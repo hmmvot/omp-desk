@@ -36,6 +36,12 @@ test("installed OMP readonly discovery, native scopes, atomic config merge and d
     assert.equal(await fs.readFile(globalFile, "utf8"), before);
     assert.equal(existsSync(path.join(agentDir, "agent.db")), false, "opening does not create credentials/usage storage");
     assert.equal(existsSync(path.join(agentDir, "models.db")), false, "opening does not initialize the native catalogue cache");
+    await fs.writeFile(globalFile, `# kept comment\n${before}`);
+    receipt = await call({ action: "read" }) as Receipt;
+    assert.deepEqual(await call({ action: "write", scope: "global", baseline: receipt.files.global, edits: [{ path: ["task", "agentAdvisor", "settings-helper"] }] }), { saved: true, changed: false });
+    assert.equal(await fs.readFile(globalFile, "utf8"), `# kept comment\n${before}`, "a no-op clear never rewrites the file or strips its comments");
+    await fs.writeFile(globalFile, before);
+    receipt = await call({ action: "read" }) as Receipt;
     await fs.appendFile(globalFile, "externalUnknown: retained\n");
     await call({ action: "write", scope: "global", baseline: receipt.files.global, edits: [{ path: ["modelRoles", "smol"], value: "settings-fixture/fixture-model:high" }, { path: ["task", "agentModelOverrides", "settings-helper"], value: "settings-fixture/fixture-model" }, { path: ["task", "agentPrewalk", "settings-helper"], value: "off" }] });
     receipt = await call({ action: "read" }) as Receipt;

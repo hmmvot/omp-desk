@@ -12,6 +12,6 @@ export type SettingsAction =
   | { action: "create"; requestId: string; scope: SettingsScope };
 export type SettingsMessage =
   | { type: "settings:init"; key: string; kind: SettingsKind; canApply: boolean; sessionLabel?: string }
-  | { type: "settings:snapshot"; snapshot: SettingsSnapshot }
+  | { type: "settings:snapshot"; snapshot: SettingsSnapshot; configExists: Readonly<Record<SettingsScope, boolean>> }
   | { type: "settings:preview"; spec: AgentSpec | null }
   | { type: "settings:result"; requestId: string; ok: boolean; message: string };

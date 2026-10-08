@@ -5,6 +5,19 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **Models and Agents settings** are easier to read and navigate: the model browser shows available models first and by default, roles and agents are compact keyboard-navigable lists, fallback chains and presets are listed instead of hidden behind a key field, and prewalk/advisor offer inherit, on, off or a pattern. Selection, filters and unsaved drafts survive reloads and saves, results appear next to the control that caused them, and the pages follow the VS Code theme in Dark and Light.
+
+### Fixed
+
+- Typing in an agent's model suggestion field no longer replaces its existing override patterns.
+- Enabling or disabling an agent no longer copies project-level disabled agents into the global config.
+- Clearing a setting that is not set no longer rewrites the config file and strips its comments.
+- Opening a project or global config that does not exist yet explains that saving creates it, instead of showing a generic error.
+
 ## [0.1.0] - 2026-10-07
 
 First public preview of OMP Desk: a Windows-only VS Code extension that runs your installed [Oh My Pi](https://github.com/can1357/oh-my-pi) (`omp`) sessions in editor tabs.
@@ -31,4 +44,5 @@ First public preview of OMP Desk: a Windows-only VS Code extension that runs you
 - OMP is not bundled. The extension launches the `omp` found on `PATH` and never installs, downloads or updates it.
 - OMP Desk is an unofficial, independent integration, not an official OMP distribution.
 
+[Unreleased]: https://github.com/hmmvot/omp-desk/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/hmmvot/omp-desk/releases/tag/v0.1.0

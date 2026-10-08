@@ -127,7 +127,7 @@ export class SettingsEditors implements vscode.Disposable {
     const result = await this.#worker(editor, { action, provider });
     if (!record(result) || !record(result.snapshot) || !record(result.files)) throw new SettingsRefusal("OMP returned an invalid settings snapshot.");
     editor.receipt = result as unknown as ReadReceipt;
-    this.#post(editor, { type: "settings:snapshot", snapshot: editor.receipt.snapshot });
+    this.#post(editor, { type: "settings:snapshot", snapshot: editor.receipt.snapshot, configExists: { global: editor.receipt.files.global.exists, project: editor.receipt.files.project.exists } });
   }
   #scope(raw: ConfigRecord): SettingsScope {
     if (raw.scope !== "global" && raw.scope !== "project") throw new SettingsRefusal("Choose global or project scope.");
@@ -137,22 +137,23 @@ export class SettingsEditors implements vscode.Disposable {
     const receipt = editor.receipt;
     if (!receipt) throw new SettingsRefusal("Reload before saving.");
     let saved = false;
+    let changed = false;
+    const write = async (target: SettingsScope, targetEdits: ConfigEdit[], targetPreset?: string): Promise<void> => {
+      const result = await this.#worker(editor, { action: "write", scope: target, edits: targetEdits, preset: targetPreset, baseline: receipt.files[target] });
+      saved = true;
+      if (!record(result) || result.changed !== false) changed = true;
+    };
     try {
       if (scope === "global" && thinking !== undefined) edits.push({ path: ["defaultThinkingLevel"], value: thinking });
-      if (edits.length) {
-        await this.#worker(editor, { action: "write", scope, edits, preset, baseline: receipt.files[scope] });
-        saved = true;
-      }
-      if (scope === "project" && thinking !== undefined) {
-        await this.#worker(editor, { action: "write", scope: "global", edits: [{ path: ["defaultThinkingLevel"], value: thinking }], baseline: receipt.files.global });
-        saved = true;
-      }
+      if (edits.length) await write(scope, edits, preset);
+      if (scope === "project" && thinking !== undefined) await write("global", [{ path: ["defaultThinkingLevel"], value: thinking }]);
     } catch (error) {
       if (saved) throw new SettingsRefusal("Project roles were saved, but global thinking was not. Reload to inspect the partial result before retrying.");
       throw error;
     }
     try { await this.#read(editor); }
     catch { throw new SettingsRefusal("The settings were saved, but readback failed. Reload to inspect the result before making another change."); }
+    if (!changed) return "Nothing to save: OMP config already has these values. The file was not rewritten.";
     return "Saved to OMP config. Check effective values and sources for inherited shadows. Future resolution reloads; the current model and existing children are unchanged.";
   }
   async #action(editor: Editor, raw: ConfigRecord, requestId: string): Promise<void> {
@@ -193,8 +194,10 @@ export class SettingsEditors implements vscode.Disposable {
           break;
         }
         case "open-config": {
-          const file = editor.receipt?.snapshot[this.#scope(raw) === "global" ? "globalFile" : "projectFile"];
+          const scope = this.#scope(raw);
+          const file = editor.receipt?.snapshot[scope === "global" ? "globalFile" : "projectFile"];
           if (!file) throw new SettingsRefusal("Reload before opening config.");
+          if (!editor.receipt?.files[scope].exists) throw new SettingsRefusal(scope === "global" ? "The global OMP config does not exist yet. Saving a global setting here creates it." : "This folder has no project OMP config yet. Saving a project role creates it.");
           await vscode.window.showTextDocument(await vscode.workspace.openTextDocument(vscode.Uri.file(file)), { preview: false });
           break;
         }
