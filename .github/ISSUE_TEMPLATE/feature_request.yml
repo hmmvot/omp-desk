@@ -1,0 +1,46 @@
+name: Feature request
+description: Suggest an improvement or a new capability
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion. OMP Desk is a VS Code front end for your installed Oh My Pi (`omp`); features that belong to OMP itself are best requested in the [OMP repository](https://github.com/can1357/oh-my-pi).
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What are you trying to do, and what gets in the way today?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How should it work in VS Code?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Sessions view
+        - Chat mode
+        - Terminal mode
+        - Notifications
+        - Packaging and installation
+        - Documentation
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Screenshots, mockups or links.

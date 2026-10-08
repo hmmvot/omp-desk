@@ -1,0 +1,88 @@
+name: Bug report
+description: Something in OMP Desk does not work as expected
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. OMP Desk runs only on Windows (x64 and arm64).
+        Please search existing issues first, and **do not** report security vulnerabilities here; see the [security policy](https://github.com/hmmvot/omp-desk/security/policy).
+  - type: input
+    id: extension-version
+    attributes:
+      label: OMP Desk version
+      description: Shown in the Extensions view, for example `0.1.0`.
+    validations:
+      required: true
+  - type: input
+    id: vscode-version
+    attributes:
+      label: VS Code version
+      description: Output of **Help > About**, or `code --version`.
+      placeholder: "1.110.0"
+    validations:
+      required: true
+  - type: input
+    id: omp-version
+    attributes:
+      label: omp version
+      description: Output of `omp --version` in a terminal.
+      placeholder: "omp/18.3.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: os-arch
+    attributes:
+      label: Windows version and architecture
+      options:
+        - Windows 11, x64
+        - Windows 11, arm64
+        - Windows 10, x64
+        - Windows 10, arm64
+        - Other (describe below)
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Session mode
+      description: The mode the problem occurred in.
+      options:
+        - Chat
+        - Terminal
+        - Both
+        - Not related to a session editor (Sessions view, notifications, installation)
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: Describe the problem and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open the OMP view and add a folder
+        2. Start a session in Chat
+        3. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs from the OMP output channel
+      description: |
+        Open **View > Output**, choose **OMP** in the drop-down, and paste the relevant lines.
+        **OMP: Show Diagnostics** from the Command Palette prints a summary you can attach as well.
+        Redact anything private: prompts, file paths, user names and tokens.
+      render: text
+  - type: textarea
+    id: additional
+    attributes:
+      label: Additional context
+      description: Screenshots, a screen recording, or anything else that helps.

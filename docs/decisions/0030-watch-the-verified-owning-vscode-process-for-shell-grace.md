@@ -1,0 +1,47 @@
+---
+status: accepted
+date: 2026-09-27
+---
+
+# ADR-0030: Watch the verified owning VS Code process for folder-shell grace
+
+## Context and Problem Statement
+
+[ADR-0024](0024-own-omp-pty-for-in-tab-terminal.md) authorizes a finite, folder-shell-only stop attempt after *proven full VS Code exit*, but not after a Webview disconnect or extension-host restart. The independently surviving PTY broker cannot interpret loss of its frontend as application exit. VS Code has multiple windows and processes; a PID from an environment variable alone may be stale or refer to the wrong role. At decision time, the broker had no application-lifetime monitor. On 2026-09-27 the user explicitly chose the **verified owning VS Code main-process generation** as the meaning of close (all windows in that instance), not every VS Code installation or unrelated instance on the machine.
+
+The installed VS Code 1.139.1 source at commit `04c0d99f4fb0d8afe6ce4f0c58e31e183ac3e4b1` sets `VSCODE_PID` in its claimed primary process, starts local extension hosts through a main-process-owned utility fork, and quits the main process after the last window closes on Windows. The resulting direct-parent topology is an implementation dependency to verify for each launch, not a public extension API contract. The extension supports earlier VS Code versions, remote hosts and alternate process topologies: an unverified association must disable automatic stopping rather than guess. This decision is separate from [ADR-0029](0029-report-uncontained-pty-tree-stop-as-unknown.md): even an authorized stop still cannot prove every detached Windows shell descendant exited with the prebuilt ConPTY addon.
+
+## Considered Options
+
+- Treat extension deactivation, IPC disconnect, absence of registered windows or elapsed time as full exit: incorrectly stops a shell during Reload Window, Restart Extensions, late extension activation or another live window; reject.
+- Enumerate process names/parent PIDs or trust `VSCODE_PID`: PID reuse, unreadable roles, helper processes and independent VS Code instances make absence or identity ambiguous; reject as stop authority.
+- Require a verified direct local extension-host-to-owning-main association while both generations are live, retain a kernel handle to that main process in the broker, and start grace only after that handle signals: chosen fail-closed owner-instance lifetime. Unsupported/unverifiable associations leave the shell alive for explicit Close.
+- Require an authoritative machine-wide lifecycle/admission service for every VS Code instance and window: stronger than this product's owning-instance scope and not provided by the VS Code extension API; no silent assumption that it exists.
+
+## Decision Outcome
+
+On supported local Windows desktop extension hosts, a folder-shell broker records the verified **owning-main-process generations** admitted for that shell. The extension supplies its current `process.pid`, `process.ppid` and candidate `VSCODE_PID` only as hints. The broker's privately staged helper independently opens both process handles, reads creation FILETIME, executable image and the live extension host's actual parent, and requires that parent, `process.ppid` and candidate main PID agree; the main must be older, alive, have the expected VS Code application image/role and not be the extension host, a renderer, a broker or another helper. Retain a query/synchronize handle for each admitted main generation, deduplicating a restarted extension host of the **same** main. A missing hint, process access failure, inconsistent topology or unsupported local/runtime platform is **unknown**, not exit. Never use the existing generic process-query-failed-as-gone result to authorize termination. The helper and its observation live with the broker, not solely with a replaceable extension host, and are staged under ADR-0012.
+
+Host-role recognition accepts an exact legacy `--type=extensionHost` argument, or exact modern `--type=utility` and `--utility-sub-type=node.mojom.NodeService` arguments together with the host's own `VSCODE_CRASH_REPORTER_PROCESS_TYPE=extensionHost` and `VSCODE_ESM_ENTRYPOINT=vs/workbench/api/node/extensionHostProcess` environment markers. Installed VS Code's utility factory sets that pair for extension hosts; shared, PTY and agent utilities can use the same NodeService command line, so NodeService, DNS and inspector flags alone do not identify a host. The helper parses native argv and independently scans the candidate's already-open handle under a finite memory bound, without copying or reporting unrelated environment strings. Missing, unreadable, duplicate or conflicting markers fail closed. These mutable same-user role markers do not authenticate a hostile same-user process, and none replaces the parent, image, creation-time or retained-generation checks.
+
+An authenticated, positively attested adoption by a **different** main process atomically adds its exact generation/handle and invalidates the previous grace epoch and queued events under the broker's adoption/stop gate, regardless of whether the earlier main is still alive. A same-main host restart deduplicates that generation and cannot start grace. Because the broker permits multiple authenticated clients, an admitted live main is never replaced by a mere latest-socket heuristic: an automatic stop is permitted only after **every admitted** main handle is positively signaled. An authenticated attachment whose main cannot be attested disables automatic stopping for this shell instead of silently dropping a possible live owner; a failed authentication does not affect the owner set. On the transition to all admitted handles signaled, begin a separate bounded, monotonic orphan-grace epoch. At expiry, serialize with adoption and explicit stop, revalidate the same epoch and all handles, then authorize **one folder-shell-only** stop attempt; never auto-stop a managed OMP host. Use the identity-safe stop path and retain the slot/record and `tree: unknown` or observed `remaining`, `verified: false`, when complete tree exit cannot be proved under ADR-0029. Helper crash, wait failure, lost evidence or an unauthenticated owner change is unknown, not exit. Broker death or elapsed grace is not proof of an empty tree.
+
+This scope covers all windows sharing any admitted owning VS Code main generation; closing one window while its main survives cannot signal that handle. A newly started **different** main generation is not retroactively part of the earlier lifetime, but its positively attested adoption before the deadline joins the owner set and cancels old grace. Merely starting another instance without reaching the broker does not, so this is **not** a global no-windows guarantee. Main-process crash signals that admitted generation's end even if detached renderer OS processes survive; the policy is explicitly about attested main generations. A version/topology change fails closed instead of switching to frontend-loss heuristics.
+
+Installed isolated acceptance on 2026-10-08 armed the real staged helper under a modern utility/NodeService extension host and matched its admitted owning-main generation against an independent kernel reading. The source, installed and staged helper hashes matched. On the same packaged snapshot, typecheck and 164 targeted tests passed, actual Processes Stop completed its authenticated shutdown without a false warning, and a fresh shell's natural exit retired automatically while preserving its copyable screen and silent close. The owned window and all observed owned process generations were cleaned up. This establishes modern admission and arming, not actual last-window grace expiry or the cross-window concurrency matrix.
+
+### Consequences
+
+- Positive: an observed last-window exit for the verified owning instance can trigger a finite shell-only cleanup attempt while Restart Extensions or Reload Window leaves its main handle alive.
+- Negative: main-process identity and parent association depend on inspected VS Code Windows topology, not a public stable VS Code API; unsupported/remote/unverifiable cases retain shells and require explicit Close. Real installed modern admission and arming are established by the isolated check above; last-window grace expiry and cross-window concurrency remain unexercised. Headless fixture tests alone cannot prove those runtime boundaries.
+- Negative: a window reopened in another instance before it attaches may not cancel the old grace; unknown/escaped shell descendants remain recoverable but not positively stopped without Job Object containment. This does not change managed OMP's no-auto-stop rule.
+
+## Related Documents
+
+[Sessions design](../designs/2026-09-26-sessions-and-in-tab-terminal.md), [ADR-0024](0024-own-omp-pty-for-in-tab-terminal.md), [ADR-0029](0029-report-uncontained-pty-tree-stop-as-unknown.md), [ADR-0012](0012-run-child-process-entries-from-staged-copies.md).
+
+## Architecture Review
+
+- Reviewer: independent architect (initial and corrective passes).
+- Outcome: accepted after specifying the admitted-main-generation set, same-main deduplication, different-main epoch invalidation and fail-closed unattestable attachments.
+- Notes: Source-level topology evidence from VS Code 1.139.1 commit `04c0d99f4fb0d8afe6ce4f0c58e31e183ac3e4b1`; this accepts the architecture, not a completed source implementation or installed-window runtime admission.

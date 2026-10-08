@@ -1,0 +1,243 @@
+Third-party notices for the OMP Desk extension.
+
+OMP Desk itself is MIT-licensed (see LICENSE). This extension contains adapted
+source from the oh-my-pi project. The copyright notice and permission notice
+below are reproduced as the MIT license requires.
+
+Maintenance note: this file is the single, reviewed record of shipped
+third-party code. Update it whenever a package that is bundled into, or shipped
+next to, the extension is added, removed or changes version.
+
+================================================================================
+Bundled runtime dependencies of the guest Webview (media/guest.js)
+================================================================================
+
+The Webview bundle is self-contained, so these are shipped inside it:
+
+  react             19.2.7   MIT   Copyright (c) Meta Platforms, Inc. and affiliates.
+  react-dom         19.2.7   MIT   Copyright (c) Meta Platforms, Inc. and affiliates.
+  scheduler         0.27.0   MIT   Copyright (c) Meta Platforms, Inc. and affiliates.
+  @xterm/xterm      6.0.0    MIT   (see the xterm.js section below)
+  @xterm/addon-fit  0.11.0   MIT   (see the xterm.js section below)
+  @xterm/addon-unicode11  0.9.0  MIT   (see the xterm.js section below)
+
+esbuild is configured with `legalComments: "eof"`, which appends the license
+banners of bundled packages to the emitted bundle; React and the scheduler carry
+such banners, while `@xterm/xterm` and `@xterm/addon-fit` ship their
+licenses as files and are recorded here; `@xterm/addon-unicode11` carries an
+`@license MIT` banner that esbuild appends and is recorded here as well.
+`@oh-my-pi/pi-wire` is imported for types only, so nothing of it reaches the
+bundle. The terminal stylesheet of
+`@xterm/xterm` is imported as text into the bundle rather than emitted as a
+separate file, because the guest document allows styles only through its nonced
+`<style>` element.
+
+================================================================================
+Codicon font and stylesheet (media/codicons)
+================================================================================
+
+Package: @vscode/codicons 0.0.46-24 (font version 1.15)
+Project: Visual Studio Code Codicons, Microsoft Corporation
+Repository: https://github.com/microsoft/vscode-codicons
+License: Creative Commons Attribution 4.0 International (CC-BY-4.0)
+The package's code is MIT, Copyright (c) Microsoft Corporation; its complete
+permission notice also ships in media/codicons/LICENSE-CODE.
+License URL: https://creativecommons.org/licenses/by/4.0/
+
+The unmodified codicon.css and codicon.ttf are copied by the build and shipped
+in media/codicons, with the complete upstream license in media/codicons/LICENSE.
+Only the surrounding webview layout is extension-specific; the glyphs/font are
+not modified. This attribution does not imply Microsoft endorsement.
+
+================================================================================
+Bundled runtime dependencies of the folder-shell Webview (media/shell.js)
+================================================================================
+
+The shell editor's renderer is the second browser bundle, with the same rules as
+the guest, and ships the same runtime code: `react`, `react-dom` and `scheduler`
+(MIT, Copyright (c) Meta Platforms, Inc. and affiliates), plus `@xterm/xterm`
+6.0.0, `@xterm/addon-fit` 0.11.0 and `@xterm/addon-unicode11` 0.9.0 (see the
+xterm.js section below).
+
+The extension host bundle (out/extension.js) and the native host-control module
+(out/omp-host-control.mjs) bundle no third-party runtime code beyond Node.js
+built-ins.
+
+================================================================================
+Bundled runtime dependencies of the PTY broker (out/pty/pty-broker.js)
+================================================================================
+
+The broker is a detached Node process that owns a pseudo terminal for as long as
+its child lives (ADR-0024). Its bounded screen state is a headless terminal
+emulator, bundled into that entry:
+
+  @xterm/headless           6.0.0   MIT   (see the xterm.js section below)
+  @xterm/addon-serialize    0.14.0  MIT   (see the xterm.js section below)
+  @xterm/addon-unicode11    0.9.0   MIT   (see the xterm.js section below)
+
+All three are pre-minified upstream CommonJS builds that carry no `@license`
+banner, so esbuild `legalComments: "eof"` appends nothing for them and they are
+recorded here instead. (In the Webview bundles the same addon resolves to its
+ES-module build, which does carry an `@license MIT` banner.)
+`node-pty` is deliberately *not* bundled into this entry; it is shipped
+as a package next to it and loaded from a staged copy, below.
+
+================================================================================
+Staged native package of the PTY broker (out/pty/node_modules/node-pty)
+================================================================================
+
+The build copies `node-pty` 1.1.0 from `node_modules` into the packaged tree at
+`out/pty/node_modules/node-pty` — its `package.json`, its `lib/**` runtime
+modules and its `prebuilds/win32-{x64,arm64}/**` — and the extension stages that
+whole tree into extension global storage
+(`<globalStorage>/runtime/pty-tree/<sha256>/`, ADR-0012) before any session runs
+from it. These files ship in the VSIX but are not part of any JavaScript bundle:
+
+  lib/*.js                                 the loader, the Windows terminal and
+                                           the conout worker of node-pty
+  prebuilds/<platform>-<arch>/pty.node     winpty addon (N-API)
+  prebuilds/<platform>-<arch>/conpty.node  ConPTY addon (N-API)
+  prebuilds/<platform>-<arch>/conpty_console_list.node
+  prebuilds/<platform>-<arch>/conpty/conpty.dll        Microsoft ConPTY
+  prebuilds/<platform>-<arch>/conpty/OpenConsole.exe   Microsoft OpenConsole
+  prebuilds/<platform>-<arch>/winpty.dll               winpty
+  prebuilds/<platform>-<arch>/winpty-agent.exe         winpty
+
+The native addons are N-API modules built with `node-addon-api` (MIT, used to
+build them and not shipped); the extension loads them only after proving they
+work in the runtime it will use (`pty-broker.js --self-check`).
+
+License:      MIT, three notices as reproduced in `node_modules/node-pty/LICENSE`
+Copyright (c) 2012-2015, Christopher Jeffrey (https://github.com/chjj/)
+Copyright (c) 2016, Daniel Imms (http://www.growingwiththeweb.com)
+Copyright (c) 2018 - present Microsoft Corporation
+
+The bundled ConPTY binaries (`conpty.dll`, `OpenConsole.exe`) and the winpty
+binaries are redistributed by `node-pty` under its own MIT terms:
+
+  ConPTY / OpenConsole   MIT   Copyright (c) Microsoft Corporation
+                                (from the microsoft/terminal project;
+                                 `node-pty/third_party/conpty/<version>/`)
+  winpty                 MIT   Copyright (c) 2011-2016 Ryan Prichard
+                                (`node-pty/deps/winpty/LICENSE`)
+
+================================================================================
+xterm.js (bundled and shipped as a package)
+================================================================================
+
+Project:   xterm.js
+Repository: https://github.com/xtermjs/xterm.js
+License:   MIT
+Copyright (c) 2017-2019, The xterm.js authors (https://github.com/xtermjs/xterm.js)
+Copyright (c) 2014-2016, SourceLair Private Company (https://www.sourcelair.com)
+Copyright (c) 2012-2013, Christopher Jeffrey (https://github.com/chjj/)
+
+The full MIT permission text below applies to them unchanged — the same text
+that covers the other MIT-licensed components in this file.
+
+================================================================================
+oh-my-pi icon artwork (adapted)
+================================================================================
+
+The Activity Bar glyph in media/omp-activity.svg is a monochrome adaptation
+of packages/collab-web/public/favicon.svg in the oh-my-pi repository.
+The extension listing icon in media/omp-icon.png is a 128×128 resize of
+packages/collab-web/public/favicon-512x512.png from the same repository.
+Both are attributed under the repository-level MIT license reproduced below.
+This independent VS Code extension is not an official OMP distribution.
+
+================================================================================
+@oh-my-pi/collab-web — formatting helpers (source adapted)
+================================================================================
+
+Project:      oh-my-pi
+Repository:   https://github.com/can1357/oh-my-pi
+Upstream dir: packages/collab-web/src/lib
+Upstream rev: a1b3b83a7fb8460445f2f5995a6aa56047bd44c7 (81 commits after the
+              v18.2.11 tag; the checkout rev the adapted file was read from)
+License:      MIT
+
+Adapted file in this repository (it keeps a provenance header naming the
+upstream file it came from):
+
+  src/webview/lib/format.ts     from packages/collab-web/src/lib/format.ts
+
+Documented local edits (no upstream behavior was changed beyond these):
+
+  - format.ts drops `shortenPath` and adds `argsDigest` for tool-card summaries.
+
+Not copied: the upstream React application and per-tool renderers
+(packages/collab-web/src/app.tsx, components/, tool-render/). The panel UI in
+this repository (src/webview/App.tsx, src/webview/components/, src/webview/styles.ts,
+src/webview/bridge.ts, src/webview/messages.ts, src/webview/main.tsx) and the
+host document factory (src/host/guest-webview.ts) are original to this project.
+The Collab guest modules (codec, link, socket, client, use-guest) and the local
+relay that earlier builds adapted from the same upstream directory were removed
+with the Collab transport (ADR-0038) and ship in no build from this revision on.
+
+================================================================================
+@oh-my-pi/pi-wire — session and message types (dependency, types only)
+================================================================================
+
+Project:      oh-my-pi
+Repository:   https://github.com/can1357/oh-my-pi
+Upstream dir: packages/wire
+Version used: 18.3.0 (type declarations only: imported with `import type`,
+              erased at build, never shipped in a bundle)
+License:      MIT
+Copyright (c) 2025-2026 Can Bölük
+Copyright (c) 2026 Stencil Labs, Inc.
+
+These two lines are the copyright notice shipped in the installed 18.3.0 package
+LICENSE. The repository-level MIT text below additionally carries the notice that
+applies to the adapted collab-web source.
+
+================================================================================
+Paseo — paced text reveal policy (source adapted)
+================================================================================
+
+Project:      Paseo
+Repository:   https://github.com/getpaseo/paseo
+Upstream rev: 5285b7e502714f2d08a220c328aedca3b9637b94
+Upstream file: packages/app/src/agent-stream/text-reveal.ts
+License:      Apache License, Version 2.0
+Copyright (c) 2025-present Mohamed Boudra
+
+Adapted destination: src/webview/lib/text-reveal.ts.
+Modified for OMP Desk / React DOM / VS Code theming on 2026-10-04:
+cached suffix grapheme segmentation, uncertain trailing-cluster retention,
+replacement/completion flush and native-selection-safe presentation.
+
+The full Apache-2.0 license and attribution/modified-source notice are shipped
+in licenses/paseo/LICENSE and licenses/paseo/NOTICE. The audited upstream root
+and packages/app source subtree at this exact revision contain no NOTICE files.
+No third-party source from Paseo is incorporated by this adaptation.
+The project-owned overview, scroll and height-window policies are not ports.
+
+================================================================================
+MIT License (oh-my-pi)
+================================================================================
+
+MIT License
+
+Copyright (c) 2025 Mario Zechner
+Copyright (c) 2025-2026 Can Bölük
+Copyright (c) 2026 Stencil Labs, Inc.
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
