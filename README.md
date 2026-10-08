@@ -1,7 +1,7 @@
 # OMP Desk
 
 [![CI](https://github.com/hmmvot/omp-desk/actions/workflows/ci.yml/badge.svg)](https://github.com/hmmvot/omp-desk/actions/workflows/ci.yml)
-[![Marketplace version](https://img.shields.io/visual-studio-marketplace/v/hmmvot.omp-desk)](https://marketplace.visualstudio.com/items?itemName=hmmvot.omp-desk)
+[![Marketplace version](https://vsmarketplacebadges.dev/version-short/hmmvot.omp-desk.svg)](https://marketplace.visualstudio.com/items?itemName=hmmvot.omp-desk)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![100% vibe coded](https://img.shields.io/badge/100%25-vibe%20coded-ff69b4)](#how-this-was-made)
 [![Built with Oh My Pi](https://img.shields.io/badge/built%20with-Oh%20My%20Pi-blueviolet)](#how-this-was-made)
