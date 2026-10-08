@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { filteredModels, roleChange, lines } from "./model.ts";
+import { appendLine, disabledAgentsAfterToggle, filteredModels, roleChange, lines } from "./model.ts";
 
 test("default auto thinking is a global setting while nondefault efforts stay encoded in selectors", () => {
   assert.deepEqual(roleChange("default", "provider/model:high", "auto", "project"), { edits: [{ path: ["modelRoles", "default"], value: "provider/model" }], thinking: "auto" });
@@ -17,7 +17,21 @@ test("ordered pattern lists and model search preserve their observable semantics
     { provider: "a", id: "two", name: "Picture", kind: "image", available: false, reasoning: false, efforts: [], recent: -1 },
     { provider: "a", id: "three", name: "Fast", kind: "chat", available: true, reasoning: true, efforts: [], recent: 0 },
   ];
-  assert.deepEqual(filteredModels(models, "", "", "", true).map(model => model.id), ["three", "one"]);
-  assert.deepEqual(filteredModels(models, "PICTURE", "a", "image", false).map(model => model.id), ["two"]);
+  assert.deepEqual(filteredModels(models, "", "", "", true, false).map(model => model.id), ["three", "one"]);
+  assert.deepEqual(filteredModels(models, "PICTURE", "a", "image", false, false).map(model => model.id), ["two"]);
+  assert.deepEqual(filteredModels(models, "", "", "", false, false).map(model => model.id), ["three", "one", "two"], "usable models lead the unfiltered catalogue");
+  assert.deepEqual(filteredModels(models, "", "", "", false, true).map(model => model.id), ["three", "one"], "the available-only default hides locked models");
   assert.equal(models[0]?.id, "one", "filtering never mutates the native catalogue");
+});
+test("appending a suggested pattern keeps the existing ordered overrides", () => {
+  assert.equal(appendLine("a/one\nc/two", " x/three "), "a/one\nc/two\nx/three");
+  assert.equal(appendLine("a/one\nc/two", "c/two"), "a/one\nc/two", "duplicates are not appended");
+  assert.equal(appendLine("a/one", "  "), "a/one");
+  assert.equal(appendLine("", "@smol"), "@smol");
+});
+test("agent toggles rewrite only the global disabled list, never copying other layers", () => {
+  assert.deepEqual(disabledAgentsAfterToggle(undefined, "reviewer", false), ["reviewer"]);
+  assert.deepEqual(disabledAgentsAfterToggle(["explore", "reviewer"], "reviewer", true), ["explore"]);
+  assert.deepEqual(disabledAgentsAfterToggle(["explore"], "reviewer", false), ["explore", "reviewer"]);
+  assert.deepEqual(disabledAgentsAfterToggle(["reviewer"], "reviewer", false), ["reviewer"], "a repeated disable stays a single entry");
 });

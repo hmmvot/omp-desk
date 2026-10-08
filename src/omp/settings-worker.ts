@@ -83,22 +83,24 @@ async function stageFile(target: string, content: string): Promise<string> {
   return staged;
 }
 
-async function writeConfig(request: WorkerRequest, logical: string, utilsRoot: string, validate: (data: ConfigRecord, edits: ConfigEdit[]) => void, migratedGlobal: () => Promise<ConfigRecord>): Promise<void> {
+/** Returns whether the file changed; edits that leave every entry as it is never rewrite it (and never strip its comments). */
+async function writeConfig(request: WorkerRequest, logical: string, utilsRoot: string, validate: (data: ConfigRecord, edits: ConfigEdit[]) => void, migratedGlobal: () => Promise<ConfigRecord>): Promise<boolean> {
   const baseline = request.baseline;
   if (!baseline || baseline.logical !== logical || !request.edits) throw new SettingsRefusal("Reload the editor before saving.");
   const beforeLock = await readConfig(logical);
   if (beforeLock.physical !== baseline.physical || beforeLock.exists !== baseline.exists) throw new SettingsRefusal("The config was removed, created or redirected. Reload before saving.");
   const { withFileLock } = await sourceImport(utilsRoot, "file-lock.ts");
   const { stringifyYamlConfig } = await sourceImport(utilsRoot, "yaml-config.ts");
-  await withFileLock(baseline.physical, async () => {
+  return withFileLock(baseline.physical, async () => {
     const current = await readConfig(logical);
     if (current.physical !== baseline.physical || current.exists !== baseline.exists) throw new SettingsRefusal("The config target changed. Reload before saving.");
     const layer = request.scope === "project" ? current.settings : await migratedGlobal();
     const merged = mergeConfigEdits(layer, baseline.settings, request.edits!);
+    if (request.edits!.every(edit => isDeepStrictEqual(valueAt(layer, edit.path), edit.value))) return false;
     validate(merged, request.edits!);
     const content = stringifyYamlConfig(merged);
     const digest = createHash("sha256").update(content).digest("hex");
-    if (digest === current.digest) return;
+    if (digest === current.digest) return false;
     const staged = await stageFile(current.physical, content);
     try {
       const latest = await readConfig(logical);
@@ -106,6 +108,7 @@ async function writeConfig(request: WorkerRequest, logical: string, utilsRoot: s
       if (current.exists) await retryWindowsFileOperation(() => fs.rename(staged, current.physical));
       else await fs.link(staged, current.physical);
     } finally { await fs.rm(staged, { force: true }); }
+    return true;
   });
 }
 
@@ -321,8 +324,8 @@ async function main(request: WorkerRequest): Promise<unknown> {
       if (scope === "project" && (valueAt(editorSettings(settings.getProjectSettings()), ["modelRoleStorage"]) ?? valueAt(editorSettings(settings.getGlobalSettings()), ["modelRoleStorage"])) !== "project") throw new SettingsRefusal("Project role writes require OMP's modelRoleStorage setting to be project.");
       if (scope === "project" && request.edits?.some(edit => edit.path[0] !== "modelRoles")) throw new SettingsRefusal("The native dashboards save this setting globally; project scope is only for model roles.");
       if (scope === "project" && !isDeepStrictEqual(files.project.settings.modelRoles, settings.getProjectSettings().modelRoles)) throw new SettingsRefusal("Project model roles require a native OMP migration first. Nothing was changed.");
-      await writeConfig(request, scope === "project" ? projectFile : globalFile, utilsRoot, validate, async () => (await Settings.loadReadOnly({ cwd: request.cwd, agentDir })).getGlobalSettings());
-      return { saved: true };
+      const changed = await writeConfig(request, scope === "project" ? projectFile : globalFile, utilsRoot, validate, async () => (await Settings.loadReadOnly({ cwd: request.cwd, agentDir })).getGlobalSettings());
+      return { saved: true, changed };
     }
     if (request.action === "resolve-default") {
       const selected = resolver.resolveRoleSelection(["default"], settings, registry.getAvailable());
