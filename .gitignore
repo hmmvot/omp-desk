@@ -1,0 +1,9 @@
+docs/tmp/
+node_modules/
+out/
+media/guest.*
+media/shell.js*
+media/settings.js*
+media/codicons/
+*.vsix
+.vscode-test/

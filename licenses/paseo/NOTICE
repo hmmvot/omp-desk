@@ -1,0 +1,17 @@
+Paseo
+Copyright (c) 2025-present Mohamed Boudra
+https://github.com/getpaseo/paseo
+Apache License, Version 2.0 (see LICENSE in this directory).
+
+OMP Desk adapts the reveal scheduling policy from:
+packages/app/src/agent-stream/text-reveal.ts
+Pinned revision: 5285b7e502714f2d08a220c328aedca3b9637b94
+
+Modified for OMP Desk / React DOM / VS Code theming on 2026-10-04:
+cached suffix grapheme segmentation, uncertain trailing-cluster retention,
+replacement/completion flush and native-selection-safe presentation.
+Destination: src/webview/lib/text-reveal.ts.
+
+The upstream root and packages/app source subtree at this revision contain
+no NOTICE files. No third-party source from Paseo is incorporated by this
+adaptation. This directory is distributed in the extension VSIX.

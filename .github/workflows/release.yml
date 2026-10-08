@@ -1,0 +1,59 @@
+name: Release
+
+# Pushing a `v<version>` tag publishes a GitHub Release with both VSIX files. A manual
+# run must be started from that tag (Use workflow from: Tags), not from a branch.
+#
+# Marketplace publishing is not automated yet. It will be added as a step running
+# `vsce publish --oidc` (trusted publishing, no stored secret) once vsce releases that
+# flag; neither vsce 3.9.2 nor 4.0.0 has it.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Refuse a run that is not on a tag
+        if: github.ref_type != 'tag'
+        run: |
+          echo "::error::Run this workflow from a v<version> tag, not from ${{ github.ref_name }}."
+          exit 1
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - name: Check the tag and extract its release notes
+        # The notes stay outside the checkout: vsce would otherwise package them into the VSIX.
+        run: node scripts/release-notes.mjs "${{ github.ref_name }}" "$env:RUNNER_TEMP/release-notes.md"
+      - run: npm ci
+      - run: npm run typecheck
+      # The broker end-to-end tests run the bundled out/ tree; they register only after a build.
+      - run: npm run build
+      - run: npm test
+      - run: npm run vsix:all
+      - name: Create the GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          gh release create "$TAG" \
+            "omp-desk-win32-x64-$version.vsix" \
+            "omp-desk-win32-arm64-$version.vsix" \
+            --verify-tag \
+            --title "OMP Desk $version" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"

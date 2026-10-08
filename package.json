@@ -1,0 +1,775 @@
+{
+  "name": "omp-desk",
+  "displayName": "OMP Desk",
+  "description": "Run Oh My Pi (omp) sessions in VS Code: a Sessions view, Chat or the native Terminal TUI in one editor, and sessions that survive reloads. Windows only.",
+  "icon": "media/omp-icon.png",
+  "version": "0.1.0",
+  "publisher": "hmmvot",
+  "author": {
+    "name": "hmmvot"
+  },
+  "license": "MIT",
+  "preview": true,
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hmmvot/omp-desk.git"
+  },
+  "bugs": {
+    "url": "https://github.com/hmmvot/omp-desk/issues"
+  },
+  "homepage": "https://github.com/hmmvot/omp-desk#readme",
+  "galleryBanner": {
+    "color": "#0B0B18",
+    "theme": "dark"
+  },
+  "keywords": [
+    "omp",
+    "oh-my-pi",
+    "ohmypi",
+    "ai",
+    "agent",
+    "coding agent",
+    "chat",
+    "terminal",
+    "tui",
+    "sessions",
+    "llm",
+    "windows",
+    "conpty"
+  ],
+  "engines": {
+    "vscode": "^1.110.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "extensionKind": [
+    "ui"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false,
+      "description": "OMP Desk starts the installed omp and PowerShell helpers with a workspace folder as the working directory, so it needs a trusted workspace."
+    },
+    "virtualWorkspaces": false
+  },
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onStartupFinished",
+    "onView:omp.sessions",
+    "onView:omp.processes",
+    "onView:omp.tools",
+    "onUri",
+    "onWebviewPanel:omp.session",
+    "onWebviewPanel:omp.shellTerminal",
+    "onWebviewPanel:omp.settings"
+  ],
+  "contributes": {
+    "configuration": {
+      "title": "OMP Desk",
+      "properties": {
+        "omp.toolCallDetail": {
+          "type": "string",
+          "enum": ["overview", "detailed"],
+          "default": "overview",
+          "scope": "application",
+          "description": "Tool presentation in every OMP Chat. Overview groups routine calls; Detailed shows individual calls. The Tools output picker in the chat footer changes this global setting live."
+        },
+        "omp.desktopNotifications": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show Windows desktop notifications when a session finishes or asks for input unless its editor is active and visible in the focused window. Display questions may remain in Windows notification history and appear on the lock screen."
+        },
+        "omp.showWorkspaceFolders": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show the folders VS Code has open in this window, or every folder of a multi-root workspace, in Sessions next to the pinned folders. When off, Sessions shows only pinned folders and folders where a session of this window is running."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "omp",
+          "title": "OMP Desk",
+          "icon": "media/omp-activity.svg"
+        }
+      ]
+    },
+    "views": {
+      "omp": [
+        {
+          "id": "omp.sessions",
+          "name": "Sessions"
+        },
+        {
+          "id": "omp.tools",
+          "name": "Tools",
+          "visibility": "collapsed"
+        },
+        {
+          "id": "omp.processes",
+          "name": "Processes",
+          "visibility": "collapsed"
+        }
+      ]
+    },
+    "viewsWelcome": [
+      {
+        "view": "omp.sessions",
+        "when": "omp.catalogPending",
+        "contents": "Reading this profile's stored OMP sessions and pinned folders…"
+      },
+      {
+        "view": "omp.sessions",
+        "when": "!omp.hasWorkspaceFolders && !omp.catalogPending && config.omp.showWorkspaceFolders",
+        "contents": "Open a folder in VS Code, or add one here. Open folders appear automatically; pinned folders stay in every window.\n[Add Folder](command:omp.addWorkspaceFolder)\n[New Session](command:omp.newSession)\nClick a session to view its history. Use the row's Open action to start or resume it."
+      },
+      {
+        "view": "omp.sessions",
+        "when": "!omp.hasWorkspaceFolders && !omp.catalogPending && !config.omp.showWorkspaceFolders",
+        "contents": "No folder is pinned. Open folders are hidden by the omp.showWorkspaceFolders setting.\n[Add Folder](command:omp.addWorkspaceFolder)\n[New Session](command:omp.newSession)\nClick a session to view its history. Use the row's Open action to start or resume it."
+      },
+      {
+        "view": "omp.processes",
+        "when": "omp.processesLoaded",
+        "contents": "No OMP background process is running.\nA session or terminal keeps running in a background process after its editor or window closes. It is listed here until it exits or you stop it."
+      }
+    ],
+    "commands": [
+      {
+        "command": "omp.openModels",
+        "title": "Open Models Settings",
+        "category": "OMP",
+        "icon": "$(symbol-variable)"
+      },
+      {
+        "command": "omp.openAgents",
+        "title": "Open Agents Settings",
+        "category": "OMP",
+        "icon": "$(organization)"
+      },
+      {
+        "command": "omp.newSession",
+        "enablement": "!omp.catalogPending",
+        "title": "New Session",
+        "category": "OMP",
+        "icon": "$(add)"
+      },
+      {
+        "command": "omp.addWorkspaceFolder",
+        "enablement": "!omp.catalogPending",
+        "title": "Add Folder",
+        "category": "OMP",
+        "icon": "$(new-folder)"
+      },
+      {
+        "command": "omp.pinWorkspaceFolder",
+        "enablement": "!omp.catalogPending",
+        "title": "Pin Folder",
+        "category": "OMP",
+        "icon": "$(pin)"
+      },
+      {
+        "command": "omp.unpinWorkspaceFolder",
+        "enablement": "!omp.catalogPending",
+        "title": "Unpin Folder",
+        "category": "OMP",
+        "icon": "$(pinned)"
+      },
+      {
+        "command": "omp.resumeWorkspaceFolder",
+        "enablement": "!omp.catalogPending",
+        "title": "Resume Session",
+        "category": "OMP",
+        "icon": "$(history)"
+      },
+      {
+        "command": "omp.openSession",
+        "title": "Open",
+        "category": "OMP",
+        "icon": "$(debug-start)"
+      },
+      {
+        "command": "omp.switchToSessionWindow",
+        "title": "Switch to Window",
+        "category": "OMP",
+        "icon": "$(window)"
+      },
+      {
+        "command": "omp.openSessionInChat",
+        "title": "Open in Chat",
+        "category": "OMP",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "omp.openSessionInTerminal",
+        "title": "Open in Terminal",
+        "category": "OMP",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "omp.showSessionInChat",
+        "title": "Show in Chat",
+        "category": "OMP",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "omp.showSessionInTerminal",
+        "title": "Show in Terminal",
+        "category": "OMP",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "omp.chooseDefaultSessionView",
+        "title": "Choose Default Session View…",
+        "category": "OMP"
+      },
+      {
+        "command": "omp.chooseDefaultSessionViewChat",
+        "title": "Default Session View: Chat",
+        "category": "OMP",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "omp.chooseDefaultSessionViewTerminal",
+        "title": "Default Session View: Terminal",
+        "category": "OMP",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "omp.forgetSession",
+        "enablement": "!omp.catalogPending",
+        "title": "Forget",
+        "category": "OMP",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "omp.deleteSession",
+        "enablement": "!omp.catalogPending",
+        "title": "Delete",
+        "category": "OMP",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "omp.stopSessionHost",
+        "title": "Stop",
+        "category": "OMP",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "omp.switchSessionViewChat",
+        "enablement": "!omp.sessionTransitionPending",
+        "title": "Switch to Chat",
+        "category": "OMP",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "omp.switchSessionViewTerminal",
+        "enablement": "!omp.sessionTransitionPending",
+        "title": "Switch to Terminal",
+        "category": "OMP",
+        "icon": "$(terminal)"
+      },
+      {
+        "command": "omp.copyTerminalScreen",
+        "title": "Copy screen",
+        "category": "OMP",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "omp.redrawTerminal",
+        "enablement": "omp.sessionMode == terminal",
+        "title": "Redraw Terminal",
+        "category": "OMP",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "omp.refreshSessions",
+        "title": "Refresh Sessions",
+        "category": "OMP",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "omp.showHostControls",
+        "enablement": "omp.sessionMode != terminal",
+        "title": "Show Host Controls",
+        "category": "OMP",
+        "icon": "$(circuit-board)"
+      },
+      {
+        "command": "omp.selectModel",
+        "enablement": "omp.sessionMode != terminal",
+        "title": "Select Host Model",
+        "category": "OMP",
+        "icon": "$(symbol-class)"
+      },
+      {
+        "command": "omp.selectThinking",
+        "enablement": "omp.sessionMode != terminal",
+        "title": "Select Host Thinking Level",
+        "category": "OMP",
+        "icon": "$(lightbulb)"
+      },
+      {
+        "command": "omp.copyTools",
+        "title": "Copy Active Tool Names",
+        "category": "OMP",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "omp.loginProvider",
+        "title": "Log In to Provider…",
+        "category": "OMP",
+        "icon": "$(account)"
+      },
+      {
+        "command": "omp.enableFileEvidence",
+        "title": "Enable File Change Observation (This Session)",
+        "category": "OMP",
+        "icon": "$(eye)"
+      },
+      {
+        "command": "omp.disableFileEvidence",
+        "title": "Disable File Change Observation (This Workspace)",
+        "category": "OMP",
+        "icon": "$(eye-closed)"
+      },
+      {
+        "command": "omp.showFileEvidence",
+        "title": "Show Observed File Changes",
+        "category": "OMP",
+        "icon": "$(diff)"
+      },
+      {
+        "command": "omp.deleteFileEvidence",
+        "title": "Delete Stored File Observations",
+        "category": "OMP",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "omp.showDiagnostics",
+        "title": "Show Diagnostics",
+        "category": "OMP",
+        "icon": "$(pulse)"
+      },
+      {
+        "command": "omp.copyRowDiagnostics",
+        "title": "Copy Diagnostics",
+        "category": "OMP",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "omp.sendPrompt",
+        "enablement": "omp.sessionMode == chat",
+        "title": "Send Composer Prompt",
+        "category": "OMP",
+        "icon": "$(send)"
+      },
+      {
+        "command": "omp.stopTurn",
+        "enablement": "omp.sessionMode == chat",
+        "title": "Stop Current Turn",
+        "category": "OMP",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "omp.focusComposer",
+        "enablement": "omp.sessionMode == chat",
+        "title": "Focus Chat Composer",
+        "category": "OMP",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "omp.openTerminal",
+        "title": "Open Terminal in Folder",
+        "category": "OMP"
+      },
+      {
+        "command": "omp.reconnectTerminal",
+        "title": "Reconnect Terminal",
+        "category": "OMP"
+      },
+      {
+        "command": "omp.renameSession",
+        "title": "Rename",
+        "category": "OMP"
+      },
+      {
+        "command": "omp.closeSession",
+        "title": "Close",
+        "category": "OMP"
+      },
+      {
+        "command": "omp.reloadSession",
+        "title": "Reload",
+        "category": "OMP"
+      },
+      {
+        "command": "omp.sendSelection",
+        "title": "Add Selection to Session",
+        "category": "OMP",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "omp.sendFile",
+        "title": "Add File to Session",
+        "category": "OMP",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "omp.openStats",
+        "title": "Open Stats",
+        "category": "OMP",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "omp.refreshProcesses",
+        "title": "Refresh Processes",
+        "category": "OMP",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "omp.stopProcess",
+        "title": "Stop Process",
+        "category": "OMP",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "omp.stopOrphanedProcesses",
+        "title": "Stop Orphaned and Idle Processes",
+        "category": "OMP",
+        "icon": "$(clear-all)"
+      },
+      {
+        "command": "omp.refreshTools",
+        "title": "Refresh Tools",
+        "category": "OMP",
+        "icon": "$(refresh)"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "omp.copyRowDiagnostics",
+          "when": "false"
+        },
+        {
+          "command": "omp.showSessionInChat",
+          "when": "false"
+        },
+        {
+          "command": "omp.showSessionInTerminal",
+          "when": "false"
+        },
+        {
+          "command": "omp.chooseDefaultSessionViewChat",
+          "when": "false"
+        },
+        {
+          "command": "omp.chooseDefaultSessionViewTerminal",
+          "when": "false"
+        },
+        {
+          "command": "omp.stopProcess",
+          "when": "false"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "omp.sendSelection",
+          "when": "editorHasSelection && resourceScheme == file",
+          "group": "9_omp@1"
+        },
+        {
+          "command": "omp.sendFile",
+          "when": "!editorHasSelection && resourceScheme == file",
+          "group": "9_omp@2"
+        }
+      ],
+      "explorer/context": [
+        {
+          "command": "omp.sendFile",
+          "when": "resourceScheme == file",
+          "group": "6_omp@1"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "omp.sendFile",
+          "when": "resourceScheme == file",
+          "group": "3_omp@1"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "omp.switchSessionViewTerminal",
+          "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat",
+          "group": "navigation@1"
+        },
+        {
+          "command": "omp.switchSessionViewChat",
+          "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == terminal",
+          "group": "navigation@1"
+        },
+        {
+          "command": "omp.copyTerminalScreen",
+          "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == terminal",
+          "group": "1_terminal@1"
+        },
+        {
+          "command": "omp.redrawTerminal",
+          "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == terminal",
+          "group": "1_terminal@2"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "omp.openModels",
+          "when": "view == omp.sessions",
+          "group": "1_settings@1"
+        },
+        {
+          "command": "omp.openAgents",
+          "when": "view == omp.sessions",
+          "group": "1_settings@2"
+        },
+        {
+          "command": "omp.newSession",
+          "when": "view == omp.sessions",
+          "group": "navigation@1"
+        },
+        {
+          "command": "omp.chooseDefaultSessionViewChat",
+          "when": "view == omp.sessions && omp.defaultSessionMode == chat",
+          "group": "1_view@1"
+        },
+        {
+          "command": "omp.chooseDefaultSessionViewTerminal",
+          "when": "view == omp.sessions && omp.defaultSessionMode == terminal",
+          "group": "1_view@1"
+        },
+        {
+          "command": "omp.addWorkspaceFolder",
+          "when": "view == omp.sessions",
+          "group": "2_folder@1"
+        },
+        {
+          "command": "omp.loginProvider",
+          "when": "view == omp.sessions",
+          "group": "1_provider@1"
+        },
+        {
+          "command": "omp.refreshProcesses",
+          "when": "view == omp.processes",
+          "group": "navigation@1"
+        },
+        {
+          "command": "omp.openStats",
+          "when": "view == omp.sessions",
+          "group": "navigation@2"
+        },
+        {
+          "command": "omp.stopOrphanedProcesses",
+          "when": "view == omp.processes",
+          "group": "navigation@2"
+        },
+        {
+          "command": "omp.refreshTools",
+          "when": "view == omp.tools",
+          "group": "navigation@1"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "omp.copyRowDiagnostics",
+          "when": "view == omp.sessions && viewItem =~ /^(ompSession|ompWorkspaceFolder)\\./",
+          "group": "9_diagnostics@1"
+        },
+        {
+          "command": "omp.copyRowDiagnostics",
+          "when": "view == omp.processes && viewItem =~ /^ompProcess\\./",
+          "group": "9_diagnostics@1"
+        },
+        {
+          "command": "omp.newSession",
+          "when": "view == omp.sessions && viewItem =~ /^ompWorkspaceFolder\\./",
+          "group": "inline@1"
+        },
+        {
+          "command": "omp.newSession",
+          "when": "view == omp.sessions && viewItem =~ /^ompWorkspaceFolder\\./",
+          "group": "1_folder@1"
+        },
+        {
+          "command": "omp.resumeWorkspaceFolder",
+          "when": "view == omp.sessions && viewItem =~ /^ompWorkspaceFolder\\./",
+          "group": "inline@2"
+        },
+        {
+          "command": "omp.resumeWorkspaceFolder",
+          "when": "view == omp.sessions && viewItem =~ /^ompWorkspaceFolder\\./",
+          "group": "1_folder@2"
+        },
+        {
+          "command": "omp.openTerminal",
+          "when": "view == omp.sessions && viewItem =~ /^ompWorkspaceFolder\\./",
+          "group": "1_folder@3"
+        },
+        {
+          "command": "omp.reconnectTerminal",
+          "when": "view == omp.sessions && viewItem =~ /^ompWorkspaceFolder\\.shells\\./",
+          "group": "1_folder@4"
+        },
+        {
+          "command": "omp.pinWorkspaceFolder",
+          "when": "view == omp.sessions && viewItem =~ /^ompWorkspaceFolder\\..*\\.unpinned$/",
+          "group": "inline@3"
+        },
+        {
+          "command": "omp.pinWorkspaceFolder",
+          "when": "view == omp.sessions && viewItem =~ /^ompWorkspaceFolder\\..*\\.unpinned$/",
+          "group": "2_folder@1"
+        },
+        {
+          "command": "omp.unpinWorkspaceFolder",
+          "when": "view == omp.sessions && viewItem =~ /^ompWorkspaceFolder\\..*\\.pinned$/",
+          "group": "2_folder@1"
+        },
+        {
+          "command": "omp.openSession",
+          "when": "view == omp.sessions && viewItem =~ /^ompSession\\.[^.]*\\.(stopped|draft)\\./",
+          "group": "inline@1"
+        },
+        {
+          "command": "omp.openSessionInChat",
+          "when": "view == omp.sessions && viewItem =~ /^ompSession\\.[^.]*\\.(stopped|draft|externalOmp)\\./",
+          "group": "1_open@1"
+        },
+        {
+          "command": "omp.openSessionInTerminal",
+          "when": "view == omp.sessions && viewItem =~ /^ompSession\\.[^.]*\\.(stopped|draft|externalOmp)\\./",
+          "group": "1_open@2"
+        },
+        {
+          "command": "omp.showSessionInChat",
+          "when": "view == omp.sessions && viewItem =~ /^ompSession\\.[^.]*\\.(running|working|background|question|unread|waiting)\\.[^.]*\\.[^.]*\\.[^.]*\\.view-(none|terminal)$/",
+          "group": "1_open@1"
+        },
+        {
+          "command": "omp.showSessionInTerminal",
+          "when": "view == omp.sessions && viewItem =~ /^ompSession\\.[^.]*\\.(running|working|background|question|unread|waiting)\\.[^.]*\\.[^.]*\\.[^.]*\\.view-(none|chat)$/",
+          "group": "1_open@2"
+        },
+        {
+          "command": "omp.stopSessionHost",
+          "when": "view == omp.sessions && viewItem =~ /^ompSession\\.[^.]*\\.otherWindow\\./",
+          "group": "1_open@0"
+        },
+        {
+          "command": "omp.switchToSessionWindow",
+          "when": "view == omp.sessions && viewItem =~ /^ompSession\\.[^.]*\\.otherWindow\\..*\\.window-switchable$/",
+          "group": "1_open@1"
+        },
+        {
+          "command": "omp.renameSession",
+          "when": "view == omp.sessions && viewItem =~ /^ompSession\\.[^.]*\\.(stopped|draft|running|working|background|question|unread|waiting)\\./",
+          "group": "2_manage@1"
+        },
+        {
+          "command": "omp.reloadSession",
+          "when": "view == omp.sessions && viewItem =~ /^ompSession\\.[^.]*\\.(running|working|background|question|unread|waiting)\\.[^.]*\\.[^.]*\\.materialized\\./",
+          "group": "2_manage@2"
+        },
+        {
+          "command": "omp.closeSession",
+          "when": "view == omp.sessions && viewItem =~ /^ompSession\\.[^.]*\\.(running|working|background|question|unread|waiting)\\./",
+          "group": "2_manage@3"
+        },
+        {
+          "command": "omp.forgetSession",
+          "when": "view == omp.sessions && viewItem =~ /^ompSession\\.forgettable\\./",
+          "group": "3_remove@1"
+        },
+        {
+          "command": "omp.deleteSession",
+          "when": "view == omp.sessions && viewItem =~ /^ompSession\\.[^.]*\\.(stopped|running|working|background|question|unread|waiting)\\.[^.]*\\.deletable\\./",
+          "group": "3_remove@2"
+        },
+        {
+          "command": "omp.stopProcess",
+          "when": "view == omp.processes && viewItem =~ /^ompProcess\\.stoppable\\./",
+          "group": "inline@1"
+        },
+        {
+          "command": "omp.stopProcess",
+          "when": "view == omp.processes && viewItem =~ /^ompProcess\\.stoppable\\./",
+          "group": "1_stop@1"
+        }
+      ]
+    },
+    "keybindings": [
+      {
+        "command": "omp.sendPrompt",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat"
+      },
+      {
+        "command": "omp.stopTurn",
+        "key": "escape",
+        "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat && omp.streaming && !omp.composerPopupOpen"
+      },
+      {
+        "command": "omp.focusComposer",
+        "key": "ctrl+shift+l",
+        "mac": "cmd+shift+l",
+        "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat"
+      },
+      {
+        "command": "omp.redrawTerminal",
+        "key": "ctrl+alt+shift+r",
+        "mac": "cmd+alt+shift+r",
+        "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == terminal"
+      },
+      {
+        "command": "omp.sendSelection",
+        "key": "alt+shift+k",
+        "when": "editorTextFocus && editorHasSelection && resourceScheme == file"
+      }
+    ]
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "watch": "node esbuild.mjs --watch",
+    "vscode:prepublish": "npm run build",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test \"src/**/*.test.ts\"",
+    "vsix": "vsce package --no-dependencies",
+    "vsix:x64": "node scripts/package-vsix.mjs win32-x64",
+    "vsix:arm64": "node scripts/package-vsix.mjs win32-arm64",
+    "vsix:all": "npm run vsix:x64 && npm run vsix:arm64"
+  },
+  "dependencies": {
+    "@oh-my-pi/pi-wire": "18.3.0",
+    "@vscode/codicons": "^0.0.46-24",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/addon-serialize": "0.14.0",
+    "@xterm/addon-unicode11": "0.9.0",
+    "@xterm/headless": "6.0.0",
+    "@xterm/xterm": "6.0.0",
+    "node-pty": "1.1.0",
+    "react": "19.2.7",
+    "react-dom": "19.2.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@types/vscode": "^1.110.0",
+    "@vscode/vsce": "^3.2.1",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.9.0",
+    "vscode-uri": "^3.2.0"
+  }
+}
