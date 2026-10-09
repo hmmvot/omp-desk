@@ -78,6 +78,7 @@ ${TERMINAL_STYLES}
 .omp-context-popover { position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 50; display: flex; flex-direction: column; gap: 4px; width: max-content; max-width: min(260px, calc(100vw - 24px)); box-sizing: border-box; padding: 16px; border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-widget-border)); border-radius: 6px; background: color-mix(in srgb, var(--vscode-editorHoverWidget-background) 86%, var(--vscode-foreground, var(--vscode-editorHoverWidget-foreground))); color: var(--vscode-editorHoverWidget-foreground); box-shadow: 0 4px 16px var(--vscode-widget-shadow); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; pointer-events: auto; }
 .omp-context-popover::after { content: ""; position: absolute; left: 0; right: 0; top: 100%; height: 8px; }
 .omp-context-popover strong { color: inherit; font-weight: 600; }
+.omp-context-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
 /* High-contrast themes already draw a strong border; keep their exact hover colours and no shadow. */
 .vscode-high-contrast .omp-context-popover, .vscode-high-contrast-light .omp-context-popover { background: var(--vscode-editorHoverWidget-background); box-shadow: none; }
 @media (forced-colors: active) {

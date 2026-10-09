@@ -155,7 +155,8 @@ export function ChatFooter({ client, snapshot, trailingActions }: {
 					<ContextUsageIndicator tokens={usage?.tokens} contextWindow={contextWindow} percent={usage?.percent}
 						cost={metadata?.sessionCost} windows={windows} quotaTooltip={quotaTooltip}
 						onCompact={() => guestTransport.post({ type: "omp:chat-command", command: "compact" })}
-						compactBlocked={blocked ?? (snapshot.maintenance?.status === "working" ? "A compaction is already running." : null)}
+						onShake={() => guestTransport.post({ type: "omp:chat-command", command: "shake" })}
+						maintenanceBlocked={blocked ?? (snapshot.maintenance?.status === "working" ? "Context maintenance is already running." : null)}
 						compactHint={snapshot.working ? "Interrupts the running turn, compacts, then the turn continues" : undefined} />
 					{trailingActions}
 				</div>

@@ -138,7 +138,7 @@ import {
   stopBrokerOwnedHost,
 } from "./host/rpc-reconcile";
 import type { NativeStopVerdict } from "./host/rpc-reconcile";
-import type { RpcSession, SendOutcome, SendRefusal } from "./host/rpc/session";
+import type { CommandResult, CompactMode, RpcSession, SendOutcome, SendRefusal, ShakeMode } from "./host/rpc/session";
 import { readSlashRegistry, type BuiltinSlashEntry, type DeskSlashAction, type SlashRegistry } from "./host/slash-registry";
 import { sessionPrompts } from "./webview/lib/prompt-history";
 import { NAVIGATE_REFUSAL_SENTENCES, rewindPreview, rewindTargets } from "./chat/rewind";
@@ -1287,6 +1287,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("omp.toggleToolOutput", () => toggleTranscriptDefault(TOOLS_EXPANDED_KEY)),
     vscode.commands.registerCommand("omp.searchPromptHistory", () => searchPromptHistory()),
     vscode.commands.registerCommand("omp.compactConversation", () => runActiveChatAction(context, index, "compact")),
+    vscode.commands.registerCommand("omp.shakeConversation", () => runActiveChatAction(context, index, "shake")),
     vscode.commands.registerCommand("omp.cycleModel", () => runActiveChatAction(context, index, "cycle-model")),
     vscode.commands.registerCommand("omp.cycleThinkingLevel", () => runActiveChatAction(context, index, "cycle-thinking")),
     vscode.commands.registerCommand("omp.exportConversationHtml", () => runActiveChatAction(context, index, "export-html")),
@@ -7152,6 +7153,12 @@ function chatRefusalText(reason: SendRefusal): string {
   return reason === "busy" ? "OMP is busy with the running turn; try again after it ends." : reason === "not-live" || reason === "not-owner" ? "This conversation is not accepting commands right now." : "OMP did not accept the command.";
 }
 
+/** A maintenance pass's outcome. Its report already shows in the conversation; only a refusal or silence needs a warning. */
+function reportMaintenance(result: CommandResult<string>, notDone: string): void {
+  if (result.status === "refused") showWarning(`${notDone} ${chatRefusalText(result.reason)}`);
+  else if (result.status === "unconfirmed") showWarning("OMP did not report the outcome of the command.");
+}
+
 /**
  * One Chat action for `tabId`'s live conversation. Every action that sends or uploads anything asks first in
  * VS Code's own UI (an InputBox, a save dialog, a modal confirmation); cycling is one explicit keypress, as in
@@ -7173,16 +7180,41 @@ async function runChatAction(context: vscode.ExtensionContext, index: SessionInd
   switch (command) {
     case "compact": {
       const running = session.model.working;
-      const instructions = await vscode.window.showInputBox({
+      // OMP's `/compact` modes (session/compact-modes.ts); the first is preselected, so Enter runs the default.
+      const modes: (vscode.QuickPickItem & { mode: CompactMode })[] = [
+        { mode: "snapcompact", label: "snapcompact", description: "default", detail: "Archive the earlier conversation onto dense images the model reads back. No model call." },
+        { mode: "soft", label: "soft", detail: "Summarize the earlier conversation locally with the active model." },
+        { mode: "remote", label: "remote", detail: "Summarize through the provider's server compaction, then fall back to a local summary." },
+      ];
+      const picked = await vscode.window.showQuickPick(modes, {
         title: "Compact Conversation",
-        prompt: `OMP replaces the earlier conversation with a summary to free context.${running ? " The running turn is interrupted and continues after the summary." : ""} Optionally say what the summary must keep.`,
-        placeHolder: "Optional instructions for the summary",
+        placeHolder: `How OMP frees context${running ? "; the running turn is interrupted and continues afterwards" : ""}`,
         ignoreFocusOut: true,
       });
-      if (instructions === undefined || !current()) return;
-      const result = await session.compact(instructions.trim().length > 0 ? instructions.trim() : undefined);
-      if (result.status === "refused") showWarning(`The conversation was not compacted. ${chatRefusalText(result.reason)}`);
-      else if (result.status === "unconfirmed") showWarning("OMP did not report whether the conversation was compacted.");
+      if (picked === undefined || !current()) return;
+      let instructions: string | undefined;
+      if (picked.mode !== "snapcompact") {
+        instructions = await vscode.window.showInputBox({
+          title: `Compact Conversation (${picked.label})`,
+          prompt: "Optionally say what the summary must keep.",
+          placeHolder: "Optional instructions for the summary",
+          ignoreFocusOut: true,
+        });
+        if (instructions === undefined || !current()) return;
+      }
+      reportMaintenance(await session.maintain({ kind: "compact", mode: picked.mode, ...(instructions === undefined ? {} : { instructions }) }), "The conversation was not compacted.");
+      return;
+    }
+    case "shake": {
+      // OMP's `/shake` modes (slash-commands/builtin-lifecycle.ts); `elide` is OMP's default and preselected.
+      const modes: (vscode.QuickPickItem & { mode: ShakeMode })[] = [
+        { mode: "elide", label: "elide", description: "default", detail: "Strip tool results and large blocks from the context." },
+        { mode: "images", label: "images", detail: "Strip image blocks from the context." },
+        { mode: "thinking", label: "thinking", detail: "Drop all thinking blocks from the context." },
+      ];
+      const picked = await vscode.window.showQuickPick(modes, { title: "Shake Conversation", placeHolder: "What OMP drops from the context", ignoreFocusOut: true });
+      if (picked === undefined || !current()) return;
+      reportMaintenance(await session.maintain({ kind: "shake", mode: picked.mode }), "The conversation was not shaken.");
       return;
     }
     case "cycle-model": {

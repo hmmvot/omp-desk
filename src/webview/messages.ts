@@ -844,18 +844,19 @@ export type GuestOpenDetailMessage =
 	| { type: "omp:open-detail"; kind: "agent"; agentId: string };
 
 /**
- * A Chat action the page asks the host to run with its own consent UI: `compact` (instructions InputBox),
- * `cycle-model` / `cycle-thinking` (the TUI's role and thinking cycling), `export-html` (save dialog) and `share`
- * (a modal confirmation naming what is uploaded). The page names the action only; the host decides everything else.
+ * A Chat action the page asks the host to run with its own consent UI: `compact` and `shake` (a mode QuickPick, and
+ * for a summarizing compaction an instructions InputBox), `cycle-model` / `cycle-thinking` (the TUI's role and
+ * thinking cycling), `export-html` (save dialog) and `share` (a modal confirmation naming what is uploaded). The page
+ * names the action only; the host decides everything else.
  */
 export interface GuestChatCommandMessage {
 	type: "omp:chat-command";
 	command: GuestChatCommand;
 }
 
-export type GuestChatCommand = "compact" | "cycle-model" | "cycle-thinking" | "export-html" | "share" | "provider-login";
+export type GuestChatCommand = "compact" | "shake" | "cycle-model" | "cycle-thinking" | "export-html" | "share" | "provider-login";
 
-const CHAT_COMMANDS: Record<string, GuestChatCommand> = { compact: "compact", "cycle-model": "cycle-model", "cycle-thinking": "cycle-thinking", "export-html": "export-html", share: "share", "provider-login": "provider-login" };
+const CHAT_COMMANDS: Record<string, GuestChatCommand> = { compact: "compact", shake: "shake", "cycle-model": "cycle-model", "cycle-thinking": "cycle-thinking", "export-html": "export-html", share: "share", "provider-login": "provider-login" };
 
 /** `StopReason` of the newest assistant reply, as the wire package defines it. */
 export type GuestTurnOutcome = "stop" | "length" | "toolUse" | "error" | "aborted";

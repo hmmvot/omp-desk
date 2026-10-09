@@ -120,8 +120,6 @@ export type RpcCommand =
 	| { type: "abort" }
 	/** Withdraw the user's queued messages, then abort; the child answers `{steering, followUp, imagesDropped?, truncated?}`. */
 	| { type: "abort_and_restore_queue" }
-	/** Manual compaction; the child answers with its compaction result. */
-	| { type: "compact"; customInstructions?: string }
 	/** Next role/scoped model; the child answers `null` when there is nothing to cycle to. */
 	| { type: "cycle_model" }
 	/** Next thinking selector of the live model; `null` when the model has none. */
