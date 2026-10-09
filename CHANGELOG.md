@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - An `@path` mention written in inline code in Chat (`` `@CHANGELOG.md` ``) is now a link, as it already was in plain text.
+- **Session cost** in the context popover covers the whole session, as the terminal UI's status line does. After a compaction it used to count only the spend since that compaction.
 - The context ring and its popover under the Chat composer show the new usage after **Compact** / **Shake** (from the popover or typed), after `/handoff` and after an automatic compaction. They used to keep the figure from before the pass until the next turn.
 
 ## [0.2.1] - 2026-10-09
