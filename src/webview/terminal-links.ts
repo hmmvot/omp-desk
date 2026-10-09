@@ -20,17 +20,25 @@ export type WebLinkMode = "editor" | "external";
 /** Ctrl+Click on a Chat file link reveals it in VS Code's Explorer instead of opening it; Ctrl+Shift+Click shows it in the system file manager. */
 export type FileLinkAction = "reveal" | "os";
 /**
- * The context menu of a Chat file link (`webview/context` in package.json). VS Code reads the link's
- * `data-vscode-context`, makes each key a context key for the menu's `when` clauses and passes the
- * object, plus `webview` (the panel's viewType), to the chosen command.
+ * The context menus of Chat file and web links (`webview/context` in package.json). VS Code reads the
+ * link's `data-vscode-context`, makes each key a context key for the menu's `when` clauses and passes
+ * the object, plus `webview` (the panel's viewType), to the chosen command.
  */
 export const FILE_LINK_MENU_SECTION = "ompFileLink";
+export const WEB_LINK_MENU_SECTION = "ompWebLink";
 export interface FileLinkMenuContext {
 	readonly webviewSection: typeof FILE_LINK_MENU_SECTION;
 	readonly ompFileLinkTarget: string;
 }
+export interface WebLinkMenuContext {
+	readonly webviewSection: typeof WEB_LINK_MENU_SECTION;
+	readonly ompWebLinkUrl: string;
+}
 export function fileLinkMenuContext(target: string): string {
 	return JSON.stringify({ webviewSection: FILE_LINK_MENU_SECTION, ompFileLinkTarget: target } satisfies FileLinkMenuContext);
+}
+export function webLinkMenuContext(url: string): string {
+	return JSON.stringify({ webviewSection: WEB_LINK_MENU_SECTION, ompWebLinkUrl: url } satisfies WebLinkMenuContext);
 }
 export const MAX_TERMINAL_LINK_LENGTH = 4096;
 export function isTerminalLinkTarget(value: unknown): value is string {

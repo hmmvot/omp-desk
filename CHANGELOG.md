@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Folder paths in Chat are links too. A click opens a file in a tab; **Ctrl+Click** selects the file or folder in the Explorer without opening it, and **Ctrl+Shift+Click** opens its folder in File Explorer with it selected. A plain click on a folder selects it in the Explorer. The Explorer can show only paths inside a folder open in the window. The same three actions are in the link's right-click menu.
+- Folder paths in Chat are links too. A click opens a file in a tab; **Ctrl+Click** selects the file or folder in the Explorer without opening it, and **Ctrl+Shift+Click** opens its folder in File Explorer with it selected. A plain click on a folder selects it in the Explorer. The Explorer can show only paths inside a folder open in the window. The same three actions are in the link's right-click menu, and a web link's right-click menu offers **Open in Editor** and **Open in Browser**.
 - In Chat sessions the model is asked to write the files and folders it mentions as paths in inline code (`src/app.ts:42`, `docs/`), so they become links.
 - **Ctrl+Shift+Q** puts the cursor in the chat composer from anywhere, the integrated terminal included: the active session, else the one showing next to your files. With no session open it opens the OMP Desk side bar. In a Terminal-mode session it no longer reaches OMP as Ctrl+Q; press Ctrl+Q itself for a follow-up message.
 - Sessions open in their own editor group on the left, and that group is locked, so files you open from Chat links, the Explorer or Quick Open appear in a group on the right and the chat stays visible. Turn it off with `omp.chatColumn`.

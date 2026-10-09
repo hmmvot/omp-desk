@@ -196,7 +196,7 @@ import type { BrokerSlotProvenance, BrokerSlotStore } from "./host/broker-slots"
 import type { PtyHandle } from "./host/pty-client";
 import { TerminalPipeline } from "./host/terminal-pipeline";
 import type { TerminalHostMessage } from "./host/terminal-pipeline";
-import { fileLinkMenuTarget, handleTerminalLink, openTerminalFile, openWebLink, revealPathInExplorer, revealPathInOs } from "./host/terminal-links";
+import { fileLinkMenuTarget, handleTerminalLink, openTerminalFile, openWebLink, revealPathInExplorer, revealPathInOs, webLinkMenuUrl } from "./host/terminal-links";
 import type { FileLinkAction, TerminalLinkRequest, TerminalLinkValidation, WebLinkMode } from "./webview/terminal-links";
 import {
   createShellSlotId,
@@ -1237,6 +1237,8 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("omp.fileLink.open", (argument: unknown) => openFileLinkFromMenu(argument, undefined)),
     vscode.commands.registerCommand("omp.fileLink.reveal", (argument: unknown) => openFileLinkFromMenu(argument, "reveal")),
     vscode.commands.registerCommand("omp.fileLink.revealInOs", (argument: unknown) => openFileLinkFromMenu(argument, "os")),
+    vscode.commands.registerCommand("omp.webLink.openInEditor", (argument: unknown) => openWebLinkFromMenu(argument, "editor")),
+    vscode.commands.registerCommand("omp.webLink.openInBrowser", (argument: unknown) => openWebLinkFromMenu(argument, "external")),
     vscode.commands.registerCommand("omp.chooseDefaultSessionView", chooseDefaultView),
     vscode.commands.registerCommand("omp.chooseDefaultSessionViewChat", chooseDefaultView),
     vscode.commands.registerCommand("omp.chooseDefaultSessionViewTerminal", chooseDefaultView),
@@ -8034,6 +8036,14 @@ function refreshChatDisplayPreferences(event: vscode.ConfigurationChangeEvent): 
     chat.refreshDisplayPreferences();
   }
 }
+/** A web link's context-menu command: the same open a click or Ctrl+Click sends, from a Chat or a detail tab. */
+async function openWebLinkFromMenu(argument: unknown, mode: WebLinkMode): Promise<void> {
+  const url = webLinkMenuUrl(argument);
+  if (url === null) return;
+  try { await openPageWebLink(url, mode); }
+  catch (error) { log(`web link: cannot open ${url}: ${messageOf(error)}`); showWarning(`cannot open ${url}: ${messageOf(error)}`); }
+}
+
 /**
  * A web link the user clicked in a page, already re-validated as `http(s)` by the caller: an editor
  * tab (Simple Browser) or the external browser. Only the origin is logged, never the path or query.

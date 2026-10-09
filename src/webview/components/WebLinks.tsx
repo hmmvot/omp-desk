@@ -13,6 +13,7 @@ import { createContext, useContext, useEffect, useState } from "react";
 import type { GuestHostMessage, GuestWebviewMessage } from "../messages";
 import { TerminalLinkClient } from "../lib/terminal-link-client";
 import { WEB_LINK_HINT } from "../lib/chat-web-links";
+import { webLinkMenuContext } from "../terminal-links";
 import { claimLinkActivation } from "./FileLinks";
 
 /** Exported for static renders, which cannot run the provider's effect. */
@@ -41,6 +42,7 @@ export function WebLink({ url, children }: { url: string; children: ReactNode })
 		role="link"
 		tabIndex={0}
 		data-web-url={url}
+		data-vscode-context={webLinkMenuContext(url)}
 		title={`${url}\n${WEB_LINK_HINT}`}
 		onClick={event => { if (claimLinkActivation(event)) client.open(url, event.ctrlKey ? "external" : "editor"); }}
 		onKeyDown={event => { if ((event.key === "Enter" || event.key === " ") && claimLinkActivation(event)) client.open(url, event.ctrlKey ? "external" : "editor"); }}
