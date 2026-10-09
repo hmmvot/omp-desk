@@ -58,6 +58,7 @@ import type { ChatClient, ChatSnapshot } from "../lib/chat-client";
 import { chatWritable } from "../lib/chat-client";
 import { reportComposerPopupOpen } from "../lib/composer-overlay";
 import { providePanelActions } from "../lib/panel-actions";
+import { focusWhenPossible } from "../lib/focus-retry";
 import { provideDraftHandoff, subscribeRestoredDraft, takeRestoredDraft } from "../lib/draft-handoff";
 import type { DraftCapture } from "../lib/draft-handoff";
 import { followedByBlank, spaceInsertion, subscribeInsertedText } from "../lib/insert-text";
@@ -1024,7 +1025,14 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind 
 			providePanelActions({
 				"send-prompt": () => send(false),
 				"stop-turn": stop,
-				"focus-composer": () => textareaRef.current?.focus(),
+				"focus-composer": () => {
+					focusWhenPossible({
+						element: () => textareaRef.current,
+						active: () => document.activeElement,
+						idle: active => active === null || active === document.body,
+						schedule: (callback, delayMs) => { window.setTimeout(callback, delayMs); },
+					});
+				},
 				"retry-turn": () => void retry(),
 			}),
 		[retry, send, stop],

@@ -84,8 +84,19 @@
           "type": "boolean",
           "default": true,
           "description": "Show the folders VS Code has open in this window, or every folder of a multi-root workspace, in Sessions next to the pinned folders. When off, Sessions shows only pinned folders and folders where a session of this window is running."
+        },
+        "omp.chatColumn": {
+          "type": "boolean",
+          "default": true,
+          "description": "Open OMP session editors in their own editor group on the left and lock that group, so files and other tabs open in a group to the right and the chat stays visible. When off, a session editor opens in the active editor group."
         }
       }
+    },
+    "configurationDefaults": {
+      "terminal.integrated.commandsToSkipShell": [
+        "omp.focusComposer",
+        "omp.moveFileToNewWindow"
+      ]
     },
     "viewsContainers": {
       "activitybar": [
@@ -285,6 +296,11 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "omp.moveFileToNewWindow",
+        "title": "Toggle Files Window Next to Chat",
+        "category": "OMP"
+      },
+      {
         "command": "omp.fileLink.open",
         "title": "Open",
         "category": "OMP"
@@ -390,7 +406,6 @@
       },
       {
         "command": "omp.focusComposer",
-        "enablement": "omp.sessionMode == chat",
         "title": "Focus Chat Composer",
         "category": "OMP",
         "icon": "$(edit)"
@@ -867,6 +882,11 @@
     },
     "keybindings": [
       {
+        "command": "omp.focusComposer",
+        "key": "ctrl+shift+q",
+        "mac": "cmd+shift+q"
+      },
+      {
         "command": "omp.sendPrompt",
         "key": "ctrl+enter",
         "mac": "cmd+enter",
@@ -909,11 +929,6 @@
         "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat"
       },
       {
-        "command": "omp.cycleModel",
-        "key": "ctrl+shift+m",
-        "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat"
-      },
-      {
         "command": "omp.cycleThinkingLevel",
         "key": "ctrl+shift+u",
         "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat"
@@ -923,6 +938,11 @@
         "key": "ctrl+alt+shift+r",
         "mac": "cmd+alt+shift+r",
         "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == terminal"
+      },
+      {
+        "command": "omp.moveFileToNewWindow",
+        "key": "ctrl+shift+m",
+        "mac": "cmd+shift+m"
       },
       {
         "command": "omp.sendSelection",

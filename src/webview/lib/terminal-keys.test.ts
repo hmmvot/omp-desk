@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { isTerminalRedrawChord, terminalCopyChord, withoutInterrupt } from "./terminal-keys.ts";
+import { isTerminalWorkbenchChord, terminalCopyChord, withoutInterrupt } from "./terminal-keys.ts";
 import type { TerminalKeyEventLike } from "./terminal-keys.ts";
 
 // Non-Latin letters below are written as escapes: U+0441 and U+0421 are Cyrillic es (the key a Russian layout reports
@@ -44,16 +44,22 @@ describe("terminal copy chords in a shell (Ctrl+C interrupts)", () => {
 	});
 });
 
-describe("isTerminalRedrawChord", () => {
-	it("claims Ctrl+Alt+Shift+R on any layout and nothing the program or copy uses", () => {
-		assert.equal(isTerminalRedrawChord(key("R", { ctrlKey: true, altKey: true, shiftKey: true })), true);
-		assert.equal(isTerminalRedrawChord({ ...key("\u043a", { ctrlKey: true, altKey: true, shiftKey: true }), code: "KeyR" }), true);
-		assert.equal(isTerminalRedrawChord(key("R", { metaKey: true, altKey: true, shiftKey: true })), true);
-		assert.equal(isTerminalRedrawChord(key("r", { ctrlKey: true })), false);
-		assert.equal(isTerminalRedrawChord(key("R", { ctrlKey: true, shiftKey: true })), false);
-		assert.equal(isTerminalRedrawChord(key("R", { ctrlKey: true, altKey: true })), false);
-		assert.equal(isTerminalRedrawChord(key("L", { ctrlKey: true, altKey: true, shiftKey: true })), false);
-		assert.equal(isTerminalRedrawChord(key("l", { ctrlKey: true })), false, "Ctrl+L is OMP's live-mode key");
+describe("isTerminalWorkbenchChord", () => {
+	it("claims Ctrl+Alt+Shift+R, Ctrl+Shift+Q and Ctrl+Shift+M on any layout and nothing the program or copy uses", () => {
+		assert.equal(isTerminalWorkbenchChord(key("R", { ctrlKey: true, altKey: true, shiftKey: true })), true);
+		assert.equal(isTerminalWorkbenchChord({ ...key("\u043a", { ctrlKey: true, altKey: true, shiftKey: true }), code: "KeyR" }), true);
+		assert.equal(isTerminalWorkbenchChord(key("R", { metaKey: true, altKey: true, shiftKey: true })), true);
+		assert.equal(isTerminalWorkbenchChord(key("Q", { ctrlKey: true, shiftKey: true })), true);
+		assert.equal(isTerminalWorkbenchChord({ ...key("\u0419", { ctrlKey: true, shiftKey: true }), code: "KeyQ" }), true);
+		assert.equal(isTerminalWorkbenchChord(key("q", { ctrlKey: true })), false, "Ctrl+Q is OMP's follow-up key on Windows");
+		assert.equal(isTerminalWorkbenchChord({ ...key("\u042c", { ctrlKey: true, shiftKey: true }), code: "KeyM" }), true, "Ctrl+Shift+M would reach OMP as Ctrl+M, a carriage return");
+		assert.equal(isTerminalWorkbenchChord(key("m", { ctrlKey: true })), false);
+		assert.equal(isTerminalWorkbenchChord(key("Q", { ctrlKey: true, altKey: true, shiftKey: true })), false);
+		assert.equal(isTerminalWorkbenchChord(key("r", { ctrlKey: true })), false);
+		assert.equal(isTerminalWorkbenchChord(key("R", { ctrlKey: true, shiftKey: true })), false);
+		assert.equal(isTerminalWorkbenchChord(key("R", { ctrlKey: true, altKey: true })), false);
+		assert.equal(isTerminalWorkbenchChord(key("L", { ctrlKey: true, altKey: true, shiftKey: true })), false);
+		assert.equal(isTerminalWorkbenchChord(key("l", { ctrlKey: true })), false, "Ctrl+L is OMP's live-mode key");
 	});
 });
 
