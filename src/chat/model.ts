@@ -913,7 +913,10 @@ export function reduceChatFrame(model: ChatModel, frame: ChatEventFrame, clock: 
 		case "retry_fallback_applied":
 		case "retry_fallback_succeeded":
 		case "todo_reminder":
+			return appendEphemeral(model, frame.type, frame, now);
 		case "notice":
+			// OMP announces xd:// device mounts for the model's benefit; in Chat they only list tool names.
+			if (frame.level === "info" && frame.source === "xdev") return model;
 			return appendEphemeral(model, frame.type, frame, now);
 		case "ttsr_triggered": {
 			const last = positionTranscript(model.entries, model.durableCount, model.pending, model.ephemeral, model.stream && model.streamId && model.streamPosition ? { message: model.stream, messageId: model.streamId, position: model.streamPosition } : null, model.durablePositions).at(-1);

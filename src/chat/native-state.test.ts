@@ -25,6 +25,17 @@ it("keeps a live notice between messages as both messages become durable and acr
 	assert.deepEqual(visibleIds(model), ["saved-second"], "a native rebuild drops a notification whose anchor disappeared");
 });
 
+it("hides OMP's xd:// mount announcement but keeps other notices, including xdev warnings", () => {
+	let model = reduceChatFrame(createChatModel(), { type: "notice", level: "info", message: "xd://: mounted mcp_a, mcp_b", source: "xdev" }, { now: 1 });
+	assert.deepEqual(model.ephemeral, []);
+	model = reduceChatFrame(model, { type: "notice", level: "warning", message: "xd://: mount failed", source: "xdev" }, { now: 2 });
+	model = reduceChatFrame(model, { type: "notice", level: "info", message: "Plan autosaved.", source: "plan-yolo" }, { now: 3 });
+	assert.deepEqual(model.ephemeral.map(item => item.payload), [
+		{ type: "notice", level: "warning", message: "xd://: mount failed", source: "xdev" },
+		{ type: "notice", level: "info", message: "Plan autosaved.", source: "plan-yolo" },
+	]);
+});
+
 it("merges only adjacent TTSR notices, not notices separated by a message", () => {
 	let model = reduceChatFrame(createChatModel(), { type: "ttsr_triggered", rules: [{ name: "a" }] });
 	model = reduceChatFrame(model, { type: "ttsr_triggered", rules: [{ name: "b" }] });
