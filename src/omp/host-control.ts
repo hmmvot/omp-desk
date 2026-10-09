@@ -106,6 +106,7 @@ import type { NativeFileObservationStorageProbe } from "../host/native-file-obse
 import { createFileEvidenceHooks, createFileEvidenceObserver } from "./file-evidence.ts";
 import { registerNavigateCommand, type NavigateCommandApi } from "./navigate-command.ts";
 import { isLiveSubagentRef, registerAgentLiveness, stopAgentLiveness, type OmpAgentRegistry } from "./agent-liveness.ts";
+import { registerChatPrompt } from "./chat-prompt.ts";
 import type { FileEvidenceOmpHooks, FileEvidenceStatus } from "./file-evidence.ts";
 
 // OMP extension surface (declared structurally)
@@ -1188,6 +1189,8 @@ export async function hostControlExtension(pi: OmpExtensionAPI): Promise<void> {
 	registerNavigateCommand(pi);
 	// Every binding: subagent bindings observe their own runs, the RPC main binding publishes (ADR-0053).
 	registerAgentLiveness(pi);
+	// Every binding; only the RPC main session's prompt gains the Chat prompt. Like Rewind, it needs no control channel.
+	registerChatPrompt(pi);
 	if (metadata.kind === "rejected") {
 		log(`refusing host control: ${metadata.reason}`);
 		return;

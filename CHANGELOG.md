@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Folder paths in Chat are links too. A click opens a file in a tab; **Ctrl+Click** selects the file or folder in the Explorer without opening it, and **Ctrl+Shift+Click** opens its folder in File Explorer with it selected. A plain click on a folder selects it in the Explorer. The Explorer can show only paths inside a folder open in the window. The same three actions are in the link's right-click menu.
+- In Chat sessions the model is asked to write the files and folders it mentions as paths in inline code (`src/app.ts:42`, `docs/`), so they become links.
+
+### Fixed
+
+- An `@path` mention written in inline code in Chat (`` `@CHANGELOG.md` ``) is now a link, as it already was in plain text.
+
 ## [0.2.1] - 2026-10-09
 
 ### Added

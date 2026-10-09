@@ -5,6 +5,10 @@ export interface TerminalLinkRequest {
 	target: string;
 	/** Where an `http(s)` target opens: an editor tab (Simple Browser) or the external browser. Only on an open. */
 	mode?: WebLinkMode;
+	/** Chat only: a folder is a valid target too. Terminal links name files alone. */
+	folders?: true;
+	/** Chat only, on an open: what a modified click does with a file or folder instead of the plain open. */
+	action?: FileLinkAction;
 }
 export interface TerminalLinkValidation {
 	type: "omp:terminal-link-validation";
@@ -13,6 +17,21 @@ export interface TerminalLinkValidation {
 }
 /** A plain click (or Enter) opens a web link in an editor tab; Ctrl+Click (or Ctrl+Enter) in the external browser. */
 export type WebLinkMode = "editor" | "external";
+/** Ctrl+Click on a Chat file link reveals it in VS Code's Explorer instead of opening it; Ctrl+Shift+Click shows it in the system file manager. */
+export type FileLinkAction = "reveal" | "os";
+/**
+ * The context menu of a Chat file link (`webview/context` in package.json). VS Code reads the link's
+ * `data-vscode-context`, makes each key a context key for the menu's `when` clauses and passes the
+ * object, plus `webview` (the panel's viewType), to the chosen command.
+ */
+export const FILE_LINK_MENU_SECTION = "ompFileLink";
+export interface FileLinkMenuContext {
+	readonly webviewSection: typeof FILE_LINK_MENU_SECTION;
+	readonly ompFileLinkTarget: string;
+}
+export function fileLinkMenuContext(target: string): string {
+	return JSON.stringify({ webviewSection: FILE_LINK_MENU_SECTION, ompFileLinkTarget: target } satisfies FileLinkMenuContext);
+}
 export const MAX_TERMINAL_LINK_LENGTH = 4096;
 export function isTerminalLinkTarget(value: unknown): value is string {
 	return typeof value === "string" && value.length > 0 && value.length <= MAX_TERMINAL_LINK_LENGTH && !/[\u0000-\u001f\u007f]/.test(value);
@@ -33,11 +52,18 @@ export function webLinkUrl(value: string): string | null {
 }
 export function parseTerminalLinkRequest(value: Record<string, unknown>): TerminalLinkRequest | null {
 	if (value.type !== "omp:terminal-link-validate" && value.type !== "omp:terminal-link-open") return null;
-	const keys = value.type === "omp:terminal-link-open" ? ["type", "requestId", "target", "mode"] : ["type", "requestId", "target"];
+	const keys = value.type === "omp:terminal-link-open" ? ["type", "requestId", "target", "mode", "folders", "action"] : ["type", "requestId", "target", "folders"];
 	if (Object.keys(value).some(key => !keys.includes(key))) return null;
 	if (!Number.isSafeInteger(value.requestId) || Number(value.requestId) < 0 || !isTerminalLinkTarget(value.target)) return null;
 	if (value.mode !== undefined && value.mode !== "editor" && value.mode !== "external") return null;
-	return { type: value.type, requestId: Number(value.requestId), target: value.target, ...(value.mode === undefined ? {} : { mode: value.mode }) };
+	if (value.folders !== undefined && value.folders !== true) return null;
+	if (value.action !== undefined && value.action !== "reveal" && value.action !== "os") return null;
+	return {
+		type: value.type, requestId: Number(value.requestId), target: value.target,
+		...(value.mode === undefined ? {} : { mode: value.mode }),
+		...(value.folders === undefined ? {} : { folders: true as const }),
+		...(value.action === undefined ? {} : { action: value.action }),
+	};
 }
 export function parseTerminalLinkValidation(value: Record<string, unknown>): TerminalLinkValidation | null {
 	if (value.type !== "omp:terminal-link-validation" || typeof value.valid !== "boolean" || !Number.isSafeInteger(value.requestId) || Number(value.requestId) < 0) return null;

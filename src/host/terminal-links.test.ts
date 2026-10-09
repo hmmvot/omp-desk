@@ -42,7 +42,7 @@ test("a relative reference resolves against the cwd it is asked with and a missi
 	try {
 		await mkdir(join(cwd, "src"));
 		await writeFile(join(cwd, "src", "a.ts"), "one\ntwo\n");
-		assert.deepEqual(await existingTerminalFile("src/a.ts#L2", cwd), { path: join(cwd, "src", "a.ts"), line: 2, column: 1 });
+		assert.deepEqual(await existingTerminalFile("src/a.ts#L2", cwd), { path: join(cwd, "src", "a.ts"), line: 2, column: 1, folder: false });
 		assert.deepEqual(await existingTerminalFile("@src/a.ts", cwd), null, "a mention marker is never part of a path");
 		assert.equal(await existingTerminalFile("src/absent.ts:3", cwd), null);
 		assert.equal(await existingTerminalFile("src", cwd), null);
@@ -55,7 +55,7 @@ test("a relative reference resolves against the cwd it is asked with and a missi
 	try {
 		await writeFile(join(cwd, "a b.ts"), "first\nsecond\nthird\n");
 		await mkdir(join(cwd, "dir"));
-		assert.deepEqual(await existingTerminalFile("a b.ts:2:3", cwd), { path: join(cwd, "a b.ts"), line: 2, column: 3 });
+		assert.deepEqual(await existingTerminalFile("a b.ts:2:3", cwd), { path: join(cwd, "a b.ts"), line: 2, column: 3, folder: false });
 		assert.equal(await existingTerminalFile("absent.ts", cwd), null);
 		assert.equal(await existingTerminalFile("dir", cwd), null);
 		assert.equal((await existingTerminalFile(pathToFileURL(join(cwd, "a b.ts")).href, cwd))?.path, join(cwd, "a b.ts"));
@@ -64,11 +64,11 @@ test("a relative reference resolves against the cwd it is asked with and a missi
 		const replies: unknown[] = [];
 		let current = true;
 		const warnings: string[] = [];
-		const host = { cwd, isCurrent: () => current, reply: (message: unknown) => { replies.push(message); }, openFile: async (location: TerminalFileLocation) => { opened.push(location); }, openUrl: async (url: string) => { urls.push(url); }, warn: (message: string) => { warnings.push(message); } };
+		const host = { cwd, isCurrent: () => current, reply: (message: unknown) => { replies.push(message); }, openFile: async (location: TerminalFileLocation) => { opened.push(location); }, revealInExplorer: async () => { throw new Error("a terminal link never reveals"); }, revealInOs: async () => { throw new Error("a terminal link never reveals"); }, openUrl: async (url: string) => { urls.push(url); }, warn: (message: string) => { warnings.push(message); } };
 		await handleTerminalLink({ type: "omp:terminal-link-validate", requestId: 7, target: "a b.ts:2:3" }, host);
 		assert.deepEqual(replies, [{ type: "omp:terminal-link-validation", requestId: 7, valid: true }]);
 		await handleTerminalLink({ type: "omp:terminal-link-open", requestId: 8, target: "a b.ts:2:3" }, host);
-		assert.deepEqual(opened, [{ path: join(cwd, "a b.ts"), line: 2, column: 3 }]);
+		assert.deepEqual(opened, [{ path: join(cwd, "a b.ts"), line: 2, column: 3, folder: false }]);
 		for (const target of ["absent.ts", "dir", "command:run", "vscode://command/run", "javascript:alert(1)"]) await handleTerminalLink({ type: "omp:terminal-link-open", requestId: 9, target }, host);
 		assert.equal(opened.length, 1); assert.deepEqual(urls, []);
 		assert.equal(warnings.length, 5, "every refused activation tells the user instead of failing silently");
@@ -86,10 +86,44 @@ test("a failed open surfaces a short warning with the cause", async () => {
 	try {
 		await writeFile(join(cwd, "image.png"), "x");
 		const warnings: string[] = [];
-		const host = { cwd, isCurrent: () => true, reply() {}, openUrl: async () => {}, warn: (message: string) => { warnings.push(message); },
+		const host = { cwd, isCurrent: () => true, reply() {}, openUrl: async () => {}, warn: (message: string) => { warnings.push(message); }, revealInExplorer: async () => true, revealInOs: async () => {},
 			openFile: async () => { throw new Error("cannot display"); } };
 		await handleTerminalLink({ type: "omp:terminal-link-open", requestId: 1, target: "image.png" }, host);
 		assert.deepEqual(warnings, [`cannot open ${join(cwd, "image.png")}: cannot display`]);
+	} finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
+test("a Chat link opens a file, only reveals it or its folder in the Explorer on Ctrl+Click, and shows it in File Explorer on Ctrl+Shift+Click", async () => {
+	const cwd = await mkdtemp(join(tmpdir(), "omp-links-"));
+	try {
+		await writeFile(join(cwd, "a.ts"), "x");
+		await mkdir(join(cwd, "dir"));
+		const calls: string[] = [];
+		const replies: unknown[] = [];
+		const warnings: string[] = [];
+		let inWorkspace = true;
+		const host = { cwd, isCurrent: () => true, reply: (message: unknown) => { replies.push(message); }, openUrl: async () => {}, warn: (message: string) => { warnings.push(message); },
+			openFile: async (location: TerminalFileLocation) => { calls.push(`open ${location.path}`); },
+			revealInExplorer: async (path: string) => { calls.push(`explorer ${path}`); return inWorkspace; },
+			revealInOs: async (path: string) => { calls.push(`os ${path}`); } };
+		await handleTerminalLink({ type: "omp:terminal-link-validate", requestId: 1, target: "dir" }, host);
+		await handleTerminalLink({ type: "omp:terminal-link-validate", requestId: 2, target: "dir", folders: true }, host);
+		assert.deepEqual(replies, [
+			{ type: "omp:terminal-link-validation", requestId: 1, valid: false },
+			{ type: "omp:terminal-link-validation", requestId: 2, valid: true },
+		], "only a Chat request accepts a folder");
+		const file = join(cwd, "a.ts"), dir = join(cwd, "dir");
+		await handleTerminalLink({ type: "omp:terminal-link-open", requestId: 3, target: "a.ts", folders: true }, host);
+		await handleTerminalLink({ type: "omp:terminal-link-open", requestId: 4, target: "a.ts", folders: true, action: "reveal" }, host);
+		await handleTerminalLink({ type: "omp:terminal-link-open", requestId: 5, target: "a.ts", folders: true, action: "os" }, host);
+		await handleTerminalLink({ type: "omp:terminal-link-open", requestId: 6, target: "dir", folders: true }, host);
+		await handleTerminalLink({ type: "omp:terminal-link-open", requestId: 7, target: "dir", folders: true, action: "os" }, host);
+		assert.deepEqual(calls, [`open ${file}`, `explorer ${file}`, `os ${file}`, `explorer ${dir}`, `os ${dir}`]);
+		assert.deepEqual(warnings, []);
+		inWorkspace = false;
+		await handleTerminalLink({ type: "omp:terminal-link-open", requestId: 8, target: "a.ts", folders: true, action: "reveal" }, host);
+		assert.deepEqual(calls.slice(-1), [`explorer ${file}`], "Ctrl+Click opens nothing, even when the Explorer cannot show the file");
+		assert.match(warnings[0]!, /not in a folder open in this window.*Ctrl\+Shift\+Click/);
 	} finally { await rm(cwd, { recursive: true, force: true }); }
 });
 
@@ -136,7 +170,7 @@ test("a web link opens only as a re-validated http(s) URL, in the mode the page 
 	const warnings: string[] = [];
 	let current = true;
 	let fail = false;
-	const host = { cwd: "D:\\repo", isCurrent: () => current, reply() { throw new Error("an open is never answered"); }, openFile: async () => { throw new Error("a web link is never a file"); },
+	const host = { cwd: "D:\\repo", isCurrent: () => current, reply() { throw new Error("an open is never answered"); }, openFile: async () => { throw new Error("a web link is never a file"); }, revealInExplorer: async () => true, revealInOs: async () => {},
 		openUrl: async (url: string, mode: string) => { if (fail) throw new Error("command 'simpleBrowser.api.open' not found"); urls.push([url, mode]); }, warn: (message: string) => { warnings.push(message); } };
 	await handleTerminalLink({ type: "omp:terminal-link-open", requestId: 1, target: "https://example.com", mode: "editor" }, host);
 	await handleTerminalLink({ type: "omp:terminal-link-open", requestId: 2, target: "http://example.com/a b?q=1#x", mode: "external" }, host);

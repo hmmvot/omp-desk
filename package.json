@@ -285,6 +285,21 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "omp.fileLink.open",
+        "title": "Open",
+        "category": "OMP"
+      },
+      {
+        "command": "omp.fileLink.reveal",
+        "title": "Reveal in Explorer",
+        "category": "OMP"
+      },
+      {
+        "command": "omp.fileLink.revealInOs",
+        "title": "Reveal in File Explorer",
+        "category": "OMP"
+      },
+      {
         "command": "omp.refreshSessions",
         "title": "Refresh Sessions",
         "category": "OMP",
@@ -541,6 +556,35 @@
         {
           "command": "omp.stopProcess",
           "when": "false"
+        },
+        {
+          "command": "omp.fileLink.open",
+          "when": "false"
+        },
+        {
+          "command": "omp.fileLink.reveal",
+          "when": "false"
+        },
+        {
+          "command": "omp.fileLink.revealInOs",
+          "when": "false"
+        }
+      ],
+      "webview/context": [
+        {
+          "command": "omp.fileLink.open",
+          "when": "webviewId =~ /^omp[.]session/ && webviewSection == ompFileLink",
+          "group": "navigation@1"
+        },
+        {
+          "command": "omp.fileLink.reveal",
+          "when": "webviewId =~ /^omp[.]session/ && webviewSection == ompFileLink",
+          "group": "navigation@2"
+        },
+        {
+          "command": "omp.fileLink.revealInOs",
+          "when": "webviewId =~ /^omp[.]session/ && webviewSection == ompFileLink",
+          "group": "navigation@3"
         }
       ],
       "editor/context": [

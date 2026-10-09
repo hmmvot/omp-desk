@@ -59,10 +59,10 @@ function plain(text: string, key: string): ReactNode {
 	return <Fragment key={key}>{nodes}</Fragment>;
 }
 
-/** A whole code span that is one path (spaces allowed only after a drive, home or relative prefix) links as a unit; any other span links the file references it holds. A URL in code stays code. */
+/** A whole code span that is one path (spaces allowed only after a drive, home or relative prefix) links as a unit; an `@` mention and any other span link the file references they hold. A URL in code stays code. */
 function codeSpan(content: string, key: string): ReactNode {
 	const whole = content.trim();
-	const single = !/\s/.test(whole) || /^(?:[a-z]:[\\/]|~[\\/]|\.{1,2}[\\/]|\/)/i.test(whole) && !/\s-/.test(whole);
+	const single = !whole.startsWith("@") && (!/\s/.test(whole) || /^(?:[a-z]:[\\/]|~[\\/]|\.{1,2}[\\/]|\/)/i.test(whole) && !/\s-/.test(whole));
 	return <code key={key}>{single && isFileLinkCandidate(whole) ? <FileLink target={whole}>{content}</FileLink> : files(content, `${key}f`)}</code>;
 }
 
