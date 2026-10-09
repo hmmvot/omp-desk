@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-09
+
 ### Added
 
 - Provider login is easy to find before the first session: Sessions shows **Log in to a model provider to start** when the default OMP profile has no available models. Chat's model chip becomes **Log In to Provider** when its own profile has no models, and the model picker always offers **Log In to Provider…** to add another provider.
@@ -80,6 +82,7 @@ First public preview of OMP Desk: a Windows-only VS Code extension that runs you
 - OMP is not bundled. The extension launches the `omp` found on `PATH` and never installs, downloads or updates it.
 - OMP Desk is an unofficial, independent integration, not an official OMP distribution.
 
-[Unreleased]: https://github.com/hmmvot/omp-desk/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/hmmvot/omp-desk/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/hmmvot/omp-desk/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/hmmvot/omp-desk/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/hmmvot/omp-desk/releases/tag/v0.1.0
