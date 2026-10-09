@@ -3627,7 +3627,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
-		await t.test("Alt+click on the model or thinking level cycles through the host, and Compact in the context popover asks the host", async () => {
+		await t.test("Alt+click on the model or thinking level cycles through the host, and Compact and Shake in the context popover ask the host", async () => {
 			await reset("quick-footer-actions");
 			const commands = () => ui.evaluate<string[]>("window.sent.filter(message=>message.type==='omp:chat-command').map(message=>message.command)");
 			const altClick = async (selector: string) => {
@@ -3647,6 +3647,11 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate("document.querySelector('.omp-context-compact').click()");
 			assert.deepEqual(await commands(), ["cycle-model", "cycle-thinking", "compact"]);
 			await ui.wait("!document.querySelector('.omp-context-popover')");
+			await ui.evaluate("document.querySelector('.omp-composer textarea').focus();document.querySelector('.omp-context-trigger').focus()");
+			await ui.wait("document.querySelector('.omp-context-shake')");
+			await ui.evaluate("document.querySelector('.omp-context-shake').click()");
+			assert.deepEqual(await commands(), ["cycle-model", "cycle-thinking", "compact", "shake"]);
+			await ui.wait("!document.querySelector('.omp-context-popover')");
 			await ui.evaluate("document.querySelector('.omp-composer textarea').focus();window.ui.push({working:true,settled:false})");
 			await ui.wait("document.querySelector('[aria-label=\"Stop the running turn\"]')");
 			await ui.evaluate("document.querySelector('.omp-context-trigger').focus()");
@@ -3655,7 +3660,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.equal(await ui.evaluate("document.querySelector('.omp-context-compact').title"), "Interrupts the running turn, compacts, then the turn continues");
 			await ui.evaluate("window.ui.push({maintenance:{action:'compact',reason:'manual',status:'working'}})");
 			await ui.wait("document.querySelector('.omp-context-compact')?.disabled===true");
-			assert.equal(await ui.evaluate("document.querySelector('.omp-context-compact').title"), "A compaction is already running.");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-context-shake').disabled"), true, "one maintenance pass at a time");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 

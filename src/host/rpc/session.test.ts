@@ -1300,25 +1300,91 @@ describe("chat quick actions", () => {
 		session.dispose();
 	});
 
-	it("compacts with optional instructions, shows its own progress, runs during a turn and refuses a second pass", async () => {
+	it("compacts and shakes through OMP's slash commands, shows its own progress until the report and refuses a second pass", async () => {
 		const { session, channel } = await boot({ child });
 		let during: unknown;
-		channel.handlers.set("compact", () => { during = session.model.maintenance; return { data: {} }; });
-		assert.deepEqual(await session.compact("keep the API decisions"), { status: "ok", value: null });
-		assert.deepEqual(during, { action: "compact", reason: "manual", status: "working" });
+		// As installed OMP answers: `/compact` acknowledges at once and reports from the background, `/shake` reports first.
+		const answer = (report: string, reportFirst = false) => channel.handlers.set("prompt", () => {
+			during = session.model.maintenance;
+			if (reportFirst) channel.emit({ type: "command_output", text: report });
+			else queueMicrotask(() => channel.emit({ type: "command_output", text: report }));
+			return { data: { agentInvoked: false } };
+		});
+		answer("Compaction complete. Tokens: 900 -> 300 (saved 600).");
+		assert.deepEqual(await session.maintain({ kind: "compact", mode: "snapcompact" }), { status: "ok", value: "Compaction complete. Tokens: 900 -> 300 (saved 600)." });
+		assert.deepEqual(during, { action: "snapcompact", reason: "manual", status: "working" });
 		assert.equal(session.model.maintenance?.status, "complete");
-		assert.equal(channel.commandsOfType("compact")[0]?.customInstructions, "keep the API decisions");
-		channel.handlers.set("compact", () => ({ success: false, error: "nothing to compact" }));
-		assert.equal((await session.compact(undefined)).status, "refused");
+		answer("Compaction failed: Nothing to compact (session too small)");
+		assert.equal((await session.maintain({ kind: "compact", mode: "soft", instructions: " keep the API decisions " })).status, "ok");
+		assert.equal(session.model.maintenance?.status, "skipped", "OMP's failure report is its command output, not a second failure line");
+		answer("Nothing to shake.", true);
+		assert.deepEqual(await session.maintain({ kind: "shake", mode: "elide" }), { status: "ok", value: "Nothing to shake." });
+		assert.deepEqual(during, { action: "shake", reason: "manual", status: "working" });
+		assert.equal(session.model.maintenance?.status, "complete");
+		const sent = channel.commandsOfType("prompt");
+		assert.deepEqual(sent.map(command => command.message), ["/compact snapcompact", "/compact soft keep the API decisions", "/shake elide"]);
+		assert.ok(sent.every(command => command.streamingBehavior === undefined), "a command, never text queued for the model");
+		channel.handlers.set("prompt", () => ({ data: { agentInvoked: true } }));
+		assert.deepEqual(await session.maintain({ kind: "shake", mode: "images" }), { status: "refused", reason: "rejected" }, "text that reached the model is no command");
 		assert.equal(session.model.maintenance?.status, "failed");
-		channel.emit({ type: "agent_start" });
-		await tick();
-		channel.handlers.set("compact", () => ({ data: {} }));
-		assert.deepEqual(await session.compact(undefined), { status: "ok", value: null }, "OMP interrupts the turn, compacts and resumes it, as in the TUI");
 		let second: Promise<unknown> | undefined;
-		channel.handlers.set("compact", () => { second ??= session.compact(undefined); return { data: {} }; });
-		await session.compact(undefined);
-		assert.deepEqual(await second, { status: "refused", reason: "busy" }, "a compaction already running");
+		channel.handlers.set("prompt", () => {
+			second ??= session.maintain({ kind: "shake", mode: "elide" });
+			queueMicrotask(() => channel.emit({ type: "command_output", text: "Compaction complete." }));
+			return { data: { agentInvoked: false } };
+		});
+		await session.maintain({ kind: "compact", mode: "remote" });
+		assert.deepEqual(await second, { status: "refused", reason: "busy" }, "a pass already running");
+		session.dispose();
+	});
+
+	it("reads the context usage back after a pass so the ring shows what OMP reports now, not the figure from before it", async () => {
+		const before = { tokens: 384_000, contextWindow: 1_000_000, percent: 38.4 };
+		const after = { tokens: 120_000, contextWindow: 1_000_000, percent: 12 };
+		const { session, channel } = await boot({ child: { ...child, contextUsage: before } });
+		assert.deepEqual(session.model.state?.contextUsage, before);
+		// Compact from the popover: the child's usage changes while the pass runs, the report comes from the background.
+		channel.handlers.set("prompt", () => {
+			channel.child.contextUsage = after;
+			queueMicrotask(() => channel.emit({ type: "command_output", text: "Compaction complete. Tokens: 384000 -> 120000 (saved 264000)." }));
+			return { data: { agentInvoked: false } };
+		});
+		await session.maintain({ kind: "compact", mode: "soft" });
+		assert.deepEqual(session.model.state?.contextUsage, after, "after /compact");
+		// Shake from the popover: OMP reports before it acknowledges.
+		const shaken = { tokens: 60_000, contextWindow: 1_000_000, percent: 6 };
+		channel.handlers.set("prompt", () => {
+			channel.child.contextUsage = shaken;
+			channel.emit({ type: "command_output", text: "Shook 3 tool results." });
+			return { data: { agentInvoked: false } };
+		});
+		await session.maintain({ kind: "shake", mode: "elide" });
+		assert.deepEqual(session.model.state?.contextUsage, shaken, "after /shake");
+		// A failed pass still ends by asking, whatever the figure now is.
+		channel.child.contextUsage = { tokens: null, contextWindow: 1_000_000, percent: null };
+		channel.handlers.set("prompt", () => ({ data: { agentInvoked: true } }));
+		await session.maintain({ kind: "shake", mode: "images" });
+		assert.deepEqual(session.model.state?.contextUsage, { tokens: null, contextWindow: 1_000_000, percent: null }, "unknown usage is shown as unknown, not as the old number");
+		session.dispose();
+	});
+
+	it("reads the context usage back when a background /compact typed in the composer reports, and when OMP compacts by itself", async () => {
+		const before = { tokens: 800_000, contextWindow: 1_000_000, percent: 80 };
+		const { session, channel } = await boot({ child: { ...child, contextUsage: before } });
+		channel.handlers.set("prompt", () => ({ data: { agentInvoked: false } }));
+		assert.equal((await session.prompt({ requestId: "typed-compact", text: "/compact" })).status, "accepted");
+		await tick();
+		assert.deepEqual(session.model.state?.contextUsage, before, "the acknowledgement precedes the compaction");
+		const after = { tokens: 90_000, contextWindow: 1_000_000, percent: 9 };
+		channel.child.contextUsage = after;
+		channel.emit({ type: "command_output", text: "Compaction complete. Tokens: 800000 -> 90000 (saved 710000)." });
+		await tick();
+		assert.deepEqual(session.model.state?.contextUsage, after, "after the typed /compact reports");
+		const auto = { tokens: 40_000, contextWindow: 1_000_000, percent: 4 };
+		channel.child.contextUsage = auto;
+		channel.emit({ type: "auto_compaction_end", action: "context-full", result: undefined, aborted: false, willRetry: false });
+		await tick();
+		assert.deepEqual(session.model.state?.contextUsage, auto, "after an automatic compaction");
 		session.dispose();
 	});
 

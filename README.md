@@ -74,7 +74,7 @@ For how this works, see the [architecture](docs/architecture.md).
 - **Retry** (`F5` or `Alt+R`) re-runs a failed or aborted reply.
 - Copy buttons on code blocks and on your own messages.
 - `Ctrl+T` shows or hides all thinking, and `Ctrl+O` expands or collapses all tool calls. Every Chat remembers both choices.
-- **Compact…** in the context popover, **Export as HTML** and **Share** are in the editor title menu. `Alt+click` the model or thinking chip to cycle it (`Ctrl+Shift+M`, `Ctrl+Shift+U`).
+- **Compact…** and **Shake…** in the context popover ask for OMP's mode first (`snapcompact` and `elide` preselected); **Export as HTML** and **Share** are in the editor title menu. `Alt+click` the model or thinking chip to cycle it (`Ctrl+Shift+M`, `Ctrl+Shift+U`).
 - Terminal-only slash commands such as `/hotkeys` or `/settings` are never sent to the model. Chat opens the VS Code equivalent or says where the command works.
 - Status lines and warnings from OMP extensions appear around the composer; their informational notices are not shown.
 - **Rewind** goes back to one of your prompts in place and puts it into the composer to edit and send again: `Esc` `Esc` in an empty composer, **Rewind to here** on a prompt, `/rewind` or `/branch`, or **OMP: Rewind Conversation…**. **Undo** returns to where you were, and a marker where the conversation split switches between your branches.
@@ -132,7 +132,7 @@ All commands are in the Command Palette under **OMP**. The ones with default key
 | `Ctrl+Alt+Shift+R` | Redraw Terminal | Terminal editor |
 | `Alt+Shift+K` | Add Selection to Session | Text editor with a selection |
 
-Other commands include **New Session**, **Add Folder**, **Pin Folder**, **Unpin Folder**, **Resume Session**, **Switch to Chat / Terminal**, **Compact Conversation…**, **Export Conversation as HTML…**, **Share Conversation Link…**, **Show Chat Keyboard Shortcuts**, **Open Stats**, **Log In to Provider…**, **Show Diagnostics** and the file-change observation commands.
+Other commands include **New Session**, **Add Folder**, **Pin Folder**, **Unpin Folder**, **Resume Session**, **Switch to Chat / Terminal**, **Compact Conversation…**, **Shake Conversation…**, **Export Conversation as HTML…**, **Share Conversation Link…**, **Show Chat Keyboard Shortcuts**, **Open Stats**, **Log In to Provider…**, **Show Diagnostics** and the file-change observation commands.
 
 ## Settings
 

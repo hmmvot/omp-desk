@@ -7,17 +7,19 @@ import type { FooterQuotaWindow } from "../footer-metadata";
 
 const CIRCUMFERENCE = 2 * Math.PI * 6;
 
-export function ContextUsageIndicator({ tokens, contextWindow, percent, cost, windows, quotaTooltip, onCompact, compactBlocked, compactHint }: {
+export function ContextUsageIndicator({ tokens, contextWindow, percent, cost, windows, quotaTooltip, onCompact, onShake, maintenanceBlocked, compactHint }: {
 	tokens: number | null | undefined;
 	contextWindow: number | null;
 	percent: number | null | undefined;
 	cost: number | undefined;
 	windows: readonly FooterQuotaWindow[];
 	quotaTooltip: string;
-	/** Ask the host to compact the conversation (it asks for optional instructions first). */
+	/** Ask the host to compact the conversation (it asks for the mode, and for a summary the instructions, first). */
 	onCompact?: () => void;
-	/** Why Compact is unavailable now (a compaction already running, a read-only page), or `null`. */
-	compactBlocked?: string | null;
+	/** Ask the host to shake heavy content out of the context (it asks for the mode first). */
+	onShake?: () => void;
+	/** Why Compact and Shake are unavailable now (a maintenance pass already running, a read-only page), or `null`. */
+	maintenanceBlocked?: string | null;
 	/** What Compact will do when it differs from the usual: during a turn it interrupts and then resumes it. */
 	compactHint?: string;
 }) {
@@ -82,11 +84,18 @@ export function ContextUsageIndicator({ tokens, contextWindow, percent, cost, wi
 				title={window.resetsAt === null ? quotaTooltip : `Resets at ${new Date(window.resetsAt).toLocaleString()}${quotaTooltip ? `\n\n${quotaTooltip}` : ""}`}>
 				{quotaWindowLabel(window, now)}
 			</div>)}
-			{onCompact !== undefined && <button type="button" className="omp-btn omp-context-compact" disabled={compactBlocked != null}
-				title={compactBlocked ?? compactHint ?? "Summarize the earlier conversation to free context (you can say what to keep)"}
-				onClick={() => { setOpen(false); onCompact(); }}>
-				<span aria-hidden="true" className="codicon codicon-fold" />Compact…
-			</button>}
+			{(onCompact !== undefined || onShake !== undefined) && <div className="omp-context-actions">
+				{onCompact !== undefined && <button type="button" className="omp-btn omp-context-compact" disabled={maintenanceBlocked != null}
+					title={maintenanceBlocked ?? compactHint ?? "Free context: archive the earlier conversation onto images (snapcompact) or summarize it"}
+					onClick={() => { setOpen(false); onCompact(); }}>
+					<span aria-hidden="true" className="codicon codicon-fold" />Compact…
+				</button>}
+				{onShake !== undefined && <button type="button" className="omp-btn omp-context-shake" disabled={maintenanceBlocked != null}
+					title={maintenanceBlocked ?? "Drop heavy content from the context: tool results and large blocks (elide), images or thinking"}
+					onClick={() => { setOpen(false); onShake(); }}>
+					<span aria-hidden="true" className="codicon codicon-clear-all" />Shake…
+				</button>}
+			</div>}
 		</div>}
 	</div>;
 }

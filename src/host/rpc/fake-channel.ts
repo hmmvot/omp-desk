@@ -35,6 +35,8 @@ export interface FakeChildModel {
 	thinkingLevel: string | undefined;
 	todoPhases: readonly TodoPhase[];
 	subagents: readonly RunningAgent[];
+	/** What `get_state` reports as context usage; omitted from the answer while undefined. */
+	contextUsage?: { tokens: number | null; contextWindow: number | null; percent: number | null };
 }
 
 export type CommandHandler = (command: Record<string, unknown>) => Record<string, unknown> | "drop" | undefined;
@@ -195,6 +197,7 @@ export class FakeRpcChannel implements RpcChannel {
 						messageCount: this.child.entries.length,
 						isSettled: !this.child.isStreaming,
 						todoPhases: this.child.todoPhases,
+						...(this.child.contextUsage === undefined ? {} : { contextUsage: this.child.contextUsage }),
 					},
 				};
 			case "get_entries": {

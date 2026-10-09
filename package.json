@@ -453,6 +453,12 @@
         "category": "OMP"
       },
       {
+        "command": "omp.shakeConversation",
+        "enablement": "omp.sessionMode == chat",
+        "title": "Shake Conversation…",
+        "category": "OMP"
+      },
+      {
         "command": "omp.cycleModel",
         "enablement": "omp.sessionMode == chat",
         "title": "Cycle Model",
@@ -703,14 +709,19 @@
           "group": "3_session@1"
         },
         {
-          "command": "omp.exportConversationHtml",
+          "command": "omp.shakeConversation",
           "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat",
           "group": "3_session@2"
         },
         {
-          "command": "omp.shareConversation",
+          "command": "omp.exportConversationHtml",
           "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat",
           "group": "3_session@3"
+        },
+        {
+          "command": "omp.shareConversation",
+          "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat",
+          "group": "3_session@4"
         },
         {
           "command": "omp.showChatKeyboardShortcuts",

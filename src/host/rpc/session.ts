@@ -324,21 +324,30 @@ const REBUILD_RETRY_MS = 150;
  */
 type NavigationWait = "result" | "local" | "rejected" | "fell-through" | "timeout" | "lost";
 
-/** A one-shot child command whose answer carries data (`cycle_*`, `promote`, `compact`, `export_html`). */
+/** A one-shot child command whose answer carries data (`cycle_*`, `promote`, `export_html`, a maintenance report). */
 export type CommandResult<T> =
 	| { status: "ok"; value: T }
 	| { status: "refused"; reason: SendRefusal; code?: string }
 	| { status: "unconfirmed" };
 
-/** Manual compaction can run a model summary: its answer is awaited far longer than an ordinary command. */
-const COMPACT_TIMEOUT_MS = 15 * 60_000;
+/** The `/compact` modes of installed OMP (`session/compact-modes.ts`). */
+export type CompactMode = "snapcompact" | "soft" | "remote";
+/** The `/shake` modes of installed OMP (`slash-commands/builtin-lifecycle.ts`). */
+export type ShakeMode = "elide" | "images" | "thinking";
+/** A manual context-maintenance pass: `/compact <mode> [focus]` or `/shake <mode>`. */
+export type MaintenanceRequest =
+	| { readonly kind: "compact"; readonly mode: CompactMode; readonly instructions?: string }
+	| { readonly kind: "shake"; readonly mode: ShakeMode };
+
+/** A manual compaction can run a model summary: its report is awaited far longer than an ordinary command. */
+const MAINTENANCE_REPORT_TIMEOUT_MS = 15 * 60_000;
 /** HTML export renders the whole session. */
 const EXPORT_TIMEOUT_MS = 2 * 60_000;
 /**
- * Stop queues behind whatever serial command the child is running (a manual compaction at worst) and then waits
+ * Stop queues behind whatever serial command the child is running (a manual shake at worst) and then waits
  * for the turn to go idle. OMP has already withdrawn the queue when it answers, so the answer must not be given up early.
  */
-const ABORT_RESTORE_TIMEOUT_MS = COMPACT_TIMEOUT_MS + 2 * 60_000;
+const ABORT_RESTORE_TIMEOUT_MS = MAINTENANCE_REPORT_TIMEOUT_MS + 2 * 60_000;
 const MAX_RESTORED_ENTRIES = 64;
 
 /** The `abort_and_restore_queue` answer, validated; anything malformed restores nothing rather than guessing. */
@@ -523,6 +532,8 @@ export class RpcSession {
 	#fileMaterialized: boolean;
 	#slashArmed = false;
 	#internalSeq = 0;
+	/** Takes the next `command_output` line while a manual maintenance pass waits for its report. */
+	#maintenanceReport: ((text: string | null) => void) | null = null;
 	#unsubscribe: (() => void) | null = null;
 	#startPromise: Promise<void> | null = null;
 	#paint: Promise<void> = Promise.resolve();
@@ -698,6 +709,8 @@ export class RpcSession {
 		this.#disarmWatchdog();
 		this.#clearAutoRecovery();
 		this.#failAllCommands("closed");
+		this.#maintenanceReport?.(null);
+		this.#maintenanceReport = null;
 		for (const waiter of this.#readyWaiters.splice(0)) waiter(false);
 		this.#channel.disconnect();
 		this.#listeners.clear();
@@ -979,22 +992,43 @@ export class RpcSession {
 	}
 
 	/**
-	 * Manual compaction (`compact`). As in the TUI it may run during a turn: OMP aborts the turn, compacts, then resumes
-	 * it. Refused only while a compaction is already running. OMP emits no maintenance event for a manual pass, so the
-	 * session shows its own progress and outcome on the working line, as a native one would.
+	 * Manual compaction or shake, sent as the slash command the TUI runs: OMP's RPC `compact` takes no mode and there
+	 * is no RPC `shake`. The `prompt` carries no `streamingBehavior`: OMP runs a builtin before any turn logic, so it
+	 * also works during a turn (a compaction aborts the turn, compacts, then resumes it), and text that ever reached
+	 * the model would be refused as busy instead of queued. Refused while a pass is already running. OMP emits no
+	 * maintenance event for a manual pass and reports its outcome only as one `command_output` line (`/shake` before
+	 * its acknowledgement, `/compact` after it, from the background), so the session shows its own progress until
+	 * that line arrives; the line still renders as the notice it always is.
 	 */
-	async compact(customInstructions: string | undefined): Promise<CommandResult<null>> {
+	async maintain(request: MaintenanceRequest): Promise<CommandResult<string>> {
 		const refusal = this.#controlRefusal() ?? (this.#model.maintenance?.status === "working" ? "busy" : null);
 		if (refusal !== null) return { status: "refused", reason: refusal };
-		this.#applyLocal({ type: "auto_compaction_start", action: "compact", reason: "manual" });
-		const outcome = await this.#sendInternal({ type: "compact", ...(customInstructions === undefined ? {} : { customInstructions }) }, COMPACT_TIMEOUT_MS);
-		const errorMessage = outcome.status === "accepted" ? undefined : outcome.status === "unconfirmed" ? "OMP did not report the outcome." : "OMP did not compact the session.";
-		if (this.#live) this.#applyLocal({ type: "auto_compaction_end", action: "compact", aborted: false, willRetry: false, ...(errorMessage === undefined ? {} : { errorMessage }) });
-		if (outcome.status === "accepted") {
-			this.#requestReconcile();
-			return { status: "ok", value: null };
+		const action = request.kind === "shake" ? "shake" : request.mode === "soft" ? "compact" : request.mode;
+		const focus = request.kind === "compact" && request.instructions !== undefined && request.instructions.trim() !== "" ? ` ${request.instructions.trim()}` : "";
+		const report = Promise.withResolvers<string | null>();
+		this.#maintenanceReport = report.resolve;
+		this.#applyLocal({ type: "auto_compaction_start", action, reason: "manual" });
+		let result: CommandResult<string>;
+		// `/shake` answers only after it rewrote the branch, so its acknowledgement gets the report's patience too.
+		const ack = await this.#sendInternal({ type: "prompt", message: `/${request.kind} ${request.mode}${focus}` }, MAINTENANCE_REPORT_TIMEOUT_MS);
+		if (ack.status !== "accepted") result = ack;
+		// The text became a turn instead of a command: an input hook rewrote it, or this OMP does not have the builtin.
+		else if (!isRecord(ack.response.data) || ack.response.data.agentInvoked !== false) result = { status: "refused", reason: "rejected" };
+		else {
+			const timer = this.#timers.setTimeout(() => report.resolve(null), MAINTENANCE_REPORT_TIMEOUT_MS);
+			const text = await report.promise;
+			this.#timers.clearTimeout(timer);
+			result = text === null ? { status: "unconfirmed" } : { status: "ok", value: text };
 		}
-		return outcome;
+		if (this.#maintenanceReport === report.resolve) this.#maintenanceReport = null;
+		// OMP's own failure report is already in the transcript as command output; the pass ends as skipped so the
+		// progress line does not repeat it. Only a missing report or command leaves a failure line of its own.
+		const reportedFailure = result.status === "ok" && /^\w+ failed\b/i.test(result.value);
+		const errorMessage = result.status === "ok" ? undefined
+			: result.status === "unconfirmed" ? "OMP did not report the outcome." : "OMP did not run the command.";
+		if (this.#live) this.#applyLocal({ type: "auto_compaction_end", action, aborted: false, willRetry: false, ...(reportedFailure ? { skipped: true } : {}), ...(errorMessage === undefined ? {} : { errorMessage }) });
+		this.#requestReconcile();
+		return result;
 	}
 
 	/** `cycle_model`: the next role or scoped model. `null` when OMP had nothing to cycle to. */
@@ -1464,8 +1498,18 @@ export class RpcSession {
 			// The command text became a user message: an input hook rewrote it, or OMP no longer routes it.
 			if (frame.type === "message_start" && isRecord(frame.message) && frame.message.role === "user" && JSON.stringify(frame.message.content ?? "").includes(navigation.requestId)) navigation.finish("fell-through");
 		}
-		// Only a navigation sends a prompt with an internal id: a result after its wait ended (timeout, fall-through)
-		// is not a user turn. It lifts the fence of an unanswered one; the re-read shows the outcome.
+		// A maintenance pass takes the next command output as its report; the line still renders as a notice. Any
+		// other output is a background builtin (`/compact`, `/handoff` typed in the composer) that reports only when it
+		// is done, long after its acknowledgement: that line is the first moment the context usage can be read back.
+		if (frame.type === "command_output") {
+			const report = this.#maintenanceReport;
+			if (report !== null) {
+				this.#maintenanceReport = null;
+				report(typeof frame.text === "string" ? frame.text : "");
+			} else if (this.#live) void this.#refreshState();
+		}
+		// Only a navigation or a maintenance pass sends a prompt with an internal id: a result after its wait ended
+		// (timeout, fall-through) is not a user turn. It lifts a navigation's fence; the re-read shows the outcome.
 		if (frame.type === "prompt_result" && typeof frame.id === "string" && frame.id.startsWith(INTERNAL_ID_PREFIX)) {
 			if (this.#navigationFence?.id === frame.id) this.#navigationFence = null;
 			this.#requestReconcile();
@@ -1675,7 +1719,12 @@ export class RpcSession {
 				if (frame.toolName === "eval" && this.#live) void this.#refreshState();
 				return;
 			case "auto_compaction_end":
-				if (this.#live) void this.#rebuild();
+				// A pass changes the context size without a turn: `session_settled` never follows it, so the footer's
+				// context usage (read only from `get_state`) would keep the figure from before the pass.
+				if (this.#live) {
+					void this.#rebuild();
+					void this.#refreshState();
+				}
 				return;
 			case "session_info_update":
 			case "config_update":
