@@ -32,7 +32,7 @@ import { MAX_TERMINAL_COLS, MAX_TERMINAL_ROWS, MIN_TERMINAL_COLS, MIN_TERMINAL_R
 import type { TerminalGrid } from "./terminal-pane.ts";
 import type { TerminalFontSettings } from "../messages.ts";
 import { terminalAppearanceFrom } from "./terminal-theme.ts";
-import { isTerminalRedrawChord, terminalCopyChord, withoutInterrupt } from "./terminal-keys.ts";
+import { isTerminalWorkbenchChord, terminalCopyChord, withoutInterrupt } from "./terminal-keys.ts";
 import { OrderedTerminalSurface } from "./terminal-ordered-surface.ts";
 import { activateTerminalUnicode } from "./terminal-unicode.ts";
 import { terminalFileLinkProvider } from "./terminal-link-provider.ts";
@@ -168,9 +168,9 @@ export function createTerminalRenderer(host: HTMLElement, hooks: TerminalRendere
 			if (event.type === "keyup") consumedChord = false;
 			return false;
 		}
-		// The redraw chord is the workbench's: it must bubble (no stopPropagation), but the
-		// program never receives it.
-		if (event.type === "keydown" && isTerminalRedrawChord(event)) {
+		// A workbench chord (Redraw, the OMP Desk side bar) must bubble (no stopPropagation),
+		// but the program never receives it.
+		if (event.type === "keydown" && isTerminalWorkbenchChord(event)) {
 			consumedChord = true;
 			return false;
 		}

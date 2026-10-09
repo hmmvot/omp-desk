@@ -49,6 +49,7 @@ For how this works, see the [architecture](docs/architecture.md).
 - **Switch to Chat** and **Switch to Terminal** in the editor title change the view of the same session.
 - New sessions open in Chat. Choose Terminal for all new sessions with **OMP: Choose Default Session View…**.
 - Prefer the OMP terminal? Use OMP Desk as a host for native OMP terminals that survive reloads.
+- Sessions open in their own editor group on the left, and OMP Desk locks it. Files opened from Chat links, the Explorer or Quick Open go to a group on the right, so you read them next to the chat. Turn this off with `omp.chatColumn`; unlock the group from its title bar for a one-off change.
 
 ### Sessions view
 
@@ -119,13 +120,15 @@ All commands are in the Command Palette under **OMP**. The ones with default key
 
 | Key | Command | When |
 | --- | --- | --- |
+| `Ctrl+Shift+Q` | Focus the chat composer of the active or visible session; opens the OMP Desk side bar when no session is open | Anywhere, including the integrated terminal |
+| `Ctrl+Shift+M` | Toggle the file window: the first press moves all files of the group next to the chat into one window that stays on top (files from Chat links open there too); the next press brings them back next to the chat and closes it | Anywhere, including the integrated terminal (replaces VS Code's Problems key; a keymap extension that binds it in text editors wins there unless you add a user keybinding) |
 | `Ctrl+Enter` | Send composer prompt (`Enter` in the composer also sends) | Chat editor focused |
 | `Esc` | Stop current turn | Chat editor, turn running |
 | `Ctrl+Shift+L` | Focus chat composer | Chat editor |
 | `F5`, `Alt+R` | Retry the failed or aborted reply | Chat editor, no turn running |
 | `Ctrl+R` | Search prompt history | Chat editor |
 | `Ctrl+T` / `Ctrl+O` | Show/hide all thinking / expand/collapse all tool calls | Chat editor |
-| `Ctrl+Shift+M` / `Ctrl+Shift+U` | Cycle model / thinking level | Chat editor |
+| `Ctrl+Shift+U` | Cycle thinking level (**Cycle Model** has no default key) | Chat editor |
 | `Ctrl+Alt+Shift+R` | Redraw Terminal | Terminal editor |
 | `Alt+Shift+K` | Add Selection to Session | Text editor with a selection |
 
@@ -138,6 +141,7 @@ Other commands include **New Session**, **Add Folder**, **Pin Folder**, **Unpin 
 | `omp.toolCallDetail` | `overview` | `overview` groups routine tool calls; `detailed` shows each call. Applies to every Chat. |
 | `omp.desktopNotifications` | `true` | Windows desktop notifications when a session finishes or asks for input. |
 | `omp.showWorkspaceFolders` | `true` | Show the folders VS Code has open in this window in Sessions. When off, only pinned folders (and folders with a running session) are listed. |
+| `omp.chatColumn` | `true` | Open sessions in their own locked editor group on the left, with files on the right. When off, a session opens in the active editor group. |
 
 OMP's own settings, models, tools, skills and MCP servers live in OMP's files. Configure them through OMP.
 

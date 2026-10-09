@@ -89,12 +89,14 @@ export interface TerminalFileOpenApi {
  * Open `location` in a new, non-preview tab through the workbench's default-editor
  * resolution, so images, PDFs and other binaries get their viewer (`showTextDocument`
  * rejects those). The selection only applies to text editors; viewers ignore it.
+ * `viewColumn` targets an editor group by its column; without it VS Code picks the group.
  */
-export async function openTerminalFile(api: TerminalFileOpenApi, location: TerminalFileLocation): Promise<void> {
+export async function openTerminalFile(api: TerminalFileOpenApi, location: TerminalFileLocation, viewColumn?: number): Promise<void> {
 	const position = [location.line - 1, location.column - 1] as const;
 	await api.commands.executeCommand("vscode.open", api.Uri.file(location.path), {
 		preview: false,
 		selection: new api.Range(position[0], position[1], position[0], position[1]),
+		...viewColumn === undefined ? {} : { viewColumn },
 	});
 }
 

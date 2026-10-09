@@ -152,9 +152,11 @@ test("every file opens through vscode.open in a new tab; text keeps its line and
 		commands: { executeCommand: async (command, ...args) => { calls.push([command, ...args]); } } };
 	await openTerminalFile(api, { path: "D:\\repo\\docs\\tmp\\subagent-icon-options.png", line: 1, column: 1 });
 	await openTerminalFile(api, { path: "D:\\repo\\src\\a.ts", line: 12, column: 4 });
+	await openTerminalFile(api, { path: "D:\\repo\\src\\b.ts", line: 1, column: 1 }, 3);
 	assert.deepEqual(calls, [
 		["vscode.open", { fsPath: "D:\\repo\\docs\\tmp\\subagent-icon-options.png" }, { preview: false, selection: new Range(0, 0, 0, 0) }],
 		["vscode.open", { fsPath: "D:\\repo\\src\\a.ts" }, { preview: false, selection: new Range(11, 3, 11, 3) }],
+		["vscode.open", { fsPath: "D:\\repo\\src\\b.ts" }, { preview: false, selection: new Range(0, 0, 0, 0), viewColumn: 3 }],
 	]);
 });
 
