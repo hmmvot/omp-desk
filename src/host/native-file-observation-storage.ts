@@ -60,7 +60,7 @@ import {
 	describeStorageError,
 	inspectLocalRoot,
 	isPermittedAclPrincipal,
-	parseIcaclsAcl,
+	parseWindowsAcl,
 	restrictPrivateStorage,
 	verifyPrivateStorage,
 } from "./private-storage.ts";
@@ -216,14 +216,8 @@ export type NativeFileObservationStorageRestriction = PrivateStorageRestriction;
 
 export type NativeFileObservationAclReport = PrivateStorageAclReport;
 
-/**
- * The ACL listing and permitted-principal rules are shared private-storage
- * mechanics ({@link parseIcaclsAcl}, {@link isPermittedAclPrincipal} in
- * `./private-storage.ts`) rather than a second copy of security code; they are
- * re-exported here because that is where this feature's callers and the runtime
- * stager already import them from.
- */
-export { isPermittedAclPrincipal, parseIcaclsAcl };
+/** Shared SID-based access parsing and permitted-principal policy. */
+export { isPermittedAclPrincipal, parseWindowsAcl };
 
 const NATIVE_FILE_OBSERVATION_PROBE_TEXT = "omp-native-file-observation-probe";
 

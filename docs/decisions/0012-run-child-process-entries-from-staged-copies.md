@@ -5,6 +5,8 @@ date: 2026-09-24
 
 # ADR-0012: Run Child-Process Entries From Content-Addressed Copies Outside the Install Folder
 
+**Narrow amendment (2026-10-09):** accepted [ADR-0054](0054-verify-private-windows-storage-with-security-identifiers.md) replaces the Windows name-based owner/ACL reads and `dir /q` fallback with module-free .NET SID reads and UTF-8 diagnostics. The same-user, carrier, volume-root and staged-copy policies here remain operative; the older tool-specific observations below are historical.
+
 ## Context and Problem Statement
 
 Three packaged files are executed from inside the installed extension folder:
