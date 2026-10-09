@@ -80,4 +80,11 @@ describe("queueNotice", () => {
 		assert.match(queueNotice("edit", { ok: true, results: [result("removed", "a", { imagesDropped: true })] })?.text ?? "", /images could not be restored/);
 		assert.equal(queueNotice("edit", { ok: false, reason: "the session is not running" })?.text, "The queue was not changed: the session is not running.");
 	});
+
+	it("words Send now outcomes as promotions, never as removals", () => {
+		assert.equal(queueNotice("promote", { ok: true, results: [result("removed", "a")] }), null);
+		assert.equal(queueNotice("promote", { ok: true, results: [result("gone", "a")] })?.text, "1 queued message was already sent or is no longer queued, so it could not be sent now.");
+		assert.match(queueNotice("promote", { ok: true, results: [result("failed", "a")] })?.text ?? "", /could not be moved to steering and is still queued/);
+		assert.match(queueNotice("promote", { ok: true, results: [result("unknown", "a")] })?.text ?? "", /did not confirm whether 1 queued message was moved to steering/);
+	});
 });

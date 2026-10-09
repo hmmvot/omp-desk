@@ -108,12 +108,25 @@ export type RpcThinkingLevel = string;
 
 /** Child commands issued by the host; historical child reads never grant page filesystem authority. */
 export type RpcCommand =
-	| { type: "prompt"; message: string; images?: readonly RpcImage[]; streamingBehavior: "steer" | "followUp" }
+	/** Without `streamingBehavior`, OMP refuses a prompt that would start a turn while one runs (`AgentBusyError`). */
+	| { type: "prompt"; message: string; images?: readonly RpcImage[]; streamingBehavior?: "steer" | "followUp" }
 	| { type: "steer"; message: string; images?: readonly RpcImage[] }
 	| { type: "follow_up"; message: string; images?: readonly RpcImage[] }
 	/** Remove the first pending user message whose queue-chip text is `message` from one queue; the child answers `removed`. */
 	| { type: "remove_queued_message"; message: string; queue: "steering" | "followUp" }
+	/** Move the first matching follow-up to the end of the steering queue; the child answers `{promoted}` (OMP 18.8.5 `rpc-mode.ts`). */
+	| { type: "promote_queued_message"; message: string }
 	| { type: "abort" }
+	/** Withdraw the user's queued messages, then abort; the child answers `{steering, followUp, imagesDropped?, truncated?}`. */
+	| { type: "abort_and_restore_queue" }
+	/** Manual compaction; the child answers with its compaction result. */
+	| { type: "compact"; customInstructions?: string }
+	/** Next role/scoped model; the child answers `null` when there is nothing to cycle to. */
+	| { type: "cycle_model" }
+	/** Next thinking selector of the live model; `null` when the model has none. */
+	| { type: "cycle_thinking_level" }
+	/** Render the session to an HTML file; the child answers `{path}`. */
+	| { type: "export_html"; outputPath?: string }
 	| { type: "get_state" }
 	| { type: "get_session_stats" }
 	| { type: "set_subagent_subscription"; level: "progress" }
@@ -265,9 +278,14 @@ export function isRecoverableRpcFailure(code: string | null): boolean {
  * Builtins that change the session's identity, file or process. `new`/`resume`/`fork` have no text-mode
  * handler in rpc and would be sent to the model verbatim; `handoff`/`move` change identity or cwd inside the
  * process; `session` can delete the bound file (`/session delete`), bypassing the delete guards;
- * `quit`/`exit` would end the process from under the tab.
+ * `quit`/`exit` would end the process from under the tab. `branch` (alias `rewind`) and `tree` open TUI selectors;
+ * `/branch` is OMP's in-place rewind selector, not the RPC `branch` command that forks into a new file. The page runs
+ * `/rewind` and `/branch` as Chat's own in-place Rewind before anything is sent (ADR-0051), so only a `/branch` with
+ * arguments reaches this list. `omp-desk-navigate` is that Rewind's internal command; typed by hand it is refused,
+ * never forwarded.
  */
 export const DENIED_SLASH_COMMANDS: Readonly<Record<string, true>> = {
+	"omp-desk-navigate": true,
 	new: true,
 	fresh: true,
 	resume: true,
@@ -287,6 +305,15 @@ export const DENIED_SLASH_COMMANDS: Readonly<Record<string, true>> = {
 /** The one sentence shown when a denied builtin is typed. */
 export const SLASH_DENIED_SENTENCE =
 	"This command changes the session's identity or file, so it is not available in the chat. Use the Sessions panel instead.";
+
+/** `/branch` or `/rewind` typed with arguments: both are Chat's Rewind, which takes none (ADR-0051). */
+export const REWIND_ARGUMENTS_SENTENCE =
+	"Rewind takes no arguments: send /rewind or /branch alone, press Esc twice in an empty composer, or use a message's Rewind action.";
+
+/** The sentence for a denied builtin the page refuses; `command` is the canonical name `classifySlashInput` reported. */
+export function slashDeniedSentence(command: string): string {
+	return command === "branch" ? REWIND_ARGUMENTS_SENTENCE : SLASH_DENIED_SENTENCE;
+}
 
 export type SlashVerdict = { denied: false } | { denied: true; command: string };
 

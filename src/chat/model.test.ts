@@ -327,17 +327,29 @@ describe("command output and presentation", () => {
 		assert.deepEqual(model.ephemeral.at(-1)?.payload, { text: "line one\nline two" });
 	});
 
-	it("keeps one bounded status line from status and widget entries", () => {
+	it("keeps one bounded status line, and widgets as separate multi-line blocks at their placement", () => {
 		let model = reduceChatFrame(live(), { type: "ui_status", key: "a", text: "one" });
 		model = reduceChatFrame(model, { type: "ui_widget", key: "w", lines: ["two", "lines"] });
-		assert.equal(model.statusLine, "one · two lines");
+		model = reduceChatFrame(model, { type: "ui_widget", key: "below", lines: ["under"], placement: "belowEditor" });
+		assert.equal(model.statusLine, "one", "a widget is not folded into the status line");
+		assert.deepEqual([...model.widgets], [["w", { lines: ["two", "lines"], placement: "aboveEditor" }], ["below", { lines: ["under"], placement: "belowEditor" }]]);
 		model = reduceChatFrame(model, { type: "ui_status", key: "a", text: null });
-		assert.equal(model.statusLine, "two lines");
-		model = reduceChatFrame(model, { type: "ui_widget", key: "w", lines: null });
 		assert.equal(model.statusLine, null);
+		model = reduceChatFrame(model, { type: "ui_widget", key: "w", lines: null });
+		model = reduceChatFrame(model, { type: "ui_widget", key: "below", lines: ["", " "] });
+		assert.equal(model.widgets.size, 0, "a null or blank widget is removed");
 		for (let index = 0; index < 40; index += 1) model = reduceChatFrame(model, { type: "ui_status", key: `k${index}`, text: "x".repeat(500) });
 		assert.ok((model.statusLine ?? "").length <= 200);
 		assert.ok(model.statusEntries.size <= 16);
+	});
+
+	it("shows each extension notice once, a repeat with a new id", () => {
+		let model = reduceChatFrame(live(), { type: "ui_notify", level: "info", message: "Indexed 12 files" });
+		const first = model.extensionNotice;
+		assert.deepEqual({ level: first?.level, message: first?.message }, { level: "info", message: "Indexed 12 files" });
+		model = reduceChatFrame(model, { type: "ui_notify", level: "warning", message: "Indexed 12 files" });
+		assert.notEqual(model.extensionNotice?.id, first?.id);
+		assert.equal(model.extensionNotice?.level, "warning");
 	});
 
 	it("re-issues composer text with a new seq so the same text can repeat", () => {

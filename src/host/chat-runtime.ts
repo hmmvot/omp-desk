@@ -31,15 +31,16 @@ import type {
 	ChatStatePayload,
 } from "../chat/model.ts";
 import { createChatModel, sameEpoch, setChatPhase, snapshotOf } from "../chat/model.ts";
-import { splitChatSnapshot } from "../webview/chat-messages.ts";
-import type { ChatHostMessage, ChatWebviewMessage, ChatSubagentRequestMessage, ChatDisplayPreferences, ChatQueueRemoveMessage, ChatQueueResultEntry } from "../webview/chat-messages.ts";
+import { MAX_CHAT_TEXT_LENGTH, splitChatSnapshot } from "../webview/chat-messages.ts";
+import type { ChatHostMessage, ChatWebviewMessage, ChatSubagentRequestMessage, ChatDisplayPreferences, ChatQueueRemoveMessage, ChatQueueResultEntry, ChatAbortResultMessage, ChatNavigateResultMessage } from "../webview/chat-messages.ts";
 import { SUBAGENT_CHUNK_CHARS, type SubagentTranscriptPage } from "../chat/subagent-transcript.ts";
 import type { HistoryReader } from "./rpc/history-reader.ts";
-import { SLASH_DENIED_SENTENCE } from "./rpc/protocol.ts";
+import { SLASH_DENIED_SENTENCE, classifySlashInput } from "./rpc/protocol.ts";
 import type { RpcChannel } from "./rpc/protocol.ts";
 import { RpcSession, readViewOnlySnapshot } from "./rpc/session.ts";
-import type { RpcRecoveryReason, RpcSessionOptions, RpcSessionOutput, SendOutcome } from "./rpc/session.ts";
+import type { NavigateOutcome, NavigateRequest, RestoredQueue, RpcRecoveryReason, RpcSessionOptions, RpcSessionOutput, SendOutcome } from "./rpc/session.ts";
 import { nativeSettingsCommand, type SettingsKind } from "../chat/settings-command.ts";
+import { tuiCommandGuidance, tuiOnlyCommand, type BuiltinSlashEntry, type DeskSlashAction } from "./slash-registry.ts";
 
 /** One route that shows a conversation. */
 export interface ChatPage {
@@ -77,7 +78,9 @@ export type ChatRuntimeEvent =
 	/** The live command catalogue changed, independently of token/model updates. */
 	| { readonly type: "catalogue" }
 	/** The session healed its own connection (or the page asked it to); a bounded reason for the diagnostics log. */
-	| { readonly type: "recovery"; readonly reason: RpcRecoveryReason };
+	| { readonly type: "recovery"; readonly reason: RpcRecoveryReason }
+	/** An OMP extension reported an error (`notify` with `notifyType: "error"`); bounded, untrusted text. */
+	| { readonly type: "extension-error"; readonly message: string };
 
 /** What the caller supplies to attach a live conversation. */
 export interface LiveConversationInput {
@@ -110,10 +113,17 @@ export interface ChatRuntimeOptions {
 		stillCurrent: () => boolean,
 		tabId: string,
 	) => Promise<ChatDisplayPreferences["toolCallDetail"] | undefined>;
+	/** The installed OMP's builtin slash registry, or `null` while it is unknown (nothing is refused as TUI-only then). */
+	readonly slashRegistry?: () => readonly BuiltinSlashEntry[] | null;
+	/** Runs the Desk equivalent of a terminal-UI slash command. */
+	readonly runDeskAction?: (action: DeskSlashAction, tabId: string) => Promise<void>;
 }
 
-/** The outcome of one page command, for a route that answers its own request ledger. */
-export type ChatCommandOutcome = "accepted" | "refused" | "unconfirmed" | "ignored";
+/**
+ * The outcome of one page command, for a route that answers its own request ledger. `explained` is a refusal
+ * the asking route was already told about in one line, so it shows no second, generic refusal.
+ */
+export type ChatCommandOutcome = "accepted" | "refused" | "explained" | "unconfirmed" | "ignored";
 
 /** Bounded sentences the page is told when the host refuses or cannot confirm a command. */
 export const CHAT_NOT_LIVE_SENTENCE = "This conversation is not accepting input right now.";
@@ -393,6 +403,7 @@ export class ChatRuntime {
 		const readOnly = origin?.readOnlyReason?.() ?? null;
 		if (readOnly !== null && message.type !== "omp:chat-load-older" && message.type !== "omp:chat-subagent-read" && !resuming) {
 			if (message.type === "omp:chat-queue-remove") this.#failQueueRemove(message, origin);
+			if (message.type === "omp:chat-navigate") this.#answerNavigate(origin, message.requestId, { status: "refused", reason: "not-live" });
 			this.#tell(conversation, origin, readOnly);
 			return "refused";
 		}
@@ -426,8 +437,14 @@ export class ChatRuntime {
 		}
 		if (session === null) {
 			if (message.type === "omp:chat-queue-remove") this.#failQueueRemove(message, origin);
+			if (message.type === "omp:chat-navigate") this.#answerNavigate(origin, message.requestId, { status: "refused", reason: "not-live" });
 			this.#tell(conversation, origin, CHAT_NOT_LIVE_SENTENCE);
 			return "refused";
+		}
+		if (message.type === "omp:chat-prompt" || message.type === "omp:chat-steer" || message.type === "omp:chat-follow-up") {
+			// An identity-changing builtin keeps its own refusal (the session's); every other TUI-only builtin is answered here.
+			const command = classifySlashInput(message.text, session.model.commands).denied ? null : tuiOnlyCommand(message.text, this.#options.slashRegistry?.() ?? null, session.model.commands);
+			if (command !== null) return this.#serveTuiCommand(conversation, origin, `${tabId}:${message.requestId}`, command);
 		}
 		switch (message.type) {
 			case "omp:chat-prompt":
@@ -436,8 +453,13 @@ export class ChatRuntime {
 				return this.#settle(conversation, origin, await session.steer({ requestId: message.requestId, text: message.text, ...(message.images === undefined ? {} : { images: message.images }) }));
 			case "omp:chat-follow-up":
 				return this.#settle(conversation, origin, await session.followUp({ requestId: message.requestId, text: message.text, ...(message.images === undefined ? {} : { images: message.images }) }));
-			case "omp:chat-abort":
-				return this.#settle(conversation, origin, await session.abort(message.requestId));
+			case "omp:chat-abort": {
+				const epoch = session.epoch;
+				const outcome = await session.abortAndRestore(message.requestId);
+				if (conversation.disposed) return "ignored";
+				this.#answerAbort(origin, epoch, message.requestId, outcome.status === "accepted" ? outcome.restored : outcome.status);
+				return this.#settle(conversation, origin, outcome.status === "accepted" ? { status: "accepted", agentInvoked: null } : outcome);
+			}
 			case "omp:chat-queue-remove":
 				return await this.#serveQueueRemove(conversation, session, message, origin);
 			case "omp:chat-ui-response":
@@ -448,6 +470,10 @@ export class ChatRuntime {
 					return "refused";
 				}
 				return "accepted";
+			case "omp:chat-navigate": {
+				const outcome = await this.navigate(tabId, { requestId: message.requestId, kind: message.kind, targetId: message.targetId, expectedLeafId: message.expectedLeafId, summarize: message.summarize }, origin);
+				return outcome.status === "done" ? "accepted" : outcome.status;
+			}
 		}
 	}
 
@@ -557,6 +583,9 @@ export class ChatRuntime {
 			case "recovery":
 				this.#options.onEvent(tabId, { type: "recovery", reason: output.reason });
 				return;
+			case "extension-error":
+				this.#options.onEvent(tabId, { type: "extension-error", message: output.message });
+				return;
 			case "model": {
 				const baseline = conversation.baselinePending;
 				conversation.baselinePending = false;
@@ -657,7 +686,7 @@ export class ChatRuntime {
 			this.#failQueueRemove(message, origin);
 			return "ignored";
 		}
-		const outcome = await session.removeQueued(message.requestId, message.items);
+		const outcome = message.purpose === "promote" ? await session.promoteQueued(message.requestId, message.items) : await session.removeQueued(message.requestId, message.items);
 		if (conversation.disposed) return "ignored";
 		if (outcome.status === "refused") {
 			const settled = this.#settle(conversation, origin, { status: "refused", reason: outcome.reason });
@@ -692,6 +721,85 @@ export class ChatRuntime {
 			sent = origin.post(answer(stripped));
 		}
 		return sent === "sent";
+	}
+
+	/**
+	 * Run one in-place navigation (ADR-0051) for a page or the command palette. The answer goes to the page that
+	 * asked. A navigation without a page (the command palette) needs a writable route showing the tab — the same gate
+	 * a page's own request passes in `handleMessage` — and is told to every writable route, so the controlling
+	 * editor's composer receives a rewound prompt; read-only routes see the result in the transcript only.
+	 */
+	async navigate(tabId: string, request: NavigateRequest, origin: ChatPage | null): Promise<NavigateOutcome> {
+		const conversation = this.#conversations.get(tabId);
+		const session = conversation?.kind === "live" ? conversation.session : null;
+		const routes = origin === null ? this.#pageList(tabId).filter(page => (page.readOnlyReason?.() ?? null) === null) : [origin];
+		const outcome: NavigateOutcome = session === null || conversation === undefined
+			? { status: "refused", reason: "not-live" }
+			: routes.length === 0 ? { status: "refused", reason: "not-owner" } : await session.navigate(request);
+		if (conversation === undefined || conversation.disposed) return outcome;
+		for (const page of routes) this.#answerNavigate(page, request.requestId, outcome);
+		return outcome;
+	}
+
+	/** The outcome for one route; a draft the route cannot carry is resent without its images, flagged. */
+	#answerNavigate(origin: ChatPage | null, requestId: string, outcome: NavigateOutcome): void {
+		if (origin === null) return;
+		if (outcome.status !== "done") {
+			origin.post({ type: "omp:chat-navigate-result", requestId, status: outcome.status, ...(outcome.status === "refused" ? { reason: outcome.reason } : {}) });
+			return;
+		}
+		const base: ChatNavigateResultMessage = { type: "omp:chat-navigate-result", requestId, status: "done", kind: outcome.kind, summarized: outcome.summarized, ...(outcome.raced ? { raced: true as const } : {}) };
+		const draft = outcome.draft;
+		if (draft === null) { origin.post(base); return; }
+		const text = draft.text.slice(0, MAX_CHAT_TEXT_LENGTH);
+		const full: ChatNavigateResultMessage = { ...base, draft: { text, images: draft.images.slice(0, 8).map(image => ({ type: image.type, mimeType: image.mimeType, data: image.data })), unavailableImages: draft.unavailableImages + Math.max(0, draft.images.length - 8) } };
+		if (origin.post(full) !== "too-large") return;
+		origin.post({ ...base, draft: { text, images: [], unavailableImages: draft.unavailableImages + draft.images.length } });
+	}
+
+	/**
+	 * Tell the route that stopped the turn what `abort_and_restore_queue` handed back, so its composer can put the
+	 * withdrawn messages into the draft. An answer the route cannot carry is resent without images, then with an
+	 * oldest-first prefix of the texts, flagged either way: withdrawn text is never dropped silently.
+	 */
+	#answerAbort(origin: ChatPage | null, epoch: ChatEpoch, requestId: string, restored: RestoredQueue | "refused" | "unconfirmed"): void {
+		if (origin === null) return;
+		const base = { type: "omp:chat-abort-result" as const, epoch, requestId };
+		if (typeof restored === "string") { origin.post({ ...base, status: restored, entries: [] }); return; }
+		const answer = (entries: ChatAbortResultMessage["entries"], imagesDropped: boolean, truncated: boolean): ChatAbortResultMessage =>
+			({ ...base, status: "accepted", entries, ...(imagesDropped ? { imagesDropped: true as const } : {}), ...(truncated ? { truncated: true as const } : {}) });
+		const clipped = restored.entries.some(entry => entry.text.length > MAX_CHAT_TEXT_LENGTH);
+		const full = restored.entries.map(entry => ({ text: entry.text.slice(0, MAX_CHAT_TEXT_LENGTH), ...(entry.images.length > 0 ? { images: entry.images.map(image => ({ type: image.type, mimeType: image.mimeType, data: image.data })) } : {}) }));
+		if (origin.post(answer(full, restored.imagesDropped, restored.truncated || clipped)) !== "too-large") return;
+		const texts = full.map(entry => ({ text: entry.text }));
+		const imagesDropped = restored.imagesDropped || restored.entries.some(entry => entry.images.length > 0);
+		for (let count = texts.length; count >= 0; count = count === 0 ? -1 : Math.floor(count / 2)) {
+			if (origin.post(answer(texts.slice(0, count), imagesDropped, restored.truncated || clipped || count < texts.length)) !== "too-large") return;
+		}
+	}
+
+	/** A terminal-UI builtin typed into Chat: never sent to OMP. Its Desk equivalent runs when there is one. Once per request. */
+	#serveTuiCommand(conversation: Conversation, origin: ChatPage | null, key: string, command: string): Promise<ChatCommandOutcome> {
+		const previous = this.#settingsRequests.get(key);
+		if (previous) return previous;
+		const guidance = tuiCommandGuidance(command);
+		const operation = (async (): Promise<ChatCommandOutcome> => {
+			const run = this.#options.runDeskAction;
+			if (guidance.action === undefined || run === undefined) {
+				this.#tell(conversation, origin, guidance.action === undefined ? guidance.line : `/${guidance.command} works only in OMP's terminal UI and was not sent.`);
+				return "explained";
+			}
+			try { await run(guidance.action, conversation.tabId); }
+			catch {
+				this.#tell(conversation, origin, `/${guidance.command} was not sent, and its Desk equivalent could not be opened.`);
+				return "explained";
+			}
+			this.#tell(conversation, origin, guidance.line);
+			return "explained";
+		})();
+		this.#settingsRequests.set(key, operation);
+		if (this.#settingsRequests.size > 128) this.#settingsRequests.delete(this.#settingsRequests.keys().next().value!);
+		return operation;
 	}
 
 	#settle(conversation: Conversation, origin: ChatPage | null, outcome: SendOutcome): ChatCommandOutcome {

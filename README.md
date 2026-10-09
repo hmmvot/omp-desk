@@ -66,7 +66,17 @@ For how this works, see the [architecture](docs/architecture.md).
 ### Chat
 
 - Streaming replies, saved history, image attachments and `@file` mentions.
-- While a turn runs, `Enter` steers it and `Alt+Enter` queues a follow-up. Queued messages can be edited or removed.
+- While a turn runs, `Enter` steers it and `Alt+Enter` queues a follow-up. Queued messages can be edited, removed or sent now as steering. `Alt+↑` takes the newest one back into the draft.
+- **Stop** (or `Esc`) puts messages that were still queued back into the draft instead of running them.
+- `↑`/`↓` in an empty composer walk through your earlier prompts. `Ctrl+R` searches past prompts of every conversation.
+- **Retry** (`F5` or `Alt+R`) re-runs a failed or aborted reply.
+- Copy buttons on code blocks and on your own messages.
+- `Ctrl+T` shows or hides all thinking, and `Ctrl+O` expands or collapses all tool calls. Every Chat remembers both choices.
+- **Compact…** in the context popover, **Export as HTML** and **Share** are in the editor title menu. `Alt+click` the model or thinking chip to cycle it (`Ctrl+Shift+M`, `Ctrl+Shift+U`).
+- Terminal-only slash commands such as `/hotkeys` or `/settings` are never sent to the model. Chat opens the VS Code equivalent or says where the command works.
+- Status lines and notices from OMP extensions appear around the composer.
+- **Rewind** goes back to one of your prompts in place and puts it into the composer to edit and send again: `Esc` `Esc` in an empty composer, **Rewind to here** on a prompt, `/rewind` or `/branch`, or **OMP: Rewind Conversation…**. **Undo** returns to where you were, and a marker where the conversation split switches between your branches.
+- Rewind never restores files; it lists the files changed after that point. A chat started by an older OMP Desk must be restarted before it can rewind.
 - Slash commands suggest their arguments.
 - OMP's questions and approval requests appear as a card above the composer.
 - File paths in replies and tool rows are links. A click opens the file at that line.
@@ -110,10 +120,14 @@ All commands are in the Command Palette under **OMP**. The ones with default key
 | `Ctrl+Enter` | Send composer prompt (`Enter` in the composer also sends) | Chat editor focused |
 | `Esc` | Stop current turn | Chat editor, turn running |
 | `Ctrl+Shift+L` | Focus chat composer | Chat editor |
+| `F5`, `Alt+R` | Retry the failed or aborted reply | Chat editor, no turn running |
+| `Ctrl+R` | Search prompt history | Chat editor |
+| `Ctrl+T` / `Ctrl+O` | Show/hide all thinking / expand/collapse all tool calls | Chat editor |
+| `Ctrl+Shift+M` / `Ctrl+Shift+U` | Cycle model / thinking level | Chat editor |
 | `Ctrl+Alt+Shift+R` | Redraw Terminal | Terminal editor |
 | `Alt+Shift+K` | Add Selection to Session | Text editor with a selection |
 
-Other commands include **New Session**, **Add Folder**, **Pin Folder**, **Unpin Folder**, **Resume Session**, **Switch to Chat / Terminal**, **Open Stats**, **Log In to Provider…**, **Show Diagnostics** and the file-change observation commands.
+Other commands include **New Session**, **Add Folder**, **Pin Folder**, **Unpin Folder**, **Resume Session**, **Switch to Chat / Terminal**, **Compact Conversation…**, **Export Conversation as HTML…**, **Share Conversation Link…**, **Show Chat Keyboard Shortcuts**, **Open Stats**, **Log In to Provider…**, **Show Diagnostics** and the file-change observation commands.
 
 ## Settings
 

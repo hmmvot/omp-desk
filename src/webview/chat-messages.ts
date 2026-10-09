@@ -23,11 +23,13 @@
  * | `omp:chat-ui-request` / `omp:chat-ui-cancel` | one dialog, or the withdrawal of one |
  * | `omp:chat-subagent-chunk` | one chunk of a subagent transcript the page asked for |
  * | `omp:chat-display-preferences` | tool-call detail and accessibility settings |
- * | `omp:chat-queue-result` | the outcome of a queue removal the page requested |
- * | `omp:chat-send-result` | correlated text admission, refusal, or uncertain delivery; not a turn result |
+ * | `omp:chat-queue-result` | the outcome of a queue removal or promotion the page requested |
+ * | `omp:chat-send-result` | correlated text admission, refusal, uncertain delivery, or a terminal-UI command the host answered itself; not a turn result |
+ * | `omp:chat-abort-result` | what a Stop the page requested withdrew from OMP's queues, for its composer |
+ * | `omp:chat-navigate-result` | the outcome of an in-place Rewind/Undo/branch switch, and a rewound prompt for the composer |
  *
  * Page → host: `omp:chat-prompt`, `-steer`, `-follow-up`, `-abort`, `-ui-response`,
- * `-load-older`, `-resume`, `-reconnect`, `-restart`, `-subagent-read`, `-tool-detail`, `-queue-remove`.
+ * `-load-older`, `-resume`, `-reconnect`, `-restart`, `-subagent-read`, `-tool-detail`, `-queue-remove`, `-navigate`.
  * Every mutation carries a page-minted `requestId`, which the host uses as the
  * exactly-once key (the rpc command id is `vsc:<requestId>`).
  */
@@ -36,10 +38,12 @@
 import type { ImageContent } from "@oh-my-pi/pi-wire";
 import { parseChatMessage, parseChatEntry, type AssistantMessage, type ChatEntry } from "../chat/messages.ts";
 import { MAX_AGENT_IDENTITIES, parseAgentRoster, parseAgentActivity, parseSubagentFrame } from "../chat/agents.ts";
+import { parseLiveAgents } from "../chat/agent-liveness.ts";
 import { parseNativeEventFrame, type MaintenanceState, type RetryState } from "../chat/events.ts";
 import { parseTodoPhases } from "../chat/todos.ts";
 import type { EphemeralItem } from "../chat/projection.ts";
-import { MAX_EPHEMERAL_ITEMS, MAX_QUEUED_ITEMS, MAX_QUEUED_TEXT_LENGTH, MAX_QUEUED_TOTAL_BYTES, normalizeQueuedMessages, queuedJsonBytes } from "../chat/model.ts";
+import { MAX_EPHEMERAL_ITEMS, MAX_QUEUED_ITEMS, MAX_QUEUED_TEXT_LENGTH, MAX_QUEUED_TOTAL_BYTES, MAX_WIDGET_LINES, normalizeQueuedMessages, queuedJsonBytes } from "../chat/model.ts";
+import { NAVIGATE_REFUSAL_SENTENCES, parseBranchPoints, type NavigateRefusal, type NavigationKind } from "../chat/rewind.ts";
 import { SUBAGENT_CHUNK_CHARS } from "../chat/subagent-transcript.ts";
 import type {
 	ActiveTool,
@@ -66,6 +70,8 @@ import { isRecord } from "../guards.ts";
 
 /** Longest prompt/steer/follow-up text one message carries. */
 export const MAX_CHAT_TEXT_LENGTH = 200_000;
+/** Messages one Stop hands back to the composer (the host's own bound on `abort_and_restore_queue`). */
+export const MAX_RESTORED_MESSAGES = 64;
 /** Images one prompt may carry. */
 export const MAX_CHAT_IMAGES = 8;
 /** Base64 characters of one image (512 KiB raw). */
@@ -92,7 +98,6 @@ const MAX_ASK_QUESTIONS = 64;
 const MAX_ACTIVE_TOOLS = 256;
 const MAX_PENDING_ROWS = 1_024;
 const MAX_COMMANDS = 500;
-const MAX_WIDGET_LINES = 100;
 
 /** Mutation ids: 128 random bits as lowercase hex, the bridge's own token grammar. */
 const REQUEST_ID = /^[0-9a-f]{32}$/;
@@ -173,6 +178,10 @@ export interface ChatSubagentChunkMessage {
 export interface ChatDisplayPreferences {
 	toolCallDetail: "overview" | "detailed";
 	accessibilitySupport: boolean;
+	/** The remembered thinking default (the TUI's `Ctrl+T`); absent = closed. */
+	thinkingExpanded?: boolean;
+	/** The remembered tool-call default (the TUI's `Ctrl+O`); absent = collapsed. */
+	toolsExpanded?: boolean;
 }
 export interface ChatDisplayPreferencesMessage extends ChatDisplayPreferences {
 	type: "omp:chat-display-preferences";
@@ -192,21 +201,24 @@ export interface ChatQueuedRef {
 }
 
 /**
- * Take pending messages out of OMP's queues. `cancel` discards what is removed; `edit` hands it back to the
- * page that asked, which puts it in its composer. Several items are removed in order, one by one.
+ * Act on pending messages in OMP's queues. `cancel` discards what is removed; `edit` hands it back to the
+ * page that asked, which puts it in its composer; `promote` turns a queued follow-up into steering, delivered
+ * before the agent's next step. Several items are handled in order, one by one.
  */
 export interface ChatQueueRemoveMessage {
 	type: "omp:chat-queue-remove";
 	requestId: string;
 	epoch: ChatEpoch;
-	purpose: "cancel" | "edit";
+	purpose: ChatQueuePurpose;
 	items: ChatQueuedRef[];
 }
 
+export type ChatQueuePurpose = "cancel" | "edit" | "promote";
+
 /**
- * What happened to one requested item: `removed` (taken out of the queue; its images when `purpose` is `edit`),
- * `gone` (not in the queue when the command ran: already delivered, or removed elsewhere), `unknown` (no confirmed
- * answer) or `failed` (still queued).
+ * What happened to one requested item: `removed` (taken out of the queue — or, for `promote`, moved to steering;
+ * its images when `purpose` is `edit`), `gone` (not in the queue when the command ran: already delivered, or
+ * removed elsewhere), `unknown` (no confirmed answer) or `failed` (still queued).
  */
 export type ChatQueueResultEntry = { status: "removed"; images?: ChatImageWire[]; imagesDropped?: true } | { status: "gone" | "unknown" | "failed" };
 
@@ -221,16 +233,57 @@ export interface ChatQueueResultMessage {
 	type: "omp:chat-queue-result";
 	epoch: ChatEpoch;
 	requestId: string;
-	purpose: "cancel" | "edit";
+	purpose: ChatQueuePurpose;
 	results: ChatQueueResultEntry[];
 }
 
-/** Correlated admission result, not the eventual prompt_result at a turn's yield. */
+/**
+ * Correlated admission result, not the eventual prompt_result at a turn's yield. `explained` is a terminal-UI
+ * command the host did not send to OMP: it answered it in the transcript, and ran its Desk equivalent if any.
+ */
 export interface ChatSendResultMessage {
 	type: "omp:chat-send-result";
 	epoch: ChatEpoch;
 	requestId: string;
+	status: "accepted" | "refused" | "unconfirmed" | "explained";
+}
+
+/** One message a Stop withdrew from OMP's queues, as the composer takes it back. */
+export interface ChatRestoredMessage {
+	text: string;
+	images?: ChatImageWire[];
+}
+
+/**
+ * The answer to one `omp:chat-abort`, sent to the page that asked: what `abort_and_restore_queue` took out of the
+ * steering and follow-up queues (oldest first), for that page's composer. `imagesDropped`/`truncated` say some
+ * images, or the newest texts, could not be carried; `refused`/`unconfirmed` withdrew nothing the page can know of.
+ */
+export interface ChatAbortResultMessage {
+	type: "omp:chat-abort-result";
+	epoch: ChatEpoch;
+	requestId: string;
 	status: "accepted" | "refused" | "unconfirmed";
+	entries: ChatRestoredMessage[];
+	imagesDropped?: true;
+	truncated?: true;
+}
+
+/**
+ * The answer to one in-place navigation (ADR-0051), sent to the page that asked, or to every page of the tab for a
+ * command-palette Rewind. `draft` is the rewound prompt for the composer; `unavailableImages` counts images that could
+ * not be carried (an unresolved stored image, or a route that could not take the bytes).
+ */
+export interface ChatNavigateResultMessage {
+	type: "omp:chat-navigate-result";
+	requestId: string;
+	status: "done" | "refused" | "unconfirmed";
+	reason?: NavigateRefusal;
+	kind?: NavigationKind;
+	summarized?: boolean;
+	/** The session moved while OMP ran the navigation; the move happened, but not exactly from the point the page saw. */
+	raced?: true;
+	draft?: { text: string; images: ChatImageWire[]; unavailableImages: number };
 }
 
 export type ChatHostMessage =
@@ -245,6 +298,8 @@ export type ChatHostMessage =
 	| ChatSubagentChunkMessage
 	| ChatQueueResultMessage
 	| ChatSendResultMessage
+	| ChatAbortResultMessage
+	| ChatNavigateResultMessage
 	| ChatUiCancelMessage;
 
 /** One image of a prompt, as OMP's `prompt`/`steer`/`follow_up` accept it. */
@@ -318,6 +373,16 @@ export interface ChatRestartMessage {
 	epoch: ChatEpoch;
 }
 
+/** Rewind, Undo or switch branches in place; `expectedLeafId` is the leaf the page saw (compare-and-swap). */
+export interface ChatNavigateMessage {
+	type: "omp:chat-navigate";
+	requestId: string;
+	kind: NavigationKind;
+	targetId: string;
+	expectedLeafId: string | null;
+	summarize: boolean;
+}
+
 export type ChatWebviewMessage =
 	| ChatToolDetailMessage
 	| ChatPromptMessage
@@ -330,6 +395,7 @@ export type ChatWebviewMessage =
 	| ChatResumeMessage
 	| ChatReconnectMessage
 	| ChatRestartMessage
+	| ChatNavigateMessage
 	| ChatQueueRemoveMessage;
 
 // Small guards
@@ -661,6 +727,10 @@ export function parseChatEventFrame(value: unknown): ChatEventFrame | null {
 			const agents = parseAgentRoster(value.agents);
 			return agents === null || (value.availability !== "available" && value.availability !== "unavailable") ? null : { type: "agents_snapshot", agents, availability: value.availability };
 		}
+		case "agents_liveness": {
+			const agents = parseLiveAgents(value.agents);
+			return agents === null ? null : { type: "agents_liveness", agents };
+		}
 		case "config_update": {
 			const frame: ChatEventFrame = { type: "config_update" };
 			if (value.model !== undefined) {
@@ -691,15 +761,19 @@ export function parseChatEventFrame(value: unknown): ChatEventFrame | null {
 			return { type: "ui_status", key: value.key, text: value.text };
 		case "ui_widget": {
 			if (!isName(value.key, MAX_LABEL_LENGTH)) return null;
-			if (value.lines === null) return { type: "ui_widget", key: value.key, lines: null };
+			if (value.placement !== undefined && value.placement !== "aboveEditor" && value.placement !== "belowEditor") return null;
+			const placement: { placement?: "aboveEditor" | "belowEditor" } = value.placement === undefined ? {} : { placement: value.placement };
+			if (value.lines === null) return { type: "ui_widget", key: value.key, lines: null, ...placement };
 			if (!Array.isArray(value.lines) || value.lines.length > MAX_WIDGET_LINES) return null;
 			const lines: string[] = [];
 			for (const line of value.lines) {
 				if (!isText(line, 2_000)) return null;
 				lines.push(line);
 			}
-			return { type: "ui_widget", key: value.key, lines };
+			return { type: "ui_widget", key: value.key, lines, ...placement };
 		}
+		case "ui_notify":
+			return (value.level === "info" || value.level === "warning") && isText(value.message, 2_000) ? { type: "ui_notify", level: value.level, message: value.message } : null;
 		case "ui_editor_text":
 			return isText(value.text, MAX_CHAT_UI_VALUE_LENGTH) ? { type: "ui_editor_text", text: value.text } : null;
 		default:
@@ -825,6 +899,7 @@ function parseSnapshotHead(value: unknown): ChatSnapshotHead | null {
 		header,
 		olderCount: value.olderCount,
 		leafId: value.leafId,
+		branches: parseBranchPoints(value.branches),
 		state,
 		pending,
 		stream,
@@ -860,13 +935,52 @@ export function parseChatHostMessage(value: unknown): ChatHostMessage | null {
 	switch (value.type) {
 		case "omp:chat-send-result": {
 			const epoch = parseChatEpoch(value.epoch);
-			if (epoch === null || !isChatRequestId(value.requestId) || (value.status !== "accepted" && value.status !== "refused" && value.status !== "unconfirmed")) return null;
+			if (epoch === null || !isChatRequestId(value.requestId) || (value.status !== "accepted" && value.status !== "refused" && value.status !== "unconfirmed" && value.status !== "explained")) return null;
 			return { type: value.type, epoch, requestId: value.requestId, status: value.status };
+		}
+		case "omp:chat-abort-result": {
+			const epoch = parseChatEpoch(value.epoch);
+			if (epoch === null || !isChatRequestId(value.requestId) || (value.status !== "accepted" && value.status !== "refused" && value.status !== "unconfirmed")) return null;
+			if (!Array.isArray(value.entries) || value.entries.length > MAX_RESTORED_MESSAGES || (value.status !== "accepted" && value.entries.length > 0)) return null;
+			const entries: ChatRestoredMessage[] = [];
+			let imagesDropped = value.imagesDropped === true;
+			for (const raw of value.entries) {
+				if (!isRecord(raw) || typeof raw.text !== "string" || raw.text.length > MAX_CHAT_TEXT_LENGTH) return null;
+				const images = parseRestoredImages(raw.images, false);
+				if (images.imagesDropped) imagesDropped = true;
+				entries.push(images.images === undefined ? { text: raw.text } : { text: raw.text, images: images.images });
+			}
+			return { type: value.type, epoch, requestId: value.requestId, status: value.status, entries, ...(imagesDropped ? { imagesDropped: true as const } : {}), ...(value.truncated === true ? { truncated: true as const } : {}) };
+		}
+		case "omp:chat-navigate-result": {
+			if (!isChatRequestId(value.requestId) || (value.status !== "done" && value.status !== "refused" && value.status !== "unconfirmed")) return null;
+			const message: ChatNavigateResultMessage = { type: value.type, requestId: value.requestId, status: value.status };
+			if (value.status === "refused") {
+				if (typeof value.reason !== "string" || !Object.hasOwn(NAVIGATE_REFUSAL_SENTENCES, value.reason) || value.reason === "unconfirmed") return null;
+				message.reason = value.reason as NavigateRefusal;
+			}
+			if (value.status !== "done") return message;
+			if (value.kind !== "rewind" && value.kind !== "undo" && value.kind !== "switch") return null;
+			message.kind = value.kind;
+			message.summarized = value.summarized === true;
+			if (value.raced === true) message.raced = true;
+			if (value.draft !== undefined) {
+				const draft = value.draft;
+				if (!isRecord(draft) || typeof draft.text !== "string" || draft.text.length > MAX_CHAT_TEXT_LENGTH || !isCount(draft.unavailableImages)) return null;
+				const images = parseRestoredImages(draft.images, false);
+				message.draft = { text: draft.text, images: images.images ?? [], unavailableImages: draft.unavailableImages + (images.imagesDropped ? 1 : 0) };
+			}
+			return message;
 		}
 		case "omp:chat-display-preferences": {
 			const epoch = parseChatEpoch(value.epoch);
 			if (epoch === null || (value.toolCallDetail !== "overview" && value.toolCallDetail !== "detailed") || typeof value.accessibilitySupport !== "boolean") return null;
-			return { type: value.type, epoch, toolCallDetail: value.toolCallDetail, accessibilitySupport: value.accessibilitySupport };
+			if ((value.thinkingExpanded !== undefined && typeof value.thinkingExpanded !== "boolean") || (value.toolsExpanded !== undefined && typeof value.toolsExpanded !== "boolean")) return null;
+			return {
+				type: value.type, epoch, toolCallDetail: value.toolCallDetail, accessibilitySupport: value.accessibilitySupport,
+				...(value.thinkingExpanded === undefined ? {} : { thinkingExpanded: value.thinkingExpanded }),
+				...(value.toolsExpanded === undefined ? {} : { toolsExpanded: value.toolsExpanded }),
+			};
 		}
 		case "omp:chat-subagent-chunk": {
 			const epoch = parseChatEpoch(value.epoch);
@@ -875,7 +989,7 @@ export function parseChatHostMessage(value: unknown): ChatHostMessage | null {
 		}
 		case "omp:chat-queue-result": {
 			const epoch = parseChatEpoch(value.epoch);
-			if (epoch === null || !isChatRequestId(value.requestId) || (value.purpose !== "cancel" && value.purpose !== "edit")) return null;
+			if (epoch === null || !isChatRequestId(value.requestId) || !isQueuePurpose(value.purpose)) return null;
 			if (!Array.isArray(value.results) || value.results.length === 0 || value.results.length > 2 * MAX_QUEUED_ITEMS) return null;
 			const results: ChatQueueResultEntry[] = [];
 			for (const raw of value.results) {
@@ -1001,6 +1115,10 @@ function parseQueuedRefs(value: unknown): ChatQueuedRef[] | null {
 	return refs;
 }
 
+function isQueuePurpose(value: unknown): value is ChatQueuePurpose {
+	return value === "cancel" || value === "edit" || value === "promote";
+}
+
 /**
  * Validate one untrusted page→host `omp:chat-*` payload. The host parses with this before it
  * touches the rpc channel, so a malformed or oversized command never becomes a stdin line.
@@ -1034,6 +1152,11 @@ export function parseChatWebviewMessage(value: unknown): ChatWebviewMessage | nu
 		}
 		case "omp:chat-abort":
 			return { type: "omp:chat-abort", requestId };
+		case "omp:chat-navigate": {
+			const { kind, targetId, expectedLeafId, summarize } = value;
+			if ((kind !== "rewind" && kind !== "undo" && kind !== "switch") || !isName(targetId, MAX_ID_LENGTH) || (expectedLeafId !== null && !isName(expectedLeafId, MAX_ID_LENGTH)) || typeof summarize !== "boolean") return null;
+			return { type: "omp:chat-navigate", requestId, kind, targetId, expectedLeafId, summarize };
+		}
 		case "omp:chat-ui-response": {
 			const response = value.response;
 			if (!isRecord(response) || !isName(response.id, MAX_ID_LENGTH)) return null;
@@ -1075,7 +1198,7 @@ export function parseChatWebviewMessage(value: unknown): ChatWebviewMessage | nu
 		}
 		case "omp:chat-queue-remove": {
 			const epoch = parseChatEpoch(value.epoch);
-			if (epoch === null || (value.purpose !== "cancel" && value.purpose !== "edit")) return null;
+			if (epoch === null || !isQueuePurpose(value.purpose)) return null;
 			const items = parseQueuedRefs(value.items);
 			return items === null ? null : { type: "omp:chat-queue-remove", requestId, epoch, purpose: value.purpose, items };
 		}

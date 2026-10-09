@@ -706,11 +706,25 @@ describe("draft messages", () => {
 
 describe("composer command boundary", () => {
 	it("relays only actions the composer can execute", () => {
-		for (const action of ["send-prompt", "stop-turn", "focus-composer"]) {
+		for (const action of ["send-prompt", "stop-turn", "focus-composer", "retry-turn"]) {
 			assert.deepEqual(parseGuestHostMessage({ type: "omp:webview-action", action }), { type: "omp:webview-action", action });
 		}
 		assert.equal(parseGuestHostMessage({ type: "omp:webview-action", action: "approve" }), null);
 		assert.equal(parseGuestHostMessage({ type: "omp:webview-action" }), null);
+	});
+
+	it("relays a recalled prompt whole, newlines included, and nothing empty or oversized", () => {
+		const text = "first line\nsecond line";
+		assert.deepEqual(parseGuestHostMessage({ type: "omp:recall-prompt", text }), { type: "omp:recall-prompt", text });
+		for (const bad of ["", "  \n ", "x".repeat(200_001), 7, null]) assert.equal(parseGuestHostMessage({ type: "omp:recall-prompt", text: bad }), null);
+	});
+
+	it("lets the page name only the fixed Chat actions the host asks consent for", () => {
+		for (const command of ["compact", "cycle-model", "cycle-thinking", "export-html", "share"]) {
+			assert.deepEqual(parseGuestWebviewMessage({ type: "omp:chat-command", command }), { type: "omp:chat-command", command });
+		}
+		assert.equal(parseGuestWebviewMessage({ type: "omp:chat-command", command: "bash" }), null);
+		assert.equal(parseGuestWebviewMessage({ type: "omp:chat-command", command: "share", path: "C:/x.html" }), null, "the page cannot choose where or what");
 	});
 });
 

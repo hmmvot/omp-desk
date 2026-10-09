@@ -381,6 +381,74 @@
         "icon": "$(edit)"
       },
       {
+        "command": "omp.retryTurn",
+        "enablement": "omp.sessionMode == chat",
+        "title": "Retry Last Turn",
+        "category": "OMP",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "omp.searchPromptHistory",
+        "enablement": "omp.sessionMode == chat",
+        "title": "Search Prompt History…",
+        "category": "OMP",
+        "icon": "$(history)"
+      },
+      {
+        "command": "omp.toggleThinking",
+        "enablement": "omp.sessionMode == chat",
+        "title": "Show/Hide All Thinking",
+        "category": "OMP"
+      },
+      {
+        "command": "omp.toggleToolOutput",
+        "enablement": "omp.sessionMode == chat",
+        "title": "Expand/Collapse All Tool Calls",
+        "category": "OMP"
+      },
+      {
+        "command": "omp.compactConversation",
+        "enablement": "omp.sessionMode == chat",
+        "title": "Compact Conversation…",
+        "category": "OMP"
+      },
+      {
+        "command": "omp.cycleModel",
+        "enablement": "omp.sessionMode == chat",
+        "title": "Cycle Model",
+        "category": "OMP"
+      },
+      {
+        "command": "omp.cycleThinkingLevel",
+        "enablement": "omp.sessionMode == chat",
+        "title": "Cycle Thinking Level",
+        "category": "OMP"
+      },
+      {
+        "command": "omp.exportConversationHtml",
+        "enablement": "omp.sessionMode == chat",
+        "title": "Export Conversation as HTML…",
+        "category": "OMP"
+      },
+      {
+        "command": "omp.shareConversation",
+        "enablement": "omp.sessionMode == chat",
+        "title": "Share Conversation Link…",
+        "category": "OMP"
+      },
+      {
+        "command": "omp.showChatKeyboardShortcuts",
+        "title": "Show Chat Keyboard Shortcuts",
+        "category": "OMP"
+      },
+      {
+        "command": "omp.rewindConversation",
+        "enablement": "omp.sessionMode == chat",
+        "title": "Rewind Conversation…",
+        "category": "OMP",
+        "icon": "$(discard)"
+      },
+      {
         "command": "omp.openTerminal",
         "title": "Open Terminal in Folder",
         "category": "OMP"
@@ -521,6 +589,51 @@
           "command": "omp.redrawTerminal",
           "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == terminal",
           "group": "1_terminal@2"
+        },
+        {
+          "command": "omp.retryTurn",
+          "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat",
+          "group": "2_chat@1"
+        },
+        {
+          "command": "omp.searchPromptHistory",
+          "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat",
+          "group": "2_chat@2"
+        },
+        {
+          "command": "omp.toggleThinking",
+          "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat",
+          "group": "2_chat@3"
+        },
+        {
+          "command": "omp.toggleToolOutput",
+          "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat",
+          "group": "2_chat@4"
+        },
+        {
+          "command": "omp.compactConversation",
+          "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat",
+          "group": "3_session@1"
+        },
+        {
+          "command": "omp.exportConversationHtml",
+          "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat",
+          "group": "3_session@2"
+        },
+        {
+          "command": "omp.shareConversation",
+          "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat",
+          "group": "3_session@3"
+        },
+        {
+          "command": "omp.showChatKeyboardShortcuts",
+          "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat",
+          "group": "4_help@1"
+        },
+        {
+          "command": "omp.rewindConversation",
+          "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat",
+          "group": "2_rewind@1"
         }
       ],
       "view/title": [
@@ -724,6 +837,41 @@
         "command": "omp.focusComposer",
         "key": "ctrl+shift+l",
         "mac": "cmd+shift+l",
+        "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat"
+      },
+      {
+        "command": "omp.retryTurn",
+        "key": "f5",
+        "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat && !omp.streaming"
+      },
+      {
+        "command": "omp.retryTurn",
+        "key": "alt+r",
+        "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat && !omp.streaming"
+      },
+      {
+        "command": "omp.searchPromptHistory",
+        "key": "ctrl+r",
+        "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat"
+      },
+      {
+        "command": "omp.toggleThinking",
+        "key": "ctrl+t",
+        "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat"
+      },
+      {
+        "command": "omp.toggleToolOutput",
+        "key": "ctrl+o",
+        "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat"
+      },
+      {
+        "command": "omp.cycleModel",
+        "key": "ctrl+shift+m",
+        "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat"
+      },
+      {
+        "command": "omp.cycleThinkingLevel",
+        "key": "ctrl+shift+u",
         "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat"
       },
       {

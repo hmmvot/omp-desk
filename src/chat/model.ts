@@ -15,10 +15,12 @@
 import type { ImageContent } from "@oh-my-pi/pi-wire";
 import { assistantPersistenceKey, entryMessage, isInterruptedToolResult, type AssistantMessage, type ChatEntry, type ChatMessage, type RetryErrorUpdate } from "./messages.ts";
 import { latestTodoFromEntries, parseTodoPhases, todoPhasesFromEntry, todoPhasesFromToolResult, type TodoProjection } from "./todos.ts";
-import { reduceAgentFrame, reduceAgentRoster, taskSpawnIdentity, type AgentActivity, type AgentIdentities, type AgentIdentity, type RunningAgent, type SpawnLookup, type SubagentFrame } from "./agents.ts";
+import { reduceAgentFrame, reduceAgentLiveness, reduceAgentRoster, taskSpawnIdentity, withRegistryRows, type AgentActivity, type AgentIdentities, type AgentIdentity, type RunningAgent, type SpawnLookup, type SubagentFrame } from "./agents.ts";
+import type { LiveAgent } from "./agent-liveness.ts";
 import type { MaintenanceState, NativeEventFrame, RetryState } from "./events.ts";
 import { positionTranscript, type EphemeralItem, type TranscriptPosition } from "./projection.ts";
 import { transcriptWindow, type TranscriptWindow } from "../webview/lib/transcript-window.ts";
+import type { BranchPoint } from "./rewind.ts";
 
 // Vocabulary
 
@@ -94,6 +96,19 @@ export interface ActiveTool {
 /** Latest host-owned command refusal/unknown outcome; no notice history. */
 export interface CommandFeedback {
 	id: number;
+	message: string;
+}
+
+/** An extension's `setWidget` block: its lines, shown where the extension placed it relative to the composer. */
+export interface ChatWidget {
+	lines: readonly string[];
+	placement: "aboveEditor" | "belowEditor";
+}
+
+/** The latest informational `notify` of an OMP extension; `id` changes per notice so a repeat shows again. */
+export interface ExtensionNotice {
+	id: number;
+	level: "info" | "warning";
 	message: string;
 }
 
@@ -216,6 +231,8 @@ export interface ChatModel {
 	/** Rendering rows still on disk above the loaded window. */
 	olderCount: number;
 	leafId: string | null;
+	/** Off-path branches of the active path (ADR-0051), replaced with every authoritative rewrite or snapshot. */
+	branches: readonly BranchPoint[];
 	state: ChatLiteState | null;
 	/** The assistant message being streamed (`message_start`/`message_update`), cleared by its `message_end`. */
 	stream: AssistantMessage | null;
@@ -256,9 +273,12 @@ export interface ChatModel {
 	/** Bounded live-only notifications positioned at their arrival point in the transcript. */
 	ephemeral: readonly EphemeralItem[];
 	commandFeedback: CommandFeedback | null;
-	/** One bounded text line from `setStatus`/`setWidget`, or null. */
+	/** One bounded text line from `setStatus`, or null. */
 	statusLine: string | null;
 	statusEntries: ReadonlyMap<string, string>;
+	/** `setWidget` blocks by key, in arrival order. */
+	widgets: ReadonlyMap<string, ChatWidget>;
+	extensionNotice: ExtensionNotice | null;
 	/** `set_editor_text`: the composer prefill request; `seq` changes per request so the same text can repeat. */
 	pendingEditorText: { text: string; seq: number } | null;
 	commands: readonly ChatSlashCommand[];
@@ -276,6 +296,7 @@ export const MAX_COMMAND_OUTPUTS = 50;
 export const MAX_COMMANDS = 500;
 export const MAX_STATUS_KEYS = 16;
 export const MAX_STATUS_TEXT = 200;
+export const MAX_WIDGET_LINES = 100;
 export const MAX_COMMAND_FEEDBACK_TEXT = 2_000;
 export const MAX_COMMAND_OUTPUT_TEXT = 16_000;
 
@@ -328,12 +349,16 @@ export type ChatEventFrame = SubagentFrame | NativeEventFrame
 	| { type: "available_commands_update"; commands: readonly ChatSlashCommand[] }
 	| { type: "command_output"; text: string }
 	| { type: "ui_status"; key: string; text: string | null }
-	| { type: "ui_widget"; key: string; lines: readonly string[] | null }
+	| { type: "ui_widget"; key: string; lines: readonly string[] | null; placement?: "aboveEditor" | "belowEditor" }
+	/** An extension's informational `notify` (errors go to the host's error message instead). */
+	| { type: "ui_notify"; level: "info" | "warning"; message: string }
 	| { type: "ui_editor_text"; text: string }
 	| { type: "queue_update"; queuedMessageCount: number; queuedMessages: ChatQueuedMessages }
 	/** Host-normalized `get_state` refresh: replaces the footer state. */
 	| { type: "state_update"; state: ChatLiteState; todoSeed: unknown }
-	| { type: "agents_snapshot"; agents: readonly RunningAgent[]; availability: "available" | "unavailable" };
+	| { type: "agents_snapshot"; agents: readonly RunningAgent[]; availability: "available" | "unavailable" }
+	/** The host-accepted Desk liveness signal (ADR-0053): every subagent the OMP process observes working. */
+	| { type: "agents_liveness"; agents: readonly LiveAgent[] };
 
 /** `omp:chat-state`. */
 export interface ChatStatePayload {
@@ -363,6 +388,8 @@ export interface ChatSnapshotPayload {
 	entries: readonly ChatEntry[];
 	olderCount: number;
 	leafId: string | null;
+	/** Off-path branches of the active path; absent means none known. */
+	branches?: readonly BranchPoint[];
 	state: ChatLiteState | null;
 	pending: readonly ChatPendingRowPayload[];
 	/** The in-flight assistant message, if any. */
@@ -415,6 +442,7 @@ const NO_UI: readonly ChatUiRequest[] = Object.freeze([]);
 const EMPTY_PENDING: ReadonlyMap<string, PendingRow> = new Map();
 const EMPTY_TOOLS: ReadonlyMap<string, ActiveTool> = new Map();
 const EMPTY_STATUS: ReadonlyMap<string, string> = new Map();
+const NO_WIDGETS: ReadonlyMap<string, ChatWidget> = new Map();
 
 export function createChatModel(): ChatModel {
 	return {
@@ -428,6 +456,7 @@ export function createChatModel(): ChatModel {
 		pending: EMPTY_PENDING,
 		olderCount: 0,
 		leafId: null,
+		branches: [],
 		state: null,
 		stream: null,
 		streamId: null,
@@ -460,6 +489,8 @@ export function createChatModel(): ChatModel {
 		commandFeedback: null,
 		statusLine: null,
 		statusEntries: EMPTY_STATUS,
+		widgets: NO_WIDGETS,
+		extensionNotice: null,
 		pendingEditorText: null,
 		commands: NO_COMMANDS,
 		todoSeed: null,
@@ -745,6 +776,7 @@ export function applyChatSnapshot(model: ChatModel, snapshot: ChatSnapshotPayloa
 			pending,
 			olderCount: snapshot.olderCount,
 			leafId: snapshot.leafId,
+			branches: snapshot.branches ?? [],
 			state: snapshot.state,
 			stream: snapshot.stream?.message ?? null,
 			streamId: snapshot.stream?.messageId ?? null,
@@ -847,9 +879,12 @@ export function reduceChatFrame(model: ChatModel, frame: ChatEventFrame, clock: 
 		case "subagent_event":
 			return { ...model, ...reduceAgentFrame(model.agents, model.agentActivity, model.agentIdentity, frame, now, spawnLookup(model)) };
 		case "agents_snapshot": {
-			const { agents, agentIdentity } = reduceAgentRoster(frame.agents, model.agentIdentity, spawnLookup(model));
-			return { ...model, agents, agentIdentity, agentAvailability: frame.availability, agentActivity: new Map([...model.agentActivity].filter(([id]) => agents.has(id))) };
+			const roster = reduceAgentRoster(frame.agents, model.agentIdentity, spawnLookup(model));
+			const agents = withRegistryRows(roster.agents, model.agents);
+			return { ...model, agents, agentIdentity: roster.agentIdentity, agentAvailability: frame.availability, agentActivity: new Map([...model.agentActivity].filter(([id]) => agents.has(id))) };
 		}
+		case "agents_liveness":
+			return { ...model, ...reduceAgentLiveness(model.agents, model.agentActivity, model.agentIdentity, frame.agents, now, spawnLookup(model)) };
 		case "auto_compaction_start":
 			return { ...model, maintenance: { action: frame.action, reason: frame.reason, status: "working" } };
 		case "auto_compaction_end": {
@@ -1005,13 +1040,14 @@ export function reduceChatFrame(model: ChatModel, frame: ChatEventFrame, clock: 
 			return { ...model, statusEntries: entries, statusLine: statusLineOf(entries) };
 		}
 		case "ui_widget": {
-			const key = `widget:${frame.key}`;
-			const entries = new Map(model.statusEntries);
-			const text = frame.lines === null ? "" : frame.lines.join(" ").trim();
-			if (text.length === 0) entries.delete(key);
-			else if (entries.has(key) || entries.size < MAX_STATUS_KEYS) entries.set(key, clampText(text, MAX_STATUS_TEXT));
-			return { ...model, statusEntries: entries, statusLine: statusLineOf(entries) };
+			const widgets = new Map(model.widgets);
+			const lines = (frame.lines ?? []).slice(0, MAX_WIDGET_LINES).map(line => clampText(line, MAX_STATUS_TEXT));
+			if (lines.every(line => line.trim().length === 0)) widgets.delete(frame.key);
+			else if (widgets.has(frame.key) || widgets.size < MAX_STATUS_KEYS) widgets.set(frame.key, { lines, placement: frame.placement ?? "aboveEditor" });
+			return { ...model, widgets };
 		}
+		case "ui_notify":
+			return { ...model, extensionNotice: { id: (model.extensionNotice?.id ?? 0) + 1, level: frame.level, message: clampText(frame.message, MAX_COMMAND_FEEDBACK_TEXT) } };
 		case "state_update":
 			return applyChatLiteState(model, frame.state, frame.todoSeed, clock);
 		case "ui_editor_text":
@@ -1183,6 +1219,28 @@ export function applyChatRewrite(
 	return reproject({ ...next, pending: surviving, ephemeral }, clock);
 }
 
+/**
+ * Drop the pending rows whose message is saved on another branch of the file (ADR-0051): a reattach replays the
+ * broker's ring, which still holds the turns of a branch the user rewound away from. Those rows can never match
+ * the active path, yet they are not *unsaved*. `offPath` are the file's entries off the active path.
+ */
+export function dropPendingSavedElsewhere(model: ChatModel, offPath: readonly ChatEntry[], clock: ChatClock = {}): ChatModel {
+	if (model.pending.size === 0) return model;
+	const pending = new Map(model.pending);
+	const pendingRows = pendingEntries(model);
+	for (const row of offPath) {
+		const message = entryMessage(row);
+		if (message === null || pending.size === 0) continue;
+		const entryId = matchingPending(pending, message);
+		if (entryId === undefined) continue;
+		pending.delete(entryId);
+		const at = pendingRows.findIndex(candidate => candidate.id === entryId);
+		if (at >= 0) pendingRows.splice(at, 1);
+	}
+	if (pending.size === model.pending.size) return model;
+	return reproject(withPending(model, [...durableRows(model)], pending, pendingRows), clock);
+}
+
 /** Flag every remaining pending row *not yet saved* (the reconcile budget ran out). */
 export function markPendingUnsaved(model: ChatModel): ChatModel {
 	let changed = false;
@@ -1328,6 +1386,7 @@ export function snapshotOf(model: ChatModel, epoch: ChatEpoch): ChatSnapshotPayl
 		entries: durableRows(model),
 		olderCount: model.olderCount,
 		leafId: model.leafId,
+		branches: model.branches,
 		state: model.state,
 		pending,
 		stream: model.stream !== null && model.streamId !== null ? { messageId: model.streamId, message: model.stream } : null,

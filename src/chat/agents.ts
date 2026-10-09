@@ -1,5 +1,6 @@
 /** Native registry membership plus bounded latest activity; no child transcript is retained here. */
 import { isRecord } from "../guards.ts";
+import type { LiveAgent, LiveAgentState } from "./agent-liveness.ts";
 
 export type AgentStatus = "pending" | "running" | "completed" | "failed" | "aborted";
 export interface RunningAgent {
@@ -15,6 +16,13 @@ export interface RunningAgent {
 	sessionFile?: string;
 	parentToolCallId?: string;
 	progress?: Record<string, unknown>;
+	/**
+	 * `"registry"`: the row exists only because the Desk liveness signal (ADR-0053) reported the agent working while
+	 * OMP's RPC roster did not list it. Absent for a row the RPC roster owns. A later RPC frame for the id takes over.
+	 */
+	origin?: "registry";
+	/** The registry state the newest liveness publication reported for this id; absent when it did not list it. */
+	liveState?: LiveAgentState;
 }
 export interface AgentActivity { type: string; tool?: string; intent?: string; timestamp: number }
 export interface AgentOwner { sessionFile?: string; parentToolCallId?: string }
@@ -38,6 +46,8 @@ export function parseRunningAgent(value: unknown): RunningAgent | null {
 	if (!isRecord(value) || !isIdentity(value.id) || typeof value.agent !== "string" || typeof value.agentSource !== "string" || typeof value.index !== "number" || !Number.isSafeInteger(value.index) || typeof value.lastUpdate !== "number" || !Number.isFinite(value.lastUpdate) || typeof value.status !== "string" || !Object.hasOwn(AGENT_STATUSES, value.status)) return null;
 	for (const key of ["description", "task", "assignment", "sessionFile", "parentToolCallId"]) if (value[key] !== undefined && typeof value[key] !== "string") return null;
 	if (value.progress !== undefined && !isRecord(value.progress)) return null;
+	if (value.origin !== undefined && value.origin !== "registry") return null;
+	if (value.liveState !== undefined && value.liveState !== "running" && value.liveState !== "idle") return null;
 	return value as unknown as RunningAgent;
 }
 export function parseAgentRoster(value: unknown): RunningAgent[] | null {
@@ -159,12 +169,20 @@ export function reduceAgentFrame(
 	const payload = frame.payload;
 	const id = frame.type === "subagent_progress" ? frame.payload.progress.id : frame.payload.id;
 	const existing = agents.get(id);
-	if ((existing === undefined && (frame.type !== "subagent_lifecycle" || frame.payload.status !== "started")) || (existing !== undefined && !sameAgentOwner(payload, existing))) return { agents, agentActivity: activity, agentIdentity: identities };
+	// A registry-only row yields to OMP's own roster: any RPC frame for its id replaces or removes it.
+	if ((existing === undefined && (frame.type !== "subagent_lifecycle" || frame.payload.status !== "started")) || (existing !== undefined && existing.origin !== "registry" && !sameAgentOwner(payload, existing))) return { agents, agentActivity: activity, agentIdentity: identities };
 	const next = new Map(agents);
 	if (frame.type === "subagent_lifecycle" && frame.payload.status !== "started") {
-		next.delete(id);
+		// The finished run's activity never labels anything after it, whether the row goes or stays.
 		const latest = new Map(activity);
 		latest.delete(id);
+		// The newest publication already reported this agent working after its registry ref went idle: OMP's run
+		// ended, but a resumed run it does not observe goes on, so the row stays as a registry row.
+		if (existing?.liveState === "idle") {
+			next.set(id, { id, index: existing.index, agent: existing.agent, agentSource: existing.agentSource, status: "running", lastUpdate: existing.lastUpdate, ...(existing.sessionFile === undefined ? {} : { sessionFile: existing.sessionFile }), ...(existing.description === undefined ? {} : { description: existing.description }), ...(existing.assignment === undefined ? {} : { assignment: existing.assignment }), origin: "registry", liveState: "idle" });
+			return { agents: next, agentActivity: latest, agentIdentity: identities };
+		}
+		next.delete(id);
 		return { agents: next, agentActivity: latest, agentIdentity: identities };
 	}
 	const resolved = resolveIdentity({
@@ -181,9 +199,73 @@ export function reduceAgentFrame(
 		task: frame.type === "subagent_progress" ? frame.payload.task : existing?.task,
 		assignment: resolved.assignment,
 		progress: frame.type === "subagent_progress" ? frame.payload.progress : existing?.progress,
+		...(existing?.liveState === undefined ? {} : { liveState: existing.liveState }),
 	};
 	next.set(id, row);
 	return { agents: next, agentActivity: activity, agentIdentity: remember(identities, row) };
+}
+
+/** Index of a registry-only row: after every agent the RPC roster numbered, then ordered by id. */
+const REGISTRY_ROW_INDEX = 1_000_000;
+
+/**
+ * Fold one accepted liveness publication (ADR-0053) into the roster. The RPC roster stays authoritative for every
+ * id it lists: a published agent it already shows keeps its row, only annotated with the published `liveState`, so
+ * no agent appears twice and a publication never removes an RPC row. A published agent it does not show becomes a
+ * `"registry"` row running with the published activity and the identity remembered from its spawn; a registry row
+ * the publication no longer lists is removed.
+ */
+export function reduceAgentLiveness(
+	agents: ReadonlyMap<string, RunningAgent>, activity: ReadonlyMap<string, AgentActivity>, identities: AgentIdentities, live: readonly LiveAgent[], now: number, spawn?: SpawnLookup,
+): { agents: ReadonlyMap<string, RunningAgent>; agentActivity: ReadonlyMap<string, AgentActivity>; agentIdentity: AgentIdentities } {
+	const next = new Map(agents);
+	const latest = new Map(activity);
+	let agentIdentity = identities;
+	const listed = new Map(live.map(agent => [agent.id, agent]));
+	for (const [id, row] of agents) {
+		if (row.origin === "registry" && !listed.has(id)) {
+			next.delete(id);
+			latest.delete(id);
+		} else if (row.origin !== "registry" && row.liveState !== listed.get(id)?.state) {
+			const { liveState: _previous, ...rest } = row;
+			const state = listed.get(id)?.state;
+			next.set(id, state === undefined ? rest : { ...rest, liveState: state });
+		}
+	}
+	for (const signal of live) {
+		const existing = next.get(signal.id);
+		if (existing !== undefined && existing.origin !== "registry") continue;
+		const known = identities.get(signal.id);
+		const resolved = resolveIdentity({ id: signal.id, agent: signal.agent, agentSource: known?.agentSource ?? "" }, existing, known, spawn);
+		const row: RunningAgent = {
+			id: signal.id, index: existing?.index ?? REGISTRY_ROW_INDEX, agent: resolved.agent, agentSource: known?.agentSource ?? existing?.agentSource ?? "",
+			status: "running", lastUpdate: existing?.lastUpdate ?? now,
+			...(signal.sessionFile === undefined ? {} : { sessionFile: signal.sessionFile }),
+			...(resolved.description === undefined ? {} : { description: resolved.description }),
+			...(resolved.assignment === undefined ? {} : { assignment: resolved.assignment }),
+			origin: "registry",
+			liveState: signal.state,
+		};
+		next.set(signal.id, row);
+		agentIdentity = remember(agentIdentity, row);
+		if (signal.tool !== undefined || signal.intent !== undefined) {
+			latest.set(signal.id, { type: "registry", timestamp: now, ...(signal.tool === undefined ? {} : { tool: signal.tool }), ...(signal.intent === undefined ? {} : { intent: signal.intent }) });
+		} else {
+			latest.delete(signal.id);
+		}
+	}
+	return { agents: next, agentActivity: latest, agentIdentity };
+}
+
+/** A `get_subagents` snapshot replaces OMP's rows only: registry rows for ids it does not list are kept. */
+export function withRegistryRows(snapshot: ReadonlyMap<string, RunningAgent>, previous: ReadonlyMap<string, RunningAgent>): ReadonlyMap<string, RunningAgent> {
+	let merged: Map<string, RunningAgent> | null = null;
+	for (const [id, row] of previous) {
+		if (row.origin !== "registry" || snapshot.has(id)) continue;
+		merged ??= new Map(snapshot);
+		merged.set(id, row);
+	}
+	return merged ?? snapshot;
 }
 
 /** The type and assignment a `task` tool call in the transcript gave the agent named `id`, newest call first. */

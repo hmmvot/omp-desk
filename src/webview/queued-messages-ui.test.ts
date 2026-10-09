@@ -421,6 +421,48 @@ test("queued messages row: list, cancel, edit, already-sent race and bottom anch
 			await ui.evaluate("document.querySelector('.omp-queue-all').click()");
 			assert.equal(await ui.evaluate("window.ui.removals()[0].items.length"), 30, "Edit all names every message, hidden ones included");
 		});
+
+		await t.test("Send now promotes one follow-up during a turn by exact reference, and reports one OMP already delivered", async () => {
+			await load("queue-promote");
+			await ui.evaluate(`window.ui.queue(['steer me'],['urgent one','later one'])`);
+			await ui.wait("document.querySelectorAll('.omp-queue-remove').length===3");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-queue-promote')"), null, "nothing to promote ahead of while no turn runs");
+			await ui.evaluate("window.ui.push({working:true,settled:false});window.ui.queue(['steer me'],['urgent one','later one'])");
+			await ui.wait("document.querySelectorAll('.omp-queue-promote').length===2");
+			await ui.evaluate("document.querySelectorAll('.omp-queue-promote')[0].click()");
+			const [request] = await ui.evaluate<{ purpose: string; items: unknown }[]>("window.ui.removals()");
+			assert.equal(request!.purpose, "promote");
+			assert.deepEqual(request!.items, [{ queue: "followUp", text: "urgent one" }], "steering is never offered; only the clicked follow-up is named");
+			await ui.evaluate("window.ui.answer(window.ui.removals()[0],[{status:'removed'}]);window.ui.queue(['steer me','urgent one'],['later one'])");
+			await ui.wait("document.querySelectorAll('.omp-queue-promote').length===1 && !document.querySelector('.omp-queue-promote').disabled");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-queue-status')"), null, "a clean promotion says nothing");
+			assert.equal(await draft(), "", "Send now never touches the composer");
+			await ui.evaluate("document.querySelector('.omp-queue-promote').click()");
+			await ui.evaluate("window.ui.answer(window.ui.removals().at(-1),[{status:'gone'}])");
+			await ui.wait("document.querySelector('.omp-queue-status')");
+			assert.match(await ui.evaluate<string>("document.querySelector('.omp-queue-status').textContent"), /already sent or is no longer queued, so it could not be sent now/);
+			assert.equal(await ui.evaluate("window.sent.filter(message=>/^omp:chat-(prompt|steer|follow-up)$/.test(message.type)).length"), 0, "promotion sends no new prompt");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("Alt+Up in the composer takes the newest queued message back into the draft, after what is typed", async () => {
+			await load("queue-alt-up");
+			await ui.evaluate(`window.ui.queue(['steer first'],['older follow-up','newest follow-up'])`);
+			await ui.wait("document.querySelectorAll('.omp-queue-edit').length===3");
+			await typeDraft("typed");
+			await ui.call("Input.dispatchKeyEvent", { type: "keyDown", key: "ArrowUp", code: "ArrowUp", windowsVirtualKeyCode: 38, modifiers: 1 });
+			await ui.call("Input.dispatchKeyEvent", { type: "keyUp", key: "ArrowUp", code: "ArrowUp", windowsVirtualKeyCode: 38, modifiers: 1 });
+			const [request] = await ui.evaluate<{ purpose: string; items: unknown }[]>("window.ui.removals()");
+			assert.equal(request!.purpose, "edit");
+			assert.deepEqual(request!.items, [{ queue: "followUp", text: "newest follow-up" }]);
+			await ui.evaluate("window.ui.answer(window.ui.removals()[0],[{status:'removed'}]);window.ui.queue(['steer first'],['older follow-up'])");
+			await ui.wait("document.querySelector('.omp-composer textarea').value.includes('newest follow-up')");
+			assert.equal(await draft(), "typed\n\nnewest follow-up");
+			await ui.call("Input.dispatchKeyEvent", { type: "keyDown", key: "ArrowUp", code: "ArrowUp", windowsVirtualKeyCode: 38, modifiers: 1 });
+			assert.deepEqual((await ui.evaluate<{ items: unknown }[]>("window.ui.removals()")).at(-1)!.items, [{ queue: "followUp", text: "older follow-up" }], "the next press takes the next newest");
+			assert.equal(await ui.evaluate("window.sent.filter(message=>/^omp:chat-(prompt|steer|follow-up)$/.test(message.type)).length"), 0);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
 	} finally {
 		page?.socket.close(); browser?.socket.close();
 		child.kill();

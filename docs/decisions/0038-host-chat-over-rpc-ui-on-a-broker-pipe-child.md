@@ -11,6 +11,8 @@ date: 2026-09-29
 
 > Native TUI removal and legacy classification narrowly superseded by accepted [ADR-0040](0040-switch-one-editor-between-rpc-chat-and-native-pty.md): explicit native transport returns in the same editor; RPC Chat and security/removal decisions remain. Implemented in source with headless and owned real-OMP evidence; installed-window acceptance remains separate.
 
+> §4 and §8 narrowly amended by [ADR-0051](0051-rewind-chat-in-place-through-a-desk-registered-omp-command.md): reconciliation treats a moved `leafId` (an empty delta or one that does not extend the leaf) as a rebuild, takes the disk window at the live leaf only when the disk agrees with the live cursor, otherwise reads `get_entries` trimmed to the same tail window, and `loadOlder` walks ancestors; disk-first stays. The `-e` module may register the RPC-only `omp-desk-navigate` command; the host-control pipe stays read-only.
+
 ## Context and Problem Statement
 
 The chat editor is a Collab guest ([ADR-0002](0002-local-collab-gui-native-omp.md)): a loopback relay sidecar, a room and bearer link

@@ -10,6 +10,11 @@
  * authenticates the client before disclosing anything reusable, answers
  * `snapshot`, publishes only non-secret discovery metadata into the
  * launcher's rendezvous directory, and hosts the consented file-evidence hooks.
+ * In an rpc-ui child it also registers Chat's internal `omp-desk-navigate`
+ * command (ADR-0051, `navigate-command.ts`), which arrives over RPC stdin and
+ * never over this pipe, and publishes the subagent liveness signal the Agents
+ * row merges with OMP's RPC roster (ADR-0053, `agent-liveness.ts`) through that
+ * session's own `setStatus`, never over this pipe.
  *
  * RPC model/thinking/name commands remain on the session's RPC pipe. This channel
  * adds only bounded native state and target-guarded public-SDK shutdown/name operations.
@@ -99,6 +104,8 @@ import { NativeActivityJournal, NATIVE_ACTIVITY_HOOKS, type NativeActivityHook }
 import { fileEvidenceStoreRoot } from "../host/file-evidence-reader.ts";
 import type { NativeFileObservationStorageProbe } from "../host/native-file-observation-storage.ts";
 import { createFileEvidenceHooks, createFileEvidenceObserver } from "./file-evidence.ts";
+import { registerNavigateCommand, type NavigateCommandApi } from "./navigate-command.ts";
+import { isLiveSubagentRef, registerAgentLiveness, stopAgentLiveness, type OmpAgentRegistry } from "./agent-liveness.ts";
 import type { FileEvidenceOmpHooks, FileEvidenceStatus } from "./file-evidence.ts";
 
 // OMP extension surface (declared structurally)
@@ -152,6 +159,9 @@ export interface OmpExtensionAPI {
 	getActiveTools(): string[];
 	getAllTools(): OmpToolInfo[];
 	setSessionName?(name: string): void;
+	/** Command registration and custom entries, used only by the RPC-mode navigation command (ADR-0051). */
+	registerCommand?: NavigateCommandApi["registerCommand"];
+	appendEntry?: NavigateCommandApi["appendEntry"];
 	readonly logger?: OmpLogger;
 	/**
 	 * The injected SDK namespace (`pi.pi`), declared only where this file reads
@@ -161,33 +171,20 @@ export interface OmpExtensionAPI {
 	 * was started (a `task` call, or revived from `parked` by an IRC message), has a
 	 * ref there, and only some of them are async jobs of the parent.
 	 */
-	readonly pi?: { readonly VERSION?: unknown; readonly AgentRegistry?: { global?(): { list?(): readonly OmpAgentRef[] } } };
-}
-
-/** The slice of a registry `AgentRef` this module reads. */
-export interface OmpAgentRef {
-	readonly kind?: unknown;
-	readonly status?: unknown;
-	readonly session?: { readonly isStreaming?: unknown; readonly queuedMessageCount?: unknown } | null;
-	readonly lifecycle?: { readonly acceptedAt?: unknown };
+	readonly pi?: { readonly VERSION?: unknown; readonly AgentRegistry?: { global?(): OmpAgentRegistry } };
 }
 
 /**
- * Whether any subagent of this process is doing work the main session is waiting on: a ref that
- * is `running` (unless its result was already accepted and nothing is streaming, the registry's
- * own "stale accepted run"), or a live `idle` one with messages queued for it. Parked, aborted,
- * advisor and main refs never count. An absent or throwing registry (an older OMP) counts nothing.
+ * Whether any subagent of this process is doing work the main session is waiting on, by the
+ * shared derivation {@link isLiveSubagentRef} (`subagentLiveState`, ADR-0053): running (not a
+ * stale accepted run), idle with messages queued, or idle while its session streams with new
+ * work its own binding observed after it left running. An absent or throwing registry (an older
+ * OMP) counts nothing.
  */
 export function hasLiveSubagents(pi: OmpExtensionAPI): boolean {
 	try {
 		const refs = pi.pi?.AgentRegistry?.global?.()?.list?.();
-		if (!Array.isArray(refs)) return false;
-		return refs.some((ref: OmpAgentRef) => {
-			if (ref === null || typeof ref !== "object" || ref.kind !== "sub") return false;
-			if (ref.status === "running") return !(ref.lifecycle?.acceptedAt !== undefined && ref.session?.isStreaming !== true);
-			const queued = ref.session?.queuedMessageCount;
-			return ref.status === "idle" && typeof queued === "number" && queued > 0;
-		});
+		return Array.isArray(refs) && refs.some(isLiveSubagentRef);
 	} catch {
 		return false;
 	}
@@ -1186,6 +1183,11 @@ export async function hostControlExtension(pi: OmpExtensionAPI): Promise<void> {
 		}
 	};
 	if (metadata.kind === "absent") return;
+	// Independent of the control channel: an RPC chat child launched by Desk can rewind in place even when the
+	// control server below refuses or a later binding stays inert (ADR-0051).
+	registerNavigateCommand(pi);
+	// Every binding: subagent bindings observe their own runs, the RPC main binding publishes (ADR-0053).
+	registerAgentLiveness(pi);
 	if (metadata.kind === "rejected") {
 		log(`refusing host control: ${metadata.reason}`);
 		return;
@@ -1247,6 +1249,7 @@ export async function hostControlExtension(pi: OmpExtensionAPI): Promise<void> {
 		pi.on("session_shutdown", async () => {
 			shutdownRequested = true;
 			void evidence?.close();
+			stopAgentLiveness();
 			try {
 				await server?.stop("session-shutdown");
 			} finally {

@@ -7,6 +7,10 @@ date: 2026-09-24
 
 > Amended by [ADR-0038](0038-host-chat-over-rpc-ui-on-a-broker-pipe-child.md): the pipe's model/thinking mutation, model list and request-id ledger are replaced by rpc commands and deleted; the pipe stays for the config-layer snapshot, the names-only tool catalogue and the file-observation hooks.
 
+> Narrowly amended by [ADR-0051](0051-rewind-chat-in-place-through-a-desk-registered-omp-command.md): the `-e` host-control module also registers one RPC-only internal extension command, `omp-desk-navigate`, which rewinds a Chat conversation in place. The command depends only on the module loading with a non-absent bootstrap, not on the pipe or its key, and its input travels over RPC stdin. The pipe itself stays read-only.
+
+> Narrowly amended by [ADR-0053](0053-merge-a-desk-published-registry-liveness-signal-into-the-agents-row.md): in an RPC child, the `-e` host-control module also publishes a bounded subagent liveness signal through its main session's own `ctx.ui.setStatus`, on RPC stdout. It reads `AgentRegistry.global()` and the subagent bindings' run events. It needs neither the pipe nor its key, and the pipe itself stays read-only.
+
 ## Context and Problem Statement
 
 [ADR-0002](0002-local-collab-gui-native-omp.md) uses an OMP Collab guest for conversation, approvals and Hub, but writable guests cannot change the host's model or thinking level. The native OMP process can outlive VS Code's extension host on a window reload. A control listener owned by the latter would disappear, while adding privileged commands to the encrypted Collab relay would mix transport and authorization responsibilities.

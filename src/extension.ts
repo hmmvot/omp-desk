@@ -137,7 +137,11 @@ import {
   stopBrokerOwnedHost,
 } from "./host/rpc-reconcile";
 import type { NativeStopVerdict } from "./host/rpc-reconcile";
-import type { RpcSession, SendOutcome } from "./host/rpc/session";
+import type { RpcSession, SendOutcome, SendRefusal } from "./host/rpc/session";
+import { readSlashRegistry, type BuiltinSlashEntry, type DeskSlashAction, type SlashRegistry } from "./host/slash-registry";
+import { sessionPrompts } from "./webview/lib/prompt-history";
+import { NAVIGATE_REFUSAL_SENTENCES, rewindPreview, rewindTargets } from "./chat/rewind";
+import { rewindBlockedReason } from "./webview/lib/rewind-mode";
 import type { ChatLiteState, ChatModel, ChatPhase } from "./chat/model";
 import { cancelControlPicker, pickControlModel, pickControlThinking, pickToolCallDetail } from "./host/control-picker";
 import { activitySignature, turnActivity, withRegistrySubagentWork } from "./webview/lib/activity";
@@ -173,7 +177,7 @@ import {
   sha256,
 } from "./bridge-protocol";
 import { isPanelTabId, persistedShellSlotId, shellIdentityBootstrapSource } from "./webview/panel-identity";
-import { GUEST_PROTOCOL_VERSION, isSafeBoundaryText, parseGuestWebviewMessage, type GuestOpenDetailMessage } from "./webview/messages";
+import { GUEST_PROTOCOL_VERSION, isSafeBoundaryText, parseGuestWebviewMessage, type GuestChatCommand, type GuestOpenDetailMessage, type GuestRecallPromptMessage } from "./webview/messages";
 import { DETAIL_VIEW_TYPE, DetailTabs } from "./host/detail-tabs";
 import type { DetailTarget } from "./webview/detail-target";
 // The folder shell's terminal (ADR-0024): the extension-owned PTY broker is the writer, the
@@ -329,6 +333,8 @@ const LEASE_HELPER = "out/session-lease-probe.ps1";
  * other child entry, so a reinstall of the extension cannot rename it away.
  */
 const RENAME_HELPER_SCRIPT = "media/rename-session.mjs";
+/** Packaged Bun helper that lists the installed OMP's builtin slash commands (`host/slash-registry.ts`). */
+const SLASH_REGISTRY_HELPER = "media/slash-registry.mjs";
 /**
  * The icon every OMP chat editor's tab carries, from this extension's own media.
  *
@@ -1019,7 +1025,7 @@ export function activate(context: vscode.ExtensionContext): void {
     if (entry === null) throw new Error("The launching OMP conversation is no longer registered.");
     const session = chat.sessionOf(tabId);
     return {
-      cwd: entry.cwd,
+      folder: entry.cwd,
       profile: entry.scope.profile ?? DEFAULT_OMP_PROFILE,
       executable: await executableFor(stateOf(tabId)?.runtime ?? null),
       sessionLabel: entry.title ?? "launching Chat",
@@ -1032,12 +1038,13 @@ export function activate(context: vscode.ExtensionContext): void {
       }),
     };
   };
-  const settingsEditors = new SettingsEditors(context, async (kind, argument) => {
-    const folder = await chooseFolder(index, folders, argument, { title: `Choose the OMP folder for ${kind} settings`, addWhenEmpty: true });
-    if (folder === null) return null;
-    const active = index.activeTabId === null ? null : index.get(index.activeTabId);
-    if (active !== null && active.cwd === folder.path) return settingsBinding(active.tabId);
-    return { cwd: folder.path, profile: active?.scope.profile ?? process.env.OMP_PROFILE ?? process.env.PI_PROFILE ?? DEFAULT_OMP_PROFILE };
+  // Settings open in the global scope; the editor's scope control reaches a project folder.
+  const settingsEditors = new SettingsEditors(context, {
+    defaultProfile: () => {
+      const active = index.activeTabId === null ? null : index.get(index.activeTabId);
+      return active?.scope.profile ?? process.env.OMP_PROFILE ?? process.env.PI_PROFILE ?? DEFAULT_OMP_PROFILE;
+    },
+    folders: () => folders.list().map(folder => folder.path),
   });
   context.subscriptions.push(settingsEditors);
   chat = new ChatRuntime({
@@ -1046,7 +1053,18 @@ export function activate(context: vscode.ExtensionContext): void {
     readDisplayPreferences: readChatDisplayPreferences,
     writeToolCallDetail: writeChatToolDetail,
     pickToolCallDetail,
-    openSettings: async (kind, tabId) => settingsEditors.open(kind, await settingsBinding(tabId)),
+    // Terminal-UI builtins typed into Chat are answered, not sent (ADR-0052); the list is the installed OMP's.
+    slashRegistry: () => currentSlashRegistry(context),
+    runDeskAction: async (action, tabId) => {
+      if (action !== "models-settings") return runDeskSlashAction(action);
+      await settingsEditors.open("models", await settingsBinding(tabId));
+    },
+    // Models from a Chat shows that Chat's folder so its default can be applied to the session;
+    // agent settings are global, so Agents opens in the global scope for the Chat's profile.
+    openSettings: async (kind, tabId) => {
+      const binding = await settingsBinding(tabId);
+      await settingsEditors.open(kind, kind === "agents" ? { folder: null, profile: binding.profile, ...(binding.executable ? { executable: binding.executable } : {}) } : binding);
+    },
   });
   detailTabs = new DetailTabs({
     createPanel: (conversation, target) => {
@@ -1245,6 +1263,17 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("omp.sendPrompt", () => postPanelAction("send-prompt")),
     vscode.commands.registerCommand("omp.stopTurn", () => postPanelAction("stop-turn")),
     vscode.commands.registerCommand("omp.focusComposer", () => postPanelAction("focus-composer")),
+    vscode.commands.registerCommand("omp.retryTurn", () => postChatPanelAction("retry-turn")),
+    vscode.commands.registerCommand("omp.toggleThinking", () => toggleTranscriptDefault(THINKING_EXPANDED_KEY)),
+    vscode.commands.registerCommand("omp.toggleToolOutput", () => toggleTranscriptDefault(TOOLS_EXPANDED_KEY)),
+    vscode.commands.registerCommand("omp.searchPromptHistory", () => searchPromptHistory()),
+    vscode.commands.registerCommand("omp.compactConversation", () => runActiveChatAction(context, index, "compact")),
+    vscode.commands.registerCommand("omp.cycleModel", () => runActiveChatAction(context, index, "cycle-model")),
+    vscode.commands.registerCommand("omp.cycleThinkingLevel", () => runActiveChatAction(context, index, "cycle-thinking")),
+    vscode.commands.registerCommand("omp.exportConversationHtml", () => runActiveChatAction(context, index, "export-html")),
+    vscode.commands.registerCommand("omp.shareConversation", () => runActiveChatAction(context, index, "share")),
+    vscode.commands.registerCommand("omp.showChatKeyboardShortcuts", () => showChatKeyboardShortcuts()),
+    vscode.commands.registerCommand("omp.rewindConversation", () => rewindConversation()),
     vscode.commands.registerCommand("omp.sendSelection", () => addSelectionToSession(context, index)),
     vscode.commands.registerCommand("omp.sendFile", (clicked: unknown, selected: unknown) => addFilesToSession(context, index, clicked, selected)),
     vscode.commands.registerCommand("omp.showDiagnostics", () => showDiagnostics(context, index)),
@@ -5261,6 +5290,7 @@ const CHAT_COMMAND_TYPES: ReadonlySet<string> = new Set([
   "omp:chat-queue-remove",
   "omp:chat-tool-detail",
   "omp:chat-subagent-read",
+  "omp:chat-navigate",
 ]);
 
 /** How long one document is given to hand its unsent draft over before it is replaced. */
@@ -5367,7 +5397,7 @@ function replyChatSendResult(tabId: string, message: ChatWebviewMessage, page: C
     type: "omp:chat-send-result",
     epoch,
     requestId: message.requestId,
-    status: outcome === "accepted" ? "accepted" : outcome === "unconfirmed" ? "unconfirmed" : "refused",
+    status: outcome === "accepted" ? "accepted" : outcome === "explained" ? "explained" : outcome === "unconfirmed" ? "unconfirmed" : "refused",
   });
 }
 
@@ -5387,6 +5417,9 @@ async function runChatCommand(tabId: string, message: ChatWebviewMessage, page: 
     outcome = "unconfirmed";
   }
   replyChatSendResult(tabId, message, page, outcome);
+  if (outcome === "accepted" && (message.type === "omp:chat-prompt" || message.type === "omp:chat-steer" || message.type === "omp:chat-follow-up")) {
+    rememberPrompt(message.text);
+  }
   if (outcome !== "accepted" || message.type === "omp:chat-abort") {
     log(`tab ${tabId}: ${message.type} ${message.requestId.slice(0, 8)} was ${outcome}`);
   }
@@ -5575,6 +5608,9 @@ async function handleGuestMessage(
     }
     case "omp:control-request":
       await handleGuestControlRequest(index, tabId, parsed, panelResponder(tabId, panel, parsed.actionSeq));
+      return;
+    case "omp:chat-command":
+      if (activationContext !== undefined) await runChatAction(activationContext, index, tabId, parsed.command);
       return;
     default:
       // The terminal vocabulary belongs to the folder shell, never to a chat editor.
@@ -6737,6 +6773,288 @@ function postPanelAction(action: GuestPanelAction): void {
   log(`tab ${target.tabId}: ${action} asked from a VS Code command or keybinding`);
 }
 
+// Chat quick actions (ADR-0052): the TUI's retry, history search, compaction, cycling, export and share,
+// run for one Chat's live conversation with VS Code's own consent UI. None of them starts a host.
+
+/** The active Chat editor's tab, or `null` after saying why there is none (or why it may not act). */
+function activeChatTab(): string | null {
+  const target = activePanelTab();
+  const refused = target === null ? null : passiveReasonForSlot(target.slotId);
+  if (refused !== null) {
+    showWarning(`${refused} The action was not run.`);
+    return null;
+  }
+  if (target === null || target.mode !== "chat") {
+    showWarning("No OMP Chat editor is active, so there is nothing for this command to act on.");
+    return null;
+  }
+  return target.tabId;
+}
+
+/** Ask the active Chat editor's own composer to run one of its actions (retry, thinking or tools toggle). */
+function postChatPanelAction(action: GuestPanelAction): void {
+  if (activeChatTab() !== null) postPanelAction(action);
+}
+
+/** Run one {@link GuestChatCommand} for the active Chat editor, from the command palette or a keybinding. */
+function runActiveChatAction(context: vscode.ExtensionContext, index: SessionIndex, command: GuestChatCommand): void {
+  const tabId = activeChatTab();
+  if (tabId !== null) void runChatAction(context, index, tabId, command);
+}
+
+function chatRefusalText(reason: SendRefusal): string {
+  return reason === "busy" ? "OMP is busy with the running turn; try again after it ends." : reason === "not-live" || reason === "not-owner" ? "This conversation is not accepting commands right now." : "OMP did not accept the command.";
+}
+
+/**
+ * One Chat action for `tabId`'s live conversation. Every action that sends or uploads anything asks first in
+ * VS Code's own UI (an InputBox, a save dialog, a modal confirmation); cycling is one explicit keypress, as in
+ * the TUI. Outcomes are reported here; progress shows in the conversation itself.
+ */
+async function runChatAction(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, command: GuestChatCommand): Promise<void> {
+  const session = chat.sessionOf(tabId);
+  if (session === null || session.phase !== "live") {
+    showWarning("This conversation is not live, so the action was not run.");
+    return;
+  }
+  const current = (): boolean => chat.sessionOf(tabId) === session && session.phase === "live";
+  switch (command) {
+    case "compact": {
+      if (session.model.working) { showWarning("OMP is running a turn. Compact the conversation after it ends."); return; }
+      const instructions = await vscode.window.showInputBox({
+        title: "Compact Conversation",
+        prompt: "OMP replaces the earlier conversation with a summary to free context. Optionally say what the summary must keep.",
+        placeHolder: "Optional instructions for the summary",
+        ignoreFocusOut: true,
+      });
+      if (instructions === undefined || !current()) return;
+      const result = await session.compact(instructions.trim().length > 0 ? instructions.trim() : undefined);
+      if (result.status === "refused") showWarning(`The conversation was not compacted. ${chatRefusalText(result.reason)}`);
+      else if (result.status === "unconfirmed") showWarning("OMP did not report whether the conversation was compacted.");
+      return;
+    }
+    case "cycle-model": {
+      const result = await session.cycleModel();
+      if (result.status === "refused") showWarning(`The model was not changed. ${chatRefusalText(result.reason)}`);
+      else if (result.status === "unconfirmed") showWarning("OMP did not report whether the model changed.");
+      else if (result.value === null) showInfo("OMP has no other model to cycle to. Configure model roles in OMP settings.");
+      else vscode.window.setStatusBarMessage(`OMP model: ${result.value.model.name ?? result.value.model.id}${result.value.thinkingLevel ? ` · ${result.value.thinkingLevel}` : ""}`, 4_000);
+      return;
+    }
+    case "cycle-thinking": {
+      const result = await session.cycleThinkingLevel();
+      if (result.status === "refused") showWarning(`The thinking level was not changed. ${chatRefusalText(result.reason)}`);
+      else if (result.status === "unconfirmed") showWarning("OMP did not report whether the thinking level changed.");
+      else if (result.value === null) showInfo("The current model has no thinking levels to cycle through.");
+      else vscode.window.setStatusBarMessage(`OMP thinking level: ${result.value}`, 4_000);
+      return;
+    }
+    case "export-html": {
+      const entry = index.get(tabId);
+      const base = (entry?.title ?? "omp-session").replace(/[<>:"/\\|?*\u0000-\u001f]+/g, " ").trim().slice(0, 80) || "omp-session";
+      const folder = entry?.cwd ?? context.globalStorageUri.fsPath;
+      const target = await vscode.window.showSaveDialog({
+        title: "Export Conversation as HTML",
+        defaultUri: vscode.Uri.file(path.join(folder, `${base}.html`)),
+        filters: { HTML: ["html"] },
+      });
+      if (target === undefined || !current()) return;
+      const result = await session.exportHtml(target.fsPath);
+      if (result.status !== "ok") {
+        showError(result.status === "refused" ? `The conversation was not exported. ${chatRefusalText(result.reason)}` : "OMP did not report whether the export was written.");
+        return;
+      }
+      const written = vscode.Uri.file(result.value);
+      const picked = await vscode.window.showInformationMessage(`OMP: Exported the conversation to ${result.value}.`, "Open", "Reveal in File Explorer");
+      if (picked === "Open") await vscode.env.openExternal(written);
+      else if (picked === "Reveal in File Explorer") await vscode.commands.executeCommand("revealFileInOS", written);
+      return;
+    }
+    case "share": {
+      const picked = await vscode.window.showWarningMessage(
+        "Share this conversation?",
+        { modal: true, detail: "OMP uploads the whole transcript of this conversation — your messages, the agent's replies, tool calls and their output — as an encrypted share and posts the link in the conversation. Anyone with the link can read it." },
+        "Upload and Share",
+      );
+      if (picked !== "Upload and Share" || !current()) return;
+      const outcome = await session.prompt({ requestId: createControlRequestId(), text: "/share" });
+      if (outcome.status === "refused") showWarning(`Nothing was shared. ${chatRefusalText(outcome.reason)}`);
+      else if (outcome.status === "unconfirmed") showWarning("OMP did not confirm the share command. It was not sent again.");
+      return;
+    }
+  }
+}
+
+/** The Desk stand-in for a terminal-UI slash command typed into Chat (`host/slash-registry.ts`). */
+async function runDeskSlashAction(action: Exclude<DeskSlashAction, "models-settings">): Promise<void> {
+  switch (action) {
+    case "keyboard-shortcuts":
+      await showChatKeyboardShortcuts();
+      return;
+    case "source-control":
+      await vscode.commands.executeCommand("workbench.view.scm");
+      return;
+    case "tools-view":
+      await vscode.commands.executeCommand("omp.tools.focus");
+      return;
+    case "provider-login":
+      await vscode.commands.executeCommand("omp.loginProvider");
+      return;
+  }
+}
+
+async function showChatKeyboardShortcuts(): Promise<void> {
+  await vscode.commands.executeCommand("workbench.action.openGlobalKeybindings", "omp.");
+}
+
+/** Prompts the user sent from any Chat, newest first; VS Code's global state, so one list per VS Code profile. */
+const PROMPT_HISTORY_KEY = "omp.chat.promptHistory";
+const MAX_PROMPT_HISTORY = 200;
+/** A prompt longer than this is not remembered: history search is for prompts one retypes. */
+const MAX_REMEMBERED_PROMPT = 20_000;
+
+function rememberedPrompts(): string[] {
+  const stored = activationContext?.globalState.get<unknown>(PROMPT_HISTORY_KEY);
+  return Array.isArray(stored) ? stored.filter((item): item is string => typeof item === "string") : [];
+}
+
+function rememberPrompt(text: string): void {
+  const context = activationContext;
+  if (context === undefined || text.trim().length === 0 || text.length > MAX_REMEMBERED_PROMPT || text.trimStart().startsWith("/")) return;
+  const next = [text, ...rememberedPrompts().filter(item => item !== text)].slice(0, MAX_PROMPT_HISTORY);
+  void context.globalState.update(PROMPT_HISTORY_KEY, next);
+}
+
+/**
+ * The TUI's `Ctrl+R`: a QuickPick of past prompts, this conversation's first (newest first), then the ones sent
+ * from other Chats. The pick is added to the draft, never sent.
+ */
+async function searchPromptHistory(): Promise<void> {
+  const tabId = activeChatTab();
+  if (tabId === null) return;
+  const own = sessionPrompts(chat.modelOf(tabId)?.entries ?? []).reverse();
+  const seen = new Set(own);
+  const others = rememberedPrompts().filter(text => !seen.has(text));
+  const item = (text: string): vscode.QuickPickItem & { text: string } => {
+    const line = text.split(/\r?\n/).find(part => part.trim().length > 0)?.trim() ?? text.trim();
+    const lines = text.split(/\r?\n/).length;
+    return { label: line.length > 120 ? `${line.slice(0, 119)}…` : line, ...(lines > 1 ? { description: `${lines} lines` } : {}), text };
+  };
+  const items: (vscode.QuickPickItem & { text?: string })[] = [
+    ...(own.length > 0 ? [{ label: "This conversation", kind: vscode.QuickPickItemKind.Separator }, ...own.map(item)] : []),
+    ...(others.length > 0 ? [{ label: "Other conversations", kind: vscode.QuickPickItemKind.Separator }, ...others.map(item)] : []),
+  ];
+  if (items.length === 0) {
+    showInfo("No past prompts yet.");
+    return;
+  }
+  const picked = await vscode.window.showQuickPick(items, { title: "Search Prompt History", placeHolder: "Type to filter; Enter adds the prompt to the draft without sending it", matchOnDescription: true });
+  if (picked?.text === undefined) return;
+  const panel = stateOf(tabId)?.panel;
+  if (panel === undefined || panel === null) return;
+  void panel.webview.postMessage({ type: "omp:recall-prompt", text: picked.text } satisfies GuestRecallPromptMessage);
+}
+
+/**
+ * "OMP: Rewind Conversation…" (ADR-0051), the keyboard-only route to Chat's in-place Rewind: the loaded prompts of the
+ * active Chat, newest first, with what leaves the branch, then Rewind or Rewind & summarize. The request is pinned to
+ * the leaf the list was built from; the answer and the prompt go to the tab's writable editor routes, whose composer
+ * takes the prompt to edit and send again. Files changed afterwards are named and never restored.
+ */
+async function rewindConversation(): Promise<void> {
+  const tabId = activeChatTab();
+  if (tabId === null) return;
+  const model = chat.modelOf(tabId);
+  const blocked = model === null || model === undefined ? NAVIGATE_REFUSAL_SENTENCES["not-live"] : rewindBlockedReason(model);
+  if (model === null || model === undefined || blocked !== null) {
+    showWarning(blocked ?? NAVIGATE_REFUSAL_SENTENCES["not-live"]);
+    return;
+  }
+  const durable = model.entries.slice(0, model.durableCount);
+  const leafId = model.leafId;
+  const cwd = model.header?.cwd;
+  const targets = rewindTargets(durable).reverse();
+  if (targets.length === 0) {
+    showInfo("There is no earlier message in this conversation to rewind to.");
+    return;
+  }
+  const leaving = (id: string): string => {
+    const preview = rewindPreview(durable, id, cwd);
+    if (preview === null) return "";
+    const files = preview.files.length === 0 ? "" : ` · files changed after it stay as they are: ${preview.files.slice(0, 5).join(", ")}${preview.files.length > 5 ? `, +${preview.files.length - 5}` : ""}`;
+    return `${preview.messages} message${preview.messages === 1 ? "" : "s"} leave this branch${files}`;
+  };
+  const picked = await vscode.window.showQuickPick(
+    targets.map(target => ({ label: target.preview, description: new Date(target.timestamp).toLocaleString(), detail: leaving(target.id), id: target.id })),
+    { title: "Rewind Conversation", placeHolder: "Pick the message to rewind to; it returns to the composer to edit and send again", matchOnDescription: true },
+  );
+  if (picked === undefined) return;
+  const how = await vscode.window.showQuickPick(
+    [
+      { label: "Rewind", detail: picked.detail, summarize: false },
+      { label: "Rewind & summarize", detail: "Also keep a model-written summary of the abandoned messages", summarize: true },
+    ],
+    { title: `Rewind to: ${picked.label}`, placeHolder: "Nothing on disk is undone" },
+  );
+  if (how === undefined) return;
+  const outcome = await chat.navigate(tabId, { requestId: encodeHex(randomBytes(16)), kind: "rewind", targetId: picked.id, expectedLeafId: leafId, summarize: how.summarize }, null);
+  if (outcome.status === "done") {
+    if (outcome.raced) showInfo("Rewound, but OMP also changed the conversation meanwhile. Check the transcript.");
+    return;
+  }
+  showWarning(NAVIGATE_REFUSAL_SENTENCES[outcome.status === "unconfirmed" ? "unconfirmed" : outcome.reason]);
+}
+
+/**
+ * The installed OMP's builtin slash registry, read once per install by `media/slash-registry.mjs` and re-checked at
+ * most once a minute, so an OMP update changes which typed commands are terminal-only without a Desk release.
+ * `null` while unknown: nothing is refused as terminal-only then.
+ */
+let slashRegistry: SlashRegistry | null = null;
+/** The install whose registry could not be read: its helper is not started again until the install changes. */
+let slashRegistryFailedKey: string | null = null;
+let slashRegistryCheckedAt = 0;
+let slashRegistryLoading: Promise<void> | null = null;
+const SLASH_REGISTRY_RECHECK_MS = 60_000;
+
+function currentSlashRegistry(context: vscode.ExtensionContext): readonly BuiltinSlashEntry[] | null {
+  if (slashRegistryLoading === null && Date.now() - slashRegistryCheckedAt > SLASH_REGISTRY_RECHECK_MS) {
+    slashRegistryLoading = loadSlashRegistry(context).finally(() => {
+      slashRegistryCheckedAt = Date.now();
+      slashRegistryLoading = null;
+    });
+  }
+  return slashRegistry?.commands ?? null;
+}
+
+async function loadSlashRegistry(context: vscode.ExtensionContext): Promise<void> {
+  try {
+    const bun = await resolveBunRuntime();
+    const pkg = bun === null ? null : await resolveOmpPackageRoot(await resolveOmpBinary());
+    if (bun === null || pkg === null) {
+      slashRegistry = null;
+      return;
+    }
+    const key = `${pkg.root}@${pkg.version ?? "unknown"}`;
+    if (slashRegistry?.key === key || slashRegistryFailedKey === key) return;
+    // Another install's commands must never classify this one, even when this one cannot be read.
+    slashRegistry = null;
+    slashRegistryFailedKey = key;
+    const [helper] = await stageRuntimeAssets({ storageDir: context.globalStorageUri.fsPath, sourcePaths: [context.asAbsolutePath(SLASH_REGISTRY_HELPER)] });
+    if (helper === undefined) return;
+    const commands = await readSlashRegistry({ bunPath: bun, helperPath: helper.path, packageRoot: pkg.root, cwd: path.dirname(helper.path) });
+    if (commands === null) {
+      log(`the slash-command registry of ${key} could not be read; terminal-only commands are not refused`);
+      return;
+    }
+    slashRegistry = { key, commands };
+    slashRegistryFailedKey = null;
+    log(`read ${commands.length} builtin slash commands from ${key}`);
+  } catch (error) {
+    log(`the slash-command registry could not be read: ${messageOf(error)}`);
+  }
+}
+
 // "OMP: Add Selection to Session" and "OMP: Add File to Session"
 // What is added is a reference (`@src/a.ts [lines 12-30]`), composed by `host/editor-context` for the
 // chosen session's cwd. The target is always the user's choice from a picker, most recently focused
@@ -7342,7 +7660,19 @@ function readChatDisplayPreferences(): ChatDisplayPreferences {
   return {
     toolCallDetail: vscode.workspace.getConfiguration("omp").get<string>("toolCallDetail", "overview") === "detailed" ? "detailed" : "overview",
     accessibilitySupport: vscode.workspace.getConfiguration("editor").get<string>("accessibilitySupport", "auto") === "on",
+    thinkingExpanded: activationContext?.globalState.get<unknown>(THINKING_EXPANDED_KEY) === true,
+    toolsExpanded: activationContext?.globalState.get<unknown>(TOOLS_EXPANDED_KEY) === true,
   };
+}
+
+/** The TUI's `Ctrl+T` / `Ctrl+O`: one remembered default for every Chat in this VS Code profile. */
+const THINKING_EXPANDED_KEY = "omp.chat.thinkingExpanded";
+const TOOLS_EXPANDED_KEY = "omp.chat.toolsExpanded";
+
+async function toggleTranscriptDefault(key: typeof THINKING_EXPANDED_KEY | typeof TOOLS_EXPANDED_KEY): Promise<void> {
+  if (activeChatTab() === null || activationContext === undefined) return;
+  await activationContext.globalState.update(key, activationContext.globalState.get<unknown>(key) !== true);
+  chat.refreshDisplayPreferences();
 }
 
 async function writeChatToolDetail(value: ChatDisplayPreferences["toolCallDetail"]): Promise<void> {
@@ -7446,6 +7776,9 @@ function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, 
       return;
     case "recovery":
       log(`tab ${tabId}: chat connection recovery (${event.reason}).`);
+      return;
+    case "extension-error":
+      void vscode.window.showErrorMessage(`OMP extension: ${event.message}`);
       return;
   }
 }
@@ -8720,6 +9053,7 @@ const ELECTION_GATED_TYPES: Readonly<Record<string, true>> = {
   "omp:chat-reconnect": true,
   "omp:chat-restart": true,
   "omp:chat-queue-remove": true,
+  "omp:chat-command": true,
 };
 
 /** Register one election of `slot`; it is forgotten when it settles, however it ends. */
@@ -10559,6 +10893,10 @@ async function handlePassiveSlotMessage(slot: string, panel: vscode.WebviewPanel
     // The conversation refuses a write from a route that may not write, and tells this page
     // why, so the refusal is visible instead of a prompt vanishing.
     await runChatCommand(state.tabId, parsed as ChatWebviewMessage, panelChatPage(state, panel));
+    return;
+  }
+  if (parsed.type === "omp:chat-command") {
+    showWarning(`${passiveReasonForSlot(slot) ?? PASSIVE_REASON_DEFAULT} The action was not run.`);
     return;
   }
   log(`slot ${slot}: a non-controlling editor's ${parsed.type} was refused`);

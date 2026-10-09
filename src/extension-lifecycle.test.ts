@@ -2567,8 +2567,8 @@ describe("same-editor Chat and native Terminal actions", () => {
 		const settingsWrites = harness.configurationWrites().length;
 		try {
 			assert.deepEqual(clients.map(client => client.getDisplayPreferences()), [
-				{ toolCallDetail: "overview", accessibilitySupport: false },
-				{ toolCallDetail: "overview", accessibilitySupport: false },
+				{ toolCallDetail: "overview", accessibilitySupport: false, thinkingExpanded: false, toolsExpanded: false },
+				{ toolCallDetail: "overview", accessibilitySupport: false, thinkingExpanded: false, toolsExpanded: false },
 			]);
 			// The page only asks: the host opens its native picker, marks the setting in force, and writes nothing until a row is chosen.
 			assert.equal(clients[0]!.chooseToolCallDetail(), true);
@@ -2588,8 +2588,8 @@ describe("same-editor Chat and native Terminal actions", () => {
 			await choosing;
 			assert.equal(picker.disposed, true);
 			assert.deepEqual(clients.map(client => client.getDisplayPreferences()), [
-				{ toolCallDetail: "detailed", accessibilitySupport: false },
-				{ toolCallDetail: "detailed", accessibilitySupport: false },
+				{ toolCallDetail: "detailed", accessibilitySupport: false, thinkingExpanded: false, toolsExpanded: false },
+				{ toolCallDetail: "detailed", accessibilitySupport: false, thinkingExpanded: false, toolsExpanded: false },
 			]);
 			assert.deepEqual(harness.configurationWrites()[settingsWrites], { key: "omp.toolCallDetail", value: "detailed", target: 1 });
 			// Dismissing the picker writes nothing, and a stale epoch never reaches it.
@@ -2609,8 +2609,8 @@ describe("same-editor Chat and native Terminal actions", () => {
 			harness.configuration({ "omp.toolCallDetail": "overview", "editor.accessibilitySupport": "on" });
 			harness.refreshChatDisplayPreferences({ affectsConfiguration: key => key === "editor.accessibilitySupport" });
 			assert.deepEqual(clients.map(client => client.getDisplayPreferences()), [
-				{ toolCallDetail: "overview", accessibilitySupport: true },
-				{ toolCallDetail: "overview", accessibilitySupport: true },
+				{ toolCallDetail: "overview", accessibilitySupport: true, thinkingExpanded: false, toolsExpanded: false },
+				{ toolCallDetail: "overview", accessibilitySupport: true, thinkingExpanded: false, toolsExpanded: false },
 			]);
 			assert.equal(channel.written.length, writes, "presentation updates never write OMP commands even when writer admission is fenced");
 		} finally {

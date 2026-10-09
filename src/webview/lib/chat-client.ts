@@ -39,10 +39,11 @@ import {
 	createChatModel,
 	sameEpoch,
 } from "../../chat/model.ts";
-import { SLASH_DENIED_SENTENCE, classifySlashInput } from "../../host/rpc/protocol.ts";
+import { classifySlashInput, slashDeniedSentence } from "../../host/rpc/protocol.ts";
 import type { GuestHostMessage, GuestWebviewMessage } from "../messages.ts";
 import { ChatSnapshotAssembler } from "../chat-messages.ts";
-import type { ChatDisplayPreferences, ChatQueueResultEntry, ChatQueueResultItem, ChatQueuedRef } from "../chat-messages.ts";
+import type { ChatAbortResultMessage, ChatDisplayPreferences, ChatNavigateResultMessage, ChatQueuePurpose, ChatQueueResultEntry, ChatQueueResultItem, ChatQueuedRef } from "../chat-messages.ts";
+import type { NavigationKind } from "../../chat/rewind.ts";
 import { parseSubagentPage, type SubagentTranscriptPage } from "../../chat/subagent-transcript.ts";
 
 /** What every surface renders from. */
@@ -66,8 +67,22 @@ export interface ChatClientOptions {
 	newRequestId?: () => string;
 }
 
-/** The outcome of a send; a refusal names why, in a fixed sentence the composer shows. */
-export type ChatSendResult = { ok: true } | { ok: false; reason: string; unconfirmed?: boolean };
+/**
+ * The outcome of a send; a refusal names why, in a fixed sentence the composer shows. `explained` means the host
+ * answered a terminal-UI command itself instead of sending it: nothing reached OMP, and no turn starts.
+ */
+export type ChatSendResult = { ok: true; explained?: true } | { ok: false; reason: string; unconfirmed?: boolean };
+
+/** What a Stop withdrew from OMP's queues, delivered to the page that pressed it (see {@link ChatClient.sendAbort}). */
+export type ChatAbortAnswer = Omit<ChatAbortResultMessage, "type" | "epoch" | "requestId">;
+
+/** Stops awaiting their queue hand-back; bounded so a host that never answers cannot grow it. */
+const MAX_PENDING_ABORTS = 16;
+
+/** The outcome of one in-place navigation (see {@link ChatClient.navigate}). */
+export type ChatNavigateAnswer = Omit<ChatNavigateResultMessage, "type">;
+/** Past the host's worst case: a summarizing rewind may wait 180 s for OMP, then re-reads the session. */
+const NAVIGATE_RESULT_TIMEOUT_MS = 240_000;
 
 /** Dialog answers remembered across one epoch; bounded so a long session cannot grow it. */
 const MAX_ANSWERED = 256;
@@ -113,7 +128,7 @@ interface PendingSubagentRead {
 
 interface PendingQueueRemoval {
 	epoch: ChatEpoch;
-	purpose: "cancel" | "edit";
+	purpose: ChatQueuePurpose;
 	items: ChatQueuedRef[];
 	resolve(result: ChatQueueRemoveResult): void;
 	timer: unknown;
@@ -129,6 +144,9 @@ export class ChatClient {
 	readonly #childReads = new Map<string, PendingSubagentRead>();
 	readonly #queueRemovals = new Map<string, PendingQueueRemoval>();
 	readonly #textSends = new Map<string, { resolve(result: ChatSendResult): void; timer: unknown }>();
+	readonly #aborts = new Map<string, (answer: ChatAbortAnswer) => void>();
+	readonly #navigations = new Map<string, { resolve(answer: ChatNavigateAnswer): void; timer: unknown }>();
+	readonly #navigationListeners = new Set<(answer: ChatNavigateAnswer) => void>();
 	#model: ChatModel = createChatModel();
 	#displayPreferences: ChatDisplayPreferences = { toolCallDetail: "overview", accessibilitySupport: false };
 	#draftHandoffLocked = false;
@@ -189,10 +207,32 @@ export class ChatClient {
 				this.#finishTextSend(message.requestId, message.status);
 				return true;
 			}
+			case "omp:chat-abort-result": {
+				// Correlated by request id alone: OMP already withdrew these messages, whatever the epoch did since.
+				const answer = this.#aborts.get(message.requestId);
+				if (answer === undefined) return true;
+				this.#aborts.delete(message.requestId);
+				answer({ status: message.status, entries: message.entries, ...(message.imagesDropped ? { imagesDropped: true } : {}), ...(message.truncated ? { truncated: true } : {}) });
+				return true;
+			}
+			case "omp:chat-navigate-result": {
+				// Correlated by request id alone; a palette Rewind (no page asked) still reaches every listener.
+				const { type: _type, ...answer } = message;
+				const pending = this.#navigations.get(message.requestId);
+				if (pending !== undefined) {
+					this.#navigations.delete(message.requestId);
+					clearTimeout(pending.timer as number);
+					pending.resolve(answer);
+				}
+				for (const listener of [...this.#navigationListeners]) listener(answer);
+				return true;
+			}
 			case "omp:chat-display-preferences":
 				if (!sameEpoch(model.epoch, message.epoch)) return true;
-				if (this.#displayPreferences.toolCallDetail !== message.toolCallDetail || this.#displayPreferences.accessibilitySupport !== message.accessibilitySupport) {
-					this.#displayPreferences = { toolCallDetail: message.toolCallDetail, accessibilitySupport: message.accessibilitySupport };
+				if (this.#displayPreferences.toolCallDetail !== message.toolCallDetail || this.#displayPreferences.accessibilitySupport !== message.accessibilitySupport ||
+					this.#displayPreferences.thinkingExpanded !== message.thinkingExpanded || this.#displayPreferences.toolsExpanded !== message.toolsExpanded) {
+					const { type: _type, epoch: _epoch, ...preferences } = message;
+					this.#displayPreferences = preferences;
 					for (const listener of this.#listeners) listener();
 				}
 				return true;
@@ -280,7 +320,8 @@ export class ChatClient {
 		if (this.#draftHandoffLocked) return Promise.resolve({ ok: false, reason: "Your input is held while this editor is being replaced." });
 		const refusal = this.#refusal();
 		if (refusal !== null) return Promise.resolve({ ok: false, reason: refusal });
-		if (classifySlashInput(text, this.#model.commands).denied) return Promise.resolve({ ok: false, reason: SLASH_DENIED_SENTENCE });
+		const verdict = classifySlashInput(text, this.#model.commands);
+		if (verdict.denied) return Promise.resolve({ ok: false, reason: slashDeniedSentence(verdict.command) });
 		const wire = images === undefined || images.length === 0 ? undefined : images.map(image => ({ type: "image" as const, mimeType: image.mimeType, data: image.data }));
 		const requestId = this.#newRequestId();
 		const base = { type, requestId, text };
@@ -299,12 +340,12 @@ export class ChatClient {
 		return promise;
 	}
 
-	#finishTextSend(requestId: string, status: "accepted" | "refused" | "unconfirmed"): void {
+	#finishTextSend(requestId: string, status: "accepted" | "refused" | "unconfirmed" | "explained"): void {
 		const pending = this.#textSends.get(requestId);
 		if (pending === undefined) return;
 		this.#textSends.delete(requestId);
 		clearTimeout(pending.timer as number);
-		pending.resolve(status === "accepted" ? { ok: true } : {
+		pending.resolve(status === "accepted" ? { ok: true } : status === "explained" ? { ok: true, explained: true } : {
 			ok: false,
 			reason: status === "refused" ? REFUSAL_NOT_ACCEPTED : REFUSAL_UNCONFIRMED,
 			...(status === "unconfirmed" ? { unconfirmed: true } : {}),
@@ -326,11 +367,56 @@ export class ChatClient {
 		return this.#sendText("omp:chat-follow-up", text, images);
 	}
 
-	/** Stop the running turn; the session continues. */
-	sendAbort(): ChatSendResult {
+	/**
+	 * Stop the running turn; the session continues. Like the TUI's Escape, the host withdraws the user's queued
+	 * messages first (`abort_and_restore_queue`) so they neither run after the stop nor vanish: `onAnswer` gets them
+	 * back, oldest first, whenever the host answers — the composer puts them into the draft.
+	 */
+	sendAbort(onAnswer?: (answer: ChatAbortAnswer) => void): ChatSendResult {
 		const refusal = this.#refusal();
 		if (refusal !== null) return { ok: false, reason: refusal };
-		return this.#send({ type: "omp:chat-abort", requestId: this.#newRequestId() });
+		const requestId = this.#newRequestId();
+		if (onAnswer !== undefined) {
+			this.#aborts.set(requestId, onAnswer);
+			if (this.#aborts.size > MAX_PENDING_ABORTS) this.#aborts.delete(this.#aborts.keys().next().value!);
+		}
+		const result = this.#send({ type: "omp:chat-abort", requestId });
+		if (!result.ok) this.#aborts.delete(requestId);
+		return result;
+	}
+
+	/**
+	 * Rewind, Undo or switch branches in place (ADR-0051). `expectedLeafId` is the leaf the page decided on; the host
+	 * and OMP both refuse a navigation made against another one. Never retried; an answer that never comes is
+	 * `unconfirmed` and the next snapshot shows what happened.
+	 */
+	navigate(request: { kind: NavigationKind; targetId: string; expectedLeafId: string | null; summarize: boolean }): Promise<ChatNavigateAnswer> {
+		const refusal = this.#refusal();
+		if (refusal !== null || this.#draftHandoffLocked) return Promise.resolve({ requestId: "", status: "refused", reason: "not-live" });
+		const requestId = this.#newRequestId();
+		const { promise, resolve } = Promise.withResolvers<ChatNavigateAnswer>();
+		const timer = setTimeout(() => {
+			if (this.#navigations.delete(requestId)) resolve({ requestId, status: "unconfirmed" });
+		}, NAVIGATE_RESULT_TIMEOUT_MS);
+		this.#navigations.set(requestId, { resolve, timer });
+		let posted: boolean | void = false;
+		try {
+			posted = this.#transport.post({ type: "omp:chat-navigate", requestId, ...request });
+		} catch {
+			posted = undefined;
+		}
+		if (posted === false) {
+			clearTimeout(timer);
+			this.#navigations.delete(requestId);
+			resolve({ requestId, status: "refused", reason: "not-live" });
+		}
+		return promise;
+	}
+
+	/** Every navigation answer this page receives, its own or a command-palette one; the composer takes rewound prompts here. */
+	subscribeNavigations(listener: (answer: ChatNavigateAnswer) => void): () => void {
+		this.#navigationListeners.add(listener);
+		return () => { this.#navigationListeners.delete(listener); };
 	}
 
 	/**
@@ -395,12 +481,12 @@ export class ChatClient {
 	}
 
 	/**
-	 * Take pending messages out of OMP's queue. `cancel` discards them; `edit` returns what was removed for the
-	 * caller to put back in the composer. Resolves with one result per item once the host answered — a message
-	 * OMP had already delivered is `gone`, a lost answer is `unknown` — and never resolves a removal as done
-	 * without the host's word.
+	 * Act on pending messages in OMP's queue. `cancel` discards them; `edit` returns what was removed for the
+	 * caller to put back in the composer; `promote` moves queued follow-ups to steering (removed = promoted).
+	 * Resolves with one result per item once the host answered — a message OMP had already delivered is `gone`,
+	 * a lost answer is `unknown` — and never resolves a removal as done without the host's word.
 	 */
-	removeQueued(purpose: "cancel" | "edit", items: readonly ChatQueuedRef[]): Promise<ChatQueueRemoveResult> {
+	removeQueued(purpose: ChatQueuePurpose, items: readonly ChatQueuedRef[]): Promise<ChatQueueRemoveResult> {
 		if (this.#draftHandoffLocked) return Promise.resolve({ ok: false, reason: "Your input is held while this editor is being replaced." });
 		const refusal = this.#refusal();
 		if (refusal !== null) return Promise.resolve({ ok: false, reason: refusal });

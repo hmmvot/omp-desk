@@ -1,7 +1,8 @@
 /**
  * Behavioral tests for the read-only session-file reader: the fixed title slot line, the partial last line, the tail
  * window and its `olderCount`, on-demand older rows, active-path filtering, growth, atomic rewrite, legacy ids, an
- * oversize row, and a large file. Runner: `node --test src/host/rpc/history-reader.test.ts`.
+ * oversize row, a large file, and (ADR-0051) a snapshot at a given leaf, ancestry-walking older rows, and branch
+ * points with their previews. Runner: `node --test src/host/rpc/history-reader.test.ts`.
  */
 import assert from "node:assert/strict";
 import { appendFile, mkdir, writeFile } from "node:fs/promises";
@@ -262,5 +263,82 @@ describe("rendersByFacts", () => {
 		];
 		for (const { entry, facts } of samples) assert.equal(rendersByFacts(facts), rendersTranscriptEntry(entry), entry.type);
 		assert.equal(rendersByFacts({ type: "custom" }), false);
+	});
+});
+
+describe("HistoryReader at a leaf that is not the last line (ADR-0051)", () => {
+	const marker = (id: string, parentId: string): ChatEntry => ({ type: "custom", id, parentId, timestamp: "2026-01-01T00:00:00.000Z", customType: "omp-desk/navigation", data: {} });
+
+	it("snapshots the path to the given leaf, not to the last entry of the file", async () => {
+		const dir = await scratch();
+		// u0..a2, then a rewind to a0 (marker m) and a new prompt on it: the file ends on the new branch.
+		const rows = [...conversation(3), marker("m", "a0"), messageEntry("u1b", "m", userMessage("branch prompt", 5_000)), messageEntry("a1b", "u1b", assistantMessage("branch reply", 5_005))];
+		const reader = await HistoryReader.open(await dir.file("leaf.jsonl", sessionFileText({ entries: rows })));
+		const atEnd = await reader.snapshot(10);
+		assert.deepEqual(atEnd.entries.map(entry => entry.id), ["u0", "a0", "m", "u1b", "a1b"]);
+		assert.equal(atEnd.leafId, "a1b");
+		assert.deepEqual(atEnd.branches, [{ entryId: "a0", branches: [{ tipId: "a2", firstPromptId: "u1", firstPrompt: "q1", messages: 4, prompts: 2 }] }]);
+		const atOld = await reader.snapshot(10, "a2");
+		assert.deepEqual(atOld.entries.map(entry => entry.id), ["u0", "a0", "u1", "a1", "u2", "a2"]);
+		assert.equal(atOld.leafId, "a2");
+		assert.equal(atOld.lastId, "a1b", "the cursor is still the last line of the file");
+		assert.deepEqual(atOld.branches, [{ entryId: "a0", branches: [{ tipId: "a1b", firstPromptId: "u1b", firstPrompt: "branch prompt", messages: 2, prompts: 1 }] }], "a branch rooted at a marker counts when a prompt follows it");
+		const tail = await reader.snapshot(2, "a2");
+		assert.deepEqual(tail.entries.map(entry => entry.id), ["u2", "a2"]);
+		assert.equal(tail.olderCount, 4);
+		const unknown = await reader.snapshot(10, "not-indexed");
+		assert.equal(unknown.leafId, "a1b", "an unindexed leaf falls back to the file's last entry, which the caller can tell apart");
+	});
+
+	it("loads older rows along the ancestors of the row held, not in file order", async () => {
+		const dir = await scratch();
+		// u0..a3, then a second branch off a1 written after it: u2b..a3b.
+		const branch = [
+			messageEntry("u2b", "a1", userMessage("b2", 6_000)),
+			messageEntry("a2b", "u2b", assistantMessage("rb2", 6_005)),
+			messageEntry("u3b", "a2b", userMessage("b3", 6_010)),
+			messageEntry("a3b", "u3b", assistantMessage("rb3", 6_015)),
+		];
+		const reader = await HistoryReader.open(await dir.file("older.jsonl", sessionFileText({ entries: [...conversation(4), ...branch] })));
+		const snap = await reader.snapshot(2);
+		assert.deepEqual(snap.entries.map(entry => entry.id), ["u3b", "a3b"]);
+		assert.equal(snap.olderCount, 6);
+		const first = await reader.loadOlder("u3b", 2);
+		assert.deepEqual(first.entries.map(entry => entry.id), ["u2b", "a2b"]);
+		assert.equal(first.olderCount, 4);
+		const second = await reader.loadOlder("u2b", 2);
+		assert.deepEqual(second.entries.map(entry => entry.id), ["u1", "a1"], "across the branch point, never a3 (the line before u2b)");
+		assert.equal(second.olderCount, 2);
+		const other = await reader.snapshot(2, "a3");
+		assert.deepEqual(other.entries.map(entry => entry.id), ["u3", "a3"]);
+		assert.deepEqual((await reader.loadOlder("u3", 2)).entries.map(entry => entry.id), ["u2", "a2"]);
+	});
+
+	it("lists only user-rooted branches, newest first, capped per point", async () => {
+		const dir = await scratch();
+		const siblings = Array.from({ length: 25 }, (_, index) => messageEntry(`s${index}`, "a0", userMessage(`alt ${index}`, 7_000 + index)));
+		// OMP's own pruning leaves a subtree rooted at an assistant message: not a branch the user made.
+		const retry = messageEntry("retry", "u0", assistantMessage("discarded", 6_500));
+		const reader = await HistoryReader.open(await dir.file("many.jsonl", sessionFileText({ entries: [...conversation(2), retry, ...siblings] })));
+		const snap = await reader.snapshot(4, "a1");
+		assert.equal(snap.branches.length, 1);
+		const [point] = snap.branches;
+		assert.equal(point!.entryId, "a0");
+		assert.equal(point!.branches.length, 20);
+		assert.deepEqual(point!.branches.slice(0, 2).map(branch => [branch.tipId, branch.firstPrompt]), [["s24", "alt 24"], ["s23", "alt 23"]]);
+	});
+
+	it("reads first-prompt previews for the newest 40 branches only", async () => {
+		const dir = await scratch();
+		const rows = conversation(46);
+		const branches = Array.from({ length: 45 }, (_, index) => messageEntry(`b${index}`, `a${index}`, userMessage(`alt ${index}\nsecond line`, 9_000 + index)));
+		const reader = await HistoryReader.open(await dir.file("previews.jsonl", sessionFileText({ entries: [...rows, ...branches] })));
+		const snap = await reader.snapshot(4, "a45");
+		assert.equal(snap.branches.length, 45);
+		assert.deepEqual(snap.branches.map(point => point.entryId), Array.from({ length: 45 }, (_, index) => `a${index}`));
+		const previews = snap.branches.map(point => point.branches[0]!.firstPrompt ?? null);
+		assert.deepEqual(previews.slice(0, 5), [null, null, null, null, null], "the oldest points go without a preview");
+		assert.deepEqual(previews.slice(5), Array.from({ length: 40 }, (_, index) => `alt ${index + 5}`), "the first line of the prompt");
+		assert.ok(snap.branches.every(point => point.branches[0]!.firstPromptId === point.branches[0]!.tipId));
 	});
 });

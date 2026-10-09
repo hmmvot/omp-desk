@@ -228,6 +228,45 @@ ${TERMINAL_STYLES}
 }
 
 .omp-row--marker { color: var(--omp-muted); font-size: 11px; }
+/* Hover actions of a row (Copy on the user's messages); shown on hover or keyboard focus. */
+.omp-row { position: relative; }
+.omp-row-actions { position: absolute; top: 2px; right: 4px; display: flex; gap: 4px; opacity: 0; }
+.omp-row:hover > .omp-row-actions, .omp-row-actions:focus-within, .omp-row-actions:has(.omp-copy-status) { opacity: 1; }
+.omp-retry-turn { display: inline-flex; align-items: center; gap: 4px; margin-top: 6px; padding: 2px 8px; border: 1px solid var(--vscode-button-border, transparent); border-radius: 3px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); font: inherit; cursor: pointer; }
+.omp-retry-turn:hover { background: var(--vscode-button-secondaryHoverBackground); }
+.omp-retry-turn:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+/* OMP extension setWidget blocks and notify notices, above or below the prompt. */
+.omp-extension-widgets { display: flex; flex-direction: column; gap: 4px; margin: 0 0 6px; }
+.omp-extension-widgets--belowEditor { margin: 6px 0 0; }
+.omp-extension-widget { padding: 2px 6px; border-left: 2px solid var(--omp-border); color: var(--omp-muted); font-size: 11px; }
+.omp-extension-widget-line { white-space: pre-wrap; overflow-wrap: anywhere; }
+.omp-extension-notice { display: flex; align-items: center; gap: 6px; margin: 0 0 6px; font-size: 12px; }
+.omp-extension-notice--warning .codicon-warning { color: var(--vscode-editorWarning-foreground); }
+.omp-extension-notice-text { flex: 1 1 auto; min-width: 0; overflow-wrap: anywhere; }
+/* Rewind (ADR-0051): the picked prompt, what would leave the branch, the bar above the composer and branch markers. */
+.omp-row--rewind-selected .omp-body-block { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; cursor: pointer; }
+.omp-row--rewind-dimmed { opacity: 0.45; }
+.omp-rewind-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin: 0 0 6px; padding: 6px 8px; border: 1px solid var(--omp-border); border-radius: 6px; font-size: 12px; }
+.omp-rewind-bar:focus { outline: 1px solid var(--vscode-focusBorder); }
+.omp-rewind-bar--picking { border-color: var(--vscode-focusBorder); flex-direction: column; align-items: stretch; }
+.omp-rewind-bar--notice > span { flex: 1 1 auto; min-width: 0; }
+.omp-rewind-title, .omp-rewind-files { display: flex; gap: 6px; align-items: baseline; overflow-wrap: anywhere; }
+.omp-rewind-target { font-style: italic; }
+.omp-rewind-files { color: var(--omp-muted); }
+.omp-rewind-files .codicon-warning { color: var(--vscode-editorWarning-foreground); }
+.omp-rewind-blocked { color: var(--vscode-editorWarning-foreground); }
+.omp-rewind-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.omp-rewind-legend { color: var(--omp-muted); font-size: 11px; margin-left: auto; }
+.omp-branch-point { margin-top: 6px; font-size: 11px; color: var(--omp-muted); }
+.omp-branch-point-toggle { display: inline-flex; align-items: center; gap: 4px; padding: 1px 6px; border: 1px dashed var(--omp-border); border-radius: 10px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.omp-branch-point-toggle:hover { color: var(--vscode-foreground); }
+.omp-branch-point-toggle:focus-visible, .omp-branch-switch:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+.omp-branch-list { list-style: none; margin: 4px 0 0; padding: 0 0 0 12px; display: flex; flex-direction: column; gap: 2px; }
+.omp-branch-switch { display: flex; gap: 8px; width: 100%; padding: 2px 6px; border: 0; border-radius: 3px; background: transparent; color: var(--vscode-foreground); font: inherit; text-align: left; cursor: pointer; }
+.omp-branch-switch:hover:not(:disabled) { background: var(--vscode-list-hoverBackground); }
+.omp-branch-switch:disabled { cursor: default; opacity: 0.6; }
+.omp-branch-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.omp-branch-size { color: var(--omp-muted); }
 
 .omp-badge {
 	display: inline-block;
@@ -285,6 +324,13 @@ ${TERMINAL_STYLES}
 	margin: 6px 0;
 }
 .omp-md pre code { color: inherit; background: none; padding: 0; font-size: var(--omp-mono-size); line-height: 1.45; }
+/* Hover Copy on fenced code blocks and user messages: hidden until the block is hovered or the button is focused. */
+.omp-code-block { position: relative; }
+.omp-copy-button { display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px; border: 1px solid var(--vscode-button-border, transparent); border-radius: 3px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); font: inherit; font-size: 11px; cursor: pointer; }
+.omp-copy-button:hover { background: var(--vscode-button-secondaryHoverBackground); }
+.omp-copy-button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+.omp-code-copy { position: absolute; top: 4px; right: 4px; opacity: 0; }
+.omp-code-block:hover .omp-code-copy, .omp-code-copy:focus-visible, .omp-code-copy:has(.omp-copy-status) { opacity: 1; }
 .omp-md blockquote {
 	margin: 4px 0;
 	padding: 0 8px;

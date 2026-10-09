@@ -27,6 +27,8 @@ export interface PanelActionHandlers extends Record<GuestPanelAction, () => void
 	"stop-turn"(): void;
 	/** Move focus into the prompt textarea. */
 	"focus-composer"(): void;
+	/** Re-run a failed or aborted last turn (`/retry`), like the TUI's F5; a no-op while a turn runs. */
+	"retry-turn"(): void;
 }
 
 const providers: PanelActionHandlers[] = [];

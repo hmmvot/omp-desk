@@ -14,7 +14,7 @@ import { describe, it } from "node:test";
 import type { SessionEntry } from "@oh-my-pi/pi-wire";
 import { createChatModel, snapshotOf } from "../../chat/model.ts";
 import type { ChatEpoch, ChatPhase, ChatSnapshotPayload, ChatUiRequest } from "../../chat/model.ts";
-import { SLASH_DENIED_SENTENCE } from "../../host/rpc/protocol.ts";
+import { REWIND_ARGUMENTS_SENTENCE, SLASH_DENIED_SENTENCE } from "../../host/rpc/protocol.ts";
 import { splitChatSnapshot } from "../chat-messages.ts";
 import type { GuestHostMessage, GuestWebviewMessage } from "../messages.ts";
 import { ChatClient } from "./chat-client.ts";
@@ -385,6 +385,7 @@ describe("writing needs a live, unlocked session", () => {
 		for (const denied of ["/new", "  /resume 3", "/session delete", "/quit"]) {
 			assert.deepEqual(await client.sendPrompt(denied), { ok: false, reason: SLASH_DENIED_SENTENCE }, denied);
 		}
+		assert.deepEqual(await client.sendPrompt("/branch 3"), { ok: false, reason: REWIND_ARGUMENTS_SENTENCE }, "Rewind's alias with arguments says how to rewind");
 		assert.equal(sent.length, 0);
 		// An unknown command and a pasted path are ordinary text to OMP, so they are sent.
 		assert.equal((await client.sendPrompt("/usr/bin/x fails")).ok, true);
@@ -431,5 +432,62 @@ describe("reading older rows and resuming", () => {
 		client.setDraftHandoffLocked(false);
 		setReachable(false);
 		assert.equal(client.restart(), false);
+	});
+});
+
+describe("chat quick actions", () => {
+	it("settles a terminal-UI command the host answered itself as handled, never as a sent turn or a refusal", async () => {
+		const { client, sent } = harness(false);
+		client.handle(snapshotMessage());
+		const pending = client.sendPrompt("/hotkeys");
+		const prompt = sent[0];
+		assert.ok(prompt?.type === "omp:chat-prompt");
+		client.handle({ type: "omp:chat-send-result", epoch: EPOCH, requestId: prompt.requestId, status: "explained" });
+		assert.deepEqual(await pending, { ok: true, explained: true });
+	});
+
+	it("hands a Stop's withdrawn queue to the page that stopped, once, whatever the epoch did meanwhile", () => {
+		const { client, sent } = harness();
+		client.handle(snapshotMessage());
+		const answers: unknown[] = [];
+		assert.deepEqual(client.sendAbort(answer => answers.push(answer)), { ok: true });
+		const abort = sent.at(-1);
+		assert.ok(abort?.type === "omp:chat-abort");
+		const requestId = abort.requestId;
+		client.handle(snapshotMessage({}, OTHER_EPOCH));
+		const result = { type: "omp:chat-abort-result" as const, epoch: EPOCH, requestId, status: "accepted" as const, entries: [{ text: "queued steer" }], imagesDropped: true as const };
+		client.handle(result);
+		client.handle(result);
+		client.handle({ ...result, requestId: "f".repeat(32) });
+		assert.deepEqual(answers, [{ status: "accepted", entries: [{ text: "queued steer" }], imagesDropped: true }]);
+	});
+
+	it("forgets a Stop the route never carried", () => {
+		const { client, sent, setReachable } = harness();
+		client.handle(snapshotMessage());
+		setReachable(false);
+		const answers: unknown[] = [];
+		assert.equal(client.sendAbort(answer => answers.push(answer)).ok, false);
+		client.handle({ type: "omp:chat-abort-result", epoch: EPOCH, requestId: "1".padStart(32, "0"), status: "accepted", entries: [{ text: "x" }] });
+		assert.deepEqual(answers, []);
+		assert.equal(sent.length, 0);
+	});
+
+	it("promotes queued follow-ups through the same correlated queue request", async () => {
+		const { client, sent } = harness();
+		client.handle(snapshotMessage());
+		const pending = client.removeQueued("promote", [{ queue: "followUp", text: "later" }]);
+		const request = sent.at(-1);
+		assert.ok(request?.type === "omp:chat-queue-remove");
+		assert.equal(request.purpose, "promote");
+		client.handle({ type: "omp:chat-queue-result", epoch: EPOCH, requestId: request.requestId, purpose: "promote", results: [{ status: "removed" }] });
+		assert.deepEqual(await pending, { ok: true, results: [{ queue: "followUp", text: "later", status: "removed" }] });
+	});
+
+	it("adopts the host's remembered thinking and tool defaults", () => {
+		const { client } = harness();
+		client.handle(snapshotMessage());
+		client.handle({ type: "omp:chat-display-preferences", epoch: EPOCH, toolCallDetail: "overview", accessibilitySupport: false, thinkingExpanded: true, toolsExpanded: true });
+		assert.deepEqual(client.getDisplayPreferences(), { toolCallDetail: "overview", accessibilitySupport: false, thinkingExpanded: true, toolsExpanded: true });
 	});
 });

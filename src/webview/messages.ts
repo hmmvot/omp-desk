@@ -33,7 +33,7 @@
 // extensionless specifiers (the Webview bundle itself does not care).
 import type { ControlModelRef } from "../host/control-protocol.ts";
 import { isRecord } from "../guards.ts";
-import { parseChatHostMessage, parseChatWebviewMessage } from "./chat-messages.ts";
+import { MAX_CHAT_TEXT_LENGTH, parseChatHostMessage, parseChatWebviewMessage } from "./chat-messages.ts";
 import type { ChatHostMessage, ChatWebviewMessage } from "./chat-messages.ts";
 import { isPanelTabId } from "./panel-identity.ts";
 import { parseFooterMetadata } from "./footer-metadata.ts";
@@ -50,7 +50,7 @@ export * from "./chat-messages.ts";
  * speaks another version, so a surviving page of an older build is never driven
  * by this host.
  */
-export const GUEST_PROTOCOL_VERSION = 7;
+export const GUEST_PROTOCOL_VERSION = 8;
 
 /**
  * Paths the completion popup may show for one query. The extension host asks
@@ -276,7 +276,7 @@ export interface GuestPanelActionMessage {
 	action: GuestPanelAction;
 }
 
-export type GuestPanelAction = "send-prompt" | "stop-turn" | "focus-composer";
+export type GuestPanelAction = "send-prompt" | "stop-turn" | "focus-composer" | "retry-turn";
 
 /**
  * Longest reference text one editor-context insertion may carry.
@@ -297,6 +297,15 @@ export const MAX_INSERT_TEXT_LENGTH = 900;
  */
 export interface GuestInsertTextMessage {
 	type: "omp:insert-text";
+	text: string;
+}
+
+/**
+ * A past prompt the user picked in the host's prompt-history search (`omp.searchPromptHistory`). The composer
+ * adds it to the draft — after what the draft holds, as an edited queued message is — and never sends it.
+ */
+export interface GuestRecallPromptMessage {
+	type: "omp:recall-prompt";
 	text: string;
 }
 
@@ -698,6 +707,7 @@ export type GuestHostMessage =
 	| GuestControlStateMessage
 	| GuestPanelActionMessage
 	| GuestInsertTextMessage
+	| GuestRecallPromptMessage
 	| GuestDraftRequestMessage
 	| GuestDraftRestoreMessage
 	| GuestDraftReleaseMessage
@@ -833,6 +843,20 @@ export type GuestOpenDetailMessage =
 	| { type: "omp:open-detail"; kind: "todo" | "agents" }
 	| { type: "omp:open-detail"; kind: "agent"; agentId: string };
 
+/**
+ * A Chat action the page asks the host to run with its own consent UI: `compact` (instructions InputBox),
+ * `cycle-model` / `cycle-thinking` (the TUI's role and thinking cycling), `export-html` (save dialog) and `share`
+ * (a modal confirmation naming what is uploaded). The page names the action only; the host decides everything else.
+ */
+export interface GuestChatCommandMessage {
+	type: "omp:chat-command";
+	command: GuestChatCommand;
+}
+
+export type GuestChatCommand = "compact" | "cycle-model" | "cycle-thinking" | "export-html" | "share";
+
+const CHAT_COMMANDS: Record<string, GuestChatCommand> = { compact: "compact", "cycle-model": "cycle-model", "cycle-thinking": "cycle-thinking", "export-html": "export-html", share: "share" };
+
 /** `StopReason` of the newest assistant reply, as the wire package defines it. */
 export type GuestTurnOutcome = "stop" | "length" | "toolUse" | "error" | "aborted";
 
@@ -856,7 +880,8 @@ export type GuestWebviewMessage =
 	| GuestTerminalVisibilityMessage
 	| GuestDraftReplyMessage
 	| GuestDraftRestoredMessage
-	| GuestOpenDetailMessage;
+	| GuestOpenDetailMessage
+	| GuestChatCommandMessage;
 
 
 /**
@@ -948,6 +973,7 @@ const PANEL_ACTION: Record<string, GuestPanelAction> = {
 	"send-prompt": "send-prompt",
 	"stop-turn": "stop-turn",
 	"focus-composer": "focus-composer",
+	"retry-turn": "retry-turn",
 };
 
 
@@ -1054,8 +1080,12 @@ export function parseGuestHostMessage(value: unknown): GuestHostMessage | null {
 			? { type: "omp:insert-text", text }
 			: null;
 	}
+	if (value.type === "omp:recall-prompt") {
+		const { text } = value;
+		return typeof text === "string" && text.trim().length > 0 && text.length <= MAX_CHAT_TEXT_LENGTH ? { type: "omp:recall-prompt", text } : null;
+	}
 	if (value.type === "omp:webview-action") {
-		// Only the three actions the composer itself offers: anything else is a
+		// Only the actions the composer itself offers: anything else is a
 		// host/guest version mismatch, and ignoring it is safer than guessing.
 		const action = typeof value.action === "string" ? PANEL_ACTION[value.action] : undefined;
 		return action === undefined ? null : { type: "omp:webview-action", action };
@@ -1125,12 +1155,17 @@ export function parseGuestHostMessage(value: unknown): GuestHostMessage | null {
 /** Validate an untrusted Webview→host message; `null` when the shape is wrong. */
 export function parseGuestWebviewMessage(value: unknown): GuestWebviewMessage | null {
 	if (!isRecord(value) || typeof value.type !== "string") return null;
-	if (value.type.startsWith("omp:chat-")) return parseChatWebviewMessage(value);
+	// `omp:chat-command` is the guest's own vocabulary (host consent), not a conversation command.
+	if (value.type.startsWith("omp:chat-") && value.type !== "omp:chat-command") return parseChatWebviewMessage(value);
 	if (value.type === "omp:terminal-link-validate" || value.type === "omp:terminal-link-open") return parseTerminalLinkRequest(value);
 	switch (value.type) {
 		case "omp:session-mode":
 			if (Object.keys(value).length !== 2 || (value.mode !== "chat" && value.mode !== "terminal")) return null;
 			return { type: "omp:session-mode", mode: value.mode };
+		case "omp:chat-command": {
+			const command = typeof value.command === "string" && Object.keys(value).length === 2 ? CHAT_COMMANDS[value.command] : undefined;
+			return command === undefined ? null : { type: "omp:chat-command", command };
+		}
 		case "omp:open-detail": {
 			if (value.kind === "agent") {
 				if (Object.keys(value).length !== 3 || !isNamedBoundaryText(value.agentId, MAX_DETAIL_AGENT_ID_LENGTH) || LONE_SURROGATE.test(value.agentId)) return null;

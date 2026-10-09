@@ -1,32 +1,52 @@
-import type { ConfigEdit, ConfigRecord, SettingsModel, SettingsScope } from "../../host/omp-settings-core";
+import type { ConfigRecord, SettingsModel, SettingsSnapshot } from "../../host/omp-settings-core";
+import { modelKey, selectorBase, selectorThinking } from "../../host/settings-pick-items.ts";
 import { isRecord } from "../../guards.ts";
 export function at(data: ConfigRecord, path: readonly string[]): unknown {
   let value: unknown = data;
   for (const key of path) { if (!isRecord(value) || !Object.hasOwn(value, key)) return undefined; value = value[key]; }
   return value;
 }
-export function text(value: unknown): string { return typeof value === "string" ? value : Array.isArray(value) ? value.filter(item => typeof item === "string").join("\n") : ""; }
-export function lines(value: string): string[] { return value.split(/\r?\n/).map(line => line.trim()).filter(Boolean); }
+/** A stored list or OMP pattern list as entries: arrays and comma-separated strings, as `normalizeModelPatternList` reads them. */
+export function patternList(value: unknown): string[] {
+  const parts = typeof value === "string" ? value.split(",") : Array.isArray(value) ? value.flatMap(item => typeof item === "string" ? item.split(",") : []) : [];
+  return parts.map(part => part.trim()).filter(Boolean);
+}
 /** `1 model`, `3 models`. */
 export function count(value: number, noun: string): string { return `${value} ${noun}${value === 1 ? "" : "s"}`; }
 export function sameList(left: readonly string[], right: readonly string[]): boolean { return left.length === right.length && left.every((item, index) => item === right[index]); }
-/** Append one pattern to an ordered one-per-line list without replacing or duplicating existing entries. */
-export function appendLine(list: string, candidate: string): string {
-  const entry = candidate.trim();
-  const current = lines(list);
-  return entry && !current.includes(entry) ? [...current, entry].join("\n") : current.join("\n");
+/** Ordered-list editing: moves stop at the ends, and an entry already in the list is never added twice. */
+export function moveEntry(list: readonly string[], index: number, step: number): string[] {
+  const other = index + step;
+  if (index < 0 || index >= list.length || other < 0 || other >= list.length) return [...list];
+  const next = [...list];
+  [next[index], next[other]] = [next[other]!, next[index]!];
+  return next;
 }
+export function withoutEntry(list: readonly string[], index: number): string[] { return list.filter((_, position) => position !== index); }
+export function withEntry(list: readonly string[], entry: string): string[] { return list.includes(entry) ? [...list] : [...list, entry]; }
 /** The native toggle edits the global disabled list only; values from higher layers are never copied into it. */
 export function disabledAgentsAfterToggle(globalList: unknown, agent: string, enabled: boolean): string[] {
-  const disabled = lines(text(globalList)).filter(name => name !== agent);
+  const disabled = patternList(globalList).filter(name => name !== agent);
   return enabled ? disabled : [...disabled, agent];
 }
-export function selectorBase(value: string): string { return value.replace(/:(?:auto|off|minimal|low|medium|high|xhigh)$/, ""); }
-export function roleChange(role: string, selector: string, effort: string, scope: SettingsScope): { edits: ConfigEdit[]; thinking?: string } {
-  const trimmed = selector.trim();
-  if (!trimmed) return { edits: [{ path: ["modelRoles", role], ...(scope === "project" ? { value: null } : {}) }] };
-  const value = !effort ? trimmed : effort === "inherit" || role === "default" && effort === "auto" ? selectorBase(trimmed) : `${selectorBase(trimmed)}:${effort}`;
-  return { edits: [{ path: ["modelRoles", role], value }], ...(role === "default" && effort === "auto" ? { thinking: "auto" } : {}) };
+export interface EntryStatus { readonly text: string; readonly ok: boolean }
+/** What a fallback or override entry resolves to now: a role's model, a provider's availability or a model's. */
+export function entryStatus(entry: string, snapshot: Pick<SettingsSnapshot, "models" | "roles" | "providers">): EntryStatus {
+  if (entry.startsWith("@")) {
+    const role = snapshot.roles.find(item => item.id === entry.slice(1));
+    if (!role) return { text: "unknown role", ok: false };
+    return role.resolved ? { text: `→ ${role.resolved}`, ok: true } : { text: role.selector ? "role has no available model" : "automatic", ok: !role.selector };
+  }
+  if (entry.endsWith("/*")) {
+    const provider = snapshot.providers.find(item => item.id === entry.slice(0, -2));
+    if (!provider) return { text: "unknown provider", ok: false };
+    return provider.available ? { text: "any model on this provider", ok: true } : { text: `${providerStatus(provider.status)}`, ok: false };
+  }
+  const model = snapshot.models.find(item => modelKey(item) === selectorBase(entry));
+  const thinking = selectorThinking(entry);
+  const pattern = entry.includes("*") || !entry.includes("/");
+  if (!model) return { text: pattern ? "pattern" : "not in the catalogue", ok: pattern };
+  return model.available ? { text: thinking ? `available · thinking ${thinking}` : "available", ok: true } : { text: "needs login", ok: false };
 }
 /** Usable models lead: the native hub's All scope lists available models only, so the browser defaults to them too. */
 export function filteredModels(models: readonly SettingsModel[], query: string, provider: string, kind: string, recent: boolean, availableOnly: boolean): SettingsModel[] {

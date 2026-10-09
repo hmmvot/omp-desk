@@ -14,7 +14,7 @@
  * host's first `omp:chat-snapshot` replaces it.
  */
 import type { ReactNode } from "react";
-import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from "react";
 import { guestTransport } from "./bridge";
 import type { GuestRouteKind } from "./bridge";
 import { chatTurnInProgress } from "../chat/model";
@@ -25,7 +25,10 @@ import { DetailView } from "./components/DetailView";
 import { HudDock } from "./components/HudDock";
 import { QueuedMessages } from "./components/QueuedMessages";
 import { DETAIL_META, parseDetailMeta } from "./detail-target";
-import { Transcript } from "./components/Transcript";
+import { Transcript, type TranscriptRewind } from "./components/Transcript";
+import { RewindBar } from "./components/Rewind";
+import { NAVIGATE_REFUSAL_SENTENCES, rewindTargets, undoOffer, type NavigationKind } from "../chat/rewind";
+import { REWIND_IDLE, reduceRewind, rewindBlockedReason } from "./lib/rewind-mode";
 import { parseDraftHandoffContent } from "./messages";
 import type { ChatClient } from "./lib/chat-client";
 import { chatBanner } from "./lib/chat-banner";
@@ -34,6 +37,7 @@ import { requestPanelAction } from "./lib/panel-actions";
 import { useChatSnapshot, useComposerPopupReport } from "./lib/use-chat";
 import { TerminalPane } from "./components/TerminalPane";
 import { sessionViewSnapshot, subscribeSessionView } from "./lib/session-view";
+import { adoptTranscriptToggles } from "./lib/transcript-toggles";
 
 export function App({ client }: { client: ChatClient }): ReactNode {
 	if (!guestTransport.hosted) {
@@ -141,6 +145,8 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 	const preferences = useSyncExternalStore(client.subscribe, client.getDisplayPreferences);
 	// Screen-reader paging is not a menu choice: it follows VS Code's `editor.accessibilitySupport`, which the host pushes with the display preferences.
 	const pagedHistory = preferences.accessibilitySupport;
+	// The host's remembered thinking and tool defaults (`omp.toggleThinking`, `omp.toggleToolOutput`).
+	useEffect(() => adoptTranscriptToggles(preferences.thinkingExpanded === true, preferences.toolsExpanded === true), [preferences.thinkingExpanded, preferences.toolsExpanded]);
 
 	useEffect(() => {
 		document.title = snapshot.header?.title ?? snapshot.state?.sessionName ?? "omp session";
@@ -153,6 +159,47 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 	const workUnknown = hostLost || snapshot.phase === "attaching" || snapshot.phase === "resyncing" || snapshot.phase === "failed";
 	const shown = workUnknown && snapshot.working ? { ...snapshot, working: false } : snapshot;
 	const readChild = useCallback((id: string, options?: { fromByte?: number; beforeId?: string }) => client.readSubagent(id, options), [client]);
+
+	// Rewind (ADR-0051): picking a prompt, one navigation at a time, the Undo offer and branch switches.
+	const [rewind, dispatchRewind] = useReducer(reduceRewind, REWIND_IDLE);
+	const [rewindNotice, setRewindNotice] = useState<string | null>(null);
+	const rewindBarRef = useRef<HTMLDivElement | null>(null);
+	const durable = useMemo(() => snapshot.entries.slice(0, snapshot.durableCount), [snapshot.entries, snapshot.durableCount]);
+	const targets = useMemo(() => rewindTargets(durable), [durable]);
+	const targetIds = useMemo(() => new Set(targets.map(target => target.id)), [targets]);
+	const undo = useMemo(() => undoOffer(durable, snapshot.leafId), [durable, snapshot.leafId]);
+	const rewindBlocked = hostLost ? NAVIGATE_REFUSAL_SENTENCES["not-live"] : rewindBlockedReason(snapshot);
+	useEffect(() => dispatchRewind({ type: "snapshot", targets, leafId: snapshot.leafId }), [targets, snapshot.leafId]);
+	const startRewind = useCallback((targetId?: string): void => {
+		setRewindNotice(targets.length === 0 ? "There is no earlier message in this conversation to rewind to." : null);
+		dispatchRewind({ type: "start", targets, leafId: snapshot.leafId, ...(targetId === undefined ? {} : { targetId }) });
+	}, [targets, snapshot.leafId]);
+	const navigate = useCallback(async (kind: NavigationKind, targetId: string, leafId: string | null, summarize: boolean): Promise<void> => {
+		dispatchRewind({ type: "submit", action: kind, targetId, leafId, summarize });
+		const answer = await client.navigate({ kind, targetId, expectedLeafId: leafId, summarize });
+		dispatchRewind({ type: "settled" });
+		setRewindNotice(answer.status === "done"
+			? (answer.raced === true ? "Done, but OMP also changed the conversation meanwhile. Check the transcript." : null)
+			: NAVIGATE_REFUSAL_SENTENCES[answer.status === "unconfirmed" ? "unconfirmed" : answer.reason ?? "failed"]);
+		if (answer.status !== "done" || answer.kind !== "rewind") requestPanelAction("focus-composer");
+	}, [client]);
+	const pickedId = rewind.kind === "picking" ? rewind.targetId : null;
+	const transcriptRewind = useMemo((): TranscriptRewind => ({
+		targets: rewindBlocked === null || rewind.kind === "picking" ? targetIds : new Set<string>(),
+		selectedId: pickedId,
+		branchPoints: snapshot.branches,
+		onPick: entryId => {
+			if (rewind.kind === "picking" && rewind.targetId === entryId && rewindBlocked === null) void navigate("rewind", entryId, rewind.leafId, false);
+			else if (rewind.kind === "picking") dispatchRewind({ type: "select", targets, targetId: entryId });
+			else startRewind(entryId);
+		},
+		...(rewindBlocked === null && rewind.kind !== "pending" ? { onSwitch: (tipId: string) => void navigate("switch", tipId, snapshot.leafId, false) } : {}),
+	}), [rewindBlocked, rewind, targetIds, pickedId, snapshot.branches, snapshot.leafId, targets, navigate, startRewind]);
+	// Picking owns the keyboard in the bar; leaving it returns focus to the composer.
+	const picking = rewind.kind === "picking";
+	useEffect(() => {
+		if (picking) rewindBarRef.current?.focus({ preventScroll: true });
+	}, [picking]);
 	const notice = hostLost
 		? { level: "warn", icon: "debug-disconnect", text: "Lost connection to the extension host — reconnecting. Your draft is kept." }
 		: restartOffered
@@ -178,9 +225,10 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 	return (
 		<div className="omp-chat">
 			{banners}
+			{/* One link-validation cache for the transcript and the rewind bar's changed files (a context only, no DOM). */}
+			<FileLinksProvider transport={guestTransport} cwd={snapshot.header?.cwd}>
 			<div className="omp-body">
 				<div className="omp-main">
-					<FileLinksProvider transport={guestTransport} cwd={snapshot.header?.cwd}>
 					<Transcript
 						toolCallDetail={preferences.toolCallDetail}
 						conversationKey={snapshot.header?.id ?? snapshot.epoch?.nonce ?? "chat"}
@@ -213,8 +261,8 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 						asyncPaused={snapshot.asyncPaused}
 						waitingForAnswer={snapshot.uiRequest !== null}
 						pagedHistory={pagedHistory}
+						rewind={transcriptRewind}
 					/>
-					</FileLinksProvider>
 				</div>
 			</div>
 			{/* Only panel-only composer/editor requests are unavailable on a bridge route. */}
@@ -227,8 +275,15 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 			<div className="omp-dock">
 				<HudDock model={snapshot} />
 				<QueuedMessages client={client} model={snapshot} />
-				<Composer client={client} snapshot={shown} progressAvailable={!workUnknown} />
+				<RewindBar mode={rewind} targets={targets} entries={durable} cwd={snapshot.header?.cwd} blocked={rewindBlocked} undo={undo} notice={rewindNotice} barRef={rewindBarRef}
+					onMove={to => dispatchRewind({ type: "move", targets, to })}
+					onSubmit={summarize => { if (rewind.kind === "picking") void navigate("rewind", rewind.targetId, rewind.leafId, summarize); }}
+					onCancel={() => { dispatchRewind({ type: "cancel" }); requestPanelAction("focus-composer"); }}
+					onUndo={() => { if (undo !== null) void navigate("undo", undo.from, snapshot.leafId, false); }}
+					onDismissNotice={() => setRewindNotice(null)} />
+				<Composer client={client} snapshot={shown} progressAvailable={!workUnknown} onRewind={startRewind} />
 			</div>
+			</FileLinksProvider>
 		</div>
 	);
 }
