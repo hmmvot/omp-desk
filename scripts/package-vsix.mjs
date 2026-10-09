@@ -2,7 +2,7 @@
 //
 // `vsce package` runs `vscode:prepublish` (the esbuild build), which reads
 // OMP_DESK_TARGET to ship only that architecture's node-pty prebuilds. The output is
-// `omp-desk-<target>-<version>.vsix` in the repository root.
+// `out/omp-desk-<target>-<version>.vsix`, next to the build output and ignored by Git.
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import path from "node:path";
@@ -18,8 +18,10 @@ if (!TARGETS.includes(target)) {
 const require = createRequire(import.meta.url);
 const vsceManifest = require.resolve("@vscode/vsce/package.json");
 const vsce = path.join(path.dirname(vsceManifest), "vsce");
+const { name, version } = require("../package.json");
+const output = path.join("out", `${name}-${target}-${version}.vsix`);
 
-const result = spawnSync(process.execPath, [vsce, "package", "--target", target, "--no-dependencies"], {
+const result = spawnSync(process.execPath, [vsce, "package", "--target", target, "--no-dependencies", "--out", output], {
   stdio: "inherit",
   env: { ...process.env, OMP_DESK_TARGET: target },
 });

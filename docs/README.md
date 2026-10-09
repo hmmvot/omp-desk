@@ -92,7 +92,7 @@ Use `product.md` for confirmed product intent, and `architecture.md` for the sys
 
 For a lasting technical choice with meaningful alternatives, write one ADR in `decisions/NNNN-short-title.md`, numbering from `0001` in sequence. ADR statuses are `proposed`, `accepted`, `rejected`, and `superseded`. Its title must name the chosen approach, not merely the subject. A new ADR supersedes an accepted decision; mark the old one `superseded`, link to its replacement, and preserve its original rationale. Templates are exempt from the dated/numbered filename convention. Do not create an ADR just to fill the directory.
 
-`docs/tmp/` is a local, Git-ignored workspace for drafts, plans, collected context, and task notes. Its contents are not current decisions. When a draft is ready for review, move the relevant content to `designs/` or `decisions/` as `proposed`. At task end, remove obsolete temporary material and promote lasting findings to permanent documents. The empty directory is intentionally not tracked.
+`.omp/workspace/` is the local, Git-ignored workspace for agents; see [AGENTS.md](../AGENTS.md) and the `README.md` inside it, which separates permanent records from temporary files under `tmp/`. Temporary contents are not current decisions. When a draft is ready for review, move the relevant content to `designs/` or `decisions/` as `proposed`. At task end, remove obsolete temporary material and promote lasting findings to permanent documents. The directory is intentionally not tracked.
 
 ## Required review
 

@@ -29,8 +29,8 @@ npm ci
 | `npm test` | Run every `src/**/*.test.ts` file with the Node test runner |
 | `npm run build` | Bundle the extension host, Webviews, host-control module and PTY broker into `out/` and `media/` |
 | `npm run watch` | Rebuild on change |
-| `npm run vsix` | Package a VSIX for the current platform with `vsce` |
-| `npm run vsix:x64`, `npm run vsix:arm64`, `npm run vsix:all` | Package per-architecture release VSIX files (each contains only its own `node-pty` prebuilds); see [docs/publishing.md](docs/publishing.md) |
+| `npm run vsix` | Package a VSIX for the current platform with `vsce` into `out/` |
+| `npm run vsix:x64`, `npm run vsix:arm64`, `npm run vsix:all` | Package per-architecture release VSIX files into `out/` (each contains only its own `node-pty` prebuilds); see [docs/publishing.md](docs/publishing.md) |
 
 Before opening a pull request, run `npm run typecheck`, `npm test` and `npm run build`.
 
@@ -38,7 +38,7 @@ Before opening a pull request, run `npm run typecheck`, `npm test` and `npm run 
 
 1. Run `npm run build`, then `npm run vsix`.
 2. Install the VSIX into a throwaway VS Code profile, not your everyday one:
-   `code --user-data-dir <scratch-dir>\data --extensions-dir <scratch-dir>\ext --install-extension <file>.vsix`, then start VS Code with the same two flags.
+   `code --user-data-dir <scratch-dir>\data --extensions-dir <scratch-dir>\ext --install-extension out\<file>.vsix`, then start VS Code with the same two flags.
 3. Open the **OMP Desk** view in the Activity Bar, add a folder and start a session.
 
 The extension writes a log to the **OMP Desk** channel of the Output panel and can print a diagnostics summary with **OMP: Show Diagnostics**.
@@ -48,7 +48,7 @@ The extension writes a log to the **OMP Desk** channel of the Output panel and c
 `scripts/test-vscode.ps1` starts a throwaway VS Code that has its own OMP state as well. That lets you try states your everyday OMP is not in, for example a first start with no provider login:
 
 ```powershell
-./scripts/test-vscode.ps1 -Name nologin -Vsix ./omp-desk-win32-x64-<version>.vsix -Folder <project folder>
+./scripts/test-vscode.ps1 -Name nologin -Vsix ./out/omp-desk-win32-x64-<version>.vsix -Folder <project folder>
 ./scripts/test-vscode.ps1 -Name nologin -Reset    # back to an OMP with no logins, settings or sessions
 ```
 

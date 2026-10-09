@@ -11,7 +11,8 @@ media/**/*.d.mts
 package-lock.json
 esbuild.mjs
 tsconfig.json
-*.vsix
+**/*.vsix
+.omp/**
 .gitignore
 AGENTS.md
 CONTRIBUTING.md

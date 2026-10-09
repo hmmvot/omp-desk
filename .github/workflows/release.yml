@@ -52,8 +52,8 @@ jobs:
         run: |
           version="${TAG#v}"
           gh release create "$TAG" \
-            "omp-desk-win32-x64-$version.vsix" \
-            "omp-desk-win32-arm64-$version.vsix" \
+            "out/omp-desk-win32-x64-$version.vsix" \
+            "out/omp-desk-win32-arm64-$version.vsix" \
             --verify-tag \
             --title "OMP Desk $version" \
             --notes-file "$RUNNER_TEMP/release-notes.md"

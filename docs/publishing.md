@@ -61,7 +61,7 @@ npm run vsix:all
 ```
 
 1. `npm run vsix:x64` and `npm run vsix:arm64` run `scripts/package-vsix.mjs`, which calls `vsce package --target <target> --no-dependencies` with `OMP_DESK_TARGET` set. `vscode:prepublish` runs `npm run build`, so the output always matches the sources; `esbuild.mjs` reads `OMP_DESK_TARGET` and copies only that target's `node-pty` prebuilds. `--no-dependencies` is correct because everything is bundled by esbuild and the `node-pty` package is copied into `out/pty/` by the build. Run `npm run build` again afterwards for an ordinary local build.
-2. Each command writes `omp-desk-<target>-<version>.vsix`. A package is built for one platform ([platform-specific extensions](https://code.visualstudio.com/api/working-with-extensions/publishing-extension#platform-specific-extensions)); VS Code 1.61+ selects the one matching the user's platform.
+2. Each command writes `out/omp-desk-<target>-<version>.vsix`. A package is built for one platform ([platform-specific extensions](https://code.visualstudio.com/api/working-with-extensions/publishing-extension#platform-specific-extensions)); VS Code 1.61+ selects the one matching the user's platform.
 3. Inspect each package before publishing (see [Verifying](#verifying)).
 4. Publish both packages to the Marketplace (see [Authentication](#authentication)).
 5. Tag the released commit `v<version>` and push the tag (`git tag v0.1.0`, `git push origin v0.1.0`). The [Release workflow](../.github/workflows/release.yml) then checks that the tag matches `version` in `package.json`, runs the quality gates, builds both VSIX files and creates the GitHub Release with them attached and the matching CHANGELOG section as its notes (`scripts/release-notes.mjs`). It does not publish to the Marketplace.

@@ -893,7 +893,7 @@
     "vscode:prepublish": "npm run build",
     "typecheck": "tsc -p tsconfig.json",
     "test": "node --test \"src/**/*.test.ts\"",
-    "vsix": "vsce package --no-dependencies",
+    "vsix": "vsce package --no-dependencies --out out",
     "vsix:x64": "node scripts/package-vsix.mjs win32-x64",
     "vsix:arm64": "node scripts/package-vsix.mjs win32-arm64",
     "vsix:all": "npm run vsix:x64 && npm run vsix:arm64"
