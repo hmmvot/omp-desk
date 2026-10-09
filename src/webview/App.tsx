@@ -28,7 +28,7 @@ import { DETAIL_META, parseDetailMeta } from "./detail-target";
 import { Transcript, type TranscriptRewind } from "./components/Transcript";
 import { RewindBar } from "./components/Rewind";
 import { NAVIGATE_REFUSAL_SENTENCES, rewindTargets, undoOffer, type NavigationKind } from "../chat/rewind";
-import { REWIND_IDLE, reduceRewind, rewindBlockedReason } from "./lib/rewind-mode";
+import { REWIND_IDLE, conversationMovedPastLeaf, reduceRewind, rewindBlockedReason } from "./lib/rewind-mode";
 import { parseDraftHandoffContent } from "./messages";
 import type { ChatClient } from "./lib/chat-client";
 import { chatBanner } from "./lib/chat-banner";
@@ -167,7 +167,8 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 	const durable = useMemo(() => snapshot.entries.slice(0, snapshot.durableCount), [snapshot.entries, snapshot.durableCount]);
 	const targets = useMemo(() => rewindTargets(durable), [durable]);
 	const targetIds = useMemo(() => new Set(targets.map(target => target.id)), [targets]);
-	const undo = useMemo(() => undoOffer(durable, snapshot.leafId), [durable, snapshot.leafId]);
+	const movedOn = conversationMovedPastLeaf(snapshot);
+	const undo = useMemo(() => movedOn ? null : undoOffer(durable, snapshot.leafId), [movedOn, durable, snapshot.leafId]);
 	const rewindBlocked = hostLost ? NAVIGATE_REFUSAL_SENTENCES["not-live"] : rewindBlockedReason(snapshot);
 	useEffect(() => dispatchRewind({ type: "snapshot", targets, leafId: snapshot.leafId }), [targets, snapshot.leafId]);
 	const startRewind = useCallback((targetId?: string): void => {

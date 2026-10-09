@@ -704,6 +704,18 @@ describe("dialogs and presentation", () => {
 		assert.equal(session.model.header?.title ?? null, null, "setTitle does not rename the tab");
 	});
 
+	it("shows an extension's notify warning but not its info, which is per-call commentary the working status covers", async () => {
+		const { session, channel } = await boot({ child: { sessionFile: "D:\\scratch\\ui4.jsonl", entries: [], leafId: null } });
+		channel.emit({ type: "extension_ui_request", id: "i", method: "notify", message: "Reading the parser", notifyType: "info" });
+		channel.emit({ type: "extension_ui_request", id: "n", method: "notify", message: "No type given" });
+		await tick();
+		const ignored = session.model.extensionNotice;
+		assert.equal(ignored, null, "info, and notify without a type, are not shown");
+		channel.emit({ type: "extension_ui_request", id: "w", method: "notify", message: "Index is stale", notifyType: "warning" });
+		await tick();
+		assert.equal(session.model.extensionNotice?.message, "Index is stale");
+	});
+
 	it("does not forward agent_end.messages or assistantMessageEvent", async () => {
 		const { channel, outputs } = await boot({ child: { sessionFile: "D:\\scratch\\st.jsonl", entries: [], leafId: null } });
 		outputs.length = 0;

@@ -74,7 +74,7 @@ For how this works, see the [architecture](docs/architecture.md).
 - `Ctrl+T` shows or hides all thinking, and `Ctrl+O` expands or collapses all tool calls. Every Chat remembers both choices.
 - **Compact…** in the context popover, **Export as HTML** and **Share** are in the editor title menu. `Alt+click` the model or thinking chip to cycle it (`Ctrl+Shift+M`, `Ctrl+Shift+U`).
 - Terminal-only slash commands such as `/hotkeys` or `/settings` are never sent to the model. Chat opens the VS Code equivalent or says where the command works.
-- Status lines and notices from OMP extensions appear around the composer.
+- Status lines and warnings from OMP extensions appear around the composer; their informational notices are not shown.
 - **Rewind** goes back to one of your prompts in place and puts it into the composer to edit and send again: `Esc` `Esc` in an empty composer, **Rewind to here** on a prompt, `/rewind` or `/branch`, or **OMP: Rewind Conversation…**. **Undo** returns to where you were, and a marker where the conversation split switches between your branches.
 - Rewind never restores files; it lists the files changed after that point. A chat started by an older OMP Desk must be restarted before it can rewind.
 - Slash commands suggest their arguments.

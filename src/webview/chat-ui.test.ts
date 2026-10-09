@@ -3539,7 +3539,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
-		await t.test("extension widgets render at their placement as plain text, and an info or warning notice is dismissible", async () => {
+		await t.test("extension widgets render at their placement as plain text, and a warning notice is dismissible", async () => {
 			await reset("quick-extension-surfaces");
 			const frame = (value: Record<string, unknown>) => ui.evaluate(`window.ui.receive({type:'omp:chat-event',epoch:window.ui.current().epoch,frame:${JSON.stringify(value)}})`);
 			await frame({ type: "ui_widget", key: "build", lines: ["Build: <b>green</b>", "2 warnings"] });
@@ -3558,8 +3558,8 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.equal(await ui.evaluate("document.querySelector('.omp-extension-notice-text').textContent"), "Index is stale");
 			await ui.evaluate("document.querySelector('.omp-extension-notice [aria-label=\"Dismiss notice\"]').click()");
 			await ui.wait("!document.querySelector('.omp-extension-notice')");
-			await frame({ type: "ui_notify", level: "info", message: "Index rebuilt" });
-			await ui.wait("document.querySelector('.omp-extension-notice--info .omp-extension-notice-text')?.textContent==='Index rebuilt'");
+			await frame({ type: "ui_notify", level: "warning", message: "Index rebuilt" });
+			await ui.wait("document.querySelector('.omp-extension-notice--warning .omp-extension-notice-text')?.textContent==='Index rebuilt'");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
@@ -3798,6 +3798,11 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await pushRewind({ entries: [...rewindRows.slice(0, 2), marker], durableCount: 3, leafId: "m1" });
 			await ui.wait("document.querySelector('.omp-rewind-bar--undo')");
 			assert.equal(await ui.evaluate("document.querySelector('.omp-rewind-bar--undo').textContent"), "RewoundUndo");
+			// A prompt sent from here moves the conversation on: the bar goes at once, not when the turn is saved.
+			await pushRewind({ entries: [...rewindRows.slice(0, 2), marker], durableCount: 3, leafId: "m1", working: true });
+			await ui.wait("!document.querySelector('.omp-rewind-bar--undo')");
+			await pushRewind({ entries: [...rewindRows.slice(0, 2), marker], durableCount: 3, leafId: "m1" });
+			await ui.wait("document.querySelector('.omp-rewind-bar--undo')");
 			await ui.evaluate("[...document.querySelectorAll('.omp-rewind-bar--undo button')].find(button=>button.textContent==='Undo').click()");
 			await ui.wait("window.sent.filter(message=>message.type==='omp:chat-navigate').length===2");
 			assert.deepEqual((await navigations())[1], { ...(await navigations())[1]!, kind: "undo", targetId: "a2", expectedLeafId: "m1", summarize: false });

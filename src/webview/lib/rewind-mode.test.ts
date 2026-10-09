@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createChatModel, type ChatModel } from "../../chat/model.ts";
 import { NAVIGATE_REFUSAL_SENTENCES, type RewindTarget } from "../../chat/rewind.ts";
-import { REWIND_IDLE, reduceRewind, rewindBlockedReason, type RewindMode } from "./rewind-mode.ts";
+import { REWIND_IDLE, conversationMovedPastLeaf, reduceRewind, rewindBlockedReason, type RewindMode } from "./rewind-mode.ts";
 
 const target = (id: string): RewindTarget => ({ id, parentId: null, preview: id, images: 0, timestamp: "" });
 const targets = ["u1", "u2", "u3"].map(target);
@@ -67,5 +67,14 @@ describe("rewind availability on the page", () => {
 		assert.equal(rewindBlockedReason(live({ maintenance: { action: "compact", status: "working" } })), NAVIGATE_REFUSAL_SENTENCES.compacting);
 		assert.equal(rewindBlockedReason(live({ commands: [] })), NAVIGATE_REFUSAL_SENTENCES.unsupported);
 		assert.equal(rewindBlockedReason(live({ commands: [{ name: "omp-desk-navigate", source: "prompt" }] })), NAVIGATE_REFUSAL_SENTENCES.unsupported, "a same-named template is not the command");
+	});
+
+	it("withdraws Undo once a sent prompt moves the conversation on, before the turn is saved", () => {
+		const pending = (rows: readonly [string, { hidden: boolean; unsaved: boolean }][]) => new Map(rows) as unknown as ChatModel["pending"];
+		assert.equal(conversationMovedPastLeaf(live()), false, "idle at the rewind: Undo stays");
+		assert.equal(conversationMovedPastLeaf(live({ pending: pending([["p1", { hidden: false, unsaved: false }]]) })), true, "the sent prompt, not yet saved");
+		assert.equal(conversationMovedPastLeaf(live({ working: true })), true, "the turn it started");
+		assert.equal(conversationMovedPastLeaf(live({ state: { queuedMessageCount: 1 } as ChatModel["state"] })), true, "a queued prompt");
+		assert.equal(conversationMovedPastLeaf(live({ pending: pending([["h", { hidden: true, unsaved: false }], ["u", { hidden: false, unsaved: true }]]) })), false, "hidden extension rows and a prompt OMP never wrote are not a new turn");
 	});
 });

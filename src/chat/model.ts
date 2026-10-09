@@ -105,10 +105,10 @@ export interface ChatWidget {
 	placement: "aboveEditor" | "belowEditor";
 }
 
-/** The latest informational `notify` of an OMP extension; `id` changes per notice so a repeat shows again. */
+/** The latest `notify` warning of an OMP extension; `id` changes per notice so a repeat shows again. */
 export interface ExtensionNotice {
 	id: number;
-	level: "info" | "warning";
+	level: "warning";
 	message: string;
 }
 
@@ -350,8 +350,8 @@ export type ChatEventFrame = SubagentFrame | NativeEventFrame
 	| { type: "command_output"; text: string }
 	| { type: "ui_status"; key: string; text: string | null }
 	| { type: "ui_widget"; key: string; lines: readonly string[] | null; placement?: "aboveEditor" | "belowEditor" }
-	/** An extension's informational `notify` (errors go to the host's error message instead). */
-	| { type: "ui_notify"; level: "info" | "warning"; message: string }
+	/** An extension's `notify` warning (errors go to the host's error message; `info` is not shown). */
+	| { type: "ui_notify"; level: "warning"; message: string }
 	| { type: "ui_editor_text"; text: string }
 	| { type: "queue_update"; queuedMessageCount: number; queuedMessages: ChatQueuedMessages }
 	/** Host-normalized `get_state` refresh: replaces the footer state. */

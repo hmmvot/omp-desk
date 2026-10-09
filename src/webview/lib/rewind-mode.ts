@@ -7,7 +7,7 @@
  * the user did not see.
  */
 import { NAVIGATE_COMMAND, NAVIGATE_REFUSAL_SENTENCES, type NavigationKind, type RewindTarget } from "../../chat/rewind.ts";
-import type { ChatModel } from "../../chat/model.ts";
+import { chatTurnInProgress, type ChatModel } from "../../chat/model.ts";
 
 /**
  * Why this page cannot rewind now, in the host's own sentences, or null. The same facts the host checks
@@ -20,6 +20,18 @@ export function rewindBlockedReason(model: ChatModel): string | null {
 	if (model.working || model.uiRequest !== null || !model.settled || model.asyncPaused || (model.state?.queuedMessageCount ?? 0) > 0) return NAVIGATE_REFUSAL_SENTENCES.busy;
 	if (!model.commands.some(command => command.name === NAVIGATE_COMMAND && command.source === "extension")) return NAVIGATE_REFUSAL_SENTENCES.unsupported;
 	return null;
+}
+
+/**
+ * The page offers Undo only while the conversation still ends at the rewind: a prompt the user sent (an unsaved
+ * visible row, a queued message or a turn in progress) has moved it on, and the marker leaves the leaf as soon as
+ * that turn is saved, so the bar goes away now rather than lingering disabled until then.
+ */
+export function conversationMovedPastLeaf(model: ChatModel): boolean {
+	if (chatTurnInProgress(model) || (model.state?.queuedMessageCount ?? 0) > 0) return true;
+	// An `unsaved` row is one OMP never wrote (it survives a rewind, unanchored), not a new prompt.
+	for (const row of model.pending.values()) if (!row.hidden && !row.unsaved) return true;
+	return false;
 }
 
 export type RewindMode =
