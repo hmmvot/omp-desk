@@ -316,6 +316,16 @@
         "category": "OMP"
       },
       {
+        "command": "omp.webLink.openInEditor",
+        "title": "Open in Editor",
+        "category": "OMP"
+      },
+      {
+        "command": "omp.webLink.openInBrowser",
+        "title": "Open in Browser",
+        "category": "OMP"
+      },
+      {
         "command": "omp.refreshSessions",
         "title": "Refresh Sessions",
         "category": "OMP",
@@ -583,6 +593,14 @@
         {
           "command": "omp.fileLink.revealInOs",
           "when": "false"
+        },
+        {
+          "command": "omp.webLink.openInEditor",
+          "when": "false"
+        },
+        {
+          "command": "omp.webLink.openInBrowser",
+          "when": "false"
         }
       ],
       "webview/context": [
@@ -600,6 +618,16 @@
           "command": "omp.fileLink.revealInOs",
           "when": "webviewId =~ /^omp[.]session/ && webviewSection == ompFileLink",
           "group": "navigation@3"
+        },
+        {
+          "command": "omp.webLink.openInEditor",
+          "when": "webviewId =~ /^omp[.](session|detail)/ && webviewSection == ompWebLink",
+          "group": "navigation@1"
+        },
+        {
+          "command": "omp.webLink.openInBrowser",
+          "when": "webviewId =~ /^omp[.](session|detail)/ && webviewSection == ompWebLink",
+          "group": "navigation@2"
         }
       ],
       "editor/context": [

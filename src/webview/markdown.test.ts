@@ -105,7 +105,8 @@ test("file links add no URL scheme: only http(s) destinations become web links a
 	assert.equal(text(linked), "web mail bad data cmd vs file");
 	assert.doesNotMatch(linked, /<a /, "the page never renders a navigating anchor");
 	assert.deepEqual([...linked.matchAll(/data-web-url="([^"]*)"/g)].map(match => match[1]), ["https://example.test/a.ts"]);
-	assert.match(linked, /<span class="omp-web-link" role="link" tabindex="0" data-web-url="https:\/\/example\.test\/a\.ts" title="https:\/\/example\.test\/a\.ts\nOpen in editor · Ctrl\+Click to open in browser">web<\/span>/);
+	assert.deepEqual([...linked.matchAll(/data-vscode-context="(\{&quot;webviewSection&quot;:&quot;ompWebLink[^"]*)"/g)].map(match => JSON.parse(match[1]!.replaceAll("&quot;", "\"")).ompWebLinkUrl), ["https://example.test/a.ts"], "the right-click menu opens the URL a click opens");
+	assert.match(linked, /<span class="omp-web-link" role="link" tabindex="0" data-web-url="https:\/\/example\.test\/a\.ts"[^>]*>web<\/span>/);
 	assert.deepEqual([...linked.matchAll(/data-file-target="([^"]*)"/g)].map(match => match[1]), ["file:///D:/repo/a.ts#L3"], "a file: URL is a file reference, nothing else is");
 	assert.doesNotMatch(linked, /javascript:|data:text|command:|vscode:|mailto:/);
 });

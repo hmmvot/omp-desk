@@ -3,7 +3,7 @@ import { stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir, hostname } from "node:os";
-import { FILE_LINK_MENU_SECTION, isTerminalLinkTarget, webLinkUrl } from "../webview/terminal-links.ts";
+import { FILE_LINK_MENU_SECTION, WEB_LINK_MENU_SECTION, isTerminalLinkTarget, webLinkUrl } from "../webview/terminal-links.ts";
 import type { TerminalLinkRequest, TerminalLinkValidation, WebLinkMode } from "../webview/terminal-links.ts";
 
 /** The position a target may carry after its path: group 1 is the line, group 2 the column. */
@@ -18,6 +18,12 @@ export function fileLinkMenuTarget(argument: unknown): { readonly webview: strin
 	const { webview, webviewSection, ompFileLinkTarget } = argument as Record<string, unknown>;
 	if (webviewSection !== FILE_LINK_MENU_SECTION || typeof webview !== "string" || !isTerminalLinkTarget(ompFileLinkTarget)) return null;
 	return { webview, target: ompFileLinkTarget };
+}
+/** The `http(s)` URL a web link's context-menu command was invoked with, re-validated as a click's would be, or `null`. */
+export function webLinkMenuUrl(argument: unknown): string | null {
+	if (typeof argument !== "object" || argument === null) return null;
+	const { webviewSection, ompWebLinkUrl } = argument as Record<string, unknown>;
+	return webviewSection === WEB_LINK_MENU_SECTION && typeof ompWebLinkUrl === "string" ? webLinkUrl(ompWebLinkUrl) : null;
 }
 /**
  * Resolve a terminal file reference against `cwd` to an absolute local path, or `null`.
