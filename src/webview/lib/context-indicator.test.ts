@@ -25,6 +25,13 @@ describe("native context details", () => {
 		}
 		assert.equal(sessionCostLabel(parseFooterMetadata({ ...metadata, sessionCost: 0.42 })?.sessionCost), "Session cost $0.42");
 	});
+	it("preserves reported model availability without inventing it from absent or malformed metadata", () => {
+		assert.equal(parseFooterMetadata(metadata)?.hasAvailableModels, undefined);
+		for (const hasAvailableModels of [true, false]) {
+			assert.equal(parseFooterMetadata({ ...metadata, hasAvailableModels })?.hasAvailableModels, hasAvailableModels);
+		}
+		assert.equal(parseFooterMetadata({ ...metadata, hasAvailableModels: "false" }), null);
+	});
 	it("formats reset countdowns across minute, hour and day boundaries from native timestamps", () => {
 		const now = 1800000000000;
 		const label = (minutes: number): string => quotaWindowLabel({ label: "5h", usedPercent: 7, resetsAt: now + minutes * 60000 }, now);

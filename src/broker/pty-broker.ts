@@ -776,6 +776,7 @@ export class PtyBroker {
 			state: this.childExit === null ? "running" : "exited",
 			exitCode: this.childExit?.code ?? null,
 			signal: this.childExit?.signal ?? null,
+			...(this.rpc !== null && this.childExit !== null ? { stderrTail: this.rpc.stderrTail() } : {}),
 			// An rpc child has no screen: the record's geometry is reported and `alt` is false.
 			cols: screen?.cols ?? this.options.cols,
 			rows: screen?.rows ?? this.options.rows,

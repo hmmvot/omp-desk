@@ -50,7 +50,7 @@ export * from "./chat-messages.ts";
  * speaks another version, so a surviving page of an older build is never driven
  * by this host.
  */
-export const GUEST_PROTOCOL_VERSION = 8;
+export const GUEST_PROTOCOL_VERSION = 9;
 
 /**
  * Paths the completion popup may show for one query. The extension host asks
@@ -853,9 +853,9 @@ export interface GuestChatCommandMessage {
 	command: GuestChatCommand;
 }
 
-export type GuestChatCommand = "compact" | "cycle-model" | "cycle-thinking" | "export-html" | "share";
+export type GuestChatCommand = "compact" | "cycle-model" | "cycle-thinking" | "export-html" | "share" | "provider-login";
 
-const CHAT_COMMANDS: Record<string, GuestChatCommand> = { compact: "compact", "cycle-model": "cycle-model", "cycle-thinking": "cycle-thinking", "export-html": "export-html", share: "share" };
+const CHAT_COMMANDS: Record<string, GuestChatCommand> = { compact: "compact", "cycle-model": "cycle-model", "cycle-thinking": "cycle-thinking", "export-html": "export-html", share: "share", "provider-login": "provider-login" };
 
 /** `StopReason` of the newest assistant reply, as the wire package defines it. */
 export type GuestTurnOutcome = "stop" | "length" | "toolUse" | "error" | "aborted";

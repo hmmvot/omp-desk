@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Provider login is easy to find before the first session: Sessions shows **Log in to a model provider to start** when the default OMP profile has no available models. Chat's model chip becomes **Log In to Provider** when its own profile has no models, and the model picker always offers **Log In to Provider…** to add another provider.
+
+### Changed
+
+- A compaction shows in Chat as it does in the terminal UI: a rule across the transcript that cuts off the summarized history, labelled with the amount (for example **Compacted · 400k → 47.8k tokens**); click it to read the summary. The unclear "context-full · complete" line is gone; only a cancelled or failed pass leaves a short line.
+- **Compact…** in the context popover also works while a turn runs, as `/compact` does in the terminal UI: OMP interrupts the turn, compacts, then continues it. It is unavailable only while a compaction is already running.
+
+### Fixed
+
+- Chat explains an OMP process that exits on its own with its exit code and bounded stderr text instead of only saying the session stopped. A "No default model selected" refusal offers **Log In to Provider** for that session's profile; other startup failures show their own reason. After configuring a provider, Resume uses the same tab.
+- In the composer's command, argument and file suggestions, Up and Down now scroll the list to the selected item. Before, the selection could move past the visible part of a long list, so you could not see what Enter would insert.
+- Restored Chat tabs can receive large transcripts, screenshots and tool-result rows after Reload Window without overflowing the authenticated bridge's bounded outbound queue. Snapshot delivery uses socket backpressure and bounded authenticated fragments, closes non-reading peers within a finite write deadline, and explains repeated connection failures instead of reconnecting silently forever.
+- **OMP: Log In to Provider…** works without an open session: it opens `omp login` for the default profile, or asks which profile when your sessions use more than one. Before, it refused with "Open a managed OMP session first", which left a new user with no way to log in before the first session could start.
+
 ## [0.2.0] - 2026-10-09
 
 ### Added

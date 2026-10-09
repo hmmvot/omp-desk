@@ -57,6 +57,7 @@ export function childStatusOf(status: PtyStatusPayload): RpcChildStatus {
 		state: status.state,
 		pid: status.nativePid > 0 ? status.nativePid : null,
 		exitCode: status.exitCode,
+		...(status.stderrTail === undefined ? {} : { stderrTail: status.stderrTail }),
 	};
 }
 
@@ -211,7 +212,7 @@ export class RpcHandle extends BrokerHandle<BrokerHandleEvent> implements RpcCha
 				return;
 			case "state": {
 				super.handleFrame(frame);
-				this.emitChannel({ type: "child", status: childStatusOf(frame.status) });
+				if (!this.stopRequested) this.emitChannel({ type: "child", status: childStatusOf(frame.status) });
 				if (frame.status.state === "exited") this.closeChannel(this.stopRequested ? "stopped" : "child-exited");
 				return;
 			}

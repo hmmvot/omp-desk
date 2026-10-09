@@ -22,6 +22,7 @@ export interface RpcChildStatus {
 	state: "running" | "exited" | "unknown";
 	pid: number | null;
 	exitCode: number | null;
+	stderrTail?: string;
 }
 
 /** Result of one broker attach; the replay lines follow as `line` events. */

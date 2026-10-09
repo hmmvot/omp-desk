@@ -100,6 +100,7 @@ export class RpcChild {
 	private discarding = false;
 	private droppedLines = 0;
 	private stderrText = "";
+	private stderrEscape: "text" | "escape" | "escape-intermediate" | "csi" | "string" | "string-escape" = "text";
 	private ready: string | null = null;
 	private protocol: 1 | 2 | null = null;
 	private negotiateTimer: NodeJS.Timeout | null = null;
@@ -109,6 +110,7 @@ export class RpcChild {
 	private finished = false;
 	private exitTimer: NodeJS.Timeout | undefined;
 	private stdoutEnded = false;
+	private stderrEnded = false;
 	private exitInfo: { readonly code: number | null; readonly signal: NodeJS.Signals | null } | null = null;
 
 	constructor(proc: ChildProcess, hooks: RpcChildHooks, ring: RpcLineRing) {
@@ -125,6 +127,10 @@ export class RpcChild {
 		});
 		proc.stderr?.setEncoding("utf8");
 		proc.stderr?.on("data", (chunk: string) => this.takeStderr(chunk));
+		proc.stderr?.on("end", () => {
+			this.stderrEnded = true;
+			this.maybeFinish();
+		});
 		// A dead stdin pipe surfaces as an error on the stream; the write callback reports it.
 		proc.stdin?.on("error", () => undefined);
 		proc.once("exit", (code, signal) => {
@@ -298,14 +304,44 @@ export class RpcChild {
 	}
 
 	private takeStderr(chunk: string): void {
-		const combined = this.stderrText + chunk;
-		this.stderrText =
-			combined.length > PTY_RPC_STDERR_TAIL_BYTES ? combined.slice(combined.length - PTY_RPC_STDERR_TAIL_BYTES) : combined;
-		this.hooks.onStderr(chunk);
+		// Stateful stripping keeps split CSI/OSC/DCS sequences out of the diagnostic tail.
+		let text = "";
+		for (const char of chunk) {
+			const code = char.charCodeAt(0);
+			switch (this.stderrEscape) {
+				case "escape":
+					this.stderrEscape = char === "[" ? "csi" : "]PX^_".includes(char) ? "string" : code >= 0x20 && code <= 0x2f ? "escape-intermediate" : "text";
+					break;
+				case "escape-intermediate":
+					if (code >= 0x30 && code <= 0x7e) this.stderrEscape = "text";
+					break;
+				case "csi":
+					if (code >= 0x40 && code <= 0x7e) this.stderrEscape = "text";
+					break;
+				case "string":
+					if (char === "\x07" || char === "\x9c") this.stderrEscape = "text";
+					else if (char === "\x1b") this.stderrEscape = "string-escape";
+					break;
+				case "string-escape":
+					this.stderrEscape = char === "\\" ? "text" : "string";
+					break;
+				case "text":
+					if (char === "\x1b") this.stderrEscape = "escape";
+					else if (char === "\x9b") this.stderrEscape = "csi";
+					else if ("\x90\x98\x9d\x9e\x9f".includes(char)) this.stderrEscape = "string";
+					else if (char === "\n" || char === "\t" || code >= 0x20 && !(code >= 0x7f && code <= 0x9f)) text += char;
+			}
+		}
+		const bytes = Buffer.from(this.stderrText + text);
+		let start = Math.max(0, bytes.length - PTY_RPC_STDERR_TAIL_BYTES);
+		// Do not turn a clipped UTF-8 character into a replacement character.
+		while (start < bytes.length && (bytes[start]! & 0xc0) === 0x80) start += 1;
+		this.stderrText = bytes.subarray(start).toString("utf8");
+		if (text) this.hooks.onStderr(text);
 	}
 
 	private maybeFinish(): void {
-		if (this.exitInfo !== null && this.stdoutEnded) this.finish();
+		if (this.exitInfo !== null && this.stdoutEnded && this.stderrEnded) this.finish();
 	}
 
 	private finish(): void {

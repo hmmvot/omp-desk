@@ -43,6 +43,21 @@ Before opening a pull request, run `npm run typecheck`, `npm test` and `npm run 
 
 The extension writes a log to the **OMP Desk** channel of the Output panel and can print a diagnostics summary with **OMP: Show Diagnostics**.
 
+### Test environments with their own OMP state
+
+`scripts/test-vscode.ps1` starts a throwaway VS Code that has its own OMP state as well. That lets you try states your everyday OMP is not in, for example a first start with no provider login:
+
+```powershell
+./scripts/test-vscode.ps1 -Name nologin -Vsix ./omp-desk-win32-x64-<version>.vsix -Folder <project folder>
+./scripts/test-vscode.ps1 -Name nologin -Reset    # back to an OMP with no logins, settings or sessions
+```
+
+Each `-Name` keeps VS Code data, extensions and an OMP directory under `%LOCALAPPDATA%\omp-desk-test\<name>`. The script points OMP's default profile there with `PI_CODING_AGENT_DIR`. It is the default profile that OMP Desk launches sessions in; `OMP_PROFILE` would not work, because Desk always passes an explicit `--profile`.
+
+The launched VS Code also does not inherit the provider API keys from your environment, so it sees only what was logged in inside the test environment. Pass `-KeepProviderKeys` to keep them.
+
+A new environment starts with settings that skip VS Code's first-run prompts (workspace trust, AI sign-in, welcome page). Keep the root inside your user profile: OMP Desk refuses to start sessions when its storage sits under a folder other users can modify, such as a folder created directly under `C:\`. `-RemoteDebuggingPort` opens a DevTools port for automated UI checks. `-ResetVsCode` also clears VS Code and OMP Desk storage. Run `Get-Help ./scripts/test-vscode.ps1 -Detailed` for every option.
+
 ## Documentation and design conventions
 
 Project documentation lives in [`docs/`](docs/README.md): current architecture, product requirements, design documents and architecture decision records (ADRs). Start with [docs/README.md](docs/README.md); it defines the templates and naming conventions.

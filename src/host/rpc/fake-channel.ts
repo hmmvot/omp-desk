@@ -52,6 +52,8 @@ export class FakeRpcChannel implements RpcChannel {
 	ready: string | null = READY_LINE;
 	rpcProtocol: 1 | 2 | null = 2;
 	childState: RpcChildStatus["state"] = "running";
+	childExitCode = 0;
+	childStderrTail: string | undefined;
 	writeError: RpcWriteErrorCode | null = null;
 	attachError = false;
 	autoRespond = true;
@@ -105,7 +107,7 @@ export class FakeRpcChannel implements RpcChannel {
 			pinnedOverflow: false,
 			rpcProtocol: this.rpcProtocol,
 			ready: this.ready,
-			child: { state: this.childState, pid: 1234, exitCode: null },
+			child: { state: this.childState, pid: 1234, exitCode: this.childState === "exited" ? this.childExitCode : null, ...(this.childStderrTail === undefined ? {} : { stderrTail: this.childStderrTail }) },
 		};
 		queueMicrotask(() => {
 			for (const line of replay) this.#deliver({ type: "line", seq: line.seq, line: line.line });
@@ -150,9 +152,11 @@ export class FakeRpcChannel implements RpcChannel {
 		this.#deliver({ type: "closed", reason });
 	}
 
-	exitChild(): void {
+	exitChild(exitCode = 0, stderrTail?: string): void {
 		this.childState = "exited";
-		this.#deliver({ type: "child", status: { state: "exited", pid: 1234, exitCode: 0 } });
+		this.childExitCode = exitCode;
+		this.childStderrTail = stderrTail;
+		this.#deliver({ type: "child", status: { state: "exited", pid: 1234, exitCode, ...(stderrTail === undefined ? {} : { stderrTail }) } });
 	}
 
 	commandsOfType(type: string): Record<string, unknown>[] {

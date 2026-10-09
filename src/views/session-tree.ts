@@ -629,7 +629,17 @@ export class EmptySessionTreeItem extends vscode.TreeItem {
 	}
 }
 
-export type LauncherTreeItem = WorkspaceFolderTreeItem | SessionTreeItem | EmptySessionTreeItem;
+/** A default-profile onboarding action, not a session or folder. */
+export class ProviderLoginTreeItem extends vscode.TreeItem {
+	constructor() {
+		super("Log in to a model provider to start", vscode.TreeItemCollapsibleState.None);
+		this.id = "omp.providerLogin";
+		this.iconPath = new vscode.ThemeIcon("account");
+		this.command = { command: "omp.loginProvider", title: "Log In to Provider" };
+	}
+}
+
+export type LauncherTreeItem = WorkspaceFolderTreeItem | SessionTreeItem | EmptySessionTreeItem | ProviderLoginTreeItem;
 
 /**
  * Catalog-first projection. Membership and local activity are synchronous;
@@ -669,6 +679,8 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 	#conversationsActive = 0;
 	#revealLocks = 0;
 	#projectionPending = false;
+	readonly #providerLogin = new ProviderLoginTreeItem();
+	#providerLoginRequired = false;
 
 	constructor(source: SessionLauncherSource, options: {
 		readonly now?: () => number;
@@ -677,6 +689,13 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 		this.#source = source;
 		this.#now = options.now ?? (() => Date.now());
 		this.#onObservationError = options.onObservationError ?? console.error;
+	}
+
+	setProviderLoginRequired(required: boolean): void {
+		if (this.#disposed || this.#providerLoginRequired === required) return;
+		this.#providerLoginRequired = required;
+		this.#rootVersion++;
+		this.#changes.fire();
 	}
 
 	refresh(options: { readonly ownership?: boolean } = {}): void {
@@ -764,7 +783,7 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 				this.#servedRoot = version;
 				this.#served.fire();
 			});
-			return [...this.#items];
+			return this.#providerLoginRequired ? [this.#providerLogin, ...this.#items] : [...this.#items];
 		}
 		if (!(element instanceof WorkspaceFolderTreeItem)) return [];
 		const version = this.#folderVersions.get(element.folderId);
@@ -780,7 +799,7 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 	getTreeItem(element: LauncherTreeItem): vscode.TreeItem { return element; }
 
 	getParent(element: LauncherTreeItem): LauncherTreeItem | undefined {
-		if (element instanceof WorkspaceFolderTreeItem) return undefined;
+		if (element instanceof WorkspaceFolderTreeItem || element instanceof ProviderLoginTreeItem) return undefined;
 		if (element instanceof EmptySessionTreeItem) return this.#items.find(folder => folder.folderId === element.folderId);
 		return this.#items.find(folder => folder.rows.includes(element));
 	}

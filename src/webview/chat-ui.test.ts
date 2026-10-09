@@ -107,7 +107,7 @@ const fixture = `
 import { createRoot } from "react-dom/client";
 import { App } from "./App";
 import { ShellView } from "./components/ShellView";
-import { guestTransport, readCspNonce } from "./bridge";
+import { guestTransport, readCspNonce, fixtureBridgeOperation } from "./bridge";
 import { ChatClient } from "./lib/chat-client";
 import { createChatModel, snapshotOf } from "../chat/model";
 import { splitChatSnapshot } from "./chat-messages";
@@ -138,6 +138,7 @@ function push(patch = {}) { current = { ...current, ...patch }; const parts = sp
 }
 window.ui = {
  token: location.search, original, next, current: () => current, receive, push,
+ bridgeOperation: fixtureBridgeOperation,
  admission(enabled) { autoAdmission = enabled; },
  sends: () => window.sent.filter(textRequest),
  sendReply(request = window.ui.sends().at(-1), status = "accepted", reason) { receive({ type: "omp:chat-send-result", epoch: current.epoch, requestId: request.requestId, status, ...(reason === undefined ? {} : { reason }) }); },
@@ -161,7 +162,13 @@ createRoot(document.getElementById("root")).render(location.search.includes("fol
 // subtest; the timeout only guards a hang and must cover the whole set under suite load.
 test("compact chat's rendered behavioral boundaries", { skip: browserPath === undefined, timeout: 280_000 }, async t => {
 	const bundled = await build({ stdin: { contents: fixture, loader: "tsx", resolveDir: join(process.cwd(), "src/webview") },
-		bundle: true, write: false, format: "iife", platform: "browser", jsx: "automatic", loader: { ".css": "text" }, define: { "process.env.NODE_ENV": '"production"' } });
+		bundle: true, write: false, format: "iife", platform: "browser", jsx: "automatic", loader: { ".css": "text" }, define: { "process.env.NODE_ENV": '"production"' },
+		plugins: [{ name: "bridge-operation-test-access", setup(builder) {
+			builder.onLoad({ filter: /[/\\]webview[/\\]bridge\.ts$/ }, args => ({
+				contents: `${readFileSync(args.path, "utf8")}\nexport { bridgeOperation as fixtureBridgeOperation };`,
+				loader: "ts", resolveDir: join(process.cwd(), "src/webview"),
+			}));
+		} }] });
 	const script = bundled.outputFiles[0]!.text;
 	const server = createServer((request, response) => {
 		const fixtureUrl = new URL(request.url ?? "/", "http://fixture");
@@ -1054,6 +1061,29 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.equal(await ui.evaluate("document.querySelector('.omp-composer textarea').value"), "/skill");
 		});
 
+		await t.test("arrow keys keep the active suggestion visible in a scrolled list, wrapping both ways, while hovering never scrolls", async () => {
+			await reset("slash-scroll");
+			await ui.evaluate("window.ui.push({commands:Array.from({length:30},(_,i)=>({name:'cmd'+String(i).padStart(2,'0'),description:'Command '+i}))});document.querySelector('.omp-composer textarea').focus()");
+			const key = async (key: string, code: number) => { await ui.call("Input.dispatchKeyEvent", {type:"keyDown",key,code:key,windowsVirtualKeyCode:code}); await ui.call("Input.dispatchKeyEvent", {type:"keyUp",key,code:key,windowsVirtualKeyCode:code}); };
+			await ui.call("Input.insertText", { text: "/cmd" });
+			await ui.wait("document.querySelectorAll('[aria-label=\"Slash commands\"] [role=\"option\"]').length===30");
+			const view = () => ui.evaluate<{ active: string; visible: boolean; scrolled: boolean }>(`(()=>{const list=document.querySelector('[aria-label="Slash commands"]');const active=list.querySelector('[aria-selected="true"]');
+			 const l=list.getBoundingClientRect(),a=active.getBoundingClientRect();return{active:active.querySelector('strong').textContent,visible:a.top>=l.top-0.5&&a.bottom<=l.bottom+0.5,scrolled:list.scrollTop>0}})()`);
+			assert.equal(await ui.evaluate("(()=>{const list=document.querySelector('[aria-label=\"Slash commands\"]');return list.scrollHeight>list.clientHeight})()"), true, "the fixture overflows the list");
+			for (let step = 1; step <= 20; step++) await key("ArrowDown", 40);
+			assert.deepEqual(await view(), { active: "/cmd20", visible: true, scrolled: true }, "moving down scrolls the active option into view");
+			for (let step = 0; step < 20; step++) await key("ArrowUp", 38);
+			assert.deepEqual(await view(), { active: "/cmd00", visible: true, scrolled: false }, "moving back up scrolls up to it");
+			await key("ArrowUp", 38);
+			assert.deepEqual(await view(), { active: "/cmd29", visible: true, scrolled: true }, "wrapping to the last option reveals it");
+			await key("ArrowDown", 40);
+			assert.deepEqual(await view(), { active: "/cmd00", visible: true, scrolled: false }, "wrapping to the first option reveals it");
+			const box = await ui.evaluate<{ x: number; y: number }>("(()=>{const list=document.querySelector('[aria-label=\"Slash commands\"]');const options=[...list.querySelectorAll('[role=\"option\"]')];const l=list.getBoundingClientRect();const partial=options.find(o=>{const r=o.getBoundingClientRect();return r.top<l.bottom&&r.bottom>l.bottom});const r=partial.getBoundingClientRect();return{x:r.left+r.width/2,y:(r.top+l.bottom)/2}})()");
+			await ui.call("Input.dispatchMouseEvent", { type: "mouseMoved", ...box });
+			assert.equal(await ui.evaluate("document.querySelector('[aria-label=\"Slash commands\"]').scrollTop"), 0, "hovering a partly visible option does not scroll the list under the pointer");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("slash argument variants filter, navigate, insert by keyboard and click without sending, and dismiss safely", async () => {
 			await reset("slash-arguments");
 			await ui.evaluate("window.ui.push({commands:[{name:'shake',aliases:['trim'],inputHint:'[elide|images|thinking]',subcommands:[{name:'elide',description:'Hide old text (default)'},{name:'images',description:'Remove images',usage:'/shake images'},{name:'thinking',description:'Remove thinking'}]}]});document.querySelector('.omp-composer textarea').focus()");
@@ -1681,6 +1711,25 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.ok(text.includes("Safety rule") && text.includes("Slash command output") && text.includes("Provider error"));
 		});
 
+		await t.test("no available models turn the model trigger into a login action, and models restore its picker", async () => {
+			await reset("provider-login");
+			await ui.evaluate("window.ui.receive({type:'omp:footer-metadata',provider:null,branch:null,windows:[],accounts:[],accountSelection:null,hasAvailableModels:false})");
+			await ui.wait("document.querySelector('.omp-footer-trigger-label').textContent==='Log In to Provider'");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-footer-trigger').disabled"), false);
+			assert.equal(await ui.evaluate("window.ui.bridgeOperation({type:'omp:chat-command',command:'provider-login'})"), "provider-login");
+			assert.equal(await ui.evaluate("window.ui.bridgeOperation({type:'omp:chat-command',command:'cycle-model'})"), null, "other quick actions keep their existing panel-only contract");
+			const requests = await ui.evaluate<number>("window.ui.requests().length");
+			await ui.evaluate("document.querySelector('.omp-footer-trigger').click()");
+			assert.equal(await ui.evaluate("window.sent.at(-1).type==='omp:chat-command' && window.sent.at(-1).command==='provider-login'"), true);
+			assert.equal(await ui.evaluate("window.ui.requests().length"), requests, "login is not a model mutation or a catalogue request");
+			await ui.evaluate("window.ui.receive({type:'omp:footer-metadata',provider:'one',branch:null,windows:[],accounts:[],accountSelection:null,hasAvailableModels:true})");
+			await ui.wait("document.querySelector('.omp-footer-trigger-label').textContent===window.ui.original.name");
+			await ui.evaluate("document.querySelector('.omp-footer-trigger').click()");
+			await ui.wait("window.ui.last().picker==='model'");
+			await ui.evaluate("window.ui.reply()");
+			assert.equal(await ui.evaluate("window.ui.requests().some(request=>request.action==='set-model')"), false, "a login menu choice returns no model selection");
+		});
+
 		await t.test("model selection sends once and waits for pushed host readback, including mismatched replies", async () => {
 			await reset("model");
 			assert.equal(await ui.evaluate("window.ui.last().picker"), undefined);
@@ -1998,6 +2047,21 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate("window.ui.push({phase:'live',readOnlyReason:'Another editor controls this session'})");
 			await ui.wait("document.querySelector('.omp-composer textarea').placeholder==='Another editor controls this session'");
 			await ui.call("Emulation.clearDeviceMetricsOverride");
+		});
+
+		await t.test("an autonomous exit shows plain-text stderr and a stopped-session provider login action", async () => {
+			await reset("child-exit-reason");
+			await ui.evaluate(`window.ui.push({phase:'stopped',code:'child-exited',readOnlyReason:'stopped',exitReason:{exitCode:1,stderr:'No default model selected. Use /login.\\n<script>not markup</script>'}})`);
+			await ui.wait("document.querySelector('.omp-notice-description')?.textContent.includes('OMP exited with code 1.')");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-notice-description').textContent.includes('<script>not markup</script>')"), true);
+			assert.equal(await ui.evaluate("document.querySelector('.omp-notice-description script')"), null);
+			await ui.evaluate("Array.from(document.querySelectorAll('.omp-notice button')).find(button=>button.textContent==='Log In to Provider').click()");
+			assert.equal(await ui.evaluate("window.sent.at(-1).type==='omp:chat-command' && window.sent.at(-1).command==='provider-login'"), true);
+			await ui.evaluate("window.ui.push({phase:'stopped',exitReason:{exitCode:1,stderr:'Could not restore model fixture/missing'}})");
+			await ui.wait("document.querySelector('.omp-notice-description')?.textContent.includes('Could not restore model fixture/missing')");
+			assert.equal(await ui.evaluate("Array.from(document.querySelectorAll('.omp-notice button')).some(button=>button.textContent==='Log In to Provider')"), false);
+			await ui.evaluate("window.ui.push({phase:'live',code:null,readOnlyReason:null,exitReason:undefined})");
+			await ui.wait("!document.querySelector('.omp-notice')");
 		});
 
 		await t.test("ask transitions retain host controls, metadata and command feedback inside the same dock", async () => {
@@ -3587,8 +3651,33 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.wait("document.querySelector('[aria-label=\"Stop the running turn\"]')");
 			await ui.evaluate("document.querySelector('.omp-context-trigger').focus()");
 			await ui.wait("document.querySelector('.omp-context-compact')");
-			assert.equal(await ui.evaluate("document.querySelector('.omp-context-compact').disabled"), true, "no compaction while a turn runs");
-			assert.equal(await ui.evaluate("document.querySelector('.omp-context-compact').title"), "Compact after the running turn ends.");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-context-compact').disabled"), false, "as in the TUI, Compact runs during a turn");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-context-compact').title"), "Interrupts the running turn, compacts, then the turn continues");
+			await ui.evaluate("window.ui.push({maintenance:{action:'compact',reason:'manual',status:'working'}})");
+			await ui.wait("document.querySelector('.omp-context-compact')?.disabled===true");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-context-compact').title"), "A compaction is already running.");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("a compaction is a divider across the transcript, as in the TUI, and a completed pass adds no status line", async () => {
+			await reset("quick-compaction-divider");
+			const frame = (value: Record<string, unknown>) => ui.evaluate(`window.ui.receive({type:'omp:chat-event',epoch:window.ui.current().epoch,frame:${JSON.stringify(value)}})`);
+			const at = new Date(Date.UTC(2026, 9, 9, 9, 45)).toISOString();
+			const entries = [
+				{ type: "message", id: "u1", parentId: null, timestamp: at, message: { role: "user", content: [{ type: "text", text: "earlier work" }], timestamp: 1 } },
+				{ type: "compaction", id: "c1", parentId: "u1", timestamp: at, summary: "Summary of the earlier work", firstKeptEntryId: "u1", tokensBefore: 400161, tokensAfter: 47758 },
+			];
+			await ui.evaluate(`window.ui.push(${JSON.stringify({ entries, durableCount: entries.length, leafId: "c1" })})`);
+			await frame({ type: "auto_compaction_end", action: "context-full", aborted: false, willRetry: false });
+			await ui.wait("document.querySelector('.omp-native-summary--divider summary')");
+			const divider = await ui.evaluate<{ text: string; rules: boolean }>(`(()=>{const summary=document.querySelector('.omp-native-summary--divider summary');
+			 const rule=pseudo=>getComputedStyle(summary,pseudo).borderTopStyle==='solid';return{text:summary.textContent,rules:rule('::before')&&rule('::after')}})()`);
+			assert.deepEqual(divider, { text: "Compacted · 400k → 47.8k tokens", rules: true });
+			assert.equal(await ui.evaluate("document.querySelector('.omp-transcript').textContent.includes('complete')"), false, "no 'context-full · complete' line");
+			await ui.evaluate("document.querySelector('.omp-native-summary--divider summary').click()");
+			await ui.wait("document.querySelector('.omp-native-summary--divider').textContent.includes('Summary of the earlier work')");
+			await frame({ type: "auto_compaction_end", action: "context-full", aborted: true, willRetry: false });
+			await ui.wait("document.querySelector('.omp-transcript').textContent.includes('Context-full maintenance cancelled')");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 

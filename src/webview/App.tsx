@@ -155,6 +155,7 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 	const banner = chatBanner(snapshot);
 	// A severed host link is shown as a lost connection, never as silence; the draft lives in the composer and is kept.
 	const hostLost = useSyncExternalStore(guestTransport.onRouteChange, guestTransport.hostConnectionLost);
+	const hostRecoveryFailed = useSyncExternalStore(guestTransport.onRouteChange, guestTransport.hostRecoveryFailed);
 	// While the link is down or the session is being (re)attached, a remembered `working` is not an observation: show none.
 	const workUnknown = hostLost || snapshot.phase === "attaching" || snapshot.phase === "resyncing" || snapshot.phase === "failed";
 	const shown = workUnknown && snapshot.working ? { ...snapshot, working: false } : snapshot;
@@ -202,7 +203,9 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 		if (picking) rewindBarRef.current?.focus({ preventScroll: true });
 	}, [picking]);
 	const notice = hostLost
-		? { level: "warn", icon: "debug-disconnect", text: "Lost connection to the extension host — reconnecting. Your draft is kept." }
+		? { level: "warn", icon: "debug-disconnect", text: hostRecoveryFailed
+			? "The extension connection repeatedly failed. Run Developer: Reload Window. If it still fails, copy your draft before closing and reopening this tab. OMP has not been stopped."
+			: "Lost connection to the extension host — reconnecting. Your draft is kept." }
 		: restartOffered
 			? { level: "warn", icon: "debug-disconnect", text: "OMP has not answered a state request. Reconnect keeps the same process; Restart can stop it and reopen the saved conversation. Unconfirmed input is kept and never resent automatically." }
 			: banner;
@@ -210,9 +213,10 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 		<div className="omp-notices">
 			<div className={`omp-notice omp-notice--${notice.level === "warn" ? "warning" : notice.level}`} role="status">
 				<span className={`codicon codicon-${notice.icon}`} aria-hidden="true" />
-				<span className="omp-notice-description">{notice.text}</span>
+				<span className={`omp-notice-description${snapshot.exitReason === undefined ? "" : " omp-notice-exit"}`}>{notice.text}</span>
 				{!hostLost && (banner?.action === "reconnect" || restartOffered) && <button type="button" className="omp-btn" disabled={snapshot.phase !== "failed"} onClick={() => client.reconnect()}>Reconnect</button>}
 				{!hostLost && restartOffered && <button type="button" className="omp-btn" onClick={() => client.restart()}>Restart</button>}
+				{!hostLost && banner?.action === "provider-login" && <button type="button" className="omp-btn" onClick={() => guestTransport.post({ type: "omp:chat-command", command: "provider-login" })}>Log In to Provider</button>}
 			</div>
 		</div>
 	);

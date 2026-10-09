@@ -21,6 +21,7 @@
  */
 import { stat } from "node:fs/promises";
 import path from "node:path";
+import { CHAT_EXIT_STDERR_BYTES, parseChatExitReason, type ChatExitReason } from "../../chat/exit-reason.ts";
 import {
 	applyChatEntries,
 	applyChatLiteState,
@@ -393,7 +394,7 @@ const FRAME_FAILURE_RESYNC_GAP_MS = 2_000;
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,120}$/;
 const MAX_REMEMBERED_REQUESTS = 256;
 const MAX_LEDGER = 64;
-const STDERR_TAIL_BYTES = 32 * 1024;
+const STDERR_TAIL_BYTES = CHAT_EXIT_STDERR_BYTES;
 const MESSAGE_ID_TAIL = /,"messageId":"([^"\\]{1,64})"\}$/;
 
 /** A failure that ends the establish sequence with a bounded code. */
@@ -978,11 +979,12 @@ export class RpcSession {
 	}
 
 	/**
-	 * Manual compaction (`compact`), refused while a turn runs. OMP emits no maintenance event for a manual
-	 * pass, so the session shows its own progress and outcome on the working line, as a native one would.
+	 * Manual compaction (`compact`). As in the TUI it may run during a turn: OMP aborts the turn, compacts, then resumes
+	 * it. Refused only while a compaction is already running. OMP emits no maintenance event for a manual pass, so the
+	 * session shows its own progress and outcome on the working line, as a native one would.
 	 */
 	async compact(customInstructions: string | undefined): Promise<CommandResult<null>> {
-		const refusal = this.#controlRefusal() ?? (this.#model.working || this.#model.maintenance?.status === "working" ? "busy" : null);
+		const refusal = this.#controlRefusal() ?? (this.#model.maintenance?.status === "working" ? "busy" : null);
 		if (refusal !== null) return { status: "refused", reason: refusal };
 		this.#applyLocal({ type: "auto_compaction_start", action: "compact", reason: "manual" });
 		const outcome = await this.#sendInternal({ type: "compact", ...(customInstructions === undefined ? {} : { customInstructions }) }, COMPACT_TIMEOUT_MS);
@@ -1255,7 +1257,7 @@ export class RpcSession {
 		if (result.truncated) this.#agentLiveness.forgetLast();
 		if (result.child.state === "exited") {
 			await this.#paint;
-			this.#stopped("child-exited");
+			this.#stopped("child-exited", { exitCode: result.child.exitCode, stderr: result.child.stderrTail ?? this.#stderr });
 			return;
 		}
 		this.#rpcProtocol = result.rpcProtocol;
@@ -1377,11 +1379,15 @@ export class RpcSession {
 				if (event.rpcProtocol !== null) this.#rpcProtocol = event.rpcProtocol;
 				if (!this.#readySeen) this.#processLine(event.line);
 				return;
-			case "stderr":
-				this.#stderr = (this.#stderr + event.text).slice(-STDERR_TAIL_BYTES);
+			case "stderr": {
+				const bytes = Buffer.from(this.#stderr + event.text);
+				let start = Math.max(0, bytes.length - STDERR_TAIL_BYTES);
+				while (start < bytes.length && (bytes[start]! & 0xc0) === 0x80) start += 1;
+				this.#stderr = bytes.subarray(start).toString("utf8");
 				return;
+			}
 			case "child":
-				if (event.status.state === "exited") this.#stopped("child-exited");
+				if (event.status.state === "exited") this.#stopped("child-exited", { exitCode: event.status.exitCode, stderr: event.status.stderrTail ?? this.#stderr });
 				return;
 			case "closed":
 				if (event.reason === "disconnected") {
@@ -2134,8 +2140,17 @@ export class RpcSession {
 		this.#scheduleAutoRecovery(code);
 	}
 
-	#stopped(code: RpcErrorCode | null): void {
-		if (this.#ended || this.#disposed) return;
+	#stopped(code: RpcErrorCode | null, reason?: ChatExitReason): void {
+		if (this.#disposed) return;
+		if (this.#ended) {
+			// A failed in-flight write may learn of exit before the final broker status.
+			const exitReason = reason === undefined ? null : parseChatExitReason(reason);
+			if (this.#model.code === "child-exited" && this.#model.exitReason === undefined && exitReason !== null) {
+				this.#model = { ...this.#model, exitReason };
+				this.#publish();
+			}
+			return;
+		}
 		this.#ended = true;
 		this.#clearReconcileTimer();
 		this.#clearPausedStateTimer();
@@ -2144,6 +2159,8 @@ export class RpcSession {
 		this.#failAllCommands("closed");
 		for (const waiter of this.#readyWaiters.splice(0)) waiter(false);
 		this.#model = setChatPhase(this.#model, "stopped", code, "stopped");
+		const exitReason = reason === undefined ? null : parseChatExitReason(reason);
+		if (exitReason !== null) this.#model = { ...this.#model, exitReason };
 		this.#publish();
 	}
 
@@ -2176,6 +2193,7 @@ export class RpcSession {
 			cwd: this.#model.header?.cwd ?? this.#options.cwd,
 			title: this.#model.header?.title ?? null,
 			readOnlyReason: this.#model.readOnlyReason,
+			...(this.#model.exitReason === undefined ? {} : { exitReason: this.#model.exitReason }),
 		};
 	}
 

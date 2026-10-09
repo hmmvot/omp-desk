@@ -111,6 +111,7 @@ export function ChatFooter({ client, snapshot, trailingActions }: {
 	const model = snapshot.state?.model ?? null;
 	const level = snapshot.state?.thinkingLevel ?? null;
 	const readOnly = snapshot.readOnlyReason !== null;
+	const needsProviderLogin = metadata?.hasAvailableModels === false;
 	const blocked = !live ? "This session is not running." : readOnly ? snapshot.readOnlyReason ?? "This session is read-only." :
 		view.state === null ? "Waiting for the host's controls." : !view.state.available ? view.state.reason ?? "Host controls are unavailable." :
 		view.state.mutationMode === "unavailable" ? "The host cannot apply changes." :
@@ -134,9 +135,9 @@ export function ChatFooter({ client, snapshot, trailingActions }: {
 		<>
 			<div className="omp-composer-toolbar">
 				<div className="omp-composer-lead">
-					<button type="button" className="omp-footer-trigger" disabled={blocked !== null}
-						title={blocked ?? `Provider: ${model?.provider ?? "unknown"} · Alt+click: next model`} onClick={event => event.altKey ? guestTransport.post({ type: "omp:chat-command", command: "cycle-model" }) : send({ action: "snapshot", picker: "model" })}>
-						<span className="omp-footer-trigger-label">{model?.name ?? model?.id ?? "Model unavailable"}</span>
+					<button type="button" className="omp-footer-trigger" disabled={!needsProviderLogin && blocked !== null}
+						title={needsProviderLogin ? "Log in to a model provider for this session" : blocked ?? `Provider: ${model?.provider ?? "unknown"} · Alt+click: next model`} onClick={event => needsProviderLogin ? guestTransport.post({ type: "omp:chat-command", command: "provider-login" }) : event.altKey ? guestTransport.post({ type: "omp:chat-command", command: "cycle-model" }) : send({ action: "snapshot", picker: "model" })}>
+						<span className="omp-footer-trigger-label">{needsProviderLogin ? "Log In to Provider" : model?.name ?? model?.id ?? "Model unavailable"}</span>
 						<span aria-hidden="true" className={`codicon codicon-${view.awaiting !== null && (bookRef.current?.picker === "model" || view.action === "set-model") ? "loading codicon-modifier-spin" : "chevron-down"}`} />
 					</button>
 					<button type="button" className="omp-footer-trigger omp-footer-trigger--level" disabled={blocked !== null}
@@ -154,7 +155,8 @@ export function ChatFooter({ client, snapshot, trailingActions }: {
 					<ContextUsageIndicator tokens={usage?.tokens} contextWindow={contextWindow} percent={usage?.percent}
 						cost={metadata?.sessionCost} windows={windows} quotaTooltip={quotaTooltip}
 						onCompact={() => guestTransport.post({ type: "omp:chat-command", command: "compact" })}
-						compactBlocked={blocked ?? (snapshot.working ? "Compact after the running turn ends." : null)} />
+						compactBlocked={blocked ?? (snapshot.maintenance?.status === "working" ? "A compaction is already running." : null)}
+						compactHint={snapshot.working ? "Interrupts the running turn, compacts, then the turn continues" : undefined} />
 					{trailingActions}
 				</div>
 			</div>
