@@ -75,6 +75,7 @@ import { blobsDirectoryFor, resolveBlobImages } from "./history-blobs.ts";
 import { parseAgentRoster } from "../../chat/agents.ts";
 import { childPageFromNative, type SubagentTranscriptPage } from "../../chat/subagent-transcript.ts";
 import { isRecord } from "../../guards.ts";
+import { readJournalCost } from "../session-cost.ts";
 import { RpcFrameReader, type RpcFrameCounters } from "./frames.ts";
 import {
 	DENIED_SLASH_COMMANDS,
@@ -1130,7 +1131,11 @@ export class RpcSession {
 		return outcome.status === "accepted" ? { status: "accepted", agentInvoked: null } : outcome;
 	}
 
-	/** Native session totals, never a sum of the extension's truncated history window. */
+	/**
+	 * Spend of the whole session, as OMP's status line counts it: every entry of the session file, compacted history
+	 * included. `get_session_stats` only confirms the binding; its `cost` covers just the window after the latest
+	 * compaction and answers only for a session without a file.
+	 */
 	async readSessionCost(): Promise<number | null> {
 		if (this.#disposed || this.#ended || !this.#live || !this.#identityVerified) return null;
 		const epoch = this.#epochCounter;
@@ -1142,8 +1147,10 @@ export class RpcSession {
 		const data = outcome.response.data;
 		if (!isRecord(data) || id === null || data.sessionId !== id ||
 			(file !== null && (typeof data.sessionFile !== "string" || !samePath(data.sessionFile, file)))) return null;
+		const cost = file === null ? data.cost : await readJournalCost(file);
+		if (this.#disposed || this.#ended || epoch !== this.#epochCounter || file !== this.#boundFile || id !== this.#boundId) return null;
 		// OMP initializes cost to zero even for absent/unpriced usage; it has no availability flag.
-		return typeof data.cost === "number" && Number.isFinite(data.cost) && data.cost > 0 ? data.cost : null;
+		return typeof cost === "number" && Number.isFinite(cost) && cost > 0 ? cost : null;
 	}
 
 	/** Model catalogue; fetched lazily (never while a turn streams: it queues ahead of `abort`). */

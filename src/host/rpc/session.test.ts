@@ -494,6 +494,24 @@ describe("authoritative session cost", () => {
 		assert.equal(await session.readSessionCost(), null);
 	});
 
+	it("totals every journal entry, compacted history included, not the window OMP reports after a compaction", async () => {
+		const usage = (total: number) => ({ input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total } });
+		const message = (id: string, parentId: string | null, body: Record<string, unknown>) => ({ type: "message", id, parentId, timestamp: "2026-10-09T00:00:00.000Z", message: body });
+		const file = await scratchFile("journal.jsonl", [
+			message("u1", null, { role: "user", content: "start", timestamp: 1 }),
+			message("a1", "u1", { role: "assistant", content: [], usage: usage(2), timestamp: 2 }),
+			message("t1", "a1", { role: "toolResult", toolName: "task", toolCallId: "c1", content: [], details: { usage: usage(3) }, timestamp: 3 }),
+			message("t2", "t1", { role: "toolResult", toolName: "read", toolCallId: "c2", content: [], details: { usage: usage(100) }, timestamp: 4 }),
+			{ type: "model_usage", id: "m1", parentId: "t2", timestamp: "2026-10-09T00:00:00.000Z", usage: usage(0.5) },
+			{ type: "compaction", id: "c1", parentId: "m1", timestamp: "2026-10-09T00:00:00.000Z", summary: "s", firstKeptEntryId: "m1", tokensBefore: 10 },
+			message("a2", "c1", { role: "assistant", content: [], usage: usage(1.25), timestamp: 5 }),
+			message("a3", "u1", { role: "assistant", content: [], usage: usage(4), timestamp: 6 }),
+		]);
+		const { session, channel } = await boot({ file });
+		channel.handlers.set("get_session_stats", () => ({ data: { sessionId: "sess-1", sessionFile: file, cost: 1.25 } }));
+		assert.equal(await session.readSessionCost(), 10.75, "assistant, task and side-call spend on every branch; other tool details are not billing");
+	});
+
 	it("discards cost readback from an interrupted connection rather than carrying it into the new epoch", async () => {
 		const { session, channel } = await boot();
 		channel.handlers.set("get_session_stats", () => "drop");
