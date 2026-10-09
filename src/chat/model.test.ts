@@ -344,12 +344,11 @@ describe("command output and presentation", () => {
 	});
 
 	it("shows each extension notice once, a repeat with a new id", () => {
-		let model = reduceChatFrame(live(), { type: "ui_notify", level: "info", message: "Indexed 12 files" });
+		let model = reduceChatFrame(live(), { type: "ui_notify", level: "warning", message: "Index is stale" });
 		const first = model.extensionNotice;
-		assert.deepEqual({ level: first?.level, message: first?.message }, { level: "info", message: "Indexed 12 files" });
-		model = reduceChatFrame(model, { type: "ui_notify", level: "warning", message: "Indexed 12 files" });
+		assert.deepEqual({ level: first?.level, message: first?.message }, { level: "warning", message: "Index is stale" });
+		model = reduceChatFrame(model, { type: "ui_notify", level: "warning", message: "Index is stale" });
 		assert.notEqual(model.extensionNotice?.id, first?.id);
-		assert.equal(model.extensionNotice?.level, "warning");
 	});
 
 	it("re-issues composer text with a new seq so the same text can repeat", () => {

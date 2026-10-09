@@ -773,7 +773,7 @@ export function parseChatEventFrame(value: unknown): ChatEventFrame | null {
 			return { type: "ui_widget", key: value.key, lines, ...placement };
 		}
 		case "ui_notify":
-			return (value.level === "info" || value.level === "warning") && isText(value.message, 2_000) ? { type: "ui_notify", level: value.level, message: value.message } : null;
+			return value.level === "warning" && isText(value.message, 2_000) ? { type: "ui_notify", level: "warning", message: value.message } : null;
 		case "ui_editor_text":
 			return isText(value.text, MAX_CHAT_UI_VALUE_LENGTH) ? { type: "ui_editor_text", text: value.text } : null;
 		default:

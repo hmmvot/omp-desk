@@ -1577,7 +1577,9 @@ export class RpcSession {
 				// Untrusted extension text: bounded here, shown as text (never markup) by the page and the host.
 				const message = frame.message.slice(0, 2_000);
 				if (frame.notifyType === "error") { if (this.#live) this.#emit({ type: "extension-error", message }); }
-				else this.#applyFrame({ type: "ui_notify", level: frame.notifyType === "warning" ? "warning" : "info", message });
+				// `info` is dropped: extensions use it for running commentary (a tool intent per call) that the working
+				// status already shows; a banner per call only duplicated it. Warnings stay until dismissed.
+				else if (frame.notifyType === "warning") this.#applyFrame({ type: "ui_notify", level: "warning", message });
 				return;
 			}
 			case "set_editor_text":

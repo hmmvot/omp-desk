@@ -21,8 +21,8 @@ export function ExtensionWidgets({ snapshot, placement }: { snapshot: ChatModel;
 }
 
 /**
- * The latest informational or warning `notify` of an OMP extension, until dismissed or replaced. Errors are not
- * here: the host shows them as VS Code error messages.
+ * The latest `notify` warning of an OMP extension, until dismissed or replaced. Errors are not here (the host shows
+ * them as VS Code error messages), and `info` is not shown at all: the host drops it.
  */
 export function ExtensionNoticeLine({ snapshot }: { snapshot: ChatModel }): ReactNode {
 	const notice = snapshot.extensionNotice;
@@ -30,8 +30,8 @@ export function ExtensionNoticeLine({ snapshot }: { snapshot: ChatModel }): Reac
 	useEffect(() => { setDismissed(null); }, [notice?.id]);
 	if (notice === null || dismissed === notice.id) return null;
 	return (
-		<div className={`omp-extension-notice omp-extension-notice--${notice.level}`} role="status">
-			<span className={`codicon codicon-${notice.level === "warning" ? "warning" : "info"}`} aria-hidden="true" />
+		<div className="omp-extension-notice omp-extension-notice--warning" role="status">
+			<span className="codicon codicon-warning" aria-hidden="true" />
 			<span className="omp-extension-notice-text">{notice.message}</span>
 			<button type="button" className="omp-btn" aria-label="Dismiss notice" title="Dismiss" onClick={() => setDismissed(notice.id)}>
 				<span className="codicon codicon-close" aria-hidden="true" />
