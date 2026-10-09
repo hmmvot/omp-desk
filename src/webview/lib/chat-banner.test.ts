@@ -1,9 +1,8 @@
 /**
  * Tests for the one line a conversation shows about its state.
  *
- * The rule defended: a failure is shown as a fixed sentence chosen by a bounded code, never
- * as text the child or a newer host supplied, and a state the page cannot map is shown as
- * the generic sentence rather than as nothing.
+ * Failure codes select fixed sentences; autonomous child exits show bounded plain-text
+ * diagnostics and offer provider login only for the installed OMP's no-model refusal.
  *
  * Runner: `node --test src/webview/lib/chat-banner.test.ts`.
  */
@@ -54,6 +53,22 @@ describe("chatBanner", () => {
 			const banner = chatBanner(model(phase));
 			assert.ok(banner !== null && banner.text.length > 0, phase);
 		}
+	});
+
+	it("shows autonomous exit code and stderr, with login only for the no-model refusal", () => {
+		const noModel = chatBanner(model("stopped", { code: "child-exited", exitReason: { exitCode: 1, stderr: "No default model selected. Use /login.\n" } }));
+		assert.equal(noModel?.text, "OMP exited with code 1.\nNo default model selected. Use /login.");
+		assert.equal(noModel?.action, "provider-login");
+		const other = chatBanner(model("stopped", { code: "child-exited", exitReason: { exitCode: 1, stderr: "Could not restore model fixture/missing" } }));
+		assert.equal(other?.text, "OMP exited with code 1.\nCould not restore model fixture/missing");
+		assert.equal(other?.action, undefined);
+		assert.equal(chatBanner(model("stopped", { exitReason: { exitCode: 0, stderr: "" } }))?.text, "OMP exited with code 0.");
+	});
+
+	it("shows Bun's final error without its minified source excerpt", () => {
+		const banner = chatBanner(model("stopped", { exitReason: { exitCode: 1, stderr: "clipped minified source text\n\nerror: Could not restore model fixture/missing\n      at startup (cli.js:1:2)\n\n" } }));
+		assert.equal(banner?.text, "OMP exited with code 1.\nerror: Could not restore model fixture/missing\n      at startup (cli.js:1:2)");
+		assert.equal(banner?.action, undefined);
 	});
 
 	it("overrides host details and failure codes when Resume is available", () => {

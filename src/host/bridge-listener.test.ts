@@ -625,4 +625,131 @@ describe("bridge listener session", () => {
 		assert.equal(parsed.documentId, encodeBase64Url(DOCUMENT));
 		assert.deepEqual(parsed.payload, payload);
 	});
+	it("closes a snapshot peer that never reads without materializing its remaining train", { timeout: 10_000 }, async () => {
+		// This intentionally exercises the real TCP send buffers and platform-clock
+		// write deadline. Fake time cannot establish that an actual peer stopped draining.
+		const ended = Promise.withResolvers<string>();
+		const diagnostics: string[] = [];
+		let produced = 0;
+		const route = "8".repeat(32);
+		const stalled = await harness({
+			onDiagnostic: code => diagnostics.push(code),
+			onSessionEnded: (_session, reason) => ended.resolve(reason),
+			onRouteAcknowledged: session => {
+				session.sendSnapshot(route, (function* () {
+					const text = "x".repeat(20_000);
+					for (let index = 0; index < 16_384; index++) {
+						produced++;
+						yield { text, index };
+					}
+				})());
+				return true;
+			},
+		});
+		const peer = await TestClient.connect(stalled.port);
+		const keys = await handshake(peer, stalled.port);
+		await peer.nextBinary();
+		peer.socket.pause();
+		peer.sendBinary(await peer.seal(keys.clientToServer, keys.hostGeneration, keys.connectionId,
+			`["route-ack","${encodeBase64Url(keys.hostGeneration)}","${encodeBase64Url(DOCUMENT)}","${route}"]`));
+		assert.equal(await ended.promise, "timeout");
+		assert.ok(diagnostics.includes("outbound-stalled"));
+		assert.ok(produced < 16_384, "the writer must stop pulling when the peer stops draining");
+	});
+
+	it("retains the one MiB bound for an ordinary synchronous push flood", { timeout: 5_000 }, async () => {
+		const ended = Promise.withResolvers<string>();
+		const diagnostics: string[] = [];
+		const route = "9".repeat(32);
+		const bounded = await harness({
+			onDiagnostic: code => diagnostics.push(code),
+			onSessionEnded: (_session, reason) => ended.resolve(reason),
+			onRouteAcknowledged: session => {
+				for (let index = 0; index < 80; index++) session.send("terminal", { routeGeneration: route, payload: { text: "x".repeat(20_000) } });
+				return true;
+			},
+		});
+		const peer = await TestClient.connect(bounded.port);
+		const keys = await handshake(peer, bounded.port);
+		await peer.nextBinary();
+		peer.sendBinary(await peer.seal(keys.clientToServer, keys.hostGeneration, keys.connectionId,
+			`["route-ack","${encodeBase64Url(keys.hostGeneration)}","${encodeBase64Url(DOCUMENT)}","${route}"]`));
+		assert.equal(await ended.promise, "protocol");
+		assert.ok(diagnostics.includes("outbound-queue"));
+	});
+	it("finishes the earliest snapshot and supersedes only pending trains without moving live events", { timeout: 5_000 }, async () => {
+		let pulled = 0;
+		const route = "a".repeat(32);
+		const ordered = await harness({
+			onRouteAcknowledged: session => {
+				session.sendSnapshot(route, (function* () {
+					pulled++;
+					queueMicrotask(() => {
+						session.sendSnapshot(route, [{ marker: "discarded-pending" }]);
+						session.send("terminal", { routeGeneration: route, payload: { marker: "live-event" } });
+						session.sendSnapshot(route, [{ marker: "latest" }]);
+					});
+					yield { marker: "old-first" };
+					pulled++;
+					yield { marker: "old-tail" };
+				})());
+				return true;
+			},
+		});
+		const peer = await TestClient.connect(ordered.port);
+		const keys = await handshake(peer, ordered.port);
+		await peer.nextBinary();
+		peer.sendBinary(await peer.seal(keys.clientToServer, keys.hostGeneration, keys.connectionId,
+			`["route-ack","${encodeBase64Url(keys.hostGeneration)}","${encodeBase64Url(DOCUMENT)}","${route}"]`));
+		const received: unknown[] = [];
+		for (let index = 0; index < 4; index++) {
+			const opened = await openFrame({ key: keys.serverToClient, frame: await peer.nextBinary(),
+				expectedDirection: BRIDGE_DIRECTION_SERVER_TO_CLIENT, hostGeneration: keys.hostGeneration,
+				connectionId: keys.connectionId, documentId: DOCUMENT });
+			assert.equal(opened.sequence, index + 1);
+			const message = parseTextFrame(opened.plaintext);
+			assert.ok(Array.isArray(message));
+			const push = parseTerminalPush(message);
+			assert.ok(push);
+			received.push(push.payload);
+		}
+		assert.deepEqual(received, [{ marker: "old-first" }, { marker: "old-tail" }, { marker: "live-event" }, { marker: "latest" }]);
+		assert.equal(pulled, 2);
+	});
+	it("writes 64-bit WebSocket lengths from 64 KiB through the plaintext ceiling", { timeout: 5_000 }, async () => {
+		const route = "b".repeat(32);
+		const wide = await harness({
+			onRouteAcknowledged: session => {
+				for (const length of [65_536, 200_000, 255_000]) {
+					session.send("terminal", { routeGeneration: route, payload: { text: "x".repeat(length) } });
+				}
+				return true;
+			},
+		});
+		const peer = await TestClient.connect(wide.port);
+		const keys = await handshake(peer, wide.port);
+		await peer.nextBinary();
+		peer.sendBinary(await peer.seal(keys.clientToServer, keys.hostGeneration, keys.connectionId,
+			`["route-ack","${encodeBase64Url(keys.hostGeneration)}","${encodeBase64Url(DOCUMENT)}","${route}"]`));
+		for (const length of [65_536, 200_000, 255_000]) {
+			const opened = await openFrame({ key: keys.serverToClient, frame: await peer.nextBinary(),
+				expectedDirection: BRIDGE_DIRECTION_SERVER_TO_CLIENT, hostGeneration: keys.hostGeneration,
+				connectionId: keys.connectionId, documentId: DOCUMENT });
+			const message = parseTextFrame(opened.plaintext);
+			assert.ok(Array.isArray(message));
+			assert.deepEqual(parseTerminalPush(message)?.payload, { text: "x".repeat(length) });
+		}
+	});
+
+	it("refuses oversized and fragmented WebSocket control frames before replying", { timeout: 5_000 }, async () => {
+		const control = await harness();
+		for (const fragmented of [false, true]) {
+			const peer = await TestClient.connect(control.port);
+			const frame = encodeFrame(0x9, Buffer.alloc(fragmented ? 1 : 126));
+			if (fragmented) frame[0] = frame[0]! & 0x7f;
+			peer.socket.write(frame);
+			assert.equal(await peer.closed(), true);
+			assert.equal(peer.debugFrames(), "", "an invalid control frame must not elicit a pong");
+		}
+	});
 });

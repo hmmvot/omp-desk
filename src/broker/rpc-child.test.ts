@@ -16,6 +16,7 @@ import { join } from "node:path";
 import { after, afterEach, before, describe, it } from "node:test";
 import { RpcChildWriteError, startRpcChild, offersProtocol2, RPC_NEGOTIATE_ID, type RpcChild } from "./rpc-child.ts";
 import { peekRpcLine, RpcLineRing } from "./rpc-ring.ts";
+import { PTY_RPC_STDERR_TAIL_BYTES } from "../host/pty-protocol.ts";
 
 /**
  * The stand-in for `omp --mode rpc-ui`. argv[2] picks a behaviour:
@@ -31,7 +32,7 @@ const CHILD_SOURCE = String.raw`
 const mode = process.argv[2];
 const out = value => process.stdout.write(JSON.stringify(value) + "\n");
 if (mode === "die") {
-	process.stderr.write("boom before ready");
+	process.stderr.write("\x1b[31mboom before ready\x1b[0m");
 	process.exit(3);
 }
 let negotiated = false;
@@ -53,6 +54,7 @@ process.stdin.on("data", chunk => {
 		} else if (command.type === "ask") {
 			out({ type: "extension_ui_request", id: command.dialogId, method: "select", title: "Approve?", options: ["Approve", "Deny"] });
 		} else if (command.type === "noise") {
+			if (command.text !== undefined) process.stderr.write(command.text);
 			process.stderr.write("x".repeat(command.stderrBytes));
 			out({ type: "echo", negotiated, done: true });
 		} else {
@@ -239,8 +241,22 @@ describe("stdout and stdin lines", { timeout: 30_000 }, () => {
 		await send(child, { type: "noise", stderrBytes: 100_000 });
 		await waitFor(() => lines(ring).some(line => line.done === true));
 		await waitFor(() => stderr.join("").length >= 100_000);
-		assert.ok(child.stderrTail().length <= 32 * 1024, "only a bounded tail is kept");
+		assert.ok(Buffer.byteLength(child.stderrTail()) <= PTY_RPC_STDERR_TAIL_BYTES, "only a bounded tail is kept");
 		assert.ok(child.stderrTail().length > 0);
+	});
+
+	it("strips ANSI sequences split across chunks and bounds the UTF-8 tail in bytes", async () => {
+		const { child, ready, stderr } = await start("v2");
+		await ready;
+		for (const text of ["prefix\x1b[", "31mred\x1b[0m\x1b]8;;secret-url", "\x1b\\label\x1b]8;;\x07\x1b(", "B\n", "😀".repeat(3000) + "END"]) {
+			await send(child, { type: "noise", stderrBytes: 0, text });
+		}
+		await waitFor(() => child.stderrTail().endsWith("END"));
+		assert.match(stderr.join(""), /^prefixredlabel\n/);
+		assert.doesNotMatch(stderr.join(""), /\x1b|secret-url/);
+		assert.ok(Buffer.byteLength(child.stderrTail()) <= PTY_RPC_STDERR_TAIL_BYTES);
+		assert.doesNotMatch(child.stderrTail(), /�/);
+		assert.ok(child.stderrTail().endsWith("END"));
 	});
 });
 
@@ -307,7 +323,7 @@ describe("stop", { timeout: 30_000 }, () => {
 		const info = await exit;
 		assert.equal(info.code, 3);
 		assert.equal(child.rpcProtocol, null, "never negotiated");
-		assert.match(child.stderrTail() + stderr.join(""), /boom before ready/);
+		assert.equal(child.stderrTail(), "boom before ready", "stderr is drained and stripped before exit is announced");
 	});
 });
 

@@ -38,7 +38,7 @@
 import { BridgeClient } from "./lib/bridge-client.ts";
 import { HostLink } from "./lib/host-link.ts";
 import type { BridgeClientEndpoint } from "./lib/bridge-client.ts";
-import { decodeBase64Url } from "../bridge-protocol.ts";
+import { createToken, decodeBase64Url } from "../bridge-protocol.ts";
 import type { GuestHostMessage, GuestWebviewMessage } from "./messages.ts";
 import { GUEST_PROTOCOL_VERSION, parseGuestHostMessage } from "./messages.ts";
 import {
@@ -221,6 +221,8 @@ function bridgeOperation(message: GuestWebviewMessage): string | null {
 	switch (message.type) {
 		case "omp:control-request":
 			return message.action === "snapshot" ? "snapshot" : message.action;
+		case "omp:chat-command":
+			return message.command === "provider-login" ? "provider-login" : null;
 		case "omp:chat-prompt":
 			return "chat-prompt";
 		case "omp:chat-steer":
@@ -283,6 +285,10 @@ function handleRouteOffer(message: Extract<GuestHostMessage, { type: "omp:route-
 		const client = state.bridge;
 		if (client === null || !client.acknowledgeRoute(message.routeGeneration)) return;
 		adoptRoute("bridge", message.hostGeneration, message.documentId, message.routeGeneration);
+		// A surviving older guest never sends this sealed, read-only announcement.
+		// The host keeps its snapshot detached until this connection proves v9.
+		client.request({ routeGeneration: message.routeGeneration, requestId: createToken(), actionSeq: "0",
+			operation: "guest-version", payload: { protocolVersion: GUEST_PROTOCOL_VERSION, fragments: true } });
 		return;
 	}
 	postOverPanel({ type: "omp:route-ack", hostGeneration: message.hostGeneration, documentId: message.documentId, routeGeneration: message.routeGeneration });
@@ -349,6 +355,11 @@ function startBridge(bind: Extract<GuestHostMessage, { type: "omp:bridge-bind" }
 			if (connected || state.bridge !== client || state.route?.kind !== "bridge") return;
 			adoptRoute("none", "", "", "");
 		},
+		onRecoveryFailed: () => {
+			if (state.bridge !== client || !state.hostLink.lost) return;
+			state.hostLink.noteRecoveryFailed();
+			for (const listener of state.routeListeners) listener(state.route?.kind ?? "none");
+		},
 	});
 	state.bridge = client;
 	client.start();
@@ -361,6 +372,7 @@ function startBridge(bind: Extract<GuestHostMessage, { type: "omp:bridge-bind" }
 function adoptRoute(kind: GuestRouteKind, hostGeneration: string, documentId: string, routeGeneration: string): void {
 	const previous = state.route;
 	state.route = { kind, hostGeneration, documentId, routeGeneration };
+	if (kind === "panel") state.hostLink.noteConnection(true);
 	if (previous?.kind !== kind || previous?.hostGeneration !== hostGeneration || previous?.routeGeneration !== routeGeneration) {
 		for (const listener of state.routeListeners) listener(kind);
 	}
@@ -443,6 +455,9 @@ export const guestTransport = {
 	/** Actual established bridge loss, not an unanswered feature request. */
 	hostConnectionLost(): boolean {
 		return state.hostLink.lost;
+	},
+	hostRecoveryFailed(): boolean {
+		return state.hostLink.recoveryFailed;
 	},
 	/** Observe route changes; the UI uses this to say what a route cannot carry. */
 	onRouteChange(listener: (kind: GuestRouteKind) => void): () => void {

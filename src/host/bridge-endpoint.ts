@@ -33,11 +33,24 @@ import type { BridgeDocumentRecord, BridgeNativeBinding, BridgeRecordScope } fro
 import { bindingHashFor } from "./bridge-records.ts";
 import { BridgeListener } from "./bridge-listener.ts";
 import type { BridgeAdmittedRequest, BridgeDocumentAuthorization, BridgeSession } from "./bridge-listener.ts";
-import { BridgeDocumentRoute } from "./bridge-route.ts";
+import { BridgeDocumentRoute, BRIDGE_ROUTE_ACK_TIMEOUT_MS } from "./bridge-route.ts";
 import type { BridgeEndpointState } from "./bridge-route.ts";
 import { isBridgeEditorId, isCanonicalWebviewOrigin } from "../bridge-identity.ts";
 import { BRIDGE_DOCUMENT_ID_BYTES, BRIDGE_EDITOR_ID_BYTES, BRIDGE_PATH, decodeHex, encodeHex, randomBytes } from "../bridge-protocol.ts";
 import type { BridgeHello } from "../bridge-protocol.ts";
+import { GUEST_PROTOCOL_VERSION } from "../webview/messages.ts";
+import type { ChatStateMessage } from "../webview/chat-messages.ts";
+
+/** Small enough for the previous guest protocol, without any snapshot or fragment. */
+export const BRIDGE_GUEST_RELOAD_REASON = "This page needs the current OMP Desk guest. Run Developer: Reload Window. Your draft is kept.";
+
+interface GuestVersionCheck {
+	readonly session: BridgeSession;
+	readonly routeGeneration: string;
+	readonly deadline: number;
+	status: "pending" | "accepted" | "refused";
+	timer: NodeJS.Timeout | undefined;
+}
 
 /** One document incarnation of an editor, with its route. */
 export interface BridgeEditorDocument {
@@ -93,6 +106,8 @@ export class BridgeEditorEndpoint {
 	readonly #committed = new Map<string, { readonly origin: string; readonly bindingHash: string; readonly binding: BridgeNativeBinding }>();
 	/** The one authenticated session per document, for offers that wait for one. */
 	readonly #sessions = new Map<string, BridgeSession>();
+	/** Rendering capability belongs to a connection and its acknowledged route, not D alone. */
+	readonly #guestVersions = new Map<string, GuestVersionCheck>();
 	#listener: BridgeListener | null = null;
 	#current: string | null = null;
 	/** The Origin a not-yet-committed document reported over the panel route. */
@@ -125,6 +140,15 @@ export class BridgeEditorEndpoint {
 
 	get hostGeneration(): Uint8Array {
 		return this.#hooks.hostGeneration;
+	}
+
+	/** Whether this exact bridge route proved it can consume the current guest DTOs. */
+	guestVersionAccepted(documentId: string): boolean {
+		const check = this.#guestVersions.get(documentId);
+		const document = this.#documents.get(documentId);
+		return check?.status === "accepted" && this.#sessions.get(documentId) === check.session
+			&& document?.route.offeredKind === "bridge" && document.route.acknowledged
+			&& document.route.isCurrentRoute(check.routeGeneration) && check.session.routeAcknowledged(check.routeGeneration);
 	}
 
 	/** The document this editor is serving right now, or `null`. */
@@ -221,7 +245,8 @@ export class BridgeEditorEndpoint {
 			requestedPort,
 			authorize: hello => this.#authorize(hello),
 			onRequest: (session, request) => {
-				this.#hooks.onRequest(session, encodeHex(session.documentId), request);
+				if (request.operation === "guest-version") this.#guestVersionRequest(session, request);
+				else this.#hooks.onRequest(session, encodeHex(session.documentId), request);
 			},
 			onSessionAuthenticated: session => this.noteSession(session),
 			onSessionEnded: session => this.#sessionEnded(session),
@@ -236,6 +261,7 @@ export class BridgeEditorEndpoint {
 		if (this.#closed) return;
 		this.#closed = true;
 		for (const document of this.#documents.values()) document.route.retire();
+		for (const documentId of this.#guestVersions.keys()) this.#clearGuestVersion(documentId);
 		this.#listener?.close();
 		this.#listener = null;
 		this.#documents.clear();
@@ -270,6 +296,7 @@ export class BridgeEditorEndpoint {
 	#sessionEnded(session: BridgeSession): void {
 		const documentId = encodeHex(session.documentId);
 		if (this.#sessions.get(documentId) !== session) return;
+		this.#clearGuestVersion(documentId);
 		this.#sessions.delete(documentId);
 		this.#documents.get(documentId)?.route.bridgeClosed();
 	}
@@ -286,13 +313,67 @@ export class BridgeEditorEndpoint {
 		const documentId = encodeHex(session.documentId);
 		const document = this.#documents.get(documentId);
 		if (document === undefined || !this.#hooks.eligible(documentId)) return false;
-		if (document.route.acknowledge(routeGeneration, "bridge")) return true;
+		if (document.route.acknowledge(routeGeneration, "bridge")) {
+			const previous = this.#guestVersions.get(documentId);
+			if (previous?.session !== session || previous.routeGeneration !== routeGeneration) {
+				this.#clearGuestVersion(documentId);
+				const check: GuestVersionCheck = { session, routeGeneration, deadline: performance.now() + BRIDGE_ROUTE_ACK_TIMEOUT_MS,
+					status: "pending", timer: undefined };
+				this.#guestVersions.set(documentId, check);
+				check.timer = setTimeout(() => this.#refuseGuestVersion(documentId, check), BRIDGE_ROUTE_ACK_TIMEOUT_MS);
+				check.timer.unref();
+			}
+			return true;
+		}
 		try {
-			session.send("route-offer", { routeGeneration: document.route.requireRouteGeneration(), status: document.route.status() });
+			this.#sendOffer(document, document.route.requireRouteGeneration());
 		} catch {
 			/* the session may have gone away between the acknowledgement and this offer */
 		}
 		return false;
+	}
+
+	#clearGuestVersion(documentId: string): void {
+		clearTimeout(this.#guestVersions.get(documentId)?.timer);
+		this.#guestVersions.delete(documentId);
+	}
+
+	#guestVersionRequest(session: BridgeSession, request: BridgeAdmittedRequest): void {
+		const documentId = encodeHex(session.documentId);
+		const check = this.#guestVersions.get(documentId);
+		const payload = request.payload;
+		const matches = check !== undefined && check.session === session && check.routeGeneration === request.routeGeneration;
+		const valid = payload !== null && typeof payload === "object" && !Array.isArray(payload)
+			&& "protocolVersion" in payload && payload.protocolVersion === GUEST_PROTOCOL_VERSION
+			&& "fragments" in payload && payload.fragments === true;
+		const accepted = matches && check.status !== "refused" && (check.status === "accepted" || performance.now() <= check.deadline) && valid;
+		// Release the transport reservation immediately; this probe never reaches native code.
+		session.reply(request.requestId, { accepted });
+		if (!matches) return;
+		if (!accepted) { this.#refuseGuestVersion(documentId, check); return; }
+		if (check.status === "accepted") return;
+		clearTimeout(check.timer);
+		check.timer = undefined;
+		check.status = "accepted";
+		const document = this.#documents.get(documentId);
+		if (document !== undefined) this.#hooks.onStateChanged?.(documentId, document.route.state);
+	}
+
+	#refuseGuestVersion(documentId: string, check: GuestVersionCheck): void {
+		const document = this.#documents.get(documentId);
+		if (this.#guestVersions.get(documentId) !== check || this.#sessions.get(documentId) !== check.session
+			|| document === undefined || !document.route.isCurrentRoute(check.routeGeneration) || check.status === "refused") return;
+		clearTimeout(check.timer);
+		check.timer = undefined;
+		check.status = "refused";
+		// Do not attach ChatRuntime: an old surviving page cannot assemble fragments.
+		// This existing v8 message disables its composer without touching its draft.
+		const payload: ChatStateMessage = {
+			type: "omp:chat-state", epoch: { nonce: encodeHex(this.#hooks.hostGeneration), counter: 0 },
+			phase: "blocked", code: null, sessionId: null, cwd: null, title: null, readOnlyReason: BRIDGE_GUEST_RELOAD_REASON,
+		};
+		check.session.send("terminal", { routeGeneration: check.routeGeneration, payload });
+		this.#hooks.onStateChanged?.(documentId, document.route.state);
 	}
 
 	/**
@@ -316,6 +397,7 @@ export class BridgeEditorEndpoint {
 		}
 		if (previous !== null && previous !== documentId) {
 			this.#documents.get(previous)?.route.retire();
+			this.#clearGuestVersion(previous);
 			this.#documents.delete(previous);
 			this.#committed.delete(previous);
 			this.#sessions.delete(previous);
@@ -552,10 +634,14 @@ export class BridgeEditorEndpoint {
 		const document = this.document;
 		if (document === null || this.#closed) return null;
 		document.route.panelBound();
+		this.#clearGuestVersion(document.documentId);
 		return document.route.offer("panel");
 	}
 
 	#sendOffer(document: BridgeEditorDocument, routeGeneration: string): void {
+		const wasAccepted = this.guestVersionAccepted(document.documentId);
+		this.#clearGuestVersion(document.documentId);
+		if (wasAccepted) this.#hooks.onStateChanged?.(document.documentId, document.route.state);
 		const session = this.#sessions.get(document.documentId);
 		if (session === undefined) return;
 		session.send("route-offer", { routeGeneration, status: document.route.status() });
@@ -566,6 +652,7 @@ export class BridgeEditorEndpoint {
 		const documentId = encodeHex(session.documentId);
 		const document = this.#documents.get(documentId);
 		if (document === undefined || !this.#hooks.eligible(documentId)) return;
+		this.#clearGuestVersion(documentId);
 		this.#sessions.set(documentId, session);
 		document.route.bridgeAuthenticated();
 		// The page needs the current route offer to acknowledge, whether this is its
@@ -602,6 +689,7 @@ export class BridgeEditorEndpoint {
 	 * re-attaches and re-asks for the state it needs.
 	 */
 	pushTerminal(documentId: string, payload: unknown): boolean {
+		if (!this.guestVersionAccepted(documentId)) return false;
 		const document = this.#documents.get(documentId);
 		const session = this.#sessions.get(documentId);
 		if (document === undefined || session === undefined) return false;
@@ -611,8 +699,19 @@ export class BridgeEditorEndpoint {
 		return true;
 	}
 
+	/** Stream one replaceable snapshot through the current acknowledged bridge. */
+	pushSnapshot(documentId: string, messages: Iterable<unknown>): boolean {
+		if (!this.guestVersionAccepted(documentId)) return false;
+		const document = this.#documents.get(documentId);
+		const session = this.#sessions.get(documentId);
+		const route = document?.route.routeGeneration;
+		if (session === undefined || route === null || route === undefined) return false;
+		return session.sendSnapshot(route, messages);
+	}
+
 	/** Retire one document: its credential stops authenticating immediately. */
 	async retireDocument(documentId: string): Promise<void> {
+		this.#clearGuestVersion(documentId);
 		this.#documents.get(documentId)?.route.retire();
 		this.#documents.delete(documentId);
 		this.#committed.delete(documentId);

@@ -445,10 +445,24 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind 
 		: visible.length === 0 ? -1 : Math.min(activeSuggestion, visible.length - 1);
 	const argumentHint = argument !== null && argument.query.length === 0 ? argument.hint.text : "";
 	const suggestionsOpen = visible.length > 0 || argumentHint.length > 0;
-	const selectSuggestion = useCallback((index: number): void => {
+	// A pointer selects only an option it can already see; scrolling under the pointer would move the list away from it.
+	const pointerSelectionRef = useRef(false);
+	const selectSuggestion = useCallback((index: number, pointer = false): void => {
+		pointerSelectionRef.current = pointer;
 		setActiveSuggestion(index);
 		setArgumentSelectionKey(completionKey);
 	}, [completionKey]);
+	// Keep the active option inside the list's scrollport, so keyboard navigation never selects an option the user cannot see.
+	useLayoutEffect(() => {
+		if (pointerSelectionRef.current) { pointerSelectionRef.current = false; return; }
+		if (activeIndex < 0) return;
+		const option = document.getElementById(`${suggestionListId}-${activeIndex}`);
+		const list = option?.parentElement;
+		if (!option || !list) return;
+		// The first option scrolls to the very top, so the list's padding and any argument hint above it show too.
+		if (activeIndex === 0 || option.offsetTop < list.scrollTop) list.scrollTop = activeIndex === 0 ? 0 : option.offsetTop;
+		else if (option.offsetTop + option.offsetHeight > list.scrollTop + list.clientHeight) list.scrollTop = option.offsetTop + option.offsetHeight - list.clientHeight;
+	}, [activeIndex, visible, suggestionListId]);
 	// Outside press, Escape and window blur dismiss the completion list by the same shared rule as every other chat layer.
 	const dismissCompletion = useCallback((): void => {
 		setDismissedCompletion(`${textRef.current}\0${caretRef.current}`);
@@ -1425,7 +1439,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind 
 									role="option"
 									aria-selected={index === activeIndex}
 									className={`omp-suggest-option${index === activeIndex ? " omp-suggest-option--active" : ""}`}
-									onMouseEnter={() => selectSuggestion(index)}
+									onMouseEnter={() => selectSuggestion(index, true)}
 									// Accepting must not blur the textarea first: the click would
 									// otherwise land after the caret and draft context were lost.
 									onMouseDown={event => event.preventDefault()}

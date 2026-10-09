@@ -56,6 +56,7 @@
 
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { canonicalJson } from "./control-protocol.ts";
+import { CHAT_EXIT_STDERR_BYTES, parseChatExitReason } from "../chat/exit-reason.ts";
 
 /**
  * Version of the frame protocol. Bumped when a frame's meaning changes.
@@ -149,7 +150,7 @@ export const PTY_RPC_MAX_READY_CHARS = 16 * 1024;
 export const PTY_RPC_MAX_STDERR_CHARS = 16 * 1024;
 
 /** Bytes of the child's stderr the broker keeps for diagnostics. */
-export const PTY_RPC_STDERR_TAIL_BYTES = 32 * 1024;
+export const PTY_RPC_STDERR_TAIL_BYTES = CHAT_EXIT_STDERR_BYTES;
 
 const NONCE_RE = /^[A-Za-z0-9_-]{43}$/;
 const DIGEST_RE = /^[a-f0-9]{64}$/;
@@ -623,6 +624,8 @@ export interface PtyStatusPayload {
 	readonly state: PtyChildState;
 	readonly exitCode: number | null;
 	readonly signal: number | null;
+	/** Plain-text managed-RPC stderr tail on exit; absent for native Terminal children. */
+	readonly stderrTail?: string;
 	readonly cols: number;
 	readonly rows: number;
 	readonly alt: boolean;
@@ -1502,6 +1505,7 @@ export function isPtyStatusPayload(value: unknown): value is PtyStatusPayload {
 	if (status.state !== "running" && status.state !== "exited") return false;
 	if (status.exitCode !== null && !Number.isInteger(status.exitCode)) return false;
 	if (status.signal !== null && !Number.isInteger(status.signal)) return false;
+	if (status.stderrTail !== undefined && parseChatExitReason({ exitCode: status.exitCode, stderr: status.stderrTail }) === null) return false;
 	if (!Number.isInteger(status.cols) || !Number.isInteger(status.rows)) return false;
 	if (typeof status.alt !== "boolean") return false;
 	if (status.title !== null && !isBoundedPtyText(status.title, PTY_MAX_TITLE_CHARS)) return false;

@@ -72,6 +72,7 @@ import {
 	verifyProof,
 } from "../bridge-protocol.ts";
 import type { BridgeHello, BridgeRouteStatus } from "../bridge-protocol.ts";
+import { fragmentBridgeMessage } from "../bridge-fragments.ts";
 
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const WS_OPCODE_TEXT = 0x1;
@@ -90,6 +91,8 @@ const MASK_BYTES = 4;
  * its own answer; none grants session writer authority.
  */
 const BRIDGE_STREAM_OPERATIONS: Record<string, true> = {
+	"guest-version": true,
+	"provider-login": true,
 	"chat-tool-detail": true,
 	"chat-subagent-read": true,
 	"terminal-attach": true,
@@ -150,6 +153,8 @@ export interface BridgeSession {
 	): void;
 	/** Answer one admitted request. */
 	reply(requestId: string, result: unknown): void;
+	/** Admit a replaceable authoritative snapshot, producing only one frame at a time. */
+	sendSnapshot(routeGeneration: string, messages: Iterable<unknown>): boolean;
 	close(reason: BridgeCloseReason): void;
 }
 
@@ -197,6 +202,16 @@ export interface BridgeListenerHooks {
 	/** Silence after which a session is marked `disconnected`; defaults to the protocol's 45 s. */
 	readonly idleMs?: number;
 }
+
+/** A snapshot keeps DTO references, never a serialized transcript backlog. */
+interface SnapshotWrite {
+	source: Iterator<unknown> | null;
+	readonly routeGeneration: string;
+}
+
+type OutboundWrite = { readonly text: string; readonly bytes: number } | SnapshotWrite;
+
+const BRIDGE_WRITE_TIMEOUT_MS = 5_000;
 
 /** Stop codes a listener can report without leaking anything about the peer. */
 export type BridgeListenerFailure = "port-occupied" | "bind-failed";
@@ -418,7 +433,10 @@ class Session implements BridgeSession {
 	#acknowledgedRoute: string | null = null;
 	#keys: { readonly clientToServer: Uint8Array; readonly serverToClient: Uint8Array } | null = null;
 	#buffer = Buffer.alloc(0);
-	#sendChain: Promise<void> = Promise.resolve();
+	readonly #writes: OutboundWrite[] = [];
+	#writing = false;
+	#activeSnapshot: SnapshotWrite | null = null;
+	#pongPending = false;
 	#receiveChain: Promise<void> = Promise.resolve();
 	#queuedBytes = 0;
 	#pendingReads = new Set<string>();
@@ -536,9 +554,35 @@ class Session implements BridgeSession {
 		this.#sealAndWrite(replyFrame(this.#hostGeneration, this.#documentId, this.#acknowledgedRoute, requestId, result));
 	}
 
+	sendSnapshot(routeGeneration: string, messages: Iterable<unknown>): boolean {
+		if (!this.routeAcknowledged(routeGeneration)) return false;
+		// Finish the earliest train so disk-first paint cannot be starved by live
+		// hydration. Replace only later, wholly unsent trains; live events retain
+		// their positions and the latest snapshot is appended after them.
+		let retained = this.#activeSnapshot !== null;
+		for (let index = 0; index < this.#writes.length;) {
+			const queued = this.#writes[index]!;
+			if ("source" in queued) {
+				if (retained) {
+					queued.source = null;
+					this.#writes.splice(index, 1);
+					continue;
+				}
+				retained = true;
+			}
+			index++;
+		}
+		this.#writes.push({ source: messages[Symbol.iterator](), routeGeneration });
+		void this.#flushWrites();
+		return true;
+	}
+
 	close(reason: BridgeCloseReason): void {
 		if (this.#state === "closed") return;
 		this.#state = "closed";
+		if (this.#activeSnapshot !== null) this.#activeSnapshot.source = null;
+		for (const queued of this.#writes) if ("source" in queued) queued.source = null;
+		this.#writes.length = 0;
 		clearTimeout(this.#handshakeTimer);
 		clearInterval(this.#heartbeatTimer);
 		this.#handshakeTimer = undefined;
@@ -559,7 +603,7 @@ class Session implements BridgeSession {
 				return;
 			}
 			this.#buffer = this.#buffer.subarray(frame.consumed);
-			if (frame.overflow) {
+			if (frame.overflow || !frame.masked) {
 				this.close("protocol");
 				return;
 			}
@@ -568,14 +612,17 @@ class Session implements BridgeSession {
 				return;
 			}
 			if (frame.opcode === WS_OPCODE_PING) {
-				this.#socket.write(encodeWebSocketFrame(WS_OPCODE_PONG, frame.payload));
+				// RFC 6455 permits coalescing pongs. Keep at most one tiny control
+				// response in flight, even before authentication, under a deadline.
+				if (!this.#pongPending) {
+					this.#pongPending = true;
+					void this.#writeSocketFrame(encodeWebSocketFrame(WS_OPCODE_PONG, frame.payload))
+						.catch(() => this.close("protocol"))
+						.finally(() => { this.#pongPending = false; });
+				}
 				continue;
 			}
-			if (!frame.masked) {
-				// A browser client must mask; an unmasked frame is not this guest.
-				this.close("protocol");
-				return;
-			}
+			if (frame.opcode === WS_OPCODE_PONG) continue;
 			if (frame.opcode === WS_OPCODE_BINARY) {
 				if (this.#keys === null) {
 					this.close("protocol");
@@ -832,13 +879,19 @@ class Session implements BridgeSession {
 		if (
 			message.length !== 8 ||
 			!isCanonicalToken(route) ||
-			route !== this.#acknowledgedRoute ||
 			!isCanonicalToken(requestId) ||
 			typeof actionSeq !== "string" ||
 			!/^[0-9]{1,20}$/.test(actionSeq) ||
 			typeof operation !== "string" ||
 			typeof payload !== "string"
 		) {
+			this.close("protocol");
+			return;
+		}
+		if (route !== this.#acknowledgedRoute) {
+			// A sealed read-only capability probe for a fenced route has no authority
+			// or reservation. Ignore it; the current route's fixed deadline still applies.
+			if (operation === "guest-version") return;
 			this.close("protocol");
 			return;
 		}
@@ -899,45 +952,97 @@ class Session implements BridgeSession {
 		this.#sealAndWrite(pingFrame(createToken()));
 	}
 
-	/**
-	 * Seal and write in one order.
-	 *
-	 * The seal is asynchronous (WebCrypto in the guest, Node's WebCrypto here), so
-	 * the chain is what keeps the sequence numbers and the wire order identical
-	 * even when a seal completes out of order. The queue bound is checked before
-	 * the frame is sealed.
-	 */
+	/** Admit ordinary traffic under the unchanged plaintext queue budget. */
 	#sealAndWrite(text: string): void {
 		if (this.#state === "closed" || this.#keys === null) return;
-		const keys = this.#keys;
-		const payloadBytes = Buffer.byteLength(text, "utf8");
-		this.#queuedBytes += payloadBytes;
-		if (this.#queuedBytes > BRIDGE_MAX_QUEUED_OUTBOUND_BYTES) {
+		const bytes = Buffer.byteLength(text, "utf8");
+		if (!this.#reserveBytes(bytes)) return;
+		this.#writes.push({ text, bytes });
+		void this.#flushWrites();
+	}
+
+	#reserveBytes(bytes: number): boolean {
+		if (bytes > BRIDGE_MAX_PLAINTEXT_BYTES || this.#queuedBytes + bytes > BRIDGE_MAX_QUEUED_OUTBOUND_BYTES) {
 			this.#hooks.onDiagnostic?.("outbound-queue", "the bridge session exceeded its outbound queue bound");
 			this.close("protocol");
-			return;
+			return false;
 		}
-		this.#sendChain = this.#sendChain
-			.then(async () => {
-				const sequence = this.#outbound.next;
-				const sealed = await sealFrame({
-					key: keys.serverToClient,
-					direction: BRIDGE_DIRECTION_SERVER_TO_CLIENT,
-					sequence,
-					plaintext: Buffer.from(text, "utf8"),
-					additionalData: frameAdditionalData(this.#hostGeneration, this.#connectionId, this.#documentId, BRIDGE_DIRECTION_SERVER_TO_CLIENT, sequence),
-				});
-				this.#outbound.accept(sequence);
-				if (this.#state === "closed") return;
-				// Sealed frames are binary on the wire: the guest's reader accepts a
-				// text frame only while it is still handshaking, so a text-labelled
-				// sealed frame would be refused as a protocol violation.
-				this.#socket.write(encodeWebSocketFrame(WS_OPCODE_BINARY, Buffer.from(sealed)));
-			})
-			.catch(() => this.close("protocol"))
-			.finally(() => {
-				this.#queuedBytes -= payloadBytes;
+		this.#queuedBytes += bytes;
+		return true;
+	}
+
+	async #flushWrites(): Promise<void> {
+		if (this.#writing) return;
+		this.#writing = true;
+		try {
+			while (this.#state !== "closed") {
+				const queued = this.#writes.shift();
+				if (queued === undefined) break;
+				if ("source" in queued) {
+					this.#activeSnapshot = queued;
+					while (queued.source !== null && this.routeAcknowledged(queued.routeGeneration)) {
+						const next = queued.source.next();
+						if (next.done) break;
+						for (const payload of fragmentBridgeMessage(next.value, queued.routeGeneration)) {
+							if (queued.source === null || !this.routeAcknowledged(queued.routeGeneration)) break;
+							const text = terminalPushFrame(this.#hostGeneration, this.#documentId, payload);
+							const bytes = Buffer.byteLength(text, "utf8");
+							if (!this.#reserveBytes(bytes)) break;
+							try { await this.#writeSealed(text); }
+							finally { this.#queuedBytes -= bytes; }
+						}
+					}
+					queued.source = null;
+					this.#activeSnapshot = null;
+				} else {
+					try { await this.#writeSealed(queued.text); }
+					finally { this.#queuedBytes -= queued.bytes; }
+				}
+			}
+		} catch {
+			this.close("protocol");
+		} finally {
+			this.#writing = false;
+		}
+	}
+
+	async #writeSealed(text: string): Promise<void> {
+		const keys = this.#keys;
+		if (this.#state === "closed" || keys === null) return;
+		const sequence = this.#outbound.next;
+		const sealed = await sealFrame({
+			key: keys.serverToClient,
+			direction: BRIDGE_DIRECTION_SERVER_TO_CLIENT,
+			sequence,
+			plaintext: Buffer.from(text, "utf8"),
+			additionalData: frameAdditionalData(this.#hostGeneration, this.#connectionId, this.#documentId, BRIDGE_DIRECTION_SERVER_TO_CLIENT, sequence),
+		});
+		this.#outbound.accept(sequence);
+		if (this.state === "closed") return;
+		await this.#writeSocketFrame(encodeWebSocketFrame(WS_OPCODE_BINARY, Buffer.from(sealed)));
+	}
+
+	/** Complete at most one data frame plus one 125-byte pong in socket memory. */
+	async #writeSocketFrame(frame: Buffer): Promise<void> {
+		if (this.#state === "closed") return;
+		const written = Promise.withResolvers<void>();
+		const timer = setTimeout(() => {
+			this.#hooks.onDiagnostic?.("outbound-stalled", "the bridge peer did not drain an outbound frame");
+			this.close("timeout");
+			written.reject(new Error("bridge write deadline"));
+		}, BRIDGE_WRITE_TIMEOUT_MS);
+		const closed = (): void => written.reject(new Error("bridge socket closed"));
+		this.#socket.once("close", closed);
+		try {
+			this.#socket.write(frame, error => {
+				if (error) written.reject(error);
+				else written.resolve();
 			});
+			await written.promise;
+		} finally {
+			clearTimeout(timer);
+			this.#socket.off("close", closed);
+		}
 	}
 }
 
@@ -992,6 +1097,9 @@ function readWebSocketFrame(buffer: Buffer): WebSocketFrame | null {
 		length = Number(declared);
 		offset = 10;
 	}
+	if (((buffer[0] ?? 0) & 0x80) === 0 || (opcode >= WS_OPCODE_CLOSE && length > 125)) {
+		return { opcode, masked, payload: Buffer.alloc(0), consumed: 2, overflow: true };
+	}
 	if (length > BRIDGE_MAX_FRAME_BYTES) return { opcode, masked, payload: Buffer.alloc(0), consumed: 2, overflow: true };
 	const maskLength = masked ? MASK_BYTES : 0;
 	if (buffer.length < offset + maskLength + length) return null;
@@ -1004,13 +1112,18 @@ function readWebSocketFrame(buffer: Buffer): WebSocketFrame | null {
 }
 
 function encodeWebSocketFrame(opcode: number, payload: Buffer): Buffer {
-	const header = Buffer.alloc(payload.length < 126 ? 2 : 4);
+	const header = Buffer.alloc(payload.length < 126 ? 2 : payload.length <= 0xffff ? 4 : 10);
 	header[0] = 0x80 | opcode;
 	if (payload.length < 126) {
 		header[1] = payload.length;
 		return Buffer.concat([header, payload]);
 	}
-	header[1] = 126;
-	header.writeUInt16BE(payload.length, 2);
+	if (payload.length <= 0xffff) {
+		header[1] = 126;
+		header.writeUInt16BE(payload.length, 2);
+	} else {
+		header[1] = 127;
+		header.writeBigUInt64BE(BigInt(payload.length), 2);
+	}
 	return Buffer.concat([header, payload]);
 }

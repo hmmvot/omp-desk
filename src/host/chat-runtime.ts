@@ -52,6 +52,8 @@ export interface ChatPage {
 	 * in chunks that fit. `dropped` means the route is gone or not ready.
 	 */
 	post(message: ChatHostMessage): "sent" | "too-large" | "dropped";
+	/** A bridge streams snapshots with backpressure rather than admitting a synchronous burst. */
+	postSnapshot?(messages: Iterable<ChatHostMessage>): "sent" | "dropped";
 	/** Largest JSON size of one snapshot chunk this route carries; the default suits `postMessage`. */
 	readonly maxChunkBytes?: number;
 	/**
@@ -65,7 +67,7 @@ export interface ChatPage {
 export type ChatRuntimeEvent =
 	/** The live model changed. `baseline` marks attach/resync hydration, never an ordinary live history reconcile. */
 	| { readonly type: "model"; readonly model: ChatModel; readonly baseline: boolean }
-	/** The phase, code or identity payload of the conversation changed. */
+	/** The phase, code, identity or bounded autonomous child-exit diagnostic changed. */
 	| { readonly type: "state"; readonly payload: ChatStatePayload }
 	/** The identity the process serves: learned for a new session, verified for a resumed one. */
 	| { readonly type: "identity"; readonly sessionFile: string; readonly sessionId: string }
@@ -327,7 +329,7 @@ export class ChatRuntime {
 		if (state !== null) page.post({ type: "omp:chat-state", ...state });
 		const snapshot = conversation.session === null ? conversation.snapshot : conversation.session.snapshot();
 		if (snapshot !== null) this.#sendSnapshot(conversation, page, snapshot);
-		if (state !== null) page.post({ type: "omp:chat-display-preferences", epoch: state.epoch, ...this.#displayPreferences() });
+		if (snapshot === null && state !== null) page.post({ type: "omp:chat-display-preferences", epoch: state.epoch, ...this.#displayPreferences() });
 	}
 
 	#displayPreferences(): ChatDisplayPreferences {
@@ -622,10 +624,20 @@ export class ChatRuntime {
 			page.maxChunkBytes === undefined
 				? splitChatSnapshot(payload, snapshotId)
 				: splitChatSnapshot(payload, snapshotId, page.maxChunkBytes);
+		if (page.postSnapshot !== undefined) {
+			const preferences = this.#displayPreferences();
+			page.postSnapshot((function* () {
+				yield split.snapshot;
+				yield* split.chunks;
+				yield { type: "omp:chat-display-preferences", epoch: payload.epoch, ...preferences };
+			})());
+			return;
+		}
 		if (page.post(split.snapshot) !== "sent") return;
 		for (const chunk of split.chunks) {
 			if (page.post(chunk) !== "sent") return;
 		}
+		page.post({ type: "omp:chat-display-preferences", epoch: payload.epoch, ...this.#displayPreferences() });
 		void conversation;
 	}
 
@@ -893,9 +905,17 @@ function withReadOnlyOverlay(page: ChatPage): ChatPage {
 	const reasonOf = page.readOnlyReason;
 	if (reasonOf === undefined) return page;
 	return {
-		id: page.id,
-		...(page.maxChunkBytes === undefined ? {} : { maxChunkBytes: page.maxChunkBytes }),
-		readOnlyReason: reasonOf,
+		...page,
+		...(page.postSnapshot === undefined ? {} : {
+			postSnapshot: (messages: Iterable<ChatHostMessage>) => page.postSnapshot!((function* () {
+				for (const message of messages) {
+					const reason = reasonOf();
+					yield reason !== null && message.type === "omp:chat-snapshot"
+						? { ...message, head: { ...message.head, readOnlyReason: reason } }
+						: message;
+				}
+			})()),
+		}),
 		post: message => {
 			const reason = reasonOf();
 			if (reason !== null && message.type === "omp:chat-state") return page.post({ ...message, readOnlyReason: reason });

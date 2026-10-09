@@ -89,6 +89,44 @@ function snapshots(outputs: readonly RpcSessionOutput[]): ChatSnapshotPayload[] 
 	return outputs.flatMap(output => (output.type === "snapshot" ? [output.payload] : []));
 }
 
+describe("autonomous child exit diagnostics", () => {
+	it("publishes the final broker stderr even if streamed diagnostics were missed", async () => {
+		const { session, channel, outputs } = await boot({ child: { sessionFile: "D:\\scratch\\exit.jsonl" } });
+		const stderr = "No default model selected. Use /login.";
+		channel.exitChild(1, stderr);
+		channel.closeLink("child-exited");
+		assert.deepEqual(session.model.exitReason, { exitCode: 1, stderr });
+		assert.deepEqual(snapshots(outputs).at(-1)?.exitReason, { exitCode: 1, stderr });
+		assert.deepEqual(outputs.filter(output => output.type === "state").at(-1)?.payload.exitReason, { exitCode: 1, stderr });
+		session.dispose();
+	});
+
+	it("retains pre-ready failure diagnostics from an already-exited attach", async () => {
+		const stderr = "Could not restore model fixture/missing";
+		const { session } = await boot({ setup: channel => { channel.childState = "exited"; channel.childExitCode = 1; channel.childStderrTail = stderr; channel.ready = null; } });
+		assert.equal(session.phase, "stopped");
+		assert.deepEqual(session.snapshot().exitReason, { exitCode: 1, stderr });
+		session.dispose();
+	});
+
+	it("does not diagnose a user-requested Stop as an autonomous failure", async () => {
+		const { session, channel } = await boot({ child: { sessionFile: "D:\\scratch\\stop.jsonl" } });
+		channel.closeLink("stopped");
+		assert.equal(session.model.code, null);
+		assert.equal(session.model.exitReason, undefined);
+		session.dispose();
+	});
+
+	it("accepts final diagnostics after an in-flight write learned of exit first", async () => {
+		const { session, channel } = await boot({ child: { sessionFile: "D:\\scratch\\write-exit.jsonl" } });
+		channel.writeError = "child-exited";
+		await session.prompt({ requestId: "exit-prompt", text: "hello" });
+		channel.exitChild(3, "Owned startup failure");
+		assert.deepEqual(session.snapshot().exitReason, { exitCode: 3, stderr: "Owned startup failure" });
+		session.dispose();
+	});
+});
+
 describe("resync sequence", () => {
 	it("paints the disk tail first, keeps replay in the shadow, sends only the delta, then goes live once", async () => {
 		const file = await scratchFile("s1.jsonl", [u1, a1]);
@@ -1262,7 +1300,7 @@ describe("chat quick actions", () => {
 		session.dispose();
 	});
 
-	it("compacts with optional instructions, shows its own progress, and refuses while a turn runs", async () => {
+	it("compacts with optional instructions, shows its own progress, runs during a turn and refuses a second pass", async () => {
 		const { session, channel } = await boot({ child });
 		let during: unknown;
 		channel.handlers.set("compact", () => { during = session.model.maintenance; return { data: {} }; });
@@ -1274,7 +1312,13 @@ describe("chat quick actions", () => {
 		assert.equal((await session.compact(undefined)).status, "refused");
 		assert.equal(session.model.maintenance?.status, "failed");
 		channel.emit({ type: "agent_start" });
-		assert.deepEqual(await session.compact(undefined), { status: "refused", reason: "busy" });
+		await tick();
+		channel.handlers.set("compact", () => ({ data: {} }));
+		assert.deepEqual(await session.compact(undefined), { status: "ok", value: null }, "OMP interrupts the turn, compacts and resumes it, as in the TUI");
+		let second: Promise<unknown> | undefined;
+		channel.handlers.set("compact", () => { second ??= session.compact(undefined); return { data: {} }; });
+		await session.compact(undefined);
+		assert.deepEqual(await second, { status: "refused", reason: "busy" }, "a compaction already running");
 		session.dispose();
 	});
 

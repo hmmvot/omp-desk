@@ -411,6 +411,7 @@ describe("managed-rpc broker end to end", { skip: SKIP, timeout: 120_000 }, () =
 		await seen.whenLine(json => json.type === "bye");
 		const closed = await seen.whenEvent(event => event.type === "closed");
 		assert.deepEqual(closed, { type: "closed", reason: "stopped" });
+		assert.equal(seen.events.some(event => event.type === "child" && event.status.state === "exited"), false, "an intentional stop does not announce an autonomous child exit");
 		assert.equal((await handle.refreshStatus()).state, "exited");
 		await assert.rejects(send(handle, { type: "mark", name: "late" }), (error: unknown) => {
 			assert.ok(error instanceof RpcWriteError);

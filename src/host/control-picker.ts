@@ -38,10 +38,10 @@ function choose<T>(title: string, items: readonly Choice<T>[], stillCurrent: () 
 
 const modelOrder = new Intl.Collator("en", { numeric: true, sensitivity: "base" });
 
-export function pickControlModel(models: readonly ControlModelRef[], current: ControlModelRef | null, stillCurrent: () => boolean, tabId?: string): Promise<ControlModelRef | undefined> {
+export function pickControlModel(models: readonly ControlModelRef[], current: ControlModelRef | null, stillCurrent: () => boolean, tabId?: string): Promise<ControlModelRef | "provider-login" | undefined> {
 	const names = new Map<string, number>();
 	for (const model of models) { const name = model.name ?? model.id; names.set(name, (names.get(name) ?? 0) + 1); }
-	const items: Choice<ControlModelRef>[] = [];
+	const items: Choice<ControlModelRef | "provider-login">[] = [];
 	let provider: string | undefined;
 	for (const model of [...models].sort((a, b) => modelOrder.compare(a.provider, b.provider) || modelOrder.compare(a.id, b.id))) {
 		if (provider !== model.provider) {
@@ -53,6 +53,8 @@ export function pickControlModel(models: readonly ControlModelRef[], current: Co
 			description: selected ? "current" : (names.get(model.name ?? model.id) ?? 0) > 1 ? model.id : undefined,
 			value: model, current: selected });
 	}
+	items.push({ label: "", kind: vscode.QuickPickItemKind.Separator });
+	items.push({ label: "$(account) Log In to Provider…", value: "provider-login" });
 	return choose("Model", items, stillCurrent, tabId);
 }
 

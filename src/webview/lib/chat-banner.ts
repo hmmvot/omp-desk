@@ -1,22 +1,21 @@
 /**
  * The one line a conversation shows about its own state, by phase.
  *
- * The extension never forwards arbitrary child text: a failure arrives as a bounded machine
- * `code` and the page picks the fixed sentence (`RPC_ERROR_SENTENCES`). A code this build does
- * not know gets the generic sentence, so a newer host can add codes without the page showing
- * nothing or raw text.
+ * Failure codes select fixed sentences. An autonomous managed-RPC child exit additionally
+ * carries a bounded plain-text stderr diagnostic; React renders it as text, not markup.
  */
 // Explicit `.ts` specifiers: this module is imported by the node:test runner.
 import type { ChatModel } from "../../chat/model.ts";
 import { isRecoverableRpcFailure, RPC_ERROR_SENTENCES } from "../../host/rpc/protocol.ts";
 import type { RpcErrorCode } from "../../host/rpc/protocol.ts";
+import { chatExitText, exitNeedsProviderLogin } from "../../chat/exit-reason.ts";
 
 export interface ChatBanner {
 	level: "info" | "warn" | "error";
 	text: string;
 	icon: string;
 	/** An in-place remedy the page can offer next to the sentence. */
-	action?: "reconnect";
+	action?: "reconnect" | "provider-login";
 }
 
 const GENERIC_FAILURE = "The session is not available.";
@@ -31,7 +30,7 @@ export function errorSentence(code: string | null): string {
 }
 
 /** The banner for a model, or `null` when a live, writable conversation needs none. */
-export function chatBanner(model: Pick<ChatModel, "phase" | "code" | "readOnlyReason">): ChatBanner | null {
+export function chatBanner(model: Pick<ChatModel, "phase" | "code" | "readOnlyReason" | "exitReason">): ChatBanner | null {
 	switch (model.phase) {
 		case "starting":
 			return { level: "info", icon: "debug-start", text: "Starting the session…" };
@@ -42,6 +41,10 @@ export function chatBanner(model: Pick<ChatModel, "phase" | "code" | "readOnlyRe
 		case "live":
 			return model.readOnlyReason === null ? null : { level: "warn", icon: "warning", text: model.readOnlyReason };
 		case "stopped":
+			if (model.exitReason !== undefined) return {
+				level: "error", icon: "error", text: chatExitText(model.exitReason),
+				...(exitNeedsProviderLogin(model.exitReason) ? { action: "provider-login" as const } : {}),
+			};
 		case "view-only":
 			return { level: "info", icon: "debug-stop", text: STOPPED_TEXT };
 		case "failed":

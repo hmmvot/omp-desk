@@ -11,6 +11,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { createDetailHtml, createGuestHtml, createShellHtml, createUnavailableGuestHtml } from "./host/guest-webview";
+import { chatExitText, type ChatExitReason } from "./chat/exit-reason";
 import { persistedTabId } from "./webview/panel-identity";
 import { installedNerdFonts } from "./host/terminal-fonts";
 import { terminalFontFamily } from "./webview/lib/terminal-theme";
@@ -148,7 +149,7 @@ import { activitySignature, turnActivity, withRegistrySubagentWork } from "./web
 import type { ChatDisplayPreferences, ChatWebviewMessage } from "./webview/chat-messages";
 // The reconnecting bridge (ADR-0023): one exact listener per actual editor, durable
 // records, one route per document, and one admission path for irreversible changes.
-import { BridgeEditorEndpoint } from "./host/bridge-endpoint";
+import { BridgeEditorEndpoint, BRIDGE_GUEST_RELOAD_REASON } from "./host/bridge-endpoint";
 import type { BridgeBootstrapDelivery } from "./host/bridge-endpoint";
 import { BridgeRecords, bindingMatches } from "./host/bridge-records";
 import type { BridgeNativeBinding, BridgeRecordScope } from "./host/bridge-records";
@@ -169,6 +170,7 @@ import {
 import {
   BRIDGE_MAX_PLAINTEXT_BYTES,
   BRIDGE_PATH,
+  asciiJsonText,
   createToken,
   decodeBase64Url,
   encodeBase64Url,
@@ -568,6 +570,13 @@ const footerBindings = new Map<string, {
   modelId: string | null;
 }>();
 const usageCaches = new Map<string, ProviderUsageCache>();
+let defaultProviderModelsAvailable: boolean | null = null;
+let defaultProviderModelsRead: Promise<void> | null = null;
+let defaultProviderModelsDirty = false;
+const sessionModelReads = new Map<string, Promise<void>>();
+const sessionModelRefreshOwed = new Set<string>();
+let providerLoginTerminal: vscode.Terminal | null = null;
+let providerLoginOpening = false;
 /**
  * This activation's host generation `H`.
  *
@@ -1095,6 +1104,7 @@ export function activate(context: vscode.ExtensionContext): void {
     for (const binding of footerBindings.values()) binding.observer?.dispose();
     footerBindings.clear();
     usageCaches.clear();
+    sessionModelRefreshOwed.clear();
   } });
   context.subscriptions.push(
     vscode.window.registerWebviewPanelSerializer(PANEL_VIEW_TYPE, legacySerializerFor(context, index)),
@@ -1133,6 +1143,7 @@ export function activate(context: vscode.ExtensionContext): void {
   launcherProvider = provider;
   const view = vscode.window.createTreeView(SESSIONS_VIEW_ID, { treeDataProvider: provider });
   launcherView = view;
+  subscribeProviderLoginRefresh(context, index);
   const toolsProvider = new ToolsTreeProvider();
   const toolsView = vscode.window.createTreeView("omp.tools", { treeDataProvider: toolsProvider });
   const tools = new SessionToolsController(() => toolsTarget(index), snapshot => toolsProvider.setSnapshot(snapshot));
@@ -6296,8 +6307,8 @@ function panelChatPage(state: TabState, panel: vscode.WebviewPanel): ChatPage {
 
 /** The largest chat message the bridge carries in one encrypted frame, with headroom. */
 const BRIDGE_CHAT_MESSAGE_LIMIT = BRIDGE_MAX_PLAINTEXT_BYTES - 4096;
-/** Snapshot chunks the bridge route is sent, well under its frame ceiling. */
-const BRIDGE_CHAT_CHUNK_BYTES = 32 * 1024;
+/** Row grouping stays compatible with panel snapshots; large DTOs are fragmented by the bridge writer. */
+const BRIDGE_CHAT_CHUNK_BYTES = 248 * 1024;
 
 /** The bridge route of one surviving page: host pushes ride the bridge's own frames. */
 function bridgeChatPage(bridge: NonNullable<TabState["bridge"]>, documentId: string): ChatPage {
@@ -6305,11 +6316,12 @@ function bridgeChatPage(bridge: NonNullable<TabState["bridge"]>, documentId: str
     id: `bridge-${documentId}`,
     maxChunkBytes: BRIDGE_CHAT_CHUNK_BYTES,
     readOnlyReason: () => { const state = tabs.get(bridge.editorId); return state === undefined ? PASSIVE_REASON_DEFAULT : sessionAdmissionReason(state); },
+    postSnapshot: messages => bridge.endpoint.pushSnapshot(documentId, messages) ? "sent" : "dropped",
     post: message => {
       // One frame carries at most the bridge's plaintext ceiling. A larger message is
       // refused, not truncated: the conversation then re-sends an authoritative snapshot
       // in chunks that fit.
-      if (Buffer.byteLength(JSON.stringify(message), "utf8") > BRIDGE_CHAT_MESSAGE_LIMIT) return "too-large";
+      if (Buffer.byteLength(JSON.stringify(asciiJsonText(message)), "utf8") > BRIDGE_CHAT_MESSAGE_LIMIT) return "too-large";
       return bridge.endpoint.pushTerminal(documentId, message) ? "sent" : "dropped";
     },
   };
@@ -6335,10 +6347,10 @@ function attachChatRoute(slot: string, force = false): void {
     const bridge = state.bridge;
     const documentId = bridge.documentId as string;
     const route = bridge.endpoint.routeFor(documentId);
-    // The session is authenticated and the route acknowledged: state and history are
-    // informative from then on, while every command is gated separately on the route
-    // being dispatchable.
-    if (route?.state === "BRIDGE_READY" || route?.state === "BRIDGE_AUTHENTICATED_WAITING") {
+    // Authentication alone does not prove that a surviving older page can consume
+    // snapshot fragments. Its connection and acknowledged route must announce v9.
+    if (bridge.endpoint.guestVersionAccepted(documentId)
+      && (route?.state === "BRIDGE_READY" || route?.state === "BRIDGE_AUTHENTICATED_WAITING")) {
       desired = { id: `bridge-${documentId}`, page: bridgeChatPage(bridge, documentId) };
     }
   }
@@ -6384,6 +6396,10 @@ function handleBridgeRequest(
     session.reply(request.requestId, { type: "omp:error", message: "This document is no longer served.", code: "not-hosted" });
     return;
   }
+  if (!bridge.endpoint.guestVersionAccepted(documentId)) {
+    session.reply(request.requestId, { type: "omp:error", message: BRIDGE_GUEST_RELOAD_REASON, code: "guest-version" });
+    return;
+  }
   const tabId = state.tabId;
   if (tabId === null) {
     session.reply(request.requestId, { type: "omp:error", message: "This document is no longer served.", code: "not-hosted" });
@@ -6400,6 +6416,20 @@ function handleBridgeRequest(
     // Only the listed controls/chat/terminal exchanges are carried, and this
     // window needs its current index to answer them. Nothing else is admitted.
     refuseBridgeRequest(session, route.routeGeneration, request.requestId);
+    return;
+  }
+  if (request.operation === "provider-login") {
+    const parsed = parseGuestWebviewMessage({ ...payload, type: "omp:chat-command" });
+    if (parsed?.type !== "omp:chat-command" || parsed.command !== "provider-login" ||
+      activationContext === undefined || (route.state !== "BRIDGE_READY" && route.state !== "BRIDGE_AUTHENTICATED_WAITING")) {
+      refuseBridgeRequest(session, route.routeGeneration, request.requestId);
+      return;
+    }
+    // Opening native login changes no session writer; the exact current authenticated
+    // document may request it while Chat is stopped. Passive editors retain panel-only login.
+    void runChatAction(activationContext, table, tabId, parsed.command)
+      .then(() => session.reply(request.requestId, null))
+      .catch(() => refuseBridgeRequest(session, route.routeGeneration, request.requestId));
     return;
   }
   if (request.operation === "terminal-copy-reply") {
@@ -6500,6 +6530,7 @@ const BRIDGE_OPERATIONS: Record<string, true> = {
   "set-model": true,
   "set-thinking": true,
   tools: true,
+  "provider-login": true,
   "chat-prompt": true,
   "chat-steer": true,
   "chat-follow-up": true,
@@ -6812,6 +6843,12 @@ function chatRefusalText(reason: SendRefusal): string {
  * the TUI. Outcomes are reported here; progress shows in the conversation itself.
  */
 async function runChatAction(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, command: GuestChatCommand): Promise<void> {
+  if (command === "provider-login") {
+    const entry = index.get(tabId);
+    await openProviderLogin(stateOf(tabId)?.runtime ?? null, entry?.scope.profile ?? null,
+      entry?.cwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir());
+    return;
+  }
   const session = chat.sessionOf(tabId);
   if (session === null || session.phase !== "live") {
     showWarning("This conversation is not live, so the action was not run.");
@@ -6820,10 +6857,10 @@ async function runChatAction(context: vscode.ExtensionContext, index: SessionInd
   const current = (): boolean => chat.sessionOf(tabId) === session && session.phase === "live";
   switch (command) {
     case "compact": {
-      if (session.model.working) { showWarning("OMP is running a turn. Compact the conversation after it ends."); return; }
+      const running = session.model.working;
       const instructions = await vscode.window.showInputBox({
         title: "Compact Conversation",
-        prompt: "OMP replaces the earlier conversation with a summary to free context. Optionally say what the summary must keep.",
+        prompt: `OMP replaces the earlier conversation with a summary to free context.${running ? " The running turn is interrupted and continues after the summary." : ""} Optionally say what the summary must keep.`,
         placeHolder: "Optional instructions for the summary",
         ignoreFocusOut: true,
       });
@@ -7720,6 +7757,8 @@ function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, 
       if (event.baseline) toolsController?.sync();
       const pickerModel = footerBindings.get(tabId);
       if (pickerModel?.modelId && (pickerModel.modelId !== event.model.state?.model?.id || pickerModel.message.provider !== event.model.state?.model?.provider)) cancelControlPicker(tabId);
+      if (event.baseline || pickerModel?.modelId !== event.model.state?.model?.id ||
+        pickerModel?.message.provider !== event.model.state?.model?.provider) void refreshSessionModels(index, tabId);
       refreshFooterMetadata(index, tabId, event.baseline);
       void retryPendingIdentity(index, tabId);
       if (event.baseline && !diagnosticsStageMeasured(tabId, "first-paint")) {
@@ -7728,7 +7767,7 @@ function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, 
       return;
     case "state": {
       const phase = event.payload.phase;
-      logChatConnectionPhase(tabId, phase, event.payload.code);
+      logChatConnectionPhase(tabId, phase, event.payload.code, event.payload.exitReason);
       if (phase !== "live") cancelControlPicker(tabId);
       if (phase === "live") {
         const entry = index.get(tabId);
@@ -7747,6 +7786,7 @@ function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, 
         invalidateGuestControls(tabId);
         refreshFooterMetadata(index, tabId, true);
         refreshSessionCost(index, tabId);
+        void refreshSessionModels(index, tabId);
       }
       if (phase === "stopped" && event.payload.code === "child-exited") {
         const runtime = stateOf(tabId)?.runtime ?? null;
@@ -7770,6 +7810,7 @@ function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, 
       void restartChat(context, index, tabId, event.nativeNonce);
       return;
     case "turn-ended":
+      if (sessionModelRefreshOwed.has(tabId)) void refreshSessionModels(index, tabId);
       refreshFooterMetadata(index, tabId, true);
       refreshSessionCost(index, tabId);
       footerBindings.get(tabId)?.observer?.refresh();
@@ -7819,14 +7860,15 @@ async function resumeFromChat(context: vscode.ExtensionContext, index: SessionIn
 const loggedChatPhases = new Map<string, ChatPhase>();
 
 /**
- * Record a lost connection and its end in the output channel. The page only ever shows a fixed
- * sentence, and a conversation that silently stopped answering left no trace here before.
+ * Record a lost connection and its end in the output channel, including the bounded plain-text
+ * diagnostic for an autonomous managed-RPC child exit.
  */
-function logChatConnectionPhase(tabId: string, phase: ChatPhase, code: string | null): void {
+function logChatConnectionPhase(tabId: string, phase: ChatPhase, code: string | null, exitReason?: ChatExitReason): void {
   const previous = loggedChatPhases.get(tabId);
   if (phase === "failed" || phase === "stopped") {
     loggedChatPhases.set(tabId, phase);
     log(`tab ${tabId}: chat connection ${phase}${code === null ? "" : ` (${code})`}.`);
+    if (phase === "stopped" && exitReason !== undefined) log(`tab ${tabId}: ${chatExitText(exitReason)}`);
   } else if (phase === "live") {
     loggedChatPhases.delete(tabId);
     if (previous === "failed") log(`tab ${tabId}: chat connection restored; the same session is live again.`);
@@ -8466,8 +8508,15 @@ async function handleGuestControlRequest(
             model.id.length > 0 && model.id.length <= 200 && isSafeBoundaryText(model.provider) && isSafeBoundaryText(model.id))
             .map(model => ({ provider: model.provider, id: model.id,
               ...(model.name && model.name.length <= 200 && isSafeBoundaryText(model.name) ? { name: model.name } : {}) }));
-          if (stillCurrent() && models.length > 0) selectedModel = await pickControlModel(models, beforeModel, stillCurrent, tabId);
-          else if (models.length === 0) notice = "OMP listed no selectable models.";
+          if (stillCurrent()) {
+            recordSessionModels(index, tabId, models.length > 0);
+            if (models.length === 0) await openProviderLogin(state.runtime, entry.scope.profile, entry.cwd);
+            else {
+              const picked = await pickControlModel(models, beforeModel, stillCurrent, tabId);
+              if (picked === "provider-login") await openProviderLogin(state.runtime, entry.scope.profile, entry.cwd);
+              else selectedModel = picked;
+            }
+          }
         }
       } else {
         const thinking = await session.getAvailableThinkingLevels();
@@ -8561,6 +8610,76 @@ function ompCliScopeEnvironment(profile: string | null): Record<string, string> 
  */
 async function executableFor(runtime: SessionHostRuntime | null): Promise<OmpCommand> {
   return runtime?.binary ?? (await resolveOmpBinary());
+}
+
+/** Cache only a successful default-profile catalogue; unresolved OMP adds no onboarding UI. */
+function refreshDefaultProviderModels(): Promise<void> {
+  defaultProviderModelsDirty = true;
+  if (defaultProviderModelsRead !== null) return defaultProviderModelsRead;
+  defaultProviderModelsRead = (async () => {
+    do {
+      defaultProviderModelsDirty = false;
+      let executable: OmpCommand;
+      try { executable = await executableFor(null); }
+      catch {
+        defaultProviderModelsAvailable = null;
+        launcherProvider?.setProviderLoginRequired(false);
+        continue;
+      }
+      try {
+        const result = await runOmpCli(executable, ["models", "--json"], 15_000, {
+          cwd: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir(),
+          env: ompCliScopeEnvironment(DEFAULT_OMP_PROFILE),
+        });
+        if (result.exitCode !== 0) continue;
+        const parsed: unknown = JSON.parse(result.stdout);
+        if (typeof parsed !== "object" || parsed === null || !("models" in parsed) || !Array.isArray(parsed.models)) continue;
+        defaultProviderModelsAvailable = parsed.models.length > 0;
+        launcherProvider?.setProviderLoginRequired(!defaultProviderModelsAvailable);
+      } catch { log("Default-profile models could not be read; retaining the last availability."); }
+    } while (defaultProviderModelsDirty);
+  })().finally(() => { defaultProviderModelsRead = null; });
+  return defaultProviderModelsRead;
+}
+
+/** Activation and the native login terminal are the only window-wide discovery triggers. */
+function subscribeProviderLoginRefresh(context: vscode.ExtensionContext, index: SessionIndex): void {
+  context.subscriptions.push(vscode.window.onDidCloseTerminal(terminal => {
+    const ownedLoginClosed = terminal === providerLoginTerminal;
+    if (ownedLoginClosed) providerLoginTerminal = null;
+    if (!ownedLoginClosed && terminal.name !== "omp login") return;
+    void refreshDefaultProviderModels();
+    for (const entry of index.list()) void refreshSessionModels(index, entry.tabId);
+  }));
+  void refreshDefaultProviderModels();
+}
+
+function recordSessionModels(index: SessionIndex, tabId: string, available: boolean): void {
+  ensureFooterBinding(index, tabId);
+  const binding = footerBindings.get(tabId);
+  if (!binding || binding.message.hasAvailableModels === available) return;
+  binding.message = { ...binding.message, hasAvailableModels: available };
+  publishFooterMetadata(tabId);
+  void refreshDefaultProviderModels();
+}
+
+/** Read this conversation's own profile through RPC, never a per-session CLI. */
+function refreshSessionModels(index: SessionIndex, tabId: string): Promise<void> {
+  const pending = sessionModelReads.get(tabId);
+  if (pending) return pending;
+  const session = chat.sessionOf(tabId);
+  if (session === null || session.phase !== "live") return Promise.resolve();
+  const epoch = session.epoch;
+  const read = session.getAvailableModels().then(listed => {
+    if (chat.sessionOf(tabId) !== session || session.phase !== "live" ||
+      epoch.nonce !== session.epoch.nonce || epoch.counter !== session.epoch.counter) return;
+    if (listed.status === "ok") {
+      sessionModelRefreshOwed.delete(tabId);
+      recordSessionModels(index, tabId, listed.models.length > 0);
+    } else if (listed.status === "refused" && listed.reason === "busy") sessionModelRefreshOwed.add(tabId);
+  }).finally(() => { if (sessionModelReads.get(tabId) === read) sessionModelReads.delete(tabId); });
+  sessionModelReads.set(tabId, read);
+  return read;
 }
 /** Host-owned optional footer facts, sent to every editor showing this exact conversation. */
 function publishFooterMetadata(tabId: string): void {
@@ -8662,7 +8781,15 @@ function refreshFooterMetadata(index: SessionIndex, tabId: string, refreshUsage:
  * the terminal is the user's to drive. The command runs in the session's profile scope, so
  * the credential lands where the session will read it.
  */
-async function openProviderLogin(runtime: SessionHostRuntime, profile: string | null): Promise<void> {
+async function openProviderLogin(runtime: SessionHostRuntime | null, profile: string | null, cwd: string): Promise<void> {
+  if (providerLoginOpening || providerLoginTerminal !== null) return;
+  providerLoginOpening = true;
+  try { await launchProviderLogin(runtime, profile, cwd); }
+  finally { providerLoginOpening = false; }
+}
+
+/** Both callers hold the window's login-open guard, including their asynchronous preflight. */
+async function launchProviderLogin(runtime: SessionHostRuntime | null, profile: string | null, cwd: string): Promise<void> {
   let executable: OmpCommand;
   try {
     executable = await executableFor(runtime);
@@ -8670,25 +8797,41 @@ async function openProviderLogin(runtime: SessionHostRuntime, profile: string | 
     showError(`The installed OMP could not be resolved, so no provider login was started: ${messageOf(error)}`);
     return;
   }
-  openProviderLoginTerminal({
+  providerLoginTerminal = openProviderLoginTerminal({
     args: ["login"],
     executable,
-    cwd: runtime.cwd,
+    cwd,
     env: ompCliScopeEnvironment(profile),
     name: "omp login",
   });
 }
 
 
-/** Command-palette entry for the native provider login; never another tab's host. */
-function loginProviderFromPalette(index: SessionIndex): void {
-  const tabId = index.activeTabId;
-  const runtime = tabId === null ? null : stateOf(tabId)?.runtime ?? null;
-  if (tabId === null || runtime === null) {
-    showInfo("Open a managed OMP session first: the provider login runs in that session's profile scope.");
-    return;
-  }
-  void openProviderLogin(runtime, index.get(tabId)?.scope.profile ?? null);
+/**
+ * Command-palette entry for the native provider login; never another tab's host. From a session's tab it logs in
+ * within that session's profile. Without one it still works: a new user must log in before any session can start,
+ * so it uses the default profile, or asks when the indexed sessions use more than one profile.
+ */
+async function loginProviderFromPalette(index: SessionIndex): Promise<void> {
+  if (providerLoginOpening || providerLoginTerminal !== null) return;
+  providerLoginOpening = true;
+  try {
+    const tabId = index.activeTabId;
+    const runtime = tabId === null ? null : stateOf(tabId)?.runtime ?? null;
+    if (tabId !== null && runtime !== null) {
+      await launchProviderLogin(runtime, index.get(tabId)?.scope.profile ?? null, runtime.cwd);
+      return;
+    }
+    const profiles = [...new Set(index.list().map(entry => entry.scope.profile ?? DEFAULT_OMP_PROFILE))].sort();
+    let profile: string = DEFAULT_OMP_PROFILE;
+    if (profiles.length > 1 || (profiles.length === 1 && profiles[0] !== DEFAULT_OMP_PROFILE)) {
+      const choices = profiles.includes(DEFAULT_OMP_PROFILE) ? profiles : [DEFAULT_OMP_PROFILE, ...profiles];
+      const picked = await vscode.window.showQuickPick(choices, { title: "Log In to Provider", placeHolder: "OMP profile to log in with" });
+      if (picked === undefined) return;
+      profile = picked;
+    }
+    await launchProviderLogin(null, profile, vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir());
+  } finally { providerLoginOpening = false; }
 }
 
 async function copyHostTools(index: SessionIndex): Promise<void> {
@@ -8837,15 +8980,22 @@ async function selectHostModel(index: SessionIndex): Promise<void> {
     showInfo(listed.reason === "busy" ? "OMP is busy with a turn; select a model when it finishes." : "The session is not accepting commands right now.");
     return;
   }
-  if (listed.status === "failed" || listed.models.length === 0) {
+  if (listed.status === "failed") {
     showInfo("OMP listed no selectable models.");
     return;
   }
+  if (chat.sessionOf(active.tabId) !== active.session) return;
+  recordSessionModels(index, active.tabId, listed.models.length > 0);
   const picked = await pickControlModel(listed.models, active.session.model.state?.model ?? null,
     () => chat.sessionOf(active.tabId) === active.session, active.tabId);
   if (!picked) return;
   if (chat.sessionOf(active.tabId) !== active.session) {
     showWarning("The selected session changed while choosing; nothing was changed.");
+    return;
+  }
+  if (picked === "provider-login") {
+    const entry = index.get(active.tabId);
+    if (entry !== null) await openProviderLogin(stateOf(active.tabId)?.runtime ?? null, entry.scope.profile, entry.cwd);
     return;
   }
   const outcome = await active.session.setModel(picked.provider, picked.id);
@@ -10896,6 +11046,10 @@ async function handlePassiveSlotMessage(slot: string, panel: vscode.WebviewPanel
     return;
   }
   if (parsed.type === "omp:chat-command") {
+    if (parsed.command === "provider-login" && activationContext !== undefined && indexForBridge !== null) {
+      await runChatAction(activationContext, indexForBridge, state.tabId, parsed.command);
+      return;
+    }
     showWarning(`${passiveReasonForSlot(slot) ?? PASSIVE_REASON_DEFAULT} The action was not run.`);
     return;
   }

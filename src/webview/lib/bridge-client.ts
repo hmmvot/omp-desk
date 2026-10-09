@@ -3,9 +3,10 @@
  *
  * A surviving Webview page keeps this client for the whole life of its document.
  * The extension host that created the page can disappear and be replaced — that
- * is the whole point — so this client reconnects on its own, forever, with
- * backoff, and re-proves its document secret `K` on every new connection. Nothing
- * it learns from a previous extension host is trusted: the host generation `H` and
+ * is the whole point — so this client reconnects with backoff and re-proves its
+ * document secret `K`. Repeated authenticated recovery failures require manual
+ * document recovery instead of silently retrying forever.
+ * Nothing it learns from a previous extension host is trusted: the host generation `H` and
  * the connection id `Q` are fresh on every connection, and every application frame
  * is bound to both.
  *
@@ -23,6 +24,7 @@
 import {
 	BRIDGE_DIRECTION_CLIENT_TO_SERVER,
 	BRIDGE_DIRECTION_SERVER_TO_CLIENT,
+	BRIDGE_HEARTBEAT_MS,
 	BRIDGE_PATH,
 	BridgeProtocolError,
 	BridgeSequence,
@@ -41,6 +43,7 @@ import {
 	routeAckFrame,
 	sealFrame,
 } from "../../bridge-protocol.ts";
+import { BridgeMessageAssembler } from "../../bridge-fragments.ts";
 
 /** The first reconnect delay, doubling up to {@link BRIDGE_CLIENT_MAX_BACKOFF_MS}. */
 export const BRIDGE_CLIENT_INITIAL_BACKOFF_MS = 1_000;
@@ -101,6 +104,8 @@ export interface BridgeClientHooks {
 	readonly onConnection: (connected: boolean) => void;
 	/** A bounded, fixed-code fact about this client; never peer text. */
 	readonly onDiagnostic?: (code: string) => void;
+	/** Repeated immediate authenticated failures need a manual document recovery. */
+	readonly onRecoveryFailed?: () => void;
 }
 
 /** One request the page wants the new extension host to serve. */
@@ -116,6 +121,7 @@ export interface BridgeClientRequest {
 export class BridgeClient {
 	readonly #endpoint: BridgeClientEndpoint;
 	readonly #hooks: BridgeClientHooks;
+	readonly #fragments: BridgeMessageAssembler;
 	#socket: WebSocket | null = null;
 	#state: "idle" | "connecting" | "ready" | "closed" = "idle";
 	#routeGeneration: string | null = null;
@@ -124,6 +130,8 @@ export class BridgeClient {
 	#connectionId: Uint8Array = new Uint8Array(16);
 	#sequence = new BridgeSequence();
 	#attempt = 0;
+	#readyAt = 0;
+	#fastFailures = 0;
 	#retryTimer: NodeJS.Timeout | undefined;
 	/** Serialises sends so two seals can never reorder on the wire. */
 	#sendChain: Promise<void> = Promise.resolve();
@@ -137,6 +145,7 @@ export class BridgeClient {
 	constructor(endpoint: BridgeClientEndpoint, hooks: BridgeClientHooks) {
 		this.#endpoint = endpoint;
 		this.#hooks = hooks;
+		this.#fragments = new BridgeMessageAssembler(() => this.#reconnect("fragment-timeout"));
 	}
 
 	get connected(): boolean {
@@ -152,6 +161,7 @@ export class BridgeClient {
 	/** Stop for good: the document is going away or its credential was retired. */
 	stop(): void {
 		this.#state = "closed";
+		this.#fragments.reset();
 		clearTimeout(this.#retryTimer);
 		this.#retryTimer = undefined;
 		// The secret is not wiped here: the same document keeps it across a host
@@ -189,7 +199,10 @@ export class BridgeClient {
 	/** Acknowledge one route offer the transport layer accepted. */
 	acknowledgeRoute(routeGeneration: string): boolean {
 		const queued = this.#sendSealed(() => routeAckFrame(this.#hostGeneration, this.#documentId(), routeGeneration));
-		if (queued) this.#routeGeneration = routeGeneration;
+		if (queued) {
+			this.#fragments.reset();
+			this.#routeGeneration = routeGeneration;
+		}
 		return queued;
 	}
 
@@ -201,6 +214,8 @@ export class BridgeClient {
 		if (this.#state === "closed") return;
 		this.#state = "connecting";
 		this.#keys = null;
+		this.#fragments.reset();
+		this.#routeGeneration = null;
 		// Both directions are per connection: a new host generation mints a fresh
 		// connection id and starts its own counters at zero.
 		this.#sequence = new BridgeSequence();
@@ -340,7 +355,7 @@ export class BridgeClient {
 		if (kind === "ready") {
 			if (message.length !== 4 || typeof message[3] !== "string") throw new BridgeProtocolError("malformed", "The ready frame is not the shape this version defines.");
 			this.#state = "ready";
-			this.#attempt = 0;
+			this.#readyAt = Date.now();
 			this.#hooks.onConnection(true);
 			this.#hooks.onReady?.(message[3]);
 			// An offer that arrived before `ready` (or before this connection was
@@ -388,7 +403,10 @@ export class BridgeClient {
 			if (message.length !== 4 || typeof payload !== "string") {
 				throw new BridgeProtocolError("malformed", "A pushed message is not the shape this version defines.");
 			}
-			this.#hooks.onMessage?.(parseAsciiJsonText(payload));
+			let complete: unknown;
+			try { complete = this.#fragments.accept(parseAsciiJsonText(payload), this.#routeGeneration); }
+			catch { this.#reconnect("fragment-refused"); return; }
+			if (complete !== null) this.#hooks.onMessage?.(complete);
 			return;
 		}
 		throw new BridgeProtocolError("unsupported", "The host sent a frame this client does not know.");
@@ -437,8 +455,27 @@ export class BridgeClient {
 		const wasReady = this.#state === "ready";
 		this.#state = "connecting";
 		this.#keys = null;
+		this.#fragments.reset();
+		this.#routeGeneration = null;
 		this.#hooks.onDiagnostic?.(code);
 		if (wasReady) this.#hooks.onConnection(false);
+		if (wasReady) {
+			// A late deterministic partial-row refusal is not successful recovery,
+			// even when the socket was authenticated long enough to look stable.
+			const fragmentFailure = code === "fragment-timeout" || code === "fragment-refused";
+			if (fragmentFailure || (code !== "sequence-limit" && Date.now() - this.#readyAt < BRIDGE_HEARTBEAT_MS)) {
+				this.#fastFailures += 1;
+			} else if (Date.now() - this.#readyAt >= BRIDGE_HEARTBEAT_MS) {
+				this.#fastFailures = 0;
+				this.#attempt = 0;
+			}
+			if (this.#fastFailures >= 3) {
+				this.stop();
+				this.#hooks.onDiagnostic?.("recovery-failed");
+				this.#hooks.onRecoveryFailed?.();
+				return;
+			}
+		}
 		clearTimeout(this.#retryTimer);
 		const delay = Math.min(BRIDGE_CLIENT_MAX_BACKOFF_MS, BRIDGE_CLIENT_INITIAL_BACKOFF_MS * 2 ** Math.min(this.#attempt, 5));
 		this.#attempt += 1;

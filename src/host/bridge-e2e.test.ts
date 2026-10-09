@@ -29,12 +29,51 @@ import * as os from "node:os";
 import { setTimeout as delay } from "node:timers/promises";
 import * as path from "node:path";
 import { after, describe, it } from "node:test";
-import { BridgeEditorEndpoint } from "./bridge-endpoint.ts";
+import { BridgeEditorEndpoint, BRIDGE_GUEST_RELOAD_REASON } from "./bridge-endpoint.ts";
 import { BridgeRecords, bindingHashFor } from "./bridge-records.ts";
 import type { BridgeEndpointState } from "./bridge-route.ts";
 import type { BridgeNativeBinding, BridgeRecordScope } from "./bridge-records.ts";
 import { BridgeClient } from "../webview/lib/bridge-client.ts";
 import type { BridgeClientEndpoint, BridgeClientHooks } from "../webview/lib/bridge-client.ts";
+import { GUEST_PROTOCOL_VERSION, parseGuestHostMessage } from "../webview/messages.ts";
+import { applyChatState, createChatModel } from "../chat/model.ts";
+import { BRIDGE_DIRECTION_SERVER_TO_CLIENT, encodeBase64Url, frameKeys, openFrame, parseAndVerifyChallenge, parseHello, parseTerminalPush, parseTextFrame } from "../bridge-protocol.ts";
+import { BRIDGE_ROUTE_ACK_TIMEOUT_MS } from "./bridge-route.ts";
+import type { BridgeChallenge, BridgeHello } from "../bridge-protocol.ts";
+
+/** Independently decrypt wire pushes, before the guest hides fragment envelopes. */
+function wireTap(socket: WebSocket, secret: Uint8Array): { payloads: unknown[]; drain(): Promise<void> } {
+	const payloads: unknown[] = [];
+	let hello: BridgeHello;
+	let challenge: BridgeChallenge;
+	let key: Uint8Array;
+	let chain = Promise.resolve();
+	const send = socket.send.bind(socket);
+	socket.send = data => {
+		if (typeof data === "string" && JSON.parse(data)[0] === "hello") hello = parseHello(data);
+		send(data);
+	};
+	socket.addEventListener("message", event => {
+		chain = chain.then(async () => {
+			if (typeof event.data === "string") {
+				const verified = await parseAndVerifyChallenge(event.data, secret, {
+					workspace: hello.workspace, tabId: hello.tabId, editorId: encodeBase64Url(hello.editorId),
+					documentId: encodeBase64Url(hello.documentId), bindingHash: hello.bindingHash, clientNonce: encodeBase64Url(hello.clientNonce),
+					port: Number(new URL(socket.url).port), origin: ORIGIN, serverNonce: "", hostGeneration: "", connectionId: "",
+				});
+				challenge = verified.challenge;
+				key = (await frameKeys(secret, verified.transcriptText)).serverToClient;
+				return;
+			}
+			const opened = await openFrame({ key, frame: new Uint8Array(event.data as ArrayBuffer), expectedDirection: BRIDGE_DIRECTION_SERVER_TO_CLIENT,
+				hostGeneration: challenge.hostGeneration, connectionId: challenge.connectionId, documentId: hello.documentId });
+			const frame = parseTextFrame(opened.plaintext);
+			assert.ok(Array.isArray(frame));
+			if (frame[0] === "terminal") payloads.push(parseTerminalPush(frame)!.payload);
+		});
+	});
+	return { payloads, drain: () => chain };
+}
 
 const WORKSPACE = "a".repeat(64);
 const TAB = "tab:11111111-2222-3333-4444-555555555555";
@@ -176,6 +215,8 @@ async function page(
 	port: number,
 	secret: Uint8Array,
 	overrides: Partial<BridgeClientEndpoint> = {},
+	onMessage?: (payload: unknown) => void,
+	captureWire = false,
 ): Promise<{
 	readonly client: BridgeClient;
 	readonly ready: Queue<string>;
@@ -185,6 +226,8 @@ async function page(
 	readonly connection: Queue<boolean>;
 	readonly connections: boolean[];
 	readonly diagnostics: Queue<string>;
+	readonly messages: Queue<unknown>;
+	readonly wire: { payloads: unknown[]; drain(): Promise<void> }[];
 }> {
 	const ready = new Queue<string>();
 	const offers = new Queue<{ routeGeneration: string; status: string }>();
@@ -193,6 +236,8 @@ async function page(
 	const connection = new Queue<boolean>();
 	const diagnostics = new Queue<string>();
 	const connections: boolean[] = [];
+	const messages = new Queue<unknown>();
+	const wire: { payloads: unknown[]; drain(): Promise<void> }[] = [];
 	const hooks: BridgeClientHooks = {
 		onReady: status => ready.push(status),
 		onRouteOffer: (routeGeneration, status) => offers.push({ routeGeneration, status }),
@@ -200,6 +245,7 @@ async function page(
 		onReply: (requestId, payload) => replies.push({ requestId, payload }),
 		onConnection: connected => { connections.push(connected); connection.push(connected); },
 		onDiagnostic: code => diagnostics.push(code),
+		onMessage: payload => { messages.push(payload); onMessage?.(payload); },
 	};
 	const endpoint: BridgeClientEndpoint = {
 		workspace: WORKSPACE,
@@ -213,12 +259,16 @@ async function page(
 		// Node's WebSocket sends no Origin header of its own (the DOM type does not
 		// declare the options object that carries one), and this listener pins exactly
 		// the document's Origin, so the test supplies it.
-		connect: url => new NodeWebSocket(url, { headers: { origin: ORIGIN } }),
+		connect: url => {
+			const socket = new NodeWebSocket(url, { headers: { origin: ORIGIN } });
+			if (captureWire) wire.push(wireTap(socket, secret));
+			return socket;
+		},
 		...overrides,
 	};
 	const client = new BridgeClient(endpoint, hooks);
 	clients.push(client);
-	return { client, ready, offers, invalidations, replies, connection, connections, diagnostics };
+	return { client, ready, offers, invalidations, replies, connection, connections, diagnostics, messages, wire };
 }
 
 /** What a test can observe about one host's own route decisions. */
@@ -248,7 +298,138 @@ async function provision(
 	return { host, store: backing, secret: delivery.secret, events };
 }
 
+async function announceVersion(guest: Awaited<ReturnType<typeof page>>, routeGeneration: string, payload: unknown): Promise<unknown> {
+	const requestId = crypto.randomUUID().replaceAll("-", "");
+	assert.equal(guest.client.request({ requestId, routeGeneration, actionSeq: "0", operation: "guest-version", payload }), true);
+	const reply = await observed(guest.replies, "the read-only version reply");
+	assert.equal(reply.requestId, requestId);
+	return reply.payload;
+}
+
+function unsentSnapshot(): Iterable<unknown> {
+	return { *[Symbol.iterator]() { throw new Error("an unproven guest must not enumerate a snapshot"); } };
+}
+
 describe("bridge transport end to end", () => {
+	it("gives an old surviving page a bounded unfragmented Reload Window reason without attaching a snapshot", async context => {
+		const { host, secret, events } = await provision(0x5a);
+		const guest = await page(host.port ?? 0, secret, {}, undefined, true);
+		guest.client.start();
+		await observed(guest.ready, "the old page to authenticate");
+		const route = await observed(guest.offers, "the route offer");
+		context.mock.timers.enable({ apis: ["setTimeout"] });
+		try {
+			assert.equal(guest.client.acknowledgeRoute(route.routeGeneration), true);
+			await observedState(events.states, "BRIDGE_READY");
+			assert.equal(host.guestVersionAccepted(DOCUMENT), false);
+			assert.equal(host.pushSnapshot(DOCUMENT, unsentSnapshot()), false);
+			assert.equal(host.pushTerminal(DOCUMENT, { type: "omp:bridge-fragment" }), false);
+			context.mock.timers.tick(BRIDGE_ROUTE_ACK_TIMEOUT_MS);
+			const message = await observed(guest.messages, "the old page's actionable reason") as { type: string; phase: string; readOnlyReason: string };
+			assert.equal(message.type, "omp:chat-state");
+			assert.equal(message.phase, "blocked");
+			assert.equal(message.readOnlyReason, BRIDGE_GUEST_RELOAD_REASON);
+			assert.match(message.readOnlyReason, /Reload Window/);
+			await guest.wire[0]!.drain();
+			const parsed = parseGuestHostMessage(message);
+			assert.ok(parsed?.type === "omp:chat-state", "the existing v8 payload parser accepts the recovery reason");
+			const previous = createChatModel();
+			previous.epoch = { nonce: "previous-host", counter: 7 };
+			previous.phase = "live";
+			previous.pendingEditorText = { text: "retained composer prefill", seq: 1 };
+			const blocked = applyChatState(previous, parsed);
+			assert.equal(blocked.readOnlyReason, BRIDGE_GUEST_RELOAD_REASON);
+			assert.equal(blocked.pendingEditorText, previous.pendingEditorText);
+			assert.equal(blocked.entries, previous.entries, "an old page keeps its existing transcript");
+			assert.deepEqual(guest.wire[0]!.payloads, [message], "no fragment or transcript can reach an unproven page on the wire");
+			assert.equal(guest.client.connected, true, "an old page does not enter an automatic reconnect loop");
+			assert.deepEqual(await announceVersion(guest, route.routeGeneration, { protocolVersion: GUEST_PROTOCOL_VERSION, fragments: true }), { accepted: false });
+			assert.equal(host.guestVersionAccepted(DOCUMENT), false, "a late announcement cannot undo the reload fence");
+			assert.equal(host.pushSnapshot(DOCUMENT, unsentSnapshot()), false);
+		} finally { context.mock.timers.reset(); guest.client.stop(); host.close(); }
+	});
+
+	for (const payload of [
+		{ protocolVersion: GUEST_PROTOCOL_VERSION - 1, fragments: true },
+		{ protocolVersion: GUEST_PROTOCOL_VERSION + 1, fragments: true },
+		{ protocolVersion: GUEST_PROTOCOL_VERSION, fragments: false },
+		{ protocolVersion: String(GUEST_PROTOCOL_VERSION), fragments: true },
+		null,
+	]) {
+		it(`refuses an incompatible or malformed guest capability ${JSON.stringify(payload)}`, async () => {
+			const { host, secret, events } = await provision(0x5a);
+			const guest = await page(host.port ?? 0, secret, {}, undefined, true);
+			try {
+				guest.client.start();
+				await observed(guest.ready, "authentication");
+				const route = await observed(guest.offers, "a route offer");
+				guest.client.acknowledgeRoute(route.routeGeneration);
+				await observedState(events.states, "BRIDGE_READY");
+				assert.deepEqual(await announceVersion(guest, route.routeGeneration, payload), { accepted: false });
+				assert.equal(host.guestVersionAccepted(DOCUMENT), false);
+				assert.equal(host.pushSnapshot(DOCUMENT, unsentSnapshot()), false);
+				const message = await observed(guest.messages, "the reload reason");
+				await guest.wire[0]!.drain();
+				assert.deepEqual(guest.wire[0]!.payloads, [message]);
+				assert.equal(guest.client.connected, true);
+			} finally { guest.client.stop(); host.close(); }
+		});
+	}
+
+	it("delivers complete large DTOs only after current-connection v9 proof and requires proof again on reconnect", async () => {
+		const { host, secret, events } = await provision(0x5a);
+		const payload = { type: "test-snapshot", tool: "t".repeat(950 * 1024), image: "a".repeat(900 * 1024) };
+		let guest = await page(host.port ?? 0, secret, {}, undefined, true);
+		try {
+			for (let connection = 0; connection < 2; connection++) {
+				guest.client.start();
+				await observed(guest.ready, "authentication");
+				const route = await observed(guest.offers, "a current connection's route offer");
+				guest.client.acknowledgeRoute(route.routeGeneration);
+				await observedState(events.states, "BRIDGE_READY");
+				assert.equal(host.guestVersionAccepted(DOCUMENT), false, "a previous socket's proof cannot authorize this socket");
+				assert.equal(host.pushSnapshot(DOCUMENT, unsentSnapshot()), false);
+				assert.deepEqual(await announceVersion(guest, route.routeGeneration, { protocolVersion: GUEST_PROTOCOL_VERSION, fragments: true }), { accepted: true });
+				assert.equal(host.guestVersionAccepted(DOCUMENT), true);
+				assert.equal(host.pushSnapshot(DOCUMENT, [payload]), true);
+				assert.deepEqual(await observed(guest.messages, "a complete large DTO"), payload);
+				await guest.wire[0]!.drain();
+				assert.ok(guest.wire[0]!.payloads.length > 1);
+				assert.ok(guest.wire[0]!.payloads.every(message => (message as { type: string }).type === "omp:bridge-fragment"));
+				guest.client.stop();
+				await observedState(events.states, "DISCONNECTED");
+				if (connection === 0) guest = await page(host.port ?? 0, secret, {}, undefined, true);
+			}
+		} finally { guest.client.stop(); host.close(); }
+	});
+
+	it("fences version proof on a new route and ignores a fully sealed stale-route announcement", async () => {
+		const { host, secret, events } = await provision(0x5a);
+		const guest = await page(host.port ?? 0, secret);
+		try {
+			guest.client.start();
+			await observed(guest.ready, "authentication");
+			const previous = await observed(guest.offers, "the original offer");
+			guest.client.acknowledgeRoute(previous.routeGeneration);
+			await observedState(events.states, "BRIDGE_READY");
+			assert.deepEqual(await announceVersion(guest, previous.routeGeneration, { protocolVersion: GUEST_PROTOCOL_VERSION, fragments: true }), { accepted: true });
+			const current = host.offerBridge();
+			assert.ok(current);
+			assert.notEqual(current, previous.routeGeneration);
+			assert.equal(host.guestVersionAccepted(DOCUMENT), false);
+			const offered = await observed(guest.offers, "the fresh route offer");
+			assert.equal(offered.routeGeneration, current);
+			guest.client.acknowledgeRoute(current);
+			await observedState(events.states, "BRIDGE_READY");
+			assert.equal(guest.client.request({ requestId: "8".repeat(32), routeGeneration: previous.routeGeneration, actionSeq: "0",
+				operation: "guest-version", payload: { protocolVersion: GUEST_PROTOCOL_VERSION, fragments: true } }), true);
+			assert.deepEqual(await announceVersion(guest, current, { protocolVersion: GUEST_PROTOCOL_VERSION, fragments: true }), { accepted: true },
+				"the stale announcement has neither a reply nor an application/native effect");
+			assert.equal(host.guestVersionAccepted(DOCUMENT), true);
+			assert.equal(guest.client.connected, true);
+		} finally { guest.client.stop(); host.close(); }
+	});
+
 	it("authenticates a document, offers a route and answers one acknowledged request", async () => {
 		const { host, secret, events } = await provision(0x5a);
 		const { client, ready, offers, replies, connection } = await page(host.port ?? 0, secret);

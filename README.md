@@ -55,6 +55,7 @@ For how this works, see the [architecture](docs/architecture.md).
 ![Sessions view](media/readme/sessions.png)
 
 - Shows the folders open in this window and the folders you pin, with every OMP session underneath, running or stopped.
+- If the default OMP profile has no models yet, **Log in to a model provider to start** appears above the folders.
 - **Pin Folder** keeps a folder in every window. **Add Folder** picks and pins another one.
 - Live status per session: **Working**, **Waiting for subagents**, **Needs your answer**, **Idle** or **Unread reply**.
 - A session open in another window says so. **Switch to Window** takes you there.
@@ -84,6 +85,7 @@ For how this works, see the [architecture](docs/architecture.md).
 - Routine tool calls are grouped in an **Overview**. The **Tools output** chip switches every Chat to **Detailed**.
 - Pinned rows show the TODO list and running subagents. Open a subagent's live transcript in its own tab.
 - Model and thinking pickers. The footer shows context usage, provider quotas and the Git branch.
+- Without available models, the model chip offers **Log In to Provider**. Every model picker also ends with **Log In to Provider…** to add another provider.
 - Your draft stays until OMP confirms it. Nothing is resent automatically.
 - If OMP stops responding, **Reconnect** or **Restart** the conversation.
 - Follows your light, dark or high-contrast theme.

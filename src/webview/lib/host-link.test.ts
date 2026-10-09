@@ -28,4 +28,14 @@ describe("HostLink", () => {
 		link.noteConnection(true);
 		assert.equal(link.refuses("omp:chat-prompt"), false);
 	});
+	it("surfaces exhausted recovery while retaining the draft admission fence until a route recovers", () => {
+		const link = new HostLink();
+		link.noteRecoveryFailed();
+		assert.equal(link.lost, true);
+		assert.equal(link.recoveryFailed, true);
+		assert.equal(link.refuses("omp:chat-prompt"), true);
+		link.noteConnection(true);
+		assert.equal(link.recoveryFailed, false);
+		assert.equal(link.refuses("omp:chat-prompt"), false);
+	});
 });

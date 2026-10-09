@@ -96,6 +96,8 @@ export const TreeItemCollapsibleState = { None: 0, Collapsed: 1, Expanded: 2 };
 export const Uri = { from: URI.from, parse: URI.parse, file: fsPath => ({ fsPath, toString: () => fsPath }), joinPath: (root, ...parts) => Uri.file([root.fsPath, ...parts].join('/')) };
 export const window = { state: { focused: true }, errors: [], tabGroups: { all: [], activeTabGroup: { activeTab: null, viewColumn: 1 } },
   openedDocuments: [],
+  closedTerminals: new EventEmitter(),
+  onDidCloseTerminal(listener) { return window.closedTerminals.event(listener); },
   async showTextDocument(uri, options) { window.openedDocuments.push({ uri, options }); },
   showWarningMessage: async (_message, _options, action) => action,
   showInformationMessage: async () => undefined, showErrorMessage: async message => { window.errors.push(message); }, setStatusBarMessage() {},
@@ -137,6 +139,7 @@ import { sessionItemState as fixtureRowState } from './views/session-tree';
 import * as fixtureVscode from 'vscode';
 import { acquireClaim as fixtureClaim, createClaimHolder as fixtureHolder, setClaimFailures } from './host/session-claim';
 import { capturedDesktopXml, capturedDesktopXmls, resetDesktopXmls } from './host/desktop-notifications';
+import { providerLoginFixture } from './host/native-terminal';
 const fixtureOpenPanel = openPanel;
 export const harness = {
   connectHostControl, reconnectHostControl, establishControl, closeSession, launchHost, presentRestoreOutcome, openTab, handleChatEvent, bindPanel, restoreTabs, bridgeSerializerFor,
@@ -147,7 +150,19 @@ export const harness = {
   bindConversationIdentity, retryPendingIdentity, SessionTreeProvider,
   terminalFontMessage, revealDesktopNotification, revealActiveSession, refreshLauncher, launcherFacts, notifierFor, forgetTurnActivity,
   copyActiveTerminalScreen, handleGuestMessage, activateNativeEditor, postPanelAction,
+  handleBridgeRequest, bridgeDocumentEligible,
   runChatCommand,
+  subscribeProviderLoginRefresh, refreshDefaultProviderModels, refreshSessionModels, recordSessionModels, runChatAction, openProviderLogin, loginProviderFromPalette,
+  providerLoginFixture,
+  providerModelsIdle: () => defaultProviderModelsRead ?? Promise.resolve(),
+  closeLoginTerminal: name => fixtureVscode.window.closedTerminals.fire(name === "omp login" && providerLoginTerminal !== null ? providerLoginTerminal : { name }),
+  closeOtherTerminal: name => fixtureVscode.window.closedTerminals.fire({ name }),
+  profilePicker(handler) {
+    const previous = fixtureVscode.window.showQuickPick;
+    fixtureVscode.window.showQuickPick = handler;
+    return () => { fixtureVscode.window.showQuickPick = previous; };
+  },
+  sessionModelAvailability: tabId => footerBindings.get(tabId)?.message.hasAvailableModels,
   handlePassiveSlotMessage, passiveReasonForSlot,
   footerIdle: () => Promise.all([...footerBindings.values()].map(binding => binding.observer?.idle())).then(() => undefined),
   restoredDraft: slot => draftRestores.get(slot)?.reply ?? null,
@@ -281,10 +296,16 @@ interface State {
   panel?: unknown;
   document?: unknown;
 }
+interface ProviderModelIndexFixture {
+  get(): { tabId: string; cwd: string; scope: { profile: string | null } };
+  list(): { tabId: string }[];
+}
+
 interface Harness {
   reset(index: unknown, chat: unknown): void;
   state(tabId: string): State;
   editor(index: unknown, endpoint: unknown, panel: unknown, editorId?: string, tabId?: string): State;
+  bridgeDocumentEligible(editorId: string, documentId: string): boolean;
   connectHostControl(...args: unknown[]): Promise<void>;
   reconnectHostControl(...args: unknown[]): Promise<void>;
   startNativeWatch(...args: unknown[]): void;
@@ -299,6 +320,19 @@ interface Harness {
   switchSessionMode(...args: unknown[]): Promise<void>;
   restartChat(...args: unknown[]): Promise<void>;
   runChatCommand(...args: unknown[]): Promise<"accepted" | "refused" | "unconfirmed" | "ignored">;
+  subscribeProviderLoginRefresh(context: { subscriptions: { dispose(): void }[] }, index: SessionIndex | ProviderModelIndexFixture): void;
+  refreshDefaultProviderModels(): Promise<void>;
+  refreshSessionModels(index: SessionIndex | ProviderModelIndexFixture, tabId: string): Promise<void>;
+  recordSessionModels(index: SessionIndex | ProviderModelIndexFixture, tabId: string, available: boolean): void;
+  runChatAction(...args: unknown[]): Promise<void>;
+  openProviderLogin(...args: unknown[]): Promise<void>;
+  loginProviderFromPalette(...args: unknown[]): Promise<void>;
+  profilePicker(handler: (profiles: readonly string[]) => Promise<string | undefined>): () => void;
+  providerModelsIdle(): Promise<void>;
+  closeLoginTerminal(name: string): void;
+  closeOtherTerminal(name: string): void;
+  sessionModelAvailability(tabId: string): boolean | undefined;
+  providerLoginFixture: { enabled: boolean; unresolved: boolean; models: unknown[]; calls: { args: string[]; options: { env: Record<string, string> } }[]; logins: { env: Record<string, string>; cwd: string }[]; read: (() => Promise<{ stdout: string; stderr: string; exitCode: number }>) | null; resolve: (() => Promise<{ command: string; prefixArgs: string[]; version: string }>) | null };
   owningWindowUri(): URI | null;
   switchToSessionWindow(...args: unknown[]): Promise<void>;
   setWindowWorkspace(file: URI | undefined, folders: readonly { uri: URI }[]): void;
@@ -314,6 +348,7 @@ interface Harness {
   shellFixture(cwd: string, panel: unknown, liveness: "running" | "exited" | "unreachable"): Promise<{ slot: string; state: State; record(): unknown; remove(): Promise<boolean> }>;
   copyActiveTerminalScreen(): void;
   handleGuestMessage(...args: unknown[]): Promise<void>;
+  handleBridgeRequest(...args: unknown[]): void;
   handlePassiveSlotMessage(...args: unknown[]): Promise<void>;
   passiveReasonForSlot(slot: string): string | null;
   footerIdle(): Promise<void>;
@@ -441,6 +476,23 @@ before(async () => {
         loader: "js", resolveDir: path.dirname(entry),
       }));
       for (const [name, extra] of [
+        ["native-terminal", `
+          import { resolveOmpBinary as realResolveOmpBinary, runOmpCli as realRunOmpCli } from ${JSON.stringify(path.join(path.dirname(entry), "host", "native-terminal.ts"))};
+          export const providerLoginFixture = { enabled: false, unresolved: false, models: [], calls: [], logins: [], read: null, resolve: null };
+          let resolved;
+          export async function resolveOmpBinary() {
+            if (providerLoginFixture.unresolved) throw new Error('fixture unresolved');
+            if (providerLoginFixture.resolve) return providerLoginFixture.resolve();
+            if (providerLoginFixture.enabled) return { command: process.execPath, prefixArgs: [], version: 'fixture' };
+            return resolved ??= realResolveOmpBinary();
+          }
+          export async function runOmpCli(executable, args, timeout, options) {
+            if (args[0] !== 'models') return realRunOmpCli(executable, args, timeout, options);
+            providerLoginFixture.calls.push({ args, options });
+            return providerLoginFixture.read ? providerLoginFixture.read() : { stdout: JSON.stringify({ models: providerLoginFixture.models }), stderr: '', exitCode: 0 };
+          }
+          export function openProviderLoginTerminal(request) { providerLoginFixture.logins.push(request); return { name: request.name }; }
+        `],
         ["rpc-launch", "export async function launchRpcHost() { return globalThis.__nativeLaunch; }"],
         ["control-client", "export async function queryControlProcessGeneration() { return 'creation-fixture'; }"],
         ["control-protocol", "export async function readControlRendezvous() { return globalThis.__controlReadiness ? globalThis.__controlReadiness() : {}; }"],
@@ -503,6 +555,7 @@ function indexFixture(native: NativeFixture) {
     observeOwnership: async () => ({ ok: true, claim: null }),
     claimHolder: { id: "fixture-window" },
     row, lifecycle: new TabLifecycle(), activeTabId: TAB, get: () => row,
+    list: () => [row],
     slotBinding: () => binding,
     setEditorMode: async (_slotId: string, mode: "chat" | "terminal") => { binding.mode = mode; },
     setRunIntent: async (_tabId: string, intent: string) => { row.runIntent = intent; },
@@ -718,6 +771,342 @@ describe("footer host readback", () => {
       await changingThinking;
       assert.equal(rendered.getSnapshot().state?.thinkingLevel, "high", "acknowledgement cannot replace effective readback with xhigh");
     } finally { host.dispose(); }
+  });
+  it("refreshes default-model availability on activation, login terminal close and changed session models", async () => {
+    await harness.providerModelsIdle();
+    const native = runtime(821), index = indexFixture(native);
+    harness.reset(index, new ChatRuntime({ hostNonce: "provider-refresh", onEvent: () => {} }));
+    const fixture = harness.providerLoginFixture;
+    fixture.enabled = true; fixture.models = []; fixture.calls.length = 0;
+    const subscriptions: { dispose(): void }[] = [];
+    try {
+      harness.subscribeProviderLoginRefresh({ subscriptions }, index);
+      await harness.providerModelsIdle();
+      assert.equal(fixture.calls.length, 1);
+      assert.deepEqual(fixture.calls[0]!.args, ["models", "--json"]);
+      assert.deepEqual(fixture.calls[0]!.options.env, { OMP_PROFILE: "default" });
+      harness.closeLoginTerminal("ordinary shell");
+      await harness.providerModelsIdle();
+      assert.equal(fixture.calls.length, 1);
+      fixture.models = [{ id: "available" }];
+      harness.closeLoginTerminal("omp login");
+      await harness.providerModelsIdle();
+      assert.equal(fixture.calls.length, 2);
+      harness.recordSessionModels(index, TAB, false);
+      await harness.providerModelsIdle();
+      assert.equal(fixture.calls.length, 3);
+      assert.equal(harness.sessionModelAvailability(TAB), false);
+      harness.recordSessionModels(index, TAB, false);
+      await harness.providerModelsIdle();
+      assert.equal(fixture.calls.length, 3, "unchanged session models reuse the cached flag");
+      harness.recordSessionModels(index, TAB, true);
+      await harness.providerModelsIdle();
+      assert.equal(fixture.calls.length, 4);
+      assert.equal(harness.sessionModelAvailability(TAB), true);
+      fixture.unresolved = true;
+      await harness.refreshDefaultProviderModels();
+      assert.equal(fixture.calls.length, 4, "missing OMP is not treated as an empty catalogue");
+    } finally {
+      for (const subscription of subscriptions) subscription.dispose();
+      fixture.enabled = false; fixture.unresolved = false;
+    }
+  });
+
+  it("keeps a terminal-close refresh that arrives during an outstanding default catalogue read", async () => {
+    await harness.providerModelsIdle();
+    const fixture = harness.providerLoginFixture;
+    const deferred = Promise.withResolvers<{ stdout: string; stderr: string; exitCode: number }>();
+    fixture.enabled = true; fixture.calls.length = 0; fixture.read = () => deferred.promise;
+    try {
+      const first = harness.refreshDefaultProviderModels();
+      await nextTurn();
+      assert.equal(fixture.calls.length, 1);
+      const second = harness.refreshDefaultProviderModels();
+      fixture.read = null; fixture.models = [{ id: "after-login" }];
+      deferred.resolve({ stdout: '{"models":[]}', stderr: "", exitCode: 0 });
+      await Promise.all([first, second]);
+      assert.equal(fixture.calls.length, 2, "one coalesced follow-up reads the new credentials");
+    } finally { fixture.enabled = false; fixture.read = null; }
+  });
+
+  it("uses the chat's RPC models and keeps login in the model picker without selecting a fake model", async () => {
+    const saved = storage(), native = runtime(822), index = indexFixture(native);
+    await writeFile(native.sessionFile, sessionFileText({ id: "session-1", cwd: root, entries: [] }));
+    const channel = new FakeRpcChannel({ sessionFile: native.sessionFile, sessionId: "session-1" });
+    let available: unknown[] = [];
+    channel.handlers.set("get_available_models", () => ({ data: { models: available } }));
+    const host = new ChatRuntime({ hostNonce: "provider-models", onEvent: () => {},
+      createSession: options => new RpcSession({ ...options, timers: new ManualTimers() }) });
+    harness.reset(index, host);
+    const state = harness.state(TAB); state.runtime = native;
+    const messages: unknown[] = [];
+    const panel = { webview: { postMessage: async (message: unknown) => { messages.push(message); return true; } } };
+    state.panel = panel;
+    const fixture = harness.providerLoginFixture;
+    fixture.enabled = true; fixture.logins.length = 0;
+    const subscriptions: { dispose(): void }[] = [];
+    harness.subscribeProviderLoginRefresh({ subscriptions }, index);
+    try {
+      const session = host.startLive(TAB, { channel, sessionFile: native.sessionFile, cwd: root, title: null });
+      await session.start();
+      await harness.refreshSessionModels(index, TAB);
+      assert.equal(harness.sessionModelAvailability(TAB), false);
+      assert.ok(channel.commandsOfType("get_available_models").length > 0);
+      const metadata = messages.at(-1);
+      assert.ok(metadata && typeof metadata === "object" && "hasAvailableModels" in metadata);
+      assert.equal(metadata.hasAvailableModels, false);
+      await harness.runChatAction(saved.context, index, TAB, "provider-login");
+      assert.deepEqual(fixture.logins.at(-1)?.env, { OMP_PROFILE: "default" });
+      available = [{ provider: "p", id: "m", name: "Model", contextWindow: 1000 }];
+      harness.closeLoginTerminal("omp login");
+      await harness.refreshSessionModels(index, TAB);
+      assert.equal(harness.sessionModelAvailability(TAB), true);
+      const request = { type: "omp:control-request", scope: "11111111-2222-4333-8444-555555555555", requestId: 1, action: "snapshot", picker: "model" };
+      const pending = harness.handleGuestControlRequest(index, TAB, request, harness.panelResponder(TAB, panel));
+      await nextTurn();
+      const picker = harness.quickPicks().at(-1)!;
+      assert.equal(picker.items.at(-1)?.label, "$(account) Log In to Provider…");
+      picker.choose(picker.items.length - 1);
+      await pending;
+      assert.equal(fixture.logins.length, 2);
+      assert.equal(channel.commandsOfType("set_model").length, 0);
+      const reply = messages.at(-1);
+      assert.ok(reply && typeof reply === "object" && "type" in reply);
+      assert.equal(reply.type, "omp:control-state");
+      assert.equal("selectedModel" in reply, false);
+    } finally {
+      harness.closeLoginTerminal("omp login"); host.dispose(); await harness.providerModelsIdle();
+      for (const subscription of subscriptions) subscription.dispose();
+      fixture.enabled = false;
+    }
+  });
+
+  it("allows scoped passive panel login while keeping the real passive bridge eligibility fence", async () => {
+    const saved = storage(), native = runtime(823), index = indexFixture(native);
+    index.slotBinding = () => ({ tabId: TAB, role: "passive" });
+    const host = new ChatRuntime({ hostNonce: "passive-provider-login", onEvent: () => {} });
+    harness.reset(index, host);
+    const fixture = harness.providerLoginFixture;
+    fixture.enabled = true; fixture.logins.length = 0;
+    const restore = harness.desktopEnvironment(saved.context);
+    const panel = harness.createPanel();
+    const endpoint = new BridgeEditorEndpoint({
+      records: new BridgeRecords({ root: path.join(root, "passive-provider-login"), secrets: saved.context.secrets }),
+      scope: { workspace: "a".repeat(64), tabId: TAB, editorId: EDITOR },
+      hostGeneration: harness.hostGeneration(),
+      eligible: documentId => harness.bridgeDocumentEligible(EDITOR, documentId),
+      onRequest: () => assert.fail("a passive page has no bridge request authority"),
+    });
+    resources.push(endpoint);
+    assert.ok(await endpoint.beginDocument(DOCUMENT, "d".repeat(32)));
+    const state = harness.editor(index, endpoint, panel);
+    state.runtime = native;
+    const subscriptions: { dispose(): void }[] = [];
+    harness.subscribeProviderLoginRefresh({ subscriptions }, index);
+    const command = { type: "omp:chat-command", command: "provider-login" };
+    try {
+      assert.equal(harness.bridgeDocumentEligible(EDITOR, DOCUMENT), false, "the real authentication/ACK eligibility rejects a passive editor");
+      await harness.handlePassiveSlotMessage(EDITOR, panel, command);
+      assert.equal(fixture.logins.length, 1);
+      assert.deepEqual(fixture.logins[0]!.env, { OMP_PROFILE: "default" });
+      assert.equal(harness.bridgeDocumentEligible(EDITOR, DOCUMENT), false, "login grants no passive bridge authority");
+      harness.closeLoginTerminal("omp login");
+      await harness.handlePassiveSlotMessage(EDITOR, harness.createPanel(), command);
+      await harness.handlePassiveSlotMessage(EDITOR, panel, { ...command, profile: "other" });
+      await harness.handlePassiveSlotMessage(EDITOR, panel, { ...command, command: "cycle-model" });
+      assert.equal(fixture.logins.length, 1, "a stale panel, injected scope or model command cannot launch login even with the guard released");
+      assert.equal(index.row.runIntent, "running");
+      assert.equal(state.runtime, native);
+      assert.equal(host.sessionOf(TAB), null);
+    } finally {
+      harness.closeLoginTerminal("omp login"); host.dispose(); endpoint.close(); await harness.providerModelsIdle();
+      for (const subscription of subscriptions) subscription.dispose();
+      fixture.enabled = false; restore();
+    }
+  });
+
+  it("ignores concurrent provider-login requests through the real bridge while executable preflight is pending", async () => {
+    await harness.providerModelsIdle();
+    const saved = storage(), native = runtime(826), index = indexFixture(native);
+    const host = new ChatRuntime({ hostNonce: "bridge-provider-login", onEvent: () => {} });
+    harness.reset(index, host);
+    const fixture = harness.providerLoginFixture;
+    fixture.enabled = true; fixture.logins.length = 0;
+    const restore = harness.desktopEnvironment(saved.context);
+    const scope = { workspace: "a".repeat(64), tabId: TAB, editorId: EDITOR };
+    const endpoint = new BridgeEditorEndpoint({
+      records: new BridgeRecords({ root: path.join(root, "bridge-provider-login"), secrets: saved.context.secrets }),
+      scope, hostGeneration: harness.hostGeneration(),
+      eligible: documentId => harness.bridgeDocumentEligible(EDITOR, documentId),
+      onRequest: (peer, documentId, request) => harness.handleBridgeRequest(EDITOR, documentId, peer, request),
+    });
+    resources.push(endpoint);
+    const port = await endpoint.bind(); assert.notEqual(port, null);
+    assert.ok(await endpoint.beginDocument(DOCUMENT, "d".repeat(32)));
+    assert.equal(endpoint.pinOrigin(DOCUMENT, ORIGIN), true);
+    const delivery = await endpoint.commit(nativeBinding(native)); assert.ok(delivery);
+    const state = harness.editor(index, endpoint, harness.createPanel());
+    state.runtime = native;
+    endpoint.nativeReady(true); assert.ok(endpoint.offerBridge());
+    const subscriptions: { dispose(): void }[] = [];
+    harness.subscribeProviderLoginRefresh({ subscriptions }, index);
+    await harness.providerModelsIdle();
+    const offered = Promise.withResolvers<string>();
+    const unprovenReply = Promise.withResolvers<unknown>();
+    const versionReply = Promise.withResolvers<unknown>();
+    const invalidReply = Promise.withResolvers<unknown>();
+    const invalidation = Promise.withResolvers<string>();
+    const firstReply = Promise.withResolvers<unknown>();
+    const repeatReply = Promise.withResolvers<unknown>();
+    const connections: boolean[] = [];
+    const invalidations: string[] = [];
+    const NodeSocket = WebSocket as unknown as new (url: string, options: { headers: Record<string, string> }) => WebSocket;
+    const page = new BridgeClient({
+      ...scope, documentId: DOCUMENT, port: port!, origin: ORIGIN, bindingHash: delivery.bindingHash, secret: delivery.secret,
+      connect: url => new NodeSocket(url, { headers: { origin: ORIGIN } }),
+    }, {
+      onRouteOffer: generation => offered.resolve(generation),
+      onReply: (requestId, payload) => {
+        const answer = requestId === "1".repeat(32) ? unprovenReply : requestId === "2".repeat(32) ? versionReply
+          : requestId === "3".repeat(32) ? invalidReply : requestId === "4".repeat(32) ? firstReply : requestId === "5".repeat(32) ? repeatReply : null;
+        assert.ok(answer, "every reply retains its request correlation"); answer.resolve(payload);
+      },
+      onInvalidate: generation => { invalidations.push(generation); invalidation.resolve(generation); },
+      onConnection: connected => connections.push(connected),
+    });
+    pages.push(page);
+    const gate = Promise.withResolvers<{ command: string; prefixArgs: string[]; version: string }>();
+    const preflightStarted = Promise.withResolvers<void>();
+    let resolves = 0;
+    try {
+      page.start();
+      const generation = await bounded(offered.promise);
+      assert.equal(page.acknowledgeRoute(generation), true);
+      const payload = { type: "omp:chat-command", command: "provider-login" };
+      assert.equal(page.request({ requestId: "1".repeat(32), routeGeneration: generation, actionSeq: "1", operation: "provider-login", payload }), true);
+      assert.equal((await bounded(unprovenReply.promise) as { code: string }).code, "guest-version");
+      assert.equal(fixture.logins.length, 0, "an authenticated route alone is not the required guest proof");
+      assert.equal(page.request({ requestId: "2".repeat(32), routeGeneration: generation, actionSeq: "2", operation: "guest-version",
+        payload: { protocolVersion: GUEST_PROTOCOL_VERSION, fragments: true } }), true);
+      assert.deepEqual(await bounded(versionReply.promise), { accepted: true });
+      assert.equal(endpoint.guestVersionAccepted(DOCUMENT), true);
+      assert.equal(endpoint.routeFor(DOCUMENT)?.state, "BRIDGE_READY");
+      assert.equal(page.request({ requestId: "3".repeat(32), routeGeneration: generation, actionSeq: "3", operation: "provider-login", payload: { ...payload, profile: "other" } }), true);
+      assert.equal(await bounded(invalidReply.promise), null);
+      assert.equal(await bounded(invalidation.promise), generation);
+      assert.equal(fixture.logins.length, 0, "the host rejects page-supplied profile authority before any login guard is held");
+      const priorConnections = [...connections], priorInvalidations = [...invalidations];
+      fixture.resolve = () => { resolves++; preflightStarted.resolve(); return gate.promise; };
+      assert.equal(page.request({ requestId: "4".repeat(32), routeGeneration: generation, actionSeq: "4", operation: "provider-login", payload }), true);
+      await bounded(preflightStarted.promise);
+      assert.equal(page.request({ requestId: "5".repeat(32), routeGeneration: generation, actionSeq: "5", operation: "provider-login", payload }), true);
+      assert.equal(await bounded(repeatReply.promise), null, "the repeat is answered while the original executable preflight remains pending");
+      assert.equal(resolves, 1);
+      assert.equal(fixture.logins.length, 0);
+      gate.resolve({ command: process.execPath, prefixArgs: [], version: "fixture" });
+      assert.equal(await bounded(firstReply.promise), null);
+      assert.equal(fixture.logins.length, 1);
+      assert.deepEqual(fixture.logins[0]!.env, { OMP_PROFILE: "default" });
+      assert.equal(page.connected, true);
+      assert.deepEqual(connections, priorConnections, "no disconnect or reconnect");
+      assert.deepEqual(invalidations, priorInvalidations, "valid repeated login does not invalidate the native route");
+      assert.equal(endpoint.routeFor(DOCUMENT)?.state, "BRIDGE_READY");
+      assert.equal(bindingMatches(endpoint.committedBinding()!, nativeBinding(native)), true);
+      assert.equal(index.row.runIntent, "running");
+      assert.equal(index.row.ownership.ownerGeneration, OWNER);
+      assert.equal(state.runtime, native);
+      assert.equal(native.handle.state, "running");
+      assert.equal(host.sessionOf(TAB), null, "login neither creates a conversation nor dispatches a prompt");
+    } finally {
+      fixture.resolve = null; gate.resolve({ command: process.execPath, prefixArgs: [], version: "fixture" });
+      page.stop(); endpoint.close(); harness.closeLoginTerminal("omp login"); host.dispose(); await harness.providerModelsIdle();
+      for (const subscription of subscriptions) subscription.dispose();
+      fixture.enabled = false; restore();
+    }
+  });
+
+  it("coalesces concurrent login opens and releases the window guard only on its terminal close or preflight failure", async () => {
+    await harness.providerModelsIdle();
+    const index = indexFixture(runtime(824));
+    const host = new ChatRuntime({ hostNonce: "provider-login-guard", onEvent: () => {} });
+    harness.reset(index, host);
+    const fixture = harness.providerLoginFixture;
+    fixture.enabled = true; fixture.logins.length = 0;
+    const subscriptions: { dispose(): void }[] = [];
+    harness.subscribeProviderLoginRefresh({ subscriptions }, index);
+    await harness.providerModelsIdle();
+    const gate = Promise.withResolvers<{ command: string; prefixArgs: string[]; version: string }>();
+    let resolves = 0;
+    fixture.resolve = () => { resolves++; return gate.promise; };
+    try {
+      const first = harness.openProviderLogin(null, null, root);
+      const duplicate = harness.openProviderLogin(null, null, root);
+      assert.equal(resolves, 1, "the in-flight guard is reserved before resolving the executable");
+      gate.resolve({ command: process.execPath, prefixArgs: [], version: "fixture" });
+      await Promise.all([first, duplicate]);
+      fixture.resolve = null;
+      assert.equal(fixture.logins.length, 1);
+      await harness.openProviderLogin(null, null, root);
+      harness.closeOtherTerminal("omp login");
+      await harness.openProviderLogin(null, null, root);
+      assert.equal(fixture.logins.length, 1, "another terminal with the same name cannot release the owned guard");
+      harness.closeLoginTerminal("omp login");
+      await harness.openProviderLogin(null, null, root);
+      assert.equal(fixture.logins.length, 2, "the owned terminal close releases the guard");
+      harness.closeLoginTerminal("omp login");
+      fixture.unresolved = true;
+      await harness.openProviderLogin(null, null, root);
+      assert.equal(fixture.logins.length, 2);
+      fixture.unresolved = false;
+      await harness.openProviderLogin(null, null, root);
+      assert.equal(fixture.logins.length, 3, "a failed executable preflight does not hold the guard forever");
+    } finally {
+      fixture.resolve = null; fixture.unresolved = false;
+      gate.resolve({ command: process.execPath, prefixArgs: [], version: "fixture" });
+      harness.closeLoginTerminal("omp login"); host.dispose(); await harness.providerModelsIdle();
+      for (const subscription of subscriptions) subscription.dispose();
+      fixture.enabled = false;
+    }
+  });
+
+  it("holds the shared login guard during palette profile choice and releases it on cancellation", async () => {
+    await harness.providerModelsIdle();
+    const base = indexFixture(runtime(825));
+    const index = { ...base, activeTabId: null, list: () => [{ ...base.row, scope: { profile: "existing-test-profile" } }] };
+    const host = new ChatRuntime({ hostNonce: "provider-profile-guard", onEvent: () => {} });
+    harness.reset(index, host);
+    const fixture = harness.providerLoginFixture;
+    fixture.enabled = true; fixture.logins.length = 0;
+    const subscriptions: { dispose(): void }[] = [];
+    harness.subscribeProviderLoginRefresh({ subscriptions }, index);
+    await harness.providerModelsIdle();
+    const answer = Promise.withResolvers<string | undefined>();
+    let choices = 0;
+    const restorePicker = harness.profilePicker(async profiles => {
+      choices++;
+      assert.deepEqual(profiles, ["default", "existing-test-profile"]);
+      return answer.promise;
+    });
+    try {
+      const first = harness.loginProviderFromPalette(index);
+      const duplicate = harness.loginProviderFromPalette(index);
+      await harness.openProviderLogin(null, null, root);
+      assert.equal(choices, 1);
+      assert.equal(fixture.logins.length, 0);
+      answer.resolve(undefined);
+      await Promise.all([first, duplicate]);
+      restorePicker();
+      const restoreSelectedPicker = harness.profilePicker(async () => "default");
+      try { await harness.loginProviderFromPalette(index); }
+      finally { restoreSelectedPicker(); }
+      assert.equal(fixture.logins.length, 1, "cancelling the profile picker does not hold the shared guard");
+      assert.deepEqual(fixture.logins[0]!.env, { OMP_PROFILE: "default" });
+    } finally {
+      answer.resolve(undefined); restorePicker();
+      harness.closeLoginTerminal("omp login"); host.dispose(); await harness.providerModelsIdle();
+      for (const subscription of subscriptions) subscription.dispose();
+      fixture.enabled = false;
+    }
   });
 });
 
@@ -1391,8 +1780,12 @@ describe("native replacement lifecycle", () => {
         const NodeSocket = WebSocket as unknown as new (url: string, options: { headers: Record<string, string> }) => WebSocket;
         const createBridge = () => new BridgeClient({ workspace: scope.workspace, tabId: TAB, editorId: EDITOR, documentId, port: port!, origin: ORIGIN,
           bindingHash: delivery.bindingHash, secret: delivery.secret, connect: url => new NodeSocket(url, { headers: { origin: ORIGIN } }) },
-          { onRouteOffer: route => { generation = route; bridge!.acknowledgeRoute(route); },
-            onReply: (_id, result) => reply.resolve(result), onInvalidate: () => undefined, onConnection: () => undefined,
+          { onRouteOffer: route => {
+              generation = route; bridge!.acknowledgeRoute(route);
+              bridge!.request({ routeGeneration: route, requestId: "9".repeat(32), actionSeq: "0", operation: "guest-version",
+                payload: { protocolVersion: GUEST_PROTOCOL_VERSION, fragments: true } });
+            },
+            onReply: (id, result) => { if (id !== "9".repeat(32)) reply.resolve(result); }, onInvalidate: () => undefined, onConnection: () => undefined,
             onMessage: payload => {
               const message = parseGuestHostMessage(payload); assert.ok(message);
               // A real socket loss between disk paint and the authoritative live snapshot:

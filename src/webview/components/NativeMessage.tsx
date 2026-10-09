@@ -20,6 +20,10 @@ export interface NativeMessageProps {
 const COMPACTION_LABELS: Record<string, string> = {
 	remote: "Remote-compacted", soft: "Soft-compacted", handoff: "Handed off", snapcompact: "Snap-compacted", shake: "Shaken",
 };
+/** The TUI's names for a maintenance pass, by `auto_compaction_*` action. */
+const MAINTENANCE_LABELS: Record<string, string> = {
+	"context-full": "Context-full maintenance", compact: "Compaction", handoff: "Handoff", remote: "Server compaction", shake: "Shake", snapcompact: "Snapcompact",
+};
 const IRC_KINDS: Record<string, string> = {
 	"irc:incoming": "incoming", "irc:autoreply": "auto-reply", "irc:relay": "relay", "irc:workpool": "work pool",
 };
@@ -76,7 +80,16 @@ function CustomMessageView({ message, irc }: { message: CustomMessage; irc?: Irc
 				</section>;
 			}
 			case "retry_failed": return <section className="omp-native-message omp-error"><strong>Retry failed after {numberField(data, "attempt") ?? 0}</strong><p>{stringField(data, "errorMessage")}</p></section>;
-			case "maintenance": return <section className="omp-native-message"><strong>{stringField(data, "action")} · {stringField(data, "status")}</strong>{stringField(data, "errorMessage") && <p className="omp-error">{stringField(data, "errorMessage")}</p>}{data.willRetry === true && <p>Will retry</p>}</section>;
+			case "maintenance": {
+				// As the TUI: a completed pass shows as the compaction divider, a skipped one as nothing; only a
+				// cancelled or failed pass leaves a short line.
+				const status = stringField(data, "status");
+				const error = stringField(data, "errorMessage");
+				const action = MAINTENANCE_LABELS[stringField(data, "action") ?? ""] ?? "Maintenance";
+				if (status === "cancelled") return <div className="omp-native-muted">{action} cancelled</div>;
+				if (!error) return null;
+				return <div className="omp-native-muted omp-warning">{action} failed: {error}{data.willRetry === true ? " · will retry" : ""}</div>;
+			}
 			case "retry_fallback_applied": return <section className="omp-native-event omp-warning"><strong>Fallback applied · {stringField(data, "role")} · {stringField(data, "from")} → {stringField(data, "to")}</strong>{stringField(data, "reason") && <NativeDisclosure title="Fallback reason"><Markdown text={stringField(data, "reason")!} /></NativeDisclosure>}</section>;
 			case "retry_fallback_succeeded": return <section className="omp-native-message omp-success"><strong>Fallback succeeded · {stringField(data, "model")}</strong><p>{stringField(data, "role")}</p></section>;
 			case "todo_reminder": return <section className="omp-native-message omp-native-muted"><strong>TODO reminder · {numberField(data, "attempt")}/{numberField(data, "maxAttempts")}</strong><ul>{recordRows(data, "todos").map((todo, index) => {
@@ -226,8 +239,10 @@ function SummaryView({ summary, superseded = false }: { summary: SummaryMessage 
 	const blocks = "blocks" in summary ? summary.blocks : undefined;
 	const images = "images" in summary ? summary.images : undefined;
 	const label = compaction ? (method && COMPACTION_LABELS[method]) || "Compacted" : "Branch summarized";
-	return <section className="omp-native-summary">
-		<NativeDisclosure title={<>{label}{superseded ? " · superseded in full history" : ""}{warning ? <span className="omp-warning"> · Warning</span> : null}</>}>
+	// As the TUI: a rule across the transcript that cuts off the summarized history, the label and amount in the middle.
+	const amount = before !== undefined && before > 0 && after !== undefined ? <span className="omp-native-summary-amount"> · {fmtTokens(before)} → {fmtTokens(after)} tokens</span> : null;
+	return <section className="omp-native-summary omp-native-summary--divider">
+		<NativeDisclosure title={<span className="omp-native-summary-label">{label}{amount}{superseded ? " · superseded in full history" : ""}{warning ? <span className="omp-warning"> · Warning</span> : null}</span>}>
 			{warning ? <p className="omp-warning">{warning}</p> : null}
 			{compaction ? <p className="omp-native-muted">Summary of the earlier conversation; full history is retained.</p> : null}
 			{method ? <p>Method: {method}</p> : null}

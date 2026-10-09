@@ -8,6 +8,8 @@ export interface FooterMetadataMessage extends FooterUsage {
 	branch: string | null;
 	/** Cost reported by OMP's `get_session_stats`; present only when it is a positive number. */
 	sessionCost?: number;
+	/** Session-profile RPC discovery; absent until a successful model read. */
+	hasAvailableModels?: boolean;
 }
 export function parseFooterMetadata(value: Record<string, unknown>): FooterMetadataMessage | null {
 	const text = (item: unknown): item is string => typeof item === "string" && item.length > 0 && item.length <= 200 && !/[\u0000-\u001f\u007f]/.test(item);
@@ -33,7 +35,9 @@ export function parseFooterMetadata(value: Record<string, unknown>): FooterMetad
 		accounts.push({ label: item.label, windows });
 	}
 	const sessionCost = typeof value.sessionCost === "number" && Number.isFinite(value.sessionCost) && value.sessionCost > 0 ? value.sessionCost : null;
+	if (value.hasAvailableModels !== undefined && typeof value.hasAvailableModels !== "boolean") return null;
 	return { type: "omp:footer-metadata", provider: value.provider as string | null, branch: value.branch as string | null,
 		windows, accounts, accountSelection: value.accountSelection as string | null,
-		...(sessionCost === null ? {} : { sessionCost }) };
+		...(sessionCost === null ? {} : { sessionCost }),
+		...(value.hasAvailableModels === undefined ? {} : { hasAvailableModels: value.hasAvailableModels as boolean }) };
 }

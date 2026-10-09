@@ -497,6 +497,30 @@ describe("launcher tree", () => {
 		assert.equal(provider.getChildren(toggled[0]!)[0]?.command?.command, "omp.newSession");
 	});
 
+	it("places the login action above folders only while the no-model flag is set", () => {
+		const provider = providerFor({ folders: () => [folder("folder:alpha", ALPHA)],
+			entries: () => [], activeTabId: () => null, facts: () => NO_FACTS });
+		const original = provider.getChildren()[0]!;
+		let changes = 0;
+		provider.onDidChangeTreeData(() => { changes++; });
+		provider.setProviderLoginRequired(true);
+		const [login, retained] = provider.getChildren();
+		assert.ok(login instanceof sessionTree.ProviderLoginTreeItem);
+		assert.equal(login.label, "Log in to a model provider to start");
+		assert.equal(login.command?.command, "omp.loginProvider");
+		assert.equal(iconId(login), "account");
+		assert.equal(login.collapsibleState, TreeItemCollapsibleState.None);
+		assert.equal(provider.getParent(login), undefined);
+		assert.deepEqual(provider.getChildren(login), []);
+		assert.equal(retained, original);
+		provider.setProviderLoginRequired(true);
+		assert.equal(changes, 1, "unchanged cached availability does not repaint");
+		provider.refresh();
+		assert.equal(provider.getChildren()[0], login, "the action has stable identity");
+		provider.setProviderLoginRequired(false);
+		assert.deepEqual(provider.getChildren(), [original]);
+	});
+
 	it("keeps each folder's conversation membership separate", async () => {
 		const { provider, roots } = await build({
 			folders: [folder("folder:alpha", ALPHA), folder("folder:beta", BETA)],

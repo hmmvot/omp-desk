@@ -14,15 +14,26 @@
  */
 export class HostLink {
 	#lost = false;
+	#recoveryFailed = false;
 
 	/** The bridge socket became usable (`true`) or a usable one dropped (`false`). */
 	noteConnection(connected: boolean): void {
 		this.#lost = !connected;
+		if (connected) this.#recoveryFailed = false;
 	}
 
 	/** An established host connection was lost and has not recovered. */
 	get lost(): boolean {
 		return this.#lost;
+	}
+
+	noteRecoveryFailed(): void {
+		this.#lost = true;
+		this.#recoveryFailed = true;
+	}
+
+	get recoveryFailed(): boolean {
+		return this.#recoveryFailed;
 	}
 
 	/** Whether a message of this type must not be handed to any route right now. */

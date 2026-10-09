@@ -709,6 +709,7 @@ ${TERMINAL_STYLES}
 .omp-notice--warning > .codicon { color: var(--vscode-editorWarning-foreground); }
 .omp-notice--error { color: var(--vscode-errorForeground); }
 .omp-notice-description { flex: 1 1 auto; }
+.omp-notice-exit { white-space: pre-wrap; overflow-wrap: anywhere; min-width: 0; }
 .omp-notice .omp-btn { flex: 0 0 auto; height: 20px; padding: 0 8px; font-size: 11px; }
 
 /* ── native transcript and the bottom-block HUD rows ───────────────────── */
@@ -735,6 +736,15 @@ ${QUEUE_STYLES}
 .omp-native-code { padding: 8px; color: var(--vscode-foreground); background: var(--vscode-textCodeBlock-background); border-radius: var(--omp-radius); }
 .omp-native-status, .omp-native-divider { padding: 6px 0; color: var(--omp-muted); }
 .omp-native-divider { border-top: 1px solid var(--omp-border); }
+/* Compaction and branch summaries: a rule across the transcript with the label in the middle, as the TUI draws it. */
+.omp-native-summary--divider { margin: 12px 0; }
+.omp-native-summary--divider > .omp-native-disclosure { margin: 0; }
+.omp-native-summary--divider > .omp-native-disclosure > summary { display: flex; align-items: center; gap: 10px; list-style: none; color: var(--omp-muted); }
+.omp-native-summary--divider > .omp-native-disclosure > summary::-webkit-details-marker { display: none; }
+.omp-native-summary--divider > .omp-native-disclosure > summary::before, .omp-native-summary--divider > .omp-native-disclosure > summary::after { content: ""; flex: 1 1 24px; border-top: 1px solid var(--omp-border); }
+.omp-native-summary-label { flex: 0 1 auto; text-align: center; }
+.omp-native-summary-amount { font-family: var(--omp-mono); font-size: var(--omp-mono-size); }
+.omp-native-summary--divider > .omp-native-disclosure[open] > summary { margin-bottom: 8px; }
 .omp-native-badge { border: 1px solid var(--omp-border); border-radius: 4px; padding: 0 5px; font-size: 0.85em; color: var(--omp-muted); }
 .omp-native-image { margin: 6px 0; }
 .omp-native-image img { display: block; max-width: 100%; max-height: 480px; object-fit: contain; }

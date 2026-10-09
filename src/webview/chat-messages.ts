@@ -7,9 +7,9 @@
  * host is validated here before the reducer sees it — the reducer trusts its input types —
  * and everything the page sends is validated again by the host through the same guards.
  *
- * Nothing here carries a credential: no link, no key, no process id. A row's text is
- * transcript content and is relayed verbatim; every *label* the page shows about the
- * connection (phase, code) is a bounded vocabulary, never child text.
+ * Nothing here carries a credential: no link, no key, no process id. Transcript content
+ * is relayed verbatim; connection codes remain a bounded vocabulary. Autonomous child
+ * exits additionally carry a bounded plain-text stderr tail, rendered without markup.
  *
  * Host → page:
  *
@@ -45,6 +45,7 @@ import type { EphemeralItem } from "../chat/projection.ts";
 import { MAX_EPHEMERAL_ITEMS, MAX_QUEUED_ITEMS, MAX_QUEUED_TEXT_LENGTH, MAX_QUEUED_TOTAL_BYTES, MAX_WIDGET_LINES, normalizeQueuedMessages, queuedJsonBytes } from "../chat/model.ts";
 import { NAVIGATE_REFUSAL_SENTENCES, parseBranchPoints, type NavigateRefusal, type NavigationKind } from "../chat/rewind.ts";
 import { SUBAGENT_CHUNK_CHARS } from "../chat/subagent-transcript.ts";
+import { parseChatExitReason } from "../chat/exit-reason.ts";
 import type {
 	ActiveTool,
 	ChatEpoch,
@@ -789,6 +790,8 @@ function parseSnapshotHead(value: unknown): ChatSnapshotHead | null {
 	if (phase === undefined) return null;
 	if (value.code !== null && !isText(value.code, MAX_LABEL_LENGTH)) return null;
 	if (value.readOnlyReason !== null && !isText(value.readOnlyReason, 2_000)) return null;
+	const exitReason = value.exitReason === undefined ? undefined : parseChatExitReason(value.exitReason);
+	if (exitReason === null) return null;
 	const header = value.header === null ? null : parseHeader(value.header);
 	if (header === null && value.header !== null) return null;
 	if (!isCount(value.olderCount)) return null;
@@ -896,6 +899,7 @@ function parseSnapshotHead(value: unknown): ChatSnapshotHead | null {
 		phase,
 		code: value.code,
 		readOnlyReason: value.readOnlyReason,
+		...(exitReason === undefined ? {} : { exitReason }),
 		header,
 		olderCount: value.olderCount,
 		leafId: value.leafId,
@@ -1008,6 +1012,8 @@ export function parseChatHostMessage(value: unknown): ChatHostMessage | null {
 				if (field !== null && !isText(field, 2_000)) return null;
 			}
 			if (value.readOnlyReason !== null && !isText(value.readOnlyReason, 2_000)) return null;
+			const exitReason = value.exitReason === undefined ? undefined : parseChatExitReason(value.exitReason);
+			if (exitReason === null) return null;
 			return {
 				type: "omp:chat-state",
 				epoch,
@@ -1017,6 +1023,7 @@ export function parseChatHostMessage(value: unknown): ChatHostMessage | null {
 				cwd: value.cwd as string | null,
 				title: value.title as string | null,
 				readOnlyReason: value.readOnlyReason,
+				...(exitReason === undefined ? {} : { exitReason }),
 			};
 		}
 		case "omp:chat-snapshot": {

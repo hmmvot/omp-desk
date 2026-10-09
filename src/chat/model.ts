@@ -21,6 +21,7 @@ import type { MaintenanceState, NativeEventFrame, RetryState } from "./events.ts
 import { positionTranscript, type EphemeralItem, type TranscriptPosition } from "./projection.ts";
 import { transcriptWindow, type TranscriptWindow } from "../webview/lib/transcript-window.ts";
 import type { BranchPoint } from "./rewind.ts";
+import type { ChatExitReason } from "./exit-reason.ts";
 
 // Vocabulary
 
@@ -223,6 +224,8 @@ export interface ChatModel {
 	phase: ChatPhase;
 	code: ChatCode | null;
 	readOnlyReason: string | null;
+	/** Present only after an autonomous managed-RPC child exit. */
+	exitReason?: ChatExitReason;
 	header: ChatHeader | null;
 	/** Durable rows in file order (active path), then pending rows. `durableCount` splits them. */
 	entries: readonly ChatEntry[];
@@ -369,6 +372,7 @@ export interface ChatStatePayload {
 	cwd: string | null;
 	title: string | null;
 	readOnlyReason: string | null;
+	exitReason?: ChatExitReason;
 }
 
 export interface ChatPendingRowPayload extends TranscriptPosition {
@@ -383,6 +387,7 @@ export interface ChatSnapshotPayload {
 	phase: ChatPhase;
 	code: ChatCode | null;
 	readOnlyReason: string | null;
+	exitReason?: ChatExitReason;
 	header: ChatHeader | null;
 	/** Durable rows of the tail window in file order. */
 	entries: readonly ChatEntry[];
@@ -770,6 +775,7 @@ export function applyChatSnapshot(model: ChatModel, snapshot: ChatSnapshotPayloa
 			phase: snapshot.phase,
 			code: snapshot.code,
 			readOnlyReason: snapshot.readOnlyReason,
+			exitReason: snapshot.exitReason,
 			header: snapshot.header,
 			entries: pendingRows.length === 0 ? durable : [...durable, ...pendingRows],
 			durableCount: durable.length,
@@ -820,7 +826,7 @@ export function applyChatState(model: ChatModel, payload: ChatStatePayload): Cha
 		model.header !== null && payload.title !== null && payload.title !== model.header.title
 			? { ...model.header, title: payload.title }
 			: model.header;
-	return setChatPhase({ ...model, header }, payload.phase, payload.code, payload.readOnlyReason);
+	return setChatPhase({ ...model, header, exitReason: payload.exitReason }, payload.phase, payload.code, payload.readOnlyReason);
 }
 
 /** Apply a get_state cut atomically; phases cross host→page on every refresh. */
@@ -1382,6 +1388,7 @@ export function snapshotOf(model: ChatModel, epoch: ChatEpoch): ChatSnapshotPayl
 		phase: model.phase,
 		code: model.code,
 		readOnlyReason: model.readOnlyReason,
+		...(model.exitReason === undefined ? {} : { exitReason: model.exitReason }),
 		header: model.header,
 		entries: durableRows(model),
 		olderCount: model.olderCount,
