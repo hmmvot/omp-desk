@@ -1,13 +1,24 @@
+import { spawn } from "node:child_process";
 import { stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir, hostname } from "node:os";
-import { isTerminalLinkTarget, webLinkUrl } from "../webview/terminal-links.ts";
+import { FILE_LINK_MENU_SECTION, isTerminalLinkTarget, webLinkUrl } from "../webview/terminal-links.ts";
 import type { TerminalLinkRequest, TerminalLinkValidation, WebLinkMode } from "../webview/terminal-links.ts";
 
 /** The position a target may carry after its path: group 1 is the line, group 2 the column. */
 const POSITION_SUFFIX = /(?::L?|#L)(\d+)(?:[:C](\d+))?(?:-L?\d+(?:[:C]\d+)?)?$/i;
 export interface TerminalFileLocation { readonly path: string; readonly line: number; readonly column: number }
+/**
+ * The panel viewType and link target a Chat file link's context-menu command was invoked with, or `null`.
+ * The object comes from the page's `data-vscode-context`, so it is checked like any page message.
+ */
+export function fileLinkMenuTarget(argument: unknown): { readonly webview: string; readonly target: string } | null {
+	if (typeof argument !== "object" || argument === null) return null;
+	const { webview, webviewSection, ompFileLinkTarget } = argument as Record<string, unknown>;
+	if (webviewSection !== FILE_LINK_MENU_SECTION || typeof webview !== "string" || !isTerminalLinkTarget(ompFileLinkTarget)) return null;
+	return { webview, target: ompFileLinkTarget };
+}
 /**
  * Resolve a terminal file reference against `cwd` to an absolute local path, or `null`.
  * Line and column are one-based, as in the terminal; {@link openTerminalFile} converts
@@ -58,11 +69,14 @@ export function resolveTerminalFileReference(target: string, cwd: string, home: 
 	return { path: paths.resolve(cwd, filename), line, column };
 }
 
-export async function existingTerminalFile(target: string, cwd: string, home?: string): Promise<TerminalFileLocation | null> {
+/** An existing local file, or with `folders` an existing file or folder, that `target` names; `null` otherwise. */
+export async function existingTerminalFile(target: string, cwd: string, home?: string, folders = false): Promise<(TerminalFileLocation & { readonly folder: boolean }) | null> {
 	const location = resolveTerminalFileReference(target, cwd, home);
 	if (location === null) return null;
-	try { return (await stat(location.path)).isFile() ? location : null; }
-	catch { return null; }
+	try {
+		const found = await stat(location.path);
+		return found.isFile() ? { ...location, folder: false } : folders && found.isDirectory() ? { ...location, folder: true } : null;
+	} catch { return null; }
 }
 
 /** The slice of the VS Code API that opening a terminal file reference needs. */
@@ -82,6 +96,37 @@ export async function openTerminalFile(api: TerminalFileOpenApi, location: Termi
 		preview: false,
 		selection: new api.Range(position[0], position[1], position[0], position[1]),
 	});
+}
+
+/** The slice of the VS Code API that revealing a path needs. */
+export interface PathRevealApi<Uri> {
+	readonly Uri: { file(path: string): Uri };
+	readonly commands: { executeCommand(command: string, ...args: unknown[]): PromiseLike<unknown> };
+	readonly workspace: { getWorkspaceFolder(uri: Uri): unknown };
+}
+/**
+ * Select `path` in VS Code's Explorer through the workbench's own Reveal in Explorer command, which
+ * shows the Explorer. Only a path inside an open workspace folder has a row there; `false` otherwise.
+ */
+export async function revealPathInExplorer<Uri>(api: PathRevealApi<Uri>, path: string): Promise<boolean> {
+	const uri = api.Uri.file(path);
+	if (api.workspace.getWorkspaceFolder(uri) === undefined) return false;
+	await api.commands.executeCommand("revealInExplorer", uri);
+	return true;
+}
+/**
+ * Open the folder holding `target` in File Explorer with `target` selected. VS Code's `revealFileInOS` command is not
+ * used: while its Explorer list has focus it reveals the Explorer's own selection instead of the argument, which is
+ * exactly the state a Ctrl+Click on a link leaves behind.
+ */
+export function revealPathInOs(target: string): Promise<void> {
+	const explorer = path.win32.join(process.env.SystemRoot ?? "C:\\Windows", "explorer.exe");
+	const { promise, resolve, reject } = Promise.withResolvers<void>();
+	// `/select,"path"` must reach Explorer unquoted as a whole; a Windows path cannot contain `"`.
+	const child = spawn(explorer, [`/select,"${target}"`], { detached: true, stdio: "ignore", windowsVerbatimArguments: true });
+	child.once("error", reject);
+	child.once("spawn", () => { child.unref(); resolve(); });
+	return promise;
 }
 
 /** The slice of the VS Code API that opening a web link needs. */
@@ -107,6 +152,10 @@ export interface TerminalLinkHost {
 	isCurrent(): boolean;
 	reply(message: TerminalLinkValidation): void;
 	openFile(location: TerminalFileLocation): Promise<void>;
+	/** Select `path` in VS Code's Explorer, showing it; `false` when no open workspace folder contains it. */
+	revealInExplorer(path: string): Promise<boolean>;
+	/** Show `path` selected in the system file manager. */
+	revealInOs(path: string): Promise<void>;
 	openUrl(url: string, mode: WebLinkMode): Promise<void>;
 	/** Short user-visible notice, so an activation that cannot complete is never silent. */
 	warn(message: string): void;
@@ -129,14 +178,28 @@ export async function handleTerminalLink(request: TerminalLinkRequest, host: Ter
 		catch (error) { host.warn(`cannot open ${url}: ${error instanceof Error ? error.message : String(error)}`); }
 		return;
 	}
-	const location = await existingTerminalFile(request.target, host.cwd, home);
+	const location = await existingTerminalFile(request.target, host.cwd, home, request.folders === true);
 	if (!host.isCurrent()) return;
 	if (request.type === "omp:terminal-link-validate") {
 		host.reply({ type: "omp:terminal-link-validation", requestId: request.requestId, valid: location !== null });
-	} else if (location === null) {
-		host.warn(`cannot open "${request.target}": no such file in this session's folder.`);
-	} else {
-		try { await host.openFile(location); }
-		catch (error) { host.warn(`cannot open ${location.path}: ${error instanceof Error ? error.message : String(error)}`); }
+		return;
 	}
+	if (location === null) {
+		host.warn(`cannot open "${request.target}": no such ${request.folders === true ? "file or folder" : "file"} in this session's folder.`);
+		return;
+	}
+	try {
+		if (request.action === "os") {
+			await host.revealInOs(location.path);
+			return;
+		}
+		// A folder has no tab to open: any click on it reveals it in the Explorer. Ctrl+Click only reveals, a file too.
+		if (request.action !== "reveal" && !location.folder) {
+			await host.openFile(location);
+			return;
+		}
+		if (!await host.revealInExplorer(location.path)) {
+			host.warn(`${location.path} is not in a folder open in this window, so the Explorer cannot show it. Ctrl+Shift+Click shows it in File Explorer.`);
+		}
+	} catch (error) { host.warn(`cannot open ${location.path}: ${error instanceof Error ? error.message : String(error)}`); }
 }

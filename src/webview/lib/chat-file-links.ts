@@ -1,5 +1,5 @@
 import { detectTerminalFileLinks } from "../terminal-links.ts";
-import type { TerminalTextLink } from "../terminal-links.ts";
+import type { FileLinkAction, TerminalTextLink } from "../terminal-links.ts";
 import type { GuestHostMessage, GuestWebviewMessage } from "../messages.ts";
 import { ValidationCache } from "./link-validation-cache.ts";
 import { TerminalLinkClient } from "./terminal-link-client.ts";
@@ -92,12 +92,12 @@ export class ChatFileLinks {
 	async #validate(target: string): Promise<boolean> {
 		while (this.#active >= MAX_IN_FLIGHT) await new Promise<void>(resolve => this.#waiting.push(resolve));
 		this.#active++;
-		try { return await this.#client.validate(target); }
+		try { return await this.#client.validate(target, true); }
 		finally { this.#active--; this.#waiting.shift()?.(); }
 	}
 	/** The fresh answer for `target`, or `undefined` while the host has not been asked or the answer expired. */
 	peek(target: string): boolean | undefined { return this.#cache.peek(target); }
 	resolve(target: string): Promise<boolean> { return this.#cache.resolve(target); }
-	open(target: string): void { this.#client.open(target); }
+	open(target: string, action?: FileLinkAction): void { this.#client.openPath(target, action); }
 	dispose(): void { this.#client.dispose(); }
 }

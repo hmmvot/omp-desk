@@ -1,15 +1,17 @@
 /**
- * Clickable file references in the Chat.
+ * Clickable file and folder references in the Chat.
  *
- * A reference stays ordinary text until the host proves the file exists (the Terminal mode
+ * A reference stays ordinary text until the host proves the file or folder exists (the Terminal mode
  * validation, answered from the document's cache); then the very same characters are wrapped in a
  * link. Without a provider — a detail tab, a static render — nothing is wrapped, so the text, its
  * selection and its copy are the same either way. Opening goes through the host's Terminal mode
- * path, which re-resolves against the session cwd and refuses anything that is not an existing local file.
+ * path, which re-resolves against the session cwd and refuses anything that is not an existing local file or folder.
  */
 import type { MouseEvent, KeyboardEvent, ReactNode } from "react";
 import { createContext, useContext, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { GuestHostMessage, GuestWebviewMessage } from "../messages";
+import { fileLinkMenuContext } from "../terminal-links";
+import type { FileLinkAction } from "../terminal-links";
 import { ChatFileLinks, detectChatFileLinks, isFileLinkCandidate } from "../lib/chat-file-links";
 
 /** Exported for static renders, which cannot run the provider's effect. */
@@ -71,15 +73,23 @@ export function claimLinkActivation(event: MouseEvent | KeyboardEvent): boolean 
 	return true;
 }
 
+/** Ctrl+Click (or Ctrl+Enter) reveals the target in VS Code's Explorer instead of opening it; with Shift it shows the target in the system file manager. */
+export function fileLinkAction(event: { ctrlKey: boolean; shiftKey: boolean }): FileLinkAction | undefined {
+	return !event.ctrlKey ? undefined : event.shiftKey ? "os" : "reveal";
+}
+
 function Anchor({ links, target, children }: { links: ChatFileLinks; target: string; children: ReactNode }): ReactNode {
 	return <span
 		className="omp-file-link"
 		role="link"
 		tabIndex={0}
 		data-file-target={target}
-		title={`Open ${target}`}
-		onClick={event => { if (claimLinkActivation(event)) links.open(target); }}
-		onKeyDown={event => { if ((event.key === "Enter" || event.key === " ") && claimLinkActivation(event)) links.open(target); }}
+		data-vscode-context={fileLinkMenuContext(target)}
+		title={`${target}\nOpen · Ctrl+Click to reveal in Explorer · Ctrl+Shift+Click to show in File Explorer`}
+		// Shift+mousedown would extend the text selection, and the click then reads as a selection, not an activation.
+		onMouseDown={event => { if (event.shiftKey) event.preventDefault(); }}
+		onClick={event => { if (claimLinkActivation(event)) links.open(target, fileLinkAction(event)); }}
+		onKeyDown={event => { if ((event.key === "Enter" || event.key === " ") && claimLinkActivation(event)) links.open(target, fileLinkAction(event)); }}
 	>{children}</span>;
 }
 

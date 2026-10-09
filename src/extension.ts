@@ -194,8 +194,8 @@ import type { BrokerSlotProvenance, BrokerSlotStore } from "./host/broker-slots"
 import type { PtyHandle } from "./host/pty-client";
 import { TerminalPipeline } from "./host/terminal-pipeline";
 import type { TerminalHostMessage } from "./host/terminal-pipeline";
-import { handleTerminalLink, openTerminalFile, openWebLink } from "./host/terminal-links";
-import type { TerminalLinkRequest, TerminalLinkValidation, WebLinkMode } from "./webview/terminal-links";
+import { fileLinkMenuTarget, handleTerminalLink, openTerminalFile, openWebLink, revealPathInExplorer, revealPathInOs } from "./host/terminal-links";
+import type { FileLinkAction, TerminalLinkRequest, TerminalLinkValidation, WebLinkMode } from "./webview/terminal-links";
 import {
   createShellSlotId,
   createShellSlotStore,
@@ -1231,6 +1231,9 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("omp.switchSessionViewTerminal", () => switchActiveSessionView(context, index, "terminal")),
     vscode.commands.registerCommand("omp.copyTerminalScreen", copyActiveTerminalScreen),
     vscode.commands.registerCommand("omp.redrawTerminal", redrawActiveTerminal),
+    vscode.commands.registerCommand("omp.fileLink.open", (argument: unknown) => openFileLinkFromMenu(argument, undefined)),
+    vscode.commands.registerCommand("omp.fileLink.reveal", (argument: unknown) => openFileLinkFromMenu(argument, "reveal")),
+    vscode.commands.registerCommand("omp.fileLink.revealInOs", (argument: unknown) => openFileLinkFromMenu(argument, "os")),
     vscode.commands.registerCommand("omp.chooseDefaultSessionView", chooseDefaultView),
     vscode.commands.registerCommand("omp.chooseDefaultSessionViewChat", chooseDefaultView),
     vscode.commands.registerCommand("omp.chooseDefaultSessionViewTerminal", chooseDefaultView),
@@ -11222,6 +11225,21 @@ const TERMINAL_PANEL_TYPES: Record<string, true> = {
 };
 
 /**
+ * A Chat file link's context-menu command: the same open a click, Ctrl+Click or Ctrl+Shift+Click sends,
+ * routed to the editor whose panel showed the menu, so the target resolves against that session's cwd.
+ */
+async function openFileLinkFromMenu(argument: unknown, action: FileLinkAction | undefined): Promise<void> {
+  const menu = fileLinkMenuTarget(argument);
+  if (menu === null) return;
+  for (const [slot, state] of tabs) {
+    if (state.panel?.viewType !== menu.webview) continue;
+    const request = { type: "omp:terminal-link-open", requestId: 0, target: menu.target, folders: true, ...(action === undefined ? {} : { action }) } as const;
+    await handleTerminalGuestMessage(slot, request, request);
+    return;
+  }
+}
+
+/**
  * Answer one terminal message from the page that shows this tab.
  *
  * Every message is validated by the shared boundary before it arrives here, and
@@ -11269,6 +11287,8 @@ async function handleTerminalGuestMessage(
           (terminalCwd(state) ?? "") === cwd,
         reply: message => pushTerminalTo(state.slotId, message),
         openFile: location => openTerminalFile(vscode, location),
+        revealInExplorer: target => revealPathInExplorer(vscode, target),
+        revealInOs: target => revealPathInOs(target),
         warn: message => { log(`terminal link: ${message}`); showWarning(message); },
         openUrl: openPageWebLink,
       });

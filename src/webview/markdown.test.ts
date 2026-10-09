@@ -82,13 +82,21 @@ test("file references only become links once the host proves them, with the rend
 	assert.equal(text(linked), text(plain), "linking never changes the characters on screen");
 	const targets = [...linked.matchAll(/data-file-target="([^"]*)"/g)].map(match => match[1]);
 	assert.deepEqual(targets, ["src/a.ts:12:4", "./docs/my notes.md", "docs/guide.md#L7", "lib/c.ts", "D:\\Work Space\\b.ts:3", "src/a.ts:9"]);
-	assert.match(linked, /<span class="omp-file-link" role="link" tabindex="0" data-file-target="src\/a\.ts:12:4" title="Open src\/a\.ts:12:4">src\/a\.ts:12:4<\/span>/);
+	assert.match(linked, /<span class="omp-file-link" role="link" tabindex="0" data-file-target="src\/a\.ts:12:4"[^>]*>src\/a\.ts:12:4<\/span>/);
+	const menuTargets = [...linked.matchAll(/data-vscode-context="([^"]*)"/g)].map(match => JSON.parse(match[1]!.replaceAll("&quot;", "\"")).ompFileLinkTarget);
+	assert.deepEqual(menuTargets, targets, "the right-click menu acts on the same target a click opens");
 	assert.match(linked, /<code><span class="omp-file-link"[^>]*data-file-target="\.\/docs\/my notes\.md"[^>]*>\.\/docs\/my notes\.md<\/span><\/code>/, "an inline code span is one link, inside the code element");
 	assert.match(linked, /<strong><span class="omp-file-link"[^>]*data-file-target="lib\/c\.ts"[^>]*>lib\/c\.ts<\/span><\/strong>/);
 	assert.match(linked, /<span class="omp-file-link"[^>]*data-file-target="docs\/guide\.md#L7"[^>]*>the guide<\/span>/, "a Markdown link to a file keeps its label");
 	assert.match(linked, /<span[^>]*data-file-target="src\/a\.ts:9"[^>]*>@src\/a\.ts \[lines 9-20\]<\/span>/, "a mention opens at the first line of its note");
 	assert.doesNotMatch(linked, /data-file-target="src\/missing\.ts"/, "an unproven path stays text");
 	assert.doesNotMatch(linked, /<pre><code[^>]*><span/, "fenced code stays text");
+});
+
+test("an @ mention in inline code links like the same mention in prose", async () => {
+	const linked = await renderLinked("See `@lib/c.ts` and @lib/c.ts.", EXISTING);
+	assert.deepEqual([...linked.matchAll(/data-file-target="([^"]*)"/g)].map(match => match[1]), ["lib/c.ts", "lib/c.ts"]);
+	assert.match(linked, /<code><span class="omp-file-link"[^>]*>@lib\/c\.ts<\/span><\/code>/);
 });
 
 test("file links add no URL scheme: only http(s) destinations become web links and every other destination renders as its label", async () => {

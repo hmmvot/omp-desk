@@ -1,5 +1,5 @@
 import type { GuestHostMessage, GuestWebviewMessage } from "../messages.ts";
-import type { WebLinkMode } from "../terminal-links.ts";
+import type { FileLinkAction, WebLinkMode } from "../terminal-links.ts";
 
 // Mounts can change within one document while an older stat is still in flight.
 let nextTerminalLinkRequestId = 0;
@@ -19,13 +19,14 @@ export class TerminalLinkClient {
 			this.#pending.delete(message.requestId); clearTimeout(pending.timer); pending.resolve(message.valid);
 		});
 	}
-	validate(target: string): Promise<boolean> {
+	/** `folders` asks whether `target` names an existing file or folder (Chat); without it, a file only (Terminal). */
+	validate(target: string, folders = false): Promise<boolean> {
 		if (this.#disposed) return Promise.resolve(false);
 		const requestId = nextTerminalLinkRequestId++;
 		const { promise, resolve } = Promise.withResolvers<boolean>();
 		const timer = setTimeout(() => { this.#pending.delete(requestId); resolve(false); }, 4000);
 		this.#pending.set(requestId, { resolve, timer });
-		if (!this.#post({ type: "omp:terminal-link-validate", requestId, target })) {
+		if (!this.#post({ type: "omp:terminal-link-validate", requestId, target, ...(folders ? { folders: true as const } : {}) })) {
 			clearTimeout(timer); this.#pending.delete(requestId); resolve(false);
 		}
 		return promise;
@@ -33,6 +34,10 @@ export class TerminalLinkClient {
 	/** `mode` says where a web link opens; a file reference carries none. */
 	open(target: string, mode?: WebLinkMode): void {
 		this.#post({ type: "omp:terminal-link-open", requestId: nextTerminalLinkRequestId++, target, ...(mode === undefined ? {} : { mode }) });
+	}
+	/** Open a Chat file or folder reference; `action` is what a modified click adds or does instead. */
+	openPath(target: string, action?: FileLinkAction): void {
+		this.#post({ type: "omp:terminal-link-open", requestId: nextTerminalLinkRequestId++, target, folders: true, ...(action === undefined ? {} : { action }) });
 	}
 	dispose(): void {
 		this.#disposed = true;
