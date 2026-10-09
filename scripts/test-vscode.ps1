@@ -24,7 +24,7 @@ Keep -Root inside your user profile. OMP Desk refuses to start sessions when ano
 the path to its storage, which is the case for folders created directly under a drive root such as C:\tests.
 
 .EXAMPLE
-./scripts/test-vscode.ps1 -Name nologin -Vsix ./omp-desk-win32-x64-<version>.vsix -Folder ~/projects/demo
+./scripts/test-vscode.ps1 -Name nologin -Vsix ./out/omp-desk-win32-x64-<version>.vsix -Folder ~/projects/demo
 .EXAMPLE
 ./scripts/test-vscode.ps1 -Name nologin -Reset
 #>
