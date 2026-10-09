@@ -6,7 +6,7 @@
  * `queue_update` as the host read them back, and a removal's outcome is exactly the host's per-item answer.
  */
 import type { ChatQueuedMessages } from "../../chat/model.ts";
-import type { ChatQueueResultItem, ChatQueuedRef } from "../chat-messages.ts";
+import type { ChatQueuePurpose, ChatQueueResultItem, ChatQueuedRef } from "../chat-messages.ts";
 import type { RestoredQueued } from "./queue-restore.ts";
 import { HUD_HEADER_PX, HUD_LINE_PX, HUD_LIST_PAD_PX, HUD_STACK_PAD_PX } from "../../chat/hud-summary.ts";
 
@@ -77,25 +77,26 @@ export interface QueueNotice {
 const messages = (count: number): string => (count === 1 ? "1 queued message" : `${count} queued messages`);
 
 /**
- * The notice a finished removal leaves, or `null` when every item was removed and nothing needs saying.
- * `gone` is the already-delivered race: the message was sent between the click and the command, so it is
- * reported as sent — never as removed, and never dropped silently.
+ * The notice a finished removal or promotion leaves, or `null` when every item was handled and nothing needs
+ * saying. `gone` is the already-delivered race: the message was sent between the click and the command, so it
+ * is reported as sent — never as removed, and never dropped silently.
  */
-export function queueNotice(purpose: "cancel" | "edit", outcome: { ok: true; results: readonly ChatQueueResultItem[] } | { ok: false; reason: string }): QueueNotice | null {
+export function queueNotice(purpose: ChatQueuePurpose, outcome: { ok: true; results: readonly ChatQueueResultItem[] } | { ok: false; reason: string }): QueueNotice | null {
 	if (!outcome.ok) return { tone: "warn", text: `The queue was not changed: ${outcome.reason}.` };
 	const gone = outcome.results.filter(result => result.status === "gone");
 	const unknown = outcome.results.filter(result => result.status === "unknown");
 	const failed = outcome.results.filter(result => result.status === "failed");
 	const imagesDropped = outcome.results.some(result => result.status === "removed" && result.imagesDropped === true);
+	const done = purpose === "promote" ? "moved to steering" : "removed";
 	const parts: string[] = [];
 	if (gone.length > 0) {
 		// OMP answers `removed: false` for a message it delivered, but also for one removed elsewhere (the TUI, another window).
-		parts.push(`${messages(gone.length)} ${gone.length === 1 ? "was" : "were"} already sent or ${gone.length === 1 ? "is" : "are"} no longer queued, so ${gone.length === 1 ? "it" : "they"} could not be ${purpose === "edit" ? "edited" : "removed"}.`);
+		parts.push(`${messages(gone.length)} ${gone.length === 1 ? "was" : "were"} already sent or ${gone.length === 1 ? "is" : "are"} no longer queued, so ${gone.length === 1 ? "it" : "they"} could not be ${purpose === "edit" ? "edited" : purpose === "promote" ? "sent now" : "removed"}.`);
 	}
 	if (unknown.length > 0) {
-		parts.push(`OMP did not confirm whether ${messages(unknown.length)} ${unknown.length === 1 ? "was" : "were"} removed; the list shows what is still queued.`);
+		parts.push(`OMP did not confirm whether ${messages(unknown.length)} ${unknown.length === 1 ? "was" : "were"} ${done}; the list shows what is still queued.`);
 	}
-	if (failed.length > 0) parts.push(`${messages(failed.length)} could not be removed and ${failed.length === 1 ? "is" : "are"} still queued.`);
+	if (failed.length > 0) parts.push(`${messages(failed.length)} could not be ${done} and ${failed.length === 1 ? "is" : "are"} still queued.`);
 	if (imagesDropped && purpose === "edit") parts.push("Some images could not be restored to the composer.");
 	if (parts.length === 0) return null;
 	const detail = unknown.length === 0 ? undefined : unknown.map(result => result.text).join("\n\n");

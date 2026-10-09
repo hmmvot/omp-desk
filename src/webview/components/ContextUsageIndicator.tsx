@@ -7,13 +7,17 @@ import type { FooterQuotaWindow } from "../footer-metadata";
 
 const CIRCUMFERENCE = 2 * Math.PI * 6;
 
-export function ContextUsageIndicator({ tokens, contextWindow, percent, cost, windows, quotaTooltip }: {
+export function ContextUsageIndicator({ tokens, contextWindow, percent, cost, windows, quotaTooltip, onCompact, compactBlocked }: {
 	tokens: number | null | undefined;
 	contextWindow: number | null;
 	percent: number | null | undefined;
 	cost: number | undefined;
 	windows: readonly FooterQuotaWindow[];
 	quotaTooltip: string;
+	/** Ask the host to compact the conversation (it asks for optional instructions first). */
+	onCompact?: () => void;
+	/** Why Compact is unavailable now (a running turn, a read-only page), or `null`. */
+	compactBlocked?: string | null;
 }) {
 	const [open, setOpen] = useState(false);
 	const [now, setNow] = useState(Date.now);
@@ -66,7 +70,7 @@ export function ContextUsageIndicator({ tokens, contextWindow, percent, cost, wi
 			</svg>
 			{used !== null && <span className="omp-context-percent" aria-hidden="true">{fmtPercent(used)}</span>}
 		</button>
-		{open && <div className="omp-context-popover" id={tooltipId} role="tooltip" ref={popoverRef} style={{ transform: `translateX(${shift}px)` }}>
+		{open && <div className="omp-context-popover" id={tooltipId} role={onCompact === undefined ? "tooltip" : "group"} aria-label={onCompact === undefined ? undefined : "Context window"} ref={popoverRef} style={{ transform: `translateX(${shift}px)` }}>
 			<strong>Context window</strong>
 			<div>{usedLabel}</div>
 			<div>{contextTokenLabel(tokens)} / {contextTokenLabel(contextWindow)} tokens</div>
@@ -76,6 +80,11 @@ export function ContextUsageIndicator({ tokens, contextWindow, percent, cost, wi
 				title={window.resetsAt === null ? quotaTooltip : `Resets at ${new Date(window.resetsAt).toLocaleString()}${quotaTooltip ? `\n\n${quotaTooltip}` : ""}`}>
 				{quotaWindowLabel(window, now)}
 			</div>)}
+			{onCompact !== undefined && <button type="button" className="omp-btn omp-context-compact" disabled={compactBlocked != null}
+				title={compactBlocked ?? "Summarize the earlier conversation to free context (you can say what to keep)"}
+				onClick={() => { setOpen(false); onCompact(); }}>
+				<span aria-hidden="true" className="codicon codicon-fold" />Compact…
+			</button>}
 		</div>}
 	</div>;
 }

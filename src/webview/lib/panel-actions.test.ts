@@ -19,6 +19,7 @@ function recorder(name: string, calls: string[]) {
 		"send-prompt": () => calls.push(`${name}:send`),
 		"stop-turn": () => calls.push(`${name}:stop`),
 		"focus-composer": () => calls.push(`${name}:focus`),
+		"retry-turn": () => calls.push(`${name}:retry`),
 	};
 }
 

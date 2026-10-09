@@ -1,9 +1,14 @@
 import type { ChatSlashCommand } from "../../chat/model.ts";
 import { classifySlashInput } from "../../host/rpc/protocol.ts";
 
-const SETTINGS_COMMANDS: readonly ChatSlashCommand[] = [
+/**
+ * Commands Chat runs itself before anything is sent. `/rewind` and `/branch` are Chat's in-place Rewind, as they are
+ * OMP's TUI rewind selector (`branch`, alias `rewind`); they never reach OMP or its fork-into-a-new-file RPC `branch`.
+ */
+const DESK_COMMANDS: readonly ChatSlashCommand[] = [
  { name: "models", aliases: ["model"], source: "OMP Desk", description: "Open native Models settings (selector arguments retain OMP RPC semantics)" },
  { name: "agents", source: "OMP Desk", description: "Open native Agents settings" },
+ { name: "rewind", aliases: ["branch"], source: "OMP Desk", description: "Rewind the conversation to an earlier message (Esc Esc)" },
 ];
 
 /** Only the leading command token is completion-owned; embedded skill tokens are prose. */
@@ -16,9 +21,14 @@ export function slashQueryAt(text: string, caret: number): { query: string; end:
 
 /** Denied owners and every advertised alias disappear together; selection dispatches the owner. */
 export function slashSuggestions(commands: readonly ChatSlashCommand[], query: string): readonly ChatSlashCommand[] {
- const catalogue = [...SETTINGS_COMMANDS, ...commands.filter(command => !SETTINGS_COMMANDS.some(setting => setting.name === command.name || setting.aliases?.includes(command.name)))];
- return catalogue.filter(command => !classifySlashInput(`/${command.name}`, commands).denied &&
+ const catalogue = [...DESK_COMMANDS, ...commands.filter(command => !DESK_COMMANDS.some(local => local.name === command.name || local.aliases?.includes(command.name)))];
+ return catalogue.filter(command => (DESK_COMMANDS.includes(command) || !classifySlashInput(`/${command.name}`, commands).denied) &&
   (command.name.toLowerCase().includes(query) || command.aliases?.some(alias => alias.toLowerCase().includes(query)))).slice(0, 50);
+}
+
+/** Whether a draft is Chat's own `/rewind` or `/branch` (case-insensitive, nothing after it): the page opens Rewind instead of sending. */
+export function isRewindCommand(text: string): boolean {
+ return /^\/(?:rewind|branch)\s*$/i.test(text.trim());
 }
 
 export function spliceSlash(text: string, end: number, name: string): { text: string; caret: number } {

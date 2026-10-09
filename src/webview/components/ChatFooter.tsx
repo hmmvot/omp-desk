@@ -135,12 +135,12 @@ export function ChatFooter({ client, snapshot, trailingActions }: {
 			<div className="omp-composer-toolbar">
 				<div className="omp-composer-lead">
 					<button type="button" className="omp-footer-trigger" disabled={blocked !== null}
-						title={blocked ?? `Provider: ${model?.provider ?? "unknown"}`} onClick={() => send({ action: "snapshot", picker: "model" })}>
+						title={blocked ?? `Provider: ${model?.provider ?? "unknown"} · Alt+click: next model`} onClick={event => event.altKey ? guestTransport.post({ type: "omp:chat-command", command: "cycle-model" }) : send({ action: "snapshot", picker: "model" })}>
 						<span className="omp-footer-trigger-label">{model?.name ?? model?.id ?? "Model unavailable"}</span>
 						<span aria-hidden="true" className={`codicon codicon-${view.awaiting !== null && (bookRef.current?.picker === "model" || view.action === "set-model") ? "loading codicon-modifier-spin" : "chevron-down"}`} />
 					</button>
 					<button type="button" className="omp-footer-trigger omp-footer-trigger--level" disabled={blocked !== null}
-						title={blocked ?? "Change the session's thinking level"} aria-label="Thinking level" onClick={() => send({ action: "snapshot", picker: "thinking" })}>
+						title={blocked ?? "Change the session's thinking level · Alt+click: next level"} aria-label="Thinking level" onClick={event => event.altKey ? guestTransport.post({ type: "omp:chat-command", command: "cycle-thinking" }) : send({ action: "snapshot", picker: "thinking" })}>
 						<span className="omp-footer-trigger-label">{level ?? "Unavailable"}</span>
 						<span aria-hidden="true" className={`codicon codicon-${view.awaiting !== null && (bookRef.current?.picker === "thinking" || view.action === "set-thinking") ? "loading codicon-modifier-spin" : "chevron-down"}`} />
 					</button>
@@ -152,7 +152,9 @@ export function ChatFooter({ client, snapshot, trailingActions }: {
 				</div>
 				<div className="omp-composer-toolbar-actions">
 					<ContextUsageIndicator tokens={usage?.tokens} contextWindow={contextWindow} percent={usage?.percent}
-						cost={metadata?.sessionCost} windows={windows} quotaTooltip={quotaTooltip} />
+						cost={metadata?.sessionCost} windows={windows} quotaTooltip={quotaTooltip}
+						onCompact={() => guestTransport.post({ type: "omp:chat-command", command: "compact" })}
+						compactBlocked={blocked ?? (snapshot.working ? "Compact after the running turn ends." : null)} />
 					{trailingActions}
 				</div>
 			</div>

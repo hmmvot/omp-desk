@@ -28,6 +28,9 @@ import type { HistoryReader } from "./rpc/history-reader.ts";
 import { RpcSession } from "./rpc/session.ts";
 import type { readViewOnlySnapshot } from "./rpc/session.ts";
 import { ManualTimers, assistantMessage, messageEntry, tick, userMessage, waitUntil } from "./rpc/test-support.ts";
+import { NAVIGATE_COMMAND, NAVIGATION_MARKER_TYPE, parseNavigateArgs } from "../chat/rewind.ts";
+import { parseChatHostMessage, parseChatWebviewMessage } from "../webview/chat-messages.ts";
+import { isoOf } from "./rpc/test-support.ts";
 
 const TAB = "tab:one";
 const SESSION_FILE = "D:\\scratch\\chat.jsonl";
@@ -77,7 +80,7 @@ const rows = (count: number, size = 1): ReturnType<typeof messageEntry>[] =>
 			: messageEntry(id, `r${index - 1}`, assistantMessage(text, 1000 + index * 10));
 	});
 
-function newRuntime(events: ChatRuntimeEvent[], extra: Pick<ChatRuntimeOptions, "readViewOnly" | "openSettings"> = {}): ChatRuntime {
+function newRuntime(events: ChatRuntimeEvent[], extra: Pick<ChatRuntimeOptions, "readViewOnly" | "openSettings" | "slashRegistry" | "runDeskAction"> = {}): ChatRuntime {
 	let snapshotIds = 0;
 	const timers = new ManualTimers();
 	return new ChatRuntime({
@@ -93,7 +96,7 @@ function newRuntime(events: ChatRuntimeEvent[], extra: Pick<ChatRuntimeOptions, 
 }
 
 /** A live conversation of a *new* session over a scripted child, driven to `live`. */
-async function liveRig(child: Partial<FakeChildModel> = {}, extra: Pick<ChatRuntimeOptions, "openSettings"> = {}): Promise<Rig> {
+async function liveRig(child: Partial<FakeChildModel> = {}, extra: Pick<ChatRuntimeOptions, "openSettings" | "slashRegistry" | "runDeskAction"> = {}): Promise<Rig> {
 	const events: ChatRuntimeEvent[] = [];
 	const runtime = newRuntime(events, extra);
 	const channel = new FakeRpcChannel({ sessionFile: SESSION_FILE, ...child });
@@ -268,7 +271,7 @@ describe("a page command while the conversation is not live", () => {
 		assert.equal(channel.commandsOfType("prompt").length, 1);
 
 		assert.equal(await runtime.handleMessage(TAB, { type: "omp:chat-abort", requestId: "req-a" }, page), "accepted");
-		assert.equal(channel.commandsOfType("abort").length, 1, "the stop was written while the prompt was pending");
+		assert.equal(channel.commandsOfType("abort_and_restore_queue").length, 1, "the stop was written while the prompt was pending");
 		assert.equal(page.notices().length, 0);
 		void prompting;
 	});
@@ -615,5 +618,270 @@ describe("native Models and Agents settings", () => {
 		current = false;
 		await apply({ provider: "p", id: "target" });
 		assert.equal(channel.commandsOfType("set_model").length, writes);
+	});
+});
+
+describe("terminal-UI builtins typed into Chat", () => {
+	const REGISTRY = [
+		{ name: "hotkeys", aliases: ["keys"], handled: false },
+		{ name: "copy", aliases: [], handled: false },
+		{ name: "compact", aliases: [], handled: true },
+		{ name: "review", aliases: [], handled: false },
+	];
+
+	it("are answered in one line and never sent; a mapped one runs its Desk action once per request", async () => {
+		const ran: string[] = [];
+		const { runtime, channel } = await liveRig({}, { slashRegistry: () => REGISTRY, runDeskAction: async (action, tabId) => { ran.push(`${tabId}:${action}`); } });
+		const page = new RecordingPage("editor");
+		runtime.attachPage(TAB, page);
+		const request = { type: "omp:chat-prompt" as const, requestId: "tui-1", text: "/keys" };
+		assert.equal(await runtime.handleMessage(TAB, request, page), "explained");
+		assert.equal(await runtime.handleMessage(TAB, request, page), "explained");
+		assert.deepEqual(ran, [`${TAB}:keyboard-shortcuts`], "an alias resolves to its builtin, and a repeated request runs nothing again");
+		assert.equal(await runtime.handleMessage(TAB, { type: "omp:chat-steer", requestId: "tui-2", text: "/copy that" }, page), "explained");
+		assert.deepEqual(page.notices(), [
+			"/hotkeys is a terminal command; opened the OMP keyboard shortcuts instead.",
+			"/copy was not sent: use the Copy buttons on replies, code blocks and your messages.",
+		]);
+		assert.equal(channel.commandsOfType("prompt").length + channel.commandsOfType("steer").length, 0, "nothing reaches OMP");
+	});
+
+	it("still sends a builtin rpc mode runs, a command an extension advertises under that name, and anything while the registry is unknown", async () => {
+		let registry: typeof REGISTRY | null = REGISTRY;
+		const { runtime, channel } = await liveRig({}, { slashRegistry: () => registry, runDeskAction: async () => { throw new Error("must not run"); } });
+		const page = new RecordingPage("editor");
+		runtime.attachPage(TAB, page);
+		assert.equal(await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "sent-1", text: "/compact keep it" }, page), "accepted");
+		channel.emit({ type: "available_commands_update", commands: [{ name: "review", description: "Extension review" }] });
+		await tick();
+		assert.equal(await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "sent-2", text: "/review" }, page), "accepted");
+		registry = null;
+		assert.equal(await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "sent-3", text: "/copy" }, page), "accepted");
+		assert.deepEqual(channel.commandsOfType("prompt").map(command => command.message), ["/compact keep it", "/review", "/copy"]);
+		assert.deepEqual(page.notices(), []);
+	});
+
+	it("says so when the Desk action fails, instead of claiming it opened", async () => {
+		const { runtime } = await liveRig({}, { slashRegistry: () => REGISTRY, runDeskAction: async () => { throw new Error("no view"); } });
+		const page = new RecordingPage("editor");
+		runtime.attachPage(TAB, page);
+		assert.equal(await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "tui-fail", text: "/hotkeys" }, page), "explained");
+		assert.deepEqual(page.notices(), ["/hotkeys was not sent, and its Desk equivalent could not be opened."], "one line, and no claim that it opened");
+	});
+});
+
+describe("Stop", () => {
+	it("hands the withdrawn queue back to the page that stopped, and to no other route", async () => {
+		const { runtime, channel } = await liveRig({ isStreaming: true });
+		channel.handlers.set("abort_and_restore_queue", () => ({ data: { steering: [{ text: "queued steer" }], followUp: [{ text: "queued follow-up" }] } }));
+		const stopping = new RecordingPage("stopping");
+		const other = new RecordingPage("other");
+		runtime.attachPage(TAB, stopping);
+		runtime.attachPage(TAB, other);
+		assert.equal(await runtime.handleMessage(TAB, { type: "omp:chat-abort", requestId: "stop-1" }, stopping), "accepted");
+		const [answer] = stopping.ofType("omp:chat-abort-result");
+		assert.deepEqual(answer && { status: answer.status, requestId: answer.requestId, entries: answer.entries }, { status: "accepted", requestId: "stop-1", entries: [{ text: "queued steer" }, { text: "queued follow-up" }] });
+		assert.equal(other.ofType("omp:chat-abort-result").length, 0);
+		assert.equal(channel.commandsOfType("abort").length, 0);
+	});
+
+	it("tells the page a refused stop withdrew nothing", async () => {
+		const { runtime, channel } = await liveRig({ isStreaming: true });
+		channel.handlers.set("abort_and_restore_queue", () => ({ success: false, error: "nope" }));
+		const page = new RecordingPage("editor");
+		runtime.attachPage(TAB, page);
+		await runtime.handleMessage(TAB, { type: "omp:chat-abort", requestId: "stop-2" }, page);
+		assert.deepEqual(page.ofType("omp:chat-abort-result").map(answer => [answer.status, answer.entries.length]), [["refused", 0]]);
+	});
+});
+
+/**
+ * In-place Rewind, Undo and branch switching (ADR-0051), as the runtime routes them: the outcome goes to the route
+ * that asked, or to every writable route for a host-side request; a route that may not write is refused before the
+ * session is asked; a draft the route cannot carry is resent without its images.
+ */
+describe("navigating a conversation in place (omp:chat-navigate)", () => {
+	const NAV = "0123456789abcdef0123456789abcd01";
+	const READ_ONLY = "Another editor controls this session.";
+	const PNG = "iVBORw0KGgo=";
+
+	/**
+	 * A live conversation whose process registered the navigate command. Its `prompt` handler moves the leaf as the
+	 * OMP-side command does: to the rewound prompt's parent (or to the target), then one marker entry naming the move.
+	 */
+	async function navigableRig(entries: Record<string, unknown>[] = rows(4) as never, marker: Record<string, unknown> = {}) {
+		const runtime = newRuntime([]);
+		const channel = new FakeRpcChannel({ sessionFile: SESSION_FILE, entries, leafId: entries.at(-1)!.id as string });
+		channel.handlers.set("get_available_commands", () => ({ data: { commands: [{ name: NAVIGATE_COMMAND, source: "extension" }] } }));
+		channel.handlers.set("prompt", command => {
+			const text = String(command.message);
+			const args = text.startsWith(`/${NAVIGATE_COMMAND} `) ? parseNavigateArgs(text.slice(NAVIGATE_COMMAND.length + 2)) : null;
+			if (args === null) return undefined;
+			const target = channel.child.entries.find(entry => entry.id === args.targetId);
+			const to = args.kind === "rewind" ? (target?.parentId as string | null) : args.targetId;
+			const id = `marker-${channel.child.entries.length}`;
+			const data = { v: 1, requestId: args.requestId, kind: args.kind, from: channel.child.leafId, target: args.targetId, to, summarized: args.summarize, ...marker };
+			channel.child.entries = [...channel.child.entries, { type: "custom", id, parentId: to, timestamp: isoOf(90_000), customType: NAVIGATION_MARKER_TYPE, data }];
+			channel.child.leafId = id;
+			return { data: { agentInvoked: false } };
+		});
+		const session = runtime.startLive(TAB, { channel, sessionFile: null, cwd: "D:\\scratch", title: null });
+		await waitUntil(() => session.phase === "live" && session.model.commands.length > 0);
+		assert.equal(session.phase, "live");
+		return { runtime, channel };
+	}
+
+	const rewind = (patch: Partial<{ requestId: string; targetId: string; expectedLeafId: string | null; summarize: boolean }> = {}) =>
+		({ type: "omp:chat-navigate" as const, requestId: NAV, kind: "rewind" as const, targetId: "r2", expectedLeafId: "r3", summarize: false, ...patch });
+	const request = (patch: Partial<{ requestId: string; targetId: string; expectedLeafId: string | null }> = {}) => {
+		const { type: _type, ...rest } = rewind(patch);
+		return rest;
+	};
+	const navigations = (channel: FakeRpcChannel) => channel.commandsOfType("prompt").filter(command => String(command.message).startsWith(`/${NAVIGATE_COMMAND} `));
+	const results = (page: RecordingPage) => page.ofType("omp:chat-navigate-result");
+
+	it("answers only the route that asked: done, the kind, and the rewound prompt for its composer", async () => {
+		const { runtime, channel } = await navigableRig();
+		const asking = new RecordingPage("asking");
+		const other = new RecordingPage("other");
+		runtime.attachPage(TAB, asking);
+		runtime.attachPage(TAB, other);
+
+		assert.equal(await runtime.handleMessage(TAB, rewind(), asking), "accepted");
+		assert.equal(navigations(channel).length, 1);
+		assert.deepEqual(results(asking), [{ type: "omp:chat-navigate-result", requestId: NAV, status: "done", kind: "rewind", summarized: false, draft: { text: "r2:x", images: [], unavailableImages: 0 } }]);
+		assert.equal(results(other).length, 0, "another route sees the moved transcript, not the draft");
+		const shown = assembled(other)?.entries.map(entry => entry.id) ?? [];
+		assert.equal(shown.includes("r2") || shown.includes("r3"), false, "every route was re-synced to the new branch");
+
+		assert.equal(await runtime.handleMessage(TAB, rewind(), asking), "accepted", "a repeated request returns the first outcome");
+		assert.equal(navigations(channel).length, 1, "and never runs the command again");
+		runtime.dispose();
+	});
+
+	it("carries raced and summarized on the wire, through the page's parser", async () => {
+		const { runtime } = await navigableRig(rows(4) as never, { raced: true });
+		const page = new RecordingPage("editor");
+		runtime.attachPage(TAB, page);
+		await runtime.handleMessage(TAB, rewind({ summarize: true }), page);
+		const [answer] = results(page);
+		assert.equal(answer?.raced, true);
+		assert.equal(answer?.summarized, true);
+		const parsed = parseChatHostMessage(JSON.parse(JSON.stringify(answer)));
+		assert.ok(parsed?.type === "omp:chat-navigate-result");
+		assert.equal(parsed.raced, true);
+		assert.equal(parsed.summarized, true);
+		runtime.dispose();
+	});
+
+	it("answers a host-side request (the command palette) on every writable route and on no read-only one", async () => {
+		const { runtime } = await navigableRig();
+		const writable = new RecordingPage("editor-a");
+		const passive = new RecordingPage("editor-b");
+		passive.readOnlyReason = () => READ_ONLY;
+		runtime.attachPage(TAB, writable);
+		runtime.attachPage(TAB, passive);
+
+		const outcome = await runtime.navigate(TAB, request(), null);
+		assert.equal(outcome.status, "done");
+		assert.deepEqual(results(writable).map(answer => [answer.status, answer.draft?.text]), [["done", "r2:x"]]);
+		assert.equal(results(passive).length, 0);
+		runtime.dispose();
+	});
+
+	it("refuses a host-side request not-owner when no route may write, and sends nothing", async () => {
+		const { runtime, channel } = await navigableRig();
+		assert.deepEqual(await runtime.navigate(TAB, request(), null), { status: "refused", reason: "not-owner" }, "no route at all");
+		const passive = new RecordingPage("editor-b");
+		passive.readOnlyReason = () => READ_ONLY;
+		runtime.attachPage(TAB, passive);
+		assert.deepEqual(await runtime.navigate(TAB, request({ requestId: "0123456789abcdef0123456789abcd02" }), null), { status: "refused", reason: "not-owner" });
+		assert.equal(results(passive).length, 0);
+		assert.equal(navigations(channel).length, 0);
+		runtime.dispose();
+	});
+
+	it("refuses a read-only route not-live, with its reason, without asking the session", async () => {
+		const { runtime, channel } = await navigableRig();
+		const passive = new RecordingPage("editor-b");
+		passive.readOnlyReason = () => READ_ONLY;
+		runtime.attachPage(TAB, passive);
+		const before = channel.written.length;
+
+		assert.equal(await runtime.handleMessage(TAB, rewind(), passive), "refused");
+		assert.deepEqual(results(passive), [{ type: "omp:chat-navigate-result", requestId: NAV, status: "refused", reason: "not-live" }]);
+		assert.deepEqual(passive.notices(), [READ_ONLY]);
+		assert.equal(channel.written.length, before);
+		runtime.dispose();
+	});
+
+	it("refuses a view-only conversation and a failed session not-live, writing nothing", async () => {
+		const viewOnly = newRuntime([], { readViewOnly: viewOnlyStub });
+		await viewOnly.showViewOnly(TAB, { file: SESSION_FILE, cwd: "D:\\scratch", title: null, reason: "stopped" });
+		const page = new RecordingPage("editor");
+		viewOnly.attachPage(TAB, page);
+		assert.equal(await viewOnly.handleMessage(TAB, rewind(), page), "refused");
+		assert.deepEqual(await viewOnly.navigate(TAB, request({ requestId: "0123456789abcdef0123456789abcd02" }), null), { status: "refused", reason: "not-live" });
+		assert.deepEqual(results(page).map(answer => [answer.status, answer.reason]), [["refused", "not-live"], ["refused", "not-live"]]);
+		assert.deepEqual(page.notices(), [CHAT_NOT_LIVE_SENTENCE]);
+		viewOnly.dispose();
+
+		const failedRuntime = newRuntime([]);
+		const channel = new FakeRpcChannel({ sessionFile: "D:\\scratch\\another.jsonl" });
+		const failed = failedRuntime.startLive(TAB, { channel, sessionFile: SESSION_FILE, cwd: "D:\\scratch", title: null });
+		await waitUntil(() => failed.phase === "failed");
+		const failedPage = new RecordingPage("editor");
+		failedRuntime.attachPage(TAB, failedPage);
+		const before = channel.written.length;
+		assert.equal(await failedRuntime.handleMessage(TAB, rewind(), failedPage), "refused");
+		assert.deepEqual(results(failedPage).map(answer => [answer.status, answer.reason]), [["refused", "not-live"]]);
+		assert.equal(channel.written.length, before);
+		failedRuntime.dispose();
+	});
+
+	it("drops a malformed request at the parser, and refuses the session's own checks on the route that asked", async () => {
+		const valid = rewind();
+		assert.deepEqual(parseChatWebviewMessage({ ...valid, extra: 1 }), valid);
+		assert.deepEqual(parseChatWebviewMessage({ ...valid, expectedLeafId: null }), { ...valid, expectedLeafId: null }, "an empty conversation has no leaf");
+		for (const bad of [
+			{ ...valid, kind: "fork" },
+			{ ...valid, targetId: "" },
+			{ ...valid, targetId: undefined },
+			{ ...valid, expectedLeafId: 3 },
+			{ ...valid, summarize: "yes" },
+			{ ...valid, requestId: "nav-1" },
+		]) {
+			assert.equal(parseChatWebviewMessage(bad), null, JSON.stringify(bad));
+		}
+
+		const { runtime, channel } = await navigableRig();
+		const page = new RecordingPage("editor");
+		runtime.attachPage(TAB, page);
+		assert.equal(await runtime.handleMessage(TAB, rewind({ requestId: "not-a-marker-id" }), page), "refused");
+		assert.equal(await runtime.handleMessage(TAB, rewind({ expectedLeafId: "r1" }), page), "refused");
+		assert.equal(await runtime.handleMessage(TAB, rewind({ requestId: "0123456789abcdef0123456789abcd03", targetId: "r3" }), page), "refused");
+		assert.deepEqual(results(page).map(answer => answer.reason), ["bad-request-id", "stale", "target"]);
+		assert.equal(navigations(channel).length, 0);
+		runtime.dispose();
+	});
+
+	it("resends a draft too large for its route without images, counted as unavailable", async () => {
+		const images = Array.from({ length: 9 }, () => ({ type: "image", data: PNG, mimeType: "image/png" }));
+		const entries = [
+			...rows(2),
+			messageEntry("r2", "r1", { role: "user", content: [{ type: "text", text: "look" }, ...images], timestamp: 1020 } as never),
+			messageEntry("r3", "r2", assistantMessage("seen", 1030)),
+		];
+		const { runtime } = await navigableRig(entries as never);
+		const small = new RecordingPage("bridge");
+		small.refuse = message => (message.type === "omp:chat-navigate-result" && (message.draft?.images.length ?? 0) > 0 ? "too-large" : "sent");
+		const roomy = new RecordingPage("editor");
+		runtime.attachPage(TAB, small);
+		runtime.attachPage(TAB, roomy);
+
+		assert.equal((await runtime.navigate(TAB, request(), null)).status, "done");
+		assert.deepEqual(results(small).map(answer => answer.draft), [{ text: "look", images: [], unavailableImages: 9 }]);
+		assert.deepEqual(results(roomy).map(answer => [answer.draft?.images.length, answer.draft?.unavailableImages]), [[8, 1]], "at most eight images; the rest are counted");
+		runtime.dispose();
 	});
 });

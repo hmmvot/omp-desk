@@ -115,13 +115,32 @@ describe("parseChatHostMessage", () => {
 	});
 
 	it("carries only a correlated text-admission status, without trusting undeclared host prose", () => {
-		for (const status of ["accepted", "refused", "unconfirmed"]) {
+		for (const status of ["accepted", "refused", "unconfirmed", "explained"]) {
 			const message = { type: "omp:chat-send-result", epoch: EPOCH, requestId: REQUEST_ID, status };
 			assert.deepEqual(parseChatHostMessage({ ...message, reason: "untrusted details", extra: 1 }), message);
 			for (const patch of [{ requestId: "" }, { requestId: 7 }, { status: "running" }, { status: true }, { epoch: null }]) {
 				assert.equal(parseChatHostMessage({ ...message, ...patch }), null);
 			}
 		}
+	});
+
+	it("carries a Stop's hand-back of queued messages, bounded, with what could not be carried flagged", () => {
+		const message = { type: "omp:chat-abort-result", epoch: EPOCH, requestId: REQUEST_ID, status: "accepted", entries: [{ text: "steer" }, { text: "follow", images: [{ type: "image", mimeType: "image/png", data: "AA==" }] }], truncated: true };
+		assert.deepEqual(parseChatHostMessage(message), message);
+		assert.deepEqual(parseChatHostMessage({ ...message, entries: [{ text: "x", images: "nope" }] }), { ...message, entries: [{ text: "x" }], imagesDropped: true }, "an unreadable image is reported dropped, the text kept");
+		assert.deepEqual(parseChatHostMessage({ ...message, status: "refused", entries: [], truncated: undefined }), { type: "omp:chat-abort-result", epoch: EPOCH, requestId: REQUEST_ID, status: "refused", entries: [] });
+		assert.equal(parseChatHostMessage({ ...message, status: "refused" }), null, "a refused stop withdrew nothing");
+		assert.equal(parseChatHostMessage({ ...message, entries: Array.from({ length: 65 }, () => ({ text: "x" })) }), null);
+		assert.equal(parseChatHostMessage({ ...message, entries: [{ text: 7 }] }), null);
+	});
+
+	it("carries promotion results and the remembered transcript defaults", () => {
+		const result = { type: "omp:chat-queue-result", epoch: EPOCH, requestId: REQUEST_ID, purpose: "promote", results: [{ status: "removed" }, { status: "gone" }] };
+		assert.deepEqual(parseChatHostMessage(result), result);
+		assert.equal(parseChatHostMessage({ ...result, purpose: "send" }), null);
+		const preferences = { type: "omp:chat-display-preferences", epoch: EPOCH, toolCallDetail: "overview", accessibilitySupport: false, thinkingExpanded: true, toolsExpanded: false };
+		assert.deepEqual(parseChatHostMessage(preferences), preferences);
+		assert.equal(parseChatHostMessage({ ...preferences, thinkingExpanded: "yes" }), null);
 	});
 
 	it("requires a target id to withdraw a dialog", () => {

@@ -3,24 +3,31 @@ import type { KeyboardEvent, ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { isRecord } from "../../guards";
 import type { ConfigEdit, SettingsAgent, SettingsRole, SettingsScope, SettingsSnapshot } from "../../host/omp-settings-core";
+import { modelKey, selectorBase } from "../../host/settings-pick-items";
 import type { SettingsAction, SettingsMessage } from "./messages";
-import { appendLine, at, compactCount, count, disabledAgentsAfterToggle, displayValue, filteredModels, lines, perfLabel, priceLabel, providerStatus, roleChange, sameList, selectorBase, sourceLabel, text } from "./model";
+import { at, compactCount, count, disabledAgentsAfterToggle, displayValue, entryStatus, filteredModels, moveEntry, patternList, perfLabel, priceLabel, providerStatus, sameList, sourceLabel, withEntry, withoutEntry } from "./model";
 import { SETTINGS_CSS } from "./styles";
 
 declare function acquireVsCodeApi(): { postMessage(message: SettingsAction): void; setState(state: { key: string }): void };
 const vscode = acquireVsCodeApi();
 type ActionRequest<T = SettingsAction> = T extends SettingsAction ? Omit<T, "requestId"> : never;
-/** `origin` names the card whose controls sent the action; its result is shown beside them. */
-type Send = (action: ActionRequest, origin?: string) => void;
+/** `origin` names the card whose controls sent the action; its result is shown beside them. Returns the request id, or undefined while another operation runs. */
+type Send = (action: ActionRequest, origin?: string) => string | undefined;
+/** Opens a host QuickPick and resolves with the chosen value, or null when dismissed or refused. */
+type Pick = (action: ActionRequest<Extract<SettingsAction, { action: "pick-model" | "pick-chain-key" }>>, origin?: string) => Promise<string | null>;
 type Init = Extract<SettingsMessage, { type: "settings:init" }>;
 type Preview = Extract<SettingsMessage, { type: "settings:preview" }>["spec"];
 type ConfigExists = Extract<SettingsMessage, { type: "settings:snapshot" }>["configExists"];
 interface Status { readonly ok: boolean; readonly pending: boolean; readonly message: string; readonly origin?: string }
-interface SurfaceProps { snapshot: SettingsSnapshot; send: Send; revision: number }
+interface SurfaceProps { snapshot: SettingsSnapshot; send: Send; pick: Pick; revision: number; folder: string | null }
 const StatusContext = createContext<Status>({ ok: true, pending: false, message: "" });
 const PAGE = 100;
 const NAME_PATTERN = /^[a-zA-Z][\w-]*$/;
 const NAME_HINT = "Use a letter, then letters, digits, - or _.";
+const PENDING: Partial<Record<SettingsAction["action"], string>> = {
+  generate: "OMP is generating the agent specification…", refresh: "Refreshing the provider catalogue…", reload: "Reloading…", save: "Saving…", preset: "Saving…",
+  "assign-role": "Choose in the picker; the role is saved when you pick…", "pick-model": "Choose in the picker…", "pick-chain-key": "Choose in the picker…", "pick-scope": "Choose the scope in the picker…",
+};
 
 const focusLabel = (element: Element): string => element.getAttribute("aria-label") ?? element.textContent?.trim() ?? "";
 function useHost() {
@@ -31,6 +38,9 @@ function useHost() {
   const [preview, setPreview] = useState<Preview>(null);
   const [busy, setBusy] = useState(true);
   const [status, setStatus] = useState<Status>({ ok: true, pending: true, message: "Reading the installed OMP settings…" });
+  // A pick resolves on its request's result, so a follow-up action is never refused as still running.
+  const busyRef = useRef(true);
+  const picks = useRef(new Map<string, { value: string | null; resolve(value: string | null): void }>());
   const focus = useRef<{ tag: string; label: string; origin?: string } | undefined>(undefined);
   useEffect(() => {
     const receive = (event: MessageEvent<unknown>): void => {
@@ -41,7 +51,14 @@ function useHost() {
         case "settings:init": setInit(message); vscode.setState({ key: message.key }); break;
         case "settings:snapshot": setSnapshot(message.snapshot); setConfigExists(message.configExists); setRevision(value => value + 1); break;
         case "settings:preview": setPreview(message.spec); break;
-        case "settings:result": setBusy(false); setStatus(previous => ({ ok: message.ok, pending: false, message: message.message, origin: previous.origin })); break;
+        case "settings:picked": { const pending = picks.current.get(message.requestId); if (pending) pending.value = message.value; break; }
+        case "settings:result": {
+          busyRef.current = false;
+          setBusy(false); setStatus(previous => ({ ok: message.ok, pending: false, message: message.message, origin: previous.origin }));
+          const pending = picks.current.get(message.requestId);
+          if (pending) { picks.current.delete(message.requestId); pending.resolve(message.ok ? pending.value : null); }
+          break;
+        }
       }
     };
     window.addEventListener("message", receive);
@@ -58,14 +75,23 @@ function useHost() {
     (match ?? (target.origin ? document.getElementById(`status-${target.origin}`) : null))?.focus();
   }, [busy]);
   const send: Send = (action, origin) => {
-    if (busy) return;
+    if (busyRef.current) return undefined;
     const active = document.activeElement;
     focus.current = active && active !== document.body ? { tag: active.tagName, label: focusLabel(active), origin } : undefined;
+    busyRef.current = true;
     setBusy(true);
-    setStatus({ ok: true, pending: true, origin, message: action.action === "generate" ? "OMP is generating the agent specification…" : action.action === "refresh" ? "Refreshing the provider catalogue…" : action.action === "reload" ? "Reloading…" : action.action === "save" || action.action === "preset" ? "Saving…" : "Working…" });
-    vscode.postMessage({ ...action, requestId: crypto.randomUUID() });
+    setStatus({ ok: true, pending: true, origin, message: PENDING[action.action] ?? "Working…" });
+    const requestId = crypto.randomUUID();
+    vscode.postMessage({ ...action, requestId });
+    return requestId;
   };
-  return { init, snapshot, configExists, revision, preview, busy, status, send };
+  const pick: Pick = (action, origin) => {
+    const { promise, resolve } = Promise.withResolvers<string | null>();
+    const requestId = send(action, origin);
+    if (requestId === undefined) resolve(null); else picks.current.set(requestId, { value: null, resolve });
+    return promise;
+  };
+  return { init, snapshot, configExists, revision, preview, busy, status, send, pick };
 }
 /**
  * Unsaved per-item drafts, kept while the user moves between roles or agents and dropped by the next
@@ -122,8 +148,8 @@ function Panel({ id, section, children }: { id: string; section: string; childre
 }
 
 interface ListOption { readonly id: string; readonly group?: string; readonly title?: string; readonly dim?: boolean; readonly content: ReactNode }
-/** A single-tab-stop listbox: arrows, Page Up/Down, Home and End move the selection, as VS Code lists do. */
-function ListBox({ label, options, selected, onSelect }: { label: string; options: readonly ListOption[]; selected?: string; onSelect(id: string): void }) {
+/** A single-tab-stop listbox: arrows, Page Up/Down, Home and End move the selection, as VS Code lists do; Enter or a double-click activates the selected option. */
+function ListBox({ label, options, selected, onSelect, onActivate }: { label: string; options: readonly ListOption[]; selected?: string; onSelect(id: string): void; onActivate?(id: string): void }) {
   const prefix = useId();
   const box = useRef<HTMLDivElement>(null);
   const index = options.findIndex(option => option.id === selected);
@@ -138,6 +164,7 @@ function ListBox({ label, options, selected, onSelect }: { label: string; option
     else if (option.offsetTop + option.offsetHeight > list.scrollTop + list.clientHeight) list.scrollTop = option.offsetTop + option.offsetHeight - list.clientHeight;
   }, [selected]);
   const keyDown = (event: KeyboardEvent): void => {
+    if (event.key === "Enter" && onActivate && selected !== undefined) { event.preventDefault(); onActivate(selected); return; }
     const steps: Record<string, number> = { ArrowDown: 1, ArrowUp: -1, PageDown: 10, PageUp: -10, Home: -options.length, End: options.length };
     const step = steps[event.key];
     if (step === undefined || !options.length) return;
@@ -150,139 +177,169 @@ function ListBox({ label, options, selected, onSelect }: { label: string; option
     if (last && last[0] === option.group) last[1].push(option); else groups.push([option.group, [option]]);
   }
   const render = (option: ListOption) => <div key={option.id} id={optionId(option.id)} role="option" aria-selected={option.id === selected} title={option.title}
-    className={`option${option.id === selected ? " selected" : ""}${option.dim ? " dim" : ""}`} onClick={() => onSelect(option.id)}>{option.content}</div>;
+    className={`option${option.id === selected ? " selected" : ""}${option.dim ? " dim" : ""}`} onClick={() => onSelect(option.id)} onDoubleClick={onActivate && (() => onActivate(option.id))}>{option.content}</div>;
   return <div ref={box} className="listbox" role="listbox" aria-label={label} tabIndex={0} aria-activedescendant={index >= 0 ? optionId(selected!) : undefined} onKeyDown={keyDown}>
     {groups.map(([group, items], position) => group === undefined ? items.map(render)
       : <div key={`${group}:${position}`} role="group" aria-labelledby={`${prefix}-group-${position}`}><div className="group-label" id={`${prefix}-group-${position}`}>{group}</div>{items.map(render)}</div>)}
   </div>;
 }
+/**
+ * An ordered list edited without typing: Move up/down buttons or Alt+Up/Down on a focused row reorder it,
+ * Remove or Delete drops an entry. Focus stays on the moved row or the pressed control.
+ */
+function OrderedList({ label, entries, onChange, describe, empty }: { label: string; entries: readonly string[]; onChange(next: string[]): void; describe(entry: string): ReactNode; empty: string }) {
+  const controls = useRef(new Map<string, HTMLElement>());
+  const [focusKey, setFocusKey] = useState<string>();
+  useEffect(() => { if (focusKey) { controls.current.get(focusKey)?.focus(); setFocusKey(undefined); } }, [focusKey]);
+  const ref = (key: string) => (element: HTMLElement | null): void => { if (element) controls.current.set(key, element); else controls.current.delete(key); };
+  const move = (index: number, step: number, control: "row" | "up" | "down"): void => {
+    const next = moveEntry(entries, index, step);
+    if (sameList(next, entries)) return;
+    onChange(next);
+    const entry = entries[index]!; const other = index + step;
+    // At either end the pressed arrow disables itself; keep focus on the row through its other arrow.
+    setFocusKey(control === "row" ? `${entry}:row` : other === 0 || other === next.length - 1 ? `${entry}:${step < 0 ? "down" : "up"}` : `${entry}:${control}`);
+  };
+  const remove = (index: number): void => {
+    const next = withoutEntry(entries, index);
+    onChange(next);
+    setFocusKey(next.length ? `${next[Math.min(index, next.length - 1)]}:remove` : undefined);
+  };
+  const keyDown = (event: KeyboardEvent, index: number): void => {
+    if (event.target !== event.currentTarget) return;
+    if (event.altKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) { event.preventDefault(); move(index, event.key === "ArrowUp" ? -1 : 1, "row"); }
+    else if (event.key === "Delete") { event.preventDefault(); remove(index); }
+  };
+  if (!entries.length) return <p className="small muted">{empty}</p>;
+  return <ol className="ordered" aria-label={label}>{entries.map((entry, index) =>
+    <li key={entry} tabIndex={0} ref={ref(`${entry}:row`)} aria-label={`${index + 1}. ${entry}`} aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown Delete" onKeyDown={event => keyDown(event, index)}>
+      <span className="ordinal">{index + 1}</span><code className="ellipsis" title={entry}>{entry}</code><span className="small muted ellipsis grow">{describe(entry)}</span>
+      <button type="button" ref={ref(`${entry}:up`)} className="icon secondary" aria-label={`Move ${entry} up`} title="Move up (Alt+Up)" disabled={index === 0} onClick={() => move(index, -1, "up")}><Icon name="arrow-up" /></button>
+      <button type="button" ref={ref(`${entry}:down`)} className="icon secondary" aria-label={`Move ${entry} down`} title="Move down (Alt+Down)" disabled={index === entries.length - 1} onClick={() => move(index, 1, "down")}><Icon name="arrow-down" /></button>
+      <button type="button" ref={ref(`${entry}:remove`)} className="icon secondary" aria-label={`Remove ${entry}`} title="Remove (Delete)" onClick={() => remove(index)}><Icon name="close" /></button>
+    </li>)}</ol>;
+}
+function EntryStatusText({ entry, snapshot }: { entry: string; snapshot: SettingsSnapshot }) {
+  const status = entryStatus(entry, snapshot);
+  return <span className={status.ok ? "" : "warning-text"}>{status.ok ? "" : <Icon name="warning" />}{status.text}</span>;
+}
 
 function App() {
   const host = useHost();
   const kind = host.init?.kind;
+  const folder = host.init?.folder ?? null;
   const [section, setSection] = useState("roles");
   useEffect(() => setSection(kind === "agents" ? "agents" : "roles"), [kind]);
   const { snapshot } = host;
-  const folder = snapshot?.cwd.split(/[\\/]/).filter(Boolean).at(-1) ?? snapshot?.cwd;
+  const folderName = folder?.split(/[\\/]/).filter(Boolean).at(-1) ?? folder;
   const config = (scope: SettingsScope) => {
     const file = snapshot?.[scope === "global" ? "globalFile" : "projectFile"];
     return <button type="button" className="secondary" disabled={host.busy || !host.configExists[scope]} title={host.configExists[scope] ? file : `No ${scope} config exists yet (${file}); saving creates it.`}
       onClick={() => host.send({ action: "open-config", scope })}><Icon name="go-to-file" />{scope === "global" ? "Global config" : "Project config"}</button>;
   };
+  const surface = snapshot && { snapshot, send: host.send, pick: host.pick, revision: host.revision, folder };
   return <StatusContext.Provider value={host.status}><main aria-busy={host.busy}>
     {host.busy && <div className="progress" aria-hidden="true" />}
     <header className="header">
       <div><h1>{kind === "agents" ? "Agents" : kind === "models" ? "Models" : "OMP settings"}</h1>
-        {snapshot && <div className="muted small">OMP profile <strong>{snapshot.profile}</strong> · folder <span title={snapshot.cwd}>{folder}</span></div>}</div>
+        {snapshot && <div className="muted small">OMP profile <strong>{snapshot.profile}</strong> · {folder === null ? kind === "agents" ? "global config, user and bundled agents" : "global config, no project layer" : <>project folder <span title={folder}>{folderName}</span></>}</div>}</div>
       <div className="toolbar">
+        {host.init && <button type="button" className="secondary" disabled={host.busy} aria-label={`Scope: ${folder === null ? "Global" : folderName}. Change scope`} title="Show the global scope, or include one project folder's layer and agents"
+          onClick={() => host.send({ action: "pick-scope" })}><Icon name={folder === null ? "globe" : "folder"} />{folder === null ? "Global" : folderName}<Icon name="chevron-down" /></button>}
         <button type="button" className="secondary" disabled={host.busy} onClick={() => host.send({ action: "reload" })}><Icon name="refresh" />Reload</button>
-        {snapshot && <>{config("global")}{config("project")}</>}
+        {snapshot && <>{config("global")}{folder !== null && config("project")}</>}
       </div>
     </header>
     {snapshot || host.busy || host.status.ok
       ? <div role="status" className={`status small ${host.status.ok ? "muted" : "error"}`}>{host.status.origin === undefined && host.status.message}</div>
       : <div className="empty" role="alert"><Icon name="error" /><p>{host.status.message || "OMP settings could not be read."}</p><button type="button" onClick={() => host.send({ action: "reload" })}>Try again</button></div>}
-    {snapshot && kind && <>
+    {surface && kind && <>
       <details className="notice small"><summary>Saving writes OMP's own config files, which plain OMP also reads. Running sessions keep their models.</summary>
         <p>Like OMP, saving removes YAML comments and keeps unknown values. Effective values can differ from saved ones when a higher-priority config sets them. Existing subagents are not changed.</p>
-        <dl><dt>Global config</dt><dd><code>{snapshot.globalFile}</code></dd><dt>Project config</dt><dd><code>{snapshot.projectFile}</code></dd>
-          {kind === "agents" && <><dt>New user agents</dt><dd><code>{snapshot.agentDirectories.global}</code></dd><dt>New project agents</dt><dd><code>{snapshot.agentDirectories.project}</code></dd></>}</dl>
+        <dl><dt>Global config</dt><dd><code>{surface.snapshot.globalFile}</code></dd>{folder !== null && <><dt>Project config</dt><dd><code>{surface.snapshot.projectFile}</code></dd></>}
+          {kind === "agents" && <><dt>New user agents</dt><dd><code>{surface.snapshot.agentDirectories.global}</code></dd>{folder !== null && <><dt>New project agents</dt><dd><code>{surface.snapshot.agentDirectories.project}</code></dd></>}</>}</dl>
       </details>
       <Tabs items={kind === "agents" ? AGENT_SECTIONS : MODEL_SECTIONS} selected={section} onSelect={setSection} />
       <fieldset disabled={host.busy}>
         {kind === "models" ? <>
-          <Panel id="roles" section={section}><ModelsRoles snapshot={snapshot} send={host.send} revision={host.revision} init={host.init} /></Panel>
-          <Panel id="browse" section={section}><ModelBrowser snapshot={snapshot} send={host.send} revision={host.revision} /></Panel>
-          <Panel id="presets" section={section}><Presets snapshot={snapshot} send={host.send} revision={host.revision} /></Panel>
+          <Panel id="roles" section={section}><ModelsRoles {...surface} init={host.init} /></Panel>
+          <Panel id="browse" section={section}><ModelBrowser {...surface} /></Panel>
+          <Panel id="presets" section={section}><Presets {...surface} /></Panel>
         </> : <>
-          <Panel id="agents" section={section}><Agents snapshot={snapshot} send={host.send} revision={host.revision} /></Panel>
-          <Panel id="new" section={section}><NewAgent send={host.send} preview={host.preview} directories={snapshot.agentDirectories} /></Panel>
+          <Panel id="agents" section={section}><Agents {...surface} /></Panel>
+          <Panel id="new" section={section}><NewAgent send={host.send} preview={host.preview} directories={surface.snapshot.agentDirectories} folder={folder} /></Panel>
         </>}
       </fieldset>
     </>}
   </main></StatusContext.Provider>;
 }
 
-function ModelSuggestions({ snapshot, id, accepts }: { snapshot: SettingsSnapshot; id: string; accepts?: readonly string[] }) {
-  const accepted = useMemo(() => accepts ? new Set(accepts) : undefined, [accepts]);
-  return <datalist id={id}>{snapshot.models.filter(model => model.available && (!accepted || accepted.has(`${model.provider}/${model.id}`))).map(model => <option key={`${model.provider}/${model.id}`} value={`${model.provider}/${model.id}`}>{model.name}</option>)}{snapshot.roles.map(role => <option key={`role:${role.id}`} value={`@${role.id}`} />)}</datalist>;
-}
 const ROLE_GROUPS: Record<string, string> = { chat: "Chat roles", kind: "Specialized roles" };
-interface RoleDraft { readonly selector: string; readonly effort: string }
 function ModelsRoles(props: SurfaceProps & { init?: Init }) {
-  const { snapshot, revision } = props;
+  const { snapshot, send, revision, folder } = props;
   const [selected, setSelected] = useState("default");
   const [custom, setCustom] = useState("");
   const [draftRole, setDraftRole] = useState<SettingsRole>();
   const [roleError, setRoleError] = useState("");
-  const [drafts, setDraft] = useDrafts<RoleDraft>(revision);
-  const projectAllowed = snapshot.effective.modelRoleStorage === "project";
+  const projectAllowed = folder !== null && snapshot.effective.modelRoleStorage === "project";
   const [chosenScope, setScope] = useState<SettingsScope>(projectAllowed ? "project" : "global");
   const scope = projectAllowed ? chosenScope : "global";
   const roles = draftRole && !snapshot.roles.some(role => role.id === draftRole.id) ? [...snapshot.roles, draftRole] : snapshot.roles;
   const role = roles.find(role => role.id === selected) ?? roles[0];
-  const options = roles.map(item => ({ id: item.id, group: ROLE_GROUPS[item.section] ?? "Custom roles", content: <div className="option-row">
-    <strong>{item.id}</strong>{Object.keys(drafts).some(key => key.startsWith(`${item.id}:`)) && <Unsaved />}
+  const assign = (id: string, step: "model" | "thinking" = "model"): void => { send({ action: "assign-role", role: id, scope, step }, "role"); };
+  const options = roles.map(item => ({ id: item.id, group: ROLE_GROUPS[item.section] ?? "Custom roles", title: "Enter or double-click to choose a model", content: <div className="option-row">
+    <strong>{item.id}</strong>
     <span className={`ellipsis small${item.resolved ? "" : " muted"}`}>{item.resolved ? `${item.resolved}${item.thinking ? ` · ${item.thinking}` : ""}` : item.selector ? "unavailable" : "auto"}</span>
   </div> }));
   const addRole = (): void => {
     const id = custom.trim();
     if (!NAME_PATTERN.test(id)) { setRoleError(NAME_HINT); return; }
-    setDraftRole({ id, name: id, section: "custom", source: "default", accepts: snapshot.models.filter(model => model.available && model.kind === "chat").map(model => `${model.provider}/${model.id}`), defaults: [] });
+    setDraftRole({ id, name: id, section: "custom", source: "default", accepts: snapshot.models.filter(model => model.available && model.kind === "chat").map(modelKey), defaults: [] });
     setSelected(id); setCustom(""); setRoleError("");
+    assign(id);
   };
   return <>
     <div className="grid">
       <section className="card"><h2>Model roles <span className="muted small">{snapshot.roles.filter(item => item.source !== "default").length} of {snapshot.roles.length} assigned</span></h2>
-        <ListBox label="Model roles" options={options} selected={role?.id} onSelect={setSelected} />
+        <ListBox label="Model roles" options={options} selected={role?.id} onSelect={setSelected} onActivate={id => { setSelected(id); assign(id); }} />
+        <p className="small muted">Enter or double-click a role to choose its model.</p>
         <form className="add-row" onSubmit={event => { event.preventDefault(); addRole(); }}>
           <input aria-label="New custom role name" placeholder="New custom role" value={custom} onChange={event => setCustom(event.target.value)} aria-invalid={Boolean(roleError)} />
-          <button className="secondary" type="submit" disabled={!custom.trim()}><Icon name="add" />Add</button>
+          <button className="secondary" type="submit" disabled={!custom.trim()}><Icon name="add" />Add and choose model…</button>
         </form>
         {roleError && <div className="small error">{roleError}</div>}
       </section>
-      {role && <RoleEditor key={`${role.id}:${scope}`} {...props} role={role} scope={scope} projectAllowed={projectAllowed} setScope={setScope}
-        draft={drafts[`${role.id}:${scope}`]} onDraft={draft => setDraft(`${role.id}:${scope}`, draft)} />}
+      {role && <RoleEditor key={`${role.id}:${scope}`} snapshot={snapshot} role={role} scope={scope} projectAllowed={projectAllowed} setScope={setScope} send={send} assign={step => assign(role.id, step)} />}
     </div>
-    <CurrentSession init={props.init} send={props.send} />
+    <CurrentSession init={props.init} send={send} />
     <Cycle key={`cycle:${revision}`} {...props} />
     <Fallback {...props} />
   </>;
 }
-function RoleEditor({ snapshot, role, scope, projectAllowed, setScope, send, draft, onDraft }: SurfaceProps & { role: SettingsRole; scope: SettingsScope; projectAllowed: boolean; setScope(scope: SettingsScope): void; draft?: RoleDraft; onDraft(draft: RoleDraft | undefined): void }) {
+function RoleEditor({ snapshot, role, scope, projectAllowed, setScope, send, assign }: { snapshot: SettingsSnapshot; role: SettingsRole; scope: SettingsScope; projectAllowed: boolean; setScope(scope: SettingsScope): void; send: Send; assign(step: "model" | "thinking"): void }) {
   const persisted = at(snapshot[scope], ["modelRoles", role.id]);
   const persistedText = typeof persisted === "string" ? persisted : "";
-  const initial = typeof persisted === "string" ? persisted : role.selector ?? "";
-  const { selector, effort } = draft ?? { selector: initial, effort: "" };
-  const dirty = selector !== initial || effort !== "";
-  const model = snapshot.models.find(model => `${model.provider}/${model.id}` === selectorBase(selector.trim())) ?? snapshot.models.find(model => `${model.provider}/${model.id}` === role.resolved);
-  const save = (clear = false): void => send({ action: "save", scope, ...roleChange(role.id, clear ? "" : selector, effort, scope) }, "role");
+  const selector = persistedText || role.selector;
+  const model = snapshot.models.find(item => modelKey(item) === (selector ? selectorBase(selector) : role.resolved)) ?? snapshot.models.find(item => modelKey(item) === role.resolved);
+  const clear = (): void => { send({ action: "save", scope, edits: [{ path: ["modelRoles", role.id], ...(scope === "project" ? { value: null } : {}) }] }, "role"); };
   return <section className="card">
-    <h2>{role.name}{role.name !== role.id && <Badge>{role.id}</Badge>}{dirty && <Badge tone="warning">Unsaved</Badge>}</h2>
+    <h2>{role.name}{role.name !== role.id && <Badge>{role.id}</Badge>}</h2>
     <dl className="small">
-      <dt>Current model</dt><dd><code>{role.resolved ?? (role.selector ? "No available model" : "Automatic")}</code>{role.thinking && <span className="muted"> · thinking {role.thinking}</span>} <Badge>{sourceLabel(role.source)}</Badge></dd>
+      <dt>Current model</dt><dd><button type="button" className="link" title="Choose a model" onClick={() => assign("model")}><code>{role.resolved ?? (role.selector ? "No available model" : "Automatic")}</code></button>{role.thinking && <span className="muted"> · thinking {role.thinking}</span>} <Badge>{sourceLabel(role.source)}</Badge></dd>
       {role.selector && role.selector !== role.resolved && <><dt>Selector</dt><dd><code>{role.selector}</code></dd></>}
       {!role.thinking && <><dt>Thinking</dt><dd>{String(snapshot.effective.defaultThinkingLevel ?? "OMP default")} <span className="muted">(default thinking level)</span></dd></>}
       {persisted !== role.selector && <><dt>Saved in {scope} config</dt><dd>{persisted === null ? `Cleared in ${scope} config (hides lower configs)` : persistedText ? <code>{persistedText}</code> : "Not set"}</dd></>}
     </dl>
-    <form onSubmit={event => { event.preventDefault(); save(); }}>
-      {projectAllowed
-        ? <label>Save to<select aria-label="Role write scope" value={scope} onChange={event => setScope(event.target.value as SettingsScope)}><option value="project">Project config · this folder</option><option value="global">Global config · active profile</option></select></label>
-        : <p className="small muted">Saved to the global config, as OMP role storage is global.</p>}
-      <div className="field-row">
-        <label className="grow">Model<input list="role-models" aria-label={`${role.id} model selector`} value={selector} onChange={event => onDraft({ selector: event.target.value, effort })} placeholder="provider/model, @role or pattern" /></label>
-        <label>Thinking<select aria-label={`${role.id} thinking effort`} disabled={!selector.trim() || !model?.reasoning} value={effort} onChange={event => onDraft({ selector, effort: event.target.value })}>
-          <option value="">Keep suffix</option>{[...new Set(["inherit", "auto", "off", ...(model?.efforts ?? [])])].map(effort => <option key={effort} value={effort}>{effort}</option>)}</select></label>
-      </div>
-      <ModelSuggestions snapshot={snapshot} id="role-models" accepts={role.accepts} />
-      <p className="small muted">{model && !model.reasoning ? "This model has no thinking levels. " : ""}{role.id === "default" ? "Auto removes the suffix and sets the global default thinking level to auto." : "Thinking is saved as a suffix on this role's selector."}</p>
-      <div className="toolbar">
-        <button type="submit" disabled={!selector.trim() || selector.trim() === persistedText && !effort}>Save role</button>
-        {dirty && <button className="secondary" type="button" onClick={() => onDraft(undefined)}>Discard changes</button>}
-        <button className="secondary" type="button" disabled={persisted === null || persisted === undefined && scope === "global"} onClick={() => save(true)}>Clear {scope} assignment</button>
-      </div>
-      <InlineStatus origin="role" />
-    </form>
+    {projectAllowed
+      ? <label>Save to<select aria-label="Role write scope" value={scope} onChange={event => setScope(event.target.value as SettingsScope)}><option value="project">Project config · this folder</option><option value="global">Global config · active profile</option></select></label>
+      : <p className="small muted">Saved to the global config{snapshot.effective.modelRoleStorage === "project" ? ". To save project roles, choose a project folder in the scope control" : ", as OMP role storage is global"}.</p>}
+    <div className="toolbar">
+      <button type="button" onClick={() => assign("model")}><Icon name="symbol-variable" />Change model…</button>
+      <button type="button" className="secondary" disabled={!selector || !model?.reasoning} title={model && !model.reasoning ? "This model has no thinking levels" : undefined} onClick={() => assign("thinking")}><Icon name="lightbulb" />Thinking…</button>
+      <button type="button" className="secondary" disabled={persisted === null || persisted === undefined && scope === "global"} onClick={clear}>Clear {scope} assignment</button>
+    </div>
+    <p className="small muted">Picking a model saves the role at once, as OMP's <code>/models</code> does; reasoning models then offer a thinking level, where Escape keeps the role's current level. Escape in the model picker changes nothing.{role.id === "default" ? " Auto thinking on the default role sets the global default thinking level." : ""}</p>
+    <InlineStatus origin="role" />
     {role.defaults.length > 0 && <details><summary className="small">OMP's automatic candidates</summary><ol className="small plain-list">{role.defaults.map(item => <li key={item}><code>{item}</code></li>)}</ol></details>}
   </section>;
 }
@@ -295,42 +352,17 @@ function CurrentSession({ init, send }: { init?: Init; send: Send }) {
   </section>;
 }
 function Cycle({ snapshot, send }: SurfaceProps) {
-  const effective = lines(text(snapshot.effective.cycleOrder));
+  const effective = patternList(snapshot.effective.cycleOrder);
   const [order, setOrder] = useState(effective);
   const addable = snapshot.roles.map(role => role.id).filter(id => !order.includes(id));
   const [chosen, setAdd] = useState("");
   const add = addable.includes(chosen) ? chosen : addable[0] ?? "";
-  const buttons = useRef(new Map<string, HTMLButtonElement>());
-  const [focusKey, setFocusKey] = useState<string>();
-  useEffect(() => { if (focusKey) { buttons.current.get(focusKey)?.focus(); setFocusKey(undefined); } }, [focusKey]);
-  const move = (index: number, step: number): void => {
-    const next = [...order]; const other = index + step;
-    if (other < 0 || other >= next.length) return;
-    [next[index], next[other]] = [next[other]!, next[index]!];
-    setOrder(next);
-    const role = order[index]!;
-    // At either end the pressed arrow disables itself; keep focus on the row through its other arrow.
-    setFocusKey(other === 0 || other === next.length - 1 ? `${role}:${step < 0 ? "down" : "up"}` : `${role}:${step < 0 ? "up" : "down"}`);
-  };
-  const remove = (index: number): void => {
-    const next = order.filter((_, i) => i !== index);
-    setOrder(next);
-    setFocusKey(next.length ? `${next[Math.min(index, next.length - 1)]}:remove` : undefined);
-  };
-  const button = (role: string, action: string, icon: string, label: string, disabled: boolean, onClick: () => void) =>
-    <button type="button" className="icon secondary" aria-label={label} title={label} disabled={disabled} onClick={onClick}
-      ref={element => { if (element) buttons.current.set(`${role}:${action}`, element); else buttons.current.delete(`${role}:${action}`); }}><Icon name={icon} /></button>;
   return <section className="card"><h2>Model cycle order <Badge>Global</Badge>{!sameList(order, effective) && <Badge tone="warning">Unsaved</Badge>}</h2>
     <p className="small muted">OMP's model cycling steps through these roles in this order. Effective order from {sourceLabel(snapshot.provenance.cycleOrder)}.</p>
-    {order.length ? <ol className="cycle">{order.map((role, index) => <li key={role}>
-      <span className="ordinal">{index + 1}</span><strong>{role}</strong><span className="small muted ellipsis grow">{snapshot.roles.find(item => item.id === role)?.resolved ?? "auto"}</span>
-      {button(role, "up", "arrow-up", `Move ${role} up`, index === 0, () => move(index, -1))}
-      {button(role, "down", "arrow-down", `Move ${role} down`, index === order.length - 1, () => move(index, 1))}
-      {button(role, "remove", "close", `Remove ${role} from cycle`, false, () => remove(index))}
-    </li>)}</ol> : <p className="small muted">No roles in the cycle.</p>}
+    <OrderedList label="Model cycle order" entries={order} onChange={setOrder} empty="No roles in the cycle." describe={role => snapshot.roles.find(item => item.id === role)?.resolved ?? "auto"} />
     <div className="toolbar">
       <select aria-label="Role to add to cycle" value={add} disabled={!addable.length} onChange={event => setAdd(event.target.value)}>{addable.map(id => <option key={id}>{id}</option>)}</select>
-      <button type="button" className="secondary" disabled={!add} onClick={() => setOrder([...order, add])}><Icon name="add" />Add</button>
+      <button type="button" className="secondary" disabled={!add} onClick={() => setOrder(withEntry(order, add))}><Icon name="add" />Add</button>
       <span className="grow" />
       <button type="button" disabled={sameList(order, effective)} onClick={() => send({ action: "save", scope: "global", edits: [{ path: ["cycleOrder"], value: order }] }, "cycle")}>Save order</button>
       <button type="button" className="secondary" disabled={snapshot.global.cycleOrder === undefined} onClick={() => send({ action: "save", scope: "global", edits: [{ path: ["cycleOrder"] }] }, "cycle")}>Reset global order</button>
@@ -338,52 +370,57 @@ function Cycle({ snapshot, send }: SurfaceProps) {
     <InlineStatus origin="cycle" />
   </section>;
 }
-function Fallback({ snapshot, send, revision }: SurfaceProps) {
+function Fallback({ snapshot, send, pick, revision }: SurfaceProps) {
   const effective = at(snapshot.effective, ["retry", "fallbackChains"]);
   const configured = isRecord(effective) ? Object.keys(effective) : [];
   const [selected, setSelected] = useState(configured[0] ?? "");
-  const [newKey, setNewKey] = useState("");
+  // A chain created here opens its first model picker once, as OMP's "+ New fallback…" continues straight to the entry.
+  const [created, setCreated] = useState<string>();
   const keys = selected && !configured.includes(selected) ? [...configured, selected] : configured;
+  const newChain = async (): Promise<void> => {
+    const key = await pick({ action: "pick-chain-key" }, "fallback");
+    if (!key) return;
+    setSelected(key); setCreated(key);
+  };
   return <section className="card"><h2>Retry fallback chains <Badge>Global</Badge></h2>
-    <p className="small muted">When a request fails, OMP retries with the chain's models from top to bottom. A chain belongs to a role, an exact model, a whole provider (<code>provider/*</code>) or everything (<code>*</code>). Effective chains from {sourceLabel(snapshot.provenance["retry.fallbackChains"])}.</p>
+    <p className="small muted">When a request fails, OMP retries with the chain's models from top to bottom. A chain belongs to a role, an exact model or a whole provider (<code>provider/*</code>). Effective chains from {sourceLabel(snapshot.provenance["retry.fallbackChains"])}.</p>
     <div className="grid">
       <div>
         {keys.length ? <ListBox label="Fallback chains" selected={selected} onSelect={setSelected} options={keys.map(key => ({ id: key, content: <div className="option-row">
-          <span className="mono ellipsis">{key}</span><span className="small muted">{configured.includes(key) ? count(lines(text(at(snapshot.effective, ["retry", "fallbackChains", key]))).length, "model") : "new"}</span>
+          <span className="mono ellipsis">{key}</span><span className="small muted">{configured.includes(key) ? count(patternList(at(snapshot.effective, ["retry", "fallbackChains", key])).length, "model") : "new"}</span>
         </div> }))} /> : <p className="small muted">No fallback chains are configured.</p>}
-        <form className="add-row" onSubmit={event => { event.preventDefault(); setSelected(newKey.trim()); setNewKey(""); }}>
-          <input list="fallback-keys" aria-label="New fallback chain key" placeholder="Role, model, provider/* or *" value={newKey} onChange={event => setNewKey(event.target.value)} />
-          <button className="secondary" type="submit" disabled={!newKey.trim()}><Icon name="add" />New chain</button>
-        </form>
-        <datalist id="fallback-keys">{[...new Set(["*", ...snapshot.roles.map(role => role.id), ...snapshot.providers.map(provider => `${provider.id}/*`)])].filter(key => !configured.includes(key)).map(key => <option key={key}>{key}</option>)}</datalist>
+        <div className="toolbar"><button type="button" className="secondary" onClick={() => void newChain()}><Icon name="add" />New chain…</button></div>
       </div>
-      {selected ? <FallbackChain key={`${selected}:${revision}`} snapshot={snapshot} send={send} chainKey={selected} /> : <p className="small muted">Choose a chain, or create one for a role, model or provider.</p>}
+      {selected ? <FallbackChain key={`${selected}:${revision}`} snapshot={snapshot} send={send} pick={pick} chainKey={selected} startAdding={created === selected} onStarted={() => setCreated(undefined)} />
+        : <p className="small muted">Choose a chain, or create one for a role, model or provider.</p>}
     </div>
   </section>;
 }
-function FallbackChain({ snapshot, send, chainKey }: { snapshot: SettingsSnapshot; send: Send; chainKey: string }) {
+function FallbackChain({ snapshot, send, pick, chainKey, startAdding, onStarted }: { snapshot: SettingsSnapshot; send: Send; pick: Pick; chainKey: string; startAdding: boolean; onStarted(): void }) {
   const persisted = at(snapshot.global, ["retry", "fallbackChains", chainKey]);
-  const effective = text(at(snapshot.effective, ["retry", "fallbackChains", chainKey]));
+  const effective = patternList(at(snapshot.effective, ["retry", "fallbackChains", chainKey]));
   const [chain, setChain] = useState(effective);
-  const [candidate, setCandidate] = useState("");
-  const count = lines(chain).length;
-  const save = (clear: boolean): void => send({ action: "save", scope: "global", edits: [{ path: ["retry", "fallbackChains", chainKey], ...(!clear && count ? { value: lines(chain) } : {}) }] }, "fallback");
+  const add = async (): Promise<void> => {
+    const value = await pick({ action: "pick-model", purpose: "fallback-entry", exclude: chain }, "fallback");
+    if (value) setChain(current => withEntry(current, value));
+  };
+  useEffect(() => { if (startAdding) { onStarted(); void add(); } }, [startAdding]);
+  const save = (clear: boolean): void => { send({ action: "save", scope: "global", edits: [{ path: ["retry", "fallbackChains", chainKey], ...(!clear && chain.length ? { value: chain } : {}) }] }, "fallback"); };
   return <div>
-    <h3><code>{chainKey}</code>{!sameList(lines(chain), lines(effective)) && <Badge tone="warning">Unsaved</Badge>}</h3>
-    <p className="small muted">{persisted === undefined ? "Not set in the global config." : sameList(lines(text(persisted)), lines(effective)) ? "Saved in the global config." : "The global config has a different chain; a higher-priority config wins."}</p>
-    <label>Models, one per line, tried in order<textarea aria-label="Ordered fallback selectors" rows={Math.min(16, Math.max(4, count + 1))} value={chain} onChange={event => setChain(event.target.value)} /></label>
-    <form className="add-row" onSubmit={event => { event.preventDefault(); setChain(appendLine(chain, candidate)); setCandidate(""); }}>
-      <input aria-label="Model to append to fallback" list="fallback-models" value={candidate} onChange={event => setCandidate(event.target.value)} placeholder="Model to append" />
-      <button className="secondary" type="submit" disabled={!candidate.trim()}><Icon name="add" />Append</button>
-    </form>
-    <ModelSuggestions snapshot={snapshot} id="fallback-models" />
+    <h3><code>{chainKey}</code>{!sameList(chain, effective) && <Badge tone="warning">Unsaved</Badge>}</h3>
+    <p className="small muted">{persisted === undefined ? "Not set in the global config." : sameList(patternList(persisted), effective) ? "Saved in the global config." : "The global config has a different chain; a higher-priority config wins."}</p>
+    <OrderedList label={`Fallback chain for ${chainKey}, tried in order`} entries={chain} onChange={setChain} empty="No models yet. Add the first one." describe={entry => <EntryStatusText entry={entry} snapshot={snapshot} />} />
     <div className="toolbar">
-      <button type="button" disabled={sameList(lines(chain), lines(text(persisted)))} onClick={() => save(false)}>Save chain</button>
+      <button type="button" className="secondary" onClick={() => void add()}><Icon name="add" />Add model…</button>
+      <span className="grow" />
+      <button type="button" disabled={sameList(chain, patternList(persisted))} onClick={() => save(false)}>Save chain</button>
+      {!sameList(chain, effective) && <button type="button" className="secondary" onClick={() => setChain(effective)}>Discard changes</button>}
       <button type="button" className="secondary" disabled={persisted === undefined} onClick={() => save(true)}>Clear global chain</button>
     </div>
     <InlineStatus origin="fallback" />
   </div>;
 }
+
 function PresetEntry({ entry }: { entry: unknown }) {
   if (!isRecord(entry)) return <p className="small muted">Not set</p>;
   const roles = isRecord(entry.modelRoles) ? Object.entries(entry.modelRoles) : [];
@@ -491,7 +528,7 @@ function ModelBrowser({ snapshot, send }: SurfaceProps) {
     </section>
   </>;
 }
-interface AgentDraft { readonly enabled: boolean; readonly model: string; readonly prewalk: string; readonly advisor: string; readonly dirty: readonly AgentField[] }
+interface AgentDraft { readonly enabled: boolean; readonly model: readonly string[]; readonly prewalk: string; readonly advisor: string; readonly dirty: readonly AgentField[] }
 type AgentField = "enabled" | "model" | "prewalk" | "advisor";
 const AGENT_SETTINGS = { model: "agentModelOverrides", prewalk: "agentPrewalk", advisor: "agentAdvisor" } as const;
 function Agents(props: SurfaceProps) {
@@ -523,36 +560,47 @@ function Agents(props: SurfaceProps) {
     </div>
   </>;
 }
-const SWITCH_CHOICES = [["", "Inherit (definition)"], ["on", "On"], ["off", "Off"], ["custom", "Role or model…"]] as const;
-/** Prewalk/advisor values as the native hub offers them: inherit, on, off, or a role/model pattern. */
-function SwitchField({ label, value, onChange, effective }: { label: string; value: string; onChange(value: string): void; effective: ReactNode }) {
-  const trimmed = value.trim();
-  // "Role or model…" with nothing typed yet has no value of its own to derive the mode from.
-  const [picked, setPicked] = useState(false);
-  const mode = trimmed === "on" || trimmed === "off" || trimmed === "" && !picked ? trimmed : "custom";
+const SWITCH_MODES = [["inherit", "Inherit"], ["off", "Off"], ["on", "On"]] as const;
+/**
+ * Prewalk and advisor as OMP stores them: no override inherits the definition, `off`, `on` (the agent's own
+ * model, else the role default) or a role/model pattern, which turns it on with that model.
+ */
+function ModelSwitch({ label, purpose, value, onChange, pick, fallback, effective }: { label: string; purpose: "prewalk" | "advisor"; value: string; onChange(value: string): void; pick: Pick; fallback: string; effective: ReactNode }) {
+  const mode = value === "" ? "inherit" : value === "off" ? "off" : "on";
+  const choose = async (): Promise<void> => {
+    const next = await pick({ action: "pick-model", purpose, ...(mode === "on" ? { current: value } : {}) }, "agent");
+    if (next) onChange(next);
+  };
   return <div className="field">
     <div className="field-row">
-      <label>{label}<select aria-label={`${label} mode`} value={mode} onChange={event => { const next = event.target.value; setPicked(next === "custom"); onChange(next === "custom" ? (mode === "custom" ? value : "") : next); }}>
-        {SWITCH_CHOICES.map(([id, text]) => <option key={id} value={id}>{text}</option>)}</select></label>
-      {mode === "custom" && <label className="grow">Pattern<input list="agent-switches" aria-label={`${label} pattern`} value={value} onChange={event => onChange(event.target.value)} placeholder="@role or model pattern" /></label>}
+      <span className="field-title">{label}</span>
+      <div role="group" aria-label={label} className="segmented">{SWITCH_MODES.map(([id, text]) =>
+        <button key={id} type="button" aria-pressed={mode === id} className={mode === id ? "" : "secondary"} onClick={() => onChange(id === "inherit" ? "" : id === "off" ? "off" : mode === "on" ? value : "on")}>{text}</button>)}</div>
+      {mode === "on" && <>
+        <span className="small">Model: {value === "on" ? <>agent default <span className="muted">(its own model, else {fallback})</span></> : <code>{value}</code>}</span>
+        <button type="button" className="secondary" aria-label={`Choose ${label.toLowerCase()} model`} onClick={() => void choose()}><Icon name="symbol-variable" />Choose model…</button>
+      </>}
     </div>
     <p className="small muted">{effective}</p>
   </div>;
 }
-function AgentEditor({ snapshot, send, agent, draft, onDraft }: SurfaceProps & { agent: SettingsAgent; draft?: AgentDraft; onDraft(draft: AgentDraft | undefined): void }) {
+function AgentEditor({ snapshot, send, pick, agent, draft, onDraft }: SurfaceProps & { agent: SettingsAgent; draft?: AgentDraft; onDraft(draft: AgentDraft | undefined): void }) {
   const persisted = (field: keyof typeof AGENT_SETTINGS) => at(snapshot.global, ["task", AGENT_SETTINGS[field], agent.name]);
-  const current: AgentDraft = draft ?? { enabled: !agent.disabled, model: text(persisted("model")), prewalk: text(persisted("prewalk")), advisor: text(persisted("advisor")), dirty: [] };
-  const set = (field: AgentField, value: string | boolean): void => onDraft({ ...current, [field]: value, dirty: current.dirty.includes(field) ? current.dirty : [...current.dirty, field] });
-  const [candidate, setCandidate] = useState("");
-  const append = (): void => { if (candidate.trim()) { set("model", appendLine(current.model, candidate)); setCandidate(""); } };
+  const persistedSwitch = (field: "prewalk" | "advisor"): string => { const value = persisted(field); return typeof value === "string" ? value : ""; };
+  const current: AgentDraft = draft ?? { enabled: !agent.disabled, model: patternList(persisted("model")), prewalk: persistedSwitch("prewalk"), advisor: persistedSwitch("advisor"), dirty: [] };
+  const set = (field: AgentField, value: AgentDraft[AgentField]): void => onDraft({ ...current, [field]: value, dirty: current.dirty.includes(field) ? current.dirty : [...current.dirty, field] });
+  const addModel = async (): Promise<void> => {
+    const value = await pick({ action: "pick-model", purpose: "agent-override", exclude: [...current.model] }, "agent");
+    if (value) set("model", withEntry(current.model, value));
+  };
   const dirty = current.dirty.length > 0;
   const save = (): void => {
     const edits: ConfigEdit[] = [];
     if (current.dirty.includes("enabled")) edits.push({ path: ["task", "disabledAgents"], value: disabledAgentsAfterToggle(at(snapshot.global, ["task", "disabledAgents"]), agent.name, current.enabled) });
-    for (const field of ["model", "prewalk", "advisor"] as const) {
-      if (!current.dirty.includes(field)) continue;
-      const value = current[field]; const patterns = lines(value);
-      edits.push({ path: ["task", AGENT_SETTINGS[field], agent.name], ...(patterns.length ? { value: field === "model" ? patterns.length === 1 ? patterns[0] : patterns : value.trim() } : {}) });
+    // One model is stored as a string, several as OMP's ordered list.
+    if (current.dirty.includes("model")) edits.push({ path: ["task", AGENT_SETTINGS.model, agent.name], ...(current.model.length ? { value: current.model.length === 1 ? current.model[0] : [...current.model] } : {}) });
+    for (const field of ["prewalk", "advisor"] as const) {
+      if (current.dirty.includes(field)) edits.push({ path: ["task", AGENT_SETTINGS[field], agent.name], ...(current[field] ? { value: current[field] } : {}) });
     }
     send({ action: "save", scope: "global", edits }, "agent");
   };
@@ -577,22 +625,17 @@ function AgentEditor({ snapshot, send, agent, draft, onDraft }: SurfaceProps & {
       <h3>Global overrides</h3>
       <label className="check"><input type="checkbox" aria-label={`${agent.name} enabled`} checked={current.enabled} onChange={event => set("enabled", event.target.checked)} />Enabled</label>
       <p className="small muted">Saved in the global disabled list.{disabledSource && !["default", "global"].includes(disabledSource) ? ` The effective list comes from the ${sourceLabel(disabledSource).toLowerCase()}.` : ""}</p>
-      <label>Model override<textarea aria-label={`${agent.name} model override`} rows={Math.min(10, Math.max(3, lines(current.model).length + 1))} value={current.model} onChange={event => set("model", event.target.value)} placeholder="One pattern per line, tried in order; blank inherits" /></label>
-      <div className="add-row">
-        <input list="agent-patterns" aria-label="Model pattern to append" placeholder="Model or @role to append" value={candidate} onChange={event => setCandidate(event.target.value)}
-          onKeyDown={event => { if (event.key === "Enter") { event.preventDefault(); append(); } }} />
-        <button className="secondary" type="button" disabled={!candidate.trim()} onClick={append}><Icon name="add" />Append</button>
-        {clear("model", "model")}
-      </div>
-      <ModelSuggestions snapshot={snapshot} id="agent-patterns" />
+      <div className="field-head"><span className="field-title">Model override</span><span className="small muted grow">tried in order</span>{clear("model", "model")}</div>
+      <OrderedList label={`${agent.name} model override, tried in order`} entries={current.model} onChange={next => set("model", next)} empty="No override: the definition or the task role decides."
+        describe={entry => <EntryStatusText entry={entry} snapshot={snapshot} />} />
+      <div className="toolbar"><button type="button" className="secondary" onClick={() => void addModel()}><Icon name="add" />Add model or role…</button></div>
       <p className="small muted">Effective override: {agent.overrideModel ?? "none, so the definition or task role decides"}{from("agentModelOverrides", agent.overrideModel)}</p>
       <div className="field-pair">
-        <SwitchField label="Prewalk" value={current.prewalk} onChange={value => set("prewalk", value)} effective={<>Effective override: {agent.prewalkOverride ?? "none"}{from("agentPrewalk", agent.prewalkOverride)}</>} />{clear("prewalk", "prewalk")}
+        <ModelSwitch label="Prewalk" purpose="prewalk" value={current.prewalk} onChange={value => set("prewalk", value)} pick={pick} fallback="@smol" effective={<>Effective override: {agent.prewalkOverride ?? "none"}{from("agentPrewalk", agent.prewalkOverride)}</>} />{clear("prewalk", "prewalk")}
       </div>
       <div className="field-pair">
-        <SwitchField label="Advisor" value={current.advisor} onChange={value => set("advisor", value)} effective={<>Effective override: {agent.advisorOverride ?? "none"}{from("agentAdvisor", agent.advisorOverride)}</>} />{clear("advisor", "advisor")}
+        <ModelSwitch label="Advisor" purpose="advisor" value={current.advisor} onChange={value => set("advisor", value)} pick={pick} fallback="@advisor" effective={<>Effective override: {agent.advisorOverride ?? "none"}{from("agentAdvisor", agent.advisorOverride)}</>} />{clear("advisor", "advisor")}
       </div>
-      <datalist id="agent-switches">{snapshot.roles.map(role => <option key={role.id}>@{role.id}</option>)}{snapshot.models.filter(model => model.available).map(model => <option key={`${model.provider}/${model.id}`}>{model.provider}/{model.id}</option>)}</datalist>
       <div className="toolbar"><button type="submit" disabled={!dirty}>Save overrides</button>{dirty && <button type="button" className="secondary" onClick={() => onDraft(undefined)}>Discard changes</button>}</div>
       <InlineStatus origin="agent" />
     </form>
@@ -604,15 +647,19 @@ function AgentEditor({ snapshot, send, agent, draft, onDraft }: SurfaceProps & {
     </details>
   </section>;
 }
-function NewAgent({ send, preview, directories }: { send: Send; preview: Preview; directories: SettingsSnapshot["agentDirectories"] }) {
-  const [description, setDescription] = useState(""); const [scope, setScope] = useState<SettingsScope>("project");
+function NewAgent({ send, preview, directories, folder }: { send: Send; preview: Preview; directories: SettingsSnapshot["agentDirectories"]; folder: string | null }) {
+  const [description, setDescription] = useState(""); const [chosenScope, setScope] = useState<SettingsScope>(folder === null ? "global" : "project");
+  // The global scope has no project folder to create agents in.
+  const scope = folder === null ? "global" : chosenScope;
   const generate = (): void => { if (description.trim()) send({ action: "generate", description }, "new-agent"); };
   return <section className="card"><h2>Generate a new agent</h2>
     <p className="small muted">Generating calls your configured provider with OMP's architect prompts, records usage like OMP and may refresh catalogues or store rotated credentials through OMP. It creates no history session. Nothing is sent until you choose Generate.</p>
     <form onSubmit={event => { event.preventDefault(); generate(); }}>
       <label>Describe the agent<textarea className="prose" aria-label="Agent creation request" maxLength={32_000} value={description} onChange={event => setDescription(event.target.value)}
         onKeyDown={event => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); generate(); } }} placeholder="What should this agent specialize in, and when should it be used?" /></label>
-      <label>Destination<select aria-label="New agent destination" value={scope} onChange={event => setScope(event.target.value as SettingsScope)}><option value="project">Project · this folder</option><option value="global">User · active OMP profile</option></select></label>
+      {folder === null
+        ? <p className="small muted">Destination: user agents of the active OMP profile. Choose a project folder in the scope control to create a project agent.</p>
+        : <label>Destination<select aria-label="New agent destination" value={scope} onChange={event => setScope(event.target.value as SettingsScope)}><option value="project">Project · this folder</option><option value="global">User · active OMP profile</option></select></label>}
       <p className="small muted">Creates a Markdown file in <code>{directories[scope]}</code>. Existing files are never overwritten.{scope === "project" ? " A new .omp/agents here can shadow an ancestor project's agents, as in OMP." : ""}</p>
       <div className="toolbar"><button className={preview ? "secondary" : ""} disabled={!description.trim()} type="submit"><Icon name="sparkle" />{preview ? "Regenerate" : "Generate specification"}</button><span className="small muted">Ctrl+Enter</span></div>
       <InlineStatus origin="new-agent" />

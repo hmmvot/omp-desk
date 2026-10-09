@@ -75,6 +75,7 @@ describe("the queue-removal messages", () => {
 	it("accepts a removal naming each message by queue and exact text", () => {
 		assert.deepEqual(parseChatWebviewMessage({ ...base, extra: 1 }), base);
 		assert.deepEqual(parseChatWebviewMessage({ ...base, purpose: "cancel" })?.type, "omp:chat-queue-remove");
+		assert.deepEqual(parseChatWebviewMessage({ ...base, purpose: "promote" }), { ...base, purpose: "promote" }, "Send now promotes by the same exact reference");
 	});
 
 	it("refuses a removal that names nothing, no queue, a wrong purpose, no epoch or too much", () => {

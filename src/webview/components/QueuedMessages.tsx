@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { ChatModel } from "../../chat/model";
-import type { ChatQueuedRef } from "../chat-messages";
+import type { ChatQueuePurpose, ChatQueuedRef } from "../chat-messages";
 import type { ChatClient } from "../lib/chat-client";
 import { chatWritable } from "../lib/chat-client";
 import { offerQueuedForEditing } from "../lib/queue-restore";
@@ -17,7 +17,8 @@ const NOT_WRITABLE = "This conversation is not accepting input right now.";
 
 /**
  * The queued-messages row, directly above the composer in the bottom block: OMP's queue readback, one line
- * per pending message (steering, then follow-up), each with Edit and Remove, and Edit all in the header.
+ * per pending message (steering, then follow-up), each with Edit and Remove — a follow-up during a turn also
+ * with Send now, which promotes it to steering — and Edit all in the header.
  *
  * It lists only what the host read back from OMP (`get_state.queuedMessages`, `queue_update`) and changes
  * the queue only through {@link ChatClient.removeQueued}, whose per-item answer decides what the row reports:
@@ -44,7 +45,7 @@ export function QueuedMessages({ client, model }: { client: ChatClient; model: C
 	const unlisted = model.state?.queuedMessages?.unlisted ?? 0;
 
 	const run = useCallback(
-		async (purpose: "cancel" | "edit", items: readonly ChatQueuedRef[]): Promise<void> => {
+		async (purpose: ChatQueuePurpose, items: readonly ChatQueuedRef[]): Promise<void> => {
 			if (busyRef.current || items.length === 0) return;
 			busyRef.current = true;
 			setBusy(true);
@@ -88,6 +89,11 @@ export function QueuedMessages({ client, model }: { client: ChatClient; model: C
 						<li key={`${row.queue}:${index}:${row.text}`} className={`omp-queue-item omp-queue-item--${row.queue}`}>
 							{model.state?.queuedMessages?.steering.length !== 0 && <span className="omp-queue-kind" title={row.queue === "steering" ? "Steering: injected into the running turn" : "Follow-up: sent after the turn ends"}>{row.label}</span>}
 							<span className="omp-queue-text" title={row.title}>{row.preview}</span>
+							{row.queue === "followUp" && model.working && (
+								<button type="button" className="omp-queue-action omp-queue-promote" disabled={disabled} aria-label={`Send now: ${row.preview}`} title={why ?? "Send now: deliver it as steering, before the agent's next step"} onClick={() => void run("promote", refs([row]))}>
+									<span className="codicon codicon-arrow-up" aria-hidden="true" />
+								</button>
+							)}
 							<button type="button" className="omp-queue-action omp-queue-edit" disabled={disabled} aria-label={`Edit queued ${row.label.toLowerCase()} message: ${row.preview}`} title={why ?? "Edit: move it into the composer"} onClick={() => void run("edit", refs([row]))}>
 								<span className="codicon codicon-edit" aria-hidden="true" />
 							</button>

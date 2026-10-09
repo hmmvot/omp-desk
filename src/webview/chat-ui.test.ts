@@ -12,6 +12,9 @@ import { build } from "esbuild";
 import type * as vscode from "vscode";
 import { createGuestHtml, createShellHtml } from "../host/guest-webview.ts";
 import { desktopToastXml } from "../host/desktop-notifications.ts";
+import type { ChatEntry } from "../chat/messages.ts";
+import { rewindPreview } from "../chat/rewind.ts";
+import { REWIND_ARGUMENTS_SENTENCE } from "../host/rpc/protocol.ts";
 
 const browserPath = [process.env.OMP_TEST_CHROMIUM,
 	"C:/Program Files/Google/Chrome/Application/chrome.exe",
@@ -3451,6 +3454,433 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.equal((await sentOpen()).length, 6);
 			assert.ok((await sentOpen()).every(message => /^https:\/\//.test(message.target)), "no disallowed scheme is ever sent");
 			assert.equal(await ui.evaluate<string>("location.href"), href, "the page never navigated itself");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("code blocks and the user's own messages copy their exact source and report clipboard failure", async () => {
+			await reset("quick-copy");
+			await ui.evaluate(`Object.defineProperty(navigator,'clipboard',{configurable:true,value:{async writeText(text){window.copied=text}}});
+			 const row=(id,message)=>({type:'message',id,parentId:null,timestamp:'2026-10-01T00:00:00.000Z',message});
+			 window.ui.push({entries:[row('user',{role:'user',timestamp:1,content:'Explain **this**\\nplease'}),
+			  row('reply',{role:'assistant',model:'m',timestamp:2,stopReason:'stop',content:[{type:'text',text:'Run:\\n\\n\`\`\`ts\\nconst a = 1;\\n  const b = a;\\n\`\`\`\\n\\nDone.'}]})],durableCount:2,working:false,settled:true})`);
+			await ui.wait("document.querySelector('.omp-code-copy') && document.querySelector('.omp-row-actions .omp-copy-button')");
+			await ui.evaluate("document.querySelector('.omp-code-copy').click()");
+			await ui.wait("window.copied!==undefined");
+			assert.equal(await ui.evaluate("window.copied"), "const a = 1;\n  const b = a;", "the code only: no fences, no language, indentation kept");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-code-copy [role=status]').textContent"), "Copied");
+			await ui.evaluate("window.copied=undefined;document.querySelector('.omp-row-actions .omp-copy-button').click()");
+			await ui.wait("window.copied!==undefined");
+			assert.equal(await ui.evaluate("window.copied"), "Explain **this**\nplease", "the prompt as sent, not its rendering");
+			await ui.evaluate("navigator.clipboard.writeText=async()=>{throw new Error('Denied')};document.querySelector('.omp-code-copy').click()");
+			await ui.wait("document.querySelector('.omp-code-copy [role=status]')?.textContent==='Copy failed'");
+			assert.equal(await ui.evaluate("window.sent.filter(message=>/^omp:chat-(prompt|steer|follow-up)$/.test(message.type)).length"), 0);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("Retry appears only on a failed or aborted last reply while idle, and re-runs it through OMP's /retry", async () => {
+			await reset("quick-retry");
+			await ui.evaluate(`window.row=(id,message)=>({type:'message',id,parentId:null,timestamp:'2026-10-01T00:00:00.000Z',message});
+			 window.failed=[window.row('u1',{role:'user',timestamp:1,content:'Do it'}),window.row('a1',{role:'assistant',model:'m',timestamp:2,stopReason:'error',errorMessage:'Provider overloaded',content:[]})];
+			 window.ui.push({entries:window.failed,durableCount:2,working:false,settled:true})`);
+			await ui.wait("document.querySelector('.omp-retry-turn')");
+			assert.match(await ui.evaluate<string>("document.querySelector('.omp-error').textContent"), /Provider overloaded/);
+			await ui.evaluate("document.querySelector('.omp-retry-turn').click()");
+			await ui.wait("window.ui.sends().length===1");
+			assert.deepEqual(await ui.evaluate("(({type,text})=>({type,text}))(window.ui.sends()[0])"), { type: "omp:chat-prompt", text: "/retry" });
+			await ui.evaluate("window.ui.push({working:true,settled:false})");
+			await ui.wait("!document.querySelector('.omp-retry-turn')");
+			await ui.evaluate("window.ui.push({working:false,settled:true,entries:[...window.failed,window.row('u2',{role:'user',timestamp:3,content:'Something else'})],durableCount:3})");
+			await ui.wait("document.querySelector('.omp-transcript').textContent.includes('Something else')");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-retry-turn')"), null, "a newer prompt leaves nothing to retry");
+			await ui.evaluate("window.ui.push({entries:[window.failed[0],window.row('a1',{role:'assistant',model:'m',timestamp:2,stopReason:'stop',content:[{type:'text',text:'Fine'}]})],durableCount:2})");
+			await ui.wait("document.querySelector('.omp-transcript').textContent.includes('Fine')");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-retry-turn')"), null, "a completed reply offers no retry");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("Up and Down on an empty draft walk the conversation's prompts and Down past the newest restores the draft", async () => {
+			await reset("quick-history");
+			await ui.evaluate(`const row=(id,message)=>({type:'message',id,parentId:null,timestamp:'2026-10-01T00:00:00.000Z',message});
+			 window.ui.push({entries:[row('u1',{role:'user',timestamp:1,content:'first prompt'}),row('a1',{role:'assistant',model:'m',timestamp:2,stopReason:'stop',content:[{type:'text',text:'ok'}]}),
+			  row('u2',{role:'user',timestamp:3,content:'second prompt'}),row('a2',{role:'assistant',model:'m',timestamp:4,stopReason:'stop',content:[{type:'text',text:'ok'}]})],durableCount:4,working:false,settled:true});
+			 document.querySelector('.omp-composer textarea').focus()`);
+			await ui.wait("document.querySelector('.omp-transcript').textContent.includes('second prompt')");
+			await press("ArrowUp", "ArrowUp", 38);
+			await ui.wait("document.querySelector('.omp-composer textarea').value==='second prompt'");
+			await press("ArrowUp", "ArrowUp", 38);
+			await ui.wait("document.querySelector('.omp-composer textarea').value==='first prompt'");
+			await press("ArrowUp", "ArrowUp", 38);
+			assert.equal(await draftValue(), "first prompt", "the oldest prompt is the end of the walk");
+			await press("ArrowDown", "ArrowDown", 40);
+			await ui.wait("document.querySelector('.omp-composer textarea').value==='second prompt'");
+			await press("ArrowDown", "ArrowDown", 40);
+			await ui.wait("document.querySelector('.omp-composer textarea').value===''");
+			await ui.call("Input.insertText", { text: "typed draft" });
+			await press("ArrowUp", "ArrowUp", 38);
+			assert.equal(await draftValue(), "typed draft", "a typed draft is never replaced");
+			assert.equal(await ui.evaluate("window.ui.sends().length"), 0);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("Stop hands the still-queued messages back into the draft, after what is typed, and says when some could not come back", async () => {
+			await reset("quick-stop-restore");
+			await ui.evaluate("window.ui.push({working:true,settled:false,state:{...window.ui.current().state,isStreaming:true}});document.querySelector('.omp-composer textarea').focus()");
+			await ui.wait("document.querySelector('[aria-label=\"Stop the running turn\"]')");
+			await ui.call("Input.insertText", { text: "typed" });
+			await ui.evaluate("document.querySelector('[aria-label=\"Stop the running turn\"]').click()");
+			await ui.wait("window.sent.some(message=>message.type==='omp:chat-abort')");
+			await ui.evaluate(`const abort=window.sent.find(message=>message.type==='omp:chat-abort');
+			 window.ui.receive({type:'omp:chat-abort-result',epoch:window.ui.current().epoch,requestId:abort.requestId,status:'accepted',entries:[{text:'queued steer'},{text:'queued follow-up'}],truncated:true})`);
+			await ui.wait("document.querySelector('.omp-composer textarea').value.includes('queued follow-up')");
+			const restored = await draftValue();
+			assert.ok(restored.startsWith("typed") && restored.indexOf("queued steer") < restored.indexOf("queued follow-up"), restored);
+			await ui.wait("document.querySelector('.omp-attach-error')?.textContent.includes('could not hand back every queued message')");
+			assert.equal(await ui.evaluate("window.ui.sends().length"), 0, "restored messages are not sent");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("extension widgets render at their placement as plain text, and an info or warning notice is dismissible", async () => {
+			await reset("quick-extension-surfaces");
+			const frame = (value: Record<string, unknown>) => ui.evaluate(`window.ui.receive({type:'omp:chat-event',epoch:window.ui.current().epoch,frame:${JSON.stringify(value)}})`);
+			await frame({ type: "ui_widget", key: "build", lines: ["Build: <b>green</b>", "2 warnings"] });
+			await frame({ type: "ui_widget", key: "hint", lines: ["below the editor"], placement: "belowEditor" });
+			await ui.wait("document.querySelectorAll('.omp-extension-widget').length===2");
+			const placed = await ui.evaluate<{ above: string[]; below: string[]; markup: number; aboveFirst: boolean }>(`(()=>{
+			 const above=document.querySelector('.omp-extension-widgets--aboveEditor'),below=document.querySelector('.omp-extension-widgets--belowEditor'),input=document.querySelector('.omp-composer textarea');
+			 return {above:[...above.querySelectorAll('.omp-extension-widget-line')].map(node=>node.textContent),below:[...below.querySelectorAll('.omp-extension-widget-line')].map(node=>node.textContent),
+			  markup:above.querySelectorAll('b').length,aboveFirst:Boolean(above.compareDocumentPosition(input)&Node.DOCUMENT_POSITION_FOLLOWING)&&Boolean(input.compareDocumentPosition(below)&Node.DOCUMENT_POSITION_FOLLOWING)};
+			})()`);
+			assert.deepEqual(placed, { above: ["Build: <b>green</b>", "2 warnings"], below: ["below the editor"], markup: 0, aboveFirst: true });
+			await frame({ type: "ui_widget", key: "build", lines: null });
+			await ui.wait("document.querySelectorAll('.omp-extension-widget').length===1");
+			await frame({ type: "ui_notify", level: "warning", message: "Index is stale" });
+			await ui.wait("document.querySelector('.omp-extension-notice--warning')");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-extension-notice-text').textContent"), "Index is stale");
+			await ui.evaluate("document.querySelector('.omp-extension-notice [aria-label=\"Dismiss notice\"]').click()");
+			await ui.wait("!document.querySelector('.omp-extension-notice')");
+			await frame({ type: "ui_notify", level: "info", message: "Index rebuilt" });
+			await ui.wait("document.querySelector('.omp-extension-notice--info .omp-extension-notice-text')?.textContent==='Index rebuilt'");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("Alt+click on the model or thinking level cycles through the host, and Compact in the context popover asks the host", async () => {
+			await reset("quick-footer-actions");
+			const commands = () => ui.evaluate<string[]>("window.sent.filter(message=>message.type==='omp:chat-command').map(message=>message.command)");
+			const altClick = async (selector: string) => {
+				const box = await ui.evaluate<{ x: number; y: number }>(`(()=>{const rect=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();return{x:rect.left+rect.width/2,y:rect.top+rect.height/2}})()`);
+				await ui.call("Input.dispatchMouseEvent", { type: "mousePressed", ...box, button: "left", clickCount: 1, modifiers: 1 });
+				await ui.call("Input.dispatchMouseEvent", { type: "mouseReleased", ...box, button: "left", clickCount: 1, modifiers: 1 });
+			};
+			const pickerRequests = await ui.evaluate<number>("window.ui.requests().length");
+			await altClick(".omp-footer-trigger:not(.omp-footer-trigger--level)");
+			await altClick(".omp-footer-trigger--level");
+			assert.deepEqual(await commands(), ["cycle-model", "cycle-thinking"]);
+			assert.equal(await ui.evaluate("window.ui.requests().length"), pickerRequests, "Alt+click opens no picker");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-context-popover')"), null);
+			await ui.evaluate("document.querySelector('.omp-context-trigger').focus()");
+			await ui.wait("document.querySelector('.omp-context-compact')");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-context-compact').disabled"), false);
+			await ui.evaluate("document.querySelector('.omp-context-compact').click()");
+			assert.deepEqual(await commands(), ["cycle-model", "cycle-thinking", "compact"]);
+			await ui.wait("!document.querySelector('.omp-context-popover')");
+			await ui.evaluate("document.querySelector('.omp-composer textarea').focus();window.ui.push({working:true,settled:false})");
+			await ui.wait("document.querySelector('[aria-label=\"Stop the running turn\"]')");
+			await ui.evaluate("document.querySelector('.omp-context-trigger').focus()");
+			await ui.wait("document.querySelector('.omp-context-compact')");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-context-compact').disabled"), true, "no compaction while a turn runs");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-context-compact').title"), "Compact after the running turn ends.");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("the host's thinking and tool defaults open or close every block once, and a block changed afterwards keeps its own state", async () => {
+			await reset("quick-transcript-defaults");
+			const prefs = (thinkingExpanded: boolean, toolsExpanded: boolean) => ui.evaluate(`window.ui.receive({type:'omp:chat-display-preferences',epoch:window.ui.current().epoch,toolCallDetail:'overview',accessibilitySupport:false,thinkingExpanded:${thinkingExpanded},toolsExpanded:${toolsExpanded}})`);
+			await ui.evaluate(`const row=(id,message)=>({type:'message',id,parentId:null,timestamp:'2026-10-01T00:00:00.000Z',message});
+			 window.ui.push({entries:[row('u1',{role:'user',timestamp:1,content:'Look'}),
+			  row('a1',{role:'assistant',model:'m',timestamp:2,stopReason:'toolUse',content:[{type:'thinking',thinking:'Private chain'},{type:'toolCall',id:'only-read',name:'read',arguments:{path:'src/a.ts'}}]}),
+			  row('r1',{role:'toolResult',toolCallId:'only-read',toolName:'read',timestamp:3,isError:false,content:[{type:'text',text:'file body'}]}),
+			  row('a2',{role:'assistant',model:'m',timestamp:4,stopReason:'stop',content:[{type:'text',text:'Read it'}]})],durableCount:4,working:false,settled:true})`);
+			await ui.wait("document.querySelector('.omp-thinking') && document.querySelector('[data-tool-name=\"read\"] .omp-tool-head')");
+			const facts = () => ui.evaluate<{ thinking: boolean; tool: string | null }>("({thinking:document.querySelector('.omp-thinking').open,tool:document.querySelector('[data-tool-name=\"read\"] .omp-tool-head').getAttribute('aria-expanded')})");
+			assert.deepEqual(await facts(), { thinking: false, tool: "false" }, "closed and collapsed by default");
+			await prefs(true, false);
+			await ui.wait("document.querySelector('.omp-thinking').open");
+			assert.equal((await facts()).tool, "false", "the thinking default leaves tools alone");
+			await prefs(true, true);
+			await ui.wait("document.querySelector('[data-tool-name=\"read\"] .omp-tool-head').getAttribute('aria-expanded')==='true'");
+			await ui.evaluate("document.querySelector('[data-tool-name=\"read\"] .omp-tool-head').click()");
+			await ui.wait("document.querySelector('[data-tool-name=\"read\"] .omp-tool-head').getAttribute('aria-expanded')==='false'");
+			await ui.evaluate("document.querySelector('.omp-thinking').open=false");
+			await prefs(true, true);
+			assert.deepEqual(await facts(), { thinking: false, tool: "false" }, "an unchanged default does not undo the user's own choice");
+			await prefs(false, false);
+			await prefs(true, true);
+			await ui.wait("document.querySelector('.omp-thinking').open && document.querySelector('[data-tool-name=\"read\"] .omp-tool-head').getAttribute('aria-expanded')==='true'");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		// Rewind (ADR-0051): two turns; the second edits a file and runs a command, so its preview has consequences.
+		const rewindAt = (n: number): string => new Date(Date.UTC(2026, 9, 9, 10, 0, n)).toISOString();
+		const rewindMessage = (id: string, parentId: string | null, n: number, message: Record<string, unknown>) => ({ type: "message", id, parentId, timestamp: rewindAt(n), message: { timestamp: n, ...message } });
+		const rewindReply = (id: string, parentId: string, n: number, text: string) => rewindMessage(id, parentId, n, { role: "assistant", model: "m", stopReason: "stop", content: [{ type: "text", text }] });
+		const rewindCall = (id: string, parentId: string, n: number, callId: string, name: string, args: Record<string, unknown>) =>
+			rewindMessage(id, parentId, n, { role: "assistant", model: "m", stopReason: "toolUse", content: [{ type: "toolCall", id: callId, name, arguments: args }] });
+		const rewindResult = (id: string, parentId: string, n: number, callId: string, name: string) =>
+			rewindMessage(id, parentId, n, { role: "toolResult", toolCallId: callId, toolName: name, isError: false, content: [{ type: "text", text: "ok" }] });
+		const rewindRows = [
+			rewindMessage("u1", null, 1, { role: "user", content: "first prompt\nwith a second line" }),
+			rewindReply("a1", "u1", 2, "First answer"),
+			rewindMessage("u2", "a1", 3, { role: "user", content: "fix the parser" }),
+			rewindCall("c1", "u2", 4, "edit-1", "edit", { path: "src/parser.ts" }),
+			rewindResult("r1", "c1", 5, "edit-1", "edit"),
+			rewindCall("c2", "r1", 6, "bash-1", "bash", { command: "npm test" }),
+			rewindResult("r2", "c2", 7, "bash-1", "bash"),
+			rewindReply("a2", "r2", 8, "Second answer"),
+		];
+		/** The catalog entry the host-control module registers; without it the page says Rewind is unsupported. */
+		const navigateCatalog = [{ name: "omp-desk-navigate", source: "extension", description: "OMP Desk navigation" }];
+		const pushRewind = (patch: Record<string, unknown> = {}): Promise<unknown> => ui.evaluate(`(()=>{
+		 window.rewindRow=text=>[...document.querySelectorAll('.omp-transcript .omp-row')].filter(row=>row.textContent.includes(text)).at(-1);
+		 window.rewindState=text=>{const row=window.rewindRow(text);return row.classList.contains('omp-row--rewind-selected')?'selected':row.classList.contains('omp-row--rewind-dimmed')?'dimmed':''};
+		 window.ui.push(${JSON.stringify({ entries: rewindRows, durableCount: rewindRows.length, leafId: "a2", branches: [], commands: navigateCatalog, working: false, settled: true, ...patch })});
+		})()`);
+		type SentNavigation = { type: string; requestId: string; kind: string; targetId: string; expectedLeafId: string | null; summarize: boolean };
+		const navigations = (): Promise<SentNavigation[]> => ui.evaluate("window.sent.filter(message=>message.type==='omp:chat-navigate')");
+		const answerNavigation = (answer: Record<string, unknown>): Promise<unknown> => ui.evaluate(`(()=>{
+		 const request=window.sent.filter(message=>message.type==='omp:chat-navigate').at(-1);
+		 window.ui.receive({type:'omp:chat-navigate-result',requestId:request.requestId,...${JSON.stringify(answer)}});
+		})()`);
+		const pickedPreview = (): Promise<string | null> => ui.evaluate("document.querySelector('.omp-rewind-bar--picking .omp-rewind-target')?.textContent ?? null");
+		const barFocused = "document.activeElement?.classList.contains('omp-rewind-bar--picking')";
+		const startFromRow = async (index: number): Promise<void> => {
+			await ui.evaluate(`document.querySelectorAll('[aria-label="Rewind to here"]')[${index}].click()`);
+			await ui.wait(barFocused);
+		};
+
+		await t.test("Rewind to here enters picking: the bar previews what leaves the branch, later rows dim, keys move, Enter/Shift+Enter/summarize send and Esc cancels", async () => {
+			await reset("rewind-picking");
+			await pushRewind();
+			await ui.wait("document.querySelectorAll('[aria-label=\"Rewind to here\"]').length===2");
+			assert.deepEqual(await ui.evaluate("[...document.querySelectorAll('[aria-label=\"Rewind to here\"]')].map(button=>button.closest('.omp-row').classList.contains('omp-row--user'))"), [true, true], "only the user's prompts offer it");
+			// The action sits in the row's hover actions: hidden until the pointer is over the prompt.
+			const actionsOpacity = async (): Promise<string> => {
+				await settleFrames();
+				return ui.evaluate("getComputedStyle(window.rewindRow('fix the parser').querySelector('.omp-row-actions')).opacity");
+			};
+			await ui.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: 1, y: 1 });
+			assert.equal(await actionsOpacity(), "0");
+			const rowBox = await ui.evaluate<{ x: number; y: number }>("(()=>{const row=window.rewindRow('fix the parser');row.scrollIntoView({block:'center'});const r=row.getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})()");
+			await ui.call("Input.dispatchMouseEvent", { type: "mouseMoved", ...rowBox });
+			assert.equal(await actionsOpacity(), "1", "hovering the prompt shows its actions");
+			const buttonBox = await ui.evaluate<{ x: number; y: number }>("(()=>{const r=window.rewindRow('fix the parser').querySelector('[aria-label=\"Rewind to here\"]').getBoundingClientRect();return{x:r.left+r.width/2,y:r.top+r.height/2}})()");
+			await ui.call("Input.dispatchMouseEvent", { type: "mouseMoved", ...buttonBox });
+			await ui.call("Input.dispatchMouseEvent", { type: "mousePressed", ...buttonBox, button: "left", clickCount: 1 });
+			await ui.call("Input.dispatchMouseEvent", { type: "mouseReleased", ...buttonBox, button: "left", clickCount: 1 });
+			await ui.wait(`document.querySelector('.omp-rewind-bar--picking') && ${barFocused}`);
+			const leaving = (id: string): number => rewindPreview(rewindRows as unknown as ChatEntry[], id)!.messages;
+			assert.equal(await ui.evaluate("document.querySelector('.omp-rewind-title').textContent"), `Rewind to: fix the parser · ${leaving("u2")} messages leave this branch`);
+			assert.equal(await ui.evaluate("document.querySelector('.omp-rewind-files').textContent"), "Files changed after this point stay as they are: src/parser.ts · 1 command ran after it");
+			const states = (): Promise<Record<string, string>> => ui.evaluate("Object.fromEntries(['first prompt','First answer','fix the parser','Second answer'].map(text=>[text,window.rewindState(text)]))");
+			assert.deepEqual(await states(), { "first prompt": "", "First answer": "", "fix the parser": "selected", "Second answer": "dimmed" });
+			assert.equal(await ui.evaluate("window.rewindRow('fix the parser').getAttribute('aria-current')"), "true");
+			assert.equal(await ui.evaluate("getComputedStyle(window.rewindRow('Second answer')).opacity"), "0.45");
+			// The bar owns the keyboard while picking.
+			await press("ArrowUp", "ArrowUp", 38);
+			await ui.wait("document.querySelector('.omp-rewind-target').textContent==='first prompt'");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-rewind-title').textContent"), `Rewind to: first prompt · ${leaving("u1")} messages leave this branch`);
+			assert.deepEqual(await states(), { "first prompt": "selected", "First answer": "dimmed", "fix the parser": "dimmed", "Second answer": "dimmed" });
+			await press("End", "End", 35);
+			await ui.wait("document.querySelector('.omp-rewind-target').textContent==='fix the parser'");
+			await press("Home", "Home", 36);
+			await ui.wait("document.querySelector('.omp-rewind-target').textContent==='first prompt'");
+			await press("ArrowDown", "ArrowDown", 40);
+			await ui.wait("document.querySelector('.omp-rewind-target').textContent==='fix the parser'");
+			await press("ArrowDown", "ArrowDown", 40);
+			assert.equal(await pickedPreview(), "fix the parser", "the newest prompt is the end of the list");
+			assert.equal(await ui.evaluate("window.ui.sends().length"), 0, "moving sends nothing");
+			assert.deepEqual(await navigations(), []);
+			// Enter rewinds against the leaf the page saw.
+			await press("Enter", "Enter", 13);
+			await ui.wait("window.sent.some(message=>message.type==='omp:chat-navigate')");
+			const [plain] = await navigations();
+			assert.match(plain!.requestId, /^[0-9a-f]{32}$/);
+			assert.deepEqual({ ...plain, requestId: "" }, { type: "omp:chat-navigate", requestId: "", kind: "rewind", targetId: "u2", expectedLeafId: "a2", summarize: false });
+			await ui.wait("document.querySelector('.omp-rewind-bar[role=status]')?.textContent==='Rewinding…'");
+			await answerNavigation({ status: "refused", reason: "stale" });
+			await ui.wait("document.querySelector('.omp-rewind-bar--notice')?.textContent.includes('The conversation changed meanwhile. Pick the message again.')");
+			await ui.evaluate("document.querySelector('[aria-label=\"Dismiss rewind notice\"]').click()");
+			await ui.wait("!document.querySelector('.omp-rewind-bar')");
+			// Shift+Enter keeps a summary of the abandoned messages.
+			await startFromRow(0);
+			assert.equal(await pickedPreview(), "first prompt");
+			await press("Enter", "Enter", 13, { modifiers: 8 });
+			await ui.wait("window.sent.filter(message=>message.type==='omp:chat-navigate').length===2");
+			assert.deepEqual((await navigations())[1], { ...(await navigations())[1]!, kind: "rewind", targetId: "u1", expectedLeafId: "a2", summarize: true });
+			await ui.wait("document.querySelector('.omp-rewind-bar[role=status]')?.textContent==='Rewinding… Summarizing the abandoned branch can take a while.'");
+			await answerNavigation({ status: "refused", reason: "unchanged" });
+			await ui.wait("document.querySelector('.omp-rewind-bar--notice')");
+			// So does the button.
+			await startFromRow(1);
+			await ui.evaluate("[...document.querySelectorAll('.omp-rewind-actions button')].find(button=>button.textContent==='Rewind & summarize').click()");
+			await ui.wait("window.sent.filter(message=>message.type==='omp:chat-navigate').length===3");
+			assert.deepEqual((await navigations())[2], { ...(await navigations())[2]!, kind: "rewind", targetId: "u2", expectedLeafId: "a2", summarize: true });
+			await answerNavigation({ status: "refused", reason: "cancelled" });
+			await ui.wait("document.querySelector('.omp-rewind-bar--notice')?.textContent.includes('An OMP extension cancelled the rewind.')");
+			// Esc leaves picking without sending anything.
+			await startFromRow(1);
+			await press("Escape", "Escape", 27);
+			await ui.wait("!document.querySelector('.omp-rewind-bar--picking') && !document.querySelector('.omp-row--rewind-dimmed')");
+			assert.equal((await navigations()).length, 3);
+			assert.equal(await ui.evaluate("window.ui.sends().length"), 0, "Rewind never sends a prompt");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("Esc Esc in an empty idle composer and /rewind or /branch alone open Rewind; one Esc, a draft or /branch with arguments do not", async () => {
+			await reset("rewind-entry-points");
+			await pushRewind();
+			await ui.wait("document.querySelectorAll('[aria-label=\"Rewind to here\"]').length===2");
+			const composer = "document.querySelector('.omp-composer textarea')";
+			const closed = async (): Promise<void> => {
+				await settleFrames();
+				assert.equal(await ui.evaluate("document.querySelector('.omp-rewind-bar--picking')"), null);
+			};
+			await ui.evaluate(`${composer}.focus()`);
+			await press("Escape", "Escape", 27);
+			await closed();
+			await ui.call("Input.insertText", { text: "x" });
+			await press("Escape", "Escape", 27);
+			await press("Escape", "Escape", 27);
+			await closed();
+			assert.equal(await draftValue(), "x", "a draft is never replaced by Rewind");
+			await press("Backspace", "Backspace", 8);
+			await ui.wait(`${composer}.value===''`);
+			await press("Escape", "Escape", 27);
+			await press("Escape", "Escape", 27);
+			await ui.wait(`document.querySelector('.omp-rewind-bar--picking') && ${barFocused}`);
+			assert.equal(await pickedPreview(), "fix the parser", "picking starts at the newest prompt");
+			await press("Escape", "Escape", 27);
+			await ui.wait("!document.querySelector('.omp-rewind-bar--picking')");
+			for (const command of ["/rewind", "/branch"]) {
+				await ui.evaluate(`${composer}.focus()`);
+				await ui.call("Input.insertText", { text: command });
+				await ui.evaluate("document.querySelector('[aria-label=\"Send message\"]').click()");
+				await ui.wait(`document.querySelector('.omp-rewind-bar--picking') && ${barFocused}`);
+				assert.equal(await draftValue(), "", `${command} is consumed`);
+				assert.equal(await pickedPreview(), "fix the parser");
+				await press("Escape", "Escape", 27);
+				await ui.wait("!document.querySelector('.omp-rewind-bar--picking')");
+			}
+			assert.equal(await ui.evaluate("window.ui.sends().length"), 0, "neither command reaches OMP");
+			await ui.evaluate(`${composer}.focus()`);
+			await ui.call("Input.insertText", { text: "/branch foo" });
+			await ui.evaluate("document.querySelector('[aria-label=\"Send message\"]').click()");
+			await ui.wait(`document.querySelector('.omp-dock').innerText.includes(${JSON.stringify(REWIND_ARGUMENTS_SENTENCE)})`);
+			assert.equal(await draftValue(), "/branch foo", "with arguments it is not Rewind: the page refuses it and keeps the draft");
+			assert.equal(await ui.evaluate("window.ui.sends().length"), 0);
+			await closed();
+			assert.deepEqual(await navigations(), []);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("a rewound prompt fills an empty composer, a typed draft moves to a recovery card, and Undo returns and takes the unedited prompt back", async () => {
+			await reset("rewind-draft");
+			await pushRewind();
+			await ui.wait("document.querySelectorAll('[aria-label=\"Rewind to here\"]').length===2");
+			await startFromRow(1);
+			await press("Enter", "Enter", 13);
+			await ui.wait("window.sent.some(message=>message.type==='omp:chat-navigate')");
+			await answerNavigation({ status: "done", kind: "rewind", summarized: false, draft: { text: "fix the parser", images: [], unavailableImages: 0 } });
+			await ui.wait("document.querySelector('.omp-composer textarea').value==='fix the parser' && !document.querySelector('.omp-rewind-bar')");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-attach-error')"), null, "an empty composer has nothing to keep");
+			// OMP's rewound branch: the target's parent, then the marker, which is the leaf.
+			const marker = { type: "custom", id: "m1", parentId: "a1", timestamp: rewindAt(9), customType: "omp-desk/navigation",
+				data: { v: 1, requestId: "0123456789abcdef0123456789abcdef", kind: "rewind", from: "a2", target: "u2", to: "a1", summarized: false } };
+			await pushRewind({ entries: [...rewindRows.slice(0, 2), marker], durableCount: 3, leafId: "m1" });
+			await ui.wait("document.querySelector('.omp-rewind-bar--undo')");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-rewind-bar--undo').textContent"), "RewoundUndo");
+			await ui.evaluate("[...document.querySelectorAll('.omp-rewind-bar--undo button')].find(button=>button.textContent==='Undo').click()");
+			await ui.wait("window.sent.filter(message=>message.type==='omp:chat-navigate').length===2");
+			assert.deepEqual((await navigations())[1], { ...(await navigations())[1]!, kind: "undo", targetId: "a2", expectedLeafId: "m1", summarize: false });
+			await ui.wait("document.querySelector('.omp-rewind-bar[role=status]')?.textContent==='Undoing the rewind…'");
+			await answerNavigation({ status: "done", kind: "undo", summarized: false });
+			await ui.wait("document.querySelector('.omp-composer textarea').value===''");
+			// Back on the original branch, with a draft of the user's own.
+			await pushRewind();
+			await ui.wait("!document.querySelector('.omp-rewind-bar') && document.querySelectorAll('[aria-label=\"Rewind to here\"]').length===2");
+			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+			await ui.call("Input.insertText", { text: "my own draft" });
+			await startFromRow(0);
+			await press("Enter", "Enter", 13);
+			await ui.wait("window.sent.filter(message=>message.type==='omp:chat-navigate').length===3");
+			assert.deepEqual((await navigations())[2], { ...(await navigations())[2]!, kind: "rewind", targetId: "u1", expectedLeafId: "a2", summarize: false });
+			await answerNavigation({ status: "done", kind: "rewind", summarized: false, draft: { text: "first prompt\nwith a second line", images: [], unavailableImages: 0 } });
+			await ui.wait("document.querySelector('.omp-composer textarea').value==='first prompt\\nwith a second line'");
+			await ui.wait("document.querySelector('.omp-attach-error details pre')");
+			assert.deepEqual(await ui.evaluate("[...document.querySelectorAll('.omp-attach-error')].map(card=>({reason:card.firstElementChild.textContent,text:card.querySelector('details pre').textContent}))"),
+				[{ reason: "Your draft from before the rewind. Add it to the draft only when you want it back.", text: "my own draft" }], "the earlier draft is kept, not overwritten");
+			assert.equal(await ui.evaluate("window.ui.sends().length"), 0);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("a branch marker after the card holding a branch point switches branches, and an unavailable Rewind says why instead of offering it", async () => {
+			await reset("rewind-branches");
+			const branches = [{ entryId: "a1", branches: [{ tipId: "old-a", firstPromptId: "old-u", firstPrompt: "an older idea", messages: 2, prompts: 1 }] }];
+			await pushRewind({ branches });
+			await ui.wait("document.querySelector('.omp-branch-point-toggle')");
+			const placement = await ui.evaluate<{ count: number; label: string; row: string; afterBody: boolean }>(`(()=>{
+			 const toggle=document.querySelector('.omp-branch-point-toggle'),row=toggle.closest('.omp-row');
+			 return {count:document.querySelectorAll('.omp-branch-point').length,label:toggle.textContent,row:row.textContent.includes('First answer')&&!row.textContent.includes('fix the parser')?'a1':'other',
+			  afterBody:row.textContent.indexOf('First answer')<row.textContent.indexOf('other branch')};
+			})()`);
+			assert.deepEqual(placement, { count: 1, label: "1 other branch · 2 messages", row: "a1", afterBody: true });
+			await ui.evaluate("document.querySelector('.omp-branch-point-toggle').click()");
+			await ui.wait("document.querySelector('.omp-branch-point-toggle').getAttribute('aria-expanded')==='true' && document.querySelector('.omp-branch-switch')");
+			assert.deepEqual(await ui.evaluate("[...document.querySelectorAll('.omp-branch-switch')].map(button=>({name:button.querySelector('.omp-branch-name').textContent,size:button.querySelector('.omp-branch-size').textContent,disabled:button.disabled}))"),
+				[{ name: "an older idea", size: "2 messages", disabled: false }]);
+			await ui.evaluate("document.querySelector('.omp-branch-switch').click()");
+			await ui.wait("window.sent.some(message=>message.type==='omp:chat-navigate')");
+			assert.deepEqual((await navigations())[0], { ...(await navigations())[0]!, kind: "switch", targetId: "old-a", expectedLeafId: "a2", summarize: false });
+			await ui.wait("document.querySelector('.omp-rewind-bar[role=status]')?.textContent==='Switching branch…'");
+			await answerNavigation({ status: "done", kind: "switch", summarized: false });
+			await ui.wait("!document.querySelector('.omp-rewind-bar')");
+			// A turn starts (here: from another window) while picking: the bar keeps the choice but says why it cannot act.
+			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+			await press("Escape", "Escape", 27);
+			await press("Escape", "Escape", 27);
+			await ui.wait(`document.querySelector('.omp-rewind-bar--picking') && ${barFocused}`);
+			assert.equal(await ui.evaluate("document.querySelector('.omp-rewind-blocked')"), null);
+			await pushRewind({ branches, working: true, settled: false });
+			const busy = "Rewind is unavailable while OMP is working. Wait for the turn to finish or stop it.";
+			await ui.wait(`document.querySelector('.omp-rewind-blocked')?.textContent===${JSON.stringify(busy)}`);
+			const offered = (): Promise<string[]> => ui.evaluate("[...document.querySelectorAll('.omp-rewind-bar--picking button')].map(button=>button.textContent)");
+			assert.deepEqual(await offered(), ["Cancel"], "the actions give way to the reason");
+			assert.deepEqual(await ui.evaluate("[...document.querySelectorAll('.omp-branch-switch')].map(button=>({disabled:button.disabled,title:button.title}))"), [{ disabled: true, title: "Switching is unavailable right now" }]);
+			await ui.evaluate(`document.querySelector('.omp-rewind-bar--picking').focus()`);
+			await press("Enter", "Enter", 13);
+			await press("Enter", "Enter", 13, { modifiers: 8 });
+			await press("Escape", "Escape", 27);
+			await ui.wait("!document.querySelector('.omp-rewind-bar--picking')");
+			assert.equal((await navigations()).length, 1, "Enter does nothing while it is unavailable");
+			assert.equal(await ui.evaluate("document.querySelectorAll('[aria-label=\"Rewind to here\"]').length"), 0, "outside picking no prompt offers it while OMP works");
+			// Esc Esc does not open it while OMP works.
+			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+			await press("Escape", "Escape", 27);
+			await press("Escape", "Escape", 27);
+			await settleFrames();
+			assert.equal(await ui.evaluate("document.querySelector('.omp-rewind-bar--picking')"), null);
+			// A chat process started without the navigate command: picking explains, nothing is offered.
+			await pushRewind({ branches, commands: [] });
+			await ui.wait("document.querySelectorAll('[aria-label=\"Rewind to here\"]').length===0 && !document.querySelector('[aria-label=\"Stop the running turn\"]')");
+			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+			await press("Escape", "Escape", 27);
+			await press("Escape", "Escape", 27);
+			const unsupported = "This chat process cannot rewind: it was started by an earlier OMP Desk. Restart the chat to use Rewind.";
+			await ui.wait(`document.querySelector('.omp-rewind-blocked')?.textContent===${JSON.stringify(unsupported)}`);
+			assert.deepEqual(await offered(), ["Cancel"]);
+			await press("Escape", "Escape", 27);
+			await ui.wait("!document.querySelector('.omp-rewind-bar--picking')");
+			assert.equal((await navigations()).length, 1);
+			assert.equal(await ui.evaluate("window.ui.sends().length"), 0);
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 

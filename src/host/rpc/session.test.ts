@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import type { ChatModel, ChatSnapshotPayload } from "../../chat/model.ts";
 import { FakeRpcChannel, responseLine, type FakeChildModel } from "./fake-channel.ts";
-import { RpcSession, type RpcSessionOptions, type RpcSessionOutput } from "./session.ts";
+import { RpcSession, parseRestoredQueue, type RpcSessionOptions, type RpcSessionOutput } from "./session.ts";
 import { turnActivity } from "../../webview/lib/activity.ts";
 import { TurnActivityLedger, type TurnNotice } from "../notifications.ts";
 import {
@@ -421,7 +421,7 @@ describe("command correlation", () => {
 	it("ends outstanding commands when the child exits", async () => {
 		const { session, channel } = await boot({ child: { sessionFile: "D:\\scratch\\x.jsonl", entries: [], leafId: null } });
 		channel.autoRespond = false;
-		const pending = session.abort("req-abort");
+		const pending = session.abortAndRestore("req-abort");
 		await tick();
 		channel.exitChild();
 		assert.deepEqual(await pending, { status: "refused", reason: "not-live" });
@@ -820,7 +820,7 @@ describe("mode-transition admission and settlement", () => {
 			session.prompt({ requestId: "fenced-prompt", text: "hello" }),
 			session.steer({ requestId: "fenced-steer", text: "hello" }),
 			session.followUp({ requestId: "fenced-follow", text: "hello" }),
-			session.abort("fenced-abort"),
+			session.abortAndRestore("fenced-abort"),
 			session.setModel("p", "m"),
 			session.setThinkingLevel("high"),
 			session.setSessionName("Do not rename"),
@@ -964,7 +964,7 @@ describe("authoritative async pause readback", () => {
 		});
 		channel.emit({ type: "agent_start" });
 		channel.emit({ type: "agent_end", isTerminal: false, awaitingAsyncWork: true, outcome: "stop" });
-		await session.abort("cancel-paused");
+		await session.abortAndRestore("cancel-paused");
 		channel.closeLink("disconnected");
 		await tick();
 		assert.equal(session.model.abortRequested, true);
@@ -1183,5 +1183,173 @@ describe("connection loss and recovery", () => {
 		assert.equal(exited.session.reconnect(), "refused");
 		mismatched.session.dispose();
 		exited.session.dispose();
+	});
+});
+
+describe("chat quick actions", () => {
+	const child = { sessionFile: "D:\\scratch\\quick.jsonl", entries: [], leafId: null };
+
+	it("stops with abort_and_restore_queue and hands back the withdrawn messages, oldest first, steering before follow-ups", async () => {
+		const { session, channel } = await boot({ child });
+		channel.handlers.set("abort_and_restore_queue", () => ({ data: { steering: [{ text: "steer one", images: [{ type: "image", mimeType: "image/png", data: "AA==" }] }], followUp: [{ text: "follow one" }, { bad: true }], truncated: true } }));
+		const outcome = await session.abortAndRestore("stop-1");
+		assert.deepEqual(outcome, { status: "accepted", restored: { entries: [{ text: "steer one", images: [{ type: "image", mimeType: "image/png", data: "AA==" }] }, { text: "follow one", images: [] }], imagesDropped: false, truncated: true } });
+		assert.equal(await session.abortAndRestore("stop-1"), outcome, "exactly once per request id");
+		assert.equal(channel.commandsOfType("abort_and_restore_queue").length, 1);
+		assert.equal(channel.commandsOfType("abort").length, 0, "Stop never strands the queue with a bare abort");
+		session.dispose();
+	});
+
+	it("flags withdrawn messages and images it cannot hand back instead of dropping them silently", async () => {
+		const { session, channel } = await boot({ child });
+		const many = Array.from({ length: 70 }, (_, index) => ({ text: `steer ${index}` }));
+		const images = Array.from({ length: 40 }, () => ({ type: "image", mimeType: "image/png", data: "AA==" }));
+		channel.handlers.set("abort_and_restore_queue", () => ({ data: { steering: many, followUp: [{ text: "with images", images: [...images, { type: "image" }] }] } }));
+		const outcome = await session.abortAndRestore("stop-caps");
+		assert.equal(outcome.status, "accepted");
+		if (outcome.status !== "accepted") return;
+		assert.equal(outcome.restored.entries.length, 64);
+		assert.equal(outcome.restored.truncated, true, "entries past the cap are reported, not lost");
+		const small = parseRestoredQueue({ steering: [], followUp: [{ text: "x", images: [{ type: "image", mimeType: "image/png", data: "AA==" }, { type: "image" }] }] });
+		assert.deepEqual(small, { entries: [{ text: "x", images: [{ type: "image", mimeType: "image/png", data: "AA==" }] }], imagesDropped: true, truncated: false });
+		session.dispose();
+	});
+
+	it("waits for a slow abort answer past the ordinary command timeout, because OMP has already withdrawn the queue", async () => {
+		const { session, channel, timers } = await boot({ child });
+		channel.handlers.set("abort_and_restore_queue", () => "drop");
+		const stopping = session.abortAndRestore("stop-slow");
+		await tick();
+		timers.advance(60_000);
+		await tick();
+		const command = channel.commandsOfType("abort_and_restore_queue")[0]!;
+		channel.emit(responseLine(command.id as string, "abort_and_restore_queue", true, { data: { steering: [{ text: "queued while compacting" }], followUp: [] } }));
+		assert.deepEqual(await stopping, { status: "accepted", restored: { entries: [{ text: "queued while compacting", images: [] }], imagesDropped: false, truncated: false } });
+		session.dispose();
+	});
+
+	it("still stops an OMP without abort_and_restore_queue with a plain abort, leaving its queue in OMP", async () => {
+		const { session, channel } = await boot({ child });
+		channel.handlers.set("abort_and_restore_queue", () => ({ success: false, error: "Unknown command: abort_and_restore_queue" }));
+		assert.deepEqual(await session.abortAndRestore("stop-old"), { status: "accepted", restored: { entries: [], imagesDropped: false, truncated: false } });
+		assert.equal(channel.commandsOfType("abort").length, 1);
+		channel.handlers.set("abort_and_restore_queue", () => ({ success: false, error: "busy" }));
+		assert.deepEqual(await session.abortAndRestore("stop-refused"), { status: "refused", reason: "rejected" });
+		assert.equal(channel.commandsOfType("abort").length, 1, "only a missing command falls back");
+		session.dispose();
+	});
+
+	it("promotes only follow-ups, one command each, and reports one OMP had already delivered as gone", async () => {
+		const { session, channel } = await boot({ child });
+		const answers = [true, false];
+		channel.handlers.set("promote_queued_message", () => ({ data: { promoted: answers.shift() } }));
+		const outcome = await session.promoteQueued("promote-1", [{ queue: "followUp", text: "a" }, { queue: "followUp", text: "b" }, { queue: "steering", text: "c" }]);
+		assert.equal(outcome.status, "done");
+		assert.deepEqual(outcome.status === "done" ? outcome.removals.map(removal => removal.status) : [], ["removed", "gone", "failed"]);
+		assert.deepEqual(channel.commandsOfType("promote_queued_message").map(command => command.message), ["a", "b"]);
+		session.dispose();
+	});
+
+	it("compacts with optional instructions, shows its own progress, and refuses while a turn runs", async () => {
+		const { session, channel } = await boot({ child });
+		let during: unknown;
+		channel.handlers.set("compact", () => { during = session.model.maintenance; return { data: {} }; });
+		assert.deepEqual(await session.compact("keep the API decisions"), { status: "ok", value: null });
+		assert.deepEqual(during, { action: "compact", reason: "manual", status: "working" });
+		assert.equal(session.model.maintenance?.status, "complete");
+		assert.equal(channel.commandsOfType("compact")[0]?.customInstructions, "keep the API decisions");
+		channel.handlers.set("compact", () => ({ success: false, error: "nothing to compact" }));
+		assert.equal((await session.compact(undefined)).status, "refused");
+		assert.equal(session.model.maintenance?.status, "failed");
+		channel.emit({ type: "agent_start" });
+		assert.deepEqual(await session.compact(undefined), { status: "refused", reason: "busy" });
+		session.dispose();
+	});
+
+	it("cycles the model and thinking level and folds the answer into the footer state at once", async () => {
+		const { session, channel } = await boot({ child });
+		channel.handlers.set("cycle_model", () => ({ data: { model: { provider: "prov", id: "next", name: "Next" }, thinkingLevel: "high", isScoped: false } }));
+		const model = await session.cycleModel();
+		assert.equal(model.status === "ok" ? model.value?.model.id : null, "next");
+		assert.equal(session.model.state?.model?.id, "next");
+		assert.equal(session.model.state?.thinkingLevel, "high");
+		channel.handlers.set("cycle_model", () => ({ data: null }));
+		assert.deepEqual(await session.cycleModel(), { status: "ok", value: null }, "nothing to cycle to");
+		channel.handlers.set("cycle_thinking_level", () => ({ data: { level: "low" } }));
+		assert.deepEqual(await session.cycleThinkingLevel(), { status: "ok", value: "low" });
+		assert.equal(session.model.state?.thinkingLevel, "low");
+		session.dispose();
+	});
+
+	it("exports to the chosen path and reports the path OMP wrote", async () => {
+		const { session, channel } = await boot({ child });
+		channel.handlers.set("export_html", command => ({ data: { path: command.outputPath } }));
+		assert.deepEqual(await session.exportHtml("D:\\out\\chat.html"), { status: "ok", value: "D:\\out\\chat.html" });
+		channel.handlers.set("export_html", () => ({ data: {} }));
+		assert.deepEqual(await session.exportHtml("D:\\out\\chat.html"), { status: "unconfirmed" });
+		session.dispose();
+	});
+});
+
+describe("queued messages after a stop", () => {
+	const child = { sessionFile: "D:\\scratch\\queue.jsonl", entries: [], leafId: null };
+	const STEER = "STEER: when you continue, reply pong";
+
+	/** A `get_state` answer as OMP writes it, listing `steering`. */
+	function stateAnswer(channel: FakeRpcChannel, id: unknown, steering: string[], isStreaming: boolean): string {
+		return responseLine(String(id), "get_state", true, { data: {
+			model: channel.child.model, thinkingLevel: "off", isStreaming, isCompacting: false, sessionFile: channel.child.sessionFile, sessionId: channel.child.sessionId,
+			queuedMessageCount: steering.length, messageCount: 0, isSettled: !isStreaming, todoPhases: [], queuedMessages: { steering, followUp: [] },
+		} });
+	}
+
+	it("drops a steer from the dock once OMP delivered it, even when a read OMP answers late still lists it (steer during a long eval, then Stop)", async () => {
+		const { session, channel } = await boot({ child });
+		const reads: Record<string, unknown>[] = [];
+		channel.handlers.set("get_state", command => { reads.push(command); return "drop"; });
+		channel.emit({ type: "agent_start" });
+		channel.emit({ type: "tool_execution_start", toolCallId: "eval-1", toolName: "eval", args: { language: "py" } });
+		channel.emit({ type: "queue_update", steering: [STEER], followUp: [] });
+		assert.deepEqual(session.model.state?.queuedMessages, { steering: [STEER], followUp: [] });
+		// Stop. The recorded order of OMP 18.8.5 (`abort`): the eval ends and the host re-reads the state; OMP answers
+		// that read only after the aborted run ended, the queue drained the steer into a new turn and said so.
+		channel.emit({ type: "tool_execution_end", toolCallId: "eval-1", toolName: "eval", result: { content: [] }, isError: false });
+		await tick();
+		assert.equal(reads.length, 1, "the eval's end re-reads the state");
+		channel.emit({ type: "agent_end", messages: [] });
+		channel.emit({ type: "queue_update", steering: [], followUp: [] });
+		channel.emit(stateAnswer(channel, reads[0]!.id, [STEER], true));
+		assert.deepEqual(session.model.state?.queuedMessages, { steering: [], followUp: [] }, "a read cut before the drain never brings the steer back");
+		assert.equal(session.model.state?.queuedMessageCount, 0);
+		channel.emit({ type: "agent_start" });
+		channel.emitMessage("message_end", "steer-row", userMessage(STEER, 5000) as never);
+		await tick();
+		assert.deepEqual(session.model.state?.queuedMessages, { steering: [], followUp: [] });
+		assert.equal(reads.length, 1, "an empty dock needs no read when the prompt lands");
+		// A read sent after the last queue_update is OMP's newest word, and is applied.
+		channel.emit({ type: "tool_execution_end", toolCallId: "eval-2", toolName: "eval", result: { content: [] }, isError: false });
+		await tick();
+		channel.emit(stateAnswer(channel, reads[1]!.id, [], true));
+		assert.equal(session.model.state?.isStreaming, true);
+		session.dispose();
+	});
+
+	it("reads the queue back when the transcript records a prompt the dock still lists, and lists each message once", async () => {
+		const { session, channel } = await boot({ child });
+		const reads: Record<string, unknown>[] = [];
+		channel.handlers.set("get_state", command => { reads.push(command); return "drop"; });
+		channel.emit({ type: "agent_start" });
+		channel.emit({ type: "queue_update", steering: [STEER, "second"], followUp: [] });
+		// OMP took the steer into the streaming response and recorded it without another queue_update.
+		channel.emitMessage("message_end", "steer-row", userMessage(STEER, 5000) as never);
+		await tick();
+		assert.equal(reads.length, 1, "the recorded prompt triggers one readback");
+		channel.emit(stateAnswer(channel, reads[0]!.id, ["second"], true));
+		assert.deepEqual(session.model.state?.queuedMessages, { steering: ["second"], followUp: [] }, "the delivered steer is gone, the other is still listed once");
+		assert.equal(session.model.state?.queuedMessageCount, 1);
+		channel.emitMessage("message_end", "reply", { role: "assistant", content: [{ type: "text", text: "ok" }], stopReason: "stop", timestamp: 6000 });
+		await tick();
+		assert.equal(reads.length, 1, "only a recorded prompt asks");
+		session.dispose();
 	});
 });

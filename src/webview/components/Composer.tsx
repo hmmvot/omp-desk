@@ -62,6 +62,8 @@ import { provideDraftHandoff, subscribeRestoredDraft, takeRestoredDraft } from "
 import type { DraftCapture } from "../lib/draft-handoff";
 import { followedByBlank, spaceInsertion, subscribeInsertedText } from "../lib/insert-text";
 import { mergeRestoredQueued, offerQueuedForEditing, subscribeQueuedForEditing } from "../lib/queue-restore";
+import { queueNotice, queueRows, restoredEntries } from "../lib/queue-view";
+import { historyStep, sessionPrompts, type HistoryCursor } from "../lib/prompt-history";
 import { mentionQueryAt, spliceMention } from "../messages";
 import {
 	activeImages,
@@ -77,7 +79,8 @@ import {
 	type ImageReferenceSpan,
 } from "../lib/image-references";
 import { useDismissibleLayer } from "../lib/dismissible-layer";
-import { argumentSuggestions, missingRequiredArgument, slashArgumentAt, slashQueryAt, slashSuggestions, spliceArgument, spliceSlash } from "../lib/slash-completion";
+import { ExtensionNoticeLine, ExtensionWidgets } from "./ExtensionSurfaces";
+import { argumentSuggestions, isRewindCommand, missingRequiredArgument, slashArgumentAt, slashQueryAt, slashSuggestions, spliceArgument, spliceSlash } from "../lib/slash-completion";
 import { ChatFooter } from "./ChatFooter";
 
 /** Textarea line height, kept in sync with `.omp-textarea`; vertical padding and border are read from the element. */
@@ -88,6 +91,8 @@ const MAX_ROWS = 8;
 
 /** Wait after the last keystroke before asking the extension host for paths. */
 const SUGGESTION_DEBOUNCE_MS = 150;
+/** Two `Esc` presses this close together in an empty, idle composer open Rewind, as in the TUI. */
+const DOUBLE_ESCAPE_MS = 500;
 
 /** Stable empty list, so "no suggestions" does not re-render every consumer. */
 const NO_SUGGESTIONS: readonly string[] = [];
@@ -300,7 +305,13 @@ interface RecoverableMessage {
 	lostAttachments?: number;
 }
 
-export function Composer({ client, snapshot, progressAvailable = true }: { client: ChatClient; snapshot: ChatSnapshot; progressAvailable?: boolean }): ReactNode {
+export function Composer({ client, snapshot, progressAvailable = true, onRewind }: {
+	client: ChatClient;
+	snapshot: ChatSnapshot;
+	progressAvailable?: boolean;
+	/** Open Rewind (`Esc` `Esc` in an empty idle composer, or `/rewind`); absent where Rewind is not offered. */
+	onRewind?: () => void;
+}): ReactNode {
 	const [text, setText] = useState("");
 	/** Every image attached to this draft, including ones whose marker was deleted and could still come back through Undo. */
 	const [images, setImages] = useState<readonly DraftImage[]>([]);
@@ -365,6 +376,8 @@ export function Composer({ client, snapshot, progressAvailable = true }: { clien
 	const caretRef = useRef(0);
 	/** Caret to restore after an accepted suggestion swaps the draft text. */
 	const pendingCaretRef = useRef<number | null>(null);
+	/** The ↑/↓ prompt-history walk in progress, or `null`. */
+	const historyRef = useRef<HistoryCursor | null>(null);
 	/** Last completion request sent, or `null` once it is answered or invalidated. */
 	const pendingQueryRef = useRef<{ requestId: number; query: string } | null>(null);
 	const requestSeqRef = useRef(0);
@@ -718,6 +731,15 @@ export function Composer({ client, snapshot, progressAvailable = true }: { clien
 			// started the read.
 			if (captureRef.current !== null || !canPrompt || request !== null || readingRef.current > 0 || sendingRef.current) return;
 			if (draft.length === 0 && attached.length === 0) return;
+			// Chat's own `/rewind` and `/branch` never reach OMP; both open the in-place Rewind.
+			if (onRewind !== undefined && attached.length === 0 && isRewindCommand(draft)) {
+				draftRevisionRef.current++;
+				textRef.current = "";
+				setText("");
+				setSendError(null);
+				onRewind();
+				return;
+			}
 			if (missingRequiredArgument(snapshot.commands, draft)) {
 				setDismissedCompletion(null);
 				setSendError("This command requires an argument.");
@@ -763,17 +785,18 @@ export function Composer({ client, snapshot, progressAvailable = true }: { clien
 				return;
 			}
 			setSendError(null);
-			if (!running && nativeSettingsCommand(draft) === null) setSubmitted(true);
+			if (!running && result.explained !== true && nativeSettingsCommand(draft) === null) setSubmitted(true);
 			// Admission may finish after typing, attaching, or restoring another draft. Never erase that work.
 			if (draftRevisionRef.current !== revision) return;
 			draftRevisionRef.current++;
+			historyRef.current = null;
 			textRef.current = "";
 			nextNumberRef.current = 1;
 			publishImages([]);
 			setAttachError(null);
 			setText("");
 		},
-		[canPrompt, client, publishImages, publishRecoverable, readCapture, request, snapshot.commands],
+		[canPrompt, client, onRewind, publishImages, publishRecoverable, readCapture, request, snapshot.commands],
 	);
 
 	// A complete capture stays immutable through the host's confirmation and replacement.
@@ -897,15 +920,89 @@ export function Composer({ client, snapshot, progressAvailable = true }: { clien
 		else place();
 	}), [composingRef, publishImages]);
 
+	// Rewind's edit and resubmit (ADR-0051): a rewound prompt replaces the draft, and a draft typed before it moves to
+	// a recovery card first, never overwritten. Undo takes the prompt back out while it is still unedited
+	// (`rewoundRef` holds the draft revision right after it was placed). Any page's navigation counts, so a command-
+	// palette Rewind lands here too.
+	const rewoundRef = useRef<number | null>(null);
+	useEffect(() => client.subscribeNavigations(answer => {
+		if (answer.status !== "done") return;
+		const place = (): void => {
+			if (captureRef.current !== null) { deferredRef.current.push(place); return; }
+			const unedited = rewoundRef.current !== null && rewoundRef.current === draftRevisionRef.current;
+			rewoundRef.current = null;
+			if (answer.kind === "undo") {
+				if (!unedited) return;
+				draftRevisionRef.current++;
+				textRef.current = "";
+				nextNumberRef.current = 1;
+				publishImages([]);
+				setAttachError(null);
+				setText("");
+				return;
+			}
+			const draft = answer.draft;
+			if (answer.kind !== "rewind" || draft === undefined) return;
+			const held = compactForSend(textRef.current, imagesRef.current);
+			if (held.text.trim().length > 0 || held.images.length > 0) {
+				const images: ImageContent[] = held.images.map(image => ({ type: "image", mimeType: image.mimeType, data: image.data }));
+				publishRecoverable([...recoverableRef.current, { id: ++recoverySeqRef.current, text: held.text, images, reason: "Your draft from before the rewind. Add it to the draft only when you want it back.", unconfirmed: false }]);
+			}
+			const merged = mergeRestoredQueued({ text: "", images: [], nextNumber: 1, nextId: imageSeqRef.current + 1 }, [{ text: draft.text, images: draft.images }]);
+			nextNumberRef.current = merged.nextNumber;
+			imageSeqRef.current = merged.nextId - 1;
+			publishImages(pruneInactive(merged.images, () => true, new Set(merged.images.map(image => image.number)), MAX_DRAFT_BYTES));
+			historyRef.current = null;
+			draftRevisionRef.current++;
+			textRef.current = merged.text;
+			pendingCaretRef.current = merged.text.length;
+			setText(merged.text);
+			const lost = merged.imagesLost + draft.unavailableImages;
+			setAttachError(lost > 0 ? `${lost} image${lost === 1 ? "" : "s"} of the rewound message could not be restored.` : null);
+			setSendError(null);
+			rewoundRef.current = draftRevisionRef.current;
+			textareaRef.current?.focus();
+		};
+		if (composingRef.current) deferredRef.current.push(place);
+		else place();
+	}), [client, composingRef, publishImages, publishRecoverable]);
+	const lastEscapeRef = useRef(Number.NEGATIVE_INFINITY);
+
 	// VS Code commands and keybindings reach the composer through this registry
 	// (`src/webview/lib/panel-actions.ts`): `omp.sendPrompt`, `omp.stopTurn` and
 	// `omp.focusComposer` run these same handlers, so a keybinding can never send
 	// what the Send button refuses or stop a turn the Stop button would not.
 
-	/** Stop the running turn; a refusal (session not live, host unreachable) is shown, never dropped. */
+	/**
+	 * Stop the running turn; a refusal (session not live, host unreachable) is shown, never dropped. Like the TUI's
+	 * Escape, the messages still queued come back into the draft (after what it holds) instead of running later.
+	 */
 	const stop = useCallback((): void => {
-		const result = client.sendAbort();
+		const result = client.sendAbort(answer => {
+			offerQueuedForEditing(answer.entries.map(entry => ({ text: entry.text, images: entry.images ?? [] })));
+			if (!mountedRef.current) return;
+			if (answer.truncated === true) setSendError("Stopped. OMP could not hand back every queued message, so some were discarded.");
+			else if (answer.imagesDropped === true) setSendError("Stopped. Some images of the queued messages could not be restored to the composer.");
+		});
 		setSendError(result.ok ? null : result.reason);
+	}, [client]);
+
+	/** `Alt+↑`, the TUI's dequeue: the newest queued message comes back into the draft. */
+	const dequeueLast = useCallback(async (): Promise<boolean> => {
+		const last = queueRows(client.getSnapshot().state?.queuedMessages).at(-1);
+		if (last === undefined) return false;
+		const outcome = await client.removeQueued("edit", [{ queue: last.queue, text: last.text }]);
+		if (outcome.ok) offerQueuedForEditing(restoredEntries(outcome.results));
+		if (mountedRef.current) setSendError(queueNotice("edit", outcome)?.text ?? null);
+		return true;
+	}, [client]);
+
+	/** Re-run a failed or aborted last turn through OMP's own `/retry` (it says "Nothing to retry." otherwise). */
+	const retry = useCallback(async (): Promise<void> => {
+		const current = client.getSnapshot();
+		if (current.working || !chatWritable(current) || captureRef.current !== null) return;
+		const result = await client.sendPrompt("/retry");
+		if (mountedRef.current) setSendError(result.ok ? null : result.reason);
 	}, [client]);
 
 	useEffect(
@@ -914,9 +1011,15 @@ export function Composer({ client, snapshot, progressAvailable = true }: { clien
 				"send-prompt": () => send(false),
 				"stop-turn": stop,
 				"focus-composer": () => textareaRef.current?.focus(),
+				"retry-turn": () => void retry(),
 			}),
-		[send, stop],
+		[retry, send, stop],
 	);
+
+	// A prompt picked in the host's history search (`Ctrl+R`) joins the draft like an edited queued message.
+	useEffect(() => guestTransport.subscribe(message => {
+		if (message.type === "omp:recall-prompt") offerQueuedForEditing([{ text: message.text, images: [] }]);
+	}), []);
 
 	// The extension host needs one more fact about Escape: whether this popup is
 	// open. It is reported on every change and cleared when the composer unmounts,
@@ -994,6 +1097,18 @@ export function Composer({ client, snapshot, progressAvailable = true }: { clien
 	const onPromptKeyDown = useCallback(
 		(event: KeyboardEvent<HTMLTextAreaElement>): void => {
 			const composing = event.nativeEvent.isComposing || composingRef.current;
+			// `Esc` `Esc` in an empty composer while nothing runs opens Rewind, as in the TUI. While a turn runs, Escape
+			// belongs to Stop (`omp.stopTurn`), and an open popup takes it first.
+			if (event.key === "Escape" && onRewind !== undefined && !composing && !suggestionsOpen) {
+				const idle = !client.getSnapshot().working && event.currentTarget.value.length === 0 && imagesRef.current.length === 0;
+				if (idle && event.timeStamp - lastEscapeRef.current <= DOUBLE_ESCAPE_MS) {
+					lastEscapeRef.current = Number.NEGATIVE_INFINITY;
+					event.preventDefault();
+					onRewind();
+					return;
+				}
+				lastEscapeRef.current = idle ? event.timeStamp : Number.NEGATIVE_INFINITY;
+			}
 			if (suggestionsOpen && !composing) {
 				if (visible.length > 0 && (event.key === "Home" || event.key === "End")) {
 					event.preventDefault(); event.stopPropagation();
@@ -1014,12 +1129,34 @@ export function Composer({ client, snapshot, progressAvailable = true }: { clien
 					}
 				}
 			}
+			if (!composing && !event.ctrlKey && !event.metaKey && !event.shiftKey && (event.key === "ArrowUp" || event.key === "ArrowDown")) {
+				if (event.altKey) {
+					if (event.key === "ArrowUp" && client.writable) { event.preventDefault(); void dequeueLast(); }
+					return;
+				}
+				const element = event.currentTarget;
+				const value = element.value;
+				const at = element.selectionStart;
+				const edge = at === element.selectionEnd && (event.key === "ArrowUp" ? !value.slice(0, at).includes("\n") : !value.slice(at).includes("\n"));
+				if (edge && imagesRef.current.length === 0) {
+					const step = historyStep(sessionPrompts(client.getSnapshot().entries), historyRef.current, event.key === "ArrowUp" ? "older" : "newer", value);
+					if (step !== null) {
+						event.preventDefault();
+						historyRef.current = step.cursor;
+						draftRevisionRef.current++;
+						textRef.current = step.text;
+						pendingCaretRef.current = step.text.length;
+						setText(step.text);
+						return;
+					}
+				}
+			}
 			if (shouldSubmitOnEnter(event, composingRef.current)) {
 				event.preventDefault();
 				send(event.altKey);
 			}
 		},
-		[acceptSuggestion, activeIndex, composingRef, send, suggestionsOpen, visible, selectSuggestion],
+		[acceptSuggestion, activeIndex, client, composingRef, dequeueLast, onRewind, send, suggestionsOpen, visible, selectSuggestion],
 	);
 
 	/** Answer the shown dialog; the client answers each dialog once and refuses a stale card. */
@@ -1165,6 +1302,8 @@ export function Composer({ client, snapshot, progressAvailable = true }: { clien
 			</div>}
 			{dialog ?? <>
 			{snapshot.statusLine !== null && <div className="omp-composer-hint">{snapshot.statusLine}</div>}
+			<ExtensionNoticeLine snapshot={snapshot} />
+			<ExtensionWidgets snapshot={snapshot} placement="aboveEditor" />
 			{request !== null && !canPrompt && (
 				<div className="omp-ask-help">
 					{live
@@ -1302,6 +1441,7 @@ export function Composer({ client, snapshot, progressAvailable = true }: { clien
 					)}
 				</div>
 			</div>
+			<ExtensionWidgets snapshot={snapshot} placement="belowEditor" />
 			</>}
 			<ChatFooter client={client} snapshot={snapshot}
 				trailingActions={dialog === null ? promptActions : undefined} />

@@ -17,7 +17,7 @@
  */
 import { assistantPersistenceKey, entryMessage, userSkill, type AssistantMessage, type ChatEntry } from "../../chat/messages";
 import type { ReactNode } from "react";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ActiveTool, ChatPhase, DisplayTurn, PendingRow } from "../../chat/model";
 import type { EphemeralItem, TranscriptPosition } from "../../chat/projection";
 import type { AgentActivity, RunningAgent } from "../../chat/agents";
@@ -39,6 +39,12 @@ import { AssistantContentView } from "./MessageContent";
 import { ChildTranscript } from "./ChildTranscript";
 import { ToolCard, type ToolCardProps } from "./ToolCard";
 import { WorkingStatus } from "./WorkingStatus";
+import { CopyButton } from "./CopyButton";
+import { messageText } from "../lib/format";
+import { requestPanelAction } from "../lib/panel-actions";
+import { clearToolDisclosures, getTranscriptToggles, subscribeTranscriptToggles, withToolDefault } from "../lib/transcript-toggles";
+import type { BranchPoint } from "../../chat/rewind";
+import { BranchPointMarker } from "./Rewind";
 
 /** How long a requested older page may stay unanswered before the button offers to ask again. */
 const OLDER_REPLY_TIMEOUT_MS = 8_000;
@@ -83,25 +89,57 @@ export interface TranscriptProps {
 	asyncPaused?: boolean;
 	pagedHistory?: boolean;
 	footerByHost?: ReadonlyMap<string, ReplyFooterData>;
+	/** The failed or aborted last reply that offers Retry, or `null`. */
+	retryTailId?: string | null;
+	/** Rewind (ADR-0051): the hover action, the picked prompt and the branch markers. Absent in child transcripts. */
+	rewind?: TranscriptRewind;
+	/** Derived from `rewind`: cards after the picked prompt (dimmed), and the branch points shown after each card. */
+	rewindDimmed?: ReadonlySet<string>;
+	branchesByCard?: ReadonlyMap<string, readonly BranchPoint[]>;
+}
+
+export interface TranscriptRewind {
+	/** Prompts that can be rewound to: durable user messages of the loaded branch. Empty hides the action. */
+	targets: ReadonlySet<string>;
+	/** The prompt being picked, or null. */
+	selectedId: string | null;
+	branchPoints: readonly BranchPoint[];
+	/** The hover action, or a click on a prompt while picking: select it, or rewind when it is already selected. */
+	onPick(entryId: string): void;
+	/** Switch to the branch whose tip is `tipId`; absent while that is unavailable. */
+	onSwitch?(tipId: string): void;
 }
 
 
 function Row({
 	kind,
 	flag,
+	actions,
+	rewindState,
+	onPick,
 	children,
 }: {
 	kind: "user" | "assistant" | "custom" | "marker";
 	/** A caution shown above the row body (a pending row the host has not seen saved). */
 	flag?: string;
+	/** Hover actions of the row (`.omp-row-actions`): Copy and Rewind on the user's messages. */
+	actions?: ReactNode;
+	/** While picking a rewind target: the selected prompt, or a row that would leave the branch. */
+	rewindState?: "selected" | "dimmed";
+	/** While picking, a click on a rewindable prompt picks it. */
+	onPick?: () => void;
 	children: ReactNode;
 }): ReactNode {
 	return (
-		<div className={`omp-row omp-row--${kind}`}>
+		<div className={`omp-row omp-row--${kind}${rewindState === undefined ? "" : ` omp-row--rewind-${rewindState}`}`} aria-current={rewindState === "selected" ? "true" : undefined} onClick={onPick === undefined ? undefined : event => {
+			if (event.target instanceof Element && event.target.closest("a,button")) return;
+			onPick();
+		}}>
 			<div className="omp-body-block">
 				{flag !== undefined && <span className="omp-chip omp-chip--warn"><span className="codicon codicon-warning" aria-hidden="true" />{flag}</span>}
 				{children}
 			</div>
+			{actions}
 		</div>
 	);
 }
@@ -128,7 +166,8 @@ export function TranscriptCardView({ card, props, autoExpanded }: { card: Transc
 		}
 		case "assistant": {
 			const failed = !card.streaming && card.content.length === 0 && (card.message.stopReason === "error" || card.message.stopReason === "aborted");
-			body = <><AssistantContentView content={card.content} streaming={card.streaming && !props.waitingForAnswer} bypassPacing={props.pagedHistory} />{failed && <div className={card.message.stopReason === "error" ? "omp-error" : "omp-warning"} role="status"><strong>{card.message.stopReason === "error" ? "Provider error" : "Aborted"}</strong>{card.message.errorMessage && <p>{card.message.errorMessage}</p>}</div>}</>;
+			const retry = card.id === props.retryTailId && <button type="button" className="omp-retry-turn" title="Retry: run the failed or aborted turn again (F5)" onClick={() => requestPanelAction("retry-turn")}><span className="codicon codicon-refresh" aria-hidden="true" />Retry</button>;
+			body = <><AssistantContentView content={card.content} streaming={card.streaming && !props.waitingForAnswer} bypassPacing={props.pagedHistory} />{failed && <div className={card.message.stopReason === "error" ? "omp-error" : "omp-warning"} role="status"><strong>{card.message.stopReason === "error" ? "Provider error" : "Aborted"}</strong>{card.message.errorMessage && <p>{card.message.errorMessage}</p>}{retry}</div>}{!failed && retry}</>;
 			break;
 		}
 		case "recovery": body = <div className="omp-native-recovery"><strong>Recovered provider error</strong>{card.message.retryRecovery?.note && <p>{card.message.retryRecovery.note}</p>}</div>; break;
@@ -136,7 +175,30 @@ export function TranscriptCardView({ card, props, autoExpanded }: { card: Transc
 		case "results": body = <>{card.tools.map(tool => <ToolCard key={tool.call.id} {...toolProps(tool)} />)}</>; break;
 	}
 	const message = card.kind === "entry" ? entryMessage(card.entry) : null;
-	return <Row kind={message?.role === "user" && !message.synthetic || message?.role === "custom" && userSkill(message) !== null ? "user" : "assistant"} flag={unsaved ? "not yet saved" : undefined}>{body}{props.footerByHost?.has(card.id) && <ReplyFooter reply={props.footerByHost.get(card.id)!} />}</Row>;
+	const user = message?.role === "user" && !message.synthetic;
+	const copyText = user ? messageText(message.content) : "";
+	const rewind = props.rewind;
+	const rewindId = rewind !== undefined && card.kind === "entry" && user && rewind.targets.has(card.entry.id) ? card.entry.id : null;
+	const copy = copyText.trim().length > 0 ? <CopyButton text={copyText} label="Copy message" /> : null;
+	const actions = copy !== null || rewindId !== null ? (
+		<div className="omp-row-actions">
+			{copy}
+			{rewindId !== null && <button type="button" className="omp-copy-button" aria-label="Rewind to here" title="Rewind to here: edit this message and send it again" onClick={event => { event.stopPropagation(); rewind!.onPick(rewindId); }}>
+				<span className="codicon codicon-discard" aria-hidden="true" />
+			</button>}
+		</div>
+	) : undefined;
+	const picking = rewind?.selectedId != null;
+	const rewindState = !picking ? undefined : rewindId !== null && rewindId === rewind.selectedId ? "selected" : props.rewindDimmed?.has(card.id) ? "dimmed" : undefined;
+	const points = props.branchesByCard?.get(card.id);
+	return (
+		<Row kind={user || message?.role === "custom" && userSkill(message) !== null ? "user" : "assistant"} flag={unsaved ? "not yet saved" : undefined} actions={actions}
+			rewindState={rewindState} onPick={picking && rewindId !== null ? () => rewind!.onPick(rewindId) : undefined}>
+			{body}
+			{props.footerByHost?.has(card.id) && <ReplyFooter reply={props.footerByHost.get(card.id)!} />}
+			{points?.map(point => <BranchPointMarker key={point.entryId ?? "root"} point={point} onSwitch={rewind?.onSwitch} />)}
+		</Row>
+	);
 }
 
 export function Transcript(props: TranscriptProps): ReactNode {
@@ -184,7 +246,53 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		if (disclosures.current.has(old) && !disclosures.current.has(current)) disclosures.current.set(current, disclosures.current.get(old)!);
 		disclosures.current.delete(old);
 	}
-	const presentationProps: TranscriptProps = { ...props, footerByHost, disclosures: disclosures.current, onDisclosureChange: (key, value) => { controllerRef.current?.retain(); disclosures.current.set(key, value); redrawDisclosures(version => version + 1); } };
+	// The tools toggle (`Ctrl+O`) is a default: a press forgets every tool block's own state, keeping the reader's
+	// place, and a block opened or closed afterwards keeps its own state until the next press.
+	const toggles = useSyncExternalStore(subscribeTranscriptToggles, getTranscriptToggles);
+	const appliedToggles = useRef(toggles.generation);
+	if (appliedToggles.current !== toggles.generation) {
+		appliedToggles.current = toggles.generation;
+		controllerRef.current?.retain();
+		clearToolDisclosures(disclosures.current);
+	}
+	const shown = useMemo(() => withToolDefault(disclosures.current, toggles.tools), [toggles.tools, toggles.generation]);
+	// A failed or aborted last reply offers Retry (the TUI's F5) while nothing runs.
+	const retryTailId = useMemo(() => {
+		if (working || phase !== "live") return null;
+		for (let index = canonical.length - 1; index >= 0; index--) {
+			const card = canonical[index]!;
+			if (card.kind === "assistant") return !card.streaming && (card.message.stopReason === "error" || card.message.stopReason === "aborted") ? card.id : null;
+			if (card.kind === "entry" && entryMessage(card.entry)?.role === "user") return null;
+		}
+		return null;
+	}, [canonical, working, phase]);
+	// Rewind: what the picked prompt would abandon, and which card carries each branch point. A branch point that is
+	// not itself on a card (a marker or a settings change) goes to the nearest earlier entry that is.
+	const rewindSelected = props.rewind?.selectedId ?? null;
+	const rewindDimmed = useMemo(() => {
+		if (rewindSelected === null) return undefined;
+		const at = canonical.findIndex(card => card.sourceIds.includes(rewindSelected));
+		return at < 0 ? undefined : new Set(canonical.slice(at + 1).map(card => card.id));
+	}, [canonical, rewindSelected]);
+	const branchPoints = props.rewind?.branchPoints;
+	const branchesByCard = useMemo(() => {
+		if (branchPoints === undefined || branchPoints.length === 0) return undefined;
+		const cardOf = new Map<string, string>();
+		for (const card of canonical) for (const source of card.sourceIds) if (!cardOf.has(source)) cardOf.set(source, card.id);
+		const position = new Map(entries.map((entry, index) => [entry.id, index]));
+		const byCard = new Map<string, BranchPoint[]>();
+		for (const point of branchPoints) {
+			let cardId: string | undefined;
+			if (point.entryId === null) cardId = olderCount === 0 ? canonical[0]?.id : undefined;
+			else for (let index = position.get(point.entryId) ?? -1; index >= 0 && cardId === undefined; index -= 1) cardId = cardOf.get(entries[index]!.id);
+			if (cardId === undefined) continue;
+			const list = byCard.get(cardId);
+			if (list === undefined) byCard.set(cardId, [point]);
+			else list.push(point);
+		}
+		return byCard;
+	}, [canonical, entries, branchPoints, olderCount]);
+	const presentationProps: TranscriptProps = { ...props, footerByHost, retryTailId, rewindDimmed, branchesByCard, disclosures: shown, onDisclosureChange: (key, value) => { controllerRef.current?.retain(); disclosures.current.set(key, value); redrawDisclosures(version => version + 1); } };
 
 	const rootRef = useRef<HTMLDivElement | null>(null);
 	const contentRef = useRef<HTMLDivElement | null>(null);
@@ -217,7 +325,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		else for (const card of overview.rows) {
 			densityRows.push(card);
 			if (card.kind !== "run") continue;
-			const expanded = disclosures.current.get(card.id) ?? false;
+			const expanded = shown.get(card.id) ?? false;
 			const live = new Set(card.liveEditIds);
 			for (const member of card.members) {
 				const id = overviewMemberId(member);
@@ -229,7 +337,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 			}
 		}
 		return { groupByCall, autoCalls, densityRows, heldRunIds };
-	}, [rows, overview, props.toolCallDetail, disclosureRevision, forcedCalls.current]);
+	}, [rows, overview, props.toolCallDetail, disclosureRevision, forcedCalls.current, shown]);
 	const sourceBindings = useMemo(() => {
 		const sources = new Map<string, readonly string[]>();
 		const order: string[] = [];
@@ -250,14 +358,14 @@ export function Transcript(props: TranscriptProps): ReactNode {
 			sources.set(presentationRowId(card, namespace), aliases);
 			order.push(...aliases);
 		}
-		for (const run of overview.runs) sources.set(run.id, disclosures.current.get(run.id) ? [run.id] : [run.id, ...run.members.flatMap(card => sources.get(card.id) ?? card.sourceIds)]);
+		for (const run of overview.runs) sources.set(run.id, shown.get(run.id) ? [run.id] : [run.id, ...run.members.flatMap(card => sources.get(card.id) ?? card.sourceIds)]);
 		return { sources, order };
-	}, [rows, overview, pending, stream, props.streamId, disclosureRevision]);
+	}, [rows, overview, pending, stream, props.streamId, disclosureRevision, shown]);
 	let bodyHeld = false;
 	for (const inBody of forcedCalls.current.values()) if (inBody) { bodyHeld = true; break; }
 	const bindingsRef = useRef({ sourceBindings, topId, bodyHeld });
 	bindingsRef.current = { sourceBindings, topId, bodyHeld };
-	const measuredRows = useMemo(() => measuredTranscriptRows(densityRows, sourceBindings.sources, viewport.width, disclosures.current, namespace, autoCalls), [densityRows, sourceBindings, viewport.width, disclosureRevision, namespace, autoCalls]);
+	const measuredRows = useMemo(() => measuredTranscriptRows(densityRows, sourceBindings.sources, viewport.width, shown, namespace, autoCalls), [densityRows, sourceBindings, viewport.width, disclosureRevision, namespace, autoCalls, shown]);
 	const updateViewport = (): void => {
 		const root = rootRef.current, measured = measuredRef.current;
 		if (!root || !measured) return;
@@ -313,6 +421,14 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		return () => { controller.dispose(); controllerRef.current = null; };
 	}, [namespace, props.depth]);
 	useLayoutEffect(() => controllerRef.current?.layout(), [rows, overview, phase, props.toolCallDetail, props.pagedHistory, disclosureRevision]);
+	// A newly picked rewind target is brought into view, loading it into the rendered window first when needed.
+	useLayoutEffect(() => {
+		if (rewindSelected === null) return;
+		const card = canonical.find(candidate => candidate.sourceIds.includes(rewindSelected));
+		if (card === undefined) return;
+		if (!props.pagedHistory && !rows.some(row => row.id === card.id)) setPinnedTopId(card.id);
+		controllerRef.current?.reveal([rewindSelected]);
+	}, [rewindSelected]);
 
 	// A page requested from the host is in flight from the click until the rows above the
 	// old top arrive (the top changes), the host says nothing is left (the count changes),
@@ -349,7 +465,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 			if (event.key !== "Escape" || event.defaultPrevented) return;
 			const element = event.target instanceof Element ? event.target : null;
 			const id = element?.closest<HTMLElement>("[data-run-id]")?.dataset.runId ?? element?.closest<HTMLElement>(".omp-tool-overview")?.dataset.sourceId;
-			if (!id || !disclosures.current.get(id)) return;
+			if (!id || !shown.get(id)) return;
 			const head = [...(rootRef.current?.querySelectorAll<HTMLElement>(".omp-tool-overview") ?? [])].find(group => group.dataset.sourceId === id)?.querySelector<HTMLButtonElement>(".omp-overview-head");
 			if (!head) return;
 			event.preventDefault(); event.stopPropagation(); head.focus({ preventScroll: true }); presentationProps.onDisclosureChange?.(id, false);
@@ -395,7 +511,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 			<MeasuredRows rows={measuredRows} context={`${namespace}:${props.toolCallDetail}`} viewport={viewport}
 				elementRef={measuredRef} following={readerMode === "following" && !bodyHeld} anchor={controllerRef.current?.anchor} paged={props.pagedHistory || (props.depth ?? 0) > 0} forcedSources={forcedCalls.current} forcedRows={heldRunIds}
 				onLayout={() => controllerRef.current?.layout()} onInteraction={held => { if (props.pagedHistory) setHeldPageEndId(held ? page.endId : null); }}
-				renderRow={index => { const card = densityRows[index]!; if (card.kind === "run") return <ToolOverview run={card} expanded={disclosures.current.get(card.id) ?? false}
+				renderRow={index => { const card = densityRows[index]!; if (card.kind === "run") return <ToolOverview run={card} expanded={shown.get(card.id) ?? false}
 					onExpandedChange={value => presentationProps.onDisclosureChange?.(card.id, value)} />;
 					const run = card.kind === "tool" || isOverviewMessage(card) ? groupByCall.get(overviewMemberId(card)) : undefined;
 					const body = <TranscriptCardView card={card} props={presentationProps} autoExpanded={card.kind === "tool" && autoCalls.get(card.tool.call.id) === true} />;

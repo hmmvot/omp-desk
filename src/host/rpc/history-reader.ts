@@ -14,6 +14,7 @@
  */
 import { open, stat, type FileHandle } from "node:fs/promises";
 import { parseChatEntry, type ChatEntry } from "../../chat/messages.ts";
+import { computeBranchPoints, rewindTargets, type BranchInfo, type BranchPoint } from "../../chat/rewind.ts";
 import { todoPhasesFromEntry, type TodoPhase } from "../../chat/todos.ts";
 import {
 	CHAT_ENTRY_TYPES,
@@ -24,7 +25,7 @@ import {
 	type ChatSnapshotPayload,
 } from "../../chat/model.ts";
 import { TRANSCRIPT_WINDOW_ROWS, transcriptWindow } from "../../webview/lib/transcript-window.ts";
-import { blobsDirectoryFor, resolveBlobImages } from "./history-blobs.ts";
+import { BLOB_BYTES_BUDGET, blobsDirectoryFor, resolveBlobImages } from "./history-blobs.ts";
 
 export const DEFAULT_TAIL_ROWS = TRANSCRIPT_WINDOW_ROWS;
 const SCAN_CHUNK_BYTES = 1024 * 1024;
@@ -34,6 +35,8 @@ const MAX_ROW_BYTES = 32 * 1024 * 1024;
 /** Adjacent rows closer than this are read with one syscall. */
 const COALESCE_GAP_BYTES = 64 * 1024;
 const MAX_COALESCED_BYTES = 16 * 1024 * 1024;
+/** Branch first-prompt bodies one snapshot reads for their previews; the rest show without one. */
+const MAX_BRANCH_PREVIEWS = 40;
 /** The custom type of the placeholder row that stands for an oversize entry. */
 export const ENTRY_TOO_LARGE_CUSTOM_TYPE = "entry-too-large";
 
@@ -56,6 +59,8 @@ interface IndexEntry {
 	offset: number;
 	length: number;
 	renders: boolean;
+	/** Message role (`user`, `assistant`, …) for a `message` entry, else null; branch points count messages. */
+	role: string | null;
 	todoCandidate: boolean;
 }
 
@@ -68,6 +73,8 @@ export interface HistorySnapshot {
 	/** Rendering rows on the active path above the window. */
 	olderCount: number;
 	leafId: string | null;
+	/** Off-path branches of the active path, from the index alone (ADR-0051). */
+	branches: BranchPoint[];
 	/** Id of the last complete entry in file order: the `get_entries { since }` cursor. */
 	lastId: string | null;
 	/**
@@ -84,7 +91,7 @@ export interface HistorySnapshot {
 export interface HistoryOlder {
 	entries: ChatEntry[];
 	olderCount: number;
-	/** False when `beforeId` is not on the active path (the caller must reload the tail). */
+	/** False when `beforeId` is not in the index (the caller must reload the tail). */
 	found: boolean;
 }
 
@@ -223,40 +230,49 @@ export class HistoryReader {
 		});
 	}
 
-	/** The tail window and the facts the resync needs. */
-	async snapshot(rows: number = DEFAULT_TAIL_ROWS): Promise<HistorySnapshot> {
+	/**
+	 * The tail window and the facts the resync needs. The window ends at `leafId` when the index holds it, otherwise
+	 * at the last entry in file order (OMP's leaf after a load); `leafId` of the result names the leaf actually used, so
+	 * a caller that passed the live leaf can tell a disk that trails the process. Legacy files ignore `leafId`.
+	 */
+	async snapshot(rows: number = DEFAULT_TAIL_ROWS, leafId?: string | null): Promise<HistorySnapshot> {
 		const header = this.#header;
 		if (header === null) throw new HistoryReadError("no-header");
-		const path = this.#activePath();
-		const { entries, start, todoSeed } = await this.#withFile(async handle => ({
+		const legacy = this.#version === null || this.#version < 3;
+		const wanted = legacy || leafId === undefined || leafId === null ? undefined : this.#byId.get(leafId);
+		const leaf = wanted ?? this.#entries.length - 1;
+		const path = this.#pathTo(leaf);
+		// Legacy files have no parent links, hence no branches.
+		const points = legacy ? [] : computeBranchPoints(this.#entries, path.map(position => this.#entries[position]!.id));
+		const { entries, start, todoSeed, branches } = await this.#withFile(async handle => ({
 			...await this.#readWindow(handle, path, path.length, rows),
 			todoSeed: await this.#readTodoSeed(handle, path),
+			branches: await this.#previewBranches(handle, points),
 		}));
 		return {
 			header,
 			title: this.#slotTitle ?? header.title ?? null,
 			entries,
 			olderCount: this.#rendersBefore(path, start),
-			leafId: this.#entries.at(-1)?.id ?? null,
+			leafId: this.#entries[leaf]?.id ?? null,
+			branches,
 			lastId: this.#entries.at(-1)?.id ?? null,
-			legacyIds: this.#version === null || this.#version < 3,
+			legacyIds: legacy,
 			badLines: this.#badLines,
 			todoSeed,
 		};
 	}
 
-	/** The next `rows` rendering rows above the row `beforeId` (the top of what the caller holds). */
+	/**
+	 * The next `rows` rendering rows above the row `beforeId` (the top of what the caller holds), walking that row's
+	 * own ancestors: the caller's window may end at a leaf that is not the last line of the file (ADR-0051).
+	 */
 	async loadOlder(beforeId: string, rows: number = DEFAULT_TAIL_ROWS): Promise<HistoryOlder> {
-		const path = this.#activePath();
-		const top = path.findIndex(position => this.#entries[position]?.id === beforeId);
-		if (top < 0) return { entries: [], olderCount: 0, found: false };
-		const { entries, start } = await this.#withFile(handle => this.#readWindow(handle, path, top, rows));
+		const top = this.#byId.get(beforeId);
+		if (top === undefined) return { entries: [], olderCount: 0, found: false };
+		const path = this.#pathTo(top);
+		const { entries, start } = await this.#withFile(handle => this.#readWindow(handle, path, path.length - 1, rows));
 		return { entries, olderCount: this.#rendersBefore(path, start), found: true };
-	}
-
-	/** Ids of the active path, oldest first (used to keep rows off the active path out of the model). */
-	activePathIds(): string[] {
-		return this.#activePath().map(position => this.#entries[position]!.id);
 	}
 
 	async #withFile<T>(work: (handle: FileHandle) => Promise<T>): Promise<T> {
@@ -362,7 +378,7 @@ export class HistoryReader {
 		const position = this.#entries.length;
 		const renders = rendersByFacts(facts);
 		// Legacy files (version < 3) may carry no parent links; the active path is then the file order.
-		this.#entries.push({ id: facts.id, parentId: facts.parentId, type: facts.type, offset, length: line.length, renders, todoCandidate: facts.todoCandidate });
+		this.#entries.push({ id: facts.id, parentId: facts.parentId, type: facts.type, offset, length: line.length, renders, role: facts.type === "message" ? facts.role : null, todoCandidate: facts.todoCandidate });
 		this.#byId.set(facts.id, position);
 		this.#pathCache = null;
 		this.#lastTag = { offset, length: line.length, text: line.toString("utf8", 0, Math.min(line.length, 128)) };
@@ -392,16 +408,18 @@ export class HistoryReader {
 		};
 	}
 
-	/** Positions of the active path, oldest first. */
-	#activePath(): number[] {
-		if (this.#pathCache !== null) return this.#pathCache;
+	/** Positions from the root to `leaf` (an index position), oldest first; the file-order leaf's path is cached. */
+	#pathTo(leaf: number): number[] {
+		const last = this.#entries.length - 1;
+		if (leaf === last && this.#pathCache !== null) return this.#pathCache;
 		let result: number[];
 		if (this.#version === null || this.#version < 3) {
-			result = this.#entries.map((_, index) => index);
+			result = [];
+			for (let index = 0; index <= leaf; index += 1) result.push(index);
 		} else {
 			result = [];
 			const seen = new Set<number>();
-			let position: number | undefined = this.#entries.length - 1;
+			let position: number | undefined = leaf;
 			while (position !== undefined && position >= 0 && !seen.has(position)) {
 				seen.add(position);
 				result.push(position);
@@ -410,8 +428,32 @@ export class HistoryReader {
 			}
 			result.reverse();
 		}
-		this.#pathCache = result;
+		if (leaf === last) this.#pathCache = result;
 		return result;
+	}
+
+	/** Fill in the first-prompt preview of each branch from its body; bounded, and a failed read keeps the bare branch. */
+	async #previewBranches(handle: FileHandle, points: readonly BranchPoint[]): Promise<BranchPoint[]> {
+		let budget = MAX_BRANCH_PREVIEWS;
+		const result: BranchPoint[] = [];
+		for (let pointIndex = points.length - 1; pointIndex >= 0; pointIndex -= 1) {
+			const point = points[pointIndex]!;
+			const branches: BranchInfo[] = [];
+			for (const branch of point.branches) {
+				const position = branch.firstPromptId === null || budget <= 0 ? undefined : this.#byId.get(branch.firstPromptId);
+				const entry = position === undefined ? undefined : this.#entries[position];
+				if (entry === undefined || entry.length > MAX_ROW_BYTES) {
+					branches.push(branch);
+					continue;
+				}
+				budget -= 1;
+				const row = await this.#rowOf(entry, await readRange(handle, entry.offset, entry.length), { bytes: BLOB_BYTES_BUDGET });
+				const preview = rewindTargets([row])[0]?.preview;
+				branches.push(preview === undefined ? branch : { ...branch, firstPrompt: preview });
+			}
+			result.push({ entryId: point.entryId, branches });
+		}
+		return result.reverse();
 	}
 
 	/** Fill by displayed cards, not raw assistant rows: a long read run costs one card. */
@@ -565,6 +607,7 @@ export function chatSnapshotFromHistory(
 		entries: history.entries,
 		olderCount: history.olderCount,
 		leafId: history.leafId,
+		branches: history.branches,
 		state: null,
 		pending: [],
 		stream: null,

@@ -30,6 +30,7 @@ import {
 	applyChatUiCancel,
 	applyChatUiRequest,
 	createChatModel,
+	dropPendingSavedElsewhere,
 	markPendingUnsaved,
 	normalizeUiRequest,
 	reduceChatFrame,
@@ -51,6 +52,25 @@ import {
 	type ChatLiteModel,
 } from "../../chat/model.ts";
 import { parseChatEntry, type ChatEntry } from "../../chat/messages.ts";
+import {
+	NAVIGATE_COMMAND,
+	NAVIGATE_ERROR_PATH,
+	branchNodesOf,
+	computeBranchPoints,
+	encodeNavigateCommand,
+	isRewindTarget,
+	navigateErrorCode,
+	navigationMarker,
+	rewindDraft,
+	undoOffer,
+	leafReaches,
+	type NavigateRefusal,
+	type NavigationKind,
+	type RewindDraft,
+} from "../../chat/rewind.ts";
+import { rendersTranscriptEntry } from "../../chat/transcript.ts";
+import { transcriptWindow } from "../../webview/lib/transcript-window.ts";
+import { blobsDirectoryFor, resolveBlobImages } from "./history-blobs.ts";
 import { parseAgentRoster } from "../../chat/agents.ts";
 import { childPageFromNative, type SubagentTranscriptPage } from "../../chat/subagent-transcript.ts";
 import { isRecord } from "../../guards.ts";
@@ -80,6 +100,7 @@ import {
 	type RpcWriteErrorCode,
 	type RpcToolDescriptor,
 } from "./protocol.ts";
+import { AGENT_LIVENESS_STATUS_KEY, AgentLivenessGuard } from "../../chat/agent-liveness.ts";
 import {
 	DEFAULT_TAIL_ROWS,
 	HistoryReader,
@@ -104,7 +125,7 @@ export const SYSTEM_TIMERS: RpcSessionTimers = {
 
 /** The part of {@link HistoryReader} the session uses. */
 export interface HistoryPort {
-	snapshot(rows?: number): Promise<HistorySnapshot>;
+	snapshot(rows?: number, leafId?: string | null): Promise<HistorySnapshot>;
 	loadOlder(beforeId: string, rows?: number): Promise<HistoryOlder>;
 	refresh(): Promise<HistoryRefresh>;
 }
@@ -162,7 +183,9 @@ export type RpcSessionOutput =
 	/** Fires after every applied frame or reconciliation while live; consumers read the model for activity. */
 	| { type: "model"; model: ChatModel }
 	/** The session healed itself (or was asked to): a bounded reason for the diagnostics log, never child text. */
-	| { type: "recovery"; reason: RpcRecoveryReason };
+	| { type: "recovery"; reason: RpcRecoveryReason }
+	/** An OMP extension's error `notify`; the host shows it as an error message rather than in the transcript. */
+	| { type: "extension-error"; message: string };
 
 export type RpcRecoveryReason = "probe-timeout" | "stale-working" | "frame-failure" | "manual-reconnect" | "auto-retry";
 
@@ -254,6 +277,92 @@ export type ThinkingLevelsResult =
 	| { status: "refused"; reason: SendRefusal }
 	| { status: "failed" };
 
+/** What `abort_and_restore_queue` handed back: the user's withdrawn messages, steering then follow-ups, oldest first. */
+export interface RestoredQueue {
+	readonly entries: readonly { readonly text: string; readonly images: readonly RpcImage[] }[];
+	/** OMP withheld the images to fit its response; the texts are complete. */
+	readonly imagesDropped: boolean;
+	/** OMP kept only an oldest-first prefix of the texts to fit its response. */
+	readonly truncated: boolean;
+}
+
+export type AbortRestoreOutcome =
+	| { status: "accepted"; restored: RestoredQueue }
+	| { status: "refused"; reason: SendRefusal }
+	| { status: "unconfirmed" };
+
+/** One in-place navigation (ADR-0051): rewind to a prompt, Undo to the previous tip, or switch to a branch tip. */
+export interface NavigateRequest {
+	/** 32 lowercase hex: it also names the marker OMP appends. */
+	requestId: string;
+	kind: NavigationKind;
+	targetId: string;
+	/** The leaf the request was made against (compare-and-swap, checked here and again inside OMP). */
+	expectedLeafId: string | null;
+	summarize: boolean;
+}
+
+export type NavigateOutcome =
+	/** `raced`: OMP reported a leaf other than the one checked (the session moved meanwhile); the move is still real. */
+	| { status: "done"; kind: NavigationKind; summarized: boolean; raced: boolean; draft: RewindDraft | null }
+	| { status: "refused"; reason: NavigateRefusal }
+	/** The command may or may not have run (lost answer or result). Never retried; the re-read shows the outcome. */
+	| { status: "unconfirmed" };
+
+const NAVIGATE_REQUEST_ID = /^[0-9a-f]{32}$/;
+/** How long the command's `prompt_result` may take; a summary is a model call. */
+const NAVIGATE_RESULT_MS = 30_000;
+const NAVIGATE_SUMMARY_RESULT_MS = 180_000;
+/** A disk that trails the live process gets one more look after this long before the re-sync reads `get_entries`. */
+const REBUILD_RETRY_MS = 150;
+
+/**
+ * How the wait for a navigation command ended (ADR-0051). `result`: its `prompt_result`; `local`: OMP answered the
+ * prompt itself (an input hook) and owes no result; `rejected`: an error acknowledgement; `fell-through`: the text
+ * reached the model as a prompt; `timeout`/`lost`: no answer, so the command may still be running.
+ */
+type NavigationWait = "result" | "local" | "rejected" | "fell-through" | "timeout" | "lost";
+
+/** A one-shot child command whose answer carries data (`cycle_*`, `promote`, `compact`, `export_html`). */
+export type CommandResult<T> =
+	| { status: "ok"; value: T }
+	| { status: "refused"; reason: SendRefusal; code?: string }
+	| { status: "unconfirmed" };
+
+/** Manual compaction can run a model summary: its answer is awaited far longer than an ordinary command. */
+const COMPACT_TIMEOUT_MS = 15 * 60_000;
+/** HTML export renders the whole session. */
+const EXPORT_TIMEOUT_MS = 2 * 60_000;
+/**
+ * Stop queues behind whatever serial command the child is running (a manual compaction at worst) and then waits
+ * for the turn to go idle. OMP has already withdrawn the queue when it answers, so the answer must not be given up early.
+ */
+const ABORT_RESTORE_TIMEOUT_MS = COMPACT_TIMEOUT_MS + 2 * 60_000;
+const MAX_RESTORED_ENTRIES = 64;
+
+/** The `abort_and_restore_queue` answer, validated; anything malformed restores nothing rather than guessing. */
+export function parseRestoredQueue(data: unknown): RestoredQueue {
+	const entries: { text: string; images: RpcImage[] }[] = [];
+	// OMP has already withdrawn these messages: whatever is not handed back is flagged, never dropped silently.
+	let imagesDropped = isRecord(data) && data.imagesDropped === true;
+	let truncated = isRecord(data) && data.truncated === true;
+	if (isRecord(data)) {
+		for (const queue of [data.steering, data.followUp]) {
+			if (!Array.isArray(queue)) continue;
+			for (const entry of queue) {
+				if (!isRecord(entry) || typeof entry.text !== "string") continue;
+				if (entries.length >= MAX_RESTORED_ENTRIES) { truncated = true; continue; }
+				const offered = Array.isArray(entry.images) ? entry.images : [];
+				const images = offered.slice(0, MAX_RESTORED_IMAGES).flatMap(image => isRecord(image) && image.type === "image" && typeof image.mimeType === "string" && typeof image.data === "string"
+					? [{ type: "image" as const, mimeType: image.mimeType, data: image.data }] : []);
+				if (images.length < offered.length) imagesDropped = true;
+				entries.push({ text: entry.text, images });
+			}
+		}
+	}
+	return { entries, imagesDropped, truncated };
+}
+
 export interface RpcSessionDiagnostics {
 	frames: Readonly<RpcFrameCounters>;
 	protocolErrors: number;
@@ -313,6 +422,8 @@ interface PendingCommand {
 	resolve(response: RpcResponseFrame): void;
 	reject(error: CommandFailure): void;
 	timer: unknown;
+	/** `#queueRevision` when the command was written: a `get_state` answer is no newer than a later `queue_update`. */
+	queueRevision: number;
 }
 
 interface LedgerEntry {
@@ -382,8 +493,11 @@ export class RpcSession {
 	readonly #frames = new RpcFrameReader();
 	readonly #pendingCommands = new Map<string, PendingCommand>();
 	readonly #subagentReferences = new Set<string>();
+	/** Session-bound, sequence-checked acceptance of the Desk liveness signal (ADR-0053). */
+	readonly #agentLiveness = new AgentLivenessGuard();
 	readonly #requests = new Map<string, Promise<SendOutcome>>();
 	readonly #queueRequests = new Map<string, Promise<RemoveQueuedOutcome>>();
+	readonly #abortRequests = new Map<string, Promise<AbortRestoreOutcome>>();
 	readonly #ledger: LedgerEntry[] = [];
 
 	#model: ChatModel;
@@ -399,6 +513,12 @@ export class RpcSession {
 	#identityVerified = false;
 	#nativeStateUnanswered = false;
 	#stateAnswerRevision = 0;
+	/**
+	 * Counts the child's `queue_update` frames. OMP can cut a `get_state` queue before a dequeue it then reports in a
+	 * `queue_update`, yet write the answer after that frame (a read sent while an abort runs is answered behind it);
+	 * folding that answer would bring back a message already delivered, and OMP coalesces, so nothing would remove it.
+	 */
+	#queueRevision = 0;
 	#fileMaterialized: boolean;
 	#slashArmed = false;
 	#internalSeq = 0;
@@ -414,6 +534,8 @@ export class RpcSession {
 	#reconcileRunning = false;
 	#reconcileAgain = false;
 	#reconcileAttempts = 0;
+	/** A full read checking pending rows against the file's other branches is in flight. */
+	#offPathCheck = false;
 	#reconcileTimer: unknown = null;
 	#pausedStateTimer: unknown = null;
 	#pausedStatePending = false;
@@ -440,6 +562,19 @@ export class RpcSession {
 	#autoRecoveryAttempt = 0;
 	#autoRecoveryTimer: unknown = null;
 	#mutationFence: string | null = null;
+	readonly #navigateRequests = new Map<string, Promise<NavigateOutcome>>();
+	/** The navigation command in flight: its internal id, its request id, the coded errors OMP reported, its waiter. */
+	#navigation: { id: string; requestId: string; errors: string[]; finish(how: NavigationWait): void } | null = null;
+	/**
+	 * A navigation whose answer never came: its handler may still move the leaf, so every mutation stays refused
+	 * until its late `prompt_result`, its marker on the active path, or the end of the process.
+	 */
+	#navigationFence: { id: string; requestId: string } | null = null;
+	#reconcileIdleWaiters: (() => void)[] = [];
+	/** Reads that replaced or extended the model with what the process holds; a navigation compares it across its re-sync. */
+	#authoritativeReads = 0;
+	/** The reader's file re-ids at load (version < 3): its ids are not the process's, so older rows cannot load by id. */
+	#readerLegacyIds = false;
 
 	constructor(options: RpcSessionOptions) {
 		this.#options = options;
@@ -654,14 +789,247 @@ export class RpcSession {
 		return { status: "done", removals };
 	}
 
-	/** Abort the running turn. Queues behind any command the child is already running (serial FIFO). */
-	abort(requestId: string): Promise<SendOutcome> {
-		return this.#once(requestId, () => {
+	/**
+	 * Stop the running turn the way the TUI's Escape does: `abort_and_restore_queue` withdraws the user's queued
+	 * messages before aborting, so neither the aborted turn nor OMP's stranded-queue drain can run them, and hands
+	 * them back for the draft. Queues behind any command the child is already running (serial FIFO), so the answer is
+	 * awaited past the longest serial command. An OMP without the command (before 18.8.5) gets a plain `abort`: the
+	 * turn still stops, and its queue stays in OMP, where the dock keeps showing it. Exactly-once per `requestId`.
+	 */
+	abortAndRestore(requestId: string): Promise<AbortRestoreOutcome> {
+		if (!REQUEST_ID_PATTERN.test(requestId)) return Promise.resolve({ status: "refused", reason: "bad-request-id" });
+		const known = this.#abortRequests.get(requestId);
+		if (known !== undefined) return known;
+		const promise = (async (): Promise<AbortRestoreOutcome> => {
 			const refusal = this.#controlRefusal();
-			if (refusal !== null) return Promise.resolve<SendOutcome>({ status: "refused", reason: refusal });
+			if (refusal !== null) return { status: "refused", reason: refusal };
 			this.#applyLocal({ type: "abort_requested" });
-			return this.#sendUser(requestId, { type: "abort" });
-		});
+			try {
+				const response = await this.#send(`${VSC_ID_PREFIX}${requestId}`, { type: "abort_and_restore_queue" }, ABORT_RESTORE_TIMEOUT_MS);
+				if (response.success) return { status: "accepted", restored: parseRestoredQueue(response.data) };
+				if (response.error !== "Unknown command: abort_and_restore_queue") return { status: "refused", reason: "rejected" };
+				const fallback = await this.#sendInternal({ type: "abort" });
+				return fallback.status === "accepted" ? { status: "accepted", restored: { entries: [], imagesDropped: false, truncated: false } } : fallback;
+			} catch (error) {
+				return this.#failureOutcome(error, requestId);
+			}
+		})();
+		this.#abortRequests.set(requestId, promise);
+		if (this.#abortRequests.size > MAX_REMEMBERED_REQUESTS) {
+			const oldest = this.#abortRequests.keys().next();
+			if (oldest.done !== true) this.#abortRequests.delete(oldest.value);
+		}
+		return promise;
+	}
+
+	/**
+	 * Move queued follow-ups to the end of the steering queue (`promote_queued_message`), one per item, in order.
+	 * OMP matches like a removal, so a follow-up it already delivered answers `gone`. Exactly-once per `requestId`.
+	 */
+	promoteQueued(requestId: string, items: readonly QueuedRef[]): Promise<RemoveQueuedOutcome> {
+		if (!REQUEST_ID_PATTERN.test(requestId)) return Promise.resolve({ status: "refused", reason: "bad-request-id" });
+		const known = this.#queueRequests.get(requestId);
+		if (known !== undefined) return known;
+		const promise = (async (): Promise<RemoveQueuedOutcome> => {
+			const refusal = this.#controlRefusal();
+			if (refusal !== null) return { status: "refused", reason: refusal };
+			const removals: QueueRemoval[] = [];
+			let halted = false;
+			for (const item of items) {
+				if (halted || item.queue !== "followUp" || this.#controlRefusal() !== null) {
+					removals.push({ queue: item.queue, text: item.text, status: "failed" });
+					continue;
+				}
+				const outcome = await this.#sendInternal({ type: "promote_queued_message", message: item.text });
+				if (outcome.status === "unconfirmed") halted = true;
+				removals.push(outcome.status === "unconfirmed" ? { queue: item.queue, text: item.text, status: "unknown" }
+					: outcome.status === "refused" ? { queue: item.queue, text: item.text, status: "failed" }
+						: isRecord(outcome.response.data) && outcome.response.data.promoted === true
+							? { queue: item.queue, text: item.text, status: "removed", images: [], imagesDropped: false }
+							: { queue: item.queue, text: item.text, status: "gone" });
+			}
+			return { status: "done", removals };
+		})();
+		this.#queueRequests.set(requestId, promise);
+		if (this.#queueRequests.size > MAX_REMEMBERED_REQUESTS) {
+			const oldest = this.#queueRequests.keys().next();
+			if (oldest.done !== true) this.#queueRequests.delete(oldest.value);
+		}
+		return promise;
+	}
+
+	/**
+	 * Move the active branch in place (ADR-0051): `/omp-desk-navigate` through `prompt`, then one re-sync through the
+	 * ordinary reconcile serializer. Success is proven only by the marker carrying this `requestId` on the active path
+	 * (the leaf or an ancestor of it); acknowledgements, results and errors only decide what to say otherwise. Never
+	 * written to the prompt ledger, never a pending user row. Exactly-once per `requestId`.
+	 */
+	navigate(request: NavigateRequest): Promise<NavigateOutcome> {
+		if (!NAVIGATE_REQUEST_ID.test(request.requestId)) return Promise.resolve({ status: "refused", reason: "bad-request-id" });
+		const known = this.#navigateRequests.get(request.requestId);
+		if (known !== undefined) return known;
+		const promise = this.#navigate(request);
+		this.#navigateRequests.set(request.requestId, promise);
+		if (this.#navigateRequests.size > MAX_REMEMBERED_REQUESTS) {
+			const oldest = this.#navigateRequests.keys().next();
+			if (oldest.done !== true) this.#navigateRequests.delete(oldest.value);
+		}
+		return promise;
+	}
+
+	/** Why a navigation cannot start now, or null. Every check is on host-known state; OMP re-checks its own. */
+	#navigationRefusal(request: NavigateRequest): NavigateRefusal | null {
+		const control = this.#controlRefusal();
+		if (control !== null) return control === "busy" ? "busy" : "not-live";
+		const model = this.#model;
+		if (model.state?.isCompacting === true || model.maintenance?.status === "working") return "compacting";
+		// Anything that could still append to the branch or wake a turn: a turn, a dialog, queued input, async work.
+		if (model.working || model.state?.isStreaming === true || model.uiRequest !== null || (model.state?.queuedMessageCount ?? 0) > 0 || !model.settled || model.asyncPaused) return "busy";
+		// A prompt whose fate is unknown, or a row not reconciled yet that a rewrite would re-anchor onto the new branch.
+		if (this.#ledger.some(entry => entry.unconfirmed) || [...model.pending.values()].some(row => !row.unsaved && row.hidden !== true)) return "busy";
+		// Only the command this module registered: a same-named prompt template or skill would reach the model.
+		if (!model.commands.some(command => command.name === NAVIGATE_COMMAND && command.source === "extension")) return "unsupported";
+		const durable = model.entries.slice(0, model.durableCount);
+		if (model.leafId !== request.expectedLeafId && !leafReaches(durable, request.expectedLeafId)) return "stale";
+		switch (request.kind) {
+			case "rewind": {
+				const target = durable.find(entry => entry.id === request.targetId);
+				if (target === undefined || !isRewindTarget(target)) return "target";
+				return null;
+			}
+			case "undo":
+				return undoOffer(durable, model.leafId)?.from === request.targetId ? null : "stale";
+			case "switch":
+				return model.branches.some(point => point.branches.some(branch => branch.tipId === request.targetId)) ? null : "target";
+		}
+	}
+
+	async #navigate(request: NavigateRequest): Promise<NavigateOutcome> {
+		let refusal = this.#navigationRefusal(request);
+		if (refusal !== null) return { status: "refused", reason: refusal };
+		// The model the request was checked against must be the one the command runs on.
+		while (this.#reconcileRunning) await new Promise<void>(resolve => this.#reconcileIdleWaiters.push(resolve));
+		refusal = this.#navigationRefusal(request);
+		if (refusal !== null) return { status: "refused", reason: refusal };
+		const sessionId = this.#boundId;
+		if (sessionId === null) return { status: "refused", reason: "not-live" };
+		// The draft comes from the entry the host holds: OMP's extension wrapper drops `editorText`/`editorImages`.
+		const target = request.kind === "rewind" ? this.#model.entries.find(entry => entry.id === request.targetId) : undefined;
+		const id = `${INTERNAL_ID_PREFIX}${++this.#internalSeq}`;
+		const wait = Promise.withResolvers<NavigationWait>();
+		const navigation = { id, requestId: request.requestId, errors: [] as string[], finish: (how: NavigationWait) => wait.resolve(how) };
+		this.#navigation = navigation;
+		const timer = this.#timers.setTimeout(() => wait.resolve("timeout"), request.summarize ? NAVIGATE_SUMMARY_RESULT_MS : NAVIGATE_RESULT_MS);
+		// Set from the send's callback when nothing was written; `as` keeps it from narrowing to `null`.
+		let notSent = null as NavigateRefusal | null;
+		const message = encodeNavigateCommand({ v: 1, requestId: request.requestId, kind: request.kind, sessionId, expectedLeafId: request.expectedLeafId, targetId: request.targetId, summarize: request.summarize });
+		// No `streamingBehavior`: if the text ever reached the model during a race, OMP refuses it as busy instead of
+		// queueing it as a steer. The acknowledgement comes when OMP routed the command, before its handler ran.
+		this.#send(id, { type: "prompt", message }).then(
+			ack => {
+				if (!ack.success) navigation.finish("rejected");
+				else if (isRecord(ack.data) && ack.data.agentInvoked === false) navigation.finish("local");
+				else if (isRecord(ack.data) && ack.data.agentInvoked === true) navigation.finish("fell-through");
+			},
+			(error: unknown) => {
+				const failure = this.#failureOutcome(error, null);
+				if (failure.status === "refused") notSent = failure.reason === "not-owner" ? "not-owner" : failure.reason === "not-live" ? "not-live" : "failed";
+				navigation.finish(failure.status === "refused" ? "rejected" : "lost");
+			},
+		);
+		const how = await wait.promise;
+		this.#timers.clearTimeout(timer);
+		this.#navigation = null;
+		if (notSent !== null) return { status: "refused", reason: notSent };
+		// The command reached the model as text: stop that turn before it does anything.
+		if (how === "fell-through") void this.#sendInternal({ type: "abort" });
+		if (how === "timeout" || how === "lost") this.#navigationFence = { id, requestId: request.requestId };
+		const reads = this.#authoritativeReads;
+		await this.#reconcileSettled();
+		const read = this.#authoritativeReads !== reads;
+		const durable = this.#model.entries.slice(0, this.#model.durableCount);
+		const marker = durable.map(entry => navigationMarker(entry)).find(found => found?.requestId === request.requestId) ?? null;
+		if (marker !== null) {
+			if (this.#navigationFence?.requestId === request.requestId) this.#navigationFence = null;
+			let draft: RewindDraft | null = null;
+			if (target !== undefined) {
+				const copy = structuredClone(target);
+				const file = this.#boundFile ?? this.#options.sessionFile;
+				await resolveBlobImages(copy, file === null ? null : blobsDirectoryFor(file), { bytes: 0 });
+				draft = rewindDraft(copy);
+			}
+			return { status: "done", kind: marker.kind, summarized: marker.summarized, raced: marker.raced === true, draft };
+		}
+		if (how === "fell-through") return { status: "refused", reason: "failed" };
+		// A coded refusal is thrown before anything moved, so it stands without the re-read.
+		if (navigation.errors.length > 0) return { status: "refused", reason: this.#navigateRefusalOf(navigation.errors) };
+		return read && (how === "result" || how === "local" || how === "rejected") ? { status: "refused", reason: "failed" } : { status: "unconfirmed" };
+	}
+
+	#navigateRefusalOf(errors: readonly string[]): NavigateRefusal {
+		const code = navigateErrorCode(errors[0]);
+		return code === "bad-request" || code === "mode" ? "failed" : code;
+	}
+
+	/** Run (or join) the one reconcile serializer and wait until it is idle. */
+	async #reconcileSettled(): Promise<void> {
+		this.#requestReconcile();
+		while (this.#reconcileRunning) await new Promise<void>(resolve => this.#reconcileIdleWaiters.push(resolve));
+	}
+
+	/**
+	 * Manual compaction (`compact`), refused while a turn runs. OMP emits no maintenance event for a manual
+	 * pass, so the session shows its own progress and outcome on the working line, as a native one would.
+	 */
+	async compact(customInstructions: string | undefined): Promise<CommandResult<null>> {
+		const refusal = this.#controlRefusal() ?? (this.#model.working || this.#model.maintenance?.status === "working" ? "busy" : null);
+		if (refusal !== null) return { status: "refused", reason: refusal };
+		this.#applyLocal({ type: "auto_compaction_start", action: "compact", reason: "manual" });
+		const outcome = await this.#sendInternal({ type: "compact", ...(customInstructions === undefined ? {} : { customInstructions }) }, COMPACT_TIMEOUT_MS);
+		const errorMessage = outcome.status === "accepted" ? undefined : outcome.status === "unconfirmed" ? "OMP did not report the outcome." : "OMP did not compact the session.";
+		if (this.#live) this.#applyLocal({ type: "auto_compaction_end", action: "compact", aborted: false, willRetry: false, ...(errorMessage === undefined ? {} : { errorMessage }) });
+		if (outcome.status === "accepted") {
+			this.#requestReconcile();
+			return { status: "ok", value: null };
+		}
+		return outcome;
+	}
+
+	/** `cycle_model`: the next role or scoped model. `null` when OMP had nothing to cycle to. */
+	async cycleModel(): Promise<CommandResult<{ model: ChatLiteModel; thinkingLevel: string | null } | null>> {
+		const refusal = this.#controlRefusal();
+		if (refusal !== null) return { status: "refused", reason: refusal };
+		const outcome = await this.#sendInternal({ type: "cycle_model" });
+		if (outcome.status !== "accepted") return outcome;
+		const data = outcome.response.data;
+		if (data === null || data === undefined) return { status: "ok", value: null };
+		const model = isRecord(data) ? parseLiteModel(data.model) : null;
+		if (model === null) return { status: "unconfirmed" };
+		const thinkingLevel = isRecord(data) && typeof data.thinkingLevel === "string" ? data.thinkingLevel : null;
+		this.#applyLocal({ type: "config_update", model, ...(thinkingLevel === null ? {} : { thinkingLevel }) });
+		return { status: "ok", value: { model, thinkingLevel } };
+	}
+
+	/** `cycle_thinking_level`: the next selector of the live model. `null` when the model has none. */
+	async cycleThinkingLevel(): Promise<CommandResult<string | null>> {
+		const refusal = this.#controlRefusal();
+		if (refusal !== null) return { status: "refused", reason: refusal };
+		const outcome = await this.#sendInternal({ type: "cycle_thinking_level" });
+		if (outcome.status !== "accepted") return outcome;
+		const data = outcome.response.data;
+		const level = isRecord(data) && typeof data.level === "string" ? data.level : null;
+		if (level !== null) this.#applyLocal({ type: "thinking_level_changed", thinkingLevel: level });
+		return { status: "ok", value: level };
+	}
+
+	/** `export_html` to `outputPath`; the value is the path OMP wrote. */
+	async exportHtml(outputPath: string): Promise<CommandResult<string>> {
+		const refusal = this.#controlRefusal();
+		if (refusal !== null) return { status: "refused", reason: refusal };
+		const outcome = await this.#sendInternal({ type: "export_html", outputPath }, EXPORT_TIMEOUT_MS);
+		if (outcome.status !== "accepted") return outcome;
+		const data = outcome.response.data;
+		return isRecord(data) && typeof data.path === "string" && data.path.length > 0 ? { status: "ok", value: data.path } : { status: "unconfirmed" };
 	}
 
 	/** Answer the dialog `response.id`. Returns false when no such dialog is pending or the write failed. */
@@ -855,10 +1223,11 @@ export class RpcSession {
 			const history = await reader.snapshot(this.#tailRows);
 			if (this.#disposed) return;
 			this.#reader = reader;
+			this.#readerLegacyIds = history.legacyIds;
 			this.#boundId = history.header.id;
 			this.#cursor = history.legacyIds ? null : history.lastId;
 			if (!this.#model.todoAuthoritative) this.#model = { ...this.#model, todoSeed: history.todoSeed };
-			this.#model = applyChatRewrite(this.#model, history.entries, history.olderCount, history.leafId, { now: this.#timers.now() });
+			this.#model = { ...applyChatRewrite(this.#model, history.entries, history.olderCount, history.leafId, { now: this.#timers.now() }), branches: history.branches };
 			this.#model = {
 				...this.#model,
 				header: { ...history.header, ...(history.title === null ? {} : { title: history.title }) },
@@ -883,6 +1252,7 @@ export class RpcSession {
 			throw new SessionFailure("attach-failed");
 		}
 		if (this.#disposed) return;
+		if (result.truncated) this.#agentLiveness.forgetLast();
 		if (result.child.state === "exited") {
 			await this.#paint;
 			this.#stopped("child-exited");
@@ -942,6 +1312,9 @@ export class RpcSession {
 			if (isRecord(data) && Array.isArray(data.commands)) this.#applyFrame({ type: "available_commands_update", commands: parseCommands(data.commands) });
 		});
 		await agentsPromise;
+		// The resync reset cleared the registry rows; the newest accepted publication restores them until the next one.
+		const liveAgents = this.#agentLiveness.last;
+		if (liveAgents !== null && !this.#disposed && !this.#ended) this.#applyLocal({ type: "agents_liveness", agents: liveAgents });
 		await askDialogPromise;
 		await this.#reconcileEntries();
 		if (this.#disposed || this.#ended) return;
@@ -1071,6 +1444,27 @@ export class RpcSession {
 	}
 
 	#onFrame(frame: Record<string, unknown>): void {
+		const navigation = this.#navigation;
+		// The navigation command's own completion and coded refusals belong to `navigate`, not to the transcript.
+		if (navigation !== null) {
+			if (frame.type === "prompt_result" && frame.id === navigation.id) {
+				navigation.finish(frame.agentInvoked === true ? "fell-through" : "result");
+				return;
+			}
+			if (frame.type === "extension_error" && frame.extensionPath === NAVIGATE_ERROR_PATH) {
+				if (navigation.errors.length < 8) navigation.errors.push(typeof frame.error === "string" ? frame.error.slice(0, 200) : "");
+				return;
+			}
+			// The command text became a user message: an input hook rewrote it, or OMP no longer routes it.
+			if (frame.type === "message_start" && isRecord(frame.message) && frame.message.role === "user" && JSON.stringify(frame.message.content ?? "").includes(navigation.requestId)) navigation.finish("fell-through");
+		}
+		// Only a navigation sends a prompt with an internal id: a result after its wait ended (timeout, fall-through)
+		// is not a user turn. It lifts the fence of an unanswered one; the re-read shows the outcome.
+		if (frame.type === "prompt_result" && typeof frame.id === "string" && frame.id.startsWith(INTERNAL_ID_PREFIX)) {
+			if (this.#navigationFence?.id === frame.id) this.#navigationFence = null;
+			this.#requestReconcile();
+			return;
+		}
 		switch (frame.type) {
 			case "response":
 				this.#onResponse(frame);
@@ -1111,7 +1505,7 @@ export class RpcSession {
 					this.#nativeStateUnanswered = false;
 					const mismatch = this.#identityVerified ? this.#identityMismatch(state, false) : null;
 					if (mismatch !== null) this.#fail(mismatch);
-					else this.#applyFrame({ type: "state_update", state: state.lite, todoSeed: state.todoSeed });
+					else this.#applyFrame({ type: "state_update", state: this.#newestQueue(state.lite, pending.queueRevision), todoSeed: state.todoSeed });
 				}
 			}
 			if (pending.command.type === "get_subagents") {
@@ -1155,6 +1549,12 @@ export class RpcSession {
 				if (typeof frame.targetId === "string") this.#dropDialog(frame.targetId);
 				return;
 			case "setStatus":
+				// The Desk liveness signal is data for the Agents row, never status-line text.
+				if (frame.statusKey === AGENT_LIVENESS_STATUS_KEY) {
+					const agents = this.#agentLiveness.accept(frame.statusText, this.#boundId);
+					if (agents !== null) this.#applyFrame({ type: "agents_liveness", agents });
+					return;
+				}
 				if (typeof frame.statusKey === "string") {
 					this.#applyFrame({
 						type: "ui_status",
@@ -1168,9 +1568,18 @@ export class RpcSession {
 					const lines = Array.isArray(frame.widgetLines)
 						? frame.widgetLines.filter((line): line is string => typeof line === "string")
 						: null;
-					this.#applyFrame({ type: "ui_widget", key: frame.widgetKey, lines });
+					const placement: { placement?: "aboveEditor" | "belowEditor" } = frame.widgetPlacement === "aboveEditor" || frame.widgetPlacement === "belowEditor" ? { placement: frame.widgetPlacement } : {};
+					this.#applyFrame({ type: "ui_widget", key: frame.widgetKey, lines, ...placement });
 				}
 				return;
+			case "notify": {
+				if (typeof frame.message !== "string" || frame.message.trim().length === 0) return;
+				// Untrusted extension text: bounded here, shown as text (never markup) by the page and the host.
+				const message = frame.message.slice(0, 2_000);
+				if (frame.notifyType === "error") { if (this.#live) this.#emit({ type: "extension-error", message }); }
+				else this.#applyFrame({ type: "ui_notify", level: frame.notifyType === "warning" ? "warning" : "info", message });
+				return;
+			}
 			case "set_editor_text":
 				if (typeof frame.text === "string") this.#applyFrame({ type: "ui_editor_text", text: frame.text });
 				return;
@@ -1209,7 +1618,7 @@ export class RpcSession {
 		if (frame.type === "subagent_lifecycle" && frame.payload.status === "started" && this.#model.agents.has(frame.payload.id)) {
 			this.#subagentReferences.delete(frame.payload.id);
 			this.#subagentReferences.add(frame.payload.id);
-		} else if (frame.type === "agents_snapshot") {
+		} else if (frame.type === "agents_snapshot" || frame.type === "agents_liveness") {
 			for (const agent of frame.agents) { this.#subagentReferences.delete(agent.id); this.#subagentReferences.add(agent.id); }
 		}
 		while (this.#subagentReferences.size > 256) {
@@ -1235,6 +1644,12 @@ export class RpcSession {
 		switch (frame.type) {
 			case "message_end":
 				this.#reconcileAttempts = 0;
+				// The transcript recorded a prompt while messages are listed: OMP does not report every delivery of a
+				// steer it took into a streaming response, so read the queue back rather than keep listing it.
+				if (frame.message.role === "user" && this.#live && (this.#model.state?.queuedMessageCount ?? 0) > 0) void this.#refreshState();
+				return;
+			case "queue_update":
+				this.#queueRevision += 1;
 				return;
 			case "agent_end":
 				this.#requestReconcile();
@@ -1296,6 +1711,9 @@ export class RpcSession {
 	}
 
 	async #runReconcile(): Promise<void> {
+		// A navigation re-syncs through this serializer as soon as its command answered; reading mid-command could
+		// only show a leaf that moved without its marker yet.
+		if (this.#navigation !== null) return;
 		this.#reconcileRunning = true;
 		try {
 			do {
@@ -1304,6 +1722,7 @@ export class RpcSession {
 			} while (this.#reconcileAgain && this.#live);
 		} finally {
 			this.#reconcileRunning = false;
+			for (const resolve of this.#reconcileIdleWaiters.splice(0)) resolve();
 		}
 		this.#afterReconcile();
 	}
@@ -1311,11 +1730,18 @@ export class RpcSession {
 	/** After a pass: retry while a pending row stays unmatched, then flag it *not yet saved* once settled. */
 	#afterReconcile(): void {
 		this.#clearReconcileTimer();
+		const fence = this.#navigationFence;
+		if (fence !== null && this.#model.entries.some(entry => navigationMarker(entry)?.requestId === fence.requestId)) this.#navigationFence = null;
 		if (!this.#live) return;
 		if (this.#model.pending.size === 0) {
 			this.#reconcileAttempts = 0;
 			this.#lostPromptCheck();
 			return;
+		}
+		// Rows replayed from a branch the user rewound away from are saved there, not lost: drop them once settled.
+		if (this.#reconcileAttempts === 0 && this.#model.settled && this.#model.branches.length > 0 && !this.#offPathCheck && [...this.#model.pending.values()].some(row => !row.unsaved && row.hidden !== true)) {
+			this.#offPathCheck = true;
+			void this.#dropPendingSavedElsewhere().finally(() => { this.#offPathCheck = false; });
 		}
 		this.#reconcileAttempts += 1;
 		const budget = this.#options.reconcileAttempts ?? DEFAULT_RECONCILE_ATTEMPTS;
@@ -1336,6 +1762,21 @@ export class RpcSession {
 		}
 	}
 
+	/** One full read: the file's entries off the active path consume the pending rows they persisted. */
+	async #dropPendingSavedElsewhere(): Promise<void> {
+		const outcome = await this.#sendInternal({ type: "get_entries" });
+		if (outcome.status !== "accepted" || this.#disposed || this.#ended) return;
+		const data = outcome.response.data;
+		if (!isRecord(data) || !Array.isArray(data.entries)) return;
+		const raw = data.entries.filter(isRecord);
+		const onPath = new Set(branchOf(raw, typeof data.leafId === "string" ? data.leafId : null).rows.map(row => row.id));
+		const offPath = raw.flatMap(row => { if (onPath.has(row.id)) return []; const parsed = parseChatEntry(row); return parsed === null ? [] : [parsed]; });
+		const next = dropPendingSavedElsewhere(this.#model, offPath, { now: this.#timers.now() });
+		if (next === this.#model) return;
+		this.#model = next;
+		if (this.#live) this.#publish();
+	}
+
 	#clearReconcileTimer(): void {
 		if (this.#reconcileTimer !== null) {
 			this.#timers.clearTimeout(this.#reconcileTimer);
@@ -1345,8 +1786,8 @@ export class RpcSession {
 
 	/**
 	 * `get_entries { since: cursor }` merged into the model. An unknown cursor, a legacy-id file or a missing reader
-	 * takes one full read (deferred to settle while a turn streams); a delta whose branch does not extend the known
-	 * leaf reloads the tail instead of guessing.
+	 * takes one full read (deferred to settle while a turn streams). A delta that does not extend the known leaf, or
+	 * an empty one whose leaf moved (a rewind, OMP's own turn recovery), rebuilds the window at the live leaf.
 	 */
 	async #reconcileEntries(): Promise<void> {
 		const since = this.#cursor;
@@ -1373,42 +1814,79 @@ export class RpcSession {
 			this.#applyFull(raw, leafId);
 			return;
 		}
-		if (raw.length === 0) return;
+		const live = { leafId, lastId: typeof raw.at(-1)?.id === "string" ? raw.at(-1)!.id as string : since };
+		if (raw.length === 0) {
+			if (leafId !== this.#model.leafId) await this.#rebuild(live);
+			else this.#authoritativeReads += 1;
+			return;
+		}
 		const branch = branchOf(raw, leafId);
 		const expectedParent = this.#model.leafId;
 		if (!branch.found || (expectedParent !== null && branch.rootParent !== expectedParent)) {
-			await this.#rebuild();
+			await this.#rebuild(live);
 			return;
 		}
-		this.#cursor = raw.at(-1)!.id as string;
+		this.#cursor = live.lastId;
 		const rows = branch.rows.flatMap(row => { const parsed = parseChatEntry(row); return parsed === null ? [] : [parsed]; });
 		this.#model = applyChatEntries(this.#model, rows, leafId, { now: this.#timers.now() });
+		this.#authoritativeReads += 1;
 		if (this.#live) {
 			this.#emit({ type: "entries", payload: { epoch: this.epoch, entries: rows, leafId } });
 			this.#emitModel();
 		}
 	}
 
-	/** A full `get_entries`: authoritative for the whole active branch (used without a usable disk cursor). */
+	/**
+	 * A full `get_entries`: authoritative for the whole active branch. With a reader, only the tail window is applied
+	 * (older rows load from disk, by ancestry), so a long session never repaints in full.
+	 */
 	#applyFull(raw: readonly Record<string, unknown>[], leafId: string | null): void {
 		const branch = branchOf(raw, leafId);
-		const rows = branch.rows.flatMap(row => { const parsed = parseChatEntry(row); return parsed === null ? [] : [parsed]; });
+		let rows = branch.rows.flatMap(row => { const parsed = parseChatEntry(row); return parsed === null ? [] : [parsed]; });
+		let olderCount = 0;
+		if (this.#reader !== null && !this.#readerLegacyIds) {
+			const window = transcriptWindow(rows, this.#tailRows, null);
+			const sourceIds = new Set(window.rows.flatMap(card => card.sourceIds));
+			const first = window.olderRows === 0 ? 0 : rows.findIndex(entry => sourceIds.has(entry.id));
+			if (first > 0) {
+				olderCount = rows.slice(0, first).filter(entry => rendersTranscriptEntry(entry)).length;
+				rows = rows.slice(first);
+			}
+		}
 		this.#cursor = raw.at(-1)?.id === undefined ? null : (raw.at(-1)!.id as string);
-		this.#model = applyChatRewrite(this.#model, rows, 0, leafId, { now: this.#timers.now() });
+		const branches = computeBranchPoints(branchNodesOf(raw), branch.rows.map(row => row.id as string));
+		this.#model = { ...applyChatRewrite(this.#model, rows, olderCount, leafId, { now: this.#timers.now() }), branches };
+		this.#authoritativeReads += 1;
 		if (this.#live) this.#publish();
 	}
 
-	/** The active branch changed under us (or the delta cannot be attached): reload from disk, else a full read. */
-	async #rebuild(): Promise<void> {
+	/**
+	 * The active branch changed under us (or the delta cannot be attached): reload the window from disk, else a full
+	 * read. `live` is what the process just reported; the disk is used only when it holds exactly that (its last entry
+	 * is the live cursor, and the live leaf is indexed), because OMP's write queue can trail the process. One short
+	 * second look, then `get_entries`. Without `live` (after compaction) the disk is taken as it is.
+	 */
+	async #rebuild(live?: { leafId: string | null; lastId: string }): Promise<void> {
 		const reader = this.#reader;
 		if (reader !== null) {
 			try {
-				await reader.refresh();
-				const history = await reader.snapshot(this.#tailRows);
-				this.#cursor = history.legacyIds ? null : history.lastId;
-				this.#model = applyChatRewrite(this.#model, history.entries, history.olderCount, history.leafId, { now: this.#timers.now() });
-				if (this.#live) this.#publish();
-				if (!history.legacyIds) return;
+				for (let attempt = 0; ; attempt += 1) {
+					await reader.refresh();
+					const history = await reader.snapshot(this.#tailRows, live?.leafId);
+					if (this.#disposed || this.#ended) return;
+					const agrees = live === undefined || (history.lastId === live.lastId && history.leafId === live.leafId);
+					if (agrees || history.legacyIds) {
+						this.#cursor = history.legacyIds ? null : history.lastId;
+						this.#model = { ...applyChatRewrite(this.#model, history.entries, history.olderCount, history.leafId, { now: this.#timers.now() }), branches: history.branches };
+						if (this.#live) this.#publish();
+						if (history.legacyIds) break;
+						this.#authoritativeReads += 1;
+						return;
+					}
+					if (attempt > 0) break;
+					await new Promise<void>(resolve => this.#timers.setTimeout(resolve, REBUILD_RETRY_MS));
+					if (this.#disposed || this.#ended) return;
+				}
 			} catch {
 				this.#historyFallbacks += 1;
 			}
@@ -1439,6 +1917,14 @@ export class RpcSession {
 		if (this.#disposed || this.#ended || !this.#live || state === null) return;
 		const mismatch = this.#identityMismatch(state, false);
 		if (mismatch !== null) this.#fail(mismatch);
+	}
+
+	/** A `get_state` cut, with the queue the model already holds when a `queue_update` arrived after the read was sent. */
+	#newestQueue(state: ChatLiteState, sentAtRevision: number): ChatLiteState {
+		const current = this.#model.state;
+		if (sentAtRevision === this.#queueRevision || current === null) return state;
+		const { queuedMessages: _stale, ...rest } = state;
+		return { ...rest, queuedMessageCount: current.queuedMessageCount, ...(current.queuedMessages === undefined ? {} : { queuedMessages: current.queuedMessages }) };
 	}
 
 	/** Public idle covers background jobs/delivery that never emit another main-agent end. */
@@ -1506,9 +1992,12 @@ export class RpcSession {
 		}
 	}
 
-	/** Why a mutation cannot be sent now, or null. */
+	/**
+	 * Why a mutation cannot be sent now, or null. A navigation in flight, or one whose answer never came, fences every
+	 * mutation (prompts, queue edits, settings, compaction) so nothing appends to the branch it is moving.
+	 */
 	#controlRefusal(): SendRefusal | null {
-		return this.#mutationFence !== null ? "busy" : this.#live && this.#identityVerified ? null : "not-live";
+		return this.#mutationFence !== null || this.#navigation !== null || this.#navigationFence !== null ? "busy" : this.#live && this.#identityVerified ? null : "not-live";
 	}
 
 	#once(requestId: string, run: () => Promise<SendOutcome>): Promise<SendOutcome> {
@@ -1578,7 +2067,7 @@ export class RpcSession {
 				this.#pendingCommands.delete(id);
 				reject(new CommandFailure("timeout"));
 			}, timeoutMs ?? this.#options.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS);
-			this.#pendingCommands.set(id, { resolve, reject, timer, command });
+			this.#pendingCommands.set(id, { resolve, reject, timer, command, queueRevision: this.#queueRevision });
 			this.#channel.writeLine(encodeCommand(id, command)).catch((error: unknown) => {
 				if (this.#pendingCommands.get(id) === undefined) return;
 				this.#pendingCommands.delete(id);

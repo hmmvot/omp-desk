@@ -62,8 +62,10 @@ export function toolPresentation(tool: ProjectedTool, cwd?: string): ToolPresent
  const path = text(args.path ?? args.file_path ?? args.file);
  const fileRows = [details.perFileResults, details.files, record(tool.active?.streamUpdate).files, record(tool.active?.streamUpdate).perFileDiffPreview].flatMap(value => Array.isArray(value) ? value.filter(isRecord) : []);
  const files = fileRows.flatMap(file => { const value = text(file.path ?? file.file_path); return value ? [value] : []; });
+ // OMP's hashline `edit` carries its files only as `[PATH#TAG]` section headers in `input`; its result names one `path`.
+ const editPaths = category !== "edit" ? [] : text(details.path) ? [text(details.path)] : path ? [path] : [...text(args.input).matchAll(/^\[([^\]\n#]+)#[0-9A-Fa-f]{4}\]/gm)].map(match => match[1]!.trim());
  const filePath = category === "read" ? text(details.resolvedPath) || readFilePath(path) : path;
- const paths = category === "edit" || category === "read" ? [...new Set((files.length ? files : filePath ? [filePath] : []).map(value => normalizeToolPath(value,cwd)))] : [];
+ const paths = category === "edit" || category === "read" ? [...new Set((files.length ? files : category === "edit" ? editPaths : filePath ? [filePath] : []).map(value => normalizeToolPath(value,cwd)))] : [];
  const stream = record(tool.active?.streamUpdate);
  const preview = (value: unknown): boolean => typeof value === "string" ? value.trim().length > 0 : Array.isArray(value) ? value.length > 0 : false;
  const liveDetail = category === "edit" && (tool.status === "queued" || tool.status === "running") && [args.content,args.newText,args.patch,args.input,args.previewDiff,args.diff,details.diff,record(stream.editDiffPreview).diff,stream.editStreamingFallback,...(Array.isArray(stream.files) ? stream.files.filter(isRecord).map(file => file.diff) : []),...(Array.isArray(stream.perFileDiffPreview) ? stream.perFileDiffPreview.filter(isRecord).map(file => file.diff) : []),partial.editDiffPreview,partial.content].some(preview);

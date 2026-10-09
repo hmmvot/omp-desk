@@ -1,10 +1,11 @@
 import type { ReactNode } from "react";
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState, useSyncExternalStore } from "react";
 import type { ChatContent, MessageContent } from "../../chat/messages.ts";
 import { Markdown } from "./Markdown.tsx";
 import { UserImageReferencesContext } from "./ImageReference.tsx";
 import { PacedMarkdown } from "./PacedMarkdown.tsx";
 import { SavedImage } from "./SavedImage.tsx";
+import { getTranscriptToggles, subscribeTranscriptToggles } from "../lib/transcript-toggles.ts";
 
 export interface MessageContentViewProps {
 	content: MessageContent;
@@ -15,12 +16,21 @@ export interface MessageContentViewProps {
 	references?: boolean;
 }
 export interface AssistantContentViewProps { content: readonly ChatContent[]; streaming?: boolean; bypassPacing?: boolean }
-export interface NativeDisclosureProps { title: ReactNode; children: ReactNode; className?: string }
+export interface NativeDisclosureProps { title: ReactNode; children: ReactNode; className?: string; initiallyOpen?: boolean; forceOpen?: { open: boolean; generation: number } }
 
 /** Materialize large Markdown and archive bodies only on disclosure. */
-export function NativeDisclosure({ title, children, className = "" }: NativeDisclosureProps) {
-	const [open, setOpen] = useState(false);
-	return <details className={`omp-native-disclosure ${className}`} onToggle={event => setOpen(event.currentTarget.open)} onKeyDown={event => {
+export function NativeDisclosure({ title, children, className = "", initiallyOpen = false, forceOpen }: NativeDisclosureProps) {
+	const [open, setOpen] = useState(initiallyOpen);
+	const ref = useRef<HTMLDetailsElement | null>(null);
+	const applied = useRef(forceOpen?.generation);
+	// A global press (the thinking toggle) opens or closes this block once; the user's own clicks win afterwards.
+	useEffect(() => {
+		if (forceOpen === undefined || applied.current === forceOpen.generation) return;
+		applied.current = forceOpen.generation;
+		if (ref.current !== null) ref.current.open = forceOpen.open;
+		setOpen(forceOpen.open);
+	}, [forceOpen?.generation, forceOpen?.open]);
+	return <details ref={ref} open={initiallyOpen || undefined} className={`omp-native-disclosure ${className}`} onToggle={event => setOpen(event.currentTarget.open)} onKeyDown={event => {
 		if (event.key !== "Escape" || !event.currentTarget.open || !event.currentTarget.contains(document.activeElement)) return;
 		event.preventDefault(); event.stopPropagation(); event.currentTarget.querySelector<HTMLElement>(":scope > summary")?.focus(); event.currentTarget.open = false;
 	}}>
@@ -29,13 +39,19 @@ export function NativeDisclosure({ title, children, className = "" }: NativeDisc
 	</details>;
 }
 
+/** A thinking block: closed unless the transcript's thinking toggle (`Ctrl+T`) shows thinking. */
+function ThinkingDisclosure({ children }: { children: ReactNode }) {
+	const toggles = useSyncExternalStore(subscribeTranscriptToggles, getTranscriptToggles);
+	return <NativeDisclosure title="Thinking" className="omp-thinking" initiallyOpen={toggles.thinking} forceOpen={{ open: toggles.thinking, generation: toggles.generation }}>{children}</NativeDisclosure>;
+}
+
 
 function ContentBlock({ block, pace = false, streaming = false, bypassPacing = false, imageNumber, imageAnchor }: { block: ChatContent; pace?: boolean; streaming?: boolean; bypassPacing?: boolean; imageNumber?: number; imageAnchor?: string }) {
 	switch (block.type) {
 		case "text":
 			return pace ? <PacedMarkdown text={block.text} streaming={streaming} bypass={bypassPacing} /> : <Markdown text={block.text} />;
 		case "thinking":
-			return block.thinking.trim().length === 0 ? null : <NativeDisclosure title="Thinking" className="omp-thinking">{pace ? <PacedMarkdown text={block.thinking} streaming={streaming} bypass={bypassPacing} /> : <Markdown text={block.thinking} />}</NativeDisclosure>;
+			return block.thinking.trim().length === 0 ? null : <ThinkingDisclosure>{pace ? <PacedMarkdown text={block.thinking} streaming={streaming} bypass={bypassPacing} /> : <Markdown text={block.thinking} />}</ThinkingDisclosure>;
 		case "redactedThinking": return null;
 		case "image":
 			return <figure className="omp-native-image" id={imageAnchor} tabIndex={imageAnchor === undefined ? undefined : -1} data-image-number={imageNumber}>

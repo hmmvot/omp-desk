@@ -25,7 +25,8 @@ export type NativeEventFrame =
 	| { type: "goal_updated"; goal: unknown; state?: unknown }
 	| { type: "config_warnings_changed" | "advisor_cost_changed" | "advisor_yielded" };
 
-const MAINTENANCE_ACTIONS: Record<string, true> = { "context-full": true, remote: true, handoff: true, shake: true, snapcompact: true };
+/** Native maintenance actions, plus `compact`: the host's own progress for a manual `compact` command, which emits no maintenance event. */
+const MAINTENANCE_ACTIONS: Record<string, true> = { "context-full": true, remote: true, handoff: true, shake: true, snapcompact: true, compact: true };
 function isCount(value: unknown): value is number { return typeof value === "number" && Number.isSafeInteger(value) && value >= 0; }
 
 export function parseNativeEventFrame(frame: unknown): NativeEventFrame | null {

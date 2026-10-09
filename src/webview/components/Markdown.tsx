@@ -20,6 +20,7 @@ import { webLinkUrl } from "../terminal-links";
 import { FileLink, FileLinkText } from "./FileLinks.tsx";
 import { ImageReferenceToken } from "./ImageReference.tsx";
 import { WebLink } from "./WebLinks.tsx";
+import { CopyButton } from "./CopyButton.tsx";
 
 /**
  * Inline token grammar; code wins over emphasis, bold over italic, matching markdown. A bare URL
@@ -273,10 +274,14 @@ function parseBlocks(text: string, tight = false, keyPrefix = "b"): ReactNode[] 
 				index++;
 			}
 			index++; // closing fence (or EOF)
+			const source = body.join("\n");
 			blocks.push(
-				<pre key={`b${key++}`}>
-					<code data-language={language}>{body.join("\n")}</code>
-				</pre>,
+				<div key={`b${key++}`} className="omp-code-block">
+					<pre>
+						<code data-language={language}>{source}</code>
+					</pre>
+					{source.length > 0 && <CopyButton text={source} label="Copy code" className="omp-code-copy" />}
+				</div>,
 			);
 			continue;
 		}

@@ -131,6 +131,14 @@ export class TranscriptScrollController {
 	retain(): void { this.#explicitFollowing = false; this.#capture(); }
 	jump(): void { this.#pageStart = false; this.#explicitFollowing = true; this.#intent = null; this.#anchor = null; this.#setMode("following"); this.layout(); }
 	pageStart(): void { this.#pageStart = true; this.#explicitFollowing = false; this.#intent = null; this.#anchor = null; this.#setMode("detached"); this.layout(); }
+	/** Detach and bring the row carrying one of `sources` into view, a third of the way down (Rewind's selected prompt). */
+	reveal(sources: readonly string[]): void {
+		this.#pageStart = false; this.#explicitFollowing = false; this.#intent = null;
+		const order = this.bindings.order();
+		this.#anchor = { sources, offset: Math.round(this.root.clientHeight / 3), height: this.root.clientHeight, order, index: order.findIndex(id => sources.includes(id)) };
+		this.#setMode("detached");
+		this.layout();
+	}
 	/** Whether native wheel/key/pointer movement still owns geometry. */
 	#intentActive(): boolean { return this.#intent !== null && (this.#intent.dragging || performance.now() <= this.#intent.until); }
 	/** Following means the bottom, whatever grew: callers run inside a layout effect or an observer, so the write lands before paint. */

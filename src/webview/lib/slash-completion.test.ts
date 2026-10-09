@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { argumentSuggestions, missingRequiredArgument, parseArgumentHint, slashArgumentAt, slashQueryAt, slashSuggestions, spliceArgument, spliceSlash } from "./slash-completion.ts";
+import { argumentSuggestions, isRewindCommand, missingRequiredArgument, parseArgumentHint, slashArgumentAt, slashQueryAt, slashSuggestions, spliceArgument, spliceSlash } from "./slash-completion.ts";
 
  test("slash completion owns only a leading command token, not paths, prose, args or embedded skills", () => {
  assert.deepEqual(slashQueryAt("/skill:inspect args", 7), { query: "skill:", end: 14 });
@@ -46,4 +46,16 @@ test("required-empty guards aliases and every submit path; optional/unknown and 
  const commands = [{name:"join", aliases:["connect"], inputHint:"<link>"}, {name:"shake",inputHint:"[variant]"}, {name:"unknown",subcommands:[{name:"one"}]}];
  for (const text of ["/join", "/join ", "/connect\t"]) assert.equal(missingRequiredArgument(commands, text), true);
  for (const text of ["/join link", "/shake ", "/unknown ", "/plain", "say /join"]) assert.equal(missingRequiredArgument(commands, text), false);
+});
+
+test("Chat's own /rewind, with OMP's /branch as its alias, replaces OMP's `branch` builtin; the internal navigate command stays hidden", () => {
+ const commands = [{ name: "branch", aliases: ["rewind"], source: "builtin" }, { name: "omp-desk-navigate", source: "extension" }];
+ for (const query of ["rew", "branch"]) {
+  const found = slashSuggestions(commands, query);
+  assert.deepEqual(found.map(command => command.name), ["rewind"], query);
+  assert.equal(found[0]!.source, "OMP Desk");
+ }
+ assert.deepEqual(slashSuggestions(commands, "omp-desk"), []);
+ for (const text of ["/rewind", " /REWIND ", "/rewind\n", "/branch", " /Branch "]) assert.equal(isRewindCommand(text), true, text);
+ for (const text of ["/rewind now", "/rewinds", "say /rewind", "/branch 3", "/branches"]) assert.equal(isRewindCommand(text), false, text);
 });
