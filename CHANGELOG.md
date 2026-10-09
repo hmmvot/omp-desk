@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - In the composer's command, argument and file suggestions, Up and Down now scroll the list to the selected item. Before, the selection could move past the visible part of a long list, so you could not see what Enter would insert.
 - Restored Chat tabs can receive large transcripts, screenshots and tool-result rows after Reload Window without overflowing the authenticated bridge's bounded outbound queue. Snapshot delivery uses socket backpressure and bounded authenticated fragments, closes non-reading peers within a finite write deadline, and explains repeated connection failures instead of reconnecting silently forever.
 - **OMP: Log In to Provider…** works without an open session: it opens `omp login` for the default profile, or asks which profile when your sessions use more than one. Before, it refused with "Open a managed OMP session first", which left a new user with no way to log in before the first session could start.
+- Chat no longer shows OMP's "xd://: mounted …" list of MCP tool names at the start of a session. That notice is meant for the model; warnings about devices still appear.
 
 ## [0.2.0] - 2026-10-09
 
