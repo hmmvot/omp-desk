@@ -25,7 +25,8 @@ import {
 	stageRuntimeAssets,
 	verifyStagedRuntimeAsset,
 } from "./runtime-assets.ts";
-import type { PrivateStorageCommandResult, PrivateStorageProbe } from "./host/private-storage.ts";
+import { readStorageOwners, type PrivateStorageCommandResult, type PrivateStorageProbe } from "./host/private-storage.ts";
+import { TEST_CURRENT_SID, fixtureAcl, fixturePrincipal } from "./host/private-storage-test-support.ts";
 
 /** The account a simulated Windows probe runs as. */
 const ACCOUNT = "WORKSTATION\\dev";
@@ -60,10 +61,7 @@ function stagedPathOf(storageDir: string, name: string, content: string): string
 
 /** An `icacls` listing naming exactly the given principals. */
 function aclListing(target: string, principals: readonly string[]): string {
-	const lines = principals.map(
-		(principal, index) => `${index === 0 ? `${target} ` : " ".repeat(target.length + 1)}${principal}:(OI)(CI)(F)`,
-	);
-	return `${lines.join("\r\n")}\r\n\r\nSuccessfully processed 1 files; Failed processing 0 files\r\n`;
+	return fixtureAcl(principals.map(principal => `${principal}:(OI)(CI)(F)`));
 }
 
 interface AccessProbe {
@@ -96,8 +94,8 @@ function windowsProbe(options: ProbeOptions = {}): AccessProbe {
 	let current = options.acl === undefined ? OWNER_ONLY : options.acl;
 	const probe: PrivateStorageProbe = {
 		platform: "win32",
-		currentAccount: ACCOUNT,
-		runIcacls: async (target: string): Promise<PrivateStorageCommandResult> => {
+		currentSid: TEST_CURRENT_SID,
+		readAcl: async (target: string): Promise<PrivateStorageCommandResult> => {
 			if (current === null) return { ok: false, stdout: "", detail: "icacls is unavailable" };
 			if (options.permissive?.(target) === true) return { ok: true, stdout: aclListing(target, ["Everyone"]), detail: null };
 			return { ok: true, stdout: aclListing(target, current), detail: null };
@@ -114,7 +112,7 @@ function windowsProbe(options: ProbeOptions = {}): AccessProbe {
 				ok: true,
 				stdout: paths
 					.filter(path => path !== options.omitPath)
-					.map(path => `${path}|${ownerOf(path)}`)
+					.map(path => `${path}|${fixturePrincipal(ownerOf(path))}`)
 					.join("\r\n"),
 				detail: null,
 			};
@@ -136,20 +134,14 @@ function realIcacls(args: readonly string[]): Promise<void> {
 
 /** Give one directory the rules the shared convention establishes, with the real tool. */
 async function restrictWithRealTool(directory: string): Promise<void> {
-	const account = await new Promise<string>(resolve => {
-		const child = spawn(path.join(process.env.SystemRoot ?? "C:\\Windows", "System32", "whoami.exe"), [], {
-			windowsHide: true,
-		});
-		let out = "";
-		child.stdout.on("data", chunk => (out += String(chunk)));
-		child.on("close", () => resolve(out.trim()));
-		child.on("error", () => resolve(""));
-	});
+	const owners = await readStorageOwners([directory]);
+	const account = /\|(S-1-[0-9-]+)(?: |$)/m.exec(owners.stdout)?.[1];
+	assert.ok(owners.ok && account !== undefined, "the test directory owner SID could not be read");
 	await realIcacls([
 		directory,
 		"/inheritance:r",
 		"/grant:r",
-		`${account}:(OI)(CI)(F)`,
+		`*${account}:(OI)(CI)(F)`,
 		"*S-1-5-18:(OI)(CI)(F)",
 		"*S-1-5-32-544:(OI)(CI)(F)",
 		"/Q",
@@ -198,7 +190,7 @@ describe("staged runtime assets", () => {
 			// fail closed.
 			await assert.rejects(
 				stageRuntimeAssets({ storageDir: path.join(tree, "globalStorage"), sourcePaths: [source] }),
-				/lets Everyone replace or re-permission it/,
+				/lets S-1-1-0(?: \([^\r\n]*\))? replace or re-permission it/,
 			);
 		},
 	);
@@ -353,7 +345,7 @@ describe("staged runtime assets", () => {
 		assert.deepEqual(applied[0], [
 			"/inheritance:r",
 			"/grant:r",
-			`${ACCOUNT}:(OI)(CI)(F)`,
+			`*${TEST_CURRENT_SID}:(OI)(CI)(F)`,
 			"*S-1-5-18:(OI)(CI)(F)",
 			"*S-1-5-32-544:(OI)(CI)(F)",
 			"/Q",
@@ -371,7 +363,7 @@ describe("staged runtime assets", () => {
 
 		await assert.rejects(
 			stageRuntimeAssets({ storageDir: root, sourcePaths: [source], access: probe }),
-			/is readable by Everyone/,
+			/is readable by S-1-1-0 \(Everyone\)/,
 		);
 	});
 
@@ -384,7 +376,7 @@ describe("staged runtime assets", () => {
 
 		await assert.rejects(
 			stageRuntimeAssets({ storageDir: root, sourcePaths: [source], access: probe }),
-			/on the path to the store lets Everyone replace or re-permission it/,
+			/on the path to the store lets S-1-1-0 \(Everyone\) replace or re-permission it/,
 		);
 		assert.deepEqual(applied, [], "a directory this module does not own is never rewritten");
 	});
@@ -397,7 +389,7 @@ describe("staged runtime assets", () => {
 
 		await assert.rejects(
 			stageRuntimeAssets({ storageDir: root, sourcePaths: [source], access: probe }),
-			/owned by WORKSTATION\\someone-else/,
+			/owned by S-1-5-21-100-200-300-1002 \(WORKSTATION\\someone-else\)/,
 		);
 	});
 
@@ -517,7 +509,7 @@ describe("staged runtime assets", () => {
 
 		await assert.rejects(
 			stageRuntimeAssets({ storageDir: root, sourcePaths: [source], access: probe }),
-			/is owned by WORKSTATION\\someone-else/,
+			/is owned by S-1-5-21-100-200-300-1002 \(WORKSTATION\\someone-else\)/,
 		);
 	});
 

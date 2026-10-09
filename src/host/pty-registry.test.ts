@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { after, describe, it } from "node:test";
 import type { PrivateStorageCommandResult, PrivateStorageProbe } from "./private-storage.ts";
+import { TEST_CURRENT_SID, fixtureAcl, fixturePrincipal } from "./private-storage-test-support.ts";
 import {
 	acquirePtySlotLock,
 	claimPtyRecord,
@@ -56,18 +57,15 @@ async function makeStorage(): Promise<string> {
 }
 
 function aclListing(target: string, principals: readonly string[]): string {
-	const lines = principals.map(
-		(principal, index) => `${index === 0 ? `${target} ` : " ".repeat(target.length + 1)}${principal}:(OI)(CI)(F)`,
-	);
-	return `${lines.join("\r\n")}\r\n\r\nSuccessfully processed 1 files; Failed processing 0 files\r\n`;
+	return fixtureAcl(principals.map(principal => `${principal}:(OI)(CI)(F)`));
 }
 
 /** An access seam that describes an owner-only directory on any host. */
 function ownerOnlyProbe(): PrivateStorageProbe {
 	return {
 		platform: "win32",
-		currentAccount: ACCOUNT,
-		runIcacls: async (target: string): Promise<PrivateStorageCommandResult> => ({
+		currentSid: TEST_CURRENT_SID,
+		readAcl: async (target: string): Promise<PrivateStorageCommandResult> => ({
 			ok: true,
 			stdout: aclListing(target, OWNER_ONLY),
 			detail: null,
@@ -75,7 +73,7 @@ function ownerOnlyProbe(): PrivateStorageProbe {
 		applyIcacls: async (): Promise<PrivateStorageCommandResult> => ({ ok: true, stdout: "", detail: null }),
 		readOwners: async (paths: readonly string[]): Promise<PrivateStorageCommandResult> => ({
 			ok: true,
-			stdout: paths.map(target => `${target}|${ACCOUNT}`).join("\r\n"),
+			stdout: paths.map(target => `${target}|${fixturePrincipal(ACCOUNT)}`).join("\r\n"),
 			detail: null,
 		}),
 	};
@@ -199,7 +197,7 @@ describe("broker records", () => {
 		const storage = await makeStorage();
 		const permissive: PrivateStorageProbe = {
 			...ownerOnlyProbe(),
-			runIcacls: async (target: string): Promise<PrivateStorageCommandResult> => ({
+			readAcl: async (target: string): Promise<PrivateStorageCommandResult> => ({
 				ok: true,
 				stdout: aclListing(target, ["Everyone"]),
 				detail: null,

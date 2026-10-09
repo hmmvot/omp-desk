@@ -22,7 +22,6 @@
 
 import * as fs from "node:fs/promises";
 import path from "node:path";
-import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { windowsPowerShellEnvironment, windowsPowerShellExecutable } from "./windows-powershell.ts";
@@ -71,14 +70,13 @@ export interface PrivateStorageLayout {
 
 export interface PrivateStorageProbe {
 	readonly platform?: NodeJS.Platform;
-	/** Account allowed alongside SYSTEM and Administrators. Defaults to this process's user. */
-	readonly currentUser?: string;
-	/** Fully qualified `machine-or-domain\account`; defaults to reading `whoami`. */
-	readonly currentAccount?: string;
-	readonly runIcacls?: (directory: string) => Promise<PrivateStorageCommandResult>;
+	/** SID of the account allowed alongside the trusted system principals. */
+	readonly currentSid?: string;
+	/** Reads SID-based access entries as JSON; defaults to the module-free .NET reader. */
+	readonly readAcl?: (directory: string) => Promise<PrivateStorageCommandResult>;
 	/** Applies extra `icacls` arguments to a directory; defaults to running `icacls`. */
 	readonly applyIcacls?: (directory: string, args: readonly string[]) => Promise<PrivateStorageCommandResult>;
-	/** Reads the owner of every given path; defaults to {@link readStorageOwners}. */
+	/** Reads owners as SIDs, with their resolved names for diagnostics when available. */
 	readonly readOwners?: (paths: readonly string[]) => Promise<PrivateStorageCommandResult>;
 	/**
 	 * Reads the mode `ls -ld` prints for one path, on POSIX; the mode carries the
@@ -139,11 +137,9 @@ export function isInsideRoot(root: string, directory: string): boolean {
 }
 
 const MAX_ICACLS_BYTES = 64 * 1024;
-const MAX_WHOAMI_BYTES = 4096;
 const MAX_OWNER_BYTES = 64 * 1024;
 const MAX_LISTING_BYTES = 256 * 1024;
 const ICACLS_TIMEOUT_MS = 10_000;
-const WHOAMI_TIMEOUT_MS = 5000;
 const OWNER_TIMEOUT_MS = 20_000;
 const DIR_TIMEOUT_MS = 20_000;
 const SETTLE_GRACE_MS = 250;
@@ -218,13 +214,68 @@ function systemTool(name: string): string {
 	return path.join(root, "System32", name);
 }
 
-function runIcaclsDefault(directory: string): Promise<PrivateStorageCommandResult> {
+/** Explicit UTF-8 also preserves non-ASCII paths and optional diagnostic account names. */
+const WINDOWS_SECURITY_SCRIPT = [
+	"$ErrorActionPreference = 'Stop'",
+	"[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)",
+	"function Principal($sid) {",
+	"  $name = $null",
+	"  try { $name = $sid.Translate([System.Security.Principal.NTAccount]).Value } catch {}",
+	"  if ($null -eq $name) { return $sid.Value }",
+	"  return ($sid.Value + ' (' + $name + ')')",
+	"}",
+	"function Security($item) {",
+	"  if ([System.IO.Directory]::Exists($item)) { return [System.IO.Directory]::GetAccessControl($item) }",
+	"  return [System.IO.File]::GetAccessControl($item)",
+	"}",
+].join("\n");
+
+function runSecurityScript(script: string, paths: readonly string[] = []): Promise<PrivateStorageCommandResult> {
 	return runCommandDefault({
-		command: systemTool("icacls.exe"),
-		args: [directory],
-		timeoutMs: ICACLS_TIMEOUT_MS,
-		maxBytes: MAX_ICACLS_BYTES,
+		command: windowsPowerShellExecutable(),
+		args: ["-NoProfile", "-NonInteractive", "-Command", `${WINDOWS_SECURITY_SCRIPT}\n${script}`],
+		timeoutMs: OWNER_TIMEOUT_MS,
+		maxBytes: MAX_OWNER_BYTES,
+		env: windowsPowerShellEnvironment({ OMP_PRIVATE_STORAGE_PATHS: JSON.stringify(paths) }),
 	});
+}
+
+/** One process reads every requested ACL; failed individual reads remain unverified. */
+export async function readStorageAcls(paths: readonly string[]): Promise<Map<string, PrivateStorageCommandResult>> {
+	const result = await runSecurityScript([
+		"$paths = $env:OMP_PRIVATE_STORAGE_PATHS | ConvertFrom-Json",
+		"$reports = @(foreach ($item in $paths) {",
+		"  $entries = $null",
+		"  try {",
+		"    $acl = Security $item",
+		"    $entries = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object {",
+		"      @{ principal = (Principal $_.IdentityReference); permissions = [int64]$_.FileSystemRights; denied = ($_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Deny) }",
+		"    })",
+		"  } catch {}",
+		"  @{ path = $item; entries = $entries }",
+		"})",
+		"ConvertTo-Json -Depth 6 -Compress -InputObject $reports",
+	].join("\n"), paths);
+	const reports = new Map<string, PrivateStorageCommandResult>();
+	if (!result.ok) {
+		for (const target of paths) reports.set(target.toLowerCase(), result);
+		return reports;
+	}
+	try {
+		const parsed: unknown = JSON.parse(result.stdout);
+		if (!Array.isArray(parsed)) return reports;
+		for (const report of parsed) {
+			if (typeof report?.path !== "string" || !paths.includes(report.path)) continue;
+			const key = report.path.toLowerCase();
+			if (reports.has(key)) return new Map();
+			reports.set(key, {
+				ok: report.entries !== null,
+				stdout: JSON.stringify(report.entries) ?? "",
+				detail: report.entries === null ? "the SID-based security API failed" : null,
+			});
+		}
+	} catch {}
+	return reports;
 }
 
 function applyIcaclsDefault(
@@ -240,127 +291,25 @@ function applyIcaclsDefault(
 	});
 }
 
-/** `machine-or-domain\account` for this process, as the system `whoami` reports it. */
-async function readCurrentAccount(): Promise<string | null> {
-	const result = await runCommandDefault({
-		command: systemTool("whoami.exe"),
-		args: [],
-		timeoutMs: WHOAMI_TIMEOUT_MS,
-		maxBytes: MAX_WHOAMI_BYTES,
-	});
-	if (!result.ok) return null;
-	const account = result.stdout.trim();
-	return /^[^\s\\"]{1,128}\\[^\s\\"]{1,128}$/.test(account) ? account : null;
+/** The current token's SID, never an account name or a console-tool spelling. */
+async function readCurrentSid(): Promise<string | null> {
+	const result = await runSecurityScript("[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value");
+	const sid = result.stdout.trim();
+	return result.ok && isSid(sid) ? sid : null;
 }
 
 /**
- * The owner of each path, as a Windows account name, from PowerShell's `Get-Acl`.
- *
- * One process answers for every path, and the paths travel in the child's
- * environment so no quoting rule can change them. This is the exact read: `.Owner`
- * returns the account name the system resolves for the owner SID, with no column to
- * overflow. A machine where a policy refuses to load the security module answers
- * nothing, which the caller then replaces with the listing read below.
- */
-async function readOwnersByName(paths: readonly string[]): Promise<Map<string, string>> {
-	const script = [
-		"$paths = @($env:OMP_PRIVATE_STORAGE_PATHS | ConvertFrom-Json)",
-		"foreach ($item in $paths) {",
-		"\ttry { $owner = (Get-Acl -LiteralPath $item -ErrorAction Stop).Owner } catch { $owner = '?' }",
-		"\tWrite-Output ($item + '|' + $owner)",
-		"}",
-	].join("\n");
-	const reported = await runCommandDefault({
-		command: windowsPowerShellExecutable(),
-		args: ["-NoProfile", "-NonInteractive", "-Command", script],
-		timeoutMs: OWNER_TIMEOUT_MS,
-		maxBytes: MAX_OWNER_BYTES,
-		env: windowsPowerShellEnvironment({ OMP_PRIVATE_STORAGE_PATHS: JSON.stringify(paths) }),
-	});
-	return reported.ok ? ownersFrom(reported.stdout, paths) : new Map();
-}
-
-/**
- * The owner of each path, from the owner `dir /q` prints before the entry's name.
- *
- * The listing is narrowed to the entry being asked about, so a directory holding a
- * hundred thousand entries costs no more than one holding two. `cmd.exe` and the
- * `dir` built into it load no module, which is why this read exists: a hardened image
- * can refuse to load the module `Get-Acl` lives in, and a store must still be usable
- * there. Its owner column is fixed width, so a long account name is printed without
- * the space before the entry name and is truncated — such a name is reported as
- * unreadable rather than guessed at, and the caller refuses that path. `dir` prints
- * an entry by its long name even when it was asked for by its 8.3 short name, so a
- * path spelled with one is listed by the long spelling of the same object.
- */
-async function readOwnersByListing(paths: readonly string[]): Promise<Map<string, string>> {
-	const owners = new Map<string, string>();
-	for (const target of paths) {
-		const listed = await longSpelling(target);
-		const listing = await runCommandDefault({
-			command: systemTool("cmd.exe"),
-			args: ["/d", "/c", "dir", "/q", "/a", `${listed}*`],
-			timeoutMs: DIR_TIMEOUT_MS,
-			maxBytes: MAX_LISTING_BYTES,
-		});
-		if (!listing.ok) continue;
-		const owner = ownerFromDirListing(listing.stdout, path.basename(listed));
-		if (owner !== null) owners.set(target.toLowerCase(), owner);
-	}
-	return owners;
-}
-
-/**
- * The resolved spelling of `target` when it names the same object with nothing
- * redirected on the way (it differs only by 8.3 short names), and `target` itself
- * otherwise, so a link is never read in place of the path that was asked about.
- */
-async function longSpelling(target: string): Promise<string> {
-	const real = await fs.realpath(target).catch(() => null);
-	return real !== null && (await spellsSameObject(path.resolve(target), real)) ? real : target;
-}
-
-/**
- * The owner of every path, exact where the system can answer and from the listing
- * where it cannot. A path neither read can prove is reported as `?`, which the caller
- * refuses on, so one unprovable component never hides the answers for the others.
+ * Direct .NET security APIs need no Get-Acl module. If policy blocks these too,
+ * refuse rather than guess from a truncated, localized dir /q owner column.
  */
 export async function readStorageOwners(paths: readonly string[]): Promise<PrivateStorageCommandResult> {
-	const owners = new Map<string, string>();
-	for (const read of [readOwnersByName, readOwnersByListing]) {
-		const missing = paths.filter(target => !owners.has(target.toLowerCase()));
-		if (missing.length === 0) break;
-		for (const [target, owner] of await read(missing)) owners.set(target, owner);
-	}
-	const lines = paths.map(target => `${target}|${owners.get(target.toLowerCase()) ?? "?"}`);
-	return { ok: true, stdout: `${lines.join("\r\n")}\r\n`, detail: null };
-}
-
-/**
- * The owner `dir /q` prints immediately before an entry's own name.
- *
- * The owner column is fixed width: when the account name overflows it, the name is
- * printed with no separating space and is cut short (`NT SERVICE\TrustedInsta` in
- * front of `Windows`). The entry name is therefore matched as the end of the last
- * token, and only a whole `qualifier\account` or SID is accepted — a truncated or
- * unrecognized owner is `null`, never a guess.
- */
-function ownerFromDirListing(stdout: string, name: string): string | null {
-	const wanted = name.toLowerCase();
-	for (const rawLine of stdout.split(/\r?\n/)) {
-		const tokens = rawLine.trim().split(/\s+/);
-		if (tokens.length < 3) continue;
-		const last = tokens[tokens.length - 1]!.toLowerCase();
-		if (last !== wanted && !last.endsWith(wanted)) continue;
-		const candidates =
-			last === wanted
-				? [tokens[tokens.length - 2]!]
-				: [`${tokens[tokens.length - 2] ?? ""}${tokens[tokens.length - 1]!.slice(0, -name.length)}`];
-		for (const candidate of candidates) {
-			if (/^([^\s\\"]{1,128}\\[^\s\\"]{1,128}|\*?S-1-[0-9-]{2,})$/i.test(candidate)) return candidate;
-		}
-	}
-	return null;
+	return runSecurityScript([
+		"$paths = $env:OMP_PRIVATE_STORAGE_PATHS | ConvertFrom-Json",
+		"foreach ($item in $paths) {",
+		"  try { $owner = Principal ((Security $item).GetOwner([System.Security.Principal.SecurityIdentifier])) } catch { $owner = '?' }",
+		"  [Console]::WriteLine($item + '|' + $owner)",
+		"}",
+	].join("\n"), paths);
 }
 
 /** The mode `ls -ld` prints for one path, on POSIX, as the default ACL-marker read. */
@@ -424,146 +373,44 @@ function ownersFrom(stdout: string, paths: readonly string[]): Map<string, strin
 	return owners;
 }
 
-/** One access entry as `icacls` prints it: a principal and the rights it holds. */
+/** One .NET access rule: SID and optional display name, numeric mask and ACE type. */
 export interface PrivateStorageAclEntry {
 	readonly principal: string;
-	/** The rights between the inheritance flags, e.g. `F`, `RX`, `M,DC`. */
-	readonly permissions: string;
-	/** A deny entry, which restricts what it names instead of granting it access. */
+	readonly permissions: number;
 	readonly denied: boolean;
 }
 
 export interface PrivateStorageAclReport {
-	/** Principals an entry of this listing *grants* something to. */
 	readonly principals: readonly string[];
 	readonly entries: readonly PrivateStorageAclEntry[];
 	readonly parsed: boolean;
 }
 
-/** Groups `icacls` prints that carry inheritance or ACE type rather than a right. */
-const ACL_NON_PERMISSION_GROUPS: Record<string, true> = {
-	OI: true,
-	CI: true,
-	IO: true,
-	I: true,
-	NP: true,
-	ID: true,
-	DENY: true,
-};
-
-/**
- * An integrity-level entry, which `icacls` prints in the same listing as the access
- * entries. It labels the object's mandatory level and grants nobody anything: it
- * restricts what may be written (for instance `Mandatory Label\High Mandatory
- * Level:(NW)` stops a lower-integrity process from writing up). It is recognised two
- * ways, because either can appear alone: by the principal it names — `Mandatory
- * Label\…` or the integrity SIDs `S-1-16-…` — and by the rights it carries, which are
- * only the integrity tokens below, so a system that prints the label in another
- * language is still classified rather than read as a grant. Anything that is neither
- * a label nor an access entry keeps its principal and rights and is refused by the
- * rules below, never ignored.
- */
-const MANDATORY_LABEL_ENTRY_RE = /^(?:mandatory label|s-1-16-)/i;
-
-/** Rights only an integrity label carries: no write up, no read up, no execute up. */
-const INTEGRITY_LABEL_TOKENS: Record<string, true> = { NW: true, NR: true, NX: true };
-
-/** A label, or `null` when these groups describe an access entry. */
-function labelEntryPrincipal(principal: string, accessGroups: readonly string[]): string | null {
-	if (MANDATORY_LABEL_ENTRY_RE.test(principal)) return principal;
-	if (accessGroups.length === 0) return null;
-	const tokens = accessGroups.flatMap(group => group.split(",")).map(token => token.trim().toUpperCase());
-	if (tokens.length === 0) return null;
-	return tokens.every(token => Object.hasOwn(INTEGRITY_LABEL_TOKENS, token)) ? principal : null;
-}
-
-/**
- * Read the access entries out of `icacls <target>` output.
- *
- * Both of `icacls`'s common layouts put the path, and in the friendly form the
- * owner, on the same line as the first access entry, so that prefix is stripped
- * before the principal is taken. A listing with no readable access entry at all is
- * `parsed: false`, which the caller treats as unverified. Each entry keeps the rights
- * it holds beside its principal, so a caller can tell a principal that may only read
- * from one that may rewrite or remove what the entry sits on, and whether the entry
- * grants access at all; an integrity label grants none and is not an entry.
- */
-export function parseIcaclsAcl(stdout: string, directory: string): PrivateStorageAclReport {
-	const entries: PrivateStorageAclEntry[] = [];
-	const directoryLower = directory.toLowerCase();
-	for (const rawLine of stdout.split(/\r?\n/)) {
-		let line = rawLine.trim();
-		if (line.length === 0) continue;
-		if (/^(successfully processed|failed processing)/i.test(line)) continue;
-		if (line.toLowerCase().startsWith(directoryLower)) {
-			line = line.slice(directory.length).trim();
-		} else {
-			const leading = /^(?:[A-Za-z]:[\\/]\S*|\\\\\S*)\s+/.exec(line);
-			if (leading) line = line.slice(leading[0].length).trim();
+/** Read only the explicit SID-based JSON protocol; malformed rules fail closed. */
+export function parseWindowsAcl(stdout: string): PrivateStorageAclReport {
+	const unreadable: PrivateStorageAclReport = { principals: [], entries: [], parsed: false };
+	try {
+		const entries: unknown = JSON.parse(stdout);
+		if (!Array.isArray(entries) || entries.length === 0) return unreadable;
+		for (const entry of entries) {
+			if (typeof entry !== "object" || entry === null ||
+				typeof entry.principal !== "string" || principalSid(entry.principal) === null ||
+				!Number.isSafeInteger(entry.permissions) || entry.permissions < -2147483648 || entry.permissions > 4294967295 ||
+				typeof entry.denied !== "boolean") return unreadable;
 		}
-		const separator = line.indexOf(":(");
-		if (separator <= 0 || !line.endsWith(")")) continue;
-		const principal = line.slice(0, separator).trim();
-		if (principal.length === 0 || principal.length > 260) continue;
-		const groups = [...line.slice(separator + 1).matchAll(/\(([^()]*)\)/g)].map(match => match[1]!.trim());
-		const accessGroups = groups.filter(
-			group => group.length > 0 && !Object.hasOwn(ACL_NON_PERMISSION_GROUPS, group.toUpperCase()),
-		);
-		if (labelEntryPrincipal(principal, accessGroups) !== null) continue;
-		entries.push({
-			principal,
-			permissions: accessGroups.join(","),
-			denied: groups.some(group => group.toUpperCase() === "DENY"),
-		});
+		return { entries, principals: entries.filter(entry => !entry.denied).map(entry => entry.principal), parsed: true };
+	} catch {
+		return unreadable;
 	}
-	return {
-		principals: entries.filter(entry => !entry.denied).map(entry => entry.principal),
-		entries,
-		parsed: entries.length > 0,
-	};
 }
 
 /**
- * Rights that let their holder replace or re-permission the object they sit on.
- *
- * Removing or renaming a component needs `D` (or `DC`, the right its parent grants
- * over it); re-permissioning it needs `WDAC` or `WO`; `F`, `GA` and `MA` contain all
- * of those and `M` contains `D`. The remaining write and create rights — `W`, `WD`,
- * `AD`, `WEA`, `WA`, `GW` — let another account write inside or beneath a component
- * without letting it put a different object in that component's place, and `M` on a
- * directory carries no `FILE_DELETE_CHILD` (its access mask is `0x1301BF`, which has
- * no `0x40` bit), so a shared top-level `Users` directory that grants `Users:(RX)`, or a parent that
- * grants create rights, stays acceptable while a component granting delete or
- * re-permission rights refuses. Every token this table does not name counts as
- * control, so an unreadable or newer right fails closed.
+ * Permit read/execute/synchronize, data/create/attribute writes and generic R/W/X.
+ * Delete (including delete-child), write-DACL, write-owner, generic-all, maximum
+ * access and any unknown mask bit can replace or re-permission and fail closed.
  */
-const NON_REPLACEMENT_ACCESS_TOKENS: Record<string, true> = {
-	N: true,
-	R: true,
-	RX: true,
-	RD: true,
-	REA: true,
-	RA: true,
-	RC: true,
-	X: true,
-	S: true,
-	GR: true,
-	GE: true,
-	W: true,
-	WD: true,
-	AD: true,
-	WEA: true,
-	WA: true,
-	GW: true,
-};
-
-export function permissionsPermitReplacement(permissions: string): boolean {
-	const tokens = permissions
-		.split(",")
-		.map(token => token.trim().toUpperCase())
-		.filter(token => token.length > 0);
-	if (tokens.length === 0) return false;
-	return tokens.some(token => !Object.hasOwn(NON_REPLACEMENT_ACCESS_TOKENS, token));
+export function permissionsPermitReplacement(permissions: number): boolean {
+	return ((permissions >>> 0) & ~0xE01201BF) !== 0;
 }
 
 /**
@@ -629,78 +476,31 @@ export function posixAccessProblem(input: {
 }
 
 /**
- * Well-known principals a private store may name: the account, SYSTEM and
- * Administrators, plus the owner-relative placeholders and the operating system's
- * own service owner.
- *
- * Every entry is one identity, named once by its account name and once by its SID,
- * because a listing may print either:
- *   • `S-1-5-18` SYSTEM, `S-1-5-32-544` Administrators — the same boundary ADR-0006
- *     already draws.
- *   • `S-1-3-0` CREATOR OWNER, `S-1-3-4` OWNER RIGHTS, `S-1-5-10` SELF — placeholders
- *     that resolve to the owner of the object, which is this account (or an owner
- *     this account trusts) for everything the store creates.
- *   • `S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464` TrustedInstaller
- *     — the service that owns and can re-permission every operating-system location,
- *     so it is part of the trust boundary rather than outside it.
- *
- * Anything else — `Everyone`, `Users`, `Authenticated Users`, `INTERACTIVE`, `S-1-5-3`
- * Batch (the token of any process run in a batch queue, not an administrator), an
- * unresolved or foreign SID — means the store is reachable beyond the same-user trust
- * boundary, so a store that names it, or is owned by it, is refused.
+ * Numeric identities inside ADR-0006's boundary. Owner-relative placeholders are
+ * trusted alongside the independently verified owner; names are diagnostic only.
  */
-const PERMITTED_ACL_PRINCIPALS: Record<string, true> = {
-	"owner rights": true,
-	"s-1-3-4": true,
-	"creator owner": true,
-	"s-1-3-0": true,
-	// SELF: the object's own principal, which for this store is the owner above.
-	self: true,
-	"s-1-5-10": true,
-	"nt authority\\system": true,
-	// `dir /q`, the owner read on a machine that cannot load the security module,
-	// prints this well-known authority without its `NT ` part (observed in a real
-	// listing of a volume's `Users` directory). Only that observed spelling is added —
-	// an arbitrary `DOMAIN\system` is not — and `icacls` and `Get-Acl` print the full
-	// form above.
-	"authority\\system": true,
-	system: true,
-	"s-1-5-18": true,
-	"builtin\\administrators": true,
-	administrators: true,
-	"s-1-5-32-544": true,
-	"nt service\\trustedinstaller": true,
-	"s-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464": true,
+const PERMITTED_ACL_SIDS: Record<string, true> = {
+	"S-1-3-4": true, // OWNER RIGHTS
+	"S-1-3-0": true, // CREATOR OWNER
+	"S-1-5-10": true, // SELF
+	"S-1-5-18": true, // SYSTEM
+	"S-1-5-32-544": true, // Administrators
+	"S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464": true, // TrustedInstaller
 };
 
-/** Split `machine-or-domain\name` into its qualifier and its account name. */
-function splitAccountName(value: string): { readonly qualifier: string | null; readonly name: string } {
-	const separator = value.lastIndexOf("\\");
-	if (separator <= 0) return { qualifier: null, name: value };
-	return { qualifier: value.slice(0, separator), name: value.slice(separator + 1) };
+function isSid(value: string): boolean {
+	return /^S-1-(?:\d+-){1,14}\d+$/.test(value);
 }
 
-/**
- * Is one listed principal the store's owner, SYSTEM or Administrators?
- *
- * The account is matched as a Windows identity, not as a name: a listed
- * `DOMAIN\name` is this account only when the qualifier is the one this process
- * was told about (or this machine's own name, when only a bare account name is
- * known), so an account of another domain that happens to share the short name is
- * not accepted as this one. Callers should pass the qualified `whoami` account,
- * which is what {@link verifyPrivateStorage} resolves for them.
- */
-export function isPermittedAclPrincipal(principal: string, currentUser: string): boolean {
-	const normalized = principal.trim().toLowerCase().replace(/^\*/, "");
-	if (normalized.length === 0) return false;
-	if (Object.hasOwn(PERMITTED_ACL_PRINCIPALS, normalized)) return true;
-	const account = splitAccountName(currentUser.trim().toLowerCase());
-	if (account.name.length === 0) return false;
-	const listed = splitAccountName(normalized);
-	if (listed.name !== account.name) return false;
-	if (listed.qualifier === null) return true;
-	if (account.qualifier !== null) return listed.qualifier === account.qualifier;
-	return listed.qualifier === os.hostname().trim().toLowerCase();
+/** Strip only the optional diagnostic name emitted by our SID reader. */
+function principalSid(principal: string): string | null {
+	const matched = /^(S-1-(?:\d+-){1,14}\d+)(?: \([^\r\n]*\))?$/.exec(principal);
+	return matched?.[1] ?? null;
+}
+
+export function isPermittedAclPrincipal(principal: string, currentSid: string): boolean {
+	const sid = principalSid(principal);
+	return sid !== null && (Object.hasOwn(PERMITTED_ACL_SIDS, sid) || (isSid(currentSid) && sid === currentSid));
 }
 
 export function describeStorageError(error: unknown): string {
@@ -717,14 +517,6 @@ async function ensureDirectories(layout: PrivateStorageLayout): Promise<void> {
 	}
 }
 
-/** The name of the account that runs this extension host, as this process sees it. */
-function currentUserName(): string {
-	try {
-		return os.userInfo().username;
-	} catch {
-		return "";
-	}
-}
 
 /** The directories the access rewrite applies to, parents first and each named once. */
 function restrictedDirectories(layout: PrivateStorageLayout): readonly string[] {
@@ -735,17 +527,6 @@ function restrictedDirectories(layout: PrivateStorageLayout): readonly string[] 
 	return directories;
 }
 
-/** Is every principal one directory's listing names one this account trusts? */
-async function isLimitedToOwner(input: {
-	readonly directory: string;
-	readonly runIcacls: (directory: string) => Promise<PrivateStorageCommandResult>;
-	readonly currentUser: string;
-}): Promise<boolean> {
-	const result = await input.runIcacls(input.directory);
-	if (!result.ok) return false;
-	const acl = parseIcaclsAcl(result.stdout, input.directory);
-	return acl.parsed && acl.principals.every(principal => isPermittedAclPrincipal(principal, input.currentUser));
-}
 
 /**
  * Why a path cannot be trusted as a plain object of the expected kind, or `null`
@@ -878,25 +659,20 @@ export async function verifyPrivateStorage(input: {
 	}
 	evidence.push("the store and every path it is reached through is a plain, non-redirected path");
 
-	let currentUser = input.probe?.currentUser ?? "";
-	if (currentUser.length === 0) currentUser = currentUserName();
 	const permittedPrincipals: string[] = [];
 	if (platform === "win32") {
-		const runIcacls = input.probe?.runIcacls ?? runIcaclsDefault;
-		// The identity is the qualified account whenever one can be read: a bare name
-		// cannot tell this machine's account from another domain's account of the same
-		// name, and a listing that named the other one must not read as proof.
-		let identity = input.probe?.currentAccount ?? "";
-		if (identity.length === 0) identity = currentUser;
-		if (!identity.includes("\\")) identity = (await readCurrentAccount()) ?? identity;
-
-		const storePaths = [...layout.directories, ...layout.verifiedDirectories, ...files];
+		const identity = input.probe?.currentSid ?? await readCurrentSid();
+		if (identity === null || !isSid(identity)) return refuse("the owning account SID could not be read");
+		const storePaths = [...new Set([layout.root, ...layout.directories, ...layout.verifiedDirectories, ...files])];
+		const reports = input.probe?.readAcl === undefined ? await readStorageAcls([...storePaths, ...carriers]) : null;
+		const readAcl = input.probe?.readAcl ?? (async (target: string) =>
+			reports?.get(target.toLowerCase()) ?? { ok: false, stdout: "", detail: "the SID reader returned no ACL" });
 		for (const target of storePaths) {
-			const result = await runIcacls(target);
+			const result = await readAcl(target);
 			if (!result.ok) {
-				return refuse(`the store access of ${target} could not be verified (${result.detail ?? "icacls failed"})`);
+				return refuse(`the store access of ${target} could not be verified (${result.detail ?? "the SID reader failed"})`);
 			}
-			const acl = parseIcaclsAcl(result.stdout, target);
+			const acl = parseWindowsAcl(result.stdout);
 			if (!acl.parsed) return refuse(`the store access listing of ${target} could not be read`);
 			for (const principal of acl.principals) {
 				if (!isPermittedAclPrincipal(principal, identity)) {
@@ -906,11 +682,11 @@ export async function verifyPrivateStorage(input: {
 			}
 		}
 		for (const target of carriers) {
-			const result = await runIcacls(target);
+			const result = await readAcl(target);
 			if (!result.ok) {
-				return refuse(`the component ${target} on the path to the store could not be verified (${result.detail ?? "icacls failed"})`);
+				return refuse(`the component ${target} on the path to the store could not be verified (${result.detail ?? "the SID reader failed"})`);
 			}
-			const acl = parseIcaclsAcl(result.stdout, target);
+			const acl = parseWindowsAcl(result.stdout);
 			if (!acl.parsed) return refuse(`the access listing of ${target} on the path to the store could not be read`);
 			for (const entry of acl.entries) {
 				if (entry.denied || isPermittedAclPrincipal(entry.principal, identity)) continue;
@@ -1020,7 +796,7 @@ function ownerOnlyGrant(account: string): readonly string[] {
 	return [
 		"/inheritance:r",
 		"/grant:r",
-		`${account}:(OI)(CI)(F)`,
+		`*${account}:(OI)(CI)(F)`,
 		"*S-1-5-18:(OI)(CI)(F)",
 		"*S-1-5-32-544:(OI)(CI)(F)",
 		"/Q",
@@ -1060,20 +836,20 @@ export async function restrictPrivateStorage(input: {
 	} catch (error) {
 		return { restricted: false, reason: `the store could not be created (${describeStorageError(error)})`, readiness: null };
 	}
-	const account = input.probe?.currentAccount ?? (await readCurrentAccount());
-	if (account === null || account.trim().length === 0) {
+	const account = input.probe?.currentSid ?? (await readCurrentSid());
+	if (account === null || !isSid(account)) {
 		return {
 			restricted: false,
 			reason: "the owning account could not be resolved, so the access rules were left untouched",
 			readiness: null,
 		};
 	}
-	const runIcacls = input.probe?.runIcacls ?? runIcaclsDefault;
+	const directories = restrictedDirectories(layout);
+	let reports = input.probe?.readAcl === undefined ? await readStorageAcls(directories) : null;
+	const readAcl = input.probe?.readAcl ?? (async (target: string) =>
+		reports?.get(target.toLowerCase()) ?? { ok: false, stdout: "", detail: "the SID reader returned no ACL" });
 	const applyIcacls = input.probe?.applyIcacls ?? applyIcaclsDefault;
-	// The pre-check uses the same exact identity the verification will use, so a
-	// directory only another domain's same-named account can reach is rewritten.
-	const identity = input.probe?.currentAccount ?? account;
-	for (const directory of restrictedDirectories(layout)) {
+	for (const [index, directory] of directories.entries()) {
 		// A link or reparse point is never rewritten: `icacls` would apply the rules to
 		// whatever it reaches, which is not this store. Verification refuses it next.
 		const stats = await fs.lstat(directory).catch(() => null);
@@ -1081,7 +857,9 @@ export async function restrictPrivateStorage(input: {
 		// A directory that is already limited to this account, SYSTEM and
 		// Administrators is left exactly as it is; the ones that are not are
 		// rewritten from themselves, one at a time, never as a recursive walk.
-		if (await isLimitedToOwner({ directory, runIcacls, currentUser: identity })) continue;
+		const result = await readAcl(directory);
+		const acl = parseWindowsAcl(result.stdout);
+		if (result.ok && acl.parsed && acl.principals.every(principal => isPermittedAclPrincipal(principal, account))) continue;
 		const applied = await applyIcacls(directory, ownerOnlyGrant(account));
 		if (!applied.ok) {
 			return {
@@ -1090,8 +868,13 @@ export async function restrictPrivateStorage(input: {
 				readiness: null,
 			};
 		}
+		// Inheritable grants can change every remaining directory. Never rewrite
+		// one from stale pre-parent-rewrite evidence.
+		if (input.probe?.readAcl === undefined && index + 1 < directories.length) {
+			reports = await readStorageAcls(directories.slice(index + 1));
+		}
 	}
-	const readiness = await verifyPrivateStorage({ layout, ...(input.probe ? { probe: input.probe } : {}) });
+	const readiness = await verifyPrivateStorage({ layout, probe: { ...input.probe, currentSid: account } });
 	return {
 		restricted: readiness.ready,
 		reason: readiness.ready ? null : readiness.reason,

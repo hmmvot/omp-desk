@@ -38,15 +38,15 @@ import {
 	type NativeFileObservationStorePaths,
 	disableNativeFileObservationCapture,
 	grantNativeFileObservationConsent,
-	isPermittedAclPrincipal,
 	openNativeFileObservationJournal,
-	parseIcaclsAcl,
+	parseWindowsAcl,
 	readNativeFileObservationConsent,
 	resolveNativeFileObservationStorePaths,
 	restrictNativeFileObservationStorage,
 	verifyNativeFileObservationStorage,
 } from "./native-file-observation-storage.ts";
-import { permissionsPermitReplacement, posixAccessMarker, posixAccessProblem, readStorageOwners } from "./private-storage.ts";
+import { permissionsPermitReplacement, posixAccessMarker, posixAccessProblem, readStorageOwners, readStorageAcls } from "./private-storage.ts";
+import { TEST_CURRENT_SID, fixtureAcl, fixturePrincipal } from "./private-storage-test-support.ts";
 import { shortDirectoryAlias } from "./short-name-test-support.ts";
 import {
 	createFileEvidenceHooks,
@@ -114,10 +114,7 @@ async function isolatedRealRoots(label: string): Promise<{ readonly workspace: s
 
 /** An `icacls` listing naming exactly the given `principal:(rights)` entries. */
 function entryListing(directory: string, entries: readonly string[]): string {
-	const lines = entries.map(
-		(entry, index) => `${index === 0 ? `${directory} ` : " ".repeat(directory.length + 1)}${entry}`,
-	);
-	return [...lines, "", "Successfully processed 1 files; Failed processing 0 files", ""].join("\r\n");
+	return fixtureAcl(entries);
 }
 
 /** An injected `icacls` listing naming exactly the given principals. */
@@ -135,16 +132,15 @@ const CURRENT_ACCOUNT = `${os.hostname()}\\${os.userInfo().username}`;
 
 /** The owner read an injected store uses: this test's account owns the temp tree. */
 function ownerReport(targets: readonly string[]): NativeFileObservationCommandResult {
-	return { ok: true, stdout: targets.map(target => `${target}|${CURRENT_ACCOUNT}`).join("\r\n"), detail: null };
+	return { ok: true, stdout: targets.map(target => `${target}|${fixturePrincipal(CURRENT_ACCOUNT)}`).join("\r\n"), detail: null };
 }
 
 /** A Windows seam whose listing for a path is chosen by the case under test. */
 function entryProbe(entriesFor: (target: string) => readonly string[]): NativeFileObservationStorageProbe {
 	return {
 		platform: "win32",
-		currentUser: os.userInfo().username,
-		currentAccount: CURRENT_ACCOUNT,
-		runIcacls: async (directory: string) => ({ ok: true, stdout: entryListing(directory, entriesFor(directory)), detail: null }),
+		currentSid: TEST_CURRENT_SID,
+		readAcl: async (directory: string) => ({ ok: true, stdout: entryListing(directory, entriesFor(directory)), detail: null }),
 		readOwners: async (targets: readonly string[]) => ownerReport(targets),
 	};
 }
@@ -156,7 +152,9 @@ const runIcacls = promisify(execFile);
 
 /** This machine's real access listing for one directory or file. */
 async function realAclOf(target: string): Promise<string> {
-	return (await runIcacls(ICACLS, [target, "/Q"], { windowsHide: true })).stdout;
+	const result = (await readStorageAcls([target])).get(target.toLowerCase());
+	assert.equal(result?.ok, true, result?.detail ?? "the real ACL read failed");
+	return result!.stdout;
 }
 
 /**
@@ -165,29 +163,31 @@ async function realAclOf(target: string): Promise<string> {
  * sandbox temporary directory that carries the whole test tree.
  */
 async function restrictRealDirectory(directory: string): Promise<void> {
-	const applied = await runIcacls(
+	const owners = await readStorageOwners([directory]);
+	const account = /\|(S-1-[0-9-]+)(?: |$)/m.exec(owners.stdout)?.[1];
+	assert.ok(owners.ok && account !== undefined, "the test directory owner SID could not be read");
+	await runIcacls(
 		ICACLS,
 		[
 			directory,
 			"/inheritance:r",
 			"/grant:r",
-			`${CURRENT_ACCOUNT}:(OI)(CI)(F)`,
+			`*${account}:(OI)(CI)(F)`,
 			"*S-1-5-18:(OI)(CI)(F)",
 			"*S-1-5-32-544:(OI)(CI)(F)",
 			"/Q",
 		],
 		{ windowsHide: true },
 	);
-	assert.match(applied.stdout, /Failed processing 0 files/, "the test tree could not be restricted");
+	// execFile rejects a nonzero exit; localized stdout is not parsed.
 }
 
 /** A Windows seam that reports one listing for every path, or no listing at all. */
 function probeWith(principals: readonly string[] | null): NativeFileObservationStorageProbe {
 	return {
 		platform: "win32",
-		currentUser: os.userInfo().username,
-		currentAccount: CURRENT_ACCOUNT,
-		runIcacls: async (directory: string): Promise<NativeFileObservationCommandResult> => {
+		currentSid: TEST_CURRENT_SID,
+		readAcl: async (directory: string): Promise<NativeFileObservationCommandResult> => {
 			if (principals === null) return { ok: false, stdout: "", detail: "icacls is unavailable" };
 			return { ok: true, stdout: aclListing(directory, principals), detail: null };
 		},
@@ -501,7 +501,7 @@ describe("native observation storage gates", () => {
 			probe: probeWith([os.userInfo().username, "NT AUTHORITY\\SYSTEM", "BUILTIN\\Users"]),
 		});
 		assert.equal(readiness.ready, false);
-		assert.match(readiness.reason ?? "", /readable by BUILTIN\\Users/);
+		assert.match(readiness.reason ?? "", /readable by S-1-5-32-545 \(BUILTIN\\Users\)/);
 		assert.deepEqual(readiness.permittedPrincipals, []);
 	});
 
@@ -513,7 +513,7 @@ describe("native observation storage gates", () => {
 			probe: probeWith([foreign, "NT AUTHORITY\\SYSTEM", "BUILTIN\\Administrators"]),
 		});
 		assert.equal(readiness.ready, false, "another domain's account of the same name was accepted");
-		assert.match(readiness.reason ?? "", /readable by SOMEDOMAIN/);
+		assert.match(readiness.reason ?? "", /readable by S-1-5-21-100-200-300-1002 \(SOMEDOMAIN/);
 
 		// The qualifier this process was told about is the one that reads as this account.
 		const qualified = await verifyNativeFileObservationStorage({
@@ -543,7 +543,7 @@ describe("native observation storage gates", () => {
 			),
 		});
 		assert.equal(readiness.ready, false, "a file with its own wide entry was accepted");
-		assert.match(readiness.reason ?? "", /readable by BUILTIN\\Users/);
+		assert.match(readiness.reason ?? "", /readable by S-1-5-32-545 \(BUILTIN\\Users\)/);
 		assert.match(readiness.reason ?? "", /consent\.json/);
 	});
 
@@ -555,13 +555,13 @@ describe("native observation storage gates", () => {
 				...probeWith(RESTRICTED_PRINCIPALS),
 				readOwners: async (targets: readonly string[]) => ({
 					ok: true,
-					stdout: targets.map(target => `${target}|SOMEONE-ELSE\\other`).join("\r\n"),
+					stdout: targets.map(target => `${target}|${fixturePrincipal("SOMEONE-ELSE\\other")}`).join("\r\n"),
 					detail: null,
 				}),
 			},
 		});
 		assert.equal(foreignOwner.ready, false, "an owner outside the trusted set was accepted");
-		assert.match(foreignOwner.reason ?? "", /owned by SOMEONE-ELSE\\other/);
+		assert.match(foreignOwner.reason ?? "", /owned by S-1-5-21-100-200-300-1002 \(SOMEONE-ELSE\\other\)/);
 
 		const unreadableOwner = await verifyNativeFileObservationStorage({
 			paths,
@@ -635,9 +635,9 @@ describe("native observation storage gates", () => {
 
 	it("reads an integrity label or a deny entry as no access at all", async () => {
 		const paths = pathsFor({ sessionId: `${SESSION}-entries` });
-		const permissions = ["F", "RX", "W", "AD", "GW", "M", "D", "DC", "WDAC", "WO", "GA", "XY"];
+		const permissions = [0x1f01ff, 0x1200a9, 0x116, 4, 0x40000000, 0x1301bf, 0x10000, 0x40, 0x40000, 0x80000, 0x10000000, 0x200];
 		const fatal = permissions.filter(permission => permissionsPermitReplacement(permission));
-		assert.deepEqual(fatal, ["F", "M", "D", "DC", "WDAC", "WO", "GA", "XY"], "the replacement rule changed");
+		assert.deepEqual(fatal, [0x1f01ff, 0x1301bf, 0x10000, 0x40, 0x40000, 0x80000, 0x10000000, 0x200], "the replacement rule changed");
 
 		// A label grants nothing, and a deny entry takes access away rather than giving
 		// it: neither may refuse a store.
@@ -654,36 +654,15 @@ describe("native observation storage gates", () => {
 		const readiness = await verifyNativeFileObservationStorage({ paths, probe });
 		assert.equal(readiness.ready, true, readiness.reason ?? "a label or deny entry refused the store");
 
-		const parsed = parseIcaclsAcl(
-			entryListing("C:\\s", [
-				"NT AUTHORITY\\SYSTEM:(OI)(CI)(F)",
-				"BUILTIN\\Users:(DENY)(F)",
-				"Mandatory Label\\High Mandatory Level:(NW)",
-			]),
-			"C:\\s",
-		);
-		assert.deepEqual(parsed.principals, ["NT AUTHORITY\\SYSTEM"], "only granting entries name principals");
-		assert.equal(parsed.entries.length, 2, "the label is not an entry");
+		const parsed = parseWindowsAcl(entryListing("C:\\s", [
+			"NT AUTHORITY\\SYSTEM:(OI)(CI)(F)",
+			"BUILTIN\\Users:(DENY)(F)",
+		]));
+		assert.deepEqual(parsed.principals, [fixturePrincipal("NT AUTHORITY\\SYSTEM")]);
+		assert.equal(parsed.entries.length, 2);
 		assert.equal(parsed.entries[1]!.denied, true);
-
-		// A system that prints the label in its own language is classified by the rights
-		// the entry carries, so a label never refuses a store and never hides one.
-		const localized = parseIcaclsAcl(
-			entryListing("C:\\s", [
-				"NT AUTHORITY\\SYSTEM:(OI)(CI)(F)",
-				"\\u041c\\u0435\\u0442\\u043a\\u0430 \\u043e\\u0431\\u044f\\u0437\\u0430\\u0442\\u0435\\u043b\\u044c\\u043d\\u043e\\u0441\\u0442\\u0438\\High Mandatory Level:(NW)",
-			]),
-			"C:\\s",
-		);
-		assert.deepEqual(localized.principals, ["NT AUTHORITY\\SYSTEM"], "a localized label was read as a grant");
-		assert.equal(localized.entries.length, 1);
-		// An entry whose rights are a label's is a label even under an unreadable name;
-		// anything else keeps its name and rights and is decided by the rules.
-		const unclassified = parseIcaclsAcl(
-			entryListing("C:\\s", ["SOMEONE\\nobody:(M)", "SOMEONE\\nobody:(NW)"]),
-			"C:\\s",
-		);
-		assert.deepEqual(unclassified.principals, ["SOMEONE\\nobody"], "an unclassifiable entry was dropped");
+		assert.equal(parseWindowsAcl("no entries").parsed, false);
+		assert.equal(parseWindowsAcl('[{"principal":"BUILTIN\\\\Users","permissions":1,"denied":false}]').parsed, false);
 	});
 
 	it("accepts the owner spelling the tools use for a well-known account", async () => {
@@ -692,10 +671,10 @@ describe("native observation storage gates", () => {
 			paths,
 			probe: {
 				...probeWith(RESTRICTED_PRINCIPALS),
-				// `dir /q` prints the well-known authority without its `NT ` part.
+				// The SID is authoritative; this legacy English spelling is display-only.
 				readOwners: async (targets: readonly string[]) => ({
 					ok: true,
-					stdout: targets.map(target => `${target}|AUTHORITY\\SYSTEM`).join("\r\n"),
+					stdout: targets.map(target => `${target}|${fixturePrincipal("AUTHORITY\\SYSTEM")}`).join("\r\n"),
 					detail: null,
 				}),
 			},
@@ -732,11 +711,7 @@ describe("native observation storage gates", () => {
 			for (const target of [base, process.env.LOCALAPPDATA ?? base, "C:\\Users"]) {
 				const owner = reported.get(target);
 				assert.equal(typeof owner, "string", `${target} has no owner in the report`);
-				assert.equal(
-					isPermittedAclPrincipal(owner ?? "", CURRENT_ACCOUNT),
-					true,
-					`the owner read reported ${owner} for ${target}, which the rules do not accept`,
-				);
+				assert.match(owner ?? "", /^S-1-/);
 			}
 
 			const readiness = await verifyNativeFileObservationStorage({ paths: namespace.paths });
@@ -873,7 +848,7 @@ describe("native observation storage gates", () => {
 
 		const unreadable = await verifyNativeFileObservationStorage({
 			paths,
-			probe: { platform: "win32", currentUser: "someone", runIcacls: async () => ({ ok: true, stdout: "no entries here", detail: null }) },
+			probe: { platform: "win32", currentSid: TEST_CURRENT_SID, readAcl: async () => ({ ok: true, stdout: "no entries here", detail: null }) },
 		});
 		assert.equal(unreadable.ready, false);
 		assert.match(unreadable.reason ?? "", /could not be read/);
@@ -883,21 +858,19 @@ describe("native observation storage gates", () => {
 		const paths = pathsFor();
 		const readiness = await verifyNativeFileObservationStorage({ paths, probe: probeWith(RESTRICTED_PRINCIPALS) });
 		assert.equal(readiness.ready, true, readiness.reason ?? "store was refused");
-		assert.deepEqual(readiness.permittedPrincipals, RESTRICTED_PRINCIPALS);
+		assert.deepEqual(readiness.permittedPrincipals, RESTRICTED_PRINCIPALS.map(fixturePrincipal));
 		assert.equal(readiness.evidence.length >= 3, true);
 	});
 
-	it("reads the principal out of a listing whose first line carries the path", () => {
-		const directory = "C:\\Users\\someone\\store";
-		const report = parseIcaclsAcl(aclListing(directory, RESTRICTED_PRINCIPALS), directory);
+	it("reads SID-based rules with optional diagnostic names", () => {
+		const report = parseWindowsAcl(aclListing("C:\\store", RESTRICTED_PRINCIPALS));
 		assert.equal(report.parsed, true);
-		assert.deepEqual(report.principals, RESTRICTED_PRINCIPALS);
+		assert.deepEqual(report.principals, RESTRICTED_PRINCIPALS.map(fixturePrincipal));
 	});
 
 	it("establishes the access rules it requires, then verifies them independently", async () => {
 		const paths = pathsFor({ sessionId: `${SESSION}-harden` });
 		const applied: Array<{ directory: string; args: readonly string[] }> = [];
-		const account = `${os.hostname()}\\${os.userInfo().username}`;
 		// The store's root inherits an entry from outside the store; the inheritable
 		// grant a rewrite applies replaces it for the root and for everything the root
 		// already holds, so no directory below it needs a rewrite of its own.
@@ -906,7 +879,7 @@ describe("native observation storage gates", () => {
 			paths,
 			probe: {
 				...probeWith(RESTRICTED_PRINCIPALS),
-				runIcacls: async (directory: string) => ({
+				readAcl: async (directory: string) => ({
 					ok: true,
 					stdout: aclListing(directory, widened ? [...RESTRICTED_PRINCIPALS, "BUILTIN\\Users"] : RESTRICTED_PRINCIPALS),
 					detail: null,
@@ -928,7 +901,7 @@ describe("native observation storage gates", () => {
 		assert.deepEqual([...applied[0]!.args], [
 			"/inheritance:r",
 			"/grant:r",
-			`${account}:(OI)(CI)(F)`,
+			`*${TEST_CURRENT_SID}:(OI)(CI)(F)`,
 			"*S-1-5-18:(OI)(CI)(F)",
 			"*S-1-5-32-544:(OI)(CI)(F)",
 			"/Q",
@@ -943,7 +916,7 @@ describe("native observation storage gates", () => {
 			paths: retained,
 			probe: {
 				...probeWith(RESTRICTED_PRINCIPALS),
-				runIcacls: async (directory: string) => ({
+				readAcl: async (directory: string) => ({
 					ok: true,
 					stdout: aclListing(
 						directory,
@@ -992,7 +965,7 @@ describe("native observation storage gates", () => {
 
 		const noAccount = await restrictNativeFileObservationStorage({
 			paths,
-			probe: { ...probeWith(RESTRICTED_PRINCIPALS), currentAccount: "" },
+			probe: { ...probeWith(RESTRICTED_PRINCIPALS), currentSid: "" },
 		});
 		assert.equal(noAccount.restricted, false);
 		assert.match(noAccount.reason ?? "", /owning account could not be resolved/);
@@ -1021,7 +994,7 @@ describe("native observation storage gates", () => {
 			// profile directory first, then given the read-only entry a shared profile
 			// keeps.
 			await restrictRealDirectory(base);
-			await runIcacls(ICACLS, [base, "/grant", "BUILTIN\\Users:(OI)(CI)(RX)", "/Q"], { windowsHide: true });
+			await runIcacls(ICACLS, [base, "/grant", "*S-1-5-32-545:(OI)(CI)(RX)", "/Q"], { windowsHide: true });
 			const namespace = resolveFileEvidenceNamespace({
 				storageRoot: roots.store,
 				ownerId: OWNER,
@@ -1043,7 +1016,7 @@ describe("native observation storage gates", () => {
 			);
 			await fs.writeFile(blob, blobBytes);
 			await fs.writeFile(record, "{}");
-			assert.match(await realAclOf(paths.storageRoot), /BUILTIN\\Users/, "the store inherits an entry beyond this account");
+			assert.match(await realAclOf(paths.storageRoot), /S-1-5-32-545/, "the store inherits an entry beyond this account");
 
 			// No injected seam: this machine's own `icacls` and owner listing run here.
 			const restriction = await restrictNativeFileObservationStorage({ paths });
@@ -1062,7 +1035,7 @@ describe("native observation storage gates", () => {
 			for (const directory of namespaceOrder(paths)) {
 				assert.doesNotMatch(
 					await realAclOf(directory),
-					/BUILTIN\\Users/,
+					/S-1-5-32-545/,
 					`${path.basename(directory)} kept an entry beyond this account`,
 				);
 			}
@@ -1078,7 +1051,7 @@ describe("native observation storage gates", () => {
 			// An observation committed after this enable inherits the same rules.
 			const later = path.join(paths.temporaryDirectory, "later.txt");
 			await fs.writeFile(later, "later");
-			assert.doesNotMatch(await realAclOf(later), /BUILTIN\\Users/, "a file written after the rewrite inherits the access rules");
+			assert.doesNotMatch(await realAclOf(later), /S-1-5-32-545/, "a file written after the rewrite inherits the access rules");
 			await fs.rm(later);
 		},
 	);
@@ -1094,7 +1067,7 @@ describe("native observation storage gates", () => {
 			// owned by this account, grants another account the right to replace it: the
 			// store must stay off. Not inheritable, so the store's own directories stay
 			// clean and only the component's own rights can refuse it.
-			await runIcacls(ICACLS, [base, "/grant", "BUILTIN\\Users:(M)", "/Q"], { windowsHide: true });
+			await runIcacls(ICACLS, [base, "/grant", "*S-1-5-32-545:(M)", "/Q"], { windowsHide: true });
 			const namespace = resolveFileEvidenceNamespace({
 				storageRoot: roots.store,
 				ownerId: OWNER,
@@ -1108,7 +1081,7 @@ describe("native observation storage gates", () => {
 
 			assert.equal(readiness.ready, false, "a component another account can replace was accepted");
 			assert.match(readiness.reason ?? "", /on the path to the store/);
-			assert.match(readiness.reason ?? "", /BUILTIN\\Users/);
+			assert.match(readiness.reason ?? "", /S-1-5-32-545/);
 		},
 	);
 
@@ -1119,7 +1092,7 @@ describe("native observation storage gates", () => {
 			const roots = await isolatedRealRoots("carrier-readonly");
 			const base = path.dirname(roots.store);
 			await restrictRealDirectory(base);
-			await runIcacls(ICACLS, [base, "/grant", "BUILTIN\\Users:(RX)", "/Q"], { windowsHide: true });
+			await runIcacls(ICACLS, [base, "/grant", "*S-1-5-32-545:(RX)", "/Q"], { windowsHide: true });
 			const namespace = resolveFileEvidenceNamespace({
 				storageRoot: roots.store,
 				ownerId: OWNER,
@@ -1160,7 +1133,7 @@ describe("native observation storage gates", () => {
 			for (const target of targets) {
 				const owner = reported.get(target);
 				assert.equal(typeof owner, "string", `${target} has no owner in the listing`);
-				assert.equal(isPermittedAclPrincipal(owner ?? "", CURRENT_ACCOUNT), true, `the listing reported ${owner}`);
+				assert.match(owner ?? "", /^S-1-/);
 			}
 		},
 	);

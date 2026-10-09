@@ -24,6 +24,7 @@ import { fileURLToPath } from "node:url";
 import { after, describe, it } from "node:test";
 import { createHash } from "node:crypto";
 import type { PrivateStorageCommandResult, PrivateStorageProbe } from "./private-storage.ts";
+import { TEST_CURRENT_SID, fixtureAcl, fixturePrincipal } from "./private-storage-test-support.ts";
 import { hashRuntimeTree, stageRuntimeTree, verifyStagedRuntimeTree, type RuntimeTreeSource } from "../runtime-assets.ts";
 import {
 	PTY_BROKER_ENTRY,
@@ -57,15 +58,15 @@ async function makeTempUnder(parent: string, name: string): Promise<string> {
 }
 
 function aclListing(target: string, principals: readonly string[]): string {
-	return `${principals.map(principal => `${target} ${principal}:(OI)(CI)(F)`).join("\r\n")}\r\n\r\nSuccessfully processed 1 files; Failed processing 0 files\r\n`;
+	return fixtureAcl(principals.map(principal => `${principal}:(OI)(CI)(F)`));
 }
 
 /** An access seam describing an owner-only tree, so staging does not depend on this host's ACLs. */
 function ownerOnlyProbe(): PrivateStorageProbe {
 	return {
 		platform: "win32",
-		currentAccount: ACCOUNT,
-		runIcacls: async (target: string): Promise<PrivateStorageCommandResult> => ({
+		currentSid: TEST_CURRENT_SID,
+		readAcl: async (target: string): Promise<PrivateStorageCommandResult> => ({
 			ok: true,
 			stdout: aclListing(target, OWNER_ONLY),
 			detail: null,
@@ -73,7 +74,7 @@ function ownerOnlyProbe(): PrivateStorageProbe {
 		applyIcacls: async (): Promise<PrivateStorageCommandResult> => ({ ok: true, stdout: "", detail: null }),
 		readOwners: async (paths: readonly string[]): Promise<PrivateStorageCommandResult> => ({
 			ok: true,
-			stdout: paths.map(target => `${target}|${ACCOUNT}`).join("\r\n"),
+			stdout: paths.map(target => `${target}|${fixturePrincipal(ACCOUNT)}`).join("\r\n"),
 			detail: null,
 		}),
 	};
