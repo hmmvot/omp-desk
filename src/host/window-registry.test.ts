@@ -69,7 +69,7 @@ describe("window registry", () => {
 			onError: detail => errors.push(detail),
 		});
 		registries.push(registry);
-		registry.setSnapshot({ windowUri: null, label: holderId, folders: [], liveCwds: [], rows: {}, ...snapshot });
+		registry.setSnapshot({ windowUri: null, label: holderId, folders: [], liveCwds: [], rows: {}, focusedAt: null, stale: false, ...snapshot });
 		return registry;
 	}
 
@@ -102,6 +102,26 @@ describe("window registry", () => {
 		const seen = reader.windowOf("owner");
 		assert.ok(seen !== undefined && !seen.here);
 		assert.deepEqual([seen.windowUri, seen.label, seen.liveCwds, seen.rows], ["file:///c%3A/work/app", "app", ["C:/work/app"], { "tab:1": { status: "working", incarnation: "inc-1", binding: "slot.1", lastActivityAt: "2026-10-10T09:01:00.000Z" } }]);
+	});
+
+	it("publishes when a window last gained the focus without making the others repaint for it", async () => {
+		const owner = windowOf("owner", 1, "2026-10-10T09:00:00.000Z", { focusedAt: "2026-10-10T09:10:00.000Z" });
+		const reader = windowOf("reader", 2, "2026-10-10T09:05:00.000Z");
+		await publish(owner, reader);
+		assert.equal(reader.windowOf("owner")?.focusedAt, "2026-10-10T09:10:00.000Z");
+		assert.equal(reader.windowOf("reader")?.focusedAt, null);
+		owner.setSnapshot({ windowUri: null, label: "owner", folders: [], liveCwds: [], rows: {}, focusedAt: "2026-10-10T09:20:00.000Z", stale: false });
+		await owner.flush();
+		assert.equal(await reader.refresh(), false, "a focus time is never shown, so it is not a reason to repaint");
+		assert.equal(reader.windowOf("owner")?.focusedAt, "2026-10-10T09:20:00.000Z", "yet the next launch decision reads the newest value");
+	});
+
+	it("reads a record that publishes no focus time as one that never had it, and rejects an unreadable one", () => {
+		const record = { version: 1, holderId: "abc", pid: 5, startedAt: "2026-10-10T09:00:00.000Z", updatedAt: "2026-10-10T09:00:01.000Z", windowUri: null, label: "x", folders: [], liveCwds: [], rows: {} };
+		assert.equal(parseWindowRecord(JSON.stringify(record), "abc")?.focusedAt, null);
+		assert.equal(parseWindowRecord(JSON.stringify({ ...record, focusedAt: "yesterday-ish" }), "abc"), null);
+		assert.equal(parseWindowRecord(JSON.stringify({ ...record, focusedAt: 17 }), "abc"), null);
+		assert.equal(boundWindowSnapshot({ windowUri: null, label: "", folders: [], liveCwds: [], rows: {}, focusedAt: "not a time", stale: false }).focusedAt, null);
 	});
 
 	it("drops a window whose process is gone, and sweeps its file once the file is stale too", async () => {
@@ -160,7 +180,7 @@ describe("window registry", () => {
 		await publish(reader);
 		const forged: WindowRecord = {
 			version: 1, holderId: "forged", pid: 9, startedAt: "2026-10-10T09:00:00.000Z", updatedAt: new Date(clock).toISOString(),
-			windowUri: null, label: "", folders: [], liveCwds: [], rows: {},
+			windowUri: null, label: "", folders: [], liveCwds: [], rows: {}, focusedAt: null, stale: false,
 		};
 		alive.add(9);
 		const bad = ["corrupt.window", "other-name.window", "huge.window"];
@@ -178,10 +198,27 @@ describe("window registry", () => {
 		for (const name of bad) assert.ok(!fs.existsSync(path.join(directory, name)), name);
 	});
 
+	it("publishes whether the window runs an older build, and reads a record that says nothing as one", async () => {
+		const owner = windowOf("owner", 1, "2026-10-10T09:00:00.000Z", { stale: false });
+		const reader = windowOf("reader", 2, "2026-10-10T09:00:01.000Z");
+		await publish(owner);
+		await reader.refresh();
+		assert.equal(reader.windowOf("owner")?.stale, false);
+		owner.setSnapshot({ windowUri: null, label: "owner", folders: [], liveCwds: [], rows: {}, focusedAt: null, stale: true });
+		await publish(owner);
+		await reader.refresh();
+		assert.equal(reader.windowOf("owner")?.stale, true, "the next record says so");
+		const record = JSON.parse(fs.readFileSync(path.join(directory, "owner.window"), "utf8"));
+		const { stale: _unused, ...withoutField } = record;
+		assert.equal(parseWindowRecord(JSON.stringify(withoutField), "owner")?.stale, true, "a build that predates the field is older than the installed one");
+		assert.equal(parseWindowRecord(JSON.stringify({ ...record, stale: "yes" }), "owner"), null);
+	});
+
 	it("validates records strictly", () => {
 		const valid: WindowRecord = {
 			version: 1, holderId: "abc", pid: 5, startedAt: "2026-10-10T09:00:00.000Z", updatedAt: "2026-10-10T09:00:01.000Z",
 			windowUri: "file:///c%3A/x", label: "x", folders: ["C:/x"], liveCwds: [], rows: { t: { status: "running", incarnation: "g", binding: "slot.1", lastActivityAt: null } },
+			focusedAt: "2026-10-10T08:59:00.000Z", stale: false,
 		};
 		assert.deepEqual(parseWindowRecord(JSON.stringify(valid), "abc"), valid);
 		const broken = (patch: object) => parseWindowRecord(JSON.stringify({ ...valid, ...patch }), "abc");
@@ -205,7 +242,7 @@ describe("window registry", () => {
 		const rows: WindowSnapshot["rows"] = Object.fromEntries(Array.from({ length: 600 }, (_unused, at) => [`tab:${at}`, { status: "running" as const, incarnation: "g", binding: "slot.1", lastActivityAt: null }]));
 		const bounded = boundWindowSnapshot({
 			windowUri: "https://example.invalid/not-a-file", label: "l".repeat(10_000),
-			folders: Array.from({ length: 100 }, (_unused, at) => `C:/f${at}`), liveCwds: [], rows,
+			folders: Array.from({ length: 100 }, (_unused, at) => `C:/f${at}`), liveCwds: [], rows, focusedAt: null, stale: false,
 		});
 		assert.equal(bounded.windowUri, null);
 		assert.equal(bounded.label.length, 4096);
@@ -215,14 +252,14 @@ describe("window registry", () => {
 
 	it("never alters a path: one that is too long, or over the byte budget, is left out whole", () => {
 		const long = `C:/${"d".repeat(5_000)}`;
-		const bounded = boundWindowSnapshot({ windowUri: null, label: "", folders: ["C:/keep", long, "C:/also"], liveCwds: [long], rows: {} });
+		const bounded = boundWindowSnapshot({ windowUri: null, label: "", folders: ["C:/keep", long, "C:/also"], liveCwds: [long], rows: {}, focusedAt: null, stale: false });
 		assert.deepEqual(bounded.folders, ["C:/keep", "C:/also"]);
 		assert.deepEqual(bounded.liveCwds, []);
 		// 64 folders and 256 cwds of the longest accepted path would not fit one record: what is kept always does.
 		const path4k = (at: number) => `C:/${String(at).padStart(5, "0")}${"p".repeat(4_000)}`;
 		const fat = boundWindowSnapshot({
 			windowUri: null, label: "", folders: Array.from({ length: 64 }, (_unused, at) => path4k(at)),
-			liveCwds: Array.from({ length: 256 }, (_unused, at) => path4k(1_000 + at)), rows: {},
+			liveCwds: Array.from({ length: 256 }, (_unused, at) => path4k(1_000 + at)), rows: {}, focusedAt: null, stale: false,
 		});
 		const text = JSON.stringify({ version: 1, holderId: "abc", pid: 5, startedAt: "2026-10-10T09:00:00.000Z", updatedAt: "2026-10-10T09:00:00.000Z", ...fat });
 		assert.ok(Buffer.byteLength(text) <= 512 * 1024, "the written record is within what every reader reads");
@@ -262,7 +299,7 @@ describe("window registry", () => {
 		clock += 5_000;
 		await other.flush();
 		assert.equal(await reader.refresh(), false, "a renewed lease is not a change");
-		other.setSnapshot({ windowUri: null, label: "other", folders: ["C:/one", "C:/two"], liveCwds: [], rows: {} });
+		other.setSnapshot({ windowUri: null, label: "other", folders: ["C:/one", "C:/two"], liveCwds: [], rows: {}, focusedAt: null, stale: false });
 		await other.flush();
 		assert.equal(await reader.refresh(), true, "its folders changed");
 		other.removeSync();

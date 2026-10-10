@@ -177,7 +177,7 @@ describe("two windows of one profile", () => {
 			const folders = new LauncherFolders({
 				pinned,
 				local: memoryStore(),
-				windows: () => registry.windows().map(open => ({ here: open.here, paths: open.folders })),
+				windows: () => registry.windows().map(open => ({ holderId: open.holderId, here: open.here, startedAt: open.startedAt, focusedAt: open.focusedAt, paths: open.folders })),
 				showWindowFolders: () => true,
 				liveSessionCwds: () => registry.windows().flatMap(open => open.liveCwds),
 			});
@@ -208,6 +208,8 @@ describe("two windows of one profile", () => {
 					folders: window.folders,
 					liveCwds: [...window.running.keys()].map(tabId => entries.find(candidate => candidate.tabId === tabId)!.cwd),
 					rows: rowsFor(window),
+					focusedAt: null,
+					stale: false,
 				});
 				await handle.registry.flush();
 			}
