@@ -342,6 +342,170 @@ describe("identity", () => {
 	});
 });
 
+describe("model and thinking choices OMP cannot take yet", () => {
+	const FILE = { child: { sessionFile: "D:\\scratch\\held.jsonl", entries: [], leafId: null } };
+	const pendingOf = (session: { model: { pendingControl: unknown } }): unknown => session.model.pendingControl;
+
+	it("sends at once when OMP is idle: nothing is held and the answer is the usual one", async () => {
+		const { session, channel } = await boot(FILE);
+		assert.deepEqual(await session.chooseModel("prov", "big", "Big"), { status: "accepted", agentInvoked: null });
+		assert.deepEqual(await session.chooseThinkingLevel("high"), { status: "accepted", agentInvoked: null });
+		assert.deepEqual(channel.commandsOfType("set_model").map(command => [command.provider, command.modelId]), [["prov", "big"]]);
+		assert.deepEqual(channel.commandsOfType("set_thinking_level").map(command => command.level), ["high"]);
+		assert.equal(session.model.state?.model?.id, "big");
+		assert.equal(pendingOf(session), null);
+	});
+
+	it("sends at once during a running turn, because OMP accepts both changes mid-turn", async () => {
+		const { session, channel } = await boot(FILE);
+		channel.emit({ type: "agent_start" });
+		await tick();
+		assert.equal(session.model.working, true);
+		assert.equal((await session.chooseModel("prov", "big")).status, "accepted");
+		assert.equal((await session.chooseThinkingLevel("low")).status, "accepted");
+		assert.equal(channel.commandsOfType("set_model").length, 1);
+		assert.equal(channel.commandsOfType("set_thinking_level").length, 1);
+		assert.equal(pendingOf(session), null);
+		assert.equal((await session.cycleThinkingLevel()).status, "ok");
+	});
+
+	it("holds a choice while compaction runs, shows it, and applies it (model, then thinking) when the pass ends", async () => {
+		const { session, channel, outputs } = await boot(FILE);
+		channel.emit({ type: "auto_compaction_start", reason: "threshold", action: "compact" });
+		await tick();
+		assert.equal(session.model.maintenance?.status, "working");
+		// Chosen thinking first, then the model: the model must still go first.
+		assert.deepEqual(await session.chooseThinkingLevel("low"), { status: "pending" });
+		assert.deepEqual(await session.chooseModel("prov", "big", "Big"), { status: "pending" });
+		assert.deepEqual(pendingOf(session), { model: { provider: "prov", id: "big", name: "Big" }, thinking: "low" });
+		assert.equal(session.model.state?.model?.id !== "big", true, "the readback is still OMP's own");
+		assert.equal(channel.commandsOfType("set_model").length + channel.commandsOfType("set_thinking_level").length, 0);
+		assert.ok(outputs.some(output => output.type === "event" && output.frame.type === "control_pending"), "the page is told");
+		channel.emit({ type: "auto_compaction_end", action: "compact", aborted: false, willRetry: false });
+		await waitUntil(() => pendingOf(session) === null);
+		const order = channel.written.filter(command => command.type === "set_model" || command.type === "set_thinking_level").map(command => command.type);
+		assert.deepEqual(order, ["set_model", "set_thinking_level"]);
+		assert.equal(session.model.state?.model?.id, "big");
+	});
+
+	it("holds during a mutation fence and applies when it lifts; the newest choice of each kind wins", async () => {
+		const { session, channel } = await boot(FILE);
+		session.setMutationFence("Changing session view.");
+		assert.deepEqual(await session.chooseModel("prov", "first"), { status: "pending" });
+		assert.deepEqual(await session.chooseModel("prov", "second"), { status: "pending" });
+		assert.deepEqual(await session.chooseThinkingLevel("low"), { status: "pending" });
+		assert.deepEqual(await session.chooseThinkingLevel("high"), { status: "pending" });
+		assert.deepEqual(pendingOf(session), { model: { provider: "prov", id: "second" }, thinking: "high" });
+		session.setMutationFence(null);
+		await waitUntil(() => pendingOf(session) === null);
+		assert.deepEqual(channel.commandsOfType("set_model").map(command => command.modelId), ["second"]);
+		assert.deepEqual(channel.commandsOfType("set_thinking_level").map(command => command.level), ["high"]);
+	});
+
+	it("lets a newer explicit choice replace held cycles, and picking OMP's own value cancels a held choice", async () => {
+		const { session, channel } = await boot(FILE);
+		const current = session.model.state?.model;
+		assert.ok(current);
+		session.setMutationFence("Changing session view.");
+		assert.deepEqual(await session.cycleModel(), { status: "pending" });
+		assert.deepEqual(await session.cycleModel(), { status: "pending" });
+		assert.deepEqual(pendingOf(session), { modelCycles: 2 });
+		assert.deepEqual(await session.chooseModel("prov", "named"), { status: "pending" });
+		assert.deepEqual(pendingOf(session), { model: { provider: "prov", id: "named" } });
+		assert.deepEqual(await session.chooseModel(current.provider, current.id), { status: "accepted", agentInvoked: null });
+		assert.equal(pendingOf(session), null);
+		session.setMutationFence(null);
+		await tick();
+		assert.equal(channel.commandsOfType("set_model").length, 0);
+		assert.equal(channel.commandsOfType("cycle_model").length, 0);
+	});
+
+	it("holds cycle commands and sends each one when OMP is ready", async () => {
+		const { session, channel } = await boot(FILE);
+		channel.handlers.set("cycle_model", () => ({ data: { model: { provider: "prov", id: "next", name: "Next" }, thinkingLevel: "high", isScoped: false } }));
+		channel.handlers.set("cycle_thinking_level", () => ({ data: { level: "low" } }));
+		session.setMutationFence("Changing session view.");
+		assert.deepEqual(await session.cycleModel(), { status: "pending" });
+		assert.deepEqual(await session.cycleThinkingLevel(), { status: "pending" });
+		assert.deepEqual(await session.cycleThinkingLevel(), { status: "pending" });
+		assert.deepEqual(pendingOf(session), { modelCycles: 1, thinkingCycles: 2 });
+		session.setMutationFence(null);
+		await waitUntil(() => pendingOf(session) === null);
+		assert.equal(channel.commandsOfType("cycle_model").length, 1);
+		assert.equal(channel.commandsOfType("cycle_thinking_level").length, 2);
+		assert.equal(session.model.state?.model?.id, "next");
+	});
+
+	it("sends a held choice before the prompt that follows it, and never runs the prompt on the old model", async () => {
+		const { session, channel } = await boot(FILE);
+		session.setMutationFence("Changing session view.");
+		assert.deepEqual(await session.chooseModel("prov", "big"), { status: "pending" });
+		channel.autoRespond = false;
+		session.setMutationFence(null);
+		await tick();
+		assert.equal(channel.commandsOfType("set_model").length, 1, "the held choice is on the wire the moment the fence lifts");
+		const sent = session.prompt({ requestId: "after-choice", text: "hello" });
+		await tick();
+		assert.equal(channel.commandsOfType("prompt").length, 0, "the prompt waits for OMP's answer to the model change");
+		const id = channel.commandsOfType("set_model")[0]!.id as string;
+		channel.emit(responseLine(id, "set_model", true, { data: { provider: "prov", id: "big", name: "Big", contextWindow: 10 } }));
+		channel.autoRespond = true;
+		assert.equal((await sent).status, "accepted");
+		const order = channel.written.filter(command => command.type === "set_model" || command.type === "prompt").map(command => command.type);
+		assert.deepEqual(order, ["set_model", "prompt"]);
+		assert.equal(pendingOf(session), null);
+	});
+
+	it("holds a prompt back (busy) instead of sending it on the old model while a choice still has to wait", async () => {
+		const { session, channel } = await boot(FILE);
+		channel.emit({ type: "auto_compaction_start", reason: "threshold", action: "compact" });
+		await tick();
+		assert.deepEqual(await session.chooseModel("prov", "big"), { status: "pending" });
+		assert.deepEqual(await session.prompt({ requestId: "while-held", text: "hello" }), { status: "refused", reason: "busy" });
+		assert.equal(channel.commandsOfType("prompt").length, 0);
+		assert.deepEqual(pendingOf(session), { model: { provider: "prov", id: "big" } }, "the choice stays held");
+	});
+
+	it("reverts to OMP's own value with a notice when OMP rejects a held choice, and does not send the waiting prompt", async () => {
+		const { session, channel, outputs } = await boot(FILE);
+		const before = session.model.state?.model;
+		channel.handlers.set("set_model", () => ({ success: false, error: "No API key for prov/big" }));
+		session.setMutationFence("Changing session view.");
+		assert.deepEqual(await session.chooseModel("prov", "big"), { status: "pending" });
+		channel.autoRespond = false;
+		session.setMutationFence(null);
+		await tick();
+		const sent = session.prompt({ requestId: "after-failure", text: "hello" });
+		await tick();
+		channel.autoRespond = true;
+		const id = channel.commandsOfType("set_model")[0]!.id as string;
+		channel.emit(responseLine(id, "set_model", false, { error: "No API key for prov/big" }));
+		assert.deepEqual(await sent, { status: "refused", reason: "choice-failed" });
+		assert.equal(pendingOf(session), null, "the mark is gone");
+		assert.deepEqual(session.model.state?.model, before, "the readback is OMP's actual value");
+		assert.equal(channel.commandsOfType("prompt").length, 0);
+		const notices = outputs.flatMap(output => (output.type === "event" && output.frame.type === "command_feedback" ? [output.frame.message] : []));
+		assert.equal(notices.length, 1);
+		assert.match(notices[0]!, /did not apply your model change/);
+		assert.doesNotMatch(notices[0]!, /No API key/, "OMP's own text is never forwarded");
+	});
+
+	it("drops a held choice whose answer never came, without retrying it", async () => {
+		const { session, channel, outputs, timers } = await boot({ ...FILE, session: { commandTimeoutMs: 1_000 } });
+		channel.handlers.set("set_thinking_level", () => "drop");
+		session.setMutationFence("Changing session view.");
+		assert.deepEqual(await session.chooseThinkingLevel("high"), { status: "pending" });
+		session.setMutationFence(null);
+		await tick();
+		assert.equal(channel.commandsOfType("set_thinking_level").length, 1);
+		timers.advance(1_001);
+		await waitUntil(() => pendingOf(session) === null);
+		assert.equal(channel.commandsOfType("set_thinking_level").length, 1, "an unanswered change is never retried");
+		const notices = outputs.flatMap(output => (output.type === "event" && output.frame.type === "command_feedback" ? [output.frame.message] : []));
+		assert.match(notices.join("\n"), /did not confirm your thinking-level change/);
+	});
+});
+
 describe("persistence lag", () => {
 	it("keeps an unmatched pending row visible, flags it after three attempts and a settle, then replaces it in place", async () => {
 		const m0 = { type: "model_change", id: "m0", parentId: null, timestamp: "2026-01-01T00:00:00.000Z", model: "p/m" };
@@ -449,11 +613,14 @@ describe("command correlation", () => {
 		assert.equal(channel.commandsOfType("prompt").length, 0);
 	});
 
-	it("refuses model listing while a turn streams (it would queue ahead of abort)", async () => {
+	it("lists models and thinking levels during a turn (a picker opened mid-turn must work)", async () => {
 		const { session, channel } = await boot({ child: { sessionFile: "D:\\scratch\\w.jsonl", entries: [], leafId: null } });
 		channel.emit({ type: "agent_start" });
 		await tick();
-		assert.deepEqual(await session.getAvailableModels(), { status: "refused", reason: "busy" });
+		assert.equal(session.model.working, true);
+		assert.equal((await session.getAvailableModels()).status, "ok");
+		assert.equal(channel.commandsOfType("get_available_models").length, 1);
+		assert.equal((await session.getAvailableThinkingLevels()).status, "ok");
 	});
 
 	it("ends outstanding commands when the child exits", async () => {

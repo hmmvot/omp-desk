@@ -134,6 +134,7 @@ export const CHAT_BUSY_SENTENCE = "OMP is busy with another request; try again i
 export const CHAT_REJECTED_SENTENCE = "OMP did not accept that.";
 export const CHAT_UNCONFIRMED_SENTENCE =
 	"The message may not have been delivered; check the transcript before sending it again.";
+export const CHAT_CHOICE_FAILED_SENTENCE = "Your model or thinking change could not be applied, so the message was not sent. Check the footer, then send it again.";
 export const CHAT_PROMPT_LOST_SENTENCE = "The last message was not delivered — send it again manually.";
 
 interface Conversation {
@@ -830,6 +831,9 @@ export class ChatRuntime {
 				break;
 			case "busy":
 				this.#tell(conversation, origin, CHAT_BUSY_SENTENCE);
+				break;
+			case "choice-failed":
+				this.#tell(conversation, origin, CHAT_CHOICE_FAILED_SENTENCE);
 				break;
 			case "bad-request-id":
 				break;

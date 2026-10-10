@@ -35,6 +35,7 @@ import {
 	markPendingUnsaved,
 	normalizeUiRequest,
 	reduceChatFrame,
+	samePendingControl,
 	setChatPhase,
 	snapshotOf,
 	type ChatCode,
@@ -51,6 +52,8 @@ import {
 	type ChatUiRequest,
 	type ChatUiResponse,
 	type ChatLiteModel,
+	type ChatPendingControl,
+	type ChatPendingModel,
 } from "../../chat/model.ts";
 import { parseChatEntry, type ChatEntry } from "../../chat/messages.ts";
 import {
@@ -198,7 +201,9 @@ export type SendRefusal =
 	| "busy"
 	| "bad-request-id"
 	| "write-failed"
-	| "rejected";
+	| "rejected"
+	/** A model or thinking choice held for OMP could not be applied, so the message that waited for it was not sent. */
+	| "choice-failed";
 
 /** Fresh process facts used at a fenced lifecycle boundary, not screen activity. */
 export interface RpcSettlementState {
@@ -213,6 +218,43 @@ export type SendOutcome =
 	| { status: "refused"; reason: SendRefusal; command?: string; code?: string }
 	/** The line may or may not have reached the child (the link dropped first). Never resent automatically. */
 	| { status: "unconfirmed" };
+
+/** A model or thinking choice the host holds, and applies as soon as OMP can take it. */
+export interface PendingResult {
+	status: "pending";
+}
+
+export type ChoiceOutcome = SendOutcome | PendingResult;
+
+/** What the host holds between a model/thinking choice and OMP being able to take it (see `RpcSession#choiceBlock`). */
+interface HeldChoices {
+	model: ChatPendingModel | null;
+	/** "Next model" requests that named no target. */
+	modelCycles: number;
+	thinking: string | null;
+	thinkingCycles: number;
+}
+
+/** `blocked`: OMP could not take it yet (a hook retries); `stalled`: a command was refused as "not now" (no automatic retry loop). */
+type HeldFlush = "done" | "blocked" | "stalled" | "failed";
+type HeldStepResult = "applied" | "nothing" | "blocked" | "rejected" | "unconfirmed";
+
+interface ChoicePlan<T> {
+	/** The held choices after this one is held. */
+	hold(held: HeldChoices): HeldChoices;
+	/** The held choices after this one replaced its kind; null for a cycle, which is relative to the current value. */
+	replace: ((held: HeldChoices) => HeldChoices) | null;
+	/** What held earlier must reach OMP before this one is sent. */
+	first: "none" | "model" | "all";
+	send(): Promise<T>;
+}
+
+/** How one held command ended: a "not now" refusal keeps the choice held, anything else settles it. */
+function heldStepResult(outcome: { status: "accepted" } | { status: "unconfirmed" } | { status: "refused"; reason: SendRefusal }): HeldStepResult {
+	if (outcome.status === "accepted") return "applied";
+	if (outcome.status === "unconfirmed") return "unconfirmed";
+	return outcome.reason === "busy" || outcome.reason === "not-live" ? "blocked" : "rejected";
+}
 
 export interface PromptRequest {
 	requestId: string;
@@ -404,6 +446,8 @@ const FRAME_FAILURE_RESYNC_GAP_MS = 2_000;
 const REQUEST_ID_PATTERN = /^[A-Za-z0-9_.:-]{1,120}$/;
 const MAX_REMEMBERED_REQUESTS = 256;
 const MAX_LEDGER = 64;
+const NO_HELD: HeldChoices = { model: null, modelCycles: 0, thinking: null, thinkingCycles: 0 };
+const MAX_HELD_CYCLES = 16;
 const STDERR_TAIL_BYTES = CHAT_EXIT_STDERR_BYTES;
 const MESSAGE_ID_TAIL = /,"messageId":"([^"\\]{1,64})"\}$/;
 
@@ -575,6 +619,9 @@ export class RpcSession {
 	#autoRecoveryAttempt = 0;
 	#autoRecoveryTimer: unknown = null;
 	#mutationFence: string | null = null;
+	/** Model and thinking choices OMP could not take when they were made; sent in order as soon as it can. */
+	#held: HeldChoices = NO_HELD;
+	#heldFlush: Promise<HeldFlush> | null = null;
 	readonly #navigateRequests = new Map<string, Promise<NavigateOutcome>>();
 	/** The navigation command in flight: its internal id, its request id, the coded errors OMP reported, its waiter. */
 	#navigation: { id: string; requestId: string; errors: string[]; finish(how: NavigationWait): void } | null = null;
@@ -670,6 +717,7 @@ export class RpcSession {
 
 	setMutationFence(reason: string | null): void {
 		this.#mutationFence = reason;
+		this.#syncHeld();
 	}
 
 	async readSettlement(): Promise<RpcSettlementState | null> {
@@ -722,7 +770,7 @@ export class RpcSession {
 		return this.#once(request.requestId, async () => {
 			const verdict = classifySlashInput(request.text, this.#model.commands);
 			if (verdict.denied) return { status: "refused", reason: "slash-denied", command: verdict.command };
-			const refusal = this.#controlRefusal();
+			const refusal = this.#controlRefusal() ?? await this.#applyHeldBeforeSend();
 			if (refusal !== null) return { status: "refused", reason: refusal };
 			this.#slashArmed = request.text.trimStart().startsWith("/");
 			this.#remember({ requestId: request.requestId, text: request.text, sentAt: this.#timers.now(), unconfirmed: false });
@@ -736,9 +784,9 @@ export class RpcSession {
 	}
 
 	steer(request: MessageRequest): Promise<SendOutcome> {
-		return this.#once(request.requestId, () => {
-			const refusal = this.#controlRefusal();
-			if (refusal !== null) return Promise.resolve<SendOutcome>({ status: "refused", reason: refusal });
+		return this.#once(request.requestId, async () => {
+			const refusal = this.#controlRefusal() ?? await this.#applyHeldBeforeSend();
+			if (refusal !== null) return { status: "refused", reason: refusal };
 			return this.#sendUser(request.requestId, {
 				type: "steer",
 				message: request.text,
@@ -748,9 +796,9 @@ export class RpcSession {
 	}
 
 	followUp(request: MessageRequest): Promise<SendOutcome> {
-		return this.#once(request.requestId, () => {
-			const refusal = this.#controlRefusal();
-			if (refusal !== null) return Promise.resolve<SendOutcome>({ status: "refused", reason: refusal });
+		return this.#once(request.requestId, async () => {
+			const refusal = this.#controlRefusal() ?? await this.#applyHeldBeforeSend();
+			if (refusal !== null) return { status: "refused", reason: refusal };
 			return this.#sendUser(request.requestId, {
 				type: "follow_up",
 				message: request.text,
@@ -955,6 +1003,7 @@ export class RpcSession {
 		const how = await wait.promise;
 		this.#timers.clearTimeout(timer);
 		this.#navigation = null;
+		this.#syncHeld();
 		if (notSent !== null) return { status: "refused", reason: notSent };
 		// The command reached the model as text: stop that turn before it does anything.
 		if (how === "fell-through") void this.#sendInternal({ type: "abort" });
@@ -966,6 +1015,7 @@ export class RpcSession {
 		const marker = durable.map(entry => navigationMarker(entry)).find(found => found?.requestId === request.requestId) ?? null;
 		if (marker !== null) {
 			if (this.#navigationFence?.requestId === request.requestId) this.#navigationFence = null;
+			this.#syncHeld();
 			let draft: RewindDraft | null = null;
 			if (target !== undefined) {
 				const copy = structuredClone(target);
@@ -1032,8 +1082,20 @@ export class RpcSession {
 		return result;
 	}
 
-	/** `cycle_model`: the next role or scoped model. `null` when OMP had nothing to cycle to. */
-	async cycleModel(): Promise<CommandResult<{ model: ChatLiteModel; thinkingLevel: string | null } | null>> {
+	/**
+	 * `cycle_model`: the next role or scoped model. `null` when OMP had nothing to cycle to. While OMP cannot take
+	 * it (see {@link RpcSession.chooseModel}) the request is held and answers `pending`.
+	 */
+	cycleModel(): Promise<CommandResult<{ model: ChatLiteModel; thinkingLevel: string | null } | null> | PendingResult> {
+		return this.#admitChoice({
+			hold: held => ({ ...held, modelCycles: Math.min(held.modelCycles + 1, MAX_HELD_CYCLES) }),
+			replace: null,
+			first: "all",
+			send: () => this.#cycleModelNow(),
+		});
+	}
+
+	async #cycleModelNow(): Promise<CommandResult<{ model: ChatLiteModel; thinkingLevel: string | null } | null>> {
 		const refusal = this.#controlRefusal();
 		if (refusal !== null) return { status: "refused", reason: refusal };
 		const outcome = await this.#sendInternal({ type: "cycle_model" });
@@ -1047,8 +1109,17 @@ export class RpcSession {
 		return { status: "ok", value: { model, thinkingLevel } };
 	}
 
-	/** `cycle_thinking_level`: the next selector of the live model. `null` when the model has none. */
-	async cycleThinkingLevel(): Promise<CommandResult<string | null>> {
+	/** `cycle_thinking_level`: the next selector of the live model. `null` when the model has none. Held like {@link RpcSession.cycleModel}. */
+	cycleThinkingLevel(): Promise<CommandResult<string | null> | PendingResult> {
+		return this.#admitChoice({
+			hold: held => ({ ...held, thinkingCycles: Math.min(held.thinkingCycles + 1, MAX_HELD_CYCLES) }),
+			replace: null,
+			first: "all",
+			send: () => this.#cycleThinkingNow(),
+		});
+	}
+
+	async #cycleThinkingNow(): Promise<CommandResult<string | null>> {
 		const refusal = this.#controlRefusal();
 		if (refusal !== null) return { status: "refused", reason: refusal };
 		const outcome = await this.#sendInternal({ type: "cycle_thinking_level" });
@@ -1123,6 +1194,42 @@ export class RpcSession {
 		return outcome.status === "accepted" ? { status: "accepted", agentInvoked: null } : outcome;
 	}
 
+	/**
+	 * The user's model choice. OMP accepts `set_model` at any time (during a turn the next model request uses the
+	 * new model), so it is sent at once; only while the host must not write (a compaction pass, a rewind, a
+	 * reconnect) is it held and sent as soon as OMP can take it. The newest choice replaces an older one.
+	 */
+	async chooseModel(provider: string, modelId: string, name?: string): Promise<ChoiceOutcome> {
+		const current = this.#model.state?.model;
+		const replace = (held: HeldChoices): HeldChoices => ({ ...held, model: null, modelCycles: 0 });
+		// Choosing what OMP already uses while a different choice waits cancels the waiting one.
+		if (current?.provider === provider && current.id === modelId && this.#choiceBlock() === "wait") {
+			this.#setHeld(replace(this.#held));
+			return { status: "accepted", agentInvoked: null };
+		}
+		return this.#admitChoice({
+			hold: held => ({ ...held, model: { provider, id: modelId, ...(name === undefined ? {} : { name }) }, modelCycles: 0 }),
+			replace,
+			first: "none",
+			send: () => this.setModel(provider, modelId),
+		});
+	}
+
+	/** The user's thinking-level choice, held like {@link RpcSession.chooseModel}; a held model change is sent before it. */
+	async chooseThinkingLevel(level: string): Promise<ChoiceOutcome> {
+		const replace = (held: HeldChoices): HeldChoices => ({ ...held, thinking: null, thinkingCycles: 0 });
+		if (this.#model.state?.thinkingLevel === level && this.#held.model === null && this.#held.modelCycles === 0 && this.#choiceBlock() === "wait") {
+			this.#setHeld(replace(this.#held));
+			return { status: "accepted", agentInvoked: null };
+		}
+		return this.#admitChoice({
+			hold: held => ({ ...held, thinking: level, thinkingCycles: 0 }),
+			replace,
+			first: "model",
+			send: () => this.setThinkingLevel(level),
+		});
+	}
+
 	async setSessionName(name: string): Promise<SendOutcome> {
 		const refusal = this.#controlRefusal();
 		if (refusal !== null) return { status: "refused", reason: refusal };
@@ -1153,9 +1260,9 @@ export class RpcSession {
 		return typeof cost === "number" && Number.isFinite(cost) && cost > 0 ? cost : null;
 	}
 
-	/** Model catalogue; fetched lazily (never while a turn streams: it queues ahead of `abort`). */
+	/** Model catalogue, read when a picker opens (also during a turn). OMP runs commands in order and answers after a provider refresh still in flight, so a Stop sent meanwhile waits for it. */
 	async getAvailableModels(): Promise<ModelsResult> {
-		const refusal = this.#controlRefusal() ?? (this.#model.working ? "busy" : null);
+		const refusal = this.#controlRefusal();
 		if (refusal !== null) return { status: "refused", reason: refusal };
 		const outcome = await this.#sendInternal({ type: "get_available_models" });
 		if (outcome.status !== "accepted") return { status: "failed" };
@@ -1170,7 +1277,7 @@ export class RpcSession {
 	}
 
 	async getAvailableThinkingLevels(): Promise<ThinkingLevelsResult> {
-		const refusal = this.#controlRefusal() ?? (this.#model.working ? "busy" : null);
+		const refusal = this.#controlRefusal();
 		if (refusal !== null) return { status: "refused", reason: refusal };
 		const outcome = await this.#sendInternal({ type: "get_available_thinking_levels" });
 		if (outcome.status !== "accepted") return { status: "failed" };
@@ -1519,6 +1626,7 @@ export class RpcSession {
 		// (timeout, fall-through) is not a user turn. It lifts a navigation's fence; the re-read shows the outcome.
 		if (frame.type === "prompt_result" && typeof frame.id === "string" && frame.id.startsWith(INTERNAL_ID_PREFIX)) {
 			if (this.#navigationFence?.id === frame.id) this.#navigationFence = null;
+			this.#syncHeld();
 			this.#requestReconcile();
 			return;
 		}
@@ -1689,6 +1797,7 @@ export class RpcSession {
 			this.#emitModel();
 		}
 		this.#syncPausedStateReadback();
+		this.#syncHeld();
 		if (this.#live && this.#model.asyncPaused) {
 			let terminalChild = false;
 			if (frame.type === "subagent_lifecycle") {
@@ -1796,6 +1905,7 @@ export class RpcSession {
 		this.#clearReconcileTimer();
 		const fence = this.#navigationFence;
 		if (fence !== null && this.#model.entries.some(entry => navigationMarker(entry)?.requestId === fence.requestId)) this.#navigationFence = null;
+		this.#syncHeld();
 		if (!this.#live) return;
 		if (this.#model.pending.size === 0) {
 			this.#reconcileAttempts = 0;
@@ -2064,6 +2174,154 @@ export class RpcSession {
 		return this.#mutationFence !== null || this.#navigation !== null || this.#navigationFence !== null ? "busy" : this.#live && this.#identityVerified ? null : "not-live";
 	}
 
+	/**
+	 * Why a model or thinking choice cannot go to OMP this instant: `wait` holds it until it can, `gone` refuses it
+	 * (the session cannot come back by itself), null sends it. OMP itself accepts the change during a turn; it is
+	 * held while the host must not write (rewind, shutdown fence, reconnect) or OMP is compacting.
+	 */
+	#choiceBlock(): "wait" | "gone" | null {
+		if (this.#disposed || this.#ended) return "gone";
+		const phase = this.#model.phase;
+		if (phase === "starting" || phase === "attaching" || phase === "resyncing") return "wait";
+		if (phase !== "live") return "gone";
+		if (this.#controlRefusal() !== null) return "wait";
+		return this.#model.state?.isCompacting === true || this.#model.maintenance?.status === "working" ? "wait" : null;
+	}
+
+	#hasHeld(): boolean {
+		const held = this.#held;
+		return held.model !== null || held.modelCycles > 0 || held.thinking !== null || held.thinkingCycles > 0;
+	}
+
+	/** Replace the held choices and show them to the page; `NO_HELD` clears the mark. */
+	#setHeld(next: HeldChoices): void {
+		this.#held = next;
+		const pending: ChatPendingControl | null = this.#hasHeld()
+			? {
+				...(next.model === null ? {} : { model: next.model }),
+				...(next.modelCycles > 0 ? { modelCycles: next.modelCycles } : {}),
+				...(next.thinking === null ? {} : { thinking: next.thinking }),
+				...(next.thinkingCycles > 0 ? { thinkingCycles: next.thinkingCycles } : {}),
+			}
+			: null;
+		if (!samePendingControl(this.#model.pendingControl, pending)) this.#applyLocal({ type: "control_pending", pending });
+	}
+
+	/**
+	 * Admit one model/thinking choice. While OMP cannot take it, the plan holds it and the answer is `pending`.
+	 * Otherwise anything held earlier that must go first (and any flush still in flight) reaches OMP, the choices
+	 * this one replaces are dropped, and it is sent.
+	 */
+	async #admitChoice<T>(plan: ChoicePlan<T>): Promise<T | PendingResult | { status: "refused"; reason: "not-live" }> {
+		for (;;) {
+			const block = this.#choiceBlock();
+			if (block === "gone") return { status: "refused", reason: "not-live" };
+			if (block === "wait") {
+				this.#setHeld(plan.hold(this.#held));
+				return { status: "pending" };
+			}
+			const running = this.#heldFlush;
+			const held = this.#held;
+			const mustFlush = plan.first === "all" ? this.#hasHeld() : plan.first === "model" && (held.model !== null || held.modelCycles > 0);
+			if (running === null && !mustFlush) break;
+			const flushed = await this.#flushHeld();
+			if (flushed === "blocked" || flushed === "stalled") {
+				this.#setHeld(plan.hold(this.#held));
+				return { status: "pending" };
+			}
+		}
+		if (plan.replace !== null) this.#setHeld(plan.replace(this.#held));
+		try {
+			return await plan.send();
+		} finally {
+			this.#syncHeld();
+		}
+	}
+
+	/** Send held choices once OMP can take them; abandon them when the session can no longer. */
+	#syncHeld(): void {
+		if (!this.#hasHeld()) return;
+		const block = this.#choiceBlock();
+		if (block === "gone") this.#setHeld(NO_HELD);
+		else if (block === null && this.#heldFlush === null) void this.#flushHeld();
+	}
+
+	#flushHeld(): Promise<HeldFlush> {
+		if (this.#heldFlush !== null) return this.#heldFlush;
+		const run = this.#flushHeldLoop();
+		this.#heldFlush = run;
+		const settle = (result: HeldFlush): void => {
+			if (this.#heldFlush === run) this.#heldFlush = null;
+			// A choice made during the last command, or a block that lifted while it ran.
+			if (result !== "stalled") this.#syncHeld();
+		};
+		void run.then(settle, () => settle("stalled"));
+		return run;
+	}
+
+	/**
+	 * Held choices in order: the model first (a model change re-applies the thinking level), each with its own
+	 * outcome. A refusal that says "not now" keeps the choice held; OMP rejecting it, or an unanswered command,
+	 * drops it with a notice (the footer then shows what OMP reports) and is never retried.
+	 */
+	async #flushHeldLoop(): Promise<HeldFlush> {
+		let failed = false;
+		for (;;) {
+			if (!this.#hasHeld()) return failed ? "failed" : "done";
+			if (this.#choiceBlock() !== null) return failed ? "failed" : "blocked";
+			const held = this.#held;
+			let kind: "model" | "thinking";
+			let consume: (current: HeldChoices) => HeldChoices;
+			let result: HeldStepResult;
+			if (held.model !== null) {
+				const model = held.model;
+				kind = "model";
+				consume = current => (current.model === model ? { ...current, model: null } : current);
+				result = heldStepResult(await this.setModel(model.provider, model.id));
+			} else if (held.modelCycles > 0) {
+				kind = "model";
+				consume = current => (current.modelCycles > 0 ? { ...current, modelCycles: current.modelCycles - 1 } : current);
+				const outcome = await this.#cycleModelNow();
+				result = outcome.status === "ok" ? (outcome.value === null ? "nothing" : "applied") : heldStepResult(outcome);
+			} else if (held.thinking !== null) {
+				const level = held.thinking;
+				kind = "thinking";
+				consume = current => (current.thinking === level ? { ...current, thinking: null } : current);
+				result = heldStepResult(await this.setThinkingLevel(level));
+			} else {
+				kind = "thinking";
+				consume = current => (current.thinkingCycles > 0 ? { ...current, thinkingCycles: current.thinkingCycles - 1 } : current);
+				const outcome = await this.#cycleThinkingNow();
+				result = outcome.status === "ok" ? (outcome.value === null ? "nothing" : "applied") : heldStepResult(outcome);
+			}
+			if (result === "blocked") return failed ? "failed" : "stalled";
+			this.#setHeld(consume(this.#held));
+			if (result === "applied") continue;
+			if (result === "nothing") this.#heldNotice(kind === "model" ? "OMP has no other model to cycle to." : "The current model has no thinking levels to cycle through.");
+			else {
+				failed = true;
+				const what = kind === "model" ? "model" : "thinking-level";
+				this.#heldNotice(result === "rejected"
+					? `OMP did not apply your ${what} change; the footer shows what OMP is using.`
+					: `OMP did not confirm your ${what} change. It was not retried; the footer shows what OMP reports.`);
+			}
+		}
+	}
+
+	#heldNotice(message: string): void {
+		if (this.#live) this.#applyLocal({ type: "command_feedback", message });
+	}
+
+	/** Before a message that could start or steer a turn: a held choice reaches OMP first, so it never runs on the old model. */
+	async #applyHeldBeforeSend(): Promise<SendRefusal | null> {
+		if (!this.#hasHeld() && this.#heldFlush === null) return null;
+		if (this.#heldFlush === null && this.#choiceBlock() !== null) return "busy";
+		const result = await this.#flushHeld();
+		if (result === "failed") return "choice-failed";
+		if (result !== "done") return "busy";
+		return this.#controlRefusal();
+	}
+
 	#once(requestId: string, run: () => Promise<SendOutcome>): Promise<SendOutcome> {
 		if (!REQUEST_ID_PATTERN.test(requestId)) return Promise.resolve({ status: "refused", reason: "bad-request-id" });
 		const known = this.#requests.get(requestId);
@@ -2177,6 +2435,7 @@ export class RpcSession {
 		this.#model = next;
 		this.#emitState();
 		this.#syncPausedStateReadback();
+		this.#syncHeld();
 	}
 
 	#fail(code: RpcErrorCode): void {
@@ -2227,6 +2486,7 @@ export class RpcSession {
 		this.#emitState();
 		this.#emit({ type: "snapshot", payload: snapshotOf(this.#model, this.epoch), baseline });
 		this.#emitModel();
+		this.#syncHeld();
 	}
 
 	/** The disk-paint snapshot: history visible while the child is still starting. */

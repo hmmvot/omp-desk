@@ -82,6 +82,31 @@ export interface ChatLiteState {
 	contextUsage?: { tokens: number | null; contextWindow: number | null; percent: number | null };
 }
 
+/** A model the user chose that OMP has not been told about yet. */
+export interface ChatPendingModel {
+	provider: string;
+	id: string;
+	name?: string;
+}
+
+/**
+ * The model and thinking choices the host holds until OMP can accept them (a compaction pass, a rewind, a
+ * reconnect): never an OMP readback. The footer shows them beside OMP's own value with a pending mark and drops
+ * the mark when the host applied or abandoned them. `*Cycles` counts "next" requests that name no target.
+ */
+export interface ChatPendingControl {
+	model?: ChatPendingModel;
+	modelCycles?: number;
+	thinking?: string;
+	thinkingCycles?: number;
+}
+
+export function samePendingControl(a: ChatPendingControl | null, b: ChatPendingControl | null): boolean {
+	if (a === null || b === null) return a === b;
+	return a.model?.provider === b.model?.provider && a.model?.id === b.model?.id && a.model?.name === b.model?.name &&
+		(a.modelCycles ?? 0) === (b.modelCycles ?? 0) && a.thinking === b.thinking && (a.thinkingCycles ?? 0) === (b.thinkingCycles ?? 0);
+}
+
 export interface ActiveTool {
 	toolCallId: string;
 	toolName: string;
@@ -276,6 +301,8 @@ export interface ChatModel {
 	/** Bounded live-only notifications positioned at their arrival point in the transcript. */
 	ephemeral: readonly EphemeralItem[];
 	commandFeedback: CommandFeedback | null;
+	/** Host-held model/thinking choices OMP has not accepted yet; null when none. */
+	pendingControl: ChatPendingControl | null;
 	/** One bounded text line from `setStatus`, or null. */
 	statusLine: string | null;
 	statusEntries: ReadonlyMap<string, string>;
@@ -344,6 +371,8 @@ export type ChatEventFrame = SubagentFrame | NativeEventFrame
 	| { type: "abort_requested" }
 	/** Host-owned only: the child mapper never produces this frame. */
 	| { type: "command_feedback"; message: string }
+	/** Host-owned only: the model/thinking choices held until OMP can accept them (`null` clears). */
+	| { type: "control_pending"; pending: ChatPendingControl | null }
 	| { type: "model_changed" }
 	| { type: "thinking_level_changed"; thinkingLevel?: string | null; configured?: string; resolved?: string }
 	| { type: "config_update"; model?: ChatLiteModel | null; thinkingLevel?: string | null }
@@ -422,6 +451,7 @@ export interface ChatSnapshotPayload {
 	ephemeral: readonly EphemeralItem[];
 	commands: readonly ChatSlashCommand[];
 	displayTurns?: readonly DisplayTurn[];
+	pendingControl?: ChatPendingControl | null;
 }
 
 /** `omp:chat-entries`. */
@@ -492,6 +522,7 @@ export function createChatModel(): ChatModel {
 		transcriptEventSeq: 0,
 		ephemeral: NO_EPHEMERAL,
 		commandFeedback: null,
+		pendingControl: null,
 		statusLine: null,
 		statusEntries: EMPTY_STATUS,
 		widgets: NO_WIDGETS,
@@ -814,6 +845,7 @@ export function applyChatSnapshot(model: ChatModel, snapshot: ChatSnapshotPayloa
 			transcriptEventSeq: snapshot.transcriptEventSeq,
 			ephemeral: snapshot.ephemeral,
 			commands: snapshot.commands,
+			pendingControl: snapshot.pendingControl ?? null,
 		},
 		clock,
 	);
@@ -1006,6 +1038,8 @@ export function reduceChatFrame(model: ChatModel, frame: ChatEventFrame, clock: 
 			return { ...model, displayTurns: finishDisplayTurn(model.displayTurns, now), settled: true, working: false, activeTools: model.activeTools.size === 0 ? model.activeTools : EMPTY_TOOLS };
 		case "command_feedback":
 			return { ...model, commandFeedback: { id: (model.commandFeedback?.id ?? 0) + 1, message: clampText(frame.message, MAX_COMMAND_FEEDBACK_TEXT) } };
+		case "control_pending":
+			return samePendingControl(model.pendingControl, frame.pending) ? model : { ...model, pendingControl: frame.pending };
 		case "model_changed":
 			return model;
 		case "turn_start":
@@ -1423,6 +1457,7 @@ export function snapshotOf(model: ChatModel, epoch: ChatEpoch): ChatSnapshotPayl
 		ephemeral: model.ephemeral,
 		commands: model.commands,
 		displayTurns: model.displayTurns,
+		...(model.pendingControl === null ? {} : { pendingControl: model.pendingControl }),
 	};
 }
 

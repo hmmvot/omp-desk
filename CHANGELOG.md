@@ -40,6 +40,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Inline code in a Markdown link label in Chat (`` [`World.Current`](…) ``) is shown as code, not with its backticks.
 - **Session cost** in the context popover covers the whole session, as the terminal UI's status line does. After a compaction it used to count only the spend since that compaction.
 - The context ring and its popover under the Chat composer show the new usage after **Compact** / **Shake** (from the popover or typed), after `/handoff` and after an automatic compaction. They used to keep the figure from before the pass until the next turn.
+- **Chat's model and thinking pickers work during a turn.** Choosing a thinking level or a model while OMP was working was refused with "OMP is busy; choose a thinking level after the turn ends". OMP accepts both changes mid-turn (the next model request uses them), so Chat now sends them at once. When Chat cannot send a change yet (OMP is compacting, a rewind is running, the connection is being restored), it keeps your choice, shows it in the picker with a clock icon and sends it as soon as OMP is ready, before any message you send in the meantime; the newest choice wins. If OMP rejects it, the picker goes back to what OMP uses and a notice says so. **Cycle Model** and **Cycle Thinking Level** (`Ctrl+Shift+U`) behave the same. A choice that is still waiting is lost if the window is reloaded.
 
 ## [0.2.1] - 2026-10-09
 

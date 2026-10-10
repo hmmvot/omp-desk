@@ -88,7 +88,7 @@ For how this works, see the [architecture](docs/architecture.md).
 - Web links in replies, tool output and the TODO and Agents tabs open in a VS Code editor tab on click or `Enter`, and in your browser on `Ctrl+Click` or `Ctrl+Enter`.
 - Routine tool calls are grouped in an **Overview**. The **Tools output** chip switches every Chat to **Detailed**.
 - Pinned rows show the TODO list and running subagents. Open a subagent's live transcript in its own tab.
-- Model and thinking pickers. The footer shows context usage, provider quotas and the Git branch.
+- Model and thinking pickers work at any time, also during a turn. A change OMP cannot take yet (compaction, a rewind, a reconnect) waits, shown in the picker with a clock icon, and is sent as soon as OMP is ready, before your next message. The footer shows context usage, provider quotas and the Git branch.
 - Without available models, the model chip offers **Log In to Provider**. Every model picker also ends with **Log In to Provider…** to add another provider.
 - Your draft stays until OMP confirms it. Nothing is resent automatically.
 - If OMP stops responding, **Reconnect** or **Restart** the conversation.

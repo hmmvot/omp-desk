@@ -66,10 +66,13 @@ export function ChatFooter({ client, snapshot, trailingActions }: {
 		// The reducer updates synchronously; a state push and picker reply can precede React's next render.
 		const current = client.getSnapshot();
 		if (!message.available || current.phase !== "live" || current.readOnlyReason !== null) return;
+		// A held choice is what the picker shows; picking OMP's own value then cancels it (the host drops it).
+		const shownModel = current.pendingControl?.model ?? current.state?.model;
+		const shownThinking = current.pendingControl?.thinking ?? current.state?.thinkingLevel;
 		if (picker === "model" && message.selectedModel &&
-			(message.selectedModel.provider !== current.state?.model?.provider || message.selectedModel.id !== current.state?.model?.id)) {
+			(message.selectedModel.provider !== shownModel?.provider || message.selectedModel.id !== shownModel?.id)) {
 			send({ action: "set-model", model: message.selectedModel });
-		} else if (picker === "thinking" && message.selectedThinking && message.selectedThinking !== current.state?.thinkingLevel &&
+		} else if (picker === "thinking" && message.selectedThinking && message.selectedThinking !== shownThinking &&
 			message.model?.provider === current.state?.model?.provider && message.model?.id === current.state?.model?.id) {
 			send({ action: "set-thinking", level: message.selectedThinking });
 		}
@@ -108,8 +111,13 @@ export function ChatFooter({ client, snapshot, trailingActions }: {
 		if (message !== undefined) setCommandFeedback(message);
 	}, [snapshot.commandFeedback]);
 	const toolsOutput = preferences.toolCallDetail === "overview" ? "Overview" : "Detailed";
+	const pending = snapshot.pendingControl;
+	const modelHeld = pending?.model !== undefined || (pending?.modelCycles ?? 0) > 0;
+	const levelHeld = pending?.thinking !== undefined || (pending?.thinkingCycles ?? 0) > 0;
 	const model = snapshot.state?.model ?? null;
-	const level = snapshot.state?.thinkingLevel ?? null;
+	const modelLabel = pending?.model !== undefined ? pending.model.name ?? pending.model.id : model?.name ?? model?.id ?? null;
+	const level = pending?.thinking ?? snapshot.state?.thinkingLevel ?? null;
+	const heldHint = (what: string, target: string | null): string => `${target === null ? `The next ${what} was requested` : `Waiting to apply ${target}`}. OMP applies it as soon as it is ready.`;
 	const readOnly = snapshot.readOnlyReason !== null;
 	const needsProviderLogin = metadata?.hasAvailableModels === false;
 	const blocked = !live ? "This session is not running." : readOnly ? snapshot.readOnlyReason ?? "This session is read-only." :
@@ -135,15 +143,15 @@ export function ChatFooter({ client, snapshot, trailingActions }: {
 		<>
 			<div className="omp-composer-toolbar">
 				<div className="omp-composer-lead">
-					<button type="button" className="omp-footer-trigger" disabled={!needsProviderLogin && blocked !== null}
-						title={needsProviderLogin ? "Log in to a model provider for this session" : blocked ?? `Provider: ${model?.provider ?? "unknown"} · Alt+click: next model`} onClick={event => needsProviderLogin ? guestTransport.post({ type: "omp:chat-command", command: "provider-login" }) : event.altKey ? guestTransport.post({ type: "omp:chat-command", command: "cycle-model" }) : send({ action: "snapshot", picker: "model" })}>
-						<span className="omp-footer-trigger-label">{needsProviderLogin ? "Log In to Provider" : model?.name ?? model?.id ?? "Model unavailable"}</span>
-						<span aria-hidden="true" className={`codicon codicon-${view.awaiting !== null && (bookRef.current?.picker === "model" || view.action === "set-model") ? "loading codicon-modifier-spin" : "chevron-down"}`} />
+					<button type="button" className={`omp-footer-trigger${modelHeld ? " omp-footer-trigger--pending" : ""}`} data-pending={modelHeld ? "true" : undefined} disabled={!needsProviderLogin && blocked !== null}
+						title={needsProviderLogin ? "Log in to a model provider for this session" : blocked ?? (modelHeld ? heldHint("model", pending?.model === undefined ? null : modelLabel) : `Provider: ${model?.provider ?? "unknown"} · Alt+click: next model`)} onClick={event => needsProviderLogin ? guestTransport.post({ type: "omp:chat-command", command: "provider-login" }) : event.altKey ? guestTransport.post({ type: "omp:chat-command", command: "cycle-model" }) : send({ action: "snapshot", picker: "model" })}>
+						<span className="omp-footer-trigger-label">{needsProviderLogin ? "Log In to Provider" : modelLabel ?? "Model unavailable"}</span>
+						<span aria-hidden="true" className={`codicon codicon-${view.awaiting !== null && (bookRef.current?.picker === "model" || view.action === "set-model") ? "loading codicon-modifier-spin" : modelHeld ? "clock" : "chevron-down"}`} />
 					</button>
-					<button type="button" className="omp-footer-trigger omp-footer-trigger--level" disabled={blocked !== null}
-						title={blocked ?? "Change the session's thinking level · Alt+click: next level"} aria-label="Thinking level" onClick={event => event.altKey ? guestTransport.post({ type: "omp:chat-command", command: "cycle-thinking" }) : send({ action: "snapshot", picker: "thinking" })}>
+					<button type="button" className={`omp-footer-trigger omp-footer-trigger--level${levelHeld ? " omp-footer-trigger--pending" : ""}`} data-pending={levelHeld ? "true" : undefined} disabled={blocked !== null}
+						title={blocked ?? (levelHeld ? heldHint("thinking level", pending?.thinking ?? null) : "Change the session's thinking level · Alt+click: next level")} aria-label="Thinking level" onClick={event => event.altKey ? guestTransport.post({ type: "omp:chat-command", command: "cycle-thinking" }) : send({ action: "snapshot", picker: "thinking" })}>
 						<span className="omp-footer-trigger-label">{level ?? "Unavailable"}</span>
-						<span aria-hidden="true" className={`codicon codicon-${view.awaiting !== null && (bookRef.current?.picker === "thinking" || view.action === "set-thinking") ? "loading codicon-modifier-spin" : "chevron-down"}`} />
+						<span aria-hidden="true" className={`codicon codicon-${view.awaiting !== null && (bookRef.current?.picker === "thinking" || view.action === "set-thinking") ? "loading codicon-modifier-spin" : levelHeld ? "clock" : "chevron-down"}`} />
 					</button>
 					<button type="button" className="omp-btn omp-tools-trigger"
 						aria-label={`Tools output: ${toolsOutput}`} title={`Tools output: ${toolsOutput}`} onClick={() => client.chooseToolCallDetail()}>

@@ -55,6 +55,7 @@ import type {
 	ChatAskAnswer,
 	ChatAskQuestion,
 	ChatLiteModel,
+	ChatPendingControl,
 	ChatLiteState,
 	ChatOlderPayload,
 	ChatPendingRowPayload,
@@ -477,6 +478,35 @@ function parseLiteModel(value: unknown): ChatLiteModel | null {
 	return model;
 }
 
+const MAX_PENDING_CYCLES = 16;
+
+/** The host's held model/thinking choices; `"invalid"` when the shape is wrong, `null` when there are none. */
+function parsePendingControl(value: unknown): ChatPendingControl | null | "invalid" {
+	if (value === undefined || value === null) return null;
+	if (!isRecord(value)) return "invalid";
+	const pending: ChatPendingControl = {};
+	if (value.model !== undefined) {
+		const model = value.model;
+		if (!isRecord(model) || !isName(model.provider, MAX_ID_LENGTH) || !isName(model.id, MAX_ID_LENGTH)) return "invalid";
+		const name = optionalText(model.name, MAX_ID_LENGTH);
+		if (name === null) return "invalid";
+		pending.model = { provider: model.provider, id: model.id, ...(name === undefined ? {} : { name }) };
+	}
+	if (value.modelCycles !== undefined) {
+		if (!isCount(value.modelCycles) || value.modelCycles > MAX_PENDING_CYCLES) return "invalid";
+		if (value.modelCycles > 0) pending.modelCycles = value.modelCycles;
+	}
+	if (value.thinking !== undefined) {
+		if (!isName(value.thinking, MAX_LABEL_LENGTH)) return "invalid";
+		pending.thinking = value.thinking;
+	}
+	if (value.thinkingCycles !== undefined) {
+		if (!isCount(value.thinkingCycles) || value.thinkingCycles > MAX_PENDING_CYCLES) return "invalid";
+		if (value.thinkingCycles > 0) pending.thinkingCycles = value.thinkingCycles;
+	}
+	return Object.keys(pending).length === 0 ? null : pending;
+}
+
 function parseLiteState(value: unknown): ChatLiteState | null {
 	if (!isRecord(value)) return null;
 	const model = value.model === null ? null : parseLiteModel(value.model);
@@ -711,6 +741,10 @@ export function parseChatEventFrame(value: unknown): ChatEventFrame | null {
 		}
 		case "command_feedback":
 			return isText(value.message, 2_000) ? { type: "command_feedback", message: value.message } : null;
+		case "control_pending": {
+			const pending = parsePendingControl(value.pending);
+			return pending === "invalid" ? null : { type: "control_pending", pending };
+		}
 		case "thinking_level_changed": {
 			if (value.thinkingLevel !== undefined && value.thinkingLevel !== null && !isText(value.thinkingLevel, MAX_LABEL_LENGTH)) return null;
 			return value.thinkingLevel === undefined ? { type: "thinking_level_changed" } : { type: "thinking_level_changed", thinkingLevel: value.thinkingLevel };
@@ -894,6 +928,8 @@ function parseSnapshotHead(value: unknown): ChatSnapshotHead | null {
 			displayTurns.push({ id: turn.id, startedAt: turn.startedAt, completedAt: isFiniteNumber(turn.completedAt) ? turn.completedAt : null, complete: turn.complete, memberKeys: turn.memberKeys });
 		}
 	}
+	const pendingControl = parsePendingControl(value.pendingControl);
+	if (pendingControl === "invalid") return null;
 
 	return {
 		phase,
@@ -930,6 +966,7 @@ function parseSnapshotHead(value: unknown): ChatSnapshotHead | null {
 		ephemeral,
 		commands,
 		displayTurns,
+		...(pendingControl === null ? {} : { pendingControl }),
 	};
 }
 
