@@ -55,6 +55,9 @@ describe("isTerminalWorkbenchChord", () => {
 		assert.equal(isTerminalWorkbenchChord({ ...key("\u042c", { ctrlKey: true, shiftKey: true }), code: "KeyM" }), true, "Ctrl+Shift+M would reach OMP as Ctrl+M, a carriage return");
 		assert.equal(isTerminalWorkbenchChord(key("m", { ctrlKey: true })), false);
 		assert.equal(isTerminalWorkbenchChord(key("Q", { ctrlKey: true, altKey: true, shiftKey: true })), false);
+		assert.equal(isTerminalWorkbenchChord(key("q", { ctrlKey: true, altKey: true })), true, "Ctrl+Alt+Q is Go to Session");
+		assert.equal(isTerminalWorkbenchChord({ ...key("\u0439", { ctrlKey: true, altKey: true }), code: "KeyQ" }), true);
+		assert.equal(isTerminalWorkbenchChord(key("m", { ctrlKey: true, altKey: true })), false);
 		assert.equal(isTerminalWorkbenchChord(key("r", { ctrlKey: true })), false);
 		assert.equal(isTerminalWorkbenchChord(key("R", { ctrlKey: true, shiftKey: true })), false);
 		assert.equal(isTerminalWorkbenchChord(key("R", { ctrlKey: true, altKey: true })), false);
