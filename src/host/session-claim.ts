@@ -13,7 +13,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import * as fsSync from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
@@ -933,8 +933,88 @@ export function claimHolderMayBeAlive(observed: ObservedClaim): boolean {
 	if (!holderProcessAlive(observed.pid)) return false;
 	const creationTime = processCreationTime(observed.pid);
 	if (creationTime === null) return false;
+	return generationMatches(observed, creationTime);
+}
+
+/** Whether a holder process that started at `creationTime` is the one `observed` was filed by. */
+function generationMatches(observed: ObservedClaim, creationTime: string): boolean {
 	if (observed.processCreationTime != null) return creationTime === observed.processCreationTime;
 	return observed.createdAt !== null && Date.parse(creationTime) <= Date.parse(observed.createdAt);
+}
+
+/**
+ * Whether the holder of `observed` is verifiably alive, for **display and navigation only**:
+ * which row says "open in another window", whether a click switches windows. It is
+ * {@link claimHolderMayBeAlive}'s verdict from a reading of the holder's start time that is kept
+ * for {@link ADVISORY_READING_MS}, and read **without blocking the extension host**. It must never admit
+ * or refuse a launch, a stop or a deletion: those keep asking {@link claimHolderMayBeAlive},
+ * which reads the start time itself, now, at each verdict (ADR-0039).
+ *
+ * The cost it removes: reading a start time is a PowerShell (or `ps`) command, 200 to 450 ms
+ * measured, seconds with a real-time scanner. The Sessions view asks about every row another
+ * window holds on every claim change, and a window switch changes claims; as one blocking command
+ * per verdict that froze every window's extension host for up to 22 seconds.
+ *
+ * A reading only speaks for a claim that existed when it was taken. It is a sample of the process
+ * that held the pid then; a claim filed after it may be a newer process that reused the pid, so
+ * such a claim gets a reading of its own, and a command already running is joined only if it
+ * started after the claim was filed.
+ */
+export async function claimHolderSeemsAlive(observed: ObservedClaim): Promise<boolean> {
+	if (!observed.verifiable || observed.pid === null || observed.holderId === null) return false;
+	if (observed.pid === process.pid) return liveHolderIds.has(observed.holderId);
+	const pid = observed.pid;
+	if (!holderProcessAlive(pid)) {
+		advisoryReadings.delete(pid);
+		return false;
+	}
+	const filedAt = observed.createdAt === null ? Number.NaN : Date.parse(observed.createdAt);
+	// A claim without a filing time cannot be shown to predate a reading: it is read afresh.
+	const speaksFor = (reading: { readonly sampledAt: number }): boolean => Number.isFinite(filedAt) && filedAt <= reading.sampledAt;
+	let reading = advisoryReadings.get(pid);
+	if (reading === undefined || !speaksFor(reading) || Date.now() - reading.at >= (reading.time === null ? FAILED_READING_MS : ADVISORY_READING_MS)) {
+		const running = advisoryInFlight.get(pid);
+		reading = running !== undefined && speaksFor(running.sample) ? await running.reading : await readAdvisory(pid);
+	}
+	return reading.time !== null && generationMatches(observed, reading.time);
+}
+
+/** One reading of a process's start time, taken at `sampledAt` (before the command ran) and finished at `at`. */
+interface AdvisoryReading {
+	readonly time: string | null;
+	readonly sampledAt: number;
+	readonly at: number;
+}
+const advisoryReadings = new Map<number, AdvisoryReading>();
+const advisoryInFlight = new Map<number, { readonly sample: { readonly sampledAt: number }; readonly reading: Promise<AdvisoryReading> }>();
+/** How long a reading backs the display of a holder. */
+const ADVISORY_READING_MS = 20_000;
+/** A reading that found nothing (no PowerShell, a timeout, no such process) is believed this long, so a missing tool is not retried for every row. */
+const FAILED_READING_MS = 10_000;
+
+function readAdvisory(pid: number): Promise<AdvisoryReading> {
+	const sampledAt = Date.now();
+	const command = creationTimeCommand(pid);
+	const reading = new Promise<string | null>(resolve => {
+		try {
+			execFile(command.file, command.args, { encoding: "utf8", timeout: 5000, windowsHide: true, ...(command.env === undefined ? {} : { env: command.env }) }, (error, stdout) => {
+				resolve(error === null ? parseCreationTime(stdout) : null);
+			});
+		} catch {
+			resolve(null);
+		}
+	}).then((time): AdvisoryReading => {
+		const done: AdvisoryReading = { time, sampledAt, at: Date.now() };
+		// An older command that finishes after a newer one never replaces what the newer one saw.
+		const known = advisoryReadings.get(pid);
+		if (known === undefined || known.sampledAt <= sampledAt) advisoryReadings.set(pid, done);
+		probeObserver?.({ pid, ms: done.at - sampledAt, mode: "async", found: time !== null });
+		return done;
+	}).finally(() => {
+		if (advisoryInFlight.get(pid)?.sample.sampledAt === sampledAt) advisoryInFlight.delete(pid);
+	});
+	advisoryInFlight.set(pid, { sample: { sampledAt }, reading });
+	return reading;
 }
 
 /** A successful existence probe; generation matching is required separately. */
@@ -949,23 +1029,45 @@ function holderProcessAlive(pid: number): boolean {
 
 let ownProcessCreationTime: string | null | undefined;
 
+/** One reading of another process's start time: how long it took and whether it blocked the extension host. */
+export interface ProcessProbe {
+	readonly pid: number;
+	readonly ms: number;
+	readonly mode: "sync" | "async";
+	readonly found: boolean;
+}
+let probeObserver: ((probe: ProcessProbe) => void) | null = null;
+/** Report every reading of a process start time (the extension logs them); `null` stops reporting. */
+export function setProcessProbeObserver(observer: ((probe: ProcessProbe) => void) | null): void {
+	probeObserver = observer;
+}
+
+/** The command that prints one process's start time, and its environment. */
+function creationTimeCommand(pid: number): { readonly file: string; readonly args: string[]; readonly env: NodeJS.ProcessEnv | undefined } {
+	return process.platform === "win32"
+		? { file: windowsPowerShellExecutable(), args: ["-NoProfile", "-NonInteractive", "-Command", `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`], env: windowsPowerShellEnvironment() }
+		: { file: "ps", args: ["-o", "lstart=", "-p", String(pid)], env: undefined };
+}
+
+function parseCreationTime(raw: string): string | null {
+	const time = Date.parse(raw.trim());
+	return Number.isFinite(time) ? new Date(time).toISOString() : null;
+}
+
 /** Read a process generation; an unavailable reading never proves a claim holder. */
 function processCreationTime(pid: number): string | null {
 	if (pid === process.pid && ownProcessCreationTime !== undefined) return ownProcessCreationTime;
 	let result: string | null = null;
+	const startedAt = Date.now();
 	try {
-		const raw = process.platform === "win32"
-			? execFileSync(windowsPowerShellExecutable(), ["-NoProfile", "-NonInteractive", "-Command",
-				`(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`],
-				{ encoding: "utf8", timeout: 5000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"], env: windowsPowerShellEnvironment() })
-			: execFileSync("ps", ["-o", "lstart=", "-p", String(pid)],
-				{ encoding: "utf8", timeout: 5000, stdio: ["ignore", "pipe", "ignore"] });
-		const time = Date.parse(raw.trim());
-		if (Number.isFinite(time)) result = new Date(time).toISOString();
+		const command = creationTimeCommand(pid);
+		result = parseCreationTime(execFileSync(command.file, command.args,
+			{ encoding: "utf8", timeout: 5000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"], ...(command.env === undefined ? {} : { env: command.env }) }));
 	} catch {
 		// No verified generation means not owned.
 	}
 	if (pid === process.pid) ownProcessCreationTime = result;
+	probeObserver?.({ pid, ms: Date.now() - startedAt, mode: "sync", found: result !== null });
 	return result;
 }
 

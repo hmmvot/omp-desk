@@ -107,12 +107,13 @@ function waitForRows(provider: Provider, predicate: () => boolean): Promise<void
 }
 
 function folder(id: string, folderPath: string, collapsed = false, flags: { readonly pinned?: boolean; readonly open?: boolean } = {}): LauncherFolder {
-	return { id, path: folderPath, collapsed, pinned: flags.pinned ?? true, open: flags.open ?? false };
+	const open = flags.open ?? false;
+	return { id, path: folderPath, collapsed, pinned: flags.pinned ?? true, open, openHere: open, openElsewhere: false };
 }
 
 /** The pinned registry's folders as the merged list the launcher shows. */
 function pinnedFolders(registry: Registry): LauncherFolder[] {
-	return registry.list().map(registered => ({ ...registered, pinned: true, open: false }));
+	return registry.list().map(registered => ({ ...registered, pinned: true, open: false, openHere: false, openElsewhere: false }));
 }
 
 /** The codicon id of an item's icon, narrowed rather than assumed. */
@@ -670,7 +671,7 @@ describe("launcher tree", () => {
 			await waitForRows(provider, () => root.rows[0]?.state !== "checking");
 			const row = await provider.itemFor(remote.tabId);
 			assert.equal(row?.state, "otherWindow");
-			assert.equal(row?.description, "Running · in another window");
+			assert.equal(row?.description, "Running", "a holder that published no status shows the status every window can vouch for");
 			assert.equal(row?.resumable, false);
 			assert.equal(row?.forgettable, false);
 			assert.equal(row?.deletable, false);

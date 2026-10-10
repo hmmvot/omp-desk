@@ -26,6 +26,10 @@ Derive per window; pin under the identity-derived id (first option). `windowFold
 - **ADR-0034 (profile-wide collapse state).** Collapsed state stays profile-wide for pinned folders only; unpinned folders keep it per window. The folder list stays one transactional catalog key for pinned folders.
 - **ADR-0039 (Blocked with Stop).** A verified live rival holder is shown as its own row state, **Open in another window**, instead of the generic Blocked. The refusal rule is unchanged (only a verified live writer excludes admission, and Stop on the rival's recorded host stays available), and the safety rules of claims are untouched. One addition: Open and a click on such a row show a short message that the session is open in another window instead of attempting the open, because the row says the holder is known. This is a message shortcut over the same claim read, not an authority; the claim is re-read first, and every other launch path still passes through claim admission.
 
+### Amended by ADR-0056
+
+[ADR-0056](0056-publish-window-state-in-a-leased-registry-and-switch-windows-by-request.md) changes three things above. (1) Window folders are still never persisted or pinned automatically, but every window publishes its own in an expiring registry record and every window shows the union, in window-start order; "per window" now describes where a folder is open, not who sees it. (2) The message shortcut for **Open in another window** rows is gone: Open and a click switch to the owning window at once, with no message, no confirmation and no Switch to Window button; a message appears only when switching is impossible, and says why. The claim is still re-read first and nothing is launched. (3) `omp.showWorkspaceFolders` and `omp.useAgentRootFolder` are application scoped. Unpinned-folder collapse stays per window.
+
 ### Consequences
 
 - Positive: Pin never changes a row's id or a command argument; no migration; no extra store; two windows pinning the same folder converge on one record, and a conflict is recorded only for a concurrent pin that differs in spelling or collapsed flag.

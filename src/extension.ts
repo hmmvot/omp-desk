@@ -67,8 +67,13 @@ import type {
   SessionIndexEntry,
 } from "./host/session-index";
 import type { SessionViewMode } from "./host/session-index";
-import { claimHolderMayBeAlive } from "./host/session-claim";
+import { claimHolderMayBeAlive, claimHolderSeemsAlive, setProcessProbeObserver } from "./host/session-claim";
 import { claimFileNameFor, startClaimWatch } from "./host/claim-watch";
+import { PUBLISHED_ROW_STATUSES, WindowRegistry } from "./host/window-registry";
+import { sessionIncarnation } from "./host/window-registry";
+import type { PublishedRow, PublishedRowStatus } from "./host/window-registry";
+import { REQUEST_ANSWER_TIMEOUT_MS, awaitSwitchAnswer, planWindowSwitch, postSwitchRequest, startRequestWatch, withdrawSwitchRequest } from "./host/window-requests";
+import type { RequestWatch, ServeContext, ServeOutcome, SwitchAnswer, SwitchRequest } from "./host/window-requests";
 import { ExternalLeaseObserver, ompSessionOwnersDir, powershellLeaseProbe } from "./host/omp-session-lease";
 import { canonicalFolderKey, folderHistoryDeletionSubject, inspectSessionFile, scanFolderHistory } from "./host/folder-history";
 import type { FolderHistoryCandidate, FolderHistoryIndexedEntry, FolderHistoryScan } from "./host/folder-history";
@@ -717,6 +722,12 @@ let nextLauncherRuntimeId = 0;
  * discovery a folder's Resume action asks for.
  */
 let launcherFolders: LauncherFolders | undefined;
+/** The leased registry of this profile's windows (ADR-0056), once this window activated. */
+let windowRegistry: WindowRegistry | undefined;
+/** Serves other windows' requests to select a session's tab (ADR-0056). */
+let windowRequestWatch: RequestWatch | undefined;
+/** Re-probe the agent roots of every live window's folders; set at activation. */
+let resolveAgentRoots: () => void = () => {};
 /**
  * This window's turn notifier, created once per session index.
  *
@@ -925,15 +936,16 @@ export function activate(context: vscode.ExtensionContext): void {
   // catalog never presents itself as "no folder is registered" while the folders the
   // user already had are still being imported.
   void vscode.commands.executeCommand("setContext", CATALOG_PENDING_CONTEXT, true);
+  const claimHolder = { ...createClaimHolder(), windowUri: owningWindowUri()?.toString() ?? null };
   const index = new SessionIndex({
     store: catalog,
     // This window's own observations — its availability reads, the reply its panels
-    // displayed, the tab it selected — stay in this window's own store. They are not
-    // shared facts: a rival window's failed attach must never publish a status over a
-    // session another window is running (ADR-0034).
+    // displayed, the tab it selected — stay in this window's own store. They are not shared
+    // facts: a rival window's failed attach must never publish a status over a session
+    // another window is running (ADR-0034).
     localStore: context.workspaceState,
     claimStorageDir: context.globalStorageUri.fsPath,
-    claimHolder: { ...createClaimHolder(), windowUri: owningWindowUri()?.toString() ?? null },
+    claimHolder,
     log: message => log(message),
   });
   // Protocol activation only reveals an existing handle; it never acquires or starts work.
@@ -951,32 +963,34 @@ export function activate(context: vscode.ExtensionContext): void {
   });
   const agentRoots = new AgentRootResolver();
   const useAgentRootFolder = () => vscode.workspace.getConfiguration("omp").get<boolean>("useAgentRootFolder", true);
-  const localWindowPaths = () => (vscode.workspace.workspaceFolders ?? [])
-    .filter(folder => folder.uri.scheme === "file")
-    .map(folder => folder.uri.fsPath);
-  // Which ancestor replaces an opened folder is read from the disk once per folder, off the
-  // tree's path: until the answer arrives the folder shows as itself, and the tree repaints
-  // when an answer differs.
-  const resolveAgentRoots = () => {
+  // The window registry (ADR-0056): this window's folders and live sessions are published in
+  // shared storage and every window derives the same union from the leased records. Records
+  // are never persisted as pinned folders.
+  const windowsRegistry = new WindowRegistry({
+    storageDir: context.globalStorageUri.fsPath,
+    holderId: claimHolder.id,
+    onError: detail => log(`window registry: ${detail}`),
+  });
+  windowRegistry = windowsRegistry;
+  // Which ancestor replaces an opened folder is read from the disk off the tree's path, for the
+  // folders of every live window: until the answer arrives the folder shows as itself, and the
+  // tree repaints when an answer differs.
+  resolveAgentRoots = () => {
     if (!useAgentRootFolder()) return;
-    void agentRoots.resolve(localWindowPaths())
+    void agentRoots.resolve(allWindowFolders())
       .then(changed => { if (changed) refreshLauncher(); })
       .catch(error => log(`launcher: the agent root of an open folder could not be resolved: ${messageOf(error)}`));
   };
   const folders = new LauncherFolders({
     pinned: registry,
     local: context.workspaceState,
-    windowPaths: localWindowPaths,
+    // This window's entry is its own bounded snapshot, the very input every other window reads, so all windows derive the list from the same data.
+    windows: () => windowsRegistry.windows().map(window => ({ here: window.here, paths: window.folders })),
     agentRoot: windowPath => (useAgentRootFolder() ? agentRoots.lookup(windowPath) : windowPath),
     showWindowFolders: () => vscode.workspace.getConfiguration("omp").get<boolean>("showWorkspaceFolders", true),
-    // A live row never vanishes with its folder: a session this window runs or is starting
+    // A live row never vanishes with its folder: a session any window runs or is starting
     // keeps its folder visible although it is neither open nor pinned.
-    liveSessionCwds: () => index.list()
-      .filter(entry => {
-        const facts = launcherFacts(entry.tabId);
-        return facts.running || facts.launching === true;
-      })
-      .map(entry => entry.cwd),
+    liveSessionCwds: () => windowsRegistry.windows().flatMap(window => window.liveCwds),
   });
   launcherFolders = folders;
   if (folders.loadError !== null) showWarning(folders.loadError);
@@ -1156,7 +1170,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const provider = new SessionTreeProvider({
     folders: () => folders.list(),
     entries: () => index.list(),
-    activeTabId: () => index.activeTabId,
+    activeTabId: () => sessionsViewActiveTab(index),
     facts: launcherFacts,
     runtimeIdentity: launcherRuntimeIdentity,
     observeOwnership: tabId => launcherOwnershipFacts(index, tabId),
@@ -1164,6 +1178,16 @@ export function activate(context: vscode.ExtensionContext): void {
     // folder could still be attached to. Shell slots never become rows.
     hasRecoverableShell: folder => recoverableShellsInFolder(folder.path).length > 0,
     grouping: sessionsGrouping,
+    // What another window publishes for a row its claim holds, applied only to the run it was
+    // published for: the incarnation the shared catalog records for the session now (ADR-0056).
+    peer: (tabId, holderId, incarnation) => {
+      const windows = (windowRegistry?.windows() ?? []).filter(window => !window.here);
+      const holder = holderId === null ? undefined : windows.find(window => window.holderId === holderId);
+      if (holder === undefined) return null;
+      const published = holder.rows[tabId];
+      const current = published !== undefined && incarnation !== null && published.incarnation === incarnation;
+      return { status: current ? published.status : null, lastActivityAt: current ? published.lastActivityAt : null, window: holder.label };
+    },
   }, { onObservationError: error => log(`launcher: row observation failed: ${messageOf(error)}`) });
   launcherProvider = provider;
   const view = vscode.window.createTreeView(SESSIONS_VIEW_ID, { treeDataProvider: provider });
@@ -1190,6 +1214,13 @@ export function activate(context: vscode.ExtensionContext): void {
     claimFiles => refreshRowsForClaims(index, claimFiles),
     { onError: detail => log(`claims: ${detail}`) },
   );
+  const requestWatch = startRequestWatch(index.claimStorageDir, index.claimHolder.id, async (request, requestContext) => {
+    windowTiming("receiver: request seen", `select ${request.id.slice(0, 8)} posted ${Date.now() - Date.parse(request.createdAt)} ms ago`);
+    const outcome = await selectHeldSessionTab(index, request, requestContext);
+    windowTiming("receiver: answer ready", `${request.id.slice(0, 8)} ok=${outcome.ok} focused=${outcome.focused}`);
+    return outcome;
+  }, { onError: detail => log(`window requests: ${detail}`), debounceMs: WINDOW_REQUEST_WATCH_DEBOUNCE_MS });
+  windowRequestWatch = requestWatch;
   context.subscriptions.push(
     output,
     vscode.workspace.onDidChangeConfiguration(refreshChatDisplayPreferences),
@@ -1198,7 +1229,11 @@ export function activate(context: vscode.ExtensionContext): void {
     // The unread dot is a decoration badge: a long row label truncates the description, a badge stays visible.
     vscode.window.registerFileDecorationProvider(provider.decorations),
     provider.onDidServeTree(() => { void revealActiveSession(index); }),
+    // The owner's own reading of a conversation's activity is what other windows order its row by.
+    provider.onDidObserveConversation(() => publishWindowSnapshot()),
     { dispose: claimWatch },
+    { dispose: () => windowRegistry?.dispose() },
+    { dispose: () => { requestWatch.dispose(); if (windowRequestWatch === requestWatch) windowRequestWatch = undefined; } },
     // The window's own folders are shown in Sessions: a change of the open folders or of the
     // setting that hides them rebuilds the list. Resolved paths are remembered per path, so an
     // open-folder change forgets them; the only disk reads are the identity of each path and
@@ -1223,17 +1258,19 @@ export function activate(context: vscode.ExtensionContext): void {
         if (TERMINAL_FONT_CONFIGURATION_KEYS.some(key => event.affectsConfiguration(key, resource))) pushTerminalFont(state, resource);
       }
     }),
-    // Nothing here polls: the launcher re-reads on the events that can change a
-    // row — this window regaining focus, the view being opened, and the
-    // terminal/panel/restore lifecycle — and after every index or folder
-    // mutation. Opening the view never discovers anything: a folder's sessions
-    // are found only when the user asks to resume one.
+    // The launcher re-reads on the events that can change a row — this window
+    // regaining focus, the view being opened, and the terminal/panel/restore
+    // lifecycle — after every index or folder mutation, and, while the view is
+    // visible, on the window registry's 15 s heartbeat (a recovery for what no
+    // event announced, ADR-0056). Opening the view never discovers anything: a
+    // folder's sessions are found only when the user asks to resume one.
     view.onDidChangeVisibility(event => {
       if (!event.visible) return;
       // A missed catalog notification is recovered here rather than leaving another
       // window's sessions or folders invisible until a restart.
       void adoptCatalogChanges(index, folders).catch(error => log(`catalog: the newest revision could not be adopted: ${messageOf(error)}`));
       refreshLauncher({ ownership: true });
+      refreshWindowRegistry();
     }),
     vscode.window.onDidChangeWindowState(event => {
       if (!event.focused) return;
@@ -1242,6 +1279,9 @@ export function activate(context: vscode.ExtensionContext): void {
       // Focus is the recovery point for a notification this window missed.
       void adoptCatalogChanges(index, folders).catch(error => log(`catalog: the newest revision could not be adopted: ${messageOf(error)}`));
       refreshLauncher({ ownership: true });
+      refreshWindowRegistry();
+      // Being brought to the front is how a switch request reaches a window whose directory event was dropped.
+      windowRequestWatch?.rescan();
       // Agent files added or removed while the window was away change which ancestor is shown.
       resolveAgentRoots();
     }),
@@ -1383,6 +1423,10 @@ export function activate(context: vscode.ExtensionContext): void {
   // restoring.
   refreshLauncher();
   resolveAgentRoots();
+  // The registry starts after the first snapshot exists, so the first record already says what
+  // this window has open. From here the other windows' records, its own lease, and the agent
+  // roots of every live window's folders are kept current by watch, heartbeat and focus.
+  windowsRegistry.start({ onChange: windowRegistryChanged, onHeartbeat: windowRegistryHeartbeat });
   // The editors this window already has are reconciled before any asynchronous native
   // work: their serializers are registered, and a page that survived a previous
   // extension host is adopted with the document its records name, so its reconnect has
@@ -1416,6 +1460,8 @@ export function deactivate(): void {
   for (const endpoint of bridgeEndpoints.values()) endpoint.close();
   bridgeEndpoints.clear();
   bridgeLiveEditors.clear();
+  // The window's lease record goes with the window; a crash leaves it to expire.
+  windowRegistry?.removeSync();
 }
 
 // Commands
@@ -1497,24 +1543,20 @@ async function openSession(
     refreshLauncher();
     return false;
   }
-  // A row that shows another window's live claim is not launched from here: Open and a click say
-  // so instead of starting anything. This is a shortcut for the message, not the safety rule —
-  // every other launch path (the mode-specific Open, a folder's Resume, Add to Session) still goes
-  // through openTab and claim admission, which refuse a verified rival. The claim is read again
-  // first: the row may be older than the other window's release, and then the ordinary open below
-  // is the right answer.
-  if (launcherProvider?.displayedState(tabId) === "otherWindow") {
-    const fresh = await launcherOwnershipFacts(index, tabId);
-    if (fresh.heldElsewhere === true) {
-      if (fresh.switchableWindow) {
-        const picked = await vscode.window.showInformationMessage("OMP: This session is open in another VS Code window.", "Switch to Window");
-        if (picked === "Switch to Window") await switchToSessionWindow(index, tabId);
-      } else {
-        showInfo("This session is open in another window. Select its unsaved workspace through VS Code's Window menu.");
-      }
+  // A session another window holds switches to that window at once, with no confirmation:
+  // nothing is launched from here. The claim is read afresh on every open of a row this window
+  // does not run, not taken from the row's cached state, so a click while the row is still
+  // Checking or stale switches too; a claim that was released meanwhile falls through to the
+  // ordinary open below.
+  if (!launcherFacts(tabId).running) {
+    const openedAt = Date.now();
+    const held = await heldByAnotherWindow(index, tabId);
+    windowTiming("requester: open of a row this window does not run", `${tabId.slice(0, 12)} held elsewhere=${held}, claim read ${Date.now() - openedAt} ms`);
+    if (held) {
+      await switchToSessionWindow(index, tabId);
       return false;
     }
-    launcherProvider.refreshOwnership(new Set([tabId]));
+    if (launcherProvider?.displayedState(tabId) === "otherWindow") launcherProvider.refreshOwnership(new Set([tabId]));
   }
   // A row that shows a plain omp process outside this extension as the writer neither launches
   // nor opens history on a bare click: it asks first (ADR-0046), after a fresh probe, because the
@@ -1563,23 +1605,284 @@ function owningWindowUri(): vscode.Uri | null {
   return workspace === undefined && folders.length === 1 && folders[0]?.uri.scheme === "file" ? folders[0].uri : null;
 }
 
+/** The local `file` folders VS Code has open in this window, in VS Code's order. */
+function localWindowFolders(): string[] {
+  return (vscode.workspace.workspaceFolders ?? [])
+    .filter(folder => folder.uri.scheme === "file")
+    .map(folder => folder.uri.fsPath);
+}
+
+/** Working directories of the sessions this window runs or is launching. */
+function localLiveSessionCwds(index: SessionIndex): string[] {
+  return index.list()
+    .filter(entry => {
+      const facts = launcherFacts(entry.tabId);
+      return facts.running || facts.launching === true;
+    })
+    .map(entry => entry.cwd);
+}
+
+/**
+ * What this window publishes in the window registry (ADR-0056): its folders, the working
+ * directories of its live sessions and, for each session it runs, its status and the
+ * conversation activity it read, fenced to the run (the incarnation the shared catalog
+ * records) they were published for. A change schedules one debounced write.
+ */
+function publishWindowSnapshot(): void {
+  const registry = windowRegistry;
+  const index = indexForBridge;
+  if (registry === undefined || index === null) return;
+  const rows: Record<string, PublishedRow> = {};
+  for (const entry of index.list()) {
+    const incarnation = sessionIncarnation(entry);
+    if (incarnation === null) continue;
+    const facts = launcherFacts(entry.tabId);
+    if (!facts.running && facts.launching !== true && facts.stopping !== true && facts.restoring !== true) continue;
+    const state = sessionItemState(entry, facts);
+    // "unread" is derived by every reader from the shared reply markers, so it is published as the idle status it sits on.
+    const status = state === "unread" ? "waiting" : state;
+    if (PUBLISHED_ROW_STATUSES.includes(status as PublishedRowStatus)) {
+      const slot = stateOf(entry.tabId)?.slotId;
+      const binding = slot === undefined ? null : index.slotBinding(slot);
+      rows[entry.tabId] = {
+        status: status as PublishedRowStatus,
+        incarnation,
+        binding: binding !== null && slot !== undefined && binding.tabId === entry.tabId ? `${slot}.${binding.generation}` : "none",
+        lastActivityAt: launcherProvider?.lastActivityOf(entry.tabId) ?? null,
+      };
+    }
+  }
+  registry.setSnapshot({
+    windowUri: owningWindowUri()?.toString() ?? null,
+    label: vscode.workspace.name ?? "",
+    folders: localWindowFolders(),
+    liveCwds: localLiveSessionCwds(index),
+    rows,
+  });
+}
+
+/** Re-read the other windows' records and renew this window's own; repaint when what they show changed. */
+function refreshWindowRegistry(): void {
+  const registry = windowRegistry;
+  if (registry === undefined) return;
+  void registry.flush();
+  void registry.refresh().then(changed => {
+    if (changed) windowRegistryChanged();
+  }, error => log(`window registry: ${messageOf(error)}`));
+}
+
+/** The folders other windows have open changed: re-resolve their agent roots and repaint. */
+function windowRegistryChanged(): void {
+  resolveAgentRoots();
+  refreshLauncher();
+}
+
+/** Every folder open in a live window of the profile, for the agent-root probe. */
+function allWindowFolders(): string[] {
+  return (windowRegistry?.windows() ?? []).flatMap(window => [...window.folders]);
+}
+
+/**
+ * Registry heartbeat (every 15 s): agent roots are re-probed whatever the registry saw, and the
+ * request directory is read again (the recovery for a watch event the platform dropped). While
+ * the Sessions view is visible every row's ownership and conversation activity is observed
+ * again, so a claim change whose notification was missed, a failed observation and a file
+ * change are all repaired within one heartbeat plus one observation. A hidden view re-observes
+ * only the rows shown as held by another window or still Checking and is otherwise brought up
+ * to date when it is shown (nobody is looking at it before that).
+ */
+function windowRegistryHeartbeat(): void {
+  resolveAgentRoots();
+  windowRequestWatch?.rescan();
+  if (launcherView?.visible === true) {
+    launcherProvider?.refresh({ ownership: true });
+    return;
+  }
+  const stale = (launcherProvider?.listedSessions() ?? [])
+    .filter(({ item }) => item.state === "otherWindow" || item.state === "checking")
+    .map(({ item }) => item.tabId);
+  if (stale.length > 0) launcherProvider?.refreshOwnership(new Set(stale));
+}
+
+/** Whether a live claim of another window of this extension holds the session right now (one claim read). */
+async function heldByAnotherWindow(index: SessionIndex, tabId: string): Promise<boolean> {
+  const observed = await index.observeOwnership(tabId);
+  const claim = observed.ok ? observed.claim : null;
+  return claim !== null && claim.verifiable && claim.holderId !== null && claim.holderId !== index.claimHolder.id && await claimHolderSeemsAlive(claim);
+}
+
+/**
+ * Bring the window that holds a session to the front and have it select the tab, with no
+ * confirmation (ADR-0056). The claim is read again first; the owner is asked, by a request
+ * addressed to its claim holder id and naming the run this window's catalog records, to select
+ * the tab it already has open, and VS Code is asked to open its saved workspace or
+ * single-folder URI, which focuses the window that has it. `forceNewWindow: true` is
+ * deliberate: it still focuses an existing window for that URI but never replaces this window
+ * when the owner has just closed. A message is shown only when the switch is impossible or
+ * did not complete, and says why.
+ */
 async function switchToSessionWindow(index: SessionIndex, argument: unknown): Promise<void> {
   const tabId = tabIdArgument(argument);
   if (tabId === null) return;
+  const startedAt = Date.now();
+  windowTiming("requester: switch started", tabId.slice(0, 12));
+  const entry = index.get(tabId);
   const observed = await index.observeOwnership(tabId);
+  windowTiming("requester: claim re-read", `${Date.now() - startedAt} ms`);
   const claim = observed.ok ? observed.claim : null;
-  if (claim === null || claim.holderId === index.claimHolder.id || !claimHolderMayBeAlive(claim)) {
-    showInfo("The session is no longer held by another window.");
-    refreshLauncher();
+  const plan = planWindowSwitch({
+    claim,
+    incarnation: entry === null ? null : sessionIncarnation(entry),
+    claimHolderAlive: claim !== null && await claimHolderSeemsAlive(claim),
+    ownHolderId: index.claimHolder.id,
+    windows: windowRegistry?.windows() ?? [],
+  });
+  if (plan.kind === "stale") {
+    showInfo("The session is no longer open in another window.");
+    launcherProvider?.refreshOwnership(new Set([tabId]));
     return;
   }
-  if (!claim.windowUri) {
-    showInfo("This owning window has no saved workspace or single-folder identity. Switch to it using VS Code's Window menu.");
+  // The wait is counted from the moment the request is posted, whatever the focus change costs.
+  const postedAt = Date.now();
+  const remaining = () => Math.max(250, postedAt + REQUEST_ANSWER_TIMEOUT_MS - Date.now());
+  let requestId: string;
+  try {
+    // The binding generation the holder published for this very run (the one the row on screen shows), if any.
+    const published = (windowRegistry?.windows() ?? []).find(window => window.holderId === plan.holderId)?.rows[tabId];
+    requestId = await postSwitchRequest(index.claimStorageDir, {
+      to: plan.holderId, from: index.claimHolder.id, tabId, incarnation: plan.incarnation,
+      binding: published !== undefined && published.incarnation === plan.incarnation ? published.binding : null,
+    });
+    windowTiming("requester: request posted", `${requestId.slice(0, 8)} ${Date.now() - startedAt} ms after the click`);
+  } catch (error) {
+    showWarning(`The window holding this session could not be asked to show it: ${messageOf(error)}`);
     return;
   }
-  const uri = vscode.Uri.parse(claim.windowUri);
-  if (uri.scheme !== "file") return;
-  await vscode.commands.executeCommand("vscode.openFolder", uri, { forceNewWindow: false });
+  // Whatever the focus change below takes, the request is withdrawn when the wait is over: the
+  // owner never selects a tab for a requester that has stopped waiting.
+  const withdrawal = setTimeout(() => {
+    void withdrawSwitchRequest(index.claimStorageDir, plan.holderId, requestId).catch(() => undefined);
+  }, Math.max(0, postedAt + REQUEST_ANSWER_TIMEOUT_MS - Date.now()));
+  try {
+    const answerOf = async (): Promise<SwitchAnswer | null> => {
+      try {
+        return await awaitSwitchAnswer(index.claimStorageDir, plan.holderId, requestId, { timeoutMs: remaining() });
+      } catch (error) {
+        showWarning(`The answer of the window holding this session could not be read: ${messageOf(error)}`);
+        return null;
+      }
+    };
+    if (plan.kind === "manual") {
+      const answer = await answerOf();
+      if (answer === null) return;
+      const where = plan.reason === "ambiguous"
+        ? "Another window shows the same folder or workspace, so VS Code cannot tell which one to bring forward."
+        : "This owning window has no saved workspace or single-folder identity, so it cannot be brought forward.";
+      showInfo(`${where} Switch to it using VS Code's Window menu${answer === "served" || answer === "unfocused" ? "; the session's tab is selected there" : ""}.`);
+      return;
+    }
+    try {
+      await vscode.commands.executeCommand("vscode.openFolder", vscode.Uri.parse(plan.uri), { forceNewWindow: true });
+    } catch (error) {
+      // Nobody is waiting for the tab any more: withdraw the request so the owner does not act late.
+      await withdrawSwitchRequest(index.claimStorageDir, plan.holderId, requestId).catch(() => undefined);
+      showWarning(`VS Code could not bring the window holding this session forward: ${messageOf(error)}`);
+      return;
+    }
+    const answer = await answerOf();
+    if (answer === "timeout") {
+      showWarning("The window holding this session did not respond, so its tab was not selected. It may be busy or run an older OMP Desk.");
+    } else if (answer === "refused") {
+      showInfo("That window no longer has an editor open for this session.");
+      launcherProvider?.refreshOwnership(new Set([tabId]));
+    } else if (answer === "unfocused") {
+      showInfo("The window holding this session selected its tab, but VS Code did not bring it to the front. Switch to it using the taskbar or VS Code's Window menu.");
+    }
+  } finally {
+    clearTimeout(withdrawal);
+  }
+}
+
+/** Resolve `true` once this window has the focus, `false` when it does not within `timeoutMs`. */
+function windowBecomesFocused(timeoutMs: number): Promise<boolean> {
+  if (vscode.window.state.focused) return Promise.resolve(true);
+  return new Promise(resolve => {
+    const subscription = vscode.window.onDidChangeWindowState(state => {
+      if (!state.focused) return;
+      clearTimeout(timer);
+      subscription.dispose();
+      resolve(true);
+    });
+    const timer = setTimeout(() => { subscription.dispose(); resolve(false); }, timeoutMs);
+  });
+}
+
+/**
+ * Tabs whose editor a window request has made visible and whose serializer revival has not
+ * happened yet. The revival consumes the mark ({@link openRestoredTabIfUncovered}) and, for a
+ * session with no live host, then opens nothing; an explicit Open of the tab clears it.
+ * Nothing releases it on elapsed time: a request selects an editor, it never starts, restores
+ * or claims a session, however late VS Code revives the editor.
+ */
+const requestSelections = new Set<string>();
+
+/**
+ * Serve another window's request to show a session's tab (ADR-0056). Selection only: it makes
+ * the VS Code editor this window already has for the session the visible one, and nothing else.
+ *
+ * It acts only when, read together after a fresh claim read and the check that the requester
+ * still waits, all of these hold: the claim names this window as holder under the owner
+ * generation this window's catalog records; the catalog records the run the request names;
+ * this window has a live host for the session; the editor slot's binding is the session's and,
+ * when the request names the binding generation the requester saw published, is that
+ * generation (a native handover and back is another binding). It checks the same again after
+ * selecting and reports success only if nothing changed. An editor VS Code has not revived
+ * yet is shown with its tab's restore deferred ({@link requestSelections}), so the serializer
+ * cannot start a session even if the host exits meanwhile. It never launches, stops, acquires
+ * a claim, changes a mode or forwards a request. The answer also says whether this window
+ * ended up focused.
+ */
+async function selectHeldSessionTab(index: SessionIndex, request: SwitchRequest, context: ServeContext): Promise<ServeOutcome> {
+  const refused: ServeOutcome = { ok: false, focused: false };
+  const readClaim = async () => {
+    const observed = await index.observeOwnership(request.tabId);
+    return observed.ok ? observed.claim : null;
+  };
+  /** The editor slot and binding generation of the session while this window holds the run the request names; `null` otherwise. Synchronous. */
+  const heldBinding = (claim: Awaited<ReturnType<typeof readClaim>>): { readonly slot: string; readonly generation: number } | null => {
+    const entry = index.get(request.tabId);
+    const state = stateOf(request.tabId);
+    if (claim === null || entry === null || state === undefined) return null;
+    if (claim.holderId !== index.claimHolder.id) return null;
+    if (entry.ownership === null || claim.ownerGeneration !== entry.ownership.ownerGeneration) return null;
+    if (sessionIncarnation(entry) !== request.incarnation || !index.hasLiveHost(request.tabId)) return null;
+    const binding = index.slotBinding(state.slotId);
+    if (binding === null || binding.tabId !== request.tabId) return null;
+    if (request.binding !== null && `${state.slotId}.${binding.generation}` !== request.binding) return null;
+    return { slot: state.slotId, generation: binding.generation };
+  };
+  // The claim read can be slow: whether the requester still waits is asked after it, and
+  // everything the claim is compared with is read after that, with nothing awaited before the
+  // first command is issued.
+  const claim = await readClaim();
+  windowTiming("receiver: claim read", request.id.slice(0, 8));
+  if (!(await context.stillWanted())) return refused;
+  windowTiming("receiver: requester still waits", request.id.slice(0, 8));
+  const held = heldBinding(claim);
+  const state = stateOf(request.tabId);
+  if (held === null || state === undefined) return refused;
+  if (state.panel !== null) await revealExistingTab(index, request.tabId, state.panel);
+  else {
+    // No tab, no command: nothing can be revived. Once a selection command may have been issued
+    // the mark stays, whatever the tab's state is afterwards (another selection can win).
+    if (editorTabOf(held.slot) === null) return refused;
+    requestSelections.add(request.tabId);
+    if (!(await selectEditorTab(held.slot))) return refused;
+  }
+  windowTiming("receiver: tab selected", request.id.slice(0, 8));
+  const after = heldBinding(await readClaim());
+  if (after === null || after.slot !== held.slot || after.generation !== held.generation) return refused;
+  return { ok: true, focused: await windowBecomesFocused(WINDOW_FOCUS_WAIT_MS) };
 }
 
 /** Tree clicks keep history immediate; only a stopped same-row second click requests a launch. */
@@ -1941,13 +2244,14 @@ function recordedHostStopPort(expectedSlot: string): RecordedHostStopPort {
 }
 
 /** A current owned-writer witness, never a recorded pid by itself. */
-async function verifiedOwnedWriterPid(index: SessionIndex, tabId: string): Promise<number | null> {
+async function verifiedOwnedWriterPid(index: SessionIndex, tabId: string, options: { readonly display?: boolean } = {}): Promise<number | null> {
   const runtime = stateOf(tabId)?.runtime ?? null;
   if (runtime !== null) return runtime.pid;
   const entry = index.get(tabId);
   if (entry === null) return null;
   const observed = await index.observeOwnership(tabId);
-  if (observed.ok && observed.claim !== null && observed.claim.holderId !== index.claimHolder.id && claimHolderMayBeAlive(observed.claim)) return null;
+  if (observed.ok && observed.claim !== null && observed.claim.holderId !== index.claimHolder.id &&
+    (options.display === true ? await claimHolderSeemsAlive(observed.claim) : claimHolderMayBeAlive(observed.claim))) return null;
   const verdict = await reconciler.reconcile({
     entry, sessionFile: entry.sessionFile, draftIdentity: entry.ownership?.draftIdentity ?? null,
     ownerGeneration: entry.ownership?.ownerGeneration ?? "", claim: observed.ok ? observed.claim : null, host: entry.host,
@@ -2470,8 +2774,8 @@ async function chooseFolder(
   const picked = await vscode.window.showQuickPick(
     candidates.map(folder => {
       const source = folder.pinned
-        ? (folder.open ? "pinned, open in this window" : "pinned")
-        : (folder.open ? "open in this window" : "kept because a session runs in it here");
+        ? (folder.open ? "pinned, open" : "pinned")
+        : (folder.open ? "open in a window" : "kept because a session runs in it");
       return {
         label: folderHeadline(folder.path),
         description: folder.path,
@@ -2858,6 +3162,10 @@ async function revealExistingTab(index: SessionIndex, tabId: string, panel: vsco
 const panelBindWaiters = new Map<string, Set<() => void>>();
 /** How long a revealed, not-yet-revived editor may take to hand this window its panel. */
 const EDITOR_REVIVE_TIMEOUT_MS = 5_000;
+/** How long an owner window waits to hold the focus before it tells a requester that it is not in front. */
+const WINDOW_FOCUS_WAIT_MS = 1_500;
+/** A request is read as soon as its file shows up (the watch's default of 150 ms folds bursts of events a person is waiting behind). */
+const WINDOW_REQUEST_WATCH_DEBOUNCE_MS = 30;
 /** Focuses the editor group of one `ViewColumn` (1-based). VS Code offers no command past the eighth. */
 const EDITOR_GROUP_FOCUS_COMMANDS = [
   "workbench.action.focusFirstEditorGroup",
@@ -2985,6 +3293,8 @@ async function openTab(
   requestedMode?: SessionViewMode,
   externalConfirmed = false,
 ): Promise<void> {
+  // The user's own Open supersedes a request's deferral of this tab's restore.
+  if (openIntent === "explicit") requestSelections.delete(tabId);
   // Explicit mode actions use switchSessionMode; ordinary Open never changes a live editor.
   // The folder list may still be receiving the predecessor build's folders, so every
   // explicit open waits for that one pass to settle before it resolves anything.
@@ -5470,11 +5780,15 @@ function bridgeSerializerFor(
  */
 async function openRestoredTabIfUncovered(context: vscode.ExtensionContext, index: SessionIndex, tabId: string): Promise<void> {
   if (index.get(tabId) === null) return;
+  // The revival a request triggered reaches this point once; it consumes the mark.
+  const requested = requestSelections.delete(tabId);
   if (index.hasLiveHost(tabId)) {
     // Already connected here: only the election may still be missing for this editor.
     await electLocalController(index, tabId);
     return;
   }
+  // Another window's request is only showing this editor: it never starts a session (ADR-0056).
+  if (requested) return;
   const startup = startupRestore;
   if (startup !== null && startup.cohort.has(tabId)) return;
   await openTab(context, index, tabId, "opened", "restored");
@@ -9812,13 +10126,16 @@ function applySlotAuthority(slot: string): void {
  * Re-read the launcher from the registered folders, the index and this window.
  *
  * Every index mutation, folder change and lifecycle event that can change a row
- * calls this; nothing in the launcher runs on a timer and nothing here scans OMP's
+ * calls this; the only timer is the registry heartbeat's re-observation of a visible view
+ * (ADR-0056), and nothing here scans OMP's
  * session files. The welcome content follows the folder list, because a launcher
  * with no folder has nothing to group and must say how to add one.
  */
 function refreshLauncher(options: { readonly ownership?: boolean } = {}): void {
   if (indexForBridge !== null) settleViewedSession(indexForBridge);
   void vscode.commands.executeCommand("setContext", SESSIONS_FLAT_CONTEXT, sessionsGrouping() === "flat");
+  // Published first: this window's own entry in the registry is what the list is derived from.
+  publishWindowSnapshot();
   launcherProvider?.refresh(options);
   toolsController?.sync();
   if (activationContext !== undefined) void vscode.commands.executeCommand("setContext", "omp.defaultSessionMode", defaultSessionMode(activationContext));
@@ -9862,7 +10179,7 @@ function revealActiveSession(index: SessionIndex): Promise<void> {
       const provider = launcherProvider;
       const view = launcherView;
       if (!provider || !view || !view.visible) return;
-      const tabId = pinnedSessionTab(index) ?? index.activeTabId;
+      const tabId = pinnedSessionTab(index) ?? sessionsViewActiveTab(index);
       if (tabId === null) { launcherSelectedPath = null; return; }
       const expand = launcherExpandFor === tabId;
       const reserved = provider.beginReveal(tabId, { expand });
@@ -9870,7 +10187,7 @@ function revealActiveSession(index: SessionIndex): Promise<void> {
       try {
         if (!expand && launcherSelectedPath === reserved.pathKey) continue;
         await view.reveal(reserved.item, { select: true, focus: false, expand: true });
-        if ((pinnedSessionTab(index) ?? index.activeTabId) === tabId) {
+        if ((pinnedSessionTab(index) ?? sessionsViewActiveTab(index)) === tabId) {
           launcherSelectedPath = reserved.pathKey;
           if (expand) launcherExpandFor = null;
         }
@@ -9901,6 +10218,16 @@ function pinnedSessionTab(index: SessionIndex): string | null {
 
 let pinnedSelectionTimer: NodeJS.Timeout | undefined;
 const PINNED_SELECTION_RESTORE_MS = 250;
+
+/**
+ * The row this window's Sessions view selects when it has no open editor to pin: the index's
+ * recovered active tab, except a session another window holds, which this window has no
+ * editor for and so does not select (the list shows every window's sessions).
+ */
+function sessionsViewActiveTab(index: SessionIndex): string | null {
+  const tabId = index.activeTabId;
+  return tabId !== null && launcherProvider?.displayedState(tabId) === "otherWindow" ? null : tabId;
+}
 
 /**
  * Put the pinned row back when the user cleared the selection or selected a non-session row.
@@ -10012,14 +10339,18 @@ function launcherFacts(tabId: string): SessionLauncherFacts {
 async function launcherOwnershipFacts(index: SessionIndex, tabId: string, options: { readonly fresh?: boolean } = {}): Promise<SessionOwnershipFacts> {
   const observed = await index.observeOwnership(tabId);
   const claim = observed.ok ? observed.claim : null;
+  // What the rows and the click's choice of window show: the holder's liveness is read without blocking the extension host and
+  // is never what admits or refuses a launch, a stop or a deletion (those ask claimHolderMayBeAlive themselves).
   const heldElsewhere = claim !== null && claim.verifiable && claim.holderId !== null &&
-    claim.holderId !== index.claimHolder.id && claimHolderMayBeAlive(claim);
+    claim.holderId !== index.claimHolder.id && await claimHolderSeemsAlive(claim);
   const heldHere = claim !== null && claim.holderId === index.claimHolder.id && claimHolderMayBeAlive(claim);
-  const pid = await verifiedOwnedWriterPid(index, tabId);
+  const pid = await verifiedOwnedWriterPid(index, tabId, { display: true });
   const sessionFile = index.get(tabId)?.sessionFile ?? null;
   const externalOmp = !heldElsewhere && !heldHere && pid === null && sessionFile !== null && externalLeases !== null &&
     await externalLeases.holds(sessionFile, options) === true;
-  return { heldElsewhere, switchableWindow: heldElsewhere && claim?.windowUri?.startsWith("file:") === true,
+  return { heldElsewhere, heldBy: heldElsewhere ? claim?.holderId ?? null : null,
+    heldGeneration: heldElsewhere ? claim?.ownerGeneration ?? null : null,
+    switchableWindow: heldElsewhere && claim?.windowUri?.startsWith("file:") === true,
     externalOmp, ownershipChecked: observed.ok, ownedWriterPid: pid,
     legacyWriter: pid !== null && index.get(tabId)?.host?.transport !== "rpc" };
 }
@@ -11311,6 +11642,13 @@ function showInfo(message: string): void {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+setProcessProbeObserver(probe => windowTiming("process start time read", `pid ${probe.pid} ${probe.mode} ${probe.ms} ms found=${probe.found}`));
+
+/** One line of the hand-over timeline between windows (ADR-0056/0057); every line carries the log's own millisecond stamp. */
+function windowTiming(event: string, detail = ""): void {
+  log(`window timing: ${event}${detail === "" ? "" : ` ${detail}`}`);
 }
 
 function log(message: string): void {

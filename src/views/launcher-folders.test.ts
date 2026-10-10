@@ -14,7 +14,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { LauncherFolders, WINDOW_FOLDER_COLLAPSED_KEY } from "./launcher-folders.ts";
-import type { LauncherFolder } from "./launcher-folders.ts";
+import type { LauncherFolder, OpenFolderWindow } from "./launcher-folders.ts";
 import {
 	WORKSPACE_FOLDERS_STORAGE_KEY,
 	WorkspaceFolderRegistry,
@@ -73,6 +73,10 @@ describe("launcher folders", () => {
 	function windowOver(catalog = memoryStore()) {
 		const state = {
 			windowPaths: [] as string[],
+			/** The folders of other live windows, in window order after this one. */
+			others: [] as string[][],
+			/** The whole ordered window list, when a test needs this window somewhere other than first. */
+			windows: null as OpenFolderWindow[] | null,
 			show: true,
 			live: [] as string[],
 			workspace: memoryStore(),
@@ -81,7 +85,7 @@ describe("launcher folders", () => {
 		const folders = new LauncherFolders({
 			pinned: registry,
 			local: state.workspace,
-			windowPaths: () => state.windowPaths,
+			windows: () => state.windows ?? [{ here: true, paths: state.windowPaths }, ...state.others.map(paths => ({ here: false, paths }))],
 			showWindowFolders: () => state.show,
 			liveSessionCwds: () => state.live,
 		});
@@ -107,7 +111,7 @@ describe("launcher folders", () => {
 		w.state.windowPaths = [beta];
 		const [only, ...rest] = w.folders.list();
 		assert.deepEqual(rest, []);
-		assert.deepEqual(only, { id: pinned.folder.id, path: beta, collapsed: true, pinned: true, open: true });
+		assert.deepEqual(only, { id: pinned.folder.id, path: beta, collapsed: true, pinned: true, open: true, openHere: true, openElsewhere: false });
 	});
 
 	it("treats case, trailing separator and detour spellings of one directory as one folder", async () => {
@@ -179,9 +183,49 @@ describe("launcher folders", () => {
 		w.state.windowPaths = [];
 		assert.deepEqual(w.folders.list(), []);
 		assert.equal(w.catalog.values.has(WORKSPACE_FOLDERS_STORAGE_KEY), false, "nothing durable was written");
-		// Another window of the profile sees none of this window's folders.
+		// The pinned catalog holds none of them: only the window registry shares open folders.
 		const other = windowOver(w.catalog);
 		assert.deepEqual(other.folders.list(), []);
+	});
+
+	it("shows the folders of other live windows as this window's own, in window order, deduplicated by identity", async () => {
+		const w = windowOver();
+		await w.registry.add(gamma);
+		w.state.windowPaths = [beta];
+		w.state.others = [[alpha, beta + path.sep], [gamma]];
+		const list = w.folders.list();
+		assert.deepEqual(paths(list), [beta, alpha, gamma], "one row per directory, in the order the windows are given");
+		assert.deepEqual(list.map(folder => [folder.pinned, folder.open, folder.openHere, folder.openElsewhere]), [
+			[false, true, true, true],
+			[false, true, false, true],
+			[true, true, false, true],
+		], "open here and elsewhere are reported; nothing else sets an other window's folder apart");
+		assert.equal(list[1]!.id, windowFolderId(alpha), "an other window's folder carries the same identity-derived id every window derives");
+		assert.equal(list[1]!.collapsed, false);
+	});
+
+	it("gives two windows given the same ordered window list the same folders, whichever one is asking", async () => {
+		const catalog = memoryStore();
+		const a = windowOver(catalog);
+		const b = windowOver(catalog);
+		await a.registry.add(gamma);
+		await b.registry.reload();
+		// The registry orders the windows once for everyone; each window only flags itself.
+		a.state.windows = [{ here: true, paths: [alpha] }, { here: false, paths: [beta] }];
+		b.state.windows = [{ here: false, paths: [alpha] }, { here: true, paths: [beta] }];
+		const shape = (folders: LauncherFolders) => folders.list().map(folder => [folder.id, folder.path, folder.collapsed, folder.pinned, folder.open]);
+		assert.deepEqual(shape(a.folders), shape(b.folders));
+		assert.deepEqual(paths(a.folders.list()), [alpha, beta, gamma]);
+		assert.deepEqual(a.folders.list().map(folder => [folder.openHere, folder.openElsewhere]), [[true, false], [false, true], [false, false]]);
+		assert.deepEqual(b.folders.list().map(folder => [folder.openHere, folder.openElsewhere]), [[false, true], [true, false], [false, false]]);
+	});
+
+	it("keeps an other window's live-session folder and marks nothing as open", async () => {
+		const w = windowOver();
+		w.state.live = [gamma];
+		const [only, ...rest] = w.folders.list();
+		assert.deepEqual(rest, []);
+		assert.deepEqual([only!.open, only!.openHere, only!.openElsewhere], [false, false, false]);
 	});
 
 	it("keeps a folder visible while a session runs in it, and drops it when that ends", async () => {
@@ -295,13 +339,13 @@ describe("launcher folders", () => {
 		const w = windowOver(catalog);
 		w.state.windowPaths = [beta];
 		const [shown] = w.folders.list();
-		assert.deepEqual(shown, { id: "folder:0d4f6c1e-legacy", path: beta, collapsed: true, pinned: true, open: true });
+		assert.deepEqual(shown, { id: "folder:0d4f6c1e-legacy", path: beta, collapsed: true, pinned: true, open: true, openHere: true, openElsewhere: false });
 		assert.equal(folderArgument({ folderId: "folder:0d4f6c1e-legacy" }, w.folders.list()).kind, "folder");
 
 		const result = await w.folders.unpin("folder:0d4f6c1e-legacy");
 		assert.ok(result.unpinned && result.stillShown);
 		const [after] = w.folders.list();
-		assert.deepEqual(after, { id: windowFolderId(beta), path: beta, collapsed: true, pinned: false, open: true });
+		assert.deepEqual(after, { id: windowFolderId(beta), path: beta, collapsed: true, pinned: false, open: true, openHere: true, openElsewhere: false });
 	});
 
 	it("unpins a folder that runs a session in this window and keeps it visible, unpinned", async () => {

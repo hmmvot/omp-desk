@@ -55,14 +55,14 @@ For how this works, see the [architecture](docs/architecture.md).
 
 ![Sessions view](media/readme/sessions.png)
 
-- Shows every OMP session, running or stopped, of the folders open in this window and the folders you pin. By default it is **one flat list**, each row labelled `folder · title`; the button in the view's title bar switches to sessions **grouped under their folders** and back (`omp.sessionsGrouping`).
+- Shows every OMP session, running or stopped, of the folders open in **any window** of the profile and the folders you pin, so every window shows the same list in the same order. By default it is **one flat list**, each row labelled `folder · title`; the button in the view's title bar switches to sessions **grouped under their folders** and back (`omp.sessionsGrouping`).
 - The flat list puts sessions that are not stopped first, unread ones on top and then the most recently active, and stopped sessions last. A **New Session…** row and a **Resume Session…** row under it, at the end, ask for the folder. The title bar also has **New Session** and **Resume Session** buttons; Resume Session asks for the folder when several are shown, then lists that folder's saved sessions.
 - A blue **●** at the right end of a row marks a reply you have not read: the agent finished or asked you something while you were not looking at that session. It clears when you look at the session's editor, and it survives a window reload.
 - While a session has an open editor, its row stays selected: the one you viewed most recently. Selecting a folder or the New Session or Resume Session row puts the selection back.
 - If the default OMP profile has no models yet, **Log in to a model provider to start** appears above the sessions.
 - **Pin Folder** keeps a folder in every window. **Add Folder** picks and pins another one.
 - Live status per session: **Working**, **Waiting for subagents**, **Needs your answer**, **Idle** or **Unread reply**.
-- A session open in another window says so. **Switch to Window** takes you there.
+- A session open in another window shows the same live status there, and clicking it takes you straight to that window with the session's tab selected, with no question first. If that window cannot be brought forward (for example it has an unsaved multi-root workspace), you are told why.
 - A session that a plain `omp` in a terminal is writing shows **Open in another OMP process**. OMP Desk asks before opening it too.
 - Row actions: **Open**, **Rename**, **Reload**, **Close**, **Forget** and **Delete**. A folder's **Resume Session** lists every saved session.
 - **Open Terminal in Folder** starts a plain shell editor in that folder.

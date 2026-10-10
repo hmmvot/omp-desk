@@ -10,6 +10,8 @@
  */
 
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, symlinkSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -21,6 +23,8 @@ import {
 	ClaimHolderError,
 	ClaimOwnershipError,
 	acquireClaim,
+	claimHolderMayBeAlive,
+	claimHolderSeemsAlive,
 	claimMutexPath,
 	claimPathFor,
 	createClaimHolder,
@@ -29,7 +33,9 @@ import {
 	normalizeClaimIdentity,
 	promoteDraftClaim,
 	readClaim,
+	setProcessProbeObserver,
 	type ClaimHolder,
+	type ProcessProbe,
 	type SessionClaim,
 } from "./session-claim.ts";
 import { shortDirectoryAlias } from "./short-name-test-support.ts";
@@ -423,5 +429,107 @@ describe("promoteDraftClaim", () => {
 
 		await caughtError(promoteDraftClaim(claim, sessionFile), TypeError);
 		await claim.release();
+	});
+});
+
+describe("whether another window's holder looks alive, for display", () => {
+	const children: Array<ReturnType<typeof spawn>> = [];
+	after(() => { for (const child of children) child.kill(); });
+	const liveProcess = (): number => {
+		const child = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)"], { stdio: "ignore", windowsHide: true });
+		children.push(child);
+		return child.pid!;
+	};
+	/** A claim another window of this extension filed, in the format an older build wrote (no recorded start time), filed at `filedAt`. */
+	async function foreignClaim(storageDir: string, sessionFile: string, pid: number, options: { processCreationTime?: string | null; filedAt?: number } = {}) {
+		const claimPath = claimPathFor(storageDir, sessionFile);
+		await mkdir(path.dirname(claimPath), { recursive: true });
+		await writeFile(claimPath, JSON.stringify({
+			version: 1, identity: sessionFile, normalizedIdentity: normalizeClaimIdentity(sessionFile), ownerGeneration: createOwnerGeneration(), holderId: randomUUID(), pid,
+			processCreationTime: options.processCreationTime ?? null, windowUri: null, createdAt: new Date(options.filedAt ?? Date.now()).toISOString(),
+		}));
+		return (await readClaim(storageDir, sessionFile))!;
+	}
+	async function watchingProbes<T>(run: (probes: ProcessProbe[]) => Promise<T>): Promise<T> {
+		const probes: ProcessProbe[] = [];
+		setProcessProbeObserver(probe => probes.push(probe));
+		try { return await run(probes); } finally { setProcessProbeObserver(null); }
+	}
+	const modes = (probes: readonly ProcessProbe[]) => probes.map(probe => probe.mode);
+
+	it("reads a holder's start time once, without blocking, and answers the verdicts after it from memory", async () => {
+		const storageDir = await makeStorageDir();
+		const claim = await foreignClaim(storageDir, await makeSessionFile(), liveProcess());
+		await watchingProbes(async probes => {
+			assert.equal(await claimHolderSeemsAlive(claim), true);
+			assert.deepEqual(modes(probes), ["async"], "one command, off the event loop");
+			for (let at = 0; at < 25; at++) assert.equal(await claimHolderSeemsAlive(claim), true);
+			assert.deepEqual(modes(probes), ["async"], "no verdict after the first starts another command");
+		});
+	});
+
+	it("shares one command between concurrent verdicts about one holder", async () => {
+		const storageDir = await makeStorageDir();
+		const pid = liveProcess();
+		const filedAt = Date.now();
+		const claims = await Promise.all([foreignClaim(storageDir, await makeSessionFile(), pid, { filedAt }), foreignClaim(storageDir, await makeSessionFile(), pid, { filedAt })]);
+		await watchingProbes(async probes => {
+			assert.deepEqual(await Promise.all(claims.map(claim => claimHolderSeemsAlive(claim))), [true, true]);
+			assert.equal(probes.length, 1);
+		});
+	});
+
+	it("never starts a command for a holder whose process is gone", async () => {
+		const storageDir = await makeStorageDir();
+		const claim = await foreignClaim(storageDir, await makeSessionFile(), 4194303);
+		await watchingProbes(async probes => {
+			assert.equal(await claimHolderSeemsAlive(claim), false);
+			assert.deepEqual(probes, []);
+		});
+	});
+
+	it("takes a claim of another generation of the pid as not held from a reading taken after the claim was filed, and does not read again", async () => {
+		const storageDir = await makeStorageDir();
+		const claim = await foreignClaim(storageDir, await makeSessionFile(), liveProcess(), { processCreationTime: "2000-01-01T00:00:00.000Z", filedAt: Date.now() - 1000 });
+		await watchingProbes(async probes => {
+			assert.equal(await claimHolderSeemsAlive(claim), false);
+			assert.equal(await claimHolderSeemsAlive(claim), false);
+			assert.deepEqual(modes(probes), ["async"], "a stale claim of a reused pid costs one command, not one per verdict");
+		});
+	});
+
+	it("reads again for a claim filed after the reading, which may be a newer process that reused the pid", async () => {
+		const storageDir = await makeStorageDir();
+		const pid = liveProcess();
+		const earlier = await foreignClaim(storageDir, await makeSessionFile(), pid);
+		await watchingProbes(async probes => {
+			assert.equal(await claimHolderSeemsAlive(earlier), true);
+			const later = await foreignClaim(storageDir, await makeSessionFile(), pid, { processCreationTime: "2000-01-01T00:00:00.000Z", filedAt: Date.now() + 60_000 });
+			assert.equal(await claimHolderSeemsAlive(later), false, "this claim is not the process that holds the pid");
+			assert.deepEqual(modes(probes), ["async", "async"], "the reading taken before the claim existed was not used for it");
+		});
+	});
+
+	it("does not join a command that started before the claim was filed", async () => {
+		const storageDir = await makeStorageDir();
+		const pid = liveProcess();
+		const first = await foreignClaim(storageDir, await makeSessionFile(), pid);
+		const newer = await foreignClaim(storageDir, await makeSessionFile(), pid, { filedAt: Date.now() + 60_000 });
+		await watchingProbes(async probes => {
+			const verdicts = await Promise.all([claimHolderSeemsAlive(first), claimHolderSeemsAlive(newer)]);
+			assert.deepEqual(verdicts, [true, true]);
+			assert.equal(probes.length, 2, "the claim filed after the running command started gets a command of its own");
+		});
+	});
+
+	it("leaves the verdict that admits a launch to read the start time itself, every time", async () => {
+		const storageDir = await makeStorageDir();
+		const claim = await foreignClaim(storageDir, await makeSessionFile(), liveProcess());
+		await watchingProbes(async probes => {
+			await claimHolderSeemsAlive(claim);
+			assert.equal(claimHolderMayBeAlive(claim), true);
+			assert.equal(claimHolderMayBeAlive(claim), true);
+			assert.deepEqual(modes(probes), ["async", "sync", "sync"]);
+		});
 	});
 });
