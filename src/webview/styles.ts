@@ -502,6 +502,8 @@ ${TERMINAL_STYLES}
 .omp-composer-toolbar-actions { display: flex; flex-wrap: nowrap; gap: 6px; align-items: center; flex: 0 0 auto; margin-left: auto; }
 .omp-composer-toolbar-actions .omp-btn { height: 28px; justify-content: center; flex: 0 0 auto; }
 .omp-composer-hint { margin-top: 4px; font-size: 11px; color: var(--omp-muted); }
+/* Notices stacked above the input row keep the 6px gap of .omp-attach-error: the input row's -4px top margin would otherwise pull it over the hint's text. */
+.omp-composer > .omp-composer-hint { margin: 0 0 6px; line-height: 1.4; }
 
 /* Attached images: chips above the row, wrapping on a narrow panel. */
 .omp-file-input { display: none; }
