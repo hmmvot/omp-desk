@@ -128,6 +128,26 @@ The user wants coverage: a token whose lookup finds several different definition
 - **Look.** A span with class `omp-symbol-search` inside the code: link colour like other symbol links, underlined dotted rather than solid, title "N definitions — click to choose". It has no file context menu (no `data-vscode-context`) because there is no file target.
 - `none`, `pending` and `unavailable` stay plain. The safety rule "never link a guessed definition" holds: the link goes to a search the user drives, not to a definition.
 
+### Per-message reminder (maintainer decision, 2026-10-11)
+
+The system-prompt rules (`file-links`, `code-links`) are followed less reliably deep into a long conversation. A second, per-message reminder reinforces both in one text (`LINK_REMINDER`, 343 characters): files and folders as paths in inline code, code symbols as links.
+
+- **Mechanism.** The host-control `-e` module's `context` handler (OMP's extension `context` event; it runs on every provider request with a deep copy of the messages and returns the messages to send) inserts one `{ role: "user", synthetic: true, attribution: "agent", content: LINK_REMINDER }` message right after every user prompt (`role: "user"`, not `synthetic`, not a history rewrite), unless that message already follows it. The prompt is the same object as before. Nothing is persisted: the session file, Chat and a resumed session never contain the reminder. Same gating as the system prompt: `ctx.mode === "rpc"` and `ctx.agent.kind === "main"`; a subagent, the native TUI and every other mode send their messages untouched. The reminder takes its prompt's timestamp and the text is fixed, so request bytes are identical from one request to the next.
+- **Why a separate message.** `emitContext` gives each cloned message its history index, and after the handlers it marks every message that differs from its stored form as per-call; the Anthropic provider never anchors a cache breakpoint on or before the first per-call message. Appending the text to the prompt made the prompt per-call, so a fresh session's first request had no breakpoint behind the system prompt and billed about 11–12k tokens uncached. Inserted messages leave every original message unmarked (alignment is by the carried index, not the position), so only the reminders are per-call and the breakpoint sits on the real prompt.
+- **Setting.** `omp.linkReminder` (default off) is read when Desk launches the session and handed to the module as `OMP_VSCODE_LINK_REMINDER` (`1` or `0`); anything but `1` registers no `context` handler. Like other launch values it applies to sessions started or resumed afterwards. The system-prompt rules stay as they are.
+- **Variants measured** (installed OMP 18.8.5, claude-opus-5-5, headless `--mode rpc` with the module, a four-file TypeScript fixture with the question "explain this small project ... Twin ... no ProcessRoutine", 8 to 16 runs each, run in parallel on the same day; mentions counted with `parseCodeSymbol` over the final reply):
+
+| Variant | runs | linked symbols | plain symbols | plain share | request 1 (input / cache read / cache write) |
+|---|---|---|---|---|---|
+| no reminder | 8 | 81 | 87 | 52% | 4 / 28557 / 0 (warm) |
+| appended to the prompt (the first implementation) | 8 | 101 | 63 | 38% | 11.5k–12.1k / 17169 / 0 |
+| persisted custom message (`before_agent_start` `message`) | 8 | 104 | 68 | 40% | 2 / 28557 / 125 (writes it) |
+| inserted developer message | 16 | 181 | 140 | 44% | 127 / 28557 / 0 |
+| inserted synthetic user message (chosen) | 16 | 212 | 93 | 30% | 127 / 28557 / 0 |
+| chosen, final code | 3 | 37 | 17 | 31% | 127 / 17169 / ~11.9k (a fresh cache) |
+
+  File and folder mentions were inline-code paths in every run with and without the reminder (59–63 per 8 runs, 0 bare, 4 once): the question already makes the model name files, and `file-links` already works, so the fixture shows no change for paths. The differences between variants are within run-to-run noise except the appended and inserted-user variants against none; the developer role gave no better rate than appending, the user role the best. Cost: the reminder is about 123 tokens; it follows the breakpoint, so each prompt's first request bills it uncached once (about 120 tokens) and the next request writes it. Over a three-prompt session every request after the first read 29–30k tokens from cache. The persisted variant caches normally but stores the message in every session file and needs Chat to hide its `customType`; the inserted variant stores nothing.
+
 ## Alternatives
 
 - **Resolve in the OMP process.** OMP has its own `lsp` tool, but the Chat page is rendered by the host window, not by OMP, and ADR-0013 rejected a reverse bridge from OMP to VS Code's providers. Resolution here serves only the transcript's links and returns nothing to OMP.

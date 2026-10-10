@@ -4144,6 +4144,7 @@ async function launchHost(
       profile: request.scope.profile,
       sessionDir: request.scope.sessionDir,
       control: control === null ? null : control.bootstrap,
+      linkReminder: vscode.workspace.getConfiguration("omp").get<boolean>("linkReminder", false),
     },
     client,
   );

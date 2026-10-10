@@ -14,7 +14,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { CONTROL_DIR_ENV, CONTROL_SLOT_ENV } from "./control-protocol";
+import { CONTROL_DIR_ENV, CONTROL_SLOT_ENV, LINK_REMINDER_ENV } from "./control-protocol";
 import {
 	DEFAULT_OMP_PROFILE,
 	controlRuntimeFlags,
@@ -65,8 +65,10 @@ export function rpcOmpLaunchSpec(input: {
 	/** Explicit session directory from the index scope, used for a new conversation only. */
 	readonly sessionDir: string | null;
 	readonly profile: string | null;
+	/** The `omp.linkReminder` setting; the Chat prompt module reads it from the environment. */
+	readonly linkReminder: boolean;
 }): RpcOmpLaunchSpec {
-	const env: Record<string, string | null> = {};
+	const env: Record<string, string | null> = { [LINK_REMINDER_ENV]: input.linkReminder ? "1" : "0" };
 	if (input.control !== null) {
 		env[CONTROL_DIR_ENV] = input.control.directory;
 		env[CONTROL_SLOT_ENV] = input.control.slotId;
@@ -134,6 +136,8 @@ export interface RpcLaunchRequest {
 	readonly sessionDir: string | null;
 	/** Host-control bootstrap, or `null` to launch without the channel. */
 	readonly control: NativeControlBootstrap | null;
+	/** The `omp.linkReminder` setting when this launch starts; applies to this process for its whole life. */
+	readonly linkReminder: boolean;
 }
 
 export type RpcLaunchOutcome =
@@ -234,6 +238,7 @@ export async function launchRpcHost(request: RpcLaunchRequest, client: PtyBroker
 		sessionFile: request.sessionFile,
 		sessionDir: request.sessionDir,
 		profile: request.profile,
+		linkReminder: request.linkReminder,
 	});
 	const launched = await client.launchRpc({
 		slot: request.slot,

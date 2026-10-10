@@ -117,6 +117,11 @@
           "type": "boolean",
           "default": true,
           "description": "Link inline code symbols in Chat replies (`Ability`, `AbilityData.Cast`, `Parse()`) to their definition when VS Code's language extensions (C# Dev Kit, TypeScript, ...) find exactly one definition of the symbol in the session's folders. Ambiguous or unknown symbols stay plain code. When off, only the links the model writes itself and file paths are links."
+        },
+        "omp.linkReminder": {
+          "type": "boolean",
+          "default": false,
+          "description": "Remind the model after every prompt you send to write the files and folders it mentions as paths in inline code and every code symbol in Chat replies as a link ([`Name`](path:line)). The reminder is a separate message added to the request only (about 120 tokens per prompt); it is never saved to the session or shown. Applies to sessions started or resumed afterwards."
         }
       }
     },
