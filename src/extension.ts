@@ -149,7 +149,7 @@ import {
   stopBrokerOwnedHost,
 } from "./host/rpc-reconcile";
 import type { NativeStopVerdict } from "./host/rpc-reconcile";
-import type { CommandResult, CompactMode, RpcSession, SendOutcome, SendRefusal, ShakeMode } from "./host/rpc/session";
+import type { ChoiceOutcome, CommandResult, CompactMode, RpcSession, SendRefusal, ShakeMode } from "./host/rpc/session";
 import { readSlashRegistry, type BuiltinSlashEntry, type DeskSlashAction, type SlashRegistry } from "./host/slash-registry";
 import { sessionPrompts } from "./webview/lib/prompt-history";
 import { symbolSearchValue } from "./webview/lib/selection-query";
@@ -8011,7 +8011,7 @@ function runActiveChatAction(context: vscode.ExtensionContext, index: SessionInd
 }
 
 function chatRefusalText(reason: SendRefusal): string {
-  return reason === "busy" ? "OMP is busy with the running turn; try again after it ends." : reason === "not-live" || reason === "not-owner" ? "This conversation is not accepting commands right now." : "OMP did not accept the command.";
+  return reason === "busy" ? "OMP is busy with another request; try again in a moment." : reason === "not-live" || reason === "not-owner" ? "This conversation is not accepting commands right now." : "OMP did not accept the command.";
 }
 
 /** A maintenance pass's outcome. Its report already shows in the conversation; only a refusal or silence needs a warning. */
@@ -8080,7 +8080,8 @@ async function runChatAction(context: vscode.ExtensionContext, index: SessionInd
     }
     case "cycle-model": {
       const result = await session.cycleModel();
-      if (result.status === "refused") showWarning(`The model was not changed. ${chatRefusalText(result.reason)}`);
+      if (result.status === "pending") vscode.window.setStatusBarMessage("OMP model: the change applies as soon as OMP is ready", 4_000);
+      else if (result.status === "refused") showWarning(`The model was not changed. ${chatRefusalText(result.reason)}`);
       else if (result.status === "unconfirmed") showWarning("OMP did not report whether the model changed.");
       else if (result.value === null) showInfo("OMP has no other model to cycle to. Configure model roles in OMP settings.");
       else vscode.window.setStatusBarMessage(`OMP model: ${result.value.model.name ?? result.value.model.id}${result.value.thinkingLevel ? ` · ${result.value.thinkingLevel}` : ""}`, 4_000);
@@ -8088,7 +8089,8 @@ async function runChatAction(context: vscode.ExtensionContext, index: SessionInd
     }
     case "cycle-thinking": {
       const result = await session.cycleThinkingLevel();
-      if (result.status === "refused") showWarning(`The thinking level was not changed. ${chatRefusalText(result.reason)}`);
+      if (result.status === "pending") vscode.window.setStatusBarMessage("OMP thinking level: the change applies as soon as OMP is ready", 4_000);
+      else if (result.status === "refused") showWarning(`The thinking level was not changed. ${chatRefusalText(result.reason)}`);
       else if (result.status === "unconfirmed") showWarning("OMP did not report whether the thinking level changed.");
       else if (result.value === null) showInfo("The current model has no thinking levels to cycle through.");
       else vscode.window.setStatusBarMessage(`OMP thinking level: ${result.value}`, 4_000);
@@ -9729,12 +9731,13 @@ async function handleGuestControlRequest(
           if (!stillCurrent()) throw new HostControlRefusedError("closed", "The editor or session changed before dispatch.", null);
           const outcome =
             request.action === "set-model"
-              ? await session.setModel(request.model!.provider, request.model!.id)
-              : await session.setThinkingLevel(request.level!);
+              ? await session.chooseModel(request.model!.provider, request.model!.id, request.model!.name)
+              : await session.chooseThinkingLevel(request.level!);
           admission.settle?.(
-            outcome.status === "accepted" ? "applied" : outcome.status === "refused" ? "refused" : "unknown",
+            outcome.status === "accepted" || outcome.status === "pending" ? "applied" : outcome.status === "refused" ? "refused" : "unknown",
           );
-          notice = outcome.status === "accepted" ? undefined : controlOutcomeNotice(outcome);
+          // A held choice shows in the footer from the chat state; only a refusal or an unconfirmed change is a notice.
+          notice = outcome.status === "accepted" || outcome.status === "pending" ? undefined : controlOutcomeNotice(outcome);
         } catch (error) {
           admission.settle?.("unknown");
           if (error instanceof HostControlRefusedError) {
@@ -9758,7 +9761,7 @@ async function handleGuestControlRequest(
       if (request.picker === "model") {
         const listed = await session.getAvailableModels();
         if (listed.status !== "ok") {
-          notice = listed.status === "refused" && listed.reason === "busy" ? "OMP is busy; choose a model after the turn ends." : "OMP could not list models. Nothing was changed.";
+          notice = listed.status === "refused" && listed.reason === "busy" ? "OMP is busy with another request; open the picker again in a moment." : "OMP could not list models. Nothing was changed.";
         } else {
           const models = listed.models.filter(model => model.provider.length > 0 && model.provider.length <= 200 &&
             model.id.length > 0 && model.id.length <= 200 && isSafeBoundaryText(model.provider) && isSafeBoundaryText(model.id))
@@ -9768,7 +9771,7 @@ async function handleGuestControlRequest(
             recordSessionModels(index, tabId, models.length > 0);
             if (models.length === 0) await openProviderLogin(state.runtime, entry.scope.profile, entry.cwd);
             else {
-              const picked = await pickControlModel(models, beforeModel, stillCurrent, tabId);
+              const picked = await pickControlModel(models, session.model.pendingControl?.model ?? beforeModel, stillCurrent, tabId);
               if (picked === "provider-login") await openProviderLogin(state.runtime, entry.scope.profile, entry.cwd);
               else selectedModel = picked;
             }
@@ -9781,10 +9784,10 @@ async function handleGuestControlRequest(
           return stillCurrent() && beforeModel?.provider === current?.provider && beforeModel?.id === current?.id;
         };
         if (thinking.status !== "ok") notice = thinking.status === "refused" && thinking.reason === "busy" ?
-          "OMP is busy; choose a thinking level after the turn ends." : "OMP could not list thinking levels. Nothing was changed.";
+          "OMP is busy with another request; open the picker again in a moment." : "OMP could not list thinking levels. Nothing was changed.";
         else if (sameModel() && thinking.levels.length > 0) selectedThinking = await pickControlThinking(
           thinking.levels.filter(level => level.length > 0 && level.length <= 64 && isSafeBoundaryText(level)),
-          session.model.state?.thinkingLevel ?? null, sameModel, tabId);
+          session.model.pendingControl?.thinking ?? session.model.state?.thinkingLevel ?? null, sameModel, tabId);
         if (!sameModel() && stillCurrent()) notice = "The model changed while choosing a thinking level. Nothing was changed.";
       }
     }
@@ -9838,10 +9841,12 @@ function controlGuestState(
   };
 }
 
-function controlOutcomeNotice(outcome: SendOutcome): string {
+function controlOutcomeNotice(outcome: ChoiceOutcome): string {
   switch (outcome.status) {
     case "accepted":
       return "OMP applied the change; the state shown was read back from the session.";
+    case "pending":
+      return "OMP applies the change as soon as it is ready.";
     case "refused":
       return outcome.reason === "busy"
         ? "OMP is busy with another request; nothing was changed."
@@ -9925,6 +9930,8 @@ function refreshSessionModels(index: SessionIndex, tabId: string): Promise<void>
   if (pending) return pending;
   const session = chat.sessionOf(tabId);
   if (session === null || session.phase !== "live") return Promise.resolve();
+  // An automatic read is not worth delaying a Stop that OMP would queue behind it; a picker the user opens may read mid-turn.
+  if (session.model.working) { sessionModelRefreshOwed.add(tabId); return Promise.resolve(); }
   const epoch = session.epoch;
   const read = session.getAvailableModels().then(listed => {
     if (chat.sessionOf(tabId) !== session || session.phase !== "live" ||
@@ -10233,7 +10240,7 @@ async function selectHostModel(index: SessionIndex): Promise<void> {
   if (active === null) return;
   const listed = await active.session.getAvailableModels();
   if (listed.status === "refused") {
-    showInfo(listed.reason === "busy" ? "OMP is busy with a turn; select a model when it finishes." : "The session is not accepting commands right now.");
+    showInfo(listed.reason === "busy" ? "OMP is busy with another request; select a model again in a moment." : "The session is not accepting commands right now.");
     return;
   }
   if (listed.status === "failed") {
@@ -10242,7 +10249,7 @@ async function selectHostModel(index: SessionIndex): Promise<void> {
   }
   if (chat.sessionOf(active.tabId) !== active.session) return;
   recordSessionModels(index, active.tabId, listed.models.length > 0);
-  const picked = await pickControlModel(listed.models, active.session.model.state?.model ?? null,
+  const picked = await pickControlModel(listed.models, active.session.model.pendingControl?.model ?? active.session.model.state?.model ?? null,
     () => chat.sessionOf(active.tabId) === active.session, active.tabId);
   if (!picked) return;
   if (chat.sessionOf(active.tabId) !== active.session) {
@@ -10254,14 +10261,14 @@ async function selectHostModel(index: SessionIndex): Promise<void> {
     if (entry !== null) await openProviderLogin(stateOf(active.tabId)?.runtime ?? null, entry.scope.profile, entry.cwd);
     return;
   }
-  const outcome = await active.session.setModel(picked.provider, picked.id);
+  const outcome = await active.session.chooseModel(picked.provider, picked.id, picked.name);
   showInfo(controlOutcomeNotice(outcome));
 }
 
 async function selectHostThinking(index: SessionIndex): Promise<void> {
   const active = activeLiveSession(index);
   if (active === null) return;
-  const current = active.session.model.state?.thinkingLevel;
+  const current = active.session.model.pendingControl?.thinking ?? active.session.model.state?.thinkingLevel;
   const listed = await active.session.getAvailableThinkingLevels();
   if (listed.status !== "ok" || listed.levels.length === 0) {
     showInfo("OMP listed no selectable thinking levels.");
@@ -10274,7 +10281,7 @@ async function selectHostThinking(index: SessionIndex): Promise<void> {
     showWarning("The selected session changed while choosing; nothing was changed.");
     return;
   }
-  const outcome = await active.session.setThinkingLevel(picked);
+  const outcome = await active.session.chooseThinkingLevel(picked);
   showInfo(controlOutcomeNotice(outcome));
 }
 

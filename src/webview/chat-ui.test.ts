@@ -1767,6 +1767,28 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.wait("document.querySelectorAll('.omp-footer-trigger')[1].textContent.trim() === 'high'");
 		});
 
+		await t.test("a choice the host holds shows in both pickers with a pending mark, picking OMP's own value is a new choice, and the mark clears when the host drops it", async () => {
+			await reset("held-choice");
+			const label = (index: number): string => `document.querySelectorAll('.omp-footer-trigger')[${index}].querySelector('.omp-footer-trigger-label').textContent`;
+			assert.equal(await ui.evaluate("document.querySelector('.omp-footer-trigger').dataset.pending"), undefined, "nothing is held by default");
+			await ui.evaluate("window.ui.push({pendingControl:{model:{provider:'two',id:'new',name:'Held Model'},thinking:'xhigh'}})");
+			await ui.wait("document.querySelector('.omp-footer-trigger').dataset.pending==='true' && document.querySelector('.omp-footer-trigger--level').dataset.pending==='true'");
+			assert.equal(await ui.evaluate(label(0)), "Held Model");
+			assert.equal(await ui.evaluate(label(1)), "xhigh");
+			assert.equal(await ui.evaluate("document.querySelectorAll('.omp-footer-trigger .codicon-clock').length"), 2);
+			assert.match(await ui.evaluate<string>("document.querySelector('.omp-footer-trigger').title"), /Waiting to apply Held Model\. OMP applies it as soon as it is ready\./);
+			assert.equal(await ui.evaluate("document.querySelector('.omp-footer-trigger').disabled"), false, "a held choice does not lock the picker");
+			await ui.evaluate("document.querySelector('.omp-footer-trigger').click()");
+			await ui.wait("window.ui.last().picker === 'model'");
+			await ui.evaluate("window.ui.reply(window.ui.last(), {selectedModel:window.ui.original})");
+			await ui.wait("window.ui.last().action === 'set-model'");
+			assert.equal(await ui.evaluate("window.ui.last().model.id===window.ui.original.id"), true, "OMP's own value, chosen while another is held, is sent so the host cancels the held one");
+			await ui.evaluate("window.ui.push({pendingControl:null});window.ui.reply()");
+			await ui.wait("document.querySelector('.omp-footer-trigger').dataset.pending===undefined && document.querySelector('.omp-footer-trigger--level').dataset.pending===undefined");
+			assert.equal(await ui.evaluate(label(0)), await ui.evaluate("window.ui.original.name"));
+			assert.equal(await ui.evaluate("document.querySelectorAll('.omp-footer-trigger .codicon-clock').length"), 0);
+		});
+
 		await t.test("timeouts and refusals are transient, preserve readback and never replay a mutation", async () => {
 			await reset("outcome");
 			await ui.evaluate("document.querySelectorAll('.omp-footer-trigger')[1].click()");
