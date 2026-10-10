@@ -80,6 +80,7 @@ import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { renameReplacingSync } from "./atomic-file.ts";
 
 /** Document schema version this build writes and accepts. */
 export const CATALOG_VERSION = 1;
@@ -465,32 +466,19 @@ function commitDocument(paths: CatalogPaths, next: CatalogDocument): void {
     throw new CatalogError("write", `The OMP profile catalog could not be written: ${messageOf(error)}`, { cause: error });
   }
   fs.closeSync(fd);
-  let lastError: unknown = null;
-  for (let attempt = 0; attempt < 4; attempt++) {
-    try {
-      fs.renameSync(staging, paths.document);
-      return;
-    } catch (error) {
-      lastError = error;
-      const code = (error as NodeJS.ErrnoException).code;
-      // Windows refuses a replace while another process has the destination open
-      // (an antivirus scan, a backup tool). The write is retried, then reported;
-      // the previous revision is still intact either way.
-      if (code !== "EPERM" && code !== "EACCES" && code !== "EBUSY") break;
-      sleepBriefly(attempt);
-    }
-  }
-  fs.rmSync(staging, { force: true });
-  throw new CatalogError("write", `The OMP profile catalog could not be replaced: ${messageOf(lastError)}`, {
-    cause: lastError,
-  });
-}
-
-/** A bounded, synchronous pause between rename attempts (this path is not awaited). */
-function sleepBriefly(attempt: number): void {
-  const until = Date.now() + 20 * (attempt + 1);
-  while (Date.now() < until) {
-    // Deliberately synchronous: the commit must finish before its caller proceeds.
+  try {
+    // Windows refuses a replace while another process has the destination open (another window re-reading the catalog,
+    // an antivirus scan, a backup tool). The rename is retried over about two seconds, then reported; the previous
+    // revision is still intact either way.
+    renameReplacingSync(() => fs.renameSync(staging, paths.document));
+    return;
+  } catch (error) {
+    fs.rmSync(staging, { force: true });
+    const code = (error as NodeJS.ErrnoException).code;
+    const held = code === "EPERM" || code === "EACCES" || code === "EBUSY"
+      ? " Another program kept the file open for too long; this window keeps the change and saves it again on its next save."
+      : "";
+    throw new CatalogError("write", `The OMP profile catalog could not be replaced: ${messageOf(error)}.${held}`, { cause: error });
   }
 }
 

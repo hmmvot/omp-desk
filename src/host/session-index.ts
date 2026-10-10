@@ -1664,6 +1664,8 @@ export class SessionIndex {
 	 * window's rows is chained here too, so it never interleaves with a mutation.
 	 */
 	#persistChain: Promise<void> = Promise.resolve();
+	#persistRetries = 0;
+	#persistRetryTimer: NodeJS.Timeout | null = null;
 
 	constructor(options: SessionIndexOptions) {
 		if (typeof options.claimStorageDir !== "string" || options.claimStorageDir.trim().length === 0) {
@@ -3969,10 +3971,13 @@ export class SessionIndex {
 					await Promise.resolve(this.#store.update(SESSION_INDEX_STORAGE_KEY, snapshot, this.#sharedBase));
 				}
 				this.#persistError = null;
+				this.#persistRetries = 0;
 				// What this window's rows are derived from is now what it just committed.
 				this.#sharedBase = snapshot;
 			} catch (error) {
 				this.#persistError = `The session index could not be persisted: ${describeError(error)}`;
+				// A transaction with a companion record is the caller's to retry or roll back; a plain snapshot is saved again here.
+				if (companion === undefined) this.#retryPersistLater();
 				return;
 			}
 			try {
@@ -3984,6 +3989,23 @@ export class SessionIndex {
 		});
 		await this.#persistChain;
 		return this.#persistError;
+	}
+
+	/**
+	 * After a failed shared write, save the current state again a little later: the snapshot is the whole in-memory index,
+	 * so a change a blocked rename (another process holding the catalog open) refused is not lost, and no further user
+	 * action is needed. Bounded: three tries, two, four and eight seconds after the failures; the timer never keeps the
+	 * process alive.
+	 */
+	#retryPersistLater(): void {
+		if (this.#persistRetryTimer !== null || this.#persistRetries >= 3) return;
+		const delayMs = 2000 * 2 ** this.#persistRetries;
+		this.#persistRetries++;
+		this.#persistRetryTimer = setTimeout(() => {
+			this.#persistRetryTimer = null;
+			void this.#persistNow();
+		}, delayMs);
+		this.#persistRetryTimer.unref();
 	}
 }
 
