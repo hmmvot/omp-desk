@@ -1416,6 +1416,27 @@ describe("launcher tree", () => {
 			assert.deepEqual(labels.sort(), ["one/app", "two/app"]);
 		});
 
+		it("lists the sessions for the picker in the flat order with their folders, whichever grouping the view uses", async () => {
+			let grouping: "flat" | "folders" = "folders";
+			const provider = flatProvider({
+				folders: [folder("folder:alpha", ALPHA), folder("folder:beta", BETA)],
+				entries: [
+					row("tab:stopped", ALPHA, { ordinal: 1, lastActiveAt: "2026-09-25T12:00:00.000Z" }),
+					row("tab:live", ALPHA, { ...live, ordinal: 2, lastActiveAt: "2026-09-25T08:00:00.000Z" }),
+					row("tab:unread", BETA, { ...live, ordinal: 3, lastActiveAt: "2026-09-25T07:00:00.000Z", lastCompletedReplyId: "event-1" }),
+				],
+				running: new Set(["tab:live", "tab:unread"]),
+				grouping: () => grouping,
+			});
+			const listed = () => provider.listedSessions().map(({ item, folder: name }) => [item.tabId, name, item.headline === String(item.label)]);
+			for (let turn = 0; turn < 20 && provider.listedSessions().some(({ item }) => item.state === "checking"); turn++) await nextTurn();
+			assert.deepEqual(listed(), [["tab:unread", "beta", true], ["tab:live", "alpha", true], ["tab:stopped", "alpha", true]]);
+			grouping = "flat";
+			provider.refresh();
+			assert.deepEqual(listed().map(([tabId, name]) => [tabId, name]), [["tab:unread", "beta"], ["tab:live", "alpha"], ["tab:stopped", "alpha"]]);
+			assert.deepEqual(flatProvider({ folders: [folder("folder:alpha", ALPHA)], entries: [] }).listedSessions(), []);
+		});
+
 		it("reveals a session at the root once the root is served, and marks a read row as not unread", async () => {
 			const provider = flatProvider({
 				folders: [folder("folder:alpha", ALPHA)],

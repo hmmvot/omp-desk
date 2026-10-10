@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Sessions is one flat list by default.** Every session of the shown folders is a row labelled `folder · title`: sessions that are not stopped first (unread on top, then the most recent activity), stopped sessions last, and a **New Session…** row at the end that asks for the folder. The button in the view's title bar (`omp.sessionsGrouping`) switches to the previous layout, grouped under folders, and back.
 - **Unread replies.** A **●** marks a session whose agent finished a reply or asked you something while you were not looking at its editor; it clears when you look at the session, and it survives a window reload. Both layouts show it.
 - While a session has an open editor, its row in Sessions stays selected: the session you viewed most recently. Clearing the selection or selecting a folder or the New Session row puts it back.
+- **Ctrl+Alt+Q** (**OMP: Go to Session…**) opens a searchable list of every session, from anywhere including the integrated terminal: title, folder and status, in the Sessions order (unread first, stopped last). Picking one opens it as a click in Sessions does; **New Session…** at the end of the list asks for the folder and starts one.
 
 ### Fixed
 

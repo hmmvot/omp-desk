@@ -1273,6 +1273,7 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
     vscode.commands.registerCommand("omp.openSession", (argument: unknown) => openSession(context, index, argument, "resumed")),
     vscode.commands.registerCommand("omp.clickSession", (argument: unknown) => clickSession(context, index, argument)),
+    vscode.commands.registerCommand("omp.goToSession", () => goToSession(context, index)),
     vscode.commands.registerCommand("omp.switchToSessionWindow", (argument: unknown) => switchToSessionWindow(index, argument)),
     vscode.commands.registerCommand("omp.forgetSession", (argument: unknown) => forgetSession(index, argument)),
     vscode.commands.registerCommand("omp.deleteSession", (argument: unknown) => deleteSession(index, argument)),
@@ -1570,6 +1571,32 @@ async function clickSession(context: vscode.ExtensionContext, index: SessionInde
   const action = sessionClicks.click(`${tabId}\0${entry.sessionFile ?? ""}`, stopped);
   if (action === "launch") await openingTabs.get(tabId);
   await openSession(context, index, argument, action === "launch" ? "resumed" : "opened");
+}
+
+/**
+ * `omp.goToSession` from anywhere: a searchable list of every session the Sessions view shows, in its
+ * flat order (live unread first, then by activity, stopped last), ended by New Session. Picking a row
+ * is a click on that row; picking New Session runs the row's command.
+ */
+async function goToSession(context: vscode.ExtensionContext, index: SessionIndex): Promise<void> {
+  const provider = launcherProvider;
+  if (provider === undefined) return;
+  interface SessionChoice extends vscode.QuickPickItem { readonly row?: SessionTreeItem }
+  const choices: SessionChoice[] = provider.listedSessions().map(({ item, folder }) => {
+    const icon = item.iconPath instanceof vscode.ThemeIcon ? `$(${item.iconPath.id}) ` : "";
+    const status = typeof item.description === "string" ? item.description : "";
+    return { label: `${icon}${item.headline}`, description: folder === "" ? status : `${folder} · ${status}`, row: item };
+  });
+  if (choices.length > 0) choices.push({ label: "", kind: vscode.QuickPickItemKind.Separator });
+  choices.push({ label: "$(add) New Session…", alwaysShow: true });
+  const picked = await vscode.window.showQuickPick(choices, {
+    title: "Go to OMP Session",
+    placeHolder: "Type to filter by title, folder or status",
+    matchOnDescription: true,
+  });
+  if (picked === undefined) return;
+  if (picked.row === undefined) await vscode.commands.executeCommand("omp.newSession");
+  else await clickSession(context, index, picked.row);
 }
 
 /**

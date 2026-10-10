@@ -105,6 +105,7 @@
     "configurationDefaults": {
       "terminal.integrated.commandsToSkipShell": [
         "omp.focusComposer",
+        "omp.goToSession",
         "omp.moveFileToNewWindow"
       ]
     },
@@ -320,6 +321,11 @@
       {
         "command": "omp.moveFileToNewWindow",
         "title": "Toggle Files Window Next to Chat",
+        "category": "OMP"
+      },
+      {
+        "command": "omp.goToSession",
+        "title": "Go to Session…",
         "category": "OMP"
       },
       {
@@ -964,6 +970,11 @@
         "command": "omp.focusComposer",
         "key": "ctrl+shift+q",
         "mac": "cmd+shift+q"
+      },
+      {
+        "command": "omp.goToSession",
+        "key": "ctrl+alt+q",
+        "mac": "cmd+alt+q"
       },
       {
         "command": "omp.sendPrompt",

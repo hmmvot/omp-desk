@@ -518,6 +518,8 @@ interface SessionRowPresentation {
  */
 export class SessionTreeItem extends vscode.TreeItem {
 	readonly tabId: string;
+	/** The session's own name, without the flat list's folder in front of it. */
+	headline!: string;
 	entry!: SessionIndexEntry;
 	state!: SessionItemState;
 	/** Whether "Forget" may be offered for this row. */
@@ -556,6 +558,7 @@ export class SessionTreeItem extends vscode.TreeItem {
 		row: SessionRowPresentation,
 	): void {
 		const headline = sessionHeadline(entry, row.header);
+		this.headline = headline;
 		this.label = row.folderLabel == null ? headline : flatRowLabel(row.folderLabel, headline);
 		this.unread = row.unread === true;
 		this.entry = entry;
@@ -737,6 +740,8 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 	#providerLoginRequired = false;
 	#grouping: SessionsGrouping = "folders";
 	#flatRows: SessionTreeItem[] = [];
+	/** The folder name of every row, in either grouping: what the session picker shows. */
+	#folderNames = new Map<string, string>();
 	#flatSignature = "";
 	readonly #decorationChanges = new vscode.EventEmitter<vscode.Uri[]>();
 	#unreadTabs = new Set<string>();
@@ -778,6 +783,15 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 	async itemFor(tabId: string): Promise<SessionTreeItem | undefined> {
 		if (!this.#initialized) this.#project();
 		return this.#byTabId.get(tabId);
+	}
+
+	/**
+	 * Every session of the shown folders in the flat list's order — live rows unread first then by
+	 * activity, stopped rows last — whichever grouping the view uses, with its folder's name.
+	 */
+	listedSessions(): readonly { readonly item: SessionTreeItem; readonly folder: string }[] {
+		if (!this.#initialized) this.#project();
+		return this.#flatRows.map(item => ({ item, folder: this.#folderNames.get(item.tabId) ?? "" }));
 	}
 
 	/**
@@ -906,7 +920,8 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 		const folders = this.#source.folders();
 		const activeTabId = this.#source.activeTabId();
 		const grouping = this.#source.grouping?.() ?? "folders";
-		const folderLabels = grouping === "flat" ? flatFolderLabels(folders) : null;
+		const folderLabels = flatFolderLabels(folders);
+		const folderNames = new Map<string, string>();
 		const now = this.#now();
 		const inputs = folders.map(folder => ({
 			folder,
@@ -954,7 +969,7 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 				const state = sessionItemState(entry, facts);
 				return { entry, header: entry.sessionFile === null ? null : header?.value ?? null,
 					conversation, facts, state, active: entry.tabId === activeTabId,
-					folderLabel: folderLabels?.get(folder.id) ?? null,
+					folderLabel: grouping === "flat" ? folderLabels.get(folder.id) ?? null : null,
 					// What another window or another OMP process runs is not this window's to read.
 					unread: isUnread(entry) && state !== "otherWindow" && state !== "externalOmp" };
 			}).sort((left, right) => {
@@ -966,22 +981,22 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 			tooltip: folderTooltip(input.folder, latestConversationAt(input.rows.map(row => row.conversation?.lastAt ?? null)),
 				input.hasRecoverableShell, now),
 		}));
-		// The flat list: one row per session of every shown folder, in the flat order.
+		// One row per session of every shown folder, in the flat order: the flat list's rows, and the
+		// session picker's in either grouping.
 		const flatOrder: string[] = [];
-		if (grouping === "flat") {
-			const flatFacts = new Map<string, FlatOrderFacts>();
-			for (const input of inputs) {
-				for (const row of input.rows) {
-					if (flatFacts.has(row.entry.tabId)) continue;
-					flatFacts.set(row.entry.tabId, {
-						tabId: row.entry.tabId, ordinal: row.entry.ordinal, unread: row.unread,
-						stopped: row.state === "stopped" || row.state === "draft",
-						lastActivityAt: activityMillis(row.conversation?.lastAt, row.entry.lastActiveAt),
-					});
-				}
+		const flatFacts = new Map<string, FlatOrderFacts>();
+		for (const input of inputs) {
+			for (const row of input.rows) {
+				if (flatFacts.has(row.entry.tabId)) continue;
+				folderNames.set(row.entry.tabId, folderLabels.get(input.folder.id) ?? "");
+				flatFacts.set(row.entry.tabId, {
+					tabId: row.entry.tabId, ordinal: row.entry.ordinal, unread: row.unread,
+					stopped: row.state === "stopped" || row.state === "draft",
+					lastActivityAt: activityMillis(row.conversation?.lastAt, row.entry.lastActiveAt),
+				});
 			}
-			for (const row of orderFlatRows([...flatFacts.values()])) flatOrder.push(row.tabId);
 		}
+		for (const row of orderFlatRows([...flatFacts.values()])) flatOrder.push(row.tabId);
 		const flatSignature = JSON.stringify([flatOrder, inputs.length === 0]);
 		const rootChanged = grouping === "flat"
 			? this.#grouping !== "flat" || flatSignature !== this.#flatSignature
@@ -1039,6 +1054,7 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 		this.#unreadTabs = unreadTabs;
 		if (decorated.length > 0) this.#decorationChanges.fire(decorated.map(tabId => vscode.Uri.from({ scheme: SESSION_DECORATION_SCHEME, path: `/${tabId}` })));
 		this.#flatRows = flatOrder.map(tabId => byTabId.get(tabId)!);
+		this.#folderNames = folderNames;
 		this.#grouping = grouping;
 		this.#flatSignature = flatSignature;
 		for (const tabId of this.#observations.keys()) {

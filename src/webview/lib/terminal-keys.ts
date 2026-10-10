@@ -57,9 +57,12 @@ export function terminalCopyChord(event: TerminalKeyEventLike, hasSelection: boo
  * - Ctrl+Shift+Q focuses the chat composer and Ctrl+Shift+M moves the file next to the chat into a new window.
  *   A terminal encodes them as Ctrl+Q, OMP's follow-up key on Windows (still available as Ctrl+Q itself), and
  *   Ctrl+M, a carriage return that would submit OMP's input.
+ * - Ctrl+Alt+Q, `OMP: Go to Session…`: a terminal would encode it as Escape then Ctrl+Q, which OMP would read
+ *   as Alt+Ctrl+Q; no OMP default binds it.
  */
 export function isTerminalWorkbenchChord(event: TerminalKeyEventLike): boolean {
-	if (!(event.ctrlKey || event.metaKey) || !event.shiftKey) return false;
+	if (!(event.ctrlKey || event.metaKey)) return false;
+	if (!event.shiftKey) return event.altKey && isKey(event, "q", "KeyQ");
 	return event.altKey ? isKey(event, "r", "KeyR") : isKey(event, "q", "KeyQ") || isKey(event, "m", "KeyM");
 }
 
