@@ -2,15 +2,24 @@
  * Replace a small file in one rename, so a reader never observes a half-written or
  * missing file. The staged entry (`<target>.<uuid>.tmp`) is private to this call and is
  * removed whatever happens. A rename that another process's open handle briefly blocks
- * (`EPERM`, `EBUSY`, `EACCES` on Windows) is retried a few times.
+ * (`EPERM`, `EBUSY`, `EACCES` on Windows) is retried with a growing wait (`RENAME_BACKOFF_MS`).
  */
 
 import { randomUUID } from "node:crypto";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 
-const RENAME_ATTEMPTS = 4;
-const RENAME_RETRY_MS = 25;
+/**
+ * Waits between rename attempts, about 2.1 s in all. On Windows a rename over a file fails for as long as any process
+ * holds the target open (another window re-reading the catalog after each change, an antivirus or indexer scan), and a
+ * slow machine keeps such handles open for hundreds of milliseconds, so a window of ~120 ms was not enough.
+ */
+export const RENAME_BACKOFF_MS: readonly number[] = [10, 20, 40, 80, 160, 320, 640, 800];
+
+/** Block this thread for `ms` without using the CPU. */
+export function sleepSync(ms: number): void {
+	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
 
 /** The error's `code`, when it has one. */
 export function errorCode(error: unknown): string | undefined {
@@ -29,18 +38,43 @@ export async function replaceFileAtomic(target: string, content: string): Promis
 	const staged = `${target}.${randomUUID()}.tmp`;
 	try {
 		await fsp.writeFile(staged, content, { encoding: "utf8", mode: 0o600, flag: "wx" });
-		for (let attempt = 1; ; attempt++) {
-			try {
-				await fsp.rename(staged, target);
-				return;
-			} catch (error) {
-				const code = errorCode(error);
-				if (attempt >= RENAME_ATTEMPTS || (code !== "EPERM" && code !== "EBUSY" && code !== "EACCES")) throw error;
-				await delay(RENAME_RETRY_MS);
-			}
-		}
+		await renameReplacing(() => fsp.rename(staged, target), delay);
 	} finally {
 		await fsp.rm(staged, { force: true }).catch(() => {});
+	}
+}
+
+/** Whether a rename failed only because another process holds the target or the staged file open. */
+function isSharingViolation(error: unknown): boolean {
+	const code = errorCode(error);
+	return code === "EPERM" || code === "EBUSY" || code === "EACCES";
+}
+
+/** Run `rename` until it lands, waiting out `RENAME_BACKOFF_MS`; any other error, or the last sharing violation, is thrown. */
+export async function renameReplacing(rename: () => Promise<void>, wait: (ms: number) => Promise<void>): Promise<void> {
+	for (let attempt = 0; ; attempt++) {
+		try {
+			await rename();
+			return;
+		} catch (error) {
+			const pause = RENAME_BACKOFF_MS[attempt];
+			if (pause === undefined || !isSharingViolation(error)) throw error;
+			await wait(pause);
+		}
+	}
+}
+
+/** `renameReplacing` for a caller that must finish before it returns; the wait blocks without spinning. */
+export function renameReplacingSync(rename: () => void, wait: (ms: number) => void = sleepSync): void {
+	for (let attempt = 0; ; attempt++) {
+		try {
+			rename();
+			return;
+		} catch (error) {
+			const pause = RENAME_BACKOFF_MS[attempt];
+			if (pause === undefined || !isSharingViolation(error)) throw error;
+			wait(pause);
+		}
 	}
 }
 
