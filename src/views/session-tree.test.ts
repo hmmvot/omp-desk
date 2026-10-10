@@ -1318,4 +1318,116 @@ describe("launcher tree", () => {
 		assert.equal(JSON.parse(row("tab:idle").diagnostics).conversation.lastAt, "2026-09-25T11:30:00.000Z");
 	});
 
+	describe("flat list", () => {
+		const row = (tabId: string, cwd: string, overrides: Partial<SessionIndexEntry> = {}): SessionIndexEntry =>
+			entry({ tabId, cwd, kind: "session", sessionFile, availability: "saved", ...overrides });
+		const live = { availability: "live", runIntent: "running" } as const;
+
+		function flatProvider(options: {
+			readonly folders: readonly LauncherFolder[];
+			readonly entries: readonly SessionIndexEntry[];
+			readonly running?: ReadonlySet<string>;
+			readonly grouping?: () => "flat" | "folders";
+		}): Provider {
+			return providerFor({
+				folders: () => options.folders,
+				entries: () => options.entries,
+				activeTabId: () => null,
+				facts: tabId => ({ open: false, running: options.running?.has(tabId) ?? false, outcome: null, activity: null }),
+				grouping: options.grouping ?? (() => "flat"),
+			});
+		}
+
+		it("shows one row per session of every folder, labelled by folder, live rows by unread then recency, stopped rows last", async () => {
+			const entries = [
+				row("tab:stopped-new", ALPHA, { ordinal: 1, lastActiveAt: "2026-09-25T12:00:00.000Z" }),
+				row("tab:live-old", ALPHA, { ...live, ordinal: 2, lastActiveAt: "2026-09-25T08:00:00.000Z" }),
+				row("tab:live-new", BETA, { ...live, ordinal: 3, lastActiveAt: "2026-09-25T11:00:00.000Z" }),
+				row("tab:live-unread", BETA, { ...live, ordinal: 4, lastActiveAt: "2026-09-25T07:00:00.000Z", lastCompletedReplyId: "event-1" }),
+				row("tab:stopped-old", BETA, { ordinal: 5, lastActiveAt: "2026-09-25T06:00:00.000Z" }),
+				row("tab:elsewhere", UNREGISTERED, { ...live }),
+			];
+			const provider = flatProvider({
+				folders: [folder("folder:alpha", ALPHA), folder("folder:beta", BETA)],
+				entries,
+				running: new Set(["tab:live-old", "tab:live-new", "tab:live-unread"]),
+			});
+			provider.getChildren();
+			await waitForRows(provider, () => (provider.getChildren() as SessionRow[]).every(item => !("state" in item) || item.state !== "checking"));
+			const children = provider.getChildren();
+			assert.deepEqual(children.map(child => child.id), [
+				"tab:live-unread", "tab:live-new", "tab:live-old", "tab:stopped-new", "tab:stopped-old", "omp.newSessionRow",
+			]);
+			const sessions = children.slice(0, 5) as SessionRow[];
+			assert.deepEqual(sessions.map(item => String(item.label).split(" · ")[0]), ["beta", "beta", "alpha", "alpha", "beta"]);
+			assert.ok(sessions.every(item => String(item.label).includes(" · ")));
+			assert.deepEqual(sessions.map(item => item.unread), [true, false, false, false, false]);
+			assert.equal(sessions[0]!.state, "running");
+			assert.equal(sessions[0]!.description, "Unread · Running");
+			assert.ok(tooltipText(sessions[0]!).includes("Unread reply"));
+			assert.equal(sessions[1]!.description, "Running");
+			const badge = provider.decorations.provideFileDecoration(sessions[0]!.resourceUri!, undefined as never) as { badge: string; tooltip: string };
+			assert.deepEqual([badge.badge, badge.tooltip], ["●", "Unread reply"]);
+			assert.equal(provider.decorations.provideFileDecoration(sessions[1]!.resourceUri!, undefined as never), undefined);
+			assert.equal(provider.getParent(sessions[0]!), undefined);
+			assert.deepEqual(provider.getChildren(sessions[0]!), []);
+		});
+
+		it("ends with a New Session row that asks for the folder through omp.newSession, and is empty without folders", async () => {
+			const provider = flatProvider({ folders: [folder("folder:alpha", ALPHA)], entries: [] });
+			const [newSession] = provider.getChildren();
+			assert.ok(newSession instanceof sessionTree.NewSessionTreeItem);
+			assert.equal(newSession.command?.command, "omp.newSession");
+			assert.equal(newSession.command?.arguments, undefined);
+			assert.deepEqual(flatProvider({ folders: [], entries: [] }).getChildren(), []);
+		});
+
+		it("switches between the flat list and folder nodes on refresh, restoring each row's own label", async () => {
+			let grouping: "flat" | "folders" = "flat";
+			const provider = flatProvider({
+				folders: [folder("folder:alpha", ALPHA)],
+				entries: [row("tab:one", ALPHA)],
+				grouping: () => grouping,
+			});
+			const changes: unknown[] = [];
+			provider.onDidChangeTreeData(element => changes.push(element));
+			assert.ok(String(provider.getChildren()[0]!.label).startsWith("alpha · "));
+			grouping = "folders";
+			provider.refresh();
+			assert.deepEqual(changes, [undefined]);
+			const roots = provider.getChildren();
+			assert.ok(roots[0] instanceof sessionTree.WorkspaceFolderTreeItem);
+			const [item] = provider.getChildren(roots[0]!) as SessionRow[];
+			assert.ok(!String(item!.label).includes(" · "));
+			assert.equal(provider.getParent(item!), roots[0]);
+			grouping = "flat";
+			provider.refresh();
+			assert.ok(String(provider.getChildren()[0]!.label).startsWith("alpha · "));
+		});
+
+		it("tells apart two folders with the same name in the row labels", () => {
+			const one = path.join(os.tmpdir(), "omp-launcher-tree", "one", "app");
+			const two = path.join(os.tmpdir(), "omp-launcher-tree", "two", "app");
+			const provider = flatProvider({
+				folders: [folder("folder:one", one), folder("folder:two", two)],
+				entries: [row("tab:a", one, { ordinal: 1 }), row("tab:b", two, { ordinal: 2 })],
+			});
+			const labels = provider.getChildren().slice(0, 2).map(item => String(item.label).split(" · ")[0]);
+			assert.deepEqual(labels.sort(), ["one/app", "two/app"]);
+		});
+
+		it("reveals a session at the root once the root is served, and marks a read row as not unread", async () => {
+			const provider = flatProvider({
+				folders: [folder("folder:alpha", ALPHA)],
+				entries: [row("tab:seen", ALPHA, { lastCompletedReplyId: "event-1", lastSeenReplyId: "event-1" })],
+			});
+			const [item] = provider.getChildren() as SessionRow[];
+			assert.equal(item!.unread, false);
+			assert.equal(provider.beginReveal("tab:seen"), undefined, "the root is not served yet");
+			await nextTurn();
+			const reserved = provider.beginReveal("tab:seen");
+			assert.equal(reserved?.item, item);
+			reserved?.release();
+		});
+	});
 });

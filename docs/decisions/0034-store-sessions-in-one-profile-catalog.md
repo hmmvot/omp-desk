@@ -57,10 +57,14 @@ membership, panel layout and focus with VS Code and the current window.
 **Shared facts and window-local facts are separate.** The catalog holds identity,
 scope, run intent, ownership/attempt/release evidence, bindings, held transfers and
 import conflicts. A window's own observations — availability, per-row status detail,
-the selected tab, the reply its panels displayed — stay in that window's local store,
+the selected tab — stay in that window's local store,
 because publishing them would let a rival window's failed attach or failed probe
 report a failure over a session another window is running. A row with no local
-observation derives its status from the shared record.
+observation derives its status from the shared record. Amended with the flat Sessions
+list: the reply a user has read (`lastSeenReplyId`) is shared with the row's
+`lastCompletedReplyId`, because a read marker kept in one window's workspace state was
+lost whenever that window opened another folder and every finished session then showed as
+unread; reading a session in any window clears its mark in all of them.
 
 **Controller election is claim-bound.** An editor becomes a conversation's
 controlling slot only when the publishing window provably holds that writer (a live

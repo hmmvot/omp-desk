@@ -90,6 +90,11 @@ export interface TurnNotifierDeps {
 	/** Delivery failures are logged with fixed wording by the caller. */
 	onError(tabId: string, kind: TurnNotice["kind"]): void;
 	onSuppressed: NotificationSuppressionObserver;
+	/**
+	 * Called for every earned event — a finished turn or a question — whether its desktop notice
+	 * was sent or suppressed (an aborted turn is not earned). The Sessions unread marker follows it.
+	 */
+	onEarned?(tabId: string, kind: TurnNotice["kind"]): void;
 }
 
 export class TurnNotifier {
@@ -98,7 +103,10 @@ export class TurnNotifier {
 
 	constructor(deps: TurnNotifierDeps) {
 		this.#deps = deps;
-		this.#ledger = new TurnActivityLedger(deps.onSuppressed);
+		this.#ledger = new TurnActivityLedger((tabId, kind, reason) => {
+			deps.onSuppressed(tabId, kind, reason);
+			if (reason !== "aborted") deps.onEarned?.(tabId, kind);
+		});
 	}
 
 	observe(tabId: string, activity: TurnActivity, suppression: NotificationSuppression | null): void {
@@ -107,6 +115,7 @@ export class TurnNotifier {
 
 	/** Direct delivery for callers whose own source (the native journal) already guarantees monotonic, deduplicated events. */
 	notify(tabId: string, notice: TurnNotice): void {
+		this.#deps.onEarned?.(tabId, notice.kind);
 		void Promise.resolve(this.#deps.send(tabId, notice)).catch(() => this.#deps.onError(tabId, notice.kind));
 	}
 

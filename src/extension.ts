@@ -32,6 +32,9 @@ import { observeSessionBranch } from "./host/session-branch";
 import type { GitApi, BranchObservation } from "./host/session-branch";
 import type { FooterMetadataMessage } from "./webview/footer-metadata";
 import { SessionClickRecognizer } from "./views/session-click";
+import { normalizeSessionsGrouping } from "./views/session-order";
+import type { SessionsGrouping } from "./views/session-order";
+import { pinnedSessionTabId, selectionRestore } from "./views/session-selection";
 import { acquireClaim, createClaimHolder, createOwnerGeneration } from "./host/session-claim";
 import type { NativeControlBootstrap, OmpCommand } from "./host/native-terminal";
 import {
@@ -83,6 +86,7 @@ import {
 import type { ReferenceSource, SendCandidate } from "./host/editor-context";
 import { TurnNotifier, desktopNotificationSuppression, reportsTrailingQuestion } from "./host/notifications";
 import type { TurnActivity, TurnNotice, NotificationSuppression } from "./host/notifications";
+import { isLookedAt, markersAfterEvent, markersAfterViewing } from "./host/session-unread";
 import { sendDesktopNotification } from "./host/desktop-notifications";
 import { notificationLine } from "./host/notification-text";
 import { NativeActivityLedger } from "./host/native-activity";
@@ -362,6 +366,8 @@ const SESSIONS_VIEW_ID = "omp.sessions";
  * show, so its welcome content offers the Add Folder flow instead of an empty list.
  */
 const HAS_WORKSPACE_FOLDERS_CONTEXT = "omp.hasWorkspaceFolders";
+/** Context key the Sessions title-bar toggle reads: the flat list is showing. */
+const SESSIONS_FLAT_CONTEXT = "omp.sessionsFlat";
 /**
  * Context key gating the Stop keybinding: true while the OMP chat panel the user
  * is looking at reports the host running a turn. It is set from the guest's own
@@ -1141,6 +1147,7 @@ export function activate(context: vscode.ExtensionContext): void {
     // A folder offers Reconnect Terminal exactly when a detached shell of that
     // folder could still be attached to. Shell slots never become rows.
     hasRecoverableShell: folder => recoverableShellsInFolder(folder.path).length > 0,
+    grouping: sessionsGrouping,
   }, { onObservationError: error => log(`launcher: row observation failed: ${messageOf(error)}`) });
   launcherProvider = provider;
   const view = vscode.window.createTreeView(SESSIONS_VIEW_ID, { treeDataProvider: provider });
@@ -1172,6 +1179,8 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.workspace.onDidChangeConfiguration(refreshChatDisplayPreferences),
     provider,
     view,
+    // The unread dot is a decoration badge: a long row label truncates the description, a badge stays visible.
+    vscode.window.registerFileDecorationProvider(provider.decorations),
     provider.onDidServeTree(() => { void revealActiveSession(index); }),
     { dispose: claimWatch },
     // The window's own folders are shown in Sessions: a change of the open folders or of the
@@ -1182,8 +1191,11 @@ export function activate(context: vscode.ExtensionContext): void {
       refreshLauncher();
     }),
     vscode.workspace.onDidChangeConfiguration(event => {
-      if (event.affectsConfiguration("omp.showWorkspaceFolders")) refreshLauncher();
+      if (event.affectsConfiguration("omp.showWorkspaceFolders") || event.affectsConfiguration("omp.sessionsGrouping")) refreshLauncher();
     }),
+    // While a session has an open editor, its row cannot be deselected: a selection with no
+    // session row in it is put back on the session viewed most recently.
+    view.onDidChangeSelection(event => restorePinnedSelection(index, event.selection)),
     vscode.workspace.onDidChangeConfiguration(event => {
       for (const state of tabs.values()) {
         if (state.panel === null || (state.shellSlot === null && state.mode !== "terminal")) continue;
@@ -1252,6 +1264,8 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("omp.closeSession", (argument: unknown) => closeSession(context, index, argument)),
     vscode.commands.registerCommand("omp.reloadSession", (argument: unknown) => reloadSession(context, index, argument)),
     vscode.commands.registerCommand("omp.addWorkspaceFolder", () => addWorkspaceFolder(index)),
+    vscode.commands.registerCommand("omp.showSessionsFlat", () => setSessionsGrouping("flat")),
+    vscode.commands.registerCommand("omp.showSessionsByFolder", () => setSessionsGrouping("folders")),
     vscode.commands.registerCommand("omp.pinWorkspaceFolder", (argument: unknown) => pinWorkspaceFolder(index, argument)),
     vscode.commands.registerCommand("omp.unpinWorkspaceFolder", (argument: unknown) => unpinWorkspaceFolder(index, argument)),
     vscode.commands.registerCommand("omp.resumeWorkspaceFolder", (argument: unknown) =>
@@ -1328,6 +1342,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // (or closed) while activation proceeds is reconciled by this, never guessed at.
   context.subscriptions.push(
     vscode.window.tabGroups.onDidChangeTabs(() => {
+      settleViewedSession(index);
       void syncBridgeEditors(context, index, { retireMissing: true }).catch(error =>
         log(`bridge: the editor membership could not be reconciled: ${messageOf(error)}`),
       );
@@ -3416,7 +3431,9 @@ function startNativeWatch(index: SessionIndex, state: TabState, runtime: NativeH
   let timer: NodeJS.Timeout | null = null;
   const onSuppressed = logNotificationSuppression;
   const reportSuppressed = (kind: TurnNotice["kind"], reason: NotificationSuppression | "aborted"): void => {
-    if (state.tabId !== null) onSuppressed(state.tabId, kind, reason);
+    if (state.tabId === null) return;
+    onSuppressed(state.tabId, kind, reason);
+    if (reason !== "aborted") recordSessionEvent(index, state.tabId);
   };
   let activityLedger = new NativeActivityLedger(reportSuppressed);
   // A reconnect builds a new ledger that recovers a still-pending dialog; its toast was already sent.
@@ -7706,6 +7723,7 @@ function notifierFor(index: SessionIndex): TurnNotifier {
         },
         onError: (tabId, kind) => log(`tab ${tabId}: desktop notification ${kind} failed (submission-failed).`),
         onSuppressed: logNotificationSuppression,
+        onEarned: tabId => recordSessionEvent(index, tabId),
       }),
     };
   }
@@ -7724,6 +7742,40 @@ function notificationSuppression(index: SessionIndex, tabId: string): Notificati
     vscode.window.state.focused,
     visible,
     active,
+  );
+}
+
+/** Whether the user is looking at this session now. The desktop-notification setting does not matter here. */
+function sessionLookedAt(index: SessionIndex, tabId: string): boolean {
+  const active = editorInFrontConversation(index) === tabId;
+  return isLookedAt(vscode.window.state.focused, stateOf(tabId)?.panel?.visible ?? active, active);
+}
+
+/**
+ * The agent finished a reply or asked a question. The session is unread from now on unless
+ * the user is in front of its editor; the marker is persisted with the session index, so it
+ * survives a window reload.
+ */
+function recordSessionEvent(index: SessionIndex, tabId: string): void {
+  const entry = index.get(tabId);
+  if (entry === null) return;
+  const markers = markersAfterEvent(entry, sessionLookedAt(index, tabId), Date.now());
+  void index.recordConversationState(tabId, markers).then(
+    () => launcherProvider?.refresh(),
+    error => log(`tab ${tabId}: the unread marker could not be saved: ${messageOf(error)}`),
+  );
+}
+
+/** The user is in front of a session's editor: what it said so far counts as read. */
+function settleViewedSession(index: SessionIndex): void {
+  const tabId = editorInFrontConversation(index);
+  const entry = tabId === null ? null : index.get(tabId);
+  if (tabId === null || entry === null || !sessionLookedAt(index, tabId)) return;
+  const read = markersAfterViewing(entry);
+  if (read === null) return;
+  void index.recordConversationState(tabId, { lastSeenReplyId: read.lastSeenReplyId }).then(
+    () => launcherProvider?.refresh(),
+    error => log(`tab ${tabId}: the unread marker could not be cleared: ${messageOf(error)}`),
   );
 }
 
@@ -9728,6 +9780,8 @@ function applySlotAuthority(slot: string): void {
  * with no folder has nothing to group and must say how to add one.
  */
 function refreshLauncher(options: { readonly ownership?: boolean } = {}): void {
+  if (indexForBridge !== null) settleViewedSession(indexForBridge);
+  void vscode.commands.executeCommand("setContext", SESSIONS_FLAT_CONTEXT, sessionsGrouping() === "flat");
   launcherProvider?.refresh(options);
   toolsController?.sync();
   if (activationContext !== undefined) void vscode.commands.executeCommand("setContext", "omp.defaultSessionMode", defaultSessionMode(activationContext));
@@ -9771,7 +9825,7 @@ function revealActiveSession(index: SessionIndex): Promise<void> {
       const provider = launcherProvider;
       const view = launcherView;
       if (!provider || !view || !view.visible) return;
-      const tabId = index.activeTabId;
+      const tabId = pinnedSessionTab(index) ?? index.activeTabId;
       if (tabId === null) { launcherSelectedPath = null; return; }
       const expand = launcherExpandFor === tabId;
       const reserved = provider.beginReveal(tabId, { expand });
@@ -9779,7 +9833,7 @@ function revealActiveSession(index: SessionIndex): Promise<void> {
       try {
         if (!expand && launcherSelectedPath === reserved.pathKey) continue;
         await view.reveal(reserved.item, { select: true, focus: false, expand: true });
-        if (index.activeTabId === tabId) {
+        if ((pinnedSessionTab(index) ?? index.activeTabId) === tabId) {
           launcherSelectedPath = reserved.pathKey;
           if (expand) launcherExpandFor = null;
         }
@@ -9792,6 +9846,57 @@ function revealActiveSession(index: SessionIndex): Promise<void> {
   };
   launcherRevealInFlight = reveal().finally(() => { launcherRevealInFlight = null; });
   return launcherRevealInFlight;
+}
+
+/**
+ * The session the Sessions view keeps selected: the one whose editor the user viewed most
+ * recently among this window's open ones, or `null` while no open editor serves a shown row.
+ */
+function pinnedSessionTab(index: SessionIndex): string | null {
+  return pinnedSessionTabId(
+    editorRecency.order().map(slot => {
+      const state = tabs.get(slot);
+      return { tabId: state?.panel != null ? state.tabId : null, shell: state?.shellSlot != null };
+    }),
+    tabId => index.get(tabId) !== null && launcherProvider?.displayedState(tabId) !== undefined,
+  );
+}
+
+let pinnedSelectionTimer: NodeJS.Timeout | undefined;
+const PINNED_SELECTION_RESTORE_MS = 250;
+
+/**
+ * Put the pinned row back when the user cleared the selection or selected a non-session row.
+ *
+ * The check runs again after a short delay: clicking a folder row selects it and collapses it, and
+ * the collapse (recorded asynchronously) must be able to land first, because the restore never
+ * expands a folder the user just collapsed; the selection is then read from the view itself.
+ */
+function restorePinnedSelection(index: SessionIndex, selection: readonly LauncherTreeItem[]): void {
+  const tabIds = (items: readonly LauncherTreeItem[]) => items.map(item => item instanceof SessionTreeItem ? item.tabId : null);
+  if (selectionRestore(pinnedSessionTab(index), tabIds(selection)) === null) return;
+  clearTimeout(pinnedSelectionTimer);
+  pinnedSelectionTimer = setTimeout(() => {
+    pinnedSelectionTimer = undefined;
+    if (selectionRestore(pinnedSessionTab(index), tabIds(launcherView?.selection ?? [])) === null) return;
+    launcherSelectedPath = null;
+    void revealActiveSession(index);
+  }, PINNED_SELECTION_RESTORE_MS);
+  pinnedSelectionTimer.unref?.();
+}
+
+/** How Sessions arranges its rows: the setting, flat by default. */
+function sessionsGrouping(): SessionsGrouping {
+  return normalizeSessionsGrouping(vscode.workspace.getConfiguration("omp").get("sessionsGrouping"));
+}
+
+/** The title-bar toggle: store the choice; the configuration listener redraws the view. */
+async function setSessionsGrouping(grouping: SessionsGrouping): Promise<void> {
+  try {
+    await vscode.workspace.getConfiguration("omp").update("sessionsGrouping", grouping, vscode.ConfigurationTarget.Global);
+  } catch (error) {
+    showError(`Sessions could not switch to ${grouping === "flat" ? "the flat list" : "folders"}: ${messageOf(error)}`);
+  }
 }
 
 /** Runtime object identity is local; activity and snapshot contents are not. */

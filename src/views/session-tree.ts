@@ -22,6 +22,13 @@
  * opens stopped history without a writer; a rapid second click or Open launches it.
  * A fileless draft has nothing to view, so its click requests Open instead.
  *
+ * Two arrangements share the same rows (`omp.sessionsGrouping`): the folder tree above,
+ * and a flat list — the default — with one row per session of the same folders, labelled
+ * `folder · title`, ordered by `src/views/session-order.ts` (live rows unread first then by
+ * last activity, stopped rows last) and ended by a New Session row. A row is *unread* when
+ * the agent finished or asked and the user has not looked since (`src/host/session-unread.ts`);
+ * both arrangements mark it with a dot in the description.
+ *
  * Rows never delete anything themselves. "Forget" drops a row and no file;
  * "Delete" is decided and performed by `src/host/session-lifecycle.ts`, which
  * re-reads every proof under an exclusive claim at the moment it acts.
@@ -48,6 +55,9 @@ import type { RestoreOutcome, SessionFileActivity, SessionFileHeader, SessionInd
 import { folderMatchesCwd } from "./workspace-folders";
 import type { LauncherFolder } from "./launcher-folders";
 import type { WorkspaceFolder } from "./workspace-folders";
+import { isUnread } from "../host/session-unread";
+import { activityMillis, flatFolderLabels, flatRowLabel, orderFlatRows } from "./session-order";
+import type { FlatOrderFacts, SessionsGrouping } from "./session-order";
 
 /**
  * Agent activity of an attached live session, as its guest reports it.
@@ -155,6 +165,8 @@ export interface SessionLauncherSource {
 	 * "Open Terminal", which always starts a new shell.
 	 */
 	hasRecoverableShell?(folder: WorkspaceFolder): boolean;
+	/** How rows are arranged now; a source that omits it keeps the folder tree. */
+	grouping?(): SessionsGrouping;
 }
 
 export type SessionOwnershipFacts = Pick<SessionLauncherFacts,
@@ -208,6 +220,12 @@ export type SessionItemState =
 	| "unread"
 	| "waiting"
 	| "running";
+
+/**
+ * The URI scheme of a session row's `resourceUri`. It exists only so a decoration provider can badge
+ * the row: a row label is truncated by a long title and takes its description with it, a badge is not.
+ */
+export const SESSION_DECORATION_SCHEME = "omp-session";
 
 const STATE_LABEL: Record<SessionItemState, string> = {
 	otherWindow: "Open in another window",
@@ -446,6 +464,7 @@ function sessionTooltip(
 	header: SessionFileHeader | null,
 	conversation: SessionConversation | null,
 	now: number,
+	unread = false,
 ): string {
 	const lines = [
 		sessionHeadline(entry, header).replace(/\r\n|\r|\n/g, " "),
@@ -454,6 +473,7 @@ function sessionTooltip(
 	if (conversation !== null) {
 		lines.push(conversation.lastAt === null ? "No activity yet" : `Last activity: ${relativeAge(conversation.lastAt, now)}`);
 	}
+	if (unread && state !== "unread") lines.push("Unread reply");
 	if (state === "stopped" || state === "draft") lines.push("Resume to send a message.");
 	if (state === "otherWindow") lines.push("Switch to that window to use this session.");
 	if (state === "externalOmp") lines.push("Open here to choose whether to continue separately.");
@@ -476,6 +496,19 @@ function folderTooltip(folder: LauncherFolder, latest: string | null, hasRecover
 	return lines.join("\n");
 }
 
+/** Everything one conversation row is painted from, besides its index entry and state. */
+interface SessionRowPresentation {
+	header: SessionFileHeader | null;
+	conversation: SessionConversation | null;
+	facts: SessionLauncherFacts;
+	active: boolean;
+	now: number;
+	/** The flat list's folder name in front of the title, or `null`/absent under a folder node. */
+	folderLabel?: string | null;
+	/** The agent finished or asked and the user has not looked since (see `src/host/session-unread.ts`). */
+	unread?: boolean;
+}
+
 /**
  * One conversation row.
  *
@@ -495,6 +528,8 @@ export class SessionTreeItem extends vscode.TreeItem {
 	resumable!: boolean;
 	/** The conversation's own last activity, or `null` while it is unknown (see {@link SessionConversation}). */
 	conversation!: SessionConversation | null;
+	/** Whether the row carries the unread mark. */
+	unread!: boolean;
 	#diagnosticFacts!: SessionLauncherFacts;
 	#diagnosticActive = false;
 
@@ -505,7 +540,7 @@ export class SessionTreeItem extends vscode.TreeItem {
 	constructor(
 		entry: SessionIndexEntry,
 		state: SessionItemState,
-		row: { header: SessionFileHeader | null; conversation: SessionConversation | null; facts: SessionLauncherFacts; active: boolean; now: number },
+		row: SessionRowPresentation,
 	) {
 		super("", vscode.TreeItemCollapsibleState.None);
 		this.tabId = entry.tabId;
@@ -518,9 +553,11 @@ export class SessionTreeItem extends vscode.TreeItem {
 	update(
 		entry: SessionIndexEntry,
 		state: SessionItemState,
-		row: { header: SessionFileHeader | null; conversation: SessionConversation | null; facts: SessionLauncherFacts; active: boolean; now: number },
+		row: SessionRowPresentation,
 	): void {
-		this.label = sessionHeadline(entry, row.header);
+		const headline = sessionHeadline(entry, row.header);
+		this.label = row.folderLabel == null ? headline : flatRowLabel(row.folderLabel, headline);
+		this.unread = row.unread === true;
 		this.entry = entry;
 		this.state = state;
 		this.conversation = row.conversation;
@@ -529,10 +566,11 @@ export class SessionTreeItem extends vscode.TreeItem {
 		this.deletable = entry.sessionFile !== null &&
 			(DELETABLE_STATE[state] || state === "running" || row.facts.running);
 		this.resumable = state === "stopped" || state === "draft" || state === "running" || state === "checking" || row.facts.running;
-		this.description = state === "otherWindow"
+		const status = state === "otherWindow"
 			? `${row.facts.activity?.pendingQuestion ? STATE_LABEL.question : row.facts.activity?.working ? STATE_LABEL.working : row.facts.activity?.backgroundWork ? STATE_LABEL.background : STATE_LABEL.running} · in another window`
 			: STATE_LABEL[state];
-		this.tooltip = sessionTooltip(entry, state, row.header, row.conversation, row.now);
+		this.description = this.unread && state !== "unread" ? `Unread · ${status}` : status;
+		this.tooltip = sessionTooltip(entry, state, row.header, row.conversation, row.now, this.unread);
 		this.#diagnosticFacts = row.facts;
 		this.#diagnosticActive = row.active;
 		this.iconPath = STATE_ICON[state];
@@ -552,8 +590,9 @@ export class SessionTreeItem extends vscode.TreeItem {
 			`view-${row.facts.open && row.facts.viewMode != null ? row.facts.viewMode : "none"}`,
 		].join(".");
 		if (state === "otherWindow" && row.facts.switchableWindow === true) this.contextValue += ".window-switchable";
-		const accessibilityLabel = `${sessionHeadline(entry, row.header)}, ${STATE_LABEL[state]}${row.active ? ", selected session" : ""}`;
+		const accessibilityLabel = `${row.folderLabel == null ? "" : `${row.folderLabel}, `}${headline}, ${STATE_LABEL[state]}${this.unread && state !== "unread" ? ", unread" : ""}${row.active ? ", selected session" : ""}`;
 		this.accessibilityInformation = { label: accessibilityLabel };
+		this.resourceUri = vscode.Uri.from({ scheme: SESSION_DECORATION_SCHEME, path: `/${entry.tabId}` });
 	}
 }
 
@@ -639,7 +678,22 @@ export class ProviderLoginTreeItem extends vscode.TreeItem {
 	}
 }
 
-export type LauncherTreeItem = WorkspaceFolderTreeItem | SessionTreeItem | EmptySessionTreeItem | ProviderLoginTreeItem;
+/**
+ * The flat list's last row: it asks for a folder and opens a new session there through
+ * `omp.newSession`, exactly as the view's own New Session action does.
+ */
+export class NewSessionTreeItem extends vscode.TreeItem {
+	constructor() {
+		super("New Session…", vscode.TreeItemCollapsibleState.None);
+		this.id = "omp.newSessionRow";
+		this.iconPath = new vscode.ThemeIcon("add");
+		this.command = { command: "omp.newSession", title: "New Session" };
+		this.contextValue = "ompNewSession";
+		this.accessibilityInformation = { label: "New Session, choose a folder to start a session in" };
+	}
+}
+
+export type LauncherTreeItem = WorkspaceFolderTreeItem | SessionTreeItem | EmptySessionTreeItem | ProviderLoginTreeItem | NewSessionTreeItem;
 
 /**
  * Catalog-first projection. Membership and local activity are synchronous;
@@ -681,6 +735,19 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 	#projectionPending = false;
 	readonly #providerLogin = new ProviderLoginTreeItem();
 	#providerLoginRequired = false;
+	#grouping: SessionsGrouping = "folders";
+	#flatRows: SessionTreeItem[] = [];
+	#flatSignature = "";
+	readonly #decorationChanges = new vscode.EventEmitter<vscode.Uri[]>();
+	#unreadTabs = new Set<string>();
+	/** Registered by the extension; badges every unread row with a dot. */
+	readonly decorations: vscode.FileDecorationProvider = {
+		onDidChangeFileDecorations: this.#decorationChanges.event,
+		provideFileDecoration: uri => uri.scheme === SESSION_DECORATION_SCHEME && this.#unreadTabs.has(uri.path.slice(1))
+			? new vscode.FileDecoration("●", "Unread reply", new vscode.ThemeColor("charts.blue"))
+			: undefined,
+	};
+	readonly #newSessionRow = new NewSessionTreeItem();
 
 	constructor(source: SessionLauncherSource, options: {
 		readonly now?: () => number;
@@ -757,14 +824,21 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 	 */
 	beginReveal(tabId: string, options: { readonly expand?: boolean } = {}): { item: SessionTreeItem; pathKey: string; release(): void } | undefined {
 		const item = this.#byTabId.get(tabId);
-		const parent = item === undefined ? undefined : this.getParent(item);
-		if (!(parent instanceof WorkspaceFolderTreeItem) || this.#servedRoot !== this.#rootVersion) return undefined;
-		if (parent.folder.collapsed ? options.expand !== true :
-			this.#servedFolders.get(parent.folderId) !== this.#folderVersions.get(parent.folderId)) return undefined;
+		if (item === undefined || this.#servedRoot !== this.#rootVersion) return undefined;
+		let pathKey: string;
+		if (this.#grouping === "flat") {
+			if (!this.#flatRows.includes(item)) return undefined;
+			pathKey = JSON.stringify([tabId, this.#rootVersion, "flat"]);
+		} else {
+			const parent = this.getParent(item);
+			if (!(parent instanceof WorkspaceFolderTreeItem)) return undefined;
+			if (parent.folder.collapsed ? options.expand !== true :
+				this.#servedFolders.get(parent.folderId) !== this.#folderVersions.get(parent.folderId)) return undefined;
+			pathKey = JSON.stringify([tabId, this.#rootVersion, parent.folderId, this.#folderVersions.get(parent.folderId)]);
+		}
 		this.#revealLocks++;
 		let released = false;
-		return { item: item!, pathKey: JSON.stringify([tabId, this.#rootVersion, parent.folderId,
-			this.#folderVersions.get(parent.folderId)]), release: () => {
+		return { item, pathKey, release: () => {
 			if (released) return;
 			released = true;
 			this.#revealLocks--;
@@ -783,9 +857,12 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 				this.#servedRoot = version;
 				this.#served.fire();
 			});
-			return this.#providerLoginRequired ? [this.#providerLogin, ...this.#items] : [...this.#items];
+			const head = this.#providerLoginRequired ? [this.#providerLogin] : [];
+			// With no folder at all the flat list is empty, so the view's welcome content shows.
+			if (this.#grouping === "flat") return this.#items.length === 0 ? head : [...head, ...this.#flatRows, this.#newSessionRow];
+			return [...head, ...this.#items];
 		}
-		if (!(element instanceof WorkspaceFolderTreeItem)) return [];
+		if (this.#grouping === "flat" || !(element instanceof WorkspaceFolderTreeItem)) return [];
 		const version = this.#folderVersions.get(element.folderId);
 		setImmediate(() => {
 			if (this.#disposed || version !== this.#folderVersions.get(element.folderId) ||
@@ -799,7 +876,8 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 	getTreeItem(element: LauncherTreeItem): vscode.TreeItem { return element; }
 
 	getParent(element: LauncherTreeItem): LauncherTreeItem | undefined {
-		if (element instanceof WorkspaceFolderTreeItem || element instanceof ProviderLoginTreeItem) return undefined;
+		if (this.#grouping === "flat" || element instanceof WorkspaceFolderTreeItem || element instanceof ProviderLoginTreeItem ||
+			element instanceof NewSessionTreeItem) return undefined;
 		if (element instanceof EmptySessionTreeItem) return this.#items.find(folder => folder.folderId === element.folderId);
 		return this.#items.find(folder => folder.rows.includes(element));
 	}
@@ -807,10 +885,12 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 	dispose(): void {
 		this.#disposed = true;
 		this.#items = [];
+		this.#flatRows = [];
 		this.#byTabId.clear();
 		this.#observations.clear();
 		this.#headers.clear();
 		this.#conversations.clear();
+		this.#decorationChanges.dispose();
 		this.#changes.dispose();
 		this.#served.dispose();
 	}
@@ -825,6 +905,8 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 		const entries = this.#source.entries();
 		const folders = this.#source.folders();
 		const activeTabId = this.#source.activeTabId();
+		const grouping = this.#source.grouping?.() ?? "folders";
+		const folderLabels = grouping === "flat" ? flatFolderLabels(folders) : null;
 		const now = this.#now();
 		const inputs = folders.map(folder => ({
 			folder,
@@ -871,7 +953,10 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 				};
 				const state = sessionItemState(entry, facts);
 				return { entry, header: entry.sessionFile === null ? null : header?.value ?? null,
-					conversation, facts, state, active: entry.tabId === activeTabId };
+					conversation, facts, state, active: entry.tabId === activeTabId,
+					folderLabel: folderLabels?.get(folder.id) ?? null,
+					// What another window or another OMP process runs is not this window's to read.
+					unread: isUnread(entry) && state !== "otherWindow" && state !== "externalOmp" };
 			}).sort((left, right) => {
 				const stopped = (state: SessionItemState) => state === "stopped" || state === "draft" ? 1 : 0;
 				return stopped(left.state) - stopped(right.state) || left.entry.ordinal - right.entry.ordinal;
@@ -881,8 +966,27 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 			tooltip: folderTooltip(input.folder, latestConversationAt(input.rows.map(row => row.conversation?.lastAt ?? null)),
 				input.hasRecoverableShell, now),
 		}));
-		const rootChanged = inputs.length !== this.#items.length ||
-			inputs.some((input, position) => this.#items[position]?.folderId !== input.folder.id);
+		// The flat list: one row per session of every shown folder, in the flat order.
+		const flatOrder: string[] = [];
+		if (grouping === "flat") {
+			const flatFacts = new Map<string, FlatOrderFacts>();
+			for (const input of inputs) {
+				for (const row of input.rows) {
+					if (flatFacts.has(row.entry.tabId)) continue;
+					flatFacts.set(row.entry.tabId, {
+						tabId: row.entry.tabId, ordinal: row.entry.ordinal, unread: row.unread,
+						stopped: row.state === "stopped" || row.state === "draft",
+						lastActivityAt: activityMillis(row.conversation?.lastAt, row.entry.lastActiveAt),
+					});
+				}
+			}
+			for (const row of orderFlatRows([...flatFacts.values()])) flatOrder.push(row.tabId);
+		}
+		const flatSignature = JSON.stringify([flatOrder, inputs.length === 0]);
+		const rootChanged = grouping === "flat"
+			? this.#grouping !== "flat" || flatSignature !== this.#flatSignature
+			: this.#grouping !== "folders" || inputs.length !== this.#items.length ||
+				inputs.some((input, position) => this.#items[position]?.folderId !== input.folder.id);
 		const changedFolders = inputs.filter(input => {
 			const old = this.#items.find(item => item.folderId === input.folder.id);
 			return old === undefined || old.folder.path !== input.folder.path ||
@@ -896,7 +1000,10 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 		// A folder whose hover text alone changed is repainted in place, children kept.
 		const repaintedFolders = new Set(inputs.filter(input => !changedFolders.includes(input) &&
 			this.#items.find(item => item.folderId === input.folder.id)?.tooltip !== input.tooltip).map(input => input.folder.id));
-		if (this.#revealLocks > 0 && (rootChanged || changedFolders.length > 0 || repaintedFolders.size > 0)) {
+		// Folder nodes are not on screen in the flat list, so only its own order is structural there.
+		const structuralChange = grouping === "flat" ? rootChanged
+			: rootChanged || changedFolders.length > 0 || repaintedFolders.size > 0;
+		if (this.#revealLocks > 0 && structuralChange) {
 			this.#projectionPending = true;
 			return;
 		}
@@ -905,14 +1012,14 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 		const byTabId = new Map<string, SessionTreeItem>();
 		const rowChanges: SessionTreeItem[] = [];
 		const newItems = inputs.map(input => {
-			const rows = input.rows.map(({ entry, header, conversation, facts, state, active }) => {
+			const rows = input.rows.map(({ entry, header, conversation, facts, state, active, folderLabel, unread }) => {
 				// The relative age is part of the key, so a refresh repaints a stale "x minutes ago".
 				const age = conversation?.lastAt == null ? null : relativeAge(conversation.lastAt, now);
-				const key = JSON.stringify([entry, header, conversation, age, facts, active]);
+				const key = JSON.stringify([entry, header, conversation, age, facts, active, folderLabel, unread]);
 				let row = previousRows.get(entry.tabId);
-				if (row === undefined) row = new SessionTreeItem(entry, state, { header, conversation, facts, active, now });
+				if (row === undefined) row = new SessionTreeItem(entry, state, { header, conversation, facts, active, now, folderLabel, unread });
 				else if (this.#presentation.get(entry.tabId) !== key) {
-					row.update(entry, state, { header, conversation, facts, active, now });
+					row.update(entry, state, { header, conversation, facts, active, now, folderLabel, unread });
 					rowChanges.push(row);
 				}
 				this.#presentation.set(entry.tabId, key);
@@ -926,6 +1033,14 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 		});
 		this.#items = newItems;
 		this.#byTabId = byTabId;
+		const unreadTabs = new Set([...byTabId].filter(([, row]) => row.unread).map(([tabId]) => tabId));
+		const decorated = [...unreadTabs].filter(tabId => !this.#unreadTabs.has(tabId))
+			.concat([...this.#unreadTabs].filter(tabId => !unreadTabs.has(tabId)));
+		this.#unreadTabs = unreadTabs;
+		if (decorated.length > 0) this.#decorationChanges.fire(decorated.map(tabId => vscode.Uri.from({ scheme: SESSION_DECORATION_SCHEME, path: `/${tabId}` })));
+		this.#flatRows = flatOrder.map(tabId => byTabId.get(tabId)!);
+		this.#grouping = grouping;
+		this.#flatSignature = flatSignature;
 		for (const tabId of this.#observations.keys()) {
 			if (byTabId.has(tabId)) continue;
 			const observation = this.#observations.get(tabId)!;
@@ -951,7 +1066,9 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 		}
 		if (initialized) {
 			if (rootChanged) this.#changes.fire();
-			else {
+			else if (grouping === "flat") {
+				for (const row of rowChanges) this.#changes.fire(row);
+			} else {
 				const structural = new Set(changedFolders.map(input => input.folder.id));
 				for (const folder of this.#items) {
 					if (structural.has(folder.folderId) || repaintedFolders.has(folder.folderId)) this.#changes.fire(folder);

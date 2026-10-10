@@ -48,6 +48,38 @@ export class MarkdownString {
 	}
 }
 
+/** A resource identity: only what `Uri.from` and a decoration lookup read back. */
+export class Uri {
+	readonly scheme: string;
+	readonly path: string;
+
+	private constructor(scheme: string, path: string) {
+		this.scheme = scheme;
+		this.path = path;
+	}
+
+	static from(parts: { readonly scheme: string; readonly path: string }): Uri {
+		return new Uri(parts.scheme, parts.path);
+	}
+
+	toString(): string {
+		return `${this.scheme}:${this.path}`;
+	}
+}
+
+/** The badge a decoration provider answers with. */
+export class FileDecoration {
+	readonly badge: string;
+	readonly tooltip: string;
+	readonly color: ThemeColor;
+
+	constructor(badge: string, tooltip: string, color: ThemeColor) {
+		this.badge = badge;
+		this.tooltip = tooltip;
+		this.color = color;
+	}
+}
+
 export class TreeItem {
 	id?: string;
 	label?: string;
@@ -55,6 +87,7 @@ export class TreeItem {
 	tooltip?: unknown;
 	iconPath?: unknown;
 	contextValue?: string;
+	resourceUri?: Uri;
 	command?: unknown;
 	accessibilityInformation?: unknown;
 	collapsibleState?: TreeItemCollapsibleState;
