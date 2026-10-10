@@ -1382,7 +1382,7 @@ describe("launcher tree", () => {
 			await waitForRows(provider, () => (provider.getChildren() as SessionRow[]).every(item => !("state" in item) || item.state !== "checking"));
 			const children = provider.getChildren();
 			assert.deepEqual(children.map(child => child.id), [
-				"tab:live-unread", "tab:live-new", "tab:live-old", "tab:stopped-new", "tab:stopped-old", "omp.newSessionRow",
+				"tab:live-unread", "tab:live-new", "tab:live-old", "tab:stopped-new", "tab:stopped-old", "omp.newSessionRow", "omp.resumeSessionRow",
 			]);
 			const sessions = children.slice(0, 5) as SessionRow[];
 			assert.deepEqual(sessions.map(item => String(item.label).split(" · ")[0]), ["beta", "beta", "alpha", "alpha", "beta"]);
@@ -1399,12 +1399,20 @@ describe("launcher tree", () => {
 			assert.deepEqual(provider.getChildren(sessions[0]!), []);
 		});
 
-		it("ends with a New Session row that asks for the folder through omp.newSession, and is empty without folders", async () => {
+		it("ends with New Session and Resume Session rows that ask for the folder, and is empty without folders", async () => {
 			const provider = flatProvider({ folders: [folder("folder:alpha", ALPHA)], entries: [] });
-			const [newSession] = provider.getChildren();
+			const [newSession, resumeSession, ...rest] = provider.getChildren();
+			assert.deepEqual(rest, []);
 			assert.ok(newSession instanceof sessionTree.NewSessionTreeItem);
 			assert.equal(newSession.command?.command, "omp.newSession");
 			assert.equal(newSession.command?.arguments, undefined);
+			assert.ok(resumeSession instanceof sessionTree.ResumeSessionTreeItem);
+			assert.equal(resumeSession.label, "Resume Session…");
+			assert.equal(iconId(resumeSession), "history");
+			assert.equal(resumeSession.command?.command, "omp.resumeWorkspaceFolder");
+			assert.equal(resumeSession.command?.arguments, undefined);
+			assert.equal(provider.getParent(resumeSession), undefined);
+			assert.deepEqual(provider.getChildren(resumeSession), []);
 			assert.deepEqual(flatProvider({ folders: [], entries: [] }).getChildren(), []);
 		});
 

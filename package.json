@@ -797,6 +797,11 @@
           "group": "navigation@1"
         },
         {
+          "command": "omp.resumeWorkspaceFolder",
+          "when": "view == omp.sessions",
+          "group": "navigation@2"
+        },
+        {
           "command": "omp.chooseDefaultSessionViewChat",
           "when": "view == omp.sessions && omp.defaultSessionMode == chat",
           "group": "1_view@1"
@@ -824,17 +829,17 @@
         {
           "command": "omp.openStats",
           "when": "view == omp.sessions",
-          "group": "navigation@2"
+          "group": "navigation@3"
         },
         {
           "command": "omp.showSessionsByFolder",
           "when": "view == omp.sessions && omp.sessionsFlat",
-          "group": "navigation@3"
+          "group": "navigation@4"
         },
         {
           "command": "omp.showSessionsFlat",
           "when": "view == omp.sessions && !omp.sessionsFlat",
-          "group": "navigation@3"
+          "group": "navigation@4"
         },
         {
           "command": "omp.stopOrphanedProcesses",

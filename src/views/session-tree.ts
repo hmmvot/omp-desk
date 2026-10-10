@@ -685,7 +685,7 @@ export class ProviderLoginTreeItem extends vscode.TreeItem {
 }
 
 /**
- * The flat list's last row: it asks for a folder and opens a new session there through
+ * The flat list's row after the sessions: it asks for a folder and opens a new session there through
  * `omp.newSession`, exactly as the view's own New Session action does.
  */
 export class NewSessionTreeItem extends vscode.TreeItem {
@@ -699,7 +699,23 @@ export class NewSessionTreeItem extends vscode.TreeItem {
 	}
 }
 
-export type LauncherTreeItem = WorkspaceFolderTreeItem | SessionTreeItem | EmptySessionTreeItem | ProviderLoginTreeItem | NewSessionTreeItem;
+/**
+ * The flat list's row under New Session…: it asks for a folder, then lists that folder's saved
+ * sessions through `omp.resumeWorkspaceFolder`, exactly as the view's own Resume Session action does.
+ */
+export class ResumeSessionTreeItem extends vscode.TreeItem {
+	constructor() {
+		super("Resume Session…", vscode.TreeItemCollapsibleState.None);
+		this.id = "omp.resumeSessionRow";
+		this.iconPath = new vscode.ThemeIcon("history");
+		this.command = { command: "omp.resumeWorkspaceFolder", title: "Resume Session" };
+		this.contextValue = "ompResumeSession";
+		this.accessibilityInformation = { label: "Resume Session, choose a folder to resume a saved session from" };
+	}
+}
+
+export type LauncherTreeItem =
+	| WorkspaceFolderTreeItem | SessionTreeItem | EmptySessionTreeItem | ProviderLoginTreeItem | NewSessionTreeItem | ResumeSessionTreeItem;
 
 /**
  * Catalog-first projection. Membership and local activity are synchronous;
@@ -756,6 +772,7 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 			: undefined,
 	};
 	readonly #newSessionRow = new NewSessionTreeItem();
+	readonly #resumeSessionRow = new ResumeSessionTreeItem();
 
 	constructor(source: SessionLauncherSource, options: {
 		readonly now?: () => number;
@@ -876,7 +893,9 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 			});
 			const head = this.#providerLoginRequired ? [this.#providerLogin] : [];
 			// With no folder at all the flat list is empty, so the view's welcome content shows.
-			if (this.#grouping === "flat") return this.#items.length === 0 ? head : [...head, ...this.#flatRows, this.#newSessionRow];
+			if (this.#grouping === "flat") {
+				return this.#items.length === 0 ? head : [...head, ...this.#flatRows, this.#newSessionRow, this.#resumeSessionRow];
+			}
 			return [...head, ...this.#items];
 		}
 		if (this.#grouping === "flat" || !(element instanceof WorkspaceFolderTreeItem)) return [];
@@ -894,7 +913,7 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 
 	getParent(element: LauncherTreeItem): LauncherTreeItem | undefined {
 		if (this.#grouping === "flat" || element instanceof WorkspaceFolderTreeItem || element instanceof ProviderLoginTreeItem ||
-			element instanceof NewSessionTreeItem) return undefined;
+			element instanceof NewSessionTreeItem || element instanceof ResumeSessionTreeItem) return undefined;
 		if (element instanceof EmptySessionTreeItem) return this.#items.find(folder => folder.folderId === element.folderId);
 		return this.#items.find(folder => folder.rows.includes(element));
 	}
