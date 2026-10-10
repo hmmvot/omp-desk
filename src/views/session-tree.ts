@@ -52,7 +52,7 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import { readSessionFileActivity, readSessionFileHeader } from "../host/session-index";
 import type { RestoreOutcome, SessionFileActivity, SessionFileHeader, SessionIndexEntry } from "../host/session-index";
-import { folderMatchesCwd } from "./workspace-folders";
+import { folderOwnsCwd } from "./workspace-folders";
 import type { LauncherFolder } from "./launcher-folders";
 import type { WorkspaceFolder } from "./workspace-folders";
 import { isUnread } from "../host/session-unread";
@@ -491,6 +491,9 @@ function folderTooltip(folder: LauncherFolder, latest: string | null, hasRecover
 		folderHeadline(folder.path).replace(/\r\n|\r|\n/g, " "),
 		folder.pinned ? `Pinned${folder.open ? " · Open in this window" : ""}` : folder.open ? "Open in this window" : "Sessions running in this window",
 		latest === null ? "No session activity yet" : `Last activity: ${relativeAge(latest, now)}`,
+		...(folder.openedPaths === undefined || folder.openedPaths.length === 0 ? [] : [
+			`Shown instead of the opened ${folder.openedPaths.map(opened => `"${opened}"`).join(", ")} because the repository's agent files are here.`,
+		]),
 	];
 	if (hasRecoverableShell) lines.push("Reconnect Terminal to reopen its terminal.");
 	return lines.join("\n");
@@ -926,7 +929,7 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 		const inputs = folders.map(folder => ({
 			folder,
 			hasRecoverableShell: this.#source.hasRecoverableShell?.(folder) === true,
-			rows: entries.filter(entry => folderMatchesCwd(folder.path, entry.cwd)).map(entry => {
+			rows: entries.filter(entry => folderOwnsCwd(folder, folders, entry.cwd)).map(entry => {
 				const identity = this.#identity(entry);
 				let observation = this.#observations.get(entry.tabId);
 				if (observation === undefined) {

@@ -125,6 +125,7 @@ import { SessionToolsController, type SessionToolsTarget } from "./host/session-
 import type { LauncherTreeItem, SessionLauncherFacts, SessionOwnershipFacts } from "./views/session-tree";
 import { WorkspaceFolderRegistry, folderArgument, mergeWorkspaceFolderRecords, WORKSPACE_FOLDERS_STORAGE_KEY } from "./views/workspace-folders";
 import { LauncherFolders } from "./views/launcher-folders";
+import { AgentRootResolver } from "./views/agent-root";
 import type { LauncherFolder } from "./views/launcher-folders";
 import type { FolderPathInspector, FolderPathVerdict, WorkspaceFolder } from "./views/workspace-folders";
 // The chat over rpc-ui (ADR-0038): a host-owned conversation per tab, served to any page.
@@ -948,12 +949,25 @@ export function activate(context: vscode.ExtensionContext): void {
     store: catalog,
     inspector: folderPathInspector(),
   });
+  const agentRoots = new AgentRootResolver();
+  const useAgentRootFolder = () => vscode.workspace.getConfiguration("omp").get<boolean>("useAgentRootFolder", true);
+  const localWindowPaths = () => (vscode.workspace.workspaceFolders ?? [])
+    .filter(folder => folder.uri.scheme === "file")
+    .map(folder => folder.uri.fsPath);
+  // Which ancestor replaces an opened folder is read from the disk once per folder, off the
+  // tree's path: until the answer arrives the folder shows as itself, and the tree repaints
+  // when an answer differs.
+  const resolveAgentRoots = () => {
+    if (!useAgentRootFolder()) return;
+    void agentRoots.resolve(localWindowPaths())
+      .then(changed => { if (changed) refreshLauncher(); })
+      .catch(error => log(`launcher: the agent root of an open folder could not be resolved: ${messageOf(error)}`));
+  };
   const folders = new LauncherFolders({
     pinned: registry,
     local: context.workspaceState,
-    windowPaths: () => (vscode.workspace.workspaceFolders ?? [])
-      .filter(folder => folder.uri.scheme === "file")
-      .map(folder => folder.uri.fsPath),
+    windowPaths: localWindowPaths,
+    agentRoot: windowPath => (useAgentRootFolder() ? agentRoots.lookup(windowPath) : windowPath),
     showWindowFolders: () => vscode.workspace.getConfiguration("omp").get<boolean>("showWorkspaceFolders", true),
     // A live row never vanishes with its folder: a session this window runs or is starting
     // keeps its folder visible although it is neither open nor pinned.
@@ -1187,13 +1201,17 @@ export function activate(context: vscode.ExtensionContext): void {
     { dispose: claimWatch },
     // The window's own folders are shown in Sessions: a change of the open folders or of the
     // setting that hides them rebuilds the list. Resolved paths are remembered per path, so an
-    // open-folder change forgets them; nothing else is read from disk for it.
+    // open-folder change forgets them; the only disk reads are the identity of each path and
+    // the agent-root probe of each open folder, which runs off the tree's path.
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
       folders.forgetIdentities();
       refreshLauncher();
+      resolveAgentRoots();
     }),
     vscode.workspace.onDidChangeConfiguration(event => {
-      if (event.affectsConfiguration("omp.showWorkspaceFolders") || event.affectsConfiguration("omp.sessionsGrouping")) refreshLauncher();
+      if (event.affectsConfiguration("omp.useAgentRootFolder")) resolveAgentRoots();
+      if (event.affectsConfiguration("omp.showWorkspaceFolders") || event.affectsConfiguration("omp.useAgentRootFolder") ||
+        event.affectsConfiguration("omp.sessionsGrouping")) refreshLauncher();
     }),
     // While a session has an open editor, its row cannot be deselected: a selection with no
     // session row in it is put back on the session viewed most recently.
@@ -1224,6 +1242,8 @@ export function activate(context: vscode.ExtensionContext): void {
       // Focus is the recovery point for a notification this window missed.
       void adoptCatalogChanges(index, folders).catch(error => log(`catalog: the newest revision could not be adopted: ${messageOf(error)}`));
       refreshLauncher({ ownership: true });
+      // Agent files added or removed while the window was away change which ancestor is shown.
+      resolveAgentRoots();
     }),
     // Collapsing a folder is presentation only, and the saved value is what its node is built
     // from (durable for a pinned folder, per window otherwise); nothing here re-reads sessions or
@@ -1362,6 +1382,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // waits for the panels it publishes instead of opening a tab the pass is already
   // restoring.
   refreshLauncher();
+  resolveAgentRoots();
   // The editors this window already has are reconciled before any asynchronous native
   // work: their serializers are registered, and a page that survived a previous
   // extension host is adopted with the document its records name, so its reconnect has
@@ -7541,8 +7562,11 @@ function sendCandidates(context: vscode.ExtensionContext, index: SessionIndex): 
 /** The QuickPick: eligible sessions, most recently focused first and preselected, then a new session next to the file. */
 async function pickSendTarget(context: vscode.ExtensionContext, index: SessionIndex, firstFsPath: string, unsaved: boolean): Promise<SendTarget | null> {
   const workspace = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(firstFsPath));
-  const folder = newSessionFolder(firstFsPath, workspace?.uri.fsPath ?? null);
-  const folderListed = launcherFolders?.folderForCwd(folder) != null;
+  const requestedFolder = newSessionFolder(firstFsPath, workspace?.uri.fsPath ?? null);
+  // A workspace folder shown as its repository's agent root starts the session there.
+  const listed = launcherFolders?.folderForCwd(requestedFolder) ?? null;
+  const folder = listed?.path ?? requestedFolder;
+  const folderListed = listed !== null;
   const entries = pickerEntries(sendCandidates(context, index), editorRecency.order(), folder, defaultSessionMode(context), folderListed);
   const items: (vscode.QuickPickItem & { target?: SendTarget })[] = [];
   for (const entry of entries) {

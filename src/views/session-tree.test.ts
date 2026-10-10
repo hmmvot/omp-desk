@@ -997,6 +997,32 @@ describe("launcher tree", () => {
 		);
 	});
 
+	it("files sessions recorded in an opened subfolder under the agent-root folder shown instead, unless another folder names the subfolder", async () => {
+		const unity = path.join(ALPHA, "Unity");
+		const root: LauncherFolder = { ...folder("folder:root", ALPHA, false, { pinned: false, open: true }), openedPaths: [unity] };
+		const provider = providerFor({
+			folders: () => [root],
+			entries: () => [entry({ tabId: "tab:sub", cwd: unity }), entry({ tabId: "tab:root", cwd: ALPHA, ordinal: 1 })],
+			activeTabId: () => "tab:sub",
+			facts: () => NO_FACTS,
+		});
+		const [shown] = await rootsOf(provider);
+		assert.deepEqual((await rowsOf(provider, shown!)).map(row => row.tabId), ["tab:sub", "tab:root"]);
+		const tip = tooltipText(shown!);
+		assert.ok(tip.includes(`Shown instead of the opened "${unity}" because the repository's agent files are here.`), tip);
+
+		const pinnedSub = folder("folder:sub", unity);
+		const split = providerFor({
+			folders: () => [root, pinnedSub],
+			entries: () => [entry({ tabId: "tab:sub", cwd: unity })],
+			activeTabId: () => "tab:sub",
+			facts: () => NO_FACTS,
+		});
+		const [first, second] = await rootsOf(split);
+		assert.ok((await rowsOf(split, first!)).every(row => !(row instanceof sessionTree.SessionTreeItem)), "the pinned subfolder keeps its own sessions");
+		assert.deepEqual((await rowsOf(split, second!)).map(row => row.tabId), ["tab:sub"]);
+	});
+
 	const FIXED_NOW = Date.parse("2026-09-25T10:10:00.000Z");
 
 	it("serves persisted rows before any probe or header read, and enriches rows independently", async () => {
