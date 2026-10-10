@@ -114,6 +114,20 @@ export interface WindowSnapshot {
 	readonly liveCwds: readonly string[];
 	/** The sessions this window runs, by tab id. */
 	readonly rows: Readonly<Record<string, PublishedRow>>;
+	/**
+	 * When this window last gained the focus (ISO), `null` before it ever had it or when it
+	 * published none. It only ranks windows that have the same folder open; it is never shown.
+	 */
+	readonly focusedAt: string | null;
+	/**
+	 * The installed OMP Desk package no longer holds the bytes this window's extension host started
+	 * from (a reinstall under a running window): the window runs an older build than the one on disk
+	 * and refuses to build new views. A launch is never handed to such a window; a session it already
+	 * holds is still switched to, because its existing tabs work. A record that has no such field was
+	 * written by a build that predates it, which is by definition older than the one installed, so
+	 * it reads as stale.
+	 */
+	readonly stale: boolean;
 }
 
 /** The record as stored. */
@@ -141,6 +155,8 @@ export const EMPTY_WINDOW_SNAPSHOT: WindowSnapshot = {
 	folders: [],
 	liveCwds: [],
 	rows: {},
+	focusedAt: null,
+	stale: false,
 };
 
 /** `true` when a process with this id exists; a process this one may not signal still exists. */
@@ -207,6 +223,8 @@ export function boundWindowSnapshot(snapshot: WindowSnapshot): WindowSnapshot {
 		folders,
 		liveCwds,
 		rows,
+		focusedAt: snapshot.focusedAt !== null && isIsoTime(snapshot.focusedAt) ? snapshot.focusedAt : null,
+		stale: snapshot.stale === true,
 	};
 }
 
@@ -231,6 +249,12 @@ export function parseWindowRecord(text: string, fileHolderId: string): WindowRec
 	const record = parsed as Record<string, unknown>;
 	if (record.version !== RECORD_VERSION || record.holderId !== fileHolderId || !ID_RE.test(fileHolderId)) return null;
 	const { pid, startedAt, updatedAt, windowUri, label, folders, liveCwds, rows } = record;
+	// A record of a build that published no focus time has none.
+	const focusedAt = record.focusedAt === undefined ? null : record.focusedAt;
+	if (focusedAt !== null && !isIsoTime(focusedAt)) return null;
+	// A record of a build that published no build state is of an older build than the installed one.
+	const stale = record.stale === undefined ? true : record.stale;
+	if (typeof stale !== "boolean") return null;
 	if (typeof pid !== "number" || !Number.isInteger(pid) || pid <= 0) return null;
 	if (!isIsoTime(startedAt) || !isIsoTime(updatedAt)) return null;
 	// Navigation is `vscode.openFolder` on a local file URI and nothing else.
@@ -262,6 +286,8 @@ export function parseWindowRecord(text: string, fileHolderId: string): WindowRec
 		folders,
 		liveCwds,
 		rows: checkedRows,
+		focusedAt,
+		stale,
 	};
 }
 
@@ -296,11 +322,11 @@ export function orderWindows(windows: readonly OpenWindow[]): readonly OpenWindo
 	});
 }
 
-function snapshotOf(window: WindowSnapshot): WindowSnapshot {
-	return { windowUri: window.windowUri, label: window.label, folders: window.folders, liveCwds: window.liveCwds, rows: window.rows };
+function snapshotOf(window: WindowSnapshot): Omit<WindowSnapshot, "focusedAt"> {
+	return { windowUri: window.windowUri, label: window.label, folders: window.folders, liveCwds: window.liveCwds, rows: window.rows, stale: window.stale };
 }
 
-/** A stable text of what the windows show, never of how fresh it is. */
+/** A stable text of what the windows show, never of how fresh it is (nor of which one was focused last: that is never shown). */
 export function windowsSignature(windows: readonly OpenWindow[]): string {
 	return JSON.stringify(windows.map(window => [window.holderId, window.here, window.startedAt, snapshotOf(window)]));
 }
@@ -450,6 +476,8 @@ export class WindowRegistry {
 				folders: record.folders,
 				liveCwds: record.liveCwds,
 				rows: record.rows,
+				focusedAt: record.focusedAt,
+				stale: record.stale,
 			});
 		}
 		return orderWindows(windows);

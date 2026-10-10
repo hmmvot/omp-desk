@@ -85,7 +85,7 @@ describe("launcher folders", () => {
 		const folders = new LauncherFolders({
 			pinned: registry,
 			local: state.workspace,
-			windows: () => state.windows ?? [{ here: true, paths: state.windowPaths }, ...state.others.map(paths => ({ here: false, paths }))],
+			windows: () => state.windows ?? [{ holderId: "window-here", startedAt: "2026-01-01T00:00:00.000Z", focusedAt: null, here: true, paths: state.windowPaths }, ...state.others.map(paths => ({ holderId: "window-other", startedAt: "2026-01-01T00:00:00.000Z", focusedAt: null, here: false, paths }))],
 			showWindowFolders: () => state.show,
 			liveSessionCwds: () => state.live,
 		});
@@ -204,6 +204,29 @@ describe("launcher folders", () => {
 		assert.equal(list[1]!.collapsed, false);
 	});
 
+	it("names the live windows that have a folder open, by the identity the list uses, agent roots included", async () => {
+		const sub = path.join(alpha, "packages", "app");
+		const stamp = { startedAt: "2026-01-01T00:00:00.000Z", focusedAt: null };
+		const folders = new LauncherFolders({
+			pinned: new WorkspaceFolderRegistry({ store: memoryStore(), inspector: directoryInspector }),
+			local: memoryStore(),
+			windows: () => [
+				{ holderId: "here", here: true, ...stamp, paths: [beta] },
+				{ holderId: "plain", here: false, ...stamp, paths: [alpha.toLowerCase().replace(/^./, alpha[0]!.toLowerCase()) + path.sep] },
+				{ holderId: "inside", here: false, ...stamp, paths: [sub] },
+				{ holderId: "unrelated", here: false, ...stamp, paths: [gamma] },
+			],
+			agentRoot: windowPath => (windowPath === sub ? alpha : windowPath),
+			showWindowFolders: () => true,
+			liveSessionCwds: () => [],
+		});
+		const holders = (folder: string) => folders.windowsWithFolder(folder).map(window => window.holderId);
+		assert.deepEqual(holders(alpha), ["plain", "inside"], "a spelling of the folder, and a window whose opened subfolder is shown as it");
+		assert.deepEqual(holders(sub), ["inside"], "the opened subfolder itself still counts for itself");
+		assert.deepEqual(holders(beta), ["here"]);
+		assert.deepEqual(holders(path.join(temp, "nowhere")), []);
+	});
+
 	it("gives two windows given the same ordered window list the same folders, whichever one is asking", async () => {
 		const catalog = memoryStore();
 		const a = windowOver(catalog);
@@ -211,8 +234,8 @@ describe("launcher folders", () => {
 		await a.registry.add(gamma);
 		await b.registry.reload();
 		// The registry orders the windows once for everyone; each window only flags itself.
-		a.state.windows = [{ here: true, paths: [alpha] }, { here: false, paths: [beta] }];
-		b.state.windows = [{ here: false, paths: [alpha] }, { here: true, paths: [beta] }];
+		a.state.windows = [{ holderId: "window-here", startedAt: "2026-01-01T00:00:00.000Z", focusedAt: null, here: true, paths: [alpha] }, { holderId: "window-other", startedAt: "2026-01-01T00:00:00.000Z", focusedAt: null, here: false, paths: [beta] }];
+		b.state.windows = [{ holderId: "window-other", startedAt: "2026-01-01T00:00:00.000Z", focusedAt: null, here: false, paths: [alpha] }, { holderId: "window-here", startedAt: "2026-01-01T00:00:00.000Z", focusedAt: null, here: true, paths: [beta] }];
 		const shape = (folders: LauncherFolders) => folders.list().map(folder => [folder.id, folder.path, folder.collapsed, folder.pinned, folder.open]);
 		assert.deepEqual(shape(a.folders), shape(b.folders));
 		assert.deepEqual(paths(a.folders.list()), [alpha, beta, gamma]);

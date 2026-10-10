@@ -42,7 +42,14 @@ export const WINDOW_FOLDER_COLLAPSED_KEY = "omp.windowFolderCollapsed.v1";
 
 /** One live window and the folders VS Code has open in it. */
 export interface OpenFolderWindow {
+	readonly holderId: string;
 	readonly here: boolean;
+	/** When the window's extension host started (ISO). */
+	readonly startedAt: string;
+	/** When the window last gained the focus (ISO), `null` when it published none. */
+	readonly focusedAt: string | null;
+	/** The window runs an older OMP Desk build than the installed one (ADR-0057): never chosen for a launch. */
+	readonly stale?: boolean;
 	readonly paths: readonly string[];
 }
 
@@ -226,6 +233,24 @@ export class LauncherFolders {
 			shown.push({ id, path: cwd, collapsed: collapsedIds.has(id), pinned: false, open: false, openHere: false, openElsewhere: false });
 		}
 		return shown;
+	}
+
+	/**
+	 * The live windows (this one included) that have this folder open, by the same identity the
+	 * list uses: a window counts when one of its opened folders is shown as this folder (its
+	 * agent root) or is this folder itself. `folderPath` is a shown folder's path. With
+	 * `exact`, only a window whose own opened folder is this folder counts (a Unity project
+	 * must be a window's workspace root, not a folder it merely stands under).
+	 */
+	windowsWithFolder(folderPath: string, options: { readonly exact?: boolean } = {}): readonly OpenFolderWindow[] {
+		const key = this.#identityOf(folderPath).key;
+		return this.#windows().filter(window => window.paths.some(windowPath =>
+			this.#identityOf(windowPath).key === key || (options.exact !== true && this.#identityOf(this.#agentRoot(windowPath)).key === key)));
+	}
+
+	/** The identity key of a path: what two spellings of one directory share (the pending launches are filed under it). */
+	identityKeyOf(folderPath: string): string {
+		return this.#identityOf(folderPath).key;
 	}
 
 	get(id: string): LauncherFolder | null {

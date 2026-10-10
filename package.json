@@ -92,6 +92,12 @@
           "scope": "application",
           "description": "When a folder VS Code has open has no agent files (AGENTS.md, CLAUDE.md, .agents, .omp, .claude, .pi) but sits inside a Git repository whose root, or a folder between, has them, Sessions shows that ancestor instead, so new sessions start where OMP finds the repository's agent files. Sessions recorded in the opened folder stay listed under it. The setting applies to all windows. When off, Sessions shows the opened folder."
         },
+        "omp.launchInFolderWindow": {
+          "type": "boolean",
+          "default": true,
+          "scope": "application",
+          "description": "Start a session in the window that has its folder open. When you start a new session, resume one from a folder, or open a stopped session of a folder that VS Code has open only in another window, that window launches it and comes to the front with the session's tab. A folder open in this window, or in no window, starts here. A Unity project (a folder with ProjectSettings/ProjectVersion.txt and Assets, found in the folder or two levels below it) always runs in a window that has the project folder open, even when the repository is open here, or in a new window opened on it, because the Unity extensions need it; the session's working directory stays the repository folder. If that window does not answer, a message says so and nothing starts. When off, every launch starts in the window you used."
+        },
         "omp.sessionsGrouping": {
           "type": "string",
           "enum": ["flat", "folders"],

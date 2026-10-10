@@ -72,8 +72,9 @@ import { claimFileNameFor, startClaimWatch } from "./host/claim-watch";
 import { PUBLISHED_ROW_STATUSES, WindowRegistry } from "./host/window-registry";
 import { sessionIncarnation } from "./host/window-registry";
 import type { PublishedRow, PublishedRowStatus } from "./host/window-registry";
-import { REQUEST_ANSWER_TIMEOUT_MS, awaitSwitchAnswer, planWindowSwitch, postSwitchRequest, startRequestWatch, withdrawSwitchRequest } from "./host/window-requests";
-import type { RequestWatch, ServeContext, ServeOutcome, SwitchAnswer, SwitchRequest } from "./host/window-requests";
+import { LAUNCH_ANSWER_TIMEOUT_MS, PENDING_ANSWER_TIMEOUT_MS, REQUEST_ANSWER_TIMEOUT_MS, awaitPendingLaunchAnswer, awaitRequestAnswer, pendingKeyOf, planFolderLaunch, planWindowFocus, planWindowSwitch, postLaunchRequest, postPendingLaunch, postSwitchRequest, startPendingLaunchWatch, startRequestWatch, withdrawPendingLaunch, withdrawRequest } from "./host/window-requests";
+import { UnityProjectCache, isUnityProject } from "./host/unity-project";
+import type { LaunchAction, LaunchRequest, LaunchWorkspace, WindowFocusPlan, RefusalReason, RequestAnswer, RequestWatch, ServeContext, ServeOutcome, SwitchRequest } from "./host/window-requests";
 import { ExternalLeaseObserver, ompSessionOwnersDir, powershellLeaseProbe } from "./host/omp-session-lease";
 import { canonicalFolderKey, folderHistoryDeletionSubject, inspectSessionFile, scanFolderHistory } from "./host/folder-history";
 import type { FolderHistoryCandidate, FolderHistoryIndexedEntry, FolderHistoryScan } from "./host/folder-history";
@@ -724,10 +725,14 @@ let nextLauncherRuntimeId = 0;
 let launcherFolders: LauncherFolders | undefined;
 /** The leased registry of this profile's windows (ADR-0056), once this window activated. */
 let windowRegistry: WindowRegistry | undefined;
+/** When this window last gained the focus: published so a launch for a folder open in several windows goes to the one used last (ADR-0057). */
+let windowFocusedAt: string | null = null;
 /** Serves other windows' requests to select a session's tab (ADR-0056). */
 let windowRequestWatch: RequestWatch | undefined;
+/** Claims the launches another window left for the folders this window has open (ADR-0057). */
+let pendingLaunchWatch: RequestWatch | undefined;
 /** Re-probe the agent roots of every live window's folders; set at activation. */
-let resolveAgentRoots: () => void = () => {};
+let resolveAgentRoots: () => Promise<void> = async () => {};
 /**
  * This window's turn notifier, created once per session index.
  *
@@ -972,12 +977,13 @@ export function activate(context: vscode.ExtensionContext): void {
     onError: detail => log(`window registry: ${detail}`),
   });
   windowRegistry = windowsRegistry;
+  windowFocusedAt = vscode.window.state.focused ? new Date().toISOString() : null;
   // Which ancestor replaces an opened folder is read from the disk off the tree's path, for the
   // folders of every live window: until the answer arrives the folder shows as itself, and the
   // tree repaints when an answer differs.
-  resolveAgentRoots = () => {
+  resolveAgentRoots = async () => {
     if (!useAgentRootFolder()) return;
-    void agentRoots.resolve(allWindowFolders())
+    await agentRoots.resolve(allWindowFolders())
       .then(changed => { if (changed) refreshLauncher(); })
       .catch(error => log(`launcher: the agent root of an open folder could not be resolved: ${messageOf(error)}`));
   };
@@ -985,7 +991,7 @@ export function activate(context: vscode.ExtensionContext): void {
     pinned: registry,
     local: context.workspaceState,
     // This window's entry is its own bounded snapshot, the very input every other window reads, so all windows derive the list from the same data.
-    windows: () => windowsRegistry.windows().map(window => ({ here: window.here, paths: window.folders })),
+    windows: () => windowsRegistry.windows().map(window => ({ holderId: window.holderId, here: window.here, startedAt: window.startedAt, focusedAt: window.focusedAt, stale: window.stale, paths: window.folders })),
     agentRoot: windowPath => (useAgentRootFolder() ? agentRoots.lookup(windowPath) : windowPath),
     showWindowFolders: () => vscode.workspace.getConfiguration("omp").get<boolean>("showWorkspaceFolders", true),
     // A live row never vanishes with its folder: a session any window runs or is starting
@@ -1215,12 +1221,20 @@ export function activate(context: vscode.ExtensionContext): void {
     { onError: detail => log(`claims: ${detail}`) },
   );
   const requestWatch = startRequestWatch(index.claimStorageDir, index.claimHolder.id, async (request, requestContext) => {
-    windowTiming("receiver: request seen", `select ${request.id.slice(0, 8)} posted ${Date.now() - Date.parse(request.createdAt)} ms ago`);
-    const outcome = await selectHeldSessionTab(index, request, requestContext);
+    windowTiming("receiver: request seen", `${request.kind} ${request.id.slice(0, 8)} posted ${Date.now() - Date.parse(request.createdAt)} ms ago`);
+    const outcome = request.kind === "select" ? await selectHeldSessionTab(index, request, requestContext) : await serveLaunchRequest(context, index, request, requestContext);
     windowTiming("receiver: answer ready", `${request.id.slice(0, 8)} ok=${outcome.ok} focused=${outcome.focused}`);
     return outcome;
   }, { onError: detail => log(`window requests: ${detail}`), debounceMs: WINDOW_REQUEST_WATCH_DEBOUNCE_MS });
   windowRequestWatch = requestWatch;
+  const pendingWatch = startPendingLaunchWatch(
+    index.claimStorageDir,
+    index.claimHolder.id,
+    () => localWindowFolders().map(folder => pendingKeyOf(folders.identityKeyOf(folder))),
+    (request, requestContext) => serveLaunchRequest(context, index, request, requestContext),
+    { onError: detail => log(`pending launches: ${detail}`) },
+  );
+  pendingLaunchWatch = pendingWatch;
   context.subscriptions.push(
     output,
     vscode.workspace.onDidChangeConfiguration(refreshChatDisplayPreferences),
@@ -1234,6 +1248,7 @@ export function activate(context: vscode.ExtensionContext): void {
     { dispose: claimWatch },
     { dispose: () => windowRegistry?.dispose() },
     { dispose: () => { requestWatch.dispose(); if (windowRequestWatch === requestWatch) windowRequestWatch = undefined; } },
+    { dispose: () => { pendingWatch.dispose(); if (pendingLaunchWatch === pendingWatch) pendingLaunchWatch = undefined; } },
     // The window's own folders are shown in Sessions: a change of the open folders or of the
     // setting that hides them rebuilds the list. Resolved paths are remembered per path, so an
     // open-folder change forgets them; the only disk reads are the identity of each path and
@@ -1242,6 +1257,7 @@ export function activate(context: vscode.ExtensionContext): void {
       folders.forgetIdentities();
       refreshLauncher();
       resolveAgentRoots();
+      pendingLaunchWatch?.rescan();
     }),
     vscode.workspace.onDidChangeConfiguration(event => {
       if (event.affectsConfiguration("omp.useAgentRootFolder")) resolveAgentRoots();
@@ -1274,6 +1290,7 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.window.onDidChangeWindowState(event => {
       if (!event.focused) return;
+      windowFocusedAt = new Date().toISOString();
       const active = activePanelTab();
       if (active !== null) activateNativeEditor(active);
       // Focus is the recovery point for a notification this window missed.
@@ -1282,6 +1299,7 @@ export function activate(context: vscode.ExtensionContext): void {
       refreshWindowRegistry();
       // Being brought to the front is how a switch request reaches a window whose directory event was dropped.
       windowRequestWatch?.rescan();
+      pendingLaunchWatch?.rescan();
       // Agent files added or removed while the window was away change which ancestor is shown.
       resolveAgentRoots();
     }),
@@ -1498,7 +1516,13 @@ async function newSession(
     refreshLauncher();
     return;
   }
+  // A folder that only another window has open is started there (ADR-0057).
+  if (await routeLaunchToFolderWindow(index, current, { kind: "new-session", folderId: current.id })) return;
+  await startNewSession(context, index, current);
+}
 
+/** Reserve a draft in the folder and open its editor: the launch itself, in this window. */
+async function startNewSession(context: vscode.ExtensionContext, index: SessionIndex, current: LauncherFolder): Promise<void> {
   let entry: SessionIndexEntry;
   try {
     entry = await index.createDraft({ cwd: current.path });
@@ -1533,6 +1557,10 @@ async function openSession(
   index: SessionIndex,
   argument: unknown,
   verb: "opened" | "resumed",
+  /** Never route this open to another window: it was asked for by another window (ADR-0057) or its caller needs the editor here. */
+  noRouting = false,
+  /** Reveal a writer that is live when the open resolves instead of changing its view (a launch another window asked for, ADR-0057). */
+  keepLiveView = false,
 ): Promise<boolean> {
   const tabId =
     tabIdArgument(argument) ??
@@ -1557,6 +1585,8 @@ async function openSession(
       return false;
     }
     if (launcherProvider?.displayedState(tabId) === "otherWindow") launcherProvider.refreshOwnership(new Set([tabId]));
+    // A session of a folder that only another window has open is opened there (ADR-0057).
+    if (!noRouting && await routeSessionOpen(index, tabId, verb, null)) return false;
   }
   // A row that shows a plain omp process outside this extension as the writer neither launches
   // nor opens history on a bare click: it asks first (ADR-0046), after a fresh probe, because the
@@ -1593,7 +1623,7 @@ async function openSession(
     await revealExistingTab(index, tabId, panel);
     return true;
   }
-  await openTab(context, index, tabId, externalConfirmed ? "resumed" : verb, "explicit", undefined, externalConfirmed);
+  await openTab(context, index, tabId, externalConfirmed ? "resumed" : verb, "explicit", undefined, externalConfirmed, keepLiveView);
   return true;
 }
 
@@ -1658,6 +1688,8 @@ function publishWindowSnapshot(): void {
     folders: localWindowFolders(),
     liveCwds: localLiveSessionCwds(index),
     rows,
+    focusedAt: windowFocusedAt,
+    stale: packageStale,
   });
 }
 
@@ -1694,6 +1726,7 @@ function allWindowFolders(): string[] {
 function windowRegistryHeartbeat(): void {
   resolveAgentRoots();
   windowRequestWatch?.rescan();
+  pendingLaunchWatch?.rescan();
   if (launcherView?.visible === true) {
     launcherProvider?.refresh({ ownership: true });
     return;
@@ -1744,7 +1777,6 @@ async function switchToSessionWindow(index: SessionIndex, argument: unknown): Pr
   }
   // The wait is counted from the moment the request is posted, whatever the focus change costs.
   const postedAt = Date.now();
-  const remaining = () => Math.max(250, postedAt + REQUEST_ANSWER_TIMEOUT_MS - Date.now());
   let requestId: string;
   try {
     // The binding generation the holder published for this very run (the one the row on screen shows), if any.
@@ -1758,49 +1790,436 @@ async function switchToSessionWindow(index: SessionIndex, argument: unknown): Pr
     showWarning(`The window holding this session could not be asked to show it: ${messageOf(error)}`);
     return;
   }
-  // Whatever the focus change below takes, the request is withdrawn when the wait is over: the
-  // owner never selects a tab for a requester that has stopped waiting.
-  const withdrawal = setTimeout(() => {
-    void withdrawSwitchRequest(index.claimStorageDir, plan.holderId, requestId).catch(() => undefined);
-  }, Math.max(0, postedAt + REQUEST_ANSWER_TIMEOUT_MS - Date.now()));
-  try {
-    const answerOf = async (): Promise<SwitchAnswer | null> => {
-      try {
-        return await awaitSwitchAnswer(index.claimStorageDir, plan.holderId, requestId, { timeoutMs: remaining() });
-      } catch (error) {
-        showWarning(`The answer of the window holding this session could not be read: ${messageOf(error)}`);
-        return null;
-      }
-    };
-    if (plan.kind === "manual") {
-      const answer = await answerOf();
-      if (answer === null) return;
-      const where = plan.reason === "ambiguous"
-        ? "Another window shows the same folder or workspace, so VS Code cannot tell which one to bring forward."
-        : "This owning window has no saved workspace or single-folder identity, so it cannot be brought forward.";
-      showInfo(`${where} Switch to it using VS Code's Window menu${answer === "served" || answer === "unfocused" ? "; the session's tab is selected there" : ""}.`);
-      return;
-    }
-    try {
-      await vscode.commands.executeCommand("vscode.openFolder", vscode.Uri.parse(plan.uri), { forceNewWindow: true });
-    } catch (error) {
-      // Nobody is waiting for the tab any more: withdraw the request so the owner does not act late.
-      await withdrawSwitchRequest(index.claimStorageDir, plan.holderId, requestId).catch(() => undefined);
-      showWarning(`VS Code could not bring the window holding this session forward: ${messageOf(error)}`);
-      return;
-    }
-    const answer = await answerOf();
-    if (answer === "timeout") {
-      showWarning("The window holding this session did not respond, so its tab was not selected. It may be busy or run an older OMP Desk.");
-    } else if (answer === "refused") {
-      showInfo("That window no longer has an editor open for this session.");
-      launcherProvider?.refreshOwnership(new Set([tabId]));
-    } else if (answer === "unfocused") {
-      showInfo("The window holding this session selected its tab, but VS Code did not bring it to the front. Switch to it using the taskbar or VS Code's Window menu.");
-    }
-  } finally {
-    clearTimeout(withdrawal);
+  const delivered = await deliverRequest({
+    label: `select ${requestId.slice(0, 8)}`,
+    postedAt,
+    timeoutMs: REQUEST_ANSWER_TIMEOUT_MS,
+    focus: plan.kind === "manual" ? { kind: "manual", reason: plan.reason } : { kind: "switch", uri: plan.uri },
+    withdraw: () => withdrawRequest(index.claimStorageDir, plan.holderId, requestId),
+    awaitAnswer: timeoutMs => awaitRequestAnswer(index.claimStorageDir, plan.holderId, requestId, { timeoutMs }),
+  });
+  if (delivered.kind === "unreadable") {
+    showWarning(`The answer of the window holding this session could not be read: ${delivered.detail}`);
+    return;
   }
+  if (delivered.kind === "focus-failed") {
+    showWarning(`VS Code could not bring the window holding this session forward: ${delivered.detail}`);
+    return;
+  }
+  const answer = delivered.answer;
+  if (delivered.manual !== null) {
+    const where = delivered.manual === "ambiguous"
+      ? "Another window shows the same folder or workspace, so VS Code cannot tell which one to bring forward."
+      : "This owning window has no saved workspace or single-folder identity, so it cannot be brought forward.";
+    showInfo(`${where} Switch to it using VS Code's Window menu${answer === "served" || answer === "unfocused" ? "; the session's tab is selected there" : ""}.`);
+    return;
+  }
+  if (answer === "timeout") {
+    showWarning("The window holding this session did not respond, so its tab was not selected. It may be busy or run an older OMP Desk.");
+  } else if (answer === "refused") {
+    showInfo("That window no longer has an editor open for this session.");
+    launcherProvider?.refreshOwnership(new Set([tabId]));
+  } else if (answer === "unfocused") {
+    showInfo("The window holding this session selected its tab, but VS Code did not bring it to the front. Switch to it using the taskbar or VS Code's Window menu.");
+  }
+}
+
+/** How a hand-over to another window ended. */
+type Delivery =
+  | { readonly kind: "answer"; readonly answer: RequestAnswer; readonly manual: "no-uri" | "ambiguous" | null }
+  /** The answer could not be read; the request was withdrawn. */
+  | { readonly kind: "unreadable"; readonly detail: string }
+  /** VS Code could not bring the window forward; the request was withdrawn, but it may have been served already. */
+  | { readonly kind: "focus-failed"; readonly detail: string };
+
+/**
+ * The shared half of every request to another window: bring that window forward the way
+ * `focus` plans (`vscode.openFolder` on its URI, or nothing when the plan is manual) and wait
+ * for its answer, both started at once. The wait ends at `postedAt + timeoutMs` however the
+ * focus command behaves (it may never settle), and the request is withdrawn when the wait ends
+ * without an answer, on a timer armed at the start and on every path that stops waiting, so the
+ * receiver never acts for a requester that has stopped waiting. A focus command that fails
+ * ends the wait at once and says so, because the receiver may already have acted on the request.
+ */
+async function deliverRequest(options: {
+  /** Names the request in the timing lines. */
+  readonly label: string;
+  readonly postedAt: number;
+  readonly timeoutMs: number;
+  readonly focus: WindowFocusPlan;
+  readonly withdraw: () => Promise<void>;
+  readonly awaitAnswer: (timeoutMs: number) => Promise<RequestAnswer>;
+}): Promise<Delivery> {
+  const deadline = options.postedAt + options.timeoutMs;
+  const withdraw = () => options.withdraw().catch(() => undefined);
+  const timer = setTimeout(() => { void withdraw(); }, Math.max(0, deadline - Date.now()));
+  try {
+    const answered = options.awaitAnswer(Math.max(250, deadline - Date.now())).then(
+      (answer): Delivery => {
+        windowTiming("requester: answer seen", `${options.label} ${answer} ${Date.now() - options.postedAt} ms after posting`);
+        return { kind: "answer", answer, manual: options.focus.kind === "manual" ? options.focus.reason : null };
+      },
+      (error): Delivery => ({ kind: "unreadable", detail: messageOf(error) }),
+    );
+    const racers: Promise<Delivery>[] = [answered];
+    if (options.focus.kind === "switch") {
+      const uri = vscode.Uri.parse(options.focus.uri);
+      racers.push(new Promise<Delivery>(resolve => {
+        void (async () => {
+          try {
+            windowTiming("requester: openFolder called", `${options.label} ${Date.now() - options.postedAt} ms after posting`);
+            await vscode.commands.executeCommand("vscode.openFolder", uri, { forceNewWindow: true });
+            windowTiming("requester: openFolder resolved", `${options.label} ${Date.now() - options.postedAt} ms after posting`);
+          } catch (error) {
+            resolve({ kind: "focus-failed", detail: messageOf(error) });
+          }
+        })();
+      }));
+    }
+    const outcome = await Promise.race(racers);
+    if (outcome.kind !== "answer" || outcome.answer === "timeout") await withdraw();
+    return outcome;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/** What each window remembers of which Unity project a folder's launches run in: one project per folder, shared by every window of the profile. */
+const UNITY_CHOICE_KEY = "omp.unityProjectChoice.v1";
+const unityProjects = new UnityProjectCache();
+
+/** The Unity project folders a launch in `folder` stands for: the folder itself, an opened folder it stands for, or projects below it. */
+async function unityCandidatesOf(folder: { readonly path: string; readonly openedPaths?: readonly string[] }): Promise<string[]> {
+  const folders = launcherFolders;
+  if (folders === undefined) return [];
+  const found = new Map<string, string>();
+  for (const project of await unityProjects.projects(folder.path)) found.set(folders.identityKeyOf(project), project);
+  for (const opened of folder.openedPaths ?? []) if (await isUnityProject(opened)) found.set(folders.identityKeyOf(opened), opened);
+  return [...found.values()];
+}
+
+/**
+ * Whether `workspace`, which a request names, is one a launch in `folder` is allowed to run in:
+ * the folder itself, or one of the Unity projects it stands for. The receiver checks this
+ * itself rather than trusting that it merely has both the workspace and the folder.
+ */
+async function launchWorkspaceFits(folder: { readonly path: string; readonly openedPaths?: readonly string[] }, workspace: LaunchWorkspace): Promise<boolean> {
+  const folders = launcherFolders;
+  if (folders === undefined) return false;
+  const wanted = folders.identityKeyOf(workspace.path);
+  if (workspace.match === "folder") return folders.identityKeyOf(folder.path) === wanted;
+  return (await unityCandidatesOf(folder)).some(candidate => folders.identityKeyOf(candidate) === wanted);
+}
+
+/**
+ * The folder the window that starts a launch in `folder` must have open (ADR-0057): the
+ * Unity project folder the launch stands for, because the Unity extensions only work in a
+ * window whose workspace root it is, or the folder itself. The folder is the project itself,
+ * stands for an opened one (an agent root over an opened project folder), or holds projects
+ * down to two levels; one project is used, several are asked once and the answer is remembered
+ * for the folder, none means the folder itself. `null` when the user dismissed the question.
+ * The session's working directory stays the folder, so the repository's agent files load.
+ */
+async function launchWorkspaceOf(folder: { readonly path: string; readonly openedPaths?: readonly string[] }): Promise<LaunchWorkspace | null> {
+  const folders = launcherFolders;
+  const ordinary: LaunchWorkspace = { path: folder.path, match: "folder" };
+  if (folders === undefined) return ordinary;
+  const candidates = await unityCandidatesOf(folder);
+  if (candidates.length === 0) return ordinary;
+  if (candidates.length === 1) return { path: candidates[0]!, match: "root" };
+  const folderKey = folders.identityKeyOf(folder.path);
+  const store = activationContext?.globalState;
+  const remembered = store?.get<Record<string, string>>(UNITY_CHOICE_KEY)?.[folderKey];
+  const known = remembered === undefined ? undefined : candidates.find(candidate => folders.identityKeyOf(candidate) === folders.identityKeyOf(remembered));
+  if (known !== undefined) return { path: known, match: "root" };
+  const picked = await vscode.window.showQuickPick(
+    candidates.map(candidate => ({ label: path.basename(candidate), description: candidate, candidate })),
+    { title: `Which Unity project should sessions in ${folderHeadline(folder.path)} run in?`, placeHolder: "The session runs in a window that has this project open; the choice is remembered for the folder" },
+  );
+  if (picked === undefined) return null;
+  if (store !== undefined) {
+    const all = { ...(store.get<Record<string, string>>(UNITY_CHOICE_KEY) ?? {}) };
+    if (Object.keys(all).length >= 64) delete all[Object.keys(all)[0]!];
+    all[folderKey] = picked.candidate;
+    await store.update(UNITY_CHOICE_KEY, all);
+  }
+  return { path: picked.candidate, match: "root" };
+}
+
+/** The windows on an older build the user was told about: once each, not at every launch. */
+const olderBuildNoticed = new Set<string>();
+
+/**
+ * A launch that would have gone to a window on an older OMP Desk starts here instead, because
+ * that window refuses to build a view after a reinstall (a reload fixes it). Said once per
+ * window, and always logged.
+ */
+function noteOlderBuildWindow(holderIds: readonly string[], folderPath: string): void {
+  log(`window request: the window(s) ${holderIds.join(", ")} with ${folderPath} run an older OMP Desk build; the launch starts here`);
+  if (holderIds.every(id => olderBuildNoticed.has(id))) return;
+  for (const id of holderIds) olderBuildNoticed.add(id);
+  showInfo(`The VS Code window with ${folderHeadline(folderPath)} runs an older OMP Desk build; reload it (Developer: Reload Window). The session opened here.`);
+}
+
+/** Where a launch for a folder starts. */
+type LaunchRoute =
+  | { readonly kind: "here" }
+  | { readonly kind: "cancelled" }
+  | { readonly kind: "window"; readonly holderId: string; readonly workspace: LaunchWorkspace }
+  | { readonly kind: "new-window"; readonly workspace: LaunchWorkspace };
+
+/**
+ * The window a launch in `folder` starts in (ADR-0057): this one when it has the workspace
+ * the launch needs open (the folder, or the Unity project it stands for), when
+ * `omp.launchInFolderWindow` is off, or, for an ordinary folder, when no live window has it
+ * (a pinned folder, or one only a session keeps visible); otherwise the most recently focused
+ * window that has it; and for a Unity project nobody has open, a new window on it. A window that
+ * runs an older OMP Desk than the installed one is never chosen: when it is the only kind of
+ * window that has the folder, the launch starts here and the user is told once.
+ */
+async function planLaunchRoute(folder: { readonly path: string; readonly openedPaths?: readonly string[] }): Promise<LaunchRoute> {
+  if (!vscode.workspace.getConfiguration("omp").get<boolean>("launchInFolderWindow", true)) return { kind: "here" };
+  const folders = launcherFolders;
+  if (windowRegistry === undefined || folders === undefined) return { kind: "here" };
+  const workspace = await launchWorkspaceOf(folder);
+  if (workspace === null) return { kind: "cancelled" };
+  const unity = workspace.match === "root";
+  const plan = planFolderLaunch(folders.windowsWithFolder(workspace.path, { exact: unity }), unity ? "new-window" : "here");
+  if (plan.kind === "here") {
+    if (plan.staleHolders !== undefined) noteOlderBuildWindow(plan.staleHolders, workspace.path);
+    return { kind: "here" };
+  }
+  return plan.kind === "window" ? { kind: "window", holderId: plan.holderId, workspace } : { kind: "new-window", workspace };
+}
+
+/**
+ * Start a launch in the window {@link planLaunchRoute} picks. Returns `false` when it starts
+ * in this window and `true` once it was handed over, successfully or not (or the user dismissed
+ * the Unity project question): the caller then starts nothing, because a window that did not
+ * answer may still start it, and two sessions are worse than none. The other window is asked,
+ * by a launch request addressed to its claim holder id, to perform the very same launch through
+ * its own ordinary path and admission, and VS Code brings it forward as for a switch; a new
+ * window is opened on the Unity project with the launch left for it to claim. A message is
+ * shown only when the hand-over did not complete, and says so; nothing is retried and nothing
+ * falls back to this window.
+ */
+async function routeLaunchToFolderWindow(
+  index: SessionIndex,
+  folder: { readonly path: string; readonly openedPaths?: readonly string[] },
+  launch: LaunchAction,
+  answerTimeoutMs?: number,
+): Promise<boolean> {
+  const route = await planLaunchRoute(folder);
+  if (route.kind === "here") return false;
+  if (route.kind === "cancelled") return true;
+  return await followLaunchRoute(index, route, launch, answerTimeoutMs);
+}
+
+/**
+ * Hand a launch to the window or new window of `route`. `true` once it was handed over, whatever
+ * came of it; `false` only when the receiver refused it as definitely not started (it runs an
+ * older build and decided before beginning anything), so the caller starts it here: the refusal
+ * is written by that receiver for this very request and a request is served at most once, so
+ * exactly one of the two windows starts it.
+ */
+async function followLaunchRoute(
+  index: SessionIndex,
+  route: Exclude<LaunchRoute, { readonly kind: "here" } | { readonly kind: "cancelled" }>,
+  launch: LaunchAction,
+  answerTimeoutMs?: number,
+): Promise<boolean> {
+  const registry = windowRegistry;
+  const folders = launcherFolders;
+  if (registry === undefined || folders === undefined) return true;
+  const postedAt = Date.now();
+  if (route.kind === "new-window") {
+    return await launchInNewWindow(index, folders, route.workspace, launch, postedAt, answerTimeoutMs ?? PENDING_ANSWER_TIMEOUT_MS);
+  }
+  let requestId: string;
+  try {
+    requestId = await postLaunchRequest(index.claimStorageDir, { to: route.holderId, from: index.claimHolder.id, workspace: route.workspace, launch });
+  } catch (error) {
+    showWarning(`The window that has this folder open could not be asked to start the session: ${messageOf(error)}. Nothing was started.`);
+    return true;
+  }
+  const delivered = await deliverRequest({
+    label: `launch ${requestId.slice(0, 8)}`,
+    postedAt,
+    timeoutMs: answerTimeoutMs ?? LAUNCH_ANSWER_TIMEOUT_MS,
+    focus: planWindowFocus(route.holderId, null, registry.windows()),
+    withdraw: () => withdrawRequest(index.claimStorageDir, route.holderId, requestId),
+    awaitAnswer: timeoutMs => awaitRequestAnswer(index.claimStorageDir, route.holderId, requestId, { timeoutMs }),
+  });
+  if (delivered.kind === "answer" && delivered.answer === "stale-build") {
+    noteOlderBuildWindow([route.holderId], route.workspace.path);
+    return false;
+  }
+  reportLaunchDelivery(delivered, "the window that has this folder open");
+  return true;
+}
+
+/**
+ * Say how handing a launch to another window ended, when it did not end silently. Nothing was
+ * started from here in any of these cases; where the receiver may have started it anyway (it
+ * answered late, or VS Code failed to focus it after it acted) the message says to look there
+ * before trying again.
+ */
+function reportLaunchDelivery(delivered: Delivery, subject: string): void {
+  if (delivered.kind === "unreadable") {
+    showWarning(`The answer of ${subject} could not be read: ${delivered.detail}. Nothing was started from here; check that window before trying again.`);
+  } else if (delivered.kind === "focus-failed") {
+    showWarning(`VS Code could not bring ${subject} forward: ${delivered.detail}. Nothing was started from here, but the session may have started there; check that window before trying again.`);
+  } else if (delivered.answer === "timeout") {
+    showWarning(`${subject.charAt(0).toUpperCase()}${subject.slice(1)} did not respond in time. Nothing was started from here; check that window before trying again. It may be busy, still loading, or run an older OMP Desk.`);
+  } else if (delivered.answer === "refused") {
+    showWarning(`${subject.charAt(0).toUpperCase()}${subject.slice(1)} could not start the session (it may have closed the folder just now). Nothing was started; try again.`);
+    refreshLauncher();
+  } else if (delivered.manual !== null) {
+    showInfo(`The session is starting in ${subject}, but VS Code cannot bring that window forward (${delivered.manual === "ambiguous" ? "another window shows the same folder or workspace" : "it has no saved workspace or single-folder identity"}). Switch to it using VS Code's Window menu.`);
+  } else if (delivered.answer === "unfocused") {
+    showInfo(`The session is starting in ${subject}, but VS Code did not bring it to the front. Switch to it using the taskbar or VS Code's Window menu.`);
+  }
+}
+
+/**
+ * No live window has the Unity project open: leave the launch for the window that will, keyed by
+ * the project folder's identity, and open a new window on it (`vscode.openFolder`, which
+ * focuses an existing window of that folder instead when one is just starting). The new window
+ * claims the launch once it runs and answers on admission; a window that never does leaves
+ * the launch to be withdrawn at the deadline and is told so here. The deadline is absolute
+ * from posting: a window that claimed the launch but has not admitted it by then finds the
+ * file withdrawn and refuses.
+ */
+async function launchInNewWindow(
+  index: SessionIndex,
+  folders: LauncherFolders,
+  workspace: LaunchWorkspace,
+  launch: LaunchAction,
+  postedAt: number,
+  answerTimeoutMs: number,
+): Promise<boolean> {
+  const key = pendingKeyOf(folders.identityKeyOf(workspace.path));
+  let requestId: string;
+  try {
+    requestId = await postPendingLaunch(index.claimStorageDir, { from: index.claimHolder.id, key, workspace, launch });
+  } catch (error) {
+    showWarning(`A window for the Unity project could not be asked to start the session: ${messageOf(error)}. Nothing was started.`);
+    return true;
+  }
+  const delivered = await deliverRequest({
+    label: `pending launch ${requestId.slice(0, 8)}`,
+    postedAt,
+    timeoutMs: answerTimeoutMs,
+    focus: { kind: "switch", uri: vscode.Uri.file(workspace.path).toString() },
+    withdraw: () => withdrawPendingLaunch(index.claimStorageDir, key, requestId),
+    awaitAnswer: timeoutMs => awaitPendingLaunchAnswer(index.claimStorageDir, requestId, { timeoutMs }),
+  });
+  // A window that had the project open and was not in the registry yet claimed the launch and refused it as an older build.
+  if (delivered.kind === "answer" && delivered.answer === "stale-build") {
+    noteOlderBuildWindow(["pending"], workspace.path);
+    return false;
+  }
+  reportLaunchDelivery(delivered, `the new window on ${workspace.path}`);
+  return true;
+}
+
+/**
+ * {@link routeLaunchToFolderWindow} for opening an indexed session: the folder is the one the
+ * session's working directory belongs to. The caller has already dealt with a session another
+ * window holds (it is switched to, not launched). A session this window already has an editor
+ * for is left alone when it is only being looked at (`opened`), and a session whose folder is
+ * unknown starts here.
+ */
+async function routeSessionOpen(index: SessionIndex, tabId: string, verb: "opened" | "resumed", mode: SessionViewMode | null): Promise<boolean> {
+  const entry = index.get(tabId);
+  const folders = launcherFolders;
+  if (entry === null || folders === undefined) return false;
+  if (verb === "opened" && stateOf(tabId) !== undefined) return false;
+  const folder = folders.folderForCwd(entry.cwd);
+  if (folder === null) return false;
+  const route = await planLaunchRoute(folder);
+  if (route.kind === "here") return false;
+  if (route.kind === "cancelled") return true;
+  return await followLaunchRoute(index, route, { kind: "open-session", tabId, verb, mode });
+}
+
+/**
+ * Serve a request to start a launch here (ADR-0057), another window's or a pending one this
+ * window claimed. Admission is this window's own: the request only says what to start, and it
+ * is performed by the same function a click in this window runs, which reads the claims and
+ * refuses a session another writer holds. This window first waits for what a window that has
+ * just started lacks (the catalog, its own folders in the registry, its agent roots), then
+ * refuses unless (1) it itself has the workspace the request names open (a Unity project as
+ * one of its own roots), (2) the folder or session the request names is one it shows and *stands
+ * under that workspace* (the folder itself, or a Unity project the folder stands for), and (3)
+ * the requester still waits; after the last asynchronous step it checks (1) and the target again
+ * before beginning. A session that is already live here is only revealed, never launched or
+ * switched to another view. It is never routed again. The answer is given on admission, once
+ * the launch has begun, not when OMP is ready; whatever the launch then reports it reports
+ * here, as for a click here.
+ */
+async function serveLaunchRequest(
+  context: vscode.ExtensionContext,
+  index: SessionIndex,
+  request: LaunchRequest,
+  serveContext: ServeContext,
+): Promise<ServeOutcome> {
+  const folders = launcherFolders;
+  const refuse = (reason: string, refusal?: RefusalReason): ServeOutcome => {
+    log(`window request: refused a launch (${request.launch.kind}) for ${request.workspace.path} (${request.workspace.match}): ${reason}`);
+    return { ok: false, focused: false, ...(refusal === undefined ? {} : { refusal }) };
+  };
+  // Before anything else: after a reinstall this window cannot build the view a launch needs, and the requester
+  // starts the launch itself on this definite refusal (nothing was begun here, and a request is served at most once).
+  if (packageChangedOnDisk()) return refuse("this window runs an older OMP Desk than the one installed", "stale-build");
+  if (folders === undefined) return refuse("the launcher is not ready");
+  await ensureCatalogReady();
+  windowTiming("receiver: catalog ready", request.id.slice(0, 8));
+  publishWindowSnapshot();
+  // A window that has just started has read no other window's record yet: the folder the request names may be open only in another window.
+  try {
+    if (await windowRegistry?.refresh()) refreshLauncher();
+  } catch (error) {
+    log(`window request: the other windows could not be read: ${messageOf(error)}`);
+  }
+  windowTiming("receiver: registry read", request.id.slice(0, 8));
+  await resolveAgentRoots();
+  windowTiming("receiver: agent roots resolved", request.id.slice(0, 8));
+  const hasWorkspace = () => folders.windowsWithFolder(request.workspace.path, { exact: request.workspace.match === "root" }).some(window => window.here);
+  if (!hasWorkspace()) return refuse("this window does not have the workspace open");
+  const action = request.launch;
+  let targetExists: () => boolean;
+  let start: () => Promise<unknown>;
+  if (action.kind === "open-session") {
+    const entry = index.get(action.tabId);
+    const folder = entry === null ? null : folders.folderForCwd(entry.cwd);
+    if (folder === null) return refuse("this window shows no folder for the session");
+    if (!(await launchWorkspaceFits(folder, request.workspace))) return refuse("the session's folder does not stand under the workspace");
+    // The target is the session as validated above: the same tab, still in the same working directory.
+    const cwd = entry!.cwd;
+    targetExists = () => index.get(action.tabId)?.cwd === cwd;
+    // Chosen at the beginning, not before the waits: a session that is live here by then is revealed (the ordinary
+    // open does that), never switched to another view, and one that goes live while the open waits is still only revealed.
+    start = () => action.mode === null || launcherFacts(action.tabId).running
+      ? openSession(context, index, action.tabId, action.verb, true, true)
+      : openSessionInMode(context, index, action.tabId, action.mode!, "open", true, true);
+  } else {
+    const folder = folders.get(action.folderId);
+    if (folder === null) return refuse("this window shows no such folder");
+    if (!(await launchWorkspaceFits(folder, request.workspace))) return refuse("the folder does not stand under the workspace");
+    const folderPath = folder.path;
+    targetExists = () => folders.get(action.folderId)?.path === folderPath;
+    start = action.kind === "new-session" ? () => startNewSession(context, index, folder) : () => resumeFromFolderHistory(context, index, folders, folder, true);
+  }
+  windowTiming("receiver: launch validated", request.id.slice(0, 8));
+  if (!(await serveContext.stillWanted())) return refuse("the requester no longer waits");
+  // Nothing is awaited between this last look at this window and the beginning of the launch.
+  if (!hasWorkspace() || !targetExists()) return refuse("the workspace or the target changed while it waited");
+  void start().catch(error => {
+    log(`window request: the launch asked for by another window failed: ${messageOf(error)}`);
+    showError(`The session another window asked for could not be started: ${messageOf(error)}`);
+  });
+  return { ok: true, focused: await windowBecomesFocused(WINDOW_FOCUS_WAIT_MS) };
 }
 
 /** Resolve `true` once this window has the focus, `false` when it does not within `timeoutMs`. */
@@ -2967,7 +3386,18 @@ async function resumeWorkspaceFolder(
     addWhenEmpty: true,
   });
   if (folder === null) return;
+  if (await routeLaunchToFolderWindow(index, folder, { kind: "resume-folder", folderId: folder.id })) return;
+  await resumeFromFolderHistory(context, index, folders, folder);
+}
 
+/** The scan, the picker and the launch of Resume Session for one folder, in this window. */
+async function resumeFromFolderHistory(
+  context: vscode.ExtensionContext,
+  index: SessionIndex,
+  folders: LauncherFolders,
+  folder: LauncherFolder,
+  keepLiveView = false,
+): Promise<void> {
   const scan = await vscode.window.withProgress(
     {
       location: vscode.ProgressLocation.Notification,
@@ -3035,7 +3465,7 @@ async function resumeWorkspaceFolder(
     refreshLauncher();
     return;
   }
-  await openFolderHistoryCandidate(context, index, current, picked);
+  await openFolderHistoryCandidate(context, index, current, picked, keepLiveView);
 }
 
 /**
@@ -3054,6 +3484,7 @@ async function openFolderHistoryCandidate(
   index: SessionIndex,
   folder: WorkspaceFolder,
   candidate: FolderHistoryCandidate,
+  keepLiveView = false,
 ): Promise<void> {
   const inspection = await inspectSessionFile(candidate.file);
   if (inspection.kind === "missing") {
@@ -3140,7 +3571,7 @@ async function openFolderHistoryCandidate(
     return;
   }
   log(`tab ${entry.tabId}: resumed folder session ${candidate.file} (${candidate.source}) from ${folder.path}`);
-  await openTab(context, index, entry.tabId, "resumed");
+  await openTab(context, index, entry.tabId, "resumed", "explicit", undefined, false, keepLiveView);
 }
 
 /**
@@ -3282,7 +3713,11 @@ async function editorSettled(slot: string, tabId: string): Promise<void> {
  * whose host only an explicit action may start, or a row whose own restore was
  * refused or failed. A second click joins the attempt already in flight, and
  * `openPanel` reuses an editor that already exists, so the attempt always reports
- * into the panel the user is looking at.
+ * into the panel the user is looking at. `keepLiveView` (a launch another window asked for)
+ * never switches a writer's view afterwards: a new launch is created in the requested view
+ * (`openTabOnce` takes it), while a writer that is live when the call arrives, that a launch
+ * already in flight or the startup restoration brings up, or that the attempt only adopts, is
+ * revealed and left as it is.
  */
 async function openTab(
   context: vscode.ExtensionContext,
@@ -3292,6 +3727,7 @@ async function openTab(
   openIntent: "explicit" | "restored" = "explicit",
   requestedMode?: SessionViewMode,
   externalConfirmed = false,
+  keepLiveView = false,
 ): Promise<void> {
   // The user's own Open supersedes a request's deferral of this tab's restore.
   if (openIntent === "explicit") requestSelections.delete(tabId);
@@ -3327,7 +3763,7 @@ async function openTab(
       if (published !== null) await revealExistingTab(index, tabId, published);
     }
     const published = stateOf(tabId);
-    if (mode !== undefined && published?.runtime != null && published.mode !== mode) await switchSessionMode(context, index, published, mode);
+    if (!keepLiveView && mode !== undefined && published?.runtime != null && published.mode !== mode) await switchSessionMode(context, index, published, mode);
     return;
   }
   const state = stateOf(tabId) ?? null;
@@ -3337,7 +3773,7 @@ async function openTab(
     // refused earlier (before this window held the writer) and never retried.
     await electLocalController(index, tabId);
     await revealExistingTab(index, tabId, state.panel);
-    if (mode !== undefined && mode !== state.mode) await switchSessionMode(context, index, state, mode);
+    if (!keepLiveView && mode !== undefined && mode !== state.mode) await switchSessionMode(context, index, state, mode);
     return;
   }
   const attempt = openTabOnce(context, index, tabId, verb, openIntent, mode, externalConfirmed);
@@ -3350,7 +3786,7 @@ async function openTab(
   const published = stateOf(tabId);
   if (published !== undefined) {
     pushSessionView(index, published);
-    if (mode !== undefined && published.runtime !== null && published.mode !== mode) await switchSessionMode(context, index, published, mode);
+    if (!keepLiveView && mode !== undefined && published.runtime !== null && published.mode !== mode) await switchSessionMode(context, index, published, mode);
   }
 }
 
@@ -4072,10 +4508,20 @@ async function chooseDefaultSessionView(context: vscode.ExtensionContext): Promi
 /**
  * Open (a stopped row launches) or show (a live row reveals its editor, reopening it when only the tab
  * was closed) one session in an explicit view. Both verbs are the same admitted path; only the wording differs.
+ * `noRouting` keeps it in this window; `revealIfLive` (a launch another window asked for) leaves the view of a session that is live here alone.
  */
-async function openSessionInMode(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown, mode: SessionViewMode, verb: "open" | "show" = "open"): Promise<void> {
+async function openSessionInMode(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown, mode: SessionViewMode, verb: "open" | "show" = "open", noRouting = false, revealIfLive = false): Promise<void> {
   const target = sessionTargetFromArgument(index, argument);
   if (target === null) { showWarning(`Select an OMP session to ${verb}.`); return; }
+  if (!noRouting && !launcherFacts(target.tabId).running) {
+    // A session another window holds is switched to, as for a click; the claim is read afresh, before anything is asked of the user.
+    if (await heldByAnotherWindow(index, target.tabId)) {
+      await switchToSessionWindow(index, target.tabId);
+      return;
+    }
+    // A session of a folder that only another window has open is opened there, in the same view (ADR-0057).
+    if (await routeSessionOpen(index, target.tabId, "resumed", mode)) return;
+  }
   let state = stateOf(target.tabId);
   // A tab VS Code has not shown since the window loaded has no panel handle yet; showing it is what creates one.
   if (state !== undefined && state.panel === null) {
@@ -4084,14 +4530,16 @@ async function openSessionInMode(context: vscode.ExtensionContext, index: Sessio
   }
   if (state?.panel != null) {
     await revealExistingTab(index, target.tabId, state.panel);
-    await switchSessionMode(context, index, state, mode);
+    // A launch another window asked for never changes the view of a session that is live here, even one that went live while this waited.
+    if (revealIfLive && (state.runtime !== null || launcherFacts(target.tabId).running)) return;
+    await switchSessionMode(context, index, state, mode, false, revealIfLive);
     return;
   }
   if (state?.bridge != null && bridgeLiveEditors.has(state.bridge.editorId)) {
     showWarning("This tab was kept running while OMP restarted in the background, so its view cannot be changed from here. Run “Developer: Reload Window”, then try again.");
     return;
   }
-  await openTab(context, index, target.tabId, "resumed", "explicit", mode);
+  await openTab(context, index, target.tabId, "resumed", "explicit", mode, false, revealIfLive);
 }
 
 /** Pending view requests disable title actions before initialization is ready to be fenced. */
@@ -4193,7 +4641,7 @@ async function readTransitionFacts(state: TabState, runtime: SessionHostRuntime)
 }
 
 /** One editor, one held claim, positively non-overlapping exact root generations. */
-async function switchSessionMode(context: vscode.ExtensionContext, index: SessionIndex, state: TabState, mode: SessionViewMode, reload = false): Promise<void> {
+async function switchSessionMode(context: vscode.ExtensionContext, index: SessionIndex, state: TabState, mode: SessionViewMode, reload = false, keepLiveView = false): Promise<void> {
   if (state.tabId === null || state.panel === null || state.transitioning || passiveReasonForSlot(state.slotId) !== null || openingTabs.has(state.tabId)) {
     showWarning("This editor cannot change views while the session is starting or stopping, or another editor controls it.");
     return;
@@ -4212,7 +4660,7 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
       state.document = null;
       if (state.bridge !== null) await prepareBridgeDocument(context, state.bridge.editorId);
       renderPanelDocument(context, state.slotId);
-      await openTab(context, index, state.tabId, "resumed");
+      await openTab(context, index, state.tabId, "resumed", "explicit", undefined, false, keepLiveView);
     } finally {
       if (pendingSessionViewChanges.get(state) === modeRequest) pendingSessionViewChanges.delete(state);
       pushSessionView(index, state);
@@ -7961,7 +8409,9 @@ async function addToSession(context: vscode.ExtensionContext, index: SessionInde
     if (!probe.ok) { showWarning(`${probe.reason} Nothing was added.`); return; }
     // Reveals a running session's editor, reopens a closed one and starts a stopped one, all through the
     // path the Sessions view's Open uses (ownership is rechecked there).
-    if (!(await openSession(context, index, tabId, "resumed"))) return;
+    // The references are inserted into an editor of this window, so a stopped session is launched here, not in
+    // the window its folder is open in (ADR-0057 leaves this one entry point local).
+    if (!(await openSession(context, index, tabId, "resumed", true))) return;
   }
   const delivered = await deliverInsertion(tabId, sources, cwd);
   if (!delivered.ok) {
@@ -11672,6 +12122,8 @@ const UPDATED_ON_DISK_DETAIL =
 /** The fingerprint of the package this host started from; `null` outside a packaged (production) install. */
 let packageDrift: PackageDrift | null = null;
 let packageDriftAnnounced = false;
+/** The last verdict of {@link packageChangedOnDisk}; published in this window's registry record (`stale`) so no other window hands it a launch. */
+let packageStale = false;
 
 /**
  * Whether the installed package no longer holds the bytes this host started from. The first
@@ -11680,6 +12132,13 @@ let packageDriftAnnounced = false;
  */
 function packageChangedOnDisk(): boolean {
   const verdict = packageDrift?.check() ?? { kind: "same" as const };
+  const stale = verdict.kind !== "same";
+  if (stale !== packageStale) {
+    packageStale = stale;
+    // At once, not at the next heartbeat: another window may be about to choose this one for a launch.
+    publishWindowSnapshot();
+    void windowRegistry?.flush();
+  }
   if (verdict.kind === "same") {
     packageDriftAnnounced = false;
     return false;

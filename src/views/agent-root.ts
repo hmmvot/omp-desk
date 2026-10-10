@@ -73,6 +73,7 @@ export class AgentRootResolver {
 	readonly #probe: PathKindProbe;
 	#resolved = new Map<string, string>();
 	#latest = 0;
+	#newest: Promise<boolean> = Promise.resolve(false);
 
 	constructor(probe: PathKindProbe = probePathKind) {
 		this.#probe = probe;
@@ -87,14 +88,25 @@ export class AgentRootResolver {
 	 * Resolve exactly these roots again (agent files may have appeared since the last time) and
 	 * remember the answers, forgetting every other root. Whether any root is now shown as another
 	 * folder than before; `false` too when a newer call superseded this one, which reports itself.
+	 * It settles only when the newest call has published, so a caller that awaits it can look
+	 * a folder up afterwards whichever call it was.
 	 */
 	async resolve(roots: readonly string[]): Promise<boolean> {
 		const call = ++this.#latest;
 		const unique = [...new Set(roots)];
-		const answers = await Promise.all(unique.map(async root => [root, await resolveAgentRoot(root, this.#probe)] as const));
-		if (call !== this.#latest) return false;
-		const previous = this.#resolved;
-		this.#resolved = new Map(answers);
-		return answers.some(([root, answer]) => answer !== (previous.get(root) ?? root));
+		const work = (async (): Promise<boolean> => {
+			const answers = await Promise.all(unique.map(async root => [root, await resolveAgentRoot(root, this.#probe)] as const));
+			if (call !== this.#latest) return false;
+			const previous = this.#resolved;
+			this.#resolved = new Map(answers);
+			return answers.some(([root, answer]) => answer !== (previous.get(root) ?? root));
+		})();
+		this.#newest = work.catch(() => false);
+		const changed = await work;
+		for (let newest = this.#newest; call !== this.#latest; newest = this.#newest) {
+			await newest;
+			if (newest === this.#newest) break;
+		}
+		return changed;
 	}
 }

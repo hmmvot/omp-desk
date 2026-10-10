@@ -133,6 +133,31 @@ describe("agent root derivation", () => {
 		assert.equal(resolver.lookup(roots[0]!), roots[0], "a root no longer open is forgotten");
 	});
 
+	it("settles a superseded call only once the newest call has published, so awaiting it is a readiness barrier", async () => {
+		const gate = Promise.withResolvers<void>();
+		let slow = false;
+		const resolver = new AgentRootResolver(async target => {
+			if (slow && target.startsWith(dir("repo", "Unity2") + path.sep)) await gate.promise;
+			try {
+				const stat = await fs.promises.stat(target);
+				return stat.isFile() ? "file" : "directory";
+			} catch {
+				return null;
+			}
+		});
+		const first = resolver.resolve([dir("repo", "Unity")]);
+		slow = true;
+		const second = resolver.resolve([dir("repo", "Unity"), dir("repo", "Unity2")]);
+		let firstSettled = false;
+		void first.then(() => { firstSettled = true; });
+		await new Promise(resolve => setTimeout(resolve, 100));
+		assert.equal(firstSettled, false, "the superseded call finished its own probes but waits for the newest to publish");
+		gate.resolve();
+		await first;
+		assert.equal(resolver.lookup(dir("repo", "Unity2")), dir("repo"), "published by the time the superseded call settles");
+		assert.equal(await second, true);
+	});
+
 	it("lets the newest of overlapping resolutions win", async () => {
 		const gate = Promise.withResolvers<void>();
 		let slow = true;
@@ -163,7 +188,7 @@ describe("agent root derivation", () => {
 			const folders = new LauncherFolders({
 				pinned: registry,
 				local: memoryStore(),
-				windows: () => [{ here: true, paths: options.open }, ...(options.others ?? []).map(paths => ({ here: false, paths }))],
+				windows: () => [{ holderId: "window-here", startedAt: "2026-01-01T00:00:00.000Z", focusedAt: null, here: true, paths: options.open }, ...(options.others ?? []).map(paths => ({ holderId: "window-other", startedAt: "2026-01-01T00:00:00.000Z", focusedAt: null, here: false, paths }))],
 				agentRoot: windowPath => (options.useAgentRoot === false ? windowPath : resolver.lookup(windowPath)),
 				showWindowFolders: () => true,
 				liveSessionCwds: () => options.live ?? [],
