@@ -56,9 +56,9 @@ For how this works, see the [architecture](docs/architecture.md).
 ![Sessions view](media/readme/sessions.png)
 
 - Shows every OMP session, running or stopped, of the folders open in this window and the folders you pin. By default it is **one flat list**, each row labelled `folder · title`; the button in the view's title bar switches to sessions **grouped under their folders** and back (`omp.sessionsGrouping`).
-- The flat list puts sessions that are not stopped first, unread ones on top and then the most recently active, and stopped sessions last. A **New Session…** row at the end asks for the folder.
+- The flat list puts sessions that are not stopped first, unread ones on top and then the most recently active, and stopped sessions last. A **New Session…** row and a **Resume Session…** row under it, at the end, ask for the folder. The title bar also has **New Session** and **Resume Session** buttons; Resume Session asks for the folder when several are shown, then lists that folder's saved sessions.
 - A blue **●** at the right end of a row marks a reply you have not read: the agent finished or asked you something while you were not looking at that session. It clears when you look at the session's editor, and it survives a window reload.
-- While a session has an open editor, its row stays selected: the one you viewed most recently. Selecting a folder or the New Session row puts the selection back.
+- While a session has an open editor, its row stays selected: the one you viewed most recently. Selecting a folder or the New Session or Resume Session row puts the selection back.
 - If the default OMP profile has no models yet, **Log in to a model provider to start** appears above the sessions.
 - **Pin Folder** keeps a folder in every window. **Add Folder** picks and pins another one.
 - Live status per session: **Working**, **Waiting for subagents**, **Needs your answer**, **Idle** or **Unread reply**.
