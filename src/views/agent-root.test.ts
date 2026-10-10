@@ -155,21 +155,30 @@ describe("agent root derivation", () => {
 	});
 
 	describe("in the Sessions folder list", () => {
-		async function windowOver(options: { open: string[]; useAgentRoot?: boolean; pinned?: string[]; live?: string[] }) {
+		async function windowOver(options: { open: string[]; others?: string[][]; useAgentRoot?: boolean; pinned?: string[]; live?: string[] }) {
 			const resolver = new AgentRootResolver();
-			await resolver.resolve(options.open);
+			await resolver.resolve([...options.open, ...(options.others ?? []).flat()]);
 			const registry = new WorkspaceFolderRegistry({ store: memoryStore(), inspector: directoryInspector });
 			for (const pinned of options.pinned ?? []) await registry.add(pinned);
 			const folders = new LauncherFolders({
 				pinned: registry,
 				local: memoryStore(),
-				windowPaths: () => options.open,
+				windows: () => [{ here: true, paths: options.open }, ...(options.others ?? []).map(paths => ({ here: false, paths }))],
 				agentRoot: windowPath => (options.useAgentRoot === false ? windowPath : resolver.lookup(windowPath)),
 				showWindowFolders: () => true,
 				liveSessionCwds: () => options.live ?? [],
 			});
 			return folders;
 		}
+
+		it("collapses roots opened in different windows onto one shown ancestor, open here and elsewhere", async () => {
+			const folders = await windowOver({ open: [dir("repo", "Unity")], others: [[dir("repo", "Unity2"), dir("loose", "project")]] });
+			const list = folders.list();
+			assert.deepEqual(list.map(folder => folder.path), [dir("repo"), dir("loose", "project")]);
+			assert.deepEqual(list[0]!.openedPaths, [dir("repo", "Unity"), dir("repo", "Unity2")]);
+			assert.deepEqual([list[0]!.openHere, list[0]!.openElsewhere, list[1]!.openHere, list[1]!.openElsewhere], [true, true, false, true]);
+			assert.equal(folders.folderForCwd(dir("repo", "Unity2"))?.id, list[0]!.id, "a session recorded in another window's subfolder is filed under the same ancestor");
+		});
 
 		it("shows the ancestor instead of the opened subfolder, keeping the subfolder for its sessions", async () => {
 			const folders = await windowOver({ open: [dir("repo", "Unity")] });

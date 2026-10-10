@@ -11,6 +11,8 @@ import { setImmediate as nextTurn } from "node:timers/promises";
 import { after, before, describe, it } from "node:test";
 import { build } from "esbuild";
 import { TabLifecycle } from "./host/tab-lifecycle.ts";
+import { startRequestWatch } from "./host/window-requests.ts";
+import type { ServeOutcome, SwitchRequest } from "./host/window-requests.ts";
 import { BridgeEditorEndpoint } from "./host/bridge-endpoint.ts";
 import type { BridgeBootstrapDelivery } from "./host/bridge-endpoint.ts";
 import { BridgeRecords, bindingMatches } from "./host/bridge-records.ts";
@@ -144,7 +146,7 @@ const fixtureOpenPanel = openPanel;
 export const harness = {
   connectHostControl, reconnectHostControl, establishControl, closeSession, launchHost, presentRestoreOutcome, openTab, handleChatEvent, bindPanel, restoreTabs, bridgeSerializerFor,
   confirmAndDeleteSession, deleteSession, handleRestoreOutcome, forgetSession, renameSession, reloadSession, handleGuestControlRequest, panelResponder,
-  switchSessionMode, restartChat, openSessionInMode, defaultSessionMode, chooseDefaultSessionView, newSession, owningWindowUri, switchToSessionWindow,
+  switchSessionMode, restartChat, openSessionInMode, defaultSessionMode, chooseDefaultSessionView, newSession, owningWindowUri, switchToSessionWindow, selectHeldSessionTab, openRestoredTabIfUncovered, requestSelections,
   startConversation, handleTerminalGuestMessage, startNativeWatch, handleNativeHostExited, hostControlAttempts,
   pushSessionView, handleShellEditorClosed,
   bindConversationIdentity, retryPendingIdentity, SessionTreeProvider,
@@ -335,6 +337,9 @@ interface Harness {
   providerLoginFixture: { enabled: boolean; unresolved: boolean; models: unknown[]; calls: { args: string[]; options: { env: Record<string, string> } }[]; logins: { env: Record<string, string>; cwd: string }[]; read: (() => Promise<{ stdout: string; stderr: string; exitCode: number }>) | null; resolve: (() => Promise<{ command: string; prefixArgs: string[]; version: string }>) | null };
   owningWindowUri(): URI | null;
   switchToSessionWindow(...args: unknown[]): Promise<void>;
+  selectHeldSessionTab(...args: unknown[]): Promise<{ ok: boolean; focused: boolean }>;
+  openRestoredTabIfUncovered(...args: unknown[]): Promise<void>;
+  requestSelections: Set<string>;
   setWindowWorkspace(file: URI | undefined, folders: readonly { uri: URI }[]): void;
   bindPanel(...args: unknown[]): void;
   restoreTabs(...args: unknown[]): Promise<void>;
@@ -385,7 +390,7 @@ interface Harness {
   information(handler: (...args: unknown[]) => unknown): void;
   openSession(context: unknown, index: SessionIndex, argument: unknown, verb: "opened" | "resumed"): Promise<void>;
   picker(mode: "chat" | "terminal" | undefined): void;
-  folders(folders: readonly { id: string; path: string; collapsed: boolean; pinned: boolean; open: boolean }[]): void;
+  folders(folders: readonly { id: string; path: string; collapsed: boolean; pinned: boolean; open: boolean; openHere: boolean; openElsewhere: boolean }[]): void;
   errors(): readonly string[];
   handleChatEvent(...args: unknown[]): void;
   confirmAndDeleteSession(...args: unknown[]): Promise<boolean>;
@@ -1170,7 +1175,7 @@ describe("native replacement lifecycle", () => {
     const row = await index.trackSession({ sessionFile: file, cwd: root });
     harness.reset(index, { stateOf: () => null });
     const provider = new harness.SessionTreeProvider({
-      folders: () => [{ id: "folder:watched", path: root, collapsed: false, pinned: true, open: false }],
+      folders: () => [{ id: "folder:watched", path: root, collapsed: false, pinned: true, open: false, openHere: false, openElsewhere: false }],
       entries: () => index.list(),
       activeTabId: () => null,
       facts: () => ({ open: false, running: false, outcome: null, activity: null }),
@@ -1196,11 +1201,13 @@ describe("native replacement lifecycle", () => {
       await shown("stopped");
       rival = await harness.acquireClaim(claimDir, file, "remote-window-owner", harness.createClaimHolder());
       await shown("otherWindow");
-      // Open and a click explain instead of launching: no writer is started or recorded.
+      // Open and a click switch to the owner instead of launching: no writer is started or recorded.
+      // This rival has no window identity, so the switch is impossible and the one message says why.
       const informed: unknown[] = [];
       harness.information(async message => { informed.push(message); });
       await harness.openSession(undefined, index, { tabId: row.tabId }, "resumed");
       assert.equal(informed.length, 1, "a rival without window metadata is explained, never launched");
+      assert.match(String(informed[0]), /cannot be brought forward/);
       assert.equal(index.get(row.tabId)?.host ?? null, null);
       await rival.release(); rival = null;
       await shown("stopped");
@@ -1995,7 +2002,7 @@ describe("verified-owned-writer policy fixtures", () => {
     const lease = { held: true as boolean | null, fresh: 0 };
     harness.setExternalLeases(leaseObserver(lease));
     const provider = new harness.SessionTreeProvider({
-      folders: () => [{ id: "folder:click", path: f.index.get(TAB)!.cwd, collapsed: false, pinned: true, open: false }],
+      folders: () => [{ id: "folder:click", path: f.index.get(TAB)!.cwd, collapsed: false, pinned: true, open: false, openHere: false, openElsewhere: false }],
       entries: () => f.index.list(),
       activeTabId: () => null,
       facts: () => ({ open: false, running: false, outcome: null, activity: null }),
@@ -2695,7 +2702,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 		const facts = { open: false, running: false, outcome: null, activity: null };
 		const first = Promise.withResolvers<{ ownershipChecked: boolean }>();
 		const provider = new harness.SessionTreeProvider({
-			folders: () => [{ id: "folder:owned", path: f.directory, collapsed: false, pinned: true, open: false }],
+			folders: () => [{ id: "folder:owned", path: f.directory, collapsed: false, pinned: true, open: false, openHere: false, openElsewhere: false }],
 			entries: () => f.index.list(),
 			activeTabId: () => f.row.tabId,
 			facts: tabId => tabId === f.row.tabId ? { ...facts, running: true } : facts,
@@ -3024,7 +3031,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 		const f = await fixture(true);
 		const secondary = await f.index.createDraft({ cwd: f.directory });
 		await f.index.setActiveTab(f.row.tabId);
-		const folders = [{ id: "folder:owned", path: f.directory, collapsed: false, pinned: true, open: false }];
+		const folders = [{ id: "folder:owned", path: f.directory, collapsed: false, pinned: true, open: false, openHere: false, openElsewhere: false }];
 		const revealGate = Promise.withResolvers<void>();
 		const revealed: string[] = [];
 		const provider = new harness.SessionTreeProvider({
@@ -3051,7 +3058,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			assert.deepEqual(revealed, [f.row.tabId]);
 			await f.index.setActiveTab(secondary.tabId);
 			const latest = harness.revealActiveSession(f.index);
-			folders.push({ id: "folder:later", path: path.join(f.directory, "later"), collapsed: false, pinned: true, open: false });
+			folders.push({ id: "folder:later", path: path.join(f.directory, "later"), collapsed: false, pinned: true, open: false, openHere: false, openElsewhere: false });
 			provider.refresh();
 			assert.deepEqual(provider.getChildren().map(row => row.id), ["folder:owned"], "structural publication cannot cancel an active reveal");
 			revealGate.resolve();
@@ -3448,7 +3455,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 		const f = await fixture();
 		try {
 			harness.picker("terminal"); await harness.chooseDefaultSessionView(f.saved.context);
-			harness.folders([{ id: "folder-mode", path: f.directory, collapsed: false, pinned: true, open: false }]);
+			harness.folders([{ id: "folder-mode", path: f.directory, collapsed: false, pinned: true, open: false, openHere: false, openElsewhere: false }]);
 			const requests: { transport?: string; sessionFile: string | null }[] = [];
 			harness.policy(f.saved.context, {
 				readProcessIdentity: async () => ({ kind: "gone" }), isProcessAlive: () => false,
@@ -3868,20 +3875,215 @@ describe("owning-window navigation", () => {
     harness.setWindowWorkspace(undefined, []);
   });
 
-  it("routes to the verified holder's workspace rather than the session cwd and never launches", async () => {
+  /** A holder whose claim names `windowUri`, and a directory where requests to it are served (or not). */
+  async function holderOf(windowUri: string | null, serve: ServeOutcome | null) {
     const owner = harness.createClaimHolder();
-    const target = URI.file("C:/sample/sample.code-workspace");
+    const storageDir = await mkdtemp(path.join(root, "switch-"));
+    const served: SwitchRequest[] = [];
+    const watch = serve === null ? null : startRequestWatch(storageDir, owner.id, async request => { served.push(request); return serve; }, { debounceMs: 10 });
     const index = {
       claimHolder: { id: "this-window" },
-      observeOwnership: async () => ({ ok: true, claim: { verifiable: true, holderId: owner.id, pid: owner.pid, windowUri: target.toString() } }),
+      claimStorageDir: storageDir,
+      get: () => ({ ownership: { ownerGeneration: "gen-1" }, host: null }),
+      observeOwnership: async () => ({ ok: true, claim: { verifiable: true, holderId: owner.id, pid: owner.pid, ownerGeneration: "gen-1", windowUri } }),
     };
+    return { index, served, stop: () => watch?.dispose() };
+  }
+
+  it("switches at once to the verified holder's workspace and has it select the tab, with no message", async () => {
+    const target = URI.file("C:/sample/sample.code-workspace");
+    const { index, served, stop } = await holderOf(target.toString(), { ok: true, focused: true });
+    const informed: unknown[] = [];
+    harness.information(async message => { informed.push(message); });
+    harness.warning(async message => { informed.push(message); });
     const calls = harness.commandHandler(null);
-    await harness.switchToSessionWindow(index, TAB);
-    assert.equal(calls.length, 1);
+    try {
+      await harness.switchToSessionWindow(index, TAB);
+    } finally { stop(); }
+    assert.equal(calls.length, 1, "nothing is launched and nothing else is run");
     assert.equal(calls[0]?.[0], "vscode.openFolder");
     assert.equal((calls[0]?.[1] as URI).toString(), target.toString());
-    assert.deepEqual(calls[0]?.[2], { forceNewWindow: false });
+    assert.deepEqual(calls[0]?.[2], { forceNewWindow: true }, "focus the owner; never replace this window if the owner just closed");
+    assert.deepEqual(served.map(request => [request.tabId, request.incarnation]), [[TAB, "gen-1_none"]]);
+    assert.deepEqual(informed, [], "a switch that works is silent");
     harness.commandHandler(null);
+  });
+
+  it("explains why, and does not try to open anything, when the owner has no window identity", async () => {
+    const { index, served, stop } = await holderOf(null, { ok: true, focused: true });
+    const informed: unknown[] = [];
+    harness.information(async message => { informed.push(message); });
+    const calls = harness.commandHandler(null);
+    try {
+      await harness.switchToSessionWindow(index, TAB);
+    } finally { stop(); }
+    assert.equal(calls.length, 0);
+    assert.equal(informed.length, 1);
+    assert.match(String(informed[0]), /no saved workspace or single-folder identity/);
+    assert.match(String(informed[0]), /tab is selected there/, "the owner was still asked to select it");
+    assert.equal(served.length, 1);
+    harness.commandHandler(null);
+  });
+
+  it("says that the owner no longer has the editor, did not respond, or did not come to the front", async () => {
+    const target = URI.file("C:/sample/other.code-workspace");
+    const warnings: unknown[] = [];
+    const informed: unknown[] = [];
+    harness.warning(async message => { warnings.push(message); });
+    harness.information(async message => { informed.push(message); });
+    const refusing = await holderOf(target.toString(), { ok: false, focused: false });
+    try { await harness.switchToSessionWindow(refusing.index, TAB); } finally { refusing.stop(); }
+    assert.match(String(informed[0]), /no longer has an editor open/);
+    const unfocused = await holderOf(target.toString(), { ok: true, focused: false });
+    try { await harness.switchToSessionWindow(unfocused.index, TAB); } finally { unfocused.stop(); }
+    assert.match(String(informed[1]), /did not bring it to the front/);
+    assert.deepEqual(warnings, []);
+    harness.commandHandler(null);
+  });
+});
+
+describe("serving another window's request to select a session's tab", () => {
+  const tabFor = (n: number) => `tab:88888888-2222-4333-8444-55555555555${n}`;
+  const ours = { ok: true, claim: { verifiable: true, holderId: "fixture-window", pid: process.pid, ownerGeneration: OWNER, windowUri: null } };
+  const elsewhere = { ok: true, claim: { verifiable: true, holderId: "another-window", pid: process.pid, ownerGeneration: OWNER, windowUri: null } };
+  const earlierRun = { ok: true, claim: { ...ours.claim, ownerGeneration: "a-generation-this-window-does-not-record" } };
+  const wanted = { stillWanted: async () => true };
+  const refused = { ok: false, focused: false };
+  /** The request was made at this time; a binding committed before it is the one the requester saw. */
+  const MADE = "2026-10-10T10:00:00.000Z";
+
+  /** An editor VS Code restored but has not shown yet, in a window that holds the session. */
+  function setup(n: number) {
+    const slot = String(n).repeat(32);
+    const TAB_B = tabFor(n);
+    const index = indexFixture(runtime(930 + n));
+    harness.reset(index, null);
+    harness.editor(index, {}, null, slot, TAB_B);
+    const groups = harness.tabStrip([[harness.viewTypeOf(TAB_B, slot)]], 0);
+    const calls = harness.commandHandler((command, argument) => {
+      if (command === "workbench.action.openEditorAtIndex") groups[0]!.tabs[argument as number]!.isActive = true;
+    });
+    // What the real index offers and the fixture does not: a live host and a committed binding.
+    const binding = { tabId: TAB_B, role: "controlling", mode: "chat" as const, generation: 3, committedAt: "2026-10-10T09:00:00.000Z" };
+    const loose = index as unknown as { observeOwnership: () => Promise<unknown>; hasLiveHost: () => boolean; slotBinding: () => typeof binding };
+    loose.hasLiveHost = () => true;
+    loose.slotBinding = () => binding;
+    loose.observeOwnership = async () => ours;
+    const incarnation = `${OWNER}_${index.row.host.pid === undefined ? "none" : `.${index.row.host.pid}`}`;
+    const request = { version: 1, id: "id-1", to: "fixture-window", from: "other", tabId: TAB_B, incarnation, binding: `${slot}.3`, createdAt: MADE };
+    return { index, loose, binding, calls, request };
+  }
+  const finish = () => { harness.commandHandler(null); harness.tabStrip([]); };
+
+  it("selects the editor it already has and requests nothing else", async () => {
+    const { index, calls, request } = setup(1);
+    assert.deepEqual(await harness.selectHeldSessionTab(index, request, wanted), { ok: true, focused: true });
+    assert.deepEqual(calls, [["workbench.action.openEditorAtIndex", 0]], "the tab is selected; no open, restore, launch or mode change is requested");
+    finish();
+  });
+
+  it("refuses, selecting nothing, when this window records another run than the request names", async () => {
+    const { index, calls, request } = setup(2);
+    assert.deepEqual(await harness.selectHeldSessionTab(index, { ...request, incarnation: `${OWNER}_an-earlier-launch` }, wanted), refused);
+    assert.deepEqual(calls, []);
+    finish();
+  });
+
+  it("refuses, selecting nothing, when the claim is not this window's or is of another generation, or when the requester gave up", async () => {
+    const { index, loose, calls, request } = setup(3);
+    loose.observeOwnership = async () => elsewhere;
+    assert.deepEqual(await harness.selectHeldSessionTab(index, request, wanted), refused);
+    loose.observeOwnership = async () => earlierRun;
+    assert.deepEqual(await harness.selectHeldSessionTab(index, request, wanted), refused, "the claim names this window but not the generation the catalog records");
+    loose.observeOwnership = async () => ours;
+    assert.deepEqual(await harness.selectHeldSessionTab(index, request, { stillWanted: async () => false }), refused);
+    assert.deepEqual(calls, []);
+    finish();
+  });
+
+  it("refuses, selecting nothing, for a session it has no editor for, and when it has no live host to serve it", async () => {
+    const { index, loose, calls, request } = setup(4);
+    assert.deepEqual(await harness.selectHeldSessionTab(index, { ...request, tabId: tabFor(5) }, wanted), refused);
+    loose.hasLiveHost = () => false;
+    assert.deepEqual(await harness.selectHeldSessionTab(index, request, wanted), refused, "showing a not-yet-revived editor could otherwise start a restore of a session nothing serves");
+    assert.deepEqual(calls, []);
+    finish();
+  });
+
+  it("refuses a request that names another binding of the editor than the one now serving the session (a native handover and back)", async () => {
+    const { index, binding, calls, request } = setup(6);
+    binding.generation = 4;
+    assert.deepEqual(await harness.selectHeldSessionTab(index, request, wanted), refused);
+    assert.deepEqual(calls, []);
+    assert.deepEqual(await harness.selectHeldSessionTab(index, { ...request, binding: null }, wanted), { ok: true, focused: true }, "a request that saw no published binding is fenced by the run alone");
+    finish();
+  });
+
+  it("does not select for a requester that gave up while the claim was being read", async () => {
+    const { index, loose, calls, request } = setup(9);
+    let release!: () => void;
+    const stalled = new Promise<void>(resolve => { release = resolve; });
+    let wantedNow = true;
+    loose.observeOwnership = async () => { await stalled; return ours; };
+    const pending = harness.selectHeldSessionTab(index, request, { stillWanted: async () => wantedNow });
+    wantedNow = false;
+    release();
+    assert.deepEqual(await pending, refused);
+    assert.deepEqual(calls, []);
+    finish();
+  });
+
+  it("does not report success when the claim or the binding changed while it selected", async () => {
+    const claimMoved = setup(7);
+    let reads = 0;
+    claimMoved.loose.observeOwnership = async () => (++reads === 1 ? ours : elsewhere);
+    assert.deepEqual(await harness.selectHeldSessionTab(claimMoved.index, claimMoved.request, wanted), refused);
+    finish();
+    const rebound = setup(8);
+    let looks = 2;
+    rebound.loose.slotBinding = () => ({ ...rebound.binding, generation: ++looks });
+    assert.deepEqual(await harness.selectHeldSessionTab(rebound.index, rebound.request, wanted), refused);
+    finish();
+  });
+
+  it("defers the serializer's restore of a tab it is showing, however late VS Code revives the editor, and only once", async () => {
+    const { index, loose, request } = setup(5);
+    assert.deepEqual(await harness.selectHeldSessionTab(index, request, wanted), { ok: true, focused: true });
+    assert.ok(harness.requestSelections.has(request.tabId), "the tab is marked until its editor is revived");
+    // Nothing releases the mark on time: the serializer reaches the helper long after the request was answered.
+    await new Promise(resolve => setTimeout(resolve, 100));
+    assert.ok(harness.requestSelections.has(request.tabId));
+    loose.hasLiveHost = () => false;
+    const touched: string[] = [];
+    const watched = new Proxy(index as object, { get: (target, name, receiver) => { touched.push(String(name)); return Reflect.get(target, name, receiver); } });
+    await harness.openRestoredTabIfUncovered({}, watched, request.tabId);
+    assert.deepEqual(touched.filter(name => !["get", "hasLiveHost"].includes(name)), [], "nothing was opened, restored or claimed");
+    assert.equal(harness.requestSelections.has(request.tabId), false, "the revival consumed the mark");
+    harness.requestSelections.clear();
+    finish();
+  });
+
+  it("keeps the serializer deferral even when the selection did not end with the tab active", async () => {
+    const { index, loose, calls, request } = setup(1);
+    // Another selection wins: the command is issued, VS Code schedules the revival, the tab is not active afterwards.
+    harness.commandHandler(() => undefined);
+    assert.deepEqual(await harness.selectHeldSessionTab(index, request, wanted), refused);
+    assert.ok(harness.requestSelections.has(request.tabId), "a command may already have triggered the revival");
+    void calls;
+    loose.hasLiveHost = () => false;
+    const touched: string[] = [];
+    const watched = new Proxy(index as object, { get: (target, name, receiver) => { touched.push(String(name)); return Reflect.get(target, name, receiver); } });
+    await harness.openRestoredTabIfUncovered({}, watched, request.tabId);
+    assert.deepEqual(touched.filter(name => !["get", "hasLiveHost"].includes(name)), []);
+    harness.requestSelections.clear();
+    finish();
+  });
+
+  it("refuses a request that names the binding of another editor slot of the same run", async () => {
+    const { index, calls, request } = setup(0);
+    assert.deepEqual(await harness.selectHeldSessionTab(index, { ...request, binding: `${"f".repeat(32)}.3` }, wanted), refused);
+    assert.deepEqual(calls, []);
+    finish();
   });
 });
 

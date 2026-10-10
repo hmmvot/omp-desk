@@ -1,27 +1,29 @@
 /**
- * OMP Desk — the folders the Sessions view shows in this window.
+ * OMP Desk — the folders the Sessions view shows.
  *
- * The displayed list is a per-window union of three sources, deduplicated by
- * filesystem identity (`folderIdentityKey`) so one directory appears once whatever
- * its spelling:
+ * The displayed list is a union of three sources, deduplicated by filesystem identity
+ * (`folderIdentityKey`) so one directory appears once whatever its spelling, and it is the
+ * same list in every window of the profile (ADR-0056):
  *
- * 1. the folders VS Code has open in this window (the single folder, or every root
- *    of a multi-root workspace; local `file` roots only), in VS Code's order and
- *    only while `omp.showWorkspaceFolders` is on. With `omp.useAgentRootFolder` an open
+ * 1. the folders VS Code has open in any live window (the single folder, or every root
+ *    of a multi-root workspace; local `file` roots only), windows in the order they
+ *    started and each window's folders in VS Code's order, only while
+ *    `omp.showWorkspaceFolders` is on. With `omp.useAgentRootFolder` an open
  *    folder without agent files inside a Git repository whose root has them is shown as
  *    that ancestor (`src/views/agent-root.ts`); the opened folder stays in `openedPaths`
  *    so the sessions recorded there keep their place;
  * 2. the profile-wide **pinned** folders (`WorkspaceFolderRegistry`), in their
  *    stored order; a pinned folder that is also open keeps its place among the open
  *    ones and says it is pinned;
- * 3. folders that are neither pinned nor open but hold a session this window runs,
+ * 3. folders that are neither pinned nor open but hold a session some window runs,
  *    so a live row never disappears with its workspace folder.
  *
  * Only pinned folders are durable and shared. Open and live-only folders are derived
- * from this window every time and never persisted; the one thing kept for them is
- * the collapsed state of their node, in this window's own store. This module owns no
- * session identity, claim or host handle; it reads only what it is handed, plus the
- * filesystem to resolve a path's identity (remembered per path, see `forgetIdentities`).
+ * from the windows' leased records every time and never persisted; the one thing kept
+ * for them is the collapsed state of their node, in this window's own store. This module
+ * owns no session identity, claim, host handle or window record; it reads only what it is
+ * handed, plus the filesystem to resolve a path's identity (remembered per path, see
+ * `forgetIdentities`).
  *
  * Ids stay stable across pinning: an unpinned folder's id is `windowFolderId(path)`,
  * and Pin registers the folder under exactly that id, so a folder-scoped command or
@@ -38,12 +40,22 @@ import { normalizeWorkspaceDirectory } from "../host/session-index.ts";
 /** Window-scoped key holding the ids of unpinned folders whose node the user collapsed. */
 export const WINDOW_FOLDER_COLLAPSED_KEY = "omp.windowFolderCollapsed.v1";
 
+/** One live window and the folders VS Code has open in it. */
+export interface OpenFolderWindow {
+	readonly here: boolean;
+	readonly paths: readonly string[];
+}
+
 /** One folder as the Sessions view shows it. */
 export interface LauncherFolder extends WorkspaceFolder {
-	/** Kept in the profile-wide pinned list: it survives this window and shows in every window. */
+	/** Kept in the profile-wide pinned list: it survives its window and shows in every window. */
 	readonly pinned: boolean;
-	/** VS Code has this folder open in this window. */
+	/** VS Code has this folder open in some live window of the profile. */
 	readonly open: boolean;
+	/** ...in this window. Only a tooltip says so: the folder looks the same in every window. */
+	readonly openHere: boolean;
+	/** ...in another window. */
+	readonly openElsewhere: boolean;
 	/**
 	 * The opened folders this one is shown instead of, because the repository's agent files live
 	 * here and not in them (`omp.useAgentRootFolder`); absent for a folder shown as itself.
@@ -70,8 +82,12 @@ export interface LauncherFoldersOptions {
 	readonly pinned: PinnedFolders;
 	/** This window's own store (workspace state): the collapsed state of unpinned folders. */
 	readonly local: WorkspaceFolderStore;
-	/** Absolute local paths of the folders VS Code has open, in VS Code's order. */
-	readonly windowPaths: () => readonly string[];
+	/**
+	 * The live windows of the profile in the one order every window derives (this window
+	 * included, flagged `here`), each with the absolute local paths of the folders VS Code has
+	 * open in it, in VS Code's order.
+	 */
+	readonly windows: () => readonly OpenFolderWindow[];
 	/**
 	 * The folder an opened folder is shown as (its agent root), read from what was resolved
 	 * already; the opened folder itself when nothing replaces it or the setting is off.
@@ -79,7 +95,7 @@ export interface LauncherFoldersOptions {
 	readonly agentRoot?: (windowPath: string) => string;
 	/** The `omp.showWorkspaceFolders` setting. */
 	readonly showWindowFolders: () => boolean;
-	/** Working directories of the sessions that run in this window. */
+	/** Working directories of the sessions that run in any live window, in window order. */
 	readonly liveSessionCwds: () => readonly string[];
 }
 
@@ -99,7 +115,7 @@ const IDENTITY_MEMORY_LIMIT = 256;
 export class LauncherFolders {
 	readonly #pinned: PinnedFolders;
 	readonly #local: WorkspaceFolderStore;
-	readonly #windowPaths: () => readonly string[];
+	readonly #windows: () => readonly OpenFolderWindow[];
 	readonly #agentRoot: (windowPath: string) => string;
 	readonly #showWindowFolders: () => boolean;
 	readonly #liveSessionCwds: () => readonly string[];
@@ -109,7 +125,7 @@ export class LauncherFolders {
 	constructor(options: LauncherFoldersOptions) {
 		this.#pinned = options.pinned;
 		this.#local = options.local;
-		this.#windowPaths = options.windowPaths;
+		this.#windows = options.windows;
 		this.#agentRoot = options.agentRoot ?? (windowPath => windowPath);
 		this.#showWindowFolders = options.showWindowFolders;
 		this.#liveSessionCwds = options.liveSessionCwds;
@@ -147,42 +163,55 @@ export class LauncherFolders {
 		const pinned = this.#pinned.list();
 		const pinnedKeys = pinned.map(folder => this.#identityOf(folder.path).key);
 		const collapsedIds = this.#collapsedIds();
-		const openKeys = new Set<string>();
-		const windowEntries: Array<{ readonly identity: PathIdentity; readonly path: string; readonly opened: string[] }> = [];
-		const substitutedKeys = new Set<string>();
-		for (const windowPath of this.#windowPaths()) {
-			const shownPath = this.#agentRoot(windowPath);
-			const identity = this.#identityOf(shownPath);
-			const ownKey = this.#identityOf(windowPath).key;
-			let entry = windowEntries.find(candidate => candidate.identity.key === identity.key);
-			if (entry === undefined) {
-				openKeys.add(identity.key);
-				entry = { identity, path: shownPath, opened: [] };
-				windowEntries.push(entry);
+		// Where each identity is open: an opened folder counts for itself and, when it is shown as
+		// its agent root, for the pinned twin of the opened folder as well.
+		const presence = new Map<string, { here: boolean; elsewhere: boolean }>();
+		const markOpen = (key: string, here: boolean): void => {
+			const seen = presence.get(key) ?? { here: false, elsewhere: false };
+			if (here) seen.here = true;
+			else seen.elsewhere = true;
+			presence.set(key, seen);
+		};
+		const windowEntries: Array<{ readonly identity: PathIdentity; readonly path: string; readonly opened: string[]; here: boolean; elsewhere: boolean }> = [];
+		for (const window of this.#windows()) {
+			for (const windowPath of window.paths) {
+				const shownPath = this.#agentRoot(windowPath);
+				const identity = this.#identityOf(shownPath);
+				const ownKey = this.#identityOf(windowPath).key;
+				let entry = windowEntries.find(candidate => candidate.identity.key === identity.key);
+				if (entry === undefined) {
+					entry = { identity, path: shownPath, opened: [], here: false, elsewhere: false };
+					windowEntries.push(entry);
+				}
+				if (window.here) entry.here = true;
+				else entry.elsewhere = true;
+				markOpen(identity.key, window.here);
+				// An opened folder shown as its ancestor still counts as open, for a pinned twin of it.
+				if (ownKey === identity.key) continue;
+				markOpen(ownKey, window.here);
+				if (!entry.opened.some(opened => this.#identityOf(opened).key === ownKey)) entry.opened.push(windowPath);
 			}
-			// An opened folder shown as its ancestor still counts as open, for a pinned twin of it.
-			if (ownKey === identity.key) continue;
-			substitutedKeys.add(ownKey);
-			if (!entry.opened.some(opened => this.#identityOf(opened).key === ownKey)) entry.opened.push(windowPath);
 		}
 		const shown: LauncherFolder[] = [];
 		const consumed = new Set<number>();
 		if (this.#showWindowFolders()) {
 			for (const entry of windowEntries) {
 				const openedPaths = entry.opened.length > 0 ? { openedPaths: entry.opened } : {};
+				const presenceFlags = { open: true, openHere: entry.here, openElsewhere: entry.elsewhere };
 				const at = pinnedKeys.indexOf(entry.identity.key);
 				if (at >= 0) {
 					consumed.add(at);
-					shown.push({ ...pinned[at]!, pinned: true, open: true, ...openedPaths });
+					shown.push({ ...pinned[at]!, pinned: true, ...presenceFlags, ...openedPaths });
 					continue;
 				}
 				const id = entry.identity.id;
-				shown.push({ id, path: entry.path, collapsed: collapsedIds.has(id), pinned: false, open: true, ...openedPaths });
+				shown.push({ id, path: entry.path, collapsed: collapsedIds.has(id), pinned: false, ...presenceFlags, ...openedPaths });
 			}
 		}
 		pinned.forEach((folder, at) => {
 			if (consumed.has(at)) return;
-			shown.push({ ...folder, pinned: true, open: openKeys.has(pinnedKeys[at]!) || substitutedKeys.has(pinnedKeys[at]!) });
+			const seen = presence.get(pinnedKeys[at]!);
+			shown.push({ ...folder, pinned: true, open: seen !== undefined, openHere: seen?.here === true, openElsewhere: seen?.elsewhere === true });
 		});
 		const usedIds = new Set(shown.map(folder => folder.id));
 		for (const cwd of this.#liveSessionCwds()) {
@@ -194,7 +223,7 @@ export class LauncherFolders {
 			let id = this.#identityOf(cwd).id;
 			if (usedIds.has(id)) id = folderIdFromKey(`spelling:${normalizeWorkspaceDirectory(cwd)}`);
 			usedIds.add(id);
-			shown.push({ id, path: cwd, collapsed: collapsedIds.has(id), pinned: false, open: false });
+			shown.push({ id, path: cwd, collapsed: collapsedIds.has(id), pinned: false, open: false, openHere: false, openElsewhere: false });
 		}
 		return shown;
 	}
@@ -237,7 +266,7 @@ export class LauncherFolders {
 		const added = await this.#pinned.add(rawPath, { collapsed: shown?.collapsed === true });
 		if (!added.ok) return added;
 		if (added.created) await this.#writeCollapsed(added.folder.id, false);
-		return { ok: true, folder: this.get(added.folder.id) ?? { ...added.folder, pinned: true, open: false }, created: added.created };
+		return { ok: true, folder: this.get(added.folder.id) ?? { ...added.folder, pinned: true, open: false, openHere: false, openElsewhere: false }, created: added.created };
 	}
 
 	/** Pin a folder the view shows. The pinned record carries the folder's own id and collapsed state. */
@@ -248,7 +277,7 @@ export class LauncherFolders {
 		const added = await this.#pinned.add(folder.path, { collapsed: folder.collapsed });
 		if (!added.ok) return { ok: false, reason: added.reason };
 		if (added.created) await this.#writeCollapsed(folder.id, false);
-		const pinned = this.get(added.folder.id) ?? { ...added.folder, pinned: true, open: folder.open };
+		const pinned = this.get(added.folder.id) ?? { ...added.folder, pinned: true, open: folder.open, openHere: folder.openHere, openElsewhere: folder.openElsewhere };
 		return { ok: true, folder: pinned, created: added.created };
 	}
 

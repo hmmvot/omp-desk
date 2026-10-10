@@ -56,6 +56,8 @@ import { folderOwnsCwd } from "./workspace-folders";
 import type { LauncherFolder } from "./launcher-folders";
 import type { WorkspaceFolder } from "./workspace-folders";
 import { isUnread } from "../host/session-unread";
+import { sessionIncarnation } from "../host/window-registry";
+import type { PublishedRowStatus } from "../host/window-registry";
 import { activityMillis, flatFolderLabels, flatRowLabel, orderFlatRows } from "./session-order";
 import type { FlatOrderFacts, SessionsGrouping } from "./session-order";
 
@@ -108,7 +110,9 @@ export interface SessionLauncherFacts {
 	readonly restoring?: boolean;
 	/** A current claim read proves another live window holds this conversation. */
 	readonly heldElsewhere?: boolean;
-	/** The verified other holder has a saved workspace or single-folder navigation identity. */
+	/** The claim holder id and owner generation of that other window. */
+	readonly heldBy?: string | null;
+	readonly heldGeneration?: string | null;
 	readonly switchableWindow?: boolean;
 	/**
 	 * A plain `omp` process this extension does not own holds this session's OMP lease
@@ -167,10 +171,16 @@ export interface SessionLauncherSource {
 	hasRecoverableShell?(folder: WorkspaceFolder): boolean;
 	/** How rows are arranged now; a source that omits it keeps the folder tree. */
 	grouping?(): SessionsGrouping;
+	/**
+	 * What the window registry knows about the live window holding a row this window does not
+	 * run (`holderId` is the claim's holder, or `null` when unknown). A source that omits it
+	 * shows such a row as Running.
+	 */
+	peer?(tabId: string, holderId: string | null, incarnation: string | null): PeerRow | null;
 }
 
 export type SessionOwnershipFacts = Pick<SessionLauncherFacts,
-	"heldElsewhere" | "switchableWindow" | "externalOmp" | "ownedWriterPid" | "ownershipChecked" | "legacyWriter">;
+	"heldElsewhere" | "heldBy" | "heldGeneration" | "switchableWindow" | "externalOmp" | "ownedWriterPid" | "ownershipChecked" | "legacyWriter">;
 
 interface RowObservation {
 	identity: string;
@@ -226,6 +236,9 @@ export type SessionItemState =
  * the row: a row label is truncated by a long title and takes its description with it, a badge is not.
  */
 export const SESSION_DECORATION_SCHEME = "omp-session";
+/** The badge after the status of a row another window runs: two joined squares, one character. */
+const OTHER_WINDOW_BADGE = "\u29C9";
+type RowBadge = "unread" | "other" | "unread-other";
 
 const STATE_LABEL: Record<SessionItemState, string> = {
 	otherWindow: "Open in another window",
@@ -465,6 +478,7 @@ function sessionTooltip(
 	conversation: SessionConversation | null,
 	now: number,
 	unread = false,
+	where: string | null = null,
 ): string {
 	const lines = [
 		sessionHeadline(entry, header).replace(/\r\n|\r|\n/g, " "),
@@ -474,8 +488,8 @@ function sessionTooltip(
 		lines.push(conversation.lastAt === null ? "No activity yet" : `Last activity: ${relativeAge(conversation.lastAt, now)}`);
 	}
 	if (unread && state !== "unread") lines.push("Unread reply");
+	if (where !== null) lines.push(where);
 	if (state === "stopped" || state === "draft") lines.push("Resume to send a message.");
-	if (state === "otherWindow") lines.push("Switch to that window to use this session.");
 	if (state === "externalOmp") lines.push("Open here to choose whether to continue separately.");
 	return lines.join("\n");
 }
@@ -487,9 +501,11 @@ function latestConversationAt(times: readonly (string | null)[]): string | null 
 }
 
 function folderTooltip(folder: LauncherFolder, latest: string | null, hasRecoverableShell: boolean, now: number): string {
+	const where = folder.openHere && folder.openElsewhere ? "Open in this and another window"
+		: folder.openHere ? "Open in this window" : folder.openElsewhere ? "Open in another window" : null;
 	const lines = [
 		folderHeadline(folder.path).replace(/\r\n|\r|\n/g, " "),
-		folder.pinned ? `Pinned${folder.open ? " · Open in this window" : ""}` : folder.open ? "Open in this window" : "Sessions running in this window",
+		folder.pinned ? `Pinned${where === null ? "" : ` · ${where}`}` : where ?? "Kept while a session runs in it",
 		latest === null ? "No session activity yet" : `Last activity: ${relativeAge(latest, now)}`,
 		...(folder.openedPaths === undefined || folder.openedPaths.length === 0 ? [] : [
 			`Shown instead of the opened ${folder.openedPaths.map(opened => `"${opened}"`).join(", ")} because the repository's agent files are here.`,
@@ -510,6 +526,36 @@ interface SessionRowPresentation {
 	folderLabel?: string | null;
 	/** The agent finished or asked and the user has not looked since (see `src/host/session-unread.ts`). */
 	unread?: boolean;
+	/** The window another window's claim shows holding this row: its published status and name, or `null` when unknown. */
+	peer?: PeerRow | null;
+}
+
+/** What the registry knows about the window that holds a row this window does not run. */
+export interface PeerRow {
+	/** The status that window publishes for the row; `null` until it has published one for this run. */
+	readonly status: PublishedRowStatus | null;
+	/** The conversation activity that window published for this run (ISO); `null` when none. */
+	readonly lastActivityAt: string | null;
+	/** That window's VS Code workspace name, for the tooltip; empty when unknown. */
+	readonly window: string;
+}
+
+/**
+ * The status a row shows: its own state, or for a row another window holds, the status that
+ * window published for the exact claim generation, with the shared unread marker applied the
+ * way the owner applies it (a settled, idle session with an unread reply is Unread reply).
+ * Without a matching publication the holder is known to run it and nothing more: Running.
+ */
+export function shownSessionState(state: SessionItemState, peer: PeerRow | null, unread: boolean): SessionItemState {
+	if (state !== "otherWindow") return state;
+	const status = peer?.status ?? "running";
+	return status === "waiting" && unread ? "unread" : status;
+}
+
+/** Which window the row is open in, for its tooltip; `null` when it is open in none this view knows of. */
+function hold(state: SessionItemState, row: SessionRowPresentation): string | null {
+	if (state === "otherWindow") return `Open in another window${row.peer?.window ? `: ${row.peer.window}` : ""}. Click to switch to it.`;
+	return row.facts.running ? "Open in this window" : null;
 }
 
 /**
@@ -572,14 +618,16 @@ export class SessionTreeItem extends vscode.TreeItem {
 		this.deletable = entry.sessionFile !== null &&
 			(DELETABLE_STATE[state] || state === "running" || row.facts.running);
 		this.resumable = state === "stopped" || state === "draft" || state === "running" || state === "checking" || row.facts.running;
-		const status = state === "otherWindow"
-			? `${row.facts.activity?.pendingQuestion ? STATE_LABEL.question : row.facts.activity?.working ? STATE_LABEL.working : row.facts.activity?.backgroundWork ? STATE_LABEL.background : STATE_LABEL.running} · in another window`
-			: STATE_LABEL[state];
-		this.description = this.unread && state !== "unread" ? `Unread · ${status}` : status;
-		this.tooltip = sessionTooltip(entry, state, row.header, row.conversation, row.now, this.unread);
+		// A row another window holds is shown as that window shows it: its published status, so
+		// every window reads the same text and icon. `state` stays "otherWindow" for the menu
+		// contract, and the tooltip names the window.
+		const shown = shownSessionState(state, row.peer ?? null, this.unread);
+		const status = STATE_LABEL[shown];
+		this.description = this.unread && shown !== "unread" ? `Unread · ${status}` : status;
+		this.tooltip = sessionTooltip(entry, shown, row.header, row.conversation, row.now, this.unread, hold(state, row));
 		this.#diagnosticFacts = row.facts;
 		this.#diagnosticActive = row.active;
-		this.iconPath = STATE_ICON[state];
+		this.iconPath = STATE_ICON[shown];
 		// The menu conditions in package.json match on these segments, so the order is
 		// part of the contract:
 		// `ompSession.forgettable|held.<state>.<resumable|live-only>.<deletable|file-kept>.<materialized|fileless>.view-<chat|terminal|none>`.
@@ -596,7 +644,7 @@ export class SessionTreeItem extends vscode.TreeItem {
 			`view-${row.facts.open && row.facts.viewMode != null ? row.facts.viewMode : "none"}`,
 		].join(".");
 		if (state === "otherWindow" && row.facts.switchableWindow === true) this.contextValue += ".window-switchable";
-		const accessibilityLabel = `${row.folderLabel == null ? "" : `${row.folderLabel}, `}${headline}, ${STATE_LABEL[state]}${this.unread && state !== "unread" ? ", unread" : ""}${row.active ? ", selected session" : ""}`;
+		const accessibilityLabel = `${row.folderLabel == null ? "" : `${row.folderLabel}, `}${headline}, ${STATE_LABEL[shown]}${this.unread && shown !== "unread" ? ", unread" : ""}${row.active ? ", selected session" : ""}`;
 		this.accessibilityInformation = { label: accessibilityLabel };
 		this.resourceUri = vscode.Uri.from({ scheme: SESSION_DECORATION_SCHEME, path: `/${entry.tabId}` });
 	}
@@ -737,6 +785,9 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 	readonly onDidChangeTreeData = this.#changes.event;
 	readonly #served = new vscode.EventEmitter<void>();
 	readonly onDidServeTree = this.#served.event;
+	readonly #observed = new vscode.EventEmitter<void>();
+	/** A row's conversation activity was read and differs from before. */
+	readonly onDidObserveConversation = this.#observed.event;
 	#items: WorkspaceFolderTreeItem[] = [];
 	#byTabId = new Map<string, SessionTreeItem>();
 	#observations = new Map<string, RowObservation>();
@@ -763,13 +814,21 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 	#folderNames = new Map<string, string>();
 	#flatSignature = "";
 	readonly #decorationChanges = new vscode.EventEmitter<vscode.Uri[]>();
-	#unreadTabs = new Set<string>();
-	/** Registered by the extension; badges every unread row with a dot. */
+	#badges = new Map<string, RowBadge>();
+	/**
+	 * Registered by the extension; badges a row after its status: an unread dot (blue), and, in a
+	 * window that does not run the session, a "held elsewhere" glyph. The row's own icon is always
+	 * its status icon, whichever window shows it.
+	 */
 	readonly decorations: vscode.FileDecorationProvider = {
 		onDidChangeFileDecorations: this.#decorationChanges.event,
-		provideFileDecoration: uri => uri.scheme === SESSION_DECORATION_SCHEME && this.#unreadTabs.has(uri.path.slice(1))
-			? new vscode.FileDecoration("●", "Unread reply", new vscode.ThemeColor("charts.blue"))
-			: undefined,
+		provideFileDecoration: uri => {
+			const badge = uri.scheme === SESSION_DECORATION_SCHEME ? this.#badges.get(uri.path.slice(1)) : undefined;
+			if (badge === undefined) return undefined;
+			if (badge === "other") return new vscode.FileDecoration(OTHER_WINDOW_BADGE, "Open in another window");
+			const decoration = new vscode.FileDecoration(badge === "unread" ? "●" : `●${OTHER_WINDOW_BADGE}`, badge === "unread" ? "Unread reply" : "Unread reply; open in another window", new vscode.ThemeColor("charts.blue"));
+			return decoration;
+		},
 	};
 	readonly #newSessionRow = new NewSessionTreeItem();
 	readonly #resumeSessionRow = new ResumeSessionTreeItem();
@@ -794,6 +853,8 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 		if (this.#disposed) return;
 		if (options.ownership === true) {
 			for (const observation of this.#observations.values()) observation.dirty = true;
+			// A transcript that appeared, vanished or changed its title is read again too.
+			for (const header of this.#headers.values()) header.dirty = true;
 		}
 		for (const conversation of this.#conversations.values()) conversation.dirty = true;
 		this.#project();
@@ -918,6 +979,11 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 		return this.#items.find(folder => folder.rows.includes(element));
 	}
 
+	/** The conversation's last activity as this window read it, for the owner to publish; `null` until read. */
+	lastActivityOf(tabId: string): string | null {
+		return this.#conversations.get(tabId)?.value?.lastConversationAt ?? null;
+	}
+
 	dispose(): void {
 		this.#disposed = true;
 		this.#items = [];
@@ -928,6 +994,7 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 		this.#conversations.clear();
 		this.#decorationChanges.dispose();
 		this.#changes.dispose();
+		this.#observed.dispose();
 		this.#served.dispose();
 	}
 
@@ -989,11 +1056,16 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 					checking: observation.value?.ownershipChecked !== true,
 				};
 				const state = sessionItemState(entry, facts);
+				// The unread marker is shared catalog state, so every window shows it; only a plain OMP
+				// process outside this extension (not a window) is not this window's to read.
+				const peer = state === "otherWindow" ? this.#source.peer?.(entry.tabId, facts.heldBy ?? null, sessionIncarnation(entry)) ?? null : null;
+				// A row another window runs is ordered, and its age shown, from what its owner published for this
+				// run (nothing published means no activity, not this window's own reading), so every window agrees.
+				if (peer?.status != null) conversation = { lastAt: peer.lastActivityAt };
 				return { entry, header: entry.sessionFile === null ? null : header?.value ?? null,
-					conversation, facts, state, active: entry.tabId === activeTabId,
+					conversation, facts, state, active: entry.tabId === activeTabId, peer,
 					folderLabel: grouping === "flat" ? folderLabels.get(folder.id) ?? null : null,
-					// What another window or another OMP process runs is not this window's to read.
-					unread: isUnread(entry) && state !== "otherWindow" && state !== "externalOmp" };
+					unread: isUnread(entry) && state !== "externalOmp" };
 			}).sort((left, right) => {
 				const stopped = (state: SessionItemState) => state === "stopped" || state === "draft" ? 1 : 0;
 				return stopped(left.state) - stopped(right.state) || left.entry.ordinal - right.entry.ordinal;
@@ -1030,6 +1102,8 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 				old.folder.collapsed !== input.folder.collapsed ||
 				old.folder.pinned !== input.folder.pinned ||
 				old.folder.open !== input.folder.open ||
+				old.folder.openHere !== input.folder.openHere ||
+				old.folder.openElsewhere !== input.folder.openElsewhere ||
 				old.hasRecoverableShell !== input.hasRecoverableShell ||
 				old.rows.length !== input.rows.length ||
 				input.rows.some((row, position) => old.rows[position]?.tabId !== row.entry.tabId);
@@ -1049,14 +1123,14 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 		const byTabId = new Map<string, SessionTreeItem>();
 		const rowChanges: SessionTreeItem[] = [];
 		const newItems = inputs.map(input => {
-			const rows = input.rows.map(({ entry, header, conversation, facts, state, active, folderLabel, unread }) => {
+			const rows = input.rows.map(({ entry, header, conversation, facts, state, active, folderLabel, unread, peer }) => {
 				// The relative age is part of the key, so a refresh repaints a stale "x minutes ago".
 				const age = conversation?.lastAt == null ? null : relativeAge(conversation.lastAt, now);
-				const key = JSON.stringify([entry, header, conversation, age, facts, active, folderLabel, unread]);
+				const key = JSON.stringify([entry, header, conversation, age, facts, active, folderLabel, unread, peer]);
 				let row = previousRows.get(entry.tabId);
-				if (row === undefined) row = new SessionTreeItem(entry, state, { header, conversation, facts, active, now, folderLabel, unread });
+				if (row === undefined) row = new SessionTreeItem(entry, state, { header, conversation, facts, active, now, folderLabel, unread, peer });
 				else if (this.#presentation.get(entry.tabId) !== key) {
-					row.update(entry, state, { header, conversation, facts, active, now, folderLabel, unread });
+					row.update(entry, state, { header, conversation, facts, active, now, folderLabel, unread, peer });
 					rowChanges.push(row);
 				}
 				this.#presentation.set(entry.tabId, key);
@@ -1070,10 +1144,15 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 		});
 		this.#items = newItems;
 		this.#byTabId = byTabId;
-		const unreadTabs = new Set([...byTabId].filter(([, row]) => row.unread).map(([tabId]) => tabId));
-		const decorated = [...unreadTabs].filter(tabId => !this.#unreadTabs.has(tabId))
-			.concat([...this.#unreadTabs].filter(tabId => !unreadTabs.has(tabId)));
-		this.#unreadTabs = unreadTabs;
+		const badges = new Map<string, RowBadge>();
+		for (const [tabId, row] of byTabId) {
+			const other = row.state === "otherWindow";
+			if (row.unread) badges.set(tabId, other ? "unread-other" : "unread");
+			else if (other) badges.set(tabId, "other");
+		}
+		const decorated = [...badges].filter(([tabId, badge]) => this.#badges.get(tabId) !== badge).map(([tabId]) => tabId)
+			.concat([...this.#badges.keys()].filter(tabId => !badges.has(tabId)));
+		this.#badges = badges;
 		if (decorated.length > 0) this.#decorationChanges.fire(decorated.map(tabId => vscode.Uri.from({ scheme: SESSION_DECORATION_SCHEME, path: `/${tabId}` })));
 		this.#flatRows = flatOrder.map(tabId => byTabId.get(tabId)!);
 		this.#folderNames = folderNames;
@@ -1199,7 +1278,10 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 			const value = await readSessionFileActivity(conversation.file, previous);
 			if (!this.#disposed && this.#conversations.get(tabId) === conversation) {
 				conversation.value = value;
-				if ((previous === null) !== (value === null) || previous?.lastConversationAt !== value?.lastConversationAt) this.#project();
+				if ((previous === null) !== (value === null) || previous?.lastConversationAt !== value?.lastConversationAt) {
+					this.#project();
+					this.#observed.fire();
+				}
 			}
 		} catch (error) {
 			if (!this.#disposed) this.#onObservationError(error);
