@@ -34,6 +34,7 @@ import type { ChatClient } from "./lib/chat-client";
 import { chatBanner } from "./lib/chat-banner";
 import { captureDraft, offerRestoredDraft, releaseDraftCapture } from "./lib/draft-handoff";
 import { requestPanelAction } from "./lib/panel-actions";
+import { selectedText } from "./lib/selection-query";
 import { useChatSnapshot, useComposerPopupReport } from "./lib/use-chat";
 import { TerminalPane } from "./components/TerminalPane";
 import { sessionViewSnapshot, subscribeSessionView } from "./lib/session-view";
@@ -82,6 +83,8 @@ function SessionView({ client }: { client: ChatClient }): ReactNode {
 			const content = parseDraftHandoffContent(capture);
 			if (content === null) releaseDraftCapture(message.requestId);
 			guestTransport.post({ type: "omp:draft-reply", requestId: message.requestId, captured: content !== null, ...(content ?? { text: "", attachments: 0, recoverable: [] }) });
+		} else if (message.type === "omp:selection-request") {
+			guestTransport.post({ type: "omp:selection-reply", requestId: message.requestId, text: view.mode === "chat" ? selectedText(document) : "" });
 		} else if (message.type === "omp:draft-release") {
 			releaseDraftCapture(message.requestId);
 		} else if (message.type === "omp:draft-restore" && view.mode === "chat") {
