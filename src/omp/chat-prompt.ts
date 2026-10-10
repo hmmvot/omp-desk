@@ -34,6 +34,14 @@ export const CHAT_PROMPT_INJECTIONS: readonly ChatPromptInjection[] = [
 		id: "file-links",
 		text: "Write each file or folder you mention as a path in inline code, relative to the working directory or absolute, so it becomes a link: `src/app.ts`, `src/app.ts:42` for a line, `src/webview/` for a folder.",
 	},
+	{
+		// A Markdown link to a path renders its label (inline code kept) as a file link once the host proves the file; the
+		// line suffix is the definition the click opens (src/webview/components/Markdown.tsx). A symbol the model leaves
+		// plain is linked by the host when VS Code's workspace symbol providers find one definition
+		// (src/host/symbol-links.ts, docs/designs/2026-10-10-code-symbol-links.md): this rule only has to help.
+		id: "code-links",
+		text: "Link every code symbol at each mention, tables and lists included: [`App.start`](src/app.ts:12) with a definition line you saw, else the file alone: [`Parser`](src/parse.ts). Plain code only for a symbol you have not located; never guess a line or search just for one.",
+	},
 ];
 
 export function renderChatPrompt(injections: readonly ChatPromptInjection[]): string {

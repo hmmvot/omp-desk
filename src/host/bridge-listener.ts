@@ -99,6 +99,7 @@ const BRIDGE_STREAM_OPERATIONS: Record<string, true> = {
 	"terminal-probe": true,
 	"terminal-copy-reply": true,
 	"terminal-link-validate": true,
+	"terminal-link-symbols": true,
 	"terminal-link-open": true,
 	"terminal-input": true,
 	"terminal-resize": true,

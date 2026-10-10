@@ -7,6 +7,7 @@ import { test } from "node:test";
 import { existingTerminalFile, handleTerminalLink, openTerminalFile, openWebLink, resolveTerminalFileReference } from "./terminal-links.ts";
 import type { TerminalFileLocation, TerminalFileOpenApi, WebLinkOpenApi } from "./terminal-links.ts";
 import { parseGuestHostMessage, parseGuestWebviewMessage } from "../webview/messages.ts";
+import { parseTerminalLinkRequest } from "../webview/terminal-links.ts";
 
  test("relative, Windows absolute and real OMP vscode links resolve with positions", () => {
 	assert.deepEqual(resolveTerminalFileReference("src/file.ts:23:7", "D:\\repo"), { path: "D:\\repo\\src\\file.ts", line: 23, column: 7 });
@@ -64,7 +65,7 @@ test("a relative reference resolves against the cwd it is asked with and a missi
 		const replies: unknown[] = [];
 		let current = true;
 		const warnings: string[] = [];
-		const host = { cwd, isCurrent: () => current, reply: (message: unknown) => { replies.push(message); }, openFile: async (location: TerminalFileLocation) => { opened.push(location); }, revealInExplorer: async () => { throw new Error("a terminal link never reveals"); }, revealInOs: async () => { throw new Error("a terminal link never reveals"); }, openUrl: async (url: string) => { urls.push(url); }, warn: (message: string) => { warnings.push(message); } };
+		const host = { cwd, isCurrent: () => current, reply: (message: unknown) => { replies.push(message); }, openFile: async (location: TerminalFileLocation) => { opened.push(location); }, revealInExplorer: async () => { throw new Error("a terminal link never reveals"); }, revealInOs: async () => { throw new Error("a terminal link never reveals"); }, searchSymbols: async () => {}, openUrl: async (url: string) => { urls.push(url); }, warn: (message: string) => { warnings.push(message); } };
 		await handleTerminalLink({ type: "omp:terminal-link-validate", requestId: 7, target: "a b.ts:2:3" }, host);
 		assert.deepEqual(replies, [{ type: "omp:terminal-link-validation", requestId: 7, valid: true }]);
 		await handleTerminalLink({ type: "omp:terminal-link-open", requestId: 8, target: "a b.ts:2:3" }, host);
@@ -86,7 +87,7 @@ test("a failed open surfaces a short warning with the cause", async () => {
 	try {
 		await writeFile(join(cwd, "image.png"), "x");
 		const warnings: string[] = [];
-		const host = { cwd, isCurrent: () => true, reply() {}, openUrl: async () => {}, warn: (message: string) => { warnings.push(message); }, revealInExplorer: async () => true, revealInOs: async () => {},
+		const host = { cwd, isCurrent: () => true, reply() {}, searchSymbols: async () => {}, openUrl: async () => {}, warn: (message: string) => { warnings.push(message); }, revealInExplorer: async () => true, revealInOs: async () => {},
 			openFile: async () => { throw new Error("cannot display"); } };
 		await handleTerminalLink({ type: "omp:terminal-link-open", requestId: 1, target: "image.png" }, host);
 		assert.deepEqual(warnings, [`cannot open ${join(cwd, "image.png")}: cannot display`]);
@@ -102,7 +103,7 @@ test("a Chat link opens a file, only reveals it or its folder in the Explorer on
 		const replies: unknown[] = [];
 		const warnings: string[] = [];
 		let inWorkspace = true;
-		const host = { cwd, isCurrent: () => true, reply: (message: unknown) => { replies.push(message); }, openUrl: async () => {}, warn: (message: string) => { warnings.push(message); },
+		const host = { cwd, isCurrent: () => true, reply: (message: unknown) => { replies.push(message); }, searchSymbols: async () => {}, openUrl: async () => {}, warn: (message: string) => { warnings.push(message); },
 			openFile: async (location: TerminalFileLocation) => { calls.push(`open ${location.path}`); },
 			revealInExplorer: async (path: string) => { calls.push(`explorer ${path}`); return inWorkspace; },
 			revealInOs: async (path: string) => { calls.push(`os ${path}`); } };
@@ -173,7 +174,7 @@ test("a web link opens only as a re-validated http(s) URL, in the mode the page 
 	let current = true;
 	let fail = false;
 	const host = { cwd: "D:\\repo", isCurrent: () => current, reply() { throw new Error("an open is never answered"); }, openFile: async () => { throw new Error("a web link is never a file"); }, revealInExplorer: async () => true, revealInOs: async () => {},
-		openUrl: async (url: string, mode: string) => { if (fail) throw new Error("command 'simpleBrowser.api.open' not found"); urls.push([url, mode]); }, warn: (message: string) => { warnings.push(message); } };
+		searchSymbols: async () => {}, openUrl: async (url: string, mode: string) => { if (fail) throw new Error("command 'simpleBrowser.api.open' not found"); urls.push([url, mode]); }, warn: (message: string) => { warnings.push(message); } };
 	await handleTerminalLink({ type: "omp:terminal-link-open", requestId: 1, target: "https://example.com", mode: "editor" }, host);
 	await handleTerminalLink({ type: "omp:terminal-link-open", requestId: 2, target: "http://example.com/a b?q=1#x", mode: "external" }, host);
 	await handleTerminalLink({ type: "omp:terminal-link-open", requestId: 3, target: "HTTPS://Example.com/x" }, host);
@@ -216,4 +217,27 @@ test("an open request may name where a web link opens; a validation, an unknown 
 	assert.equal(parseGuestWebviewMessage({ type: "omp:terminal-link-open", requestId: 4, target: "https://example.com", mode: "tab" }), null);
 	assert.equal(parseGuestWebviewMessage({ type: "omp:terminal-link-validate", requestId: 4, target: "https://example.com", mode: "editor" }), null);
 	assert.equal(parseGuestWebviewMessage({ type: "omp:terminal-link-open", requestId: 4, target: "https://example.com", url: "https://other.test" }), null);
+});
+
+test("a symbol search request opens the workspace symbol search for the symbol's last segment, re-parsed by the host; anything else is refused", async () => {
+	const searches: string[] = [];
+	const warnings: string[] = [];
+	let current = true;
+	const host = { cwd: "D:\\Work", isCurrent: () => current, reply() {}, openFile: async () => {}, revealInExplorer: async () => true, revealInOs: async () => {}, openUrl: async () => {}, searchSymbols: async (query: string) => { searches.push(query); }, warn: (message: string) => { warnings.push(message); } };
+	const ask = (target: string) => handleTerminalLink({ type: "omp:terminal-link-open", requestId: 1, target, search: true }, host);
+	await ask("Ability");
+	await ask("AbilityData.Cast(x, 3)");
+	await ask("[AllowedOn]");
+	await ask("UnitUseAbilityAbstract<T>");
+	assert.deepEqual(searches, ["Ability", "Cast", "AllowedOn", "UnitUseAbilityAbstract"]);
+	await ask("workbench.action.reloadWindow; rm -rf");
+	await ask("two words");
+	assert.deepEqual(searches, ["Ability", "Cast", "AllowedOn", "UnitUseAbilityAbstract"], "not a code symbol: nothing runs");
+	assert.equal(warnings.length, 2);
+	current = false;
+	await ask("Ability");
+	assert.equal(searches.length, 4, "a replaced document opens nothing");
+	assert.deepEqual(parseTerminalLinkRequest({ type: "omp:terminal-link-open", requestId: 2, target: "Ability", search: true }), { type: "omp:terminal-link-open", requestId: 2, target: "Ability", search: true });
+	assert.equal(parseTerminalLinkRequest({ type: "omp:terminal-link-validate", requestId: 2, target: "Ability", search: true }), null, "only an open can search");
+	assert.equal(parseTerminalLinkRequest({ type: "omp:terminal-link-open", requestId: 2, target: "Ability", search: false }), null);
 });

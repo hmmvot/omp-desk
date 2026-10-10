@@ -7,29 +7,35 @@
  * selection and its copy are the same either way. Opening goes through the host's Terminal mode
  * path, which re-resolves against the session cwd and refuses anything that is not an existing local file or folder.
  */
-import type { MouseEvent, KeyboardEvent, ReactNode } from "react";
+import type { MouseEvent, KeyboardEvent, ReactNode, RefObject } from "react";
 import { createContext, useContext, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { GuestHostMessage, GuestWebviewMessage } from "../messages";
 import { fileLinkMenuContext } from "../terminal-links";
 import type { FileLinkAction } from "../terminal-links";
 import { ChatFileLinks, detectChatFileLinks, isFileLinkCandidate } from "../lib/chat-file-links";
+import { ChatSymbolLinks } from "../lib/chat-symbol-links";
+import type { SymbolLink } from "../lib/chat-symbol-links";
 
 /** Exported for static renders, which cannot run the provider's effect. */
 export const FileLinksContext = createContext<ChatFileLinks | null>(null);
+/** The document's code-symbol answers; present exactly when {@link FileLinksContext} is. */
+export const SymbolLinksContext = createContext<ChatSymbolLinks | null>(null);
+/** Whether code symbols below may be linked: only assistant reply text opts in; user text, tool output, notices and thinking never ask the host. */
+export const SymbolLinksEligibleContext = createContext(false);
 
-/** Gives every file reference below it the document's validation cache; `cwd` is only a cache key — the host owns resolution. */
+/** Gives every file reference and code symbol below it the document's validation cache; `cwd` is only a cache key — the host owns resolution. */
 export function FileLinksProvider({ transport, cwd, children }: {
 	transport: { post(message: GuestWebviewMessage): boolean; subscribe(listener: (message: GuestHostMessage) => void): () => void };
 	cwd: string | undefined;
 	children: ReactNode;
 }): ReactNode {
-	const [links, setLinks] = useState<ChatFileLinks | null>(null);
+	const [links, setLinks] = useState<{ files: ChatFileLinks; symbols: ChatSymbolLinks } | null>(null);
 	useEffect(() => {
-		const created = new ChatFileLinks(transport);
+		const created = { files: new ChatFileLinks(transport), symbols: new ChatSymbolLinks(transport) };
 		setLinks(created);
-		return () => created.dispose();
+		return () => { created.files.dispose(); created.symbols.dispose(); };
 	}, [transport, cwd]);
-	return <FileLinksContext.Provider value={links}>{children}</FileLinksContext.Provider>;
+	return <FileLinksContext.Provider value={links?.files ?? null}><SymbolLinksContext.Provider value={links?.symbols ?? null}>{children}</SymbolLinksContext.Provider></FileLinksContext.Provider>;
 }
 
 /** How long a burst of text changes (a streaming reply) settles before the host is asked about it. */
@@ -94,6 +100,23 @@ function Anchor({ links, target, children }: { links: ChatFileLinks; target: str
 }
 
 /**
+ * A code symbol with several different definitions: the same look as a link, dotted, and a click (or Ctrl+Click, there
+ * is no single file to reveal) opens VS Code's workspace symbol search for its name, where the user chooses. Never a guessed definition.
+ */
+function SymbolSearchAnchor({ links, symbol, definitions, children }: { links: ChatFileLinks; symbol: string; definitions: number; children: ReactNode }): ReactNode {
+	return <span
+		className="omp-symbol-search"
+		role="link"
+		tabIndex={0}
+		data-symbol-search={symbol}
+		title={`${definitions} definitions — click to choose`}
+		onMouseDown={event => { if (event.shiftKey) event.preventDefault(); }}
+		onClick={event => { if (claimLinkActivation(event)) links.openSymbolSearch(symbol); }}
+		onKeyDown={event => { if ((event.key === "Enter" || event.key === " ") && claimLinkActivation(event)) links.openSymbolSearch(symbol); }}
+	>{children}</span>;
+}
+
+/**
  * `children` as the link to one known file target once the host proves it; plain `children` before and otherwise.
  * `proof` is what the host is asked about when it differs from what a click opens (a file, not each of its lines).
  */
@@ -132,6 +155,78 @@ export function FileLinkText({ text, link, revalidate }: { text: string; link?: 
 	});
 	if (cursor < text.length) nodes.push(text.slice(cursor));
 	return <>{nodes}</>;
+}
+
+/** Whether the element has been on screen once; always true where there is no `IntersectionObserver` (a static render). */
+function useSeen(): [RefObject<HTMLElement | null>, boolean] {
+	const ref = useRef<HTMLElement | null>(null);
+	const [seen, setSeen] = useState(typeof IntersectionObserver === "undefined");
+	useEffect(() => {
+		const node = ref.current;
+		if (seen || node === null) return;
+		const observer = new IntersectionObserver(entries => { if (entries.some(entry => entry.isIntersecting)) { setSeen(true); observer.disconnect(); } });
+		observer.observe(node);
+		return () => observer.disconnect();
+	}, [seen]);
+	return [ref, seen];
+}
+
+/**
+ * The definition the host found for `token` once it is asked (after the text settles); `null` before and when there is none.
+ * An answer is not polled: once it has expired the next render of the span asks again, and while it is being asked
+ * the previous answer stays so a repaint never flickers the text. While the host has the feature off nothing is shown.
+ */
+function useSymbolLink(symbols: ChatSymbolLinks | null, token: string | null): SymbolLink | null {
+	const [, refresh] = useReducer((count: number) => count + 1, 0);
+	const remembered = useRef<{ symbols: ChatSymbolLinks | null; answers: Map<string, SymbolLink | null> }>({ symbols, answers: new Map() });
+	if (remembered.current.symbols !== symbols) remembered.current = { symbols, answers: new Map() };
+	const fresh = symbols === null || token === null ? undefined : symbols.peek(token);
+	if (token !== null && fresh !== undefined) remembered.current.answers.set(token, fresh);
+	const off = symbols?.disabled === true;
+	// The client says that tokens it left unresolved may be asked again (the host's provider became ready or its queue
+	// drained, or the page budget has room): a span still without an answer renders again, which runs the effect below.
+	useEffect(() => {
+		if (symbols === null || token === null) return;
+		return symbols.subscribe(() => { if (symbols.peek(token) === undefined) refresh(); });
+	}, [symbols, token]);
+	// No dependency list: a token the client refused (its budget was full) is offered again on any later render of the
+	// span, and a token that is known or off does nothing. The state is refreshed only once an answer is recorded, so
+	// a refusal cannot make the span re-render itself in a loop.
+	useEffect(() => {
+		if (symbols === null || token === null || off || symbols.peek(token) !== undefined) return;
+		// Only the timer is cancelled by a later render; an answer that arrives still refreshes the span (a dispatch after unmount is a no-op).
+		const timer = setTimeout(() => {
+			void symbols.resolve(token).then(link => {
+				if (symbols.peek(token) === undefined) return;
+				remembered.current.answers.set(token, link);
+				refresh();
+			});
+		}, SETTLE_MS);
+		return () => clearTimeout(timer);
+	});
+	return token === null || off ? null : fresh ?? remembered.current.answers.get(token) ?? null;
+}
+
+/**
+ * One inline code span that may name a code symbol. `path` is the whole span when it also looks like a path:
+ * the file proof comes first, and the symbol is asked about only once the host refuses that path (`A.B` looks like
+ * a file with an extension). The span becomes a link to the file or to the symbol's definition once the host proves
+ * it, and asks only once it has been on screen. The characters are the same either way.
+ */
+export function CodeSymbolSpan({ content, path }: { content: string; path: string | null }): ReactNode {
+	const links = useContext(FileLinksContext);
+	const eligible = useContext(SymbolLinksEligibleContext);
+	const symbols = useContext(SymbolLinksContext);
+	const proven = useProvenTargets(links, links === null || path === null ? [] : [path], undefined);
+	const fileProven = path !== null && proven.has(path);
+	const fileRefused = path === null || (links !== null && links.peek(path) === false);
+	const [ref, seen] = useSeen();
+	const symbol = useSymbolLink(eligible ? symbols : null, !fileProven && fileRefused && seen ? content : null);
+	if (!fileProven && links !== null && symbol?.definitions !== undefined) {
+		return <code ref={ref}><SymbolSearchAnchor links={links} symbol={content} definitions={symbol.definitions}>{content}</SymbolSearchAnchor></code>;
+	}
+	const target = fileProven ? path : symbol?.target;
+	return <code ref={ref}>{links !== null && target !== undefined ? <Anchor links={links} target={target}>{content}</Anchor> : content}</code>;
 }
 
 /** The position a read call's displayed target carries (`src/a.ts:50-200`), for the link that opens at it. */

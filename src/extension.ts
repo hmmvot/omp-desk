@@ -202,6 +202,8 @@ import { TerminalPipeline } from "./host/terminal-pipeline";
 import type { TerminalHostMessage } from "./host/terminal-pipeline";
 import { fileLinkMenuTarget, handleTerminalLink, openTerminalFile, openWebLink, revealPathInExplorer, revealPathInOs, webLinkMenuUrl } from "./host/terminal-links";
 import type { FileLinkAction, TerminalLinkRequest, TerminalLinkValidation, WebLinkMode } from "./webview/terminal-links";
+import { MAX_SYMBOL_ENTRIES, SymbolLinkResolver, handleSymbolLinks, isNameCandidate, symbolEntry, symbolRoots } from "./host/symbol-links";
+import type { SymbolLinksRequest, SymbolLinksResolution, SymbolLinksRetry } from "./webview/code-symbols";
 import {
   createShellSlotId,
   createShellSlotStore,
@@ -5877,7 +5879,7 @@ async function handleGuestMessage(
     return;
   }
   // File links are presentation in either mode: the Chat validates and opens the same file references as the Terminal.
-  if (TERMINAL_PANEL_TYPES[parsed.type] === true && (own.mode === "terminal" || parsed.type === "omp:terminal-link-validate" || parsed.type === "omp:terminal-link-open")) {
+  if (TERMINAL_PANEL_TYPES[parsed.type] === true && (own.mode === "terminal" || parsed.type === "omp:terminal-link-validate" || parsed.type === "omp:terminal-link-symbols" || parsed.type === "omp:terminal-link-open")) {
     await handleTerminalGuestMessage(slot, parsed, parsed as unknown as Record<string, unknown>);
     return;
   }
@@ -6805,7 +6807,7 @@ function handleBridgeRequest(
     return;
   }
   if (request.operation === "chat-tool-detail" || request.operation === "chat-subagent-read" ||
-      request.operation === "terminal-link-validate" || request.operation === "terminal-link-open") {
+      request.operation === "terminal-link-validate" || request.operation === "terminal-link-symbols" || request.operation === "terminal-link-open") {
     // Preferences, child history and local file navigation are presentation,
     // not writer mutations. The authenticated current document still owns the
     // request; runtime epoch and post-I/O document checks remain authoritative.
@@ -6911,6 +6913,7 @@ const BRIDGE_OPERATIONS: Record<string, true> = {
   "terminal-visibility": true,
   "terminal-copy-reply": true,
   "terminal-link-validate": true,
+  "terminal-link-symbols": true,
   "terminal-link-open": true,
 };
 
@@ -11577,7 +11580,7 @@ function absentTerminalGeneration(tabId: string): string {
  * page's own channel and needs no route acknowledgement. A surviving page whose
  * panel this host does not have is reached over its authenticated bridge instead.
  */
-function pushTerminalTo(tabId: string, message: TerminalHostMessage | TerminalLinkValidation): void {
+function pushTerminalTo(tabId: string, message: TerminalHostMessage | TerminalLinkValidation | SymbolLinksResolution | SymbolLinksRetry): void {
   const state = stateOf(tabId);
   if (state === undefined) return;
   if (state.panel !== null) {
@@ -11696,6 +11699,54 @@ function pushTerminalFont(state: TabState, resource = terminalFontResource(state
   void state.panel?.webview.postMessage(terminalFontMessage(resource));
 }
 
+/**
+ * The window's code-symbol resolver (docs/designs/2026-10-10-code-symbol-links.md): created by the first Chat
+ * request, asking VS Code's workspace symbol providers, and dropped whenever files or folders change. Only
+ * `file` locations count; a provider's library or metadata location has no path inside any session folder.
+ */
+let symbolLinks: SymbolLinkResolver | undefined;
+/** Slots whose pages asked about symbols, told when parked tokens may be asked again. */
+const symbolAskers = new Set<string>();
+function symbolLinkResolver(): SymbolLinkResolver {
+  if (symbolLinks !== undefined) return symbolLinks;
+  const resolver = new SymbolLinkResolver({
+    async query(text, last) {
+      const found = await vscode.commands.executeCommand<vscode.SymbolInformation[] | undefined>("vscode.executeWorkspaceSymbolProvider", text);
+      if (!Array.isArray(found)) return null;
+      // Providers return fuzzy, ranked lists. Only entries that could be a declaration named `last` are converted,
+      // so unrelated neighbours (`GameManager` for `Game`) never crowd the exact ones out of the bound; one past
+      // the bound tells the resolver the answer was cut.
+      const candidates: vscode.SymbolInformation[] = [];
+      for (const symbol of found) {
+        if (isNameCandidate(String(symbol.name), last)) candidates.push(symbol);
+        if (candidates.length > MAX_SYMBOL_ENTRIES) break;
+      }
+      return Object.assign(candidates.map(symbolEntry), { total: found.length });
+    },
+  }, {
+    log,
+    // Parked tokens (provider not ready, queue full) are asked again by every page that has asked.
+    onRetry: () => {
+      for (const slotId of [...symbolAskers]) {
+        if (stateOf(slotId) === undefined) symbolAskers.delete(slotId);
+        else pushTerminalTo(slotId, { type: "omp:terminal-link-symbols-retry" });
+      }
+    },
+  });
+  const drop = () => resolver.invalidate();
+  const watcher = vscode.workspace.createFileSystemWatcher("**/*");
+  activationContext?.subscriptions.push(
+    watcher,
+    watcher.onDidCreate(drop), watcher.onDidChange(drop), watcher.onDidDelete(drop),
+    vscode.workspace.onDidSaveTextDocument(drop),
+    vscode.workspace.onDidRenameFiles(drop),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => { resolver.resetReadiness(); drop(); }),
+    { dispose: () => { if (symbolLinks === resolver) symbolLinks = undefined; } },
+  );
+  symbolLinks = resolver;
+  return resolver;
+}
+
 /** The parsed inbound terminal messages a folder-shell panel may send. */
 const TERMINAL_PANEL_TYPES: Record<string, true> = {
   "omp:terminal-attach": true,
@@ -11705,6 +11756,7 @@ const TERMINAL_PANEL_TYPES: Record<string, true> = {
   "omp:terminal-focus": true,
   "omp:terminal-visibility": true,
   "omp:terminal-link-validate": true,
+  "omp:terminal-link-symbols": true,
   "omp:terminal-link-open": true,
 };
 
@@ -11754,6 +11806,7 @@ async function handleTerminalGuestMessage(
   const frontendId = terminalFrontendId(tabId);
   switch (parsed.type) {
     case "omp:terminal-link-validate":
+    case "omp:terminal-link-symbols":
     case "omp:terminal-link-open": {
       const cwd = terminalCwd(state) ?? "";
       const panel = state.panel;
@@ -11763,18 +11816,31 @@ async function handleTerminalGuestMessage(
       const runtime = state.runtime;
       const conversation = state.tabId;
       const shell = state.shellSlot;
+      const isCurrent = () => stateOf(tabId) === state && state.panel === panel &&
+        state.document === document && state.bridge === bridge && bridge?.documentId === documentId &&
+        state.runtime === runtime && state.tabId === conversation && state.shellSlot === shell &&
+        (terminalCwd(state) ?? "") === cwd;
+      if (parsed.type === "omp:terminal-link-symbols") {
+        symbolAskers.add(state.slotId);
+        await handleSymbolLinks(payload as unknown as SymbolLinksRequest, {
+          cwd,
+          roots: () => symbolRoots(cwd, (vscode.workspace.workspaceFolders ?? []).map(folder => folder.uri.fsPath)),
+          enabled: () => vscode.workspace.getConfiguration("omp").get<boolean>("linkCodeSymbols", true),
+          isCurrent,
+          reply: message => pushTerminalTo(state.slotId, message),
+        }, symbolLinkResolver());
+        return;
+      }
       await handleTerminalLink(payload as unknown as TerminalLinkRequest, {
         cwd,
-        isCurrent: () => stateOf(tabId) === state && state.panel === panel &&
-          state.document === document && state.bridge === bridge && bridge?.documentId === documentId &&
-          state.runtime === runtime && state.tabId === conversation && state.shellSlot === shell &&
-          (terminalCwd(state) ?? "") === cwd,
+        isCurrent,
         reply: message => pushTerminalTo(state.slotId, message),
         openFile: location => openTerminalFile(vscode, location, fileWindowColumn()),
         revealInExplorer: target => revealPathInExplorer(vscode, target),
         revealInOs: target => revealPathInOs(target),
         warn: message => { log(`terminal link: ${message}`); showWarning(message); },
         openUrl: openPageWebLink,
+        searchSymbols: async query => { await vscode.commands.executeCommand("workbench.action.quickOpen", `#${query}`); },
       });
       return;
     }

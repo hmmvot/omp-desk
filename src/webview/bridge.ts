@@ -255,6 +255,8 @@ function bridgeOperation(message: GuestWebviewMessage): string | null {
 			return "terminal-copy-reply";
 		case "omp:terminal-link-validate":
 			return "terminal-link-validate";
+		case "omp:terminal-link-symbols":
+			return "terminal-link-symbols";
 		case "omp:terminal-link-open":
 			return "terminal-link-open";
 		case "omp:terminal-input":

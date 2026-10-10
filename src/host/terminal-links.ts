@@ -5,6 +5,18 @@ import { fileURLToPath } from "node:url";
 import { homedir, hostname } from "node:os";
 import { FILE_LINK_MENU_SECTION, WEB_LINK_MENU_SECTION, isTerminalLinkTarget, webLinkUrl } from "../webview/terminal-links.ts";
 import type { TerminalLinkRequest, TerminalLinkValidation, WebLinkMode } from "../webview/terminal-links.ts";
+import { parseCodeSymbol } from "../webview/code-symbols.ts";
+import type { CodeSymbol } from "../webview/code-symbols.ts";
+
+/**
+ * The text typed after `#` in Go to Symbol in Workspace for a symbol with several definitions: its last segment
+ * (`B` for `A.B()`), which every symbol provider understands and which lists every `B` with its container, so the
+ * user chooses among the definitions the name has. A dotted query is not used: providers differ in whether they
+ * accept it (TypeScript's does not), and a query that matches nothing would be a dead link.
+ */
+export function symbolSearchQuery(symbol: CodeSymbol): string {
+	return symbol.last;
+}
 
 /** The position a target may carry after its path: group 1 is the line, group 2 the column. */
 const POSITION_SUFFIX = /(?::L?|#L)(\d+)(?:[:C](\d+))?(?:-L?\d+(?:[:C]\d+)?)?$/i;
@@ -165,6 +177,8 @@ export interface TerminalLinkHost {
 	/** Show `path` selected in the system file manager. */
 	revealInOs(path: string): Promise<void>;
 	openUrl(url: string, mode: WebLinkMode): Promise<void>;
+	/** Open VS Code's workspace symbol search (Go to Symbol in Workspace) with `query` already typed after the `#`. */
+	searchSymbols(query: string): Promise<void>;
 	/** Short user-visible notice, so an activation that cannot complete is never silent. */
 	warn(message: string): void;
 }
@@ -175,6 +189,18 @@ export interface TerminalLinkHost {
  * for the external browser.
  */
 export async function handleTerminalLink(request: TerminalLinkRequest, host: TerminalLinkHost, home?: string): Promise<void> {
+	if (request.type === "omp:terminal-link-open" && request.search === true) {
+		// The page names a code symbol, never a command or a path: the host parses it again and prefixes the one query it builds.
+		const symbol = parseCodeSymbol(request.target);
+		if (!host.isCurrent()) return;
+		if (symbol === null) {
+			host.warn(`cannot search for "${request.target}": not a code symbol.`);
+			return;
+		}
+		try { await host.searchSymbols(symbolSearchQuery(symbol)); }
+		catch (error) { host.warn(`cannot open the symbol search: ${error instanceof Error ? error.message : String(error)}`); }
+		return;
+	}
 	if (request.type === "omp:terminal-link-open" && /^\s*https?:/i.test(request.target)) {
 		const url = webLinkUrl(request.target);
 		if (!host.isCurrent()) return;

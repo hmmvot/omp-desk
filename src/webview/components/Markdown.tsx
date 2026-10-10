@@ -16,8 +16,9 @@ import type { ReactNode } from "react";
 import { Fragment, memo, useMemo } from "react";
 import { detectChatFileLinks, fileTargetOfHref, isFileLinkCandidate } from "../lib/chat-file-links";
 import { detectWebLinks } from "../lib/chat-web-links";
+import { parseCodeSymbol } from "../code-symbols";
 import { webLinkUrl } from "../terminal-links";
-import { FileLink, FileLinkText } from "./FileLinks.tsx";
+import { CodeSymbolSpan, FileLink, FileLinkText } from "./FileLinks.tsx";
 import { ImageReferenceToken } from "./ImageReference.tsx";
 import { WebLink } from "./WebLinks.tsx";
 import { CopyButton } from "./CopyButton.tsx";
@@ -59,14 +60,42 @@ function plain(text: string, key: string): ReactNode {
 	return <Fragment key={key}>{nodes}</Fragment>;
 }
 
-/** A whole code span that is one path (spaces allowed only after a drive, home or relative prefix) links as a unit; an `@` mention and any other span link the file references they hold. A URL in code stays code. */
+/**
+ * A whole code span that is one path (spaces allowed only after a drive, home or relative prefix) links as a unit; an `@` mention and any other span link the file references they hold. A URL in code stays code.
+ * A span that names a code symbol (`Ability`, `A.B`, `Run()`, `[Attr]`) is one {@link CodeSymbolSpan}: its path proof first when it also looks like a path, then the host's workspace symbol lookup, in assistant text only.
+ */
 function codeSpan(content: string, key: string): ReactNode {
 	const whole = content.trim();
 	const single = !whole.startsWith("@") && (!/\s/.test(whole) || /^(?:[a-z]:[\\/]|~[\\/]|\.{1,2}[\\/]|\/)/i.test(whole) && !/\s-/.test(whole));
-	return <code key={key}>{single && isFileLinkCandidate(whole) ? <FileLink target={whole}>{content}</FileLink> : files(content, `${key}f`)}</code>;
+	const path = single && isFileLinkCandidate(whole) ? whole : null;
+	if (parseCodeSymbol(content) !== null) return <CodeSymbolSpan key={key} content={content} path={path} />;
+	return <code key={key}>{path !== null ? <FileLink target={path}>{content}</FileLink> : files(content, `${key}f`)}</code>;
 }
 
-function renderInline(text: string, keyPrefix: string): ReactNode[] {
+/** A link label keeps its inline code spans as code; nothing inside a label is linked again. */
+function linkLabel(label: string, key: string): ReactNode {
+	if (!label.includes("`")) return label;
+	const nodes: ReactNode[] = [];
+	const spans = /`([^`]+)`/g;
+	let cursor = 0;
+	for (const span of label.matchAll(spans)) {
+		if (span.index > cursor) nodes.push(label.slice(cursor, span.index));
+		nodes.push(<code key={`${key}c${span.index}`}>{span[1]}</code>);
+		cursor = span.index + span[0].length;
+	}
+	if (cursor < label.length) nodes.push(label.slice(cursor));
+	return <Fragment key={key}>{nodes}</Fragment>;
+}
+
+/** How many emphasis levels deep inline content is still parsed for links and code spans (bold inside italic inside strike). */
+const MAX_EMPHASIS_DEPTH = 2;
+
+/** The content of an emphasis token: links, code spans and file paths like top-level text, nesting bounded. */
+function emphasized(inner: string, key: string, depth: number): ReactNode {
+	return depth < MAX_EMPHASIS_DEPTH ? <Fragment key={key}>{renderInline(inner, key, depth + 1)}</Fragment> : plain(inner, key);
+}
+
+function renderInline(text: string, keyPrefix: string, depth = 0): ReactNode[] {
 	const nodes: ReactNode[] = [];
 	let cursor = 0;
 	let tokenIndex = 0;
@@ -80,9 +109,9 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
 		if (token.startsWith("`")) {
 			nodes.push(codeSpan(token.slice(1, -1), key));
 		} else if (token.startsWith("**") || token.startsWith("__")) {
-			nodes.push(<strong key={key}>{plain(token.slice(2, -2), `${key}f`)}</strong>);
+			nodes.push(<strong key={key}>{emphasized(token.slice(2, -2), `${key}f`, depth)}</strong>);
 		} else if (token.startsWith("~~")) {
-			nodes.push(<s key={key}>{plain(token.slice(2, -2), `${key}f`)}</s>);
+			nodes.push(<s key={key}>{emphasized(token.slice(2, -2), `${key}f`, depth)}</s>);
 		} else if (token.startsWith("[Image #") && !token.includes("](")) {
 			// Resolved against the surrounding user message's images; plain text anywhere else.
 			nodes.push(<ImageReferenceToken key={key} number={Number(/^\[Image #(\d+)/.exec(token)![1])} label={token} />);
@@ -95,7 +124,8 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
 			const url = file === null ? webLinkUrl(destination) : null;
 			// A rejected scheme keeps its label but never its URL: the transcript
 			// must not carry a `javascript:`/`data:`/`command:` destination at all.
-			nodes.push(file !== null ? <FileLink key={key} target={file}>{label}</FileLink> : url === null ? label : <WebLink key={key} url={url}>{label}</WebLink>);
+			const text = linkLabel(label, `${key}l`);
+			nodes.push(file !== null ? <FileLink key={key} target={file}>{text}</FileLink> : url === null ? <Fragment key={key}>{text}</Fragment> : <WebLink key={key} url={url}>{text}</WebLink>);
 		} else if (token.startsWith("<")) {
 			const url = webLinkUrl(token.slice(1, -1));
 			nodes.push(url === null ? plain(token, key) : <WebLink key={key} url={url}>{token.slice(1, -1)}</WebLink>);
@@ -103,8 +133,10 @@ function renderInline(text: string, keyPrefix: string): ReactNode[] {
 			// A bare URL: its trailing punctuation is prose again.
 			nodes.push(plain(token, key));
 		} else {
-			nodes.push(<em key={key}>{plain(token.slice(1, -1), `${key}f`)}</em>);
+			nodes.push(<em key={key}>{emphasized(token.slice(1, -1), `${key}f`, depth)}</em>);
 		}
+		// A nested call moved the shared regex; continue right after this token.
+		INLINE_TOKEN.lastIndex = cursor;
 		match = INLINE_TOKEN.exec(text);
 	}
 	if (cursor < text.length) nodes.push(plain(text.slice(cursor), `${keyPrefix}-p${tokenIndex}`));

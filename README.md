@@ -84,7 +84,7 @@ For how this works, see the [architecture](docs/architecture.md).
 - Rewind never restores files; it lists the files changed after that point. A chat started by an older OMP Desk must be restarted before it can rewind.
 - Slash commands suggest their arguments.
 - OMP's questions and approval requests appear as a card above the composer.
-- File paths in replies and tool rows are links. A click opens the file at that line.
+- File paths in replies and tool rows are links. A click opens the file at that line. Code symbols in a reply (`Ability`, `AbilityData.Cast()`, `Parse<T>`, `[AllowedOn]`) are links too when VS Code's language extensions (C# Dev Kit, TypeScript, and others) report exactly one definition of them in the session's folders: a click opens the definition, `Ctrl+Click` shows its file in the Explorer. A symbol with several definitions links to VS Code's symbol search for its name (dotted underline, tooltip "N definitions"): a click lets you choose. A symbol none is found for stays plain code. The language extension must have loaded the workspace (a TypeScript server starts when a TypeScript file is open); symbol searches are ranked and may be capped by the language server, so in a very large workspace a common name may be missed or, rarely, linked to one of several declarations.
 - Web links in replies, tool output and the TODO and Agents tabs open in a VS Code editor tab on click or `Enter`, and in your browser on `Ctrl+Click` or `Ctrl+Enter`.
 - Routine tool calls are grouped in an **Overview**. The **Tools output** chip switches every Chat to **Detailed**.
 - Pinned rows show the TODO list and running subagents. Open a subagent's live transcript in its own tab.
@@ -146,6 +146,7 @@ Other commands include **New Session**, **Add Folder**, **Pin Folder**, **Unpin 
 | `omp.desktopNotifications` | `true` | Windows desktop notifications when a session finishes or asks for input. |
 | `omp.showWorkspaceFolders` | `true` | Show the folders VS Code has open in this window in Sessions. When off, only pinned folders (and folders with a running session) are listed. |
 | `omp.sessionsGrouping` | `flat` | `flat` shows one list of every session, labelled with its folder; `folders` groups sessions under their folders. The Sessions title-bar button changes it. |
+| `omp.linkCodeSymbols` | `true` | Link inline code symbols in Chat replies (`Ability`, `AbilityData.Cast()`, `[AllowedOn]`) to their definition when VS Code's language extensions report exactly one definition of the symbol in the session's folders. A partial class or overloads link to one of their declarations; a symbol with several different definitions links to the symbol search; unknown symbols stay plain code. |
 | `omp.chatColumn` | `true` | Open sessions in their own locked editor group on the left, with files on the right. When off, a session opens in the active editor group. |
 
 OMP's own settings, models, tools, skills and MCP servers live in OMP's files. Configure them through OMP.

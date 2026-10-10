@@ -8,6 +8,9 @@ type Provide = (text: string, existing: readonly string[]) => Promise<string>;
 let render: (text: string) => string;
 /** Renders with a link context whose host has proven exactly `existing`, as the page does once validations are answered. */
 let renderLinked: Provide;
+/** Renders with the host answering each token of `symbols` with its target (others none) and no path existing; `asked` is what the page asked the host. */
+type RenderSymbols = (text: string, options: { paths?: string[]; symbols?: Record<string, string | number>; eligible?: boolean; provider?: boolean }) => Promise<{ html: string; asked: string[] }>;
+let renderSymbols: RenderSymbols;
 before(async () => {
 	const bundled = await build({ stdin: { contents: `
 		import { createElement } from "react";
@@ -17,6 +20,8 @@ before(async () => {
 		import { WebLinksContext } from "./components/WebLinks";
 		import { ChatFileLinks } from "./lib/chat-file-links";
 		import { TerminalLinkClient } from "./lib/terminal-link-client";
+		import { SymbolLinksContext, SymbolLinksEligibleContext } from "./components/FileLinks";
+		import { ChatSymbolLinks } from "./lib/chat-symbol-links";
 		export const render = text => renderToStaticMarkup(createElement(Markdown, { text }));
 		export const renderLinked = async (text, existing) => {
 			const listeners = new Set();
@@ -29,12 +34,38 @@ before(async () => {
 			web.dispose();
 			return html;
 		};
+		export const renderSymbols = async (text, { paths = [], symbols = {}, eligible = true, provider = true }) => {
+			const listeners = new Set();
+			const asked = [];
+			const reply = message => queueMicrotask(() => { for (const listener of listeners) listener(message); });
+			const transport = { post(message) {
+				if (message.type === "omp:terminal-link-validate") reply({ type: "omp:terminal-link-validation", requestId: message.requestId, valid: false });
+				if (message.type === "omp:terminal-link-symbols") {
+					asked.push(...message.tokens);
+					reply({ type: "omp:terminal-link-symbol-resolution", requestId: message.requestId, results: message.tokens.map(token => symbols[token] === undefined ? { token, status: "none" } : typeof symbols[token] === "number" ? { token, status: "ambiguous", definitions: symbols[token] } : { token, status: "found", target: symbols[token] }) });
+				}
+				return true;
+			}, subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); } };
+			const links = new ChatFileLinks(transport);
+			const symbolLinks = new ChatSymbolLinks(transport, { batchMs: 0 });
+			for (const path of paths) await links.resolve(path);
+			for (const token of Object.keys(symbols)) await symbolLinks.resolve(token);
+			const inner = createElement(Markdown, { text });
+			const eligibility = createElement(SymbolLinksEligibleContext.Provider, { value: eligible }, inner);
+			const html = provider
+				? renderToStaticMarkup(createElement(FileLinksContext.Provider, { value: links }, createElement(SymbolLinksContext.Provider, { value: symbolLinks }, eligibility)))
+				: renderToStaticMarkup(eligibility);
+			links.dispose();
+			symbolLinks.dispose();
+			return { html, asked };
+		};
 	`, loader: "tsx", resolveDir: join(process.cwd(), "src/webview") }, bundle: true, write: false,
 		format: "cjs", platform: "node", packages: "external", jsx: "automatic", define: { "process.env.NODE_ENV": '"production"' } });
-	const module = { exports: {} as { render: typeof render; renderLinked: Provide } };
+	const module = { exports: {} as { render: typeof render; renderLinked: Provide; renderSymbols: RenderSymbols } };
 	new Function("require", "module", "exports", bundled.outputFiles[0]!.text)(createRequire(import.meta.url), module, module.exports);
 	render = module.exports.render;
 	renderLinked = module.exports.renderLinked;
+	renderSymbols = module.exports.renderSymbols;
 });
 
 test("bullets indented under a numbered item nest inside it instead of continuing the numbering", () => {
@@ -99,6 +130,20 @@ test("an @ mention in inline code links like the same mention in prose", async (
 	assert.match(linked, /<code><span class="omp-file-link"[^>]*>@lib\/c\.ts<\/span><\/code>/);
 });
 
+test("a code symbol linked to its definition line opens that file, and an unproven target stays inline code", async () => {
+	const linked = await renderLinked("[`World.Current`](src/a.ts:12:4) and [`Missing.Thing`](src/missing.ts:3)", EXISTING);
+	assert.deepEqual([...linked.matchAll(/data-file-target="([^"]*)"/g)].map(match => match[1]), ["src/a.ts:12:4"]);
+	assert.match(linked, /<span class="omp-file-link"[^>]*data-file-target="src\/a\.ts:12:4"[^>]*><code>World\.Current<\/code><\/span> and <code>Missing\.Thing<\/code>/);
+});
+
+test("emphasis content goes through the inline pipeline: a code-label link and a code span inside bold", async () => {
+	const linked = await renderLinked("**Decides [`World.Current`](src/a.ts:12:4)** and **a `plain` span** and *[`World.Current`](src/a.ts:12:4)*", EXISTING);
+	assert.match(linked, /<strong>Decides <span class="omp-file-link"[^>]*data-file-target="src\/a\.ts:12:4"[^>]*><code>World\.Current<\/code><\/span><\/strong>/);
+	assert.match(linked, /<strong>a <code>plain<\/code> span<\/strong>/);
+	assert.match(linked, /<em><span class="omp-file-link"[^>]*><code>World\.Current<\/code><\/span><\/em>/);
+	assert.doesNotMatch(text(linked), /[`\]\[]/, "no raw backticks or link syntax on screen");
+});
+
 test("file links add no URL scheme: only http(s) destinations become web links and every other destination renders as its label", async () => {
 	const source = "[web](https://example.test/a.ts) [mail](mailto:a@b.test) [bad](javascript:alert(1)) [data](data:text/html,x) [cmd](command:workbench.action.reloadWindow) [vs](vscode://file/D:/x.ts) [file](file:///D:/repo/a.ts#L3)";
 	const linked = await renderLinked(source, ["file:///D:/repo/a.ts#L3"]);
@@ -135,4 +180,56 @@ test("bare URLs in prose become web links without their trailing punctuation, an
 	assert.doesNotMatch(linked, /<em>/, "underscores inside a URL never start emphasis");
 	assert.match(linked, /<code>https:\/\/code\.test\/c<\/code>/, "a URL in inline code stays code");
 	assert.match(linked, /<pre><code[^>]*>https:\/\/fenced\.test\/stays<\/code><\/pre>/, "fenced code stays text");
+});
+
+const SYMBOL_PROSE = "`Ability` and `AbilityData.Cast()` and `UnitUseAbilityAbstract<T>` and `[AllowedOn]` and `Ambiguous` and `Unknown`, but `two words`, `a + b` and `src/gone.ts`.";
+const SYMBOL_TARGETS = { Ability: "src/Ability.cs:12:5", "AbilityData.Cast()": "src/AbilityData.cs:40:9", "UnitUseAbilityAbstract<T>": "src/Unit.cs:3:1", "[AllowedOn]": "src/AllowedOn.cs:7:3" };
+
+test("an inline code span the host found one definition of renders as a code-path link to it; every other span stays code", async () => {
+	const { html, asked } = await renderSymbols(SYMBOL_PROSE, { symbols: SYMBOL_TARGETS, paths: ["AbilityData.Cast()", "src/gone.ts"] });
+	const targets = [...html.matchAll(/data-file-target="([^"]*)"/g)].map(match => match[1]);
+	assert.deepEqual(targets, ["src/Ability.cs:12:5", "src/AbilityData.cs:40:9", "src/Unit.cs:3:1", "src/AllowedOn.cs:7:3"]);
+	assert.match(html, /<code><span class="omp-file-link" role="link" tabindex="0" data-file-target="src\/Ability\.cs:12:5"[^>]*>Ability<\/span><\/code>/, "underlined code like a path link: the anchor inside the code element");
+	assert.match(html, /<code><span class="omp-file-link"[^>]*data-file-target="src\/AbilityData\.cs:40:9"[^>]*>AbilityData\.Cast\(\)<\/span><\/code>/, "a dotted call is a symbol once its path-shaped reading is refused");
+	assert.match(html, /<code><span class="omp-file-link"[^>]*>UnitUseAbilityAbstract&lt;T&gt;<\/span><\/code>/, "the characters are the model's, not the normalized name");
+	assert.match(html, /<code><span class="omp-file-link"[^>]*>\[AllowedOn\]<\/span><\/code>/);
+	assert.match(html, /<code>Ambiguous<\/code>/);
+	assert.match(html, /<code>Unknown<\/code>/);
+	assert.match(html, /<code>two words<\/code>, <code>a \+ b<\/code> and <code>src\/gone\.ts<\/code>/);
+	assert.equal(html.replace(/<[^>]*>/g, ""), (await renderSymbols(SYMBOL_PROSE, { symbols: {}, provider: false })).html.replace(/<[^>]*>/g, ""), "linking never changes the characters on screen");
+	assert.deepEqual([...new Set(asked)].sort(), Object.keys(SYMBOL_TARGETS).sort(), "only symbol-shaped spans were asked about");
+});
+
+test("a symbol is linked in assistant text only, and without a link context it is plain code", async () => {
+	const plain = await renderSymbols("`Ability`", { symbols: { Ability: "src/Ability.cs:12:5" }, eligible: false });
+	assert.doesNotMatch(plain.html, /omp-file-link/, "user text, tool output and thinking do not opt in");
+	const bare = await renderSymbols("`Ability`", { symbols: { Ability: "src/Ability.cs:12:5" }, provider: false });
+	assert.doesNotMatch(bare.html, /omp-file-link/);
+});
+
+test("a span that is a path the host proves stays a file link and the symbol is not asked; a refused path reads as a symbol", async () => {
+	const proven = await renderLinked("`Util.Helper`", ["Util.Helper"]);
+	assert.match(proven, /<code><span class="omp-file-link"[^>]*data-file-target="Util\.Helper"/, "a file named like a dotted symbol is the file");
+	const { html, asked } = await renderSymbols("`Util.Helper`", { symbols: { "Util.Helper": "src/Util.cs:2:1" }, paths: ["Util.Helper"] });
+	assert.match(html, /data-file-target="src\/Util\.cs:2:1"/);
+	assert.deepEqual(asked, ["Util.Helper"]);
+	const unproven = await renderSymbols("`Util.Helper`", { symbols: { "Util.Helper": "src/Util.cs:2:1" } });
+	assert.doesNotMatch(unproven.html, /omp-file-link/, "the path's own verdict is awaited first, and until then the span is plain");
+});
+
+test("code blocks and link labels never ask about symbols; a code span inside emphasis is a candidate like any other", async () => {
+	const { html } = await renderSymbols("```ts\nAbility\n```\n\n[`Ability`](docs/a.md)", { symbols: { Ability: "src/Ability.cs:12:5" } });
+	assert.doesNotMatch(html, /<pre><code[^>]*><span/);
+	assert.equal([...html.matchAll(/data-file-target="src\/Ability\.cs/g)].length, 0);
+	const emphasized = await renderSymbols("**`Ability`** and *`Ability`* and ~~`Ability`~~", { symbols: { Ability: "src/Ability.cs:12:5" } });
+	assert.equal([...emphasized.html.matchAll(/<(strong|em|s)><code><span class="omp-file-link"[^>]*data-file-target="src\/Ability\.cs:12:5"/g)].length, 3, "bold, italic and strike each link their code span");
+});
+
+test("a symbol with several definitions renders as a dotted search link with its count, never as a file link, in text and in emphasis", async () => {
+	const { html } = await renderSymbols("`Twin` and **`Twin`** and `Twin.Run()` and `Plain`", { symbols: { Twin: 3, "Twin.Run()": 2 } });
+	assert.equal([...html.matchAll(/<span class="omp-symbol-search"[^>]*data-symbol-search="Twin"[^>]*title="3 definitions — click to choose"/g)].length, 2);
+	assert.match(html, /data-symbol-search="Twin\.Run\(\)"[^>]*title="2 definitions — click to choose"/);
+	assert.doesNotMatch(html, /omp-file-link/);
+	assert.doesNotMatch(html, /data-symbol-search="Plain"/);
+	assert.doesNotMatch(html, /data-vscode-context="[^"]*Twin/, "no file menu for a search link");
 });

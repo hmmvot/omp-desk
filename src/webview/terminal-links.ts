@@ -9,6 +9,8 @@ export interface TerminalLinkRequest {
 	folders?: true;
 	/** Chat only, on an open: what a modified click does with a file or folder instead of the plain open. */
 	action?: FileLinkAction;
+	/** Chat only, on an open: `target` is a code symbol with several definitions; the host opens VS Code's workspace symbol search prefilled with its name instead of a file. */
+	search?: true;
 }
 export interface TerminalLinkValidation {
 	type: "omp:terminal-link-validation";
@@ -60,17 +62,19 @@ export function webLinkUrl(value: string): string | null {
 }
 export function parseTerminalLinkRequest(value: Record<string, unknown>): TerminalLinkRequest | null {
 	if (value.type !== "omp:terminal-link-validate" && value.type !== "omp:terminal-link-open") return null;
-	const keys = value.type === "omp:terminal-link-open" ? ["type", "requestId", "target", "mode", "folders", "action"] : ["type", "requestId", "target", "folders"];
+	const keys = value.type === "omp:terminal-link-open" ? ["type", "requestId", "target", "mode", "folders", "action", "search"] : ["type", "requestId", "target", "folders"];
 	if (Object.keys(value).some(key => !keys.includes(key))) return null;
 	if (!Number.isSafeInteger(value.requestId) || Number(value.requestId) < 0 || !isTerminalLinkTarget(value.target)) return null;
 	if (value.mode !== undefined && value.mode !== "editor" && value.mode !== "external") return null;
 	if (value.folders !== undefined && value.folders !== true) return null;
 	if (value.action !== undefined && value.action !== "reveal" && value.action !== "os") return null;
+	if (value.search !== undefined && (value.search !== true || value.type !== "omp:terminal-link-open")) return null;
 	return {
 		type: value.type, requestId: Number(value.requestId), target: value.target,
 		...(value.mode === undefined ? {} : { mode: value.mode }),
 		...(value.folders === undefined ? {} : { folders: true as const }),
 		...(value.action === undefined ? {} : { action: value.action }),
+		...(value.search === undefined ? {} : { search: true as const }),
 	};
 }
 export function parseTerminalLinkValidation(value: Record<string, unknown>): TerminalLinkValidation | null {
