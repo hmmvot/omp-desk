@@ -40,6 +40,8 @@ import { parseFooterMetadata } from "./footer-metadata.ts";
 import type { FooterMetadataMessage } from "./footer-metadata.ts";
 import { parseTerminalLinkRequest, parseTerminalLinkValidation } from "./terminal-links.ts";
 import type { TerminalLinkRequest, TerminalLinkValidation } from "./terminal-links.ts";
+import { parseSymbolLinksRequest, parseSymbolLinksResolution, parseSymbolLinksRetry } from "./code-symbols.ts";
+import type { SymbolLinksRequest, SymbolLinksResolution, SymbolLinksRetry } from "./code-symbols.ts";
 
 /** Provider-qualified model display shape shared with the host. */
 export type { ControlModelRef };
@@ -696,6 +698,8 @@ export interface GuestSessionModeRequest {
 export type GuestHostMessage =
 	| ChatHostMessage
 	| TerminalLinkValidation
+	| SymbolLinksResolution
+	| SymbolLinksRetry
 	| GuestSessionViewMessage
 	| GuestTerminalActivateMessage
 	| GuestTerminalCopyRequestMessage
@@ -865,6 +869,7 @@ export type GuestTurnOutcome = "stop" | "length" | "toolUse" | "error" | "aborte
 export type GuestWebviewMessage =
 	| ChatWebviewMessage
 	| TerminalLinkRequest
+	| SymbolLinksRequest
 	| GuestSessionModeRequest
 	| GuestReadyMessage
 	| GuestRouteAckMessage
@@ -1007,6 +1012,8 @@ export function parseGuestHostMessage(value: unknown): GuestHostMessage | null {
 	if (value.type.startsWith("omp:chat-")) return parseChatHostMessage(value);
 	if (value.type === "omp:footer-metadata") return parseFooterMetadata(value);
 	if (value.type === "omp:terminal-link-validation") return parseTerminalLinkValidation(value);
+	if (value.type === "omp:terminal-link-symbol-resolution") return parseSymbolLinksResolution(value);
+	if (value.type === "omp:terminal-link-symbols-retry") return parseSymbolLinksRetry(value);
 	if (value.type === "omp:session-view") {
 		if (Object.keys(value).some(key => !["type", "mode", "running", "starting", "stopping", "canSwitch", "title", "reason"].includes(key))) return null;
 		if (value.mode !== "chat" && value.mode !== "terminal") return null;
@@ -1159,6 +1166,7 @@ export function parseGuestWebviewMessage(value: unknown): GuestWebviewMessage | 
 	// `omp:chat-command` is the guest's own vocabulary (host consent), not a conversation command.
 	if (value.type.startsWith("omp:chat-") && value.type !== "omp:chat-command") return parseChatWebviewMessage(value);
 	if (value.type === "omp:terminal-link-validate" || value.type === "omp:terminal-link-open") return parseTerminalLinkRequest(value);
+	if (value.type === "omp:terminal-link-symbols") return parseSymbolLinksRequest(value);
 	switch (value.type) {
 		case "omp:session-mode":
 			if (Object.keys(value).length !== 2 || (value.mode !== "chat" && value.mode !== "terminal")) return null;

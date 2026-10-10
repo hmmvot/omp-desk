@@ -314,7 +314,12 @@ ${TERMINAL_STYLES}
 	border-radius: 3px;
 	padding: 1px 4px;
 }
+/* A link inside code, or code inside a link (a symbol linked to its definition): code colours, underlined as a link. */
 .omp-md code .omp-file-link, .omp-md code .omp-file-link:hover { color: inherit; text-decoration: underline; }
+.omp-md .omp-file-link > code, .omp-md .omp-web-link > code { text-decoration: underline; }
+/* A symbol with several definitions: the code colours, underlined dotted (not solid like one definition); a click opens the workspace symbol search. */
+.omp-md code .omp-symbol-search, .omp-md code .omp-symbol-search:hover { color: inherit; cursor: pointer; text-decoration: underline dotted; }
+.omp-md code .omp-symbol-search:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; border-radius: 2px; }
 .omp-md pre {
 	background: var(--vscode-textCodeBlock-background);
 	color: var(--vscode-foreground);
