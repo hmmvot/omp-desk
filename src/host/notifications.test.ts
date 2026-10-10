@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createChatModel, reduceChatFrame, applyChatUiRequest, type ChatEventFrame, type ChatModel } from "../chat/model.ts";
 import { turnActivity } from "../webview/lib/activity.ts";
-import { desktopNotificationSuppression, reportsTrailingQuestion, TurnActivityLedger, type TurnActivity, type NotificationSuppression } from "./notifications.ts";
+import { desktopNotificationSuppression, reportsTrailingQuestion, TurnActivityLedger, TurnNotifier, type TurnActivity, type NotificationSuppression } from "./notifications.ts";
 import { toChatEventFrame } from "./rpc/protocol.ts";
 import { assistantMessage } from "./rpc/test-support.ts";
 
@@ -208,5 +208,41 @@ describe("Sessions trailing-question projection", () => {
 		assert.equal(reportsTrailingQuestion({ ...base, outcome: "error" }), false);
 		assert.equal(reportsTrailingQuestion({ ...base, outcome: "aborted" }), false);
 		assert.equal(reportsTrailingQuestion({ ...base, trailingQuestion: false }), false);
+	});
+});
+
+describe("earned events for the Sessions unread marker", () => {
+	function notifier() {
+		const earned: string[] = [];
+		const sent: string[] = [];
+		const subject = new TurnNotifier({
+			send: async (_tabId, notice) => { sent.push(notice.kind); },
+			onError: () => undefined,
+			onSuppressed: () => undefined,
+			onEarned: (_tabId, kind) => { earned.push(kind); },
+		});
+		return { subject, earned, sent };
+	}
+
+	it("reports a finished turn and a question whether the desktop notice is sent or suppressed", () => {
+		const { subject, earned, sent } = notifier();
+		subject.baseline("s", WORKING);
+		subject.observe("s", { ...FINISHED }, null);
+		subject.baseline("s", WORKING);
+		subject.observe("s", { ...FINISHED }, "setting-disabled");
+		subject.baseline("s", WORKING);
+		subject.observe("s", { ...FINISHED }, "active-visible-focused");
+		assert.deepEqual(earned, ["turn-complete", "turn-complete", "turn-complete"]);
+		assert.deepEqual(sent, ["turn-complete"]);
+		subject.baseline("s", WORKING);
+		subject.observe("s", asking("q1"), "setting-disabled");
+		assert.deepEqual(earned.slice(3), ["request-pending"]);
+	});
+
+	it("does not report an aborted turn", () => {
+		const { subject, earned } = notifier();
+		subject.baseline("s", WORKING);
+		subject.observe("s", { ...FINISHED, promptStatus: "aborted", completionOutcome: "aborted" }, null);
+		assert.deepEqual(earned, []);
 	});
 });

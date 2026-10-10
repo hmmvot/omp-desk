@@ -2890,7 +2890,8 @@ describe("run intent and conversation state", () => {
 
 	it("stores conversation-scoped activity identities, not a boolean", async () => {
 		const { claimDir, sessionDir, cwd } = await tempWorkspace();
-		const index = indexFor(new TestStore(), claimDir);
+		const store = new TestStore();
+		const index = indexFor(store, claimDir);
 		const file = await makeSessionFile(sessionDir, "S-ACTIVITY", cwd);
 		const entry = await managedSession(index, file, cwd);
 
@@ -2904,6 +2905,11 @@ describe("run intent and conversation state", () => {
 
 		const seen = await index.recordConversationState(entry.tabId, { lastSeenReplyId: "reply-2" });
 		assert.equal(seen.lastSeenReplyId, "reply-2");
+		// The read marker is part of the shared catalog row: another window, or this window after it
+		// opened another folder (its own local record is then empty), sees the same verdict.
+		const other = indexFor(store, claimDir);
+		assert.equal(other.get(entry.tabId)?.lastCompletedReplyId, "reply-2");
+		assert.equal(other.get(entry.tabId)?.lastSeenReplyId, "reply-2");
 		await assert.rejects(() => index.recordConversationState("tab:missing", { title: "x" }), /No indexed tab/);
 	});
 

@@ -559,6 +559,13 @@ function indexFixture(native: NativeFixture) {
     slotBinding: () => binding,
     setEditorMode: async (_slotId: string, mode: "chat" | "terminal") => { binding.mode = mode; },
     setRunIntent: async (_tabId: string, intent: string) => { row.runIntent = intent; },
+    // Only the unread markers are modelled; a title update is refused, as the fixture always did.
+    recordConversationState: async (_tabId: string, update: { title?: string | null; lastCompletedReplyId?: string | null; lastSeenReplyId?: string | null }) => {
+      if (update.title !== undefined) throw new Error("the fixture index stores no titles");
+      if (update.lastCompletedReplyId !== undefined) Object.assign(row, { lastCompletedReplyId: update.lastCompletedReplyId });
+      if (update.lastSeenReplyId !== undefined) Object.assign(row, { lastSeenReplyId: update.lastSeenReplyId });
+      return row;
+    },
     closeSession: async () => { row.availability = "saved"; return { released: true, detail: "fixture claim released" }; },
   };
 }
@@ -2789,7 +2796,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			assert.equal(harness.desktopPayloads().length, 1, "delivery is still background work");
 			native.queuedDelivery = 0;
 			t.mock.timers.tick(750); await nextTurn();
-			assert.equal(rowState(), "waiting");
+			assert.equal(rowState(), "unread", "the finish happened while nobody looked, so the idle row is unread until its editor is viewed");
 			assert.equal(harness.desktopPayloads().length, 2);
 			t.mock.timers.tick(750); await nextTurn();
 			assert.equal(harness.desktopPayloads().length, 2, "one final notice without a wake or duplicate poll replay");
@@ -2852,7 +2859,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			adapter.observeActivity("agent_end", { messages: [{ role: "assistant", stopReason: "aborted" }] }, sdk);
 			native.idle = true;
 			t.mock.timers.tick(750); await nextTurn();
-			assert.equal(rowState(), "waiting");
+			assert.equal(rowState(), "unread", "the asks were never looked at, so the idle row stays unread");
 			assert.equal(harness.desktopPayloads().length, 2, "a cancelled ask earns no further notice");
 		} finally {
 			f.state.nativeWatch?.();

@@ -85,6 +85,16 @@
           "default": true,
           "description": "Show the folders VS Code has open in this window, or every folder of a multi-root workspace, in Sessions next to the pinned folders. When off, Sessions shows only pinned folders and folders where a session of this window is running."
         },
+        "omp.sessionsGrouping": {
+          "type": "string",
+          "enum": ["flat", "folders"],
+          "enumDescriptions": [
+            "One list of every session, labelled with its folder: sessions that are not stopped first (unread first, then most recent activity), stopped sessions last, and a New Session row at the end.",
+            "Sessions grouped under their folders."
+          ],
+          "default": "flat",
+          "description": "How Sessions arranges its rows. The toggle in the Sessions title bar changes this setting."
+        },
         "omp.chatColumn": {
           "type": "boolean",
           "default": true,
@@ -173,6 +183,18 @@
         "title": "Add Folder",
         "category": "OMP",
         "icon": "$(new-folder)"
+      },
+      {
+        "command": "omp.showSessionsByFolder",
+        "title": "Sessions: Group by Folder",
+        "category": "OMP",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "omp.showSessionsFlat",
+        "title": "Sessions: Show as Flat List",
+        "category": "OMP",
+        "icon": "$(list-flat)"
       },
       {
         "command": "omp.pinWorkspaceFolder",
@@ -565,6 +587,14 @@
     "menus": {
       "commandPalette": [
         {
+          "command": "omp.showSessionsByFolder",
+          "when": "omp.sessionsFlat"
+        },
+        {
+          "command": "omp.showSessionsFlat",
+          "when": "!omp.sessionsFlat"
+        },
+        {
           "command": "omp.copyRowDiagnostics",
           "when": "false"
         },
@@ -779,6 +809,16 @@
           "command": "omp.openStats",
           "when": "view == omp.sessions",
           "group": "navigation@2"
+        },
+        {
+          "command": "omp.showSessionsByFolder",
+          "when": "view == omp.sessions && omp.sessionsFlat",
+          "group": "navigation@3"
+        },
+        {
+          "command": "omp.showSessionsFlat",
+          "when": "view == omp.sessions && !omp.sessionsFlat",
+          "group": "navigation@3"
         },
         {
           "command": "omp.stopOrphanedProcesses",

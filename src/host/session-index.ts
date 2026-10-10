@@ -369,10 +369,11 @@ interface MutableEntry {
  * catalog.
  *
  * Everything except this window's own observations
- * ({@link MutableEntry.availability}, {@link MutableEntry.detail},
- * {@link MutableEntry.lastSeenReplyId}) and the tab this window had selected.
+ * ({@link MutableEntry.availability}, {@link MutableEntry.detail}) and the tab this
+ * window had selected. The reply identities of the unread marker are shared: a session
+ * read in one window is read in every other, and in this one after it opens another folder.
  */
-type SharedEntry = Omit<MutableEntry, "availability" | "detail" | "lastSeenReplyId">;
+type SharedEntry = Omit<MutableEntry, "availability" | "detail">;
 
 /** This window's own observation of one shared row. */
 interface LocalObservation {
@@ -398,8 +399,6 @@ interface LocalSnapshot {
 	version: number;
 	activeTabId: string | null;
 	observations: Record<string, LocalObservation>;
-	/** Reply each row's panel in this window actually displayed. */
-	seenReplies: Record<string, string>;
 }
 
 // Ownership reconciliation
@@ -1778,7 +1777,7 @@ export class SessionIndex {
 				present.add(shared.tabId);
 				const existing = this.#entries.get(shared.tabId);
 				if (existing === undefined) {
-					this.#entries.set(shared.tabId, composeEntry(shared, undefined, undefined));
+					this.#entries.set(shared.tabId, composeEntry(shared, undefined));
 					adopted.push(shared.tabId);
 					continue;
 				}
@@ -1788,11 +1787,7 @@ export class SessionIndex {
 				}
 				this.#entries.set(
 					shared.tabId,
-					composeEntry(
-						shared,
-						{ availability: existing.availability, detail: existing.detail },
-						existing.lastSeenReplyId ?? undefined,
-					),
+					composeEntry(shared, { availability: existing.availability, detail: existing.detail }),
 				);
 			}
 			for (const tabId of [...this.#entries.keys()]) {
@@ -3852,11 +3847,7 @@ export class SessionIndex {
 					const inline = inlineObservationOf(entry, shared);
 					this.#entries.set(
 						shared.tabId,
-						composeEntry(
-							shared,
-							local.observations[shared.tabId] ?? inline,
-							local.seenReplies[shared.tabId] ?? inlineSeenReplyOf(entry),
-						),
+						composeEntry(shared, local.observations[shared.tabId] ?? inline),
 					);
 				}
 				this.#nextOrdinal = raw.nextOrdinal;
@@ -3897,15 +3888,6 @@ export class SessionIndex {
 		return observations;
 	}
 
-	/** The replies this window's panels displayed, by row. */
-	#localSeenReplies(): Record<string, string> {
-		const seenReplies: Record<string, string> = {};
-		for (const [tabId, entry] of this.#entries) {
-			if (entry.lastSeenReplyId !== null) seenReplies[tabId] = entry.lastSeenReplyId;
-		}
-		return seenReplies;
-	}
-
 	/**
 	 * Read this window's own observations, tolerantly.
 	 *
@@ -3914,7 +3896,7 @@ export class SessionIndex {
 	 * the rows themselves stay exactly as the shared record holds them.
 	 */
 	#readLocalSnapshot(): LocalSnapshot {
-		const empty: LocalSnapshot = { version: LOCAL_VERSION, activeTabId: null, observations: {}, seenReplies: {} };
+		const empty: LocalSnapshot = { version: LOCAL_VERSION, activeTabId: null, observations: {} };
 		let raw: unknown;
 		try {
 			raw = this.#localStore.get<unknown>(SESSION_INDEX_LOCAL_KEY);
@@ -3939,14 +3921,8 @@ export class SessionIndex {
 				observations[tabId] = { availability: availability as SessionAvailability, detail: detail ?? null };
 			}
 		}
-		const seenReplies: Record<string, string> = {};
-		if (typeof record.seenReplies === "object" && record.seenReplies !== null && !Array.isArray(record.seenReplies)) {
-			for (const [tabId, replyId] of Object.entries(record.seenReplies as Record<string, unknown>)) {
-				if (typeof replyId === "string" && replyId.length > 0) seenReplies[tabId] = replyId;
-			}
-		}
 		const activeTabId = typeof record.activeTabId === "string" && record.activeTabId.length > 0 ? record.activeTabId : null;
-		return { version: LOCAL_VERSION, activeTabId, observations, seenReplies };
+		return { version: LOCAL_VERSION, activeTabId, observations };
 	}
 
 	async #persist(): Promise<void> {
@@ -3976,12 +3952,10 @@ export class SessionIndex {
 			bindings: [...this.#bindings.values()].map(binding => ({ ...binding })),
 		};
 		const observations: Record<string, LocalObservation> = this.#localObservations();
-		const seenReplies: Record<string, string> = this.#localSeenReplies();
 		const local: LocalSnapshot = {
 			version: LOCAL_VERSION,
 			activeTabId: this.#activeTabId,
 			observations,
-			seenReplies,
 		};
 		// One writer for the catalog: overlapping restores must not interleave.
 		this.#persistChain = this.#persistChain.then(async () => {
@@ -4131,6 +4105,7 @@ function cloneSharedEntry(entry: SharedEntry): SharedEntry {
 		runIntent: resolveRunIntent(entry),
 		title: entry.title ?? null,
 		lastCompletedReplyId: entry.lastCompletedReplyId ?? null,
+		lastSeenReplyId: typeof entry.lastSeenReplyId === "string" && entry.lastSeenReplyId.length > 0 ? entry.lastSeenReplyId : null,
 		importConflict: persistedImportConflict(entry.importConflict),
 	};
 }
@@ -4149,16 +4124,11 @@ function sharedEntryOf(entry: MutableEntry): SharedEntry {
  * itself. That is what makes a row imported from another workspace visible and
  * honestly *not* running here.
  */
-function composeEntry(
-	shared: SharedEntry,
-	observation: LocalObservation | undefined,
-	seenReplyId: string | undefined,
-): MutableEntry {
+function composeEntry(shared: SharedEntry, observation: LocalObservation | undefined): MutableEntry {
 	return {
 		...shared,
 		availability: observation?.availability ?? (shared.sessionFile === null ? "draft" : "saved"),
 		detail: observation !== undefined ? observation.detail : deriveEntryDetail(shared),
-		lastSeenReplyId: seenReplyId ?? null,
 	};
 }
 
@@ -4194,14 +4164,6 @@ function inlineObservationOf(entry: SharedEntry, shared: SharedEntry): LocalObse
 	return { availability: availability as SessionAvailability, detail: detail ?? null };
 }
 
-/** The reply an earlier build recorded as displayed, or `undefined`. */
-function inlineSeenReplyOf(entry: SharedEntry): string | undefined {
-	const candidate = entry as SharedEntry & { lastSeenReplyId?: unknown };
-	return typeof candidate.lastSeenReplyId === "string" && candidate.lastSeenReplyId.length > 0
-		? candidate.lastSeenReplyId
-		: undefined;
-}
-
 /**
  * The import conflict a row may carry, read leniently, or `null`.
  *
@@ -4217,11 +4179,7 @@ function persistedImportConflict(value: unknown): SessionImportConflict | null {
 
 /** One in-memory row's full copy, including this window's own observation. */
 function cloneEntry(entry: MutableEntry): MutableEntry {
-	return composeEntry(
-		cloneSharedEntry(entry),
-		{ availability: entry.availability, detail: entry.detail ?? null },
-		entry.lastSeenReplyId ?? undefined,
-	);
+	return composeEntry(cloneSharedEntry(entry), { availability: entry.availability, detail: entry.detail ?? null });
 }
 
 function normalizeScope(scope: OmpLaunchScope | undefined): OmpLaunchScope {
@@ -4368,10 +4326,10 @@ function isPersistedEntry(value: unknown): value is SharedEntry {
 	if (typeof entry.cwd !== "string") return false;
 	if (typeof entry.createdAt !== "string" || typeof entry.lastActiveAt !== "string") return false;
 	if (typeof entry.ordinal !== "number" || !Number.isFinite(entry.ordinal)) return false;
-	// `availability`, `detail` and `lastSeenReplyId` are this window's own
-	// observations and live in its local record, not here. A value an earlier build
-	// wrote into this record is accepted (it is validated when it is read as an
-	// observation) and simply is not part of the shared row.
+	// `availability` and `detail` are this window's own observations and live in its
+	// local record, not here. A value an earlier build wrote into this record is accepted
+	// (it is validated when it is read as an observation) and simply is not part of the
+	// shared row. `lastSeenReplyId` is shared and read leniently by `cloneSharedEntry`.
 	if (
 		entry.availability !== undefined &&
 		(typeof entry.availability !== "string" || PERSISTED_AVAILABILITIES[entry.availability] !== true)

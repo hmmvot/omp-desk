@@ -55,8 +55,11 @@ For how this works, see the [architecture](docs/architecture.md).
 
 ![Sessions view](media/readme/sessions.png)
 
-- Shows the folders open in this window and the folders you pin, with every OMP session underneath, running or stopped.
-- If the default OMP profile has no models yet, **Log in to a model provider to start** appears above the folders.
+- Shows every OMP session, running or stopped, of the folders open in this window and the folders you pin. By default it is **one flat list**, each row labelled `folder · title`; the button in the view's title bar switches to sessions **grouped under their folders** and back (`omp.sessionsGrouping`).
+- The flat list puts sessions that are not stopped first, unread ones on top and then the most recently active, and stopped sessions last. A **New Session…** row at the end asks for the folder.
+- A blue **●** at the right end of a row marks a reply you have not read: the agent finished or asked you something while you were not looking at that session. It clears when you look at the session's editor, and it survives a window reload.
+- While a session has an open editor, its row stays selected: the one you viewed most recently. Selecting a folder or the New Session row puts the selection back.
+- If the default OMP profile has no models yet, **Log in to a model provider to start** appears above the sessions.
 - **Pin Folder** keeps a folder in every window. **Add Folder** picks and pins another one.
 - Live status per session: **Working**, **Waiting for subagents**, **Needs your answer**, **Idle** or **Unread reply**.
 - A session open in another window says so. **Switch to Window** takes you there.
@@ -74,7 +77,7 @@ For how this works, see the [architecture](docs/architecture.md).
 - **Retry** (`F5` or `Alt+R`) re-runs a failed or aborted reply.
 - Copy buttons on code blocks and on your own messages.
 - `Ctrl+T` shows or hides all thinking, and `Ctrl+O` expands or collapses all tool calls. Every Chat remembers both choices.
-- **Compact…** and **Shake…** in the context popover ask for OMP's mode first (`snapcompact` and `elide` preselected); **Export as HTML** and **Share** are in the editor title menu. `Alt+click` the model or thinking chip to cycle it (`Ctrl+Shift+M`, `Ctrl+Shift+U`).
+- **Compact…** and **Shake…** in the context popover ask for OMP's mode first (`snapcompact` and `elide` preselected); **Export as HTML** and **Share** are in the editor title menu. `Alt+click` the model or thinking chip to cycle it; `Ctrl+Shift+U` cycles thinking.
 - Terminal-only slash commands such as `/hotkeys` or `/settings` are never sent to the model. Chat opens the VS Code equivalent or says where the command works.
 - Status lines and warnings from OMP extensions appear around the composer; their informational notices are not shown.
 - **Rewind** goes back to one of your prompts in place and puts it into the composer to edit and send again: `Esc` `Esc` in an empty composer, **Rewind to here** on a prompt, `/rewind` or `/branch`, or **OMP: Rewind Conversation…**. **Undo** returns to where you were, and a marker where the conversation split switches between your branches.
@@ -141,6 +144,7 @@ Other commands include **New Session**, **Add Folder**, **Pin Folder**, **Unpin 
 | `omp.toolCallDetail` | `overview` | `overview` groups routine tool calls; `detailed` shows each call. Applies to every Chat. |
 | `omp.desktopNotifications` | `true` | Windows desktop notifications when a session finishes or asks for input. |
 | `omp.showWorkspaceFolders` | `true` | Show the folders VS Code has open in this window in Sessions. When off, only pinned folders (and folders with a running session) are listed. |
+| `omp.sessionsGrouping` | `flat` | `flat` shows one list of every session, labelled with its folder; `folders` groups sessions under their folders. The Sessions title-bar button changes it. |
 | `omp.chatColumn` | `true` | Open sessions in their own locked editor group on the left, with files on the right. When off, a session opens in the active editor group. |
 
 OMP's own settings, models, tools, skills and MCP servers live in OMP's files. Configure them through OMP.
