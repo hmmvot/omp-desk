@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Ctrl+Shift+L focuses the chat composer from anywhere, replacing Ctrl+Shift+Q; it takes over VS Code's Select All Occurrences of Find Match key, which you can rebind.
+
 ## [0.3.0] - 2026-10-11
 
 ### Added

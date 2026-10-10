@@ -1002,11 +1002,6 @@
     },
     "keybindings": [
       {
-        "command": "omp.focusComposer",
-        "key": "ctrl+shift+q",
-        "mac": "cmd+shift+q"
-      },
-      {
         "command": "omp.goToSession",
         "key": "ctrl+alt+q",
         "mac": "cmd+alt+q"
@@ -1025,8 +1020,7 @@
       {
         "command": "omp.focusComposer",
         "key": "ctrl+shift+l",
-        "mac": "cmd+shift+l",
-        "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat"
+        "mac": "cmd+shift+l"
       },
       {
         "command": "omp.searchSymbolFromChat",

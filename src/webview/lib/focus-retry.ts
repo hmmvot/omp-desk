@@ -1,7 +1,7 @@
 /**
  * Move focus into an element that may not be able to take it yet.
  *
- * A host command (Ctrl+Shift+Q) posts its focus request while VS Code is still revealing the editor, so the
+ * A host command (Ctrl+Shift+L) posts its focus request while VS Code is still revealing the editor, so the
  * composer's textarea can be hidden with its frame, or disabled while the panel reconnects, and `focus()` is then
  * ignored without an error. This tries at once and again every `intervalMs` until the element holds focus, giving up
  * after `attempts` tries or as soon as something else the user chose in the meantime holds it.

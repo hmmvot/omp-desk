@@ -45,13 +45,14 @@ describe("terminal copy chords in a shell (Ctrl+C interrupts)", () => {
 });
 
 describe("isTerminalWorkbenchChord", () => {
-	it("claims Ctrl+Alt+Shift+R, Ctrl+Shift+Q and Ctrl+Shift+M on any layout and nothing the program or copy uses", () => {
+	it("claims Ctrl+Alt+Shift+R, Ctrl+Shift+L and Ctrl+Shift+M on any layout and nothing the program or copy uses", () => {
 		assert.equal(isTerminalWorkbenchChord(key("R", { ctrlKey: true, altKey: true, shiftKey: true })), true);
 		assert.equal(isTerminalWorkbenchChord({ ...key("\u043a", { ctrlKey: true, altKey: true, shiftKey: true }), code: "KeyR" }), true);
 		assert.equal(isTerminalWorkbenchChord(key("R", { metaKey: true, altKey: true, shiftKey: true })), true);
-		assert.equal(isTerminalWorkbenchChord(key("Q", { ctrlKey: true, shiftKey: true })), true);
-		assert.equal(isTerminalWorkbenchChord({ ...key("\u0419", { ctrlKey: true, shiftKey: true }), code: "KeyQ" }), true);
-		assert.equal(isTerminalWorkbenchChord(key("q", { ctrlKey: true })), false, "Ctrl+Q is OMP's follow-up key on Windows");
+		assert.equal(isTerminalWorkbenchChord(key("L", { ctrlKey: true, shiftKey: true })), true);
+		assert.equal(isTerminalWorkbenchChord({ ...key("\u0414", { ctrlKey: true, shiftKey: true }), code: "KeyL" }), true);
+		assert.equal(isTerminalWorkbenchChord(key("l", { ctrlKey: true })), false, "Ctrl+L is the program's own key");
+		assert.equal(isTerminalWorkbenchChord(key("Q", { ctrlKey: true, shiftKey: true })), false, "Ctrl+Shift+Q is no longer a workbench chord");
 		assert.equal(isTerminalWorkbenchChord({ ...key("\u042c", { ctrlKey: true, shiftKey: true }), code: "KeyM" }), true, "Ctrl+Shift+M would reach OMP as Ctrl+M, a carriage return");
 		assert.equal(isTerminalWorkbenchChord(key("m", { ctrlKey: true })), false);
 		assert.equal(isTerminalWorkbenchChord(key("Q", { ctrlKey: true, altKey: true, shiftKey: true })), false);

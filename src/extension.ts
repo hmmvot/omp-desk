@@ -5848,7 +5848,7 @@ async function openGroupInSizedFileWindow(source: vscode.TabGroup): Promise<bool
 }
 
 /**
- * `omp.focusComposer` from anywhere (Ctrl+Shift+Q): put the keyboard in a session's composer. The session is the
+ * `omp.focusComposer` from anywhere (Ctrl+Shift+L): put the keyboard in a session's composer. The session is the
  * active session editor, else the one showing in the chat group, else the last active one; a Terminal-mode session
  * gets the focus on its terminal. With no session editor open, the OMP Desk side bar opens instead.
  */
