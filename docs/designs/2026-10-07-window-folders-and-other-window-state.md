@@ -63,7 +63,7 @@ Remove becomes **Unpin**. Both only ever dropped the durable entry; with window 
 
 - **Pin** copies the folder's collapsed state into the pinned record and drops the per-window copy. The pin is committed to the catalog, so it appears in every window through the existing sync and survives closing the folder.
 - **Unpin** removes the record from the profile-wide list. In a window that still has the folder open, or runs a session in it, the folder stays visible, now unpinned, with its collapsed state moved to workspace state.
-- **Guards.** Unpin keeps the registry's guard and now actually passes it: it is refused while a managed OMP session of that folder runs or is launching in this window. Nothing else is touched (no editor closed, no session forgotten, no file deleted).
+- **No guard.** Unpin is never refused by a running session: it only drops the pinned record, and a folder this window runs a managed OMP session in stays visible (unpinned) through the live-session branch of the folder list. Nothing else is touched (no editor closed, no session forgotten, no file deleted).
 - A stale id (a folder that is neither open, pinned nor live any more) is reported and never falls back to another folder.
 
 ### Collapsed state
