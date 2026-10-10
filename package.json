@@ -3,7 +3,7 @@
   "displayName": "OMP Desk",
   "description": "Run Oh My Pi (omp) sessions in VS Code: a Sessions view, Chat or the native Terminal TUI in one editor, and sessions that survive reloads. Windows only.",
   "icon": "media/omp-icon.png",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "publisher": "hmmvot",
   "author": {
     "name": "hmmvot"
