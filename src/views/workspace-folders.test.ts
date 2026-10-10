@@ -319,39 +319,15 @@ describe("workspace folder registry", () => {
 		);
 	});
 
-	it("refuses to remove a folder while a managed session in it runs", async () => {
+	it("removes a folder's metadata and persists it", async () => {
 		const store = memoryStore();
 		const folders = registry(store);
 		const added = await folders.add(first);
 		assert.equal(added.ok, true);
-		const id = added.ok ? added.folder.id : "";
-
-		let probed: string[] = [];
-		const refused = await folders.remove(id, {
-			managedLiveSession: folder => {
-				probed.push(folder.path);
-				return folder.path === first ? `An OMP session of ${folder.path} is running.` : null;
-			},
-		});
-		assert.equal(refused.removed, false);
-		assert.match(refused.removed === false ? refused.reason : "", /is running.*Stop that session/);
-		assert.deepEqual(probed, [first]);
-		assert.equal(folders.list().length, 1, "a refused Remove removes nothing");
-
-		// With nothing running, the metadata goes and nothing else does.
-		const removed = await folders.remove(id, { managedLiveSession: () => null });
+		const removed = await folders.remove(added.ok ? added.folder.id : "");
 		assert.equal(removed.removed, true);
 		assert.deepEqual(folders.list(), []);
 		assert.equal(registry(store).list().length, 0);
-	});
-
-	it("removes a folder without any managed-session check when none is supplied", async () => {
-		const store = memoryStore();
-		const folders = registry(store);
-		const added = await folders.add(second);
-		assert.equal(added.ok, true);
-		const removed = await folders.remove(added.ok ? added.folder.id : "");
-		assert.equal(removed.removed, true);
 	});
 
 	it("keeps the committed folder's identity when another window adds the same directory", () => {

@@ -26,7 +26,6 @@
  */
 import { folderIdFromKey, folderIdentityKeyOrCanonical, folderMatchesCwd } from "./workspace-folders.ts";
 import type {
-	RemoveWorkspaceFolderOptions,
 	WorkspaceFolder,
 	WorkspaceFolderRegistry,
 	WorkspaceFolderStore,
@@ -228,15 +227,15 @@ export class LauncherFolders {
 	/**
 	 * Unpin a pinned folder: it leaves the profile-wide list and so every window's
 	 * list. It stays visible in a window that has it open, or while that window runs a
-	 * session in it, under the id it would have had unpinned. Metadata only; refused
-	 * while a managed OMP session of that folder runs, exactly as a removal always was.
+	 * session in it, under the id it would have had unpinned. Metadata only; a running
+	 * session never refuses it.
 	 */
-	async unpin(id: string, options: RemoveWorkspaceFolderOptions = {}): Promise<UnpinFolderResult> {
+	async unpin(id: string): Promise<UnpinFolderResult> {
 		const folder = this.get(id);
 		if (folder === null || !folder.pinned) {
 			return { unpinned: false, reason: "That folder is no longer pinned in the OMP launcher." };
 		}
-		const removed = await this.#pinned.remove(id, options);
+		const removed = await this.#pinned.remove(id);
 		if (!removed.removed) return { unpinned: false, reason: removed.reason };
 		const nextId = this.#identityOf(folder.path).id;
 		if (folder.collapsed) await this.#writeCollapsed(nextId, true);

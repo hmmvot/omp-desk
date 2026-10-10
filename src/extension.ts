@@ -123,7 +123,7 @@ import { ProcessTreeItem } from "./views/process-tree";
 import { ToolsTreeProvider } from "./views/tools-tree";
 import { SessionToolsController, type SessionToolsTarget } from "./host/session-tools";
 import type { LauncherTreeItem, SessionLauncherFacts, SessionOwnershipFacts } from "./views/session-tree";
-import { WorkspaceFolderRegistry, folderArgument, folderMatchesCwd, mergeWorkspaceFolderRecords, WORKSPACE_FOLDERS_STORAGE_KEY } from "./views/workspace-folders";
+import { WorkspaceFolderRegistry, folderArgument, mergeWorkspaceFolderRecords, WORKSPACE_FOLDERS_STORAGE_KEY } from "./views/workspace-folders";
 import { LauncherFolders } from "./views/launcher-folders";
 import type { LauncherFolder } from "./views/launcher-folders";
 import type { FolderPathInspector, FolderPathVerdict, WorkspaceFolder } from "./views/workspace-folders";
@@ -2379,8 +2379,8 @@ async function pinWorkspaceFolder(index: SessionIndex, argument: unknown): Promi
  *
  * This is the only way a folder is dropped from the launcher, and it is metadata only: no
  * editor is closed, no native host is stopped, no session is forgotten and no session file
- * is deleted. A folder VS Code has open here stays visible in this window; refused while a
- * managed OMP session in the folder runs. The folder's id is resolved again here, so a
+ * is deleted. A folder VS Code has open here, or runs a session in, stays visible in this
+ * window (unpinned); a running session never refuses it. The folder's id is resolved again here, so a
  * stale row cannot unpin a different folder.
  */
 async function unpinWorkspaceFolder(index: SessionIndex, argument: unknown): Promise<void> {
@@ -2393,7 +2393,7 @@ async function unpinWorkspaceFolder(index: SessionIndex, argument: unknown): Pro
     nothing: "No folder is pinned in Sessions.",
   });
   if (folder === null) return;
-  const result = await folders.unpin(folder.id, { managedLiveSession: managedLiveSessionInFolder });
+  const result = await folders.unpin(folder.id);
   if (!result.unpinned) {
     showWarning(result.reason);
     refreshLauncher();
@@ -2401,23 +2401,6 @@ async function unpinWorkspaceFolder(index: SessionIndex, argument: unknown): Pro
   }
   refreshLauncher();
   reportFolderSaveFailure(folders);
-}
-
-/**
- * Whether a managed OMP session of this folder runs, or is starting, in this window: the guard
- * Unpin asks before it drops the folder from the pinned list. Only this window's own runtime
- * counts; it is the one authority on what this window runs, and the same condition that keeps
- * the folder visible while a session lives in it.
- */
-function managedLiveSessionInFolder(folder: WorkspaceFolder): string | null {
-  const index = indexForBridge;
-  if (index === null) return null;
-  const live = index.list().some(entry => {
-    if (!folderMatchesCwd(folder.path, entry.cwd)) return false;
-    const facts = launcherFacts(entry.tabId);
-    return facts.running || facts.launching === true;
-  });
-  return live ? `A managed OMP session in "${folderHeadline(folder.path)}" is running in this window.` : null;
 }
 
 /**

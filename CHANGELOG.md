@@ -21,6 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - While a session has an open editor, its row in Sessions stays selected: the session you viewed most recently. Clearing the selection or selecting a folder or the New Session row puts it back.
 - **Ctrl+Alt+Q** (**OMP: Go to Session…**) opens a searchable list of every session, from anywhere including the integrated terminal: title, folder and status, in the Sessions order (unread first, stopped last). Picking one opens it as a click in Sessions does; **New Session…** at the end of the list asks for the folder and starts one.
 
+### Changed
+
+- **Unpin Folder** no longer refuses while a session in that folder runs. A folder with a running session in the window stays visible, unpinned.
+
 ### Fixed
 
 - An `@path` mention written in inline code in Chat (`` `@CHANGELOG.md` ``) is now a link, as it already was in plain text.

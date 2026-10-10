@@ -304,17 +304,14 @@ describe("launcher folders", () => {
 		assert.deepEqual(after, { id: windowFolderId(beta), path: beta, collapsed: true, pinned: false, open: true });
 	});
 
-	it("refuses to unpin while the caller reports a managed session in the folder, and changes nothing", async () => {
+	it("unpins a folder that runs a session in this window and keeps it visible, unpinned", async () => {
 		const w = windowOver();
-		w.state.windowPaths = [alpha];
-		await w.folders.pin(windowFolderId(alpha));
-		const refused = await w.folders.unpin(windowFolderId(alpha), {
-			managedLiveSession: folder => (folder.path === alpha ? "A managed OMP session is running." : null),
-		});
-		assert.equal(refused.unpinned, false);
-		assert.match(refused.unpinned ? "" : refused.reason, /Stop that session before unpinning/);
-		assert.equal(w.folders.list()[0]!.pinned, true);
-		assert.equal(w.registry.list().length, 1);
+		w.state.live = [alpha];
+		await w.folders.add(alpha);
+		const result = await w.folders.unpin(windowFolderId(alpha));
+		assert.ok(result.unpinned && result.stillShown);
+		assert.deepEqual(w.folders.list().map(folder => ({ path: folder.path, pinned: folder.pinned })), [{ path: alpha, pinned: false }]);
+		assert.equal(w.registry.list().length, 0);
 	});
 
 	it("reports a stale id instead of acting on another folder", async () => {

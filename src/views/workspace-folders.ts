@@ -123,18 +123,6 @@ export type RemoveWorkspaceFolderResult =
 	| { readonly removed: true; readonly folder: WorkspaceFolder }
 	| { readonly removed: false; readonly reason: string };
 
-/**
- * What a Remove must check before it drops a folder.
- *
- * `managedLiveSession` is the extension host's own knowledge — the only authority
- * on whether a managed OMP host is running in a folder — and returns the refusal
- * detail, or `null` when the folder may go. The registry deliberately knows
- * nothing about sessions, so it asks instead of guessing.
- */
-export interface RemoveWorkspaceFolderOptions {
-	readonly managedLiveSession?: (folder: WorkspaceFolder) => string | null;
-}
-
 interface PersistedFolders {
 	version: number;
 	folders: Array<{ id: string; path: string; collapsed: boolean }>;
@@ -354,24 +342,15 @@ export class WorkspaceFolderRegistry {
 	 * Remove one folder from the list.
 	 *
 	 * This is metadata only: no editor is closed, no host stopped, no session
-	 * forgotten and no file removed. It is refused while a managed OMP session in
-	 * that folder runs — the caller supplies that check, because it is the only
-	 * authority on what this window runs — and a malformed or stale id is reported
-	 * instead of falling back to another folder.
+	 * forgotten and no file removed, and a running session never refuses it. A
+	 * malformed or stale id is reported instead of falling back to another folder.
 	 */
-	async remove(id: string, options: RemoveWorkspaceFolderOptions = {}): Promise<RemoveWorkspaceFolderResult> {
+	async remove(id: string): Promise<RemoveWorkspaceFolderResult> {
 		const index = this.#folders.findIndex(folder => folder.id === id);
 		if (index < 0) {
 			return { removed: false, reason: "That folder is no longer in the OMP launcher." };
 		}
 		const folder = this.#folders[index];
-		const liveRefusal = options.managedLiveSession?.({ ...folder }) ?? null;
-		if (liveRefusal !== null) {
-			return {
-				removed: false,
-				reason: `${liveRefusal} Stop that session before unpinning the folder; nothing was changed.`,
-			};
-		}
 		this.#folders = [...this.#folders.slice(0, index), ...this.#folders.slice(index + 1)];
 		await this.#persist();
 		return { removed: true, folder: { ...folder } };
