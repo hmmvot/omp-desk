@@ -40,6 +40,7 @@ import { parseFooterMetadata } from "./footer-metadata.ts";
 import type { FooterMetadataMessage } from "./footer-metadata.ts";
 import { parseTerminalLinkRequest, parseTerminalLinkValidation } from "./terminal-links.ts";
 import type { TerminalLinkRequest, TerminalLinkValidation } from "./terminal-links.ts";
+import { MAX_SYMBOL_QUERY_LENGTH, normalizeSymbolQuery } from "./lib/selection-query.ts";
 import { parseSymbolLinksRequest, parseSymbolLinksResolution, parseSymbolLinksRetry } from "./code-symbols.ts";
 import type { SymbolLinksRequest, SymbolLinksResolution, SymbolLinksRetry } from "./code-symbols.ts";
 
@@ -393,6 +394,22 @@ export interface GuestDraftReplyMessage extends DraftHandoffContent {
 	captured: boolean;
 }
 
+/**
+ * Ask the page for what the user has selected in it, so a VS Code command (symbol search on Ctrl+N) can use it:
+ * VS Code cannot see a webview's selection. Presentation only; answered with {@link GuestSelectionReplyMessage}.
+ */
+export interface GuestSelectionRequestMessage {
+	type: "omp:selection-request";
+	requestId: number;
+}
+
+/** The page's answer: its selection as one trimmed line (possibly empty), at most {@link MAX_SYMBOL_QUERY_LENGTH} characters. */
+export interface GuestSelectionReplyMessage {
+	type: "omp:selection-reply";
+	requestId: number;
+	text: string;
+}
+
 /** Put a draft back into the composer of a document that has just been created. */
 export interface GuestDraftRestoreMessage extends DraftHandoffContent {
 	type: "omp:draft-restore";
@@ -713,6 +730,7 @@ export type GuestHostMessage =
 	| GuestInsertTextMessage
 	| GuestRecallPromptMessage
 	| GuestDraftRequestMessage
+	| GuestSelectionRequestMessage
 	| GuestDraftRestoreMessage
 	| GuestDraftReleaseMessage
 	| GuestTerminalFontMessage
@@ -887,6 +905,7 @@ export type GuestWebviewMessage =
 	| GuestDraftReplyMessage
 	| GuestDraftRestoredMessage
 	| GuestOpenDetailMessage
+	| GuestSelectionReplyMessage
 	| GuestChatCommandMessage;
 
 
@@ -1101,6 +1120,9 @@ export function parseGuestHostMessage(value: unknown): GuestHostMessage | null {
 	if (value.type === "omp:draft-request") {
 		return isRequestId(value.requestId) ? { type: "omp:draft-request", requestId: value.requestId } : null;
 	}
+	if (value.type === "omp:selection-request") {
+		return isRequestId(value.requestId) ? { type: "omp:selection-request", requestId: value.requestId } : null;
+	}
 	if (value.type === "omp:draft-release") {
 		return isRequestId(value.requestId) ? { type: "omp:draft-release", requestId: value.requestId } : null;
 	}
@@ -1296,6 +1318,9 @@ export function parseGuestWebviewMessage(value: unknown): GuestWebviewMessage | 
 			const reply: GuestTerminalCopyReplyMessage = { type: "omp:terminal-copy-reply", requestId, generation, text };
 			return fitsTerminalCopyReply(reply) ? reply : null;
 		}
+		case "omp:selection-reply":
+			if (Object.keys(value).length !== 3 || !isRequestId(value.requestId) || typeof value.text !== "string" || value.text.length > MAX_SYMBOL_QUERY_LENGTH) return null;
+			return { type: "omp:selection-reply", requestId: value.requestId, text: normalizeSymbolQuery(value.text) };
 		case "omp:draft-restored":
 			return isRequestId(value.requestId) ? { type: "omp:draft-restored", requestId: value.requestId } : null;
 		case "omp:draft-reply": {

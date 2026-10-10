@@ -152,6 +152,7 @@ import type { NativeStopVerdict } from "./host/rpc-reconcile";
 import type { CommandResult, CompactMode, RpcSession, SendOutcome, SendRefusal, ShakeMode } from "./host/rpc/session";
 import { readSlashRegistry, type BuiltinSlashEntry, type DeskSlashAction, type SlashRegistry } from "./host/slash-registry";
 import { sessionPrompts } from "./webview/lib/prompt-history";
+import { symbolSearchValue } from "./webview/lib/selection-query";
 import { NAVIGATE_REFUSAL_SENTENCES, rewindPreview, rewindTargets } from "./chat/rewind";
 import { rewindBlockedReason } from "./webview/lib/rewind-mode";
 import type { ChatLiteState, ChatModel, ChatPhase } from "./chat/model";
@@ -254,6 +255,8 @@ import type {
   GuestHostMessage,
   GuestDraftReplyMessage,
   GuestDraftRequestMessage,
+  GuestSelectionReplyMessage,
+  GuestSelectionRequestMessage,
   GuestDraftRestoreMessage,
   GuestSessionViewMessage,
   GuestTerminalFontMessage,
@@ -1381,6 +1384,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("omp.toggleThinking", () => toggleTranscriptDefault(THINKING_EXPANDED_KEY)),
     vscode.commands.registerCommand("omp.toggleToolOutput", () => toggleTranscriptDefault(TOOLS_EXPANDED_KEY)),
     vscode.commands.registerCommand("omp.searchPromptHistory", () => searchPromptHistory()),
+    vscode.commands.registerCommand("omp.searchSymbolFromChat", () => searchSymbolFromChat()),
     vscode.commands.registerCommand("omp.compactConversation", () => runActiveChatAction(context, index, "compact")),
     vscode.commands.registerCommand("omp.shakeConversation", () => runActiveChatAction(context, index, "shake")),
     vscode.commands.registerCommand("omp.cycleModel", () => runActiveChatAction(context, index, "cycle-model")),
@@ -6433,6 +6437,45 @@ const CHAT_COMMAND_TYPES: ReadonlySet<string> = new Set([
   "omp:chat-navigate",
 ]);
 
+/** How long a page is given to report its selection before the symbol search opens empty. */
+const SELECTION_REQUEST_TIMEOUT_MS = 500;
+
+const selectionRequests = new Map<number, { slot: string; panel: vscode.WebviewPanel; settle(text: string): void }>();
+let selectionRequestSeq = 0;
+
+/** The page's own answer to {@link askPageSelection}; a reply from another editor or panel is not this request's. */
+function acceptSelectionReply(slot: string, panel: vscode.WebviewPanel, reply: GuestSelectionReplyMessage): void {
+  const pending = selectionRequests.get(reply.requestId);
+  if (pending?.slot === slot && pending.panel === panel) pending.settle(reply.text);
+}
+
+/** The text selected in one editor's page (a webview's selection is invisible to VS Code), or `""` when it does not answer in time. */
+async function askPageSelection(slot: string, panel: vscode.WebviewPanel): Promise<string> {
+  const requestId = ++selectionRequestSeq;
+  const { promise, resolve } = Promise.withResolvers<string>();
+  selectionRequests.set(requestId, { slot, panel, settle: resolve });
+  const timer = setTimeout(() => resolve(""), SELECTION_REQUEST_TIMEOUT_MS);
+  try {
+    if (!await panel.webview.postMessage({ type: "omp:selection-request", requestId } satisfies GuestSelectionRequestMessage)) return "";
+    return await promise;
+  } finally {
+    clearTimeout(timer);
+    selectionRequests.delete(requestId);
+  }
+}
+
+/**
+ * `omp.searchSymbolFromChat` (Ctrl+N over a Chat page): VS Code's symbol search seeded with what the page has selected,
+ * as it is seeded from an editor's selection; with nothing selected it opens empty.
+ */
+async function searchSymbolFromChat(): Promise<void> {
+  const target = activePanelTab();
+  const selection = target !== null && target.mode === "chat" ? await askPageSelection(target.slotId, target.panel) : "";
+  const value = symbolSearchValue(selection);
+  if (value === null) await vscode.commands.executeCommand("workbench.action.showAllSymbols");
+  else await vscode.commands.executeCommand("workbench.action.quickOpen", value);
+}
+
 /** How long one document is given to hand its unsent draft over before it is replaced. */
 const DRAFT_CAPTURE_TIMEOUT_MS = 1_500;
 
@@ -6631,6 +6674,10 @@ async function handleGuestMessage(
   if (parsed.type === "omp:draft-restored") {
     const carried = draftRestores.get(slot);
     if (carried?.reply.requestId === parsed.requestId && carried.restoredDocument === own.document) draftRestores.delete(slot);
+    return;
+  }
+  if (parsed.type === "omp:selection-reply") {
+    acceptSelectionReply(slot, panel, parsed);
     return;
   }
   if (parsed.type === "omp:terminal-copy-reply") {
@@ -12283,6 +12330,10 @@ async function handlePassiveSlotMessage(slot: string, panel: vscode.WebviewPanel
   if (state?.panel !== panel || state.tabId === null) return;
   const parsed = parseGuestWebviewMessage(message);
   if (parsed === null) return;
+  if (parsed.type === "omp:selection-reply") {
+    acceptSelectionReply(slot, panel, parsed);
+    return;
+  }
   if (parsed.type === "omp:terminal-copy-reply") {
     await acceptTerminalCopy(state, parsed);
     return;

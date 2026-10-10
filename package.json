@@ -486,6 +486,13 @@
         "icon": "$(history)"
       },
       {
+        "command": "omp.searchSymbolFromChat",
+        "enablement": "omp.sessionMode == chat",
+        "title": "Search Symbol from Chat Selection",
+        "category": "OMP",
+        "icon": "$(symbol-class)"
+      },
+      {
         "command": "omp.toggleThinking",
         "enablement": "omp.sessionMode == chat",
         "title": "Show/Hide All Thinking",
@@ -1019,6 +1026,11 @@
         "command": "omp.focusComposer",
         "key": "ctrl+shift+l",
         "mac": "cmd+shift+l",
+        "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat"
+      },
+      {
+        "command": "omp.searchSymbolFromChat",
+        "key": "ctrl+n",
         "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat"
       },
       {
