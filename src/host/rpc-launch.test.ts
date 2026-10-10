@@ -21,7 +21,7 @@ import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { after, before, describe, it } from "node:test";
 import { build } from "esbuild";
-import { CONTROL_DIR_ENV, CONTROL_SLOT_ENV } from "./control-protocol.ts";
+import { CONTROL_DIR_ENV, CONTROL_SLOT_ENV, LINK_REMINDER_ENV } from "./control-protocol.ts";
 import type { NativeControlBootstrap } from "./native-terminal.ts";
 import type {
 	resumeWorkingDirectory as resumeWorkingDirectoryType,
@@ -92,6 +92,7 @@ describe("the rpc-ui launch command line", () => {
 			readonly sessionDir?: string | null;
 			readonly control?: NativeControlBootstrap | null;
 			readonly prefixArgs?: readonly string[];
+			readonly linkReminder?: boolean;
 		} = {},
 	): RpcOmpLaunchSpec {
 		return launch.rpcOmpLaunchSpec({
@@ -101,6 +102,7 @@ describe("the rpc-ui launch command line", () => {
 			sessionFile: overrides.sessionFile === undefined ? null : overrides.sessionFile,
 			sessionDir: overrides.sessionDir === undefined ? null : overrides.sessionDir,
 			profile: overrides.profile === undefined ? null : overrides.profile,
+			linkReminder: overrides.linkReminder ?? true,
 		});
 	}
 
@@ -154,16 +156,22 @@ describe("the rpc-ui launch command line", () => {
 		assert.equal(valueOf(spec({ profile: "work" }).args, "--profile"), "work");
 	});
 
-	it("carries no host-control flag or environment without a bootstrap", () => {
+	it("carries no host-control flag or rendezvous environment without a bootstrap", () => {
 		const result = spec();
-		assert.deepEqual(result.env, {});
+		assert.deepEqual(result.env, { [LINK_REMINDER_ENV]: "1" });
 		for (const flag of ["--define", "--preload", "-e"]) assert.equal(result.args.includes(flag), false, flag);
+	});
+
+	it("passes the omp.linkReminder setting to the Chat prompt module as an environment value", () => {
+		assert.equal(spec({ linkReminder: true }).env[LINK_REMINDER_ENV], "1");
+		assert.equal(spec({ linkReminder: false }).env[LINK_REMINDER_ENV], "0");
 	});
 
 	it("loads host control and publishes its rendezvous only when a bootstrap is given", () => {
 		const control = controlOf();
 		const result = spec({ control });
 		assert.deepEqual(result.env, {
+			[LINK_REMINDER_ENV]: "1",
 			[CONTROL_DIR_ENV]: control.directory,
 			[CONTROL_SLOT_ENV]: control.slotId,
 		});

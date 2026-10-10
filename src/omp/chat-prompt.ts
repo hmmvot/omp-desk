@@ -14,7 +14,16 @@
  *
  * Only an RPC main session gets the section: the native TUI renders replies itself, and a subagent's reply goes
  * to its parent rather than the user. The `-e` host-control module registers it (`registerChatPrompt`).
+ *
+ * The system-prompt rules alone are followed unevenly deep into a long conversation, so a second, per-message
+ * reminder ({@link LINK_REMINDER}: file paths in inline code and code symbols as links) follows every user prompt of
+ * a request. The `context` event, which runs on every provider request with a copy of the messages, inserts it as a
+ * separate synthetic user message right after each prompt; the session file and Chat never see it. The prompt itself is
+ * not changed, and every insertion is the same fixed text, so the provider's prompt cache prefix stays identical from
+ * one request to the next and a cache breakpoint can still sit on the real prompt (OMP never anchors a breakpoint on
+ * or before a message it finds rewritten for the request, which is why the reminder is its own message).
  */
+import { LINK_REMINDER_ENV } from "../host/control-protocol.ts";
 
 export interface ChatPromptInjection {
 	/** A short stable name for the feature the rule serves. */
@@ -50,22 +59,62 @@ export function renderChatPrompt(injections: readonly ChatPromptInjection[]): st
 
 export const CHAT_PROMPT = renderChatPrompt(CHAT_PROMPT_INJECTIONS);
 
+export const MAX_LINK_REMINDER_CHARS = 350;
+/** The text inserted after each user prompt of a request. */
+export const LINK_REMINDER =
+	"[OMP Desk reminder] In your reply, write each file or folder you mention as a path in inline code (`src/app.ts:42`, `docs/`) and each code symbol (class, method, property, field, type) as a link: [`Name`](path:line) with the definition line you saw, else [`Name`](path). Plain `code` only for a symbol you have not located; never guess a line.";
+
 /** The binding context fields this module reads (`ExtensionContext`, pi-coding-agent `extensibility/extensions/types.ts`). */
 export interface ChatPromptContext {
 	readonly mode?: unknown;
 	readonly agent?: { readonly kind?: unknown } | null;
 }
 
-/** The `pi` member the registration uses. */
+/** The `pi` members the registration uses. */
 export interface ChatPromptApi {
 	on(event: string, handler: (event: unknown, ctx: ChatPromptContext) => unknown): void;
+}
+
+/** Whether `message` is a user's own prompt: not synthetic (auto-continue and the like) and not a history rewrite. */
+function isPrompt(message: unknown): boolean {
+	if (typeof message !== "object" || message === null) return false;
+	const candidate = message as { role?: unknown; synthetic?: unknown; historyRewriteAt?: unknown };
+	return candidate.role === "user" && candidate.synthetic !== true && candidate.historyRewriteAt === undefined;
+}
+
+function isReminder(message: unknown): boolean {
+	const candidate = message as { role?: unknown; synthetic?: unknown; content?: unknown } | null;
+	return typeof candidate === "object" && candidate !== null && candidate.role === "user" && candidate.synthetic === true && candidate.content === LINK_REMINDER;
+}
+
+/**
+ * `messages` with a {@link LINK_REMINDER} synthetic user message after every user prompt that does not already have one,
+ * or `undefined` when nothing was added. Nothing existing is changed or removed, so the runner leaves the original
+ * messages unmarked and only the reminders are rebuilt for the request. The reminder takes its prompt's timestamp: the
+ * request bytes never depend on the clock.
+ */
+function withReminders(messages: readonly unknown[]): unknown[] | undefined {
+	const out: unknown[] = [];
+	let added = false;
+	for (let index = 0; index < messages.length; index++) {
+		const message = messages[index];
+		out.push(message);
+		if (!isPrompt(message) || isReminder(messages[index + 1])) continue;
+		const timestamp = (message as { timestamp?: unknown }).timestamp;
+		out.push({ role: "user", content: LINK_REMINDER, synthetic: true, attribution: "agent", timestamp: typeof timestamp === "number" ? timestamp : 0 });
+		added = true;
+	}
+	return added ? out : undefined;
 }
 
 /**
  * Append {@link CHAT_PROMPT} to the system prompt of every request an RPC main session prepares
  * (`before_agent_start` returns the replacement `systemPrompt`). A prompt that already carries it is left as it is.
+ *
+ * Only when `env` sets {@link LINK_REMINDER_ENV} to `1` (the `omp.linkReminder` setting, off by default, read when Desk
+ * launches the session), the `context` event also inserts {@link LINK_REMINDER} after every user prompt of each provider request.
  */
-export function registerChatPrompt(pi: ChatPromptApi): void {
+export function registerChatPrompt(pi: ChatPromptApi, env: Readonly<Record<string, string | undefined>> = process.env): void {
 	pi.on("before_agent_start", (event, ctx) => {
 		if (ctx?.mode !== "rpc" || ctx.agent?.kind !== "main") return undefined;
 		if (typeof event !== "object" || event === null || !("systemPrompt" in event)) return undefined;
@@ -73,5 +122,12 @@ export function registerChatPrompt(pi: ChatPromptApi): void {
 		if (!Array.isArray(prompt) || !prompt.every(part => typeof part === "string")) return undefined;
 		if (prompt.includes(CHAT_PROMPT)) return undefined;
 		return { systemPrompt: [...prompt, CHAT_PROMPT] };
+	});
+	if (env[LINK_REMINDER_ENV] !== "1") return;
+	pi.on("context", (event, ctx) => {
+		if (ctx?.mode !== "rpc" || ctx.agent?.kind !== "main") return undefined;
+		if (typeof event !== "object" || event === null || !("messages" in event) || !Array.isArray(event.messages)) return undefined;
+		const messages = withReminders(event.messages);
+		return messages === undefined ? undefined : { messages };
 	});
 }
