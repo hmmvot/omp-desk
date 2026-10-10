@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Unread replies.** A **●** marks a session whose agent finished a reply or asked you something while you were not looking at its editor; it clears when you look at the session, and it survives a window reload. Both layouts show it.
 - While a session has an open editor, its row in Sessions stays selected: the session you viewed most recently. Clearing the selection or selecting a folder or the New Session row puts it back.
 - **Ctrl+Alt+Q** (**OMP: Go to Session…**) opens a searchable list of every session, from anywhere including the integrated terminal: title, folder and status, in the Sessions order (unread first, stopped last). Picking one opens it as a click in Sessions does; **New Session…** at the end of the list asks for the folder and starts one.
+- **Sessions shows the repository's agent root for a subfolder.** A folder opened inside a Git repository whose root holds the agent files (`AGENTS.md`, `CLAUDE.md`, `.agents`, `.omp`, `.claude`, `.pi`) while the folder itself has none, as a Unity project under `repo/` does, is shown as that ancestor, so new sessions start where OMP finds them; sessions already recorded in the subfolder stay listed under it. Turn it off with `omp.useAgentRootFolder`.
 
 ### Changed
 

@@ -85,6 +85,11 @@
           "default": true,
           "description": "Show the folders VS Code has open in this window, or every folder of a multi-root workspace, in Sessions next to the pinned folders. When off, Sessions shows only pinned folders and folders where a session of this window is running."
         },
+        "omp.useAgentRootFolder": {
+          "type": "boolean",
+          "default": true,
+          "description": "When a folder VS Code has open has no agent files (AGENTS.md, CLAUDE.md, .agents, .omp, .claude, .pi) but sits inside a Git repository whose root, or a folder between, has them, Sessions shows that ancestor instead, so new sessions start where OMP finds the repository's agent files. Sessions recorded in the opened folder stay listed under it. When off, Sessions shows the opened folder."
+        },
         "omp.sessionsGrouping": {
           "type": "string",
           "enum": ["flat", "folders"],

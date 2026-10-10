@@ -214,6 +214,27 @@ export function folderMatchesCwd(folderPath: string, cwd: string): boolean {
 	return normalizeWorkspaceDirectory(folderPath) === normalizeWorkspaceDirectory(cwd);
 }
 
+/** A folder as far as matching sessions is concerned: its path and the opened folders it stands in for. */
+export interface CwdMatchableFolder {
+	readonly path: string;
+	/** Opened folders this folder is shown instead of (see `src/views/agent-root.ts`); empty or absent otherwise. */
+	readonly openedPaths?: readonly string[];
+}
+
+/**
+ * Whether `folder` is where a session recorded as running in `cwd` is filed among `shown`.
+ *
+ * A folder owns the sessions that name its own path. One shown instead of an opened
+ * subfolder also owns the sessions that name that subfolder, because they exist already and
+ * must stay visible — unless another shown folder names the subfolder itself (a pinned
+ * one), which keeps them, so a row never appears under two folders.
+ */
+export function folderOwnsCwd(folder: CwdMatchableFolder, shown: readonly CwdMatchableFolder[], cwd: string): boolean {
+	if (folderMatchesCwd(folder.path, cwd)) return true;
+	if (folder.openedPaths === undefined || !folder.openedPaths.some(opened => folderMatchesCwd(opened, cwd))) return false;
+	return !shown.some(other => folderMatchesCwd(other.path, cwd));
+}
+
 /**
  * The ordered, profile-wide folder list.
  *

@@ -7,7 +7,10 @@
  *
  * 1. the folders VS Code has open in this window (the single folder, or every root
  *    of a multi-root workspace; local `file` roots only), in VS Code's order and
- *    only while `omp.showWorkspaceFolders` is on;
+ *    only while `omp.showWorkspaceFolders` is on. With `omp.useAgentRootFolder` an open
+ *    folder without agent files inside a Git repository whose root has them is shown as
+ *    that ancestor (`src/views/agent-root.ts`); the opened folder stays in `openedPaths`
+ *    so the sessions recorded there keep their place;
  * 2. the profile-wide **pinned** folders (`WorkspaceFolderRegistry`), in their
  *    stored order; a pinned folder that is also open keeps its place among the open
  *    ones and says it is pinned;
@@ -24,7 +27,7 @@
  * and Pin registers the folder under exactly that id, so a folder-scoped command or
  * tree row that named the folder before it was pinned still resolves after.
  */
-import { folderIdFromKey, folderIdentityKeyOrCanonical, folderMatchesCwd } from "./workspace-folders.ts";
+import { folderIdFromKey, folderIdentityKeyOrCanonical, folderMatchesCwd, folderOwnsCwd } from "./workspace-folders.ts";
 import type {
 	WorkspaceFolder,
 	WorkspaceFolderRegistry,
@@ -41,6 +44,12 @@ export interface LauncherFolder extends WorkspaceFolder {
 	readonly pinned: boolean;
 	/** VS Code has this folder open in this window. */
 	readonly open: boolean;
+	/**
+	 * The opened folders this one is shown instead of, because the repository's agent files live
+	 * here and not in them (`omp.useAgentRootFolder`); absent for a folder shown as itself.
+	 * Sessions recorded in those folders are filed under this one.
+	 */
+	readonly openedPaths?: readonly string[];
 }
 
 export type PinFolderResult =
@@ -63,6 +72,11 @@ export interface LauncherFoldersOptions {
 	readonly local: WorkspaceFolderStore;
 	/** Absolute local paths of the folders VS Code has open, in VS Code's order. */
 	readonly windowPaths: () => readonly string[];
+	/**
+	 * The folder an opened folder is shown as (its agent root), read from what was resolved
+	 * already; the opened folder itself when nothing replaces it or the setting is off.
+	 */
+	readonly agentRoot?: (windowPath: string) => string;
 	/** The `omp.showWorkspaceFolders` setting. */
 	readonly showWindowFolders: () => boolean;
 	/** Working directories of the sessions that run in this window. */
@@ -86,6 +100,7 @@ export class LauncherFolders {
 	readonly #pinned: PinnedFolders;
 	readonly #local: WorkspaceFolderStore;
 	readonly #windowPaths: () => readonly string[];
+	readonly #agentRoot: (windowPath: string) => string;
 	readonly #showWindowFolders: () => boolean;
 	readonly #liveSessionCwds: () => readonly string[];
 	readonly #identities = new Map<string, PathIdentity>();
@@ -95,6 +110,7 @@ export class LauncherFolders {
 		this.#pinned = options.pinned;
 		this.#local = options.local;
 		this.#windowPaths = options.windowPaths;
+		this.#agentRoot = options.agentRoot ?? (windowPath => windowPath);
 		this.#showWindowFolders = options.showWindowFolders;
 		this.#liveSessionCwds = options.liveSessionCwds;
 	}
@@ -132,35 +148,46 @@ export class LauncherFolders {
 		const pinnedKeys = pinned.map(folder => this.#identityOf(folder.path).key);
 		const collapsedIds = this.#collapsedIds();
 		const openKeys = new Set<string>();
-		const windowEntries: Array<{ readonly identity: PathIdentity; readonly path: string }> = [];
+		const windowEntries: Array<{ readonly identity: PathIdentity; readonly path: string; readonly opened: string[] }> = [];
+		const substitutedKeys = new Set<string>();
 		for (const windowPath of this.#windowPaths()) {
-			const identity = this.#identityOf(windowPath);
-			if (openKeys.has(identity.key)) continue;
-			openKeys.add(identity.key);
-			windowEntries.push({ identity, path: windowPath });
+			const shownPath = this.#agentRoot(windowPath);
+			const identity = this.#identityOf(shownPath);
+			const ownKey = this.#identityOf(windowPath).key;
+			let entry = windowEntries.find(candidate => candidate.identity.key === identity.key);
+			if (entry === undefined) {
+				openKeys.add(identity.key);
+				entry = { identity, path: shownPath, opened: [] };
+				windowEntries.push(entry);
+			}
+			// An opened folder shown as its ancestor still counts as open, for a pinned twin of it.
+			if (ownKey === identity.key) continue;
+			substitutedKeys.add(ownKey);
+			if (!entry.opened.some(opened => this.#identityOf(opened).key === ownKey)) entry.opened.push(windowPath);
 		}
 		const shown: LauncherFolder[] = [];
 		const consumed = new Set<number>();
 		if (this.#showWindowFolders()) {
 			for (const entry of windowEntries) {
+				const openedPaths = entry.opened.length > 0 ? { openedPaths: entry.opened } : {};
 				const at = pinnedKeys.indexOf(entry.identity.key);
 				if (at >= 0) {
 					consumed.add(at);
-					shown.push({ ...pinned[at]!, pinned: true, open: true });
+					shown.push({ ...pinned[at]!, pinned: true, open: true, ...openedPaths });
 					continue;
 				}
 				const id = entry.identity.id;
-				shown.push({ id, path: entry.path, collapsed: collapsedIds.has(id), pinned: false, open: true });
+				shown.push({ id, path: entry.path, collapsed: collapsedIds.has(id), pinned: false, open: true, ...openedPaths });
 			}
 		}
 		pinned.forEach((folder, at) => {
 			if (consumed.has(at)) return;
-			shown.push({ ...folder, pinned: true, open: openKeys.has(pinnedKeys[at]!) });
+			shown.push({ ...folder, pinned: true, open: openKeys.has(pinnedKeys[at]!) || substitutedKeys.has(pinnedKeys[at]!) });
 		});
 		const usedIds = new Set(shown.map(folder => folder.id));
 		for (const cwd of this.#liveSessionCwds()) {
 			if (typeof cwd !== "string" || cwd.trim().length === 0) continue;
-			if (shown.some(folder => folderMatchesCwd(folder.path, cwd))) continue;
+			if (shown.some(folder => folderOwnsCwd(folder, shown, cwd))) continue;
 			// Rows are filed under the folder their working directory spells, so a session whose cwd
 			// is another spelling of a shown directory still needs its own heading: it gets an id
 			// from that spelling instead of repeating the shown folder's.
@@ -178,7 +205,8 @@ export class LauncherFolders {
 
 	/** The shown folder a session's working directory belongs to, if any. */
 	folderForCwd(cwd: string): LauncherFolder | null {
-		return this.list().find(folder => folderMatchesCwd(folder.path, cwd)) ?? null;
+		const shown = this.list();
+		return shown.find(folder => folderMatchesCwd(folder.path, cwd)) ?? shown.find(folder => folderOwnsCwd(folder, shown, cwd)) ?? null;
 	}
 
 	/** Set when the persisted pinned list could not be read back as this version's state. */
