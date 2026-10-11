@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-10-11
 ---
 
@@ -47,5 +47,5 @@ Three choices are needed: where the inventory comes from, how an incomplete or p
 ## Architecture Review
 
 - Reviewer: architect
-- Outcome: round 1 found 13 findings (addressed); round 2 returned *changes needed* with eight material findings on the implementation, addressed as listed in the design's review section; round 3 returned changes needed with four findings, three fixed and one (a user Claude-registry entry bound to the drive root) accepted as an undetectable residual; details in the design. Not re-reviewed.
-- Notes: stays `proposed`.
+- Outcome: accepted after six review rounds: round 1 (13 findings), 2 (8), 3 (4), 4 (1: Global provenance), 5 (1: registry location and path identity) and 6 (1: Claude config dir resolved with OMP's own resolveClaudePaths) each returned changes needed and every finding was fixed; the independent architect (ReviewR6) confirmed commit 9cad20b with no remaining material findings and accepted both documents.
+- Notes: details in the design's Architecture Review.
