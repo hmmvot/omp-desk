@@ -117,6 +117,8 @@ import { injectShellStyles } from "./lib/terminal-styles";
 import { attachSessionView, sessionViewSnapshot } from "./lib/session-view";
 import { attachInsertedText } from "./lib/insert-text";
 import { adoptNonceForCreatedStyles } from "./lib/nonce-styles";
+import { installFocusTrace } from "./lib/focus-trace";
+installFocusTrace(window, element => element.classList.contains("omp-textarea"), detail => guestTransport.post({ type: "omp:focus-trace", detail }));
 attachSessionView(guestTransport);
 attachInsertedText(guestTransport, () => sessionViewSnapshot().mode);
 const epoch = { nonce: "host-ui-test", counter: 1 };
@@ -2846,6 +2848,49 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.wait("document.querySelector('[aria-label=\"Stop the running turn\"]')");
 			assert.equal(await ui.evaluate("document.querySelector('.omp-composer textarea').value"), "draft kept");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
+			assert.equal(await ui.evaluate("document.activeElement===document.querySelector('.omp-composer textarea')"), true, "the composer takes back the focus its re-attach took by disabling it");
+		});
+		const focusTraces = (): Promise<string[]> => ui.evaluate("window.sent.filter(message=>message.type==='omp:focus-trace').map(message=>message.detail)");
+		await t.test("a composer disabled while the user types is focused again when it is writable, and the trace says why it lost focus", async () => {
+			await reset("held-focus");
+			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+			await ui.call("Input.insertText", { text: "typing" });
+			await ui.evaluate("window.ui.push({phase:'resyncing'})");
+			await ui.wait("document.querySelector('.omp-composer textarea').disabled && document.activeElement===document.body");
+			await ui.evaluate("window.ui.push({phase:'live'})");
+			await ui.wait("!document.querySelector('.omp-composer textarea').disabled && document.activeElement===document.querySelector('.omp-composer textarea')");
+			await ui.call("Input.insertText", { text: " on" });
+			assert.equal(await ui.evaluate("document.querySelector('.omp-composer textarea').value"), "typing on");
+			await ui.wait("window.sent.some(message=>message.type==='omp:focus-trace')");
+			const [line] = await focusTraces();
+			assert.match(line!, /^composer disabled while it held focus \| /);
+			assert.match(line!, /composer not writable: phase=resyncing/);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+		await t.test("a composer the user left while it was disabled is not focused again", async () => {
+			await reset("held-focus-left");
+			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.ui.push({phase:'attaching'})");
+			await ui.wait("document.querySelector('.omp-composer textarea').disabled");
+			await ui.evaluate("document.querySelector('.omp-transcript').dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}))");
+			await ui.evaluate("window.ui.push({phase:'live'})");
+			await ui.wait("!document.querySelector('.omp-composer textarea').disabled");
+			assert.equal(await ui.evaluate("document.activeElement===document.querySelector('.omp-composer textarea')"), false);
+		});
+		await t.test("a composer blurred by script is reported with the caller, and one the user left is not", async () => {
+			await reset("focus-trace-blur");
+			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("new Promise(resolve=>setTimeout(resolve,500))");
+			await ui.evaluate("document.querySelector('.omp-composer textarea').blur()");
+			await ui.wait("window.sent.some(message=>message.type==='omp:focus-trace')");
+			const [line] = await focusTraces();
+			assert.match(line!, /^composer lost focus to none \| /);
+			assert.match(line!, /blur\(\) textarea\.omp-textarea by /);
+			await ui.evaluate("new Promise(resolve=>setTimeout(resolve,1100))");
+			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("document.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}));document.querySelector('.omp-composer textarea').blur()");
+			await ui.evaluate("new Promise(resolve=>setTimeout(resolve,100))");
+			assert.equal((await focusTraces()).length, 1, "a blur right after a pointer press is the user's");
 		});
 		await t.test("a recoverable failure offers Reconnect, which asks the host once, while a non-recoverable one does not", async () => {
 			await reset("reconnect-action");

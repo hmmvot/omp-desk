@@ -848,6 +848,20 @@ export interface GuestComposerPopupMessage {
 	open: boolean;
 }
 
+/**
+ * Why the composer lost keyboard focus without the user moving it, as one bounded line the page composed.
+ *
+ * It is a diagnostic for the OMP Desk output and nothing acts on it: the host logs it and answers nothing. The
+ * page rate-limits it; the host never trusts it for a decision.
+ */
+export interface GuestFocusTraceMessage {
+	type: "omp:focus-trace";
+	detail: string;
+}
+
+/** Longest {@link GuestFocusTraceMessage} line this boundary accepts. */
+export const MAX_FOCUS_TRACE_DETAIL_LENGTH = 1200;
+
 /** What a detail tab shows: the whole TODO, the agent roster, or one agent's activity and child transcript. */
 export type DetailKind = "todo" | "agents" | "agent";
 /** The registry's own identity bound (`src/chat/agents.ts`); the host never resolves it as a path. */
@@ -895,6 +909,7 @@ export type GuestWebviewMessage =
 	| GuestFileCompletionRequestMessage
 	| GuestControlRequestMessage
 	| GuestComposerPopupMessage
+	| GuestFocusTraceMessage
 	| GuestTerminalAttachMessage
 	| GuestTerminalProbeMessage
 	| GuestTerminalCopyReplyMessage
@@ -1274,6 +1289,10 @@ export function parseGuestWebviewMessage(value: unknown): GuestWebviewMessage | 
 		case "omp:composer-popup": {
 			if (typeof value.open !== "boolean") return null;
 			return { type: "omp:composer-popup", open: value.open };
+		}
+		case "omp:focus-trace": {
+			if (!isBoundedText(value.detail, MAX_FOCUS_TRACE_DETAIL_LENGTH) || value.detail.length === 0) return null;
+			return { type: "omp:focus-trace", detail: value.detail };
 		}
 		case "omp:terminal-attach": {
 			const { generation, cols, rows } = value;

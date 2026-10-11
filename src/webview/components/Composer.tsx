@@ -58,6 +58,7 @@ import type { ChatClient, ChatSnapshot } from "../lib/chat-client";
 import { caretRowEdges } from "../lib/caret-row";
 import { chatWritable } from "../lib/chat-client";
 import { reportComposerPopupOpen } from "../lib/composer-overlay";
+import { useHeldFocus } from "../lib/use-held-focus";
 import { providePanelActions } from "../lib/panel-actions";
 import { focusWhenPossible } from "../lib/focus-retry";
 import { provideDraftHandoff, subscribeRestoredDraft, takeRestoredDraft } from "../lib/draft-handoff";
@@ -394,6 +395,8 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind 
 	// Writing needs a live, unlocked session; the same rule refuses inside the client, so
 	// a stale button can never reach the host.
 	const canPrompt = chatWritable(snapshot);
+	// A session that is re-attached while the user types disables the field; it takes the focus back when it is writable again.
+	useHeldFocus(textareaRef, canPrompt, canPrompt ? "" : `phase=${snapshot.phase}${snapshot.readOnlyReason === null ? "" : " read-only"}`);
 	const resumable = snapshot.phase === "view-only" || snapshot.phase === "stopped";
 	const busy = snapshot.working;
 	const request = snapshot.uiRequest;

@@ -7018,6 +7018,9 @@ async function handleGuestMessage(
       }
       return;
     }
+    case "omp:focus-trace":
+      log(`tab ${tabId}: focus: ${parsed.detail}`);
+      return;
     case "omp:composer-popup":
       if (parsed.open) composerPopupTabs.add(tabId);
       else composerPopupTabs.delete(tabId);
@@ -12623,6 +12626,10 @@ async function handlePassiveSlotMessage(slot: string, panel: vscode.WebviewPanel
   if (state?.panel !== panel || state.tabId === null) return;
   const parsed = parseGuestWebviewMessage(message);
   if (parsed === null) return;
+  if (parsed.type === "omp:focus-trace") {
+    log(`tab ${state.tabId}: focus (non-controlling editor): ${parsed.detail}`);
+    return;
+  }
   if (parsed.type === "omp:selection-reply") {
     acceptSelectionReply(slot, panel, parsed);
     return;

@@ -14,6 +14,8 @@
  * back later also does not match: the return is not within {@link FRAME_REFOCUS_MS}.
  */
 
+import { describeElement, traceReport } from "./focus-trace.ts";
+
 /** The longest between an element losing focus and the window blur that says its frame lost the focus too. */
 export const FRAME_BLUR_PAIR_MS = 100;
 /** The longest between that window blur and the window focus that returns the frame; VS Code's own wait is 50 ms. */
@@ -62,7 +64,10 @@ export function restoreFocusTakenByHost(win: Window & typeof globalThis): () => 
 	const onFocus = (event: Event): void => {
 		if (event.target !== win) return;
 		const element = restorer.windowFocus(idle());
-		if (element instanceof win.HTMLElement && element.isConnected && !element.matches(":disabled")) element.focus({ preventScroll: true });
+		if (element instanceof win.HTMLElement && element.isConnected && !element.matches(":disabled")) {
+			element.focus({ preventScroll: true });
+			traceReport(`frame-focus gave focus back to ${describeElement(element)} after the host refocused the webview`);
+		}
 	};
 	doc.addEventListener("focusout", onFocusOut, true);
 	win.addEventListener("blur", onBlur, true);

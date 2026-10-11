@@ -208,6 +208,14 @@ describe("parseGuestWebviewMessage completion requests", () => {
 			open: true,
 		});
 		assert.equal(parseGuestWebviewMessage({ type: "omp:composer-popup", open: "yes" }), null);
+		assert.deepEqual(parseGuestWebviewMessage({ type: "omp:focus-trace", detail: "composer lost focus to none | -3ms window blur", extra: 1 }), {
+			type: "omp:focus-trace",
+			detail: "composer lost focus to none | -3ms window blur",
+		});
+		assert.equal(parseGuestWebviewMessage({ type: "omp:focus-trace", detail: "" }), null);
+		assert.equal(parseGuestWebviewMessage({ type: "omp:focus-trace", detail: "x".repeat(1201) }), null);
+		assert.equal(parseGuestWebviewMessage({ type: "omp:focus-trace", detail: "a\u0000b" }), null);
+		assert.equal(parseGuestWebviewMessage({ type: "omp:focus-trace" }), null);
 	});
 
 	it("no longer accepts the messages of the removed Collab and terminal-switch surfaces", () => {

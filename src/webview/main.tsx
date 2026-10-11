@@ -16,8 +16,11 @@ import { adoptNonceForCreatedStyles } from "./lib/nonce-styles";
 import { attachSessionView, sessionViewSnapshot } from "./lib/session-view";
 import { attachInsertedText } from "./lib/insert-text";
 import { restoreFocusTakenByHost } from "./lib/frame-focus";
+import { installFocusTrace } from "./lib/focus-trace";
 
 function boot(): void {
+	// A composer that loses focus without the user moving it is reported to the OMP Desk output, with what the page saw.
+	installFocusTrace(window, element => element.classList.contains("omp-textarea"), detail => guestTransport.post({ type: "omp:focus-trace", detail }));
 	// VS Code focuses the webview again when its window gains focus, which empties the page's focus; put it back.
 	restoreFocusTakenByHost(window);
 	const nonce = readCspNonce();
