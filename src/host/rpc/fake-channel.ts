@@ -15,6 +15,7 @@ import type {
 } from "./protocol.ts";
 import type { RunningAgent } from "../../chat/agents.ts";
 import type { TodoPhase } from "../../chat/todos.ts";
+import { isRecord } from "../../guards.ts";
 
 export const READY_LINE = JSON.stringify({
 	type: "ready",
@@ -60,6 +61,15 @@ export class FakeRpcChannel implements RpcChannel {
 	attachError = false;
 	autoRespond = true;
 	disconnects = 0;
+	/** The attach answer's `hostToolRetention`: `false` models a broker from an earlier build. */
+	hostToolRetention = true;
+	hostCallOverflow = false;
+	/** Whether `attach` wins the broker's input claim; `false` models a window that attaches while another one holds input. */
+	inputClaimable = true;
+	/** What `set_host_tools` answers: the requested names, or a rejection (script a timeout with `handlers.set("set_host_tools", () => "drop")`). */
+	hostToolsAnswer: "names" | "reject" = "names";
+	#owned = true;
+	#ownerGeneration = 0;
 	#seq = 0;
 	#ring: { seq: number; line: string }[] = [];
 	#listeners = new Set<(event: RpcChannelEvent) => void>();
@@ -84,6 +94,22 @@ export class FakeRpcChannel implements RpcChannel {
 		return this.#seq;
 	}
 
+	get inputOwned(): boolean {
+		return this.#owned;
+	}
+
+	get ownerGeneration(): number {
+		return this.#ownerGeneration;
+	}
+
+	/** Change input ownership as the broker would report it (takeover by another window, release, loss). */
+	setOwned(owned: boolean): void {
+		if (owned === this.#owned) return;
+		this.#owned = owned;
+		this.#ownerGeneration += 1;
+		this.#deliver({ type: "input-owner", owned, generation: this.#ownerGeneration });
+	}
+
 	onEvent(listener: (event: RpcChannelEvent) => void): () => void {
 		this.#listeners.add(listener);
 		return () => {
@@ -94,12 +120,14 @@ export class FakeRpcChannel implements RpcChannel {
 	disconnect(): void {
 		this.disconnects += 1;
 		this.#attached = false;
+		this.setOwned(false);
 	}
 
 	async attach(request: { sinceSeq: number }): Promise<RpcAttachResult> {
 		this.attachRequests.push(request.sinceSeq);
 		if (this.attachError) throw new Error("attach refused");
 		this.#attached = true;
+		this.setOwned(this.inputClaimable);
 		const replay = this.#ring.filter(line => line.seq > request.sinceSeq);
 		const result: RpcAttachResult = {
 			fromSeq: request.sinceSeq,
@@ -107,6 +135,8 @@ export class FakeRpcChannel implements RpcChannel {
 			latestSeq: this.#seq,
 			truncated: false,
 			pinnedOverflow: false,
+			hostToolRetention: this.hostToolRetention,
+			hostCallOverflow: this.hostCallOverflow,
 			rpcProtocol: this.rpcProtocol,
 			ready: this.ready,
 			child: { state: this.childState, pid: 1234, exitCode: this.childState === "exited" ? this.childExitCode : null, ...(this.childStderrTail === undefined ? {} : { stderrTail: this.childStderrTail }) },
@@ -118,11 +148,21 @@ export class FakeRpcChannel implements RpcChannel {
 	}
 
 	async writeLine(line: string): Promise<void> {
-		if (this.writeError !== null) throw Object.assign(new Error("write refused"), { code: this.writeError });
+		if (this.writeError !== null) {
+			if (this.writeError === "input-not-owner") this.setOwned(false);
+			throw Object.assign(new Error("write refused"), { code: this.writeError });
+		}
 		const parsed: unknown = JSON.parse(line);
 		const command = parsed as Record<string, unknown>;
+		// The broker refuses every stdin write from a window without the claim. Only the writes host tools make are
+		// refused here, so a test can keep an otherwise ordinary session running on a window that lost input.
+		if (!this.#owned && (command.type === "set_host_tools" || command.type === "host_tool_result" || command.type === "host_tool_update")) {
+			throw Object.assign(new Error("write refused"), { code: "input-not-owner" });
+		}
 		this.written.push(command);
-		if (!this.autoRespond || command.type === "extension_ui_response") return;
+		// The broker stops replaying a host call once its result is written (or OMP cancels it).
+		if (command.type === "host_tool_result" && typeof command.id === "string") this.#releaseHostCall(command.id);
+		if (!this.autoRespond || command.type === "extension_ui_response" || command.type === "host_tool_result" || command.type === "host_tool_update") return;
 		queueMicrotask(() => this.#answer(command));
 	}
 
@@ -134,8 +174,24 @@ export class FakeRpcChannel implements RpcChannel {
 		const isResponse = line.includes('"type":"response"');
 		const retained = !isResponse || (line.includes('"id":"vsc:') && line.length <= 4096);
 		if (retained) this.#ring.push({ seq, line });
+		if (typeof frame !== "string" && frame.type === "host_tool_cancel" && typeof frame.targetId === "string") this.#releaseHostCall(frame.targetId);
 		if (this.#attached) this.#deliver({ type: "line", seq, line });
 		return seq;
+	}
+
+	/** OMP asks the host to run a registered tool. */
+	emitHostCall(id: string, toolName: string, args: Record<string, unknown> = {}): number {
+		return this.emit({ type: "host_tool_call", id, toolCallId: `tc-${id}`, toolName, arguments: args });
+	}
+
+	/** OMP aborts a pending host call. */
+	emitHostCancel(targetId: string): number {
+		return this.emit({ type: "host_tool_cancel", id: `cancel-${targetId}`, targetId });
+	}
+
+	#releaseHostCall(id: string): void {
+		const at = this.#ring.findIndex(line => line.line.includes('"type":"host_tool_call"') && line.line.includes(`"id":"${id}"`));
+		if (at >= 0) this.#ring.splice(at, 1);
 	}
 
 	/** Deliver the child's `ready` after the attach answered (the broker's late `rpc-ready`), outside the line ring. */
@@ -180,6 +236,11 @@ export class FakeRpcChannel implements RpcChannel {
 
 	#defaultResponse(command: Record<string, unknown>): Record<string, unknown> {
 		switch (command.type) {
+			case "set_host_tools": {
+				if (this.hostToolsAnswer === "reject") return { success: false, error: "host tools refused" };
+				const tools = Array.isArray(command.tools) ? command.tools : [];
+				return { data: { toolNames: tools.map(tool => (isRecord(tool) ? String(tool.name) : "")) } };
+			}
 			case "set_subagent_subscription":
 				return {};
 			case "get_subagents":

@@ -925,6 +925,13 @@ export type PtyEventFrame =
 			readonly truncated: boolean;
 			/** An unanswered `extension_ui_request` exceeded its reserved budget (none was evicted). */
 			readonly pinnedOverflow: boolean;
+			/**
+			 * This broker pins an unanswered `host_tool_call` until its result is written to the child or OMP cancels it
+			 * ({@link RpcLineRing}). Absent on a broker from an earlier build, which parses as `false`.
+			 */
+			readonly hostToolRetention: boolean;
+			/** Unanswered `host_tool_call` lines exceeded their soft budget (none was evicted). */
+			readonly hostCallOverflow: boolean;
 			/** Protocol the broker negotiated with the child; `null` until `ready` was seen and negotiation settled. */
 			readonly rpcProtocol: 1 | 2 | null;
 			/** The child's `ready` line verbatim, or `null` before it was seen. */
@@ -1272,6 +1279,8 @@ function narrowPtyFrame(record: Record<string, unknown>, direction: PtyDirection
 						latestSeq: record.latestSeq,
 						truncated: record.truncated,
 						pinnedOverflow: record.pinnedOverflow,
+						hostToolRetention: record.hostToolRetention === true,
+						hostCallOverflow: record.hostCallOverflow === true,
 						rpcProtocol: record.rpcProtocol as 1 | 2 | null,
 						ready: record.ready as string | null,
 						child: record.child,

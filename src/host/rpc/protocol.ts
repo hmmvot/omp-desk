@@ -39,6 +39,13 @@ export interface RpcAttachResult {
 	truncated: boolean;
 	/** Unanswered dialogs exceeded the broker's pinned budget. */
 	pinnedOverflow: boolean;
+	/**
+	 * The broker pins an unanswered `host_tool_call` until its result is written or OMP cancels it. `false` for a
+	 * broker from an earlier build: Desk registers no host tools on such a session.
+	 */
+	hostToolRetention: boolean;
+	/** Unanswered `host_tool_call` lines exceeded the broker's soft budget. */
+	hostCallOverflow: boolean;
 	rpcProtocol: 1 | 2 | null;
 	/** The raw `ready` line, or `null` when the child has not produced it yet. */
 	ready: string | null;
@@ -57,12 +64,21 @@ export type RpcChannelEvent =
 	| { type: "ready"; line: string; rpcProtocol: 1 | 2 | null }
 	| { type: "stderr"; text: string }
 	| { type: "child"; status: RpcChildStatus }
+	/**
+	 * Whether this frontend holds broker input now, delivered the moment the broker (or a refusal, a closed
+	 * connection or a disconnect) changes it. `generation` increases with every change.
+	 */
+	| { type: "input-owner"; owned: boolean; generation: number }
 	| { type: "closed"; reason: RpcChannelClosedReason };
 
 /** Codes a `writeLine` rejection carries in its `code` property. */
 export type RpcWriteErrorCode = "input-not-owner" | "child-exited" | "line-too-long" | "closed";
 
 export interface RpcChannel {
+	/** Whether this frontend holds broker input on its current connection. Live: cleared by every loss. */
+	readonly inputOwned: boolean;
+	/** Increases whenever {@link inputOwned} changes; an admission compares it to detect a lost-and-regained claim. */
+	readonly ownerGeneration: number;
 	/**
 	 * Connect (or reconnect after a `closed` event) and attach with a replay cursor. Idempotent per
 	 * connection: a second call on a live connection re-attaches with the new cursor. The handle claims
@@ -107,6 +123,15 @@ export interface RpcImage {
 
 export type RpcThinkingLevel = string;
 
+/** One host tool as `set_host_tools` carries it (OMP 18.8.5 `RpcHostToolDefinition`; the optional fields Desk does not use are omitted). */
+export interface RpcHostToolDefinition {
+	name: string;
+	label: string;
+	description: string;
+	parameters: Record<string, unknown>;
+	loadMode: "discoverable" | "essential";
+}
+
 /** Child commands issued by the host; historical child reads never grant page filesystem authority. */
 export type RpcCommand =
 	/** Without `streamingBehavior`, OMP refuses a prompt that would start a turn while one runs (`AgentBusyError`). */
@@ -139,7 +164,9 @@ export type RpcCommand =
 	| { type: "get_available_thinking_levels" }
 	| { type: "set_model"; provider: string; modelId: string }
 	| { type: "set_thinking_level"; level: RpcThinkingLevel }
-	| { type: "set_session_name"; name: string };
+	| { type: "set_session_name"; name: string }
+	/** Replace the host tools OMP offers its model (OMP 18.8.5 `set_host_tools`); the child answers `{ toolNames }`. */
+	| { type: "set_host_tools"; tools: readonly RpcHostToolDefinition[] };
 
 export type RpcCommandType = RpcCommand["type"];
 

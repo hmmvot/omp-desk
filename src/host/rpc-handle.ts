@@ -19,6 +19,10 @@
  *   attach, and a `ready` that arrives later is delivered as a `line` event.
  * - **Input.** The handle claims input on attach without takeover. Only the input owner may
  *   write; a window that lost the claim reads, and its writes are refused `input-not-owner`.
+ *   Ownership is live: every input-owner frame the broker sends is compared with this handle's
+ *   frontend id, and a closed connection, a disconnect and every `input-not-owner` or
+ *   `no-input-owner` refusal clear it, each reported at once as an `input-owner` channel event
+ *   (the executor gate of host tool calls reads it; ADR-0055).
  */
 
 import { randomBytes } from "node:crypto";
@@ -73,6 +77,7 @@ export class RpcHandle extends BrokerHandle<BrokerHandleEvent> implements RpcCha
 	private reconnecting: Promise<void> | null = null;
 	private lastLineSeq = 0;
 	private ownsInput = false;
+	private ownerCounter = 0;
 	private stopRequested = false;
 	private channelClosed = false;
 	private readyLine: string | null = null;
@@ -89,9 +94,14 @@ export class RpcHandle extends BrokerHandle<BrokerHandleEvent> implements RpcCha
 		this.reconnectConnection = reconnect;
 	}
 
-	/** Whether this handle held input the last time it claimed it. */
+	/** Whether this handle holds broker input right now (live: see the module comment). */
 	get inputOwned(): boolean {
 		return this.ownsInput;
+	}
+
+	/** Increases whenever {@link inputOwned} changes. */
+	get ownerGeneration(): number {
+		return this.ownerCounter;
 	}
 
 	/** The protocol the broker negotiated with the child, once known. */
@@ -119,6 +129,8 @@ export class RpcHandle extends BrokerHandle<BrokerHandleEvent> implements RpcCha
 			latestSeq: frame.latestSeq,
 			truncated: frame.truncated,
 			pinnedOverflow: frame.pinnedOverflow,
+			hostToolRetention: frame.hostToolRetention,
+			hostCallOverflow: frame.hostCallOverflow,
 			rpcProtocol: frame.rpcProtocol,
 			ready: frame.ready,
 			child: childStatusOf(frame.child),
@@ -173,6 +185,12 @@ export class RpcHandle extends BrokerHandle<BrokerHandleEvent> implements RpcCha
 		}
 	}
 
+	/** Detach this window: the claim ends with the connection, so ownership is cleared before the socket closes. */
+	disconnect(): void {
+		this.setOwned(false);
+		super.disconnect();
+	}
+
 	protected listen(connection: PtyClientSideConnection): void {
 		connection.onDrain(() => {
 			for (const waiter of this.drainWaiters.splice(0)) waiter();
@@ -184,11 +202,16 @@ export class RpcHandle extends BrokerHandle<BrokerHandleEvent> implements RpcCha
 		super.connectionClosed(reason);
 		for (const waiter of this.drainWaiters.splice(0)) waiter();
 		this.assembler.reset();
+		this.setOwned(false);
 		this.closeChannel("disconnected");
 	}
 
 	protected handleFrame(frame: PtyBrokerFrame): void {
 		switch (frame.t) {
+			case "input-owner":
+				super.handleFrame(frame);
+				this.setOwned(frame.frontendId === this.frontendId);
+				return;
 			case "rpc-attached":
 				// Every attach starts a fresh line, so a half-assembled one belongs to the old cursor.
 				this.assembler.reset();
@@ -252,14 +275,21 @@ export class RpcHandle extends BrokerHandle<BrokerHandleEvent> implements RpcCha
 	private async claim(): Promise<void> {
 		try {
 			await this.claimInput(this.frontendId);
-			this.ownsInput = true;
+			this.setOwned(true);
 		} catch (error) {
 			if (error instanceof PtyRequestError && error.code === "input-not-owner") {
-				this.ownsInput = false;
+				this.setOwned(false);
 				return;
 			}
 			throw error;
 		}
+	}
+
+	private setOwned(owned: boolean): void {
+		if (owned === this.ownsInput) return;
+		this.ownsInput = owned;
+		this.ownerCounter += 1;
+		this.emitChannel({ type: "input-owner", owned, generation: this.ownerCounter });
 	}
 
 	private reconnect(): Promise<void> {
@@ -344,7 +374,9 @@ export class RpcHandle extends BrokerHandle<BrokerHandleEvent> implements RpcCha
 		}
 		if (answer.t === "ack" && answer.ok) return;
 		if (answer.t === "ack" && answer.code !== undefined) {
-			throw new RpcWriteError(writeCodeOf(answer.code), answer.detail ?? "the broker refused the line");
+			const code = writeCodeOf(answer.code);
+			if (code === "input-not-owner") this.setOwned(false);
+			throw new RpcWriteError(code, answer.detail ?? "the broker refused the line");
 		}
 		throw new RpcWriteError("closed", "the broker did not acknowledge the line");
 	}

@@ -180,7 +180,7 @@ export class RpcChild {
 		const written = this.stdinChain.then(() => this.write(Buffer.concat([bytes, Buffer.from("\n")])));
 		this.stdinChain = written.catch(() => undefined);
 		await written;
-		this.releaseAnsweredDialog(bytes);
+		this.releaseAnswered(bytes);
 	}
 
 	/** Graceful stop: end stdin. OMP disposes the session and exits. */
@@ -208,16 +208,19 @@ export class RpcChild {
 		return done.promise;
 	}
 
-	private releaseAnsweredDialog(bytes: Buffer): void {
+	/** A written `extension_ui_response` / `host_tool_result` answers its pinned request: the ring stops replaying it. */
+	private releaseAnswered(bytes: Buffer): void {
 		const head = bytes.subarray(0, 256).toString("utf8");
-		if (peekRpcLine(head).type !== "extension_ui_response") return;
+		const type = peekRpcLine(head).type;
+		if (type !== "extension_ui_response" && type !== "host_tool_result") return;
 		try {
 			const parsed: unknown = JSON.parse(bytes.toString("utf8"));
 			if (typeof parsed === "object" && parsed !== null && "id" in parsed && typeof parsed.id === "string") {
-				this.ring.releaseDialog(parsed.id);
+				if (type === "host_tool_result") this.ring.releaseHostCall(parsed.id);
+				else this.ring.releaseDialog(parsed.id);
 			}
 		} catch {
-			// Not a response the broker can read: the dialog stays pinned, which is the safe side.
+			// Not a response the broker can read: the request stays pinned, which is the safe side.
 		}
 	}
 

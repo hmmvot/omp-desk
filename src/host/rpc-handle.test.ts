@@ -14,7 +14,9 @@
  * - a window that reattaches with its last `seq` is replayed exactly what it missed, an open
  *   message shows only its newest update, and an unanswered dialog survives every reattach until
  *   it is answered;
- * - only the input owner writes, and a second window is refused rather than interleaved;
+ * - only the input owner writes, and a second window is refused rather than interleaved; ownership is live
+ *   on the handle (takeover, release and disconnect are reported at once);
+ * - an unanswered host tool call survives every reattach until its result is written or OMP cancels it;
  * - kind gating: terminal requests are refused by an rpc broker and rpc requests by a terminal one;
  * - stop is a stdin close, and the broker never stops the child because a window went away.
  *
@@ -82,6 +84,16 @@ function handle(command, line) {
 			break;
 		case "echo":
 			out({ type: "echo", line });
+			break;
+		case "hostcall":
+			out({ type: "host_tool_call", id: command.callId, toolCallId: "tc-" + command.callId, toolName: "probe", arguments: {} });
+			out({ type: "marker", name: command.name });
+			break;
+		case "hostcancel_later":
+			setTimeout(() => out({ type: "host_tool_cancel", id: "cancel-" + command.callId, targetId: command.callId }), command.ms);
+			break;
+		case "host_tool_result":
+			out({ type: "marker", name: "result:" + command.id });
 			break;
 		case "mark":
 			out({ type: "marker", name: command.name });
@@ -350,6 +362,94 @@ describe("managed-rpc broker end to end", { skip: SKIP, timeout: 120_000 }, () =
 			readerSeen.lines().some(line => line.json.name === "nope"),
 			false,
 		);
+	});
+
+	it("reports input ownership live: takeover, release and disconnect reach the handle at once", async () => {
+		const slot = nextSlot();
+		const first = await launchRpc(slot);
+		const firstSeen = watch(first);
+		await first.attach({ sinceSeq: 0 });
+		assert.equal(first.inputOwned, true);
+		const before = first.ownerGeneration;
+		const second = await reattach(slot);
+		const secondSeen = watch(second);
+		await second.attach({ sinceSeq: 0 });
+		assert.equal(second.inputOwned, false);
+
+		await second.claimInput(second.frontendId, { takeover: true });
+		await firstSeen.whenEvent(event => event.type === "input-owner" && !event.owned);
+		assert.equal(first.inputOwned, false, "the previous owner learns of the takeover without writing");
+		assert.ok(first.ownerGeneration > before);
+		assert.equal(second.inputOwned, true);
+		assert.equal(secondSeen.events.some(event => event.type === "input-owner" && event.owned), true);
+		await assert.rejects(send(first, { type: "mark", name: "stale" }), (error: unknown) => error instanceof RpcWriteError && error.code === "input-not-owner");
+
+		await second.releaseInput(second.frontendId);
+		assert.equal(second.inputOwned, false, "a release clears ownership");
+		await second.claimInput(second.frontendId);
+		assert.equal(second.inputOwned, true);
+		const generation = second.ownerGeneration;
+		second.disconnect();
+		assert.equal(second.inputOwned, false, "a disconnect clears ownership before the socket closes");
+		assert.ok(second.ownerGeneration > generation);
+		assert.equal(secondSeen.events.some(event => event.type === "closed"), true);
+	});
+
+	it("pins a host tool call until its result is written, whatever windows come and go", async () => {
+		const slot = nextSlot();
+		const first = await launchRpc(slot);
+		const firstSeen = watch(first);
+		const attached = await first.attach({ sinceSeq: 0 });
+		assert.equal(attached.hostToolRetention, true, "this broker pins host tool calls");
+		assert.equal(attached.hostCallOverflow, false);
+		await send(first, { type: "hostcall", callId: "call-1", name: "called-1" });
+		await send(first, { type: "hostcall", callId: "call-2", name: "called-2" });
+		await firstSeen.whenLine(marker("called-2"));
+		first.disconnect();
+
+		const second = await reattach(slot);
+		const secondSeen = watch(second);
+		await second.attach({ sinceSeq: 0 });
+		await secondSeen.whenLine(json => json.type === "host_tool_call" && json.id === "call-2");
+		assert.deepEqual(
+			secondSeen.lines().filter(line => line.json.type === "host_tool_call").map(line => line.json.id),
+			["call-1", "call-2"],
+			"calls nobody answered are shown to the next window",
+		);
+		await send(second, { type: "host_tool_result", id: "call-1", result: { content: [{ type: "text", text: "ok" }] } });
+		await secondSeen.whenLine(marker("result:call-1"));
+		second.disconnect();
+
+		const third = await reattach(slot);
+		const thirdSeen = watch(third);
+		await third.attach({ sinceSeq: 0 });
+		await send(third, { type: "mark", name: "sentinel" });
+		await thirdSeen.whenLine(marker("sentinel"));
+		assert.deepEqual(
+			thirdSeen.lines().filter(line => line.json.type === "host_tool_call").map(line => line.json.id),
+			["call-2"],
+			"an answered call is never replayed",
+		);
+	});
+
+	it("releases a host tool call OMP cancels while no window is attached", async () => {
+		const slot = nextSlot();
+		const first = await launchRpc(slot);
+		const firstSeen = watch(first);
+		await first.attach({ sinceSeq: 0 });
+		await send(first, { type: "hostcall", callId: "call-1", name: "called" });
+		await firstSeen.whenLine(marker("called"));
+		await send(first, { type: "hostcancel_later", callId: "call-1", ms: 300 });
+		first.disconnect();
+		// The cancel is produced by the child's own 300 ms timer while no client is connected, so there is no event to
+		// await from this side; a fake clock cannot advance a real child process.
+		await new Promise<void>(resolve => setTimeout(resolve, 900));
+
+		const second = await reattach(slot);
+		const secondSeen = watch(second);
+		await second.attach({ sinceSeq: 0 });
+		await secondSeen.whenLine(json => json.type === "host_tool_cancel");
+		assert.equal(secondSeen.lines().some(line => line.json.type === "host_tool_call"), false, "the cancelled call is gone from the replay");
 	});
 
 	it("refuses each kind's requests on the other kind's broker", async () => {

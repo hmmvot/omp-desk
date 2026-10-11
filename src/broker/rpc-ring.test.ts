@@ -212,6 +212,97 @@ describe("pinned skeleton", () => {
 	});
 });
 
+describe("pinned host tool calls", () => {
+	const hostCall = (id: string, args = "{}"): string =>
+		`{"type":"host_tool_call","id":"${id}","toolCallId":"tc-${id}","toolName":"probe","arguments":${args}}`;
+	const hostCancel = (targetId: string): string => JSON.stringify({ type: "host_tool_cancel", id: `cancel-${targetId}`, targetId });
+	const callIds = (ring: RpcLineRing, since = 0): string[] =>
+		replayed(ring, since)
+			.filter(line => peekRpcLine(line).type === "host_tool_call")
+			.map(line => String(JSON.parse(line).id));
+
+	it("keeps an unanswered call through a flood and stops replaying it when its result is written", () => {
+		const ring = new RpcLineRing();
+		ring.append(hostCall("call-1"));
+		ring.append(hostCall("call-2"));
+		for (let index = 0; index < 600; index += 1) ring.append(filler(index));
+		assert.deepEqual(callIds(ring), ["call-1", "call-2"], "an unanswered call outlives the ring");
+		assert.equal(ring.stats().hostCalls, 2);
+
+		assert.equal(ring.releaseHostCall("call-1"), true);
+		assert.equal(ring.releaseHostCall("call-1"), false, "a duplicate result releases nothing twice");
+		assert.equal(ring.releaseHostCall("nope"), false);
+		assert.deepEqual(callIds(ring), ["call-2"]);
+		assert.equal(ring.stats().hostCalls, 1);
+	});
+
+	it("releases a call when OMP cancels it, with no consumer attached, and ignores a duplicate cancel", () => {
+		const ring = new RpcLineRing();
+		ring.setConsumers(0);
+		ring.append(hostCall("call-1"));
+		for (let index = 0; index < 600; index += 1) ring.append(filler(index));
+		assert.deepEqual(callIds(ring), ["call-1"], "a detached ring still holds the call");
+		ring.append(hostCancel("call-1"));
+		ring.append(hostCancel("call-1"));
+		assert.equal(ring.stats().hostCalls, 0);
+		assert.deepEqual(callIds(ring), []);
+		assert.equal(replayed(ring).filter(line => peekRpcLine(line).type === "host_tool_cancel").length, 2, "the cancel lines themselves stay ordinary retained lines");
+	});
+
+	it("replays a pinned call only to an attach whose cursor is before it", () => {
+		const ring = new RpcLineRing();
+		const first = ring.append(hostCall("call-1"));
+		for (let index = 0; index < 600; index += 1) ring.append(filler(index));
+		const seq = first?.seq ?? 0;
+		assert.deepEqual(callIds(ring, seq - 1), ["call-1"]);
+		assert.deepEqual(callIds(ring, seq), [], "a client that already saw the call is not shown it again");
+		assert.equal(ring.oldestSeq(), seq, "the pinned call is the oldest replayable line");
+	});
+
+	it("does not pin a call without a string id, and a re-sent id replaces its pin", () => {
+		const ring = new RpcLineRing();
+		ring.append('{"type":"host_tool_call","toolName":"probe","arguments":{}}');
+		ring.append('{"type":"host_tool_call","id":7,"toolName":"probe","arguments":{}}');
+		ring.append('{"type":"host_tool_call","id":"","toolName":"probe","arguments":{}}');
+		ring.append('{"type":"host_tool_call","id":"broken"');
+		assert.equal(ring.stats().hostCalls, 0);
+		ring.append(hostCall("call-1", '{"n":1}'));
+		ring.append(hostCall("call-1", '{"n":2}'));
+		assert.equal(ring.stats().hostCalls, 1);
+		for (let index = 0; index < 600; index += 1) ring.append(filler(index));
+		assert.deepEqual(callIds(ring), ["call-1"]);
+	});
+
+	it("still pins an oversized call, and reports (never evicts) calls beyond the soft budget", () => {
+		const ring = new RpcLineRing();
+		ring.append(hostCall("call-big", JSON.stringify({ text: "x".repeat(DEFAULT_RPC_RING_LIMITS.hostCallMaxBytes) })));
+		assert.equal(ring.hostCallOverflow, true, "one call above the byte budget is reported");
+		for (let index = 0; index < 600; index += 1) ring.append(filler(index));
+		assert.deepEqual(callIds(ring), ["call-big"]);
+		ring.releaseHostCall("call-big");
+		assert.equal(ring.hostCallOverflow, false);
+
+		const budget = DEFAULT_RPC_RING_LIMITS.hostCallMaxLines;
+		for (let index = 0; index < budget + 5; index += 1) ring.append(hostCall(`call-${index}`));
+		assert.equal(ring.hostCallOverflow, true);
+		for (let index = 0; index < 600; index += 1) ring.append(filler(index));
+		assert.equal(callIds(ring).length, budget + 5, "every unanswered call is still there");
+		for (let index = 0; index < 10; index += 1) ring.releaseHostCall(`call-${index}`);
+		assert.equal(ring.hostCallOverflow, false);
+	});
+
+	it("keeps dialog and host call pins apart", () => {
+		const ring = new RpcLineRing();
+		ring.append(dialog("same-id"));
+		ring.append(hostCall("same-id"));
+		assert.deepEqual(ring.stats(), { ...ring.stats(), dialogs: 1, hostCalls: 1 });
+		ring.releaseDialog("same-id");
+		assert.equal(ring.stats().hostCalls, 1);
+		ring.releaseHostCall("same-id");
+		assert.equal(ring.stats().dialogs, 0);
+	});
+});
+
 describe("replay from a cursor", () => {
 	it("replays only what follows the cursor, and says when the cursor is not this child's", () => {
 		const ring = new RpcLineRing();

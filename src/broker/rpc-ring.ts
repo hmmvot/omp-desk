@@ -18,7 +18,9 @@
  *   message, so only the latest matters, and it is dropped once `message_end` is seen.
  * - Unanswered dialog requests are **pinned** in their own budget and are never evicted;
  *   open `message_start` / `tool_execution_start` lines (each at most 64 KiB) are pinned in a
- *   separate skeleton budget.
+ *   separate skeleton budget. An unanswered `host_tool_call` (a tool OMP asked the host to run)
+ *   is pinned like a dialog until the host's `host_tool_result` is written to the child or OMP
+ *   cancels it with `host_tool_cancel`; its budget is soft as well.
  *
  * Every consumer reads through one cursor over the ring for replay *and* live delivery, and
  * {@link RpcSubscriber} sends from it only while its sink's queue is under a pacing bound, so
@@ -39,6 +41,9 @@ export const RPC_PINNED_DIALOG_MAX_BYTES = 1024 * 1024;
 /** Reserved budget for open message/tool start lines. Exceeding it means "not pinned". */
 export const RPC_PINNED_SKELETON_MAX_LINES = 256;
 export const RPC_PINNED_SKELETON_MAX_BYTES = 1024 * 1024;
+/** Soft budget for unanswered `host_tool_call` lines. Exceeding it is reported (`hostCallOverflow`), never evicted. */
+export const RPC_PINNED_HOST_CALL_MAX_LINES = 32;
+export const RPC_PINNED_HOST_CALL_MAX_BYTES = 1024 * 1024;
 /** A start line above this gets ordinary ring retention only (tool arguments are unbounded). */
 export const RPC_PINNED_SKELETON_LINE_MAX_BYTES = 64 * 1024;
 /** A retained `vsc:` response line above this is treated as an ordinary transient response. */
@@ -54,6 +59,8 @@ export interface RpcRingLimits {
 	readonly skeletonMaxLines: number;
 	readonly skeletonMaxBytes: number;
 	readonly skeletonLineMaxBytes: number;
+	readonly hostCallMaxLines: number;
+	readonly hostCallMaxBytes: number;
 }
 
 export const DEFAULT_RPC_RING_LIMITS: RpcRingLimits = {
@@ -64,6 +71,8 @@ export const DEFAULT_RPC_RING_LIMITS: RpcRingLimits = {
 	skeletonMaxLines: RPC_PINNED_SKELETON_MAX_LINES,
 	skeletonMaxBytes: RPC_PINNED_SKELETON_MAX_BYTES,
 	skeletonLineMaxBytes: RPC_PINNED_SKELETON_LINE_MAX_BYTES,
+	hostCallMaxLines: RPC_PINNED_HOST_CALL_MAX_LINES,
+	hostCallMaxBytes: RPC_PINNED_HOST_CALL_MAX_BYTES,
 };
 
 /** One stdout line held for delivery. */
@@ -77,7 +86,7 @@ export interface RpcRingEntry {
 	dead: boolean;
 	/** Still in the ring's array (pinned entries may outlive their place in it). */
 	inRing: boolean;
-	pinned: "dialog" | "skeleton" | null;
+	pinned: "dialog" | "skeleton" | "hostCall" | null;
 }
 
 /** What one line's shallow classification found. */
@@ -100,6 +109,18 @@ export function peekRpcLine(line: string): RpcLinePeek {
 	const match = TYPE_RE.exec(line.length > HEAD_CHARS ? line.slice(0, HEAD_CHARS) : line);
 	if (match === null) return { type: null, id: null };
 	return { type: match[2] ?? null, id: match[1] ?? null };
+}
+
+/** One top-level string field of a JSON object line, or `null` when the line is not such an object or lacks it. */
+export function stringFieldOf(line: string, field: string): string | null {
+	try {
+		const parsed: unknown = JSON.parse(line);
+		if (typeof parsed !== "object" || parsed === null) return null;
+		const value = (parsed as Record<string, unknown>)[field];
+		return typeof value === "string" ? value : null;
+	} catch {
+		return null;
+	}
 }
 
 function messageIdOf(line: string): string | null {
@@ -132,6 +153,8 @@ export class RpcLineRing {
 	private dialogBytes = 0;
 	private readonly skeleton = new Map<string, RpcRingEntry>();
 	private skeletonBytes = 0;
+	private readonly hostCalls = new Map<string, RpcRingEntry>();
+	private hostCallBytes = 0;
 	private transients: RpcRingEntry[] = [];
 	private transientHead = 0;
 	private consumers = 0;
@@ -150,6 +173,11 @@ export class RpcLineRing {
 		return this.dialogs.size > this.limits.dialogMaxLines || this.dialogBytes > this.limits.dialogMaxBytes;
 	}
 
+	/** Unanswered `host_tool_call` lines exceeded their soft budget (none was evicted). */
+	get hostCallOverflow(): boolean {
+		return this.hostCalls.size > this.limits.hostCallMaxLines || this.hostCallBytes > this.limits.hostCallMaxBytes;
+	}
+
 	/**
 	 * How many consumers read the ring. With none, a transient line is not stored: nobody
 	 * would ever be shown it, since a later attach replays retained lines only.
@@ -160,8 +188,8 @@ export class RpcLineRing {
 	}
 
 	/** Counters for diagnostics and tests. */
-	stats(): { readonly lines: number; readonly bytes: number; readonly dialogs: number; readonly skeleton: number } {
-		return { lines: this.liveLines, bytes: this.liveBytes, dialogs: this.dialogs.size, skeleton: this.skeleton.size };
+	stats(): { readonly lines: number; readonly bytes: number; readonly dialogs: number; readonly skeleton: number; readonly hostCalls: number } {
+		return { lines: this.liveLines, bytes: this.liveBytes, dialogs: this.dialogs.size, skeleton: this.skeleton.size, hostCalls: this.hostCalls.size };
 	}
 
 	/**
@@ -217,6 +245,10 @@ export class RpcLineRing {
 				if (key !== undefined) this.unpinSkeleton(`t:${key}`);
 				return this.insert(seq, bytes, true);
 			}
+			case "host_tool_call":
+				return this.appendHostCallLine(seq, bytes, line);
+			case "host_tool_cancel":
+				return this.appendHostCancelLine(seq, bytes, line);
 			case "extension_ui_request":
 				return this.appendDialogLine(seq, bytes, line);
 			default:
@@ -238,6 +270,20 @@ export class RpcLineRing {
 		return true;
 	}
 
+	/**
+	 * The broker wrote the host's `host_tool_result` for the call `id` to the child (or OMP cancelled
+	 * it): the call is never replayed again. Returns whether a pinned call was released.
+	 */
+	releaseHostCall(id: string): boolean {
+		const entry = this.hostCalls.get(id);
+		if (entry === undefined) return false;
+		this.hostCalls.delete(id);
+		this.hostCallBytes -= entry.bytes.length;
+		entry.pinned = null;
+		this.kill(entry);
+		return true;
+	}
+
 	/** Lines a client attaching with `sinceSeq` is shown, in `seq` order. */
 	replay(sinceSeq: number): RpcReplay {
 		let since = sinceSeq;
@@ -254,7 +300,7 @@ export class RpcLineRing {
 			if (entry !== undefined && entry.seq > since && entry.replayable && !entry.dead) entries.push(entry);
 		}
 		let merged = false;
-		for (const pinned of [...this.dialogs.values(), ...this.skeleton.values()]) {
+		for (const pinned of [...this.dialogs.values(), ...this.skeleton.values(), ...this.hostCalls.values()]) {
 			if (!pinned.inRing && !pinned.dead && pinned.seq > since) {
 				entries.push(pinned);
 				merged = true;
@@ -274,7 +320,7 @@ export class RpcLineRing {
 				break;
 			}
 		}
-		for (const pinned of [...this.dialogs.values(), ...this.skeleton.values()]) {
+		for (const pinned of [...this.dialogs.values(), ...this.skeleton.values(), ...this.hostCalls.values()]) {
 			if (!pinned.dead && pinned.seq < oldest) oldest = pinned.seq;
 		}
 		return oldest;
@@ -337,6 +383,26 @@ export class RpcLineRing {
 			this.dialogs.set(request.id, entry);
 			this.dialogBytes += bytes.length;
 		}
+		return entry;
+	}
+
+	private appendHostCallLine(seq: number, bytes: Buffer, line: string): RpcRingEntry | null {
+		const entry = this.insert(seq, bytes, true);
+		const id = entry === null ? null : stringFieldOf(line, "id");
+		// A call without a string id cannot be answered or cancelled by id: it is an ordinary retained line.
+		if (entry === null || id === null || id.length === 0) return entry;
+		// A re-sent id replaces the earlier pin rather than leaking its budget.
+		this.releaseHostCall(id);
+		entry.pinned = "hostCall";
+		this.hostCalls.set(id, entry);
+		this.hostCallBytes += bytes.length;
+		return entry;
+	}
+
+	private appendHostCancelLine(seq: number, bytes: Buffer, line: string): RpcRingEntry | null {
+		const entry = this.insert(seq, bytes, true);
+		const targetId = stringFieldOf(line, "targetId");
+		if (targetId !== null) this.releaseHostCall(targetId);
 		return entry;
 	}
 

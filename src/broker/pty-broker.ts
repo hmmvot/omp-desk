@@ -1047,6 +1047,8 @@ export class PtyBroker {
 					latestSeq: this.ring.latestSeq,
 					truncated: replay.truncated,
 					pinnedOverflow: this.ring.pinnedOverflow,
+					hostToolRetention: true,
+					hostCallOverflow: this.ring.hostCallOverflow,
 					rpcProtocol: rpc.rpcProtocol,
 					ready: rpc.rpcProtocol === null ? null : rpc.readyLine,
 					child: this.status(),

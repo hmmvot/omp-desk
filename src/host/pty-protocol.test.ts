@@ -557,6 +557,8 @@ describe("managed-rpc kind and frames", () => {
 				latestSeq: 9,
 				truncated: false,
 				pinnedOverflow: false,
+				hostToolRetention: true,
+				hostCallOverflow: false,
 				rpcProtocol: 2,
 				ready: '{"type":"ready"}',
 				child: statusFixture(),
@@ -575,6 +577,22 @@ describe("managed-rpc kind and frames", () => {
 			assert.equal(parsePtyFrame(key, sessionId, 1, line, "broker-to-client").t, event.t);
 			assert.throws(() => parsePtyFrame(key, sessionId, 1, line, "client-to-broker"), PtyProtocolError, event.t);
 		}
+	});
+
+	it("reads the host tool retention capability, and treats a broker that does not send it as having none", () => {
+		const key = derivePtySessionKey(createPtyToken(), createPtyNonce(), createPtyNonce());
+		const sessionId = derivePtySessionId(key);
+		const v = PTY_PROTOCOL_VERSION;
+		const attached = { v, t: "rpc-attached", id: 1, fromSeq: 0, oldestSeq: 1, latestSeq: 2, truncated: false, pinnedOverflow: false, rpcProtocol: 2, ready: null, child: statusFixture() };
+		const parse = (frame: object) => parsePtyFrame(key, sessionId, 1, encodePtyFrame(key, sessionId, 1, frame as never), "broker-to-client");
+		const current = parse({ ...attached, hostToolRetention: true, hostCallOverflow: true });
+		assert.equal(current.t === "rpc-attached" && current.hostToolRetention, true);
+		assert.equal(current.t === "rpc-attached" && current.hostCallOverflow, true);
+		const earlier = parse(attached);
+		assert.equal(earlier.t === "rpc-attached" && earlier.hostToolRetention, false, "an earlier build's broker sends neither field");
+		assert.equal(earlier.t === "rpc-attached" && earlier.hostCallOverflow, false);
+		const forged = parse({ ...attached, hostToolRetention: "yes", hostCallOverflow: 1 });
+		assert.equal(forged.t === "rpc-attached" && forged.hostToolRetention, false, "only a literal true is a capability");
 	});
 
 	it("refuses an rpc frame whose fragment position, encoding or ids are wrong", () => {

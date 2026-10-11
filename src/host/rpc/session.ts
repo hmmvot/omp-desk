@@ -110,11 +110,15 @@ import {
 	type RpcCommand,
 	type RpcErrorCode,
 	type RpcImage,
+	type RpcHostToolDefinition,
 	type RpcResponseFrame,
 	type RpcWriteErrorCode,
 	type RpcToolDescriptor,
 } from "./protocol.ts";
 import { AGENT_LIVENESS_STATUS_KEY, AgentLivenessGuard } from "../../chat/agent-liveness.ts";
+import { HostToolCalls } from "../tools/host-tool-calls.ts";
+import { HostToolRegistration, toolNamesOf, type HostToolSendOutcome } from "../tools/host-tool-registration.ts";
+import type { HostToolProvider } from "../tools/host-tool.ts";
 import {
 	DEFAULT_TAIL_ROWS,
 	HistoryReader,
@@ -180,6 +184,10 @@ export interface RpcSessionOptions {
 	idleSilenceMs?: number;
 	/** How long a watchdog probe (`get_state`) may stay unanswered before the connection is dropped and reattached. */
 	probeTimeoutMs?: number;
+	/** Desk's host tools (ADR-0055). Absent: the session registers none and ignores host tool frames. */
+	hostTools?: HostToolProvider;
+	/** Diagnostics sink for soft-limit and registration notes. */
+	log?: (message: string) => void;
 }
 
 export type RpcSessionOutput =
@@ -671,6 +679,21 @@ export class RpcSession {
 	#authoritativeReads = 0;
 	/** The reader's file re-ids at load (version < 3): its ids are not the process's, so older rows cannot load by id. */
 	#readerLegacyIds = false;
+	/** Desk's host tools (ADR-0055); `null` when the session was started without a provider. */
+	readonly #hostCalls: HostToolCalls | null;
+	readonly #hostRegistration: HostToolRegistration | null;
+	#hostToolsListener: { dispose(): void } | null = null;
+	/** The broker of the current attachment pins unanswered host calls (`hostToolRetention`). */
+	#hostRetention = false;
+	/** Counts attachments; a registration is sent once per attachment. */
+	#hostAttach = 0;
+	#hostRegisteredAttach = -1;
+	/** The tool set changed while commands could not be sent: the live transition registers it again. */
+	#hostToolsDirty = false;
+	#hostNoticePending = false;
+	#hostNoticeShown = false;
+	/** The broker line `seq` of the frame being folded (host calls compare it with the attach boundary). */
+	#lineSeq = 0;
 
 	constructor(options: RpcSessionOptions) {
 		this.#options = options;
@@ -681,6 +704,29 @@ export class RpcSession {
 		this.#boundFile = options.sessionFile;
 		this.#fileMaterialized = options.sessionFile !== null;
 		this.#model = { ...createChatModel(), epoch: { nonce: options.hostNonce, counter: 0 } };
+		const provider = options.hostTools;
+		if (provider === undefined) {
+			this.#hostCalls = null;
+			this.#hostRegistration = null;
+		} else {
+			const calls = new HostToolCalls({
+				conversationId: () => this.#boundFile ?? this.#boundId ?? "",
+				writeLine: line => this.#channel.writeLine(line),
+				inputOwned: () => this.#channel.inputOwned,
+				ownerGeneration: () => this.#channel.ownerGeneration,
+				tools: () => provider.tools(),
+				timers: this.#timers,
+				log: message => this.#options.log?.(message),
+			});
+			this.#hostCalls = calls;
+			this.#hostRegistration = new HostToolRegistration({
+				provider,
+				calls,
+				send: tools => this.#sendHostTools(tools),
+				canSend: () => !this.#disposed && !this.#ended && this.#hostRetention,
+				log: message => this.#options.log?.(message),
+			});
+		}
 	}
 
 	get model(): ChatModel {
@@ -804,6 +850,9 @@ export class RpcSession {
 		this.#maintenanceReport?.(null);
 		this.#maintenanceReport = null;
 		for (const waiter of this.#readyWaiters.splice(0)) waiter(false);
+		this.#hostToolsListener?.dispose();
+		this.#hostToolsListener = null;
+		this.#hostCalls?.dispose();
 		this.#channel.disconnect();
 		this.#listeners.clear();
 	}
@@ -1597,6 +1646,7 @@ export class RpcSession {
 
 	async #run(): Promise<void> {
 		this.#unsubscribe = this.#channel.onEvent(event => this.#onChannelEvent(event));
+		if (this.#options.hostTools !== undefined) this.#hostToolsListener = this.#options.hostTools.changed(() => this.#hostToolsChanged());
 		this.#paint = this.#diskPaint();
 		this.#establishing = true;
 		try {
@@ -1652,6 +1702,10 @@ export class RpcSession {
 			throw new SessionFailure("attach-failed");
 		}
 		if (this.#disposed) return;
+		this.#hostRetention = result.hostToolRetention;
+		this.#hostAttach += 1;
+		this.#hostCalls?.attached(result.latestSeq);
+		if (result.hostCallOverflow) this.#options.log?.("The broker holds more unanswered host tool calls than its soft limit; none was dropped.");
 		if (result.truncated) this.#agentLiveness.forgetLast();
 		if (result.child.state === "exited") {
 			await this.#paint;
@@ -1705,6 +1759,10 @@ export class RpcSession {
 			};
 		}
 		this.#identityVerified = true;
+		if (this.#hostRegistration !== null) {
+			await this.#registerHostTools();
+			if (this.#disposed || this.#ended) return;
+		}
 		const catalogueRevision = this.#commandRevision;
 		void this.#sendInternal({ type: "get_available_commands" }).then(outcome => {
 			if (this.#disposed || this.#ended || catalogueRevision !== this.#commandRevision || outcome.status !== "accepted") return;
@@ -1721,6 +1779,8 @@ export class RpcSession {
 		this.#model = setChatPhase(this.#model, "live", null, null);
 		this.#autoRecoveryAttempt = 0;
 		this.#publish(true);
+		this.#hostCalls?.open();
+		this.#afterHostToolsLive();
 		this.#afterReconcile();
 		this.#syncPausedStateReadback();
 		this.#lastActivityAt = this.#timers.now();
@@ -1776,6 +1836,65 @@ export class RpcSession {
 		if (!this.#disposed && !this.#ended) this.#applyLocal({ type: "agents_snapshot", agents: [], availability: "unavailable" });
 	}
 
+	/** Send `set_host_tools` and report what OMP made of it. */
+	async #sendHostTools(tools: readonly RpcHostToolDefinition[]): Promise<HostToolSendOutcome> {
+		const outcome = await this.#sendInternal({ type: "set_host_tools", tools });
+		if (outcome.status === "accepted") return { status: "accepted", toolNames: toolNamesOf(outcome.response.data) };
+		return outcome.status === "unconfirmed" ? { status: "unconfirmed" } : { status: "refused" };
+	}
+
+	/**
+	 * Register Desk's host tools once per attachment, before the session is published as live. A broker from an earlier
+	 * build (no retention) gets none: it would lose a call across a reload; ordinary Chat is unaffected and the Chat
+	 * says once, after going live, that the session must be restarted to get the tools.
+	 */
+	async #registerHostTools(): Promise<void> {
+		const registration = this.#hostRegistration;
+		const provider = this.#options.hostTools;
+		if (registration === null || provider === undefined || this.#hostRegisteredAttach === this.#hostAttach) return;
+		if (!this.#hostRetention) {
+			if (provider.tools().length > 0) this.#hostNoticePending = true;
+			registration.retractOnly();
+			return;
+		}
+		// Only the input owner can write to OMP; a read-only window registers when (if ever) it takes the claim.
+		if (!this.#channel.inputOwned) {
+			registration.retractOnly();
+			return;
+		}
+		this.#hostRegisteredAttach = this.#hostAttach;
+		this.#hostToolsDirty = false;
+		await registration.sync();
+	}
+
+	/** Settings changed the tool set: re-register on a live session, serialized and coalesced; otherwise just stop what is no longer allowed. */
+	#hostToolsChanged(): void {
+		const registration = this.#hostRegistration;
+		if (registration === null || this.#disposed || this.#ended) return;
+		if (this.#live && this.#identityVerified && this.#hostRetention && this.#channel.inputOwned) {
+			void registration.sync();
+			return;
+		}
+		this.#hostToolsDirty = true;
+		registration.retractOnly();
+	}
+
+	/** After the live transition: a tool set that changed meanwhile is registered, and an old broker's session gets its one notice. */
+	#afterHostToolsLive(): void {
+		if (this.#hostToolsDirty && this.#hostRetention && this.#hostRegistration !== null) {
+			this.#hostToolsDirty = false;
+			void this.#hostRegistration.sync();
+		}
+		if (this.#hostNoticePending && !this.#hostNoticeShown) {
+			this.#hostNoticePending = false;
+			this.#hostNoticeShown = true;
+			this.#applyLocal({
+				type: "command_feedback",
+				message: "This session was started by an earlier OMP Desk build, so it cannot use Desk's debugger tools. Stop and restart the session to get them.",
+			});
+		}
+	}
+
 	#onChannelEvent(event: RpcChannelEvent): void {
 		if (this.#disposed) return;
 		switch (event.type) {
@@ -1798,8 +1917,13 @@ export class RpcSession {
 			case "child":
 				if (event.status.state === "exited") this.#stopped("child-exited", { exitCode: event.status.exitCode, stderr: event.status.stderrTail ?? this.#stderr });
 				return;
+			case "input-owner":
+				this.#hostCalls?.ownerChanged();
+				if (event.owned && this.#live && this.#identityVerified) void this.#registerHostTools();
+				return;
 			case "closed":
 				if (event.reason === "disconnected") {
+					this.#hostCalls?.closeGate("the broker connection closed");
 					if (this.#establishing) this.#dropDuringEstablish = true;
 					else void this.#reattach();
 				}
@@ -1824,6 +1948,7 @@ export class RpcSession {
 				return;
 			}
 		}
+		this.#lineSeq = seq;
 		this.#flushUpdates();
 		this.#processLine(line);
 	}
@@ -1921,6 +2046,12 @@ export class RpcSession {
 				return;
 			case "ready":
 				this.#onReady(frame);
+				return;
+			case "host_tool_call":
+				this.#hostCalls?.onCall(frame, this.#lineSeq);
+				return;
+			case "host_tool_cancel":
+				this.#hostCalls?.onCancel(frame);
 				return;
 			case "extension_ui_request":
 				this.#onUiRequest(frame);
@@ -2744,6 +2875,8 @@ export class RpcSession {
 
 	#fail(code: RpcErrorCode): void {
 		if (this.#disposed) return;
+		if (code === "identity-diverged" || code === "identity-mismatch") this.#hostCalls?.diverged();
+		else this.#hostCalls?.closeGate("the session failed");
 		this.#failAllCommands("closed");
 		// A failed connection says nothing about the turn it carried: keeping `working` would show a
 		// frozen spinner. The next successful attach reads the real state back.
@@ -2771,6 +2904,7 @@ export class RpcSession {
 			return;
 		}
 		this.#ended = true;
+		this.#hostCalls?.childExited();
 		this.#clearReconcileTimer();
 		this.#clearPausedStateTimer();
 		this.#disarmWatchdog();

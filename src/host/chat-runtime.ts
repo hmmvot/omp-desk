@@ -39,6 +39,7 @@ import { SLASH_DENIED_SENTENCE, classifySlashInput } from "./rpc/protocol.ts";
 import type { RpcChannel } from "./rpc/protocol.ts";
 import { RpcSession, readViewOnlySnapshot } from "./rpc/session.ts";
 import type { NavigateOutcome, NavigateRequest, RestoredQueue, RpcRecoveryReason, RpcSessionOptions, RpcSessionOutput, SendOutcome } from "./rpc/session.ts";
+import type { HostToolProvider } from "./tools/host-tool.ts";
 import { nativeSettingsCommand, type SettingsKind } from "../chat/settings-command.ts";
 import { CLEAR_DONE_SENTENCE, CLEAR_REFUSAL_SENTENCES } from "../chat/clear.ts";
 import { DESK_COMMAND_ARGUMENTS_SENTENCE, DESK_COMMAND_UNAVAILABLE_SENTENCE, NEW_BUSY_SENTENCE, deskSessionCommand, type DeskSessionCommand } from "../chat/desk-commands.ts";
@@ -122,6 +123,10 @@ export interface ChatRuntimeOptions {
 	readonly slashRegistry?: () => readonly BuiltinSlashEntry[] | null;
 	/** Runs the Desk equivalent of a terminal-UI slash command. */
 	readonly runDeskAction?: (action: DeskSlashAction, tabId: string) => Promise<void>;
+	/** Desk's host tools for every live session (ADR-0055); absent: sessions register none. */
+	readonly hostTools?: HostToolProvider;
+	/** Diagnostics sink handed to every live session. */
+	readonly log?: (message: string) => void;
 }
 
 /**
@@ -215,6 +220,8 @@ export class ChatRuntime {
 			cwd: input.cwd,
 			hostNonce: nonce,
 			...(input.initialSeq === undefined ? {} : { initialSeq: input.initialSeq }),
+			...(this.#options.hostTools === undefined ? {} : { hostTools: this.#options.hostTools }),
+			...(this.#options.log === undefined ? {} : { log: this.#options.log }),
 		});
 		const conversation: Conversation = {
 			tabId,

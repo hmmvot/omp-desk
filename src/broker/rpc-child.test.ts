@@ -1,6 +1,6 @@
 /**
  * Tests for the managed-rpc pipe child: line draining, the broker's own protocol negotiation,
- * whole-line stdin writes, dialog release on an answer, and stop.
+ * whole-line stdin writes, dialog and host tool call release on an answer, and stop.
  *
  * Runner: `node --test src/broker/rpc-child.test.ts`
  *
@@ -26,7 +26,8 @@ import { PTY_RPC_STDERR_TAIL_BYTES } from "../host/pty-protocol.ts";
  * - `die`: exits before `ready`;
  * - `partial`: like `v2`, and ends stdout with a line that has no newline.
  * Every other stdin line is echoed as `{"type":"echo",...}` with whether negotiation had
- * already been seen; `ask` makes it raise a dialog; closing stdin makes it say `bye` and exit.
+ * already been seen; `ask` makes it raise a dialog; `hostcall` / `hostcancel` raise a `host_tool_call` or cancel one;
+ * closing stdin makes it say `bye` and exit.
  */
 const CHILD_SOURCE = String.raw`
 const mode = process.argv[2];
@@ -57,6 +58,10 @@ process.stdin.on("data", chunk => {
 			if (command.text !== undefined) process.stderr.write(command.text);
 			process.stderr.write("x".repeat(command.stderrBytes));
 			out({ type: "echo", negotiated, done: true });
+		} else if (command.type === "hostcall") {
+			out({ type: "host_tool_call", id: command.callId, toolCallId: "tc-" + command.callId, toolName: "probe", arguments: {} });
+		} else if (command.type === "hostcancel") {
+			out({ type: "host_tool_cancel", id: "cancel-" + command.callId, targetId: command.callId });
 		} else {
 			out({ type: "echo", negotiated, line });
 		}
@@ -284,6 +289,48 @@ describe("dialogs", { timeout: 30_000 }, () => {
 		await waitFor(() => ring.stats().dialogs === 1);
 		await send(child, { type: "extension_ui_response", id: "ui-9", value: "x" });
 		assert.equal(ring.stats().dialogs, 1);
+	});
+});
+
+describe("host tool calls", { timeout: 30_000 }, () => {
+	const pinnedCallIds = (ring: RpcLineRing): string[] =>
+		lines(ring)
+			.filter(line => line.type === "host_tool_call")
+			.map(line => String(line.id));
+
+	it("stops replaying a call once its result is written, and only that call", async () => {
+		const { child, ring, ready } = await start("v2");
+		await ready;
+		await send(child, { type: "hostcall", callId: "call-1" });
+		await send(child, { type: "hostcall", callId: "call-2" });
+		await waitFor(() => ring.stats().hostCalls === 2);
+		await send(child, { type: "host_tool_result", id: "call-1", result: { content: [{ type: "text", text: "ok" }] } });
+		assert.equal(ring.stats().hostCalls, 1);
+		assert.deepEqual(pinnedCallIds(ring), ["call-2"]);
+	});
+
+	it("keeps a call pinned when the result names another id or is not a result", async () => {
+		const { child, ring, ready } = await start("v2");
+		await ready;
+		await send(child, { type: "hostcall", callId: "call-1" });
+		await waitFor(() => ring.stats().hostCalls === 1);
+		await send(child, { type: "host_tool_result", id: "call-9", result: { content: [] } });
+		await send(child, { type: "host_tool_update", id: "call-1", partialResult: { content: [] } });
+		assert.equal(ring.stats().hostCalls, 1);
+	});
+
+	it("releases a call when OMP cancels it, and a duplicate cancel or a late result changes nothing", async () => {
+		const { child, ring, ready } = await start("v2");
+		await ready;
+		await send(child, { type: "hostcall", callId: "call-1" });
+		await waitFor(() => ring.stats().hostCalls === 1);
+		await send(child, { type: "hostcancel", callId: "call-1" });
+		await send(child, { type: "hostcancel", callId: "call-1" });
+		await waitFor(() => lines(ring).filter(line => line.type === "host_tool_cancel").length === 2);
+		assert.equal(ring.stats().hostCalls, 0);
+		await send(child, { type: "host_tool_result", id: "call-1", result: { content: [] } });
+		assert.equal(ring.stats().hostCalls, 0);
+		assert.deepEqual(pinnedCallIds(ring), []);
 	});
 });
 
