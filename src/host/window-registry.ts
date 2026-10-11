@@ -24,6 +24,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { errorCode, readBoundedFile, replaceFileAtomic } from "./atomic-file.ts";
+import type { BoundedRead } from "./atomic-file.ts";
 import { watchDirectory } from "./directory-watch.ts";
 
 /** Directory under the global storage folder that holds one record per live window. */
@@ -347,10 +348,45 @@ export interface WindowRegistryOptions {
 	/** Process existence probe; injected so a test can declare a pid dead. */
 	readonly pidAlive?: (pid: number) => boolean;
 	readonly onError?: (detail: string) => void;
+	/** Reads one small shared file; injected so a test can fail or hold a record read. */
+	readonly readFile?: (file: string, maxBytes: number) => Promise<BoundedRead>;
 }
 
 function messageOf(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+/** A record of another window and the pid probe's verdict made when it was read. */
+interface OtherRecord {
+	readonly record: WindowRecord;
+	readonly alive: boolean;
+}
+
+/** What one read of the registry directory found. `unreadable` counts the records it could not read (an I/O error, not a malformed file): their windows may be missing from `others`. */
+interface ReadPass {
+	readonly others: readonly OtherRecord[];
+	readonly unreadable: number;
+}
+
+/** The other live windows as one read saw them, each with the extension-host process id of its record. */
+export interface OtherWindowsSnapshot {
+	readonly windows: ReadonlyArray<{ readonly window: OpenWindow; readonly hostPid: number }>;
+	readonly unreadable: number;
+}
+
+function openWindowOf(record: WindowRecord): OpenWindow {
+	return {
+		holderId: record.holderId,
+		here: false,
+		startedAt: record.startedAt,
+		windowUri: record.windowUri,
+		label: record.label,
+		folders: record.folders,
+		liveCwds: record.liveCwds,
+		rows: record.rows,
+		focusedAt: record.focusedAt,
+		stale: record.stale,
+	};
 }
 
 
@@ -374,13 +410,13 @@ export class WindowRegistry {
 	readonly #watchDebounceMs: number | undefined;
 	readonly #pidAlive: (pid: number) => boolean;
 	readonly #onError: (detail: string) => void;
+	readonly #readFile: (file: string, maxBytes: number) => Promise<BoundedRead>;
 	#own: WindowSnapshot = EMPTY_WINDOW_SNAPSHOT;
 	#ownSignature = JSON.stringify(EMPTY_WINDOW_SNAPSHOT);
-	/** Records of other windows from the last read, with the verdict of the pid probe made then. */
-	#others: Array<{ readonly record: WindowRecord; readonly alive: boolean }> = [];
-	/** Records the last pass could not read (an I/O error, not a malformed file): a window may be missing from `#others` because of them. */
-	#unreadable = 0;
-	#passUnreadable = 0;
+	/** Records of other windows from the newest published read, with the verdict of the pid probe made then. */
+	#others: readonly OtherRecord[] = [];
+	#passSequence = 0;
+	#publishedSequence = 0;
 	#reportedSignature = "";
 	#writeTimer: NodeJS.Timeout | null = null;
 	#writing: Promise<void> = Promise.resolve();
@@ -403,6 +439,7 @@ export class WindowRegistry {
 		this.#watchDebounceMs = options.watchDebounceMs;
 		this.#pidAlive = options.pidAlive ?? processExists;
 		this.#onError = options.onError ?? (() => {});
+		this.#readFile = options.readFile ?? readBoundedFile;
 	}
 
 	get directory(): string {
@@ -470,18 +507,7 @@ export class WindowRegistry {
 		const windows: OpenWindow[] = [{ holderId: this.#holderId, here: true, startedAt: this.#startedAt, ...this.#own }];
 		for (const { record, alive } of this.#others) {
 			if (!alive || !leaseHolds(record, now, this.#leaseMs)) continue;
-			windows.push({
-				holderId: record.holderId,
-				here: false,
-				startedAt: record.startedAt,
-				windowUri: record.windowUri,
-				label: record.label,
-				folders: record.folders,
-				liveCwds: record.liveCwds,
-				rows: record.rows,
-				focusedAt: record.focusedAt,
-				stale: record.stale,
-			});
+			windows.push(openWindowOf(record));
 		}
 		return orderWindows(windows);
 	}
@@ -492,22 +518,22 @@ export class WindowRegistry {
 	}
 
 	/**
-	 * The extension-host process id the live record of this other window names, or `null` when no live record does. It is
-	 * the executor of a request addressed to that window: a requester captures it (with the process's creation time) when it
-	 * asks, so that "the executor ended" can later be proven by the process identity rather than inferred from the lease.
+	 * Read the other windows' records now and answer from *this* read alone, never from state another read can change.
+	 *
+	 * A requester that must know, before it acts on another window's behalf, which windows exist and whether any record
+	 * could not be read (`unreadable`: a window may then be missing from `windows`, so its absence proves nothing) uses
+	 * this, not {@link windows} and a shared counter: a read that started later can finish first and would otherwise
+	 * erase this read's failure. Each window carries the extension-host process id of its live record, the executor of a
+	 * request addressed to it. Rejects when the directory cannot be read, and when the registry was closed.
 	 */
-	hostPidOf(holderId: string): number | null {
+	async readOtherWindows(): Promise<OtherWindowsSnapshot> {
+		const observed = await this.#observe();
+		if (observed === null) throw new Error("the window registry was closed");
 		const now = this.#now();
-		const found = this.#others.find(({ record, alive }) => alive && record.holderId === holderId && leaseHolds(record, now, this.#leaseMs));
-		return found?.record.pid ?? null;
-	}
-
-	/**
-	 * How many window records the last {@link refresh} could not read. While it is not zero a live window may be missing from
-	 * {@link windows}, so absence from it is not evidence that the window ended.
-	 */
-	unreadableCount(): number {
-		return this.#unreadable;
+		const live = observed.pass.others.filter(({ record, alive }) => alive && leaseHolds(record, now, this.#leaseMs));
+		const entries = live.map(({ record }) => ({ window: openWindowOf(record), hostPid: record.pid }));
+		const ordered = orderWindows(entries.map(entry => entry.window));
+		return { windows: ordered.map(window => entries.find(entry => entry.window === window)!), unreadable: observed.pass.unreadable };
 	}
 
 	/**
@@ -515,14 +541,23 @@ export class WindowRegistry {
 	 * files. Whether what the windows show differs from what was last reported.
 	 */
 	async refresh(): Promise<boolean> {
-		if (this.#disposed) return false;
-		const others = await this.#readOthers();
-		if (this.#disposed) return false;
-		this.#others = others;
+		return (await this.#observe())?.changed ?? false;
+	}
+
+	/** One read pass, published when it is the newest one to have started: records are published as one value, never piecemeal. */
+	async #observe(): Promise<{ readonly pass: ReadPass; readonly changed: boolean } | null> {
+		if (this.#disposed) return null;
+		const sequence = ++this.#passSequence;
+		const pass = await this.#readPass();
+		if (this.#disposed) return null;
+		// A pass that started before one already published is older than it, and must not replace it.
+		if (sequence < this.#publishedSequence) return { pass, changed: false };
+		this.#publishedSequence = sequence;
+		this.#others = pass.others;
 		const signature = windowsSignature(this.windows());
 		const changed = signature !== this.#reportedSignature;
 		this.#reportedSignature = signature;
-		return changed;
+		return { pass, changed };
 	}
 
 	/** Write this window's record now (a lease renewal when nothing changed). */
@@ -588,18 +623,19 @@ export class WindowRegistry {
 		if (this.#removed) await fsp.rm(this.#file, { force: true });
 	}
 
-	async #readOthers(): Promise<Array<{ readonly record: WindowRecord; readonly alive: boolean }>> {
+	async #readPass(): Promise<ReadPass> {
 		let names: string[];
 		try {
 			names = await fsp.readdir(this.#directory);
 		} catch (error) {
-			if (errorCode(error) === "ENOENT") return [];
+			if (errorCode(error) === "ENOENT") return { others: [], unreadable: 0 };
 			throw error;
 		}
 		const now = this.#now();
 		const own = `${this.#holderId}${RECORD_SUFFIX}`;
-		const others: Array<{ readonly record: WindowRecord; readonly alive: boolean }> = [];
-		this.#passUnreadable = 0;
+		const others: OtherRecord[] = [];
+		// Local to this pass: another pass running at the same time can neither add to it nor erase it.
+		let unreadable = 0;
 		for (const name of names) {
 			if (name === own) continue;
 			const file = path.join(this.#directory, name);
@@ -609,6 +645,11 @@ export class WindowRegistry {
 				continue;
 			}
 			const record = await this.#readRecord(file, name.slice(0, -RECORD_SUFFIX.length));
+			if (record === "unreadable") {
+				// Not known to be dead or malformed: neither dropped from the count nor swept.
+				unreadable += 1;
+				continue;
+			}
 			if (record === null) {
 				await this.#sweep(file, now);
 				continue;
@@ -617,18 +658,17 @@ export class WindowRegistry {
 			if (!alive) await this.#sweep(file, now);
 			others.push({ record, alive });
 		}
-		this.#unreadable = this.#passUnreadable;
-		return others;
+		return { others, unreadable };
 	}
 
-	async #readRecord(file: string, holderId: string): Promise<WindowRecord | null> {
+	/** The record in `file`, `null` for a file that is not a well-formed record, `"unreadable"` when reading it failed. */
+	async #readRecord(file: string, holderId: string): Promise<WindowRecord | null | "unreadable"> {
 		try {
-			const read = await readBoundedFile(file, MAX_RECORD_BYTES);
+			const read = await this.#readFile(file, MAX_RECORD_BYTES);
 			return read.kind === "text" ? parseWindowRecord(read.text, holderId) : null;
 		} catch (error) {
-			this.#passUnreadable += 1;
 			this.#report(`could not read ${path.basename(file)}: ${messageOf(error)}`);
-			return null;
+			return "unreadable";
 		}
 	}
 

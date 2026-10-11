@@ -16,7 +16,8 @@ import {
 	processExists,
 	sessionIncarnation,
 } from "./window-registry.ts";
-import type { WindowRecord, WindowSnapshot } from "./window-registry.ts";
+import type { WindowRecord, WindowRegistryOptions, WindowSnapshot } from "./window-registry.ts";
+import { readBoundedFile } from "./atomic-file.ts";
 
 const LEASE = 60_000;
 const BASE = Date.parse("2026-10-10T10:00:00.000Z");
@@ -53,7 +54,7 @@ describe("window registry", () => {
 		fs.rmSync(storage, { recursive: true, force: true });
 	});
 
-	function windowOf(holderId: string, pid: number, startedAt: string, snapshot: Partial<WindowSnapshot> = {}): WindowRegistry {
+	function windowOf(holderId: string, pid: number, startedAt: string, snapshot: Partial<WindowSnapshot> = {}, options: Partial<WindowRegistryOptions> = {}): WindowRegistry {
 		alive.add(pid);
 		const registry = new WindowRegistry({
 			storageDir: storage,
@@ -67,6 +68,7 @@ describe("window registry", () => {
 			heartbeatMs: 1_000_000,
 			watchDebounceMs: 20,
 			onError: detail => errors.push(detail),
+			...options,
 		});
 		registries.push(registry);
 		registry.setSnapshot({ windowUri: null, label: holderId, folders: [], liveCwds: [], rows: {}, focusedAt: null, stale: false, ...snapshot });
@@ -153,21 +155,61 @@ describe("window registry", () => {
 		assert.equal(stays.windows().length, 1);
 	});
 
-	it("names the host process of a live other window, and none for itself, a dead process or an expired lease", async () => {
+	it("answers a read with the host process of each live other window, and none for itself, a dead process or an expired lease", async () => {
 		const reader = windowOf("reader", 1, "2026-10-10T09:00:00.000Z");
 		const other = windowOf("other", 2, "2026-10-10T09:01:00.000Z");
 		await publish(reader, other);
-		assert.equal(reader.hostPidOf("other"), 2);
-		assert.equal(reader.hostPidOf("reader"), null, "this window is not another window");
-		assert.equal(reader.hostPidOf("nobody"), null);
+		const live = await reader.readOtherWindows();
+		assert.deepEqual(live.windows.map(entry => [entry.window.holderId, entry.hostPid]), [["other", 2]], "this window is not another window");
+		assert.equal(live.unreadable, 0);
 		clock += LEASE + 1;
-		assert.equal(reader.hostPidOf("other"), null, "an expired lease names no executor: the lease is not evidence either way");
+		assert.deepEqual((await reader.readOtherWindows()).windows, [], "an expired lease names no executor: the lease is not evidence either way");
 		clock = BASE;
 		await other.flush();
-		await reader.refresh();
 		alive.delete(2);
-		await reader.refresh();
-		assert.equal(reader.hostPidOf("other"), null, "a process that no longer exists is not named");
+		assert.deepEqual((await reader.readOtherWindows()).windows, [], "a process that no longer exists is not named");
+	});
+
+	it("counts a record whose read failed as unreadable in that read, and never drops or sweeps it", async () => {
+		const other = windowOf("other", 2, "2026-10-10T09:01:00.000Z");
+		await other.flush();
+		const reader = windowOf("reader", 1, "2026-10-10T09:00:00.000Z", {}, {
+			readFile: async () => { throw new Error("EIO: the record is locked"); },
+		});
+		const snapshot = await reader.readOtherWindows();
+		assert.equal(snapshot.unreadable, 1);
+		assert.deepEqual(snapshot.windows, [], "an unreadable record names no window: its absence proves nothing");
+		assert.ok(fs.existsSync(path.join(directory, "other.window")), "a file that could not be read is not swept");
+		assert.ok(errors.some(detail => detail.includes("EIO")));
+	});
+
+	it("never lets a read that started later erase the read failure of an earlier one: the snapshot is that read's own", async () => {
+		const other = windowOf("other", 2, "2026-10-10T09:01:00.000Z");
+		await other.flush();
+		const gate = Promise.withResolvers<void>();
+		let reads = 0;
+		const reader = windowOf("reader", 1, "2026-10-10T09:00:00.000Z", {}, {
+			readFile: async (file, maxBytes) => {
+				reads += 1;
+				// Only the first read (pass A) is held and then fails; every later one reads normally.
+				if (reads === 1) {
+					await gate.promise;
+					throw new Error("EIO: the record is locked");
+				}
+				return await readBoundedFile(file, maxBytes);
+			},
+		});
+		const passA = reader.readOtherWindows();
+		while (reads < 1) await new Promise(resolve => setTimeout(resolve, 5));
+		// Pass B starts after A, finishes first and publishes a clean view (a watcher or heartbeat refresh does exactly this).
+		const passB = await reader.readOtherWindows();
+		assert.equal(passB.unreadable, 0);
+		assert.deepEqual(passB.windows.map(entry => entry.window.holderId), ["other"]);
+		gate.resolve();
+		const a = await passA;
+		assert.equal(a.unreadable, 1, "B's clean pass did not erase A's failure");
+		assert.deepEqual(a.windows, [], "and A's snapshot does not borrow B's records");
+		assert.deepEqual(reader.windows().map(window => window.holderId).sort(), ["other", "reader"], "the older pass did not replace the newer published view either");
 	});
 
 	it("renews the lease on every write, so a quiet window never expires", async () => {
