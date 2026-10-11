@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
+import { claudeRegistryBindsFolder } from "./inventory-guards.ts";
 import { SettingsRefusal, valueAt } from "../host/omp-settings-core.ts";
 import { PROTECTED_EXTENSION_NAMES } from "../host/inventory/inventory-model.ts";
 import { isRecord as record } from "../guards";
@@ -102,11 +103,7 @@ function projectMarkers(cwd: string): string[] {
   // OMP admits an entry of the user's Claude plugin registry into a project's inventory when its recorded projectPath is that project.
   try {
     const registry: unknown = JSON.parse(readFileSync(path.join(homedir(), ".claude", "plugins", "installed_plugins.json"), "utf8"));
-    const same = (a: string): boolean => path.resolve(a).toLowerCase() === path.resolve(cwd).toLowerCase();
-    const plugins = record(registry) && record(registry.plugins) ? Object.values(registry.plugins) : [];
-    if (plugins.some(entries => Array.isArray(entries) && entries.some(entry => record(entry) && (entry.scope === "project" || entry.scope === "local") && typeof entry.projectPath === "string" && same(entry.projectPath)))) {
-      found.push("Claude plugin entry bound to this folder");
-    }
+    if (claudeRegistryBindsFolder(registry, cwd)) found.push("Claude plugin entry bound to this folder");
   } catch { /* no readable Claude registry: nothing selects a project entry from it */ }
   return found;
 }
