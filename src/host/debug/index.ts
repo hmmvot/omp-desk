@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import type { HostToolProvider } from "../tools/host-tool.ts";
 import { assembleAgentDebugger } from "./assemble.ts";
 import type { DebugPolicy, ExpressionMode, StartMode } from "./policy.ts";
+import { UNITY_EXTENSION_ID, unityAttachPreset } from "./unity-preset.ts";
 import { VscodeDebugApi } from "./vscode-debug-api.ts";
 
 const SECTION = "omp.agentDebugger";
@@ -30,7 +31,9 @@ export function vscodePolicy(): DebugPolicy {
  * that, or the availability of a preset's extension, changes.
  */
 export function activateAgentDebugger(context: vscode.ExtensionContext, options: { log?: (line: string) => void } = {}): HostToolProvider {
-	const parts = assembleAgentDebugger(new VscodeDebugApi(), vscodePolicy(), () => [], options);
+	const api = new VscodeDebugApi();
+	const presets = [unityAttachPreset({ isInstalled: () => vscode.extensions.getExtension(UNITY_EXTENSION_ID) !== undefined, isFile: path => api.isFile(path) })];
+	const parts = assembleAgentDebugger(api, vscodePolicy(), () => presets, options);
 	context.subscriptions.push(
 		{ dispose: () => parts.dispose() },
 		vscode.workspace.onDidChangeConfiguration(event => {
