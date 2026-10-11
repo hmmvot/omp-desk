@@ -764,7 +764,7 @@ describe("Desk session commands typed into Chat (ADR-0059)", () => {
 		runtime.attachPage(TAB, page);
 		await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "clear-5", text: "/clear" }, page);
 		await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "clear-6", text: "/clear everything" }, page);
-		assert.deepEqual(page.notices(), [CLEAR_REFUSAL_SENTENCES.unsupported, CLEAR_REFUSAL_SENTENCES.arguments]);
+		assert.deepEqual(page.notices(), [CLEAR_REFUSAL_SENTENCES["restart-needed"], CLEAR_REFUSAL_SENTENCES.arguments]);
 		assert.equal(channel.commandsOfType("prompt").length, 0, "the typed text never reaches OMP, whatever its refusal");
 	});
 

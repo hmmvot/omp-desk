@@ -18,7 +18,7 @@ export function rewindBlockedReason(model: ChatModel): string | null {
 	if (model.readOnlyReason !== null) return model.readOnlyReason;
 	if (model.state?.isCompacting === true || model.maintenance?.status === "working") return NAVIGATE_REFUSAL_SENTENCES.compacting;
 	if (model.working || model.uiRequest !== null || !model.settled || model.asyncPaused || (model.state?.queuedMessageCount ?? 0) > 0) return NAVIGATE_REFUSAL_SENTENCES.busy;
-	if (!model.commands.some(command => command.name === NAVIGATE_COMMAND && command.source === "extension")) return NAVIGATE_REFUSAL_SENTENCES.unsupported;
+	if (!model.commands.some(command => command.name === NAVIGATE_COMMAND && command.source === "extension")) return NAVIGATE_REFUSAL_SENTENCES["restart-needed"];
 	return null;
 }
 

@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Ctrl+Shift+L focuses the chat composer from anywhere, replacing Ctrl+Shift+Q; it takes over VS Code's Select All Occurrences of Find Match key, which you can rebind.
 
+### Fixed
+
+- `/clear` (and Rewind) in a chat whose OMP process was started by an earlier OMP Desk build no longer says "not supported by this OMP version"; it says the process predates the command and the session needs a restart.
+
 ## [0.3.0] - 2026-10-11
 
 ### Added

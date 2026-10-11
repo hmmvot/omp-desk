@@ -235,10 +235,10 @@ describe("navigate refusals (nothing written)", () => {
 		assert.equal(channel.commandsOfType("prompt").length, 0);
 	});
 
-	it("answers unsupported unless the catalog lists the command from an extension", async () => {
+	it("answers restart-needed unless the catalog lists the command from an extension", async () => {
 		for (const catalog of [[], [{ name: NAVIGATE_COMMAND, source: "prompt" }], [{ name: NAVIGATE_COMMAND, source: "skill" }]]) {
 			const { channel, session } = await boot({ catalog });
-			assert.deepEqual(await session.navigate(rewind("u2", "a2")), { status: "refused", reason: "unsupported" }, JSON.stringify(catalog));
+			assert.deepEqual(await session.navigate(rewind("u2", "a2")), { status: "refused", reason: "restart-needed" }, JSON.stringify(catalog));
 			assert.equal(channel.commandsOfType("prompt").length, 0);
 		}
 	});

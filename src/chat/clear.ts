@@ -91,7 +91,7 @@ export function clearMarker(entry: object): ClearMarker | null {
  * Why a clear did not happen, decided by the host before writing or reported back by the OMP-side guard
  * (`RpcSession.clear`). `unconfirmed` is not a refusal and has its own sentence.
  */
-export type ClearRefusal = "not-live" | "not-owner" | "busy" | "jobs" | "work-unavailable" | "unsupported" | "session" | "reload-failed" | "bad-request-id" | "failed";
+export type ClearRefusal = "not-live" | "not-owner" | "busy" | "jobs" | "work-unavailable" | "unsupported" | "restart-needed" | "session" | "reload-failed" | "bad-request-id" | "failed";
 
 /** OMP's own sentence for a clear refused while a response streams; the page shows it unchanged. */
 export const CLEAR_BUSY_SENTENCE = "Wait for the current response to finish or abort it before resetting the context.";
@@ -103,6 +103,7 @@ export const CLEAR_REFUSAL_SENTENCES: Readonly<Record<ClearRefusal | "unconfirme
 	busy: CLEAR_BUSY_SENTENCE,
 	jobs: "OMP still has background jobs running for this session. Wait for them to finish or cancel them, then use /clear.",
 	unsupported: "/clear is not supported by this OMP version.",
+	"restart-needed": "This chat's OMP process was started by an earlier OMP Desk build. Restart the session to use /clear.",
 	session: "The session changed under this chat. Nothing was cleared.",
 	"reload-failed": "Context clear did not finish; the next message may still include earlier history. Retry /clear.",
 	"bad-request-id": "OMP did not clear the context.",

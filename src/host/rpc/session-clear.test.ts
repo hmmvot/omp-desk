@@ -80,7 +80,7 @@ describe("combined clear", () => {
  it("refuses wrong request, unsupported catalog, and running work without a prompt", async () => {
   const rig = await boot(false);
   assert.deepEqual(await rig.session.clear("bad"), { status: "refused", reason: "bad-request-id" });
-  assert.deepEqual(await rig.session.clear(rid()), { status: "refused", reason: "unsupported" });
+  assert.deepEqual(await rig.session.clear(rid()), { status: "refused", reason: "restart-needed" });
   const busy = await boot(); busy.channel.emit({ type: "agent_start" }); await tick();
   assert.deepEqual(await busy.session.clear(rid()), { status: "refused", reason: "busy" });
   assert.equal(busy.channel.commandsOfType("prompt").length, 0);

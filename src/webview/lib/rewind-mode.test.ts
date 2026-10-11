@@ -65,8 +65,8 @@ describe("rewind availability on the page", () => {
 		assert.equal(rewindBlockedReason(live({ settled: false })), NAVIGATE_REFUSAL_SENTENCES.busy);
 		assert.equal(rewindBlockedReason(live({ asyncPaused: true })), NAVIGATE_REFUSAL_SENTENCES.busy);
 		assert.equal(rewindBlockedReason(live({ maintenance: { action: "compact", status: "working" } })), NAVIGATE_REFUSAL_SENTENCES.compacting);
-		assert.equal(rewindBlockedReason(live({ commands: [] })), NAVIGATE_REFUSAL_SENTENCES.unsupported);
-		assert.equal(rewindBlockedReason(live({ commands: [{ name: "omp-desk-navigate", source: "prompt" }] })), NAVIGATE_REFUSAL_SENTENCES.unsupported, "a same-named template is not the command");
+		assert.equal(rewindBlockedReason(live({ commands: [] })), NAVIGATE_REFUSAL_SENTENCES["restart-needed"]);
+		assert.equal(rewindBlockedReason(live({ commands: [{ name: "omp-desk-navigate", source: "prompt" }] })), NAVIGATE_REFUSAL_SENTENCES["restart-needed"], "a same-named template is not the command");
 	});
 
 	it("withdraws Undo once a sent prompt moves the conversation on, before the turn is saved", () => {

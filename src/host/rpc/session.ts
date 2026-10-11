@@ -1000,7 +1000,7 @@ export class RpcSession {
 		// A prompt whose fate is unknown, or a row not reconciled yet that a rewrite would re-anchor onto the new branch.
 		if (this.#ledger.some(entry => entry.unconfirmed) || [...model.pending.values()].some(row => !row.unsaved && row.hidden !== true)) return "busy";
 		// Only the command this module registered: a same-named prompt template or skill would reach the model.
-		if (!model.commands.some(command => command.name === NAVIGATE_COMMAND && command.source === "extension")) return "unsupported";
+		if (!model.commands.some(command => command.name === NAVIGATE_COMMAND && command.source === "extension")) return "restart-needed";
 		const durable = model.entries.slice(0, model.durableCount);
 		if (model.leafId !== request.expectedLeafId && !leafReaches(durable, request.expectedLeafId)) return "stale";
 		switch (request.kind) {
@@ -1115,7 +1115,7 @@ export class RpcSession {
 		if (!model.settled) return "busy";
 		if (this.#ledger.some(entry => entry.unconfirmed) || [...model.pending.values()].some(row => !row.unsaved && row.hidden !== true)) return "busy";
 		// Only the command this module registered: a same-named prompt template or skill would reach the model.
-		return !requireCommand || model.commands.some(command => command.name === CLEAR_COMMAND && command.source === "extension") ? null : "unsupported";
+		return !requireCommand || model.commands.some(command => command.name === CLEAR_COMMAND && command.source === "extension") ? null : "restart-needed";
 	}
 
 	async #clear(requestId: string): Promise<ClearOutcome> {

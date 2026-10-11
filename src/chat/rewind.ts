@@ -100,7 +100,7 @@ export interface NavigationMarkerData {
  * Why a navigation did not happen, decided by the host before writing or reported back by the OMP-side guard
  * (`RpcSession.navigate`). `unconfirmed` is not a refusal and has its own sentence.
  */
-export type NavigateRefusal = "not-live" | "not-owner" | "busy" | "compacting" | "unsupported" | "stale" | "target" | "session" | "cancelled" | "unchanged" | "bad-request-id" | "failed";
+export type NavigateRefusal = "not-live" | "not-owner" | "busy" | "compacting" | "restart-needed" | "stale" | "target" | "session" | "cancelled" | "unchanged" | "bad-request-id" | "failed";
 
 /** One fixed sentence per refusal; nothing from the child is ever shown. */
 export const NAVIGATE_REFUSAL_SENTENCES: Readonly<Record<NavigateRefusal | "unconfirmed", string>> = {
@@ -108,7 +108,7 @@ export const NAVIGATE_REFUSAL_SENTENCES: Readonly<Record<NavigateRefusal | "unco
 	"not-owner": "Another window controls this session.",
 	busy: "Rewind is unavailable while OMP is working. Wait for the turn to finish or stop it.",
 	compacting: "Rewind is unavailable while the conversation is being compacted.",
-	unsupported: "This chat process cannot rewind: it was started by an earlier OMP Desk. Restart the chat to use Rewind.",
+	"restart-needed": "This chat's OMP process was started by an earlier OMP Desk build. Restart the session to use Rewind.",
 	stale: "The conversation changed meanwhile. Pick the message again.",
 	target: "That message is no longer on this branch. Pick another one.",
 	session: "The session changed under this chat. Nothing was rewound.",
