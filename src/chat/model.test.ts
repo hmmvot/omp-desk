@@ -396,6 +396,21 @@ describe("projections", () => {
 		assert.deepEqual(ids(model), ["d1", "d0", "live:msg-2"]);
 		assert.equal(model.leafId, "d1");
 	});
+
+	it("keeps a maintenance row anchored to the streaming message across the rewrite its own end triggers", () => {
+		const user = messageEntry("u1", null, userMessage("hi", 100));
+		let model = live({ entries: [user], leafId: "u1" });
+		model = reduceChatFrame(model, { type: "agent_start" }, { now: 1 });
+		model = reduceChatFrame(model, { type: "message_start", messageId: "msg-9", message: assistantMessage("", 200) }, { now: 2 });
+		// OMP's auto-shake fallback reports its result while the next reply is already streaming.
+		model = reduceChatFrame(model, { type: "auto_compaction_end", action: "shake", aborted: false, willRetry: false, errorMessage: "Auto-shake reclaimed ~5000 tokens but context is still above the threshold." }, { now: 3 });
+		assert.deepEqual(model.ephemeral.map(item => [item.kind, item.anchorId]), [["maintenance", "live:msg-9"]]);
+		// The host re-reads the file on every `auto_compaction_end`; the stream is not in it yet.
+		model = applyChatRewrite(model, [user], 0, "u1");
+		assert.deepEqual(model.ephemeral.map(item => [item.kind, item.anchorId]), [["maintenance", "live:msg-9"]], "the row stays under its message");
+		model = end(model, "msg-9", assistantMessage("done", 200));
+		assert.deepEqual(windowOf(model, 10, null).rows.map(row => row.id), ["u1", "live:msg-9", "event:2"]);
+	});
 });
 
 describe("IRC and custom rows reconcile without a false 'not yet saved'", () => {

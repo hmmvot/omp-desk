@@ -33,6 +33,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - A C# member named with its class in Chat (`SessionIndex.Reload`, `Outer.Inner.Member`, `Box<T>.Put`) is a link again when its class has exactly one such member. The C# language server describes a member's class as `in SessionIndex (project omp-vscode (net8.0))` (translated in a non-English VS Code), which the class match did not understand.
 - `/clear` (and Rewind) in a chat whose OMP process was started by an earlier OMP Desk build no longer says "not supported by this OMP version"; it says the process predates the command and the session needs a restart.
 - `Esc` in a VS Code list with search (a model picker, the Command Palette) opened over a working Chat only closes that list; it no longer also stops the turn.
+- A Shake or other maintenance result row in Chat no longer vanishes when OMP reports it while the next reply is already streaming. OMP's automatic shake (and the other automatic passes) report their outcome, for example "Shake failed: Auto-shake reclaimed ~N tokens but context is still above the threshold", at that moment; the re-read of the session file that follows every such report dropped the row because it was attached to the reply still being written.
 
 ## [0.3.0] - 2026-10-11
 

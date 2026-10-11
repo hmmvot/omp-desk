@@ -1256,6 +1256,8 @@ export function applyChatRewrite(
 	}
 	const next = retargetPositions({ ...withPending({ ...model, durablePositions }, durable, pending, pendingRows), olderCount, leafId }, redirects);
 	const ids = new Set(next.entries.map(entry => entry.id));
+	// The streaming message is not an entry yet, but rows already anchor to its id; its own message_end makes it the pending row of that id.
+	if (next.stream !== null && next.streamId !== null) ids.add(pendingEntryId(next.streamId));
 	const ephemeral: EphemeralItem[] = [];
 	for (const item of next.ephemeral) {
 		if (item.anchorId !== null && !ids.has(item.anchorId)) continue;
