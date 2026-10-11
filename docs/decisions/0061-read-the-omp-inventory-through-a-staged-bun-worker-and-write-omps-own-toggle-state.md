@@ -47,5 +47,5 @@ Three choices are needed: where the inventory comes from, how an incomplete or p
 ## Architecture Review
 
 - Reviewer: architect
-- Outcome: round 1 found 13 findings (addressed); round 2 returned *changes needed* with eight material findings on the implementation, addressed as listed in the design's review section; round 3 pending.
-- Notes: status stays `proposed` until round 3 reports no material finding.
+- Outcome: round 1 found 13 findings (addressed); round 2 returned *changes needed* with eight material findings on the implementation, addressed as listed in the design's review section; round 3 returned changes needed with four findings, three fixed and one (a user Claude-registry entry bound to the drive root) accepted as an undetectable residual; details in the design. Not re-reviewed.
+- Notes: stays `proposed`.

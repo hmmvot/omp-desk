@@ -8,7 +8,7 @@ import type { SessionToolsTarget } from "../session-tools.ts";
 
 const skill: InventoryRow = { kind: "skill", name: "review", description: null, path: "C:/s/SKILL.md", provider: "native", providerName: "OMP", level: "user", state: "active", shadowed: false,
 	disabledReason: null, detail: null, toolPrefix: null, runtimeName: "review", toggle: { mechanism: "disabledExtensions", refusal: null } };
-const snapshot = (cwd: string, profile = "default"): InventorySnapshot => ({ rows: [skill], cwd, profile, projectOverridesDisabledExtensions: false, incomplete: [], disabledProviders: [] });
+const snapshot = (cwd: string, profile = "default"): InventorySnapshot => ({ rows: [{ ...skill }], cwd, profile, projectOverridesDisabledExtensions: false, incomplete: [], disabledProviders: [] });
 
 function target(overrides: Partial<SessionToolsTarget> = {}): SessionToolsTarget {
 	return { key: {}, generation: "g1", mode: "chat", running: true, title: "Work", cwd: "D:/proj", profile: null, commands: [], readDescriptors: null, readTools: null, ...overrides };
@@ -27,7 +27,8 @@ function harness(initial: SessionToolsTarget | null) {
 	const controller = new InventoryController(deps);
 	const settle = async () => { for (let turn = 0; turn < 20; turn++) await new Promise(resolve => setImmediate(resolve)); };
 	const last = (view: ViewKind) => state.published.filter(([kind]) => kind === view).at(-1)![1];
-	return { state, controller, settle, last };
+	const shown = (view: ViewKind): InventoryRow => last(view).groups[0]!.items[0]!.row!;
+	return { state, controller, settle, last, shown };
 }
 
 describe("inventory controller scope and reads", () => {
@@ -126,7 +127,7 @@ describe("inventory controller switches", () => {
 		const h = harness(target());
 		h.controller.setVisible("skills", true);
 		await h.settle();
-		await h.controller.toggle("skills", skill, false);
+		await h.controller.toggle("skills", h.shown("skills"), false);
 		assert.deepEqual(h.state.toggles, [{ cwd: "D:/proj", profile: "default", scope: "session", kind: "skill", name: "review", enabled: false }]);
 		assert.equal(h.state.notices[0]![0], "info");
 		assert.match(h.state.notices[0]![1], /may apply it live/);
@@ -136,12 +137,13 @@ describe("inventory controller switches", () => {
 		const h = harness(target({ running: false }));
 		h.controller.setVisible("skills", true);
 		await h.settle();
-		await h.controller.toggle("skills", skill, false);
+		await h.controller.toggle("skills", h.shown("skills"), false);
 		assert.deepEqual(h.state.delays, []);
 		const mcp = harness(target());
+		mcp.state.readResult = request => ({ ...snapshot(request.cwd, request.profile), rows: [{ ...skill, kind: "mcp", name: "srv", toggle: { mechanism: "mcp", refusal: null } }] });
 		mcp.controller.setVisible("mcp", true);
 		await mcp.settle();
-		await mcp.controller.toggle("mcp", { ...skill, kind: "mcp", name: "srv" }, false);
+		await mcp.controller.toggle("mcp", mcp.shown("mcp"), false);
 		assert.deepEqual(mcp.state.delays, []);
 		assert.match(mcp.state.notices[0]![1], /Restart a running session/);
 	});
@@ -151,7 +153,7 @@ describe("inventory controller switches", () => {
 		await h.settle();
 		h.state.toggleResult = { ok: false, message: "OMP no longer lists this item." };
 		const reads = h.state.reads.length;
-		await h.controller.toggle("skills", skill, false);
+		await h.controller.toggle("skills", h.shown("skills"), false);
 		await h.settle();
 		assert.deepEqual(h.state.notices, [["warning", "OMP no longer lists this item."]]);
 		assert.equal(h.state.reads.length > reads, true);
@@ -161,7 +163,7 @@ describe("inventory controller switches", () => {
 		h.controller.setVisible("skills", true);
 		await h.settle();
 		h.state.toggleResult = { ok: true, changed: false };
-		await h.controller.toggle("skills", skill, false);
+		await h.controller.toggle("skills", h.shown("skills"), false);
 		assert.match(h.state.notices[0]![1], /already disabled/);
 		assert.deepEqual(h.state.delays, []);
 	});
@@ -171,13 +173,14 @@ describe("inventory controller switches", () => {
 		await h.settle();
 		let release!: () => void;
 		h.state.toggleGate = new Promise<void>(resolve => { release = resolve; });
-		const first = h.controller.toggle("skills", { ...skill, name: "one" }, false);
-		const second = h.controller.toggle("skills", { ...skill, name: "two" }, false);
+		const row = h.shown("skills");
+		const first = h.controller.toggle("skills", row, false);
+		const second = h.controller.toggle("skills", row, true);
 		await h.settle();
-		assert.deepEqual(h.state.toggles.map(toggle => toggle.name), ["one"], "the second write waits for the first");
+		assert.deepEqual(h.state.toggles.map(toggle => toggle.enabled), [false], "the second write waits for the first");
 		release();
 		await Promise.all([first, second]);
-		assert.deepEqual(h.state.toggles.map(toggle => toggle.name), ["one", "two"]);
+		assert.deepEqual(h.state.toggles.map(toggle => toggle.enabled), [false, true]);
 	});
 	it("writes the profile of the list the row came from even when the selected session changes while a switch waits", async () => {
 		const h = harness(target({ profile: "alpha" }));
@@ -185,17 +188,31 @@ describe("inventory controller switches", () => {
 		await h.settle();
 		let release!: () => void;
 		h.state.toggleGate = new Promise<void>(resolve => { release = resolve; });
-		const first = h.controller.toggle("skills", { ...skill, name: "one" }, false);
+		const first = h.controller.toggle("skills", h.shown("skills"), false);
 		h.state.target = target({ profile: "beta", cwd: "D:/other", generation: "g9", key: {} });
 		h.controller.sync();
 		await h.settle();
-		const second = h.controller.toggle("skills", { ...skill, name: "two" }, false);
+		const second = h.controller.toggle("skills", h.shown("skills"), false);
 		release();
 		await Promise.all([first, second]);
 		assert.equal(h.state.toggles[0]!.profile, "alpha");
 		assert.equal(h.state.toggles[1]!.profile, "beta", "a row published for the new list uses the new list's context");
 		const stale = h.state.toggles.filter(toggle => toggle.profile === "alpha").length;
 		assert.equal(stale, 1);
+	});
+	it("keeps a clicked row's own context after a newer list replaced it, and refuses a row it never published", async () => {
+		const h = harness(target({ profile: "alpha" }));
+		h.controller.setVisible("skills", true);
+		await h.settle();
+		const published = h.last("skills").groups[0]!.items[0]!.row!;
+		h.state.target = target({ profile: "beta", cwd: "D:/other", generation: "g9", key: {} });
+		h.controller.sync();
+		await h.settle();
+		await h.controller.toggle("skills", published, false);
+		assert.equal(h.state.toggles[0]!.profile, "alpha", "the old row writes the profile it was shown for");
+		await h.controller.toggle("skills", { ...skill, name: "invented" }, false);
+		assert.equal(h.state.toggles.length, 1);
+		assert.equal(h.state.notices.at(-1)![0], "warning");
 	});
 	it("refuses to switch before the view has ever been read", async () => {
 		const h = harness(target());

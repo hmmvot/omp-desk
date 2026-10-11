@@ -36,7 +36,8 @@ export class InventoryController {
 	#again = false;
 	#selected: SessionToolsTarget | null = null;
 	/** What each view last showed: the context of its rows, immune to later selection changes. */
-	readonly #published: Partial<Record<ViewKind, PublishedContext>> = {};
+	/** Every switchable row ever published, with the context of the list it appeared in: a row clicked after a newer list replaced it keeps its own context. */
+	readonly #contexts = new WeakMap<InventoryRow, PublishedContext>();
 	#switching: Promise<void> = Promise.resolve();
 	readonly #deps: InventoryControllerDeps;
 	readonly #views: Record<ViewKind, ViewState> = {
@@ -112,7 +113,8 @@ export class InventoryController {
 			for (const plan of plans) {
 				const inventory = results.get(plan.key)!;
 				const model = projectView({ view: plan.view, scope: plan.scope, inventory, evidence: plan.scope === "session" ? evidence : null, profile: plan.profile });
-				this.#published[plan.view] = { plan, running: target?.running === true };
+				const context: PublishedContext = { plan, running: target?.running === true };
+				for (const group of model.groups) for (const item of group.items) if (item.row !== null) this.#contexts.set(item.row, context);
 				this.#deps.publish(plan.view, plan.forcedGlobal ? { ...model, description: "Global (no active session)" } : model);
 			}
 		} finally {
@@ -123,7 +125,7 @@ export class InventoryController {
 
 	/** Serialized: two switches never interleave their writes. The folder, profile and scope are those of the list the row was published in, captured now. */
 	toggle(view: ViewKind, row: InventoryRow, enabled: boolean): Promise<void> {
-		const context = this.#published[view];
+		const context = this.#contexts.get(row);
 		const run = this.#switching.then(() => this.#toggle(context, row, enabled));
 		this.#switching = run.catch(() => {});
 		return run;

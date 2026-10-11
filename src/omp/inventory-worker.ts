@@ -87,7 +87,7 @@ const samePath = (a: string, b: string): boolean => path.normalize(a).toLowerCas
 
 /** Warnings that mean a source was skipped or unreadable, not a naming notice: such a list can be incomplete. */
 // (A missing optional file such as `<ancestor>/.vscode/mcp.json` is reported as "Failed to read" and is not an omission.)
-const OMISSION = /Failed to (load|parse)|Invalid (item|plugin)|no installPath/i;
+const OMISSION = /Failed to (load|parse)|Invalid (item|plugin|JSON|config)|no installPath/i;
 
 /** Files that SELECT project-level plugin rows or project settings without the rows themselves living in a project folder. */
 function projectMarkers(cwd: string): string[] {
@@ -203,7 +203,7 @@ async function collect(request: WorkerRequest, n: Natives): Promise<Collected> {
         const off = disabled.includes(`skill:${skill.name}`);
         rows.push({ kind: "skill", name: skill.name, description: text(skill.description), path: text(skill.filePath), provider: skill._source?.provider ?? "custom",
           providerName: skill._source?.providerName ?? "Custom directory", level: skill._source?.level === "project" ? "project" : "user", state: off ? "disabled" : "active", shadowed: false,
-          disabledReason: null, detail: null, toolPrefix: null, runtimeName: off ? null : skill.name,
+          disabledReason: null, detail: null, toolPrefix: null, runtimeName: nameOf(skill.filePath),
           toggle: overridden ? { mechanism: null, refusal: "this project's config replaces the global disabledExtensions list" } : { mechanism: "disabledExtensions", refusal: null } });
       }
     } catch { incomplete.add("skills"); }
