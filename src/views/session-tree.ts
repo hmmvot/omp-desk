@@ -973,7 +973,7 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 			const head = this.#providerLoginRequired ? [this.#providerLogin] : [];
 			const group = this.#group === null ? [] : [this.#group];
 			// `terminals` serves the processes alone: no session, folder or New Session row.
-			if (this.#grouping === "terminals") return [...head, ...this.#processItems];
+			if (this.#grouping === "terminals") return [...this.#processItems];
 			// With no folder at all the flat list has no sessions, so the view's welcome content shows
 			// unless there are processes to list.
 			if (this.#grouping === "flat") {
