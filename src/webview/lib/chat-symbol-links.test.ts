@@ -374,3 +374,17 @@ test("an ambiguous answer is a link to the symbol search, cached like a found on
 		links.dispose();
 	} finally { mock.timers.reset(); }
 });
+
+test("an ambiguous answer between files keeps its marker, from the answer through the cache", async () => {
+	mock.timers.enable({ apis: ["setTimeout"] });
+	try {
+		const { transport, answer } = fixture();
+		const links = new ChatSymbolLinks(transport);
+		const result = links.resolve("Settings.cs:3");
+		mock.timers.tick(40);
+		answer(0, [{ token: "Settings.cs:3", status: "ambiguous", definitions: 4, files: true }]);
+		assert.deepEqual(await result, { target: "Settings.cs:3", definitions: 4, files: true });
+		assert.deepEqual(links.peek("Settings.cs:3"), { target: "Settings.cs:3", definitions: 4, files: true });
+		links.dispose();
+	} finally { mock.timers.reset(); }
+});

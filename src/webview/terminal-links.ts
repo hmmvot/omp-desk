@@ -9,8 +9,11 @@ export interface TerminalLinkRequest {
 	folders?: true;
 	/** Chat only, on an open: what a modified click does with a file or folder instead of the plain open. */
 	action?: FileLinkAction;
-	/** Chat only, on an open: `target` is a code symbol with several definitions; the host opens VS Code's workspace symbol search prefilled with its name instead of a file. */
-	search?: true;
+	/**
+	 * Chat only, on an open: `true` means `target` is a code symbol with several definitions and the host opens VS Code's workspace symbol search
+	 * prefilled with its name instead of a file; `"file"` means `target` is a bare file name span that several files carry, and the host lets the user choose one.
+	 */
+	search?: true | "file";
 }
 export interface TerminalLinkValidation {
 	type: "omp:terminal-link-validation";
@@ -68,13 +71,13 @@ export function parseTerminalLinkRequest(value: Record<string, unknown>): Termin
 	if (value.mode !== undefined && value.mode !== "editor" && value.mode !== "external") return null;
 	if (value.folders !== undefined && value.folders !== true) return null;
 	if (value.action !== undefined && value.action !== "reveal" && value.action !== "os") return null;
-	if (value.search !== undefined && (value.search !== true || value.type !== "omp:terminal-link-open")) return null;
+	if (value.search !== undefined && ((value.search !== true && value.search !== "file") || value.type !== "omp:terminal-link-open")) return null;
 	return {
 		type: value.type, requestId: Number(value.requestId), target: value.target,
 		...(value.mode === undefined ? {} : { mode: value.mode }),
 		...(value.folders === undefined ? {} : { folders: true as const }),
 		...(value.action === undefined ? {} : { action: value.action }),
-		...(value.search === undefined ? {} : { search: true as const }),
+		...(value.search === undefined ? {} : { search: value.search as true | "file" }),
 	};
 }
 export function parseTerminalLinkValidation(value: Record<string, unknown>): TerminalLinkValidation | null {

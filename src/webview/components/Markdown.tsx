@@ -16,7 +16,7 @@ import type { ReactNode } from "react";
 import { Fragment, memo, useMemo } from "react";
 import { detectChatFileLinks, fileTargetOfHref, isFileLinkCandidate } from "../lib/chat-file-links";
 import { detectWebLinks } from "../lib/chat-web-links";
-import { parseCodeSymbol } from "../code-symbols";
+import { parseBareFileName, parseCodeSymbol } from "../code-symbols";
 import { webLinkUrl } from "../terminal-links";
 import { CodeSymbolSpan, FileLink, FileLinkText } from "./FileLinks.tsx";
 import { ImageReferenceToken } from "./ImageReference.tsx";
@@ -62,13 +62,15 @@ function plain(text: string, key: string): ReactNode {
 
 /**
  * A whole code span that is one path (spaces allowed only after a drive, home or relative prefix) links as a unit; an `@` mention and any other span link the file references they hold. A URL in code stays code.
- * A span that names a code symbol (`Session`, `A.B`, `Run()`, `[Attr]`) is one {@link CodeSymbolSpan}: its path proof first when it also looks like a path, then the host's workspace symbol lookup, in assistant text only.
+ * A span that names a code symbol (`Session`, `A.B`, `Run()`, `[Attr]`) or is a bare file name (`session-index.ts:849`, `session-index.ts(849)`) is one {@link CodeSymbolSpan}: its path proof first when it also looks like a path, then the host's workspace symbol and file-name lookup, in assistant text only.
  */
 function codeSpan(content: string, key: string): ReactNode {
 	const whole = content.trim();
 	const single = !whole.startsWith("@") && (!/\s/.test(whole) || /^(?:[a-z]:[\\/]|~[\\/]|\.{1,2}[\\/]|\/)/i.test(whole) && !/\s-/.test(whole));
 	const path = single && isFileLinkCandidate(whole) ? whole : null;
-	if (parseCodeSymbol(content) !== null) return <CodeSymbolSpan key={key} content={content} path={path} />;
+	const symbol = parseCodeSymbol(content) !== null;
+	// A bare file name (`session-index.ts:849`) is looked up by the host in assistant text; where it links nothing the span renders as before.
+	if (symbol || parseBareFileName(content) !== null) return <CodeSymbolSpan key={key} content={content} path={path} plain={symbol || path !== null ? undefined : files(content, `${key}f`)} />;
 	return <code key={key}>{path !== null ? <FileLink target={path}>{content}</FileLink> : files(content, `${key}f`)}</code>;
 }
 

@@ -100,19 +100,20 @@ function Anchor({ links, target, children }: { links: ChatFileLinks; target: str
 }
 
 /**
- * A code symbol with several different definitions: the same look as a link, dotted, and a click (or Ctrl+Click, there
- * is no single file to reveal) opens VS Code's workspace symbol search for its name, where the user chooses. Never a guessed definition.
+ * A code symbol with several different definitions, or a bare file name that several files carry (`files`): the same
+ * look as a link, dotted. A click (or Ctrl+Click, there is no single file to reveal) opens VS Code's workspace symbol search
+ * for the symbol's name, or lets the user choose one of the files. Never a guessed definition or file.
  */
-function SymbolSearchAnchor({ links, symbol, definitions, children }: { links: ChatFileLinks; symbol: string; definitions: number; children: ReactNode }): ReactNode {
+function SymbolSearchAnchor({ links, symbol, definitions, files, children }: { links: ChatFileLinks; symbol: string; definitions: number; files: boolean; children: ReactNode }): ReactNode {
 	return <span
 		className="omp-symbol-search"
 		role="link"
 		tabIndex={0}
 		data-symbol-search={symbol}
-		title={`${definitions} definitions — click to choose`}
+		title={files ? `${definitions} files — click to choose` : `${definitions} definitions — click to choose`}
 		onMouseDown={event => { if (event.shiftKey) event.preventDefault(); }}
-		onClick={event => { if (claimLinkActivation(event)) links.openSymbolSearch(symbol); }}
-		onKeyDown={event => { if ((event.key === "Enter" || event.key === " ") && claimLinkActivation(event)) links.openSymbolSearch(symbol); }}
+		onClick={event => { if (claimLinkActivation(event)) links.openSymbolSearch(symbol, files); }}
+		onKeyDown={event => { if ((event.key === "Enter" || event.key === " ") && claimLinkActivation(event)) links.openSymbolSearch(symbol, files); }}
 	>{children}</span>;
 }
 
@@ -208,12 +209,13 @@ function useSymbolLink(symbols: ChatSymbolLinks | null, token: string | null): S
 }
 
 /**
- * One inline code span that may name a code symbol. `path` is the whole span when it also looks like a path:
- * the file proof comes first, and the symbol is asked about only once the host refuses that path (`A.B` looks like
- * a file with an extension). The span becomes a link to the file or to the symbol's definition once the host proves
- * it, and asks only once it has been on screen. The characters are the same either way.
+ * One inline code span that may name a code symbol or a bare file name. `path` is the whole span when it also looks like a
+ * path: the file proof comes first, and the symbol or file name is asked about only once the host refuses that path (`A.B`
+ * looks like a file with an extension; `session-index.ts` is a file, but not in the session's folder). The span becomes a link to the file
+ * or to the symbol's definition once the host proves it, and asks only once it has been on screen. The characters are the same either way;
+ * `plain` stands for them when nothing links (the span's own file references, for a file name that is not a symbol).
  */
-export function CodeSymbolSpan({ content, path }: { content: string; path: string | null }): ReactNode {
+export function CodeSymbolSpan({ content, path, plain }: { content: string; path: string | null; plain?: ReactNode }): ReactNode {
 	const links = useContext(FileLinksContext);
 	const eligible = useContext(SymbolLinksEligibleContext);
 	const symbols = useContext(SymbolLinksContext);
@@ -223,10 +225,10 @@ export function CodeSymbolSpan({ content, path }: { content: string; path: strin
 	const [ref, seen] = useSeen();
 	const symbol = useSymbolLink(eligible ? symbols : null, !fileProven && fileRefused && seen ? content : null);
 	if (!fileProven && links !== null && symbol?.definitions !== undefined) {
-		return <code ref={ref}><SymbolSearchAnchor links={links} symbol={content} definitions={symbol.definitions}>{content}</SymbolSearchAnchor></code>;
+		return <code ref={ref}><SymbolSearchAnchor links={links} symbol={content} definitions={symbol.definitions} files={symbol.files === true}>{content}</SymbolSearchAnchor></code>;
 	}
 	const target = fileProven ? path : symbol?.target;
-	return <code ref={ref}>{links !== null && target !== undefined ? <Anchor links={links} target={target}>{content}</Anchor> : content}</code>;
+	return <code ref={ref}>{links !== null && target !== undefined ? <Anchor links={links} target={target}>{content}</Anchor> : plain ?? content}</code>;
 }
 
 /** The position a read call's displayed target carries (`src/a.ts:50-200`), for the link that opens at it. */

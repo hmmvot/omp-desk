@@ -8,8 +8,8 @@ type Provide = (text: string, existing: readonly string[]) => Promise<string>;
 let render: (text: string) => string;
 /** Renders with a link context whose host has proven exactly `existing`, as the page does once validations are answered. */
 let renderLinked: Provide;
-/** Renders with the host answering each token of `symbols` with its target (others none) and no path existing; `asked` is what the page asked the host. */
-type RenderSymbols = (text: string, options: { paths?: string[]; symbols?: Record<string, string | number>; eligible?: boolean; provider?: boolean }) => Promise<{ html: string; asked: string[] }>;
+/** Renders with the host answering each token of `symbols` with its target, its number of definitions or (`{ files }`) its number of same-named files (others none) and no path existing; `asked` is what the page asked the host. */
+type RenderSymbols = (text: string, options: { paths?: string[]; symbols?: Record<string, string | number | { files: number }>; eligible?: boolean; provider?: boolean }) => Promise<{ html: string; asked: string[] }>;
 let renderSymbols: RenderSymbols;
 before(async () => {
 	const bundled = await build({ stdin: { contents: `
@@ -42,7 +42,7 @@ before(async () => {
 				if (message.type === "omp:terminal-link-validate") reply({ type: "omp:terminal-link-validation", requestId: message.requestId, valid: false });
 				if (message.type === "omp:terminal-link-symbols") {
 					asked.push(...message.tokens);
-					reply({ type: "omp:terminal-link-symbol-resolution", requestId: message.requestId, results: message.tokens.map(token => symbols[token] === undefined ? { token, status: "none" } : typeof symbols[token] === "number" ? { token, status: "ambiguous", definitions: symbols[token] } : { token, status: "found", target: symbols[token] }) });
+					reply({ type: "omp:terminal-link-symbol-resolution", requestId: message.requestId, results: message.tokens.map(token => symbols[token] === undefined ? { token, status: "none" } : typeof symbols[token] === "number" ? { token, status: "ambiguous", definitions: symbols[token] } : typeof symbols[token] === "object" ? { token, status: "ambiguous", definitions: symbols[token].files, files: true } : { token, status: "found", target: symbols[token] }) });
 				}
 				return true;
 			}, subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); } };
@@ -232,4 +232,26 @@ test("a symbol with several definitions renders as a dotted search link with its
 	assert.doesNotMatch(html, /omp-file-link/);
 	assert.doesNotMatch(html, /data-symbol-search="Plain"/);
 	assert.doesNotMatch(html, /data-vscode-context="[^"]*Twin/, "no file menu for a search link");
+});
+
+test("a bare file name the host found one file of is a link to it, several files are a dotted choice, none stays code; it is asked about only after its path was refused", async () => {
+	const source = "`session-index.ts:849` and `Loader.cs(12)` and `Settings.cs:3` and `Missing.cs:1` and `@lib/c.ts` and `Util.Run` and **`session-index.ts:849`**";
+	const { html, asked } = await renderSymbols(source, { paths: ["session-index.ts:849", "Settings.cs:3", "Missing.cs:1"], symbols: { "session-index.ts:849": "Assets/session-index.ts:849", "Loader.cs(12)": "Assets/Loader.cs:12", "Settings.cs:3": { files: 3 } } });
+	assert.deepEqual([...html.matchAll(/data-file-target="([^"]*)"/g)].map(match => match[1]), ["Assets/session-index.ts:849", "Assets/Loader.cs:12", "Assets/session-index.ts:849"]);
+	assert.match(html, /<code><span class="omp-file-link"[^>]*data-file-target="Assets\/session-index\.cs:849"[^>]*>session-index\.cs:849<\/span><\/code>/, "the span's own characters, as a file link");
+	assert.match(html, /<code><span class="omp-file-link"[^>]*data-file-target="Assets\/Loader\.cs:12"[^>]*>Loader\.cs\(12\)<\/span><\/code>/, "the MSBuild form links without being a path");
+	assert.match(html, /<code><span class="omp-symbol-search"[^>]*data-symbol-search="Settings\.cs:3"[^>]*title="3 files — click to choose"/, "several files are a choice, said in files");
+	assert.match(html, /<code>Missing\.cs:1<\/code>/);
+	assert.match(html, /<strong><code><span class="omp-file-link"[^>]*>session-index\.cs:849<\/span><\/code><\/strong>/);
+	assert.doesNotMatch(html, /data-vscode-context="[^"]*Settings/, "no file menu for a choice");
+	assert.deepEqual([...new Set(asked)].sort(), ["Loader.cs(12)", "session-index.ts:849", "Settings.cs:3"], "a refused path or a span with no path shape is asked about; a mention and a mixed-case dotted name are not file names");
+});
+
+test("a bare file name is linked in assistant text only, and where nothing links it renders as before", async () => {
+	const off = await renderSymbols("`session-index.ts:849` and `Loader.cs(12)`", { paths: ["session-index.ts:849"], symbols: { "session-index.ts:849": "Assets/session-index.ts:849", "Loader.cs(12)": "Assets/Loader.cs:12" }, eligible: false });
+	assert.doesNotMatch(off.html, /omp-file-link|omp-symbol-search/);
+	assert.match(off.html, /<code>session-index\.cs:849<\/code> and <code>Loader\.cs\(12\)<\/code>/);
+	const linked = await renderLinked("`session-index.ts:849` and `Loader.cs`", ["session-index.ts:849", "Loader.cs"]);
+	assert.match(linked, /<code><span class="omp-file-link"[^>]*data-file-target="session-index\.cs:849"/, "a file the cwd has keeps the path link, in any text");
+	assert.match(linked, /<code><span class="omp-file-link"[^>]*data-file-target="Loader\.cs"/);
 });

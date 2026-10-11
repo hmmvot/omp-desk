@@ -1,6 +1,7 @@
 import path from "node:path";
-import { parseCodeSymbol } from "../webview/code-symbols.ts";
-import type { CodeSymbol, SymbolLinkResult, SymbolLinksRequest, SymbolLinksResolution } from "../webview/code-symbols.ts";
+import { parseBareFileName, parseCodeSymbol } from "../webview/code-symbols.ts";
+import type { BareFileName, CodeSymbol, SymbolLinkResult, SymbolLinksRequest, SymbolLinksResolution } from "../webview/code-symbols.ts";
+import type { FileLookup, FileNameLinkResolver } from "./file-name-links.ts";
 
 /**
  * Where an inline-code symbol of a Chat reply is defined, according to VS Code's workspace symbol providers
@@ -274,8 +275,8 @@ export function symbolTarget(entry: SymbolEntry, cwd: string): string {
 export type SymbolOutcome =
 	| { readonly status: "found"; readonly target: string }
 	| { readonly status: "none" }
-	/** Several different definitions inside the session's folders: the page links to the workspace symbol search, never to one of them. */
-	| { readonly status: "ambiguous"; readonly definitions: number }
+	/** Several different definitions inside the session's folders: the page links to the workspace symbol search, never to one of them. With `files`, several files carry the name of a bare file name span and a click lets the user choose one. */
+	| { readonly status: "ambiguous"; readonly definitions: number; readonly files?: true }
 	| { readonly status: "unavailable" }
 	/** Not a verdict: the provider is not ready or its queue is full; the token is asked again when the host signals a retry. */
 	| { readonly status: "pending" };
@@ -301,6 +302,8 @@ export interface SymbolResolverOptions {
 	readonly onRetry?: () => void;
 	/** Delays of the not-ready canary probes (the last one repeats). */
 	readonly probeDelaysMs?: readonly number[];
+	/** The bare-file-name side: looked up by {@link SymbolLinkResolver.resolveFileName} and dropped with every {@link SymbolLinkResolver.invalidate}. */
+	readonly files?: FileNameLinkResolver;
 }
 
 /** A provider answer; `total` is how many entries the provider returned before the adapter kept the name candidates. */
@@ -344,6 +347,7 @@ export class SymbolLinkResolver {
 	readonly #maxCached: number;
 	readonly #log: ((line: string) => void) | undefined;
 	readonly #onRetry: (() => void) | undefined;
+	readonly #files: FileNameLinkResolver | undefined;
 	readonly #probeDelays: readonly number[];
 	readonly #cache = new Map<string, { outcome: SymbolOutcome; expires: number }>();
 	readonly #pending = new Map<string, Promise<SymbolOutcome>>();
@@ -374,6 +378,7 @@ export class SymbolLinkResolver {
 		this.#log = options.log;
 		this.#onRetry = options.onRetry;
 		this.#probeDelays = options.probeDelaysMs ?? [2000, 4000, 8000, 16_000, 30_000];
+		this.#files = options.files;
 	}
 
 	/** A batch of the page's questions may start only while fewer than {@link MAX_ACTIVE_BATCHES} are working; pair with {@link leaveBatch}. */
@@ -393,6 +398,17 @@ export class SymbolLinkResolver {
 		this.#generation++;
 		this.#cache.clear();
 		this.#pending.clear();
+		this.#files?.invalidate();
+	}
+
+	/** The bare file name a span is: where the file search finds it (`none` when the host has no file search). Fenced by the same {@link generation}. */
+	resolveFileName(file: BareFileName, scope: SymbolScope): Promise<SymbolOutcome> {
+		return this.#files?.resolve(file, scope) ?? Promise.resolve(none);
+	}
+
+	/** The files a bare file name stands for, for the click that lets the user choose among several. */
+	lookupFileName(name: string, scope: SymbolScope): Promise<FileLookup> {
+		return this.#files?.lookup(name, scope) ?? Promise.resolve({ state: "none" });
 	}
 
 	resolve(symbol: CodeSymbol, scope: SymbolScope): Promise<SymbolOutcome> {
@@ -620,9 +636,17 @@ export async function handleSymbolLinks(request: SymbolLinksRequest, host: Symbo
 		const generation = resolver.generation;
 		const results: SymbolLinkResult[] = request.tokens.map(token => ({ token, status: "unavailable" }));
 		const tasks = request.tokens.map(async (token, index) => {
-			const symbol = parseCodeSymbol(token);
-			const outcome = symbol === null || host.cwd === "" ? none : await resolver.resolve(symbol, { cwd: host.cwd, roots });
-			results[index] = outcome.status === "found" ? { token, status: "found", target: outcome.target } : outcome.status === "ambiguous" ? { token, status: "ambiguous", definitions: outcome.definitions } : { token, status: outcome.status };
+			const scope = { cwd: host.cwd, roots };
+			// A bare file name is looked up as a file first; a span that is also a symbol (`Twin.run`) is looked up as one only when no file has that name. A file lookup that could not answer stays unanswered.
+			const file = parseBareFileName(token);
+			let outcome: SymbolOutcome = file === null || host.cwd === "" ? none : await resolver.resolveFileName(file, scope);
+			// Files changed since the batch began (the file lookup answered for an older state): no symbol lookup is started on top of it.
+			if (outcome.status === "none" && resolver.generation !== generation) outcome = { status: "unavailable" };
+			else if (outcome.status === "none") {
+				const symbol = parseCodeSymbol(token);
+				outcome = symbol === null || host.cwd === "" ? none : await resolver.resolve(symbol, scope);
+			}
+			results[index] = outcome.status === "found" ? { token, status: "found", target: outcome.target } : outcome.status === "ambiguous" ? { token, status: "ambiguous", definitions: outcome.definitions, ...(outcome.files === true ? { files: true as const } : {}) } : { token, status: outcome.status };
 		});
 		let timer: NodeJS.Timeout | undefined;
 		const deadline = new Promise<void>(resolve => { timer = setTimeout(resolve, deadlineMs); });

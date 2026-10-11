@@ -5,8 +5,9 @@ import { fileURLToPath } from "node:url";
 import { homedir, hostname } from "node:os";
 import { FILE_LINK_MENU_SECTION, WEB_LINK_MENU_SECTION, isTerminalLinkTarget, webLinkUrl } from "../webview/terminal-links.ts";
 import type { TerminalLinkRequest, TerminalLinkValidation, WebLinkMode } from "../webview/terminal-links.ts";
-import { parseCodeSymbol } from "../webview/code-symbols.ts";
+import { parseBareFileName, parseCodeSymbol } from "../webview/code-symbols.ts";
 import type { CodeSymbol } from "../webview/code-symbols.ts";
+import type { FileLookup } from "./file-name-links.ts";
 
 /**
  * The text typed after `#` in Go to Symbol in Workspace for a symbol with several definitions: its last segment
@@ -179,6 +180,10 @@ export interface TerminalLinkHost {
 	openUrl(url: string, mode: WebLinkMode): Promise<void>;
 	/** Open VS Code's workspace symbol search (Go to Symbol in Workspace) with `query` already typed after the `#`. */
 	searchSymbols(query: string): Promise<void>;
+	/** The files a bare file name stands for inside the session's folders (the host's own file lookup, never the page's answer). */
+	lookupFileName(name: string): Promise<FileLookup>;
+	/** Let the user choose one of `paths`; `undefined` when dismissed. */
+	pickFile(paths: readonly string[]): Promise<string | undefined>;
 	/** Short user-visible notice, so an activation that cannot complete is never silent. */
 	warn(message: string): void;
 }
@@ -199,6 +204,40 @@ export async function handleTerminalLink(request: TerminalLinkRequest, host: Ter
 		}
 		try { await host.searchSymbols(symbolSearchQuery(symbol)); }
 		catch (error) { host.warn(`cannot open the symbol search: ${error instanceof Error ? error.message : String(error)}`); }
+		return;
+	}
+	if (request.type === "omp:terminal-link-open" && request.search === "file") {
+		// The page names a bare file name that several files carry, never a path: the host parses it again, searches again and lets the user choose.
+		const file = parseBareFileName(request.target);
+		if (!host.isCurrent()) return;
+		if (file === null) {
+			host.warn(`cannot choose a file for "${request.target}": not a file name.`);
+			return;
+		}
+		try {
+			const lookup = await host.lookupFileName(file.name);
+			if (!host.isCurrent()) return;
+			if (lookup.state === "none" || lookup.state === "unavailable") {
+				host.warn(lookup.state === "none" ? `cannot open "${request.target}": no file named ${file.name} in this session's folders.` : `cannot open "${request.target}": the file search did not answer.`);
+				return;
+			}
+			let chosen: string | undefined = lookup.state === "unique" ? lookup.path : await host.pickFile(lookup.paths);
+			if (chosen === undefined || !host.isCurrent()) return;
+			if (lookup.state === "many") {
+				// The picker may have stayed open while files or folders changed: the choice must still be a file of the host's own current lookup (the scope is derived afresh).
+				const again = await host.lookupFileName(file.name);
+				const lowered = chosen.toLowerCase();
+				const current = again.state === "unique" ? [again.path] : again.state === "many" ? again.paths : [];
+				if (!current.some(candidate => candidate.toLowerCase() === lowered)) chosen = undefined;
+			}
+			const location = chosen === undefined ? null : await existingTerminalFile(chosen, host.cwd, home);
+			if (!host.isCurrent()) return;
+			if (location === null) {
+				host.warn(`cannot open "${request.target}": the chosen file no longer exists.`);
+				return;
+			}
+			await host.openFile({ path: location.path, line: file.line ?? 1, column: file.column ?? 1 });
+		} catch (error) { host.warn(`cannot open "${request.target}": ${error instanceof Error ? error.message : String(error)}`); }
 		return;
 	}
 	if (request.type === "omp:terminal-link-open" && /^\s*https?:/i.test(request.target)) {

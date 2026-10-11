@@ -92,6 +92,52 @@ export function parseCodeSymbol(content: string): CodeSymbol | null {
 	return { segments, name: segments.join("."), last, attribute, call };
 }
 
+/** A bare file name in inline code (`session-index.ts`, `session-index.ts:849:5`, `session-index.ts(849)`); `line` and `column` are one-based and only present when the span carried them. */
+export interface BareFileName {
+	readonly name: string;
+	readonly line?: number;
+	readonly column?: number;
+}
+
+const MAX_FILE_NAME_LENGTH = 100;
+/** Letters, digits and `_ . + @ ~ $ -`: no path separator, space or glob character, so a name is never a pattern and needs no escaping. It may not start with `@`, `-`, `+`, `~` or `$`: a leading `@` is a file mention, the others are not file names. */
+const FILE_NAME = /^[\p{L}\p{N}_.+@~$-]+$/u;
+/** A stem and an extension of one to ten characters that starts with a letter and is all lowercase or all uppercase (digits allowed): `Foo.Bar` is a symbol, `Foo.cs` and `README.MD` are files. */
+const FILE_EXTENSION = /^(.+)\.([a-z][a-z\d]{0,9}|[A-Z][A-Z\d]{0,9})$/u;
+/** The position forms, tried in order after the name: `:849`, `:849:5`, `:L849`, `:849-860` (the start), `#L849`, `(849)`, `(849,5)`. */
+const FILE_POSITIONS = [
+	/^(.*?)(?::L?(\d{1,7})(?::(\d{1,7}))?(?:-L?\d{1,7})?)$/u,
+	/^(.*?)(?:#L(\d{1,7}))$/u,
+	/^(.*?)(?:\((\d{1,7})(?:,(\d{1,7}))?\))$/u,
+];
+
+/**
+ * The bare file name one inline code span is, or `null`: one segment of letters, digits and `_ . + @ ~ $ -`
+ * with a stem and a letter-led extension in one case (see {@link FILE_EXTENSION}), optionally followed by a line
+ * (and column) in one of the {@link FILE_POSITIONS} forms. A path (any separator), a drive, a name with a space,
+ * glob character or colon elsewhere, a version number (`1.2.3`) and a sentence's trailing dot are not file names.
+ */
+export function parseBareFileName(content: string): BareFileName | null {
+	const text = content.trim();
+	if (text.length < 3 || content.length > MAX_SYMBOL_TOKEN_LENGTH || /[`\u0000-\u001f\u007f]/.test(content)) return null;
+	let name = text;
+	let line: number | undefined;
+	let column: number | undefined;
+	for (const form of FILE_POSITIONS) {
+		const match = form.exec(text);
+		if (match === null) continue;
+		name = match[1]!;
+		line = Number(match[2]);
+		if (match[3] !== undefined) column = Number(match[3]);
+		break;
+	}
+	if (name.length > MAX_FILE_NAME_LENGTH || !FILE_NAME.test(name) || !/^[\p{L}\p{N}_.]/u.test(name) || name.includes("..")) return null;
+	const parts = FILE_EXTENSION.exec(name);
+	if (parts === null || !/[\p{L}\p{N}]/u.test(parts[1]!) || parts[1]!.endsWith(".")) return null;
+	if (line !== undefined && line < 1 || column !== undefined && column < 1) return null;
+	return { name, ...(line === undefined ? {} : { line }), ...(column === undefined ? {} : { column }) };
+}
+
 /** Page to host: where are these symbols defined? The session folder is the host's, never the page's. */
 export interface SymbolLinksRequest {
 	type: "omp:terminal-link-symbols";
@@ -111,6 +157,8 @@ export interface SymbolLinkResult {
 	target?: string;
 	/** How many different definitions the name has inside the session's folders; only with `ambiguous`. */
 	definitions?: number;
+	/** The ambiguity is between files of that name (a bare file name span), not between definitions: the click lets the user choose a file. Only with `ambiguous`. */
+	files?: true;
 }
 export interface SymbolLinksResolution {
 	type: "omp:terminal-link-symbol-resolution";
@@ -151,12 +199,13 @@ export function parseSymbolLinksResolution(value: Record<string, unknown>): Symb
 	for (const entry of list as unknown[]) {
 		if (typeof entry !== "object" || entry === null || Array.isArray(entry)) return null;
 		const item = entry as Record<string, unknown>;
-		if (Object.keys(item).some(key => key !== "token" && key !== "status" && key !== "target" && key !== "definitions")) return null;
+		if (Object.keys(item).some(key => key !== "token" && key !== "status" && key !== "target" && key !== "definitions" && key !== "files")) return null;
 		if (typeof item.token !== "string" || item.token.length > MAX_SYMBOL_TOKEN_LENGTH) return null;
 		if (item.status !== "found" && item.status !== "none" && item.status !== "unavailable" && item.status !== "pending" && item.status !== "ambiguous") return null;
 		if (item.status === "found" ? !isTerminalLinkTarget(item.target) : item.target !== undefined) return null;
 		if (item.status === "ambiguous" ? !Number.isSafeInteger(item.definitions) || Number(item.definitions) < 2 || Number(item.definitions) > 100_000 : item.definitions !== undefined) return null;
-		results.push(item.status === "found" ? { token: item.token, status: "found", target: item.target as string } : item.status === "ambiguous" ? { token: item.token, status: "ambiguous", definitions: Number(item.definitions) } : { token: item.token, status: item.status });
+		if (item.files !== undefined && (item.files !== true || item.status !== "ambiguous")) return null;
+		results.push(item.status === "found" ? { token: item.token, status: "found", target: item.target as string } : item.status === "ambiguous" ? { token: item.token, status: "ambiguous", definitions: Number(item.definitions), ...(item.files === true ? { files: true as const } : {}) } : { token: item.token, status: item.status });
 	}
 	return { type: value.type, requestId: Number(value.requestId), ...(value.disabled === true ? { disabled: true as const } : {}), results };
 }

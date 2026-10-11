@@ -6,6 +6,7 @@ import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { existingTerminalFile, handleTerminalLink, openTerminalFile, openWebLink, resolveTerminalFileReference } from "./terminal-links.ts";
 import type { TerminalFileLocation, TerminalFileOpenApi, WebLinkOpenApi } from "./terminal-links.ts";
+import type { FileLookup } from "./file-name-links.ts";
 import { parseGuestHostMessage, parseGuestWebviewMessage } from "../webview/messages.ts";
 import { parseTerminalLinkRequest } from "../webview/terminal-links.ts";
 
@@ -65,7 +66,7 @@ test("a relative reference resolves against the cwd it is asked with and a missi
 		const replies: unknown[] = [];
 		let current = true;
 		const warnings: string[] = [];
-		const host = { cwd, isCurrent: () => current, reply: (message: unknown) => { replies.push(message); }, openFile: async (location: TerminalFileLocation) => { opened.push(location); }, revealInExplorer: async () => { throw new Error("a terminal link never reveals"); }, revealInOs: async () => { throw new Error("a terminal link never reveals"); }, searchSymbols: async () => {}, openUrl: async (url: string) => { urls.push(url); }, warn: (message: string) => { warnings.push(message); } };
+		const host = { cwd, isCurrent: () => current, reply: (message: unknown) => { replies.push(message); }, openFile: async (location: TerminalFileLocation) => { opened.push(location); }, revealInExplorer: async () => { throw new Error("a terminal link never reveals"); }, revealInOs: async () => { throw new Error("a terminal link never reveals"); }, searchSymbols: async () => {}, lookupFileName: async () => ({ state: "none" as const }), pickFile: async () => undefined, openUrl: async (url: string) => { urls.push(url); }, warn: (message: string) => { warnings.push(message); } };
 		await handleTerminalLink({ type: "omp:terminal-link-validate", requestId: 7, target: "a b.ts:2:3" }, host);
 		assert.deepEqual(replies, [{ type: "omp:terminal-link-validation", requestId: 7, valid: true }]);
 		await handleTerminalLink({ type: "omp:terminal-link-open", requestId: 8, target: "a b.ts:2:3" }, host);
@@ -87,7 +88,7 @@ test("a failed open surfaces a short warning with the cause", async () => {
 	try {
 		await writeFile(join(cwd, "image.png"), "x");
 		const warnings: string[] = [];
-		const host = { cwd, isCurrent: () => true, reply() {}, searchSymbols: async () => {}, openUrl: async () => {}, warn: (message: string) => { warnings.push(message); }, revealInExplorer: async () => true, revealInOs: async () => {},
+		const host = { cwd, isCurrent: () => true, reply() {}, searchSymbols: async () => {}, lookupFileName: async () => ({ state: "none" as const }), pickFile: async () => undefined, openUrl: async () => {}, warn: (message: string) => { warnings.push(message); }, revealInExplorer: async () => true, revealInOs: async () => {},
 			openFile: async () => { throw new Error("cannot display"); } };
 		await handleTerminalLink({ type: "omp:terminal-link-open", requestId: 1, target: "image.png" }, host);
 		assert.deepEqual(warnings, [`cannot open ${join(cwd, "image.png")}: cannot display`]);
@@ -103,7 +104,7 @@ test("a Chat link opens a file, only reveals it or its folder in the Explorer on
 		const replies: unknown[] = [];
 		const warnings: string[] = [];
 		let inWorkspace = true;
-		const host = { cwd, isCurrent: () => true, reply: (message: unknown) => { replies.push(message); }, searchSymbols: async () => {}, openUrl: async () => {}, warn: (message: string) => { warnings.push(message); },
+		const host = { cwd, isCurrent: () => true, reply: (message: unknown) => { replies.push(message); }, searchSymbols: async () => {}, lookupFileName: async () => ({ state: "none" as const }), pickFile: async () => undefined, openUrl: async () => {}, warn: (message: string) => { warnings.push(message); },
 			openFile: async (location: TerminalFileLocation) => { calls.push(`open ${location.path}`); },
 			revealInExplorer: async (path: string) => { calls.push(`explorer ${path}`); return inWorkspace; },
 			revealInOs: async (path: string) => { calls.push(`os ${path}`); } };
@@ -174,7 +175,7 @@ test("a web link opens only as a re-validated http(s) URL, in the mode the page 
 	let current = true;
 	let fail = false;
 	const host = { cwd: "D:\\repo", isCurrent: () => current, reply() { throw new Error("an open is never answered"); }, openFile: async () => { throw new Error("a web link is never a file"); }, revealInExplorer: async () => true, revealInOs: async () => {},
-		searchSymbols: async () => {}, openUrl: async (url: string, mode: string) => { if (fail) throw new Error("command 'simpleBrowser.api.open' not found"); urls.push([url, mode]); }, warn: (message: string) => { warnings.push(message); } };
+		searchSymbols: async () => {}, lookupFileName: async () => ({ state: "none" as const }), pickFile: async () => undefined, openUrl: async (url: string, mode: string) => { if (fail) throw new Error("command 'simpleBrowser.api.open' not found"); urls.push([url, mode]); }, warn: (message: string) => { warnings.push(message); } };
 	await handleTerminalLink({ type: "omp:terminal-link-open", requestId: 1, target: "https://example.com", mode: "editor" }, host);
 	await handleTerminalLink({ type: "omp:terminal-link-open", requestId: 2, target: "http://example.com/a b?q=1#x", mode: "external" }, host);
 	await handleTerminalLink({ type: "omp:terminal-link-open", requestId: 3, target: "HTTPS://Example.com/x" }, host);
@@ -223,7 +224,7 @@ test("a symbol search request opens the workspace symbol search for the symbol's
 	const searches: string[] = [];
 	const warnings: string[] = [];
 	let current = true;
-	const host = { cwd: "D:\\Work", isCurrent: () => current, reply() {}, openFile: async () => {}, revealInExplorer: async () => true, revealInOs: async () => {}, openUrl: async () => {}, searchSymbols: async (query: string) => { searches.push(query); }, warn: (message: string) => { warnings.push(message); } };
+	const host = { cwd: "D:\\Work", isCurrent: () => current, reply() {}, openFile: async () => {}, revealInExplorer: async () => true, revealInOs: async () => {}, openUrl: async () => {}, searchSymbols: async (query: string) => { searches.push(query); }, lookupFileName: async () => ({ state: "none" as const }), pickFile: async () => undefined, warn: (message: string) => { warnings.push(message); } };
 	const ask = (target: string) => handleTerminalLink({ type: "omp:terminal-link-open", requestId: 1, target, search: true }, host);
 	await ask("Session");
 	await ask("SessionData.Cast(x, 3)");
@@ -240,4 +241,74 @@ test("a symbol search request opens the workspace symbol search for the symbol's
 	assert.deepEqual(parseTerminalLinkRequest({ type: "omp:terminal-link-open", requestId: 2, target: "Session", search: true }), { type: "omp:terminal-link-open", requestId: 2, target: "Session", search: true });
 	assert.equal(parseTerminalLinkRequest({ type: "omp:terminal-link-validate", requestId: 2, target: "Session", search: true }), null, "only an open can search");
 	assert.equal(parseTerminalLinkRequest({ type: "omp:terminal-link-open", requestId: 2, target: "Session", search: false }), null);
+});
+
+test("a file choice request is re-parsed, searched again by the host, offered as a pick and opened at the span's line and column; nothing the page names is trusted", async () => {
+	const root = await mkdtemp(join(tmpdir(), "omp-file-choice-"));
+	try {
+		const first = join(root, "a", "session-index.ts");
+		const second = join(root, "b", "session-index.ts");
+		await mkdir(join(root, "a")); await mkdir(join(root, "b"));
+		await writeFile(first, "x"); await writeFile(second, "x");
+		const opened: TerminalFileLocation[] = [];
+		const warnings: string[] = [];
+		const picks: (readonly string[])[] = [];
+		let lookup: FileLookup = { state: "many", paths: [first, second] };
+		let choice: string | undefined = second;
+		let current = true;
+		const looked: string[] = [];
+		const host = {
+			cwd: root, isCurrent: () => current, reply() {}, revealInExplorer: async () => true, revealInOs: async () => {}, openUrl: async () => {}, searchSymbols: async () => { throw new Error("a file choice is not a symbol search"); },
+			openFile: async (location: TerminalFileLocation) => { opened.push(location); },
+			lookupFileName: async (name: string) => { looked.push(name); return lookup; },
+			pickFile: async (paths: readonly string[]) => { picks.push(paths); return choice; },
+			warn: (message: string) => { warnings.push(message); },
+		};
+		const ask = (target: string) => handleTerminalLink({ type: "omp:terminal-link-open", requestId: 1, target, search: "file" }, host);
+		await ask("session-index.ts:849:7");
+		assert.deepEqual(looked, ["session-index.ts", "session-index.ts"], "the host searches for the name, and again once the choice is made, never for a path from the page");
+		assert.deepEqual(picks, [[first, second]]);
+		assert.deepEqual(opened, [{ path: second, line: 849, column: 7 }]);
+		await ask("session-index.ts");
+		assert.deepEqual(opened[1], { path: second, line: 1, column: 1 }, "no position in the span: the file opens at its top");
+		choice = undefined;
+		await ask("session-index.ts:3");
+		assert.equal(opened.length, 2, "a dismissed pick opens nothing");
+		choice = join(root, "elsewhere.cs");
+		await ask("session-index.ts:3");
+		assert.equal(opened.length, 2, "a file the host's own lookup did not return is never opened");
+		assert.match(warnings.at(-1) ?? "", /no longer exists/);
+		choice = first;
+		await rm(first);
+		await ask("session-index.ts:3");
+		assert.equal(opened.length, 2, "a file that vanished while the picker was open is not opened");
+		lookup = { state: "unique", path: second };
+		await ask("session-index.ts(40)");
+		assert.deepEqual(opened.at(-1), { path: second, line: 40, column: 1 }, "one file left: no pick");
+		assert.equal(picks.length, 5);
+		const before = opened.length;
+		lookup = { state: "none" };
+		await ask("session-index.ts");
+		lookup = { state: "unavailable" };
+		await ask("session-index.ts");
+		await ask("src/session-index.ts");
+		await ask("two words");
+		await ask("Session");
+		assert.equal(opened.length, before);
+		assert.equal(warnings.length, 7, "the two refused picks, none, unavailable, and three spans that are not bare file names each say why");
+		assert.equal(looked.filter(name => name !== "session-index.ts").length, 0, "a span that is not a bare file name is never searched");
+		lookup = { state: "many", paths: [second, first] };
+		choice = second;
+		const shrinking = { ...host, pickFile: async () => { lookup = { state: "many", paths: [first] }; return second; } };
+		await handleTerminalLink({ type: "omp:terminal-link-open", requestId: 2, target: "session-index.ts:5", search: "file" }, shrinking);
+		assert.equal(opened.length, before, "a file that left the session's folders while the picker was open is not opened");
+		lookup = { state: "many", paths: [second, first] };
+		const pickAndReplace = { ...host, pickFile: async () => { current = false; return second; } };
+		await handleTerminalLink({ type: "omp:terminal-link-open", requestId: 2, target: "session-index.ts:5", search: "file" }, pickAndReplace);
+		assert.equal(opened.length, before, "a replaced document opens nothing");
+		current = true;
+		assert.deepEqual(parseTerminalLinkRequest({ type: "omp:terminal-link-open", requestId: 2, target: "session-index.ts", search: "file" }), { type: "omp:terminal-link-open", requestId: 2, target: "session-index.ts", search: "file" });
+		for (const search of ["files", "FILE", false, 1]) assert.equal(parseTerminalLinkRequest({ type: "omp:terminal-link-open", requestId: 2, target: "session-index.ts", search }), null, String(search));
+		assert.equal(parseTerminalLinkRequest({ type: "omp:terminal-link-validate", requestId: 2, target: "session-index.ts", search: "file" }), null, "only an open can choose");
+	} finally { await rm(root, { recursive: true, force: true }); }
 });

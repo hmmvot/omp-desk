@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { parseCodeSymbol } from "../webview/code-symbols.ts";
 import type { SymbolLinksResolution } from "../webview/code-symbols.ts";
 import { SymbolKind, SymbolLinkResolver, handleSymbolLinks, isInside, isNameCandidate, matchSymbol, symbolEntry, symbolRoots, symbolTarget } from "./symbol-links.ts";
+import { FileNameLinkResolver } from "./file-name-links.ts";
 import type { SymbolEntry, SymbolSource } from "./symbol-links.ts";
 
 const CWD = "D:\\Work\\Game";
@@ -371,6 +372,42 @@ test("a batch answers every token it was asked, normalizes each on the host and 
 			{ token: "Missing", status: "none" },
 		],
 	}]);
+});
+
+test("a bare file name token is answered from the file lookup; a token that is also a symbol is a symbol only when no file has that name, and an uncertain file lookup stays unanswered", async () => {
+	const find = async (name: string) => name === "Loader.cs" ? { paths: [`${CWD}\\Assets\\Loader.cs`], truncated: false }
+		: name === "Dup.cs" ? { paths: [`${CWD}\\A\\Dup.cs`, `${CWD}\\B\\Dup.cs`], truncated: false }
+		: name === "twin.run" ? { paths: [], truncated: false }
+		: name === "Broken.cs" ? null : { paths: [], truncated: false };
+	const { source, asked } = provider({ run: [entry("run", SymbolKind.Method, "T.ts", 4, "twin")], "Loader.cs": [entry("Loader", SymbolKind.Class, "X.cs", 1)] });
+	const { host: h, replies } = host();
+	await handleSymbolLinks({ type: "omp:terminal-link-symbols", requestId: 9, tokens: ["Loader.cs:849", "Dup.cs(12,3)", "twin.run", "Broken.cs", "Gone.cs"] }, h, new SymbolLinkResolver(source, { files: new FileNameLinkResolver({ find }, { isFile: async () => false }) }));
+	assert.deepEqual(replies[0]!.results, [
+		{ token: "Loader.cs:849", status: "found", target: "Assets/Loader.cs:849" },
+		{ token: "Dup.cs(12,3)", status: "ambiguous", definitions: 2, files: true },
+		{ token: "twin.run", status: "found", target: "T.ts:4:5" },
+		{ token: "Broken.cs", status: "unavailable" },
+		{ token: "Gone.cs", status: "none" },
+	]);
+	assert.deepEqual(asked, ["run"], "no symbol is asked for a file name that matched or could not be searched");
+});
+
+test("without a file search a bare file name is just a symbol candidate or nothing, and an invalidation reaches the file lookups and the batch's fence", async () => {
+	const { host: h, replies } = host();
+	await handleSymbolLinks({ type: "omp:terminal-link-symbols", requestId: 1, tokens: ["Loader.cs:849"] }, h, new SymbolLinkResolver(provider({}).source));
+	assert.deepEqual(replies[0]!.results, [{ token: "Loader.cs:849", status: "none" }]);
+	let version = 1;
+	const files = new FileNameLinkResolver({ find: async () => ({ paths: version === 1 ? [`${CWD}\\Old\\Loader.cs`] : [`${CWD}\\New\\Loader.cs`], truncated: false }) }, { isFile: async () => false });
+	const resolver = new SymbolLinkResolver(provider({}).source, { files });
+	assert.deepEqual(await resolver.resolveFileName({ name: "Loader.cs" }, scope), { status: "found", target: "Old/Loader.cs" });
+	version = 2;
+	assert.deepEqual(await resolver.resolveFileName({ name: "Loader.cs" }, scope), { status: "found", target: "Old/Loader.cs" }, "cached");
+	resolver.invalidate();
+	assert.deepEqual(await resolver.resolveFileName({ name: "Loader.cs" }, scope), { status: "found", target: "New/Loader.cs" }, "invalidate() forgets the file answers too");
+	const moved = host();
+	const second = new SymbolLinkResolver(provider({}).source, { files: new FileNameLinkResolver({ find: async () => { second.invalidate(); return { paths: [`${CWD}\\Old\\Loader.cs`], truncated: false }; } }, { isFile: async () => false }) });
+	await handleSymbolLinks({ type: "omp:terminal-link-symbols", requestId: 2, tokens: ["Loader.cs"] }, moved.host, second);
+	assert.deepEqual(moved.replies[0]!.results, [{ token: "Loader.cs", status: "unavailable" }], "files changed while the search ran: nothing stale is delivered");
 });
 
 test("with the setting off the host answers none and disabled, and nothing is asked of any provider", async () => {

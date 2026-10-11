@@ -99,6 +99,6 @@ export class ChatFileLinks {
 	peek(target: string): boolean | undefined { return this.#cache.peek(target); }
 	resolve(target: string): Promise<boolean> { return this.#cache.resolve(target); }
 	open(target: string, action?: FileLinkAction): void { this.#client.openPath(target, action); }
-	openSymbolSearch(symbol: string): void { this.#client.openSymbolSearch(symbol); }
+	openSymbolSearch(symbol: string, files = false): void { this.#client.openSymbolSearch(symbol, files); }
 	dispose(): void { this.#client.dispose(); }
 }

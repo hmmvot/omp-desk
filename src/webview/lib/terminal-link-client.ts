@@ -39,9 +39,12 @@ export class TerminalLinkClient {
 	openPath(target: string, action?: FileLinkAction): void {
 		this.#post({ type: "omp:terminal-link-open", requestId: nextTerminalLinkRequestId++, target, folders: true, ...(action === undefined ? {} : { action }) });
 	}
-	/** Ask the host to open VS Code's workspace symbol search prefilled with the name of `symbol`, a code symbol with several definitions. */
-	openSymbolSearch(symbol: string): void {
-		this.#post({ type: "omp:terminal-link-open", requestId: nextTerminalLinkRequestId++, target: symbol, search: true });
+	/**
+	 * Ask the host to open VS Code's workspace symbol search prefilled with the name of `symbol`, a code symbol with several definitions;
+	 * with `files`, `symbol` is a bare file name span that several files carry and the host lets the user choose one.
+	 */
+	openSymbolSearch(symbol: string, files = false): void {
+		this.#post({ type: "omp:terminal-link-open", requestId: nextTerminalLinkRequestId++, target: symbol, search: files ? "file" : true });
 	}
 	dispose(): void {
 		this.#disposed = true;

@@ -8,6 +8,8 @@ export interface SymbolLink {
 	readonly target: string;
 	/** Several different definitions: how many. */
 	readonly definitions?: number;
+	/** The several are files of that name (a bare file name span): the title says files and a click lets the user choose one. */
+	readonly files?: true;
 }
 /** `SymbolLink` once found, `null` when the host answered there is none, `undefined` while nothing fresh is known. */
 export type SymbolLookup = SymbolLink | null | undefined;
@@ -42,7 +44,7 @@ export interface ChatSymbolLinksOptions {
 	readonly requestTimeoutMs?: number;
 }
 
-interface Waiter { readonly token: string; readonly settle: (status: SymbolLinkStatus, target?: string, definitions?: number) => void }
+interface Waiter { readonly token: string; readonly settle: (status: SymbolLinkStatus, target?: string, definitions?: number, files?: true) => void }
 
 /**
  * One Chat document's code-symbol links: unique inline-code tokens are batched into `omp:terminal-link-symbols`
@@ -126,13 +128,13 @@ export class ChatSymbolLinks {
 
 	/** The host's answer for `token`; `answered` is false when it could not answer even after the one retry. */
 	async #ask(token: string, retriesLeft: number): Promise<{ link: SymbolLink | null; answered: boolean; parked?: true }> {
-		const { promise, resolve } = Promise.withResolvers<{ status: SymbolLinkStatus; target?: string; definitions?: number }>();
-		this.#queue.push({ token, settle: (status, target, definitions) => resolve({ status, ...(target === undefined ? {} : { target }), ...(definitions === undefined ? {} : { definitions }) }) });
+		const { promise, resolve } = Promise.withResolvers<{ status: SymbolLinkStatus; target?: string; definitions?: number; files?: true }>();
+		this.#queue.push({ token, settle: (status, target, definitions, files) => resolve({ status, ...(target === undefined ? {} : { target }), ...(definitions === undefined ? {} : { definitions }), ...(files === undefined ? {} : { files }) }) });
 		this.#scheduleFlush();
 		const answer = await promise;
 		if (answer.status === "found" && answer.target !== undefined) return { link: { target: answer.target }, answered: true };
 		// Several definitions: the link is the token itself (the host re-parses it) and opens the symbol search, not a file.
-		if (answer.status === "ambiguous" && answer.definitions !== undefined) return { link: { target: token, definitions: answer.definitions }, answered: true };
+		if (answer.status === "ambiguous" && answer.definitions !== undefined) return { link: { target: token, definitions: answer.definitions, ...(answer.files === true ? { files: true as const } : {}) }, answered: true };
 		if (answer.status === "pending") return { link: null, answered: false, parked: true };
 		if (answer.status !== "unavailable") return { link: null, answered: true };
 		if (retriesLeft <= 0 || this.#disposed || this.disabled) return { link: null, answered: false };
@@ -185,7 +187,7 @@ export class ChatSymbolLinks {
 	}
 
 	/** Settle every waiter of one request from `results`; a token the answer does not carry is `unavailable`. */
-	#finish(requestId: number, results: readonly { token: string; status: SymbolLinkStatus; target?: string; definitions?: number }[]): void {
+	#finish(requestId: number, results: readonly { token: string; status: SymbolLinkStatus; target?: string; definitions?: number; files?: true }[]): void {
 		const request = this.#inFlight.get(requestId);
 		if (request === undefined) return;
 		this.#inFlight.delete(requestId);
@@ -193,7 +195,7 @@ export class ChatSymbolLinks {
 		for (const waiter of request.waiters) {
 			const result = results.find(candidate => candidate.token === waiter.token);
 			if (result === undefined) waiter.settle("unavailable");
-			else waiter.settle(result.status, result.target, result.definitions);
+			else waiter.settle(result.status, result.target, result.definitions, result.files);
 		}
 		if (this.#queue.length > 0) this.#scheduleFlush();
 	}

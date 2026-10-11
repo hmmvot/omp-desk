@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseCodeSymbol, parseSymbolLinksRequest, parseSymbolLinksResolution, parseSymbolLinksRetry } from "./code-symbols.ts";
+import { parseBareFileName, parseCodeSymbol, parseSymbolLinksRequest, parseSymbolLinksResolution, parseSymbolLinksRetry } from "./code-symbols.ts";
 
 const shape = (content: string) => {
 	const symbol = parseCodeSymbol(content);
@@ -100,4 +100,45 @@ test("an ambiguous result carries its number of definitions and nothing else doe
 	for (const bad of [{ token: "Twin", status: "ambiguous" }, { token: "Twin", status: "ambiguous", definitions: 1 }, { token: "Twin", status: "ambiguous", definitions: 2.5 }, { token: "Twin", status: "ambiguous", definitions: "2" }, { token: "Twin", status: "ambiguous", definitions: 2, target: "a.ts" }, { token: "Twin", status: "none", definitions: 2 }]) {
 		assert.equal(parseSymbolLinksResolution({ ...message, results: [bad] }), null, JSON.stringify(bad));
 	}
+});
+
+test("an ambiguous result may say its several are files, and nothing else may", () => {
+	const message = { type: "omp:terminal-link-symbol-resolution", requestId: 1, results: [{ token: "Settings.cs:4", status: "ambiguous", definitions: 3, files: true }] };
+	assert.deepEqual(parseSymbolLinksResolution(message), message);
+	for (const bad of [{ token: "A.cs", status: "ambiguous", definitions: 3, files: false }, { token: "A.cs", status: "found", target: "a.cs", files: true }, { token: "A.cs", status: "none", files: true }, { token: "A.cs", status: "ambiguous", definitions: 3, files: "yes" }]) {
+		assert.equal(parseSymbolLinksResolution({ ...message, results: [bad] }), null, JSON.stringify(bad));
+	}
+});
+
+const bare = (content: string) => parseBareFileName(content);
+
+test("a bare file name has a stem and a one-case letter-led extension, with an optional line and column", () => {
+	assert.deepEqual(bare("session-index.ts"), { name: "session-index.ts" });
+	assert.deepEqual(bare("session-index.ts:849"), { name: "session-index.ts", line: 849 });
+	assert.deepEqual(bare("session-index.ts:849:12"), { name: "session-index.ts", line: 849, column: 12 });
+	assert.deepEqual(bare("session-index.ts:L849"), { name: "session-index.ts", line: 849 });
+	assert.deepEqual(bare("session-index.ts:849-860"), { name: "session-index.ts", line: 849 }, "the start of a range");
+	assert.deepEqual(bare("session-index.ts#L849"), { name: "session-index.ts", line: 849 });
+	assert.deepEqual(bare("session-index.ts(849)"), { name: "session-index.ts", line: 849 });
+	assert.deepEqual(bare("session-index.ts(849,3)"), { name: "session-index.ts", line: 849, column: 3 });
+	assert.deepEqual(bare("  index.ts:7  "), { name: "index.ts", line: 7 }, "padding is trimmed");
+	for (const name of ["foo.d.ts", ".eslintrc.json", "README.MD", "Makefile.am", "my-file_2.v2.tsx", "foo@2x.png", "Проект.cs", "a.b1"]) assert.ok(bare(name), name);
+});
+
+test("paths, symbols, versions, prose and anything that could be a glob or a mention are not bare file names", () => {
+	const refused = [
+		"src/a.cs", "a\\b.cs", "D:\\a.cs", "./a.cs", "~/a.cs", "a.cs:x", "a.cs:0", "a.cs:1:0", "a.cs(0)", "a.cs:12345678", "a.cs:12:3:4", "two words.cs", "a .cs",
+		"Foo.Bar", "SessionData.Cast", "Foo.bar2Baz", "obj.Run()", "1.2.3", "v1.0", "3.14", "e.", "a.", ".cs", "..cs", "a..cs", "foo.", "Makefile", "file.c++", "a.verylongextension",
+		"*.cs", "a?.cs", "[a].cs", "{a,b}.cs", "a(b).cs", "!a.cs", "@scope.cs", "-a.cs", "+a.cs", "~a.cs", "$a.cs", "a.cs\n", "`a.cs`", "a\u0000.cs", "x".repeat(101) + ".cs", "",
+	];
+	for (const content of refused) assert.equal(bare(content), null, JSON.stringify(content));
+	assert.equal(bare(`${" ".repeat(100)}a.cs${" ".repeat(100)}`), null, "the raw length is bounded like the wire's");
+});
+
+test("a name that is both a bare file name and a symbol is both; a mixed-case extension is a symbol only", () => {
+	assert.ok(bare("Twin.run") && parseCodeSymbol("Twin.run"));
+	assert.ok(bare("Settings.json") && parseCodeSymbol("Settings.json"));
+	assert.equal(bare("Twin.Run"), null);
+	assert.ok(parseCodeSymbol("Twin.Run"));
+	assert.equal(parseCodeSymbol("session-index.ts"), null, "two letters: never a symbol");
 });
