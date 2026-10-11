@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-10-11
 ---
 
@@ -113,5 +113,5 @@ An isolated installed-OMP RPC probe (2026-10-11; explicit temporary extension an
 ## Architecture Review
 
 - Reviewer: independent architecture reviewer inspected rounds 1–4 and OMP 18.8.5 source.
-- Outcome: accept with changes: implementation blockers resolved; Main policy approval remains outstanding.
-- Notes: Rounds 1–3 rejected earlier implementations (boundary-plus-reload alone; the /fresh and extension-command acknowledgement shapes; identity commit and Restart separation). Round 4 closes tentative provider-identity leakage into queued catalog snapshots and completes the durable/provider identity separation in Restart; no further architectural blocker was identified in the scoped re-review. Final acceptance requires Main approval of the disclosed loss of in-flight admission fencing across Reload Window and of the fail-closed rotation-before-commit recovery (Stop the exact surviving child, then reopen). The reviewer performed no executable checks.
+- Outcome: accept with changes after four rounds; implementation blockers resolved. Main approved the two disclosed residual policies on 2026-10-11: loss of the in-flight admission fence across Reload Window (as with Rewind), and fail-closed recovery when the window ends after OMP rotates the provider id but before Desk records it (Stop the exact surviving child, then reopen).
+- Notes: Rounds 1–3 rejected earlier implementations (boundary-plus-reload alone; the /fresh and extension-command acknowledgement shapes; identity commit and Restart separation). Round 4 closes tentative provider-identity leakage into queued catalog snapshots and completes the durable/provider identity separation in Restart; no further architectural blocker was identified in the scoped re-review. The reviewer performed no executable checks.
