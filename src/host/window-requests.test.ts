@@ -600,15 +600,18 @@ describe("pending launches for a window that is still starting", () => {
 
 	it("keeps the launch withdrawable until it is admitted: one claimed before the requester gave up is not started after it", async () => {
 		const gate = Promise.withResolvers<void>();
+		const entered = Promise.withResolvers<void>();
 		let wantedAtAdmission: boolean | null = null;
 		const watch = startPendingLaunchWatch(storage, "holder-new", () => [KEY], async (_request, context) => {
+			// The marker appears before the request file is read: only a serve in progress proves the claim reached admission.
+			entered.resolve();
 			await gate.promise;
 			wantedAtAdmission = await context.stillWanted();
 			return wantedAtAdmission ? SELECTED : REFUSED;
 		}, { debounceMs: 20 });
 		watches.push(watch);
 		const id = await postPendingLaunch(storage, { from: "holder-a", key: KEY, workspace: UNITY, launch: NEW });
-		await until(() => fs.existsSync(path.join(directory, `${KEY}.${id}.claimed`)));
+		await entered.promise;
 		assert.equal(pending().length, 1, "claimed but not admitted: the file is still there to be withdrawn");
 		await withdrawPendingLaunch(storage, KEY, id);
 		gate.resolve();
