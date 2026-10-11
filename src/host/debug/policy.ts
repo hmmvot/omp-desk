@@ -11,6 +11,8 @@ export interface ConsentRequest {
 	readonly title: string;
 	/** What exactly will run, one fact per line. */
 	readonly lines: readonly string[];
+	/** The setting an "Always Allow" answer switches to `allow`, so later requests of this kind are not asked. */
+	readonly setting: "start" | "expressions";
 }
 
 export interface DebugPolicy {

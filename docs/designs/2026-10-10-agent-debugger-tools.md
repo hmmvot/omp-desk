@@ -85,6 +85,7 @@ All settings have `application` scope, so a repository's settings cannot change 
 - `omp.agentDebugger.enabled` (default `true`, by the user's decision on 2026-10-11; first designed as `false`): register the debug tools in Chat sessions. Starts and expressions stay behind the consent settings below.
 - `omp.agentDebugger.start`: `ask` (default) or `allow`. The confirmation names the folder, configuration or preset, type and request, and program if any.
 - `omp.agentDebugger.expressions`: `off`, `ask` (default) or `allow`. Covers `evaluate`, breakpoint conditions and log messages, because all of them run code in the debuggee. The confirmation shows the debug session and the exact expression.
+- Each confirmation offers **Allow** (this request only) and **Always Allow**, which also sets the request's setting (`start` or `expressions`) to `allow` in the user's settings, so later requests of that kind are not asked.
 - After a confirmation, and when a queued action runs, the tool re-checks cancellation, the current setting, the executor gate, the control grant and the session's state and generation before acting.
 
 ### 5. Chat

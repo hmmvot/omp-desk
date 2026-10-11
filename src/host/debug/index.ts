@@ -19,7 +19,21 @@ export function vscodePolicy(): DebugPolicy {
 		expressionsMode: () => read<ExpressionMode>("expressions", ["off", "ask", "allow"], "ask"),
 		async confirm(request) {
 			const allow = "Allow";
-			const choice = await vscode.window.showWarningMessage(request.title, { modal: true, detail: request.lines.join("\n") }, allow);
+			const always = "Always Allow";
+			const choice = await vscode.window.showWarningMessage(
+				request.title,
+				{ modal: true, detail: [...request.lines, "", `Always Allow sets omp.agentDebugger.${request.setting} to "allow" in your user settings; later requests of this kind are not asked.`].join("\n") },
+				allow,
+				always,
+			);
+			if (choice === always) {
+				// User settings only: the setting has application scope, and a workspace value would not apply anyway.
+				// This request is allowed either way; a failed write only means the next one asks again.
+				await vscode.workspace.getConfiguration(SECTION).update(request.setting, "allow", vscode.ConfigurationTarget.Global).then(undefined, (error: unknown) => {
+					void vscode.window.showErrorMessage(`OMP Desk could not save omp.agentDebugger.${request.setting}: ${error instanceof Error ? error.message : String(error)}`);
+				});
+				return true;
+			}
 			return choice === allow;
 		},
 	};

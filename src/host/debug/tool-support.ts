@@ -173,7 +173,7 @@ export async function expressionDenial(env: DebugToolEnv, ctx: HostToolContext, 
 	const mode = env.policy.expressionsMode();
 	if (mode === "off") return "Running expressions in the debuggee is switched off (setting omp.agentDebugger.expressions).";
 	if (mode === "allow") return undefined;
-	const confirmed = await env.policy.confirm({ title: "Allow the agent to run code in the debuggee?", lines });
+	const confirmed = await env.policy.confirm({ title: "Allow the agent to run code in the debuggee?", setting: "expressions", lines });
 	admit(env, ctx);
 	if (!confirmed) return "The user declined to run this expression in the debuggee.";
 	if (env.policy.expressionsMode() === "off") return "Running expressions in the debuggee was switched off while the confirmation was open.";

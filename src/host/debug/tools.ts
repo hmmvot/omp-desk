@@ -159,6 +159,7 @@ function startTool(env: DebugToolEnv): HostToolDefinition {
 				if (env.policy.startMode() === "ask") {
 					const confirmed = await env.policy.confirm({
 						title: "Allow the agent to start debugging?",
+						setting: "start",
 						lines: [
 							`Folder: ${folder ? `${folder.name} (${folder.path})` : "none"}`,
 							`Configuration: ${label}`,
