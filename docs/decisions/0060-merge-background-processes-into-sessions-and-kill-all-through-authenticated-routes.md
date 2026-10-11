@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 date: 2026-10-11
 ---
 
@@ -44,6 +44,6 @@ First option.
 
 ## Architecture Review
 
-- Reviewer: independent `architect` agent, two rounds (2026-10-11).
-- Outcome: round 1 accept after fixes (addressed); round 2 not accepted, so this ADR stays `proposed` with the [design](../designs/2026-10-11-sessions-unify-processes.md): a native session held by another window is stopped through its broker's graceful stop rather than the owner's native shutdown lifecycle (needs the product owner's decision); the owner window's convergence after a remote shutdown is unverified; `drivenHere` is slot equality; driven and recorded routes prove the writer gone, not the broker retired.
-- Notes: a desktop notification for a session whose process has ended, activated in the Terminals layout, switches to the user's last session-serving layout (flat by default) and reveals the session's row, so it is not silently dropped. "one stop path" above means one function choosing the existing routes; it does not mean every route has the same lifecycle effects. After round 2 the product owner decided that Kill All must not stop another live window's processes through the broker; the request kind above implements that decision, and the same revision carries exact local broker identity and independent broker-exit evidence. This revision has not been re-reviewed.
+- Reviewer: independent `architect` agent, six rounds (2026-10-11), read-only static review.
+- Outcome: **accepted** after round 6 (see the [design](../designs/2026-10-11-sessions-unify-processes.md#architecture-review) for the rounds). The main correction was the product owner's decision, after round 2, that Kill All asks another live window to stop its own rows through a `stop` request instead of stopping them through the broker; later rounds hardened the request protocol, fallback evidence and registry reads.
+- Notes: "one stop path" above means one function choosing the existing routes; it does not mean every route has the same lifecycle effects. A desktop notification for a session whose process has ended, activated in the Terminals layout, switches to the user's last session-serving layout and reveals the session's row.

@@ -33,7 +33,7 @@ import type { GitApi, BranchObservation } from "./host/session-branch";
 import type { FooterMetadataMessage } from "./webview/footer-metadata";
 import { SessionClickRecognizer } from "./views/session-click";
 import { relativeAge } from "./views/relative-age";
-import { normalizeSessionsGrouping } from "./views/session-order";
+import { normalizeSessionsGrouping, planNotificationReveal } from "./views/session-order";
 import type { SessionsGrouping } from "./views/session-order";
 import { pinnedSessionTabId, selectionRestore } from "./views/session-selection";
 import { acquireClaim, createClaimHolder, createOwnerGeneration } from "./host/session-claim";
@@ -73,9 +73,9 @@ import { claimFileNameFor, startClaimWatch } from "./host/claim-watch";
 import { PUBLISHED_ROW_STATUSES, WindowRegistry } from "./host/window-registry";
 import { sessionIncarnation } from "./host/window-registry";
 import type { PublishedRow, PublishedRowStatus } from "./host/window-registry";
-import { LAUNCH_ANSWER_TIMEOUT_MS, PENDING_ANSWER_TIMEOUT_MS, REQUEST_ANSWER_TIMEOUT_MS, awaitPendingLaunchAnswer, awaitRequestAnswer, pendingKeyOf, planFolderLaunch, planWindowFocus, planWindowSwitch, postLaunchRequest, postPendingLaunch, postSwitchRequest, startPendingLaunchWatch, startRequestWatch, withdrawPendingLaunch, withdrawRequest } from "./host/window-requests";
+import { LAUNCH_ANSWER_TIMEOUT_MS, PENDING_ANSWER_TIMEOUT_MS, REQUEST_ANSWER_TIMEOUT_MS, askWindowToStop, awaitPendingLaunchAnswer, awaitRequestAnswer, pendingKeyOf, planFolderLaunch, planWindowFocus, planWindowSwitch, postLaunchRequest, postPendingLaunch, postSwitchRequest, startPendingLaunchWatch, startRequestWatch, withdrawPendingLaunch, withdrawRequest } from "./host/window-requests";
 import { UnityProjectCache, isUnityProject } from "./host/unity-project";
-import type { LaunchAction, LaunchRequest, LaunchWorkspace, WindowFocusPlan, RefusalReason, RequestAnswer, RequestWatch, ServeContext, ServeOutcome, SwitchRequest } from "./host/window-requests";
+import type { LaunchAction, LaunchRequest, LaunchWorkspace, WindowFocusPlan, RefusalReason, RequestAnswer, RequestWatch, ServeContext, ServeOutcome, StopRequest, SwitchRequest } from "./host/window-requests";
 import { ExternalLeaseObserver, ompSessionOwnersDir, powershellLeaseProbe } from "./host/omp-session-lease";
 import { canonicalFolderKey, folderHistoryDeletionSubject, inspectSessionFile, scanFolderHistory } from "./host/folder-history";
 import type { FolderHistoryCandidate, FolderHistoryIndexedEntry, FolderHistoryScan } from "./host/folder-history";
@@ -910,8 +910,19 @@ async function revealDesktopNotification(index: SessionIndex, extensionId: strin
     const provider = launcherProvider;
     const view = launcherView;
     if (provider !== undefined && view !== undefined) {
-      // The Terminals layout serves no session row: the session's process row is its place there.
-      const item = provider.sessionRowsShown() ? await provider.itemFor(tabId) : provider.processItemFor(tabId);
+      // The Terminals layout serves no session row: the session's process row is its place there. When that
+      // process has ended there is no row at all, so the layout is changed to one that serves session rows
+      // (nothing is launched) and the indexed session is revealed there.
+      const plan = planNotificationReveal({
+        sessionRowsShown: provider.sessionRowsShown(),
+        hasProcessRow: provider.processItemFor(tabId) !== undefined,
+        previousSessionLayout: lastSessionServingLayout,
+      });
+      if (plan.kind === "switch-layout") {
+        await setSessionsGrouping(plan.to);
+        refreshLauncher();
+      }
+      const item = plan.kind === "process-row" ? provider.processItemFor(tabId) : await provider.itemFor(tabId);
       if (item !== undefined && index.get(tabId) !== null) {
         try {
           await view.reveal(item, { select: true, focus: true });
@@ -1231,7 +1242,11 @@ export function activate(context: vscode.ExtensionContext): void {
   );
   const requestWatch = startRequestWatch(index.claimStorageDir, index.claimHolder.id, async (request, requestContext) => {
     windowTiming("receiver: request seen", `${request.kind} ${request.id.slice(0, 8)} posted ${Date.now() - Date.parse(request.createdAt)} ms ago`);
-    const outcome = request.kind === "select" ? await selectHeldSessionTab(index, request, requestContext) : await serveLaunchRequest(context, index, request, requestContext);
+    const outcome = request.kind === "select"
+      ? await selectHeldSessionTab(index, request, requestContext)
+      : request.kind === "stop"
+        ? await serveStopRequest(index, request, requestContext)
+        : await serveLaunchRequest(context, index, request, requestContext);
     windowTiming("receiver: answer ready", `${request.id.slice(0, 8)} ok=${outcome.ok} focused=${outcome.focused}`);
     return outcome;
   }, { onError: detail => log(`window requests: ${detail}`), debounceMs: WINDOW_REQUEST_WATCH_DEBOUNCE_MS });
@@ -2327,6 +2342,38 @@ function windowBecomesFocused(timeoutMs: number): Promise<boolean> {
 }
 
 /**
+ * Serve another window's Kill All request (ADR-0060): stop, through this window's own stop lifecycle, the rows
+ * the request names that this window provably runs, and answer per row.
+ *
+ * The request names rows by exact broker identity only. This window acts for a row only when it is a live
+ * window's request (the asking holder is another open window of this profile), the row still equals the
+ * identity named, and this window's own tier holds it (a runtime of this window under that exact slot, broker and
+ * generation, or a terminal editor of this window): see `stopRowsOnRequest`. It never forces, and a process it
+ * does not run is answered `refused`, so the requester decides what else may happen to it. A request
+ * file is writable by any local process of this user, which could stop a process of this window
+ * with the same ordinary Stop; the owner therefore also says in a notification what it stopped.
+ */
+async function serveStopRequest(index: SessionIndex, request: StopRequest, context: ServeContext): Promise<ServeOutcome> {
+  const answerAll = (state: "refused" | "unconfirmed", reason: string): ServeOutcome => ({
+    ok: true,
+    focused: false,
+    rows: request.rows.map(() => ({ state, reason })),
+  });
+  const processes = sessionProcesses;
+  if (processes === null) return answerAll("unconfirmed", "this window is still starting and has not read its processes; nothing was stopped");
+  try {
+    await windowRegistry?.refresh();
+  } catch (error) {
+    log(`stop request: the other windows could not be read: ${messageOf(error)}`);
+  }
+  const requester = windowRegistry?.windows().find(window => window.holderId === request.from && !window.here);
+  if (requester === undefined || request.from === index.claimHolder.id) return answerAll("refused", "the asking window is not another open window of this profile");
+  if (!(await context.stillWanted())) return answerAll("unconfirmed", "this window is closing; nothing was stopped");
+  log(`stop request ${request.id.slice(0, 8)} from window ${request.from.slice(0, 8)}: ${request.rows.length} row(s)`);
+  return { ok: true, focused: false, rows: await processes.serveStopRequest(request.rows, done => context.progress(done)) };
+}
+
+/**
  * Tabs whose editor a window request has made visible and whose serializer revival has not
  * happened yet. The revival consumes the mark ({@link openRestoredTabIfUncovered}) and, for a
  * session with no live host, then opens nothing; an explicit Open of the tab clears it.
@@ -2526,7 +2573,7 @@ async function stopSessionHost(
    * prompt is skipped; the stop must still bind to exactly the attempt, slot and broker the view
    * read just before (`recorded`), and anything else is refused, never stopped.
    */
-  preconfirmed?: { readonly recorded: RecordedStopCapture },
+  preconfirmed?: { readonly recorded: RecordedStopCapture; readonly gracefulOnly?: boolean },
 ): Promise<boolean> {
   const target = sessionTargetFromArgument(index, argument);
   if (target === null) {
@@ -2565,6 +2612,7 @@ async function stopSessionHost(
       : {
         conflicting: passiveReasonForSlot(liveState.slotId) !== null,
         captured: await index.lifecycle.run(tabId, async () => await readTransitionFacts(liveState, runtime)),
+        gracefulOnly: preconfirmed.gracefulOnly === true,
       };
     return await confirmAndStopRuntime(context, index, tabId, liveState, runtime, "Stop", captured);
   }
@@ -2672,12 +2720,15 @@ function setupSessionProcesses(context: vscode.ExtensionContext, index: SessionI
         running: facts.running,
         // The same fact the Sessions row shows as "Open in another window".
         heldElsewhere: launcherProvider?.displayedState(entry.tabId) === "otherWindow",
-        drivenSlot: stateOf(entry.tabId)?.runtime?.identity.slot ?? null,
       };
     }),
     brokerSlots: () => brokerSlots,
     shellSlots: () => shellSlots,
     shellOpenHere: slot => shellEditors.has(slot),
+    // Every runtime this window holds, by exact broker identity: a runtime with no session row (an editor-only one) is still this window's.
+    localRuntimes: () => [...tabs.values()].flatMap(state => state.runtime === null
+      ? []
+      : [{ slot: state.runtime.identity.slot, brokerId: state.runtime.identity.brokerId, generation: state.runtime.identity.brokerGeneration, tabId: state.tabId }]),
     indexLoadError: () => index.loadError,
     catalogLoaded: () => catalogLoaded,
     refreshCatalog: () => adoptCatalogChanges(index, folders),
@@ -2692,6 +2743,21 @@ function setupSessionProcesses(context: vscode.ExtensionContext, index: SessionI
     },
     visible: () => launcherView?.visible === true,
     layout: sessionsGrouping,
+    async peers() {
+      // An unreadable registry is not "no other window": a failure rejects, and Kill All then leaves the rows another window may run alone.
+      const registry = windowRegistry;
+      if (!registry) throw new Error("this window has no window registry");
+      // The answer of the read this call awaited itself: another read (the watcher's, the heartbeat's) can neither add its records nor erase this one's failure.
+      const snapshot = await registry.readOtherWindows();
+      if (snapshot.unreadable > 0) throw new Error(`${snapshot.unreadable} window ${snapshot.unreadable === 1 ? "record" : "records"} could not be read`);
+      return snapshot.windows.map(({ window, hostPid }) => ({
+        holderId: window.holderId,
+        label: window.label.length > 0 ? window.label : "another window",
+        // The extension host that would serve a request to the window: its end is the only thing that lets a request that may still be served be given up on.
+        hostPid,
+      }));
+    },
+    askWindowToStop: (holderId, rows) => askWindowToStop(index.claimStorageDir, { to: holderId, from: index.claimHolder.id, rows }),
     async runBrokerStop(target, operation) {
       if (target.kind !== "folder-shell") return await operation();
       return await index.lifecycle.run(target.slot, async () => {
@@ -2705,21 +2771,20 @@ function setupSessionProcesses(context: vscode.ExtensionContext, index: SessionI
         return result;
       });
     },
-    async captureDrivenStop(row) {
-      const tabId = row.host?.kind === "session" ? row.host.tabId : null;
-      if (tabId === null) return null;
-      const state = stateOf(tabId);
+    async captureDrivenStop(row, options) {
+      // The runtime of this window under exactly this slot, broker and generation: the row's slot alone is not it.
+      const state = [...tabs.values()].find(candidate =>
+        candidate.runtime !== null && candidate.runtime.identity.slot === row.slot &&
+        candidate.runtime.identity.brokerId === row.brokerId && candidate.runtime.identity.brokerGeneration === row.generation);
       const runtime = state?.runtime ?? null;
-      if (
-        state === undefined || runtime === null || state.tabId !== tabId ||
-        runtime.identity.slot !== row.slot || runtime.identity.brokerId !== row.brokerId ||
-        runtime.identity.brokerGeneration !== row.generation
-      ) return null;
+      const tabId = state?.tabId ?? null;
+      const hostTabId = row.host?.kind === "session" ? row.host.tabId : null;
+      if (state === undefined || runtime === null || tabId === null || (hostTabId !== null && hostTabId !== tabId)) return null;
       const conflicting = passiveReasonForSlot(state.slotId) !== null;
       const captured = await index.lifecycle.run(tabId, async () => await readTransitionFacts(state, runtime));
-      return { run: () => confirmAndStopRuntime(context, index, tabId, state, runtime, "Stop", { conflicting, captured }) };
+      return { run: () => confirmAndStopRuntime(context, index, tabId, state, runtime, "Stop", { conflicting, captured, gracefulOnly: !options.offerForce }) };
     },
-    async captureRecordedStop(row) {
+    async captureRecordedStop(row, options) {
       const tabId = row.host?.kind === "session" ? row.host.tabId : null;
       const entry = tabId === null ? null : index.get(tabId);
       if (tabId === null || entry === null || entry.host === null) return null;
@@ -2738,7 +2803,7 @@ function setupSessionProcesses(context: vscode.ExtensionContext, index: SessionI
         attemptStartedAt: entry.host.startedAt,
         pid: entry.host.pid,
       };
-      return { run: () => stopSessionHost(context, index, { tabId }, { recorded }) };
+      return { run: () => stopSessionHost(context, index, { tabId }, { recorded, gracefulOnly: !options.offerForce }) };
     },
     log,
   });
@@ -10316,11 +10381,15 @@ function toolsTarget(index: SessionIndex): SessionToolsTarget | null {
   const session = state.mode === "chat" ? chat.sessionOf(tabId) : null;
   const channel = activeControl(index, tabId);
   const binding = channel?.client.latestHost;
+  const entry = index.get(tabId);
   return {
     key: session ?? runtime ?? state,
     generation: JSON.stringify([state.slotId, tabId, state.mode, session?.epoch, session?.sessionFile, session?.sessionId,
       binding?.instanceId, binding?.epoch, binding?.sessionFile]),
     mode: state.mode,
+    title: entry === null ? "OMP session" : launcherProvider?.headlineFor(tabId) ?? sessionHeadline(entry, null),
+    cwd: runtime?.cwd ?? entry?.cwd ?? null,
+    profile: entry?.scope.profile ?? null,
     running: passiveReasonForSlot(state.slotId) === null && !state.transitioning &&
       (state.mode === "chat" ? session?.phase === "live" : launcherFacts(tabId).running),
     commands: session?.model.commands ?? [],
@@ -10371,15 +10440,11 @@ function describeControlError(error: unknown): string {
   if (error instanceof HostControlUnavailableError) return "native host connection unavailable";
   if (error instanceof HostControlConfigurationError) return "host-control configuration invalid";
   return "unexpected host-control failure";
-  const entry = index.get(tabId);
 }
 
 /** Close and forget one tab's verified control channel; the failure text is cleared with it. */
 function disposeControlChannel(state: TabState): void {
   state.control?.client.close();
-    title: entry === null ? "OMP session" : launcherProvider?.headlineFor(tabId) ?? sessionHeadline(entry, null),
-    cwd: runtime?.cwd ?? entry?.cwd ?? null,
-    profile: entry?.scope.profile ?? null,
   state.control = null;
   state.controlFailure = null;
 }
@@ -10946,9 +11011,14 @@ function restorePinnedSelection(index: SessionIndex, selection: readonly Launche
   pinnedSelectionTimer.unref?.();
 }
 
+/** The layout the user last used that serves session rows (flat until one is seen): where a reveal goes when Terminals has no row for the session. */
+let lastSessionServingLayout: SessionsGrouping | null = null;
+
 /** How Sessions arranges its rows: the setting, flat by default. */
 function sessionsGrouping(): SessionsGrouping {
-  return normalizeSessionsGrouping(vscode.workspace.getConfiguration("omp").get("sessionsGrouping"));
+  const grouping = normalizeSessionsGrouping(vscode.workspace.getConfiguration("omp").get("sessionsGrouping"));
+  if (grouping !== "terminals") lastSessionServingLayout = grouping;
+  return grouping;
 }
 
 const SESSIONS_LAYOUT_WORDS: Record<SessionsGrouping, string> = {
@@ -13820,7 +13890,7 @@ async function confirmAndStopRuntime(
    * gate. Its own prompt is skipped, the same checks bind to this capture, and a runtime that
    * is no longer the captured one is refused visibly.
    */
-  preconfirmed?: { readonly conflicting: boolean; readonly captured: SessionTransitionFacts | null; readonly idleOnly?: boolean },
+  preconfirmed?: { readonly conflicting: boolean; readonly captured: SessionTransitionFacts | null; readonly idleOnly?: boolean; readonly gracefulOnly?: boolean },
 ): Promise<boolean> {
   const entry = index.get(tabId);
   if (entry === null || state.runtime !== runtime || state.tabId !== tabId) {
@@ -13887,7 +13957,8 @@ async function confirmAndStopRuntime(
       });
     let stopped = await attempt("graceful");
     if (stopped === null) { showWarning("The captured process/editor changed; nothing was stopped."); return false; }
-    if (!stopped.writerGone) {
+    // A stop another window asked for is graceful only: it never opens a Force Stop or any other modal here.
+    if (!stopped.writerGone && preconfirmed?.gracefulOnly !== true) {
       const force = await vscode.window.showWarningMessage(
         `This session could not be confirmed stopped. ${stopped.detail}`,
         { modal: true, detail: "Force Stop may lose unsaved replies and work in progress. Commands started by OMP may continue running separately. Nothing is restarted automatically; check Sessions before resuming." },
