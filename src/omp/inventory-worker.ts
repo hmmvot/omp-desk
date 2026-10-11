@@ -290,7 +290,11 @@ async function collect(request: WorkerRequest, n: Natives): Promise<Collected> {
 
 function validName(name: unknown): name is string { return typeof name === "string" && name.length > 0 && name.length <= 256 && !/[\u0000-\u001f]/.test(name) }
 
-async function toggle(request: WorkerRequest, n: Natives): Promise<{ changed: boolean }> {
+/** One thing a switch changed: the file (`null` where OMP's own plugin store owns the location) and a short credential-free description. */
+interface ToggleWrite { file: string | null; what: string }
+const listWrite = (file: string, id: string, present: boolean): ToggleWrite => ({ file, what: `disabledExtensions ${present ? "+" : "-"} ${id}` });
+
+async function toggle(request: WorkerRequest, n: Natives): Promise<{ changed: boolean; writes: ToggleWrite[] }> {
   const { kind, name, enabled } = request;
   if (!validName(name) || typeof enabled !== "boolean") throw new SettingsRefusal("The switch request is invalid.");
   const collected = await collect(request, n);
@@ -320,25 +324,28 @@ async function toggle(request: WorkerRequest, n: Natives): Promise<{ changed: bo
     if (kind === "extension-module" && Object.hasOwn(PROTECTED_EXTENSION_NAMES, name)) throw new SettingsRefusal("OMP Desk depends on this extension and cannot disable it.");
     if (row === undefined || row.toggle.mechanism !== "disabledExtensions") throw new SettingsRefusal(row?.toggle.refusal ? `This item cannot be switched: ${row.toggle.refusal}.` : "OMP no longer lists this item. Refresh and try again.");
     const id = `${kind === "custom-tool" ? "tool" : kind}:${name}`;
-    return { changed: await listEdit(id, !enabled) };
+    const changed = await listEdit(id, !enabled);
+    return { changed, writes: changed ? [listWrite(globalFile, id, !enabled)] : [] };
   }
   if (kind === "builtin-tool") {
     const switchId = BUILTIN_SWITCHES[name];
     const setting = switchId === undefined ? undefined : n.registry.lookup(switchId);
     if (row === undefined || row.toggle.mechanism !== "setting" || setting === undefined || setting.type !== "boolean") throw new SettingsRefusal(row?.toggle.refusal ? `This tool cannot be switched: ${row.toggle.refusal}.` : "OMP has no on/off switch for this tool.");
     const target = setting.id.split(".");
-    return { changed: await write({ path: target, value: enabled }, edit => edit.length === target.length && edit.every((key, i) => key === target[i]),
-      () => { try { setting.assertWritable(enabled); } catch { throw new SettingsRefusal("OMP rejected this setting. Nothing was changed."); } }) };
+    const changed = await write({ path: target, value: enabled }, edit => edit.length === target.length && edit.every((key, i) => key === target[i]),
+      () => { try { setting.assertWritable(enabled); } catch { throw new SettingsRefusal("OMP rejected this setting. Nothing was changed."); } });
+    return { changed, writes: changed ? [{ file: globalFile, what: `${setting.id} = ${enabled}` }] : [] };
   }
   if (kind === "mcp") {
     if (row === undefined || row.toggle.mechanism !== "mcp") throw new SettingsRefusal(row?.toggle.refusal ? `This server cannot be switched: ${row.toggle.refusal}.` : "OMP no longer lists this server. Refresh and try again.");
     // Idempotence follows the saved user policy (denylist/allowlist), not the cwd-effective state shown in the row.
     const { mcpDenied, mcpForced } = collected;
     const alreadySaved = enabled ? !mcpDenied.has(name) && mcpForced.has(name) === mcpEntryDisabled.has(name) && !collected.globalDisabled.includes(`mcp:${name}`) : mcpDenied.has(name) && !mcpForced.has(name);
-    if (alreadySaved) return { changed: false };
+    if (alreadySaved) return { changed: false, writes: [] };
     // Global policy by name through the user denylist/allowlist OMP applies before precedence (mcp/config.ts);
     // per-entry flags and every non-user file stay untouched.
     const userPath = n.dirs.getMCPConfigPath("user", request.cwd);
+    const writes: ToggleWrite[] = [];
     let step = 0;
     try {
       if (enabled) {
@@ -348,18 +355,19 @@ async function toggle(request: WorkerRequest, n: Natives): Promise<{ changed: bo
         await n.writer.setServerForceEnabled(userPath, name, false); step = 1;
         await n.writer.setServerDisabled(userPath, name, true); step = 2;
       }
-      if (enabled) await listEdit(`mcp:${name}`, false);
+      if (enabled && await listEdit(`mcp:${name}`, false)) writes.push(listWrite(globalFile, `mcp:${name}`, false));
     } catch {
       throw new SettingsRefusal(step === 0 ? "OMP could not update its user MCP configuration." : "The MCP switch was only partly written. Refresh to see the current state.");
     }
-    return { changed: true };
+    writes.unshift({ file: userPath, what: `MCP server ${name} ${enabled ? "enabled" : "disabled"} by name in the user MCP configuration` });
+    return { changed: true, writes };
   }
   if (kind === "plugin") {
     if (row === undefined || row.toggle.mechanism !== "plugin") throw new SettingsRefusal(row?.toggle.refusal ? `This plugin cannot be switched: ${row.toggle.refusal}.` : "OMP no longer lists this plugin. Refresh and try again.");
-    if ((row.state === "disabled") === !enabled) return { changed: false };
+    if ((row.state === "disabled") === !enabled) return { changed: false, writes: [] };
     try { await new n.plugins.PluginManager(request.cwd).setEnabled(name, enabled); }
     catch { throw new SettingsRefusal("OMP could not change this plugin. Refresh to see the current state; `omp plugin enable` and `omp plugin disable` are the fallback."); }
-    return { changed: true };
+    return { changed: true, writes: [{ file: null, what: `plugin ${name} ${enabled ? "enabled" : "disabled"} through OMP's plugin manager` }] };
   }
   throw new SettingsRefusal("The switch request is invalid.");
 }

@@ -17,13 +17,13 @@ function target(overrides: Partial<SessionToolsTarget> = {}): SessionToolsTarget
 function harness(initial: SessionToolsTarget | null) {
 	const state = { target: initial, reads: [] as InventoryReadRequest[], toggles: [] as ToggleRequest[], published: [] as Array<[ViewKind, ViewModel]>, scopes: [] as Array<[ViewKind, InventoryScope]>,
 		toggleGate: null as Promise<void> | null,
-		notices: [] as Array<[string, string]>, logs: [] as string[], delays: [] as number[], gate: null as Promise<void> | null, toggleResult: { ok: true, changed: true } as ToggleResult, readResult: null as ((request: InventoryReadRequest) => InventoryResult) | null };
+		notices: [] as Array<[string, string]>, undos: [] as Array<() => void>, logs: [] as string[], delays: [] as number[], gate: null as Promise<void> | null, toggleResult: { ok: true, changed: true, writes: [] } as ToggleResult, readResult: null as ((request: InventoryReadRequest) => InventoryResult) | null };
 	const runtime: InventoryRuntime = {
 		async read(request) { state.reads.push(request); if (state.gate) await state.gate; return state.readResult?.(request) ?? snapshot(request.cwd, request.profile); },
 		async toggle(request) { state.toggles.push(request); if (state.toggleGate) await state.toggleGate; return state.toggleResult; },
 	};
 	const deps: InventoryControllerDeps = { target: () => state.target, runtime, neutralCwd: "C:/", publish: (view, model) => { state.published.push([view, model]); },
-		scopeChanged: (view, scope) => { state.scopes.push([view, scope]); }, notify: (message, level) => { state.notices.push([level, message]); }, log: message => { state.logs.push(message); }, delay: async ms => { state.delays.push(ms); } };
+		scopeChanged: (view, scope) => { state.scopes.push([view, scope]); }, notify: (message, level, undo) => { state.notices.push([level, message]); if (undo !== undefined) state.undos.push(undo); }, log: message => { state.logs.push(message); }, delay: async ms => { state.delays.push(ms); } };
 	const controller = new InventoryController(deps);
 	const settle = async () => { for (let turn = 0; turn < 20; turn++) await new Promise(resolve => setImmediate(resolve)); };
 	const last = (view: ViewKind) => state.published.filter(([kind]) => kind === view).at(-1)![1];
@@ -133,24 +133,51 @@ describe("inventory controller switches", () => {
 		assert.match(h.state.notices[0]![1], /may apply it live/);
 		assert.deepEqual(h.state.delays, [1500], "a running session gets time for OMP's config watcher before the refresh");
 	});
-	it("logs each switch request and its outcome, and nothing for a refresh", async () => {
+	it("logs each switch request with its view, item, transition and list, and its outcome with what was written, and nothing for a refresh", async () => {
 		const h = harness(target());
 		h.controller.setVisible("skills", true);
 		await h.settle();
 		assert.deepEqual(h.state.logs, []);
+		h.state.toggleResult = { ok: true, changed: true, writes: [{ file: "C:/u/config.yml", what: "disabledExtensions + skill:review" }] };
 		await h.controller.toggle("skills", h.shown("skills"), false);
-		h.state.toggleResult = { ok: true, changed: false };
+		h.state.toggleResult = { ok: true, changed: false, writes: [] };
 		await h.controller.toggle("skills", h.shown("skills"), true);
 		h.state.toggleResult = { ok: false, message: "OMP no longer lists this item." };
 		await h.controller.toggle("skills", h.shown("skills"), false);
 		assert.deepEqual(h.state.logs, [
-			"inventory: switch skill:review off requested in the session list (profile default)",
-			"inventory: switch skill:review off written",
-			"inventory: switch skill:review on requested in the session list (profile default)",
-			"inventory: switch skill:review on already as requested; nothing written",
-			"inventory: switch skill:review off requested in the session list (profile default)",
-			"inventory: switch skill:review off refused: OMP no longer lists this item.",
+			"inventory: switch requested in the skills view: skill:review enabled→disabled (global configuration of profile default; list shown: session, folder D:/proj)",
+			"inventory: switch skill:review enabled→disabled: written: disabledExtensions + skill:review (C:/u/config.yml)",
+			"inventory: switch requested in the skills view: skill:review disabled→enabled (global configuration of profile default; list shown: session, folder D:/proj)",
+			"inventory: switch skill:review disabled→enabled: already as requested; nothing written",
+			"inventory: switch requested in the skills view: skill:review enabled→disabled (global configuration of profile default; list shown: session, folder D:/proj)",
+			"inventory: switch skill:review enabled→disabled: refused: OMP no longer lists this item.",
 		]);
+	});
+	it("logs a failed read with its list, profile and folder", async () => {
+		const h = harness(target());
+		h.state.readResult = () => ({ unavailable: "No Bun." });
+		h.controller.setVisible("skills", true);
+		await h.settle();
+		assert.deepEqual(h.state.logs, ["inventory: read failed (session list, profile default, folder D:/proj): No Bun."]);
+	});
+	it("offers Undo only on a successful disable, and Undo enables the same row again", async () => {
+		const h = harness(target());
+		h.controller.setVisible("skills", true);
+		await h.settle();
+		const row = h.shown("skills");
+		await h.controller.toggle("skills", row, false);
+		assert.equal(h.state.undos.length, 1);
+		assert.match(h.state.notices[0]![1], /Disabled skill review/);
+		h.state.undos[0]!();
+		await h.settle();
+		assert.deepEqual(h.state.toggles.map(toggle => toggle.enabled), [false, true]);
+		assert.equal(h.state.undos.length, 1, "enabling offers no Undo");
+		h.state.toggleResult = { ok: true, changed: false, writes: [] };
+		await h.controller.toggle("skills", row, false);
+		assert.equal(h.state.undos.length, 1, "nothing written, nothing to undo");
+		h.state.toggleResult = { ok: false, message: "No." };
+		await h.controller.toggle("skills", row, false);
+		assert.equal(h.state.undos.length, 1, "a refusal offers no Undo");
 	});
 	it("does not wait for the watcher when the session is not running or the kind applies next session", async () => {
 		const h = harness(target({ running: false }));
@@ -181,7 +208,7 @@ describe("inventory controller switches", () => {
 		const h = harness(target());
 		h.controller.setVisible("skills", true);
 		await h.settle();
-		h.state.toggleResult = { ok: true, changed: false };
+		h.state.toggleResult = { ok: true, changed: false, writes: [] };
 		await h.controller.toggle("skills", h.shown("skills"), false);
 		assert.match(h.state.notices[0]![1], /already disabled/);
 		assert.deepEqual(h.state.delays, []);

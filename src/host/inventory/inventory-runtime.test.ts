@@ -47,11 +47,14 @@ describe("inventory runtime", () => {
 		const garbage = await runtimeWith(async () => ({ rows: 1 })).read({ cwd: "C:/", profile: "default", scope: "global" });
 		assert.match("unavailable" in garbage ? garbage.unavailable : "", /unrecognised/);
 	});
-	it("reports a switch result only for a boolean `changed` and shows refusals verbatim, other failures generically", async () => {
+	it("reports a switch result only for a boolean `changed` with well-formed write receipts and shows refusals verbatim, other failures generically", async () => {
 		const request = { cwd: "C:/", profile: "default", scope: "global" as const, kind: "skill" as const, name: "a", enabled: false };
-		assert.deepEqual(await runtimeWith(async input => { assert.deepEqual(input.request, { action: "toggle", scope: "global", kind: "skill", name: "a", enabled: false }); return { changed: true }; }).toggle(request), { ok: true, changed: true });
-		const odd = await runtimeWith(async () => ({ changed: "yes" })).toggle(request);
-		assert.equal(odd.ok, false);
+		const writes = [{ file: "C:/u/.omp/agent/config.yml", what: "disabledExtensions + skill:a" }, { file: null, what: "plugin p disabled" }];
+		assert.deepEqual(await runtimeWith(async input => { assert.deepEqual(input.request, { action: "toggle", scope: "global", kind: "skill", name: "a", enabled: false }); return { changed: true, writes }; }).toggle(request), { ok: true, changed: true, writes });
+		assert.deepEqual(await runtimeWith(async () => ({ changed: false, writes: [] })).toggle(request), { ok: true, changed: false, writes: [] });
+		for (const odd of [{ changed: "yes", writes: [] }, { changed: true }, { changed: true, writes: [{ file: 3, what: "x" }] }, { changed: true, writes: [{ file: "f" }] }, { changed: false, writes: [{ file: "f", what: "x" }] }, { changed: true, writes: new Array(9).fill({ file: null, what: "x" }) }]) {
+			assert.equal((await runtimeWith(async () => odd).toggle(request)).ok, false, JSON.stringify(odd).slice(0, 60));
+		}
 		assert.deepEqual(await runtimeWith(async () => { throw new SettingsRefusal("OMP no longer lists this item."); }).toggle(request), { ok: false, message: "OMP no longer lists this item." });
 		const crashed = await runtimeWith(async () => { throw new Error("EPERM C:/Users/x/.omp/agent/config.yml"); }).toggle(request);
 		assert.equal(crashed.ok, false);

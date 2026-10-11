@@ -32,6 +32,7 @@ const VIEWS: readonly ViewSpec[] = [
 	{ kind: "mcp", id: "omp.mcp", refresh: "omp.refreshMcp", noun: "MCP servers" },
 	{ kind: "extensions", id: "omp.extensions", refresh: "omp.refreshExtensions", noun: "extensions" },
 ];
+const UNDO = "Undo";
 const UNAVAILABLE_BUN = "OMP's inventory needs Bun and the installed OMP's importable sources; a compiled-only OMP install cannot supply it.";
 
 export function registerInventoryViews(context: vscode.ExtensionContext, deps: InventoryViewsDeps): InventoryHandle {
@@ -66,7 +67,10 @@ export function registerInventoryViews(context: vscode.ExtensionContext, deps: I
 			if (tree !== undefined) { tree.description = model.description; tree.message = model.notice ?? undefined; }
 		},
 		scopeChanged(view, scope: InventoryScope) { void vscode.commands.executeCommand("setContext", `omp.${view}.scope`, scope); },
-		notify(message, level) { void (level === "warning" ? vscode.window.showWarningMessage(message) : vscode.window.showInformationMessage(message)); },
+		notify(message, level, undo) {
+			if (undo !== undefined) { void vscode.window.showInformationMessage(message, UNDO).then(choice => { if (choice === UNDO) undo(); }); return; }
+			void (level === "warning" ? vscode.window.showWarningMessage(message) : vscode.window.showInformationMessage(message));
+		},
 		log: message => deps.log(message),
 		delay: ms => sleep(ms),
 	});

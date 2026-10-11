@@ -15,7 +15,9 @@ export interface InventoryRuntimeDeps {
 }
 export interface InventoryReadRequest { readonly cwd: string; readonly profile: string; readonly scope: InventoryScope }
 export interface ToggleRequest { readonly cwd: string; readonly profile: string; readonly scope: InventoryScope; readonly kind: RowKind; readonly name: string; readonly enabled: boolean }
-export type ToggleResult = { readonly ok: true; readonly changed: boolean } | { readonly ok: false; readonly message: string };
+/** What a switch changed, as the worker reported it: the file (`null` where OMP's plugin store owns the location) and a short description. */
+export interface ToggleWrite { readonly file: string | null; readonly what: string }
+export type ToggleResult = { readonly ok: true; readonly changed: boolean; readonly writes: readonly ToggleWrite[] } | { readonly ok: false; readonly message: string };
 export interface InventoryRuntime {
 	read(request: InventoryReadRequest): Promise<InventoryResult>;
 	toggle(request: ToggleRequest): Promise<ToggleResult>;
@@ -75,6 +77,20 @@ export function parseSnapshot(value: unknown): InventorySnapshot | null {
 	return { rows, cwd: value.cwd, profile: value.profile, projectOverridesDisabledExtensions: value.projectOverridesDisabledExtensions, incomplete: value.incomplete, disabledProviders: value.disabledProviders };
 }
 
+const MAX_WRITES = 8;
+function parseWrites(value: unknown): ToggleWrite[] | null {
+	if (!Array.isArray(value) || value.length > MAX_WRITES) return null;
+	const writes: ToggleWrite[] = [];
+	for (const entry of value) {
+		if (!record(entry)) return null;
+		const file = text(entry.file);
+		const what = text(entry.what, true);
+		if (file === undefined || what === undefined || what === null) return null;
+		writes.push({ file, what });
+	}
+	return writes;
+}
+
 const UNAVAILABLE_READ = "OMP's inventory could not be read with the installed OMP.";
 
 export function createInventoryRuntime(deps: InventoryRuntimeDeps): InventoryRuntime {
@@ -96,7 +112,9 @@ export function createInventoryRuntime(deps: InventoryRuntimeDeps): InventoryRun
 				const receipt = await deps.run({ environment, cwd: request.cwd, profile: request.profile,
 					request: { action: "toggle", scope: request.scope, kind: request.kind, name: request.name, enabled: request.enabled } });
 				if (!record(receipt) || typeof receipt.changed !== "boolean") return { ok: false, message: "OMP returned an unrecognised result; refresh to see the current state." };
-				return { ok: true, changed: receipt.changed };
+				const writes = parseWrites(receipt.writes);
+				if (writes === null || (!receipt.changed && writes.length > 0)) return { ok: false, message: "OMP returned an unrecognised result; refresh to see the current state." };
+				return { ok: true, changed: receipt.changed, writes };
 			} catch (error) {
 				return { ok: false, message: error instanceof SettingsRefusal ? error.message : "The switch could not be written. Refresh to see the current state." };
 			}

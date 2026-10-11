@@ -1,5 +1,5 @@
 import { readSessionEvidence } from "../session-tools.ts";
-import { emptyView, projectView, toggleMessage, VIEW_KINDS, appliesTo } from "./inventory-model.ts";
+import { emptyView, isUnavailable, projectView, toggleMessage, VIEW_KINDS, appliesTo } from "./inventory-model.ts";
 import type { InventoryResult, InventoryRow, InventoryScope, ViewKind, ViewModel } from "./inventory-model.ts";
 import type { InventoryRuntime } from "./inventory-runtime.ts";
 import type { SessionToolsTarget } from "../session-tools.ts";
@@ -12,7 +12,8 @@ export interface InventoryControllerDeps {
 	publish(view: ViewKind, model: ViewModel): void;
 	/** Mirrors a view's effective scope to its title-bar button. */
 	scopeChanged(view: ViewKind, scope: InventoryScope): void;
-	notify(message: string, level: "info" | "warning"): void;
+	/** `undo`, when given, is offered as an Undo button on the notice. */
+	notify(message: string, level: "info" | "warning", undo?: () => void): void;
 	/** One line per switch request and its outcome: the only trace of who changed OMP's `config.yml` from a view. */
 	log(message: string): void;
 	/** After a live switch, OMP's config watcher needs a moment before a running session shows it. */
@@ -107,6 +108,10 @@ export class InventoryController {
 				Promise.all([...keys.values()].map(async plan => [plan.key, await this.#deps.runtime.read({ cwd: plan.cwd, profile: plan.profile, scope: plan.scope })] as const)),
 				needsEvidence ? readSessionEvidence(target) : Promise.resolve(null),
 			]);
+			for (const [key, inventory] of entries) {
+				const plan = keys.get(key)!;
+				if (isUnavailable(inventory)) this.#deps.log(`inventory: read failed (${plan.scope} list, profile ${plan.profile}, folder ${plan.cwd}): ${inventory.unavailable}`);
+			}
 			const current = this.#deps.target();
 			const fenced = !this.#disposed && version === this.#version &&
 				(target === null || (current?.key === target.key && current.generation === target.generation));
@@ -128,24 +133,26 @@ export class InventoryController {
 	/** Serialized: two switches never interleave their writes. The folder, profile and scope are those of the list the row was published in, captured now. */
 	toggle(view: ViewKind, row: InventoryRow, enabled: boolean): Promise<void> {
 		const context = this.#contexts.get(row);
-		const run = this.#switching.then(() => this.#toggle(context, row, enabled));
+		const run = this.#switching.then(() => this.#toggle(view, context, row, enabled));
 		this.#switching = run.catch(() => {});
 		return run;
 	}
 
-	async #toggle(context: PublishedContext | undefined, row: InventoryRow, enabled: boolean): Promise<void> {
+	async #toggle(view: ViewKind, context: PublishedContext | undefined, row: InventoryRow, enabled: boolean): Promise<void> {
 		if (this.#disposed) return;
 		if (context === undefined) { this.#deps.notify("Refresh the view before switching.", "warning"); return; }
 		const { plan, running } = context;
-		this.#deps.log(`inventory: switch ${row.kind}:${row.name} ${enabled ? "on" : "off"} requested in the ${plan.scope} list (profile ${plan.profile})`);
+		const subject = `${row.kind}:${row.name} ${enabled ? "disabled→enabled" : "enabled→disabled"}`;
+		this.#deps.log(`inventory: switch requested in the ${view} view: ${subject} (global configuration of profile ${plan.profile}; list shown: ${plan.scope}, folder ${plan.cwd})`);
 		const result = await this.#deps.runtime.toggle({ cwd: plan.cwd, profile: plan.profile, scope: plan.scope, kind: row.kind, name: row.name, enabled });
-		this.#deps.log(`inventory: switch ${row.kind}:${row.name} ${enabled ? "on" : "off"} ${result.ok ? (result.changed ? "written" : "already as requested; nothing written") : `refused: ${result.message}`}`);
+		this.#deps.log(`inventory: switch ${subject}: ${result.ok ? (result.changed ? `written: ${result.writes.map(write => `${write.what} (${write.file ?? "OMP's own store"})`).join("; ")}` : "already as requested; nothing written") : `refused: ${result.message}`}`);
 		if (!result.ok) {
 			this.#deps.notify(result.message, "warning");
 			this.refresh();
 			return;
 		}
-		this.#deps.notify(toggleMessage(row, enabled, result.changed, running), "info");
+		// Disabling is the switch an accidental keystroke or click hurts: the notice offers to put it back.
+		this.#deps.notify(toggleMessage(row, enabled, result.changed, running), "info", result.changed && !enabled ? () => { void this.toggle(view, row, true); } : undefined);
 		this.refresh();
 		if (result.changed && running && appliesTo(row) === "live") {
 			await this.#deps.delay(LIVE_SETTLE_MS);

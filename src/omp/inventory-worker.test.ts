@@ -34,6 +34,17 @@ test("installed OMP inventory: rows, origins, redaction, global switches and ref
     assert.ok(snapshot, "the receipt parses as an inventory");
     return snapshot;
   };
+  /** A switch receipt reduced to what the worker owes the caller: whether it wrote, and each write's file name and description. */
+  const outcome = (receipt: unknown): { changed: boolean; writes: Array<[string | null, string]> } => {
+    assert.ok(typeof receipt === "object" && receipt !== null && "changed" in receipt && "writes" in receipt && Array.isArray(receipt.writes), "a switch receipt has `changed` and `writes`");
+    const writes: Array<[string | null, string]> = [];
+    for (const entry of receipt.writes) {
+      assert.ok(typeof entry === "object" && entry !== null && "file" in entry && "what" in entry && typeof entry.what === "string" && (entry.file === null || typeof entry.file === "string"));
+      writes.push([entry.file === null ? null : path.basename(entry.file), entry.what]);
+    }
+    return { changed: receipt.changed === true, writes };
+  };
+  const listed = (what: string) => ({ changed: true, writes: [["config.yml", what]] });
   const row = (snapshot: InventorySnapshot, kind: string, name: string): InventoryRow => {
     const found = snapshot.rows.find(candidate => candidate.kind === kind && candidate.name === name);
     assert.ok(found, `${kind} ${name} is listed`);
@@ -83,9 +94,9 @@ test("installed OMP inventory: rows, origins, redaction, global switches and ref
 
     // A custom-directory skill (configured with `~`) is listed, can be disabled, stays listed while disabled, and can be enabled again.
     assert.equal(row(global, "skill", "custom-one").state, "active");
-    assert.deepEqual(await run({ action: "toggle", scope: "global", kind: "skill", name: "custom-one", enabled: false }), { changed: true });
+    assert.deepEqual(outcome(await run({ action: "toggle", scope: "global", kind: "skill", name: "custom-one", enabled: false })), listed("disabledExtensions + skill:custom-one"));
     assert.equal(row(await read("global"), "skill", "custom-one").state, "disabled");
-    assert.deepEqual(await run({ action: "toggle", scope: "global", kind: "skill", name: "custom-one", enabled: true }), { changed: true });
+    assert.deepEqual(outcome(await run({ action: "toggle", scope: "global", kind: "skill", name: "custom-one", enabled: true })), listed("disabledExtensions - skill:custom-one"));
     assert.equal(row(await read("global"), "skill", "custom-one").state, "active");
 
     // A malformed existing VS Code MCP config is an omission, not an empty list.
@@ -95,10 +106,10 @@ test("installed OMP inventory: rows, origins, redaction, global switches and ref
 
     // A custom-directory skill that collides with a disabled native skill has no effective runtime name.
     await write(path.join(nativeRoot, "custom-skills", "dup", "SKILL.md"), "---\nname: demo-skill\ndescription: Colliding custom copy\n---\nbody\n");
-    assert.deepEqual(await run({ action: "toggle", scope: "global", kind: "skill", name: "demo-skill", enabled: false }), { changed: true });
+    assert.deepEqual(outcome(await run({ action: "toggle", scope: "global", kind: "skill", name: "demo-skill", enabled: false })), listed("disabledExtensions + skill:demo-skill"));
     const collided = (await read("global")).rows.filter(candidate => candidate.kind === "skill" && candidate.path?.includes("custom-skills"));
     assert.equal(collided.some(candidate => candidate.name === "demo-skill" && candidate.runtimeName !== null), false, "disabled by raw name: not an effective skill");
-    assert.deepEqual(await run({ action: "toggle", scope: "global", kind: "skill", name: "demo-skill", enabled: true }), { changed: true });
+    assert.deepEqual(outcome(await run({ action: "toggle", scope: "global", kind: "skill", name: "demo-skill", enabled: true })), listed("disabledExtensions - skill:demo-skill"));
 
     // Session scope sees the project's own skill and read-only project state.
     const session = await read("session", projectDir);
@@ -106,10 +117,10 @@ test("installed OMP inventory: rows, origins, redaction, global switches and ref
     assert.equal(row(session, "plugin", "demo-plugin").toggle.mechanism, null, "plugins switch only from Global");
 
     // Global switches write the isolated user configuration and nothing else.
-    assert.deepEqual(await run({ action: "toggle", scope: "global", kind: "skill", name: "demo-skill", enabled: false }), { changed: true });
-    assert.deepEqual(await run({ action: "toggle", scope: "global", kind: "skill", name: "demo-skill", enabled: false }), { changed: false });
-    assert.deepEqual(await run({ action: "toggle", scope: "global", kind: "extension-module", name: "demo-ext", enabled: false }), { changed: true });
-    assert.deepEqual(await run({ action: "toggle", scope: "global", kind: "builtin-tool", name: "ast_grep", enabled: true }), { changed: true });
+    assert.deepEqual(outcome(await run({ action: "toggle", scope: "global", kind: "skill", name: "demo-skill", enabled: false })), listed("disabledExtensions + skill:demo-skill"));
+    assert.deepEqual(outcome(await run({ action: "toggle", scope: "global", kind: "skill", name: "demo-skill", enabled: false })), { changed: false, writes: [] });
+    assert.deepEqual(outcome(await run({ action: "toggle", scope: "global", kind: "extension-module", name: "demo-ext", enabled: false })), listed("disabledExtensions + extension-module:demo-ext"));
+    assert.deepEqual(outcome(await run({ action: "toggle", scope: "global", kind: "builtin-tool", name: "ast_grep", enabled: true })), listed(`${BUILTIN_SWITCHES.ast_grep} = true`));
     const config = await fs.readFile(path.join(agentDir, "config.yml"), "utf8");
     assert.match(config, /skill:demo-skill/);
     assert.match(config, /extension-module:demo-ext/);
@@ -117,28 +128,28 @@ test("installed OMP inventory: rows, origins, redaction, global switches and ref
     const after = await read("global");
     assert.equal(row(after, "skill", "demo-skill").state, "disabled");
     assert.equal(row(after, "builtin-tool", "ast_grep").state, "active");
-    assert.deepEqual(await run({ action: "toggle", scope: "global", kind: "skill", name: "demo-skill", enabled: true }), { changed: true });
+    assert.deepEqual(outcome(await run({ action: "toggle", scope: "global", kind: "skill", name: "demo-skill", enabled: true })), listed("disabledExtensions - skill:demo-skill"));
     assert.doesNotMatch(await fs.readFile(path.join(agentDir, "config.yml"), "utf8"), /skill:demo-skill/);
 
     // MCP: user-level denylist by name, per-entry flags and the server definitions untouched; re-enable clears it.
     const mcpBefore = JSON.parse(await fs.readFile(path.join(agentDir, "mcp.json"), "utf8")) as { mcpServers: Record<string, unknown> };
-    assert.deepEqual(await run({ action: "toggle", scope: "global", kind: "mcp", name: "demo-mcp", enabled: false }), { changed: true });
+    assert.deepEqual(outcome(await run({ action: "toggle", scope: "global", kind: "mcp", name: "demo-mcp", enabled: false })), { changed: true, writes: [["mcp.json", "MCP server demo-mcp disabled by name in the user MCP configuration"]] });
     const mcpDisabled = JSON.parse(await fs.readFile(path.join(agentDir, "mcp.json"), "utf8")) as { mcpServers: Record<string, unknown>; disabledServers?: string[] };
     assert.deepEqual(mcpDisabled.disabledServers, ["demo-mcp"]);
     assert.deepEqual(mcpDisabled.mcpServers, mcpBefore.mcpServers);
     assert.equal(row(await read("global"), "mcp", "demo-mcp").state, "disabled");
-    assert.deepEqual(await run({ action: "toggle", scope: "global", kind: "mcp", name: "demo-mcp", enabled: true }), { changed: true });
+    assert.deepEqual(outcome(await run({ action: "toggle", scope: "global", kind: "mcp", name: "demo-mcp", enabled: true })), { changed: true, writes: [["mcp.json", "MCP server demo-mcp enabled by name in the user MCP configuration"]] });
     assert.equal(row(await read("global"), "mcp", "demo-mcp").state, "active");
 
     // A project-defined server is disabled by name from the user file; the project file is untouched.
     await write(path.join(projectDir, ".omp", "mcp.json"), JSON.stringify({ mcpServers: { "project-mcp": { type: "stdio", command: "node" } } }));
     const projectMcpBefore = await fs.readFile(path.join(projectDir, ".omp", "mcp.json"), "utf8");
-    assert.deepEqual(await run({ action: "toggle", scope: "session", kind: "mcp", name: "project-mcp", enabled: false }, projectDir), { changed: true });
+    assert.deepEqual(outcome(await run({ action: "toggle", scope: "session", kind: "mcp", name: "project-mcp", enabled: false }, projectDir)), { changed: true, writes: [["mcp.json", "MCP server project-mcp disabled by name in the user MCP configuration"]] });
     assert.equal(await fs.readFile(path.join(projectDir, ".omp", "mcp.json"), "utf8"), projectMcpBefore);
     assert.equal(row(await read("session", projectDir), "mcp", "project-mcp").state, "disabled");
 
     // Plugin: OMP's own lock file in the isolated root.
-    assert.deepEqual(await run({ action: "toggle", scope: "global", kind: "plugin", name: "demo-plugin", enabled: false }), { changed: true });
+    assert.deepEqual(outcome(await run({ action: "toggle", scope: "global", kind: "plugin", name: "demo-plugin", enabled: false })), { changed: true, writes: [[null, "plugin demo-plugin disabled through OMP's plugin manager"]] });
     assert.equal(JSON.parse(await fs.readFile(path.join(nativeRoot, "plugins", "omp-plugins.lock.json"), "utf8")).plugins["demo-plugin"].enabled, false);
     await assert.rejects(run({ action: "toggle", scope: "session", kind: "plugin", name: "demo-plugin", enabled: true }, projectDir), /Global|switched/);
 
