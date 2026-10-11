@@ -57,6 +57,8 @@ export interface SessionView {
 	readonly handedOff: boolean;
 	readonly state: SessionState;
 	readonly generation: number;
+	/** The last transport error the adapter connection reported (for example `read error` or `write EPIPE`); it often explains why a session died. */
+	readonly adapterError?: string;
 }
 
 interface Transition {
@@ -81,6 +83,7 @@ interface SessionRecord {
 	handedOff: boolean;
 	state: SessionState;
 	generation: number;
+	adapterError?: string;
 	transition?: Transition;
 	capabilities: Record<string, unknown>;
 	/** Adapter breakpoint reports from tracker `breakpoint` events, by `path:line`. */
@@ -410,6 +413,8 @@ export class DebugCoordinator implements BreakpointOwnership {
 	}
 
 	#onTrackerError(record: SessionRecord, error: Error): void {
+		// Kept even when the session already ended: the error usually arrives just before or after the end.
+		record.adapterError = error.message;
 		if (record.state.kind === "terminated") return;
 		this.#log(`debug session ${record.id}: adapter error: ${error.message}`);
 		this.#clearTransition(record);
@@ -615,6 +620,13 @@ export class DebugCoordinator implements BreakpointOwnership {
 		return found;
 	}
 
+	/** The last adapter error of the session or, failing that, of its descendants. */
+	adapterErrorOf(id: string): string | undefined {
+		const own = this.#records.get(id)?.adapterError;
+		if (own !== undefined) return own;
+		return this.#descendantRecords(id).find(child => child.adapterError !== undefined)?.adapterError;
+	}
+
 	/** The child sessions of a session, for tools that explain where a launcher's program actually runs. */
 	children(id: string): readonly SessionView[] {
 		return this.#descendantRecords(id).map(viewOf);
@@ -792,5 +804,6 @@ function viewOf(record: SessionRecord): SessionView {
 		handedOff: record.handedOff,
 		state: record.state,
 		generation: record.generation,
+		...(record.adapterError !== undefined ? { adapterError: record.adapterError } : {}),
 	};
 }

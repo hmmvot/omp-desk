@@ -32,7 +32,10 @@ describe("Unity attach preset", () => {
 		const description = String(h.tool("vscode_debug_start").description);
 		assert.match(description, /verified only after Unity loads its assembly/);
 		assert.match(description, /Debug code optimization/);
-		assert.match(description, /not batchmode/);
+		assert.match(description, /-debugCodeOptimization/);
+		assert.doesNotMatch(description, /not batchmode|must be a normal/);
+		assert.match(description, /must not block on the paused thread/);
+		assert.match(description, /vscode_debug_wait/);
 		const result = await h.call("vscode_debug_start", { preset: UNITY_ATTACH_PRESET_ID, endPoint: "127.0.0.1:56000" });
 		assert.equal(result.isError, undefined, text(result));
 		assert.equal(h.api.started[0]!.configuration.type, "vstuc");

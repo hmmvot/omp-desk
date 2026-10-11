@@ -23,7 +23,7 @@ function originText(view: SessionView, conversationId: string): string {
 
 function sessionLine(view: SessionView, conversationId: string): string {
 	const parent = view.parentId !== undefined ? `; parent ${view.parentId}` : "";
-	return `${view.id}  ${view.type} "${view.name}"${parent}; ${originText(view, conversationId)}; ${view.tracked ? describeState(view.state) : "state not available"}; generation ${view.generation}`;
+	return `${view.id}  ${view.type} "${view.name}"${parent}; ${originText(view, conversationId)}; ${view.tracked ? describeState(view.state) : "state not available"}${view.adapterError !== undefined ? ` (last adapter error: ${view.adapterError})` : ""}; generation ${view.generation}`;
 }
 
 function folderFor(env: DebugToolEnv, text: string | undefined): WorkspaceFolderInfo | { error: string } {
@@ -234,7 +234,10 @@ function waitTool(env: DebugToolEnv): HostToolDefinition {
 					},
 				});
 				const elapsedMs = Date.now() - startedAt;
-				if (outcome.kind === "terminated") return textResult(`Debug session ${sessionId} ended (generation ${outcome.generation}).`, { outcome: "terminated", generation: outcome.generation, elapsedMs });
+				if (outcome.kind === "terminated") {
+					const adapterError = env.coordinator.adapterErrorOf(sessionId);
+					return textResult(`Debug session ${sessionId} ended (generation ${outcome.generation}).${adapterError !== undefined ? ` The last adapter error was: ${adapterError}.` : ""}`, { outcome: "terminated", generation: outcome.generation, elapsedMs, ...(adapterError !== undefined ? { adapterError } : {}) });
+				}
 				if (outcome.kind === "timeout") return textResult(`No stop within ${timeoutSeconds} s; the session is ${describeState(outcome.state)} (generation ${outcome.generation}). Wait again with afterGeneration=${outcome.generation}, or pause it with vscode_debug_control.`, { outcome: "timeout", generation: outcome.generation, elapsedMs });
 				const top = await topFrame(env, outcome.sessionId, ctx, outcome.state.threadId);
 				const where = outcome.sessionId === sessionId ? `Session ${sessionId}` : `Child session ${outcome.sessionId} of ${sessionId}`;
@@ -344,7 +347,7 @@ async function execute(env: DebugToolEnv, ctx: HostToolContext, view: SessionVie
 	const after = env.coordinator.session(sessionId);
 	const state = after ? describeState(after.state) : "gone";
 	const note = outcome === "timeout" ? ` The command did not complete within ${Math.round(timeoutMs / 1000)} s; its effect is unknown until the next event.` : "";
-	return textResult(`${action} dispatched on thread ${threadId} of session ${sessionId}. State: ${state}.${note}\nNext: vscode_debug_wait with afterGeneration=${transition.generation}.`, { action, outcome, generation: transition.generation, threadId });
+	return textResult(`${action} dispatched on thread ${threadId} of session ${sessionId}. State: ${state}.${note}\nNext: vscode_debug_wait with afterGeneration=${transition.generation}. The generation counts every state change, so the next stop arrives with a higher generation than ${transition.generation}, not necessarily ${transition.generation + 1}.`, { action, outcome, generation: transition.generation, threadId });
 }
 
 function handoffTool(env: DebugToolEnv): HostToolDefinition {

@@ -184,6 +184,27 @@ describe("vscode_debug_start", () => {
 		h.dispose();
 	});
 
+	it("asks before starting a preset when the start setting is ask, and starts nothing when declined", async () => {
+		const h = createHarness({
+			presets: [{ id: "unity-attach", label: "Attach to Unity Editor", description: "Preset unity-attach attaches to the Editor.", available: () => true, build: () => ({ configuration: { name: "Attach to Unity Editor", type: "vstuc", request: "attach" } }) }],
+		});
+		h.policy.start = "ask";
+		h.policy.answer = async () => false;
+		const declined = await h.call("vscode_debug_start", { preset: "unity-attach" });
+		assert.equal(declined.isError, true);
+		assert.equal(h.policy.confirmations.length, 1);
+		assert.equal(h.policy.confirmations[0]!.setting, "start");
+		assert.match(h.policy.confirmations[0]!.lines.join("\n"), /preset "Attach to Unity Editor"/);
+		assert.match(h.policy.confirmations[0]!.lines.join("\n"), /vstuc/);
+		assert.equal(h.api.started.length, 0);
+		h.policy.answer = async () => true;
+		const allowed = await h.call("vscode_debug_start", { preset: "unity-attach" });
+		assert.equal(allowed.isError, undefined, text(allowed));
+		assert.equal(h.policy.confirmations.length, 2);
+		assert.equal(h.api.started.length, 1);
+		h.dispose();
+	});
+
 	it("serializes launches through one coordinator", async () => {
 		const h = createHarness();
 		const order: string[] = [];
@@ -782,6 +803,94 @@ describe("vscode_debug_handoff", () => {
 		const result = await h.call("vscode_debug_handoff", { sessionId: "user-session", message: "hi" });
 		assert.equal(result.isError, true);
 		assert.equal(h.api.notifications.length, 0);
+		h.dispose();
+	});
+});
+
+describe("vscode_debug_inspect stack paging", () => {
+	/** An adapter that ignores startFrame and levels, as vstuc does: it always returns the whole stack. */
+	function wholeStackAdapter(h: Harness, total: number): void {
+		h.api.onRequest("stackTrace", () => ({ stackFrames: Array.from({ length: total }, (_, index) => ({ id: 100 + index, name: `frame${index}`, source: { path: "C:\\work\\app\\main.js" }, line: index + 1 })), totalFrames: total }));
+	}
+
+	it("bounds the frames by levels even when the adapter returns the whole stack", async () => {
+		const h = createHarness();
+		const id = await startGranted(h);
+		h.api.stop(id);
+		wholeStackAdapter(h, 44);
+		const one = await h.call("vscode_debug_inspect", { sessionId: id, what: "stack", levels: 1 });
+		assert.match(text(one), /frames 0-0 of 44/);
+		assert.equal((one.details as { frames: unknown[] }).frames.length, 1);
+		assert.match(text(one), /startFrame=1/);
+		const five = await h.call("vscode_debug_inspect", { sessionId: id, what: "stack", levels: 5 });
+		assert.match(text(five), /frames 0-4 of 44/);
+		assert.equal((five.details as { frames: unknown[] }).frames.length, 5);
+		h.dispose();
+	});
+
+	it("defaults to 20 frames and pages with startFrame against an adapter that ignores both", async () => {
+		const h = createHarness();
+		const id = await startGranted(h);
+		h.api.stop(id);
+		wholeStackAdapter(h, 44);
+		const first = await h.call("vscode_debug_inspect", { sessionId: id, what: "stack" });
+		assert.match(text(first), /frames 0-19 of 44/);
+		assert.match(text(first), /24 more frame\(s\); call again with startFrame=20/);
+		const second = await h.call("vscode_debug_inspect", { sessionId: id, what: "stack", startFrame: 20 });
+		assert.match(text(second), /frames 20-39 of 44/);
+		assert.match(text(second), /#20 frame20 /);
+		const last = await h.call("vscode_debug_inspect", { sessionId: id, what: "stack", startFrame: 40 });
+		assert.match(text(last), /frames 40-43 of 44/);
+		assert.doesNotMatch(text(last), /more frame/);
+		h.dispose();
+	});
+
+	it("keeps an adapter's own paging: frames it returns for startFrame are not sliced again", async () => {
+		const h = createHarness();
+		const id = await startGranted(h);
+		h.api.stop(id);
+		h.api.onRequest("stackTrace", args => {
+			const start = (args as { startFrame: number }).startFrame;
+			return { stackFrames: [0, 1].map(offset => ({ id: 100 + start + offset, name: `f${start + offset}`, source: { path: "C:\\a.js" }, line: 1 })), totalFrames: 44 };
+		});
+		const page = await h.call("vscode_debug_inspect", { sessionId: id, what: "stack", startFrame: 10, levels: 2 });
+		assert.match(text(page), /frames 10-11 of 44/);
+		assert.match(text(page), /#10 f10 /);
+		h.dispose();
+	});
+});
+
+describe("adapter failures and generations", () => {
+	it("names the last adapter error when a wait ends and in the session list", async () => {
+		const h = createHarness();
+		const id = await startGranted(h);
+		h.api.trackers.get(id)!.error!(new Error("read error"));
+		h.api.trackers.get(id)!.error!(new Error("write EPIPE"));
+		const configs = await h.call("vscode_debug_configs", {});
+		assert.match(text(configs), /last adapter error: write EPIPE/);
+		h.api.endSession(id);
+		const wait = await h.call("vscode_debug_wait", { sessionId: id, timeoutSeconds: 1 });
+		assert.equal((wait.details as { outcome: string }).outcome, "terminated");
+		assert.match(text(wait), /ended \(generation \d+\)\. The last adapter error was: write EPIPE\./);
+		assert.equal((wait.details as { adapterError: string }).adapterError, "write EPIPE");
+		h.dispose();
+	});
+
+	it("a session that ended without an adapter error says nothing about one", async () => {
+		const h = createHarness();
+		const id = await startGranted(h);
+		h.api.endSession(id);
+		const wait = await h.call("vscode_debug_wait", { sessionId: id, timeoutSeconds: 1 });
+		assert.doesNotMatch(text(wait), /adapter error/);
+		h.dispose();
+	});
+
+	it("the control result says the next stop has a higher generation, not necessarily the next number", async () => {
+		const h = createHarness();
+		const id = await startGranted(h);
+		h.api.stop(id);
+		const control = await h.call("vscode_debug_control", { sessionId: id, action: "next" });
+		assert.match(text(control), new RegExp(`afterGeneration=${generationOf(control)}\\. .*higher generation than ${generationOf(control)}`));
 		h.dispose();
 	});
 });

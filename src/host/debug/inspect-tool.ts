@@ -85,14 +85,18 @@ async function stackView(reader: SessionReader, state: SessionState, args: Args,
 	const startFrame = args.integer("startFrame", 0, 100_000) ?? 0;
 	const levels = args.integer("levels", 1, 50) ?? 20;
 	const body = await budget.request(reader, "stackTrace", { threadId, startFrame, levels });
-	const frames = array(isRecord(body) ? body.stackFrames : undefined);
+	const returned = array(isRecord(body) ? body.stackFrames : undefined);
 	const total = isRecord(body) && typeof body.totalFrames === "number" ? body.totalFrames : undefined;
+	// DAP lets an adapter ignore startFrame and levels (vstuc returns the whole stack), so the bounds are applied here too.
+	const ignoredStart = startFrame > 0 && total !== undefined && returned.length >= total;
+	const frames = (ignoredStart ? returned.slice(startFrame) : returned).slice(0, levels);
 	const lines = frames.map((frame, index) => {
 		const id = typeof frame.id === "number" ? frame.id : undefined;
 		return `#${startFrame + index} ${String(frame.name ?? "?")} at ${sourceText(frame)}${id !== undefined ? ` [frame ${frameRef(reader.generation, id)}]` : ""}`;
 	});
-	const more = total !== undefined && startFrame + frames.length < total ? `\n... ${total - startFrame - frames.length} more frame(s); pass startFrame to continue` : "";
-	return textResult(`Thread ${threadId}, generation ${reader.generation}, frames ${startFrame}-${startFrame + Math.max(0, frames.length - 1)}${total !== undefined ? ` of ${total}` : ""}:\n${lines.join("\n")}${more}`, {
+	const next = startFrame + frames.length;
+	const more = total !== undefined ? (next < total ? `\n... ${total - next} more frame(s); call again with startFrame=${next} (and levels) to see them` : "") : frames.length === levels ? `\n... the adapter did not report the stack depth; there may be more frames: call again with startFrame=${next}` : "";
+	return textResult(`Thread ${threadId}, generation ${reader.generation}, frames ${frames.length === 0 ? "none" : `${startFrame}-${startFrame + frames.length - 1}`}${total !== undefined ? ` of ${total}` : ""}:\n${lines.join("\n")}${more}`, {
 		what: "stack",
 		generation: reader.generation,
 		threadId,
@@ -157,7 +161,7 @@ export function inspectTool(env: DebugToolEnv): HostToolDefinition {
 				what: { type: "string", enum: [...WHAT] },
 				threadId: { type: "integer", description: "Thread id (stack)." },
 				startFrame: { type: "integer", minimum: 0, description: "First frame (stack)." },
-				levels: { type: "integer", minimum: 1, maximum: 50, description: "Frame count (stack), default 20." },
+				levels: { type: "integer", minimum: 1, maximum: 50, description: "Frame count (stack), default 20, at most 50; page with startFrame." },
 				frameRef: { type: "string", description: "Frame reference from stack (scopes, evaluate)." },
 				ref: { type: "string", description: "Variables reference from scopes or variables." },
 				depth: { type: "integer", minimum: 1, maximum: 3, description: "Nesting depth (variables), default 1." },
