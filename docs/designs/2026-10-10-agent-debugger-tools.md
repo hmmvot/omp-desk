@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: in-progress
 date: 2026-10-10
 ---
 
@@ -130,4 +130,5 @@ Acceptance: in the isolated test VS Code window with `vstuc`, the agent of a Cha
 
 - Reviewer: architect
 - Outcome: round 1 (2026-10-10): accept after fixes, nine material and three minor findings. Round 2: accept after fixes, seven material (live input ownership, never evicting undelivered results, terminal cancel, untracked pre-activation sessions, control grant, generation checks on async replies, numeric hit count) and three minor findings. Round 3: accept after fixes, two material (response-aware transitions and a control route that keeps VS Code's state coherent; local cancellation still owes a result) and two minor findings. Round 4: **accept**, with two minor clarifications (pause acknowledgement, the `unknown` state) applied.
-- Notes: architectural acceptance only. The installed two-session control-route proof and the Node and Unity acceptance runs are implementation gates and have not been exercised. Implementation is paused by the user's decision (2026-10-10).
+- Notes: architectural acceptance. Implementation resumed on the user's decision (2026-10-11). The installed two-session control-route proof and the Node and Unity acceptance runs remain implementation gates of commits 3–5.
+- Implementation notes, §1 host tool channel (commit 2): exercised against installed OMP 18.8.5 and a real broker with a test-only echo tool and a wait-until-abort tool, driven by the real `RpcSession`: `set_host_tools` registration after identity verification, a model-issued call answered with `host_tool_update` and `host_tool_result`, an OMP-side cancel (turn abort) that aborts the tool's signal and writes no result, and a window reload while a call was pending, where the new window held the gate, answered the pending call with the earlier-attachment error and executed nothing. One extension to the design: a call seen live while the session was read-only (not the gate holder) is not executed; once the same session holds the gate it is answered with the same earlier-attachment error, so OMP is never left waiting on a call nobody will answer. Registration happens only when the session holds input (a read-only window registers nothing). Results are capped at 512 KiB; an `RpcSession` runs at most 8 calls at once; a local cancellation gives `execute` 5 s to settle before the outbox writes its error result. The tool context's `conversationId` is the session's bound file path.

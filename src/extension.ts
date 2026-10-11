@@ -136,6 +136,7 @@ import type { LauncherFolder } from "./views/launcher-folders";
 import type { FolderPathInspector, FolderPathVerdict, WorkspaceFolder } from "./views/workspace-folders";
 // The chat over rpc-ui (ADR-0038): a host-owned conversation per tab, served to any page.
 import { ChatRuntime } from "./host/chat-runtime";
+import { activateAgentDebugger } from "./host/debug/index";
 import type { ChatCommandOutcome, ChatPage, ChatRuntimeEvent } from "./host/chat-runtime";
 import { attachRpcHost, launchRpcHost, retireStoppedRpcBroker, stopRpcHost } from "./host/rpc-launch";
 import type { RpcAttachOutcome, RpcHostRuntime } from "./host/rpc-launch";
@@ -1105,8 +1106,12 @@ export function activate(context: vscode.ExtensionContext): void {
     folders: () => folders.list().map(folder => folder.path),
   });
   context.subscriptions.push(settingsEditors);
+  // Desk's host tools (ADR-0055): the debugger tools are registered for every Chat session while omp.agentDebugger.enabled is on.
+  const agentDebugger = activateAgentDebugger(context, { log });
   chat = new ChatRuntime({
     hostNonce: createToken(),
+    hostTools: agentDebugger,
+    log,
     onEvent: (tabId, event) => handleChatEvent(context, index, tabId, event),
     readDisplayPreferences: readChatDisplayPreferences,
     writeToolCallDetail: writeChatToolDetail,
