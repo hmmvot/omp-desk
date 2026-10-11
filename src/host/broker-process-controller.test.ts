@@ -128,6 +128,8 @@ function harness(options: HarnessOptions) {
 	const stops: Array<{ target: BrokerStopTarget; mode: BrokerStopMode }> = [];
 	const forgotten: string[] = [];
 	const capturedFor: { driven: BrokerProcessRow[]; recorded: BrokerProcessRow[] } = { driven: [], recorded: [] };
+	/** The options every capture was asked with, in order: `offerForce: false` is a stop another window asked for. */
+	const captureOptions: Array<{ readonly offerForce: boolean }> = [];
 	const asked: Array<{ holderId: string; rows: readonly RowIdentity[] }> = [];
 	const brokerProbes: BrokerStopTarget[] = [];
 	let freshReads = 0;
@@ -179,14 +181,16 @@ function harness(options: HarnessOptions) {
 			events.push("warn");
 			warns.push(message);
 		},
-		captureDrivenStop: async target => {
+		captureDrivenStop: async (target, captureOptionsArg) => {
 			events.push("captureDriven");
 			capturedFor.driven.push(target);
+			captureOptions.push(captureOptionsArg);
 			return options.driven ?? null;
 		},
-		captureRecordedStop: async target => {
+		captureRecordedStop: async (target, captureOptionsArg) => {
 			events.push("captureRecorded");
 			capturedFor.recorded.push(target);
+			captureOptions.push(captureOptionsArg);
 			return options.recorded ?? null;
 		},
 		stopThroughBroker: async (target, mode) => {
@@ -224,7 +228,7 @@ function harness(options: HarnessOptions) {
 			events.push("refresh");
 		},
 	};
-	return { ports, events, readOptions, confirms, choices, infos, warns, stops, forgotten, capturedFor, asked, brokerProbes };
+	return { ports, events, readOptions, confirms, choices, infos, warns, stops, forgotten, capturedFor, captureOptions, asked, brokerProbes };
 }
 
 /** A captured row stop that logs when it runs, through the harness's own event log. */
@@ -728,9 +732,10 @@ describe("Kill All", () => {
 		});
 		await killAll(h.ports);
 		assert.deepEqual(h.capturedFor.driven.map(target => target.id), [drivenRow.id]);
-		assert.deepEqual(h.capturedFor.recorded.map(target => target.id), [recorded.id]);
-		assert.deepEqual(h.stops.map(call => call.target.slot), [shell.slot]);
-		assert.equal(h.events.filter(event => event === "run").length, 2);
+		// A row another window holds that no window answered for takes the explicit fallback: the authenticated broker, never a recorded reattach.
+		assert.deepEqual(h.capturedFor.recorded, []);
+		assert.deepEqual(h.stops.map(call => call.target.slot).sort(), [recorded.slot, shell.slot].sort());
+		assert.equal(h.events.filter(event => event === "run").length, 1);
 		assert.deepEqual(h.forgotten, [shell.slot], "the broker route retires the shell record, the row flows retire their own");
 	});
 
@@ -961,7 +966,7 @@ describe("settleRemoteRow", () => {
 		assert.deepEqual(settleRemoteRow(held, [entry(west, { state: "changed", reason: "x" }), entry(east, { state: "refused", reason: "x" })]), { kind: "settled", result: { kind: "changed" } });
 		const withheld = settleRemoteRow(held, [entry(west, { state: "silent", reason: "x" }, true), entry(east, { state: "refused", reason: "x" })]);
 		assert.equal(withheld.kind, "settled");
-		assert.match(withheld.kind === "settled" && withheld.result.kind === "failed" ? withheld.result.message : "", /window "west" took the request up and has not reported back/);
+		assert.match(withheld.kind === "settled" && withheld.result.kind === "failed" ? withheld.result.message : "", /window "west" may still act on the request/);
 	});
 
 	it("falls back to the broker only when no window answers for the row, saying why when a window should have", () => {
@@ -1084,7 +1089,7 @@ describe("Kill All: asking the other windows", () => {
 		});
 		await killAll(working.ports);
 		assert.deepEqual(working.stops, [], "a live window that took the request up is left to finish it");
-		assert.match(working.warns[0] ?? "", /window "west" took the request up and has not reported back/);
+		assert.match(working.warns[0] ?? "", /window "west" may still act on the request \(it took the request up and did not report back\)/);
 
 		const gone = harness({
 			reads: [[a], [a], []],
@@ -1157,6 +1162,88 @@ describe("Kill All: asking the other windows", () => {
 		const request = describeKillAll(planKillAll([mine(), held()]));
 		assert.match(request.detail, /Other windows are asked to stop their own; whatever no window answers for is stopped directly\./);
 	});
+
+	it("leaves a row alone that no window was asked about when another window attached to it during the remote waits", async () => {
+		const remote = unobserved();
+		const loose = detached();
+		const attached = { ...loose, window: "other-window" as const, host: terminalHost({ window: "other-window" }) };
+		const h = harness({
+			reads: [[remote, loose], [remote, loose], []],
+			// The non-fresh revalidations: the session's, then the terminal's, which a peer attached while the peers were asked.
+			during: [[remote, loose], [remote, attached]],
+			peers: [west],
+		});
+		await killAll(h.ports);
+		assert.deepEqual(h.asked.map(call => call.rows), [[rowIdentityOf(remote)]], "the terminal was never asked about");
+		assert.deepEqual(slotsOf(h.stops), [remote.slot], "the terminal now belongs to a window nobody asked, so the broker does not stop it");
+		assert.match(h.warns[0] ?? "", /1 process changed after the confirmation and was left alone\./);
+	});
+
+	it("still stops a row nobody was asked about when it has become this window's own", async () => {
+		const loose = detached();
+		const mineNow = { ...loose, window: "this-window" as const, host: terminalHost({ window: "this-window" }) };
+		const h = harness({ reads: [[loose], [loose], []], during: [[mineNow]], peers: [west] });
+		await killAll(h.ports);
+		assert.deepEqual(slotsOf(h.stops), [loose.slot]);
+	});
+
+	it("falls back to the authenticated broker, never a recorded reattach, for a native session no window answered for", async () => {
+		// The cached row shows this window and a recorded host (no claim has enriched it): an ordinary Stop would reattach it, which a live older owner's claim refuses.
+		const native = row({ ptyKind: "managed-omp", window: "this-window", host: sessionHost({ window: "this-window", tabId: "tab-native", title: "Native one", recorded: true }) });
+		for (const answers of ["refused", "not-accepted"] as const) {
+			const h = harness({ reads: [[native], [native], []], peers: [west], recorded: captured([]), ask: (_holder, rows) => rows.map(() => answer(answers)) });
+			await killAll(h.ports);
+			assert.deepEqual(h.capturedFor, { driven: [], recorded: [] }, `no reattach after ${answers}`);
+			assert.deepEqual(h.stops.map(call => ({ slot: call.target.slot, brokerId: call.target.brokerId, generation: call.target.generation, mode: call.mode })), [
+				{ slot: native.slot, brokerId: native.brokerId, generation: native.generation, mode: "graceful" },
+			]);
+		}
+		// The same row stopped by its own Stop keeps the recorded route: the fallback is the explicit exception.
+		const single = harness({ reads: [[native]], recorded: captured([]) });
+		await stopProcess(native.id, single.ports);
+		assert.equal(single.capturedFor.recorded.length, 1);
+	});
+
+	it("keeps the local lifecycle for a fallback row that has become one this window drives", async () => {
+		const native = row({ ptyKind: "managed-omp", window: "none", host: sessionHost({ tabId: "tab-native", recorded: false }) });
+		const nowDriven = { ...native, drivenHere: true, window: "this-window" as const, host: sessionHost({ drivenHere: true, window: "this-window", tabId: "tab-native" }) };
+		const events: string[] = [];
+		const h = harness({ reads: [[native], [native], []], during: [[nowDriven]], peers: [west], driven: captured(events), events });
+		await killAll(h.ports);
+		assert.deepEqual(h.stops, []);
+		assert.deepEqual(h.capturedFor.driven.map(target => target.id), [native.id]);
+		assert.deepEqual(h.captureOptions, [{ offerForce: true }]);
+	});
+
+	it("does not take a window's 'stopped' for proof: the row's broker must be independently gone, even when its record is no longer listed", async () => {
+		const a = held({ host: sessionHost({ window: "other-window", tabId: "tab-a", title: "Stale claim" }) });
+		for (const probe of [false, new Error("the identity probe failed")]) {
+			// The final read does not list the broker either (an unreadable record hides a live broker): the report must still not claim success.
+			const h = harness({ reads: [[a], [a], []], peers: [west], ask: (_holder, rows) => rows.map(() => answer("stopped")), brokerGone: [probe] });
+			await killAll(h.ports);
+			assert.equal(h.brokerProbes.length, 1);
+			assert.equal(h.brokerProbes[0]?.brokerPid, a.brokerPid);
+			assert.equal(h.brokerProbes[0]?.brokerCreationTime, a.brokerCreationTime);
+			assert.deepEqual(h.stops, []);
+			assert.deepEqual(h.infos, []);
+			assert.match(h.warns[0] ?? "", /^Stopped 0 of 1 OMP process\. Could not be confirmed stopped: .*its window reported it stopped, but its background process is not confirmed closed/);
+		}
+		const proven = harness({ reads: [[a], [a], []], peers: [west], ask: (_holder, rows) => rows.map(() => answer("stopped")) });
+		await killAll(proven.ports);
+		assert.deepEqual(proven.infos, ["Stopped 1 OMP process."]);
+	});
+
+	it("names the reason a window may still act when it could not be sure of the request's fate", async () => {
+		const a = unobserved({ host: sessionHost({ tabId: "tab-a", title: "Uncertain one", recorded: false }) });
+		const h = harness({
+			reads: [[a], [a], [a]],
+			peers: [west],
+			ask: (_holder, rows) => rows.map(() => answer("silent", "the request could not be withdrawn (EPERM), so it may still be served")),
+		});
+		await killAll(h.ports);
+		assert.deepEqual(h.stops, [], "a request that may still be served never lets the broker act concurrently");
+		assert.match(h.warns[0] ?? "", /may still act on the request \(the request could not be withdrawn \(EPERM\), so it may still be served\)/);
+	});
 });
 
 describe("stopRowsOnRequest: serving another window's Kill All", () => {
@@ -1219,6 +1306,22 @@ describe("stopRowsOnRequest: serving another window's Kill All", () => {
 		const answers = await stopRowsOnRequest([a, b].map(rowIdentityOf), h.ports);
 		assert.deepEqual(answers.map(answer => answer.state), ["stopped", "changed"]);
 		assert.deepEqual(h.stops, [], "the terminal the other window attached meanwhile was left alone");
+	});
+
+	it("asks for graceful-only flows and never prompts, whatever route the row takes, and answers a failed graceful stop unconfirmed", async () => {
+		const chat = driven();
+		const native = driven({ ptyKind: "managed-omp" });
+		const recorded = mine({ kind: "session", ptyKind: "managed-rpc", host: sessionHost({ window: "this-window", drivenHere: true }), drivenHere: true });
+		// A driven flow whose graceful stop failed: the session's own flow reports that it did not confirm (it never shows a Force Stop here).
+		const failing = harness({ reads: [[chat, native, recorded]], driven: { run: async () => false } });
+		const answers = await stopRowsOnRequest([chat, native, recorded].map(rowIdentityOf), failing.ports);
+		assert.deepEqual(answers.map(answer => answer.state), ["unconfirmed", "unconfirmed", "unconfirmed"]);
+		assert.deepEqual(failing.confirms, [], "no prompt of any kind");
+		assert.deepEqual(failing.captureOptions, [{ offerForce: false }, { offerForce: false }, { offerForce: false }]);
+		// An ordinary Stop of the same session still lets its flow offer a Force Stop.
+		const single = harness({ reads: [[chat]], driven: captured([]) });
+		await stopProcess(chat.id, single.ports);
+		assert.deepEqual(single.captureOptions, [{ offerForce: true }]);
 	});
 
 	it("never offers a Force Stop on the requester's behalf, and reports a stop that did not work as not confirmed", async () => {

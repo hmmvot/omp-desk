@@ -12,11 +12,13 @@ import { after, afterEach, before, describe, it } from "node:test";
 import type { RowIdentity } from "./broker-processes.ts";
 import {
 	MAX_STOP_ROWS,
+	STOP_ACCEPTED_SWEEP_MS,
 	STOP_REQUEST_TTL_MS,
 	WINDOW_REQUEST_DIRECTORY,
 	askWindowToStop,
 	awaitStopAnswer,
 	postStopRequest,
+	postSwitchRequest,
 	requestTtlMs,
 	startRequestWatch,
 } from "./window-requests.ts";
@@ -199,7 +201,8 @@ describe("stop requests between windows", () => {
 		});
 		const id = await postStopRequest(storage, { to: "holder-b", from: "holder-a", rows: [identity(1)] });
 		await until(() => target.served.length === 1);
-		assert.deepEqual(await awaitStopAnswer(storage, "holder-b", id, 1, { acceptTimeoutMs: 30, progressTimeoutMs: 120, ...FAST }), { kind: "silent" });
+		const answer = await awaitStopAnswer(storage, "holder-b", id, 1, { acceptTimeoutMs: 30, progressTimeoutMs: 120, ...FAST });
+		assert.equal(answer.kind, "silent");
 		gate.resolve();
 	});
 
@@ -216,7 +219,8 @@ describe("stop requests between windows", () => {
 		await until(() => target.served.length === 1);
 		const started = Date.now();
 		// Progress every 40 ms against an idle bound of 150 ms: not silent for 200 ms of steady work, silent at the total bound.
-		assert.deepEqual(await awaitStopAnswer(storage, "holder-b", id, 1, { progressTimeoutMs: 150, totalTimeoutMs: 300, ...FAST }), { kind: "silent" });
+		const answer = await awaitStopAnswer(storage, "holder-b", id, 1, { progressTimeoutMs: 150, totalTimeoutMs: 300, ...FAST });
+		assert.equal(answer.kind, "silent");
 		assert.ok(Date.now() - started >= 280, "steady progress held the wait until the total bound");
 		stop = true;
 	});
@@ -238,13 +242,13 @@ describe("stop requests between windows", () => {
 			fs.writeFileSync(response, typeof body === "string" ? body : JSON.stringify(body));
 			await pause(40);
 		}
-		assert.deepEqual(await pending, { kind: "silent" }, "none of those is an answer");
+		assert.equal((await pending).kind, "silent", "none of those is an answer");
 	});
 
 	it("reports a window whose serving failed as silent, never as having stopped anything", async () => {
 		const target = owner("holder-b", async () => { throw new Error("editor exploded"); });
 		const id = await postStopRequest(storage, { to: "holder-b", from: "holder-a", rows: [identity(1)] });
-		assert.deepEqual(await awaitStopAnswer(storage, "holder-b", id, 1, FAST), { kind: "silent" });
+		assert.equal((await awaitStopAnswer(storage, "holder-b", id, 1, FAST)).kind, "silent");
 		assert.ok(target.errors.some(detail => detail.includes("editor exploded")));
 	});
 
@@ -258,7 +262,7 @@ describe("stop requests between windows", () => {
 		await until(() => target.served.length === 1);
 		target.watch.dispose();
 		gate.resolve();
-		assert.deepEqual(await awaitStopAnswer(storage, "holder-b", id, 1, { progressTimeoutMs: 120, ...FAST }), { kind: "silent" });
+		assert.equal((await awaitStopAnswer(storage, "holder-b", id, 1, { progressTimeoutMs: 120, ...FAST })).kind, "silent");
 	});
 
 	it("asks a window about any number of rows in requests of at most the bound, and answers every row in order", async () => {
@@ -310,5 +314,57 @@ describe("stop requests between windows", () => {
 		await postStopRequest(storage, { to: "holder-y", from: "holder-a", rows: [identity(1)] });
 		assert.deepEqual(files(".accepted"), []);
 		assert.deepEqual(files(".response"), []);
+	});
+
+	it("ends a wait for a request that cannot be withdrawn as uncertain, never as 'not accepted', and never waits for ever", async () => {
+		// A request file that cannot be deleted (here: a directory of that name, which unlink refuses) stays servable.
+		fs.mkdirSync(path.join(directory, "holder-b.id-locked.request"), { recursive: true });
+		const started = Date.now();
+		const answer = await awaitStopAnswer(storage, "holder-b", "id-locked", 1, { acceptTimeoutMs: 30, withdrawTimeoutMs: 120, ...FAST });
+		assert.equal(answer.kind, "silent");
+		assert.match(answer.kind === "silent" ? answer.reason : "", /could not be withdrawn/);
+		assert.ok(Date.now() - started < 3_000, "the pre-acceptance loop is bounded");
+	});
+
+	it("bounds the whole wait, before a window takes the request up as well as after", async () => {
+		fs.mkdirSync(path.join(directory, "holder-b.id-locked.request"), { recursive: true });
+		const started = Date.now();
+		const answer = await awaitStopAnswer(storage, "holder-b", "id-locked", 1, { acceptTimeoutMs: 60_000, withdrawTimeoutMs: 60_000, totalTimeoutMs: 150, ...FAST });
+		assert.equal(answer.kind, "silent");
+		assert.ok(Date.now() - started < 3_000);
+	});
+
+	it("does not let another window's sweep erase the take-up evidence of a stop that is still active", async () => {
+		const gate = Promise.withResolvers<void>();
+		const target = owner("holder-b", async request => {
+			await gate.promise;
+			return { ok: true, focused: false, rows: request.rows.map(() => STOPPED) };
+		});
+		const id = await postStopRequest(storage, { to: "holder-b", from: "holder-a", rows: [identity(1)] });
+		await until(() => target.served.length === 1);
+		const accepted = path.join(directory, `holder-b.${id}.accepted`);
+		// The owner has been working for ten minutes (far past the ordinary sweep, inside the stop's own lifetime).
+		const past = new Date(Date.now() - 600_000);
+		fs.utimesSync(accepted, past, past);
+		// A third window posts any request: its sweep runs.
+		await postSwitchRequest(storage, { to: "holder-z", from: "holder-c", tabId: "tab:1", incarnation: "1" });
+		assert.ok(fs.existsSync(accepted), "the accepted marker survived the sweep");
+		// A requester that only now looks (after being suspended) sees the take-up, so the window is working, not absent.
+		let calls = 0;
+		const delayed = await awaitStopAnswer(storage, "holder-b", id, 1, { progressTimeoutMs: 120, now: () => (calls++ === 0 ? Date.now() : Date.now() + 10_000), ...FAST });
+		assert.equal(delayed.kind, "silent");
+		assert.match(delayed.kind === "silent" ? delayed.reason : "", /took the request up/);
+		gate.resolve();
+		assert.ok(STOP_ACCEPTED_SWEEP_MS > 600_000, "take-up evidence outlives the requester's total wait");
+	});
+
+	it("does not read the absence of every file as 'never taken up' when the requester was not running meanwhile", async () => {
+		// Nothing is left: the request is gone, there is no accepted marker and no response (swept while this requester was suspended).
+		let calls = 0;
+		const jumped = await awaitStopAnswer(storage, "holder-b", "id-vanished", 1, { now: () => (calls++ === 0 ? 0 : 10_000), ...FAST });
+		assert.equal(jumped.kind, "silent");
+		assert.match(jumped.kind === "silent" ? jumped.reason : "", /not known whether/);
+		// A requester that kept watching proves a deletion without a trace: the old build case.
+		assert.deepEqual(await awaitStopAnswer(storage, "holder-b", "id-vanished-2", 1, FAST), { kind: "not-accepted" });
 	});
 });

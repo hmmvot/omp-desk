@@ -7,6 +7,7 @@ import {
 	flatFolderLabels,
 	flatRowLabel,
 	normalizeSessionsGrouping,
+	planNotificationReveal,
 	orderFlatRows,
 	type FlatOrderFacts,
 } from "./session-order.ts";
@@ -102,5 +103,26 @@ describe("grouping setting", () => {
 		assert.equal(normalizeSessionsGrouping("flat"), "flat");
 		assert.equal(normalizeSessionsGrouping("folders"), "folders");
 		assert.equal(normalizeSessionsGrouping("terminals"), "terminals");
+	});
+
+	describe("planNotificationReveal", () => {
+		it("reveals the session row in a layout that serves session rows", () => {
+			assert.deepEqual(planNotificationReveal({ sessionRowsShown: true, hasProcessRow: false, previousSessionLayout: null }), { kind: "session-row" });
+			assert.deepEqual(planNotificationReveal({ sessionRowsShown: true, hasProcessRow: true, previousSessionLayout: "folders" }), { kind: "session-row" });
+		});
+
+		it("reveals the process row in Terminals while the session's process is listed", () => {
+			assert.deepEqual(planNotificationReveal({ sessionRowsShown: false, hasProcessRow: true, previousSessionLayout: "folders" }), { kind: "process-row" });
+		});
+
+		it("leaves Terminals for the user's previous session-serving layout when the process has ended", () => {
+			assert.deepEqual(planNotificationReveal({ sessionRowsShown: false, hasProcessRow: false, previousSessionLayout: "folders" }), { kind: "switch-layout", to: "folders" });
+			assert.deepEqual(planNotificationReveal({ sessionRowsShown: false, hasProcessRow: false, previousSessionLayout: "flat" }), { kind: "switch-layout", to: "flat" });
+		});
+
+		it("defaults to the flat list when no earlier layout is known", () => {
+			assert.deepEqual(planNotificationReveal({ sessionRowsShown: false, hasProcessRow: false, previousSessionLayout: null }), { kind: "switch-layout", to: "flat" });
+			assert.deepEqual(planNotificationReveal({ sessionRowsShown: false, hasProcessRow: false, previousSessionLayout: "terminals" }), { kind: "switch-layout", to: "flat" });
+		});
 	});
 });

@@ -22,6 +22,10 @@
  *   window cannot be asked (it is gone or did not answer). The broker is asked to stop its child and
  *   to shut down (`broker-process-stop.ts`).
  *
+ * A stop after a request of Kill All that no window answered for is the explicit *fallback* route: this window's own
+ * lifecycle when the row has become one this window drives, and otherwise the authenticated broker, never a
+ * recorded reattach (the claim of a live owner of an older build refuses it, so it could not stop the process).
+ *
  * ## Kill All and other windows
  *
  * Kill All never stops a live window's sessions or terminals through the broker on that window's
@@ -74,10 +78,14 @@ export interface ProcessControllerPorts {
 	withProgress(title: string, work: () => Promise<void>): Promise<void>;
 	info(message: string): void;
 	warn(message: string): void;
-	/** Capture the row's own stop flow for a session this window drives, or `null` when it changed. */
-	captureDrivenStop(row: BrokerProcessRow): Promise<CapturedRowStop | null>;
-	/** Capture the row's recorded-host stop flow, or `null` when the row no longer records this exact broker. */
-	captureRecordedStop(row: BrokerProcessRow): Promise<CapturedRowStop | null>;
+	/**
+	 * Capture the row's own stop flow for a session this window drives, or `null` when it changed. With
+	 * `offerForce: false` (a stop another window asked for) the flow never opens a Force Stop or any other modal:
+	 * a graceful stop that did not work ends the flow unconfirmed.
+	 */
+	captureDrivenStop(row: BrokerProcessRow, options: { readonly offerForce: boolean }): Promise<CapturedRowStop | null>;
+	/** Capture the row's recorded-host stop flow, or `null` when the row no longer records this exact broker. Same `offerForce` rule. */
+	captureRecordedStop(row: BrokerProcessRow, options: { readonly offerForce: boolean }): Promise<CapturedRowStop | null>;
 	stopThroughBroker(target: BrokerStopTarget, mode: BrokerStopMode): Promise<BrokerStopOutcome>;
 	/**
 	 * Prove the broker's process gone by its PID and creation time, waiting up to `timeoutMs`. This is
@@ -109,8 +117,11 @@ export interface KillAllPeer {
 
 type Route = "driven" | "recorded" | "broker";
 
-function routeOf(row: BrokerProcessRow): Route {
+function routeOf(row: BrokerProcessRow, fallback: boolean): Route {
 	if (row.drivenHere) return "driven";
+	// After a request no window answered for, the broker is the route (see the header): a recorded reattach is refused
+	// by the claim of a live owner that never answered.
+	if (fallback) return "broker";
 	// A native session another window holds cannot be reattached from here (its claim refuses it), so it
 	// is stopped through its authenticated broker exactly as a process no row records.
 	if (row.ptyKind === "managed-omp" && row.window === "other-window") return "broker";
@@ -179,10 +190,14 @@ async function retireStoppedSlot(row: BrokerProcessRow, ports: ProcessController
  * only when `offerForce` (a window serving another window's request never prompts on its behalf), and it
  * neither refreshes nor reports: callers do.
  */
-async function stopRow(row: BrokerProcessRow, ports: ProcessControllerPorts, options: { readonly offerForce: boolean } = { offerForce: true }): Promise<RowStopResult> {
-	const route = routeOf(row);
+async function stopRow(
+	row: BrokerProcessRow,
+	ports: ProcessControllerPorts,
+	options: { readonly offerForce: boolean; readonly fallback?: boolean } = { offerForce: true },
+): Promise<RowStopResult> {
+	const route = routeOf(row, options.fallback === true);
 	if (route !== "broker") {
-		const captured = route === "driven" ? await ports.captureDrivenStop(row) : await ports.captureRecordedStop(row);
+		const captured = route === "driven" ? await ports.captureDrivenStop(row, { offerForce: options.offerForce }) : await ports.captureRecordedStop(row, { offerForce: options.offerForce });
 		if (captured === null) return { kind: "changed" };
 		if (!(await captured.run())) return { kind: "flow-unconfirmed" };
 		// The flow proves the session's writer gone, not that the broker retired (its shutdown acknowledgement is not an
@@ -374,7 +389,11 @@ export function settleRemoteRow(row: BrokerProcessRow, answers: readonly PeerAns
 	if (withheld !== undefined) {
 		return {
 			kind: "settled",
-			result: { kind: "failed", message: `${name}: its window "${withheld.peer.label}" took the request up and has not reported back, so it was left to that window.`, reason: "its window has not reported back" },
+			result: {
+				kind: "failed",
+				message: `${name}: its window "${withheld.peer.label}" may still act on the request (${withheld.answer.reason === "" ? "it has not reported back" : withheld.answer.reason}), so it was left to that window.`,
+				reason: "its window has not reported back",
+			},
 		};
 	}
 	const reasons = answers.flatMap(entry =>
@@ -473,18 +492,35 @@ export async function killAll(ports: ProcessControllerPorts): Promise<void> {
 	let leftAlone = 0;
 	/** Any tier the choice covers: a row that was not this window's may have become this window's meanwhile, and is then stopped by its own flow. */
 	const inChosenTiers = (plan: KillAllPlan): readonly BrokerProcessRow[] => [...plan.here, ...plan.otherWindows, ...plan.notRun];
-	/** Derive the row afresh from the broker records and stop it by that derivation, or leave it alone when it is no longer the row that was confirmed. */
-	const dispatch = async (row: BrokerProcessRow, tier: (plan: KillAllPlan) => readonly BrokerProcessRow[]): Promise<void> => {
+	/**
+	 * Derive the row afresh from the broker records and stop it by that derivation, or leave it alone when it is no longer the row
+	 * that was confirmed. The category it was sorted into is revalidated too: a row sorted as `direct` (no window was asked
+	 * about it) that has since become one another window may run is left alone, never stopped on the earlier permission.
+	 */
+	const dispatch = async (row: BrokerProcessRow, category: "here" | "direct" | "fallback"): Promise<void> => {
 		try {
-			const current = tier(planKillAll((await ports.read()).rows)).find(candidate => sameBroker(row, candidate));
+			const plan = planKillAll((await ports.read()).rows);
+			const current = (category === "here" ? plan.here : inChosenTiers(plan)).find(candidate => sameBroker(row, candidate));
 			if (current === undefined) {
 				leftAlone += 1;
 				return;
 			}
-			results.set(row.id, await stopRow(current, ports));
+			const ownedHere = plan.here.some(candidate => sameBroker(current, candidate));
+			if (category === "direct" && !ownedHere && mayRunInAnotherWindow(current)) {
+				leftAlone += 1;
+				return;
+			}
+			results.set(row.id, await stopRow(current, ports, { offerForce: true, fallback: category === "fallback" }));
 		} catch (error) {
 			results.set(row.id, asError(error));
 		}
+	};
+	/** A window's `stopped` is its own report, never proof: the broker the row showed must be independently proven gone. */
+	const verifyPeerStop = async (row: BrokerProcessRow): Promise<RowStopResult> => {
+		const gone = await ports.waitBrokerGone(stopTargetOf(row), BROKER_PROCESS_EXIT_TIMEOUT_MS).catch(() => ({ gone: false, detail: "the process probe failed" }));
+		if (gone.gone) return { kind: "stopped" };
+		const reason = `its window reported it stopped, but its background process is not confirmed closed${gone.detail === "" ? "" : ` (${gone.detail})`}`;
+		return { kind: "failed", message: `${describeProcess(row)}: ${reason}.`, reason };
 	};
 	await ports.withProgress(`Stopping ${plural(targets.length, "OMP process", "OMP processes")}…`, async () => {
 		try {
@@ -492,7 +528,7 @@ export async function killAll(ports: ProcessControllerPorts): Promise<void> {
 			// This window's own rows and the other windows' answers proceed at the same time: the windows stop theirs while this one stops its own.
 			await Promise.all([
 				(async () => {
-					for (const row of hereRows) await dispatch(row, plan => plan.here);
+					for (const row of hereRows) await dispatch(row, "here");
 				})(),
 				(async () => {
 					if (remoteRows.length === 0) return;
@@ -503,12 +539,14 @@ export async function killAll(ports: ProcessControllerPorts): Promise<void> {
 				const verdict = verdicts.get(row.id);
 				if (verdict === undefined || verdict.kind === "fallback") {
 					if (verdict?.note != null) withoutWindow.set(row.id, verdict.note);
-					await dispatch(row, inChosenTiers);
+					await dispatch(row, "fallback");
+				} else if (verdict.result.kind === "stopped") {
+					results.set(row.id, await verifyPeerStop(row));
 				} else {
 					results.set(row.id, verdict.result);
 				}
 			}
-			for (const row of directRows) await dispatch(row, inChosenTiers);
+			for (const row of directRows) await dispatch(row, "direct");
 		} finally {
 			await ports.refresh();
 		}

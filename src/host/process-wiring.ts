@@ -75,8 +75,8 @@ export interface ProcessWiringDeps {
 	/** Re-read the shared catalog (index, broker slots, shell slots, folders). */
 	refreshCatalog(): Promise<void>;
 	refreshLauncher(): void;
-	captureDrivenStop(row: BrokerProcessRow): Promise<CapturedRowStop | null>;
-	captureRecordedStop(row: BrokerProcessRow): Promise<CapturedRowStop | null>;
+	captureDrivenStop(row: BrokerProcessRow, options: { readonly offerForce: boolean }): Promise<CapturedRowStop | null>;
+	captureRecordedStop(row: BrokerProcessRow, options: { readonly offerForce: boolean }): Promise<CapturedRowStop | null>;
 	/** Hold the owning shell lifecycle for the whole authenticated stop/shutdown sequence. */
 	runBrokerStop(target: BrokerStopTarget, operation: () => Promise<BrokerStopOutcome>): Promise<BrokerStopOutcome>;
 	log(message: string): void;
@@ -287,8 +287,8 @@ export function registerSessionProcesses(context: vscode.ExtensionContext, deps:
 		},
 		info: message => void vscode.window.showInformationMessage(`OMP: ${message}`),
 		warn: message => void vscode.window.showWarningMessage(`OMP: ${message}`),
-		captureDrivenStop: row => deps.captureDrivenStop(row),
-		captureRecordedStop: row => deps.captureRecordedStop(row),
+		captureDrivenStop: (row, options) => deps.captureDrivenStop(row, options),
+		captureRecordedStop: (row, options) => deps.captureRecordedStop(row, options),
 		stopThroughBroker: (target, mode) => deps.runBrokerStop(target, () => stopBrokerThroughBroker(target, mode, stopPorts)),
 		async forgetStoppedSlot(slot) {
 			const shells = deps.shellSlots();

@@ -18,6 +18,26 @@ export function normalizeSessionsGrouping(value: unknown): SessionsGrouping {
 	return value === "folders" || value === "terminals" ? value : "flat";
 }
 
+/** Where a notification's session is revealed in the Sessions view. */
+export type NotificationRevealPlan =
+	/** The current layout serves session rows: reveal the indexed session's row. */
+	| { readonly kind: "session-row" }
+	/** The Terminals layout, and the session's process is still listed: reveal that process row. */
+	| { readonly kind: "process-row" }
+	/** The Terminals layout has no row for the session (its process ended): show a layout that serves session rows, then reveal the session's row. Nothing is launched. */
+	| { readonly kind: "switch-layout"; readonly to: "flat" | "folders" };
+
+/** Pure: the reveal a desktop notification asks for. `previousSessionLayout` is the session-serving layout the user used last, if known (flat otherwise). */
+export function planNotificationReveal(input: {
+	readonly sessionRowsShown: boolean;
+	readonly hasProcessRow: boolean;
+	readonly previousSessionLayout: SessionsGrouping | null;
+}): NotificationRevealPlan {
+	if (input.sessionRowsShown) return { kind: "session-row" };
+	if (input.hasProcessRow) return { kind: "process-row" };
+	return { kind: "switch-layout", to: input.previousSessionLayout === "folders" ? "folders" : "flat" };
+}
+
 /** What the order depends on, for one row. */
 export interface FlatOrderFacts {
 	readonly tabId: string;

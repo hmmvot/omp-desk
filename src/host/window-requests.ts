@@ -89,6 +89,18 @@ export const STOP_ACCEPT_TIMEOUT_MS = 8_000;
 export const STOP_PROGRESS_TIMEOUT_MS = 45_000;
 /** The longest a requester waits for one stop request in all, however steadily it shows progress. */
 export const STOP_TOTAL_TIMEOUT_MS = 600_000;
+/**
+ * After {@link STOP_ACCEPT_TIMEOUT_MS} a requester tries to withdraw a request nobody took up. When the delete keeps
+ * failing for this much longer the wait ends as uncertain: the window may still act on the request.
+ */
+export const STOP_WITHDRAW_TIMEOUT_MS = 10_000;
+/**
+ * A requester that was not running for this long between two looks (its host was suspended or starved) can no longer
+ * tell "the window never took the request up" from "the window took it up, finished and its files were swept".
+ */
+export const STOP_STALL_GAP_MS = 5_000;
+/** An `.accepted` file is take-up evidence for as long as a request can be active (the requester's total wait, with a margin); the ordinary {@link REQUEST_SWEEP_MS} must not erase it. */
+export const STOP_ACCEPTED_SWEEP_MS = STOP_TOTAL_TIMEOUT_MS + 300_000;
 /** Rows one stop request may name; a requester splits a longer list into several requests. */
 export const MAX_STOP_ROWS = 32;
 
@@ -460,7 +472,7 @@ async function sweepRequests(directory: string, now: number): Promise<void> {
 		const file = path.join(directory, name);
 		try {
 			const stat = await fsp.stat(file);
-			if (now - stat.mtimeMs > REQUEST_SWEEP_MS) await fsp.rm(file, { force: true });
+			if (now - stat.mtimeMs > (name.endsWith(ACCEPTED_SUFFIX) ? STOP_ACCEPTED_SWEEP_MS : REQUEST_SWEEP_MS)) await fsp.rm(file, { force: true });
 		} catch {
 			// Another window swept or served it first.
 		}
@@ -506,12 +518,18 @@ export type StopAnswer =
 	/** The window took the request up and answered every row. */
 	| { readonly kind: "answered"; readonly rows: readonly StopRowAnswer[] }
 	/**
-	 * The window never took the request up: it was withdrawn here after {@link STOP_ACCEPT_TIMEOUT_MS}, or it
-	 * vanished unanswered (a window of an older build deletes a kind it does not know). Nothing was stopped there.
+	 * The window never took the request up: it was withdrawn here after {@link STOP_ACCEPT_TIMEOUT_MS} (the delete
+	 * succeeded), or it vanished unanswered (a window of an older build deletes a kind it does not know) while this
+	 * requester kept watching. Nothing was stopped there.
 	 */
 	| { readonly kind: "not-accepted" }
-	/** The window took the request up and then went silent or answered with no usable report: some rows may have stopped. */
-	| { readonly kind: "silent" };
+	/**
+	 * It is not known whether the window acted: it took the request up and went silent or answered with no usable
+	 * report (some rows may have stopped), or the request could not be withdrawn or the evidence of its take-up may be
+	 * gone (the requester was suspended). The request may still be served, so nothing may be stopped for these rows
+	 * behind the window's back while it is alive. `reason` says which.
+	 */
+	| { readonly kind: "silent"; readonly reason: string };
 
 type ProbedRead = { readonly kind: "missing" | "invalid" | "busy" } | { readonly kind: "text"; readonly text: string };
 
@@ -524,6 +542,17 @@ async function probeFile(file: string, maxBytes: number): Promise<ProbedRead> {
 	}
 }
 
+/** What bounds {@link awaitStopAnswer}; every field defaults to the module's constant and exists for tests. */
+export interface StopWaitOptions {
+	readonly acceptTimeoutMs?: number;
+	readonly withdrawTimeoutMs?: number;
+	readonly progressTimeoutMs?: number;
+	readonly totalTimeoutMs?: number;
+	readonly stallGapMs?: number;
+	readonly pollMs?: number;
+	readonly now?: () => number;
+}
+
 /**
  * Wait for the answer to stop request `id`, which names `rowCount` rows.
  *
@@ -531,7 +560,12 @@ async function probeFile(file: string, maxBytes: number): Promise<ProbedRead> {
  * deletes the request file, and only a successful delete proves the window never acted (the receiver
  * takes a request up by renaming the file, and exactly one of the two can win). Once the request is
  * taken up the window is working: the wait ends with its answer, or as `silent` once its progress file
- * has not changed for {@link STOP_PROGRESS_TIMEOUT_MS} or the wait has lasted {@link STOP_TOTAL_TIMEOUT_MS}.
+ * has not changed for {@link STOP_PROGRESS_TIMEOUT_MS}.
+ *
+ * The whole wait, before and after take-up, ends by {@link STOP_TOTAL_TIMEOUT_MS}. A request that could not be
+ * withdrawn (the delete keeps failing for {@link STOP_WITHDRAW_TIMEOUT_MS}) and a request whose take-up evidence may
+ * be gone because this requester was not running for {@link STOP_STALL_GAP_MS} between two looks end as `silent`,
+ * never as `not-accepted`: the window may still act, so nothing may be stopped behind its back.
  * Responses that are not a well-formed answer to this request are deleted and ignored.
  */
 export async function awaitStopAnswer(
@@ -539,17 +573,20 @@ export async function awaitStopAnswer(
 	to: string,
 	id: string,
 	rowCount: number,
-	options: { readonly acceptTimeoutMs?: number; readonly progressTimeoutMs?: number; readonly totalTimeoutMs?: number; readonly pollMs?: number } = {},
+	options: StopWaitOptions = {},
 ): Promise<StopAnswer> {
 	const directory = directoryOf(storageDir);
 	const requestFile = path.join(directory, `${to}.${id}${REQUEST_SUFFIX}`);
 	const acceptedFile = path.join(directory, `${to}.${id}${ACCEPTED_SUFFIX}`);
 	const responseFile = path.join(directory, `${to}.${id}${RESPONSE_SUFFIX}`);
 	const acceptMs = options.acceptTimeoutMs ?? STOP_ACCEPT_TIMEOUT_MS;
+	const withdrawMs = options.withdrawTimeoutMs ?? STOP_WITHDRAW_TIMEOUT_MS;
 	const progressMs = options.progressTimeoutMs ?? STOP_PROGRESS_TIMEOUT_MS;
 	const totalMs = options.totalTimeoutMs ?? STOP_TOTAL_TIMEOUT_MS;
+	const stallMs = options.stallGapMs ?? STOP_STALL_GAP_MS;
 	const pollMs = options.pollMs ?? 100;
-	const startedAt = Date.now();
+	const clock = options.now ?? Date.now;
+	const startedAt = clock();
 	/** Whether a file is there; a file that cannot be examined counts as there, never as proof of absence. */
 	const exists = async (file: string): Promise<boolean> => {
 		try {
@@ -566,17 +603,29 @@ export async function awaitStopAnswer(
 		await fsp.rm(responseFile, { force: true }).catch(() => {});
 		const outcome = read.kind === "text" ? parseStopResponse(read.text, id, rowCount) : null;
 		if (outcome === null) return "unusable";
-		return outcome === "failed" ? { kind: "silent" } : { kind: "answered", rows: outcome };
+		return outcome === "failed" ? { kind: "silent", reason: "it answered with a report that could not be used" } : { kind: "answered", rows: outcome };
 	};
 	let accepted = false;
 	let lastProgress = "";
 	let lastProgressAt = startedAt;
+	let lastLookAt = startedAt;
+	/** This requester was not running between two looks: files may have been removed unseen. */
+	let stalled = false;
+	const look = (): number => {
+		const at = clock();
+		if (at - lastLookAt > stallMs) stalled = true;
+		lastLookAt = at;
+		return at;
+	};
 	let sawUnusable = false;
 	for (;;) {
+		const now = look();
 		const taken = await takeResponse();
 		if (taken === "unusable") sawUnusable = true;
 		else if (taken !== null) return taken;
-		const now = Date.now();
+		if (now - startedAt >= totalMs) {
+			return { kind: "silent", reason: accepted ? "it took the request up and did not finish in time" : "it did not take the request up in time, and the request is still there" };
+		}
 		if (!accepted) {
 			if (!(await exists(requestFile))) {
 				// The file is gone: renamed to the accepted file (one atomic step), or deleted by a window that does not know the kind.
@@ -584,7 +633,12 @@ export async function awaitStopAnswer(
 					const late = await takeResponse();
 					if (late !== null && late !== "unusable") return late;
 					// A response file that was no answer still proves a window acted on the request.
-					return late === "unusable" || sawUnusable ? { kind: "silent" } : { kind: "not-accepted" };
+					if (late === "unusable" || sawUnusable) return { kind: "silent", reason: "it answered with a report that could not be used" };
+					// With no evidence left, "never taken up" is only proven by a requester that kept watching.
+					look();
+					return stalled
+						? { kind: "silent", reason: "it is not known whether it took the request up: this window was not running while it could have" }
+						: { kind: "not-accepted" };
 				}
 				accepted = true;
 				lastProgressAt = now;
@@ -592,9 +646,13 @@ export async function awaitStopAnswer(
 				try {
 					await fsp.unlink(requestFile);
 					return { kind: "not-accepted" };
-				} catch {
+				} catch (error) {
 					// Either the window took the request up in this very instant (the next round finds the accepted file) or
-					// the delete is blocked for now; the next round decides, and only a successful delete ever ends the wait here.
+					// the delete is blocked for now; the next round decides, and only a successful delete ever ends the wait as
+					// "not taken up". A delete that stays blocked leaves the request servable: that is uncertainty.
+					if (errorCode(error) !== "ENOENT" && now - startedAt >= acceptMs + withdrawMs) {
+						return { kind: "silent", reason: `the request could not be withdrawn (${messageOf(error)}), so it may still be served` };
+					}
 				}
 			}
 		}
@@ -603,14 +661,14 @@ export async function awaitStopAnswer(
 			if (progress.kind === "missing") {
 				// The receiver removes the accepted file after it wrote the response.
 				const late = await takeResponse();
-				return late === null || late === "unusable" ? { kind: "silent" } : late;
+				return late === null || late === "unusable" ? { kind: "silent", reason: "it took the request up and did not report back" } : late;
 			}
 			const text = progress.kind === "text" ? progress.text : "";
 			if (progress.kind !== "busy" && text !== lastProgress) {
 				lastProgress = text;
 				lastProgressAt = now;
 			}
-			if (now - lastProgressAt >= progressMs || now - startedAt >= totalMs) return { kind: "silent" };
+			if (now - lastProgressAt >= progressMs) return { kind: "silent", reason: "it took the request up and did not report back" };
 		}
 		const { promise, resolve } = Promise.withResolvers<void>();
 		setTimeout(resolve, pollMs).unref?.();
@@ -620,8 +678,9 @@ export async function awaitStopAnswer(
 
 /**
  * What one window answered for one row of {@link askWindowToStop}: a receiver's answer, or why there is none.
- * `not-accepted`: the window never took the request up (nothing was done there). `silent`: it took the request up
- * and then went silent, or answered with no usable report (some rows may have stopped there).
+ * `not-accepted`: the window never took the request up (nothing was done there). `silent`: it is not known whether
+ * the window acted: it took the request up and went silent, or answered with no usable report (some rows may have
+ * stopped there), or the request could not be withdrawn, or the evidence of its take-up may be gone.
  */
 export type PeerRowAnswer = StopRowAnswer | { readonly state: "not-accepted" | "silent"; readonly reason: string };
 
@@ -633,7 +692,7 @@ export type PeerRowAnswer = StopRowAnswer | { readonly state: "not-accepted" | "
 export async function askWindowToStop(
 	storageDir: string,
 	request: { readonly to: string; readonly from: string; readonly rows: readonly RowIdentity[] },
-	options: { readonly acceptTimeoutMs?: number; readonly progressTimeoutMs?: number; readonly totalTimeoutMs?: number; readonly pollMs?: number } = {},
+	options: StopWaitOptions = {},
 ): Promise<readonly PeerRowAnswer[]> {
 	const answers: PeerRowAnswer[] = [];
 	let blocked: PeerRowAnswer | null = null;
@@ -657,7 +716,7 @@ export async function askWindowToStop(
 			continue;
 		}
 		blocked = answer.kind === "silent"
-			? { state: "silent", reason: "it took the request up and did not report back" }
+			? { state: "silent", reason: answer.reason }
 			: { state: "not-accepted", reason: "" };
 		answers.push(...chunk.map(() => blocked!));
 	}
