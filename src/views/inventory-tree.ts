@@ -33,9 +33,9 @@ export class InventoryTreeProvider implements vscode.TreeDataProvider<InventoryT
 		return group === undefined ? [] : group.items.map(item => this.#item(item));
 	}
 	#group(group: ViewGroup): InventoryTreeItem {
-		const item = new InventoryTreeItem(group.label, vscode.TreeItemCollapsibleState.Expanded, { group });
+		const item = new InventoryTreeItem(group.label, group.collapsed === true ? vscode.TreeItemCollapsibleState.Collapsed : vscode.TreeItemCollapsibleState.Expanded, { group });
 		item.id = `group:${group.id}`;
-		item.iconPath = new vscode.ThemeIcon("folder");
+		item.iconPath = new vscode.ThemeIcon(group.collapsed === true ? "info" : "folder");
 		return item;
 	}
 	#item(row: ViewItem): InventoryTreeItem {

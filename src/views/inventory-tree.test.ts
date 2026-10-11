@@ -48,6 +48,16 @@ describe("inventory tree provider", () => {
 		assert.deepEqual(provider.getChildren(group).map(child => child.label), ["a", "b"]);
 		assert.deepEqual(provider.getChildren(provider.getChildren(group)[0]), [], "a row has no children");
 	});
+	it("shows the About group folded and last, without a checkbox", () => {
+		const provider = new InventoryTreeProvider();
+		provider.setModel({ ...model([item({ label: "a" })]), groups: [...model([item({ label: "a" })]).groups, { id: "about", label: "About this list", collapsed: true, items: [item({ key: "f", label: "fact", tooltip: "full text", icon: "info" })] }] });
+		const groups = provider.getChildren();
+		assert.equal(groups.at(-1)!.collapsibleState, TreeItemCollapsibleState.Collapsed);
+		assert.equal(groups[0]!.collapsibleState, TreeItemCollapsibleState.Expanded);
+		const [fact] = provider.getChildren(groups.at(-1));
+		assert.equal(fact!.tooltip, "full text");
+		assert.equal(fact!.checkboxState, undefined);
+	});
 	it("gives a checkbox only to switchable rows and mirrors the model's state", () => {
 		const provider = new InventoryTreeProvider();
 		provider.setModel(model([item({ key: "on", label: "on", checked: true }), item({ key: "off", label: "off", checked: false }), item({ key: "ro", label: "ro", checked: null })]));

@@ -83,7 +83,7 @@ const ORIGIN_ORDER: readonly OriginClass[] = ["global", "project", "managed", "o
 
 // --- view model ------------------------------------------------------------------------------
 
-export type IconName = "book" | "tools" | "plug" | "extensions" | "package" | "circle-slash" | "warning" | "server" | "symbol-misc";
+export type IconName = "book" | "tools" | "plug" | "extensions" | "package" | "circle-slash" | "warning" | "server" | "symbol-misc" | "info";
 export interface ViewItem {
 	readonly key: string;
 	readonly label: string;
@@ -97,7 +97,10 @@ export interface ViewItem {
 	/** The row a toggle acts on; `null` for rows Desk only displays. */
 	readonly row: InventoryRow | null;
 }
-export interface ViewGroup { readonly id: string; readonly label: string; readonly items: readonly ViewItem[] }
+export interface ViewGroup { readonly id: string; readonly label: string; readonly items: readonly ViewItem[]; /** Shown folded until the user opens it. */ readonly collapsed?: boolean }
+/** A standing fact about how to read a list: kept out of the way in the "About this list" group, never above the tree. */
+export interface AboutFact { readonly label: string; readonly text: string }
+interface Projected { groups: ViewGroup[]; /** One short line, only when the list is incomplete or the view cannot mean what it normally means. */ notice: string | null; about: AboutFact[] }
 export interface ViewModel {
 	/** Replaces the tree with one explanatory row. */
 	readonly message: string | null;
@@ -132,7 +135,8 @@ function itemOf(row: InventoryRow, note: string | null, extraTooltip: string | n
 	const reason = reasonText(row);
 	const toggleable = row.toggle.mechanism !== null && !row.shadowed && row.state !== "shadowed";
 	const checked = toggleable ? row.state !== "disabled" : null;
-	const bits = [row.state === "disabled" ? "disabled" : null, row.shadowed || row.state === "shadowed" ? "shadowed" : null, note, row.detail];
+	const shadowed = row.shadowed || row.state === "shadowed";
+	const bits = [shadowed ? "shadowed" : row.state === "disabled" ? "disabled" : null, note, row.detail];
 	return {
 		key: `${row.kind}:${row.name}:${row.path ?? ""}`,
 		label: row.name,
@@ -150,13 +154,18 @@ function itemOf(row: InventoryRow, note: string | null, extraTooltip: string | n
 
 function byName(a: ViewItem, b: ViewItem): number { return a.label.localeCompare(b.label) }
 
-function groupByOrigin(rows: readonly InventoryRow[], note: (row: InventoryRow) => string | null): ViewGroup[] {
+function groupByOrigin(rows: readonly InventoryRow[], note: (row: InventoryRow) => string | null, tip: (row: InventoryRow) => string | null = () => null): ViewGroup[] {
 	const groups: ViewGroup[] = [];
 	for (const origin of ORIGIN_ORDER) {
-		const items = rows.filter(row => originClass(row) === origin).map(row => itemOf(row, note(row)));
+		const items = rows.filter(row => originClass(row) === origin).map(row => itemOf(row, note(row), tip(row)));
 		if (items.length > 0) groups.push({ id: origin, label: `${ORIGIN_LABELS[origin]} (${items.length})`, items: items.sort(byName) });
 	}
 	return groups;
+}
+
+/** The only per-session condition worth a line above the tree: the rows are the folder's configuration, not a live session. */
+function notStopped(evidence: SessionEvidence | null): string | null {
+	return evidence !== null && !evidence.running ? "Session not running; showing its folder's configuration." : null;
 }
 
 // --- skills ----------------------------------------------------------------------------------
@@ -167,7 +176,7 @@ function skillCommandNames(commands: readonly ChatSlashCommand[] | null): Readon
 	return names.length === 0 ? null : new Set(names);
 }
 
-export function projectSkills(rows: readonly InventoryRow[], evidence: SessionEvidence | null, effectiveKnown = true): { groups: ViewGroup[]; notice: string | null } {
+export function projectSkills(rows: readonly InventoryRow[], evidence: SessionEvidence | null, effectiveKnown = true): Projected {
 	const skills = rows.filter(row => row.kind === "skill");
 	const loaded = evidence === null || !evidence.running ? null : skillCommandNames(evidence.commands);
 	const commandOf = (row: InventoryRow): string => `skill:${row.runtimeName ?? row.name}`;
@@ -186,10 +195,9 @@ export function projectSkills(rows: readonly InventoryRow[], evidence: SessionEv
 		}));
 		groups.push({ id: "session-other", label: `Reported by the session (${items.length})`, items: items.sort(byName) });
 	}
-	let notice: string | null = null;
-	if (evidence !== null && evidence.running && loaded === null) notice = "This session reported no skill commands (skill commands may be off or the catalogue is capped), so what it loaded is unknown.";
-	else if (evidence !== null && !evidence.running) notice = "This session is not running; showing the configuration for its folder.";
-	return { groups, notice };
+	const about: AboutFact[] = [];
+	if (evidence !== null && evidence.running && loaded === null) about.push({ label: "What the session loaded is unknown", text: "This session reported no skill commands (skill commands may be off or the catalogue is capped), so which skills it loaded is unknown." });
+	return { groups, notice: notStopped(evidence), about };
 }
 
 // --- tools -----------------------------------------------------------------------------------
@@ -203,7 +211,7 @@ export function mcpServerOfTool(toolName: string, servers: readonly InventoryRow
 	return owners.length === 1 ? owners[0]! : null;
 }
 
-export function projectTools(rows: readonly InventoryRow[], evidence: SessionEvidence | null): { groups: ViewGroup[]; notice: string | null } {
+export function projectTools(rows: readonly InventoryRow[], evidence: SessionEvidence | null): Projected {
 	const builtins = rows.filter(row => row.kind === "builtin-tool");
 	const custom = rows.filter(row => row.kind === "custom-tool");
 	const servers = rows.filter(row => row.kind === "mcp");
@@ -212,8 +220,8 @@ export function projectTools(rows: readonly InventoryRow[], evidence: SessionEvi
 	const sessionNote = (row: InventoryRow): string | null => {
 		if (session === null) return null;
 		const tool = sessionByName.get(row.name);
-		// Absence is a claim only when the authenticated registry was observed; descriptors alone are a partial list.
-		if (tool === undefined) return row.state === "disabled" ? null : session.some(entry => entry.active !== null) ? "not in this session" : "not reported by this session";
+		// Absence is a claim only when the authenticated registry was observed; descriptors alone are a partial list, so nothing is said then.
+		if (tool === undefined) return row.state === "disabled" || !session.some(entry => entry.active !== null) ? null : "not in this session";
 		return tool.active === false ? "inactive in this session" : null;
 	};
 	const groups: ViewGroup[] = [];
@@ -238,15 +246,15 @@ export function projectTools(rows: readonly InventoryRow[], evidence: SessionEvi
 		if (mcpItems.length > 0) groups.push({ id: "mcp", label: `MCP tools (${mcpItems.length})`, items: mcpItems.sort(byName) });
 		if (otherItems.length > 0) groups.push({ id: "other", label: `Other session tools (${otherItems.length})`, items: otherItems.sort(byName) });
 	}
-	let notice: string | null = null;
-	if (evidence !== null && !evidence.running) notice = "This session is not running; showing the configuration for its folder.";
-	else if (evidence !== null && session === null) notice = "This session's own tool list could not be read, so session membership is not shown.";
-	return { groups, notice };
+	const about: AboutFact[] = [];
+	if (evidence !== null && evidence.running && session === null) about.push({ label: "Session tool list not read", text: "This session's own tool list could not be read, so which tools it has is not shown." });
+	else if (session !== null && !session.some(entry => entry.active !== null)) about.push({ label: "Session tools not authenticated", text: "Only the session's partial tool descriptions were available, so a built-in missing from them is not marked as absent." });
+	return { groups, notice: notStopped(evidence), about };
 }
 
 // --- MCP -------------------------------------------------------------------------------------
 
-export function projectMcp(rows: readonly InventoryRow[], evidence: SessionEvidence | null): { groups: ViewGroup[]; notice: string | null } {
+export function projectMcp(rows: readonly InventoryRow[], evidence: SessionEvidence | null): Projected {
 	const servers = rows.filter(row => row.kind === "mcp");
 	const session = evidence !== null && evidence.running ? evidence.tools : null;
 	const counts = new Map<InventoryRow, number>();
@@ -257,25 +265,20 @@ export function projectMcp(rows: readonly InventoryRow[], evidence: SessionEvide
 	const groups = groupByOrigin(servers, row => {
 		if (session === null || row.state !== "active") return null;
 		const count = counts.get(row) ?? 0;
-		return count > 0 ? `${count} name-matched tool${count === 1 ? "" : "s"} in this session` : "no matching tools in this session";
-	});
-	let notice = "OMP exports no MCP connection status; rows show configuration and the session tools whose names match each server.";
-	if (evidence !== null && !evidence.running) notice = "This session is not running; showing the configuration for its folder.";
-	return { groups, notice };
+		return count > 0 ? `${count} tool${count === 1 ? "" : "s"}` : "no tools";
+	}, row => session === null || row.state !== "active" ? null : "Tools are counted by the server's mcp__<server>_ name prefix in this session's tool list; that is not a connection status.");
+	return { groups, notice: notStopped(evidence), about: [{ label: "No connection status", text: "OMP exports no MCP connection status; rows show configuration and, in a session, the tools whose names match each server." }] };
 }
 
 // --- extensions ------------------------------------------------------------------------------
 
-export function projectExtensions(rows: readonly InventoryRow[], evidence: SessionEvidence | null): { groups: ViewGroup[]; notice: string | null } {
+export function projectExtensions(rows: readonly InventoryRow[], evidence: SessionEvidence | null): Projected {
 	const modules = rows.filter(row => row.kind === "extension-module");
 	const plugins = rows.filter(row => row.kind === "plugin");
 	const groups = groupByOrigin(modules, () => null).map(group => ({ ...group, id: `module-${group.id}`, label: `Modules · ${group.label}` }));
 	const pluginItems = plugins.map(row => itemOf(row, null));
 	if (pluginItems.length > 0) groups.push({ id: "plugins", label: `Plugins (${pluginItems.length})`, items: pluginItems.sort(byName) });
-	const notice = evidence !== null && !evidence.running
-		? "This session is not running; showing the configuration for its folder."
-		: "OMP reports no per-session extension state; rows show configuration.";
-	return { groups, notice };
+	return { groups, notice: notStopped(evidence), about: [{ label: "No per-session state", text: "OMP reports no per-session extension state; rows show configuration." }] };
 }
 
 // --- whole view ------------------------------------------------------------------------------
@@ -307,7 +310,7 @@ function fallback(view: ViewKind, reason: string, evidence: SessionEvidence | nu
 		}
 	}
 	if (items.length === 0) return emptyView(reason, scope, description);
-	return { message: null, notice: `${reason} Showing only what the session reports; nothing can be switched.`, scope, description,
+	return { message: null, notice: reason, scope, description,
 		groups: [{ id: "session", label: `Reported by the session (${items.length})`, items: items.sort(byName) }] };
 }
 
@@ -332,16 +335,21 @@ export function projectView(input: ProjectionInput): ViewModel {
 	const overridden = scope === "session" && inventory.projectOverridesDisabledExtensions && view !== "mcp" && view !== "extensions";
 	const notices = [
 		projected.notice,
-		incomplete ? "OMP reported a failure loading some sources, so this list may be incomplete and nothing here can be switched." : null,
-		overridden ? "This project's .omp/config.yml sets its own disabledExtensions, which replaces the global list: global switches cannot change sessions here. Use Global to edit the global list." : null,
-		inventory.disabledProviders.length > 0 ? `Items from providers disabled in OMP's settings (${inventory.disabledProviders.slice(0, 5).join(", ")}) are not loaded by OMP and are not listed.` : null,
-		view === "extensions" && scope === "session" ? "Disabled plugins installed in this project are not listed: OMP offers no listing of them." : null,
+		incomplete ? "List may be incomplete: some sources failed to load." : null,
+		overridden ? "Project config replaces the global list; switches here do not apply." : null,
 	].filter((text): text is string => text !== null);
+	const about = [...projected.about];
+	if (inventory.disabledProviders.length > 0) about.push({ label: "Disabled providers not listed", text: `Items from providers disabled in OMP's settings (${inventory.disabledProviders.slice(0, 5).join(", ")}) are not loaded by OMP and are not listed.` });
+	if (view === "extensions" && scope === "session") about.push({ label: "Disabled project plugins not listed", text: "Disabled plugins installed in this project are not listed: OMP offers no listing of them." });
 	if (projected.groups.length === 0) {
 		const reasons = notices.filter(text => text !== projected.notice);
 		return emptyView(reasons.length > 0 ? `${EMPTY_TEXT[view]} ${reasons.join(" ")}` : EMPTY_TEXT[view], scope, description);
 	}
-	return { message: null, notice: notices.length === 0 ? null : notices.join(" "), groups: projected.groups, scope, description };
+	const groups = about.length === 0 ? projected.groups : [...projected.groups, {
+		id: "about", label: "About this list", collapsed: true,
+		items: about.map(fact => ({ key: `about:${fact.label}`, label: fact.label, description: "", tooltip: fact.text, icon: "info" as const, checked: null, openPath: null, row: null })),
+	}];
+	return { message: null, notice: notices.length === 0 ? null : notices.join(" "), groups, scope, description };
 }
 
 // --- applying a toggle -----------------------------------------------------------------------

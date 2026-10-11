@@ -16,6 +16,9 @@ function view(kind: ViewKind, inventory: InventorySnapshot | { unavailable: stri
 const running = (overrides: Partial<SessionEvidence> = {}): SessionEvidence => ({ title: "Work", running: true, commands: [], tools: [], ...overrides });
 const labels = (model: ViewModel): string[] => model.groups.flatMap(group => group.items.map(item => item.label));
 const itemOf = (model: ViewModel, label: string) => model.groups.flatMap(group => group.items).find(item => item.label === label)!;
+/** The folded "About this list" group: standing facts, never shown above the tree. */
+const listed = (model: ViewModel): string[] => model.groups.filter(group => group.id !== "about").map(group => group.label);
+const aboutOf = (model: ViewModel): string[] => model.groups.find(group => group.id === "about")?.items.map(item => item.tooltip) ?? [];
 describe("origin classes", () => {
 	it("maps provider and level to one display class", () => {
 		assert.equal(originClass({ provider: "omp-managed", level: "user" }), "managed");
@@ -50,7 +53,8 @@ describe("skills projection", () => {
 		assert.doesNotMatch(itemOf(withCommand, "review").description, /not reported/);
 		const none = view("skills", snapshot(skills), running({ commands: [{ name: "help", source: "builtin" }] }));
 		assert.doesNotMatch(itemOf(none, "review").description, /not reported/);
-		assert.match(none.notice ?? "", /unknown/);
+		assert.equal(none.notice, null, "a standing fact is not a top line");
+		assert.match(aboutOf(none).join(" "), /unknown/);
 		const terminal = view("skills", snapshot(skills), running({ commands: null }));
 		assert.doesNotMatch(itemOf(terminal, "review").description, /not reported/);
 	});
@@ -95,11 +99,13 @@ describe("tools projection", () => {
 		assert.equal(itemOf(read, "read").checked, null);
 		const unread = view("tools", snapshot(rows), running({ tools: null }));
 		assert.doesNotMatch(itemOf(unread, "grep").description, /not in this session/);
-		assert.match(unread.notice ?? "", /could not be read/);
+		assert.equal(unread.notice, null);
+		assert.match(aboutOf(unread).join(" "), /could not be read/);
 	});
 	it("shows configuration for a stopped session and says so", () => {
 		const model = view("tools", snapshot(rows), { title: "Old", running: false, commands: null, tools: null });
 		assert.match(model.notice ?? "", /not running/);
+		assert.ok(model.notice!.length < 80, "one short line");
 		assert.equal(model.description, "Session: Old");
 	});
 });
@@ -108,10 +114,12 @@ describe("MCP projection", () => {
 	it("never claims a connection: counts name-matched tools and says no status exists", () => {
 		const servers = [row({ kind: "mcp", name: "solo", toolPrefix: "mcp__solo_", detail: "stdio · srv.exe", toggle: { mechanism: "mcp", refusal: null } }), row({ kind: "mcp", name: "idle", toolPrefix: "mcp__idle_", toggle: { mechanism: "mcp", refusal: null } })];
 		const model = view("mcp", snapshot(servers), running({ tools: [{ name: "mcp__solo_a", description: "", active: true }, { name: "mcp__solo_b", description: "", active: true }] }));
-		assert.match(itemOf(model, "solo").description, /2 name-matched tools in this session/);
-		assert.match(itemOf(model, "idle").description, /no matching tools in this session/);
+		assert.match(itemOf(model, "solo").description, /^2 tools/);
+		assert.match(itemOf(model, "idle").description, /^no tools/);
 		assert.doesNotMatch(JSON.stringify(model), /connected/);
-		assert.match(model.notice ?? "", /no MCP connection status/);
+		assert.equal(model.notice, null);
+		assert.match(aboutOf(model).join(" "), /no MCP connection status/);
+		assert.match(itemOf(model, "solo").tooltip, /name prefix.*not a connection status/);
 		const global = view("mcp", snapshot(servers), null, "global");
 		assert.doesNotMatch(itemOf(global, "solo").description, /tool/);
 	});
@@ -120,7 +128,7 @@ describe("MCP projection", () => {
 describe("extensions projection", () => {
 	it("lists modules by origin and plugins separately", () => {
 		const model = view("extensions", snapshot([row({ kind: "extension-module", name: "mod" }), row({ kind: "plugin", name: "pkg", provider: "omp-plugins", toggle: { mechanism: "plugin", refusal: null }, detail: "v1.0.0" })]), null, "global");
-		assert.deepEqual(model.groups.map(group => group.label), ["Modules · Global (1)", "Plugins (1)"]);
+		assert.deepEqual(listed(model), ["Modules · Global (1)", "Plugins (1)"]);
 		assert.equal(itemOf(model, "pkg").checked, true);
 	});
 });
@@ -130,7 +138,7 @@ describe("whole-view rules", () => {
 		const evidence = running({ commands: [{ name: "skill:one", source: "skill" }], tools: [{ name: "grep", description: "g", active: true }] });
 		const skills = view("skills", { unavailable: "No Bun." }, evidence);
 		assert.equal(skills.groups[0]!.items[0]!.checked, null);
-		assert.match(skills.notice ?? "", /No Bun\. Showing only what the session reports/);
+		assert.equal(skills.notice, "No Bun.");
 		assert.equal(view("mcp", { unavailable: "No Bun." }, evidence).message, "No Bun.");
 		assert.equal(view("skills", { unavailable: "No Bun." }, evidence, "global").message, "No Bun.");
 	});
@@ -161,15 +169,36 @@ describe("review follow-ups", () => {
 	});
 	it("never presents a project-scoped marketplace plugin as project or global", () => {
 		const rows = [row({ kind: "skill", name: "mp", provider: "claude-plugins", level: "project" })];
-		for (const scope of ["global", "session"] as const) assert.deepEqual(view("skills", snapshot(rows), scope === "session" ? running() : null, scope).groups.map(group => group.label), ["Other ecosystems (1)"]);
+		for (const scope of ["global", "session"] as const) assert.deepEqual(listed(view("skills", snapshot(rows), scope === "session" ? running() : null, scope)), ["Other ecosystems (1)"]);
 	});
 	it("names providers OMP has disabled", () => {
-		assert.match(view("skills", snapshot([row({ kind: "skill", name: "a" })], { disabledProviders: ["codex"] }), null, "global").notice ?? "", /disabled in OMP's settings \(codex\)/);
+		const codex = view("skills", snapshot([row({ kind: "skill", name: "a" })], { disabledProviders: ["codex"] }), null, "global");
+		assert.equal(codex.notice, null);
+		assert.match(aboutOf(codex).join(" "), /disabled in OMP's settings \(codex\)/);
+		assert.equal(codex.groups.at(-1)!.collapsed, true, "About is the last, folded group");
 	});
 	it("does not claim a built-in is absent from a session whose registry was not authenticated", () => {
 		const builtin = [row({ kind: "builtin-tool", name: "grep", provider: "builtin", level: "builtin", toggle: { mechanism: "setting", refusal: null } })];
 		const model = view("tools", snapshot(builtin), running({ tools: [{ name: "x", description: "", active: null }] }));
-		assert.match(itemOf(model, "grep").description, /not reported by this session/);
+		assert.doesNotMatch(itemOf(model, "grep").description, /not (in|reported)/, "no per-row claim without authenticated evidence");
+		assert.match(aboutOf(model).join(" "), /not marked as absent/);
+	});
+});
+
+describe("top line", () => {
+	const healthy = [row({ kind: "skill", name: "a" }), row({ kind: "mcp", name: "m", toggle: { mechanism: "mcp", refusal: null } }), row({ kind: "plugin", name: "p" })];
+	it("is empty for a healthy list in every view and scope, however many standing facts exist", () => {
+		for (const kind of ["skills", "tools", "mcp", "extensions"] as const) {
+			assert.equal(view(kind, snapshot(healthy, { disabledProviders: ["codex"] }), running({ commands: null, tools: null }), "session").notice, null, kind);
+			assert.equal(view(kind, snapshot(healthy, { disabledProviders: ["codex"] }), null, "global").notice, null, kind);
+		}
+	});
+	it("is one short line, and only for an incomplete list, a project override, a stopped session or an unreadable inventory", () => {
+		const incomplete = view("mcp", snapshot(healthy, { incomplete: ["mcp"] }), null, "global").notice!;
+		assert.match(incomplete, /incomplete/);
+		for (const text of [incomplete, view("skills", snapshot(healthy), { title: "T", running: false, commands: null, tools: null }).notice!,
+			view("skills", snapshot(healthy, { projectOverridesDisabledExtensions: true }), running()).notice!]) assert.ok(text.length < 90, text);
+		assert.equal(view("skills", { unavailable: "No Bun." }, running({ commands: [{ name: "skill:x", source: "skill" }] })).notice, "No Bun.");
 	});
 });
 
