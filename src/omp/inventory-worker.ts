@@ -1,4 +1,5 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { SettingsRefusal, valueAt } from "../host/omp-settings-core.ts";
@@ -96,8 +97,18 @@ function projectMarkers(cwd: string): string[] {
     for (const relative of [[".omp", "plugins", "installed_plugins.json"], [".claude", "settings.json"], [".claude", "settings.local.json"]]) {
       if (existsSync(path.join(dir, ...relative))) found.push(`file ${relative.join("/")}`);
     }
-    if (path.dirname(dir) === dir) return found;
+    if (path.dirname(dir) === dir) break;
   }
+  // OMP admits an entry of the user's Claude plugin registry into a project's inventory when its recorded projectPath is that project.
+  try {
+    const registry: unknown = JSON.parse(readFileSync(path.join(homedir(), ".claude", "plugins", "installed_plugins.json"), "utf8"));
+    const same = (a: string): boolean => path.resolve(a).toLowerCase() === path.resolve(cwd).toLowerCase();
+    const plugins = record(registry) && record(registry.plugins) ? Object.values(registry.plugins) : [];
+    if (plugins.some(entries => Array.isArray(entries) && entries.some(entry => record(entry) && (entry.scope === "project" || entry.scope === "local") && typeof entry.projectPath === "string" && same(entry.projectPath)))) {
+      found.push("Claude plugin entry bound to this folder");
+    }
+  } catch { /* no readable Claude registry: nothing selects a project entry from it */ }
+  return found;
 }
 /** A file inside a dot-folder of `cwd` or one of its ancestors (`.omp/`, `.claude/`, `.agents/`): the shape of a project layer, whatever level OMP's provider claims. */
 function inProjectFolder(file: string, cwd: string): boolean {
