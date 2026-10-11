@@ -55,6 +55,7 @@ import {
 import { AskDialog, AskOptionRow } from "./AskDialog";
 import type { ChatUiRequest, ChatUiResponse } from "../../chat/model";
 import type { ChatClient, ChatSnapshot } from "../lib/chat-client";
+import { caretRowEdges } from "../lib/caret-row";
 import { chatWritable } from "../lib/chat-client";
 import { reportComposerPopupOpen } from "../lib/composer-overlay";
 import { providePanelActions } from "../lib/panel-actions";
@@ -1159,7 +1160,9 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind 
 				const element = event.currentTarget;
 				const value = element.value;
 				const at = element.selectionStart;
-				const edge = at === element.selectionEnd && (event.key === "ArrowUp" ? !value.slice(0, at).includes("\n") : !value.slice(at).includes("\n"));
+				// History takes the arrow only when the browser would have no row left to move the caret to: soft-wrapped rows count, not just newlines.
+				const edges = at === element.selectionEnd ? caretRowEdges(element, at) : null;
+				const edge = edges !== null && (event.key === "ArrowUp" ? edges.first : edges.last);
 				if (edge && imagesRef.current.length === 0) {
 					const step = historyStep(sessionPrompts(client.getSnapshot().entries), historyRef.current, event.key === "ArrowUp" ? "older" : "newer", value);
 					if (step !== null) {

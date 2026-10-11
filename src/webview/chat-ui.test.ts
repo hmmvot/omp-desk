@@ -3681,6 +3681,47 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 		await t.test("Stop hands the still-queued messages back into the draft, after what is typed, and says when some could not come back", async () => {
 			await reset("quick-stop-restore");
 			await ui.evaluate("window.ui.push({working:true,settled:false,state:{...window.ui.current().state,isStreaming:true}});document.querySelector('.omp-composer textarea').focus()");
+		await t.test("Up and Down leave history while the caret has a visual row to move to: a soft-wrapped prompt is several rows, not one line", async () => {
+			await reset("quick-history-wrapped");
+			const long = Array.from({ length: 60 }, (_, index) => `word${index}`).join(" ");
+			await ui.evaluate(`const row=(id,message)=>({type:'message',id,parentId:null,timestamp:'2026-10-01T00:00:00.000Z',message});
+			 window.ui.push({entries:[row('u1',{role:'user',timestamp:1,content:'first prompt'}),row('a1',{role:'assistant',model:'m',timestamp:2,stopReason:'stop',content:[{type:'text',text:'ok'}]}),
+			  row('u2',{role:'user',timestamp:3,content:${JSON.stringify(long)}}),row('a2',{role:'assistant',model:'m',timestamp:4,stopReason:'stop',content:[{type:'text',text:'ok'}]})],durableCount:4,working:false,settled:true});
+			 window.composerBox=document.querySelector('.omp-composer textarea');window.composerBox.focus()`);
+			await ui.wait("document.querySelector('.omp-transcript').textContent.includes('word59')");
+			const caret = (): Promise<number> => ui.evaluate("window.composerBox.selectionStart");
+			const setCaret = (at: number): Promise<unknown> => ui.evaluate(`window.composerBox.setSelectionRange(${at},${at})`);
+			await press("ArrowUp", "ArrowUp", 38);
+			await ui.wait(`document.querySelector('.omp-composer textarea').value===${JSON.stringify(long)}`);
+			assert.ok(await ui.evaluate<boolean>("window.composerBox.scrollHeight>=window.composerBox.clientHeight&&window.composerBox.scrollHeight>=60"), "the recalled prompt wraps over several rows");
+			assert.equal(await caret(), long.length, "the recalled prompt has the caret at its end");
+			const middle = Math.floor(long.length / 2);
+			await press("ArrowUp", "ArrowUp", 38);
+			assert.equal(await draftValue(), long, "Up on the last row moves the caret up a row, not to older history");
+			assert.ok((await caret()) < long.length, "the caret moved");
+			await setCaret(middle);
+			await press("ArrowUp", "ArrowUp", 38);
+			assert.equal(await draftValue(), long, "Up in the middle of a wrapped paragraph moves the caret");
+			assert.ok((await caret()) < middle, "up one row");
+			await setCaret(middle);
+			await press("ArrowDown", "ArrowDown", 40);
+			assert.equal(await draftValue(), long, "Down in the middle of a wrapped paragraph moves the caret");
+			assert.ok((await caret()) > middle, "down one row");
+			await setCaret(0);
+			await press("ArrowDown", "ArrowDown", 40);
+			assert.equal(await draftValue(), long, "Down on the first row of a wrapped paragraph moves the caret");
+			assert.ok((await caret()) > 0, "down one row");
+			await setCaret(10);
+			await press("ArrowUp", "ArrowUp", 38);
+			await ui.wait("document.querySelector('.omp-composer textarea').value==='first prompt'");
+			await press("ArrowDown", "ArrowDown", 40);
+			await ui.wait(`document.querySelector('.omp-composer textarea').value===${JSON.stringify(long)}`);
+			await press("ArrowDown", "ArrowDown", 40);
+			await ui.wait("document.querySelector('.omp-composer textarea').value===''");
+			assert.equal(await ui.evaluate("window.ui.sends().length"), 0);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 			await ui.wait("document.querySelector('[aria-label=\"Stop the running turn\"]')");
 			await ui.call("Input.insertText", { text: "typed" });
 			await ui.evaluate("document.querySelector('[aria-label=\"Stop the running turn\"]').click()");
