@@ -153,6 +153,10 @@ test("installed OMP inventory: rows, origins, redaction, global switches and ref
     const claudeDir = path.join(nativeRoot, "claude-config");
     await write(path.join(claudeDir, "plugins", "installed_plugins.json"), JSON.stringify({ version: 2, plugins: { "bound@market": [{ scope: "project", projectPath: neutral, installPath: path.join(claudeDir, "cache"), version: "1" }] } }));
     await assert.rejects(runSettingsWorker({ bunPath, helperPath, packageRoot, cwd: neutral, profile: "default", request: { action: "read", scope: "global" }, env: { ...env, CLAUDE_CONFIG_DIR: claudeDir } }), /project configuration/);
+    for (const padded of [`  ${claudeDir}  `, `${claudeDir}${path.sep}..${path.sep}claude-config`]) {
+      await assert.rejects(runSettingsWorker({ bunPath, helperPath, packageRoot, cwd: neutral, profile: "default", request: { action: "read", scope: "global" }, env: { ...env, CLAUDE_CONFIG_DIR: padded } }), /project configuration/, "whitespace and unnormalised overrides resolve as OMP resolves them");
+    }
+    await runSettingsWorker({ bunPath, helperPath, packageRoot, cwd: neutral, profile: "default", request: { action: "read", scope: "global" }, env: { ...env, CLAUDE_CONFIG_DIR: "   " } });
 
     // A project that sets its own disabledExtensions replaces the global list: no global switch there.
     await write(path.join(projectDir, ".omp", "config.yml"), "disabledExtensions: []\n");

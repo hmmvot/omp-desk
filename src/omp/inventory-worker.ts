@@ -1,5 +1,4 @@
 import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { homedir } from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { claudeRegistryBindsFolder } from "./inventory-guards.ts";
@@ -51,6 +50,7 @@ interface Natives {
   writer: { setServerDisabled(file: string, name: string, disabled: boolean): Promise<void>; setServerForceEnabled(file: string, name: string, force: boolean): Promise<void>;
     readDisabledServers(file: string): Promise<string[]>; readEnabledServers(file: string): Promise<string[]> };
   bridge: { createMCPToolName(server: string, tool: string): string };
+  claudePaths: { resolveClaudePaths(): { configDir: string } };
   transport: { inferMcpTransport(server: unknown): string };
 }
 
@@ -63,7 +63,8 @@ async function load(root: string, file: string, names: readonly string[]): Promi
 }
 async function natives(packageRoot: string): Promise<Natives> {
   const scope = path.dirname(packageRoot);
-  const [dirs, settings, discovery, extSettings, state, skills, loader, helpers, tools, registry, plugins, pluginLoader, writer, bridge, transport] = await Promise.all([
+  const [claudePaths, dirs, settings, discovery, extSettings, state, skills, loader, helpers, tools, registry, plugins, pluginLoader, writer, bridge, transport] = await Promise.all([
+    load(packageRoot, "config/claude-paths.ts", ["resolveClaudePaths"]),
     load(path.join(scope, "pi-utils"), "dirs.ts", ["setProfile", "getAgentDir", "getMCPConfigPath"]),
     load(packageRoot, "config/settings.ts", ["Settings"]),
     load(packageRoot, "discovery/index.ts", ["initializeWithSettings", "loadCapability"]),
@@ -80,7 +81,7 @@ async function natives(packageRoot: string): Promise<Natives> {
     load(packageRoot, "mcp/tool-bridge.ts", ["createMCPToolName"]),
     load(path.join(scope, "pi-tui"), "overlays/extensions/mcp-runtime.ts", ["inferMcpTransport"]),
   ]);
-  return { dirs, settings, discovery, extSettings, state, skills, loader, helpers, tools, registry, plugins, pluginLoader, writer, bridge, transport } as unknown as Natives;
+  return { claudePaths, dirs, settings, discovery, extSettings, state, skills, loader, helpers, tools, registry, plugins, pluginLoader, writer, bridge, transport } as unknown as Natives;
 }
 
 const TEXT_LIMIT = 500;
@@ -92,7 +93,7 @@ const samePath = (a: string, b: string): boolean => path.normalize(a).toLowerCas
 const OMISSION = /Failed to (load|parse)|Invalid (item|plugin|JSON|config)|no installPath/i;
 
 /** Files that SELECT project-level plugin rows or project settings without the rows themselves living in a project folder. */
-function projectMarkers(cwd: string): string[] {
+function projectMarkers(cwd: string, claudeConfigDir: string): string[] {
   const found: string[] = [];
   for (let dir = path.resolve(cwd); ; dir = path.dirname(dir)) {
     for (const relative of [[".omp", "plugins", "installed_plugins.json"], [".claude", "settings.json"], [".claude", "settings.local.json"]]) {
@@ -102,7 +103,7 @@ function projectMarkers(cwd: string): string[] {
   }
   // OMP admits an entry of the user's Claude plugin registry into a project's inventory when its recorded projectPath is that project.
   try {
-    const registry: unknown = JSON.parse(readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(homedir(), ".claude"), "plugins", "installed_plugins.json"), "utf8"));
+    const registry: unknown = JSON.parse(readFileSync(path.join(claudeConfigDir, "plugins", "installed_plugins.json"), "utf8"));
     if (claudeRegistryBindsFolder(registry, cwd, resolved => { try { return realpathSync.native(resolved); } catch { return resolved; } })) found.push("Claude plugin entry bound to this folder");
   } catch { /* no readable Claude registry: nothing selects a project entry from it */ }
   return found;
@@ -274,7 +275,7 @@ async function collect(request: WorkerRequest, n: Natives): Promise<Collected> {
     // Row payloads can sit outside the project's own folders (a project plugin registry points into a user cache),
     // so the registry and settings files that SELECT such rows are checked as well as where the rows live.
     if (request.scope === "global") {
-      const found = [...Object.keys(project).map(key => `setting ${key}`), ...projectMarkers(request.cwd),
+      const found = [...Object.keys(project).map(key => `setting ${key}`), ...projectMarkers(request.cwd, n.claudePaths.resolveClaudePaths().configDir),
         ...rows.filter(row => row.path !== null && inProjectFolder(row.path, request.cwd)).map(row => `${row.kind} ${row.name}`)];
       if (found.length > 0) throw new SettingsRefusal(`OMP found project configuration at the folder used for the Global inventory (${found.slice(0, 3).join(", ")}), so Global cannot be shown reliably. Remove that project configuration.`);
     }
