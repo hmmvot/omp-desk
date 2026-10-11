@@ -17,13 +17,13 @@ function target(overrides: Partial<SessionToolsTarget> = {}): SessionToolsTarget
 function harness(initial: SessionToolsTarget | null) {
 	const state = { target: initial, reads: [] as InventoryReadRequest[], toggles: [] as ToggleRequest[], published: [] as Array<[ViewKind, ViewModel]>, scopes: [] as Array<[ViewKind, InventoryScope]>,
 		toggleGate: null as Promise<void> | null,
-		notices: [] as Array<[string, string]>, delays: [] as number[], gate: null as Promise<void> | null, toggleResult: { ok: true, changed: true } as ToggleResult, readResult: null as ((request: InventoryReadRequest) => InventoryResult) | null };
+		notices: [] as Array<[string, string]>, logs: [] as string[], delays: [] as number[], gate: null as Promise<void> | null, toggleResult: { ok: true, changed: true } as ToggleResult, readResult: null as ((request: InventoryReadRequest) => InventoryResult) | null };
 	const runtime: InventoryRuntime = {
 		async read(request) { state.reads.push(request); if (state.gate) await state.gate; return state.readResult?.(request) ?? snapshot(request.cwd, request.profile); },
 		async toggle(request) { state.toggles.push(request); if (state.toggleGate) await state.toggleGate; return state.toggleResult; },
 	};
 	const deps: InventoryControllerDeps = { target: () => state.target, runtime, neutralCwd: "C:/", publish: (view, model) => { state.published.push([view, model]); },
-		scopeChanged: (view, scope) => { state.scopes.push([view, scope]); }, notify: (message, level) => { state.notices.push([level, message]); }, delay: async ms => { state.delays.push(ms); } };
+		scopeChanged: (view, scope) => { state.scopes.push([view, scope]); }, notify: (message, level) => { state.notices.push([level, message]); }, log: message => { state.logs.push(message); }, delay: async ms => { state.delays.push(ms); } };
 	const controller = new InventoryController(deps);
 	const settle = async () => { for (let turn = 0; turn < 20; turn++) await new Promise(resolve => setImmediate(resolve)); };
 	const last = (view: ViewKind) => state.published.filter(([kind]) => kind === view).at(-1)![1];
@@ -132,6 +132,25 @@ describe("inventory controller switches", () => {
 		assert.equal(h.state.notices[0]![0], "info");
 		assert.match(h.state.notices[0]![1], /may apply it live/);
 		assert.deepEqual(h.state.delays, [1500], "a running session gets time for OMP's config watcher before the refresh");
+	});
+	it("logs each switch request and its outcome, and nothing for a refresh", async () => {
+		const h = harness(target());
+		h.controller.setVisible("skills", true);
+		await h.settle();
+		assert.deepEqual(h.state.logs, []);
+		await h.controller.toggle("skills", h.shown("skills"), false);
+		h.state.toggleResult = { ok: true, changed: false };
+		await h.controller.toggle("skills", h.shown("skills"), true);
+		h.state.toggleResult = { ok: false, message: "OMP no longer lists this item." };
+		await h.controller.toggle("skills", h.shown("skills"), false);
+		assert.deepEqual(h.state.logs, [
+			"inventory: switch skill:review off requested in the session list (profile default)",
+			"inventory: switch skill:review off written",
+			"inventory: switch skill:review on requested in the session list (profile default)",
+			"inventory: switch skill:review on already as requested; nothing written",
+			"inventory: switch skill:review off requested in the session list (profile default)",
+			"inventory: switch skill:review off refused: OMP no longer lists this item.",
+		]);
 	});
 	it("does not wait for the watcher when the session is not running or the kind applies next session", async () => {
 		const h = harness(target({ running: false }));

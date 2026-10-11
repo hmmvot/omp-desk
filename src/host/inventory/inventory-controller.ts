@@ -13,6 +13,8 @@ export interface InventoryControllerDeps {
 	/** Mirrors a view's effective scope to its title-bar button. */
 	scopeChanged(view: ViewKind, scope: InventoryScope): void;
 	notify(message: string, level: "info" | "warning"): void;
+	/** One line per switch request and its outcome: the only trace of who changed OMP's `config.yml` from a view. */
+	log(message: string): void;
 	/** After a live switch, OMP's config watcher needs a moment before a running session shows it. */
 	delay(ms: number): Promise<void>;
 }
@@ -135,7 +137,9 @@ export class InventoryController {
 		if (this.#disposed) return;
 		if (context === undefined) { this.#deps.notify("Refresh the view before switching.", "warning"); return; }
 		const { plan, running } = context;
+		this.#deps.log(`inventory: switch ${row.kind}:${row.name} ${enabled ? "on" : "off"} requested in the ${plan.scope} list (profile ${plan.profile})`);
 		const result = await this.#deps.runtime.toggle({ cwd: plan.cwd, profile: plan.profile, scope: plan.scope, kind: row.kind, name: row.name, enabled });
+		this.#deps.log(`inventory: switch ${row.kind}:${row.name} ${enabled ? "on" : "off"} ${result.ok ? (result.changed ? "written" : "already as requested; nothing written") : `refused: ${result.message}`}`);
 		if (!result.ok) {
 			this.#deps.notify(result.message, "warning");
 			this.refresh();

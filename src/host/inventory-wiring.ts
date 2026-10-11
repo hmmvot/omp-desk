@@ -67,6 +67,7 @@ export function registerInventoryViews(context: vscode.ExtensionContext, deps: I
 		},
 		scopeChanged(view, scope: InventoryScope) { void vscode.commands.executeCommand("setContext", `omp.${view}.scope`, scope); },
 		notify(message, level) { void (level === "warning" ? vscode.window.showWarningMessage(message) : vscode.window.showInformationMessage(message)); },
+		log: message => deps.log(message),
 		delay: ms => sleep(ms),
 	});
 	const subscriptions: vscode.Disposable[] = [];
