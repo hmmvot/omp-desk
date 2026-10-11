@@ -15,8 +15,11 @@ import { injectGuestStyles } from "./styles";
 import { adoptNonceForCreatedStyles } from "./lib/nonce-styles";
 import { attachSessionView, sessionViewSnapshot } from "./lib/session-view";
 import { attachInsertedText } from "./lib/insert-text";
+import { restoreFocusTakenByHost } from "./lib/frame-focus";
 
 function boot(): void {
+	// VS Code focuses the webview again when its window gains focus, which empties the page's focus; put it back.
+	restoreFocusTakenByHost(window);
 	const nonce = readCspNonce();
 	adoptNonceForCreatedStyles(nonce);
 	injectGuestStyles(nonce);
