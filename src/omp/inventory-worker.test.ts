@@ -149,6 +149,11 @@ test("installed OMP inventory: rows, origins, redaction, global switches and ref
     await assert.rejects(run({ action: "toggle", scope: "global", kind: "skill", name: "no-such-skill", enabled: false }), /no longer lists/);
     assert.equal(await fs.readFile(path.join(agentDir, "config.yml"), "utf8"), configBefore);
 
+    // A relocated Claude registry (CLAUDE_CONFIG_DIR, as OMP honours it) with an entry bound to the Global folder makes Global refuse.
+    const claudeDir = path.join(nativeRoot, "claude-config");
+    await write(path.join(claudeDir, "plugins", "installed_plugins.json"), JSON.stringify({ version: 2, plugins: { "bound@market": [{ scope: "project", projectPath: neutral, installPath: path.join(claudeDir, "cache"), version: "1" }] } }));
+    await assert.rejects(runSettingsWorker({ bunPath, helperPath, packageRoot, cwd: neutral, profile: "default", request: { action: "read", scope: "global" }, env: { ...env, CLAUDE_CONFIG_DIR: claudeDir } }), /project configuration/);
+
     // A project that sets its own disabledExtensions replaces the global list: no global switch there.
     await write(path.join(projectDir, ".omp", "config.yml"), "disabledExtensions: []\n");
     const overridden = await read("session", projectDir);

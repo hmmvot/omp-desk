@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -102,8 +102,8 @@ function projectMarkers(cwd: string): string[] {
   }
   // OMP admits an entry of the user's Claude plugin registry into a project's inventory when its recorded projectPath is that project.
   try {
-    const registry: unknown = JSON.parse(readFileSync(path.join(homedir(), ".claude", "plugins", "installed_plugins.json"), "utf8"));
-    if (claudeRegistryBindsFolder(registry, cwd)) found.push("Claude plugin entry bound to this folder");
+    const registry: unknown = JSON.parse(readFileSync(path.join(process.env.CLAUDE_CONFIG_DIR ?? path.join(homedir(), ".claude"), "plugins", "installed_plugins.json"), "utf8"));
+    if (claudeRegistryBindsFolder(registry, cwd, resolved => { try { return realpathSync.native(resolved); } catch { return resolved; } })) found.push("Claude plugin entry bound to this folder");
   } catch { /* no readable Claude registry: nothing selects a project entry from it */ }
   return found;
 }
