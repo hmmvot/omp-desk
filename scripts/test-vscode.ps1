@@ -11,6 +11,9 @@ Each -Name is a separate test environment under -Root:
 A fresh environment is OMP as a new user sees it: no provider login and no sessions. Log in from that window to
 build a state worth keeping, and use -Reset to return to a clean OMP.
 
+PI_CODING_AGENT_DIR does not move everything: OMP keeps installed plugins under ~/.omp/plugins whatever it says. A
+Plugins row switched in the Extensions view of a test window changes your real plugin lock.
+
 Provider API keys in the environment (ANTHROPIC_API_KEY and similar) would give OMP models even without a login,
 so they are removed from the launched VS Code unless -KeepProviderKeys is given.
 
