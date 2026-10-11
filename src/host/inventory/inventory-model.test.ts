@@ -21,6 +21,7 @@ describe("origin classes", () => {
 		assert.equal(originClass({ provider: "omp-managed", level: "user" }), "managed");
 		assert.equal(originClass({ provider: "native", level: "project" }), "project");
 		assert.equal(originClass({ provider: "agents", level: "project" }), "project");
+		assert.equal(originClass({ provider: "claude-plugins", level: "project" }), "other");
 		assert.equal(originClass({ provider: "native", level: "user" }), "global");
 		for (const provider of ["agents", "claude", "codex", "omp-plugins", "custom"]) assert.equal(originClass({ provider, level: "user" }), "other");
 	});
@@ -158,10 +159,9 @@ describe("review follow-ups", () => {
 		const model = view("skills", snapshot([], { incomplete: ["skills"] }), null, "global");
 		assert.match(model.message ?? "", /may be incomplete/);
 	});
-	it("labels a project-scoped marketplace plugin as another ecosystem only in Global", () => {
+	it("never presents a project-scoped marketplace plugin as project or global", () => {
 		const rows = [row({ kind: "skill", name: "mp", provider: "claude-plugins", level: "project" })];
-		assert.deepEqual(view("skills", snapshot(rows), null, "global").groups.map(group => group.label), ["Other ecosystems (1)"]);
-		assert.deepEqual(view("skills", snapshot(rows), running()).groups.map(group => group.label), ["Project (1)"]);
+		for (const scope of ["global", "session"] as const) assert.deepEqual(view("skills", snapshot(rows), scope === "session" ? running() : null, scope).groups.map(group => group.label), ["Other ecosystems (1)"]);
 	});
 	it("names providers OMP has disabled", () => {
 		assert.match(view("skills", snapshot([row({ kind: "skill", name: "a" })], { disabledProviders: ["codex"] }), null, "global").notice ?? "", /disabled in OMP's settings \(codex\)/);

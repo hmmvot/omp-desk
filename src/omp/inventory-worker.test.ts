@@ -88,6 +88,18 @@ test("installed OMP inventory: rows, origins, redaction, global switches and ref
     assert.deepEqual(await run({ action: "toggle", scope: "global", kind: "skill", name: "custom-one", enabled: true }), { changed: true });
     assert.equal(row(await read("global"), "skill", "custom-one").state, "active");
 
+    // A malformed existing VS Code MCP config is an omission, not an empty list.
+    await write(path.join(projectDir, ".vscode", "mcp.json"), "{ not json");
+    assert.ok((await read("session", projectDir)).incomplete.includes("mcp"), "a skipped malformed source marks the view incomplete");
+    await fs.rm(path.join(projectDir, ".vscode"), { recursive: true });
+
+    // A custom-directory skill that collides with a disabled native skill has no effective runtime name.
+    await write(path.join(nativeRoot, "custom-skills", "dup", "SKILL.md"), "---\nname: demo-skill\ndescription: Colliding custom copy\n---\nbody\n");
+    assert.deepEqual(await run({ action: "toggle", scope: "global", kind: "skill", name: "demo-skill", enabled: false }), { changed: true });
+    const collided = (await read("global")).rows.filter(candidate => candidate.kind === "skill" && candidate.path?.includes("custom-skills"));
+    assert.equal(collided.some(candidate => candidate.name === "demo-skill" && candidate.runtimeName !== null), false, "disabled by raw name: not an effective skill");
+    assert.deepEqual(await run({ action: "toggle", scope: "global", kind: "skill", name: "demo-skill", enabled: true }), { changed: true });
+
     // Session scope sees the project's own skill and read-only project state.
     const session = await read("session", projectDir);
     assert.equal(row(session, "skill", "project-skill").level, "project");

@@ -71,7 +71,8 @@ export interface SessionToolEntry { readonly name: string; readonly description:
 /** One display class per `{provider, level}` (design: Origin classes). */
 export function originClass(row: Pick<InventoryRow, "provider" | "level">): OriginClass {
 	if (row.provider === "omp-managed") return "managed";
-	if (row.level === "project") return "project";
+	// OMP gives a marketplace plugin its install scope without saying which registry selected it, so it is never presented as this project's or as global.
+	if (row.level === "project" && row.provider !== "claude-plugins") return "project";
 	if (row.level === "user" && row.provider === "native") return "global";
 	return "other";
 }
@@ -321,8 +322,7 @@ export function projectView(input: ProjectionInput): ViewModel {
 	if (isUnavailable(inventory)) return fallback(view, inventory.unavailable, evidence, scope, description);
 	// A category OMP could not fully load is shown as found but cannot be switched.
 	const incomplete = inventory.incomplete.includes(view);
-	// Global is user-only by construction (the worker refuses a project layer), so a project-scoped marketplace entry there comes from a user registry.
-	const scoped = scope === "global" ? inventory.rows.map(row => row.provider === "claude-plugins" && row.level === "project" ? { ...row, level: "user" as const } : row) : inventory.rows;
+	const scoped = inventory.rows;
 	const rows = incomplete ? scoped.map(row => VIEW_OF_ROW[row.kind] === view && row.toggle.mechanism !== null
 		? { ...row, toggle: { mechanism: null, refusal: "OMP reported a failure loading some sources of this kind" } } : row) : scoped;
 	const effectiveEvidence = scope === "session" ? evidence : null;

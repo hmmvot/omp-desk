@@ -256,6 +256,12 @@ async function collect(request: WorkerRequest, n: Natives): Promise<Collected> {
       }
     } catch { incomplete.add("extensions"); }
 
+    // OMP reports the install scope of a marketplace plugin but not which registry selected it (a project registry or a user one): no global switch is offered for such a row.
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i]!;
+      if (row.provider === "claude-plugins" && row.level === "project" && row.toggle.mechanism !== null) rows[i] = { ...row, toggle: { mechanism: null, refusal: "OMP marks this marketplace plugin as project-scoped without saying which registry selected it" } };
+    }
+
     // Global must be user-only: a project layer at the neutral folder would shadow rows and settings silently.
     // Row payloads can sit outside the project's own folders (a project plugin registry points into a user cache),
     // so the registry and settings files that SELECT such rows are checked as well as where the rows live.
