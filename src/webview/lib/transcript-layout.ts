@@ -1,4 +1,4 @@
-import { entryMessage } from "../../chat/messages";
+import { entryMessage } from "../../chat/messages.ts";
 import type { DensityCard } from "../../chat/tool-overview";
 import type { MeasuredRow } from "./transcript-virtualizer";
 
@@ -23,6 +23,7 @@ export function measuredTranscriptRows(cards: readonly DensityCard[], sources: R
 			estimate = card.content.reduce((height, block) => height + (block.type === "text" ? textHeight(block.text) : block.type === "image" ? 220 : 32), 16);
 		} else if (card.kind === "entry") {
 			revision.push(card.entry, disclosures.get(`irc:${namespace}:${card.id}`) ?? false);
+			if (card.entry.type === "reset_boundary") revision.push(disclosures.get(`cleared:${namespace}:${card.id}`) ?? false);
 			const message = entryMessage(card.entry);
 			if (message?.role === "user" && typeof message.content === "string") estimate = textHeight(message.content) + 16;
 			else if (message?.role === "custom" && message.customType.startsWith("irc:")) estimate = revision[1] === true ? 160 : 32;

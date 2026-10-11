@@ -30,7 +30,7 @@ import type {
 	ChatSnapshotPayload,
 	ChatStatePayload,
 } from "../chat/model.ts";
-import { createChatModel, sameEpoch, setChatPhase, snapshotOf } from "../chat/model.ts";
+import { chatTurnInProgress, createChatModel, sameEpoch, setChatPhase, snapshotOf } from "../chat/model.ts";
 import { MAX_CHAT_TEXT_LENGTH, splitChatSnapshot } from "../webview/chat-messages.ts";
 import type { ChatHostMessage, ChatWebviewMessage, ChatSubagentRequestMessage, ChatDisplayPreferences, ChatQueueRemoveMessage, ChatQueueResultEntry, ChatAbortResultMessage, ChatNavigateResultMessage } from "../webview/chat-messages.ts";
 import { SUBAGENT_CHUNK_CHARS, type SubagentTranscriptPage } from "../chat/subagent-transcript.ts";
@@ -40,6 +40,8 @@ import type { RpcChannel } from "./rpc/protocol.ts";
 import { RpcSession, readViewOnlySnapshot } from "./rpc/session.ts";
 import type { NavigateOutcome, NavigateRequest, RestoredQueue, RpcRecoveryReason, RpcSessionOptions, RpcSessionOutput, SendOutcome } from "./rpc/session.ts";
 import { nativeSettingsCommand, type SettingsKind } from "../chat/settings-command.ts";
+import { CLEAR_DONE_SENTENCE, CLEAR_REFUSAL_SENTENCES } from "../chat/clear.ts";
+import { DESK_COMMAND_ARGUMENTS_SENTENCE, DESK_COMMAND_UNAVAILABLE_SENTENCE, NEW_BUSY_SENTENCE, deskSessionCommand, type DeskSessionCommand } from "../chat/desk-commands.ts";
 import { tuiCommandGuidance, tuiOnlyCommand, type BuiltinSlashEntry, type DeskSlashAction } from "./slash-registry.ts";
 
 /** One route that shows a conversation. */
@@ -70,7 +72,7 @@ export type ChatRuntimeEvent =
 	/** The phase, code, identity or bounded autonomous child-exit diagnostic changed. */
 	| { readonly type: "state"; readonly payload: ChatStatePayload }
 	/** The identity the process serves: learned for a new session, verified for a resumed one. */
-	| { readonly type: "identity"; readonly sessionFile: string; readonly sessionId: string }
+	| { readonly type: "identity"; readonly sessionFile: string; readonly sessionId: string; readonly previousSessionId?: string }
 	/** `open_url`: the extension shows an extension-owned confirm naming the URL. */
 	| { readonly type: "open-url"; readonly url: string; readonly launchUrl?: string; readonly instructions?: string }
 	/** The page asked to resume a view-only conversation. */
@@ -89,6 +91,7 @@ export interface LiveConversationInput {
 	readonly channel: RpcChannel;
 	/** The exact file the process must serve; `null` for a new conversation. */
 	readonly sessionFile: string | null;
+	readonly expectedProviderSessionId?: string;
 	readonly cwd: string;
 	readonly title: string | null;
 	/** Last broker line seq already folded (0 after a host restart). */
@@ -98,7 +101,7 @@ export interface LiveConversationInput {
 export interface ChatRuntimeOptions {
 	/** Identifies this extension-host instance in every epoch. */
 	readonly hostNonce: string;
-	readonly onEvent: (tabId: string, event: ChatRuntimeEvent) => void;
+	readonly onEvent: (tabId: string, event: ChatRuntimeEvent) => void | Promise<void>;
 	/** Test seam: builds the session; defaults to {@link RpcSession}. */
 	readonly createSession?: (options: RpcSessionOptions) => RpcSession;
 	/** Test seam: reads the view-only snapshot; defaults to {@link readViewOnlySnapshot}. */
@@ -205,6 +208,10 @@ export class ChatRuntime {
 		const session = create({
 			channel: input.channel,
 			sessionFile: input.sessionFile,
+			...(input.expectedProviderSessionId === undefined ? {} : { expectedProviderSessionId: input.expectedProviderSessionId }),
+			acceptProviderIdentity: async (sessionFile, sessionId, previousSessionId) => {
+				await this.#options.onEvent(tabId, { type: "identity", sessionFile, sessionId, previousSessionId });
+			},
 			cwd: input.cwd,
 			hostNonce: nonce,
 			...(input.initialSeq === undefined ? {} : { initialSeq: input.initialSeq }),
@@ -445,6 +452,8 @@ export class ChatRuntime {
 			return "refused";
 		}
 		if (message.type === "omp:chat-prompt" || message.type === "omp:chat-steer" || message.type === "omp:chat-follow-up") {
+			const desk = deskSessionCommand(message.text);
+			if (desk !== null) return this.#serveDeskCommand(conversation, session, origin, `${tabId}:${message.requestId}`, desk);
 			// An identity-changing builtin keeps its own refusal (the session's); every other TUI-only builtin is answered here.
 			const command = classifySlashInput(message.text, session.model.commands).denied ? null : tuiOnlyCommand(message.text, this.#options.slashRegistry?.() ?? null, session.model.commands);
 			if (command !== null) return this.#serveTuiCommand(conversation, origin, `${tabId}:${message.requestId}`, command);
@@ -574,7 +583,7 @@ export class ChatRuntime {
 				});
 				return;
 			case "identity":
-				this.#options.onEvent(tabId, { type: "identity", sessionFile: output.sessionFile, sessionId: output.sessionId });
+				this.#options.onEvent(tabId, { type: "identity", sessionFile: output.sessionFile, sessionId: output.sessionId, ...(output.previousSessionId === undefined ? {} : { previousSessionId: output.previousSessionId }) });
 				return;
 			case "prompt-lost":
 				this.#tellAll(conversation, CHAT_PROMPT_LOST_SENTENCE);
@@ -789,6 +798,49 @@ export class ChatRuntime {
 		for (let count = texts.length; count >= 0; count = count === 0 ? -1 : Math.floor(count / 2)) {
 			if (origin.post(answer(texts.slice(0, count), imagesDropped, restored.truncated || clipped || count < texts.length)) !== "too-large") return;
 		}
+	}
+
+	/**
+	 * `/clear`, `/new` and `/delete` typed into Chat (ADR-0059): never sent to OMP. `/clear` runs the in-place reset
+	 * through the live session; the other two run their Desk action, `/new` only while no response runs. Once per request.
+	 * Every outcome is `explained`: nothing reached OMP as a prompt, so the composer starts no turn state.
+	 */
+	#serveDeskCommand(conversation: Conversation, session: RpcSession, origin: ChatPage | null, key: string, request: { command: DeskSessionCommand; hasArguments: boolean }): Promise<ChatCommandOutcome> {
+		const previous = this.#settingsRequests.get(key);
+		if (previous) return previous;
+		const operation = (async (): Promise<ChatCommandOutcome> => {
+			const { command } = request;
+			if (request.hasArguments) {
+				this.#tell(conversation, origin, command === "clear" ? CLEAR_REFUSAL_SENTENCES.arguments : DESK_COMMAND_ARGUMENTS_SENTENCE);
+				return "explained";
+			}
+			if (command === "clear") {
+				const outcome = await session.clear(randomBytes(16).toString("hex"));
+				this.#tell(conversation, origin, outcome.status === "done" ? CLEAR_DONE_SENTENCE : CLEAR_REFUSAL_SENTENCES[outcome.status === "refused" ? outcome.reason : "unconfirmed"]);
+				return "explained";
+			}
+			if (command === "fresh") {
+				const outcome = await session.fresh(randomBytes(16).toString("hex"));
+				this.#tell(conversation, origin, outcome.status === "done" ? "Provider state refreshed. Local conversation history is unchanged." : "/fresh did not confirm a provider reset.");
+				return "explained";
+			}
+			const run = this.#options.runDeskAction;
+			if (run === undefined) {
+				this.#tell(conversation, origin, DESK_COMMAND_UNAVAILABLE_SENTENCE);
+				return "explained";
+			}
+			if (command === "new" && !session.admitReplacement()) {
+				this.#tell(conversation, origin, NEW_BUSY_SENTENCE);
+				return "explained";
+			}
+			try { await run(command === "new" ? "new-session" : "delete-session", conversation.tabId); }
+			catch { this.#tell(conversation, origin, `/${command} did not complete.`); }
+			finally { if (command === "new") session.setMutationFence(null); }
+			return "explained";
+		})();
+		this.#settingsRequests.set(key, operation);
+		if (this.#settingsRequests.size > 128) this.#settingsRequests.delete(this.#settingsRequests.keys().next().value!);
+		return operation;
 	}
 
 	/** A terminal-UI builtin typed into Chat: never sent to OMP. Its Desk equivalent runs when there is one. Once per request. */

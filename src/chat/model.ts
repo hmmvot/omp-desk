@@ -255,6 +255,8 @@ export interface ChatModel {
 	/** Durable rows in file order (active path), then pending rows. `durableCount` splits them. */
 	entries: readonly ChatEntry[];
 	durableCount: number;
+	/** Host-known incomplete Desk clear during this attach; native/unknown boundaries have no such provenance. */
+	unconfirmedClearBoundaryId: string | null;
 	pending: ReadonlyMap<string, PendingRow>;
 	/** Rendering rows still on disk above the loaded window. */
 	olderCount: number;
@@ -420,6 +422,7 @@ export interface ChatSnapshotPayload {
 	header: ChatHeader | null;
 	/** Durable rows of the tail window in file order. */
 	entries: readonly ChatEntry[];
+	unconfirmedClearBoundaryId?: string | null;
 	olderCount: number;
 	leafId: string | null;
 	/** Off-path branches of the active path; absent means none known. */
@@ -488,6 +491,7 @@ export function createChatModel(): ChatModel {
 		header: null,
 		entries: NO_ENTRIES,
 		durableCount: 0,
+		unconfirmedClearBoundaryId: null,
 		pending: EMPTY_PENDING,
 		olderCount: 0,
 		leafId: null,
@@ -693,7 +697,7 @@ function isAlreadyDurable(model: ChatModel, message: ChatMessage): boolean {
 function reproject(model: ChatModel, clock: ChatClock): ChatModel {
 	if (model.todoAuthoritative) return model;
 	const candidate = latestTodoFromEntries(model.entries);
-	const phases = candidate?.phases ?? parseTodoPhases(model.todoSeed);
+	const phases = candidate?.phases ?? (model.entries.some(entry => entry.type === "reset_boundary") ? [] : parseTodoPhases(model.todoSeed));
 	return { ...model, todo: phases === null ? null : { phases, entryId: candidate?.entryId ?? null, appliedAt: clock.now ?? 0 } };
 }
 
@@ -810,6 +814,7 @@ export function applyChatSnapshot(model: ChatModel, snapshot: ChatSnapshotPayloa
 			header: snapshot.header,
 			entries: pendingRows.length === 0 ? durable : [...durable, ...pendingRows],
 			durableCount: durable.length,
+			unconfirmedClearBoundaryId: snapshot.unconfirmedClearBoundaryId ?? null,
 			pending,
 			olderCount: snapshot.olderCount,
 			leafId: snapshot.leafId,
@@ -1428,6 +1433,7 @@ export function snapshotOf(model: ChatModel, epoch: ChatEpoch): ChatSnapshotPayl
 		...(model.exitReason === undefined ? {} : { exitReason: model.exitReason }),
 		header: model.header,
 		entries: durableRows(model),
+		unconfirmedClearBoundaryId: model.unconfirmedClearBoundaryId,
 		olderCount: model.olderCount,
 		leafId: model.leafId,
 		branches: model.branches,

@@ -289,7 +289,7 @@ export function NativeMessage({ entry, model, superseded, irc }: NativeMessagePr
 	}
 	switch (entry.type) {
 		case "compaction": case "branch_summary": return <SummaryView summary={entry} superseded={superseded} />;
-		case "reset_boundary": return <div className="omp-native-divider" role="separator">Context reset · full history retained</div>;
+		case "reset_boundary": return <div className="omp-native-divider" role="separator">Context reset</div>;
 		case "model_change": return <div className="omp-native-muted">Model changed · {model?.name && (model.id === entry.model || `${model.provider}/${model.id}` === entry.model) ? model.name : entry.model}</div>;
 		case "thinking_level_change": return <div className="omp-native-muted">Thinking level changed · {thinkingLevelLabel(entry.thinkingLevel)}</div>;
 		// Persisted custom metadata is not a displayed custom_message; parent folds native user_todo_edit.

@@ -43,7 +43,24 @@ export function positionTranscript(
 		if (siblings === undefined) attached.set(anchor, [entry]);
 		else siblings.push(entry);
 	}
-	const roots = [...entries.slice(0, durableCount).filter(entry => !durablePositions.has(entry.id)), ...(attached.get(null) ?? [])];
+	// A durable entry nobody positioned (a reset boundary, a custom marker) belongs where its parent is, not above
+	// every positioned row: replayed events anchor a later prompt to the leaf they saw, which can precede it.
+	const placed = new Set<string>(durablePositions.keys());
+	const plain = new Map<string, ChatEntry[]>();
+	const roots: ChatEntry[] = [];
+	for (const entry of entries.slice(0, durableCount)) {
+		if (durablePositions.has(entry.id)) continue;
+		if (entry.parentId === null || !placed.has(entry.parentId)) {
+			roots.push(entry);
+			continue;
+		}
+		placed.add(entry.id);
+		const siblings = plain.get(entry.parentId);
+		if (siblings === undefined) plain.set(entry.parentId, [entry]);
+		else siblings.push(entry);
+	}
+	for (const [parent, children] of plain) attached.set(parent, [...children, ...(attached.get(parent) ?? [])]);
+	roots.push(...(attached.get(null) ?? []));
 	const stack = roots.reverse();
 	const seen = new Set<string>();
 	const result: ChatEntry[] = [];

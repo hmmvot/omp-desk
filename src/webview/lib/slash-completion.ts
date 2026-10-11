@@ -4,11 +4,17 @@ import { classifySlashInput } from "../../host/rpc/protocol.ts";
 /**
  * Commands Chat runs itself before anything is sent. `/rewind` and `/branch` are Chat's in-place Rewind, as they are
  * OMP's TUI rewind selector (`branch`, alias `rewind`); they never reach OMP or its fork-into-a-new-file RPC `branch`.
+ * `/clear`, `/new` and `/delete` are the session-clearing commands of OMP's TUI as Desk runs them (ADR-0059): they
+ * replace the catalogue entries of the same names, which OMP itself only runs in its terminal UI.
  */
 const DESK_COMMANDS: readonly ChatSlashCommand[] = [
  { name: "models", aliases: ["model"], source: "OMP Desk", description: "Open native Models settings (selector arguments retain OMP RPC semantics)" },
  { name: "agents", source: "OMP Desk", description: "Open native Agents settings" },
  { name: "rewind", aliases: ["branch"], source: "OMP Desk", description: "Rewind the conversation to an earlier message (Esc Esc)" },
+ { name: "clear", source: "OMP Desk", description: "Clear the conversation context in place; the session, its file and its title stay" },
+ { name: "fresh", source: "OMP Desk", description: "Rotate provider state without clearing local conversation history" },
+ { name: "new", source: "OMP Desk", description: "Start a new session in this folder in place of this tab; this one stays in Sessions" },
+ { name: "delete", source: "OMP Desk", description: "Delete this session after confirming, then start a new one in this tab" },
 ];
 
 /** Only the leading command token is completion-owned; embedded skill tokens are prose. */

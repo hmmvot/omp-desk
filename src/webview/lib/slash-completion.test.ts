@@ -59,3 +59,17 @@ test("Chat's own /rewind, with OMP's /branch as its alias, replaces OMP's `branc
  for (const text of ["/rewind", " /REWIND ", "/rewind\n", "/branch", " /Branch "]) assert.equal(isRewindCommand(text), true, text);
  for (const text of ["/rewind now", "/rewinds", "say /rewind", "/branch 3", "/branches"]) assert.equal(isRewindCommand(text), false, text);
 });
+
+test("/clear, /new, /delete and /fresh list with Desk descriptions; the internal command stays hidden", () => {
+ const commands = [{ name: "clear", source: "builtin", description: "OMP clear" }, { name: "new", source: "builtin", description: "OMP new" }, { name: "delete", source: "builtin" }, { name: "fresh", source: "builtin" }, { name: "omp-desk-clear", source: "extension" }, { name: "hotkeys", source: "builtin" }];
+ for (const name of ["clear", "new", "delete", "fresh"]) {
+  const found = slashSuggestions(commands, name);
+  assert.deepEqual(found.map(command => command.name), [name], name);
+  assert.equal(found[0]!.source, "OMP Desk");
+ }
+ assert.match(slashSuggestions(commands, "clear")[0]!.description!, /in place/);
+ assert.match(slashSuggestions(commands, "new")[0]!.description!, /in place of this tab/);
+ assert.match(slashSuggestions(commands, "fresh")[0]!.description!, /provider/);
+ assert.deepEqual(slashSuggestions(commands, "omp-desk"), []);
+ assert.equal(slashSuggestions(commands, "hotkeys").length, 1, "the remaining terminal-only commands stay listed");
+});

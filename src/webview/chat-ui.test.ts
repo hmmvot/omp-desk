@@ -257,6 +257,76 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			if (paged) await ui.evaluate(`window.ui.density(${JSON.stringify(density)}, true)`);
 		}
 
+		await t.test("Context cleared disclosure hides dropped history, relocates earlier loading and keeps it read-only", async () => {
+			await reset("cleared-history", "detailed");
+			await ui.evaluate(`(()=>{
+			 const entry=(id,message)=>({type:'message',id,parentId:null,timestamp:'2026-10-11T00:00:00Z',message:{timestamp:1,...message}});
+			 window.clearedRows=[entry('dropped-user',{role:'user',content:'Dropped prompt'}),
+			  entry('dropped-answer',{role:'assistant',model:'m',stopReason:'error',errorMessage:'Durable failure',content:[{type:'text',text:'Dropped answer'}]}),
+			  {type:'reset_boundary',id:'clear-boundary',parentId:'dropped-answer',timestamp:'2026-10-11T00:00:01Z'},
+			  entry('current-user',{role:'user',content:'Current prompt'}),
+			  entry('current-answer',{role:'assistant',model:'m',stopReason:'stop',content:[{type:'text',text:'Current answer'}]})];
+			 window.ui.push({entries:window.clearedRows,durableCount:5,olderCount:7,working:false,settled:true,
+			  commands:[{name:'omp-desk-navigate',source:'extension',description:'OMP Desk navigation'}],
+			  branches:[{entryId:'dropped-answer',branches:[{tipId:'old-tip',firstPromptId:'old-prompt',firstPrompt:'Earlier branch',messages:2,prompts:1}]}]});
+			})()`);
+			await ui.wait("document.querySelector('.omp-cleared-history summary') && document.querySelector('.omp-transcript').textContent.includes('Current answer')");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-cleared-history summary').textContent"), "Context cleared · at least 2 messages dropped");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-transcript').textContent.includes('Dropped prompt')"), false);
+			assert.equal(await ui.evaluate("document.querySelector('.omp-transcript').textContent.includes('Dropped answer')"), false);
+			assert.equal(await ui.evaluate("document.querySelector('.omp-earlier')"), null, "disk history is reachable only inside the disclosure");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-branch-point-toggle')"), null, "a pre-boundary branch point is not reassigned");
+			assert.equal(await ui.evaluate("document.querySelectorAll('[aria-label=\"Rewind to here\"]').length"), 1, "the current prompt retains Rewind");
+			await ui.evaluate("document.querySelector('.omp-cleared-history summary').click()");
+			await ui.wait("document.querySelector('.omp-cleared-history-cards')?.textContent.includes('Dropped answer')");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-cleared-history-cards').textContent.includes('Dropped prompt')"), true);
+			assert.equal(await ui.evaluate("document.querySelector('.omp-cleared-history-cards [aria-label=\"Rewind to here\"]')"), null);
+			assert.equal(await ui.evaluate("document.querySelector('.omp-cleared-history-cards .omp-reply-footer, .omp-cleared-history-cards .omp-retry-turn')"), null);
+			assert.equal(await ui.evaluate("document.querySelector('.omp-cleared-history .omp-earlier button').textContent"), "load earlier messages (7 older)");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-transcript-content > .omp-earlier')"), null);
+			await ui.evaluate("document.querySelector('.omp-cleared-history .omp-earlier button').click()");
+			await ui.wait("window.sent.some(message=>message.type==='omp:chat-load-older')");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-cleared-history .omp-earlier button').disabled"), true);
+			assert.equal(await ui.evaluate("document.querySelector('.omp-cleared-history .omp-earlier button').textContent"), "loading earlier messages…");
+			await ui.evaluate(`window.ui.push({entries:[{type:'message',id:'earlier-user',parentId:null,timestamp:'2026-10-10T00:00:00Z',message:{role:'user',timestamp:0,content:'Earlier loaded prompt'}},...window.clearedRows],durableCount:6,olderCount:0})`);
+			await ui.wait("document.querySelector('.omp-cleared-history-cards')?.textContent.includes('Earlier loaded prompt')");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-cleared-history summary').textContent"), "Context cleared · 3 messages dropped");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-earlier')"), null);
+			await ui.evaluate("document.querySelector('.omp-cleared-history summary').focus()");
+			await ui.call("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+			await ui.call("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+			await ui.wait("!document.querySelector('.omp-cleared-history-cards')");
+			assert.equal(await ui.evaluate("document.activeElement===document.querySelector('.omp-cleared-history summary')"), true);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("Context cleared disclosure survives page unmounts and earlier boundaries do not nest", async () => {
+			await reset("cleared-history-pages", "detailed", true);
+			await ui.evaluate(`(()=>{
+			 const entry=(id,text)=>({type:'message',id,parentId:null,timestamp:'2026-10-11T00:00:00Z',message:{role:'user',timestamp:1,content:text}});
+			 const boundary=id=>({type:'reset_boundary',id,parentId:null,timestamp:'2026-10-11T00:00:00Z'});
+			 window.ui.push({entries:[entry('old','Old cleared prompt'),boundary('old-clear'),entry('recent','Recently cleared prompt'),boundary('last-clear'),
+			  ...Array.from({length:120},(_,index)=>entry('current-'+index,'Current paged prompt '+index))],durableCount:124,olderCount:5,working:false,settled:true});
+			})()`);
+			await ui.wait("document.querySelector('.omp-history-pages') && document.querySelector('.omp-transcript').textContent.includes('Current paged prompt 119')");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-earlier')"), null);
+			await ui.evaluate("document.querySelector('.omp-history-pages button').click()");
+			await ui.wait("document.querySelector('.omp-cleared-history summary')");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-cleared-history summary').textContent"), "Context cleared · 1 messages dropped");
+			await ui.evaluate("document.querySelector('.omp-cleared-history summary').click()");
+			await ui.wait("document.querySelector('.omp-cleared-history-cards')?.textContent.includes('Recently cleared prompt')");
+			assert.equal(await ui.evaluate("document.querySelectorAll('.omp-cleared-history').length"), 1);
+			assert.equal(await ui.evaluate("document.querySelector('.omp-cleared-history-cards .omp-native-divider').textContent"), "Context cleared");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-cleared-history-cards').textContent.includes('Old cleared prompt')"), true);
+			await ui.evaluate("document.querySelectorAll('.omp-history-pages button')[1].click()");
+			await ui.wait("!document.querySelector('.omp-cleared-history')");
+			await ui.evaluate("document.querySelector('.omp-history-pages button').click()");
+			await ui.wait("document.querySelector('.omp-cleared-history-cards')?.textContent.includes('Recently cleared prompt')");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-cleared-history details').open"), true);
+			assert.equal(await ui.evaluate("document.querySelector('.omp-cleared-history .omp-earlier button').textContent"), "load earlier messages (5 older)");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("reserved working row and overlay preserve transcript geometry through tool and idle transitions", async () => {
 			await reset("working-status-geometry", "detailed");
 			await ui.evaluate(`window.statusRows=Array.from({length:40},(_,index)=>({type:'message',id:'status-row-'+index,parentId:null,timestamp:new Date(1000+index).toISOString(),

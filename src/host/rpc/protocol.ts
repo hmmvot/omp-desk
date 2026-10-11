@@ -280,13 +280,16 @@ export function isRecoverableRpcFailure(code: string | null): boolean {
  * `quit`/`exit` would end the process from under the tab. `branch` (alias `rewind`) and `tree` open TUI selectors;
  * `/branch` is OMP's in-place rewind selector, not the RPC `branch` command that forks into a new file. The page runs
  * `/rewind` and `/branch` as Chat's own in-place Rewind before anything is sent (ADR-0051), so only a `/branch` with
- * arguments reaches this list. `omp-desk-navigate` is that Rewind's internal command; typed by hand it is refused,
- * never forwarded.
+ * arguments reaches this list. `omp-desk-navigate` and `omp-desk-clear` are the internal commands of Rewind and
+ * `/clear`; typed by hand they are refused, never forwarded. `clear`, `new` and `delete` are answered by Chat itself
+ * before anything is sent (ADR-0059); they stay here so the session never forwards them if that interception is
+ * bypassed. `fresh` is allowed via Desk's provider-only rotation admission; it preserves the durable conversation.
  */
 export const DENIED_SLASH_COMMANDS: Readonly<Record<string, true>> = {
 	"omp-desk-navigate": true,
+	"omp-desk-clear": true,
+	clear: true,
 	new: true,
-	fresh: true,
 	resume: true,
 	fork: true,
 	handoff: true,
@@ -304,6 +307,7 @@ export const DENIED_SLASH_COMMANDS: Readonly<Record<string, true>> = {
 /** The one sentence shown when a denied builtin is typed. */
 export const SLASH_DENIED_SENTENCE =
 	"This command changes the session's identity or file, so it is not available in the chat. Use the Sessions panel instead.";
+
 
 /** `/branch` or `/rewind` typed with arguments: both are Chat's Rewind, which takes none (ADR-0051). */
 export const REWIND_ARGUMENTS_SENTENCE =

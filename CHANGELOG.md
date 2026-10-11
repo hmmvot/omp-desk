@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`/clear`, `/new`, `/delete` and `/fresh` work in Chat.** Clear combines OMP's reset boundary, public reload and supported fresh builtin: model history cleared and provider state rotated, with remaining terminal-clear differences documented in proposed ADR-0059 (round 4 review pending). Final marker-confirmed boundaries collapse history/filter Desk Rewind; known incomplete Desk clears warn, while unknown/native boundaries remain neutral and visible. Async delivery and registry-only agents count as busy; missing accessors refuse, but settled readback does not prove foreground bash/eval idleness. Fresh keeps history and commits scoped provider rotation before publishing it or capturing ordinary queued snapshots. Restart keeps durable and provider identity checks separate. Host exit between rotation and acceptance fails reattach closed; recovery requires exact-child Stop/reopen, not Chat Restart. New fences before replacement and rechecks observed settled/identity before stopping, reporting partial outcomes; Delete retains its confirmed flow.
+
 ### Changed
 
 - Ctrl+Shift+L focuses the chat composer from anywhere, replacing Ctrl+Shift+Q; it takes over VS Code's Select All Occurrences of Find Match key, which you can rebind.

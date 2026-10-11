@@ -25,6 +25,8 @@ import type { MaintenanceState, RetryState } from "../../chat/events";
 import type { SubagentReader } from "../../chat/subagent-transcript";
 import { positionTranscript } from "../../chat/projection";
 import { projectTranscript, type ProjectedTool, type TranscriptCard } from "../../chat/transcript";
+import { splitClearedHistory, type ClearedHistorySplit } from "../../chat/cleared-history";
+import { CLEAR_REFUSAL_SENTENCES } from "../../chat/clear";
 import { isOverviewMessage, overviewMemberId, projectToolOverview, type DensityCard, type OverviewProjection } from "../../chat/tool-overview";
 import { replyFooters, type ReplyFooter as ReplyFooterData } from "../../chat/reply-turns";
 import { ReplyFooter } from "./ReplyFooter";
@@ -35,7 +37,7 @@ import { MeasuredRows, type RowViewport } from "./MeasuredRows";
 import { TranscriptScrollController, type TranscriptScrollMode } from "../lib/transcript-scroll";
 import { captureToolInteraction, heldToolInteractions, restoreToolInteraction, type ToolInteraction } from "../lib/tool-interaction";
 import { NativeMessage } from "./NativeMessage";
-import { AssistantContentView } from "./MessageContent";
+import { AssistantContentView, NativeDisclosure } from "./MessageContent";
 import { ChildTranscript } from "./ChildTranscript";
 import { ToolCard, type ToolCardProps } from "./ToolCard";
 import { WorkingStatus } from "./WorkingStatus";
@@ -51,6 +53,7 @@ const OLDER_REPLY_TIMEOUT_MS = 8_000;
 
 export interface TranscriptProps {
 	entries: readonly ChatEntry[];
+	unconfirmedClearBoundaryId?: string | null;
 	stream: AssistantMessage | null;
 	activeTools: ReadonlyMap<string, ActiveTool>;
 	working: boolean;
@@ -145,7 +148,7 @@ function Row({
 }
 
 /** The DOM consumes exactly the cards counted by the semantic window. */
-export function TranscriptCardView({ card, props, autoExpanded }: { card: TranscriptCard; props: TranscriptProps; autoExpanded?: boolean }): ReactNode {
+export function TranscriptCardView({ card, props, autoExpanded, clearedHistory }: { card: TranscriptCard; props: TranscriptProps; autoExpanded?: boolean; clearedHistory?: ReactNode }): ReactNode {
 	const renderChild = (id: string) => <ChildTranscript subagentId={id} reader={props.reader} depth={(props.depth ?? 0) + 1} />;
 	const toolProps = (tool: ProjectedTool): ToolCardProps => ({
 		name: tool.call.name, callId: tool.call.id, args: tool.active?.args ?? tool.call.arguments,
@@ -161,7 +164,9 @@ export function TranscriptCardView({ card, props, autoExpanded }: { card: Transc
 	switch (card.kind) {
 		case "entry": {
 			const key = `irc:${props.conversationKey ?? "chat"}:${card.id}`;
-			body = <NativeMessage entry={card.entry} model={props.model} superseded={card.superseded} irc={{ expanded: props.disclosures?.get(key) ?? false, onChange: value => props.onDisclosureChange?.(key, value) }} />;
+			body = clearedHistory ?? (card.entry.type === "reset_boundary" && props.unconfirmedClearBoundaryId === card.entry.id
+				? <div className="omp-warning" role="status">{CLEAR_REFUSAL_SENTENCES.unconfirmed}</div>
+				: <NativeMessage entry={card.entry} model={props.model} superseded={card.superseded} irc={{ expanded: props.disclosures?.get(key) ?? false, onChange: value => props.onDisclosureChange?.(key, value) }} />);
 			break;
 		}
 		case "assistant": {
@@ -201,6 +206,30 @@ export function TranscriptCardView({ card, props, autoExpanded }: { card: Transc
 	);
 }
 
+/** Mounted only while open: dropped history never participates in the live transcript's projection or actions. */
+function ClearedHistoryCards({ entries, props }: { entries: readonly ChatEntry[]; props: TranscriptProps }): ReactNode {
+	const cards = useMemo(() => projectTranscript(entries, { cwd: props.cwd }), [entries, props.cwd]);
+	const historyProps: TranscriptProps = {
+		entries, stream: null, activeTools: new Map(), working: false, phase: props.phase, olderCount: 0,
+		onLoadOlder: () => false, pending: new Map(), cards: [], pagedHistory: true,
+		model: props.model, cwd: props.cwd, reader: props.reader, depth: props.depth,
+		agents: props.agents, agentActivity: props.agentActivity, conversationKey: props.conversationKey,
+		disclosures: props.disclosures, onDisclosureChange: props.onDisclosureChange,
+	};
+	return <div className="omp-cleared-history-cards">{cards.map(card => <TranscriptCardView key={card.id} card={card} props={historyProps} />)}</div>;
+}
+
+function ClearedHistory({ history, props, earlier }: { history: ClearedHistorySplit; props: TranscriptProps; earlier: ReactNode }): ReactNode {
+	const key = `cleared:${props.conversationKey ?? "chat"}:${history.boundary.id}`;
+	return <section className="omp-native-summary omp-native-summary--divider omp-cleared-history">
+		<NativeDisclosure title={<span className="omp-native-summary-label">{history.summary}</span>}
+			expanded={props.disclosures?.get(key) ?? false} onExpandedChange={value => props.onDisclosureChange?.(key, value)}>
+			{earlier}
+			<ClearedHistoryCards entries={history.before} props={props} />
+		</NativeDisclosure>
+	</section>;
+}
+
 export function Transcript(props: TranscriptProps): ReactNode {
 	const { entries, stream, activeTools, working, phase, olderCount, onLoadOlder, pending, cards } = props;
 
@@ -216,10 +245,11 @@ export function Transcript(props: TranscriptProps): ReactNode {
 	const controllerRef = useRef<TranscriptScrollController | null>(null);
 	const previousPaged = useRef(Boolean(props.pagedHistory));
 	const activatingPaged = Boolean(props.pagedHistory) && !previousPaged.current;
-	const { rows, topId, olderRows, earlierTopId, canonical, page } = useMemo(() => {
+	const { rows, topId, olderRows, earlierTopId, canonical, page, cleared } = useMemo(() => {
 		const live = stream && props.streamId && props.streamPosition ? { message: stream, messageId: props.streamId, position: props.streamPosition } : null;
 		const positioned = positionTranscript(entries, props.durableCount ?? entries.length - pending.size, pending, cards, live, props.durablePositions);
-		const canonical = projectTranscript(positioned, {
+		const cleared = splitClearedHistory(positioned, olderCount);
+		const canonical = projectTranscript(cleared?.after ?? positioned, {
 			pending, activeTools, working, stream: live === null ? stream : null, streamId: props.streamId ?? (stream === null ? null : "stream"),
 			retrySuppressedIds: props.retrySuppressedIds, sealedSeq: props.sealedSeq, cwd: props.cwd,
 		});
@@ -231,8 +261,8 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		}
 		const page = pageTranscriptCards(canonical, TRANSCRIPT_WINDOW_ROWS, end);
 		const window = props.pagedHistory ? page : windowTranscriptCards(canonical, TRANSCRIPT_WINDOW_ROWS, pinnedTopId ?? (previousPaged.current ? page.topId : null));
-		return { ...window, canonical, page };
-	}, [entries, pending, cards, pinnedTopId, activeTools, working, stream, props.durableCount, props.streamId, props.streamPosition, props.retrySuppressedIds, props.sealedSeq, props.cwd, props.durablePositions, props.pagedHistory, pageEndId, heldPageEndId, activatingPaged]);
+		return { ...window, canonical, page, cleared };
+	}, [entries, pending, cards, pinnedTopId, activeTools, working, stream, olderCount, props.durableCount, props.streamId, props.streamPosition, props.retrySuppressedIds, props.sealedSeq, props.cwd, props.durablePositions, props.pagedHistory, pageEndId, heldPageEndId, activatingPaged]);
 
 	const overviewRef = useRef<OverviewProjection | undefined>(undefined);
 	const namespace = props.conversationKey ?? "chat";
@@ -283,7 +313,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		const byCard = new Map<string, BranchPoint[]>();
 		for (const point of branchPoints) {
 			let cardId: string | undefined;
-			if (point.entryId === null) cardId = olderCount === 0 ? canonical[0]?.id : undefined;
+			if (point.entryId === null) cardId = cleared === null && olderCount === 0 ? canonical[0]?.id : undefined;
 			else for (let index = position.get(point.entryId) ?? -1; index >= 0 && cardId === undefined; index -= 1) cardId = cardOf.get(entries[index]!.id);
 			if (cardId === undefined) continue;
 			const list = byCard.get(cardId);
@@ -291,7 +321,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 			else list.push(point);
 		}
 		return byCard;
-	}, [canonical, entries, branchPoints, olderCount]);
+	}, [canonical, entries, branchPoints, olderCount, cleared]);
 	const presentationProps: TranscriptProps = { ...props, footerByHost, retryTailId, rewindDimmed, branchesByCard, disclosures: shown, onDisclosureChange: (key, value) => { controllerRef.current?.retain(); disclosures.current.set(key, value); redrawDisclosures(version => version + 1); } };
 
 	const rootRef = useRef<HTMLDivElement | null>(null);
@@ -439,12 +469,12 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		if (awaitingOlder === null) return;
 		if ((topEntryId ?? "") === awaitingOlder) return;
 		setAwaitingOlder(null);
-		if (topEntryId !== null) {
+		if (topEntryId !== null && cleared === null) {
 			// Rows arrived above the old top: hold the new top, so they mount, and the
 			// reveal anchor puts the reader back where they were.
 			setPinnedTopId(topEntryId);
 		}
-	}, [topEntryId, awaitingOlder]);
+	}, [topEntryId, awaitingOlder, cleared]);
 	useEffect(() => {
 		if (awaitingOlder === null) return;
 		const timer = setTimeout(() => setAwaitingOlder(null), OLDER_REPLY_TIMEOUT_MS);
@@ -458,6 +488,12 @@ export function Transcript(props: TranscriptProps): ReactNode {
 	const loading = phase === "starting" || phase === "attaching" || phase === "resyncing";
 	// One reveal step, capped by how much history is actually left above the window.
 	const step = Math.min(olderRows, TRANSCRIPT_WINDOW_ROWS);
+	const earlier = olderCount > 0 ? <div className="omp-earlier">
+		<button type="button" disabled={awaitingOlder !== null} onClick={() => {
+			controllerRef.current?.hold();
+			if (onLoadOlder()) setAwaitingOlder(topEntryId ?? "");
+		}}>{awaitingOlder !== null ? "loading earlier messages…" : `load earlier messages (${olderCount} older)`}</button>
+	</div> : null;
 
 	return (
 		<div className="omp-transcript-frame">
@@ -489,24 +525,11 @@ export function Transcript(props: TranscriptProps): ReactNode {
 							setPinnedTopId(earlierTopId);
 						}}
 					>
-						load {step} earlier messages ({olderRows + olderCount} older)
+						load {step} earlier messages ({olderRows + (cleared === null ? olderCount : 0)} older)
 					</button>
 				</div>
 			) : (
-				olderCount > 0 && (!props.pagedHistory || page.previousEndId === null) && (
-					<div className="omp-earlier">
-						<button
-							type="button"
-							disabled={awaitingOlder !== null}
-							onClick={() => {
-								controllerRef.current?.hold();
-								if (onLoadOlder()) setAwaitingOlder(topEntryId ?? "");
-							}}
-						>
-							{awaitingOlder !== null ? "loading earlier messages…" : `load earlier messages (${olderCount} older)`}
-						</button>
-					</div>
-				)
+				cleared === null && (!props.pagedHistory || page.previousEndId === null) ? earlier : null
 			)}
 			<MeasuredRows rows={measuredRows} context={`${namespace}:${props.toolCallDetail}`} viewport={viewport}
 				elementRef={measuredRef} following={readerMode === "following" && !bodyHeld} anchor={controllerRef.current?.anchor} paged={props.pagedHistory || (props.depth ?? 0) > 0} forcedSources={forcedCalls.current} forcedRows={heldRunIds}
@@ -514,7 +537,8 @@ export function Transcript(props: TranscriptProps): ReactNode {
 				renderRow={index => { const card = densityRows[index]!; if (card.kind === "run") return <ToolOverview run={card} expanded={shown.get(card.id) ?? false}
 					onExpandedChange={value => presentationProps.onDisclosureChange?.(card.id, value)} />;
 					const run = card.kind === "tool" || isOverviewMessage(card) ? groupByCall.get(overviewMemberId(card)) : undefined;
-					const body = <TranscriptCardView card={card} props={presentationProps} autoExpanded={card.kind === "tool" && autoCalls.get(card.tool.call.id) === true} />;
+					const body = <TranscriptCardView card={card} props={presentationProps} autoExpanded={card.kind === "tool" && autoCalls.get(card.tool.call.id) === true}
+						clearedHistory={cleared !== null && card.kind === "entry" && card.id === cleared.boundary.id ? <ClearedHistory history={cleared} props={presentationProps} earlier={earlier} /> : undefined} />;
 					// One wrapper element whether the call is flat or a group member, so a call that gains or loses its group keeps its DOM and focus.
 					if (card.kind !== "tool" && !isOverviewMessage(card) || props.toolCallDetail === "detailed") return body;
 					return run ? <div className="omp-overview-member" data-run-id={run.id} role="group" aria-label={run.summary}>{body}</div> : <div>{body}</div>;

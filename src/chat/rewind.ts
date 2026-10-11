@@ -9,6 +9,7 @@
 import type { ImageContent } from "@oh-my-pi/pi-wire";
 import { isRecord } from "../guards.ts";
 import type { ChatEntry } from "./messages.ts";
+import { confirmedClearBoundaryIndex } from "./cleared-history.ts";
 import { toolPresentation } from "./tool-presentation.ts";
 import { projectTranscript, rendersTranscriptEntry, type ProjectedTool } from "./transcript.ts";
 
@@ -181,7 +182,8 @@ export function isRewindTarget(entry: ChatEntry): boolean {
 /** The user prompts of the loaded active branch, oldest first. `entries` are durable rows only. */
 export function rewindTargets(entries: readonly ChatEntry[]): RewindTarget[] {
 	const targets: RewindTarget[] = [];
-	for (const entry of entries) {
+	for (let index = confirmedClearBoundaryIndex(entries) + 1; index < entries.length; index += 1) {
+		const entry = entries[index]!;
 		if (entry.type !== "message" || entry.message.role !== "user") continue;
 		const content = entry.message.content;
 		const images = typeof content === "string" ? 0 : content.filter(block => block.type === "image").length;

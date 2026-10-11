@@ -18,7 +18,9 @@ import type { BridgeBootstrapDelivery } from "./host/bridge-endpoint.ts";
 import { BridgeRecords, bindingMatches } from "./host/bridge-records.ts";
 import { BridgeClient } from "./webview/lib/bridge-client.ts";
 import type { BridgeNativeBinding } from "./host/bridge-records.ts";
-import type { SessionIndex } from "./host/session-index.ts";
+import { SESSION_INDEX_STORAGE_KEY, type SessionIndex } from "./host/session-index.ts";
+import type { CatalogRecordChange } from "./host/profile-catalog.ts";
+import type { renameStoppedSessionTitle } from "./host/native-terminal.ts";
 import type { acquireClaim, createClaimHolder, SessionClaim } from "./host/session-claim.ts";
 import type { startClaimWatch } from "./host/claim-watch.ts";
 import type { SessionLauncherFacts, SessionOwnershipFacts } from "./views/session-tree.ts";
@@ -116,9 +118,9 @@ export const window = { state: { focused: true }, errors: [], tabGroups: { all: 
     window.quickPicks.push(picker);
     return picker;
   },
-  createWebviewPanel(viewType = 'omp.session', title = 'Fixture session') {
+  createWebviewPanel(viewType = 'omp.session', title = 'Fixture session', requestedColumn) {
     const received = new Set(), disposed = new Set();
-    const panel = { viewType, title, active: true, visible: true, messages: [], onMessage: null,
+    const panel = { viewType, title, requestedColumn, active: true, visible: true, messages: [], onMessage: null,
       reveal() {}, onDidChangeViewState() { return { dispose() {} }; },
       onDidDispose(listener) { disposed.add(listener); return { dispose() { disposed.delete(listener); } }; },
       dispose() { panel.visible = false; for (const listener of disposed) listener(); },
@@ -141,13 +143,19 @@ import { sessionItemState as fixtureRowState } from './views/session-tree';
 import * as fixtureVscode from 'vscode';
 import { acquireClaim as fixtureClaim, createClaimHolder as fixtureHolder, setClaimFailures } from './host/session-claim';
 import { capturedDesktopXml, capturedDesktopXmls, resetDesktopXmls } from './host/desktop-notifications';
-import { providerLoginFixture } from './host/native-terminal';
+import { providerLoginFixture, storedRenameFixture } from './host/native-terminal';
 const fixtureOpenPanel = openPanel;
 export const harness = {
   connectHostControl, reconnectHostControl, establishControl, closeSession, launchHost, presentRestoreOutcome, openTab, handleChatEvent, bindPanel, restoreTabs, bridgeSerializerFor,
   confirmAndDeleteSession, deleteSession, handleRestoreOutcome, forgetSession, renameSession, reloadSession, handleGuestControlRequest, panelResponder,
   switchSessionMode, restartChat, openSessionInMode, defaultSessionMode, chooseDefaultSessionView, newSession, owningWindowUri, switchToSessionWindow, selectHeldSessionTab, openRestoredTabIfUncovered, requestSelections,
   routeLaunchToFolderWindow, routeSessionOpen, serveLaunchRequest, startNewSession,
+  newSessionInPlace, deleteSessionInPlace, sessionPanelColumns,
+  panelFactory(handler) {
+    const previous = fixtureVscode.window.createWebviewPanel;
+    fixtureVscode.window.createWebviewPanel = handler;
+    return () => { fixtureVscode.window.createWebviewPanel = previous; };
+  },
   setWindowRegistry(registry) { windowRegistry = registry; },
   setPackageDrift(drift) { packageDrift = drift; },
   startConversation, handleTerminalGuestMessage, startNativeWatch, handleNativeHostExited, hostControlAttempts,
@@ -159,6 +167,7 @@ export const harness = {
   runChatCommand,
   subscribeProviderLoginRefresh, refreshDefaultProviderModels, refreshSessionModels, recordSessionModels, runChatAction, openProviderLogin, loginProviderFromPalette,
   providerLoginFixture,
+  storedRenameFixture,
   providerModelsIdle: () => defaultProviderModelsRead ?? Promise.resolve(),
   closeLoginTerminal: name => fixtureVscode.window.closedTerminals.fire(name === "omp login" && providerLoginTerminal !== null ? providerLoginTerminal : { name }),
   closeOtherTerminal: name => fixtureVscode.window.closedTerminals.fire({ name }),
@@ -279,7 +288,7 @@ export const harness = {
     resetDesktopXmls();
     fixtureVscode.window.tabGroups.activeTabGroup.activeTab = null;
     reconciler = { reconcile: async () => ({ kind: 'free', evidence: [] }) };
-    runtimeEntries = async () => ({ hostControl: { path: 'fixture-host-control.mjs' } });
+    runtimeEntries = async () => ({ hostControl: { path: 'fixture-host-control.mjs' }, renameHelper: { path: 'fixture-rename-session.mjs' } });
     ptyGate = { client: async () => ({}) };
     ptyGate.attachClient = async () => ({ fixture: true });
     ptyGate.invalidate = () => {};
@@ -347,6 +356,7 @@ interface Harness {
   closeOtherTerminal(name: string): void;
   sessionModelAvailability(tabId: string): boolean | undefined;
   providerLoginFixture: { enabled: boolean; unresolved: boolean; models: unknown[]; calls: { args: string[]; options: { env: Record<string, string> } }[]; logins: { env: Record<string, string>; cwd: string }[]; read: (() => Promise<{ stdout: string; stderr: string; exitCode: number }>) | null; resolve: (() => Promise<{ command: string; prefixArgs: string[]; version: string }>) | null };
+  storedRenameFixture: { enabled: boolean; root: string; requests: Parameters<typeof renameStoppedSessionTitle>[0][]; rename: ((input: Parameters<typeof renameStoppedSessionTitle>[0]) => ReturnType<typeof renameStoppedSessionTitle>) | null };
   owningWindowUri(): URI | null;
   switchToSessionWindow(...args: unknown[]): Promise<void>;
   selectHeldSessionTab(...args: unknown[]): Promise<{ ok: boolean; focused: boolean }>;
@@ -412,6 +422,10 @@ interface Harness {
   routeSessionOpen(index: unknown, tabId: string, verb: "opened" | "resumed", mode: "chat" | "terminal" | null): Promise<boolean>;
   serveLaunchRequest(context: unknown, index: unknown, request: unknown, serveContext: { stillWanted(): Promise<boolean> }): Promise<{ ok: boolean; focused: boolean }>;
   startNewSession(context: unknown, index: unknown, folder: unknown): Promise<void>;
+  newSessionInPlace(context: unknown, index: SessionIndex, tabId: string): Promise<void>;
+  deleteSessionInPlace(context: unknown, index: SessionIndex, tabId: string): Promise<void>;
+  sessionPanelColumns: Map<string, number>;
+  panelFactory(handler: (...args: unknown[]) => unknown): () => void;
   setWindowRegistry(registry: unknown): void;
   setPackageDrift(drift: { check(): { kind: "same" } | { kind: "changed"; files: string[] } } | null): void;
   errors(): readonly string[];
@@ -505,10 +519,19 @@ before(async () => {
       }));
       for (const [name, extra] of [
         ["native-terminal", `
-          import { resolveOmpBinary as realResolveOmpBinary, runOmpCli as realRunOmpCli } from ${JSON.stringify(path.join(path.dirname(entry), "host", "native-terminal.ts"))};
+          import { resolveOmpBinary as realResolveOmpBinary, runOmpCli as realRunOmpCli, resolveBunRuntime as realResolveBunRuntime, resolveOmpPackageRoot as realResolveOmpPackageRoot, renameStoppedSessionTitle as realRenameStoppedSessionTitle } from ${JSON.stringify(path.join(path.dirname(entry), "host", "native-terminal.ts"))};
           export const providerLoginFixture = { enabled: false, unresolved: false, models: [], calls: [], logins: [], read: null, resolve: null };
+          export const storedRenameFixture = { enabled: false, root: '', requests: [], rename: null };
+          export async function resolveBunRuntime() { return storedRenameFixture.enabled ? process.execPath : realResolveBunRuntime(); }
+          export async function resolveOmpPackageRoot(binary) { return storedRenameFixture.enabled ? { root: storedRenameFixture.root } : realResolveOmpPackageRoot(binary); }
+          export async function renameStoppedSessionTitle(input) {
+            if (!storedRenameFixture.enabled) return realRenameStoppedSessionTitle(input);
+            storedRenameFixture.requests.push(input);
+            return storedRenameFixture.rename(input);
+          }
           let resolved;
           export async function resolveOmpBinary() {
+            if (storedRenameFixture.enabled) return { command: process.execPath, prefixArgs: [], version: 'fixture' };
             if (providerLoginFixture.unresolved) throw new Error('fixture unresolved');
             if (providerLoginFixture.resolve) return providerLoginFixture.resolve();
             if (providerLoginFixture.enabled) return { command: process.execPath, prefixArgs: [], version: 'fixture' };
@@ -600,6 +623,7 @@ function indexFixture(native: NativeFixture) {
 function conversation(session: { phase: string; start(): Promise<void> }) {
   Object.assign(session, {
     epoch: { nonce: "fixture", counter: 1 }, setMutationFence() {},
+    model: { header: { id: "session-1" } },
     readSettlement: async () => session.phase === "live" ? ({ sessionFile: path.join(root, "session.jsonl"), sessionId: "session-1", settled: true, hasContent: false }) : null,
   });
   return { sessionOf: () => session, modelOf: () => null, stateOf: () => ({ phase: session.phase }), startLive() {}, attachPage: () => () => undefined, release() { session.phase = "view-only"; } };
@@ -2181,9 +2205,21 @@ describe("same-editor Chat and native Terminal actions", () => {
 		const file = fileless ? null : path.join(directory, "session.jsonl");
 		if (file !== null) await writeFile(file, sessionFileText({ id: "mode-session", cwd: directory, entries: [] }));
 		const values = new Map<string, unknown>();
+		const persistence = { fail: false, beforeCommit: null as (() => void | Promise<void>) | null };
 		const index = new harness.SessionIndex({ claimStorageDir: path.join(directory, "claims"), store: {
 			get<T>(key: string) { return values.get(key) as T | undefined; },
 			async update(key: string, value: unknown) { values.set(key, value); },
+			async transactRecords(changes: readonly CatalogRecordChange[]) {
+				await persistence.beforeCommit?.();
+				if (persistence.fail) throw new Error("catalog storage write failed");
+				const next = new Map(values);
+				for (const change of changes) {
+					const decision = "decide" in change ? change.decide(values.get(change.key)) : { desired: change.desired };
+					if ("refused" in decision) throw new Error(decision.refused);
+					next.set(change.key, decision.desired);
+				}
+				for (const [key, value] of next) values.set(key, value);
+			},
 		} });
 		const row = file === null ? await index.createDraft({ cwd: directory }) : await index.trackSession({ sessionFile: file, cwd: directory });
 		const native = { ...runtime(41001), kind: mode, sessionFile: file, cwd: directory, observed: null, stopping: false, observedSurvivors: [] as readonly number[] };
@@ -2236,7 +2272,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			return { state: "running", host: { ...host, pid: next.pid, rpc: { ...next.identity, brokerPid: 40000, brokerCreationTime: "broker-creation", childPid: next.pid },
 				transport: request.transport, sessionId: request.sessionId ?? "fresh-mode-session" } };
 		}, attach: async () => ({ state: "unavailable", reason: "not needed" }) }, {});
-		return { saved, directory, file, row, index, values, native, channel, chat, state, panels, dialogs, launches: () => launches, successor: () => successor };
+		return { saved, directory, file, row, index, values, persistence, native, channel, chat, state, panels, dialogs, launches: () => launches, successor: () => successor };
 	}
 
 	interface NativeControlFixture {
@@ -2259,11 +2295,25 @@ describe("same-editor Chat and native Terminal actions", () => {
 		return { facts, shutdowns, control };
 	}
 
-	async function wedgedChat(captureComplete = true) {
+	async function wedgedChat(captureComplete = true, rotate = false) {
 		const timers = new ManualTimers();
 		const f = await fixture(false, "chat", false, timers);
 		f.saved.context.extensionUri = URI.file(root);
 		const session = f.chat.sessionOf(f.row.tabId)!;
+		if (rotate) {
+			f.channel.handlers.set("prompt", command => {
+				assert.equal(command.message, "/fresh");
+				f.channel.child.sessionId = "rotated-mode-session";
+				setImmediate(() => f.channel.emit({ type: "prompt_result", id: command.id, agentInvoked: true, status: "aborted", sessionSettled: true }));
+				return {};
+			});
+			assert.deepEqual(await session.fresh("f".repeat(32)), { status: "done" });
+			await harness.bindConversationIdentity(f.index, f.row.tabId, f.native, f.file, "rotated-mode-session", "mode-session");
+			f.channel.handlers.delete("prompt");
+			assert.equal(f.index.get(f.row.tabId)!.sessionId, "mode-session");
+			assert.equal(f.index.get(f.row.tabId)!.host!.sessionId, "rotated-mode-session");
+			assert.equal(session.sessionId, "rotated-mode-session");
+		}
 		f.channel.handlers.set("get_state", () => "drop");
 		assert.equal(session.reconnect(), "started");
 		await nextTurn(); await nextTurn();
@@ -2351,6 +2401,30 @@ describe("same-editor Chat and native Terminal actions", () => {
 			assert.ok(harness.restoredDraft(f.state.slotId), "a foreign acknowledgement cannot consume input");
 			await harness.handleGuestMessage(f.index, f.state.slotId, f.panels, { type: "omp:draft-restored", requestId: preserved.requestId });
 			assert.equal(harness.restoredDraft(f.state.slotId), null);
+		} finally { f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true }); }
+	});
+
+	it("restarts a rotated provider after native-state timeout using the durable saved identity", async () => {
+		const f = await wedgedChat(true, true);
+		try {
+			const before = await readFile(f.file!, "utf8");
+			const stop = f.native.handle.stop;
+			let forced = false;
+			f.native.handle.stop = async (...args: unknown[]) => {
+				assert.equal(f.state.runtime, f.native, "only the captured child is stopped");
+				const options = args[0] as { mode: string };
+				assert.equal(options.mode, "force");
+				forced = true;
+				return stop();
+			};
+			await harness.restartChat(f.saved.context, f.index, f.row.tabId, f.session.epoch.nonce);
+			assert.equal(forced, true);
+			assert.equal((await f.native.handle.refreshStatus()).state, "exited");
+			assert.equal(f.launches(), 1);
+			assert.equal(f.index.get(f.row.tabId)!.sessionId, "mode-session");
+			assert.equal(f.index.get(f.row.tabId)!.host!.sessionId, "mode-session", "successor resumes the durable id, not the old provider UUID");
+			assert.equal(await readFile(f.file!, "utf8"), before);
+			assert.equal(harness.restoredDraft(f.state.slotId)!.text, f.content.text);
 		} finally { f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true }); }
 	});
 
@@ -3613,6 +3687,275 @@ describe("same-editor Chat and native Terminal actions", () => {
 				assert.equal(f.index.get(draft.tabId)?.runIntent, "stopped");
 			} finally { restorePanels(); }
 		} finally { f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true }); }
+	});
+
+	describe("Chat session replacement slash actions", () => {
+		function requestedColumnOf(panel: unknown): number {
+			assert.ok(panel !== null && typeof panel === "object" && "requestedColumn" in panel);
+			assert.equal(typeof panel.requestedColumn, "number");
+			return panel.requestedColumn as number;
+		}
+
+		async function replacementFixture() {
+			const f = await fixture();
+			const requests: unknown[] = [];
+			const dialogs = harness.policy(f.saved.context, {
+				readProcessIdentity: async () => ({ kind: "gone" }), isProcessAlive: () => false,
+				probeRpc: async () => ({ kind: "unreachable", reason: "gone" }), brokerProvenance: () => ({ kind: "none" }),
+			}, { launch: async (request: unknown) => {
+				requests.push(request);
+				return { state: "not-started", reason: "fixture prevents native spawn" };
+			}, attach: async () => ({ state: "unavailable", reason: "not needed" }) }, {});
+			// Neither command may consult the launcher or hand the launch to another window.
+			harness.folders([]);
+			const calls = harness.commandHandler(() => undefined);
+			const restorePanels = harness.editorLifecycle();
+			const viewType = `omp.fixture.${f.row.tabId}`;
+			f.panels.viewType = viewType;
+			harness.tabStrip([[], [], [viewType]], 0);
+			const restore = async () => {
+				restorePanels(); harness.tabStrip([]);
+				f.chat.dispose();
+				for (const row of f.index.list()) {
+					const panel = harness.state(row.tabId).panel;
+					if (panel !== null && typeof panel === "object" && "dispose" in panel && typeof panel.dispose === "function") panel.dispose();
+					await f.index.closeSession(row.tabId, { confirmedStopped: true });
+				}
+			};
+			return { ...f, requests, dialogs, calls, restore };
+		}
+
+		it("/new fences before waiting, admits only one replacement, and refuses an old turn that starts during creation", async () => {
+			const f = await replacementFixture();
+			const reserved = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const create = f.index.createDraft.bind(f.index);
+			f.index.createDraft = async input => { reserved.resolve(); await release.promise; return await create(input); };
+			try {
+				const first = harness.newSessionInPlace(f.saved.context, f.index, f.row.tabId);
+				await reserved.promise;
+				assert.deepEqual(await f.chat.sessionOf(f.row.tabId)!.prompt({ requestId: "during-new", text: "must not start" }), { status: "refused", reason: "busy" });
+				await harness.newSessionInPlace(f.saved.context, f.index, f.row.tabId);
+				f.channel.child.isStreaming = true;
+				f.channel.emit({ type: "agent_start" });
+				release.resolve();
+				await first;
+				assert.equal(f.index.list().length, 2, "only one successor was reserved");
+				assert.equal(f.state.runtime, f.native);
+				assert.equal(f.panels.disposed, false, "newly running old work is never silently stopped");
+			} finally { release.resolve(); await f.restore(); }
+		});
+
+		it("records only explicitly accepted provider-id rotations on the same runtime and file", async () => {
+			const f = await replacementFixture();
+			try {
+				await harness.bindConversationIdentity(f.index, f.row.tabId, f.native, f.file, "rotated-provider", "mode-session");
+				assert.equal(f.index.get(f.row.tabId)!.sessionId, "mode-session");
+				assert.equal(f.index.get(f.row.tabId)!.host!.sessionId, "rotated-provider");
+				assert.equal(await f.index.recordHostSessionId(f.row.tabId, "unapproved"), false);
+				assert.equal(await f.index.recordHostSessionId(f.row.tabId, "wrong-cas", undefined, "mode-session"), false);
+			} finally { await f.restore(); }
+		});
+
+		it("keeps the durable id for stopped-session Rename after a provider rotation", async () => {
+			const f = await replacementFixture();
+			const rename = harness.storedRenameFixture;
+			try {
+				await harness.bindConversationIdentity(f.index, f.row.tabId, f.native, f.file, "rotated-provider", "mode-session");
+				await harness.closeSession(f.saved.context, f.index, f.row.tabId);
+				assert.equal(f.index.get(f.row.tabId)!.host, null);
+				rename.enabled = true; rename.root = f.directory; rename.requests.length = 0;
+				rename.rename = async input => {
+					const header = (await readFile(input.file, "utf8")).trim().split("\n").map(line => JSON.parse(line) as { type: string; id: string }).find(row => row.type === "session")!;
+					assert.equal(input.sessionId, header.id, "native helper validates --session-id against the durable header");
+					assert.equal(input.sessionId, "mode-session");
+					return { ok: true, verified: true, title: input.title, index: "synced", detail: null };
+				};
+				await harness.renameSession(f.saved.context, f.index, f.row.tabId);
+				assert.equal(rename.requests.length, 1);
+				assert.equal(f.index.get(f.row.tabId)!.title, "Recovered draft title");
+			} finally { rename.enabled = false; rename.rename = null; await f.restore(); }
+		});
+
+		it("provider acceptance refuses actual index write failure and conflicting committed runtime", async () => {
+			const f = await replacementFixture();
+			try {
+				f.persistence.fail = true;
+				assert.equal(await f.index.recordHostSessionId(f.row.tabId, "rotated-provider", undefined, "mode-session"), false);
+				assert.equal(f.index.get(f.row.tabId)!.host!.sessionId, "mode-session");
+				assert.equal(f.index.get(f.row.tabId)!.sessionId, "mode-session");
+				f.persistence.fail = false;
+				f.persistence.beforeCommit = () => {
+					const committed = structuredClone(f.values.get(SESSION_INDEX_STORAGE_KEY)) as { entries: { tabId: string; host: { sessionId: string; rpc: { brokerGeneration: string } } }[] };
+					committed.entries.find(row => row.tabId === f.row.tabId)!.host.rpc.brokerGeneration = "another-runtime-generation";
+					f.values.set(SESSION_INDEX_STORAGE_KEY, committed);
+				};
+				assert.equal(await f.index.recordHostSessionId(f.row.tabId, "rotated-provider", undefined, "mode-session"), false);
+				assert.equal(f.index.get(f.row.tabId)!.host!.sessionId, "mode-session");
+				assert.equal(f.index.get(f.row.tabId)!.sessionId, "mode-session");
+			} finally { f.persistence.beforeCommit = null; await f.restore(); }
+		});
+
+		it("never persists a rejected tentative provider identity through queued ordinary saves", async () => {
+			const f = await replacementFixture();
+			const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
+			try {
+				f.persistence.beforeCommit = async () => { entered.resolve(); await release.promise; };
+				const accepting = f.index.recordHostSessionId(f.row.tabId, "rejected-provider", undefined, "mode-session");
+				await entered.promise;
+				assert.equal(f.index.get(f.row.tabId)!.host!.sessionId, "mode-session", "tentative identity is not published");
+				const saved = f.index.recordConversationState(f.row.tabId, { title: "Concurrent title", lastSeenReplyId: "seen-during-acceptance" });
+				const other = f.index.createDraft({ cwd: f.directory });
+				const committed = structuredClone(f.values.get(SESSION_INDEX_STORAGE_KEY)) as {
+					entries: { tabId: string; sessionId: string; title: string; lastSeenReplyId: string; host: { sessionId: string; rpc: { brokerGeneration: string } } | null }[];
+				};
+				committed.entries.find(row => row.tabId === f.row.tabId)!.host!.rpc.brokerGeneration = "committed-other-generation";
+				f.values.set(SESSION_INDEX_STORAGE_KEY, committed);
+				release.resolve();
+				assert.equal(await accepting, false, "a later ordinary successful save cannot mask acceptance failure");
+				await saved;
+				const draft = await other;
+				const after = f.values.get(SESSION_INDEX_STORAGE_KEY) as typeof committed;
+				const row = after.entries.find(row => row.tabId === f.row.tabId)!;
+				assert.equal(row.host!.sessionId, "mode-session");
+				assert.equal(row.host!.rpc.brokerGeneration, "committed-other-generation");
+				assert.equal(row.sessionId, "mode-session");
+				assert.equal(row.title, "Concurrent title");
+				assert.equal(row.lastSeenReplyId, "seen-during-acceptance");
+				assert.ok(after.entries.some(row => row.tabId === draft.tabId));
+			} finally { release.resolve(); f.persistence.beforeCommit = null; await f.restore(); }
+		});
+
+		it("/new opens locally in the actual column before silently stopping and disposing the old editor", async () => {
+			const f = await replacementFixture();
+			const operations: string[] = [];
+			const stop = f.native.handle.stop;
+			f.native.handle.stop = async () => {
+				const draft = f.index.list().find(row => row.tabId !== f.row.tabId)!;
+				assert.ok(harness.state(draft.tabId).panel, "the successor editor exists before Stop");
+				assert.equal(f.panels.disposed, false);
+				operations.push("stop");
+				return stop();
+			};
+			f.panels.dispose = () => { operations.push("dispose"); f.panels.disposed = true; };
+			try {
+				await harness.newSessionInPlace(f.saved.context, f.index, f.row.tabId);
+				const draft = f.index.list().find(row => row.tabId !== f.row.tabId)!;
+				assert.equal(draft.cwd, f.row.cwd);
+				assert.equal(requestedColumnOf(harness.state(draft.tabId).panel), 3);
+				assert.deepEqual(operations, ["stop", "dispose"]);
+				assert.equal(f.index.get(f.row.tabId)?.runIntent, "stopped");
+				assert.equal(f.state.runtime, null);
+				assert.deepEqual(f.dialogs, []);
+				assert.deepEqual(f.calls.filter(([command]) => command !== "setContext"), [], "no window routing or chat-group arrangement");
+				assert.equal(f.requests.length, 1);
+				assert.equal(harness.sessionPanelColumns.size, 0);
+			} finally { await f.restore(); }
+		});
+
+		it("/new needs no stop for a stopped session and falls back to the panel's column", async () => {
+			const f = await replacementFixture();
+			f.state.runtime = null;
+			await f.index.closeSession(f.row.tabId, { confirmedStopped: true });
+			harness.tabStrip([]);
+			Object.assign(f.panels, { viewColumn: 2 });
+			try {
+				await harness.newSessionInPlace(f.saved.context, f.index, f.row.tabId);
+				const draft = f.index.list().find(row => row.tabId !== f.row.tabId)!;
+				assert.equal(requestedColumnOf(harness.state(draft.tabId).panel), 2);
+				assert.equal(f.panels.disposed, true);
+				assert.equal((await f.native.handle.refreshStatus()).state, "running", "no runtime means no stop");
+				assert.deepEqual(f.dialogs, []);
+			} finally { await f.restore(); }
+		});
+
+		it("/new leaves the old runtime and editor untouched when draft reservation fails", async () => {
+			const f = await replacementFixture();
+			f.index.createDraft = async () => { throw new Error("fixture reservation failed"); };
+			try {
+				await harness.newSessionInPlace(f.saved.context, f.index, f.row.tabId);
+				assert.equal(f.index.list().length, 1);
+				assert.equal(f.state.runtime, f.native);
+				assert.equal(f.panels.disposed, false);
+				assert.equal(f.requests.length, 0);
+				assert.match(harness.errors().at(-1)!, /could not be reserved/);
+			} finally { await f.restore(); }
+		});
+
+		it("/new leaves the old runtime and editor untouched when editor creation fails, clearing the column hint", async () => {
+			const f = await replacementFixture();
+			const restoreFactory = harness.panelFactory(() => { throw new Error("fixture editor failed"); });
+			try {
+				await harness.newSessionInPlace(f.saved.context, f.index, f.row.tabId);
+				assert.equal(f.state.runtime, f.native);
+				assert.equal(f.panels.disposed, false);
+				assert.equal(f.requests.length, 0);
+				assert.equal(harness.sessionPanelColumns.size, 0);
+				assert.match(harness.errors().at(-1)!, /editor could not be opened/);
+			} finally { restoreFactory(); await f.restore(); }
+		});
+
+		it("/new keeps the old editor when Stop is unconfirmed", async () => {
+			const f = await replacementFixture();
+			f.native.handle.stop = async () => ({ pidGone: false, verified: false, tree: "unknown", nativePid: f.native.pid, remainingPids: [], detail: "fixture stop unconfirmed" });
+			harness.warning(() => undefined);
+			try {
+				await harness.newSessionInPlace(f.saved.context, f.index, f.row.tabId);
+				assert.equal(f.index.list().length, 2);
+				assert.equal(f.state.runtime, f.native);
+				assert.equal(f.panels.disposed, false);
+				assert.equal((await f.native.handle.refreshStatus()).state, "running");
+			} finally { await f.restore(); }
+		});
+
+		it("/delete uses the existing live Chat deletion flow before creating the local replacement", async () => {
+			const f = await replacementFixture();
+			const createDraft = f.index.createDraft.bind(f.index);
+			f.index.createDraft = async input => {
+				assert.equal(f.index.get(f.row.tabId), null);
+				assert.equal(f.panels.disposed, true);
+				assert.equal((await f.native.handle.refreshStatus()).state, "exited");
+				return createDraft(input);
+			};
+			try {
+				await harness.deleteSessionInPlace(f.saved.context, f.index, f.row.tabId);
+				const [draft] = f.index.list();
+				assert.ok(draft);
+				assert.notEqual(draft.tabId, f.row.tabId);
+				assert.equal(draft.cwd, f.row.cwd);
+				assert.equal(requestedColumnOf(harness.state(draft.tabId).panel), 3);
+				await assert.rejects(readFile(f.file!), { code: "ENOENT" });
+				assert.equal(f.dialogs.length, 1);
+				assert.equal(f.dialogs[0]!.action, "Delete");
+				assert.deepEqual(f.calls.filter(([command]) => command !== "setContext"), []);
+			} finally { await f.restore(); }
+		});
+
+		it("/delete cancellation leaves the existing session and editor untouched without reserving a draft", async () => {
+			const f = await replacementFixture();
+			harness.warning(() => undefined);
+			try {
+				await harness.deleteSessionInPlace(f.saved.context, f.index, f.row.tabId);
+				assert.equal(f.index.list().length, 1);
+				assert.equal(f.state.runtime, f.native);
+				assert.equal(f.panels.disposed, false);
+				assert.equal(f.requests.length, 0);
+				assert.ok(await readFile(f.file!, "utf8"));
+			} finally { await f.restore(); }
+		});
+
+		it("/delete stop failure does not delete or create a replacement", async () => {
+			const f = await replacementFixture();
+			f.native.handle.stop = async () => ({ pidGone: false, verified: false, tree: "unknown", nativePid: f.native.pid, remainingPids: [], detail: "fixture stop unconfirmed" });
+			try {
+				await harness.deleteSessionInPlace(f.saved.context, f.index, f.row.tabId);
+				assert.equal(f.index.list().length, 1);
+				assert.equal(f.state.runtime, f.native);
+				assert.equal(f.panels.disposed, false);
+				assert.equal(f.requests.length, 0);
+				assert.ok(await readFile(f.file!, "utf8"));
+			} finally { await f.restore(); }
+		});
 	});
 
 	it("busy consent aborts RPC before settling and launches only after the root exits", async () => {

@@ -2265,8 +2265,8 @@ export class SessionIndex {
 				return { status: "failed", tabId, kind: "launch-failed", detail: step.detail };
 			}
 			this.#live.set(tabId, { claim: live.claim, host: step.handle, sessionFile: entry.sessionFile, driven: true });
-			entry.sessionId = step.handle.sessionId ?? entry.sessionId;
-			entry.host = { ...entry.host, pid: step.handle.pid, sessionId: entry.sessionId, rpc: step.handle.rpc, transport: step.handle.transport ?? entry.host.transport };
+			if (entry.sessionFile === null) entry.sessionId = step.handle.sessionId ?? entry.sessionId;
+			entry.host = { ...entry.host, pid: step.handle.pid, sessionId: step.handle.sessionId ?? entry.host.sessionId, rpc: step.handle.rpc, transport: step.handle.transport ?? entry.host.transport };
 			await this.#touch(entry, "live", "The session restarted in the same editor.");
 			await this.#persist();
 			return { status: "restored", tabId, sessionFile: entry.sessionFile, host: step.handle };
@@ -2649,12 +2649,12 @@ export class SessionIndex {
 							// A live host is attached, so an earlier release is no
 							// longer proof of anything.
 							this.#dropReleaseProof(entry);
-							entry.sessionId = handle.sessionId ?? attachable.sessionId ?? entry.sessionId;
+							if (entry.sessionFile === null) entry.sessionId = handle.sessionId ?? attachable.sessionId ?? entry.sessionId;
 							entry.host = {
 								pid: handle.pid ?? attachable.pid,
 								instanceId: null,
 								generation: null,
-								sessionId: entry.sessionId,
+								sessionId: handle.sessionId ?? attachable.sessionId ?? recorded.sessionId,
 								startedAt: recorded.startedAt,
 								transport: handle.transport ?? recorded.transport ?? "rpc",
 								rpc: handle.rpc ?? attachable.rpc,
@@ -2761,7 +2761,7 @@ export class SessionIndex {
 			}
 
 			this.#live.set(tabId, { claim, host: step.handle, sessionFile: entry.sessionFile, driven: true });
-			entry.sessionId = step.handle.sessionId ?? entry.sessionId;
+			if (entry.sessionFile === null) entry.sessionId = step.handle.sessionId ?? entry.sessionId;
 			// A host is now running, so the previous release stops being an
 			// authorization for this row.
 			this.#dropReleaseProof(entry);
@@ -2769,7 +2769,7 @@ export class SessionIndex {
 				pid: step.handle.pid,
 				instanceId: null,
 				generation: null,
-				sessionId: entry.sessionId,
+				sessionId: step.handle.sessionId ?? entry.host?.sessionId ?? entry.sessionId,
 				startedAt: this.#timestamp(),
 				transport: step.handle.transport ?? entry.host?.transport ?? "rpc",
 				rpc: step.handle.rpc,
@@ -2960,12 +2960,12 @@ export class SessionIndex {
 		this.#live.set(tabId, { claim, host: handle, sessionFile: null, driven: true });
 		// A live host is attached, so an earlier release is no longer proof of anything.
 		this.#dropReleaseProof(entry);
-		entry.sessionId = handle.sessionId ?? attachable.sessionId ?? entry.sessionId;
+		if (entry.sessionFile === null) entry.sessionId = handle.sessionId ?? attachable.sessionId ?? entry.sessionId;
 		entry.host = {
 			pid: handle.pid ?? attachable.pid,
 			instanceId: null,
 			generation: null,
-			sessionId: entry.sessionId,
+			sessionId: handle.sessionId ?? attachable.sessionId ?? recorded.sessionId,
 			startedAt: recorded.startedAt,
 			transport: handle.transport ?? recorded.transport ?? "rpc",
 			rpc: handle.rpc ?? attachable.rpc,
@@ -3449,25 +3449,21 @@ export class SessionIndex {
 	}
 
 	/**
-	 * Record the OMP session id the process this window runs reported (`get_state`), on the row and
-	 * on its recorded host, as soon as it is known — before any session file exists. A later re-adopt
-	 * of that host (extension-host or window restart) tells "the same session" from "a switch" only
-	 * by this id, so a row that never recorded it could never be re-attached.
-	 *
-	 * Runs under the tab's lifecycle. Never rewrites an id that is already recorded and differs:
-	 * that is a different session, and the caller is told (`false`).
+	 * Record the process-bound provider identity separately from the durable file identity.
+	 * An authorized rotation commits only against the captured file, runtime and previous
+	 * provider identity in the transaction. Only a committed identity is published locally.
 	 */
-	async recordHostSessionId(tabId: string, sessionId: string, lease?: TabLifecycleLease): Promise<boolean> {
+	async recordHostSessionId(tabId: string, sessionId: string, lease?: TabLifecycleLease, previousSessionId?: string): Promise<boolean> {
 		return await this.withinTabLifecycle(tabId, lease, async () => {
 			const entry = this.#entries.get(tabId);
 			if (entry === undefined || sessionId.length === 0) return false;
 			const recorded = entry.host?.sessionId ?? entry.sessionId;
-			if (recorded !== null && recorded !== sessionId) return false;
-			if (entry.sessionId === sessionId && (entry.host === null || entry.host.sessionId === sessionId)) return true;
-			entry.sessionId = sessionId;
-			if (entry.host !== null) entry.host = { ...entry.host, sessionId };
-			await this.#persist();
-			return true;
+			if (recorded !== null && recorded !== sessionId && (previousSessionId === undefined || recorded !== previousSessionId || entry.host?.transport !== "rpc")) return false;
+			if (entry.host?.sessionId === sessionId || (entry.host === null && entry.sessionId === sessionId)) return true;
+			return await this.#persistNow(undefined, {
+				before: sharedEntryOf(entry), sessionId,
+				...(previousSessionId === undefined ? {} : { previousSessionId }),
+			}) === null;
 		});
 	}
 
@@ -3946,38 +3942,83 @@ export class SessionIndex {
 	 * it is reported through {@link SessionIndex.localPersistError} and never gates a
 	 * lifecycle decision that the shared record already settled.
 	 */
-	async #persistNow(companion?: CatalogRecordChange): Promise<string | null> {
-		const snapshot: SharedSnapshot = {
-			version: INDEX_VERSION,
-			nextOrdinal: this.#nextOrdinal,
-			entries: [...this.#entries.values()].map(entry => sharedEntryOf(entry)),
-			bindings: [...this.#bindings.values()].map(binding => ({ ...binding })),
-		};
-		const observations: Record<string, LocalObservation> = this.#localObservations();
-		const local: LocalSnapshot = {
-			version: LOCAL_VERSION,
-			activeTabId: this.#activeTabId,
-			observations,
-		};
-		// One writer for the catalog: overlapping restores must not interleave.
+	async #persistNow(companion?: CatalogRecordChange, identity?: {
+		readonly before: SharedEntry;
+		readonly sessionId: string;
+		readonly previousSessionId?: string;
+	}): Promise<string | null> {
+		let failure: string | null = null;
+		// Capture each snapshot only at its serialized turn. An earlier identity transaction
+		// publishes or refuses before another save can capture that row, preserving other edits.
 		this.#persistChain = this.#persistChain.then(async () => {
+			let rejectedIdentity: SharedEntry | null = null;
+			const snapshot: SharedSnapshot = {
+				version: INDEX_VERSION,
+				nextOrdinal: this.#nextOrdinal,
+				entries: [...this.#entries.values()].map(sharedEntryOf),
+				bindings: [...this.#bindings.values()].map(binding => ({ ...binding })),
+			};
+			if (identity !== undefined) {
+				const desired = snapshot.entries.find(row => row.tabId === identity.before.tabId);
+				if (desired !== undefined) {
+					if (desired.sessionFile === null) desired.sessionId = identity.sessionId;
+					if (desired.host !== null) desired.host = { ...desired.host, sessionId: identity.sessionId };
+				}
+			}
+			const local: LocalSnapshot = {
+				version: LOCAL_VERSION,
+				activeTabId: this.#activeTabId,
+				observations: this.#localObservations(),
+			};
 			try {
-				// `Promise.resolve` adopts VS Code's `Thenable` as well as a plain
-				// promise, so a Memento and a test double behave identically here.
-				if (companion !== undefined) {
+				if (identity?.previousSessionId !== undefined) {
+					if (this.#store.transactRecords === undefined) throw new Error("The shared catalog cannot atomically accept provider identity.");
+					await this.#store.transactRecords([{ key: SESSION_INDEX_STORAGE_KEY, base: this.#sharedBase, decide: latest => {
+						const before = identity.before;
+						const committed = isPersistedSnapshot(latest) ? latest.entries.find(row => row.tabId === before.tabId) : undefined;
+						if (committed === undefined || committed.sessionFile !== before.sessionFile ||
+							!sameRecord(committed.host, before.host) || !sameRecord(committed.ownership, before.ownership) ||
+							committed.host?.sessionId !== identity.previousSessionId) {
+							if (committed !== undefined) rejectedIdentity = cloneSharedEntry(committed);
+							return { refused: "The captured provider identity, file or runtime generation changed before acceptance." };
+						}
+						return { desired: mergeSessionIndexRecords({ base: this.#sharedBase, desired: snapshot, latest }).value };
+					} }]);
+				} else if (companion !== undefined) {
 					if (this.#store.transactRecords === undefined) throw new Error("The shared catalog cannot atomically move the native broker mapping.");
 					await this.#store.transactRecords([{ key: SESSION_INDEX_STORAGE_KEY, desired: snapshot, base: this.#sharedBase }, companion]);
 				} else {
 					await Promise.resolve(this.#store.update(SESSION_INDEX_STORAGE_KEY, snapshot, this.#sharedBase));
 				}
+				if (identity !== undefined) {
+					const entry = this.#entries.get(identity.before.tabId);
+					if (entry !== undefined) {
+						if (entry.sessionFile === null) entry.sessionId = identity.sessionId;
+						if (entry.host !== null) entry.host = { ...entry.host, sessionId: identity.sessionId };
+					}
+					const live = this.#live.get(identity.before.tabId);
+					if (live !== undefined) this.#live.set(identity.before.tabId, { ...live, host: { ...live.host, sessionId: identity.sessionId } });
+				}
 				this.#persistError = null;
 				this.#persistRetries = 0;
-				// What this window's rows are derived from is now what it just committed.
 				this.#sharedBase = snapshot;
 			} catch (error) {
-				this.#persistError = `The session index could not be persisted: ${describeError(error)}`;
-				// A transaction with a companion record is the caller's to retry or roll back; a plain snapshot is saved again here.
-				if (companion === undefined) this.#retryPersistLater();
+				if (rejectedIdentity !== null) {
+					// Keep the committed runtime identity, without discarding title/unread edits
+					// made while the CAS waited. A queued ordinary save must not reassert a stale host.
+					const committed = rejectedIdentity as SharedEntry;
+					const entry = this.#entries.get(committed.tabId);
+					if (entry !== undefined) {
+						entry.sessionFile = committed.sessionFile;
+						entry.sessionId = committed.sessionId;
+						entry.host = committed.host;
+						entry.ownership = committed.ownership;
+					}
+				}
+				failure = `The session index could not be persisted: ${describeError(error)}`;
+				this.#persistError = failure;
+				// Identity and companion transactions are not retried as ordinary snapshots.
+				if (companion === undefined && identity === undefined) this.#retryPersistLater();
 				return;
 			}
 			try {
@@ -3988,7 +4029,7 @@ export class SessionIndex {
 			}
 		});
 		await this.#persistChain;
-		return this.#persistError;
+		return failure;
 	}
 
 	/**

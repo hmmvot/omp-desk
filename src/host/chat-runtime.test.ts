@@ -31,6 +31,10 @@ import { ManualTimers, assistantMessage, messageEntry, tick, userMessage, waitUn
 import { NAVIGATE_COMMAND, NAVIGATION_MARKER_TYPE, parseNavigateArgs } from "../chat/rewind.ts";
 import { parseChatHostMessage, parseChatWebviewMessage } from "../webview/chat-messages.ts";
 import { isoOf } from "./rpc/test-support.ts";
+import { CLEAR_BUSY_SENTENCE, CLEAR_COMMAND, CLEAR_DONE_SENTENCE, CLEAR_ERROR_PATH, CLEAR_REFUSAL_SENTENCES } from "../chat/clear.ts";
+import type { ClearMarkerData } from "../chat/clear.ts";
+import { DESK_COMMAND_ARGUMENTS_SENTENCE, DESK_COMMAND_UNAVAILABLE_SENTENCE, NEW_BUSY_SENTENCE } from "../chat/desk-commands.ts";
+import { runClearCommand, type ClearCommandContext } from "../omp/clear-command.ts";
 
 const TAB = "tab:one";
 const SESSION_FILE = "D:\\scratch\\chat.jsonl";
@@ -325,7 +329,7 @@ describe("a page asking to reconnect", () => {
 		const timers = new ManualTimers();
 		const events: ChatRuntimeEvent[] = [];
 		const runtime = new ChatRuntime({
-			hostNonce: "restart-host", onEvent: (_tab, event) => events.push(event),
+			hostNonce: "restart-host", onEvent: (_tab, event) => { events.push(event); },
 			createSession: options => new RpcSession({ ...options, timers, commandTimeoutMs: 10, autoRecoveryDelaysMs: [] }),
 		});
 		const channel = new FakeRpcChannel();
@@ -667,6 +671,149 @@ describe("terminal-UI builtins typed into Chat", () => {
 		runtime.attachPage(TAB, page);
 		assert.equal(await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "tui-fail", text: "/hotkeys" }, page), "explained");
 		assert.deepEqual(page.notices(), ["/hotkeys was not sent, and its Desk equivalent could not be opened."], "one line, and no claim that it opened");
+	});
+});
+
+describe("Desk session commands typed into Chat (ADR-0059)", () => {
+	const CLEAR_PREFIX = `/${CLEAR_COMMAND} `;
+
+	/** The real `-e` command running over the fake child: what `omp-desk-clear` writes lands in the child's entries. */
+	function runRealCommand(channel: FakeRpcChannel, manager: { appendResetBoundary?: () => string }): { reloads: number } {
+		const seen = { reloads: 0 };
+		const pendingClears = new Map<string, ClearMarkerData>();
+		channel.handlers.set("prompt", command => {
+			const message = String(command.message);
+			if (message === "/fresh") { channel.child.sessionId = "sess-fresh"; return { data: { agentInvoked: false } }; }
+			if (!message.startsWith(CLEAR_PREFIX)) return undefined;
+			const id = String(command.id);
+			const context: ClearCommandContext = {
+				mode: "rpc",
+				sessionManager: { getSessionId: () => "sess-1", ...manager },
+				isIdle: () => true,
+				hasPendingMessages: () => false,
+				getAsyncJobSnapshot: () => ({ running: [], delivery: { queued: 0, delivering: false, pendingJobIds: [] } }),
+				reload: async () => { seen.reloads += 1; },
+			};
+			void runClearCommand(message.slice(CLEAR_PREFIX.length), context, (customType, data) => {
+				channel.child.entries.push({ type: "custom", customType, id: "marker-1", parentId: channel.child.leafId, timestamp: "2026-10-11T00:00:02.000Z", data });
+				channel.child.leafId = "marker-1";
+			}, pendingClears, () => false).then(
+				() => channel.emit({ type: "response", id, command: "prompt", success: true, data: { agentInvoked: false } }),
+				(error: Error) => {
+					channel.emit({ type: "extension_error", extensionPath: CLEAR_ERROR_PATH, event: "command", error: error.message });
+					channel.emit({ type: "response", id, command: "prompt", success: true, data: { agentInvoked: false } });
+				},
+			);
+			return "drop";
+		});
+		return seen;
+	}
+
+	it("/clear runs the in-place reset through the -e command and tells the page; the boundary and marker reach the transcript", async () => {
+		const { runtime, channel } = await liveRig({ entries: rows(4) as never, leafId: "r3" });
+		channel.emit({ type: "available_commands_update", commands: [{ name: CLEAR_COMMAND, source: "extension", description: "Desk clear" }] });
+		await waitUntil(() => runtime.sessionOf(TAB)?.model.commands.some(command => command.name === CLEAR_COMMAND) === true);
+		const written: string[] = [];
+		const seen = runRealCommand(channel, { appendResetBoundary: () => {
+			channel.child.entries.push({ type: "reset_boundary", id: "boundary-1", parentId: channel.child.leafId, timestamp: "2026-10-11T00:00:01.000Z" });
+			channel.child.leafId = "boundary-1";
+			written.push("boundary");
+			return "boundary-1";
+		} });
+		const page = new RecordingPage("editor");
+		runtime.attachPage(TAB, page);
+		assert.equal(await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "clear-1", text: " /CLEAR " }, page), "explained");
+		assert.equal(seen.reloads, 1);
+		assert.deepEqual(page.notices(), [CLEAR_DONE_SENTENCE]);
+		const model = runtime.sessionOf(TAB)!.model;
+		assert.deepEqual(model.entries.slice(0, model.durableCount).map(entry => entry.id).slice(-3), ["r3", "boundary-1", "marker-1"]);
+		assert.deepEqual(channel.commandsOfType("prompt").map(command => String(command.message).split(" ")[0]), ["/omp-desk-clear", "/fresh", "/omp-desk-clear"], "one combined operation uses three supported prompts");
+		assert.equal(await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "clear-1", text: "/clear" }, page), "explained", "a repeated request answers again");
+		assert.equal(channel.commandsOfType("prompt").length, 3, "and runs nothing a second time");
+	});
+
+	it("/clear fails closed on an OMP whose command finds no appendResetBoundary: nothing is written", async () => {
+		const { runtime, channel } = await liveRig({ entries: rows(4) as never, leafId: "r3" });
+		channel.emit({ type: "available_commands_update", commands: [{ name: CLEAR_COMMAND, source: "extension", description: "Desk clear" }] });
+		await waitUntil(() => runtime.sessionOf(TAB)?.model.commands.some(command => command.name === CLEAR_COMMAND) === true);
+		const seen = runRealCommand(channel, {});
+		const page = new RecordingPage("editor");
+		runtime.attachPage(TAB, page);
+		assert.equal(await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "clear-2", text: "/clear" }, page), "explained");
+		assert.deepEqual(page.notices(), [CLEAR_REFUSAL_SENTENCES.unsupported]);
+		assert.equal(seen.reloads, 0);
+		assert.deepEqual(channel.child.entries.map(entry => entry.id), ["r0", "r1", "r2", "r3"], "the session file is untouched");
+	});
+
+	it("/clear while a turn runs answers with OMP's own sentence and sends nothing; the same for a steer", async () => {
+		const { runtime, channel } = await liveRig();
+		channel.emit({ type: "agent_start" });
+		await tick();
+		const page = new RecordingPage("editor");
+		runtime.attachPage(TAB, page);
+		assert.equal(await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "clear-3", text: "/clear" }, page), "explained");
+		assert.equal(await runtime.handleMessage(TAB, { type: "omp:chat-steer", requestId: "clear-4", text: "/clear" }, page), "explained");
+		assert.deepEqual(page.notices(), [CLEAR_BUSY_SENTENCE, CLEAR_BUSY_SENTENCE]);
+		assert.equal(CLEAR_BUSY_SENTENCE, "Wait for the current response to finish or abort it before resetting the context.");
+		assert.equal(channel.commandsOfType("prompt").length + channel.commandsOfType("steer").length, 0);
+	});
+
+	it("/clear needs the command in the live catalog, and takes no arguments", async () => {
+		const { runtime, channel } = await liveRig();
+		const page = new RecordingPage("editor");
+		runtime.attachPage(TAB, page);
+		await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "clear-5", text: "/clear" }, page);
+		await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "clear-6", text: "/clear everything" }, page);
+		assert.deepEqual(page.notices(), [CLEAR_REFUSAL_SENTENCES.unsupported, CLEAR_REFUSAL_SENTENCES.arguments]);
+		assert.equal(channel.commandsOfType("prompt").length, 0, "the typed text never reaches OMP, whatever its refusal");
+	});
+
+	it("/new and /delete run their Desk action once per request; /new refuses while a response runs", async () => {
+		const ran: string[] = [];
+		const { runtime, channel } = await liveRig({}, { runDeskAction: async (action, tabId) => { ran.push(`${tabId}:${action}`); } });
+		const page = new RecordingPage("editor");
+		runtime.attachPage(TAB, page);
+		const fresh = { type: "omp:chat-prompt" as const, requestId: "new-1", text: "/new" };
+		assert.equal(await runtime.handleMessage(TAB, fresh, page), "explained");
+		assert.equal(await runtime.handleMessage(TAB, fresh, page), "explained");
+		assert.equal(await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "del-1", text: "/delete" }, page), "explained");
+		assert.deepEqual(ran, [`${TAB}:new-session`, `${TAB}:delete-session`]);
+		await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "new-2", text: "/new please" }, page);
+		assert.deepEqual(ran.length, 2, "arguments are refused before anything runs");
+		channel.emit({ type: "agent_start" });
+		await tick();
+		assert.equal(await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "new-3", text: "/new" }, page), "explained");
+		assert.equal(ran.length, 2);
+		assert.deepEqual(page.notices(), [DESK_COMMAND_ARGUMENTS_SENTENCE, NEW_BUSY_SENTENCE]);
+		assert.equal(channel.commandsOfType("prompt").length, 0, "nothing reaches OMP");
+	});
+
+	it("says so when a Desk action fails or is unavailable", async () => {
+		const failing = await liveRig({}, { runDeskAction: async () => { throw new Error("nope"); } });
+		const page = new RecordingPage("editor");
+		failing.runtime.attachPage(TAB, page);
+		await failing.runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "new-4", text: "/new" }, page);
+		assert.deepEqual(page.notices(), ["/new did not complete."]);
+		const bare = await liveRig();
+		const other = new RecordingPage("other");
+		bare.runtime.attachPage(TAB, other);
+		await bare.runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "del-2", text: "/delete" }, other);
+		assert.deepEqual(other.notices(), [DESK_COMMAND_UNAVAILABLE_SENTENCE]);
+	});
+
+	it("/fresh runs through Desk's accepted provider-rotation route, preserving messages", async () => {
+		const { runtime, channel } = await liveRig();
+		channel.handlers.set("prompt", command => {
+			assert.equal(command.message, "/fresh");
+			channel.child.sessionId = "fresh-provider";
+			return { data: { agentInvoked: false } };
+		});
+		const page = new RecordingPage("editor");
+		runtime.attachPage(TAB, page);
+		assert.equal(await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "fresh-1", text: "/fresh" }, page), "explained");
+		assert.equal(runtime.sessionOf(TAB)!.sessionId, "fresh-provider");
+		assert.equal(channel.commandsOfType("prompt").length, 1);
+		assert.deepEqual(page.notices(), ["Provider state refreshed. Local conversation history is unchanged."]);
 	});
 });
 

@@ -505,6 +505,7 @@ export class HistoryReader {
 	async #readTodoSeed(handle: FileHandle, path: readonly number[]): Promise<readonly TodoPhase[] | null> {
 		for (let index = path.length - 1; index >= 0; index -= 1) {
 			const candidate = this.#entries[path[index]!]!;
+			if (candidate.type === "reset_boundary") return [];
 			if (!candidate.todoCandidate || candidate.length > MAX_ROW_BYTES) continue;
 			const row = await this.#rowOf(candidate, await readRange(handle, candidate.offset, candidate.length), { bytes: 0 });
 			const phases = todoPhasesFromEntry(row);

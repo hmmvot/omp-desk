@@ -52,6 +52,17 @@ function conversation(pairs: number): ChatEntry[] {
 }
 
 describe("HistoryReader", () => {
+	it("does not seed an unloaded pre-boundary TODO into the latest history window", async () => {
+		const dir = await scratch();
+		const todo = messageEntry("todo", null, toolResultMessage("call", 1, "todo", { op: "update", phases: [{ name: "Old", tasks: [{ content: "earlier work", status: "pending" }] }] }));
+		const boundary: ChatEntry = { type: "reset_boundary", id: "boundary", parentId: "todo", timestamp: new Date(2).toISOString() };
+		const file = await dir.file("todo.jsonl", sessionFileText({ entries: [todo, boundary, messageEntry("latest", "boundary", userMessage("new context", 3))] }));
+		const reader = await HistoryReader.open(file);
+		const snap = await reader.snapshot(1);
+		assert.deepEqual(snap.entries.map(entry => entry.id), ["latest"]);
+		assert.deepEqual(snap.todoSeed, []);
+	});
+
 	it("skips the title slot, reads the header, and returns the tail window with olderCount", async () => {
 		const dir = await scratch();
 		const file = await dir.file("a.jsonl", sessionFileText({ id: "abc", title: "My title", entries: conversation(5) }));

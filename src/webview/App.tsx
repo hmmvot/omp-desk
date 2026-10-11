@@ -241,6 +241,7 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 						toolCallDetail={preferences.toolCallDetail}
 						conversationKey={snapshot.header?.id ?? snapshot.epoch?.nonce ?? "chat"}
 						entries={snapshot.entries}
+						unconfirmedClearBoundaryId={snapshot.unconfirmedClearBoundaryId}
 						stream={snapshot.stream}
 						activeTools={snapshot.activeTools}
 						working={shown.working}

@@ -632,6 +632,8 @@ const outcomes = new Map<string, RestoreOutcome>();
  * retryable.
  */
 const openingTabs = new Map<string, Promise<void>>();
+/** A Chat /new or /delete replaces its editor in that editor's own group. */
+const sessionPanelColumns = new Map<string, vscode.ViewColumn>();
 /** Confirmed recorded-host stops still awaiting their broker verdict. */
 const stoppingTabs = new Set<string>();
 /**
@@ -1112,8 +1114,12 @@ export function activate(context: vscode.ExtensionContext): void {
     // Terminal-UI builtins typed into Chat are answered, not sent (ADR-0052); the list is the installed OMP's.
     slashRegistry: () => currentSlashRegistry(context),
     runDeskAction: async (action, tabId) => {
-      if (action !== "models-settings") return runDeskSlashAction(action);
-      await settingsEditors.open("models", await settingsBinding(tabId));
+      switch (action) {
+        case "new-session": return newSessionInPlace(context, index, tabId);
+        case "delete-session": return deleteSessionInPlace(context, index, tabId);
+        case "models-settings": await settingsEditors.open("models", await settingsBinding(tabId)); return;
+        default: return runDeskSlashAction(action);
+      }
     },
     // Models from a Chat shows that Chat's folder so its default can be applied to the session;
     // agent settings are global, so Agents opens in the global scope for the Chat's profile.
@@ -1540,6 +1546,81 @@ async function startNewSession(context: vscode.ExtensionContext, index: SessionI
   // its phase, and the draft row and its claim are exactly what they would have been
   // otherwise.
   await openTab(context, index, entry.tabId, "started");
+}
+
+/** Slash commands are local to the editor that received them, even for an unpinned folder. */
+async function createSessionInColumn(
+  context: vscode.ExtensionContext, index: SessionIndex, cwd: string, column: vscode.ViewColumn,
+): Promise<vscode.WebviewPanel | null> {
+  let entry: SessionIndexEntry;
+  try {
+    entry = await index.createDraft({ cwd });
+  } catch (error) {
+    showError(`A new OMP session could not be reserved: ${messageOf(error)}`);
+    return null;
+  }
+  refreshLauncher();
+  sessionPanelColumns.set(entry.tabId, column);
+  try {
+    await openTab(context, index, entry.tabId, "started");
+    const panel = stateOf(entry.tabId)?.panel ?? null;
+    if (panel === null) showError("The new OMP session's editor could not be opened.");
+    return panel;
+  } catch (error) {
+    showError(`The new OMP session's editor could not be opened: ${messageOf(error)}`);
+    return null;
+  } finally {
+    sessionPanelColumns.delete(entry.tabId);
+  }
+}
+
+const replacingConversations = new Set<string>();
+
+async function newSessionInPlace(context: vscode.ExtensionContext, index: SessionIndex, tabId: string): Promise<void> {
+  const entry = index.get(tabId);
+  const state = stateOf(tabId);
+  const panel = state?.panel;
+  if (entry === null || state === undefined || panel == null) {
+    showError("This session's editor is no longer open, so nothing was replaced.");
+    return;
+  }
+  if (replacingConversations.has(tabId)) { showWarning("This conversation is already being replaced."); return; }
+  replacingConversations.add(tabId);
+  const runtime = state.runtime;
+  fenceSessionAdmission(index, state, true);
+  let opened = false;
+  try {
+    const captured = runtime === null ? null : await index.lifecycle.run(tabId, async () => await readTransitionFacts(state, runtime));
+    if (runtime !== null && captured?.settled !== true) { showWarning("The session is not idle; nothing was replaced."); return; }
+    const column = sessionTabColumn(panel.viewType) ?? panel.viewColumn ?? vscode.ViewColumn.Active;
+    if (await createSessionInColumn(context, index, entry.cwd, column) === null) return;
+    opened = true;
+    if (runtime !== null) {
+      const preconfirmed = { conflicting: passiveReasonForSlot(state.slotId) !== null, captured, idleOnly: true };
+      if (!(await confirmAndStopRuntime(context, index, tabId, state, runtime, "Stop", preconfirmed))) {
+        showWarning("The new session opened, but the old session was not stopped. Its editor remains open.");
+        return;
+      }
+    }
+    if (state.tabId === tabId && state.panel === panel && state.runtime === null) panel.dispose();
+  } catch (error) {
+    showError(`${opened ? "The new session opened, but the old session could not be stopped" : "The session could not be replaced"}: ${messageOf(error)}`);
+  } finally {
+    replacingConversations.delete(tabId);
+    fenceSessionAdmission(index, state, false);
+  }
+}
+
+async function deleteSessionInPlace(context: vscode.ExtensionContext, index: SessionIndex, tabId: string): Promise<void> {
+  const entry = index.get(tabId);
+  const panel = stateOf(tabId)?.panel;
+  if (entry === null || panel == null) {
+    showError("This session's editor is no longer open, so nothing was deleted.");
+    return;
+  }
+  const column = sessionTabColumn(panel.viewType) ?? panel.viewColumn ?? vscode.ViewColumn.Active;
+  if (!(await confirmAndDeleteSession(index, tabId))) return;
+  await createSessionInColumn(context, index, entry.cwd, column);
 }
 
 /**
@@ -2559,7 +2640,7 @@ function setupProcessesView(context: vscode.ExtensionContext, index: SessionInde
       ) return null;
       const conflicting = passiveReasonForSlot(state.slotId) !== null;
       const captured = await index.lifecycle.run(tabId, async () => await readTransitionFacts(state, runtime));
-      return { run: () => confirmAndStopRuntime(context, index, tabId, state, runtime, "Stop", { conflicting, captured }) };
+      return { run: async () => { await confirmAndStopRuntime(context, index, tabId, state, runtime, "Stop", { conflicting, captured }); } };
     },
     async captureRecordedStop(row) {
       const tabId = row.host?.kind === "session" ? row.host.tabId : null;
@@ -3976,6 +4057,7 @@ async function startConversation(
   chat.startLive(tabId, {
     channel: runtime.handle,
     sessionFile,
+    ...(replayFromStart && entry?.host?.sessionId != null ? { expectedProviderSessionId: entry.host.sessionId } : {}),
     cwd: runtime.cwd,
     title: entry?.title ?? null,
     // A re-adopted child replays what its broker buffered since the beginning; a fresh one
@@ -4193,7 +4275,9 @@ async function launchHost(
   // A verified launch is a durable "this should be running": the row is running again after
   // a reload instead of being read as a deliberate stop.
   await index.setRunIntent(request.tabId, "running");
-  return { state: "running", host: hostHandle(runtime, request.sessionId) };
+  const sessionId = runtime.kind === "chat" && request.sessionFile !== null
+    ? (await readSessionFileHeader(request.sessionFile))?.sessionId ?? request.sessionId : request.sessionId;
+  return { state: "running", host: hostHandle(runtime, sessionId) };
 }
 
 function hostHandle(runtime: SessionHostRuntime, sessionId: string | null): OmpHostHandle {
@@ -4877,7 +4961,8 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
     return;
   }
   const file = row.sessionFile;
-  const sessionId = row.sessionId;
+  const sessionId = row.host?.sessionId ?? row.sessionId;
+  const durableSessionId = row.sessionId;
   const creationTime = runtime.identity.childCreationTime;
   const modeRequest = ++editorEventSequence;
   state.lastOpenRequest = modeRequest;
@@ -4894,15 +4979,15 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
       state.lastOpenRequest === modeRequest && state.panel === panel && state.document === document &&
       state.mode === "chat" && passiveReasonForSlot(state.slotId) === null &&
       currentBinding?.generation === binding.generation && currentBinding.role === "controlling" &&
-      currentBinding.tabId === tabId && current?.sessionFile === file && current.sessionId === sessionId &&
-      current.availability === "live" && current.host?.pid === runtime.pid &&
+      currentBinding.tabId === tabId && current?.sessionFile === file && current.sessionId === durableSessionId &&
+      current.availability === "live" && current.host?.pid === runtime.pid && current.host.sessionId === sessionId &&
       current.host.rpc?.childCreationTime === creationTime && current.ownership !== null &&
       current.ownership.releasedAt === null && current.ownership.ownerGeneration === committed.ownerGeneration &&
       currentCommitted !== null && bindingMatches(committed, currentCommitted) &&
       committed.pid === runtime.pid && committed.processCreation === creationTime &&
       committed.slot === runtime.identity.slot && committed.brokerId === runtime.identity.brokerId &&
       committed.brokerGeneration === runtime.identity.brokerGeneration && committed.sessionFile === file &&
-      committed.sessionId === sessionId && chat.sessionOf(tabId) === session &&
+      committed.sessionId === durableSessionId && chat.sessionOf(tabId) === session &&
       session.epoch.nonce === nativeNonce && session.sessionFile !== null && controlPathEquals(session.sessionFile, file) &&
       session.sessionId === sessionId && (!requireUnanswered || session.nativeStateUnanswered);
   };
@@ -4910,7 +4995,7 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
   try {
     const eligible = await index.lifecycle.run(tabId, async () => {
       const header = await readSessionFileHeader(file);
-      return header?.sessionId === sessionId && sameTarget(true);
+      return header?.sessionId === durableSessionId && sameTarget(true);
     });
     if (!eligible) { refuse("The saved conversation or controlling writer changed. Nothing was stopped."); return; }
     carried = await captureDraft(state);
@@ -4929,7 +5014,7 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
     if (consent !== "Restart") return;
     await index.lifecycle.run(tabId, async lease => {
       const header = await readSessionFileHeader(file);
-      if (header?.sessionId !== sessionId || !sameTarget(true)) {
+      if (header?.sessionId !== durableSessionId || !sameTarget(true)) {
         refuse("The writer recovered or the editor or saved conversation changed while confirmation was open. Nothing was stopped.");
         return;
       }
@@ -4955,7 +5040,7 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
       await retireBroker(tabId, runtime);
       chat.release(tabId);
       const saved = await readSessionFileHeader(file);
-      if (saved?.sessionId !== sessionId) {
+      if (saved?.sessionId !== durableSessionId) {
         await index.closeSession(tabId, { confirmedStopped: true, detail: "The exact saved conversation is unavailable after disposal; no successor was launched." }, lease);
         refuse("The exact saved conversation is unavailable after the process stopped. No successor was started; your input remains in this editor.");
         return;
@@ -5532,11 +5617,13 @@ function openPanel(
   // what a first frame can use without waiting; binding below then applies the
   // exact stored name and the icon.
   const entry = index.get(tabId);
-  const placement = chatColumnEnabled() ? chatPlacementNow() : null;
+  const column = sessionPanelColumns.get(tabId);
+  sessionPanelColumns.delete(tabId);
+  const placement = column === undefined && chatColumnEnabled() ? chatPlacementNow() : null;
   const panel = vscode.window.createWebviewPanel(
     viewType,
     entry === null ? "OMP session" : sessionHeadline(entry, null),
-    placement?.column ?? vscode.ViewColumn.Active,
+    column ?? placement?.column ?? vscode.ViewColumn.Active,
     {
       enableScripts: true,
       retainContextWhenHidden: true,
@@ -7241,7 +7328,7 @@ function liveBridgeBinding(tabId: string): BridgeNativeBinding | null {
     slot: runtime.identity.slot,
     brokerId: runtime.identity.brokerId,
     brokerGeneration: runtime.identity.brokerGeneration,
-    sessionId: entry.sessionId,
+    sessionId: runtime.kind === "chat" ? session?.model.header?.id ?? entry.sessionId : entry.sessionId,
     sessionFile: entry.sessionFile,
   };
 }
@@ -8133,7 +8220,7 @@ async function runChatAction(context: vscode.ExtensionContext, index: SessionInd
 }
 
 /** The Desk stand-in for a terminal-UI slash command typed into Chat (`host/slash-registry.ts`). */
-async function runDeskSlashAction(action: Exclude<DeskSlashAction, "models-settings">): Promise<void> {
+async function runDeskSlashAction(action: Exclude<DeskSlashAction, "models-settings" | "new-session" | "delete-session">): Promise<void> {
   switch (action) {
     case "keyboard-shortcuts":
       await showChatKeyboardShortcuts();
@@ -8148,6 +8235,8 @@ async function runDeskSlashAction(action: Exclude<DeskSlashAction, "models-setti
       await vscode.commands.executeCommand("omp.loginProvider");
       return;
   }
+  const exhaustive: never = action;
+  throw new Error(`Unsupported Desk slash action: ${exhaustive}`);
 }
 
 async function showChatKeyboardShortcuts(): Promise<void> {
@@ -8838,14 +8927,16 @@ async function bindConversationIdentity(
   runtime: SessionHostRuntime,
   sessionFile: string,
   sessionId: string,
+  previousSessionId?: string,
 ): Promise<void> {
   await index.lifecycle.run(tabId, async lease => {
     const current = stateOf(tabId);
     if (current === undefined || current.runtime !== runtime) return;
     // The id is recorded the moment it is known — a new session's file does not exist until its
     // first message, but a re-adopt after any restart needs the id to tell this session from a switch.
-    const recorded = await index.recordHostSessionId(tabId, sessionId, lease);
+    const recorded = await index.recordHostSessionId(tabId, sessionId, lease, previousSessionId);
     if (!recorded) log(`tab ${tabId}: the session id ${sessionId} conflicts with the one this row recorded and was not recorded`);
+    if (!recorded && previousSessionId !== undefined) throw new Error("Accepted provider identity could not be recorded.");
     const entry = index.get(tabId);
     if (entry === null || entry.sessionFile !== null) return;
     const pending = pendingIdentityFiles.get(tabId);
@@ -9005,7 +9096,7 @@ async function confirmOpenUrl(event: { url: string; launchUrl?: string; instruct
  * activity and diagnostics for a model change, the redraw and readiness for a phase, the
  * lifecycle for an exit, and the identity binding for a learned session file.
  */
-function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, event: ChatRuntimeEvent): void {
+function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, event: ChatRuntimeEvent): void | Promise<void> {
   switch (event.type) {
     case "catalogue":
       if (toolsTarget(index)?.key === chat.sessionOf(tabId)) toolsController?.refresh();
@@ -9030,7 +9121,7 @@ function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, 
       if (phase === "live") {
         const entry = index.get(tabId);
         const name = event.payload.title?.trim();
-        if (entry !== null && name && event.payload.sessionId === entry.sessionId && entry.title !== name) {
+        if (entry !== null && name && event.payload.sessionId === (entry.host?.sessionId ?? entry.sessionId) && entry.title !== name) {
           void index.recordConversationState(tabId, { title: name }).then(() => {
             refreshLauncher();
             return applyChatTabAppearance(context, index, tabId);
@@ -9055,7 +9146,7 @@ function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, 
     }
     case "identity": {
       const runtime = stateOf(tabId)?.runtime ?? null;
-      if (runtime !== null) void bindConversationIdentity(index, tabId, runtime, event.sessionFile, event.sessionId);
+      if (runtime !== null) return bindConversationIdentity(index, tabId, runtime, event.sessionFile, event.sessionId, event.previousSessionId);
       return;
     }
     case "open-url":
@@ -13615,12 +13706,12 @@ async function confirmAndStopRuntime(
    * gate. Its own prompt is skipped, the same checks bind to this capture, and a runtime that
    * is no longer the captured one is refused visibly.
    */
-  preconfirmed?: { readonly conflicting: boolean; readonly captured: SessionTransitionFacts | null },
-): Promise<void> {
+  preconfirmed?: { readonly conflicting: boolean; readonly captured: SessionTransitionFacts | null; readonly idleOnly?: boolean },
+): Promise<boolean> {
   const entry = index.get(tabId);
   if (entry === null || state.runtime !== runtime || state.tabId !== tabId) {
     if (preconfirmed !== undefined) showWarning("The session changed while the stop was being prepared, so nothing was stopped.");
-    return;
+    return false;
   }
   const conflicting = preconfirmed?.conflicting ?? passiveReasonForSlot(state.slotId) !== null;
   const previouslyStopping = runtime.kind === "terminal" && runtime.stopping;
@@ -13635,13 +13726,20 @@ async function confirmAndStopRuntime(
           : "The OMP process ends and a turn in progress is aborted. The conversation stays in OMP's session files and can be resumed." },
         label,
       );
-      if (choice !== label) return;
+      if (choice !== label) return false;
     }
     stoppingTabs.add(tabId);
     refreshLauncher();
     const attempt = async (mode: "graceful" | "force"): Promise<NativeStopVerdict | null> =>
       await index.lifecycle.run(tabId, async lease => {
         if (state.runtime !== runtime || state.tabId !== tabId || (passiveReasonForSlot(state.slotId) !== null) !== conflicting) return null;
+        if (preconfirmed?.idleOnly === true) {
+          const fresh = await readTransitionFacts(state, runtime);
+          if (fresh?.settled !== true || (captured !== null && (fresh.epoch !== captured.epoch || fresh.file !== captured.file || fresh.sessionId !== captured.sessionId))) {
+            showWarning("The old session is no longer idle or its identity changed; nothing was stopped.");
+            return null;
+          }
+        }
         if (mode === "force" && captured !== null) {
           const fresh = await readTransitionFacts(state, runtime);
           if (fresh !== null && (fresh.epoch !== captured.epoch || fresh.file !== captured.file || fresh.sessionId !== captured.sessionId)) {
@@ -13674,7 +13772,7 @@ async function confirmAndStopRuntime(
         return stopped;
       });
     let stopped = await attempt("graceful");
-    if (stopped === null) { showWarning("The captured process/editor changed; nothing was stopped."); return; }
+    if (stopped === null) { showWarning("The captured process/editor changed; nothing was stopped."); return false; }
     if (!stopped.writerGone) {
       const force = await vscode.window.showWarningMessage(
         `This session could not be confirmed stopped. ${stopped.detail}`,
@@ -13684,6 +13782,7 @@ async function confirmAndStopRuntime(
       if (force === "Force Stop") stopped = await attempt("force");
     }
     if (stopped !== null && !stopped.writerGone) showWarning(stopped.detail);
+    return stopped?.writerGone === true;
   } finally {
     stoppingTabs.delete(tabId);
     if (state.runtime !== runtime || runtime.kind !== "terminal" || !runtime.stopping) fenceSessionAdmission(index, state, false);

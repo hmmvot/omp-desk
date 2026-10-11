@@ -105,6 +105,7 @@ import { fileEvidenceStoreRoot } from "../host/file-evidence-reader.ts";
 import type { NativeFileObservationStorageProbe } from "../host/native-file-observation-storage.ts";
 import { createFileEvidenceHooks, createFileEvidenceObserver } from "./file-evidence.ts";
 import { registerNavigateCommand, type NavigateCommandApi } from "./navigate-command.ts";
+import { registerClearCommand } from "./clear-command.ts";
 import { isLiveSubagentRef, registerAgentLiveness, stopAgentLiveness, type OmpAgentRegistry } from "./agent-liveness.ts";
 import { registerChatPrompt } from "./chat-prompt.ts";
 import type { FileEvidenceOmpHooks, FileEvidenceStatus } from "./file-evidence.ts";
@@ -1187,6 +1188,8 @@ export async function hostControlExtension(pi: OmpExtensionAPI): Promise<void> {
 	// Independent of the control channel: an RPC chat child launched by Desk can rewind in place even when the
 	// control server below refuses or a later binding stays inert (ADR-0051).
 	registerNavigateCommand(pi);
+	// Same rule for Chat's in-place `/clear` (ADR-0059).
+	registerClearCommand(pi);
 	// Every binding: subagent bindings observe their own runs, the RPC main binding publishes (ADR-0053).
 	registerAgentLiveness(pi);
 	// Every binding; only the RPC main session's prompt gains the Chat prompt. Like Rewind, it needs no control channel.

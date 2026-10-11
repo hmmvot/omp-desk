@@ -39,6 +39,7 @@ describe("terminal-only slash commands", () => {
 		assert.equal(tuiCommandGuidance("login").action, "provider-login");
 		assert.equal(tuiCommandGuidance("copy").action, undefined);
 		assert.match(tuiCommandGuidance("vibe").line, /^\/vibe was not sent: it works only in OMP's terminal UI/);
+		for (const command of ["restart", "logout"]) assert.match(tuiCommandGuidance(command).line, /^\/\w+ was not sent: it is a terminal command\. Use the Sessions view/, "the remaining terminal-only commands keep their guidance");
 	});
 
 	it("accepts only the helper's well-formed answer", () => {

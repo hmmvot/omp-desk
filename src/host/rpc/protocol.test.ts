@@ -33,6 +33,7 @@ describe("classifySlashInput", () => {
 			"/new-thing",
 			"/model",
 			"/compact",
+			"/fresh",
 			"look at /new please",
 			"new",
 			"",

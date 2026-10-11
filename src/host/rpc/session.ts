@@ -57,6 +57,14 @@ import {
 } from "../../chat/model.ts";
 import { parseChatEntry, type ChatEntry } from "../../chat/messages.ts";
 import {
+	CLEAR_COMMAND,
+	CLEAR_ERROR_PATH,
+	clearErrorCode,
+	clearMarker,
+	encodeClearCommand,
+	type ClearRefusal,
+} from "../../chat/clear.ts";
+import {
 	NAVIGATE_COMMAND,
 	NAVIGATE_ERROR_PATH,
 	branchNodesOf,
@@ -66,6 +74,7 @@ import {
 	navigateErrorCode,
 	navigationMarker,
 	rewindDraft,
+	rewindTargets,
 	undoOffer,
 	leafReaches,
 	type NavigateRefusal,
@@ -139,6 +148,10 @@ export interface RpcSessionOptions {
 	channel: RpcChannel;
 	/** The exact session file the process must serve; `null` for a new conversation (learned from `get_state`). */
 	sessionFile: string | null;
+	/** Recorded provider identity when reattaching an existing child; distinct from the durable journal header. */
+	expectedProviderSessionId?: string;
+	/** Persist an accepted provider-only identity before releasing the operation's admission fence. */
+	acceptProviderIdentity?: (sessionFile: string, sessionId: string, previousSessionId: string) => Promise<void>;
 	/** Working directory shown for a new conversation (an existing file's header cwd wins). */
 	cwd: string;
 	/** Identifies this host instance in every {@link ChatEpoch}; differs per extension-host start. */
@@ -179,7 +192,7 @@ export type RpcSessionOutput =
 	/** `open_url`: the host shows an extension-owned confirm naming the URL. */
 	| { type: "open-url"; url: string; launchUrl?: string; instructions?: string }
 	/** The bound identity: learned for a new session, verified for a resumed one. */
-	| { type: "identity"; sessionFile: string; sessionId: string }
+	| { type: "identity"; sessionFile: string; sessionId: string; previousSessionId?: string }
 	| { type: "prompt-result"; requestId: string | null; result: ChatPromptResult }
 	/** A prompt sent, unconfirmed across a disconnect, never showed up: *not delivered — send again manually*. */
 	| { type: "prompt-lost"; requestId: string }
@@ -353,12 +366,21 @@ export type NavigateOutcome =
 	/** The command may or may not have run (lost answer or result). Never retried; the re-read shows the outcome. */
 	| { status: "unconfirmed" };
 
+/** The outcome of `/clear` (ADR-0059): the reset is proven by its marker, or refused with a fixed reason, or unknown. */
+export type ClearOutcome =
+	| { status: "done" }
+	| { status: "refused"; reason: ClearRefusal }
+	/** The command may or may not have reloaded (lost answer, or a boundary without its marker). Never retried; the transcript shows what happened. */
+	| { status: "unconfirmed" };
+
 const NAVIGATE_REQUEST_ID = /^[0-9a-f]{32}$/;
 /** How long the command's `prompt_result` may take; a summary is a model call. */
 const NAVIGATE_RESULT_MS = 30_000;
 const NAVIGATE_SUMMARY_RESULT_MS = 180_000;
 /** A disk that trails the live process gets one more look after this long before the re-sync reads `get_entries`. */
 const REBUILD_RETRY_MS = 150;
+/** How long a clear phase's final correlated acknowledgement may take while OMP reloads its session file. */
+const CLEAR_RESULT_MS = 30_000;
 
 /**
  * How the wait for a navigation command ended (ADR-0051). `result`: its `prompt_result`; `local`: OMP answered the
@@ -366,6 +388,15 @@ const REBUILD_RETRY_MS = 150;
  * reached the model as a prompt; `timeout`/`lost`: no answer, so the command may still be running.
  */
 type NavigationWait = "result" | "local" | "rejected" | "fell-through" | "timeout" | "lost";
+
+interface ResetPhase {
+	id: string;
+	kind: "prepare" | "fresh" | "confirm";
+	response?: RpcResponseFrame;
+	result?: boolean;
+	fellThrough: boolean;
+	wake?: () => void;
+}
 
 /** A one-shot child command whose answer carries data (`cycle_*`, `promote`, `export_html`, a maintenance report). */
 export type CommandResult<T> =
@@ -619,17 +650,22 @@ export class RpcSession {
 	#autoRecoveryAttempt = 0;
 	#autoRecoveryTimer: unknown = null;
 	#mutationFence: string | null = null;
+	#rotationAllowed = false;
+	#identityAcceptance: Promise<void> | null = null;
+	#freshFence = false;
+	#resetPhase: ResetPhase | null = null;
 	/** Model and thinking choices OMP could not take when they were made; sent in order as soon as it can. */
 	#held: HeldChoices = NO_HELD;
 	#heldFlush: Promise<HeldFlush> | null = null;
 	readonly #navigateRequests = new Map<string, Promise<NavigateOutcome>>();
+	readonly #clearRequests = new Map<string, Promise<ClearOutcome>>();
 	/** The navigation command in flight: its internal id, its request id, the coded errors OMP reported, its waiter. */
-	#navigation: { id: string; requestId: string; errors: string[]; finish(how: NavigationWait): void } | null = null;
+	#navigation: { id: string; requestId: string; errorPath: string; errors: string[]; finish?(how: NavigationWait): void; waitEnded: boolean } | null = null;
 	/**
 	 * A navigation whose answer never came: its handler may still move the leaf, so every mutation stays refused
 	 * until its late `prompt_result`, its marker on the active path, or the end of the process.
 	 */
-	#navigationFence: { id: string; requestId: string } | null = null;
+	#navigationFence: { id: string; requestId: string; clear?: true } | null = null;
 	#reconcileIdleWaiters: (() => void)[] = [];
 	/** Reads that replaced or extended the model with what the process holds; a navigation compares it across its re-sync. */
 	#authoritativeReads = 0;
@@ -720,6 +756,13 @@ export class RpcSession {
 		this.#syncHeld();
 	}
 
+	/** Shared admission for Desk lifecycle mutations; acquired synchronously before their first await. */
+	admitReplacement(): boolean {
+		if (this.#clearRefusal(false) !== null) return false;
+		this.setMutationFence("replacement");
+		return true;
+	}
+
 	async readSettlement(): Promise<RpcSettlementState | null> {
 		if (this.#disposed || this.#ended || !this.#live) return null;
 		const state = await this.#fetchState();
@@ -770,6 +813,12 @@ export class RpcSession {
 		return this.#once(request.requestId, async () => {
 			const verdict = classifySlashInput(request.text, this.#model.commands);
 			if (verdict.denied) return { status: "refused", reason: "slash-denied", command: verdict.command };
+			if (/^\s*\/fresh\s*$/i.test(request.text)) {
+				const outcome = await this.fresh(request.requestId);
+				return outcome.status === "done" ? { status: "accepted", agentInvoked: false }
+					: outcome.status === "unconfirmed" ? { status: "unconfirmed" }
+					: { status: "refused", reason: outcome.reason === "busy" || outcome.reason === "jobs" ? "busy" : "rejected" };
+			}
 			const refusal = this.#controlRefusal() ?? await this.#applyHeldBeforeSend();
 			if (refusal !== null) return { status: "refused", reason: refusal };
 			this.#slashArmed = request.text.trimStart().startsWith("/");
@@ -957,7 +1006,7 @@ export class RpcSession {
 		switch (request.kind) {
 			case "rewind": {
 				const target = durable.find(entry => entry.id === request.targetId);
-				if (target === undefined || !isRewindTarget(target)) return "target";
+				if (target === undefined || !isRewindTarget(target) || !rewindTargets(durable).some(candidate => candidate.id === target.id)) return "target";
 				return null;
 			}
 			case "undo":
@@ -974,13 +1023,13 @@ export class RpcSession {
 		while (this.#reconcileRunning) await new Promise<void>(resolve => this.#reconcileIdleWaiters.push(resolve));
 		refusal = this.#navigationRefusal(request);
 		if (refusal !== null) return { status: "refused", reason: refusal };
-		const sessionId = this.#boundId;
+		const sessionId = this.#model.header?.id ?? this.#boundId;
 		if (sessionId === null) return { status: "refused", reason: "not-live" };
 		// The draft comes from the entry the host holds: OMP's extension wrapper drops `editorText`/`editorImages`.
 		const target = request.kind === "rewind" ? this.#model.entries.find(entry => entry.id === request.targetId) : undefined;
 		const id = `${INTERNAL_ID_PREFIX}${++this.#internalSeq}`;
 		const wait = Promise.withResolvers<NavigationWait>();
-		const navigation = { id, requestId: request.requestId, errors: [] as string[], finish: (how: NavigationWait) => wait.resolve(how) };
+		const navigation = { id, requestId: request.requestId, errorPath: NAVIGATE_ERROR_PATH, errors: [] as string[], finish: (how: NavigationWait) => wait.resolve(how), waitEnded: false };
 		this.#navigation = navigation;
 		const timer = this.#timers.setTimeout(() => wait.resolve("timeout"), request.summarize ? NAVIGATE_SUMMARY_RESULT_MS : NAVIGATE_RESULT_MS);
 		// Set from the send's callback when nothing was written; `as` keeps it from narrowing to `null`.
@@ -1033,6 +1082,207 @@ export class RpcSession {
 
 	#navigateRefusalOf(errors: readonly string[]): NavigateRefusal {
 		const code = navigateErrorCode(errors[0]);
+		return code === "bad-request" || code === "mode" ? "failed" : code;
+	}
+
+	/**
+	 * Clear model context and rotate provider state (ADR-0059): boundary/reload, supported `/fresh`, then confirmation.
+	 * Success requires the marker carrying this request id and a reset boundary on the reconciled active path.
+	 * Detach-induced results never prove handler completion. Exactly once per request id; no prompt-ledger row.
+	 * Shares navigation's in-flight slot and fence, including uncertain acknowledgements.
+	 */
+	clear(requestId: string): Promise<ClearOutcome> {
+		if (!NAVIGATE_REQUEST_ID.test(requestId)) return Promise.resolve({ status: "refused", reason: "bad-request-id" });
+		const known = this.#clearRequests.get(requestId);
+		if (known !== undefined) return known;
+		const promise = this.#clear(requestId);
+		this.#clearRequests.set(requestId, promise);
+		if (this.#clearRequests.size > MAX_REMEMBERED_REQUESTS) {
+			const oldest = this.#clearRequests.keys().next();
+			if (oldest.done !== true) this.#clearRequests.delete(oldest.value);
+		}
+		return promise;
+	}
+
+	/** Why a clear cannot start now, or null. Every check is on host-known state; OMP re-checks its own. */
+	#clearRefusal(requireCommand = true): ClearRefusal | null {
+		const control = this.#controlRefusal();
+		if (control !== null) return control === "busy" ? "busy" : "not-live";
+		const model = this.#model;
+		if (model.state?.isCompacting === true || model.maintenance?.status === "working" || model.working || model.state?.isStreaming === true || model.uiRequest !== null || (model.state?.queuedMessageCount ?? 0) > 0) return "busy";
+		// The reload does not cancel the session's async jobs as the TUI does; their results would land in the new context.
+		if (model.asyncPaused || model.state?.hasPendingAsyncWork === true || model.agents.size > 0 || (this.#agentLiveness.last?.length ?? 0) > 0) return "jobs";
+		if (!model.settled) return "busy";
+		if (this.#ledger.some(entry => entry.unconfirmed) || [...model.pending.values()].some(row => !row.unsaved && row.hidden !== true)) return "busy";
+		// Only the command this module registered: a same-named prompt template or skill would reach the model.
+		return !requireCommand || model.commands.some(command => command.name === CLEAR_COMMAND && command.source === "extension") ? null : "unsupported";
+	}
+
+	async #clear(requestId: string): Promise<ClearOutcome> {
+		const refusal = this.#clearRefusal();
+		if (refusal !== null) return { status: "refused", reason: refusal };
+		const id = `${INTERNAL_ID_PREFIX}${++this.#internalSeq}`;
+		const command = { id, requestId, errorPath: CLEAR_ERROR_PATH, errors: [] as string[], waitEnded: true };
+		this.#navigation = command;
+		let completed = false;
+		const before = new Set(this.#model.entries.filter(entry => entry.type === "reset_boundary").map(entry => entry.id));
+		try {
+			while (this.#reconcileRunning) await new Promise<void>(resolve => this.#reconcileIdleWaiters.push(resolve));
+			const sessionId = this.#model.header?.id ?? this.#boundId;
+			if (sessionId === null) return { status: "refused", reason: "not-live" };
+			this.#resetPhase = { id: command.id, kind: "prepare", fellThrough: false };
+			const prepare = await this.#sendInternal({ type: "prompt", message: encodeClearCommand({ v: 1, requestId, sessionId }) }, CLEAR_RESULT_MS, command.id);
+			if (prepare.status !== "accepted") {
+				completed = prepare.status === "refused";
+				if (prepare.status === "unconfirmed") this.#navigationFence = { id: command.id, requestId, clear: true };
+				await this.#reconcileSettled();
+				return prepare.status === "unconfirmed" ? { status: "unconfirmed" } : { status: "refused", reason: command.errors.length > 0 ? this.#clearRefusalOf(command.errors) : "failed" };
+			}
+			completed = await this.#awaitResetCompletion(this.#resetPhase, prepare.response);
+			if (!completed) {
+				if (!this.#phaseFinished(this.#resetPhase)) this.#navigationFence = { id: command.id, requestId, clear: true };
+				await this.#reconcileSettled();
+				return this.#resetPhase.fellThrough ? { status: "refused", reason: "failed" } : { status: "unconfirmed" };
+			}
+			await this.#reconcileSettled();
+			if (command.errors.length > 0) return { status: "refused", reason: this.#clearRefusalOf(command.errors) };
+			if (!this.#live) return { status: "unconfirmed" };
+			if (!this.#model.entries.some(entry => entry.type === "reset_boundary" && !before.has(entry.id))) return { status: "refused", reason: "failed" };
+			completed = false;
+			const fresh = await this.#freshProvider();
+			if (fresh.status !== "done") { completed = !this.#freshFence; return { status: "unconfirmed" }; }
+			command.id = `${INTERNAL_ID_PREFIX}${++this.#internalSeq}`;
+			this.#resetPhase = { id: command.id, kind: "confirm", fellThrough: false };
+			const confirm = await this.#sendInternal({ type: "prompt", message: encodeClearCommand({ v: 1, requestId, sessionId, phase: "confirm" }) }, CLEAR_RESULT_MS, command.id);
+			completed = confirm.status === "accepted" ? await this.#awaitResetCompletion(this.#resetPhase, confirm.response) : confirm.status === "refused";
+			if (!completed && !this.#phaseFinished(this.#resetPhase)) this.#navigationFence = { id: command.id, requestId, clear: true };
+			await this.#reconcileSettled();
+			if (this.#resetPhase.fellThrough) return { status: "unconfirmed" };
+			const durable = this.#model.entries.slice(0, this.#model.durableCount);
+			const marker = durable.map(entry => clearMarker(entry)).find(found => found?.requestId === requestId);
+			if (marker != null && durable.some(entry => entry.id === marker.boundaryId && entry.type === "reset_boundary")) {
+				completed = true;
+				await this.#refreshState();
+				return { status: "done" };
+			}
+			return { status: "unconfirmed" };
+		} finally {
+			if (!completed && !this.#phaseFinished(this.#resetPhase) && !this.#ended) this.#navigationFence = { id: command.id, requestId, clear: true };
+			else if (this.#navigationFence?.requestId === requestId && !this.#freshFence) this.#navigationFence = null;
+			if (this.#navigationFence === null) this.#resetPhase = null;
+			if (this.#navigation === command) this.#navigation = null;
+			const boundary = this.#model.entries.findLast(entry => entry.type === "reset_boundary" && !before.has(entry.id));
+			if (boundary !== undefined) {
+				const confirmed = this.#model.entries.some(entry => clearMarker(entry)?.boundaryId === boundary.id);
+				this.#model = { ...this.#model, unconfirmedClearBoundaryId: confirmed ? null : boundary.id };
+				this.#emitSnapshot();
+			}
+			this.#syncHeld();
+		}
+	}
+
+	/** Plain /fresh shares clear's exclusive mutation slot, but preserves local model history. */
+	async fresh(requestId: string): Promise<ClearOutcome> {
+		const refusal = this.#clearRefusal(false);
+		if (refusal !== null) return { status: "refused", reason: refusal };
+		const id = `${INTERNAL_ID_PREFIX}${++this.#internalSeq}`;
+		const command = { id, requestId, errorPath: "", errors: [] as string[], waitEnded: true };
+		this.#navigation = command;
+		try {
+			const outcome = await this.#freshProvider();
+			if (this.#freshFence) this.#navigationFence = { id: command.id, requestId, clear: true };
+			return outcome;
+		}
+		finally {
+			if (this.#navigation === command) this.#navigation = null;
+			if (this.#navigationFence === null) this.#resetPhase = null;
+			this.#syncHeld();
+		}
+	}
+
+	async #freshProvider(): Promise<ClearOutcome> {
+		const previous = this.#boundId;
+		this.#rotationAllowed = true;
+		try {
+			const id = `${INTERNAL_ID_PREFIX}${++this.#internalSeq}`;
+			if (this.#navigation !== null) this.#navigation.id = id;
+			const phase: ResetPhase = { id, kind: "fresh", fellThrough: false };
+			this.#resetPhase = phase;
+			const ack = await this.#sendInternal({ type: "prompt", message: "/fresh" }, CLEAR_RESULT_MS, id);
+			if (ack.status !== "accepted") {
+				this.#freshFence = ack.status === "unconfirmed";
+				if (this.#freshFence && this.#navigation !== null) this.#navigationFence = { id, requestId: this.#navigation.requestId, clear: true };
+				return { status: "unconfirmed" };
+			}
+			const local = isRecord(ack.response.data) && ack.response.data.agentInvoked === false;
+			// Native fresh changes isCurrent's captured identity: cancelled admission owes a settled result.
+			if (!local && ack.response.data === undefined && phase.result === undefined) {
+				await new Promise<void>(resolve => {
+					const timer = this.#timers.setTimeout(resolve, CLEAR_RESULT_MS);
+					phase.wake = () => { this.#timers.clearTimeout(timer); resolve(); };
+				});
+			}
+			if (!local && phase.result === undefined && !phase.fellThrough) {
+				this.#freshFence = true;
+				if (this.#navigation !== null) this.#navigationFence = { id, requestId: this.#navigation.requestId, clear: true };
+				return { status: "unconfirmed" };
+			}
+			if (phase.fellThrough || (!local && (ack.response.data !== undefined || phase.result !== true))) {
+				this.#resetFellThrough();
+				return { status: "unconfirmed" };
+			}
+			await this.#refreshState();
+			return this.#live && this.#boundId !== null && this.#boundId !== previous ? { status: "done" } : { status: "unconfirmed" };
+		} finally { if (!this.#freshFence) this.#rotationAllowed = false; }
+	}
+
+	#resetFellThrough(): void {
+		const phase = this.#resetPhase;
+		if (phase === null || phase.fellThrough) return;
+		phase.fellThrough = true;
+		phase.wake?.();
+		void this.#sendInternal({ type: "abort" });
+	}
+
+	#phaseFinished(phase: ResetPhase | null): boolean {
+		const response = phase?.response;
+		return response !== undefined && (!response.success ||
+			(isRecord(response.data) && response.data.agentInvoked === false) ||
+			(response.data === undefined && phase?.result !== undefined));
+	}
+
+	async #awaitResetCompletion(phase: ResetPhase, response: RpcResponseFrame): Promise<boolean> {
+		const local = isRecord(response.data) && response.data.agentInvoked === false;
+		if (!local && response.data !== undefined) this.#resetFellThrough();
+		if (!local && !phase.fellThrough && phase.result === undefined) {
+			await new Promise<void>(resolve => {
+				const timer = this.#timers.setTimeout(resolve, CLEAR_RESULT_MS);
+				phase.wake = () => { this.#timers.clearTimeout(timer); resolve(); };
+			});
+		}
+		return !phase.fellThrough && (local || phase.result === true);
+	}
+
+	async #finishFreshFence(): Promise<void> {
+		const phase = this.#resetPhase;
+		const fence = this.#navigationFence;
+		if (!this.#freshFence || phase?.kind !== "fresh" || fence?.id !== phase.id || phase.response === undefined) return;
+		const response = phase.response;
+		const local = isRecord(response.data) && response.data.agentInvoked === false;
+		if (response.success && !phase.fellThrough && !local && !(response.data === undefined && phase.result === true)) return;
+		const revision = this.#stateAnswerRevision;
+		await this.#refreshState();
+		if (response.success && !phase.fellThrough && this.#live && revision === this.#stateAnswerRevision) return;
+		if (this.#navigationFence !== fence) return;
+		this.#freshFence = false;
+		this.#rotationAllowed = false;
+		this.#navigationFence = null;
+		if (this.#navigation === null) this.#resetPhase = null;
+		this.#syncHeld();
+	}
+
+	#clearRefusalOf(errors: readonly string[]): ClearRefusal {
+		const code = clearErrorCode(errors[0]);
 		return code === "bad-request" || code === "mode" ? "failed" : code;
 	}
 
@@ -1374,7 +1624,7 @@ export class RpcSession {
 			if (this.#disposed) return;
 			this.#reader = reader;
 			this.#readerLegacyIds = history.legacyIds;
-			this.#boundId = history.header.id;
+			this.#boundId = this.#options.expectedProviderSessionId ?? history.header.id;
 			this.#cursor = history.legacyIds ? null : history.lastId;
 			if (!this.#model.todoAuthoritative) this.#model = { ...this.#model, todoSeed: history.todoSeed };
 			this.#model = { ...applyChatRewrite(this.#model, history.entries, history.olderCount, history.leafId, { now: this.#timers.now() }), branches: history.branches };
@@ -1482,7 +1732,18 @@ export class RpcSession {
 		if (this.#boundFile !== null) {
 			if (state.sessionFile === null || !samePath(state.sessionFile, this.#boundFile)) return code;
 		}
-		if (this.#boundId !== null && state.sessionId !== this.#boundId) return code;
+		if (this.#boundId !== null && state.sessionId !== this.#boundId) {
+			if (!this.#rotationAllowed || state.sessionId === null) return code;
+			const previousSessionId = this.#boundId;
+			this.#boundId = state.sessionId;
+			this.#rotationAllowed = false;
+			if (this.#boundFile !== null) {
+				if (this.#options.acceptProviderIdentity !== undefined) {
+					this.#identityAcceptance = this.#options.acceptProviderIdentity(this.#boundFile, state.sessionId, previousSessionId)
+						.catch(() => { this.#fail("identity-diverged"); });
+				} else this.#emit({ type: "identity", sessionFile: this.#boundFile, sessionId: state.sessionId, previousSessionId });
+			}
+		}
 		return null;
 	}
 
@@ -1598,19 +1859,42 @@ export class RpcSession {
 	}
 
 	#onFrame(frame: Record<string, unknown>): void {
+		const phase = this.#resetPhase;
+		if (phase !== null) {
+			if (frame.type === "prompt_result" && frame.id === phase.id) {
+				if (phase.kind === "fresh") {
+					phase.result = frame.agentInvoked === true && frame.status === "aborted" && frame.sessionSettled === true;
+					if (frame.agentInvoked === true && !phase.result) this.#resetFellThrough();
+				} else if (frame.agentInvoked === false && frame.status === "completed") phase.result = true;
+				else if (frame.status === "error" || frame.agentInvoked === true) {
+					phase.result = false;
+					if (frame.agentInvoked === true) this.#resetFellThrough();
+				}
+				// False/aborted is a detach, not completion; wait for the handler's completed result.
+				if (phase.result !== undefined) phase.wake?.();
+				if (this.#freshFence) void this.#finishFreshFence();
+				else if (this.#navigationFence?.id === phase.id && this.#phaseFinished(phase)) {
+					this.#navigationFence = null;
+					if (this.#navigation === null) this.#resetPhase = null;
+					this.#syncHeld();
+				}
+				return;
+			}
+			if (frame.type === "message_start" && isRecord(frame.message) && frame.message.role === "user") this.#resetFellThrough();
+		}
 		const navigation = this.#navigation;
 		// The navigation command's own completion and coded refusals belong to `navigate`, not to the transcript.
 		if (navigation !== null) {
 			if (frame.type === "prompt_result" && frame.id === navigation.id) {
-				navigation.finish(frame.agentInvoked === true ? "fell-through" : "result");
+				if (navigation.errorPath !== CLEAR_ERROR_PATH) navigation.finish?.(frame.agentInvoked === true ? "fell-through" : "result");
 				return;
 			}
-			if (frame.type === "extension_error" && frame.extensionPath === NAVIGATE_ERROR_PATH) {
+			if (frame.type === "extension_error" && frame.extensionPath === navigation.errorPath) {
 				if (navigation.errors.length < 8) navigation.errors.push(typeof frame.error === "string" ? frame.error.slice(0, 200) : "");
 				return;
 			}
 			// The command text became a user message: an input hook rewrote it, or OMP no longer routes it.
-			if (frame.type === "message_start" && isRecord(frame.message) && frame.message.role === "user" && JSON.stringify(frame.message.content ?? "").includes(navigation.requestId)) navigation.finish("fell-through");
+			if (frame.type === "message_start" && isRecord(frame.message) && frame.message.role === "user" && JSON.stringify(frame.message.content ?? "").includes(navigation.requestId)) navigation.finish?.("fell-through");
 		}
 		// A maintenance pass takes the next command output as its report; the line still renders as a notice. Any
 		// other output is a background builtin (`/compact`, `/handoff` typed in the composer) that reports only when it
@@ -1625,7 +1909,8 @@ export class RpcSession {
 		// Only a navigation or a maintenance pass sends a prompt with an internal id: a result after its wait ended
 		// (timeout, fall-through) is not a user turn. It lifts a navigation's fence; the re-read shows the outcome.
 		if (frame.type === "prompt_result" && typeof frame.id === "string" && frame.id.startsWith(INTERNAL_ID_PREFIX)) {
-			if (this.#navigationFence?.id === frame.id) this.#navigationFence = null;
+			// A reload detach result does not establish handler completion and cannot lift a clear fence.
+			if (this.#navigationFence?.id === frame.id && this.#navigationFence.clear !== true) this.#navigationFence = null;
 			this.#syncHeld();
 			this.#requestReconcile();
 			return;
@@ -1658,6 +1943,18 @@ export class RpcSession {
 		if (!isResponseFrame(frame)) return;
 		const id = frame.id;
 		if (typeof id !== "string") return;
+		if (this.#resetPhase?.id === id) {
+			this.#resetPhase.response = frame;
+			if (isRecord(frame.data) && frame.data.agentInvoked === true) this.#resetFellThrough();
+		}
+		if (this.#navigationFence?.id === id) {
+			if (this.#freshFence) {
+				void this.#finishFreshFence();
+			} else if (this.#resetPhase?.id !== id || this.#phaseFinished(this.#resetPhase)) {
+				this.#navigationFence = null;
+				this.#syncHeld();
+			}
+		}
 		const pending = this.#pendingCommands.get(id);
 		if (pending !== undefined) {
 			this.#pendingCommands.delete(id);
@@ -1716,7 +2013,7 @@ export class RpcSession {
 			case "setStatus":
 				// The Desk liveness signal is data for the Agents row, never status-line text.
 				if (frame.statusKey === AGENT_LIVENESS_STATUS_KEY) {
-					const agents = this.#agentLiveness.accept(frame.statusText, this.#boundId);
+					const agents = this.#agentLiveness.accept(frame.statusText, this.#model.header?.id ?? this.#boundId);
 					if (agents !== null) this.#applyFrame({ type: "agents_liveness", agents });
 					return;
 				}
@@ -1886,7 +2183,7 @@ export class RpcSession {
 	async #runReconcile(): Promise<void> {
 		// A navigation re-syncs through this serializer as soon as its command answered; reading mid-command could
 		// only show a leaf that moved without its marker yet.
-		if (this.#navigation !== null) return;
+		if (this.#navigation !== null && !this.#navigation.waitEnded) return;
 		this.#reconcileRunning = true;
 		try {
 			do {
@@ -1904,7 +2201,11 @@ export class RpcSession {
 	#afterReconcile(): void {
 		this.#clearReconcileTimer();
 		const fence = this.#navigationFence;
-		if (fence !== null && this.#model.entries.some(entry => navigationMarker(entry)?.requestId === fence.requestId)) this.#navigationFence = null;
+		if (fence !== null && this.#model.entries.some(entry => {
+			if (fence.clear !== true) return navigationMarker(entry)?.requestId === fence.requestId;
+			const marker = clearMarker(entry);
+			return marker?.requestId === fence.requestId && this.#model.entries.some(boundary => boundary.type === "reset_boundary" && boundary.id === marker.boundaryId);
+		})) this.#navigationFence = null;
 		this.#syncHeld();
 		if (!this.#live) return;
 		if (this.#model.pending.size === 0) {
@@ -2088,9 +2389,11 @@ export class RpcSession {
 	/** A state-producing builtin need not emit a todo tool frame (slash edit, eval or auto-clear). */
 	async #refreshState(): Promise<void> {
 		const state = await this.#fetchState();
-		if (this.#disposed || this.#ended || !this.#live || state === null) return;
-		const mismatch = this.#identityMismatch(state, false);
-		if (mismatch !== null) this.#fail(mismatch);
+		if (!this.#disposed && !this.#ended && this.#live && state !== null) {
+			const mismatch = this.#identityMismatch(state, false);
+			if (mismatch !== null) this.#fail(mismatch);
+		}
+		if (this.#identityAcceptance !== null) await this.#identityAcceptance;
 	}
 
 	/** A `get_state` cut, with the queue the model already holds when a `queue_update` arrived after the read was sent. */
@@ -2357,13 +2660,14 @@ export class RpcSession {
 	async #sendInternal(
 		command: RpcCommand,
 		timeoutMs?: number,
+		id?: string,
 	): Promise<
 		| { status: "accepted"; response: RpcResponseFrame }
 		| { status: "refused"; reason: SendRefusal; code?: string }
 		| { status: "unconfirmed" }
 	> {
 		try {
-			const response = await this.#send(`${INTERNAL_ID_PREFIX}${++this.#internalSeq}`, command, timeoutMs);
+			const response = await this.#send(id ?? `${INTERNAL_ID_PREFIX}${++this.#internalSeq}`, command, timeoutMs);
 			if (response.success) return { status: "accepted", response };
 			return { status: "refused", reason: "rejected", ...(typeof response.code === "string" ? { code: response.code } : {}) };
 		} catch (error) {

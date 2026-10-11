@@ -382,7 +382,7 @@ describe("writing needs a live, unlocked session", () => {
 
 	it("refuses a builtin that changes the session's identity or file, and passes ordinary text", async () => {
 		const { client, sent } = live();
-		for (const denied of ["/new", "  /resume 3", "/session delete", "/quit"]) {
+		for (const denied of ["  /resume 3", "/session delete", "/quit", "/omp-desk-clear {}"]) {
 			assert.deepEqual(await client.sendPrompt(denied), { ok: false, reason: SLASH_DENIED_SENTENCE }, denied);
 		}
 		assert.deepEqual(await client.sendPrompt("/branch 3"), { ok: false, reason: REWIND_ARGUMENTS_SENTENCE }, "Rewind's alias with arguments says how to rewind");
@@ -391,6 +391,12 @@ describe("writing needs a live, unlocked session", () => {
 		assert.equal((await client.sendPrompt("/usr/bin/x fails")).ok, true);
 		assert.equal((await client.sendPrompt("/review the diff")).ok, true);
 		assert.equal(sent.length, 2);
+	});
+
+	it("passes /clear, /new, /delete and /fresh to the host, which answers them itself (ADR-0059)", async () => {
+		const { client, sent } = live();
+		for (const command of ["/clear", " /NEW ", "/delete", "/new with arguments", "/fresh"]) assert.equal((await client.sendPrompt(command)).ok, true, command);
+		assert.equal(sent.length, 5);
 	});
 });
 

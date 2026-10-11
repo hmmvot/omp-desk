@@ -40,6 +40,7 @@ import {
 	sameEpoch,
 } from "../../chat/model.ts";
 import { classifySlashInput, slashDeniedSentence } from "../../host/rpc/protocol.ts";
+import { deskSessionCommand } from "../../chat/desk-commands.ts";
 import type { GuestHostMessage, GuestWebviewMessage } from "../messages.ts";
 import { ChatSnapshotAssembler } from "../chat-messages.ts";
 import type { ChatAbortResultMessage, ChatDisplayPreferences, ChatNavigateResultMessage, ChatQueuePurpose, ChatQueueResultEntry, ChatQueueResultItem, ChatQueuedRef } from "../chat-messages.ts";
@@ -321,7 +322,8 @@ export class ChatClient {
 		const refusal = this.#refusal();
 		if (refusal !== null) return Promise.resolve({ ok: false, reason: refusal });
 		const verdict = classifySlashInput(text, this.#model.commands);
-		if (verdict.denied) return Promise.resolve({ ok: false, reason: slashDeniedSentence(verdict.command) });
+		// `/clear`, `/new` and `/delete` are answered by the host itself (ADR-0059); everything else denied stops here.
+		if (verdict.denied && deskSessionCommand(text) === null) return Promise.resolve({ ok: false, reason: slashDeniedSentence(verdict.command) });
 		const wire = images === undefined || images.length === 0 ? undefined : images.map(image => ({ type: "image" as const, mimeType: image.mimeType, data: image.data }));
 		const requestId = this.#newRequestId();
 		const base = { type, requestId, text };
