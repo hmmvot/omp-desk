@@ -22,7 +22,7 @@ export function unityAttachPreset(host: UnityPresetHost): DebugPreset {
 	return {
 		id: UNITY_ATTACH_PRESET_ID,
 		label: "Attach to Unity Editor",
-		description: `Preset "${UNITY_ATTACH_PRESET_ID}" (Attach to Unity Editor) attaches the Microsoft Unity debugger (type vstuc) to the running Unity Editor of the project in the workspace folder; optional "endPoint" (host:port) and "projectPath" (the Unity project folder, when it is not the workspace folder). A script breakpoint is verified only after Unity loads its assembly, and the Editor must use Debug code optimization. Starting a test or Play Mode is not part of this tool: the user's Unity tooling does that; then wait for the stop.`,
+		description: `Preset "${UNITY_ATTACH_PRESET_ID}" (Attach to Unity Editor) attaches the Microsoft Unity debugger (type vstuc) to the running Unity Editor of the project in the workspace folder; optional "endPoint" (host:port) and "projectPath" (the Unity project folder, when it is not the workspace folder). A script breakpoint is verified only after Unity loads its assembly, and the Editor must be a normal (not batchmode) Editor, because a batchmode Editor exposes no debugger port, and must use Debug code optimization. Starting a test or Play Mode is not part of this tool: the user's Unity tooling does that; then wait for the stop.`,
 		available: () => host.isInstalled(),
 		build: ({ endPoint, projectPath }) => {
 			if (endPoint !== undefined && !END_POINT.test(endPoint)) return { error: `"endPoint" must be host:port, for example 127.0.0.1:56000.` };
