@@ -96,10 +96,11 @@ describe("flat folder labels", () => {
 });
 
 describe("grouping setting", () => {
-	it("defaults to the flat list and accepts only the two known values", () => {
+	it("defaults to the flat list and accepts only the three known values", () => {
 		assert.equal(normalizeSessionsGrouping(undefined), "flat");
 		assert.equal(normalizeSessionsGrouping("tree"), "flat");
 		assert.equal(normalizeSessionsGrouping("flat"), "flat");
 		assert.equal(normalizeSessionsGrouping("folders"), "folders");
+		assert.equal(normalizeSessionsGrouping("terminals"), "terminals");
 	});
 });

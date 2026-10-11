@@ -53,6 +53,7 @@ import * as vscode from "vscode";
 import { readSessionFileActivity, readSessionFileHeader } from "../host/session-index";
 import type { RestoreOutcome, SessionFileActivity, SessionFileHeader, SessionIndexEntry } from "../host/session-index";
 import { folderOwnsCwd } from "./workspace-folders";
+import { relativeAge } from "./relative-age";
 import type { LauncherFolder } from "./launcher-folders";
 import type { WorkspaceFolder } from "./workspace-folders";
 import { isUnread } from "../host/session-unread";
@@ -60,6 +61,9 @@ import { sessionIncarnation } from "../host/window-registry";
 import type { PublishedRowStatus } from "../host/window-registry";
 import { activityMillis, flatFolderLabels, flatRowLabel, orderFlatRows } from "./session-order";
 import type { FlatOrderFacts, SessionsGrouping } from "./session-order";
+import type { BrokerProcessRow, BrokerProcessSnapshot } from "../host/broker-processes";
+import { ProcessTreeItem, TerminalsGroupTreeItem } from "./process-rows";
+import { listedProcessRows, processFolder, processOpenTarget, processUptime, processesBySession, sessionProcessMark } from "./session-processes";
 
 /**
  * Agent activity of an attached live session, as its guest reports it.
@@ -434,25 +438,6 @@ export function folderPathDescription(folderPath: string): string {
 	return `${folderPath.slice(0, prefixLength)}…${folderPath.slice(-(budget - prefixLength - 1))}`;
 }
 
-const relativeTimeFormatter = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
-
-/**
- * How long ago a timestamp was, in the coarsest honest unit.
- *
- * Used by a session row's tooltip and by the folder resume picker, so a session's
- * age reads the same wherever the launcher shows it.
- */
-export function relativeAge(iso: string, now: number): string {
-	const at = new Date(iso).getTime();
-	if (Number.isNaN(at)) return "unknown";
-	const seconds = Math.max(0, Math.round((now - at) / 1000));
-	if (seconds < 60) return relativeTimeFormatter.format(-seconds, "second");
-	const minutes = Math.round(seconds / 60);
-	if (minutes < 60) return relativeTimeFormatter.format(-minutes, "minute");
-	const hours = Math.round(minutes / 60);
-	if (hours < 48) return relativeTimeFormatter.format(-hours, "hour");
-	return relativeTimeFormatter.format(-Math.round(hours / 24), "day");
-}
 
 /** A session file's size in the coarsest honest unit, as the picker shows it. */
 export function sizeText(bytes: number): string {
@@ -479,6 +464,7 @@ function sessionTooltip(
 	now: number,
 	unread = false,
 	where: string | null = null,
+	processMark: string | null = null,
 ): string {
 	const lines = [
 		sessionHeadline(entry, header).replace(/\r\n|\r|\n/g, " "),
@@ -489,6 +475,7 @@ function sessionTooltip(
 	}
 	if (unread && state !== "unread") lines.push("Unread reply");
 	if (where !== null) lines.push(where);
+	if (processMark !== null) lines.push(processMark);
 	if (state === "stopped" || state === "draft") lines.push("Resume to send a message.");
 	if (state === "externalOmp") lines.push("Open here to choose whether to continue separately.");
 	return lines.join("\n");
@@ -528,6 +515,8 @@ interface SessionRowPresentation {
 	unread?: boolean;
 	/** The window another window's claim shows holding this row: its published status and name, or `null` when unknown. */
 	peer?: PeerRow | null;
+	/** The tooltip sentence that marks the row's background process (`src/views/session-processes.ts`), or `null`. */
+	processMark?: string | null;
 }
 
 /** What the registry knows about the window that holds a row this window does not run. */
@@ -624,7 +613,7 @@ export class SessionTreeItem extends vscode.TreeItem {
 		const shown = shownSessionState(state, row.peer ?? null, this.unread);
 		const status = STATE_LABEL[shown];
 		this.description = this.unread && shown !== "unread" ? `Unread · ${status}` : status;
-		this.tooltip = sessionTooltip(entry, shown, row.header, row.conversation, row.now, this.unread, hold(state, row));
+		this.tooltip = sessionTooltip(entry, shown, row.header, row.conversation, row.now, this.unread, hold(state, row), row.processMark ?? null);
 		this.#diagnosticFacts = row.facts;
 		this.#diagnosticActive = row.active;
 		this.iconPath = STATE_ICON[shown];
@@ -644,7 +633,7 @@ export class SessionTreeItem extends vscode.TreeItem {
 			`view-${row.facts.open && row.facts.viewMode != null ? row.facts.viewMode : "none"}`,
 		].join(".");
 		if (state === "otherWindow" && row.facts.switchableWindow === true) this.contextValue += ".window-switchable";
-		const accessibilityLabel = `${row.folderLabel == null ? "" : `${row.folderLabel}, `}${headline}, ${STATE_LABEL[shown]}${this.unread && shown !== "unread" ? ", unread" : ""}${row.active ? ", selected session" : ""}`;
+		const accessibilityLabel = `${row.folderLabel == null ? "" : `${row.folderLabel}, `}${headline}, ${STATE_LABEL[shown]}${this.unread && shown !== "unread" ? ", unread" : ""}${row.processMark == null ? "" : `, ${row.processMark.replace(/^Process: /, "process ")}`}${row.active ? ", selected session" : ""}`;
 		this.accessibilityInformation = { label: accessibilityLabel };
 		this.resourceUri = vscode.Uri.from({ scheme: SESSION_DECORATION_SCHEME, path: `/${entry.tabId}` });
 	}
@@ -763,7 +752,8 @@ export class ResumeSessionTreeItem extends vscode.TreeItem {
 }
 
 export type LauncherTreeItem =
-	| WorkspaceFolderTreeItem | SessionTreeItem | EmptySessionTreeItem | ProviderLoginTreeItem | NewSessionTreeItem | ResumeSessionTreeItem;
+	| WorkspaceFolderTreeItem | SessionTreeItem | EmptySessionTreeItem | ProviderLoginTreeItem | NewSessionTreeItem | ResumeSessionTreeItem
+	| ProcessTreeItem | TerminalsGroupTreeItem;
 
 /**
  * Catalog-first projection. Membership and local activity are synchronous;
@@ -813,6 +803,14 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 	/** The folder name of every row, in either grouping: what the session picker shows. */
 	#folderNames = new Map<string, string>();
 	#flatSignature = "";
+	/** The last process snapshot's rows (`setProcesses`); `null` until a read finished. */
+	#processes: readonly BrokerProcessRow[] | null = null;
+	/** The process rows the current layout serves, with the group that holds them in the flat and folders layouts. */
+	#processItems: ProcessTreeItem[] = [];
+	#group: TerminalsGroupTreeItem | null = null;
+	/** What each process row was last painted from, to repaint only a changed one. */
+	#processKeys = new Map<string, string>();
+	#processSignature = "";
 	readonly #decorationChanges = new vscode.EventEmitter<vscode.Uri[]>();
 	#badges = new Map<string, RowBadge>();
 	/**
@@ -847,6 +845,26 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 		this.#providerLoginRequired = required;
 		this.#rootVersion++;
 		this.#changes.fire();
+	}
+
+	/**
+	 * The latest process snapshot, or `null` while none has been read. The tree repaints only what the
+	 * snapshot changed: a row whose words changed, the group, or the root when the set of listed rows did.
+	 */
+	setProcesses(snapshot: BrokerProcessSnapshot | null): void {
+		if (this.#disposed) return;
+		this.#processes = snapshot === null ? null : snapshot.rows;
+		this.#project();
+	}
+
+	/** Whether the current layout puts session rows on screen: `terminals` serves processes only. */
+	sessionRowsShown(): boolean {
+		return this.#grouping !== "terminals";
+	}
+
+	/** The process row a session's process stands in under the current layout, or `undefined`. */
+	processItemFor(tabId: string): ProcessTreeItem | undefined {
+		return this.#processItems.find(item => item.row.host?.kind === "session" && item.row.host.tabId === tabId);
 	}
 
 	refresh(options: { readonly ownership?: boolean } = {}): void {
@@ -919,7 +937,7 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 	 */
 	beginReveal(tabId: string, options: { readonly expand?: boolean } = {}): { item: SessionTreeItem; pathKey: string; release(): void } | undefined {
 		const item = this.#byTabId.get(tabId);
-		if (item === undefined || this.#servedRoot !== this.#rootVersion) return undefined;
+		if (this.#grouping === "terminals" || item === undefined || this.#servedRoot !== this.#rootVersion) return undefined;
 		let pathKey: string;
 		if (this.#grouping === "flat") {
 			if (!this.#flatRows.includes(item)) return undefined;
@@ -953,13 +971,18 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 				this.#served.fire();
 			});
 			const head = this.#providerLoginRequired ? [this.#providerLogin] : [];
-			// With no folder at all the flat list is empty, so the view's welcome content shows.
+			const group = this.#group === null ? [] : [this.#group];
+			// `terminals` serves the processes alone: no session, folder or New Session row.
+			if (this.#grouping === "terminals") return [...head, ...this.#processItems];
+			// With no folder at all the flat list has no sessions, so the view's welcome content shows
+			// unless there are processes to list.
 			if (this.#grouping === "flat") {
-				return this.#items.length === 0 ? head : [...head, ...this.#flatRows, this.#newSessionRow, this.#resumeSessionRow];
+				return this.#items.length === 0 ? [...head, ...group] : [...head, ...this.#flatRows, ...group, this.#newSessionRow, this.#resumeSessionRow];
 			}
-			return [...head, ...this.#items];
+			return [...head, ...this.#items, ...group];
 		}
-		if (this.#grouping === "flat" || !(element instanceof WorkspaceFolderTreeItem)) return [];
+		if (element instanceof TerminalsGroupTreeItem) return [...element.rows];
+		if (this.#grouping !== "folders" || !(element instanceof WorkspaceFolderTreeItem)) return [];
 		const version = this.#folderVersions.get(element.folderId);
 		setImmediate(() => {
 			if (this.#disposed || version !== this.#folderVersions.get(element.folderId) ||
@@ -973,7 +996,9 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 	getTreeItem(element: LauncherTreeItem): vscode.TreeItem { return element; }
 
 	getParent(element: LauncherTreeItem): LauncherTreeItem | undefined {
-		if (this.#grouping === "flat" || element instanceof WorkspaceFolderTreeItem || element instanceof ProviderLoginTreeItem ||
+		if (element instanceof ProcessTreeItem) return this.#grouping === "terminals" ? undefined : this.#group ?? undefined;
+		if (element instanceof TerminalsGroupTreeItem) return undefined;
+		if (this.#grouping !== "folders" || element instanceof WorkspaceFolderTreeItem || element instanceof ProviderLoginTreeItem ||
 			element instanceof NewSessionTreeItem || element instanceof ResumeSessionTreeItem) return undefined;
 		if (element instanceof EmptySessionTreeItem) return this.#items.find(folder => folder.folderId === element.folderId);
 		return this.#items.find(folder => folder.rows.includes(element));
@@ -988,6 +1013,9 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 		this.#disposed = true;
 		this.#items = [];
 		this.#flatRows = [];
+		this.#processItems = [];
+		this.#group = null;
+		this.#processKeys.clear();
 		this.#byTabId.clear();
 		this.#observations.clear();
 		this.#headers.clear();
@@ -1012,6 +1040,7 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 		const folderLabels = flatFolderLabels(folders);
 		const folderNames = new Map<string, string>();
 		const now = this.#now();
+		const processBySession = processesBySession(this.#processes ?? []);
 		const inputs = folders.map(folder => ({
 			folder,
 			hasRecoverableShell: this.#source.hasRecoverableShell?.(folder) === true,
@@ -1065,7 +1094,8 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 				return { entry, header: entry.sessionFile === null ? null : header?.value ?? null,
 					conversation, facts, state, active: entry.tabId === activeTabId, peer,
 					folderLabel: grouping === "flat" ? folderLabels.get(folder.id) ?? null : null,
-					unread: isUnread(entry) && state !== "externalOmp" };
+					unread: isUnread(entry) && state !== "externalOmp",
+					processMark: sessionProcessMark(state, facts.running || facts.ownedWriterPid != null, processBySession.get(entry.tabId) ?? null) };
 			}).sort((left, right) => {
 				const stopped = (state: SessionItemState) => state === "stopped" || state === "draft" ? 1 : 0;
 				return stopped(left.state) - stopped(right.state) || left.entry.ordinal - right.entry.ordinal;
@@ -1092,10 +1122,28 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 		}
 		for (const row of orderFlatRows([...flatFacts.values()])) flatOrder.push(row.tabId);
 		const flatSignature = JSON.stringify([flatOrder, inputs.length === 0]);
-		const rootChanged = grouping === "flat"
-			? this.#grouping !== "flat" || flatSignature !== this.#flatSignature
-			: this.#grouping !== "folders" || inputs.length !== this.#items.length ||
-				inputs.some((input, position) => this.#items[position]?.folderId !== input.folder.id);
+		// The process rows the layout lists: the group's children, or every row in `terminals`.
+		const shownTabIds = new Set(flatOrder);
+		const processInputs = listedProcessRows(this.#processes ?? [], grouping, shownTabIds).map(row => {
+			const folder = processFolder(row);
+			const owner = folder === null ? undefined : folders.find(candidate => folderOwnsCwd(candidate, folders, folder));
+			const folderLabel = folder === null ? null
+				: owner === undefined ? folderHeadline(folder) : folderLabels.get(owner.id) ?? folderHeadline(owner.path);
+			const target = processOpenTarget(row, shownTabIds);
+			// Uptime and age as text, not the raw milliseconds, so a repaint happens when the words change.
+			const key = JSON.stringify([row.id, row.status, row.child, row.window, row.drivenHere, row.host, row.title, row.olderBuild,
+				row.stop, folderLabel, target, processUptime(row), relativeAge(row.startedAt, now)]);
+			return { row, folderLabel, target, key };
+		});
+		const processSignature = JSON.stringify([grouping === "terminals", processInputs.map(input => input.row.id)]);
+		const processesChanged = processSignature !== this.#processSignature;
+		const processRootChanged = grouping === "terminals"
+			? processesChanged || this.#grouping !== "terminals"
+			: (processInputs.length > 0) !== (this.#group !== null);
+		const rootChanged = this.#grouping !== grouping || processRootChanged || (grouping === "flat"
+			? flatSignature !== this.#flatSignature
+			: grouping === "folders" && (inputs.length !== this.#items.length ||
+				inputs.some((input, position) => this.#items[position]?.folderId !== input.folder.id)));
 		const changedFolders = inputs.filter(input => {
 			const old = this.#items.find(item => item.folderId === input.folder.id);
 			return old === undefined || old.folder.path !== input.folder.path ||
@@ -1111,9 +1159,9 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 		// A folder whose hover text alone changed is repainted in place, children kept.
 		const repaintedFolders = new Set(inputs.filter(input => !changedFolders.includes(input) &&
 			this.#items.find(item => item.folderId === input.folder.id)?.tooltip !== input.tooltip).map(input => input.folder.id));
-		// Folder nodes are not on screen in the flat list, so only its own order is structural there.
-		const structuralChange = grouping === "flat" ? rootChanged
-			: rootChanged || changedFolders.length > 0 || repaintedFolders.size > 0;
+		// Folder nodes are not on screen in the flat list or in `terminals`, so only the root's own content is structural there.
+		const structuralChange = grouping === "folders" ? rootChanged || changedFolders.length > 0 || repaintedFolders.size > 0
+			: rootChanged;
 		if (this.#revealLocks > 0 && structuralChange) {
 			this.#projectionPending = true;
 			return;
@@ -1123,14 +1171,14 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 		const byTabId = new Map<string, SessionTreeItem>();
 		const rowChanges: SessionTreeItem[] = [];
 		const newItems = inputs.map(input => {
-			const rows = input.rows.map(({ entry, header, conversation, facts, state, active, folderLabel, unread, peer }) => {
+			const rows = input.rows.map(({ entry, header, conversation, facts, state, active, folderLabel, unread, peer, processMark }) => {
 				// The relative age is part of the key, so a refresh repaints a stale "x minutes ago".
 				const age = conversation?.lastAt == null ? null : relativeAge(conversation.lastAt, now);
-				const key = JSON.stringify([entry, header, conversation, age, facts, active, folderLabel, unread, peer]);
+				const key = JSON.stringify([entry, header, conversation, age, facts, active, folderLabel, unread, peer, processMark]);
 				let row = previousRows.get(entry.tabId);
-				if (row === undefined) row = new SessionTreeItem(entry, state, { header, conversation, facts, active, now, folderLabel, unread, peer });
+				if (row === undefined) row = new SessionTreeItem(entry, state, { header, conversation, facts, active, now, folderLabel, unread, peer, processMark });
 				else if (this.#presentation.get(entry.tabId) !== key) {
-					row.update(entry, state, { header, conversation, facts, active, now, folderLabel, unread, peer });
+					row.update(entry, state, { header, conversation, facts, active, now, folderLabel, unread, peer, processMark });
 					rowChanges.push(row);
 				}
 				this.#presentation.set(entry.tabId, key);
@@ -1144,6 +1192,26 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 		});
 		this.#items = newItems;
 		this.#byTabId = byTabId;
+		// Process rows are repainted in place, like session rows, so the tree keeps the instances it knows.
+		const previousProcesses = new Map(this.#processItems.map(item => [item.row.id, item] as const));
+		const processChanges: ProcessTreeItem[] = [];
+		const processKeys = new Map<string, string>();
+		const processItems = processInputs.map(({ row, folderLabel, target, key }) => {
+			let item = previousProcesses.get(row.id);
+			if (item === undefined) item = new ProcessTreeItem(row, folderLabel, target, now);
+			else if (this.#processKeys.get(row.id) !== key) {
+				item.update(row, folderLabel, target, now);
+				processChanges.push(item);
+			}
+			processKeys.set(row.id, key);
+			return item;
+		});
+		this.#processKeys = processKeys;
+		let group: TerminalsGroupTreeItem | null = null;
+		if (grouping !== "terminals" && processItems.length > 0) {
+			group = this.#group ?? new TerminalsGroupTreeItem(processItems);
+			group.update(processItems);
+		}
 		const badges = new Map<string, RowBadge>();
 		for (const [tabId, row] of byTabId) {
 			const other = row.state === "otherWindow";
@@ -1158,6 +1226,9 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 		this.#folderNames = folderNames;
 		this.#grouping = grouping;
 		this.#flatSignature = flatSignature;
+		this.#processItems = processItems;
+		this.#group = group;
+		this.#processSignature = processSignature;
 		for (const tabId of this.#observations.keys()) {
 			if (byTabId.has(tabId)) continue;
 			const observation = this.#observations.get(tabId)!;
@@ -1183,17 +1254,22 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 		}
 		if (initialized) {
 			if (rootChanged) this.#changes.fire();
-			else if (grouping === "flat") {
-				for (const row of rowChanges) this.#changes.fire(row);
-			} else {
-				const structural = new Set(changedFolders.map(input => input.folder.id));
-				for (const folder of this.#items) {
-					if (structural.has(folder.folderId) || repaintedFolders.has(folder.folderId)) this.#changes.fire(folder);
+			else {
+				if (grouping === "flat") {
+					for (const row of rowChanges) this.#changes.fire(row);
+				} else if (grouping === "folders") {
+					const structural = new Set(changedFolders.map(input => input.folder.id));
+					for (const folder of this.#items) {
+						if (structural.has(folder.folderId) || repaintedFolders.has(folder.folderId)) this.#changes.fire(folder);
+					}
+					for (const row of rowChanges) {
+						const parent = this.getParent(row) as WorkspaceFolderTreeItem | undefined;
+						if (parent !== undefined && !structural.has(parent.folderId) && !repaintedFolders.has(parent.folderId)) this.#changes.fire(row);
+					}
 				}
-				for (const row of rowChanges) {
-					const parent = this.getParent(row) as WorkspaceFolderTreeItem | undefined;
-					if (parent !== undefined && !structural.has(parent.folderId) && !repaintedFolders.has(parent.folderId)) this.#changes.fire(row);
-				}
+				// The group's own text (its count) and each process row whose words changed.
+				if (group !== null && processesChanged) this.#changes.fire(group);
+				for (const item of processChanges) this.#changes.fire(item);
 			}
 		}
 		this.#scheduleEnrichment();

@@ -14,7 +14,9 @@ import {
 	buildBrokerProcessCatalog,
 	createBrokerProcessReader,
 	deriveBrokerProcessRow,
+	planKillAll,
 	selectOrphanedAndIdle,
+	sessionRowWindow,
 } from "./broker-processes.ts";
 import type {
 	BrokerCatalogSources,
@@ -104,6 +106,7 @@ function harness(initial: readonly SourcedBrokerRecord[], catalog: BrokerProcess
 		unreadable: 0,
 		probeDelay: false,
 		childDelay: false,
+		clock: NOW,
 	};
 	const calls = {
 		creation: [] as number[],
@@ -143,7 +146,7 @@ function harness(initial: readonly SourcedBrokerRecord[], catalog: BrokerProcess
 			return state.child(record);
 		},
 		buildDigest: async () => state.digest,
-		now: () => NOW,
+		now: () => state.clock,
 	};
 	return { state, calls, reader: createBrokerProcessReader(ports) };
 }
@@ -258,15 +261,17 @@ describe("broker process reader: the identity cache", () => {
 		assert.equal(snapshot.hidden, 1);
 	});
 
-	it("re-verifies a verified record now and then on ticks, so a recycled PID cannot show for long", async () => {
+	it("re-verifies a verified record once a minute on ticks, so a recycled PID cannot show for long", async () => {
 		const record = facts("tab:a");
 		const { state, calls, reader } = harness([current(record)]);
 		await reader.read();
 		state.creation = () => ({ kind: "found", creationTime: "134349421019999999" });
-		let shown = true;
-		for (let tick = 0; tick < 24 && shown; tick++) shown = (await reader.read()).rows.length === 1;
-		assert.equal(shown, false, "a recycled PID kept showing across many ticks");
-		assert.ok(calls.creation.length >= 2);
+		state.clock += 59_000;
+		assert.equal((await reader.read()).rows.length, 1, "a tick inside the minute re-probed");
+		assert.equal(calls.creation.length, 1);
+		state.clock += 2_000;
+		assert.equal((await reader.read()).rows.length, 0, "a recycled PID kept showing past the minute");
+		assert.equal(calls.creation.length, 2);
 	});
 
 	it("retries an unreadable reading next time instead of caching it", async () => {
@@ -336,6 +341,23 @@ describe("broker process reader: child state", () => {
 		await reader.read({ fresh: true });
 		assert.equal(calls.child.length, 10);
 		assert.equal(calls.maxChildrenInFlight, 4);
+	});
+
+	it("reads only the children never read when asked, so a new broker among many costs one attach", async () => {
+		const known = Array.from({ length: 6 }, (_, index) => current(facts(`tab:${index}`)));
+		const { state, calls, reader } = harness(known);
+		await reader.read({ fresh: true });
+		assert.equal(calls.child.length, 6);
+		const newcomer = current(facts("tab:new"));
+		state.records = [...known, newcomer];
+		state.child = () => "exited";
+		const snapshot = await reader.read({ unreadChildren: true });
+		assert.deepEqual(calls.child.slice(6), ["tab:new"]);
+		assert.equal(snapshot.rows.find(row => row.slot === "tab:new")?.child, "exited");
+		assert.equal(snapshot.rows.find(row => row.slot === "tab:0")?.child, "running", "a known child was re-read");
+		assert.deepEqual(calls.catalogFresh.filter(Boolean), [true], "an unread-children read re-read the catalog");
+		await reader.read({ unreadChildren: true });
+		assert.equal(calls.child.length, 7, "a child already read was read again");
 	});
 
 	it("asks for a fresh catalog only on an explicit read, after listing the records", async () => {
@@ -684,5 +706,83 @@ describe("Stats broker discovery", () => {
 		assert.equal(result.drivenHere, false);
 		assert.equal(result.stop.available, true);
 		assert.deepEqual(selectOrphanedAndIdle([result]), []);
+	});
+});
+
+describe("planKillAll", () => {
+	function row(overrides: Partial<BrokerProcessRow> = {}): BrokerProcessRow {
+		serial += 1;
+		return {
+			id: `current|tab:${serial}|pty-${serial}`,
+			source: "current",
+			kind: "session",
+			ptyKind: "managed-rpc",
+			slot: `tab:${serial}`,
+			brokerId: `pty-${serial}`,
+			generation: `gen-${serial}`,
+			brokerPid: 3000 + serial,
+			brokerCreationTime: "134349421014308869",
+			startedAt: new Date(NOW).toISOString(),
+			uptimeMs: 0,
+			title: null,
+			status: "in-use",
+			host: null,
+			window: "none",
+			drivenHere: false,
+			child: "running",
+			olderBuild: false,
+			stop: { available: true },
+			...overrides,
+		};
+	}
+
+	it("sorts a row by what this window provably runs, never by an editor that merely shows it", () => {
+		const terminalHere = row({ kind: "terminal", ptyKind: "folder-shell", window: "this-window" });
+		const shown = row({ window: "this-window" });
+		const other = row({ window: "other-window" });
+		const unheld = row({ window: "none" });
+		const plan = planKillAll([unheld, other, shown, terminalHere]);
+		assert.deepEqual(plan.here, [terminalHere]);
+		assert.deepEqual(plan.otherWindows, [other]);
+		assert.deepEqual(plan.notRun, [unheld, shown]);
+		assert.deepEqual(plan.blocked, []);
+	});
+
+	it("keeps a row this window drives in its own tier whatever its window field says", () => {
+		const driven = row({ drivenHere: true, window: "none" });
+		const plan = planKillAll([driven]);
+		assert.deepEqual(plan.here, [driven]);
+		assert.deepEqual(plan.notRun, []);
+	});
+
+	it("includes idle, orphaned and unknown rows and a Stats dashboard in their tier", () => {
+		const idle = row({ kind: "terminal", ptyKind: "folder-shell", child: "exited", window: "this-window" });
+		const orphaned = row({ status: "orphaned" });
+		const unknown = row({ status: "unknown", child: "unknown" });
+		const stats = row({ kind: "stats", ptyKind: "stats-dashboard", host: { kind: "stats", window: "none" } });
+		const plan = planKillAll([idle, orphaned, unknown, stats]);
+		assert.deepEqual(plan.here, [idle]);
+		assert.deepEqual(plan.notRun, [orphaned, unknown, stats]);
+	});
+
+	it("sets aside a row this build cannot stop, whichever window shows it", () => {
+		const old = row({ source: "predecessor", window: "this-window", stop: { available: false, reason: "previous build" } });
+		const incompatible = row({ stop: { available: false, reason: "another version" } });
+		const plan = planKillAll([old, incompatible]);
+		assert.deepEqual(plan.blocked, [old, incompatible]);
+		assert.deepEqual([plan.here, plan.otherWindows, plan.notRun], [[], [], []]);
+	});
+});
+
+describe("sessionRowWindow", () => {
+	it("gives a row another window holds to that window even when an editor of this one shows it", () => {
+		assert.equal(sessionRowWindow({ open: true, running: false, heldElsewhere: true }), "other-window");
+		assert.equal(sessionRowWindow({ open: false, running: false, heldElsewhere: true }), "other-window");
+	});
+
+	it("gives a row this window shows or runs to this window, and any other to none", () => {
+		assert.equal(sessionRowWindow({ open: true, running: false, heldElsewhere: false }), "this-window");
+		assert.equal(sessionRowWindow({ open: false, running: true, heldElsewhere: false }), "this-window");
+		assert.equal(sessionRowWindow({ open: false, running: false, heldElsewhere: false }), "none");
 	});
 });

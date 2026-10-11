@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Ctrl+Shift+L focuses the chat composer from anywhere, replacing Ctrl+Shift+Q; it takes over VS Code's Select All Occurrences of Find Match key, which you can rebind.
 - The notice shown in a chat or terminal tab, and in the warning, after OMP Desk was updated while the window was open is one sentence, "OMP Desk was updated. Reload the window to continue.", and the tab has a **Reload Window** button.
+- **The Processes view is part of Sessions.** A running session says `Process: running` in its tooltip. Terminals and processes that no listed session stands for are in a **Terminals** group after the sessions, and the new **Terminals** layout (third Sessions layout, next to the flat list and folders) lists every background process with its folder; a click opens its session or terminal. **Stop Orphaned and Idle** and **Kill All** are Sessions title buttons. Kill All stops everything this window runs and, if you choose, the processes of other windows too, through each process's authenticated stop (no process id is signalled), and reports what could not be stopped. **New Session** and **Resume Session** are no longer title buttons; their rows in the list stay. The Processes view and `omp.processes` are removed ([design](docs/designs/2026-10-11-sessions-unify-processes.md), [ADR-0060](docs/decisions/0060-merge-background-processes-into-sessions-and-kill-all-through-authenticated-routes.md)).
+- Processes are read only while Sessions is visible (every 5 s in the Terminals layout, every 30 s otherwise), and a verified process identity is trusted for 60 s rather than a number of ticks.
 
 ### Fixed
 

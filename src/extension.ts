@@ -32,6 +32,7 @@ import { observeSessionBranch } from "./host/session-branch";
 import type { GitApi, BranchObservation } from "./host/session-branch";
 import type { FooterMetadataMessage } from "./webview/footer-metadata";
 import { SessionClickRecognizer } from "./views/session-click";
+import { relativeAge } from "./views/relative-age";
 import { normalizeSessionsGrouping } from "./views/session-order";
 import type { SessionsGrouping } from "./views/session-order";
 import { pinnedSessionTabId, selectionRestore } from "./views/session-selection";
@@ -114,7 +115,6 @@ import {
 import type { DiagnosticEnvironment, DiagnosticStageId } from "./host/diagnostics";
 import {
   folderHeadline,
-  relativeAge,
   sessionFileLabel,
   sessionItemState,
   sessionStateLabel,
@@ -125,7 +125,7 @@ import {
   sizeText,
   WorkspaceFolderTreeItem,
 } from "./views/session-tree";
-import { ProcessTreeItem } from "./views/process-tree";
+import { ProcessTreeItem } from "./views/process-rows";
 import { ToolsTreeProvider } from "./views/tools-tree";
 import { SessionToolsController, type SessionToolsTarget } from "./host/session-tools";
 import type { LauncherTreeItem, SessionLauncherFacts, SessionOwnershipFacts } from "./views/session-tree";
@@ -212,6 +212,7 @@ import type { TerminalHostMessage } from "./host/terminal-pipeline";
 import { fileLinkMenuTarget, handleTerminalLink, openTerminalFile, openWebLink, revealPathInExplorer, revealPathInOs, webLinkMenuUrl } from "./host/terminal-links";
 import type { FileLinkAction, TerminalLinkRequest, TerminalLinkValidation, WebLinkMode } from "./webview/terminal-links";
 import { MAX_SYMBOL_ENTRIES, SymbolLinkResolver, handleSymbolLinks, isNameCandidate, symbolEntry, symbolRoots } from "./host/symbol-links";
+import { FileNameLinkResolver, fileChoiceLabel, workspaceFileNameSource } from "./host/file-name-links";
 import type { SymbolLinksRequest, SymbolLinksResolution, SymbolLinksRetry } from "./webview/code-symbols";
 import {
   createShellSlotId,
@@ -231,7 +232,8 @@ import { stopShellAndBroker, watchShellExit, type ShellExitWatchStop } from "./h
 import { catalogPaths, createCatalogStore, startCatalogWatch } from "./host/profile-catalog";
 import type { CatalogStore } from "./host/profile-catalog";
 import { importPredecessorFolders, predecessorStorageDir } from "./host/predecessor-import";
-import { registerProcessesView } from "./host/process-wiring";
+import { registerSessionProcesses } from "./host/process-wiring";
+import type { SessionProcesses } from "./host/process-wiring";
 import { registerStatsDashboard } from "./host/stats-wiring";
 import { SettingsEditors } from "./host/omp-settings-editor";
 import type { SettingsEditorContext } from "./host/omp-settings-editor";
@@ -379,8 +381,8 @@ const SESSIONS_VIEW_ID = "omp.sessions";
  * show, so its welcome content offers the Add Folder flow instead of an empty list.
  */
 const HAS_WORKSPACE_FOLDERS_CONTEXT = "omp.hasWorkspaceFolders";
-/** Context key the Sessions title-bar toggle reads: the flat list is showing. */
-const SESSIONS_FLAT_CONTEXT = "omp.sessionsFlat";
+/** Context key the Sessions title-bar layout buttons read: the layout the view shows (`flat`, `folders` or `terminals`). */
+const SESSIONS_LAYOUT_CONTEXT = "omp.sessionsLayout";
 /**
  * Context key gating the Stop keybinding: true while the OMP chat panel the user
  * is looking at reports the host running a turn. It is set from the guest's own
@@ -683,6 +685,8 @@ const composerPopupTabs = new Set<string>();
 /** The OMP editors of this window in the order the user last focused them; orders the add-to-session picker. */
 const editorRecency = new EditorRecency();
 let toolsController: SessionToolsController | null = null;
+/** The Sessions view's background processes: its reader, poll and stop commands. */
+let sessionProcesses: SessionProcesses | null = null;
 /**
  * The document each editor's page has announced (`omp:ready`) it is listening in. A reference is
  * posted to a chat page only once its current document is in here: a page that has not announced
@@ -906,7 +910,8 @@ async function revealDesktopNotification(index: SessionIndex, extensionId: strin
     const provider = launcherProvider;
     const view = launcherView;
     if (provider !== undefined && view !== undefined) {
-      const item = await provider.itemFor(tabId);
+      // The Terminals layout serves no session row: the session's process row is its place there.
+      const item = provider.sessionRowsShown() ? await provider.itemFor(tabId) : provider.processItemFor(tabId);
       if (item !== undefined && index.get(tabId) !== null) {
         try {
           await view.reveal(item, { select: true, focus: true });
@@ -1277,6 +1282,7 @@ export function activate(context: vscode.ExtensionContext): void {
       if (event.affectsConfiguration("omp.useAgentRootFolder")) resolveAgentRoots();
       if (event.affectsConfiguration("omp.showWorkspaceFolders") || event.affectsConfiguration("omp.useAgentRootFolder") ||
         event.affectsConfiguration("omp.sessionsGrouping")) refreshLauncher();
+      if (event.affectsConfiguration("omp.sessionsGrouping")) sessionProcesses?.sync();
     }),
     // While a session has an open editor, its row cannot be deselected: a selection with no
     // session row in it is put back on the session viewed most recently.
@@ -1295,6 +1301,8 @@ export function activate(context: vscode.ExtensionContext): void {
     // event announced, ADR-0056). Opening the view never discovers anything: a
     // folder's sessions are found only when the user asks to resume one.
     view.onDidChangeVisibility(event => {
+      // A hidden view stops polling its processes; a shown one reads them at once.
+      sessionProcesses?.sync();
       if (!event.visible) return;
       // A missed catalog notification is recovered here rather than leaving another
       // window's sessions or folders invisible until a restart.
@@ -1360,6 +1368,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("omp.addWorkspaceFolder", () => addWorkspaceFolder(index)),
     vscode.commands.registerCommand("omp.showSessionsFlat", () => setSessionsGrouping("flat")),
     vscode.commands.registerCommand("omp.showSessionsByFolder", () => setSessionsGrouping("folders")),
+    vscode.commands.registerCommand("omp.showSessionsTerminals", () => setSessionsGrouping("terminals")),
     vscode.commands.registerCommand("omp.pinWorkspaceFolder", (argument: unknown) => pinWorkspaceFolder(index, argument)),
     vscode.commands.registerCommand("omp.unpinWorkspaceFolder", (argument: unknown) => unpinWorkspaceFolder(index, argument)),
     vscode.commands.registerCommand("omp.resumeWorkspaceFolder", (argument: unknown) =>
@@ -1367,6 +1376,7 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
     vscode.commands.registerCommand("omp.openSession", (argument: unknown) => openSession(context, index, argument, "resumed")),
     vscode.commands.registerCommand("omp.clickSession", (argument: unknown) => clickSession(context, index, argument)),
+    vscode.commands.registerCommand("omp.openProcess", (argument: unknown) => openProcess(context, index, argument)),
     vscode.commands.registerCommand("omp.goToSession", () => goToSession(context, index)),
     vscode.commands.registerCommand("omp.switchToSessionWindow", (argument: unknown) => switchToSessionWindow(index, argument)),
     vscode.commands.registerCommand("omp.forgetSession", (argument: unknown) => forgetSession(index, argument)),
@@ -1470,7 +1480,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // responsible for. An editor VS Code restores for a row this pass does not cover is
   // opened by its own serializer path, so it is never left unconnected.
   startCatalogActivation(context, index, folders, catalog);
-  setupProcessesView(context, index, folders);
+  setupSessionProcesses(context, index, folders);
   // Stage the entries children run from outside the installed extension folder
   // before anything can need them, so no process starts from a file inside a
   // folder a reinstall may be renaming. The launch paths stage again themselves and
@@ -2409,6 +2419,47 @@ async function clickSession(context: vscode.ExtensionContext, index: SessionInde
 }
 
 /**
+ * Click a process row: open what it stands for. A session process opens its session's row as a
+ * click on it would; a terminal shows its editor here, or reconnects it when this window has none;
+ * the Stats dashboard opens its panel. A terminal another window shows is that window's to show.
+ */
+async function openProcess(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown): Promise<void> {
+  if (!(argument instanceof ProcessTreeItem) || argument.openTarget === null) return;
+  const row = argument.row;
+  if (argument.openTarget === "stats") {
+    await vscode.commands.executeCommand("omp.openStats");
+    return;
+  }
+  if (argument.openTarget === "session") {
+    const tabId = row.host?.kind === "session" ? row.host.tabId : null;
+    const item = tabId === null ? undefined : await launcherProvider?.itemFor(tabId);
+    if (item === undefined) {
+      showInfo("That session is not listed in Sessions any more. Refresh and try again.");
+      return;
+    }
+    await clickSession(context, index, item);
+    return;
+  }
+  const state = stateOf(row.slot);
+  if (state?.panel != null) {
+    state.panel.reveal();
+    return;
+  }
+  const record = shellSlots?.get(row.slot) ?? null;
+  if (record === null) {
+    showWarning("This terminal has no record to reconnect it from. Stop it from Sessions if it is not needed.");
+    return;
+  }
+  if (row.window === "other-window") {
+    showInfo("This terminal is open in another VS Code window.");
+    return;
+  }
+  if (!(await attachFolderShell(context, index, record))) {
+    showWarning("This terminal could not be reconnected. It may have ended; refresh Sessions and try again.");
+  }
+}
+
+/**
  * `omp.goToSession` from anywhere: a searchable list of every session the Sessions view shows, in its
  * flat order (live unread first, then by activity, stopped last), ended by New Session. Picking a row
  * is a click on that row; picking New Session runs the row's command.
@@ -2481,44 +2532,51 @@ async function stopSessionHost(
   index: SessionIndex,
   argument: unknown,
   /**
-   * Set by the Processes view, which asks nothing for a single stop. The row's own prompt is
-   * skipped; a row that records an rpc process must still record exactly the attempt and slot
-   * the view read just before (`recorded`), and anything else is refused, never stopped.
+   * Set by the Sessions view's process stops, which ask nothing for a single stop. The row's own
+   * prompt is skipped; the stop must still bind to exactly the attempt, slot and broker the view
+   * read just before (`recorded`), and anything else is refused, never stopped.
    */
-  preconfirmed?: { readonly recorded: { readonly slot: string; readonly attemptStartedAt: string; readonly pid: number | null } | null },
-): Promise<void> {
+  preconfirmed?: { readonly recorded: RecordedStopCapture },
+): Promise<boolean> {
   const target = sessionTargetFromArgument(index, argument);
   if (target === null) {
     showWarning("Select an OMP session to stop.");
-    return;
+    return false;
   }
   const { tabId, entry } = target;
   if (entry.host === null) {
     showWarning(
       "This session has no running process that this window can stop. Refresh Sessions and try again.",
     );
-    return;
+    return false;
   }
   if (entry.host.transport === "native" && stateOf(tabId)?.runtime == null) {
     await reattachNativeForLifecycle(context, index, tabId);
     if (stateOf(tabId)?.runtime == null) {
       showWarning("This window could not reconnect to the running session. Use /exit in its Terminal, or reopen its editor and try again.");
-      return;
+      return false;
     }
   }
   const liveState = stateOf(tabId);
   if (liveState?.runtime != null) {
     const runtime = liveState.runtime;
-    // The Processes view asks nothing for a single stop: the runtime's passive flag and transition
-    // facts are read here, immediately before the stop, exactly as that view's driven capture does.
+    const recorded = preconfirmed?.recorded;
+    if (recorded !== undefined && (
+      runtime.identity.slot !== recorded.slot || runtime.identity.brokerId !== recorded.brokerId ||
+      runtime.identity.brokerGeneration !== recorded.brokerGeneration
+    )) {
+      showWarning("The session's process changed while the stop was being prepared, so nothing was stopped.");
+      return false;
+    }
+    // The process stop asks nothing for a single stop: the runtime's passive flag and transition
+    // facts are read here, immediately before the stop, exactly as the driven capture does.
     const captured = preconfirmed === undefined
       ? undefined
       : {
         conflicting: passiveReasonForSlot(liveState.slotId) !== null,
         captured: await index.lifecycle.run(tabId, async () => await readTransitionFacts(liveState, runtime)),
       };
-    await confirmAndStopRuntime(context, index, tabId, liveState, runtime, "Stop", captured);
-    return;
+    return await confirmAndStopRuntime(context, index, tabId, liveState, runtime, "Stop", captured);
   }
   // The transport has to exist before anything is confirmed: this row's own recorded
   // broker slot is the only thing that can name the child, and a mapping that cannot
@@ -2530,18 +2588,22 @@ async function stopSessionHost(
         ? "This session's connection details are missing. Reopen its editor and try again."
         : "This session's connection details could not be read. Refresh Sessions and try again.",
     );
-    return;
+    return false;
   }
   // The confirmation names one exact attempt and slot; the index re-reads the row under
   // the tab's gate and refuses if it now records another attempt, and the port refuses a
-  // slot that changed, so a stale dialog can never stop a process the user was not shown.
+  // slot or broker that changed, so a stale dialog can never stop a process the user was not shown.
   const expect = { attemptStartedAt: entry.host.startedAt, pid: entry.host.pid };
   const risk = "Stops this session. Unsaved replies and work in progress may be lost. Commands started by OMP may continue running separately.";
+  const rpc = entry.host.rpc ?? null;
   if (preconfirmed !== undefined) {
     const recorded = preconfirmed.recorded;
-    if (recorded === null || recorded.slot !== provenance.slot || recorded.attemptStartedAt !== expect.attemptStartedAt || recorded.pid !== expect.pid) {
+    if (
+      recorded.slot !== provenance.slot || recorded.attemptStartedAt !== expect.attemptStartedAt || recorded.pid !== expect.pid ||
+      rpc === null || rpc.brokerId !== recorded.brokerId || rpc.brokerGeneration !== recorded.brokerGeneration
+    ) {
       showWarning("The session's recorded process changed while the stop was being prepared, so nothing was stopped.");
-      return;
+      return false;
     }
   } else {
     const picked = await vscode.window.showWarningMessage(
@@ -2551,7 +2613,7 @@ async function stopSessionHost(
     );
     if (picked !== STOP_RECORDED_HOST_LABEL) {
       showInfo("Nothing was stopped.");
-      return;
+      return false;
     }
   }
   stoppingTabs.add(tabId);
@@ -2559,7 +2621,7 @@ async function stopSessionHost(
   try {
     const result = await index.lifecycle.run(tabId, async lease => {
       const stopped = await index.stopRecordedHost(tabId, {
-        stop: recordedHostStopPort(provenance.slot),
+        stop: recordedHostStopPort(provenance.slot, rpc === null ? null : { brokerId: rpc.brokerId, brokerGeneration: rpc.brokerGeneration }),
         expect,
       }, lease);
       // Retire the exact slot and credentials before a queued Resume can provision
@@ -2573,25 +2635,35 @@ async function stopSessionHost(
     });
     if (!result.stopped) {
       showWarning(result.detail);
-      return;
+      return false;
     }
+    return true;
   } finally {
     stoppingTabs.delete(tabId);
     refreshLauncher();
   }
 }
 
+/** What a recorded-process stop binds to: the exact attempt, slot and broker of the row's recorded host. */
+interface RecordedStopCapture {
+  readonly slot: string;
+  readonly brokerId: string;
+  readonly brokerGeneration: string;
+  readonly attemptStartedAt: string;
+  readonly pid: number | null;
+}
+
 /**
- * Create the Processes view: the extension's background brokers, listed from the broker
- * registry and stopped only through the broker (or a row's own stop flow). The row flows
+ * Register the background processes of the Sessions view: the extension's brokers, listed from the
+ * broker registry and stopped only through the broker (or a row's own stop flow). The row flows
  * it reuses are handed in as captures taken just before the stop, so a stop never runs
  * against a target that changed in between.
  */
-function setupProcessesView(context: vscode.ExtensionContext, index: SessionIndex, folders: LauncherFolders): void {
+function setupSessionProcesses(context: vscode.ExtensionContext, index: SessionIndex, folders: LauncherFolders): void {
   let catalogLoaded = false;
   void ensureCatalogReady().then(() => { catalogLoaded = catalogStore !== undefined; });
   registerStatsDashboard(context, { client: brokerClient, log });
-  registerProcessesView(context, {
+  sessionProcesses = registerSessionProcesses(context, {
     storageDir: context.globalStorageUri.fsPath,
     predecessorStorageDir: predecessorStorageDir(context.globalStorageUri.fsPath),
     client: attachBrokerClient,
@@ -2620,6 +2692,16 @@ function setupProcessesView(context: vscode.ExtensionContext, index: SessionInde
     catalogLoaded: () => catalogLoaded,
     refreshCatalog: () => adoptCatalogChanges(index, folders),
     refreshLauncher: () => refreshLauncher({ ownership: true }),
+    publish: snapshot => {
+      launcherProvider?.setProcesses(snapshot);
+      if (launcherView !== undefined) {
+        launcherView.message = snapshot.unreadable > 0
+          ? `${snapshot.unreadable} broker record ${snapshot.unreadable === 1 ? "file" : "files"} could not be read and ${snapshot.unreadable === 1 ? "is" : "are"} not listed.`
+          : undefined;
+      }
+    },
+    visible: () => launcherView?.visible === true,
+    layout: sessionsGrouping,
     async runBrokerStop(target, operation) {
       if (target.kind !== "folder-shell") return await operation();
       return await index.lifecycle.run(target.slot, async () => {
@@ -2627,7 +2709,7 @@ function setupProcessesView(context: vscode.ExtensionContext, index: SessionInde
         const stopWatch = stateOf(target.slot)?.ownerStopWatch;
         const result = await operation();
         if (result.kind === "stopped") {
-          log(`shell ${target.slot}: Processes Stop acknowledged broker shutdown; no tree-stop claim made`);
+          log(`shell ${target.slot}: Sessions Stop acknowledged broker shutdown; no tree-stop claim made`);
           stopWatch?.({ cancelQueuedRetirement: true });
         }
         return result;
@@ -2645,19 +2727,27 @@ function setupProcessesView(context: vscode.ExtensionContext, index: SessionInde
       ) return null;
       const conflicting = passiveReasonForSlot(state.slotId) !== null;
       const captured = await index.lifecycle.run(tabId, async () => await readTransitionFacts(state, runtime));
-      return { run: async () => { await confirmAndStopRuntime(context, index, tabId, state, runtime, "Stop", { conflicting, captured }); } };
+      return { run: () => confirmAndStopRuntime(context, index, tabId, state, runtime, "Stop", { conflicting, captured }) };
     },
     async captureRecordedStop(row) {
       const tabId = row.host?.kind === "session" ? row.host.tabId : null;
       const entry = tabId === null ? null : index.get(tabId);
       if (tabId === null || entry === null || entry.host === null) return null;
       const provenance = brokerProvenanceFor(tabId);
-      if (provenance.kind !== "slot" || provenance.slot !== row.slot) return null;
-      // A native row is reattached first by the row's own flow; its runtime is read after that.
-      if (entry.host.transport === "native") {
-        return { run: () => stopSessionHost(context, index, { tabId }, { recorded: null }) };
-      }
-      const recorded = { slot: provenance.slot, attemptStartedAt: entry.host.startedAt, pid: entry.host.pid };
+      const rpc = isManagedHost(entry.host) ? entry.host.rpc ?? null : null;
+      // The stop binds to the exact slot and broker the row was derived from; a native row is
+      // reattached first by the row's own flow, which holds the same binding.
+      if (
+        provenance.kind !== "slot" || provenance.slot !== row.slot ||
+        rpc === null || rpc.brokerId !== row.brokerId || rpc.brokerGeneration !== row.generation
+      ) return null;
+      const recorded: RecordedStopCapture = {
+        slot: provenance.slot,
+        brokerId: rpc.brokerId,
+        brokerGeneration: rpc.brokerGeneration,
+        attemptStartedAt: entry.host.startedAt,
+        pid: entry.host.pid,
+      };
       return { run: () => stopSessionHost(context, index, { tabId }, { recorded }) };
     },
     log,
@@ -2692,11 +2782,19 @@ async function reattachNativeForLifecycle(context: vscode.ExtensionContext, inde
  * ({@link brokerProvenanceFor}), because the index owns the policy and never reads
  * the slot table itself. Every refusal is bounded text; nothing is signalled by pid.
  */
-function recordedHostStopPort(expectedSlot: string): RecordedHostStopPort {
+function recordedHostStopPort(
+  expectedSlot: string,
+  /** The broker the caller bound the stop to, when it was shown one: the row's recorded identity must still be it. */
+  expectedBroker: { readonly brokerId: string; readonly brokerGeneration: string } | null = null,
+): RecordedHostStopPort {
   return {
     async stopRecordedHost(entry) {
       const provenance = brokerProvenanceFor(entry.tabId);
-      if (provenance.kind === "slot" && provenance.slot !== expectedSlot) {
+      const recordedRpc = entry.host !== null && isManagedHost(entry.host) ? entry.host.rpc ?? null : null;
+      if (
+        (provenance.kind === "slot" && provenance.slot !== expectedSlot) ||
+        (expectedBroker !== null && (recordedRpc === null || recordedRpc.brokerId !== expectedBroker.brokerId || recordedRpc.brokerGeneration !== expectedBroker.brokerGeneration))
+      ) {
         return {
           kind: "unknown",
           detail:
@@ -10735,10 +10833,11 @@ function applySlotAuthority(slot: string): void {
  */
 function refreshLauncher(options: { readonly ownership?: boolean } = {}): void {
   if (indexForBridge !== null) settleViewedSession(indexForBridge);
-  void vscode.commands.executeCommand("setContext", SESSIONS_FLAT_CONTEXT, sessionsGrouping() === "flat");
+  void vscode.commands.executeCommand("setContext", SESSIONS_LAYOUT_CONTEXT, sessionsGrouping());
   // Published first: this window's own entry in the registry is what the list is derived from.
   publishWindowSnapshot();
   launcherProvider?.refresh(options);
+  sessionProcesses?.touch();
   toolsController?.sync();
   if (activationContext !== undefined) void vscode.commands.executeCommand("setContext", "omp.defaultSessionMode", defaultSessionMode(activationContext));
   void vscode.commands.executeCommand(
@@ -10780,7 +10879,7 @@ function revealActiveSession(index: SessionIndex): Promise<void> {
       launcherRevealRequested = false;
       const provider = launcherProvider;
       const view = launcherView;
-      if (!provider || !view || !view.visible) return;
+      if (!provider || !view || !view.visible || !provider.sessionRowsShown()) return;
       const tabId = pinnedSessionTab(index) ?? sessionsViewActiveTab(index);
       if (tabId === null) { launcherSelectedPath = null; return; }
       const expand = launcherExpandFor === tabId;
@@ -10840,11 +10939,13 @@ function sessionsViewActiveTab(index: SessionIndex): string | null {
  */
 function restorePinnedSelection(index: SessionIndex, selection: readonly LauncherTreeItem[]): void {
   const tabIds = (items: readonly LauncherTreeItem[]) => items.map(item => item instanceof SessionTreeItem ? item.tabId : null);
+  // The Terminals layout has no session row to pin: a selection there is the user's.
+  if (launcherProvider?.sessionRowsShown() === false) return;
   if (selectionRestore(pinnedSessionTab(index), tabIds(selection)) === null) return;
   clearTimeout(pinnedSelectionTimer);
   pinnedSelectionTimer = setTimeout(() => {
     pinnedSelectionTimer = undefined;
-    if (selectionRestore(pinnedSessionTab(index), tabIds(launcherView?.selection ?? [])) === null) return;
+    if (launcherProvider?.sessionRowsShown() === false || selectionRestore(pinnedSessionTab(index), tabIds(launcherView?.selection ?? [])) === null) return;
     launcherSelectedPath = null;
     void revealActiveSession(index);
   }, PINNED_SELECTION_RESTORE_MS);
@@ -10856,12 +10957,18 @@ function sessionsGrouping(): SessionsGrouping {
   return normalizeSessionsGrouping(vscode.workspace.getConfiguration("omp").get("sessionsGrouping"));
 }
 
+const SESSIONS_LAYOUT_WORDS: Record<SessionsGrouping, string> = {
+  flat: "the flat list",
+  folders: "folders",
+  terminals: "terminals",
+};
+
 /** The title-bar toggle: store the choice; the configuration listener redraws the view. */
 async function setSessionsGrouping(grouping: SessionsGrouping): Promise<void> {
   try {
     await vscode.workspace.getConfiguration("omp").update("sessionsGrouping", grouping, vscode.ConfigurationTarget.Global);
   } catch (error) {
-    showError(`Sessions could not switch to ${grouping === "flat" ? "the flat list" : "folders"}: ${messageOf(error)}`);
+    showError(`Sessions could not switch to ${SESSIONS_LAYOUT_WORDS[grouping]}: ${messageOf(error)}`);
   }
 }
 
@@ -12685,6 +12792,7 @@ function symbolLinkResolver(): SymbolLinkResolver {
     },
   }, {
     log,
+    files: new FileNameLinkResolver(workspaceFileNameSource(vscode), { log }),
     // Parked tokens (provider not ready, queue full) are asked again by every page that has asked.
     onRetry: () => {
       for (const slotId of [...symbolAskers]) {
@@ -12801,6 +12909,12 @@ async function handleTerminalGuestMessage(
         warn: message => { log(`terminal link: ${message}`); showWarning(message); },
         openUrl: openPageWebLink,
         searchSymbols: async query => { await vscode.commands.executeCommand("workbench.action.quickOpen", `#${query}`); },
+        lookupFileName: name => symbolLinkResolver().lookupFileName(name, { cwd, roots: symbolRoots(cwd, (vscode.workspace.workspaceFolders ?? []).map(folder => folder.uri.fsPath)) }),
+        pickFile: async paths => {
+          const roots = symbolRoots(cwd, (vscode.workspace.workspaceFolders ?? []).map(folder => folder.uri.fsPath));
+          const picked = await vscode.window.showQuickPick(paths.map(file => ({ ...fileChoiceLabel(file, cwd, roots), file })), { placeHolder: "Choose a file", matchOnDescription: true });
+          return picked?.file;
+        },
       });
       return;
     }

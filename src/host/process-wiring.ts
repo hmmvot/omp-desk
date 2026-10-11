@@ -1,41 +1,45 @@
 /**
- * The Processes view's connection to the running extension.
+ * The Sessions view's connection to the background processes of this profile.
  *
  * Everything policy-bearing lives in `broker-processes.ts`, `broker-process-stop.ts` and
  * `broker-process-controller.ts`; this module only builds their ports from the extension's
- * own state, owns the view and its visible-only poll, and registers the commands. It
- * reads session rows, broker-slot mappings and shell slots, and stops only through those
- * modules or through the row stop flows the caller hands in; it never signals a process id.
+ * own state, owns the one serialized reader behind every read and its visible-only poll, and
+ * registers the commands. It reads session rows, broker-slot mappings and shell slots, and stops
+ * only through those modules or through the row stop flows the caller hands in; it never signals a
+ * process id. The Sessions provider receives every snapshot through `publish`.
  */
 
 import * as vscode from "vscode";
 import { brokerStopAttachFor, stopBrokerThroughBroker } from "./broker-process-stop.ts";
 import type { BrokerStopPorts, BrokerStopTarget, BrokerStopOutcome } from "./broker-process-stop.ts";
-import { stopOrphanedAndIdle, stopProcess } from "./broker-process-controller.ts";
+import { killAll, stopOrphanedAndIdle, stopProcess } from "./broker-process-controller.ts";
 import type { CapturedRowStop, ProcessControllerPorts } from "./broker-process-controller.ts";
 import { createBrokerRecordLister } from "./broker-process-records.ts";
-import { buildBrokerProcessCatalog, createBrokerProcessReader } from "./broker-processes.ts";
+import { buildBrokerProcessCatalog, createBrokerProcessReader, sessionRowWindow } from "./broker-processes.ts";
 import type {
 	BrokerCatalogRow,
 	BrokerCatalogShell,
 	BrokerCatalogSources,
 	BrokerProcessChild,
 	BrokerProcessReader,
+	BrokerProcessReadOptions,
 	BrokerProcessRow,
 	BrokerProcessSnapshot,
-	BrokerProcessWindow,
 	BrokerRecordFacts,
 } from "./broker-processes.ts";
 import type { BrokerSlotStore } from "./broker-slots.ts";
 import { isPtyProcessAlive, queryPtyProcessIdentity, waitForPtyProcessGone } from "./pty-identity.ts";
 import type { PtyBrokerClient } from "./pty-client.ts";
 import type { ShellSlotStore } from "./shell-slots.ts";
-import { ProcessTreeItem, ProcessTreeProvider } from "../views/process-tree";
+import { ProcessTreeItem } from "../views/process-rows";
+import type { SessionsGrouping } from "../views/session-order";
 
-export const PROCESSES_VIEW_ID = "omp.processes";
-
-/** How often a visible view re-reads the cheap facts. A hidden view does nothing. */
-export const PROCESSES_POLL_MS = 5_000;
+/** How often a visible Sessions view in the Terminals layout re-reads the cheap facts. A hidden view does nothing. */
+export const TERMINALS_POLL_MS = 5_000;
+/** How often a visible Sessions view in another layout re-reads them: only the row marks and the Terminals group depend on it. */
+export const SESSIONS_POLL_MS = 30_000;
+/** How long after a launcher refresh a visible view reads again, so a row that just started or stopped shows its process. */
+export const LAUNCHER_REFRESH_DELAY_MS = 2_000;
 
 /** The session index's facts about one row that matter to slot classification. */
 export interface ProcessWiringSessionRow {
@@ -75,20 +79,36 @@ export interface ProcessWiringDeps {
 	log(message: string): void;
 }
 
+export interface SessionProcessesDeps extends ProcessWiringDeps {
+	/** Serve a snapshot to the Sessions view. */
+	publish(snapshot: BrokerProcessSnapshot): void;
+	/** The Sessions view is on screen. A hidden view is never polled; an explicit action always reads. */
+	visible(): boolean;
+	layout(): SessionsGrouping;
+}
+
+/** What the extension calls into the registered processes: view or layout changes and launcher refreshes. */
+export interface SessionProcesses {
+	/** The view's visibility or the layout changed: reschedule the poll, and read now when the view is shown. */
+	sync(): void;
+	/** The launcher was refreshed: read once more shortly, when the view is shown. */
+	touch(): void;
+	/** An explicit fresh read. */
+	refresh(): Promise<BrokerProcessSnapshot>;
+}
+
 function messageOf(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
 /** Session rows and slot tables as the model's catalog sources. */
 export function catalogSourcesFrom(deps: ProcessWiringDeps): BrokerCatalogSources {
-	const windowOf = (row: ProcessWiringSessionRow): BrokerProcessWindow =>
-		row.open || row.running ? "this-window" : row.heldElsewhere ? "other-window" : "none";
 	const rows: BrokerCatalogRow[] = deps.sessionRows().map(row => ({
 		tabId: row.tabId,
 		title: row.title,
 		folder: row.folder,
 		hostSlot: row.hostSlot,
-		window: windowOf(row),
+		window: sessionRowWindow(row),
 		drivenSlot: row.drivenSlot,
 	}));
 	const brokerRefs = deps.brokerSlots()?.references() ?? null;
@@ -164,63 +184,58 @@ export function createBrokerProcessReaderFor(deps: ProcessWiringDeps): BrokerPro
 	});
 }
 
-/** Create the view, its poll, its commands and the controller ports. */
-export function registerProcessesView(context: vscode.ExtensionContext, deps: ProcessWiringDeps): void {
+/** Own the reader, its poll and the commands of the processes the Sessions view lists. */
+export function registerSessionProcesses(context: vscode.ExtensionContext, deps: SessionProcessesDeps): SessionProcesses {
 	const reader = createBrokerProcessReaderFor(deps);
-	const provider = new ProcessTreeProvider();
-	const view = vscode.window.createTreeView(PROCESSES_VIEW_ID, { treeDataProvider: provider });
-	view.message = "Reading background processes…";
-	let snapshot: BrokerProcessSnapshot | null = null;
-	let inFlight: Promise<BrokerProcessSnapshot | null> | null = null;
-	let fresherWanted = false;
-	let timer: NodeJS.Timeout | undefined;
 	let disposed = false;
+	let loaded = false;
+	let chain: Promise<unknown> = Promise.resolve();
+	let pollTimer: NodeJS.Timeout | undefined;
+	let touchTimer: NodeJS.Timeout | undefined;
+	let tickQueued = false;
 
-	const publish = (next: BrokerProcessSnapshot): void => {
-		snapshot = next;
-		provider.setSnapshot(next);
-		view.message =
-			next.unreadable > 0
-				? `${next.unreadable} broker record ${next.unreadable === 1 ? "file" : "files"} could not be read and ${next.unreadable === 1 ? "is" : "are"} not listed.`
-				: undefined;
-		view.description = next.rows.length === 0 ? undefined : String(next.rows.length);
-		void vscode.commands.executeCommand("setContext", "omp.processesLoaded", true);
-	};
-
-	/** One read at a time; an explicit read that arrives mid-flight runs once more afterwards. */
-	const refresh = (fresh: boolean): Promise<BrokerProcessSnapshot | null> => {
-		if (inFlight !== null) {
-			if (fresh) fresherWanted = true;
-			return inFlight;
-		}
-		inFlight = (async () => {
-			try {
-				let result: BrokerProcessSnapshot | null = null;
-				let explicit = fresh;
-				do {
-					fresherWanted = false;
-					result = await reader.read({ fresh: explicit });
-					if (!disposed) publish(result);
-					explicit = true;
-				} while (fresherWanted && !disposed);
-				return result;
-			} catch (error) {
-				deps.log(`processes: the list could not be read: ${messageOf(error)}`);
-				return snapshot;
-			} finally {
-				inFlight = null;
+	/**
+	 * The one owner of the reader: every read, the poll's and every controller's, runs one after
+	 * another, and every answer is served to the view, so the list never shows an older read than the
+	 * one an action just made.
+	 */
+	const read = (options?: BrokerProcessReadOptions): Promise<BrokerProcessSnapshot> => {
+		const run = chain.then(async () => {
+			const snapshot = await reader.read(options);
+			if (!disposed) {
+				deps.publish(snapshot);
+				if (!loaded) {
+					loaded = true;
+					void vscode.commands.executeCommand("setContext", "omp.processesLoaded", true);
+				}
 			}
-		})();
-		return inFlight;
+			return snapshot;
+		});
+		chain = run.catch(() => undefined);
+		return run;
 	};
 
-	const startPolling = (): void => {
-		if (timer !== undefined) return;
-		timer = setInterval(() => void refresh(false), PROCESSES_POLL_MS);
+	/** Background read: the cheap facts, and the child state of a row that has none yet. Never for a hidden view. */
+	const tick = async (): Promise<void> => {
+		if (disposed || tickQueued || !deps.visible()) return;
+		tickQueued = true;
+		try {
+			await read({ fresh: false, unreadChildren: true });
+		} catch (error) {
+			deps.log(`processes: the list could not be read: ${messageOf(error)}`);
+		} finally {
+			tickQueued = false;
+		}
 	};
-	const stopPolling = (): void => {
-		clearInterval(timer);
-		timer = undefined;
+
+	const schedule = (): void => {
+		clearTimeout(pollTimer);
+		pollTimer = undefined;
+		if (disposed || !deps.visible()) return;
+		pollTimer = setTimeout(() => {
+			pollTimer = undefined;
+			void tick().finally(schedule);
+		}, deps.layout() === "terminals" ? TERMINALS_POLL_MS : SESSIONS_POLL_MS);
 	};
 
 	const confirm: ProcessControllerPorts["confirm"] = async request =>
@@ -242,8 +257,19 @@ export function registerProcessesView(context: vscode.ExtensionContext, deps: Pr
 	};
 
 	const controllerPorts: ProcessControllerPorts = {
-		read: options => reader.read(options),
+		read,
 		confirm,
+		async choose(request) {
+			const picked = await vscode.window.showWarningMessage(
+				request.message,
+				{ modal: true, detail: request.detail },
+				...request.options.map(option => option.label),
+			);
+			return request.options.find(option => option.label === picked)?.id ?? null;
+		},
+		async withProgress(title, work) {
+			await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `OMP: ${title}` }, work);
+		},
 		info: message => void vscode.window.showInformationMessage(`OMP: ${message}`),
 		warn: message => void vscode.window.showWarningMessage(`OMP: ${message}`),
 		captureDrivenStop: row => deps.captureDrivenStop(row),
@@ -256,7 +282,7 @@ export function registerProcessesView(context: vscode.ExtensionContext, deps: Pr
 		},
 		async refresh() {
 			deps.refreshLauncher();
-			await refresh(true);
+			await read({ fresh: true }).catch(error => deps.log(`processes: the list could not be read: ${messageOf(error)}`));
 		},
 	};
 
@@ -267,35 +293,38 @@ export function registerProcessesView(context: vscode.ExtensionContext, deps: Pr
 	};
 
 	context.subscriptions.push(
-		view,
-		provider,
 		{
 			dispose: () => {
 				disposed = true;
-				stopPolling();
+				clearTimeout(pollTimer);
+				clearTimeout(touchTimer);
 			},
 		},
-		view.onDidChangeVisibility(event => {
-			if (event.visible) {
-				startPolling();
-				void refresh(true);
-			} else {
-				stopPolling();
-			}
-		}),
-		vscode.commands.registerCommand("omp.refreshProcesses", () => refresh(true)),
+		vscode.commands.registerCommand("omp.refreshProcesses", () => read({ fresh: true }).catch(error => deps.log(`processes: the list could not be read: ${messageOf(error)}`))),
 		vscode.commands.registerCommand("omp.stopProcess", async (argument: unknown) => {
 			const id = rowIdOf(argument);
 			if (id === null) {
-				void vscode.window.showWarningMessage("OMP: Select a process in the Processes view to stop.");
+				void vscode.window.showWarningMessage("OMP: Select a process in the Sessions view to stop.");
 				return;
 			}
 			await stopProcess(id, controllerPorts);
 		}),
 		vscode.commands.registerCommand("omp.stopOrphanedProcesses", () => stopOrphanedAndIdle(controllerPorts)),
+		vscode.commands.registerCommand("omp.killAll", () => killAll(controllerPorts)),
 	);
-	if (view.visible) {
-		startPolling();
-		void refresh(true);
-	}
+
+	return {
+		sync() {
+			schedule();
+			if (!disposed && deps.visible()) void read({ fresh: true }).catch(error => deps.log(`processes: the list could not be read: ${messageOf(error)}`));
+		},
+		touch() {
+			if (disposed || touchTimer !== undefined || !deps.visible()) return;
+			touchTimer = setTimeout(() => {
+				touchTimer = undefined;
+				void tick();
+			}, LAUNCHER_REFRESH_DELAY_MS);
+		},
+		refresh: () => read({ fresh: true }),
+	};
 }

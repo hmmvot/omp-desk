@@ -26,6 +26,9 @@ import { after, before, describe, it } from "node:test";
 import { setImmediate as nextTurn } from "node:timers/promises";
 
 import type { SessionIndexEntry } from "../host/session-index.ts";
+import type { BrokerProcessRow, BrokerProcessSnapshot } from "../host/broker-processes.ts";
+import type { ProcessTreeItem, TerminalsGroupTreeItem } from "./process-rows.ts";
+import type { SessionsGrouping } from "./session-order.ts";
 import type { FolderPathInspector, WorkspaceFolderStore } from "./workspace-folders.ts";
 import type { LauncherFolder } from "./launcher-folders.ts";
 import type {
@@ -64,6 +67,7 @@ if (typeof module.registerHooks === "function") {
 
 const { TreeItemCollapsibleState } = await import("./vscode-test-stub.ts");
 const sessionTree = await import("./session-tree.ts");
+const { relativeAge } = await import("./relative-age.ts");
 const { WorkspaceFolderRegistry } = await import("./workspace-folders.ts");
 // Register the extensionless dependency hook above before loading the index.
 const { SessionIndex } = await import("../host/session-index.ts");
@@ -1326,7 +1330,7 @@ describe("launcher tree", () => {
 		}, { now: () => now });
 		const root = (await rootsOf(provider))[0]!;
 		const row = (tabId: string) => root.rows.find(candidate => candidate.tabId === tabId)!;
-		const lastActivity = (iso: string) => `Last activity: ${sessionTree.relativeAge(iso, now)}`;
+		const lastActivity = (iso: string) => `Last activity: ${relativeAge(iso, now)}`;
 		await waitForRows(provider, () => tooltipText(row("tab:idle")).includes(lastActivity("2026-09-25T08:00:05.000Z")));
 		assert.ok(tooltipText(row("tab:draft")).includes("No activity yet"), "a draft without a file has no conversation yet");
 		assert.ok(tooltipText(root).includes(lastActivity("2026-09-25T08:00:05.000Z")), "the folder takes its latest conversation, not a draft's bookkeeping");
@@ -1354,7 +1358,7 @@ describe("launcher tree", () => {
 			readonly folders: readonly LauncherFolder[];
 			readonly entries: readonly SessionIndexEntry[];
 			readonly running?: ReadonlySet<string>;
-			readonly grouping?: () => "flat" | "folders";
+			readonly grouping?: () => SessionsGrouping;
 		}): Provider {
 			return providerFor({
 				folders: () => options.folders,
@@ -1484,6 +1488,139 @@ describe("launcher tree", () => {
 			const reserved = provider.beginReveal("tab:seen");
 			assert.equal(reserved?.item, item);
 			reserved?.release();
+		});
+	});
+
+	describe("background processes", () => {
+		const row = (tabId: string, cwd: string, overrides: Partial<SessionIndexEntry> = {}): SessionIndexEntry =>
+			entry({ tabId, cwd, kind: "session", sessionFile, availability: "saved", ...overrides });
+		const live = { availability: "live", runIntent: "running" } as const;
+		let serial = 0;
+
+		function process(overrides: Partial<BrokerProcessRow> = {}): BrokerProcessRow {
+			serial += 1;
+			return {
+				id: `current|tab:${serial}|pty-${serial}`,
+				source: "current",
+				kind: "terminal",
+				ptyKind: "folder-shell",
+				slot: `tab:${serial}`,
+				brokerId: `pty-${serial}`,
+				generation: `gen-${serial}`,
+				brokerPid: 7000 + serial,
+				brokerCreationTime: "134349421014308869",
+				startedAt: "2026-09-25T10:00:00.000Z",
+				uptimeMs: 60_000,
+				title: null,
+				status: "in-use",
+				host: { kind: "terminal", folder: ALPHA, label: "alpha", window: "this-window" },
+				window: "this-window",
+				drivenHere: false,
+				child: "running",
+				olderBuild: false,
+				stop: { available: true },
+				...overrides,
+			};
+		}
+
+		const sessionProcess = (tabId: string, overrides: Partial<BrokerProcessRow> = {}): BrokerProcessRow =>
+			process({
+				kind: "session",
+				ptyKind: "managed-rpc",
+				host: { kind: "session", tabId, title: "Fix the build", folder: ALPHA, window: "this-window", drivenHere: true, recorded: true },
+				drivenHere: true,
+				...overrides,
+			});
+
+		const snapshot = (...rows: BrokerProcessRow[]): BrokerProcessSnapshot => ({ rows, hidden: 0, unreadable: 0, takenAt: 0 });
+
+		function provider(grouping: SessionsGrouping, entries: readonly SessionIndexEntry[] = [row("tab:a", ALPHA, live)]): Provider {
+			return providerFor({
+				folders: () => [folder("folder:alpha", ALPHA)],
+				entries: () => entries,
+				activeTabId: () => null,
+				facts: tabId => ({ open: false, running: tabId === "tab:a", outcome: null, activity: null }),
+				grouping: () => grouping,
+			});
+		}
+
+		it("groups the processes no session row stands for under Terminals, after the sessions in the flat list", async () => {
+			const flat = provider("flat");
+			const shell = process();
+			const orphan = process({ kind: "session", ptyKind: "managed-rpc", status: "orphaned", host: null, title: "left over" });
+			flat.setProcesses(snapshot(sessionProcess("tab:a"), shell, orphan));
+			const children = flat.getChildren();
+			assert.deepEqual(children.map(child => child.id), ["tab:a", "omp.terminalsGroup", "omp.newSessionRow", "omp.resumeSessionRow"]);
+			const group = children[1] as InstanceType<typeof TerminalsGroupTreeItem>;
+			assert.deepEqual(flat.getChildren(group).map(child => child.id), [shell.id, orphan.id]);
+			assert.equal(flat.getParent(flat.getChildren(group)[0]!), group);
+			assert.equal(group.description, "2");
+		});
+
+		it("groups them after the folder nodes in the folders layout, and shows no group while none is loose", async () => {
+			const folders = provider("folders");
+			folders.setProcesses(snapshot(sessionProcess("tab:a"), process()));
+			assert.deepEqual((await folders.getChildren()).map(child => child.id), ["folder:alpha", "omp.terminalsGroup"]);
+			folders.setProcesses(snapshot(sessionProcess("tab:a")));
+			assert.deepEqual((await folders.getChildren()).map(child => child.id), ["folder:alpha"]);
+			const unread = provider("folders");
+			assert.deepEqual((await unread.getChildren()).map(child => child.id), ["folder:alpha"]);
+		});
+
+		it("marks the session row of a live process and says what its process is", async () => {
+			const flat = provider("flat");
+			flat.setProcesses(snapshot(sessionProcess("tab:a")));
+			const [item] = flat.getChildren() as SessionRow[];
+			assert.ok(tooltipText(item!).includes("Process: running, up 1m"));
+			flat.setProcesses(null);
+			assert.ok(tooltipText((flat.getChildren() as SessionRow[])[0]!).includes("Process: running"));
+			assert.ok(!tooltipText((flat.getChildren() as SessionRow[])[0]!).includes("up 1m"));
+		});
+
+		it("serves every process, session processes included, at the root of the Terminals layout, with its folder", async () => {
+			const terminals = provider("terminals");
+			const shell = process();
+			const sessionRow = sessionProcess("tab:a");
+			terminals.setProcesses(snapshot(sessionRow, shell));
+			const children = (await terminals.getChildren()) as Array<InstanceType<typeof ProcessTreeItem>>;
+			assert.deepEqual(children.map(child => child.id), [sessionRow.id, shell.id]);
+			assert.deepEqual(children.map(child => String(child.label)), ["alpha · Fix the build", "alpha · Terminal"]);
+			assert.deepEqual(children.map(child => child.openTarget), ["session", "terminal"]);
+			assert.deepEqual(children.map(child => child.command?.command), ["omp.openProcess", "omp.openProcess"]);
+			assert.equal(terminals.sessionRowsShown(), false);
+			assert.equal(terminals.getParent(children[0]!), undefined);
+			assert.deepEqual(await terminals.getChildren(children[0]!), []);
+			assert.ok(await terminals.itemFor("tab:a"), "a click on a session process still reaches its session row");
+			assert.equal(terminals.beginReveal("tab:a"), undefined, "but the layout serves no session row to reveal");
+			assert.equal(terminals.processItemFor("tab:a"), children[0], "a notification reveals the session's process row instead");
+			assert.equal(terminals.processItemFor("tab:unknown"), undefined);
+			assert.equal(provider("flat").sessionRowsShown(), true);
+		});
+
+		it("opens nothing for a row that stands for nothing a click can open, and offers Stop only on a stoppable row", async () => {
+			const terminals = provider("terminals");
+			const orphan = process({ kind: "session", ptyKind: "managed-rpc", status: "orphaned", host: null, title: "left over" });
+			const old = process({ source: "predecessor", stop: { available: false, reason: "previous version" } });
+			terminals.setProcesses(snapshot(orphan, old));
+			const [first, second] = (await terminals.getChildren()) as Array<InstanceType<typeof ProcessTreeItem>>;
+			assert.equal(first!.command, undefined);
+			assert.match(String(first!.contextValue), /^ompProcess\.stoppable\.session\.orphaned$/);
+			assert.match(String(second!.contextValue), /^ompProcess\.fixed\./);
+		});
+
+		it("repaints a process row in place when its facts change, and drops it when it is gone", async () => {
+			const terminals = provider("terminals");
+			const shell = process();
+			terminals.setProcesses(snapshot(shell));
+			const [item] = (await terminals.getChildren()) as Array<InstanceType<typeof ProcessTreeItem>>;
+			const changed: unknown[] = [];
+			terminals.onDidChangeTreeData(element => changed.push(element));
+			terminals.setProcesses(snapshot({ ...shell, status: "orphaned", host: null, title: "left over" }));
+			assert.equal(((await terminals.getChildren()) as unknown[])[0], item, "the tree keeps the instance it knows");
+			assert.ok(String(item!.description).startsWith("Orphaned"));
+			assert.ok(changed.includes(item));
+			terminals.setProcesses(snapshot());
+			assert.deepEqual(await terminals.getChildren(), []);
 		});
 	});
 });

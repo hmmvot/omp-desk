@@ -5,6 +5,8 @@ date: 2026-10-07
 
 # Processes view: see and stop the extension's background brokers
 
+> **Superseded in part (2026-10-11).** The separate Processes view, its poll rule, its titles and its "no stop-everything action" are replaced by [Sessions unify](2026-10-11-sessions-unify-processes.md) and [ADR-0060](../decisions/0060-merge-background-processes-into-sessions-and-kill-all-through-authenticated-routes.md); the process model, classification, reader and authenticated stop routes below remain operative.
+
 > Shell-slot retention clauses below record the original design. The 2026-10-08 folder-shell lifecycle correction now retires slots after confirmed natural child exit, or after editor Terminate proves child absence and authenticated broker shutdown; successful Processes Stop also retires the slot. Descendant uncertainty remains truthful diagnostics, not a reason to retain an empty broker or report a failed shell stop. The immutable broker registry record is preserved. See [Current Architecture](../architecture.md#current-architecture).
 
 ## Problem

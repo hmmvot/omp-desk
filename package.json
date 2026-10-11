@@ -57,7 +57,6 @@
   "activationEvents": [
     "onStartupFinished",
     "onView:omp.sessions",
-    "onView:omp.processes",
     "onView:omp.tools",
     "onUri",
     "onWebviewPanel:omp.session",
@@ -100,13 +99,14 @@
         },
         "omp.sessionsGrouping": {
           "type": "string",
-          "enum": ["flat", "folders"],
+          "enum": ["flat", "folders", "terminals"],
           "enumDescriptions": [
             "One list of every session, labelled with its folder: sessions that are not stopped first (unread first, then most recent activity), stopped sessions last, and a New Session row at the end.",
-            "Sessions grouped under their folders."
+            "Sessions grouped under their folders.",
+            "The background processes of this profile instead of sessions: session processes and terminals, each labelled with its folder. A row opens its session or terminal."
           ],
           "default": "flat",
-          "description": "How Sessions arranges its rows. The toggle in the Sessions title bar changes this setting."
+          "description": "How Sessions arranges its rows. The layout buttons in the Sessions title bar change this setting."
         },
         "omp.chatColumn": {
           "type": "boolean",
@@ -116,7 +116,7 @@
         "omp.linkCodeSymbols": {
           "type": "boolean",
           "default": true,
-          "description": "Link inline code symbols in Chat replies (`Session`, `SessionData.Cast`, `Parse()`) to their definition when VS Code's language extensions (C# Dev Kit, TypeScript, ...) find exactly one definition of the symbol in the session's folders. Ambiguous or unknown symbols stay plain code. When off, only the links the model writes itself and file paths are links."
+          "description": "Link inline code symbols in Chat replies (`Session`, `SessionData.Cast`, `Parse()`) to their definition when VS Code's language extensions (C# Dev Kit, TypeScript, ...) find exactly one definition of the symbol in the session's folders, and a bare file name such as `session-index.ts:849` to the file when VS Code's file search finds it in the session's folders (several files of that name link to a list to choose from). Ambiguous or unknown symbols stay plain code. When off, only the links the model writes itself and file paths are links."
         },
         "omp.linkReminder": {
           "type": "boolean",
@@ -180,11 +180,6 @@
           "id": "omp.tools",
           "name": "Tools",
           "visibility": "collapsed"
-        },
-        {
-          "id": "omp.processes",
-          "name": "Processes",
-          "visibility": "collapsed"
         }
       ]
     },
@@ -196,17 +191,17 @@
       },
       {
         "view": "omp.sessions",
-        "when": "!omp.hasWorkspaceFolders && !omp.catalogPending && config.omp.showWorkspaceFolders",
+        "when": "!omp.hasWorkspaceFolders && !omp.catalogPending && config.omp.showWorkspaceFolders && omp.sessionsLayout != terminals",
         "contents": "Open a folder in VS Code, or add one here. Open folders appear automatically; pinned folders stay in every window.\n[Add Folder](command:omp.addWorkspaceFolder)\n[New Session](command:omp.newSession)\nClick a session to view its history. Use the row's Open action to start or resume it."
       },
       {
         "view": "omp.sessions",
-        "when": "!omp.hasWorkspaceFolders && !omp.catalogPending && !config.omp.showWorkspaceFolders",
+        "when": "!omp.hasWorkspaceFolders && !omp.catalogPending && !config.omp.showWorkspaceFolders && omp.sessionsLayout != terminals",
         "contents": "No folder is pinned. Open folders are hidden by the omp.showWorkspaceFolders setting.\n[Add Folder](command:omp.addWorkspaceFolder)\n[New Session](command:omp.newSession)\nClick a session to view its history. Use the row's Open action to start or resume it."
       },
       {
-        "view": "omp.processes",
-        "when": "omp.processesLoaded",
+        "view": "omp.sessions",
+        "when": "omp.sessionsLayout == terminals && omp.processesLoaded && !omp.catalogPending",
         "contents": "No OMP background process is running.\nA session or terminal keeps running in a background process after its editor or window closes. It is listed here until it exits or you stop it."
       }
     ],
@@ -248,6 +243,12 @@
         "title": "Sessions: Show as Flat List",
         "category": "OMP",
         "icon": "$(list-flat)"
+      },
+      {
+        "command": "omp.showSessionsTerminals",
+        "title": "Sessions: Show Terminals",
+        "category": "OMP",
+        "icon": "$(terminal)"
       },
       {
         "command": "omp.pinWorkspaceFolder",
@@ -638,9 +639,15 @@
       },
       {
         "command": "omp.stopOrphanedProcesses",
-        "title": "Stop Orphaned and Idle Processes",
+        "title": "Stop Orphaned and Idle",
         "category": "OMP",
         "icon": "$(clear-all)"
+      },
+      {
+        "command": "omp.killAll",
+        "title": "Kill All",
+        "category": "OMP",
+        "icon": "$(stop-circle)"
       },
       {
         "command": "omp.refreshTools",
@@ -652,12 +659,20 @@
     "menus": {
       "commandPalette": [
         {
-          "command": "omp.showSessionsByFolder",
-          "when": "omp.sessionsFlat"
+          "command": "omp.showSessionsFlat",
+          "when": "omp.sessionsLayout != flat"
         },
         {
-          "command": "omp.showSessionsFlat",
-          "when": "!omp.sessionsFlat"
+          "command": "omp.showSessionsByFolder",
+          "when": "omp.sessionsLayout != folders"
+        },
+        {
+          "command": "omp.showSessionsTerminals",
+          "when": "omp.sessionsLayout != terminals"
+        },
+        {
+          "command": "omp.refreshProcesses",
+          "when": "false"
         },
         {
           "command": "omp.copyRowDiagnostics",
@@ -841,16 +856,6 @@
           "group": "1_settings@2"
         },
         {
-          "command": "omp.newSession",
-          "when": "view == omp.sessions",
-          "group": "navigation@1"
-        },
-        {
-          "command": "omp.resumeWorkspaceFolder",
-          "when": "view == omp.sessions",
-          "group": "navigation@2"
-        },
-        {
           "command": "omp.chooseDefaultSessionViewChat",
           "when": "view == omp.sessions && omp.defaultSessionMode == chat",
           "group": "1_view@1"
@@ -871,29 +876,34 @@
           "group": "1_provider@1"
         },
         {
-          "command": "omp.refreshProcesses",
-          "when": "view == omp.processes",
+          "command": "omp.openStats",
+          "when": "view == omp.sessions",
           "group": "navigation@1"
         },
         {
-          "command": "omp.openStats",
-          "when": "view == omp.sessions",
-          "group": "navigation@3"
+          "command": "omp.showSessionsFlat",
+          "when": "view == omp.sessions && omp.sessionsLayout != flat",
+          "group": "navigation@2"
         },
         {
           "command": "omp.showSessionsByFolder",
-          "when": "view == omp.sessions && omp.sessionsFlat",
-          "group": "navigation@4"
+          "when": "view == omp.sessions && omp.sessionsLayout != folders",
+          "group": "navigation@3"
         },
         {
-          "command": "omp.showSessionsFlat",
-          "when": "view == omp.sessions && !omp.sessionsFlat",
+          "command": "omp.showSessionsTerminals",
+          "when": "view == omp.sessions && omp.sessionsLayout != terminals",
           "group": "navigation@4"
         },
         {
           "command": "omp.stopOrphanedProcesses",
-          "when": "view == omp.processes",
-          "group": "navigation@2"
+          "when": "view == omp.sessions",
+          "group": "navigation@5"
+        },
+        {
+          "command": "omp.killAll",
+          "when": "view == omp.sessions",
+          "group": "navigation@6"
         },
         {
           "command": "omp.refreshTools",
@@ -904,12 +914,7 @@
       "view/item/context": [
         {
           "command": "omp.copyRowDiagnostics",
-          "when": "view == omp.sessions && viewItem =~ /^(ompSession|ompWorkspaceFolder)\\./",
-          "group": "9_diagnostics@1"
-        },
-        {
-          "command": "omp.copyRowDiagnostics",
-          "when": "view == omp.processes && viewItem =~ /^ompProcess\\./",
+          "when": "view == omp.sessions && viewItem =~ /^(ompSession|ompWorkspaceFolder|ompProcess)\\./",
           "group": "9_diagnostics@1"
         },
         {
@@ -1019,12 +1024,12 @@
         },
         {
           "command": "omp.stopProcess",
-          "when": "view == omp.processes && viewItem =~ /^ompProcess\\.stoppable\\./",
+          "when": "view == omp.sessions && viewItem =~ /^ompProcess\\.stoppable\\./",
           "group": "inline@1"
         },
         {
           "command": "omp.stopProcess",
-          "when": "view == omp.processes && viewItem =~ /^ompProcess\\.stoppable\\./",
+          "when": "view == omp.sessions && viewItem =~ /^ompProcess\\.stoppable\\./",
           "group": "1_stop@1"
         }
       ]

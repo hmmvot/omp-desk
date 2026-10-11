@@ -10,12 +10,12 @@
  */
 import * as path from "node:path";
 
-/** How the Sessions view arranges its rows: one flat list, or grouped under folders. */
-export type SessionsGrouping = "flat" | "folders";
+/** How the Sessions view arranges its rows: one flat list, grouped under folders, or the background processes. */
+export type SessionsGrouping = "flat" | "folders" | "terminals";
 
 /** The setting's value for anything unrecognized: the flat list is the default. */
 export function normalizeSessionsGrouping(value: unknown): SessionsGrouping {
-	return value === "folders" ? "folders" : "flat";
+	return value === "folders" || value === "terminals" ? value : "flat";
 }
 
 /** What the order depends on, for one row. */

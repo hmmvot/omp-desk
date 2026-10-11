@@ -18,6 +18,10 @@ export const TreeItemCollapsibleState = {
 
 export type TreeItemCollapsibleState = (typeof TreeItemCollapsibleState)[keyof typeof TreeItemCollapsibleState];
 
+/** The two checkbox states an inventory row uses. */
+export const TreeItemCheckboxState = { Unchecked: 0, Checked: 1 } as const;
+export type TreeItemCheckboxState = (typeof TreeItemCheckboxState)[keyof typeof TreeItemCheckboxState];
+
 /** One entry's theme colour, as a tree item stores it. */
 export class ThemeColor {
 	readonly id: string;
@@ -91,6 +95,7 @@ export class TreeItem {
 	command?: unknown;
 	accessibilityInformation?: unknown;
 	collapsibleState?: TreeItemCollapsibleState;
+	checkboxState?: TreeItemCheckboxState;
 
 	constructor(label: string, collapsibleState?: TreeItemCollapsibleState) {
 		this.label = label;

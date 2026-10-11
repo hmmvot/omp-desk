@@ -180,14 +180,19 @@ export interface BrokerProcessReadOptions {
 	 * row's child state. A tick reads none of these and reuses the last answers.
 	 */
 	readonly fresh?: boolean;
+	/**
+	 * A tick that also reads the child state of the rows whose child was never read (one
+	 * authenticated attach each), and nothing else: a new broker costs one attach, not one per broker.
+	 */
+	readonly unreadChildren?: boolean;
 }
 
 export interface BrokerProcessReader {
 	read(options?: BrokerProcessReadOptions): Promise<BrokerProcessSnapshot>;
 }
 
-/** Every Nth tick re-verifies the cached identities, so a recycled PID cannot show for long. */
-const REVERIFY_EVERY_TICKS = 12;
+/** How long a verified identity is trusted on ticks, so a recycled PID cannot show for long whatever the tick interval. */
+const REVERIFY_MS = 60_000;
 /** Authenticated attaches, and creation-time probes, in flight at once. */
 const READ_CONCURRENCY = 4;
 
@@ -213,18 +218,27 @@ async function mapBounded<T, R>(items: readonly T[], work: (item: T) => Promise<
  * does not restart, and a creation time identifies one process lifetime), so that verdict
  * is kept for good: the registry keeps one record per stopped broker, and each must cost
  * one probe ever, not one per refresh. A *verified* identity is remembered only while the
- * PID stays alive and is dropped on every explicit read and every twelfth tick. The caches
+ * PID stays alive and is dropped on every explicit read and once a minute. The caches
  * decide only what is displayed: a stop re-derives everything fresh.
  */
 export function createBrokerProcessReader(ports: BrokerProcessReadPorts): BrokerProcessReader {
 	let verified = new Set<string>();
 	const dead = new Set<string>();
 	const children = new Map<string, BrokerProcessChild>();
-	let ticks = 0;
+	let lastReverified = Number.NEGATIVE_INFINITY;
+	const readChildren = async (entries: readonly SourcedBrokerRecord[]): Promise<void> => {
+		await mapBounded(entries, async entry => {
+			children.set(identityKey(entry.record), await ports.readChild(entry.record));
+		});
+	};
 	return {
 		async read(options = {}) {
 			const fresh = options.fresh === true;
-			if (fresh || ++ticks % REVERIFY_EVERY_TICKS === 0) verified = new Set();
+			const startedAt = ports.now();
+			if (fresh || startedAt - lastReverified >= REVERIFY_MS) {
+				verified = new Set();
+				lastReverified = startedAt;
+			}
 			// Records first, catalog second: see BrokerProcessReadPorts.catalog.
 			const listing = await ports.listRecords();
 			const catalog = await ports.catalog(fresh);
@@ -260,10 +274,9 @@ export function createBrokerProcessReader(ports: BrokerProcessReadPorts): Broker
 			verified = stillVerified;
 			if (fresh) {
 				children.clear();
-				const todo = live.filter(entry => stopAvailability(entry).available);
-				await mapBounded(todo, async entry => {
-					children.set(identityKey(entry.record), await ports.readChild(entry.record));
-				});
+				await readChildren(live.filter(entry => stopAvailability(entry).available));
+			} else if (options.unreadChildren === true) {
+				await readChildren(live.filter(entry => stopAvailability(entry).available && !children.has(identityKey(entry.record))));
 			}
 			const rows = live.map(entry =>
 				deriveBrokerProcessRow(entry, catalog, digest, now, children.get(identityKey(entry.record)) ?? "unknown"),
@@ -360,6 +373,49 @@ export function selectOrphanedAndIdle(rows: readonly BrokerProcessRow[]): readon
 			row.window !== "this-window" &&
 			(row.status === "orphaned" || row.child === "exited"),
 	);
+}
+
+/**
+ * Who Kill All may stop, by tier. Pure.
+ *
+ * Local membership is exact identity, never display presence: a window showing a session in an
+ * editor does not run its process, and a session another window holds can read as `none` until
+ * its claim has been observed. So:
+ *
+ * - `here`: a session whose runtime this window drives (`drivenHere`: the runtime's slot, broker
+ *   and generation are the row's) and a folder terminal an editor of this window carries.
+ * - `otherWindows`: a row another window's claim or a recorded editor holds.
+ * - `notRun`: every other stoppable row: a detached terminal, a background session, an orphan,
+ *   an idle process, the Stats dashboard, and a session this window only shows. Not known to be
+ *   this window's, so it joins only by the explicit all-windows choice.
+ * - `blocked`: rows this build cannot authenticate to; never attempted, but reported.
+ */
+export interface KillAllPlan {
+	readonly here: readonly BrokerProcessRow[];
+	readonly otherWindows: readonly BrokerProcessRow[];
+	readonly notRun: readonly BrokerProcessRow[];
+	readonly blocked: readonly BrokerProcessRow[];
+}
+
+export function planKillAll(rows: readonly BrokerProcessRow[]): KillAllPlan {
+	const stoppable = rows.filter(row => row.stop.available);
+	const isHere = (row: BrokerProcessRow): boolean => row.drivenHere || (row.kind === "terminal" && row.window === "this-window");
+	return {
+		here: stoppable.filter(isHere),
+		otherWindows: stoppable.filter(row => !isHere(row) && row.window === "other-window"),
+		notRun: stoppable.filter(row => !isHere(row) && row.window !== "other-window"),
+		blocked: rows.filter(row => !row.stop.available),
+	};
+}
+
+/**
+ * Which window shows a session row, from what the session index says. A row another window's claim
+ * holds is that window's even when this window also has an editor open on it (the editor does not run
+ * it), so `heldElsewhere` wins over `open`; Kill All and the row's mark rely on this order.
+ */
+export function sessionRowWindow(facts: { readonly open: boolean; readonly running: boolean; readonly heldElsewhere: boolean }): BrokerProcessWindow {
+	if (facts.heldElsewhere) return "other-window";
+	return facts.open || facts.running ? "this-window" : "none";
 }
 
 // The catalog
