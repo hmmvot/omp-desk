@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Ctrl+Shift+L focuses the chat composer from anywhere, replacing Ctrl+Shift+Q; it takes over VS Code's Select All Occurrences of Find Match key, which you can rebind.
+- The notice shown in a chat or terminal tab, and in the warning, after OMP Desk was updated while the window was open is one sentence, "OMP Desk was updated. Reload the window to continue.", and the tab has a **Reload Window** button.
 
 ### Fixed
 

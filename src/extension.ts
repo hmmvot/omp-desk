@@ -10,7 +10,7 @@ import { createHash } from "node:crypto";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
-import { createDetailHtml, createGuestHtml, createShellHtml, createUnavailableGuestHtml } from "./host/guest-webview";
+import { UNAVAILABLE_RELOAD_MESSAGE, createDetailHtml, createGuestHtml, createShellHtml, createUnavailableGuestHtml } from "./host/guest-webview";
 import { chatExitText, type ChatExitReason } from "./chat/exit-reason";
 import { persistedTabId } from "./webview/panel-identity";
 import { installedNerdFonts } from "./host/terminal-fonts";
@@ -6129,6 +6129,7 @@ function renderPanelDocument(context: vscode.ExtensionContext, key: string): voi
   panel.webview.html = html ?? createUnavailableGuestHtml(
     awaitingBridge ? BRIDGE_PENDING_DETAIL : updatedOnDisk ? UPDATED_ON_DISK_DETAIL : GUEST_UNAVAILABLE_DETAIL,
     { tabId: identityTabId, editorId: panelIdentity?.editorIdHex ?? state.slotId },
+    { reloadButton: updatedOnDisk },
   );
   refreshGuestContext();
   if (kind === "guest") {
@@ -12256,14 +12257,9 @@ function log(message: string): void {
 /** `vscode.ExtensionMode.Production`; compared by value so the mocked `vscode` of the tests need not define the enum. */
 const EXTENSION_MODE_PRODUCTION = 1;
 const PACKAGE_DRIFT_POLL_MS = 10_000;
-const UPDATED_ON_DISK_MESSAGE =
-  "OMP was updated while this window was open. Reload the window to finish updating; " +
-  "until then, a chat or terminal opened or switched now shows a notice instead of mixing old and new versions.";
+const UPDATED_ON_DISK_MESSAGE = "OMP Desk was updated. Reload the window to continue.";
 /** Shown by a document that was not built because the installed package changed under this host. */
-const UPDATED_ON_DISK_DETAIL =
-  "OMP was updated while this window was open, so this view was not loaded: it would mix the new version with the " +
-  "one still running. Run “Developer: Reload Window” from the Command Palette to finish updating. " +
-  "Sessions and terminals that are already running are not affected.";
+const UPDATED_ON_DISK_DETAIL = UPDATED_ON_DISK_MESSAGE;
 
 /** The fingerprint of the package this host started from; `null` outside a packaged (production) install. */
 let packageDrift: PackageDrift | null = null;
@@ -12326,6 +12322,11 @@ function registerPanelLifecycle(
     // A disposed panel must not send a late request into a replacement editor.
     const state = tabs.get(slot);
     if (state?.panel !== panel || state.tabId === null) return;
+    // The updated-on-disk page's one button: honoured only while the installed package really changed under this host.
+    if (typeof message === "object" && message !== null && "type" in message && message.type === UNAVAILABLE_RELOAD_MESSAGE && state.document?.kind === "unavailable" && packageChangedOnDisk()) {
+      void vscode.commands.executeCommand("workbench.action.reloadWindow");
+      return;
+    }
     const handling = dispatchSlotMessage(index, slot, panel, message);
     void handling.catch(() => {
       log(`slot ${slot}: a guest message could not be processed`);

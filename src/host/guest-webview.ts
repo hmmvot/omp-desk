@@ -23,7 +23,7 @@
  */
 import { randomBytes } from "node:crypto";
 import type * as vscode from "vscode";
-import { PANEL_BRIDGE_META, PANEL_IDENTITY_META, isPanelTabId, panelBridgeMetaValue, panelDocumentIdentityBootstrapSource } from "../webview/panel-identity.ts";
+import { PANEL_BRIDGE_META, PANEL_IDENTITY_META, isPanelTabId, panelBridgeMetaValue, panelDocumentIdentityBootstrapSource, panelDocumentScriptSource } from "../webview/panel-identity.ts";
 import { SHELL_SLOT_META, isShellSlotId } from "../webview/panel-identity.ts";
 import { DETAIL_META, detailMetaValue, type DetailTarget } from "../webview/detail-target.ts";
 
@@ -221,7 +221,7 @@ export interface GuestFallbackIdentity {
  *   editor whose session could not be identified, which consequently persists
  *   nothing and is not restored again.
  */
-export function createUnavailableGuestHtml(detail: string, identity?: GuestFallbackIdentity): string {
+export function createUnavailableGuestHtml(detail: string, identity?: GuestFallbackIdentity, options: UnavailableGuestOptions = {}): string {
 	const nonce = randomBytes(16).toString("base64url");
 	// The bootstrap saves the *same* identity the guest document would: version 2 with
 	// the actual editor id for an editor of a dynamic view type, version 1 for the
@@ -235,8 +235,25 @@ export function createUnavailableGuestHtml(detail: string, identity?: GuestFallb
 	);
 	// The bootstrap is the only script this document may run: it persists this
 	// editor's identity so a restart still has an editor to restore. With no usable id
-	// the CSP permits no script at all.
-	const script = bootstrap === null ? "" : `\t\t<script nonce="${nonce}">${bootstrap}</script>\n`;
+	// the CSP permits no script at all. The reload button adds one statement to that same
+	// script (the document may acquire the VS Code API only once): a click posts the fixed
+	// message {@link UNAVAILABLE_RELOAD_MESSAGE}, which the host honours only while the
+	// installed package has changed under it.
+	const script =
+		options.reloadButton === true
+			? `\t\t<script nonce="${nonce}">${panelDocumentScriptSource(identity?.tabId, identity?.editorId ?? null, RELOAD_BUTTON_STATEMENTS)}</script>\n`
+			: bootstrap === null
+				? ""
+				: `\t\t<script nonce="${nonce}">${bootstrap}</script>\n`;
+	const body =
+		options.reloadButton === true
+			? `\t\t<p class="reason">${escapeText(detail)}</p>\n\t\t<p><button id="reload" type="button">Reload Window</button></p>\n`
+			: `\t\t<p class="reason">${escapeText(detail)}</p>
+		<p>
+			This editor is kept rather than closed. The OMP output channel records what is missing. If this condition
+			persists, use the session's row in the OMP launcher to reopen the session without discarding this tab.
+		</p>
+`;
 
 	return `<!DOCTYPE html>
 <html lang="en">
@@ -250,18 +267,28 @@ ${identityMeta(identified)}\t\t<title>OMP session</title>
 			h1 { font-size: 1rem; margin: 0 0 0.5rem; }
 			p { margin: 0 0 0.75rem; max-width: 40rem; }
 			.reason { color: var(--vscode-descriptionForeground); }
+			button { font-family: inherit; color: var(--vscode-button-foreground); background: var(--vscode-button-background); border: 0; padding: 0.35rem 0.9rem; cursor: pointer; }
+			button:hover { background: var(--vscode-button-hoverBackground); }
 		</style>
 	</head>
 	<body>
 		<h1>OMP session</h1>
-		<p class="reason">${escapeText(detail)}</p>
-		<p>
-			This editor is kept rather than closed. The OMP output channel records what is missing. If this condition
-			persists, use the session's row in the OMP launcher to reopen the session without discarding this tab.
-		</p>
-${script}\t</body>
+${body}${script}\t</body>
 </html>
 `;
+}
+
+/** What the page posts when its Reload Window button is clicked; carries no data. */
+export const UNAVAILABLE_RELOAD_MESSAGE = "omp:reload-window";
+
+/** One click handler, run against the document's single `api`. */
+const RELOAD_BUTTON_STATEMENTS =
+	'var b=document.getElementById("reload");' +
+	`if(b)b.addEventListener("click",function(){api.postMessage({type:"${UNAVAILABLE_RELOAD_MESSAGE}"});});`;
+
+export interface UnavailableGuestOptions {
+	/** Offer a Reload Window button instead of the "editor is kept" paragraph (the installed package changed under this host). */
+	readonly reloadButton?: boolean;
 }
 
 /**

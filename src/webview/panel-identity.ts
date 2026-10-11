@@ -278,7 +278,7 @@ export function shellIdentityLiteral(slotId: unknown): string | null {
  * @returns the script body, or `null` for a slot id this contract refuses.
  */
 export function shellIdentityBootstrapSource(slotId: unknown): string | null {
-	return identityBootstrapScript(shellIdentityLiteral(slotId));
+	return identityBootstrapScript(shellIdentityLiteral(slotId), "");
 }
 
 /**
@@ -304,21 +304,30 @@ export function shellIdentityBootstrapSource(slotId: unknown): string | null {
  *   contract accepts — in which case the document persists nothing.
  */
 export function panelDocumentIdentityBootstrapSource(tabId: unknown, editorId: unknown): string | null {
-	return identityBootstrapScript(identityLiteral(editorId === null ? panelIdentityFor(tabId) : panelIdentityForEditor(tabId, editorId)));
+	return identityBootstrapScript(identityLiteral(editorId === null ? panelIdentityFor(tabId) : panelIdentityForEditor(tabId, editorId)), "");
+}
+
+/**
+ * The same bootstrap with extra statements that run against the one `api` this document may acquire
+ * (`acquireVsCodeApi` can be called once per document, so a page that also talks to the host must share it).
+ * With an identity this contract refuses the script still runs the statements but persists nothing.
+ */
+export function panelDocumentScriptSource(tabId: unknown, editorId: unknown, apiStatements: string): string {
+	const literal = identityLiteral(editorId === null ? panelIdentityFor(tabId) : panelIdentityForEditor(tabId, editorId));
+	return identityBootstrapScript(literal, apiStatements) as string;
 }
 
 /** The one bootstrap body both identities share; only the literal differs. */
-function identityBootstrapScript(literal: string | null): string | null {
-	if (literal === null) return null;
+function identityBootstrapScript(literal: string | null, apiStatements: string): string | null {
+	if (literal === null && apiStatements.length === 0) return null;
 	return (
 		"(function(){" +
 		'var factory=typeof acquireVsCodeApi==="function"?acquireVsCodeApi:null;' +
 		"if(factory===null)return;" +
 		"try{" +
 		"var api=Reflect.apply(factory,window,[]);" +
-		'if(api&&typeof api.setState==="function")api.setState(' +
-		literal +
-		");" +
+		(literal === null ? "" : 'if(api&&typeof api.setState==="function")api.setState(' + literal + ");") +
+		apiStatements +
 		"}catch(error){}" +
 		"})();"
 	);

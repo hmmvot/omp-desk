@@ -17,7 +17,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type * as vscode from "vscode";
 
-import { createDetailHtml, createGuestHtml, createShellHtml, createUnavailableGuestHtml } from "./guest-webview.ts";
+import { UNAVAILABLE_RELOAD_MESSAGE, createDetailHtml, createGuestHtml, createShellHtml, createUnavailableGuestHtml } from "./guest-webview.ts";
 import { parseDetailMeta } from "../webview/detail-target.ts";
 import {
 	PANEL_BRIDGE_META,
@@ -125,6 +125,32 @@ describe("createUnavailableGuestHtml", () => {
 		});
 		assert.match(html, /&lt;script&gt;alert\("x"\)&lt;\/script&gt; failed &amp; stopped\./);
 		assert.equal(html.includes("<script>alert"), false);
+	});
+
+	it("offers a Reload Window button that shares the one VS Code API and posts a fixed message", () => {
+		const html = createUnavailableGuestHtml("OMP Desk was updated.", { tabId: TAB_ID, editorId: EDITOR_ID }, { reloadButton: true });
+		assert.match(html, /<button id="reload" type="button">Reload Window<\/button>/);
+		assert.equal(html.includes("kept rather than closed"), false, "the long explanation is dropped");
+		const scripts = html.match(/<script[^>]*>.*?<\/script>/gs) ?? [];
+		assert.equal(scripts.length, 1);
+		assert.equal((scripts[0]?.match(/acquireVsCodeApi/g) ?? []).length, 2, "the API is acquired once (the factory check and its call share one reference)");
+		assert.match(scripts[0] ?? "", new RegExp(`postMessage\\(\\{type:"${UNAVAILABLE_RELOAD_MESSAGE}"\\}\\)`));
+		assert.match(scripts[0] ?? "", new RegExp(`setState\\(\\{"version":${PANEL_IDENTITY_VERSION_EDITOR},"tabId":"${TAB_ID}","editorId":"${EDITOR_ID}"\\}\\)`));
+		assert.equal(declaredCsp(html).includes("unsafe-inline"), false);
+		assert.equal(declaredCsp(html).includes("connect-src"), false);
+	});
+
+	it("still wires the button when the identity is unusable, persisting nothing", () => {
+		const html = createUnavailableGuestHtml("OMP Desk was updated.", undefined, { reloadButton: true });
+		assert.equal(html.includes(PANEL_IDENTITY_META), false);
+		assert.equal(html.includes("setState"), false);
+		assert.match(html, new RegExp(UNAVAILABLE_RELOAD_MESSAGE));
+	});
+
+	it("keeps the explanation and no script for the other reasons", () => {
+		const html = createUnavailableGuestHtml("The relay is not available.", undefined);
+		assert.equal(html.includes("<button"), false);
+		assert.match(html, /kept rather than closed/);
 	});
 
 	it("persists nothing for an editor whose identity it cannot use", () => {
