@@ -13,7 +13,7 @@ import * as vscode from "vscode";
 import { brokerStopAttachFor, stopBrokerThroughBroker } from "./broker-process-stop.ts";
 import type { BrokerStopPorts, BrokerStopTarget, BrokerStopOutcome } from "./broker-process-stop.ts";
 import { killAll, stopOrphanedAndIdle, stopProcess, stopRowsOnRequest } from "./broker-process-controller.ts";
-import type { CapturedRowStop, KillAllPeer, ProcessControllerPorts } from "./broker-process-controller.ts";
+import type { CapturedRowStop, ProcessControllerPorts } from "./broker-process-controller.ts";
 import { createBrokerRecordLister } from "./broker-process-records.ts";
 import { buildBrokerProcessCatalog, createBrokerProcessReader, sessionRowWindow } from "./broker-processes.ts";
 import type {
@@ -32,6 +32,8 @@ import type {
 import type { PeerRowAnswer, StopRowAnswer } from "./window-requests.ts";
 import type { BrokerSlotStore } from "./broker-slots.ts";
 import { isPtyProcessAlive, queryPtyProcessIdentity, waitForPtyProcessGone } from "./pty-identity.ts";
+import { identifyPeerExecutor, proveExecutorGone } from "./peer-executor.ts";
+import type { PeerExecutorProbe } from "./peer-executor.ts";
 import type { PtyBrokerClient } from "./pty-client.ts";
 import type { ShellSlotStore } from "./shell-slots.ts";
 import { ProcessTreeItem } from "../views/process-rows";
@@ -82,16 +84,22 @@ export interface ProcessWiringDeps {
 	log(message: string): void;
 }
 
+/** Another live window as the window registry names it, with the extension host that serves its requests. */
+export interface WindowPeer {
+	readonly holderId: string;
+	readonly label: string;
+	/** The host's process id from the window's live registry record, or `null` when it names none. */
+	readonly hostPid: number | null;
+}
+
 export interface SessionProcessesDeps extends ProcessWiringDeps {
 	/** Serve a snapshot to the Sessions view. */
 	publish(snapshot: BrokerProcessSnapshot): void;
 	/** The Sessions view is on screen. A hidden view is never polled; an explicit action always reads. */
 	visible(): boolean;
 	layout(): SessionsGrouping;
-	/** The other live windows of this profile, from the window registry read now. */
-	peers(): Promise<readonly KillAllPeer[]>;
-	/** Whether the window is still listed as live. */
-	peerIsLive(holderId: string): Promise<boolean>;
+	/** The other live windows of this profile, from the window registry read now. Rejects when the registry could not be read: that is not "no other window". */
+	peers(): Promise<readonly WindowPeer[]>;
 	/** Ask a window to stop the rows it runs among `rows` through its own lifecycle, one answer per row. Never throws. */
 	askWindowToStop(holderId: string, rows: readonly RowIdentity[]): Promise<readonly PeerRowAnswer[]>;
 }
@@ -270,6 +278,17 @@ export function registerSessionProcesses(context: vscode.ExtensionContext, deps:
 			return await waitForPtyProcessGone(ready.helper, target.brokerPid, target.brokerCreationTime, timeoutMs);
 		},
 	};
+	/** The kernel probes behind a peer's executor identity, or `null` when the broker client has no verified helper. */
+	const peerProbe = async (): Promise<PeerExecutorProbe | null> => {
+		const client = await deps.client();
+		const ready = client === null ? null : await client.attachReady().catch(() => null);
+		const helper = ready?.helper ?? null;
+		if (helper === null) return null;
+		return {
+			read: pid => queryPtyProcessIdentity(helper, pid),
+			waitGone: (pid, creationTime, timeoutMs) => waitForPtyProcessGone(helper, pid, creationTime, timeoutMs),
+		};
+	};
 
 	const controllerPorts: ProcessControllerPorts = {
 		read,
@@ -296,8 +315,14 @@ export function registerSessionProcesses(context: vscode.ExtensionContext, deps:
 			await deps.brokerSlots()?.forget(slot);
 		},
 		waitBrokerGone: (target, timeoutMs) => stopPorts.waitBrokerGone(target, timeoutMs),
-		peers: () => deps.peers(),
-		peerIsLive: holderId => deps.peerIsLive(holderId),
+		async peers() {
+			const windows = await deps.peers();
+			const probe = await peerProbe();
+			return await Promise.all(windows.map(async window => ({ holderId: window.holderId, label: window.label, executor: await identifyPeerExecutor(window.hostPid, probe) })));
+		},
+		async peerExecutorGone(peer) {
+			return await proveExecutorGone(peer, await peerProbe());
+		},
 		askWindowToStop: (holderId, rows) => deps.askWindowToStop(holderId, rows),
 		async refresh() {
 			deps.refreshLauncher();

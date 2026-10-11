@@ -153,6 +153,23 @@ describe("window registry", () => {
 		assert.equal(stays.windows().length, 1);
 	});
 
+	it("names the host process of a live other window, and none for itself, a dead process or an expired lease", async () => {
+		const reader = windowOf("reader", 1, "2026-10-10T09:00:00.000Z");
+		const other = windowOf("other", 2, "2026-10-10T09:01:00.000Z");
+		await publish(reader, other);
+		assert.equal(reader.hostPidOf("other"), 2);
+		assert.equal(reader.hostPidOf("reader"), null, "this window is not another window");
+		assert.equal(reader.hostPidOf("nobody"), null);
+		clock += LEASE + 1;
+		assert.equal(reader.hostPidOf("other"), null, "an expired lease names no executor: the lease is not evidence either way");
+		clock = BASE;
+		await other.flush();
+		await reader.refresh();
+		alive.delete(2);
+		await reader.refresh();
+		assert.equal(reader.hostPidOf("other"), null, "a process that no longer exists is not named");
+	});
+
 	it("renews the lease on every write, so a quiet window never expires", async () => {
 		const quiet = windowOf("quiet", 1, "2026-10-10T09:00:00.000Z");
 		const reader = windowOf("reader", 2, "2026-10-10T09:05:00.000Z");

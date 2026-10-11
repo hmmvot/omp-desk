@@ -95,10 +95,18 @@ export interface ProcessControllerPorts {
 	waitBrokerGone(target: BrokerStopTarget, timeoutMs: number): Promise<{ readonly gone: boolean; readonly detail: string }>;
 	/** The child is confirmed gone: retire a shell recovery record or an unowned session mapping. */
 	forgetStoppedSlot(slot: string): Promise<void>;
-	/** The other live windows of this profile, from the window registry read now. Never throws. */
+	/**
+	 * The other live windows of this profile, from the window registry read now. It rejects when the registry could not
+	 * be read: that is not "no other window", and Kill All then leaves the rows another window may run alone.
+	 */
 	peers(): Promise<readonly KillAllPeer[]>;
-	/** Whether `holderId` is still a live window. */
-	peerIsLive(holderId: string): Promise<boolean>;
+	/**
+	 * Whether the process that would execute a request to `peer` (its extension host, as identified when the peer was
+	 * read) is *positively* gone: the kernel no longer has it, or its id belongs to a process created later. A lease that
+	 * lapsed, a registry entry that vanished, an unreadable registry and a probe that cannot decide are none of that:
+	 * they are `gone: false`. Never throws.
+	 */
+	peerExecutorGone(peer: KillAllPeer): Promise<{ readonly gone: boolean; readonly detail: string }>;
 	/**
 	 * Ask a window to stop the rows it runs among `rows` (the identities this window was shown). One answer per
 	 * row, in order. Never throws: a window that cannot be asked answers `not-accepted` for every row.
@@ -108,11 +116,19 @@ export interface ProcessControllerPorts {
 	refresh(): Promise<void>;
 }
 
+/** The process that executes a window's requests: its extension host, with the creation time the kernel gave it. */
+export interface PeerExecutor {
+	readonly pid: number;
+	readonly creationTime: string;
+}
+
 /** A live window other than this one, as the registry names it. */
 export interface KillAllPeer {
 	readonly holderId: string;
 	/** The window's workspace name, for the report. */
 	readonly label: string;
+	/** Its extension host as it was identified when the window was read, or `null` when it could not be: then its end can never be proven. */
+	readonly executor: PeerExecutor | null;
 }
 
 type Route = "driven" | "recorded" | "broker";
@@ -352,12 +368,15 @@ function asError(error: unknown): Error {
 	return error instanceof Error ? error : new Error(String(error));
 }
 
-/** What one live window answered for one row, and whether it still looks alive when it went silent. */
+/** What one live window answered for one row, and whether its executor is proven gone when it went silent. */
 export interface PeerAnswerFor {
 	readonly peer: KillAllPeer;
 	readonly answer: PeerRowAnswer;
-	/** Meaningful for a `silent` answer: the window is still listed as live (it may be working, or waiting on a prompt). */
-	readonly live: boolean;
+	/**
+	 * Meaningful for a `silent` answer: the window's executor is positively proven gone. Anything else (a live window,
+	 * a lapsed lease, an unreadable registry, an undecided probe) leaves the request possibly still served.
+	 */
+	readonly executorGone: boolean;
 }
 
 /** How the answers of the live windows settle one row that another window might run. */
@@ -385,7 +404,7 @@ export function settleRemoteRow(row: BrokerProcessRow, answers: readonly PeerAns
 	const unconfirmed = answers.find(entry => entry.answer.state === "unconfirmed");
 	if (unconfirmed !== undefined) return { kind: "settled", result: { kind: "failed", message: `${reportOf(unconfirmed)}.`, reason: unconfirmed.answer.reason } };
 	if (answers.some(entry => entry.answer.state === "changed")) return { kind: "settled", result: { kind: "changed" } };
-	const withheld = answers.find(entry => entry.answer.state === "silent" && entry.live);
+	const withheld = answers.find(entry => entry.answer.state === "silent" && !entry.executorGone);
 	if (withheld !== undefined) {
 		return {
 			kind: "settled",
@@ -400,7 +419,7 @@ export function settleRemoteRow(row: BrokerProcessRow, answers: readonly PeerAns
 		entry.answer.state === "not-accepted"
 			? [`window "${entry.peer.label}" did not take the request up${entry.answer.reason === "" ? "" : ` (${entry.answer.reason})`}`]
 			: entry.answer.state === "silent"
-				? [`window "${entry.peer.label}" stopped answering and is no longer open`]
+				? [`window "${entry.peer.label}" stopped answering and its process has ended`]
 				: [],
 	);
 	if (reasons.length === 0 && row.window === "other-window") {
@@ -411,11 +430,14 @@ export function settleRemoteRow(row: BrokerProcessRow, answers: readonly PeerAns
 
 /** Ask every other live window about `rows` at once and settle each row from the answers. Never throws. */
 async function askOtherWindows(rows: readonly BrokerProcessRow[], ports: ProcessControllerPorts): Promise<ReadonlyMap<string, RemoteVerdict>> {
-	let peers: readonly KillAllPeer[] = [];
+	let peers: readonly KillAllPeer[];
 	try {
 		peers = await ports.peers();
-	} catch {
-		peers = [];
+	} catch (error) {
+		// An unreadable registry is not "no other window": the windows could not be asked, so no row another window may
+		// run is stopped behind their backs.
+		const reason = `the window registry could not be read (${asError(error).message}), so the other windows could not be asked`;
+		return new Map(rows.map(row => [row.id, { kind: "settled", result: { kind: "failed", message: `${describeProcess(row)}: ${reason}; it was left alone.`, reason } } as const]));
 	}
 	const identities = rows.map(rowIdentityOf);
 	const asked = await Promise.all(
@@ -424,12 +446,15 @@ async function askOtherWindows(rows: readonly BrokerProcessRow[], ports: Process
 			try {
 				answers = await ports.askWindowToStop(peer.holderId, identities);
 			} catch (error) {
-				answers = rows.map(() => ({ state: "not-accepted" as const, reason: asError(error).message }));
+				// What happened to a request that may have been posted is unknown: uncertain, never "not taken up".
+				answers = rows.map(() => ({ state: "silent" as const, reason: `the request could not be completed (${asError(error).message})` }));
 			}
+			// A port that answered for fewer rows than it was asked about left the rest of them unknown, never "not taken up".
+			answers = rows.map((_row, position) => answers[position] ?? { state: "silent" as const, reason: "it did not answer for this row" });
 			const silent = answers.some(answer => answer.state === "silent");
-			// An unreadable registry does not prove the window gone: a window that took the request up is left alone then.
-			const live = silent ? await ports.peerIsLive(peer.holderId).catch(() => true) : false;
-			return { peer, answers, live };
+			// Only positive evidence that the window's executor ended lets its rows fall back to the broker.
+			const executorGone = silent ? (await ports.peerExecutorGone(peer).catch(() => ({ gone: false, detail: "the process probe failed" }))).gone : false;
+			return { peer, answers, executorGone };
 		}),
 	);
 	const verdicts = new Map<string, RemoteVerdict>();
@@ -438,7 +463,7 @@ async function askOtherWindows(rows: readonly BrokerProcessRow[], ports: Process
 			row.id,
 			settleRemoteRow(
 				row,
-				asked.map(({ peer, answers, live }) => ({ peer, answer: answers[position] ?? { state: "not-accepted" as const, reason: "" }, live })),
+				asked.map(({ peer, answers, executorGone }) => ({ peer, answer: answers[position]!, executorGone })),
 			),
 		);
 	}

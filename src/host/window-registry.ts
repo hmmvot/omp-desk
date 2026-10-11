@@ -378,6 +378,9 @@ export class WindowRegistry {
 	#ownSignature = JSON.stringify(EMPTY_WINDOW_SNAPSHOT);
 	/** Records of other windows from the last read, with the verdict of the pid probe made then. */
 	#others: Array<{ readonly record: WindowRecord; readonly alive: boolean }> = [];
+	/** Records the last pass could not read (an I/O error, not a malformed file): a window may be missing from `#others` because of them. */
+	#unreadable = 0;
+	#passUnreadable = 0;
 	#reportedSignature = "";
 	#writeTimer: NodeJS.Timeout | null = null;
 	#writing: Promise<void> = Promise.resolve();
@@ -489,6 +492,25 @@ export class WindowRegistry {
 	}
 
 	/**
+	 * The extension-host process id the live record of this other window names, or `null` when no live record does. It is
+	 * the executor of a request addressed to that window: a requester captures it (with the process's creation time) when it
+	 * asks, so that "the executor ended" can later be proven by the process identity rather than inferred from the lease.
+	 */
+	hostPidOf(holderId: string): number | null {
+		const now = this.#now();
+		const found = this.#others.find(({ record, alive }) => alive && record.holderId === holderId && leaseHolds(record, now, this.#leaseMs));
+		return found?.record.pid ?? null;
+	}
+
+	/**
+	 * How many window records the last {@link refresh} could not read. While it is not zero a live window may be missing from
+	 * {@link windows}, so absence from it is not evidence that the window ended.
+	 */
+	unreadableCount(): number {
+		return this.#unreadable;
+	}
+
+	/**
 	 * Re-read the other windows' records, drop the dead ones from view and sweep the stale
 	 * files. Whether what the windows show differs from what was last reported.
 	 */
@@ -577,6 +599,7 @@ export class WindowRegistry {
 		const now = this.#now();
 		const own = `${this.#holderId}${RECORD_SUFFIX}`;
 		const others: Array<{ readonly record: WindowRecord; readonly alive: boolean }> = [];
+		this.#passUnreadable = 0;
 		for (const name of names) {
 			if (name === own) continue;
 			const file = path.join(this.#directory, name);
@@ -594,6 +617,7 @@ export class WindowRegistry {
 			if (!alive) await this.#sweep(file, now);
 			others.push({ record, alive });
 		}
+		this.#unreadable = this.#passUnreadable;
 		return others;
 	}
 
@@ -602,6 +626,7 @@ export class WindowRegistry {
 			const read = await readBoundedFile(file, MAX_RECORD_BYTES);
 			return read.kind === "text" ? parseWindowRecord(read.text, holderId) : null;
 		} catch (error) {
+			this.#passUnreadable += 1;
 			this.#report(`could not read ${path.basename(file)}: ${messageOf(error)}`);
 			return null;
 		}

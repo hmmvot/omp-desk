@@ -111,8 +111,10 @@ interface HarnessOptions {
 	readonly peersFail?: boolean;
 	/** What each window answers for the rows it is asked about; a window answers `refused` for every row when omitted. */
 	readonly ask?: (holderId: string, rows: readonly RowIdentity[]) => readonly PeerRowAnswer[];
-	/** Windows still listed as live; all of the peers when omitted. */
-	readonly live?: readonly string[];
+	/** Holders whose executor (extension host) is positively proven gone; none when omitted. A lapsed lease or a vanished record proves nothing and is not modelled here on purpose. */
+	readonly gone?: readonly string[];
+	/** The proof of a window's executor itself fails (an undecided probe). */
+	readonly goneProbeFails?: boolean;
 	/** What each successive probe of a broker's process says; gone when omitted. */
 	readonly brokerGone?: ReadonlyArray<boolean | Error>;
 }
@@ -218,7 +220,11 @@ function harness(options: HarnessOptions) {
 			if (options.peersFail === true) throw new Error("the registry could not be read");
 			return peers;
 		},
-		peerIsLive: async holderId => (options.live ?? peers.map(peer => peer.holderId)).includes(holderId),
+		peerExecutorGone: async peer => {
+			events.push(`gone?:${peer.holderId}`);
+			if (options.goneProbeFails === true) return { gone: false, detail: "the process probe failed" };
+			return options.gone?.includes(peer.holderId) === true ? { gone: true, detail: "the window's process is gone" } : { gone: false, detail: "the window's process still runs" };
+		},
 		askWindowToStop: async (holderId, rows) => {
 			events.push(`ask:${holderId}`);
 			asked.push({ holderId, rows });
@@ -950,10 +956,10 @@ describe("the broker's exit is its own evidence, apart from the writer's", () =>
 });
 
 describe("settleRemoteRow", () => {
-	const west: KillAllPeer = { holderId: "holder-west", label: "west" };
-	const east: KillAllPeer = { holderId: "holder-east", label: "east" };
+	const west: KillAllPeer = { holderId: "holder-west", label: "west", executor: { pid: 7001, creationTime: "13434942101430001" } };
+	const east: KillAllPeer = { holderId: "holder-east", label: "east", executor: { pid: 7002, creationTime: "13434942101430002" } };
 	const held = row({ window: "other-window", host: sessionHost({ window: "other-window" }) });
-	const entry = (peer: KillAllPeer, answer: PeerRowAnswer, live = false): PeerAnswerFor => ({ peer, answer, live });
+	const entry = (peer: KillAllPeer, answer: PeerRowAnswer, executorGone = false): PeerAnswerFor => ({ peer, answer, executorGone });
 
 	it("takes the owner's own answer over everyone else's refusals", () => {
 		assert.deepEqual(settleRemoteRow(held, [entry(west, { state: "refused", reason: "x" }), entry(east, { state: "stopped", reason: "" })]), { kind: "settled", result: { kind: "stopped" } });
@@ -964,7 +970,7 @@ describe("settleRemoteRow", () => {
 
 	it("never lets anyone else stop a row its owner says changed, or one a live window took up and went silent on", () => {
 		assert.deepEqual(settleRemoteRow(held, [entry(west, { state: "changed", reason: "x" }), entry(east, { state: "refused", reason: "x" })]), { kind: "settled", result: { kind: "changed" } });
-		const withheld = settleRemoteRow(held, [entry(west, { state: "silent", reason: "x" }, true), entry(east, { state: "refused", reason: "x" })]);
+		const withheld = settleRemoteRow(held, [entry(west, { state: "silent", reason: "x" }, false), entry(east, { state: "refused", reason: "x" })]);
 		assert.equal(withheld.kind, "settled");
 		assert.match(withheld.kind === "settled" && withheld.result.kind === "failed" ? withheld.result.message : "", /window "west" may still act on the request/);
 	});
@@ -976,13 +982,14 @@ describe("settleRemoteRow", () => {
 		assert.deepEqual(settleRemoteRow(notHeld, [entry(west, { state: "refused", reason: "x" })]), { kind: "fallback", note: null });
 		assert.deepEqual(settleRemoteRow(notHeld, [entry(west, { state: "not-accepted", reason: "" })]), { kind: "fallback", note: 'window "west" did not take the request up' });
 		assert.deepEqual(settleRemoteRow(notHeld, [entry(west, { state: "not-accepted", reason: "disk full" })]), { kind: "fallback", note: 'window "west" did not take the request up (disk full)' });
-		assert.deepEqual(settleRemoteRow(notHeld, [entry(west, { state: "silent", reason: "x" }, false)]), { kind: "fallback", note: 'window "west" stopped answering and is no longer open' });
+		assert.deepEqual(settleRemoteRow(notHeld, [entry(west, { state: "silent", reason: "x" }, true)]), { kind: "fallback", note: 'window "west" stopped answering and its process has ended' });
+		assert.equal(settleRemoteRow(notHeld, [entry(west, { state: "silent", reason: "x" }, false)]).kind, "settled", "an undecided process is not an ended one");
 	});
 });
 
 describe("Kill All: asking the other windows", () => {
-	const west: KillAllPeer = { holderId: "holder-west", label: "west" };
-	const east: KillAllPeer = { holderId: "holder-east", label: "east" };
+	const west: KillAllPeer = { holderId: "holder-west", label: "west", executor: { pid: 7001, creationTime: "13434942101430001" } };
+	const east: KillAllPeer = { holderId: "holder-east", label: "east", executor: { pid: 7002, creationTime: "13434942101430002" } };
 	const mine = (overrides: Partial<BrokerProcessRow> = {}): BrokerProcessRow =>
 		terminal({ window: "this-window", host: terminalHost({ window: "this-window" }), ...overrides });
 	const held = (overrides: Partial<BrokerProcessRow> = {}): BrokerProcessRow =>
@@ -1094,12 +1101,12 @@ describe("Kill All: asking the other windows", () => {
 		const gone = harness({
 			reads: [[a], [a], []],
 			peers: [west],
-			live: [],
+			gone: [west.holderId],
 			ask: (_holder, rows) => rows.map(() => answer("silent", "it took the request up and did not report back")),
 		});
 		await killAll(gone.ports);
 		assert.deepEqual(gone.stops.map(call => call.target.slot), [a.slot]);
-		assert.match(gone.infos[0] ?? "", /window "west" stopped answering and is no longer open/);
+		assert.match(gone.infos[0] ?? "", /window "west" stopped answering and its process has ended/);
 	});
 
 	it("never stops a row its owner answered changed, through the broker or otherwise", async () => {
@@ -1150,12 +1157,50 @@ describe("Kill All: asking the other windows", () => {
 		assert.deepEqual(h.stops.map(call => call.target.slot), [a.slot]);
 	});
 
-	it("treats a registry that cannot be read as no window to ask", async () => {
-		const a = unobserved();
-		const h = harness({ reads: [[a], [a], []], peers: [west], peersFail: true });
+	it("leaves the rows another window may run alone when the registry cannot be read, and still stops what no window can run", async () => {
+		const a = unobserved({ host: sessionHost({ tabId: "tab-a", title: "Maybe elsewhere", recorded: false }) });
+		const loose = detached();
+		const h = harness({ reads: [[a, loose], [a, loose], [a]], peers: [west], peersFail: true });
 		await killAll(h.ports);
-		assert.deepEqual(h.asked, []);
-		assert.deepEqual(h.stops.map(call => call.target.slot), [a.slot]);
+		assert.deepEqual(h.asked, [], "nobody could be asked");
+		assert.deepEqual(h.stops.map(call => call.target.slot), [loose.slot], "the broker never acts on a row a window might run");
+		assert.match(h.warns[0] ?? "", /Maybe elsewhere.*the window registry could not be read \(the registry could not be read\), so the other windows could not be asked; it was left alone/);
+	});
+
+	it("gives up on a request that may still be served only on positive proof that its executor ended, not on a lapsed lease or an undecided probe", async () => {
+		const a = unobserved({ host: sessionHost({ tabId: "tab-a", title: "Slow owner", recorded: false }) });
+		const silent = (_holder: string, rows: readonly RowIdentity[]) => rows.map(() => answer("silent", "it took the request up and did not report back"));
+		// The owner's lease lapsed and its registry record is gone, but nothing proves its host ended: it may yet resume its accepted request.
+		const resumable = harness({ reads: [[a], [a], [a]], peers: [west], ask: silent });
+		await killAll(resumable.ports);
+		assert.deepEqual(resumable.stops, [], "no broker stop concurrent with a request that may still be served");
+		assert.deepEqual(resumable.capturedFor, { driven: [], recorded: [] });
+		assert.match(resumable.warns[0] ?? "", /window "west" may still act on the request/);
+		// The probe cannot decide (or the window's process was never identified): the same.
+		const undecided = harness({ reads: [[a], [a], [a]], peers: [west], ask: silent, goneProbeFails: true });
+		await killAll(undecided.ports);
+		assert.deepEqual(undecided.stops, []);
+		const unidentified = harness({ reads: [[a], [a], [a]], peers: [{ ...west, executor: null }], ask: silent, goneProbeFails: true });
+		await killAll(unidentified.ports);
+		assert.deepEqual(unidentified.stops, []);
+		// The host is proven gone: nothing can resume the request, so the broker route is open, and the report says so.
+		const dead = harness({ reads: [[a], [a], []], peers: [west], ask: silent, gone: [west.holderId] });
+		await killAll(dead.ports);
+		assert.deepEqual(dead.stops.map(call => call.target.slot), [a.slot]);
+		assert.match(dead.infos[0] ?? "", /Stopped without their window: the OMP session "Slow owner" \(window "west" stopped answering and its process has ended\)/);
+		// The proof is asked about only for a window that went silent.
+		const answered = harness({ reads: [[a], [a], []], peers: [west], ask: (_holder, rows) => rows.map(() => answer("refused", "x")) });
+		await killAll(answered.ports);
+		assert.equal(answered.events.some(event => event.startsWith("gone?:")), false);
+	});
+
+	it("treats a port that answered for fewer rows than it was asked as uncertain, not as having refused the rest", async () => {
+		const a = unobserved({ host: sessionHost({ tabId: "tab-a", title: "First", recorded: false }) });
+		const b = unobserved({ host: sessionHost({ tabId: "tab-b", title: "Second", recorded: false }) });
+		const h = harness({ reads: [[a, b], [a, b], [b]], peers: [west], ask: (_holder, rows) => rows.slice(0, 1).map(() => answer("stopped")) });
+		await killAll(h.ports);
+		assert.deepEqual(h.stops, [], "the second row's fate is unknown while the window may still act");
+		assert.match(h.warns[0] ?? "", /Second.*may still act on the request/);
 	});
 
 	it("tells the modal that other windows are asked first", () => {
