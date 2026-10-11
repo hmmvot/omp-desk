@@ -82,10 +82,10 @@ function putValue(data: ConfigRecord, path: readonly string[], value: unknown): 
   else Object.defineProperty(parent, leaf, { value, writable: true, enumerable: true, configurable: true });
 }
 /** Merge only explicitly edited leaves; sibling changes and unknown keys stay intact. */
-export function mergeConfigEdits(current: ConfigRecord, baseline: ConfigRecord, edits: readonly ConfigEdit[]): ConfigRecord {
+export function mergeConfigEdits(current: ConfigRecord, baseline: ConfigRecord, edits: readonly ConfigEdit[], allowed: (path: readonly string[]) => boolean = allowedPath): ConfigRecord {
   if (edits.length === 0 || edits.length > 100) throw new SettingsRefusal("No valid settings changes were provided.");
   for (const edit of edits) {
-    if (!allowedPath(edit.path)) throw new SettingsRefusal("This editor cannot write that setting.");
+    if (!allowed(edit.path)) throw new SettingsRefusal("This editor cannot write that setting.");
     if (!isDeepStrictEqual(valueAt(current, edit.path), valueAt(baseline, edit.path))) {
       throw new SettingsRefusal("This setting changed outside the editor. Reload before saving; nothing was overwritten.");
     }

@@ -1,0 +1,139 @@
+---
+status: proposed
+date: 2026-10-11
+---
+
+# Skills, Tools, MCP and Extensions views with global enable/disable
+
+## Problem
+
+The single read-only Tools view lists skill *commands* and tool names of the focused session. It cannot say where a skill, tool, MCP server or extension comes from, cannot open a skill's `SKILL.md` (OMP exports no skill path over RPC), shows nothing for a session that is not running, and cannot change what OMP loads. The user asked for four views in the OMP Desk container — **Skills**, **Tools**, **MCP** and **Extensions** — that show origin, open the item's source, and enable or disable it.
+
+## Goals and Non-goals
+
+- Four tree views with one shared model: a list of items, each with an origin, a state, a source file to open, and (where OMP defines one) a global enable/disable switch.
+- Each view has a **Session | Global** switch. By default it shows the active session's inventory; with no active session it shows the global inventory. The user can switch to Global and back.
+- Enable/disable is **global only**: it writes the user-level OMP configuration (profile `config.yml`, user MCP config, plugin runtime config) and never a project file.
+- OMP does the discovery. No second discovery implementation, no scanning of skill directories by the extension.
+- Non-goals: editing skill, tool, MCP or extension definitions; adding or removing items; per-project toggles; hooks, rules, prompts, slash commands and context files (the dashboard lists them as separate kinds); marketplace plugins as a toggle target; MCP OAuth, connection control and live per-server status that OMP does not export; changing Desk's own `-e` module.
+
+## Current State
+
+`src/host/session-tools.ts` and `src/views/tools-tree.ts` ([design](2026-10-08-active-session-tools-view.md)) show one tree with two groups for the active or last-focused editor. Skills are the slash-catalogue entries whose source is `skill` (no paths); tools come from bounded `get_state.dumpTools` plus authenticated names-only `listTools`. ADR-0009 keeps the Webview and the host-control channel names-only and read-only for tool selection.
+
+Installed OMP 18.8.5 (verified in its package source):
+
+- Config key `disabledExtensions` (`extensibility/settings.ts`) holds ids built by each capability's `toExtensionId`: `skill:<name>`, `tool:<name>`, `extension-module:<name>`, `mcp:<name>`, `hook:`, `rule:`. `loadCapability` drops a disabled item unless `includeDisabled` is set.
+- The TUI Extensions dashboard builds the full inventory including disabled and shadowed items with `loadAllExtensions(cwd, disabledIds)` (`modes/components/extensions/state-manager.ts`). Each row carries `kind`, `name`, `path`, `source{provider,providerName,level}`, `state` (`active`/`disabled`/`shadowed`), `disabledReason` and the raw item. That function logs and swallows a failed source instead of reporting it.
+- The dashboard toggles every kind except MCP through `disabledExtensions`. **MCP** is routed to the user MCP config: user-level `disabledServers` / `enabledServers` lists (`mcp/config-writer.ts`: `setServerDisabled`, `setServerForceEnabled`), which `/mcp disable` writes too; the runtime loader (`mcp/config.ts`) applies them by server name before per-entry `enabled` and precedence.
+- Built-in tools have no uniform switch. `resolveBuiltinToolPlan` (`tools/index.ts`) gates them with individual settings; OMP's settings UI shows the user-facing ones as boolean `<tool>.enabled` entries (`find` is a three-state enum). Several built-ins have no switch (`read`, `write`, `edit`, `task`, `wait`, …).
+- Plugins (`omp plugin list`) are enabled per user in `omp-plugins.lock.json` through `PluginManager.setEnabled`; the lock lives under OMP's config root, not its agent directory.
+- Live application: a running process started with `startWatching` reloads config files; a `disabledExtensions`/`extensions` change runs the extension reconcile (`sdk.ts`: suspend/resume loaded modules, tool registration, then `refreshSkillsAndCommands`); settings-gated built-in tools follow the session's built-in reconcile; sources the process never imported need a restart. Custom `tool` capability items, MCP servers and plugins are read at session creation / MCP startup.
+- A project's `.omp/config.yml` array **replaces** the global array when OMP merges settings.
+- No RPC command lists skills with paths, tools with origin, or MCP servers or their status. The Desk `-e` host-control module can read `pi.getAllTools()` (with `sourceInfo`), but the control protocol carries names only and is out of scope here.
+- The existing Models/Agents editors already run a staged, digest-verified Bun worker that imports the installed OMP source and edits `config.yml` under OMP's file lock ([ADR-0048](../decisions/0048-write-omp-settings-directly-under-native-file-locks.md)).
+
+## Proposed Design
+
+### Inventory source (decided in [ADR-0061](../decisions/0061-read-the-omp-inventory-through-a-staged-bun-worker-and-write-omps-own-toggle-state.md))
+
+A second staged worker, `out/inventory-worker.mjs` (source `src/omp/inventory-worker.ts`), runs under the same resolved Bun and the same resolved OMP package root as the settings worker, through the same spawn/receipt helper (`runSettingsWorker`, `OMP_DESK_SETTINGS` receipt). One request is `read` or `toggle`, with `scope` (`session` or `global`), the working folder and the profile. The worker:
+
+1. resolves the profile's agent directory, loads `Settings.loadReadOnly({cwd, agentDir})` and binds `initializeWithSettings`, exactly as the settings worker does;
+2. calls OMP's `loadAllExtensions(cwd, disabledIds)` and keeps the `skill`, `tool`, `mcp` and `extension-module` rows;
+3. **checks that result for completeness**: each category is loaded again through `loadCapability` with its warnings visible and the item count compared; a `Failed to load` warning or a count mismatch marks that category *incomplete*. An incomplete category keeps its rows but loses every switch, and the view says its list may be incomplete;
+4. resolves each skill's **effective name** through OMP's `loadSkills` (the loader a session uses: custom directories, collision renames, source eligibility) and adds the skills that loader finds beyond the dashboard's rows; a skill the loader does not load (for example excluded by OMP's skill settings) carries no runtime name and is labelled as such;
+5. lists **configured extension files** (OMP's `extensions` setting) read-only, named from the file path, with no switch;
+6. lists the built-in tools from `BUILTIN_TOOLS`, with the switch from an explicit table in the repository (`src/omp/inventory-switches.ts`: tool name → `<setting>.enabled`). Each id is looked up in the installed settings registry at run time; a missing id or a non-boolean setting means *no switch*, and `find` (enum) and switchless tools show their state read-only. A contract test checks every table entry against the installed OMP;
+7. lists installed plugins (`PluginManager.list()`, which includes disabled ones) labelled **OMP package**; in Session scope it also lists project-installed plugins (`getEnabledPlugins`) read-only;
+8. returns one bounded JSON inventory: no raw item objects, no credentials. MCP rows carry transport, a basename for a stdio command and the host of a URL, never arguments, environment, headers or query strings (Exa-style URLs carry keys).
+
+Failure behaviour: Bun, the package root or a required export missing, a signature mismatch, a timeout or an invalid receipt makes the inventory *unavailable* with a fixed reason. A view then falls back to what the session itself reports (skill commands, tool names and descriptions, as today) and says the installed OMP's inventory could not be read; switches are disabled. Nothing is silently approximated. A contract test runs the worker against the installed OMP when present.
+
+**Completeness limits, stated rather than hidden.** "Incomplete" is raised by a failed capability load, a count mismatch between the dashboard function and a warning-bearing reload, a `Failed to load`/`Failed to parse`/`Invalid item|plugin`/`no installPath` warning from either loader, or a throw. A benign "Failed to read" of an optional file (for example an ancestor `.vscode/mcp.json`) is not an omission. Items from providers disabled in OMP's settings are not loaded by OMP itself (its dashboard omits them too), so they are not listed and a notice names the disabled providers. Disabled plugins installed in a *project* have no OMP listing API; Session scope says they are not listed. A project-installed plugin wins over a same-named user plugin in OMP's loader, so the user copy is shown as shadowed in Session scope. An empty list that is known to be incomplete is shown as that message, never as "none found".
+
+### Scope: Session | Global
+
+Each view has its own scope, kept in memory and mirrored to a context key (`omp.<view>.scope`) that selects which title button is shown. The view description states the scope (`Session: <title>` or `Global`, with the profile name for a named profile).
+
+- **Global** reads at the drive root of the extension's global storage, so no project layer or project-folder ancestor applies. **The worker enforces this rather than assuming it**: if the Global read finds project settings keys or any row whose file lies in a dot-folder (`.omp`, `.claude`, …) of the working folder or its ancestors, it refuses with a sentence naming what it found, and the view shows that message instead of a list that could silently mix project state into "Global". The check also covers files that *select* project rows without living in a project folder: a project plugin registry (`.omp/plugins/installed_plugins.json`) and Claude project settings (`.claude/settings*.json`) in the folder or an ancestor. (A provider-reported "project" level alone is not a project layer: OMP keeps the install scope on Claude-marketplace plugins registered in the user's own OMP registry, whose files live in the user's plugin cache; with the checks above, such a row in Global can only come from a user registry and is labelled *Other ecosystems* there, while Session keeps OMP's level.)
+- **Session** reads at the active session's recorded cwd and profile, so project items appear, then overlays what the running session itself reports: for Skills, the presence of `skill:<runtime name>` in the Chat catalogue; for Tools, membership and active state from `dumpTools`/`listTools`; for MCP, tools whose name carries the server's `mcp__<server>_` prefix; for Extensions nothing (no surface exists). Wording is evidence-bound: "not reported by this session" only when the session reported skill commands and omitted this one; nothing is claimed when the catalogue is absent (Terminal mode, no catalogue yet) or the session is not running. MCP tool-name prefixes are minted lossily by OMP (servers `foo` and `foo_bar` both prefix `mcp__foo_bar_x`), so a tool is attributed to a server only when exactly one prefix matches; an ambiguous tool stays under *Other*, and counts are labelled "name-matched". Session tools that no row explains (host tools, extension tools) are listed under *Other*.
+- The default is Session when the active or last-focused OMP editor selects a target (the existing editor-recency rule) and the user has not chosen Global; with no target the effective scope is Global (the description says "no active session" when the user had chosen Session). The user's explicit choice sticks until they switch back.
+- A project that sets its own `disabledExtensions` replaces the global list in OMP's merge. The worker reports that condition; affected rows lose their switch and the view's notice says the project's list replaces the global one. A project setting that overrides a built-in's `<tool>.enabled` likewise removes that switch.
+
+### Views
+
+**Skills.** Groups by origin class (below). A row shows the skill name, provider detail and `disabled`/`shadowed`/`not reported by this session`; its tooltip carries the description (plain text) and the path. Click opens `SKILL.md` in the editor. A checkbox enables/disables it globally. A shadowed row (a lower-priority copy of a same-named skill) has no checkbox, because the name is switched for the effective copy.
+
+**Tools.** Groups: *Built-in* (name, switch state; a checkbox only when OMP has a boolean switch; `rewind` and `checkpoint` say they share the checkpoint switch), *Custom* (capability `tool` rows with origin; checkbox; click opens the tool file), *MCP* (session scope only: tools unambiguously name-matched to a server; read-only), *Other* (session tools no row explains, read-only). Activation marks come from `listTools` as before. Absent and inactive built-ins are marked only when the session's tool list was actually read.
+
+**MCP.** One row per configured server with origin class, transport, a redacted endpoint, the source config file (click opens it) and state: enabled/disabled/shadowed from OMP's own computation (denylist, per-entry `enabled`, allowlist). In a session a server shows "N name-matched tools in this session" or "no matching tools in this session". **No RPC or host-control call returns MCP connection status; Desk shows configuration state and name-matched tool evidence only and never says "connected".** A checkbox enables/disables it globally through the user MCP config.
+
+**Extensions.** *Modules* (the dashboard's `extension-module` rows: native user/project files, plus configured files read-only) and *Plugins* (`omp plugin list` packages, labelled **OMP package**). Hooks, rules and the other dashboard kinds are not extensions here: the dashboard keeps them as distinct kinds with their own ids. Marketplace plugins are out of scope as a toggle target; their skills, tools and servers appear in the other views under *Other ecosystems*. Click opens the module file (or the plugin's `package.json`). Desk's own `-e` host-control module is passed explicitly by flag and is therefore never discovered or listed; independently, a switch request for an extension named `omp-host-control` is refused with a reason. **Plugin switches exist only in Global scope** (the lock is user-level and not tied to a project); project-installed plugins are read-only.
+
+### Origin classes
+
+One pure function maps `{provider, level}` to a display class: provider `omp-managed` → **Managed**; level `project` → **Project** (Global scope relabels project-scoped `claude-plugins` rows as user-level first, see above); level `user` with provider `native` → **Global**; every other provider (`agents`, `claude`, `codex`, `gemini`, `omp-plugins`, `claude-plugins`, …) → **Other ecosystems**, labelled with OMP's `providerName`. Rows keep provider and level for the tooltip.
+
+### Toggles (global only)
+
+| Item | Written | Where | Applies to running sessions |
+| --- | --- | --- | --- |
+| Skill, custom tool, extension module | `disabledExtensions` list add/remove of `skill:`/`tool:`/`extension-module:<name>` | user `config.yml` of the row's profile | skills and extension modules: OMP's reconcile may apply them to a running session once its watcher fires; custom tools: next session; a module OMP never imported needs a restart |
+| Built-in tool | the table's `<setting>.enabled` | user `config.yml` | settings-gated built-ins: may apply to a running session |
+| MCP server | the user MCP config's `disabledServers` / `enabledServers` by server name (`setServerDisabled`, `setServerForceEnabled`); a legacy `mcp:<name>` id is removed from `disabledExtensions` on enable | `mcp.json` beside `config.yml` | new sessions; restart a running one |
+| Plugin | `PluginManager.setEnabled` (Global scope only) | `omp-plugins.lock.json` | next session |
+
+`config.yml` writes use the settings worker's transaction (installed OMP's file lock, re-read, merge of the targeted key only, staged file, fsync, bounded Windows replace, no unlink, exclusive first creation, no-op when nothing changes). The transaction is extracted from `src/omp/settings-worker.ts` into `src/omp/config-transaction.ts` and its path allow-list is a parameter; each caller names exactly the key it may change. The Models/Agents editors behave as before and their tests are unchanged. The project config is never written, and a MCP switch changes no per-entry flag or definition.
+
+**Switches are bound to what the user saw.** The controller records, per view, the folder, profile, scope and running state of the list it last published and captures that context when a checkbox is clicked, before the request enters the serialized queue; a later change of the selected session cannot redirect a queued write. A `disabledExtensions` edit is computed from the same baseline the locked transaction compares against, so a concurrent save is detected rather than overwritten. MCP idempotence follows the saved user lists (and a legacy global `mcp:` id), not the cwd-effective row state; a server a project excludes by its own `mcp:` id has no switch.
+
+**MCP writes are by server name in the user file's lists**, so a server defined in a project file is disabled from the *user* configuration without touching the project. The two lists are updated in a fixed order that is safe if interrupted (disable: clear the force list, then add to the denylist; enable: clear the denylist, then set the allowlist only when a per-entry `enabled: false` needs overriding). If the second step fails the worker reports "only partly written", the view re-reads, and the shown state is OMP's computation.
+
+**Comments are not preserved.** OMP's serializer removes YAML comments on any rewrite (its own `/extensions`, `/mcp disable` and settings saves do the same, as do the Models/Agents editors under ADR-0048). A toggle whose value is already in effect writes nothing. This is a disclosed limitation, accepted by the maintainer.
+
+**No confirmation dialog precedes a switch.** The user chose global-only switches and each is reversible. Instead the checkbox tooltip and the result notice say that the switch "changes the global OMP configuration for all sessions". After the write the extension re-reads, shows the saved state, and reports from the table: "saved; a running session may apply it live" for the live kinds, "saved; new sessions use it, restart a running session to apply" for the others. For a Session-scope refresh the host re-reads after OMP's config-watch debounce so a live change is visible; the extension never claims application it has not observed. A write that OMP's validation, a conflicting concurrent edit, a changed inventory (the row is gone, shadowed or incomplete) or a missing Bun refuses is reported with a fixed reason and changes nothing. Switch requests are serialized, and each is validated against a fresh read of the folder and profile of the view that issued it.
+
+### Host structure and registration
+
+`src/host/inventory/` holds the model and projection (pure: origin classes, evidence overlay, row ordering, switch wording), the runtime (receipt validation, fixed failure sentences) and the controller (target selection, per-view scope and visibility, one worker run per distinct folder/profile per refresh shared by every visible view, at most one read cycle with one queued refresh, identity fencing of results, serialized toggles with a post-read). `src/views/inventory-tree.ts` is the one tree provider for all four views. `src/host/inventory-wiring.ts` exposes `registerInventoryViews(context, deps)`, which creates the views, commands (refresh, Session/Global, open source) and subscriptions and returns `{ sync(), refresh() }`; `extension.ts` supplies `target()` (the editor-recency target now also carries the entry's title, cwd and profile) and `log`. `src/host/session-tools.ts` keeps the evidence reads and fencing; `tools-tree.ts` and its test are removed.
+
+Reads happen only while a view is visible, never on a timer; a result is discarded when the target generation changed. Tree tooltips are plain strings (an item description is untrusted and is never Markdown or a command link). Click on a row opens an absolute file path the worker reported, in a preview editor.
+
+## Alternatives
+
+- **OMP CLI** (`omp skill list --json`, `omp plugin list --json`): cwd-based, omits disabled skills, has no tools/MCP/extension inventory and no origin for tools. Rejected as the source (it remains a reference for expected values).
+- **Re-implement discovery in TypeScript**: a second convention that drifts on every provider OMP adds. Rejected.
+- **Capability API only** (`loadCapability` per kind): a stabler import surface but forces re-implementing the dashboard's state computation (provider gate, user opt-in, MCP denylist merge). Used instead as the *completeness check* beside the dashboard function.
+- **Write MCP through `disabledExtensions` (`mcp:<name>`)**: OMP's own dashboard and `/mcp disable` use the MCP config; using the user lists keeps `/mcp list`, the runtime and Desk in agreement. Rejected.
+- **OMP's `setMcpServerEnabled`** (per-entry `enabled` on the entry's own file): it can write a project or source file and is entry-scoped, which breaks global-only. Rejected for the user-file name lists.
+- **Extend the host-control protocol** with tool `sourceInfo` and MCP server names: would give session origin for tools and exact server attribution, but changes an authenticated protocol (ADR-0003/0006/0009) for a display feature. Left as a follow-up decision, not needed now.
+- **Per-project toggles**: refused by the user's decision; `disabledExtensions` in project config replaces rather than merges.
+- **A confirmation before the first switch**: refused by the maintainer (reversible, explicit scope in the UI instead).
+
+## Risks and Open Questions
+
+- The worker depends on installed-source module paths and on `loadAllExtensions`, a UI-layer function; renames degrade to the fallback with a visible reason. Compiled-only OMP installs cannot supply the inventory. The completeness check and the contract test detect partial loads and drift.
+- Session overlays are evidence, not proof: skill commands can be capped at the catalogue limit, MCP tool-name prefixes are lossy, extension modules have no session surface.
+- `PluginManager.setEnabled` is OMP's own writer; its atomicity is OMP's (the plugin lock file is written without a lock).
+- A switch changes user-wide OMP behaviour for every session and every other tool using the profile; the tooltip and notice say "global".
+- Comments in `config.yml` are lost on a rewrite, as with any OMP settings write.
+- Project-installed disabled plugins and items of provider-disabled sources are not listed (OMP offers no listing / does not load them); both are stated in the view.
+- `omp plugin` state lives under OMP's config root; a Windows user with a non-default root is covered because the worker runs OMP's own path resolution.
+
+## Rollout and Verification
+
+1. Shared config transaction extracted; settings tests unchanged.
+2. Worker, projection, controller, tree provider, registration.
+3. Tests: origin classification, projection/overlay (evidence present/absent, ambiguity, incomplete, unavailable fallback), receipt validation and fixed failure sentences, controller scope, fencing, serialization and switch messages, tree item construction (checkbox, command, plain tooltip), and a contract test against the installed OMP with a disposable config root (rows and origins, secret redaction, every table switch id, each toggle kind written to the isolated files only, refusals, project override, Global refusal on a project layer).
+4. Live check in an isolated VS Code window with an isolated OMP agent directory (`PI_CODING_AGENT_DIR`) and config root; never the user's real configuration.
+
+## Related Decisions
+
+[ADR-0061](../decisions/0061-read-the-omp-inventory-through-a-staged-bun-worker-and-write-omps-own-toggle-state.md). Supersedes the one-view design [Active-session Skills and Tools view](2026-10-08-active-session-tools-view.md). Reuses [ADR-0048](../decisions/0048-write-omp-settings-directly-under-native-file-locks.md) for config writes and staged workers. [ADR-0009](../decisions/0009-read-only-native-tools-until-atomic-selection.md) is amended narrowly (see ADR-0061): per-session tool selection and the pipe remain read-only; only OMP's persisted user configuration changes, which OMP itself applies.
+
+## Architecture Review
+
+- Reviewer: architect
+- Outcome: round 1 (architect) found 13 findings, all addressed in the revision above. Round 2 (same reviewer, against the implementation) returned *changes needed* with eight material findings (queued writes bound to a later profile; `disabledExtensions` baseline recapture; completeness overstated and incomplete-empty hidden; custom-directory skills and `~`; Global guard by payload path and the claude-plugins exemption; plugin precedence; MCP policy vs effective state; session wording). All eight are addressed in code and in this document; round 3 is recorded below once complete.
+- Notes: status stays `proposed` until round 3 reports no material finding.

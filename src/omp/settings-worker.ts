@@ -2,17 +2,17 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as os from "node:os";
 import { pathToFileURL } from "node:url";
-import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { retryWindowsFileOperation } from "../host/file-operation-retry.ts";
-import { displaySettings, editorSettings, mergeConfigEdits, parseAgentSpec, valueAt, withRollbackJournalHeader, EDITOR_SETTING_PATHS, SettingsRefusal } from "../host/omp-settings-core.ts";
+import { globalConfigFile, readConfig, stageFile, writeConfig } from "./config-transaction.ts";
+import type { FileBaseline } from "./config-transaction.ts";
+import { displaySettings, editorSettings, parseAgentSpec, valueAt, withRollbackJournalHeader, EDITOR_SETTING_PATHS, SettingsRefusal } from "../host/omp-settings-core.ts";
 import { isRecord as record } from "../guards";
 import type { AgentSpec, ConfigEdit, ConfigRecord, SettingsScope } from "../host/omp-settings-core.ts";
 import { YAML } from "bun";
 import { Database } from "bun:sqlite";
 import type { NativeAuth, NativeModules } from "./settings-contracts.ts";
 
-interface FileBaseline { logical: string; physical: string; exists: boolean; digest: string; settings: ConfigRecord }
+
 interface WorkerRequest {
   packageRoot: string; cwd: string; profile: string;
   action: "read" | "write" | "refresh" | "generate" | "create" | "resolve-default" | "agent-file" | "preset-plan";
@@ -47,71 +47,6 @@ async function sourceImport<Name extends keyof NativeModules>(root: string, file
   return typed;
 }
 
-async function readConfig(logical: string): Promise<FileBaseline> {
-  let physical: string;
-  try { physical = await fs.realpath(logical); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    const link = await fs.lstat(logical).catch((failure: NodeJS.ErrnoException) => {
-      if (failure.code === "ENOENT") return null;
-      throw failure;
-    });
-    if (link?.isSymbolicLink()) throw new SettingsRefusal("The config is a dangling symbolic link. Repair its target before saving.");
-    // OMP uses the logical spelling for missing targets; first publication is no-replace.
-    physical = path.resolve(logical);
-  }
-  let content: string;
-  try { content = await fs.readFile(physical, "utf8"); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    return { logical, physical, exists: false, digest: "missing", settings: {} };
-  }
-  let parsed: unknown;
-  try { parsed = YAML.parse(content); } catch { throw new SettingsRefusal("Config YAML cannot be parsed. Nothing was changed."); }
-  if (parsed !== null && parsed !== undefined && !record(parsed)) throw new SettingsRefusal("Config YAML must be a mapping. Nothing was changed.");
-  return { logical, physical, exists: true, digest: createHash("sha256").update(content).digest("hex"), settings: record(parsed) ? parsed : {} };
-}
-
-async function stageFile(target: string, content: string): Promise<string> {
-  await fs.mkdir(path.dirname(target), { recursive: true });
-  const staged = `${target}.${process.pid}.${randomUUID()}.tmp`;
-  const handle = await fs.open(staged, "wx", 0o600);
-  try {
-    try { await handle.writeFile(content, "utf8"); await handle.sync(); }
-    finally { await handle.close(); }
-  } catch (error) { await fs.rm(staged, { force: true }).catch(() => {}); throw error; }
-  return staged;
-}
-
-/** Returns whether the file changed; edits that leave every entry as it is never rewrite it (and never strip its comments). */
-async function writeConfig(request: WorkerRequest, logical: string, utilsRoot: string, validate: (data: ConfigRecord, edits: ConfigEdit[]) => void, migratedGlobal: () => Promise<ConfigRecord>): Promise<boolean> {
-  const baseline = request.baseline;
-  if (!baseline || baseline.logical !== logical || !request.edits) throw new SettingsRefusal("Reload the editor before saving.");
-  const beforeLock = await readConfig(logical);
-  if (beforeLock.physical !== baseline.physical || beforeLock.exists !== baseline.exists) throw new SettingsRefusal("The config was removed, created or redirected. Reload before saving.");
-  const { withFileLock } = await sourceImport(utilsRoot, "file-lock.ts");
-  const { stringifyYamlConfig } = await sourceImport(utilsRoot, "yaml-config.ts");
-  return withFileLock(baseline.physical, async () => {
-    const current = await readConfig(logical);
-    if (current.physical !== baseline.physical || current.exists !== baseline.exists) throw new SettingsRefusal("The config target changed. Reload before saving.");
-    const layer = request.scope === "project" ? current.settings : await migratedGlobal();
-    const merged = mergeConfigEdits(layer, baseline.settings, request.edits!);
-    if (request.edits!.every(edit => isDeepStrictEqual(valueAt(layer, edit.path), edit.value))) return false;
-    validate(merged, request.edits!);
-    const content = stringifyYamlConfig(merged);
-    const digest = createHash("sha256").update(content).digest("hex");
-    if (digest === current.digest) return false;
-    const staged = await stageFile(current.physical, content);
-    try {
-      const latest = await readConfig(logical);
-      if (latest.physical !== current.physical || latest.exists !== current.exists || latest.digest !== current.digest) throw new SettingsRefusal("The config changed during saving. Reload; nothing was overwritten.");
-      if (current.exists) await retryWindowsFileOperation(() => fs.rename(staged, current.physical));
-      else await fs.link(staged, current.physical);
-    } finally { await fs.rm(staged, { force: true }); }
-    return true;
-  });
-}
-
 async function main(request: WorkerRequest): Promise<unknown> {
   if (!path.isAbsolute(request.packageRoot) || !path.isAbsolute(request.cwd)) throw new SettingsRefusal("The settings context is unavailable.");
   const utilsRoot = path.join(path.dirname(request.packageRoot), "pi-utils");
@@ -120,8 +55,7 @@ async function main(request: WorkerRequest): Promise<unknown> {
   const dirs = await sourceImport(utilsRoot, "dirs.ts");
   dirs.setProfile(request.profile);
   const agentDir = dirs.getAgentDir();
-  let globalFile = path.join(agentDir, "config.yml");
-  if (!(await fs.stat(globalFile).catch(() => null)) && await fs.stat(path.join(agentDir, "config.yaml")).catch(() => null)) globalFile = path.join(agentDir, "config.yaml");
+  const globalFile = await globalConfigFile(agentDir);
   const projectFile = path.join(dirs.getProjectAgentDir(request.cwd), "config.yml");
   const files = { global: await readConfig(globalFile), project: await readConfig(projectFile) };
   const { Settings } = await sourceImport(request.packageRoot, "config/settings.ts");

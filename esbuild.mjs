@@ -96,6 +96,14 @@ const targets = [
     },
   },
   {
+    name: "inventory-worker",
+    options: {
+      entryPoints: ["src/omp/inventory-worker.ts"], outfile: "out/inventory-worker.mjs",
+      bundle: true, platform: "node", format: "esm", target: "es2022",
+      external: ["bun", "bun:sqlite"],
+    },
+  },
+  {
     // Loaded by the launched native OMP process (`omp -e out/omp-host-control.mjs`).
     // The `.mjs` extension makes the ESM factory unambiguous without setting a
     // package-wide "type": "module", which would break the CommonJS extension bundle.

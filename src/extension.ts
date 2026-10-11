@@ -126,8 +126,8 @@ import {
   WorkspaceFolderTreeItem,
 } from "./views/session-tree";
 import { ProcessTreeItem } from "./views/process-rows";
-import { ToolsTreeProvider } from "./views/tools-tree";
-import { SessionToolsController, type SessionToolsTarget } from "./host/session-tools";
+import { registerInventoryViews, type InventoryHandle } from "./host/inventory-wiring";
+import type { SessionToolsTarget } from "./host/session-tools";
 import type { LauncherTreeItem, SessionLauncherFacts, SessionOwnershipFacts } from "./views/session-tree";
 import { WorkspaceFolderRegistry, folderArgument, mergeWorkspaceFolderRecords, WORKSPACE_FOLDERS_STORAGE_KEY } from "./views/workspace-folders";
 import { LauncherFolders } from "./views/launcher-folders";
@@ -684,7 +684,7 @@ const turnActivities = new Map<string, TurnActivity>();
 const composerPopupTabs = new Set<string>();
 /** The OMP editors of this window in the order the user last focused them; orders the add-to-session picker. */
 const editorRecency = new EditorRecency();
-let toolsController: SessionToolsController | null = null;
+let inventoryViews: InventoryHandle | null = null;
 /** The Sessions view's background processes: its reader, poll and stop commands. */
 let sessionProcesses: SessionProcesses | null = null;
 /**
@@ -1218,18 +1218,8 @@ export function activate(context: vscode.ExtensionContext): void {
   const view = vscode.window.createTreeView(SESSIONS_VIEW_ID, { treeDataProvider: provider });
   launcherView = view;
   subscribeProviderLoginRefresh(context, index);
-  const toolsProvider = new ToolsTreeProvider();
-  const toolsView = vscode.window.createTreeView("omp.tools", { treeDataProvider: toolsProvider });
-  const tools = new SessionToolsController(() => toolsTarget(index), snapshot => toolsProvider.setSnapshot(snapshot));
-  toolsController = tools;
-  context.subscriptions.push(
-    toolsProvider, toolsView, tools,
-    { dispose: () => { if (toolsController === tools) toolsController = null; } },
-    toolsView.onDidChangeVisibility(event => tools.setVisible(event.visible)),
-    vscode.window.tabGroups.onDidChangeTabs(() => tools.sync()),
-    vscode.commands.registerCommand("omp.refreshTools", () => tools.refresh()),
-  );
-  tools.setVisible(toolsView.visible);
+  inventoryViews = registerInventoryViews(context, { target: () => toolsTarget(index), log });
+  context.subscriptions.push({ dispose: () => { inventoryViews = null; } });
   const chooseDefaultView = () => chooseDefaultSessionView(context);
   // Another window opening or releasing a session is only visible as a claim file appearing,
   // changing or going away. The watch is a hint that re-reads the ownership of the rows filed
@@ -9203,11 +9193,11 @@ async function confirmOpenUrl(event: { url: string; launchUrl?: string; instruct
 function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, event: ChatRuntimeEvent): void | Promise<void> {
   switch (event.type) {
     case "catalogue":
-      if (toolsTarget(index)?.key === chat.sessionOf(tabId)) toolsController?.refresh();
+      if (toolsTarget(index)?.key === chat.sessionOf(tabId)) inventoryViews?.refresh();
       return;
     case "model":
       applyTurnActivity(index, tabId, event.model, event.baseline);
-      if (event.baseline) toolsController?.sync();
+      if (event.baseline) inventoryViews?.sync();
       const pickerModel = footerBindings.get(tabId);
       if (pickerModel?.modelId && (pickerModel.modelId !== event.model.state?.model?.id || pickerModel.message.provider !== event.model.state?.model?.provider)) cancelControlPicker(tabId);
       if (event.baseline || pickerModel?.modelId !== event.model.state?.model?.id ||
@@ -10381,11 +10371,15 @@ function describeControlError(error: unknown): string {
   if (error instanceof HostControlUnavailableError) return "native host connection unavailable";
   if (error instanceof HostControlConfigurationError) return "host-control configuration invalid";
   return "unexpected host-control failure";
+  const entry = index.get(tabId);
 }
 
 /** Close and forget one tab's verified control channel; the failure text is cleared with it. */
 function disposeControlChannel(state: TabState): void {
   state.control?.client.close();
+    title: entry === null ? "OMP session" : launcherProvider?.headlineFor(tabId) ?? sessionHeadline(entry, null),
+    cwd: runtime?.cwd ?? entry?.cwd ?? null,
+    profile: entry?.scope.profile ?? null,
   state.control = null;
   state.controlFailure = null;
 }
@@ -10838,7 +10832,7 @@ function refreshLauncher(options: { readonly ownership?: boolean } = {}): void {
   publishWindowSnapshot();
   launcherProvider?.refresh(options);
   sessionProcesses?.touch();
-  toolsController?.sync();
+  inventoryViews?.sync();
   if (activationContext !== undefined) void vscode.commands.executeCommand("setContext", "omp.defaultSessionMode", defaultSessionMode(activationContext));
   void vscode.commands.executeCommand(
     "setContext",
@@ -12489,7 +12483,7 @@ function registerPanelLifecycle(
     // Deactivation must clear editor-title and Stop contexts as well as activation.
     refreshGuestContext();
     if (event.webviewPanel.active && state.tabId !== null) editorRecency.touch(slot);
-    if (activated) toolsController?.refresh();
+    if (activated) inventoryViews?.refresh();
     if (!event.webviewPanel.active || state.tabId === null) return;
     if (activated) {
       activateNativeEditor(state);

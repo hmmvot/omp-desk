@@ -1,5 +1,5 @@
 ---
-status: implemented
+status: superseded
 date: 2026-10-08
 ---
 

@@ -57,7 +57,10 @@
   "activationEvents": [
     "onStartupFinished",
     "onView:omp.sessions",
+    "onView:omp.skills",
     "onView:omp.tools",
+    "onView:omp.mcp",
+    "onView:omp.extensions",
     "onUri",
     "onWebviewPanel:omp.session",
     "onWebviewPanel:omp.shellTerminal",
@@ -177,8 +180,23 @@
           "name": "Sessions"
         },
         {
+          "id": "omp.skills",
+          "name": "Skills",
+          "visibility": "collapsed"
+        },
+        {
           "id": "omp.tools",
           "name": "Tools",
+          "visibility": "collapsed"
+        },
+        {
+          "id": "omp.mcp",
+          "name": "MCP",
+          "visibility": "collapsed"
+        },
+        {
+          "id": "omp.extensions",
+          "name": "Extensions",
           "visibility": "collapsed"
         }
       ]
@@ -650,10 +668,81 @@
         "icon": "$(stop-circle)"
       },
       {
+        "command": "omp.refreshSkills",
+        "title": "Refresh Skills",
+        "category": "OMP",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "omp.skills.showGlobal",
+        "title": "Show Global Skills",
+        "category": "OMP",
+        "icon": "$(globe)"
+      },
+      {
+        "command": "omp.skills.showSession",
+        "title": "Show Active Session's Skills",
+        "category": "OMP",
+        "icon": "$(window)"
+      },
+      {
         "command": "omp.refreshTools",
         "title": "Refresh Tools",
         "category": "OMP",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "omp.tools.showGlobal",
+        "title": "Show Global Tools",
+        "category": "OMP",
+        "icon": "$(globe)"
+      },
+      {
+        "command": "omp.tools.showSession",
+        "title": "Show Active Session's Tools",
+        "category": "OMP",
+        "icon": "$(window)"
+      },
+      {
+        "command": "omp.refreshMcp",
+        "title": "Refresh MCP",
+        "category": "OMP",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "omp.mcp.showGlobal",
+        "title": "Show Global MCP",
+        "category": "OMP",
+        "icon": "$(globe)"
+      },
+      {
+        "command": "omp.mcp.showSession",
+        "title": "Show Active Session's MCP",
+        "category": "OMP",
+        "icon": "$(window)"
+      },
+      {
+        "command": "omp.refreshExtensions",
+        "title": "Refresh Extensions",
+        "category": "OMP",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "omp.extensions.showGlobal",
+        "title": "Show Global Extensions",
+        "category": "OMP",
+        "icon": "$(globe)"
+      },
+      {
+        "command": "omp.extensions.showSession",
+        "title": "Show Active Session's Extensions",
+        "category": "OMP",
+        "icon": "$(window)"
+      },
+      {
+        "command": "omp.inventory.open",
+        "title": "Open Source File",
+        "category": "OMP"
       }
     ],
     "menus": {
@@ -696,6 +785,42 @@
         },
         {
           "command": "omp.stopProcess",
+          "when": "false"
+        },
+        {
+          "command": "omp.skills.showGlobal",
+          "when": "false"
+        },
+        {
+          "command": "omp.skills.showSession",
+          "when": "false"
+        },
+        {
+          "command": "omp.tools.showGlobal",
+          "when": "false"
+        },
+        {
+          "command": "omp.tools.showSession",
+          "when": "false"
+        },
+        {
+          "command": "omp.mcp.showGlobal",
+          "when": "false"
+        },
+        {
+          "command": "omp.mcp.showSession",
+          "when": "false"
+        },
+        {
+          "command": "omp.extensions.showGlobal",
+          "when": "false"
+        },
+        {
+          "command": "omp.extensions.showSession",
+          "when": "false"
+        },
+        {
+          "command": "omp.inventory.open",
           "when": "false"
         },
         {
@@ -906,9 +1031,64 @@
           "group": "navigation@6"
         },
         {
+          "command": "omp.skills.showGlobal",
+          "when": "view == omp.skills && omp.skills.scope == session",
+          "group": "navigation@1"
+        },
+        {
+          "command": "omp.skills.showSession",
+          "when": "view == omp.skills && omp.skills.scope == global",
+          "group": "navigation@1"
+        },
+        {
+          "command": "omp.refreshSkills",
+          "when": "view == omp.skills",
+          "group": "navigation@2"
+        },
+        {
+          "command": "omp.tools.showGlobal",
+          "when": "view == omp.tools && omp.tools.scope == session",
+          "group": "navigation@1"
+        },
+        {
+          "command": "omp.tools.showSession",
+          "when": "view == omp.tools && omp.tools.scope == global",
+          "group": "navigation@1"
+        },
+        {
           "command": "omp.refreshTools",
           "when": "view == omp.tools",
+          "group": "navigation@2"
+        },
+        {
+          "command": "omp.mcp.showGlobal",
+          "when": "view == omp.mcp && omp.mcp.scope == session",
           "group": "navigation@1"
+        },
+        {
+          "command": "omp.mcp.showSession",
+          "when": "view == omp.mcp && omp.mcp.scope == global",
+          "group": "navigation@1"
+        },
+        {
+          "command": "omp.refreshMcp",
+          "when": "view == omp.mcp",
+          "group": "navigation@2"
+        },
+        {
+          "command": "omp.extensions.showGlobal",
+          "when": "view == omp.extensions && omp.extensions.scope == session",
+          "group": "navigation@1"
+        },
+        {
+          "command": "omp.extensions.showSession",
+          "when": "view == omp.extensions && omp.extensions.scope == global",
+          "group": "navigation@1"
+        },
+        {
+          "command": "omp.refreshExtensions",
+          "when": "view == omp.extensions",
+          "group": "navigation@2"
         }
       ],
       "view/item/context": [
