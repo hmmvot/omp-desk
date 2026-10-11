@@ -14,7 +14,7 @@ export function vscodePolicy(): DebugPolicy {
 		return (allowed as readonly string[]).includes(value ?? "") ? value as T : fallback;
 	};
 	return {
-		enabled: () => vscode.workspace.getConfiguration(SECTION).get<boolean>("enabled", false) === true,
+		enabled: () => vscode.workspace.getConfiguration(SECTION).get<boolean>("enabled", true) === true,
 		startMode: () => read<StartMode>("start", ["ask", "allow"], "ask"),
 		expressionsMode: () => read<ExpressionMode>("expressions", ["off", "ask", "allow"], "ask"),
 		async confirm(request) {
