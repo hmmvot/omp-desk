@@ -23,6 +23,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **OMP: Open Terminal in Folder** and **OMP: Reconnect Terminal** run from the Command Palette ask which folder to use, as New Session does, instead of warning "Choose a registered OMP folder".
 - Clicking into the Chat composer of a window that did not have the focus no longer leaves the composer without it. VS Code refocuses a webview editor when its window gains the focus, which cleared the focus the click had just given to the composer (or to whichever element in the page you clicked); the page now puts it back, only when the loss is that refocus and not you moving away.
 - In the Chat composer, Up and Down recall prompt history only when the caret is already on the first or last visual row. A soft-wrapped paragraph used to count as one line, so Up anywhere inside it replaced the text with an older prompt; now the arrows move the caret through the wrapped rows first.
 - A C# member named with its class in Chat (`SessionIndex.Reload`, `Outer.Inner.Member`, `Box<T>.Put`) is a link again when its class has exactly one such member. The C# language server describes a member's class as `in SessionIndex (project omp-vscode (net8.0))` (translated in a non-English VS Code), which the class match did not understand.

@@ -13080,11 +13080,8 @@ async function openFolderTerminal(
   index: SessionIndex,
   argument: unknown,
 ): Promise<void> {
-  const folder = resolveFolderArgument(argument);
-  if (folder === null) {
-    showWarning("Choose a registered OMP folder to open a terminal in.");
-    return;
-  }
+  const folder = await terminalFolder(index, argument, "Choose the OMP folder to open a terminal in");
+  if (folder === null) return;
   await launchFolderShell(context, index, folder.path, newShellSlot());
 }
 
@@ -13099,11 +13096,8 @@ async function reconnectFolderTerminal(
   index: SessionIndex,
   argument: unknown,
 ): Promise<void> {
-  const folder = resolveFolderArgument(argument);
-  if (folder === null) {
-    showWarning("Choose a registered OMP folder to reconnect its terminal in.");
-    return;
-  }
+  const folder = await terminalFolder(index, argument, "Choose the OMP folder whose terminal to reconnect");
+  if (folder === null) return;
   // Explicit Reconnect can also rebind an editor this host can still reach.
   const key = canonicalFolderKey(folder.path);
   const candidates = key === null ? [] : shellSlotsForFolder(shellSlots?.list() ?? [], key);
@@ -13133,6 +13127,20 @@ async function reconnectFolderTerminal(
         "Try Reconnect Terminal again, or choose Open Terminal to start a new one.",
     );
   }
+}
+
+/**
+ * The folder a terminal command acts on: the one a row or caller named, or, run from the Command
+ * Palette with no argument, the user's choice among the folders Sessions shows.
+ */
+async function terminalFolder(index: SessionIndex, argument: unknown, title: string): Promise<LauncherFolder | null> {
+  if (argument === undefined) {
+    const folders = launcherFolders;
+    return folders === undefined ? null : await chooseFolder(index, folders, undefined, { title, addWhenEmpty: false });
+  }
+  const folder = resolveFolderArgument(argument);
+  if (folder === null) showWarning("That folder is no longer in Sessions. Refresh Sessions and try again.");
+  return folder;
 }
 
 /** The folder one folder-scoped command was invoked for. */
