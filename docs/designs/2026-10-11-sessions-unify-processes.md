@@ -37,12 +37,12 @@ The user asked for one view: merge Processes into Sessions, mark sessions that h
 
 ### Layouts
 
-`omp.sessionsGrouping` becomes `flat | folders | terminals` (unknown values still normalise to `flat`). The title bar has one button per layout the view is not showing (icon and tooltip name the layout it switches to), driven by one context key `omp.sessionsLayout` (replacing `omp.sessionsFlat`); the command palette offers the three layouts directly.
+`omp.sessionsGrouping` becomes `flat | folders | terminals` (unknown values still normalise to `flat`). The title bar has one layout button that opens a QuickPick of the three layouts, the current one marked; the button's icon shows the current layout, driven by one context key `omp.sessionsLayout` (replacing `omp.sessionsFlat`); the command palette offers the picker. The Terminals group closes the list; a TreeView has no separators, so the gap is an inert spacer row (`SpacerTreeItem`, id `omp.terminalsSpacer`, empty label, no command or context value), absent when the group is the only root row. It is no session row, so Go to Session, the pinned-selection rule and reveal never see it; selecting it is put back like selecting a folder.
 
 | Layout | Root of the tree |
 |---|---|
-| `flat` | session rows in the flat order, then the **Terminals** group when it has children, then the New Session… and Resume Session… rows |
-| `folders` | folder nodes, then the **Terminals** group when it has children |
+| `flat` | session rows in the flat order, then the New Session… and Resume Session… rows, then — when the group has children — a blank spacer row and the **Terminals** group |
+| `folders` | folder nodes, then — when the group has children — a blank spacer row and the **Terminals** group |
 | `terminals` | one process row per live broker, in the model's order (orphaned, idle, unknown, in use, then newest first); no session rows, no New or Resume rows, no folder nodes |
 
 The projection of session rows is the same in every layout, so `listedSessions`, `headlineFor`, `itemFor` and the Go to Session picker keep working while `terminals` is shown. Only what the tree serves differs, and `beginReveal` returns nothing in `terminals` (no session row is on screen), the pinned-selection rule does not run there.
@@ -167,8 +167,8 @@ A request carries only the row identities the requester was shown (slot, broker 
 ### Package contribution
 
 - Views: `omp.processes` and `onView:omp.processes`, its `viewsWelcome`, `omp.refreshProcesses` (menu entries) are removed. `omp.refreshProcesses` stays as a hidden internal command (called by the Stats panel and by shell exit), not in the palette.
-- Sessions title: `omp.newSession` and `omp.resumeWorkspaceFolder` leave the title bar and keep their commands and palette entries and every row and folder entry. Added in the navigation group: `omp.stopOrphanedProcesses` (clear-all) and `omp.killAll` (stop-circle). The layout buttons: each layout the view is not showing has its own title button (so two of `flat`, `folders`, `terminals` show at a time), and all three are in the palette.
-- New commands: `omp.killAll`, `omp.showSessionsTerminals`, `omp.openProcess` (hidden). `omp.stopProcess` stays hidden and inline on stoppable process rows.
+- Sessions title: `omp.newSession` and `omp.resumeWorkspaceFolder` leave the title bar and keep their commands and palette entries and every row and folder entry. Added in the navigation group: `omp.stopOrphanedProcesses` (clear-all) and `omp.killAll` (stop-circle). The layout button: one title button opens a QuickPick of the three layouts (current one marked, short descriptions). It is three commands, `omp.chooseSessionsLayout.flat`, `.folders` and `.terminals`, all running the same picker and shown one at a time by `omp.sessionsLayout` so its icon (`list-flat`, `list-tree`, `terminal`) shows the current layout; they are hidden from the palette, which has `omp.chooseSessionsLayout`. A choice only writes `omp.sessionsGrouping`. (Amended 2026-10-11 after use: the first build had one button per layout the view was not showing.)
+- New commands: `omp.killAll`, `omp.chooseSessionsLayout` (palette) with its three hidden title-button variants, `omp.openProcess` (hidden). `omp.stopProcess` stays hidden and inline on stoppable process rows.
 - Welcome content: the two folder welcomes gain `omp.sessionsLayout != terminals`; a new one for the `terminals` layout says that no background process is running.
 - `omp.copyRowDiagnostics` stays for process rows under `view == omp.sessions`.
 - The setting's enum gains `terminals` and its description names the three layouts.

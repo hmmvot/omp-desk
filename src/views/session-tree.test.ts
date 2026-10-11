@@ -1550,17 +1550,33 @@ describe("launcher tree", () => {
 			const orphan = process({ kind: "session", ptyKind: "managed-rpc", status: "orphaned", host: null, title: "left over" });
 			flat.setProcesses(snapshot(sessionProcess("tab:a"), shell, orphan));
 			const children = flat.getChildren();
-			assert.deepEqual(children.map(child => child.id), ["tab:a", "omp.terminalsGroup", "omp.newSessionRow", "omp.resumeSessionRow"]);
-			const group = children[1] as InstanceType<typeof TerminalsGroupTreeItem>;
+			assert.deepEqual(children.map(child => child.id), ["tab:a", "omp.newSessionRow", "omp.resumeSessionRow", "omp.terminalsSpacer", "omp.terminalsGroup"]);
+			const group = children[4] as InstanceType<typeof TerminalsGroupTreeItem>;
+			const spacer = children[3]!;
+			assert.equal(spacer.label, "");
+			assert.equal(spacer.command, undefined);
+			assert.equal(spacer.contextValue, undefined);
+			assert.equal(flat.getParent(spacer), undefined);
+			assert.deepEqual(flat.getChildren(spacer), []);
+			assert.equal((await flat.itemFor("omp.terminalsSpacer")), undefined, "the spacer is no session");
 			assert.deepEqual(flat.getChildren(group).map(child => child.id), [shell.id, orphan.id]);
 			assert.equal(flat.getParent(flat.getChildren(group)[0]!), group);
 			assert.equal(group.description, "2");
 		});
 
+		it("puts the Terminals group alone, with no spacer, when nothing else is listed", async () => {
+			const flat = provider("flat", []);
+			const noFolders = providerFor({ folders: () => [], entries: () => [], activeTabId: () => null, facts: () => ({ open: false, running: false, outcome: null, activity: null }), grouping: () => "flat" });
+			noFolders.setProcesses(snapshot(process()));
+			assert.deepEqual(noFolders.getChildren().map(child => child.id), ["omp.terminalsGroup"]);
+			flat.setProcesses(snapshot());
+			assert.ok(!flat.getChildren().some(child => child.id === "omp.terminalsSpacer"));
+		});
+
 		it("groups them after the folder nodes in the folders layout, and shows no group while none is loose", async () => {
 			const folders = provider("folders");
 			folders.setProcesses(snapshot(sessionProcess("tab:a"), process()));
-			assert.deepEqual((await folders.getChildren()).map(child => child.id), ["folder:alpha", "omp.terminalsGroup"]);
+			assert.deepEqual((await folders.getChildren()).map(child => child.id), ["folder:alpha", "omp.terminalsSpacer", "omp.terminalsGroup"]);
 			folders.setProcesses(snapshot(sessionProcess("tab:a")));
 			assert.deepEqual((await folders.getChildren()).map(child => child.id), ["folder:alpha"]);
 			const unread = provider("folders");

@@ -33,7 +33,7 @@ import type { GitApi, BranchObservation } from "./host/session-branch";
 import type { FooterMetadataMessage } from "./webview/footer-metadata";
 import { SessionClickRecognizer } from "./views/session-click";
 import { relativeAge } from "./views/relative-age";
-import { normalizeSessionsGrouping, planNotificationReveal } from "./views/session-order";
+import { normalizeSessionsGrouping, planNotificationReveal, sessionsLayoutPickItems } from "./views/session-order";
 import type { SessionsGrouping } from "./views/session-order";
 import { pinnedSessionTabId, selectionRestore } from "./views/session-selection";
 import { acquireClaim, createClaimHolder, createOwnerGeneration } from "./host/session-claim";
@@ -381,7 +381,7 @@ const SESSIONS_VIEW_ID = "omp.sessions";
  * show, so its welcome content offers the Add Folder flow instead of an empty list.
  */
 const HAS_WORKSPACE_FOLDERS_CONTEXT = "omp.hasWorkspaceFolders";
-/** Context key the Sessions title-bar layout buttons read: the layout the view shows (`flat`, `folders` or `terminals`). */
+/** Context key the Sessions title-bar layout button reads (it picks the button's icon): the layout the view shows (`flat`, `folders` or `terminals`). */
 const SESSIONS_LAYOUT_CONTEXT = "omp.sessionsLayout";
 /**
  * Context key gating the Stop keybinding: true while the OMP chat panel the user
@@ -1371,9 +1371,10 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("omp.closeSession", (argument: unknown) => closeSession(context, index, argument)),
     vscode.commands.registerCommand("omp.reloadSession", (argument: unknown) => reloadSession(context, index, argument)),
     vscode.commands.registerCommand("omp.addWorkspaceFolder", () => addWorkspaceFolder(index)),
-    vscode.commands.registerCommand("omp.showSessionsFlat", () => setSessionsGrouping("flat")),
-    vscode.commands.registerCommand("omp.showSessionsByFolder", () => setSessionsGrouping("folders")),
-    vscode.commands.registerCommand("omp.showSessionsTerminals", () => setSessionsGrouping("terminals")),
+    vscode.commands.registerCommand("omp.chooseSessionsLayout", () => chooseSessionsLayout()),
+    vscode.commands.registerCommand("omp.chooseSessionsLayout.flat", () => chooseSessionsLayout()),
+    vscode.commands.registerCommand("omp.chooseSessionsLayout.folders", () => chooseSessionsLayout()),
+    vscode.commands.registerCommand("omp.chooseSessionsLayout.terminals", () => chooseSessionsLayout()),
     vscode.commands.registerCommand("omp.pinWorkspaceFolder", (argument: unknown) => pinWorkspaceFolder(index, argument)),
     vscode.commands.registerCommand("omp.unpinWorkspaceFolder", (argument: unknown) => unpinWorkspaceFolder(index, argument)),
     vscode.commands.registerCommand("omp.resumeWorkspaceFolder", (argument: unknown) =>
@@ -11027,13 +11028,30 @@ const SESSIONS_LAYOUT_WORDS: Record<SessionsGrouping, string> = {
   terminals: "terminals",
 };
 
-/** The title-bar toggle: store the choice; the configuration listener redraws the view. */
+/** Store the chosen layout; the configuration listener redraws the view. */
 async function setSessionsGrouping(grouping: SessionsGrouping): Promise<void> {
   try {
     await vscode.workspace.getConfiguration("omp").update("sessionsGrouping", grouping, vscode.ConfigurationTarget.Global);
   } catch (error) {
     showError(`Sessions could not switch to ${SESSIONS_LAYOUT_WORDS[grouping]}: ${messageOf(error)}`);
   }
+}
+
+/**
+ * The title-bar layout button: a picker of the three layouts with the current one marked. Every
+ * button variant (one icon per layout, so the icon shows what is current) and the palette command
+ * open this same picker.
+ */
+async function chooseSessionsLayout(): Promise<void> {
+  const current = sessionsGrouping();
+  const items = sessionsLayoutPickItems(current);
+  const picked = await vscode.window.showQuickPick(items, {
+    title: "Sessions Layout",
+    placeHolder: "Choose how Sessions arranges its rows",
+    matchOnDescription: true,
+    matchOnDetail: true,
+  });
+  if (picked !== undefined && picked.id !== current) await setSessionsGrouping(picked.id);
 }
 
 /** Runtime object identity is local; activity and snapshot contents are not. */

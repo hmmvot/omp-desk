@@ -109,7 +109,7 @@
             "The background processes of this profile instead of sessions: session processes and terminals, each labelled with its folder. A row opens its session or terminal."
           ],
           "default": "flat",
-          "description": "How Sessions arranges its rows. The layout buttons in the Sessions title bar change this setting."
+          "description": "How Sessions arranges its rows. The layout button in the Sessions title bar opens a picker that changes this setting."
         },
         "omp.chatColumn": {
           "type": "boolean",
@@ -251,20 +251,26 @@
         "icon": "$(new-folder)"
       },
       {
-        "command": "omp.showSessionsByFolder",
-        "title": "Sessions: Group by Folder",
-        "category": "OMP",
-        "icon": "$(list-tree)"
-      },
-      {
-        "command": "omp.showSessionsFlat",
-        "title": "Sessions: Show as Flat List",
+        "command": "omp.chooseSessionsLayout",
+        "title": "Sessions: Choose Layout…",
         "category": "OMP",
         "icon": "$(list-flat)"
       },
       {
-        "command": "omp.showSessionsTerminals",
-        "title": "Sessions: Show Terminals",
+        "command": "omp.chooseSessionsLayout.flat",
+        "title": "Sessions Layout: Flat List (change…)",
+        "category": "OMP",
+        "icon": "$(list-flat)"
+      },
+      {
+        "command": "omp.chooseSessionsLayout.folders",
+        "title": "Sessions Layout: By Folder (change…)",
+        "category": "OMP",
+        "icon": "$(list-tree)"
+      },
+      {
+        "command": "omp.chooseSessionsLayout.terminals",
+        "title": "Sessions Layout: Terminals (change…)",
         "category": "OMP",
         "icon": "$(terminal)"
       },
@@ -748,16 +754,16 @@
     "menus": {
       "commandPalette": [
         {
-          "command": "omp.showSessionsFlat",
-          "when": "omp.sessionsLayout != flat"
+          "command": "omp.chooseSessionsLayout.flat",
+          "when": "false"
         },
         {
-          "command": "omp.showSessionsByFolder",
-          "when": "omp.sessionsLayout != folders"
+          "command": "omp.chooseSessionsLayout.folders",
+          "when": "false"
         },
         {
-          "command": "omp.showSessionsTerminals",
-          "when": "omp.sessionsLayout != terminals"
+          "command": "omp.chooseSessionsLayout.terminals",
+          "when": "false"
         },
         {
           "command": "omp.refreshProcesses",
@@ -1006,19 +1012,19 @@
           "group": "navigation@1"
         },
         {
-          "command": "omp.showSessionsFlat",
-          "when": "view == omp.sessions && omp.sessionsLayout != flat",
+          "command": "omp.chooseSessionsLayout.flat",
+          "when": "view == omp.sessions && omp.sessionsLayout == flat",
           "group": "navigation@2"
         },
         {
-          "command": "omp.showSessionsByFolder",
-          "when": "view == omp.sessions && omp.sessionsLayout != folders",
-          "group": "navigation@3"
+          "command": "omp.chooseSessionsLayout.folders",
+          "when": "view == omp.sessions && omp.sessionsLayout == folders",
+          "group": "navigation@2"
         },
         {
-          "command": "omp.showSessionsTerminals",
-          "when": "view == omp.sessions && omp.sessionsLayout != terminals",
-          "group": "navigation@4"
+          "command": "omp.chooseSessionsLayout.terminals",
+          "when": "view == omp.sessions && omp.sessionsLayout == terminals",
+          "group": "navigation@2"
         },
         {
           "command": "omp.stopOrphanedProcesses",

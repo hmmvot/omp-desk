@@ -18,6 +18,23 @@ export function normalizeSessionsGrouping(value: unknown): SessionsGrouping {
 	return value === "folders" || value === "terminals" ? value : "flat";
 }
 
+/** The layouts the Sessions title-bar picker offers, in order, with the words it shows. */
+export const SESSIONS_LAYOUT_CHOICES: ReadonlyArray<{ readonly id: SessionsGrouping; readonly label: string; readonly description: string }> = [
+	{ id: "flat", label: "Flat List", description: "Every session in one list, labelled with its folder" },
+	{ id: "folders", label: "By Folder", description: "Sessions grouped under their folders" },
+	{ id: "terminals", label: "Terminals", description: "Background processes: sessions and terminals that are running" },
+];
+
+/** Pure: the picker's items, the current layout marked with a filled radio and the others with an empty one. */
+export function sessionsLayoutPickItems(current: SessionsGrouping): Array<{ readonly id: SessionsGrouping; readonly label: string; readonly description: string; readonly detail: string }> {
+	return SESSIONS_LAYOUT_CHOICES.map(choice => ({
+		id: choice.id,
+		label: `${choice.id === current ? "$(circle-large-filled)" : "$(circle-large-outline)"} ${choice.label}`,
+		description: choice.id === current ? "current" : "",
+		detail: choice.description,
+	}));
+}
+
 /** Where a notification's session is revealed in the Sessions view. */
 export type NotificationRevealPlan =
 	/** The current layout serves session rows: reveal the indexed session's row. */

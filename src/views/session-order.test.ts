@@ -8,6 +8,7 @@ import {
 	flatRowLabel,
 	normalizeSessionsGrouping,
 	planNotificationReveal,
+	sessionsLayoutPickItems,
 	orderFlatRows,
 	type FlatOrderFacts,
 } from "./session-order.ts";
@@ -103,6 +104,16 @@ describe("grouping setting", () => {
 		assert.equal(normalizeSessionsGrouping("flat"), "flat");
 		assert.equal(normalizeSessionsGrouping("folders"), "folders");
 		assert.equal(normalizeSessionsGrouping("terminals"), "terminals");
+	});
+
+	it("offers the three layouts in order and marks exactly the current one", () => {
+		for (const current of ["flat", "folders", "terminals"] as const) {
+			const items = sessionsLayoutPickItems(current);
+			assert.deepEqual(items.map(item => item.id), ["flat", "folders", "terminals"]);
+			assert.deepEqual(items.filter(item => item.description === "current").map(item => item.id), [current]);
+			assert.deepEqual(items.filter(item => item.label.startsWith("$(circle-large-filled)")).map(item => item.id), [current]);
+			assert.ok(items.every(item => item.detail.length > 0));
+		}
 	});
 
 	describe("planNotificationReveal", () => {

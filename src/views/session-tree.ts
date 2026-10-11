@@ -751,9 +751,22 @@ export class ResumeSessionTreeItem extends vscode.TreeItem {
 	}
 }
 
+/**
+ * A blank, inert row that separates the Terminals group from what is above it (a TreeView has no
+ * separators). No command, no context menu, no session behind it.
+ */
+export class SpacerTreeItem extends vscode.TreeItem {
+	static readonly ID = "omp.terminalsSpacer";
+	constructor() {
+		super("", vscode.TreeItemCollapsibleState.None);
+		this.id = SpacerTreeItem.ID;
+		this.accessibilityInformation = { label: "" };
+	}
+}
+
 export type LauncherTreeItem =
 	| WorkspaceFolderTreeItem | SessionTreeItem | EmptySessionTreeItem | ProviderLoginTreeItem | NewSessionTreeItem | ResumeSessionTreeItem
-	| ProcessTreeItem | TerminalsGroupTreeItem;
+	| ProcessTreeItem | TerminalsGroupTreeItem | SpacerTreeItem;
 
 /**
  * Catalog-first projection. Membership and local activity are synchronous;
@@ -830,6 +843,7 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 	};
 	readonly #newSessionRow = new NewSessionTreeItem();
 	readonly #resumeSessionRow = new ResumeSessionTreeItem();
+	readonly #spacer = new SpacerTreeItem();
 
 	constructor(source: SessionLauncherSource, options: {
 		readonly now?: () => number;
@@ -971,15 +985,16 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 				this.#served.fire();
 			});
 			const head = this.#providerLoginRequired ? [this.#providerLogin] : [];
-			const group = this.#group === null ? [] : [this.#group];
-			// `terminals` serves the processes alone: no session, folder or New Session row.
+			// `terminals` serves the processes alone: no session, folder, New Session or login row.
 			if (this.#grouping === "terminals") return [...this.#processItems];
-			// With no folder at all the flat list has no sessions, so the view's welcome content shows
-			// unless there are processes to list.
-			if (this.#grouping === "flat") {
-				return this.#items.length === 0 ? [...head, ...group] : [...head, ...this.#flatRows, ...group, this.#newSessionRow, this.#resumeSessionRow];
-			}
-			return [...head, ...this.#items, ...group];
+			// The Terminals group closes the list, after every session, folder and the New/Resume rows,
+			// set off by a blank row when something is above it. With no folder at all the flat list has
+			// no sessions, so the view's welcome content shows unless there are processes to list.
+			const above: LauncherTreeItem[] = this.#grouping === "flat"
+				? this.#items.length === 0 ? [...head] : [...head, ...this.#flatRows, this.#newSessionRow, this.#resumeSessionRow]
+				: [...head, ...this.#items];
+			if (this.#group === null) return above;
+			return above.length === 0 ? [this.#group] : [...above, this.#spacer, this.#group];
 		}
 		if (element instanceof TerminalsGroupTreeItem) return [...element.rows];
 		if (this.#grouping !== "folders" || !(element instanceof WorkspaceFolderTreeItem)) return [];
@@ -997,7 +1012,7 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 
 	getParent(element: LauncherTreeItem): LauncherTreeItem | undefined {
 		if (element instanceof ProcessTreeItem) return this.#grouping === "terminals" ? undefined : this.#group ?? undefined;
-		if (element instanceof TerminalsGroupTreeItem) return undefined;
+		if (element instanceof TerminalsGroupTreeItem || element instanceof SpacerTreeItem) return undefined;
 		if (this.#grouping !== "folders" || element instanceof WorkspaceFolderTreeItem || element instanceof ProviderLoginTreeItem ||
 			element instanceof NewSessionTreeItem || element instanceof ResumeSessionTreeItem) return undefined;
 		if (element instanceof EmptySessionTreeItem) return this.#items.find(folder => folder.folderId === element.folderId);
