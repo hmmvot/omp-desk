@@ -1015,7 +1015,7 @@
       {
         "command": "omp.stopTurn",
         "key": "escape",
-        "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat && omp.streaming && !omp.composerPopupOpen"
+        "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat && omp.streaming && !omp.composerPopupOpen && !inQuickOpen"
       },
       {
         "command": "omp.focusComposer",
