@@ -29,7 +29,9 @@ export function resolveToolRoute(name: string, args: Record<string, unknown>, de
 export type ToolCategory = "edit" | "command" | "read" | "search" | "agent" | "wait" | "message" | "other";
 /** `agents` is how many subagents a task call spawns; `jobs` are the distinct jobs a settled wait reports (both empty for other tools). */
 export interface ToolPresentation { route: ToolRoute; title: string; target: string; category: ToolCategory; eligible: boolean; paths: readonly string[]; agents: number; jobs: readonly string[]; liveDetail: boolean; failed: boolean; completed: boolean; warnings: number }
-const titles: Readonly<Record<string,string>> = {ask:"Ask",task:"Task",read:"Read",edit:"Edit",apply_patch:"Edit",ast_edit:"AST edit",write:"Write",bash:"Bash",python:"Python",eval:"Python",grep:"Grep",ast_grep:"AST grep",glob:"Glob",find:"Find",web_search:"Web search",todo:"TODO",wait:"Wait",debug:"Debug",lsp:"LSP",goal:"Goal",resolve:"Resolve",reject:"Reject",github:"GitHub",think:"Think",retain:"Retain",recall:"Recall",reflect:"Reflect"};
+/** Row titles of the host-run `vscode_debug_*` tools (docs/designs/2026-10-10-agent-debugger-tools.md section 5). */
+export const DEBUG_TOOL_TITLES: Readonly<Record<string,string>> = {vscode_debug_configs:"Debug setup",vscode_debug_breakpoints:"Breakpoints",vscode_debug_start:"Debug start",vscode_debug_wait:"Wait for stop",vscode_debug_inspect:"Debug inspect",vscode_debug_control:"Debug control",vscode_debug_handoff:"Hand off to you"};
+const titles: Readonly<Record<string,string>> = {...DEBUG_TOOL_TITLES,ask:"Ask",task:"Task",read:"Read",edit:"Edit",apply_patch:"Edit",ast_edit:"AST edit",write:"Write",bash:"Bash",python:"Python",eval:"Python",grep:"Grep",ast_grep:"AST grep",glob:"Glob",find:"Find",web_search:"Web search",todo:"TODO",wait:"Wait",debug:"Debug",lsp:"LSP",goal:"Goal",resolve:"Resolve",reject:"Reject",github:"GitHub",think:"Think",retain:"Retain",recall:"Recall",reflect:"Reflect"};
 export function normalizeToolPath(path: string, cwd?: string): string {
  const normalized = path.replaceAll("\\", "/").replace(/^\.\//, "");
  const root = cwd?.replaceAll("\\", "/").replace(/\/$/, "");
@@ -78,7 +80,7 @@ export function toolPresentation(tool: ProjectedTool, cwd?: string): ToolPresent
  const settledJobs = jobRows.some(job => job.status !== "running") ? jobRows.filter(job => job.status !== "running") : jobRows;
  const jobs = category === "wait" ? [...new Set(settledJobs.map(job => text(job.name) || text(job.id)).filter(Boolean))] : [];
  // A running task or wait keeps its own live row and joins the adjacent group once it settles.
- const excluded = ["ask","resolve","reject","approve","approval","question","confirm"].includes(name) || (name === "task" || name === "wait") && pending || name.startsWith("vibe_") || details.requiresApproval === true || details.pendingApproval === true;
+ const excluded = ["ask","resolve","reject","approve","approval","question","confirm"].includes(name) || (name === "task" || name === "wait" || name === "vscode_debug_wait") && pending || name.startsWith("vibe_") || details.requiresApproval === true || details.pendingApproval === true;
  const target = route.kind === "agent" ? `→ ${text(record(details.message).to) || path.replace(/^agent:\/\//i,"")}` : route.kind === "process" || route.kind === "config" ? path : text(args.command ?? args.code ?? args.query ?? args.pattern ?? args.objective) || (category === "read" && path ? normalizeToolPath(path,cwd) : paths.join(", ")) || path;
  const failed = tool.status !== "skipped" && (tool.status === "error" || tool.result?.isError === true || details.isError === true || Boolean(details.error) ||
   category === "command" && (typeof details.exitCode === "number" && details.exitCode !== 0 || Array.isArray(details.cells) && details.cells.filter(isRecord).some(cell => cell.status === "error" || typeof cell.exitCode === "number" && cell.exitCode !== 0)) ||

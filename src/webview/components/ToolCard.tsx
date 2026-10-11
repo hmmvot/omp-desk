@@ -3,7 +3,7 @@ import { memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } fr
 import type { AgentActivity, RunningAgent } from "../../chat/agents";
 import type { ChatContent, CustomMessage, ToolResultMessage } from "../../chat/messages";
 import { isInterruptedToolResult, parseChatContent } from "../../chat/messages";
-import { toolPresentation } from "../../chat/tool-presentation";
+import { DEBUG_TOOL_TITLES, toolPresentation } from "../../chat/tool-presentation";
 import { messageText } from "../lib/format";
 import { ToolTargetText } from "./FileLinks";
 import { MessageContentView } from "./MessageContent";
@@ -95,7 +95,9 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 	// Wait owns its clock; Ask names the user wait even while its details are closed.
 	const waitFace = name === "wait";
 	const pendingAsk = metadata.route.name === "ask" && result === undefined && (state === "running" || state === "queued");
-	const view = showBody || waitFace || metadata.route.name === "ask" ? retained && retainedView.current ? retainedView.current : describeTool({
+	// The host-run debug tools carry their one-line face (outcome, clock) in their renderer, so it is built while collapsed too.
+	const debugFace = Object.hasOwn(DEBUG_TOOL_TITLES, name);
+	const view = showBody || waitFace || debugFace || metadata.route.name === "ask" ? retained && retainedView.current ? retainedView.current : describeTool({
 		name, args: record(args), details, stream, text, expanded: showBody, partial,
 		hasResult: metadata.route.name === "ask" ? result !== undefined : source !== undefined, isError: state === "error",
 		callId: props.callId, agents: props.agents, agentActivity: props.agentActivity, renderChild: props.renderChild, cwd: props.cwd,

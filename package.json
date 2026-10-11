@@ -122,6 +122,35 @@
           "type": "boolean",
           "default": false,
           "description": "Remind the model after every prompt you send to write the files and folders it mentions as paths in inline code and every code symbol in Chat replies as a link ([`Name`](path:line)). The reminder is a separate message added to the request only (about 120 tokens per prompt); it is never saved to the session or shown. Applies to sessions started or resumed afterwards."
+        },
+        "omp.agentDebugger.enabled": {
+          "type": "boolean",
+          "default": false,
+          "scope": "application",
+          "description": "Give the agent of an OMP Chat session tools (`vscode_debug_*`) to drive VS Code's debugger: set breakpoints, start a launch configuration, wait for a stop, read the stack and variables, step, and hand the paused program to you. The agent works through VS Code's own debug sessions, so you see the same breakpoints and paused state in Run and Debug and can take over at any time. The tools are available in the main session of Chat editors only. These permissions are consent prompts, not a sandbox: a launch configuration can run programs and tasks, and the agent can also edit your workspace. Applies to sessions started or resumed afterwards."
+        },
+        "omp.agentDebugger.start": {
+          "type": "string",
+          "enum": ["ask", "allow"],
+          "enumDescriptions": [
+            "Ask before the agent starts a debug configuration; the prompt names the folder, the configuration or preset, its type and request, and its program.",
+            "Start the debug configurations the agent chooses without asking."
+          ],
+          "default": "ask",
+          "scope": "application",
+          "description": "Whether the agent may start a debug configuration of your launch.json (or an Attach to Unity Editor preset) without asking. Only the agent's own starts can be controlled by it; sessions you started are read-only to the agent."
+        },
+        "omp.agentDebugger.expressions": {
+          "type": "string",
+          "enum": ["off", "ask", "allow"],
+          "enumDescriptions": [
+            "The agent may not run expressions in the debugged program: no evaluate, breakpoint conditions or log messages.",
+            "Ask before each expression; the prompt shows the debug session and the exact expression.",
+            "Run the expressions the agent chooses without asking."
+          ],
+          "default": "ask",
+          "scope": "application",
+          "description": "Whether the agent may run code in the debugged program: evaluating an expression, and breakpoint conditions and log messages (all of them run code in the debuggee)."
         }
       }
     },

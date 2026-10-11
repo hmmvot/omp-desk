@@ -12,6 +12,7 @@ import { fmtDuration, fmtTokens } from "../lib/format";
 import { useLiveDurations } from "../lib/live-clock";
 import { CodePreview, Diagnostics, DiffPreview, groupedFiles, JsonOutput, LimitedList, Link, MatchOutput, record, records, scalar, Section, string, strings, TextPreview, ToolImage } from "./tool-renderer-primitives";
 import { AgentProgressView } from "./AgentProgress";
+import { DEBUG_TOOL_ICONS, debugToolRenderers } from "./debug-tool-renderers";
 
 export interface ToolRenderContext {
 	name: string;
@@ -675,12 +676,14 @@ export const TOOL_ICONS: Readonly<Record<string, string>> = {
 	resolve: "check", reject: "circle-slash", retain: "bookmark", recall: "history", reflect: "lightbulb",
 	task: "organization", think: "lightbulb", todo: "checklist", web_search: "globe",
 	vibe_spawn: "run", vibe_send: "send", vibe_wait: "watch", vibe_kill: "debug-stop", vibe_list: "list-tree", write: "edit",
+	...DEBUG_TOOL_ICONS,
 };
 export const nativeToolRenderers: Record<string, ToolRenderer> = {
 	ask, ast_grep: astGrep, ast_edit: astEdit, bash, debug, edit, apply_patch: edit, eval: evaluate,
 	find, github, glob, grep, lsp, wait, read, resolve: resolution, reject: resolution,
 	retain, recall, reflect, task, think, todo, goal, web_search: webSearch,
 	vibe_spawn: vibe, vibe_send: vibe, vibe_wait: vibe, vibe_kill: vibe, vibe_list: vibe, write,
+	...debugToolRenderers,
 };
 export function describeTool(context: ToolRenderContext): ToolSemanticView {
 	const renderer = Object.hasOwn(nativeToolRenderers, context.name) ? nativeToolRenderers[context.name]! : unknown;
