@@ -715,7 +715,7 @@ describe("desktop protocol activation", () => {
     let focused = false;
     let present = true;
     const rowIndex = { ...index, get: () => present ? index.row : null };
-    harness.notificationTree({ itemFor: async () => item }, {
+    harness.notificationTree({ itemFor: async () => item, sessionRowsShown: () => true, processItemFor: () => undefined }, {
       reveal: async (row: unknown, options: { select: boolean; focus: boolean }) => {
         if (options.select) selected = row;
         focused = options.focus;
@@ -730,7 +730,7 @@ describe("desktop protocol activation", () => {
       assert.equal(state.runtime, native);
       assert.equal(index.row.runIntent, "running");
       selected = null;
-      harness.notificationTree({ itemFor: async () => { present = false; return item; } }, {
+      harness.notificationTree({ itemFor: async () => { present = false; return item; }, sessionRowsShown: () => true, processItemFor: () => undefined }, {
         reveal: async (row: unknown) => { selected = row; },
       });
       await harness.revealDesktopNotification(rowIndex, "hmmvot.omp-desk", uri);

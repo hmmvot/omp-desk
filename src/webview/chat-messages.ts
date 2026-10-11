@@ -829,6 +829,8 @@ function parseSnapshotHead(value: unknown): ChatSnapshotHead | null {
 	const header = value.header === null ? null : parseHeader(value.header);
 	if (header === null && value.header !== null) return null;
 	if (!isCount(value.olderCount)) return null;
+	const unconfirmedClearBoundaryId = value.unconfirmedClearBoundaryId === undefined || value.unconfirmedClearBoundaryId === null ? value.unconfirmedClearBoundaryId : isName(value.unconfirmedClearBoundaryId, MAX_ID_LENGTH) ? value.unconfirmedClearBoundaryId : false;
+	if (unconfirmedClearBoundaryId === false) return null;
 	if (value.leafId !== null && !isText(value.leafId, MAX_ID_LENGTH)) return null;
 	const state = value.state === null ? null : parseLiteState(value.state);
 	if (state === null && value.state !== null) return null;
@@ -937,6 +939,7 @@ function parseSnapshotHead(value: unknown): ChatSnapshotHead | null {
 		readOnlyReason: value.readOnlyReason,
 		...(exitReason === undefined ? {} : { exitReason }),
 		header,
+		...(unconfirmedClearBoundaryId === undefined ? {} : { unconfirmedClearBoundaryId }),
 		olderCount: value.olderCount,
 		leafId: value.leafId,
 		branches: parseBranchPoints(value.branches),

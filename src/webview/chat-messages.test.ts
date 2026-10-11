@@ -333,6 +333,8 @@ describe("snapshot transport", () => {
 		const { snapshot, chunks } = splitChatSnapshot(payload(rows), "snap-1", 1_000);
 		assert.deepEqual(parseChatHostMessage(wire(snapshot)), wire(snapshot));
 		for (const chunk of chunks) assert.deepEqual(parseChatHostMessage(wire(chunk)), wire(chunk));
+		const unconfirmed = { ...snapshot, head: { ...snapshot.head, unconfirmedClearBoundaryId: "b1" } };
+		assert.deepEqual(parseChatHostMessage(wire(unconfirmed)), wire(unconfirmed));
 	});
 
 	it("holds a snapshot of no rows as a single message", () => {

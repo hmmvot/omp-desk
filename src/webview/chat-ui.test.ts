@@ -13,7 +13,8 @@ import type * as vscode from "vscode";
 import { createGuestHtml, createShellHtml } from "../host/guest-webview.ts";
 import { desktopToastXml } from "../host/desktop-notifications.ts";
 import type { ChatEntry } from "../chat/messages.ts";
-import { rewindPreview } from "../chat/rewind.ts";
+import { CLEAR_MARKER_TYPE } from "../chat/clear.ts";
+import { NAVIGATE_REFUSAL_SENTENCES, rewindPreview } from "../chat/rewind.ts";
 import { REWIND_ARGUMENTS_SENTENCE } from "../host/rpc/protocol.ts";
 
 const browserPath = [process.env.OMP_TEST_CHROMIUM,
@@ -264,9 +265,10 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			 window.clearedRows=[entry('dropped-user',{role:'user',content:'Dropped prompt'}),
 			  entry('dropped-answer',{role:'assistant',model:'m',stopReason:'error',errorMessage:'Durable failure',content:[{type:'text',text:'Dropped answer'}]}),
 			  {type:'reset_boundary',id:'clear-boundary',parentId:'dropped-answer',timestamp:'2026-10-11T00:00:01Z'},
+			  {type:'custom',id:'clear-marker',parentId:'clear-boundary',timestamp:'2026-10-11T00:00:01Z',customType:${JSON.stringify(CLEAR_MARKER_TYPE)},data:{v:1,requestId:'00112233445566778899aabbccddeeff',boundaryId:'clear-boundary'}},
 			  entry('current-user',{role:'user',content:'Current prompt'}),
 			  entry('current-answer',{role:'assistant',model:'m',stopReason:'stop',content:[{type:'text',text:'Current answer'}]})];
-			 window.ui.push({entries:window.clearedRows,durableCount:5,olderCount:7,working:false,settled:true,
+			 window.ui.push({entries:window.clearedRows,durableCount:6,olderCount:7,working:false,settled:true,
 			  commands:[{name:'omp-desk-navigate',source:'extension',description:'OMP Desk navigation'}],
 			  branches:[{entryId:'dropped-answer',branches:[{tipId:'old-tip',firstPromptId:'old-prompt',firstPrompt:'Earlier branch',messages:2,prompts:1}]}]});
 			})()`);
@@ -288,7 +290,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.wait("window.sent.some(message=>message.type==='omp:chat-load-older')");
 			assert.equal(await ui.evaluate("document.querySelector('.omp-cleared-history .omp-earlier button').disabled"), true);
 			assert.equal(await ui.evaluate("document.querySelector('.omp-cleared-history .omp-earlier button').textContent"), "loading earlier messages…");
-			await ui.evaluate(`window.ui.push({entries:[{type:'message',id:'earlier-user',parentId:null,timestamp:'2026-10-10T00:00:00Z',message:{role:'user',timestamp:0,content:'Earlier loaded prompt'}},...window.clearedRows],durableCount:6,olderCount:0})`);
+			await ui.evaluate(`window.ui.push({entries:[{type:'message',id:'earlier-user',parentId:null,timestamp:'2026-10-10T00:00:00Z',message:{role:'user',timestamp:0,content:'Earlier loaded prompt'}},...window.clearedRows],durableCount:7,olderCount:0})`);
 			await ui.wait("document.querySelector('.omp-cleared-history-cards')?.textContent.includes('Earlier loaded prompt')");
 			assert.equal(await ui.evaluate("document.querySelector('.omp-cleared-history summary').textContent"), "Context cleared · 3 messages dropped");
 			assert.equal(await ui.evaluate("document.querySelector('.omp-earlier')"), null);
@@ -305,8 +307,9 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate(`(()=>{
 			 const entry=(id,text)=>({type:'message',id,parentId:null,timestamp:'2026-10-11T00:00:00Z',message:{role:'user',timestamp:1,content:text}});
 			 const boundary=id=>({type:'reset_boundary',id,parentId:null,timestamp:'2026-10-11T00:00:00Z'});
-			 window.ui.push({entries:[entry('old','Old cleared prompt'),boundary('old-clear'),entry('recent','Recently cleared prompt'),boundary('last-clear'),
-			  ...Array.from({length:120},(_,index)=>entry('current-'+index,'Current paged prompt '+index))],durableCount:124,olderCount:5,working:false,settled:true});
+			 const marker=boundaryId=>({type:'custom',id:'marker-'+boundaryId,parentId:null,timestamp:'2026-10-11T00:00:00Z',customType:${JSON.stringify(CLEAR_MARKER_TYPE)},data:{v:1,requestId:'00112233445566778899aabbccddeeff',boundaryId}});
+			 window.ui.push({entries:[entry('old','Old cleared prompt'),boundary('old-clear'),marker('old-clear'),entry('recent','Recently cleared prompt'),boundary('last-clear'),marker('last-clear'),
+			  ...Array.from({length:120},(_,index)=>entry('current-'+index,'Current paged prompt '+index))],durableCount:126,olderCount:5,working:false,settled:true});
 			})()`);
 			await ui.wait("document.querySelector('.omp-history-pages') && document.querySelector('.omp-transcript').textContent.includes('Current paged prompt 119')");
 			assert.equal(await ui.evaluate("document.querySelector('.omp-earlier')"), null);
@@ -316,7 +319,8 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate("document.querySelector('.omp-cleared-history summary').click()");
 			await ui.wait("document.querySelector('.omp-cleared-history-cards')?.textContent.includes('Recently cleared prompt')");
 			assert.equal(await ui.evaluate("document.querySelectorAll('.omp-cleared-history').length"), 1);
-			assert.equal(await ui.evaluate("document.querySelector('.omp-cleared-history-cards .omp-native-divider').textContent"), "Context cleared");
+			assert.equal(await ui.evaluate("document.querySelectorAll('.omp-cleared-history-cards .omp-native-divider').length"), 1, "the earlier boundary is an ordinary divider");
+			assert.equal(await ui.evaluate("document.querySelectorAll('.omp-cleared-history-cards .omp-cleared-history, .omp-cleared-history-cards details').length"), 0, "and not a nested disclosure");
 			assert.equal(await ui.evaluate("document.querySelector('.omp-cleared-history-cards').textContent.includes('Old cleared prompt')"), true);
 			await ui.evaluate("document.querySelectorAll('.omp-history-pages button')[1].click()");
 			await ui.wait("!document.querySelector('.omp-cleared-history')");
@@ -3678,9 +3682,6 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
-		await t.test("Stop hands the still-queued messages back into the draft, after what is typed, and says when some could not come back", async () => {
-			await reset("quick-stop-restore");
-			await ui.evaluate("window.ui.push({working:true,settled:false,state:{...window.ui.current().state,isStreaming:true}});document.querySelector('.omp-composer textarea').focus()");
 		await t.test("Up and Down leave history while the caret has a visual row to move to: a soft-wrapped prompt is several rows, not one line", async () => {
 			await reset("quick-history-wrapped");
 			const long = Array.from({ length: 60 }, (_, index) => `word${index}`).join(" ");
@@ -3722,6 +3723,9 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		await t.test("Stop hands the still-queued messages back into the draft, after what is typed, and says when some could not come back", async () => {
+			await reset("quick-stop-restore");
+			await ui.evaluate("window.ui.push({working:true,settled:false,state:{...window.ui.current().state,isStreaming:true}});document.querySelector('.omp-composer textarea').focus()");
 			await ui.wait("document.querySelector('[aria-label=\"Stop the running turn\"]')");
 			await ui.call("Input.insertText", { text: "typed" });
 			await ui.evaluate("document.querySelector('[aria-label=\"Stop the running turn\"]').click()");
@@ -4082,7 +4086,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.wait(`document.querySelector('.omp-rewind-bar--picking') && ${barFocused}`);
 			assert.equal(await ui.evaluate("document.querySelector('.omp-rewind-blocked')"), null);
 			await pushRewind({ branches, working: true, settled: false });
-			const busy = "Rewind is unavailable while OMP is working. Wait for the turn to finish or stop it.";
+			const busy = NAVIGATE_REFUSAL_SENTENCES.busy;
 			await ui.wait(`document.querySelector('.omp-rewind-blocked')?.textContent===${JSON.stringify(busy)}`);
 			const offered = (): Promise<string[]> => ui.evaluate("[...document.querySelectorAll('.omp-rewind-bar--picking button')].map(button=>button.textContent)");
 			assert.deepEqual(await offered(), ["Cancel"], "the actions give way to the reason");
@@ -4106,7 +4110,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
 			await press("Escape", "Escape", 27);
 			await press("Escape", "Escape", 27);
-			const unsupported = "This chat process cannot rewind: it was started by an earlier OMP Desk. Restart the chat to use Rewind.";
+			const unsupported = NAVIGATE_REFUSAL_SENTENCES["restart-needed"];
 			await ui.wait(`document.querySelector('.omp-rewind-blocked')?.textContent===${JSON.stringify(unsupported)}`);
 			assert.deepEqual(await offered(), ["Cancel"]);
 			await press("Escape", "Escape", 27);
