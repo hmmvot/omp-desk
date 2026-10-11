@@ -90,9 +90,64 @@ function bareName(text: string): string {
 	return out.trim();
 }
 
-/** The container's identifiers, outermost first: `OmpDesk.Sessions.SessionData<T>` is `["Game", "Sessions", "SessionData"]`. */
-function containerSegments(container: string): string[] {
-	return bareName(container).split(/[.:]+/).map(segment => segment.trim()).filter(segment => segment !== "");
+/** The identifiers of a dotted type path, outermost first: `OmpDesk.Sessions.SessionData<T>` is `["Game", "Sessions", "SessionData"]`. */
+function pathSegments(text: string): string[] {
+	return bareName(text).split(/[.:]+/).map(segment => segment.trim()).filter(segment => segment !== "");
+}
+
+/** `text` split at whitespace outside generic argument lists (`Dictionary<K, V>.Entry` stays one word). */
+function topLevelWords(text: string): string[] {
+	const words: string[] = [];
+	let depth = 0;
+	let word = "";
+	for (const char of text) {
+		if (char === "<") depth++;
+		else if (char === ">") depth = Math.max(0, depth - 1);
+		if (depth === 0 && /\s/.test(char)) {
+			if (word !== "") words.push(word);
+			word = "";
+		} else word += char;
+	}
+	if (word !== "") words.push(word);
+	return words;
+}
+
+/** `text` split at its last parenthesized group, which must end it: `in Foo (project P (net8.0))` is `in Foo` and `project P (net8.0)`. */
+function trailingGroup(text: string): { head: string; group: string } | null {
+	if (!text.endsWith(")")) return null;
+	let depth = 0;
+	for (let index = text.length - 1; index >= 0; index--) {
+		if (text[index] === ")") depth++;
+		else if (text[index] === "(" && --depth === 0) return { head: text.slice(0, index).trim(), group: text.slice(index + 1, -1).trim() };
+	}
+	return null;
+}
+
+/**
+ * What a provider's container text says about where a declaration lives. `paths` are the alternatives for the
+ * enclosing type path (a qualifier must end one of them); `key` is the identity of the container for grouping
+ * overloads and partial parts.
+ *
+ * Most providers give the enclosing path itself (`OmpDesk.Sessions.SessionData<T>`). The C# language server (Roslyn,
+ * behind both the C# and C# Dev Kit extensions) gives a localized display text instead: a member's container is
+ * `in SessionIndex (project omp-vscode (net8.0))` (`в SessionIndex (проект Game (net8.0))` in a Russian window), a nested type of a
+ * partial type `in Outer (Outer.cs - Game (net8.0))`, and a top-level type has only the project or file
+ * (`project omp-vscode (net8.0)`, `Unit.cs - Game (net8.0)`), never a namespace. The enclosing type path is the one word
+ * of the text before its trailing group that is not the localized "in" (its place differs between languages), so
+ * every such word is an alternative; the group, which names the project, stays part of the identity so same-named
+ * types of two projects are not one symbol.
+ */
+function containerInfo(container: string): { paths: string[][]; key: string } {
+	const split = trailingGroup(container.trim());
+	// A group with a space or a nested group is the project part of a member's container; `(net8.0)` alone is a project's framework.
+	if (split !== null && /[\s(]/.test(split.group)) {
+		const words = topLevelWords(split.head);
+		// A declaration in the global namespace's own scope (a delegate) has only the "in" word: no enclosing type.
+		const paths = words.length < 2 ? [] : words.map(pathSegments).filter(segments => segments.length > 0);
+		return { paths, key: `${words.map(bareName).join(" ")}\0${split.group}` };
+	}
+	const segments = pathSegments(container);
+	return { paths: [segments], key: segments.join(".") };
 }
 
 export type SymbolMatch =
@@ -123,7 +178,7 @@ export function isNameCandidate(name: string, last: string): boolean {
 
 /** Which declarations are one symbol: the partial parts of one type, or the overloads of one member. */
 function declarationKey(entry: SymbolEntry): string | null {
-	const container = containerSegments(entry.container).join(".");
+	const container = containerInfo(entry.container).key;
 	const name = bareName(entry.name);
 	if (entry.kind in TYPE_KINDS) {
 		// Parts of a C# partial type share name, arity and container; a global-namespace type has no container, so only `.cs` files may share without one.
@@ -164,8 +219,8 @@ export function matchSymbol(symbol: CodeSymbol, entries: readonly SymbolEntry[],
 		if (LINKABLE_KINDS[entry.kind] !== true || !names.includes(bareName(entry.name))) return false;
 		if (symbol.attribute && !(entry.kind in TYPE_KINDS)) return false;
 		if (wanted.length === 0) return true;
-		const container = containerSegments(entry.container);
-		return container.length >= wanted.length && wanted.every((segment, index) => container[container.length - wanted.length + index] === segment);
+		return containerInfo(entry.container).paths.some(container =>
+			container.length >= wanted.length && wanted.every((segment, index) => container[container.length - wanted.length + index] === segment));
 	});
 	if (wanted.length === 0 && /^[A-Z]/.test(symbol.last)) {
 		const types = matches.filter(entry => entry.kind in TYPE_KINDS);

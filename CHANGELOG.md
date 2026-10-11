@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A C# member named with its class in Chat (`SessionIndex.Reload`, `Outer.Inner.Member`, `Box<T>.Put`) is a link again when its class has exactly one such member. The C# language server describes a member's class as `in SessionIndex (project omp-vscode (net8.0))` (translated in a non-English VS Code), which the class match did not understand.
 - `/clear` (and Rewind) in a chat whose OMP process was started by an earlier OMP Desk build no longer says "not supported by this OMP version"; it says the process predates the command and the session needs a restart.
 
 ## [0.3.0] - 2026-10-11

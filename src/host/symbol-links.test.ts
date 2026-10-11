@@ -48,6 +48,85 @@ test("a dotted name needs its preceding segments to end the entry's container; a
 	assert.equal(unique("Color.Red", [entry("Red", SymbolKind.EnumMember, "C.cs", 2, "Color")]), "C.cs:2");
 });
 
+/**
+ * Entries shaped exactly like the C# language server's workspace/symbol answers (Microsoft.CodeAnalysis.LanguageServer
+ * of ms-dotnettools.csharp 2.160.4; raw captures in .omp/workspace/tmp/symprobe/raw-en.txt and raw-ru.txt), kinds
+ * as vscode.SymbolKind. The container is a localized display text, never a namespace: `in SessionIndex (project Probe (net8.0))`.
+ */
+const roslyn = (name: string, kind: number, file: string, line: number, container: string) => entry(name, kind, file, line, container);
+const IN = (type: string, project = "Probe (net8.0)") => `in ${type} (project ${project})`;
+const TOP = "project Probe (net8.0)";
+
+test("a C# member links through the Roslyn container text `in Type (project P (tfm))`", () => {
+	const overloads = [
+		roslyn("Reload", SymbolKind.Method, "SessionIndex.cs", 8, IN("SessionIndex")),
+		roslyn("Reload", SymbolKind.Method, "SessionIndex.cs", 9, IN("SessionIndex")),
+	];
+	assert.equal(unique("SessionIndex.Reload", overloads), "SessionIndex.cs:8", "overloads of one member in one type are one definition");
+	assert.equal(unique("SessionIndex.Reload()", overloads), "SessionIndex.cs:8");
+	assert.equal(unique("Reload", overloads), "SessionIndex.cs:8");
+	assert.equal(unique("SessionIndex.Reload", [...overloads, roslyn("Reload", SymbolKind.Method, "Other.cs", 3, IN("Other"))]), "SessionIndex.cs:8", "a member of another type is no rival of the qualified name");
+	assert.equal(unique("Reload", [...overloads, roslyn("Reload", SymbolKind.Method, "Other.cs", 3, IN("Other"))]), "ambiguous");
+	assert.equal(unique("Other.Reload", overloads), "none", "the qualifier must be the member's own type");
+	assert.equal(unique("SessionIndex.Reload", [roslyn("Reload", SymbolKind.Method, "Other.cs", 3, IN("SessionIndex", "Elsewhere (net8.0)")), ...overloads]), "ambiguous", "same-named types of two projects are two symbols");
+});
+
+test("a Roslyn container in another display language is read the same way", () => {
+	const ru = (type: string) => `в ${type} (проект Probe (net8.0))`;
+	const overloads = [
+		roslyn("Reload", SymbolKind.Method, "SessionIndex.cs", 8, ru("SessionIndex")),
+		roslyn("Reload", SymbolKind.Method, "SessionIndex.cs", 9, ru("SessionIndex")),
+	];
+	assert.equal(unique("SessionIndex.Reload", overloads), "SessionIndex.cs:8");
+	assert.equal(unique("Other.Reload", overloads), "none");
+	const ja = roslyn("Run", SymbolKind.Method, "G.cs", 2, "GlobalThing 内 (プロジェクト Probe (net8.0))");
+	assert.equal(unique("GlobalThing.Run", [ja]), "G.cs:2", "the localized word may follow the type");
+});
+
+test("Class.Property, Class.Field, Enum.Member, nested and generic containers", () => {
+	const counter = roslyn("Counter", SymbolKind.Property, "SessionIndex.cs", 7, IN("SessionIndex"));
+	assert.equal(unique("SessionIndex.Counter", [counter]), "SessionIndex.cs:7");
+	assert.equal(unique("SessionIndex.Counter", [counter, roslyn("Counter", SymbolKind.Property, "Other.cs", 2, IN("Other"))]), "SessionIndex.cs:7");
+	assert.equal(unique("Mode.One", [roslyn("One", SymbolKind.EnumMember, "G.cs", 4, IN("Mode"))]), "G.cs:4");
+	assert.equal(unique("GlobalThing.Value", [roslyn("Value", SymbolKind.Field, "G.cs", 1, IN("GlobalThing"))]), "G.cs:1");
+	const member = roslyn("Member", SymbolKind.Method, "SessionIndex.cs", 16, IN("Outer.Inner"));
+	assert.equal(unique("Outer.Inner.Member", [member]), "SessionIndex.cs:16");
+	assert.equal(unique("Inner.Member", [member]), "SessionIndex.cs:16", "the nearest enclosing type is enough");
+	assert.equal(unique("Outer.Member", [member]), "none", "Outer does not directly hold Member");
+	assert.equal(unique("Inner.Prop", [roslyn("Prop", SymbolKind.Property, "SessionIndex.cs", 17, IN("Outer.Inner"))]), "SessionIndex.cs:17");
+	const put = roslyn("Put", SymbolKind.Method, "SessionIndex.cs", 22, IN("Box<T>"));
+	assert.equal(unique("Box.Put", [put]), "SessionIndex.cs:22", "the container's type parameters are ignored");
+	assert.equal(unique("Box<T>.Put", [put]), "SessionIndex.cs:22");
+	const fill = roslyn("Fill", SymbolKind.Method, "SessionIndex.cs", 23, IN("Box<T>.Slot<U>"));
+	assert.equal(unique("Slot.Fill", [fill]), "SessionIndex.cs:23");
+	assert.equal(unique("Box.Slot.Fill", [fill]), "SessionIndex.cs:23");
+	assert.equal(unique("Box.Fill", [fill]), "none");
+	assert.equal(unique("Dict.Add", [roslyn("Add", SymbolKind.Method, "D.cs", 5, IN("Dict<K, V>"))]), "D.cs:5", "a space inside the type arguments does not split the container");
+	assert.equal(unique("Entry.Key", [roslyn("Key", SymbolKind.Property, "D.cs", 6, IN("Dict<K, V>.Entry"))]), "D.cs:6");
+});
+
+test("a Roslyn type, partial type and delegate still link; the project, file and `in` words are not qualifiers", () => {
+	assert.equal(unique("SessionIndex", [roslyn("Uuid", SymbolKind.Struct, "SessionIndex.cs", 4, TOP), roslyn("SessionIndex", SymbolKind.Class, "SessionIndex.cs", 5, TOP)]), "SessionIndex.cs:5");
+	assert.equal(unique("Probe.SessionIndex", [roslyn("SessionIndex", SymbolKind.Class, "SessionIndex.cs", 5, TOP)]), "none", "the project is not the type's container");
+	assert.equal(unique("Parted", [roslyn("Parted", SymbolKind.Class, "Global.cs", 2, "Global.cs - Probe (net8.0)"), roslyn("Parted", SymbolKind.Class, "Global.cs", 3, "Global.cs - Probe (net8.0)")]), "Global.cs:2", "parts of one partial type in one file");
+	assert.equal(unique("Split.Nest", [roslyn("Nest", SymbolKind.Class, "PartB.cs", 3, "in Split (PartB.cs - Probe (net8.0))")]), "PartB.cs:3", "a nested type of a partial type");
+	assert.equal(unique("Deep", [roslyn("Deep", SymbolKind.Method, "PartA.cs", 3, IN("Split.Nest"))]), "PartA.cs:3");
+	const handler = roslyn("Handler", SymbolKind.Function, "G.cs", 6, "in  (project Probe (net8.0))");
+	assert.equal(unique("Handler", [handler]), "G.cs:6", "a delegate in the global scope has no type in its container");
+	assert.equal(unique("Game.Handler", [handler]), "none");
+	assert.equal(unique("Split.Two", [roslyn("Two", SymbolKind.Method, "PartB.cs", 3, IN("Split")), roslyn("Two", SymbolKind.Method, "PartA.cs", 9, IN("Split"))]), "PartA.cs:9", "one member name in two files of a partial type is one symbol");
+});
+
+test("a lookup of `SessionIndex.Reload` finds the member in the bare-name answer (the failing case of the omp-vscode log)", async () => {
+	const answer = [
+		roslyn("Reload", SymbolKind.Method, "SessionIndex.cs", 73, IN("SessionIndex", "Assembly-CSharp (netstandard2.1)")),
+		roslyn("Reload", SymbolKind.Method, "SessionIndex.cs", 80, IN("SessionIndex", "Assembly-CSharp (netstandard2.1)")),
+	];
+	const { source, asked } = provider({ Reload: answer });
+	assert.deepEqual(await new SymbolLinkResolver(source).resolve(symbol("SessionIndex.Reload"), scope), { status: "found", target: "SessionIndex.cs:73:5" });
+	assert.deepEqual(asked, ["Reload"]);
+});
+
 test("a bare capitalized name prefers a type over members of that name; members are accepted when no type matches", () => {
 	const type = entry("Session", SymbolKind.Class, "T.cs", 1);
 	const member = entry("Session", SymbolKind.Property, "P.cs", 2, "Unit");
