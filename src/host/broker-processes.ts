@@ -80,7 +80,10 @@ export interface BrokerProcessSessionHost {
 	readonly title: string;
 	readonly folder: string | null;
 	readonly window: BrokerProcessWindow;
-	/** This window runs a host of the row under exactly this slot, so its own stop flow owns it. */
+	/**
+	 * A runtime of this window runs exactly this broker (its slot, broker id and generation are the
+	 * row's), so the window's own stop flow owns it. A slot equal in name only is not enough.
+	 */
 	readonly drivenHere: boolean;
 	/** The row's recorded host names this slot (not only a mapping). */
 	readonly recorded: boolean;
@@ -107,14 +110,33 @@ export interface BrokerProcessCatalog {
 	readonly ready: boolean;
 	/** `false` when a source dropped an entry or could not be read in full. */
 	readonly complete: boolean;
-	session(slot: string): BrokerProcessSessionHost | null;
-	terminal(slot: string): BrokerProcessTerminalHost | null;
+	/** The session host the catalog records for this exact broker, or `null`; `drivenHere` needs the whole identity, not the slot alone. */
+	session(identity: BrokerIdentity): BrokerProcessSessionHost | null;
+	terminal(identity: BrokerIdentity): BrokerProcessTerminalHost | null;
 }
 
 /** A stop this build can perform, or the reason it cannot. */
 export type BrokerProcessStopAvailability =
 	| { readonly available: true }
 	| { readonly available: false; readonly reason: string; readonly diagnosticReason?: string };
+
+/** The three facts that name one broker process lifetime: a slot reused by a later broker differs in the other two. */
+export interface BrokerIdentity {
+	readonly slot: string;
+	readonly brokerId: string;
+	readonly generation: string;
+}
+
+/**
+ * What a window says about one broker row it was shown: the broker identity plus the type and the
+ * conversation the row hosted. A stop request carries only this, and the receiver stops a row that
+ * still equals it (see {@link rowMatchesIdentity}) and that it provably runs.
+ */
+export interface RowIdentity extends BrokerIdentity {
+	readonly ptyKind: PtyKind;
+	/** The conversation a session row's host names, `null` for anything else (a terminal, the dashboard, an editor-only slot). */
+	readonly tabId: string | null;
+}
 
 export interface BrokerProcessRow {
 	/** Stable across refreshes while the same broker runs. */
@@ -135,7 +157,7 @@ export interface BrokerProcessRow {
 	readonly status: BrokerProcessStatus;
 	readonly host: BrokerProcessHost | null;
 	readonly window: BrokerProcessWindow;
-	/** A runtime of this window drives the session: its own stop flow owns the row. */
+	/** A runtime of this window drives this exact broker: its own stop flow owns the row. */
 	readonly drivenHere: boolean;
 	readonly child: BrokerProcessChild;
 	/** The broker runs another build's staged runtime than this extension's package. */
@@ -323,7 +345,8 @@ export function deriveBrokerProcessRow(
 		host = { kind: "stats", window: "none" };
 		status = "in-use";
 	} else if (catalog.ready && source === "current") {
-		host = kind === "terminal" ? catalog.terminal(record.slot) : catalog.session(record.slot);
+		const identity: BrokerIdentity = { slot: record.slot, brokerId: record.brokerId, generation: record.generation };
+		host = kind === "terminal" ? catalog.terminal(identity) : catalog.session(identity);
 		status = host !== null ? "in-use" : catalog.complete ? "orphaned" : "unknown";
 	}
 	const startedMs = Date.parse(record.startedAt);
@@ -408,6 +431,54 @@ export function planKillAll(rows: readonly BrokerProcessRow[]): KillAllPlan {
 	};
 }
 
+/** What a stop request says about `row`: its exact identity and the conversation it hosts. */
+export function rowIdentityOf(row: BrokerProcessRow): RowIdentity {
+	return {
+		slot: row.slot,
+		brokerId: row.brokerId,
+		generation: row.generation,
+		ptyKind: row.ptyKind,
+		tabId: row.host?.kind === "session" ? row.host.tabId : null,
+	};
+}
+
+/** `row` is exactly the row `identity` describes: same broker lifetime, same type and same conversation. */
+export function rowMatchesIdentity(row: BrokerProcessRow, identity: RowIdentity): boolean {
+	const current = rowIdentityOf(row);
+	return (
+		current.slot === identity.slot &&
+		current.brokerId === identity.brokerId &&
+		current.generation === identity.generation &&
+		current.ptyKind === identity.ptyKind &&
+		current.tabId === identity.tabId
+	);
+}
+
+/**
+ * `current` is the broker `shown` described, not a later one in the same slot: the row id carries the
+ * slot and the broker id, and the generation and the process (id and creation time) must match too.
+ */
+export function sameBroker(shown: BrokerProcessRow, current: BrokerProcessRow): boolean {
+	return (
+		shown.id === current.id &&
+		shown.generation === current.generation &&
+		shown.brokerPid === current.brokerPid &&
+		shown.brokerCreationTime === current.brokerCreationTime
+	);
+}
+
+/**
+ * Rows a window other than this one may run, so Kill All asks the other windows about them before it
+ * touches the broker: every row an other window's claim or editor records, and every live session
+ * process this window does not run (a claim can read as `none` until it is observed). A detached
+ * terminal, an orphan, an idle process and the dashboard are no window's: the requester stops those itself.
+ */
+export function mayRunInAnotherWindow(row: BrokerProcessRow): boolean {
+	if (!row.stop.available || row.drivenHere) return false;
+	if (row.window === "other-window") return true;
+	return row.kind === "session" && row.child !== "exited" && row.status !== "orphaned";
+}
+
 /**
  * Which window shows a session row, from what the session index says. A row another window's claim
  * holds is that window's even when this window also has an editor open on it (the editor does not run
@@ -428,8 +499,6 @@ export interface BrokerCatalogRow {
 	/** `host.rpc.slot` of the row's recorded host, or `null`. */
 	readonly hostSlot: string | null;
 	readonly window: BrokerProcessWindow;
-	/** Slot of the runtime this window drives for the row, or `null`. */
-	readonly drivenSlot: string | null;
 }
 
 export interface BrokerCatalogShell {
@@ -437,6 +506,17 @@ export interface BrokerCatalogShell {
 	readonly folder: string;
 	readonly label: string;
 	readonly window: BrokerProcessWindow;
+	/**
+	 * The broker generation the window's editor attached to (`null` when none was recorded). An editor
+	 * of this window proves the shell only for that generation: a later broker in the slot is not it.
+	 */
+	readonly generation: string | null;
+}
+
+/** A runtime this window holds for a broker, whether or not a session row exists for it (an editor-only runtime has none). */
+export interface BrokerLocalRuntime extends BrokerIdentity {
+	/** The conversation its editor shows, or `null`. */
+	readonly tabId: string | null;
 }
 
 export interface BrokerCatalogSources {
@@ -447,6 +527,8 @@ export interface BrokerCatalogSources {
 	readonly byConversation: ReadonlyMap<string, string>;
 	/** `brokerSlots` `byEditor` values. */
 	readonly byEditor: ReadonlySet<string>;
+	/** Every runtime this window holds, by exact broker identity: `drivenHere` is decided by these, never by a row's slot. */
+	readonly localRuntimes: readonly BrokerLocalRuntime[];
 	/** `false` when the broker-slot table was unreadable or dropped or conflicted an entry. */
 	readonly brokerSlotsComplete: boolean;
 	readonly shells: readonly BrokerCatalogShell[];
@@ -468,32 +550,43 @@ export function buildBrokerProcessCatalog(sources: BrokerCatalogSources): Broker
 	const byHostSlot = new Map<string, BrokerCatalogRow>();
 	for (const row of sources.rows) if (row.hostSlot !== null) byHostSlot.set(row.hostSlot, row);
 	const shellBySlot = new Map(sources.shells.map(shell => [shell.slot, shell] as const));
-	const sessionHost = (row: BrokerCatalogRow, slot: string): BrokerProcessSessionHost => ({
+	const isLocal = (identity: BrokerIdentity): BrokerLocalRuntime | undefined =>
+		sources.localRuntimes.find(runtime => runtime.slot === identity.slot && runtime.brokerId === identity.brokerId && runtime.generation === identity.generation);
+	const sessionHost = (row: BrokerCatalogRow, identity: BrokerIdentity): BrokerProcessSessionHost => ({
 		kind: "session",
 		tabId: row.tabId,
 		title: row.title,
 		folder: row.folder,
 		window: row.window,
-		drivenHere: row.drivenSlot === slot,
-		recorded: row.hostSlot === slot,
+		drivenHere: isLocal(identity) !== undefined,
+		recorded: row.hostSlot === identity.slot,
 	});
 	return {
 		ready: sources.ready,
 		complete: sources.ready && sources.brokerSlotsComplete && sources.shellSlotsComplete,
-		session(slot) {
-			const byHost = byHostSlot.get(slot);
-			if (byHost !== undefined) return sessionHost(byHost, slot);
-			const tabId = sources.byConversation.get(slot);
+		session(identity) {
+			const byHost = byHostSlot.get(identity.slot);
+			if (byHost !== undefined) return sessionHost(byHost, identity);
+			const tabId = sources.byConversation.get(identity.slot);
 			const mapped = tabId === undefined ? undefined : byTab.get(tabId);
-			if (mapped !== undefined) return sessionHost(mapped, slot);
-			if (sources.byEditor.has(slot)) {
+			if (mapped !== undefined) return sessionHost(mapped, identity);
+			// A runtime of this window with no row of its own (an editor-only runtime) is still this window's: it must
+			// not read as a process nobody runs, or the broker would stop it behind the editor.
+			const local = isLocal(identity);
+			if (local !== undefined) {
+				return { kind: "session", tabId: local.tabId, title: "An editor of a session", folder: null, window: "this-window", drivenHere: true, recorded: false };
+			}
+			if (sources.byEditor.has(identity.slot)) {
 				return { kind: "session", tabId: null, title: "An editor of a session", folder: null, window: "none", drivenHere: false, recorded: false };
 			}
 			return null;
 		},
-		terminal(slot) {
-			const shell = shellBySlot.get(slot);
-			return shell === undefined ? null : { kind: "terminal", folder: shell.folder, label: shell.label, window: shell.window };
+		terminal(identity) {
+			const shell = shellBySlot.get(identity.slot);
+			if (shell === undefined) return null;
+			// An editor of this window carries the shell only for the generation it attached to.
+			const window = shell.window === "this-window" && shell.generation !== null && shell.generation !== identity.generation ? "none" : shell.window;
+			return { kind: "terminal", folder: shell.folder, label: shell.label, window };
 		},
 	};
 }

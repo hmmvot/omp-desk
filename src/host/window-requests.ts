@@ -8,14 +8,27 @@
  *   `window-requests/<holder id>.<request id>.request`   → `{ version, id, kind, to, from, createdAt, ... }`
  *   `window-requests/<holder id>.<request id>.response`  → `{ version, id, ok, focused }`
  *
- * There are two kinds. A **select** request names a session another window holds
+ * There are three kinds. A **select** request names a session another window holds
  * (`tabId`, `incarnation`, `binding`): the holder acts only to select the tab, a
  * selection-only operation that shows an editor this window already has for that session,
  * while this window still holds the session under the run incarnation the request names, and
  * never launches, stops, acquires a claim, changes a mode or forwards a request. A **launch**
  * request names a folder the receiver has open (or a session of such a folder) and what to
  * start there; the receiver starts it through its own ordinary launch path and admission, and
- * only for a folder or session it still has itself.
+ * only for a folder or session it still has itself. A **stop** request (Kill All) names rows
+ * by exact broker identity (`slot`, `brokerId`, `generation`, type and conversation) that the
+ * requester was shown; the receiver re-reads its own processes and stops, through its own stop
+ * lifecycle, only a row that still equals one named identity and that it provably runs, and it
+ * answers per row. It never stops a row by anything but that identity, and a stop request never
+ * names a process id.
+ *
+ * A stop is the one request that is *taken up* before it is answered (the receiver renames the request file to
+ * `<holder id>.<request id>.accepted` and rewrites that file with its progress after each row), because the
+ * requester must tell a window that never saw the request (it may stop that window's rows through
+ * the broker) from one that took it and is working (it must not):
+ *
+ *   `window-requests/<holder id>.<request id>.accepted` → `{ version, id, done }`
+ *   `window-requests/<holder id>.<request id>.response` → `{ version, id, ok, focused, rows: [{ state, reason }] }`
  *
  * The receiver writes the response and deletes the request; the requester reads the response
  * (and deletes it). A request is dropped once it is older than its kind's lifetime
@@ -37,6 +50,8 @@ import * as path from "node:path";
 import { errorCode, readBoundedFile, replaceFileAtomic } from "./atomic-file.ts";
 import { watchDirectory } from "./directory-watch.ts";
 import type { OpenWindow } from "./window-registry.ts";
+import type { RowIdentity } from "./broker-processes.ts";
+import type { PtyKind } from "./pty-protocol.ts";
 
 export const WINDOW_REQUEST_DIRECTORY = "window-requests";
 /**
@@ -59,6 +74,23 @@ export const REQUEST_ANSWER_TIMEOUT_MS = 5_000;
  * loading may take seconds.
  */
 export const LAUNCH_ANSWER_TIMEOUT_MS = 10_000;
+/**
+ * A stop request nobody took up this long after it was posted is dropped by its receiver. The
+ * requester gives up on acceptance after {@link STOP_ACCEPT_TIMEOUT_MS} and withdraws it, so this only
+ * bounds what a crashed requester leaves behind.
+ */
+export const STOP_REQUEST_TTL_MS = 9_000;
+/** How long a requester waits for a window to take up a stop request. A window that has not taken it by then is treated as not answering. */
+export const STOP_ACCEPT_TIMEOUT_MS = 8_000;
+/**
+ * How long a requester waits for a window that took up a stop request to show progress (a finished row) or to answer.
+ * One row can take a graceful stop and a shutdown wait (about 25 s) before the next report.
+ */
+export const STOP_PROGRESS_TIMEOUT_MS = 45_000;
+/** The longest a requester waits for one stop request in all, however steadily it shows progress. */
+export const STOP_TOTAL_TIMEOUT_MS = 600_000;
+/** Rows one stop request may name; a requester splits a longer list into several requests. */
+export const MAX_STOP_ROWS = 32;
 
 const REQUEST_SUFFIX = ".request";
 const RESPONSE_SUFFIX = ".response";
@@ -68,8 +100,15 @@ const INCARNATION_RE = /^[A-Za-z0-9._:-]{1,300}$/;
 const FILE_RE = /^([A-Za-z0-9-]{1,100})\.([A-Za-z0-9-]{1,100})\.(request|response)$/;
 /** A request stamped further ahead than this is not trusted. */
 const FUTURE_SKEW_MS = 5_000;
-const MAX_REQUEST_BYTES = 8 * 1024;
+const MAX_REQUEST_BYTES = 32 * 1024;
 const MAX_RESPONSE_BYTES = 1024;
+const MAX_STOP_RESPONSE_BYTES = 16 * 1024;
+const MAX_PROGRESS_BYTES = 512;
+const MAX_STOP_REASON = 240;
+const ACCEPTED_SUFFIX = ".accepted";
+const SLOT_RE = /^[A-Za-z0-9:._/\\-]{1,256}$/;
+const BROKER_FIELD_RE = /^[A-Za-z0-9._:/-]{1,128}$/;
+const PTY_KINDS: readonly PtyKind[] = ["managed-rpc", "managed-omp", "folder-shell", "stats-dashboard"];
 const MAX_TAB_ID = 200;
 const MAX_WORKSPACE_PATH = 4096;
 const FOLDER_ID_RE = /^folder:[A-Za-z0-9._-]{1,100}$/;
@@ -127,12 +166,36 @@ export interface LaunchRequest extends RequestBase {
 	readonly launch: LaunchAction;
 }
 
+/** One request to stop the rows it names that the receiving window runs itself. */
+export interface StopRequest extends RequestBase {
+	readonly kind: "stop";
+	/** What the requester was shown, at most {@link MAX_STOP_ROWS}, without repeats. */
+	readonly rows: readonly RowIdentity[];
+}
+
+/** What a receiver answers for one named row. */
+export type StopRowState =
+	/** The receiver's own flow stopped it and its broker is gone. */
+	| "stopped"
+	/** The receiver runs it and tried; it is not confirmed stopped (a failed or unconfirmed stop, a stop that left its broker open). */
+	| "unconfirmed"
+	/** The receiver does not provably run it (or the row cannot be stopped by this build): nothing was done, and another route may be taken. */
+	| "refused"
+	/** The row is gone or no longer equals the identity named, or changed while it was being prepared: nothing was stopped, and nobody else may stop it on the strength of this request. */
+	| "changed";
+
+export interface StopRowAnswer {
+	readonly state: StopRowState;
+	/** Bounded text for the report; may be empty. */
+	readonly reason: string;
+}
+
 /** A request as a window receives it. */
-export type WindowRequest = SwitchRequest | LaunchRequest;
+export type WindowRequest = SwitchRequest | LaunchRequest | StopRequest;
 
 /** How long a request stays actionable. */
 export function requestTtlMs(request: Pick<WindowRequest, "kind">): number {
-	return request.kind === "launch" ? LAUNCH_REQUEST_TTL_MS : REQUEST_TTL_MS;
+	return request.kind === "launch" ? LAUNCH_REQUEST_TTL_MS : request.kind === "stop" ? STOP_REQUEST_TTL_MS : REQUEST_TTL_MS;
 }
 
 /** What the owner did with a request: whether it selected the tab, and whether its window is in front. */
@@ -146,6 +209,8 @@ export interface ServeOutcome {
 	 * cannot build a view. Only a refusal can carry it.
 	 */
 	readonly refusal?: RefusalReason;
+	/** A stop request's per-row answers, in the order of the request's rows; only a successful outcome carries them. */
+	readonly rows?: readonly StopRowAnswer[];
 }
 
 /** The reasons a refusal names; a refusal without one is the ordinary "could not do it". */
@@ -153,8 +218,10 @@ export type RefusalReason = "stale-build";
 
 /** What `serve` may ask while it works. */
 export interface ServeContext {
-	/** `false` once the request was withdrawn or expired: the requester no longer wants the tab selected. */
+	/** `false` once the request was withdrawn or expired: the requester no longer wants the tab selected. A stop that was taken up cannot be withdrawn: it is `false` only once this window shuts down. */
 	stillWanted(): Promise<boolean>;
+	/** A stop request's progress: `done` rows are finished. The requester measures silence from the last change. Nothing for any other kind. */
+	progress(done: number): Promise<void>;
 }
 
 /** How the requester's wait ended. */
@@ -187,6 +254,33 @@ function parseWorkspace(value: unknown): LaunchWorkspace | null {
 	return { path: workspacePath, match };
 }
 
+function parseRowIdentity(value: unknown): RowIdentity | null {
+	if (typeof value !== "object" || value === null) return null;
+	const { slot, brokerId, generation, ptyKind, tabId } = value as Record<string, unknown>;
+	if (typeof slot !== "string" || !SLOT_RE.test(slot)) return null;
+	if (typeof brokerId !== "string" || !BROKER_FIELD_RE.test(brokerId)) return null;
+	if (typeof generation !== "string" || !BROKER_FIELD_RE.test(generation)) return null;
+	if (typeof ptyKind !== "string" || !PTY_KINDS.includes(ptyKind as PtyKind)) return null;
+	if (tabId !== null && (typeof tabId !== "string" || tabId.length === 0 || tabId.length > MAX_TAB_ID)) return null;
+	return { slot, brokerId, generation, ptyKind: ptyKind as PtyKind, tabId };
+}
+
+/** The identities of a stop request: one to {@link MAX_STOP_ROWS}, each well-formed, none repeated. */
+function parseStopRows(value: unknown): readonly RowIdentity[] | null {
+	if (!Array.isArray(value) || value.length === 0 || value.length > MAX_STOP_ROWS) return null;
+	const rows: RowIdentity[] = [];
+	const seen = new Set<string>();
+	for (const item of value) {
+		const row = parseRowIdentity(item);
+		if (row === null) return null;
+		const key = JSON.stringify([row.slot, row.brokerId, row.generation]);
+		if (seen.has(key)) return null;
+		seen.add(key);
+		rows.push(row);
+	}
+	return rows;
+}
+
 function parseRequest(text: string, fileTo: string, fileId: string): WindowRequest | null {
 	let parsed: unknown;
 	try {
@@ -196,7 +290,7 @@ function parseRequest(text: string, fileTo: string, fileId: string): WindowReque
 	}
 	if (typeof parsed !== "object" || parsed === null) return null;
 	// Every field is checked one by one below; nothing of this shape is trusted before that.
-	const { version, kind, id, to, from, tabId, incarnation, binding, createdAt, launch, workspace } = parsed as Record<string, unknown>;
+	const { version, kind, id, to, from, tabId, incarnation, binding, createdAt, launch, workspace, rows } = parsed as Record<string, unknown>;
 	if (version !== VERSION || id !== fileId || to !== fileTo) return null;
 	if (typeof from !== "string" || !ID_RE.test(from)) return null;
 	if (typeof createdAt !== "string" || createdAt.length > 40 || !Number.isFinite(Date.parse(createdAt))) return null;
@@ -204,6 +298,10 @@ function parseRequest(text: string, fileTo: string, fileId: string): WindowReque
 		const action = parseLaunch(launch);
 		const target = parseWorkspace(workspace);
 		return action === null || target === null ? null : { kind, version: VERSION, id, to, from, createdAt, workspace: target, launch: action };
+	}
+	if (kind === "stop") {
+		const identities = parseStopRows(rows);
+		return identities === null ? null : { kind, version: VERSION, id, to, from, createdAt, rows: identities };
 	}
 	if (kind !== "select") return null;
 	if (typeof tabId !== "string" || tabId.length === 0 || tabId.length > MAX_TAB_ID) return null;
@@ -231,7 +329,37 @@ function parseResponse(text: string, id: string): ServeOutcome | null {
 /** The text of the response file for `outcome`: what the requester reads back with {@link parseResponse}. */
 function responseText(id: string, outcome: ServeOutcome): string {
 	const refusal = !outcome.ok && outcome.refusal !== undefined ? { refusal: outcome.refusal } : {};
-	return `${JSON.stringify({ version: VERSION, id, ok: outcome.ok, focused: outcome.ok && outcome.focused, ...refusal })}\n`;
+	const rows = outcome.ok && outcome.rows !== undefined
+		? { rows: outcome.rows.map(row => ({ state: row.state, reason: row.reason.slice(0, MAX_STOP_REASON) })) }
+		: {};
+	return `${JSON.stringify({ version: VERSION, id, ok: outcome.ok, focused: outcome.ok && outcome.focused, ...refusal, ...rows })}\n`;
+}
+
+/**
+ * The outcome in `text` for stop request `id` of `count` rows: the per-row answers of a successful answer, `"failed"` for a
+ * well-formed answer that says the receiver could not serve (it may have stopped some rows first), or `null` for anything
+ * that is not a well-formed answer to this very request.
+ */
+function parseStopResponse(text: string, id: string, count: number): readonly StopRowAnswer[] | "failed" | null {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(text);
+	} catch {
+		return null;
+	}
+	if (typeof parsed !== "object" || parsed === null) return null;
+	const record = parsed as Record<string, unknown>;
+	if (record.version === VERSION && record.id === id && record.ok === false) return "failed";
+	if (record.version !== VERSION || record.id !== id || record.ok !== true || !Array.isArray(record.rows) || record.rows.length !== count) return null;
+	const answers: StopRowAnswer[] = [];
+	for (const item of record.rows) {
+		if (typeof item !== "object" || item === null) return null;
+		const { state, reason } = item as Record<string, unknown>;
+		if (state !== "stopped" && state !== "unconfirmed" && state !== "refused" && state !== "changed") return null;
+		if (typeof reason !== "string" || reason.length > MAX_STOP_REASON) return null;
+		answers.push({ state, reason });
+	}
+	return answers;
 }
 
 /**
@@ -285,6 +413,31 @@ export async function postLaunchRequest(
 		createdAt: new Date(now()).toISOString(),
 		workspace: request.workspace,
 		launch: request.launch,
+	};
+	await writeRequest(storageDir, record, now);
+	return id;
+}
+
+/**
+ * Ask `to` to stop the rows it runs among `rows` (at most {@link MAX_STOP_ROWS}). Resolves with the
+ * request id once the file is in place; the requester then waits with {@link awaitStopAnswer}.
+ */
+export async function postStopRequest(
+	storageDir: string,
+	request: { readonly to: string; readonly from: string; readonly rows: readonly RowIdentity[] },
+	now: () => number = Date.now,
+): Promise<string> {
+	if (!ID_RE.test(request.to) || !ID_RE.test(request.from)) throw new TypeError("a window request needs holder ids of letters, digits and dashes");
+	if (parseStopRows(request.rows) === null) throw new TypeError(`a stop request needs one to ${MAX_STOP_ROWS} distinct, well-formed row identities`);
+	const id = randomUUID();
+	const record: StopRequest = {
+		kind: "stop",
+		version: VERSION,
+		id,
+		to: request.to,
+		from: request.from,
+		createdAt: new Date(now()).toISOString(),
+		rows: request.rows,
 	};
 	await writeRequest(storageDir, record, now);
 	return id;
@@ -346,6 +499,169 @@ export async function awaitRequestAnswer(
 		setTimeout(resolve, pollMs).unref?.();
 		await promise;
 	}
+}
+
+/** How a requester's wait for a stop request ended. */
+export type StopAnswer =
+	/** The window took the request up and answered every row. */
+	| { readonly kind: "answered"; readonly rows: readonly StopRowAnswer[] }
+	/**
+	 * The window never took the request up: it was withdrawn here after {@link STOP_ACCEPT_TIMEOUT_MS}, or it
+	 * vanished unanswered (a window of an older build deletes a kind it does not know). Nothing was stopped there.
+	 */
+	| { readonly kind: "not-accepted" }
+	/** The window took the request up and then went silent or answered with no usable report: some rows may have stopped. */
+	| { readonly kind: "silent" };
+
+type ProbedRead = { readonly kind: "missing" | "invalid" | "busy" } | { readonly kind: "text"; readonly text: string };
+
+/** One bounded read of a file another window rewrites; a sharing conflict while it is replaced reads as `busy`, never an exception. */
+async function probeFile(file: string, maxBytes: number): Promise<ProbedRead> {
+	try {
+		return await readBoundedFile(file, maxBytes);
+	} catch {
+		return { kind: "busy" };
+	}
+}
+
+/**
+ * Wait for the answer to stop request `id`, which names `rowCount` rows.
+ *
+ * Before the window takes the request up, the requester owns it: at {@link STOP_ACCEPT_TIMEOUT_MS} it
+ * deletes the request file, and only a successful delete proves the window never acted (the receiver
+ * takes a request up by renaming the file, and exactly one of the two can win). Once the request is
+ * taken up the window is working: the wait ends with its answer, or as `silent` once its progress file
+ * has not changed for {@link STOP_PROGRESS_TIMEOUT_MS} or the wait has lasted {@link STOP_TOTAL_TIMEOUT_MS}.
+ * Responses that are not a well-formed answer to this request are deleted and ignored.
+ */
+export async function awaitStopAnswer(
+	storageDir: string,
+	to: string,
+	id: string,
+	rowCount: number,
+	options: { readonly acceptTimeoutMs?: number; readonly progressTimeoutMs?: number; readonly totalTimeoutMs?: number; readonly pollMs?: number } = {},
+): Promise<StopAnswer> {
+	const directory = directoryOf(storageDir);
+	const requestFile = path.join(directory, `${to}.${id}${REQUEST_SUFFIX}`);
+	const acceptedFile = path.join(directory, `${to}.${id}${ACCEPTED_SUFFIX}`);
+	const responseFile = path.join(directory, `${to}.${id}${RESPONSE_SUFFIX}`);
+	const acceptMs = options.acceptTimeoutMs ?? STOP_ACCEPT_TIMEOUT_MS;
+	const progressMs = options.progressTimeoutMs ?? STOP_PROGRESS_TIMEOUT_MS;
+	const totalMs = options.totalTimeoutMs ?? STOP_TOTAL_TIMEOUT_MS;
+	const pollMs = options.pollMs ?? 100;
+	const startedAt = Date.now();
+	/** Whether a file is there; a file that cannot be examined counts as there, never as proof of absence. */
+	const exists = async (file: string): Promise<boolean> => {
+		try {
+			await fsp.stat(file);
+			return true;
+		} catch (error) {
+			return errorCode(error) !== "ENOENT";
+		}
+	};
+	/** `null`: no response file. `"unusable"`: a response file was there and is no answer to this request (it is deleted). */
+	const takeResponse = async (): Promise<StopAnswer | "unusable" | null> => {
+		const read = await probeFile(responseFile, MAX_STOP_RESPONSE_BYTES);
+		if (read.kind === "missing" || read.kind === "busy") return null;
+		await fsp.rm(responseFile, { force: true }).catch(() => {});
+		const outcome = read.kind === "text" ? parseStopResponse(read.text, id, rowCount) : null;
+		if (outcome === null) return "unusable";
+		return outcome === "failed" ? { kind: "silent" } : { kind: "answered", rows: outcome };
+	};
+	let accepted = false;
+	let lastProgress = "";
+	let lastProgressAt = startedAt;
+	let sawUnusable = false;
+	for (;;) {
+		const taken = await takeResponse();
+		if (taken === "unusable") sawUnusable = true;
+		else if (taken !== null) return taken;
+		const now = Date.now();
+		if (!accepted) {
+			if (!(await exists(requestFile))) {
+				// The file is gone: renamed to the accepted file (one atomic step), or deleted by a window that does not know the kind.
+				if (!(await exists(acceptedFile))) {
+					const late = await takeResponse();
+					if (late !== null && late !== "unusable") return late;
+					// A response file that was no answer still proves a window acted on the request.
+					return late === "unusable" || sawUnusable ? { kind: "silent" } : { kind: "not-accepted" };
+				}
+				accepted = true;
+				lastProgressAt = now;
+			} else if (now - startedAt >= acceptMs) {
+				try {
+					await fsp.unlink(requestFile);
+					return { kind: "not-accepted" };
+				} catch {
+					// Either the window took the request up in this very instant (the next round finds the accepted file) or
+					// the delete is blocked for now; the next round decides, and only a successful delete ever ends the wait here.
+				}
+			}
+		}
+		if (accepted) {
+			const progress = await probeFile(acceptedFile, MAX_PROGRESS_BYTES);
+			if (progress.kind === "missing") {
+				// The receiver removes the accepted file after it wrote the response.
+				const late = await takeResponse();
+				return late === null || late === "unusable" ? { kind: "silent" } : late;
+			}
+			const text = progress.kind === "text" ? progress.text : "";
+			if (progress.kind !== "busy" && text !== lastProgress) {
+				lastProgress = text;
+				lastProgressAt = now;
+			}
+			if (now - lastProgressAt >= progressMs || now - startedAt >= totalMs) return { kind: "silent" };
+		}
+		const { promise, resolve } = Promise.withResolvers<void>();
+		setTimeout(resolve, pollMs).unref?.();
+		await promise;
+	}
+}
+
+/**
+ * What one window answered for one row of {@link askWindowToStop}: a receiver's answer, or why there is none.
+ * `not-accepted`: the window never took the request up (nothing was done there). `silent`: it took the request up
+ * and then went silent, or answered with no usable report (some rows may have stopped there).
+ */
+export type PeerRowAnswer = StopRowAnswer | { readonly state: "not-accepted" | "silent"; readonly reason: string };
+
+/**
+ * Ask `request.to` to stop the rows it runs among `request.rows`, in as many requests as {@link MAX_STOP_ROWS}
+ * needs, one after another, and answer for every row in order. Once a request is not taken up or goes silent the
+ * rows not asked yet are answered the same way and no further request is posted to that window. Never throws.
+ */
+export async function askWindowToStop(
+	storageDir: string,
+	request: { readonly to: string; readonly from: string; readonly rows: readonly RowIdentity[] },
+	options: { readonly acceptTimeoutMs?: number; readonly progressTimeoutMs?: number; readonly totalTimeoutMs?: number; readonly pollMs?: number } = {},
+): Promise<readonly PeerRowAnswer[]> {
+	const answers: PeerRowAnswer[] = [];
+	let blocked: PeerRowAnswer | null = null;
+	for (let start = 0; start < request.rows.length; start += MAX_STOP_ROWS) {
+		const chunk = request.rows.slice(start, start + MAX_STOP_ROWS);
+		if (blocked !== null) {
+			answers.push(...chunk.map(() => blocked!));
+			continue;
+		}
+		let id: string;
+		try {
+			id = await postStopRequest(storageDir, { to: request.to, from: request.from, rows: chunk });
+		} catch (error) {
+			blocked = { state: "not-accepted", reason: `the request could not be posted: ${messageOf(error)}` };
+			answers.push(...chunk.map(() => blocked!));
+			continue;
+		}
+		const answer = await awaitStopAnswer(storageDir, request.to, id, chunk.length, options);
+		if (answer.kind === "answered") {
+			answers.push(...answer.rows);
+			continue;
+		}
+		blocked = answer.kind === "silent"
+			? { state: "silent", reason: "it took the request up and did not report back" }
+			: { state: "not-accepted", reason: "" };
+		answers.push(...chunk.map(() => blocked!));
+	}
+	return answers;
 }
 
 /**
@@ -429,17 +745,35 @@ export function startRequestWatch(
 				await fsp.rm(file, { force: true });
 				return;
 			}
+			const acceptedFile = path.join(directory, `${request.to}.${request.id}${ACCEPTED_SUFFIX}`);
+			if (request.kind === "stop") {
+				// Take the request up: one atomic rename, so the requester's delete and this claim cannot both win. A request
+				// the requester already withdrew is gone, and nothing is stopped for it.
+				try {
+					await fsp.rename(file, acceptedFile);
+				} catch (error) {
+					if (errorCode(error) !== "ENOENT") report(`a stop request could not be taken up: ${messageOf(error)}`);
+					return;
+				}
+			}
 			const stillWanted = async (): Promise<boolean> => {
-				if (disposed || now() - Date.parse(request.createdAt) > requestTtlMs(request)) return false;
+				if (disposed) return false;
+				// A stop that was taken up cannot be withdrawn, and the user already confirmed it.
+				if (request.kind === "stop") return true;
+				if (now() - Date.parse(request.createdAt) > requestTtlMs(request)) return false;
 				try {
 					return (await fsp.stat(file)).isFile();
 				} catch {
 					return false;
 				}
 			};
+			const progress = async (done: number): Promise<void> => {
+				if (request.kind !== "stop" || disposed) return;
+				await replaceFileAtomic(acceptedFile, `${JSON.stringify({ version: VERSION, id: request.id, done })}\n`).catch(() => {});
+			};
 			let outcome: ServeOutcome = { ok: false, focused: false };
 			try {
-				outcome = await serve(request, { stillWanted });
+				outcome = await serve(request, { stillWanted, progress });
 			} catch (error) {
 				report(`a window request could not be served: ${messageOf(error)}`);
 			}
@@ -450,6 +784,7 @@ export function startRequestWatch(
 				responseText(request.id, outcome),
 			);
 			await fsp.rm(file, { force: true });
+			if (request.kind === "stop") await fsp.rm(acceptedFile, { force: true });
 		} catch (error) {
 			report(`a window request could not be answered: ${messageOf(error)}`);
 		} finally {
@@ -794,7 +1129,7 @@ export function startPendingLaunchWatch(
 			};
 			let outcome: ServeOutcome = { ok: false, focused: false };
 			try {
-				outcome = await serve(request, { stillWanted });
+				outcome = await serve(request, { stillWanted, progress: async () => {} });
 			} catch (error) {
 				report(`a pending launch could not be served: ${messageOf(error)}`);
 			}

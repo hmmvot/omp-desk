@@ -14,7 +14,11 @@ import {
 	buildBrokerProcessCatalog,
 	createBrokerProcessReader,
 	deriveBrokerProcessRow,
+	mayRunInAnotherWindow,
 	planKillAll,
+	rowIdentityOf,
+	rowMatchesIdentity,
+	sameBroker,
 	selectOrphanedAndIdle,
 	sessionRowWindow,
 } from "./broker-processes.ts";
@@ -82,6 +86,7 @@ function sources(overrides: Partial<BrokerCatalogSources> = {}): BrokerCatalogSo
 		rows: [],
 		byConversation: new Map(),
 		byEditor: new Set(),
+		localRuntimes: [],
 		brokerSlotsComplete: true,
 		shells: [],
 		shellSlotsComplete: true,
@@ -374,7 +379,7 @@ describe("broker process rows: stop availability and flags", () => {
 		// The catalog references the slot, which must not make a predecessor "in use".
 		const catalog = buildBrokerProcessCatalog(
 			sources({
-				rows: [{ tabId: "t1", title: "T", folder: null, hostSlot: "tab:old", window: "none", drivenSlot: null }],
+				rows: [{ tabId: "t1", title: "T", folder: null, hostSlot: "tab:old", window: "none" }],
 			}),
 		);
 		const { calls, reader } = harness([predecessor(record)], catalog);
@@ -438,7 +443,6 @@ describe("broker process classification", () => {
 		folder: "C:/work/app",
 		hostSlot: null,
 		window: "none" as const,
-		drivenSlot: null,
 		...overrides,
 	});
 
@@ -481,7 +485,7 @@ describe("broker process classification", () => {
 	it("calls a slot in the shell list in use for a terminal", () => {
 		const result = derive(
 			"shell:a",
-			sources({ shells: [{ slot: "shell:a", folder: "C:/work/app", label: "app", window: "other-window" }] }),
+			sources({ shells: [{ slot: "shell:a", folder: "C:/work/app", label: "app", window: "other-window", generation: null }] }),
 			"folder-shell",
 		);
 		assert.equal(result.status, "in-use");
@@ -491,7 +495,7 @@ describe("broker process classification", () => {
 	});
 
 	it("does not take a terminal's slot from the session mappings, or a session's from the shell list", () => {
-		const shellAsSession = derive("shell:a", sources({ shells: [{ slot: "shell:a", folder: "f", label: "l", window: "none" }] }), "managed-rpc");
+		const shellAsSession = derive("shell:a", sources({ shells: [{ slot: "shell:a", folder: "f", label: "l", window: "none", generation: null }] }), "managed-rpc");
 		assert.equal(shellAsSession.status, "orphaned");
 		const sessionAsShell = derive("tab:a", sources({ rows: [row({ hostSlot: "tab:a" })] }), "folder-shell");
 		assert.equal(sessionAsShell.status, "orphaned");
@@ -524,23 +528,52 @@ describe("broker process classification", () => {
 			assert.equal(result.status, "in-use");
 			const shell = derive(
 				"shell:a",
-				sources({ ...incomplete, shells: [{ slot: "shell:a", folder: "f", label: "l", window: "none" }] }),
+				sources({ ...incomplete, shells: [{ slot: "shell:a", folder: "f", label: "l", window: "none", generation: null }] }),
 				"folder-shell",
 			);
 			assert.equal(shell.status, "in-use");
 		});
 	}
 
-	it("decides driven-here per slot, not per row", () => {
-		const catalogSources = sources({
-			rows: [row({ hostSlot: "tab:a", drivenSlot: "tab:a" })],
-			byConversation: new Map([["tab:b", "t1"]]),
-		});
-		const driven = derive("tab:a", catalogSources);
-		const other = derive("tab:b", catalogSources);
-		assert.equal(driven.drivenHere, true);
-		assert.equal(other.drivenHere, false);
-		assert.equal(other.status, "in-use");
+	it("decides driven-here by the exact broker a runtime of this window holds, not by the row's slot", () => {
+		const record = facts("tab:a");
+		const identity = { slot: record.slot, brokerId: record.brokerId, generation: record.generation };
+		const catalogOf = (localRuntimes: BrokerCatalogSources["localRuntimes"]) => buildBrokerProcessCatalog(sources({ rows: [row({ hostSlot: "tab:a" })], localRuntimes }));
+		const classify = (localRuntimes: BrokerCatalogSources["localRuntimes"]) => deriveBrokerProcessRow(current(record), catalogOf(localRuntimes), BUILD_DIGEST, NOW, "running");
+		assert.equal(classify([{ ...identity, tabId: "t1" }]).drivenHere, true);
+		assert.equal(classify([]).drivenHere, false);
+		// The same slot under a later broker (another id, or another generation of the launch) is not the runtime this window holds.
+		assert.equal(classify([{ ...identity, brokerId: "pty-another", tabId: "t1" }]).drivenHere, false);
+		assert.equal(classify([{ ...identity, generation: "gen-another", tabId: "t1" }]).drivenHere, false);
+		assert.equal(classify([{ ...identity, slot: "tab:b", tabId: "t1" }]).drivenHere, false);
+	});
+
+	it("counts an editor-only runtime of this window as this window's, with the conversation its editor shows", () => {
+		const record = facts("tab:a");
+		const runtime = { slot: record.slot, brokerId: record.brokerId, generation: record.generation, tabId: "t-editor" };
+		// No row records the slot and no mapping names it: without the runtime this broker would read as an orphan.
+		const withRuntime = deriveBrokerProcessRow(current(record), buildBrokerProcessCatalog(sources({ localRuntimes: [runtime] })), BUILD_DIGEST, NOW, "running");
+		assert.equal(withRuntime.status, "in-use");
+		assert.equal(withRuntime.drivenHere, true);
+		assert.equal(withRuntime.window, "this-window");
+		assert.equal(withRuntime.host?.kind === "session" ? withRuntime.host.tabId : "not a session", "t-editor");
+		const otherBroker = deriveBrokerProcessRow(current(record), buildBrokerProcessCatalog(sources({ localRuntimes: [{ ...runtime, brokerId: "pty-another" }] })), BUILD_DIGEST, NOW, "running");
+		assert.equal(otherBroker.status, "orphaned");
+		assert.equal(otherBroker.drivenHere, false);
+		// An editor-only mapping with this window's runtime keeps the same fact; with none it is nobody's here.
+		const mappedOnly = deriveBrokerProcessRow(current(record), buildBrokerProcessCatalog(sources({ byEditor: new Set(["tab:a"]) })), BUILD_DIGEST, NOW, "running");
+		assert.equal(mappedOnly.drivenHere, false);
+		assert.equal(mappedOnly.window, "none");
+	});
+
+	it("trusts an editor of this window for a terminal only for the generation it attached to", () => {
+		const shell = (generation: string | null) => sources({ shells: [{ slot: "shell:a", folder: "C:/work/app", label: "app", window: "this-window", generation }] });
+		const record = facts("shell:a", { kind: "folder-shell" });
+		const classify = (generation: string | null) => deriveBrokerProcessRow(current(record), buildBrokerProcessCatalog(shell(generation)), BUILD_DIGEST, NOW, "running");
+		assert.equal(classify(record.generation).window, "this-window");
+		assert.equal(classify(null).window, "this-window");
+		assert.equal(classify("gen-an-older-broker").window, "none", "a later broker in the slot is not the one the editor carries");
+		assert.equal(classify("gen-an-older-broker").status, "in-use");
 	});
 
 	it("does not classify a predecessor row, whatever the catalog says", () => {
@@ -574,8 +607,8 @@ describe("broker process ordering", () => {
 		const catalog = buildBrokerProcessCatalog(
 			sources({
 				rows: [
-					{ tabId: "t1", title: "exited", folder: null, hostSlot: "tab:exited", window: "none", drivenSlot: null },
-					{ tabId: "t2", title: "in use", folder: null, hostSlot: "tab:in-use", window: "none", drivenSlot: null },
+					{ tabId: "t1", title: "exited", folder: null, hostSlot: "tab:exited", window: "none" },
+					{ tabId: "t2", title: "in use", folder: null, hostSlot: "tab:in-use", window: "none" },
 				],
 			}),
 		);
@@ -595,8 +628,8 @@ describe("broker process ordering", () => {
 			sources({
 				brokerSlotsComplete: false,
 				rows: [
-					{ tabId: "t1", title: "exited", folder: null, hostSlot: "tab:exited", window: "none", drivenSlot: null },
-					{ tabId: "t2", title: "in use", folder: null, hostSlot: "tab:in-use", window: "none", drivenSlot: null },
+					{ tabId: "t1", title: "exited", folder: null, hostSlot: "tab:exited", window: "none" },
+					{ tabId: "t2", title: "in use", folder: null, hostSlot: "tab:in-use", window: "none" },
 				],
 			}),
 		);
@@ -771,6 +804,42 @@ describe("planKillAll", () => {
 		const plan = planKillAll([old, incompatible]);
 		assert.deepEqual(plan.blocked, [old, incompatible]);
 		assert.deepEqual([plan.here, plan.otherWindows, plan.notRun], [[], [], []]);
+	});
+
+	it("names a row by its exact broker identity and conversation, and matches only a row that still equals it", () => {
+		const session = row({ host: { kind: "session", tabId: "t1", title: "A", folder: null, window: "none", drivenHere: false, recorded: true } });
+		const identity = rowIdentityOf(session);
+		assert.deepEqual(identity, { slot: session.slot, brokerId: session.brokerId, generation: session.generation, ptyKind: "managed-rpc", tabId: "t1" });
+		assert.equal(rowMatchesIdentity(session, identity), true);
+		assert.equal(rowMatchesIdentity({ ...session, generation: "gen-later" }, identity), false, "a later launch in the slot");
+		assert.equal(rowMatchesIdentity({ ...session, brokerId: "pty-later" }, identity), false);
+		assert.equal(rowMatchesIdentity({ ...session, ptyKind: "managed-omp" }, identity), false);
+		assert.equal(rowMatchesIdentity({ ...session, host: { ...session.host!, tabId: "t2" } as BrokerProcessRow["host"] }, identity), false, "the slot now hosts another conversation");
+		assert.equal(rowMatchesIdentity({ ...session, host: null }, identity), false);
+		assert.equal(rowIdentityOf(row()).tabId, null);
+	});
+
+	it("tells one broker from a later one in the same slot by generation and process", () => {
+		const shown = row();
+		assert.equal(sameBroker(shown, { ...shown }), true);
+		assert.equal(sameBroker(shown, { ...shown, generation: "gen-later" }), false);
+		assert.equal(sameBroker(shown, { ...shown, brokerPid: shown.brokerPid + 1 }), false);
+		assert.equal(sameBroker(shown, { ...shown, brokerCreationTime: "134349421014309999" }), false);
+		assert.equal(sameBroker(shown, row()), false);
+	});
+
+	it("asks the other windows only about rows one of them might run", () => {
+		const held = row({ window: "other-window" });
+		const heldTerminal = row({ kind: "terminal", ptyKind: "folder-shell", window: "other-window" });
+		const runningUnobserved = row({ window: "none" });
+		const shownHere = row({ window: "this-window" });
+		assert.deepEqual([held, heldTerminal, runningUnobserved, shownHere].map(mayRunInAnotherWindow), [true, true, true, true]);
+		assert.equal(mayRunInAnotherWindow(row({ drivenHere: true })), false, "this window runs it");
+		assert.equal(mayRunInAnotherWindow(row({ status: "orphaned" })), false);
+		assert.equal(mayRunInAnotherWindow(row({ child: "exited" })), false);
+		assert.equal(mayRunInAnotherWindow(row({ kind: "terminal", ptyKind: "folder-shell", window: "none" })), false, "a detached terminal is no window's");
+		assert.equal(mayRunInAnotherWindow(row({ kind: "stats", ptyKind: "stats-dashboard", host: { kind: "stats", window: "none" } })), false);
+		assert.equal(mayRunInAnotherWindow(row({ stop: { available: false, reason: "previous build" }, window: "other-window" })), false);
 	});
 });
 

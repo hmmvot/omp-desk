@@ -12,21 +12,24 @@
 import * as vscode from "vscode";
 import { brokerStopAttachFor, stopBrokerThroughBroker } from "./broker-process-stop.ts";
 import type { BrokerStopPorts, BrokerStopTarget, BrokerStopOutcome } from "./broker-process-stop.ts";
-import { killAll, stopOrphanedAndIdle, stopProcess } from "./broker-process-controller.ts";
-import type { CapturedRowStop, ProcessControllerPorts } from "./broker-process-controller.ts";
+import { killAll, stopOrphanedAndIdle, stopProcess, stopRowsOnRequest } from "./broker-process-controller.ts";
+import type { CapturedRowStop, KillAllPeer, ProcessControllerPorts } from "./broker-process-controller.ts";
 import { createBrokerRecordLister } from "./broker-process-records.ts";
 import { buildBrokerProcessCatalog, createBrokerProcessReader, sessionRowWindow } from "./broker-processes.ts";
 import type {
 	BrokerCatalogRow,
 	BrokerCatalogShell,
 	BrokerCatalogSources,
+	BrokerLocalRuntime,
 	BrokerProcessChild,
 	BrokerProcessReader,
 	BrokerProcessReadOptions,
 	BrokerProcessRow,
 	BrokerProcessSnapshot,
 	BrokerRecordFacts,
+	RowIdentity,
 } from "./broker-processes.ts";
+import type { PeerRowAnswer, StopRowAnswer } from "./window-requests.ts";
 import type { BrokerSlotStore } from "./broker-slots.ts";
 import { isPtyProcessAlive, queryPtyProcessIdentity, waitForPtyProcessGone } from "./pty-identity.ts";
 import type { PtyBrokerClient } from "./pty-client.ts";
@@ -51,8 +54,6 @@ export interface ProcessWiringSessionRow {
 	readonly open: boolean;
 	readonly running: boolean;
 	readonly heldElsewhere: boolean;
-	/** Slot of the runtime this window drives for the row, or `null`. */
-	readonly drivenSlot: string | null;
 }
 
 export interface ProcessWiringDeps {
@@ -65,6 +66,8 @@ export interface ProcessWiringDeps {
 	shellSlots(): ShellSlotStore | undefined;
 	/** An editor of this window carries the folder shell. */
 	shellOpenHere(slot: string): boolean;
+	/** Every runtime this window holds, by exact broker identity, whether or not a session row exists for it. */
+	localRuntimes(): readonly BrokerLocalRuntime[];
 	/** `null` when the session index loaded cleanly. */
 	indexLoadError(): string | null;
 	/** The profile catalog has been read in this window. */
@@ -85,6 +88,12 @@ export interface SessionProcessesDeps extends ProcessWiringDeps {
 	/** The Sessions view is on screen. A hidden view is never polled; an explicit action always reads. */
 	visible(): boolean;
 	layout(): SessionsGrouping;
+	/** The other live windows of this profile, from the window registry read now. */
+	peers(): Promise<readonly KillAllPeer[]>;
+	/** Whether the window is still listed as live. */
+	peerIsLive(holderId: string): Promise<boolean>;
+	/** Ask a window to stop the rows it runs among `rows` through its own lifecycle, one answer per row. Never throws. */
+	askWindowToStop(holderId: string, rows: readonly RowIdentity[]): Promise<readonly PeerRowAnswer[]>;
 }
 
 /** What the extension calls into the registered processes: view or layout changes and launcher refreshes. */
@@ -95,6 +104,11 @@ export interface SessionProcesses {
 	touch(): void;
 	/** An explicit fresh read. */
 	refresh(): Promise<BrokerProcessSnapshot>;
+	/**
+	 * Serve another window's Kill All: stop, through this window's own lifecycle, the rows among `identities` that this
+	 * window provably runs, and answer per row in order. Never offers a Force Stop on the requester's behalf.
+	 */
+	serveStopRequest(identities: readonly RowIdentity[], progress: (done: number) => Promise<void>): Promise<readonly StopRowAnswer[]>;
 }
 
 function messageOf(error: unknown): string {
@@ -109,7 +123,6 @@ export function catalogSourcesFrom(deps: ProcessWiringDeps): BrokerCatalogSource
 		folder: row.folder,
 		hostSlot: row.hostSlot,
 		window: sessionRowWindow(row),
-		drivenSlot: row.drivenSlot,
 	}));
 	const brokerRefs = deps.brokerSlots()?.references() ?? null;
 	const shellRefs = deps.shellSlots()?.references() ?? null;
@@ -120,12 +133,14 @@ export function catalogSourcesFrom(deps: ProcessWiringDeps): BrokerCatalogSource
 		folder: record.cwd,
 		label: record.label,
 		window: deps.shellOpenHere(record.slot) ? "this-window" : record.detachedAt === null ? "other-window" : "none",
+		generation: record.lastGeneration,
 	}));
 	return {
 		ready: deps.catalogLoaded(),
 		rows,
 		byConversation,
 		byEditor: new Set(Object.values(brokerRefs?.byEditor ?? {})),
+		localRuntimes: deps.localRuntimes(),
 		brokerSlotsComplete: brokerRefs !== null && brokerRefs.complete && deps.indexLoadError() === null,
 		shells,
 		shellSlotsComplete: shellRefs !== null && shellRefs.complete,
@@ -280,6 +295,10 @@ export function registerSessionProcesses(context: vscode.ExtensionContext, deps:
 			if (shells?.get(slot) != null) await shells.remove(slot);
 			await deps.brokerSlots()?.forget(slot);
 		},
+		waitBrokerGone: (target, timeoutMs) => stopPorts.waitBrokerGone(target, timeoutMs),
+		peers: () => deps.peers(),
+		peerIsLive: holderId => deps.peerIsLive(holderId),
+		askWindowToStop: (holderId, rows) => deps.askWindowToStop(holderId, rows),
 		async refresh() {
 			deps.refreshLauncher();
 			await read({ fresh: true }).catch(error => deps.log(`processes: the list could not be read: ${messageOf(error)}`));
@@ -326,5 +345,16 @@ export function registerSessionProcesses(context: vscode.ExtensionContext, deps:
 			}, LAUNCHER_REFRESH_DELAY_MS);
 		},
 		refresh: () => read({ fresh: true }),
+		async serveStopRequest(identities, progress) {
+			const answers = await stopRowsOnRequest(identities, controllerPorts, progress);
+			// The requester is another window of this profile: this window says what it did on its behalf, so a stop it did not start is never silent.
+			const acted = answers.filter(answer => answer.state === "stopped" || answer.state === "unconfirmed");
+			if (acted.length > 0) {
+				const stopped = acted.filter(answer => answer.state === "stopped").length;
+				deps.log(`processes: a stop requested by another window: ${stopped} of ${acted.length} stopped here`);
+				void vscode.window.showInformationMessage(`OMP: Another window ran Kill All. ${stopped} of ${acted.length} of this window's OMP ${acted.length === 1 ? "process was" : "processes were"} stopped.`);
+			}
+			return answers;
+		},
 	};
 }
