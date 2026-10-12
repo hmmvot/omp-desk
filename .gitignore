@@ -4,5 +4,6 @@ out/
 media/guest.*
 media/shell.js*
 media/settings.js*
+media/desk-settings.js*
 media/codicons/
 .vscode-test/

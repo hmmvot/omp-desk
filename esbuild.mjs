@@ -88,6 +88,16 @@ const targets = [
     },
   },
   {
+    // The Settings view's page (a webview view in the OMP Desk side bar): message-only, like the Models/Agents page.
+    name: "desk-settings",
+    options: {
+      entryPoints: ["src/webview/desk-settings/main.tsx"], outfile: "media/desk-settings.js",
+      bundle: true, platform: "browser", format: "iife", target: "es2022",
+      jsx: "automatic", jsxImportSource: "react",
+      define: { "process.env.NODE_ENV": '"production"' },
+    },
+  },
+  {
     name: "settings-worker",
     options: {
       entryPoints: ["src/omp/settings-worker.ts"], outfile: "out/settings-worker.mjs",
