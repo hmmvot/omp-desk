@@ -29,7 +29,7 @@
  * connection the token authenticates, and never put in Webview state.
  */
 
-import { link, mkdir, readdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
+import { link, lstat, mkdir, readdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { createHash, randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { restrictPrivateStorage, type PrivateStorageProbe } from "./private-storage.ts";
@@ -44,6 +44,8 @@ export const PTY_SLOT_LOCK_SUFFIX = ".lock";
 
 /** How long one launcher waits for another window's slot lock before refusing. */
 const SLOT_LOCK_WAIT_MS = 5_000;
+/** Fresh judgements of the state directory's access after a listed file vanished mid-read. */
+const VERIFY_RETRIES = 3;
 const SLOT_LOCK_POLL_MS = 100;
 
 /** Fixed text the shared convention's write probe writes and reads back. */
@@ -275,26 +277,34 @@ export async function verifyPtyStateAccess(
 	access?: PrivateStorageProbe,
 ): Promise<{ readonly ok: boolean; readonly reason: string | null }> {
 	const root = ptyStateDirectory(storageDir);
-	const files: string[] = [];
-	try {
-		for (const name of await readdir(root)) {
-			if (name.endsWith(PTY_RECORD_SUFFIX) || name.endsWith(PTY_SLOT_LOCK_SUFFIX)) files.push(join(root, name));
+	// A slot lock is transient: another launcher (a folder shell, a resume in another tab) removes it the moment its launch
+	// is published. A lock listed here and gone by the time the owner and access readers look at it made the whole PTY surface
+	// refuse ("the owner of ...json.lock could not be read") for a file that no longer holds anything to protect, so a failure is
+	// judged again, on a fresh listing, while a file it listed has vanished. A real refusal (nothing vanished) is never retried.
+	for (let attempt = 0; ; attempt++) {
+		const files: string[] = [];
+		try {
+			for (const name of await readdir(root)) {
+				if (name.endsWith(PTY_RECORD_SUFFIX) || name.endsWith(PTY_SLOT_LOCK_SUFFIX)) files.push(join(root, name));
+			}
+		} catch {
+			// A directory that is not there yet has nothing to verify beyond itself.
 		}
-	} catch {
-		// A directory that is not there yet has nothing to verify beyond itself.
+		const restriction = await restrictPrivateStorage({
+			layout: {
+				root,
+				directories: [root],
+				verifiedDirectories: [],
+				verifiedFiles: files,
+				probeDirectory: root,
+				probeText: PTY_STORAGE_PROBE_TEXT,
+			},
+			...(access === undefined ? {} : { probe: access }),
+		});
+		if (restriction.restricted) return { ok: true, reason: null };
+		const vanished = await Promise.all(files.map(file => lstat(file).then(() => false, () => true)));
+		if (attempt >= VERIFY_RETRIES || !vanished.some(Boolean)) return { ok: false, reason: restriction.reason };
 	}
-	const restriction = await restrictPrivateStorage({
-		layout: {
-			root,
-			directories: [root],
-			verifiedDirectories: [],
-			verifiedFiles: files,
-			probeDirectory: root,
-			probeText: PTY_STORAGE_PROBE_TEXT,
-		},
-		...(access === undefined ? {} : { probe: access }),
-	});
-	return { ok: restriction.restricted, reason: restriction.restricted ? null : restriction.reason };
 }
 
 /** Result of trying to occupy a slot. */

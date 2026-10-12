@@ -729,6 +729,16 @@ export class TerminalPipeline {
 		this.#ownerId = null;
 	}
 
+	/**
+	 * The writer's process was proven gone by evidence this pipeline cannot see (Kill, Task Manager, a crash: the broker
+	 * that would have said so is gone too). The pane ends the way it does for an exit the broker reported, with no exit
+	 * code to show, instead of the connection-lost presentation.
+	 */
+	noteProcessGone(): void {
+		if (this.#disposed) return;
+		this.#onWriterEvent({ kind: "exit", seq: this.#seq, code: null, signal: null });
+	}
+
 	#onWriterEvent(event: TerminalWriterEvent): void {
 		if (this.#disposed) return;
 		if (event.kind === "input-owner") {

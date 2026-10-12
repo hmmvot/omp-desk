@@ -500,6 +500,8 @@ interface TabState {
   } | null;
   /** Why host control is currently unavailable, shown rather than hidden. */
   controlFailure: string | null;
+  /** What the terminal pane says when it asks for a writer that ended (killed, crashed): replaces the "not attached" wording. */
+  endedNotice: string | null;
   /** Frontend for a folder shell or the managed native session. */
   pipeline: TerminalPipeline | null;
   /** The folder-shell slot this editor carries, when this tab *is* a folder shell. */
@@ -4349,8 +4351,16 @@ function watchRuntimeBroker(index: SessionIndex, tabId: string, runtime: Session
         }
         const state = stateOf(tabId);
         if (state !== undefined) {
+          // The pane ends as for an exit the broker reported, not as a lost connection; stale control errors
+          // from the moments before the process ended are dropped once the exit has been recorded.
+          state.endedNotice = "This terminal's process has ended.";
+          state.pipeline?.noteProcessGone();
           await handleNativeHostExited(index, state, runtime);
           if (isCurrent()) incomplete("the terminal's exit handling left its runtime in place");
+          else {
+            state.controlFailure = null;
+            pushSessionView(index, state);
+          }
         }
       } catch (error) {
         incomplete(messageOf(error));
@@ -4376,6 +4386,7 @@ async function startConversation(
 ): Promise<void> {
   cancelControlPicker(tabId);
   tabState(tabId).runtime = runtime;
+  tabState(tabId).endedNotice = null;
   watchRuntimeBroker(index, tabId, runtime);
   const state = tabState(tabId);
   state.mode = runtime.kind;
@@ -10892,6 +10903,7 @@ function newTabState(slotId: string): TabState {
     lastEditorClose: -1,
     control: null,
     controlFailure: null,
+    endedNotice: null,
     pipeline: null,
     shellSlot: null,
     ownerStopWatch: null,
@@ -13248,7 +13260,7 @@ async function handleTerminalGuestMessage(
         }
         pushTerminalUnavailable(
           tabId,
-          state.mode === "terminal" ? "This native OMP session is not attached to its broker in this window." : "This folder terminal is not attached to its broker in this window.",
+          state.endedNotice ?? (state.mode === "terminal" ? "This native OMP session is not attached to its broker in this window." : "This folder terminal is not attached to its broker in this window."),
         );
         return;
       }
@@ -13266,7 +13278,7 @@ async function handleTerminalGuestMessage(
           pushSessionView(indexForBridge ?? null, state, true);
           return;
         }
-        pushTerminalUnavailable(tabId, "This terminal is not attached to its broker in this window.");
+        pushTerminalUnavailable(tabId, state.endedNotice ?? "This terminal is not attached to its broker in this window.");
         return;
       }
       await attached.probe(frontendId, {
@@ -13612,6 +13624,7 @@ function bindShellPanel(
 async function startShellTerminal(index: SessionIndex, slot: string, handle: PtyHandle): Promise<void> {
   const state = tabState(slot);
   state.runtime = null;
+  state.endedNotice = null;
   try {
     await handle.attach();
   } catch (error) {
@@ -13653,8 +13666,13 @@ async function startShellTerminal(index: SessionIndex, slot: string, handle: Pty
         log(`shell ${slot}: the broker process and the shell pid ${shellRoot.pid} are gone`);
         await shellSlots?.remove(slot);
         await brokerSlots?.forget(slot);
+        const ended = stateOf(slot);
+        if (ended !== undefined) {
+          // The pane ends as for an exit the broker reported (exit banner, copyable screen), not as a lost connection.
+          ended.endedNotice = "This terminal's process has ended.";
+          ended.pipeline?.noteProcessGone();
+        }
         stopTerminalForTab(slot);
-        pushTerminalUnavailable(slot, "This terminal's process has ended.");
         refreshLauncher();
       });
     },

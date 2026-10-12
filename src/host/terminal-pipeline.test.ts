@@ -1277,4 +1277,23 @@ describe("TerminalPipeline exited broker retirement", () => {
 			pipeline.dispose();
 		}
 	});
+
+	it("ends like a reported exit when the process was proven gone by other evidence, even after the connection closed", async () => {
+		const writer = createFakeWriter();
+		const pipeline = await startedPipeline(writer);
+		const page = screenConsumer();
+		pipeline.register("page-a", page.send);
+		try {
+			await pipeline.attach("page-a", { generation: null, cols: 80, rows: 24 });
+			writer.emit({ kind: "output", seq: 1, data: "final output" });
+			writer.emit({ kind: "closed" });
+			assert.equal(page.state.phase, "unavailable");
+			const screen = page.screen;
+			pipeline.noteProcessGone();
+			assert.equal(page.state.phase, "stopped", "the pane shows the ended state, not a lost connection");
+			assert.equal(page.screen, screen, "the screen the user had stays copyable");
+		} finally {
+			pipeline.dispose();
+		}
+	});
 });

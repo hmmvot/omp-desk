@@ -219,4 +219,44 @@ describe("broker records", () => {
 		const text = await readFile(ptyRecordPath(storage, "tab:1"), "utf8");
 		assert.match(text, /"type"|"slot"/);
 	});
+
+	it("does not refuse the directory because another launcher released its slot lock while the owners were being read", async () => {
+		const storage = await makeStorage();
+		await ensurePtyStateAccess(storage, ownerOnlyProbe());
+		await claimPtyRecord(storage, record("tab:1"));
+		const lock = ptySlotLockPath(storage, "tab:other");
+		await writeFile(lock, "launcher");
+		let reads = 0;
+		const probe: PrivateStorageProbe = {
+			...ownerOnlyProbe(),
+			readOwners: async (paths: readonly string[]): Promise<PrivateStorageCommandResult> => {
+				// The first read lists the lock; by the time the tool reports, its owner has removed it, so no line names it.
+				if (reads++ === 0) await rm(lock, { force: true });
+				const present = paths.filter(target => target !== lock || reads > 1);
+				return { ok: true, stdout: present.map(target => `${target}|${fixturePrincipal(ACCOUNT)}`).join("\r\n"), detail: null };
+			},
+		};
+		const access = await ensurePtyStateAccess(storage, probe);
+		assert.equal(access.ok, true, access.reason ?? "");
+		assert.ok(reads >= 2, "the verification was judged again on a fresh listing");
+	});
+
+	it("still refuses when nothing vanished: an unreadable owner of a file that is there is a real refusal", async () => {
+		const storage = await makeStorage();
+		await ensurePtyStateAccess(storage, ownerOnlyProbe());
+		const lock = ptySlotLockPath(storage, "tab:other");
+		await writeFile(lock, "launcher");
+		let reads = 0;
+		const probe: PrivateStorageProbe = {
+			...ownerOnlyProbe(),
+			readOwners: async (paths: readonly string[]): Promise<PrivateStorageCommandResult> => {
+				reads++;
+				return { ok: true, stdout: paths.filter(target => target !== lock).map(target => `${target}|${fixturePrincipal(ACCOUNT)}`).join("\r\n"), detail: null };
+			},
+		};
+		const access = await ensurePtyStateAccess(storage, probe);
+		assert.equal(access.ok, false);
+		assert.match(access.reason ?? "", /could not be read/);
+		assert.equal(reads, 1, "a refusal with nothing vanished is not retried");
+	});
 });
