@@ -31,8 +31,8 @@ import {
 	proofFrame,
 	requestFrame,
 	sealFrame,
-} from "../bridge-protocol.ts";
-import type { BridgeHello } from "../bridge-protocol.ts";
+} from "../protocol/bridge-protocol.ts";
+import type { BridgeHello } from "../protocol/bridge-protocol.ts";
 import { BridgeListener } from "./bridge-listener.ts";
 import type { BridgeAdmittedRequest, BridgeDocumentAuthorization, BridgeListenerHooks, BridgeSession, BridgeSessionState } from "./bridge-listener.ts";
 

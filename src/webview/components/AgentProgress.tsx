@@ -1,8 +1,8 @@
 import type { ReactNode } from "react";
 import type { AgentActivity } from "../../chat/agents";
-import { fmtDuration, fmtTokens } from "../lib/format";
+import { fmtDuration, fmtTokens } from "../../shared/format";
 import { useLiveDurations } from "../lib/live-clock";
-import { isRecord } from "../../guards";
+import { isRecord } from "../../shared/guards";
 import { agentActivityText } from "../../chat/hud-summary";
 
 export interface AgentProgressViewProps {

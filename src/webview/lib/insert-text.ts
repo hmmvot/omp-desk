@@ -13,7 +13,7 @@
  *
  * Nothing here submits, and the text never reaches Webview state or a log.
  */
-import type { GuestHostMessage } from "../messages";
+import type { GuestHostMessage } from "../../protocol/messages";
 
 /** How many insertions may wait for a composer; older ones are dropped first. */
 const MAX_PENDING = 8;

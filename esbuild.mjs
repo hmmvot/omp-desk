@@ -162,7 +162,7 @@ const shared = {
  *
  * The extension stages this file, together with the host-control module, into
  * extension global storage and runs PowerShell from that verified copy
- * (`src/runtime-assets.ts`), so nothing starts it out of the installed extension
+ * (`src/host/runtime-assets.ts`), so nothing starts it out of the installed extension
  * folder. The copy here is still part of the build rather than a manual step, and
  * host control refuses visibly when staging finds no helper.
  */

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { detectWebLinks } from "./chat-web-links.ts";
-import { webLinkUrl } from "../terminal-links.ts";
+import { webLinkUrl } from "../../shared/terminal-links.ts";
 
 test("bare URLs stop before sentence punctuation and unbalanced closing brackets, and cover exactly their characters", () => {
 	const text = "Go to https://example.com. Then (see https://a.test/x?q=1), 'https://b.test/y'; [https://c.test/z] https://en.wikipedia.org/wiki/Foo_(bar) and https://d.test/e!?";

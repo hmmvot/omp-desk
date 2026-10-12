@@ -1,6 +1,6 @@
-import type { GuestHostMessage, GuestWebviewMessage } from "../messages.ts";
-import { MAX_SYMBOL_TOKENS_PER_REQUEST } from "../code-symbols.ts";
-import type { SymbolLinkStatus } from "../code-symbols.ts";
+import type { GuestHostMessage, GuestWebviewMessage } from "../../protocol/messages.ts";
+import { MAX_SYMBOL_TOKENS_PER_REQUEST } from "../../shared/code-symbols.ts";
+import type { SymbolLinkStatus } from "../../shared/code-symbols.ts";
 
 /** A symbol the host found one definition of; `target` opens through the ordinary file-link request. */
 export interface SymbolLink {

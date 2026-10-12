@@ -12,7 +12,7 @@
  *
  * Everything here is pure and bounded; no field is trusted beyond its validated shape and length.
  */
-import { isRecord } from "../guards.ts";
+import { isRecord } from "../shared/guards.ts";
 
 /** The `setStatus` key the publisher writes and the host intercepts; it never reaches the status line. */
 export const AGENT_LIVENESS_STATUS_KEY = "omp-desk.agent-liveness";

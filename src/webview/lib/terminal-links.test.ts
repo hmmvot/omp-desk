@@ -3,10 +3,10 @@ import { test } from "node:test";
 import { createRequire } from "node:module";
 import type { Terminal as HeadlessTerminal } from "@xterm/headless";
 import type { IBuffer, ILink } from "@xterm/xterm";
-import { detectTerminalFileLinks } from "../terminal-links.ts";
+import { detectTerminalFileLinks } from "../../shared/terminal-links.ts";
 import { terminalFileLinkProvider } from "./terminal-link-provider.ts";
 import { TerminalLinkClient } from "./terminal-link-client.ts";
-import type { GuestHostMessage, GuestWebviewMessage } from "../messages.ts";
+import type { GuestHostMessage, GuestWebviewMessage } from "../../protocol/messages.ts";
 const require = createRequire(import.meta.url);
 const { Terminal } = require("@xterm/headless") as { Terminal: typeof HeadlessTerminal };
 

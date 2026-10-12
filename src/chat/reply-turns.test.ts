@@ -4,7 +4,7 @@ import { assistantPersistenceKey, type AssistantMessage, type ChatEntry, type Ch
 import { applyChatSnapshot, createChatModel, reduceChatFrame, snapshotOf, type DisplayTurn } from "./model.ts";
 import { replyFooters, type ReplyTurnOptions } from "./reply-turns.ts";
 import { projectTranscript } from "./transcript.ts";
-import { ChatSnapshotAssembler, parseChatHostMessage, splitChatSnapshot } from "../webview/chat-messages.ts";
+import { ChatSnapshotAssembler, parseChatHostMessage, splitChatSnapshot } from "../protocol/chat-messages.ts";
 
 const entry = (id: string, message: ChatMessage): ChatEntry => ({ type: "message", id, parentId: null, timestamp: new Date(message.timestamp).toISOString(), message });
 const user = (timestamp = 1000): ChatMessage => ({ role: "user", content: "Request", timestamp });

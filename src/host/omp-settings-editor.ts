@@ -2,21 +2,21 @@ import * as vscode from "vscode";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { createHash } from "node:crypto";
-import { stageRuntimeAssets, verifyStagedRuntimeAsset } from "../runtime-assets";
-import type { StagedRuntimeAsset } from "../runtime-assets";
+import { stageRuntimeAssets, verifyStagedRuntimeAsset } from "./runtime-assets";
+import type { StagedRuntimeAsset } from "./runtime-assets";
 import { openProviderLoginTerminal, resolveBunRuntime, resolveOmpBinary, resolveOmpPackageRoot } from "./native-terminal";
 import type { OmpCommand } from "./native-terminal";
 import { runSettingsWorker } from "./omp-settings-worker";
 import { createSettingsHtml } from "./guest-webview";
 import { parseAgentSpec, SettingsRefusal, valueAt } from "./omp-settings-core";
-import { isRecord as record } from "../guards";
-import type { AgentSpec, ConfigEdit, ConfigRecord, SettingsScope, SettingsSnapshot } from "./omp-settings-core";
+import { isRecord as record } from "../shared/guards";
+import type { AgentSpec, ConfigEdit, ConfigRecord, SettingsScope, SettingsSnapshot } from "../protocol/settings-model";
 import type { SettingsKind } from "../chat/settings-command";
-import type { SettingsMessage } from "../webview/settings/messages";
+import type { SettingsMessage } from "../protocol/settings-messages";
 import { chooseSetting, pickFallbackChainKey, pickSettingsModel, pickSettingsThinking } from "./settings-pickers";
-import { modelKey, roleChange, selectorBase, selectorThinking } from "./settings-pick-items";
+import { modelKey, roleChange, selectorBase, selectorThinking } from "../protocol/settings-pick-items";
 import { parseModelPickRequest, parseRoleAssignment } from "./settings-pick-requests";
-import type { PickEntry } from "./settings-pick-items";
+import type { PickEntry } from "../protocol/settings-pick-items";
 
 export interface SettingsEditorContext {
   /** The project folder whose layer and agents are shown, or null for the global scope. */

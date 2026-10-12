@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseBareFileName } from "../webview/code-symbols.ts";
-import type { BareFileName } from "../webview/code-symbols.ts";
+import { parseBareFileName } from "../shared/code-symbols.ts";
+import type { BareFileName } from "../shared/code-symbols.ts";
 import { FileNameLinkResolver, MAX_FILE_NAME_RESULTS, excludeGlob, fileChoiceLabel, fileNameGlob, fileNameOutcome, fileNameTarget, outermostRoots, workspaceFileNameSource } from "./file-name-links.ts";
 import type { FileNameResolverOptions, FileNameSource, FindFilesApi } from "./file-name-links.ts";
 

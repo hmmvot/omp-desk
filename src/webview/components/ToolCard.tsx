@@ -4,12 +4,13 @@ import type { AgentActivity, RunningAgent } from "../../chat/agents";
 import type { ChatContent, CustomMessage, ToolResultMessage } from "../../chat/messages";
 import { isInterruptedToolResult, parseChatContent } from "../../chat/messages";
 import { DEBUG_TOOL_TITLES, toolPresentation } from "../../chat/tool-presentation";
-import { messageText } from "../lib/format";
+import { messageText } from "../../shared/format";
 import { ToolTargetText } from "./FileLinks";
 import { MessageContentView } from "./MessageContent";
 import { lateDiagnosticsFiles, recordRows, stringField } from "./native-message-helpers";
 import { Diagnostics, displayText, record, scalar, Section, TextPreview } from "./tool-renderer-primitives";
-import { describeTool, hasNoDetails, hasWaitRows, TOOL_ICONS, type ToolSemanticView } from "./tool-renderers";
+import { describeTool, hasNoDetails, hasWaitRows, TOOL_ICONS } from "./tool-renderers";
+import type { ToolSemanticView } from "./tool-render-types";
 
 export interface ToolCardProps {
 	name: string;

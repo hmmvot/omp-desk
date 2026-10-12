@@ -82,11 +82,11 @@ import {
 	type RewindDraft,
 } from "../../chat/rewind.ts";
 import { rendersTranscriptEntry } from "../../chat/transcript.ts";
-import { transcriptWindow } from "../../webview/lib/transcript-window.ts";
+import { transcriptWindow } from "../../chat/transcript-window.ts";
 import { blobsDirectoryFor, resolveBlobImages } from "./history-blobs.ts";
 import { parseAgentRoster } from "../../chat/agents.ts";
 import { childPageFromNative, type SubagentTranscriptPage } from "../../chat/subagent-transcript.ts";
-import { isRecord } from "../../guards.ts";
+import { isRecord } from "../../shared/guards.ts";
 import { readJournalCost, readJournalFacts, type JournalFacts } from "../session-cost.ts";
 import { extractContextFiles, isContextReportText, parseContextReport, parseSessionStats } from "../context/context-parse.ts";
 import type { ContextRead, ContextReportRead } from "../context/context-parse.ts";
@@ -116,7 +116,7 @@ import {
 	type RpcResponseFrame,
 	type RpcWriteErrorCode,
 	type RpcToolDescriptor,
-} from "./protocol.ts";
+} from "../../protocol/rpc.ts";
 import { AGENT_LIVENESS_STATUS_KEY, AgentLivenessGuard } from "../../chat/agent-liveness.ts";
 import { HostToolCalls } from "../tools/host-tool-calls.ts";
 import { HostToolRegistration, toolNamesOf, type HostToolSendOutcome } from "../tools/host-tool-registration.ts";

@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
-import type { ControlModelRef } from "./control-protocol.ts";
-import type { ChatDisplayPreferences } from "../webview/chat-messages.ts";
+import type { ControlModelRef } from "../protocol/control.ts";
+import type { ChatDisplayPreferences } from "../protocol/chat-messages.ts";
 
 type ToolCallDetail = ChatDisplayPreferences["toolCallDetail"];
 

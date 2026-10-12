@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { callerOf, describeElement, FocusTrace, TRACE_MAX_REPORTS, TRACE_MIN_GAP_MS, TRACE_RING_SIZE, USER_ACTION_WINDOW_MS } from "./focus-trace.ts";
-import { MAX_FOCUS_TRACE_DETAIL_LENGTH } from "../messages.ts";
+import { MAX_FOCUS_TRACE_DETAIL_LENGTH } from "../../protocol/messages.ts";
 
 function fixture() {
 	const clock = { now: 10_000 };

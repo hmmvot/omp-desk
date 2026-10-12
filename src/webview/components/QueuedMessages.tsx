@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { ChatModel } from "../../chat/model";
-import type { ChatQueuePurpose, ChatQueuedRef } from "../chat-messages";
+import type { ChatQueuePurpose, ChatQueuedRef } from "../../protocol/chat-messages";
 import type { ChatClient } from "../lib/chat-client";
 import { chatWritable } from "../lib/chat-client";
 import { offerQueuedForEditing } from "../lib/queue-restore";

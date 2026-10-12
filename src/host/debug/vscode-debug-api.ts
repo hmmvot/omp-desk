@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import * as vscode from "vscode";
-import { isRecord } from "../../guards.ts";
+import { isRecord } from "../../shared/guards.ts";
 import type {
 	BreakpointChange,
 	BreakpointInfo,

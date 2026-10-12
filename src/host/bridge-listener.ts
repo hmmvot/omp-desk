@@ -70,9 +70,9 @@ import {
 	statusFrame,
 	terminalPushFrame,
 	verifyProof,
-} from "../bridge-protocol.ts";
-import type { BridgeHello, BridgeRouteStatus } from "../bridge-protocol.ts";
-import { fragmentBridgeMessage } from "../bridge-fragments.ts";
+} from "../protocol/bridge-protocol.ts";
+import type { BridgeHello, BridgeRouteStatus } from "../protocol/bridge-protocol.ts";
+import { fragmentBridgeMessage } from "../protocol/bridge-fragments.ts";
 
 const WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 const WS_OPCODE_TEXT = 0x1;

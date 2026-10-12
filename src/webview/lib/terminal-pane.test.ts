@@ -13,8 +13,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import type { GuestTerminalDataMessage, GuestTerminalExitMessage, GuestTerminalSnapshotMessage, GuestTerminalStateMessage } from "../messages.ts";
-import { encodeBase64 } from "./bytes-base64.ts";
+import type { GuestTerminalDataMessage, GuestTerminalExitMessage, GuestTerminalSnapshotMessage, GuestTerminalStateMessage } from "../../protocol/messages.ts";
+import { encodeBase64 } from "../../shared/bytes-base64.ts";
 import { initialTerminalPane, reduceTerminalFrame, resizeTerminalPane, timeoutTerminalAttach } from "./terminal-pane.ts";
 
 const GENERATION = "0123456789abcdef0123456789abcdef";

@@ -22,7 +22,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { PANEL_IDENTITY_VERSION } from "./panel-identity.ts";
+import { PANEL_IDENTITY_VERSION } from "../shared/panel-identity.ts";
 
 interface DeliveredEvent {
 	data: unknown;

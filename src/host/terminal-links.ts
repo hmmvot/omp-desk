@@ -3,11 +3,11 @@ import { stat } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir, hostname } from "node:os";
-import { FILE_LINK_MENU_SECTION, WEB_LINK_MENU_SECTION, isTerminalLinkTarget, webLinkUrl } from "../webview/terminal-links.ts";
-import type { TerminalLinkRequest, TerminalLinkValidation, WebLinkMode } from "../webview/terminal-links.ts";
-import { parseBareFileName, parseCodeSymbol } from "../webview/code-symbols.ts";
-import type { CodeSymbol } from "../webview/code-symbols.ts";
-import type { FileLookup } from "./file-name-links.ts";
+import { FILE_LINK_MENU_SECTION, WEB_LINK_MENU_SECTION, isTerminalLinkTarget, webLinkUrl } from "../shared/terminal-links.ts";
+import type { TerminalLinkRequest, TerminalLinkValidation, WebLinkMode } from "../shared/terminal-links.ts";
+import { parseBareFileName, parseCodeSymbol } from "../shared/code-symbols.ts";
+import type { CodeSymbol } from "../shared/code-symbols.ts";
+import type { FileLookup } from "./link-scope.ts";
 
 /**
  * The text typed after `#` in Go to Symbol in Workspace for a symbol with several definitions: its last segment

@@ -9,7 +9,7 @@
  */
 // Explicit `.ts` specifiers: this module is imported by the node:test runner.
 import type { ChatEntry } from "../../chat/messages.ts";
-import { messageText } from "./format.ts";
+import { messageText } from "../../shared/format.ts";
 
 /** Where a walk through the history stands. */
 export interface HistoryCursor {

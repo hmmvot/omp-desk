@@ -12,7 +12,7 @@ import * as path from "node:path";
 import * as vscode from "vscode";
 import { UNAVAILABLE_RELOAD_MESSAGE, createDetailHtml, createGuestHtml, createShellHtml, createUnavailableGuestHtml } from "./host/guest-webview";
 import { chatExitText, type ChatExitReason } from "./chat/exit-reason";
-import { persistedTabId } from "./webview/panel-identity";
+import { persistedTabId } from "./shared/panel-identity";
 import { installedNerdFonts } from "./host/terminal-fonts";
 import { terminalFontFamily } from "./webview/lib/terminal-theme";
 import {
@@ -31,9 +31,9 @@ import { runOmpCli } from "./host/native-terminal";
 import { ProviderUsageCache, PROVIDER_USAGE_ARGS, PROVIDER_USAGE_TIMEOUT_MS } from "./host/provider-usage";
 import { observeSessionBranch } from "./host/session-branch";
 import type { GitApi, BranchObservation } from "./host/session-branch";
-import type { FooterMetadataMessage } from "./webview/footer-metadata";
+import type { FooterMetadataMessage } from "./shared/footer-metadata";
 import { SessionClickRecognizer } from "./views/session-click";
-import { relativeAge } from "./views/relative-age";
+import { relativeAge } from "./shared/relative-age";
 import { normalizeSessionsGrouping, planNotificationReveal, sessionsLayoutPickItems } from "./views/session-order";
 import type { SessionsGrouping } from "./views/session-order";
 import { pinnedSessionTabId, selectionLeaveOtherWindow, selectionRestore } from "./views/session-selection";
@@ -92,13 +92,13 @@ import {
   newSessionFolder,
   pickerEntries,
   selectionLines,
-} from "./host/editor-context";
-import type { ReferenceSource, SendCandidate } from "./host/editor-context";
+} from "./wiring/editor-context";
+import type { ReferenceSource, SendCandidate } from "./wiring/editor-context";
 import { TurnNotifier, desktopNotificationSuppression, reportsTrailingQuestion } from "./host/notifications";
 import type { TurnActivity, TurnNotice, NotificationSuppression } from "./host/notifications";
 import { isLookedAt, markersAfterEvent, markersAfterViewing } from "./host/session-unread";
 import { sendDesktopNotification } from "./host/desktop-notifications";
-import { notificationLine } from "./host/notification-text";
+import { notificationLine } from "./shared/notification-text";
 import { NativeActivityLedger } from "./host/native-activity";
 import {
   isOpenControlClient,
@@ -107,7 +107,7 @@ import {
   mayReportControlFailure,
   type ControlAttemptPlan,
 } from "./host/control-attempt";
-import { stageRuntimeAssets, verifyStagedRuntimeAsset, type StagedRuntimeAsset } from "./runtime-assets";
+import { stageRuntimeAssets, verifyStagedRuntimeAsset, type StagedRuntimeAsset } from "./host/runtime-assets";
 import { PackageDrift } from "./host/package-drift";
 import {
   DIAGNOSTICS_DOCUMENT_PATH,
@@ -129,8 +129,8 @@ import {
   WorkspaceFolderTreeItem,
 } from "./views/session-tree";
 import { ProcessTreeItem } from "./views/process-rows";
-import { registerInventoryViews, type InventoryHandle } from "./host/inventory-wiring";
-import { registerContextView, type ContextHandle } from "./host/context-wiring";
+import { registerInventoryViews, type InventoryHandle } from "./wiring/inventory-wiring";
+import { registerContextView, type ContextHandle } from "./wiring/context-wiring";
 import type { ContextTarget } from "./host/context/context-controller";
 import { registerDeskSettingsView } from "./host/desk-settings/view";
 import type { SessionToolsTarget } from "./host/session-tools";
@@ -159,13 +159,13 @@ import type { NativeStopVerdict } from "./host/rpc-reconcile";
 import type { ChoiceOutcome, CommandResult, CompactMode, RpcSession, SendRefusal, ShakeMode } from "./host/rpc/session";
 import { readSlashRegistry, type BuiltinSlashEntry, type DeskSlashAction, type SlashRegistry } from "./host/slash-registry";
 import { sessionPrompts } from "./webview/lib/prompt-history";
-import { symbolSearchValue } from "./webview/lib/selection-query";
+import { symbolSearchValue } from "./shared/selection-query";
 import { NAVIGATE_REFUSAL_SENTENCES, rewindPreview, rewindTargets } from "./chat/rewind";
 import { rewindBlockedReason } from "./webview/lib/rewind-mode";
 import type { ChatLiteState, ChatModel, ChatPhase } from "./chat/model";
 import { cancelControlPicker, pickControlModel, pickControlThinking, pickToolCallDetail } from "./host/control-picker";
-import { activitySignature, turnActivity, withRegistrySubagentWork } from "./webview/lib/activity";
-import type { ChatDisplayPreferences, ChatWebviewMessage } from "./webview/chat-messages";
+import { activitySignature, turnActivity, withRegistrySubagentWork } from "./protocol/activity";
+import type { ChatDisplayPreferences, ChatWebviewMessage } from "./protocol/chat-messages";
 // The reconnecting bridge (ADR-0023): one exact listener per actual editor, durable
 // records, one route per document, and one admission path for irreversible changes.
 import { BridgeEditorEndpoint, BRIDGE_GUEST_RELOAD_REASON } from "./host/bridge-endpoint";
@@ -185,7 +185,7 @@ import {
   tabInputIdentity,
   TAB_INPUT_VIEW_TYPE_PREFIX,
   workspaceIdentityText,
-} from "./bridge-identity";
+} from "./host/bridge-identity";
 import {
   BRIDGE_MAX_PLAINTEXT_BYTES,
   BRIDGE_PATH,
@@ -196,13 +196,13 @@ import {
   encodeHex,
   randomBytes,
   sha256,
-} from "./bridge-protocol";
-import { isPanelTabId, persistedShellSlotId, shellIdentityBootstrapSource } from "./webview/panel-identity";
-import { GUEST_PROTOCOL_VERSION, isSafeBoundaryText, parseGuestWebviewMessage, type GuestChatCommand, type GuestOpenDetailMessage, type GuestRecallPromptMessage } from "./webview/messages";
+} from "./protocol/bridge-protocol";
+import { isPanelTabId, persistedShellSlotId, shellIdentityBootstrapSource } from "./shared/panel-identity";
+import { GUEST_PROTOCOL_VERSION, isSafeBoundaryText, parseGuestWebviewMessage, type GuestChatCommand, type GuestOpenDetailMessage, type GuestRecallPromptMessage } from "./protocol/messages";
 import { DETAIL_VIEW_TYPE, DetailTabs } from "./host/detail-tabs";
 import { arrangeChatGroup, chatGroupColumn, chatPlacement, filesGroupColumn, strayEmptyGroups, type ChatPlacement } from "./host/chat-layout";
 import { appearedGroup, FILE_WINDOW_SIZE, FileWindowTracker } from "./host/file-window";
-import type { DetailTarget } from "./webview/detail-target";
+import type { DetailTarget } from "./protocol/detail-target";
 // The folder shell's terminal (ADR-0024): the extension-owned PTY broker is the writer, the
 // panel is only a frontend, and this module owns the glue between them.
 import { PtyBrokerClient } from "./host/pty-client";
@@ -216,10 +216,10 @@ import type { PtyHandle } from "./host/pty-client";
 import { TerminalPipeline } from "./host/terminal-pipeline";
 import type { TerminalHostMessage } from "./host/terminal-pipeline";
 import { fileLinkMenuTarget, handleTerminalLink, openTerminalFile, openWebLink, revealPathInExplorer, revealPathInOs, webLinkMenuUrl } from "./host/terminal-links";
-import type { FileLinkAction, TerminalLinkRequest, TerminalLinkValidation, WebLinkMode } from "./webview/terminal-links";
+import type { FileLinkAction, TerminalLinkRequest, TerminalLinkValidation, WebLinkMode } from "./shared/terminal-links";
 import { MAX_SYMBOL_ENTRIES, SymbolLinkResolver, handleSymbolLinks, isNameCandidate, symbolEntry, symbolRoots } from "./host/symbol-links";
 import { FileNameLinkResolver, fileChoiceLabel, workspaceFileNameSource } from "./host/file-name-links";
-import type { SymbolLinksRequest, SymbolLinksResolution, SymbolLinksRetry } from "./webview/code-symbols";
+import type { SymbolLinksRequest, SymbolLinksResolution, SymbolLinksRetry } from "./shared/code-symbols";
 import {
   createShellSlotId,
   createShellSlotStore,
@@ -243,10 +243,10 @@ import { awaitEndedRuntimeCleanup } from "./host/runtime-settle";
 // user's sessions and folders nor forks them.
 import { catalogPaths, createCatalogStore, startCatalogWatch } from "./host/profile-catalog";
 import type { CatalogStore } from "./host/profile-catalog";
-import { importPredecessorFolders, predecessorStorageDir } from "./host/predecessor-import";
-import { registerSessionProcesses } from "./host/process-wiring";
-import type { SessionProcesses } from "./host/process-wiring";
-import { registerStatsDashboard } from "./host/stats-wiring";
+import { importPredecessorFolders, predecessorStorageDir } from "./wiring/predecessor-import";
+import { registerSessionProcesses } from "./wiring/process-wiring";
+import type { SessionProcesses } from "./wiring/process-wiring";
+import { registerStatsDashboard } from "./wiring/stats-wiring";
 import { SettingsEditors } from "./host/omp-settings-editor";
 import type { SettingsEditorContext } from "./host/omp-settings-editor";
 import { settingsSessionApply } from "./host/omp-settings-apply";
@@ -278,7 +278,7 @@ import type {
   GuestTerminalCopyReplyMessage,
   GuestTerminalCopyRequestMessage,
   GuestTerminalActivateMessage,
-} from "./webview/messages";
+} from "./protocol/messages";
 // Host control — every symbol from the `src/host/control-*` modules is imported in
 // this one block, so a rename there is a change here and nowhere else. The channel
 // is optional: a failure to establish it never blocks a session.
@@ -289,9 +289,9 @@ import {
   createControlSlotId,
   readControlRendezvous,
 } from "./host/control-protocol";
+import type { ControlModelRef } from "./protocol/control";
 import type {
   ControlHostSnapshot,
-  ControlModelRef,
   ControlRendezvous,
   ControlNativeState,
   ControlNativeTarget,
@@ -1064,7 +1064,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // through the serializer registered for its view type. Registration is
   // synchronous and happens before the asynchronous work below, so an editor VS
   // Code is already reviving always finds one; the panel it hands back carries
-  // the tab identity its own document persisted (`src/webview/panel-identity.ts`),
+  // the tab identity its own document persisted (`src/shared/panel-identity.ts`),
   // which the index then resolves. The index stays authoritative for what the
   // session is and who may write it — a restored editor is a view of a row, never
   // a second claim on it.
@@ -6564,7 +6564,7 @@ function reserveSlotForConversation(
  * The serializer VS Code revives this window's OMP editors through.
  *
  * The state it is handed was written by that editor's own previous document (see
- * `src/webview/panel-identity.ts`) and is treated as untrusted: it is narrowed to
+ * `src/shared/panel-identity.ts`) and is treated as untrusted: it is narrowed to
  * the exact identity shape and then resolved against the current index, so a
  * malformed, stale or foreign value can never attach an editor to another
  * session's row — and a row this workspace no longer has leaves an explanatory
@@ -8793,7 +8793,7 @@ async function loadSlashRegistry(context: vscode.ExtensionContext): Promise<void
 }
 
 // "OMP: Add Selection to Session" and "OMP: Add File to Session"
-// What is added is a reference (`@src/a.ts [lines 12-30]`), composed by `host/editor-context` for the
+// What is added is a reference (`@src/a.ts [lines 12-30]`), composed by `wiring/editor-context` for the
 // chosen session's cwd. The target is always the user's choice from a picker, most recently focused
 // editor first; nothing is ever submitted, and the destination is revealed and focused.
 

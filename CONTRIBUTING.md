@@ -25,8 +25,8 @@ npm ci
 
 | Command | Purpose |
 | --- | --- |
-| `npm run typecheck` | Type-check the whole project (`tsc`, no emit) |
-| `npm test` | Run every `src/**/*.test.ts` file with the Node test runner |
+| `npm run typecheck` | Type-check the whole project (`tsc`, no emit), then `node scripts/check-imports.mjs`: the import direction between the `src/` layers and import cycles ([ADR-0065](docs/decisions/0065-enforce-one-import-direction-between-source-layers.md)) |
+| `npm test` | Run every `src/**/*.test.ts` file and the `scripts/*.test.mjs` files with the Node test runner |
 | `npm run build` | Bundle the extension host, Webviews, host-control module and PTY broker into `out/` and `media/` |
 | `npm run watch` | Rebuild on change |
 | `npm run vsix` | Package a VSIX for the current platform with `vsce` into `out/` |

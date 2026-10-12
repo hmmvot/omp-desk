@@ -1,4 +1,4 @@
-import { isRecord } from "../../guards.ts";
+import { isRecord } from "../../shared/guards.ts";
 import type { HostToolContext, HostToolResult } from "../tools/host-tool.ts";
 import { HostToolRefusal } from "../tools/host-tool.ts";
 import type { DebugCoordinator, SessionView } from "./coordinator.ts";

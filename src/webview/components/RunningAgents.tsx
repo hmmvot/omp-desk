@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { useId } from "react";
 import type { ChatModel } from "../../chat/model";
 import { agentsSummary, agentWindowWithin } from "../../chat/hud-summary";
-import { fmtDuration } from "../lib/format";
+import { fmtDuration } from "../../shared/format";
 import { useAgentElapsed } from "../lib/live-clock";
 import { HudHeader, useDetailOpener } from "./HudRows";
 

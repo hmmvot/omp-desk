@@ -30,7 +30,7 @@ import { BrokerHandle, PtyRequestError, type BrokerHandleEvent } from "./broker-
 import { PTY_PROTOCOL_VERSION, PTY_RPC_MAX_WRITE_BYTES, PtyProtocolError, PtyRpcFragmentAssembler, ptyRpcFragment, ptyRpcFragmentCount } from "./pty-protocol.ts";
 import type { PtyBrokerFrame, PtyBrokerRecord, PtyStatusPayload, PtyStopMode, PtyStopResult } from "./pty-protocol.ts";
 import type { PtyClientSideConnection } from "./pty-ipc.ts";
-import type { RpcAttachResult, RpcChannel, RpcChannelEvent, RpcChildStatus } from "./rpc/protocol.ts";
+import type { RpcAttachResult, RpcChannel, RpcChannelEvent, RpcChildStatus } from "../protocol/rpc.ts";
 
 /** How long one line write waits for the broker's acknowledgement. */
 const WRITE_TIMEOUT_MS = 60_000;

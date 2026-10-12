@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseCodeSymbol } from "../webview/code-symbols.ts";
-import type { SymbolLinksResolution } from "../webview/code-symbols.ts";
-import { SymbolKind, SymbolLinkResolver, handleSymbolLinks, isInside, isNameCandidate, matchSymbol, symbolEntry, symbolRoots, symbolTarget } from "./symbol-links.ts";
+import { parseCodeSymbol } from "../shared/code-symbols.ts";
+import type { SymbolLinksResolution } from "../shared/code-symbols.ts";
+import { SymbolKind, SymbolLinkResolver, handleSymbolLinks, isNameCandidate, matchSymbol, symbolEntry, symbolRoots, symbolTarget } from "./symbol-links.ts";
+import { isInside } from "./link-scope.ts";
 import { FileNameLinkResolver } from "./file-name-links.ts";
 import type { SymbolEntry, SymbolSource } from "./symbol-links.ts";
 

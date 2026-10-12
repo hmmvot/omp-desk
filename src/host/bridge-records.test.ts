@@ -14,8 +14,8 @@ import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { after, describe, it } from "node:test";
-import { BRIDGE_PATH, encodeBase64Url } from "../bridge-protocol.ts";
-import { tabIdToken } from "../bridge-identity.ts";
+import { BRIDGE_PATH, encodeBase64Url } from "../protocol/bridge-protocol.ts";
+import { tabIdToken } from "./bridge-identity.ts";
 import { BridgeRecordError, BridgeRecords } from "./bridge-records.ts";
 import type { BridgeDocumentRecord, BridgeNativeBinding, BridgeRecordScope, BridgeSecretStore } from "./bridge-records.ts";
 

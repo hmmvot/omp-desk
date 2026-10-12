@@ -29,8 +29,8 @@ import type {
 	GuestTerminalPhase,
 	GuestTerminalSnapshotMessage,
 	GuestTerminalStateMessage,
-} from "../messages.ts";
-import { decodeBase64 } from "./bytes-base64.ts";
+} from "../../protocol/messages.ts";
+import { decodeBase64 } from "../../shared/bytes-base64.ts";
 
 /** Every host message this state machine accepts, in the order it arrived. */
 export type TerminalFrame = GuestTerminalStateMessage | GuestTerminalSnapshotMessage | GuestTerminalDataMessage | GuestTerminalExitMessage;

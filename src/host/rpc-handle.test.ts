@@ -35,7 +35,7 @@ import { BrokerHandle } from "./broker-handle.ts";
 import { PTY_PROTOCOL_VERSION, type PtyBrokerFrame, type PtyRequestFrame } from "./pty-protocol.ts";
 import { PtyBrokerClient } from "./pty-client.ts";
 import { RpcHandle, RpcWriteError } from "./rpc-handle.ts";
-import type { RpcChannelEvent } from "./rpc/protocol.ts";
+import type { RpcChannelEvent } from "../protocol/rpc.ts";
 
 const EXTENSION_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 

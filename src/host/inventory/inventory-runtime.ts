@@ -1,4 +1,4 @@
-import { isRecord as record } from "../../guards.ts";
+import { isRecord as record } from "../../shared/guards.ts";
 import { SettingsRefusal } from "../omp-settings-core.ts";
 import { REASON_LIMIT, REASONS_PER_VIEW, SOURCE_ROLES } from "./inventory-model.ts";
 import type { IncompleteReason, InventoryResult, InventoryRow, InventoryScope, InventorySnapshot, RowKind, RowSource, RowToggle, SourceRole, ToggleMechanism, ViewKind } from "./inventory-model.ts";

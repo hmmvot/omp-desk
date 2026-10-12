@@ -24,7 +24,7 @@ import {
 	type ChatPhase,
 	type ChatSnapshotPayload,
 } from "../../chat/model.ts";
-import { TRANSCRIPT_WINDOW_ROWS, transcriptWindow } from "../../webview/lib/transcript-window.ts";
+import { TRANSCRIPT_WINDOW_ROWS, transcriptWindow } from "../../chat/transcript-window.ts";
 import { BLOB_BYTES_BUDGET, blobsDirectoryFor, resolveBlobImages } from "./history-blobs.ts";
 
 export const DEFAULT_TAIL_ROWS = TRANSCRIPT_WINDOW_ROWS;

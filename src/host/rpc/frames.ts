@@ -3,7 +3,7 @@
  * of OMP's protocol v2 `rpc_chunk` reassembly (`rpc-frame.ts` `RpcFrameDecoder`; the installed package cannot be
  * imported). Errors are counted and bounded diagnostics, never fatal: the session resyncs instead.
  */
-import { isRecord } from "../../guards.ts";
+import { isRecord } from "../../shared/guards.ts";
 
 /** Maximum UTF-8 size of one physical frame line (OMP `MAX_RPC_FRAME_BYTES`). */
 export const MAX_RPC_FRAME_BYTES = 1024 * 1024;

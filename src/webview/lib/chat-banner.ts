@@ -6,8 +6,8 @@
  */
 // Explicit `.ts` specifiers: this module is imported by the node:test runner.
 import type { ChatModel } from "../../chat/model.ts";
-import { isRecoverableRpcFailure, RPC_ERROR_SENTENCES } from "../../host/rpc/protocol.ts";
-import type { RpcErrorCode } from "../../host/rpc/protocol.ts";
+import { isRecoverableRpcFailure, RPC_ERROR_SENTENCES } from "../../protocol/rpc.ts";
+import type { RpcErrorCode } from "../../protocol/rpc.ts";
 import { chatExitText, exitNeedsProviderLogin } from "../../chat/exit-reason.ts";
 
 export interface ChatBanner {

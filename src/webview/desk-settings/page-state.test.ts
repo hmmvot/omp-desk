@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildView, groupViews, projectConfiguration } from "../../host/desk-settings/model.ts";
-import type { SettingGroupView } from "../../host/desk-settings/model.ts";
+import { buildView, groupViews, projectConfiguration } from "../../protocol/desk-settings.ts";
+import type { SettingGroupView } from "../../protocol/desk-settings.ts";
 import { initialPageState, leaveDecision, needsWrite, readyToSave, reducePage } from "./page-state.ts";
 import type { PageEvent, PageState } from "./page-state.ts";
 

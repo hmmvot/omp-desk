@@ -26,7 +26,7 @@
  *   document incarnation, which is the caller's next step, not a second editor.
  */
 // Explicit `.ts` specifier so the node:test runner can load this module directly.
-import { isBridgeTabId } from "../bridge-identity.ts";
+import { isBridgeTabId } from "./bridge-identity.ts";
 
 /** Where the editor a tab is served by came from. */
 export type EditorProvenance = "saved" | "transient";

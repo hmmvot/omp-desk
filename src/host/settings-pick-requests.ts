@@ -1,7 +1,7 @@
 import { SettingsRefusal } from "./omp-settings-core.ts";
-import type { SettingsRole, SettingsScope } from "./omp-settings-core.ts";
-import { LIST_PICK_PURPOSES } from "./settings-pick-items.ts";
-import type { PickPurpose } from "./settings-pick-items.ts";
+import type { SettingsRole, SettingsScope } from "../protocol/settings-model.ts";
+import { LIST_PICK_PURPOSES } from "../protocol/settings-pick-items.ts";
+import type { PickPurpose } from "../protocol/settings-pick-items.ts";
 
 const shortText = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 512;
 /** Validates a page's `pick-model` request; values are offered and returned, never executed. */

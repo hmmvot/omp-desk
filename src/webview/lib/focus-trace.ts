@@ -10,7 +10,7 @@
  * A normal keystroke, a window deactivation and the operating system giving the window focus back are not losses
  * and are never reported. Reports are rate-limited, so a page that loses focus in a loop cannot flood the log.
  */
-import { MAX_FOCUS_TRACE_DETAIL_LENGTH } from "../messages.ts";
+import { MAX_FOCUS_TRACE_DETAIL_LENGTH } from "../../protocol/messages.ts";
 
 /** Events remembered for the next report. */
 export const TRACE_RING_SIZE = 16;

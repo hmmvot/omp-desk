@@ -1,4 +1,4 @@
-import { isTransientOmpFailure } from "../omp-unavailable.ts";
+import { isTransientOmpFailure } from "../../shared/omp-unavailable.ts";
 
 /**
  * Where Bun and the selected OMP's package source are (ADR-0061). Finding them runs the same launcher

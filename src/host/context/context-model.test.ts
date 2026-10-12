@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { relativeAge } from "../../views/relative-age.ts";
+import { relativeAge } from "../../shared/relative-age.ts";
 import { liveSignature, NO_SESSION_MESSAGE, NOT_RUNNING_MESSAGE, projectContext, READING_MESSAGE, TERMINAL_MESSAGE } from "./context-model.ts";
 import { parseContextReport } from "./context-parse.ts";
 import type { ContextInputs, ContextLive, ContextViewModel } from "./context-model.ts";

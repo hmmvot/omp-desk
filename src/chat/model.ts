@@ -19,7 +19,8 @@ import { reduceAgentFrame, reduceAgentLiveness, reduceAgentRoster, taskSpawnIden
 import type { LiveAgent } from "./agent-liveness.ts";
 import type { MaintenanceState, NativeEventFrame, RetryState } from "./events.ts";
 import { positionTranscript, type EphemeralItem, type TranscriptPosition } from "./projection.ts";
-import { transcriptWindow, type TranscriptWindow } from "../webview/lib/transcript-window.ts";
+import type { ActiveTool, PendingRow } from "./pending.ts";
+import { transcriptWindow, type TranscriptWindow } from "./transcript-window.ts";
 import type { BranchPoint } from "./rewind.ts";
 import type { ChatExitReason } from "./exit-reason.ts";
 import { sanitizeAnsi, stripAnsi, withoutCutSgr } from "./ansi.ts";
@@ -108,18 +109,6 @@ export function samePendingControl(a: ChatPendingControl | null, b: ChatPendingC
 		(a.modelCycles ?? 0) === (b.modelCycles ?? 0) && a.thinking === b.thinking && (a.thinkingCycles ?? 0) === (b.thinkingCycles ?? 0);
 }
 
-export interface ActiveTool {
-	toolCallId: string;
-	toolName: string;
-	args: unknown;
-	intent?: string;
-	partialResult?: unknown;
-	/** Latest `tool_stream_update.update` projection (e.g. a diff preview). */
-	streamUpdate?: unknown;
-	startedAt: number;
-}
-
-
 /** Latest host-owned command refusal/unknown outcome; no notice history. */
 export interface CommandFeedback {
 	id: number;
@@ -197,23 +186,6 @@ export interface ChatPromptResult {
 	status: "completed" | "aborted" | "error";
 	agentInvoked: boolean;
 	sessionSettled: boolean;
-}
-
-/** A message that ended live and whose durable entry has not been seen yet. */
-export interface PendingRow extends TranscriptPosition {
-	/** The synthetic entry id, `live:<messageId>`; also the key in {@link ChatModel.pending}. */
-	entryId: string;
-	messageId: string;
-	role: ChatMessage["role"];
-	timestamp: number;
-	toolCallId: string | null;
-	customType?: string;
-	/** Hidden context is persisted and reconciled, but never receives a visible unsaved warning. */
-	hidden?: boolean;
-	/** Custom rows only: customType + content + details, the identity that survives a differing persist timestamp. */
-	fingerprint?: string;
-	/** True once the reconcile attempts ran out after the session settled: shown as *not yet saved*. */
-	unsaved: boolean;
 }
 
 export interface DisplayTurn { id: number; startedAt: number | null; completedAt: number | null; memberKeys: readonly string[]; complete: boolean }

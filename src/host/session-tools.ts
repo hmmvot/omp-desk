@@ -1,6 +1,6 @@
 import type { ChatSlashCommand } from "../chat/model.ts";
 import type { ControlToolList } from "./control-protocol.ts";
-import type { RpcToolDescriptor } from "./rpc/protocol.ts";
+import type { RpcToolDescriptor } from "../protocol/rpc.ts";
 import type { SessionEvidence, SessionToolEntry } from "./inventory/inventory-model.ts";
 
 /**

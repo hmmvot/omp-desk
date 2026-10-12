@@ -1,5 +1,5 @@
 /** Native transcript/maintenance events used identically at child and page JSON boundaries. */
-import { isRecord } from "../guards.ts";
+import { isRecord } from "../shared/guards.ts";
 import { parseChatMessage, parseRetryRecovery, type CustomMessage, type RetryErrorUpdate } from "./messages.ts";
 import { parseTodoPhases, type TodoTask } from "./todos.ts";
 

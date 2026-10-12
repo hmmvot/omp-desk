@@ -9,8 +9,8 @@
  * pass with the newest set.
  */
 
-import { isRecord } from "../../guards.ts";
-import type { RpcHostToolDefinition } from "../rpc/protocol.ts";
+import { isRecord } from "../../shared/guards.ts";
+import type { RpcHostToolDefinition } from "../../protocol/rpc.ts";
 import type { HostToolCalls } from "./host-tool-calls.ts";
 import type { HostToolProvider } from "./host-tool.ts";
 

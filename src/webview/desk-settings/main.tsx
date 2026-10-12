@@ -1,10 +1,9 @@
 import { useEffect, useId, useMemo, useReducer, useRef, useState } from "react";
 import type { Dispatch, KeyboardEvent, ReactNode } from "react";
 import { createRoot } from "react-dom/client";
-import { isRecord } from "../../guards.ts";
-import { inputText, matchesQuery, parseInput } from "../../host/desk-settings/model.ts";
-import type { JsonValue, SettingView, Target } from "../../host/desk-settings/model.ts";
-import type { DeskSettingsAction, DeskSettingsMessage } from "../../host/desk-settings/protocol.ts";
+import { isRecord } from "../../shared/guards.ts";
+import { inputText, matchesQuery, parseInput } from "../../protocol/desk-settings.ts";
+import type { DeskSettingsAction, DeskSettingsMessage, JsonValue, SettingView, Target } from "../../protocol/desk-settings.ts";
 import { initialPageState, leaveDecision, needsWrite, readyToSave, reducePage } from "./page-state.ts";
 import type { PageEvent, PageState } from "./page-state.ts";
 import { DESK_SETTINGS_CSS } from "./styles";

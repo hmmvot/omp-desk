@@ -53,7 +53,7 @@ import * as vscode from "vscode";
 import { readSessionFileActivity, readSessionFileHeaderReading } from "../host/session-index";
 import type { RestoreOutcome, SessionFileActivity, SessionFileHeader, SessionFileHeaderReading, SessionIndexEntry } from "../host/session-index";
 import { folderOwnsCwd } from "./workspace-folders";
-import { relativeAge } from "./relative-age";
+import { relativeAge } from "../shared/relative-age";
 import type { LauncherFolder } from "./launcher-folders";
 import type { WorkspaceFolder } from "./workspace-folders";
 import { isUnread } from "../host/session-unread";

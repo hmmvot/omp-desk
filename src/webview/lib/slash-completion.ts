@@ -1,5 +1,5 @@
 import type { ChatSlashCommand } from "../../chat/model.ts";
-import { classifySlashInput } from "../../host/rpc/protocol.ts";
+import { classifySlashInput } from "../../protocol/rpc.ts";
 
 /**
  * Commands Chat runs itself before anything is sent. `/rewind` and `/branch` are Chat's in-place Rewind, as they are

@@ -49,7 +49,7 @@ import {
 	type RuntimeTreeSource,
 	type StagedRuntimeAsset,
 	type StagedRuntimeTree,
-} from "../runtime-assets.ts";
+} from "./runtime-assets.ts";
 import { PTY_RUNTIME_VERSION } from "./pty-protocol.ts";
 import {
 	SELF_CHECK_DEADLINE_FLAG,

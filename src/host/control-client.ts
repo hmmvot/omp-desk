@@ -281,7 +281,7 @@ let controlHelper: { readonly path: string; readonly sha256: string } | null = n
  * The packaged helper lives inside the installed extension folder, which
  * `code --install-extension <vsix> --force` renames, so nothing here starts
  * PowerShell from that folder: activation stages a content-addressed copy
- * (`src/runtime-assets.ts`) and configures it once, before any peer proof. Until
+ * (`src/host/runtime-assets.ts`) and configures it once, before any peer proof. Until
  * then there is no helper at all, and every proof refuses visibly with
  * `helper-unavailable` — there is still no unchecked fallback.
  *

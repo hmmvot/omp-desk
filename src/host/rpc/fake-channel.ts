@@ -12,10 +12,10 @@ import type {
 	RpcChannelEvent,
 	RpcChildStatus,
 	RpcWriteErrorCode,
-} from "./protocol.ts";
+} from "../../protocol/rpc.ts";
 import type { RunningAgent } from "../../chat/agents.ts";
 import type { TodoPhase } from "../../chat/todos.ts";
-import { isRecord } from "../../guards.ts";
+import { isRecord } from "../../shared/guards.ts";
 
 export const READY_LINE = JSON.stringify({
 	type: "ready",

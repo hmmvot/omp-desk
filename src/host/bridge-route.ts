@@ -27,8 +27,8 @@
  * resent.
  */
 
-import { asciiJsonText, createToken, isCanonicalToken } from "../bridge-protocol.ts";
-import type { BridgeRouteStatus } from "../bridge-protocol.ts";
+import { asciiJsonText, createToken, isCanonicalToken } from "../protocol/bridge-protocol.ts";
+import type { BridgeRouteStatus } from "../protocol/bridge-protocol.ts";
 
 /** The default deadline for the guest to acknowledge a route offer. */
 export const BRIDGE_ROUTE_ACK_TIMEOUT_MS = 5_000;

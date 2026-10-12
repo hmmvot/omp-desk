@@ -1,7 +1,8 @@
 import path from "node:path";
-import { parseBareFileName, parseCodeSymbol } from "../webview/code-symbols.ts";
-import type { BareFileName, CodeSymbol, SymbolLinkResult, SymbolLinksRequest, SymbolLinksResolution } from "../webview/code-symbols.ts";
-import type { FileLookup, FileNameLinkResolver } from "./file-name-links.ts";
+import { parseBareFileName, parseCodeSymbol } from "../shared/code-symbols.ts";
+import type { BareFileName, CodeSymbol, SymbolLinkResult, SymbolLinksRequest, SymbolLinksResolution } from "../shared/code-symbols.ts";
+import { isInside } from "./link-scope.ts";
+import type { FileLookup, FileNameLinks, SymbolOutcome, SymbolScope } from "./link-scope.ts";
 
 /**
  * Where an inline-code symbol of a Chat reply is defined, according to VS Code's workspace symbol providers
@@ -250,13 +251,6 @@ export function matchSymbol(symbol: CodeSymbol, entries: readonly SymbolEntry[],
 	return { state: "ambiguous", locations: locations.length, symbols: sameSymbols.length };
 }
 
-/** Whether `file` is `root` or inside it (Windows rules: case-insensitive, either separator). */
-export function isInside(root: string, file: string): boolean {
-	if (root === "" || file === "") return false;
-	const relative = path.win32.relative(root, file);
-	return relative === "" || (relative !== ".." && !relative.startsWith("..\\") && !path.win32.isAbsolute(relative));
-}
-
 /**
  * The folders a symbol's file may be in: the session's working directory, and any open workspace folder that
  * contains it (a session started in a subfolder still links to the rest of its project). No library or metadata location.
@@ -270,21 +264,6 @@ export function symbolRoots(cwd: string, workspaceFolders: readonly string[]): s
 export function symbolTarget(entry: SymbolEntry, cwd: string): string {
 	const shown = isInside(cwd, entry.path) ? path.win32.relative(cwd, entry.path).replaceAll("\\", "/") : entry.path;
 	return entry.line > 0 ? `${shown}:${entry.line}:${Math.max(entry.column, 1)}` : shown;
-}
-
-export type SymbolOutcome =
-	| { readonly status: "found"; readonly target: string }
-	| { readonly status: "none" }
-	/** Several different definitions inside the session's folders: the page links to the workspace symbol search, never to one of them. With `files`, several files carry the name of a bare file name span and a click lets the user choose one. */
-	| { readonly status: "ambiguous"; readonly definitions: number; readonly files?: true }
-	| { readonly status: "unavailable" }
-	/** Not a verdict: the provider is not ready or its queue is full; the token is asked again when the host signals a retry. */
-	| { readonly status: "pending" };
-
-export interface SymbolScope {
-	/** The session's working directory: relative targets are relative to it, and it names the cache scope. */
-	readonly cwd: string;
-	readonly roots: readonly string[];
 }
 
 export interface SymbolResolverOptions {
@@ -303,7 +282,7 @@ export interface SymbolResolverOptions {
 	/** Delays of the not-ready canary probes (the last one repeats). */
 	readonly probeDelaysMs?: readonly number[];
 	/** The bare-file-name side: looked up by {@link SymbolLinkResolver.resolveFileName} and dropped with every {@link SymbolLinkResolver.invalidate}. */
-	readonly files?: FileNameLinkResolver;
+	readonly files?: FileNameLinks;
 }
 
 /** A provider answer; `total` is how many entries the provider returned before the adapter kept the name candidates. */
@@ -347,7 +326,7 @@ export class SymbolLinkResolver {
 	readonly #maxCached: number;
 	readonly #log: ((line: string) => void) | undefined;
 	readonly #onRetry: (() => void) | undefined;
-	readonly #files: FileNameLinkResolver | undefined;
+	readonly #files: FileNameLinks | undefined;
 	readonly #probeDelays: readonly number[];
 	readonly #cache = new Map<string, { outcome: SymbolOutcome; expires: number }>();
 	readonly #pending = new Map<string, Promise<SymbolOutcome>>();

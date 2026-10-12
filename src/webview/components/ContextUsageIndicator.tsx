@@ -1,9 +1,9 @@
 /** Project-owned DOM/SVG implementation of the Paseo context-ring visual design. */
 import { useEffect, useId, useLayoutEffect, useRef, useState } from "react";
 import { useDismissibleLayer } from "../lib/dismissible-layer";
-import { contextTokenLabel, quotaWindowLabel, sessionCostLabel } from "../lib/context-indicator";
-import { fmtPercent } from "../lib/format";
-import type { FooterQuotaWindow } from "../footer-metadata";
+import { contextTokenLabel, quotaWindowLabel, sessionCostLabel } from "../../shared/context-indicator";
+import { fmtPercent } from "../../shared/format";
+import type { FooterQuotaWindow } from "../../shared/footer-metadata";
 
 const CIRCUMFERENCE = 2 * Math.PI * 6;
 

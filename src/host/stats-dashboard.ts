@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { request } from "node:http";
 import { createConnection } from "node:net";
-import type { PtyBrokerClient, PtyHandle, PtyLaunchSpec } from "./pty-client";
-import type { PtyBrokerRecord } from "./pty-protocol";
+import type { PtyBrokerClient, PtyHandle } from "./pty-client";
+import type { PtyBrokerRecord, PtyLaunchSpec } from "./pty-protocol";
 import type { OmpCommand } from "./native-terminal";
 import { acquirePtySlotLock, releasePtySlotLock } from "./pty-registry.ts";
 

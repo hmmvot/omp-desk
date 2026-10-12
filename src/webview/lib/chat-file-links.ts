@@ -1,6 +1,6 @@
-import { detectTerminalFileLinks } from "../terminal-links.ts";
-import type { FileLinkAction, TerminalTextLink } from "../terminal-links.ts";
-import type { GuestHostMessage, GuestWebviewMessage } from "../messages.ts";
+import { detectTerminalFileLinks } from "../../shared/terminal-links.ts";
+import type { FileLinkAction, TerminalTextLink } from "../../shared/terminal-links.ts";
+import type { GuestHostMessage, GuestWebviewMessage } from "../../protocol/messages.ts";
 import { ValidationCache } from "./link-validation-cache.ts";
 import { TerminalLinkClient } from "./terminal-link-client.ts";
 

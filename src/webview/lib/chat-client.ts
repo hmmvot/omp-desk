@@ -39,11 +39,11 @@ import {
 	createChatModel,
 	sameEpoch,
 } from "../../chat/model.ts";
-import { classifySlashInput, slashDeniedSentence } from "../../host/rpc/protocol.ts";
+import { classifySlashInput, slashDeniedSentence } from "../../protocol/rpc.ts";
 import { deskSessionCommand } from "../../chat/desk-commands.ts";
-import type { GuestHostMessage, GuestWebviewMessage } from "../messages.ts";
-import { ChatSnapshotAssembler } from "../chat-messages.ts";
-import type { ChatAbortResultMessage, ChatDisplayPreferences, ChatNavigateResultMessage, ChatQueuePurpose, ChatQueueResultEntry, ChatQueueResultItem, ChatQueuedRef } from "../chat-messages.ts";
+import type { GuestHostMessage, GuestWebviewMessage } from "../../protocol/messages.ts";
+import { ChatSnapshotAssembler } from "../../protocol/chat-messages.ts";
+import type { ChatAbortResultMessage, ChatDisplayPreferences, ChatNavigateResultMessage, ChatQueuePurpose, ChatQueueResultEntry, ChatQueueResultItem, ChatQueuedRef } from "../../protocol/chat-messages.ts";
 import type { NavigationKind } from "../../chat/rewind.ts";
 import { parseSubagentPage, type SubagentTranscriptPage } from "../../chat/subagent-transcript.ts";
 

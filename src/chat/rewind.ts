@@ -7,7 +7,7 @@
  * the branch points of the active path.
  */
 import type { ImageContent } from "@oh-my-pi/pi-wire";
-import { isRecord } from "../guards.ts";
+import { isRecord } from "../shared/guards.ts";
 import type { ChatEntry } from "./messages.ts";
 import { confirmedClearBoundaryIndex } from "./cleared-history.ts";
 import { toolPresentation } from "./tool-presentation.ts";

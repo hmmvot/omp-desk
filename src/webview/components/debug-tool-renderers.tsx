@@ -1,9 +1,9 @@
 import type { ReactNode } from "react";
 import { DEBUG_TOOL_TITLES } from "../../chat/tool-presentation";
-import { fmtDuration } from "../lib/format";
+import { fmtDuration } from "../../shared/format";
 import { useLiveDurations } from "../lib/live-clock";
 import { JsonOutput, scalar, Section, string, TextPreview } from "./tool-renderer-primitives";
-import type { ToolRenderContext, ToolSemanticView } from "./tool-renderers";
+import type { ToolRenderContext, ToolSemanticView } from "./tool-render-types";
 
 /**
  * Chat cards for the host-run `vscode_debug_*` tools (docs/designs/2026-10-10-agent-debugger-tools.md section 5):

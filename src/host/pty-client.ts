@@ -50,6 +50,7 @@ import {
 	PTY_DEFAULT_OWNER_GRACE_MS,
 	PTY_PROTOCOL_VERSION,
 	type PtyBrokerRecord,
+	type PtyLaunchSpec,
 	type PtyBrokerFrame,
 	type PtyKind,
 	type PtyOwnerHint,
@@ -105,41 +106,6 @@ export interface PtyBrokerClientOptions {
 	readonly env?: Readonly<Record<string, string>>;
 	/** Receives runtime-proof state changes worth a log line (a provisional admission, its resolution). */
 	readonly onRuntimeEvent?: (message: string) => void;
-}
-
-/** One terminal to start: the broker runs it, owns it, and outlives this window. */
-export interface PtyLaunchSpec {
-	/** Writer slot: `tab:<tabId>` for a managed host, `shell:<uuid>` for a folder shell. */
-	readonly slot: string;
-	readonly kind: PtyKind;
-	/** Absolute path of the executable. */
-	readonly file: string;
-	readonly args: readonly string[];
-	readonly cwd: string;
-	/** Environment overrides over the broker's own; a `null` value is sent as an empty string. */
-	readonly env?: Readonly<Record<string, string | null>>;
-	readonly cols?: number;
-	readonly rows?: number;
-	readonly title?: string | null;
-	readonly scrollbackLines?: number;
-	readonly backlogChars?: number;
-	/** How long the broker keeps an exited child's record without a client, in ms. */
-	readonly exitRetentionMs?: number;
-	/**
-	 * The owning VS Code instance this folder shell belongs to, as the extension host
-	 * sees itself (ADR-0030). Honored for a `folder-shell` only, and only as a hint: the
-	 * broker attests it independently and reports what it proved in `status.ownerStop`.
-	 *
-	 * `null` states that the launching frontend exists but cannot attest an owning main
-	 * process, which disarms automatic stopping for the shell. Omitting the field makes no
-	 * ownership claim and changes nothing.
-	 */
-	readonly owner?: PtyOwnerHint | null;
-	/**
-	 * Finite grace, in ms, between every admitted owning main process signaling and the one
-	 * shell stop attempt. The broker clamps it into its own finite range.
-	 */
-	readonly ownerGraceMs?: number;
 }
 
 export interface BrokerLaunchOutcome<Handle> {

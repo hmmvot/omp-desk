@@ -29,12 +29,12 @@ import { ChatClient } from "./webview/lib/chat-client.ts";
 import { FakeRpcChannel } from "./host/rpc/fake-channel.ts";
 import { RpcSession } from "./host/rpc/session.ts";
 import { ManualTimers, assistantMessage, messageEntry, sessionFileText, userMessage } from "./host/rpc/test-support.ts";
-import { GUEST_PROTOCOL_VERSION, parseGuestHostMessage } from "./webview/messages.ts";
-import type { GuestTerminalFontMessage } from "./webview/messages.ts";
+import { GUEST_PROTOCOL_VERSION, parseGuestHostMessage } from "./protocol/messages.ts";
+import type { GuestTerminalFontMessage } from "./protocol/messages.ts";
 import { URI } from "vscode-uri";
 import type { TurnNotice } from "./host/notifications.ts";
 import { createOmpHostControlAdapter, type OmpExtensionContext } from "./omp/host-control.ts";
-import { parseChatWebviewMessage, type ChatDisplayPreferences, type ChatWebviewMessage } from "./webview/chat-messages.ts";
+import { parseChatWebviewMessage, type ChatDisplayPreferences, type ChatWebviewMessage } from "./protocol/chat-messages.ts";
 
 interface NativeFixture {
   readonly pid: number;

@@ -14,9 +14,9 @@ import { describe, it } from "node:test";
 import type { SessionEntry } from "@oh-my-pi/pi-wire";
 import { createChatModel, snapshotOf } from "../../chat/model.ts";
 import type { ChatEpoch, ChatPhase, ChatSnapshotPayload, ChatUiRequest } from "../../chat/model.ts";
-import { REWIND_ARGUMENTS_SENTENCE, SLASH_DENIED_SENTENCE } from "../../host/rpc/protocol.ts";
-import { splitChatSnapshot } from "../chat-messages.ts";
-import type { GuestHostMessage, GuestWebviewMessage } from "../messages.ts";
+import { REWIND_ARGUMENTS_SENTENCE, SLASH_DENIED_SENTENCE } from "../../protocol/rpc.ts";
+import { splitChatSnapshot } from "../../protocol/chat-messages.ts";
+import type { GuestHostMessage, GuestWebviewMessage } from "../../protocol/messages.ts";
 import { ChatClient } from "./chat-client.ts";
 
 const EPOCH: ChatEpoch = { nonce: "host-a", counter: 1 };

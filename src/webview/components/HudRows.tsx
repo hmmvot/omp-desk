@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { useCallback, useSyncExternalStore } from "react";
 import { guestTransport } from "../bridge";
-import type { DetailTarget } from "../detail-target";
+import type { DetailTarget } from "../../protocol/detail-target";
 
 /**
  * Opens a detail tab. Only a page on the host's own panel route can: a surviving bridge page keeps

@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DeskSettingsController } from "./controller.ts";
-import { projectConfiguration } from "./model.ts";
+import { projectConfiguration } from "../../protocol/desk-settings.ts";
 import type { DeskSettingsPort } from "./controller.ts";
-import type { ConfigLayers, JsonValue, Target } from "./model.ts";
+import type { ConfigLayers, JsonValue, Target } from "../../protocol/desk-settings.ts";
 
 const DESCRIPTORS = projectConfiguration({
 	title: "T",

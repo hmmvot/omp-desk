@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { OmpUnavailableError } from "../omp-unavailable.ts";
+import { OmpUnavailableError } from "../../shared/omp-unavailable.ts";
 import { createRuntimeResolver, NO_BUN, noPackageSource, RESOLVE_TTL_MS } from "./inventory-environment.ts";
 import type { RuntimeResolution } from "./inventory-environment.ts";
 

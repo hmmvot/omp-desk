@@ -2,7 +2,7 @@
  * Host-side factory for the documents one OMP editor can show.
  *
  * An editor is restored across a restart by VS Code only when it carries state
- * its own document persisted (see `src/webview/panel-identity.ts`), so every
+ * its own document persisted (see `src/shared/panel-identity.ts`), so every
  * document here stamps the same non-secret tab identity into a meta tag — the
  * chat page reads it with the bundle, and the explanation document's nonce-gated
  * inline script persists it directly:
@@ -23,9 +23,9 @@
  */
 import { randomBytes } from "node:crypto";
 import type * as vscode from "vscode";
-import { PANEL_BRIDGE_META, PANEL_IDENTITY_META, isPanelTabId, panelBridgeMetaValue, panelDocumentIdentityBootstrapSource, panelDocumentScriptSource } from "../webview/panel-identity.ts";
-import { SHELL_SLOT_META, isShellSlotId } from "../webview/panel-identity.ts";
-import { DETAIL_META, detailMetaValue, type DetailTarget } from "../webview/detail-target.ts";
+import { PANEL_BRIDGE_META, PANEL_IDENTITY_META, isPanelTabId, panelBridgeMetaValue, panelDocumentIdentityBootstrapSource, panelDocumentScriptSource } from "../shared/panel-identity.ts";
+import { SHELL_SLOT_META, isShellSlotId } from "../shared/panel-identity.ts";
+import { DETAIL_META, detailMetaValue, type DetailTarget } from "../protocol/detail-target.ts";
 
 
 /**

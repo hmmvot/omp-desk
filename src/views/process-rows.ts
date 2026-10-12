@@ -12,8 +12,8 @@
  */
 import * as vscode from "vscode";
 import type { BrokerProcessRow } from "../host/broker-processes";
-import { fmtDuration } from "../webview/lib/format";
-import { relativeAge } from "./relative-age";
+import { fmtDuration } from "../shared/format";
+import { relativeAge } from "../shared/relative-age";
 import {
 	PROCESS_STATE_EXPLANATION,
 	processDescription,

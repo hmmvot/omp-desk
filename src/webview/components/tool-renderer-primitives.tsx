@@ -2,13 +2,13 @@ import type { ReactNode } from "react";
 import { useState } from "react";
 import { parseAnsi, stripAnsi, type AnsiLimits, type AnsiLine } from "../../chat/ansi";
 import { AnsiLines } from "./AnsiText";
-import { isRecord } from "../../guards";
+import { isRecord } from "../../shared/guards";
 import { Markdown } from "./Markdown";
 import { FileLink, FileLinkText } from "./FileLinks";
 import type { ExplicitFileLink } from "./FileLinks";
 import { SavedImage } from "./SavedImage";
 import { WebLink } from "./WebLinks";
-import { webLinkUrl } from "../terminal-links";
+import { webLinkUrl } from "../../shared/terminal-links";
 
 export function record(value: unknown): Record<string, unknown> { return isRecord(value) ? value : {}; }
 export function string(value: unknown): string { return typeof value === "string" ? value : ""; }

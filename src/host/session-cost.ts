@@ -1,6 +1,6 @@
 import { createReadStream } from "node:fs";
 import { createInterface } from "node:readline";
-import { isRecord } from "../guards.ts";
+import { isRecord } from "../shared/guards.ts";
 
 /**
  * The usage an OMP journal entry bills, as pi-coding-agent's `entryUsage` (session-manager.ts) counts it: an

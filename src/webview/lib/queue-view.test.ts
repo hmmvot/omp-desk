@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import type { ChatQueueResultItem } from "../chat-messages.ts";
+import type { ChatQueueResultItem } from "../../protocol/chat-messages.ts";
 import { QUEUE_MAX_LINES, QUEUE_TITLE_LIMIT, queueNotice, queueRows, queueSummary, queueWindow, restoredEntries } from "./queue-view.ts";
 
 const result = (status: ChatQueueResultItem["status"], text: string, extra: Record<string, unknown> = {}): ChatQueueResultItem => ({ queue: "followUp", text, status, ...extra }) as ChatQueueResultItem;

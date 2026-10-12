@@ -13,7 +13,7 @@
  */
 import { spawn } from "node:child_process";
 import type { ChatSlashCommand } from "../chat/model.ts";
-import { isRecord } from "../guards.ts";
+import { isRecord } from "../shared/guards.ts";
 
 /** One builtin of the installed registry: its names and whether rpc mode can run it. */
 export interface BuiltinSlashEntry {

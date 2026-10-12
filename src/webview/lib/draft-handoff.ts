@@ -3,7 +3,7 @@
  * Capture locks its source until a matching release or disposal. Image bytes,
  * draft text and recovery records never reach persisted Webview state or logs.
  */
-import type { DraftHandoffContent } from "../messages.ts";
+import type { DraftHandoffContent } from "../../protocol/messages.ts";
 
 export type DraftCapture = DraftHandoffContent;
 

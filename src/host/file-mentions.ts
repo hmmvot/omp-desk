@@ -36,7 +36,7 @@ import {
 	MAX_FILE_PATH_LENGTH,
 	MAX_FILE_QUERY_LENGTH,
 	isSafeBoundaryText,
-} from "../webview/messages.ts";
+} from "../protocol/messages.ts";
 
 /** Minimal URI shape this module needs; `vscode.Uri` satisfies it structurally. */
 export interface FileSearchUri {

@@ -25,7 +25,7 @@ import { after, describe, it } from "node:test";
 import { createHash } from "node:crypto";
 import type { PrivateStorageCommandResult, PrivateStorageProbe } from "./private-storage.ts";
 import { TEST_CURRENT_SID, fixtureAcl, fixturePrincipal } from "./private-storage-test-support.ts";
-import { hashRuntimeTree, stageRuntimeTree, verifyStagedRuntimeTree, type RuntimeTreeSource } from "../runtime-assets.ts";
+import { hashRuntimeTree, stageRuntimeTree, verifyStagedRuntimeTree, type RuntimeTreeSource } from "./runtime-assets.ts";
 import {
 	PTY_BROKER_ENTRY,
 	PTY_OWNER_HELPER,

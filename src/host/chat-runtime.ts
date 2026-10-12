@@ -31,12 +31,12 @@ import type {
 	ChatStatePayload,
 } from "../chat/model.ts";
 import { chatTurnInProgress, createChatModel, sameEpoch, setChatPhase, snapshotOf } from "../chat/model.ts";
-import { MAX_CHAT_TEXT_LENGTH, splitChatSnapshot } from "../webview/chat-messages.ts";
-import type { ChatHostMessage, ChatWebviewMessage, ChatSubagentRequestMessage, ChatDisplayPreferences, ChatQueueRemoveMessage, ChatQueueResultEntry, ChatAbortResultMessage, ChatNavigateResultMessage } from "../webview/chat-messages.ts";
+import { MAX_CHAT_TEXT_LENGTH, splitChatSnapshot } from "../protocol/chat-messages.ts";
+import type { ChatHostMessage, ChatWebviewMessage, ChatSubagentRequestMessage, ChatDisplayPreferences, ChatQueueRemoveMessage, ChatQueueResultEntry, ChatAbortResultMessage, ChatNavigateResultMessage } from "../protocol/chat-messages.ts";
 import { SUBAGENT_CHUNK_CHARS, type SubagentTranscriptPage } from "../chat/subagent-transcript.ts";
 import type { HistoryReader } from "./rpc/history-reader.ts";
-import { SLASH_DENIED_SENTENCE, classifySlashInput } from "./rpc/protocol.ts";
-import type { RpcChannel } from "./rpc/protocol.ts";
+import { SLASH_DENIED_SENTENCE, classifySlashInput } from "../protocol/rpc.ts";
+import type { RpcChannel } from "../protocol/rpc.ts";
 import { RpcSession, readViewOnlySnapshot } from "./rpc/session.ts";
 import type { NavigateOutcome, NavigateRequest, RestoredQueue, RpcRecoveryReason, RpcSessionOptions, RpcSessionOutput, SendOutcome } from "./rpc/session.ts";
 import type { HostToolProvider } from "./tools/host-tool.ts";

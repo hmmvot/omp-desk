@@ -18,15 +18,15 @@
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { guestTransport } from "../bridge";
-import { encodeUtf8Chunks } from "../lib/bytes-base64";
+import { encodeUtf8Chunks } from "../../shared/bytes-base64";
 import { initialTerminalPane, isTerminalFrame, reduceTerminalFrame, resizeTerminalPane, timeoutTerminalAttach } from "../lib/terminal-pane";
 import type { TerminalGrid, TerminalPaneState, TerminalFrame } from "../lib/terminal-pane";
 import { createTerminalRenderer } from "../lib/terminal-renderer";
 import type { TerminalRenderer } from "../lib/terminal-renderer";
 import { reportTerminalPresence } from "../lib/terminal-presence";
 import { writeTerminalClipboard } from "../lib/terminal-clipboard";
-import { fitsTerminalCopyReply, MAX_TERMINAL_INPUT_BYTES } from "../messages";
-import type { GuestTerminalCopyReplyMessage } from "../messages";
+import { fitsTerminalCopyReply, MAX_TERMINAL_INPUT_BYTES } from "../../protocol/messages";
+import type { GuestTerminalCopyReplyMessage } from "../../protocol/messages";
 import { TerminalLinkClient } from "../lib/terminal-link-client";
 
 /**

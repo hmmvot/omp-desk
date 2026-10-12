@@ -23,8 +23,8 @@
  *   OMP ignores a result for an id it no longer waits for, so a duplicate is harmless. Nothing is ever re-run.
  */
 
-import { isRecord } from "../../guards.ts";
-import { writeErrorCode } from "../rpc/protocol.ts";
+import { isRecord } from "../../shared/guards.ts";
+import { writeErrorCode } from "../../protocol/rpc.ts";
 import { HostToolRefusal, type HostToolContext, type HostToolDefinition, type HostToolResult } from "./host-tool.ts";
 
 export const HOST_TOOL_EARLIER_ATTACHMENT_ERROR =

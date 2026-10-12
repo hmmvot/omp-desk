@@ -50,7 +50,7 @@ function moduleCarrying<T extends object>(loaded: T, member: string): T {
 const headless = moduleCarrying(headlessModule, "Terminal");
 const serialize = moduleCarrying(serializeModule, "SerializeAddon");
 const unicode11 = moduleCarrying(unicode11Module, "Unicode11Addon");
-import { activateTerminalUnicode } from "../webview/lib/terminal-unicode.ts";
+import { activateTerminalUnicode } from "../shared/terminal-unicode.ts";
 import { PTY_DEFAULT_BACKLOG_CHARS, PTY_DEFAULT_SCROLLBACK_LINES, PTY_MAX_TITLE_CHARS } from "../host/pty-protocol.ts";
 
 /** One sequenced piece of output: its first position and its text. */

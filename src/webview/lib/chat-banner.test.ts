@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createChatModel } from "../../chat/model.ts";
 import type { ChatModel, ChatPhase } from "../../chat/model.ts";
-import { RPC_ERROR_SENTENCES } from "../../host/rpc/protocol.ts";
+import { RPC_ERROR_SENTENCES } from "../../protocol/rpc.ts";
 import { chatBanner, errorSentence } from "./chat-banner.ts";
 
 function model(phase: ChatPhase, patch: Partial<ChatModel> = {}): ChatModel {

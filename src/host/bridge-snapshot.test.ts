@@ -4,7 +4,7 @@ import { BridgeListener } from "./bridge-listener.ts";
 import { BridgeClient } from "../webview/lib/bridge-client.ts";
 import { ChatRuntime } from "./chat-runtime.ts";
 import { snapshotOf, createChatModel } from "../chat/model.ts";
-import { ChatSnapshotAssembler, parseChatHostMessage } from "../webview/chat-messages.ts";
+import { ChatSnapshotAssembler, parseChatHostMessage } from "../protocol/chat-messages.ts";
 import { mkdtemp, writeFile, rm } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";

@@ -16,11 +16,11 @@
  * One tab per (conversation, kind, agent id): a second request reveals the existing editor. The
  * registry has no vscode import so its rules are testable with fake panels.
  */
-import { GUEST_PROTOCOL_VERSION, parseGuestWebviewMessage } from "../webview/messages.ts";
-import { detailKey, type DetailTarget } from "../webview/detail-target.ts";
-import { webLinkUrl, type WebLinkMode } from "../webview/terminal-links.ts";
+import { GUEST_PROTOCOL_VERSION, parseGuestWebviewMessage } from "../protocol/messages.ts";
+import { detailKey, type DetailTarget } from "../protocol/detail-target.ts";
+import { webLinkUrl, type WebLinkMode } from "../shared/terminal-links.ts";
 import type { ChatCommandOutcome, ChatPage } from "./chat-runtime.ts";
-import type { ChatWebviewMessage } from "../webview/chat-messages.ts";
+import type { ChatWebviewMessage } from "../protocol/chat-messages.ts";
 
 /** The slice of a VS Code WebviewPanel this registry uses. */
 export interface DetailPanel {

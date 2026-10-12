@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { isRecord as record } from "../guards.ts";
+import { isRecord as record } from "../shared/guards.ts";
 
 /**
  * True when an entry of Claude Code's plugin registry (`installed_plugins.json`) with a project or local scope records `cwd`

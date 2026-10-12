@@ -1,5 +1,5 @@
 /** Installed OMP usage report -> current-provider quota facts, never token-derived limits. */
-import type { FooterAccountUsage, FooterQuotaWindow, FooterUsage } from "../webview/footer-metadata.ts";
+import type { FooterAccountUsage, FooterQuotaWindow, FooterUsage } from "../shared/footer-metadata.ts";
 import type { OmpCliResult } from "./native-terminal.ts";
 export const PROVIDER_USAGE_ARGS = ["usage", "--json", "--redact"] as const;
 export const PROVIDER_USAGE_TIMEOUT_MS = 20_000;

@@ -1,8 +1,8 @@
 import { stat } from "node:fs/promises";
 import path from "node:path";
-import type { BareFileName } from "../webview/code-symbols.ts";
-import { isInside } from "./symbol-links.ts";
-import type { SymbolOutcome, SymbolScope } from "./symbol-links.ts";
+import type { BareFileName } from "../shared/code-symbols.ts";
+import { isInside } from "./link-scope.ts";
+import type { FileLookup, FileNameLinks, SymbolOutcome, SymbolScope } from "./link-scope.ts";
 
 /**
  * Where a bare file name of a Chat reply (`session-index.ts:849`) is, according to VS Code's file search
@@ -10,14 +10,6 @@ import type { SymbolOutcome, SymbolScope } from "./symbol-links.ts";
  * injected, so the rules, bounds and cache are tested without VS Code. Windows rules throughout, like the symbol
  * links: file names compare case-insensitively and either separator is a separator.
  */
-
-/** The files a name stands for inside the session's folders. */
-export type FileLookup =
-	| { readonly state: "none" }
-	| { readonly state: "unique"; readonly path: string }
-	| { readonly state: "many"; readonly paths: readonly string[] }
-	/** The search failed, timed out or was refused, or files changed while it ran: no reliable answer yet. */
-	| { readonly state: "unavailable" };
 
 /**
  * The search side: the paths of every file whose name is `name` (compared case-insensitively) below `folders`, or
@@ -70,7 +62,7 @@ export function outermostRoots(roots: readonly string[]): string[] {
  * dropped by {@link invalidate} when files change; the same question asked while it runs shares one search; an answer
  * that was started before an invalidation is returned as `unavailable` and not cached.
  */
-export class FileNameLinkResolver {
+export class FileNameLinkResolver implements FileNameLinks {
 	readonly #source: FileNameSource;
 	readonly #now: () => number;
 	readonly #queryTimeoutMs: number;

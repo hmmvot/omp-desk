@@ -1,5 +1,5 @@
-import { inputText, sameValue } from "../../host/desk-settings/model.ts";
-import type { JsonValue, SettingGroupView, SettingView, Target, WorkspaceFacts } from "../../host/desk-settings/model.ts";
+import { inputText, sameValue } from "../../protocol/desk-settings.ts";
+import type { JsonValue, SettingGroupView, SettingView, Target, WorkspaceFacts } from "../../protocol/desk-settings.ts";
 
 /**
  * The Settings page's state and the rules that keep it truthful while writes, results and live

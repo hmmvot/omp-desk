@@ -22,19 +22,20 @@ import { Composer } from "./components/Composer";
 import { FileLinksProvider } from "./components/FileLinks";
 import { WebLinksProvider } from "./components/WebLinks";
 import { DetailView } from "./components/DetailView";
+import { ChildTranscript } from "./components/ChildTranscript";
 import { HudDock } from "./components/HudDock";
 import { QueuedMessages } from "./components/QueuedMessages";
-import { DETAIL_META, parseDetailMeta } from "./detail-target";
+import { DETAIL_META, parseDetailMeta } from "../protocol/detail-target";
 import { Transcript, type TranscriptRewind } from "./components/Transcript";
 import { RewindBar } from "./components/Rewind";
 import { NAVIGATE_REFUSAL_SENTENCES, rewindTargets, undoOffer, type NavigationKind } from "../chat/rewind";
 import { REWIND_IDLE, conversationMovedPastLeaf, reduceRewind, rewindBlockedReason } from "./lib/rewind-mode";
-import { parseDraftHandoffContent } from "./messages";
+import { parseDraftHandoffContent } from "../protocol/messages";
 import type { ChatClient } from "./lib/chat-client";
 import { chatBanner } from "./lib/chat-banner";
 import { captureDraft, offerRestoredDraft, releaseDraftCapture } from "./lib/draft-handoff";
 import { requestPanelAction } from "./lib/panel-actions";
-import { selectedText } from "./lib/selection-query";
+import { selectedText } from "../shared/selection-query";
 import { useChatSnapshot, useComposerPopupReport } from "./lib/use-chat";
 import { TerminalPane } from "./components/TerminalPane";
 import { sessionViewSnapshot, subscribeSessionView } from "./lib/session-view";
@@ -163,6 +164,8 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 	const workUnknown = hostLost || snapshot.phase === "attaching" || snapshot.phase === "resyncing" || snapshot.phase === "failed";
 	const shown = workUnknown && snapshot.working ? { ...snapshot, working: false } : snapshot;
 	const readChild = useCallback((id: string, options?: { fromByte?: number; beforeId?: string }) => client.readSubagent(id, options), [client]);
+	/** The page hands the transcript its child renderer, so `Transcript` does not import `ChildTranscript` (which imports it). */
+	const renderChild = useCallback((id: string, depth: number) => <ChildTranscript subagentId={id} reader={readChild} depth={depth} />, [readChild]);
 
 	// Rewind (ADR-0051): picking a prompt, one navigation at a time, the Undo offer and branch switches.
 	const [rewind, dispatchRewind] = useReducer(reduceRewind, REWIND_IDLE);
@@ -261,7 +264,7 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 						retrySuppressedIds={snapshot.retrySuppressedIds}
 						agents={snapshot.agents}
 						agentActivity={snapshot.agentActivity}
-						reader={readChild}
+						renderChild={renderChild}
 						model={snapshot.state?.model}
 						maintenance={snapshot.maintenance}
 						retry={snapshot.retry}

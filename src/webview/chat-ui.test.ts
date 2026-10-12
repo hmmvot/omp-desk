@@ -15,7 +15,7 @@ import { desktopToastXml } from "../host/desktop-notifications.ts";
 import type { ChatEntry } from "../chat/messages.ts";
 import { CLEAR_MARKER_TYPE } from "../chat/clear.ts";
 import { NAVIGATE_REFUSAL_SENTENCES, rewindPreview } from "../chat/rewind.ts";
-import { REWIND_ARGUMENTS_SENTENCE } from "../host/rpc/protocol.ts";
+import { REWIND_ARGUMENTS_SENTENCE } from "../protocol/rpc.ts";
 
 const browserPath = [process.env.OMP_TEST_CHROMIUM,
 	"C:/Program Files/Google/Chrome/Application/chrome.exe",
@@ -111,7 +111,7 @@ import { ShellView } from "./components/ShellView";
 import { guestTransport, readCspNonce, fixtureBridgeOperation } from "./bridge";
 import { ChatClient } from "./lib/chat-client";
 import { createChatModel, snapshotOf } from "../chat/model";
-import { splitChatSnapshot } from "./chat-messages";
+import { splitChatSnapshot } from "../protocol/chat-messages";
 import { injectGuestStyles } from "./styles";
 import { injectShellStyles } from "./lib/terminal-styles";
 import { attachSessionView, sessionViewSnapshot } from "./lib/session-view";

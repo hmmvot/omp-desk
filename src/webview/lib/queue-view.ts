@@ -6,7 +6,7 @@
  * `queue_update` as the host read them back, and a removal's outcome is exactly the host's per-item answer.
  */
 import type { ChatQueuedMessages } from "../../chat/model.ts";
-import type { ChatQueuePurpose, ChatQueueResultItem, ChatQueuedRef } from "../chat-messages.ts";
+import type { ChatQueuePurpose, ChatQueueResultItem, ChatQueuedRef } from "../../protocol/chat-messages.ts";
 import type { RestoredQueued } from "./queue-restore.ts";
 import { HUD_HEADER_PX, HUD_LINE_PX, HUD_LIST_PAD_PX, HUD_STACK_PAD_PX } from "../../chat/hud-summary.ts";
 

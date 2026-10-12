@@ -1,4 +1,4 @@
-import { isRecord } from "../../guards.ts";
+import { isRecord } from "../../shared/guards.ts";
 import type { HostToolContext, HostToolDefinition, HostToolResult } from "../tools/host-tool.ts";
 import type { SessionReader, SessionState } from "./coordinator.ts";
 import { SessionNotStoppedError, StaleGenerationError } from "./coordinator.ts";

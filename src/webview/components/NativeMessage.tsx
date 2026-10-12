@@ -1,9 +1,9 @@
 import { useId, useMemo } from "react";
 import type { ChatEntry, ChatMessage, CustomMessage, ExecutionMessage, SummaryMessage } from "../../chat/messages.ts";
 import { advisorNotes, entryMessage, userSkill, type AdvisorNote } from "../../chat/messages.ts";
-import { isRecord } from "../../guards.ts";
+import { isRecord } from "../../shared/guards.ts";
 import { TODO_STATUS_WORD } from "../../chat/hud-summary.ts";
-import { fmtDuration, fmtTokens } from "../lib/format.ts";
+import { fmtDuration, fmtTokens } from "../../shared/format.ts";
 import { Markdown } from "./Markdown.tsx";
 import { AssistantContentView, MessageContentView, NativeDisclosure } from "./MessageContent.tsx";
 import { lateDiagnosticsFiles, nativeText, numberField, recordRows, stringField } from "./native-message-helpers.ts";

@@ -4,8 +4,8 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { toChatEventFrame } from "../host/rpc/protocol.ts";
-import { ChatSnapshotAssembler, parseChatHostMessage, splitChatSnapshot } from "../webview/chat-messages.ts";
+import { toChatEventFrame } from "../protocol/rpc.ts";
+import { ChatSnapshotAssembler, parseChatHostMessage, splitChatSnapshot } from "../protocol/chat-messages.ts";
 import { createChatModel, reduceChatFrame, snapshotOf, type ChatPendingControl } from "./model.ts";
 
 const EPOCH = { nonce: "n", counter: 1 };

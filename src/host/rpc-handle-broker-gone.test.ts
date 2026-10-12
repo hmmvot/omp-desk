@@ -13,7 +13,7 @@ import { describe, it } from "node:test";
 import type { PtyBrokerRecord } from "./pty-protocol.ts";
 import type { PtyClientSideConnection } from "./pty-ipc.ts";
 import { RpcHandle } from "./rpc-handle.ts";
-import type { RpcChannelEvent } from "./rpc/protocol.ts";
+import type { RpcChannelEvent } from "../protocol/rpc.ts";
 
 /** A connection that never speaks; the test closes it by hand, as a killed broker's socket closes. */
 function silentConnection() {

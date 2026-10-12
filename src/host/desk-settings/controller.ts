@@ -7,9 +7,8 @@ import {
 	isTestable,
 	resetTargets,
 	sameValue,
-} from "./model.ts";
-import type { ConfigLayers, JsonValue, SettingDescriptor, Target, WorkspaceFacts } from "./model.ts";
-import type { DeskSettingsMessage } from "./protocol.ts";
+} from "../../protocol/desk-settings.ts";
+import type { ConfigLayers, DeskSettingsMessage, JsonValue, SettingDescriptor, Target, WorkspaceFacts } from "../../protocol/desk-settings.ts";
 
 /** What the controller needs from VS Code. Tests substitute a fake; `view.ts` binds the real configuration API. */
 export interface DeskSettingsPort {

@@ -1,6 +1,6 @@
 /** Installed OMP RPC/JSONL display vocabulary. No runtime dependency on the terminal renderer. */
 import type { ImageContent, RedactedThinkingContent, TextContent, ThinkingContent, ToolCallContent, WireUsage } from "@oh-my-pi/pi-wire";
-import { isRecord } from "../guards.ts";
+import { isRecord } from "../shared/guards.ts";
 
 export interface RetryRecovery {
 	kind: "auto-retry";

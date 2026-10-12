@@ -1,5 +1,5 @@
-import { webLinkUrl } from "../terminal-links.ts";
-import type { TerminalTextLink } from "../terminal-links.ts";
+import { webLinkUrl } from "../../shared/terminal-links.ts";
+import type { TerminalTextLink } from "../../shared/terminal-links.ts";
 
 /**
  * Bare `http(s)` URLs in Chat prose. A web link needs no host proof (the host re-validates the URL

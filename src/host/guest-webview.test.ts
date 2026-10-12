@@ -18,14 +18,14 @@ import { describe, it } from "node:test";
 import type * as vscode from "vscode";
 
 import { UNAVAILABLE_RELOAD_MESSAGE, createDetailHtml, createGuestHtml, createShellHtml, createUnavailableGuestHtml } from "./guest-webview.ts";
-import { parseDetailMeta } from "../webview/detail-target.ts";
+import { parseDetailMeta } from "../protocol/detail-target.ts";
 import {
 	PANEL_BRIDGE_META,
 	PANEL_IDENTITY_META,
 	PANEL_IDENTITY_VERSION,
 	PANEL_IDENTITY_VERSION_EDITOR,
 	SHELL_SLOT_META,
-} from "../webview/panel-identity.ts";
+} from "../shared/panel-identity.ts";
 
 const TAB_ID = "tab:2c26b46b-68ff-4c1d-a3d8-1e0f9a0b7c6d";
 /** The actual editor id (`E`) a dynamic editor's view type names. */

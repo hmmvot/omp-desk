@@ -1,5 +1,5 @@
 /** Shared native route decisions and density metadata. Never creates render bodies. */
-import { isRecord } from "../guards.ts";
+import { isRecord } from "../shared/guards.ts";
 import type { ProjectedTool } from "./transcript.ts";
 export interface ToolRoute { kind: "native" | "agent" | "process" | "config" | "device" | "help"; name: string; args: Record<string, unknown>; details: Record<string, unknown> }
 const record = (value: unknown): Record<string, unknown> => isRecord(value) ? value : {};

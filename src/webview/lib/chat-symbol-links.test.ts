@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mock, test } from "node:test";
-import type { GuestHostMessage, GuestWebviewMessage } from "../messages.ts";
-import type { SymbolLinkResult } from "../code-symbols.ts";
+import type { GuestHostMessage, GuestWebviewMessage } from "../../protocol/messages.ts";
+import type { SymbolLinkResult } from "../../shared/code-symbols.ts";
 import { ChatSymbolLinks } from "./chat-symbol-links.ts";
 
 function fixture() {

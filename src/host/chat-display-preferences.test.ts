@@ -5,7 +5,7 @@ import { RpcSession } from "./rpc/session.ts";
 import { FakeRpcChannel } from "./rpc/fake-channel.ts";
 import { ManualTimers, tick, messageEntry, userMessage, waitUntil } from "./rpc/test-support.ts";
 import { ChatClient } from "../webview/lib/chat-client.ts";
-import { parseChatHostMessage, type ChatDisplayPreferences } from "../webview/chat-messages.ts";
+import { parseChatHostMessage, type ChatDisplayPreferences } from "../protocol/chat-messages.ts";
 
  test("global density changes both live replicas without losing history or gaining session write authority", async () => {
  let preferences: ChatDisplayPreferences = { toolCallDetail: "overview", accessibilitySupport: false };

@@ -6,8 +6,8 @@ import { isDeepStrictEqual } from "node:util";
 import { YAML } from "bun";
 import { FILE_OPERATION_BACKOFF_MS, retryFileOperation, stageBeside } from "../host/atomic-file.ts";
 import { mergeConfigEdits, valueAt, SettingsRefusal } from "../host/omp-settings-core.ts";
-import { isRecord as record } from "../guards";
-import type { ConfigEdit, ConfigRecord, SettingsScope } from "../host/omp-settings-core.ts";
+import { isRecord as record } from "../shared/guards";
+import type { ConfigEdit, ConfigRecord, SettingsScope } from "../protocol/settings-model.ts";
 import type { NativeModules } from "./settings-contracts.ts";
 
 /**

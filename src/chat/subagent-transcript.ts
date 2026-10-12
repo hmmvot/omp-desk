@@ -1,5 +1,5 @@
 /** Read-only child-history contract. Only the host resolves a previously observed native identity. */
-import { isRecord } from "../guards.ts";
+import { isRecord } from "../shared/guards.ts";
 import { parseChatEntry, type ChatEntry } from "./messages.ts";
 
 export const SUBAGENT_PAGE_ROWS = 200;

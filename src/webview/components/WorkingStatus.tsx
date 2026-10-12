@@ -1,7 +1,7 @@
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 import type { MaintenanceState } from "../../chat/events";
-import { fmtDuration } from "../lib/format";
+import { fmtDuration } from "../../shared/format";
 import { useSecondTick } from "../lib/live-clock";
 
 /** A permanent final row: only its text changes, never its height or scroll identity. */

@@ -6,9 +6,9 @@ import { pathToFileURL } from "node:url";
 import { test } from "node:test";
 import { existingTerminalFile, handleTerminalLink, openTerminalFile, openWebLink, resolveTerminalFileReference } from "./terminal-links.ts";
 import type { TerminalFileLocation, TerminalFileOpenApi, WebLinkOpenApi } from "./terminal-links.ts";
-import type { FileLookup } from "./file-name-links.ts";
-import { parseGuestHostMessage, parseGuestWebviewMessage } from "../webview/messages.ts";
-import { parseTerminalLinkRequest } from "../webview/terminal-links.ts";
+import type { FileLookup } from "./link-scope.ts";
+import { parseGuestHostMessage, parseGuestWebviewMessage } from "../protocol/messages.ts";
+import { parseTerminalLinkRequest } from "../shared/terminal-links.ts";
 
  test("relative, Windows absolute and real OMP vscode links resolve with positions", () => {
 	assert.deepEqual(resolveTerminalFileReference("src/file.ts:23:7", "D:\\repo"), { path: "D:\\repo\\src\\file.ts", line: 23, column: 7 });

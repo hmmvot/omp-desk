@@ -4,7 +4,7 @@ import { AgentLivenessGuard, MAX_AGENT_LIVENESS_CHARS, MAX_LIVE_AGENTS, decodeAg
 import { agentRow, agentsSummary } from "./hud-summary.ts";
 import { applyChatSnapshot, createChatModel, reduceChatFrame, snapshotOf, type ChatModel } from "./model.ts";
 import { parseAgentRoster } from "./agents.ts";
-import { parseChatHostMessage } from "../webview/chat-messages.ts";
+import { parseChatHostMessage } from "../protocol/chat-messages.ts";
 
 const INSTANCE = "0123456789abcdef0123456789abcdef";
 const owner = { sessionFile: "C:\\s\\Worker.jsonl" };

@@ -6,7 +6,7 @@ import {
 	type ControlNativeActivityEntry,
 	type ControlNativeActivityOutcome,
 } from "./control-protocol.ts";
-import { notificationLine } from "./notification-text.ts";
+import { notificationLine } from "../shared/notification-text.ts";
 import type { TurnActivity, TurnNotice, NotificationSuppression } from "./notifications.ts";
 
 export const NATIVE_ACTIVITY_HOOKS = ["agent_start", "message_end", "agent_end", "tool_execution_start", "tool_execution_end", "tool_approval_requested", "tool_approval_resolved"] as const;

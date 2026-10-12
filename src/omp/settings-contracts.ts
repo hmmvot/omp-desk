@@ -1,4 +1,4 @@
-import type { ConfigRecord } from "../host/omp-settings-core.ts";
+import type { ConfigRecord } from "../protocol/settings-model.ts";
 
 export interface NativeModel {
   provider: string; id: string; name: string; contextWindow?: number; maxTokens?: number;

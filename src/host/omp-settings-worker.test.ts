@@ -6,7 +6,7 @@ import * as path from "node:path";
 import * as os from "node:os";
 import { fileURLToPath } from "node:url";
 import { runSettingsWorker } from "./omp-settings-worker.ts";
-import type { ConfigRecord, SettingsSnapshot } from "./omp-settings-core.ts";
+import type { ConfigRecord, SettingsSnapshot } from "../protocol/settings-model.ts";
 
 const packageRoot = process.env.OMP_SETTINGS_TEST_PACKAGE_ROOT ?? path.join(os.homedir(), ".bun", "install", "global", "node_modules", "@oh-my-pi", "pi-coding-agent");
 const bunPath = process.env.OMP_SETTINGS_TEST_BUN ?? path.join(os.homedir(), ".bun", "bin", process.platform === "win32" ? "bun.exe" : "bun");

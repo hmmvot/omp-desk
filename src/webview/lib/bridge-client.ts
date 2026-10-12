@@ -42,8 +42,8 @@ import {
 	requestFrame,
 	routeAckFrame,
 	sealFrame,
-} from "../../bridge-protocol.ts";
-import { BridgeMessageAssembler } from "../../bridge-fragments.ts";
+} from "../../protocol/bridge-protocol.ts";
+import { BridgeMessageAssembler } from "../../protocol/bridge-fragments.ts";
 
 /** The first reconnect delay, doubling up to {@link BRIDGE_CLIENT_MAX_BACKOFF_MS}. */
 export const BRIDGE_CLIENT_INITIAL_BACKOFF_MS = 1_000;

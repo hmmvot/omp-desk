@@ -5,7 +5,7 @@
  * builtin, verifies provider identity rotation, and asks the command to append the final marker.
  * The codec, marker and fixed refusal vocabulary are shared; remaining native-clear differences are in the ADR.
  */
-import { isRecord } from "../guards.ts";
+import { isRecord } from "../shared/guards.ts";
 
 /** The extension command the host-control module registers in RPC mode. */
 export const CLEAR_COMMAND = "omp-desk-clear";

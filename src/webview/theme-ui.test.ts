@@ -71,7 +71,7 @@ import {App} from './App';
 import {guestTransport} from './bridge';
 import {ChatClient} from './lib/chat-client';
 import {createChatModel,snapshotOf} from '../chat/model';
-import {splitChatSnapshot} from './chat-messages';
+import {splitChatSnapshot} from '../protocol/chat-messages';
 import {injectGuestStyles} from './styles';
 import {attachSessionView} from './lib/session-view';
 import {createTerminalRenderer} from './lib/terminal-renderer';

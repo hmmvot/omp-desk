@@ -1,5 +1,5 @@
-import type { GuestHostMessage, GuestWebviewMessage } from "../messages.ts";
-import type { FileLinkAction, WebLinkMode } from "../terminal-links.ts";
+import type { GuestHostMessage, GuestWebviewMessage } from "../../protocol/messages.ts";
+import type { FileLinkAction, WebLinkMode } from "../../shared/terminal-links.ts";
 
 // Mounts can change within one document while an older stat is still in flight.
 let nextTerminalLinkRequestId = 0;

@@ -80,7 +80,7 @@ import {
 	readControlLaunchMetadata,
 	startHostControlServer,
 } from "../omp/host-control.ts";
-import { stageRuntimeAssets } from "../runtime-assets.ts";
+import { stageRuntimeAssets } from "./runtime-assets.ts";
 import { NativeActivityLedger } from "./native-activity.ts";
 
 const tempDirs: string[] = [];

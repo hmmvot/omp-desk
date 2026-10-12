@@ -1,11 +1,11 @@
-import { isRecord } from "../../guards.ts";
+import { isRecord } from "../../shared/guards.ts";
 import { randomBytes } from "node:crypto";
 import * as vscode from "vscode";
 import { resolveOmpBinary } from "../native-terminal";
 import { DeskSettingsController } from "./controller.ts";
-import { projectConfiguration } from "./model.ts";
+import { projectConfiguration } from "../../protocol/desk-settings.ts";
 import type { DeskSettingsPort } from "./controller.ts";
-import type { ConfigLayers, JsonValue, Target, WorkspaceFacts } from "./model.ts";
+import type { ConfigLayers, JsonValue, Target, WorkspaceFacts } from "../../protocol/desk-settings.ts";
 
 /** The side-bar view that lists this extension's settings. Declared in package.json `contributes.views`. */
 export const DESK_SETTINGS_VIEW_ID = "omp.deskSettings";

@@ -1,4 +1,4 @@
-import { isRecord } from "../../guards.ts";
+import { isRecord } from "../../shared/guards.ts";
 import type { BreakpointInfo, DapMessage, DebugApi, DebugDisposable, DebugSessionInfo, SessionTracker } from "./debug-api.ts";
 
 /**

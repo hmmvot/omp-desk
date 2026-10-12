@@ -4,12 +4,12 @@ import { pathToFileURL } from "node:url";
 import { claudeRegistryBindsFolder } from "./inventory-guards.ts";
 import { SettingsRefusal, valueAt } from "../host/omp-settings-core.ts";
 import { PROTECTED_EXTENSION_NAMES, REASONS_PER_VIEW } from "../host/inventory/inventory-model.ts";
-import { isRecord as record } from "../guards";
+import { isRecord as record } from "../shared/guards";
 import { BUILTIN_SWITCHES, SHARED_SWITCH_NOTES } from "./inventory-switches.ts";
 import { excusedEntryWarnings, foldMcpServer } from "./inventory-mcp.ts";
 import type { McpEntry } from "./inventory-mcp.ts";
 import { globalConfigFile, readConfig, writeConfig } from "./config-transaction.ts";
-import type { ConfigEdit, ConfigRecord } from "../host/omp-settings-core.ts";
+import type { ConfigEdit, ConfigRecord } from "../protocol/settings-model.ts";
 import { OMISSION, projectFailure, projectWarning } from "./inventory-reasons.ts";
 import type { IncompleteReason, InventoryRow, InventorySnapshot, RowToggle, ViewKind } from "../host/inventory/inventory-model.ts";
 

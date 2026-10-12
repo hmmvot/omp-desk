@@ -18,7 +18,8 @@
 import { assistantPersistenceKey, entryMessage, userSkill, type AssistantMessage, type ChatEntry } from "../../chat/messages";
 import type { ReactNode } from "react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import type { ActiveTool, ChatPhase, DisplayTurn, PendingRow } from "../../chat/model";
+import type { ChatPhase, DisplayTurn } from "../../chat/model";
+import type { ActiveTool, PendingRow } from "../../chat/pending";
 import type { EphemeralItem, TranscriptPosition } from "../../chat/projection";
 import type { AgentActivity, RunningAgent } from "../../chat/agents";
 import type { MaintenanceState, RetryState } from "../../chat/events";
@@ -31,18 +32,17 @@ import { isOverviewMessage, overviewMemberId, projectToolOverview, type DensityC
 import { replyFooters, type ReplyFooter as ReplyFooterData } from "../../chat/reply-turns";
 import { ReplyFooter } from "./ReplyFooter";
 import { ToolOverview } from "./ToolOverview";
-import { TRANSCRIPT_WINDOW_ROWS, pageTranscriptCards, windowTranscriptCards } from "../lib/transcript-window";
+import { TRANSCRIPT_WINDOW_ROWS, pageTranscriptCards, windowTranscriptCards } from "../../chat/transcript-window";
 import { measuredTranscriptRows, presentationRowId } from "../lib/transcript-layout";
 import { MeasuredRows, type RowViewport } from "./MeasuredRows";
 import { TranscriptScrollController, type TranscriptScrollMode } from "../lib/transcript-scroll";
 import { captureToolInteraction, heldToolInteractions, restoreToolInteraction, type ToolInteraction } from "../lib/tool-interaction";
 import { NativeMessage } from "./NativeMessage";
 import { AssistantContentView, NativeDisclosure } from "./MessageContent";
-import { ChildTranscript } from "./ChildTranscript";
 import { ToolCard, type ToolCardProps } from "./ToolCard";
 import { WorkingStatus } from "./WorkingStatus";
 import { CopyButton } from "./CopyButton";
-import { messageText } from "../lib/format";
+import { messageText } from "../../shared/format";
 import { requestPanelAction } from "../lib/panel-actions";
 import { clearToolDisclosures, getTranscriptToggles, subscribeTranscriptToggles, withToolDefault } from "../lib/transcript-toggles";
 import type { BranchPoint } from "../../chat/rewind";
@@ -78,7 +78,8 @@ export interface TranscriptProps {
 	agents?: ReadonlyMap<string, RunningAgent>;
 	model?: { id: string; name?: string; provider?: string } | null;
 	agentActivity?: ReadonlyMap<string, AgentActivity>;
-	reader?: SubagentReader;
+	/** Renders the read-only child transcript of a subagent at `depth`; the page and `ChildTranscript` supply it so this module does not import them. */
+	renderChild?: (subagentId: string, depth: number) => ReactNode;
 	depth?: number;
 	maintenance?: MaintenanceState | null;
 	cwd?: string;
@@ -149,7 +150,7 @@ function Row({
 
 /** The DOM consumes exactly the cards counted by the semantic window. */
 export function TranscriptCardView({ card, props, autoExpanded, clearedHistory }: { card: TranscriptCard; props: TranscriptProps; autoExpanded?: boolean; clearedHistory?: ReactNode }): ReactNode {
-	const renderChild = (id: string) => <ChildTranscript subagentId={id} reader={props.reader} depth={(props.depth ?? 0) + 1} />;
+	const renderChild = props.renderChild === undefined ? undefined : (id: string) => props.renderChild!(id, (props.depth ?? 0) + 1);
 	const toolProps = (tool: ProjectedTool): ToolCardProps => ({
 		name: tool.call.name, callId: tool.call.id, args: tool.active?.args ?? tool.call.arguments,
 		intent: tool.call.intent ?? tool.active?.intent, result: tool.result, status: tool.status,
@@ -212,7 +213,7 @@ function ClearedHistoryCards({ entries, props }: { entries: readonly ChatEntry[]
 	const historyProps: TranscriptProps = {
 		entries, stream: null, activeTools: new Map(), working: false, phase: props.phase, olderCount: 0,
 		onLoadOlder: () => false, pending: new Map(), cards: [], pagedHistory: true,
-		model: props.model, cwd: props.cwd, reader: props.reader, depth: props.depth,
+		model: props.model, cwd: props.cwd, renderChild: props.renderChild, depth: props.depth,
 		agents: props.agents, agentActivity: props.agentActivity, conversationKey: props.conversationKey,
 		disclosures: props.disclosures, onDisclosureChange: props.onDisclosureChange,
 	};

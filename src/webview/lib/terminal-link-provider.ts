@@ -1,5 +1,5 @@
 import type { IBuffer, IBufferCellPosition, ILink, ILinkProvider } from "@xterm/xterm";
-import { detectTerminalFileLinks } from "../terminal-links.ts";
+import { detectTerminalFileLinks } from "../../shared/terminal-links.ts";
 import { ValidationCache } from "./link-validation-cache.ts";
 
 /** Uses terminal cells (not JS string length) so wide glyphs and wrapped paths stay clickable. */

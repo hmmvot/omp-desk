@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import type { GuestHostMessage } from "../messages.ts";
+import type { GuestHostMessage } from "../../protocol/messages.ts";
 import { attachInsertedText, followedByBlank, offerInsertedText, spaceInsertion, subscribeInsertedText } from "./insert-text.ts";
 
 describe("spaceInsertion", () => {

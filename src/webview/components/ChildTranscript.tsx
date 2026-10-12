@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { createChatModel, type ActiveTool } from "../../chat/model";
+import { createChatModel } from "../../chat/model";
+import type { ActiveTool } from "../../chat/pending";
 import type { ChatEntry } from "../../chat/messages";
 import {
 	SUBAGENT_PAGE_ROWS,
@@ -10,7 +11,7 @@ import {
 	type SubagentTranscriptPage,
 } from "../../chat/subagent-transcript";
 import { Transcript } from "./Transcript";
-import { messageText } from "../lib/format";
+import { messageText } from "../../shared/format";
 import { Markdown } from "./Markdown";
 
 export interface ChildTranscriptProps {
@@ -215,7 +216,7 @@ export function ChildTranscriptBody({ subagentId, reader, depth, refreshMs, keep
 			{earlier && <div className="omp-native-note">Viewing an earlier page. Refresh returns to the latest history.</div>}
 			{page?.status === "available" && page.entries.length === 0 && <div className="omp-native-note">OMP returned no child transcript entries.</div>}
 			{childModel !== null && page?.status === "available" && page.entries.length > 0 && (
-				<Transcript entries={childModel.entries} durableCount={childModel.durableCount} stream={childModel.stream} activeTools={childModel.activeTools} working={childModel.working} phase={childModel.phase} olderCount={childModel.olderCount} pending={childModel.pending} cards={childModel.ephemeral} reader={reader} depth={depth} onLoadOlder={() => read("older")} />
+				<Transcript entries={childModel.entries} durableCount={childModel.durableCount} stream={childModel.stream} activeTools={childModel.activeTools} working={childModel.working} phase={childModel.phase} olderCount={childModel.olderCount} pending={childModel.pending} cards={childModel.ephemeral} depth={depth} renderChild={(id, nextDepth) => <ChildTranscript subagentId={id} reader={reader} depth={nextDepth} />} onLoadOlder={() => read("older")} />
 			)}
 		</div>
 	);

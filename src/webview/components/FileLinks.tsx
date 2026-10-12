@@ -9,9 +9,9 @@
  */
 import type { MouseEvent, KeyboardEvent, ReactNode, RefObject } from "react";
 import { createContext, useContext, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import type { GuestHostMessage, GuestWebviewMessage } from "../messages";
-import { fileLinkMenuContext } from "../terminal-links";
-import type { FileLinkAction } from "../terminal-links";
+import type { GuestHostMessage, GuestWebviewMessage } from "../../protocol/messages";
+import { fileLinkMenuContext } from "../../shared/terminal-links";
+import type { FileLinkAction } from "../../shared/terminal-links";
 import { ChatFileLinks, detectChatFileLinks, isFileLinkCandidate } from "../lib/chat-file-links";
 import { ChatSymbolLinks } from "../lib/chat-symbol-links";
 import type { SymbolLink } from "../lib/chat-symbol-links";

@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
-import { GUEST_PROTOCOL_VERSION } from "../webview/messages.ts";
-import type { ChatWebviewMessage } from "../webview/chat-messages.ts";
+import { GUEST_PROTOCOL_VERSION } from "../protocol/messages.ts";
+import type { ChatWebviewMessage } from "../protocol/chat-messages.ts";
 import type { ChatPage } from "./chat-runtime.ts";
 import { DETAIL_READ_ONLY_REASON, DETAIL_VIEW_TYPE, DetailTabs, type DetailPanel, type DetailTabsHost } from "./detail-tabs.ts";
-import type { DetailTarget } from "../webview/detail-target.ts";
+import type { DetailTarget } from "../protocol/detail-target.ts";
 
 class FakePanel implements DetailPanel {
 	revealed = 0;

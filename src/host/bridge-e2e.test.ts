@@ -35,11 +35,11 @@ import type { BridgeEndpointState } from "./bridge-route.ts";
 import type { BridgeNativeBinding, BridgeRecordScope } from "./bridge-records.ts";
 import { BridgeClient } from "../webview/lib/bridge-client.ts";
 import type { BridgeClientEndpoint, BridgeClientHooks } from "../webview/lib/bridge-client.ts";
-import { GUEST_PROTOCOL_VERSION, parseGuestHostMessage } from "../webview/messages.ts";
+import { GUEST_PROTOCOL_VERSION, parseGuestHostMessage } from "../protocol/messages.ts";
 import { applyChatState, createChatModel } from "../chat/model.ts";
-import { BRIDGE_DIRECTION_SERVER_TO_CLIENT, encodeBase64Url, frameKeys, openFrame, parseAndVerifyChallenge, parseHello, parseTerminalPush, parseTextFrame } from "../bridge-protocol.ts";
+import { BRIDGE_DIRECTION_SERVER_TO_CLIENT, encodeBase64Url, frameKeys, openFrame, parseAndVerifyChallenge, parseHello, parseTerminalPush, parseTextFrame } from "../protocol/bridge-protocol.ts";
 import { BRIDGE_ROUTE_ACK_TIMEOUT_MS } from "./bridge-route.ts";
-import type { BridgeChallenge, BridgeHello } from "../bridge-protocol.ts";
+import type { BridgeChallenge, BridgeHello } from "../protocol/bridge-protocol.ts";
 
 /** Independently decrypt wire pushes, before the guest hides fragment envelopes. */
 function wireTap(socket: WebSocket, secret: Uint8Array): { payloads: unknown[]; drain(): Promise<void> } {

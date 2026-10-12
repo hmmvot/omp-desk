@@ -31,7 +31,7 @@
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import * as path from "node:path";
-import { verifyStagedRuntimeAsset, type StagedRuntimeAsset } from "../runtime-assets.ts";
+import { verifyStagedRuntimeAsset, type StagedRuntimeAsset } from "./runtime-assets.ts";
 import { windowsPowerShellEnvironment, windowsPowerShellExecutable } from "./windows-powershell.ts";
 
 /** First 64-bit seed OMP's native lock mixes into the path hash. The bytes spell `OMP-LOCK`. */

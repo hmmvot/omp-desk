@@ -1,4 +1,4 @@
-import { isRecord } from "../../guards.ts";
+import { isRecord } from "../../shared/guards.ts";
 import type {
 	BreakpointChange,
 	BreakpointInfo,

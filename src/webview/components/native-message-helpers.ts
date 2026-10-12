@@ -1,5 +1,5 @@
 import type { MessageContent } from "../../chat/messages.ts";
-import { isRecord } from "../../guards.ts";
+import { isRecord } from "../../shared/guards.ts";
 
 export interface LateDiagnosticsFile {
 	path?: string;

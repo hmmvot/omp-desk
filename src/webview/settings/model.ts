@@ -1,6 +1,6 @@
-import type { ConfigRecord, SettingsModel, SettingsSnapshot } from "../../host/omp-settings-core";
-import { modelKey, selectorBase, selectorThinking } from "../../host/settings-pick-items.ts";
-import { isRecord } from "../../guards.ts";
+import type { ConfigRecord, SettingsModel, SettingsSnapshot } from "../../protocol/settings-model";
+import { modelKey, selectorBase, selectorThinking } from "../../protocol/settings-pick-items.ts";
+import { isRecord } from "../../shared/guards.ts";
 export function at(data: ConfigRecord, path: readonly string[]): unknown {
   let value: unknown = data;
   for (const key of path) { if (!isRecord(value) || !Object.hasOwn(value, key)) return undefined; value = value[key]; }

@@ -35,11 +35,11 @@ import { BridgeListener } from "./bridge-listener.ts";
 import type { BridgeAdmittedRequest, BridgeDocumentAuthorization, BridgeSession } from "./bridge-listener.ts";
 import { BridgeDocumentRoute, BRIDGE_ROUTE_ACK_TIMEOUT_MS } from "./bridge-route.ts";
 import type { BridgeEndpointState } from "./bridge-route.ts";
-import { isBridgeEditorId, isCanonicalWebviewOrigin } from "../bridge-identity.ts";
-import { BRIDGE_DOCUMENT_ID_BYTES, BRIDGE_EDITOR_ID_BYTES, BRIDGE_PATH, decodeHex, encodeHex, randomBytes } from "../bridge-protocol.ts";
-import type { BridgeHello } from "../bridge-protocol.ts";
-import { GUEST_PROTOCOL_VERSION } from "../webview/messages.ts";
-import type { ChatStateMessage } from "../webview/chat-messages.ts";
+import { isBridgeEditorId, isCanonicalWebviewOrigin } from "./bridge-identity.ts";
+import { BRIDGE_DOCUMENT_ID_BYTES, BRIDGE_EDITOR_ID_BYTES, BRIDGE_PATH, decodeHex, encodeHex, randomBytes } from "../protocol/bridge-protocol.ts";
+import type { BridgeHello } from "../protocol/bridge-protocol.ts";
+import { GUEST_PROTOCOL_VERSION } from "../protocol/messages.ts";
+import type { ChatStateMessage } from "../protocol/chat-messages.ts";
 
 /** Small enough for the previous guest protocol, without any snapshot or fragment. */
 export const BRIDGE_GUEST_RELOAD_REASON = "This page needs the current OMP Desk guest. Run Developer: Reload Window. Your draft is kept.";

@@ -1,10 +1,10 @@
 import { createContext, Fragment, useContext, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent, ReactNode } from "react";
 import { createRoot } from "react-dom/client";
-import { isRecord } from "../../guards";
-import type { ConfigEdit, SettingsAgent, SettingsRole, SettingsScope, SettingsSnapshot } from "../../host/omp-settings-core";
-import { modelKey, selectorBase } from "../../host/settings-pick-items";
-import type { SettingsAction, SettingsMessage } from "./messages";
+import { isRecord } from "../../shared/guards";
+import type { ConfigEdit, SettingsAgent, SettingsRole, SettingsScope, SettingsSnapshot } from "../../protocol/settings-model";
+import { modelKey, selectorBase } from "../../protocol/settings-pick-items";
+import type { SettingsAction, SettingsMessage } from "../../protocol/settings-messages";
 import { at, compactCount, count, disabledAgentsAfterToggle, displayValue, entryStatus, filteredModels, moveEntry, patternList, perfLabel, priceLabel, providerStatus, sameList, sourceLabel, withEntry, withoutEntry } from "./model";
 import { SETTINGS_CSS } from "./styles";
 

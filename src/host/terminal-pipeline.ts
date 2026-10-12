@@ -23,7 +23,7 @@
  * the native transport being present.
  */
 import { randomBytes } from "node:crypto";
-import { bracketedPaste } from "./editor-context.ts";
+import { bracketedPaste } from "./bracketed-paste.ts";
 
 
 /** Shown in place of the earlier screen when it cannot be restored; new output still arrives, so nothing is lost from here on. */

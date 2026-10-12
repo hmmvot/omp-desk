@@ -14,7 +14,7 @@ import { afterEach, describe, it } from "node:test";
 import type { ChatModel, ChatSnapshotPayload } from "../../chat/model.ts";
 import { FakeRpcChannel, responseLine, type FakeChildModel } from "./fake-channel.ts";
 import { MESSAGE_UPDATE_PACE_MS, RpcSession, parseRestoredQueue, type RpcSessionOptions, type RpcSessionOutput } from "./session.ts";
-import { turnActivity } from "../../webview/lib/activity.ts";
+import { turnActivity } from "../../protocol/activity.ts";
 import { TurnActivityLedger, type TurnNotice } from "../notifications.ts";
 import {
 	ManualTimers,

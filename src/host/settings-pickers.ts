@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
-import { chainKeyEntries, modelPickEntries, thinkingPickEntries } from "./settings-pick-items.ts";
-import type { ModelPickInput, PickEntry, PickSnapshot } from "./settings-pick-items.ts";
+import { chainKeyEntries, modelPickEntries, thinkingPickEntries } from "../protocol/settings-pick-items.ts";
+import type { ModelPickInput, PickEntry, PickSnapshot } from "../protocol/settings-pick-items.ts";
 
 interface Item extends vscode.QuickPickItem { readonly value?: string; readonly available?: boolean; readonly current?: boolean }
 interface ChooseOptions {

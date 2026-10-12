@@ -1,4 +1,4 @@
-import { isRecord } from "../../guards.ts";
+import { isRecord } from "../../shared/guards.ts";
 import { stripAnsi } from "../../chat/ansi.ts";
 import type { JournalFacts } from "../session-cost.ts";
 

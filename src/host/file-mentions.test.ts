@@ -16,7 +16,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { FILE_COMPLETION_LIMIT, MAX_FILE_QUERY_LENGTH } from "../webview/messages.ts";
+import { FILE_COMPLETION_LIMIT, MAX_FILE_QUERY_LENGTH } from "../protocol/messages.ts";
 import type { FindFilesLike, FileSearchUri } from "./file-mentions.ts";
 import { fileMentionInclude, findFileMentions, mentionPath, parseFileQuery, rankFileMentions } from "./file-mentions.ts";
 

@@ -1,7 +1,7 @@
 /** Density-independent semantic cards, mutable replacement and exact call/result ownership. */
 import type { ToolCallContent } from "@oh-my-pi/pi-wire";
-import { isRecord } from "../guards.ts";
-import type { ActiveTool, PendingRow } from "./model.ts";
+import { isRecord } from "../shared/guards.ts";
+import type { ActiveTool, PendingRow } from "./pending.ts";
 import { entryMessage, isInterruptedToolResult, type AssistantMessage, type ChatContent, type ChatEntry, type CustomMessage, type ToolResultMessage } from "./messages.ts";
 import { todoPhasesFromToolResult } from "./todos.ts";
 

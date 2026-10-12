@@ -1,5 +1,5 @@
 /** Native registry membership plus bounded latest activity; no child transcript is retained here. */
-import { isRecord } from "../guards.ts";
+import { isRecord } from "../shared/guards.ts";
 import type { LiveAgent, LiveAgentState } from "./agent-liveness.ts";
 
 export type AgentStatus = "pending" | "running" | "completed" | "failed" | "aborted";

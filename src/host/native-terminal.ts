@@ -38,7 +38,7 @@ import {
   OmpUnavailableError,
   rethrowIfTransientInspection,
   transientErrnoCause,
-} from "./omp-unavailable";
+} from "../shared/omp-unavailable";
 
 const CLI_TIMEOUT_MS = 20_000;
 const VERSION_TIMEOUT_MS = 15_000;

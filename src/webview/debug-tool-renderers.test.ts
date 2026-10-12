@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { before, test } from "node:test";
 import { build } from "esbuild";
 import type { ToolCardProps } from "./components/ToolCard";
-import type { ToolRenderContext } from "./components/tool-renderers";
+import type { ToolRenderContext } from "./components/tool-render-types";
 import { toolPresentation } from "../chat/tool-presentation.ts";
 import type { ProjectedTool } from "../chat/transcript.ts";
 

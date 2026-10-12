@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { CHAT_EXIT_STDERR_BYTES, parseChatExitReason } from "./exit-reason.ts";
 import { createChatModel, applyChatState, applyChatSnapshot, snapshotOf } from "./model.ts";
-import { parseChatHostMessage, splitChatSnapshot } from "../webview/chat-messages.ts";
+import { parseChatHostMessage, splitChatSnapshot } from "../protocol/chat-messages.ts";
 
 describe("managed Chat exit reason boundary", () => {
 	it("validates byte bounds, codes and plain-text controls", () => {

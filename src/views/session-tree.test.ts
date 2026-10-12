@@ -67,7 +67,7 @@ if (typeof module.registerHooks === "function") {
 
 const { TreeItemCollapsibleState } = await import("./vscode-test-stub.ts");
 const sessionTree = await import("./session-tree.ts");
-const { relativeAge } = await import("./relative-age.ts");
+const { relativeAge } = await import("../shared/relative-age.ts");
 const { WorkspaceFolderRegistry } = await import("./workspace-folders.ts");
 // Register the extensionless dependency hook above before loading the index.
 const { SessionIndex } = await import("../host/session-index.ts");

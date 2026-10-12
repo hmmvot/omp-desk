@@ -1,5 +1,5 @@
 /** Canonical todo evidence and display selection, shared by host and page. */
-import { isRecord } from "../guards.ts";
+import { isRecord } from "../shared/guards.ts";
 import type { ChatEntry } from "./messages.ts";
 
 export type TodoStatus = "pending" | "in_progress" | "completed" | "abandoned" | "blocked";

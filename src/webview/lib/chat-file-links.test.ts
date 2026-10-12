@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { setImmediate as tick } from "node:timers/promises";
 import { test } from "node:test";
 import { ChatFileLinks, detectChatFileLinks, fileTargetOfHref, isFileLinkCandidate } from "./chat-file-links.ts";
-import type { GuestHostMessage, GuestWebviewMessage } from "../messages.ts";
+import type { GuestHostMessage, GuestWebviewMessage } from "../../protocol/messages.ts";
 
 const targets = (text: string): string[] => detectChatFileLinks(text).map(link => link.target);
 

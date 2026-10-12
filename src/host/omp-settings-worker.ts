@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { SettingsRefusal } from "./omp-settings-core.ts";
-import { isRecord as record } from "../guards.ts";
-import type { ConfigRecord } from "./omp-settings-core";
+import { isRecord as record } from "../shared/guards.ts";
+import type { ConfigRecord } from "../protocol/settings-model";
 
 /** No native diagnostic output is logged or returned: it can contain provider credentials. */
 export function runSettingsWorker(input: {

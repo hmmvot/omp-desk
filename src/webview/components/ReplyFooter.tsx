@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import type { ReplyFooter as ReplyFooterData } from "../../chat/reply-turns.ts";
-import { fmtDuration } from "../lib/format";
+import { fmtDuration } from "../../shared/format";
 
 export function ReplyFooter({ reply }: { reply: ReplyFooterData }) {
 	const [copyStatus, setCopyStatus] = useState<string | null>(null);

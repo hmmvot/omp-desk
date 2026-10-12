@@ -4,8 +4,8 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { toChatEventFrame } from "../host/rpc/protocol.ts";
-import { ChatSnapshotAssembler, parseChatHostMessage, parseChatWebviewMessage, splitChatSnapshot } from "../webview/chat-messages.ts";
+import { toChatEventFrame } from "../protocol/rpc.ts";
+import { ChatSnapshotAssembler, parseChatHostMessage, parseChatWebviewMessage, splitChatSnapshot } from "../protocol/chat-messages.ts";
 import { MAX_QUEUED_ITEMS, MAX_QUEUED_TEXT_LENGTH, MAX_QUEUED_TOTAL_BYTES, createChatModel, normalizeQueuedMessages, reduceChatFrame, snapshotOf, type ChatLiteState } from "./model.ts";
 
 const EPOCH = { nonce: "n", counter: 1 };

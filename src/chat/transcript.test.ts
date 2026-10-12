@@ -4,7 +4,7 @@ import type { AssistantMessage, ChatEntry, ChatMessage, ToolResultMessage } from
 import { isInterruptedToolResult, parseChatEntry } from "./messages.ts";
 import { createChatModel, reduceChatFrame, windowOf } from "./model.ts";
 import { projectTranscript } from "./transcript.ts";
-import { windowTranscriptCards } from "../webview/lib/transcript-window.ts";
+import { windowTranscriptCards } from "./transcript-window.ts";
 const entry = (id: string, message: ChatMessage): ChatEntry => ({ type: "message", id, parentId: null, timestamp: new Date(message.timestamp).toISOString(), message });
 const call = (id: string, name: string, path: string): AssistantMessage => ({ role: "assistant", timestamp: 1, model: "m", stopReason: "toolUse", content: [{ type: "toolCall", id, name, arguments: { path } }] });
 

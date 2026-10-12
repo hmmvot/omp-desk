@@ -38,9 +38,9 @@
 import { BridgeClient } from "./lib/bridge-client.ts";
 import { HostLink } from "./lib/host-link.ts";
 import type { BridgeClientEndpoint } from "./lib/bridge-client.ts";
-import { createToken, decodeBase64Url } from "../bridge-protocol.ts";
-import type { GuestHostMessage, GuestWebviewMessage } from "./messages.ts";
-import { GUEST_PROTOCOL_VERSION, parseGuestHostMessage } from "./messages.ts";
+import { createToken, decodeBase64Url } from "../protocol/bridge-protocol.ts";
+import type { GuestHostMessage, GuestWebviewMessage } from "../protocol/messages.ts";
+import { GUEST_PROTOCOL_VERSION, parseGuestHostMessage } from "../protocol/messages.ts";
 import {
 	PANEL_BRIDGE_META,
 	PANEL_IDENTITY_META,
@@ -49,8 +49,8 @@ import {
 	panelIdentityForEditor,
 	parsePanelBridgeTicket,
 	shellIdentityFor,
-} from "./panel-identity.ts";
-import type { PanelBridgeTicket } from "./panel-identity.ts";
+} from "../shared/panel-identity.ts";
+import type { PanelBridgeTicket } from "../shared/panel-identity.ts";
 
 /**
  * The capabilities this panel uses from the injected VS Code API.

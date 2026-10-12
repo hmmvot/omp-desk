@@ -1,7 +1,7 @@
 import * as path from "node:path";
-import { relativeAge } from "../../views/relative-age.ts";
-import { contextTokenLabel, sessionCostLabel } from "../../webview/lib/context-indicator.ts";
-import { fmtPercent, fmtTokens } from "../../webview/lib/format.ts";
+import { relativeAge } from "../../shared/relative-age.ts";
+import { contextTokenLabel, sessionCostLabel } from "../../shared/context-indicator.ts";
+import { fmtPercent, fmtTokens } from "../../shared/format.ts";
 import type { ChatLiteModel, ChatModel } from "../../chat/model.ts";
 import type { MaintenanceState } from "../../chat/events.ts";
 import type { JournalFacts } from "../session-cost.ts";

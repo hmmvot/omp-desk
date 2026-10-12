@@ -15,7 +15,7 @@
  */
 import { readFile, stat } from "node:fs/promises";
 import path from "node:path";
-import { isRecord } from "../../guards.ts";
+import { isRecord } from "../../shared/guards.ts";
 
 const BLOB_PREFIX = "blob:sha256:";
 const BLOB_REF_PATTERN = /^blob:sha256:[a-f0-9]{64}$/;

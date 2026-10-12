@@ -13,7 +13,7 @@
  * provider first: a replaced composer owns the action from the
  * moment it mounts, and a stale one cannot keep answering for the panel.
  */
-import type { GuestPanelAction } from "../messages.ts";
+import type { GuestPanelAction } from "../../protocol/messages.ts";
 
 /**
  * The actions themselves are the message contract's ({@link GuestPanelAction});

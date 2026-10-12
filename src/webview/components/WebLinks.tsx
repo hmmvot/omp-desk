@@ -10,10 +10,10 @@
  */
 import type { ReactNode } from "react";
 import { createContext, useContext, useEffect, useState } from "react";
-import type { GuestHostMessage, GuestWebviewMessage } from "../messages";
+import type { GuestHostMessage, GuestWebviewMessage } from "../../protocol/messages";
 import { TerminalLinkClient } from "../lib/terminal-link-client";
 import { WEB_LINK_HINT } from "../lib/chat-web-links";
-import { webLinkMenuContext } from "../terminal-links";
+import { webLinkMenuContext } from "../../shared/terminal-links";
 import { claimLinkActivation } from "./FileLinks";
 
 /** Exported for static renders, which cannot run the provider's effect. */

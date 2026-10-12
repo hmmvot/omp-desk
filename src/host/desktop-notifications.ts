@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { notificationLine } from "./notification-text.ts";
+import { notificationLine } from "../shared/notification-text.ts";
 import { windowsPowerShellEnvironment, windowsPowerShellExecutable } from "./windows-powershell.ts";
 
 export interface DesktopNotification {

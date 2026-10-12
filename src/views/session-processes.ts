@@ -8,7 +8,7 @@
  * only chooses words and decides, per layout, which rows are listed where.
  */
 import type { BrokerProcessRow } from "../host/broker-processes.ts";
-import { fmtDuration } from "../webview/lib/format.ts";
+import { fmtDuration } from "../shared/format.ts";
 import type { SessionsGrouping } from "./session-order.ts";
 
 export type ProcessState = "orphaned" | "idle" | "inuse" | "unknown";

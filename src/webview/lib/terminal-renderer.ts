@@ -28,17 +28,17 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { Terminal } from "@xterm/xterm";
 import type { IDisposable, ITheme } from "@xterm/xterm";
-import { MAX_TERMINAL_COLS, MAX_TERMINAL_ROWS, MIN_TERMINAL_COLS, MIN_TERMINAL_ROWS } from "../messages.ts";
+import { MAX_TERMINAL_COLS, MAX_TERMINAL_ROWS, MIN_TERMINAL_COLS, MIN_TERMINAL_ROWS } from "../../protocol/messages.ts";
 import type { TerminalGrid } from "./terminal-pane.ts";
-import type { TerminalFontSettings } from "../messages.ts";
+import type { TerminalFontSettings } from "../../protocol/messages.ts";
 import { terminalAppearanceFrom } from "./terminal-theme.ts";
 import { isTerminalWorkbenchChord, terminalCopyChord, withoutInterrupt } from "./terminal-keys.ts";
 import { OrderedTerminalSurface } from "./terminal-ordered-surface.ts";
-import { activateTerminalUnicode } from "./terminal-unicode.ts";
+import { activateTerminalUnicode } from "../../shared/terminal-unicode.ts";
 import { terminalFileLinkProvider } from "./terminal-link-provider.ts";
 import { WEB_LINK_HINT } from "./chat-web-links.ts";
-import { webLinkUrl } from "../terminal-links.ts";
-import type { WebLinkMode } from "../terminal-links.ts";
+import { webLinkUrl } from "../../shared/terminal-links.ts";
+import type { WebLinkMode } from "../../shared/terminal-links.ts";
 
 /**
  * Lines the renderer keeps behind the screen.

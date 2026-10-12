@@ -12,9 +12,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { ChatEpoch } from "../chat/model.ts";
-import type { ChatHostMessage, ChatQueueRemoveMessage, ChatQueueResultMessage } from "../webview/chat-messages.ts";
+import type { ChatHostMessage, ChatQueueRemoveMessage, ChatQueueResultMessage } from "../protocol/chat-messages.ts";
 import { ChatClient } from "../webview/lib/chat-client.ts";
-import type { GuestWebviewMessage } from "../webview/messages.ts";
+import type { GuestWebviewMessage } from "../protocol/messages.ts";
 import { ChatRuntime } from "./chat-runtime.ts";
 import type { ChatPage } from "./chat-runtime.ts";
 import { FakeRpcChannel } from "./rpc/fake-channel.ts";

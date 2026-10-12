@@ -3,11 +3,11 @@ import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { guestTransport } from "../bridge";
 import type { ChatClient, ChatSnapshot } from "../lib/chat-client";
-import type { ControlModelRef, GuestControlAction, GuestControlStateMessage } from "../messages";
-import type { FooterMetadataMessage } from "../footer-metadata";
-import { newControlScope } from "../messages";
+import type { ControlModelRef, GuestControlAction, GuestControlStateMessage } from "../../protocol/messages";
+import type { FooterMetadataMessage } from "../../shared/footer-metadata";
+import { newControlScope } from "../../protocol/messages";
 import { ContextUsageIndicator } from "./ContextUsageIndicator";
-import { quotaUsedPercent } from "../lib/context-indicator";
+import { quotaUsedPercent } from "../../shared/context-indicator";
 
 const CONTROL_WAIT_TIMEOUT_MS = 35_000;
 const FEEDBACK_MS = 6_000;

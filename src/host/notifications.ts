@@ -1,5 +1,5 @@
-import type { TurnActivityReport } from "../webview/lib/activity.ts";
-import type { GuestTurnOutcome } from "../webview/messages.ts";
+import type { TurnActivityReport } from "../protocol/activity.ts";
+import type { GuestTurnOutcome } from "../protocol/messages.ts";
 
 /** Host-owned projection; hidden editors keep receiving the same RPC observations. */
 export type TurnActivity = TurnActivityReport;

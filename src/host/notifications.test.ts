@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createChatModel, reduceChatFrame, applyChatUiRequest, type ChatEventFrame, type ChatModel } from "../chat/model.ts";
-import { turnActivity } from "../webview/lib/activity.ts";
+import { turnActivity } from "../protocol/activity.ts";
 import { desktopNotificationSuppression, reportsTrailingQuestion, TurnActivityLedger, TurnNotifier, type TurnActivity, type NotificationSuppression } from "./notifications.ts";
-import { toChatEventFrame } from "./rpc/protocol.ts";
+import { toChatEventFrame } from "../protocol/rpc.ts";
 import { assistantMessage } from "./rpc/test-support.ts";
 
 const IDLE: TurnActivity = { streaming: false, backgroundWork: false, settled: true, promptStatus: null, completionOutcome: null, pendingRequest: null, outcome: null, trailingQuestion: false };

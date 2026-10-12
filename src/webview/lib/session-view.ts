@@ -1,4 +1,4 @@
-import type { GuestHostMessage, GuestSessionViewMessage } from "../messages";
+import type { GuestHostMessage, GuestSessionViewMessage } from "../../protocol/messages";
 interface SessionViewTransport {
 	subscribe(listener: (message: GuestHostMessage) => void): () => void;
 }
