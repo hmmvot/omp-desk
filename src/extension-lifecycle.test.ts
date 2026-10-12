@@ -150,7 +150,7 @@ const fixtureContext = undefined as never;
 const fixtureWindow = () => windowState();
 export const harness = {
   connectHostControl, reconnectHostControl, establishControl, closeSession, launchHost, presentRestoreOutcome, openTab, handleChatEvent, bindPanel, restoreTabs, bridgeSerializerFor,
-  confirmAndDeleteSession, deleteSession, handleRestoreOutcome, forgetSession, renameSession, reloadSession, handleGuestControlRequest, panelResponder,
+  handleRestoreOutcome, renameSession, reloadSession, handleGuestControlRequest, panelResponder,
   switchSessionMode, restartChat, openSessionInMode, defaultSessionMode, chooseDefaultSessionView, newSession, startNewSession,
   newSessionInPlace, deleteSessionInPlace,
   panelFactory(handler) {
@@ -250,8 +250,8 @@ export const harness = {
     w.reconciler = createOwnerReconciler(ports);
     launcher = () => hostLauncher;
     openPanel = () => undefined;
-    brokerProvenanceFor = () => ({ kind: 'slot', slot: 'host:legacy-fixture' });
-    recordedHostStopPort = () => stopPort;
+    // The broker facts of the fixture's rows come in through the handle's deps, not by reassigning a function of the module.
+    w.sessionActions = registerSessionActions({ ...sessionActionsDeps(), brokerProvenanceFor: () => ({ kind: 'slot', slot: 'host:legacy-fixture' }), recordedHostStopPort: () => stopPort });
     const dialogs = [];
     fixtureVscode.window.showWarningMessage = async (message, options, action) => { dialogs.push({ message, detail: options?.detail, action }); return action; };
     fixtureVscode.window.showInputBox = async () => "Recovered draft title";
@@ -345,6 +345,10 @@ interface WindowFixture {
     selectHeldTab(index: unknown, request: unknown, serveContext: { stillWanted(): Promise<boolean> }): Promise<{ ok: boolean; focused: boolean }>;
     openRestoredTabIfUncovered(context: unknown, index: unknown, tabId: string): Promise<void>;
     routeLaunch(index: unknown, folder: { path: string }, launch: unknown, answerTimeoutMs?: number): Promise<boolean>;
+  };
+  sessionActions: {
+    confirmAndDelete(index: unknown, subject: unknown): Promise<boolean>;
+    delete(index: unknown, argument: unknown): Promise<void>;
   };
   readonly sessionPanelColumns: Map<string, number>;
   readonly hostControlAttempts: WeakMap<object, Promise<void>>;
@@ -444,10 +448,7 @@ interface Harness {
   panelFactory(handler: (...args: unknown[]) => unknown): () => void;
   errors(): readonly string[];
   handleChatEvent(...args: unknown[]): void;
-  confirmAndDeleteSession(...args: unknown[]): Promise<boolean>;
-  deleteSession(...args: unknown[]): Promise<void>;
   handleRestoreOutcome(...args: unknown[]): Promise<void>;
-  forgetSession(...args: unknown[]): Promise<void>;
   renameSession(...args: unknown[]): Promise<void>;
   reloadSession(...args: unknown[]): Promise<void>;
   handleGuestControlRequest(...args: unknown[]): Promise<void>;
@@ -2096,44 +2097,6 @@ describe("verified-owned-writer policy fixtures", () => {
     } finally { provider.dispose(); setLauncherTree(undefined, undefined); harness.window().externalLeases = null; f.runtime.dispose(); }
   });
 
-  it("an unowned legacy draft can be Forgotten immediately, and an unowned materialized row can be Deleted with only exact-path confirmation", async () => {
-    const draft = await legacyFixture("forget-dead", false, false);
-    const notifications: unknown[] = [];
-    harness.information(async (...args) => { notifications.push(args); });
-    try {
-      await harness.forgetSession(draft.index, TAB);
-      assert.equal(draft.index.get(TAB), null);
-      assert.deepEqual(notifications, [], "Forget is visible in the tree and does not emit a completion toast");
-    }
-    finally { draft.runtime.dispose(); }
-    const saved = await legacyFixture("delete-dead", false, true);
-    try {
-      saved.index.observeOwnershipOfFile = async () => ({ ok: false, detail: "Fixture claim storage is unreadable." });
-      assert.equal(await harness.confirmAndDeleteSession(saved.index, TAB), true);
-      assert.equal(saved.index.get(TAB), null);
-      await assert.rejects(readFile(saved.file!), { code: "ENOENT" });
-      assert.equal(saved.dialogs.length, 1);
-      assert.equal(saved.dialogs[0]!.detail!.includes(saved.file!), false, "filesystem paths stay out of the modal");
-      assert.equal(saved.dialogs[0]!.detail!.split(/[.!?]\s+/).length <= 2, true);
-      assert.deepEqual(saved.operations, []);
-    } finally { saved.runtime.dispose(); }
-  });
-
-  it("cancelling Delete leaves history and index unchanged without a redundant notification", async () => {
-    const f = await legacyFixture("cancel-delete", false, true);
-    const before = await readFile(f.file!, "utf8");
-    const notifications: unknown[] = [];
-    harness.warning(async () => undefined);
-    harness.information(async message => { notifications.push(message); });
-    try {
-      assert.equal(await harness.confirmAndDeleteSession(f.index, TAB), false);
-      assert.ok(f.index.get(TAB));
-      assert.equal(await readFile(f.file!, "utf8"), before);
-      assert.deepEqual(f.operations, []);
-      assert.deepEqual(notifications, []);
-    } finally { f.runtime.dispose(); }
-  });
-
   it("Open of a verified legacy writer after restart confirms its stop before launching on the same file", async () => {
     const f = await legacyFixture("live-open-after-restart", true, true);
     try {
@@ -2165,18 +2128,6 @@ describe("verified-owned-writer policy fixtures", () => {
       assert.deepEqual(f.operations, ["stop legacy child and shutdown broker", "launch rpc"]);
       assert.equal(f.dialogs.length, 1);
     } finally { f.runtime.dispose(); await f.index.closeSession(TAB, { confirmedStopped: true }); }
-  });
-
-  it("the verified live legacy child offers one stop-and-delete confirmation, preserving exact-path scope", async () => {
-    const f = await legacyFixture("live-delete", true, true);
-    try {
-      assert.equal(await harness.confirmAndDeleteSession(f.index, TAB), true);
-      assert.deepEqual(f.operations, ["stop legacy child and shutdown broker"]);
-      assert.equal(f.dialogs.length, 1);
-      assert.equal(f.dialogs[0]!.action, "Delete");
-      assert.equal(f.index.get(TAB), null);
-      await assert.rejects(readFile(f.file!), { code: "ENOENT" });
-    } finally { f.runtime.dispose(); }
   });
 });
 
@@ -3407,29 +3358,6 @@ describe("same-editor Chat and native Terminal actions", () => {
 		} finally { f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true }); }
 	});
 
-	it("Delete from either stopped-row command argument confirms before removing the file and row", async () => {
-		for (const treeArgument of [true, false]) {
-			const f = await fixture();
-			f.state.runtime = null;
-			await f.index.closeSession(f.row.tabId, { confirmedStopped: true });
-			let dialogs = 0;
-			harness.warning(async (_message, options, action) => {
-				dialogs++;
-				assert.equal(f.index.get(f.row.tabId)?.runIntent, "stopped");
-				assert.ok(await readFile(f.file!, "utf8"), "the confirmation precedes file removal");
-				assert.ok(options !== null && typeof options === "object" && "modal" in options && options.modal === true);
-				return action;
-			});
-			try {
-				await harness.deleteSession(f.index, treeArgument ? { tabId: f.row.tabId } : f.row.tabId);
-				assert.equal(dialogs, 1);
-				assert.equal(f.index.get(f.row.tabId), null);
-				await assert.rejects(readFile(f.file!), { code: "ENOENT" });
-				assert.equal(f.launches(), 0, "Delete does not start a stopped session");
-			} finally { f.chat.dispose(); }
-		}
-	});
-
 	it("a stalled stopped-row Delete preflight reports failure and never deletes after a late read", async t => {
 		const f = await fixture();
 		f.state.runtime = null;
@@ -3438,7 +3366,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 		f.index.observeOwnership = async () => await observation.promise;
 		t.mock.timers.enable({ apis: ["setTimeout"] });
 		try {
-			const deleting = harness.deleteSession(f.index, { tabId: f.row.tabId });
+			const deleting = harness.window().sessionActions.delete(f.index, { tabId: f.row.tabId });
 			await nextTurn(); t.mock.timers.tick(5_000); await deleting;
 			assert.equal(harness.errors().length, 1, "preflight failure is visible, not a silent rejected command");
 			assert.equal(f.dialogs.length, 0);
@@ -4173,7 +4101,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 		const control = nativeControl(f);
 		try {
 			f.native.handle.stop = async () => { throw new Error("Delete must gracefully dispose the native SDK before removal"); };
-			assert.equal(await harness.confirmAndDeleteSession(f.index, f.row.tabId), true, JSON.stringify({ dialogs: f.dialogs, errors: harness.errors() }));
+			assert.equal(await harness.window().sessionActions.confirmAndDelete(f.index, f.row.tabId), true, JSON.stringify({ dialogs: f.dialogs, errors: harness.errors() }));
 			assert.equal(control.shutdowns.length, 1);
 			assert.equal(f.index.get(f.row.tabId), null);
 			assert.equal(f.panels.disposed, true);

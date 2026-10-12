@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { CONTROL_DIR_ENV, CONTROL_SLOT_ENV } from "./control-protocol";
-import type { ControlNativeState } from "./control-protocol";
+import type { ControlNativeState, ControlNativeTarget } from "./control-protocol";
 import { controlRuntimeFlags, DEFAULT_OMP_PROFILE, resolveOmpBinary } from "./native-terminal";
 import type { OmpCommand } from "./native-terminal";
 import type { PtyBrokerClient, PtyHandle } from "./pty-client";
@@ -24,6 +24,17 @@ export interface NativeHostRuntime extends Omit<RpcHostRuntime, "kind" | "handle
 }
 
 export type SessionHostRuntime = RpcHostRuntime | NativeHostRuntime;
+
+/** What one runtime reports about the session it runs, read under the tab's gate before a stop, a switch or a deletion acts on it. */
+export interface SessionTransitionFacts {
+	readonly file: string | null;
+	readonly sessionId: string | null;
+	readonly epoch: string;
+	readonly settled: boolean;
+	readonly hasContent: boolean | null;
+	readonly nativeTarget: ControlNativeTarget | null;
+}
+
 export type NativeLaunchOutcome =
 	| { readonly state: "running"; readonly reason: string; readonly runtime: NativeHostRuntime }
 	| { readonly state: "not-started" | "unconfirmed"; readonly reason: string; readonly runtime: null };

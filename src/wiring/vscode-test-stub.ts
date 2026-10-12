@@ -16,6 +16,8 @@ export const Uri = { from: TreeUri.from, parse: URI.parse, file: URI.file };
 
 export const ViewColumn = { One: 1, Two: 2, Beside: -2 } as const;
 
+export const QuickPickItemKind = { Separator: -1, Default: 0 } as const;
+
 export class TabInputText {
 	readonly uri: URI;
 	constructor(uri: URI) {
@@ -67,6 +69,10 @@ export const window: {
 	visibleTextEditors: unknown[];
 	picks: unknown[];
 	showQuickPick: (items: unknown, options?: unknown) => Promise<unknown>;
+	/** What a notification asked through `showWarningMessage` / `showInformationMessage` said, in order. */
+	notices: string[];
+	showWarningMessage: (message: string, ...rest: unknown[]) => Promise<undefined>;
+	showInformationMessage: (message: string, ...rest: unknown[]) => Promise<undefined>;
 } = {
 	state: { focused: true },
 	onDidChangeWindowState: focusChanges.event,
@@ -78,17 +84,28 @@ export const window: {
 	visibleTextEditors: [],
 	picks: [],
 	showQuickPick: async items => { window.picks.push(items); return undefined; },
+	notices: [],
+	showWarningMessage: async message => { window.notices.push(message); return undefined; },
+	showInformationMessage: async message => { window.notices.push(message); return undefined; },
 };
 
 export const commands: {
 	calls: unknown[][];
 	handler: ((...args: unknown[]) => unknown) | null;
 	executeCommand(...args: unknown[]): Promise<unknown>;
+	/** The commands a module registered, by id. */
+	registered: Map<string, (...args: unknown[]) => unknown>;
+	registerCommand(id: string, handler: (...args: unknown[]) => unknown): { dispose(): void };
 } = {
 	calls: [],
 	handler: null,
 	async executeCommand(...args) {
 		commands.calls.push(args);
 		return commands.handler?.(...args);
+	},
+	registered: new Map(),
+	registerCommand(id, handler) {
+		commands.registered.set(id, handler);
+		return { dispose: () => { commands.registered.delete(id); } };
 	},
 };
