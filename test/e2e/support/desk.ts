@@ -54,6 +54,28 @@ export class Desk {
 		return page;
 	}
 
+	/**
+	 * Runs Developer: Reload Window from the Command Palette and returns the window once it is back with the extension
+	 * contributed. The reload replaces the renderer, so the old `Page` and every locator on it are dead: the window is
+	 * looked up again, and only after the old renderer has gone (its title or content is no longer the one that ran the command).
+	 */
+	async reloadWindow(page: Page, folderName: string): Promise<Page> {
+		// F1 is swallowed while a webview holds the keyboard focus (the Chat composer does): the title bar takes it first.
+		await page.locator("[id='workbench.parts.titlebar']").click({ position: { x: 5, y: 5 } });
+		await page.keyboard.press("F1");
+		const picker = page.locator(".quick-input-widget");
+		await picker.locator(".quick-input-box input").fill(">Developer: Reload Window");
+		const option = picker.getByRole("option", { name: /Developer: Reload Window/ });
+		await expect(option).toBeVisible();
+		// The page navigates away as the reload starts: a Promise that outlives it is the load event of the new renderer.
+		const reloaded = page.waitForEvent("load", { timeout: 120_000 });
+		await page.keyboard.press("Enter");
+		await reloaded;
+		const back = await this.window(folderName);
+		await this.ready(back);
+		return back;
+	}
+
 	/** Waits until the window has OMP Desk's Activity Bar entry, i.e. the extension's containers are contributed. */
 	async ready(page: Page): Promise<void> {
 		await page.locator(ACTIVITY_BAR_ENTRY).waitFor({ timeout: 120_000 });
@@ -117,9 +139,38 @@ export class Desk {
 	 */
 	async clickMenuItem(page: Page, name: string): Promise<void> {
 		const item = page.locator(".monaco-menu").getByRole("menuitem", { name, exact: true });
-		await item.hover();
+		await item.hover({ timeout: 30_000 });
 		await expect(item.locator("xpath=..")).toHaveClass(/focused/);
-		await item.click();
+		await item.click({ timeout: 30_000 });
+	}
+
+	/**
+	 * Opens the context menu of a Sessions row and clicks one of its items. A tree row that re-renders between mouse down
+	 * and up loses the right click (the Sessions list repaints as other windows publish), so the click is repeated until the
+	 * menu shows the item; an open menu that lacks it is dismissed first, because it would swallow the next right click.
+	 */
+	async rowMenu(page: Page, row: Locator, item: string): Promise<void> {
+		const entry = page.locator(".monaco-menu").getByRole("menuitem", { name: item, exact: true });
+		await expect(async () => {
+			await row.click({ button: "right" });
+			try {
+				await expect(entry).toBeVisible({ timeout: 2_000 });
+			} catch (error) {
+				await page.keyboard.press("Escape");
+				throw error;
+			}
+		}, `the row menu offers ${item}`).toPass({ timeout: 30_000, intervals: [200, 500] });
+		await this.clickMenuItem(page, item);
+	}
+
+	/** The modal confirmation VS Code shows as DOM (the profile sets `window.dialogStyle: custom`). */
+	dialog(page: Page): Locator {
+		return page.locator(".monaco-dialog-box");
+	}
+
+	/** Notification toasts (the `showInfo` / `showWarning` messages of the extension). */
+	toasts(page: Page): Locator {
+		return page.locator(".notifications-toasts .notification-toast");
 	}
 
 	/** Types `text` into a Chat composer and presses Send. */

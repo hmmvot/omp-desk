@@ -354,6 +354,8 @@ interface WindowFixture {
   sessionActions: {
     confirmAndDelete(index: unknown, subject: unknown): Promise<boolean>;
     delete(index: unknown, argument: unknown): Promise<void>;
+    stopHost(context: unknown, index: unknown, argument: unknown, preconfirmed?: { recorded: unknown; gracefulOnly?: boolean }): Promise<boolean>;
+    forget(index: unknown, argument: unknown): Promise<void>;
   };
   guestDispatcher: {
     handleMessage(...args: unknown[]): Promise<void>;
@@ -4210,6 +4212,327 @@ describe("same-editor Chat and native Terminal actions", () => {
 			assert.equal(f.launches(), 0);
 			assert.equal(f.index.get(f.row.tabId)?.runIntent, "stopped");
 		} finally { f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true }); }
+	});
+
+	describe("Close, Stop, Reload, Forget and Delete by what became of the session's process", () => {
+		type Fate = "stopped cleanly" | "broker and OMP gone" | "broker gone, OMP alive" | "stop unconfirmed, OMP alive";
+
+		/** The user's answers: a modal's first button is pressed, a Force Stop only when `force`; every other warning is what the user read. */
+		function user(force: boolean) {
+			const modals: string[] = [], read: string[] = [];
+			harness.warning(async (message, options, ...items) => {
+				if ((options as { modal?: boolean } | undefined)?.modal !== true) { read.push(String(message)); return undefined; }
+				modals.push(items[0] as string);
+				return items[0] === "Force Stop" && !force ? undefined : items[0];
+			});
+			return { modals, read };
+		}
+
+		/** One running session of this window over the real index, with the means to say what became of its process. */
+		async function subject(fileless = false, kind: "chat" | "terminal" = "chat") {
+			const f = await fixture(fileless, kind);
+			const owner = kind === "terminal" ? `native.${f.native.identity.slot}` : f.index.get(f.row.tabId)!.ownership!.ownerGeneration;
+			return {
+				...f,
+				/** Say what became of the process; returns the stop requests that reached the broker. A force stop succeeds only when `forceWorks`. */
+				model(fate: Fate, forceWorks = false): string[] {
+					const requests: string[] = [];
+					const clean = f.native.handle.stop;
+					const ended = fate === "broker and OMP gone";
+					if (ended) f.native.exit();
+					harness.window().rootGone = async root => ended && root.pid === f.native.pid;
+					f.native.handle.stop = async (options?: { mode?: string }) => {
+						requests.push(options?.mode ?? "graceful");
+						if (fate === "stopped cleanly" || (fate === "stop unconfirmed, OMP alive" && forceWorks && options?.mode === "force")) return await clean();
+						if (fate === "stop unconfirmed, OMP alive") return { pidGone: false, verified: false, tree: "unknown", nativePid: f.native.pid, remainingPids: [], detail: "OMP did not exit" };
+						throw new Error("the recorded broker process is gone");
+					};
+					return requests;
+				},
+				async claimHeld(): Promise<boolean> {
+					const seen = await f.index.observeOwnership(f.row.tabId);
+					return seen.ok && seen.claim !== null;
+				},
+				/** Put control material of the session's launch in the secret store; returns whether any of it is left. */
+				holdCredentials(): () => boolean {
+					f.saved.secrets.set(`omp.hostControl.key.${owner}`, "proven-key");
+					f.saved.secrets.set(`omp.hostControl.recipient.${owner}`, "recipient");
+					return () => [...f.saved.secrets.keys()].some(name => name.endsWith(owner));
+				},
+				async finish() {
+					harness.warning(async (_message, _options, action) => action);
+					harness.information(async () => undefined);
+					f.state.nativeWatch?.(); f.state.pipeline?.dispose(); f.chat.dispose();
+					await f.index.closeSession(f.row.tabId, { confirmedStopped: true });
+				},
+			};
+		}
+
+		const closeCells: { kind: "chat" | "terminal"; fate: Fate; force: boolean; forceWorks?: boolean; closed: boolean; modals: string[]; requests: string[] }[] = [
+			{ kind: "chat", fate: "stopped cleanly", force: false, closed: true, modals: ["Close"], requests: ["graceful"] },
+			{ kind: "chat", fate: "broker and OMP gone", force: false, closed: true, modals: ["Close"], requests: ["graceful"] },
+			{ kind: "chat", fate: "broker gone, OMP alive", force: false, closed: false, modals: ["Close", "Force Stop"], requests: ["graceful"] },
+			{ kind: "chat", fate: "broker gone, OMP alive", force: true, closed: false, modals: ["Close", "Force Stop"], requests: ["graceful", "force"] },
+			{ kind: "chat", fate: "stop unconfirmed, OMP alive", force: false, closed: false, modals: ["Close", "Force Stop"], requests: ["graceful"] },
+			{ kind: "chat", fate: "stop unconfirmed, OMP alive", force: true, forceWorks: true, closed: true, modals: ["Close", "Force Stop"], requests: ["graceful", "force"] },
+			{ kind: "chat", fate: "stop unconfirmed, OMP alive", force: true, forceWorks: false, closed: false, modals: ["Close", "Force Stop"], requests: ["graceful", "force"] },
+			{ kind: "terminal", fate: "stopped cleanly", force: false, closed: true, modals: ["Close"], requests: [] },
+			{ kind: "terminal", fate: "broker and OMP gone", force: false, closed: true, modals: ["Close"], requests: [] },
+			{ kind: "terminal", fate: "broker gone, OMP alive", force: false, closed: false, modals: ["Close", "Force Stop"], requests: [] },
+			{ kind: "terminal", fate: "broker gone, OMP alive", force: true, closed: false, modals: ["Close", "Force Stop"], requests: ["force"] },
+		];
+		for (const cell of closeCells) {
+			const forceNote = !cell.modals.includes("Force Stop") ? "" : cell.force ? `, Force Stop pressed${cell.forceWorks ? " and working" : ""}` : ", Force Stop declined";
+			it(`Close of a ${cell.kind} session whose process is ${cell.fate}${forceNote} ${cell.closed ? "stops it and releases everything" : "keeps its runtime, claim, credentials and running intent"}`, async () => {
+				const s = await subject(false, cell.kind);
+				const ui = user(cell.force);
+				const requests = s.model(cell.fate, cell.forceWorks);
+				if (cell.kind === "terminal" && cell.fate === "stopped cleanly") nativeControl(s);
+				const credentialsLeft = s.holdCredentials();
+				try {
+					assert.equal(await s.claimHeld(), true, "the fixture session holds its claim before Close");
+					await harness.closeSession(s.saved.context, s.index, s.row.tabId);
+					assert.deepEqual(ui.modals, cell.modals);
+					assert.deepEqual(requests, cell.requests);
+					if (cell.closed) {
+						assert.equal(s.state.runtime, null);
+						assert.equal(s.index.get(s.row.tabId)?.runIntent, "stopped");
+						assert.equal(await s.claimHeld(), false, "a verified stop releases the session claim");
+						assert.equal(credentialsLeft(), false, "a verified stop releases the control credentials");
+						assert.deepEqual(ui.read, [], "a stop that finished tells the user nothing went wrong");
+					} else {
+						assert.equal(s.state.runtime, s.native, "an unconfirmed stop keeps the runtime this window drives");
+						assert.equal(s.index.get(s.row.tabId)?.runIntent, "running");
+						assert.equal(await s.claimHeld(), true, "an unconfirmed stop keeps the claim");
+						assert.equal(credentialsLeft(), true, "an unconfirmed stop keeps the control credentials");
+						assert.equal(ui.read.length, 1, "the user is told once that the session could not be confirmed stopped");
+						if (cell.kind === "chat") assert.equal(s.state.transitioning, false, "a chat that stayed running is open to another try");
+					}
+				} finally { await s.finish(); }
+			});
+		}
+
+		it("Close of a Chat draft without a file stops it and keeps the draft row, with its reserved identity released", async () => {
+			const s = await subject(true);
+			const ui = user(false);
+			s.model("stopped cleanly");
+			try {
+				assert.equal(await s.claimHeld(), true);
+				await harness.closeSession(s.saved.context, s.index, s.row.tabId);
+				assert.deepEqual(ui.modals, ["Close"]);
+				const row = s.index.get(s.row.tabId);
+				assert.notEqual(row, null, "Close never forgets a row");
+				assert.deepEqual([row!.sessionFile, row!.runIntent, row!.availability], [null, "stopped", "draft"]);
+				assert.equal(await s.claimHeld(), false);
+			} finally { await s.finish(); }
+		});
+
+		it("Close of a copy this window shows for a session another editor controls stops only this window's copy: the shared row stays running and its claim stays held", async () => {
+			const s = await subject();
+			const ui = user(false);
+			s.model("stopped cleanly");
+			const binding = s.index.slotBinding(s.state.slotId)!;
+			s.index.slotBinding = () => ({ ...binding, role: "passive" });
+			try {
+				await harness.closeSession(s.saved.context, s.index, s.row.tabId);
+				assert.deepEqual(ui.modals, ["Close"]);
+				assert.equal(s.state.runtime, null);
+				assert.equal(s.index.get(s.row.tabId)?.runIntent, "running", "the controller's row is not recorded stopped by a passive copy");
+				assert.equal(await s.claimHeld(), true, "the controller's claim is not released by a passive copy");
+			} finally { await s.finish(); }
+		});
+
+		it("two Closes of one session dispatch one stop, and neither offers a Force Stop for a session the first one ended", async () => {
+			const s = await subject();
+			const ui = user(true);
+			const requests = s.model("stopped cleanly");
+			const credentialsLeft = s.holdCredentials();
+			try {
+				await Promise.all([harness.closeSession(s.saved.context, s.index, s.row.tabId), harness.closeSession(s.saved.context, s.index, s.row.tabId)]);
+				assert.deepEqual(requests, ["graceful"]);
+				assert.equal(ui.modals.includes("Force Stop"), false);
+				assert.equal(s.state.runtime, null);
+				assert.equal(s.index.get(s.row.tabId)?.runIntent, "stopped");
+				assert.equal(await s.claimHeld(), false);
+				assert.equal(credentialsLeft(), false);
+			} finally { await s.finish(); }
+		});
+
+		it("Close of a stopped row only says so: no dialog, no stop", async () => {
+			const s = await subject();
+			const ui = user(true);
+			const requests = s.model("stopped cleanly");
+			const infos: string[] = [];
+			harness.information(async message => { infos.push(String(message)); });
+			try {
+				await s.index.closeSession(s.row.tabId, { confirmedStopped: true });
+				s.state.runtime = null;
+				await harness.closeSession(s.saved.context, s.index, s.row.tabId);
+				assert.deepEqual([ui.modals, requests, ui.read], [[], [], []]);
+				assert.equal(infos.length, 1);
+				assert.match(infos[0]!, /already stopped/);
+			} finally { await s.finish(); }
+		});
+
+		it("Close of a running row this window neither drives nor has a recorded process for stops nothing and says so", async () => {
+			const native = runtime(719); const index = indexFixture(native);
+			index.row.host = null as never;
+			harness.reset(index, null);
+			const ui = user(true);
+			await harness.closeSession(storage().context, index, TAB);
+			assert.deepEqual(ui.modals, []);
+			assert.equal(ui.read.length, 1);
+			assert.match(ui.read[0]!, /not running an OMP host for that session, so nothing was stopped/);
+			assert.equal(index.row.runIntent, "running");
+			harness.warning(async (_message, _options, action) => action);
+		});
+
+		for (const cell of [
+			{ fate: "broker and OMP gone", finished: true },
+			{ fate: "broker gone, OMP alive", finished: false },
+			{ fate: "stop unconfirmed, OMP alive", finished: false },
+		] as const) {
+			it(`a Stop another window asked for is graceful only: with the process ${cell.fate} it ${cell.finished ? "finishes the stop" : "offers no Force Stop and leaves the session running"}`, async () => {
+				const s = await subject();
+				const ui = user(true);
+				const requests = s.model(cell.fate, true);
+				const credentialsLeft = s.holdCredentials();
+				const host = s.index.get(s.row.tabId)!.host!;
+				const recorded = { ...s.native.identity, attemptStartedAt: host.startedAt, pid: host.pid };
+				try {
+					assert.equal(await harness.window().sessionActions.stopHost(s.saved.context, s.index, s.row.tabId, { recorded, gracefulOnly: true }), cell.finished);
+					assert.deepEqual(ui.modals, [], "neither the stop nor a Force Stop is asked of the user");
+					assert.deepEqual(requests, ["graceful"]);
+					assert.equal(s.state.runtime, cell.finished ? null : s.native);
+					assert.equal(s.index.get(s.row.tabId)?.runIntent, cell.finished ? "stopped" : "running");
+					assert.equal(await s.claimHeld(), !cell.finished);
+					assert.equal(credentialsLeft(), !cell.finished);
+					assert.equal(ui.read.length, cell.finished ? 0 : 1);
+				} finally { await s.finish(); }
+			});
+		}
+
+		it("Delete of a Chat session whose broker and OMP process were already ended elsewhere deletes the exact file after one confirmation", async () => {
+			const s = await subject();
+			const ui = user(true);
+			s.model("broker and OMP gone");
+			try {
+				assert.equal(await harness.window().sessionActions.confirmAndDelete(s.index, s.row.tabId), true, JSON.stringify({ modals: ui.modals, read: ui.read, errors: harness.errors() }));
+				assert.deepEqual(ui.modals, ["Delete"], "one confirmation, no stop or Force Stop question");
+				assert.equal(s.index.get(s.row.tabId), null);
+				await assert.rejects(readFile(s.file!), { code: "ENOENT" });
+			} finally { await s.finish().catch(() => undefined); }
+		});
+
+		it("Delete of a Chat session whose broker is gone but whose OMP process is alive deletes nothing and keeps the runtime", async () => {
+			const s = await subject();
+			const ui = user(true);
+			s.model("broker gone, OMP alive");
+			try {
+				assert.equal(await harness.window().sessionActions.confirmAndDelete(s.index, s.row.tabId), false);
+				assert.equal(ui.modals.includes("Force Stop"), false, "Delete never offers a forced stop");
+				assert.equal(ui.read.length, 1, "the user is told the session could not be stopped");
+				assert.ok(await readFile(s.file!, "utf8"), "the transcript is untouched");
+				assert.notEqual(s.index.get(s.row.tabId), null);
+				assert.equal(s.state.runtime, s.native);
+				assert.equal(await s.claimHeld(), true);
+			} finally { await s.finish(); }
+		});
+
+		it("Reload of a stopped row starts nothing and points to Resume, and Reload of a draft without a file says it is not saved", async () => {
+			const stopped = await subject();
+			const ui = user(true);
+			const infos: string[] = [];
+			harness.information(async message => { infos.push(String(message)); });
+			try {
+				await stopped.index.closeSession(stopped.row.tabId, { confirmedStopped: true });
+				stopped.state.runtime = null;
+				await harness.reloadSession(stopped.saved.context, stopped.index, stopped.row.tabId);
+				assert.equal(infos.length, 1);
+				assert.match(infos[0]!, /stopped\. Use Resume/);
+				assert.deepEqual([stopped.launches(), ui.modals], [0, []]);
+			} finally { await stopped.finish(); }
+			const draft = await subject(true);
+			const asked = user(true);
+			try {
+				await harness.reloadSession(draft.saved.context, draft.index, draft.row.tabId);
+				assert.equal(asked.read.length, 1);
+				assert.match(asked.read[0]!, /has not been saved yet/);
+				assert.deepEqual([draft.launches(), asked.modals, draft.state.runtime === draft.native], [0, [], true], "a draft is never reloaded into an implicit Resume");
+			} finally { await draft.finish(); }
+		});
+
+		const endedCells = [
+			{ request: "Reload", mode: "chat", transport: "rpc", unreadable: false, modals: ["Reload"] },
+			{ request: "Reload", mode: "chat", transport: "rpc", unreadable: true, modals: [] },
+			{ request: "switch to Terminal", mode: "terminal", transport: "native", unreadable: false, modals: [] },
+			{ request: "switch to Terminal", mode: "terminal", transport: "native", unreadable: true, modals: [] },
+		] as const;
+		for (const cell of endedCells) {
+			it(`${cell.request} of a Chat session whose broker and OMP were ended elsewhere, ${cell.unreadable ? "whose state can no longer be read, " : ""}ends it and starts one successor on the same file in ${cell.mode}, with no Force Stop and no warning`, async () => {
+				const s = await subject();
+				const ui = user(true);
+				const requests = s.model("broker and OMP gone");
+				if (cell.unreadable) Object.assign(s.chat.sessionOf(s.row.tabId)!, { readSettlement: async () => null });
+				const credentialsLeft = s.holdCredentials();
+				try {
+					if (cell.request === "Reload") await harness.reloadSession(s.saved.context, s.index, s.row.tabId);
+					else await harness.switchSessionMode(s.saved.context, s.index, s.state, cell.mode);
+					assert.equal(s.launches(), 1, "exactly one successor");
+					assert.deepEqual(ui.modals, cell.modals, "no Force Stop, and no question for a session with nothing left to stop");
+					assert.deepEqual(ui.read, [], "nothing is reported as failed");
+					assert.notEqual(s.state.runtime, s.native);
+					assert.notEqual(s.state.runtime, null, "the successor is this window's runtime");
+					assert.equal(s.state.mode, cell.mode);
+					assert.equal(s.index.get(s.row.tabId)?.host?.transport, cell.transport);
+					assert.equal(s.index.get(s.row.tabId)?.sessionFile, s.file, "the successor continues the same exact file");
+					assert.equal(credentialsLeft(), false, "the ended process's control credentials are released");
+					assert.ok(requests.length <= 1, "the broker was asked at most once");
+				} finally { await s.finish(); }
+			});
+		}
+
+		for (const request of ["Reload", "switch to Terminal"] as const) {
+			it(`${request} of a Chat session whose state cannot be read but whose OMP process is alive changes nothing and says so`, async () => {
+				const s = await subject();
+				const ui = user(true);
+				const requests = s.model("broker gone, OMP alive");
+				Object.assign(s.chat.sessionOf(s.row.tabId)!, { readSettlement: async () => null });
+				try {
+					if (request === "Reload") await harness.reloadSession(s.saved.context, s.index, s.row.tabId);
+					else await harness.switchSessionMode(s.saved.context, s.index, s.state, "terminal");
+					assert.deepEqual([s.launches(), ui.modals, requests], [0, [], []], "nothing is asked, stopped or started");
+					assert.equal(ui.read.length, 1);
+					assert.match(ui.read[0]!, /could not be verified; nothing was stopped/);
+					assert.equal(s.state.runtime, s.native);
+					assert.equal(s.index.get(s.row.tabId)?.runIntent, "running");
+					assert.equal(await s.claimHeld(), true);
+				} finally { await s.finish(); }
+			});
+		}
+
+		for (const kind of ["chat", "terminal"] as const) {
+			it(`Forget refuses a ${kind} session this window runs and drops it, panel and all, once it is stopped, leaving its transcript`, async () => {
+				const s = await subject(false, kind);
+				const ui = user(true);
+				s.model("stopped cleanly");
+				if (kind === "terminal") nativeControl(s);
+				try {
+					await harness.window().sessionActions.forget(s.index, s.row.tabId);
+					assert.notEqual(s.index.get(s.row.tabId), null, "a running session stays in Sessions");
+					assert.equal(s.state.runtime, s.native);
+					assert.equal(s.panels.disposed, false, "its editor stays open");
+					assert.equal(ui.read.length, 1, "the user is told to stop it first");
+					assert.equal(await s.claimHeld(), true);
+					await harness.closeSession(s.saved.context, s.index, s.row.tabId);
+					assert.equal(s.state.runtime, null);
+					await harness.window().sessionActions.forget(s.index, s.row.tabId);
+					assert.equal(s.index.get(s.row.tabId), null);
+					assert.equal(s.panels.disposed, true, "the forgotten row's editor closes with it");
+					assert.ok(await readFile(s.file!, "utf8"), "Forget never touches the transcript");
+				} finally { await s.finish().catch(() => undefined); }
+			});
+		}
 	});
 });
 

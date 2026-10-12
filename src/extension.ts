@@ -3816,6 +3816,25 @@ async function alreadyEnded(runtime: SessionHostRuntime): Promise<NativeStopVerd
   };
 }
 
+/**
+ * End the runtime of a session whose recorded OMP root is already gone, the way its exit would have ended it
+ * (`handleRpcHostExited`, `handleNativeHostExited`: runtime cleared, credentials and claim released, row recorded stopped),
+ * so that a request made for a stopped session can follow. `false` when the root is not proven gone or the exit could
+ * not be completed (surviving children, no proof through the broker): the caller then reports what it found.
+ * Call it outside the tab's lifecycle gate, which both handlers take.
+ */
+async function endEndedRuntime(context: vscode.ExtensionContext, index: SessionIndex, state: TabState, runtime: SessionHostRuntime): Promise<boolean> {
+  const tabId = state.tabId;
+  if (tabId === null || state.runtime !== runtime || await alreadyEnded(runtime) === null) return false;
+  try {
+    if (runtime.kind === "chat") await handleRpcHostExited(context, index, tabId, runtime);
+    else await handleNativeHostExited(index, state, runtime);
+  } catch (error) {
+    log(`tab ${tabId}: the session whose OMP process already ended could not be closed: ${messageOf(error)}`);
+  }
+  return state.runtime !== runtime;
+}
+
 /** Native graceful shutdown is an SDK request, never a ConPTY close. */
 async function requestSessionStop(state: TabState, runtime: SessionHostRuntime, mode: "graceful" | "force", consent: boolean, expected?: SessionTransitionFacts | null): Promise<NativeStopVerdict> {
   const s = windowState();
@@ -4103,6 +4122,12 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
       return await readTransitionFacts(state, runtime);
     }));
     if (captured === null) {
+      // The facts of a session whose process already ended (killed from outside, crashed) cannot be read: end it as its exit
+      // would and take the request as one for a stopped session, which Resumes it in the requested view.
+      if (state.lastOpenRequest === modeRequest && await endEndedRuntime(context, index, state, runtime)) {
+        await switchSessionMode(context, index, state, mode, false, keepLiveView);
+        return;
+      }
       showWarning(runtime.kind === "terminal" ? "Native control is unavailable. Use native /exit or explicit force Stop (tree unknown); no automatic replacement follows uncontrolled force." : "The current RPC session state could not be verified; nothing was stopped.");
       return;
     }
@@ -4159,17 +4184,28 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
         }
         stopped = await waitForManagedRootExit(runtime, broker);
       } else {
+        // An abort or a settlement that a process which already ended cannot give is not a refusal: the proof of its root is the answer.
+        let ended: NativeStopVerdict | null = null;
         if (consent) {
           const abort = await withSessionReadDeadline(s.chat.sessionOf(tabId)?.abortForShutdown() ?? Promise.resolve(undefined));
-          if (abort?.status !== "accepted") { showWarning("Abort was not confirmed; no replacement was started."); return; }
+          if (abort?.status !== "accepted") {
+            ended = await alreadyEnded(runtime);
+            if (ended === null) { showWarning("Abort was not confirmed; no replacement was started."); return; }
+          }
         }
-        const last = await waitForRpcSettlement(state, runtime, fresh);
-        if (last === null) { showWarning("RPC did not settle on the captured session; nothing was replaced."); return; }
-        acceptedStop = true;
-        const requested = await withSessionReadDeadline(stopRpcHost(runtime, "graceful"), 35_000);
-        stopped = requested.writerGone ? await waitForManagedRootExit(runtime, broker, 5_000) : requested;
+        if (ended === null && await waitForRpcSettlement(state, runtime, fresh) === null) {
+          ended = await alreadyEnded(runtime);
+          if (ended === null) { showWarning("RPC did not settle on the captured session; nothing was replaced."); return; }
+        }
+        if (ended !== null) stopped = ended;
+        else {
+          acceptedStop = true;
+          const requested = await withSessionReadDeadline(stopRpcHost(runtime, "graceful"), 35_000);
+          stopped = requested.writerGone ? await waitForManagedRootExit(runtime, broker, 5_000) : requested;
+        }
       }
       log(`tab ${tabId}: view switch stop: ${stopped.diagnosticDetail ?? stopped.detail}`);
+      if (!stopped.writerGone) stopped = await alreadyEnded(runtime) ?? stopped;
       if (!stopped.writerGone) { state.controlFailure = stopped.detail; showWarning(stopped.detail); return; }
       const credentialOwner = controlOwnerFor(runtime, row.ownership?.ownerGeneration ?? "");
       state.nativeWatch?.();
@@ -4199,8 +4235,14 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
     await changing;
     if (replacement !== null) await handleRestoreOutcome(context, index, tabId, replacement);
   } catch (error) {
-    if (state.lastOpenRequest === modeRequest) state.lastOpenRequest = ++s.editorEventSequence;
+    const superseded = state.lastOpenRequest !== modeRequest;
+    if (!superseded) state.lastOpenRequest = ++s.editorEventSequence;
     log(`tab ${tabId}: view switch failed: ${messageOf(error)}`);
+    // A read or an abort that timed out on a process that already ended is not a failed switch: finish it as a Resume.
+    if (!superseded && !acceptedStop && state.runtime === runtime && await endEndedRuntime(context, index, state, runtime)) {
+      await switchSessionMode(context, index, state, mode, false, keepLiveView);
+      return;
+    }
     state.controlFailure = acceptedStop
       ? "The view switch could not finish because the session has not been confirmed stopped. Use Stop Session to recover."
       : "The view switch could not finish. The current view is still available; try switching again.";

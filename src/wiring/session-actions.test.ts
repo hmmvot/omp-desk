@@ -926,3 +926,153 @@ describe("the transport that stops a recorded host", () => {
 		assert.deepEqual(await port({ kind: "slot", slot: SLOT }, {}).stop(native), { kind: "unknown", detail: "Stop this session from its Terminal editor, or use /exit there." });
 	});
 });
+
+/** Another window of this profile holds the session: a live holder takes the claim over the same exact transcript. */
+async function holdAsAnotherWindow(index: SessionIndex, fixtureRoot: string, transcript: string) {
+	const rival = await acquireClaim(path.join(fixtureRoot, "claims"), transcript, "rival-owner", createClaimHolder());
+	const holder = async (): Promise<string | null> => {
+		const seen = await index.observeOwnership(TAB);
+		assert.ok(seen.ok);
+		return seen.claim?.holderId ?? null;
+	};
+	const holderId = await holder();
+	assert.ok(holderId !== null && holderId !== index.claimHolder.id, "the claim is another window's");
+	return { rival, holderId, holder };
+}
+
+describe("destructive actions by what holds the session", () => {
+	describe("Forget", () => {
+		it("drops a stopped row without touching its transcript, and never asks", async () => {
+			const f = await legacyFixture("forget-stopped", false, true);
+			const before = await readFile(f.file!, "utf8");
+			await f.actions.forget(f.index, TAB);
+			assert.equal(f.index.get(TAB), null);
+			assert.equal(await readFile(f.file!, "utf8"), before, "Forget removes launcher metadata only");
+			assert.deepEqual([f.dialogs, f.warnings, f.errors], [[], [], []]);
+		});
+
+		it("refuses a row whose OMP process is verified running, and keeps the row and this window's records", async () => {
+			const f = await legacyFixture("forget-running", true, true);
+			f.state.tabs.set("slot-1", tabRecord("slot-1", TAB));
+			f.state.outcomes.set(TAB, { status: "draft" });
+			try {
+				await f.actions.forget(f.index, TAB);
+				assert.ok(f.index.get(TAB), "a running session stays in Sessions");
+				assert.equal(f.warnings.length, 1, "the user is told why");
+				assert.deepEqual([f.state.tabs.size, f.conversationsClosed, f.state.outcomes.size], [1, [], 1]);
+			} finally {
+				await f.index.closeSession(TAB, { confirmedStopped: true });
+			}
+		});
+
+		it("refuses a row another live window holds, and takes nothing from that window's claim", async () => {
+			const f = await legacyFixture("forget-held", false, true);
+			const held = await holdAsAnotherWindow(f.index, f.root, f.file!);
+			try {
+				await f.actions.forget(f.index, TAB);
+				assert.ok(f.index.get(TAB));
+				assert.equal(f.warnings.length, 1);
+				assert.equal(await held.holder(), held.holderId);
+			} finally {
+				await held.rival.release();
+			}
+		});
+	});
+
+	describe("Stop of a recorded process", () => {
+		const recorded = { slot: SLOT, brokerId: "broker-1", brokerGeneration: "gen-1" };
+		it("stops a draft without a file and keeps the draft row, stopped, with its reserved identity released", async () => {
+			const f = await legacyFixture("stop-draft", true, false);
+			f.state.brokerSlots = { forget: async () => {} } as never;
+			try {
+				assert.equal(await f.actions.stopHost(f.state.context, f.index, TAB), true);
+				assert.deepEqual(f.operations, ["stop legacy child and shutdown broker"]);
+				const row = f.index.get(TAB);
+				assert.ok(row, "Stop never forgets a row");
+				assert.deepEqual([row.sessionFile, row.runIntent, row.host], [null, "stopped", null]);
+				const seen = await f.index.observeOwnership(TAB);
+				assert.ok(seen.ok && seen.claim === null, "the draft's reserved identity is released");
+			} finally {
+				await f.index.closeSession(TAB, { confirmedStopped: true });
+			}
+		});
+
+		it("stops the recorded broker's process of a row another live window holds, and leaves that window's claim alone", async () => {
+			const f = await legacyFixture("stop-held", true, true);
+			const held = await holdAsAnotherWindow(f.index, f.root, f.file!);
+			f.state.brokerSlots = { forget: async () => {} } as never;
+			try {
+				assert.equal(await f.actions.stopHost(f.state.context, f.index, TAB), true);
+				assert.deepEqual(f.operations, ["stop legacy child and shutdown broker"], "a Stop is allowed against a rival's recorded broker, after the user's confirmation");
+				assert.equal(f.dialogs.length, 1);
+				assert.equal(await held.holder(), held.holderId, "the other window's claim is neither taken nor released");
+			} finally {
+				await held.rival.release();
+			}
+		});
+
+		it("keeps the row's process, slot and credentials when the broker could not prove the writer gone", async () => {
+			const f = await legacyFixture("stop-stuck", true, true);
+			f.state.brokerSlots = { forget: async () => { throw new Error("must not be reached"); } } as never;
+			f.state.outcomes.set(TAB, { status: "draft" });
+			f.state.stopPort = { stopRecordedHost: async () => ({ kind: "stopped", writerGone: false, treeEmpty: false, detail: "OMP is still running.", slot: SLOT }) };
+			try {
+				assert.equal(await f.actions.stopHost(f.state.context, f.index, TAB), false);
+				assert.equal(f.warnings.length, 1);
+				assert.match(f.warnings[0]!, /OMP is still running\./);
+				assert.deepEqual([f.state.outcomes.size, f.released], [1, []]);
+				assert.ok(f.index.get(TAB)?.host, "the recorded process stays recorded: it may still run");
+				assert.equal(f.dialogs.length, 1, "no second question and no forced stop from this path");
+			} finally {
+				await f.index.closeSession(TAB, { confirmedStopped: true });
+			}
+		});
+	});
+
+	describe("Delete", () => {
+		it("refuses a row another live window holds, before any question, and keeps its transcript and claim", async () => {
+			const f = await legacyFixture("delete-held", false, true);
+			const held = await holdAsAnotherWindow(f.index, f.root, f.file!);
+			try {
+				assert.equal(await f.actions.confirmAndDelete(f.index, TAB), false);
+				assert.deepEqual(f.dialogs, [], "nothing is confirmed that cannot be done");
+				assert.equal(f.warnings.length, 1);
+				assert.ok(await readFile(f.file!, "utf8"));
+				assert.ok(f.index.get(TAB));
+				assert.equal(await held.holder(), held.holderId);
+			} finally {
+				await held.rival.release();
+			}
+		});
+
+		it("refuses a draft without a file, saying why, with no question", async () => {
+			const f = await legacyFixture("delete-draft", false, false);
+			assert.equal(await f.actions.confirmAndDelete(f.index, TAB), false);
+			assert.deepEqual(f.dialogs, []);
+			assert.equal(f.warnings.length, 1);
+			assert.match(f.warnings[0]!, /^This session was not deleted: /);
+			assert.ok(f.index.get(TAB), "the draft row is kept");
+		});
+
+		for (const [why, port] of [
+			["it cannot be reached", { kind: "unknown", detail: "This session is disconnected. Reopen its editor and try Stop again." }],
+			["it is not proven gone", { kind: "stopped", writerGone: false, treeEmpty: false, detail: "OMP is still running.", slot: SLOT }],
+		] as const) {
+			it(`deletes nothing when the running session's recorded process cannot be stopped because ${why}`, async () => {
+				const f = await legacyFixture("delete-unstoppable", true, true);
+				f.state.stopPort = { stopRecordedHost: async () => port } as RecordedHostStopPort;
+				const before = await readFile(f.file!, "utf8");
+				try {
+					assert.equal(await f.actions.confirmAndDelete(f.index, TAB), false);
+					assert.equal(f.dialogs.length, 1, "the one confirmation was asked; the stop it led to failed");
+					assert.equal(await readFile(f.file!, "utf8"), before, "the transcript is untouched");
+					assert.ok(f.index.get(TAB));
+					assert.ok(f.warnings.length >= 1, "the user is told the session was not stopped");
+					assert.deepEqual(f.forgotten, [], "no conversation state is dropped for a row that stays");
+				} finally {
+					await f.index.closeSession(TAB, { confirmedStopped: true });
+				}
+			});
+		}
+	});
+});

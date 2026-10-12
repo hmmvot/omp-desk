@@ -1,0 +1,536 @@
+/**
+ * The contribution contract: what `package.json` promises the editor against what the extension does at runtime.
+ *
+ * A menu entry, keybinding or welcome link that names a command nobody registered says "command not found"; a
+ * `viewItem` clause that no row ever satisfies hides a context menu without any error; a view with no provider
+ * stays empty. None of those is visible to a unit test of one module, so this file activates the real extension
+ * bundle against a recording `vscode` (`vscode-recording-stub.ts`, in a temporary storage folder and with no OMP
+ * installation to find) and compares what it registered with what `package.json` contributes, and it builds the
+ * rows of every tree from the real providers to compare their `contextValue`s with the menu clauses.
+ *
+ * Rules the cases hold the contributions to:
+ * - every command a menu, keybinding or welcome link names is declared in `contributes.commands`, with a title;
+ * - every declared command is registered once at runtime (a declared command that is not is a dead menu item);
+ * - a registered command that is not declared is allowed only when a tree row runs it on click (`omp.clickSession`);
+ * - every `view == <id>` names a contributed view, in a contributed container, that the extension gave a provider;
+ * - every `viewItem` clause matches a `contextValue` its view's tree produces, and every produced `contextValue`
+ *   has a menu entry unless it is one of the rows that only open on click;
+ * - a command hidden from the palette (`when: false`) is reachable another way, because it needs a row or an
+ *   editor to act on; and every palette-visible command runs without an argument without throwing.
+ *
+ * The tree modules load `vscode` through `src/views/vscode-test-stub.ts`; the hook below is limited to files under
+ * `src/`, so the activated bundle (in the temporary folder) keeps its own recording module.
+ */
+import assert from "node:assert/strict";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import module from "node:module";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
+import { fileURLToPath } from "node:url";
+import { setImmediate as nextTurn } from "node:timers/promises";
+import { after, before, describe, it } from "node:test";
+
+import { build } from "esbuild";
+import { URI } from "vscode-uri";
+
+import type { BrokerProcessRow, BrokerProcessSnapshot } from "../host/broker-processes.ts";
+import type { SessionIndexEntry } from "../host/session-model.ts";
+import type { LauncherFolder } from "../views/launcher-folders.ts";
+import type { SessionActivityFacts, SessionLauncherFacts, SessionTreeProvider } from "../views/session-tree.ts";
+import { createRecordingVscode } from "./vscode-recording-stub.ts";
+import type { Recording } from "./vscode-recording-stub.ts";
+
+// The tree modules import the editor API; map it before their first import (a static import would be evaluated first).
+if (typeof module.registerHooks === "function") {
+	const stubUrl = new URL("../views/vscode-test-stub.ts", import.meta.url).href;
+	const EXTENSIONLESS = /^\.(?!.*\.[cm]?[jt]sx?$)/;
+	module.registerHooks({
+		resolve(specifier, context, nextResolve) {
+			const fromSource = (context.parentURL ?? "").includes("/src/");
+			if (specifier === "vscode" && fromSource) return { url: stubUrl, shortCircuit: true };
+			if (EXTENSIONLESS.test(specifier) && fromSource) {
+				for (const candidate of [`${specifier}.ts`, `${specifier}.tsx`]) {
+					try {
+						return nextResolve(candidate, context);
+					} catch {
+						// Try the next extension.
+					}
+				}
+			}
+			return nextResolve(specifier, context);
+		},
+	});
+}
+
+const sessionTree = await import("../views/session-tree.ts");
+const { ContextTreeProvider } = await import("../views/context-tree.ts");
+const { InventoryTreeProvider } = await import("../views/inventory-tree.ts");
+const { projectContext } = await import("../host/context/context-model.ts");
+const { projectView } = await import("../host/inventory/inventory-model.ts");
+
+// ---------------------------------------------------------------------------------------------------------------
+// package.json, as the editor reads it
+// ---------------------------------------------------------------------------------------------------------------
+
+interface MenuEntry { readonly command?: string; readonly submenu?: string; readonly when?: string; readonly group?: string }
+interface CommandDeclaration { readonly command: string; readonly title?: string; readonly icon?: string }
+interface ViewDeclaration { readonly id: string; readonly type?: string }
+interface PackageJson {
+	readonly contributes: {
+		readonly commands: readonly CommandDeclaration[];
+		readonly menus: Readonly<Record<string, readonly MenuEntry[]>>;
+		readonly keybindings: readonly { readonly command: string; readonly when?: string }[];
+		readonly views: Readonly<Record<string, readonly ViewDeclaration[]>>;
+		readonly viewsContainers: Readonly<Record<string, readonly { readonly id: string }[]>>;
+		readonly viewsWelcome: readonly { readonly view: string; readonly when?: string; readonly contents: string }[];
+		readonly configuration: { readonly properties: Readonly<Record<string, unknown>> };
+	};
+}
+const manifest = JSON.parse(await readFile(new URL("../../package.json", import.meta.url), "utf8")) as PackageJson;
+const contributes = manifest.contributes;
+
+const declared = new Map(contributes.commands.map(command => [command.command, command]));
+const views = Object.values(contributes.views).flat();
+const viewIds = new Set(views.map(view => view.id));
+const palette = contributes.menus.commandPalette ?? [];
+const hiddenFromPalette = new Set(palette.filter(entry => entry.when === "false").map(entry => entry.command ?? ""));
+const menus = Object.entries(contributes.menus).flatMap(([menu, entries]) => entries.map((entry, at) => ({ menu, at, entry })));
+
+/** Name an entry so a failure points at the line of `package.json` to change. */
+function where(menu: string, entry: MenuEntry): string {
+	return `${menu} entry ${entry.command ?? entry.submenu ?? "(neither command nor submenu)"} [${entry.group ?? "no group"}] when "${entry.when ?? ""}"`;
+}
+
+/** A `viewItem` condition of a `when` clause; the clauses this extension writes are a conjunction with one such atom. */
+function viewItemTest(when: string, owner: string): { readonly view: string | null; readonly matches: ((contextValue: string) => boolean) | null } {
+	const withoutRegex = when.replace(/=~\s*\/(?:\\.|[^/\\])*\/[a-z]*/g, "=~ REGEX");
+	assert.ok(!/\|\||[()]/.test(withoutRegex) || !/\bviewItem\b/.test(when), `${owner}: this contract reads conjunctions only`);
+	const view = /(?:^|&&)\s*view\s*==\s*([\w.]+)/.exec(when)?.[1] ?? null;
+	const pattern = /\bviewItem\s*=~\s*\/((?:\\.|[^/\\])*)\/([a-z]*)/.exec(when);
+	if (pattern !== null) {
+		const regex = new RegExp(pattern[1] ?? "", pattern[2] ?? "");
+		return { view, matches: value => regex.test(value) };
+	}
+	const literal = /\bviewItem\s*==\s*([\w.]+)/.exec(when)?.[1];
+	if (literal !== undefined) return { view, matches: value => value === literal };
+	assert.ok(!/\bviewItem\b/.test(when), `${owner}: a viewItem condition this contract cannot read`);
+	return { view, matches: null };
+}
+
+// ---------------------------------------------------------------------------------------------------------------
+// The activated extension
+// ---------------------------------------------------------------------------------------------------------------
+
+interface ExtensionModule {
+	activate(context: unknown): Promise<void>;
+	deactivate(): void;
+}
+interface ActivationContext {
+	readonly subscriptions: { dispose(): void }[];
+}
+
+let root = "";
+let recording: Recording;
+let extension: ExtensionModule;
+let context: ActivationContext;
+const savedEnvironment = new Map<string, string | undefined>();
+
+function memento() {
+	const values = new Map<string, unknown>();
+	return {
+		get: (key: string, fallback?: unknown) => (values.has(key) ? values.get(key) : fallback),
+		update: async (key: string, value: unknown) => { values.set(key, value); },
+		keys: () => [...values.keys()],
+		setKeysForSync() {},
+	};
+}
+
+before(async () => {
+	root = await mkdtemp(path.join(tmpdir(), "omp-contributions-"));
+	const entry = fileURLToPath(new URL("../extension.ts", import.meta.url));
+	const bundle = path.join(root, "out", "extension.js");
+	// The shipped bundle's own configuration, with `vscode` left for the host to provide.
+	await build({
+		entryPoints: [entry], outfile: bundle, bundle: true, platform: "node", format: "cjs", target: "node20",
+		external: ["vscode"], logLevel: "silent", logOverride: { "empty-import-meta": "silent" },
+	});
+	// `require("vscode")` from the bundle resolves to this folder and so to the recording module.
+	await mkdir(path.join(root, "node_modules", "vscode"), { recursive: true });
+	await writeFile(path.join(root, "node_modules", "vscode", "index.js"), "module.exports = globalThis.__ompContributionVscode;");
+	const home = path.join(root, "home");
+	await mkdir(home, { recursive: true });
+	for (const [name, value] of [["USERPROFILE", home], ["HOME", home], ["PI_CODING_AGENT_DIR", path.join(home, "agent")]] as const) {
+		savedEnvironment.set(name, process.env[name]);
+		process.env[name] = value;
+	}
+	// No OMP to find: nothing the handlers do can start the user's installed OMP or Bun.
+	const created = createRecordingVscode({ "omp.executablePath": path.join(root, "no-such-omp.exe") });
+	recording = created.recording;
+	(globalThis as Record<string, unknown>).__ompContributionVscode = created.vscode;
+	extension = module.createRequire(bundle)(bundle) as ExtensionModule;
+	const extensionFolder = path.join(root, "extension");
+	const storage = path.join(root, "global-storage");
+	await mkdir(extensionFolder, { recursive: true });
+	await mkdir(storage, { recursive: true });
+	context = {
+		extensionMode: 3, extensionUri: URI.file(extensionFolder), extensionPath: extensionFolder, globalStorageUri: URI.file(storage),
+		storageUri: undefined, subscriptions: [], workspaceState: memento(), globalState: memento(),
+		secrets: { get: async () => undefined, store: async () => {}, delete: async () => {} }, extension: { id: "test.omp-desk" },
+	} as ActivationContext;
+	await extension.activate(context);
+	// The catalog pass finishes after `activate` returns and registers its watchers when it does; tearing down before
+	// it ends would leave a watcher no one disposes.
+	await recording.contextSet("omp.catalogPending", false);
+	await nextTurn();
+	await nextTurn();
+});
+
+after(async () => {
+	for (let subscription = context?.subscriptions.pop(); subscription !== undefined; subscription = context.subscriptions.pop()) subscription.dispose();
+	extension?.deactivate();
+	for (const [name, value] of savedEnvironment) {
+		if (value === undefined) delete process.env[name];
+		else process.env[name] = value;
+	}
+	if (root !== "") await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+});
+
+// ---------------------------------------------------------------------------------------------------------------
+// The rows every tree produces
+// ---------------------------------------------------------------------------------------------------------------
+
+interface ProducedRow { readonly contextValue: string | undefined; readonly command: string | undefined }
+
+const ALPHA = path.join(tmpdir(), "omp-contributions", "alpha");
+const FILE = path.join(tmpdir(), "omp-contributions", "session.jsonl");
+const NO_FACTS: SessionLauncherFacts = { open: false, running: false, outcome: null, activity: null };
+const providers: InstanceType<typeof SessionTreeProvider>[] = [];
+after(() => { for (const provider of providers) provider.dispose(); });
+
+function sessionEntry(overrides: Partial<SessionIndexEntry>): SessionIndexEntry {
+	return {
+		tabId: "tab:row", cwd: ALPHA, kind: "session", origin: "extension", sessionFile: FILE, sessionId: null, scope: { profile: null, sessionDir: null },
+		sessionDir: null, ownership: null, host: null, createdAt: "2026-09-25T10:00:00.000Z", lastActiveAt: "2026-09-25T10:05:00.000Z", ordinal: 0,
+		availability: "saved", detail: null, runIntent: "stopped", title: null, lastCompletedReplyId: null, lastSeenReplyId: null, ...overrides,
+	};
+}
+const activity = (overrides: Partial<SessionActivityFacts>): SessionActivityFacts => ({
+	pendingQuestion: false, working: false, backgroundWork: false, settled: true, trailingQuestion: false, lastCompletedReplyId: null, lastSeenReplyId: null, ...overrides,
+});
+
+/** Session rows over the situations a row can be in: the real classifier names each one's state, the real row builds its `contextValue`. */
+function sessionRows(): { state: string; row: ProducedRow }[] {
+	const stopped = sessionEntry({});
+	const draft = sessionEntry({ kind: "draft", sessionFile: null, availability: "draft" });
+	const live = sessionEntry({ availability: "live", runIntent: "running" });
+	const liveDraft = sessionEntry({ kind: "draft", sessionFile: null, availability: "live", runIntent: "running" });
+	const attached = (viewMode: "chat" | "terminal" | null, activityFacts: SessionActivityFacts | null = null): SessionLauncherFacts =>
+		({ ...NO_FACTS, running: true, open: viewMode !== null, viewMode, activity: activityFacts });
+	const scenarios: readonly { entry: SessionIndexEntry; facts: SessionLauncherFacts }[] = [
+		{ entry: stopped, facts: NO_FACTS },
+		{ entry: stopped, facts: { ...NO_FACTS, ownershipChecked: true } },
+		{ entry: draft, facts: NO_FACTS },
+		{ entry: live, facts: attached("chat") },
+		{ entry: live, facts: attached("terminal") },
+		{ entry: live, facts: attached(null) },
+		{ entry: liveDraft, facts: attached("chat") },
+		{ entry: live, facts: attached("chat", activity({ pendingQuestion: true })) },
+		{ entry: live, facts: attached("chat", activity({ working: true })) },
+		{ entry: live, facts: attached("chat", activity({ backgroundWork: true })) },
+		{ entry: live, facts: attached("chat", activity({ settled: false })) },
+		{ entry: live, facts: attached("chat", activity({ lastCompletedReplyId: "reply-1" })) },
+		{ entry: live, facts: attached("chat", activity({})) },
+		{ entry: live, facts: { ...NO_FACTS, ownedWriterPid: 4242, ownershipChecked: true } },
+		{ entry: live, facts: { ...NO_FACTS, heldElsewhere: true, switchableWindow: true } },
+		{ entry: live, facts: { ...NO_FACTS, heldElsewhere: true, switchableWindow: false } },
+		{ entry: stopped, facts: { ...NO_FACTS, externalOmp: true, ownershipChecked: true } },
+		{ entry: sessionEntry({ availability: "failed" }), facts: NO_FACTS },
+		{ entry: live, facts: { ...NO_FACTS, restoring: true } },
+		{ entry: live, facts: { ...NO_FACTS, launching: true } },
+		{ entry: live, facts: { ...attached("chat"), stopping: true } },
+		{ entry: live, facts: { ...NO_FACTS, checking: true } },
+	];
+	return scenarios.map(({ entry, facts }) => {
+		const state = sessionTree.sessionItemState(entry, facts);
+		const item = new sessionTree.SessionTreeItem(entry, state, { header: null, conversation: { lastAt: null }, facts, active: false, now: 0 });
+		return { state, row: { contextValue: item.contextValue, command: item.command?.command } };
+	});
+}
+
+const folderRow = (id: string, folderPath: string, flags: { pinned: boolean; collapsed: boolean }): LauncherFolder =>
+	({ id, path: folderPath, collapsed: flags.collapsed, pinned: flags.pinned, open: false, openHere: false, openElsewhere: false });
+
+/** Every node a session provider serves in one layout, folders and their children included. */
+async function walk(provider: InstanceType<typeof SessionTreeProvider>): Promise<ProducedRow[]> {
+	const produced: ProducedRow[] = [];
+	const visit = async (items: readonly object[]): Promise<void> => {
+		for (const item of items) {
+			const node = item as { contextValue?: string; command?: { command: string } };
+			produced.push({ contextValue: node.contextValue, command: node.command?.command });
+			const children = await provider.getChildren(item as never);
+			if (children.length > 0) await visit(children);
+		}
+	};
+	await visit(await provider.getChildren());
+	return produced;
+}
+
+let serial = 0;
+function processRow(overrides: Partial<BrokerProcessRow>): BrokerProcessRow {
+	serial += 1;
+	return {
+		id: `current|tab:${serial}|pty-${serial}`, source: "current", kind: "terminal", ptyKind: "folder-shell", slot: `tab:${serial}`, brokerId: `pty-${serial}`,
+		generation: `gen-${serial}`, brokerPid: 7000 + serial, brokerCreationTime: "134349421014308869", startedAt: "2026-09-25T10:00:00.000Z", uptimeMs: 60_000,
+		title: null, status: "in-use", host: { kind: "terminal", folder: ALPHA, label: "alpha", window: "this-window" }, window: "this-window", drivenHere: false,
+		child: "running", olderBuild: false, stop: { available: true }, ...overrides,
+	};
+}
+/** Background processes of every kind, status and stop availability the Sessions view can list. */
+function processRows(): BrokerProcessRow[] {
+	const rows: BrokerProcessRow[] = [];
+	for (const status of ["in-use", "orphaned", "unknown"] as const) {
+		for (const stop of [{ available: true }, { available: false, reason: "previous version" }] as const) {
+			for (const source of ["current", "predecessor"] as const) {
+				rows.push(processRow({ status, stop, source }));
+				rows.push(processRow({ status, stop, source, kind: "session", ptyKind: "managed-rpc", drivenHere: true,
+					host: { kind: "session", tabId: `tab:p${serial}`, title: "Fix the build", folder: ALPHA, window: "this-window", drivenHere: true, recorded: true } }));
+				rows.push(processRow({ status, stop, source, kind: "session", ptyKind: "managed-rpc", host: null, title: "left over" }));
+				rows.push(processRow({ status, stop, source, kind: "stats", ptyKind: "stats-dashboard", host: { kind: "stats", window: "this-window" } }));
+			}
+		}
+	}
+	return rows;
+}
+
+/** Rows of the Sessions tree in every layout, with folders of every flavour, session rows and background processes. */
+async function sessionsViewRows(): Promise<ProducedRow[]> {
+	const folders: LauncherFolder[] = [];
+	for (const pinned of [true, false]) {
+		for (const collapsed of [true, false]) {
+			for (const shells of [true, false]) folders.push(folderRow(`folder:${pinned}-${collapsed}-${shells}`, path.join(ALPHA, shells ? "shells" : "plain", `${pinned}-${collapsed}`), { pinned, collapsed }));
+		}
+	}
+	const sessions = sessionRows();
+	const entries = sessions.map((_, at) => sessionEntry({ tabId: `tab:${at}`, cwd: folders[at % folders.length]!.path }));
+	const rows: ProducedRow[] = sessions.map(item => item.row);
+	for (const grouping of ["flat", "folders", "terminals"] as const) {
+		const provider = new sessionTree.SessionTreeProvider({
+			folders: () => folders, entries: () => entries, activeTabId: () => null, facts: () => NO_FACTS, grouping: () => grouping,
+			runtimeIdentity: () => null, observeOwnership: async () => ({}), hasRecoverableShell: folder => folder.path.includes(`${path.sep}shells${path.sep}`),
+		});
+		providers.push(provider);
+		const snapshot: BrokerProcessSnapshot = { rows: processRows(), hidden: 0, unreadable: 0, takenAt: 0 };
+		provider.setProcesses(snapshot);
+		rows.push(...await walk(provider));
+	}
+	// The two rows the provider shows only for an empty folder and for a default profile with no provider login.
+	const emptyFolder = new sessionTree.WorkspaceFolderTreeItem(folders[0]!, []);
+	for (const item of [new sessionTree.EmptySessionTreeItem(emptyFolder), new sessionTree.ProviderLoginTreeItem()]) {
+		rows.push({ contextValue: item.contextValue, command: item.command?.command });
+	}
+	return rows;
+}
+
+/** The Context view's rows from the real projection of a live Chat's context report. */
+function contextViewRows(): ProducedRow[] {
+	const provider = new ContextTreeProvider();
+	const model = projectContext({
+		subject: { title: "Work", mode: "chat", running: true },
+		live: { model: { provider: "anthropic", id: "sonnet", name: "Sonnet", contextWindow: 200_000 }, usage: { tokens: 76_800, contextWindow: 200_000, percent: 38.4 }, busy: false, rewriting: false, maintenance: null },
+		read: {
+			at: 0, autoCompaction: true,
+			stats: { userMessages: 4, assistantMessages: 4, toolCalls: 9, toolResults: 9, totalMessages: 26, premiumRequests: 0, tokens: { input: 150_000, output: 12_000, reasoning: 0, cacheRead: 90_000, cacheWrite: 0 } },
+			files: { files: [{ path: path.join(ALPHA, "AGENTS.md"), chars: 1234 }], onDemand: [path.join(ALPHA, "src", "AGENTS.md")] },
+			journal: { cost: 1.2, compactionCount: 2, lastCompaction: { timestamp: "2026-10-12T10:00:00.000Z", method: "soft", tokensBefore: 384_000, tokensAfter: 120_000, warning: null }, clearCount: 1, lastClear: "2026-10-11T12:00:00.000Z" },
+		},
+		report: null, now: Date.parse("2026-10-12T12:00:00.000Z"),
+	});
+	provider.setModel(model);
+	return provider.getChildren().flatMap(group => [group, ...provider.getChildren(group)]).map(item => ({ contextValue: item.contextValue, command: item.command?.command }));
+}
+
+/** One inventory view's rows, switchable and read-only, in both scopes. */
+function inventoryViewRows(kind: "skills" | "tools" | "mcp" | "extensions"): ProducedRow[] {
+	const rowOf = (name: string, rowKind: string, switchable: boolean) => ({
+		kind: rowKind, name, description: null, path: path.join(ALPHA, name), provider: "native", providerName: "OMP", level: "user", state: "active", shadowed: false, shadowedBy: null,
+		disabledReason: null, detail: null, toolPrefix: null, runtimeName: null, sources: [],
+		toggle: switchable ? { mechanism: "disabledExtensions", refusal: null } : { mechanism: null, refusal: "managed by the OMP installation" },
+	});
+	const inventory = {
+		rows: ["skill", "builtin-tool", "custom-tool", "mcp", "extension-module", "plugin"].flatMap(rowKind => [rowOf(`${rowKind}-on`, rowKind, true), rowOf(`${rowKind}-fixed`, rowKind, false)]),
+		cwd: ALPHA, profile: "default", projectOverridesDisabledExtensions: false, incomplete: [], incompleteReasons: [], disabledProviders: [],
+	} as unknown as Parameters<typeof projectView>[0]["inventory"];
+	const provider = new InventoryTreeProvider();
+	provider.setModel(projectView({ view: kind, scope: "global", inventory, evidence: null, profile: "default" }));
+	return provider.getChildren().flatMap(group => [group, ...provider.getChildren(group)]).map(item => ({ contextValue: item.contextValue, command: item.command?.command }));
+}
+
+/** The tree behind each contributed view id: what its rows can be. */
+async function producedByView(): Promise<Map<string, ProducedRow[]>> {
+	return new Map([
+		["omp.sessions", await sessionsViewRows()],
+		["omp.context", contextViewRows()],
+		["omp.skills", inventoryViewRows("skills")],
+		["omp.tools", inventoryViewRows("tools")],
+		["omp.mcp", inventoryViewRows("mcp")],
+		["omp.extensions", inventoryViewRows("extensions")],
+	]);
+}
+
+/**
+ * Rows whose only interaction is the click (or checkbox) they carry; they need no menu entry. Everything else a tree
+ * produces must be matched by a `view/item/context` clause, so a renamed `contextValue` cannot drop a menu silently.
+ */
+const CLICK_ONLY_ROWS = new Set(["ompNewSession", "ompResumeSession", "ompTerminalsGroup", "inventory.switchable", "inventory.readonly"]);
+
+// ---------------------------------------------------------------------------------------------------------------
+// The cases
+// ---------------------------------------------------------------------------------------------------------------
+
+describe("commands", () => {
+	it("are declared, with a title, for every menu entry, keybinding, palette entry and welcome link that names one", () => {
+		const named: { by: string; command: string }[] = [];
+		for (const { menu, entry } of menus) {
+			assert.ok(entry.command !== undefined || entry.submenu !== undefined, `${where(menu, entry)}: names no command`);
+			if (entry.command !== undefined) named.push({ by: where(menu, entry), command: entry.command });
+		}
+		for (const binding of contributes.keybindings) named.push({ by: `keybinding ${binding.command} when "${binding.when ?? ""}"`, command: binding.command });
+		for (const welcome of contributes.viewsWelcome) {
+			for (const link of welcome.contents.matchAll(/\(command:([\w.]+)\)/g)) named.push({ by: `viewsWelcome of ${welcome.view}: "${link[0]}"`, command: link[1] ?? "" });
+		}
+		const missing = named.filter(use => !declared.has(use.command)).map(use => `${use.command} (${use.by})`);
+		assert.deepEqual(missing, [], "named but not declared in contributes.commands");
+		const untitled = contributes.commands.filter(command => (command.title ?? "").trim() === "").map(command => command.command);
+		assert.deepEqual(untitled, [], "declared without a title");
+	});
+
+	it("have an icon wherever a menu shows them as a button", () => {
+		const iconless: string[] = [];
+		for (const { menu, entry } of menus) {
+			const asButton = (menu === "view/title" || menu === "editor/title") && /^navigation(@|$)/.test(entry.group ?? "")
+				|| menu === "view/item/context" && /^inline(@|$)/.test(entry.group ?? "");
+			if (asButton && entry.command !== undefined && declared.get(entry.command)?.icon === undefined) iconless.push(where(menu, entry));
+		}
+		assert.deepEqual(iconless, [], "shown as a toolbar or inline button without an icon");
+	});
+
+	it("are registered at runtime, once each, and only the row commands are registered without a declaration", async () => {
+		const rowCommands = new Set([...(await producedByView()).values()].flat().flatMap(row => (row.command === undefined ? [] : [row.command])));
+		assert.deepEqual(recording.duplicateCommands, [], "registered twice (the editor refuses the second registration)");
+		const unregistered = [...declared.keys()].filter(id => !recording.commands.has(id));
+		assert.deepEqual(unregistered, [], "declared in package.json but never registered: a menu item or palette entry that says 'command not found'");
+		const undeclared = [...recording.commands.keys()].filter(id => !declared.has(id) && !rowCommands.has(id));
+		assert.deepEqual(undeclared, [], "registered without a declaration and not run by any row's click: declare it or drop it");
+		const unregisteredRowCommands = [...rowCommands].filter(id => !recording.commands.has(id));
+		assert.deepEqual(unregisteredRowCommands, [], "run by a tree row's click but never registered");
+	});
+});
+
+describe("views", () => {
+	it("named by a when clause or a welcome entry are contributed, in a contributed container, and served by a provider", () => {
+		const unknown: string[] = [];
+		for (const { menu, entry } of menus) {
+			for (const used of (entry.when ?? "").matchAll(/(?:^|[\s&|(!])view\s*==\s*([\w.]+)/g)) {
+				if (!viewIds.has(used[1] ?? "")) unknown.push(`${used[1]} in ${where(menu, entry)}`);
+			}
+		}
+		for (const welcome of contributes.viewsWelcome) if (!viewIds.has(welcome.view)) unknown.push(`${welcome.view} in a viewsWelcome entry`);
+		assert.deepEqual(unknown, [], "names a view that is not contributed");
+
+		const containers = new Set(Object.values(contributes.viewsContainers).flat().map(container => container.id));
+		assert.deepEqual(Object.keys(contributes.views).filter(container => !containers.has(container)), [], "views placed in a container that is not contributed");
+
+		const served = new Set([...recording.treeViews, ...recording.webviewViews]);
+		assert.deepEqual([...viewIds].filter(id => !served.has(id)), [], "contributed but given no provider at runtime (the view would stay empty)");
+		assert.deepEqual([...served].filter(id => !viewIds.has(id)), [], "given a provider at runtime but not contributed");
+		const kindMismatch = views.filter(view => (view.type === "webview" ? recording.treeViews : recording.webviewViews).includes(view.id)).map(view => view.id);
+		assert.deepEqual(kindMismatch, [], "contributed as one view type and served as the other");
+	});
+
+	it("are only tested against settings the extension contributes", () => {
+		const settings = new Set(Object.keys(contributes.configuration.properties));
+		const unknown: string[] = [];
+		const clauses = [...menus.map(({ menu, entry }) => ({ by: where(menu, entry), when: entry.when ?? "" })), ...contributes.viewsWelcome.map(welcome => ({ by: `viewsWelcome of ${welcome.view}`, when: welcome.when ?? "" })),
+			...contributes.keybindings.map(binding => ({ by: `keybinding ${binding.command}`, when: binding.when ?? "" }))];
+		for (const { by, when } of clauses) {
+			for (const used of when.matchAll(/\bconfig\.(omp\.[\w.]+)/g)) if (!settings.has(used[1] ?? "")) unknown.push(`${used[1]} in ${by}`);
+		}
+		assert.deepEqual(unknown, [], "tests a setting that is not contributed (the clause is never true)");
+	});
+});
+
+describe("context menus", () => {
+	it("match rows their tree produces, and no row the tree produces is left without a menu", async () => {
+		const produced = await producedByView();
+		const dead: string[] = [];
+		const matchedValues = new Map<string, Set<string>>();
+		for (const { menu, entry } of menus.filter(candidate => candidate.menu === "view/item/context")) {
+			const owner = where(menu, entry);
+			const { view, matches } = viewItemTest(entry.when ?? "", owner);
+			if (view === null) { dead.push(`${owner}: no view condition`); continue; }
+			if (matches === null) continue;
+			const rows = produced.get(view);
+			if (rows === undefined) { dead.push(`${owner}: no tree of this extension serves ${view}`); continue; }
+			const hits = [...new Set(rows.flatMap(row => (row.contextValue !== undefined && matches(row.contextValue) ? [row.contextValue] : [])))];
+			if (hits.length === 0) dead.push(`${owner}: no row of ${view} has a matching contextValue`);
+			for (const hit of hits) (matchedValues.get(view) ?? matchedValues.set(view, new Set()).get(view)!).add(hit);
+		}
+		assert.deepEqual(dead, [], "a menu entry no row can satisfy: it is never shown");
+
+		const orphaned: string[] = [];
+		for (const [view, rows] of produced) {
+			for (const value of new Set(rows.flatMap(row => (row.contextValue === undefined ? [] : [row.contextValue])))) {
+				if (!matchedValues.get(view)?.has(value) && !CLICK_ONLY_ROWS.has(value)) orphaned.push(`${view}: ${value}`);
+			}
+		}
+		assert.deepEqual(orphaned, [], "a row the tree produces that no view/item/context entry matches");
+	});
+});
+
+describe("the palette", () => {
+	/** Invoke every palette-visible command's registered handler the way the palette does: no argument. Dialogs answer "dismissed". */
+	let palettePass: Promise<{ failures: string[]; executed: string[] }> | undefined;
+	function runPalette(): Promise<{ failures: string[]; executed: string[] }> {
+		palettePass ??= (async () => {
+			const failures: string[] = [];
+			const visible = [...declared.keys()].filter(id => !hiddenFromPalette.has(id));
+			const before = recording.executed.length;
+			for (const id of visible) {
+				try {
+					await recording.commands.get(id)?.();
+				} catch (error) {
+					failures.push(`${id}: ${error instanceof Error ? error.message : String(error)}`);
+				}
+			}
+			return { failures, executed: recording.executed.slice(before).map(call => String(call[0])) };
+		})();
+		return palettePass;
+	}
+
+	it("hides only what needs a row or an editor, and everything it hides is reachable another way", async () => {
+		const { executed } = await runPalette();
+		const rowCommands = new Set([...(await producedByView()).values()].flat().flatMap(row => (row.command === undefined ? [] : [row.command])));
+		const reachable = new Set<string>([
+			...menus.filter(candidate => candidate.menu !== "commandPalette").flatMap(({ entry }) => (entry.command === undefined ? [] : [entry.command])),
+			...contributes.keybindings.map(binding => binding.command),
+			...contributes.viewsWelcome.flatMap(welcome => [...welcome.contents.matchAll(/\(command:([\w.]+)\)/g)].map(link => link[1] ?? "")),
+			...rowCommands,
+			...executed,
+		]);
+		assert.deepEqual([...hiddenFromPalette].filter(id => !declared.has(id)), [], "hidden from the palette but not declared");
+		assert.deepEqual([...hiddenFromPalette].filter(id => !reachable.has(id)), [], "hidden from the palette and reachable from no menu, keybinding, welcome link, row or command: nothing can run it");
+		assert.deepEqual(palette.filter(entry => entry.when !== "false").map(entry => entry.command), [], "a palette entry whose condition is not simply false: its commands need a case of their own");
+	});
+
+	it("runs every visible command without an argument and without throwing", { timeout: 120_000 }, async () => {
+		const { failures } = await runPalette();
+		assert.deepEqual(failures, [], "a command the palette offers threw when run with no argument");
+	});
+
+	it("only executes commands that exist when a visible command runs another", async () => {
+		const { executed } = await runPalette();
+				const viewFocus = new Set([...viewIds].map(id => `${id}.focus`));
+		const missing = [...new Set(executed)].filter(id => id.startsWith("omp.") && !viewFocus.has(id) && !recording.commands.has(id));
+		assert.deepEqual(missing, [], "executed by a command of this extension but registered by no one");
+	});
+});

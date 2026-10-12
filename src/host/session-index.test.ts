@@ -3142,6 +3142,22 @@ describe("recording a killed row as stopped", () => {
 		assert.equal(committed?.runIntent, "stopped");
 	});
 
+	it("records a killed draft without a file stopped, keeps the draft row and releases its reserved identity", async () => {
+		const store = new ConditionalStore();
+		const base = await identifiedAttempt();
+		const committed = base.store.value as { entries: Array<{ ownership: object }> };
+		const identity = "draft:killed-draft";
+		store.value = { ...committed, entries: [{ ...committed.entries[0], sessionFile: null, sessionId: null, ownership: { ...committed.entries[0]!.ownership, draftIdentity: identity } }] };
+		await acquireClaim(base.claimDir, identity, "generation-matched", createClaimHolder(4194303));
+		const index = indexFor(store, base.claimDir);
+		const result = await index.reconcileKilledHost(base.tabId, CAPTURED);
+		assert.equal(result.kind, "recorded", JSON.stringify(result));
+		const row = index.get(base.tabId);
+		assert.notEqual(row, null, "Kill never forgets a row");
+		assert.deepEqual([row?.sessionFile, row?.runIntent, row?.host], [null, "stopped", null]);
+		assert.equal(await readClaim(base.claimDir, identity), null, "the reserved identity is released");
+	});
+
 	it("never records a replacement launch another window committed meanwhile as stopped", async () => {
 		const fixture = await fixtureOn(new ConditionalStore());
 		// Another window launched B after this window read A: the committed row now records B, this window still holds A.
