@@ -13,6 +13,8 @@ date: 2026-09-29
 
 > §4 and §8 narrowly amended by [ADR-0051](0051-rewind-chat-in-place-through-a-desk-registered-omp-command.md): reconciliation treats a moved `leafId` (an empty delta or one that does not extend the leaf) as a rebuild, takes the disk window at the live leaf only when the disk agrees with the live cursor, otherwise reads `get_entries` trimmed to the same tail window, and `loadOlder` walks ancestors; disk-first stays. The `-e` module may register the RPC-only `omp-desk-navigate` command; the host-control pipe stays read-only.
 
+> §1 amended 2026-10-12 (see the [design](../designs/2026-09-29-rpc-ui-chat-and-sessions.md), retention rules): the 4 MiB / 2048-line bound counts retained lines only. Transient lines (`response`, `rpc_chunk`) held for an attached client until every cursor has passed them have their own 128 MiB budget per broker, so a reattaching client's own `get_entries` answer no longer evicts the replay ahead of it. Eviction still walks one oldest-first queue: overflowing either bound evicts the oldest line of any kind, and a cursor that loses an unsent line is disconnected and reattaches. Memory is bounded per broker, not across brokers.
+
 ## Context and Problem Statement
 
 The chat editor is a Collab guest ([ADR-0002](0002-local-collab-gui-native-omp.md)): a loopback relay sidecar, a room and bearer link

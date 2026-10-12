@@ -16,7 +16,10 @@
  *   id starts with `vsc:` (a refused `prompt` must be learnable after a host restart).
  *   Transient lines are held only until every attached consumer has passed them, under their
  *   own budget: an answer the client asked for (a long session's `get_entries` is tens of MiB
- *   of chunks) never pushes the retained history out, and the history never pushes it out.
+ *   of chunks) is not counted against the retained bound, so within its own budget it never
+ *   pushes the retained history out. Eviction still walks one oldest-first queue, though: when
+ *   the *retained* bound overflows (2048 lines or 4 MiB of new output while an answer is still
+ *   unsent), an older unsent transient line is evicted too and its consumer must reattach.
  * - `message_update` is superseded per open `messageId`: each carries the whole accumulated
  *   message, so only the latest matters, and it is dropped once `message_end` is seen.
  * - Unanswered dialog requests are **pinned** in their own budget and are never evicted;
