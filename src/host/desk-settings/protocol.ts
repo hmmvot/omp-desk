@@ -10,9 +10,12 @@ export type DeskSettingsAction =
 	/** Open the Settings editor filtered to the one setting. */
 	| { readonly action: "open-editor"; readonly requestId: string; readonly key: string }
 	/** Open the settings.json that holds the value (the workspace's when it overrides), revealing the key. */
-	| { readonly action: "open-json"; readonly requestId: string; readonly key: string };
+	| { readonly action: "open-json"; readonly requestId: string; readonly key: string }
+	/** Try `value` (what is typed in the row, saved or not) the way the setting is used, and report the outcome; writes nothing. */
+	| { readonly action: "test"; readonly requestId: string; readonly key: string; readonly value: string };
 
 /** Host to page. */
 export type DeskSettingsMessage =
 	| { readonly type: "settings:state"; readonly groups: readonly SettingGroupView[]; readonly workspace: WorkspaceFacts }
-	| { readonly type: "settings:result"; readonly requestId: string; readonly key: string; readonly ok: boolean; readonly message: string };
+	| { readonly type: "settings:result"; readonly requestId: string; readonly key: string; readonly ok: boolean; readonly message: string }
+	| { readonly type: "settings:test"; readonly requestId: string; readonly key: string; readonly ok: boolean; readonly message: string };

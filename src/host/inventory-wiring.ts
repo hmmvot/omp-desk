@@ -6,7 +6,8 @@ import { createRuntimeResolver, NO_BUN, noPackageSource } from "./inventory/inve
 import { createInventoryRuntime } from "./inventory/inventory-runtime.ts";
 import { OPEN_SOURCE_COMMAND, InventoryTreeProvider } from "../views/inventory-tree.ts";
 import { runSettingsWorker } from "./omp-settings-worker";
-import { resolveBunRuntime, resolveOmpBinary, resolveOmpPackageRoot } from "./native-terminal";
+import { configuredOmpPath, resolveBunRuntime, resolveOmpBinary, resolveOmpPackageRoot } from "./native-terminal";
+import { OMP_PATH_SETTING } from "./omp-unavailable";
 import { stageRuntimeAssets, verifyStagedRuntimeAsset } from "../runtime-assets";
 import type { InventoryTreeItem } from "../views/inventory-tree.ts";
 import type { InventoryScope, ViewKind } from "./inventory/inventory-model.ts";
@@ -39,6 +40,7 @@ export function registerInventoryViews(context: vscode.ExtensionContext, deps: I
 	const storage = context.globalStorageUri.fsPath;
 	const runtimeLocation = createRuntimeResolver({
 		log: deps.log,
+		key: configuredOmpPath,
 		async resolve() {
 			const executable = await resolveOmpBinary();
 			const [bun, root] = await Promise.all([resolveBunRuntime(), resolveOmpPackageRoot(executable)]);
@@ -116,6 +118,7 @@ export function registerInventoryViews(context: vscode.ExtensionContext, deps: I
 			catch { void vscode.window.showWarningMessage("That source file could not be opened; it may have been moved. Refresh the view."); }
 		}),
 		vscode.window.tabGroups.onDidChangeTabs(() => controller.sync()),
+		vscode.workspace.onDidChangeConfiguration(event => { if (event.affectsConfiguration(OMP_PATH_SETTING)) controller.refresh({ force: true }); }),
 		controller,
 	);
 	context.subscriptions.push(...subscriptions);

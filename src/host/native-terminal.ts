@@ -30,17 +30,19 @@ import type {
   TerminalWriterStatus,
 } from "./terminal-pipeline";
 import { placeSnapshotCursor } from "./terminal-pipeline";
+import {
+  formatDuration,
+  isTransientOmpFailure,
+  NO_FALLBACK_NOTICE,
+  OMP_PATH_SETTING,
+  OmpUnavailableError,
+  rethrowIfTransientInspection,
+  transientErrnoCause,
+} from "./omp-unavailable";
 
 const CLI_TIMEOUT_MS = 20_000;
 const VERSION_TIMEOUT_MS = 15_000;
 const MAX_CLI_OUTPUT_CHARS = 4 * 1024 * 1024;
-/** Thrown when the installed OMP cannot be found or executed. */
-export class OmpUnavailableError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "OmpUnavailableError";
-  }
-}
 
 /**
  * A launch target: an executable plus arguments that must precede every OMP
@@ -66,6 +68,11 @@ export interface OmpCliResult {
   readonly stdout: string;
   readonly stderr: string;
   readonly exitCode: number;
+  /**
+   * The signal that ended the process when something other than this module's own timeout or output
+   * limit killed it (the machine's memory manager, a user, a service stop); absent otherwise.
+   */
+  readonly signal?: NodeJS.Signals;
 }
 
 /** One visible provider-login terminal: the command, where it runs, and its scope. */
@@ -115,37 +122,68 @@ export function delay(ms: number): Promise<void> {
  * own program. An unrecognised script, package-manager launcher or foreign
  * `.exe` is refused instead of being launched blindly.
  *
+ * A failure of a candidate is classified before the search moves on (see
+ * {@link OmpUnavailableError}). A *definitive* refusal — a missing file, a program that is not
+ * OMP's, a foreign launcher, a probe that exits non-zero — records its reason and the search goes on
+ * to the next candidate. A *transient* failure — the `--version` probe running past its limit, the
+ * process not being creatable, the process being killed — says nothing about the candidate, so the
+ * search stops with an error naming it: continuing would start whichever lower-priority install
+ * happens to answer, i.e. an older OMP than the one PATH selects, because the machine was busy.
+ * Retrying once with a longer bound was considered and rejected: it doubles the wait on exactly the
+ * machines where the wait hurts, and the next launch is the retry.
+ *
  * Every call resolves afresh, and that is deliberate: a session started now must
  * run the installation the user has now, so a replaced shim target or a new PATH
  * entry is picked up by the next launch. A host that is already running is never
  * re-resolved into a second writer — it keeps the command captured at its own
  * launch (`RpcHostRuntime.binary`) for every later CLI call.
  */
-export async function resolveOmpBinary(): Promise<OmpBinary> {
+export async function resolveOmpBinary(
+  options: { readonly probeTimeoutMs?: number; readonly explicitPath?: string } = {},
+): Promise<OmpBinary> {
+  const probeTimeoutMs = options.probeTimeoutMs ?? VERSION_TIMEOUT_MS;
+  const explicitPath = (options.explicitPath ?? configuredOmpPath()).trim();
+  const explicit = explicitPath.length > 0;
   const rejections: string[] = [];
 
   // Each distinct file is tried once, in search order, and every refusal is
   // recorded at the position it was tried, so the reasons a failure reports
-  // read in the same order the search used.
+  // read in the same order the search used. An explicit path is the only target.
+  // A file is looked at only when the search reaches it: a file further down PATH that
+  // cannot be read right now is no obstacle to a healthy preferred install.
   const seenTargets = new Set<string>();
-  for (const target of await launchTargets()) {
-    const key = process.platform === "win32" ? target.key.toLowerCase() : target.key;
+  const pending: PendingTarget[] = explicit
+    ? [{ file: explicitPath, classify: () => explicitTarget(explicitPath) }]
+    : launchTargets();
+  for (const [index, item] of pending.entries()) {
+    const key = process.platform === "win32" ? item.file.toLowerCase() : item.file;
     if (seenTargets.has(key)) continue;
     seenTargets.add(key);
+    const target = await item.classify();
+    if (target === null) continue;
 
     let resolved: OmpBinary | null = null;
     if (target.kind === "unusable") {
       rejections.push(target.reason);
     } else if (target.kind === "bun-shim") {
-      resolved = await resolveBunShim(target.shim, rejections);
+      resolved = await resolveBunShim(target.shim, rejections, probeTimeoutMs);
     } else {
-      resolved = await verifyLaunchCandidate(target.candidate, rejections);
+      resolved = await verifyLaunchCandidate(target.candidate, rejections, probeTimeoutMs);
     }
     if (resolved !== null) {
+      // A Test of a typed path, or a resolution under an explicit setting, says nothing about what PATH offers.
+      if (options.explicitPath === undefined && !explicit) noteOtherInstalls(item.file, resolved, pending.slice(index + 1));
       return resolved;
     }
   }
 
+  if (explicit) {
+    throw new OmpUnavailableError(
+      `The OMP named by the ${OMP_PATH_SETTING} setting (${explicitPath}) cannot be used.` +
+        `${describeRejections(rejections)} Desk does not search PATH while that setting is set; ` +
+        "correct the path, or clear the setting to use the OMP on PATH.",
+    );
+  }
   throw new OmpUnavailableError(
     "No usable OMP launcher was found." +
       `${describeRejections(rejections)} Check the installed OMP and PATH; this extension runs the ` +
@@ -153,9 +191,120 @@ export async function resolveOmpBinary(): Promise<OmpBinary> {
   );
 }
 
+/**
+ * The explicit OMP path the user set (`omp.executablePath`, machine scope, so a workspace can never
+ * name a program to run), or the empty string when PATH decides.
+ */
+export function configuredOmpPath(): string {
+  const value = vscode.workspace.getConfiguration("omp").get<unknown>(OMP_PATH_SETTING.slice("omp.".length));
+  return typeof value === "string" ? value.trim() : "";
+}
+
+/**
+ * The one target an explicit path stands for. It is held to every rule a PATH entry is held to —
+ * OMP's own program, or a recognised bun shim resolved to its entry — and a path that fails them is
+ * refused with its reason rather than started.
+ */
+async function explicitTarget(file: string): Promise<LaunchTarget> {
+  if (!path.isAbsolute(file)) return { kind: "unusable", key: file, reason: `${file} is not an absolute path` };
+  if (!(await isRunnableFile(file))) {
+    return { kind: "unusable", key: file, reason: `${file} does not exist or is not a runnable file` };
+  }
+  return await pathTarget(file, `the ${OMP_PATH_SETTING} setting`);
+}
+
+let ompResolutionLog: ((message: string) => void) | null = null;
+let otherInstallsReported = false;
+let otherInstallsInFlight = false;
+
+/** Where resolution notes go (the OMP Desk output); the extension sets it once, at activation. */
+export function setOmpResolutionLog(sink: ((message: string) => void) | null): void {
+  ompResolutionLog = sink;
+}
+
+/**
+ * Say once per window, in the log only, that PATH offers more than one OMP install: a user who
+ * installed a second copy deserves to see which one runs. The selected install is never changed by
+ * this, and the other installs' releases are read in the background, so a resolution never waits
+ * for a probe it does not need. The allowance is spent only by a report that was written: PATH
+ * entries that turn out to be the same install do not use it up.
+ */
+function noteOtherInstalls(selectedFile: string, selected: OmpBinary, rest: readonly PendingTarget[]): void {
+  const log = ompResolutionLog;
+  if (log === null || otherInstallsReported || otherInstallsInFlight || rest.length === 0) return;
+  otherInstallsInFlight = true;
+  void (async () => {
+    try {
+      const message = await reportOtherInstalls(selectedFile, selected, rest);
+      // The sink may have been replaced or cleared while the probes ran (the window's output closed).
+      if (message !== null && ompResolutionLog === log) {
+        log(message);
+        otherInstallsReported = true;
+      }
+    } catch {
+      // A diagnostic never fails a resolution; a later resolution tries again.
+    } finally {
+      otherInstallsInFlight = false;
+    }
+  })();
+}
+
+/**
+ * The install a launch command stands for — the entry script of a runtime launch, else the program —
+ * with links and junctions resolved, so two PATH entries reaching one install are one install.
+ */
+async function installIdentity(executable: OmpCommand): Promise<string> {
+  const file = executable.prefixArgs.at(-1) ?? executable.command;
+  let identity = file;
+  try {
+    identity = await fs.realpath(file);
+  } catch {
+    // An unreadable path stands for itself.
+  }
+  return process.platform === "win32" ? identity.toLowerCase() : identity;
+}
+
+async function reportOtherInstalls(
+  selectedFile: string,
+  selected: OmpBinary,
+  rest: readonly PendingTarget[],
+): Promise<string | null> {
+  const distinct = new Map<string, { readonly file: string; readonly executable: OmpCommand }>();
+  const selectedIdentity = await installIdentity(selected);
+  for (const item of rest) {
+    const target = await item.classify();
+    if (target === null || target.kind === "unusable") continue;
+    const candidate = target.kind === "direct" ? target.candidate : await bunShimCandidate(target.shim);
+    if (typeof candidate === "string") continue;
+    const identity = await installIdentity(candidate.executable);
+    if (identity === selectedIdentity || distinct.has(identity)) continue;
+    distinct.set(identity, { file: item.file, executable: candidate.executable });
+  }
+  if (distinct.size === 0) return null;
+
+  const release = (version: string | null): string => (version === null ? "release unknown" : `release ${version}`);
+  const listed = [`${selectedFile} (${release(selected.version)}, in use)`];
+  for (const other of distinct.values()) {
+    let version: string | null = null;
+    try {
+      const result = await runOmpCli(other.executable, ["--version"], VERSION_TIMEOUT_MS);
+      if (result.exitCode === 0) version = parseVersion(result.stdout) ?? parseVersion(result.stderr);
+    } catch {
+      // The release stays unknown; the install is still reported.
+    }
+    listed.push(`${other.file} (${release(version)}, not used)`);
+  }
+  return (
+    "More than one OMP install was found. Desk runs the first one PATH offers (the launcher directory " +
+    `is only a last resort): ${listed.join("; ")}.`
+  );
+}
+
 interface OmpLaunchCandidate {
   readonly executable: OmpCommand;
   readonly origin: string;
+  /** The file PATH named, for messages: the program itself, or the bun shim that forwards to the entry. */
+  readonly label: string;
 }
 
 /** One target to try, in search order, with the file path that identifies it. */
@@ -163,6 +312,13 @@ type LaunchTarget =
   | { readonly kind: "direct"; readonly key: string; readonly candidate: OmpLaunchCandidate }
   | { readonly kind: "bun-shim"; readonly key: string; readonly shim: string }
   | { readonly kind: "unusable"; readonly key: string; readonly reason: string };
+
+/** One file the search will look at, in search order; what it is gets decided only when the search reaches it. */
+interface PendingTarget {
+  readonly file: string;
+  /** The target the file is, or `null` when there is nothing there (an installer directory that is not installed). */
+  classify(): Promise<LaunchTarget | null>;
+}
 
 /**
  * Why a file that is nothing but a name on PATH is never started.
@@ -177,80 +333,75 @@ const FOREIGN_LAUNCHER_REASON =
   "forwards to another process; it is not started";
 
 /**
- * Every target to try, in order: PATH in PATH order first, then the launcher
+ * Every file to look at, in order: PATH in PATH order first, then the launcher
  * directory OMP's own installer writes to.
  *
- * Classification happens here rather than at verification time, because
- * verifying "all direct executables, then all shims" would let a later PATH
- * entry overtake an earlier one and would put an older launcher-directory copy
- * in front of the `omp` the user selected on PATH. A PATH entry that cannot be
- * launched as one process is still returned, as an `unusable` entry, so its
- * refusal is reported where the search reached it; a launcher directory that is
- * not installed at all is simply absent.
+ * The order is fixed here, before anything is verified, because verifying "all direct
+ * executables, then all shims" would let a later PATH entry overtake an earlier one and would
+ * put an older launcher-directory copy in front of the `omp` the user selected on PATH. What each
+ * file is — OMP's program, a bun shim, or a refusal that is reported where the search reached it
+ * — is decided by its `classify`, when the search gets there; a launcher directory that is not
+ * installed at all classifies as absent.
  */
-async function launchTargets(): Promise<LaunchTarget[]> {
-  const targets: LaunchTarget[] = [];
-  for (const file of await pathExecutables()) {
-    // Content decides before shape does: a compiled OMP executable embeds bun's
-    // own runtime, so it also contains bun-shim strings far inside it.
-    const identity = await classifyCandidate(file);
-    if (identity === "omp-program") {
-      targets.push({
-        kind: "direct",
-        key: file,
-        candidate: { executable: { command: file, prefixArgs: [] }, origin: "PATH" },
-      });
-      continue;
-    }
-    if (identity === "bun-shim") {
-      targets.push({ kind: "bun-shim", key: file, shim: file });
-      continue;
-    }
-    if (isShimLocation(file)) {
-      targets.push({
-        kind: "unusable",
-        key: file,
-        reason: `${file} is a package-manager shim, which never runs as a single process`,
-      });
-      continue;
-    }
-    if (process.platform === "win32" && !file.toLowerCase().endsWith(".exe")) {
-      targets.push({
-        kind: "unusable",
-        key: file,
-        reason: `${file} is a script launcher, which needs a shell and would add a process layer`,
-      });
-      continue;
-    }
-    targets.push({
-      kind: "unusable",
-      key: file,
-      reason: `${file} ${FOREIGN_LAUNCHER_REASON}`,
-    });
-  }
+function launchTargets(): PendingTarget[] {
+  const pending: PendingTarget[] = pathExecutableNames().map(file => ({
+    file,
+    async classify() {
+      return (await isRunnableFile(file)) ? pathTarget(file, "PATH") : null;
+    },
+  }));
 
   // Last resort only: an install under OMP's own launcher directory is never
   // preferred over the `omp` the user put on PATH, and it is held to the same
   // identity rule as a PATH entry — a file that only forwards to OMP would
   // break the process identity the extension matches against the registry.
   for (const file of officialLauncherCandidates()) {
-    if (!(await isRunnableFile(file))) continue;
-    const identity = await classifyCandidate(file);
-    if (identity === "omp-program") {
-      targets.push({
-        kind: "direct",
-        key: file,
-        candidate: { executable: { command: file, prefixArgs: [] }, origin: "the OMP launcher directory" },
-      });
-      continue;
-    }
-    targets.push({
-      kind: "unusable",
-      key: file,
-      reason: `${file} ${FOREIGN_LAUNCHER_REASON}`,
+    pending.push({
+      file,
+      async classify() {
+        if (!(await isRunnableFile(file))) return null;
+        const identity = await classifyCandidate(file);
+        if (identity === "omp-program") {
+          return {
+            kind: "direct",
+            key: file,
+            candidate: { executable: { command: file, prefixArgs: [] }, origin: "the OMP launcher directory", label: file },
+          };
+        }
+        return { kind: "unusable", key: file, reason: `${file} ${FOREIGN_LAUNCHER_REASON}` };
+      },
     });
   }
-  return targets;
+  return pending;
+}
+
+/**
+ * What one file that is named as an OMP executable — on PATH, or by the user — is, judged by its
+ * content: OMP's own program, a bun shim to resolve through, or a refusal with its reason.
+ */
+async function pathTarget(file: string, origin: string): Promise<LaunchTarget> {
+  // Content decides before shape does: a compiled OMP executable embeds bun's
+  // own runtime, so it also contains bun-shim strings far inside it.
+  const identity = await classifyCandidate(file);
+  if (identity === "omp-program") {
+    return {
+      kind: "direct",
+      key: file,
+      candidate: { executable: { command: file, prefixArgs: [] }, origin, label: file },
+    };
+  }
+  if (identity === "bun-shim") return { kind: "bun-shim", key: file, shim: file };
+  if (isShimLocation(file)) {
+    return { kind: "unusable", key: file, reason: `${file} is a package-manager shim, which never runs as a single process` };
+  }
+  if (process.platform === "win32" && !file.toLowerCase().endsWith(".exe")) {
+    return {
+      kind: "unusable",
+      key: file,
+      reason: `${file} is a script launcher, which needs a shell and would add a process layer`,
+    };
+  }
+  return { kind: "unusable", key: file, reason: `${file} ${FOREIGN_LAUNCHER_REASON}` };
 }
 
 /** The directory OMP's own updater installs the release binary into. */
@@ -264,16 +415,17 @@ function officialLauncherCandidates(): string[] {
 const OMP_EXECUTABLE_NAMES: readonly string[] =
   process.platform === "win32" ? ["omp.exe", "omp.cmd", "omp.bat", "omp"] : ["omp"];
 
-/** Every `omp` executable PATH offers, in PATH order. */
-async function pathExecutables(): Promise<string[]> {
+/**
+ * Every file name PATH could offer an `omp` under, in PATH order. Nothing is looked at here: whether a
+ * name is a runnable file is asked when the search reaches it, so a directory further down PATH that
+ * cannot be read right now is no obstacle to a healthy `omp` found earlier.
+ */
+function pathExecutableNames(): string[] {
   const found: string[] = [];
   const pathValue = process.env.PATH ?? process.env.Path ?? "";
   for (const entry of pathValue.split(path.delimiter)) {
     if (!entry) continue;
-    for (const name of OMP_EXECUTABLE_NAMES) {
-      const candidate = path.join(entry, name);
-      if (await isRunnableFile(candidate)) found.push(candidate);
-    }
+    for (const name of OMP_EXECUTABLE_NAMES) found.push(path.join(entry, name));
   }
   return found;
 }
@@ -315,7 +467,8 @@ async function isBunShim(file: string): Promise<boolean> {
     } finally {
       await handle.close();
     }
-  } catch {
+  } catch (error) {
+    rethrowIfTransientInspection(file, error);
     return false;
   }
   return content.includes(BUN_SHIM_MARKER);
@@ -367,7 +520,8 @@ async function isOmpRuntimeProgram(file: string): Promise<boolean> {
     const remembered = ompProgramScans.get(scanKey);
     if (remembered !== undefined) return remembered;
     handle = await fs.open(file, "r");
-  } catch {
+  } catch (error) {
+    rethrowIfTransientInspection(file, error);
     return false;
   }
   try {
@@ -393,6 +547,9 @@ async function isOmpRuntimeProgram(file: string): Promise<boolean> {
     }
     ompProgramScans.set(scanKey, false);
     return false;
+  } catch (error) {
+    rethrowIfTransientInspection(file, error);
+    throw error;
   } finally {
     await handle.close();
   }
@@ -424,30 +581,34 @@ async function classifyCandidate(file: string): Promise<CandidateIdentity> {
 const OMP_PACKAGE_NAME = "@oh-my-pi/pi-coding-agent";
 
 /**
- * Resolve a bun shim to the runtime entry it forwards to.
+ * Resolve a bun shim to the runtime entry it forwards to, or say why it cannot be.
  *
  * bun records a shim's real target beside it in a `.bunx` metadata file, which
  * is the mapping the shim itself uses; the owning package's manifest is only a
  * fallback. Nothing here is guessed from a path.
  */
-async function resolveBunShim(shim: string, rejections: string[]): Promise<OmpBinary | null> {
+async function bunShimCandidate(shim: string): Promise<OmpLaunchCandidate | string> {
   const binDirectory = path.dirname(shim);
   const bunRoot = path.resolve(binDirectory, "..");
   const bun = await bunRuntime(binDirectory);
-  if (bun === null) {
-    rejections.push(`${shim} is a bun shim, but no bun runtime was found beside it in ${binDirectory}`);
-    return null;
-  }
+  if (bun === null) return `${shim} is a bun shim, but no bun runtime was found beside it in ${binDirectory}`;
 
   const entry = await bunShimEntry(shim, bunRoot);
-  if (entry === null) {
-    rejections.push(`${shim} is a bun shim, but its target entry could not be resolved from ${bunRoot}`);
+  if (entry === null) return `${shim} is a bun shim, but its target entry could not be resolved from ${bunRoot}`;
+  return {
+    executable: { command: bun, prefixArgs: [entry] },
+    origin: `the bun shim ${shim}, resolved to ${entry}`,
+    label: shim,
+  };
+}
+
+async function resolveBunShim(shim: string, rejections: string[], probeTimeoutMs: number): Promise<OmpBinary | null> {
+  const candidate = await bunShimCandidate(shim);
+  if (typeof candidate === "string") {
+    rejections.push(candidate);
     return null;
   }
-  return await verifyLaunchCandidate(
-    { executable: { command: bun, prefixArgs: [entry] }, origin: `the bun shim ${shim}, resolved to ${entry}` },
-    rejections,
-  );
+  return await verifyLaunchCandidate(candidate, rejections, probeTimeoutMs);
 }
 
 /** The runtime beside a bun shim, or `bun` from PATH. */
@@ -482,8 +643,11 @@ async function bunShimEntry(shim: string, bunRoot: string): Promise<string | nul
       const recorded = path.resolve(bunRoot, match[1]);
       if (await isRunnableFile(recorded)) return recorded;
     }
-  } catch {
-    // No metadata beside the shim; fall through to the package manifest.
+  } catch (error) {
+    // No metadata beside the shim; fall through to the package manifest. A file that is merely
+    // busy right now is not "no metadata".
+    if (isTransientOmpFailure(error)) throw error;
+    rethrowIfTransientInspection(metadata, error);
   }
   const packageDirectory = path.join(bunRoot, "install", "global", "node_modules", OMP_PACKAGE_NAME);
   return await packageBinEntry(packageDirectory);
@@ -494,7 +658,8 @@ async function packageBinEntry(packageDirectory: string): Promise<string | null>
   let manifest: unknown;
   try {
     manifest = JSON.parse(await fs.readFile(path.join(packageDirectory, "package.json"), "utf8"));
-  } catch {
+  } catch (error) {
+    rethrowIfTransientInspection(packageDirectory, error);
     return null;
   }
   if (typeof manifest !== "object" || manifest === null) return null;
@@ -522,25 +687,44 @@ async function packageBinEntry(packageDirectory: string): Promise<string | null>
  * still refused here — a broken launcher fails visibly at resolution instead of
  * turning into a confusing discovery timeout once a session is supposed to be
  * running.
+ *
+ * That refusal is *definitive*, and the caller goes on to the next candidate. A probe that
+ * could not be answered because of the machine — it ran past its limit, the process could not be
+ * created, it was killed — is not a refusal of this candidate and throws a transient
+ * {@link OmpUnavailableError} instead, ending the whole resolution (see {@link resolveOmpBinary}).
  */
 async function verifyLaunchCandidate(
   candidate: OmpLaunchCandidate,
   rejections: string[],
+  probeTimeoutMs: number,
 ): Promise<OmpBinary | null> {
   const { command, prefixArgs } = candidate.executable;
   let version: string | null = null;
+  let transientCause: string | undefined;
   try {
-    const result = await runOmpCli(candidate.executable, ["--version"], VERSION_TIMEOUT_MS);
-    if (result.exitCode !== 0) {
+    const result = await runOmpCli(candidate.executable, ["--version"], probeTimeoutMs);
+    if (result.signal !== undefined) {
+      transientCause = `was killed by ${result.signal} before it answered`;
+    } else if (result.exitCode !== 0) {
       rejections.push(
         `${command} was rejected: \`--version\` exited with code ${result.exitCode}${describeStderr(result.stderr)}`,
       );
       return null;
+    } else {
+      version = parseVersion(result.stdout) ?? parseVersion(result.stderr);
     }
-    version = parseVersion(result.stdout) ?? parseVersion(result.stderr);
   } catch (error) {
-    rejections.push(`${command} was rejected: ${messageOf(error)}`);
-    return null;
+    if (!isTransientOmpFailure(error)) {
+      rejections.push(`${command} was rejected: ${messageOf(error)}`);
+      return null;
+    }
+    transientCause = error.transientCause;
+  }
+  if (transientCause !== undefined) {
+    throw new OmpUnavailableError(
+      `\`omp --version\` of ${candidate.label} ${transientCause}; ${NO_FALLBACK_NOTICE}${describeRejections(rejections)}`,
+      { transientCause },
+    );
   }
   return { command, prefixArgs, version, origin: candidate.origin };
 }
@@ -554,7 +738,8 @@ async function isRunnableFile(file: string): Promise<boolean> {
   try {
     await fs.access(file, fsConstants.X_OK);
     return true;
-  } catch {
+  } catch (error) {
+    rethrowIfTransientInspection(file, error);
     return false;
   }
 }
@@ -594,6 +779,7 @@ export async function runOmpCli(
   let stdout = "";
   let stderr = "";
   let settled = false;
+  let overflowed = false;
   let timer: NodeJS.Timeout | undefined;
 
   const settle = (action: () => void): void => {
@@ -609,6 +795,7 @@ export async function runOmpCli(
       reject(
         new OmpUnavailableError(
           `\`${path.basename(executable.command)} ${args.join(" ")}\` did not finish within ${timeoutMs}ms.`,
+          { transientCause: `did not finish within ${formatDuration(timeoutMs)}` },
         ),
       ),
     );
@@ -617,17 +804,32 @@ export async function runOmpCli(
   child.stdout?.setEncoding("utf8");
   child.stdout?.on("data", (chunk: string) => {
     stdout += chunk;
-    if (stdout.length > MAX_CLI_OUTPUT_CHARS) child.kill();
+    if (stdout.length > MAX_CLI_OUTPUT_CHARS) {
+      overflowed = true;
+      child.kill();
+    }
   });
   child.stderr?.setEncoding("utf8");
   child.stderr?.on("data", (chunk: string) => {
     stderr += chunk;
   });
   child.on("error", error => {
-    settle(() => reject(new OmpUnavailableError(`Could not run ${executable.command}: ${error.message}`)));
+    const transientCause = transientErrnoCause(error, "started");
+    settle(() =>
+      reject(
+        new OmpUnavailableError(
+          `Could not run ${executable.command}: ${error.message}`,
+          transientCause === undefined ? {} : { transientCause },
+        ),
+      ),
+    );
   });
-  child.on("close", code => {
-    settle(() => resolve({ stdout, stderr, exitCode: code ?? -1 }));
+  child.on("close", (code, signal) => {
+    // A signal this module sent itself (the output limit) is not news about the machine.
+    const killedByOther = signal !== null && !overflowed;
+    settle(() =>
+      resolve({ stdout, stderr, exitCode: code ?? -1, ...(killedByOther ? { signal } : {}) }),
+    );
   });
 
   return await promise;
@@ -789,63 +991,65 @@ export interface OmpPackageRoot {
 }
 
 /**
- * Resolve the *selected* OMP executable's own package source, or `null`.
+ * Resolve the *selected* OMP launch's own package source, or `null`.
  *
- * The helper imports `session/session-storage`, so it needs real source files. A
- * compiled single-file install carries its code inside the binary and exposes no
- * importable root: that variant returns `null` and the caller must refuse with a
- * capability message instead of reaching for the file directly. Everything found
- * here is validated by name, by the presence of the storage module and — when the
- * executable reported a version — by that version, so a similarly named package
- * from another install can never stand in for the selected one.
+ * The helper imports `session/session-storage`, so it needs real source files. A runtime launch
+ * names the entry script it runs, and the package that holds that entry — the nearest ancestor
+ * whose manifest names OMP's package — is the one and only root. It is validated by name, by the
+ * presence of the storage module and, when the launch reported a release, by that exact release.
+ *
+ * Nothing else is searched. A compiled single-file install carries its code inside the binary and
+ * has no entry to follow, so it has no importable root and gets `null`: the caller must refuse with
+ * a capability message instead of reaching for another install's package, because a package of
+ * the same release number elsewhere on the machine is not evidence of being this install's source.
+ * A directory that cannot be read right now ends the lookup with a transient error, never with
+ * another root.
  */
 export async function resolveOmpPackageRoot(
   executable: OmpCommand & { readonly version?: string | null },
 ): Promise<OmpPackageRoot | null> {
-  const packageName = OMP_PACKAGE_NAME;
-  const relative = ["@oh-my-pi", "pi-coding-agent"];
-  const roots: { readonly dir: string; readonly origin: string }[] = [];
-  const binaryDir = path.dirname(executable.command);
-  // A bun shim sits in `<root>/bin`, so its global install is a sibling of that.
-  roots.push({ dir: path.resolve(binaryDir, "..", "install", "global", "node_modules", ...relative), origin: "the selected launcher's install tree" });
-  roots.push({ dir: path.resolve(binaryDir, "..", "node_modules", ...relative), origin: "the selected launcher's install tree" });
-  roots.push({ dir: path.resolve(binaryDir, "node_modules", ...relative), origin: "the selected launcher's directory" });
-  const bunInstall = process.env.BUN_INSTALL ?? "";
-  if (bunInstall.length > 0) {
-    roots.push({ dir: path.join(bunInstall, "install", "global", "node_modules", ...relative), origin: "BUN_INSTALL" });
+  const entry = executable.prefixArgs.at(-1);
+  if (entry === undefined) return null;
+  const dir = await packageDirectoryOf(entry);
+  if (dir === null) return null;
+  const manifest = await readPackageManifest(dir);
+  if (manifest === null) return null;
+  const expected = executable.version ?? null;
+  if (expected !== null && manifest.version !== expected) return null;
+  try {
+    const stats = await fs.stat(path.join(dir, "src", "session", "session-storage.ts"));
+    if (!stats.isFile()) return null;
+  } catch (error) {
+    rethrowIfTransientInspection(dir, error);
+    return null;
   }
-  roots.push({ dir: path.join(os.homedir(), ".bun", "install", "global", "node_modules", ...relative), origin: "the user's Bun install" });
-  const appData = process.env.APPDATA ?? "";
-  if (appData.length > 0) {
-    roots.push({ dir: path.join(appData, "npm", "node_modules", ...relative), origin: "the npm global prefix" });
-  }
-  for (const { dir, origin } of roots) {
-    let manifest: unknown;
-    try {
-      manifest = JSON.parse(await fs.readFile(path.join(dir, "package.json"), "utf8"));
-    } catch {
-      continue;
-    }
-    if (typeof manifest !== "object" || manifest === null) continue;
-    const name = (manifest as { name?: unknown }).name;
-    if (name !== packageNameRaw()) continue;
-    const version = (manifest as { version?: unknown }).version;
-    const expected = executable.version ?? null;
-    if (expected !== null && typeof version === "string" && version !== expected) continue;
-    try {
-      const stats = await fs.stat(path.join(dir, "src", "session", "session-storage.ts"));
-      if (!stats.isFile()) continue;
-    } catch {
-      continue;
-    }
-    return { root: dir, version: typeof version === "string" ? version : null, origin };
-  }
-  return null;
+  return { root: dir, version: manifest.version ?? null, origin: "the package of the selected entry script" };
 }
 
-/** The package name OMP publishes under. */
-function packageNameRaw(): string {
-  return OMP_PACKAGE_NAME;
+/** The `name` and `version` of the package manifest in `dir`, or `null` when there is none that reads. */
+async function readPackageManifest(dir: string): Promise<{ readonly name?: unknown; readonly version?: string } | null> {
+  let manifest: unknown;
+  try {
+    manifest = JSON.parse(await fs.readFile(path.join(dir, "package.json"), "utf8"));
+  } catch (error) {
+    rethrowIfTransientInspection(dir, error);
+    return null;
+  }
+  if (typeof manifest !== "object" || manifest === null) return null;
+  const { name, version } = manifest as { name?: unknown; version?: unknown };
+  return typeof version === "string" ? { name, version } : { name };
+}
+
+/** The directory of the OMP package that holds `entry`: the nearest ancestor whose manifest names it. */
+async function packageDirectoryOf(entry: string): Promise<string | null> {
+  let dir = path.dirname(entry);
+  for (;;) {
+    const manifest = await readPackageManifest(dir);
+    if (manifest !== null && manifest.name === OMP_PACKAGE_NAME) return dir;
+    const parent = path.dirname(dir);
+    if (parent === dir) return null;
+    dir = parent;
+  }
 }
 
 /** What one stopped-session rename produced. */

@@ -50,6 +50,10 @@ input[type=checkbox],input[type=radio]{accent-color:var(--vscode-checkbox-select
 .message.error,.invalid{color:var(--vscode-errorForeground)}
 .invalid{margin:4px 0 0;font-size:12px}
 .preview{margin:0;padding:6px 8px;max-height:96px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;background:var(--vscode-textCodeBlock-background);border-radius:3px}
+.test{margin:8px 0 0}
+.test button{padding:2px 12px;color:var(--vscode-button-secondaryForeground,var(--vscode-foreground));background:var(--vscode-button-secondaryBackground,transparent);border-color:var(--vscode-button-border,var(--vscode-panel-border,transparent))}
+.test button:hover:not(:disabled){background:var(--vscode-button-secondaryHoverBackground,var(--vscode-toolbar-hoverBackground))}
+.test .message{display:block;white-space:pre-wrap;overflow-wrap:anywhere}
 .empty{padding:20px 4px;text-align:center;color:var(--vscode-descriptionForeground)}
 @media (forced-colors:active){button:focus-visible{outline:2px solid CanvasText}}
 `;

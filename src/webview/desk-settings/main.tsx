@@ -70,6 +70,8 @@ function usePage(): [PageState, Dispatch<PageEvent>] {
         dispatch({ type: "state", groups: message.groups, workspace: message.workspace, editing: editingKey() });
       } else if (message.type === "settings:result") {
         dispatch({ type: "result", requestId: message.requestId, key: message.key, ok: message.ok, message: message.message });
+      } else if (message.type === "settings:test") {
+        dispatch({ type: "test-result", requestId: message.requestId, key: message.key, ok: message.ok, message: message.message });
       }
     };
     window.addEventListener("message", receive);
@@ -114,6 +116,7 @@ function Row({ view, page, dispatch, target, chooseTarget }: {
   chooseTarget(target: Target): void;
 }) {
   const controlId = useId();
+  const testButton = useRef<HTMLButtonElement>(null);
   const descId = `${controlId}-desc`;
   const optionId = `${controlId}-option`;
   const messageId = `${controlId}-message`;
@@ -137,8 +140,8 @@ function Row({ view, page, dispatch, target, chooseTarget }: {
     if (needsWrite(view, parsed.value, target)) write(parsed.value);
     else dispatch({ type: "draft", key: view.key, draft: undefined });
   };
-  const leave = (): void => {
-    const decision = leaveDecision(draft, inputText(view.value), page.own[view.key]?.some(entry => !entry.acked) === true);
+  const leave = (toTest: boolean): void => {
+    const decision = leaveDecision(draft, inputText(view.value), page.own[view.key]?.some(entry => !entry.acked) === true, toTest);
     if (decision === "defer") dispatch({ type: "defer", key: view.key });
     else if (decision === "adopt") dispatch({ type: "adopt", key: view.key });
     else if (decision === "save") save();
@@ -154,6 +157,12 @@ function Row({ view, page, dispatch, target, chooseTarget }: {
     invalid === null ? "" : invalidId,
     note === undefined ? "" : messageId,
   ].filter(Boolean).join(" ") || undefined;
+  const testState = page.tests[view.key];
+  const testId = `${controlId}-test`;
+  const runTest = (): void => {
+    const tested = draft?.text ?? inputText(view.value);
+    dispatch({ type: "test", key: view.key, requestId: send({ action: "test", key: view.key, value: tested }), tested });
+  };
 
   const resetTitle = `${resetHint(view)}${view.defaultValue === undefined ? "" : ` Default: ${typeof view.defaultValue === "object" ? JSON.stringify(view.defaultValue) : String(view.defaultValue)}.`}`;
   const actions = (
@@ -199,7 +208,9 @@ function Row({ view, page, dispatch, target, chooseTarget }: {
     const common = {
       id: controlId, value: text, "aria-invalid": invalid !== null, "aria-describedby": describedBy,
       onChange: (event: { currentTarget: { value: string } }) => dispatch({ type: "draft", key: view.key, draft: { text: event.currentTarget.value, base: draft?.base ?? inputText(view.value) } }),
-      onKeyDown: textKeys, onBlur: leave,
+      onKeyDown: textKeys,
+      // Moving to this row's Test button is not leaving the field: Test saves nothing, so the draft it tests stays unsaved.
+      onBlur: (event: { relatedTarget: EventTarget | null }) => leave(event.relatedTarget !== null && event.relatedTarget === testButton.current),
     };
     body = (
       <div className="control">
@@ -225,6 +236,20 @@ function Row({ view, page, dispatch, target, chooseTarget }: {
       {view.deprecation === undefined ? null : <div className="note deprecated">Deprecated: {view.deprecation}</div>}
       <Description id={descId} text={view.description} />
       {body}
+      {view.test === true ? (
+        <div className="test">
+          <button type="button" ref={testButton} disabled={testState?.status === "running"} aria-describedby={testId}
+            title="Try this value the way a launch would, without saving it. Empty tries the OMP found on PATH."
+            onClick={runTest}>
+            Test
+          </button>
+          <div id={testId} className={testState?.status === "done" && !testState.ok ? "message error" : "message"} role="status" aria-live="polite">
+            {testState === undefined ? null : testState.status === "running"
+              ? `Testing ${testState.tested === "" ? "the OMP on PATH" : testState.tested}…`
+              : `${testState.ok ? "Works" : "Refused"} — tested ${testState.tested === "" ? "the PATH search" : testState.tested}: ${testState.message}`}
+          </div>
+        </div>
+      ) : null}
       {view.targets.length > 1 && control.kind !== "json" ? (
         <fieldset className="targets">
           <legend className="sr">Save {view.label} to</legend>

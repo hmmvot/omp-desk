@@ -13,6 +13,11 @@ export interface Pending { readonly requestId: string; readonly value: JsonValue
 
 export interface OwnWrite { readonly requestId: string; readonly text: string; readonly acked: boolean }
 
+/** A Test of a row: the typed value it ran with, and its outcome once the host answered. Never saved, never shown as the setting's own note. */
+export type TestState =
+	| { readonly requestId: string; readonly tested: string; readonly status: "running" }
+	| { readonly requestId: string; readonly tested: string; readonly status: "done"; readonly ok: boolean; readonly message: string };
+
 export interface PageState {
 	readonly groups: readonly SettingGroupView[] | undefined;
 	readonly workspace: WorkspaceFacts | undefined;
@@ -23,9 +28,11 @@ export interface PageState {
 	readonly latest: Readonly<Record<string, string>>;
 	/** This document's writes of a row that are not finished: sent and unanswered, or answered but not yet read back. Only these can explain a stored value as this document's own save. */
 	readonly own: Readonly<Record<string, readonly OwnWrite[]>>;
+	/** The latest Test of each row; an answer for an older Test is ignored. */
+	readonly tests: Readonly<Record<string, TestState>>;
 }
 
-export const initialPageState: PageState = { groups: undefined, workspace: undefined, pending: {}, drafts: {}, notes: {}, latest: {}, own: {} };
+export const initialPageState: PageState = { groups: undefined, workspace: undefined, pending: {}, drafts: {}, notes: {}, latest: {}, own: {}, tests: {} };
 
 export type PageEvent =
 	/** A fresh snapshot; `editing` is the key whose text field has the focus right now, if any. */
@@ -42,7 +49,10 @@ export type PageEvent =
 	/** Open and other row actions: they become the row's latest request. */
 	| { readonly type: "request"; readonly key: string; readonly requestId: string }
 	/** Fade a success note, only if it is still the note of that request. */
-	| { readonly type: "expire"; readonly key: string; readonly requestId: string };
+	| { readonly type: "expire"; readonly key: string; readonly requestId: string }
+	/** The user pressed Test on a row with `tested` typed into it. */
+	| { readonly type: "test"; readonly key: string; readonly requestId: string; readonly tested: string }
+	| { readonly type: "test-result"; readonly key: string; readonly requestId: string; readonly ok: boolean; readonly message: string };
 
 const without = <T>(record: Readonly<Record<string, T>>, key: string): Record<string, T> => {
 	const next = { ...record };
@@ -164,6 +174,13 @@ export function reducePage(state: PageState, event: PageEvent): PageState {
 			const note = state.notes[event.key];
 			return note !== undefined && note.requestId === event.requestId && note.ok ? { ...state, notes: without(state.notes, event.key) } : state;
 		}
+		case "test":
+			return { ...state, tests: { ...state.tests, [event.key]: { requestId: event.requestId, tested: event.tested, status: "running" } } };
+		case "test-result": {
+			const current = state.tests[event.key];
+			if (current === undefined || current.requestId !== event.requestId) return state;
+			return { ...state, tests: { ...state.tests, [event.key]: { requestId: event.requestId, tested: current.tested, status: "done", ok: event.ok, message: event.message } } };
+		}
 	}
 }
 
@@ -171,9 +188,10 @@ export function reducePage(state: PageState, event: PageEvent): PageState {
  * What leaving a text field means: a draft made against a value that has since changed elsewhere is dropped (the
  * current value wins, with a note); otherwise it is saved. While a save of the row is still unanswered the stored value
  * cannot be told from this document's own save, so the decision waits for the answer. Enter is the explicit save and does not ask this.
+ * Focus moving to the row's own Test button is not leaving the field: the draft is what Test is about, and Test saves nothing, so it stays unsaved.
  */
-export function leaveDecision(draft: Draft | undefined, storedText: string, unanswered = false): "none" | "adopt" | "save" | "defer" {
-	if (draft === undefined) return "none";
+export function leaveDecision(draft: Draft | undefined, storedText: string, unanswered = false, toTest = false): "none" | "adopt" | "save" | "defer" {
+	if (draft === undefined || toTest) return "none";
 	if (storedText === draft.base) return "save";
 	return unanswered ? "defer" : "adopt";
 }

@@ -128,6 +128,12 @@
           "default": false,
           "description": "Remind the model after every prompt you send to write the files and folders it mentions as paths in inline code and every code symbol in Chat replies as a link ([`Name`](path:line)). The reminder is a separate message added to the request only (about 120 tokens per prompt); it is never saved to the session or shown. Applies to sessions started or resumed afterwards."
         },
+        "omp.executablePath": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "description": "Absolute path of the OMP to run: the `omp` program itself, or a Bun-installed `omp.exe` shim. Empty uses the first `omp` on PATH. When set, this is the only OMP Desk considers: if it cannot be used, Desk says why and does not search PATH. Applies to sessions started, resumed or read afterwards. User settings only; a workspace cannot set it."
+        },
         "omp.agentDebugger.enabled": {
           "type": "boolean",
           "default": true,

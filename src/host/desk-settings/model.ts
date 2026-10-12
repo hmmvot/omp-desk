@@ -4,7 +4,14 @@
  * written to and the layers a reset clears. It imports nothing from VS Code, so the host controller,
  * the Webview bundle and the tests share exactly one copy of every rule.
  */
+import { OMP_PATH_SETTING } from "../omp-unavailable.ts";
 
+/** Settings whose row carries a **Test** button: the page asks the host to try the typed value without saving it. */
+const TESTABLE_KEYS: Readonly<Record<string, true>> = { [OMP_PATH_SETTING]: true };
+
+export function isTestable(key: string): boolean {
+	return TESTABLE_KEYS[key] === true;
+}
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 
@@ -91,6 +98,8 @@ export interface SettingView {
 	readonly defaultTarget: Target;
 	/** A line on where this setting lives, for settings whose scope limits the layers. */
 	readonly scopeNote?: string;
+	/** The row offers a Test button for the value typed into it. */
+	readonly test?: true;
 }
 
 export interface SettingGroupView {
@@ -437,6 +446,7 @@ export function buildView(
 		targets: writableTargets(descriptor, workspace),
 		defaultTarget: defaultTarget(descriptor, layers, workspace),
 		...(note === undefined ? {} : { scopeNote: note }),
+		...(isTestable(descriptor.key) ? { test: true as const } : {}),
 	};
 }
 

@@ -24,6 +24,7 @@ import {
   resolveBunRuntime,
   resolveOmpBinary,
   resolveOmpPackageRoot,
+  setOmpResolutionLog,
   terminalWriterForHandle,
 } from "./host/native-terminal";
 import { runOmpCli } from "./host/native-terminal";
@@ -38,7 +39,7 @@ import type { SessionsGrouping } from "./views/session-order";
 import { pinnedSessionTabId, selectionLeaveOtherWindow, selectionRestore } from "./views/session-selection";
 import { acquireClaim, createOwnerGeneration, readClaimHolder } from "./host/session-claim";
 import { startLoopLagMonitor, trackOperation } from "./host/loop-lag";
-import type { NativeControlBootstrap, OmpCommand } from "./host/native-terminal";
+import type { NativeControlBootstrap, OmpCommand, OmpPackageRoot } from "./host/native-terminal";
 import {
   SESSION_INDEX_LOCAL_KEY,
   SESSION_INDEX_STORAGE_KEY,
@@ -953,6 +954,8 @@ async function revealDesktopNotification(index: SessionIndex, extensionId: strin
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   output = vscode.window.createOutputChannel("OMP Desk");
   activationContext = context;
+  setOmpResolutionLog(log);
+  context.subscriptions.push({ dispose: () => setOmpResolutionLog(null) });
   // The host's one thread is shared with every extension; a stall of 500 ms or more is logged with the Desk operations that overlapped it.
   context.subscriptions.push({ dispose: startLoopLagMonitor(message => log(message)) });
   // This host's start time is a PowerShell command, hundreds of milliseconds to seconds on a busy machine. It runs beside the
@@ -14062,15 +14065,18 @@ async function renameStoppedSession(
     );
     return;
   }
-  let binary: Awaited<ReturnType<typeof resolveOmpBinary>> | null = null;
-  try {
-    binary = await resolveOmpBinary();
-  } catch (error) {
-    log(`the installed OMP could not be resolved for a rename: ${messageOf(error)}`);
-  }
   // The package source must come from the *selected* executable's own install tree,
   // never from a similarly named package somewhere else on the machine.
-  const pkg = binary === null ? null : await resolveOmpPackageRoot(binary);
+  let pkg: OmpPackageRoot | null;
+  try {
+    pkg = await resolveOmpPackageRoot(await resolveOmpBinary());
+  } catch (error) {
+    log(`the installed OMP could not be resolved for a rename: ${messageOf(error)}`);
+    showError(
+      `The installed OMP could not be resolved, so a stopped session's stored title cannot be changed here: ${messageOf(error).split(/\r?\n/)[0]}`,
+    );
+    return;
+  }
   if (pkg === null) {
     showError(
       "The installed OMP this window resolved exposes no importable package source (a compiled-only install), so a " +

@@ -174,6 +174,18 @@ describe("inventory controller cache", () => {
 		await h.settle();
 		assert.equal(h.state.reads.length, 3);
 	});
+	it("a forced refresh while no view is visible is remembered, so showing a view later does not paint the cached read", async () => {
+		const h = harness(null);
+		h.controller.setVisible("skills", true);
+		await h.settle();
+		h.controller.setVisible("skills", false);
+		h.controller.refresh({ force: true });
+		await h.settle();
+		assert.equal(h.state.reads.length, 1, "nothing is read while hidden");
+		h.controller.setVisible("skills", true);
+		await h.settle();
+		assert.equal(h.state.reads.length, 2, "the cached read was dropped and the OMP is read again");
+	});
 	it("a read that was running before a switch is not cached as current afterwards", async () => {
 		const h = harness(null);
 		let release!: () => void;

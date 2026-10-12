@@ -214,3 +214,27 @@ test("a deferred save is submitted once, and only its own failure decides the de
 	const submitted = run([{ type: "write", key: "t.n", requestId: "r3", value: 8 }, { type: "result", requestId: "r3", key: "t.n", ok: true, message: "Saved to User settings, but this workspace's own value overrides it here." }, state(snapshot({ n: 7 }), null)], ready);
 	assert.deepEqual(readyToSave(submitted), [], "no second automatic write");
 });
+
+test("a Test keeps its own result, ignores an older Test's answer, and never touches the row's notes or pending writes", () => {
+	const afterFirst = run([state(snapshot({})), { type: "test", key: "t.a", requestId: "t1", tested: "C:\\a\\omp.exe" }]);
+	assert.deepEqual(afterFirst.tests["t.a"], { requestId: "t1", tested: "C:\\a\\omp.exe", status: "running" });
+	const second = reducePage(afterFirst, { type: "test", key: "t.a", requestId: "t2", tested: "" });
+	// The first Test answers after the second was started: its answer is not presented.
+	const late = reducePage(second, { type: "test-result", key: "t.a", requestId: "t1", ok: false, message: "old" });
+	assert.deepEqual(late.tests["t.a"], { requestId: "t2", tested: "", status: "running" });
+	const done = reducePage(late, { type: "test-result", key: "t.a", requestId: "t2", ok: true, message: "from PATH" });
+	assert.deepEqual(done.tests["t.a"], { requestId: "t2", tested: "", status: "done", ok: true, message: "from PATH" });
+	assert.deepEqual(done.notes, {});
+	assert.deepEqual(done.pending, {});
+	// A snapshot (the setting changed elsewhere) does not erase the Test result of what was typed.
+	assert.deepEqual(reducePage(done, state(snapshot({ a: true }))).tests["t.a"], done.tests["t.a"]);
+	// An answer for a Test this document never started (an earlier document of the view) is ignored.
+	assert.deepEqual(reducePage(initialPageState, { type: "test-result", key: "t.a", requestId: "old", ok: true, message: "x" }).tests, {});
+});
+
+test("moving focus to the row's Test button keeps the draft unsaved, so a Test never writes the setting", () => {
+	const draft = { text: "C:\\new\\omp.exe", base: "C:\\old\\omp.exe" };
+	assert.equal(leaveDecision(draft, "C:\\old\\omp.exe", false, true), "none", "the draft is kept, nothing is saved");
+	assert.equal(leaveDecision(draft, "C:\\old\\omp.exe"), "save", "leaving to anywhere else still saves");
+	assert.equal(leaveDecision(draft, "C:\\elsewhere\\omp.exe", true, true), "none", "not even a deferred decision is made");
+});

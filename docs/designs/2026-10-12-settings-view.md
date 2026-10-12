@@ -83,6 +83,7 @@ The page keeps its state in a pure reducer (`src/webview/desk-settings/page-stat
 - **Open in Settings editor**: `workbench.action.openSettings` with `@id:<key>`.
 - **Edit in <layer> settings.json** (arrays/objects and other JSON rows): `workbench.action.openSettingsJson` (or `workbench.action.openWorkspaceSettingsFile` when the workspace holds the value) with `revealSetting: { key, edit: true }`.
 - Reset, and the layer choice above.
+- **Test** (rows marked testable; `omp.executablePath` today, [ADR-0011](../decisions/0011-use-installed-omp-without-version-gate.md) amended): runs the typed value through the same resolution a launch uses and shows the resolved file and release, or the exact failure, under the row. It needs no layer choice and saves nothing; an empty value tests the PATH search. The result is kept per row beside, not inside, the write note, so it neither fades nor is replaced by a snapshot, and an answer for an older Test is ignored.
 
 ### Page behaviour and accessibility
 

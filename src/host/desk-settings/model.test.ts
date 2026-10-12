@@ -182,6 +182,22 @@ test("the shipped manifest projects completely: every contributed omp setting ha
 	}
 });
 
+test("only the explicit OMP path setting is machine-scoped, editable in place and offers Test", () => {
+	const manifest = JSON.parse(readFileSync(new URL("../../../package.json", import.meta.url), "utf8")) as { contributes: { configuration: { properties: Record<string, { scope?: string; default?: unknown }> } } };
+	const property = manifest.contributes.configuration.properties["omp.executablePath"]!;
+	assert.equal(property.scope, "machine", "a workspace must never be able to name the program to run");
+	assert.equal(property.default, "");
+	const descriptors = projectConfiguration(manifest.contributes.configuration);
+	const row = (key: string) => {
+		const descriptor = descriptors.find(candidate => candidate.key === key)!;
+		return buildView(descriptor, { defaultValue: "" }, "", { available: true, name: "w" }, []);
+	};
+	assert.equal(row("omp.executablePath").control.kind, "string");
+	assert.deepEqual(row("omp.executablePath").targets, ["user"], "no workspace layer is offered");
+	assert.equal(row("omp.executablePath").test, true);
+	assert.equal(row("omp.linkReminder").test, undefined);
+});
+
 test("a schema the page cannot validate fully is never offered as a control", () => {
 	const projected = (property: Record<string, unknown>) => projectConfiguration({ properties: { "p.x": property } })[0]!.control;
 	assert.deepEqual(projected({ type: "string", format: "uri" }), { kind: "json" }, "format is not enforced by the page");

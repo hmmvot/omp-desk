@@ -82,11 +82,15 @@ export class InventoryController {
 		this.refresh();
 	}
 
-	/** `force` drops every cached read first (the user's Refresh); otherwise a read younger than FRESH_MS is used as is and an older one is shown, marked, while a fresh read runs. */
+	/**
+	 * `force` drops every cached read first (the user's Refresh, or the OMP changing); otherwise a read younger than FRESH_MS is used as is and an older one is shown, marked, while a fresh read runs.
+	 * A forced refresh is remembered while no view is visible, so the first view shown afterwards does not paint the old OMP's cached rows.
+	 */
 	refresh(options: { readonly force?: boolean } = {}): void {
-		if (this.#disposed || !VIEW_KINDS.some(view => this.#views[view].visible)) return;
-		this.#version += 1;
+		if (this.#disposed) return;
 		if (options.force === true) this.#forced = true;
+		if (!VIEW_KINDS.some(view => this.#views[view].visible)) return;
+		this.#version += 1;
 		this.#selected = this.#deps.target();
 		if (this.#pending) { this.#again = true; return; }
 		void this.#cycle();

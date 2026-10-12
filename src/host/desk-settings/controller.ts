@@ -4,6 +4,7 @@ import {
 	chooseTarget,
 	groupViews,
 	hasFolderLayer,
+	isTestable,
 	resetTargets,
 	sameValue,
 } from "./model.ts";
@@ -23,10 +24,13 @@ export interface DeskSettingsPort {
 	workspace(): WorkspaceFacts;
 	openSettingsEditor(key: string): Promise<void>;
 	openSettingsJson(key: string, target: Target, edit: boolean): Promise<void>;
+	/** Try an OMP path (empty: the PATH search) exactly as a launch would resolve it, and say what came out. Saves nothing. */
+	testOmp(path: string): Promise<{ readonly ok: boolean; readonly message: string }>;
 }
 
 type StateMessage = Extract<DeskSettingsMessage, { type: "settings:state" }>;
 type ResultMessage = Extract<DeskSettingsMessage, { type: "settings:result" }>;
+type TestMessage = Extract<DeskSettingsMessage, { type: "settings:test" }>;
 
 const REQUEST_ID = /^[\w-]{1,80}$/;
 const LAYER_NAMES: Record<Target, string> = { user: "User", workspace: "Workspace" };
@@ -69,7 +73,7 @@ export class DeskSettingsController {
 	}
 
 	/** Perform one page action. `ready` has no result; the caller answers it with the state. */
-	async handle(raw: unknown): Promise<ResultMessage | null> {
+	async handle(raw: unknown): Promise<ResultMessage | TestMessage | null> {
 		if (typeof raw !== "object" || raw === null) return null;
 		const message = raw as Record<string, unknown>;
 		const requestId = message.requestId;
@@ -89,6 +93,20 @@ export class DeskSettingsController {
 				const target = chooseTarget(descriptor, layers, this.port.workspace(), undefined);
 				const resolved: Target = target.ok ? target.target : "user";
 				return this.#open(requestId, descriptor, () => this.port.openSettingsJson(descriptor.key, resolved, descriptor.control.kind === "json"));
+			}
+			case "test": {
+				const reply = (ok: boolean, text: string): TestMessage => ({ type: "settings:test", requestId, key: descriptor.key, ok, message: text });
+				if (!isTestable(descriptor.key)) return reply(false, "This setting has no test.");
+				const checked = checkValue(descriptor.control, message.value);
+				if (!checked.ok || typeof checked.value !== "string") return reply(false, checked.ok ? "The value must be text." : checked.message);
+				try {
+					const outcome = await this.port.testOmp(checked.value);
+					this.log(`settings view: test of ${descriptor.key} (${checked.value === "" ? "PATH search" : checked.value}): ${outcome.ok ? "resolved" : "refused"}`);
+					return reply(outcome.ok, outcome.message);
+				} catch (error) {
+					this.log(`settings view: test of ${descriptor.key} failed: ${errorText(error)}`);
+					return reply(false, errorText(error));
+				}
 			}
 			default: return fail("Unknown action.");
 		}

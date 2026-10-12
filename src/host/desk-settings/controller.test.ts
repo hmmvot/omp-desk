@@ -57,6 +57,7 @@ function fake(): Fake {
 		workspace: () => state.workspace,
 		async openSettingsEditor(key) { state.opened.push(`editor:${key}`); },
 		async openSettingsJson(key, target, edit) { state.opened.push(`json:${key}:${target}:${edit}`); },
+		async testOmp() { return { ok: false, message: "this fake has no OMP" }; },
 	};
 	return state;
 }
@@ -206,4 +207,57 @@ test("concurrent writes run in order", async () => {
 	await Promise.all([first, second]);
 	assert.deepEqual(order, [1, 2]);
 	assert.equal(state.layers["t.limit"]!.user, 2);
+});
+
+const OMP_DESCRIPTORS = projectConfiguration({
+	properties: {
+		"omp.executablePath": { type: "string", default: "", scope: "machine", description: "The OMP to run." },
+		"omp.other": { type: "string", default: "", description: "Another text setting." },
+	},
+});
+
+function ompHarness(outcome: (path: string) => Promise<{ ok: boolean; message: string }>) {
+	const writes: string[] = [];
+	const tested: string[] = [];
+	const port: DeskSettingsPort = {
+		inspect: (): ConfigLayers => ({ defaultValue: "" }),
+		effective: () => "",
+		folderValues: () => [],
+		async update(key) { writes.push(key); },
+		workspace: () => ({ available: false, name: null }),
+		async openSettingsEditor() {},
+		async openSettingsJson() {},
+		async testOmp(path) { tested.push(path); return outcome(path); },
+	};
+	return { writes, tested, controller: new DeskSettingsController(OMP_DESCRIPTORS, port, message => logs.push(message)) };
+}
+
+test("only the explicit OMP path row offers Test, and the row says so", () => {
+	const rows = ompHarness(async () => ({ ok: true, message: "" })).controller.state().groups.flatMap(group => group.settings);
+	assert.deepEqual(rows.map(row => [row.key, row.test === true]), [["omp.executablePath", true], ["omp.other", false]]);
+});
+
+test("Test hands the typed value to the host's resolution and reports its outcome, saving nothing", async () => {
+	const h = ompHarness(async path => (path === "" ? { ok: true, message: "from PATH" } : { ok: false, message: `${path} is refused` }));
+	const refused = await act(h.controller, { action: "test", key: "omp.executablePath", value: "C:\\bad\\omp.exe" });
+	assert.deepEqual(refused, { type: "settings:test", requestId: refused!.requestId, key: "omp.executablePath", ok: false, message: "C:\\bad\\omp.exe is refused" });
+	const onPath = await act(h.controller, { action: "test", key: "omp.executablePath", value: "" });
+	assert.deepEqual(onPath, { type: "settings:test", requestId: onPath!.requestId, key: "omp.executablePath", ok: true, message: "from PATH" });
+	assert.deepEqual(h.tested, ["C:\\bad\\omp.exe", ""]);
+	assert.deepEqual(h.writes, [], "a Test never writes the setting");
+});
+
+test("Test refuses a setting that has none and a value that is not text, before resolving anything", async () => {
+	const h = ompHarness(async () => ({ ok: true, message: "" }));
+	const other = await act(h.controller, { action: "test", key: "omp.other", value: "x" });
+	assert.equal(other?.type === "settings:test" && other.ok, false);
+	const notText = await act(h.controller, { action: "test", key: "omp.executablePath", value: 5 });
+	assert.equal(notText?.type === "settings:test" && notText.ok, false);
+	assert.deepEqual(h.tested, []);
+});
+
+test("a Test whose resolution throws is reported on the row, not lost", async () => {
+	const h = ompHarness(async () => { throw new Error("spawn exploded"); });
+	const failed = await act(h.controller, { action: "test", key: "omp.executablePath", value: "C:\\x\\omp.exe" });
+	assert.deepEqual(failed, { type: "settings:test", requestId: failed!.requestId, key: "omp.executablePath", ok: false, message: "spawn exploded" });
 });

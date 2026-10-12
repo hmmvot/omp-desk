@@ -1,6 +1,7 @@
 import { isRecord } from "../../guards.ts";
 import { randomBytes } from "node:crypto";
 import * as vscode from "vscode";
+import { resolveOmpBinary } from "../native-terminal";
 import { DeskSettingsController } from "./controller.ts";
 import { projectConfiguration } from "./model.ts";
 import type { DeskSettingsPort } from "./controller.ts";
@@ -38,6 +39,17 @@ function bind(): DeskSettingsPort {
 				target === "workspace" ? "workbench.action.openWorkspaceSettingsFile" : "workbench.action.openSettingsJson",
 				{ revealSetting: { key, edit } },
 			);
+		},
+		async testOmp(path) {
+			const typed = path.trim();
+			try {
+				const binary = await resolveOmpBinary({ explicitPath: typed });
+				const release = binary.version === null ? "release not reported" : `release ${binary.version}`;
+				return { ok: true, message: `Resolves to OMP (${release}) from ${binary.origin}. Desk would run: ${[binary.command, ...binary.prefixArgs].join(" ")}` };
+			} catch (error) {
+				const text = error instanceof Error ? error.message : String(error);
+				return { ok: false, message: text.length > 1500 ? `${text.slice(0, 1500)}…` : text };
+			}
 		},
 	};
 }
