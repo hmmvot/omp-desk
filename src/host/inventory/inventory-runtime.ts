@@ -1,6 +1,7 @@
 import { isRecord as record } from "../../guards.ts";
 import { SettingsRefusal } from "../omp-settings-core.ts";
-import type { InventoryResult, InventoryRow, InventoryScope, InventorySnapshot, RowKind, RowToggle, ToggleMechanism, ViewKind } from "./inventory-model.ts";
+import { SOURCE_ROLES } from "./inventory-model.ts";
+import type { InventoryResult, InventoryRow, InventoryScope, InventorySnapshot, RowKind, RowSource, RowToggle, SourceRole, ToggleMechanism, ViewKind } from "./inventory-model.ts";
 
 /**
  * The extension-host half of the inventory worker (ADR-0061): it asks for a read or a switch and
@@ -44,6 +45,20 @@ function parseToggle(value: unknown): RowToggle | null {
 	return { mechanism: mechanism as ToggleMechanism | null, refusal };
 }
 
+const MAX_SOURCES = 32;
+function parseSources(value: unknown): readonly RowSource[] | null {
+	if (!Array.isArray(value) || value.length > MAX_SOURCES) return null;
+	const sources: RowSource[] = [];
+	for (const entry of value) {
+		if (!record(entry)) return null;
+		const path = text(entry.path);
+		const providerName = text(entry.providerName, true);
+		if (path === undefined || typeof providerName !== "string" || typeof entry.level !== "string" || !LEVELS.includes(entry.level) || typeof entry.role !== "string" || !SOURCE_ROLES.includes(entry.role)) return null;
+		sources.push({ path, providerName, level: entry.level as RowSource["level"], role: entry.role as SourceRole });
+	}
+	return sources;
+}
+
 export function parseRow(value: unknown): InventoryRow | null {
 	if (!record(value)) return null;
 	const { kind, level, state } = value;
@@ -57,10 +72,12 @@ export function parseRow(value: unknown): InventoryRow | null {
 	const detail = text(value.detail);
 	const toolPrefix = text(value.toolPrefix);
 	const toggle = parseToggle(value.toggle);
+	const sources = parseSources(value.sources);
+	if (sources === null) return null;
 	if (typeof kind !== "string" || !ROW_KINDS.includes(kind) || typeof level !== "string" || !LEVELS.includes(level) || typeof state !== "string" || !STATES.includes(state) ||
 		typeof name !== "string" || name.length === 0 || typeof provider !== "string" || typeof providerName !== "string" ||
 		description === undefined || path === undefined || disabledReason === undefined || detail === undefined || toolPrefix === undefined || runtimeName === undefined || typeof value.shadowed !== "boolean" || toggle === null) return null;
-	return { kind: kind as InventoryRow["kind"], name, description, path, provider, providerName, level: level as InventoryRow["level"], state: state as InventoryRow["state"], shadowed: value.shadowed, disabledReason, detail, toolPrefix, runtimeName, toggle };
+	return { kind: kind as InventoryRow["kind"], name, description, path, provider, providerName, level: level as InventoryRow["level"], state: state as InventoryRow["state"], shadowed: value.shadowed, disabledReason, detail, toolPrefix, runtimeName, toggle, sources };
 }
 
 export function parseSnapshot(value: unknown): InventorySnapshot | null {

@@ -5,7 +5,7 @@ import type { InventoryRow, InventorySnapshot, SessionEvidence, ViewKind, ViewMo
 
 function row(overrides: Partial<InventoryRow> & Pick<InventoryRow, "kind" | "name">): InventoryRow {
 	return { description: null, path: `C:/x/${overrides.name}`, provider: "native", providerName: "OMP", level: "user", state: "active", shadowed: false, disabledReason: null,
-		detail: null, toolPrefix: null, runtimeName: null, toggle: { mechanism: "disabledExtensions", refusal: null }, ...overrides };
+		detail: null, toolPrefix: null, runtimeName: null, sources: [], toggle: { mechanism: "disabledExtensions", refusal: null }, ...overrides };
 }
 function snapshot(rows: InventoryRow[], extra: Partial<InventorySnapshot> = {}): InventorySnapshot {
 	return { rows, cwd: "C:/p", profile: "default", projectOverridesDisabledExtensions: false, incomplete: [], disabledProviders: [], ...extra };
@@ -122,6 +122,34 @@ describe("MCP projection", () => {
 		assert.match(itemOf(model, "solo").tooltip, /name prefix.*not a connection status/);
 		const global = view("mcp", snapshot(servers), null, "global");
 		assert.doesNotMatch(itemOf(global, "solo").description, /tool/);
+	});
+});
+
+describe("MCP server named by several files", () => {
+	const unity = row({ kind: "mcp", name: "unity", path: "D:/omp-vscode/.mcp.json", provider: "mcp-json", providerName: "MCP Config", level: "project", state: "disabled", disabledReason: "entry", detail: "stdio · uvx", toolPrefix: "mcp__unity_",
+		toggle: { mechanism: null, refusal: ".omp/mcp.json sets enabled: false for it without defining it" },
+		sources: [{ path: "D:/omp-vscode/.omp/mcp.json", providerName: "OMP", level: "project", role: "disables" }, { path: "D:/omp-vscode/.mcp.json", providerName: "MCP Config", level: "project", role: "defines" }] });
+	it("shows one row that says which file disables it, lists the contributing files, and offers no switch", () => {
+		const model = view("mcp", snapshot([unity, row({ kind: "mcp", name: "symbols", detail: "stdio · node", toggle: { mechanism: "mcp", refusal: null } })]), null, "global");
+		const item = itemOf(model, "unity");
+		assert.equal(model.groups.flatMap(group => group.items).filter(candidate => candidate.label === "unity").length, 1);
+		assert.equal(item.description, "disabled by mcp.json · stdio · uvx");
+		assert.equal(item.checked, null);
+		assert.equal(item.openPath, "D:/omp-vscode/.mcp.json");
+		assert.match(item.tooltip, /State: disabled by the entry in OMP D:\/omp-vscode\/\.omp\/mcp\.json, which only sets enabled: false/);
+		assert.match(item.tooltip, /- D:\/omp-vscode\/\.omp\/mcp\.json \(OMP, project\): disables it/);
+		assert.match(item.tooltip, /- D:\/omp-vscode\/\.mcp\.json \(MCP Config, project\): defines it/);
+		assert.match(item.tooltip, /Cannot be switched here: \.omp\/mcp\.json sets enabled: false/);
+		assert.doesNotMatch(item.description, /shadowed/);
+	});
+	it("says an owner entry without a command or url leaves nothing loaded", () => {
+		const model = view("mcp", snapshot([row({ kind: "mcp", name: "x", state: "disabled", disabledReason: "invalid-entry", detail: "no command or url", sources: [{ path: "D:/p/.omp/mcp.json", providerName: "OMP", level: "project", role: "incomplete" }] })]), null, "global");
+		assert.equal(itemOf(model, "x").description, "no definition · no command or url");
+		assert.match(itemOf(model, "x").tooltip, /OMP loads nothing for it: the entry in OMP D:\/p\/\.omp\/mcp\.json has no command or url/);
+	});
+	it("keeps the ordinary notes for a server defined once", () => {
+		const item = itemOf(view("mcp", snapshot([row({ kind: "mcp", name: "solo", detail: "stdio · srv", sources: [{ path: "C:/x/solo", providerName: "OMP", level: "user", role: "defines" }] })]), null, "global"), "solo");
+		assert.doesNotMatch(item.tooltip, /Configured in/);
 	});
 });
 

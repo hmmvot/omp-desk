@@ -17,6 +17,18 @@ export type RowState = "active" | "disabled" | "shadowed";
 export type ToggleMechanism = "disabledExtensions" | "setting" | "mcp" | "plugin";
 export interface RowToggle { readonly mechanism: ToggleMechanism | null; readonly refusal: string | null }
 
+/**
+ * One file that contributes to a row. An MCP server name is one row however many sources mention it: OMP does not merge
+ * fields, the highest-priority entry owns the name, so the other entries are listed here and never become rows of their own.
+ * - `defines`: the command or url shown on the row.
+ * - `disables`: an entry that owns the name and only sets `enabled: false` (OMP then loads nothing for the name).
+ * - `incomplete`: an entry that owns the name without a command or url and without `enabled: false`.
+ * - `ignored`: another entry of the name that OMP does not use.
+ */
+export type SourceRole = "defines" | "disables" | "incomplete" | "ignored";
+export const SOURCE_ROLES: readonly string[] = ["defines", "disables", "incomplete", "ignored"];
+export interface RowSource { readonly path: string | null; readonly providerName: string; readonly level: "user" | "project" | "native" | "builtin"; readonly role: SourceRole }
+
 export interface InventoryRow {
 	readonly kind: RowKind;
 	readonly name: string;
@@ -37,6 +49,8 @@ export interface InventoryRow {
 	/** Skills: the name OMP registers the skill under in a session started here (collisions rename), `null` when OMP does not load it. */
 	readonly runtimeName: string | null;
 	readonly toggle: RowToggle;
+	/** Every file that contributes to the row, in OMP's precedence order; empty for rows with a single origin. */
+	readonly sources: readonly RowSource[];
 }
 
 export interface InventorySnapshot {
@@ -124,8 +138,26 @@ function reasonText(row: InventoryRow): string | null {
 	switch (row.disabledReason) {
 		case "provider-disabled": return "its provider is disabled in OMP";
 		case "user-opt-in": return "its user-level source is not enabled in OMP";
+		case "entry": return `disabled by the entry in ${sourceOf(row, "disables")}, which only sets enabled: false`;
+		case "invalid-entry": return `OMP loads nothing for it: the entry in ${sourceOf(row, "incomplete")} has no command or url`;
 		default: return "disabled";
 	}
+}
+function sourceOf(row: InventoryRow, role: SourceRole): string {
+	const source = row.sources.find(candidate => candidate.role === role);
+	return source === undefined ? "a project file" : `${source.providerName} ${source.path ?? ""}`.trim();
+}
+/** The short file name of the source that disables a row or leaves it without a definition, for the row's description. */
+function entryFile(row: InventoryRow): string | null {
+	const source = row.sources.find(candidate => candidate.role === (row.disabledReason === "entry" ? "disables" : "incomplete"));
+	return source?.path?.split(/[\\/]/).at(-1) ?? null;
+}
+const ROLE_TEXT: Readonly<Record<SourceRole, string>> = {
+	defines: "defines it", disables: "disables it (enabled: false, no definition)", incomplete: "has no command or url", ignored: "ignored by OMP",
+};
+function sourceLines(row: InventoryRow): string | null {
+	if (row.sources.length === 0 || (row.sources.length === 1 && row.sources[0]!.role === "defines")) return null;
+	return plain("Configured in:", ...row.sources.map(source => `- ${source.path ?? source.providerName} (${source.providerName}, ${source.level}): ${ROLE_TEXT[source.role]}`));
 }
 const kindIcon: Readonly<Record<RowKind, IconName>> = {
 	skill: "book", "custom-tool": "tools", "builtin-tool": "tools", mcp: "server", "extension-module": "extensions", plugin: "package",
@@ -136,13 +168,15 @@ function itemOf(row: InventoryRow, note: string | null, extraTooltip: string | n
 	const toggleable = row.toggle.mechanism !== null && !row.shadowed && row.state !== "shadowed";
 	const checked = toggleable ? row.state !== "disabled" : null;
 	const shadowed = row.shadowed || row.state === "shadowed";
-	const bits = [shadowed ? "shadowed" : row.state === "disabled" ? "disabled" : null, note, row.detail];
+	const byEntry = row.state === "disabled" && (row.disabledReason === "entry" || row.disabledReason === "invalid-entry");
+	const stateBit = shadowed ? "shadowed" : byEntry ? (row.disabledReason === "entry" ? `disabled by ${entryFile(row) ?? "an entry"}` : "no definition") : row.state === "disabled" ? "disabled" : null;
+	const bits = [stateBit, note, row.detail];
 	return {
 		key: `${row.kind}:${row.name}:${row.path ?? ""}`,
 		label: row.name,
 		description: bits.filter((bit): bit is string => bit !== null && bit.length > 0).join(" · "),
 		tooltip: plain(row.description, row.detail === null ? null : `Detail: ${row.detail}`, `Origin: ${row.providerName} (${row.level})`,
-			row.path === null ? null : `Source: ${row.path}`, reason === null ? null : `State: ${reason}`, note, extraTooltip,
+			row.path === null ? null : `Source: ${row.path}`, reason === null ? null : `State: ${reason}`, sourceLines(row), note, extraTooltip,
 			row.toggle.mechanism === null && row.toggle.refusal !== null ? `Cannot be switched here: ${row.toggle.refusal}` : null,
 			toggleable ? "The checkbox changes the global OMP configuration, which applies to every session of this profile." : null),
 		icon: row.state === "disabled" ? "circle-slash" : kindIcon[row.kind],

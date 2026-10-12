@@ -6,7 +6,7 @@ import type { InventoryRuntimeDeps, WorkerEnvironment } from "./inventory-runtim
 
 const environment: WorkerEnvironment = { bun: "bun", packageRoot: "C:/omp", helperPath: "C:/worker.mjs" };
 const row = (overrides: Record<string, unknown> = {}) => ({ kind: "skill", name: "a", description: null, path: "C:/a/SKILL.md", provider: "native", providerName: "OMP", level: "user", state: "active", shadowed: false,
-	disabledReason: null, detail: null, toolPrefix: null, runtimeName: "a", toggle: { mechanism: "disabledExtensions", refusal: null }, ...overrides });
+	disabledReason: null, detail: null, toolPrefix: null, runtimeName: "a", sources: [], toggle: { mechanism: "disabledExtensions", refusal: null }, ...overrides });
 const receipt = (rows: unknown[] = [row()], extra: Record<string, unknown> = {}) => ({ rows, cwd: "C:/", profile: "default", projectOverridesDisabledExtensions: false, incomplete: [], disabledProviders: [], ...extra });
 
 function runtimeWith(run: InventoryRuntimeDeps["run"], env: WorkerEnvironment | { readonly unavailable: string } = environment) {
@@ -24,6 +24,7 @@ describe("inventory receipt validation", () => {
 		for (const bad of [
 			null, "text", { ...receipt(), rows: "x" }, receipt([row({ kind: "evil" })]), receipt([row({ level: "root" })]), receipt([row({ state: "weird" })]), receipt([row({ name: "" })]),
 			receipt([row({ shadowed: "yes" })]), receipt([row({ toggle: { mechanism: "shell", refusal: null } })]), receipt([row({ toggle: null })]), receipt([row({ path: "x".repeat(5000) })]),
+			receipt([row({ sources: [{ path: null, providerName: "x", level: "project", role: "merges" }] })]), receipt([row({ sources: "x" })]), receipt([row({ sources: new Array(33).fill({ path: null, providerName: "x", level: "project", role: "defines" }) })]),
 			receipt([row()], { incomplete: ["bogus"] }), receipt([row()], { projectOverridesDisabledExtensions: "no" }), receipt(new Array(5001).fill(row())), receipt([null]),
 		]) assert.equal(parseSnapshot(bad), null, JSON.stringify(bad)?.slice(0, 80));
 	});

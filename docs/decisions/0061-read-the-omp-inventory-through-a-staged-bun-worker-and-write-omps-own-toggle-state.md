@@ -35,6 +35,7 @@ Three choices are needed: where the inventory comes from, how an incomplete or p
 6. **MCP status:** no RPC or control surface returns it; Desk shows configuration state and *name-matched* tool evidence (a tool is attributed to a server only on a unique `mcp__<server>_` prefix) and never claims a connection.
 7. **Desk's `-e` module** is never listed (explicit flag, not discovery) and a switch request for the name `omp-host-control` is refused.
 8. **Amendment to ADR-0009.** ADR-0009's boundary stays for tool *selection*: the Webview and the host-control pipe gain no selection or toggle command, and no per-session active-tool change is made by Desk. The user's request for Skills, Tools, MCP and Extensions switches is the product decision to *persist OMP's own user configuration*, which OMP applies to sessions on its own schedule; it is not a mutation through the pipe and not session-atomic, and the UI never presents it as such.
+9. **One MCP row per server name.** OMP does not merge same-named entries; the highest-priority entry owns the name and an entry that only sets `enabled: false` is a by-name switch that keeps the name off. The worker therefore folds a name's entries into one row (definition from the first full entry, state from the owner, contributing files listed on the row) and does not count OMP's `Must have command or url` validation warning for such a switch as an incomplete list. See the design's "One row per MCP server name".
 
 ### Consequences
 

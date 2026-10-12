@@ -183,3 +183,48 @@ test("installed OMP inventory: rows, origins, redaction, global switches and ref
     await fs.rm(projectDir, { recursive: true, force: true });
   }
 });
+
+/**
+ * A project whose `.mcp.json` defines servers and whose `.omp/mcp.json` only switches some of them off
+ * (the layout of a project with a local disable): OMP does not merge entries, the higher-priority one owns the name.
+ */
+test("installed OMP inventory: an MCP name with a definition and a by-name override is one disabled row, and the view is not incomplete", { skip: !available, timeout: 180_000 }, async () => {
+  const nativeRoot = await fs.mkdtemp(path.join(os.homedir(), "omp-desk-inventory-test-"));
+  const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-desk-inventory-project-"));
+  const write = async (file: string, content: string): Promise<void> => { await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, content); };
+  const env = { PI_CONFIG_DIR: path.basename(nativeRoot), PI_CODING_AGENT_DIR: "", PI_CONFIG_FILES: "", OMP_AUTH_BROKER_URL: "", OMP_AUTH_BROKER_TOKEN: "" };
+  try {
+    await write(path.join(projectDir, ".mcp.json"), JSON.stringify({ mcpServers: {
+      unity: { type: "stdio", command: "uvx", args: ["--python", "3.12", "--from", "mcpforunityserver==9.7.1", "mcp-for-unity"], timeout: 600000 },
+      "symbols": { type: "stdio", command: "node", args: ["scripts/mcp-start.mjs", "symbols"], directTools: true },
+      playwright: { type: "stdio", command: "node", args: ["scripts/mcp-start.mjs", "playwright"], directTools: true },
+      omnisharp: { type: "stdio", command: "node", args: ["scripts/mcp-start.mjs", "omnisharp"], directTools: true },
+      devtools: { type: "http", url: "http://127.0.0.1:3000/mcp" },
+    } }, null, 2));
+    await write(path.join(projectDir, ".omp", "mcp.json"), JSON.stringify({ mcpServers: { unity: { enabled: false }, devtools: { enabled: false }, playwright: { enabled: false } } }, null, 2));
+    const snapshot = parseSnapshot(await runSettingsWorker({ bunPath, helperPath, packageRoot, cwd: projectDir, profile: "default", request: { action: "read", scope: "session" }, env }));
+    assert.ok(snapshot, "the receipt parses as an inventory");
+    const servers = snapshot.rows.filter(candidate => candidate.kind === "mcp" && ["unity", "symbols", "playwright", "omnisharp", "devtools"].includes(candidate.name));
+    assert.deepEqual(servers.map(server => server.name).sort(), ["devtools", "playwright", "symbols", "omnisharp", "unity"], "one row per name");
+    const named = (name: string): InventoryRow => servers.find(server => server.name === name)!;
+    for (const name of ["unity", "devtools", "playwright"]) {
+      assert.equal(named(name).state, "disabled", name);
+      assert.equal(named(name).disabledReason, "entry", name);
+      assert.equal(named(name).shadowed, false, name);
+      assert.equal(named(name).toggle.mechanism, null, name);
+      assert.deepEqual(named(name).sources.map(source => [path.basename(source.path ?? ""), source.role]), [["mcp.json", "disables"], [".mcp.json", "defines"]], name);
+      assert.equal(path.basename(named(name).path ?? ""), ".mcp.json", "the row opens the file that defines it");
+    }
+    assert.equal(named("unity").detail, "stdio · uvx");
+    assert.equal(named("playwright").detail, "stdio · node");
+    assert.equal(named("devtools").detail, "http · 127.0.0.1:3000");
+    for (const name of ["symbols", "omnisharp"]) {
+      assert.equal(named(name).state, "active", name);
+      assert.equal(named(name).toggle.mechanism, "mcp", name);
+    }
+    assert.equal(snapshot.incomplete.includes("mcp"), false, "an enabled: false entry is a switch, not a failed source");
+  } finally {
+    await fs.rm(nativeRoot, { recursive: true, force: true });
+    await fs.rm(projectDir, { recursive: true, force: true });
+  }
+});

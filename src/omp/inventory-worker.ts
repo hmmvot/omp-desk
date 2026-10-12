@@ -6,6 +6,8 @@ import { SettingsRefusal, valueAt } from "../host/omp-settings-core.ts";
 import { PROTECTED_EXTENSION_NAMES } from "../host/inventory/inventory-model.ts";
 import { isRecord as record } from "../guards";
 import { BUILTIN_SWITCHES, SHARED_SWITCH_NOTES } from "./inventory-switches.ts";
+import { excusedEntryWarnings, foldMcpServer } from "./inventory-mcp.ts";
+import type { McpEntry } from "./inventory-mcp.ts";
 import { globalConfigFile, readConfig, writeConfig } from "./config-transaction.ts";
 import type { ConfigEdit, ConfigRecord } from "../host/omp-settings-core.ts";
 import type { InventoryRow, InventorySnapshot, RowToggle, ViewKind } from "../host/inventory/inventory-model.ts";
@@ -152,6 +154,8 @@ async function collect(request: WorkerRequest, n: Natives): Promise<Collected> {
     const incomplete = new Set<ViewKind>();
     const rows: InventoryRow[] = [];
     const mcpEntryDisabled = new Set<string>();
+    const mcpEntries = new Map<string, McpEntry[]>();
+    const mcpExtensions = new Map<McpEntry, NativeExtension>();
     const idToggle = (ext: NativeExtension): RowToggle => {
       const toggle = disabledToggle(ext, "disabledExtensions");
       return overridden && toggle.mechanism !== null ? { mechanism: null, refusal: "this project's config replaces the global disabledExtensions list" } : toggle;
@@ -161,7 +165,7 @@ async function collect(request: WorkerRequest, n: Natives): Promise<Collected> {
       const source = { provider: String(ext.source.provider), providerName: String(ext.source.providerName), level: ext.source.level === "project" ? "project" as const : ext.source.level === "native" ? "native" as const : "user" as const };
       const raw = record(ext.raw) ? ext.raw : {};
       const common = { name: ext.name, path: text(ext.path), ...source, state: ext.state, shadowed: ext.state === "shadowed" || raw._shadowed === true,
-        disabledReason: ext.disabledReason ?? null, toolPrefix: null, detail: null as string | null, runtimeName: null as string | null };
+        disabledReason: ext.disabledReason ?? null, toolPrefix: null, detail: null as string | null, runtimeName: null as string | null, sources: [] as const };
       if (ext.kind === "skill") { kinds.skill++; rows.push({ ...common, kind: "skill", description: text(ext.description), toggle: idToggle(ext) }); }
       else if (ext.kind === "tool") { kinds.tool++; rows.push({ ...common, kind: "custom-tool", description: text(ext.description), toggle: idToggle(ext) }); }
       else if (ext.kind === "extension-module") {
@@ -170,14 +174,24 @@ async function collect(request: WorkerRequest, n: Natives): Promise<Collected> {
           toggle: Object.hasOwn(PROTECTED_EXTENSION_NAMES, ext.name) ? { mechanism: null, refusal: "OMP Desk depends on this extension" } : idToggle(ext) });
       } else if (ext.kind === "mcp") {
         kinds.mcp++;
-        const transport = n.transport.inferMcpTransport(raw);
-        const minted = n.bridge.createMCPToolName(ext.name, "x");
-        if (raw.enabled === false) mcpEntryDisabled.add(ext.name);
-        const excluded = projectDisabled.includes(`mcp:${ext.name}`);
-        rows.push({ ...common, kind: "mcp", description: null, detail: `${transport} · ${endpointOf(raw, transport)}`,
-          toolPrefix: minted.endsWith("_x") ? minted.slice(0, -1) : null,
-          toggle: excluded ? { mechanism: null, refusal: "this project's config disables it by name, which a global switch cannot override" } : disabledToggle(ext, "mcp") });
+        const entry: McpEntry = { name: ext.name, path: common.path, provider: common.provider, providerName: common.providerName, level: source.level === "native" ? "user" : source.level,
+          state: ext.state, disabledReason: common.disabledReason, shadowed: common.shadowed, enabled: typeof raw.enabled === "boolean" ? raw.enabled : undefined,
+          defines: text(raw.command) !== null || text(raw.url) !== null, raw };
+        const entries = mcpEntries.get(ext.name);
+        if (entries === undefined) mcpEntries.set(ext.name, [entry]); else entries.push(entry);
+        mcpExtensions.set(entry, ext);
       }
+    }
+    // One row per server name: OMP's highest-priority entry owns it and nothing is merged (inventory-mcp.ts).
+    for (const entries of mcpEntries.values()) {
+      const folded = foldMcpServer(entries, {
+        detail: raw => { const transport = n.transport.inferMcpTransport(raw); return `${transport} · ${endpointOf(raw, transport)}`; },
+        toolPrefix: name => { const minted = n.bridge.createMCPToolName(name, "x"); return minted.endsWith("_x") ? minted.slice(0, -1) : null; },
+        switchOf: owner => disabledToggle(mcpExtensions.get(owner)!, "mcp"),
+        excludedByProject: projectDisabled.includes(`mcp:${entries[0]!.name}`),
+      });
+      if (folded.ownerDisabledByFlag) mcpEntryDisabled.add(entries[0]!.name);
+      rows.push(folded.row);
     }
 
     // The dashboard loader logs and swallows per-kind failures; check against warning-bearing loads.
@@ -185,7 +199,9 @@ async function collect(request: WorkerRequest, n: Natives): Promise<Collected> {
     await Promise.all(Object.entries(VIEW_OF_CAPABILITY).map(async ([capability, view]) => {
       try {
         const result = await n.discovery.loadCapability(capability, { cwd: request.cwd, includeDisabled: true, disabledExtensions: disabled, ...(capability === "extension-modules" ? { providers: ["native"] } : {}) });
-        const failed = result.warnings.some(warning => OMISSION.test(warning));
+        // An MCP entry that only sets `enabled: false` is a by-name switch; OMP's validator still calls it an invalid item.
+        const warnings = capability === "mcps" ? excusedEntryWarnings(result.warnings, [...mcpEntries.values()].flat(), samePath) : result.warnings;
+        const failed = warnings.some(warning => OMISSION.test(warning));
         if (failed || result.all.length !== expected[capability]) incomplete.add(view);
       } catch { incomplete.add(view); }
     }));
@@ -212,7 +228,7 @@ async function collect(request: WorkerRequest, n: Natives): Promise<Collected> {
         const off = disabled.includes(`skill:${skill.name}`);
         rows.push({ kind: "skill", name: skill.name, description: text(skill.description), path: text(skill.filePath), provider: skill._source?.provider ?? "custom",
           providerName: skill._source?.providerName ?? "Custom directory", level: skill._source?.level === "project" ? "project" : "user", state: off ? "disabled" : "active", shadowed: false,
-          disabledReason: null, detail: null, toolPrefix: null, runtimeName: nameOf(skill.filePath),
+          disabledReason: null, detail: null, toolPrefix: null, runtimeName: nameOf(skill.filePath), sources: [],
           toggle: overridden ? { mechanism: null, refusal: "this project's config replaces the global disabledExtensions list" } : { mechanism: "disabledExtensions", refusal: null } });
       }
     } catch { incomplete.add("skills"); }
@@ -226,7 +242,7 @@ async function collect(request: WorkerRequest, n: Natives): Promise<Collected> {
       for (const extensionPath of paths) {
         if (rows.some(row => row.kind === "extension-module" && row.path !== null && samePath(row.path, extensionPath))) continue;
         rows.push({ kind: "extension-module", name: n.helpers.getExtensionNameFromPath(extensionPath), description: null, path: extensionPath, provider: "configured", providerName: "Configured path", level,
-          state: "active", shadowed: false, disabledReason: null, detail: null, toolPrefix: null, runtimeName: null,
+          state: "active", shadowed: false, disabledReason: null, detail: null, toolPrefix: null, runtimeName: null, sources: [],
           toggle: { mechanism: null, refusal: "it is configured through OMP's `extensions` setting" } });
       }
     } catch { incomplete.add("extensions"); }
@@ -241,7 +257,7 @@ async function collect(request: WorkerRequest, n: Natives): Promise<Collected> {
       else if (setting !== undefined) { toggle = { mechanism: null, refusal: "OMP offers this tool as a multi-state setting; change it in OMP's settings" }; detail = `${setting.id}: ${String(value)}`; }
       if (SHARED_SWITCH_NOTES[tool] && setting !== undefined && setting.type === "boolean") detail = SHARED_SWITCH_NOTES[tool]!;
       rows.push({ kind: "builtin-tool", name: tool, description: null, path: null, provider: "builtin", providerName: "Built-in", level: "builtin",
-        state: value === false || value === "off" ? "disabled" : "active", shadowed: false, disabledReason: null, detail, toolPrefix: null, runtimeName: null, toggle });
+        state: value === false || value === "off" ? "disabled" : "active", shadowed: false, disabledReason: null, detail, toolPrefix: null, runtimeName: null, sources: [], toggle });
     }
 
     // Plugins: user plugins are switched globally (Global scope only). In a session the project's copy of a package wins
@@ -254,13 +270,13 @@ async function collect(request: WorkerRequest, n: Natives): Promise<Collected> {
         const shadowed = projectCopies.has(plugin.name);
         rows.push({ kind: "plugin", name: plugin.name, description: null, path: path.join(plugin.path, "package.json"), provider: "omp-plugins", providerName: "OMP package", level: "user",
           state: shadowed ? "shadowed" : plugin.enabled ? "active" : "disabled", shadowed, disabledReason: shadowed ? "shadowed" : null,
-          detail: `v${plugin.version}${count > 0 ? ` · ${count} extension entr${count === 1 ? "y" : "ies"}` : ""}`, toolPrefix: null, runtimeName: null,
+          detail: `v${plugin.version}${count > 0 ? ` · ${count} extension entr${count === 1 ? "y" : "ies"}` : ""}`, toolPrefix: null, runtimeName: null, sources: [],
           toggle: shadowed ? { mechanism: null, refusal: "this project's copy of the package is the one OMP loads" }
             : request.scope === "global" ? { mechanism: "plugin", refusal: null } : { mechanism: null, refusal: "switch the view to Global to enable or disable plugins" } });
       }
       for (const plugin of projectCopies.values()) {
         rows.push({ kind: "plugin", name: plugin.name, description: null, path: path.join(plugin.path, "package.json"), provider: "omp-plugins", providerName: "OMP package", level: "project",
-          state: "active", shadowed: false, disabledReason: null, detail: `v${plugin.version} · installed in this project`, toolPrefix: null, runtimeName: null,
+          state: "active", shadowed: false, disabledReason: null, detail: `v${plugin.version} · installed in this project`, toolPrefix: null, runtimeName: null, sources: [],
           toggle: { mechanism: null, refusal: "it is installed in this project; manage it there" } });
       }
     } catch { incomplete.add("extensions"); }

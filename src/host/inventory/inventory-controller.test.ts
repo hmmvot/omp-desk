@@ -7,7 +7,7 @@ import type { InventoryRuntime, InventoryReadRequest, ToggleRequest, ToggleResul
 import type { SessionToolsTarget } from "../session-tools.ts";
 
 const skill: InventoryRow = { kind: "skill", name: "review", description: null, path: "C:/s/SKILL.md", provider: "native", providerName: "OMP", level: "user", state: "active", shadowed: false,
-	disabledReason: null, detail: null, toolPrefix: null, runtimeName: "review", toggle: { mechanism: "disabledExtensions", refusal: null } };
+	disabledReason: null, detail: null, toolPrefix: null, runtimeName: "review", sources: [], toggle: { mechanism: "disabledExtensions", refusal: null } };
 const snapshot = (cwd: string, profile = "default"): InventorySnapshot => ({ rows: [{ ...skill }], cwd, profile, projectOverridesDisabledExtensions: false, incomplete: [], disabledProviders: [] });
 
 function target(overrides: Partial<SessionToolsTarget> = {}): SessionToolsTarget {
