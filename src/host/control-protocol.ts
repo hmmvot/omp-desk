@@ -48,9 +48,9 @@ import {
 	randomUUID,
 	timingSafeEqual,
 } from "node:crypto";
-import { open, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { open, readdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
-import { retryWindowsFileOperation } from "./file-operation-retry.ts";
+import { FILE_OPERATION_BACKOFF_MS, replaceFileAtomic } from "./atomic-file.ts";
 
 /** Bumped when a frame shape changes incompatibly; both ends must match. */
 export const CONTROL_PROTOCOL_VERSION = 3;
@@ -1213,13 +1213,7 @@ export async function writeControlRendezvous(
 	record: ControlRendezvous,
 ): Promise<void> {
 	const path = controlRendezvousPath(directory, record.slotId);
-	const temp = `${path}.${process.pid}.tmp`;
-	await writeFile(temp, `${JSON.stringify(record, null, "\t")}\n`, { encoding: "utf8", mode: 0o600 });
-	try {
-		await retryWindowsFileOperation(() => rename(temp, path));
-	} finally {
-		await rm(temp, { force: true }).catch(() => undefined);
-	}
+	await replaceFileAtomic(path, `${JSON.stringify(record, null, "\t")}\n`, { backoff: FILE_OPERATION_BACKOFF_MS, createDirectory: false });
 }
 
 /** Remove the rendezvous only while it still names `instanceId`. */

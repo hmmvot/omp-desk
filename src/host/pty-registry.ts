@@ -32,6 +32,7 @@
 import { link, lstat, mkdir, readdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { createHash, randomBytes } from "node:crypto";
 import { join } from "node:path";
+import { stageBeside } from "./atomic-file.ts";
 import { restrictPrivateStorage, type PrivateStorageProbe } from "./private-storage.ts";
 import { PTY_RECORD_SUFFIX, isPtyCreationTime, parsePtyBrokerRecord, type PtyBrokerRecord } from "./pty-protocol.ts";
 import { isPtyProcessAlive } from "./pty-identity.ts";
@@ -344,8 +345,7 @@ export async function claimPtyRecord(
 	if (held !== null && held.holderId !== options.launchId && isPtyProcessAlive(held.pid)) {
 		return { claimed: false, detail: "another window is claiming this slot" };
 	}
-	const temporary = `${target}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
-	await writeFile(temporary, `${JSON.stringify(record)}\n`, { mode: 0o600 });
+	const temporary = await stageBeside(target, `${JSON.stringify(record)}\n`);
 	try {
 		try {
 			await link(temporary, target);

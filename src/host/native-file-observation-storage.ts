@@ -46,8 +46,7 @@ import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
-import { retryWindowsFileOperation } from "./file-operation-retry.ts";
+import { FILE_OPERATION_BACKOFF_MS, replaceFileAtomic } from "./atomic-file.ts";
 
 import { isControlSlotId } from "./control-protocol.ts";
 import {
@@ -346,27 +345,23 @@ async function readBytesBounded(file: string, maxBytes: number): Promise<Bounded
 	}
 }
 
-/** Write bytes to a temporary file, flush them, then rename into place. */
+/**
+ * Write bytes to a staged file in the namespace's own `tmp` directory (its access rules are verified
+ * before any write, and a blob or record directory is listed by its readers), flush them, then rename
+ * into place. Every directory exists already: nothing here creates one.
+ */
 async function writeFileAtomically(
 	directory: string,
 	temporary: string,
 	name: string,
 	bytes: Uint8Array,
 ): Promise<void> {
-	const staged = path.join(temporary, `.${process.pid}-${randomUUID()}.staged`);
-	const handle = await fs.open(staged, "wx", 0o600);
-	try {
-		await handle.writeFile(bytes);
-		await handle.sync();
-	} finally {
-		await handle.close();
-	}
-	try {
-		await retryWindowsFileOperation(() => fs.rename(staged, path.join(directory, name)));
-	} catch (error) {
-		await fs.rm(staged, { force: true }).catch(() => {});
-		throw error;
-	}
+	await replaceFileAtomic(path.join(directory, name), bytes, {
+		sync: true,
+		backoff: FILE_OPERATION_BACKOFF_MS,
+		createDirectory: false,
+		stagingDirectory: temporary,
+	});
 }
 
 /** Key order is fixed here so the consent digest is stable without a canonical encoder. */

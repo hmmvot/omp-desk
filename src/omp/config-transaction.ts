@@ -1,10 +1,10 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { YAML } from "bun";
-import { retryWindowsFileOperation } from "../host/file-operation-retry.ts";
+import { FILE_OPERATION_BACKOFF_MS, retryFileOperation, stageBeside } from "../host/atomic-file.ts";
 import { mergeConfigEdits, valueAt, SettingsRefusal } from "../host/omp-settings-core.ts";
 import { isRecord as record } from "../guards";
 import type { ConfigEdit, ConfigRecord, SettingsScope } from "../host/omp-settings-core.ts";
@@ -51,15 +51,10 @@ export async function readConfig(logical: string): Promise<FileBaseline> {
   return { logical, physical, exists: true, digest: createHash("sha256").update(content).digest("hex"), settings: record(parsed) ? parsed : {} };
 }
 
+/** Stage `content` beside `target` (creating its directory), flushed to disk, for the caller to publish and remove. */
 export async function stageFile(target: string, content: string): Promise<string> {
   await fs.mkdir(path.dirname(target), { recursive: true });
-  const staged = `${target}.${process.pid}.${randomUUID()}.tmp`;
-  const handle = await fs.open(staged, "wx", 0o600);
-  try {
-    try { await handle.writeFile(content, "utf8"); await handle.sync(); }
-    finally { await handle.close(); }
-  } catch (error) { await fs.rm(staged, { force: true }).catch(() => {}); throw error; }
-  return staged;
+  return stageBeside(target, content, { sync: true });
 }
 
 /**
@@ -91,7 +86,7 @@ export async function writeConfig(
     try {
       const latest = await readConfig(logical);
       if (latest.physical !== current.physical || latest.exists !== current.exists || latest.digest !== current.digest) throw new SettingsRefusal("The config changed during saving. Reload; nothing was overwritten.");
-      if (current.exists) await retryWindowsFileOperation(() => fs.rename(staged, current.physical));
+      if (current.exists) await retryFileOperation(() => fs.rename(staged, current.physical), FILE_OPERATION_BACKOFF_MS);
       else await fs.link(staged, current.physical);
     } finally { await fs.rm(staged, { force: true }); }
     return true;

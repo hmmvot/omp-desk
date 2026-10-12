@@ -37,7 +37,7 @@
 
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
-import { retryWindowsFileOperation } from "./file-operation-retry.ts";
+import { FILE_OPERATION_BACKOFF_MS, replaceFileAtomic } from "./atomic-file.ts";
 import { BRIDGE_PATH, BRIDGE_SECRET_BYTES, asciiJsonText, decodeBase64Url, encodeBase64Url, encodeHex, sha256 } from "../bridge-protocol.ts";
 import { isBridgeTabId, tabIdToken } from "../bridge-identity.ts";
 
@@ -577,13 +577,6 @@ export class BridgeRecords {
 
 	/** Write a record through a private temporary file and one rename. */
 	async #writeAtomically(file: string, value: unknown): Promise<void> {
-		await fsp.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
-		const temporary = `${file}.${process.pid}.${Math.random().toString(16).slice(2)}.tmp`;
-		await fsp.writeFile(temporary, `${JSON.stringify(value, null, "\t")}\n`, { encoding: "utf8", mode: 0o600 });
-		try {
-			await retryWindowsFileOperation(() => fsp.rename(temporary, file));
-		} finally {
-			await fsp.rm(temporary, { force: true }).catch(() => undefined);
-		}
+		await replaceFileAtomic(file, `${JSON.stringify(value, null, "\t")}\n`, { backoff: FILE_OPERATION_BACKOFF_MS });
 	}
 }

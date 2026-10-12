@@ -18,7 +18,7 @@ import * as fsSync from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { retryWindowsFileOperation } from "./file-operation-retry.ts";
+import { FILE_OPERATION_BACKOFF_MS, replaceFileAtomic, stageBeside } from "./atomic-file.ts";
 import { windowsPowerShellEnvironment, windowsPowerShellExecutable } from "./windows-powershell.ts";
 
 /** Directory created under `storageDir` that owns every claim file. */
@@ -562,27 +562,7 @@ function rivalHolderConflict(
  * never observe a missing claim file.
  */
 async function replaceClaimRecord(claimPath: string, record: ClaimRecord): Promise<void> {
-	await replaceStagedFile(claimPath, `${JSON.stringify(record, null, "\t")}\n`);
-}
-
-/**
- * Replace the file at `target` with `content` in one rename, so no contender can
- * observe a missing file. The staged entry is private to this process and is
- * removed whatever happens.
- */
-async function replaceStagedFile(target: string, content: string): Promise<void> {
-	const staged = `${target}.${process.pid}.${randomUUID()}.staged`;
-	try {
-		const handle = await fsp.open(staged, "wx", 0o600);
-		try {
-			await handle.writeFile(content, "utf8");
-		} finally {
-			await handle.close();
-		}
-		await retryWindowsFileOperation(() => fsp.rename(staged, target));
-	} finally {
-		await fsp.rm(staged, { force: true }).catch(() => undefined);
-	}
+	await replaceFileAtomic(claimPath, `${JSON.stringify(record, null, "\t")}\n`, { backoff: FILE_OPERATION_BACKOFF_MS, createDirectory: false });
 }
 
 /**
@@ -603,15 +583,8 @@ async function publishClaimFile(claimPath: string, record: ClaimRecord): Promise
  * empty or half-written one.
  */
 async function publishStagedFile(target: string, content: string): Promise<boolean> {
-	const staged = `${target}.${process.pid}.${randomUUID()}.staged`;
+	const staged = await stageBeside(target, content);
 	try {
-		const stagedHandle = await fsp.open(staged, "wx", 0o600);
-		try {
-			await stagedHandle.writeFile(content, "utf8");
-		} finally {
-			await stagedHandle.close();
-		}
-
 		try {
 			await fsp.link(staged, target);
 			return true;

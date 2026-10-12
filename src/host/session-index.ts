@@ -18,7 +18,7 @@ import type { FileHandle } from "node:fs/promises";
 import { createReadStream } from "node:fs";
 import { createInterface } from "node:readline";
 import * as path from "node:path";
-import { retryWindowsFileOperation } from "./file-operation-retry.ts";
+import { FILE_OPERATION_BACKOFF_MS, retryFileOperation } from "./atomic-file.ts";
 import {
 	ClaimConflictError,
 	ClaimOwnershipError,
@@ -2636,9 +2636,9 @@ export class SessionIndex {
 				// Retry only admission before any launcher call; never replay a restore
 				// after it may have started a writer.
 				const holder = await this.#claimHolderReady;
-				claim = await retryWindowsFileOperation(
+				claim = await retryFileOperation(
 					() => acquireClaim(this.#claimStorageDir, target, generation, holder),
-					{ attempts: 3 },
+					FILE_OPERATION_BACKOFF_MS.slice(0, 2),
 				);
 			} catch (error) {
 				if (error instanceof ClaimConflictError) {

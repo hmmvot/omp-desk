@@ -1,8 +1,14 @@
 /**
- * Replace a small file in one rename, so a reader never observes a half-written or
- * missing file. The staged entry (`<target>.<uuid>.tmp`) is private to this call and is
- * removed whatever happens. A rename that another process's open handle briefly blocks
- * (`EPERM`, `EBUSY`, `EACCES` on Windows) is retried with a growing wait (`RENAME_BACKOFF_MS`).
+ * The one module for replacing a file's content and for retrying a file operation.
+ *
+ * `replaceFileAtomic` stages the content in a private sibling (`<target>.<pid>.<uuid>.tmp`,
+ * created exclusively by `stageBeside`) and renames it over the target in one step, so a
+ * reader never observes a half-written or missing file; the staged entry is removed whatever
+ * happens. A rename (or any other file operation) that another process's open handle briefly
+ * blocks (`EPERM`, `EBUSY`, `EACCES` on Windows) is retried through `retryFileOperation` with
+ * a growing wait. Two budgets are named: `RENAME_BACKOFF_MS` (the default of
+ * `replaceFileAtomic`, shared records that other windows re-read) and
+ * `FILE_OPERATION_BACKOFF_MS` (the shorter one that bounds a launch admission).
  */
 
 import { randomUUID } from "node:crypto";
@@ -16,6 +22,12 @@ import * as path from "node:path";
  */
 export const RENAME_BACKOFF_MS: readonly number[] = [10, 20, 40, 80, 160, 320, 640, 800];
 
+/**
+ * Waits between attempts of the shorter budget, about 1.1 s in all (seven attempts). It bounds the writers that run
+ * under a launch, a claim or a transaction, where a longer wait would be a change in how long that step may take.
+ */
+export const FILE_OPERATION_BACKOFF_MS: readonly number[] = [25, 50, 100, 200, 250, 250];
+
 /** The error's `code`, when it has one. */
 export function errorCode(error: unknown): string | undefined {
 	if (typeof error !== "object" || error === null || !("code" in error)) return undefined;
@@ -28,34 +40,98 @@ function delay(ms: number): Promise<void> {
 	return promise;
 }
 
-export async function replaceFileAtomic(target: string, content: string): Promise<void> {
-	await fsp.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
-	const staged = `${target}.${randomUUID()}.tmp`;
-	try {
-		await fsp.writeFile(staged, content, { encoding: "utf8", mode: 0o600, flag: "wx" });
-		await renameReplacing(() => fsp.rename(staged, target), delay);
-	} finally {
-		await fsp.rm(staged, { force: true }).catch(() => {});
-	}
-}
-
-/** Whether a rename failed only because another process holds the target or the staged file open. */
+/** Whether an operation failed only because another process holds a file open. */
 function isSharingViolation(error: unknown): boolean {
 	const code = errorCode(error);
 	return code === "EPERM" || code === "EBUSY" || code === "EACCES";
 }
 
-/** Run `rename` until it lands, waiting out `RENAME_BACKOFF_MS`; any other error, or the last sharing violation, is thrown. */
-export async function renameReplacing(rename: () => Promise<void>, wait: (ms: number) => Promise<void>): Promise<void> {
-	for (let attempt = 0; ; attempt++) {
+/** Test seams of `retryFileOperation`. */
+export interface RetryFileOperationOptions {
+	readonly platform?: NodeJS.Platform;
+	readonly wait?: (ms: number) => Promise<unknown>;
+}
+
+/**
+ * Run `operation`, and when it fails with a Windows sharing or access violation (`EPERM`, `EBUSY`,
+ * `EACCES`) wait the next entry of `backoff` and run it again: `backoff.length + 1` attempts at most.
+ * Any other error, any error off Windows, and the last violation are thrown as they are. Never
+ * unlinks the target: each attempt is the same atomic replacement or pre-launch claim admission.
+ */
+export async function retryFileOperation<T>(
+	operation: () => Promise<T>,
+	backoff: readonly number[],
+	options: RetryFileOperationOptions = {},
+): Promise<T> {
+	const wait = options.wait ?? delay;
+	for (let attempt = 0; ; attempt += 1) {
 		try {
-			await rename();
-			return;
+			return await operation();
 		} catch (error) {
-			const pause = RENAME_BACKOFF_MS[attempt];
-			if (pause === undefined || !isSharingViolation(error)) throw error;
+			const pause = backoff[attempt];
+			if ((options.platform ?? process.platform) !== "win32" || pause === undefined || !isSharingViolation(error)) throw error;
 			await wait(pause);
 		}
+	}
+}
+
+/** Run `rename` until it lands, waiting out `RENAME_BACKOFF_MS` (on any platform); any other error, or the last sharing violation, is thrown. */
+export function renameReplacing(rename: () => Promise<void>, wait: (ms: number) => Promise<void>): Promise<void> {
+	return retryFileOperation(rename, RENAME_BACKOFF_MS, { platform: "win32", wait });
+}
+
+/** How a staged sibling is written. */
+export interface StageBesideOptions {
+	/** Permission bits of the staged file; `0o600`. */
+	readonly mode?: number;
+	/** Flush the staged file to disk before it is handed out. */
+	readonly sync?: boolean;
+	/** Stage in this directory instead of the target's own, for a store whose staging area has its own access rules. */
+	readonly stagingDirectory?: string;
+}
+
+/**
+ * Write `content` to a private sibling of `target`, `<target>.<pid>.<uuid>.tmp`, created exclusively
+ * (an existing entry of that name is an error, never reused or overwritten), and return its path. A
+ * failed write removes what it created. Once this returns, removing the staged entry is the caller's:
+ * the one that renames it, links it into place or gives up.
+ */
+export async function stageBeside(target: string, content: string | Uint8Array, options: StageBesideOptions = {}): Promise<string> {
+	const unique = `${process.pid}.${randomUUID()}.tmp`;
+	const staged = options.stagingDirectory === undefined
+		? `${target}.${unique}`
+		: path.join(options.stagingDirectory, `${path.basename(target)}.${unique}`);
+	const handle = await fsp.open(staged, "wx", options.mode ?? 0o600);
+	try {
+		try {
+			await handle.writeFile(content, "utf8");
+			if (options.sync === true) await handle.sync();
+		} finally {
+			await handle.close();
+		}
+	} catch (error) {
+		await fsp.rm(staged, { force: true }).catch(() => {});
+		throw error;
+	}
+	return staged;
+}
+
+/** How `replaceFileAtomic` stages and publishes. */
+export interface ReplaceFileOptions extends StageBesideOptions {
+	/** Waits between rename attempts; `RENAME_BACKOFF_MS`. */
+	readonly backoff?: readonly number[];
+	/** Create the target's directory (owner-only) when it is missing; `true`. A store that verified its directories first passes `false`. */
+	readonly createDirectory?: boolean;
+}
+
+/** Replace the file at `target` with `content` in one rename; the old content stays whole until the new lands. */
+export async function replaceFileAtomic(target: string, content: string | Uint8Array, options: ReplaceFileOptions = {}): Promise<void> {
+	if (options.createDirectory !== false) await fsp.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+	const staged = await stageBeside(target, content, options);
+	try {
+		await retryFileOperation(() => fsp.rename(staged, target), options.backoff ?? RENAME_BACKOFF_MS);
+	} finally {
+		await fsp.rm(staged, { force: true }).catch(() => {});
 	}
 }
 

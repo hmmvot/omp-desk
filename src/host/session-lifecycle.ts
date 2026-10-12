@@ -94,9 +94,9 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { mkdir, readdir, readFile, rename, rm, stat, unlink, writeFile } from "node:fs/promises";
+import { readdir, readFile, rm, stat, unlink } from "node:fs/promises";
 import * as path from "node:path";
-import { retryWindowsFileOperation } from "./file-operation-retry.ts";
+import { FILE_OPERATION_BACKOFF_MS, replaceFileAtomic } from "./atomic-file.ts";
 import {
 	ClaimOwnershipError,
 	acquireClaim,
@@ -407,15 +407,8 @@ export function createNativeDeletionEvidenceStore(directory: string): NativeDele
 			}
 		},
 		async write(transaction: NativeDeletionTransaction): Promise<void> {
-			await mkdir(root, { recursive: true, mode: 0o700 });
 			const file = path.join(root, `${evidenceFileName(transaction.transactionId)}.json`);
-			const staged = `${file}.${process.pid}.${randomUUID()}.staged`;
-			await writeFile(staged, `${JSON.stringify(transaction, null, "\t")}\n`, { encoding: "utf8", mode: 0o600 });
-			try {
-				await retryWindowsFileOperation(() => rename(staged, file));
-			} finally {
-				await rm(staged, { force: true }).catch(() => undefined);
-			}
+			await replaceFileAtomic(file, `${JSON.stringify(transaction, null, "\t")}\n`, { backoff: FILE_OPERATION_BACKOFF_MS });
 		},
 		async list(): Promise<readonly NativeDeletionTransaction[]> {
 			let names: readonly string[];

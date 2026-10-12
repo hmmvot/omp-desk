@@ -72,9 +72,10 @@
  * that proof.
  */
 
-import { createHash, randomBytes } from "node:crypto";
-import { link, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { link, mkdir, readFile, readdir, rename, rm } from "node:fs/promises";
 import { basename, dirname, join, relative, sep } from "node:path";
+import { stageBeside } from "./host/atomic-file.ts";
 import { restrictPrivateStorage, type PrivateStorageLayout, type PrivateStorageProbe } from "./host/private-storage.ts";
 
 /** Directory inside extension global storage holding staged runtime assets. */
@@ -209,8 +210,7 @@ async function stageRuntimeAsset(storageDir: string, sourcePath: string): Promis
 	if ((await digestOfFile(target)) === sha256) return { path: target, sha256 };
 
 	await mkdir(directory, { recursive: true, mode: 0o700 });
-	const temporary = `${target}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
-	await writeFile(temporary, bytes, { mode: 0o600 });
+	const temporary = await stageBeside(target, bytes);
 	try {
 		// Publication first tries `link`, which creates the path only when it does not
 		// exist yet: a second staging of the same digest that races this one therefore
@@ -428,8 +428,7 @@ async function publishTreeFile(
 ): Promise<StagedRuntimeTreeFile> {
 	if ((await digestOfFile(target)) === sha256) return { path: target, relativePath, sha256 };
 	const bytes = await readFile(sourcePath);
-	const temporary = `${target}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
-	await writeFile(temporary, bytes, { mode: 0o600 });
+	const temporary = await stageBeside(target, bytes);
 	try {
 		if (!(await publishNewCopy(temporary, target))) await replaceCopy(temporary, target, sha256);
 	} finally {

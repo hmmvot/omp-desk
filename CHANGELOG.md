@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The shipped bundles (`out/extension.js`, `media/guest.js` and the others) are minified; the extension host parses the first at every window start and a session editor the second when it opens, and both were about twice the size (2.1 MB and 2.0 MB, now 1.1 MB each). The watch build (`npm run watch`) stays readable.
 - The OMP Desk output logs how long the PTY broker's health check took on the first launch in a window (`PTY runtime proved itself: self-check N ms, ready in M ms`): the check's own run, and the whole proof including the staging of the broker tree. An unproven admission and the repeated check log their times too. The numbers are the basis for deciding whether one proof should be shared by every window.
+- Internal structure: every writer that replaces a file now goes through `src/host/atomic-file.ts` (one exclusive `<file>.<pid>.<uuid>.tmp` staging entry, removed on every exit, and one retry loop for Windows sharing violations with two named budgets, unchanged in length), and the hard-link publishers of the runtime copies and the PTY records stage through the same module; the separate `file-operation-retry.ts` is gone. Temporary files of the session claims, bridge records, control rendezvous and native evidence are now named `*.tmp`, not `*.staged`.
 
 ### Fixed
 
