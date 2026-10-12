@@ -2,6 +2,7 @@ import * as path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import * as vscode from "vscode";
 import { InventoryController } from "./inventory/inventory-controller.ts";
+import { createRuntimeResolver, NO_BUN, noPackageSource } from "./inventory/inventory-environment.ts";
 import { createInventoryRuntime } from "./inventory/inventory-runtime.ts";
 import { OPEN_SOURCE_COMMAND, InventoryTreeProvider } from "../views/inventory-tree.ts";
 import { runSettingsWorker } from "./omp-settings-worker";
@@ -33,34 +34,34 @@ const VIEWS: readonly ViewSpec[] = [
 	{ kind: "extensions", id: "omp.extensions", refresh: "omp.refreshExtensions", noun: "extensions" },
 ];
 const UNDO = "Undo";
-const UNAVAILABLE_BUN = "OMP's inventory needs Bun and the installed OMP's importable sources; a compiled-only OMP install cannot supply it.";
-const RESOLVE_TTL_MS = 60_000;
 
 export function registerInventoryViews(context: vscode.ExtensionContext, deps: InventoryViewsDeps): InventoryHandle {
 	const storage = context.globalStorageUri.fsPath;
-	/** Where Bun and the OMP package are is stable for a minute; resolving them spawns lookups, so it is not repeated per read. The staged worker is still verified on every run. */
-	let resolved: { readonly at: number; readonly bun: string; readonly root: string } | null = null;
+	const runtimeLocation = createRuntimeResolver({
+		log: deps.log,
+		async resolve() {
+			const executable = await resolveOmpBinary();
+			const [bun, root] = await Promise.all([resolveBunRuntime(), resolveOmpPackageRoot(executable)]);
+			if (bun === null) return { ok: false, unavailable: NO_BUN };
+			if (root === null) return { ok: false, unavailable: noPackageSource(executable.command, executable.version) };
+			return { ok: true, bun, packageRoot: root.root, launcher: executable.command, release: executable.version };
+		},
+	});
 	const runtime = createInventoryRuntime({
 		async environment(): Promise<WorkerEnvironment | { unavailable: string }> {
 			const started = Date.now();
 			try {
-				if (resolved === null || Date.now() - resolved.at > RESOLVE_TTL_MS) {
-					const executable = await resolveOmpBinary();
-					const [bun, root] = await Promise.all([resolveBunRuntime(), resolveOmpPackageRoot(executable)]);
-					if (bun === null || root === null) return { unavailable: UNAVAILABLE_BUN };
-					resolved = { at: Date.now(), bun, root: root.root };
-					deps.log(`inventory: resolved Bun and the OMP package in ${Date.now() - started} ms`);
-				}
+				const location = await runtimeLocation();
+				if ("unavailable" in location) return location;
 				const verifyStarted = Date.now();
 				const [asset] = await stageRuntimeAssets({ storageDir: storage, sourcePaths: [vscode.Uri.joinPath(context.extensionUri, "out", "inventory-worker.mjs").fsPath] });
 				if (asset === undefined || !(await verifyStagedRuntimeAsset(asset))) return { unavailable: "The inventory worker is missing from this extension build or its staged copy changed." };
 				const total = Date.now() - started;
 				if (total > 250) deps.log(`inventory: environment took ${total} ms (staging and verifying the worker ${Date.now() - verifyStarted} ms)`);
-				return { bun: resolved.bun, packageRoot: resolved.root, helperPath: asset.path };
+				return { bun: location.bun, packageRoot: location.packageRoot, helperPath: asset.path };
 			} catch (error) {
-				resolved = null;
 				deps.log(`inventory: environment unavailable: ${error instanceof Error ? error.message : String(error)}`);
-				return { unavailable: "The installed OMP could not be resolved." };
+				return { unavailable: "The inventory worker could not be prepared." };
 			}
 		},
 		run: input => runSettingsWorker({ bunPath: input.environment.bun, helperPath: input.environment.helperPath, packageRoot: input.environment.packageRoot,
