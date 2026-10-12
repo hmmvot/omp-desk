@@ -87,7 +87,9 @@ import { blobsDirectoryFor, resolveBlobImages } from "./history-blobs.ts";
 import { parseAgentRoster } from "../../chat/agents.ts";
 import { childPageFromNative, type SubagentTranscriptPage } from "../../chat/subagent-transcript.ts";
 import { isRecord } from "../../guards.ts";
-import { readJournalCost } from "../session-cost.ts";
+import { readJournalCost, readJournalFacts, type JournalFacts } from "../session-cost.ts";
+import { extractContextFiles, isContextReportText, parseContextReport, parseSessionStats } from "../context/context-parse.ts";
+import type { ContextRead, ContextReportRead } from "../context/context-parse.ts";
 import { RpcFrameReader, type RpcFrameCounters } from "./frames.ts";
 import {
 	DENIED_SLASH_COMMANDS,
@@ -425,6 +427,14 @@ export type MaintenanceRequest =
 const MAINTENANCE_REPORT_TIMEOUT_MS = 15 * 60_000;
 /** HTML export renders the whole session. */
 const EXPORT_TIMEOUT_MS = 2 * 60_000;
+/** `/context` is a builtin that answers before anything else runs. */
+const CONTEXT_REPORT_TIMEOUT_MS = 10_000;
+
+/** What the frame handler saw when the report arrived: the text, the time and the usage the Chat state showed then. */
+interface ContextCapture { readonly text: string; readonly at: number; readonly usageTokens: number | null }
+interface ContextRequest { readonly capture: (capture: ContextCapture | null) => void; captured: boolean }
+/** How long after the acknowledgement a report that has not arrived is still awaited. */
+const CONTEXT_REPORT_GRACE_MS = 500;
 /**
  * Stop queues behind whatever serial command the child is running (a manual shake at worst) and then waits
  * for the turn to go idle. OMP has already withdrawn the queue when it answers, so the answer must not be given up early.
@@ -618,6 +628,14 @@ export class RpcSession {
 	#internalSeq = 0;
 	/** Takes the next `command_output` line while a manual maintenance pass waits for its report. */
 	#maintenanceReport: ((text: string | null) => void) | null = null;
+	/**
+	 * The explicit `/context` request in flight, from admission until its result is returned (ADR-0063). It fences every
+	 * mutation like a navigation does (`#controlRefusal`), is bound to the native identity it started under, and
+	 * takes the first `command_output` that is a report while it waits; the frame itself still renders.
+	 */
+	#contextRequest: ContextRequest | null = null;
+	/** Prompts, steers and follow-ups written and not yet acknowledged. */
+	#userInputInFlight = 0;
 	#unsubscribe: (() => void) | null = null;
 	#startPromise: Promise<void> | null = null;
 	#paint: Promise<void> = Promise.resolve();
@@ -849,6 +867,8 @@ export class RpcSession {
 		this.#failAllCommands("closed");
 		this.#maintenanceReport?.(null);
 		this.#maintenanceReport = null;
+		this.#contextRequest?.capture(null);
+		this.#contextRequest = null;
 		for (const waiter of this.#readyWaiters.splice(0)) waiter(false);
 		this.#hostToolsListener?.dispose();
 		this.#hostToolsListener = null;
@@ -868,7 +888,7 @@ export class RpcSession {
 					: outcome.status === "unconfirmed" ? { status: "unconfirmed" }
 					: { status: "refused", reason: outcome.reason === "busy" || outcome.reason === "jobs" ? "busy" : "rejected" };
 			}
-			const refusal = this.#controlRefusal() ?? await this.#applyHeldBeforeSend();
+			const refusal = this.#controlRefusal() ?? await this.#applyHeldBeforeSend() ?? this.#controlRefusal();
 			if (refusal !== null) return { status: "refused", reason: refusal };
 			this.#slashArmed = request.text.trimStart().startsWith("/");
 			this.#remember({ requestId: request.requestId, text: request.text, sentAt: this.#timers.now(), unconfirmed: false });
@@ -883,7 +903,7 @@ export class RpcSession {
 
 	steer(request: MessageRequest): Promise<SendOutcome> {
 		return this.#once(request.requestId, async () => {
-			const refusal = this.#controlRefusal() ?? await this.#applyHeldBeforeSend();
+			const refusal = this.#controlRefusal() ?? await this.#applyHeldBeforeSend() ?? this.#controlRefusal();
 			if (refusal !== null) return { status: "refused", reason: refusal };
 			return this.#sendUser(request.requestId, {
 				type: "steer",
@@ -895,7 +915,7 @@ export class RpcSession {
 
 	followUp(request: MessageRequest): Promise<SendOutcome> {
 		return this.#once(request.requestId, async () => {
-			const refusal = this.#controlRefusal() ?? await this.#applyHeldBeforeSend();
+			const refusal = this.#controlRefusal() ?? await this.#applyHeldBeforeSend() ?? this.#controlRefusal();
 			if (refusal !== null) return { status: "refused", reason: refusal };
 			return this.#sendUser(request.requestId, {
 				type: "follow_up",
@@ -1559,6 +1579,85 @@ export class RpcSession {
 		return typeof cost === "number" && Number.isFinite(cost) && cost > 0 ? cost : null;
 	}
 
+	/**
+	 * One identity-checked read of what OMP reports about this session's context through its read-only surfaces
+	 * (ADR-0063): `get_state` (the auto-compaction flag and the prompt's context files), `get_session_stats` and the
+	 * session file's spend and boundaries. Each part is `null` when its source did not answer; the whole read is
+	 * `null` when the session is not live or its identity changed while reading. It writes nothing to the session
+	 * and adds nothing to the conversation. OMP's `/context` report is a separate, explicit request
+	 * ({@link RpcSession.requestContextReport}).
+	 */
+	async readContext(): Promise<ContextRead | null> {
+		if (this.#disposed || this.#ended || !this.#live || !this.#identityVerified) return null;
+		const epoch = this.#epochCounter;
+		const file = this.#boundFile;
+		const id = this.#boundId;
+		const gone = (): boolean => this.#disposed || this.#ended || !this.#live || epoch !== this.#epochCounter || file !== this.#boundFile || id !== this.#boundId;
+		const state = await this.#fetchState();
+		if (state === null || gone() || this.#identityMismatch(state, false) !== null) return null;
+		const statsOutcome = await this.#sendInternal({ type: "get_session_stats" });
+		if (gone()) return null;
+		const statsData = statsOutcome.status === "accepted" && isRecord(statsOutcome.response.data) && statsOutcome.response.data.sessionId === id &&
+			(file === null || (typeof statsOutcome.response.data.sessionFile === "string" && samePath(statsOutcome.response.data.sessionFile, file))) ? statsOutcome.response.data : null;
+		const stats = statsData === null ? null : parseSessionStats(statsData);
+		let journal: JournalFacts | null = null;
+		if (file !== null) journal = await readJournalFacts(file);
+		else if (statsData !== null && typeof statsData.cost === "number" && Number.isFinite(statsData.cost)) journal = { cost: statsData.cost, compactionCount: 0, lastCompaction: null, clearCount: 0, lastClear: null };
+		if (gone()) return null;
+		return { at: this.#timers.now(), autoCompaction: state.autoCompaction, stats, journal, files: state.systemPrompt === null ? null : extractContextFiles(state.systemPrompt) };
+	}
+
+	/**
+	 * OMP's own `/context` report, on the user's explicit request (ADR-0063). It runs in the conversation exactly as if
+	 * the user typed it: the report also appears there as the notice OMP's command output always is, so nothing is
+	 * hidden and nothing is replayed differently after a reload. The report is taken from the one `command_output` that
+	 * is a report while this request waits; the frame is not consumed. Refused while a turn, a pass, a rewind or
+	 * another report request is in flight, and when the session's catalogue lacks the builtin. If the text did not run
+	 * as a command (an input hook rewrote it) the turn it started is aborted and the request is refused.
+	 */
+	async requestContextReport(): Promise<CommandResult<ContextReportRead>> {
+		// A request in flight is itself a `#controlRefusal` ("busy"), so a second request, a maintenance pass, a rewind, a clear and any prompt wait for this one to finish.
+		const refusal = this.#controlRefusal();
+		if (refusal !== null) return { status: "refused", reason: refusal };
+		const busy = this.#model.working || this.#model.asyncPaused || this.#model.state?.isCompacting === true ||
+			this.#model.maintenance?.status === "working" || this.#maintenanceReport !== null || this.#userInputInFlight > 0;
+		if (busy) return { status: "refused", reason: "busy" };
+		// Only OMP's own builtin: a same-named extension command or prompt template would not print the report.
+		if (!this.#model.commands.some(command => command.name === "context" && command.source === "builtin")) return { status: "refused", reason: "rejected" };
+		const epoch = this.#epochCounter;
+		const file = this.#boundFile;
+		const id = this.#boundId;
+		// Native identity and the input claim it started under: losing the claim and regaining it keeps the epoch, file and id but not the generation, and whoever held the claim meanwhile may have started work an abort would hit.
+		const owner = this.#channel.ownerGeneration;
+		const current = (): boolean => !this.#disposed && !this.#ended && this.#live && epoch === this.#epochCounter && file === this.#boundFile && id === this.#boundId &&
+			this.#channel.inputOwned && this.#channel.ownerGeneration === owner;
+		const answer = Promise.withResolvers<ContextCapture | null>();
+		const request: ContextRequest = { capture: answer.resolve, captured: false };
+		this.#contextRequest = request;
+		let grace: unknown = null;
+		try {
+			const ack = await this.#sendInternal({ type: "prompt", message: "/context" }, CONTEXT_REPORT_TIMEOUT_MS);
+			// The session moved on (reconnect, another identity, closed) while the acknowledgement was awaited: nothing here describes it, and an abort would hit work this request did not start.
+			if (!current()) return { status: "refused", reason: "not-live" };
+			if (ack.status !== "accepted") return ack;
+			if (!isRecord(ack.response.data) || ack.response.data.agentInvoked !== false) {
+				void this.#sendInternal({ type: "abort" });
+				return { status: "refused", reason: "rejected" };
+			}
+			// OMP writes the report before it acknowledges, so it is already here unless the builtin printed something else.
+			if (!request.captured) grace = this.#timers.setTimeout(() => answer.resolve(null), CONTEXT_REPORT_GRACE_MS);
+			const capture = await answer.promise;
+			if (!current()) return { status: "refused", reason: "not-live" };
+			const report = capture === null ? null : parseContextReport(capture.text);
+			return report === null || capture === null ? { status: "unconfirmed" } : { status: "ok", value: { at: capture.at, usageTokensAtRead: capture.usageTokens, report } };
+		} finally {
+			if (grace !== null) this.#timers.clearTimeout(grace);
+			if (this.#contextRequest === request) this.#contextRequest = null;
+			// Model and thinking choices made while the request held the fence are applied now, not at the next unrelated event.
+			this.#syncHeld();
+		}
+	}
+
 	/** Model catalogue, read when a picker opens (also during a turn). OMP runs commands in order and answers after a provider refresh still in flight, so a Stop sent meanwhile waits for it. */
 	async getAvailableModels(): Promise<ModelsResult> {
 		const refusal = this.#controlRefusal();
@@ -2020,6 +2119,13 @@ export class RpcSession {
 			}
 			// The command text became a user message: an input hook rewrote it, or OMP no longer routes it.
 			if (frame.type === "message_start" && isRecord(frame.message) && frame.message.role === "user" && JSON.stringify(frame.message.content ?? "").includes(navigation.requestId)) navigation.finish?.("fell-through");
+		}
+		// An explicit `/context` request reads the report from the frame; the frame still renders as the notice it is.
+		// OMP's output carries no request id: this is the first report observed while the request waits, not a proven answer to it.
+		const pending = this.#contextRequest;
+		if (pending !== null && !pending.captured && frame.type === "command_output" && typeof frame.text === "string" && isContextReportText(frame.text)) {
+			pending.captured = true;
+			pending.capture({ text: frame.text, at: this.#timers.now(), usageTokens: this.#model.state?.contextUsage?.tokens ?? null });
 		}
 		// A maintenance pass takes the next command output as its report; the line still renders as a notice. Any
 		// other output is a background builtin (`/compact`, `/handoff` typed in the composer) that reports only when it
@@ -2605,7 +2711,7 @@ export class RpcSession {
 	 * mutation (prompts, queue edits, settings, compaction) so nothing appends to the branch it is moving.
 	 */
 	#controlRefusal(): SendRefusal | null {
-		return this.#mutationFence !== null || this.#navigation !== null || this.#navigationFence !== null ? "busy" : this.#live && this.#identityVerified ? null : "not-live";
+		return this.#mutationFence !== null || this.#navigation !== null || this.#navigationFence !== null || this.#contextRequest !== null ? "busy" : this.#live && this.#identityVerified ? null : "not-live";
 	}
 
 	/**
@@ -2775,6 +2881,8 @@ export class RpcSession {
 	}
 
 	async #sendUser(requestId: string, command: RpcCommand): Promise<SendOutcome> {
+		// The interval before OMP acknowledges the input (it awaits its input hooks first) is not visible in the model: an explicit `/context` request must not start inside it.
+		this.#userInputInFlight += 1;
 		try {
 			const response = await this.#send(`${VSC_ID_PREFIX}${requestId}`, command);
 			if (response.success) {
@@ -2785,6 +2893,8 @@ export class RpcSession {
 			return { status: "refused", reason: "rejected", ...(typeof response.code === "string" ? { code: response.code } : {}) };
 		} catch (error) {
 			return this.#failureOutcome(error, requestId);
+		} finally {
+			this.#userInputInFlight -= 1;
 		}
 	}
 

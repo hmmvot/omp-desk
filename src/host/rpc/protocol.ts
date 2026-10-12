@@ -382,6 +382,17 @@ export interface ParsedState {
 	messageCount: number | null;
 	todoSeed: unknown;
 	dumpTools: readonly RpcToolDescriptor[] | null;
+	/** The rendered prompt blocks, kept only for the Context view's file list; `null` when absent or malformed. */
+	systemPrompt: readonly string[] | null;
+	autoCompaction: boolean | null;
+}
+
+const MAX_PROMPT_BLOCKS = 64;
+
+/** `get_state.systemPrompt`: an array of strings, or `null`; its size is bounded where it is scanned. */
+export function parseSystemPrompt(value: unknown): readonly string[] | null {
+	if (!Array.isArray(value) || value.length > MAX_PROMPT_BLOCKS || value.some(block => typeof block !== "string")) return null;
+	return value as string[];
 }
 
 /** Provider-facing descriptors only; schemas/examples never cross this host boundary. */
@@ -432,6 +443,8 @@ export function parseStateData(data: unknown): ParsedState | null {
 		messageCount: typeof data.messageCount === "number" && Number.isSafeInteger(data.messageCount) && data.messageCount >= 0 ? data.messageCount : null,
 		todoSeed: data.todoPhases ?? null,
 		dumpTools: parseDumpTools(data.dumpTools),
+		systemPrompt: parseSystemPrompt(data.systemPrompt),
+		autoCompaction: typeof data.autoCompactionEnabled === "boolean" ? data.autoCompactionEnabled : null,
 	};
 }
 

@@ -11,7 +11,7 @@ const skill: InventoryRow = { kind: "skill", name: "review", description: null, 
 const snapshot = (cwd: string, profile = "default"): InventorySnapshot => ({ rows: [{ ...skill }], cwd, profile, projectOverridesDisabledExtensions: false, incomplete: [], disabledProviders: [] });
 
 function target(overrides: Partial<SessionToolsTarget> = {}): SessionToolsTarget {
-	return { key: {}, generation: "g1", mode: "chat", running: true, title: "Work", cwd: "D:/proj", profile: null, commands: [], readDescriptors: null, readTools: null, ...overrides };
+	return { key: {}, generation: "g1", tabId: "tab-1", mode: "chat", running: true, title: "Work", cwd: "D:/proj", profile: null, commands: [], readDescriptors: null, readTools: null, ...overrides };
 }
 
 function harness(initial: SessionToolsTarget | null) {

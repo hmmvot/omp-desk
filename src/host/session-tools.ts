@@ -11,6 +11,8 @@ import type { SessionEvidence, SessionToolEntry } from "./inventory/inventory-mo
 export interface SessionToolsTarget {
 	readonly key: object;
 	readonly generation: string;
+	/** The editor's session tab; the Context view runs Compact and Shake for it. */
+	readonly tabId: string;
 	readonly mode: "chat" | "terminal";
 	readonly running: boolean;
 	/** Session title, shown in the view description. */
