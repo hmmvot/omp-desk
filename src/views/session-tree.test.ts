@@ -275,7 +275,7 @@ describe("session row menu per state", () => {
 	const LIVE = ["running", "working", "background", "question", "unread", "waiting"] as const;
 	const OPEN = ["omp.openSessionInChat", "omp.openSessionInTerminal"];
 	const SHOW_BOTH = ["omp.showSessionInChat", "omp.showSessionInTerminal"];
-	const LIVE_REST = ["omp.renameSession", "omp.reloadSession", "omp.closeSession", "omp.deleteSession"];
+	const LIVE_REST = ["omp.renameSession", "omp.reloadSession", "omp.closeSession", "omp.deleteSession", "omp.killSession"];
 	const attached = (viewMode: "chat" | "terminal" | null): SessionLauncherFacts =>
 		({ ...NO_FACTS, open: viewMode !== null, running: true, viewMode });
 	const materialized = entry({ tabId: "tab:menu", cwd: ALPHA, kind: "session", sessionFile: FILE, availability: "live", runIntent: "running" });
@@ -300,22 +300,23 @@ describe("session row menu per state", () => {
 				expected: [...SHOW_BOTH, ...LIVE_REST] },
 		]),
 		{ name: "a fileless live draft has nothing to reload or delete", state: "working", entry: fileless, facts: attached("chat"),
-			expected: ["omp.showSessionInTerminal", "omp.renameSession", "omp.closeSession"] },
+			expected: ["omp.showSessionInTerminal", "omp.renameSession", "omp.closeSession", "omp.killSession"] },
 		{ name: "a verified live writer this window has not attached", state: "running", entry: materialized,
 			facts: { ...NO_FACTS, ownedWriterPid: 4242, ownershipChecked: true }, expected: [...SHOW_BOTH, ...LIVE_REST] },
 		{ name: "open in another window", state: "otherWindow", entry: materialized,
-			facts: { ...NO_FACTS, heldElsewhere: true, switchableWindow: true }, expected: ["omp.stopSessionHost", "omp.switchToSessionWindow"] },
+			facts: { ...NO_FACTS, heldElsewhere: true, switchableWindow: true }, expected: ["omp.stopSessionHost", "omp.switchToSessionWindow", "omp.killSession"] },
 		{ name: "another window without a saved navigation identity", state: "otherWindow", entry: materialized,
-			facts: { ...NO_FACTS, heldElsewhere: true, switchableWindow: false }, expected: ["omp.stopSessionHost"] },
+			facts: { ...NO_FACTS, heldElsewhere: true, switchableWindow: false }, expected: ["omp.stopSessionHost", "omp.killSession"] },
 		{ name: "open in another OMP process", state: "externalOmp", entry: materialized,
 			facts: { ...NO_FACTS, externalOmp: true, ownershipChecked: true }, expected: OPEN },
 		{ name: "blocked by a missing transcript", state: "blocked",
 			entry: entry({ tabId: "tab:menu", cwd: ALPHA, kind: "session", sessionFile: FILE, availability: "failed" }),
 			facts: NO_FACTS, expected: ["omp.forgetSession"] },
-		{ name: "restoring", state: "restoring", entry: materialized, facts: { ...NO_FACTS, restoring: true }, expected: [] },
-		{ name: "starting", state: "starting", entry: materialized, facts: { ...NO_FACTS, launching: true }, expected: [] },
-		{ name: "stopping", state: "stopping", entry: materialized, facts: { ...attached("chat"), stopping: true }, expected: [] },
-		{ name: "checking", state: "checking", entry: materialized, facts: { ...NO_FACTS, checking: true }, expected: [] },
+		// Kill is the one explicit exception to "nothing that would race the transition": it ends the process whatever it is doing.
+		{ name: "restoring", state: "restoring", entry: materialized, facts: { ...NO_FACTS, restoring: true }, expected: ["omp.killSession"] },
+		{ name: "starting", state: "starting", entry: materialized, facts: { ...NO_FACTS, launching: true }, expected: ["omp.killSession"] },
+		{ name: "stopping", state: "stopping", entry: materialized, facts: { ...attached("chat"), stopping: true }, expected: ["omp.killSession"] },
+		{ name: "checking", state: "checking", entry: materialized, facts: { ...NO_FACTS, checking: true }, expected: ["omp.killSession"] },
 	];
 
 	for (const row of cases) {
