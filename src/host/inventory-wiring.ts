@@ -34,19 +34,31 @@ const VIEWS: readonly ViewSpec[] = [
 ];
 const UNDO = "Undo";
 const UNAVAILABLE_BUN = "OMP's inventory needs Bun and the installed OMP's importable sources; a compiled-only OMP install cannot supply it.";
+const RESOLVE_TTL_MS = 60_000;
 
 export function registerInventoryViews(context: vscode.ExtensionContext, deps: InventoryViewsDeps): InventoryHandle {
 	const storage = context.globalStorageUri.fsPath;
+	/** Where Bun and the OMP package are is stable for a minute; resolving them spawns lookups, so it is not repeated per read. The staged worker is still verified on every run. */
+	let resolved: { readonly at: number; readonly bun: string; readonly root: string } | null = null;
 	const runtime = createInventoryRuntime({
 		async environment(): Promise<WorkerEnvironment | { unavailable: string }> {
+			const started = Date.now();
 			try {
-				const executable = await resolveOmpBinary();
-				const [bun, root] = await Promise.all([resolveBunRuntime(), resolveOmpPackageRoot(executable)]);
-				if (bun === null || root === null) return { unavailable: UNAVAILABLE_BUN };
+				if (resolved === null || Date.now() - resolved.at > RESOLVE_TTL_MS) {
+					const executable = await resolveOmpBinary();
+					const [bun, root] = await Promise.all([resolveBunRuntime(), resolveOmpPackageRoot(executable)]);
+					if (bun === null || root === null) return { unavailable: UNAVAILABLE_BUN };
+					resolved = { at: Date.now(), bun, root: root.root };
+					deps.log(`inventory: resolved Bun and the OMP package in ${Date.now() - started} ms`);
+				}
+				const verifyStarted = Date.now();
 				const [asset] = await stageRuntimeAssets({ storageDir: storage, sourcePaths: [vscode.Uri.joinPath(context.extensionUri, "out", "inventory-worker.mjs").fsPath] });
 				if (asset === undefined || !(await verifyStagedRuntimeAsset(asset))) return { unavailable: "The inventory worker is missing from this extension build or its staged copy changed." };
-				return { bun, packageRoot: root.root, helperPath: asset.path };
+				const total = Date.now() - started;
+				if (total > 250) deps.log(`inventory: environment took ${total} ms (staging and verifying the worker ${Date.now() - verifyStarted} ms)`);
+				return { bun: resolved.bun, packageRoot: resolved.root, helperPath: asset.path };
 			} catch (error) {
+				resolved = null;
 				deps.log(`inventory: environment unavailable: ${error instanceof Error ? error.message : String(error)}`);
 				return { unavailable: "The installed OMP could not be resolved." };
 			}
@@ -89,7 +101,7 @@ export function registerInventoryViews(context: vscode.ExtensionContext, deps: I
 					if (row !== undefined && row !== null) void controller.toggle(spec.kind, row, state === vscode.TreeItemCheckboxState.Checked);
 				}
 			}),
-			vscode.commands.registerCommand(spec.refresh, () => controller.refresh()),
+			vscode.commands.registerCommand(spec.refresh, () => controller.refresh({ force: true })),
 			vscode.commands.registerCommand(`omp.${spec.kind}.showGlobal`, () => controller.setScope(spec.kind, "global")),
 			vscode.commands.registerCommand(`omp.${spec.kind}.showSession`, () => controller.setScope(spec.kind, "session")),
 		);

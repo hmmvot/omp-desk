@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { InventoryController } from "./inventory-controller.ts";
+import { FRESH_MS, InventoryController } from "./inventory-controller.ts";
 import type { InventoryControllerDeps } from "./inventory-controller.ts";
 import type { InventoryResult, InventoryRow, InventoryScope, InventorySnapshot, ViewKind, ViewModel } from "./inventory-model.ts";
 import type { InventoryRuntime, InventoryReadRequest, ToggleRequest, ToggleResult } from "./inventory-runtime.ts";
@@ -15,7 +15,7 @@ function target(overrides: Partial<SessionToolsTarget> = {}): SessionToolsTarget
 }
 
 function harness(initial: SessionToolsTarget | null) {
-	const state = { target: initial, reads: [] as InventoryReadRequest[], toggles: [] as ToggleRequest[], published: [] as Array<[ViewKind, ViewModel]>, scopes: [] as Array<[ViewKind, InventoryScope]>,
+	const state = { clock: 1_000_000, target: initial, reads: [] as InventoryReadRequest[], toggles: [] as ToggleRequest[], published: [] as Array<[ViewKind, ViewModel]>, scopes: [] as Array<[ViewKind, InventoryScope]>,
 		toggleGate: null as Promise<void> | null,
 		notices: [] as Array<[string, string]>, undos: [] as Array<() => void>, logs: [] as string[], delays: [] as number[], gate: null as Promise<void> | null, toggleResult: { ok: true, changed: true, writes: [] } as ToggleResult, readResult: null as ((request: InventoryReadRequest) => InventoryResult) | null };
 	const runtime: InventoryRuntime = {
@@ -23,12 +23,14 @@ function harness(initial: SessionToolsTarget | null) {
 		async toggle(request) { state.toggles.push(request); if (state.toggleGate) await state.toggleGate; return state.toggleResult; },
 	};
 	const deps: InventoryControllerDeps = { target: () => state.target, runtime, neutralCwd: "C:/", publish: (view, model) => { state.published.push([view, model]); },
-		scopeChanged: (view, scope) => { state.scopes.push([view, scope]); }, notify: (message, level, undo) => { state.notices.push([level, message]); if (undo !== undefined) state.undos.push(undo); }, log: message => { state.logs.push(message); }, delay: async ms => { state.delays.push(ms); } };
+		scopeChanged: (view, scope) => { state.scopes.push([view, scope]); }, notify: (message, level, undo) => { state.notices.push([level, message]); if (undo !== undefined) state.undos.push(undo); }, log: message => { state.logs.push(message); }, delay: async ms => { state.delays.push(ms); }, now: () => state.clock };
 	const controller = new InventoryController(deps);
 	const settle = async () => { for (let turn = 0; turn < 20; turn++) await new Promise(resolve => setImmediate(resolve)); };
+	/** Switch lines only: timing lines are informational and differ per run. */
+	const switchLogs = (): string[] => state.logs.filter(line => /inventory: switch/.test(line));
 	const last = (view: ViewKind) => state.published.filter(([kind]) => kind === view).at(-1)![1];
 	const shown = (view: ViewKind): InventoryRow => last(view).groups[0]!.items[0]!.row!;
-	return { state, controller, settle, last, shown };
+	return { state, controller, settle, last, shown, switchLogs };
 }
 
 describe("inventory controller scope and reads", () => {
@@ -47,10 +49,7 @@ describe("inventory controller scope and reads", () => {
 		const h = harness(target({ profile: "work" }));
 		for (const view of ["skills", "tools", "mcp"] as const) h.controller.setVisible(view, true);
 		await h.settle();
-		const before = h.state.reads.length;
-		h.controller.refresh();
-		await h.settle();
-		assert.deepEqual(h.state.reads.slice(before), [{ cwd: "D:/proj", profile: "work", scope: "session" }], "three views, one worker run");
+		assert.deepEqual(h.state.reads, [{ cwd: "D:/proj", profile: "work", scope: "session" }], "three views opened in a row: one worker run");
 		for (const view of ["skills", "tools", "mcp"] as const) assert.equal(h.last(view).scope, "session");
 	});
 	it("shows Global at the neutral folder with no active session", async () => {
@@ -98,9 +97,9 @@ describe("inventory controller scope and reads", () => {
 		const results = h.state.published.filter(([, model]) => model.message === null);
 		assert.equal(results.length >= 1, true);
 		assert.equal(results.every(([, model]) => model.description === "Session: Work"), true);
-		assert.equal(h.state.reads.length >= 2, true, "the new generation was read again");
+		assert.equal(h.state.reads.length, 1, "the same folder and profile is read once; the new generation only re-reads the session");
 	});
-	it("reads again for a changed generation but not for an identical target", async () => {
+	it("does not read OMP again for a changed generation of the same folder and profile", async () => {
 		const h = harness(target());
 		h.controller.setVisible("skills", true);
 		await h.settle();
@@ -111,7 +110,7 @@ describe("inventory controller scope and reads", () => {
 		h.state.target = target({ generation: "g2" });
 		h.controller.sync();
 		await h.settle();
-		assert.equal(h.state.reads.length, before + 1);
+		assert.equal(h.state.reads.length, before, "a new generation of the same folder and profile reuses the fresh read");
 	});
 	it("reports an unreadable inventory as a message in the view", async () => {
 		const h = harness(null);
@@ -119,6 +118,106 @@ describe("inventory controller scope and reads", () => {
 		h.controller.setVisible("mcp", true);
 		await h.settle();
 		assert.equal(h.last("mcp").message, "No Bun.");
+	});
+});
+
+describe("inventory controller cache", () => {
+	it("opening views one after another while the first read runs starts one worker run, and every view gets its rows", async () => {
+		const h = harness(null);
+		let release!: () => void;
+		h.state.gate = new Promise<void>(resolve => { release = resolve; });
+		for (const view of ["skills", "tools", "mcp"] as const) { h.controller.setVisible(view, true); await h.settle(); }
+		assert.equal(h.state.reads.length, 1, "later cycles join the read that is already running");
+		release();
+		await h.settle();
+		assert.equal(h.state.reads.length, 1);
+		for (const view of ["skills", "tools", "mcp"] as const) assert.notEqual(h.last(view).message, "Reading OMP's inventory…", view);
+	});
+	it("paints a cached read at once, marked while a newer one runs, and replaces it with the fresh one", async () => {
+		const h = harness(null);
+		h.controller.setVisible("skills", true);
+		await h.settle();
+		h.state.clock += 60_000;
+		let release!: () => void;
+		h.state.gate = new Promise<void>(resolve => { release = resolve; });
+		h.controller.refresh();
+		await h.settle();
+		assert.equal(h.last("skills").message, null, "rows stay on screen");
+		assert.match(h.last("skills").description, /refreshing…$/);
+		release();
+		await h.settle();
+		assert.doesNotMatch(h.last("skills").description, /refreshing/);
+		assert.equal(h.state.reads.length, 2);
+	});
+	it("uses a read younger than the freshness window without asking OMP again, and not an older one", async () => {
+		const h = harness(null);
+		h.controller.setVisible("skills", true);
+		await h.settle();
+		h.state.clock += FRESH_MS - 1;
+		h.controller.refresh();
+		await h.settle();
+		assert.equal(h.state.reads.length, 1);
+		assert.doesNotMatch(h.last("skills").description, /refreshing/);
+		h.state.clock += 2;
+		h.controller.refresh();
+		await h.settle();
+		assert.equal(h.state.reads.length, 2);
+	});
+	it("an explicit Refresh and a written switch drop the cache and read again", async () => {
+		const h = harness(target({ running: false }));
+		h.controller.setVisible("skills", true);
+		await h.settle();
+		h.controller.refresh({ force: true });
+		await h.settle();
+		assert.equal(h.state.reads.length, 2);
+		await h.controller.toggle("skills", h.shown("skills"), false);
+		await h.settle();
+		assert.equal(h.state.reads.length, 3);
+	});
+	it("a read that was running before a switch is not cached as current afterwards", async () => {
+		const h = harness(null);
+		let release!: () => void;
+		h.state.gate = new Promise<void>(resolve => { release = resolve; });
+		h.controller.setVisible("skills", true);
+		await h.settle();
+		const stale = snapshot("C:/");
+		h.state.readResult = () => ({ ...stale, rows: [{ ...skill, name: "old" }] });
+		await h.controller.toggle("skills", skill, false).catch(() => {});
+		h.state.readResult = () => ({ ...stale, rows: [{ ...skill, name: "new" }] });
+		h.state.gate = null;
+		release();
+		await h.settle();
+		h.controller.refresh();
+		await h.settle();
+		assert.equal(h.last("skills").groups[0]!.items[0]!.label, "new");
+	});
+	it("keeps showing the earlier read, marked, when a refresh fails, and never caches the failure", async () => {
+		const h = harness(null);
+		h.controller.setVisible("skills", true);
+		await h.settle();
+		h.state.clock += 60_000;
+		h.state.readResult = () => ({ unavailable: "No Bun." });
+		h.controller.refresh();
+		await h.settle();
+		assert.equal(h.last("skills").message, null);
+		assert.match(h.last("skills").description, /could not refresh; showing an earlier read/);
+		h.state.readResult = null;
+		h.controller.refresh();
+		await h.settle();
+		assert.doesNotMatch(h.last("skills").description, /could not refresh/);
+		assert.equal(h.state.reads.length, 3);
+	});
+	it("a session tab switch back to a folder read moments ago paints its cached list without another worker run", async () => {
+		const h = harness(target({ cwd: "D:/a" }));
+		h.controller.setVisible("skills", true);
+		await h.settle();
+		h.state.target = target({ cwd: "D:/b", generation: "g2", key: {} });
+		h.controller.sync();
+		await h.settle();
+		h.state.target = target({ cwd: "D:/a", generation: "g3", key: {} });
+		h.controller.sync();
+		await h.settle();
+		assert.deepEqual(h.state.reads.map(read => read.cwd), ["D:/a", "D:/b"]);
 	});
 });
 
@@ -137,14 +236,14 @@ describe("inventory controller switches", () => {
 		const h = harness(target());
 		h.controller.setVisible("skills", true);
 		await h.settle();
-		assert.deepEqual(h.state.logs, []);
+		assert.deepEqual(h.switchLogs(), []);
 		h.state.toggleResult = { ok: true, changed: true, writes: [{ file: "C:/u/config.yml", what: "disabledExtensions + skill:review" }] };
 		await h.controller.toggle("skills", h.shown("skills"), false);
 		h.state.toggleResult = { ok: true, changed: false, writes: [] };
 		await h.controller.toggle("skills", h.shown("skills"), true);
 		h.state.toggleResult = { ok: false, message: "OMP no longer lists this item." };
 		await h.controller.toggle("skills", h.shown("skills"), false);
-		assert.deepEqual(h.state.logs, [
+		assert.deepEqual(h.switchLogs(), [
 			"inventory: switch requested in the skills view: skill:review enabled→disabled (global configuration of profile default; list shown: session, folder D:/proj)",
 			"inventory: switch skill:review enabled→disabled: written: disabledExtensions + skill:review (C:/u/config.yml)",
 			"inventory: switch requested in the skills view: skill:review disabled→enabled (global configuration of profile default; list shown: session, folder D:/proj)",
@@ -158,7 +257,7 @@ describe("inventory controller switches", () => {
 		h.state.readResult = () => ({ unavailable: "No Bun." });
 		h.controller.setVisible("skills", true);
 		await h.settle();
-		assert.deepEqual(h.state.logs, ["inventory: read failed (session list, profile default, folder D:/proj): No Bun."]);
+		assert.deepEqual(h.state.logs.filter(line => /read failed/.test(line)).map(line => line.replace(/ after \d+ ms/, "")), ["inventory: read failed (session list, profile default, folder D:/proj): No Bun."]);
 	});
 	it("offers Undo only on a successful disable, and Undo enables the same row again", async () => {
 		const h = harness(target());
