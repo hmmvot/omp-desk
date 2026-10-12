@@ -341,8 +341,98 @@ describe("runtime proof gate", { skip: process.platform !== "win32" ? "the runti
 			extensionRoot: unreported,
 		});
 		assert.equal(unreportedReadiness.ready, true, unreportedReadiness.reason ?? "not ready");
-		assert.equal(unreportedReadiness.runtime?.selfCheck.childExitCode, null);
-		assert.equal(unreportedReadiness.runtime?.selfCheck.childOutput, true);
+		assert.equal(unreportedReadiness.proven, true);
+		assert.equal(unreportedReadiness.runtime?.selfCheck?.childExitCode, null);
+		assert.equal(unreportedReadiness.runtime?.selfCheck?.childOutput, true);
+	});
+
+	describe("a self-check that ran out of time", () => {
+		/** An entry that records each run's argument line in `log`, then prints `answer` and exits with `code`. */
+		const entryWith = (log: string, answer: Record<string, unknown>, code: number): string =>
+			`require("node:fs").appendFileSync(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)) + "\\n");` +
+			`process.stdout.write(JSON.stringify(${JSON.stringify(answer)}) + "\\n"); process.exit(${code});`;
+		const lateAnswer = {
+			ok: false,
+			outcome: "inconclusive",
+			detail: "the pipe child did not finish within the self-check deadline of 15 s",
+		};
+
+		it("is admitted provisionally, not as a proof, and is probed again by the next call", async () => {
+			const log = path.join(await makeTempUnder(homedir(), ".omp-pty-log-"), "runs.log");
+			const root = await fakeRuntimeTree(entryWith(log, lateAnswer, 8));
+			const storageDir = await makeTempUnder(homedir(), ".omp-pty-storage-");
+			const first = await ensurePtyRuntime({ storageDir, extensionRoot: root });
+			assert.equal(first.ready, true, first.reason ?? "not ready");
+			assert.equal(first.proven, false);
+			assert.ok(first.runtime, "a broker may be started from the staged, verified tree");
+			assert.equal(first.runtime.selfCheck, null);
+			assert.match(first.reason ?? "", /did not finish within the self-check deadline of 15 s/);
+			assert.match(first.reason ?? "", /admitted unproven/);
+			// Not cached: the same tree in the same storage runs its check again.
+			const second = await ensurePtyRuntime({ storageDir, extensionRoot: root });
+			assert.equal(second.proven, false);
+			assert.equal((await readFile(log, "utf8")).trim().split("\n").length, 2);
+		});
+
+		it("asks the entry for the deadline it is given, and for its default otherwise", async () => {
+			const log = path.join(await makeTempUnder(homedir(), ".omp-pty-log-"), "runs.log");
+			const root = await fakeRuntimeTree(entryWith(log, lateAnswer, 8));
+			const storageDir = await makeTempUnder(homedir(), ".omp-pty-storage-");
+			await ensurePtyRuntime({ storageDir, extensionRoot: root });
+			await ensurePtyRuntime({ storageDir, extensionRoot: root, selfCheckDeadlineMs: 90_000 });
+			const runs = (await readFile(log, "utf8")).trim().split("\n").map(line => JSON.parse(line) as string[]);
+			assert.deepEqual(runs[0], ["--self-check"]);
+			assert.deepEqual(runs[1], ["--self-check", "--self-check-deadline-ms=90000"]);
+		});
+
+		it("is refused when the entry says it observed a fault, even though it also ran long", async () => {
+			const log = path.join(await makeTempUnder(homedir(), ".omp-pty-log-"), "runs.log");
+			const broken = { ok: false, outcome: "broken", detail: "the self-check child exited with code 3" };
+			const root = await fakeRuntimeTree(entryWith(log, broken, 7));
+			const readiness = await ensurePtyRuntime({ storageDir: await makeTempUnder(homedir(), ".omp-pty-storage-"), extensionRoot: root });
+			assert.equal(readiness.ready, false);
+			assert.equal(readiness.proven, false);
+			assert.match(readiness.reason ?? "", /exit code 7: the self-check child exited with code 3/);
+		});
+
+		it("is refused when the entry's answer carries no outcome, as an old entry's would", async () => {
+			// Only an explicit `inconclusive` is lateness; a bare nonzero status never is.
+			const log = path.join(await makeTempUnder(homedir(), ".omp-pty-log-"), "runs.log");
+			const root = await fakeRuntimeTree(entryWith(log, { ok: false, detail: "no outcome field" }, 8));
+			const readiness = await ensurePtyRuntime({ storageDir: await makeTempUnder(homedir(), ".omp-pty-storage-"), extensionRoot: root });
+			assert.equal(readiness.ready, false);
+			assert.match(readiness.reason ?? "", /exit code 8: no outcome field/);
+		});
+
+		it("is refused when the classification contradicts the exit code the entry chose", async () => {
+			// "inconclusive" under the fault exit code is a contradiction, not lateness.
+			const log = path.join(await makeTempUnder(homedir(), ".omp-pty-log-"), "runs.log");
+			const root = await fakeRuntimeTree(entryWith(log, lateAnswer, 7));
+			const readiness = await ensurePtyRuntime({ storageDir: await makeTempUnder(homedir(), ".omp-pty-storage-"), extensionRoot: root });
+			assert.equal(readiness.ready, false);
+			assert.match(readiness.reason ?? "", /exit code 7/);
+		});
+
+		it("is refused when an inconclusive answer also reports a nonzero child exit", async () => {
+			// The child's own nonzero code is an observed fault, whatever the run called itself.
+			const log = path.join(await makeTempUnder(homedir(), ".omp-pty-log-"), "runs.log");
+			const root = await fakeRuntimeTree(entryWith(log, { ...lateAnswer, childExitCode: 3 }, 8));
+			const readiness = await ensurePtyRuntime({ storageDir: await makeTempUnder(homedir(), ".omp-pty-storage-"), extensionRoot: root });
+			assert.equal(readiness.ready, false);
+		});
+
+		it("is refused when a run given the extended deadline still calls itself late", async () => {
+			// The re-run is what settles a provisional admission; it must never answer "late" again.
+			const log = path.join(await makeTempUnder(homedir(), ".omp-pty-log-"), "runs.log");
+			const root = await fakeRuntimeTree(entryWith(log, lateAnswer, 8));
+			const readiness = await ensurePtyRuntime({
+				storageDir: await makeTempUnder(homedir(), ".omp-pty-storage-"),
+				extensionRoot: root,
+				selfCheckDeadlineMs: 90_000,
+			});
+			assert.equal(readiness.ready, false);
+			assert.equal(readiness.proven, false);
+		});
 	});
 });
 
@@ -368,14 +458,17 @@ describe("runtime proof", { skip: built ? false : "the packaged broker tree is a
 		assert.match(runtime.ownerHelper.sha256, /^[a-f0-9]{64}$/);
 		assert.equal(runtime.tree.files.some(file => file.relativePath === "node_modules/node-pty/lib/index.js"), true);
 		assert.equal(runtime.tree.files.some(file => file.relativePath.endsWith(".map")), false);
-		assert.equal(runtime.selfCheck.childOutput, true, "the child's own proof must have been read back");
+		const proof = runtime.selfCheck;
+		assert.ok(proof, "a proven runtime carries what its self-check observed");
+		assert.equal(readiness.proven, true);
+		assert.equal(proof.childOutput, true, "the child's own proof must have been read back");
 		// The measured Windows backend does not always report the child's exit code, so a
 		// proof with an unreported code is a proof: the markers are what admitted it.
 		assert.ok(
-			runtime.selfCheck.childExitCode === 0 || runtime.selfCheck.childExitCode === null,
-			`unexpected child exit code ${String(runtime.selfCheck.childExitCode)}`,
+			proof.childExitCode === 0 || proof.childExitCode === null,
+			`unexpected child exit code ${String(proof.childExitCode)}`,
 		);
-		if (process.platform === "win32") assert.equal(runtime.selfCheck.conptyDll, true);
+		if (process.platform === "win32") assert.equal(proof.conptyDll, true);
 		// The second call is the cached proof of the same tree in the same storage.
 		const again = await ensurePtyRuntime({ storageDir: storage, extensionRoot: EXTENSION_ROOT });
 		assert.equal(again.treeDigest, readiness.treeDigest);

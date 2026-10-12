@@ -80,6 +80,7 @@ import {
 	type PtyRuntime,
 	type PtyRuntimeReadiness,
 } from "./pty-runtime.ts";
+import { PtyRuntimeProof } from "./pty-runtime-proof.ts";
 import { folderShellLaunchSpec, type PtyFolderShellRequest } from "./pty-shell.ts";
 import { RpcHandle } from "./rpc-handle.ts";
 
@@ -102,6 +103,8 @@ export interface PtyBrokerClientOptions {
 	readonly nodePath?: string;
 	/** Extra environment for the broker process. */
 	readonly env?: Readonly<Record<string, string>>;
+	/** Receives runtime-proof state changes worth a log line (a provisional admission, its resolution). */
+	readonly onRuntimeEvent?: (message: string) => void;
 }
 
 /** One terminal to start: the broker runs it, owns it, and outlives this window. */
@@ -292,47 +295,37 @@ export class PtyHandle extends BrokerHandle<PtyHandleEvent> {
  */
 export class PtyBrokerClient {
 	private readonly options: PtyBrokerClientOptions;
-	private runtimePromise: Promise<PtyRuntimeReadiness> | null = null;
-	/** The full runtime proof once settled successfully; an attach reads it and never waits for it. */
-	private provenRuntime: PtyRuntimeReadiness | null = null;
+	private readonly proof: PtyRuntimeProof;
 	private probePromise: Promise<PtyProbeReadiness> | null = null;
 	private accessPromise: Promise<{ readonly ok: boolean; readonly reason: string | null }> | null = null;
 
 	constructor(options: PtyBrokerClientOptions) {
 		this.options = options;
+		this.proof = new PtyRuntimeProof({
+			probe: deadlineMs =>
+				ensurePtyRuntime({
+					storageDir: options.storageDir,
+					extensionRoot: options.extensionRoot,
+					...(options.nodePath === undefined ? {} : { nodePath: options.nodePath }),
+					...(options.env === undefined ? {} : { env: options.env }),
+					...(deadlineMs === undefined ? {} : { selfCheckDeadlineMs: deadlineMs }),
+				}),
+			...(options.onRuntimeEvent === undefined ? {} : { log: options.onRuntimeEvent }),
+		});
 	}
 
 	/**
 	 * Stage and prove the broker runtime.
 	 *
-	 * The answer is cached per process for the staged tree digest; a *failed* one is
-	 * not cached, because the usual cause is a half-finished build or install that the
-	 * next call should see the fix for.
+	 * A proven answer is cached per process for the staged tree digest; a *refusal* is
+	 * not, because the usual cause is a half-finished build or install that the next call
+	 * should see the fix for. A probe that ran out of time with nothing observed to be
+	 * wrong answers `ready` but not `proven` (a slow machine says nothing about the
+	 * runtime): the launch proceeds and a repeated check settles it in the background
+	 * ({@link PtyRuntimeProof}).
 	 */
 	async ready(): Promise<PtyRuntimeReadiness> {
-		const cached = this.runtimePromise;
-		if (cached !== null) {
-			const readiness = await cached;
-			if (readiness.ready) return readiness;
-			this.runtimePromise = null;
-		}
-		const attempt = ensurePtyRuntime({
-			storageDir: this.options.storageDir,
-			extensionRoot: this.options.extensionRoot,
-			...(this.options.nodePath === undefined ? {} : { nodePath: this.options.nodePath }),
-			...(this.options.env === undefined ? {} : { env: this.options.env }),
-		});
-		this.runtimePromise = attempt.then(
-			readiness => {
-				if (readiness.ready) this.provenRuntime = readiness;
-				return readiness;
-			},
-			(error: unknown) => {
-				this.runtimePromise = null;
-				throw error;
-			},
-		);
-		return await this.runtimePromise;
+		return await this.proof.ready();
 	}
 
 	/**
@@ -345,7 +338,7 @@ export class PtyBrokerClient {
 	 * {@link ready} answers from that proof. Only success is cached.
 	 */
 	async attachReady(): Promise<PtyProbeReadiness> {
-		const proven = this.provenRuntime;
+		const proven = this.proof.provenAnswer();
 		if (proven !== null && proven.runtime !== null) {
 			return {
 				ready: true,

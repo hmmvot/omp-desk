@@ -1051,6 +1051,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   ptyClient = new PtyBrokerClient({
     storageDir: context.globalStorageUri.fsPath,
     extensionRoot: context.extensionUri.fsPath,
+    onRuntimeEvent: message => log(message),
   });
   // Readiness is asked for lazily and a *failed* check is not latched, so a transient
   // staging or self-check failure is retried by the next reconciliation, attach or

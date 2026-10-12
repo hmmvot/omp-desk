@@ -51,6 +51,12 @@ import {
 	type StagedRuntimeTree,
 } from "../runtime-assets.ts";
 import { PTY_RUNTIME_VERSION } from "./pty-protocol.ts";
+import {
+	SELF_CHECK_DEADLINE_FLAG,
+	SELF_CHECK_DEADLINE_MS,
+	SELF_CHECK_INCONCLUSIVE_EXIT,
+	selfCheckTimeoutMayBeLateness,
+} from "../broker/pty-self-check.ts";
 import type { PtyProbeHelper } from "./pty-identity.ts";
 
 /** Directory in the installed extension holding the packaged broker tree. */
@@ -83,7 +89,7 @@ const KNOWN_PLATFORMS: Record<string, true> = {
 	android: true,
 };
 
-/** A staged runtime that passed its own self-check. */
+/** A staged runtime that passed its own self-check, or was admitted provisionally because the self-check was inconclusive. */
 export interface PtyRuntime {
 	readonly tree: StagedRuntimeTree;
 	readonly entry: StagedRuntimeAsset;
@@ -92,8 +98,8 @@ export interface PtyRuntime {
 	readonly ownerHelper: PtyProbeHelper;
 	/** `sha256` of the entry script, re-verified before it is started. */
 	readonly entrySha256: string;
-	/** What the self-check observed, for diagnostics. */
-	readonly selfCheck: PtySelfCheckAnswer;
+	/** What the self-check observed, for diagnostics; `null` for a tree admitted before its probe finished. */
+	readonly selfCheck: PtySelfCheckAnswer | null;
 }
 
 /** What the runtime reported about itself when it was asked to prove itself. */
@@ -123,7 +129,17 @@ export interface PtySelfCheckAnswer {
 }
 
 export interface PtyRuntimeReadiness {
+	/**
+	 * A broker may be started from {@link runtime}. True for a proven tree and for one
+	 * admitted provisionally ({@link proven} false); false only for a refusal.
+	 */
 	readonly ready: boolean;
+	/**
+	 * Whether the self-check proved the tree. `false` with `ready: true` is the
+	 * provisional admission: the probe ran out of time with nothing observed to be wrong,
+	 * and {@link reason} says so. Never cached as a proof.
+	 */
+	readonly proven: boolean;
 	readonly reason: string | null;
 	readonly platform: NodeJS.Platform;
 	readonly runtimeVersion: number;
@@ -142,6 +158,12 @@ export interface PtyRuntimeOptions {
 	readonly env?: Readonly<Record<string, string>>;
 	/** Access probe, for tests that must not depend on this machine's ACLs. */
 	readonly access?: PrivateStorageProbe;
+	/**
+	 * The deadline each phase of the self-check is given, in ms; the entry's own default
+	 * ({@link SELF_CHECK_DEADLINE_MS}) when absent. The re-run of an inconclusive probe asks
+	 * for {@link SELF_CHECK_EXTENDED_DEADLINE_MS}.
+	 */
+	readonly selfCheckDeadlineMs?: number;
 }
 
 /**
@@ -175,9 +197,28 @@ export function ptyRuntimeCommand(nodePath?: string): { readonly command: string
 	return { command, env };
 }
 
+/** What one run of the staged entry's `--self-check` concluded. */
+type SelfCheckKind = "proven" | "broken" | "inconclusive";
+
 interface SelfCheckResult {
+	readonly kind: SelfCheckKind;
 	readonly answer: PtySelfCheckAnswer | null;
 	readonly detail: string;
+}
+
+/** Extra time the host gives the entry beyond its two deadlines: process start and the addon load. */
+const SELF_CHECK_HOST_SLACK_MS = 30_000;
+
+/** The parsed first JSON line the staged entry printed, or `null` when it printed none. */
+function selfCheckAnswerRecord(stdout: string): Record<string, unknown> | null {
+	const line = stdout.split(/\r?\n/).find(entry => entry.trim().startsWith("{"));
+	if (line === undefined) return null;
+	try {
+		const parsed: unknown = JSON.parse(line);
+		return typeof parsed === "object" && parsed !== null ? (parsed as Record<string, unknown>) : null;
+	} catch {
+		return null;
+	}
 }
 
 /**
@@ -189,25 +230,28 @@ interface SelfCheckResult {
  * is collapsed to a single line and bounded before it is reported.
  */
 function selfCheckAnswerDetail(stdout: string): string {
-	const line = stdout.split(/\r?\n/).find(entry => entry.trim().startsWith("{"));
-	if (line === undefined) return "";
-	try {
-		const parsed: unknown = JSON.parse(line);
-		if (typeof parsed !== "object" || parsed === null) return "";
-		const detail = (parsed as Record<string, unknown>).detail;
-		return typeof detail === "string" ? detail.replace(/\s+/g, " ").slice(0, 400).trim() : "";
-	} catch {
-		return "";
-	}
+	const detail = selfCheckAnswerRecord(stdout)?.detail;
+	return typeof detail === "string" ? detail.replace(/\s+/g, " ").slice(0, 400).trim() : "";
 }
 
-/** Run the staged entry's `--self-check` and read its answer. */
+/**
+ * Run the staged entry's `--self-check` and read its answer.
+ *
+ * A run ends one of three ways. `proven` carries the entry's answer. `broken` is a fault
+ * the entry observed or an answer that does not hold up. `inconclusive` is the entry
+ * reporting that it ran out of time with nothing observed to be wrong, or this host's
+ * own bound killing an entry that never answered while the deadline it was given may
+ * still only have been lateness ({@link selfCheckTimeoutMayBeLateness}).
+ */
 async function runSelfCheck(
 	runtime: { readonly entry: StagedRuntimeAsset; readonly tree: StagedRuntimeTree },
 	options: PtyRuntimeOptions,
 ): Promise<SelfCheckResult> {
 	const { command, env } = ptyRuntimeCommand(options.nodePath);
-	const child = spawn(command, [runtime.entry.path, "--self-check"], {
+	const deadlineMs = options.selfCheckDeadlineMs ?? SELF_CHECK_DEADLINE_MS;
+	const args = [runtime.entry.path, "--self-check"];
+	if (options.selfCheckDeadlineMs !== undefined) args.push(`${SELF_CHECK_DEADLINE_FLAG}=${options.selfCheckDeadlineMs}`);
+	const child = spawn(command, args, {
 		cwd: runtime.tree.directory,
 		windowsHide: true,
 		stdio: ["ignore", "pipe", "pipe"],
@@ -224,7 +268,13 @@ async function runSelfCheck(
 	const exit = Promise.withResolvers<number | null>();
 	child.on("error", () => exit.resolve(null));
 	child.on("close", code => exit.resolve(code));
-	const timer = setTimeout(() => child.kill(), 60_000);
+	// The entry runs its console phase and its pipe phase one after the other, each under
+	// the deadline, so this host's own bound is both plus the slack.
+	let killed = false;
+	const timer = setTimeout(() => {
+		killed = true;
+		child.kill();
+	}, 2 * deadlineMs + SELF_CHECK_HOST_SLACK_MS);
 	timer.unref();
 	let code: number | null;
 	try {
@@ -236,31 +286,45 @@ async function runSelfCheck(
 		// Anything unreadable falls back to the process's own first stderr line.
 		const reported = selfCheckAnswerDetail(stdout);
 		const detail = reported.length > 0 ? reported : (stderr.trim().split(/\r?\n/)[0] ?? "");
-		return {
-			answer: null,
-			detail: `the runtime self-check failed with exit code ${code ?? "unknown"}${detail.length > 0 ? `: ${detail}` : ""}`,
-		};
+		const text = `the runtime self-check failed with exit code ${code ?? "unknown"}${detail.length > 0 ? `: ${detail}` : ""}`;
+		// Lateness is admitted only when the deadline this run was given may excuse it, and then
+		// only on the entry's own consistent classification (its inconclusive exit code, `ok:
+		// false`, `outcome: "inconclusive"` and no nonzero child exit code reported beside it),
+		// or when this host's bound killed an entry that had printed nothing at all. Any answer
+		// it did print outranks the kill.
+		const record = selfCheckAnswerRecord(stdout);
+		const childExit = record?.childExitCode;
+		const faultReported = typeof childExit === "number" && childExit !== 0;
+		const entrySaysLate =
+			code === SELF_CHECK_INCONCLUSIVE_EXIT && record?.ok === false && record.outcome === "inconclusive" && !faultReported;
+		const killedSilent = killed && stdout.trim().length === 0;
+		if (selfCheckTimeoutMayBeLateness(deadlineMs) && (entrySaysLate || killedSilent)) {
+			return { kind: "inconclusive", answer: null, detail: text };
+		}
+		return { kind: "broken", answer: null, detail: text };
 	}
+	// Every answer below that does not hold up is a fault, not lateness: the entry finished.
+	const refuse = (detail: string): SelfCheckResult => ({ kind: "broken", answer: null, detail });
 	const line = stdout.split(/\r?\n/).find(entry => entry.trim().startsWith("{"));
 	if (line === undefined) {
 		const detail = stderr.trim().split(/\r?\n/)[0] ?? "";
-		return { answer: null, detail: `the runtime self-check printed no answer (exit ${code ?? "unknown"}${detail.length > 0 ? `: ${detail}` : ""})` };
+		return refuse(`the runtime self-check printed no answer (exit ${code ?? "unknown"}${detail.length > 0 ? `: ${detail}` : ""})`);
 	}
 	let parsed: unknown;
 	try {
 		parsed = JSON.parse(line);
 	} catch {
-		return { answer: null, detail: "the runtime self-check answer is not JSON" };
+		return refuse("the runtime self-check answer is not JSON");
 	}
 	if (typeof parsed !== "object" || parsed === null) {
-		return { answer: null, detail: "the runtime self-check answer is not an object" };
+		return refuse("the runtime self-check answer is not an object");
 	}
 	const record = parsed as Record<string, unknown>;
 	if (record.ok !== true) {
-		return { answer: null, detail: `the runtime self-check failed: ${String(record.detail ?? "no reason given")}` };
+		return refuse(`the runtime self-check failed: ${String(record.detail ?? "no reason given")}`);
 	}
 	if (typeof record.platform !== "string" || typeof record.arch !== "string" || typeof record.node !== "string") {
-		return { answer: null, detail: "the runtime self-check answer is missing its platform description" };
+		return refuse("the runtime self-check answer is missing its platform description");
 	}
 	// A platform name outside the known set is replaced by this host's.
 	const platform = KNOWN_PLATFORMS[record.platform] === true ? (record.platform as NodeJS.Platform) : process.platform;
@@ -268,19 +332,19 @@ async function runSelfCheck(
 	// of the proof: an exit report alone says only that something ended, which a
 	// backend that delivered nothing to the child would also produce.
 	if (record.childOutput !== true) {
-		return { answer: null, detail: "the runtime self-check did not prove the child's output reached its pseudo console" };
+		return refuse("the runtime self-check did not prove the child's output reached its pseudo console");
 	}
 	if (record.pipeChild !== true) {
-		return { answer: null, detail: "the runtime self-check did not prove a pipe child can carry a JSONL line" };
+		return refuse("the runtime self-check did not prove a pipe child can carry a JSONL line");
 	}
 	// A reported exit code must be clean. An unreported one (`null`) is accepted only
 	// because the markers above were proved: the Windows ConPTY backend does not always
 	// report a code at all.
 	if (record.childExitCode !== 0 && record.childExitCode !== null) {
-		return { answer: null, detail: `the runtime self-check child did not exit cleanly (${String(record.childExitCode)})` };
+		return refuse(`the runtime self-check child did not exit cleanly (${String(record.childExitCode)})`);
 	}
 	if (!Number.isSafeInteger(record.childPid) || (record.childPid as number) <= 0) {
-		return { answer: null, detail: "the runtime self-check did not report the child process it started" };
+		return refuse("the runtime self-check did not report the child process it started");
 	}
 	const answer: PtySelfCheckAnswer = {
 		runtimeVersion: typeof record.runtimeVersion === "number" ? record.runtimeVersion : PTY_RUNTIME_VERSION,
@@ -295,7 +359,7 @@ async function runSelfCheck(
 		childExitCode: record.childExitCode,
 		durationMs: typeof record.durationMs === "number" ? record.durationMs : -1,
 	};
-	return { answer, detail: "the runtime proved itself" };
+	return { kind: "proven", answer, detail: "the runtime proved itself" };
 }
 
 /**
@@ -380,17 +444,24 @@ export async function ensurePtyProbeHelper(options: PtyRuntimeOptions): Promise<
 /**
  * Stage the broker tree and prove it.
  *
- * A ready answer means: every packaged file was copied into owner-only storage
- * outside the installed extension, every copy was re-hashed, the entry, the identity
- * probe and the owner-watch helper are all present, and the staged entry proved a
- * real child and a pipe child in the runtime that will be used for sessions. A tree
- * that fails any of that is reported unready with the reason, and the caller must
- * not start a broker from it.
+ * A proven answer (`ready` and `proven`) means: every packaged file was copied into
+ * owner-only storage outside the installed extension, every copy was re-hashed, the
+ * entry, the identity probe and the owner-watch helper are all present, and the staged
+ * entry proved a real child and a pipe child in the runtime that will be used for
+ * sessions. A tree that fails any of that is reported unready with the reason, and the
+ * caller must not start a broker from it.
+ *
+ * The one other ready answer is the provisional one (`ready` without `proven`): the
+ * tree is staged and verified, but the self-check ran out of time with nothing observed
+ * to be wrong, which on a saturated machine says nothing about the runtime
+ * ([ADR-0032](../../docs/decisions/0032-prove-the-pty-runtime-with-a-console-child.md),
+ * 2026-10-12 amendment). It is never cached as a proof; {@link PtyRuntimeProof} repeats it.
  */
 export async function ensurePtyRuntime(options: PtyRuntimeOptions): Promise<PtyRuntimeReadiness> {
 	if (process.platform !== PTY_SUPPORTED_PLATFORM) {
 		return {
 			ready: false,
+			proven: false,
 			reason:
 				`the PTY broker is implemented and measured for ${PTY_SUPPORTED_PLATFORM} only; ` +
 				`this host is ${process.platform}`,
@@ -437,7 +508,7 @@ export async function ensurePtyRuntime(options: PtyRuntimeOptions): Promise<PtyR
 		return notReady("the staged broker tree does not hold the bytes it was staged with");
 	}
 	const check = await runSelfCheck({ entry, tree }, options);
-	if (check.answer === null) {
+	if (check.kind === "broken") {
 		return notReady(check.detail, tree.digest);
 	}
 	const runtime: PtyRuntime = {
@@ -448,12 +519,23 @@ export async function ensurePtyRuntime(options: PtyRuntimeOptions): Promise<PtyR
 		entrySha256: entry.sha256,
 		selfCheck: check.answer,
 	};
+	if (check.answer === null) {
+		// Ran out of time with nothing observed to be wrong: a slow machine, not a refuted
+		// runtime. The tree is staged and verified, so a broker may be started from it and the
+		// real spawn reports its own failure; the result is deliberately not cached as a proof.
+		return {
+			...readyAnswer(runtime),
+			proven: false,
+			reason: `${check.detail}; no fault was observed, so the runtime is admitted unproven while the check is repeated with a longer deadline`,
+		};
+	}
 	provedRuntimes.set(cacheKey, runtime);
 	return readyAnswer(runtime);
 
 	function notReady(reason: string, digest: string | null = null): PtyRuntimeReadiness {
 		return {
 			ready: false,
+			proven: false,
 			reason,
 			platform: process.platform,
 			runtimeVersion: PTY_RUNTIME_VERSION,
@@ -466,9 +548,10 @@ export async function ensurePtyRuntime(options: PtyRuntimeOptions): Promise<PtyR
 function readyAnswer(runtime: PtyRuntime): PtyRuntimeReadiness {
 	return {
 		ready: true,
+		proven: true,
 		reason: null,
 		platform: process.platform,
-		runtimeVersion: runtime.selfCheck.runtimeVersion,
+		runtimeVersion: runtime.selfCheck?.runtimeVersion ?? PTY_RUNTIME_VERSION,
 		treeDigest: runtime.tree.digest,
 		runtime,
 	};

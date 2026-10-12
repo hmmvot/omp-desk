@@ -136,9 +136,12 @@ import { RpcChildWriteError, startRpcChild, type RpcChild } from "./rpc-child.ts
 import { RPC_PACE_BYTES, RpcLineRing, RpcSubscriber, type RpcSink } from "./rpc-ring.ts";
 import { PTY_OWNER_EXIT_REASON, PtyOwnerMonitor } from "./pty-owner-monitor.ts";
 import {
-	SELF_CHECK_DEADLINE_MS,
 	SELF_CHECK_OUTPUT_LIMIT,
+	SELF_CHECK_INCONCLUSIVE_EXIT,
+	SelfCheckInconclusive,
+	watchPipeEcho,
 	selfCheckChild,
+	selfCheckDeadlineFromArgs,
 	selfCheckPlan,
 	selfCheckTools,
 	selfCheckVerdict,
@@ -158,8 +161,10 @@ export const PTY_BROKER_EXIT = {
 	spawnFailed: 4,
 	/** This process could not prove its own kernel identity. */
 	identityUnavailable: 6,
-	/** The staged runtime could not run a child through its own PTY backend. */
+	/** The staged runtime could not run a child through its own PTY backend: a fault was observed. */
 	selfCheckFailed: 7,
+	/** The self-check ran out of time with no fault observed: neither proven nor refuted. */
+	selfCheckInconclusive: SELF_CHECK_INCONCLUSIVE_EXIT,
 } as const;
 
 /** Default time a broker with an exited child stays available without a client. */
@@ -1531,7 +1536,7 @@ function messageOf(error: unknown): string {
  * not always report one). The child is a plain console client rather than this
  * runtime's own executable, for the measurement `selfCheckChild` records.
  */
-async function runSelfCheck(): Promise<number> {
+async function runSelfCheck(deadlineMs: number): Promise<number> {
 	const started = Date.now();
 	const plan = selfCheckPlan(randomBytes(8).toString("hex"));
 	const childCommand = selfCheckChild({
@@ -1591,27 +1596,39 @@ async function runSelfCheck(): Promise<number> {
 		// measured about three seconds after the spawn and its exit report can arrive
 		// before that flush, so nothing here samples a moment after the exit. A child that
 		// never reports its exit, or never prints its markers, reaches this bound.
-		const deadline = setTimeout(proof.resolve, SELF_CHECK_DEADLINE_MS);
+		let timedOut = false;
+		const deadline = setTimeout(() => {
+			timedOut = true;
+			proof.resolve();
+		}, deadlineMs);
 		await proof.promise;
 		clearTimeout(deadline);
 		// Whatever the verdict is, the answer carries what this backend actually reported:
 		// a refusal that says only "it did not prove itself" is harder to act on than one
 		// that also names the exit code the backend gave.
 		report.childExitCode = exitCode ?? null;
-		if (!exitReported) throw new Error("the self-check child did not report its exit within the self-check deadline");
-		const verdict = selfCheckVerdict({ output, markers: plan.markers, exitCode });
-		if (!verdict.ok) throw new Error(verdict.detail);
+		const verdict = selfCheckVerdict({ output, markers: plan.markers, exitReported, exitCode, timedOut, deadlineMs });
+		if (!verdict.ok) {
+			if (verdict.inconclusive) throw new SelfCheckInconclusive(verdict.detail);
+			throw new Error(verdict.detail);
+		}
 		report.childOutput = true;
-		await proveRpcPipeChild();
+		await proveRpcPipeChild(deadlineMs);
 		report.pipeChild = true;
 	} catch (error) {
+		// Running out of time with nothing observed to be wrong is reported as such, so the
+		// host does not treat a slow machine as a broken runtime; every observed fault is a refusal.
+		const inconclusive = error instanceof SelfCheckInconclusive;
 		report.ok = false;
+		report.outcome = inconclusive ? "inconclusive" : "broken";
+		report.deadlineMs = deadlineMs;
 		report.detail = messageOf(error);
 		report.durationMs = Date.now() - started;
 		process.stdout.write(`${JSON.stringify(report)}\n`);
-		return PTY_BROKER_EXIT.selfCheckFailed;
+		return inconclusive ? PTY_BROKER_EXIT.selfCheckInconclusive : PTY_BROKER_EXIT.selfCheckFailed;
 	}
 	report.ok = true;
+	report.outcome = "proven";
 	report.durationMs = Date.now() - started;
 	process.stdout.write(`${JSON.stringify(report)}\n`);
 	return PTY_BROKER_EXIT.ok;
@@ -1628,7 +1645,7 @@ async function runSelfCheck(): Promise<number> {
  * so the staged tree gains no file — a changed tree would be gated at attach by its
  * runtime version, which is deliberately not bumped for this kind.
  */
-async function proveRpcPipeChild(): Promise<void> {
+async function proveRpcPipeChild(deadlineMs: number): Promise<void> {
 	const entry = process.argv[1];
 	if (entry === undefined) throw new Error("the broker entry is unknown, so the pipe child cannot be started");
 	const line = JSON.stringify({ type: "pipe-check", token: randomBytes(8).toString("hex") });
@@ -1637,30 +1654,7 @@ async function proveRpcPipeChild(): Promise<void> {
 		windowsHide: true,
 		env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
 	});
-	const outcome = Promise.withResolvers<void>();
-	let echoed = "";
-	child.stdout.setEncoding("utf8");
-	child.stdout.on("data", (chunk: string) => {
-		echoed += chunk;
-		if (echoed.includes("\n")) child.stdin.end();
-	});
-	child.once("error", error => outcome.reject(error));
-	child.once("close", code => {
-		if (echoed.trim() !== line) outcome.reject(new Error("the pipe child did not echo the line it was given"));
-		else if (code !== 0) outcome.reject(new Error(`the pipe child did not exit cleanly after its stdin closed (${String(code)})`));
-		else outcome.resolve();
-	});
-	child.stdin.on("error", () => undefined);
-	child.stdin.write(`${line}\n`);
-	const deadline = setTimeout(() => {
-		child.kill();
-		outcome.reject(new Error("the pipe child did not finish within the self-check deadline"));
-	}, SELF_CHECK_DEADLINE_MS);
-	try {
-		await outcome.promise;
-	} finally {
-		clearTimeout(deadline);
-	}
+	await watchPipeEcho(child, line, deadlineMs);
 }
 
 /** The echo child the self-check's pipe case starts: every stdin line is written back until stdin ends. */
@@ -1678,7 +1672,16 @@ async function runPipeEcho(): Promise<number> {
 }
 
 async function main(): Promise<number> {
-	if (process.argv.slice(2).includes("--self-check")) return await runSelfCheck();
+	if (process.argv.slice(2).includes("--self-check")) {
+		let deadlineMs: number;
+		try {
+			deadlineMs = selfCheckDeadlineFromArgs(process.argv.slice(2));
+		} catch (error) {
+			process.stderr.write(`pty-broker: ${messageOf(error)}\n`);
+			return PTY_BROKER_EXIT.arguments;
+		}
+		return await runSelfCheck(deadlineMs);
+	}
 	if (process.argv.slice(2).includes("--pipe-echo")) return await runPipeEcho();
 	const parsed = parsePtyBrokerArgs(process.argv.slice(2));
 	if (typeof parsed === "string") {

@@ -9,10 +9,14 @@
  * every later reconciliation, attach and open, and every row would report the PTY broker
  * as unavailable while its writer was still running and recoverable.
  *
- * So this gate latches only success:
+ * So this gate latches only a *proven* runtime:
  *
  * - one attempt at a time per window, shared by every caller that arrives while it runs;
  * - a proven runtime is kept for the activation, so nothing is staged twice;
+ * - a runtime admitted provisionally (the self-check ran out of time with nothing observed
+ *   to be wrong, so the client reports `ready` without `proven`) lets the launch proceed
+ *   but is not latched: the next caller asks the client again, which answers from its own
+ *   state without probing, and sees the repeated check's verdict when there is one;
  * - a failed check is kept for {@link PTY_READINESS_RETRY_MS}, so a startup pass that
  *   reconciles many rows cannot run one staging attempt per row; after that window the
  *   next row, click, ownership recheck or attach retries it;
@@ -25,7 +29,7 @@ import type { PtyBrokerClient } from "./pty-client";
 export const PTY_READINESS_RETRY_MS = 2_000;
 
 export interface PtyReadinessGate {
-	/** The client when the runtime is proven ready now, or `null` when it is not (yet). */
+	/** The client when a broker may be started from the runtime now (proven, or admitted provisionally), or `null` when not (yet). */
 	client(): Promise<PtyBrokerClient | null>;
 	/**
 	 * The client when it can re-adopt an already-running broker, or `null` when it cannot (yet).
@@ -92,7 +96,9 @@ export function createPtyReadinessGate(input: {
 		try {
 			const ready = await input.client.ready();
 			reason = ready.reason;
-			proven = ready.ready;
+			// A provisional admission (`ready` but not `proven`) lets the launch proceed and is not
+			// latched: the client repeats the check, and a refusal it finds must reach the next caller.
+			proven = ready.ready && ready.proven;
 			retryAt = ready.ready ? 0 : now() + retryMs;
 			if (!ready.ready) input.onFailure?.(reason ?? "the staged runtime did not prove itself");
 			return ready.ready;

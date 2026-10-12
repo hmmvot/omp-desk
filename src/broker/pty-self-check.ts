@@ -51,6 +51,62 @@ export const SELF_CHECK_CHILD_DELAY_MS = 40;
  */
 export const SELF_CHECK_DEADLINE_MS = 15_000;
 
+/**
+ * The deadline the host asks for when it re-runs a probe that was inconclusive
+ * ({@link SelfCheckInconclusive}). Measured under saturation (twice the logical
+ * processors spinning at normal priority) one run took 8 to 14 s against an unloaded
+ * 4.3 s, and a run on a loaded machine with other windows starting missed the 15 s
+ * bound of its pipe phase; six times the unloaded cost covers that without waiting
+ * indefinitely on a tree that really delivers nothing.
+ */
+export const SELF_CHECK_EXTENDED_DEADLINE_MS = 90_000;
+
+/** Command-line flag carrying a deadline other than {@link SELF_CHECK_DEADLINE_MS}. */
+export const SELF_CHECK_DEADLINE_FLAG = "--self-check-deadline-ms";
+
+/** The shortest and longest deadline the flag may carry; the shortest is above the measured first flush. */
+export const SELF_CHECK_DEADLINE_MIN_MS = 5_000;
+export const SELF_CHECK_DEADLINE_MAX_MS = 300_000;
+
+/**
+ * The deadline one run is asked for: the default when the flag is absent, otherwise the
+ * flag's whole-number milliseconds inside the allowed range. A malformed or
+ * out-of-range value is an error, never silently replaced by the default, so a caller
+ * that asked for a longer budget cannot believe it got one.
+ */
+export function selfCheckDeadlineFromArgs(args: readonly string[]): number {
+	const prefix = `${SELF_CHECK_DEADLINE_FLAG}=`;
+	const given = args.filter(argument => argument.startsWith(prefix));
+	if (given.length === 0) return SELF_CHECK_DEADLINE_MS;
+	if (given.length > 1) throw new TypeError(`${SELF_CHECK_DEADLINE_FLAG} may be given once`);
+	const text = given[0]!.slice(prefix.length);
+	const value = /^[0-9]{1,7}$/.test(text) ? Number(text) : Number.NaN;
+	if (!Number.isSafeInteger(value) || value < SELF_CHECK_DEADLINE_MIN_MS || value > SELF_CHECK_DEADLINE_MAX_MS) {
+		throw new TypeError(
+			`${SELF_CHECK_DEADLINE_FLAG} takes whole milliseconds from ${SELF_CHECK_DEADLINE_MIN_MS} to ${SELF_CHECK_DEADLINE_MAX_MS}`,
+		);
+	}
+	return value;
+}
+
+/**
+ * A probe that ran out of time with nothing contradicting the runtime.
+ *
+ * Reaching a deadline is not evidence of a broken runtime: a saturated machine starts
+ * processes and flushes pseudo-console output late. It is also not evidence of a good
+ * one. The entry reports it as `outcome: "inconclusive"` (exit 8), distinct from a run
+ * that *observed* a fault — an addon that does not load, a child that cannot be
+ * started, a nonzero exit, a pipe child that echoed something else — which is
+ * `outcome: "broken"` (exit 7). The host admits the former provisionally and keeps
+ * probing, and refuses the latter (ADR-0032, 2026-10-12 amendment).
+ */
+export class SelfCheckInconclusive extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "SelfCheckInconclusive";
+	}
+}
+
 /** The two markers one self-check run's child must print, in order. */
 export interface SelfCheckMarkers {
 	/** Printed as soon as the child runs, so the data path is proven early. */
@@ -172,37 +228,164 @@ export interface SelfCheckObservation {
 	/** Everything the pseudo console delivered from the child, as text. */
 	readonly output: string;
 	readonly markers: SelfCheckMarkers;
+	/** Whether the backend reported that the child ended. */
+	readonly exitReported: boolean;
 	/** The exit code the backend reported, or `undefined` when it reported none. */
 	readonly exitCode: number | undefined;
+	/** The run stopped waiting because its deadline ran out, not because the proof was complete. */
+	readonly timedOut: boolean;
+	/** The deadline this run was given. */
+	readonly deadlineMs: number;
 }
 
-/** Whether one run proved the backend, and what it observed. */
+/**
+ * Whether a run that ran out of time may only have been late.
+ *
+ * Reaching the default deadline can be lateness: a saturated machine starts processes and
+ * flushes pseudo-console output late (measured 8 to 14 s against 4.3 s unloaded). A run
+ * that was already given the extended window ({@link SELF_CHECK_EXTENDED_DEADLINE_MS})
+ * and still did not finish has no such excuse: its timeout is a refusal.
+ */
+export function selfCheckTimeoutMayBeLateness(deadlineMs: number): boolean {
+	return deadlineMs < SELF_CHECK_EXTENDED_DEADLINE_MS;
+}
+
+/** The entry's exit code for an inconclusive run; the host admits nothing else as lateness. */
+export const SELF_CHECK_INCONCLUSIVE_EXIT = 8;
+
+/**
+ * Whether what the pipe child echoed so far already contradicts the line it was given.
+ *
+ * The echo child writes back exactly the bytes it read, so the whole echo must be
+ * `line` and one `\n`. Echo that is still a prefix of that (nothing, or a partial flush)
+ * is only late; any other byte is a fault the runtime showed.
+ */
+export function pipeEchoContradicts(echoed: string, line: string): boolean {
+	return !`${line}\n`.startsWith(echoed);
+}
+
+/** The parts of a spawned pipe child {@link watchPipeEcho} uses; a `ChildProcess` with piped stdio fits. */
+export interface PipeEchoChild {
+	readonly stdin: { write(data: string): unknown; end(): unknown; on(event: "error", listener: (error: Error) => void): unknown };
+	readonly stdout: { setEncoding(encoding: "utf8"): unknown; on(event: "data", listener: (chunk: string) => void): unknown };
+	once(event: "error", listener: (error: Error) => void): unknown;
+	once(event: "exit" | "close", listener: (code: number | null) => void): unknown;
+	kill(): unknown;
+}
+
+/** Test seam for {@link watchPipeEcho}'s deadline. */
+export interface PipeEchoTimers {
+	setTimeout(run: () => void, ms: number): unknown;
+	clearTimeout(handle: unknown): void;
+}
+
+const REAL_TIMERS: PipeEchoTimers = {
+	setTimeout: (run, ms) => setTimeout(run, ms),
+	clearTimeout: handle => clearTimeout(handle as NodeJS.Timeout),
+};
+
+/**
+ * Prove the pipe path with one echo child: write `line`, read it back exactly, close
+ * stdin, and see the child exit 0.
+ *
+ * Every fault is a refusal the moment it is observed — a write error, an echo that is
+ * not a prefix of the line, an exit with any code other than 0, an incomplete echo at
+ * close. Only a deadline reached with nothing of that observed rejects with
+ * {@link SelfCheckInconclusive}, and only when the deadline may excuse lateness
+ * ({@link selfCheckTimeoutMayBeLateness}).
+ */
+export function watchPipeEcho(
+	child: PipeEchoChild,
+	line: string,
+	deadlineMs: number,
+	timers: PipeEchoTimers = REAL_TIMERS,
+): Promise<void> {
+	const outcome = Promise.withResolvers<void>();
+	let settled = false;
+	let echoed = "";
+	let exitCode: number | null | undefined;
+	const settle = (error: Error | null): void => {
+		if (settled) return;
+		settled = true;
+		timers.clearTimeout(deadline);
+		if (error === null) {
+			outcome.resolve();
+			return;
+		}
+		child.kill();
+		outcome.reject(error);
+	};
+	child.stdout.setEncoding("utf8");
+	child.stdout.on("data", chunk => {
+		echoed += chunk;
+		if (pipeEchoContradicts(echoed, line)) settle(new Error("the pipe child echoed something other than the line it was given"));
+		else if (echoed.endsWith("\n")) child.stdin.end();
+	});
+	child.stdin.on("error", error => settle(new Error(`writing to the pipe child failed: ${error.message}`)));
+	child.once("error", error => settle(error));
+	child.once("exit", code => {
+		exitCode = code;
+		if (code !== 0) settle(new Error(`the pipe child did not exit cleanly after its stdin closed (${String(code)})`));
+	});
+	child.once("close", code => {
+		if (echoed !== `${line}\n`) settle(new Error("the pipe child did not echo the line it was given"));
+		else if ((exitCode ?? code) !== 0) settle(new Error(`the pipe child did not exit cleanly after its stdin closed (${String(exitCode ?? code)})`));
+		else settle(null);
+	});
+	const deadline = timers.setTimeout(() => {
+		const detail = `the pipe child did not finish within the self-check deadline of ${Math.round(deadlineMs / 1000)} s`;
+		settle(selfCheckTimeoutMayBeLateness(deadlineMs) ? new SelfCheckInconclusive(detail) : new Error(detail));
+	}, deadlineMs);
+	child.stdin.write(`${line}\n`);
+	return outcome.promise;
+}
+
+/**
+ * Whether one run proved the backend, and what it observed.
+ *
+ * A refusal is `inconclusive` only when the run ran out of time *and* nothing it did
+ * observe contradicts the runtime (no nonzero exit code), *and* the deadline was short
+ * enough for lateness to explain it ({@link selfCheckTimeoutMayBeLateness}). Every
+ * other refusal observed a fault, or waited out the extended window, and is final.
+ */
 export type SelfCheckVerdict =
 	| { readonly ok: true; readonly childExitCode: number | null }
-	| { readonly ok: false; readonly detail: string };
+	| { readonly ok: false; readonly detail: string; readonly inconclusive: boolean };
 
 /**
  * Decide one run from what it observed and nothing else.
  *
  * `exitCode` is what a reported exit carried; `undefined` means the backend reported an
- * exit without a code, which is the measured Windows case. Whether an exit was reported
- * at all is not visible here — a run that reported none before its deadline is refused
- * by the observer (`src/broker/pty-broker.ts`), because this event is the backend's own
- * notification that the child ended, not an independent reading of process absence.
+ * exit without a code, which is the measured Windows case. A reported exit is this
+ * backend's own notification that the child ended, not an independent reading of
+ * process absence, and it is only half of the proof: the child's own markers are the
+ * other half.
  */
 export function selfCheckVerdict(observation: SelfCheckObservation): SelfCheckVerdict {
+	// A code the backend did report is evidence about the runtime however the rest went.
+	if (observation.exitReported && observation.exitCode !== undefined && observation.exitCode !== 0) {
+		return { ok: false, detail: `the self-check child exited with code ${observation.exitCode}`, inconclusive: false };
+	}
 	const startSeen = observation.output.includes(observation.markers.start);
 	const endSeen = observation.output.includes(observation.markers.end);
-	if (!startSeen || !endSeen) {
+	const markers = `start ${startSeen ? "seen" : "missing"}, completion ${endSeen ? "seen" : "missing"}`;
+	const late = observation.timedOut && selfCheckTimeoutMayBeLateness(observation.deadlineMs);
+	const window = `${Math.round(observation.deadlineMs / 1000)} s`;
+	if (!observation.exitReported) {
 		return {
 			ok: false,
-			detail:
-				`the self-check child did not prove itself through its pseudo console (start ${startSeen ? "seen" : "missing"}, ` +
-				`completion ${endSeen ? "seen" : "missing"})`,
+			detail: `the self-check child did not report its exit within the self-check deadline of ${window} (${markers})`,
+			inconclusive: late,
 		};
 	}
-	if (observation.exitCode !== undefined && observation.exitCode !== 0) {
-		return { ok: false, detail: `the self-check child exited with code ${observation.exitCode}` };
+	if (!startSeen || !endSeen) {
+		// The backend reported the child's end, so what is missing is bytes, not a
+		// process: the measured first flush is about three seconds.
+		return {
+			ok: false,
+			detail: `the self-check child did not prove itself through its pseudo console within ${window} (${markers})`,
+			inconclusive: late,
+		};
 	}
 	// Both markers arrived and the backend reported the child's exit. The code is
 	// reported when this backend has one; the markers are what make an unreported code

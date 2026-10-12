@@ -7,6 +7,8 @@ date: 2026-09-28
 
 > Narrowly amended by the [rpc-ui design](../designs/2026-09-29-rpc-ui-chat-and-sessions.md) (ADR-0038), section 1, "Attach does not wait on runtime staging": the runtime proof below still gates every path that *starts* a child under the staged tree. Attaching to an already-running broker no longer waits for it; it needs only the staged, verified identity probe and the record's token handshake.
 
+> Decision Outcome amended 2026-10-12 (accepted after independent architecture review): a run that only ran out of time is *inconclusive* and admits a launch provisionally, without being kept as proof; see [Amendment 2026-10-12](#amendment-2026-10-12-a-timeout-with-no-observed-fault-is-inconclusive).
+
 ## Context and Problem Statement
 
 [ADR-0024](0024-own-omp-pty-for-in-tab-terminal.md) requires the broker runtime and its native
@@ -94,6 +96,43 @@ one-line reason to the host, which reports it instead of only the entry's status
 - Negative: the markers prove the console carried the child's bytes and the backend reported the
   child's exit, not that any process is independently proven gone, and not that a session's own
   long-lived child will stream perfectly under every backend quirk.
+
+## Amendment 2026-10-12: a timeout with no observed fault is inconclusive
+
+### Context
+
+With the machine saturated, a whole self-check run was measured at up to 14 s against about 4 s idle, and a phase that missed the 15-second deadline refused the runtime with exit code 7 (`the pipe child did not finish within the self-check deadline`). Every session start in that window failed, although nothing about the tree was wrong. A deadline that passes with nothing observed is absence of evidence: it cannot tell a healthy late runtime from a hung one.
+
+### Decision
+
+A run now ends one of three ways, reported by the entry as `outcome` and by its exit code:
+
+- **proven** (exit 0): unchanged — both markers, the backend's exit report and the pipe-child echo. An exit-0 answer is validated as before; it needs no `outcome` field, so an older entry's success is still accepted.
+- **broken** (exit 7): a fault was *observed* — a nonzero exit code the backend reported, a completed run without its markers, a pipe-child write error, an echo that is not exactly the line given plus `\n` (checked on every chunk and again at close), a pipe child that exited with any code other than 0, an addon that did not load, a malformed answer. A timeout after an observed fault is still broken.
+- **inconclusive** (exit 8): the default 15-second deadline of a phase passed and nothing observed contradicts the runtime.
+
+The host admits lateness only on a consistent answer: exit 8 *and* `ok: false` *and* `outcome: "inconclusive"` *and* no nonzero `childExitCode` reported beside it, for a run given the default deadline. Any other nonzero exit — including an older entry's answer without `outcome`, or `inconclusive` under exit 7 — is a refusal. The host's own kill bound (both phases' deadlines plus 30 s) counts as lateness only when the entry printed nothing at all; an answer it did print outranks the kill.
+
+The host (`src/host/pty-runtime.ts`, `src/host/pty-runtime-proof.ts`) treats them so:
+
+- a proven answer is kept for the activation, as before;
+- an inconclusive answer admits the launch as `ready: true, proven: false` from the staged, re-verified tree, is **not** cached as proof, and is logged (`PTY runtime admitted unproven`). One background re-run with the extended **90-second** deadline per phase starts 20 s later; at that deadline a timeout is never inconclusive (the entry reports it as broken and the host refuses an `inconclusive` answer to it), so the re-run either proves the tree (kept) or refuses it. A re-run that cannot even be started is retried twice more at 20-second intervals; if all three fail, the provisional admission is dropped and the next launch runs a fresh first probe;
+- a refusal from that re-run is held for 60 s, so the following launches get the fault instead of another provisional admission from a fresh short probe; after the hold a new probe runs, because the refusal can itself be a probe starved past its deadline;
+- a refusal from the first probe is not held, as before.
+
+Attaching to an already-running broker is unaffected (see the note at the top).
+
+### Consequences
+
+- Positive: a slow machine no longer fails session starts; a fault the runtime actually showed is still a refusal at once.
+- Negative: a genuinely hung or output-less backend is admitted provisionally until the re-run refuses it. The console and pipe phases each get 90 s, and the host kills the entry after 210 s, so the refusal arrives about 20 s plus up to 180 s (210 s if the entry never answers) after the admission. Sessions started in that window run on a tree that was never proven and are neither stopped nor repaired by the later refusal; their own spawn reports its own failure. The refusal blocks only later launches.
+- Negative: 90 s per phase is an operational bound, not proof that CPU starvation cannot last longer; a re-run starved past it refuses a healthy tree for the 60-second hold.
+
+### Review
+
+- Reviewer: architect (separate, disposable read-only agent), against the source, tests and this text.
+- Outcome: accepted after three passes. Round 1 found two major defects — the host admitted any nonzero exit labelled `inconclusive` (including exit 7 and an answer to the extended re-run), and a pipe-child write error was discarded so a later timeout was excused — and four claim mismatches: re-runs that kept throwing left the runtime provisional forever, the older-answer rule, the per-phase time bound, and the exact-echo rule on normal completion. All were fixed in code, tests and this text. Round 2 found one remaining gap (an `inconclusive` answer that also reported a nonzero child exit was admitted); fixed with a regression test. Round 3 confirmed no remaining findings.
+- The choice itself (inconclusive admits provisionally, an extended re-run settles it) was not in question.
 
 ## Related Documents
 

@@ -16,8 +16,10 @@ import { PTY_READINESS_RETRY_MS, createPtyReadinessGate } from "./pty-readiness.
 import type { PtyReadinessGate } from "./pty-readiness.ts";
 import type { PtyBrokerClient } from "./pty-client.ts";
 
-/** One `ready()` answer the fake client replays, or a check that throws. */
-type ReadinessAnswer = { readonly ready: boolean; readonly reason?: string | null } | "throw";
+/** One `ready()` answer the fake client replays, or a check that throws. `proven` defaults to `ready`. */
+type ReadinessAnswer =
+	| { readonly ready: boolean; readonly proven?: boolean; readonly reason?: string | null }
+	| "throw";
 
 interface FakeReadiness {
 	readonly gate: PtyReadinessGate;
@@ -39,7 +41,7 @@ function gateWith(answers: readonly ReadinessAnswer[], options: { readonly retry
 			const answer = answers[Math.min(calls, answers.length - 1)];
 			calls += 1;
 			if (answer === "throw") throw new Error("the staged runtime could not be checked");
-			return { ready: answer.ready, reason: answer.reason ?? null };
+			return { ready: answer.ready, proven: answer.proven ?? answer.ready, reason: answer.reason ?? null };
 		},
 	} as unknown as PtyBrokerClient;
 	const failures: string[] = [];
@@ -154,6 +156,39 @@ describe("broker readiness gate", () => {
 		assert.equal(await first, client);
 		assert.equal(await second, client);
 		assert.equal(calls, 1, "concurrent callers share one readiness check");
+	});
+
+	it("lets a launch proceed on a provisional admission but never latches it as a proof", async () => {
+		const unproven = "the pipe child did not finish within the self-check deadline of 15 s";
+		const { gate, client, calls, failures } = gateWith([
+			{ ready: true, proven: false, reason: unproven },
+			{ ready: true, proven: false, reason: unproven },
+			{ ready: true },
+		]);
+
+		assert.equal(await gate.client(), client, "a slow probe does not fail the launch");
+		assert.deepEqual(failures, [], "a provisional admission is not a failed check");
+		assert.equal(gate.reason(), unproven, "the window can still say why the runtime is unproven");
+		// Not latched: every caller asks the client again, so a refusal the repeated
+		// check finds reaches the next launch instead of hiding behind the first answer.
+		assert.equal(await gate.client(), client);
+		assert.equal(calls(), 2);
+		assert.equal(await gate.client(), client);
+		assert.equal(gate.reason(), null);
+		assert.equal(await gate.client(), client);
+		assert.equal(calls(), 3, "once proven, the proof is latched");
+	});
+
+	it("refuses the launch after a provisional admission when the repeated check refused the runtime", async () => {
+		const { gate, client, failures } = gateWith([
+			{ ready: true, proven: false, reason: "unproven" },
+			{ ready: false, reason: "the repeated self-check refused the runtime" },
+		], { retryMs: PTY_READINESS_RETRY_MS });
+
+		assert.equal(await gate.client(), client);
+		assert.equal(await gate.client(), null, "the refusal is not swallowed by the earlier admission");
+		assert.deepEqual(failures, ["the repeated self-check refused the runtime"]);
+		assert.match(gate.reason() ?? "", /refused the runtime/);
 	});
 });
 

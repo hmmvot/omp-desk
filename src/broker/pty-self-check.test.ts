@@ -19,16 +19,26 @@
 
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { describe, it } from "node:test";
 
 import {
 	SELF_CHECK_CHILD_DELAY_MS,
+	SELF_CHECK_DEADLINE_FLAG,
+	SELF_CHECK_DEADLINE_MAX_MS,
+	SELF_CHECK_DEADLINE_MIN_MS,
+	SELF_CHECK_EXTENDED_DEADLINE_MS,
 	SELF_CHECK_MARKER,
 	SELF_CHECK_DEADLINE_MS,
 	SELF_CHECK_OUTPUT_LIMIT,
 	SELF_CHECK_TOKEN_MAX,
+	SelfCheckInconclusive,
+	type SelfCheckObservation,
 	selfCheckChild,
+	selfCheckDeadlineFromArgs,
 	selfCheckPlan,
+	watchPipeEcho,
+	selfCheckTimeoutMayBeLateness,
 	selfCheckTools,
 	selfCheckVerdict,
 } from "./pty-self-check.ts";
@@ -138,30 +148,37 @@ describe("selfCheckChild", () => {
 	});
 });
 
+/** One observation as the broker would build it; the defaults are a run that completed in time. */
+function observe(fields: Partial<SelfCheckObservation>): SelfCheckObservation {
+	return {
+		output: `${plan.markers.start}\r\n${plan.markers.end}\r\n`,
+		markers: plan.markers,
+		exitReported: true,
+		exitCode: 0,
+		timedOut: false,
+		deadlineMs: SELF_CHECK_DEADLINE_MS,
+		...fields,
+	};
+}
+
 describe("selfCheckVerdict", () => {
 	const both = `${plan.markers.start}\r\n${plan.markers.end}\r\n`;
 
 	it("accepts a child that proved both markers and reported a clean exit", () => {
-		assert.deepEqual(selfCheckVerdict({ output: both, markers: plan.markers, exitCode: 0 }), {
-			ok: true,
-			childExitCode: 0,
-		});
+		assert.deepEqual(selfCheckVerdict(observe({})), { ok: true, childExitCode: 0 });
 	});
 
 	it("accepts an unreported exit code only with both markers", () => {
 		// The measured Windows case: the child ran to completion and its code is unknown.
-		assert.deepEqual(selfCheckVerdict({ output: both, markers: plan.markers, exitCode: undefined }), {
-			ok: true,
-			childExitCode: null,
-		});
+		assert.deepEqual(selfCheckVerdict(observe({ exitCode: undefined })), { ok: true, childExitCode: null });
 		// The same unreported code without the child's own proof proves nothing at all.
-		const noProof = selfCheckVerdict({ output: "", markers: plan.markers, exitCode: undefined });
+		const noProof = selfCheckVerdict(observe({ output: "", exitCode: undefined }));
 		assert.equal(noProof.ok, false);
 		assert.match(noProof.ok ? "" : noProof.detail, /did not prove itself/);
 	});
 
 	it("refuses a nonzero exit even when the child printed both markers", () => {
-		const verdict = selfCheckVerdict({ output: both, markers: plan.markers, exitCode: 1 });
+		const verdict = selfCheckVerdict(observe({ output: both, exitCode: 1 }));
 		assert.equal(verdict.ok, false);
 		assert.match(verdict.ok ? "" : verdict.detail, /exited with code 1/);
 	});
@@ -175,10 +192,16 @@ describe("selfCheckVerdict", () => {
 			[`${SELF_CHECK_MARKER}-ffffffffffffffff-start\r\n`, /start missing, completion missing/],
 		];
 		for (const [output, expected] of cases) {
-			const verdict = selfCheckVerdict({ output, markers: plan.markers, exitCode: 0 });
+			const verdict = selfCheckVerdict(observe({ output }));
 			assert.equal(verdict.ok, false, `accepted ${JSON.stringify(output)}`);
 			assert.match(verdict.ok ? "" : verdict.detail, expected);
 		}
+	});
+
+	it("refuses a child whose end the backend never reported, even with both markers", () => {
+		const verdict = selfCheckVerdict(observe({ exitReported: false, exitCode: undefined }));
+		assert.equal(verdict.ok, false);
+		assert.match(verdict.ok ? "" : verdict.detail, /did not report its exit/);
 	});
 
 	it("bounds the output one run keeps, and waits beyond the backend's measured flush", () => {
@@ -189,5 +212,155 @@ describe("selfCheckVerdict", () => {
 			SELF_CHECK_DEADLINE_MS >= 5_000,
 			`${SELF_CHECK_DEADLINE_MS}ms is inside the measured first flush of child output`,
 		);
+	});
+});
+
+describe("selfCheckVerdict: a run that ran out of time", () => {
+	const nothing = { output: "", exitCode: undefined } as const;
+
+	it("is inconclusive, not broken, when only the default deadline passed with no fault observed", () => {
+		// The measured symptom: under saturation the proof was late, nothing was wrong.
+		const lateMarkers = selfCheckVerdict(observe({ ...nothing, timedOut: true }));
+		assert.deepEqual(lateMarkers.ok ? null : lateMarkers.inconclusive, true);
+		const lateExit = selfCheckVerdict(observe({ ...nothing, exitReported: false, timedOut: true }));
+		assert.deepEqual(lateExit.ok ? null : lateExit.inconclusive, true);
+		// Half a proof at the deadline is just as unfinished.
+		const half = selfCheckVerdict(observe({ output: `${plan.markers.start}\r\n`, timedOut: true }));
+		assert.deepEqual(half.ok ? null : half.inconclusive, true);
+	});
+
+	it("is broken once the extended window passed, so a console that delivers nothing is still caught", () => {
+		for (const fields of [
+			{ ...nothing, timedOut: true },
+			{ ...nothing, exitReported: false, timedOut: true },
+		] as const) {
+			const verdict = selfCheckVerdict(observe({ ...fields, deadlineMs: SELF_CHECK_EXTENDED_DEADLINE_MS }));
+			assert.equal(verdict.ok, false);
+			assert.equal(verdict.ok ? null : verdict.inconclusive, false);
+			assert.match(verdict.ok ? "" : verdict.detail, /90 s/);
+		}
+		assert.equal(selfCheckTimeoutMayBeLateness(SELF_CHECK_DEADLINE_MS), true);
+		assert.equal(selfCheckTimeoutMayBeLateness(SELF_CHECK_EXTENDED_DEADLINE_MS), false);
+	});
+
+	it("is broken whenever a fault was observed, however little time was left", () => {
+		// A nonzero code is evidence about the runtime, not lateness.
+		const code = selfCheckVerdict(observe({ output: "", exitCode: 3, timedOut: true }));
+		assert.equal(code.ok ? null : code.inconclusive, false);
+		assert.match(code.ok ? "" : code.detail, /exited with code 3/);
+	});
+
+	it("a run that finished inside the deadline never reports lateness", () => {
+		// Markers missing without a timeout cannot be explained by waiting longer.
+		const verdict = selfCheckVerdict(observe({ output: "" }));
+		assert.equal(verdict.ok ? null : verdict.inconclusive, false);
+	});
+
+	it("an extended run proves a late but complete child like any other", () => {
+		assert.deepEqual(selfCheckVerdict(observe({ deadlineMs: SELF_CHECK_EXTENDED_DEADLINE_MS })), {
+			ok: true,
+			childExitCode: 0,
+		});
+	});
+});
+
+describe("watchPipeEcho: the pipe half of the self-check", () => {
+	const line = JSON.stringify({ type: "pipe-check", token: "0123456789abcdef" });
+
+	/** A pipe child driven by hand. */
+	interface FakeChild extends EventEmitter {
+		readonly stdin: EventEmitter & { readonly written: string[]; ended: boolean; write(data: string): void; end(): void };
+		readonly stdout: EventEmitter & { setEncoding(): void };
+		killed: boolean;
+		kill(): void;
+	}
+
+	/** A fake child under watch, and a deadline that fires only when the test says so. */
+	function harness(deadlineMs = SELF_CHECK_DEADLINE_MS): { readonly child: FakeChild; readonly result: Promise<unknown>; deadline(): void } {
+		const child: FakeChild = Object.assign(new EventEmitter(), {
+			stdin: Object.assign(new EventEmitter(), { written: [] as string[], ended: false, write(this: { written: string[] }, data: string) { this.written.push(data); }, end(this: { ended: boolean }) { this.ended = true; } }),
+			stdout: Object.assign(new EventEmitter(), { setEncoding() {} }),
+			killed: false,
+			kill(this: { killed: boolean }) { this.killed = true; },
+		});
+		let fire: (() => void) | null = null;
+		const timers = { setTimeout: (run: () => void) => { fire = run; return 1; }, clearTimeout: () => { fire = null; } };
+		const result = watchPipeEcho(child, line, deadlineMs, timers).then(() => "proven", (error: unknown) => error);
+		return { child, result, deadline: () => fire?.() };
+	}
+
+	it("proves an exact echo followed by a clean exit, and closes stdin once the line is back", async () => {
+		const { child, result } = harness();
+		assert.deepEqual(child.stdin.written, [`${line}\n`]);
+		child.stdout.emit("data", line.slice(0, 10));
+		assert.equal(child.stdin.ended, false, "half a line is not the echo yet");
+		child.stdout.emit("data", `${line.slice(10)}\n`);
+		assert.equal(child.stdin.ended, true);
+		child.emit("exit", 0);
+		child.emit("close", 0);
+		assert.equal(await result, "proven");
+	});
+
+	it("is inconclusive only when the default deadline passes with nothing wrong observed", async () => {
+		const { child, result, deadline } = harness();
+		child.stdout.emit("data", line.slice(0, 5));
+		deadline();
+		const error = await result;
+		assert.ok(error instanceof SelfCheckInconclusive, String(error));
+		assert.equal(child.killed, true);
+		const extended = harness(SELF_CHECK_EXTENDED_DEADLINE_MS);
+		extended.deadline();
+		const late = await extended.result;
+		assert.ok(late instanceof Error && !(late instanceof SelfCheckInconclusive), "the extended window excuses nothing");
+	});
+
+	it("refuses every observed fault at once, so a later timeout can never excuse it", async () => {
+		const faults: Array<[string, (child: FakeChild) => void, RegExp]> = [
+			["a write error such as EPIPE", child => child.stdin.emit("error", new Error("write EPIPE")), /writing to the pipe child failed: write EPIPE/],
+			["an echo that differs from the line", child => child.stdout.emit("data", `${line.slice(0, -1)}X`), /echoed something other/],
+			["CRLF instead of the exact bytes", child => child.stdout.emit("data", `${line}\r\n`), /echoed something other/],
+			["a nonzero exit while the pipes stay open", child => child.emit("exit", 3), /did not exit cleanly.*\(3\)/],
+			["a close without the whole line", child => { child.stdout.emit("data", line); child.emit("close", 0); }, /did not echo the line/],
+			["a spawn error", child => child.emit("error", new Error("spawn ENOENT")), /spawn ENOENT/],
+		];
+		for (const [name, act, expected] of faults) {
+			const { child, result, deadline } = harness();
+			act(child);
+			deadline();
+			const error = await result;
+			assert.ok(error instanceof Error && !(error instanceof SelfCheckInconclusive), `${name}: ${String(error)}`);
+			assert.match(error.message, expected, name);
+			assert.equal(child.killed, true, `${name}: the child is ended`);
+		}
+	});
+});
+
+describe("selfCheckDeadlineFromArgs", () => {
+	it("is the default without the flag and the flag's value with it", () => {
+		assert.equal(selfCheckDeadlineFromArgs(["--self-check"]), SELF_CHECK_DEADLINE_MS);
+		assert.equal(
+			selfCheckDeadlineFromArgs(["--self-check", `${SELF_CHECK_DEADLINE_FLAG}=${SELF_CHECK_EXTENDED_DEADLINE_MS}`]),
+			SELF_CHECK_EXTENDED_DEADLINE_MS,
+		);
+	});
+
+	it("refuses a malformed, out-of-range or repeated value instead of falling back", () => {
+		const bad = ["", "abc", "-1", "1.5", "1e4", "4999", String(SELF_CHECK_DEADLINE_MAX_MS + 1), "99999999"];
+		for (const value of bad) {
+			assert.throws(() => selfCheckDeadlineFromArgs([`${SELF_CHECK_DEADLINE_FLAG}=${value}`]), TypeError, value);
+		}
+		assert.throws(
+			() => selfCheckDeadlineFromArgs([`${SELF_CHECK_DEADLINE_FLAG}=10000`, `${SELF_CHECK_DEADLINE_FLAG}=20000`]),
+			TypeError,
+		);
+		// The bounds themselves are accepted.
+		assert.equal(selfCheckDeadlineFromArgs([`${SELF_CHECK_DEADLINE_FLAG}=${SELF_CHECK_DEADLINE_MIN_MS}`]), SELF_CHECK_DEADLINE_MIN_MS);
+		assert.equal(selfCheckDeadlineFromArgs([`${SELF_CHECK_DEADLINE_FLAG}=${SELF_CHECK_DEADLINE_MAX_MS}`]), SELF_CHECK_DEADLINE_MAX_MS);
+	});
+
+	it("keeps the extended window above the loaded measurement and inside the allowed range", () => {
+		// Measured under saturation: a whole run took up to 14 s, each phase had 15 s.
+		assert.ok(SELF_CHECK_EXTENDED_DEADLINE_MS >= 4 * SELF_CHECK_DEADLINE_MS);
+		assert.ok(SELF_CHECK_EXTENDED_DEADLINE_MS <= SELF_CHECK_DEADLINE_MAX_MS);
 	});
 });
