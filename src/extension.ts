@@ -68,7 +68,8 @@ import type {
   SessionIndexEntry,
 } from "./host/session-index";
 import type { SessionViewMode } from "./host/session-index";
-import { claimHolderMayBeAlive, claimHolderSeemsAlive, setProcessProbeObserver } from "./host/session-claim";
+import { claimHolderMayBeAlive, setProcessProbeObserver } from "./host/session-claim";
+import { holderSeemsAlive } from "./host/holder-liveness";
 import { claimFileNameFor, startClaimWatch } from "./host/claim-watch";
 import { PUBLISHED_ROW_STATUSES, WindowRegistry } from "./host/window-registry";
 import { sessionIncarnation } from "./host/window-registry";
@@ -127,6 +128,9 @@ import {
 } from "./views/session-tree";
 import { ProcessTreeItem } from "./views/process-rows";
 import { registerInventoryViews, type InventoryHandle } from "./host/inventory-wiring";
+import { registerContextView, type ContextHandle } from "./host/context-wiring";
+import type { ContextTarget } from "./host/context/context-controller";
+import { registerDeskSettingsView } from "./host/desk-settings/view";
 import type { SessionToolsTarget } from "./host/session-tools";
 import type { LauncherTreeItem, SessionLauncherFacts, SessionOwnershipFacts } from "./views/session-tree";
 import { WorkspaceFolderRegistry, folderArgument, mergeWorkspaceFolderRecords, WORKSPACE_FOLDERS_STORAGE_KEY } from "./views/workspace-folders";
@@ -140,7 +144,7 @@ import { activateAgentDebugger } from "./host/debug/index";
 import type { ChatCommandOutcome, ChatPage, ChatRuntimeEvent } from "./host/chat-runtime";
 import { attachRpcHost, launchRpcHost, retireStoppedRpcBroker, stopRpcHost } from "./host/rpc-launch";
 import type { RpcAttachOutcome, RpcHostRuntime } from "./host/rpc-launch";
-import { attachNativeHost, launchNativeHost, waitForManagedRootExit } from "./host/native-session";
+import { attachNativeHost, brokerAndRootGone, launchNativeHost, waitForManagedRootExit } from "./host/native-session";
 import type { NativeAttachOutcome, NativeHostRuntime, SessionHostRuntime } from "./host/native-session";
 import {
   createOwnerReconciler,
@@ -226,6 +230,11 @@ import {
 } from "./host/shell-slots";
 import type { ShellLiveness, ShellSlotRecord, ShellSlotStore } from "./host/shell-slots";
 import { stopShellAndBroker, watchShellExit, type ShellExitWatchStop } from "./host/shell-exit";
+import { awaitWriterGone, watchBrokerLoss } from "./host/broker-loss";
+import { isPtyProcessAlive } from "./host/pty-identity";
+import { setTimeout as delayMs } from "node:timers/promises";
+import { createSessionKiller } from "./host/session-kill-wiring";
+import type { CapturedHost, KillSelection, RecordedProcess } from "./host/session-kill";
 // The profile catalog (ADR-0034) is the one authority for this extension's durable
 // state; it is profile-wide, so opening another VS Code folder neither hides the
 // user's sessions and folders nor forks them.
@@ -685,6 +694,7 @@ const composerPopupTabs = new Set<string>();
 /** The OMP editors of this window in the order the user last focused them; orders the add-to-session picker. */
 const editorRecency = new EditorRecency();
 let inventoryViews: InventoryHandle | null = null;
+let contextView: ContextHandle | null = null;
 /** The Sessions view's background processes: its reader, poll and stop commands. */
 let sessionProcesses: SessionProcesses | null = null;
 /**
@@ -1231,6 +1241,13 @@ export function activate(context: vscode.ExtensionContext): void {
   subscribeProviderLoginRefresh(context, index);
   inventoryViews = registerInventoryViews(context, { target: () => toolsTarget(index), log });
   context.subscriptions.push({ dispose: () => { inventoryViews = null; } });
+  contextView = registerContextView(context, {
+    target: () => contextTarget(index),
+    log,
+    runAction: (tabId, command) => void runChatAction(context, index, tabId, command),
+  });
+  context.subscriptions.push({ dispose: () => { contextView = null; } });
+  registerDeskSettingsView(context, { log });
   const chooseDefaultView = () => chooseDefaultSessionView(context);
   // Another window opening or releasing a session is only visible as a claim file appearing,
   // changing or going away. The watch is a hint that re-reads the ownership of the rows filed
@@ -1390,6 +1407,7 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand("omp.stopSessionHost", (argument: unknown) =>
       stopSessionHost(context, index, argument),
     ),
+    vscode.commands.registerCommand("omp.killSession", (argument: unknown) => killSession(context, index, argument)),
     vscode.commands.registerCommand("omp.refreshSessions", () => refreshSessions(index)),
     vscode.commands.registerCommand("omp.showHostControls", () => showHostControls(index)),
     vscode.commands.registerCommand("omp.selectModel", () => selectHostModel(index)),
@@ -1847,7 +1865,7 @@ function windowRegistryHeartbeat(): void {
 async function heldByAnotherWindow(index: SessionIndex, tabId: string): Promise<boolean> {
   const observed = await index.observeOwnership(tabId);
   const claim = observed.ok ? observed.claim : null;
-  return claim !== null && claim.verifiable && claim.holderId !== null && claim.holderId !== index.claimHolder.id && await claimHolderSeemsAlive(claim);
+  return claim !== null && claim.verifiable && claim.holderId !== null && claim.holderId !== index.claimHolder.id && await holderSeemsAlive(claim, windowRegistry);
 }
 
 /**
@@ -1872,7 +1890,7 @@ async function switchToSessionWindow(index: SessionIndex, argument: unknown): Pr
   const plan = planWindowSwitch({
     claim,
     incarnation: entry === null ? null : sessionIncarnation(entry),
-    claimHolderAlive: claim !== null && await claimHolderSeemsAlive(claim),
+    claimHolderAlive: claim !== null && await holderSeemsAlive(claim, windowRegistry),
     ownHolderId: index.claimHolder.id,
     windows: windowRegistry?.windows() ?? [],
   });
@@ -2683,6 +2701,95 @@ async function stopSessionHost(
   }
 }
 
+/**
+ * Kill (ADR-0060, amended 2026-10-12): end the process tree of a session row, or of a process row
+ * of the Terminals group, at once. It asks OMP nothing and reads no state of the session; the one
+ * check kept is that the recorded process id still has the creation time Desk recorded for it
+ * (`src/host/session-kill.ts`). Only a tree item names its target: Kill never falls back to the
+ * active or the front session the way Stop does, because nothing here asks for confirmation.
+ */
+async function killSession(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown): Promise<void> {
+  let selection: KillSelection | null = null;
+  if (argument instanceof ProcessTreeItem) {
+    selection = { kind: "process", row: argument.row };
+  } else {
+    const tabId = argument instanceof SessionTreeItem ? argument.tabId : typeof argument === "string" && index.get(argument) !== null ? argument : null;
+    const entry = tabId === null ? null : index.get(tabId);
+    if (tabId !== null && entry !== null) selection = { kind: "session", tabId, title: launcherProvider?.headlineFor(tabId) ?? sessionHeadline(entry, null) };
+  }
+  if (selection === null) {
+    showWarning("Select a session or a process in Sessions to kill.");
+    return;
+  }
+  await createSessionKiller({
+    client: attachBrokerClient,
+    async readRows() {
+      return (await sessionProcesses?.refresh())?.rows ?? [];
+    },
+    recordedProcess: tabId => recordedProcessOf(index, tabId),
+    async forgetStoppedSlot(slot) {
+      await index.lifecycle.run(slot, async () => {
+        // Only the broker-slot mapping of a broker shown gone. A folder shell's recovery record stays until its own owner
+        // watch proves the shell root gone too: a broker-only proof must not retire it (ADR-0060 amendment).
+        await brokerSlots?.forget(slot);
+      });
+      refreshLauncher();
+    },
+    reconcileSession: (tabId, captured) => reconcileKilledSession(context, index, tabId, captured),
+    async refresh() {
+      refreshLauncher({ ownership: true });
+      await sessionProcesses?.refresh();
+    },
+    requester: () => `the Sessions menu of window "${vscode.workspace.name ?? "no folder"}" (${index.claimHolder.id.slice(0, 8)})`,
+    log,
+  })(selection);
+}
+
+/**
+ * The host a session's process is recorded as: this window's own runtime identity when it has one,
+ * else the index's record, together with the launch attempt the row's host record names, so that what
+ * Kill examined stays one exact incarnation.
+ */
+function recordedProcessOf(index: SessionIndex, tabId: string): RecordedProcess | null {
+  const entry = index.get(tabId);
+  const rpc = stateOf(tabId)?.runtime?.identity ?? (entry?.host != null && isManagedHost(entry.host) ? entry.host.rpc ?? null : null);
+  if (rpc === null) return null;
+  return {
+    slot: rpc.slot, brokerId: rpc.brokerId, brokerGeneration: rpc.brokerGeneration, brokerPid: rpc.brokerPid,
+    brokerCreationTime: rpc.brokerCreationTime, childPid: rpc.childPid, childCreationTime: rpc.childCreationTime,
+    attemptStartedAt: entry?.host?.startedAt ?? null, hostPid: entry?.host?.pid ?? null,
+  };
+}
+
+/**
+ * After Kill proved a session's OMP child (and broker) gone: record the row as stopped through the index's
+ * own incarnation-bound transaction (`SessionIndex.reconcileKilledHost`: under the tab's gate, no live rival
+ * holder, the claim taken, and a shared write that is refused when the committed row no longer records the
+ * killed process), then forget the broker slot and the control material of that incarnation.
+ *
+ * A session this window drives, one a live rival window holds, and one that now records a newer launch are
+ * left alone (a benign skip, logged): the owner's broker watch ends the first two, and the third is not the
+ * killed process. Anything else that left the row unrecorded throws, so the command tells the user.
+ */
+async function reconcileKilledSession(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, captured: CapturedHost): Promise<void> {
+  const before = index.get(tabId);
+  const result = await index.lifecycle.run(tabId, async lease => {
+    const recorded = await index.reconcileKilledHost(tabId, captured, lease);
+    if (recorded.kind === "recorded") {
+      await brokerSlots?.forget(recorded.slot);
+      outcomes.delete(tabId);
+      await releaseHostControl(context, tabId, before === null ? null : recordedControlOwner(before));
+    }
+    return recorded;
+  });
+  if (result.kind === "recorded") log(`tab ${tabId}: after Kill: the row is recorded as stopped`);
+  else if (result.kind === "skipped") log(`tab ${tabId}: after Kill: ${result.detail}`);
+  else {
+    log(`tab ${tabId}: after Kill: ${result.detail}`);
+    throw new Error(result.detail);
+  }
+}
+
 /** What a recorded-process stop binds to: the exact attempt, slot and broker of the row's recorded host. */
 interface RecordedStopCapture {
   readonly slot: string;
@@ -2914,7 +3021,7 @@ async function verifiedOwnedWriterPid(index: SessionIndex, tabId: string, option
   if (entry === null) return null;
   const observed = await index.observeOwnership(tabId);
   if (observed.ok && observed.claim !== null && observed.claim.holderId !== index.claimHolder.id &&
-    (options.display === true ? await claimHolderSeemsAlive(observed.claim) : claimHolderMayBeAlive(observed.claim))) return null;
+    (options.display === true ? await holderSeemsAlive(observed.claim, windowRegistry) : claimHolderMayBeAlive(observed.claim))) return null;
   const verdict = await reconciler.reconcile({
     entry, sessionFile: entry.sessionFile, draftIdentity: entry.ownership?.draftIdentity ?? null,
     ownerGeneration: entry.ownership?.ownerGeneration ?? "", claim: observed.ok ? observed.claim : null, host: entry.host,
@@ -4174,6 +4281,84 @@ function launcher(context: vscode.ExtensionContext, index: SessionIndex): OmpHos
   };
 }
 
+/** The broker watch of each runtime this window drives; a runtime that starts again replaces its own. */
+const brokerWatches = new WeakMap<SessionHostRuntime, () => void>();
+
+/**
+ * Prove that a broker that no longer exists took its OMP (or shell) root with it, waiting a bounded
+ * while for the root to follow (a Kill ends the broker's tree first and then the recorded root). Only
+ * both recorded creation times naming gone processes is proof (`src/host/broker-loss.ts`); a broker's
+ * absence alone says nothing about the writer (ADR-0029).
+ */
+async function brokerLossProven(
+  isCurrent: () => boolean,
+  broker: { readonly pid: number; readonly creationTime: string | null },
+  root: { readonly pid: number; readonly creationTime: string | null },
+): Promise<boolean> {
+  const client = await attachBrokerClient();
+  if (client === null) return false;
+  return awaitWriterGone({
+    prove: () => brokerAndRootGone(client, broker, root),
+    rootAlive: () => isPtyProcessAlive(root.pid),
+    isCurrent,
+    pause: ms => delayMs(ms),
+  });
+}
+
+/**
+ * Notice that the broker of a runtime this window drives was ended from outside (Kill in Sessions,
+ * Task Manager, a crash). Nothing says so over the connection, so the window asks whether the broker
+ * process still exists (`src/host/broker-loss.ts`). Its absence is only a trigger: nothing is
+ * published until the broker's and the OMP root's recorded creation times both name gone processes.
+ * Then a chat session is ended the way its child's exit ends it (the session shows the process ended
+ * and `handleRpcHostExited` records the row as stopped) and a native terminal runs
+ * `handleNativeHostExited`. When the root is still there, or cannot be shown gone, the runtime is
+ * kept and the user is told it could not be confirmed ended.
+ */
+function watchRuntimeBroker(index: SessionIndex, tabId: string, runtime: SessionHostRuntime): void {
+  brokerWatches.get(runtime)?.();
+  const isCurrent = (): boolean => stateOf(tabId)?.runtime === runtime;
+  brokerWatches.set(runtime, watchBrokerLoss({
+    brokerPid: runtime.handle.brokerPid,
+    isCurrent,
+    onLost: async () => {
+      log(`tab ${tabId}: the broker process ${runtime.handle.brokerPid} no longer exists; checking that its OMP process (pid ${runtime.pid}) is gone too`);
+      const proven = await brokerLossProven(
+        isCurrent,
+        { pid: runtime.handle.brokerPid, creationTime: runtime.handle.record.brokerCreationTime },
+        { pid: runtime.pid, creationTime: runtime.identity.childCreationTime },
+      );
+      if (!isCurrent()) return;
+      if (!proven) {
+        log(`tab ${tabId}: the broker process is gone but its OMP process pid ${runtime.pid} could not be confirmed gone; the session is kept as it is`);
+        showWarning("OMP: A session's background process ended, but its OMP process could not be confirmed ended. Check Task Manager, then use Stop Session or refresh Sessions.");
+        return;
+      }
+      log(`tab ${tabId}: the broker process and the OMP process pid ${runtime.pid} are gone`);
+      const incomplete = (why: string): void => {
+        log(`tab ${tabId}: the broker and the OMP process are gone but the session's exit could not be completed (${why}); the session is kept as it is`);
+        showWarning("OMP: A session's process ended, but its exit could not be recorded. Refresh Sessions or reopen the session.");
+      };
+      try {
+        if (runtime.kind === "chat") {
+          runtime.handle.brokerGone();
+          // The exit handling runs from the channel's close; it is complete when the runtime is no longer this window's.
+          for (let look = 0; look < 40 && isCurrent(); look++) await delayMs(250);
+          if (isCurrent()) incomplete("it did not finish within 10 s");
+          return;
+        }
+        const state = stateOf(tabId);
+        if (state !== undefined) {
+          await handleNativeHostExited(index, state, runtime);
+          if (isCurrent()) incomplete("the terminal's exit handling left its runtime in place");
+        }
+      } catch (error) {
+        incomplete(messageOf(error));
+      }
+    },
+  }));
+}
+
 /**
  * Hand one running host to its host-owned conversation.
  *
@@ -4191,6 +4376,7 @@ async function startConversation(
 ): Promise<void> {
   cancelControlPicker(tabId);
   tabState(tabId).runtime = runtime;
+  watchRuntimeBroker(index, tabId, runtime);
   const state = tabState(tabId);
   state.mode = runtime.kind;
   // The selected view can differ from a surviving writer we just reattached.
@@ -9031,6 +9217,10 @@ async function handleRpcHostExited(
   tabId: string,
   runtime: RpcHostRuntime,
 ): Promise<void> {
+  // Report-only boundary for the whole transaction: a failure after the runtime was cleared
+  // (stopping its terminal, disposing control) must still be visible, and the broker watch
+  // stops waiting once the runtime is gone. Nothing is mutated here: a replacement runtime
+  // may already own the tab.
   await index.lifecycle.run(tabId, async lease => {
     const current = stateOf(tabId);
     if (current === undefined || current.runtime !== runtime) return;
@@ -9052,13 +9242,21 @@ async function handleRpcHostExited(
     stopTerminalForTab(current.slotId);
     current.transitioning = false;
     disposeControlChannel(current);
-    await retireBroker(tabId, runtime);
-    // A writer that exited is a stopped session: the durable intent is what keeps its
-    // row stopped across a reload instead of being re-launched.
-    await index.setRunIntent(tabId, "stopped", stop.detail);
-    // Control material is dropped only for a stop this window can prove.
-    if (stop.writerGone) await releaseHostControl(context, tabId, ownerGeneration);
-    else current.controlFailure = stop.detail;
+    try {
+      await retireBroker(tabId, runtime);
+      // A writer that exited is a stopped session: the durable intent is what keeps its
+      // row stopped across a reload instead of being re-launched.
+      await index.setRunIntent(tabId, "stopped", stop.detail);
+      // Control material is dropped only for a stop this window can prove.
+      if (stop.writerGone) await releaseHostControl(context, tabId, ownerGeneration);
+      else current.controlFailure = stop.detail;
+    } catch (error) {
+      log(`tab ${tabId}: the exit of the OMP process could not be recorded: ${messageOf(error)}`);
+      showError(`The OMP process exited, but its session could not be recorded as stopped: ${messageOf(error)}. Refresh Sessions before resuming it.`);
+      pushSessionView(index, current);
+      refreshLauncher();
+      return;
+    }
     try {
       const result = await index.closeSession(tabId, { confirmedStopped: stop.writerGone, detail: stop.detail }, lease);
       log(`tab ${tabId}: closeSession released=${result.released} (${result.detail})`);
@@ -9073,6 +9271,9 @@ async function handleRpcHostExited(
     }
     pushSessionView(index, current);
     refreshLauncher();
+  }).catch((error: unknown) => {
+    log(`tab ${tabId}: the exit of the OMP process could not be completed: ${messageOf(error)}`);
+    showError(`The OMP process exited, but OMP Desk could not finish closing its session: ${messageOf(error)}. Refresh Sessions before resuming it.`);
   });
 }
 
@@ -9262,11 +9463,11 @@ async function confirmOpenUrl(event: { url: string; launchUrl?: string; instruct
 function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, event: ChatRuntimeEvent): void | Promise<void> {
   switch (event.type) {
     case "catalogue":
-      if (toolsTarget(index)?.key === chat.sessionOf(tabId)) inventoryViews?.refresh();
+      if (toolsTarget(index)?.key === chat.sessionOf(tabId)) { inventoryViews?.refresh(); contextView?.refresh(); }
       return;
     case "model":
       applyTurnActivity(index, tabId, event.model, event.baseline);
-      if (event.baseline) inventoryViews?.sync();
+      if (event.baseline) { inventoryViews?.sync(); contextView?.sync(); }
       const pickerModel = footerBindings.get(tabId);
       if (pickerModel?.modelId && (pickerModel.modelId !== event.model.state?.model?.id || pickerModel.message.provider !== event.model.state?.model?.provider)) cancelControlPicker(tabId);
       if (event.baseline || pickerModel?.modelId !== event.model.state?.model?.id ||
@@ -10388,6 +10589,7 @@ function toolsTarget(index: SessionIndex): SessionToolsTarget | null {
   const entry = index.get(tabId);
   return {
     key: session ?? runtime ?? state,
+    tabId,
     generation: JSON.stringify([state.slotId, tabId, state.mode, session?.epoch, session?.sessionFile, session?.sessionId,
       binding?.instanceId, binding?.epoch, binding?.sessionFile]),
     mode: state.mode,
@@ -10407,6 +10609,21 @@ function toolsTarget(index: SessionIndex): SessionToolsTarget | null {
         (session === null || (host?.sessionFile !== null && host?.sessionFile !== undefined &&
           session.sessionFile !== null && controlPathEquals(host.sessionFile, session.sessionFile))) ? list : null;
     },
+  };
+}
+
+/** The Context view's subject: the inventory views' selection (editor recency) plus the tab and its Chat session. */
+function contextTarget(index: SessionIndex): ContextTarget | null {
+  const target = toolsTarget(index);
+  if (target === null) return null;
+  return {
+    key: target.key,
+    generation: target.generation,
+    mode: target.mode === "chat" ? "chat" : "terminal",
+    running: target.running,
+    title: target.title,
+    tabId: target.tabId,
+    session: target.mode === "chat" ? chat.sessionOf(target.tabId) : null,
   };
 }
 
@@ -10902,6 +11119,7 @@ function refreshLauncher(options: { readonly ownership?: boolean } = {}): void {
   launcherProvider?.refresh(options);
   sessionProcesses?.touch();
   inventoryViews?.sync();
+  contextView?.sync();
   if (activationContext !== undefined) void vscode.commands.executeCommand("setContext", "omp.defaultSessionMode", defaultSessionMode(activationContext));
   void vscode.commands.executeCommand(
     "setContext",
@@ -11035,6 +11253,17 @@ const SESSIONS_LAYOUT_WORDS: Record<SessionsGrouping, string> = {
 async function setSessionsGrouping(grouping: SessionsGrouping): Promise<void> {
   try {
     await vscode.workspace.getConfiguration("omp").update("sessionsGrouping", grouping, vscode.ConfigurationTarget.Global);
+    // The picker writes the user layer; a workspace value of the same setting wins in this window, so say why the layout did not change.
+    const inEffect = normalizeSessionsGrouping(vscode.workspace.getConfiguration("omp").get("sessionsGrouping"));
+    if (inEffect !== grouping) {
+      const overridden = vscode.workspace.getConfiguration("omp").inspect("sessionsGrouping")?.workspaceValue !== undefined;
+      void vscode.window.showWarningMessage(
+        overridden
+          ? `This workspace sets its own Sessions layout, which overrides your choice here. Your choice is saved in your user settings.`
+          : `Sessions shows ${SESSIONS_LAYOUT_WORDS[inEffect]}, not the layout you chose: another setting changed it meanwhile.`,
+        "Open Settings",
+      ).then(action => { if (action === "Open Settings") void vscode.commands.executeCommand("workbench.action.openSettings", "@id:omp.sessionsGrouping"); });
+    }
   } catch (error) {
     showError(`Sessions could not switch to ${SESSIONS_LAYOUT_WORDS[grouping]}: ${messageOf(error)}`);
   }
@@ -11136,7 +11365,7 @@ async function launcherOwnershipFacts(index: SessionIndex, tabId: string, option
   // What the rows and the click's choice of window show: the holder's liveness is read without blocking the extension host and
   // is never what admits or refuses a launch, a stop or a deletion (those ask claimHolderMayBeAlive themselves).
   const heldElsewhere = claim !== null && claim.verifiable && claim.holderId !== null &&
-    claim.holderId !== index.claimHolder.id && await claimHolderSeemsAlive(claim);
+    claim.holderId !== index.claimHolder.id && await holderSeemsAlive(claim, windowRegistry);
   const heldHere = claim !== null && claim.holderId === index.claimHolder.id && claimHolderMayBeAlive(claim);
   const pid = await verifiedOwnedWriterPid(index, tabId, { display: true });
   const sessionFile = index.get(tabId)?.sessionFile ?? null;
@@ -12574,7 +12803,7 @@ function registerPanelLifecycle(
     // Deactivation must clear editor-title and Stop contexts as well as activation.
     refreshGuestContext();
     if (event.webviewPanel.active && state.tabId !== null) editorRecency.touch(slot);
-    if (activated) inventoryViews?.refresh();
+    if (activated) { inventoryViews?.refresh(); contextView?.refresh(); }
     if (!event.webviewPanel.active || state.tabId === null) return;
     if (activated) {
       activateNativeEditor(state);
@@ -13400,10 +13629,43 @@ async function startShellTerminal(index: SessionIndex, slot: string, handle: Pty
     log: message => log(`shell ${slot}: ${message}`),
     runRetirement: operation => index.lifecycle.run(slot, operation),
   });
-  state.ownerStopWatch = options => {
+  // The shell's broker may be ended from outside (Kill in Sessions, Task Manager, a crash) without a word over the
+  // connection. Its absence is only a trigger: the slot is retired and the pane says its process ended only once the
+  // broker's and the shell root's recorded creation times both name gone processes (see `watchRuntimeBroker`).
+  // A shell root whose identity was never read keeps its recovery record. The retirement re-checks, inside the slot's
+  // gate, that an ordinary Stop or a replacement pane has not taken over the watch.
+  let watchingBroker = true;
+  const shellRoot = { pid: handle.statusValue?.nativePid ?? 0, creationTime: handle.statusValue?.nativeCreationTime ?? null };
+  const stopLossWatch = watchBrokerLoss({
+    brokerPid: handle.brokerPid,
+    isCurrent: () => watchingBroker,
+    onLost: async () => {
+      log(`shell ${slot}: the broker process ${handle.brokerPid} no longer exists; checking that its shell (pid ${shellRoot.pid}) is gone too`);
+      const proven = shellRoot.pid > 0 && await brokerLossProven(() => watchingBroker, { pid: handle.brokerPid, creationTime: handle.record.brokerCreationTime }, shellRoot);
+      if (!watchingBroker) return;
+      if (!proven) {
+        log(`shell ${slot}: the broker process is gone but its shell could not be confirmed gone; the recovery record is kept`);
+        showWarning("OMP: A terminal's background process ended, but its shell could not be confirmed ended. Check Task Manager or refresh Sessions.");
+        return;
+      }
+      await index.lifecycle.run(slot, async () => {
+        if (!watchingBroker || stateOf(slot)?.ownerStopWatch !== ownStop) return;
+        log(`shell ${slot}: the broker process and the shell pid ${shellRoot.pid} are gone`);
+        await shellSlots?.remove(slot);
+        await brokerSlots?.forget(slot);
+        stopTerminalForTab(slot);
+        pushTerminalUnavailable(slot, "This terminal's process has ended.");
+        refreshLauncher();
+      });
+    },
+  });
+  const ownStop: ShellExitWatchStop = options => {
+    watchingBroker = false;
+    stopLossWatch();
     stopOwnerWatch?.(options);
     stopExitWatch(options);
   };
+  state.ownerStopWatch = ownStop;
 }
 
 /**

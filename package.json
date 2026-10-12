@@ -61,6 +61,8 @@
     "onView:omp.tools",
     "onView:omp.mcp",
     "onView:omp.extensions",
+    "onView:omp.context",
+    "onView:omp.deskSettings",
     "onUri",
     "onWebviewPanel:omp.session",
     "onWebviewPanel:omp.shellTerminal",
@@ -197,6 +199,17 @@
         {
           "id": "omp.extensions",
           "name": "Extensions",
+          "visibility": "collapsed"
+        },
+        {
+          "id": "omp.context",
+          "name": "Context",
+          "visibility": "collapsed"
+        },
+        {
+          "type": "webview",
+          "id": "omp.deskSettings",
+          "name": "Settings",
           "visibility": "collapsed"
         }
       ]
@@ -674,6 +687,11 @@
         "icon": "$(stop-circle)"
       },
       {
+        "command": "omp.killSession",
+        "title": "Kill",
+        "category": "OMP"
+      },
+      {
         "command": "omp.refreshSkills",
         "title": "Refresh Skills",
         "category": "OMP",
@@ -749,6 +767,30 @@
         "command": "omp.inventory.open",
         "title": "Open Source File",
         "category": "OMP"
+      },
+      {
+        "command": "omp.refreshContext",
+        "title": "Refresh Context",
+        "category": "OMP",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "omp.context.readBreakdown",
+        "title": "Read Context Breakdown",
+        "category": "OMP",
+        "icon": "$(graph)"
+      },
+      {
+        "command": "omp.context.compact",
+        "title": "Compact Conversation…",
+        "category": "OMP",
+        "icon": "$(fold)"
+      },
+      {
+        "command": "omp.context.shake",
+        "title": "Shake Conversation…",
+        "category": "OMP",
+        "icon": "$(clear-all)"
       }
     ],
     "menus": {
@@ -794,6 +836,10 @@
           "when": "false"
         },
         {
+          "command": "omp.killSession",
+          "when": "false"
+        },
+        {
           "command": "omp.skills.showGlobal",
           "when": "false"
         },
@@ -823,6 +869,22 @@
         },
         {
           "command": "omp.extensions.showSession",
+          "when": "false"
+        },
+        {
+          "command": "omp.refreshContext",
+          "when": "false"
+        },
+        {
+          "command": "omp.context.readBreakdown",
+          "when": "false"
+        },
+        {
+          "command": "omp.context.compact",
+          "when": "false"
+        },
+        {
+          "command": "omp.context.shake",
           "when": "false"
         },
         {
@@ -1095,6 +1157,26 @@
           "command": "omp.refreshExtensions",
           "when": "view == omp.extensions",
           "group": "navigation@2"
+        },
+        {
+          "command": "omp.refreshContext",
+          "when": "view == omp.context",
+          "group": "navigation@1"
+        },
+        {
+          "command": "omp.context.readBreakdown",
+          "when": "view == omp.context && omp.context.canMaintain",
+          "group": "navigation@2"
+        },
+        {
+          "command": "omp.context.compact",
+          "when": "view == omp.context && omp.context.canMaintain",
+          "group": "navigation@3"
+        },
+        {
+          "command": "omp.context.shake",
+          "when": "view == omp.context && omp.context.canMaintain",
+          "group": "navigation@4"
         }
       ],
       "view/item/context": [
@@ -1217,6 +1299,26 @@
           "command": "omp.stopProcess",
           "when": "view == omp.sessions && viewItem =~ /^ompProcess\\.stoppable\\./",
           "group": "1_stop@1"
+        },
+        {
+          "command": "omp.killSession",
+          "when": "view == omp.sessions && viewItem =~ /^ompProcess\\./",
+          "group": "1_stop@2"
+        },
+        {
+          "command": "omp.killSession",
+          "when": "view == omp.sessions && viewItem =~ /^ompSession\\.[^.]*\\.(running|working|background|question|unread|waiting|restoring|stopping|starting|checking|otherWindow)\\./",
+          "group": "4_kill@1"
+        },
+        {
+          "command": "omp.context.compact",
+          "when": "view == omp.context && viewItem == ompContext.used",
+          "group": "inline@1"
+        },
+        {
+          "command": "omp.context.shake",
+          "when": "view == omp.context && viewItem == ompContext.used",
+          "group": "inline@2"
         }
       ]
     },

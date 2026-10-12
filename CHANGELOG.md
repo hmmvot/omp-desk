@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A Settings view in the OMP Desk side bar** lists every OMP Desk setting and changes it in place: a toggle for each on/off setting, a dropdown (with the option descriptions) for each choice, and a validated field for numbers and text; settings that are lists or objects open `settings.json` at the key. Each row shows where the value in effect comes from (default, user or workspace), has a Reset button that restores the default, and an **Open in Settings editor** button; a search box filters the list and the view follows changes made anywhere else (the Settings editor, `settings.json`, another window, the Chat footer's Tools picker). Changes are saved to your user settings; a setting that your workspace already overrides is saved there, and where the setting's scope allows it you can choose Workspace on its row. The list comes from the extension's own settings schema, so a setting added later appears by itself ([design](docs/designs/2026-10-12-settings-view.md), [ADR-0062](docs/decisions/0062-render-the-settings-view-from-the-contributed-schema-in-a-webview-view.md)).
+- **Context view** in the OMP Desk side bar: shows the selected Chat session's context — model and window usage with the Chat footer's numbers and thresholds, messages and billed tokens of the retained context, auto-compaction state, session cost, compaction count and last compaction, the last `/clear` boundary, and the AGENTS/rule files OMP put in the prompt (click to open). A **Read Breakdown** action runs OMP's own `/context` in the conversation (its report also appears in the Chat) and lists OMP's categories with the time it was read; Compact and Shake from the view title or the Used row reuse the Chat's flow. Reads happen only while the view is visible and send no prompt; the breakdown is never read automatically ([ADR-0063](docs/decisions/0063-read-the-context-breakdown-from-omps-own-context-report-and-files-from-the-system-prompt.md)).
+- **Kill in Sessions.** The context menu of a session row (and of a process row in the Terminals group) offers **Kill**: it ends the session's whole process tree (the broker, OMP and everything it started) at once, without asking OMP and without looking at whether the session is busy, who holds it or what claims it. The one check it keeps is that the process is still the one Desk recorded (id and creation time), so it never ends a stranger. Desk then updates its own records as it does after an unexpected exit, so the row shows the session stopped and it can be resumed; the window that has the session open shows it ended. A failure is shown in a notification and logged. See ADR-0060 (amended).
+
+### Fixed
+
+- Sessions: a row another window runs keeps its ⧉ mark and the status that window publishes on a busy machine, and a click on it switches to that window at once. The holder is now found in the window registry (a current lease and a live process) instead of a PowerShell start-time reading that timed out after 5 s and made the row look like an ordinary Running row.
+- Sessions: a failed session lease probe is no longer retried at once by every row observation (up to three 5 s PowerShell attempts in a row, repeating for as long as the machine was busy); it answers unknown for 15 s first.
+
 ## [0.3.1] - 2026-10-12
 
 ### Added
