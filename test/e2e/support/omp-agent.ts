@@ -8,6 +8,7 @@
  */
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { SKILL_NAME } from "./fixtures-constants.ts";
 import { MOCK_MODEL_ID, MOCK_PROVIDER_ID } from "../fixtures/mock-openai-server.ts";
 
 export async function writeMockAgentConfig(agentDir: string, mockUrl: string): Promise<void> {
@@ -35,6 +36,17 @@ export async function writeMockAgentConfig(agentDir: string, mockUrl: string): P
 	].join("\n");
 	await writeFile(join(agentDir, "models.yml"), models, "utf8");
 	await writeFile(join(agentDir, "config.yml"), config, "utf8");
+}
+
+/**
+ * An owned skill in the isolated agent directory (`<agentDir>/skills/<name>/SKILL.md`, OMP's native user level). The
+ * Skills view lists it in its own first group "Global", so the latency scenario can wait for a known leaf row; a skill in
+ * the fixture workspace's `.claude/skills` was not discovered by the inventory.
+ */
+export async function writeFixtureSkill(agentDir: string): Promise<void> {
+	const dir = join(agentDir, "skills", SKILL_NAME);
+	await mkdir(dir, { recursive: true });
+	await writeFile(join(dir, "SKILL.md"), `---\nname: ${SKILL_NAME}\ndescription: Fixture skill owned by the OMP Desk end-to-end suite.\n---\n\nNothing to do.\n`, "utf8");
 }
 
 /**

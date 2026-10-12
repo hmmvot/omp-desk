@@ -9,6 +9,9 @@
 // webview works, and (devtools) whether a performance trace can be recorded. The window under test must have a Chat
 // session open (`npm run test:e2e` with `E2E_KEEP_ENV=1` and a session left open by a scenario, or open one by hand).
 import { spawn } from "node:child_process";
+import { mkdirSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const [kind, port, mockUrl] = process.argv.slice(2);
 if (!["playwright", "devtools"].includes(kind) || !port) {
@@ -16,12 +19,17 @@ if (!["playwright", "devtools"].includes(kind) || !port) {
 	process.exit(2);
 }
 
+// Everything the servers write themselves (console logs, snapshots, traces) is confined to out/e2e-results/mcp (gitignored);
+// the server runs with that directory as its working directory.
+const outputDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "out", "e2e-results", "mcp");
+mkdirSync(outputDir, { recursive: true });
+
 const endpoint = `http://127.0.0.1:${port}`;
 const command = kind === "playwright"
-	? ["npx", "-y", "@playwright/mcp@latest", `--cdp-endpoint=${endpoint}`]
+	? ["npx", "-y", "@playwright/mcp@latest", `--cdp-endpoint=${endpoint}`, `--output-dir=${outputDir}`]
 	: ["npx", "-y", "chrome-devtools-mcp@latest", `--browser-url=${endpoint}`, "--no-usage-statistics", "--no-performance-crux"];
 
-const child = spawn(command[0], command.slice(1), { shell: true, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+const child = spawn(command[0], command.slice(1), { cwd: outputDir, shell: true, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
 let stderr = "";
 child.stderr.on("data", chunk => { stderr += chunk; });
 const pending = new Map();

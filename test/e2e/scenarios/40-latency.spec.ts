@@ -3,10 +3,13 @@
  * (see support/latency.ts), plus the same measurements under CPU load.
  *
  *   - Sessions layout title button -> QuickPick with its rows rendered: budget 500 ms
- *   - Skills, first expand in a fresh profile ("cold", the inventory worker has to be started): recorded, no budget
+ *   - Skills, first expand in this window (the inventory is likely warm already, so this is "first expand", not a cold
+ *     start; in the loaded run it is a reopen in the same profile): recorded, no budget; it is only counted once the suite's own fixture skill row (group "Global") is rendered
  *   - Skills, collapse and expand again (cached): budget 300 ms
  *
- * A budget is checked against the median of three samples. Under load the numbers are recorded and only a coarse bound
+ * A budget is checked against the median of three samples, and every sample must be a success (a timeout is -1 and
+ * fails the test instead of passing as "below the budget"). The Skills view still lists the user's real
+ * ~/.claude and ~/.agents skills next to the fixture skill; the suite reads them but never changes them. Under load the numbers are recorded and only a coarse bound
  * (several seconds) is asserted: the point there is the report, and a blocked extension host still fails it.
  */
 import { appendFileSync } from "node:fs";
@@ -16,6 +19,7 @@ import type { Desk } from "../support/desk.ts";
 import { expect, test } from "../support/fixtures.ts";
 import { clickToReady } from "../support/latency.ts";
 import { startCpuLoad } from "../support/load.ts";
+import { SKILL_NAME } from "../support/fixtures-constants.ts";
 import type { RunState } from "../support/state.ts";
 
 const SAMPLES = 3;
@@ -25,7 +29,7 @@ const LOADED_CEILING_MS = 8_000;
 
 interface Numbers {
 	readonly layoutQuickPickMs: number[];
-	readonly skillsColdMs: number;
+	readonly skillsFirstMs: number;
 	readonly skillsCachedMs: number[];
 }
 
@@ -45,10 +49,10 @@ async function measure(desk: Desk, page: Page): Promise<Numbers> {
 	}
 
 	const skillsHeader = sidebar.getByRole("button", { name: /^Skills/ });
-	const skillsRows = { selector: "[role=tree][aria-label='Skills'] [role=treeitem]", minCount: 1 };
+	const skillsRows = { selector: `[role=tree][aria-label='Skills'] [role=treeitem][aria-label*='${SKILL_NAME}']`, minCount: 1 };
 	if (await skillsHeader.getAttribute("aria-expanded") === "true") await skillsHeader.click();
-	const cold = await clickToReady(page, skillsHeader, skillsRows, 120_000);
-	await expect(sidebar.getByRole("tree", { name: "Skills" }).getByRole("treeitem").first()).toBeVisible();
+	const first = await clickToReady(page, skillsHeader, skillsRows, 120_000);
+	await expect(sidebar.getByRole("tree", { name: "Skills" }).locator(`[role=treeitem][aria-label*='${SKILL_NAME}']`)).toBeVisible();
 	const cachedMs: number[] = [];
 	for (let sample = 0; sample < SAMPLES; sample++) {
 		await skillsHeader.click(); // collapse
@@ -56,7 +60,13 @@ async function measure(desk: Desk, page: Page): Promise<Numbers> {
 		cachedMs.push(await clickToReady(page, skillsHeader, skillsRows));
 	}
 	await skillsHeader.click(); // leave it collapsed
-	return { layoutQuickPickMs: layoutMs, skillsColdMs: cold, skillsCachedMs: cachedMs };
+	return { layoutQuickPickMs: layoutMs, skillsFirstMs: first, skillsCachedMs: cachedMs };
+}
+
+/** Every sample must have succeeded: clickToReady returns -1 on a timeout, which must never count as "fast". */
+function expectSamples(numbers: Numbers): void {
+	expect(numbers.skillsFirstMs, "the first Skills expand must render the fixture skill row").toBeGreaterThan(0);
+	for (const value of [...numbers.layoutQuickPickMs, ...numbers.skillsCachedMs]) expect(value, "every latency sample must have completed").toBeGreaterThan(0);
 }
 
 function record(state: RunState, label: string, numbers: Numbers): void {
@@ -71,7 +81,7 @@ test("quick and cached paths stay inside their budgets", async ({ desk, state })
 	const page = await desk.window("alpha-desk");
 	const numbers = await measure(desk, page);
 	record(state, "idle", numbers);
-	expect(numbers.skillsColdMs, "the cold Skills expand must render rows").toBeGreaterThan(0);
+	expectSamples(numbers);
 	expect(median(numbers.layoutQuickPickMs), "Sessions layout QuickPick").toBeLessThan(LAYOUT_BUDGET_MS);
 	expect(median(numbers.skillsCachedMs), "Skills reopened from the cache").toBeLessThan(CACHED_BUDGET_MS);
 });
@@ -83,10 +93,8 @@ test("the same measurements under CPU load are recorded", async ({ desk, state }
 	try {
 		const numbers = await measure(desk, page);
 		record(state, `cpu-load x${load.workers}`, numbers);
-		for (const value of [...numbers.layoutQuickPickMs, ...numbers.skillsCachedMs]) {
-			expect(value, "a quick path under load must still finish").toBeGreaterThan(0);
-			expect(value).toBeLessThan(LOADED_CEILING_MS);
-		}
+		expectSamples(numbers);
+		for (const value of [...numbers.layoutQuickPickMs, ...numbers.skillsCachedMs]) expect(value).toBeLessThan(LOADED_CEILING_MS);
 	} finally {
 		load.stop();
 	}

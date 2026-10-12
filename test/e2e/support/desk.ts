@@ -93,11 +93,20 @@ export class Desk {
 	 */
 	async newChatSession(page: Page, folderName: string, timeout = 30_000): Promise<FrameLocator> {
 		const tree = await this.sessionsTree(page);
-		await tree.getByRole("treeitem", { name: /^New Session/ }).click();
+		// A Chat of an earlier scenario may still be open with its composer visible: the new session is told from it by one
+		// more Chat webview iframe (hidden editor tabs keep theirs), never by "a composer is visible".
+		const panels = page.locator("iframe.webview:not([src*='purpose=webviewView'])");
+		const before = await panels.count();
 		const pick = page.locator(".quick-input-widget").getByRole("option", { name: new RegExp(`^${folderName}`) });
-		const composer = this.chat(page).getByRole("combobox", { name: "Message OMP" });
-		await expect.poll(async () => await pick.isVisible() || await composer.isVisible(), { message: `a folder pick or the composer for ${folderName}`, timeout }).toBe(true);
+		// A tree row that re-renders between mouse down and up (the Sessions list refreshes right after a window closed) loses
+		// the click; it is repeated only while neither the pick nor a new panel appeared, so it cannot start two sessions.
+		await expect(async () => {
+			await tree.getByRole("treeitem", { name: /^New Session/ }).click();
+			await expect.poll(async () => await pick.isVisible() || await panels.count() > before, { timeout: 8_000 }).toBe(true);
+		}, `a folder pick or a new Chat panel for ${folderName}`).toPass({ timeout, intervals: [200] });
 		if (await pick.isVisible()) await pick.click();
+		await expect.poll(async () => await panels.count(), { message: "the new Chat panel", timeout }).toBeGreaterThan(before);
+		const composer = this.chat(page).getByRole("combobox", { name: "Message OMP" });
 		await expect(composer).toBeVisible({ timeout });
 		return this.chat(page);
 	}

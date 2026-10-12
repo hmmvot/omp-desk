@@ -9,14 +9,16 @@ here: neither as the foreground window nor as a visible top-level window. Every 
 visible top-level windows. A Code.exe whose command line names -Marker (the test root) is a violation: the watchdog
 records it, terminates that process tree at once and keeps running so the report stays complete.
 
+Writes -ReadyFile once the sampling loop is about to start (the suite does not launch VS Code before that).
 Stops when -StopFile appears or -ParentPid exits, and then writes -ReportFile (JSON): samples, duration, foreground
-changes, largest gap between samples, windows enumerated and the violations. The exit code is 3 on a violation.
+changes, largest gap between samples, windows enumerated and the violations. The exit code is 3 on a violation, 0 otherwise; a nonzero exit without a report means the watchdog failed.
 #>
 [CmdletBinding()]
 param(
 	[Parameter(Mandatory)] [string] $Marker,
 	[Parameter(Mandatory)] [string] $ReportFile,
 	[Parameter(Mandatory)] [string] $StopFile,
+	[Parameter(Mandatory)] [string] $ReadyFile,
 	[int] $ParentPid = 0,
 	[int] $IntervalMs = 50
 )
@@ -59,8 +61,9 @@ public static class OmpDeskForegroundWatchdog {
 
 	static string Json(string s) { return "\"" + s.Replace("\\", "\\\\").Replace("\"", "\\\"") + "\""; }
 
-	public static int Run(string marker, string reportFile, string stopFile, int parentPid, int intervalMs) {
+	public static int Run(string marker, string reportFile, string stopFile, string readyFile, int parentPid, int intervalMs) {
 		var stopwatch = Stopwatch.StartNew();
+		File.WriteAllText(readyFile, "ready");
 		long samples = 0, changes = 0, enumerations = 0, visibleSeen = 0, maxGapMs = 0, lastTick = 0;
 		uint lastForeground = 0;
 		var violations = new List<string>();
@@ -118,4 +121,4 @@ public static class OmpDeskForegroundWatchdog {
 	}
 }
 '@
-exit ([OmpDeskForegroundWatchdog]::Run($Marker, $ReportFile, $StopFile, $ParentPid, $IntervalMs))
+exit ([OmpDeskForegroundWatchdog]::Run($Marker, $ReportFile, $StopFile, $ReadyFile, $ParentPid, $IntervalMs))
