@@ -263,6 +263,18 @@ describe("folder path descriptions", () => {
 	});
 });
 
+describe("a draft whose process was killed", () => {
+	it("is the row of a draft with no process, in the state the tree labels it with, and not a running or idle-waiting one", () => {
+		const fresh = entry({ tabId: "tab:draft", cwd: ALPHA });
+		// What closing a confirmed-stopped draft leaves: no host, a stopped intent, the draft availability.
+		const killed = { ...fresh, host: null, runIntent: "stopped", availability: "draft" } as typeof fresh;
+		assert.equal(sessionTree.sessionItemState(killed, NO_FACTS), sessionTree.sessionItemState(fresh, NO_FACTS));
+		assert.equal(sessionTree.sessionItemState(killed, { ...NO_FACTS, ownershipChecked: true }), "draft");
+		assert.notEqual(sessionTree.sessionItemState(killed, NO_FACTS), "waiting");
+		assert.notEqual(sessionTree.sessionItemState(killed, NO_FACTS), "running");
+	});
+});
+
 /**
  * The context menu of a session row is `package.json` `when` clauses evaluated over the
  * `contextValue` this tree builds, so one table defends both halves at once: a state that

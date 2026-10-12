@@ -235,6 +235,7 @@ import { isPtyProcessAlive } from "./host/pty-identity";
 import { setTimeout as delayMs } from "node:timers/promises";
 import { createSessionKiller } from "./host/session-kill-wiring";
 import type { CapturedHost, KillSelection, RecordedProcess } from "./host/session-kill";
+import { awaitEndedRuntimeCleanup } from "./host/runtime-settle";
 // The profile catalog (ADR-0034) is the one authority for this extension's durable
 // state; it is profile-wide, so opening another VS Code folder neither hides the
 // user's sessions and folders nor forks them.
@@ -4088,6 +4089,19 @@ async function openTab(
   // The folder list may still be receiving the predecessor build's folders, so every
   // explicit open waits for that one pass to settle before it resolves anything.
   await ensureCatalogReady();
+  // A chat whose process ended shows the ended state before its exit cleanup is finished, and offers Resume at once. A click
+  // in that gap would find the dead runtime still in place, take the session for one already running here and start nothing,
+  // so every open waits for the cleanup of the runtime that ended, then for the tab's queued lifecycle work (src/host/runtime-settle.ts).
+  const ending = stateOf(tabId)?.runtime ?? null;
+  if (ending !== null && ending.kind === "chat" && chat.stateOf(tabId)?.phase === "stopped") {
+    const settled = await awaitEndedRuntimeCleanup({
+      holdsEndedRuntime: () => stateOf(tabId)?.runtime === ending,
+      drainLifecycle: () => index.lifecycle.run(tabId, async () => undefined),
+      pause: ms => delayMs(ms),
+      now: () => Date.now(),
+    }, 15_000);
+    if (!settled) log(`tab ${tabId}: the exit cleanup of the ended session had not finished after 15 s; the open continues without it`);
+  }
   // Number this request before it can wait: a close during the wait overrides
   // it, while a subsequent explicit click is a new request to open the editor.
   const intent = tabState(tabId);
