@@ -125,6 +125,8 @@ import { owningWindowUri, registerWindowRouting } from "./wiring/window-routing"
 import type { WindowRouting, WindowRoutingDeps } from "./wiring/window-routing";
 import { createRecordedHostStopPort, readBrokerProvenance, registerSessionActions } from "./wiring/session-actions";
 import type { SessionActions, SessionActionsDeps } from "./wiring/session-actions";
+import { CHAT_COMMAND_TYPES, registerGuestDispatcher } from "./wiring/guest-dispatcher";
+import type { CarriedDraft, GuestDispatcher, GuestDispatcherDeps } from "./wiring/guest-dispatcher";
 import { registerDeskSettingsView } from "./host/desk-settings/view";
 import type { SessionToolsTarget } from "./host/session-tools";
 import type { LauncherTreeItem, SessionLauncherFacts, SessionOwnershipFacts } from "./views/session-tree";
@@ -136,7 +138,7 @@ import type { FolderPathInspector, FolderPathVerdict, WorkspaceFolder } from "./
 // The chat over rpc-ui (ADR-0038): a host-owned conversation per tab, served to any page.
 import { ChatRuntime } from "./host/chat-runtime";
 import { activateAgentDebugger } from "./host/debug/index";
-import type { ChatCommandOutcome, ChatPage, ChatRuntimeEvent } from "./host/chat-runtime";
+import type { ChatPage, ChatRuntimeEvent } from "./host/chat-runtime";
 import { attachRpcHost, launchRpcHost, retireStoppedRpcBroker, stopRpcHost } from "./host/rpc-launch";
 import type { RpcAttachOutcome, RpcHostRuntime } from "./host/rpc-launch";
 import { attachNativeHost, brokerAndRootGone, launchNativeHost, waitForManagedRootExit } from "./host/native-session";
@@ -151,7 +153,6 @@ import type { NativeStopVerdict } from "./host/rpc-reconcile";
 import type { ChoiceOutcome, CommandResult, CompactMode, RpcSession, SendRefusal, ShakeMode } from "./host/rpc/session";
 import { readSlashRegistry, type BuiltinSlashEntry, type DeskSlashAction, type SlashRegistry } from "./host/slash-registry";
 import { sessionPrompts } from "./webview/lib/prompt-history";
-import { symbolSearchValue } from "./shared/selection-query";
 import { NAVIGATE_REFUSAL_SENTENCES, rewindPreview, rewindTargets } from "./chat/rewind";
 import { rewindBlockedReason } from "./webview/lib/rewind-mode";
 import type { ChatLiteState, ChatModel, ChatPhase } from "./chat/model";
@@ -175,7 +176,6 @@ import {
   persistedBridgeState,
   recoveredBridgePanelState,
   tabInputIdentity,
-  TAB_INPUT_VIEW_TYPE_PREFIX,
   workspaceIdentityText,
 } from "./host/bridge-identity";
 import {
@@ -190,10 +190,9 @@ import {
   sha256,
 } from "./protocol/bridge-protocol";
 import { isPanelTabId, persistedShellSlotId, shellIdentityBootstrapSource } from "./shared/panel-identity";
-import { GUEST_PROTOCOL_VERSION, isSafeBoundaryText, parseGuestWebviewMessage, type GuestChatCommand, type GuestOpenDetailMessage, type GuestRecallPromptMessage } from "./protocol/messages";
+import { isSafeBoundaryText, parseGuestWebviewMessage, type GuestChatCommand, type GuestRecallPromptMessage } from "./protocol/messages";
 import { DETAIL_VIEW_TYPE, DetailTabs } from "./host/detail-tabs";
 import { EDITOR_GROUP_FOCUS_COMMANDS, arrangeChatGroup, chatGroupColumn, chatPlacement, strayEmptyGroups, type ChatPlacement } from "./host/chat-layout";
-import type { DetailTarget } from "./protocol/detail-target";
 // The folder shell's terminal (ADR-0024): the extension-owned PTY broker is the writer, the
 // panel is only a frontend, and this module owns the glue between them.
 import { PtyBrokerClient } from "./host/pty-client";
@@ -250,16 +249,11 @@ import type {
   GuestPanelAction,
   GuestPanelActionMessage,
   GuestInsertTextMessage,
-  GuestControlInvalidateMessage,
-  GuestFileCompletionsMessage,
   GuestRouteOfferMessage,
+  GuestRouteAckMessage,
+  GuestBridgeAckMessage,
   GuestBridgeBindMessage,
   GuestHostMessage,
-  GuestDraftReplyMessage,
-  GuestDraftRequestMessage,
-  GuestSelectionReplyMessage,
-  GuestSelectionRequestMessage,
-  GuestDraftRestoreMessage,
   GuestSessionViewMessage,
   GuestTerminalFontMessage,
   GuestTerminalCopyReplyMessage,
@@ -658,18 +652,12 @@ interface WindowState {
   }>;
 
   // Guest dispatch
+  /** The page-message dispatcher; it owns the selection and draft-capture request tables. */
+  readonly guestDispatcher: GuestDispatcher<TabState>;
   /** Tabs whose composer currently shows its `@`-completion popup (reported by the page). */
   readonly composerPopupTabs: Set<string>;
-  /** Selection requests asked of a page and not yet answered, by request id. */
-  readonly selectionRequests: Map<number, { slot: string; panel: vscode.WebviewPanel; settle(text: string): void }>;
-  /** Source of the next selection request id. */
-  selectionRequestSeq: number;
-  /** A reply must belong to the exact source editor and document, not just its id. */
-  readonly draftCaptures: Map<number, { source: TabState; panel: vscode.WebviewPanel; document: TabState["document"]; settle(reply: GuestDraftReplyMessage | null): void }>;
-  /** Source of the next draft-capture request id. */
-  draftCaptureSeq: number;
   /** Drafts captured from a replaced document, waiting for its successor to be ready (by editor slot). */
-  readonly draftRestores: Map<string, CarriedDraft>;
+  readonly draftRestores: Map<string, CarriedDraft<TabState>>;
   /**
    * The installed OMP's builtin slash registry, read once per install by `media/slash-registry.mjs` and re-checked at
    * most once a minute, so an OMP update changes which typed commands are terminal-only without a Desk release.
@@ -1035,6 +1023,51 @@ function sessionActionsDeps(): SessionActionsDeps<TabState> {
   };
 }
 
+/**
+ * What the guest dispatcher reads of this window and calls into. The getters read the installed window when they
+ * run, so the dispatcher can be created with the window, before it is installed.
+ */
+function guestDispatcherDeps(): GuestDispatcherDeps<TabState> {
+  return {
+    context: () => windowState().context,
+    tabs: () => windowState().tabs,
+    tab: stateOf,
+    activePanelTab,
+    draftRestores: () => windowState().draftRestores,
+    composerPopupTabs: () => windowState().composerPopupTabs,
+    chat: () => windowState().chat,
+    detailTabs: () => windowState().detailTabs,
+    panelChatPage,
+    attachChatRoute,
+    attachChatRoutes,
+    rememberPrompt,
+    runChatAction,
+    completeFiles: (cwd, query) => findFileMentions(query, {
+      cwd,
+      findFiles: (include, exclude, maxResults) => vscode.workspace.findFiles(include, exclude, maxResults),
+    }),
+    pushSessionView,
+    noteReadyDocument,
+    activateNativeEditor,
+    switchSessionMode,
+    refreshGuestContext,
+    bridgeRouteOf,
+    pinBridgeOrigin,
+    redeliverBridgeBinding,
+    acknowledgeBridgeRoute,
+    acknowledgeBridgeSecret,
+    isTerminalPanelType: type => TERMINAL_PANEL_TYPES[type] === true,
+    handleTerminalMessage: handleTerminalGuestMessage,
+    acceptTerminalCopy,
+    controlRequest: (index, tabId, request, panel) =>
+      handleGuestControlRequest(index, tabId, request, panelResponder(tabId, panel, request.actionSeq)),
+    log,
+    info: showInfo,
+    warn: showWarning,
+    error: showError,
+  };
+}
+
 /** The initial state of one window: every collection empty, every handle not yet created. */
 function createWindowState(context: vscode.ExtensionContext): WindowState {
   return {
@@ -1079,12 +1112,9 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
       modelId: string | null;
     }>(),
     // Guest dispatch
+    guestDispatcher: registerGuestDispatcher(guestDispatcherDeps()),
     composerPopupTabs: new Set<string>(),
-    selectionRequests: new Map<number, { slot: string; panel: vscode.WebviewPanel; settle(text: string): void }>(),
-    selectionRequestSeq: 0,
-    draftCaptures: new Map<number, { source: TabState; panel: vscode.WebviewPanel; document: TabState["document"]; settle(reply: GuestDraftReplyMessage | null): void }>(),
-    draftCaptureSeq: 0,
-    draftRestores: new Map<string, CarriedDraft>(),
+    draftRestores: new Map<string, CarriedDraft<TabState>>(),
     slashRegistry: null,
     slashRegistryFailedKey: null,
     slashRegistryCheckedAt: 0,
@@ -1606,7 +1636,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // A detail tab shows live data from its session and persists nothing. No serializer exists for
   // it: one that survived a window restart or a host-only restart has nothing to show and no way
   // to learn the host is gone, so every leftover is closed at activation.
-  void closeLeftoverDetailTabs().catch(error => log(`detail tabs: leftovers could not be closed (${messageOf(error)})`));
+  void s.guestDispatcher.closeLeftoverDetailTabs().catch(error => log(`detail tabs: leftovers could not be closed (${messageOf(error)})`));
   // A plain omp outside this extension writing one of these sessions is told from the sessions this
   // extension owns through the session lease OMP itself takes (ADR-0046). The probe only opens a
   // named mutex and closes it, and a failed probe leaves every row exactly as it was.
@@ -1815,7 +1845,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     registerDeskCommand("omp.toggleThinking", () => toggleTranscriptDefault(THINKING_EXPANDED_KEY)),
     registerDeskCommand("omp.toggleToolOutput", () => toggleTranscriptDefault(TOOLS_EXPANDED_KEY)),
     registerDeskCommand("omp.searchPromptHistory", () => searchPromptHistory()),
-    registerDeskCommand("omp.searchSymbolFromChat", () => searchSymbolFromChat()),
+    registerDeskCommand("omp.searchSymbolFromChat", () => s.guestDispatcher.searchSymbolFromChat()),
     registerDeskCommand("omp.compactConversation", () => runActiveChatAction(context, index, "compact")),
     registerDeskCommand("omp.shakeConversation", () => runActiveChatAction(context, index, "shake")),
     registerDeskCommand("omp.cycleModel", () => runActiveChatAction(context, index, "cycle-model")),
@@ -3087,7 +3117,7 @@ async function openTabOnce(
       allowStoppedResume: intent === "explicit" && (verb !== "opened" || stoppedForOpen),
     });
   } catch (error) {
-    presentUnavailable(index, tabId, messageOf(error));
+    s.guestDispatcher.presentUnavailable(index, tabId, messageOf(error));
     showError(`The OMP session could not be ${verb}: ${messageOf(error)}`);
     return;
   }
@@ -3960,7 +3990,7 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
   let acceptedStop = false;
   let admissionFenced = false;
   let replacement: RestoreOutcome | null = null;
-  let carried: CarriedDraft | null = null;
+  let carried: CarriedDraft<TabState> | null = null;
   try {
     const session = runtime.kind === "chat" ? s.chat.sessionOf(tabId) : null;
     const pending = runtime.kind === "terminal" ? s.hostControlAttempts.get(runtime)
@@ -4015,7 +4045,7 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
       ) === label;
       if (!consent) return;
     }
-    carried = state.mode === "chat" ? await carryDraftFrom(state.panel) : null;
+    carried = state.mode === "chat" ? await s.guestDispatcher.carryDraftFrom(state.panel) : null;
     if (carried !== null) s.draftRestores.set(state.slotId, carried);
     const admitted = Promise.withResolvers<void>();
     const changing = index.lifecycle.run(tabId, async lease => {
@@ -4095,7 +4125,7 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
     showWarning(state.controlFailure);
   } finally {
     if (carried !== null && state.document === carried.document) {
-      releaseCarriedDraft(carried);
+      s.guestDispatcher.releaseCarriedDraft(carried);
       if (s.draftRestores.get(state.slotId) === carried) s.draftRestores.delete(state.slotId);
     }
     if (s.pendingSessionViewChanges.get(state) === modeRequest) s.pendingSessionViewChanges.delete(state);
@@ -4144,7 +4174,7 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
   const modeRequest = ++s.editorEventSequence;
   state.lastOpenRequest = modeRequest;
   s.pendingSessionViewChanges.set(state, modeRequest);
-  let carried: CarriedDraft | null = null;
+  let carried: CarriedDraft<TabState> | null = null;
   let stopRequested = false;
   let writerGone = false;
   let replacement: RestoreOutcome | null = null;
@@ -4175,7 +4205,7 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
       return header?.sessionId === durableSessionId && sameTarget(true);
     });
     if (!eligible) { refuse("The saved conversation or controlling writer changed. Nothing was stopped."); return; }
-    carried = await captureDraft(state);
+    carried = await s.guestDispatcher.captureDraft(state);
     if (carried === null || !sameTarget(true)) {
       refuse("Restart could not capture this editor's complete input. Wait for pending image reads or edits to finish and try again; nothing was stopped.");
       return;
@@ -4241,7 +4271,7 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
     refuse(state.controlFailure);
   } finally {
     if (carried !== null && state.document === document) {
-      releaseCarriedDraft(carried);
+      s.guestDispatcher.releaseCarriedDraft(carried);
       if (s.draftRestores.get(state.slotId) === carried) s.draftRestores.delete(state.slotId);
     }
     if (s.pendingSessionViewChanges.get(state) === modeRequest) s.pendingSessionViewChanges.delete(state);
@@ -4628,13 +4658,13 @@ function presentRestoreOutcome(
   switch (outcome.status) {
     case "draft":
       log(`tab ${tabId}: draft tab restored without a process`);
-      presentUnavailable(index, tabId, DRAFT_NO_HOST_DETAIL);
+      windowState().guestDispatcher.presentUnavailable(index, tabId, DRAFT_NO_HOST_DETAIL);
       return;
     case "stopped":
       // The row stays exactly as the user left it. A restored editor for it shows its saved
       // history and why nothing was started.
       log(`tab ${tabId}: stopped by its durable run intent; nothing was started or attached`);
-      presentUnavailable(index, tabId, outcome.detail);
+      windowState().guestDispatcher.presentUnavailable(index, tabId, outcome.detail);
       return;
     case "conflict": {
       log(`tab ${tabId}: conflict (${outcome.kind}): ${outcome.detail}`);
@@ -4644,7 +4674,7 @@ function presentRestoreOutcome(
     }
     case "failed":
       log(`tab ${tabId}: failed (${outcome.kind}): ${outcome.detail}`);
-      presentUnavailable(index, tabId, outcome.detail);
+      windowState().guestDispatcher.presentUnavailable(index, tabId, outcome.detail);
       showError(`The OMP session could not be started: ${outcome.detail}`);
       return;
   }
@@ -4659,7 +4689,7 @@ function presentConflict(index: SessionIndex, tabId: string, detail: string): vo
     attachChatRoutes(tabId, true);
     return;
   }
-  presentUnavailable(index, tabId, detail, "blocked");
+  s.guestDispatcher.presentUnavailable(index, tabId, detail, "blocked");
 }
 
 // Panels and the guest link
@@ -5234,13 +5264,13 @@ function bridgeSerializerFor(
         return;
       }
       const superseded = reservation.outcome === "replaced" ? s.tabs.get(conversation)?.panel ?? null : null;
-      const carriedDraft = await carryDraftFrom(superseded);
+      const carriedDraft = await s.guestDispatcher.carryDraftFrom(superseded);
       try {
         bindPanel(context, index, slot, conversation, panel, "restored", committed?.role ?? "controlling");
         if (carriedDraft !== null) s.draftRestores.set(slot, carriedDraft);
         superseded?.dispose();
       } finally {
-        releaseCarriedDraft(carriedDraft);
+        s.guestDispatcher.releaseCarriedDraft(carriedDraft);
       }
       // A reload recreates the editor and a fresh HTML document. Reuse its
       // native attempt while replacing only the prior document incarnation.
@@ -5362,7 +5392,7 @@ function legacySerializerFor(
           localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "media")],
         },
       );
-      const carriedDraft = previousPanel !== null && previousPanel !== panel ? await carryDraftFrom(previousPanel) : null;
+      const carriedDraft = previousPanel !== null && previousPanel !== panel ? await s.guestDispatcher.carryDraftFrom(previousPanel) : null;
       try {
         bindPanel(context, index, ownEditorId, tabId, successor, "restored");
         if (carriedDraft !== null) s.draftRestores.set(ownEditorId, carriedDraft);
@@ -5371,7 +5401,7 @@ function legacySerializerFor(
         panel.dispose();
         if (previousPanel !== null && previousPanel !== panel && previousPanel !== successor) previousPanel.dispose();
       } finally {
-        releaseCarriedDraft(carriedDraft);
+        s.guestDispatcher.releaseCarriedDraft(carriedDraft);
       }
       s.bridgeEditors.settleTransition(tabId, ownEditorId, ticket);
       const prepared = await prepareBridgeDocument(context, ownEditorId);
@@ -5424,7 +5454,7 @@ function replayPanelOutcome(index: SessionIndex, tabId: string): void {
       });
     return;
   }
-  presentUnavailable(index, tabId, DRAFT_NO_HOST_DETAIL);
+  s.guestDispatcher.presentUnavailable(index, tabId, DRAFT_NO_HOST_DETAIL);
 }
 
 /**
@@ -5438,9 +5468,9 @@ function replayPanelOutcome(index: SessionIndex, tabId: string): void {
 function projectRestoreReport(index: SessionIndex, report: RestoreReport): void {
   for (const session of [...report.restored, ...report.attached]) attachChatRoutes(session.tabId, true);
   for (const blocked of report.conflicts) presentConflict(index, blocked.tabId, blocked.detail);
-  for (const failure of report.failures) presentUnavailable(index, failure.tabId, failure.detail);
-  for (const draft of report.drafts) presentUnavailable(index, draft.tabId, DRAFT_NO_HOST_DETAIL);
-  for (const stopped of report.stopped) presentUnavailable(index, stopped.tabId, stopped.detail);
+  for (const failure of report.failures) windowState().guestDispatcher.presentUnavailable(index, failure.tabId, failure.detail);
+  for (const draft of report.drafts) windowState().guestDispatcher.presentUnavailable(index, draft.tabId, DRAFT_NO_HOST_DETAIL);
+  for (const stopped of report.stopped) windowState().guestDispatcher.presentUnavailable(index, stopped.tabId, stopped.detail);
 }
 
 async function setActiveTab(index: SessionIndex, tabId: string): Promise<void> {
@@ -5448,431 +5478,6 @@ async function setActiveTab(index: SessionIndex, tabId: string): Promise<void> {
     await index.setActiveTab(tabId);
   } catch (error) {
     log(`tab ${tabId}: could not record the active tab: ${messageOf(error)}`);
-  }
-}
-
-/** The chat commands a page sends; each is deduplicated by its own request id in the conversation. */
-const CHAT_COMMAND_TYPES: ReadonlySet<string> = new Set([
-  "omp:chat-prompt",
-  "omp:chat-steer",
-  "omp:chat-follow-up",
-  "omp:chat-abort",
-  "omp:chat-ui-response",
-  "omp:chat-load-older",
-  "omp:chat-resume",
-  "omp:chat-reconnect",
-  "omp:chat-restart",
-  "omp:chat-queue-remove",
-  "omp:chat-tool-detail",
-  "omp:chat-subagent-read",
-  "omp:chat-navigate",
-]);
-
-/** How long a page is given to report its selection before the symbol search opens empty. */
-const SELECTION_REQUEST_TIMEOUT_MS = 500;
-
-/** The page's own answer to {@link askPageSelection}; a reply from another editor or panel is not this request's. */
-function acceptSelectionReply(slot: string, panel: vscode.WebviewPanel, reply: GuestSelectionReplyMessage): void {
-  const s = windowState();
-  const pending = s.selectionRequests.get(reply.requestId);
-  if (pending?.slot === slot && pending.panel === panel) pending.settle(reply.text);
-}
-
-/** The text selected in one editor's page (a webview's selection is invisible to VS Code), or `""` when it does not answer in time. */
-async function askPageSelection(slot: string, panel: vscode.WebviewPanel): Promise<string> {
-  const s = windowState();
-  const requestId = ++s.selectionRequestSeq;
-  const { promise, resolve } = Promise.withResolvers<string>();
-  s.selectionRequests.set(requestId, { slot, panel, settle: resolve });
-  const timer = setTimeout(() => resolve(""), SELECTION_REQUEST_TIMEOUT_MS);
-  try {
-    if (!await panel.webview.postMessage({ type: "omp:selection-request", requestId } satisfies GuestSelectionRequestMessage)) return "";
-    return await promise;
-  } finally {
-    clearTimeout(timer);
-    s.selectionRequests.delete(requestId);
-  }
-}
-
-/**
- * `omp.searchSymbolFromChat` (Ctrl+N over a Chat page): VS Code's symbol search seeded with what the page has selected,
- * as it is seeded from an editor's selection; with nothing selected it opens empty.
- */
-async function searchSymbolFromChat(): Promise<void> {
-  const target = activePanelTab();
-  const selection = target !== null && target.mode === "chat" ? await askPageSelection(target.slotId, target.panel) : "";
-  const value = symbolSearchValue(selection);
-  if (value === null) await vscode.commands.executeCommand("workbench.action.showAllSymbols");
-  else await vscode.commands.executeCommand("workbench.action.quickOpen", value);
-}
-
-/** How long one document is given to hand its unsent draft over before it is replaced. */
-const DRAFT_CAPTURE_TIMEOUT_MS = 1_500;
-
-/**
- * Drafts captured from a replaced document, waiting for its successor to be ready.
- *
- * The draft is transient by construction: it lives in memory only, is never written to
- * Webview state, is never logged and remains held until the replacement acknowledges it.
- */
-interface CarriedDraft {
-  reply: GuestDraftReplyMessage;
-  source: TabState;
-  panel: vscode.WebviewPanel;
-  document: TabState["document"];
-  restoredDocument: TabState["document"];
-}
-
-/**
- * Ask one editor's page for its unsent composer draft (ADR-0025's bounded handoff): the old
- * document is the only thing that holds the text, so it is asked and its answer is what makes
- * replacing it honest. Silence within the bound is "not captured" — the host never claims to
- * have preserved text it never received.
- */
-async function captureDraft(source: TabState): Promise<CarriedDraft | null> {
-  const s = windowState();
-  const panel = source.panel;
-  if (panel === null || source.document?.kind !== "guest") return null;
-  const document = source.document;
-  const requestId = ++s.draftCaptureSeq;
-  const { promise, resolve } = Promise.withResolvers<GuestDraftReplyMessage | null>();
-  s.draftCaptures.set(requestId, { source, panel, document, settle: resolve });
-  const timer = setTimeout(() => {
-    if (s.draftCaptures.delete(requestId)) resolve(null);
-  }, DRAFT_CAPTURE_TIMEOUT_MS);
-  let captured = false;
-  try {
-    if (!await panel.webview.postMessage({ type: "omp:draft-request", requestId } satisfies GuestDraftRequestMessage)) resolve(null);
-    const reply = await promise;
-    if (reply === null || !reply.captured || source.document !== document || source.panel !== panel) return null;
-    captured = true;
-    return { reply, source, panel, document, restoredDocument: null };
-  } finally {
-    clearTimeout(timer);
-    s.draftCaptures.delete(requestId);
-    if (!captured) void panel.webview.postMessage({ type: "omp:draft-release", requestId } satisfies GuestHostMessage);
-  }
-}
-
-/** Cancel only the source capture; an already-replaced document has nothing to unlock. */
-function releaseCarriedDraft(carried: CarriedDraft | null): void {
-  if (carried === null || carried.source.panel !== carried.panel || carried.source.document !== carried.document) return;
-  void carried.panel.webview.postMessage({ type: "omp:draft-release", requestId: carried.reply.requestId } satisfies GuestHostMessage);
-}
-
-/**
- * The unsent draft of a panel that is about to be replaced by another editor of the same
- * conversation, or `null` when there is none. A panel that shows no live chat document has no
- * composer to ask; a page that does not answer is reported rather than silently emptied.
- */
-async function carryDraftFrom(previous: vscode.WebviewPanel | null): Promise<CarriedDraft | null> {
-  const s = windowState();
-  if (previous === null) return null;
-  let owner: TabState | undefined;
-  for (const state of s.tabs.values()) if (state.panel === previous) { owner = state; break; }
-  if (owner === undefined || owner.mode !== "chat" || owner.document?.kind !== "guest") return null;
-  const carried = await captureDraft(owner);
-  if (carried === null) {
-    showWarning("This editor's complete unsent input could not be captured before the editor was replaced, so it was not preserved.");
-    return null;
-  }
-  const attachments = carried.reply.attachments + carried.reply.recoverable.reduce((sum, entry) => sum + entry.attachments, 0);
-  if (attachments > 0) showInfo(`${attachments} image${attachments === 1 ? "" : "s"} could not be carried to the replacement document. Their text is preserved; reattach them before sending.`);
-  return carried;
-}
-
-/**
- * Show a page the saved history of its session while nothing serves it yet.
- *
- * A restored page can announce itself before its host is re-adopted — re-adoption first
- * proves the broker runtime, which takes seconds — and disk history needs no process. When
- * no conversation exists for the tab and the row has a session file, the page is given the
- * read-only history at once; the live conversation replaces it when the host attaches.
- */
-function paintSavedHistory(index: SessionIndex, tabId: string): void {
-  const s = windowState();
-  const entry = index.get(tabId);
-  if (stateOf(tabId)?.mode !== "chat" || entry === null || entry.sessionFile === null || s.chat.kindOf(tabId) !== null) return;
-  void s.chat
-    .showViewOnly(tabId, { file: entry.sessionFile, cwd: entry.cwd, title: entry.title, reason: "Restoring the session…", phase: "resyncing" })
-    .then(() => {
-      if (s.chat.kindOf(tabId) === "view-only") attachChatRoutes(tabId, true);
-    });
-}
-
-function replyChatSendResult(tabId: string, message: ChatWebviewMessage, page: ChatPage, outcome: ChatCommandOutcome): void {
-  const s = windowState();
-  if (message.type !== "omp:chat-prompt" && message.type !== "omp:chat-steer" && message.type !== "omp:chat-follow-up") return;
-  const epoch = s.chat.stateOf(tabId)?.epoch;
-  if (epoch === undefined) return;
-  page.post({
-    type: "omp:chat-send-result",
-    epoch,
-    requestId: message.requestId,
-    status: outcome === "accepted" ? "accepted" : outcome === "explained" ? "explained" : outcome === "unconfirmed" ? "unconfirmed" : "refused",
-  });
-}
-
-/**
- * Run one chat command through the conversation and record what became of it.
- *
- * A stop, or any command the conversation did not accept, is written to the output channel:
- * the page's own notice is what the user sees, but the log is what proves whether the
- * command ever reached the session.
- */
-async function runChatCommand(tabId: string, message: ChatWebviewMessage, page: ChatPage): Promise<ChatCommandOutcome> {
-  const s = windowState();
-  let outcome: ChatCommandOutcome;
-  try {
-    outcome = await s.chat.handleMessage(tabId, message, page);
-  } catch (error) {
-    if (message.type !== "omp:chat-prompt" && message.type !== "omp:chat-steer" && message.type !== "omp:chat-follow-up") throw error;
-    outcome = "unconfirmed";
-  }
-  replyChatSendResult(tabId, message, page, outcome);
-  if (outcome === "accepted" && (message.type === "omp:chat-prompt" || message.type === "omp:chat-steer" || message.type === "omp:chat-follow-up")) {
-    rememberPrompt(message.text);
-  }
-  if (outcome !== "accepted" || message.type === "omp:chat-abort") {
-    log(`tab ${tabId}: ${message.type} ${message.requestId.slice(0, 8)} was ${outcome}`);
-  }
-  return outcome;
-}
-
-/**
- * Close the detail tabs a previous host lifetime left behind. A webview of an unregistered view
- * type is never revived, so without this sweep it would remain as a dead tab.
- */
-async function closeLeftoverDetailTabs(): Promise<void> {
-  const leftovers: vscode.Tab[] = [];
-  for (const group of vscode.window.tabGroups.all) {
-    for (const tab of group.tabs) {
-      const viewType = tab.input instanceof vscode.TabInputWebview ? tab.input.viewType : null;
-      if (viewType === DETAIL_VIEW_TYPE || viewType === `${TAB_INPUT_VIEW_TYPE_PREFIX}${DETAIL_VIEW_TYPE}`) leftovers.push(tab);
-    }
-  }
-  if (leftovers.length > 0) await vscode.window.tabGroups.close(leftovers, true);
-}
-
-/**
- * Open, or reveal, one detail tab of the conversation an editor shows. Presentation only, so a
- * passive editor may ask too; the conversation comes from the sending editor, never the message.
- */
-function openDetailTab(tabId: string, mode: "chat" | "terminal", request: GuestOpenDetailMessage): void {
-  const s = windowState();
-  // A terminal editor and a legacy tab have no conversation page to show: nothing would arrive.
-  if (mode === "terminal" || s.chat.kindOf(tabId) === "legacy") return;
-  const target: DetailTarget = request.kind === "agent" ? { kind: "agent", agentId: request.agentId } : { kind: request.kind };
-  const outcome = s.detailTabs.open(tabId, target);
-  log(`tab ${tabId}: detail tab ${target.kind} was ${outcome}`);
-}
-
-/**
- * Guest messages are untrusted UI input. The panel may send chat commands and request one
- * of the explicitly bounded host-control actions, but it cannot supply a pipe identity, a
- * ledger id or a target session: every command is answered for the conversation this
- * editor slot serves now, against the host-owned session.
- *
- * `omp:ready` is the page's "I am listening" signal — sent by a fresh document after its
- * client is attached — and is what makes the host (re)send the conversation's state and an
- * authoritative snapshot, so a reloaded document never has to guess what it missed.
- */
-async function handleGuestMessage(
-  index: SessionIndex,
-  slot: string,
-  panel: vscode.WebviewPanel,
-  message: unknown,
-): Promise<void> {
-  const s = windowState();
-  // Addressed by the immutable editor slot: what the editor shows is resolved here, at
-  // dispatch, so a listener registered earlier still answers for the conversation the
-  // editor serves now.
-  const own = s.tabs.get(slot);
-  if (own === undefined || own.panel !== panel || own.tabId === null) return;
-  const tabId = own.tabId;
-  const parsed = parseGuestWebviewMessage(message);
-  if (!parsed) {
-    log(`slot ${slot}: ignored an unrecognized guest message`);
-    return;
-  }
-  // The bounded draft handoff's own answer. It authorizes nothing and is answered before
-  // every other gate, because the request is made to this very document precisely when it is
-  // about to be replaced.
-  if (parsed.type === "omp:draft-reply") {
-    const pending = s.draftCaptures.get(parsed.requestId);
-    if (pending?.source === own && pending.panel === panel && pending.document === own.document) pending.settle(parsed);
-    return;
-  }
-  if (parsed.type === "omp:draft-restored") {
-    const carried = s.draftRestores.get(slot);
-    if (carried?.reply.requestId === parsed.requestId && carried.restoredDocument === own.document) s.draftRestores.delete(slot);
-    return;
-  }
-  if (parsed.type === "omp:selection-reply") {
-    acceptSelectionReply(slot, panel, parsed);
-    return;
-  }
-  if (parsed.type === "omp:terminal-copy-reply") {
-    await acceptTerminalCopy(own, parsed);
-    return;
-  }
-  if (parsed.type === "omp:session-mode") {
-    if (s.context !== undefined) await switchSessionMode(s.context, index, own, parsed.mode);
-    return;
-  }
-  if (parsed.type === "omp:open-detail") {
-    openDetailTab(tabId, own.mode, parsed);
-    return;
-  }
-  // File links are presentation in either mode: the Chat validates and opens the same file references as the Terminal.
-  if (TERMINAL_PANEL_TYPES[parsed.type] === true && (own.mode === "terminal" || parsed.type === "omp:terminal-link-validate" || parsed.type === "omp:terminal-link-symbols" || parsed.type === "omp:terminal-link-open")) {
-    await handleTerminalGuestMessage(slot, parsed, parsed as unknown as Record<string, unknown>);
-    return;
-  }
-  if (CHAT_COMMAND_TYPES.has(parsed.type)) {
-    await runChatCommand(tabId, parsed as ChatWebviewMessage, panelChatPage(own, panel));
-    return;
-  }
-  switch (parsed.type) {
-    case "omp:route-ack": {
-      const state = stateOf(tabId);
-      const route = bridgeRouteOf(tabId);
-      if (state === undefined || state.panel !== panel || route === null) return;
-      if (encodeHex(s.bridgeHostGeneration) !== parsed.hostGeneration || state.bridge?.documentId !== parsed.documentId) {
-        log(`tab ${tabId}: a route acknowledgement named another host generation or document`);
-        return;
-      }
-      const alreadyAcknowledged = route.acknowledged;
-      if (!route.acknowledge(parsed.routeGeneration, "panel")) {
-        log(`tab ${tabId}: a route acknowledgement named a fenced generation`);
-        return;
-      }
-      // Repeated delivery is valid, but an ACK of the ready-status offer must not
-      // trigger another identical offer and an unbounded panel round trip.
-      if (alreadyAcknowledged) return;
-      s.diagnostics.note(tabId, `bridge: route ${parsed.routeGeneration.slice(0, 8)} acknowledged over panel`);
-      pushBridgeRouteOffer(tabId);
-      return;
-    }
-    case "omp:bridge-ack": {
-      const state = stateOf(tabId);
-      const bridge = state?.bridge ?? null;
-      if (state === undefined || state.panel !== panel || bridge === null) return;
-      if (encodeHex(s.bridgeHostGeneration) !== parsed.hostGeneration || bridge.documentId !== parsed.documentId) return;
-      const recorded = bridge.endpoint.committedBindingHash();
-      if (recorded === null || recorded !== parsed.bindingHash) {
-        log(`tab ${tabId}: a bridge acknowledgement named a binding this host did not commit`);
-        return;
-      }
-      bridge.bound = true;
-      log(`tab ${tabId}: the panel acknowledged its bridge secret`);
-      s.diagnostics.note(tabId, `bridge: the panel acknowledged the secret for document ${bridge.documentId?.slice(0, 8) ?? "unknown"}`);
-      refreshBridgeReadiness(tabId);
-      return;
-    }
-    case "omp:ready": {
-      if (parsed.protocolVersion !== GUEST_PROTOCOL_VERSION) {
-        log(`tab ${tabId}: guest protocol ${parsed.protocolVersion} != ${GUEST_PROTOCOL_VERSION}; the conversation was not sent`);
-        showError(
-          "The chat panel and extension are using different versions. Run Developer: Reload Window, then try again.",
-        );
-        return;
-      }
-      if (parsed.documentId !== undefined && parsed.editorId !== undefined && parsed.bootstrapId !== undefined && parsed.origin !== undefined) {
-        own.heldReadyReport = null;
-        pinBridgeOrigin(tabId, panel, { documentId: parsed.documentId, bootstrapId: parsed.bootstrapId, origin: parsed.origin });
-        // A page that announces itself again is re-sent the *same* secret when its
-        // document is already committed: the delivery is the one step that can be lost in
-        // transit, and rotating the secret would break a connection the page already holds.
-        void redeliverBridgeBinding(tabId);
-      }
-      pushSessionView(index, own, true);
-      noteReadyDocument(own, parsed.documentId);
-      activateNativeEditor(own);
-      // The document proves it can receive: it is sent the conversation, always fresh.
-      attachChatRoute(slot, true);
-      paintSavedHistory(index, tabId);
-      // A document that replaced another one receives the draft this host captured from its
-      // predecessor. It is put back, never sent, and only once.
-      const carried = s.draftRestores.get(slot);
-      if (own.mode === "chat" && own.document?.kind === "guest" && carried !== undefined &&
-          (own.document !== carried.document || panel !== carried.panel)) {
-        carried.restoredDocument = own.document;
-        const { requestId, text, attachments, recoverable } = carried.reply;
-        void panel.webview.postMessage({ type: "omp:draft-restore", requestId, text, attachments, recoverable } satisfies GuestDraftRestoreMessage);
-      }
-      return;
-    }
-    case "omp:focus-trace":
-      log(`tab ${tabId}: focus: ${parsed.detail}`);
-      return;
-    case "omp:composer-popup":
-      if (parsed.open) s.composerPopupTabs.add(tabId);
-      else s.composerPopupTabs.delete(tabId);
-      refreshGuestContext();
-      return;
-    case "omp:complete-files": {
-      const state = stateOf(tabId);
-      const cwd = state?.runtime?.cwd ?? index.get(tabId)?.cwd ?? null;
-      if (state?.panel !== panel || cwd === null) return;
-      const paths = await findFileMentions(parsed.query, {
-        cwd,
-        findFiles: (include, exclude, maxResults) => vscode.workspace.findFiles(include, exclude, maxResults),
-      });
-      if (stateOf(tabId)?.panel !== panel) return;
-      const reply: GuestFileCompletionsMessage = {
-        type: "omp:file-completions",
-        requestId: parsed.requestId,
-        paths,
-      };
-      void panel.webview.postMessage(reply);
-      return;
-    }
-    case "omp:control-request":
-      await handleGuestControlRequest(index, tabId, parsed, panelResponder(tabId, panel, parsed.actionSeq));
-      return;
-    case "omp:chat-command":
-      if (s.context !== undefined) await runChatAction(s.context, index, tabId, parsed.command);
-      return;
-    default:
-      // The terminal vocabulary belongs to the folder shell, never to a chat editor.
-      log(`slot ${slot}: ignored a ${parsed.type} message from a chat editor`);
-      return;
-  }
-}
-
-/**
- * Show why a tab has no live conversation: a session with a file shows its saved history
- * read-only with the reason; a draft that never got a file shows the reason alone.
- */
-function presentUnavailable(index: SessionIndex, tabId: string, reason: string, phase: "view-only" | "blocked" = "view-only"): void {
-  const s = windowState();
-  const entry = index.get(tabId);
-  if (entry === null) return;
-  void s.chat
-    .showViewOnly(tabId, { file: entry.sessionFile, cwd: entry.cwd, title: entry.title, reason, phase })
-    .then(() => attachChatRoutes(tabId, true));
-}
-
-/**
- * Tell one panel that the host-control facts it last read are stale.
- *
- * A panel asks for its model/thinking and tool state when it mounts and when the user hits
- * Refresh — none of which change when the authenticated channel or the exact session file
- * becomes available a moment later. Nothing is pushed here but the invalidation: the panel
- * answers with its own correlated snapshot request, and only a request this window can
- * attribute to that panel is answered.
- */
-function invalidateGuestControls(tabId: string): void {
-  const state = stateOf(tabId);
-  const panel = state?.panel ?? null;
-  const message: GuestControlInvalidateMessage = { type: "omp:control-invalidate" };
-  if (panel !== null) void panel.webview.postMessage(message);
-  // An orphan has no panel handle: its invalidation travels the route it does have.
-  const route = bridgeRouteOf(tabId);
-  const bridge = state?.bridge ?? null;
-  if (panel === null && route !== null && bridge !== null && bridge.documentId !== null) {
-    bridge.endpoint.invalidateRoute(bridge.documentId, route.routeGeneration);
   }
 }
 
@@ -6497,6 +6102,46 @@ function pushBridgeRouteOffer(tabId: string): void {
   bridge.endpoint.refreshBridgeOffer();
 }
 
+/** The page acknowledged the route generation it was offered over its panel (the dispatcher's `omp:route-ack`). */
+function acknowledgeBridgeRoute(tabId: string, panel: vscode.WebviewPanel, message: GuestRouteAckMessage): void {
+  const s = windowState();
+  const state = stateOf(tabId);
+  const route = bridgeRouteOf(tabId);
+  if (state === undefined || state.panel !== panel || route === null) return;
+  if (encodeHex(s.bridgeHostGeneration) !== message.hostGeneration || state.bridge?.documentId !== message.documentId) {
+    log(`tab ${tabId}: a route acknowledgement named another host generation or document`);
+    return;
+  }
+  const alreadyAcknowledged = route.acknowledged;
+  if (!route.acknowledge(message.routeGeneration, "panel")) {
+    log(`tab ${tabId}: a route acknowledgement named a fenced generation`);
+    return;
+  }
+  // Repeated delivery is valid, but an ACK of the ready-status offer must not
+  // trigger another identical offer and an unbounded panel round trip.
+  if (alreadyAcknowledged) return;
+  s.diagnostics.note(tabId, `bridge: route ${message.routeGeneration.slice(0, 8)} acknowledged over panel`);
+  pushBridgeRouteOffer(tabId);
+}
+
+/** The page acknowledged the secret it was delivered (the dispatcher's `omp:bridge-ack`). */
+function acknowledgeBridgeSecret(tabId: string, panel: vscode.WebviewPanel, message: GuestBridgeAckMessage): void {
+  const s = windowState();
+  const state = stateOf(tabId);
+  const bridge = state?.bridge ?? null;
+  if (state === undefined || state.panel !== panel || bridge === null) return;
+  if (encodeHex(s.bridgeHostGeneration) !== message.hostGeneration || bridge.documentId !== message.documentId) return;
+  const recorded = bridge.endpoint.committedBindingHash();
+  if (recorded === null || recorded !== message.bindingHash) {
+    log(`tab ${tabId}: a bridge acknowledgement named a binding this host did not commit`);
+    return;
+  }
+  bridge.bound = true;
+  log(`tab ${tabId}: the panel acknowledged its bridge secret`);
+  s.diagnostics.note(tabId, `bridge: the panel acknowledged the secret for document ${bridge.documentId?.slice(0, 8) ?? "unknown"}`);
+  refreshBridgeReadiness(tabId);
+}
+
 // Chat pages: the routes that show a host-owned conversation
 
 function panelPageId(panel: vscode.WebviewPanel): string {
@@ -6682,7 +6327,7 @@ function handleBridgeRequest(
     }
     const handled = terminal
       ? handleTerminalGuestMessage(editorId, parsed, parsed as unknown as Record<string, unknown>)
-      : runChatCommand(tabId, parsed as ChatWebviewMessage, bridgeChatPage(bridge, documentId));
+      : s.guestDispatcher.runChatCommand(tabId, parsed as ChatWebviewMessage, bridgeChatPage(bridge, documentId));
     void handled.then(() => session.reply(request.requestId, null))
       .catch(() => refuseBridgeRequest(session, route.routeGeneration, request.requestId));
     return;
@@ -6718,11 +6363,11 @@ function handleBridgeRequest(
       log(
         `tab ${tabId}: a bridge ${chatType} was refused (${parsed === null ? "the payload was not a valid chat command" : "this route cannot dispatch: the native side is not verified for this document"})`,
       );
-      if (parsed !== null) replyChatSendResult(tabId, parsed as ChatWebviewMessage, bridgeChatPage(bridge, documentId), "refused");
+      if (parsed !== null) s.guestDispatcher.replyChatSendResult(tabId, parsed as ChatWebviewMessage, bridgeChatPage(bridge, documentId), "refused");
       refuseBridgeRequest(session, route.routeGeneration, request.requestId);
       return;
     }
-    void runChatCommand(tabId, parsed as ChatWebviewMessage, bridgeChatPage(bridge, documentId))
+    void s.guestDispatcher.runChatCommand(tabId, parsed as ChatWebviewMessage, bridgeChatPage(bridge, documentId))
       .then(() => session.reply(request.requestId, null))
       .catch(() => {
         log(`tab ${tabId}: a bridge chat command could not be processed`);
@@ -8123,7 +7768,7 @@ function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, 
         }
         void commitBridgeDocument(tabId);
         refreshBridgeReadiness(tabId);
-        invalidateGuestControls(tabId);
+        s.guestDispatcher.invalidateControls(tabId);
         refreshFooterMetadata(index, tabId, true);
         refreshSessionCost(index, tabId);
         void refreshSessionModels(index, tabId);
@@ -8181,7 +7826,7 @@ async function resumeFromChat(context: vscode.ExtensionContext, index: SessionIn
   } catch (error) {
     log(`tab ${tabId}: Resume from Chat failed: ${messageOf(error)}`);
     const reason = `The session could not be resumed: ${messageOf(error)}`;
-    if (!s.chat.notify(tabId, reason) && !s.chat.has(tabId)) presentUnavailable(index, tabId, reason);
+    if (!s.chat.notify(tabId, reason) && !s.chat.has(tabId)) s.guestDispatcher.presentUnavailable(index, tabId, reason);
     return;
   }
   const phase = s.chat.stateOf(tabId)?.phase ?? null;
@@ -8194,7 +7839,7 @@ async function resumeFromChat(context: vscode.ExtensionContext, index: SessionIn
   // The admission was never reached (the editor or row changed, or this window still holds a process it could not
   // prove gone): say so in the footer, or on the page itself when no conversation is shown.
   const reason = stateOf(tabId)?.controlFailure ?? "The session could not be resumed. The OMP output channel has details.";
-  if (!s.chat.notify(tabId, reason) && !s.chat.has(tabId)) presentUnavailable(index, tabId, reason);
+  if (!s.chat.notify(tabId, reason) && !s.chat.has(tabId)) s.guestDispatcher.presentUnavailable(index, tabId, reason);
 }
 
 /**
@@ -8585,7 +8230,7 @@ async function establishControl(
       s.diagnostics.succeed(tabId, "host-control-verified", {
         detail: `pid ${input.pid} · instance ${snapshot.host.instanceId}`,
       });
-      invalidateGuestControls(tabId);
+      s.guestDispatcher.invalidateControls(tabId);
       void commitBridgeDocument(tabId);
       refreshBridgeReadiness(tabId);
     });
@@ -8735,7 +8380,7 @@ function panelResponder(tabId: string, panel: vscode.WebviewPanel, actionSeq: un
         return null;
       }
     },
-    invalidate: () => invalidateGuestControls(tabId),
+    invalidate: () => windowState().guestDispatcher.invalidateControls(tabId),
   };
 }
 
@@ -9741,7 +9386,7 @@ function applySlotAuthority(slot: string): void {
     replayHeldReadyReport(state);
     // A control request answered while this editor could not act left its footer without
     // controls; now that it may act, the page asks again.
-    invalidateGuestControls(state.tabId);
+    s.guestDispatcher.invalidateControls(state.tabId);
   }
   refreshLauncher();
   pushSessionView(s.indexForBridge, state);
@@ -11501,7 +11146,7 @@ function registerPanelLifecycle(
 function dispatchSlotMessage(index: SessionIndex, slot: string, panel: vscode.WebviewPanel, message: unknown): Promise<void> {
   const s = windowState();
   const route = (): Promise<void> =>
-    passiveReasonForSlot(slot) === null ? handleGuestMessage(index, slot, panel, message) : handlePassiveSlotMessage(slot, panel, message);
+    passiveReasonForSlot(slot) === null ? s.guestDispatcher.handleMessage(index, slot, panel, message) : handlePassiveSlotMessage(slot, panel, message);
   if (passiveReasonForSlot(slot) === null || !s.slotElections.has(slot)) return route();
   const type = parseGuestWebviewMessage(message)?.type;
   if (type === undefined || ELECTION_GATED_TYPES[type] !== true) return route();
@@ -11533,7 +11178,7 @@ async function handlePassiveSlotMessage(slot: string, panel: vscode.WebviewPanel
     return;
   }
   if (parsed.type === "omp:selection-reply") {
-    acceptSelectionReply(slot, panel, parsed);
+    s.guestDispatcher.acceptSelectionReply(slot, panel, parsed);
     return;
   }
   if (parsed.type === "omp:terminal-copy-reply") {
@@ -11541,7 +11186,7 @@ async function handlePassiveSlotMessage(slot: string, panel: vscode.WebviewPanel
     return;
   }
   if (parsed.type === "omp:open-detail") {
-    openDetailTab(state.tabId, state.mode, parsed);
+    s.guestDispatcher.openDetailTab(state.tabId, state.mode, parsed);
     return;
   }
   if (parsed.type === "omp:ready") {
@@ -11559,7 +11204,7 @@ async function handlePassiveSlotMessage(slot: string, panel: vscode.WebviewPanel
   }
   if (parsed.type === "omp:chat-load-older" || parsed.type === "omp:chat-resume" ||
       parsed.type === "omp:chat-tool-detail" || parsed.type === "omp:chat-subagent-read") {
-    await runChatCommand(state.tabId, parsed, panelChatPage(state, panel));
+    await s.guestDispatcher.runChatCommand(state.tabId, parsed, panelChatPage(state, panel));
     return;
   }
   if (TERMINAL_PANEL_TYPES[parsed.type] === true) {
@@ -11590,7 +11235,7 @@ async function handlePassiveSlotMessage(slot: string, panel: vscode.WebviewPanel
   if (CHAT_COMMAND_TYPES.has(parsed.type)) {
     // The conversation refuses a write from a route that may not write, and tells this page
     // why, so the refusal is visible instead of a prompt vanishing.
-    await runChatCommand(state.tabId, parsed as ChatWebviewMessage, panelChatPage(state, panel));
+    await s.guestDispatcher.runChatCommand(state.tabId, parsed as ChatWebviewMessage, panelChatPage(state, panel));
     return;
   }
   if (parsed.type === "omp:chat-command") {

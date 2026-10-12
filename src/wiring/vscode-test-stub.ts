@@ -27,6 +27,12 @@ export class TabInputText {
 export class TabInputTextDiff {}
 export class TabInputCustom {}
 export class TabInputNotebook {}
+export class TabInputWebview {
+	readonly viewType: string;
+	constructor(viewType: string) {
+		this.viewType = viewType;
+	}
+}
 
 /** One editor group as the routing reads it. */
 export interface StubTabGroup {

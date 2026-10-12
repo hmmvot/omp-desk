@@ -165,9 +165,8 @@ export const harness = {
   pushSessionView, handleShellEditorClosed,
   bindConversationIdentity, retryPendingIdentity, SessionTreeProvider,
   terminalFontMessage, revealDesktopNotification, revealActiveSession, releaseSelectionFromOtherWindow, refreshLauncher, launcherFacts, notifierFor, forgetTurnActivity,
-  copyActiveTerminalScreen, handleGuestMessage, activateNativeEditor, postPanelAction,
+  copyActiveTerminalScreen, activateNativeEditor, postPanelAction,
   handleBridgeRequest, bridgeDocumentEligible,
-  runChatCommand,
   subscribeProviderLoginRefresh, refreshDefaultProviderModels, refreshSessionModels, recordSessionModels, runChatAction, openProviderLogin, loginProviderFromPalette,
   providerLoginFixture,
   storedRenameFixture,
@@ -350,6 +349,10 @@ interface WindowFixture {
     confirmAndDelete(index: unknown, subject: unknown): Promise<boolean>;
     delete(index: unknown, argument: unknown): Promise<void>;
   };
+  guestDispatcher: {
+    handleMessage(...args: unknown[]): Promise<void>;
+    runChatCommand(...args: unknown[]): Promise<"accepted" | "refused" | "unconfirmed" | "ignored">;
+  };
   readonly sessionPanelColumns: Map<string, number>;
   readonly hostControlAttempts: WeakMap<object, Promise<void>>;
 }
@@ -374,7 +377,6 @@ interface Harness {
   restoredDraft(slot: string): { requestId: number; text: string; attachments: number; recoverable: readonly { text: string; attachments: number; unconfirmed: boolean }[] } | null;
   switchSessionMode(...args: unknown[]): Promise<void>;
   restartChat(...args: unknown[]): Promise<void>;
-  runChatCommand(...args: unknown[]): Promise<"accepted" | "refused" | "unconfirmed" | "ignored">;
   subscribeProviderLoginRefresh(context: { subscriptions: { dispose(): void }[] }, index: SessionIndex | ProviderModelIndexFixture): void;
   refreshDefaultProviderModels(): Promise<void>;
   refreshSessionModels(index: SessionIndex | ProviderModelIndexFixture, tabId: string): Promise<void>;
@@ -400,7 +402,6 @@ interface Harness {
   handleShellEditorClosed(...args: unknown[]): Promise<void>;
   shellFixture(cwd: string, panel: unknown, liveness: "running" | "exited" | "unreachable"): Promise<{ slot: string; state: State; record(): unknown; remove(): Promise<boolean> }>;
   copyActiveTerminalScreen(): void;
-  handleGuestMessage(...args: unknown[]): Promise<void>;
   handleBridgeRequest(...args: unknown[]): void;
   handlePassiveSlotMessage(...args: unknown[]): Promise<void>;
   passiveReasonForSlot(slot: string): string | null;
@@ -1634,7 +1635,7 @@ describe("native replacement lifecycle", () => {
         while (toGuest.length !== 0 || toHost.length !== 0) {
           assert.ok(rounds++ < 12, "a completed panel handshake must not spin in offer/ACK round trips");
           for (const message of toGuest.splice(0)) window.dispatchEvent(new MessageEvent("message", { data: message }));
-          for (const message of toHost.splice(0)) await harness.handleGuestMessage(index, EDITOR, panel, message);
+          for (const message of toHost.splice(0)) await harness.window().guestDispatcher.handleMessage(index, EDITOR, panel, message);
         }
       };
       const first = offer();
@@ -1754,7 +1755,7 @@ describe("native replacement lifecycle", () => {
         }
         if (message.type !== "omp:chat-prompt") return false;
         if (bridge === null) {
-          void harness.runChatCommand(TAB, message, admissionPage);
+          void harness.window().guestDispatcher.runChatCommand(TAB, message, admissionPage);
           return true;
         }
         return bridge.request({ routeGeneration: generation, requestId: message.requestId, actionSeq: "1",
@@ -1839,7 +1840,7 @@ describe("native replacement lifecycle", () => {
           assert.ok(payload !== null && typeof payload === "object" && "text" in payload);
           const message = parseChatWebviewMessage({ type: "omp:chat-prompt", requestId: request.requestId, text: payload.text });
           assert.ok(message?.type === "omp:chat-prompt");
-          void harness.runChatCommand(TAB, message, receiptPage).then(outcome => peer.reply(request.requestId, { outcome }));
+          void harness.window().guestDispatcher.runChatCommand(TAB, message, receiptPage).then(outcome => peer.reply(request.requestId, { outcome }));
         },
       });
       const receiptPage: ChatPage = { id: "bridge-admission", post: message => restarted.pushTerminal(documentId, message) ? "sent" : "dropped" };
@@ -2299,7 +2300,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			await post(message);
 			const request = message as { type?: string; requestId?: number };
 			if (request.type === "omp:draft-request" && typeof request.requestId === "number") {
-				await harness.handleGuestMessage(f.index, f.state.slotId, f.panels, {
+				await harness.window().guestDispatcher.handleMessage(f.index, f.state.slotId, f.panels, {
 					type: "omp:draft-reply", requestId: request.requestId, captured: captureComplete,
 					...(captureComplete ? content : { text: "", attachments: 0, recoverable: [] }),
 				});
@@ -2363,12 +2364,12 @@ describe("same-editor Chat and native Terminal actions", () => {
 			assert.equal(f.channel.written.length, commands, "Restart cannot depend on another blocked get_state or abort");
 			const preserved = harness.restoredDraft(f.state.slotId)!;
 			assert.deepEqual({ text: preserved.text, attachments: preserved.attachments, recoverable: preserved.recoverable }, f.content);
-			await harness.handleGuestMessage(f.index, f.state.slotId, f.panels, { type: "omp:ready", protocolVersion: GUEST_PROTOCOL_VERSION });
+			await harness.window().guestDispatcher.handleMessage(f.index, f.state.slotId, f.panels, { type: "omp:ready", protocolVersion: GUEST_PROTOCOL_VERSION });
 			const restored = (f.panels.messages as { type: string; requestId?: number }[]).find(item => item.type === "omp:draft-restore");
 			assert.equal(restored?.requestId, preserved.requestId);
-			await harness.handleGuestMessage(f.index, f.state.slotId, f.panels, { type: "omp:draft-restored", requestId: preserved.requestId + 1 });
+			await harness.window().guestDispatcher.handleMessage(f.index, f.state.slotId, f.panels, { type: "omp:draft-restored", requestId: preserved.requestId + 1 });
 			assert.ok(harness.restoredDraft(f.state.slotId), "a foreign acknowledgement cannot consume input");
-			await harness.handleGuestMessage(f.index, f.state.slotId, f.panels, { type: "omp:draft-restored", requestId: preserved.requestId });
+			await harness.window().guestDispatcher.handleMessage(f.index, f.state.slotId, f.panels, { type: "omp:draft-restored", requestId: preserved.requestId });
 			assert.equal(harness.restoredDraft(f.state.slotId), null);
 		} finally { f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true }); }
 	});
@@ -3063,19 +3064,19 @@ describe("same-editor Chat and native Terminal actions", () => {
 		const validate = { type: "omp:terminal-link-validate", requestId: 10, target };
 		const open = { type: "omp:terminal-link-open", requestId: 11, target };
 		try {
-			await harness.handleGuestMessage(f.index, f.state.slotId, f.panels, validate);
+			await harness.window().guestDispatcher.handleMessage(f.index, f.state.slotId, f.panels, validate);
 			assert.deepEqual(f.panels.messages.at(-1), { type: "omp:terminal-link-validation", requestId: 10, valid: true });
-			await harness.handleGuestMessage(f.index, f.state.slotId, f.panels, open);
+			await harness.window().guestDispatcher.handleMessage(f.index, f.state.slotId, f.panels, open);
 			const opened = harness.openedDocuments()[initial]!;
 			assert.equal(opened.uri.fsPath, file);
 			assert.equal(opened.options.preview, false, "navigation creates a retained editor, not a disposable preview");
 			assert.deepEqual([opened.options.selection.start.line, opened.options.selection.start.character,
 				opened.options.selection.end.line, opened.options.selection.end.character], [1, 3, 1, 3]);
-			await harness.handleGuestMessage(f.index, f.state.slotId, f.panels, { ...validate, requestId: 12, target: "./missing.ts" });
+			await harness.window().guestDispatcher.handleMessage(f.index, f.state.slotId, f.panels, { ...validate, requestId: 12, target: "./missing.ts" });
 			assert.deepEqual(f.panels.messages.at(-1), { type: "omp:terminal-link-validation", requestId: 12, valid: false });
-			await harness.handleGuestMessage(f.index, f.state.slotId, f.panels, { ...open, requestId: 13, target: "command:workbench.action.reloadWindow" });
+			await harness.window().guestDispatcher.handleMessage(f.index, f.state.slotId, f.panels, { ...open, requestId: 13, target: "command:workbench.action.reloadWindow" });
 			assert.equal(harness.openedDocuments().length, initial + 1);
-			const pending = harness.handleGuestMessage(f.index, f.state.slotId, f.panels, { ...open, requestId: 14 });
+			const pending = harness.window().guestDispatcher.handleMessage(f.index, f.state.slotId, f.panels, { ...open, requestId: 14 });
 			f.state.panel = harness.createPanel();
 			await pending;
 			assert.equal(harness.openedDocuments().length, initial + 1, "disk validation cannot open a file for a replaced document");
@@ -3092,7 +3093,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			// A native-separator absolute path to a binary opens through the same retained-tab command.
 			const image = path.join(f.directory, "subagent-icon-options.png");
 			await writeFile(image, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 1, 2, 3]));
-			await harness.handleGuestMessage(f.index, f.state.slotId, f.panels, { ...open, requestId: 15, target: image });
+			await harness.window().guestDispatcher.handleMessage(f.index, f.state.slotId, f.panels, { ...open, requestId: 15, target: image });
 			assert.equal(harness.openedDocuments()[initial + 2]!.uri.fsPath, image);
 			assert.equal(harness.openedDocuments()[initial + 2]!.options.preview, false);
 		} finally {
@@ -3109,17 +3110,17 @@ describe("same-editor Chat and native Terminal actions", () => {
 		const request = (type: "omp:terminal-link-validate" | "omp:terminal-link-open", requestId: number, target: string) => ({ type, requestId, target });
 		try {
 			assert.equal(f.state.mode, "chat");
-			await harness.handleGuestMessage(f.index, f.state.slotId, f.panels, request("omp:terminal-link-validate", 20, "chat-navigation.ts:2:4"));
+			await harness.window().guestDispatcher.handleMessage(f.index, f.state.slotId, f.panels, request("omp:terminal-link-validate", 20, "chat-navigation.ts:2:4"));
 			assert.deepEqual(f.panels.messages.at(-1), { type: "omp:terminal-link-validation", requestId: 20, valid: true }, "a relative path validates against the session cwd");
-			await harness.handleGuestMessage(f.index, f.state.slotId, f.panels, request("omp:terminal-link-validate", 21, "chat-missing.ts"));
+			await harness.window().guestDispatcher.handleMessage(f.index, f.state.slotId, f.panels, request("omp:terminal-link-validate", 21, "chat-missing.ts"));
 			assert.deepEqual(f.panels.messages.at(-1), { type: "omp:terminal-link-validation", requestId: 21, valid: false }, "a file that does not exist is never a link");
-			await harness.handleGuestMessage(f.index, f.state.slotId, f.panels, request("omp:terminal-link-open", 22, "chat-navigation.ts#L3-9"));
+			await harness.window().guestDispatcher.handleMessage(f.index, f.state.slotId, f.panels, request("omp:terminal-link-open", 22, "chat-navigation.ts#L3-9"));
 			const opened = harness.openedDocuments()[initial]!;
 			assert.equal(opened.uri.fsPath, file);
 			assert.equal(opened.options.preview, false);
 			assert.deepEqual([opened.options.selection.start.line, opened.options.selection.start.character], [2, 0], "the start of a #L range is revealed");
 			for (const [index, target] of ["command:workbench.action.reloadWindow", "vscode://command/x", "javascript:alert(1)", "chat-missing.ts", "file://remote/share/chat-navigation.ts"].entries()) {
-				await harness.handleGuestMessage(f.index, f.state.slotId, f.panels, request("omp:terminal-link-open", 30 + index, target));
+				await harness.window().guestDispatcher.handleMessage(f.index, f.state.slotId, f.panels, request("omp:terminal-link-open", 30 + index, target));
 			}
 			assert.equal(harness.openedDocuments().length, initial + 1, "nothing but the one existing file was opened");
 		} finally {
@@ -3159,7 +3160,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			assert.equal(clients[0]!.chooseToolCallDetail(), true);
 			assert.deepEqual(Object.keys(posted as Record<string, unknown>).sort(), ["epoch", "requestId", "type"], "the request carries no value");
 			const pickers = harness.quickPicks().length;
-			const choosing = harness.handleGuestMessage(f.index, state.slotId, f.panels, posted);
+			const choosing = harness.window().guestDispatcher.handleMessage(f.index, state.slotId, f.panels, posted);
 			for (let round = 0; round < 20 && harness.quickPicks().length === pickers; round++) await nextTurn();
 			const picker = harness.quickPicks().at(-1)!;
 			assert.equal(harness.quickPicks().length, pickers + 1);
@@ -3178,14 +3179,14 @@ describe("same-editor Chat and native Terminal actions", () => {
 			]);
 			assert.deepEqual(harness.configurationWrites()[settingsWrites], { key: "omp.toolCallDetail", value: "detailed", target: 1 });
 			// Dismissing the picker writes nothing, and a stale epoch never reaches it.
-			const dismissed = harness.handleGuestMessage(f.index, state.slotId, f.panels, posted);
+			const dismissed = harness.window().guestDispatcher.handleMessage(f.index, state.slotId, f.panels, posted);
 			for (let round = 0; round < 20 && harness.quickPicks().length === pickers + 1; round++) await nextTurn();
 			const second = harness.quickPicks().at(-1)!;
 			assert.equal(second.items[1]!.detail, "$(check) Current tools output", "the picker marks the setting now in force");
 			second.dismiss();
 			await dismissed;
 			assert.equal(harness.configurationWrites().length, settingsWrites + 1);
-			await harness.handleGuestMessage(f.index, state.slotId, f.panels, {
+			await harness.window().guestDispatcher.handleMessage(f.index, state.slotId, f.panels, {
 				...(posted as Record<string, unknown>),
 				epoch: { ...clients[0]!.getSnapshot().epoch!, nonce: "stale-host" },
 			});
