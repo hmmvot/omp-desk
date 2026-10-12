@@ -145,20 +145,24 @@ import { acquireClaim as fixtureClaim, createClaimHolder as fixtureHolder, setCl
 import { capturedDesktopXml, capturedDesktopXmls, resetDesktopXmls } from './host/desktop-notifications';
 import { providerLoginFixture, storedRenameFixture } from './host/native-terminal';
 const fixtureOpenPanel = openPanel;
+// The harness runs windows without an activation context: the cases that need one set it on the window.
+const fixtureContext = undefined as never;
+const fixtureWindow = () => state();
 export const harness = {
   connectHostControl, reconnectHostControl, establishControl, closeSession, launchHost, presentRestoreOutcome, openTab, handleChatEvent, bindPanel, restoreTabs, bridgeSerializerFor,
   confirmAndDeleteSession, deleteSession, handleRestoreOutcome, forgetSession, renameSession, reloadSession, handleGuestControlRequest, panelResponder,
-  switchSessionMode, restartChat, openSessionInMode, defaultSessionMode, chooseDefaultSessionView, newSession, owningWindowUri, switchToSessionWindow, selectHeldSessionTab, openRestoredTabIfUncovered, requestSelections,
+  switchSessionMode, restartChat, openSessionInMode, defaultSessionMode, chooseDefaultSessionView, newSession, owningWindowUri, switchToSessionWindow, selectHeldSessionTab, openRestoredTabIfUncovered,
   routeLaunchToFolderWindow, routeSessionOpen, serveLaunchRequest, startNewSession,
-  newSessionInPlace, deleteSessionInPlace, sessionPanelColumns,
+  newSessionInPlace, deleteSessionInPlace,
   panelFactory(handler) {
     const previous = fixtureVscode.window.createWebviewPanel;
     fixtureVscode.window.createWebviewPanel = handler;
     return () => { fixtureVscode.window.createWebviewPanel = previous; };
   },
-  setWindowRegistry(registry) { windowRegistry = registry; },
-  setPackageDrift(drift) { packageDrift = drift; },
-  startConversation, handleTerminalGuestMessage, startNativeWatch, handleNativeHostExited, hostControlAttempts,
+  installWindow(next) { window = next; },
+  window: () => state(),
+  createWindowState,
+  startConversation, handleTerminalGuestMessage, startNativeWatch, handleNativeHostExited,
   pushSessionView, handleShellEditorClosed,
   bindConversationIdentity, retryPendingIdentity, SessionTreeProvider,
   terminalFontMessage, revealDesktopNotification, revealActiveSession, releaseSelectionFromOtherWindow, refreshLauncher, launcherFacts, notifierFor, forgetTurnActivity,
@@ -168,18 +172,18 @@ export const harness = {
   subscribeProviderLoginRefresh, refreshDefaultProviderModels, refreshSessionModels, recordSessionModels, runChatAction, openProviderLogin, loginProviderFromPalette,
   providerLoginFixture,
   storedRenameFixture,
-  providerModelsIdle: () => defaultProviderModelsRead ?? Promise.resolve(),
-  closeLoginTerminal: name => fixtureVscode.window.closedTerminals.fire(name === "omp login" && providerLoginTerminal !== null ? providerLoginTerminal : { name }),
+  providerModelsIdle: () => fixtureWindow().defaultProviderModelsRead ?? Promise.resolve(),
+  closeLoginTerminal: name => fixtureVscode.window.closedTerminals.fire(name === "omp login" && fixtureWindow().providerLoginTerminal !== null ? fixtureWindow().providerLoginTerminal : { name }),
   closeOtherTerminal: name => fixtureVscode.window.closedTerminals.fire({ name }),
   profilePicker(handler) {
     const previous = fixtureVscode.window.showQuickPick;
     fixtureVscode.window.showQuickPick = handler;
     return () => { fixtureVscode.window.showQuickPick = previous; };
   },
-  sessionModelAvailability: tabId => footerBindings.get(tabId)?.message.hasAvailableModels,
+  sessionModelAvailability: tabId => fixtureWindow().footerBindings.get(tabId)?.message.hasAvailableModels,
   handlePassiveSlotMessage, passiveReasonForSlot,
-  footerIdle: () => Promise.all([...footerBindings.values()].map(binding => binding.observer?.idle())).then(() => undefined),
-  restoredDraft: slot => draftRestores.get(slot)?.reply ?? null,
+  footerIdle: () => Promise.all([...fixtureWindow().footerBindings.values()].map(binding => binding.observer?.idle())).then(() => undefined),
+  restoredDraft: slot => fixtureWindow().draftRestores.get(slot)?.reply ?? null,
   readChatDisplayPreferences, writeChatToolDetail, refreshChatDisplayPreferences,
   configurationWrites: () => fixtureVscode.workspace.configurationWrites,
   setWindowWorkspace(file, folders) { fixtureVscode.workspace.workspaceFile = file; fixtureVscode.workspace.workspaceFolders = folders; },
@@ -188,19 +192,19 @@ export const harness = {
   pickToolCallDetail,
   shellContext(cwd, panel) {
     const slot = createShellSlotId(), state = newTabState(slot);
-    state.shellSlot = slot; state.panel = panel; tabs.set(slot, state);
-    shellSlots = { get: key => key === slot ? { cwd } : null };
+    state.shellSlot = slot; state.panel = panel; fixtureWindow().tabs.set(slot, state);
+    fixtureWindow().shellSlots = { get: key => key === slot ? { cwd } : null };
     return { slot, state };
   },
   async shellFixture(cwd, panel, liveness) {
-    const slot = createShellSlotId(), state = newTabState(slot), values = new Map();
-    state.shellSlot = slot; state.panel = panel; tabs.set(slot, state);
-    shellSlots = createShellSlotStore({ get: key => values.get(key), update: async (key, value) => { values.set(key, value); } });
-    await shellSlots.add({ slot, cwd, folderKey: cwd, label: 'Project terminal' });
-    ptyGate.client = async () => ({ attach: async () => ({ handle: liveness === 'unreachable' ? null : { refreshStatus: async () => ({ state: liveness }) } }) });
-    return { slot, state, record: () => shellSlots.get(slot), remove: () => shellSlots.remove(slot) };
+    const slot = createShellSlotId(), state = newTabState(slot), values = new Map(), w = fixtureWindow();
+    state.shellSlot = slot; state.panel = panel; w.tabs.set(slot, state);
+    w.shellSlots = createShellSlotStore({ get: key => values.get(key), update: async (key, value) => { values.set(key, value); } });
+    await w.shellSlots.add({ slot, cwd, folderKey: cwd, label: 'Project terminal' });
+    w.ptyGate.client = async () => ({ attach: async () => ({ handle: liveness === 'unreachable' ? null : { refreshStatus: async () => ({ state: liveness }) } }) });
+    return { slot, state, record: () => w.shellSlots.get(slot), remove: () => w.shellSlots.remove(slot) };
   },
-  hostGeneration: () => bridgeHostGeneration,
+  hostGeneration: () => fixtureWindow().bridgeHostGeneration,
   clipboardWrites: () => fixtureVscode.env.clipboard.writes,
   desktopPayload: capturedDesktopXml,
   desktopPayloads: capturedDesktopXmls,
@@ -210,12 +214,12 @@ export const harness = {
     fixtureVscode.window.tabGroups.activeTabGroup.activeTab = { input };
   },
   desktopEnvironment(context) {
-    const previousContext = activationContext;
-    activationContext = context;
+    const previousContext = fixtureWindow().context;
+    fixtureWindow().context = context;
     fixtureVscode.env.uriScheme = 'vscode';
     fixtureVscode.env.asExternalUri = async uri => uri.with({ query: uri.query + '&windowId=9471' });
     return () => {
-      activationContext = previousContext;
+      fixtureWindow().context = previousContext;
       delete fixtureVscode.env.uriScheme;
       delete fixtureVscode.env.asExternalUri;
     };
@@ -230,24 +234,22 @@ export const harness = {
     return () => { openPanel = previous; ensureBridgeEndpoint = previousBridge; };
   },
   createPanel: () => fixtureVscode.window.createWebviewPanel(),
-  notificationTree(provider, view) { launcherProvider = provider; launcherView = view; launcherSelectedPath = null; launcherExpandFor = null; },
   warning(handler) { fixtureVscode.window.showWarningMessage = handler; },
   information(handler) { fixtureVscode.window.showInformationMessage = handler; },
   picker(mode) { fixtureVscode.window.showQuickPick = async rows => rows.find(row => row.mode === mode); },
   folders(folders, openingWindows = []) {
-    launcherFolders = {
+    fixtureWindow().launcherFolders = {
       list: () => folders, get: id => folders.find(folder => folder.id === id) ?? null, folderForCwd: cwd => folders.find(folder => folder.path === cwd) ?? null,
       windowsWithFolder: (folderPath, options) => typeof openingWindows === 'function' ? openingWindows(folderPath, options) : openingWindows,
       identityKeyOf: value => value,
     };
   },
-  setActivationContext(context) { activationContext = context; },
-  setResolveAgentRoots(resolve) { resolveAgentRoots = resolve; },
   errors() { return fixtureVscode.window.errors; },
   rowState: fixtureRowState,
   policy(context, ports, hostLauncher, stopPort) {
-    activationContext = context;
-    reconciler = createOwnerReconciler(ports);
+    const w = fixtureWindow();
+    w.context = context;
+    w.reconciler = createOwnerReconciler(ports);
     launcher = () => hostLauncher;
     openPanel = () => undefined;
     brokerProvenanceFor = () => ({ kind: 'slot', slot: 'host:legacy-fixture' });
@@ -271,15 +273,16 @@ export const harness = {
     return groups;
   },
   commandHandler(handler) { fixtureVscode.commands.calls.length = 0; fixtureVscode.commands.handler = handler; return fixtureVscode.commands.calls; },
-  bindRevived(slot, panel) { tabs.get(slot).panel = panel; for (const resolve of panelBindWaiters.get(slot) ?? []) resolve(); },
-  markPageRunning(slot) { bridgeLiveEditors.add(slot); },
+  bindRevived(slot, panel) { const w = fixtureWindow(); w.tabs.get(slot).panel = panel; for (const resolve of w.panelBindWaiters.get(slot) ?? []) resolve(); },
+  markPageRunning(slot) { fixtureWindow().bridgeLiveEditors.add(slot); },
   controlClient: HostControlClient,
   SessionIndex, acquireClaim: fixtureClaim, createClaimHolder: fixtureHolder, launcherOwnershipFacts, refreshRowsForClaims, startClaimWatch,
-  setExternalLeases(observer) { externalLeases = observer; },
   setClaimFailures,
   reset(index, conversation) {
-    tabs.clear(); chat = conversation; indexForBridge = index; startupRestorePending = false;
-    detailTabs = new DetailTabs({ createPanel() { throw new Error('the fixture opens no detail tab'); }, attachPage: () => () => {}, handleMessage: async () => ({ status: 'refused' }), openUrl: async () => {}, log() {} });
+    harness.installWindow(createWindowState(fixtureContext));
+    const w = fixtureWindow();
+    w.chat = conversation; w.indexForBridge = index; w.startupRestorePending = false;
+    w.detailTabs = new DetailTabs({ createPanel() { throw new Error('the fixture opens no detail tab'); }, attachPage: () => () => {}, handleMessage: async () => ({ status: 'refused' }), openUrl: async () => {}, log() {} });
     fixtureVscode.window.errors.length = 0;
     fixtureVscode.env.clipboard.writes.length = 0;
     fixtureVscode.workspace.configurationValues = {};
@@ -287,22 +290,25 @@ export const harness = {
     delete fixtureVscode.env.asExternalUri;
     resetDesktopXmls();
     fixtureVscode.window.tabGroups.activeTabGroup.activeTab = null;
-    reconciler = { reconcile: async () => ({ kind: 'free', evidence: [] }) };
+    w.reconciler = { reconcile: async () => ({ kind: 'free', evidence: [] }) };
     runtimeEntries = async () => ({ hostControl: { path: 'fixture-host-control.mjs' }, renameHelper: { path: 'fixture-rename-session.mjs' } });
-    ptyGate = { client: async () => ({}) };
-    ptyGate.attachClient = async () => ({ fixture: true });
-    ptyGate.invalidate = () => {};
+    w.ptyGate = { client: async () => ({}) };
+    w.ptyGate.attachClient = async () => ({ fixture: true });
+    w.ptyGate.invalidate = () => {};
   },
   editor(index, endpoint, panel, editorId = '${EDITOR}', tabId = '${TAB}') {
     const state = newTabState(editorId); state.tabId = tabId; state.panel = panel;
     state.bridge = { editorId, endpoint, documentId: '${DOCUMENT}', bound: true };
     state.document = { kind: 'guest', bridgeDocumentId: '${DOCUMENT}' };
-    tabs.set(editorId, state);
-    bridgeEditors.reserve({ tabId, editorId, provenance: 'saved', sequence: 1 });
-    bridgeEndpoints.set(editorId, endpoint);
+    const w = fixtureWindow();
+    w.tabs.set(editorId, state);
+    w.bridgeEditors.reserve({ tabId, editorId, provenance: 'saved', sequence: 1 });
+    w.bridgeEndpoints.set(editorId, endpoint);
     return state;
   }
-};`;
+};
+// A window is installed from the start, so a case that reaches an internal before its first reset still has one.
+harness.installWindow(createWindowState(fixtureContext));`;
 
 interface State {
   mode: "chat" | "terminal";
@@ -324,8 +330,27 @@ interface ProviderModelIndexFixture {
   list(): { tabId: string }[];
 }
 
+/** The fields of the bundled copy's `WindowState` that the cases set or read, as the cases see them. */
+interface WindowFixture {
+  context: unknown;
+  windowRegistry: unknown;
+  packageDrift: { check(): { kind: "same" } | { kind: "changed"; files: string[] } } | null;
+  resolveAgentRoots: () => Promise<void>;
+  externalLeases: { holds(file: string, options?: { fresh?: boolean }): Promise<boolean | null> } | null;
+  launcherProvider: unknown;
+  launcherView: unknown;
+  launcherSelectedPath: string | null;
+  launcherExpandFor: string | null;
+  readonly requestSelections: Set<string>;
+  readonly sessionPanelColumns: Map<string, number>;
+  readonly hostControlAttempts: WeakMap<object, Promise<void>>;
+}
+
 interface Harness {
   reset(index: unknown, chat: unknown): void;
+  installWindow(next: unknown): void;
+  createWindowState(context: unknown): unknown;
+  window(): WindowFixture;
   state(tabId: string): State;
   editor(index: unknown, endpoint: unknown, panel: unknown, editorId?: string, tabId?: string): State;
   bridgeDocumentEligible(editorId: string, documentId: string): boolean;
@@ -338,7 +363,6 @@ interface Harness {
   launchHost(...args: unknown[]): Promise<{ state: string }>;
   presentRestoreOutcome(index: SessionIndex, tabId: string, outcome: unknown): void;
   openTab(...args: unknown[]): Promise<void>;
-  hostControlAttempts: WeakMap<object, Promise<void>>;
   restoredDraft(slot: string): { requestId: number; text: string; attachments: number; recoverable: readonly { text: string; attachments: number; unconfirmed: boolean }[] } | null;
   switchSessionMode(...args: unknown[]): Promise<void>;
   restartChat(...args: unknown[]): Promise<void>;
@@ -361,7 +385,6 @@ interface Harness {
   switchToSessionWindow(...args: unknown[]): Promise<void>;
   selectHeldSessionTab(...args: unknown[]): Promise<{ ok: boolean; focused: boolean }>;
   openRestoredTabIfUncovered(...args: unknown[]): Promise<void>;
-  requestSelections: Set<string>;
   setWindowWorkspace(file: URI | undefined, folders: readonly { uri: URI }[]): void;
   bindPanel(...args: unknown[]): void;
   restoreTabs(...args: unknown[]): Promise<void>;
@@ -404,7 +427,6 @@ interface Harness {
   quickPicks(): readonly { title: string; items: readonly { label: string; description?: string; detail?: string }[]; disposed: boolean; choose(index: number): void; dismiss(): void }[];
   pickToolCallDetail: NonNullable<ConstructorParameters<typeof ChatRuntime>[0]["pickToolCallDetail"]>;
   shellContext(cwd: string, panel: unknown): { slot: string; state: State };
-  notificationTree(provider: unknown, view: unknown): void;
   openSessionInMode(...args: unknown[]): Promise<void>;
   defaultSessionMode(context: unknown): "chat" | "terminal";
   chooseDefaultSessionView(context: unknown): Promise<void>;
@@ -417,18 +439,13 @@ interface Harness {
     folders: readonly { id: string; path: string; collapsed: boolean; pinned: boolean; open: boolean; openHere: boolean; openElsewhere: boolean }[],
     openingWindows?: readonly FixtureOpeningWindow[] | ((folderPath: string, options?: { exact?: boolean }) => readonly FixtureOpeningWindow[]),
   ): void;
-  setActivationContext(context: unknown): void;
-  setResolveAgentRoots(resolve: () => Promise<void>): void;
   routeLaunchToFolderWindow(index: unknown, folder: { path: string }, launch: unknown, answerTimeoutMs?: number): Promise<boolean>;
   routeSessionOpen(index: unknown, tabId: string, verb: "opened" | "resumed", mode: "chat" | "terminal" | null): Promise<boolean>;
   serveLaunchRequest(context: unknown, index: unknown, request: unknown, serveContext: { stillWanted(): Promise<boolean> }): Promise<{ ok: boolean; focused: boolean }>;
   startNewSession(context: unknown, index: unknown, folder: unknown): Promise<void>;
   newSessionInPlace(context: unknown, index: SessionIndex, tabId: string): Promise<void>;
   deleteSessionInPlace(context: unknown, index: SessionIndex, tabId: string): Promise<void>;
-  sessionPanelColumns: Map<string, number>;
   panelFactory(handler: (...args: unknown[]) => unknown): () => void;
-  setWindowRegistry(registry: unknown): void;
-  setPackageDrift(drift: { check(): { kind: "same" } | { kind: "changed"; files: string[] } } | null): void;
   errors(): readonly string[];
   handleChatEvent(...args: unknown[]): void;
   confirmAndDeleteSession(...args: unknown[]): Promise<boolean>;
@@ -459,7 +476,6 @@ interface Harness {
   acquireClaim: typeof acquireClaim;
   createClaimHolder: typeof createClaimHolder;
   launcherOwnershipFacts(index: SessionIndex, tabId: string, options?: { fresh?: boolean }): Promise<SessionOwnershipFacts>;
-  setExternalLeases(observer: { holds(file: string, options?: { fresh?: boolean }): Promise<boolean | null> } | null): void;
   refreshRowsForClaims(index: SessionIndex, claimFiles: ReadonlySet<string>): void;
   startClaimWatch: typeof startClaimWatch;
   setClaimFailures(codes: string[]): void;
@@ -479,6 +495,11 @@ interface LifecyclePanel {
 }
 
 let harness: Harness;
+/** Show a launcher tree in the window: the provider, its view, and no selection or pending expansion. */
+function setLauncherTree(provider: unknown, view: unknown): void {
+  const w = harness.window();
+  w.launcherProvider = provider; w.launcherView = view; w.launcherSelectedPath = null; w.launcherExpandFor = null;
+}
 let root: string;
 const resources: { close(): void }[] = [];
 const pages: BridgeClient[] = [];
@@ -716,7 +737,7 @@ describe("desktop protocol activation", () => {
     let focused = false;
     let present = true;
     const rowIndex = { ...index, get: () => present ? index.row : null };
-    harness.notificationTree({ itemFor: async () => item, sessionRowsShown: () => true, processItemFor: () => undefined }, {
+    setLauncherTree({ itemFor: async () => item, sessionRowsShown: () => true, processItemFor: () => undefined }, {
       reveal: async (row: unknown, options: { select: boolean; focus: boolean }) => {
         if (options.select) selected = row;
         focused = options.focus;
@@ -731,14 +752,14 @@ describe("desktop protocol activation", () => {
       assert.equal(state.runtime, native);
       assert.equal(index.row.runIntent, "running");
       selected = null;
-      harness.notificationTree({ itemFor: async () => { present = false; return item; }, sessionRowsShown: () => true, processItemFor: () => undefined }, {
+      setLauncherTree({ itemFor: async () => { present = false; return item; }, sessionRowsShown: () => true, processItemFor: () => undefined }, {
         reveal: async (row: unknown) => { selected = row; },
       });
       await harness.revealDesktopNotification(rowIndex, "hmmvot.omp-desk", uri);
       assert.equal(selected, null);
       assert.equal(state.runtime, native);
       assert.equal(index.row.runIntent, "running");
-    } finally { harness.notificationTree(undefined, undefined); }
+    } finally { setLauncherTree(undefined, undefined); }
   });
 });
 
@@ -1230,7 +1251,7 @@ describe("native replacement lifecycle", () => {
       runtimeIdentity: () => null,
       observeOwnership: tabId => harness.launcherOwnershipFacts(index, tabId),
     });
-    harness.notificationTree(provider, undefined);
+    setLauncherTree(provider, undefined);
     const watch = harness.startClaimWatch(claimDir, files => harness.refreshRowsForClaims(index, files), { debounceMs: 20 });
     // Waits on the view's own repaint signal, never on a guessed delay.
     const shown = async (expected: string): Promise<void> => {
@@ -1261,7 +1282,7 @@ describe("native replacement lifecycle", () => {
       await shown("stopped");
     } finally {
       await rival?.release();
-      watch(); provider.dispose(); harness.notificationTree(undefined, undefined);
+      watch(); provider.dispose(); setLauncherTree(undefined, undefined);
     }
   });
 
@@ -1975,7 +1996,7 @@ describe("verified-owned-writer policy fixtures", () => {
   it("asks before launching a session a plain terminal omp writes: Cancel starts nothing, Open Anyway launches it, and a restore never asks", async () => {
     const f = await legacyFixture("terminal-writer", false, true);
     const lease = { held: true as boolean | null, fresh: 0 };
-    harness.setExternalLeases(leaseObserver(lease));
+    harness.window().externalLeases = leaseObserver(lease);
     try {
       const facts = await harness.launcherOwnershipFacts(f.index, TAB);
       assert.equal(facts.externalOmp, true);
@@ -1991,13 +2012,13 @@ describe("verified-owned-writer policy fixtures", () => {
       harness.warning(async (_message, _options, action) => action);
       await harness.openTab(storage().context, f.index, TAB, "resumed");
       assert.deepEqual(f.operations, ["launch rpc"], "Open Anyway is the user's launch");
-    } finally { harness.setExternalLeases(null); f.runtime.dispose(); await f.index.closeSession(TAB, { confirmedStopped: true }); }
+    } finally { harness.window().externalLeases = null; f.runtime.dispose(); await f.index.closeSession(TAB, { confirmedStopped: true }); }
   });
 
   it("never asks for a restored editor, a history view or when the probe cannot tell", async () => {
     const f = await legacyFixture("quiet-restore", false, true);
     const lease = { held: true as boolean | null, fresh: 0 };
-    harness.setExternalLeases(leaseObserver(lease));
+    harness.window().externalLeases = leaseObserver(lease);
     try {
       const asked: unknown[] = [];
       harness.warning(async message => { asked.push(message); return undefined; });
@@ -2008,12 +2029,12 @@ describe("verified-owned-writer policy fixtures", () => {
       harness.warning(async (_message, _options, action) => action);
       await harness.openTab(storage().context, f.index, TAB, "resumed");
       assert.deepEqual(f.operations, ["launch rpc"], "an unknown lease is today's behavior: no dialog, launch");
-    } finally { harness.setExternalLeases(null); f.runtime.dispose(); await f.index.closeSession(TAB, { confirmedStopped: true }); }
+    } finally { harness.window().externalLeases = null; f.runtime.dispose(); await f.index.closeSession(TAB, { confirmedStopped: true }); }
   });
 
   it("asks for a plain Open too when the row's run intent is not stopped, and not when it is", async () => {
     const f = await legacyFixture("open-running-intent", false, true);
-    harness.setExternalLeases(leaseObserver({ held: true, fresh: 0 }));
+    harness.window().externalLeases = leaseObserver({ held: true, fresh: 0 });
     try {
       await f.index.setRunIntent(TAB, "running");
       const asked: unknown[] = [];
@@ -2021,7 +2042,7 @@ describe("verified-owned-writer policy fixtures", () => {
       await harness.openTab(storage().context, f.index, TAB, "opened");
       assert.equal(asked.length, 1, "an Open that may launch a writer asks first");
       assert.deepEqual(f.operations, [], "Cancel starts nothing");
-    } finally { harness.setExternalLeases(null); f.runtime.dispose(); await f.index.closeSession(TAB, { confirmedStopped: true }); }
+    } finally { harness.window().externalLeases = null; f.runtime.dispose(); await f.index.closeSession(TAB, { confirmedStopped: true }); }
   });
 
   it("lets another window's live claim win over the lease: that row is Open in another window, never an external process", async () => {
@@ -2036,19 +2057,19 @@ describe("verified-owned-writer policy fixtures", () => {
     const row = await index.trackSession({ sessionFile: file, cwd: root });
     const rival = await harness.acquireClaim(claimDir, file, "remote-window-owner", harness.createClaimHolder());
     harness.reset(index, { stateOf: () => null });
-    harness.setExternalLeases(leaseObserver({ held: true, fresh: 0 }));
+    harness.window().externalLeases = leaseObserver({ held: true, fresh: 0 });
     try {
       const facts = await harness.launcherOwnershipFacts(index, row.tabId);
       assert.equal(facts.heldElsewhere, true);
       assert.equal(facts.externalOmp, false, "the other window's children hold leases too, so the claim names the holder");
       assert.equal(harness.rowState(index.get(row.tabId), facts), "otherWindow");
-    } finally { await rival.release(); harness.setExternalLeases(null); }
+    } finally { await rival.release(); harness.window().externalLeases = null; }
   });
 
   it("asks on a click of an 'externalOmp' row, rechecks first, and explains nothing when the terminal has exited", async () => {
     const f = await legacyFixture("click-terminal", false, true);
     const lease = { held: true as boolean | null, fresh: 0 };
-    harness.setExternalLeases(leaseObserver(lease));
+    harness.window().externalLeases = leaseObserver(lease);
     const provider = new harness.SessionTreeProvider({
       folders: () => [{ id: "folder:click", path: f.index.get(TAB)!.cwd, collapsed: false, pinned: true, open: false, openHere: false, openElsewhere: false }],
       entries: () => f.index.list(),
@@ -2057,7 +2078,7 @@ describe("verified-owned-writer policy fixtures", () => {
       runtimeIdentity: () => null,
       observeOwnership: tabId => harness.launcherOwnershipFacts(f.index, tabId),
     });
-    harness.notificationTree(provider, undefined);
+    setLauncherTree(provider, undefined);
     try {
       for (;;) {
         const repainted = Promise.withResolvers<void>();
@@ -2076,7 +2097,7 @@ describe("verified-owned-writer policy fixtures", () => {
       harness.warning(async (_message, _options, action) => action);
       await harness.openSession(storage().context, f.index, { tabId: TAB }, "opened");
       assert.deepEqual(f.operations, ["launch rpc"], "Open Anyway after a click is an explicit launch");
-    } finally { provider.dispose(); harness.notificationTree(undefined, undefined); harness.setExternalLeases(null); f.runtime.dispose(); }
+    } finally { provider.dispose(); setLauncherTree(undefined, undefined); harness.window().externalLeases = null; f.runtime.dispose(); }
   });
 
   it("an unowned legacy draft can be Forgotten immediately, and an unowned materialized row can be Deleted with only exact-path confirmation", async () => {
@@ -2920,12 +2941,12 @@ describe("same-editor Chat and native Terminal actions", () => {
 			observeOwnership: () => first.promise,
 		});
 		t.mock.timers.enable({ apis: ["Date"], now: 0 });
-		harness.notificationTree(undefined, undefined);
+		setLauncherTree(undefined, undefined);
 		let roots: ReturnType<typeof provider.getChildren> | undefined;
 		let foreign: Awaited<ReturnType<typeof acquireClaim>> | null = null;
 		try {
 			await harness.bindConversationIdentity(f.index, f.row.tabId, f.native, allocatedFile, "mode-session");
-			harness.notificationTree(provider, undefined);
+			setLauncherTree(provider, undefined);
 			roots = provider.getChildren();
 			assert.deepEqual(roots.map(root => root.id), ["folder:owned"]);
 			const initialRows = provider.getChildren(roots[0]);
@@ -2951,7 +2972,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 		} finally {
 			await foreign?.release();
 			first.resolve({ ownershipChecked: true });
-			harness.notificationTree(undefined, undefined);
+			setLauncherTree(undefined, undefined);
 			f.state.runtime = null;
 			t.mock.timers.setTime(2250);
 			await harness.retryPendingIdentity(f.index, f.row.tabId);
@@ -2983,7 +3004,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 		const restore = harness.desktopEnvironment({ ...f.saved.context, extension: { id: "hmmvot.omp-desk" } });
 		harness.configuration({ "omp.desktopNotifications": true });
 		harness.focusSession(false);
-		harness.notificationTree(undefined, undefined);
+		setLauncherTree(undefined, undefined);
 		t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
 		const rowState = () => harness.rowState(f.index.get(f.row.tabId), harness.launcherFacts(f.row.tabId));
 		try {
@@ -3047,7 +3068,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 		const restore = harness.desktopEnvironment({ ...f.saved.context, extension: { id: "hmmvot.omp-desk" } });
 		harness.configuration({ "omp.desktopNotifications": true });
 		harness.focusSession(false);
-		harness.notificationTree(undefined, undefined);
+		setLauncherTree(undefined, undefined);
 		t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
 		const rowState = () => harness.rowState(f.index.get(f.row.tabId), harness.launcherFacts(f.row.tabId));
 		try {
@@ -3255,7 +3276,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			revealOptions.push(options);
 			await revealGate.promise;
 		} };
-		harness.notificationTree(provider, view);
+		setLauncherTree(provider, view);
 		const served = provider.onDidServeTree(() => { void harness.revealActiveSession(f.index); });
 		try {
 			await harness.revealActiveSession(f.index);
@@ -3306,7 +3327,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			revealGate.resolve();
 			served.dispose();
 			provider.dispose();
-			harness.notificationTree(undefined, undefined);
+			setLauncherTree(undefined, undefined);
 			f.chat.dispose();
 			await f.index.closeSession(f.row.tabId, { confirmedStopped: true });
 		}
@@ -3330,7 +3351,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			visible: true, selection: [],
 			reveal: async item => { revealed.push(item.tabId); view.selection = [item]; },
 		};
-		harness.notificationTree(provider, view);
+		setLauncherTree(provider, view);
 		const served = provider.onDidServeTree(() => { void harness.revealActiveSession(f.index); });
 		try {
 			await harness.revealActiveSession(f.index);
@@ -3370,7 +3391,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 		} finally {
 			served.dispose();
 			provider.dispose();
-			harness.notificationTree(undefined, undefined);
+			setLauncherTree(undefined, undefined);
 			f.chat.dispose();
 			await f.index.closeSession(f.row.tabId, { confirmedStopped: true });
 		}
@@ -3655,7 +3676,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 		const native = terminalRuntime(f.native.pid, f.file, f.directory);
 		f.state.runtime = native; f.state.panel = null;
 		const connected = Promise.withResolvers<void>();
-		harness.hostControlAttempts.set(native, connected.promise);
+		harness.window().hostControlAttempts.set(native, connected.promise);
 		const restorePanels = harness.editorLifecycle();
 		try {
 			let completed = false;
@@ -3672,7 +3693,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			assert.equal(f.index.slotBinding(f.state.slotId)?.mode, "chat");
 			assert.equal((await native.handle.refreshStatus()).state, "exited", "the old native writer exits before Chat starts");
 		} finally {
-			connected.resolve(); harness.hostControlAttempts.delete(native);
+			connected.resolve(); harness.window().hostControlAttempts.delete(native);
 			restorePanels(); f.state.nativeWatch?.(); f.state.pipeline?.dispose();
 			f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true });
 		}
@@ -3683,7 +3704,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 		const native = terminalRuntime(f.native.pid, f.file, f.directory);
 		f.state.runtime = native;
 		const connected = Promise.withResolvers<void>();
-		harness.hostControlAttempts.set(native, connected.promise);
+		harness.window().hostControlAttempts.set(native, connected.promise);
 		const restorePanels = harness.editorLifecycle();
 		const panel = harness.createPanel();
 		try {
@@ -3699,7 +3720,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			assert.equal(f.launches(), 0);
 			assert.equal((await native.handle.refreshStatus()).state, "running", "closing while authentication waits does not stop the old writer");
 		} finally {
-			connected.resolve(); harness.hostControlAttempts.delete(native);
+			connected.resolve(); harness.window().hostControlAttempts.delete(native);
 			restorePanels(); f.state.nativeWatch?.(); f.state.pipeline?.dispose();
 			f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true });
 		}
@@ -3914,7 +3935,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 				assert.deepEqual(f.dialogs, []);
 				assert.deepEqual(f.calls.filter(([command]) => command !== "setContext"), [], "no window routing or chat-group arrangement");
 				assert.equal(f.requests.length, 1);
-				assert.equal(harness.sessionPanelColumns.size, 0);
+				assert.equal(harness.window().sessionPanelColumns.size, 0);
 			} finally { await f.restore(); }
 		});
 
@@ -3955,7 +3976,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 				assert.equal(f.state.runtime, f.native);
 				assert.equal(f.panels.disposed, false);
 				assert.equal(f.requests.length, 0);
-				assert.equal(harness.sessionPanelColumns.size, 0);
+				assert.equal(harness.window().sessionPanelColumns.size, 0);
 				assert.match(harness.errors().at(-1)!, /editor could not be opened/);
 			} finally { restoreFactory(); await f.restore(); }
 		});
@@ -4514,13 +4535,6 @@ describe("starting a session in the window that has its folder open", () => {
       const watch = startRequestWatch(storageDir, target.holderId, async request => { served.push(request); return target.serve!; }, { debounceMs: 10 });
       cleanups.push(() => watch.dispose());
     }
-    harness.setWindowRegistry({
-      setSnapshot: () => true,
-      refresh: async () => false,
-      flush: async () => {},
-      windows: () => targets.map(target => ({ holderId: target.holderId, here: false, startedAt: STAMP, windowUri: target.uri, label: target.holderId, folders: [], liveCwds: [], rows: {}, focusedAt: null })),
-      liveHolderPid: (holderId: string) => targets.find(target => target.holderId === holderId)?.pid ?? null,
-    });
     const drafts: unknown[] = [];
     const index = {
       claimHolder: { id: "this-window" },
@@ -4536,12 +4550,19 @@ describe("starting a session in the window that has its folder open", () => {
     harness.warning(async message => { warnings.push(String(message)); });
     harness.information(async message => { informed.push(String(message)); });
     harness.reset(index as never, { stateOf: () => null });
+    harness.window().windowRegistry = {
+      setSnapshot: () => true,
+      refresh: async () => false,
+      flush: async () => {},
+      windows: () => targets.map(target => ({ holderId: target.holderId, here: false, startedAt: STAMP, windowUri: target.uri, label: target.holderId, folders: [], liveCwds: [], rows: {}, focusedAt: null })),
+      liveHolderPid: (holderId: string) => targets.find(target => target.holderId === holderId)?.pid ?? null,
+    };
     const calls = harness.commandHandler(null);
     return { storageDir, served, drafts, index, warnings, informed, calls };
   }
   after(() => {
     for (const cleanup of cleanups.splice(0)) cleanup();
-    harness.setWindowRegistry(undefined);
+    harness.window().windowRegistry = undefined;
     harness.folders([]);
     harness.commandHandler(null);
     harness.configuration({});
@@ -4620,11 +4641,11 @@ describe("starting a session in the window that has its folder open", () => {
       const w = await world([]);
       const published: Array<{ stale: boolean }> = [];
       let flushed = 0;
-      harness.setWindowRegistry({ setSnapshot: (snapshot: { stale: boolean }) => { published.push(snapshot); return true; }, refresh: async () => false, flush: async () => { flushed++; }, windows: () => [] });
+      harness.window().windowRegistry = { setSnapshot: (snapshot: { stale: boolean }) => { published.push(snapshot); return true; }, refresh: async () => false, flush: async () => { flushed++; }, windows: () => [] };
       harness.folders([folderRow({ openHere: true })], [here]);
       const request = { kind: "launch", version: 1, id: "id-1", to: "this-window", from: "holder-a", createdAt: STAMP, workspace: workspaceFolder, launch: { kind: "new-session", folderId: "folder:proj-1" } };
       let verdict: { kind: "same" } | { kind: "changed"; files: string[] } = { kind: "changed", files: ["out/extension.js"] };
-      harness.setPackageDrift({ check: () => verdict });
+      harness.window().packageDrift = { check: () => verdict };
       try {
         await harness.serveLaunchRequest(undefined, w.index, request, { stillWanted: async () => true });
         assert.equal(published.at(-1)?.stale, true);
@@ -4635,19 +4656,19 @@ describe("starting a session in the window that has its folder open", () => {
         verdict = { kind: "same" };
         await harness.serveLaunchRequest(undefined, w.index, request, { stillWanted: async () => true }).catch(() => undefined);
         assert.equal(published.at(-1)?.stale, false);
-      } finally { harness.setPackageDrift(null); }
+      } finally { harness.window().packageDrift = null; }
     });
 
     it("refuses a launch request it receives, as definitely not started, before it looks at anything else", async () => {
       const w = await world([]);
       harness.folders([folderRow({ openHere: true })], [here]);
-      harness.setPackageDrift({ check: () => ({ kind: "changed", files: ["out/extension.js"] }) });
+      harness.window().packageDrift = { check: () => ({ kind: "changed", files: ["out/extension.js"] }) };
       try {
         const request = { kind: "launch", version: 1, id: "id-1", to: "this-window", from: "holder-a", createdAt: STAMP, workspace: workspaceFolder, launch: { kind: "new-session", folderId: "folder:proj-1" } };
         assert.deepEqual(await harness.serveLaunchRequest(undefined, w.index, request, { stillWanted: async () => true }), { ok: false, focused: false, refusal: "stale-build" });
         await nextTurn(); await nextTurn();
         assert.deepEqual(w.drafts, [], "nothing began here");
-      } finally { harness.setPackageDrift(null); }
+      } finally { harness.window().packageDrift = null; }
     });
   });
 
@@ -4872,11 +4893,11 @@ describe("starting a session in the window that has its folder open", () => {
       const rows: ReturnType<typeof folderRow>[] = [];
       harness.folders(rows, [here]);
       let refreshed = 0;
-      harness.setWindowRegistry({
+      harness.window().windowRegistry = {
         setSnapshot: () => true,
         windows: () => [],
         refresh: async () => { refreshed++; rows.push(folderRow({ openHere: true })); return true; },
-      });
+      };
       assert.deepEqual(await harness.serveLaunchRequest(undefined, w.index, request({ kind: "new-session", folderId: "folder:proj-1" }), wanted), { ok: true, focused: true });
       assert.equal(refreshed, 1);
       await nextTurn(); await nextTurn();
@@ -4887,13 +4908,13 @@ describe("starting a session in the window that has its folder open", () => {
       const w = await world([]);
       const rows: ReturnType<typeof folderRow>[] = [];
       harness.folders(rows, [here]);
-      harness.setResolveAgentRoots(async () => {
+      harness.window().resolveAgentRoots = async () => {
         await new Promise(resolve => setTimeout(resolve, 60));
         rows.push(folderRow({ openHere: true }));
-      });
+      };
       try {
         assert.deepEqual(await harness.serveLaunchRequest(undefined, w.index, request({ kind: "new-session", folderId: "folder:proj-1" }), wanted), { ok: true, focused: true });
-      } finally { harness.setResolveAgentRoots(async () => {}); }
+      } finally { harness.window().resolveAgentRoots = async () => {}; }
       await nextTurn(); await nextTurn();
       assert.deepEqual(w.drafts, [{ cwd: FOLDER }]);
     });
@@ -5001,8 +5022,8 @@ describe("starting a session in the window that has its folder open", () => {
       const alpha = path.join(repo, "Alpha");
       const beta = path.join(repo, "Beta");
       const memory = new Map<string, unknown>();
-      harness.setActivationContext({ globalState: { get: (key: string) => memory.get(key), update: async (key: string, value: unknown) => { memory.set(key, value); } } });
       const w = await world([{ holderId: "holder-beta", uri: URI.file(beta).toString(), serve: { ok: true, focused: true } }]);
+      harness.window().context = { globalState: { get: (key: string) => memory.get(key), update: async (key: string, value: unknown) => { memory.set(key, value); } } };
       harness.folders([unityRow(repo)], opening({ [beta]: [there("holder-beta")] }));
       const asked: unknown[] = [];
       let answer: "beta" | "alpha" | undefined = undefined;
@@ -5022,7 +5043,7 @@ describe("starting a session in the window that has its folder open", () => {
         await harness.newSession(undefined, w.index, "folder:repo-1");
         assert.equal(asked.length, 2, "the answer is remembered for the folder");
         assert.equal(w.served.length, 2);
-      } finally { restore(); harness.setActivationContext(undefined); }
+      } finally { restore(); harness.window().context = undefined; }
     });
 
     it("starts here, opening no second window, when the only window with the project runs an older build", async () => {
@@ -5168,17 +5189,17 @@ describe("serving another window's request to select a session's tab", () => {
   it("defers the serializer's restore of a tab it is showing, however late VS Code revives the editor, and only once", async () => {
     const { index, loose, request } = setup(5);
     assert.deepEqual(await harness.selectHeldSessionTab(index, request, wanted), { ok: true, focused: true });
-    assert.ok(harness.requestSelections.has(request.tabId), "the tab is marked until its editor is revived");
+    assert.ok(harness.window().requestSelections.has(request.tabId), "the tab is marked until its editor is revived");
     // Nothing releases the mark on time: the serializer reaches the helper long after the request was answered.
     await new Promise(resolve => setTimeout(resolve, 100));
-    assert.ok(harness.requestSelections.has(request.tabId));
+    assert.ok(harness.window().requestSelections.has(request.tabId));
     loose.hasLiveHost = () => false;
     const touched: string[] = [];
     const watched = new Proxy(index as object, { get: (target, name, receiver) => { touched.push(String(name)); return Reflect.get(target, name, receiver); } });
     await harness.openRestoredTabIfUncovered({}, watched, request.tabId);
     assert.deepEqual(touched.filter(name => !["get", "hasLiveHost"].includes(name)), [], "nothing was opened, restored or claimed");
-    assert.equal(harness.requestSelections.has(request.tabId), false, "the revival consumed the mark");
-    harness.requestSelections.clear();
+    assert.equal(harness.window().requestSelections.has(request.tabId), false, "the revival consumed the mark");
+    harness.window().requestSelections.clear();
     finish();
   });
 
@@ -5187,14 +5208,14 @@ describe("serving another window's request to select a session's tab", () => {
     // Another selection wins: the command is issued, VS Code schedules the revival, the tab is not active afterwards.
     harness.commandHandler(() => undefined);
     assert.deepEqual(await harness.selectHeldSessionTab(index, request, wanted), refused);
-    assert.ok(harness.requestSelections.has(request.tabId), "a command may already have triggered the revival");
+    assert.ok(harness.window().requestSelections.has(request.tabId), "a command may already have triggered the revival");
     void calls;
     loose.hasLiveHost = () => false;
     const touched: string[] = [];
     const watched = new Proxy(index as object, { get: (target, name, receiver) => { touched.push(String(name)); return Reflect.get(target, name, receiver); } });
     await harness.openRestoredTabIfUncovered({}, watched, request.tabId);
     assert.deepEqual(touched.filter(name => !["get", "hasLiveHost"].includes(name)), []);
-    harness.requestSelections.clear();
+    harness.window().requestSelections.clear();
     finish();
   });
 
