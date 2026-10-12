@@ -445,6 +445,43 @@ describe("paced subscriber", () => {
 		assert.match(sink.closeReason ?? "", /reattach/);
 	});
 
+	it("keeps an attached consumer whose replay is still going out when an answer larger than the ring arrives", () => {
+		// A reattach to a long session: the retained history fills the ring, the replay is paced,
+		// and the client's catch-up requests answer with a small get_state and a get_entries that
+		// OMP sends as a train of 1 MiB chunk lines larger than the whole ring. No part of either
+		// answer may push another out before it is sent.
+		const ring = new RpcLineRing();
+		for (let index = 0; index < 200; index += 1) ring.append(filler(index));
+		const sink = new FakeSink();
+		const subscriber = subscribe(ring, sink, 0);
+		sink.pendingBytes = RPC_PACE_BYTES;
+		assert.equal(subscriber.pump(), false, "the replay is paced");
+		const answer = [JSON.stringify({ id: "int:1", type: "response", command: "get_state", success: true })];
+		for (let index = 0; index < 6; index += 1) {
+			answer.push(JSON.stringify({ type: "rpc_chunk", chunkId: "c1", index, count: 6, data: "x".repeat(1024 * 1024) }));
+		}
+		for (const line of answer) ring.append(line);
+		sink.pendingBytes = 0;
+		assert.equal(subscriber.pump(), true, sink.closeReason ?? "");
+		assert.deepEqual(sink.lines().slice(-answer.length).map(line => line.text), answer);
+		ring.dropTransientsThrough(subscriber.cursor);
+		assert.equal(ring.stats().lines, 200, "the answers are released once delivered; the history stays");
+	});
+
+	it("still disconnects a consumer that leaves more undelivered answers behind than their own bound", () => {
+		const ring = new RpcLineRing({ ...DEFAULT_RPC_RING_LIMITS, transientMaxBytes: 64 * 1024 });
+		const sink = new FakeSink();
+		const subscriber = subscribe(ring, sink, 0);
+		sink.pendingBytes = RPC_PACE_BYTES;
+		for (let index = 0; index < 8; index += 1) {
+			ring.append(JSON.stringify({ type: "rpc_chunk", chunkId: "c1", index, count: 8, data: "x".repeat(16 * 1024) }));
+		}
+		sink.pendingBytes = 0;
+		subscriber.pump();
+		assert.equal(sink.closed, true);
+		assert.match(sink.closeReason ?? "", /reattach/);
+	});
+
 	it("releases live-only lines once every consumer has passed them", () => {
 		const ring = new RpcLineRing();
 		const sink = new FakeSink();

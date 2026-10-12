@@ -14,6 +14,9 @@
  * - `response` and `rpc_chunk` lines are transient: a client attached *now* gets them, one
  *   that attaches later resynchronizes from disk. The exception is a small `response` whose
  *   id starts with `vsc:` (a refused `prompt` must be learnable after a host restart).
+ *   Transient lines are held only until every attached consumer has passed them, under their
+ *   own budget: an answer the client asked for (a long session's `get_entries` is tens of MiB
+ *   of chunks) never pushes the retained history out, and the history never pushes it out.
  * - `message_update` is superseded per open `messageId`: each carries the whole accumulated
  *   message, so only the latest matters, and it is dropped once `message_end` is seen.
  * - Unanswered dialog requests are **pinned** in their own budget and are never evicted;
@@ -31,10 +34,15 @@
 
 import { ptyRpcFragment, ptyRpcFragmentCount } from "../host/pty-protocol.ts";
 
-/** Ring bound: raw bytes of live (non-superseded) lines. */
+/** Ring bound: raw bytes of live (non-superseded) replayable lines. */
 export const RPC_RING_MAX_BYTES = 4 * 1024 * 1024;
-/** Ring bound: live lines. */
+/** Ring bound: live replayable lines. */
 export const RPC_RING_MAX_LINES = 2048;
+/**
+ * Bound on transient lines an attached consumer has not passed yet: twice the client's 64 MiB
+ * chunked-response cap, so one whole answer always fits while the replay ahead of it is sent.
+ */
+export const RPC_TRANSIENT_MAX_BYTES = 128 * 1024 * 1024;
 /** Reserved budget for unanswered dialog requests. Exceeding it is reported, never evicted. */
 export const RPC_PINNED_DIALOG_MAX_LINES = 256;
 export const RPC_PINNED_DIALOG_MAX_BYTES = 1024 * 1024;
@@ -54,6 +62,7 @@ export const RPC_PACE_BYTES = 2 * 1024 * 1024;
 export interface RpcRingLimits {
 	readonly maxBytes: number;
 	readonly maxLines: number;
+	readonly transientMaxBytes: number;
 	readonly dialogMaxLines: number;
 	readonly dialogMaxBytes: number;
 	readonly skeletonMaxLines: number;
@@ -66,6 +75,7 @@ export interface RpcRingLimits {
 export const DEFAULT_RPC_RING_LIMITS: RpcRingLimits = {
 	maxBytes: RPC_RING_MAX_BYTES,
 	maxLines: RPC_RING_MAX_LINES,
+	transientMaxBytes: RPC_TRANSIENT_MAX_BYTES,
 	dialogMaxLines: RPC_PINNED_DIALOG_MAX_LINES,
 	dialogMaxBytes: RPC_PINNED_DIALOG_MAX_BYTES,
 	skeletonMaxLines: RPC_PINNED_SKELETON_MAX_LINES,
@@ -143,6 +153,9 @@ export class RpcLineRing {
 	private deadInItems = 0;
 	private liveBytes = 0;
 	private liveLines = 0;
+	/** Transient lines in the ring, accounted apart from the replayable bound. */
+	private transientBytes = 0;
+	private transientLines = 0;
 	private nextSeq = 1;
 	/** Highest `seq` a bound evicted that a live cursor might not have seen. */
 	private liveLostThrough = 0;
@@ -189,7 +202,7 @@ export class RpcLineRing {
 
 	/** Counters for diagnostics and tests. */
 	stats(): { readonly lines: number; readonly bytes: number; readonly dialogs: number; readonly skeleton: number; readonly hostCalls: number } {
-		return { lines: this.liveLines, bytes: this.liveBytes, dialogs: this.dialogs.size, skeleton: this.skeleton.size, hostCalls: this.hostCalls.size };
+		return { lines: this.liveLines + this.transientLines, bytes: this.liveBytes + this.transientBytes, dialogs: this.dialogs.size, skeleton: this.skeleton.size, hostCalls: this.hostCalls.size };
 	}
 
 	/**
@@ -428,11 +441,21 @@ export class RpcLineRing {
 		if (!replayable && this.consumers === 0) return null;
 		const entry: RpcRingEntry = { seq, bytes, replayable, dead: false, inRing: true, pinned: null };
 		this.items.push(entry);
-		this.liveBytes += bytes.length;
-		this.liveLines += 1;
+		this.account(entry, 1);
 		if (!replayable) this.transients.push(entry);
 		this.evict();
 		return entry;
+	}
+
+	/** Add (`1`) or remove (`-1`) an in-ring entry from the budget its kind counts against. */
+	private account(entry: RpcRingEntry, sign: 1 | -1): void {
+		if (entry.replayable) {
+			this.liveBytes += sign * entry.bytes.length;
+			this.liveLines += sign;
+		} else {
+			this.transientBytes += sign * entry.bytes.length;
+			this.transientLines += sign;
+		}
 	}
 
 	/** Mark an entry permanently undeliverable and release its ring accounting. */
@@ -440,14 +463,17 @@ export class RpcLineRing {
 		if (entry.dead) return;
 		entry.dead = true;
 		if (!entry.inRing) return;
-		this.liveBytes -= entry.bytes.length;
-		this.liveLines -= 1;
+		this.account(entry, -1);
 		this.deadInItems += 1;
 		this.compact();
 	}
 
+	private overBound(): boolean {
+		return this.liveLines > this.limits.maxLines || this.liveBytes > this.limits.maxBytes || this.transientBytes > this.limits.transientMaxBytes;
+	}
+
 	private evict(): void {
-		while ((this.liveLines > this.limits.maxLines || this.liveBytes > this.limits.maxBytes) && this.liveLines > 1) {
+		while (this.overBound() && this.liveLines + this.transientLines > 1) {
 			const entry = this.items[this.head];
 			if (entry === undefined) break;
 			this.head += 1;
@@ -456,8 +482,7 @@ export class RpcLineRing {
 				continue;
 			}
 			entry.inRing = false;
-			this.liveBytes -= entry.bytes.length;
-			this.liveLines -= 1;
+			this.account(entry, -1);
 			this.liveLostThrough = Math.max(this.liveLostThrough, entry.seq);
 			if (entry.replayable && entry.pinned === null) {
 				this.replayLostThrough = Math.max(this.replayLostThrough, entry.seq);
@@ -471,7 +496,7 @@ export class RpcLineRing {
 
 	/** Drop dead entries once they outnumber the live ones, so a long turn cannot grow the array. */
 	private compact(): void {
-		if (this.deadInItems <= 1024 || this.deadInItems <= this.liveLines) return;
+		if (this.deadInItems <= 1024 || this.deadInItems <= this.liveLines + this.transientLines) return;
 		const kept: RpcRingEntry[] = [];
 		for (let index = this.head; index < this.items.length; index += 1) {
 			const entry = this.items[index];

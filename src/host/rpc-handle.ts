@@ -155,11 +155,15 @@ export class RpcHandle extends BrokerHandle<BrokerHandleEvent> implements RpcCha
 	/**
 	 * Stop the child. Graceful closes its stdin, so OMP aborts a running turn, persists it and
 	 * exits; `force` terminates the exact process. The channel reports `stopped` once the
-	 * broker proved the process gone.
+	 * broker proved the process gone. A connection the broker already closed (a consumer it
+	 * disconnected, a dropped socket) is replaced first by a fresh, identity-checked one that
+	 * does not subscribe to the output, so a session whose view cannot stay attached can still
+	 * be stopped.
 	 */
 	async stop(options: { readonly mode?: PtyStopMode; readonly timeoutMs?: number } = {}): Promise<PtyStopResult> {
 		this.stopRequested = true;
 		try {
+			if (this.closedReason !== null) await this.reconnect();
 			const result = await super.stop(options);
 			if (!result.pidGone) this.stopRequested = false;
 			return result;

@@ -105,6 +105,15 @@ function handle(command, line) {
 		case "mark":
 			out({ type: "marker", name: command.name });
 			break;
+		case "history":
+			for (let index = 0; index < command.lines; index += 1) out({ type: "tool_execution_update", n: index, pad: "h".repeat(command.bytes) });
+			out({ type: "marker", name: command.name });
+			break;
+		case "answer":
+			out({ id: "int:state", type: "response", command: "get_state", success: true });
+			for (let index = 0; index < command.chunks; index += 1) out({ type: "rpc_chunk", chunkId: "c1", index, count: command.chunks, data: "c".repeat(command.bytes) });
+			out({ type: "marker", name: command.name });
+			break;
 	}
 }
 process.stdin.on("end", () => {
@@ -317,6 +326,34 @@ describe("managed-rpc broker end to end", { skip: SKIP }, () => {
 			fourthSeen.lines().some(line => line.json.type === "message_update"),
 			false,
 		);
+	});
+
+	it("keeps a window that reattaches to a full ring while its catch-up answer is larger than the ring", { timeout: TEST_TIMEOUT_MS }, async () => {
+		// A long session: about 3.5 MiB of retained lines, then a window reloads and asks for the
+		// session's entries, which OMP answers with chunk lines larger than the whole ring. The
+		// broker used to disconnect such a window as fallen behind on every attempt.
+		const slot = nextSlot();
+		const first = await launchRpc(slot);
+		const firstSeen = watch(first);
+		await first.attach({ sinceSeq: 0 });
+		await send(first, { type: "history", lines: 220, bytes: 16 * 1024, name: "history" });
+		await firstSeen.whenLine(marker("history"));
+		first.disconnect();
+
+		const second = await reattach(slot);
+		const secondSeen = watch(second);
+		await second.attach({ sinceSeq: 0 });
+		const closed = secondSeen.whenEvent(event => event.type === "closed");
+		const answered = secondSeen.whenLine(marker("answered"));
+		void send(second, { type: "answer", chunks: 6, bytes: 1024 * 1024, name: "answered" });
+		// The window is busy (an extension host under load reads its socket late): the replay and
+		// the answer queue up at the broker while nothing is read.
+		await new Promise(resolve => setImmediate(resolve));
+		const until = Date.now() + 3_000;
+		while (Date.now() < until) { /* hold the event loop, as a busy extension host does */ }
+		const outcome = await Promise.race([answered.then(() => "answered"), closed.then(event => JSON.stringify(event))]);
+		assert.equal(outcome, "answered");
+		assert.equal(secondSeen.lines().filter(line => line.json.type === "rpc_chunk").length, 6, "every chunk of the answer arrived");
 	});
 
 	it("keeps an unanswered dialog across every reattach until it is answered", { timeout: TEST_TIMEOUT_MS }, async () => {
