@@ -99,8 +99,8 @@ export const CATALOG_LOCK_TIMEOUT_MS = 4_000;
  */
 export const CATALOG_LOCK_STALE_MS = 10_000;
 
-/** How many raw legacy records the conflict ledger keeps, newest last. */
-export const CATALOG_CONFLICT_LIMIT = 128;
+/** How many records of one disagreement (record key, identity and reason) the conflict ledger keeps, newest last (ADR-0034). */
+export const CATALOG_CONFLICT_GROUP_KEEP = 3;
 
 /** How many import-ledger entries are kept. */
 export const CATALOG_IMPORT_LIMIT = 512;
@@ -167,6 +167,8 @@ export interface CatalogConflictRecord {
   readonly retained: unknown;
   /** The value that was not applied, retained for recovery. */
   readonly rejected: unknown;
+  /** How many older records of this same disagreement were dropped before this one (ADR-0034); absent when none were. */
+  readonly earlier?: number;
 }
 
 /** The committed document. */
@@ -231,7 +233,47 @@ function readConflictRecord(value: unknown): CatalogConflictRecord | null {
     return null;
   }
   if (source !== null && typeof source !== "string") return null;
-  return { key, identity, source, at, reason, retained: value.retained, rejected: value.rejected };
+  const earlier = value.earlier;
+  return {
+    key, identity, source, at, reason, retained: value.retained, rejected: value.rejected,
+    ...(typeof earlier === "number" && Number.isSafeInteger(earlier) && earlier > 0 ? { earlier } : {}),
+  };
+}
+
+/**
+ * Bound the conflict ledger per disagreement: records are grouped by `(key, identity, reason)` and a group keeps its
+ * newest {@link CATALOG_CONFLICT_GROUP_KEEP}. The records a group drops are counted into the `earlier` of the oldest record
+ * it keeps, so the ledger still says how often the disagreement happened. A different row, reason, import source or lock
+ * reclaim is another group and keeps its own records: nothing is forgotten as a kind of disagreement, only repeats of one.
+ * Order is preserved (the ledger stays oldest first). Returns the same array when nothing is over the bound.
+ */
+export function compactConflicts(conflicts: readonly CatalogConflictRecord[]): readonly CatalogConflictRecord[] {
+  const groups = new Map<string, number[]>();
+  conflicts.forEach((record, index) => {
+    const group = JSON.stringify([record.key, record.identity, record.reason]);
+    const members = groups.get(group);
+    if (members === undefined) groups.set(group, [index]);
+    else members.push(index);
+  });
+  const dropped = new Set<number>();
+  const earlierOf = new Map<number, number>();
+  for (const members of groups.values()) {
+    if (members.length <= CATALOG_CONFLICT_GROUP_KEEP) continue;
+    const cut = members.length - CATALOG_CONFLICT_GROUP_KEEP;
+    let lost = 0;
+    for (const index of members.slice(0, cut)) {
+      dropped.add(index);
+      lost += 1 + (conflicts[index]?.earlier ?? 0);
+    }
+    const oldestKept = members[cut];
+    if (oldestKept !== undefined) earlierOf.set(oldestKept, lost + (conflicts[oldestKept]?.earlier ?? 0));
+  }
+  if (dropped.size === 0) return conflicts;
+  return conflicts.flatMap((record, index) => {
+    if (dropped.has(index)) return [];
+    const earlier = earlierOf.get(index);
+    return [earlier === undefined ? record : { ...record, earlier }];
+  });
 }
 
 /**
@@ -587,14 +629,12 @@ export async function transactCatalog(
       version: CATALOG_VERSION,
       revision: current.revision + 1,
       records,
-      // Both ledgers are *non-evicting*. An import tombstone that could be evicted would
-      // make its source eligible again and let it resurrect a row the user removed
-      // afterwards; a dropped conflict would destroy the only raw copy of a record two
-      // sources disagreed about. They are therefore kept whole, and a pathological
-      // number of them is a size problem to solve by retention policy, never by silently
-      // forgetting an identity.
+      // The import ledger is *non-evicting*: a tombstone that could be evicted would make its source eligible
+      // again and let it resurrect a row the user removed afterwards. The conflict ledger keeps every kind of
+      // disagreement and bounds only its repeats (ADR-0034, 2026-10-12), on the newest committed ledger under
+      // the lock, so a ledger an earlier build let grow shrinks with the next commit.
       imports,
-      conflicts,
+      conflicts: compactConflicts(conflicts),
     };
     await commitDocument(paths, next);
     return { revision: next.revision, changed: true };

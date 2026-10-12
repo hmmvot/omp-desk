@@ -495,9 +495,11 @@ describe("bridge listener session", () => {
 
 	it("answers heartbeats and marks a silent peer disconnected instead of closing it", async () => {
 		const ended: { readonly reason: string; readonly state: BridgeSessionState }[] = [];
+		// The idle window must outlast the handshake, the ack and one late heartbeat tick on a starved machine: the host sends
+		// no ping once a session is already idle, so a window barely above the heartbeat made the ping read time out.
 		const silent = await harness({
 			heartbeatMs: 20,
-			idleMs: 60,
+			idleMs: 600,
 			onSessionEnded(session, reason) {
 				ended.push({ reason, state: session.state });
 			},

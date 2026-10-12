@@ -20,8 +20,8 @@ import { existsSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import * as path from "node:path";
 import { after, describe, it } from "node:test";
-import { CatalogError, catalogPaths, createCatalogStore, startCatalogWatch } from "./profile-catalog.ts";
-import type { CatalogPaths, CatalogStore } from "./profile-catalog.ts";
+import { CATALOG_CONFLICT_GROUP_KEEP, CatalogError, catalogPaths, compactConflicts, createCatalogStore, startCatalogWatch } from "./profile-catalog.ts";
+import type { CatalogConflictRecord, CatalogPaths, CatalogStore } from "./profile-catalog.ts";
 
 const roots: string[] = [];
 
@@ -360,6 +360,70 @@ describe("profile catalog", () => {
 			clearTimeout(guard);
 			dispose();
 		}
+	});
+});
+
+function conflict(identity: string, n: number, extra: { reason?: string; key?: string; earlier?: number } = {}): CatalogConflictRecord {
+	return {
+		key: extra.key ?? "test.rows.v1", identity, source: null, at: `2026-10-12T00:00:${String(n).padStart(2, "0")}.000Z`,
+		reason: extra.reason ?? "both windows changed this row", retained: { n }, rejected: { n: -n },
+		...(extra.earlier === undefined ? {} : { earlier: extra.earlier }),
+	};
+}
+
+describe("conflict ledger bound (ADR-0034)", () => {
+	it("keeps the newest records of one disagreement and counts the older ones into the oldest it keeps", () => {
+		const ledger = [1, 2, 3, 4, 5, 6, 7].map(n => conflict("a", n));
+		const compacted = compactConflicts(ledger);
+		assert.deepEqual(compacted.map(record => (record.retained as { n: number }).n), [5, 6, 7]);
+		assert.deepEqual(compacted.map(record => record.earlier), [4, undefined, undefined]);
+	});
+
+	it("never merges different rows, reasons or keys: each disagreement keeps its own records, in ledger order", () => {
+		const ledger = [
+			conflict("a", 1), conflict("b", 2), conflict("a", 3, { reason: "other reason" }), conflict("a", 4), conflict("c", 5, { key: "other.key" }),
+			conflict("a", 6), conflict("b", 7), conflict("a", 8), conflict("a", 9),
+		];
+		const compacted = compactConflicts(ledger);
+		assert.deepEqual(compacted.map(record => (record.retained as { n: number }).n), [2, 3, 5, 6, 7, 8, 9]);
+		assert.equal(compacted.find(record => (record.retained as { n: number }).n === 6)?.earlier, 2, "records 1 and 4 were dropped");
+		assert.equal(compacted.filter(record => record.identity === "b" && record.earlier !== undefined).length, 0);
+		assert.ok(compacted.some(record => record.reason === "other reason"), "a different reason survives a flood of another");
+		assert.ok(compacted.some(record => record.key === "other.key"));
+	});
+
+	it("carries the count a dropped record already held, and returns the same ledger when nothing is over the bound", () => {
+		const ledger = [conflict("a", 1, { earlier: 10 }), conflict("a", 2), conflict("a", 3), conflict("a", 4)];
+		const compacted = compactConflicts(ledger);
+		assert.deepEqual(compacted.map(record => record.earlier), [11, undefined, undefined]);
+		const small = [conflict("a", 1), conflict("a", 2), conflict("b", 3)];
+		assert.equal(compactConflicts(small), small);
+	});
+
+	it("shrinks an oversized ledger on the next ordinary commit, and a transaction that changes nothing leaves the file alone", async () => {
+		const { paths } = await tempCatalog();
+		const one = await window(paths);
+		await one.update("test.rows.v1", [{ id: "a", value: "1" }]);
+		// A ledger an earlier build let grow: 40 records of one disagreement and one of another.
+		const document = await readDocument(paths);
+		const oversized = [...Array.from({ length: 40 }, (_, n) => conflict("a", n)), conflict("b", 41)];
+		await writeFile(paths.document, JSON.stringify({ ...document, conflicts: oversized }), "utf8");
+		const two = await window(paths);
+		assert.equal(two.conflicts().length, 41, "reading never compacts");
+
+		const before = await readFile(paths.document, "utf8");
+		await two.run(() => false);
+		assert.equal(await readFile(paths.document, "utf8"), before, "no change, no write, no compaction");
+
+		await two.update("test.rows.v1", [{ id: "a", value: "1" }, { id: "b", value: "2" }]);
+		const after = await readDocument(paths);
+		assert.equal(after.conflicts.length, CATALOG_CONFLICT_GROUP_KEEP + 1);
+		assert.equal((after.conflicts[0] as CatalogConflictRecord).earlier, 40 - CATALOG_CONFLICT_GROUP_KEEP);
+		assert.equal(two.conflicts().length, CATALOG_CONFLICT_GROUP_KEEP + 1, "this window adopted the compacted ledger");
+
+		const older = await window(paths);
+		assert.equal(older.conflicts().length, CATALOG_CONFLICT_GROUP_KEEP + 1);
+		assert.equal(older.conflicts()[0]?.earlier, 40 - CATALOG_CONFLICT_GROUP_KEEP, "a reader keeps the count");
 	});
 });
 
