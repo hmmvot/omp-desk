@@ -95,6 +95,7 @@ Plain `/fresh` is allowed through the same fenced, accepted-provider-rotation pa
 - ADR-0038 §8 / ADR-0003 via ADR-0051: a second RPC-only extension command; mutations travel over broker-owned RPC stdin, never the read-only host-control pipe.
 - ADR-0052: clear/new leave terminal-only guidance; delete leaves identity-command refusal; fresh accepts deliberate provider-only identity rotation.
 - ADR-0051: Desk Rewind targets now stop at confirmed clear boundaries; branch history remains recoverable.
+- Admission (2026-10-13): the first admission check no longer refuses only because OMP is still finishing an interrupted turn, has a message queued, or has not confirmed a sent message yet. Those three transient reasons defer the clear (one per session, at most 60 s, ended without writing by a user message, another command, or a stopped/changed session); the deferred clear then runs through exactly the same fenced operation. Refusals name their reason (`busy`, `dialog`, `queued`, `unsettled`, `unconfirmed-send`, `jobs`); a streaming response, an open dialog and background work are never deferred.
 
 ## Consequences
 

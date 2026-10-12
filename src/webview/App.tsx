@@ -17,6 +17,7 @@ import type { ReactNode } from "react";
 import { useCallback, useEffect, useMemo, useReducer, useRef, useState, useSyncExternalStore } from "react";
 import { guestTransport } from "./bridge";
 import type { GuestRouteKind } from "./bridge";
+import { backgroundWaitOf } from "../chat/background-wait";
 import { chatTurnInProgress } from "../chat/model";
 import { Composer } from "./components/Composer";
 import { FileLinksProvider } from "./components/FileLinks";
@@ -249,6 +250,7 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 						activeTools={snapshot.activeTools}
 						working={shown.working}
 						turnInProgress={!workUnknown && chatTurnInProgress(snapshot)}
+						backgroundWait={workUnknown ? null : backgroundWaitOf(snapshot)}
 						workingIntent={snapshot.workingIntent}
 						phase={snapshot.phase}
 						olderCount={snapshot.olderCount}

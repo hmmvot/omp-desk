@@ -38,10 +38,10 @@ import type { HistoryReader } from "./rpc/history-reader.ts";
 import { SLASH_DENIED_SENTENCE, classifySlashInput } from "../protocol/rpc.ts";
 import type { RpcChannel } from "../protocol/rpc.ts";
 import { RpcSession, readViewOnlySnapshot } from "./rpc/session.ts";
-import type { NavigateOutcome, NavigateRequest, RestoredQueue, RpcRecoveryReason, RpcSessionOptions, RpcSessionOutput, SendOutcome } from "./rpc/session.ts";
+import type { ClearOutcome, NavigateOutcome, NavigateRequest, RestoredQueue, RpcRecoveryReason, RpcSessionOptions, RpcSessionOutput, SendOutcome } from "./rpc/session.ts";
 import type { HostToolProvider } from "./tools/host-tool.ts";
 import { nativeSettingsCommand, type SettingsKind } from "../chat/settings-command.ts";
-import { CLEAR_DONE_SENTENCE, CLEAR_REFUSAL_SENTENCES } from "../chat/clear.ts";
+import { CLEAR_DEFERRED_SENTENCES, CLEAR_DONE_SENTENCE, CLEAR_REFUSAL_SENTENCES } from "../chat/clear.ts";
 import { DESK_COMMAND_ARGUMENTS_SENTENCE, DESK_COMMAND_UNAVAILABLE_SENTENCE, NEW_BUSY_SENTENCE, deskSessionCommand, type DeskSessionCommand } from "../chat/desk-commands.ts";
 import { tuiCommandGuidance, tuiOnlyCommand, type BuiltinSlashEntry, type DeskSlashAction } from "./slash-registry.ts";
 
@@ -821,9 +821,19 @@ export class ChatRuntime {
 				this.#tell(conversation, origin, command === "clear" ? CLEAR_REFUSAL_SENTENCES.arguments : DESK_COMMAND_ARGUMENTS_SENTENCE);
 				return "explained";
 			}
+			// Another Desk command ends a clear that is waiting for OMP; `/clear` itself is answered by the session.
+			if (command !== "clear") session.cancelDeferredClear();
 			if (command === "clear") {
-				const outcome = await session.clear(randomBytes(16).toString("hex"));
-				this.#tell(conversation, origin, outcome.status === "done" ? CLEAR_DONE_SENTENCE : CLEAR_REFUSAL_SENTENCES[outcome.status === "refused" ? outcome.reason : "unconfirmed"]);
+				const sentence = (outcome: ClearOutcome): string => outcome.status === "done" ? CLEAR_DONE_SENTENCE : CLEAR_REFUSAL_SENTENCES[outcome.status === "refused" ? outcome.reason : "unconfirmed"];
+				const waiting = Promise.withResolvers<void>();
+				const run = session.clear(randomBytes(16).toString("hex"), reason => { this.#tellAll(conversation, CLEAR_DEFERRED_SENTENCES[reason]); waiting.resolve(); });
+				const first = await Promise.race([run, waiting.promise]);
+				if (first === undefined) {
+					// The clear waits for OMP to be ready. The composer is released now; every route is told the outcome when it comes.
+					void run.then(outcome => { if (!conversation.disposed) this.#tellAll(conversation, sentence(outcome)); });
+					return "explained";
+				}
+				this.#tell(conversation, origin, sentence(first));
 				return "explained";
 			}
 			if (command === "fresh") {

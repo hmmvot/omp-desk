@@ -410,6 +410,36 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			}
 		});
 
+		await t.test("while only background work keeps the turn open the row names the wait and times it from the agent's last message", async () => {
+			await reset("background-wait");
+			await ui.evaluate(`(() => {
+			 const now = Date.now(), iso = at => new Date(at).toISOString();
+			 const row = (id, parentId, at, message) => ({ type: 'message', id, parentId, timestamp: iso(at), message: { timestamp: at, ...message } });
+			 window.ui.push({ entries: [
+			  row('u', null, now - 4_200_000, { role: 'user', content: 'push it' }),
+			  row('a', 'u', now - 4_190_000, { role: 'assistant', model: 'm', stopReason: 'toolUse', content: [{ type: 'toolCall', id: 'call-push', name: 'bash', arguments: { i: 'Хвост лога push', command: 'git push origin main' } }] }),
+			  row('r', 'a', now - 4_180_000, { role: 'toolResult', toolCallId: 'call-push', toolName: 'bash', isError: false, content: [{ type: 'text', text: 'Backgrounded as job job-1' }], details: { async: { state: 'running', jobId: 'job-1', type: 'bash' } } }),
+			  row('z', 'r', now - 125_000, { role: 'assistant', model: 'm', stopReason: 'stop', content: [{ type: 'text', text: 'Pushing in the background.' }] })
+			 ], durableCount: 4, working: false, settled: false, asyncPaused: true, workingIntent: 'Хвост лога push',
+			 displayTurns: [{ id: 1, startedAt: now - 4_200_000, completedAt: null, complete: false, memberKeys: [] }] });
+			})()`);
+			await ui.wait("document.querySelector('.omp-working-status-text').textContent==='Waiting for background job: Хвост лога push'");
+			assert.match(await ui.evaluate<string>("document.querySelector('.omp-working-status-elapsed').textContent"), /^2m \d\ds$/, "the wait since the agent's last message, not the 1h 10m of the whole turn");
+			await ui.evaluate("window.ui.push({working:true,asyncPaused:false})");
+			await ui.wait("document.querySelector('.omp-working-status-text').textContent==='Хвост лога push'");
+			assert.match(await ui.evaluate<string>("document.querySelector('.omp-working-status-elapsed').textContent"), /^1h /, "the agent works again: the normal intent and the turn timer");
+			await ui.evaluate("window.ui.push({working:false,asyncPaused:true,uiRequests:[{id:'status-ask',method:'confirm',title:'Proceed?',message:''}]})");
+			await ui.wait("document.querySelector('.omp-working-status-text').textContent==='Waiting for your answer'");
+		});
+
+		await t.test("a /clear waiting for OMP shows what it waits for until it runs", async () => {
+			await reset("clear-pending");
+			await ui.evaluate("window.ui.push({clearPending:'unsettled'})");
+			await ui.wait("document.querySelector('.omp-footer-feedback[data-clear-pending]')?.textContent.includes('/clear will run when OMP finishes the interrupted turn.')");
+			await ui.evaluate("window.ui.push({clearPending:null})");
+			await ui.wait("!document.querySelector('.omp-footer-feedback[data-clear-pending]')");
+		});
+
 		await t.test("only outer user movement detaches, and source position survives prepend, resize and same-session rejoin", async () => {
 			await reset("paseo-scroll-source");
 			await ui.evaluate(`window.historyRows=Array.from({length:180},(_,index)=>({type:'message',id:'row-'+index,parentId:null,timestamp:new Date(1000+index).toISOString(),

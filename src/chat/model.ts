@@ -17,6 +17,7 @@ import { assistantPersistenceKey, entryMessage, isInterruptedToolResult, type As
 import { latestTodoFromEntries, parseTodoPhases, todoPhasesFromEntry, todoPhasesFromToolResult, type TodoProjection } from "./todos.ts";
 import { reduceAgentFrame, reduceAgentLiveness, reduceAgentRoster, taskSpawnIdentity, withRegistryRows, type AgentActivity, type AgentIdentities, type AgentIdentity, type RunningAgent, type SpawnLookup, type SubagentFrame } from "./agents.ts";
 import type { LiveAgent } from "./agent-liveness.ts";
+import type { ClearDeferrable } from "./clear.ts";
 import type { MaintenanceState, NativeEventFrame, RetryState } from "./events.ts";
 import { positionTranscript, type EphemeralItem, type TranscriptPosition } from "./projection.ts";
 import type { ActiveTool, PendingRow } from "./pending.ts";
@@ -278,6 +279,8 @@ export interface ChatModel {
 	commandFeedback: CommandFeedback | null;
 	/** Host-held model/thinking choices OMP has not accepted yet; null when none. */
 	pendingControl: ChatPendingControl | null;
+	/** A `/clear` the host deferred until OMP finishes an interrupted turn; at most one per session. */
+	clearPending: ClearDeferrable | null;
 	/** One bounded text line from `setStatus`, or null. */
 	statusLine: string | null;
 	statusEntries: ReadonlyMap<string, string>;
@@ -348,6 +351,8 @@ export type ChatEventFrame = SubagentFrame | NativeEventFrame
 	| { type: "command_feedback"; message: string }
 	/** Host-owned only: the model/thinking choices held until OMP can accept them (`null` clears). */
 	| { type: "control_pending"; pending: ChatPendingControl | null }
+	/** Host-owned only: a `/clear` is waiting for OMP to become ready (ADR-0059 amendment). */
+	| { type: "clear_pending"; pending: ClearDeferrable | null }
 	| { type: "model_changed" }
 	| { type: "thinking_level_changed"; thinkingLevel?: string | null; configured?: string; resolved?: string }
 	| { type: "config_update"; model?: ChatLiteModel | null; thinkingLevel?: string | null }
@@ -428,6 +433,7 @@ export interface ChatSnapshotPayload {
 	commands: readonly ChatSlashCommand[];
 	displayTurns?: readonly DisplayTurn[];
 	pendingControl?: ChatPendingControl | null;
+	clearPending?: ClearDeferrable | null;
 }
 
 /** `omp:chat-entries`. */
@@ -500,6 +506,7 @@ export function createChatModel(): ChatModel {
 		ephemeral: NO_EPHEMERAL,
 		commandFeedback: null,
 		pendingControl: null,
+		clearPending: null,
 		statusLine: null,
 		statusEntries: EMPTY_STATUS,
 		widgets: NO_WIDGETS,
@@ -832,6 +839,7 @@ export function applyChatSnapshot(model: ChatModel, snapshot: ChatSnapshotPayloa
 			ephemeral: snapshot.ephemeral,
 			commands: snapshot.commands,
 			pendingControl: snapshot.pendingControl ?? null,
+			clearPending: snapshot.clearPending ?? null,
 		},
 		clock,
 	);
@@ -1026,6 +1034,8 @@ export function reduceChatFrame(model: ChatModel, frame: ChatEventFrame, clock: 
 			return { ...model, commandFeedback: { id: (model.commandFeedback?.id ?? 0) + 1, message: clampText(frame.message, MAX_COMMAND_FEEDBACK_TEXT) } };
 		case "control_pending":
 			return samePendingControl(model.pendingControl, frame.pending) ? model : { ...model, pendingControl: frame.pending };
+		case "clear_pending":
+			return model.clearPending === frame.pending ? model : { ...model, clearPending: frame.pending };
 		case "model_changed":
 			return model;
 		case "turn_start":
@@ -1447,6 +1457,7 @@ export function snapshotOf(model: ChatModel, epoch: ChatEpoch): ChatSnapshotPayl
 		commands: model.commands,
 		displayTurns: model.displayTurns,
 		...(model.pendingControl === null ? {} : { pendingControl: model.pendingControl }),
+		...(model.clearPending === null ? {} : { clearPending: model.clearPending }),
 	};
 }
 

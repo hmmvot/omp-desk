@@ -58,10 +58,12 @@ import {
 import { parseChatEntry, type ChatEntry } from "../../chat/messages.ts";
 import {
 	CLEAR_COMMAND,
+	CLEAR_DEFER_MS,
 	CLEAR_ERROR_PATH,
 	clearErrorCode,
 	clearMarker,
 	encodeClearCommand,
+	type ClearDeferrable,
 	type ClearRefusal,
 } from "../../chat/clear.ts";
 import {
@@ -383,6 +385,19 @@ export type ClearOutcome =
 	/** The command may or may not have reloaded (lost answer, or a boundary without its marker). Never retried; the transcript shows what happened. */
 	| { status: "unconfirmed" };
 
+/** A `/clear` waiting for OMP to finish an interrupted turn (ADR-0059 amendment): at most one per session. */
+interface DeferredClear {
+	requestId: string;
+	/** Durable and provider identity when it began: another one means the session under it changed. */
+	header: string | null;
+	bound: string | null;
+	timer: unknown;
+	resolve(outcome: ClearOutcome): void;
+}
+
+/** Why a clear cannot start now; a deferrable reason passes without the user stopping anything. */
+type ClearBlock = { reason: ClearRefusal; deferrable: false } | { reason: ClearDeferrable; deferrable: true };
+
 const NAVIGATE_REQUEST_ID = /^[0-9a-f]{32}$/;
 /** How long the command's `prompt_result` may take; a summary is a model call. */
 const NAVIGATE_RESULT_MS = 30_000;
@@ -694,6 +709,7 @@ export class RpcSession {
 	#heldFlush: Promise<HeldFlush> | null = null;
 	readonly #navigateRequests = new Map<string, Promise<NavigateOutcome>>();
 	readonly #clearRequests = new Map<string, Promise<ClearOutcome>>();
+	#deferredClear: DeferredClear | null = null;
 	/** The navigation command in flight: its internal id, its request id, the coded errors OMP reported, its waiter. */
 	#navigation: { id: string; requestId: string; errorPath: string; errors: string[]; finish?(how: NavigationWait): void; waitEnded: boolean } | null = null;
 	/**
@@ -831,6 +847,7 @@ export class RpcSession {
 
 	/** Shared admission for Desk lifecycle mutations; acquired synchronously before their first await. */
 	admitReplacement(): boolean {
+		this.cancelDeferredClear();
 		if (this.#clearRefusal(false) !== null) return false;
 		this.setMutationFence("replacement");
 		return true;
@@ -874,6 +891,7 @@ export class RpcSession {
 		this.#clearPausedStateTimer();
 		this.#disarmWatchdog();
 		this.#clearAutoRecovery();
+		this.#endDeferredClear({ status: "refused", reason: "not-live" });
 		this.#failAllCommands("closed");
 		this.#maintenanceReport?.(null);
 		this.#maintenanceReport = null;
@@ -900,6 +918,7 @@ export class RpcSession {
 			}
 			const refusal = this.#controlRefusal() ?? await this.#applyHeldBeforeSend() ?? this.#controlRefusal();
 			if (refusal !== null) return { status: "refused", reason: refusal };
+			this.cancelDeferredClear();
 			this.#slashArmed = request.text.trimStart().startsWith("/");
 			this.#remember({ requestId: request.requestId, text: request.text, sentAt: this.#timers.now(), unconfirmed: false });
 			return this.#sendUser(request.requestId, {
@@ -915,6 +934,7 @@ export class RpcSession {
 		return this.#once(request.requestId, async () => {
 			const refusal = this.#controlRefusal() ?? await this.#applyHeldBeforeSend() ?? this.#controlRefusal();
 			if (refusal !== null) return { status: "refused", reason: refusal };
+			this.cancelDeferredClear();
 			return this.#sendUser(request.requestId, {
 				type: "steer",
 				message: request.text,
@@ -927,6 +947,7 @@ export class RpcSession {
 		return this.#once(request.requestId, async () => {
 			const refusal = this.#controlRefusal() ?? await this.#applyHeldBeforeSend() ?? this.#controlRefusal();
 			if (refusal !== null) return { status: "refused", reason: refusal };
+			this.cancelDeferredClear();
 			return this.#sendUser(request.requestId, {
 				type: "follow_up",
 				message: request.text,
@@ -1059,6 +1080,7 @@ export class RpcSession {
 		if (!NAVIGATE_REQUEST_ID.test(request.requestId)) return Promise.resolve({ status: "refused", reason: "bad-request-id" });
 		const known = this.#navigateRequests.get(request.requestId);
 		if (known !== undefined) return known;
+		this.cancelDeferredClear();
 		const promise = this.#navigate(request);
 		this.#navigateRequests.set(request.requestId, promise);
 		if (this.#navigateRequests.size > MAX_REMEMBERED_REQUESTS) {
@@ -1170,11 +1192,11 @@ export class RpcSession {
 	 * Detach-induced results never prove handler completion. Exactly once per request id; no prompt-ledger row.
 	 * Shares navigation's in-flight slot and fence, including uncertain acknowledgements.
 	 */
-	clear(requestId: string): Promise<ClearOutcome> {
+	clear(requestId: string, onDeferred?: (reason: ClearDeferrable) => void): Promise<ClearOutcome> {
 		if (!NAVIGATE_REQUEST_ID.test(requestId)) return Promise.resolve({ status: "refused", reason: "bad-request-id" });
 		const known = this.#clearRequests.get(requestId);
 		if (known !== undefined) return known;
-		const promise = this.#clear(requestId);
+		const promise = this.#clearOrDefer(requestId, onDeferred);
 		this.#clearRequests.set(requestId, promise);
 		if (this.#clearRequests.size > MAX_REMEMBERED_REQUESTS) {
 			const oldest = this.#clearRequests.keys().next();
@@ -1183,18 +1205,94 @@ export class RpcSession {
 		return promise;
 	}
 
+	/**
+	 * A clear OMP is not ready for yet runs when it is, if the only thing in the way passes by itself (an interrupted
+	 * turn not settled yet, a message waiting in OMP's queue, a sent message not confirmed yet) and the caller can show
+	 * the wait (`onDeferred`). It then goes through `#clear` unchanged, with all its fencing and confirmation. Without
+	 * a caller that shows it, or for any other reason, the clear is refused as before.
+	 */
+	#clearOrDefer(requestId: string, onDeferred: ((reason: ClearDeferrable) => void) | undefined): Promise<ClearOutcome> {
+		if (this.#deferredClear !== null) return Promise.resolve({ status: "refused", reason: "clear-pending" });
+		const block = this.#clearBlock();
+		if (onDeferred === undefined || block === null || !block.deferrable || !this.#hasClearCommand()) return this.#clear(requestId);
+		return new Promise<ClearOutcome>(resolve => {
+			const timer = this.#timers.setTimeout(() => this.#expireDeferredClear(), CLEAR_DEFER_MS);
+			this.#deferredClear = { requestId, header: this.#model.header?.id ?? null, bound: this.#boundId, timer, resolve };
+			this.#setClearPending(block.reason);
+			onDeferred(block.reason);
+		});
+	}
+
+	/** Drop a waiting clear because the user sent a message or started another command. Nothing was written to OMP. */
+	cancelDeferredClear(): void {
+		this.#endDeferredClear({ status: "refused", reason: "cancelled" });
+	}
+
+	#endDeferredClear(outcome: ClearOutcome): void {
+		const pending = this.#deferredClear;
+		if (pending === null) return;
+		this.#deferredClear = null;
+		this.#timers.clearTimeout(pending.timer);
+		this.#setClearPending(null);
+		pending.resolve(outcome);
+	}
+
+	#setClearPending(pending: ClearDeferrable | null): void {
+		if (this.#model.clearPending === pending) return;
+		if (this.#live && !this.#disposed) this.#applyLocal({ type: "clear_pending", pending });
+		else this.#model = { ...this.#model, clearPending: pending };
+	}
+
+	/** Run the waiting clear once nothing blocks it; end it when its session stopped or changed. Called after every model change. */
+	#syncDeferredClear(): void {
+		const pending = this.#deferredClear;
+		if (pending === null) return;
+		if (this.#disposed || this.#ended) { this.#endDeferredClear({ status: "refused", reason: "not-live" }); return; }
+		if ((this.#model.header?.id ?? null) !== pending.header || this.#boundId !== pending.bound) { this.#endDeferredClear({ status: "refused", reason: "session" }); return; }
+		const block = this.#clearBlock();
+		if (block !== null) {
+			// What the page says it waits for follows what is in the way now, while that is still something that passes.
+			if (block.deferrable) this.#setClearPending(block.reason);
+			return;
+		}
+		this.#deferredClear = null;
+		this.#timers.clearTimeout(pending.timer);
+		// Same path as an immediate clear: its synchronous prefix takes the shared mutation slot before anything else can.
+		const run = this.#clear(pending.requestId);
+		this.#setClearPending(null);
+		void run.then(pending.resolve);
+	}
+
+	/** The wait ran out: the precise reason the clear still cannot run. */
+	#expireDeferredClear(): void {
+		this.#syncDeferredClear();
+		if (this.#deferredClear === null) return;
+		this.#endDeferredClear({ status: "refused", reason: this.#clearBlock()?.reason ?? "failed" });
+	}
+
+	#hasClearCommand(): boolean {
+		return this.#model.commands.some(command => command.name === CLEAR_COMMAND && command.source === "extension");
+	}
+
 	/** Why a clear cannot start now, or null. Every check is on host-known state; OMP re-checks its own. */
 	#clearRefusal(requireCommand = true): ClearRefusal | null {
+		return this.#clearBlock(requireCommand)?.reason ?? null;
+	}
+
+	/** The first thing in the way of a clear, named for the user, and whether it passes by itself. */
+	#clearBlock(requireCommand = true): ClearBlock | null {
 		const control = this.#controlRefusal();
-		if (control !== null) return control === "busy" ? "busy" : "not-live";
+		if (control !== null) return { reason: control === "busy" ? "busy" : "not-live", deferrable: false };
 		const model = this.#model;
-		if (model.state?.isCompacting === true || model.maintenance?.status === "working" || model.working || model.state?.isStreaming === true || model.uiRequest !== null || (model.state?.queuedMessageCount ?? 0) > 0) return "busy";
+		if (model.state?.isCompacting === true || model.maintenance?.status === "working" || model.working || model.state?.isStreaming === true) return { reason: "busy", deferrable: false };
+		if (model.uiRequest !== null) return { reason: "dialog", deferrable: false };
+		if ((model.state?.queuedMessageCount ?? 0) > 0) return { reason: "queued", deferrable: true };
 		// The reload does not cancel the session's async jobs as the TUI does; their results would land in the new context.
-		if (model.asyncPaused || model.state?.hasPendingAsyncWork === true || model.agents.size > 0 || (this.#agentLiveness.last?.length ?? 0) > 0) return "jobs";
-		if (!model.settled) return "busy";
-		if (this.#ledger.some(entry => entry.unconfirmed) || [...model.pending.values()].some(row => !row.unsaved && row.hidden !== true)) return "busy";
+		if (model.asyncPaused || model.state?.hasPendingAsyncWork === true || model.agents.size > 0 || (this.#agentLiveness.last?.length ?? 0) > 0) return { reason: "jobs", deferrable: false };
+		if (!model.settled) return { reason: "unsettled", deferrable: true };
+		if (this.#ledger.some(entry => entry.unconfirmed) || [...model.pending.values()].some(row => !row.unsaved && row.hidden !== true)) return { reason: "unconfirmed-send", deferrable: true };
 		// Only the command this module registered: a same-named prompt template or skill would reach the model.
-		return !requireCommand || model.commands.some(command => command.name === CLEAR_COMMAND && command.source === "extension") ? null : "restart-needed";
+		return !requireCommand || this.#hasClearCommand() ? null : { reason: "restart-needed", deferrable: false };
 	}
 
 	async #clear(requestId: string): Promise<ClearOutcome> {
@@ -1262,6 +1360,7 @@ export class RpcSession {
 
 	/** Plain /fresh shares clear's exclusive mutation slot, but preserves local model history. */
 	async fresh(requestId: string): Promise<ClearOutcome> {
+		this.cancelDeferredClear();
 		const refusal = this.#clearRefusal(false);
 		if (refusal !== null) return { status: "refused", reason: refusal };
 		const id = `${INTERNAL_ID_PREFIX}${++this.#internalSeq}`;
@@ -1381,6 +1480,7 @@ export class RpcSession {
 	 * that line arrives; the line still renders as the notice it always is.
 	 */
 	async maintain(request: MaintenanceRequest): Promise<CommandResult<string>> {
+		this.cancelDeferredClear();
 		const refusal = this.#controlRefusal() ?? (this.#model.maintenance?.status === "working" ? "busy" : null);
 		if (refusal !== null) return { status: "refused", reason: refusal };
 		const action = request.kind === "shake" ? "shake" : request.mode === "soft" ? "compact" : request.mode;
@@ -1627,6 +1727,7 @@ export class RpcSession {
 	 */
 	async requestContextReport(): Promise<CommandResult<ContextReportRead>> {
 		// A request in flight is itself a `#controlRefusal` ("busy"), so a second request, a maintenance pass, a rewind, a clear and any prompt wait for this one to finish.
+		this.cancelDeferredClear();
 		const refusal = this.#controlRefusal();
 		if (refusal !== null) return { status: "refused", reason: refusal };
 		const busy = this.#model.working || this.#model.asyncPaused || this.#model.state?.isCompacting === true ||
@@ -2805,6 +2906,7 @@ export class RpcSession {
 
 	/** Send held choices once OMP can take them; abandon them when the session can no longer. */
 	#syncHeld(): void {
+		this.#syncDeferredClear();
 		if (!this.#hasHeld()) return;
 		const block = this.#choiceBlock();
 		if (block === "gone") this.#setHeld(NO_HELD);
@@ -3013,6 +3115,7 @@ export class RpcSession {
 		if (code === "identity-diverged" || code === "identity-mismatch") this.#hostCalls?.diverged();
 		else this.#hostCalls?.closeGate("the session failed");
 		this.#failAllCommands("closed");
+		this.#endDeferredClear({ status: "refused", reason: "not-live" });
 		// A failed connection says nothing about the turn it carried: keeping `working` would show a
 		// frozen spinner. The next successful attach reads the real state back.
 		this.#model = {
@@ -3048,6 +3151,7 @@ export class RpcSession {
 		this.#clearAutoRecovery();
 		this.#failAllCommands("closed");
 		for (const waiter of this.#readyWaiters.splice(0)) waiter(false);
+		this.#endDeferredClear({ status: "refused", reason: "not-live" });
 		this.#model = setChatPhase(this.#model, "stopped", code, "stopped");
 		const exitReason = reason === undefined ? null : parseChatExitReason(reason);
 		if (exitReason !== null) this.#model = { ...this.#model, exitReason };

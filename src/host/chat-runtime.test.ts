@@ -31,7 +31,7 @@ import { ManualTimers, assistantMessage, messageEntry, tick, userMessage, waitUn
 import { NAVIGATE_COMMAND, NAVIGATION_MARKER_TYPE, parseNavigateArgs } from "../chat/rewind.ts";
 import { parseChatHostMessage, parseChatWebviewMessage } from "../protocol/chat-messages.ts";
 import { isoOf } from "./rpc/test-support.ts";
-import { CLEAR_BUSY_SENTENCE, CLEAR_COMMAND, CLEAR_DONE_SENTENCE, CLEAR_ERROR_PATH, CLEAR_REFUSAL_SENTENCES } from "../chat/clear.ts";
+import { CLEAR_BUSY_SENTENCE, CLEAR_COMMAND, CLEAR_DEFERRED_SENTENCES, CLEAR_DONE_SENTENCE, CLEAR_ERROR_PATH, CLEAR_REFUSAL_SENTENCES } from "../chat/clear.ts";
 import type { ClearMarkerData } from "../chat/clear.ts";
 import { DESK_COMMAND_ARGUMENTS_SENTENCE, DESK_COMMAND_UNAVAILABLE_SENTENCE, NEW_BUSY_SENTENCE } from "../chat/desk-commands.ts";
 import { runClearCommand, type ClearCommandContext } from "../omp/clear-command.ts";
@@ -756,6 +756,73 @@ describe("Desk session commands typed into Chat (ADR-0059)", () => {
 		assert.deepEqual(page.notices(), [CLEAR_BUSY_SENTENCE, CLEAR_BUSY_SENTENCE]);
 		assert.equal(CLEAR_BUSY_SENTENCE, "Wait for the current response to finish or abort it before resetting the context.");
 		assert.equal(channel.commandsOfType("prompt").length + channel.commandsOfType("steer").length, 0);
+	});
+
+	/** The real command over the fake child, with a boundary the way OMP appends it. */
+	async function clearRig() {
+		const rig = await liveRig({ entries: rows(4) as never, leafId: "r3" });
+		rig.channel.emit({ type: "available_commands_update", commands: [{ name: CLEAR_COMMAND, source: "extension", description: "Desk clear" }] });
+		await waitUntil(() => rig.runtime.sessionOf(TAB)?.model.commands.some(command => command.name === CLEAR_COMMAND) === true);
+		const seen = runRealCommand(rig.channel, { appendResetBoundary: () => {
+			rig.channel.child.entries.push({ type: "reset_boundary", id: "boundary-1", parentId: rig.channel.child.leafId, timestamp: "2026-10-11T00:00:01.000Z" });
+			rig.channel.child.leafId = "boundary-1";
+			return "boundary-1";
+		} });
+		const page = new RecordingPage("editor");
+		rig.runtime.attachPage(TAB, page);
+		// The aborted turn: the agent ended, OMP has not reported the session settled.
+		rig.channel.emit({ type: "agent_start" });
+		rig.channel.emit({ type: "agent_end", messages: [] });
+		await tick();
+		return { ...rig, seen, page };
+	}
+
+	it("/clear right after an aborted turn waits for OMP instead of refusing: the composer is released at once, the page is told, and the clear runs when OMP settles", async () => {
+		const { runtime, channel, seen, page } = await clearRig();
+		assert.equal(await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "clear-d1", text: "/clear" }, page), "explained", "answered without waiting for OMP");
+		assert.deepEqual(page.notices(), [CLEAR_DEFERRED_SENTENCES.unsettled]);
+		assert.equal(runtime.sessionOf(TAB)!.model.clearPending, "unsettled");
+		assert.equal(seen.reloads, 0);
+		assert.equal(await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "clear-d2", text: "/clear" }, page), "explained");
+		assert.deepEqual(page.notices().slice(1), [CLEAR_REFUSAL_SENTENCES["clear-pending"]], "a second /clear says it already waits");
+		channel.emit({ type: "session_settled" });
+		await waitUntil(() => page.notices().length === 3);
+		assert.deepEqual(page.notices().slice(2), [CLEAR_DONE_SENTENCE]);
+		assert.equal(seen.reloads, 1, "one clear ran");
+		assert.equal(runtime.sessionOf(TAB)!.model.clearPending, null);
+		assert.deepEqual(channel.commandsOfType("prompt").map(command => String(command.message).split(" ")[0]), ["/omp-desk-clear", "/fresh", "/omp-desk-clear"]);
+	});
+
+	it("a message sent while /clear waits cancels it and says so; the clear never runs", async () => {
+		const { runtime, channel, seen, page } = await clearRig();
+		await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "clear-d3", text: "/clear" }, page);
+		await runtime.handleMessage(TAB, { type: "omp:chat-steer", requestId: "after-d3", text: "actually, keep going" }, page);
+		await waitUntil(() => page.notices().includes(CLEAR_REFUSAL_SENTENCES.cancelled));
+		channel.emit({ type: "session_settled" });
+		await tick();
+		assert.equal(seen.reloads, 0);
+		assert.equal(runtime.sessionOf(TAB)!.model.clearPending, null);
+		assert.equal(channel.commandsOfType("prompt").filter(command => String(command.message).startsWith(CLEAR_PREFIX)).length, 0);
+	});
+
+	it("another Desk command cancels it too", async () => {
+		const { runtime, seen, page } = await clearRig();
+		await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "clear-d4", text: "/clear" }, page);
+		assert.equal(runtime.sessionOf(TAB)!.model.clearPending, "unsettled");
+		await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "delete-d4", text: "/delete" }, page);
+		await waitUntil(() => page.notices().includes(CLEAR_REFUSAL_SENTENCES.cancelled));
+		assert.equal(runtime.sessionOf(TAB)!.model.clearPending, null);
+		assert.equal(seen.reloads, 0);
+	});
+
+	it("a dialog, unlike an interrupted turn, is refused at once with its own sentence", async () => {
+		const { runtime, channel } = await liveRig();
+		channel.emit({ type: "extension_ui_request", id: "ui-1", method: "confirm", title: "Sure?", message: "?" });
+		await tick();
+		const page = new RecordingPage("editor");
+		runtime.attachPage(TAB, page);
+		await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "clear-d5", text: "/clear" }, page);
+		assert.deepEqual(page.notices(), [CLEAR_REFUSAL_SENTENCES.dialog]);
 	});
 
 	it("/clear needs the command in the live catalog, and takes no arguments", async () => {

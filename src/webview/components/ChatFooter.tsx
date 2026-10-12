@@ -6,6 +6,7 @@ import type { ChatClient, ChatSnapshot } from "../lib/chat-client";
 import type { ControlModelRef, GuestControlAction, GuestControlStateMessage } from "../../protocol/messages";
 import type { FooterMetadataMessage } from "../../shared/footer-metadata";
 import { newControlScope } from "../../protocol/messages";
+import { CLEAR_DEFERRED_SENTENCES } from "../../chat/clear";
 import { ContextUsageIndicator } from "./ContextUsageIndicator";
 import { quotaUsedPercent } from "../../shared/context-indicator";
 
@@ -169,7 +170,10 @@ export function ChatFooter({ client, snapshot, trailingActions }: {
 					{trailingActions}
 				</div>
 			</div>
-			{(view.feedback ?? commandFeedback) !== null && <div className="omp-footer-feedback" role="status">
+			{snapshot.clearPending !== null && <div className="omp-footer-feedback" role="status" data-clear-pending={snapshot.clearPending}>
+				<span><span aria-hidden="true" className="codicon codicon-loading codicon-modifier-spin" /> {CLEAR_DEFERRED_SENTENCES[snapshot.clearPending]}</span>
+			</div>}
+			{snapshot.clearPending === null && (view.feedback ?? commandFeedback) !== null && <div className="omp-footer-feedback" role="status">
 				<span>{view.feedback ?? commandFeedback}</span>
 				<button type="button" className="omp-btn" aria-label="Dismiss message" title="Dismiss message" onClick={() => {
 					if (view.feedback !== null) setView(previous => ({ ...previous, feedback: null }));

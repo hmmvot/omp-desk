@@ -36,6 +36,7 @@
 // Explicit `.ts` specifiers and type-only imports: this module is imported by the node:test
 // runner, which does not resolve extensionless specifiers, and it must stay free of host code.
 import type { ImageContent } from "@oh-my-pi/pi-wire";
+import type { ClearDeferrable } from "../chat/clear.ts";
 import { parseChatMessage, parseChatEntry, type AssistantMessage, type ChatEntry } from "../chat/messages.ts";
 import { MAX_AGENT_IDENTITIES, parseAgentRoster, parseAgentActivity, parseSubagentFrame } from "../chat/agents.ts";
 import { parseLiveAgents } from "../chat/agent-liveness.ts";
@@ -480,6 +481,12 @@ function parseLiteModel(value: unknown): ChatLiteModel | null {
 
 const MAX_PENDING_CYCLES = 16;
 
+/** The reason a `/clear` waits; `"invalid"` when the value is not one, `null` when none waits. */
+function parseClearPending(value: unknown): ClearDeferrable | null | "invalid" {
+	if (value === undefined || value === null) return null;
+	return value === "unsettled" || value === "queued" || value === "unconfirmed-send" ? value : "invalid";
+}
+
 /** The host's held model/thinking choices; `"invalid"` when the shape is wrong, `null` when there are none. */
 function parsePendingControl(value: unknown): ChatPendingControl | null | "invalid" {
 	if (value === undefined || value === null) return null;
@@ -745,6 +752,10 @@ export function parseChatEventFrame(value: unknown): ChatEventFrame | null {
 			const pending = parsePendingControl(value.pending);
 			return pending === "invalid" ? null : { type: "control_pending", pending };
 		}
+		case "clear_pending": {
+			const pending = parseClearPending(value.pending);
+			return pending === "invalid" ? null : { type: "clear_pending", pending };
+		}
 		case "thinking_level_changed": {
 			if (value.thinkingLevel !== undefined && value.thinkingLevel !== null && !isText(value.thinkingLevel, MAX_LABEL_LENGTH)) return null;
 			return value.thinkingLevel === undefined ? { type: "thinking_level_changed" } : { type: "thinking_level_changed", thinkingLevel: value.thinkingLevel };
@@ -932,6 +943,8 @@ function parseSnapshotHead(value: unknown): ChatSnapshotHead | null {
 	}
 	const pendingControl = parsePendingControl(value.pendingControl);
 	if (pendingControl === "invalid") return null;
+	const clearPending = parseClearPending(value.clearPending);
+	if (clearPending === "invalid") return null;
 
 	return {
 		phase,
@@ -970,6 +983,7 @@ function parseSnapshotHead(value: unknown): ChatSnapshotHead | null {
 		commands,
 		displayTurns,
 		...(pendingControl === null ? {} : { pendingControl }),
+		...(clearPending === null ? {} : { clearPending }),
 	};
 }
 

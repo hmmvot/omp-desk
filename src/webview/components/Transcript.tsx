@@ -15,6 +15,7 @@
  * on its own card in its own place in the row order, and costs one of the same
  * bound's cards, since a result has no row of its own to be shown on.
  */
+import type { BackgroundWait } from "../../chat/background-wait";
 import { assistantPersistenceKey, entryMessage, userSkill, type AssistantMessage, type ChatEntry } from "../../chat/messages";
 import type { ReactNode } from "react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
@@ -58,6 +59,8 @@ export interface TranscriptProps {
 	activeTools: ReadonlyMap<string, ActiveTool>;
 	working: boolean;
 	turnInProgress?: boolean;
+	/** Set while only background work keeps the turn open; replaces the intent and the whole-turn timer. */
+	backgroundWait?: BackgroundWait | null;
 	workingIntent?: string | null;
 	phase: ChatPhase;
 	waitingForAnswer?: boolean;
@@ -545,7 +548,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 					return run ? <div className="omp-overview-member" data-run-id={run.id} role="group" aria-label={run.summary}>{body}</div> : <div>{body}</div>;
 				}} />
 			<WorkingStatus working={props.turnInProgress ?? working} intent={props.workingIntent}
-				waitingForAnswer={props.waitingForAnswer} maintenance={props.maintenance}
+				waitingForAnswer={props.waitingForAnswer} maintenance={props.maintenance} backgroundWait={props.backgroundWait}
 				startedAt={props.displayTurns?.at(-1)?.complete === false ? props.displayTurns.at(-1)?.startedAt : null} />
 			</div>
 		</div>

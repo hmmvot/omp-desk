@@ -91,7 +91,17 @@ export function clearMarker(entry: object): ClearMarker | null {
  * Why a clear did not happen, decided by the host before writing or reported back by the OMP-side guard
  * (`RpcSession.clear`). `unconfirmed` is not a refusal and has its own sentence.
  */
-export type ClearRefusal = "not-live" | "not-owner" | "busy" | "jobs" | "work-unavailable" | "unsupported" | "restart-needed" | "session" | "reload-failed" | "bad-request-id" | "failed";
+export type ClearRefusal = "not-live" | "not-owner" | "busy" | "unsettled" | "queued" | "dialog" | "unconfirmed-send" | "clear-pending" | "cancelled" | "jobs" | "work-unavailable" | "unsupported" | "restart-needed" | "session" | "reload-failed" | "bad-request-id" | "failed";
+
+/**
+ * The reasons that pass by themselves, without the user stopping anything: OMP is finishing an aborted turn,
+ * takes a queued message, or reconciles a message that was sent. A streaming response or an open dialog is not one.
+ * A clear refused for one of these waits instead (see `RpcSession.clear`), and the page is told which.
+ */
+export type ClearDeferrable = "unsettled" | "queued" | "unconfirmed-send";
+
+/** How long a deferred clear waits for OMP to become ready before the precise refusal is shown. */
+export const CLEAR_DEFER_MS = 60_000;
 
 /** OMP's own sentence for a clear refused while a response streams; the page shows it unchanged. */
 export const CLEAR_BUSY_SENTENCE = "Wait for the current response to finish or abort it before resetting the context.";
@@ -101,6 +111,12 @@ export const CLEAR_REFUSAL_SENTENCES: Readonly<Record<ClearRefusal | "unconfirme
 	"not-live": "/clear needs a running session. Resume it first.",
 	"not-owner": "Another window controls this session.",
 	busy: CLEAR_BUSY_SENTENCE,
+	unsettled: "OMP is still finishing the interrupted turn. Try /clear again in a moment.",
+	queued: "A message is waiting in OMP's queue. Wait until OMP takes it, or remove it from the queue, then use /clear.",
+	dialog: "OMP is waiting for your answer in a dialog. Answer it first, then use /clear.",
+	"unconfirmed-send": "OMP has not confirmed the message you sent yet. Wait a moment, then use /clear.",
+	"clear-pending": "/clear is already waiting for OMP to finish.",
+	cancelled: "The waiting /clear was cancelled because another message or command was sent.",
 	jobs: "OMP still has background jobs running for this session. Wait for them to finish or cancel them, then use /clear.",
 	unsupported: "/clear is not supported by this OMP version.",
 	"restart-needed": "This chat's OMP process was started by an earlier OMP Desk build. Restart the session to use /clear.",
@@ -111,6 +127,13 @@ export const CLEAR_REFUSAL_SENTENCES: Readonly<Record<ClearRefusal | "unconfirme
 	unconfirmed: "Context clear did not finish; the next message may still include earlier history. Retry /clear.",
 	"work-unavailable": "OMP could not establish that background work is idle. Nothing was cleared.",
 	arguments: "/clear takes no arguments.",
+};
+
+/** The notice shown when a clear is deferred, naming what it waits for. */
+export const CLEAR_DEFERRED_SENTENCES: Readonly<Record<ClearDeferrable, string>> = {
+	unsettled: "/clear will run when OMP finishes the interrupted turn.",
+	queued: "/clear will run when OMP has taken the message waiting in its queue.",
+	"unconfirmed-send": "/clear will run when OMP has confirmed the message you just sent.",
 };
 
 /** The line shown once the reset is confirmed. */
