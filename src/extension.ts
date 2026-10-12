@@ -144,7 +144,7 @@ import { activateAgentDebugger } from "./host/debug/index";
 import type { ChatPage, ChatRuntimeEvent } from "./host/chat-runtime";
 import { attachRpcHost, launchRpcHost, retireStoppedRpcBroker, stopRpcHost } from "./host/rpc-launch";
 import type { RpcAttachOutcome, RpcHostRuntime } from "./host/rpc-launch";
-import { attachNativeHost, brokerAndRootGone, launchNativeHost, waitForManagedRootExit } from "./host/native-session";
+import { attachNativeHost, brokerAndRootGone, launchNativeHost, recordedRootGone, waitForManagedRootExit } from "./host/native-session";
 import type { NativeAttachOutcome, NativeHostRuntime, SessionHostRuntime, SessionTransitionFacts } from "./host/native-session";
 import {
   createOwnerReconciler,
@@ -576,6 +576,17 @@ interface WindowState {
   editorPanels: EditorPanels;
   /** One endpoint per actual editor (`E`) this window serves; the bridge host creates them and `dispose` closes them. */
   readonly bridgeEndpoints: Map<string, BridgeEditorEndpoint>;
+  /**
+   * Builds one editor's endpoint for the bridge host. Product code never assigns it; the lifecycle harness swaps in an
+   * endpoint whose listener cannot bind, so its editors run on the panel route with the host's real creation path.
+   */
+  createBridgeEndpoint: BridgeHostDeps<TabState>["createEndpoint"];
+  /**
+   * Whether a runtime's recorded OMP root has already ended (`recordedRootGone` over this window's broker client). Product
+   * code never assigns it; the lifecycle harness, whose runtimes carry process ids no real process has, answers for the
+   * roots it models.
+   */
+  rootGone: (root: { readonly pid: number; readonly creationTime: string | null }) => Promise<boolean>;
   /** Editor ids present in this window's actual editor membership right now. */
   readonly bridgeLiveEditors: Set<string>;
   /** The one-winner reservation table of this window's editors (ADR-0019/0023). */
@@ -1117,6 +1128,7 @@ function bridgeHostDeps(): BridgeHostDeps<TabState> {
     cancelControlPicker,
     serializerFor: (context, index, viewType) => windowState().editorPanels.bridgeSerializerFor(context, index, viewType),
     handleRequest: handleBridgeRequest,
+    createEndpoint: options => windowState().createBridgeEndpoint(options),
     log,
   };
 }
@@ -1128,7 +1140,6 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     reconciler: undefined as never, // assigned by `activate` before anything reads it
     indexForBridge: null,
     catalogStore: undefined,
-    createEndpoint: options => windowState().createBridgeEndpoint(options),
     catalogReady: Promise.resolve(),
     externalLeases: null,
     claimFileNames: new Map<string, string | null>(),
@@ -1143,6 +1154,8 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     bridgeHost: registerBridgeHost(bridgeHostDeps()),
     editorPanels: registerEditorPanels(editorPanelsDeps()),
     bridgeEndpoints: new Map<string, BridgeEditorEndpoint>(),
+    createBridgeEndpoint: options => new BridgeEditorEndpoint(options),
+    rootGone: async root => await recordedRootGone(await attachBrokerClient().catch(() => null), root),
     bridgeLiveEditors: new Set<string>(),
     bridgeEditors: new EditorCoordinator(),
     outcomes: new Map<string, RestoreOutcome>(),
@@ -3778,8 +3791,33 @@ async function handleNativeHostExited(index: SessionIndex, state: TabState, runt
   });
 }
 
-/** Native graceful shutdown is an SDK request, never a ConPTY close. */
+/**
+ * Stop a session's process, or recognize that it already ended.
+ *
+ * A stop that could not be confirmed (the broker was killed or crashed, the process cannot be reached, OMP did not
+ * answer) is not yet a failure: when the recorded OMP root is proven gone (`recordedRootGone`: its id unused, or now
+ * another process's), the writer is gone and the session is stopped, so Close, Stop and Reload finish normally
+ * instead of asking for a Force Stop that has nothing left to stop.
+ */
 async function stopSessionRuntime(state: TabState, runtime: SessionHostRuntime, mode: "graceful" | "force", consent: boolean, expected?: SessionTransitionFacts | null): Promise<NativeStopVerdict> {
+  const verdict = await requestSessionStop(state, runtime, mode, consent, expected);
+  return verdict.writerGone ? verdict : await alreadyEnded(runtime) ?? verdict;
+}
+
+/** A verdict for a runtime whose recorded OMP root is already gone, or `null` when that cannot be shown. */
+async function alreadyEnded(runtime: SessionHostRuntime): Promise<NativeStopVerdict | null> {
+  const root = { pid: runtime.pid, creationTime: runtime.identity.childCreationTime };
+  if (!await windowState().rootGone(root)) return null;
+  return {
+    writerGone: true,
+    treeEmpty: false,
+    detail: "The OMP process had already ended.",
+    diagnosticDetail: `The stop was not confirmed by the broker, but the recorded OMP root pid ${root.pid} is gone.`,
+  };
+}
+
+/** Native graceful shutdown is an SDK request, never a ConPTY close. */
+async function requestSessionStop(state: TabState, runtime: SessionHostRuntime, mode: "graceful" | "force", consent: boolean, expected?: SessionTransitionFacts | null): Promise<NativeStopVerdict> {
   const s = windowState();
   if (runtime.kind === "chat") {
     const broker = await attachBrokerClient();
@@ -11318,7 +11356,7 @@ async function confirmAndStopRuntime(
           }
         }
         const stopped = previouslyStopping && mode === "graceful"
-          ? { writerGone: false, treeEmpty: false, detail: "Native shutdown is already pending; no new shutdown is sent." }
+          ? await alreadyEnded(runtime) ?? { writerGone: false, treeEmpty: false, detail: "Native shutdown is already pending; no new shutdown is sent." }
           : await stopSessionRuntime(state, runtime, mode, true, captured);
         log(`session stop ${tabId}: ${"diagnosticDetail" in stopped ? stopped.diagnosticDetail ?? stopped.detail : stopped.detail}`);
         if (!stopped.writerGone) {

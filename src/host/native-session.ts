@@ -6,6 +6,7 @@ import type { ControlNativeState, ControlNativeTarget } from "./control-protocol
 import { controlRuntimeFlags, DEFAULT_OMP_PROFILE, resolveOmpBinary } from "./native-terminal";
 import type { OmpCommand } from "./native-terminal";
 import type { PtyBrokerClient, PtyHandle } from "./pty-client";
+import { isPtyProcessAlive } from "./pty-identity";
 import { recordedRpcIdentityOf, resumeWorkingDirectory } from "./rpc-launch";
 import type { RpcHostRuntime, RpcLaunchRequest, RpcOmpLaunchSpec } from "./rpc-launch";
 import { brokerNativeGenerationReader, verifyPinnedBrokerAttachment } from "./rpc-reconcile";
@@ -163,4 +164,24 @@ export async function brokerAndRootGone(
 	const reader = await brokerNativeGenerationReader(client).catch(() => null);
 	if (reader === null) return false;
 	return await processGone(reader, broker.pid, broker.creationTime) && await processGone(reader, root.pid, root.creationTime);
+}
+
+/**
+ * Whether the OMP (or shell) root a runtime recorded has already ended, proven without that runtime's own broker:
+ * an id no process uses any more is conclusive at once; an id still in use is gone only when its creation time,
+ * read through `client`'s probe (any broker of this build), differs from the recorded one. `false` for anything less.
+ * A stop that could not be confirmed (its broker gone, the process unreachable) asks this before reporting a failure,
+ * because a writer that is already gone is stopped.
+ */
+export async function recordedRootGone(
+	client: PtyBrokerClient | null,
+	root: { readonly pid: number; readonly creationTime: string | null },
+	isAlive: (pid: number) => boolean = isPtyProcessAlive,
+): Promise<boolean> {
+	if (!Number.isSafeInteger(root.pid) || root.pid <= 0) return false;
+	if (!isAlive(root.pid)) return true;
+	if (client === null) return false;
+	const reader = await brokerNativeGenerationReader(client).catch(() => null);
+	if (reader === null) return false;
+	return await processGone(reader, root.pid, root.creationTime);
 }

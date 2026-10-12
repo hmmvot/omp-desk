@@ -295,6 +295,8 @@ export const harness = {
     w.ptyGate = { client: async () => ({}) };
     w.ptyGate.attachClient = async () => ({ fixture: true });
     w.ptyGate.invalidate = () => {};
+    // The fixture's runtimes carry process ids no real process has: a root is running unless a case says it ended.
+    w.rootGone = async () => false;
   },
   editor(index, endpoint, panel, editorId = '${EDITOR}', tabId = '${TAB}') {
     const state = newTabState(editorId); state.tabId = tabId; state.panel = panel;
@@ -335,6 +337,7 @@ interface WindowFixture {
   context: unknown;
   windowRegistry: unknown;
   packageDrift: { check(): { kind: "same" } | { kind: "changed"; files: string[] } } | null;
+  rootGone: (root: { readonly pid: number; readonly creationTime: string | null }) => Promise<boolean>;
   resolveAgentRoots: () => Promise<void>;
   externalLeases: { holds(file: string, options?: { fresh?: boolean }): Promise<boolean | null> } | null;
   launcherProvider: unknown;
@@ -1347,6 +1350,24 @@ describe("native replacement lifecycle", () => {
     assert.equal(harness.state(TAB).runtime, native);
   });
 
+  it("closes a session whose broker and OMP process were already ended elsewhere, without a Force Stop", async () => {
+    const saved = storage(); const native = runtime(708); const index = indexFixture(native);
+    let stops = 0;
+    native.handle.stop = async () => {
+      stops += 1;
+      throw new Error("the recorded broker process is gone");
+    };
+    harness.reset(index, conversation({ phase: "live", start: async () => undefined }));
+    harness.window().rootGone = async root => root.pid === native.pid;
+    harness.state(TAB).runtime = native;
+    saved.secrets.set(KEY, "ended-key"); saved.secrets.set(RECIPIENT, "ended-recipient");
+    await harness.closeSession(saved.context, index, TAB);
+    assert.equal(index.row.runIntent, "stopped");
+    assert.equal(harness.state(TAB).runtime, null);
+    assert.equal(saved.secrets.has(KEY), false);
+    assert.equal(stops, 1, "an ended process is stopped by the first attempt; no Force Stop follows");
+  });
+
   it("releases a verified Close's old credentials, waits for resumed identity, then reconnects with the new key", async () => {
     const saved = storage();
     const old = runtime(101);
@@ -1608,6 +1629,7 @@ describe("native replacement lifecycle", () => {
 
   it("panel route handshakes quiesce and replacement still fences the old writer", async () => {
     const saved = storage(); const native = runtime(828); const index = indexFixture(native);
+    harness.reset(index, null);
     const endpoint = new BridgeEditorEndpoint({
       records: new BridgeRecords({ root: path.join(root, "route-loop"), secrets: saved.context.secrets }),
       scope: { workspace: "a".repeat(64), tabId: TAB, editorId: EDITOR },
@@ -1628,7 +1650,6 @@ describe("native replacement lifecycle", () => {
     }) });
     try {
       // Exercise the actual guest receiver and host dispatcher, not an ACK echo fixture.
-    harness.reset(index, null);
       // This loading boundary must see the injected window/API; a static import
       // would initialize the browser transport before those capabilities exist.
       const guest = (await import(`${pathToFileURL(fileURLToPath(new URL("./webview/bridge.ts", import.meta.url))).href}?route-loop`)).guestTransport;

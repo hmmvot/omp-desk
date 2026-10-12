@@ -23,7 +23,7 @@ import { after, before, describe, it } from "node:test";
 import { build } from "esbuild";
 import { queryPtyProcessIdentity } from "./pty-identity.ts";
 import type { PtyProbeHelper } from "./pty-identity.ts";
-import type { brokerAndRootGone as brokerAndRootGoneType, waitForManagedRootExit as waitForManagedRootExitType } from "./native-session.ts";
+import type { brokerAndRootGone as brokerAndRootGoneType, recordedRootGone as recordedRootGoneType, waitForManagedRootExit as waitForManagedRootExitType } from "./native-session.ts";
 
 const VSCODE_STUB = `
 export const Uri = { file: (value) => ({ fsPath: value }) };
@@ -38,6 +38,7 @@ const ABSENT_PID = 2147483000;
 let temp: string;
 let wait: typeof waitForManagedRootExitType;
 let bothGone: typeof brokerAndRootGoneType;
+let rootGone: typeof recordedRootGoneType;
 let helper: PtyProbeHelper;
 let ownCreation: string;
 
@@ -61,9 +62,10 @@ before(async () => {
 			},
 		],
 	});
-	const loaded = (await import(pathToFileURL(outfile).href)) as { waitForManagedRootExit: typeof waitForManagedRootExitType; brokerAndRootGone: typeof brokerAndRootGoneType };
+	const loaded = (await import(pathToFileURL(outfile).href)) as { waitForManagedRootExit: typeof waitForManagedRootExitType; brokerAndRootGone: typeof brokerAndRootGoneType; recordedRootGone: typeof recordedRootGoneType };
 	wait = loaded.waitForManagedRootExit;
 	bothGone = loaded.brokerAndRootGone;
+	rootGone = loaded.recordedRootGone;
 	helper = { path: HELPER, sha256: createHash("sha256").update(await readFile(HELPER)).digest("hex") };
 	const own = await queryPtyProcessIdentity(helper, process.pid);
 	assert.equal(own.kind, "found");
@@ -137,5 +139,21 @@ describe("the proof that a broker and its root are both gone", { skip: process.p
 	it("does not hold without a verified probe", async () => {
 		const noProbe = { attachReady: async () => ({ ready: true, helper: null }) } as unknown as Parameters<typeof waitForManagedRootExitType>[1];
 		assert.equal(await bothGone(noProbe, { pid: ABSENT_PID, creationTime: GONE_CREATION }, { pid: ABSENT_PID - 1, creationTime: GONE_CREATION }), false);
+	});
+});
+
+describe("the proof that a stopped session's OMP root already ended", { skip: process.platform !== "win32" ? "the identity probe is implemented for Windows only" : false }, () => {
+	it("holds for an id no process uses, even with no broker to ask", async () => {
+		assert.equal(await rootGone(null, { pid: ABSENT_PID, creationTime: GONE_CREATION }), true);
+	});
+
+	it("holds for an id reissued to a process created at another time", async () => {
+		assert.equal(await rootGone(client(), { pid: process.pid, creationTime: GONE_CREATION }), true);
+	});
+
+	it("does not hold while the id is still the recorded process, or when that cannot be read", async () => {
+		assert.equal(await rootGone(client(), { pid: process.pid, creationTime: ownCreation }), false);
+		assert.equal(await rootGone(null, { pid: process.pid, creationTime: GONE_CREATION }), false, "no probe to tell a reissued id apart");
+		assert.equal(await rootGone(client(), { pid: process.pid, creationTime: null }), false, "a creation time never recorded");
 	});
 });
