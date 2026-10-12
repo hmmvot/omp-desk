@@ -151,8 +151,7 @@ const fixtureWindow = () => windowState();
 export const harness = {
   connectHostControl, reconnectHostControl, establishControl, closeSession, launchHost, presentRestoreOutcome, openTab, handleChatEvent, bindPanel, restoreTabs, bridgeSerializerFor,
   confirmAndDeleteSession, deleteSession, handleRestoreOutcome, forgetSession, renameSession, reloadSession, handleGuestControlRequest, panelResponder,
-  switchSessionMode, restartChat, openSessionInMode, defaultSessionMode, chooseDefaultSessionView, newSession, owningWindowUri, switchToSessionWindow, selectHeldSessionTab, openRestoredTabIfUncovered,
-  routeLaunchToFolderWindow, routeSessionOpen, serveLaunchRequest, startNewSession,
+  switchSessionMode, restartChat, openSessionInMode, defaultSessionMode, chooseDefaultSessionView, newSession, startNewSession,
   newSessionInPlace, deleteSessionInPlace,
   panelFactory(handler) {
     const previous = fixtureVscode.window.createWebviewPanel;
@@ -186,7 +185,6 @@ export const harness = {
   restoredDraft: slot => fixtureWindow().draftRestores.get(slot)?.reply ?? null,
   readChatDisplayPreferences, writeChatToolDetail, refreshChatDisplayPreferences,
   configurationWrites: () => fixtureVscode.workspace.configurationWrites,
-  setWindowWorkspace(file, folders) { fixtureVscode.workspace.workspaceFile = file; fixtureVscode.workspace.workspaceFolders = folders; },
   openedDocuments: () => fixtureVscode.window.openedDocuments,
   quickPicks: () => fixtureVscode.window.quickPicks,
   pickToolCallDetail,
@@ -342,6 +340,12 @@ interface WindowFixture {
   launcherSelectedPath: string | null;
   launcherExpandFor: string | null;
   readonly requestSelections: Set<string>;
+  readonly routing: {
+    serveLaunchRequest(context: unknown, index: unknown, request: unknown, serveContext: { stillWanted(): Promise<boolean> }): Promise<{ ok: boolean; focused: boolean }>;
+    selectHeldTab(index: unknown, request: unknown, serveContext: { stillWanted(): Promise<boolean> }): Promise<{ ok: boolean; focused: boolean }>;
+    openRestoredTabIfUncovered(context: unknown, index: unknown, tabId: string): Promise<void>;
+    routeLaunch(index: unknown, folder: { path: string }, launch: unknown, answerTimeoutMs?: number): Promise<boolean>;
+  };
   readonly sessionPanelColumns: Map<string, number>;
   readonly hostControlAttempts: WeakMap<object, Promise<void>>;
 }
@@ -381,11 +385,6 @@ interface Harness {
   sessionModelAvailability(tabId: string): boolean | undefined;
   providerLoginFixture: { enabled: boolean; unresolved: boolean; models: unknown[]; calls: { args: string[]; options: { env: Record<string, string> } }[]; logins: { env: Record<string, string>; cwd: string }[]; read: (() => Promise<{ stdout: string; stderr: string; exitCode: number }>) | null; resolve: (() => Promise<{ command: string; prefixArgs: string[]; version: string }>) | null };
   storedRenameFixture: { enabled: boolean; root: string; requests: Parameters<typeof renameStoppedSessionTitle>[0][]; rename: ((input: Parameters<typeof renameStoppedSessionTitle>[0]) => ReturnType<typeof renameStoppedSessionTitle>) | null };
-  owningWindowUri(): URI | null;
-  switchToSessionWindow(...args: unknown[]): Promise<void>;
-  selectHeldSessionTab(...args: unknown[]): Promise<{ ok: boolean; focused: boolean }>;
-  openRestoredTabIfUncovered(...args: unknown[]): Promise<void>;
-  setWindowWorkspace(file: URI | undefined, folders: readonly { uri: URI }[]): void;
   bindPanel(...args: unknown[]): void;
   restoreTabs(...args: unknown[]): Promise<void>;
   bridgeSerializerFor(...args: unknown[]): { deserializeWebviewPanel(panel: unknown, state: unknown): Promise<void> };
@@ -439,9 +438,6 @@ interface Harness {
     folders: readonly { id: string; path: string; collapsed: boolean; pinned: boolean; open: boolean; openHere: boolean; openElsewhere: boolean }[],
     openingWindows?: readonly FixtureOpeningWindow[] | ((folderPath: string, options?: { exact?: boolean }) => readonly FixtureOpeningWindow[]),
   ): void;
-  routeLaunchToFolderWindow(index: unknown, folder: { path: string }, launch: unknown, answerTimeoutMs?: number): Promise<boolean>;
-  routeSessionOpen(index: unknown, tabId: string, verb: "opened" | "resumed", mode: "chat" | "terminal" | null): Promise<boolean>;
-  serveLaunchRequest(context: unknown, index: unknown, request: unknown, serveContext: { stillWanted(): Promise<boolean> }): Promise<{ ok: boolean; focused: boolean }>;
   startNewSession(context: unknown, index: unknown, folder: unknown): Promise<void>;
   newSessionInPlace(context: unknown, index: SessionIndex, tabId: string): Promise<void>;
   deleteSessionInPlace(context: unknown, index: SessionIndex, tabId: string): Promise<void>;
@@ -2586,7 +2582,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 				const notices: unknown[] = [];
 				harness.warning(async (...args) => { notices.push(args); });
 				const request = { kind: "launch", version: 1, id: "id-1", to: "this-window", from: "holder-a", createdAt: "2026-10-10T09:00:00.000Z", workspace: { path: cwd, match: "folder" }, launch: launch(f.row.tabId) };
-				assert.equal((await harness.serveLaunchRequest(f.saved.context, f.index, request, { stillWanted: async () => true })).ok, true);
+				assert.equal((await harness.window().routing.serveLaunchRequest(f.saved.context, f.index, request, { stillWanted: async () => true })).ok, true);
 				await new Promise(resolve => setTimeout(resolve, 100));
 				assert.deepEqual(notices, [], "no view switch was attempted");
 				assert.equal(f.state.mode, "terminal");
@@ -4423,89 +4419,6 @@ describe("editors VS Code restored but has not shown yet", () => {
   });
 });
 
-describe("owning-window navigation", () => {
-  it("uses a saved workspace identity for multiple roots and limits unsaved multi-root windows", () => {
-    const one = URI.file("C:/omp-vscode/one");
-    const two = URI.file("C:/omp-vscode/two");
-    const saved = URI.file("C:/omp-vscode/sample.code-workspace");
-    harness.setWindowWorkspace(undefined, [{ uri: one }]);
-    assert.equal(harness.owningWindowUri()?.toString(), one.toString());
-    harness.setWindowWorkspace(undefined, [{ uri: one }, { uri: two }]);
-    assert.equal(harness.owningWindowUri(), null);
-    harness.setWindowWorkspace(saved, [{ uri: one }, { uri: two }]);
-    assert.equal(harness.owningWindowUri()?.toString(), saved.toString());
-    harness.setWindowWorkspace(URI.parse("untitled:workspace"), [{ uri: one }]);
-    assert.equal(harness.owningWindowUri(), null);
-    harness.setWindowWorkspace(undefined, []);
-  });
-
-  /** A holder whose claim names `windowUri`, and a directory where requests to it are served (or not). */
-  async function holderOf(windowUri: string | null, serve: ServeOutcome | null) {
-    const owner = harness.createClaimHolder();
-    const storageDir = await mkdtemp(path.join(root, "switch-"));
-    const served: WindowRequest[] = [];
-    const watch = serve === null ? null : startRequestWatch(storageDir, owner.id, async request => { served.push(request); return serve; }, { debounceMs: 10 });
-    const index = {
-      claimHolder: { id: "this-window" },
-      claimStorageDir: storageDir,
-      get: () => ({ ownership: { ownerGeneration: "gen-1" }, host: null }),
-      observeOwnership: async () => ({ ok: true, claim: { verifiable: true, holderId: owner.id, pid: owner.pid, ownerGeneration: "gen-1", windowUri } }),
-    };
-    return { index, served, stop: () => watch?.dispose() };
-  }
-
-  it("switches at once to the verified holder's workspace and has it select the tab, with no message", async () => {
-    const target = URI.file("C:/omp-vscode/sample.code-workspace");
-    const { index, served, stop } = await holderOf(target.toString(), { ok: true, focused: true });
-    const informed: unknown[] = [];
-    harness.information(async message => { informed.push(message); });
-    harness.warning(async message => { informed.push(message); });
-    const calls = harness.commandHandler(null);
-    try {
-      await harness.switchToSessionWindow(index, TAB);
-    } finally { stop(); }
-    assert.equal(calls.length, 1, "nothing is launched and nothing else is run");
-    assert.equal(calls[0]?.[0], "vscode.openFolder");
-    assert.equal((calls[0]?.[1] as URI).toString(), target.toString());
-    assert.deepEqual(calls[0]?.[2], { forceNewWindow: true }, "focus the owner; never replace this window if the owner just closed");
-    assert.deepEqual(served.flatMap(request => request.kind === "select" ? [[request.tabId, request.incarnation]] : []), [[TAB, "gen-1_none"]]);
-    assert.deepEqual(informed, [], "a switch that works is silent");
-    harness.commandHandler(null);
-  });
-
-  it("explains why, and does not try to open anything, when the owner has no window identity", async () => {
-    const { index, served, stop } = await holderOf(null, { ok: true, focused: true });
-    const informed: unknown[] = [];
-    harness.information(async message => { informed.push(message); });
-    const calls = harness.commandHandler(null);
-    try {
-      await harness.switchToSessionWindow(index, TAB);
-    } finally { stop(); }
-    assert.equal(calls.length, 0);
-    assert.equal(informed.length, 1);
-    assert.match(String(informed[0]), /no saved workspace or single-folder identity/);
-    assert.match(String(informed[0]), /tab is selected there/, "the owner was still asked to select it");
-    assert.equal(served.length, 1);
-    harness.commandHandler(null);
-  });
-
-  it("says that the owner no longer has the editor, did not respond, or did not come to the front", async () => {
-    const target = URI.file("C:/omp-vscode/other.code-workspace");
-    const warnings: unknown[] = [];
-    const informed: unknown[] = [];
-    harness.warning(async message => { warnings.push(message); });
-    harness.information(async message => { informed.push(message); });
-    const refusing = await holderOf(target.toString(), { ok: false, focused: false });
-    try { await harness.switchToSessionWindow(refusing.index, TAB); } finally { refusing.stop(); }
-    assert.match(String(informed[0]), /no longer has an editor open/);
-    const unfocused = await holderOf(target.toString(), { ok: true, focused: false });
-    try { await harness.switchToSessionWindow(unfocused.index, TAB); } finally { unfocused.stop(); }
-    assert.match(String(informed[1]), /did not bring it to the front/);
-    assert.deepEqual(warnings, []);
-    harness.commandHandler(null);
-  });
-});
-
 interface FixtureOpeningWindow { holderId: string; here: boolean; startedAt: string; focusedAt: string | null; stale?: boolean }
 
 describe("starting a session in the window that has its folder open", () => {
@@ -4647,14 +4560,14 @@ describe("starting a session in the window that has its folder open", () => {
       let verdict: { kind: "same" } | { kind: "changed"; files: string[] } = { kind: "changed", files: ["out/extension.js"] };
       harness.window().packageDrift = { check: () => verdict };
       try {
-        await harness.serveLaunchRequest(undefined, w.index, request, { stillWanted: async () => true });
+        await harness.window().routing.serveLaunchRequest(undefined, w.index, request, { stillWanted: async () => true });
         assert.equal(published.at(-1)?.stale, true);
         assert.ok(flushed >= 1, "written at once, not at the next heartbeat");
         const before = published.length;
-        await harness.serveLaunchRequest(undefined, w.index, request, { stillWanted: async () => true });
+        await harness.window().routing.serveLaunchRequest(undefined, w.index, request, { stillWanted: async () => true });
         assert.equal(published.length, before, "an unchanged verdict republishes nothing");
         verdict = { kind: "same" };
-        await harness.serveLaunchRequest(undefined, w.index, request, { stillWanted: async () => true }).catch(() => undefined);
+        await harness.window().routing.serveLaunchRequest(undefined, w.index, request, { stillWanted: async () => true }).catch(() => undefined);
         assert.equal(published.at(-1)?.stale, false);
       } finally { harness.window().packageDrift = null; }
     });
@@ -4665,7 +4578,7 @@ describe("starting a session in the window that has its folder open", () => {
       harness.window().packageDrift = { check: () => ({ kind: "changed", files: ["out/extension.js"] }) };
       try {
         const request = { kind: "launch", version: 1, id: "id-1", to: "this-window", from: "holder-a", createdAt: STAMP, workspace: workspaceFolder, launch: { kind: "new-session", folderId: "folder:proj-1" } };
-        assert.deepEqual(await harness.serveLaunchRequest(undefined, w.index, request, { stillWanted: async () => true }), { ok: false, focused: false, refusal: "stale-build" });
+        assert.deepEqual(await harness.window().routing.serveLaunchRequest(undefined, w.index, request, { stillWanted: async () => true }), { ok: false, focused: false, refusal: "stale-build" });
         await nextTurn(); await nextTurn();
         assert.deepEqual(w.drafts, [], "nothing began here");
       } finally { harness.window().packageDrift = null; }
@@ -4708,38 +4621,12 @@ describe("starting a session in the window that has its folder open", () => {
     assert.deepEqual(refusing.drafts, []);
     const silent = await world([{ holderId: "holder-b", uri: "file:///c%3A/b", serve: null }]);
     harness.folders([folderRow()], [there("holder-b")]);
-    assert.equal(await harness.routeLaunchToFolderWindow(silent.index, { path: FOLDER }, { kind: "new-session", folderId: "folder:proj-1" }, 150), true, "handed over: the caller starts nothing");
+    assert.equal(await harness.window().routing.routeLaunch(silent.index, { path: FOLDER }, { kind: "new-session", folderId: "folder:proj-1" }, 150), true, "handed over: the caller starts nothing");
     assert.match(silent.warnings[0] ?? "", /did not respond in time/);
     assert.match(silent.warnings[0] ?? "", /Nothing was started from here/);
     assert.deepEqual(silent.drafts, []);
     const left = (await readdir(path.join(silent.storageDir, "window-requests"))).filter(name => name.endsWith(".request"));
     assert.deepEqual(left, [], "the unanswered request is withdrawn, so the window cannot start it late");
-  });
-
-  it("ends its wait at the deadline even when VS Code never finishes focusing the window, and withdraws the request", async () => {
-    const w = await world([{ holderId: "holder-b", uri: "file:///c%3A/b", serve: null }]);
-    harness.folders([folderRow()], [there("holder-b")]);
-    harness.commandHandler(() => new Promise(() => {}));
-    const started = Date.now();
-    assert.equal(await harness.routeLaunchToFolderWindow(w.index, { path: FOLDER }, { kind: "new-session", folderId: "folder:proj-1" }, 200), true);
-    assert.ok(Date.now() - started < 3_000, "the command is not held by the focus command");
-    assert.match(w.warnings[0] ?? "", /did not respond in time/);
-    const left = (await readdir(path.join(w.storageDir, "window-requests"))).filter(name => name.endsWith(".request"));
-    assert.deepEqual(left, []);
-    harness.commandHandler(null);
-  });
-
-  it("says the session may have started when VS Code fails to focus a window that was asked, and withdraws the request", async () => {
-    const w = await world([{ holderId: "holder-b", uri: "file:///c%3A/b", serve: null }]);
-    harness.folders([folderRow()], [there("holder-b")]);
-    harness.commandHandler(() => { throw new Error("no such window"); });
-    assert.equal(await harness.routeLaunchToFolderWindow(w.index, { path: FOLDER }, { kind: "new-session", folderId: "folder:proj-1" }, 3_000), true);
-    assert.match(w.warnings[0] ?? "", /could not bring the window that has this folder open forward/);
-    assert.match(w.warnings[0] ?? "", /may have started there/);
-    assert.deepEqual(w.drafts, []);
-    const left = (await readdir(path.join(w.storageDir, "window-requests"))).filter(name => name.endsWith(".request"));
-    assert.deepEqual(left, []);
-    harness.commandHandler(null);
   });
 
   it("starts here, whatever other windows have open, when omp.launchInFolderWindow is off", async () => {
@@ -4766,27 +4653,6 @@ describe("starting a session in the window that has its folder open", () => {
   describe("opening a session row", () => {
     const TAB = "tab:99999999-1111-4222-8333-444444444444";
     const entry = { tabId: TAB, cwd: FOLDER };
-
-    it("hands a stopped session of a folder only another window has open to that window, in the view asked for", async () => {
-      const w = await world([{ holderId: "holder-b", uri: URI.file("C:/omp-vscode/proj").toString(), serve: { ok: true, focused: true } }]);
-      (w.index as { get: unknown }).get = () => entry;
-      harness.folders([folderRow()], [there("holder-b")]);
-      assert.equal(await harness.routeSessionOpen(w.index, TAB, "resumed", "terminal"), true);
-      const request = w.served[0]!;
-      assert.deepEqual(request.kind === "launch" ? [request.launch, request.workspace] : null, [{ kind: "open-session", tabId: TAB, verb: "resumed", mode: "terminal" }, workspaceFolder]);
-      assert.equal(w.calls[0]?.[0], "vscode.openFolder");
-    });
-
-    it("leaves alone a session when this window has the folder, and one it already shows only to look at", async () => {
-      const w = await world([{ holderId: "holder-b", uri: "file:///c%3A/b", serve: { ok: true, focused: true } }]);
-      (w.index as { get: unknown }).get = () => entry;
-      harness.folders([folderRow({ openHere: true })], [here, there("holder-b")]);
-      assert.equal(await harness.routeSessionOpen(w.index, TAB, "resumed", null), false, "the folder is open here");
-      harness.folders([folderRow()], [there("holder-b")]);
-      harness.state(TAB);
-      assert.equal(await harness.routeSessionOpen(w.index, TAB, "opened", null), false, "an editor this window already has is only revealed");
-      assert.deepEqual([w.served, w.calls], [[], []]);
-    });
 
     it("switches to the window that holds the session, before anything is asked or launched, when it is opened in an explicit view", async () => {
       const holder = harness.createClaimHolder();
@@ -4824,50 +4690,11 @@ describe("starting a session in the window that has its folder open", () => {
     it("starts the launch here through the ordinary path, and answers on admission", async () => {
       const w = await world([]);
       harness.folders([folderRow({ openHere: true, openElsewhere: false })], [here]);
-      const outcome = await harness.serveLaunchRequest(undefined, w.index, request({ kind: "new-session", folderId: "folder:proj-1" }), wanted);
+      const outcome = await harness.window().routing.serveLaunchRequest(undefined, w.index, request({ kind: "new-session", folderId: "folder:proj-1" }), wanted);
       assert.deepEqual(outcome, { ok: true, focused: true });
       await nextTurn(); await nextTurn();
       assert.deepEqual(w.drafts, [{ cwd: FOLDER }], "the same draft a click here makes");
       assert.deepEqual(harness.errors().length, 1, "what the launch then reports it reports here (the fixture draft refuses)");
-    });
-
-    it("refuses a request whose folder or session does not stand under the workspace it names, though this window has both", async () => {
-      const w = await world([]);
-      harness.folders([folderRow({ openHere: true }), folderRow({ id: "folder:other-1", path: "C:/omp-vscode/other", openHere: true })], [here]);
-      const refused = { ok: false, focused: false };
-      assert.deepEqual(await harness.serveLaunchRequest(undefined, w.index, request({ kind: "new-session", folderId: "folder:other-1" }), wanted), refused, "another folder this window shows is not the workspace the request names");
-      assert.deepEqual(await harness.serveLaunchRequest(undefined, w.index, request({ kind: "resume-folder", folderId: "folder:other-1" }, { path: FOLDER, match: "root" }), wanted), refused, "and no folder stands under a root that is not a Unity project it holds");
-      (w.index as { get: unknown }).get = () => ({ tabId: "tab:x", cwd: "C:/omp-vscode/other" });
-      assert.deepEqual(await harness.serveLaunchRequest(undefined, w.index, request({ kind: "open-session", tabId: "tab:x", verb: "resumed", mode: null }), wanted), refused, "nor a session of another folder");
-      await nextTurn();
-      assert.deepEqual(w.drafts, []);
-    });
-
-    it("looks again at this window after its last asynchronous step: a workspace or folder that went away meanwhile starts nothing", async () => {
-      const w = await world([]);
-      let open = true;
-      harness.folders([folderRow({ openHere: true })], () => open ? [here] : []);
-      const refused = { ok: false, focused: false };
-      assert.deepEqual(await harness.serveLaunchRequest(undefined, w.index, request({ kind: "new-session", folderId: "folder:proj-1" }), { stillWanted: async () => { open = false; return true; } }), refused, "the workspace was closed while the requester was asked");
-      const rows = [folderRow({ openHere: true })];
-      harness.folders(rows, [here]);
-      assert.deepEqual(await harness.serveLaunchRequest(undefined, w.index, request({ kind: "new-session", folderId: "folder:proj-1" }), { stillWanted: async () => { rows.length = 0; return true; } }), refused, "the folder left Sessions while the requester was asked");
-      await nextTurn();
-      assert.deepEqual(w.drafts, []);
-    });
-
-    it("fences the target it validated: a session whose working directory changed, or a folder that moved, during admission starts nothing", async () => {
-      const w = await world([]);
-      let cwd = FOLDER;
-      (w.index as { get: unknown }).get = () => ({ tabId: "tab:x", cwd });
-      harness.folders([folderRow({ openHere: true })], [here]);
-      const refused = { ok: false, focused: false };
-      assert.deepEqual(await harness.serveLaunchRequest(undefined, w.index, request({ kind: "open-session", tabId: "tab:x", verb: "resumed", mode: null }), { stillWanted: async () => { cwd = FOLDER + "/elsewhere"; return true; } }), refused);
-      const rows = [folderRow({ openHere: true })];
-      harness.folders(rows, [here]);
-      assert.deepEqual(await harness.serveLaunchRequest(undefined, w.index, request({ kind: "new-session", folderId: "folder:proj-1" }), { stillWanted: async () => { rows[0] = folderRow({ openHere: true, path: "C:/omp-vscode/proj-moved" }); return true; } }), refused);
-      await nextTurn();
-      assert.deepEqual(w.drafts, []);
     });
 
     it("never changes the view of a session that became live here while the launch was admitted", async () => {
@@ -4879,58 +4706,12 @@ describe("starting a session in the window that has its folder open", () => {
       state.panel = { webview: { postMessage: async () => true }, reveal: () => {}, dispose: () => {} };
       const live = { kind: "terminal", stopping: false, handle: { state: "running" } };
       const before = state.lastOpenRequest;
-      const outcome = await harness.serveLaunchRequest(undefined, w.index, request({ kind: "open-session", tabId: TAB, verb: "resumed", mode: "chat" }), { stillWanted: async () => { state.runtime = live; return true; } });
+      const outcome = await harness.window().routing.serveLaunchRequest(undefined, w.index, request({ kind: "open-session", tabId: TAB, verb: "resumed", mode: "chat" }), { stillWanted: async () => { state.runtime = live; return true; } });
       assert.equal(outcome.ok, true);
       await nextTurn(); await nextTurn();
       assert.equal(state.lastOpenRequest, before, "no view change was begun for the live session");
       assert.equal(state.mode, "chat");
       assert.equal(state.runtime, live);
-      assert.deepEqual(w.drafts, []);
-    });
-
-    it("reads the other windows' records before it decides, as a window that has just started has read none", async () => {
-      const w = await world([]);
-      const rows: ReturnType<typeof folderRow>[] = [];
-      harness.folders(rows, [here]);
-      let refreshed = 0;
-      harness.window().windowRegistry = {
-        setSnapshot: () => true,
-        windows: () => [],
-        refresh: async () => { refreshed++; rows.push(folderRow({ openHere: true })); return true; },
-      };
-      assert.deepEqual(await harness.serveLaunchRequest(undefined, w.index, request({ kind: "new-session", folderId: "folder:proj-1" }), wanted), { ok: true, focused: true });
-      assert.equal(refreshed, 1);
-      await nextTurn(); await nextTurn();
-      assert.deepEqual(w.drafts, [{ cwd: FOLDER }]);
-    });
-
-    it("waits for a window that has just started to be ready, so a launch that arrives early is not refused", async () => {
-      const w = await world([]);
-      const rows: ReturnType<typeof folderRow>[] = [];
-      harness.folders(rows, [here]);
-      harness.window().resolveAgentRoots = async () => {
-        await new Promise(resolve => setTimeout(resolve, 60));
-        rows.push(folderRow({ openHere: true }));
-      };
-      try {
-        assert.deepEqual(await harness.serveLaunchRequest(undefined, w.index, request({ kind: "new-session", folderId: "folder:proj-1" }), wanted), { ok: true, focused: true });
-      } finally { harness.window().resolveAgentRoots = async () => {}; }
-      await nextTurn(); await nextTurn();
-      assert.deepEqual(w.drafts, [{ cwd: FOLDER }]);
-    });
-
-    it("refuses what this window cannot do itself, and starts nothing", async () => {
-      const w = await world([]);
-      const refused = { ok: false, focused: false };
-      harness.folders([folderRow()], [there("holder-b")]);
-      assert.deepEqual(await harness.serveLaunchRequest(undefined, w.index, request({ kind: "new-session", folderId: "folder:proj-1" }), wanted), refused, "this window does not have the folder open");
-      harness.folders([folderRow({ openHere: true })], [here]);
-      assert.deepEqual(await harness.serveLaunchRequest(undefined, w.index, request({ kind: "new-session", folderId: "folder:unknown" }), wanted), refused, "a folder this window does not show");
-      assert.deepEqual(await harness.serveLaunchRequest(undefined, w.index, request({ kind: "open-session", tabId: "tab:nobody", verb: "resumed", mode: null }), wanted), refused, "a session this window does not list");
-      assert.deepEqual(await harness.serveLaunchRequest(undefined, w.index, request({ kind: "new-session", folderId: "folder:proj-1" }), { stillWanted: async () => false }), refused, "the requester stopped waiting");
-      harness.folders([folderRow({ openHere: true })], (_folderPath, options) => options?.exact === true ? [] : [here]);
-      assert.deepEqual(await harness.serveLaunchRequest(undefined, w.index, request({ kind: "new-session", folderId: "folder:proj-1" }, { path: FOLDER, match: "root" }), wanted), refused, "a workspace root this window does not have, whatever agent root it shows");
-      await nextTurn();
       assert.deepEqual(w.drafts, []);
     });
   });
@@ -4992,17 +4773,6 @@ describe("starting a session in the window that has its folder open", () => {
       const request = claimed[0]!;
       assert.deepEqual(request.kind === "launch" ? [request.launch, request.workspace, request.to] : null, [launch, { path: unity, match: "root" }, "holder-new"]);
       assert.deepEqual([w.drafts, w.warnings, w.informed], [[], [], []], "nothing here, and silent when the new window answers");
-    });
-
-    it("says so, withdraws the launch and starts nothing here when the new window never answers", async () => {
-      const repo = await repoWith("repo-silent", "omp-vscode");
-      const w = await world([]);
-      harness.folders([unityRow(repo)], opening({}));
-      assert.equal(await harness.routeLaunchToFolderWindow(w.index, { path: repo }, launch, 150), true);
-      assert.match(w.warnings[0] ?? "", /did not respond in time/);
-      assert.deepEqual(w.drafts, []);
-      const left = (await readdir(path.join(w.storageDir, "pending-launches"))).filter(name => name.endsWith(".pending"));
-      assert.deepEqual(left, [], "a window that opens later must not start a launch nobody waits for");
     });
 
     it("tells the user when the new window took the launch but could not be brought to the front", async () => {
@@ -5085,8 +4855,6 @@ describe("starting a session in the window that has its folder open", () => {
 describe("serving another window's request to select a session's tab", () => {
   const tabFor = (n: number) => `tab:88888888-2222-4333-8444-55555555555${n}`;
   const ours = { ok: true, claim: { verifiable: true, holderId: "fixture-window", pid: process.pid, ownerGeneration: OWNER, windowUri: null } };
-  const elsewhere = { ok: true, claim: { verifiable: true, holderId: "another-window", pid: process.pid, ownerGeneration: OWNER, windowUri: null } };
-  const earlierRun = { ok: true, claim: { ...ours.claim, ownerGeneration: "a-generation-this-window-does-not-record" } };
   const wanted = { stillWanted: async () => true };
   const refused = { ok: false, focused: false };
   /** The request was made at this time; a binding committed before it is the one the requester saw. */
@@ -5117,78 +4885,14 @@ describe("serving another window's request to select a session's tab", () => {
 
   it("selects the editor it already has and requests nothing else", async () => {
     const { index, calls, request } = setup(1);
-    assert.deepEqual(await harness.selectHeldSessionTab(index, request, wanted), { ok: true, focused: true });
+    assert.deepEqual(await harness.window().routing.selectHeldTab(index, request, wanted), { ok: true, focused: true });
     assert.deepEqual(calls, [["workbench.action.openEditorAtIndex", 0]], "the tab is selected; no open, restore, launch or mode change is requested");
-    finish();
-  });
-
-  it("refuses, selecting nothing, when this window records another run than the request names", async () => {
-    const { index, calls, request } = setup(2);
-    assert.deepEqual(await harness.selectHeldSessionTab(index, { ...request, incarnation: `${OWNER}_an-earlier-launch` }, wanted), refused);
-    assert.deepEqual(calls, []);
-    finish();
-  });
-
-  it("refuses, selecting nothing, when the claim is not this window's or is of another generation, or when the requester gave up", async () => {
-    const { index, loose, calls, request } = setup(3);
-    loose.observeOwnership = async () => elsewhere;
-    assert.deepEqual(await harness.selectHeldSessionTab(index, request, wanted), refused);
-    loose.observeOwnership = async () => earlierRun;
-    assert.deepEqual(await harness.selectHeldSessionTab(index, request, wanted), refused, "the claim names this window but not the generation the catalog records");
-    loose.observeOwnership = async () => ours;
-    assert.deepEqual(await harness.selectHeldSessionTab(index, request, { stillWanted: async () => false }), refused);
-    assert.deepEqual(calls, []);
-    finish();
-  });
-
-  it("refuses, selecting nothing, for a session it has no editor for, and when it has no live host to serve it", async () => {
-    const { index, loose, calls, request } = setup(4);
-    assert.deepEqual(await harness.selectHeldSessionTab(index, { ...request, tabId: tabFor(5) }, wanted), refused);
-    loose.hasLiveHost = () => false;
-    assert.deepEqual(await harness.selectHeldSessionTab(index, request, wanted), refused, "showing a not-yet-revived editor could otherwise start a restore of a session nothing serves");
-    assert.deepEqual(calls, []);
-    finish();
-  });
-
-  it("refuses a request that names another binding of the editor than the one now serving the session (a native handover and back)", async () => {
-    const { index, binding, calls, request } = setup(6);
-    binding.generation = 4;
-    assert.deepEqual(await harness.selectHeldSessionTab(index, request, wanted), refused);
-    assert.deepEqual(calls, []);
-    assert.deepEqual(await harness.selectHeldSessionTab(index, { ...request, binding: null }, wanted), { ok: true, focused: true }, "a request that saw no published binding is fenced by the run alone");
-    finish();
-  });
-
-  it("does not select for a requester that gave up while the claim was being read", async () => {
-    const { index, loose, calls, request } = setup(9);
-    let release!: () => void;
-    const stalled = new Promise<void>(resolve => { release = resolve; });
-    let wantedNow = true;
-    loose.observeOwnership = async () => { await stalled; return ours; };
-    const pending = harness.selectHeldSessionTab(index, request, { stillWanted: async () => wantedNow });
-    wantedNow = false;
-    release();
-    assert.deepEqual(await pending, refused);
-    assert.deepEqual(calls, []);
-    finish();
-  });
-
-  it("does not report success when the claim or the binding changed while it selected", async () => {
-    const claimMoved = setup(7);
-    let reads = 0;
-    claimMoved.loose.observeOwnership = async () => (++reads === 1 ? ours : elsewhere);
-    assert.deepEqual(await harness.selectHeldSessionTab(claimMoved.index, claimMoved.request, wanted), refused);
-    finish();
-    const rebound = setup(8);
-    let looks = 2;
-    rebound.loose.slotBinding = () => ({ ...rebound.binding, generation: ++looks });
-    assert.deepEqual(await harness.selectHeldSessionTab(rebound.index, rebound.request, wanted), refused);
     finish();
   });
 
   it("defers the serializer's restore of a tab it is showing, however late VS Code revives the editor, and only once", async () => {
     const { index, loose, request } = setup(5);
-    assert.deepEqual(await harness.selectHeldSessionTab(index, request, wanted), { ok: true, focused: true });
+    assert.deepEqual(await harness.window().routing.selectHeldTab(index, request, wanted), { ok: true, focused: true });
     assert.ok(harness.window().requestSelections.has(request.tabId), "the tab is marked until its editor is revived");
     // Nothing releases the mark on time: the serializer reaches the helper long after the request was answered.
     await new Promise(resolve => setTimeout(resolve, 100));
@@ -5196,7 +4900,7 @@ describe("serving another window's request to select a session's tab", () => {
     loose.hasLiveHost = () => false;
     const touched: string[] = [];
     const watched = new Proxy(index as object, { get: (target, name, receiver) => { touched.push(String(name)); return Reflect.get(target, name, receiver); } });
-    await harness.openRestoredTabIfUncovered({}, watched, request.tabId);
+    await harness.window().routing.openRestoredTabIfUncovered({}, watched, request.tabId);
     assert.deepEqual(touched.filter(name => !["get", "hasLiveHost"].includes(name)), [], "nothing was opened, restored or claimed");
     assert.equal(harness.window().requestSelections.has(request.tabId), false, "the revival consumed the mark");
     harness.window().requestSelections.clear();
@@ -5207,22 +4911,15 @@ describe("serving another window's request to select a session's tab", () => {
     const { index, loose, calls, request } = setup(1);
     // Another selection wins: the command is issued, VS Code schedules the revival, the tab is not active afterwards.
     harness.commandHandler(() => undefined);
-    assert.deepEqual(await harness.selectHeldSessionTab(index, request, wanted), refused);
+    assert.deepEqual(await harness.window().routing.selectHeldTab(index, request, wanted), refused);
     assert.ok(harness.window().requestSelections.has(request.tabId), "a command may already have triggered the revival");
     void calls;
     loose.hasLiveHost = () => false;
     const touched: string[] = [];
     const watched = new Proxy(index as object, { get: (target, name, receiver) => { touched.push(String(name)); return Reflect.get(target, name, receiver); } });
-    await harness.openRestoredTabIfUncovered({}, watched, request.tabId);
+    await harness.window().routing.openRestoredTabIfUncovered({}, watched, request.tabId);
     assert.deepEqual(touched.filter(name => !["get", "hasLiveHost"].includes(name)), []);
     harness.window().requestSelections.clear();
-    finish();
-  });
-
-  it("refuses a request that names the binding of another editor slot of the same run", async () => {
-    const { index, calls, request } = setup(0);
-    assert.deepEqual(await harness.selectHeldSessionTab(index, { ...request, binding: `${"f".repeat(32)}.3` }, wanted), refused);
-    assert.deepEqual(calls, []);
     finish();
   });
 });

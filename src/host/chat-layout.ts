@@ -68,6 +68,18 @@ export function strayEmptyGroups<G extends LayoutGroup>(groups: readonly G[], is
 	return groups.filter(group => group.tabs.length === 0);
 }
 
+/** Focuses the editor group of one `ViewColumn` (1-based). VS Code offers no command past the eighth. */
+export const EDITOR_GROUP_FOCUS_COMMANDS = [
+	"workbench.action.focusFirstEditorGroup",
+	"workbench.action.focusSecondEditorGroup",
+	"workbench.action.focusThirdEditorGroup",
+	"workbench.action.focusFourthEditorGroup",
+	"workbench.action.focusFifthEditorGroup",
+	"workbench.action.focusSixthEditorGroup",
+	"workbench.action.focusSeventhEditorGroup",
+	"workbench.action.focusEighthEditorGroup",
+];
+
 /** The VS Code calls that arrange the chat group. */
 export interface ChatLayoutApi {
 	executeCommand(command: string): PromiseLike<unknown>;
