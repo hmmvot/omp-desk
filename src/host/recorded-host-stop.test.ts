@@ -26,12 +26,9 @@ import type {
   stopBrokerOwnedHost as stopBrokerOwnedHostType,
 } from "./rpc-reconcile.ts";
 import type { readClaim as readClaimType } from "./session-claim.ts";
-import type {
-  RecordedHostStopPort,
-  SessionIndex as SessionIndexType,
-  SessionIndexEntry,
-  SessionIndexStore,
-} from "./session-index.ts";
+import type { SessionIndex as SessionIndexType, SessionIndexStore } from "./session-index.ts";
+import type { RecordedHostStopPort } from "./session-availability.ts";
+import type { SessionIndexEntry } from "./session-model.ts";
 
 /**
  * The bundle's entry point.

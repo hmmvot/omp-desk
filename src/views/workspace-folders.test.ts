@@ -23,7 +23,7 @@ import {
 	windowFolderId,
 } from "./workspace-folders.ts";
 import type { FolderPathInspector, FolderPathVerdict, WorkspaceFolderStore } from "./workspace-folders.ts";
-import { normalizeSessionIdentityKey, normalizeWorkspaceDirectory } from "../host/session-index.ts";
+import { normalizeSessionIdentityKey, normalizeWorkspaceDirectory } from "../host/session-files.ts";
 
 /** A memento stub: one in-memory value per key, with a switch to make writes fail. */
 function memoryStore(): WorkspaceFolderStore & { readonly raw: () => unknown; failWrites: boolean } {

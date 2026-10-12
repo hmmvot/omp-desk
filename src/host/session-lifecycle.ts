@@ -106,16 +106,11 @@ import {
 } from "./session-claim.ts";
 import type { ObservedClaim, SessionClaim } from "./session-claim.ts";
 import { claimHolderMayBeAlive } from "./session-claim.ts";
-import { acceptOwnerAbsenceEvidence, normalizeSessionIdentityKey, readSessionFileHeader } from "./session-index.ts";
-import type {
-	OwnerAbsenceEvidence,
-	OwnerReconciler,
-	OwnerVerdict,
-	RecordedHost,
-	RecordedOwnership,
-	SessionIndex,
-	SessionIndexEntry,
-} from "./session-index.ts";
+import { acceptOwnerAbsenceEvidence } from "./session-availability.ts";
+import type { OwnerAbsenceEvidence, OwnerReconciler, OwnerVerdict } from "./session-availability.ts";
+import { normalizeSessionIdentityKey, readSessionFileHeader } from "./session-files.ts";
+import type { SessionIndex } from "./session-index.ts";
+import type { RecordedHost, RecordedOwnership, SessionIndexEntry } from "./session-model.ts";
 import type { TabLifecycleLease } from "./tab-lifecycle.ts";
 
 /** OMP's extension for a session transcript. */

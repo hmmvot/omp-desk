@@ -43,33 +43,32 @@ import type { NativeControlBootstrap, OmpCommand, OmpPackageRoot } from "./host/
 import {
   SESSION_INDEX_LOCAL_KEY,
   SESSION_INDEX_STORAGE_KEY,
-  isManagedHost,
   mergeSessionIndexRecords,
-  normalizeSessionIdentityKey,
-  readSessionFileHeader,
   SessionIndex,
 } from "./host/session-index";
+import { isManagedHost } from "./host/session-model";
+import { normalizeSessionIdentityKey, readSessionFileHeader } from "./host/session-files";
 import { confirmedSessionDeletion, deleteManagedSession, inspectSessionDeletion } from "./host/session-lifecycle";
 import type { SessionDeletionOptions, SessionDeletionResult, SessionDeletionSubject } from "./host/session-lifecycle";
+import type {
+  OmpHostAttachRequest,
+  OmpHostAttachResult,
+  OmpHostLaunchRequest,
+  OmpHostLaunchResult,
+  OmpHostLauncher,
+  RestoreOutcome,
+  RestoreReport,
+  SessionConflictKind,
+} from "./host/session-index";
 import type {
   AttachPin,
   DeferredReconcileReport,
   DeferredReconciliation,
-  OmpHostAttachRequest,
-  OmpHostAttachResult,
-  OmpHostHandle,
-  OmpHostLaunchRequest,
-  OmpHostLaunchResult,
-  OmpHostLauncher,
   OwnerReconciler,
   RecordedHostStopPort,
-  RestoreOutcome,
-  RestoreReport,
-  SessionConflictKind,
-  SessionFileHeader,
-  SessionIndexEntry,
-} from "./host/session-index";
-import type { SessionViewMode } from "./host/session-index";
+} from "./host/session-availability";
+import type { OmpHostHandle, SessionIndexEntry, SessionViewMode } from "./host/session-model";
+import type { SessionFileHeader } from "./host/session-files";
 import { claimHolderMayBeAlive, setProcessProbeObserver } from "./host/session-claim";
 import { holderSeemsAlive } from "./host/holder-liveness";
 import { claimFileNameFor, startClaimWatch } from "./host/claim-watch";

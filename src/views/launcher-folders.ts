@@ -35,7 +35,7 @@ import type {
 	WorkspaceFolderRegistry,
 	WorkspaceFolderStore,
 } from "./workspace-folders.ts";
-import { normalizeWorkspaceDirectory } from "../host/session-index.ts";
+import { normalizeWorkspaceDirectory } from "../host/session-files.ts";
 
 /** Window-scoped key holding the ids of unpinned folders whose node the user collapsed. */
 export const WINDOW_FOLDER_COLLAPSED_KEY = "omp.windowFolderCollapsed.v1";

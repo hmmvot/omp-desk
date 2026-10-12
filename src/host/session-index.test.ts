@@ -15,27 +15,19 @@
 
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { after, describe, it } from "node:test";
 import { claimPathFor, createOwnerGeneration, acquireClaim, createClaimHolder, readClaim } from "./session-claim.ts";
-import type { ClaimHolder, ObservedClaim } from "./session-claim.ts";
+import type { ClaimHolder } from "./session-claim.ts";
 import {
 	SESSION_INDEX_STORAGE_KEY,
-	acceptOwnerAbsenceEvidence,
-	classifySessionAvailability,
-	isAbsoluteWorkspaceDirectory,
-	isRpcHost,
-	parseSessionFileHeader,
 	SessionIndex,
 	SessionIndexError,
-	normalizeWorkspaceDirectory,
-	readSessionFileActivity,
-	readSessionFileHeader,
-	readSessionFileHeaderReading,
-	resolveSessionOrigin,
 } from "./session-index.ts";
+import { isAbsoluteWorkspaceDirectory, normalizeWorkspaceDirectory } from "./session-files.ts";
+import { isRpcHost, resolveSessionOrigin } from "./session-model.ts";
 import {
 	createNativeDeletionEvidenceStore,
 	deleteManagedSession,
@@ -47,25 +39,24 @@ import type { SessionDeletionOptions } from "./session-lifecycle.ts";
 import type {
 	AttachPin,
 	DeferredReconciliation,
-	OmpHostAttachRequest,
-	OmpHostAttachResult,
-	OmpHostHandle,
-	OmpHostLaunchRequest,
-	OmpHostLaunchResult,
-	OmpHostLauncher,
 	OwnerAbsenceEvidence,
 	OwnerAbsenceSubject,
 	OwnerReconcileRequest,
 	OwnerReconciler,
 	OwnerVerdict,
-	RecordedHost,
 	RecordedHostStopPort,
 	RecordedHostStopResult,
-	RunIntent,
-	SessionIndexEntry,
+} from "./session-availability.ts";
+import type {
+	OmpHostAttachRequest,
+	OmpHostAttachResult,
+	OmpHostLaunchRequest,
+	OmpHostLaunchResult,
+	OmpHostLauncher,
 	SessionIndexStore,
 	TrackSessionInput,
 } from "./session-index.ts";
+import type { OmpHostHandle, RecordedHost, RunIntent, SessionIndexEntry } from "./session-model.ts";
 import { catalogPaths, createCatalogStore } from "./profile-catalog.ts";
 import { BROKER_SLOTS_KEY, createBrokerSlotStore, createHostSlotId, mergeBrokerSlotRecords } from "./broker-slots.ts";
 import { mergeSessionIndexRecords } from "./session-index.ts";
@@ -1227,135 +1218,6 @@ describe("live draft reattach", () => {
 	});
 });
 
-// ── Classification policy ───────────────────────────────────────────────────
-
-describe("availability policy", () => {
-	it("never accepts absence evidence about a host this index never launched", async () => {
-		const entry = await draftEntry();
-		const rpc = {
-			slot: PROVEN_BROKER_SLOT,
-			brokerId: "broker-id",
-			brokerGeneration: "broker-gen-9",
-			brokerPid: 800,
-			brokerCreationTime: "133700000000000001",
-			childPid: 900,
-			childCreationTime: "133700000000000002",
-		};
-		const gone = {
-			kind: "recorded-broker-and-child-gone",
-			slot: rpc.slot,
-			brokerGeneration: rpc.brokerGeneration,
-			childPid: 900,
-			childCreationTime: rpc.childCreationTime,
-		} as const;
-		const exited = {
-			kind: "broker-child-exited",
-			slot: rpc.slot,
-			childPid: 900,
-			brokerGeneration: rpc.brokerGeneration,
-		} as const;
-		assert.equal(acceptOwnerAbsenceEvidence(entry, { kind: "no-recorded-host" }), true);
-		assert.equal(acceptOwnerAbsenceEvidence(entry, { kind: "claim-released" }), false);
-		assert.equal(acceptOwnerAbsenceEvidence(entry, gone), false);
-		assert.equal(acceptOwnerAbsenceEvidence(entry, exited), false);
-
-		const recordedHost: RecordedHost = {
-			pid: 900,
-			instanceId: null,
-			generation: null,
-			sessionId: "S",
-			startedAt: "2026-09-24T11:00:00.000Z",
-			transport: "rpc",
-			rpc,
-		};
-		const withHost: SessionIndexEntry = { ...entry, host: recordedHost };
-		assert.equal(acceptOwnerAbsenceEvidence(withHost, { kind: "no-recorded-host" }), false);
-		assert.equal(acceptOwnerAbsenceEvidence(withHost, gone), true);
-		assert.equal(acceptOwnerAbsenceEvidence(withHost, exited), true);
-		// Every fact of the recorded identity must match: another slot, broker
-		// generation, child pid or child creation time is a different process.
-		assert.equal(acceptOwnerAbsenceEvidence(withHost, { ...gone, slot: "host:other" }), false);
-		assert.equal(acceptOwnerAbsenceEvidence(withHost, { ...gone, brokerGeneration: "broker-gen-other" }), false);
-		assert.equal(acceptOwnerAbsenceEvidence(withHost, { ...gone, childPid: 901 }), false);
-		assert.equal(acceptOwnerAbsenceEvidence(withHost, { ...gone, childCreationTime: "133700000000000003" }), false);
-		assert.equal(acceptOwnerAbsenceEvidence(withHost, { ...exited, childPid: 901 }), false);
-		assert.equal(acceptOwnerAbsenceEvidence(withHost, { ...exited, brokerGeneration: "broker-gen-other" }), false);
-
-		// A launch attempt whose outcome was never read names no child at all, so
-		// nothing that is later observed gone can prove anything about it.
-		const unread: SessionIndexEntry = {
-			...withHost,
-			host: { ...recordedHost, pid: null, rpc: { ...rpc, childPid: null, childCreationTime: null } },
-		};
-		assert.equal(acceptOwnerAbsenceEvidence(unread, gone), false);
-		assert.equal(acceptOwnerAbsenceEvidence(unread, exited), false);
-		assert.equal(acceptOwnerAbsenceEvidence(unread, { kind: "no-recorded-host" }), false);
-
-		// A legacy record has no creation time to compare: only the reporting child's
-		// pid can be matched, and the combined item is never accepted for it.
-		const legacy: SessionIndexEntry = { ...withHost, host: { ...recordedHost, transport: undefined, rpc: undefined } };
-		assert.equal(acceptOwnerAbsenceEvidence(legacy, gone), false);
-		assert.equal(acceptOwnerAbsenceEvidence(legacy, { ...exited, brokerGeneration: null }), true);
-		assert.equal(acceptOwnerAbsenceEvidence(legacy, { ...exited, childPid: 901, brokerGeneration: null }), false);
-
-		// A release that predates the recorded host does not clear it.
-		const staleRelease: SessionIndexEntry = {
-			...withHost,
-			ownership: {
-				ownerGeneration: entry.ownership?.ownerGeneration ?? "g",
-				draftIdentity: null,
-				releasedAt: "2026-09-24T09:00:00.000Z",
-			},
-		};
-		assert.equal(acceptOwnerAbsenceEvidence(staleRelease, { kind: "claim-released" }), false);
-	});
-
-
-	it("binds attach to the recorded broker child independently of stale or missing claims", async () => {
-		const { tabId, index, handle } = await restartedWithRecordedHost();
-		const entry = index.get(tabId);
-		assert.ok(entry);
-		const generation = entry.ownership?.ownerGeneration;
-		assert.ok(generation);
-
-		const observed = (ownerGeneration: string): ObservedClaim => ({
-			claimPath: "claims/session.claim",
-			normalizedIdentity: "identity",
-			verifiable: true,
-			ownerGeneration,
-			holderId: "holder-of-record",
-			identity: null,
-			pid: 1,
-			createdAt: "2026-09-24T10:00:00.000Z",
-		});
-		const pin = provenPin(handle);
-		const classify = (claim: ObservedClaim | null, host: OmpHostHandle = handle) =>
-			classifySessionAvailability({
-				entry,
-				fileExists: true,
-				claim,
-				localLive: false,
-				verdict: { kind: "attachable", host, pin, detail: "same pid, same broker child" },
-			});
-
-		const ours = classify(observed(generation));
-		assert.equal(ours.availability, "live");
-		assert.deepEqual(ours.attachableHost?.rpc, handle.rpc);
-		assert.equal(ours.attachPin, pin, "the transport a verdict proved is published with its host");
-
-		assert.deepEqual(classify(null).attachableHost, handle, "missing claims do not undo positive exact-broker identity");
-		const foreign = classify(observed(createOwnerGeneration()));
-		assert.deepEqual(foreign.attachableHost, handle, "claim acquisition separately excludes only verified-live rivals");
-
-		// A host that does not match the recorded pid is only a live conflict.
-		const mismatched = classify(observed(generation), { ...handle, pid: 999 });
-		assert.equal(mismatched.availability, "live");
-		assert.equal(mismatched.attachableHost, null);
-		assert.match(mismatched.detail, /Not attaching/);
-	});
-
-});
-
 // ── Imported history is a row like any other ────────────────────────────────
 
 /**
@@ -1873,194 +1735,6 @@ describe("persisted rows from earlier versions", () => {
 		// An unexpected value is never read as "this extension created it".
 		assert.equal(resolveSessionOrigin("something-else", ownership), "imported");
 		assert.equal(resolveSessionOrigin("something-else", { ...ownership, draftIdentity: "draft:1" }), "extension");
-	});
-});
-
-// ── Session file header ─────────────────────────────────────────────────────
-
-describe("session file header", () => {
-	/** The physical shape OMP 18.3.0 writes: title slot, then the session header. */
-	function body(options: { slotTitle?: string; headerTitle?: string; extra?: string[] }): string {
-		const slot = JSON.stringify({
-			type: "title",
-			v: 1,
-			title: options.slotTitle ?? "",
-			source: "auto",
-			updatedAt: "2026-09-24T10:00:00.000Z",
-			pad: " ".repeat(8),
-		});
-		const header = JSON.stringify({
-			type: "session",
-			version: 3,
-			id: "S-HEADER",
-			timestamp: "2026-09-24T10:00:00.000Z",
-			cwd: "C:\\projects\\one",
-			...(options.headerTitle === undefined ? {} : { title: options.headerTitle }),
-		});
-		return [slot, header, ...(options.extra ?? [])].join("\n") + "\n";
-	}
-
-	it("reads the title OMP keeps in the fixed-width slot", () => {
-		assert.deepEqual(parseSessionFileHeader(body({ slotTitle: "View omp stats" })), {
-			sessionId: "S-HEADER",
-			cwd: "C:\\projects\\one",
-			title: "View omp stats",
-		});
-	});
-
-	it("prefers the title slot, including an explicit cleared name, and reads legacy header titles", () => {
-		// OMP's current slot is authoritative even when it clears an older header name.
-		assert.equal(parseSessionFileHeader(body({ slotTitle: "renamed", headerTitle: "old" }))?.title, "renamed");
-		assert.equal(parseSessionFileHeader(body({ headerTitle: "old header name" }))?.title, null);
-		assert.equal(parseSessionFileHeader(JSON.stringify({ type: "session", id: "legacy", title: "Legacy title" }))?.title, "Legacy title");
-		// An unnamed session reports no title at all rather than an empty one.
-		assert.equal(parseSessionFileHeader(body({}))?.title, null);
-	});
-
-	it("reports no title for a candidate the slot never named", () => {
-		// A `title_change` entry is a log entry, not the slot: reading it would
-		// report a title OMP's own listing would not.
-		const withChange = body({
-			extra: [
-				JSON.stringify({
-					type: "title_change",
-					id: "0b05dd58",
-					parentId: "aacc56ca",
-					timestamp: "2026-09-24T10:05:00.000Z",
-					title: "appended by a rename",
-					source: "user",
-				}),
-			],
-		});
-		assert.equal(parseSessionFileHeader(withChange)?.title, null);
-		// A slot from a future version is not read as this one.
-		const futureSlot = `${JSON.stringify({ type: "title", v: 2, title: "from the future" })}\n${JSON.stringify({
-			type: "session",
-			id: "S-FUTURE",
-			cwd: "C:\\projects\\one",
-		})}\n`;
-		assert.equal(parseSessionFileHeader(futureSlot)?.title, null);
-	});
-
-	it("needs a session header, not only a title slot", () => {
-		assert.equal(parseSessionFileHeader(""), null);
-		assert.equal(parseSessionFileHeader(`${JSON.stringify({ type: "title", v: 1, title: "orphan" })}\n`), null);
-	});
-
-	it("summarizes only the first user prompt and leaves native and user titles authoritative", () => {
-		const messages = [
-			JSON.stringify({ type: "message", message: { role: "assistant", content: "Not a prompt" } }),
-			JSON.stringify({ type: "message", message: { role: "user", content: [{ type: "text", text: "  Fix the login\n layout  " }, { type: "image", data: "ignored" }] } }),
-			JSON.stringify({ type: "message", message: { role: "user", content: "Not the first prompt" } }),
-		];
-		assert.equal(parseSessionFileHeader(body({ extra: messages }))?.promptTitle, "Fix the login layout");
-		assert.equal(parseSessionFileHeader(body({ slotTitle: "User title", extra: messages }))?.title, "User title");
-		assert.equal(parseSessionFileHeader(body({ slotTitle: "User title", extra: messages }))?.promptTitle, undefined);
-		const long = parseSessionFileHeader(body({ extra: [JSON.stringify({ type: "message", message: { role: "user", content: "x".repeat(100) } })] }))?.promptTitle;
-		assert.equal(long?.length, 60);
-	});
-
-	it("finds the first prompt even beyond the bounded header prefix", async () => {
-		const root = await mkdtemp(path.join(tmpdir(), "omp-prompt-title-"));
-		try {
-			const file = path.join(root, "session.jsonl");
-			await writeFile(file, body({ extra: [
-				JSON.stringify({ type: "metadata", content: "x".repeat(70_000) }),
-				JSON.stringify({ type: "message", message: { role: "user", content: "A descriptive session" } }),
-			] }));
-			assert.equal((await readSessionFileHeader(file))?.promptTitle, "A descriptive session");
-		} finally { await rm(root, { recursive: true, force: true }); }
-	});
-
-	it("re-reads a file only when its stamp changed, which a title rewritten in place does by mtime alone", async () => {
-		const root = await mkdtemp(path.join(tmpdir(), "omp-header-stamp-"));
-		try {
-			const file = path.join(root, "session.jsonl");
-			await writeFile(file, body({ slotTitle: "One" }));
-			const first = await readSessionFileHeaderReading(file, null);
-			assert.equal(first?.header?.title, "One");
-			assert.equal(await readSessionFileHeaderReading(file, first), first, "an unchanged file is not read again");
-			// OMP rewrites the slot in place: the same byte count, a newer mtime.
-			await writeFile(file, body({ slotTitle: "Two" }));
-			await utimes(file, new Date("2026-10-12T12:00:00Z"), new Date("2026-10-12T12:00:00Z"));
-			const second = await readSessionFileHeaderReading(file, first);
-			assert.equal(second?.size, first?.size);
-			assert.equal(second?.header?.title, "Two");
-			assert.equal(await readSessionFileHeaderReading(path.join(root, "missing.jsonl"), first), null);
-		} finally { await rm(root, { recursive: true, force: true }); }
-	});
-});
-
-describe("session file activity", () => {
-	/** One entry as OMP 18.6.3 serializes it: `type`, then `id`, `parentId`, `timestamp`, then the payload. */
-	function entry(type: string, timestamp: string, payload: Record<string, unknown> = {}): string {
-		return JSON.stringify({ type, id: timestamp.slice(11, 19), parentId: null, timestamp, ...payload });
-	}
-	/** A custom message as OMP writes it: the payload comes first and the common fields last. */
-	function customMessage(timestamp: string, content: string): string {
-		return JSON.stringify({ type: "custom_message", customType: "async-result", content, display: true, details: { timestamp: "1999-01-01T00:00:00.000Z" }, attribution: "agent", id: "c1", parentId: null, timestamp });
-	}
-	const head = [
-		JSON.stringify({ type: "title", v: 1, title: "Named" }).padEnd(255, " "),
-		JSON.stringify({ type: "session", version: 3, id: "S-ACTIVITY", timestamp: "2026-10-08T09:00:00.000Z", cwd: "C:\\projects\\one" }),
-	];
-
-	async function withFile(lines: readonly string[], check: (file: string) => Promise<void>, trailingNewline = true): Promise<void> {
-		const root = await mkdtemp(path.join(tmpdir(), "omp-activity-"));
-		try {
-			const file = path.join(root, "session.jsonl");
-			await writeFile(file, `${lines.join("\n")}${trailingNewline ? "\n" : ""}`);
-			await check(file);
-		} finally { await rm(root, { recursive: true, force: true }); }
-	}
-
-	it("reports the last conversation entry, not the bookkeeping OMP appends after it", async () => {
-		await withFile([
-			...head,
-			entry("model_change", "2026-10-08T09:00:01.000Z", { model: "anthropic/claude" }),
-			entry("message", "2026-10-08T10:00:00.000Z", { message: { role: "user", content: "hello" } }),
-			entry("message", "2026-10-08T10:01:00.000Z", { message: { role: "assistant", content: [{ type: "text", text: "hi" }] } }),
-			// A host exit, a resume and a model switch: none of them is the conversation.
-			entry("custom", "2026-10-08T12:00:00.000Z", { customType: "session_exit", data: { reason: "dispose", kind: "normal" } }),
-			entry("thinking_level_change", "2026-10-08T12:05:00.000Z", { thinkingLevel: "high" }),
-			entry("service_tier_change", "2026-10-08T12:05:00.000Z", { serviceTier: null }),
-			entry("model_change", "2026-10-08T12:06:00.000Z", { model: "openai/gpt" }),
-		], async file => {
-			assert.equal((await readSessionFileActivity(file))?.lastConversationAt, "2026-10-08T10:01:00.000Z");
-		});
-	});
-
-	it("reads entries across chunk boundaries, including a payload-first custom message and an unterminated last line", async () => {
-		const bulky = (minute: number) => entry("custom", `2026-10-08T11:${String(minute).padStart(2, "0")}:00.000Z`, {
-			customType: "tool_execution_start", data: { args: "x".repeat(30_000) },
-		});
-		await withFile([
-			...head,
-			entry("message", "2026-10-08T10:00:00.000Z", { message: { role: "assistant", content: "y".repeat(150_000) } }),
-			customMessage("2026-10-08T10:05:00.000Z", "z".repeat(200_000)),
-			bulky(1), bulky(2), bulky(3), bulky(4), bulky(5),
-			entry("custom", "2026-10-08T12:00:00.000Z", { customType: "session_exit" }).slice(0, 40),
-		], async file => {
-			assert.equal((await readSessionFileActivity(file))?.lastConversationAt, "2026-10-08T10:05:00.000Z");
-		}, false);
-		await withFile([
-			...head,
-			entry("message", "2026-10-08T10:00:00.000Z", { message: { role: "assistant", content: "y".repeat(150_000) } }),
-			bulky(1), bulky(2), bulky(3),
-		], async file => {
-			assert.equal((await readSessionFileActivity(file))?.lastConversationAt, "2026-10-08T10:00:00.000Z");
-		});
-	});
-
-	it("tells a file without conversation from a missing one, and re-reads only a changed file", async () => {
-		await withFile([...head, entry("model_change", "2026-10-08T09:00:01.000Z", { model: "anthropic/claude" })], async file => {
-			const empty = await readSessionFileActivity(file);
-			assert.equal(empty?.lastConversationAt, null);
-			assert.equal(await readSessionFileActivity(file, empty), empty, "an unchanged file is not read again");
-			await writeFile(file, `${entry("message", "2026-10-08T10:00:00.000Z", { message: { role: "user", content: "next" } })}\n`, { flag: "a" });
-			assert.equal((await readSessionFileActivity(file, empty))?.lastConversationAt, "2026-10-08T10:00:00.000Z");
-			assert.equal(await readSessionFileActivity(path.join(path.dirname(file), "missing.jsonl")), null);
-		});
 	});
 });
 
@@ -2752,40 +2426,6 @@ describe("working directories", () => {
 
 	/** A drive or POSIX root: the kind of value an earlier version's normalizer reduced to a drive-relative one. */
 	const root = windows ? "C:\\" : "/";
-
-	it("keeps a drive or POSIX root instead of stripping it away", () => {
-		if (windows) {
-			assert.equal(normalizeWorkspaceDirectory("C:\\"), "c:\\");
-			assert.equal(normalizeWorkspaceDirectory("C:/"), "c:\\");
-			assert.equal(normalizeWorkspaceDirectory("C:\\Projects\\"), "c:\\projects");
-			assert.equal(isAbsoluteWorkspaceDirectory("C:\\"), true);
-			assert.equal(isAbsoluteWorkspaceDirectory("\\\\server\\share"), true, "a UNC share is an absolute directory");
-		} else {
-			assert.equal(normalizeWorkspaceDirectory("/"), "/");
-			assert.equal(normalizeWorkspaceDirectory("/Projects/"), "/Projects");
-			assert.equal(isAbsoluteWorkspaceDirectory("/"), true);
-		}
-		assert.equal(
-			isAbsoluteWorkspaceDirectory("\\foo"),
-			false,
-			"a drive-less rooted path is drive-relative, so it is not an absolute directory",
-		);
-	});
-
-	it("keeps a value that is not absolute instead of resolving it against this process", () => {
-		const host = normalizeWorkspaceDirectory(process.cwd());
-		for (const value of ["", "   ", "C:", "relative", "relative/dir", "\\foo"]) {
-			assert.notEqual(
-				normalizeWorkspaceDirectory(value),
-				host,
-				`${JSON.stringify(value)} must never become this process's own folder`,
-			);
-			assert.equal(isAbsoluteWorkspaceDirectory(value), false, `${JSON.stringify(value)} is not an absolute directory`);
-		}
-		assert.equal(normalizeWorkspaceDirectory(""), "");
-		assert.equal(normalizeWorkspaceDirectory("C:"), windows ? "c:" : "C:");
-		assert.equal(normalizeWorkspaceDirectory("\\foo"), "\\foo");
-	});
 
 	it("reserves a draft in a drive or POSIX root and keeps it a usable absolute directory", async () => {
 		const { claimDir } = await tempWorkspace();

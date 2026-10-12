@@ -39,8 +39,8 @@ import {
 	normalizeSessionIdentityKey,
 	normalizeWorkspaceDirectory,
 	readSessionFileHeader,
-} from "./session-index.ts";
-import type { SessionFileHeader } from "./session-index.ts";
+} from "./session-files.ts";
+import type { SessionFileHeader } from "./session-files.ts";
 import type { SessionDeletionSubject } from "./session-lifecycle.ts";
 
 /**

@@ -18,7 +18,7 @@ import * as path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { setImmediate as nextTurn } from "node:timers/promises";
 
-import type { SessionIndexEntry } from "../host/session-index.ts";
+import type { SessionIndexEntry } from "../host/session-model.ts";
 import type { FolderPathInspector, WorkspaceFolderStore } from "./workspace-folders.ts";
 import type { SessionActivityFacts, SessionLauncherFacts, SessionOwnershipFacts, SessionTreeItem, SessionTreeProvider, WorkspaceFolderTreeItem } from "./session-tree.ts";
 import type { SessionsGrouping } from "./session-order.ts";

@@ -50,8 +50,10 @@
  */
 import * as path from "node:path";
 import * as vscode from "vscode";
-import { readSessionFileActivity, readSessionFileHeaderReading } from "../host/session-index";
-import type { RestoreOutcome, SessionFileActivity, SessionFileHeader, SessionFileHeaderReading, SessionIndexEntry } from "../host/session-index";
+import { readSessionFileActivity, readSessionFileHeaderReading } from "../host/session-files";
+import type { SessionFileActivity, SessionFileHeader, SessionFileHeaderReading } from "../host/session-files";
+import type { RestoreOutcome } from "../host/session-index";
+import type { SessionIndexEntry } from "../host/session-model";
 import { folderOwnsCwd } from "./workspace-folders";
 import { relativeAge } from "../shared/relative-age";
 import type { LauncherFolder } from "./launcher-folders";

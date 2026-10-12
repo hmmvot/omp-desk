@@ -10,7 +10,7 @@ import { recordedRpcIdentityOf, resumeWorkingDirectory } from "./rpc-launch";
 import type { RpcHostRuntime, RpcLaunchRequest, RpcOmpLaunchSpec } from "./rpc-launch";
 import { brokerNativeGenerationReader, verifyPinnedBrokerAttachment } from "./rpc-reconcile";
 import type { BrokerPin, NativeGenerationReader, NativeStopVerdict } from "./rpc-reconcile";
-import { readSessionFileHeader } from "./session-index";
+import { readSessionFileHeader } from "./session-files";
 
 export interface NativeHostRuntime extends Omit<RpcHostRuntime, "kind" | "handle"> {
 	readonly kind: "terminal";

@@ -31,11 +31,7 @@
  *   drive-relative or empty value.
  */
 import { createHash } from "node:crypto";
-import {
-	isAbsoluteWorkspaceDirectory,
-	normalizeSessionIdentityKey,
-	normalizeWorkspaceDirectory,
-} from "../host/session-index.ts";
+import { isAbsoluteWorkspaceDirectory, normalizeSessionIdentityKey, normalizeWorkspaceDirectory } from "../host/session-files.ts";
 import { mergeKeyedArray } from "../host/catalog-merge.ts";
 import type { RecordConflictDraft } from "../host/catalog-merge.ts";
 

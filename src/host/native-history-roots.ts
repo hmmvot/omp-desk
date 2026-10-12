@@ -41,7 +41,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { describeError, probePathKind } from "./native-history.ts";
 import type { NativeHistoryDiagnostic, NativeHistoryRoot, NativeHistoryRootSource } from "./native-history.ts";
-import { normalizeSessionIdentityKey } from "./session-index.ts";
+import { normalizeSessionIdentityKey } from "./session-files.ts";
 
 /**
  * A path the index already knows about: an entry's exact session file, or the

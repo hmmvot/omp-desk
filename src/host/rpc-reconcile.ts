@@ -22,15 +22,15 @@ import { isPtyProcessAlive, queryPtyProcessIdentity } from "./pty-identity";
 import type { PtyIdentityReading } from "./pty-identity";
 import type { PtyBrokerClient } from "./pty-client";
 import type { PtyBrokerRecord, PtyKind, PtyStopResult } from "./pty-protocol";
-import { isManagedHost } from "./session-index";
+import { isManagedHost } from "./session-model";
+import type { RecordedRpcIdentity } from "./session-model";
 import type {
 	AttachPin,
 	OwnerAbsenceEvidence,
 	OwnerReconcileRequest,
 	OwnerReconciler,
 	OwnerVerdict,
-	RecordedRpcIdentity,
-} from "./session-index";
+} from "./session-availability";
 
 /** Bounded wait for the process to disappear after a stop. */
 export const HOST_STOP_TIMEOUT_MS = 15_000;

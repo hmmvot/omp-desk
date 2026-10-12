@@ -27,8 +27,8 @@ import type { PtyHandle } from "./pty-client";
 import type { RpcHandle } from "./rpc-handle";
 import { HOST_STOP_TIMEOUT_MS, brokerNativeGenerationReader, decideStop, verifyPinnedBrokerAttachment } from "./rpc-reconcile";
 import type { BrokerPin, NativeStopVerdict } from "./rpc-reconcile";
-import { readSessionFileHeader } from "./session-index";
-import type { RecordedRpcIdentity } from "./session-index";
+import { readSessionFileHeader } from "./session-files";
+import type { RecordedRpcIdentity } from "./session-model";
 
 /** How long a fresh child may take to report its own pid and creation time. */
 const CHILD_IDENTITY_TIMEOUT_MS = 5_000;

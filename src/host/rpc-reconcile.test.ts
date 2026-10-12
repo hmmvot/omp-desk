@@ -39,7 +39,9 @@ import type {
 	stopBrokerOwnedHost as stopBrokerOwnedHostType,
 	verifyPinnedBrokerAttachment as verifyPinnedBrokerAttachmentType,
 } from "./rpc-reconcile.ts";
-import type { OmpHostHandle, OmpHostLauncher, OwnerReconcileRequest, RecordedHost, RecordedRpcIdentity, SessionIndexEntry, SessionIndexStore } from "./session-index.ts";
+import type { OmpHostLauncher, SessionIndexStore } from "./session-index.ts";
+import type { OwnerReconcileRequest } from "./session-availability.ts";
+import type { OmpHostHandle, RecordedHost, RecordedRpcIdentity, SessionIndexEntry } from "./session-model.ts";
 import type { PtyBrokerRecord, PtyStopResult } from "./pty-protocol.ts";
 
 /** The part of the compiled module these tests drive. */
