@@ -17,3 +17,5 @@ tsconfig.json
 AGENTS.md
 CONTRIBUTING.md
 SECURITY.md
+test/**
+out/e2e-results/**

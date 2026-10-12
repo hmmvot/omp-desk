@@ -1,0 +1,125 @@
+/**
+ * A Playwright view of the hidden-desktop VS Code: windows (one Page per window), the OMP Desk views and the Chat
+ * webview. VS Code nests a webview as workbench page > `iframe.webview` (vscode-webview://, hosted in an overlay
+ * container, not inside the editor part) > `iframe#active-frame`; a webview *view* of a side bar is the same with
+ * `purpose=webviewView` in the outer iframe's URL.
+ */
+import { chromium, expect, type Browser, type BrowserContext, type FrameLocator, type Locator, type Page } from "@playwright/test";
+import { startVsCode } from "./launcher.ts";
+import type { RunState } from "./state.ts";
+import { sleep } from "./time.ts";
+
+export const ACTIVITY_BAR_ENTRY = "[id='workbench.parts.activitybar'] .action-label[aria-label='OMP Desk']";
+
+export class Desk {
+	constructor(readonly browser: Browser, readonly state: RunState) {}
+
+	static async connect(state: RunState): Promise<Desk> {
+		const browser = await chromium.connectOverCDP(`http://127.0.0.1:${state.cdpPort}`, { timeout: 120_000 });
+		return new Desk(browser, state);
+	}
+
+	get context(): BrowserContext {
+		return this.browser.contexts()[0];
+	}
+
+	/** The workbench page of the window whose title names `folderName` (the folder is the title's root name). */
+	async window(folderName: string, timeoutMs = 120_000): Promise<Page> {
+		const deadline = Date.now() + timeoutMs;
+		for (;;) {
+			for (const page of this.context.pages()) {
+				if (page.isClosed()) continue;
+				const title = await page.title().catch(() => "");
+				if (title.includes(` - ${folderName} - `) || title.endsWith(` - ${folderName}`) || title.startsWith(`${folderName} - `)) {
+					await this.emulateFocus(page);
+					return page;
+				}
+			}
+			if (Date.now() > deadline) throw new Error(`no VS Code window titled for ${folderName}; pages: ${this.context.pages().length}`);
+			await sleep(250);
+		}
+	}
+
+	/** A window on the hidden desktop is never the focused one; without this a screenshot can come back stale or hang. */
+	private async emulateFocus(page: Page): Promise<void> {
+		const session = await this.context.newCDPSession(page);
+		await session.send("Emulation.setFocusEmulationEnabled", { enabled: true });
+	}
+
+	/** Opens another window of the same profile on `folder` (the launcher forwards to the running VS Code). */
+	async openWindow(folder: string, folderName: string): Promise<Page> {
+		await startVsCode({ name: this.state.name, root: this.state.root, folder });
+		const page = await this.window(folderName);
+		await this.ready(page);
+		return page;
+	}
+
+	/** Waits until the window has OMP Desk's Activity Bar entry, i.e. the extension's containers are contributed. */
+	async ready(page: Page): Promise<void> {
+		await page.locator(ACTIVITY_BAR_ENTRY).waitFor({ timeout: 120_000 });
+	}
+
+	/** Reveals the OMP Desk side bar container (idempotent: clicks only when it is not already the visible one). */
+	async showSidebar(page: Page): Promise<Locator> {
+		const sidebar = page.locator("[id='workbench.parts.sidebar']");
+		const title = sidebar.getByRole("heading", { name: "OMP Desk", level: 2 });
+		if (!await title.isVisible()) await page.locator(ACTIVITY_BAR_ENTRY).click();
+		await expect(title).toBeVisible();
+		return sidebar;
+	}
+
+	/** The Sessions tree (a workbench tree: ordinary roles and aria snapshots work on it). */
+	async sessionsTree(page: Page): Promise<Locator> {
+		const sidebar = await this.showSidebar(page);
+		return sidebar.getByRole("tree", { name: "Sessions" });
+	}
+
+	/**
+	 * The visible Chat webview of a window. Chat is a webview *panel* in the editor area, so it is told from a side-bar
+	 * webview view by the absence of `purpose=webviewView`; hidden editor tabs keep their iframe but are not visible.
+	 */
+	chat(page: Page): FrameLocator {
+		return page.frameLocator("iframe.webview.ready:visible:not([src*='purpose=webviewView'])").first().frameLocator("iframe#active-frame");
+	}
+
+	/** A webview view of the OMP Desk side bar (Settings). */
+	sidebarWebview(page: Page): FrameLocator {
+		return page.frameLocator("iframe.webview.ready:visible[src*='purpose=webviewView']").first().frameLocator("iframe#active-frame");
+	}
+
+	/**
+	 * Starts a Chat session in `folderName` from the Sessions tree's New Session row. With one folder open VS Code Desk
+	 * starts at once; with several it asks which folder first.
+	 */
+	async newChatSession(page: Page, folderName: string, timeout = 30_000): Promise<FrameLocator> {
+		const tree = await this.sessionsTree(page);
+		await tree.getByRole("treeitem", { name: /^New Session/ }).click();
+		const pick = page.locator(".quick-input-widget").getByRole("option", { name: new RegExp(`^${folderName}`) });
+		const composer = this.chat(page).getByRole("combobox", { name: "Message OMP" });
+		await expect.poll(async () => await pick.isVisible() || await composer.isVisible(), { message: `a folder pick or the composer for ${folderName}`, timeout }).toBe(true);
+		if (await pick.isVisible()) await pick.click();
+		await expect(composer).toBeVisible({ timeout });
+		return this.chat(page);
+	}
+
+	/**
+	 * Clicks an item of the open context menu. A click that lands the instant the menu opens is ignored by VS Code's
+	 * menu, so the item is hovered and must show as focused (the menu has registered the pointer) before it is clicked.
+	 */
+	async clickMenuItem(page: Page, name: string): Promise<void> {
+		const item = page.locator(".monaco-menu").getByRole("menuitem", { name, exact: true });
+		await item.hover();
+		await expect(item.locator("xpath=..")).toHaveClass(/focused/);
+		await item.click();
+	}
+
+	/** Types `text` into a Chat composer and presses Send. */
+	async send(chat: FrameLocator, text: string): Promise<void> {
+		await chat.getByRole("combobox", { name: "Message OMP" }).fill(text);
+		await chat.getByRole("button", { name: "Send message" }).click();
+	}
+
+	async close(): Promise<void> {
+		await this.browser.close();
+	}
+}

@@ -1401,8 +1401,10 @@
     "build": "node esbuild.mjs",
     "watch": "node esbuild.mjs --watch",
     "vscode:prepublish": "npm run build",
-    "typecheck": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json && tsc -p test/e2e/tsconfig.json",
     "test": "node --test \"src/**/*.test.ts\"",
+    "test:e2e": "playwright test -c test/e2e/playwright.config.ts",
+    "test:e2e:stop": "node test/e2e/stop-kept-env.mjs",
     "vsix": "vsce package --no-dependencies --out out",
     "vsix:x64": "node scripts/package-vsix.mjs win32-x64",
     "vsix:arm64": "node scripts/package-vsix.mjs win32-arm64",
@@ -1421,6 +1423,7 @@
     "react-dom": "19.2.7"
   },
   "devDependencies": {
+    "@playwright/test": "^1.64.0",
     "@types/node": "^22.0.0",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",

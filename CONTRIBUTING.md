@@ -60,6 +60,18 @@ The launched VS Code also does not inherit the provider API keys from your envir
 
 A new environment starts with settings that skip VS Code's first-run prompts (workspace trust, AI sign-in, welcome page). Keep the root inside your user profile: OMP Desk refuses to start sessions when its storage sits under a folder other users can modify, such as a folder created directly under `C:\`. `-RemoteDebuggingPort` opens a DevTools port for automated UI checks. `-ResetVsCode` also clears VS Code and OMP Desk storage; stop the window first. Run `Get-Help ./scripts/test-vscode.ps1 -Detailed` for every option.
 
+### End-to-end tests (Playwright over CDP)
+
+`npm run test:e2e` runs [Playwright Test](https://playwright.dev/) against a real VS Code with the real extension and the installed `omp`, on the same hidden Windows desktop as `scripts/test-vscode.ps1` (the only launcher the suite uses; no test window can appear on your screen). It needs Windows, `code.cmd` on `PATH`, an installed `omp` and `npm ci`; Playwright's own browsers are not used or downloaded.
+
+What a run does: it packages the working tree into `out/e2e-results/omp-desk-e2e-<target>.vsix` (rebuilt only when a source file is newer; `E2E_VSIX=<path>` pins a VSIX, `E2E_REBUILD=1` forces a rebuild), starts a local OpenAI-compatible mock model server (`test/e2e/fixtures/mock-openai-server.ts`), writes an isolated OMP agent directory that names it as the only provider (`models.yml`, `config.yml`; no provider key), starts a fresh `e2e-run-*` environment under `%LOCALAPPDATA%\omp-desk-test`, attaches with `chromium.connectOverCDP` and runs `test/e2e/scenarios/*.spec.ts` in order on one worker: wiring smoke test, a session held by another window, Kill then immediate resume, `/context` rendering, latency budgets. Afterwards it stops VS Code and deletes the profile.
+
+- A foreground watchdog (`test/e2e/foreground-watchdog.ps1`, 50 ms) runs on your desktop for the whole run and fails it, killing the window, if a test VS Code window ever becomes foreground or visible there.
+- A side-effect guard hashes `~/.omp/agent/config.yml`, the top-level files of `~/.omp/plugins` and your VS Code `settings.json` before and after and fails the run on any change, printing the changed lines. `~/.omp/plugins` and user-level skills (`~/.claude`, `~/.agents`) are not isolated by `PI_CODING_AGENT_DIR`: the suite never toggles them and asserts only that rows exist. If your own OMP saves its settings during a run, the guard reports that change: rerun.
+- Artifacts are under `out/e2e-results/` (Git-ignored): `report.json`, `watchdog.json`, `latency.jsonl`, and for each failed test `artifacts/<test>/trace.zip` (open with `npx playwright show-trace`), `window-N.png` and `error-context.md`.
+- Development loop: `E2E_KEEP_ENV=1 npm run test:e2e -- 20-kill` keeps VS Code running and the next run attaches to it; end it with `npm run test:e2e:stop`. Run one suite at a time. Waits are generous because the machine is often busy; only the latency budgets in `40-latency.spec.ts` are strict.
+- `node test/e2e/tools/mcp-probe.mjs <playwright|devtools> <cdp-port>` drives the window through Playwright MCP or Chrome DevTools MCP over stdio (nothing is registered in any MCP configuration); see ADR-0064 for what it showed.
+
 ## Documentation and design conventions
 
 Project documentation lives in [`docs/`](docs/README.md): current architecture, product requirements, design documents and architecture decision records (ADRs). Start with [docs/README.md](docs/README.md); it defines the templates and naming conventions.
