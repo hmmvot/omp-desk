@@ -1787,6 +1787,47 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.ok(text.includes("Safety rule") && text.includes("Slash command output") && text.includes("Provider error"));
 		});
 
+		await t.test("a /context-style report renders its SGR colors as styled spans and shows no escape fragment, in handled output, widgets and bash executions", async () => {
+			await reset("native-ansi");
+			await ui.evaluate("document.documentElement.style.setProperty('--vscode-terminal-ansiRed','#c12345')");
+			const ESC = "\u001b";
+			const bar = `[${ESC}[38;2;107;114;128m░░░░${ESC}[39m${ESC}[38;2;156;163;176m░${ESC}[39m${ESC}[1m${ESC}[38;2;0;180;255m░░░${ESC}[22m${ESC}[39m] 1%  5700 tokens`;
+			const report = [`Context window: 200000 tokens (3% used)`, `  ${"System prompt".padEnd(16)} ${bar}`, `  ${"Auto-compact buf".padEnd(16)} [${ESC}[31m████${ESC}[0m] 82%  16384 tokens${ESC}[2K`, `  ${ESC}]8;;https://example.test/docs${ESC}\\Docs link${ESC}]8;;${ESC}\\ ${ESC}[48;5;196m${ESC}[38;5;21mindexed${ESC}[0m ${ESC}[7mswap${ESC}[0m`].join("\r\n");
+			const frame = (value: Record<string, unknown>) => ui.evaluate(`window.ui.receive({type:'omp:chat-event',epoch:window.ui.current().epoch,frame:${JSON.stringify(value)}})`);
+			await ui.evaluate(`window.ui.push({entries:[{type:'message',id:'shell',parentId:null,timestamp:'2026-10-02T00:00:00Z',message:{role:'bashExecution',timestamp:1,command:'ls',output:${JSON.stringify(`${ESC}[32mgreen line${ESC}[0m\nplain`)},exitCode:0,cancelled:false,truncated:false}}]})`);
+			await frame({ type: "command_output", text: report });
+			await frame({ type: "ui_widget", key: "styled", lines: [`${ESC}[1;35mwidget bold${ESC}[0m text`] });
+			await ui.wait("document.querySelector('.omp-command-output') && document.querySelector('.omp-extension-widget-line') && document.querySelector('.omp-native-output span')");
+			const shown = await ui.evaluate<{ text: string; widget: string; shell: string; hasEscape: boolean; spans: number }>(`(()=>{
+			 const out=document.querySelector('.omp-command-output'),all=document.body.textContent;
+			 return{text:out.textContent,widget:document.querySelector('.omp-extension-widget-line').textContent,shell:document.querySelector('.omp-native-output').textContent,hasEscape:/\\u001b|\\[38;|\\[39m|\\[1m|\\[0m|\\]8;;|\\[2K/.test(all),spans:out.querySelectorAll('span').length}
+			})()`);
+			assert.equal(shown.hasEscape, false, "no escape fragment is visible anywhere on the page");
+			assert.match(shown.text, /System prompt\s+\[░░░░░░░░\] 1%  5700 tokens/);
+			assert.match(shown.text, /\[████\] 82%  16384 tokens\n/);
+			assert.match(shown.text, /Docs link indexed swap/);
+			assert.doesNotMatch(shown.text, /example\.test|\r/);
+			assert.equal(shown.widget, "widget bold text");
+			assert.match(shown.shell, /^green line\nplain/);
+			assert.ok(shown.spans > 0);
+			const colors = await ui.evaluate<Record<string, string>>(`(()=>{
+			 const find=(root,text)=>Array.from(root.querySelectorAll('span')).find(node=>node.textContent===text);
+			 const out=document.querySelector('.omp-command-output'),style=node=>getComputedStyle(node);
+			 const indexed=find(out,'indexed'),swap=find(out,'swap');
+			 return{truecolor:style(find(out,'░░░░')).color,truecolorTail:style(find(out,'░░░')).color,tailWeight:style(find(out,'░░░')).fontWeight,palette:style(find(out,'████')).color,indexedColor:style(indexed).color,indexedBg:style(indexed).backgroundColor,swapColor:style(swap).color,swapBg:style(swap).backgroundColor,editorBg:getComputedStyle(document.body).backgroundColor,widgetWeight:style(find(document.querySelector('.omp-extension-widget-line'),'widget bold')).fontWeight,widgetColor:style(find(document.querySelector('.omp-extension-widget-line'),'widget bold')).color,shellColor:style(find(document.querySelector('.omp-native-output'),'green line')).color}
+			})()`);
+			assert.equal(colors.truecolor, "rgb(107, 114, 128)");
+			assert.equal(colors.truecolorTail, "rgb(0, 180, 255)");
+			assert.equal(colors.tailWeight, "700");
+			assert.equal(colors.palette, "rgb(193, 35, 69)", "the 16 palette colors follow the theme's terminal variables");
+			assert.equal(colors.indexedColor, "rgb(0, 0, 255)");
+			assert.equal(colors.indexedBg, "rgb(255, 0, 0)");
+			assert.notEqual(colors.swapColor, colors.swapBg, "an inverse run swaps foreground and background");
+			assert.equal(colors.widgetWeight, "700");
+			assert.notEqual(colors.widgetColor, colors.shellColor);
+			assert.equal(colors.shellColor.startsWith("rgb("), true);
+		});
+
 		await t.test("no available models turn the model trigger into a login action, and models restore its picker", async () => {
 			await reset("provider-login");
 			await ui.evaluate("window.ui.receive({type:'omp:footer-metadata',provider:null,branch:null,windows:[],accounts:[],accountSelection:null,hasAvailableModels:false})");

@@ -1,5 +1,7 @@
 import type { ReactNode } from "react";
 import { useState } from "react";
+import { parseAnsi, stripAnsi, type AnsiLimits, type AnsiLine } from "../../chat/ansi";
+import { AnsiLines } from "./AnsiText";
 import { isRecord } from "../../guards";
 import { Markdown } from "./Markdown";
 import { FileLink, FileLinkText } from "./FileLinks";
@@ -14,17 +16,20 @@ export function records(value: unknown): Record<string, unknown>[] { return Arra
 export function strings(value: unknown): string[] { return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : typeof value === "string" ? [value] : []; }
 export function scalar(value: unknown): string { return typeof value === "string" || typeof value === "number" || typeof value === "boolean" ? String(value) : ""; }
 
-/** Strip terminal styling before presenting native output in the DOM. */
+/** Strip terminal styling before presenting native output as plain text in the DOM. */
 export function displayText(value: string): string {
-	return value.replace(/\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)/g, "").replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, "").replace(/\r/g, "");
+	return stripAnsi(value);
 }
+/** Tool output is longer than a notice; it is still read within a bound. */
+const PREVIEW_ANSI_LIMITS: AnsiLimits = { maxChars: 1024 * 1024, maxSpans: 20_000 };
+const joinedLine = (line: AnsiLine): string => line.map(span => span.text).join("");
 /** Bound rendered rows as well as logical newlines, so wrapped output stays compact. */
 export function PreviewWindow({ children, lines, tail = false, code = false }: { children: ReactNode; lines: number; tail?: boolean; code?: boolean }): ReactNode {
 	if (lines <= 0) return null;
 	return <div className={`omp-native-preview-window${tail ? " omp-native-preview-window--tail" : ""}${code ? " omp-native-preview-window--code" : ""}`} style={{ maxHeight: `calc(${lines}lh + ${code ? 8 : 0}px)` }}><div className="omp-native-preview-window-content">{children}</div></div>;
 }
 /** Long native output is disclosed in flow, never placed in a second scroll region. */
-function OutputLines({ all, render }: { all: readonly string[]; render: (lines: readonly string[], offset: number) => ReactNode }): ReactNode {
+function OutputLines<T>({ all, render }: { all: readonly T[]; render: (lines: readonly T[], offset: number) => ReactNode }): ReactNode {
 	const [limit, setLimit] = useState(200);
 	const end = Math.min(all.length, limit), tail = end < all.length ? Math.max(end, all.length - 20) : all.length;
 	const hidden = tail - end;
@@ -36,12 +41,13 @@ function OutputLines({ all, render }: { all: readonly string[]; render: (lines: 
 }
 export function TextPreview({ text, expanded, lines = 3, tail = false, prose = false }: { text: string; expanded: boolean; lines?: number; tail?: boolean; prose?: boolean }): ReactNode {
 	if (!text) return null;
-	const all = displayText(text).split("\n");
+	const all = parseAnsi(text, PREVIEW_ANSI_LIMITS);
 	const hidden = expanded ? 0 : Math.max(0, all.length - lines);
 	const shown = expanded ? all : tail ? all.slice(-lines) : all.slice(0, lines);
+	const body = (part: readonly AnsiLine[]): ReactNode => prose ? <Markdown text={part.map(joinedLine).join("\n")} /> : <pre className="omp-pre"><AnsiLines lines={part} /></pre>;
 	return <div className="omp-native-preview">
 		{hidden > 0 && tail && <div className="omp-empty-note">{hidden} earlier lines</div>}
-		{shown.length > 0 && (expanded ? <OutputLines all={all} render={part => prose ? <Markdown text={part.join("\n")} /> : <pre className="omp-pre">{part.join("\n")}</pre>} /> : <PreviewWindow lines={lines} tail={tail} code={!prose}>{prose ? <Markdown text={shown.join("\n")} /> : <pre className="omp-pre">{shown.join("\n")}</pre>}</PreviewWindow>)}
+		{shown.length > 0 && (expanded ? <OutputLines all={all} render={body} /> : <PreviewWindow lines={lines} tail={tail} code={!prose}>{body(shown)}</PreviewWindow>)}
 		{hidden > 0 && !tail && <div className="omp-empty-note">{hidden} more lines</div>}
 	</div>;
 }

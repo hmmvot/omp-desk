@@ -1,4 +1,5 @@
 import { isRecord } from "../../guards.ts";
+import { stripAnsi } from "../../chat/ansi.ts";
 import type { JournalFacts } from "../session-cost.ts";
 
 /**
@@ -73,18 +74,20 @@ export interface ContextReport {
 	readonly unavailable: string | null;
 }
 
-const ANSI = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
 const HEADER = /^Context window: (\d+) tokens \((\d+)% used\)$/;
 const ROW = /^ {2}(\S.*?)\s+\[[^\]]*\]\s*\S*\s+(\d+) tokens$/;
 const UNAVAILABLE = /^Context usage is unavailable[^\n]*$/;
 const MINIMAL = /^Context\nWindow: (\d+)\nUsed: (\d+)$/;
 const MAX_REPORT_CHARS = 8_192;
+/** OMP colors each bar cell run, so the styled report is several times its plain length. */
+const MAX_RAW_REPORT_CHARS = 64 * 1024;
 const MAX_NOTES = 12;
 const MAX_NOTE_CHARS = 240;
 
-/** Whether `text` begins like a report OMP's `/context` prints; the capture in `RpcSession` takes only such a frame. */
+/** Whether `text` begins like a report OMP's `/context` prints (styling aside); the capture in `RpcSession` takes only such a frame. */
 export function isContextReportText(text: string): boolean {
-	return text.startsWith("Context window:") || text.startsWith("Context usage is unavailable") || text.startsWith("Context\nWindow:");
+	const plain = stripAnsi(text, MAX_RAW_REPORT_CHARS);
+	return plain.startsWith("Context window:") || plain.startsWith("Context usage is unavailable") || plain.startsWith("Context\nWindow:");
 }
 
 /** The written-out form of a label OMP pads and truncates to sixteen characters. */
@@ -92,9 +95,9 @@ const LABELS: Readonly<Record<string, string>> = { "Auto-compact buf": "Auto-com
 
 /** `null` when `text` is not a recognizable report. */
 export function parseContextReport(text: string): ContextReport | null {
-	if (text.length === 0 || text.length > MAX_REPORT_CHARS) return null;
-	const plain = text.replace(ANSI, "").replaceAll("\r\n", "\n").trim();
-	if (!isContextReportText(plain)) return null;
+	if (text.length === 0 || text.length > MAX_RAW_REPORT_CHARS) return null;
+	const plain = stripAnsi(text, MAX_RAW_REPORT_CHARS).trim();
+	if (plain.length > MAX_REPORT_CHARS || !isContextReportText(plain)) return null;
 	if (UNAVAILABLE.test(plain)) return { contextWindow: null, usedPercent: null, rows: [], notes: [], unavailable: plain };
 	const minimal = MINIMAL.exec(plain);
 	if (minimal !== null) {

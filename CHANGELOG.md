@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Sessions: a row another window runs keeps its ⧉ mark and the status that window publishes on a busy machine, and a click on it switches to that window at once. The holder is now found in the window registry (a current lease and a live process) instead of a PowerShell start-time reading that timed out after 5 s and made the row look like an ordinary Running row.
 - Sessions: a failed session lease probe is no longer retried at once by every row observation (up to three 5 s PowerShell attempts in a row, repeating for as long as the machine was busy); it answers unknown for 15 s first.
+- Chat: terminal styling in native output is drawn instead of shown as raw text. OMP's `/context` report (typed or sent by the Context view's **Read Breakdown**) listed fragments such as `[38;2;107;114;128m░░░░[39m` because the escape byte was dropped and the rest of each sequence printed; the colored bars now render in the theme's terminal colors. Bash tool previews, bash executions and extension widgets use the same renderer; every other escape sequence (cursor moves, titles, hyperlinks — link text stays) is removed whole, and the copied text is plain.
 
 ## [0.3.1] - 2026-10-12
 

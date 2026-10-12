@@ -22,6 +22,7 @@ import { positionTranscript, type EphemeralItem, type TranscriptPosition } from 
 import { transcriptWindow, type TranscriptWindow } from "../webview/lib/transcript-window.ts";
 import type { BranchPoint } from "./rewind.ts";
 import type { ChatExitReason } from "./exit-reason.ts";
+import { sanitizeAnsi, stripAnsi, withoutCutSgr } from "./ansi.ts";
 
 // Vocabulary
 
@@ -541,11 +542,19 @@ export function sameEpoch(a: ChatEpoch | null, b: ChatEpoch | null): boolean {
 	return a !== null && b !== null && a.nonce === b.nonce && a.counter === b.counter;
 }
 
+/**
+ * Plain text bound: terminal escape sequences and control characters other than tab/newline are removed whole
+ * (`stripAnsi`), never just their ESC byte, so no sequence fragment reaches the page.
+ */
 function clampText(text: string, max: number): string {
-	// Control characters other than tab/newline are dropped: the text is rendered as plain text only.
-	// oxlint-disable-next-line no-control-regex
-	const clean = text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "");
+	const clean = stripAnsi(text, max * 4);
 	return clean.length <= max ? clean : `${clean.slice(0, max - 1)}…`;
+}
+
+/** Like {@link clampText}, but SGR styling stays (the page draws it); every other sequence is removed. */
+function clampStyledText(text: string, max: number): string {
+	const clean = sanitizeAnsi(text, max * 4);
+	return clean.length <= max ? clean : `${withoutCutSgr(clean.slice(0, max - 1))}…`;
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -1080,7 +1089,7 @@ export function reduceChatFrame(model: ChatModel, frame: ChatEventFrame, clock: 
 		case "available_commands_update":
 			return { ...model, commands: frame.commands.slice(0, MAX_COMMANDS) };
 		case "command_output":
-			return appendEphemeral(model, "command_output", { text: clampText(frame.text, MAX_COMMAND_OUTPUT_TEXT) }, now);
+			return appendEphemeral(model, "command_output", { text: clampStyledText(frame.text, MAX_COMMAND_OUTPUT_TEXT) }, now);
 		case "ui_status": {
 			const entries = new Map(model.statusEntries);
 			if (frame.text === null || frame.text.length === 0) entries.delete(frame.key);
@@ -1089,8 +1098,8 @@ export function reduceChatFrame(model: ChatModel, frame: ChatEventFrame, clock: 
 		}
 		case "ui_widget": {
 			const widgets = new Map(model.widgets);
-			const lines = (frame.lines ?? []).slice(0, MAX_WIDGET_LINES).map(line => clampText(line, MAX_STATUS_TEXT));
-			if (lines.every(line => line.trim().length === 0)) widgets.delete(frame.key);
+			const lines = (frame.lines ?? []).slice(0, MAX_WIDGET_LINES).map(line => clampStyledText(line, MAX_STATUS_TEXT));
+			if (lines.every(line => stripAnsi(line).trim().length === 0)) widgets.delete(frame.key);
 			else if (widgets.has(frame.key) || widgets.size < MAX_STATUS_KEYS) widgets.set(frame.key, { lines, placement: frame.placement ?? "aboveEditor" });
 			return { ...model, widgets };
 		}

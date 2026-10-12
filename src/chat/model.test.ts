@@ -8,6 +8,7 @@ import { describe, it } from "node:test";
 import type { ChatEntry, ChatMessage } from "./messages.ts";
 import {
 	MAX_COMMAND_OUTPUTS,
+	MAX_COMMAND_OUTPUT_TEXT,
 	applyChatEntries,
 	applyChatEvent,
 	applyChatOlder,
@@ -325,6 +326,30 @@ describe("command output and presentation", () => {
 		assert.deepEqual(model.ephemeral[0]?.payload, { text: "output 5" });
 		model = reduceChatFrame(model, { type: "command_output", text: "line\u0007 one\nline two" });
 		assert.deepEqual(model.ephemeral.at(-1)?.payload, { text: "line one\nline two" });
+	});
+
+	it("keeps SGR styling of a handled command's output whole and removes every other sequence, never just the ESC byte", () => {
+		const styled = "\u001b[38;2;0;180;255m░░░\u001b[39m] 1%\u001b[2K\u001b]0;title\u0007 \u001b[1;31mdone\u001b[0m";
+		const model = reduceChatFrame(live(), { type: "command_output", text: styled });
+		assert.deepEqual(model.ephemeral.at(-1)?.payload, { text: "\u001b[38;2;0;180;255m░░░\u001b[39m] 1% \u001b[1;31mdone\u001b[0m" });
+		const clamped = reduceChatFrame(live(), { type: "command_output", text: `${"\u001b[31mx\u001b[0m".repeat(MAX_COMMAND_OUTPUT_TEXT)}` });
+		const payload = clamped.ephemeral.at(-1)?.payload;
+		assert.ok(typeof payload === "object" && payload !== null && "text" in payload && typeof payload.text === "string");
+		const text = payload.text;
+		assert.ok(text.length <= MAX_COMMAND_OUTPUT_TEXT);
+		assert.match(text, /…$/);
+		assert.doesNotMatch(text.slice(0, -1), /\u001b(?!\[(?:31|0)m)|\u001b$/);
+	});
+
+	it("strips terminal sequences from plain text surfaces instead of leaving their fragments", () => {
+		let model = reduceChatFrame(live(), { type: "ui_status", key: "a", text: "\u001b[31mred\u001b[0m status" });
+		assert.equal(model.statusLine, "red status");
+		model = reduceChatFrame(model, { type: "ui_notify", level: "warning", message: "\u001b]8;;https://x.test\u001b\\link\u001b]8;;\u001b\\ ok" });
+		assert.equal(model.extensionNotice?.message, "link ok");
+		model = reduceChatFrame(model, { type: "ui_widget", key: "w", lines: ["\u001b[32mgreen\u001b[0m", "\u001b[2J"] });
+		assert.deepEqual(model.widgets.get("w")?.lines, ["\u001b[32mgreen\u001b[0m", ""]);
+		model = reduceChatFrame(model, { type: "ui_widget", key: "w", lines: ["\u001b[0m", "\u001b[2K "] });
+		assert.equal(model.widgets.has("w"), false);
 	});
 
 	it("keeps one bounded status line, and widgets as separate multi-line blocks at their placement", () => {

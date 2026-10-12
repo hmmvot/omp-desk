@@ -37,6 +37,15 @@ describe("/context report", () => {
 		const styled = REPORT.replaceAll("\n", "\r\n").replace("[████", "\u001b[32m[████").replace("1325 tokens", "1325 tokens\u001b[0m");
 		assert.deepEqual(parseContextReport(styled)?.rows.find(row => row.label === "System context"), { label: "System context", tokens: 1325 });
 	});
+	it("reads OMP's themed report: truecolor runs inside every bar, far longer than its plain text", () => {
+		const bar = (filled: number): string => `[\u001b[38;2;107;114;128m${"░".repeat(24 - filled)}\u001b[39m${Array.from({ length: filled }, () => "\u001b[1m\u001b[38;2;0;180;255m█\u001b[22m\u001b[39m").join("")}] 1%`;
+		const styled = ["Context window: 200000 tokens (3% used)", ...Array.from({ length: 12 }, (_, index) => `  ${`Row ${index}`.padEnd(16)} ${bar(24)}  ${index + 1} tokens`)].join("\n");
+		assert.ok(styled.length > 8_192, "the styled text exceeds the plain-text bound");
+		const report = parseContextReport(styled);
+		assert.equal(report?.rows.length, 12);
+		assert.deepEqual(report?.rows[3], { label: "Row 3", tokens: 4 });
+		assert.equal(isContextReportText(`\u001b[1mContext window:\u001b[22m 5 tokens (1% used)`), true);
+	});
 	it("answers an explicit unavailable state for OMP's no-model text and reads its minimal fallback form", () => {
 		const none = parseContextReport("Context usage is unavailable: no model is selected for this session.")!;
 		assert.equal(none.unavailable, "Context usage is unavailable: no model is selected for this session.");

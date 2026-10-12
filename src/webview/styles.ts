@@ -12,6 +12,7 @@
  */
 import { BASE_CSS } from "./lib/base-styles.ts";
 import { TOOL_STYLES } from "./tool-styles.ts";
+import { ANSI_STYLES } from "./ansi-styles.ts";
 import { TERMINAL_STYLES } from "./lib/terminal-styles.ts";
 import { HUD_STYLES } from "./hud-styles.ts";
 import { QUEUE_STYLES } from "./queue-styles.ts";
@@ -19,6 +20,7 @@ import { QUEUE_STYLES } from "./queue-styles.ts";
 const CSS = `
 ${BASE_CSS}
 ${TERMINAL_STYLES}
+${ANSI_STYLES}
 
 
 .omp-session-view, .omp-native-session { display: flex; flex-direction: column; height: 100%; min-height: 0; }

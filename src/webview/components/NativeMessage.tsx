@@ -1,4 +1,4 @@
-import { useId } from "react";
+import { useId, useMemo } from "react";
 import type { ChatEntry, ChatMessage, CustomMessage, ExecutionMessage, SummaryMessage } from "../../chat/messages.ts";
 import { advisorNotes, entryMessage, userSkill, type AdvisorNote } from "../../chat/messages.ts";
 import { isRecord } from "../../guards.ts";
@@ -7,6 +7,8 @@ import { fmtDuration, fmtTokens } from "../lib/format.ts";
 import { Markdown } from "./Markdown.tsx";
 import { AssistantContentView, MessageContentView, NativeDisclosure } from "./MessageContent.tsx";
 import { lateDiagnosticsFiles, nativeText, numberField, recordRows, stringField } from "./native-message-helpers.ts";
+import { parseAnsi } from "../../chat/ansi.ts";
+import { AnsiLines, AnsiText } from "./AnsiText.tsx";
 
 export interface IrcDisclosure { expanded: boolean; onChange(expanded: boolean): void }
 export interface NativeMessageProps {
@@ -63,7 +65,7 @@ function CustomMessageView({ message, irc }: { message: CustomMessage; irc?: Irc
 		const kind = message.customType.slice(7);
 		const data = isRecord(details) ? details : {};
 		switch (kind) {
-			case "command_output": return <section className="omp-native-message"><header><strong>Command output</strong></header><pre className="omp-command-output">{stringField(data, "text") ?? ""}</pre></section>;
+			case "command_output": return <section className="omp-native-message"><header><strong>Command output</strong></header><pre className="omp-command-output"><AnsiText text={stringField(data, "text") ?? ""} /></pre></section>;
 			case "ttsr_triggered": {
 				const rules = recordRows(data, "rules");
 				return <section className="omp-native-message omp-warning"><header><strong>TTSR triggered</strong> · {rules.length} rules</header><ul>{rules.map((rule, index) => <li key={index}><strong>{stringField(rule, "name") ?? stringField(rule, "id") ?? "Rule"}</strong>{stringField(rule, "description") && <p>{stringField(rule, "description")}</p>}</li>)}</ul></section>;
@@ -197,13 +199,13 @@ function ArtifactWarning({ meta }: { meta: unknown }) {
 }
 
 function ExecutionView({ message }: { message: ExecutionMessage }) {
-	const lines = message.output.split(/\r?\n/);
+	const lines = useMemo(() => parseAnsi(message.output), [message.output]);
 	const failed = !message.cancelled && message.exitCode !== undefined && message.exitCode !== 0;
 	return <section className={`omp-native-message omp-native-execution ${failed ? "omp-error" : message.cancelled ? "omp-warning" : ""}`}>
 		<header><strong>{message.role === "bashExecution" ? "Bash execution" : "Python execution"}</strong> · {message.cancelled ? "cancelled" : failed ? "failed" : "complete"}{message.exitCode !== undefined ? <span> · exit {message.exitCode}</span> : null}{message.excludeFromContext ? <span className="omp-native-badge">Excluded from model context</span> : null}{message.truncated ? <span className="omp-native-badge">Output truncated</span> : null}</header>
 		<pre className="omp-native-code">{message.role === "bashExecution" ? message.command : message.code}</pre>
-		<pre className="omp-native-output">{lines.slice(-10).join("\n")}</pre>
-		{lines.length > 10 ? <NativeDisclosure title={`Full output (${lines.length} lines)`}><pre className="omp-native-output">{message.output}</pre></NativeDisclosure> : null}
+		<pre className="omp-native-output"><AnsiLines lines={lines.slice(-10)} /></pre>
+		{lines.length > 10 ? <NativeDisclosure title={`Full output (${lines.length} lines)`}><pre className="omp-native-output"><AnsiLines lines={lines} /></pre></NativeDisclosure> : null}
 		{message.images?.length ? <MessageContentView content={message.images} /> : null}
 		<ArtifactWarning meta={message.meta} />
 	</section>;

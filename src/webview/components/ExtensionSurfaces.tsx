@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
 import type { ChatModel } from "../../chat/model";
+import { AnsiText } from "./AnsiText";
 
 /**
  * OMP extension `setWidget` blocks at their placement, one block per key with every line kept, as the TUI draws
@@ -13,7 +14,7 @@ export function ExtensionWidgets({ snapshot, placement }: { snapshot: ChatModel;
 		<div className={`omp-extension-widgets omp-extension-widgets--${placement}`} aria-label="Extension status">
 			{blocks.map(([key, widget]) => (
 				<div key={key} className="omp-extension-widget" data-widget-key={key}>
-					{widget.lines.map((line, index) => <div key={index} className="omp-extension-widget-line">{line}</div>)}
+					{widget.lines.map((line, index) => <div key={index} className="omp-extension-widget-line"><AnsiText text={line} /></div>)}
 				</div>
 			))}
 		</div>
