@@ -52,11 +52,13 @@ The extension writes a log to the **OMP Desk** channel of the Output panel and c
 ./scripts/test-vscode.ps1 -Name nologin -Reset    # back to an OMP with no logins, settings or sessions
 ```
 
+The window never appears on your screen and cannot take the foreground or keyboard focus: the script starts it on a separate hidden Windows desktop, which no click, shortcut or focus change of yours reaches either. Drive it through the DevTools port (`-RemoteDebuggingPort`; key events, DOM evaluation, webview targets and `Page.captureScreenshot` work there) and close it with `-Stop`, for example `./scripts/test-vscode.ps1 -Name nologin -Stop`. Send `Emulation.setFocusEmulationEnabled` first: a window on the hidden desktop is never the focused one, and without it a screenshot was observed to return a stale frame. Programs started from that window, such as OMP or a browser OMP opens, run on the hidden desktop too. This is the only way the script starts VS Code.
+
 Each `-Name` keeps VS Code data, extensions and an OMP directory under `%LOCALAPPDATA%\omp-desk-test\<name>`. The script points OMP's default profile there with `PI_CODING_AGENT_DIR`. It is the default profile that OMP Desk launches sessions in; `OMP_PROFILE` would not work, because Desk always passes an explicit `--profile`.
 
 The launched VS Code also does not inherit the provider API keys from your environment, so it sees only what was logged in inside the test environment. Pass `-KeepProviderKeys` to keep them.
 
-A new environment starts with settings that skip VS Code's first-run prompts (workspace trust, AI sign-in, welcome page). Keep the root inside your user profile: OMP Desk refuses to start sessions when its storage sits under a folder other users can modify, such as a folder created directly under `C:\`. `-RemoteDebuggingPort` opens a DevTools port for automated UI checks. `-ResetVsCode` also clears VS Code and OMP Desk storage. Run `Get-Help ./scripts/test-vscode.ps1 -Detailed` for every option.
+A new environment starts with settings that skip VS Code's first-run prompts (workspace trust, AI sign-in, welcome page). Keep the root inside your user profile: OMP Desk refuses to start sessions when its storage sits under a folder other users can modify, such as a folder created directly under `C:\`. `-RemoteDebuggingPort` opens a DevTools port for automated UI checks. `-ResetVsCode` also clears VS Code and OMP Desk storage; stop the window first. Run `Get-Help ./scripts/test-vscode.ps1 -Detailed` for every option.
 
 ## Documentation and design conventions
 
