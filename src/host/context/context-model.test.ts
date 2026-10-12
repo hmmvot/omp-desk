@@ -9,7 +9,7 @@ import type { ContextRead, ContextReportRead } from "./context-parse.ts";
 const NOW = Date.parse("2026-10-12T12:00:00.000Z");
 const subject = { title: "Work", mode: "chat", running: true } as const;
 const usage = (percent: number | null, tokens: number | null = 76_800, window: number | null = 200_000) => ({ tokens, contextWindow: window, percent });
-const live = (overrides: Partial<ContextLive> = {}): ContextLive => ({ model: { provider: "anthropic", id: "sonnet", name: "Sonnet", contextWindow: 200_000 }, usage: usage(38.4), busy: false, maintenance: null, ...overrides });
+const live = (overrides: Partial<ContextLive> = {}): ContextLive => ({ model: { provider: "anthropic", id: "sonnet", name: "Sonnet", contextWindow: 200_000 }, usage: usage(38.4), busy: false, rewriting: false, maintenance: null, ...overrides });
 const REPORT = parseContextReport("Context window: 200000 tokens (38% used)\n  System prompt    [█░] 2%  3000 tokens\n  System tools     [█░] 4%  8000 tokens\n  Messages         [█░] 30%  60000 tokens\n  Auto-compact buf [█░] 5%  10000 tokens\n  Free             [█░] 40%  80000 tokens")!;
 const reportRead = (overrides: Partial<ContextReportRead> = {}): ContextReportRead => ({ at: NOW - 60_000, usageTokensAtRead: 76_800, report: REPORT, ...overrides });
 const read = (overrides: Partial<ContextRead> = {}): ContextRead => ({
@@ -179,6 +179,7 @@ describe("live signature", () => {
 		assert.equal(liveSignature(live()), base);
 		assert.notEqual(liveSignature(live({ usage: usage(38.5) })), base);
 		assert.notEqual(liveSignature(live({ busy: true })), base);
+		assert.notEqual(liveSignature(live({ busy: true, rewriting: true })), liveSignature(live({ busy: true })));
 		assert.notEqual(liveSignature(live({ maintenance: { action: "compact", status: "working" } })), base);
 		assert.notEqual(liveSignature(live({ model: { provider: "x", id: "y", contextWindow: 1 } })), base);
 	});

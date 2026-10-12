@@ -27,8 +27,10 @@ export interface ContextSubject {
 export interface ContextLive {
 	readonly model: ChatLiteModel | null;
 	readonly usage: { readonly tokens: number | null; readonly contextWindow: number | null; readonly percent: number | null } | null;
-	/** A turn, a compaction or a maintenance pass is in progress: deep reads wait for it to end. */
+	/** A turn, a compaction or a maintenance pass is in progress. Refreshes of an existing deep read wait for it to end. */
 	readonly busy: boolean;
+	/** A compaction or a maintenance pass is rewriting the conversation: no deep read runs until it ends (a turn alone does not stop one). */
+	readonly rewriting: boolean;
 	readonly maintenance: MaintenanceState | null;
 }
 
@@ -38,6 +40,7 @@ export function liveOf(model: ChatModel): ContextLive {
 		model: state?.model ?? null,
 		usage: state?.contextUsage ?? null,
 		busy: model.working || model.asyncPaused || state?.isCompacting === true || model.maintenance?.status === "working",
+		rewriting: state?.isCompacting === true || model.maintenance?.status === "working",
 		maintenance: model.maintenance,
 	};
 }
@@ -46,7 +49,7 @@ export function liveOf(model: ChatModel): ContextLive {
 export function liveSignature(live: ContextLive): string {
 	const maintenance = live.maintenance;
 	return JSON.stringify([live.model?.provider, live.model?.id, live.model?.name, live.model?.contextWindow, live.usage?.tokens, live.usage?.contextWindow,
-		live.usage?.percent, live.busy, maintenance?.action, maintenance?.status, maintenance?.reason, maintenance?.errorMessage]);
+		live.usage?.percent, live.busy, live.rewriting, maintenance?.action, maintenance?.status, maintenance?.reason, maintenance?.errorMessage]);
 }
 
 export type ItemTone = "normal" | "warning" | "critical" | "muted";

@@ -224,6 +224,136 @@ describe("refresh policy", () => {
 	});
 });
 
+describe("a session that cannot answer yet, or is mid-turn", () => {
+	const hasStats = (model: ContextViewModel): boolean => model.groups.some(group => group.id === "stats");
+	const tokens = (value: number) => ({ tokens: value, contextWindow: 1000, percent: value / 10 });
+	it("reads a conversation that is already mid-turn when the view attaches, and keeps the read through the turn", async () => {
+		const session = new FakeSession();
+		session.model = { ...session.model, working: true };
+		const h = harness(target(session));
+		h.controller.setVisible(true);
+		h.fire();
+		await flush();
+		assert.equal(session.reads.length, 1, "a long turn must not leave the view without its deep groups");
+		session.reads[0]!.resolve(emptyRead(1));
+		await flush();
+		assert.equal(hasStats(h.last()), true);
+		// With a read in hand the turn's own usage changes ask for nothing: refreshes wait for idle.
+		const timers = h.state.timers.length;
+		session.change({ state: { ...session.model.state!, contextUsage: tokens(300) } });
+		assert.equal(h.state.timers.length, timers);
+		// The user's Refresh is explicit and runs even mid-turn.
+		h.controller.refresh();
+		h.fire();
+		await flush();
+		assert.equal(session.reads.length, 2);
+	});
+	it("reads again mid-turn when the selection's generation changed and wiped the read", async () => {
+		const session = new FakeSession();
+		const h = harness(target(session));
+		h.controller.setVisible(true);
+		h.fire();
+		await flush();
+		session.reads[0]!.resolve(emptyRead(1));
+		await flush();
+		session.change({ working: true });
+		h.state.target = target(session, { generation: "g2" });
+		session.emit({ type: "snapshot", payload: {} as never, baseline: false });
+		assert.equal(hasStats(h.last()), false, "the new epoch is not described by the old read");
+		h.fire();
+		await flush();
+		assert.equal(session.reads.length, 2);
+		session.reads[1]!.resolve(emptyRead(2));
+		await flush();
+		assert.equal(hasStats(h.last()), true);
+	});
+	it("does not read during a compaction or a pass, and asks again when it ends even though the turn goes on", async () => {
+		const session = new FakeSession();
+		session.model = { ...session.model, working: true, maintenance: { action: "context-full", status: "working", reason: "threshold" } };
+		const h = harness(target(session));
+		h.controller.setVisible(true);
+		h.fire();
+		await flush();
+		assert.equal(session.reads.length, 0);
+		session.change({ maintenance: { action: "context-full", status: "complete", reason: "threshold" } });
+		const scheduled = h.state.timers.filter(timer => timer.live);
+		assert.equal(scheduled.length, 1, "the pass ending asks, with the turn still running and nothing read");
+		h.fire();
+		await flush();
+		assert.equal(session.reads.length, 1);
+		session.reads[0]!.resolve(emptyRead(1));
+		await flush();
+		assert.equal(hasStats(h.last()), true);
+	});
+	it("discards a read that a pass began under, but not one that merely runs under a turn", async () => {
+		const session = new FakeSession();
+		session.model = { ...session.model, working: true };
+		const h = harness(target(session));
+		h.controller.setVisible(true);
+		h.fire();
+		await flush();
+		session.change({ working: false });
+		session.reads[0]!.resolve(emptyRead(1));
+		await flush();
+		assert.equal(hasStats(h.last()), true, "the turn ending under the read does not describe a moved-on conversation");
+		h.controller.refresh();
+		h.fire();
+		await flush();
+		session.change({ state: { ...session.model.state!, isCompacting: true } });
+		session.reads[1]!.resolve({ ...emptyRead(2), autoCompaction: false });
+		await flush();
+		assert.equal(h.last().groups.find(group => group.id === "maintenance")!.items.find(row => row.key === "maintenance.auto")?.description, "on", "the earlier read stays");
+	});
+	it("does not ask a session that is not live, and reads when its next phase change makes it live", async () => {
+		const session = new FakeSession();
+		session.model = { ...session.model, phase: "resyncing" };
+		const h = harness(target(session));
+		h.controller.setVisible(true);
+		h.fire();
+		await flush();
+		assert.equal(session.reads.length, 0);
+		session.emit({ type: "state", payload: {} as never });
+		assert.equal(h.state.timers.filter(timer => timer.live).length, 0, "a phase change that is still not live asks nothing");
+		session.model = { ...session.model, phase: "live" };
+		session.emit({ type: "state", payload: {} as never });
+		assert.equal(h.state.timers.filter(timer => timer.live).length, 1, "the transition into live asks, debounced");
+		h.fire();
+		await flush();
+		assert.equal(session.reads.length, 1);
+		session.reads[0]!.resolve(emptyRead(1));
+		await flush();
+		assert.equal(hasStats(h.last()), true);
+		const timers = h.state.timers.length;
+		session.emit({ type: "state", payload: {} as never });
+		assert.equal(h.state.timers.length, timers, "once read, a phase change asks for nothing");
+	});
+	it("retries a read that came back empty on the next state change or snapshot, not on a timer, and says so in the log", async () => {
+		const session = new FakeSession();
+		const h = harness(target(session));
+		h.controller.setVisible(true);
+		h.fire();
+		await flush();
+		session.reads[0]!.resolve(null);
+		await flush();
+		assert.equal(hasStats(h.last()), false);
+		assert.equal(h.state.logs.length, 1);
+		assert.equal(h.state.timers.filter(timer => timer.live).length, 0, "nothing is scheduled by itself");
+		session.emit({ type: "state", payload: {} as never });
+		h.fire();
+		await flush();
+		assert.equal(session.reads.length, 2);
+		session.reads[1]!.resolve(null);
+		await flush();
+		session.emit({ type: "snapshot", payload: {} as never, baseline: false });
+		h.fire();
+		await flush();
+		assert.equal(session.reads.length, 3, "a snapshot that kept the generation asks too");
+		session.reads[2]!.resolve(emptyRead(3));
+		await flush();
+		assert.equal(hasStats(h.last()), true);
+	});
+});
+
 describe("lifetime", () => {
 	it("keeps following the session across syncs and title changes that build an equivalent target", async () => {
 		const session = new FakeSession();

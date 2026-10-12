@@ -52,7 +52,9 @@ export function breakdownFailure(result: Exclude<CommandResult<unknown>, { statu
  * Owns what the Context view shows: visibility, the selected target, the live header, the deep read and the last
  * explicit breakdown. Reads only while visible; never on a timer of its own (the only timer is the debounce after a
  * session change); a result is dropped when the target's key or generation changed; at most one deep read runs per
- * selection, with one queued.
+ * selection, with one queued. A deep read may run during a turn (the session answers `get_state` and `get_session_stats`
+ * meanwhile) but never during a compaction or a pass; while a turn runs a change asks for one only when none has been
+ * read for the selection, and once one exists refreshes wait for the session to be idle.
  */
 export class ContextController {
 	readonly #deps: ContextControllerDeps;
@@ -65,6 +67,8 @@ export class ContextController {
 	#report: ContextReportRead | null = null;
 	#reading = false;
 	#again = false;
+	/** The last deep read of this attachment gave no answer (not live, refused, timed out, replaced mid-read): the next phase change or snapshot asks again. */
+	#missed = false;
 	#timer: unknown = null;
 	/** Advances whenever the subscription, the debounce timer or an in-flight request stops being the current attachment (hide, selection change, a session starting or stopping). Results and events carry the value they started under. */
 	#attachment = 0;
@@ -153,6 +157,7 @@ export class ContextController {
 		this.#again = false;
 		this.#live = null;
 		this.#signature = "";
+		this.#missed = false;
 	}
 
 	/** Forget the selection and everything read for it; the next visible sync starts from nothing. */
@@ -179,25 +184,43 @@ export class ContextController {
 			this.#revision += 1;
 			this.#read = null;
 			this.#report = null;
+			this.#missed = false;
 			this.sync();
 			if (this.#attachment !== attachment) return;
 			this.#schedule(DEEP_READ_DEBOUNCE_MS);
 			this.#publish();
 			return;
 		}
+		// A phase or code change: the session may now be able to answer a read it could not answer before.
+		if (output.type === "state") {
+			this.#retryMissed(session);
+			return;
+		}
 		if (output.type === "snapshot") {
 			// A new epoch (reconnect, rewind, a replaced conversation) changes the target's generation: re-evaluate the selection.
 			this.sync();
 			if (this.#attachment !== attachment) return;
+			this.#retryMissed(session);
 		} else if (output.type !== "model") return;
 		const live = liveOf(session.model);
 		const signature = liveSignature(live);
 		if (signature === this.#signature) return;
-		if (live.busy && this.#live?.busy !== true) this.#revision += 1;
+		const before = this.#live;
+		if ((live.busy && before?.busy !== true) || (live.rewriting && before?.rewriting !== true)) this.#revision += 1;
 		this.#live = live;
 		this.#signature = signature;
 		this.#publish();
-		if (!live.busy) this.#schedule(DEEP_READ_DEBOUNCE_MS);
+		if (this.#mayAsk(live)) this.#schedule(DEEP_READ_DEBOUNCE_MS);
+	}
+
+	/** A change asks for a read when no pass is rewriting the conversation and either the session is idle or nothing has been read for this selection yet (a long turn must not leave the view without its deep groups). */
+	#mayAsk(live: ContextLive): boolean {
+		return !live.rewriting && (!live.busy || this.#read === null);
+	}
+
+	/** The last read gave no answer: the next transition into a live session asks again (never on a timer of its own). */
+	#retryMissed(session: ContextSession): void {
+		if (this.#missed && session.model.phase === "live") this.#schedule(DEEP_READ_DEBOUNCE_MS);
 	}
 
 	#schedule(ms: number): void {
@@ -214,29 +237,40 @@ export class ContextController {
 		const session = target?.session;
 		if (this.#disposed || !this.#visible || target === null || session === null || session === undefined || target.mode !== "chat" || !target.running) return;
 		if (this.#reading) { this.#again = true; return; }
-		// A turn, a compaction or a pass is running: the change that ends it asks again.
-		if (liveOf(session.model).busy) return;
+		// A compaction or a pass is rewriting the conversation: the change that ends it asks again. A turn does not stop a read.
+		if (liveOf(session.model).rewriting) return;
+		// Not live (starting, resyncing, reattaching): OMP cannot answer yet. The phase change that makes it live asks again.
+		if (session.model.phase !== "live") { this.#missed = true; return; }
 		const attachment = this.#attachment;
 		const revision = this.#revision;
 		this.#reading = true;
 		let read: ContextRead | null = null;
+		let failed = false;
 		try {
 			read = await session.readContext();
 		} catch (error) {
+			failed = true;
 			this.#deps.log(`context: read failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
 		// The attachment changed: whoever changed it reset the reading flag and owns what follows.
 		if (attachment !== this.#attachment) return;
 		this.#reading = false;
-		// A turn began or the identity changed while this read was in flight, even if it is idle again: the three sources
-		// were not read at one moment of one conversation. The read is dropped whole and asked for again once idle.
+		// A turn or a pass began, or the identity changed, while this read was in flight: the three sources were not read
+		// at one moment of one conversation. The read is dropped whole and asked for again. (A read that started during a
+		// turn is not overtaken by that turn.)
 		const overtaken = revision !== this.#revision;
-		const busy = liveOf(session.model).busy;
-		if (read !== null && !overtaken && !busy) this.#read = read;
+		const live = liveOf(session.model);
+		if (read !== null && !overtaken && !live.rewriting) {
+			this.#read = read;
+			this.#missed = false;
+		} else if (read === null) {
+			this.#missed = true;
+			if (!failed) this.#deps.log("context: the session gave no answer to the deep read; it is asked again when the session next changes state");
+		}
 		this.#publish();
 		const again = this.#again || overtaken;
 		this.#again = false;
-		if (again && !busy) this.#schedule(DEEP_READ_DEBOUNCE_MS);
+		if (again && this.#mayAsk(live)) this.#schedule(DEEP_READ_DEBOUNCE_MS);
 	}
 
 	#publish(): void {
