@@ -9,7 +9,7 @@ import type { PtyBrokerClient, PtyHandle } from "./pty-client";
 import { recordedRpcIdentityOf, resumeWorkingDirectory } from "./rpc-launch";
 import type { RpcHostRuntime, RpcLaunchRequest, RpcOmpLaunchSpec } from "./rpc-launch";
 import { brokerNativeGenerationReader, verifyPinnedBrokerAttachment } from "./rpc-reconcile";
-import type { BrokerPin, NativeStopVerdict } from "./rpc-reconcile";
+import type { BrokerPin, NativeGenerationReader, NativeStopVerdict } from "./rpc-reconcile";
 import { readSessionFileHeader } from "./session-index";
 
 export interface NativeHostRuntime extends Omit<RpcHostRuntime, "kind" | "handle"> {
@@ -116,10 +116,40 @@ export async function waitForManagedRootExit(runtime: SessionHostRuntime, client
 				}
 			}
 		} catch (error) {
+			// A broker that no longer exists (killed, or crashed) cannot answer. The writer is then proven gone the way a
+			// recovered row's is: the broker's and the OMP root's own creation times name processes that are no longer there.
+			if (await processGone(reader, runtime.handle.brokerPid, runtime.handle.record.brokerCreationTime) && await processGone(reader, runtime.pid, runtime.identity.childCreationTime)) {
+				return { writerGone: true, treeEmpty: false, detail: "The session is stopped. Commands it started may continue running separately.", diagnosticDetail: `The broker ${runtime.handle.brokerPid} and the exact OMP root pid ${runtime.pid} are gone. Its uncontained process tree remains unknown.` };
+			}
 			return { writerGone: false, treeEmpty: false, detail: "The session is disconnected. Reopen its editor and try Stop again.", diagnosticDetail: `Native child-exit read failed: ${error instanceof Error ? error.message : String(error)}` };
 		}
 		if (Date.now() >= deadline) break;
 		await delay(100);
 	} while (true);
 	return { writerGone: false, treeEmpty: false, detail: "OMP is still finishing queued or background work, or could not be confirmed stopped. Nothing was restarted; try Stop again.", diagnosticDetail: `Exact OMP root pid ${runtime.pid} exit was not confirmed before the deadline.` };
+}
+
+/** Whether a creation-time reading proves the process recorded under `creationTime` is gone: the id is unused, or now belongs to a process created at another time. `null` (never recorded) and an unreadable id prove nothing. */
+async function processGone(reader: NativeGenerationReader, pid: number, creationTime: string | null): Promise<boolean> {
+	if (creationTime === null) return false;
+	try {
+		const reading = await reader(pid);
+		return reading.kind === "gone" || (reading.kind === "found" && reading.creationTime !== creationTime);
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Whether a broker and the OMP (or shell) root it hosted are both proven gone by their recorded creation times.
+ * `false` for anything less: a process still there, an id without a recorded creation time, or a probe that could not run.
+ */
+export async function brokerAndRootGone(
+	client: PtyBrokerClient,
+	broker: { readonly pid: number; readonly creationTime: string | null },
+	root: { readonly pid: number; readonly creationTime: string | null },
+): Promise<boolean> {
+	const reader = await brokerNativeGenerationReader(client).catch(() => null);
+	if (reader === null) return false;
+	return await processGone(reader, broker.pid, broker.creationTime) && await processGone(reader, root.pid, root.creationTime);
 }

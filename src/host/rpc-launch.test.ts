@@ -234,6 +234,8 @@ describe("letting a stopped host's broker go", () => {
 		({
 			identity: { slot: "host:test-slot" },
 			handle: {
+				// A broker that still exists: a failed shutdown is then a refusal, not a retirement.
+				brokerPid: process.pid,
 				shutdown: async () => {
 					events.push("shutdown");
 					return shutdown();
@@ -259,5 +261,23 @@ describe("letting a stopped host's broker go", () => {
 		assert.equal(result.retired, false);
 		assert.match(result.detail, /not proven gone/);
 		assert.deepEqual(events, ["shutdown", "disconnect"]);
+	});
+
+	it("counts a broker whose process no longer exists as retired (killed from outside): there is nothing left to shut down", async () => {
+		const events: string[] = [];
+		const runtime = runtimeOf(async () => {
+			throw new Error("the broker connection closed");
+		}, events) as unknown as { handle: { brokerPid: number } };
+		runtime.handle.brokerPid = 2147483000;
+		const result = await launch.retireStoppedRpcBroker(runtime as unknown as Parameters<LaunchModule["retireStoppedRpcBroker"]>[0]);
+		assert.equal(result.retired, true);
+		assert.match(result.detail, /no longer exists/);
+		assert.deepEqual(events, ["shutdown", "disconnect"]);
+
+		const alive = runtimeOf(async () => {
+			throw new Error("the broker connection closed");
+		}, []) as unknown as { handle: { brokerPid: number } };
+		alive.handle.brokerPid = process.pid;
+		assert.equal((await launch.retireStoppedRpcBroker(alive as unknown as Parameters<LaunchModule["retireStoppedRpcBroker"]>[0])).retired, false, "a broker that still exists and did not shut down is not retired");
 	});
 });

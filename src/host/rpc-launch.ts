@@ -21,6 +21,7 @@ import {
 	resolveOmpBinary,
 } from "./native-terminal";
 import type { NativeControlBootstrap, OmpBinary, OmpCommand } from "./native-terminal";
+import { isPtyProcessAlive } from "./pty-identity";
 import type { PtyBrokerClient } from "./pty-client";
 import type { PtyHandle } from "./pty-client";
 import type { RpcHandle } from "./rpc-handle";
@@ -388,13 +389,15 @@ export async function stopRpcHost(runtime: RpcHostRuntime, mode: "graceful" | "f
  * never be made unfindable by it. Its own record is kept as recovery metadata, and this
  * window's connection is dropped whatever the answer.
  *
- * Returns whether the broker acknowledged the shutdown; `detail` is bounded text for the log.
+ * Returns whether the broker acknowledged the shutdown or no longer exists; `detail` is bounded text for the log.
  */
 export async function retireStoppedRpcBroker(runtime: { readonly handle: RpcHandle | PtyHandle; readonly identity: RecordedRpcIdentity }): Promise<{ readonly retired: boolean; readonly detail: string }> {
 	try {
 		await runtime.handle.shutdown();
 		return { retired: true, detail: `the broker of slot ${runtime.identity.slot} acknowledged its shutdown` };
 	} catch (error) {
+		// A broker that no longer exists (killed, or crashed) has nothing left to shut down: its slot is as retired as it gets.
+		if (!isPtyProcessAlive(runtime.handle.brokerPid)) return { retired: true, detail: `the broker of slot ${runtime.identity.slot} (pid ${runtime.handle.brokerPid}) no longer exists` };
 		return {
 			retired: false,
 			detail: `the broker of slot ${runtime.identity.slot} was not shut down: ${error instanceof Error ? error.message : String(error)}`,

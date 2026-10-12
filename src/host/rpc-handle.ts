@@ -185,6 +185,22 @@ export class RpcHandle extends BrokerHandle<BrokerHandleEvent> implements RpcCha
 		}
 	}
 
+	/**
+	 * The broker process behind this handle no longer exists and the caller proved the OMP process it
+	 * hosted gone too (by both recorded creation times): no exit frame can ever arrive, so the channel
+	 * ends the way a child's exit ends it, and the session shows the process ended instead of
+	 * reattaching to nothing. Nothing here asks the broker anything, and it names no cause: only the
+	 * caller's proof is known.
+	 */
+	brokerGone(): void {
+		this.emitChannel({
+			type: "child",
+			status: { state: "exited", pid: null, exitCode: null, stderrTail: "The OMP process is no longer running." },
+		});
+		this.channelClosed = false;
+		this.closeChannel("child-exited");
+	}
+
 	/** Detach this window: the claim ends with the connection, so ownership is cleared before the socket closes. */
 	disconnect(): void {
 		this.setOwned(false);

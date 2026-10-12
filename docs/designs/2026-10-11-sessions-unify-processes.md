@@ -21,7 +21,7 @@ The user asked for one view: merge Processes into Sessions, mark sessions that h
   - Title buttons **Stop Orphaned and Idle** (the existing selection and semantics) and **Kill All** (below). New Session and Resume Session leave the title bar; their in-list rows stay.
   - Keep every safety invariant of the Processes design unless the user's Kill All decision changes it, and bound the polling cost of a view that is now always visible.
 - Non-goals:
-  - Ending a process by PID or process tree. ADR-0029, ADR-0037 and ADR-0039 still forbid it.
+  - Ending a process by PID or process tree from Stop, Stop Orphaned and Idle or Kill All. ADR-0029, ADR-0037 and ADR-0039 still forbid it there. The one exception is the later, explicit per-row **Kill** menu action, a user decision of 2026-10-12 (see the [ADR-0060 amendment](../decisions/0060-merge-background-processes-into-sessions-and-kill-all-through-authenticated-routes.md#amendment-2026-10-12-kill-an-explicit-process-tree-kill-of-one-row)).
   - Stopping another live window's sessions or terminals through the broker on that window's behalf: Kill All asks the window to stop its own (see Multi-window).
   - Changing broker, registry or catalog formats, the staged runtime, or the classification rules of the Processes design (record liveness, the union of references, `orphaned` versus `unknown`).
   - Skills, Tools and MCP views: a separate package with its own design.
