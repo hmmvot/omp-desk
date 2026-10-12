@@ -538,7 +538,7 @@ interface TabState {
  * Everything one window mutates while it runs, in one object.
  *
  * `activate` builds it with {@link createWindowState} and installs it in the one module
- * binding, {@link window}; every function reads it through {@link state}. Grouped by concern.
+ * binding, {@link window}; every function reads it through {@link windowState}. Grouped by concern.
  */
 interface WindowState {
   // Session index and claims
@@ -1066,17 +1066,14 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
   };
 }
 
-/** This window's state; `undefined` before `activate` installs it and after `deactivate` clears it. */
+/** This window's state; `undefined` until `activate` installs it, and the next `activate` replaces it. */
 let window: WindowState | undefined;
 
 /** The installed window state. Throws when no window is installed, which is the invariant every caller relies on. */
-function state(): WindowState {
-  if (window === undefined) throw new Error("The OMP Desk window state is not installed: `activate` has not run or `deactivate` has.");
+function windowState(): WindowState {
+  if (window === undefined) throw new Error("The OMP Desk window state is not installed: `activate` has not run.");
   return window;
 }
-
-/** {@link state} for the functions whose own `state` local (an editor's `TabState`) shadows it. */
-const windowState: () => WindowState = state;
 
 /** One bound panel's document: the guest bundle, or a bounded explanation. */
 interface PanelDocument {
@@ -1146,7 +1143,7 @@ async function stagedEntriesIntact(entries: StagedRuntimeEntries): Promise<boole
  * changed helper only turns the probe off and must never stop a host from launching.
  */
 async function stageLeaseHelper(context: vscode.ExtensionContext): Promise<StagedRuntimeAsset | null> {
-  const s = state();
+  const s = windowState();
   if (s.stagedLeaseHelper !== null) {
     const cached = await s.stagedLeaseHelper;
     if (cached !== null && await verifyStagedRuntimeAsset(cached)) return cached;
@@ -1185,7 +1182,7 @@ async function stageLeaseHelper(context: vscode.ExtensionContext): Promise<Stage
  * already running host — finds it configured.
  */
 async function runtimeEntries(context: vscode.ExtensionContext): Promise<StagedRuntimeEntries> {
-  const s = state();
+  const s = windowState();
   const cached = s.stagedEntries;
   if (cached !== null) {
     const entries = await cached;
@@ -1216,7 +1213,7 @@ async function runtimeEntries(context: vscode.ExtensionContext): Promise<StagedR
 }
 
 async function revealDesktopNotification(index: SessionIndex, extensionId: string, uri: vscode.Uri): Promise<void> {
-  const s = state();
+  const s = windowState();
   if (uri.authority.toLowerCase() !== extensionId.toLowerCase() || uri.path !== "/reveal") return;
   const tabId = new URLSearchParams(uri.query).get("session");
   if (tabId === null || !/^tab:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(tabId)) return;
@@ -1257,7 +1254,7 @@ async function revealDesktopNotification(index: SessionIndex, extensionId: strin
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   window = createWindowState(context);
-  const s = state();
+  const s = windowState();
   s.output = vscode.window.createOutputChannel("OMP Desk");
   setOmpResolutionLog(log);
   context.subscriptions.push({ dispose: () => setOmpResolutionLog(null) });
@@ -1849,7 +1846,8 @@ export function deactivate(): void {
   s.bridgeLiveEditors.clear();
   // The window's lease record goes with the window; a crash leaves it to expire.
   s.windowRegistry?.removeSync();
-  window = undefined;
+  // `window` stays installed, disposed: subscriptions are disposed after this returns, and a late timer, watcher or
+  // promise continuation must read the disposed window as it read the module bindings before, not throw.
 }
 
 // Commands
@@ -1871,7 +1869,7 @@ async function newSession(
   index: SessionIndex,
   argument: unknown,
 ): Promise<void> {
-  const s = state();
+  const s = windowState();
   const folders = s.launcherFolders;
   if (folders === undefined) return;
   const folder = await chooseFolder(index, folders, argument, {
@@ -1913,7 +1911,7 @@ async function startNewSession(context: vscode.ExtensionContext, index: SessionI
 async function createSessionInColumn(
   context: vscode.ExtensionContext, index: SessionIndex, cwd: string, column: vscode.ViewColumn,
 ): Promise<vscode.WebviewPanel | null> {
-  const s = state();
+  const s = windowState();
   let entry: SessionIndexEntry;
   try {
     entry = await index.createDraft({ cwd });
@@ -2106,7 +2104,7 @@ function localLiveSessionCwds(index: SessionIndex): string[] {
  * records) they were published for. A change schedules one debounced write.
  */
 function publishWindowSnapshot(): void {
-  const s = state();
+  const s = windowState();
   const registry = s.windowRegistry;
   const index = s.indexForBridge;
   if (registry === undefined || index === null) return;
@@ -2143,7 +2141,7 @@ function publishWindowSnapshot(): void {
 
 /** Re-read the other windows' records and renew this window's own; repaint when what they show changed. */
 function refreshWindowRegistry(): void {
-  const s = state();
+  const s = windowState();
   const registry = s.windowRegistry;
   if (registry === undefined) return;
   void registry.flush();
@@ -2154,14 +2152,14 @@ function refreshWindowRegistry(): void {
 
 /** The folders other windows have open changed: re-resolve their agent roots and repaint. */
 function windowRegistryChanged(): void {
-  const s = state();
+  const s = windowState();
   s.resolveAgentRoots();
   refreshLauncher();
 }
 
 /** Every folder open in a live window of the profile, for the agent-root probe. */
 function allWindowFolders(): string[] {
-  const s = state();
+  const s = windowState();
   return (s.windowRegistry?.windows() ?? []).flatMap(window => [...window.folders]);
 }
 
@@ -2175,7 +2173,7 @@ function allWindowFolders(): string[] {
  * to date when it is shown (nobody is looking at it before that).
  */
 function windowRegistryHeartbeat(): void {
-  const s = state();
+  const s = windowState();
   s.resolveAgentRoots();
   s.windowRequestWatch?.rescan();
   s.pendingLaunchWatch?.rescan();
@@ -2191,7 +2189,7 @@ function windowRegistryHeartbeat(): void {
 
 /** Whether a live claim of another window of this extension holds the session right now (one claim read). */
 async function heldByAnotherWindow(index: SessionIndex, tabId: string): Promise<boolean> {
-  const s = state();
+  const s = windowState();
   const observed = await index.observeOwnership(tabId);
   const claim = observed.ok ? observed.claim : null;
   return claim !== null && claim.verifiable && claim.holderId !== null && claim.holderId !== index.claimHolder.id && await holderSeemsAlive(claim, s.windowRegistry);
@@ -2217,7 +2215,7 @@ async function switchToSessionWindow(index: SessionIndex, argument: unknown): Pr
 }
 
 async function requestSessionWindowSwitch(index: SessionIndex, argument: unknown): Promise<void> {
-  const s = state();
+  const s = windowState();
   const tabId = tabIdArgument(argument);
   if (tabId === null) return;
   const startedAt = Date.now();
@@ -2352,7 +2350,7 @@ const UNITY_CHOICE_KEY = "omp.unityProjectChoice.v1";
 
 /** The Unity project folders a launch in `folder` stands for: the folder itself, an opened folder it stands for, or projects below it. */
 async function unityCandidatesOf(folder: { readonly path: string; readonly openedPaths?: readonly string[] }): Promise<string[]> {
-  const s = state();
+  const s = windowState();
   const folders = s.launcherFolders;
   if (folders === undefined) return [];
   const found = new Map<string, string>();
@@ -2367,7 +2365,7 @@ async function unityCandidatesOf(folder: { readonly path: string; readonly opene
  * itself rather than trusting that it merely has both the workspace and the folder.
  */
 async function launchWorkspaceFits(folder: { readonly path: string; readonly openedPaths?: readonly string[] }, workspace: LaunchWorkspace): Promise<boolean> {
-  const s = state();
+  const s = windowState();
   const folders = s.launcherFolders;
   if (folders === undefined) return false;
   const wanted = folders.identityKeyOf(workspace.path);
@@ -2385,7 +2383,7 @@ async function launchWorkspaceFits(folder: { readonly path: string; readonly ope
  * The session's working directory stays the folder, so the repository's agent files load.
  */
 async function launchWorkspaceOf(folder: { readonly path: string; readonly openedPaths?: readonly string[] }): Promise<LaunchWorkspace | null> {
-  const s = state();
+  const s = windowState();
   const folders = s.launcherFolders;
   const ordinary: LaunchWorkspace = { path: folder.path, match: "folder" };
   if (folders === undefined) return ordinary;
@@ -2417,7 +2415,7 @@ async function launchWorkspaceOf(folder: { readonly path: string; readonly opene
  * window, and always logged.
  */
 function noteOlderBuildWindow(holderIds: readonly string[], folderPath: string): void {
-  const s = state();
+  const s = windowState();
   log(`window request: the window(s) ${holderIds.join(", ")} with ${folderPath} run an older OMP Desk build; the launch starts here`);
   if (holderIds.every(id => s.olderBuildNoticed.has(id))) return;
   for (const id of holderIds) s.olderBuildNoticed.add(id);
@@ -2441,7 +2439,7 @@ type LaunchRoute =
  * window that has the folder, the launch starts here and the user is told once.
  */
 async function planLaunchRoute(folder: { readonly path: string; readonly openedPaths?: readonly string[] }): Promise<LaunchRoute> {
-  const s = state();
+  const s = windowState();
   if (!vscode.workspace.getConfiguration("omp").get<boolean>("launchInFolderWindow", true)) return { kind: "here" };
   const folders = s.launcherFolders;
   if (s.windowRegistry === undefined || folders === undefined) return { kind: "here" };
@@ -2492,7 +2490,7 @@ async function followLaunchRoute(
   launch: LaunchAction,
   answerTimeoutMs?: number,
 ): Promise<boolean> {
-  const s = state();
+  const s = windowState();
   const registry = s.windowRegistry;
   const folders = s.launcherFolders;
   if (registry === undefined || folders === undefined) return true;
@@ -2596,7 +2594,7 @@ async function launchInNewWindow(
  * unknown starts here.
  */
 async function routeSessionOpen(index: SessionIndex, tabId: string, verb: "opened" | "resumed", mode: SessionViewMode | null): Promise<boolean> {
-  const s = state();
+  const s = windowState();
   const entry = index.get(tabId);
   const folders = s.launcherFolders;
   if (entry === null || folders === undefined) return false;
@@ -2630,7 +2628,7 @@ async function serveLaunchRequest(
   request: LaunchRequest,
   serveContext: ServeContext,
 ): Promise<ServeOutcome> {
-  const s = state();
+  const s = windowState();
   const folders = s.launcherFolders;
   const refuse = (reason: string, refusal?: RefusalReason): ServeOutcome => {
     log(`window request: refused a launch (${request.launch.kind}) for ${request.workspace.path} (${request.workspace.match}): ${reason}`);
@@ -2716,7 +2714,7 @@ function windowBecomesFocused(timeoutMs: number): Promise<boolean> {
  * with the same ordinary Stop; the owner therefore also says in a notification what it stopped.
  */
 async function serveStopRequest(index: SessionIndex, request: StopRequest, context: ServeContext): Promise<ServeOutcome> {
-  const s = state();
+  const s = windowState();
   const answerAll = (state: "refused" | "unconfirmed", reason: string): ServeOutcome => ({
     ok: true,
     focused: false,
@@ -2798,7 +2796,7 @@ async function selectHeldSessionTab(index: SessionIndex, request: SwitchRequest,
 
 /** Tree clicks keep history immediate; only a stopped same-row second click requests a launch. */
 async function clickSession(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown): Promise<void> {
-  const s = state();
+  const s = windowState();
   if (!(argument instanceof SessionTreeItem)) return;
   const tabId = argument.tabId;
   const entry = index.get(tabId);
@@ -2859,7 +2857,7 @@ async function openProcess(context: vscode.ExtensionContext, index: SessionIndex
  * is a click on that row; picking New Session runs the row's command.
  */
 async function goToSession(context: vscode.ExtensionContext, index: SessionIndex): Promise<void> {
-  const s = state();
+  const s = windowState();
   const provider = s.launcherProvider;
   if (provider === undefined) return;
   interface SessionChoice extends vscode.QuickPickItem { readonly row?: SessionTreeItem }
@@ -2888,7 +2886,7 @@ async function goToSession(context: vscode.ExtensionContext, index: SessionIndex
  * veto it. The native transcript is never removed here.
  */
 async function forgetSession(index: SessionIndex, argument: unknown): Promise<void> {
-  const s = state();
+  const s = windowState();
   const tabId = tabIdArgument(argument) ?? (await pickIndexedTab(index, "Forget a launcher entry"));
   if (tabId === null) return;
   const entry = index.get(tabId);
@@ -2934,7 +2932,7 @@ async function stopSessionHost(
    */
   preconfirmed?: { readonly recorded: RecordedStopCapture; readonly gracefulOnly?: boolean },
 ): Promise<boolean> {
-  const s = state();
+  const s = windowState();
   const target = sessionTargetFromArgument(index, argument);
   if (target === null) {
     showWarning("Select an OMP session to stop.");
@@ -3050,7 +3048,7 @@ async function stopSessionHost(
  * active or the front session the way Stop does, because nothing here asks for confirmation.
  */
 async function killSession(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown): Promise<void> {
-  const s = state();
+  const s = windowState();
   let selection: KillSelection | null = null;
   if (argument instanceof ProcessTreeItem) {
     selection = { kind: "process", row: argument.row };
@@ -3114,7 +3112,7 @@ function recordedProcessOf(index: SessionIndex, tabId: string): RecordedProcess 
  * killed process. Anything else that left the row unrecorded throws, so the command tells the user.
  */
 async function reconcileKilledSession(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, captured: CapturedHost): Promise<void> {
-  const s = state();
+  const s = windowState();
   const before = index.get(tabId);
   const result = await index.lifecycle.run(tabId, async lease => {
     const recorded = await index.reconcileKilledHost(tabId, captured, lease);
@@ -3149,7 +3147,7 @@ interface RecordedStopCapture {
  * against a target that changed in between.
  */
 function setupSessionProcesses(context: vscode.ExtensionContext, index: SessionIndex, folders: LauncherFolders): void {
-  const s = state();
+  const s = windowState();
   let catalogLoaded = false;
   void ensureCatalogReady().then(() => { catalogLoaded = s.catalogStore !== undefined; });
   registerStatsDashboard(context, { client: brokerClient, log });
@@ -3263,7 +3261,7 @@ function setupSessionProcesses(context: vscode.ExtensionContext, index: SessionI
 
 /** Attach only; a lifecycle action must never launch a process to stop it. */
 async function reattachNativeForLifecycle(context: vscode.ExtensionContext, index: SessionIndex, tabId: string): Promise<void> {
-  const s = state();
+  const s = windowState();
   const entry = index.get(tabId);
   if (entry?.host?.transport !== "native") return;
   const observation = await index.observeOwnership(tabId);
@@ -3360,7 +3358,7 @@ function recordedHostStopPort(
 
 /** A current owned-writer witness, never a recorded pid by itself. */
 async function verifiedOwnedWriterPid(index: SessionIndex, tabId: string, options: { readonly display?: boolean } = {}): Promise<number | null> {
-  const s = state();
+  const s = windowState();
   const runtime = stateOf(tabId)?.runtime ?? null;
   if (runtime !== null) return runtime.pid;
   const entry = index.get(tabId);
@@ -3377,7 +3375,7 @@ async function verifiedOwnedWriterPid(index: SessionIndex, tabId: string, option
 
 /** Stop the positively verified target after its caller's one confirmation. */
 async function stopVerifiedOwnedWriter(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, pid: number, captured?: CapturedSessionStop): Promise<boolean> {
-  const s = state();
+  const s = windowState();
   s.stoppingTabs.add(tabId);
   refreshLauncher();
   try {
@@ -3444,7 +3442,7 @@ async function stopVerifiedOwnedWriter(context: vscode.ExtensionContext, index: 
  * unreadable table or entry is uncertainty, never "nothing was launched".
  */
 function brokerProvenanceFor(tabId: string): BrokerSlotProvenance {
-  const s = state();
+  const s = windowState();
   if (s.brokerSlots === undefined) return { kind: "unreadable" };
   const byConversation = s.brokerSlots.provenanceFor({ conversation: tabId });
   if (byConversation.kind !== "none") return byConversation;
@@ -3477,7 +3475,7 @@ function isProcessAlive(pid: number): boolean {
  * left for it to show.
  */
 function forgetConversationState(tabId: string): void {
-  const s = state();
+  const s = windowState();
   s.detailTabs.closeConversation(tabId);
   for (const state of [...s.tabs.values()]) {
     if (state.tabId !== tabId) continue;
@@ -3511,7 +3509,7 @@ interface CapturedSessionStop {
 }
 
 async function confirmAndDeleteSession(index: SessionIndex, subject: SessionDeletionSubject): Promise<boolean> {
-  const s = state();
+  const s = windowState();
   try {
     const tabId = typeof subject === "string" && index.get(subject) !== null ? subject : null;
     if (tabId !== null && s.context !== undefined && stateOf(tabId)?.runtime == null && index.get(tabId)?.host?.transport === "native") {
@@ -3546,7 +3544,7 @@ async function deleteSessionAfterFence(
   subject: SessionDeletionSubject,
   captured?: CapturedSessionStop,
 ): Promise<boolean> {
-  const s = state();
+  const s = windowState();
   const options: SessionDeletionOptions = {
     index,
     reconciler: s.reconciler,
@@ -3662,7 +3660,7 @@ async function deleteSession(index: SessionIndex, argument: unknown): Promise<vo
 
 /** Re-read the launcher from the folders it shows, the index and this window. */
 function refreshSessions(index: SessionIndex): void {
-  const s = state();
+  const s = windowState();
   // An explicit Refresh is the user's own answer to a launcher they believe is stale, so
   // it adopts the newest committed revision before re-reading anything.
   if (s.launcherFolders !== undefined) {
@@ -3727,7 +3725,7 @@ function reportFolderSaveFailure(folders: LauncherFolders): void {
  * to suggest, the dialog is used directly.
  */
 async function addWorkspaceFolder(index: SessionIndex): Promise<LauncherFolder | null> {
-  const s = state();
+  const s = windowState();
   const folders = s.launcherFolders;
   if (folders === undefined) return null;
   const chosenPath = await pickFolderToAdd(folders);
@@ -3803,7 +3801,7 @@ async function browseForFolder(): Promise<string | null> {
  * resolved again here, so a stale row cannot pin a different folder.
  */
 async function pinWorkspaceFolder(index: SessionIndex, argument: unknown): Promise<void> {
-  const s = state();
+  const s = windowState();
   const folders = s.launcherFolders;
   if (folders === undefined) return;
   const folder = await chooseFolder(index, folders, argument, {
@@ -3833,7 +3831,7 @@ async function pinWorkspaceFolder(index: SessionIndex, argument: unknown): Promi
  * stale row cannot unpin a different folder.
  */
 async function unpinWorkspaceFolder(index: SessionIndex, argument: unknown): Promise<void> {
-  const s = state();
+  const s = windowState();
   const folders = s.launcherFolders;
   if (folders === undefined) return;
   const folder = await chooseFolder(index, folders, argument, {
@@ -4014,7 +4012,7 @@ async function pickFolderHistoryCandidate(
   folder: WorkspaceFolder,
   scan: FolderHistoryScan,
 ): Promise<FolderHistoryCandidate | null> {
-  const s = state();
+  const s = windowState();
   const open = new Set<string>();
   const running = new Set<string>();
   for (const state of s.tabs.values()) {
@@ -4086,7 +4084,7 @@ async function resumeWorkspaceFolder(
   index: SessionIndex,
   argument: unknown,
 ): Promise<void> {
-  const s = state();
+  const s = windowState();
   const folders = s.launcherFolders;
   if (folders === undefined) return;
   const folder = await chooseFolder(index, folders, argument, {
@@ -4400,7 +4398,7 @@ async function reviveEditorPanel(
  * as "passive, starting or stopping".
  */
 async function editorSettled(slot: string, tabId: string): Promise<void> {
-  const s = state();
+  const s = windowState();
   const deadline = Date.now() + EDITOR_REVIVE_TIMEOUT_MS;
   for (;;) {
     const state = s.tabs.get(slot);
@@ -4522,7 +4520,7 @@ async function openTabOnce(
   requestedMode?: SessionViewMode,
   externalConfirmed = false,
 ): Promise<void> {
-  const s = state();
+  const s = windowState();
   // Wait for the activation pass before touching this tab: it may be restoring
   // the very row this click is for, and a second restore of one row is what the
   // index refuses as a duplicate. No tab lifecycle is held while waiting — this
@@ -4685,7 +4683,7 @@ async function brokerLossProven(
  * kept and the user is told it could not be confirmed ended.
  */
 function watchRuntimeBroker(index: SessionIndex, tabId: string, runtime: SessionHostRuntime): void {
-  const s = state();
+  const s = windowState();
   s.brokerWatches.get(runtime)?.();
   const isCurrent = (): boolean => stateOf(tabId)?.runtime === runtime;
   s.brokerWatches.set(runtime, watchBrokerLoss({
@@ -4807,7 +4805,7 @@ async function attachHost(
   index: SessionIndex,
   request: OmpHostAttachRequest,
 ): Promise<OmpHostAttachResult> {
-  const s = state();
+  const s = windowState();
   const attachedAt = Date.now();
   s.diagnostics.beginSubject(request.tabId, {
     label: diagnosticsLabel(request.cwd),
@@ -4871,7 +4869,7 @@ async function launchHost(
   index: SessionIndex,
   request: OmpHostLaunchRequest,
 ): Promise<OmpHostLaunchResult> {
-  const s = state();
+  const s = windowState();
   // Fresh authenticated current-file readback protects against an own native
   // /resume hidden by a stale catalog row. Failure remains explicitly best effort.
   if (request.sessionFile !== null) {
@@ -5837,7 +5835,7 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
  * current facts exactly as an explicit click is.
  */
 function startStartupRestore(context: vscode.ExtensionContext, index: SessionIndex): void {
-  const s = state();
+  const s = windowState();
   const cohort = localRecoveryCohort(index);
   s.startupRestorePending = false;
   const settled = (async () => {
@@ -5894,7 +5892,7 @@ function inLocalRecoveryCohort(index: SessionIndex, tabId: string): boolean {
  * the restore cohort even though nothing in this activation has bound a panel to it.
  */
 function hasLocalEditorFor(tabId: string): boolean {
-  const s = state();
+  const s = windowState();
   if ((s.tabs.get(tabId)?.panel ?? null) !== null) return true;
   if (
     s.editorSlots
@@ -5946,7 +5944,7 @@ function createProfileCatalog(context: vscode.ExtensionContext): Promise<Catalog
  * folder list together with a ledger entry ({@link importPredecessorFolders}).
  */
 function startCatalogActivation(context: vscode.ExtensionContext, index: SessionIndex, folders: LauncherFolders, catalog: CatalogStore): void {
-  const s = state();
+  const s = windowState();
   const settled = (async () => {
     try {
       await importPredecessorFolders({
@@ -5979,7 +5977,7 @@ function startCatalogActivation(context: vscode.ExtensionContext, index: Session
  * resolved against everything this window can recover.
  */
 async function ensureCatalogReady(): Promise<void> {
-  const s = state();
+  const s = windowState();
   await s.catalogReady;
 }
 
@@ -6005,7 +6003,7 @@ async function adoptCatalogChangesMarked(
   folders: LauncherFolders,
   options: { readonly startup?: boolean } = {},
 ): Promise<void> {
-  const s = state();
+  const s = windowState();
   const catalog = s.catalogStore;
   if (catalog === undefined) return;
   // A foreign revision is read from disk; this window's *own* commit already advanced the
@@ -6042,7 +6040,7 @@ async function adoptCatalogChangesMarked(
  * failure to watch only costs a refresh on the next focus or explicit refresh.
  */
 function watchCatalogForWindow(index: SessionIndex, folders: LauncherFolders): void {
-  const s = state();
+  const s = windowState();
   const catalog = s.catalogStore;
   if (catalog === undefined) return;
   const notify = (): void => {
@@ -6070,7 +6068,7 @@ async function restoreTabs(
   index: SessionIndex,
   cohort: ReadonlySet<string>,
 ): Promise<void> {
-  const s = state();
+  const s = windowState();
   if (cohort.size === 0) {
     refreshLauncher();
     return;
@@ -6141,7 +6139,7 @@ async function handleRestoreOutcome(
   tabId: string,
   outcome: RestoreOutcome,
 ): Promise<void> {
-  const s = state();
+  const s = windowState();
   // The launcher shows this outcome until the next attempt, so a refused or
   // failed open stays visible after the notification is gone.
   s.outcomes.set(tabId, outcome);
@@ -6208,7 +6206,7 @@ function presentRestoreOutcome(
 
 /** Present a positively verified writer; a legacy writer remains explicitly stoppable. */
 function presentConflict(index: SessionIndex, tabId: string, detail: string): void {
-  const s = state();
+  const s = windowState();
   const entry = index.get(tabId);
   if (entry !== null && entry.host !== null && !isManagedHost(entry.host)) {
     s.chat.showLegacy(tabId, { cwd: entry.cwd, title: entry.title, reason: detail });
@@ -6255,7 +6253,7 @@ async function electLocalController(index: SessionIndex, tabId: string): Promise
  * fences a demoted editor's bridge route and terminal input.
  */
 function reconcileLocalRoles(index: SessionIndex): void {
-  const s = state();
+  const s = windowState();
   for (const entry of s.editorSlots.entries()) {
     const binding = index.slotBinding(entry.slotId);
     const durable: EditorSlotRole = binding?.role ?? "passive";
@@ -6457,7 +6455,7 @@ const AUX_WINDOW_GROUP = -3;
 
 /** The view column files from the chat open in: the file window's group while that window is open, else VS Code's choice. */
 function fileWindowColumn(): number | undefined {
-  const s = state();
+  const s = windowState();
   return s.fileWindow.column(vscode.window.tabGroups.all) ?? undefined;
 }
 
@@ -6476,7 +6474,7 @@ async function keepFileWindowOnTop(): Promise<void> {
  * file window it brings all of its tabs back to the group next to the chat and closes the window.
  */
 async function moveFileToNewWindow(): Promise<void> {
-  const s = state();
+  const s = windowState();
   const groups = vscode.window.tabGroups;
   const window = s.fileWindow.current(groups.all);
   if (window !== null) {
@@ -6509,7 +6507,7 @@ async function focusEditorGroup(group: vscode.TabGroup): Promise<boolean> {
  * a window of VS Code's default size (the command takes no bounds).
  */
 async function moveGroupToNewWindow(source: vscode.TabGroup): Promise<void> {
-  const s = state();
+  const s = windowState();
   if (!await focusEditorGroup(source)) {
     showInfo("The file group is beyond the eighth editor group; focus it and use View: Move Editor Group into New Window.");
     return;
@@ -6578,7 +6576,7 @@ async function groupHoldingReopened(tab: vscode.Tab, window: vscode.TabGroup): P
  * window, which is then still remembered, and the user is told.
  */
 async function returnFilesFromWindow(window: vscode.TabGroup): Promise<void> {
-  const s = state();
+  const s = windowState();
   const groups = vscode.window.tabGroups;
   const candidates = groups.all.filter(group => group !== window);
   const tabs = [...window.tabs];
@@ -6638,7 +6636,7 @@ async function returnFilesFromWindow(window: vscode.TabGroup): Promise<void> {
  * first file, so the caller can move the group instead.
  */
 async function openGroupInSizedFileWindow(source: vscode.TabGroup): Promise<boolean> {
-  const s = state();
+  const s = windowState();
   const tabs = [...source.tabs];
   const first = tabs[0];
   if (first === undefined || !(first.input instanceof vscode.TabInputText)) return false;
@@ -6897,7 +6895,7 @@ function reserveSlotForConversation(
   slot: string,
   provenance: "saved" | "transient",
 ) {
-  const s = state();
+  const s = windowState();
   const first = s.bridgeEditors.reserve({ tabId: conversation, editorId: slot, provenance, sequence: ++s.editorEventSequence });
   if (first.outcome !== "lost") return first;
   const incumbent = first.reservation.editorId;
@@ -6944,7 +6942,7 @@ function bridgeSerializerFor(
   index: SessionIndex,
   viewType: string,
 ): vscode.WebviewPanelSerializer {
-  const s = state();
+  const s = windowState();
   return {
     async deserializeWebviewPanel(panel, state): Promise<void> {
       const identity = decodeBridgeViewType(viewType);
@@ -7064,7 +7062,7 @@ function bridgeSerializerFor(
  * by `openingTabs`.
  */
 async function openRestoredTabIfUncovered(context: vscode.ExtensionContext, index: SessionIndex, tabId: string): Promise<void> {
-  const s = state();
+  const s = windowState();
   if (index.get(tabId) === null) return;
   // The revival a request triggered reaches this point once; it consumes the mark.
   const requested = s.requestSelections.delete(tabId);
@@ -7094,7 +7092,7 @@ function legacySerializerFor(
   context: vscode.ExtensionContext,
   index: SessionIndex,
 ): vscode.WebviewPanelSerializer {
-  const s = state();
+  const s = windowState();
   return {
     async deserializeWebviewPanel(panel, state): Promise<void> {
       const tabId = persistedTabId(state);
@@ -7208,7 +7206,7 @@ function legacySerializerFor(
  * its saved history read-only, so a restored editor never waits on a process.
  */
 function replayPanelOutcome(index: SessionIndex, tabId: string): void {
-  const s = state();
+  const s = windowState();
   if (s.chat.has(tabId)) {
     attachChatRoutes(tabId);
     return;
@@ -7277,14 +7275,14 @@ const SELECTION_REQUEST_TIMEOUT_MS = 500;
 
 /** The page's own answer to {@link askPageSelection}; a reply from another editor or panel is not this request's. */
 function acceptSelectionReply(slot: string, panel: vscode.WebviewPanel, reply: GuestSelectionReplyMessage): void {
-  const s = state();
+  const s = windowState();
   const pending = s.selectionRequests.get(reply.requestId);
   if (pending?.slot === slot && pending.panel === panel) pending.settle(reply.text);
 }
 
 /** The text selected in one editor's page (a webview's selection is invisible to VS Code), or `""` when it does not answer in time. */
 async function askPageSelection(slot: string, panel: vscode.WebviewPanel): Promise<string> {
-  const s = state();
+  const s = windowState();
   const requestId = ++s.selectionRequestSeq;
   const { promise, resolve } = Promise.withResolvers<string>();
   s.selectionRequests.set(requestId, { slot, panel, settle: resolve });
@@ -7334,7 +7332,7 @@ interface CarriedDraft {
  * have preserved text it never received.
  */
 async function captureDraft(source: TabState): Promise<CarriedDraft | null> {
-  const s = state();
+  const s = windowState();
   const panel = source.panel;
   if (panel === null || source.document?.kind !== "guest") return null;
   const document = source.document;
@@ -7370,7 +7368,7 @@ function releaseCarriedDraft(carried: CarriedDraft | null): void {
  * composer to ask; a page that does not answer is reported rather than silently emptied.
  */
 async function carryDraftFrom(previous: vscode.WebviewPanel | null): Promise<CarriedDraft | null> {
-  const s = state();
+  const s = windowState();
   if (previous === null) return null;
   let owner: TabState | undefined;
   for (const state of s.tabs.values()) if (state.panel === previous) { owner = state; break; }
@@ -7394,7 +7392,7 @@ async function carryDraftFrom(previous: vscode.WebviewPanel | null): Promise<Car
  * read-only history at once; the live conversation replaces it when the host attaches.
  */
 function paintSavedHistory(index: SessionIndex, tabId: string): void {
-  const s = state();
+  const s = windowState();
   const entry = index.get(tabId);
   if (stateOf(tabId)?.mode !== "chat" || entry === null || entry.sessionFile === null || s.chat.kindOf(tabId) !== null) return;
   void s.chat
@@ -7405,7 +7403,7 @@ function paintSavedHistory(index: SessionIndex, tabId: string): void {
 }
 
 function replyChatSendResult(tabId: string, message: ChatWebviewMessage, page: ChatPage, outcome: ChatCommandOutcome): void {
-  const s = state();
+  const s = windowState();
   if (message.type !== "omp:chat-prompt" && message.type !== "omp:chat-steer" && message.type !== "omp:chat-follow-up") return;
   const epoch = s.chat.stateOf(tabId)?.epoch;
   if (epoch === undefined) return;
@@ -7425,7 +7423,7 @@ function replyChatSendResult(tabId: string, message: ChatWebviewMessage, page: C
  * command ever reached the session.
  */
 async function runChatCommand(tabId: string, message: ChatWebviewMessage, page: ChatPage): Promise<ChatCommandOutcome> {
-  const s = state();
+  const s = windowState();
   let outcome: ChatCommandOutcome;
   try {
     outcome = await s.chat.handleMessage(tabId, message, page);
@@ -7463,7 +7461,7 @@ async function closeLeftoverDetailTabs(): Promise<void> {
  * passive editor may ask too; the conversation comes from the sending editor, never the message.
  */
 function openDetailTab(tabId: string, mode: "chat" | "terminal", request: GuestOpenDetailMessage): void {
-  const s = state();
+  const s = windowState();
   // A terminal editor and a legacy tab have no conversation page to show: nothing would arrive.
   if (mode === "terminal" || s.chat.kindOf(tabId) === "legacy") return;
   const target: DetailTarget = request.kind === "agent" ? { kind: "agent", agentId: request.agentId } : { kind: request.kind };
@@ -7487,7 +7485,7 @@ async function handleGuestMessage(
   panel: vscode.WebviewPanel,
   message: unknown,
 ): Promise<void> {
-  const s = state();
+  const s = windowState();
   // Addressed by the immutable editor slot: what the editor shows is resolved here, at
   // dispatch, so a listener registered earlier still answers for the conversation the
   // editor serves now.
@@ -7650,7 +7648,7 @@ async function handleGuestMessage(
  * read-only with the reason; a draft that never got a file shows the reason alone.
  */
 function presentUnavailable(index: SessionIndex, tabId: string, reason: string, phase: "view-only" | "blocked" = "view-only"): void {
-  const s = state();
+  const s = windowState();
   const entry = index.get(tabId);
   if (entry === null) return;
   void s.chat
@@ -7689,7 +7687,7 @@ function invalidateGuestControls(tabId: string): void {
 
 /** Resolve this window's workspace hash and its durable bridge records. */
 async function bridgeHost(context: vscode.ExtensionContext): Promise<{ readonly workspace: string; readonly records: BridgeRecords }> {
-  const s = state();
+  const s = windowState();
   if (s.bridgeWorkspace !== null && s.bridgeStore !== null) return { workspace: s.bridgeWorkspace, records: s.bridgeStore };
   const folders = (vscode.workspace.workspaceFolders ?? []).map(folder => folder.uri.fsPath);
   const workspaceFile = vscode.workspace.workspaceFile?.fsPath ?? null;
@@ -7731,7 +7729,7 @@ function editorMembership(): { readonly tabId: string; readonly editorId: string
 
 /** Register one dynamic type's serializer, once per activation. */
 function registerBridgeSerializer(context: vscode.ExtensionContext, index: SessionIndex, viewType: string): void {
-  const s = state();
+  const s = windowState();
   if (s.bridgeSerializerTypes.has(viewType)) return;
   s.bridgeSerializerTypes.add(viewType);
   context.subscriptions.push(vscode.window.registerWebviewPanelSerializer(viewType, bridgeSerializerFor(context, index, viewType)));
@@ -7739,7 +7737,7 @@ function registerBridgeSerializer(context: vscode.ExtensionContext, index: Sessi
 
 /** The endpoint of one editor, or `null` when this window does not serve it. */
 function bridgeEndpointOf(editorId: string): BridgeEditorEndpoint | null {
-  const s = state();
+  const s = windowState();
   return s.bridgeEndpoints.get(editorId) ?? null;
 }
 
@@ -7777,7 +7775,7 @@ async function ensureBridgeEndpoint(
   tabId: string,
   editorId: string,
 ): Promise<BridgeEditorEndpoint | null> {
-  const s = state();
+  const s = windowState();
   const existing = bridgeEndpointOf(editorId);
   if (existing !== null) return existing;
   const pending = s.pendingBridgeEndpoints.get(editorId);
@@ -7922,7 +7920,7 @@ async function syncBridgeEditors(
   index: SessionIndex,
   options: { readonly retireMissing?: boolean } = {},
 ): Promise<void> {
-  const s = state();
+  const s = windowState();
   const membership = editorMembership();
   const present = new Set(membership.map(entry => entry.editorId));
   for (const editorId of [...s.bridgeLiveEditors]) {
@@ -8304,7 +8302,7 @@ function pushBridgeRouteOffer(tabId: string): void {
 // Chat pages: the routes that show a host-owned conversation
 
 function panelPageId(panel: vscode.WebviewPanel): string {
-  const s = state();
+  const s = windowState();
   let id = s.panelPageIds.get(panel);
   if (id === undefined) {
     s.panelPageSequence += 1;
@@ -8337,7 +8335,7 @@ const BRIDGE_CHAT_CHUNK_BYTES = 248 * 1024;
 
 /** The bridge route of one surviving page: host pushes ride the bridge's own frames. */
 function bridgeChatPage(bridge: NonNullable<TabState["bridge"]>, documentId: string): ChatPage {
-  const s = state();
+  const s = windowState();
   return {
     id: `bridge-${documentId}`,
     maxChunkBytes: BRIDGE_CHAT_CHUNK_BYTES,
@@ -8393,7 +8391,7 @@ function attachChatRoute(slot: string, force = false): void {
 
 /** Point every editor showing one conversation at its route (after its host or view changed). */
 function attachChatRoutes(tabId: string, force = false): void {
-  const s = state();
+  const s = windowState();
   for (const [slot, state] of s.tabs) {
     if (state.tabId === tabId) attachChatRoute(slot, force);
   }
@@ -8882,7 +8880,7 @@ function reportMaintenance(result: CommandResult<string>, notDone: string): void
  * the TUI. Outcomes are reported here; progress shows in the conversation itself.
  */
 async function runChatAction(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, command: GuestChatCommand): Promise<void> {
-  const s = state();
+  const s = windowState();
   if (command === "provider-login") {
     const entry = index.get(tabId);
     await openProviderLogin(stateOf(tabId)?.runtime ?? null, entry?.scope.profile ?? null,
@@ -9020,13 +9018,13 @@ const MAX_PROMPT_HISTORY = 200;
 const MAX_REMEMBERED_PROMPT = 20_000;
 
 function rememberedPrompts(): string[] {
-  const s = state();
+  const s = windowState();
   const stored = s.context?.globalState.get<unknown>(PROMPT_HISTORY_KEY);
   return Array.isArray(stored) ? stored.filter((item): item is string => typeof item === "string") : [];
 }
 
 function rememberPrompt(text: string): void {
-  const s = state();
+  const s = windowState();
   const context = s.context;
   if (context === undefined || text.trim().length === 0 || text.length > MAX_REMEMBERED_PROMPT || text.trimStart().startsWith("/")) return;
   const next = [text, ...rememberedPrompts().filter(item => item !== text)].slice(0, MAX_PROMPT_HISTORY);
@@ -9038,7 +9036,7 @@ function rememberPrompt(text: string): void {
  * from other Chats. The pick is added to the draft, never sent.
  */
 async function searchPromptHistory(): Promise<void> {
-  const s = state();
+  const s = windowState();
   const tabId = activeChatTab();
   if (tabId === null) return;
   const own = sessionPrompts(s.chat.modelOf(tabId)?.entries ?? []).reverse();
@@ -9071,7 +9069,7 @@ async function searchPromptHistory(): Promise<void> {
  * takes the prompt to edit and send again. Files changed afterwards are named and never restored.
  */
 async function rewindConversation(): Promise<void> {
-  const s = state();
+  const s = windowState();
   const tabId = activeChatTab();
   if (tabId === null) return;
   const model = s.chat.modelOf(tabId);
@@ -9118,7 +9116,7 @@ async function rewindConversation(): Promise<void> {
 const SLASH_REGISTRY_RECHECK_MS = 60_000;
 
 function currentSlashRegistry(context: vscode.ExtensionContext): readonly BuiltinSlashEntry[] | null {
-  const s = state();
+  const s = windowState();
   if (s.slashRegistryLoading === null && Date.now() - s.slashRegistryCheckedAt > SLASH_REGISTRY_RECHECK_MS) {
     s.slashRegistryLoading = loadSlashRegistry(context).finally(() => {
       s.slashRegistryCheckedAt = Date.now();
@@ -9129,7 +9127,7 @@ function currentSlashRegistry(context: vscode.ExtensionContext): readonly Builti
 }
 
 async function loadSlashRegistry(context: vscode.ExtensionContext): Promise<void> {
-  const s = state();
+  const s = windowState();
   try {
     const bun = await resolveBunRuntime();
     const pkg = bun === null ? null : await resolveOmpPackageRoot(await resolveOmpBinary());
@@ -9199,7 +9197,7 @@ async function addFilesToSession(context: vscode.ExtensionContext, index: Sessio
 
 /** This window's sessions that can take text now, or by being opened first. */
 function sendCandidates(context: vscode.ExtensionContext, index: SessionIndex): SendCandidate[] {
-  const s = state();
+  const s = windowState();
   const found: SendCandidate[] = [];
   for (const entry of index.list()) {
     const facts = launcherFacts(entry.tabId);
@@ -9229,7 +9227,7 @@ function sendCandidates(context: vscode.ExtensionContext, index: SessionIndex): 
 
 /** The QuickPick: eligible sessions, most recently focused first and preselected, then a new session next to the file. */
 async function pickSendTarget(context: vscode.ExtensionContext, index: SessionIndex, firstFsPath: string, unsaved: boolean): Promise<SendTarget | null> {
-  const s = state();
+  const s = windowState();
   const workspace = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(firstFsPath));
   const requestedFolder = newSessionFolder(firstFsPath, workspace?.uri.fsPath ?? null);
   // A workspace folder shown as its repository's agent root starts the session there.
@@ -9274,7 +9272,7 @@ async function pickSendTarget(context: vscode.ExtensionContext, index: SessionIn
 }
 
 async function addToSession(context: vscode.ExtensionContext, index: SessionIndex, sources: readonly ReferenceSource[], unsaved: boolean): Promise<void> {
-  const s = state();
+  const s = windowState();
   const first = sources[0];
   if (first === undefined) return;
   const target = await pickSendTarget(context, index, first.fsPath, unsaved);
@@ -9352,7 +9350,7 @@ async function deliverInsertion(
   sources: readonly ReferenceSource[],
   entryCwd: string,
 ): Promise<{ readonly ok: true; readonly title: string; readonly summary: string } | { readonly ok: false; readonly reason: string }> {
-  const s = state();
+  const s = windowState();
   const deadline = Date.now() + INSERT_TARGET_TIMEOUT_MS;
   let waiting = "the session did not become ready";
   let revealed = false;
@@ -9400,7 +9398,7 @@ async function deliverInsertion(
  * state being reported twice.
  */
 function notifierFor(index: SessionIndex): TurnNotifier {
-  const s = state();
+  const s = windowState();
   if (s.turnNotifier === undefined || s.turnNotifier.index !== index) {
     s.turnNotifier = {
       index,
@@ -9468,7 +9466,7 @@ function sessionLookedAt(index: SessionIndex, tabId: string): boolean {
  * survives a window reload.
  */
 function recordSessionEvent(index: SessionIndex, tabId: string): void {
-  const s = state();
+  const s = windowState();
   const entry = index.get(tabId);
   if (entry === null) return;
   const markers = markersAfterEvent(entry, sessionLookedAt(index, tabId), Date.now());
@@ -9480,7 +9478,7 @@ function recordSessionEvent(index: SessionIndex, tabId: string): void {
 
 /** The user is in front of a session's editor: what it said so far counts as read. */
 function settleViewedSession(index: SessionIndex): void {
-  const s = state();
+  const s = windowState();
   const tabId = editorInFrontConversation(index);
   const entry = tabId === null ? null : index.get(tabId);
   if (tabId === null || entry === null || !sessionLookedAt(index, tabId)) return;
@@ -9498,7 +9496,7 @@ function settleViewedSession(index: SessionIndex): void {
  * meaning (an open `@`-completion popup).
  */
 function refreshGuestContext(): void {
-  const s = state();
+  const s = windowState();
   const visible = activePanelTab();
   const activity = visible === null ? undefined : s.turnActivities.get(visible.tabId);
   const mode = visible?.mode ?? "";
@@ -9516,7 +9514,7 @@ const SUBAGENT_WORK_POLL_MS = 3_000;
 const SUBAGENT_WORK_MAX_FAILURES = 3;
 
 function setSubagentWork(index: SessionIndex, tabId: string, active: boolean): void {
-  const s = state();
+  const s = windowState();
   if ((s.subagentWork.get(tabId) ?? false) === active) return;
   if (active) s.subagentWork.set(tabId, true); else s.subagentWork.delete(tabId);
   const model = s.chat.sessionOf(tabId)?.model;
@@ -9524,7 +9522,7 @@ function setSubagentWork(index: SessionIndex, tabId: string, active: boolean): v
 }
 
 function stopSubagentWatch(index: SessionIndex | null, tabId: string): void {
-  const s = state();
+  const s = windowState();
   const timer = s.subagentWatches.get(tabId);
   if (timer !== undefined) clearInterval(timer);
   s.subagentWatches.delete(tabId);
@@ -9533,7 +9531,7 @@ function stopSubagentWatch(index: SessionIndex | null, tabId: string): void {
 
 /** Ask a verified chat child for its registry subagents until the channel it was started on changes. */
 function watchSubagentWork(index: SessionIndex, tabId: string, client: HostControlClient): void {
-  const s = state();
+  const s = windowState();
   stopSubagentWatch(null, tabId);
   let failures = 0;
   let inFlight = false;
@@ -9566,7 +9564,7 @@ function watchSubagentWork(index: SessionIndex, tabId: string, client: HostContr
  * host is never read as a transition.
  */
 function applyTurnActivity(index: SessionIndex, tabId: string, model: ChatModel, baseline: boolean): void {
-  const s = state();
+  const s = windowState();
   const previous = s.turnActivities.get(tabId) ?? null;
   const observed = turnActivity(model);
   const activity = observed !== null && s.subagentWork.get(tabId) === true ? withRegistrySubagentWork(observed) : observed;
@@ -9594,7 +9592,7 @@ function applyTurnActivity(index: SessionIndex, tabId: string, model: ChatModel,
 
 /** Drop everything this window remembered about a conversation that is gone. */
 function forgetTurnActivity(index: SessionIndex, tabId: string): void {
-  const s = state();
+  const s = windowState();
   stopSubagentWatch(null, tabId);
   s.turnActivities.delete(tabId);
   s.composerPopupTabs.delete(tabId);
@@ -9620,7 +9618,7 @@ function rpcPhaseIsRunning(phase: ChatPhase): boolean {
  * as they were, and is only logged.
  */
 async function retireBroker(tabId: string, runtime: SessionHostRuntime): Promise<void> {
-  const s = state();
+  const s = windowState();
   const result = await retireStoppedRpcBroker(runtime);
   log(`tab ${tabId}: ${result.detail}`);
   if (result.retired) await s.brokerSlots?.forget(runtime.identity.slot).catch(() => undefined);
@@ -9641,7 +9639,7 @@ async function handleRpcHostExited(
   tabId: string,
   runtime: RpcHostRuntime,
 ): Promise<void> {
-  const s = state();
+  const s = windowState();
   // Report-only boundary for the whole transaction: a failure after the runtime was cleared
   // (stopping its terminal, disposing control) must still be visible, and the broker watch
   // stops waiting once the runtime is gone. Nothing is mutated here: a replacement runtime
@@ -9718,7 +9716,7 @@ async function bindConversationIdentity(
   sessionId: string,
   previousSessionId?: string,
 ): Promise<void> {
-  const s = state();
+  const s = windowState();
   await index.lifecycle.run(tabId, async lease => {
     const current = stateOf(tabId);
     if (current === undefined || current.runtime !== runtime) return;
@@ -9777,7 +9775,7 @@ const IDENTITY_RETRY_MS = 750;
  * conversation's process changes, or the pending entry is replaced.
  */
 function scheduleIdentityRetry(index: SessionIndex, tabId: string): void {
-  const s = state();
+  const s = windowState();
   const pending = s.pendingIdentityFiles.get(tabId);
   if (pending === undefined || pending.timer !== null) return;
   const timer = setTimeout(() => {
@@ -9792,7 +9790,7 @@ function scheduleIdentityRetry(index: SessionIndex, tabId: string): void {
 
 /** Bind a pending new session to its file once OMP has written it; also called on conversation activity. */
 function retryPendingIdentity(index: SessionIndex, tabId: string): Promise<void> {
-  const s = state();
+  const s = windowState();
   const pending = s.pendingIdentityFiles.get(tabId);
   if (pending === undefined || Date.now() - pending.lastTry < IDENTITY_RETRY_MS) return Promise.resolve();
   if (stateOf(tabId)?.runtime !== pending.runtime || index.get(tabId)?.sessionFile !== null) {
@@ -9826,7 +9824,7 @@ function retryPendingIdentity(index: SessionIndex, tabId: string): Promise<void>
 
 /** These are editor presentation preferences, never OMP commands. */
 function readChatDisplayPreferences(): ChatDisplayPreferences {
-  const s = state();
+  const s = windowState();
   return {
     toolCallDetail: vscode.workspace.getConfiguration("omp").get<string>("toolCallDetail", "overview") === "detailed" ? "detailed" : "overview",
     accessibilitySupport: vscode.workspace.getConfiguration("editor").get<string>("accessibilitySupport", "auto") === "on",
@@ -9840,7 +9838,7 @@ const THINKING_EXPANDED_KEY = "omp.chat.thinkingExpanded";
 const TOOLS_EXPANDED_KEY = "omp.chat.toolsExpanded";
 
 async function toggleTranscriptDefault(key: typeof THINKING_EXPANDED_KEY | typeof TOOLS_EXPANDED_KEY): Promise<void> {
-  const s = state();
+  const s = windowState();
   if (activeChatTab() === null || s.context === undefined) return;
   await s.context.globalState.update(key, s.context.globalState.get<unknown>(key) !== true);
   s.chat.refreshDisplayPreferences();
@@ -9851,7 +9849,7 @@ async function writeChatToolDetail(value: ChatDisplayPreferences["toolCallDetail
 }
 
 function refreshChatDisplayPreferences(event: vscode.ConfigurationChangeEvent): void {
-  const s = state();
+  const s = windowState();
   if (event.affectsConfiguration("omp.toolCallDetail") || event.affectsConfiguration("editor.accessibilitySupport")) {
     s.chat.refreshDisplayPreferences();
   }
@@ -9891,7 +9889,7 @@ async function confirmOpenUrl(event: { url: string; launchUrl?: string; instruct
  * lifecycle for an exit, and the identity binding for a learned session file.
  */
 function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, event: ChatRuntimeEvent): void | Promise<void> {
-  const s = state();
+  const s = windowState();
   switch (event.type) {
     case "catalogue":
       if (toolsTarget(index)?.key === s.chat.sessionOf(tabId)) { s.inventoryViews?.refresh(); s.contextView?.refresh(); }
@@ -9978,7 +9976,7 @@ function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, 
  * admission gave, so the button is never answered with silence.
  */
 async function resumeFromChat(context: vscode.ExtensionContext, index: SessionIndex, tabId: string): Promise<void> {
-  const s = state();
+  const s = windowState();
   const before = s.outcomes.get(tabId);
   try {
     await openTab(context, index, tabId, "resumed");
@@ -10006,7 +10004,7 @@ async function resumeFromChat(context: vscode.ExtensionContext, index: SessionIn
  * diagnostic for an autonomous managed-RPC child exit.
  */
 function logChatConnectionPhase(tabId: string, phase: ChatPhase, code: string | null, exitReason?: ChatExitReason): void {
-  const s = state();
+  const s = windowState();
   const previous = s.loggedChatPhases.get(tabId);
   if (phase === "failed" || phase === "stopped") {
     s.loggedChatPhases.set(tabId, phase);
@@ -10130,7 +10128,7 @@ async function prepareHostControl(
 }
 
 async function singleFlightHostControl(runtime: SessionHostRuntime, connect: () => Promise<void>): Promise<void> {
-  const s = state();
+  const s = windowState();
   const pending = s.hostControlAttempts.get(runtime);
   if (pending !== undefined) return pending;
   const attempt = connect();
@@ -10165,7 +10163,7 @@ async function connectHostControlAttempt(
   runtime: SessionHostRuntime,
   prepared: PreparedHostControl,
 ): Promise<void> {
-  const s = state();
+  const s = windowState();
   const pid = runtime.pid;
   const attempt: ControlAttemptPlan = { runtime, pid };
   ownerGeneration = controlOwnerFor(runtime, ownerGeneration);
@@ -10239,7 +10237,7 @@ async function reconnectHostControlAttempt(
   ownerGeneration: string,
   runtime: SessionHostRuntime,
 ): Promise<void> {
-  const s = state();
+  const s = windowState();
   const pid = runtime.pid;
   ownerGeneration = controlOwnerFor(runtime, ownerGeneration);
   // Captured before the secret reads below await, for the same reason as above.
@@ -10299,7 +10297,7 @@ async function establishControl(
   attempt: ControlAttemptPlan,
   input: EstablishControlInput,
 ): Promise<void> {
-  const s = state();
+  const s = windowState();
   const runtime = stateOf(tabId)?.runtime;
   const stillCurrent = (): boolean =>
     mayReportControlFailure(attemptTargetFor(tabId), { runtime: attempt.runtime, pid: attempt.pid, client: null }) &&
@@ -10762,7 +10760,7 @@ async function executableFor(runtime: SessionHostRuntime | null): Promise<OmpCom
 
 /** Cache only a successful default-profile catalogue; unresolved OMP adds no onboarding UI. */
 function refreshDefaultProviderModels(): Promise<void> {
-  const s = state();
+  const s = windowState();
   s.defaultProviderModelsDirty = true;
   if (s.defaultProviderModelsRead !== null) return s.defaultProviderModelsRead;
   s.defaultProviderModelsRead = (async () => {
@@ -10793,7 +10791,7 @@ function refreshDefaultProviderModels(): Promise<void> {
 
 /** Activation and the native login terminal are the only window-wide discovery triggers. */
 function subscribeProviderLoginRefresh(context: vscode.ExtensionContext, index: SessionIndex): void {
-  const s = state();
+  const s = windowState();
   context.subscriptions.push(vscode.window.onDidCloseTerminal(terminal => {
     const ownedLoginClosed = terminal === s.providerLoginTerminal;
     if (ownedLoginClosed) s.providerLoginTerminal = null;
@@ -10805,7 +10803,7 @@ function subscribeProviderLoginRefresh(context: vscode.ExtensionContext, index: 
 }
 
 function recordSessionModels(index: SessionIndex, tabId: string, available: boolean): void {
-  const s = state();
+  const s = windowState();
   ensureFooterBinding(index, tabId);
   const binding = s.footerBindings.get(tabId);
   if (!binding || binding.message.hasAvailableModels === available) return;
@@ -10816,7 +10814,7 @@ function recordSessionModels(index: SessionIndex, tabId: string, available: bool
 
 /** Read this conversation's own profile through RPC, never a per-session CLI. */
 function refreshSessionModels(index: SessionIndex, tabId: string): Promise<void> {
-  const s = state();
+  const s = windowState();
   const pending = s.sessionModelReads.get(tabId);
   if (pending) return pending;
   const session = s.chat.sessionOf(tabId);
@@ -10837,7 +10835,7 @@ function refreshSessionModels(index: SessionIndex, tabId: string): Promise<void>
 }
 /** Host-owned optional footer facts, sent to every editor showing this exact conversation. */
 function publishFooterMetadata(tabId: string): void {
-  const s = state();
+  const s = windowState();
   const binding = s.footerBindings.get(tabId);
   if (!binding) return;
   for (const state of s.tabs.values()) {
@@ -10848,7 +10846,7 @@ function publishFooterMetadata(tabId: string): void {
 }
 
 function ensureFooterBinding(index: SessionIndex, tabId: string): void {
-  const s = state();
+  const s = windowState();
   const entry = index.get(tabId);
   if (!entry) return;
   const cwd = stateOf(tabId)?.runtime?.cwd ?? entry.cwd;
@@ -10877,7 +10875,7 @@ function ensureFooterBinding(index: SessionIndex, tabId: string): void {
 
 /** Session cost has its own attach/end readback; it must not inherit the quota cache's five-minute throttle. */
 function refreshSessionCost(index: SessionIndex, tabId: string): void {
-  const s = state();
+  const s = windowState();
   ensureFooterBinding(index, tabId);
   const binding = s.footerBindings.get(tabId);
   const session = s.chat.sessionOf(tabId);
@@ -10896,7 +10894,7 @@ function refreshSessionCost(index: SessionIndex, tabId: string): void {
 }
 
 function refreshFooterMetadata(index: SessionIndex, tabId: string, refreshUsage: boolean): void {
-  const s = state();
+  const s = windowState();
   ensureFooterBinding(index, tabId);
   const binding = s.footerBindings.get(tabId);
   const session = s.chat.sessionOf(tabId);
@@ -10940,7 +10938,7 @@ function refreshFooterMetadata(index: SessionIndex, tabId: string, refreshUsage:
  * the credential lands where the session will read it.
  */
 async function openProviderLogin(runtime: SessionHostRuntime | null, profile: string | null, cwd: string): Promise<void> {
-  const s = state();
+  const s = windowState();
   if (s.providerLoginOpening || s.providerLoginTerminal !== null) return;
   s.providerLoginOpening = true;
   try { await launchProviderLogin(runtime, profile, cwd); }
@@ -10949,7 +10947,7 @@ async function openProviderLogin(runtime: SessionHostRuntime | null, profile: st
 
 /** Both callers hold the window's login-open guard, including their asynchronous preflight. */
 async function launchProviderLogin(runtime: SessionHostRuntime | null, profile: string | null, cwd: string): Promise<void> {
-  const s = state();
+  const s = windowState();
   let executable: OmpCommand;
   try {
     executable = await executableFor(runtime);
@@ -10973,7 +10971,7 @@ async function launchProviderLogin(runtime: SessionHostRuntime | null, profile: 
  * so it uses the default profile, or asks when the indexed sessions use more than one profile.
  */
 async function loginProviderFromPalette(index: SessionIndex): Promise<void> {
-  const s = state();
+  const s = windowState();
   if (s.providerLoginOpening || s.providerLoginTerminal !== null) return;
   s.providerLoginOpening = true;
   try {
@@ -11058,7 +11056,7 @@ function toolsTarget(index: SessionIndex): SessionToolsTarget | null {
 
 /** The Context view's subject: the inventory views' selection (editor recency) plus the tab and its Chat session. */
 function contextTarget(index: SessionIndex): ContextTarget | null {
-  const s = state();
+  const s = windowState();
   const target = toolsTarget(index);
   if (target === null) return null;
   return {
@@ -11157,7 +11155,7 @@ async function showHostControls(index: SessionIndex): Promise<void> {
 
 
 async function selectHostModel(index: SessionIndex): Promise<void> {
-  const s = state();
+  const s = windowState();
   const active = activeLiveSession(index);
   if (active === null) return;
   const listed = await active.session.getAvailableModels();
@@ -11188,7 +11186,7 @@ async function selectHostModel(index: SessionIndex): Promise<void> {
 }
 
 async function selectHostThinking(index: SessionIndex): Promise<void> {
-  const s = state();
+  const s = windowState();
   const active = activeLiveSession(index);
   if (active === null) return;
   const current = active.session.model.pendingControl?.thinking ?? active.session.model.state?.thinkingLevel;
@@ -11251,7 +11249,7 @@ async function refreshControlSnapshot(channel: ControlChannel): Promise<ControlH
  * controller.
  */
 function stateOf(key: string | null): TabState | undefined {
-  const s = state();
+  const s = windowState();
   if (key === null) return undefined;
   const direct = s.tabs.get(key);
   if (direct !== undefined) return direct;
@@ -11272,7 +11270,7 @@ function stateOf(key: string | null): TabState | undefined {
 
 /** One slot's own record, or `null`. Never resolves through a conversation. */
 function slotState(slot: string): TabState | null {
-  const s = state();
+  const s = windowState();
   return s.tabs.get(slot) ?? null;
 }
 
@@ -11301,7 +11299,7 @@ function slotState(slot: string): TabState | null {
  * a panel VS Code restored carries no icon until it is bound here.
  */
 async function applyChatTabAppearance(context: vscode.ExtensionContext, index: SessionIndex, key: string): Promise<void> {
-  const s = state();
+  const s = windowState();
   for (const state of [...s.tabs.values()]) {
     if (state.panel === null || state.tabId === null) continue;
     if (state.slotId !== key && state.tabId !== key) continue;
@@ -11360,7 +11358,7 @@ function newTabState(slotId: string): TabState {
  * conversation that record is moved under its editor's key as soon as one binds.
  */
 function tabState(key: string): TabState {
-  const s = state();
+  const s = windowState();
   const existing = stateOf(key);
   if (existing !== undefined) return existing;
   const created = newTabState(key);
@@ -11392,7 +11390,7 @@ const ELECTION_GATED_TYPES: Readonly<Record<string, true>> = {
 
 /** Register one election of `slot`; it is forgotten when it settles, however it ends. */
 function trackElection(slot: string, work: Promise<void>): Promise<void> {
-  const s = state();
+  const s = windowState();
   let pending = s.slotElections.get(slot);
   if (pending === undefined) {
     pending = new Set();
@@ -11411,7 +11409,7 @@ function trackElection(slot: string, work: Promise<void>): Promise<void> {
 
 /** Resolve once every election of `slot` that is in flight now has settled, or after the bound. */
 async function awaitElection(slot: string): Promise<void> {
-  const s = state();
+  const s = windowState();
   const pending = s.slotElections.get(slot);
   if (pending === undefined) return;
   let timer: NodeJS.Timeout | undefined;
@@ -11563,7 +11561,7 @@ function applySlotAuthority(slot: string): void {
  * with no folder has nothing to group and must say how to add one.
  */
 function refreshLauncher(options: { readonly ownership?: boolean } = {}): void {
-  const s = state();
+  const s = windowState();
   if (s.indexForBridge !== null) settleViewedSession(s.indexForBridge);
   void vscode.commands.executeCommand("setContext", SESSIONS_LAYOUT_CONTEXT, sessionsGrouping());
   // Published first: this window's own entry in the registry is what the list is derived from.
@@ -11592,7 +11590,7 @@ function refreshLauncher(options: { readonly ownership?: boolean } = {}): void {
  * staying on the same tab is left alone.
  */
 function requestSessionRowExpand(tabId: string): void {
-  const s = state();
+  const s = windowState();
   s.launcherExpandFor = tabId;
 }
 
@@ -11606,7 +11604,7 @@ function requestSessionRowExpand(tabId: string): void {
  * any other refresh leaves the collapse the registry recorded as it is.
  */
 function revealActiveSession(index: SessionIndex): Promise<void> {
-  const s = state();
+  const s = windowState();
   s.launcherRevealRequested = true;
   if (s.launcherRevealInFlight !== null) return s.launcherRevealInFlight;
   const reveal = async () => {
@@ -11645,7 +11643,7 @@ function revealActiveSession(index: SessionIndex): Promise<void> {
  * after the user comes back; nothing else about this window's own editors would ever move it.
  */
 function selectionRestsOnOtherWindow(target: string): boolean {
-  const s = state();
+  const s = windowState();
   const provider = s.launcherProvider;
   const view = s.launcherView;
   if (provider === undefined || view === undefined) return false;
@@ -11655,7 +11653,7 @@ function selectionRestsOnOtherWindow(target: string): boolean {
 
 /** Put the selection back on this window's own session when it rests on a row another window runs. */
 function releaseSelectionFromOtherWindow(index: SessionIndex): void {
-  const s = state();
+  const s = windowState();
   const target = pinnedSessionTab(index) ?? sessionsViewActiveTab(index);
   if (target === null || s.launcherProvider?.sessionRowsShown() !== true || !selectionRestsOnOtherWindow(target)) return;
   s.launcherSelectedPath = null;
@@ -11667,7 +11665,7 @@ function releaseSelectionFromOtherWindow(index: SessionIndex): void {
  * recently among this window's open ones, or `null` while no open editor serves a shown row.
  */
 function pinnedSessionTab(index: SessionIndex): string | null {
-  const s = state();
+  const s = windowState();
   return pinnedSessionTabId(
     s.editorRecency.order().map(slot => {
       const state = s.tabs.get(slot);
@@ -11685,7 +11683,7 @@ const PINNED_SELECTION_RESTORE_MS = 250;
  * editor for and so does not select (the list shows every window's sessions).
  */
 function sessionsViewActiveTab(index: SessionIndex): string | null {
-  const s = state();
+  const s = windowState();
   const tabId = index.activeTabId;
   return tabId !== null && s.launcherProvider?.displayedState(tabId) === "otherWindow" ? null : tabId;
 }
@@ -11698,7 +11696,7 @@ function sessionsViewActiveTab(index: SessionIndex): string | null {
  * expands a folder the user just collapsed; the selection is then read from the view itself.
  */
 function restorePinnedSelection(index: SessionIndex, selection: readonly LauncherTreeItem[]): void {
-  const s = state();
+  const s = windowState();
   const tabIds = (items: readonly LauncherTreeItem[]) => items.map(item => item instanceof SessionTreeItem ? item.tabId : null);
   // The Terminals layout has no session row to pin: a selection there is the user's.
   if (s.launcherProvider?.sessionRowsShown() === false) return;
@@ -11715,7 +11713,7 @@ function restorePinnedSelection(index: SessionIndex, selection: readonly Launche
 
 /** How Sessions arranges its rows: the setting, flat by default. */
 function sessionsGrouping(): SessionsGrouping {
-  const s = state();
+  const s = windowState();
   const grouping = normalizeSessionsGrouping(vscode.workspace.getConfiguration("omp").get("sessionsGrouping"));
   if (grouping !== "terminals") s.lastSessionServingLayout = grouping;
   return grouping;
@@ -11840,7 +11838,7 @@ function launcherFacts(tabId: string): SessionLauncherFacts {
  * act on a verdict older than the click.
  */
 async function launcherOwnershipFacts(index: SessionIndex, tabId: string, options: { readonly fresh?: boolean } = {}): Promise<SessionOwnershipFacts> {
-  const s = state();
+  const s = windowState();
   const observed = await index.observeOwnership(tabId);
   const claim = observed.ok ? observed.claim : null;
   // What the rows and the click's choice of window show: the holder's liveness is read without blocking the extension host and
@@ -11890,7 +11888,7 @@ async function confirmOpenAnyway(): Promise<boolean> {
  * nothing else. An empty set means the watcher could not say which claims changed.
  */
 function refreshRowsForClaims(index: SessionIndex, claimFiles: ReadonlySet<string>): void {
-  const s = state();
+  const s = windowState();
   const provider = s.launcherProvider;
   if (provider === undefined) return;
   if (claimFiles.size === 0) {
@@ -11923,7 +11921,7 @@ function refreshRowsForClaims(index: SessionIndex, claimFiles: ReadonlySet<strin
  * whatever an explicit open reported for it.
  */
 function recordOutcomes(report: RestoreReport): void {
-  const s = state();
+  const s = windowState();
   // Only the rows this pass considered lose their previous outcome: a pass pinned
   // to the activation cohort must not erase what an explicit open reported for a
   // row it did not touch. (A pass over every row resets all of them, since every
@@ -12431,7 +12429,7 @@ function observationDocumentUri(
   stage: NativeFileObservationRecord["stage"],
   binding: ObservationDocumentBinding,
 ): vscode.Uri {
-  const s = state();
+  const s = windowState();
   const token = createControlRequestId();
   const uri = vscode.Uri.from({
     scheme: OBSERVATION_DOCUMENT_SCHEME,
@@ -12448,7 +12446,7 @@ function observationDocumentUri(
 
 /** Ask every open observation document to re-read the store. */
 function refreshObservationDocuments(): void {
-  const s = state();
+  const s = windowState();
   for (const entry of s.observationDocuments.values()) s.observationDocumentChanges.fire(entry.uri);
 }
 
@@ -12521,7 +12519,7 @@ async function observationDocumentContent(
   index: SessionIndex,
   uriPath: string,
 ): Promise<string> {
-  const s = state();
+  const s = windowState();
   const token = observationTokenFromPath(uriPath);
   const entry = token === null ? undefined : s.observationDocuments.get(token);
   if (entry === undefined) return OBSERVATION_DOCUMENT_UNAVAILABLE;
@@ -13027,7 +13025,7 @@ function diagnosticsLabel(cwd: string): string {
  * unobserved, is not measured yet.
  */
 function diagnosticsStageMeasured(tabId: string, stageId: DiagnosticStageId): boolean {
-  const s = state();
+  const s = windowState();
   const stage = s.diagnostics.snapshot(tabId)?.stages.find(current => current.id === stageId);
   return stage !== undefined && stage.durationMs !== null;
 }
@@ -13051,7 +13049,7 @@ function diagnosticsEnvironment(context: vscode.ExtensionContext): DiagnosticEnv
  * Every value is a non-secret identity.
  */
 function refreshSessionDiagnostics(index: SessionIndex): void {
-  const s = state();
+  const s = windowState();
   const recorded = new Set(s.diagnostics.subjects().map(subject => subject.key));
   let resolvedTarget = false;
   for (const [tabId, state] of s.tabs) {
@@ -13103,7 +13101,7 @@ async function diagnosticsDocumentContent(
   index: SessionIndex,
   uriPath: string,
 ): Promise<string> {
-  const s = state();
+  const s = windowState();
   if (uriPath !== DIAGNOSTICS_DOCUMENT_PATH) {
     return `${redactCapabilities(uriPath)}\n\nThis diagnostics document has no report bound to this path. Run "OMP: Show Diagnostics" to open the window's report.\n`;
   }
@@ -13113,7 +13111,7 @@ async function diagnosticsDocumentContent(
 
 /** Show this window's read-only diagnostics report. */
 async function showDiagnostics(context: vscode.ExtensionContext, index: SessionIndex): Promise<void> {
-  const s = state();
+  const s = windowState();
   try {
     const document = await vscode.workspace.openTextDocument(diagnosticsUri());
     await vscode.window.showTextDocument(document, { preview: false });
@@ -13157,7 +13155,7 @@ function registerDeskCommand(id: string, handler: (...args: never[]) => unknown)
 }
 
 function log(message: string): void {
-  // Silent before activation and after deactivation: the log is the one function with no window to require.
+  // Silent before activation: the log is the one function that must not require a window.
   window?.output?.appendLine(`[${new Date().toISOString()}] ${message}`);
 }
 
@@ -13176,7 +13174,7 @@ const UPDATED_ON_DISK_DETAIL = UPDATED_ON_DISK_MESSAGE;
  * document build asks again, because a user may have dismissed it.
  */
 function packageChangedOnDisk(): boolean {
-  const s = state();
+  const s = windowState();
   const verdict = s.packageDrift?.check() ?? { kind: "same" as const };
   const stale = verdict.kind !== "same";
   if (stale !== s.packageStale) {
@@ -13220,7 +13218,7 @@ function registerPanelLifecycle(
   slot: string,
   panel: vscode.WebviewPanel,
 ): void {
-  const s = state();
+  const s = windowState();
   let wasActive = panel.active;
   if (panel.active) s.editorRecency.touch(slot);
   panel.webview.onDidReceiveMessage(message => {
@@ -13307,7 +13305,7 @@ function registerPanelLifecycle(
  * authority (presentation, paging, `omp:ready`) never waits.
  */
 function dispatchSlotMessage(index: SessionIndex, slot: string, panel: vscode.WebviewPanel, message: unknown): Promise<void> {
-  const s = state();
+  const s = windowState();
   const route = (): Promise<void> =>
     passiveReasonForSlot(slot) === null ? handleGuestMessage(index, slot, panel, message) : handlePassiveSlotMessage(slot, panel, message);
   if (passiveReasonForSlot(slot) === null || !s.slotElections.has(slot)) return route();
@@ -13430,7 +13428,7 @@ function terminalFrontendId(key: string): string {
 
 /** `true` for a map key that serves an indexed conversation (never a shell). */
 function isSessionTab(key: string): boolean {
-  const s = state();
+  const s = windowState();
   const conversation = stateOf(key)?.tabId ?? null;
   return conversation !== null && s.indexForBridge?.get(conversation) != null;
 }
@@ -13551,7 +13549,7 @@ function terminalFontResource(state: TabState): vscode.Uri | undefined {
 }
 
 function terminalFontMessage(resource?: vscode.Uri): GuestTerminalFontMessage {
-  const s = state();
+  const s = windowState();
   const terminal = vscode.workspace.getConfiguration("terminal.integrated", resource);
   const editor = vscode.workspace.getConfiguration("editor", resource);
   return {
@@ -13575,7 +13573,7 @@ function pushTerminalFont(state: TabState, resource = terminalFontResource(state
  * startup in every window, for panes that most windows never open.
  */
 function readInstalledTerminalFonts(): void {
-  const s = state();
+  const s = windowState();
   s.installedTerminalFontsRead ??= installedNerdFonts().then(families => {
     if (families.length === 0) return;
     s.installedTerminalFonts = families;
@@ -13584,7 +13582,7 @@ function readInstalledTerminalFonts(): void {
 }
 
 function symbolLinkResolver(): SymbolLinkResolver {
-  const s = state();
+  const s = windowState();
   if (s.symbolLinks !== undefined) return s.symbolLinks;
   const resolver = new SymbolLinkResolver({
     async query(text, last) {
@@ -13643,7 +13641,7 @@ const TERMINAL_PANEL_TYPES: Record<string, true> = {
  * routed to the editor whose panel showed the menu, so the target resolves against that session's cwd.
  */
 async function openFileLinkFromMenu(argument: unknown, action: FileLinkAction | undefined): Promise<void> {
-  const s = state();
+  const s = windowState();
   const menu = fileLinkMenuTarget(argument);
   if (menu === null) return;
   for (const [slot, state] of s.tabs) {
@@ -13800,7 +13798,7 @@ async function handleTerminalGuestMessage(
 
 /** The recoverable (detached) shells of one folder, newest first. */
 function recoverableShellsInFolder(folderPath: string): readonly ShellSlotRecord[] {
-  const s = state();
+  const s = windowState();
   const key = canonicalFolderKey(folderPath);
   if (key === null || s.shellSlots === undefined) return [];
   const bound = (slot: string) => {
@@ -13845,7 +13843,7 @@ async function reconnectFolderTerminal(
   index: SessionIndex,
   argument: unknown,
 ): Promise<void> {
-  const s = state();
+  const s = windowState();
   const folder = await terminalFolder(index, argument, "Choose the OMP folder whose terminal to reconnect");
   if (folder === null) return;
   // Explicit Reconnect can also rebind an editor this host can still reach.
@@ -13884,7 +13882,7 @@ async function reconnectFolderTerminal(
  * Palette with no argument, the user's choice among the folders Sessions shows.
  */
 async function terminalFolder(index: SessionIndex, argument: unknown, title: string): Promise<LauncherFolder | null> {
-  const s = state();
+  const s = windowState();
   if (argument === undefined) {
     const folders = s.launcherFolders;
     return folders === undefined ? null : await chooseFolder(index, folders, undefined, { title, addWhenEmpty: false });
@@ -13896,7 +13894,7 @@ async function terminalFolder(index: SessionIndex, argument: unknown, title: str
 
 /** The folder one folder-scoped command was invoked for. */
 function resolveFolderArgument(argument: unknown): LauncherFolder | null {
-  const s = state();
+  const s = windowState();
   if (argument instanceof WorkspaceFolderTreeItem) return s.launcherFolders?.get(argument.folderId) ?? null;
   const resolved = folderArgument(argument, s.launcherFolders?.list() ?? []);
   if (resolved.kind === "folder") return resolved.folder;
@@ -13937,7 +13935,7 @@ async function launchFolderShell(
   cwd: string,
   slot: string,
 ): Promise<void> {
-  const s = state();
+  const s = windowState();
   const client = await brokerClient();
   if (client === null) {
     showError("Terminal support is unavailable. Reload the window and try Open Terminal again.");
@@ -13989,7 +13987,7 @@ async function attachFolderShell(
   index: SessionIndex,
   record: ShellSlotRecord,
 ): Promise<boolean> {
-  const s = state();
+  const s = windowState();
   const client = await attachBrokerClient();
   if (client === null) return false;
   const attached = await client.attach(record.slot, { owner: folderShellOwner() });
@@ -14286,7 +14284,7 @@ async function observeFolderShell(slot: string): Promise<ShellLiveness> {
  * empty tree, and is not a failure to stop the shell.
  */
 async function terminateFolderShell(slot: string, record: ShellSlotRecord): Promise<void> {
-  const s = state();
+  const s = windowState();
   const handle = await shellWriterFor(slot);
   if (handle === null) {
     log(`shell ${slot}: terminal for ${record.cwd} could not be reached for termination`);
@@ -14311,7 +14309,7 @@ async function terminateFolderShell(slot: string, record: ShellSlotRecord): Prom
 
 /** The serializer VS Code revives folder-shell editors through. */
 function shellSerializerFor(context: vscode.ExtensionContext, index: SessionIndex) {
-  const s = state();
+  const s = windowState();
   return {
     async deserializeWebviewPanel(panel: vscode.WebviewPanel, state: unknown): Promise<void> {
       const slot = persistedShellSlotId(state);
@@ -14345,7 +14343,7 @@ function shellSerializerFor(context: vscode.ExtensionContext, index: SessionInde
  * seldom waits for it.
  */
 async function brokerClient(): Promise<PtyBrokerClient | null> {
-  const s = state();
+  const s = windowState();
   const gate = s.ptyGate;
   if (gate === undefined) return null;
   return await gate.client();
@@ -14358,7 +14356,7 @@ async function brokerClient(): Promise<PtyBrokerClient | null> {
  * which executes the staged tree, so restore does not wait for the runtime proof.
  */
 async function attachBrokerClient(): Promise<PtyBrokerClient | null> {
-  const s = state();
+  const s = windowState();
   const gate = s.ptyGate;
   if (gate === undefined) return null;
   return await gate.attachClient();
@@ -14567,7 +14565,7 @@ async function renameStoppedSession(
  * title-slot rewrite is forbidden, so nothing else edits the file.
  */
 async function renameSession(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown): Promise<void> {
-  const s = state();
+  const s = windowState();
   const target = sessionTargetFromArgument(index, argument);
   if (target === null) {
     showWarning("Select an OMP session to rename.");

@@ -147,7 +147,7 @@ import { providerLoginFixture, storedRenameFixture } from './host/native-termina
 const fixtureOpenPanel = openPanel;
 // The harness runs windows without an activation context: the cases that need one set it on the window.
 const fixtureContext = undefined as never;
-const fixtureWindow = () => state();
+const fixtureWindow = () => windowState();
 export const harness = {
   connectHostControl, reconnectHostControl, establishControl, closeSession, launchHost, presentRestoreOutcome, openTab, handleChatEvent, bindPanel, restoreTabs, bridgeSerializerFor,
   confirmAndDeleteSession, deleteSession, handleRestoreOutcome, forgetSession, renameSession, reloadSession, handleGuestControlRequest, panelResponder,
@@ -160,7 +160,7 @@ export const harness = {
     return () => { fixtureVscode.window.createWebviewPanel = previous; };
   },
   installWindow(next) { window = next; },
-  window: () => state(),
+  window: () => windowState(),
   createWindowState,
   startConversation, handleTerminalGuestMessage, startNativeWatch, handleNativeHostExited,
   pushSessionView, handleShellEditorClosed,
