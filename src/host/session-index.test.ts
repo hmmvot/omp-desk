@@ -3642,7 +3642,7 @@ describe("same-editor managed transport replacement", () => {
 describe("atomic best-effort native conversation binding", () => {
 	async function nativePair() {
 		const workspace = await tempWorkspace();
-		const store = createCatalogStore({ paths: catalogPaths(workspace.cwd), mergers: {
+		const store = await createCatalogStore({ paths: catalogPaths(workspace.cwd), mergers: {
 			[SESSION_INDEX_STORAGE_KEY]: mergeSessionIndexRecords, [BROKER_SLOTS_KEY]: mergeBrokerSlotRecords,
 		} });
 		const index = indexFor(store, workspace.claimDir);

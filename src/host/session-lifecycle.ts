@@ -225,8 +225,8 @@ export interface SessionDeletionDecision {
 }
 
 /**
- * Decide whether one session's files may be deleted. Pure, so every refusal
- * boundary is testable without a filesystem, a registry or a claim.
+ * Decide whether one session's files may be deleted. Pure apart from awaiting the holder
+ * lease's start-time reading, so every refusal boundary is testable without a filesystem, a registry or a claim.
  *
  * The order is deliberate: the existence of something to delete first, then this
  * window's own live host, then ownership, which is where every remaining refusal
@@ -240,7 +240,7 @@ export interface SessionDeletionDecision {
  * OMP process started outside this extension, or a user-typed native `/resume`,
  * is not observed and not excluded by anything here.
  */
-export function decideSessionDeletion(facts: SessionDeletionFacts): SessionDeletionDecision {
+export async function decideSessionDeletion(facts: SessionDeletionFacts): Promise<SessionDeletionDecision> {
 	const { subject, windowHostRunning, fileExists, claim, claimHolderId, claimError, verdict } = facts;
 	const heldByThisDeletion = facts.claimIsThisDeletions === true;
 	const refuse = (kind: SessionDeletionRefusalKind, detail: string): SessionDeletionDecision => ({
@@ -278,7 +278,7 @@ export function decideSessionDeletion(facts: SessionDeletionFacts): SessionDelet
 			"This session is running in this window. Stop it before deleting its saved conversation.",
 		);
 	}
-	if (!heldByThisDeletion && claim !== null && claim.holderId !== null && claim.holderId !== claimHolderId && claimHolderMayBeAlive(claim)) {
+	if (!heldByThisDeletion && claim !== null && claim.holderId !== null && claim.holderId !== claimHolderId && await claimHolderMayBeAlive(claim)) {
 		// Two windows of one workspace share the owner generation, so this is the
 		// check that actually sees the other window — before the confirmation
 		// dialog, not only when the identity is taken below.
@@ -643,7 +643,7 @@ async function gatherDeletion(
 				? null
 				: (subject.profile ?? null);
 	if (file === null) {
-		const decision = decideSessionDeletion({
+		const decision = await decideSessionDeletion({
 			subject: {
 				sessionFile: null,
 				host: entry?.host ?? null,
@@ -681,7 +681,7 @@ async function gatherDeletion(
 	const checkable = file.toLowerCase().endsWith(SESSION_FILE_SUFFIX);
 	const exists = checkable && (await fileExists(file));
 	const header = exists ? await readSessionFileHeader(file) : null;
-	const provisional = decideSessionDeletion({
+	const provisional = await decideSessionDeletion({
 		subject: truth,
 		windowHostRunning,
 		fileExists: exists,
@@ -740,7 +740,7 @@ async function gatherDeletion(
 	return {
 		kind: "inspected",
 		...gathered,
-		decision: decideSessionDeletion({
+		decision: await decideSessionDeletion({
 			subject: truth,
 			windowHostRunning,
 			fileExists: exists,
@@ -1151,7 +1151,7 @@ async function revalidateFrozenTarget(
 	// claim is not a veto; a newly verified live rival is.
 	const observed = await options.index.observeOwnershipOfFile(confirmed.sessionFile);
 	const held = observed.ok ? observed.claim : null;
-	if (held !== null && held.holderId !== options.index.claimHolder.id && claimHolderMayBeAlive(held)) {
+	if (held !== null && held.holderId !== options.index.claimHolder.id && await claimHolderMayBeAlive(held)) {
 		return "Another verified live extension window now holds this session; nothing was deleted.";
 	}
 	const heldGeneration = held?.ownerGeneration ?? gathered.entry?.ownership?.ownerGeneration ?? "";
@@ -1169,7 +1169,7 @@ async function revalidateFrozenTarget(
 			kind: "unknown",
 			detail: `Ownership reconciliation failed: ${describeError(error)}`,
 		}));
-	const fresh = decideSessionDeletion({
+	const fresh = await decideSessionDeletion({
 		subject: gathered.subject,
 		windowHostRunning: gathered.tabId !== null && options.windowHostRunning(gathered.tabId),
 		fileExists: true,

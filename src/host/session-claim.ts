@@ -13,7 +13,7 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
-import { execFile, execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import * as fsSync from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
@@ -306,10 +306,21 @@ const localClaims = new Map<string, ClaimRecord>();
  * for any other pid stands for a process that has to be probed on disk, so it is
  * deliberately *not* registered as live here.
  */
-export function createClaimHolder(pid: number = process.pid): ClaimHolder {
+export function createClaimHolder(pid: number = process.pid, processCreationTime: string | null = null): ClaimHolder {
 	const id = randomUUID();
 	if (pid === process.pid) liveHolderIds.add(id);
-	return { id, pid, processCreationTime: processCreationTime(pid) };
+	return { id, pid, processCreationTime };
+}
+
+/**
+ * {@link createClaimHolder} with the process's verified start time, read without blocking the extension host.
+ *
+ * The start time is what lets another window tell this process from a later occupant of its pid (ADR-0035);
+ * reading it is a PowerShell (or `ps`) command, hundreds of milliseconds and seconds on a busy machine, so it is
+ * awaited and never run synchronously. A holder made without it is verified by the weaker filing-time rule.
+ */
+export async function readClaimHolder(pid: number = process.pid): Promise<ClaimHolder> {
+	return createClaimHolder(pid, await readProcessCreationTime(pid));
 }
 
 /** `true` when `identity` is a reserved draft identity rather than a path. */
@@ -486,7 +497,7 @@ export async function acquireClaim(
 	const local = localClaims.get(claimPath);
 	if (local !== undefined) {
 		const observed = observedClaim(claimPath, normalizedIdentity, local);
-		if (local.holderId !== holder.id && claimHolderMayBeAlive(observed)) {
+		if (local.holderId !== holder.id && await claimHolderMayBeAlive(observed)) {
 			throw rivalHolderConflict(observed, identity, ownerGeneration);
 		}
 		localClaims.set(claimPath, record);
@@ -498,7 +509,7 @@ export async function acquireClaim(
 			if (await publishClaimFile(claimPath, record)) return handle();
 			const observed = await readClaimFile(claimPath, normalizedIdentity);
 			if (observed !== null && observed.holderId === holder.id) return handle();
-			if (observed !== null && claimHolderMayBeAlive(observed)) {
+			if (observed !== null && await claimHolderMayBeAlive(observed)) {
 				throw rivalHolderConflict(observed, identity, ownerGeneration);
 			}
 			await replaceClaimRecord(claimPath, record);
@@ -507,7 +518,7 @@ export async function acquireClaim(
 	} catch (error) {
 		if (error instanceof ClaimConflictError && !(error instanceof ClaimBusyError)) throw error;
 		const observed = await readClaimFile(claimPath, normalizedIdentity).catch(() => null);
-		if (observed !== null && observed.holderId !== holder.id && claimHolderMayBeAlive(observed)) {
+		if (observed !== null && observed.holderId !== holder.id && await claimHolderMayBeAlive(observed)) {
 			throw rivalHolderConflict(observed, identity, ownerGeneration);
 		}
 		localClaims.set(claimPath, record);
@@ -927,11 +938,11 @@ function isSameOwner(observed: ObservedClaim, normalizedIdentity: string, ownerG
  * been written after that process started. Missing or unreadable evidence is
  * not ownership. Native OMP children are verified separately by their broker.
  */
-export function claimHolderMayBeAlive(observed: ObservedClaim): boolean {
+export async function claimHolderMayBeAlive(observed: ObservedClaim): Promise<boolean> {
 	if (!observed.verifiable || observed.pid === null || observed.holderId === null) return false;
 	if (observed.pid === process.pid) return liveHolderIds.has(observed.holderId);
 	if (!holderProcessAlive(observed.pid)) return false;
-	const creationTime = processCreationTime(observed.pid);
+	const creationTime = await readProcessCreationTime(observed.pid);
 	if (creationTime === null) return false;
 	return generationMatches(observed, creationTime);
 }
@@ -952,8 +963,8 @@ function generationMatches(observed: ObservedClaim, creationTime: string): boole
  *
  * The cost it removes: reading a start time is a PowerShell (or `ps`) command, 200 to 450 ms
  * measured, seconds with a real-time scanner. The Sessions view asks about every row another
- * window holds on every claim change, and a window switch changes claims; as one blocking command
- * per verdict that froze every window's extension host for up to 22 seconds.
+ * window holds on every claim change, and a window switch changes claims; as one synchronous
+ * command per verdict that froze every window's extension host for up to 22 seconds.
  *
  * A reading only speaks for a claim that existed when it was taken. It is a sample of the process
  * that held the pid then; a claim filed after it may be a newer process that reused the pid, so
@@ -994,21 +1005,11 @@ const FAILED_READING_MS = 10_000;
 
 function readAdvisory(pid: number): Promise<AdvisoryReading> {
 	const sampledAt = Date.now();
-	const command = creationTimeCommand(pid);
-	const reading = new Promise<string | null>(resolve => {
-		try {
-			execFile(command.file, command.args, { encoding: "utf8", timeout: 5000, windowsHide: true, ...(command.env === undefined ? {} : { env: command.env }) }, (error, stdout) => {
-				resolve(error === null ? parseCreationTime(stdout) : null);
-			});
-		} catch {
-			resolve(null);
-		}
-	}).then((time): AdvisoryReading => {
+	const reading = readCreationTime(pid, "display").then((time): AdvisoryReading => {
 		const done: AdvisoryReading = { time, sampledAt, at: Date.now() };
 		// An older command that finishes after a newer one never replaces what the newer one saw.
 		const known = advisoryReadings.get(pid);
 		if (known === undefined || known.sampledAt <= sampledAt) advisoryReadings.set(pid, done);
-		probeObserver?.({ pid, ms: done.at - sampledAt, mode: "async", found: time !== null });
 		return done;
 	}).finally(() => {
 		if (advisoryInFlight.get(pid)?.sample.sampledAt === sampledAt) advisoryInFlight.delete(pid);
@@ -1027,13 +1028,14 @@ function holderProcessAlive(pid: number): boolean {
 	}
 }
 
-let ownProcessCreationTime: string | null | undefined;
+/** Why one start time was read: this process's own, a holder's for a launch/stop/delete verdict, or a holder's for display. */
+export type ProcessProbePurpose = "own" | "verdict" | "display";
 
-/** One reading of another process's start time: how long it took and whether it blocked the extension host. */
+/** One reading of a process's start time: how long the command took (it never blocks the extension host). */
 export interface ProcessProbe {
 	readonly pid: number;
 	readonly ms: number;
-	readonly mode: "sync" | "async";
+	readonly purpose: ProcessProbePurpose;
 	readonly found: boolean;
 }
 let probeObserver: ((probe: ProcessProbe) => void) | null = null;
@@ -1054,21 +1056,37 @@ function parseCreationTime(raw: string): string | null {
 	return Number.isFinite(time) ? new Date(time).toISOString() : null;
 }
 
-/** Read a process generation; an unavailable reading never proves a claim holder. */
-function processCreationTime(pid: number): string | null {
-	if (pid === process.pid && ownProcessCreationTime !== undefined) return ownProcessCreationTime;
-	let result: string | null = null;
+/**
+ * Run the start-time command and parse its output; every failure (no such process, no PowerShell, a timeout) is
+ * `null`, because an unavailable reading never proves a claim holder.
+ */
+async function readCreationTime(pid: number, purpose: ProcessProbePurpose): Promise<string | null> {
 	const startedAt = Date.now();
-	try {
-		const command = creationTimeCommand(pid);
-		result = parseCreationTime(execFileSync(command.file, command.args,
-			{ encoding: "utf8", timeout: 5000, windowsHide: true, stdio: ["ignore", "pipe", "ignore"], ...(command.env === undefined ? {} : { env: command.env }) }));
-	} catch {
-		// No verified generation means not owned.
-	}
-	if (pid === process.pid) ownProcessCreationTime = result;
-	probeObserver?.({ pid, ms: Date.now() - startedAt, mode: "sync", found: result !== null });
-	return result;
+	const command = creationTimeCommand(pid);
+	const time = await new Promise<string | null>(resolve => {
+		try {
+			execFile(command.file, command.args, { encoding: "utf8", timeout: 5000, windowsHide: true, ...(command.env === undefined ? {} : { env: command.env }) }, (error, stdout) => {
+				resolve(error === null ? parseCreationTime(stdout) : null);
+			});
+		} catch {
+			resolve(null);
+		}
+	});
+	probeObserver?.({ pid, ms: Date.now() - startedAt, purpose, found: time !== null });
+	return time;
+}
+
+/** This process's own start time, read once: every caller, including a failed reading, shares the one command. */
+let ownProcessCreationTime: Promise<string | null> | undefined;
+
+/**
+ * Read a process generation without blocking the extension host. This process's own is read once and kept; any
+ * other process is read afresh each time (a verdict never rides on an older reading, ADR-0039).
+ */
+export function readProcessCreationTime(pid: number): Promise<string | null> {
+	if (pid !== process.pid) return readCreationTime(pid, "verdict");
+	ownProcessCreationTime ??= readCreationTime(pid, "own");
+	return ownProcessCreationTime;
 }
 
 function assertOwnerGeneration(ownerGeneration: string): void {

@@ -44,7 +44,7 @@ async function tempProfile(): Promise<Profile> {
 	return { storageDir, oldDir: path.join(root, "globalStorage", PREDECESSOR_EXTENSION_ID) };
 }
 
-function openStore(storageDir: string): CatalogStore {
+function openStore(storageDir: string): Promise<CatalogStore> {
 	return createCatalogStore({
 		paths: catalogPaths(storageDir),
 		mergers: { [WORKSPACE_FOLDERS_STORAGE_KEY]: mergeWorkspaceFolderRecords },
@@ -91,7 +91,7 @@ describe("importPredecessorFolders", () => {
 			"omp.brokerSlots.v1": { byEditor: { e: "slot" }, byConversation: {} },
 		});
 		const before = await readFile(file, "utf8");
-		const store = openStore(storageDir);
+		const store = await openStore(storageDir);
 
 		const report = await importPredecessorFolders({ store, storageDir, log });
 
@@ -113,14 +113,14 @@ describe("importPredecessorFolders", () => {
 		await writePredecessorCatalog(oldDir, {
 			[WORKSPACE_FOLDERS_STORAGE_KEY]: folderRecord({ id: "folder:a", path: "C:\\work\\alpha" }, { id: "folder:b", path: "C:\\work\\beta" }),
 		});
-		const first = openStore(storageDir);
+		const first = await openStore(storageDir);
 		await importPredecessorFolders({ store: first, storageDir, log });
 		await first.transactRecords([
 			{ key: WORKSPACE_FOLDERS_STORAGE_KEY, base: first.get(WORKSPACE_FOLDERS_STORAGE_KEY), desired: folderRecord({ id: "folder:b", path: "C:\\work\\beta" }) },
 		]);
 		assert.deepEqual(foldersOf(first).map(folder => folder.id), ["folder:b"]);
 
-		const second = openStore(storageDir);
+		const second = await openStore(storageDir);
 		const report = await importPredecessorFolders({ store: second, storageDir, log });
 
 		assert.deepEqual(report, { status: "already-imported", folders: 0, detail: null });
@@ -132,7 +132,7 @@ describe("importPredecessorFolders", () => {
 		await writePredecessorCatalog(oldDir, {
 			[WORKSPACE_FOLDERS_STORAGE_KEY]: folderRecord({ id: "folder:old", path: "C:\\work\\alpha" }, { id: "folder:new-only", path: "C:\\work\\gamma" }),
 		});
-		const store = openStore(storageDir);
+		const store = await openStore(storageDir);
 		await store.transactRecords([
 			{ key: WORKSPACE_FOLDERS_STORAGE_KEY, base: undefined, desired: folderRecord({ id: "folder:mine", path: "C:\\work\\alpha", collapsed: true }) },
 		]);
@@ -148,7 +148,7 @@ describe("importPredecessorFolders", () => {
 
 	it("records nothing when the predecessor has no catalog, so a later import is still possible", async () => {
 		const { storageDir, oldDir } = await tempProfile();
-		const store = openStore(storageDir);
+		const store = await openStore(storageDir);
 
 		assert.deepEqual(await importPredecessorFolders({ store, storageDir, log }), { status: "absent", folders: 0, detail: null });
 		assert.equal(store.imports().length, 0);
@@ -164,7 +164,7 @@ describe("importPredecessorFolders", () => {
 		const file = catalogPaths(oldDir).document;
 		await mkdir(path.dirname(file), { recursive: true });
 		await writeFile(file, "{ not json");
-		const store = openStore(storageDir);
+		const store = await openStore(storageDir);
 
 		const failed = await importPredecessorFolders({ store, storageDir, log });
 
@@ -180,7 +180,7 @@ describe("importPredecessorFolders", () => {
 	it("marks a predecessor without a folder list as imported so it is not read again", async () => {
 		const { storageDir, oldDir } = await tempProfile();
 		await writePredecessorCatalog(oldDir, { "omp.sessionIndex.v1": { version: 1, nextOrdinal: 0, entries: [], bindings: [] } });
-		const store = openStore(storageDir);
+		const store = await openStore(storageDir);
 
 		const report = await importPredecessorFolders({ store, storageDir, log });
 

@@ -33,6 +33,7 @@ import {
 	normalizeClaimIdentity,
 	promoteDraftClaim,
 	readClaim,
+	readClaimHolder,
 	setProcessProbeObserver,
 	type ClaimHolder,
 	type ProcessProbe,
@@ -462,16 +463,16 @@ describe("whether another window's holder looks alive, for display", () => {
 		setProcessProbeObserver(probe => probes.push(probe));
 		try { return await run(probes); } finally { setProcessProbeObserver(null); }
 	}
-	const modes = (probes: readonly ProcessProbe[]) => probes.map(probe => probe.mode);
+	const purposes = (probes: readonly ProcessProbe[]) => probes.map(probe => probe.purpose);
 
 	it("reads a holder's start time once, without blocking, and answers the verdicts after it from memory", async () => {
 		const storageDir = await makeStorageDir();
 		const claim = await foreignClaim(storageDir, await makeSessionFile(), await liveProcess());
 		await watchingProbes(async probes => {
 			assert.equal(await claimHolderSeemsAlive(claim), true);
-			assert.deepEqual(modes(probes), ["async"], "one command, off the event loop");
+			assert.deepEqual(purposes(probes), ["display"], "one command, off the event loop");
 			for (let at = 0; at < 25; at++) assert.equal(await claimHolderSeemsAlive(claim), true);
-			assert.deepEqual(modes(probes), ["async"], "no verdict after the first starts another command");
+			assert.deepEqual(purposes(probes), ["display"], "no verdict after the first starts another command");
 		});
 	});
 
@@ -501,7 +502,7 @@ describe("whether another window's holder looks alive, for display", () => {
 		await watchingProbes(async probes => {
 			assert.equal(await claimHolderSeemsAlive(claim), false);
 			assert.equal(await claimHolderSeemsAlive(claim), false);
-			assert.deepEqual(modes(probes), ["async"], "a stale claim of a reused pid costs one command, not one per verdict");
+			assert.deepEqual(purposes(probes), ["display"], "a stale claim of a reused pid costs one command, not one per verdict");
 		});
 	});
 
@@ -513,7 +514,7 @@ describe("whether another window's holder looks alive, for display", () => {
 			assert.equal(await claimHolderSeemsAlive(earlier), true);
 			const later = await foreignClaim(storageDir, await makeSessionFile(), pid, { processCreationTime: "2000-01-01T00:00:00.000Z", filedAt: Date.now() + 60_000 });
 			assert.equal(await claimHolderSeemsAlive(later), false, "this claim is not the process that holds the pid");
-			assert.deepEqual(modes(probes), ["async", "async"], "the reading taken before the claim existed was not used for it");
+			assert.deepEqual(purposes(probes), ["display", "display"], "the reading taken before the claim existed was not used for it");
 		});
 	});
 
@@ -529,14 +530,62 @@ describe("whether another window's holder looks alive, for display", () => {
 		});
 	});
 
-	it("leaves the verdict that admits a launch to read the start time itself, every time", async () => {
+	it("leaves the verdict that admits a launch to read the start time itself, every time, without blocking the thread", async () => {
 		const storageDir = await makeStorageDir();
 		const claim = await foreignClaim(storageDir, await makeSessionFile(), await liveProcess());
 		await watchingProbes(async probes => {
 			await claimHolderSeemsAlive(claim);
-			assert.equal(claimHolderMayBeAlive(claim), true);
-			assert.equal(claimHolderMayBeAlive(claim), true);
-			assert.deepEqual(modes(probes), ["async", "sync", "sync"]);
+			const pending = claimHolderMayBeAlive(claim);
+			assert.ok(pending instanceof Promise, "the reading is awaited, never run synchronously");
+			assert.equal(probes.length, 1, "the command has not finished, so no reading has been taken yet");
+			assert.equal(await pending, true);
+			assert.equal(await claimHolderMayBeAlive(claim), true);
+			assert.deepEqual(purposes(probes), ["display", "verdict", "verdict"]);
 		});
+	});
+
+	/** Count the event-loop turns that run while `pending` is unsettled: a synchronous reading leaves none. */
+	async function turnsWhile(pending: Promise<unknown>): Promise<number> {
+		let settled = false;
+		void pending.then(() => { settled = true; }, () => { settled = true; });
+		let turns = 0;
+		while (!settled) {
+			turns++;
+			await new Promise<void>(resolve => setImmediate(resolve));
+		}
+		return turns;
+	}
+
+	it("lets the event loop run while a launch verdict reads the holder's start time", async () => {
+		const storageDir = await makeStorageDir();
+		const claim = await foreignClaim(storageDir, await makeSessionFile(), await liveProcess());
+		const pending = claimHolderMayBeAlive(claim);
+		assert.ok(await turnsWhile(pending) > 20, "the reading is a child process awaited off the thread, not a synchronous spawn");
+		assert.equal(await pending, true);
+	});
+
+	it("reads this process's start time once, off the thread, and records it in the holder", async () => {
+		await watchingProbes(async probes => {
+			const pending = readClaimHolder();
+			const first = await pending;
+			const second = await readClaimHolder();
+			assert.equal(first.pid, process.pid);
+			assert.match(first.processCreationTime ?? "", /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
+			assert.equal(second.processCreationTime, first.processCreationTime);
+			assert.ok(probes.filter(probe => probe.purpose === "own").length <= 1, "the own start time is read at most once per process");
+			assert.notEqual(second.id, first.id, "each holder is still a fresh lease");
+		});
+	});
+
+	it("makes a holder without a start time that is verified by the claim's filing time instead", async () => {
+		const bare = createClaimHolder(process.pid);
+		assert.equal(bare.processCreationTime, null);
+		const storageDir = await makeStorageDir();
+		const file = await makeSessionFile();
+		const claim = await acquireClaim(storageDir, file, createOwnerGeneration(), bare);
+		const observed = await readClaim(storageDir, file);
+		assert.equal(observed?.processCreationTime, null);
+		assert.equal(await claimHolderMayBeAlive(observed!), true, "this process's own holder is live by registration");
+		await claim.release();
 	});
 });

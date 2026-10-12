@@ -36,7 +36,8 @@ import { relativeAge } from "./views/relative-age";
 import { normalizeSessionsGrouping, planNotificationReveal, sessionsLayoutPickItems } from "./views/session-order";
 import type { SessionsGrouping } from "./views/session-order";
 import { pinnedSessionTabId, selectionRestore } from "./views/session-selection";
-import { acquireClaim, createClaimHolder, createOwnerGeneration } from "./host/session-claim";
+import { acquireClaim, createOwnerGeneration, readClaimHolder } from "./host/session-claim";
+import { startLoopLagMonitor, trackOperation } from "./host/loop-lag";
 import type { NativeControlBootstrap, OmpCommand } from "./host/native-terminal";
 import {
   SESSION_INDEX_LOCAL_KEY,
@@ -949,9 +950,14 @@ async function revealDesktopNotification(index: SessionIndex, extensionId: strin
   log("The notified session has no retained editor or Sessions row in this window.");
 }
 
-export function activate(context: vscode.ExtensionContext): void {
+export async function activate(context: vscode.ExtensionContext): Promise<void> {
   output = vscode.window.createOutputChannel("OMP Desk");
   activationContext = context;
+  // The host's one thread is shared with every extension; a stall of 500 ms or more is logged with the Desk operations that overlapped it.
+  context.subscriptions.push({ dispose: startLoopLagMonitor(message => log(message)) });
+  // This host's start time is a PowerShell command, hundreds of milliseconds to seconds on a busy machine. It runs beside the
+  // rest of the setup and is awaited only where the claim holder needs it: a synchronous read froze every extension in the host.
+  const ownHolder = readClaimHolder();
   void installedNerdFonts().then(families => {
     installedTerminalFonts = families;
     for (const state of tabs.values()) if (state.mode === "terminal" || state.shellSlot !== null) pushTerminalFont(state);
@@ -969,14 +975,14 @@ export function activate(context: vscode.ExtensionContext): void {
     const poll = setInterval(() => { packageChangedOnDisk(); }, PACKAGE_DRIFT_POLL_MS);
     context.subscriptions.push({ dispose: () => clearInterval(poll) });
   }
-  const catalog = createProfileCatalog(context);
+  const catalog = await createProfileCatalog(context);
   catalogStore = catalog;
   // The launcher reports that it is still reading the profile's stored sessions until
   // the one-time import of the predecessor build's folder list has settled, so an empty
   // catalog never presents itself as "no folder is registered" while the folders the
   // user already had are still being imported.
   void vscode.commands.executeCommand("setContext", CATALOG_PENDING_CONTEXT, true);
-  const claimHolder = { ...createClaimHolder(), windowUri: owningWindowUri()?.toString() ?? null };
+  const claimHolder = { ...await ownHolder, windowUri: owningWindowUri()?.toString() ?? null };
   const index = new SessionIndex({
     store: catalog,
     // This window's own observations — its availability reads, the reply its panels
@@ -1335,7 +1341,7 @@ export function activate(context: vscode.ExtensionContext): void {
       refreshLauncher({ ownership: true });
       refreshWindowRegistry();
     }),
-    vscode.window.onDidChangeWindowState(event => {
+    vscode.window.onDidChangeWindowState(event => trackOperation("window focus change", () => {
       if (!event.focused) return;
       windowFocusedAt = new Date().toISOString();
       const active = activePanelTab();
@@ -1349,7 +1355,7 @@ export function activate(context: vscode.ExtensionContext): void {
       pendingLaunchWatch?.rescan();
       // Agent files added or removed while the window was away change which ancestor is shown.
       resolveAgentRoots();
-    }),
+    })),
     // Collapsing a folder is presentation only, and the saved value is what its node is built
     // from (durable for a pinned folder, per window otherwise); nothing here re-reads sessions or
     // touches an editor.
@@ -1363,88 +1369,88 @@ export function activate(context: vscode.ExtensionContext): void {
         void folders.setCollapsed(event.element.folder.id, false).then(() => reportFolderSaveFailure(folders));
       }
     }),
-    vscode.commands.registerCommand("omp.newSession", (argument: unknown) => newSession(context, index, argument)),
-    vscode.commands.registerCommand("omp.openSessionInChat", (argument: unknown) => openSessionInMode(context, index, argument, "chat")),
-    vscode.commands.registerCommand("omp.openSessionInTerminal", (argument: unknown) => openSessionInMode(context, index, argument, "terminal")),
-    vscode.commands.registerCommand("omp.showSessionInChat", (argument: unknown) => openSessionInMode(context, index, argument, "chat", "show")),
-    vscode.commands.registerCommand("omp.showSessionInTerminal", (argument: unknown) => openSessionInMode(context, index, argument, "terminal", "show")),
-    vscode.commands.registerCommand("omp.switchSessionViewChat", () => switchActiveSessionView(context, index, "chat")),
-    vscode.commands.registerCommand("omp.switchSessionViewTerminal", () => switchActiveSessionView(context, index, "terminal")),
-    vscode.commands.registerCommand("omp.copyTerminalScreen", copyActiveTerminalScreen),
-    vscode.commands.registerCommand("omp.redrawTerminal", redrawActiveTerminal),
-    vscode.commands.registerCommand("omp.moveFileToNewWindow", moveFileToNewWindow),
-    vscode.commands.registerCommand("omp.fileLink.open", (argument: unknown) => openFileLinkFromMenu(argument, undefined)),
-    vscode.commands.registerCommand("omp.fileLink.reveal", (argument: unknown) => openFileLinkFromMenu(argument, "reveal")),
-    vscode.commands.registerCommand("omp.fileLink.revealInOs", (argument: unknown) => openFileLinkFromMenu(argument, "os")),
-    vscode.commands.registerCommand("omp.webLink.openInEditor", (argument: unknown) => openWebLinkFromMenu(argument, "editor")),
-    vscode.commands.registerCommand("omp.webLink.openInBrowser", (argument: unknown) => openWebLinkFromMenu(argument, "external")),
-    vscode.commands.registerCommand("omp.chooseDefaultSessionView", chooseDefaultView),
-    vscode.commands.registerCommand("omp.chooseDefaultSessionViewChat", chooseDefaultView),
-    vscode.commands.registerCommand("omp.chooseDefaultSessionViewTerminal", chooseDefaultView),
+    registerDeskCommand("omp.newSession", (argument: unknown) => newSession(context, index, argument)),
+    registerDeskCommand("omp.openSessionInChat", (argument: unknown) => openSessionInMode(context, index, argument, "chat")),
+    registerDeskCommand("omp.openSessionInTerminal", (argument: unknown) => openSessionInMode(context, index, argument, "terminal")),
+    registerDeskCommand("omp.showSessionInChat", (argument: unknown) => openSessionInMode(context, index, argument, "chat", "show")),
+    registerDeskCommand("omp.showSessionInTerminal", (argument: unknown) => openSessionInMode(context, index, argument, "terminal", "show")),
+    registerDeskCommand("omp.switchSessionViewChat", () => switchActiveSessionView(context, index, "chat")),
+    registerDeskCommand("omp.switchSessionViewTerminal", () => switchActiveSessionView(context, index, "terminal")),
+    registerDeskCommand("omp.copyTerminalScreen", copyActiveTerminalScreen),
+    registerDeskCommand("omp.redrawTerminal", redrawActiveTerminal),
+    registerDeskCommand("omp.moveFileToNewWindow", moveFileToNewWindow),
+    registerDeskCommand("omp.fileLink.open", (argument: unknown) => openFileLinkFromMenu(argument, undefined)),
+    registerDeskCommand("omp.fileLink.reveal", (argument: unknown) => openFileLinkFromMenu(argument, "reveal")),
+    registerDeskCommand("omp.fileLink.revealInOs", (argument: unknown) => openFileLinkFromMenu(argument, "os")),
+    registerDeskCommand("omp.webLink.openInEditor", (argument: unknown) => openWebLinkFromMenu(argument, "editor")),
+    registerDeskCommand("omp.webLink.openInBrowser", (argument: unknown) => openWebLinkFromMenu(argument, "external")),
+    registerDeskCommand("omp.chooseDefaultSessionView", chooseDefaultView),
+    registerDeskCommand("omp.chooseDefaultSessionViewChat", chooseDefaultView),
+    registerDeskCommand("omp.chooseDefaultSessionViewTerminal", chooseDefaultView),
     // The in-tab terminal and the folder shell: a folder's terminal actions, the
     // explicit lifecycle actions of a session row, and the exact Reload.
-    vscode.commands.registerCommand("omp.openTerminal", (argument: unknown) => openFolderTerminal(context, index, argument)),
-    vscode.commands.registerCommand("omp.reconnectTerminal", (argument: unknown) =>
+    registerDeskCommand("omp.openTerminal", (argument: unknown) => openFolderTerminal(context, index, argument)),
+    registerDeskCommand("omp.reconnectTerminal", (argument: unknown) =>
       reconnectFolderTerminal(context, index, argument),
     ),
-    vscode.commands.registerCommand("omp.renameSession", (argument: unknown) => renameSession(context, index, argument)),
-    vscode.commands.registerCommand("omp.closeSession", (argument: unknown) => closeSession(context, index, argument)),
-    vscode.commands.registerCommand("omp.reloadSession", (argument: unknown) => reloadSession(context, index, argument)),
-    vscode.commands.registerCommand("omp.addWorkspaceFolder", () => addWorkspaceFolder(index)),
-    vscode.commands.registerCommand("omp.chooseSessionsLayout", () => chooseSessionsLayout()),
-    vscode.commands.registerCommand("omp.chooseSessionsLayout.flat", () => chooseSessionsLayout()),
-    vscode.commands.registerCommand("omp.chooseSessionsLayout.folders", () => chooseSessionsLayout()),
-    vscode.commands.registerCommand("omp.chooseSessionsLayout.terminals", () => chooseSessionsLayout()),
-    vscode.commands.registerCommand("omp.pinWorkspaceFolder", (argument: unknown) => pinWorkspaceFolder(index, argument)),
-    vscode.commands.registerCommand("omp.unpinWorkspaceFolder", (argument: unknown) => unpinWorkspaceFolder(index, argument)),
-    vscode.commands.registerCommand("omp.resumeWorkspaceFolder", (argument: unknown) =>
+    registerDeskCommand("omp.renameSession", (argument: unknown) => renameSession(context, index, argument)),
+    registerDeskCommand("omp.closeSession", (argument: unknown) => closeSession(context, index, argument)),
+    registerDeskCommand("omp.reloadSession", (argument: unknown) => reloadSession(context, index, argument)),
+    registerDeskCommand("omp.addWorkspaceFolder", () => addWorkspaceFolder(index)),
+    registerDeskCommand("omp.chooseSessionsLayout", () => chooseSessionsLayout()),
+    registerDeskCommand("omp.chooseSessionsLayout.flat", () => chooseSessionsLayout()),
+    registerDeskCommand("omp.chooseSessionsLayout.folders", () => chooseSessionsLayout()),
+    registerDeskCommand("omp.chooseSessionsLayout.terminals", () => chooseSessionsLayout()),
+    registerDeskCommand("omp.pinWorkspaceFolder", (argument: unknown) => pinWorkspaceFolder(index, argument)),
+    registerDeskCommand("omp.unpinWorkspaceFolder", (argument: unknown) => unpinWorkspaceFolder(index, argument)),
+    registerDeskCommand("omp.resumeWorkspaceFolder", (argument: unknown) =>
       resumeWorkspaceFolder(context, index, argument),
     ),
-    vscode.commands.registerCommand("omp.openSession", (argument: unknown) => openSession(context, index, argument, "resumed")),
-    vscode.commands.registerCommand("omp.clickSession", (argument: unknown) => clickSession(context, index, argument)),
-    vscode.commands.registerCommand("omp.openProcess", (argument: unknown) => openProcess(context, index, argument)),
-    vscode.commands.registerCommand("omp.goToSession", () => goToSession(context, index)),
-    vscode.commands.registerCommand("omp.switchToSessionWindow", (argument: unknown) => switchToSessionWindow(index, argument)),
-    vscode.commands.registerCommand("omp.forgetSession", (argument: unknown) => forgetSession(index, argument)),
-    vscode.commands.registerCommand("omp.deleteSession", (argument: unknown) => deleteSession(index, argument)),
-    vscode.commands.registerCommand("omp.stopSessionHost", (argument: unknown) =>
+    registerDeskCommand("omp.openSession", (argument: unknown) => openSession(context, index, argument, "resumed")),
+    registerDeskCommand("omp.clickSession", (argument: unknown) => clickSession(context, index, argument)),
+    registerDeskCommand("omp.openProcess", (argument: unknown) => openProcess(context, index, argument)),
+    registerDeskCommand("omp.goToSession", () => goToSession(context, index)),
+    registerDeskCommand("omp.switchToSessionWindow", (argument: unknown) => switchToSessionWindow(index, argument)),
+    registerDeskCommand("omp.forgetSession", (argument: unknown) => forgetSession(index, argument)),
+    registerDeskCommand("omp.deleteSession", (argument: unknown) => deleteSession(index, argument)),
+    registerDeskCommand("omp.stopSessionHost", (argument: unknown) =>
       stopSessionHost(context, index, argument),
     ),
-    vscode.commands.registerCommand("omp.killSession", (argument: unknown) => killSession(context, index, argument)),
-    vscode.commands.registerCommand("omp.refreshSessions", () => refreshSessions(index)),
-    vscode.commands.registerCommand("omp.showHostControls", () => showHostControls(index)),
-    vscode.commands.registerCommand("omp.selectModel", () => selectHostModel(index)),
-    vscode.commands.registerCommand("omp.selectThinking", () => selectHostThinking(index)),
-    vscode.commands.registerCommand("omp.copyTools", () => copyHostTools(index)),
-    vscode.commands.registerCommand("omp.loginProvider", () => loginProviderFromPalette(index)),
-    vscode.commands.registerCommand("omp.enableFileEvidence", () => enableFileEvidence(context, index)),
-    vscode.commands.registerCommand("omp.disableFileEvidence", () => disableFileEvidence(context, index)),
-    vscode.commands.registerCommand("omp.showFileEvidence", () => showFileEvidence(context, index)),
-    vscode.commands.registerCommand("omp.deleteFileEvidence", () => deleteFileEvidence(context, index)),
+    registerDeskCommand("omp.killSession", (argument: unknown) => killSession(context, index, argument)),
+    registerDeskCommand("omp.refreshSessions", () => refreshSessions(index)),
+    registerDeskCommand("omp.showHostControls", () => showHostControls(index)),
+    registerDeskCommand("omp.selectModel", () => selectHostModel(index)),
+    registerDeskCommand("omp.selectThinking", () => selectHostThinking(index)),
+    registerDeskCommand("omp.copyTools", () => copyHostTools(index)),
+    registerDeskCommand("omp.loginProvider", () => loginProviderFromPalette(index)),
+    registerDeskCommand("omp.enableFileEvidence", () => enableFileEvidence(context, index)),
+    registerDeskCommand("omp.disableFileEvidence", () => disableFileEvidence(context, index)),
+    registerDeskCommand("omp.showFileEvidence", () => showFileEvidence(context, index)),
+    registerDeskCommand("omp.deleteFileEvidence", () => deleteFileEvidence(context, index)),
     // Keyboard/command access to actions the panel already offers, so a
     // keybinding reaches the same composer handlers the buttons use. Each of
     // these targets the actual active editor, never a merely visible split panel,
     // reports when there is none, and never starts a host.
-    vscode.commands.registerCommand("omp.sendPrompt", () => postPanelAction("send-prompt")),
-    vscode.commands.registerCommand("omp.stopTurn", () => postPanelAction("stop-turn")),
-    vscode.commands.registerCommand("omp.focusComposer", () => focusChatComposer(index)),
-    vscode.commands.registerCommand("omp.retryTurn", () => postChatPanelAction("retry-turn")),
-    vscode.commands.registerCommand("omp.toggleThinking", () => toggleTranscriptDefault(THINKING_EXPANDED_KEY)),
-    vscode.commands.registerCommand("omp.toggleToolOutput", () => toggleTranscriptDefault(TOOLS_EXPANDED_KEY)),
-    vscode.commands.registerCommand("omp.searchPromptHistory", () => searchPromptHistory()),
-    vscode.commands.registerCommand("omp.searchSymbolFromChat", () => searchSymbolFromChat()),
-    vscode.commands.registerCommand("omp.compactConversation", () => runActiveChatAction(context, index, "compact")),
-    vscode.commands.registerCommand("omp.shakeConversation", () => runActiveChatAction(context, index, "shake")),
-    vscode.commands.registerCommand("omp.cycleModel", () => runActiveChatAction(context, index, "cycle-model")),
-    vscode.commands.registerCommand("omp.cycleThinkingLevel", () => runActiveChatAction(context, index, "cycle-thinking")),
-    vscode.commands.registerCommand("omp.exportConversationHtml", () => runActiveChatAction(context, index, "export-html")),
-    vscode.commands.registerCommand("omp.shareConversation", () => runActiveChatAction(context, index, "share")),
-    vscode.commands.registerCommand("omp.showChatKeyboardShortcuts", () => showChatKeyboardShortcuts()),
-    vscode.commands.registerCommand("omp.rewindConversation", () => rewindConversation()),
-    vscode.commands.registerCommand("omp.sendSelection", () => addSelectionToSession(context, index)),
-    vscode.commands.registerCommand("omp.sendFile", (clicked: unknown, selected: unknown) => addFilesToSession(context, index, clicked, selected)),
-    vscode.commands.registerCommand("omp.showDiagnostics", () => showDiagnostics(context, index)),
-    vscode.commands.registerCommand("omp.copyRowDiagnostics", async (item: unknown) => {
+    registerDeskCommand("omp.sendPrompt", () => postPanelAction("send-prompt")),
+    registerDeskCommand("omp.stopTurn", () => postPanelAction("stop-turn")),
+    registerDeskCommand("omp.focusComposer", () => focusChatComposer(index)),
+    registerDeskCommand("omp.retryTurn", () => postChatPanelAction("retry-turn")),
+    registerDeskCommand("omp.toggleThinking", () => toggleTranscriptDefault(THINKING_EXPANDED_KEY)),
+    registerDeskCommand("omp.toggleToolOutput", () => toggleTranscriptDefault(TOOLS_EXPANDED_KEY)),
+    registerDeskCommand("omp.searchPromptHistory", () => searchPromptHistory()),
+    registerDeskCommand("omp.searchSymbolFromChat", () => searchSymbolFromChat()),
+    registerDeskCommand("omp.compactConversation", () => runActiveChatAction(context, index, "compact")),
+    registerDeskCommand("omp.shakeConversation", () => runActiveChatAction(context, index, "shake")),
+    registerDeskCommand("omp.cycleModel", () => runActiveChatAction(context, index, "cycle-model")),
+    registerDeskCommand("omp.cycleThinkingLevel", () => runActiveChatAction(context, index, "cycle-thinking")),
+    registerDeskCommand("omp.exportConversationHtml", () => runActiveChatAction(context, index, "export-html")),
+    registerDeskCommand("omp.shareConversation", () => runActiveChatAction(context, index, "share")),
+    registerDeskCommand("omp.showChatKeyboardShortcuts", () => showChatKeyboardShortcuts()),
+    registerDeskCommand("omp.rewindConversation", () => rewindConversation()),
+    registerDeskCommand("omp.sendSelection", () => addSelectionToSession(context, index)),
+    registerDeskCommand("omp.sendFile", (clicked: unknown, selected: unknown) => addFilesToSession(context, index, clicked, selected)),
+    registerDeskCommand("omp.showDiagnostics", () => showDiagnostics(context, index)),
+    registerDeskCommand("omp.copyRowDiagnostics", async (item: unknown) => {
       if (!(item instanceof SessionTreeItem || item instanceof WorkspaceFolderTreeItem || item instanceof ProcessTreeItem)) return;
       try {
         await vscode.env.clipboard.writeText(redactCapabilities(item.diagnostics));
@@ -3024,7 +3030,7 @@ async function verifiedOwnedWriterPid(index: SessionIndex, tabId: string, option
   if (entry === null) return null;
   const observed = await index.observeOwnership(tabId);
   if (observed.ok && observed.claim !== null && observed.claim.holderId !== index.claimHolder.id &&
-    (options.display === true ? await holderSeemsAlive(observed.claim, windowRegistry) : claimHolderMayBeAlive(observed.claim))) return null;
+    (options.display === true ? await holderSeemsAlive(observed.claim, windowRegistry) : await claimHolderMayBeAlive(observed.claim))) return null;
   const verdict = await reconciler.reconcile({
     entry, sessionFile: entry.sessionFile, draftIdentity: entry.ownership?.draftIdentity ?? null,
     ownerGeneration: entry.ownership?.ownerGeneration ?? "", claim: observed.ok ? observed.claim : null, host: entry.host,
@@ -5568,7 +5574,7 @@ const CATALOG_PENDING_CONTEXT = "omp.catalogPending";
  * a delta against the newest committed revision instead of overwriting another
  * window's work.
  */
-function createProfileCatalog(context: vscode.ExtensionContext): CatalogStore {
+function createProfileCatalog(context: vscode.ExtensionContext): Promise<CatalogStore> {
   return createCatalogStore({
     paths: catalogPaths(context.globalStorageUri.fsPath),
     mergers: {
@@ -5639,7 +5645,15 @@ async function ensureCatalogReady(): Promise<void> {
  * them visible here, and their ownership is proven exactly as before when the user
  * opens one.
  */
-async function adoptCatalogChanges(
+function adoptCatalogChanges(
+  index: SessionIndex,
+  folders: LauncherFolders,
+  options: { readonly startup?: boolean } = {},
+): Promise<void> {
+  return trackOperation("catalog adoption", () => adoptCatalogChangesMarked(index, folders, options));
+}
+
+async function adoptCatalogChangesMarked(
   index: SessionIndex,
   folders: LauncherFolders,
   options: { readonly startup?: boolean } = {},
@@ -11141,8 +11155,8 @@ function refreshLauncher(options: { readonly ownership?: boolean } = {}): void {
   if (indexForBridge !== null) settleViewedSession(indexForBridge);
   void vscode.commands.executeCommand("setContext", SESSIONS_LAYOUT_CONTEXT, sessionsGrouping());
   // Published first: this window's own entry in the registry is what the list is derived from.
-  publishWindowSnapshot();
-  launcherProvider?.refresh(options);
+  trackOperation("window snapshot", () => publishWindowSnapshot());
+  trackOperation("Sessions view refresh", () => launcherProvider?.refresh(options));
   sessionProcesses?.touch();
   inventoryViews?.sync();
   contextView?.sync();
@@ -11392,7 +11406,7 @@ async function launcherOwnershipFacts(index: SessionIndex, tabId: string, option
   // is never what admits or refuses a launch, a stop or a deletion (those ask claimHolderMayBeAlive themselves).
   const heldElsewhere = claim !== null && claim.verifiable && claim.holderId !== null &&
     claim.holderId !== index.claimHolder.id && await holderSeemsAlive(claim, windowRegistry);
-  const heldHere = claim !== null && claim.holderId === index.claimHolder.id && claimHolderMayBeAlive(claim);
+  const heldHere = claim !== null && claim.holderId === index.claimHolder.id && await claimHolderMayBeAlive(claim);
   const pid = await verifiedOwnedWriterPid(index, tabId, { display: true });
   const sessionFile = index.get(tabId)?.sessionFile ?? null;
   const externalOmp = !heldElsewhere && !heldHere && pid === null && sessionFile !== null && externalLeases !== null &&
@@ -12693,11 +12707,19 @@ function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-setProcessProbeObserver(probe => windowTiming("process start time read", `pid ${probe.pid} ${probe.mode} ${probe.ms} ms found=${probe.found}`));
+setProcessProbeObserver(probe => windowTiming("process start time read", `pid ${probe.pid} ${probe.purpose} ${probe.ms} ms found=${probe.found}`));
 
 /** One line of the hand-over timeline between windows (ADR-0056/0057); every line carries the log's own millisecond stamp. */
 function windowTiming(event: string, detail = ""): void {
   log(`window timing: ${event}${detail === "" ? "" : ` ${detail}`}`);
+}
+
+/**
+ * `vscode.commands.registerCommand` with the handler marked as a named operation of the event-loop monitor, so a stall of the
+ * extension host names the command that was running (and how long its synchronous part held the thread).
+ */
+function registerDeskCommand(id: string, handler: (...args: never[]) => unknown): vscode.Disposable {
+  return vscode.commands.registerCommand(id, (...args: never[]) => trackOperation(`command ${id}`, () => handler(...args)));
 }
 
 function log(message: string): void {
@@ -13972,7 +13994,7 @@ async function renameStoppedSession(
     if (proposed === undefined) return;
     await index.lifecycle.run(tabId, async () => {
       const observed = await index.observeOwnership(tabId);
-      if ((observed.ok && observed.claim !== null && observed.claim.holderId !== index.claimHolder.id && claimHolderMayBeAlive(observed.claim)) || await verifiedOwnedWriterPid(index, tabId) !== null) {
+      if ((observed.ok && observed.claim !== null && observed.claim.holderId !== index.claimHolder.id && await claimHolderMayBeAlive(observed.claim)) || await verifiedOwnedWriterPid(index, tabId) !== null) {
         showWarning("This session is running in another editor. Rename it there.");
         return;
       }
@@ -14038,7 +14060,7 @@ async function renameStoppedSession(
   }
   try {
     const observed = await index.observeOwnership(tabId);
-    if ((observed.ok && observed.claim !== null && observed.claim.holderId !== index.claimHolder.id && claimHolderMayBeAlive(observed.claim)) || await verifiedOwnedWriterPid(index, tabId) !== null) {
+    if ((observed.ok && observed.claim !== null && observed.claim.holderId !== index.claimHolder.id && await claimHolderMayBeAlive(observed.claim)) || await verifiedOwnedWriterPid(index, tabId) !== null) {
       showError("This session is running in another editor. Stop it before renaming its saved conversation.");
       return;
     }

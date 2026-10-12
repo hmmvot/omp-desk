@@ -80,7 +80,7 @@ function rowsMerger(input: { readonly base: unknown; readonly desired: unknown; 
 	return { value: [...merged.values()], conflicts };
 }
 
-function window(paths: CatalogPaths): CatalogStore {
+function window(paths: CatalogPaths): Promise<CatalogStore> {
 	return createCatalogStore({ paths, mergers: { "test.rows.v1": rowsMerger } });
 }
 
@@ -92,7 +92,7 @@ async function readDocument(paths: CatalogPaths): Promise<{ revision: number; re
 describe("profile catalog", () => {
 	it("commits durably, advances the revision and reports it to this window", async () => {
 		const { paths } = await tempCatalog();
-		const one = window(paths);
+		const one = await window(paths);
 		assert.equal(one.revision(), 0);
 		await one.update("test.rows.v1", [{ id: "a", value: "1" }]);
 		assert.equal(one.revision(), 1);
@@ -101,15 +101,15 @@ describe("profile catalog", () => {
 		assert.deepEqual(document.records["test.rows.v1"], [{ id: "a", value: "1" }]);
 
 		// A second window over the same directory sees the committed record.
-		const two = window(paths);
+		const two = await window(paths);
 		assert.equal(two.revision(), 1);
 		assert.deepEqual(two.get("test.rows.v1"), [{ id: "a", value: "1" }]);
 	});
 
 	it("keeps two windows' different rows when both write one record", async () => {
 		const { paths } = await tempCatalog();
-		const one = window(paths);
-		const two = window(paths);
+		const one = await window(paths);
+		const two = await window(paths);
 		await one.update("test.rows.v1", [{ id: "a", value: "1" }]);
 		// Window two read the record before window one committed.
 		await two.refresh();
@@ -130,8 +130,8 @@ describe("profile catalog", () => {
 
 	it("merges a stale window's edit into the newest revision and records the disagreement", async () => {
 		const { paths } = await tempCatalog();
-		const one = window(paths);
-		const two = window(paths);
+		const one = await window(paths);
+		const two = await window(paths);
 		await one.update("test.rows.v1", [
 			{ id: "a", value: "1" },
 			{ id: "b", value: "2" },
@@ -175,8 +175,8 @@ describe("profile catalog", () => {
 
 	it("adopts another window's commit through refresh and notifies listeners", async () => {
 		const { paths } = await tempCatalog();
-		const one = window(paths);
-		const two = window(paths);
+		const one = await window(paths);
+		const two = await window(paths);
 		const seen: number[] = [];
 		two.onChange(refresh => seen.push(refresh.revision));
 		await one.update("test.rows.v1", [{ id: "a", value: "1" }]);
@@ -192,12 +192,12 @@ describe("profile catalog", () => {
 
 	it("reports a catalog that cannot be read and refuses to write over it", async () => {
 		const { paths } = await tempCatalog();
-		const one = window(paths);
+		const one = await window(paths);
 		await one.update("test.rows.v1", [{ id: "a", value: "1" }]);
 		// Another build (or a damaged file) leaves something this version cannot read.
 		await writeFile(paths.document, "{ not json", "utf8");
 		const refusalMessages: string[] = [];
-		const two = createCatalogStore({
+		const two = await createCatalogStore({
 			paths,
 			mergers: { "test.rows.v1": rowsMerger },
 			onUnavailable: reason => refusalMessages.push(reason),
@@ -214,11 +214,11 @@ describe("profile catalog", () => {
 
 	it("refuses while another live process holds the lock", async () => {
 		const { paths } = await tempCatalog();
-		const one = window(paths);
+		const one = await window(paths);
 		await one.update("test.rows.v1", [{ id: "a", value: "1" }]);
 		// A lock of *this* process: it is provably alive, so it is never reclaimed.
 		await writeFile(paths.lock, JSON.stringify({ token: "held", pid: process.pid, host: osHostname(), at: "now" }), "utf8");
-		const two = window(paths);
+		const two = await window(paths);
 		await assert.rejects(() => two.update("test.rows.v1", [{ id: "b", value: "2" }]), (error: unknown) => {
 			return error instanceof CatalogError && error.reason === "busy";
 		});
@@ -228,7 +228,7 @@ describe("profile catalog", () => {
 
 	it("reclaims only a lock whose owner is provably gone and old enough, and records it", async () => {
 		const { paths } = await tempCatalog();
-		const one = window(paths);
+		const one = await window(paths);
 		await one.update("test.rows.v1", [{ id: "a", value: "1" }]);
 		// A process id that cannot exist, with an old timestamp.
 		await writeFile(
@@ -236,7 +236,7 @@ describe("profile catalog", () => {
 			JSON.stringify({ token: "dead", pid: 0x7ffffff0, host: osHostname(), at: "2020-01-01T00:00:00.000Z" }),
 			"utf8",
 		);
-		const two = createCatalogStore({
+		const two = await createCatalogStore({
 			paths,
 			mergers: { "test.rows.v1": rowsMerger },
 			// A zero stale threshold makes the old lock count as old enough without
@@ -255,8 +255,8 @@ describe("profile catalog", () => {
 
 	it("does not resurrect a record another window deleted", async () => {
 		const { paths } = await tempCatalog();
-		const one = window(paths);
-		const two = window(paths);
+		const one = await window(paths);
+		const two = await window(paths);
 		await one.update("test.rows.v1", [
 			{ id: "a", value: "1" },
 			{ id: "b", value: "2" },
@@ -278,12 +278,12 @@ describe("profile catalog", () => {
 
 	it("merges against the value this window's consumer read, not the one committed since", async () => {
 		const { paths } = await tempCatalog();
-		const one = window(paths);
+		const one = await window(paths);
 		await one.update("test.rows.v1", [{ id: "a", value: "1" }]);
 
 		// Window two is constructed before window one's change and has not re-read: its
 		// in-memory snapshot is empty, and it now writes that snapshot back unchanged.
-		const two = window(paths);
+		const two = await window(paths);
 		await one.update("test.rows.v1", [
 			{ id: "a", value: "1" },
 			{ id: "b", value: "2" },
@@ -306,10 +306,10 @@ describe("profile catalog", () => {
 
 	it("refuses while the lock cannot be read, because age is not proof of a dead owner", async () => {
 		const { paths } = await tempCatalog();
-		const one = window(paths);
+		const one = await window(paths);
 		await one.update("test.rows.v1", [{ id: "a", value: "1" }]);
 		await writeFile(paths.lock, "{ not a lock record", "utf8");
-		const two = createCatalogStore({
+		const two = await createCatalogStore({
 			paths,
 			mergers: { "test.rows.v1": rowsMerger },
 			lockTimeoutMs: 150,
@@ -323,8 +323,8 @@ describe("profile catalog", () => {
 
 	it("keeps another window's record when a consumer names the base it actually read", async () => {
 		const { paths } = await tempCatalog();
-		const one = window(paths);
-		const two = window(paths);
+		const one = await window(paths);
+		const two = await window(paths);
 		await one.update("test.rows.v1", [{ id: "a", value: "1" }]);
 		// Window two read the empty record and remembers exactly that snapshot.
 		const twoBase = two.get<Row[]>("test.rows.v1") ?? [];
@@ -345,7 +345,7 @@ describe("profile catalog", () => {
 
 	it("watches the document and reports a commit", async () => {
 		const { paths } = await tempCatalog();
-		const one = window(paths);
+		const one = await window(paths);
 		// This deliberately exercises a real file-system notification, which no fake
 		// clock can produce, so the signal is awaited with a bounded guard: the test
 		// resolves from the watcher's own callback, not from a guessed delay.

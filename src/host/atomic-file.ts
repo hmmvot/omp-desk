@@ -16,11 +16,6 @@ import * as path from "node:path";
  */
 export const RENAME_BACKOFF_MS: readonly number[] = [10, 20, 40, 80, 160, 320, 640, 800];
 
-/** Block this thread for `ms` without using the CPU. */
-export function sleepSync(ms: number): void {
-	Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
 /** The error's `code`, when it has one. */
 export function errorCode(error: unknown): string | undefined {
 	if (typeof error !== "object" || error === null || !("code" in error)) return undefined;
@@ -60,20 +55,6 @@ export async function renameReplacing(rename: () => Promise<void>, wait: (ms: nu
 			const pause = RENAME_BACKOFF_MS[attempt];
 			if (pause === undefined || !isSharingViolation(error)) throw error;
 			await wait(pause);
-		}
-	}
-}
-
-/** `renameReplacing` for a caller that must finish before it returns; the wait blocks without spinning. */
-export function renameReplacingSync(rename: () => void, wait: (ms: number) => void = sleepSync): void {
-	for (let attempt = 0; ; attempt++) {
-		try {
-			rename();
-			return;
-		} catch (error) {
-			const pause = RENAME_BACKOFF_MS[attempt];
-			if (pause === undefined || !isSharingViolation(error)) throw error;
-			wait(pause);
 		}
 	}
 }

@@ -2583,7 +2583,7 @@ export class SessionIndex {
 			const claimBefore = observed.ok ? observed.claim : null;
 			const generation = entry.ownership?.ownerGeneration ?? createOwnerGeneration();
 			const heldBefore = claimBefore !== null;
-			if (claimBefore !== null && claimBefore.holderId !== this.#claimHolder.id && claimHolderMayBeAlive(claimBefore)) {
+			if (claimBefore !== null && claimBefore.holderId !== this.#claimHolder.id && await claimHolderMayBeAlive(claimBefore)) {
 				const detail = "This session is open in another window. Continue there.";
 				await this.#touch(entry, "live", detail);
 				await this.#persist();
@@ -3127,7 +3127,7 @@ export class SessionIndex {
 		const publishedTemporaryClaim = claimBefore === null;
 		let claim: SessionClaim | null = null;
 		try {
-			if (claimBefore === null || claimBefore.holderId === this.#claimHolder.id || !claimHolderMayBeAlive(claimBefore)) {
+			if (claimBefore === null || claimBefore.holderId === this.#claimHolder.id || !(await claimHolderMayBeAlive(claimBefore))) {
 				claim = await acquireClaim(this.#claimStorageDir, identity, generation, this.#claimHolder);
 			}
 		} catch (error) {
@@ -3212,7 +3212,7 @@ export class SessionIndex {
 			const observed = await this.#readClaim(identity);
 			if (!observed.ok) return { kind: "failed", detail: observed.detail };
 			const claimBefore = observed.claim;
-			if (claimBefore !== null && claimBefore.holderId !== this.#claimHolder.id && claimHolderMayBeAlive(claimBefore)) {
+			if (claimBefore !== null && claimBefore.holderId !== this.#claimHolder.id && await claimHolderMayBeAlive(claimBefore)) {
 				return skipped("rival", "Another live window holds the session; its own watch ends it.");
 			}
 			const generation = entry.ownership?.ownerGeneration ?? createOwnerGeneration();
@@ -3275,7 +3275,7 @@ export class SessionIndex {
 		const target = entry.sessionFile ?? entry.ownership?.draftIdentity ?? null;
 		if (target !== null) {
 			const observed = await this.#readClaim(target);
-			const guard = this.#claimGuardingRemoval(entry, observed.ok ? observed.claim : null);
+			const guard = await this.#claimGuardingRemoval(entry, observed.ok ? observed.claim : null);
 			if (guard !== null) return { removed: false, detail: guard };
 			if (reconciler !== undefined) {
 				const verdict = await this.#reconcile(entry, observed.ok ? observed.claim : null, reconciler);
@@ -3301,10 +3301,10 @@ export class SessionIndex {
 	 * other window. A host of this window was already refused before this check.
 	 * Provenance is not consulted.
 	 */
-	#claimGuardingRemoval(entry: MutableEntry, claim: ObservedClaim | null): string | null {
+	async #claimGuardingRemoval(entry: MutableEntry, claim: ObservedClaim | null): Promise<string | null> {
 		if (claim === null) return null;
 		const rivalHolder =
-			claim.holderId !== this.#claimHolder.id && claimHolderMayBeAlive(claim);
+			claim.holderId !== this.#claimHolder.id && await claimHolderMayBeAlive(claim);
 		if (rivalHolder) {
 			return "Another live window of this extension holds this session.";
 		}
@@ -3361,7 +3361,7 @@ export class SessionIndex {
 			return { removed: false, detail: `${file} still exists, so the row is kept.` };
 		}
 		const observed = await this.#readClaim(file);
-		if (observed.ok && observed.claim !== null && claimHolderMayBeAlive(observed.claim)) {
+		if (observed.ok && observed.claim !== null && await claimHolderMayBeAlive(observed.claim)) {
 			const held = options.heldClaim;
 			// A claim that is not the deletion's own keeps the row: it may belong to a
 			// writer that is still alive.
@@ -3668,7 +3668,7 @@ export class SessionIndex {
 		const target = entry.sessionFile ?? entry.ownership?.draftIdentity ?? null;
 		const observed = target === null ? null : await this.#readClaim(target);
 		const claim = observed?.ok ? observed.claim : null;
-		if (claim !== null && claim.holderId !== this.#claimHolder.id && claimHolderMayBeAlive(claim)) {
+		if (claim !== null && claim.holderId !== this.#claimHolder.id && await claimHolderMayBeAlive(claim)) {
 			return "This session is open in another window. This editor is read-only; continue there.";
 		}
 		return null;
@@ -3811,7 +3811,7 @@ export class SessionIndex {
 		claim: ObservedClaim | null,
 		reconciler: OwnerReconciler,
 	): Promise<OwnerVerdict> {
-		if (claim !== null && claim.holderId !== this.#claimHolder.id && claimHolderMayBeAlive(claim)) {
+		if (claim !== null && claim.holderId !== this.#claimHolder.id && await claimHolderMayBeAlive(claim)) {
 			return { kind: "live", detail: "Another live window of this extension holds this session." };
 		}
 		try {

@@ -71,7 +71,7 @@ export async function importPredecessorFolders(deps: PredecessorImportDeps): Pro
 	const predecessorDir = predecessorStorageDir(deps.storageDir);
 	let folderRecord: unknown;
 	try {
-		const document = readCatalogDocument(catalogPaths(predecessorDir));
+		const document = await readCatalogDocument(catalogPaths(predecessorDir));
 		if (document === null) return { status: "absent", folders: 0, detail: null };
 		folderRecord = Object.prototype.hasOwnProperty.call(document.records, WORKSPACE_FOLDERS_STORAGE_KEY)
 			? document.records[WORKSPACE_FOLDERS_STORAGE_KEY]

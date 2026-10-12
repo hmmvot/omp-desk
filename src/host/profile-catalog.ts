@@ -78,9 +78,11 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
+import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { renameReplacingSync } from "./atomic-file.ts";
+import { renameReplacing } from "./atomic-file.ts";
+import { trackOperation } from "./loop-lag.ts";
 
 /** Document schema version this build writes and accepts. */
 export const CATALOG_VERSION = 1;
@@ -239,17 +241,17 @@ function readConflictRecord(value: unknown): CatalogConflictRecord | null {
  * state throws {@link CatalogError} `unavailable`: the caller must refuse to write
  * rather than treat the catalog as empty.
  */
-export function readCatalogDocument(paths: CatalogPaths): CatalogDocument | null {
+export async function readCatalogDocument(paths: CatalogPaths): Promise<CatalogDocument | null> {
   let text: string;
   try {
-    text = fs.readFileSync(paths.document, "utf8");
+    text = await fsp.readFile(paths.document, "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw new CatalogError("unavailable", `The OMP profile catalog could not be read: ${messageOf(error)}`, { cause: error });
   }
   let parsed: unknown;
   try {
-    parsed = JSON.parse(text);
+    parsed = trackOperation("catalog parse", () => JSON.parse(text));
   } catch (error) {
     throw new CatalogError(
       "unavailable",
@@ -309,9 +311,9 @@ interface LockRecord {
   readonly at: string;
 }
 
-function readLockRecord(lockPath: string): LockRecord | null {
+async function readLockRecord(lockPath: string): Promise<LockRecord | null> {
   try {
-    const parsed = JSON.parse(fs.readFileSync(lockPath, "utf8")) as Partial<LockRecord>;
+    const parsed = JSON.parse(await fsp.readFile(lockPath, "utf8")) as Partial<LockRecord>;
     if (typeof parsed.token !== "string" || parsed.token.length === 0) return null;
     if (typeof parsed.pid !== "number" || !Number.isFinite(parsed.pid)) return null;
     return {
@@ -352,15 +354,15 @@ interface HeldLock {
   readonly reclaimedFrom: LockRecord | null;
 }
 
-function tryCreateLock(lockPath: string, token: string): boolean {
+async function tryCreateLock(lockPath: string, token: string): Promise<boolean> {
   try {
-    const fd = fs.openSync(lockPath, "wx");
+    const handle = await fsp.open(lockPath, "wx");
     try {
       const record: LockRecord = { token, pid: process.pid, host: osHostname(), at: new Date().toISOString() };
-      fs.writeSync(fd, JSON.stringify(record));
-      fs.fsyncSync(fd);
+      await handle.writeFile(JSON.stringify(record));
+      await handle.sync();
     } finally {
-      fs.closeSync(fd);
+      await handle.close();
     }
     return true;
   } catch (error) {
@@ -387,22 +389,22 @@ async function acquireLock(lockPath: string, options: AcquireLockOptions): Promi
   /** The lock this acquisition had to reclaim, recorded so the reclaim is visible. */
   let reclaimedFrom: LockRecord | null = null;
   for (;;) {
-    if (tryCreateLock(lockPath, token)) return { token, reclaimedFrom };
-    const record = readLockRecord(lockPath);
+    if (await tryCreateLock(lockPath, token)) return { token, reclaimedFrom };
+    const record = await readLockRecord(lockPath);
     if (record === null) {
       // A lock file this process cannot read is ambiguous: it may be a live holder's
       // record being written right now, or a damaged file. Age is not proof of a dead
       // owner, so it is never reclaimed on age alone — the acquisition waits and then
       // refuses, and the caller reports that the change was not saved.
     } else if (ownerIsProvablyGone(record)) {
-      const age = lockAgeMs(lockPath, options.now);
+      const age = await lockAgeMs(lockPath, options.now);
       if (age !== null && age > options.staleMs) {
         // Reclaim the lock of a process that provably no longer exists. The
         // transaction that follows still re-reads the latest revision, so a lost
         // partial write cannot be committed as this window's values.
         try {
-          const current = readLockRecord(lockPath);
-          if (current !== null && current.token === record.token) fs.rmSync(lockPath, { force: true });
+          const current = await readLockRecord(lockPath);
+          if (current !== null && current.token === record.token) await fsp.rm(lockPath, { force: true });
           reclaimedFrom = record;
           continue;
         } catch {
@@ -420,19 +422,19 @@ async function acquireLock(lockPath: string, options: AcquireLockOptions): Promi
   }
 }
 
-function lockAgeMs(lockPath: string, now: () => number): number | null {
+async function lockAgeMs(lockPath: string, now: () => number): Promise<number | null> {
   try {
-    return now() - fs.statSync(lockPath).mtimeMs;
+    return now() - (await fsp.stat(lockPath)).mtimeMs;
   } catch {
     return null;
   }
 }
 
-function releaseLock(lockPath: string, token: string): void {
-  const record = readLockRecord(lockPath);
+async function releaseLock(lockPath: string, token: string): Promise<void> {
+  const record = await readLockRecord(lockPath);
   if (record === null || record.token !== token) return;
   try {
-    fs.rmSync(lockPath, { force: true });
+    await fsp.rm(lockPath, { force: true });
   } catch {
     /* the lock is left for a dead-owner reclaim; the commit already landed */
   }
@@ -448,32 +450,32 @@ function releaseLock(lockPath: string, token: string): void {
  * or the new one, never a partial write, and a crash leaves the previous revision
  * in place.
  */
-function commitDocument(paths: CatalogPaths, next: CatalogDocument): void {
+async function commitDocument(paths: CatalogPaths, next: CatalogDocument): Promise<void> {
   const staging = `${paths.document}.${process.pid}.${randomUUID()}.tmp`;
-  const payload = JSON.stringify(next);
-  let fd: number;
+  const payload = trackOperation("catalog serialize", () => JSON.stringify(next));
+  let handle: fsp.FileHandle;
   try {
-    fd = fs.openSync(staging, "w");
+    handle = await fsp.open(staging, "w");
   } catch (error) {
     throw new CatalogError("write", `The OMP profile catalog could not be staged: ${messageOf(error)}`, { cause: error });
   }
   try {
-    fs.writeSync(fd, payload);
-    fs.fsyncSync(fd);
+    await handle.writeFile(payload);
+    await handle.sync();
   } catch (error) {
-    fs.closeSync(fd);
-    fs.rmSync(staging, { force: true });
+    await handle.close().catch(() => undefined);
+    await fsp.rm(staging, { force: true });
     throw new CatalogError("write", `The OMP profile catalog could not be written: ${messageOf(error)}`, { cause: error });
   }
-  fs.closeSync(fd);
+  await handle.close();
   try {
     // Windows refuses a replace while another process has the destination open (another window re-reading the catalog,
     // an antivirus scan, a backup tool). The rename is retried over about two seconds, then reported; the previous
     // revision is still intact either way.
-    renameReplacingSync(() => fs.renameSync(staging, paths.document));
+    await renameReplacing(() => fsp.rename(staging, paths.document), delay);
     return;
   } catch (error) {
-    fs.rmSync(staging, { force: true });
+    await fsp.rm(staging, { force: true });
     const code = (error as NodeJS.ErrnoException).code;
     const held = code === "EPERM" || code === "EACCES" || code === "EBUSY"
       ? " Another program kept the file open for too long; this window keeps the change and saves it again on its next save."
@@ -532,7 +534,7 @@ export async function transactCatalog(
   operation: (tx: CatalogTransaction) => boolean | void,
   options: CatalogTransactionOptions = {},
 ): Promise<CatalogCommitResult> {
-  fs.mkdirSync(paths.root, { recursive: true });
+  await fsp.mkdir(paths.root, { recursive: true });
   const now = options.now ?? (() => Date.now());
   const clock = options.clock ?? (() => new Date());
   const held = await acquireLock(paths.lock, {
@@ -541,7 +543,7 @@ export async function transactCatalog(
     now,
   });
   try {
-    const current = readCatalogDocument(paths) ?? emptyCatalogDocument();
+    const current = (await readCatalogDocument(paths)) ?? emptyCatalogDocument();
     const records: Record<string, unknown> = { ...current.records };
     const imports: CatalogImportRecord[] = [...current.imports];
     const conflicts: CatalogConflictRecord[] = [...current.conflicts];
@@ -594,10 +596,10 @@ export async function transactCatalog(
       imports,
       conflicts,
     };
-    commitDocument(paths, next);
+    await commitDocument(paths, next);
     return { revision: next.revision, changed: true };
   } finally {
-    releaseLock(paths.lock, held.token);
+    await releaseLock(paths.lock, held.token);
   }
 }
 
@@ -720,12 +722,12 @@ function sameValue(left: unknown, right: unknown): boolean {
 /**
  * Build this window's view of the profile catalog.
  *
- * The initial read is synchronous so activation can construct its consumers with
- * the real state in hand (a sidebar built from an empty projection would show the
- * welcome view and then flicker). Mutations are asynchronous and serialized inside
- * this window as well as across windows.
+ * The initial read is awaited by activation, which builds its consumers only once it
+ * has the real state (a sidebar built from an empty projection would show the
+ * welcome view and then flicker). No read, lock or write blocks the extension host's
+ * thread. Mutations are serialized inside this window as well as across windows.
  */
-export function createCatalogStore(options: CatalogStoreOptions): CatalogStore {
+export async function createCatalogStore(options: CatalogStoreOptions): Promise<CatalogStore> {
   const { paths, mergers } = options;
   const now = options.now ?? (() => Date.now());
   const clock = options.clock ?? (() => new Date());
@@ -749,8 +751,8 @@ export function createCatalogStore(options: CatalogStoreOptions): CatalogStore {
   let chain: Promise<unknown> = Promise.resolve();
 
   try {
-    fs.mkdirSync(paths.root, { recursive: true });
-    const document = readCatalogDocument(paths);
+    await fsp.mkdir(paths.root, { recursive: true });
+    const document = await readCatalogDocument(paths);
     if (document !== null) {
       records = document.records;
       imports = document.imports;
@@ -763,6 +765,8 @@ export function createCatalogStore(options: CatalogStoreOptions): CatalogStore {
   }
 
   const applyDocument = (document: CatalogDocument): CatalogRefresh => {
+    // A read that began before a newer revision was applied (a refresh racing a commit) is older than what this window holds.
+    if (document.revision < revision) return { revision, keys: [] };
     const changed: string[] = [];
     const keys = new Set([...Object.keys(records), ...Object.keys(document.records)]);
     for (const key of keys) {
@@ -812,8 +816,8 @@ export function createCatalogStore(options: CatalogStoreOptions): CatalogStore {
       clock,
     });
     if (result.changed) {
-      const document = readCatalogDocument(paths) ?? emptyCatalogDocument();
-      notify(applyDocument(document));
+      const document = (await readCatalogDocument(paths)) ?? emptyCatalogDocument();
+      notify(trackOperation("catalog apply", () => applyDocument(document)));
     } else {
       revision = Math.max(revision, result.revision);
     }
@@ -930,7 +934,7 @@ export function createCatalogStore(options: CatalogStoreOptions): CatalogStore {
     async refresh(): Promise<CatalogRefresh | null> {
       let document: CatalogDocument | null;
       try {
-        document = readCatalogDocument(paths);
+        document = await readCatalogDocument(paths);
       } catch (error) {
         unavailable = messageOf(error);
         return null;
@@ -946,7 +950,7 @@ export function createCatalogStore(options: CatalogStoreOptions): CatalogStore {
         conflicts = document.conflicts;
         return null;
       }
-      const refresh = applyDocument(document);
+      const refresh = trackOperation("catalog apply", () => applyDocument(document));
       notify(refresh);
       return refresh;
     },
