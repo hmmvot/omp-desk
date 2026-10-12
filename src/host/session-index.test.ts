@@ -15,7 +15,7 @@
 
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { after, describe, it } from "node:test";
@@ -33,6 +33,7 @@ import {
 	normalizeWorkspaceDirectory,
 	readSessionFileActivity,
 	readSessionFileHeader,
+	readSessionFileHeaderReading,
 	resolveSessionOrigin,
 } from "./session-index.ts";
 import {
@@ -622,6 +623,28 @@ describe("restoreAll", () => {
 		assert.equal(started.requests.length, 1);
 		assert.equal(started.requests[0]?.sessionFile, null, "a draft starts a fresh session, not a resume");
 		assert.equal(index.get(draft.tabId)?.availability, "live");
+	});
+
+	it("files the claim of a launch with the holder's start time even when that is still being read at activation", async () => {
+		const { claimDir, cwd } = await tempWorkspace();
+		const store = new TestStore();
+		const { promise: creationTime, resolve: readStartTime } = Promise.withResolvers<string | null>();
+		const holder = createClaimHolder();
+		const index = new SessionIndex({ store, claimStorageDir: claimDir, claimHolder: holder, claimHolderCreationTime: creationTime });
+		const draft = await index.createDraft({ cwd });
+		assert.equal(index.claimHolder.processCreationTime, null, "the rows and the commands do not wait for the reading");
+
+		const started = recordingLauncher({ state: "running", host: runningHandle() });
+		const restore = index.restoreAll({ reconciler: noRecordedHost, launcher: started.launcher, restoreDrafts: true });
+		await new Promise(resolve => setImmediate(resolve));
+		assert.equal(started.requests.length, 0, "the launch waits for the holder's start time before it files its claim");
+		readStartTime("2026-10-12T10:00:00.000Z");
+		const report = await restore;
+		assert.equal(report.restored.length, 1);
+		const claim = await readClaim(claimDir, draft.ownership!.draftIdentity!);
+		assert.equal(claim?.holderId, holder.id, "the same lease, now complete");
+		assert.equal(claim?.processCreationTime, "2026-10-12T10:00:00.000Z");
+		assert.equal(index.claimHolder.processCreationTime, "2026-10-12T10:00:00.000Z");
 	});
 
 	it("starts exactly one host when two tabs point at one session", async () => {
@@ -1946,6 +1969,24 @@ describe("session file header", () => {
 				JSON.stringify({ type: "message", message: { role: "user", content: "A descriptive session" } }),
 			] }));
 			assert.equal((await readSessionFileHeader(file))?.promptTitle, "A descriptive session");
+		} finally { await rm(root, { recursive: true, force: true }); }
+	});
+
+	it("re-reads a file only when its stamp changed, which a title rewritten in place does by mtime alone", async () => {
+		const root = await mkdtemp(path.join(tmpdir(), "omp-header-stamp-"));
+		try {
+			const file = path.join(root, "session.jsonl");
+			await writeFile(file, body({ slotTitle: "One" }));
+			const first = await readSessionFileHeaderReading(file, null);
+			assert.equal(first?.header?.title, "One");
+			assert.equal(await readSessionFileHeaderReading(file, first), first, "an unchanged file is not read again");
+			// OMP rewrites the slot in place: the same byte count, a newer mtime.
+			await writeFile(file, body({ slotTitle: "Two" }));
+			await utimes(file, new Date("2026-10-12T12:00:00Z"), new Date("2026-10-12T12:00:00Z"));
+			const second = await readSessionFileHeaderReading(file, first);
+			assert.equal(second?.size, first?.size);
+			assert.equal(second?.header?.title, "Two");
+			assert.equal(await readSessionFileHeaderReading(path.join(root, "missing.jsonl"), first), null);
 		} finally { await rm(root, { recursive: true, force: true }); }
 	});
 });

@@ -11,11 +11,14 @@ let renderLinked: Provide;
 /** Renders with the host answering each token of `symbols` with its target, its number of definitions or (`{ files }`) its number of same-named files (others none) and no path existing; `asked` is what the page asked the host. */
 type RenderSymbols = (text: string, options: { paths?: string[]; symbols?: Record<string, string | number | { files: number }>; eligible?: boolean; provider?: boolean }) => Promise<{ html: string; asked: string[] }>;
 let renderSymbols: RenderSymbols;
+/** Parses every prefix of `text` of the given lengths in turn, each from the previous parse, and reports each step's markup and how many leading blocks it kept as the same element. */
+type RenderStreamed = (text: string, lengths: readonly number[]) => { html: string; kept: number }[];
+let renderStreamed: RenderStreamed;
 before(async () => {
 	const bundled = await build({ stdin: { contents: `
 		import { createElement } from "react";
 		import { renderToStaticMarkup } from "react-dom/server";
-		import { Markdown } from "./components/Markdown";
+		import { Markdown, parseMarkdown } from "./components/Markdown";
 		import { FileLinksContext } from "./components/FileLinks";
 		import { WebLinksContext } from "./components/WebLinks";
 		import { ChatFileLinks } from "./lib/chat-file-links";
@@ -59,13 +62,26 @@ before(async () => {
 			symbolLinks.dispose();
 			return { html, asked };
 		};
+		export const renderStreamed = (text, lengths) => {
+			const steps = [];
+			let previous = null;
+			for (const length of lengths) {
+				const parsed = parseMarkdown(text.slice(0, length), previous);
+				let kept = 0;
+				while (previous !== null && kept < previous.blocks.length && parsed.blocks[kept] === previous.blocks[kept]) kept += 1;
+				steps.push({ html: renderToStaticMarkup(createElement("div", { className: "omp-md" }, parsed.blocks)), kept });
+				previous = parsed;
+			}
+			return steps;
+		};
 	`, loader: "tsx", resolveDir: join(process.cwd(), "src/webview") }, bundle: true, write: false,
 		format: "cjs", platform: "node", packages: "external", jsx: "automatic", define: { "process.env.NODE_ENV": '"production"' } });
-	const module = { exports: {} as { render: typeof render; renderLinked: Provide; renderSymbols: RenderSymbols } };
+	const module = { exports: {} as { render: typeof render; renderLinked: Provide; renderSymbols: RenderSymbols; renderStreamed: RenderStreamed } };
 	new Function("require", "module", "exports", bundled.outputFiles[0]!.text)(createRequire(import.meta.url), module, module.exports);
 	render = module.exports.render;
 	renderLinked = module.exports.renderLinked;
 	renderSymbols = module.exports.renderSymbols;
+	renderStreamed = module.exports.renderStreamed;
 });
 
 test("bullets indented under a numbered item nest inside it instead of continuing the numbering", () => {
@@ -254,4 +270,50 @@ test("a bare file name is linked in assistant text only, and where nothing links
 	const linked = await renderLinked("`session-index.ts:849` and `Loader.cs`", ["session-index.ts:849", "Loader.cs"]);
 	assert.match(linked, /<code><span class="omp-file-link"[^>]*data-file-target="session-index\.cs:849"/, "a file the cwd has keeps the path link, in any text");
 	assert.match(linked, /<code><span class="omp-file-link"[^>]*data-file-target="Loader\.cs"/);
+});
+
+const STREAMED = [
+	"# Plan",
+	"",
+	"First `a.ts` paragraph that goes",
+	"on for two lines.",
+	"",
+	"- one",
+	"",
+	"- two after a blank joins the same loose list",
+	"  with a continuation",
+	"- three",
+	"",
+	"col | val",
+	"--- | ---",
+	"a | 1",
+	"",
+	"> quoted",
+	"",
+	"```ts",
+	"const x = 1;",
+	"```",
+	"",
+	"tail -",
+	"- not a rule",
+].join("\n");
+
+test("a streamed reply parsed prefix by prefix renders exactly as a fresh parse at every length, keeping the finished blocks", () => {
+	const lengths = Array.from({ length: STREAMED.length }, (_, index) => index + 1);
+	const steps = renderStreamed(STREAMED, lengths);
+	for (const [index, step] of steps.entries()) {
+		assert.equal(step.html, render(STREAMED.slice(0, lengths[index])), `prefix of ${lengths[index]} characters`);
+	}
+	assert.equal(steps.at(-1)?.kept, 6, "the heading, paragraph, list, table, quote and fence are reused while the tail streams");
+	assert.ok(steps.every(step => step.kept <= 6));
+});
+
+test("a block that may still be joined by what follows is parsed again, and a text that does not extend the previous one reuses nothing", () => {
+	const open = renderStreamed("a\n\nb", [1, 4]);
+	assert.equal(open[1]?.kept, 0, "the only block ends on the last line, so it is parsed again");
+	const closed = renderStreamed("a\n\nb\n\nc", [5, 9]);
+	assert.equal(closed[1]?.kept, 1, "a block followed by a line break is final");
+	const replaced = renderStreamed("a\n\nb\n\nc", [9, 1]);
+	assert.equal(replaced[1]?.kept, 0);
+	assert.equal(replaced[1]?.html, render("a"));
 });

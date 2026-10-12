@@ -33,7 +33,7 @@ import {
 	normalizeClaimIdentity,
 	promoteDraftClaim,
 	readClaim,
-	readClaimHolder,
+	readProcessCreationTime,
 	setProcessProbeObserver,
 	type ClaimHolder,
 	type ProcessProbe,
@@ -564,16 +564,13 @@ describe("whether another window's holder looks alive, for display", () => {
 		assert.equal(await pending, true);
 	});
 
-	it("reads this process's start time once, off the thread, and records it in the holder", async () => {
+	it("reads this process's start time once, off the thread", async () => {
 		await watchingProbes(async probes => {
-			const pending = readClaimHolder();
-			const first = await pending;
-			const second = await readClaimHolder();
-			assert.equal(first.pid, process.pid);
-			assert.match(first.processCreationTime ?? "", /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
-			assert.equal(second.processCreationTime, first.processCreationTime);
+			const first = await readProcessCreationTime(process.pid);
+			const second = await readProcessCreationTime(process.pid);
+			assert.match(first ?? "", /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/);
+			assert.equal(second, first);
 			assert.ok(probes.filter(probe => probe.purpose === "own").length <= 1, "the own start time is read at most once per process");
-			assert.notEqual(second.id, first.id, "each holder is still a fresh lease");
 		});
 	});
 

@@ -1021,7 +1021,7 @@ async function deleteManagedSessionHeld(
 	const frozenGeneration = gathered.entry?.ownership?.ownerGeneration ?? createOwnerGeneration();
 	let claim: SessionClaim;
 	try {
-		claim = await acquireClaim(options.index.claimStorageDir, file, frozenGeneration, options.index.claimHolder);
+		claim = await acquireClaim(options.index.claimStorageDir, file, frozenGeneration, await options.index.claimHolderReady());
 	} catch (error) {
 		return refuse(
 			"claim-busy",
@@ -1307,7 +1307,7 @@ export async function recoverNativeDeletion(
 				options.index.claimStorageDir,
 				transaction.sessionFile,
 				createOwnerGeneration(),
-				options.index.claimHolder,
+				await options.index.claimHolderReady(),
 			);
 		} catch (error) {
 			return refuse(

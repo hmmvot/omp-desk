@@ -50,8 +50,8 @@
  */
 import * as path from "node:path";
 import * as vscode from "vscode";
-import { readSessionFileActivity, readSessionFileHeader } from "../host/session-index";
-import type { RestoreOutcome, SessionFileActivity, SessionFileHeader, SessionIndexEntry } from "../host/session-index";
+import { readSessionFileActivity, readSessionFileHeaderReading } from "../host/session-index";
+import type { RestoreOutcome, SessionFileActivity, SessionFileHeader, SessionFileHeaderReading, SessionIndexEntry } from "../host/session-index";
 import { folderOwnsCwd } from "./workspace-folders";
 import { relativeAge } from "./relative-age";
 import type { LauncherFolder } from "./launcher-folders";
@@ -193,10 +193,11 @@ interface RowObservation {
 	inFlight: boolean;
 }
 
+/** The session file's header, re-checked by `fstat` on every ownership refresh and read again only when the file changed. */
 interface HeaderObservation {
 	identity: string;
 	file: string;
-	value: SessionFileHeader | null;
+	value: SessionFileHeaderReading | null;
 	dirty: boolean;
 	inFlight: boolean;
 }
@@ -809,6 +810,10 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 	#conversationsActive = 0;
 	#revealLocks = 0;
 	#projectionPending = false;
+	/** A read changed what a row shows; the next enrichment turn projects once for every such read. */
+	#projectionDue = false;
+	/** A conversation read changed a row's activity, reported with that projection. */
+	#activityChanged = false;
 	readonly #providerLogin = new ProviderLoginTreeItem();
 	#providerLoginRequired = false;
 	#grouping: SessionsGrouping = "folders";
@@ -935,7 +940,7 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 	/** The observed file name also supplies Processes and newly opened detail tabs. */
 	headlineFor(tabId: string): string | undefined {
 		const row = this.#byTabId.get(tabId);
-		return row === undefined ? undefined : sessionHeadline(row.entry, this.#headers.get(tabId)?.value ?? null);
+		return row === undefined ? undefined : sessionHeadline(row.entry, this.#headers.get(tabId)?.value?.header ?? null);
 	}
 
 	/**
@@ -1106,7 +1111,7 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 				// A row another window runs is ordered, and its age shown, from what its owner published for this
 				// run (nothing published means no activity, not this window's own reading), so every window agrees.
 				if (peer?.status != null) conversation = { lastAt: peer.lastActivityAt };
-				return { entry, header: entry.sessionFile === null ? null : header?.value ?? null,
+				return { entry, header: entry.sessionFile === null ? null : header?.value?.header ?? null,
 					conversation, facts, state, active: entry.tabId === activeTabId, peer,
 					folderLabel: grouping === "flat" ? folderLabels.get(folder.id) ?? null : null,
 					unread: isUnread(entry) && state !== "externalOmp",
@@ -1290,12 +1295,26 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 		this.#scheduleEnrichment();
 	}
 
+	/**
+	 * One turn later: repaint once for every read that completed since the last turn, then start the
+	 * next reads, at most four of a kind at a time. Reads complete in bursts (the file calls share a
+	 * thread pool), and a projection walks every row, so one per burst rather than one per read.
+	 */
 	#scheduleEnrichment(): void {
 		if (this.#scheduled || this.#disposed) return;
 		this.#scheduled = true;
 		setImmediate(() => {
-			this.#scheduled = false;
 			if (this.#disposed) return;
+			if (this.#projectionDue) {
+				this.#projectionDue = false;
+				// Still scheduled, so the projection's own request for a turn is this one.
+				this.#project();
+				if (this.#activityChanged) {
+					this.#activityChanged = false;
+					this.#observed.fire();
+				}
+			}
+			this.#scheduled = false;
 			for (const [tabId, observation] of this.#observations) {
 				if (this.#ownershipActive >= 4) break;
 				if (!observation.dirty || observation.inFlight || !this.#byTabId.has(tabId) ||
@@ -1333,7 +1352,7 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 				observation.identity === identity && this.#identity(current) === identity &&
 				!this.#source.facts(tabId).running) {
 				observation.value = value;
-				this.#project();
+				this.#projectionDue = true;
 			}
 		} catch (error) {
 			if (!this.#disposed) this.#onObservationError(error);
@@ -1345,13 +1364,14 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 		}
 	}
 
+	/** An unchanged file costs one `fstat` and repaints nothing. */
 	async #readHeader(tabId: string, header: HeaderObservation): Promise<void> {
 		const identity = header.identity;
 		try {
-			const value = await readSessionFileHeader(header.file);
-			if (!this.#disposed && this.#headers.get(tabId) === header && header.identity === identity) {
+			const value = await readSessionFileHeaderReading(header.file, header.value);
+			if (!this.#disposed && this.#headers.get(tabId) === header && header.identity === identity && value !== header.value) {
 				header.value = value;
-				this.#project();
+				this.#projectionDue = true;
 			}
 		} catch (error) {
 			if (!this.#disposed) this.#onObservationError(error);
@@ -1370,8 +1390,8 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 			if (!this.#disposed && this.#conversations.get(tabId) === conversation) {
 				conversation.value = value;
 				if ((previous === null) !== (value === null) || previous?.lastConversationAt !== value?.lastConversationAt) {
-					this.#project();
-					this.#observed.fire();
+					this.#projectionDue = true;
+					this.#activityChanged = true;
 				}
 			}
 		} catch (error) {

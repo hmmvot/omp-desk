@@ -13,7 +13,7 @@
  * add a package to the bundle for behavior this panel does not need.
  */
 import type { ReactNode } from "react";
-import { Fragment, memo, useMemo } from "react";
+import { Fragment, memo, useMemo, useRef } from "react";
 import { detectChatFileLinks, fileTargetOfHref, isFileLinkCandidate } from "../lib/chat-file-links";
 import { detectWebLinks } from "../lib/chat-web-links";
 import { parseBareFileName, parseCodeSymbol } from "../code-symbols";
@@ -286,10 +286,51 @@ function parseList(lines: readonly string[], start: number, listKey: string): { 
 
 /** Parse block structure; `tight` renders paragraphs inline, as in a tight list item. */
 function parseBlocks(text: string, tight = false, keyPrefix = "b"): ReactNode[] {
+	return parseBlockRange(text.split(/\r?\n/), 0, 0, tight, keyPrefix).blocks;
+}
+
+/**
+ * One parse of a whole text, with what a later parse of a longer text can reuse: the
+ * lines, and the line each block started on. The block keys are the block's index.
+ */
+export interface MarkdownParse {
+	readonly text: string;
+	readonly lines: readonly string[];
+	readonly blocks: readonly ReactNode[];
+	readonly starts: readonly number[];
+}
+
+/**
+ * Parse `text`, reusing the blocks of `previous` when `text` only appends to its text (a
+ * reply streaming in). A block's parse depends on its own lines and on the first non-blank
+ * line after it (a list reads past blank lines, a paragraph stops at the line that opens
+ * the next block), so every block that ends before the previous text's last line — the one
+ * line an append can change — is kept as the same element, and only the tail is parsed again.
+ */
+export function parseMarkdown(text: string, previous: MarkdownParse | null): MarkdownParse {
 	const lines = text.split(/\r?\n/);
+	if (previous !== null && previous.starts.length >= 2 && text.length > previous.text.length && text.startsWith(previous.text)) {
+		const modified = previous.lines.length - 1;
+		const last = previous.starts.length - 1;
+		// A block that starts on the modified line may now be joined by the block before it
+		// (a second list item after a blank, a table separator under a paragraph): that one is
+		// parsed again too.
+		const from = (previous.starts[last] as number) < modified ? last : last - 1;
+		if (from >= 1) {
+			const tail = parseBlockRange(lines, previous.starts[from] as number, from, false, "b");
+			return { text, lines, blocks: [...previous.blocks.slice(0, from), ...tail.blocks], starts: [...previous.starts.slice(0, from), ...tail.starts] };
+		}
+	}
+	const parsed = parseBlockRange(lines, 0, 0, false, "b");
+	return { text, lines, blocks: parsed.blocks, starts: parsed.starts };
+}
+
+/** Parse the blocks from line `from` on; `firstKey` numbers the first of them. Every block takes exactly one key. */
+function parseBlockRange(lines: readonly string[], from: number, firstKey: number, tight: boolean, keyPrefix: string): { blocks: ReactNode[]; starts: number[] } {
 	const blocks: ReactNode[] = [];
-	let index = 0;
-	let key = 0;
+	const starts: number[] = [];
+	let index = from;
+	let key = firstKey;
 
 	while (index < lines.length) {
 		const line = lines[index] as string;
@@ -297,6 +338,7 @@ function parseBlocks(text: string, tight = false, keyPrefix = "b"): ReactNode[] 
 			index++;
 			continue;
 		}
+		starts.push(index);
 
 		const fence = FENCE.exec(line);
 		if (fence !== null) {
@@ -412,10 +454,13 @@ function parseBlocks(text: string, tight = false, keyPrefix = "b"): ReactNode[] 
 		blocks.push(tight ? <span key={paragraphKey}>{renderLines(paragraph, paragraphKey)}</span> : <p key={paragraphKey}>{renderLines(paragraph, paragraphKey)}</p>);
 	}
 
-	return blocks;
+	return { blocks, starts };
 }
 
 export const Markdown = memo(function Markdown({ text }: { text: string }): ReactNode {
-	const blocks = useMemo(() => parseBlocks(text), [text]);
-	return <div className="omp-md">{blocks}</div>;
+	// The previous parse feeds the next one: while a reply streams, only the tail is parsed again.
+	const previous = useRef<MarkdownParse | null>(null);
+	const parsed = useMemo(() => parseMarkdown(text, previous.current), [text]);
+	previous.current = parsed;
+	return <div className="omp-md">{parsed.blocks}</div>;
 });

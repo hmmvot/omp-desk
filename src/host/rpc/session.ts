@@ -499,6 +499,14 @@ const NO_HELD: HeldChoices = { model: null, modelCycles: 0, thinking: null, thin
 const MAX_HELD_CYCLES = 16;
 const STDERR_TAIL_BYTES = CHAT_EXIT_STDERR_BYTES;
 const MESSAGE_ID_TAIL = /,"messageId":"([^"\\]{1,64})"\}$/;
+/**
+ * How often live `message_update` frames are passed on while a reply streams. OMP writes one per
+ * token chunk and each carries the whole partial message, which the page then validates, reduces
+ * and renders whole; one frame per message every {@link MESSAGE_UPDATE_PACE_MS} bounds that work
+ * at any token rate. The latest frame per message wins, a pending frame is delivered before any
+ * other line so order is kept, and the first frame after a pause goes out on the next timer turn.
+ */
+export const MESSAGE_UPDATE_PACE_MS = 33;
 
 /** A failure that ends the establish sequence with a bounded code. */
 class SessionFailure extends Error {
@@ -644,7 +652,8 @@ export class RpcSession {
 	#supportsV2 = false;
 	#rpcProtocol: 1 | 2 | null = null;
 	#updates = new Map<string, string>();
-	#flushScheduled = false;
+	#updateTimer: unknown = null;
+	#updatesFlushedAt = Number.NEGATIVE_INFINITY;
 	#reconcileRunning = false;
 	#reconcileAgain = false;
 	#reconcileAttempts = 0;
@@ -860,6 +869,7 @@ export class RpcSession {
 		this.#disposed = true;
 		this.#unsubscribe?.();
 		this.#unsubscribe = null;
+		this.#dropUpdates();
 		this.#clearReconcileTimer();
 		this.#clearPausedStateTimer();
 		this.#disarmWatchdog();
@@ -2040,9 +2050,12 @@ export class RpcSession {
 				const id = match[1]!;
 				this.#updates.delete(id);
 				this.#updates.set(id, line);
-				if (!this.#flushScheduled) {
-					this.#flushScheduled = true;
-					queueMicrotask(() => this.#flushUpdates());
+				if (this.#updateTimer === null) {
+					const wait = Math.max(0, MESSAGE_UPDATE_PACE_MS - (this.#timers.now() - this.#updatesFlushedAt));
+					this.#updateTimer = this.#timers.setTimeout(() => {
+						this.#updateTimer = null;
+						this.#flushUpdates();
+					}, wait);
 				}
 				return;
 			}
@@ -2052,13 +2065,25 @@ export class RpcSession {
 		this.#processLine(line);
 	}
 
-	/** Parse and apply the latest `message_update` per `messageId` collected in this burst. */
+	/** Parse and apply the latest `message_update` per `messageId` collected since the last flush. */
 	#flushUpdates(): void {
-		this.#flushScheduled = false;
+		if (this.#updateTimer !== null) {
+			this.#timers.clearTimeout(this.#updateTimer);
+			this.#updateTimer = null;
+		}
 		if (this.#updates.size === 0) return;
+		this.#updatesFlushedAt = this.#timers.now();
 		const lines = [...this.#updates.values()];
 		this.#updates.clear();
 		for (const line of lines) this.#processLine(line);
+	}
+
+	#dropUpdates(): void {
+		if (this.#updateTimer !== null) {
+			this.#timers.clearTimeout(this.#updateTimer);
+			this.#updateTimer = null;
+		}
+		this.#updates.clear();
 	}
 
 	#processLine(line: string): void {
@@ -3013,6 +3038,8 @@ export class RpcSession {
 			}
 			return;
 		}
+		// A partial reply the child was still streaming is shown as far as it got.
+		this.#flushUpdates();
 		this.#ended = true;
 		this.#hostCalls?.childExited();
 		this.#clearReconcileTimer();

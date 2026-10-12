@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 import type { ChatModel, ChatSnapshotPayload } from "../../chat/model.ts";
 import { FakeRpcChannel, responseLine, type FakeChildModel } from "./fake-channel.ts";
-import { RpcSession, parseRestoredQueue, type RpcSessionOptions, type RpcSessionOutput } from "./session.ts";
+import { MESSAGE_UPDATE_PACE_MS, RpcSession, parseRestoredQueue, type RpcSessionOptions, type RpcSessionOutput } from "./session.ts";
 import { turnActivity } from "../../webview/lib/activity.ts";
 import { TurnActivityLedger, type TurnNotice } from "../notifications.ts";
 import {
@@ -736,14 +736,17 @@ describe("slash deny-list backstop", () => {
 	});
 });
 
-describe("message_update coalescing", () => {
+describe("message_update pacing", () => {
 	it("parses and forwards only the latest update per messageId in one burst", async () => {
-		const { session, channel, outputs } = await boot({ child: { sessionFile: "D:\\scratch\\u.jsonl", entries: [], leafId: null } });
+		const { session, channel, outputs, timers } = await boot({ child: { sessionFile: "D:\\scratch\\u.jsonl", entries: [], leafId: null } });
 		outputs.length = 0;
 		for (let index = 1; index <= 50; index += 1) {
 			channel.emitMessage("message_update", "msg-1", assistantMessage("x".repeat(index), 9000) as never);
 		}
 		channel.emitMessage("message_update", "msg-2", assistantMessage("other", 9001) as never);
+		await tick();
+		assert.equal(outputs.filter(output => output.type === "event" && output.frame.type === "message_update").length, 0, "nothing is forwarded before the pacing timer");
+		timers.advance(0);
 		await tick();
 		const updates = outputs.filter(output => output.type === "event" && output.frame.type === "message_update");
 		assert.equal(updates.length, 2);
@@ -756,6 +759,41 @@ describe("message_update coalescing", () => {
 		const block = forwarded.content[0];
 		assert.ok(block !== undefined && block.type === "text");
 		assert.equal(block.text.length, 50);
+	});
+
+	it("forwards at most one update per message every pace interval while the reply streams", async () => {
+		const { channel, outputs, timers } = await boot({ child: { sessionFile: "D:\\scratch\\p.jsonl", entries: [], leafId: null } });
+		outputs.length = 0;
+		const forwarded = (): number[] => outputs.flatMap(output => {
+			if (output.type !== "event" || output.frame.type !== "message_update" || output.frame.message.role !== "assistant") return [];
+			const block = output.frame.message.content[0];
+			return block !== undefined && block.type === "text" ? [block.text.length] : [];
+		});
+		channel.emitMessage("message_update", "msg-1", assistantMessage("x", 9000) as never);
+		timers.advance(0);
+		assert.deepEqual(forwarded(), [1], "the first chunk after a pause goes out at once");
+		// Chunks keep arriving faster than the pace: none goes out until the interval has passed.
+		for (let index = 2; index <= 10; index += 1) {
+			channel.emitMessage("message_update", "msg-1", assistantMessage("x".repeat(index), 9000) as never);
+			timers.advance(MESSAGE_UPDATE_PACE_MS / 11);
+		}
+		assert.deepEqual(forwarded(), [1]);
+		const pendingBefore = timers.pending;
+		timers.advance(MESSAGE_UPDATE_PACE_MS);
+		assert.deepEqual(forwarded(), [1, 10], "the interval delivers the latest chunk only");
+		assert.equal(timers.pending, pendingBefore - 1, "the pacing timer is gone once the buffer is empty");
+	});
+
+	it("delivers the pending chunk of a reply the child was still streaming when the child exits", async () => {
+		const { session, channel } = await boot({ child: { sessionFile: "D:\\scratch\\px.jsonl", entries: [], leafId: null } });
+		channel.emitMessage("message_update", "msg-1", assistantMessage("cut off here", 9000) as never);
+		channel.closeLink("child-exited");
+		await tick();
+		assert.equal(session.phase, "stopped");
+		const stream = session.model.stream;
+		assert.ok(stream !== null && stream.role === "assistant");
+		const block = stream.content[0];
+		assert.ok(block !== undefined && block.type === "text" && block.text === "cut off here");
 	});
 
 	it("flushes a pending update before a later non-update frame so order is kept", async () => {
@@ -940,12 +978,13 @@ describe("dialogs and presentation", () => {
 	});
 
 	it("does not forward agent_end.messages or assistantMessageEvent", async () => {
-		const { channel, outputs } = await boot({ child: { sessionFile: "D:\\scratch\\st.jsonl", entries: [], leafId: null } });
+		const { channel, outputs, timers } = await boot({ child: { sessionFile: "D:\\scratch\\st.jsonl", entries: [], leafId: null } });
 		outputs.length = 0;
 		channel.emit({ type: "agent_end", isTerminal: true, messages: [assistantMessage("dup", 1)] });
 		channel.emit(
 			`{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"x","partial":{"role":"assistant"}},"message":${JSON.stringify(assistantMessage("x", 10))},"messageId":"msg-7"}`,
 		);
+		timers.advance(0);
 		await tick();
 		const text = JSON.stringify(outputs.filter(output => output.type === "event"));
 		assert.equal(text.includes("assistantMessageEvent"), false);

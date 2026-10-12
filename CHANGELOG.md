@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The shipped bundles (`out/extension.js`, `media/guest.js` and the others) are minified; the extension host parses the first at every window start and a session editor the second when it opens, and both were about twice the size (2.1 MB and 2.0 MB, now 1.1 MB each). The watch build (`npm run watch`) stays readable.
+- The OMP Desk output logs how long the PTY broker's health check took on the first launch in a window (`PTY runtime proved itself: self-check N ms, ready in M ms`): the check's own run, and the whole proof including the staging of the broker tree. An unproven admission and the repeated check log their times too. The numbers are the basis for deciding whether one proof should be shared by every window.
+
+### Fixed
+
+- Chat: a fast reply (a model streaming hundreds of tokens per second) no longer makes the page spend most of its time reparsing. OMP sends one `message_update` per token chunk, each carrying the whole partial message, and the page validated, reduced and rendered every one; the host now passes on at most one per message every 33 ms (the latest wins, order is kept, a pause flushes on the next turn), and the Markdown of a reply that streams in parses only the block the new text touches, keeping every earlier block's element (a 20 KB reply rendered at 400 growth steps: 562 ms of parsing became 16 ms).
+- Activation no longer waits for the window's own process start time. The reading is a PowerShell command (hundreds of milliseconds idle, seconds on a busy machine) and `activate` awaited it before registering the Sessions view, the commands and the editors; now only a session claim this window writes waits for it (the start-time rule of ADR-0035 is kept), and everything else appears at once. The installed Nerd Font list, another PowerShell command (it loads System.Drawing, a second or more of CPU), is read when the first terminal pane asks for its font instead of at every activation, for panes most windows never open.
+- Sessions: the 15 s heartbeat no longer opens and parses every session file's header. Each header is re-read only when the file's modification time or size changed (one `fstat` otherwise; a title OMP rewrites in place changes the time), and the reads that complete together repaint the view once rather than once per file.
+
 ## [0.3.2] - 2026-10-12
 
 ### Added

@@ -312,17 +312,6 @@ export function createClaimHolder(pid: number = process.pid, processCreationTime
 	return { id, pid, processCreationTime };
 }
 
-/**
- * {@link createClaimHolder} with the process's verified start time, read without blocking the extension host.
- *
- * The start time is what lets another window tell this process from a later occupant of its pid (ADR-0035);
- * reading it is a PowerShell (or `ps`) command, hundreds of milliseconds and seconds on a busy machine, so it is
- * awaited and never run synchronously. A holder made without it is verified by the weaker filing-time rule.
- */
-export async function readClaimHolder(pid: number = process.pid): Promise<ClaimHolder> {
-	return createClaimHolder(pid, await readProcessCreationTime(pid));
-}
-
 /** `true` when `identity` is a reserved draft identity rather than a path. */
 export function isDraftIdentity(identity: string): boolean {
 	return typeof identity === "string" && identity.startsWith(DRAFT_IDENTITY_PREFIX);

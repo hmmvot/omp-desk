@@ -148,6 +148,10 @@ const targets = [
 
 const shared = {
   sourcemap: true,
+  // A watch build stays readable for debugging; what ships is minified: the extension host parses
+  // `out/extension.js` at every window start and a session editor parses `media/guest.js` when it
+  // opens, and the unminified bundles were about twice the size (2.1 MB and 2.0 MB against 1.1 MB each).
+  minify: !watch,
   logLevel: "info",
   // Preserve bundled MIT/@license banners for third-party attribution.
   legalComments: "eof",

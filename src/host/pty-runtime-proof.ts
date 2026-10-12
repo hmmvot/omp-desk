@@ -51,6 +51,17 @@ function defaultSchedule(run: () => void, delayMs: number): () => void {
 	return () => clearTimeout(timer);
 }
 
+/**
+ * How long the proof took, for the Output log: the self-check's own run as the entry
+ * measured it, and the whole probe (listing, staging and hashing the tree, then the check)
+ * as this host saw it. The numbers decide whether proving once per window is worth
+ * sharing across windows.
+ */
+function probeTiming(readiness: PtyRuntimeReadiness, elapsedMs: number): string {
+	const check = readiness.runtime?.selfCheck?.durationMs ?? -1;
+	return check < 0 ? `ready in ${elapsedMs} ms` : `self-check ${check} ms, ready in ${elapsedMs} ms`;
+}
+
 export class PtyRuntimeProof {
 	private readonly input: PtyRuntimeProofInput;
 	private readonly now: () => number;
@@ -89,13 +100,15 @@ export class PtyRuntimeProof {
 	}
 
 	private async probeFirst(): Promise<PtyRuntimeReadiness> {
+		const started = this.now();
 		try {
 			const readiness = await this.input.probe(undefined);
 			if (readiness.ready && readiness.proven) {
 				this.proven = readiness;
+				this.input.log?.(`PTY runtime proved itself: ${probeTiming(readiness, this.now() - started)}`);
 			} else if (readiness.ready) {
 				this.provisional = readiness;
-				this.input.log?.(`PTY runtime admitted unproven: ${readiness.reason ?? "the self-check was inconclusive"}`);
+				this.input.log?.(`PTY runtime admitted unproven after ${this.now() - started} ms: ${readiness.reason ?? "the self-check was inconclusive"}`);
 				this.reprobes = 0;
 				this.scheduleReprobe();
 			}
@@ -111,6 +124,7 @@ export class PtyRuntimeProof {
 
 	private async reprobe(): Promise<void> {
 		this.reprobes += 1;
+		const started = this.now();
 		let readiness: PtyRuntimeReadiness;
 		try {
 			readiness = await this.input.probe(SELF_CHECK_EXTENDED_DEADLINE_MS);
@@ -127,7 +141,7 @@ export class PtyRuntimeProof {
 		if (readiness.ready && readiness.proven) {
 			this.proven = readiness;
 			this.provisional = null;
-			this.input.log?.("PTY runtime proved itself on the repeated self-check");
+			this.input.log?.(`PTY runtime proved itself on the repeated self-check: ${probeTiming(readiness, this.now() - started)}`);
 		} else if (readiness.ready) {
 			// Cannot happen with the extended deadline (the host refuses a late answer to it),
 			// but a probe that did not decide is not kept: the next launch probes afresh.

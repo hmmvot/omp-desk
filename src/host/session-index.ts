@@ -1083,6 +1083,13 @@ export interface SessionFileHeader {
  */
 const SESSION_TITLE_SLOT_TYPE = "title";
 
+/** One reading of a session file's header, with the file stamp it was read at. */
+export interface SessionFileHeaderReading {
+	readonly mtimeMs: number;
+	readonly size: number;
+	readonly header: SessionFileHeader | null;
+}
+
 /**
  * Read the JSONL header of an OMP session file, or `null` when the file is
  * missing, unreadable, or does not carry a session header.
@@ -1091,11 +1098,24 @@ const SESSION_TITLE_SLOT_TYPE = "title";
  * is outside that prefix needs a streaming scan, stopped at the first user entry.
  */
 export async function readSessionFileHeader(file: string): Promise<SessionFileHeader | null> {
+	return (await readSessionFileHeaderReading(file, null))?.header ?? null;
+}
+
+/**
+ * {@link readSessionFileHeader} for a reader that keeps asking: `previous` is its last reading of the
+ * same file, and a file whose `mtimeMs` and `size` still match it costs one `fstat` and returns
+ * `previous` as is. `null` is a file that could not be opened or read.
+ */
+export async function readSessionFileHeaderReading(file: string, previous: SessionFileHeaderReading | null): Promise<SessionFileHeaderReading | null> {
 	let content: string;
 	let truncated = false;
+	let stamp: { readonly mtimeMs: number; readonly size: number };
 	try {
 		const handle = await open(file, "r");
 		try {
+			const { mtimeMs, size } = await handle.stat();
+			if (previous !== null && previous.mtimeMs === mtimeMs && previous.size === size) return previous;
+			stamp = { mtimeMs, size };
 			const buffer = Buffer.allocUnsafe(SESSION_HEADER_SCAN_BYTES);
 			const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
 			truncated = bytesRead === buffer.length;
@@ -1106,6 +1126,11 @@ export async function readSessionFileHeader(file: string): Promise<SessionFileHe
 	} catch {
 		return null;
 	}
+	return { ...stamp, header: await parseSessionFileHeaderFully(file, content, truncated) };
+}
+
+/** The header of `content`, a prefix of `file`; a truncated prefix without a title is followed to the first user entry. */
+async function parseSessionFileHeaderFully(file: string, content: string, truncated: boolean): Promise<SessionFileHeader | null> {
 	const header = parseSessionFileHeader(content);
 	if (header === null || header.title !== null || header.promptTitle !== undefined || !truncated) return header;
 	// A large first prompt or preceding metadata can lie beyond the header prefix.
@@ -1449,6 +1474,13 @@ export interface SessionIndexOptions {
 	 * caller that already owns a lease for this window may reuse it.
 	 */
 	readonly claimHolder?: ClaimHolder;
+	/**
+	 * The holder's process start time while it is still being read (a PowerShell command, hundreds of
+	 * milliseconds to seconds). Until it resolves the holder is presented without one; a claim this index
+	 * writes waits for it, so what it files is verified by the start-time rule (ADR-0035), while everything
+	 * that only compares holder ids — the Sessions rows, the commands, the views — goes ahead at once.
+	 */
+	readonly claimHolderCreationTime?: Promise<string | null>;
 	/** Clock injection for tests; defaults to the system clock. */
 	readonly now?: () => Date;
 	/** Technical failure details for the extension's Output channel, separate from user-facing status. */
@@ -1641,7 +1673,9 @@ export class SessionIndex {
 	 * share the persisted owner generation, so this is what actually keeps them
 	 * from both holding one session (see `session-claim.ts`).
 	 */
-	readonly #claimHolder: ClaimHolder;
+	#claimHolder: ClaimHolder;
+	/** The holder with its start time, once that has been read; the same lease either way. */
+	readonly #claimHolderReady: Promise<ClaimHolder>;
 	/**
 	 * One tab's lifecycle operations, serialized — promotion, restore/attach,
 	 * close and removal all mutate the same per-tab facts after awaiting, and each
@@ -1696,6 +1730,12 @@ export class SessionIndex {
 		this.#now = options.now ?? (() => new Date());
 		this.#log = options.log;
 		this.#claimHolder = options.claimHolder ?? createClaimHolder();
+		this.#claimHolderReady = options.claimHolderCreationTime === undefined
+			? Promise.resolve(this.#claimHolder)
+			: options.claimHolderCreationTime.then(processCreationTime => {
+				if (processCreationTime !== null) this.#claimHolder = { ...this.#claimHolder, processCreationTime };
+				return this.#claimHolder;
+			}, () => this.#claimHolder);
 		this.#load();
 	}
 
@@ -2595,8 +2635,9 @@ export class SessionIndex {
 			try {
 				// Retry only admission before any launcher call; never replay a restore
 				// after it may have started a writer.
+				const holder = await this.#claimHolderReady;
 				claim = await retryWindowsFileOperation(
-					() => acquireClaim(this.#claimStorageDir, target, generation, this.#claimHolder),
+					() => acquireClaim(this.#claimStorageDir, target, generation, holder),
 					{ attempts: 3 },
 				);
 			} catch (error) {
@@ -2953,7 +2994,7 @@ export class SessionIndex {
 		// native is touched; a live rival holder makes the acquisition fail.
 		let claim: SessionClaim;
 		try {
-			claim = await acquireClaim(this.#claimStorageDir, identity, ownership.ownerGeneration, this.#claimHolder);
+			claim = await acquireClaim(this.#claimStorageDir, identity, ownership.ownerGeneration, await this.#claimHolderReady);
 		} catch (error) {
 			const conflict = error instanceof ClaimConflictError;
 			const detail = conflict
@@ -3128,7 +3169,7 @@ export class SessionIndex {
 		let claim: SessionClaim | null = null;
 		try {
 			if (claimBefore === null || claimBefore.holderId === this.#claimHolder.id || !(await claimHolderMayBeAlive(claimBefore))) {
-				claim = await acquireClaim(this.#claimStorageDir, identity, generation, this.#claimHolder);
+				claim = await acquireClaim(this.#claimStorageDir, identity, generation, await this.#claimHolderReady);
 			}
 		} catch (error) {
 			if (error instanceof ClaimConflictError) {
@@ -3218,7 +3259,7 @@ export class SessionIndex {
 			const generation = entry.ownership?.ownerGeneration ?? createOwnerGeneration();
 			let claim: SessionClaim;
 			try {
-				claim = await acquireClaim(this.#claimStorageDir, identity, generation, this.#claimHolder);
+				claim = await acquireClaim(this.#claimStorageDir, identity, generation, await this.#claimHolderReady);
 			} catch (error) {
 				if (error instanceof ClaimConflictError) return skipped("rival", "Another window took the session meanwhile; its own watch ends it.");
 				return { kind: "failed", detail: "The session could not be prepared to record as stopped." };
@@ -3438,12 +3479,18 @@ export class SessionIndex {
 	}
 
 	/**
-	 * This window's live holder lease. Other modules that take a claim for a tab
-	 * of this index (session deletion) MUST use it, so they adopt this window's
-	 * own claim instead of presenting themselves as a second holder.
+	 * This window's live holder lease, for comparing holder ids: it may still lack its process start
+	 * time. Other modules that take a claim for a tab of this index (session deletion, rename) MUST
+	 * use {@link claimHolderReady}, so they adopt this window's own claim instead of presenting
+	 * themselves as a second holder, and file it with the start time.
 	 */
 	get claimHolder(): ClaimHolder {
 		return this.#claimHolder;
+	}
+
+	/** The same lease once its process start time has been read (or the reading failed). */
+	claimHolderReady(): Promise<ClaimHolder> {
+		return this.#claimHolderReady;
 	}
 
 	/**
@@ -3836,7 +3883,7 @@ export class SessionIndex {
 			this.#claimStorageDir,
 			identity,
 			entry.ownership?.ownerGeneration ?? createOwnerGeneration(),
-			this.#claimHolder,
+			await this.#claimHolderReady,
 		);
 	}
 

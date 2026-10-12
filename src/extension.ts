@@ -37,7 +37,7 @@ import { relativeAge } from "./views/relative-age";
 import { normalizeSessionsGrouping, planNotificationReveal, sessionsLayoutPickItems } from "./views/session-order";
 import type { SessionsGrouping } from "./views/session-order";
 import { pinnedSessionTabId, selectionLeaveOtherWindow, selectionRestore } from "./views/session-selection";
-import { acquireClaim, createOwnerGeneration, readClaimHolder } from "./host/session-claim";
+import { acquireClaim, createClaimHolder, createOwnerGeneration, readProcessCreationTime } from "./host/session-claim";
 import { startLoopLagMonitor, trackOperation } from "./host/loop-lag";
 import type { NativeControlBootstrap, OmpCommand, OmpPackageRoot } from "./host/native-terminal";
 import {
@@ -958,13 +958,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push({ dispose: () => setOmpResolutionLog(null) });
   // The host's one thread is shared with every extension; a stall of 500 ms or more is logged with the Desk operations that overlapped it.
   context.subscriptions.push({ dispose: startLoopLagMonitor(message => log(message)) });
-  // This host's start time is a PowerShell command, hundreds of milliseconds to seconds on a busy machine. It runs beside the
-  // rest of the setup and is awaited only where the claim holder needs it: a synchronous read froze every extension in the host.
-  const ownHolder = readClaimHolder();
-  void installedNerdFonts().then(families => {
-    installedTerminalFonts = families;
-    for (const state of tabs.values()) if (state.mode === "terminal" || state.shellSlot !== null) pushTerminalFont(state);
-  });
+  // This host's start time is a PowerShell command, hundreds of milliseconds to seconds on a busy machine. It runs beside
+  // the rest of the setup; only the claims the index writes wait for it (ADR-0035), so the Sessions view, the commands
+  // and the editors appear without it. A synchronous read froze every extension in the host; an awaited one held them back.
+  const claimHolderCreationTime = readProcessCreationTime(process.pid);
   // The report's window timeline starts here: every window-level measurement is relative to
   // the extension host's own activation.
   diagnostics.beginSubject(WINDOW_DIAGNOSTIC_SUBJECT, { label: "window", kind: "window" });
@@ -985,7 +982,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // catalog never presents itself as "no folder is registered" while the folders the
   // user already had are still being imported.
   void vscode.commands.executeCommand("setContext", CATALOG_PENDING_CONTEXT, true);
-  const claimHolder = { ...await ownHolder, windowUri: owningWindowUri()?.toString() ?? null };
+  const claimHolder = { ...createClaimHolder(), windowUri: owningWindowUri()?.toString() ?? null };
   const index = new SessionIndex({
     store: catalog,
     // This window's own observations — its availability reads, the reply its panels
@@ -995,6 +992,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     localStore: context.workspaceState,
     claimStorageDir: context.globalStorageUri.fsPath,
     claimHolder,
+    claimHolderCreationTime,
     log: message => log(message),
   });
   // Protocol activation only reveals an existing handle; it never acquires or starts work.
@@ -13166,7 +13164,24 @@ function terminalFontMessage(resource?: vscode.Uri): GuestTerminalFontMessage {
 }
 
 function pushTerminalFont(state: TabState, resource = terminalFontResource(state)): void {
+  readInstalledTerminalFonts();
   void state.panel?.webview.postMessage(terminalFontMessage(resource));
+}
+
+let installedTerminalFontsRead: Promise<void> | null = null;
+
+/**
+ * Read the installed Nerd Font families once, when the first terminal pane asks for its font, and push the
+ * answer to every terminal pane then open. The read is a PowerShell command that loads System.Drawing,
+ * a second or more of CPU; at activation it competed with the start-time read and with VS Code's own
+ * startup in every window, for panes that most windows never open.
+ */
+function readInstalledTerminalFonts(): void {
+  installedTerminalFontsRead ??= installedNerdFonts().then(families => {
+    if (families.length === 0) return;
+    installedTerminalFonts = families;
+    for (const state of tabs.values()) if (state.mode === "terminal" || state.shellSlot !== null) pushTerminalFont(state);
+  });
 }
 
 /**
@@ -14092,7 +14107,7 @@ async function renameStoppedSession(
   const ownerGeneration = entry.ownership?.ownerGeneration ?? createOwnerGeneration();
   let claim;
   try {
-    claim = await acquireClaim(context.globalStorageUri.fsPath, file, ownerGeneration, index.claimHolder);
+    claim = await acquireClaim(context.globalStorageUri.fsPath, file, ownerGeneration, await index.claimHolderReady());
   } catch (error) {
     log(`rename claim failed: ${messageOf(error)}`);
     showError("This session could not be opened for renaming. Refresh Sessions and try again; see OMP Desk output for details.");
