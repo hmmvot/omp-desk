@@ -103,7 +103,7 @@ export type KillSelection =
 export type KillReconcile =
 	/** A session row: its host record, claim and stopped intent, for exactly the captured incarnation (`reconcileSession`). */
 	| { readonly kind: "session"; readonly tabId: string; readonly captured: CapturedHost }
-	/** A folder shell, or a mapping no row records: the shell slot and the broker slot. */
+	/** A folder shell or a mapping no row records: only the broker-slot mapping of the broker shown gone is forgotten; a shell's recovery record stays for its owner's watch. */
 	| { readonly kind: "slot"; readonly slot: string }
 	| { readonly kind: "none" };
 
