@@ -161,7 +161,7 @@ export const harness = {
   startConversation, handleTerminalGuestMessage, startNativeWatch, handleNativeHostExited, hostControlAttempts,
   pushSessionView, handleShellEditorClosed,
   bindConversationIdentity, retryPendingIdentity, SessionTreeProvider,
-  terminalFontMessage, revealDesktopNotification, revealActiveSession, refreshLauncher, launcherFacts, notifierFor, forgetTurnActivity,
+  terminalFontMessage, revealDesktopNotification, revealActiveSession, releaseSelectionFromOtherWindow, refreshLauncher, launcherFacts, notifierFor, forgetTurnActivity,
   copyActiveTerminalScreen, handleGuestMessage, activateNativeEditor, postPanelAction,
   handleBridgeRequest, bridgeDocumentEligible,
   runChatCommand,
@@ -385,6 +385,7 @@ interface Harness {
   clipboardWrites(): readonly string[];
   revealDesktopNotification(...args: unknown[]): Promise<void>;
   revealActiveSession(index: SessionIndex): Promise<void>;
+  releaseSelectionFromOtherWindow(index: SessionIndex): void;
   refreshLauncher(options?: { ownership?: boolean }): void;
   launcherFacts(tabId: string): SessionLauncherFacts;
   notifierFor(index: unknown): { notify(tabId: string, notice: TurnNotice): void };
@@ -3303,6 +3304,70 @@ describe("same-editor Chat and native Terminal actions", () => {
 			assert.equal(revealed.length, 3, "the expansion was a one-shot answer to the activation");
 		} finally {
 			revealGate.resolve();
+			served.dispose();
+			provider.dispose();
+			harness.notificationTree(undefined, undefined);
+			f.chat.dispose();
+			await f.index.closeSession(f.row.tabId, { confirmedStopped: true });
+		}
+	});
+
+	it("takes the selection off a row another window runs, once a click switched there or this window regained focus, and leaves a row the user chose here", async () => {
+		const f = await fixture(true);
+		const theirs = await f.index.createDraft({ cwd: f.directory });
+		const chosen = await f.index.createDraft({ cwd: f.directory });
+		await f.index.setActiveTab(f.row.tabId);
+		const folders = [{ id: "folder:owned", path: f.directory, collapsed: false, pinned: true, open: false, openHere: false, openElsewhere: false }];
+		const provider = new harness.SessionTreeProvider({
+			folders: () => folders, entries: () => f.index.list(), activeTabId: () => f.index.activeTabId,
+			facts: tabId => tabId === f.row.tabId ? { open: true, running: true, outcome: null, activity: null } : { open: false, running: false, outcome: null, activity: null },
+			runtimeIdentity: () => null,
+			// Another window holds one of the sessions; this window runs the others.
+			observeOwnership: async tabId => ({ ownershipChecked: true, heldElsewhere: tabId === theirs.tabId }),
+		});
+		const revealed: string[] = [];
+		const view: { visible: boolean; selection: Array<{ tabId: string }>; reveal(item: { tabId: string }): Promise<void> } = {
+			visible: true, selection: [],
+			reveal: async item => { revealed.push(item.tabId); view.selection = [item]; },
+		};
+		harness.notificationTree(provider, view);
+		const served = provider.onDidServeTree(() => { void harness.revealActiveSession(f.index); });
+		try {
+			await harness.revealActiveSession(f.index);
+			const roots = provider.getChildren();
+			provider.getChildren(roots[0]);
+			await nextTurn();
+			assert.deepEqual(revealed, [f.row.tabId], "this window's own session is selected");
+			for (let turns = 0; turns < 20 && provider.displayedState(theirs.tabId) !== "otherWindow"; turns++) await nextTurn();
+			assert.equal(provider.displayedState(theirs.tabId), "otherWindow", "the row is shown as another window's");
+
+			// The click on the other window's row selected it while it switched there; nothing about this window's editors moves it back.
+			// Any later reveal (every launcher refresh asks for one) finds the pinned row already "served" and must still not leave the selection there.
+			view.selection = [(await provider.itemFor(theirs.tabId))!];
+			await harness.revealActiveSession(f.index);
+			assert.deepEqual(revealed, [f.row.tabId, f.row.tabId], "the selection is put back on this window's own session");
+			assert.deepEqual(view.selection.map(item => item.tabId), [f.row.tabId]);
+
+			// So does the release a switch click and a regained window focus ask for.
+			view.selection = [(await provider.itemFor(theirs.tabId))!];
+			harness.releaseSelectionFromOtherWindow(f.index);
+			await nextTurn(); await nextTurn();
+			assert.deepEqual(revealed, [f.row.tabId, f.row.tabId, f.row.tabId]);
+			assert.deepEqual(view.selection.map(item => item.tabId), [f.row.tabId]);
+
+			// With the selection on the pinned row nothing is selected again.
+			harness.releaseSelectionFromOtherWindow(f.index);
+			await nextTurn(); await nextTurn();
+			assert.equal(revealed.length, 3);
+
+			// A row this window can act on, selected by the user, is theirs to keep.
+			view.selection = [(await provider.itemFor(chosen.tabId))!];
+			harness.releaseSelectionFromOtherWindow(f.index);
+			await harness.revealActiveSession(f.index);
+			await nextTurn(); await nextTurn();
+			assert.equal(revealed.length, 3);
+			assert.deepEqual(view.selection.map(item => item.tabId), [chosen.tabId]);
+		} finally {
 			served.dispose();
 			provider.dispose();
 			harness.notificationTree(undefined, undefined);

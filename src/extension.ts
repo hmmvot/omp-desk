@@ -35,7 +35,7 @@ import { SessionClickRecognizer } from "./views/session-click";
 import { relativeAge } from "./views/relative-age";
 import { normalizeSessionsGrouping, planNotificationReveal, sessionsLayoutPickItems } from "./views/session-order";
 import type { SessionsGrouping } from "./views/session-order";
-import { pinnedSessionTabId, selectionRestore } from "./views/session-selection";
+import { pinnedSessionTabId, selectionLeaveOtherWindow, selectionRestore } from "./views/session-selection";
 import { acquireClaim, createOwnerGeneration, readClaimHolder } from "./host/session-claim";
 import { startLoopLagMonitor, trackOperation } from "./host/loop-lag";
 import type { NativeControlBootstrap, OmpCommand } from "./host/native-terminal";
@@ -1349,6 +1349,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       // Focus is the recovery point for a notification this window missed.
       void adoptCatalogChanges(index, folders).catch(error => log(`catalog: the newest revision could not be adopted: ${messageOf(error)}`));
       refreshLauncher({ ownership: true });
+      // A row another window runs may have been left selected by a click that switched there; this window selects only its own session.
+      releaseSelectionFromOtherWindow(index);
       refreshWindowRegistry();
       // Being brought to the front is how a switch request reaches a window whose directory event was dropped.
       windowRequestWatch?.rescan();
@@ -1885,9 +1887,18 @@ async function heldByAnotherWindow(index: SessionIndex, tabId: string): Promise<
  * single-folder URI, which focuses the window that has it. `forceNewWindow: true` is
  * deliberate: it still focuses an existing window for that URI but never replaces this window
  * when the owner has just closed. A message is shown only when the switch is impossible or
- * did not complete, and says why.
+ * did not complete, and says why. The click that asked for it selected the row this window does not run,
+ * so however the switch ends the selection goes back to this window's own session.
  */
 async function switchToSessionWindow(index: SessionIndex, argument: unknown): Promise<void> {
+  try {
+    await requestSessionWindowSwitch(index, argument);
+  } finally {
+    releaseSelectionFromOtherWindow(index);
+  }
+}
+
+async function requestSessionWindowSwitch(index: SessionIndex, argument: unknown): Promise<void> {
   const tabId = tabIdArgument(argument);
   if (tabId === null) return;
   const startedAt = Date.now();
@@ -11207,7 +11218,8 @@ function revealActiveSession(index: SessionIndex): Promise<void> {
       const reserved = provider.beginReveal(tabId, { expand });
       if (reserved === undefined) return;
       try {
-        if (!expand && launcherSelectedPath === reserved.pathKey) continue;
+        // A selection that rests on a row another window runs is never "already there": that row is not this window's session.
+        if (!expand && launcherSelectedPath === reserved.pathKey && !selectionRestsOnOtherWindow(tabId)) continue;
         await view.reveal(reserved.item, { select: true, focus: false, expand: true });
         if ((pinnedSessionTab(index) ?? sessionsViewActiveTab(index)) === tabId) {
           launcherSelectedPath = reserved.pathKey;
@@ -11222,6 +11234,27 @@ function revealActiveSession(index: SessionIndex): Promise<void> {
   };
   launcherRevealInFlight = reveal().finally(() => { launcherRevealInFlight = null; });
   return launcherRevealInFlight;
+}
+
+/**
+ * Whether the Sessions selection holds only rows another window runs, with `target` as the session this window
+ * selects. A click on such a row selects it while it switches to that window, and the selection then stays there
+ * after the user comes back; nothing else about this window's own editors would ever move it.
+ */
+function selectionRestsOnOtherWindow(target: string): boolean {
+  const provider = launcherProvider;
+  const view = launcherView;
+  if (provider === undefined || view === undefined) return false;
+  const selected = (view.selection ?? []).map(item => item instanceof SessionTreeItem ? item.tabId : null);
+  return selectionLeaveOtherWindow(target, selected, tabId => provider.displayedState(tabId) === "otherWindow") !== null;
+}
+
+/** Put the selection back on this window's own session when it rests on a row another window runs. */
+function releaseSelectionFromOtherWindow(index: SessionIndex): void {
+  const target = pinnedSessionTab(index) ?? sessionsViewActiveTab(index);
+  if (target === null || launcherProvider?.sessionRowsShown() !== true || !selectionRestsOnOtherWindow(target)) return;
+  launcherSelectedPath = null;
+  void revealActiveSession(index);
 }
 
 /**

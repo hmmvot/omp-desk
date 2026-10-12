@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { pinnedSessionTabId, selectionRestore, type EditorFacts } from "./session-selection.ts";
+import { pinnedSessionTabId, selectionLeaveOtherWindow, selectionRestore, type EditorFacts } from "./session-selection.ts";
 
 const session = (tabId: string | null): EditorFacts => ({ tabId, shell: false });
 const shown = (...tabIds: string[]) => (tabId: string) => tabIds.includes(tabId);
@@ -42,5 +42,26 @@ describe("selection restore", () => {
 
 	it("follows the viewed session: once another editor is viewed it is the one restored", () => {
 		assert.equal(selectionRestore(pinnedSessionTabId([session("tab:b"), session("tab:a")], shown("tab:a", "tab:b")), []), "tab:b");
+	});
+});
+
+describe("selection resting on another window's row", () => {
+	const elsewhere = (...tabIds: string[]) => (tabId: string) => tabIds.includes(tabId);
+
+	it("gives way to this window's own session when only rows another window holds are selected", () => {
+		assert.equal(selectionLeaveOtherWindow("tab:own", ["tab:theirs"], elsewhere("tab:theirs")), "tab:own");
+		assert.equal(selectionLeaveOtherWindow("tab:own", ["tab:theirs", "tab:also"], elsewhere("tab:theirs", "tab:also")), "tab:own");
+	});
+
+	it("leaves a selection the user made of a row this window can act on, and one that includes a non-session row", () => {
+		assert.equal(selectionLeaveOtherWindow("tab:own", ["tab:stopped"], elsewhere("tab:theirs")), null);
+		assert.equal(selectionLeaveOtherWindow("tab:own", ["tab:own"], elsewhere("tab:theirs")), null);
+		assert.equal(selectionLeaveOtherWindow("tab:own", ["tab:theirs", "tab:stopped"], elsewhere("tab:theirs")), null);
+		assert.equal(selectionLeaveOtherWindow("tab:own", ["tab:theirs", null], elsewhere("tab:theirs")), null);
+	});
+
+	it("has nothing to put back without a session of its own or without a selection", () => {
+		assert.equal(selectionLeaveOtherWindow(null, ["tab:theirs"], elsewhere("tab:theirs")), null);
+		assert.equal(selectionLeaveOtherWindow("tab:own", [], elsewhere("tab:theirs")), null);
 	});
 });
