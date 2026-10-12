@@ -69,8 +69,12 @@ describe("window requests", () => {
 	}
 
 	// The platform file watcher is the thing under test; its events arrive when they arrive.
-	async function until(predicate: () => boolean): Promise<void> {
-		for (let attempt = 0; attempt < 200 && !predicate(); attempt++) await new Promise(resolve => setTimeout(resolve, 25));
+	async function until(predicate: () => boolean, options: { readonly attempts?: number; readonly rescan?: RequestWatch } = {}): Promise<void> {
+		for (let attempt = 0; attempt < (options.attempts ?? 200) && !predicate(); attempt++) {
+			// A watcher leaves what overflows its queue on disk until the next scan; a window does that scan when it gains focus.
+			options.rescan?.rescan();
+			await new Promise(resolve => setTimeout(resolve, 25));
+		}
 		assert.ok(predicate(), "the awaited condition never came true");
 	}
 
@@ -179,13 +183,17 @@ describe("window requests", () => {
 	});
 
 	it("never serves a request twice for as long as it could still be acted on, even after many others completed", async () => {
-		const target = owner("holder-b");
-		const first = await post("holder-b", "tab:first");
+		// A request older than its lifetime is dropped unserved, and 300 files outlast that on a loaded machine: both sides read one frozen clock.
+		const frozen = Date.now();
+		const clock = (): number => frozen;
+		const target = owner("holder-b", SELECTED, clock);
+		const first = await post("holder-b", "tab:first", clock);
 		await until(() => target.served.length === 1);
 		const name = `holder-b.${first}.request`;
-		const original = { version: 1, id: first, to: "holder-b", from: "holder-a", tabId: "tab:first", incarnation: "inc-1", binding: null, createdAt: new Date().toISOString() };
-		for (let at = 0; at < 300; at++) await post("holder-b", `tab:${at}`);
-		await until(() => target.served.length === 301);
+		const original = { version: 1, id: first, to: "holder-b", from: "holder-a", tabId: "tab:first", incarnation: "inc-1", binding: null, createdAt: new Date(frozen).toISOString() };
+		for (let at = 0; at < 300; at++) await post("holder-b", `tab:${at}`, clock);
+		// Hundreds of files can outrun the watcher on a loaded machine: it takes the names it can queue and leaves the rest for a scan, so the wait scans.
+		await until(() => target.served.length === 301, { attempts: 2_400, rescan: target.watch });
 		// The first request's cleanup "failed": its file is back, and it is not served again.
 		fs.writeFileSync(path.join(directory, name), `${JSON.stringify(original)}\n`);
 		target.watch.rescan();
@@ -641,11 +649,13 @@ describe("pending launches for a window that is still starting", () => {
 
 	it("bounds the work a held launch and repeated scans can pile up, and serves every launch for its keys in the end", async () => {
 		const gate = Promise.withResolvers<void>();
+		const entered = Promise.withResolvers<void>();
 		let active = 0;
 		let peak = 0;
 		const served: string[] = [];
 		const watch = startPendingLaunchWatch(storage, "holder-new", () => [KEY], async request => {
 			peak = Math.max(peak, ++active);
+			entered.resolve();
 			await gate.promise;
 			active--;
 			served.push(request.id);
@@ -655,9 +665,14 @@ describe("pending launches for a window that is still starting", () => {
 		fs.mkdirSync(directory, { recursive: true });
 		for (let at = 0; at < 40; at++) fs.writeFileSync(path.join(directory, `${OTHER_KEY}.other-${at}.pending`), "{}");
 		const ids = await Promise.all(Array.from({ length: 5 }, () => postPendingLaunch(storage, { from: "holder-a", key: KEY, workspace: UNITY, launch: NEW })));
+		// Hold until the first launch is actually being served: on a slow machine the first scan can take longer than any fixed wait,
+		// and a peak of 0 would then say nothing about admission. Only after that do the repeated scans have something to pile up on.
+		await entered.promise;
 		for (let at = 0; at < 20; at++) watch.rescan();
+		// A negative claim ("nothing else is admitted") has no event to await: a bounded window lets the repeated scans run. A slow scan only makes this less strict, never a false failure.
 		await new Promise(resolve => setTimeout(resolve, 100));
 		assert.equal(peak, 1, "launches are admitted one at a time");
+		assert.equal(fs.readdirSync(directory).filter(name => name.endsWith(".claimed")).length, 1, "only the held launch is claimed");
 		gate.resolve();
 		for (const id of ids) assert.equal(await awaitPendingLaunchAnswer(storage, id, { timeoutMs: 5_000, pollMs: 20 }), "served");
 		assert.deepEqual([...served].sort(), [...ids].sort(), "each launch once, though the scans repeated");

@@ -43,6 +43,13 @@ const WINDOWS_ONLY = process.platform !== "win32" ? "the process identity readin
 const BUILT = existsSync(path.join(EXTENSION_ROOT, "out", "pty", "pty-broker.js"));
 const SKIP = WINDOWS_ONLY || (BUILT ? false : "the packaged broker tree is absent: run `node esbuild.mjs --pty` first");
 
+/**
+ * The bound of one test, which launches its own detached broker (seconds each, many more on a loaded
+ * runner). A bound on the whole suite would instead add the tests up: ten sequential launches can
+ * exceed any fixed total on a slow machine with every test healthy, and cancel the last one mid-run.
+ */
+const TEST_TIMEOUT_MS = 90_000;
+
 /** The stand-in for `omp --mode rpc-ui`. */
 const RPC_CHILD_SCRIPT = String.raw`
 const out = value => process.stdout.write(JSON.stringify(value) + "\n");
@@ -215,13 +222,13 @@ after(async () => {
 	await rm(storage, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
 });
 
-describe("managed-rpc broker end to end", { skip: SKIP, timeout: 120_000 }, () => {
+describe("managed-rpc broker end to end", { skip: SKIP }, () => {
 	before(async () => {
 		const readiness = await client.ready();
 		assert.equal(readiness.ready, true, readiness.reason ?? "not ready");
 	});
 
-	it("runs a pipe child, negotiates protocol 2 itself, and shows neither `ready` nor the negotiation as lines", async () => {
+	it("runs a pipe child, negotiates protocol 2 itself, and shows neither `ready` nor the negotiation as lines", { timeout: TEST_TIMEOUT_MS }, async () => {
 		const slot = nextSlot();
 		const handle = await launchRpc(slot);
 		const seen = watch(handle);
@@ -245,7 +252,7 @@ describe("managed-rpc broker end to end", { skip: SKIP, timeout: 120_000 }, () =
 		assert.match(status.nativeCreationTime ?? "", /^[1-9][0-9]{9,19}$/, "the child's kernel identity is recorded like any child's");
 	});
 
-	it("carries a quote-dense 1 MiB line whole in both directions", async () => {
+	it("carries a quote-dense 1 MiB line whole in both directions", { timeout: TEST_TIMEOUT_MS }, async () => {
 		const handle = await launchRpc();
 		const seen = watch(handle);
 		await handle.attach({ sinceSeq: 0 });
@@ -260,7 +267,7 @@ describe("managed-rpc broker end to end", { skip: SKIP, timeout: 120_000 }, () =
 		assert.ok(back && back.text.length > 2 * 1024 * 1024);
 	});
 
-	it("replays from the last seq: only what was missed, an open message as its newest update", async () => {
+	it("replays from the last seq: only what was missed, an open message as its newest update", { timeout: TEST_TIMEOUT_MS }, async () => {
 		const slot = nextSlot();
 		const first = await launchRpc(slot);
 		const firstSeen = watch(first);
@@ -312,7 +319,7 @@ describe("managed-rpc broker end to end", { skip: SKIP, timeout: 120_000 }, () =
 		);
 	});
 
-	it("keeps an unanswered dialog across every reattach until it is answered", async () => {
+	it("keeps an unanswered dialog across every reattach until it is answered", { timeout: TEST_TIMEOUT_MS }, async () => {
 		const slot = nextSlot();
 		const first = await launchRpc(slot);
 		const firstSeen = watch(first);
@@ -342,7 +349,7 @@ describe("managed-rpc broker end to end", { skip: SKIP, timeout: 120_000 }, () =
 		);
 	});
 
-	it("lets only the input owner write, and refuses a second window instead of interleaving", async () => {
+	it("lets only the input owner write, and refuses a second window instead of interleaving", { timeout: TEST_TIMEOUT_MS }, async () => {
 		const slot = nextSlot();
 		const owner = await launchRpc(slot);
 		await owner.attach({ sinceSeq: 0 });
@@ -364,7 +371,7 @@ describe("managed-rpc broker end to end", { skip: SKIP, timeout: 120_000 }, () =
 		);
 	});
 
-	it("reports input ownership live: takeover, release and disconnect reach the handle at once", async () => {
+	it("reports input ownership live: takeover, release and disconnect reach the handle at once", { timeout: TEST_TIMEOUT_MS }, async () => {
 		const slot = nextSlot();
 		const first = await launchRpc(slot);
 		const firstSeen = watch(first);
@@ -395,7 +402,7 @@ describe("managed-rpc broker end to end", { skip: SKIP, timeout: 120_000 }, () =
 		assert.equal(secondSeen.events.some(event => event.type === "closed"), true);
 	});
 
-	it("pins a host tool call until its result is written, whatever windows come and go", async () => {
+	it("pins a host tool call until its result is written, whatever windows come and go", { timeout: TEST_TIMEOUT_MS }, async () => {
 		const slot = nextSlot();
 		const first = await launchRpc(slot);
 		const firstSeen = watch(first);
@@ -432,7 +439,7 @@ describe("managed-rpc broker end to end", { skip: SKIP, timeout: 120_000 }, () =
 		);
 	});
 
-	it("releases a host tool call OMP cancels while no window is attached", async () => {
+	it("releases a host tool call OMP cancels while no window is attached", { timeout: TEST_TIMEOUT_MS }, async () => {
 		const slot = nextSlot();
 		const first = await launchRpc(slot);
 		const firstSeen = watch(first);
@@ -452,7 +459,7 @@ describe("managed-rpc broker end to end", { skip: SKIP, timeout: 120_000 }, () =
 		assert.equal(secondSeen.lines().some(line => line.json.type === "host_tool_call"), false, "the cancelled call is gone from the replay");
 	});
 
-	it("refuses each kind's requests on the other kind's broker", async () => {
+	it("refuses each kind's requests on the other kind's broker", { timeout: TEST_TIMEOUT_MS }, async () => {
 		const rpcSlot = nextSlot();
 		const rpc = await launchRpc(rpcSlot);
 		const terminalSlot = `tab:rpc-e2e-terminal-${counter}`;
@@ -502,7 +509,7 @@ describe("managed-rpc broker end to end", { skip: SKIP, timeout: 120_000 }, () =
 		}
 	});
 
-	it("stops as a stdin close: the child says goodbye and exits, and the channel reports `stopped`", async () => {
+	it("stops as a stdin close: the child says goodbye and exits, and the channel reports `stopped`", { timeout: TEST_TIMEOUT_MS }, async () => {
 		const handle = await launchRpc();
 		const seen = watch(handle);
 		await handle.attach({ sinceSeq: 0 });
