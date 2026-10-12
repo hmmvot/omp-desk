@@ -3,14 +3,15 @@ import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { claudeRegistryBindsFolder } from "./inventory-guards.ts";
 import { SettingsRefusal, valueAt } from "../host/omp-settings-core.ts";
-import { PROTECTED_EXTENSION_NAMES } from "../host/inventory/inventory-model.ts";
+import { PROTECTED_EXTENSION_NAMES, REASONS_PER_VIEW } from "../host/inventory/inventory-model.ts";
 import { isRecord as record } from "../guards";
 import { BUILTIN_SWITCHES, SHARED_SWITCH_NOTES } from "./inventory-switches.ts";
 import { excusedEntryWarnings, foldMcpServer } from "./inventory-mcp.ts";
 import type { McpEntry } from "./inventory-mcp.ts";
 import { globalConfigFile, readConfig, writeConfig } from "./config-transaction.ts";
 import type { ConfigEdit, ConfigRecord } from "../host/omp-settings-core.ts";
-import type { InventoryRow, InventorySnapshot, RowToggle, ViewKind } from "../host/inventory/inventory-model.ts";
+import { OMISSION, projectFailure, projectWarning } from "./inventory-reasons.ts";
+import type { IncompleteReason, InventoryRow, InventorySnapshot, RowToggle, ViewKind } from "../host/inventory/inventory-model.ts";
 
 /**
  * Bun worker for ADR-0061: reads OMP's own extension inventory (the TUI dashboard's
@@ -54,6 +55,7 @@ interface Natives {
   bridge: { createMCPToolName(server: string, tool: string): string };
   claudePaths: { resolveClaudePaths(): { configDir: string } };
   transport: { inferMcpTransport(server: unknown): string };
+  mcp: { isSameMCPConnection(left: unknown, right: unknown): boolean };
 }
 
 /** The selected OMP install is runtime-specific and must not be bundled with the extension. */
@@ -65,7 +67,7 @@ async function load(root: string, file: string, names: readonly string[]): Promi
 }
 async function natives(packageRoot: string): Promise<Natives> {
   const scope = path.dirname(packageRoot);
-  const [claudePaths, dirs, settings, discovery, extSettings, state, skills, loader, helpers, tools, registry, plugins, pluginLoader, writer, bridge, transport] = await Promise.all([
+  const [claudePaths, dirs, settings, discovery, extSettings, state, skills, loader, helpers, tools, registry, plugins, pluginLoader, writer, bridge, transport, mcp] = await Promise.all([
     load(packageRoot, "config/claude-paths.ts", ["resolveClaudePaths"]),
     load(path.join(scope, "pi-utils"), "dirs.ts", ["setProfile", "getAgentDir", "getMCPConfigPath"]),
     load(packageRoot, "config/settings.ts", ["Settings"]),
@@ -82,17 +84,14 @@ async function natives(packageRoot: string): Promise<Natives> {
     load(packageRoot, "mcp/config-writer.ts", ["setServerDisabled", "setServerForceEnabled", "readDisabledServers", "readEnabledServers"]),
     load(packageRoot, "mcp/tool-bridge.ts", ["createMCPToolName"]),
     load(path.join(scope, "pi-tui"), "overlays/extensions/mcp-runtime.ts", ["inferMcpTransport"]),
+    load(packageRoot, "capability/mcp.ts", ["isSameMCPConnection"]),
   ]);
-  return { claudePaths, dirs, settings, discovery, extSettings, state, skills, loader, helpers, tools, registry, plugins, pluginLoader, writer, bridge, transport } as unknown as Natives;
+  return { claudePaths, dirs, settings, discovery, extSettings, state, skills, loader, helpers, tools, registry, plugins, pluginLoader, writer, bridge, transport, mcp } as unknown as Natives;
 }
 
 const TEXT_LIMIT = 500;
 const text = (value: unknown): string | null => typeof value === "string" && value.trim().length > 0 ? value.trim().slice(0, TEXT_LIMIT) : null;
 const samePath = (a: string, b: string): boolean => path.normalize(a).toLowerCase() === path.normalize(b).toLowerCase();
-
-/** Warnings that mean a source was skipped or unreadable, not a naming notice: such a list can be incomplete. */
-// (A missing optional file such as `<ancestor>/.vscode/mcp.json` is reported as "Failed to read" and is not an omission.)
-const OMISSION = /Failed to (load|parse)|Invalid (item|plugin|JSON|config)|no installPath/i;
 
 /** Files that SELECT project-level plugin rows or project settings without the rows themselves living in a project folder. */
 function projectMarkers(cwd: string, claudeConfigDir: string): string[] {
@@ -152,9 +151,22 @@ async function collect(request: WorkerRequest, n: Natives): Promise<Collected> {
     const projectDisabled = overridden ? (project.disabledExtensions as unknown[]).filter((id): id is string => typeof id === "string") : [];
     const extensions = await n.state.loadAllExtensions(request.cwd, disabled);
     const incomplete = new Set<ViewKind>();
+    const incompleteReasons: IncompleteReason[] = [];
+    const overflow = new Map<ViewKind, number>();
+    /** A view's list may be incomplete; `reason` is already projected (inventory-reasons.ts): the failed source's path and category, never OMP's raw payload. */
+    const fail = (view: ViewKind, reason: string): void => {
+      incomplete.add(view);
+      const listed = incompleteReasons.filter(known => known.view === view);
+      if (listed.some(known => known.reason === reason)) return;
+      // The last slot of a view is the overflow marker, so the receipt never claims more than it holds.
+      if (listed.length < REASONS_PER_VIEW - 1) incompleteReasons.push({ view, reason });
+      else overflow.set(view, (overflow.get(view) ?? 0) + 1);
+    };
     const rows: InventoryRow[] = [];
     const mcpEntryDisabled = new Set<string>();
     const mcpEntries = new Map<string, McpEntry[]>();
+    /** Every MCP entry in the order OMP's loader returned them (provider priority, then file order): the order dedupe walks. */
+    const mcpOrder: McpEntry[] = [];
     const mcpExtensions = new Map<McpEntry, NativeExtension>();
     const idToggle = (ext: NativeExtension): RowToggle => {
       const toggle = disabledToggle(ext, "disabledExtensions");
@@ -164,7 +176,7 @@ async function collect(request: WorkerRequest, n: Natives): Promise<Collected> {
     for (const ext of extensions) {
       const source = { provider: String(ext.source.provider), providerName: String(ext.source.providerName), level: ext.source.level === "project" ? "project" as const : ext.source.level === "native" ? "native" as const : "user" as const };
       const raw = record(ext.raw) ? ext.raw : {};
-      const common = { name: ext.name, path: text(ext.path), ...source, state: ext.state, shadowed: ext.state === "shadowed" || raw._shadowed === true,
+      const common = { name: ext.name, path: text(ext.path), ...source, state: ext.state, shadowed: ext.state === "shadowed" || raw._shadowed === true, shadowedBy: null,
         disabledReason: ext.disabledReason ?? null, toolPrefix: null, detail: null as string | null, runtimeName: null as string | null, sources: [] as const };
       if (ext.kind === "skill") { kinds.skill++; rows.push({ ...common, kind: "skill", description: text(ext.description), toggle: idToggle(ext) }); }
       else if (ext.kind === "tool") { kinds.tool++; rows.push({ ...common, kind: "custom-tool", description: text(ext.description), toggle: idToggle(ext) }); }
@@ -180,6 +192,7 @@ async function collect(request: WorkerRequest, n: Natives): Promise<Collected> {
         const entries = mcpEntries.get(ext.name);
         if (entries === undefined) mcpEntries.set(ext.name, [entry]); else entries.push(entry);
         mcpExtensions.set(entry, ext);
+        mcpOrder.push(entry);
       }
     }
     // One row per server name: OMP's highest-priority entry owns it and nothing is merged (inventory-mcp.ts).
@@ -189,6 +202,15 @@ async function collect(request: WorkerRequest, n: Natives): Promise<Collected> {
         toolPrefix: name => { const minted = n.bridge.createMCPToolName(name, "x"); return minted.endsWith("_x") ? minted.slice(0, -1) : null; },
         switchOf: owner => disabledToggle(mcpExtensions.get(owner)!, "mcp"),
         excludedByProject: projectDisabled.includes(`mcp:${entries[0]!.name}`),
+        // The loader's equivalence shadow: the first earlier, surviving entry of another name with the same connection (capability/index.ts dedupe).
+        shadowedBy: owner => {
+          const own = mcpExtensions.get(owner);
+          for (const earlier of mcpOrder.slice(0, mcpOrder.indexOf(owner))) {
+            if (earlier.name === owner.name || earlier.shadowed || disabled.includes(`mcp:${earlier.name}`)) continue;
+            if (own !== undefined && n.mcp.isSameMCPConnection(mcpExtensions.get(earlier)?.raw, own.raw)) return earlier.name;
+          }
+          return null;
+        },
       });
       if (folded.ownerDisabledByFlag) mcpEntryDisabled.add(entries[0]!.name);
       rows.push(folded.row);
@@ -201,9 +223,9 @@ async function collect(request: WorkerRequest, n: Natives): Promise<Collected> {
         const result = await n.discovery.loadCapability(capability, { cwd: request.cwd, includeDisabled: true, disabledExtensions: disabled, ...(capability === "extension-modules" ? { providers: ["native"] } : {}) });
         // An MCP entry that only sets `enabled: false` is a by-name switch; OMP's validator still calls it an invalid item.
         const warnings = capability === "mcps" ? excusedEntryWarnings(result.warnings, [...mcpEntries.values()].flat(), samePath) : result.warnings;
-        const failed = warnings.some(warning => OMISSION.test(warning));
-        if (failed || result.all.length !== expected[capability]) incomplete.add(view);
-      } catch { incomplete.add(view); }
+        for (const warning of warnings) if (OMISSION.test(warning)) fail(view, projectWarning(warning));
+        if (result.all.length !== expected[capability]) fail(view, `OMP's ${capability} loader returned ${result.all.length} entries, the dashboard loader ${expected[capability]}`);
+      } catch (error) { fail(view, projectFailure(`OMP's ${capability} loader`, error)); }
     }));
 
     // OMP's effective skill set (custom directories, collision renames, source eligibility) names each skill as a session
@@ -215,7 +237,10 @@ async function collect(request: WorkerRequest, n: Natives): Promise<Collected> {
       const base = { ...skillOptions, ...(customDirectories === undefined ? {} : { customDirectories }), cwd: request.cwd,
         extensionRoots: { explicit: [], mode: "merge", configured: n.extSettings.cfgExtensions.get(settings), configuredLevel: settings.extensionsSourceLevel() } };
       const [effective, everything] = await Promise.all([n.skills.loadSkills({ ...base, disabledExtensions: disabled }), n.skills.loadSkills({ ...base, disabledExtensions: [] })]);
-      if ([...effective.warnings, ...everything.warnings].some(warning => OMISSION.test(JSON.stringify(warning)))) incomplete.add("skills");
+      for (const warning of [...effective.warnings, ...everything.warnings]) {
+        const line = typeof warning === "string" ? warning : record(warning) && typeof warning.message === "string" ? warning.message : JSON.stringify(warning);
+        if (OMISSION.test(line)) fail("skills", projectWarning(line));
+      }
       const runtime = [...effective.skills];
       const nameOf = (file: string): string | null => { const at = runtime.findIndex(skill => samePath(skill.filePath, file)); return at < 0 ? null : runtime.splice(at, 1)[0]!.name; };
       for (const row of rows) {
@@ -227,11 +252,11 @@ async function collect(request: WorkerRequest, n: Natives): Promise<Collected> {
         if (listed.has(path.normalize(skill.filePath).toLowerCase())) continue;
         const off = disabled.includes(`skill:${skill.name}`);
         rows.push({ kind: "skill", name: skill.name, description: text(skill.description), path: text(skill.filePath), provider: skill._source?.provider ?? "custom",
-          providerName: skill._source?.providerName ?? "Custom directory", level: skill._source?.level === "project" ? "project" : "user", state: off ? "disabled" : "active", shadowed: false,
+          providerName: skill._source?.providerName ?? "Custom directory", level: skill._source?.level === "project" ? "project" : "user", state: off ? "disabled" : "active", shadowed: false, shadowedBy: null,
           disabledReason: null, detail: null, toolPrefix: null, runtimeName: nameOf(skill.filePath), sources: [],
           toggle: overridden ? { mechanism: null, refusal: "this project's config replaces the global disabledExtensions list" } : { mechanism: "disabledExtensions", refusal: null } });
       }
-    } catch { incomplete.add("skills"); }
+    } catch (error) { fail("skills", projectFailure("OMP's skill loader", error)); }
 
     // Configured extension files outside OMP's native directories: shown, never switched here.
     try {
@@ -242,10 +267,10 @@ async function collect(request: WorkerRequest, n: Natives): Promise<Collected> {
       for (const extensionPath of paths) {
         if (rows.some(row => row.kind === "extension-module" && row.path !== null && samePath(row.path, extensionPath))) continue;
         rows.push({ kind: "extension-module", name: n.helpers.getExtensionNameFromPath(extensionPath), description: null, path: extensionPath, provider: "configured", providerName: "Configured path", level,
-          state: "active", shadowed: false, disabledReason: null, detail: null, toolPrefix: null, runtimeName: null, sources: [],
+          state: "active", shadowed: false, shadowedBy: null, disabledReason: null, detail: null, toolPrefix: null, runtimeName: null, sources: [],
           toggle: { mechanism: null, refusal: "it is configured through OMP's `extensions` setting" } });
       }
-    } catch { incomplete.add("extensions"); }
+    } catch (error) { fail("extensions", projectFailure("OMP's configured extension path resolution", error)); }
 
     for (const tool of Object.keys(n.tools.BUILTIN_TOOLS)) {
       const switchId = BUILTIN_SWITCHES[tool];
@@ -257,7 +282,7 @@ async function collect(request: WorkerRequest, n: Natives): Promise<Collected> {
       else if (setting !== undefined) { toggle = { mechanism: null, refusal: "OMP offers this tool as a multi-state setting; change it in OMP's settings" }; detail = `${setting.id}: ${String(value)}`; }
       if (SHARED_SWITCH_NOTES[tool] && setting !== undefined && setting.type === "boolean") detail = SHARED_SWITCH_NOTES[tool]!;
       rows.push({ kind: "builtin-tool", name: tool, description: null, path: null, provider: "builtin", providerName: "Built-in", level: "builtin",
-        state: value === false || value === "off" ? "disabled" : "active", shadowed: false, disabledReason: null, detail, toolPrefix: null, runtimeName: null, sources: [], toggle });
+        state: value === false || value === "off" ? "disabled" : "active", shadowed: false, shadowedBy: null, disabledReason: null, detail, toolPrefix: null, runtimeName: null, sources: [], toggle });
     }
 
     // Plugins: user plugins are switched globally (Global scope only). In a session the project's copy of a package wins
@@ -269,17 +294,17 @@ async function collect(request: WorkerRequest, n: Natives): Promise<Collected> {
         const count = plugin.manifest.extensions?.length ?? 0;
         const shadowed = projectCopies.has(plugin.name);
         rows.push({ kind: "plugin", name: plugin.name, description: null, path: path.join(plugin.path, "package.json"), provider: "omp-plugins", providerName: "OMP package", level: "user",
-          state: shadowed ? "shadowed" : plugin.enabled ? "active" : "disabled", shadowed, disabledReason: shadowed ? "shadowed" : null,
+          state: shadowed ? "shadowed" : plugin.enabled ? "active" : "disabled", shadowed, shadowedBy: shadowed ? "this project's copy of the package" : null, disabledReason: shadowed ? "shadowed" : null,
           detail: `v${plugin.version}${count > 0 ? ` · ${count} extension entr${count === 1 ? "y" : "ies"}` : ""}`, toolPrefix: null, runtimeName: null, sources: [],
           toggle: shadowed ? { mechanism: null, refusal: "this project's copy of the package is the one OMP loads" }
             : request.scope === "global" ? { mechanism: "plugin", refusal: null } : { mechanism: null, refusal: "switch the view to Global to enable or disable plugins" } });
       }
       for (const plugin of projectCopies.values()) {
         rows.push({ kind: "plugin", name: plugin.name, description: null, path: path.join(plugin.path, "package.json"), provider: "omp-plugins", providerName: "OMP package", level: "project",
-          state: "active", shadowed: false, disabledReason: null, detail: `v${plugin.version} · installed in this project`, toolPrefix: null, runtimeName: null, sources: [],
+          state: "active", shadowed: false, shadowedBy: null, disabledReason: null, detail: `v${plugin.version} · installed in this project`, toolPrefix: null, runtimeName: null, sources: [],
           toggle: { mechanism: null, refusal: "it is installed in this project; manage it there" } });
       }
-    } catch { incomplete.add("extensions"); }
+    } catch (error) { fail("extensions", projectFailure("OMP's plugin list", error)); }
 
     // OMP reports the install scope of a marketplace plugin but not which registry selected it (a project registry or a user one): no global switch is offered for such a row.
     for (let i = 0; i < rows.length; i++) {
@@ -297,9 +322,10 @@ async function collect(request: WorkerRequest, n: Natives): Promise<Collected> {
     }
     const providerSetting = n.registry.lookup("disabledProviders")?.get(settings);
     const disabledProviders = Array.isArray(providerSetting) ? providerSetting.filter((id): id is string => typeof id === "string").slice(0, 50) : [];
+    for (const [view, count] of overflow) incompleteReasons.push({ view, reason: `${count} more failure${count === 1 ? "" : "s"} not listed` });
     const userMcp = n.dirs.getMCPConfigPath("user", request.cwd);
     const [mcpDenied, mcpForced] = await Promise.all([n.writer.readDisabledServers(userMcp).catch(() => [] as string[]), n.writer.readEnabledServers(userMcp).catch(() => [] as string[])]);
-    return { snapshot: { rows, cwd: request.cwd, profile: request.profile, projectOverridesDisabledExtensions: overridden, incomplete: [...incomplete], disabledProviders }, mcpEntryDisabled, globalDisabled,
+    return { snapshot: { rows, cwd: request.cwd, profile: request.profile, projectOverridesDisabledExtensions: overridden, incomplete: [...incomplete], incompleteReasons, disabledProviders }, mcpEntryDisabled, globalDisabled,
       mcpDenied: new Set(mcpDenied), mcpForced: new Set(mcpForced) };
   } finally { release(); }
 }
@@ -317,7 +343,8 @@ async function toggle(request: WorkerRequest, n: Natives): Promise<{ changed: bo
   const { snapshot, mcpEntryDisabled } = collected;
   const row = snapshot.rows.find(candidate => candidate.kind === kind && candidate.name === name);
   const view: Readonly<Record<string, ViewKind>> = { skill: "skills", "custom-tool": "tools", "builtin-tool": "tools", mcp: "mcp", "extension-module": "extensions", plugin: "extensions" };
-  if (row !== undefined && snapshot.incomplete.includes(view[row.kind]!)) throw new SettingsRefusal("OMP reported a failure loading some sources of this kind. Refresh before switching anything.");
+  const failure = snapshot.incompleteReasons.find(entry => entry.view === (row === undefined ? undefined : view[row.kind]));
+  if (row !== undefined && snapshot.incomplete.includes(view[row.kind]!)) throw new SettingsRefusal(`OMP reported a failure loading some sources of this kind${failure === undefined ? "" : ` (${failure.reason})`}. Refresh before switching anything.`);
   const utilsRoot = path.join(path.dirname(request.packageRoot), "pi-utils");
   const agentDir = n.dirs.getAgentDir();
   const globalFile = await globalConfigFile(agentDir);

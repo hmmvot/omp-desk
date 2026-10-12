@@ -1,7 +1,7 @@
 import { isRecord as record } from "../../guards.ts";
 import { SettingsRefusal } from "../omp-settings-core.ts";
-import { SOURCE_ROLES } from "./inventory-model.ts";
-import type { InventoryResult, InventoryRow, InventoryScope, InventorySnapshot, RowKind, RowSource, RowToggle, SourceRole, ToggleMechanism, ViewKind } from "./inventory-model.ts";
+import { REASON_LIMIT, REASONS_PER_VIEW, SOURCE_ROLES } from "./inventory-model.ts";
+import type { IncompleteReason, InventoryResult, InventoryRow, InventoryScope, InventorySnapshot, RowKind, RowSource, RowToggle, SourceRole, ToggleMechanism, ViewKind } from "./inventory-model.ts";
 
 /**
  * The extension-host half of the inventory worker (ADR-0061): it asks for a read or a switch and
@@ -68,6 +68,7 @@ export function parseRow(value: unknown): InventoryRow | null {
 	const description = text(value.description);
 	const path = text(value.path);
 	const disabledReason = text(value.disabledReason);
+	const shadowedBy = text(value.shadowedBy);
 	const runtimeName = text(value.runtimeName);
 	const detail = text(value.detail);
 	const toolPrefix = text(value.toolPrefix);
@@ -76,8 +77,20 @@ export function parseRow(value: unknown): InventoryRow | null {
 	if (sources === null) return null;
 	if (typeof kind !== "string" || !ROW_KINDS.includes(kind) || typeof level !== "string" || !LEVELS.includes(level) || typeof state !== "string" || !STATES.includes(state) ||
 		typeof name !== "string" || name.length === 0 || typeof provider !== "string" || typeof providerName !== "string" ||
-		description === undefined || path === undefined || disabledReason === undefined || detail === undefined || toolPrefix === undefined || runtimeName === undefined || typeof value.shadowed !== "boolean" || toggle === null) return null;
-	return { kind: kind as InventoryRow["kind"], name, description, path, provider, providerName, level: level as InventoryRow["level"], state: state as InventoryRow["state"], shadowed: value.shadowed, disabledReason, detail, toolPrefix, runtimeName, toggle, sources };
+		description === undefined || path === undefined || disabledReason === undefined || value.shadowedBy === undefined || shadowedBy === undefined || detail === undefined || toolPrefix === undefined || runtimeName === undefined || typeof value.shadowed !== "boolean" || toggle === null) return null;
+	return { kind: kind as InventoryRow["kind"], name, description, path, provider, providerName, level: level as InventoryRow["level"], state: state as InventoryRow["state"], shadowed: value.shadowed, shadowedBy, disabledReason, detail, toolPrefix, runtimeName, toggle, sources };
+}
+
+/** Exactly what the worker emits: one line of at most `REASON_LIMIT` characters, at most `REASONS_PER_VIEW` per view, only for a view the receipt marks incomplete. */
+function parseReasons(value: unknown, incomplete: readonly ViewKind[]): readonly IncompleteReason[] | null {
+	if (!Array.isArray(value) || value.length > VIEWS.length * REASONS_PER_VIEW) return null;
+	const reasons: IncompleteReason[] = [];
+	for (const entry of value) {
+		if (!record(entry) || typeof entry.view !== "string" || !VIEWS.includes(entry.view) || !incomplete.includes(entry.view as ViewKind) ||
+			typeof entry.reason !== "string" || entry.reason.length === 0 || entry.reason.length > REASON_LIMIT || /\p{Cc}/u.test(entry.reason)) return null;
+		reasons.push({ view: entry.view as ViewKind, reason: entry.reason });
+	}
+	return VIEWS.some(view => reasons.filter(reason => reason.view === view).length > REASONS_PER_VIEW) ? null : reasons;
 }
 
 export function parseSnapshot(value: unknown): InventorySnapshot | null {
@@ -85,13 +98,15 @@ export function parseSnapshot(value: unknown): InventorySnapshot | null {
 		typeof value.projectOverridesDisabledExtensions !== "boolean" || !Array.isArray(value.incomplete) || !Array.isArray(value.disabledProviders) || value.disabledProviders.length > 100 ||
 		!value.disabledProviders.every((id): id is string => typeof id === "string" && id.length <= 200) ||
 		!value.incomplete.every((view): view is ViewKind => typeof view === "string" && VIEWS.includes(view))) return null;
+	const incompleteReasons = parseReasons(value.incompleteReasons, value.incomplete);
+	if (incompleteReasons === null) return null;
 	const rows: InventoryRow[] = [];
 	for (const raw of value.rows) {
 		const row = parseRow(raw);
 		if (row === null) return null;
 		rows.push(row);
 	}
-	return { rows, cwd: value.cwd, profile: value.profile, projectOverridesDisabledExtensions: value.projectOverridesDisabledExtensions, incomplete: value.incomplete, disabledProviders: value.disabledProviders };
+	return { rows, cwd: value.cwd, profile: value.profile, projectOverridesDisabledExtensions: value.projectOverridesDisabledExtensions, incomplete: value.incomplete, incompleteReasons, disabledProviders: value.disabledProviders };
 }
 
 const MAX_WRITES = 8;

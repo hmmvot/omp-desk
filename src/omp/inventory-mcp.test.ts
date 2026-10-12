@@ -3,9 +3,9 @@ import { describe, it } from "node:test";
 import { excusedEntryWarnings, foldMcpServer } from "./inventory-mcp.ts";
 import type { McpEntry, McpFoldHooks } from "./inventory-mcp.ts";
 
-/** The entries OMP's dashboard loader returned for D:/Workspace/omp-vscode: `.omp/mcp.json` (OMP, priority 100) before `.mcp.json` (MCP Config, priority 5). */
-const OVERRIDE = "D:\\Workspace\\omp-vscode\\.omp\\mcp.json";
-const DEFINITIONS = "D:\\Workspace\\omp-vscode\\.mcp.json";
+/** The entries OMP's dashboard loader returned for a project folder: `.omp/mcp.json` (OMP, priority 100) before `.mcp.json` (MCP Config, priority 5). */
+const OVERRIDE = "D:\\project\\.omp\\mcp.json";
+const DEFINITIONS = "D:\\project\\.mcp.json";
 const base = { level: "project" as const, state: "disabled" as const };
 const override = (name: string, shadowed: boolean): McpEntry => ({ ...base, name, path: OVERRIDE, provider: "native", providerName: "OMP", disabledReason: "item-disabled", shadowed, enabled: false, defines: false, raw: { enabled: false } });
 const definition = (name: string, raw: Record<string, unknown>): McpEntry => ({ ...base, name, path: DEFINITIONS, provider: "mcp-json", providerName: "MCP Config", state: "shadowed", disabledReason: "shadowed", shadowed: true, enabled: undefined, defines: true, raw });
@@ -19,6 +19,7 @@ const hooks = (over: Partial<McpFoldHooks> = {}): McpFoldHooks => ({
   toolPrefix: name => `mcp__${name}_`,
   switchOf: () => ({ mechanism: "mcp", refusal: null }),
   excludedByProject: false,
+  shadowedBy: () => null,
   ...over,
 });
 
@@ -70,6 +71,32 @@ describe("one row per MCP server name", () => {
     assert.equal(row.disabledReason, "invalid-entry");
     assert.equal(row.detail, "no command or url");
     assert.match(row.toggle.refusal!, /no command or url/);
+  });
+  it("an owner OMP dropped for an equivalent connection is a shadowed row that names the server OMP keeps", () => {
+    const owner: McpEntry = { ...base, name: "devtools-copy", path: DEFINITIONS, provider: "mcp-json", providerName: "MCP Config", state: "shadowed", disabledReason: "shadowed", shadowed: true, enabled: undefined, defines: true, raw: projectDefinitions.devtools! };
+    const { row } = foldMcpServer([owner], hooks({ shadowedBy: entry => entry === owner ? "devtools" : null }));
+    assert.equal(row.shadowed, true);
+    assert.equal(row.shadowedBy, "devtools");
+    assert.equal(row.toggle.mechanism, null);
+    assert.match(row.toggle.refusal!, /OMP keeps the server devtools, which has the same command or url/);
+  });
+  it("a live owner is never marked as shadowed, whatever the hook would say", () => {
+    const owner: McpEntry = { ...base, name: "s", path: DEFINITIONS, provider: "mcp-json", providerName: "MCP Config", state: "active", disabledReason: null, shadowed: false, enabled: undefined, defines: true, raw: { command: "a" } };
+    const { row } = foldMcpServer([owner], hooks({ shadowedBy: () => "x" }));
+    assert.equal(row.shadowedBy, null);
+  });
+  it("the whole omp-vscode entry set (three overrides over five definitions) yields five rows and none shadowed", () => {
+    const all: McpEntry[] = [
+      override("unity", false), override("devtools", true), override("playwright", true),
+      definition("unity", projectDefinitions.unity!), definition("playwright", projectDefinitions.playwright!), definition("devtools", projectDefinitions.devtools!),
+      { ...definition("symbols", { command: "node" }), state: "active", disabledReason: null, shadowed: false },
+      { ...definition("omnisharp", { command: "node" }), state: "active", disabledReason: null, shadowed: false },
+    ];
+    const byName = new Map<string, McpEntry[]>();
+    for (const entry of all) byName.set(entry.name, [...(byName.get(entry.name) ?? []), entry]);
+    const rows = [...byName.values()].map(entries => foldMcpServer(entries, hooks()).row);
+    assert.deepEqual(rows.map(row => row.name).sort(), ["devtools", "playwright", "symbols", "omnisharp", "unity"]);
+    assert.equal(rows.filter(row => row.shadowed || row.state === "shadowed").length, 0);
   });
 });
 

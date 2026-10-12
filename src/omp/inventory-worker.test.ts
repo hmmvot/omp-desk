@@ -228,3 +228,79 @@ test("installed OMP inventory: an MCP name with a definition and a by-name overr
     await fs.rm(projectDir, { recursive: true, force: true });
   }
 });
+
+/**
+ * OMP's precedence for one MCP name (verified against OMP 18.8.5, capability/index.ts and discovery/builtin.ts, mcp-json.ts): the provider's priority first
+ * (native `.omp/` and `~/.omp/agent` 100, the standalone `.mcp.json` provider 5), then file order inside the provider (project before user). One name is one
+ * row, owned by the first entry; a server another name duplicates connection for connection is the one OMP drops, and the row says which server it loses to.
+ */
+test("installed OMP inventory: one effective row per MCP name by OMP's precedence, a shadowed alias names its winner", { skip: !available, timeout: 180_000 }, async () => {
+  const nativeRoot = await fs.mkdtemp(path.join(os.homedir(), "omp-desk-inventory-test-"));
+  const agentDir = path.join(nativeRoot, "agent");
+  const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-desk-inventory-project-"));
+  const write = async (file: string, content: unknown): Promise<void> => { await fs.mkdir(path.dirname(file), { recursive: true }); await fs.writeFile(file, JSON.stringify(content)); };
+  const env = { PI_CONFIG_DIR: path.basename(nativeRoot), PI_CODING_AGENT_DIR: "", PI_CONFIG_FILES: "", OMP_AUTH_BROKER_URL: "", OMP_AUTH_BROKER_TOKEN: "" };
+  try {
+    await write(path.join(agentDir, "mcp.json"), { mcpServers: { shared: { type: "stdio", command: "user-cmd" } } });
+    await write(path.join(projectDir, ".mcp.json"), { mcpServers: {
+      shared: { type: "stdio", command: "project-cmd" },
+      layer: { type: "stdio", command: "standalone-cmd" },
+      "dup-a": { type: "stdio", command: "same-cmd" },
+      "dup-b": { type: "stdio", command: "same-cmd" },
+    } });
+    await write(path.join(projectDir, ".omp", "mcp.json"), { mcpServers: { layer: { type: "stdio", command: "omp-project-cmd" } } });
+    const snapshot = parseSnapshot(await runSettingsWorker({ bunPath, helperPath, packageRoot, cwd: projectDir, profile: "default", request: { action: "read", scope: "session" }, env }));
+    assert.ok(snapshot, "the receipt parses as an inventory");
+    // Other ecosystems' user-level files of the real home (Claude, Codex, ...) also feed the list; the fixture's names are the ones asserted on.
+    const all = snapshot.rows.filter(candidate => candidate.kind === "mcp");
+    assert.equal(new Set(all.map(server => server.name)).size, all.length, "no name appears twice in the whole list");
+    const servers = all.filter(candidate => ["shared", "layer", "dup-a", "dup-b"].includes(candidate.name));
+    assert.deepEqual(servers.map(server => server.name).sort(), ["dup-a", "dup-b", "layer", "shared"], "exactly one row per name");
+    const named = (name: string): InventoryRow => servers.find(server => server.name === name)!;
+    const files = (name: string): Array<[string, string, string]> => named(name).sources.map(source => [path.basename(path.dirname(source.path ?? "")) === ".omp" ? ".omp/mcp.json" : path.basename(source.path ?? ""), source.level, source.role]);
+
+    // The user-level file of the 100-priority provider beats the project's standalone `.mcp.json` (priority 5): provider before level.
+    assert.equal(named("shared").detail, "stdio · user-cmd");
+    assert.equal(named("shared").level, "user");
+    assert.equal(named("shared").state, "active");
+    assert.equal(named("shared").shadowed, false);
+    assert.deepEqual(files("shared"), [["mcp.json", "user", "defines"], [".mcp.json", "project", "ignored"]]);
+    // Inside one provider the project's `.omp/mcp.json` beats the standalone file.
+    assert.equal(named("layer").detail, "stdio · omp-project-cmd");
+    assert.equal(named("layer").level, "project");
+    assert.deepEqual(files("layer"), [[".omp/mcp.json", "project", "defines"], [".mcp.json", "project", "ignored"]]);
+    // Two names with one connection: OMP keeps the first and drops the second, and the row names the survivor.
+    assert.equal(named("dup-a").state, "active");
+    assert.equal(named("dup-a").shadowedBy, null);
+    assert.equal(named("dup-b").state, "shadowed");
+    assert.equal(named("dup-b").shadowed, true);
+    assert.equal(named("dup-b").shadowedBy, "dup-a");
+    assert.equal(named("dup-b").toggle.mechanism, null);
+    assert.equal(snapshot.incomplete.includes("mcp"), false);
+  } finally {
+    await fs.rm(nativeRoot, { recursive: true, force: true });
+    await fs.rm(projectDir, { recursive: true, force: true });
+  }
+});
+
+test("installed OMP inventory: an unreadable MCP file marks the list incomplete and names the file and OMP's reason", { skip: !available, timeout: 180_000 }, async () => {
+  const nativeRoot = await fs.mkdtemp(path.join(os.homedir(), "omp-desk-inventory-test-"));
+  const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-desk-inventory-project-"));
+  const env = { PI_CONFIG_DIR: path.basename(nativeRoot), PI_CODING_AGENT_DIR: "", PI_CONFIG_FILES: "", OMP_AUTH_BROKER_URL: "", OMP_AUTH_BROKER_TOKEN: "" };
+  try {
+    await fs.writeFile(path.join(projectDir, ".mcp.json"), "{ \"mcpServers\": { broken");
+    await fs.mkdir(path.join(projectDir, ".omp"), { recursive: true });
+    await fs.writeFile(path.join(projectDir, ".omp", "mcp.json"), JSON.stringify({ mcpServers: { ok: { type: "stdio", command: "ok-cmd" } } }));
+    const snapshot = parseSnapshot(await runSettingsWorker({ bunPath, helperPath, packageRoot, cwd: projectDir, profile: "default", request: { action: "read", scope: "session" }, env }));
+    assert.ok(snapshot, "the receipt parses as an inventory");
+    assert.ok(snapshot.rows.some(candidate => candidate.kind === "mcp" && candidate.name === "ok"), "the readable file still lists its server");
+    assert.equal(snapshot.incomplete.includes("mcp"), true);
+    const reasons = snapshot.incompleteReasons.filter(entry => entry.view === "mcp").map(entry => entry.reason);
+    const ours = reasons.filter(reason => /Failed to parse JSON in .*\.mcp\.json/.test(reason));
+    assert.equal(ours.length, 1, `the broken file is named once, with what failed: ${reasons.join(" | ")}`);
+    assert.equal(snapshot.incomplete.includes("skills"), false, "another view is not blamed");
+  } finally {
+    await fs.rm(nativeRoot, { recursive: true, force: true });
+    await fs.rm(projectDir, { recursive: true, force: true });
+  }
+});

@@ -122,7 +122,10 @@ export class InventoryController {
 		const run = this.#deps.runtime.read({ cwd: plan.cwd, profile: plan.profile, scope: plan.scope }).then(result => {
 			const took = this.#now() - started;
 			if (isUnavailable(result)) this.#deps.log(`inventory: read failed after ${took} ms (${plan.scope} list, profile ${plan.profile}, folder ${plan.cwd}): ${result.unavailable}`);
-			else this.#deps.log(`inventory: read ${plan.scope} list in ${took} ms (${result.rows.length} rows, profile ${plan.profile})`);
+			else {
+				this.#deps.log(`inventory: read ${plan.scope} list in ${took} ms (${result.rows.length} rows, profile ${plan.profile})`);
+				for (const entry of result.incompleteReasons) this.#deps.log(`inventory: ${entry.view} list incomplete (${plan.scope} list, folder ${plan.cwd}): ${entry.reason}`);
+			}
 			if (this.#epoch === epoch) {
 				if (!isUnavailable(result)) this.#cache.set(plan.key, { result, at: this.#now() });
 				this.#inflight.delete(plan.key);

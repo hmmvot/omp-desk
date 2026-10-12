@@ -3,9 +3,13 @@ import type { InventoryRow, RowSource, RowToggle } from "../host/inventory/inven
 /**
  * One MCP server name, one row (ADR-0061, amendment). OMP's capability loader keys servers by name and the
  * highest-priority entry owns the name; it never merges fields from a lower entry (capability/index.ts dedupe,
- * mcp/config.ts `suppress`). An entry that only sets `enabled: false` is therefore not a server but a by-name switch
- * that keeps the whole name off, which is how a project turns off a server another file defines. This fold turns
- * the entries of a name into the one row the user means and lists the contributing files on it.
+ * mcp/config.ts `suppress`). Priority is the provider's (OMP's `.omp/` and `~/.omp/agent` files 100, omp-plugins 90,
+ * Claude 80 ... the standalone `.mcp.json`/`mcp.json` provider 5), then the order of files inside the provider
+ * (project before user), so a user-level file of a higher-priority provider beats a project `.mcp.json`. Neither
+ * provider walks up to a repository or worktree root: project files are read at the session's own folder only.
+ * An entry that only sets `enabled: false` is therefore not a server but a by-name switch that keeps the whole name
+ * off, which is how a project turns off a server another file defines. This fold turns the entries of a name into
+ * the one row the user means and lists the contributing files on it.
  */
 export interface McpEntry {
   readonly name: string;
@@ -31,6 +35,8 @@ export interface McpFoldHooks {
   switchOf(owner: McpEntry): RowToggle;
   /** The project's own configuration disables this name by id, which a global switch cannot override. */
   excludedByProject: boolean;
+  /** The name of the other server whose identical connection makes OMP drop the owner, when the owner carries OMP's `_shadowed` mark; `null` when none can be named. */
+  shadowedBy(owner: McpEntry): string | null;
 }
 export interface FoldedServer { readonly row: InventoryRow; /** The owner is a definition that carries `enabled: false`: enabling must also force-enable it by name. */ readonly ownerDisabledByFlag: boolean }
 
@@ -56,16 +62,20 @@ export function foldMcpServer(entries: readonly McpEntry[], hooks: McpFoldHooks)
   };
   if (!ownerDefines) {
     const disables = owner.enabled === false;
-    return { ownerDisabledByFlag: false, row: { ...base, state: "disabled", shadowed: false, disabledReason: disables ? "entry" : "invalid-entry",
+    return { ownerDisabledByFlag: false, row: { ...base, state: "disabled", shadowed: false, shadowedBy: null, disabledReason: disables ? "entry" : "invalid-entry",
       toggle: { mechanism: null, refusal: disables
         ? `${fileName(owner)} sets enabled: false for it without defining it, so OMP loads nothing for the name whatever the global switch says; remove that entry to enable it`
         : `its entry in ${fileName(owner)} has no command or url, so OMP loads nothing for it` } } };
   }
-  const toggle: RowToggle = hooks.excludedByProject
-    ? { mechanism: null, refusal: "this project's config disables it by name, which a global switch cannot override" }
-    : hooks.switchOf(owner);
+  const shadowed = owner.shadowed || owner.state === "shadowed";
+  const shadowedBy = shadowed ? hooks.shadowedBy(owner) : null;
+  const toggle: RowToggle = shadowedBy !== null
+    ? { mechanism: null, refusal: `OMP keeps the server ${shadowedBy}, which has the same command or url, so there is nothing to switch for this one` }
+    : hooks.excludedByProject
+      ? { mechanism: null, refusal: "this project's config disables it by name, which a global switch cannot override" }
+      : hooks.switchOf(owner);
   return { ownerDisabledByFlag: owner.enabled === false,
-    row: { ...base, state: owner.state, shadowed: owner.shadowed || owner.state === "shadowed", disabledReason: owner.disabledReason, toggle } };
+    row: { ...base, state: owner.state, shadowed, shadowedBy, disabledReason: owner.disabledReason, toggle } };
 }
 
 /** Warnings OMP raises for entries that are by-name switches rather than failed sources: `Invalid item at <file>: Must have command or url`. */

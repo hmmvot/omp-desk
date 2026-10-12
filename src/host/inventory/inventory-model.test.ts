@@ -4,11 +4,11 @@ import { appliesTo, mcpServerOfTool, originClass, projectView, toggleMessage } f
 import type { InventoryRow, InventorySnapshot, SessionEvidence, ViewKind, ViewModel } from "./inventory-model.ts";
 
 function row(overrides: Partial<InventoryRow> & Pick<InventoryRow, "kind" | "name">): InventoryRow {
-	return { description: null, path: `C:/x/${overrides.name}`, provider: "native", providerName: "OMP", level: "user", state: "active", shadowed: false, disabledReason: null,
+	return { description: null, path: `C:/x/${overrides.name}`, provider: "native", providerName: "OMP", level: "user", state: "active", shadowed: false, shadowedBy: null, disabledReason: null,
 		detail: null, toolPrefix: null, runtimeName: null, sources: [], toggle: { mechanism: "disabledExtensions", refusal: null }, ...overrides };
 }
 function snapshot(rows: InventoryRow[], extra: Partial<InventorySnapshot> = {}): InventorySnapshot {
-	return { rows, cwd: "C:/p", profile: "default", projectOverridesDisabledExtensions: false, incomplete: [], disabledProviders: [], ...extra };
+	return { rows, cwd: "C:/p", profile: "default", projectOverridesDisabledExtensions: false, incomplete: [], incompleteReasons: [], disabledProviders: [], ...extra };
 }
 function view(kind: ViewKind, inventory: InventorySnapshot | { unavailable: string }, evidence: SessionEvidence | null, scope: "session" | "global" = "session"): ViewModel {
 	return projectView({ view: kind, scope, inventory, evidence, profile: "default" });
@@ -153,6 +153,26 @@ describe("MCP server named by several files", () => {
 	});
 });
 
+describe("MCP shadow wording", () => {
+	it("names the entry that shadows a lower full definition of the same name, in the tooltip of the one row", () => {
+		const owner = row({ kind: "mcp", name: "s", path: "C:/home/.omp/agent/mcp.json", detail: "stdio · a", toggle: { mechanism: "mcp", refusal: null },
+			sources: [{ path: "C:/home/.omp/agent/mcp.json", providerName: "OMP", level: "user", role: "defines" }, { path: "D:/p/.mcp.json", providerName: "MCP Config", level: "project", role: "ignored" }] });
+		const item = itemOf(view("mcp", snapshot([owner]), null, "global"), "s");
+		assert.match(item.tooltip, /- D:\/p\/\.mcp\.json \(MCP Config, project\): shadowed by C:\/home\/\.omp\/agent\/mcp\.json/);
+		assert.equal(item.checked, true, "the effective row keeps its switch");
+		assert.doesNotMatch(item.description, /shadowed/);
+	});
+	it("names the server OMP keeps instead of an alias with the same connection, without contradicting itself", () => {
+		const alias = row({ kind: "mcp", name: "devtools-2", state: "shadowed", shadowed: true, shadowedBy: "devtools", disabledReason: "shadowed", detail: "http · 127.0.0.1:3000",
+			toggle: { mechanism: null, refusal: "OMP keeps the server devtools, which has the same command or url, so there is nothing to switch for this one" } });
+		const item = itemOf(view("mcp", snapshot([alias]), null, "global"), "devtools-2");
+		assert.match(item.description, /^shadowed by devtools · /);
+		assert.match(item.tooltip, /State: OMP's discovery keeps the server devtools and drops this one: both have the same command or url/);
+		assert.doesNotMatch(item.tooltip, /same name/, "no contradictory same-name wording");
+		assert.equal(item.checked, null);
+	});
+});
+
 describe("extensions projection", () => {
 	it("lists modules by origin and plugins separately", () => {
 		const model = view("extensions", snapshot([row({ kind: "extension-module", name: "mod" }), row({ kind: "plugin", name: "pkg", provider: "omp-plugins", toggle: { mechanism: "plugin", refusal: null }, detail: "v1.0.0" })]), null, "global");
@@ -187,6 +207,23 @@ describe("whole-view rules", () => {
 	});
 	it("states the scope and a named profile in the description", () => {
 		assert.equal(projectView({ view: "skills", scope: "global", inventory: snapshot([row({ kind: "skill", name: "a" })]), evidence: null, profile: "work" }).description, "Global (profile work)");
+	});
+});
+
+describe("incomplete banner", () => {
+	it("names the source and the reason OMP gave, only for the view they belong to", () => {
+		const reasons = [{ view: "mcp" as const, reason: "[MCP Config] Failed to parse JSON in D:/p/.mcp.json" }, { view: "skills" as const, reason: "OMP's skill loader failed: boom" }];
+		const mcp = view("mcp", snapshot([row({ kind: "mcp", name: "m", toggle: { mechanism: "mcp", refusal: null } })], { incomplete: ["mcp", "skills"], incompleteReasons: reasons }), null, "global");
+		assert.equal(mcp.notice, "List may be incomplete: [MCP Config] Failed to parse JSON in D:/p/.mcp.json.");
+		const skills = view("skills", snapshot([row({ kind: "skill", name: "a" })], { incomplete: ["mcp", "skills"], incompleteReasons: reasons }), null, "global");
+		assert.match(skills.notice ?? "", /skill loader failed: boom/);
+		assert.doesNotMatch(skills.notice ?? "", /\.mcp\.json/);
+	});
+	it("shows the first reasons and counts the rest; with none named it keeps the bare fact", () => {
+		const many = [1, 2, 3, 4].map(index => ({ view: "mcp" as const, reason: `source ${index} failed` }));
+		const notice = view("mcp", snapshot([row({ kind: "mcp", name: "m" })], { incomplete: ["mcp"], incompleteReasons: many }), null, "global").notice!;
+		assert.equal(notice, "List may be incomplete: source 1 failed; source 2 failed (and 2 more, see the Desk log).");
+		assert.equal(view("mcp", snapshot([row({ kind: "mcp", name: "m" })], { incomplete: ["mcp"] }), null, "global").notice, "List may be incomplete: some sources failed to load.");
 	});
 });
 

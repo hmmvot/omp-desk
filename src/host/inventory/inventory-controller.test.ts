@@ -6,9 +6,9 @@ import type { InventoryResult, InventoryRow, InventoryScope, InventorySnapshot, 
 import type { InventoryRuntime, InventoryReadRequest, ToggleRequest, ToggleResult } from "./inventory-runtime.ts";
 import type { SessionToolsTarget } from "../session-tools.ts";
 
-const skill: InventoryRow = { kind: "skill", name: "review", description: null, path: "C:/s/SKILL.md", provider: "native", providerName: "OMP", level: "user", state: "active", shadowed: false,
+const skill: InventoryRow = { kind: "skill", name: "review", description: null, path: "C:/s/SKILL.md", provider: "native", providerName: "OMP", level: "user", state: "active", shadowed: false, shadowedBy: null,
 	disabledReason: null, detail: null, toolPrefix: null, runtimeName: "review", sources: [], toggle: { mechanism: "disabledExtensions", refusal: null } };
-const snapshot = (cwd: string, profile = "default"): InventorySnapshot => ({ rows: [{ ...skill }], cwd, profile, projectOverridesDisabledExtensions: false, incomplete: [], disabledProviders: [] });
+const snapshot = (cwd: string, profile = "default"): InventorySnapshot => ({ rows: [{ ...skill }], cwd, profile, projectOverridesDisabledExtensions: false, incomplete: [], incompleteReasons: [], disabledProviders: [] });
 
 function target(overrides: Partial<SessionToolsTarget> = {}): SessionToolsTarget {
 	return { key: {}, generation: "g1", tabId: "tab-1", mode: "chat", running: true, title: "Work", cwd: "D:/proj", profile: null, commands: [], readDescriptors: null, readTools: null, ...overrides };

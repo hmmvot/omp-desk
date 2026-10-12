@@ -5,9 +5,9 @@ import { createInventoryRuntime, parseSnapshot } from "./inventory-runtime.ts";
 import type { InventoryRuntimeDeps, WorkerEnvironment } from "./inventory-runtime.ts";
 
 const environment: WorkerEnvironment = { bun: "bun", packageRoot: "C:/omp", helperPath: "C:/worker.mjs" };
-const row = (overrides: Record<string, unknown> = {}) => ({ kind: "skill", name: "a", description: null, path: "C:/a/SKILL.md", provider: "native", providerName: "OMP", level: "user", state: "active", shadowed: false,
+const row = (overrides: Record<string, unknown> = {}) => ({ kind: "skill", name: "a", description: null, path: "C:/a/SKILL.md", provider: "native", providerName: "OMP", level: "user", state: "active", shadowed: false, shadowedBy: null,
 	disabledReason: null, detail: null, toolPrefix: null, runtimeName: "a", sources: [], toggle: { mechanism: "disabledExtensions", refusal: null }, ...overrides });
-const receipt = (rows: unknown[] = [row()], extra: Record<string, unknown> = {}) => ({ rows, cwd: "C:/", profile: "default", projectOverridesDisabledExtensions: false, incomplete: [], disabledProviders: [], ...extra });
+const receipt = (rows: unknown[] = [row()], extra: Record<string, unknown> = {}) => ({ rows, cwd: "C:/", profile: "default", projectOverridesDisabledExtensions: false, incomplete: [], incompleteReasons: [], disabledProviders: [], ...extra });
 
 function runtimeWith(run: InventoryRuntimeDeps["run"], env: WorkerEnvironment | { readonly unavailable: string } = environment) {
 	return createInventoryRuntime({ environment: async () => env, run });
@@ -15,10 +15,17 @@ function runtimeWith(run: InventoryRuntimeDeps["run"], env: WorkerEnvironment | 
 
 describe("inventory receipt validation", () => {
 	it("accepts a well-formed receipt and keeps every field", () => {
-		const snapshot = parseSnapshot(receipt([row(), row({ name: "b", kind: "mcp", toolPrefix: "mcp__b_", toggle: { mechanism: "mcp", refusal: null } })], { incomplete: ["skills"] }));
+		const reasons = [{ view: "skills", reason: "[Skills] Failed to parse JSON in C:/x/y.json" }];
+		const snapshot = parseSnapshot(receipt([row(), row({ name: "b", kind: "mcp", toolPrefix: "mcp__b_", shadowed: true, shadowedBy: "a", toggle: { mechanism: "mcp", refusal: null } })], { incomplete: ["skills"], incompleteReasons: reasons }));
 		assert.equal(snapshot?.rows.length, 2);
 		assert.deepEqual(snapshot?.incomplete, ["skills"]);
+		assert.deepEqual(snapshot?.incompleteReasons, reasons);
 		assert.equal(snapshot?.rows[1]?.toolPrefix, "mcp__b_");
+		assert.equal(snapshot?.rows[1]?.shadowedBy, "a");
+	});
+	it("accepts reasons exactly at the documented bounds", () => {
+		const reasons = [...new Array(20).fill(null).map((_, index) => ({ view: "mcp", reason: index === 0 ? "x".repeat(300) : `source ${index} failed` })), { view: "tools", reason: "t" }];
+		assert.equal(parseSnapshot(receipt([row()], { incomplete: ["mcp", "tools"], incompleteReasons: reasons }))?.incompleteReasons.length, 21);
 	});
 	it("rejects anything outside the contract rather than rendering it", () => {
 		for (const bad of [
@@ -26,6 +33,12 @@ describe("inventory receipt validation", () => {
 			receipt([row({ shadowed: "yes" })]), receipt([row({ toggle: { mechanism: "shell", refusal: null } })]), receipt([row({ toggle: null })]), receipt([row({ path: "x".repeat(5000) })]),
 			receipt([row({ sources: [{ path: null, providerName: "x", level: "project", role: "merges" }] })]), receipt([row({ sources: "x" })]), receipt([row({ sources: new Array(33).fill({ path: null, providerName: "x", level: "project", role: "defines" }) })]),
 			receipt([row()], { incomplete: ["bogus"] }), receipt([row()], { projectOverridesDisabledExtensions: "no" }), receipt(new Array(5001).fill(row())), receipt([null]),
+			receipt([row({ shadowedBy: 3 })]), receipt([row()], { incompleteReasons: "x" }), receipt([row()], { incomplete: ["mcp"], incompleteReasons: [{ view: "bogus", reason: "x" }] }),
+			receipt([row()], { incomplete: ["mcp"], incompleteReasons: [{ view: "mcp", reason: "" }] }), receipt([row()], { incomplete: ["mcp"], incompleteReasons: [{ view: "mcp", reason: "x".repeat(301) }] }),
+			receipt([row()], { incomplete: ["mcp"], incompleteReasons: [{ view: "mcp", reason: "two\nlines" }] }),
+			receipt([row()], { incomplete: ["mcp"], incompleteReasons: new Array(21).fill({ view: "mcp", reason: "x" }) }),
+			receipt([row()], { incomplete: ["skills"], incompleteReasons: [{ view: "mcp", reason: "x" }] }), // a reason for a view the receipt does not mark incomplete
+			receipt([row()], { incompleteReasons: undefined }), { ...receipt(), rows: [(({ shadowedBy: _omitted, ...rest }) => rest)(row())] },
 		]) assert.equal(parseSnapshot(bad), null, JSON.stringify(bad)?.slice(0, 80));
 	});
 });

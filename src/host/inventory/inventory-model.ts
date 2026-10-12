@@ -39,8 +39,10 @@ export interface InventoryRow {
 	readonly providerName: string;
 	readonly level: "user" | "project" | "native" | "builtin";
 	readonly state: RowState;
-	/** A lower-priority copy of a same-named item; OMP never switches such a row (it can also be `disabled`). */
+	/** A lower-priority copy of a same-named item or an alias of an equivalent one; OMP never switches such a row (it can also be `disabled`). */
 	readonly shadowed: boolean;
+	/** The name of the item OMP loads instead of a shadowed row; `null` when the row is not shadowed or OMP does not say which one wins. */
+	readonly shadowedBy: string | null;
 	readonly disabledReason: string | null;
 	/** What an MCP server's transport is, a built-in's setting value or a plugin's version: short plain text. */
 	readonly detail: string | null;
@@ -52,6 +54,10 @@ export interface InventoryRow {
 	/** Every file that contributes to the row, in OMP's precedence order; empty for rows with a single origin. */
 	readonly sources: readonly RowSource[];
 }
+export interface IncompleteReason { readonly view: ViewKind; readonly reason: string }
+/** Bounds of the receipt's reasons: characters each, and entries per view (the last one may be the overflow marker). */
+export const REASON_LIMIT = 300;
+export const REASONS_PER_VIEW = 20;
 
 export interface InventorySnapshot {
 	readonly rows: readonly InventoryRow[];
@@ -61,6 +67,8 @@ export interface InventorySnapshot {
 	readonly projectOverridesDisabledExtensions: boolean;
 	/** Views whose OMP discovery reported a failed source or a mismatch: their lists may be incomplete and nothing in them can be switched. */
 	readonly incomplete: readonly ViewKind[];
+	/** Why each view in `incomplete` is: the failed source and OMP's reason, as short credential-free text. Empty only when no reason could be named. */
+	readonly incompleteReasons: readonly IncompleteReason[];
 	/** Provider ids disabled in OMP's settings: OMP loads nothing from them, so none of their items can appear. */
 	readonly disabledProviders: readonly string[];
 }
@@ -133,7 +141,10 @@ function plain(...parts: readonly (string | null | undefined)[]): string {
 	return parts.filter((part): part is string => typeof part === "string" && part.length > 0).join("\n");
 }
 function reasonText(row: InventoryRow): string | null {
-	if (row.shadowed || row.state === "shadowed") return "shadowed by a higher-priority item of the same name";
+	if (row.shadowed || row.state === "shadowed") {
+		if (row.shadowedBy === null) return "shadowed by a higher-priority item of the same name";
+		return row.kind === "mcp" ? `OMP's discovery keeps the server ${row.shadowedBy} and drops this one: both have the same command or url (OMP's own dashboard computation; a server switched off by name can make a session load differently)` : `shadowed by ${row.shadowedBy}`;
+	}
 	if (row.state !== "disabled") return null;
 	switch (row.disabledReason) {
 		case "provider-disabled": return "its provider is disabled in OMP";
@@ -152,12 +163,18 @@ function entryFile(row: InventoryRow): string | null {
 	const source = row.sources.find(candidate => candidate.role === (row.disabledReason === "entry" ? "disables" : "incomplete"));
 	return source?.path?.split(/[\\/]/).at(-1) ?? null;
 }
-const ROLE_TEXT: Readonly<Record<SourceRole, string>> = {
-	defines: "defines it", disables: "disables it (enabled: false, no definition)", incomplete: "has no command or url", ignored: "ignored by OMP",
+const ROLE_TEXT: Readonly<Record<Exclude<SourceRole, "ignored">, string>> = {
+	defines: "defines it", disables: "disables it (enabled: false, no definition)", incomplete: "has no command or url",
 };
+/** OMP keeps the highest-priority entry of a name and never merges the others, so `sources[0]` is the entry that shadows an `ignored` one. */
+function roleText(row: InventoryRow, source: RowSource): string {
+	if (source.role !== "ignored") return ROLE_TEXT[source.role];
+	const owner = row.sources[0];
+	return owner === undefined || owner === source ? "ignored by OMP" : `shadowed by ${owner.path ?? owner.providerName} (OMP keeps the first entry of a name)`;
+}
 function sourceLines(row: InventoryRow): string | null {
 	if (row.sources.length === 0 || (row.sources.length === 1 && row.sources[0]!.role === "defines")) return null;
-	return plain("Configured in:", ...row.sources.map(source => `- ${source.path ?? source.providerName} (${source.providerName}, ${source.level}): ${ROLE_TEXT[source.role]}`));
+	return plain("Configured in:", ...row.sources.map(source => `- ${source.path ?? source.providerName} (${source.providerName}, ${source.level}): ${roleText(row, source)}`));
 }
 const kindIcon: Readonly<Record<RowKind, IconName>> = {
 	skill: "book", "custom-tool": "tools", "builtin-tool": "tools", mcp: "server", "extension-module": "extensions", plugin: "package",
@@ -169,7 +186,7 @@ function itemOf(row: InventoryRow, note: string | null, extraTooltip: string | n
 	const checked = toggleable ? row.state !== "disabled" : null;
 	const shadowed = row.shadowed || row.state === "shadowed";
 	const byEntry = row.state === "disabled" && (row.disabledReason === "entry" || row.disabledReason === "invalid-entry");
-	const stateBit = shadowed ? "shadowed" : byEntry ? (row.disabledReason === "entry" ? `disabled by ${entryFile(row) ?? "an entry"}` : "no definition") : row.state === "disabled" ? "disabled" : null;
+	const stateBit = shadowed ? (row.shadowedBy === null ? "shadowed" : `shadowed by ${row.shadowedBy}`) : byEntry ? (row.disabledReason === "entry" ? `disabled by ${entryFile(row) ?? "an entry"}` : "no definition") : row.state === "disabled" ? "disabled" : null;
 	const bits = [stateBit, note, row.detail];
 	return {
 		key: `${row.kind}:${row.name}:${row.path ?? ""}`,
@@ -351,6 +368,13 @@ function fallback(view: ViewKind, reason: string, evidence: SessionEvidence | nu
 const VIEW_OF_ROW: Readonly<Record<RowKind, ViewKind>> = {
 	skill: "skills", "custom-tool": "tools", "builtin-tool": "tools", mcp: "mcp", "extension-module": "extensions", plugin: "extensions",
 };
+const REASONS_SHOWN = 2;
+/** The banner of an incomplete list: the sources OMP failed to read and why, or the bare fact when no reason could be named. */
+function incompleteNotice(reasons: readonly string[]): string {
+	if (reasons.length === 0) return "List may be incomplete: some sources failed to load.";
+	const more = reasons.length > REASONS_SHOWN ? ` (and ${reasons.length - REASONS_SHOWN} more, see the Desk log)` : "";
+	return `List may be incomplete: ${reasons.slice(0, REASONS_SHOWN).join("; ")}${more}.`;
+}
 
 export function projectView(input: ProjectionInput): ViewModel {
 	const { view, scope, inventory, evidence, profile } = input;
@@ -369,7 +393,7 @@ export function projectView(input: ProjectionInput): ViewModel {
 	const overridden = scope === "session" && inventory.projectOverridesDisabledExtensions && view !== "mcp" && view !== "extensions";
 	const notices = [
 		projected.notice,
-		incomplete ? "List may be incomplete: some sources failed to load." : null,
+		incomplete ? incompleteNotice(inventory.incompleteReasons.filter(entry => entry.view === view).map(entry => entry.reason)) : null,
 		overridden ? "Project config replaces the global list; switches here do not apply." : null,
 	].filter((text): text is string => text !== null);
 	const about = [...projected.about];
