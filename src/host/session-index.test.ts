@@ -3430,6 +3430,123 @@ describe("explicit stop of a recorded broker-owned host", () => {
 	});
 });
 
+// ── Recording a row stopped after Kill: bound to the incarnation that was killed ─────────
+
+/** A shared catalog with conditional commits, as the profile catalog has: `decide` sees what is committed *now*. */
+class ConditionalStore extends TestStore {
+	async transactRecords(changes: ReadonlyArray<{ key: string; base?: unknown; desired?: unknown; decide?: (latest: unknown) => { desired: unknown } | { refused: string } }>): Promise<void> {
+		for (const change of changes) {
+			const decided = change.decide === undefined ? { desired: change.desired } : change.decide(this.values.get(change.key));
+			if ("refused" in decided) throw new Error(decided.refused);
+			this.values.set(change.key, decided.desired);
+		}
+	}
+}
+
+describe("recording a killed row as stopped", () => {
+	const CAPTURED = {
+		slot: PROVEN_BROKER_SLOT,
+		brokerId: "broker-id-of-record",
+		brokerGeneration: "broker-generation-of-record",
+		attemptStartedAt: "2026-09-24T10:00:00.000Z",
+		hostPid: 6200,
+	};
+
+	async function fixtureOn(store: ConditionalStore, input: { readonly ownerGeneration?: string } = {}) {
+		const base = await identifiedAttempt(input);
+		store.value = base.store.value;
+		return { ...base, store, index: indexFor(store, base.claimDir) };
+	}
+
+	it("records the exact killed incarnation stopped, clears its host and releases the claim it took", async () => {
+		const fixture = await fixtureOn(new ConditionalStore());
+		const result = await fixture.index.reconcileKilledHost(fixture.tabId, CAPTURED);
+		assert.equal(result.kind, "recorded", JSON.stringify(result));
+		const row = fixture.index.get(fixture.tabId);
+		assert.equal(row?.host, null);
+		assert.equal(row?.runIntent, "stopped");
+		assert.equal(await readClaim(fixture.claimDir, fixture.file), null, "the claim taken for the write is released");
+		const committed = (fixture.store.value as { entries: Array<{ host: unknown; runIntent: string }> }).entries[0];
+		assert.equal(committed?.host, null);
+		assert.equal(committed?.runIntent, "stopped");
+	});
+
+	it("never records a replacement launch another window committed meanwhile as stopped", async () => {
+		const fixture = await fixtureOn(new ConditionalStore());
+		// Another window launched B after this window read A: the committed row now records B, this window still holds A.
+		const committed = fixture.store.value as { entries: Array<Record<string, unknown>> };
+		const replacement = { ...(fixture.host as object), startedAt: "2026-09-24T10:30:00.000Z", pid: 7200 };
+		fixture.store.value = { ...committed, entries: [{ ...committed.entries[0], host: replacement, runIntent: "running" }] };
+
+		const result = await fixture.index.reconcileKilledHost(fixture.tabId, CAPTURED);
+		assert.equal(result.kind, "skipped", JSON.stringify(result));
+		assert.equal(result.kind === "skipped" ? result.why : null, "changed");
+		const after = (fixture.store.value as { entries: Array<{ host: { startedAt: string } | null; runIntent: string }> }).entries[0];
+		assert.equal(after?.host?.startedAt, "2026-09-24T10:30:00.000Z", "the replacement's host record is untouched");
+		assert.equal(after?.runIntent, "running", "the replacement's run intent is untouched");
+	});
+
+	it("records nothing when the row already records another launch attempt, or no process", async () => {
+		const fixture = await fixtureOn(new ConditionalStore());
+		const other = await fixture.index.reconcileKilledHost(fixture.tabId, { ...CAPTURED, attemptStartedAt: "2026-09-24T09:00:00.000Z" });
+		assert.equal(other.kind === "skipped" ? other.why : other.kind, "changed");
+		const otherBroker = await fixture.index.reconcileKilledHost(fixture.tabId, { ...CAPTURED, brokerGeneration: "another" });
+		assert.equal(otherBroker.kind === "skipped" ? otherBroker.why : otherBroker.kind, "changed");
+		assert.equal(fixture.index.get(fixture.tabId)?.runIntent, "running");
+		assert.equal((await fixture.index.reconcileKilledHost("tab:missing", CAPTURED)).kind, "skipped");
+	});
+
+	it("leaves a row a live rival window holds to that window, and takes nothing from its claim", async () => {
+		const fixture = await fixtureOn(new ConditionalStore(), { ownerGeneration: "generation-elsewhere" });
+		const held = await acquireClaim(fixture.claimDir, fixture.file, "rival-owner", createClaimHolder());
+		const before = await readClaim(fixture.claimDir, fixture.file);
+		const result = await fixture.index.reconcileKilledHost(fixture.tabId, CAPTURED);
+		assert.equal(result.kind === "skipped" ? result.why : result.kind, "rival");
+		assert.deepEqual(await readClaim(fixture.claimDir, fixture.file), before);
+		assert.equal(fixture.index.get(fixture.tabId)?.runIntent, "running");
+		await held.release();
+	});
+
+	it("reports a write the shared catalog could not take, and keeps the row as it was", async () => {
+		const store = new ConditionalStore();
+		const fixture = await fixtureOn(store);
+		store.transactRecords = async () => { throw new Error("the catalog is locked"); };
+		const result = await fixture.index.reconcileKilledHost(fixture.tabId, CAPTURED);
+		assert.equal(result.kind, "failed", JSON.stringify(result));
+		assert.equal(fixture.index.get(fixture.tabId)?.runIntent, "running");
+		assert.notEqual(fixture.index.get(fixture.tabId)?.host, null);
+		assert.equal(await readClaim(fixture.claimDir, fixture.file), null, "the claim taken for the write is released");
+	});
+});
+
+describe("recording a killed row while other saves are queued", () => {
+	it("neither lets an unrelated save publish the tentative stopped row nor lets a refused one be observed", async () => {
+		const store = new ConditionalStore();
+		const base = await identifiedAttempt();
+		store.value = base.store.value;
+		const index = indexFor(store, base.claimDir);
+		const committed = store.value as { entries: Array<Record<string, unknown>> };
+		const replacement = { ...(base.host as object), startedAt: "2026-09-24T10:30:00.000Z", pid: 7200 };
+		store.value = { ...committed, entries: [{ ...committed.entries[0], host: replacement, runIntent: "running" }] };
+		const captured = { slot: PROVEN_BROKER_SLOT, brokerId: "broker-id-of-record", brokerGeneration: "broker-generation-of-record", attemptStartedAt: "2026-09-24T10:00:00.000Z", hostPid: 6200 };
+		const observed: Array<string | undefined> = [];
+		const original = store.update.bind(store);
+		// Every unconditional save of the shared record is looked at: none may carry a stopped row. The catalog merges a row this
+		// window did not change into what is committed, so the double keeps the committed rows and takes the rest.
+		store.update = async (key: string, value: unknown) => {
+			if (key !== SESSION_INDEX_STORAGE_KEY) return await original(key, value);
+			observed.push((value as { entries: Array<{ runIntent: string }> }).entries[0]?.runIntent);
+			await original(key, { ...(value as object), entries: (store.value as { entries: unknown[] }).entries });
+		};
+		const [result] = await Promise.all([index.reconcileKilledHost(base.tabId, captured), index.setActiveTab(base.tabId), index.setActiveTab(base.tabId)]);
+		assert.equal(result.kind, "skipped", JSON.stringify(result));
+		assert.ok(!observed.includes("stopped"), "no unconditional save published the stopped row");
+		const after = (store.value as { entries: Array<{ host: { startedAt: string } | null; runIntent: string }> }).entries[0];
+		assert.equal(after?.host?.startedAt, "2026-09-24T10:30:00.000Z");
+		assert.equal(after?.runIntent, "running");
+	});
+});
+
 describe("same-editor managed transport replacement", () => {
 	async function started(fileless = false) {
 		const workspace = await tempWorkspace();

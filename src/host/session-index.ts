@@ -1536,6 +1536,25 @@ export interface StopRecordedHostOptions {
 	readonly expect: { readonly attemptStartedAt: string; readonly pid: number | null };
 }
 
+
+/** The incarnation of a session's recorded process that Kill examined. */
+export interface KilledHostCapture {
+	readonly slot: string;
+	readonly brokerId: string;
+	readonly brokerGeneration: string;
+	readonly attemptStartedAt: string;
+	readonly hostPid: number | null;
+}
+
+/** What recording a killed row as stopped did. `skipped` is benign: the row's owner or a newer launch is not this call's to settle. */
+export type KilledHostReconcileResult =
+	| { readonly kind: "recorded"; readonly slot: string; readonly detail: string }
+	| { readonly kind: "skipped"; readonly why: "driven" | "changed" | "rival"; readonly detail: string }
+	| { readonly kind: "failed"; readonly detail: string };
+
+/** Sentinel the conditional shared write returns when the committed row no longer records the expected process. */
+const HOST_CHANGED = "The row's recorded process changed before this record was accepted.";
+
 /** What an explicit stop of one row's recorded host did, in words the launcher can show. */
 export interface StopRecordedHostResult {
 	/** `true` only when the exact recorded writer was stopped and its claim released. */
@@ -3168,6 +3187,77 @@ export class SessionIndex {
 		return { stopped: true, detail: attempt.detail, slot: attempt.slot };
 	}
 
+	/**
+	 * Record a row stopped after its exact recorded process was proven gone *by someone else* (Kill).
+	 *
+	 * Unlike {@link SessionIndex.stopRecordedHost} this takes no rival-Stop exception and asks no broker: it
+	 * applies only to the incarnation named by `captured`. Under the tab's gate it requires that this window
+	 * does not drive the host, that the row still records that incarnation, and that no live rival window
+	 * holds the claim; it then takes the claim (a rival that acquires meanwhile refuses it) and commits the
+	 * stopped row with a conditional shared write that is refused when the *committed* row no longer records
+	 * that incarnation, so a replacement launch another window published meanwhile is never recorded stopped.
+	 */
+	async reconcileKilledHost(tabId: string, captured: KilledHostCapture, lease?: TabLifecycleLease): Promise<KilledHostReconcileResult> {
+		return await this.withinTabLifecycle(tabId, lease, async () => {
+			const skipped = (why: "driven" | "changed" | "rival", detail: string): KilledHostReconcileResult => ({ kind: "skipped", why, detail });
+			const entry = this.#entries.get(tabId);
+			if (entry === undefined || entry.host === null) return skipped("changed", "The row records no process any more.");
+			if (this.#drivesHost(tabId)) return skipped("driven", "This window drives the session; its own broker watch ends it.");
+			const matches = (host: { readonly startedAt: string; readonly pid: number | null; readonly rpc?: RecordedRpcIdentity | null } | null): boolean =>
+				host !== null && host.startedAt === captured.attemptStartedAt && host.pid === captured.hostPid &&
+				host.rpc?.slot === captured.slot && host.rpc?.brokerId === captured.brokerId && host.rpc?.brokerGeneration === captured.brokerGeneration;
+			if (!matches(entry.host)) return skipped("changed", "The row records another process than the one that was killed.");
+			const identity = entry.sessionFile ?? entry.ownership?.draftIdentity ?? null;
+			if (identity === null) return { kind: "failed", detail: "The row recorded neither a session file nor a reserved identity, so its record cannot be held." };
+			const observed = await this.#readClaim(identity);
+			if (!observed.ok) return { kind: "failed", detail: observed.detail };
+			const claimBefore = observed.claim;
+			if (claimBefore !== null && claimBefore.holderId !== this.#claimHolder.id && claimHolderMayBeAlive(claimBefore)) {
+				return skipped("rival", "Another live window holds the session; its own watch ends it.");
+			}
+			const generation = entry.ownership?.ownerGeneration ?? createOwnerGeneration();
+			let claim: SessionClaim;
+			try {
+				claim = await acquireClaim(this.#claimStorageDir, identity, generation, this.#claimHolder);
+			} catch (error) {
+				if (error instanceof ClaimConflictError) return skipped("rival", "Another window took the session meanwhile; its own watch ends it.");
+				return { kind: "failed", detail: "The session could not be prepared to record as stopped." };
+			}
+			const stoppedAt = this.#timestamp();
+			const detail = "This session's process was killed. Resume to continue.";
+			const stop = (row: { host: unknown; runIntent: string; ownership: { ownerGeneration: string; draftIdentity: string | null; releasedAt: string | null } | null; lastActiveAt: string }): void => {
+				row.runIntent = "stopped";
+				row.host = null;
+				if (row.ownership !== null) row.ownership = { ownerGeneration: row.ownership.ownerGeneration, draftIdentity: row.ownership.draftIdentity, releasedAt: stoppedAt };
+				row.lastActiveAt = stoppedAt;
+			};
+			// Nothing of this window's own state changes until the conditional shared write lands (see `#persistNow`): an
+			// unrelated save queued meanwhile can neither publish a tentative stopped row nor observe a refused one.
+			const failure = await this.#persistNow(undefined, undefined, {
+				tabId,
+				matches,
+				apply: row => stop(row),
+				publish: () => {
+					stop(entry);
+					entry.availability = entry.sessionFile === null ? "draft" : "saved";
+					entry.detail = detail;
+					this.#live.delete(tabId);
+				},
+			});
+			if (failure !== null) {
+				await this.#releaseQuietly(claim);
+				if (failure === HOST_CHANGED) {
+					await this.refreshFromStore().catch(() => undefined);
+					return skipped("changed", "Another window recorded a different process for this row meanwhile; nothing was recorded.");
+				}
+				return { kind: "failed", detail: failure };
+			}
+			const held = await this.#releaseQuietly(claim);
+			if (held !== null) return { kind: "failed", detail: `The row was recorded as stopped, but its claim could not be released: ${held}` };
+			return { kind: "recorded", slot: captured.slot, detail: "This session's process was killed. Resume to continue." };
+		});
+	}
+
 	/** Forget metadata under the tab gate; only current positive ownership excludes it. */
 	async remove(tabId: string, reconciler?: OwnerReconciler): Promise<RemoveResult> {
 		return await this.withinTabLifecycle(tabId, undefined, async () => await this.#removeHeld(tabId, reconciler));
@@ -3946,12 +4036,21 @@ export class SessionIndex {
 		readonly before: SharedEntry;
 		readonly sessionId: string;
 		readonly previousSessionId?: string;
+	}, expectHost?: {
+		readonly tabId: string;
+		/** Whether the *committed* row's host is still the incarnation this write was decided against. */
+		matches(host: { readonly startedAt: string; readonly pid: number | null; readonly rpc?: RecordedRpcIdentity | null } | null): boolean;
+		/** Write the tentative row into the private snapshot. */
+		apply(row: SharedEntry): void;
+		/** Make this window's own state follow a landed write. */
+		publish(): void;
 	}): Promise<string | null> {
 		let failure: string | null = null;
 		// Capture each snapshot only at its serialized turn. An earlier identity transaction
 		// publishes or refuses before another save can capture that row, preserving other edits.
 		this.#persistChain = this.#persistChain.then(async () => {
 			let rejectedIdentity: SharedEntry | null = null;
+			let hostChanged = false;
 			const snapshot: SharedSnapshot = {
 				version: INDEX_VERSION,
 				nextOrdinal: this.#nextOrdinal,
@@ -3964,6 +4063,11 @@ export class SessionIndex {
 					if (desired.sessionFile === null) desired.sessionId = identity.sessionId;
 					if (desired.host !== null) desired.host = { ...desired.host, sessionId: identity.sessionId };
 				}
+			}
+			if (expectHost !== undefined) {
+				// The tentative row exists only in this private snapshot until the conditional write lands.
+				const tentative = snapshot.entries.find(row => row.tabId === expectHost.tabId);
+				if (tentative !== undefined) expectHost.apply(tentative);
 			}
 			const local: LocalSnapshot = {
 				version: LOCAL_VERSION,
@@ -3984,6 +4088,16 @@ export class SessionIndex {
 						}
 						return { desired: mergeSessionIndexRecords({ base: this.#sharedBase, desired: snapshot, latest }).value };
 					} }]);
+				} else if (expectHost !== undefined) {
+					if (this.#store.transactRecords === undefined) throw new Error("The shared catalog cannot atomically accept a conditional record.");
+					await this.#store.transactRecords([{ key: SESSION_INDEX_STORAGE_KEY, base: this.#sharedBase, decide: latest => {
+						const committed = isPersistedSnapshot(latest) ? latest.entries.find(row => row.tabId === expectHost.tabId) : undefined;
+						if (committed === undefined || !expectHost.matches(committed.host)) {
+							hostChanged = true;
+							return { refused: "The row's recorded process changed before this record was accepted." };
+						}
+						return { desired: mergeSessionIndexRecords({ base: this.#sharedBase, desired: snapshot, latest }).value };
+					} }]);
 				} else if (companion !== undefined) {
 					if (this.#store.transactRecords === undefined) throw new Error("The shared catalog cannot atomically move the native broker mapping.");
 					await this.#store.transactRecords([{ key: SESSION_INDEX_STORAGE_KEY, desired: snapshot, base: this.#sharedBase }, companion]);
@@ -3999,10 +4113,16 @@ export class SessionIndex {
 					const live = this.#live.get(identity.before.tabId);
 					if (live !== undefined) this.#live.set(identity.before.tabId, { ...live, host: { ...live.host, sessionId: identity.sessionId } });
 				}
+				// The conditional write landed: only now does this window's own state follow it, inside the same serialized turn.
+				if (expectHost !== undefined) expectHost.publish();
 				this.#persistError = null;
 				this.#persistRetries = 0;
 				this.#sharedBase = snapshot;
 			} catch (error) {
+				if (hostChanged) {
+					failure = HOST_CHANGED;
+					return;
+				}
 				if (rejectedIdentity !== null) {
 					// Keep the committed runtime identity, without discarding title/unread edits
 					// made while the CAS waited. A queued ordinary save must not reassert a stale host.
