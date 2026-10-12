@@ -144,19 +144,19 @@ import * as fixtureVscode from 'vscode';
 import { acquireClaim as fixtureClaim, createClaimHolder as fixtureHolder, setClaimFailures } from './host/session-claim';
 import { capturedDesktopXml, capturedDesktopXmls, resetDesktopXmls } from './host/desktop-notifications';
 import { providerLoginFixture, storedRenameFixture } from './host/native-terminal';
-const fixtureOpenPanel = openPanel;
+import { bridgeViewType } from './host/bridge-identity';
 // The harness runs windows without an activation context: the cases that need one set it on the window.
 const fixtureContext = undefined as never;
 const fixtureWindow = () => windowState();
 export const harness = {
-  connectHostControl, reconnectHostControl, establishControl, closeSession, launchHost, presentRestoreOutcome, openTab, handleChatEvent, bindPanel, restoreTabs, bridgeSerializerFor,
+  connectHostControl, reconnectHostControl, establishControl, closeSession, launchHost, presentRestoreOutcome, openTab, handleChatEvent, restoreTabs,
   handleRestoreOutcome, renameSession, reloadSession, handleGuestControlRequest, panelResponder,
   switchSessionMode, restartChat, openSessionInMode, defaultSessionMode, chooseDefaultSessionView, newSession, startNewSession,
   newSessionInPlace, deleteSessionInPlace,
   panelFactory(handler) {
-    const previous = fixtureVscode.window.createWebviewPanel;
-    fixtureVscode.window.createWebviewPanel = handler;
-    return () => { fixtureVscode.window.createWebviewPanel = previous; };
+    const w = fixtureWindow(), previous = w.editorPanels;
+    w.editorPanels = registerEditorPanels({ ...editorPanelsDeps(), createWebviewPanel: handler });
+    return () => { w.editorPanels = previous; };
   },
   installWindow(next) { window = next; },
   window: () => windowState(),
@@ -166,7 +166,7 @@ export const harness = {
   bindConversationIdentity, retryPendingIdentity, SessionTreeProvider,
   terminalFontMessage, revealDesktopNotification, revealActiveSession, releaseSelectionFromOtherWindow, refreshLauncher, launcherFacts, notifierFor, forgetTurnActivity,
   copyActiveTerminalScreen, activateNativeEditor, postPanelAction,
-  handleBridgeRequest, bridgeDocumentEligible,
+  handleBridgeRequest,
   subscribeProviderLoginRefresh, refreshDefaultProviderModels, refreshSessionModels, recordSessionModels, runChatAction, openProviderLogin, loginProviderFromPalette,
   providerLoginFixture,
   storedRenameFixture,
@@ -201,7 +201,7 @@ export const harness = {
     w.ptyGate.client = async () => ({ attach: async () => ({ handle: liveness === 'unreachable' ? null : { refreshStatus: async () => ({ state: liveness }) } }) });
     return { slot, state, record: () => w.shellSlots.get(slot), remove: () => w.shellSlots.remove(slot) };
   },
-  hostGeneration: () => fixtureWindow().bridgeHostGeneration,
+  hostGeneration: () => fixtureWindow().bridgeHost.hostGeneration,
   clipboardWrites: () => fixtureVscode.env.clipboard.writes,
   desktopPayload: capturedDesktopXml,
   desktopPayloads: capturedDesktopXmls,
@@ -223,12 +223,12 @@ export const harness = {
   },
   configuration(values) { fixtureVscode.workspace.configurationValues = values; },
   editorLifecycle() {
-    const previous = openPanel, previousBridge = ensureBridgeEndpoint;
-    openPanel = fixtureOpenPanel;
+    const w = fixtureWindow(), previous = { editorPanels: w.editorPanels, bridgeHost: w.bridgeHost };
+    w.editorPanels = registerEditorPanels(editorPanelsDeps());
     // Bridge bootstrap is covered by real sockets separately; these cases drive editor
     // identity, disposal and runtime delivery through the ordinary panel route.
-    ensureBridgeEndpoint = async () => null;
-    return () => { openPanel = previous; ensureBridgeEndpoint = previousBridge; };
+    w.bridgeHost = registerBridgeHost({ ...bridgeHostDeps(), ensureEndpoint: async () => null });
+    return () => { w.editorPanels = previous.editorPanels; w.bridgeHost = previous.bridgeHost; };
   },
   createPanel: () => fixtureVscode.window.createWebviewPanel(),
   warning(handler) { fixtureVscode.window.showWarningMessage = handler; },
@@ -248,7 +248,7 @@ export const harness = {
     w.context = context;
     w.reconciler = createOwnerReconciler(ports);
     launcher = () => hostLauncher;
-    openPanel = () => undefined;
+    w.editorPanels = { ...w.editorPanels, openPanel: () => undefined };
     // The broker facts of the fixture's rows come in through the handle's deps, not by reassigning a function of the module.
     w.sessionActions = registerSessionActions({ ...sessionActionsDeps(), brokerProvenanceFor: () => ({ kind: 'slot', slot: 'host:legacy-fixture' }), recordedHostStopPort: () => stopPort });
     const dialogs = [];
@@ -256,8 +256,8 @@ export const harness = {
     fixtureVscode.window.showInputBox = async () => "Recovered draft title";
     return dialogs;
   },
-  commitBridgeDocument, refreshBridgeReadiness, attachChatRoute, state: tabState,
-  reviveEditorPanel, openSession, openPanel: fixtureOpenPanel, requestSessionRowExpand, viewTypeOf: bridgeViewType,
+  attachChatRoute, state: tabState,
+  reviveEditorPanel, openSession, requestSessionRowExpand, viewTypeOf: bridgeViewType,
   tabStrip(columns, activeColumn = 0) {
     // One group per column; each entry is the view type of one webview editor tab.
     const groups = columns.map((viewTypes, at) => {
@@ -354,6 +354,16 @@ interface WindowFixture {
     runChatCommand(...args: unknown[]): Promise<"accepted" | "refused" | "unconfirmed" | "ignored">;
   };
   readonly sessionPanelColumns: Map<string, number>;
+  editorPanels: {
+    openPanel(...args: unknown[]): void;
+    bindPanel(...args: unknown[]): void;
+    bridgeSerializerFor(...args: unknown[]): { deserializeWebviewPanel(panel: unknown, state: unknown): Promise<void> };
+  };
+  bridgeHost: {
+    documentEligible(editorId: string, documentId: string): boolean;
+    commitDocument(tabId: string): Promise<void>;
+    refreshReadiness(tabId: string): void;
+  };
   readonly hostControlAttempts: WeakMap<object, Promise<void>>;
 }
 
@@ -364,7 +374,6 @@ interface Harness {
   window(): WindowFixture;
   state(tabId: string): State;
   editor(index: unknown, endpoint: unknown, panel: unknown, editorId?: string, tabId?: string): State;
-  bridgeDocumentEligible(editorId: string, documentId: string): boolean;
   connectHostControl(...args: unknown[]): Promise<void>;
   reconnectHostControl(...args: unknown[]): Promise<void>;
   startNativeWatch(...args: unknown[]): void;
@@ -391,9 +400,7 @@ interface Harness {
   sessionModelAvailability(tabId: string): boolean | undefined;
   providerLoginFixture: { enabled: boolean; unresolved: boolean; models: unknown[]; calls: { args: string[]; options: { env: Record<string, string> } }[]; logins: { env: Record<string, string>; cwd: string }[]; read: (() => Promise<{ stdout: string; stderr: string; exitCode: number }>) | null; resolve: (() => Promise<{ command: string; prefixArgs: string[]; version: string }>) | null };
   storedRenameFixture: { enabled: boolean; root: string; requests: Parameters<typeof renameStoppedSessionTitle>[0][]; rename: ((input: Parameters<typeof renameStoppedSessionTitle>[0]) => ReturnType<typeof renameStoppedSessionTitle>) | null };
-  bindPanel(...args: unknown[]): void;
   restoreTabs(...args: unknown[]): Promise<void>;
-  bridgeSerializerFor(...args: unknown[]): { deserializeWebviewPanel(panel: unknown, state: unknown): Promise<void> };
   editorLifecycle(): () => void;
   createPanel(): LifecyclePanel;
   startConversation(...args: unknown[]): Promise<void>;
@@ -456,16 +463,13 @@ interface Harness {
   panelResponder(...args: unknown[]): unknown;
   rowState(entry: unknown, facts: unknown): string;
   policy(...args: unknown[]): { message: string; detail?: string; action: string }[];
-  commitBridgeDocument(tabId: string): Promise<void>;
   reviveEditorPanel(index: unknown, tabId: string): Promise<{ selected: boolean; panel: unknown }>;
-  openPanel(...args: unknown[]): void;
   requestSessionRowExpand(tabId: string): void;
   viewTypeOf(tabId: string, editorId: string): string;
   tabStrip(columns: readonly (readonly string[])[], activeColumn?: number): { viewColumn: number; tabs: { isActive: boolean; group: unknown }[] }[];
   commandHandler(handler: ((command: string, ...args: unknown[]) => void) | null): unknown[][];
   bindRevived(slot: string, panel: unknown): void;
   markPageRunning(slot: string): void;
-  refreshBridgeReadiness(tabId: string): void;
   attachChatRoute(slot: string): void;
   SessionIndex: typeof SessionIndex;
   SessionTreeProvider: typeof import("./views/session-tree.ts").SessionTreeProvider;
@@ -973,7 +977,7 @@ describe("footer host readback", () => {
       records: new BridgeRecords({ root: path.join(root, "passive-provider-login"), secrets: saved.context.secrets }),
       scope: { workspace: "a".repeat(64), tabId: TAB, editorId: EDITOR },
       hostGeneration: harness.hostGeneration(),
-      eligible: documentId => harness.bridgeDocumentEligible(EDITOR, documentId),
+      eligible: documentId => harness.window().bridgeHost.documentEligible(EDITOR, documentId),
       onRequest: () => assert.fail("a passive page has no bridge request authority"),
     });
     resources.push(endpoint);
@@ -984,11 +988,11 @@ describe("footer host readback", () => {
     harness.subscribeProviderLoginRefresh({ subscriptions }, index);
     const command = { type: "omp:chat-command", command: "provider-login" };
     try {
-      assert.equal(harness.bridgeDocumentEligible(EDITOR, DOCUMENT), false, "the real authentication/ACK eligibility rejects a passive editor");
+      assert.equal(harness.window().bridgeHost.documentEligible(EDITOR, DOCUMENT), false, "the real authentication/ACK eligibility rejects a passive editor");
       await harness.handlePassiveSlotMessage(EDITOR, panel, command);
       assert.equal(fixture.logins.length, 1);
       assert.deepEqual(fixture.logins[0]!.env, { OMP_PROFILE: "default" });
-      assert.equal(harness.bridgeDocumentEligible(EDITOR, DOCUMENT), false, "login grants no passive bridge authority");
+      assert.equal(harness.window().bridgeHost.documentEligible(EDITOR, DOCUMENT), false, "login grants no passive bridge authority");
       harness.closeLoginTerminal("omp login");
       await harness.handlePassiveSlotMessage(EDITOR, harness.createPanel(), command);
       await harness.handlePassiveSlotMessage(EDITOR, panel, { ...command, profile: "other" });
@@ -1016,7 +1020,7 @@ describe("footer host readback", () => {
     const endpoint = new BridgeEditorEndpoint({
       records: new BridgeRecords({ root: path.join(root, "bridge-provider-login"), secrets: saved.context.secrets }),
       scope, hostGeneration: harness.hostGeneration(),
-      eligible: documentId => harness.bridgeDocumentEligible(EDITOR, documentId),
+      eligible: documentId => harness.window().bridgeHost.documentEligible(EDITOR, documentId),
       onRequest: (peer, documentId, request) => harness.handleBridgeRequest(EDITOR, documentId, peer, request),
     });
     resources.push(endpoint);
@@ -1695,7 +1699,7 @@ describe("native replacement lifecycle", () => {
     assert.notEqual(documentId, DOCUMENT, "a new native process requires a fresh document capability");
     assert.equal(await records.readSecret(scope, DOCUMENT), null, "the old child's document credential is retired");
     first.pinOrigin(documentId, ORIGIN);
-    await harness.commitBridgeDocument(TAB);
+    await harness.window().bridgeHost.commitDocument(TAB);
     const delivery = await first.delivery(); assert.ok(delivery);
     assert.equal(bindingMatches(first.committedBinding()!, nativeBinding(resumed)), true);
     assert.equal(first.committedBinding()?.sessionFile, old.sessionFile, "Resume preserves the exact transcript");
@@ -1814,7 +1818,7 @@ describe("native replacement lifecycle", () => {
         documentId = priorEditor.bridge!.documentId;
         assert.notEqual(documentId, DOCUMENT);
         first.pinOrigin(documentId, ORIGIN);
-        await harness.commitBridgeDocument(TAB);
+        await harness.window().bridgeHost.commitDocument(TAB);
         const committed = await first.delivery(); assert.ok(committed); delivery = committed;
         assert.equal(bindingMatches(first.committedBinding()!, nativeBinding(resumed)), true);
         survivor = resumed;
@@ -2783,7 +2787,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			}
 			f.state.panel = null;
 			f.state.runtime = activeRuntime;
-			harness.bindPanel(f.saved.context, index, "d".repeat(32), f.row.tabId, oldPanel, "created");
+			harness.window().editorPanels.bindPanel(f.saved.context, index, "d".repeat(32), f.row.tabId, oldPanel, "created");
 			await harness.openTab(f.saved.context, index, f.row.tabId, "opened");
 			if (mode === "terminal") await harness.startConversation(index, f.row.tabId, native, f.file, false);
 			try {
@@ -3633,7 +3637,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 		const restorePanels = harness.editorLifecycle();
 		const panel = harness.createPanel();
 		try {
-			harness.bindPanel(f.saved.context, f.index, f.state.slotId, f.row.tabId, panel, "created");
+			harness.window().editorPanels.bindPanel(f.saved.context, f.index, f.state.slotId, f.row.tabId, panel, "created");
 			await nextTurn();
 			const switching = harness.switchSessionMode(f.saved.context, f.index, f.state, "chat");
 			await nextTurn();
@@ -4157,7 +4161,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			harness.reset(reloaded, f.chat);
 			for (const editor of saved) {
 				const panel = harness.createPanel();
-				await harness.bridgeSerializerFor(f.saved.context, reloaded, editor.viewType).deserializeWebviewPanel(panel, {
+				await harness.window().editorPanels.bridgeSerializerFor(f.saved.context, reloaded, editor.viewType).deserializeWebviewPanel(panel, {
 					version: 2, tabId: editor.tabId, editorId: editor.editorId,
 				});
 				assert.equal(harness.state(editor.editorId).mode, editor.mode);
@@ -4314,7 +4318,7 @@ describe("editors VS Code restored but has not shown yet", () => {
     });
     const warnings: string[] = [];
     harness.warning(message => { warnings.push(String(message)); });
-    harness.openPanel({ extensionUri: { fsPath: root } }, index, TAB_B);
+    harness.window().editorPanels.openPanel({ extensionUri: { fsPath: root } }, index, TAB_B);
     for (let turn = 0; turn < 20 && calls.length === 0; turn++) await nextTurn();
     assert.deepEqual(calls, [["workbench.action.openEditorAtIndex", 0]]);
     assert.deepEqual(warnings, [], "no \"already open\" warning without showing the tab");
@@ -4886,7 +4890,7 @@ describe("a command sent while its editor is still being elected", () => {
     const slot = "e".repeat(32);
     const release = Promise.withResolvers<void>();
     store.hold = release.promise;
-    harness.bindPanel(saved.context, index, slot, row.tabId, panel, "created");
+    harness.window().editorPanels.bindPanel(saved.context, index, slot, row.tabId, panel, "created");
     const posted = () => panel.messages as { type: string; requestId?: number; available?: boolean; reason?: string; frame?: { type: string; message?: string } }[];
     // The control request created this conversation's footer binding, whose Git-branch observer may
     // still have a `git` child running in the session's working directory. Disposing it kills the

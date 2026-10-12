@@ -10,9 +10,8 @@ import { createHash } from "node:crypto";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
-import { UNAVAILABLE_RELOAD_MESSAGE, createDetailHtml, createGuestHtml, createShellHtml, createUnavailableGuestHtml } from "./host/guest-webview";
+import { UNAVAILABLE_RELOAD_MESSAGE, createDetailHtml, createShellHtml, createUnavailableGuestHtml } from "./host/guest-webview";
 import { chatExitText, type ChatExitReason } from "./chat/exit-reason";
-import { persistedTabId } from "./shared/panel-identity";
 import { installedNerdFonts } from "./host/terminal-fonts";
 import { terminalFontFamily } from "./webview/lib/terminal-theme";
 import {
@@ -127,6 +126,10 @@ import { createRecordedHostStopPort, readBrokerProvenance, registerSessionAction
 import type { SessionActions, SessionActionsDeps } from "./wiring/session-actions";
 import { CHAT_COMMAND_TYPES, registerGuestDispatcher } from "./wiring/guest-dispatcher";
 import type { CarriedDraft, GuestDispatcher, GuestDispatcherDeps } from "./wiring/guest-dispatcher";
+import { registerBridgeHost } from "./wiring/bridge-host";
+import type { BridgeHost, BridgeHostDeps } from "./wiring/bridge-host";
+import { EDITOR_TAB_ICON, UPDATED_ON_DISK_DETAIL, registerEditorPanels } from "./wiring/editor-panels";
+import type { EditorPanels, EditorPanelsDeps, PanelDocument } from "./wiring/editor-panels";
 import { registerDeskSettingsView } from "./host/desk-settings/view";
 import type { SessionToolsTarget } from "./host/session-tools";
 import type { LauncherTreeItem, SessionLauncherFacts, SessionOwnershipFacts } from "./views/session-tree";
@@ -162,29 +165,17 @@ import type { ChatDisplayPreferences, ChatWebviewMessage } from "./protocol/chat
 // The reconnecting bridge (ADR-0023): one exact listener per actual editor, durable
 // records, one route per document, and one admission path for irreversible changes.
 import { BridgeEditorEndpoint, BRIDGE_GUEST_RELOAD_REASON } from "./host/bridge-endpoint";
-import type { BridgeBootstrapDelivery } from "./host/bridge-endpoint";
-import { BridgeRecords, bindingMatches } from "./host/bridge-records";
-import type { BridgeNativeBinding, BridgeRecordScope } from "./host/bridge-records";
+import { bindingMatches } from "./host/bridge-records";
 import { BridgeAdmissionError } from "./host/bridge-route";
 import type { BridgeDocumentRoute, BridgeEndpointState, BridgeReservation } from "./host/bridge-route";
 import { EditorCoordinator } from "./host/editor-coordinator";
-import { retireClosedEditorBridge } from "./host/bridge-lifecycle";
 import type { BridgeAdmittedRequest, BridgeSession } from "./host/bridge-listener";
-import {
-  bridgeViewType,
-  decodeBridgeViewType,
-  persistedBridgeState,
-  recoveredBridgePanelState,
-  tabInputIdentity,
-  workspaceIdentityText,
-} from "./host/bridge-identity";
+import { tabInputIdentity } from "./host/bridge-identity";
 import {
   BRIDGE_MAX_PLAINTEXT_BYTES,
-  BRIDGE_PATH,
   asciiJsonText,
   createToken,
   decodeBase64Url,
-  encodeBase64Url,
   encodeHex,
   randomBytes,
   sha256,
@@ -192,7 +183,7 @@ import {
 import { isPanelTabId, persistedShellSlotId, shellIdentityBootstrapSource } from "./shared/panel-identity";
 import { isSafeBoundaryText, parseGuestWebviewMessage, type GuestChatCommand, type GuestRecallPromptMessage } from "./protocol/messages";
 import { DETAIL_VIEW_TYPE, DetailTabs } from "./host/detail-tabs";
-import { EDITOR_GROUP_FOCUS_COMMANDS, arrangeChatGroup, chatGroupColumn, chatPlacement, strayEmptyGroups, type ChatPlacement } from "./host/chat-layout";
+import { EDITOR_GROUP_FOCUS_COMMANDS } from "./host/chat-layout";
 // The folder shell's terminal (ADR-0024): the extension-owned PTY broker is the writer, the
 // panel is only a frontend, and this module owns the glue between them.
 import { PtyBrokerClient } from "./host/pty-client";
@@ -249,10 +240,6 @@ import type {
   GuestPanelAction,
   GuestPanelActionMessage,
   GuestInsertTextMessage,
-  GuestRouteOfferMessage,
-  GuestRouteAckMessage,
-  GuestBridgeAckMessage,
-  GuestBridgeBindMessage,
   GuestHostMessage,
   GuestSessionViewMessage,
   GuestTerminalFontMessage,
@@ -350,13 +337,6 @@ const LEASE_HELPER = "out/session-lease-probe.ps1";
 const RENAME_HELPER_SCRIPT = "media/rename-session.mjs";
 /** Packaged Bun helper that lists the installed OMP's builtin slash commands (`host/slash-registry.ts`). */
 const SLASH_REGISTRY_HELPER = "media/slash-registry.mjs";
-/**
- * The icon every OMP chat editor's tab carries, from this extension's own media.
- *
- * A tab is recognized as an OMP session by this icon rather than by a title
- * prefix, so the title itself is free to be exactly the session's own name.
- */
-const EDITOR_TAB_ICON = "media/omp-icon.png";
 /** Chat publishes promptly; native startup can wait on a heavy workspace. */
 const CONTROL_RENDEZVOUS_TIMEOUT_MS = 15_000;
 const NATIVE_CONTROL_RENDEZVOUS_TIMEOUT_MS = 60_000;
@@ -583,23 +563,19 @@ interface WindowState {
    */
   readonly tabs: Map<string, TabState>;
   /**
-   * This activation's host generation `H`.
-   *
-   * One per extension-host activation, not per editor: it is what makes an
-   * acknowledgement, a reply or a mutation minted for a previous host unusable in
-   * this one, so a restarted host needs no coordination with the host it replaced.
+   * The window's reconnecting bridge (ADR-0023): the endpoints and documents of its editors, their routes and the host
+   * generation. It owns the workspace hash, the record store, the endpoints being created and the serializer types. It is
+   * mutable only because the lifecycle harness replaces it with a handle built from fake facts; no product code assigns it.
    */
-  readonly bridgeHostGeneration: Uint8Array;
-  /** This window's canonical workspace hash `W`, resolved once per activation. */
-  bridgeWorkspace: string | null;
-  /** Durable bridge records of this workspace, created on first use. */
-  bridgeStore: BridgeRecords | null;
-  /** One endpoint per actual editor (`E`) this window serves. */
+  bridgeHost: BridgeHost<TabState>;
+  /**
+   * The window's session editors as VS Code panels: where one opens, how a panel becomes a chat surface, the document it
+   * shows and the serializers that revive it. Mutable only because the lifecycle harness replaces it with a handle built
+   * from fake facts; no product code assigns it.
+   */
+  editorPanels: EditorPanels;
+  /** One endpoint per actual editor (`E`) this window serves; the bridge host creates them and `dispose` closes them. */
   readonly bridgeEndpoints: Map<string, BridgeEditorEndpoint>;
-  /** Endpoint creation must be single-flight: concurrent restore, tab and panel callbacks share its exact port. */
-  readonly pendingBridgeEndpoints: Map<string, Promise<BridgeEditorEndpoint | null>>;
-  /** Dynamic bridge view types this activation registered a serializer for. */
-  readonly bridgeSerializerTypes: Set<string>;
   /** Editor ids present in this window's actual editor membership right now. */
   readonly bridgeLiveEditors: Set<string>;
   /** The one-winner reservation table of this window's editors (ADR-0019/0023). */
@@ -937,7 +913,7 @@ function windowRoutingDeps(): WindowRoutingDeps {
     hasEditorTab: slot => editorTabOf(slot) !== null,
     selectEditorTab,
     revealExistingTab,
-    isSessionTabInput,
+    isSessionTabInput: input => windowState().editorPanels.isSessionTabInput(input),
     electLocalController,
     openSession,
     openSessionInMode,
@@ -1051,11 +1027,11 @@ function guestDispatcherDeps(): GuestDispatcherDeps<TabState> {
     activateNativeEditor,
     switchSessionMode,
     refreshGuestContext,
-    bridgeRouteOf,
-    pinBridgeOrigin,
-    redeliverBridgeBinding,
-    acknowledgeBridgeRoute,
-    acknowledgeBridgeSecret,
+    bridgeRouteOf: tabId => windowState().bridgeHost.routeOf(tabId),
+    pinBridgeOrigin: (tabId, panel, report) => windowState().bridgeHost.pinOrigin(tabId, panel, report),
+    redeliverBridgeBinding: tabId => windowState().bridgeHost.redeliverBinding(tabId),
+    acknowledgeBridgeRoute: (tabId, panel, message) => windowState().bridgeHost.acknowledgeRoute(tabId, panel, message),
+    acknowledgeBridgeSecret: (tabId, panel, message) => windowState().bridgeHost.acknowledgeSecret(tabId, panel, message),
     isTerminalPanelType: type => TERMINAL_PANEL_TYPES[type] === true,
     handleTerminalMessage: handleTerminalGuestMessage,
     acceptTerminalCopy,
@@ -1065,6 +1041,83 @@ function guestDispatcherDeps(): GuestDispatcherDeps<TabState> {
     info: showInfo,
     warn: showWarning,
     error: showError,
+  };
+}
+
+/**
+ * What the editor panels read of this window and call into. The getters read the installed window when they run, so the
+ * panels can be created with the window, before it is installed. The lifecycle harness builds its handle from these with a
+ * panel factory of its own.
+ */
+function editorPanelsDeps(): EditorPanelsDeps<TabState> {
+  return {
+    tabs: () => windowState().tabs,
+    tab: stateOf,
+    tabState,
+    editors: () => windowState().bridgeEditors,
+    liveEditors: () => windowState().bridgeLiveEditors,
+    nextEditorEvent: () => ++windowState().editorEventSequence,
+    sessionPanelColumns: () => windowState().sessionPanelColumns,
+    panelBindWaiters: () => windowState().panelBindWaiters,
+    draftRestores: () => windowState().draftRestores,
+    startupRestoreSettled: () => windowState().startupRestore === null && !windowState().startupRestorePending,
+    guest: () => windowState().guestDispatcher,
+    routing: () => windowState().routing,
+    bridge: () => windowState().bridgeHost,
+    slotReasons: { passive: PASSIVE_REASON_DEFAULT, electing: ELECTING_REASON },
+    bindSlotToConversation,
+    trackElection,
+    applySlotAuthority,
+    reserveSlot: reserveSlotForConversation,
+    defaultSessionMode,
+    isSessionTab,
+    applyChatTabAppearance,
+    registerPanelLifecycle,
+    ensureTerminalPipeline,
+    forgetTerminalCopy,
+    refreshGuestContext,
+    packageChangedOnDisk,
+    replayPanelOutcome,
+    createWebviewPanel: (viewType, title, showOptions, options) => vscode.window.createWebviewPanel(viewType, title, showOptions, options),
+    editorTabOf,
+    reviveEditorPanel,
+    activePanelTab,
+    refreshLauncher: () => refreshLauncher(),
+    setActiveTab,
+    requestSessionRowExpand,
+    ensureCatalogReady,
+    log,
+    info: showInfo,
+    warn: showWarning,
+  };
+}
+
+/**
+ * What the bridge host reads of this window and calls into. The getters read the installed window when they run, so the
+ * host can be created with the window, before it is installed. The lifecycle harness builds its handle from these with an
+ * endpoint provider of its own.
+ */
+function bridgeHostDeps(): BridgeHostDeps<TabState> {
+  return {
+    tabs: () => windowState().tabs,
+    tab: stateOf,
+    tabState,
+    index: () => windowState().indexForBridge,
+    chat: () => windowState().chat,
+    editors: () => windowState().bridgeEditors,
+    editorSlots: () => windowState().editorSlots,
+    endpoints: () => windowState().bridgeEndpoints,
+    liveEditors: () => windowState().bridgeLiveEditors,
+    diagnostics: () => windowState().diagnostics,
+    passiveReasonForSlot,
+    reserveSlot: reserveSlotForConversation,
+    defaultSessionMode,
+    attachChatRoute,
+    refreshLauncher: () => refreshLauncher(),
+    cancelControlPicker,
+    serializerFor: (context, index, viewType) => windowState().editorPanels.bridgeSerializerFor(context, index, viewType),
+    handleRequest: handleBridgeRequest,
+    log,
   };
 }
 
@@ -1086,12 +1139,9 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     requestSelections: new Set<string>(),
     // Editor panels and bridge
     tabs: new Map<string, TabState>(),
-    bridgeHostGeneration: randomBytes(16),
-    bridgeWorkspace: null,
-    bridgeStore: null,
+    bridgeHost: registerBridgeHost(bridgeHostDeps()),
+    editorPanels: registerEditorPanels(editorPanelsDeps()),
     bridgeEndpoints: new Map<string, BridgeEditorEndpoint>(),
-    pendingBridgeEndpoints: new Map<string, Promise<BridgeEditorEndpoint | null>>(),
-    bridgeSerializerTypes: new Set<string>(),
     bridgeLiveEditors: new Set<string>(),
     bridgeEditors: new EditorCoordinator(),
     outcomes: new Map<string, RestoreOutcome>(),
@@ -1194,13 +1244,6 @@ let window: WindowState | undefined;
 function windowState(): WindowState {
   if (window === undefined) throw new Error("The OMP Desk window state is not installed: `activate` has not run.");
   return window;
-}
-
-/** One bound panel's document: the guest bundle, or a bounded explanation. */
-interface PanelDocument {
-  readonly kind: "guest" | "unavailable";
-  /** The one bridge document embedded in this HTML, if any. */
-  readonly bridgeDocumentId: string | null;
 }
 
 /** Non-secret control facts persisted per ownership so a reload can reattach. */
@@ -1625,7 +1668,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     s.sessionModelRefreshOwed.clear();
   } });
   context.subscriptions.push(
-    vscode.window.registerWebviewPanelSerializer(PANEL_VIEW_TYPE, legacySerializerFor(context, index)),
+    vscode.window.registerWebviewPanelSerializer(PANEL_VIEW_TYPE, windowState().editorPanels.legacySerializerFor(context, index)),
   );
   // The folder-shell editor is its own view type with its own serializer: VS Code
   // restores it by the identity its own document wrote (the durable shell slot), and
@@ -1840,7 +1883,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // reports when there is none, and never starts a host.
     registerDeskCommand("omp.sendPrompt", () => postPanelAction("send-prompt")),
     registerDeskCommand("omp.stopTurn", () => postPanelAction("stop-turn")),
-    registerDeskCommand("omp.focusComposer", () => focusChatComposer(index)),
+    registerDeskCommand("omp.focusComposer", () => windowState().editorPanels.focusChatComposer(index)),
     registerDeskCommand("omp.retryTurn", () => postChatPanelAction("retry-turn")),
     registerDeskCommand("omp.toggleThinking", () => toggleTranscriptDefault(THINKING_EXPANDED_KEY)),
     registerDeskCommand("omp.toggleToolOutput", () => toggleTranscriptDefault(TOOLS_EXPANDED_KEY)),
@@ -1889,7 +1932,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(
     vscode.window.tabGroups.onDidChangeTabs(() => {
       settleViewedSession(index);
-      void syncBridgeEditors(context, index, { retireMissing: true }).catch(error =>
+      void windowState().bridgeHost.syncEditors(context, index, { retireMissing: true }).catch(error =>
         log(`bridge: the editor membership could not be reconciled: ${messageOf(error)}`),
       );
     }),
@@ -1914,7 +1957,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // work: their serializers are registered, and a page that survived a previous
   // extension host is adopted with the document its records name, so its reconnect has
   // something to authenticate against as soon as it dials in.
-  void syncBridgeEditors(context, index).catch(error => log(`bridge: the editor membership could not be reconciled: ${messageOf(error)}`));
+  void windowState().bridgeHost.syncEditors(context, index).catch(error => log(`bridge: the editor membership could not be reconciled: ${messageOf(error)}`));
   // The catalog is read, the predecessor build's folder list is imported into it, and
   // only then does the activation restore pass run — pinned to the rows this window is
   // responsible for. An editor VS Code restores for a row this pass does not cover is
@@ -2052,7 +2095,7 @@ async function newSessionInPlace(context: vscode.ExtensionContext, index: Sessio
   try {
     const captured = runtime === null ? null : await index.lifecycle.run(tabId, async () => await readTransitionFacts(state, runtime));
     if (runtime !== null && captured?.settled !== true) { showWarning("The session is not idle; nothing was replaced."); return; }
-    const column = sessionTabColumn(panel.viewType) ?? panel.viewColumn ?? vscode.ViewColumn.Active;
+    const column = windowState().editorPanels.sessionTabColumn(panel.viewType) ?? panel.viewColumn ?? vscode.ViewColumn.Active;
     if (await createSessionInColumn(context, index, entry.cwd, column) === null) return;
     opened = true;
     if (runtime !== null) {
@@ -2078,7 +2121,7 @@ async function deleteSessionInPlace(context: vscode.ExtensionContext, index: Ses
     showError("This session's editor is no longer open, so nothing was deleted.");
     return;
   }
-  const column = sessionTabColumn(panel.viewType) ?? panel.viewColumn ?? vscode.ViewColumn.Active;
+  const column = windowState().editorPanels.sessionTabColumn(panel.viewType) ?? panel.viewColumn ?? vscode.ViewColumn.Active;
   if (!(await windowState().sessionActions.confirmAndDelete(index, tabId))) return;
   await createSessionInColumn(context, index, entry.cwd, column);
 }
@@ -2959,7 +3002,7 @@ async function openTab(
     // still perform exactly one restore, and a subsequent close cancels focus.
     const row = index.get(tabId);
     if (row !== null && (stateOf(tabId)?.panel ?? null) === null) {
-      openPanel(context, index, tabId);
+      windowState().editorPanels.openPanel(context, index, tabId);
       refreshLauncher();
     }
     await inFlight;
@@ -3077,7 +3120,7 @@ async function openTabOnce(
     // The editor is created (or revealed) before anything native happens: it is where the
     // user sees whatever comes next, and a launch that is slow or cannot start must not
     // delay the chat surface or hide the reason it is unavailable.
-    openPanel(context, index, tabId);
+    windowState().editorPanels.openPanel(context, index, tabId);
     refreshLauncher();
   }
   const openedState = stateOf(tabId);
@@ -3420,8 +3463,8 @@ async function launchHost(
   // retire the old capability and remount this same editor with a fresh incarnation.
   const editor = stateOf(request.tabId);
   if (editor !== undefined && editor.panel !== null && editor.bridge !== null && editor.bridge.endpoint.committedBinding() !== null) {
-    await prepareBridgeDocument(context, editor.bridge.editorId);
-    renderPanelDocument(context, editor.bridge.editorId);
+    await windowState().bridgeHost.prepareDocument(context, editor.bridge.editorId);
+    windowState().editorPanels.renderPanelDocument(context, editor.bridge.editorId);
   }
   // The broker slot is minted once per host and never derived from the conversation. A new
   // launch always mints a new slot: a recorded slot may still hold a retained record whose
@@ -3645,8 +3688,8 @@ async function applyNativeConversationObservation(index: SessionIndex, state: Ta
       await index.recordConversationState(fromId, { title: facts.name });
       if (s.context !== undefined) void applyChatTabAppearance(s.context, index, fromId);
     }
-    await commitBridgeDocument(fromId);
-    refreshBridgeReadiness(fromId);
+    await windowState().bridgeHost.commitDocument(fromId);
+    windowState().bridgeHost.refreshReadiness(fromId);
     return;
   }
   // SDK allocated paths may not exist yet. Never import or materialize one.
@@ -3690,12 +3733,12 @@ async function applyNativeConversationObservation(index: SessionIndex, state: Ta
   const context = s.context;
   if (context !== undefined && state.panel !== null) {
     state.document = null;
-    if (state.bridge !== null) await prepareBridgeDocument(context, state.slotId);
-    renderPanelDocument(context, state.slotId);
+    if (state.bridge !== null) await windowState().bridgeHost.prepareDocument(context, state.slotId);
+    windowState().editorPanels.renderPanelDocument(context, state.slotId);
   }
   ensureTerminalPipeline(index, state.slotId, runtime.handle);
-  await commitBridgeDocument(destination.tabId);
-  refreshBridgeReadiness(destination.tabId);
+  await windowState().bridgeHost.commitDocument(destination.tabId);
+  windowState().bridgeHost.refreshReadiness(destination.tabId);
   await index.setActiveTab(destination.tabId);
   if (s.context !== undefined) void applyChatTabAppearance(s.context, index, destination.tabId);
   refreshLauncher();
@@ -3953,8 +3996,8 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
       await index.setEditorMode(state.slotId, mode);
       refreshGuestContext();
       state.document = null;
-      if (state.bridge !== null) await prepareBridgeDocument(context, state.bridge.editorId);
-      renderPanelDocument(context, state.slotId);
+      if (state.bridge !== null) await windowState().bridgeHost.prepareDocument(context, state.bridge.editorId);
+      windowState().editorPanels.renderPanelDocument(context, state.slotId);
       await openTab(context, index, state.tabId, "resumed", "explicit", undefined, false, keepLiveView);
     } finally {
       if (s.pendingSessionViewChanges.get(state) === modeRequest) s.pendingSessionViewChanges.delete(state);
@@ -4108,8 +4151,8 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
       state.controlFailure = null;
       pushSessionView(index, state);
       state.document = null;
-      if (state.bridge !== null) await prepareBridgeDocument(context, state.bridge.editorId);
-      renderPanelDocument(context, state.slotId);
+      if (state.bridge !== null) await windowState().bridgeHost.prepareDocument(context, state.bridge.editorId);
+      windowState().editorPanels.renderPanelDocument(context, state.slotId);
       replacement = await index.replaceHost(tabId, { confirmedStopped: true, expectedPid: runtime.pid, expectedCreationTime: runtime.identity.childCreationTime, mode, slotId: state.slotId, emptyFile: fresh.file, launcher: launcher(context, index) }, lease);
       if (replacement.status === "failed" && state.runtime === null) await index.closeSession(tabId, { confirmedStopped: true, detail: replacement.detail }, lease);
     });
@@ -4255,8 +4298,8 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
       s.draftRestores.set(state.slotId, captured);
       state.controlFailure = null;
       state.document = null;
-      if (state.bridge !== null) await prepareBridgeDocument(context, state.bridge.editorId);
-      renderPanelDocument(context, state.slotId);
+      if (state.bridge !== null) await windowState().bridgeHost.prepareDocument(context, state.bridge.editorId);
+      windowState().editorPanels.renderPanelDocument(context, state.slotId);
       replacement = await index.replaceHost(tabId, { confirmedStopped: true, expectedPid: runtime.pid, expectedCreationTime: creationTime, mode: "chat", slotId: state.slotId, emptyFile: file, launcher: launcher(context, index) }, lease);
       if (replacement.status === "failed" && state.runtime === null) await index.closeSession(tabId, { confirmedStopped: true, detail: replacement.detail }, lease);
     });
@@ -4377,7 +4420,7 @@ function hasLocalEditorFor(tabId: string): boolean {
   ) {
     return true;
   }
-  return editorMembership().some(entry => (s.bridgeEditors.tabOfEditor(entry.editorId) ?? entry.tabId) === tabId);
+  return windowState().bridgeHost.editorMembership().some(entry => (s.bridgeEditors.tabOfEditor(entry.editorId) ?? entry.tabId) === tabId);
 }
 
 // The profile catalog
@@ -4754,384 +4797,9 @@ function localSlotFor(tabId: string): string | null {
   return state !== undefined && state.panel !== null ? state.slotId : null;
 }
 
-/** A document can be prepared while this editor's link to the extension is still being set up. */
-const BRIDGE_PENDING_DETAIL =
-  "This tab is still connecting to OMP. It will fill in on its own in a moment.";
-const GUEST_UNAVAILABLE_DETAIL =
-  "OMP could not connect this tab to its session. Details are in the OMP output channel.";
 /** Shown by a restored panel for a draft that no explicit action has started yet. */
 const DRAFT_NO_HOST_DETAIL =
   "This OMP session has not been started yet. Its tab was kept; click the session's row in the OMP Sessions view to start it.";
-/** Shown by a restored editor whose persisted identity is not one this window wrote. */
-const UNIDENTIFIED_PANEL_DETAIL =
-  "VS Code restored this tab, but OMP does not recognize which session it belonged to, so nothing was opened. " +
-  "Close this tab and open the session you want from the OMP Sessions view.";
-/** Shown by a legacy editor that lost this tab to an editor already serving it. */
-const LEGACY_DUPLICATE_DETAIL =
-  "Another tab for this OMP session is already open in this window, so this old tab was left as a note instead of " +
-  "starting a second copy. Close this tab and use the one already open.";
-
-/** Shown by a restored editor whose identity names a row this workspace no longer has. */
-const STALE_PANEL_DETAIL =
-  "VS Code restored this tab for a session that is no longer in the OMP Sessions view, so nothing was opened. " +
-  "Close this tab and start the session from the OMP Sessions view.";
-
-/**
- * Create this tab's editor, or bring the one it already has to the front.
- *
- * Creation is the explicit-intent path. VS Code revives the editors the user
- * actually had open through {@link serializerFor}, which adopts the panel it
- * supplies; this function is for a row the user just asked to open, and it is
- * called *before* any native work so the chat surface appears
- * immediately and has somewhere to report whatever happens next.
- */
-function openPanel(
-  context: vscode.ExtensionContext,
-  index: SessionIndex,
-  tabId: string,
-): void {
-  const s = windowState();
-  const state = tabState(tabId);
-  if (state.panel !== null) {
-    // An explicit Open joins the editor this tab already has — including one that is
-    // waiting on a legacy migration — instead of starting a second one.
-    state.panel.reveal();
-    return;
-  }
-  // A surviving bridged page is already this editor, even without a panel handle.
-  // Resume must serve its existing route, not create a second editor.
-  if (state.bridge?.documentId != null && s.bridgeLiveEditors.has(state.bridge.editorId)) return;
-  // The winner of this tab's editors is decided synchronously, before any await: a
-  // restored editor's callback that arrives later must lose against this transient
-  // panel only if the saved editor is the one the user's layout names, which is the
-  // rule `EditorCoordinator` owns.
-  const editorId = createToken();
-  const reservation = s.bridgeEditors.reserve({ tabId, editorId, provenance: "transient", sequence: ++s.editorEventSequence });
-  if (reservation.outcome === "lost") {
-    // VS Code restored this tab's editor but has not revived it, because it was never shown.
-    // That editor is the one to show: opening a rival would be the duplicate chat this
-    // reservation exists to prevent.
-    if (editorTabOf(reservation.reservation.editorId) !== null) {
-      void reviveEditorPanel(index, tabId).then(({ selected }) => {
-        if (!selected) showWarning("That OMP session is open in a tab VS Code could not bring to the front. Select its tab in the editor.");
-      });
-      return;
-    }
-    showWarning("That OMP session is already open in this window.");
-    refreshLauncher();
-    return;
-  }
-  const ownEditorId = reservation.reservation.editorId;
-  const viewType = bridgeViewType(tabId, ownEditorId);
-  registerBridgeSerializer(context, index, viewType);
-  // The tab is named for the session it shows, from the same rule its launcher row
-  // uses, so it is never a second copy of the working folder's name. The row is
-  // already known here — this path is a row's own Open — and its cached title is
-  // what a first frame can use without waiting; binding below then applies the
-  // exact stored name and the icon.
-  const entry = index.get(tabId);
-  const column = s.sessionPanelColumns.get(tabId);
-  s.sessionPanelColumns.delete(tabId);
-  const placement = column === undefined && chatColumnEnabled() ? chatPlacementNow() : null;
-  const panel = vscode.window.createWebviewPanel(
-    viewType,
-    entry === null ? "OMP session" : sessionHeadline(entry, null),
-    column ?? placement?.column ?? vscode.ViewColumn.Active,
-    {
-      enableScripts: true,
-      retainContextWhenHidden: true,
-      localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "media")],
-    },
-  );
-  if (placement !== null) {
-    log(`chat column: session editor placed at column ${placement.column} (${placement.arrange})`);
-    void arrangeSessionPanelGroup(placement, panel, viewType)
-      .catch(error => log(`chat column: the chat group could not be arranged: ${messageOf(error)}`));
-  }
-  bindPanel(context, index, ownEditorId, tabId, panel, "created");
-  void setActiveTab(index, tabId);
-  // The endpoint, the document and its exact port are provisioned *after* the panel
-  // exists but before a guest document is installed: the panel first shows a bounded
-  // explanation, then the guest document whose `connect-src` names the port this
-  // editor actually holds.
-  void (async () => {
-    const prepared = await prepareBridgeDocument(context, ownEditorId);
-    if (s.tabs.get(ownEditorId)?.panel !== panel) return;
-    if (prepared === null) {
-      // No bridge endpoint means this editor cannot be reconnected to after a
-      // host-only restart — and nothing more. The chat, the composer and every
-      // panel-served control keep working, so the panel is rendered without a bridge
-      // rather than being left on an explanation.
-      log(`slot ${ownEditorId}: this editor has no bridge endpoint (${s.bridgeEndpoints.get(ownEditorId)?.failure ?? "unknown"})`);
-      const current = s.tabs.get(ownEditorId);
-      if (current !== undefined) current.bridge = null;
-      renderPanelDocument(context, ownEditorId);
-      return;
-    }
-    renderPanelDocument(context, ownEditorId);
-  })();
-}
-
-/** Whether session editors keep their own locked editor group on the left (`omp.chatColumn`). */
-function chatColumnEnabled(): boolean {
-  return vscode.workspace.getConfiguration("omp").get<boolean>("chatColumn", true);
-}
-
-/** Whether a tab shows a session editor of this extension. */
-function isSessionTabInput(input: unknown): boolean {
-  return input instanceof vscode.TabInputWebview && tabInputIdentity(input.viewType) !== null;
-}
-
-/** Where a session editor opens now, from the tabs VS Code reports. */
-function chatPlacementNow(): ChatPlacement {
-  const groups = vscode.window.tabGroups;
-  return chatPlacement(groups.all, groups.activeTabGroup.viewColumn, isSessionTabInput, vscode.ViewColumn.Beside);
-}
-
-/** The column VS Code really shows a session editor in, from the tab it reports; `panel.viewColumn` keeps the requested column until a view-state event. */
-function sessionTabColumn(viewType: string): number | undefined {
-  return vscode.window.tabGroups.all.find(group => group.tabs.some(tab => tab.input instanceof vscode.TabInputWebview && tab.input.viewType === viewType))?.viewColumn;
-}
-
-/**
- * Arrange a new session editor's group (`arrangeChatGroup`) from the column its tab is really in. VS Code does not put
- * an editor into an empty locked group, even by exact column, so after the chat group's last editor was closed the
- * editor lands in a new group on the right while `panel.viewColumn` still says the requested column. The group is then
- * moved from where it is, and the emptied locked remnant, now to its right, is closed so no stray group stays beside the chat.
- */
-async function arrangeSessionPanelGroup(placement: ChatPlacement, panel: vscode.WebviewPanel, viewType: string): Promise<void> {
-  for (let attempt = 0; attempt < 40 && sessionTabColumn(viewType) === undefined; attempt++) {
-    const { promise, resolve } = Promise.withResolvers<void>();
-    setTimeout(resolve, 50);
-    await promise;
-  }
-  const live = { get active() { return panel.active; }, get viewColumn() { return sessionTabColumn(viewType) ?? panel.viewColumn; }, onDidChangeViewState: (listener: () => void) => panel.onDidChangeViewState(listener) };
-  const landed = live.viewColumn;
-  log(`chat column: the session editor is at column ${landed} (asked for ${placement.column})`);
-  await arrangeChatGroup({ executeCommand: command => vscode.commands.executeCommand(command) }, placement, live);
-  // The editor missed the requested group, so that group is still there, emptied. VS Code reports the move a moment later.
-  if (placement.arrange !== "move-left-and-lock" || landed === placement.column) return;
-  for (let attempt = 0; attempt < 40; attempt++) {
-    const groups = vscode.window.tabGroups;
-    const strays = strayEmptyGroups(groups.all, isSessionTabInput);
-    if (strays.length > 0) {
-      log(`chat column: closing ${strays.length} empty group(s) beside the chat group`);
-      await groups.close(strays);
-      return;
-    }
-    const { promise, resolve } = Promise.withResolvers<void>();
-    setTimeout(resolve, 50);
-    await promise;
-  }
-  log(`chat column: no empty group to close found; groups: ${vscode.window.tabGroups.all.map(group => `${group.viewColumn}:${group.tabs.length}`).join(" ")}`);
-}
-
-/**
- * `omp.focusComposer` from anywhere (Ctrl+Shift+L): put the keyboard in a session's composer. The session is the
- * active session editor, else the one showing in the chat group, else the last active one; a Terminal-mode session
- * gets the focus on its terminal. With no session editor open, the OMP Desk side bar opens instead.
- */
-async function focusChatComposer(index: SessionIndex): Promise<void> {
-  let tabId = activePanelTab()?.tabId ?? null;
-  if (tabId === null) {
-    const groups = vscode.window.tabGroups;
-    const column = chatGroupColumn(groups.all, groups.activeTabGroup.viewColumn, isSessionTabInput);
-    const input = groups.all.find(group => group.viewColumn === column)?.activeTab?.input;
-    tabId = (input instanceof vscode.TabInputWebview ? tabInputIdentity(input.viewType)?.tabId : null) ?? index.activeTabId;
-  }
-  // A tab VS Code restored but never showed has no panel yet; selecting it makes VS Code hand one over.
-  const panel = tabId === null ? null : (await reviveEditorPanel(index, tabId)).panel;
-  const state = tabId === null ? undefined : stateOf(tabId);
-  if (panel === null || state === undefined) {
-    await vscode.commands.executeCommand("workbench.view.extension.omp");
-    return;
-  }
-  panel.reveal(panel.viewColumn, false);
-  if (state.mode !== "chat") return;
-  const delivered = await panel.webview.postMessage({ type: "omp:webview-action", action: "focus-composer" } satisfies GuestPanelActionMessage);
-  log(`tab ${tabId}: focus-composer asked from a VS Code command or keybinding (delivered=${delivered}, panel visible=${panel.visible}, active=${panel.active}, column ${panel.viewColumn})`);
-}
-
-/**
- * Bind one editor panel to one indexed conversation, and give it a document it can
- * render.
- *
- * This is the single place a panel becomes a chat surface, so an editor VS Code
- * restored and one this window created get the same listeners, the same disposal
- * rules and the same document for the state the editor is actually in. The editor
- * slot is the identity; the conversation is only what that slot shows right now.
- *
- * Every listener is guarded by the exact panel it was registered for: a panel
- * that a restored editor replaced must never clear its successor's readiness,
- * activity or recording, or answer a message meant for it.
- */
-function bindPanel(
-  context: vscode.ExtensionContext,
-  index: SessionIndex,
-  slot: string,
-  conversation: string,
-  panel: vscode.WebviewPanel,
-  origin: "created" | "restored",
-  role: EditorSlotRole = "controlling",
-): void {
-  const s = windowState();
-  // The editor's own record. A conversation that was launched or restored before its
-  // editor existed has its record moved under this editor's immutable key here, so
-  // from now on nothing in this window reaches this editor by conversation alone.
-  // A panel publishes itself as a passive surface first: the local election follows the
-  // durable one, so an editor can never act as a controller on a role this window has not
-  // recorded. A controlling role is promoted below, once the index has recorded it.
-  const state = bindSlotToConversation(
-    slot,
-    conversation,
-    "passive",
-    role === "passive" ? PASSIVE_REASON_DEFAULT : ELECTING_REASON,
-  );
-  if (origin === "restored") state.mode = state.runtime?.kind ?? index.slotBinding(slot)?.mode ?? defaultSessionMode(context);
-  // The durable binding is what a later restore resolves its conversation *and* its
-  // role from, so it is written as soon as the editor becomes a chat surface. A
-  // controlling binding demotes its rivals durably; a passive one only records this
-  // editor's own non-controlling role.
-  // This election is tracked: a command the page sends before it settles waits for it
-  // (`dispatchSlotMessage`) instead of being judged on the interim passive answer.
-  void trackElection(
-    slot,
-    index
-      .bindEditorSlot(slot, conversation, role)
-      .then(async binding => {
-        if (state.tabId !== conversation || index.slotBinding(slot)?.tabId !== conversation) return;
-        // The index decides the role: `controlling` requires proof that this window holds
-        // the conversation's writer, so a refusal is published locally as the passive
-        // surface it really is, and nothing here demotes another window's controller.
-        // The answer is only this editor's if it names this editor's conversation: a failed
-        // election can report the binding of another conversation, and granting control on
-        // that would publish an authority the shared record does not hold.
-        if (binding.role === "controlling" && binding.tabId === conversation) {
-          bindSlotToConversation(slot, conversation, "controlling", null);
-          applySlotAuthority(slot);
-        } else {
-          bindSlotToConversation(slot, conversation, "passive", binding.roleRefusal ?? PASSIVE_REASON_DEFAULT);
-          applySlotAuthority(slot);
-          log(`slot ${slot}: this editor is not controlling ${conversation} (${binding.roleRefusal ?? "no reason reported"})`);
-        }
-        // The view mode is only bookkeeping for a later restore. It is recorded *after* the role
-        // is published: it costs another durable write, and the editor must not stay
-        // passive for the length of it.
-        await index.setEditorMode(slot, state.mode);
-      })
-      .catch(error => log(`slot ${slot}: its editor-slot binding could not be persisted (${messageOf(error)})`)),
-  );
-  state.panel = panel;
-  if (state.runtime?.kind === "terminal") ensureTerminalPipeline(index, slot, state.runtime.handle);
-  state.origin = origin;
-  // The tab now says what this editor shows. This is the one place a chat panel
-  // becomes a surface, and a restored editor carries no icon and may carry a name
-  // from before the last rename, so the appearance is applied to every panel bound
-  // here — created, restored or migrated.
-  void applyChatTabAppearance(context, index, slot);
-  const boundEditorId = state.bridge?.editorId ?? null;
-  if (boundEditorId !== null) void adoptBridgeEditor(context, slot, panel);
-  state.document = null;
-  if (origin === "restored") {
-    // VS Code hands back a panel, not this extension's creation options, and no
-    // extension API exposes them afterwards. A restored editor is therefore told
-    // here that it may run scripts and load this extension's own media, before its
-    // document is set: without `enableScripts` the guest bundle would never run,
-    // and a document assigned before the options would be reloaded.
-    panel.webview.options = {
-      enableScripts: true,
-      localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "media")],
-    };
-  }
-  registerPanelLifecycle(index, slot, panel);
-  // The document is chosen and set synchronously, so an editor VS Code restored
-  // renders at once and a panel whose bridge endpoint is not ready says so instead of
-  // waiting blank while the endpoint is bound.
-  renderPanelDocument(context, slot);
-  refreshLauncher();
-  for (const resolve of s.panelBindWaiters.get(slot) ?? []) resolve();
-}
-
-/**
- * Point one bound panel at the document its tab's state calls for: the guest
- * bundle with the bridge endpoint this tab holds, else a bounded,
- * non-connecting explanation of what is missing.
- *
- * The document is rebuilt only when what it shows actually changes (usually from the
- * explanation to the guest once its bridge endpoint exists), because assigning
- * `webview.html` reloads the panel: a live guest is never reloaded for nothing, and a
- * panel that already shows the explanation is not re-rendered with the same text. A new
- * document must announce itself (`omp:ready`) before the conversation is posted into
- * it, so readiness is tracked per document rather than per tab.
- */
-function renderPanelDocument(context: vscode.ExtensionContext, key: string): void {
-  // A folder shell has its own document and its own serializer; it is not a chat.
-  const state = stateOf(key);
-  if (state === undefined || state.tabId === null || !isSessionTab(state.slotId)) return;
-  const conversation = state.tabId;
-  if (state.panel === null) return;
-  const panel = state.panel;
-  panel.iconPath = vscode.Uri.joinPath(context.extensionUri, state.mode === "terminal" ? "media/terminal-icon.svg" : EDITOR_TAB_ICON);
-  // The document's persisted identity is the editor's *original* (T, E) namespace,
-  // which never changes: the viewType encodes it, and a restored editor resolves the
-  // conversation it serves now from the durable slot binding. What the page is *shown*
-  // comes from the link the host delivers, not from this identity. This panel's own
-  // view type is that namespace, so the identity a document persists is exactly the pair
-  // VS Code will hand back to this editor's serializer — the recorded endpoint, the
-  // current conversation and the slot key are only fallbacks for a type that cannot be
-  // read.
-  const panelIdentity = tabInputIdentity(panel.viewType);
-  const identityTabId = panelIdentity?.tabId ?? state.bridge?.endpoint.scope.tabId ?? conversation;
-  // The bridge ticket is what makes this document reachable again after a host-only
-  // restart, so a guest document is only rendered once its endpoint and exact port
-  // exist: a document without them would come back as an orphan with no route.
-  const ticket = bridgeTicketFacts(state.slotId);
-  // A bridged editor is only rendered once its endpoint and exact port exist, because
-  // the document's `connect-src` must name the listener this host actually holds. An
-  // editor with no bridge at all still gets its chat: the bridge is what makes the page
-  // *survive* a restart, not what makes the chat work.
-  const awaitingBridge = state.bridge !== null && ticket === null;
-  let html: string | null = null;
-  if (!awaitingBridge) {
-    try {
-      html = createGuestHtml(panel.webview, context.extensionUri, identityTabId, ticket, state.mode);
-    } catch (error) {
-      // The document is built from this extension's own inputs, so a failure is a defect
-      // rather than an input: it is logged and the panel keeps an honest document instead
-      // of a broken one with a weaker CSP.
-      log(`slot ${state.slotId}: the panel document could not be built: ${messageOf(error)}`);
-    }
-  }
-  let updatedOnDisk = false;
-  if (html !== null && packageChangedOnDisk()) {
-    // A page that is already loaded came from the build this host runs, and it stays valid. Only a
-    // document that would be built now reads the replaced bundle, so only that one is withheld.
-    if (state.document !== null && state.document.kind === "guest" && state.document.bridgeDocumentId === (ticket?.documentId ?? null)) return;
-    html = null;
-    updatedOnDisk = true;
-  }
-  const kind: PanelDocument["kind"] = html === null ? "unavailable" : "guest";
-  const bridgeDocumentId = ticket?.documentId ?? null;
-  if (state.document !== null && state.document.kind === kind && state.document.bridgeDocumentId === bridgeDocumentId) return;
-  forgetTerminalCopy(state);
-  state.document = { kind, bridgeDocumentId };
-  // A fallback page must persist the identity its own view type names — the tab (T)
-  // *and* the actual editor id (E) — so a document left by a pending bridge cannot make
-  // this editor unidentifiable at its next restart. Both documents of an editor therefore
-  // save the same state.
-  panel.webview.html = html ?? createUnavailableGuestHtml(
-    awaitingBridge ? BRIDGE_PENDING_DETAIL : updatedOnDisk ? UPDATED_ON_DISK_DETAIL : GUEST_UNAVAILABLE_DETAIL,
-    { tabId: identityTabId, editorId: panelIdentity?.editorIdHex ?? state.slotId },
-    { reloadButton: updatedOnDisk },
-  );
-  refreshGuestContext();
-  if (kind === "guest") {
-    // A freshly installed guest document is a new incarnation: the host offers this
-    // document's route over the panel handle it holds, and dispatch waits for the
-    // page's acknowledgement.
-    offerBridgeRoute(state.slotId);
-  }
-}
 
 /**
  * Reserve one editor for one conversation, letting a committed controller take a
@@ -5155,274 +4823,6 @@ function reserveSlotForConversation(
   if (index.slotBinding(slot)?.role !== "controlling" || index.slotBinding(incumbent)?.role !== "passive") return first;
   s.bridgeEditors.releaseEditor(incumbent);
   return s.bridgeEditors.reserve({ tabId: conversation, editorId: slot, provenance, sequence: ++s.editorEventSequence });
-}
-
-/**
- * The serializer VS Code revives this window's OMP editors through.
- *
- * The state it is handed was written by that editor's own previous document (see
- * `src/shared/panel-identity.ts`) and is treated as untrusted: it is narrowed to
- * the exact identity shape and then resolved against the current index, so a
- * malformed, stale or foreign value can never attach an editor to another
- * session's row — and a row this workspace no longer has leaves an explanatory
- * editor rather than a new index entry, a guessed session or a host.
- *
- * Nothing native starts here, and nothing here waits for a bridge endpoint: the supplied
- * panel is adopted first, with a document it can render. The activation pass owns
- * the one restore attempt per row, and this editor either projects that attempt's
- * result or waits for the ordinary open path — which is why an explicit Open
- * still starts an eligible draft's host even though its editor is already back.
- */
-/**
- * The serializer of one dynamic versioned view type.
- *
- * The registered type, the saved state and the actual editor must agree before
- * anything is adopted: the type names `(T, E)`, the saved state is
- * `{version:2, tabId, editorId}`, and only a matching pair is this editor's own
- * revival. A mismatch leaves an explanatory editor rather than guessing an identity —
- * deserialized state is untrusted input, and a wrong guess would attach an editor to
- * another session's row. The single exception is the legacy version-1 state an
- * earlier build's document left on this type, which is accepted only when this
- * editor's own view type *and* its durable controlling binding prove the same pair
- * (`recoveredBridgePanelState`).
- *
- * Adoption re-uses whatever this window already knows about the tab: the endpoint,
- * the document and the native attempt all belong to the tab, so a reloaded editor
- * takes over a *new* document incarnation rather than starting a second attempt.
- */
-function bridgeSerializerFor(
-  context: vscode.ExtensionContext,
-  index: SessionIndex,
-  viewType: string,
-): vscode.WebviewPanelSerializer {
-  const s = windowState();
-  return {
-    async deserializeWebviewPanel(panel, state): Promise<void> {
-      const identity = decodeBridgeViewType(viewType);
-      // VS Code hands back an editor's title but no icon, and an editor it restores
-      // may end below as a bounded explanation rather than a chat. The icon is what
-      // makes such a tab recognizable as an OMP editor, so it is applied before any
-      // decision; a chat panel's binding re-affirms it with its own document.
-      panel.iconPath ??= vscode.Uri.joinPath(context.extensionUri, EDITOR_TAB_ICON);
-      // VS Code may hand this window a restored editor before the profile catalog has
-      // been read. Resolving the row now would report a stored session as gone and leave
-      // the editor as an explanation, so the restoration waits for that one pass to
-      // settle. The wait is the catalog's own promise, so it can only be short and it
-      // always settles.
-      await ensureCatalogReady();
-      // A dynamic editor's own document saves `{version:2, tabId, editorId}`. An
-      // *earlier* build's fallback document — the explanation a panel shows while it
-      // has no bridge endpoint — saved the version-1 chat identity on this same type, so that
-      // editor's state named a tab but no longer said which editor it is and every
-      // later restart refused it. Such a state is recovered only when the editor's own
-      // viewType and its durable binding both prove the same (T, E) pair; nothing is
-      // guessed for a foreign, passive or mismatched editor.
-      const stored = persistedBridgeState(state);
-      const saved = stored ?? recoveredBridgePanelState(viewType, state, editorId => index.slotBinding(editorId));
-      if (
-        identity === null ||
-        saved === null ||
-        saved.tabId.toLowerCase() !== identity.tabId.toLowerCase() ||
-        saved.editorId !== identity.editorIdHex
-      ) {
-        panel.webview.html = createUnavailableGuestHtml(UNIDENTIFIED_PANEL_DETAIL);
-        if (stored === null && persistedTabId(state) !== null) {
-          log(
-            "a restored OMP editor carried a legacy version-1 identity that its view type and durable controlling binding do not prove; it was left as an explanation",
-          );
-        } else {
-          log("a restored OMP editor carried no usable bridge identity; it was left as an explanation");
-        }
-        return;
-      }
-      if (stored === null) {
-        log(
-          `slot ${saved.editorId.slice(0, 8)}: a legacy version-1 identity was adopted because this editor's view type and durable controlling binding proved it`,
-        );
-      }
-      const namespaceTabId = identity.tabId;
-      const slot = identity.editorIdHex;
-      // The viewType names the editor's original (T, E) namespace. Which conversation
-      // it serves *now* is the durable binding's answer, not the namespace's: after a
-      // settled switch the same editor serves another conversation, and the original
-      // T must not select anything.
-      const committed = index.slotBinding(slot);
-      const conversation = committed === null || index.get(committed.tabId) === null ? namespaceTabId : committed.tabId;
-      if (index.get(conversation) === null) {
-        panel.webview.html = createUnavailableGuestHtml(STALE_PANEL_DETAIL);
-        log("a restored OMP editor named a tab this workspace no longer has; it was left as an explanation");
-        return;
-      }
-      const reservation = reserveSlotForConversation(index, conversation, slot, "saved");
-      if (reservation.outcome === "lost") {
-        // Another editor of this conversation holds it: this one is a duplicate of a
-        // session that is already open, and a second chat for one session is what the
-        // one-winner rule exists to prevent.
-        log(`slot ${slot}: a second restored webview for this conversation was closed`);
-        panel.dispose();
-        showInfo("An OMP editor restored for this window was closed: it was a duplicate of one already open for the same session.");
-        return;
-      }
-      const superseded = reservation.outcome === "replaced" ? s.tabs.get(conversation)?.panel ?? null : null;
-      const carriedDraft = await s.guestDispatcher.carryDraftFrom(superseded);
-      try {
-        bindPanel(context, index, slot, conversation, panel, "restored", committed?.role ?? "controlling");
-        if (carriedDraft !== null) s.draftRestores.set(slot, carriedDraft);
-        superseded?.dispose();
-      } finally {
-        s.guestDispatcher.releaseCarriedDraft(carriedDraft);
-      }
-      // A reload recreates the editor and a fresh HTML document. Reuse its
-      // native attempt while replacing only the prior document incarnation.
-      const adopted = await adoptBridgeEditor(context, slot, panel);
-      const prepared = adopted ? await prepareBridgeDocument(context, slot) : null;
-      if (s.tabs.get(slot)?.panel === panel && s.bridgeEditors.holdsEditor(slot)) {
-        if (prepared === null) {
-          // A bridge failure must not strand a restored chat on the placeholder.
-          // It cannot survive a host-only restart without a ticket, but the
-          // ordinary panel route still carries its conversation.
-          const current = s.tabs.get(slot);
-          if (current?.bridge?.editorId === slot) current.bridge = null;
-          log(`slot ${slot}: restored editor has no reconnect bridge; serving its chat through the panel`);
-        }
-        renderPanelDocument(context, slot);
-      }
-      // Only a panel VS Code actually made active describes the user's selection, so
-      // the index follows that and nothing here reveals, moves or focuses a restored
-      // editor: its saved position and group are already its own.
-      if (panel.active) {
-        if (s.startupRestore === null && !s.startupRestorePending) requestSessionRowExpand(conversation);
-        await setActiveTab(index, conversation);
-      }
-      replayPanelOutcome(index, conversation);
-      // The activation pass restores only the rows this window is responsible for. A
-      // restored editor for any *other* row in the profile-wide index is this window's
-      // own editor for a conversation nobody has opened here yet, so it takes the same
-      // path an explicit click takes: one native attempt for that tab, re-derived from
-      // current ownership rather than from the pass's cohort. A tab the pass does cover
-      // is left to it, and a tab that already has a runtime is already connected.
-      await s.routing.openRestoredTabIfUncovered(context, index, conversation);
-    },
-  };
-}
-
-/**
- * The legacy serializer: the one-time migration of a generic panel.
- *
- * A version-1 panel cannot change its view type in place, so its first resolution
- * creates one versioned successor in the source's own view column, binds that
- * successor *before* intentionally disposing only the exact supplied panel, and
- * re-uses the tab's existing native attempt. The winner is reserved synchronously,
- * so a second saved callback for the same tab loses rather than producing a second
- * editor, and the migration itself is claimed once per tab.
- */
-function legacySerializerFor(
-  context: vscode.ExtensionContext,
-  index: SessionIndex,
-): vscode.WebviewPanelSerializer {
-  const s = windowState();
-  return {
-    async deserializeWebviewPanel(panel, state): Promise<void> {
-      const tabId = persistedTabId(state);
-      // As in the versioned serializer: a restored editor arrives with a title but no
-      // icon, and one that ends as an explanation here is still an OMP editor tab.
-      panel.iconPath ??= vscode.Uri.joinPath(context.extensionUri, EDITOR_TAB_ICON);
-      // This serializer resolves the same index the versioned one does, so it waits for
-      // the same barrier: a legacy panel must not be declared stale before the catalog
-      // has been read.
-      await ensureCatalogReady();
-      if (tabId === null) {
-        panel.webview.html = createUnavailableGuestHtml(UNIDENTIFIED_PANEL_DETAIL);
-        log("a restored OMP editor carried no usable panel identity; it was left as an explanation");
-        return;
-      }
-      const entry = index.get(tabId);
-      if (entry === null) {
-        panel.webview.html = createUnavailableGuestHtml(STALE_PANEL_DETAIL);
-        log("a restored OMP editor named a tab this workspace no longer has; it was left as an explanation");
-        return;
-      }
-      // This panel is this tab's editor until its successor replaces it — and it stays
-      // as the bounded explanation when the tab is already served elsewhere — so its own
-      // restored title is corrected here too: an older build titled it with the working
-      // folder, and the successor is given the same name below.
-      const tabTitle = sessionHeadline(entry, null);
-      panel.title = tabTitle;
-      // A legacy panel is a *different* editor from a versioned one, so it is
-      // reserved as such: the reservation decides synchronously whether this panel
-      // may create the one successor or whether another editor already owns the tab.
-      const editorId = createToken();
-      const reservation = reserveSlotForConversation(index, tabId, editorId, "saved");
-      if (reservation.outcome === "lost") {
-        // Another editor of this conversation already serves it. This legacy panel
-        // keeps its editor and shows the bounded explanation: creating a successor
-        // would be a second chat for one session.
-        // This legacy panel keeps the version-1 identity the static type persists, so a
-        // later restart still restores it (and the legacy serializer accepts that state).
-        panel.webview.html = createUnavailableGuestHtml(LEGACY_DUPLICATE_DETAIL, { tabId, editorId: null });
-        log(`tab ${tabId}: a legacy panel was left as an explanation because another editor already owns this conversation`);
-        return;
-      }
-      const ownEditorId = reservation.reservation.editorId;
-      const ticket = s.bridgeEditors.claimTransition(tabId, ownEditorId);
-      if (ticket === null) {
-        panel.webview.html = createUnavailableGuestHtml(LEGACY_DUPLICATE_DETAIL, { tabId, editorId: null });
-        log(`tab ${tabId}: a legacy migration is already running for this tab`);
-        return;
-      }
-      const previousPanel = s.tabs.get(tabId)?.panel ?? null;
-      if (previousPanel !== null && previousPanel !== panel) {
-        // A transient panel an explicit open created is standing for this tab. The
-        // editor VS Code restored wins — it is the one the user's own layout names —
-        // and the transient panel is retired without releasing anything native: the
-        // tab keeps its runtime, its claim and its in-flight restore.
-        log(`tab ${tabId}: a restored webview replaced the panel an explicit open had created`);
-      }
-      const viewType = bridgeViewType(tabId, ownEditorId);
-      registerBridgeSerializer(context, index, viewType);
-      // The successor is created in the source panel's own view column, and a source
-      // that is not focused keeps the focus: the migration must not move the user.
-      const successor = vscode.window.createWebviewPanel(
-        viewType,
-        tabTitle,
-        { viewColumn: panel.viewColumn ?? vscode.ViewColumn.Active, preserveFocus: !panel.active },
-        {
-          enableScripts: true,
-          retainContextWhenHidden: true,
-          localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "media")],
-        },
-      );
-      const carriedDraft = previousPanel !== null && previousPanel !== panel ? await s.guestDispatcher.carryDraftFrom(previousPanel) : null;
-      try {
-        bindPanel(context, index, ownEditorId, tabId, successor, "restored");
-        if (carriedDraft !== null) s.draftRestores.set(ownEditorId, carriedDraft);
-        // Only the exact supplied panel is disposed, and only after its successor is
-        // bound: the predecessor's close must not be read as this tab's editor closing.
-        panel.dispose();
-        if (previousPanel !== null && previousPanel !== panel && previousPanel !== successor) previousPanel.dispose();
-      } finally {
-        s.guestDispatcher.releaseCarriedDraft(carriedDraft);
-      }
-      s.bridgeEditors.settleTransition(tabId, ownEditorId, ticket);
-      const prepared = await prepareBridgeDocument(context, ownEditorId);
-      if (s.tabs.get(ownEditorId)?.panel === successor && s.bridgeEditors.holdsEditor(ownEditorId)) {
-        if (prepared === null) {
-          const current = s.tabs.get(ownEditorId);
-          if (current?.bridge?.editorId === ownEditorId) current.bridge = null;
-          log(`slot ${ownEditorId}: migrated editor has no reconnect bridge; serving its chat through the panel`);
-        }
-        renderPanelDocument(context, ownEditorId);
-      }
-      log(`tab ${tabId}: a legacy editor was migrated onto a versioned successor`);
-      // Only a panel VS Code actually made active describes the user's selection,
-      // so the index follows that and nothing here reveals, moves or focuses a
-      // restored editor: its saved position and group are already its own.
-      if (panel.active) await setActiveTab(index, tabId);
-      // Deserialization is lazy, so this callback can arrive long after the native
-      // side settled: the last outcome is replayed rather than assumed delivered.
-      replayPanelOutcome(index, tabId);
-    },
-  };
 }
 
 /**
@@ -5479,667 +4879,6 @@ async function setActiveTab(index: SessionIndex, tabId: string): Promise<void> {
   } catch (error) {
     log(`tab ${tabId}: could not record the active tab: ${messageOf(error)}`);
   }
-}
-
-// The reconnecting bridge (ADR-0023)
-//
-// One listener per actual editor, one document per HTML incarnation, one route per
-// document, and one admission ledger per document. The extension owns policy — who
-// may act, and whose native checks pass right now — while `src/host/bridge-*` owns
-// the listener, the records, the route state machine and the admission rules.
-
-/** Resolve this window's workspace hash and its durable bridge records. */
-async function bridgeHost(context: vscode.ExtensionContext): Promise<{ readonly workspace: string; readonly records: BridgeRecords }> {
-  const s = windowState();
-  if (s.bridgeWorkspace !== null && s.bridgeStore !== null) return { workspace: s.bridgeWorkspace, records: s.bridgeStore };
-  const folders = (vscode.workspace.workspaceFolders ?? []).map(folder => folder.uri.fsPath);
-  const workspaceFile = vscode.workspace.workspaceFile?.fsPath ?? null;
-  const workspace = encodeHex(await sha256(new TextEncoder().encode(workspaceIdentityText(folders, workspaceFile))));
-  s.bridgeWorkspace = workspace;
-  s.bridgeStore = new BridgeRecords({
-    root: path.join(context.globalStorageUri.fsPath, "bridge", "v1"),
-    secrets: context.secrets,
-  });
-  return { workspace, records: s.bridgeStore };
-}
-
-/** The identity of one editor under the workspace hash its own records are filed under, or `null` when it is not one this bridge minted. */
-function bridgeScope(workspace: string, tabId: string, editorId: string): BridgeRecordScope | null {
-  if (!isPanelTabId(tabId) || !/^[0-9a-f]{32}$/.test(editorId)) return null;
-  return { workspace, tabId, editorId };
-}
-
-/**
- * The editors this window's *actual* VS Code membership contains.
- *
- * The tab input's view type is the authority: a stored secret, an index row or a
- * saved state can be stale, but a tab input that exists right now means the editor
- * exists right now. The installed workbench prefixes webview inputs, which
- * `tabInputIdentity` unwraps; a type outside this namespace is not ours.
- */
-function editorMembership(): { readonly tabId: string; readonly editorId: string }[] {
-  const found: { tabId: string; editorId: string }[] = [];
-  for (const group of vscode.window.tabGroups.all) {
-    for (const tab of group.tabs) {
-      const input = tab.input;
-      const viewType = input instanceof vscode.TabInputWebview ? input.viewType : null;
-      const identity = viewType === null ? null : tabInputIdentity(viewType);
-      if (identity !== null) found.push({ tabId: identity.tabId, editorId: identity.editorIdHex });
-    }
-  }
-  return found;
-}
-
-/** Register one dynamic type's serializer, once per activation. */
-function registerBridgeSerializer(context: vscode.ExtensionContext, index: SessionIndex, viewType: string): void {
-  const s = windowState();
-  if (s.bridgeSerializerTypes.has(viewType)) return;
-  s.bridgeSerializerTypes.add(viewType);
-  context.subscriptions.push(vscode.window.registerWebviewPanelSerializer(viewType, bridgeSerializerFor(context, index, viewType)));
-}
-
-/** The endpoint of one editor, or `null` when this window does not serve it. */
-function bridgeEndpointOf(editorId: string): BridgeEditorEndpoint | null {
-  const s = windowState();
-  return s.bridgeEndpoints.get(editorId) ?? null;
-}
-
-/**
- * Whether one document of one editor may still act.
- *
- * Every answer is re-derived from live window state — the winning editor of the
- * tab, actual editor membership, and the document this host currently serves — so a
- * record, a secret or a socket can never authorize anything by itself.
- */
-function bridgeDocumentEligible(editorId: string, documentId: string): boolean {
-  const s = windowState();
-  // A non-controlling editor is never eligible for a bridge route: it must not be
-  // able to reconnect and act after another editor took the conversation.
-  if (passiveReasonForSlot(editorId) !== null) return false;
-  const state = s.tabs.get(editorId);
-  if (state === undefined || state.tabId === null || state.bridge === null || state.bridge.editorId !== editorId) return false;
-  if (state.bridge.documentId !== documentId) return false;
-  if (s.indexForBridge !== null && s.indexForBridge.get(state.tabId) === null) return false;
-  // A panel handle for this exact document is the strongest fact; without one the
-  // editor must still be in real VS Code membership, which is what a surviving page
-  // after a host-only restart has.
-  return state.panel !== null || s.bridgeLiveEditors.has(editorId);
-}
-
-/**
- * Create — or adopt — the endpoint of one actual editor.
- *
- * Binds its exact recorded port (an ephemeral one only for an editor this window
- * has never recorded), then hands back the endpoint. A port that cannot be bound is
- * reported as a bounded failure and no route is offered for that editor.
- */
-async function ensureBridgeEndpoint(
-  context: vscode.ExtensionContext,
-  tabId: string,
-  editorId: string,
-): Promise<BridgeEditorEndpoint | null> {
-  const s = windowState();
-  const existing = bridgeEndpointOf(editorId);
-  if (existing !== null) return existing;
-  const pending = s.pendingBridgeEndpoints.get(editorId);
-  if (pending !== undefined) return pending;
-  const creation = (async (): Promise<BridgeEditorEndpoint | null> => {
-    const host = await bridgeHost(context);
-    // An editor keeps the workspace hash its records were minted under even when the
-    // window's own hash has since changed (a folder was opened or closed): that hash is
-    // what its surviving page presents, so recomputing it would orphan the page.
-    if (bridgeScope(host.workspace, tabId, editorId) === null) return null;
-    const scope = bridgeScope(await host.records.homeWorkspace(tabId, editorId, host.workspace), tabId, editorId);
-    if (scope === null) return null;
-    const endpoint = new BridgeEditorEndpoint({
-      records: host.records,
-      scope,
-      hostGeneration: s.bridgeHostGeneration,
-      eligible: documentId => bridgeDocumentEligible(editorId, documentId),
-      onRequest: (session, documentId, request) => handleBridgeRequest(editorId, documentId, session, request),
-      onStateChanged: (documentId, state) => {
-        log(`tab ${tabId}: bridge document ${documentId.slice(0, 8)} is ${state}`);
-        s.diagnostics.note(tabId, `bridge: document ${documentId.slice(0, 8)} is ${state}`);
-        // A surviving page becomes reachable (or stops being) as its route state moves.
-        attachChatRoute(editorId);
-        refreshLauncher();
-      },
-      onDiagnostic: (code, detail) => {
-        log(`tab ${tabId}: bridge ${code} — ${detail}`);
-        s.diagnostics.note(tabId, `bridge: ${code}`);
-      },
-    });
-    const port = await endpoint.bind();
-    if (port === null) {
-      log(`tab ${tabId}: the bridge listener could not bind (${endpoint.failure ?? "unknown"})`);
-      endpoint.close();
-      return null;
-    }
-    s.bridgeEndpoints.set(editorId, endpoint);
-    log(`tab ${tabId}: bridge listener bound on 127.0.0.1:${port} for editor ${editorId.slice(0, 8)}`);
-    return endpoint;
-  })();
-  s.pendingBridgeEndpoints.set(editorId, creation);
-  try {
-    return await creation;
-  } finally {
-    if (s.pendingBridgeEndpoints.get(editorId) === creation) s.pendingBridgeEndpoints.delete(editorId);
-  }
-}
-
-/**
- * Prepare the document this tab's panel is about to render.
- *
- * Mints a fresh document incarnation `D` and its bootstrap id, retires the previous
- * document's credential and binds the editor's exact port — all *before* the HTML
- * exists, so a panel is never rendered for a listener that does not exist and a
- * page's `connect-src` never names a port nobody is holding.
- */
-async function prepareBridgeDocument(
-  context: vscode.ExtensionContext,
-  editorId: string,
-): Promise<{ readonly endpoint: BridgeEditorEndpoint; readonly documentId: string; readonly bootstrapId: string; readonly port: number } | null> {
-  const s = windowState();
-  const state = s.tabs.get(editorId);
-  // The endpoint's own recorded namespace wins: an editor keeps the (T, E) namespace its
-  // listener was bound under, so a slot whose reservation was released (a passive
-  // newcomer whose destination belongs to another editor) is never given a second
-  // endpoint under another conversation.
-  const known = state?.bridge?.endpoint.scope.tabId ?? null;
-  const namespaceTabId = known ?? s.bridgeEditors.tabOfEditor(editorId) ?? null;
-  // A *passive* slot may still provision: it must be able to retire the document that
-  // was authorized for the conversation it no longer serves, and it can act on nothing.
-  const mayProvision =
-    state !== undefined && namespaceTabId !== null && (s.bridgeEditors.holdsEditor(editorId) || passiveReasonForSlot(editorId) !== null);
-  if (!mayProvision) return null;
-  const endpoint = await ensureBridgeEndpoint(context, namespaceTabId, editorId);
-  if (endpoint === null) return null;
-  const documentId = createToken();
-  const bootstrapId = createToken();
-  const document = await endpoint.beginDocument(documentId, bootstrapId);
-  const port = endpoint.port;
-  if (document === null || port === null) {
-    log(`slot ${editorId}: this editor's bridge document could not be prepared`);
-    return null;
-  }
-  if (s.tabs.get(editorId) !== state || !s.bridgeEditors.holdsEditor(editorId)) {
-    await endpoint.retireDocument(documentId);
-    return null;
-  }
-  // Preparation and panel adoption share the endpoint but can finish in either
-  // order. The document itself must publish its ticket even if adoption is
-  // still returning from the same single-flight bind.
-  if (state.bridge === null || state.bridge.editorId !== editorId || state.bridge.endpoint !== endpoint) {
-    state.bridge = { editorId, endpoint, documentId, bound: false };
-  } else {
-    state.bridge.documentId = documentId;
-    state.bridge.bound = false;
-  }
-  s.bridgeEditors.noteDocument(editorId, editorId, documentId);
-  return { endpoint, documentId, bootstrapId, port };
-}
-
-/**
- * Adopt one actual editor into this window's live state.
- *
- * The endpoint is created — and its exact port bound — if this activation does not
- * already have one, the tab's bridge entry is pointed at it, and the editor is
- * registered as present in this window's real membership: that membership is what
- * authorizes a surviving page's handshake when this host holds no panel handle for it.
- */
-async function adoptBridgeEditor(
-  context: vscode.ExtensionContext,
-  slot: string,
-  panel: vscode.WebviewPanel | null,
-): Promise<boolean> {
-  const s = windowState();
-  const state = tabState(slot);
-  const namespaceTabId = s.bridgeEditors.tabOfEditor(slot) ?? state.tabId ?? null;
-  if (namespaceTabId === null || !s.bridgeEditors.holdsEditor(slot)) return false;
-  const endpoint = await ensureBridgeEndpoint(context, namespaceTabId, slot);
-  if (endpoint === null || !s.bridgeEditors.holdsEditor(slot)) return false;
-  const existing = state.bridge;
-  if (existing === null || existing.editorId !== slot || existing.endpoint !== endpoint) {
-    state.bridge = { editorId: slot, endpoint, documentId: null, bound: false };
-  }
-  s.bridgeLiveEditors.add(slot);
-  if (panel !== null) endpoint.panelBound();
-  return true;
-}
-
-/**
- * Reconcile this window's editors with VS Code's own membership.
- *
- * Called at activation — before any asynchronous native work — and again whenever the
- * tab set changes. Two things come out of it: every *recognized* dynamic type gets a
- * serializer (so a later reload can restore that editor), and every editor whose page
- * may still be running is adopted with its recorded document and origin, so a
- * surviving page's reconnect has something to authenticate against. A stale type (an
- * indexed id this workspace no longer has) gets its serializer too, and its resolver
- * explains itself without starting any native work.
- */
-async function syncBridgeEditors(
-  context: vscode.ExtensionContext,
-  index: SessionIndex,
-  options: { readonly retireMissing?: boolean } = {},
-): Promise<void> {
-  const s = windowState();
-  const membership = editorMembership();
-  const present = new Set(membership.map(entry => entry.editorId));
-  for (const editorId of [...s.bridgeLiveEditors]) {
-    if (present.has(editorId)) continue;
-    s.bridgeLiveEditors.delete(editorId);
-    // Only a *change* in the tab set retires an editor: the activation pass runs
-    // before this window has necessarily listed every editor it restored, and
-    // forgetting a page that is still running would destroy the credential it needs.
-    if (options.retireMissing !== true) continue;
-    retireClosedBridgeEditor(editorId);
-  }
-  for (const entry of membership) {
-    registerBridgeSerializer(context, index, bridgeViewType(entry.tabId, entry.editorId));
-    s.bridgeLiveEditors.add(entry.editorId);
-    // The viewType names the editor's *original* (T, E) namespace, which never
-    // changes. Which conversation the editor serves now is the editor
-    // coordinator's reservation for it: after a settled switch that is the new conversation, and
-    // the original T no longer selects anything.
-    const served = s.bridgeEditors.tabOfEditor(entry.editorId);
-    // Only the elected editor may own this conversation's endpoint; a duplicate
-    // actual Webview input is still observed, but never gets a native route or secret.
-    if (served === null) {
-      const elected = reserveSlotForConversation(index, entry.tabId, entry.editorId, "saved");
-      if (elected.outcome === "lost") continue;
-    }
-    const conversation = s.bridgeEditors.tabOfEditor(entry.editorId) ?? entry.tabId;
-    if (index.get(conversation) === null) continue;
-    const state = s.tabs.get(entry.editorId);
-    if (state !== undefined && state.bridge?.editorId === entry.editorId && state.bridge.documentId !== null) continue;
-    const endpoint = await ensureBridgeEndpoint(context, entry.tabId, entry.editorId);
-    if (endpoint === null) continue;
-    if (!s.bridgeEditors.holdsEditor(entry.editorId)) {
-      await endpoint.forget();
-      s.bridgeEndpoints.delete(entry.editorId);
-      continue;
-    }
-    // A host re-adopted before this editor was adopted lives in the conversation's own
-    // record (nothing named an editor for it yet). The editor that serves the conversation
-    // takes that record — its runtime, control channel and counters — so the bridge's
-    // native-readiness check finds the running host under the editor's key.
-    const held = s.tabs.get(entry.editorId) === undefined ? s.tabs.get(conversation) : undefined;
-    if (held !== undefined && held.slotId !== entry.editorId && held.panel === null) {
-      s.tabs.delete(held.slotId);
-      s.editorSlots.remove(held.slotId);
-      held.slotId = entry.editorId;
-      held.tabId = conversation;
-      s.tabs.set(entry.editorId, held);
-    }
-    const current = tabState(entry.editorId);
-    if (current.tabId === null) current.tabId = conversation;
-    if (current.panel === null) current.mode = current.runtime?.kind ?? index.slotBinding(entry.editorId)?.mode ?? defaultSessionMode(context);
-    if (current.bridge === null || current.bridge.editorId !== entry.editorId) {
-      current.bridge = { editorId: entry.editorId, endpoint, documentId: null, bound: false };
-    }
-    if (current.panel !== null) {
-      // This window holds the panel handle, so the panel is this document's route and
-      // its document is provisioned when it renders.
-      endpoint.panelBound();
-      continue;
-    }
-    const adopted = await endpoint.adoptRecordedDocument();
-    if (!s.bridgeEditors.holdsEditor(entry.editorId) || current.bridge?.endpoint !== endpoint) continue;
-    if (adopted === null) continue;
-    s.diagnostics.note(entry.editorId, `bridge: adopted surviving document ${adopted.documentId.slice(0, 8)} for editor ${entry.editorId.slice(0, 8)}`);
-    current.bridge.documentId = adopted.documentId;
-    s.bridgeEditors.noteDocument(entry.editorId, entry.editorId, adopted.documentId);
-    endpoint.offerBridge();
-    refreshBridgeReadiness(entry.editorId);
-    log(`slot ${entry.editorId}: adopted surviving bridge document ${adopted.documentId.slice(0, 8)}`);
-    refreshLauncher();
-  }
-}
-
-/** The bridge ticket facts one rendered document carries. */
-interface BridgeTicketFacts {
-  readonly editorId: string;
-  readonly documentId: string;
-  readonly bootstrapId: string;
-  readonly port: number;
-}
-
-/** The ticket of the document this tab's panel currently shows, or `null`. */
-function bridgeTicketFacts(tabId: string): BridgeTicketFacts | null {
-  const state = stateOf(tabId);
-  const bridge = state?.bridge ?? null;
-  if (bridge === null || bridge.documentId === null) return null;
-  const endpoint = bridge.endpoint;
-  const document = endpoint.document;
-  const port = endpoint.port;
-  if (document === null || document.documentId !== bridge.documentId || port === null) return null;
-  return { editorId: bridge.editorId, documentId: bridge.documentId, bootstrapId: document.bootstrapId, port };
-}
-
-/**
- * Pin the Origin a page reported over the panel route.
- *
- * The report is only honored when it names the exact document this host currently
- * serves, which is what keeps a late message from an older document from pinning
- * an origin for a newer one. The origin itself is validated as a canonical
- * non-opaque Webview origin by the endpoint; a report for another document, or an
- * origin this bridge does not accept, is refused rather than normalised.
- */
-function pinBridgeOrigin(tabId: string, panel: vscode.WebviewPanel, report: { readonly documentId: string; readonly bootstrapId: string; readonly origin: string }): void {
-  const state = stateOf(tabId);
-  const bridge = state?.bridge ?? null;
-  if (state === undefined || bridge === null || state.panel !== panel) return;
-  if (bridge.documentId !== report.documentId) {
-    log(`tab ${tabId}: an origin report named a document this host no longer serves`);
-    return;
-  }
-  const document = bridge.endpoint.document;
-  if (document === null || document.bootstrapId !== report.bootstrapId) {
-    log(`tab ${tabId}: an origin report named a bootstrap this host did not mint`);
-    return;
-  }
-  if (!bridge.endpoint.pinOrigin(report.documentId, report.origin)) return;
-  log(`tab ${tabId}: bridge origin pinned for document ${report.documentId.slice(0, 8)}`);
-  void commitBridgeDocument(tabId);
-}
-
-/**
- * Apply the origin report a page made while its editor was not yet controlling.
- *
- * Returns `true` when a held report was consumed (the pin, and with it the commit, ran); the
- * caller then has nothing left to commit itself. Nothing is applied while the editor is still
- * passive or has no panel, so the passive gate keeps its meaning: it only decides *when* the
- * report the page already made is honored.
- */
-function replayHeldReadyReport(state: TabState): boolean {
-  const held = state.heldReadyReport;
-  if (held === null || state.panel === null || state.tabId === null) return false;
-  if (passiveReasonForSlot(state.slotId) !== null) return false;
-  state.heldReadyReport = null;
-  pinBridgeOrigin(state.tabId, state.panel, held);
-  void redeliverBridgeBinding(state.tabId);
-  return true;
-}
-
-/** The chat-host binding this window can verify for one tab right now, or `null`. */
-function liveBridgeBinding(tabId: string): BridgeNativeBinding | null {
-  const s = windowState();
-  const state = stateOf(tabId);
-  const table = s.indexForBridge;
-  if (state === undefined || state.tabId === null || table === null) return null;
-  const runtime = state.runtime;
-  // The binding is the *current* conversation's: the endpoint's namespace T never
-  // selects chat authority again after the editor serves another conversation.
-  const entry = table.get(state.tabId);
-  if (runtime === null || entry === null) return null;
-  const session = s.chat.sessionOf(state.tabId);
-  if (runtime.kind === "chat" && (session === null || session.phase !== "live")) return null;
-  if (runtime.kind === "terminal" && (!state.control || !isOpenControlClient(state.control.client) || runtime.observed?.available !== true || runtime.observed.sessionId !== entry.sessionId || runtime.observed.sessionFile === null || entry.sessionFile === null || !controlPathEquals(runtime.observed.sessionFile, entry.sessionFile))) return null;
-  if (entry.availability !== "live" || entry.ownership === null || entry.ownership.releasedAt !== null) return null;
-  if (entry.host?.pid !== runtime.pid) return null;
-  // Only an exactly identified conversation is bound: a new session's file is learned
-  // from the process itself, and binding before that would fix an identity that changes.
-  if (entry.sessionFile === null || runtime.identity.childCreationTime === null) return null;
-  return {
-    ownerGeneration: entry.ownership.ownerGeneration,
-    pid: runtime.pid,
-    processCreation: runtime.identity.childCreationTime,
-    slot: runtime.identity.slot,
-    brokerId: runtime.identity.brokerId,
-    brokerGeneration: runtime.identity.brokerGeneration,
-    sessionId: runtime.kind === "chat" ? session?.model.header?.id ?? entry.sessionId : entry.sessionId,
-    sessionFile: entry.sessionFile,
-  };
-}
-
-/**
- * Commit this tab's document against the chat-host binding, once.
- *
- * The commit is what makes the document able to authenticate at all, so it happens
- * only when the Origin is pinned *and* the chat host is verified: a live conversation
- * whose owner, broker slot, child identity and session file all agree. No
- * secret is delivered before that, and the descriptor written here is what a
- * surviving page's handshake is checked against after a restart.
- */
-async function commitBridgeDocument(tabId: string): Promise<void> {
-  const s = windowState();
-  const state = stateOf(tabId);
-  const bridge = state?.bridge ?? null;
-  if (state === undefined || bridge === null) return;
-  if (replayHeldReadyReport(state)) return;
-  if (bridge.documentId === null || bridge.bound) return;
-  const binding = liveBridgeBinding(tabId);
-  if (binding === null) return;
-  const delivery = await bridge.endpoint.commit(binding);
-  if (delivery === null) return;
-  bridge.bound = false;
-  log(`tab ${tabId}: bridge document ${delivery.documentId.slice(0, 8)} committed`);
-  // The endpoint, the document and the binding are bounded facts; the secret and the
-  // binding's own fields are not recorded.
-  s.diagnostics.note(
-    tabId,
-    `bridge: document ${delivery.documentId.slice(0, 8)} committed for editor ${bridge.editorId.slice(0, 8)} on 127.0.0.1:${delivery.port}`,
-  );
-  deliverBridgeBinding(tabId, delivery);
-}
-
-/**
- * Deliver one document's bridge secret over the panel route.
- *
- * The secret only ever travels to the exact panel of the document it belongs to, so
- * a superseded panel cannot receive it; the page answers with an acknowledgement
- * naming this delivery, which is what proves the page that holds the secret is the
- * one whose link the binding was pinned to.
- */
-function deliverBridgeBinding(tabId: string, delivery: BridgeBootstrapDelivery): void {
-  const s = windowState();
-  const state = stateOf(tabId);
-  const bridge = state?.bridge ?? null;
-  const panel = state?.panel ?? null;
-  if (state === undefined || bridge === null || panel === null) return;
-  if (bridge.documentId !== delivery.documentId) return;
-  const message: GuestBridgeBindMessage = {
-    type: "omp:bridge-bind",
-    hostGeneration: encodeHex(s.bridgeHostGeneration),
-    documentId: delivery.documentId,
-    bootstrapId: delivery.bootstrapId,
-    workspace: bridge.endpoint.scope.workspace,
-    // The page identifies itself to the listener by its document's own identity, which
-    // is the editor's original namespace — not the conversation it serves now.
-    tabId: bridge.endpoint.scope.tabId,
-    editorId: bridge.editorId,
-    port: delivery.port,
-    origin: delivery.origin,
-    path: BRIDGE_PATH,
-    bindingHash: delivery.bindingHash,
-    secret: encodeBase64Url(delivery.secret),
-  };
-  void panel.webview.postMessage(message);
-  log(`tab ${tabId}: bridge secret delivered for document ${delivery.documentId.slice(0, 8)}`);
-}
-
-/** Re-send the current document's bridge secret, without rotating it. */
-async function redeliverBridgeBinding(tabId: string): Promise<void> {
-  const bridge = stateOf(tabId)?.bridge ?? null;
-  if (bridge === null || bridge.bound) return;
-  const delivery = await bridge.endpoint.delivery();
-  if (delivery !== null) deliverBridgeBinding(tabId, delivery);
-}
-
-/**
- * Re-check this tab's native readiness for its bridge route.
- *
- * A recovered orphan may dispatch only while the *same* chat-host identity is verified:
- * a reattached process with a new epoch, a different broker generation
- * or a released claim is a different native side, and the bridge becomes
- * authenticated standby again instead of dispatching against it.
- */
-function refreshBridgeReadiness(tabId: string): void {
-  const state = stateOf(tabId);
-  const bridge = state?.bridge ?? null;
-  if (state === undefined || bridge === null || bridge.documentId === null) return;
-  const recorded = bridge.endpoint.committedBinding();
-  const live = liveBridgeBinding(tabId);
-  bridge.endpoint.nativeReady(recorded !== null && live !== null && bindingMatches(recorded, live));
-  pushBridgeRouteOffer(tabId);
-}
-
-/**
- * Retire the bridge of an editor this window observed closing.
- *
- * The reservation is released, the editor leaves the live membership, the endpoint
- * is dropped from this activation and its records — including the port lease record
- * and the document secret — are forgotten. That is what makes a reopen possible
- * (a fresh editor id must be able to win its tab) and what keeps a closed editor's
- * credential from outliving the editor.
- */
-function retireClosedBridgeEditor(slot: string): void {
-  const s = windowState();
-  const state = s.tabs.get(slot);
-  const endpoint = state?.bridge?.editorId === slot ? state.bridge.endpoint : s.bridgeEndpoints.get(slot) ?? s.pendingBridgeEndpoints.get(slot) ?? null;
-  if (state?.bridge?.editorId === slot) state.bridge = null;
-  s.bridgeLiveEditors.delete(slot);
-  // Only this editor's own reservation is released, and only its own endpoint and
-  // records are forgotten: another editor showing the same conversation — a passive
-  // one that still holds an unsent draft, or the incumbent of a live conflict —
-  // keeps its own slot, its own credential and its own process.
-  const namespaceTabId = s.bridgeEditors.tabOfEditor(slot);
-  if (namespaceTabId === null) {
-    void Promise.resolve(endpoint)
-      .then(bound => bound?.forget())
-      .catch(() => undefined);
-  } else {
-    // The helper releases the reservation before its first await. This closes the
-    // window where a late bind could adopt an editor the user already closed.
-    void retireClosedEditorBridge({ tabId: namespaceTabId, editorId: slot, endpoint, editors: s.bridgeEditors })
-      .then(result => {
-        if (!result.retired) return;
-        log(`slot ${slot}: the closed editor's bridge was retired`);
-        s.diagnostics.note(slot, `bridge: editor ${slot.slice(0, 8)} closed; endpoint and records retired`);
-      })
-      .catch(() => undefined);
-  }
-  if (endpoint instanceof Promise) {
-    void endpoint.then(bound => {
-      if (bound !== null && s.bridgeEndpoints.get(slot) === bound) s.bridgeEndpoints.delete(slot);
-    }).catch(() => undefined);
-  } else if (endpoint !== null && s.bridgeEndpoints.get(slot) === endpoint) {
-    s.bridgeEndpoints.delete(slot);
-  }
-}
-
-/** The route of this tab's current document, or `null`. */
-function bridgeRouteOf(tabId: string): BridgeDocumentRoute | null {
-  const state = stateOf(tabId);
-  const bridge = state?.bridge ?? null;
-  if (bridge === null || bridge.documentId === null) return null;
-  return bridge.endpoint.routeFor(bridge.documentId);
-}
-
-/**
- * Offer this document's route over the transport that can carry it.
- *
- * The panel route wins whenever this host actually holds the panel handle for this
- * document; the bridge is for a surviving page whose handle the restarted host no
- * longer has. The offer mints a fresh generation whenever the transport changes, and
- * dispatch waits for the page's acknowledgement either way.
- */
-function offerBridgeRoute(tabId: string): void {
-  const s = windowState();
-  cancelControlPicker(tabId);
-  const state = stateOf(tabId);
-  const bridge = state?.bridge ?? null;
-  if (state === undefined || bridge === null || bridge.documentId === null) return;
-  const ticket = bridgeTicketFacts(tabId);
-  if (ticket === null) return;
-  const route = bridgeRouteOf(tabId);
-  if (route === null) return;
-  if (state.panel !== null) {
-    const routeGeneration = bridge.endpoint.offerPanel();
-    if (routeGeneration === null) return;
-    void state.panel.webview.postMessage({
-      type: "omp:route-offer",
-      hostGeneration: encodeHex(s.bridgeHostGeneration),
-      documentId: bridge.documentId,
-      routeGeneration,
-      status: route.status(),
-    } satisfies GuestRouteOfferMessage);
-    return;
-  }
-  bridge.endpoint.offerBridge();
-}
-
-/**
- * Re-send the *current* offer so a status change reaches the page.
- *
- * The generation is not re-minted here: an already acknowledged route stays
- * acknowledged, and only the status word it carries moves.
- */
-function pushBridgeRouteOffer(tabId: string): void {
-  const s = windowState();
-  const state = stateOf(tabId);
-  const bridge = state?.bridge ?? null;
-  if (state === undefined || bridge === null || bridge.documentId === null) return;
-  const route = bridgeRouteOf(tabId);
-  const routeGeneration = route?.routeGeneration ?? null;
-  if (route === null || routeGeneration === null) return;
-  const status = route.status();
-  s.diagnostics.note(tabId, `bridge: route ${routeGeneration.slice(0, 8)} offered over ${state.panel === null ? "bridge" : "panel"} (${status})`);
-  if (state.panel !== null) {
-    void state.panel.webview.postMessage({
-      type: "omp:route-offer",
-      hostGeneration: encodeHex(s.bridgeHostGeneration),
-      documentId: bridge.documentId,
-      routeGeneration,
-      status,
-    } satisfies GuestRouteOfferMessage);
-    return;
-  }
-  // An orphan has no panel handle: the endpoint re-sends the *current* generation
-  // over whatever session is authenticated, and its own `noteSession` covers the case
-  // where the page has not reconnected yet.
-  bridge.endpoint.refreshBridgeOffer();
-}
-
-/** The page acknowledged the route generation it was offered over its panel (the dispatcher's `omp:route-ack`). */
-function acknowledgeBridgeRoute(tabId: string, panel: vscode.WebviewPanel, message: GuestRouteAckMessage): void {
-  const s = windowState();
-  const state = stateOf(tabId);
-  const route = bridgeRouteOf(tabId);
-  if (state === undefined || state.panel !== panel || route === null) return;
-  if (encodeHex(s.bridgeHostGeneration) !== message.hostGeneration || state.bridge?.documentId !== message.documentId) {
-    log(`tab ${tabId}: a route acknowledgement named another host generation or document`);
-    return;
-  }
-  const alreadyAcknowledged = route.acknowledged;
-  if (!route.acknowledge(message.routeGeneration, "panel")) {
-    log(`tab ${tabId}: a route acknowledgement named a fenced generation`);
-    return;
-  }
-  // Repeated delivery is valid, but an ACK of the ready-status offer must not
-  // trigger another identical offer and an unbounded panel round trip.
-  if (alreadyAcknowledged) return;
-  s.diagnostics.note(tabId, `bridge: route ${message.routeGeneration.slice(0, 8)} acknowledged over panel`);
-  pushBridgeRouteOffer(tabId);
-}
-
-/** The page acknowledged the secret it was delivered (the dispatcher's `omp:bridge-ack`). */
-function acknowledgeBridgeSecret(tabId: string, panel: vscode.WebviewPanel, message: GuestBridgeAckMessage): void {
-  const s = windowState();
-  const state = stateOf(tabId);
-  const bridge = state?.bridge ?? null;
-  if (state === undefined || state.panel !== panel || bridge === null) return;
-  if (encodeHex(s.bridgeHostGeneration) !== message.hostGeneration || bridge.documentId !== message.documentId) return;
-  const recorded = bridge.endpoint.committedBindingHash();
-  if (recorded === null || recorded !== message.bindingHash) {
-    log(`tab ${tabId}: a bridge acknowledgement named a binding this host did not commit`);
-    return;
-  }
-  bridge.bound = true;
-  log(`tab ${tabId}: the panel acknowledged its bridge secret`);
-  s.diagnostics.note(tabId, `bridge: the panel acknowledged the secret for document ${bridge.documentId?.slice(0, 8) ?? "unknown"}`);
-  refreshBridgeReadiness(tabId);
 }
 
 // Chat pages: the routes that show a host-owned conversation
@@ -6275,7 +5014,7 @@ function handleBridgeRequest(
     session.reply(request.requestId, { type: "omp:error", message: "This document is no longer served.", code: "not-hosted" });
     return;
   }
-  const route = bridgeRouteOf(editorId);
+  const route = windowState().bridgeHost.routeOf(editorId);
   const payload = typeof request.payload === "object" && request.payload !== null ? request.payload : null;
   if (route === null || payload === null) {
     session.reply(request.requestId, { type: "omp:error", message: "This document has no route.", code: "not-hosted" });
@@ -6335,7 +5074,7 @@ function handleBridgeRequest(
   if (request.operation.startsWith("terminal-")) {
     const object = payload as Record<string, unknown>;
     const parsed = parseGuestWebviewMessage({ ...object, type: `omp:${request.operation}` });
-    if (parsed === null || !route.dispatchable || state.runtime?.kind !== "terminal" || state.mode !== "terminal" || liveBridgeBinding(tabId) === null) {
+    if (parsed === null || !route.dispatchable || state.runtime?.kind !== "terminal" || state.mode !== "terminal" || windowState().bridgeHost.liveBinding(tabId) === null) {
       refuseBridgeRequest(session, route.routeGeneration, request.requestId);
       return;
     }
@@ -7584,8 +6323,8 @@ async function bindConversationIdentity(
       void applyChatTabAppearance(s.context as vscode.ExtensionContext, index, tabId);
       // The document could not be committed while the session had no file: the binding a
       // surviving page authenticates against needs the exact file, so it is committed now.
-      void commitBridgeDocument(tabId);
-      refreshBridgeReadiness(tabId);
+      void windowState().bridgeHost.commitDocument(tabId);
+      windowState().bridgeHost.refreshReadiness(tabId);
     } else {
       // OMP creates the file lazily (first message), so the exact path is remembered and bound as
       // soon as the file exists.
@@ -7657,8 +6396,8 @@ function retryPendingIdentity(index: SessionIndex, tabId: string): Promise<void>
       s.pendingIdentityFiles.delete(tabId);
       log(`tab ${tabId}: bound to the session file ${pending.sessionFile}`);
       void applyChatTabAppearance(s.context as vscode.ExtensionContext, index, tabId);
-      void commitBridgeDocument(tabId);
-      refreshBridgeReadiness(tabId);
+      void windowState().bridgeHost.commitDocument(tabId);
+      windowState().bridgeHost.refreshReadiness(tabId);
       refreshLauncher();
     })
     .catch(error => log(`tab ${tabId}: binding the session file failed: ${messageOf(error)}`));
@@ -7766,8 +6505,8 @@ function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, 
         if (!diagnosticsStageMeasured(tabId, "chat-live")) {
           s.diagnostics.succeed(tabId, "chat-live", { detail: "the conversation reached its live phase" });
         }
-        void commitBridgeDocument(tabId);
-        refreshBridgeReadiness(tabId);
+        void windowState().bridgeHost.commitDocument(tabId);
+        windowState().bridgeHost.refreshReadiness(tabId);
         s.guestDispatcher.invalidateControls(tabId);
         refreshFooterMetadata(index, tabId, true);
         refreshSessionCost(index, tabId);
@@ -8231,8 +6970,8 @@ async function establishControl(
         detail: `pid ${input.pid} · instance ${snapshot.host.instanceId}`,
       });
       s.guestDispatcher.invalidateControls(tabId);
-      void commitBridgeDocument(tabId);
-      refreshBridgeReadiness(tabId);
+      void windowState().bridgeHost.commitDocument(tabId);
+      windowState().bridgeHost.refreshReadiness(tabId);
     });
   } catch (error) {
     // A failure is only reported for the attempt that still owns the tab: reporting a
@@ -8354,7 +7093,7 @@ function panelResponder(tabId: string, panel: vscode.WebviewPanel, actionSeq: un
       if (live()) void panel.webview.postMessage(message);
     },
     admit: input => {
-      const route = bridgeRouteOf(tabId);
+      const route = windowState().bridgeHost.routeOf(tabId);
       // A document this window never bridged has only the panel route, and the
       // host mints the request id at dispatch. A bridged document uses its own
       // document ledger, so both routes reserve the same sequence exactly once.
@@ -8368,7 +7107,7 @@ function panelResponder(tabId: string, panel: vscode.WebviewPanel, actionSeq: un
         return {
           nativeRequestId: reservation.nativeRequestId,
           fence: () => {
-            if (!live() || bridgeRouteOf(tabId) !== route) {
+            if (!live() || windowState().bridgeHost.routeOf(tabId) !== route) {
               throw new HostControlRefusedError("closed", "This document was closed before native dispatch.", null);
             }
             reservation.verify();
@@ -9383,7 +8122,7 @@ function applySlotAuthority(slot: string): void {
   // disabled, banner shown) and the runtime refuses its commands; re-send so it applies now.
   attachChatRoute(slot, true);
   if (reason === null) {
-    replayHeldReadyReport(state);
+    windowState().bridgeHost.replayHeldReadyReport(state);
     // A control request answered while this editor could not act left its footer without
     // controls; now that it may act, the page asks again.
     s.guestDispatcher.invalidateControls(state.tabId);
@@ -11003,9 +9742,8 @@ function log(message: string): void {
 /** `vscode.ExtensionMode.Production`; compared by value so the mocked `vscode` of the tests need not define the enum. */
 const EXTENSION_MODE_PRODUCTION = 1;
 const PACKAGE_DRIFT_POLL_MS = 10_000;
-const UPDATED_ON_DISK_MESSAGE = "OMP Desk was updated. Reload the window to continue.";
-/** Shown by a document that was not built because the installed package changed under this host. */
-const UPDATED_ON_DISK_DETAIL = UPDATED_ON_DISK_MESSAGE;
+/** The notification and the explanation a document that was not built shows say the same thing. */
+const UPDATED_ON_DISK_MESSAGE = UPDATED_ON_DISK_DETAIL;
 
 /**
  * Whether the installed package no longer holds the bytes this host started from. The first
@@ -11104,7 +9842,7 @@ function registerPanelLifecycle(
     // port and secret are forgotten because nothing may be served from a closed
     // editor's records. A host-only restart disposes no editor, and its records must
     // survive for the page that is still running.
-    retireClosedBridgeEditor(slot);
+    windowState().bridgeHost.retireClosedEditor(slot);
     log(`slot ${slot}: webview closed; the OMP process keeps running`);
     refreshLauncher();
   });

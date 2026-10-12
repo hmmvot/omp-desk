@@ -6,15 +6,15 @@
  * Every member is plain data a test sets before it calls the module and reads back afterwards. It is not a VS
  * Code emulation; product code never imports it.
  */
-import { URI } from "vscode-uri";
+import { URI, Utils } from "vscode-uri";
 import { EventEmitter, Uri as TreeUri } from "../views/vscode-test-stub.ts";
 
 export * from "../views/vscode-test-stub.ts";
 
 /** Resource identities: the tree's `Uri.from`, and `parse`/`file` with the real `vscode-uri` behaviour. */
-export const Uri = { from: TreeUri.from, parse: URI.parse, file: URI.file };
+export const Uri = { from: TreeUri.from, parse: URI.parse, file: URI.file, joinPath: Utils.joinPath };
 
-export const ViewColumn = { One: 1, Two: 2, Beside: -2 } as const;
+export const ViewColumn = { Active: -1, One: 1, Two: 2, Beside: -2 } as const;
 
 export const QuickPickItemKind = { Separator: -1, Default: 0 } as const;
 
@@ -79,6 +79,9 @@ export const window: {
 	notices: string[];
 	showWarningMessage: (message: string, ...rest: unknown[]) => Promise<undefined>;
 	showInformationMessage: (message: string, ...rest: unknown[]) => Promise<undefined>;
+	/** The webview panel serializers a module registered, by view type. */
+	serializers: Map<string, { deserializeWebviewPanel(panel: unknown, state: unknown): Thenable<void> }>;
+	registerWebviewPanelSerializer(viewType: string, serializer: { deserializeWebviewPanel(panel: unknown, state: unknown): Thenable<void> }): { dispose(): void };
 } = {
 	state: { focused: true },
 	onDidChangeWindowState: focusChanges.event,
@@ -93,6 +96,11 @@ export const window: {
 	notices: [],
 	showWarningMessage: async message => { window.notices.push(message); return undefined; },
 	showInformationMessage: async message => { window.notices.push(message); return undefined; },
+	registerWebviewPanelSerializer(viewType, serializer) {
+		window.serializers.set(viewType, serializer);
+		return { dispose: () => { window.serializers.delete(viewType); } };
+	},
+	serializers: new Map(),
 };
 
 export const commands: {
