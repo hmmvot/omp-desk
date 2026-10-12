@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
 	ExternalLeaseObserver,
+	LEASE_FAILURE_BACKOFF_MS,
 	LEASE_MUTEX_PREFIX,
 	nativeLockDigest,
 	ompSessionOwnersDir,
@@ -219,6 +220,31 @@ describe("ExternalLeaseObserver", () => {
 		assert.equal(await instance.holds("two.jsonl"), null);
 		assert.equal(logs.length, 1);
 		assert.match(logs[0]!, /unavailable/);
+	});
+
+	it("does not start another probe for each observation while the last one failed, and tries again after the backoff", async () => {
+		let probes = 0;
+		let clock = 1_000;
+		const instance = new ExternalLeaseObserver({
+			// A busy machine: the probe takes longer than a verdict stays fresh, then reports nothing.
+			probe: async () => { probes += 1; clock += 5_000; return null; },
+			ownersDir: () => OWNERS,
+			readSessionId: async file => files.get(file) ?? null,
+			knownFiles: () => [...files.keys()],
+			now: () => clock,
+			ttlMs: 2_000,
+		});
+		const burst = await Promise.all([instance.holds("one.jsonl"), instance.holds("two.jsonl"), instance.holds("three.jsonl")]);
+		assert.deepEqual(burst, [null, null, null]);
+		assert.equal(probes, 1, "one failed pass answers the whole burst; each row did not start its own three attempts");
+		clock += 5_000;
+		assert.equal(await instance.holds("one.jsonl"), null);
+		assert.equal(probes, 1, "inside the backoff the failure is answered from memory");
+		clock += LEASE_FAILURE_BACKOFF_MS;
+		assert.equal(await instance.holds("one.jsonl"), null);
+		assert.equal(probes, 2, "after the backoff the probe is tried again");
+		assert.equal(await instance.holds("one.jsonl", { fresh: true }), null);
+		assert.equal(probes, 3, "a click that must not act on an old verdict still probes");
 	});
 
 	it("answers unknown when it cannot name the lease: no owners directory, no header, an unplain id", async () => {

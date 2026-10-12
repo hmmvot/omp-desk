@@ -4432,7 +4432,13 @@ describe("starting a session in the window that has its folder open", () => {
   const cleanups: Array<() => void> = [];
   let created = 0;
 
-  interface Target { readonly holderId: string; readonly uri: string | null; readonly serve: ServeOutcome | null }
+  interface Target {
+    readonly holderId: string;
+    readonly uri: string | null;
+    readonly serve: ServeOutcome | null;
+    /** The extension-host process the registry's live record of this window names; none when the registry knows no live process for it. */
+    readonly pid?: number;
+  }
 
   /** This window, the windows it could hand a launch to (served for real through the request directory) and what it was asked to do. */
   async function world(targets: readonly Target[]) {
@@ -4448,6 +4454,7 @@ describe("starting a session in the window that has its folder open", () => {
       refresh: async () => false,
       flush: async () => {},
       windows: () => targets.map(target => ({ holderId: target.holderId, here: false, startedAt: STAMP, windowUri: target.uri, label: target.holderId, folders: [], liveCwds: [], rows: {}, focusedAt: null })),
+      liveHolderPid: (holderId: string) => targets.find(target => target.holderId === holderId)?.pid ?? null,
     });
     const drafts: unknown[] = [];
     const index = {
@@ -4706,6 +4713,20 @@ describe("starting a session in the window that has its folder open", () => {
       await harness.openSessionInMode(undefined, w.index, TAB, "terminal");
       assert.deepEqual(w.served.map(request => request.kind), ["select"], "the owner is asked to select the tab; no launch is requested or started");
       assert.equal(w.calls[0]?.[0], "vscode.openFolder");
+      assert.deepEqual(w.drafts, []);
+    });
+
+    it("takes a holder the registry shows live for a window that holds the session, without reading its process start time", async () => {
+      // A pid no process has: the start-time reading would find nothing and call the holder gone, as it does when PowerShell times out on a busy machine.
+      const absentPid = 2 ** 22 + 4321;
+      const w = await world([{ holderId: "holder-live", pid: absentPid, uri: URI.file("C:/omp-vscode/proj").toString(), serve: { ok: true, focused: true } }]);
+      Object.assign(w.index, {
+        get: () => ({ tabId: TAB, cwd: FOLDER, ownership: { ownerGeneration: "g" }, host: null }),
+        observeOwnership: async () => ({ ok: true, claim: { verifiable: true, holderId: "holder-live", pid: absentPid, ownerGeneration: "g", windowUri: null } }),
+      });
+      harness.folders([folderRow()], [there("holder-live")]);
+      await harness.openSessionInMode(undefined, w.index, TAB, "terminal");
+      assert.deepEqual(w.served.map(request => request.kind), ["select"], "switched, not launched");
       assert.deepEqual(w.drafts, []);
     });
   });

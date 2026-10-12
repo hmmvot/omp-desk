@@ -269,6 +269,13 @@ export function powershellLeaseProbe(options: LeaseProbeLaunchOptions): LeasePro
 /** Default freshness of a cached verdict: long enough to serve a burst of row observations. */
 export const LEASE_VERDICT_TTL_MS = 2_000;
 
+/**
+ * How long a probe that failed (a timeout, no PowerShell, an unreadable report) answers "unknown" before another is
+ * started. Without it every observation that found the failed verdict stale started the next 5 s attempt at once, up to
+ * three in a row, so a busy machine ran one PowerShell after another and took longer to answer each of them.
+ */
+export const LEASE_FAILURE_BACKOFF_MS = 15_000;
+
 /** Most session ids probed in one helper run, so one pass stays a single short PowerShell call. */
 const MAX_BATCH = 200;
 
@@ -289,6 +296,9 @@ interface Verdict {
 	readonly state: LeaseState | null;
 	/** When the probe that produced this was started. */
 	readonly at: number;
+	/** When that probe finished, and whether it produced no report at all. */
+	readonly finishedAt: number;
+	readonly failed: boolean;
 	/** Ordinal of the pass that produced this, so a fresh request can demand a later one. */
 	readonly pass: number;
 }
@@ -333,7 +343,7 @@ export class ExternalLeaseObserver {
 		const passFloor = this.#passesStarted;
 		for (let attempt = 0; attempt < 3; attempt += 1) {
 			const known = this.#verdicts.get(name);
-			if (known !== undefined && (options.fresh === true ? known.pass > passFloor : known.at >= since)) return known.state === null ? null : known.state === "held";
+			if (known !== undefined && this.#usable(known, options.fresh === true, since, passFloor)) return known.state === null ? null : known.state === "held";
 			this.#wanted.add(name);
 			this.#round ??= this.#run(ownersDir).finally(() => {
 				this.#round = null;
@@ -347,6 +357,12 @@ export class ExternalLeaseObserver {
 	/** Forget every verdict; the next request probes again. */
 	invalidate(): void {
 		this.#verdicts.clear();
+	}
+
+	/** Whether a verdict answers this call: a later pass for a fresh one, else a recent one; a failed probe holds for the backoff. */
+	#usable(known: Verdict, fresh: boolean, since: number, passFloor: number): boolean {
+		if (fresh) return known.pass > passFloor;
+		return known.failed ? this.#now() - known.finishedAt < LEASE_FAILURE_BACKOFF_MS : known.at >= since;
 	}
 
 	async #run(ownersDir: string): Promise<void> {
@@ -380,8 +396,9 @@ export class ExternalLeaseObserver {
 			this.#options.log?.("session lease probe unavailable: rows keep their ordinary ownership state");
 		}
 		if (answer !== null) this.#unavailableLogged = false;
+		const finishedAt = this.#now();
 		for (const name of requested) {
-			this.#verdicts.set(name, { state: answer?.get(name) ?? null, at: startedAt, pass });
+			this.#verdicts.set(name, { state: answer?.get(name) ?? null, at: startedAt, finishedAt, failed: answer === null, pass });
 		}
 		// Bound the cache to the names of the latest passes.
 		if (this.#verdicts.size > MAX_BATCH * 4) {

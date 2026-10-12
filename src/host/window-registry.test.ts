@@ -406,6 +406,27 @@ describe("window registry", () => {
 		assert.deepEqual(fs.readdirSync(directory).filter(name => name.endsWith(".tmp")), [], "no staged file is left behind either");
 	});
 
+	it("names the process of another window that is live, read from its record alone", async () => {
+		const owner = windowOf("owner", 41, "2026-10-10T09:00:00.000Z");
+		const reader = windowOf("reader", 42, "2026-10-10T09:05:00.000Z");
+		await publish(owner, reader);
+		assert.equal(reader.liveHolderPid("owner"), 41);
+		assert.equal(reader.liveHolderPid("reader"), null, "this window is not another window");
+		assert.equal(reader.liveHolderPid("never-seen"), null);
+	});
+
+	it("stops naming a window whose process is gone at once, and one whose lease has lapsed", async () => {
+		const owner = windowOf("owner", 41, "2026-10-10T09:00:00.000Z");
+		const reader = windowOf("reader", 42, "2026-10-10T09:05:00.000Z");
+		await publish(owner, reader);
+		alive.delete(41);
+		assert.equal(reader.liveHolderPid("owner"), null, "the process is probed at the question, not only when the records were read");
+		alive.add(41);
+		assert.equal(reader.liveHolderPid("owner"), 41);
+		clock += LEASE + 1;
+		assert.equal(reader.liveHolderPid("owner"), null, "a record nobody renews does not prove a window");
+	});
+
 	it("tells a live pid from a gone one", () => {
 		assert.equal(processExists(process.pid), true);
 		assert.equal(processExists(0), false);

@@ -518,6 +518,21 @@ export class WindowRegistry {
 	}
 
 	/**
+	 * The extension-host process id of the other live window of `holderId`, or `null` when this registry knows none.
+	 *
+	 * What a session claim's holder is, read from the windows' own records (a fresh lease and a process that
+	 * still exists, checked now) and never from a process spawned to read a start time: that command takes seconds on a busy
+	 * machine and then answers nothing, which is how a row another window runs stopped being shown as such.
+	 */
+	liveHolderPid(holderId: string): number | null {
+		const now = this.#now();
+		for (const { record } of this.#others) {
+			if (record.holderId === holderId && leaseHolds(record, now, this.#leaseMs) && this.#pidAlive(record.pid)) return record.pid;
+		}
+		return null;
+	}
+
+	/**
 	 * Read the other windows' records now and answer from *this* read alone, never from state another read can change.
 	 *
 	 * A requester that must know, before it acts on another window's behalf, which windows exist and whether any record
