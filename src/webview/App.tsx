@@ -29,7 +29,7 @@ import { DETAIL_META, parseDetailMeta } from "../protocol/detail-target";
 import { Transcript, type TranscriptRewind } from "./components/Transcript";
 import { RewindBar } from "./components/Rewind";
 import { NAVIGATE_REFUSAL_SENTENCES, rewindTargets, undoOffer, type NavigationKind } from "../chat/rewind";
-import { REWIND_IDLE, conversationMovedPastLeaf, reduceRewind, rewindBlockedReason } from "./lib/rewind-mode";
+import { REWIND_IDLE, conversationMovedPastLeaf, reduceRewind, rewindBlockedReason } from "../chat/rewind-mode";
 import { parseDraftHandoffContent } from "../protocol/messages";
 import type { ChatClient } from "./lib/chat-client";
 import { chatBanner } from "./lib/chat-banner";

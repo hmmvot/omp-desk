@@ -81,7 +81,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { renameReplacing } from "./atomic-file.ts";
+import { renameReplacing, stageBeside } from "./atomic-file.ts";
 import { trackOperation } from "./loop-lag.ts";
 
 /** Document schema version this build writes and accepts. */
@@ -493,23 +493,13 @@ async function releaseLock(lockPath: string, token: string): Promise<void> {
  * in place.
  */
 async function commitDocument(paths: CatalogPaths, next: CatalogDocument): Promise<void> {
-  const staging = `${paths.document}.${process.pid}.${randomUUID()}.tmp`;
   const payload = trackOperation("catalog serialize", () => JSON.stringify(next));
-  let handle: fsp.FileHandle;
+  let staging: string;
   try {
-    handle = await fsp.open(staging, "w");
+    staging = await stageBeside(paths.document, payload, { sync: true });
   } catch (error) {
-    throw new CatalogError("write", `The OMP profile catalog could not be staged: ${messageOf(error)}`, { cause: error });
-  }
-  try {
-    await handle.writeFile(payload);
-    await handle.sync();
-  } catch (error) {
-    await handle.close().catch(() => undefined);
-    await fsp.rm(staging, { force: true });
     throw new CatalogError("write", `The OMP profile catalog could not be written: ${messageOf(error)}`, { cause: error });
   }
-  await handle.close();
   try {
     // Windows refuses a replace while another process has the destination open (another window re-reading the catalog,
     // an antivirus scan, a backup tool). The rename is retried over about two seconds, then reported; the previous

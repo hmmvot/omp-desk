@@ -90,7 +90,7 @@ Option 1.
   socket's own fixed text for a known close code or a fixed sentence this guest
   composes, and the recorder's close *metadata* carries the fixed form while admitted
   payloads stay exactly as received.
-- **Message boundary** (`src/webview/messages.ts`): the guest's `omp:status` detail
+- **Message boundary** (`src/protocol/messages.ts`): the guest's `omp:status` detail
   and `omp:error` message are replaced by `CAPABILITY_WITHHELD` at the parse, so
   every consumer — the log, the diagnostics report, the notification, the launcher
   row — is downstream of a value that is never the guest's or the host's text. The

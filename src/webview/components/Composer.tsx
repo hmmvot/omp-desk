@@ -66,7 +66,7 @@ import type { DraftCapture } from "../lib/draft-handoff";
 import { followedByBlank, spaceInsertion, subscribeInsertedText } from "../lib/insert-text";
 import { mergeRestoredQueued, offerQueuedForEditing, subscribeQueuedForEditing } from "../lib/queue-restore";
 import { queueNotice, queueRows, restoredEntries } from "../lib/queue-view";
-import { historyStep, sessionPrompts, type HistoryCursor } from "../lib/prompt-history";
+import { historyStep, sessionPrompts, type HistoryCursor } from "../../chat/prompt-history";
 import { mentionQueryAt, spliceMention } from "../../protocol/messages";
 import {
 	activeImages,

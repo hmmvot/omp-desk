@@ -9,6 +9,7 @@
 import { open } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { createReadStream } from "node:fs";
+import type { Readable } from "node:stream";
 import { createInterface } from "node:readline";
 import * as path from "node:path";
 import { normalizeClaimIdentity } from "./session-claim.ts";
@@ -56,8 +57,16 @@ export async function readSessionFileHeader(file: string): Promise<SessionFileHe
  * {@link readSessionFileHeader} for a reader that keeps asking: `previous` is its last reading of the
  * same file, and a file whose `mtimeMs` and `size` still match it costs one `fstat` and returns
  * `previous` as is. `null` is a file that could not be opened or read.
+ *
+ * Only a completed reading is reusable: when the streaming scan for the first prompt fails, the
+ * header is returned as far as the prefix gave it, with a stamp that matches no file, so the next
+ * call reads again. `openStream` is the scan's file stream, replaceable by a test.
  */
-export async function readSessionFileHeaderReading(file: string, previous: SessionFileHeaderReading | null): Promise<SessionFileHeaderReading | null> {
+export async function readSessionFileHeaderReading(
+	file: string,
+	previous: SessionFileHeaderReading | null,
+	openStream: (file: string) => Readable = file => createReadStream(file, { encoding: "utf8" }),
+): Promise<SessionFileHeaderReading | null> {
 	let content: string;
 	let truncated = false;
 	let stamp: { readonly mtimeMs: number; readonly size: number };
@@ -77,31 +86,40 @@ export async function readSessionFileHeaderReading(file: string, previous: Sessi
 	} catch {
 		return null;
 	}
-	return { ...stamp, header: await parseSessionFileHeaderFully(file, content, truncated) };
+	const { header, complete } = await parseSessionFileHeaderFully(file, content, truncated, openStream);
+	return complete ? { ...stamp, header } : { mtimeMs: Number.NaN, size: stamp.size, header };
 }
 
-/** The header of `content`, a prefix of `file`; a truncated prefix without a title is followed to the first user entry. */
-async function parseSessionFileHeaderFully(file: string, content: string, truncated: boolean): Promise<SessionFileHeader | null> {
+/**
+ * The header of `content`, a prefix of `file`; a truncated prefix without a title is followed to the
+ * first user entry. `complete` is false when that scan failed and the header may lack its prompt title.
+ */
+async function parseSessionFileHeaderFully(
+	file: string,
+	content: string,
+	truncated: boolean,
+	openStream: (file: string) => Readable,
+): Promise<{ readonly header: SessionFileHeader | null; readonly complete: boolean }> {
 	const header = parseSessionFileHeader(content);
-	if (header === null || header.title !== null || header.promptTitle !== undefined || !truncated) return header;
+	if (header === null || header.title !== null || header.promptTitle !== undefined || !truncated) return { header, complete: true };
 	// A large first prompt or preceding metadata can lie beyond the header prefix.
 	// Stream only until the first user entry; never retain the growing transcript.
-	const stream = createReadStream(file, { encoding: "utf8" });
+	const stream = openStream(file);
 	const lines = createInterface({ input: stream, crlfDelay: Infinity });
 	try {
 		for await (const line of lines) {
 			let entry: unknown;
 			try { entry = JSON.parse(line); } catch { continue; }
 			const title = firstPromptTitle(entry);
-			if (title !== undefined) return title ? { ...header, promptTitle: title } : header;
+			if (title !== undefined) return { header: title ? { ...header, promptTitle: title } : header, complete: true };
 		}
 	} catch {
-		return header;
+		return { header, complete: false };
 	} finally {
 		lines.close();
 		stream.destroy();
 	}
-	return header;
+	return { header, complete: true };
 }
 
 /**

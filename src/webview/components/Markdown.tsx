@@ -291,11 +291,11 @@ function parseBlocks(text: string, tight = false, keyPrefix = "b"): ReactNode[] 
 
 /**
  * One parse of a whole text, with what a later parse of a longer text can reuse: the
- * lines, and the line each block started on. The block keys are the block's index.
+ * number of lines, and the line each block started on. The block keys are the block's index.
  */
 export interface MarkdownParse {
 	readonly text: string;
-	readonly lines: readonly string[];
+	readonly lineCount: number;
 	readonly blocks: readonly ReactNode[];
 	readonly starts: readonly number[];
 }
@@ -310,7 +310,7 @@ export interface MarkdownParse {
 export function parseMarkdown(text: string, previous: MarkdownParse | null): MarkdownParse {
 	const lines = text.split(/\r?\n/);
 	if (previous !== null && previous.starts.length >= 2 && text.length > previous.text.length && text.startsWith(previous.text)) {
-		const modified = previous.lines.length - 1;
+		const modified = previous.lineCount - 1;
 		const last = previous.starts.length - 1;
 		// A block that starts on the modified line may now be joined by the block before it
 		// (a second list item after a blank, a table separator under a paragraph): that one is
@@ -318,11 +318,11 @@ export function parseMarkdown(text: string, previous: MarkdownParse | null): Mar
 		const from = (previous.starts[last] as number) < modified ? last : last - 1;
 		if (from >= 1) {
 			const tail = parseBlockRange(lines, previous.starts[from] as number, from, false, "b");
-			return { text, lines, blocks: [...previous.blocks.slice(0, from), ...tail.blocks], starts: [...previous.starts.slice(0, from), ...tail.starts] };
+			return { text, lineCount: lines.length, blocks: [...previous.blocks.slice(0, from), ...tail.blocks], starts: [...previous.starts.slice(0, from), ...tail.starts] };
 		}
 	}
 	const parsed = parseBlockRange(lines, 0, 0, false, "b");
-	return { text, lines, blocks: parsed.blocks, starts: parsed.starts };
+	return { text, lineCount: lines.length, blocks: parsed.blocks, starts: parsed.starts };
 }
 
 /** Parse the blocks from line `from` on; `firstKey` numbers the first of them. Every block takes exactly one key. */

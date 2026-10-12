@@ -223,12 +223,15 @@ export const harness = {
   },
   configuration(values) { fixtureVscode.workspace.configurationValues = values; },
   editorLifecycle() {
-    const w = fixtureWindow(), previous = { editorPanels: w.editorPanels, bridgeHost: w.bridgeHost };
+    const w = fixtureWindow(), previous = w.editorPanels;
     w.editorPanels = registerEditorPanels(editorPanelsDeps());
-    // Bridge bootstrap is covered by real sockets separately; these cases drive editor
-    // identity, disposal and runtime delivery through the ordinary panel route.
-    w.bridgeHost = registerBridgeHost({ ...bridgeHostDeps(), ensureEndpoint: async () => null });
-    return () => { w.editorPanels = previous.editorPanels; w.bridgeHost = previous.bridgeHost; };
+    // Bridge bootstrap is covered by real sockets separately; these cases drive editor identity, disposal and runtime
+    // delivery through the ordinary panel route. The window's own bridge host (and so its host generation) stays
+    // installed and runs its real endpoint creation; only the listener is faked, and it never binds. The factory is not
+    // put back on restore: a provisioning still in flight when a case ends resolves it late, and a real listener bound
+    // then would outlive the window and keep the process alive. A reset gives the next case a window with the real one.
+    w.createBridgeEndpoint = () => ({ bind: async () => null, failure: 'fixture listener', close() {} });
+    return () => { w.editorPanels = previous; };
   },
   createPanel: () => fixtureVscode.window.createWebviewPanel(),
   warning(handler) { fixtureVscode.window.showWarningMessage = handler; },
@@ -1615,7 +1618,6 @@ describe("native replacement lifecycle", () => {
     assert.ok(await endpoint.beginDocument(DOCUMENT, "d".repeat(32)));
     const toHost: unknown[] = []; const toGuest: unknown[] = [];
     const panel = { webview: { postMessage: async (message: unknown) => { toGuest.push(message); return true; } } };
-    harness.reset(index, null);
     harness.editor(index, endpoint, panel);
     const window = new EventTarget();
     const previousWindow = Object.getOwnPropertyDescriptor(globalThis, "window");
@@ -1626,6 +1628,7 @@ describe("native replacement lifecycle", () => {
     }) });
     try {
       // Exercise the actual guest receiver and host dispatcher, not an ACK echo fixture.
+    harness.reset(index, null);
       // This loading boundary must see the injected window/API; a static import
       // would initialize the browser transport before those capabilities exist.
       const guest = (await import(`${pathToFileURL(fileURLToPath(new URL("./webview/bridge.ts", import.meta.url))).href}?route-loop`)).guestTransport;

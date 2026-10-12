@@ -9,7 +9,7 @@ date: 2026-09-28
 
 > Ownership/controller clauses narrowed by [ADR-0039](0039-refuse-only-on-a-verified-live-writer-the-extension-owns.md): stale/unverifiable claims and sticky import disagreements do not veto session operations. Unowned editors may control their surface. Catalog read/merge/lock integrity failures still protect the catalog itself.
 
-> **Amended before the first release:** the read-only importer of per-workspace Memento state described below was removed, because no earlier build was ever published and its source could never exist for a new extension id. A one-time, ledger-bound import of only the registered folder list from the predecessor extension id's catalog (`src/host/predecessor-import.ts`) replaced it. Statements below about the legacy importer are historical.
+> **Amended before the first release:** the read-only importer of per-workspace Memento state described below was removed, because no earlier build was ever published and its source could never exist for a new extension id. A one-time, ledger-bound import of only the registered folder list from the predecessor extension id's catalog (`src/wiring/predecessor-import.ts`) replaced it. Statements below about the legacy importer are historical.
 
 ## Context and Problem Statement
 

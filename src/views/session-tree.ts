@@ -1307,16 +1307,23 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 		this.#scheduled = true;
 		setImmediate(() => {
 			if (this.#disposed) return;
-			if (this.#projectionDue) {
-				this.#projectionDue = false;
-				// Still scheduled, so the projection's own request for a turn is this one.
-				this.#project();
-				if (this.#activityChanged) {
-					this.#activityChanged = false;
-					this.#observed.fire();
+			// Still scheduled while projecting, so the projection's own request for a turn is this one. A
+			// projection that throws is reported like a failed read and must not leave the flag set:
+			// nothing would ever dispatch another read.
+			try {
+				if (this.#projectionDue) {
+					this.#projectionDue = false;
+					this.#project();
+					if (this.#activityChanged) {
+						this.#activityChanged = false;
+						this.#observed.fire();
+					}
 				}
+			} catch (error) {
+				this.#onObservationError(error);
+			} finally {
+				this.#scheduled = false;
 			}
-			this.#scheduled = false;
 			for (const [tabId, observation] of this.#observations) {
 				if (this.#ownershipActive >= 4) break;
 				if (!observation.dirty || observation.inFlight || !this.#byTabId.has(tabId) ||

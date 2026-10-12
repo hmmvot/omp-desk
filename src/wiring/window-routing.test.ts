@@ -897,8 +897,12 @@ describe("serving a launch another window asked for", () => {
 	it("publishes this window's snapshot before it reads the others', so the requester can find it", async () => {
 		const w = await world();
 		ready(w, folderRow({ openHere: true }));
+		const order: string[] = [];
+		const setSnapshot = w.registry.setSnapshot, refresh = w.registry.refresh;
+		w.registry.setSnapshot = snapshot => { order.push("published"); return setSnapshot(snapshot); };
+		w.registry.refresh = async () => { order.push("refreshed"); return refresh(); };
 		await serve(w, request(newSession));
-		assert.equal(w.state.published.length, 1);
+		assert.deepEqual(order, ["published", "refreshed"]);
 	});
 
 	it("refuses what this window cannot do itself, and starts nothing", async () => {
@@ -936,6 +940,21 @@ describe("serving a launch another window asked for", () => {
 			const outcome = await serve(w, request(newSession));
 			assert.deepEqual(outcome, { ok: true, focused: false });
 			assert.deepEqual(w.drafts.length, 1);
+		} finally { stub.window.state.focused = true; }
+	});
+
+	it("answers focused as soon as this window comes to the front, without waiting out the full wait", async () => {
+		const w = await world();
+		ready(w, folderRow({ openHere: true }));
+		stub.window.state.focused = false;
+		try {
+			const startedAt = Date.now();
+			const outcome = serve(w, request(newSession));
+			// The launch begins in the same step in which this window starts waiting for the focus.
+			while (w.drafts.length === 0) await nextTurn();
+			stub.window.fireFocus(true);
+			assert.deepEqual(await outcome, { ok: true, focused: true });
+			assert.ok(Date.now() - startedAt < 1_000, "the answer did not wait out the 1.5 s the window is given to come forward");
 		} finally { stub.window.state.focused = true; }
 	});
 });
@@ -987,7 +1006,7 @@ describe("serving another window's Kill All request", () => {
 		assert.deepEqual(outcome, { ok: true, focused: false, rows: [{ state: "stopped", reason: "" }, { state: "stopped", reason: "" }] });
 		assert.deepEqual(progress, [1]);
 		assert.equal(w.state.refreshes, 1);
-		assert.ok(w.logged.some(line => line.startsWith("stop request id-stop-: from window")) || w.logged.some(line => line.includes("2 row(s)")));
+		assert.ok(w.logged.includes("stop request id-stop- from window holder-a: 2 row(s)"));
 	});
 
 	it("still answers when the other windows could not be read", async () => {

@@ -1,7 +1,7 @@
-/** The composer's ↑/↓ prompt history. Runner: `node --test src/webview/lib/prompt-history.test.ts`. */
+/** The composer's ↑/↓ prompt history. Runner: `node --test src/chat/prompt-history.test.ts`. */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import type { ChatEntry } from "../../chat/messages.ts";
+import type { ChatEntry } from "./messages.ts";
 import { historyStep, sessionPrompts, type HistoryCursor } from "./prompt-history.ts";
 
 const user = (id: string, content: unknown, extra: Record<string, unknown> = {}): ChatEntry =>

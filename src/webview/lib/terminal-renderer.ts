@@ -31,7 +31,7 @@ import type { IDisposable, ITheme } from "@xterm/xterm";
 import { MAX_TERMINAL_COLS, MAX_TERMINAL_ROWS, MIN_TERMINAL_COLS, MIN_TERMINAL_ROWS } from "../../protocol/messages.ts";
 import type { TerminalGrid } from "./terminal-pane.ts";
 import type { TerminalFontSettings } from "../../protocol/messages.ts";
-import { terminalAppearanceFrom } from "./terminal-theme.ts";
+import { terminalAppearanceFrom } from "../../shared/terminal-theme.ts";
 import { isTerminalWorkbenchChord, terminalCopyChord, withoutInterrupt } from "./terminal-keys.ts";
 import { OrderedTerminalSurface } from "./terminal-ordered-surface.ts";
 import { activateTerminalUnicode } from "../../shared/terminal-unicode.ts";

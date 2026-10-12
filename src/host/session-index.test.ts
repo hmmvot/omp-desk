@@ -174,16 +174,6 @@ function runningHandle(sessionId = "S-LIVE"): OmpHostHandle & { pid: number } {
 	};
 }
 
-/** One reserved draft tab plus the entry the index holds for it. */
-async function draftEntry(): Promise<SessionIndexEntry> {
-	const { claimDir, cwd } = await tempWorkspace();
-	const index = indexFor(new TestStore(), claimDir);
-	const draft = await index.createDraft({ cwd });
-	const entry = index.get(draft.tabId);
-	assert.ok(entry, "a draft always has an entry");
-	return entry;
-}
-
 /**
  * A session file this extension manages: reserved as a draft, promoted to the
  * exact file, then confirmed stopped. That is the shape of a tab that may be

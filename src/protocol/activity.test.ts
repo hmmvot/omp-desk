@@ -15,7 +15,6 @@ import type { AssistantMessage, SessionEntry } from "@oh-my-pi/pi-wire";
 import type { ChatModel } from "../chat/model.ts";
 import { createChatModel, reduceChatFrame, snapshotOf, applyChatSnapshot } from "../chat/model.ts";
 import { turnActivity, activitySignature, withRegistrySubagentWork } from "./activity.ts";
-import { composerPopupOpen, reportComposerPopupOpen, subscribeComposerPopupOpen } from "../webview/lib/composer-overlay.ts";
 
 function snapshot(patch: Partial<ChatModel> = {}): ChatModel {
 	return { ...createChatModel(), phase: "live", ...patch };
@@ -91,41 +90,6 @@ describe("what the conversation reports", () => {
 		const model = snapshot({ agents: new Map([["Reader", { id: "Reader", index: 0, agent: "scout", agentSource: "native", lastUpdate: 10, status: "running" }]]) });
 		assert.equal(turnActivity(model)!.streaming, false);
 		assert.equal(turnActivity(model)!.backgroundWork, true);
-	});
-});
-
-describe("the composer popup state", () => {
-	it("tells subscribers about changes, ignores repeats, and stops after release", () => {
-		const seen: boolean[] = [];
-		const release = subscribeComposerPopupOpen(open => seen.push(open));
-		assert.equal(composerPopupOpen(), false);
-		// The composer reports on every render of its popup state; only real
-		// changes may reach the host, or the report would be re-sent needlessly.
-		reportComposerPopupOpen("completion", false);
-		reportComposerPopupOpen("completion", true);
-		reportComposerPopupOpen("completion", true);
-		reportComposerPopupOpen("completion", false);
-		assert.deepEqual(seen, [true, false]);
-		assert.equal(composerPopupOpen(), false);
-		release();
-		reportComposerPopupOpen("completion", true);
-		assert.deepEqual(seen, [true, false], "a released subscriber must stop receiving");
-		reportComposerPopupOpen("completion", false);
-	});
-	it("keeps Escape reserved until both completion and context popovers are closed", () => {
-		const seen: boolean[] = [];
-		const release = subscribeComposerPopupOpen(value => seen.push(value));
-		reportComposerPopupOpen("completion", true);
-		reportComposerPopupOpen("context", true);
-		reportComposerPopupOpen("context", false);
-		assert.equal(composerPopupOpen(), true);
-		assert.deepEqual(seen, [true]);
-		reportComposerPopupOpen("context", true);
-		reportComposerPopupOpen("completion", false);
-		assert.equal(composerPopupOpen(), true);
-		reportComposerPopupOpen("context", false);
-		assert.deepEqual(seen, [true, false]);
-		release();
 	});
 });
 

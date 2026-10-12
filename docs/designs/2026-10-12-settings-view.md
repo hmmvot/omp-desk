@@ -34,7 +34,7 @@ Settings are contributed under one `contributes.configuration` section titled "O
 
 ### Schema projection (pure, shared)
 
-`src/host/desk-settings/model.ts` imports nothing from VS Code. `projectConfiguration(contributes.configuration)` accepts one section or an array and produces descriptors:
+`src/protocol/desk-settings.ts` (originally `src/host/desk-settings/model.ts` and `protocol.ts`, merged when the source layers were introduced) imports nothing from VS Code. `projectConfiguration(contributes.configuration)` accepts one section or an array and produces descriptors:
 
 | Schema | Control |
 | --- | --- |
@@ -91,10 +91,10 @@ One column for a narrow side bar. A sticky search box filters by label, key, gro
 
 ### Components
 
-- `src/host/desk-settings/model.ts`: projection, validation, source/target/reset rules, search (pure; shared with the page bundle).
+- `src/protocol/desk-settings.ts` (was `model.ts` and `protocol.ts`): projection, validation, source/target/reset rules, search (pure; shared with the page bundle).
 - `controller.ts`: state assembly and action handling over a small port (`inspect`, `effective`, `update`, `workspace`, open commands); no VS Code import.
 - `view.ts`: binds the port to the configuration API, the Webview view provider, the CSP and the change listeners.
-- `protocol.ts`, `src/webview/desk-settings/{main.tsx,page-state.ts,styles.ts}`.
+- `src/webview/desk-settings/{main.tsx,page-state.ts,styles.ts}` (the message contract is in `src/protocol/desk-settings.ts`).
 - One `registerDeskSettingsView(context, { log })` call in `extension.ts`.
 
 ## Alternatives

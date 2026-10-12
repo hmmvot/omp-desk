@@ -8,8 +8,8 @@
  * stored here. Pure: the composer owns the textarea, the caret rule and the state.
  */
 // Explicit `.ts` specifiers: this module is imported by the node:test runner.
-import type { ChatEntry } from "../../chat/messages.ts";
-import { messageText } from "../../shared/format.ts";
+import type { ChatEntry } from "./messages.ts";
+import { messageText } from "../shared/format.ts";
 
 /** Where a walk through the history stands. */
 export interface HistoryCursor {

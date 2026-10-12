@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
+import { Readable } from "node:stream";
 import { describe, it } from "node:test";
 import {
 	isAbsoluteWorkspaceDirectory,
@@ -132,6 +133,25 @@ describe("session file header", () => {
 			assert.equal(second?.size, first?.size);
 			assert.equal(second?.header?.title, "Two");
 			assert.equal(await readSessionFileHeaderReading(path.join(root, "missing.jsonl"), first), null);
+		} finally { await rm(root, { recursive: true, force: true }); }
+	});
+
+	it("does not reuse a reading whose first-prompt scan failed, so the next call finds the prompt title", async () => {
+		const root = await mkdtemp(path.join(tmpdir(), "omp-header-scan-failure-"));
+		try {
+			const file = path.join(root, "session.jsonl");
+			await writeFile(file, body({ extra: [
+				JSON.stringify({ type: "metadata", content: "x".repeat(70_000) }),
+				JSON.stringify({ type: "message", message: { role: "user", content: "A descriptive session" } }),
+			] }));
+			const failing = () => new Readable({ read() { this.destroy(new Error("read failed")); } });
+			const degraded = await readSessionFileHeaderReading(file, null, failing);
+			assert.equal(degraded?.header?.promptTitle, undefined, "the failed scan leaves the header without its prompt title");
+			// The file is unchanged, yet the degraded reading must not stand in for a read.
+			const healed = await readSessionFileHeaderReading(file, degraded);
+			assert.notEqual(healed, degraded);
+			assert.equal(healed?.header?.promptTitle, "A descriptive session");
+			assert.equal(await readSessionFileHeaderReading(file, healed), healed, "a completed reading is reused again");
 		} finally { await rm(root, { recursive: true, force: true }); }
 	});
 });

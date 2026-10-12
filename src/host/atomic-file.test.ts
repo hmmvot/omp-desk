@@ -37,21 +37,27 @@ describe("rename retry policy", () => {
 	it("retries a blocked rename until it lands", async () => {
 		let failures = 3;
 		const waits: number[] = [];
-		await renameReplacing(async () => { if (failures-- > 0) throw sharing("EPERM"); }, async ms => { waits.push(ms); });
+		await renameReplacing(async () => { if (failures-- > 0) throw sharing("EPERM"); }, async ms => { waits.push(ms); }, { platform: "win32" });
 		assert.deepEqual(waits, RENAME_BACKOFF_MS.slice(0, 3));
 	});
 
 	it("gives up after the whole window and throws the last sharing error", async () => {
 		const waits: number[] = [];
 		let attempts = 0;
-		await assert.rejects(renameReplacing(async () => { attempts++; throw sharing("EBUSY"); }, async ms => { waits.push(ms); }), /EBUSY/);
+		await assert.rejects(renameReplacing(async () => { attempts++; throw sharing("EBUSY"); }, async ms => { waits.push(ms); }, { platform: "win32" }), /EBUSY/);
 		assert.equal(attempts, RENAME_BACKOFF_MS.length + 1);
 		assert.deepEqual(waits, [...RENAME_BACKOFF_MS]);
 	});
 
 	it("does not retry an error that is not a sharing violation", async () => {
 		let attempts = 0;
-		await assert.rejects(renameReplacing(async () => { attempts++; throw sharing("ENOENT"); }, async () => {}), /ENOENT/);
+		await assert.rejects(renameReplacing(async () => { attempts++; throw sharing("ENOENT"); }, async () => {}, { platform: "win32" }), /ENOENT/);
+		assert.equal(attempts, 1);
+	});
+
+	it("does not retry off Windows, like replaceFileAtomic", async () => {
+		let attempts = 0;
+		await assert.rejects(renameReplacing(async () => { attempts++; throw sharing("EPERM"); }, async () => {}, { platform: "linux" }), /EPERM/);
 		assert.equal(attempts, 1);
 	});
 });

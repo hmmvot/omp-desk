@@ -2,13 +2,13 @@
  * Rewind's page surfaces (design `docs/designs/2026-10-09-chat-rewind.md`): the bar above the composer while a
  * prompt is being picked or a navigation runs, the one-line Undo offer, and the branch-point marker the transcript
  * places after the card where other branches leave the active path. State lives in `ChatView`
- * (`lib/rewind-mode.ts`); these components only render it and report the user's choices.
+ * (`chat/rewind-mode.ts`); these components only render it and report the user's choices.
  */
 import type { KeyboardEvent, ReactNode, RefObject } from "react";
 import { useState } from "react";
 import type { ChatEntry } from "../../chat/messages";
 import { rewindPreview, type BranchPoint, type RewindTarget, type UndoOffer } from "../../chat/rewind";
-import type { RewindMode } from "../lib/rewind-mode";
+import type { RewindMode } from "../../chat/rewind-mode";
 import { FileLink } from "./FileLinks";
 
 const plural = (count: number, noun: string): string => `${count} ${noun}${count === 1 ? "" : "s"}`;

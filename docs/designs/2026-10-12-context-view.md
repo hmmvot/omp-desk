@@ -61,7 +61,7 @@ View title: **Refresh**, **Read Breakdown**, **Compact…** and **Shake…** (`o
 
 ### Where each number comes from, and refresh policy
 
-`src/host/context/` holds the pure projection and parsers and a controller; `src/views/context-tree.ts` the tree provider; `src/host/context-wiring.ts` exports `registerContextView(context, deps)` (the one registration entry). `extension.ts` supplies `target(): ContextTarget | null` (built from `toolsTarget`, so the selection rule is the inventory views' own rule by construction, plus the tab id and the `RpcSession`), a `log`, and the compact/shake runner. `SessionToolsTarget` gains the `tabId` its builder already has.
+`src/host/context/` holds the pure projection and parsers and a controller; `src/views/context-tree.ts` the tree provider; `src/wiring/context-wiring.ts` exports `registerContextView(context, deps)` (the one registration entry). `extension.ts` supplies `target(): ContextTarget | null` (built from `toolsTarget`, so the selection rule is the inventory views' own rule by construction, plus the tab id and the `RpcSession`), a `log`, and the compact/shake runner. `SessionToolsTarget` gains the `tabId` its builder already has.
 
 The controller reads **only while the view is visible** and never on a timer of its own. It has two automatic tiers and one explicit request.
 

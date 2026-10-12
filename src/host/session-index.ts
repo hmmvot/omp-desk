@@ -29,7 +29,7 @@ import {
 	readClaim,
 } from "./session-claim.ts";
 import type { ClaimHolder, ObservedClaim, SessionClaim } from "./session-claim.ts";
-import { acceptOwnerAbsenceEvidence, classifySessionAvailability, deferredAuthorization } from "./session-availability.ts";
+import { acceptOwnerAbsenceEvidence, classifySessionAvailability } from "./session-availability.ts";
 import type {
 	AttachPin,
 	DeferredReconcileOptions,
@@ -3169,6 +3169,44 @@ function toEntry(entry: MutableEntry): SessionIndexEntry {
 		...row,
 		kind: entry.sessionFile === null ? "draft" : "session",
 	};
+}
+
+/**
+ * Signature of the row facts a deferred adoption is authorized by.
+ *
+ * A deferred pass adopts a file for a host it has proven gone, and that proof was
+ * accepted for the row as it stood when the pass classified it. Everything an
+ * intervening lifecycle operation can change is in here — the binding, the
+ * identity, the availability, the ownership record and the recorded host — while
+ * `detail` and `lastActiveAt` are left out: a pass updates both itself, and they
+ * carry no ownership meaning. The pass carries the signature forward, and
+ * {@link SessionIndex.promoteDeferredDraft} re-derives it inside the adoption's
+ * own lifecycle, so a stale authorization is refused instead of applied.
+ */
+function deferredAuthorization(entry: SessionIndexEntry): string {
+	const ownership = entry.ownership;
+	const host = entry.host;
+	return JSON.stringify([
+		entry.origin,
+		entry.kind,
+		entry.sessionFile,
+		entry.sessionId,
+		entry.availability,
+		entry.cwd,
+		entry.scope.sessionDir,
+		ownership?.ownerGeneration ?? null,
+		ownership?.draftIdentity ?? null,
+		ownership?.releasedAt ?? null,
+		host?.pid ?? null,
+		host?.instanceId ?? null,
+		host?.generation ?? null,
+		host?.sessionId ?? null,
+		host?.startedAt ?? null,
+		host?.transport ?? null,
+		host?.rpc?.slot ?? null,
+		host?.rpc?.childPid ?? null,
+		host?.rpc?.childCreationTime ?? null,
+	]);
 }
 
 /**

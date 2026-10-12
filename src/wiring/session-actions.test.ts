@@ -116,6 +116,8 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 	const stopPortRequests: unknown[][] = [];
 	const confirmedStops: unknown[][] = [];
 	const catalogAdoptions: unknown[][] = [];
+	/** What the window was asked, in order, across ports whose relative order a case asserts. */
+	const order: string[] = [];
 	const reattached: unknown[][] = [];
 	const shellsAttached: unknown[] = [];
 	const tabsAsked: string[] = [];
@@ -141,7 +143,7 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 		passiveReasonForSlot: () => null,
 		launcherProvider: () => state.provider as never,
 		launcherView: () => state.view as never,
-		refreshLauncher: options => { refreshes.push(options); },
+		refreshLauncher: options => { order.push("refresh"); refreshes.push(options); },
 		facts: tabId => (state.facts.get(tabId) ?? { open: false, running: false, outcome: null, activity: null }) as never,
 		sessionsGrouping: () => "flat",
 		openSession: async (...args) => { opened.push(args.slice(2)); return true; },
@@ -176,7 +178,7 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 		brokerProvenanceFor: () => state.provenance,
 		recordedHostStopPort: (...args) => { stopPortRequests.push(args); return state.stopPort as RecordedHostStopPort; },
 		ensureCatalogReady: async () => {},
-		adoptCatalogChanges: async (...args) => { catalogAdoptions.push(args.slice(1)); },
+		adoptCatalogChanges: async (...args) => { order.push("adopt"); catalogAdoptions.push(args.slice(1)); },
 		showWarningMessage: async (message, options, ...items) => {
 			dialogs.push({ message, detail: options.detail, modal: options.modal === true, items });
 			await state.beforeAnswer?.();
@@ -195,7 +197,7 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 	stub.window.notices.length = 0;
 	return {
 		actions, deps, state, index: index as never, dialogs, warnings, infos, errors, logged, opened, refreshes, released, forgotten, editorsReleased, slotsRemoved,
-		conversationsClosed, stopPortRequests, confirmedStops, catalogAdoptions, reattached, shellsAttached, tabsAsked, commands: stub.commands.calls, notices: stub.window.notices,
+		conversationsClosed, stopPortRequests, confirmedStops, catalogAdoptions, order, reattached, shellsAttached, tabsAsked, commands: stub.commands.calls, notices: stub.window.notices,
 	};
 }
 
@@ -813,7 +815,7 @@ describe("refreshing the launcher", () => {
 		w.actions.refresh(w.index);
 		assert.deepEqual(w.catalogAdoptions, [[folders]]);
 		assert.deepEqual(w.refreshes, [{ ownership: true }]);
-		assert.deepEqual(w.logged, ["launcher: refreshed from the folder list, the session index and this window's editors"]);
+		assert.deepEqual(w.order, ["adopt", "refresh"], "the newest catalog revision is adopted before the rows are re-read");
 	});
 
 	it("still re-reads without folders, and logs an adoption that failed instead of throwing", async () => {

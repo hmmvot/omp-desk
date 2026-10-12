@@ -23,7 +23,7 @@ import * as path from "node:path";
 export const RENAME_BACKOFF_MS: readonly number[] = [10, 20, 40, 80, 160, 320, 640, 800];
 
 /**
- * Waits between attempts of the shorter budget, about 1.1 s in all (seven attempts). It bounds the writers that run
+ * Waits between attempts of the shorter budget, about 0.9 s in all (seven attempts). It bounds the writers that run
  * under a launch, a claim or a transaction, where a longer wait would be a change in how long that step may take.
  */
 export const FILE_OPERATION_BACKOFF_MS: readonly number[] = [25, 50, 100, 200, 250, 250];
@@ -75,9 +75,9 @@ export async function retryFileOperation<T>(
 	}
 }
 
-/** Run `rename` until it lands, waiting out `RENAME_BACKOFF_MS` (on any platform); any other error, or the last sharing violation, is thrown. */
-export function renameReplacing(rename: () => Promise<void>, wait: (ms: number) => Promise<void>): Promise<void> {
-	return retryFileOperation(rename, RENAME_BACKOFF_MS, { platform: "win32", wait });
+/** Run `rename` until it lands, waiting out `RENAME_BACKOFF_MS` on Windows (see `retryFileOperation`); any other error, or the last sharing violation, is thrown. */
+export function renameReplacing(rename: () => Promise<void>, wait: (ms: number) => Promise<void>, options: Pick<RetryFileOperationOptions, "platform"> = {}): Promise<void> {
+	return retryFileOperation(rename, RENAME_BACKOFF_MS, { ...options, wait });
 }
 
 /** How a staged sibling is written. */

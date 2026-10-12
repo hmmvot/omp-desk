@@ -6,8 +6,8 @@
  * or drops the selected prompt from the loaded branch ends it, so a navigation is never sent against a transcript
  * the user did not see.
  */
-import { NAVIGATE_COMMAND, NAVIGATE_REFUSAL_SENTENCES, type NavigationKind, type RewindTarget } from "../../chat/rewind.ts";
-import { chatTurnInProgress, type ChatModel } from "../../chat/model.ts";
+import { NAVIGATE_COMMAND, NAVIGATE_REFUSAL_SENTENCES, type NavigationKind, type RewindTarget } from "./rewind.ts";
+import { chatTurnInProgress, type ChatModel } from "./model.ts";
 
 /**
  * Why this page cannot rewind now, in the host's own sentences, or null. The same facts the host checks

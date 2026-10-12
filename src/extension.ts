@@ -13,7 +13,7 @@ import * as vscode from "vscode";
 import { UNAVAILABLE_RELOAD_MESSAGE, createDetailHtml, createShellHtml, createUnavailableGuestHtml } from "./host/guest-webview";
 import { chatExitText, type ChatExitReason } from "./chat/exit-reason";
 import { installedNerdFonts } from "./host/terminal-fonts";
-import { terminalFontFamily } from "./webview/lib/terminal-theme";
+import { terminalFontFamily } from "./shared/terminal-theme";
 import {
   DEFAULT_OMP_PROFILE,
   delay,
@@ -155,9 +155,9 @@ import {
 import type { NativeStopVerdict } from "./host/rpc-reconcile";
 import type { ChoiceOutcome, CommandResult, CompactMode, RpcSession, SendRefusal, ShakeMode } from "./host/rpc/session";
 import { readSlashRegistry, type BuiltinSlashEntry, type DeskSlashAction, type SlashRegistry } from "./host/slash-registry";
-import { sessionPrompts } from "./webview/lib/prompt-history";
+import { sessionPrompts } from "./chat/prompt-history";
 import { NAVIGATE_REFUSAL_SENTENCES, rewindPreview, rewindTargets } from "./chat/rewind";
-import { rewindBlockedReason } from "./webview/lib/rewind-mode";
+import { rewindBlockedReason } from "./chat/rewind-mode";
 import type { ChatLiteState, ChatModel, ChatPhase } from "./chat/model";
 import { cancelControlPicker, pickControlModel, pickControlThinking, pickToolCallDetail } from "./host/control-picker";
 import { activitySignature, turnActivity, withRegistrySubagentWork } from "./protocol/activity";
@@ -564,10 +564,10 @@ interface WindowState {
   readonly tabs: Map<string, TabState>;
   /**
    * The window's reconnecting bridge (ADR-0023): the endpoints and documents of its editors, their routes and the host
-   * generation. It owns the workspace hash, the record store, the endpoints being created and the serializer types. It is
-   * mutable only because the lifecycle harness replaces it with a handle built from fake facts; no product code assigns it.
+   * generation. It owns the workspace hash, the record store, the endpoints being created and the serializer types. The
+   * lifecycle harness never replaces it: its host generation is the one every endpoint of the window is fenced to.
    */
-  bridgeHost: BridgeHost<TabState>;
+  readonly bridgeHost: BridgeHost<TabState>;
   /**
    * The window's session editors as VS Code panels: where one opens, how a panel becomes a chat surface, the document it
    * shows and the serializers that revive it. Mutable only because the lifecycle harness replaces it with a handle built
@@ -1094,8 +1094,8 @@ function editorPanelsDeps(): EditorPanelsDeps<TabState> {
 
 /**
  * What the bridge host reads of this window and calls into. The getters read the installed window when they run, so the
- * host can be created with the window, before it is installed. The lifecycle harness builds its handle from these with an
- * endpoint provider of its own.
+ * host can be created with the window, before it is installed; the endpoint factory is the window's `createBridgeEndpoint`,
+ * which the lifecycle harness replaces.
  */
 function bridgeHostDeps(): BridgeHostDeps<TabState> {
   return {
@@ -1128,6 +1128,7 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     reconciler: undefined as never, // assigned by `activate` before anything reads it
     indexForBridge: null,
     catalogStore: undefined,
+    createEndpoint: options => windowState().createBridgeEndpoint(options),
     catalogReady: Promise.resolve(),
     externalLeases: null,
     claimFileNames: new Map<string, string | null>(),
@@ -9742,9 +9743,6 @@ function log(message: string): void {
 /** `vscode.ExtensionMode.Production`; compared by value so the mocked `vscode` of the tests need not define the enum. */
 const EXTENSION_MODE_PRODUCTION = 1;
 const PACKAGE_DRIFT_POLL_MS = 10_000;
-/** The notification and the explanation a document that was not built shows say the same thing. */
-const UPDATED_ON_DISK_MESSAGE = UPDATED_ON_DISK_DETAIL;
-
 /**
  * Whether the installed package no longer holds the bytes this host started from. The first
  * detection of an episode is logged and offered as a Reload Window notification; every later
@@ -9767,7 +9765,7 @@ function packageChangedOnDisk(): boolean {
   if (!s.packageDriftAnnounced) {
     s.packageDriftAnnounced = true;
     log(`the installed extension changed on disk under this window (${verdict.files.join(", ")}); a reload finishes the update.`);
-    void vscode.window.showWarningMessage(UPDATED_ON_DISK_MESSAGE, RELOAD_WINDOW_LABEL).then(choice => {
+    void vscode.window.showWarningMessage(UPDATED_ON_DISK_DETAIL, RELOAD_WINDOW_LABEL).then(choice => {
       if (choice === RELOAD_WINDOW_LABEL) void vscode.commands.executeCommand("workbench.action.reloadWindow");
     });
   }

@@ -23,6 +23,8 @@ const ALLOWED = {
   webview: ["protocol", "chat", "shared"],
   wiring: ["host", "views", "protocol", "chat", "shared"],
 };
+// The bundle entry may import every layer except `webview` (page code runs in the webview, never in the host).
+const EXTENSION_ALLOWED = Object.keys(ALLOWED).filter((layer) => layer !== "webview");
 const ROOT_FILE = "extension.ts";
 const EXTENSIONS = [".ts", ".tsx"];
 
@@ -83,7 +85,8 @@ function specifiersOf(text) {
   return found.sort((a, b) => a.line - b.line);
 }
 
-const isTestFile = (rel) => /\.test\.tsx?$/.test(rel) || /test-stub[^/]*\.tsx?$/.test(rel);
+// `test-stub` must start a name segment: `vscode-test-stub.ts` and `test-stub.ts` are stubs, `latest-stub.ts` is not.
+const isTestFile = (rel) => /\.test\.tsx?$/.test(rel) || /(?:^|[/-])test-stub[^/]*\.tsx?$/.test(rel);
 
 // layer of a file: a ALLOWED key, "extension" for src/extension.ts, "root" for another file
 // directly under src/, "outside" for a file outside src/ (test/**), "unknown" otherwise.
@@ -128,15 +131,16 @@ for (const rel of nodes) {
     findings.push(`${rel}:1 is in a directory that is not a layer (${Object.keys(ALLOWED).join(", ")})`);
     continue;
   }
-  if (isTestFile(rel) || layer === "extension" || layer === "root" || layer === "unknown" || layer === "outside") {
+  if (isTestFile(rel) || layer === "root" || layer === "unknown" || layer === "outside") {
     continue;
   }
+  const allowed = layer === "extension" ? EXTENSION_ALLOWED : ALLOWED[layer];
   for (const { to, line } of graph.get(rel)) {
     const target = layerOf(to);
     if (target === layer || target === "outside" || target === "root" || target === "unknown") continue;
     if (target === "extension") {
       findings.push(`${rel}:${line} imports ${to}: ${layer} may not import ${ROOT_FILE}`);
-    } else if (!ALLOWED[layer].includes(target)) {
+    } else if (!allowed.includes(target)) {
       findings.push(`${rel}:${line} imports ${to}: ${layer} may not import ${target}`);
     }
   }

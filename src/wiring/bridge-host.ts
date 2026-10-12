@@ -14,8 +14,7 @@
 
 import * as path from "node:path";
 import * as vscode from "vscode";
-import { BridgeEditorEndpoint } from "../host/bridge-endpoint.ts";
-import type { BridgeBootstrapDelivery } from "../host/bridge-endpoint.ts";
+import type { BridgeBootstrapDelivery, BridgeEditorEndpoint, BridgeEditorEndpointOptions } from "../host/bridge-endpoint.ts";
 import {
 	bridgeViewType,
 	tabInputIdentity,
@@ -143,13 +142,13 @@ export interface BridgeNotices {
 	log(message: string): void;
 }
 
-export interface BridgeHostDeps<Tab extends BridgeTab = BridgeTab> extends BridgeWindowFacts<Tab>, BridgeEditorPort, BridgeNotices {
-	/**
-	 * Replaces the creation of an editor's endpoint — the single-flight, the recorded port and the listener.
-	 * Only the lifecycle harness sets it: its editors run on the panel route, with no listener to bind.
-	 */
-	readonly ensureEndpoint?: (context: vscode.ExtensionContext, tabId: string, editorId: string) => Promise<BridgeEditorEndpoint | null>;
+/** The environmental port behind an editor's endpoint: the one place a listener object comes into being. */
+export interface BridgeEndpointFactory {
+	/** Build — without binding — the endpoint one editor's records and hooks describe. */
+	createEndpoint(options: BridgeEditorEndpointOptions): BridgeEditorEndpoint;
 }
+
+export interface BridgeHostDeps<Tab extends BridgeTab = BridgeTab> extends BridgeWindowFacts<Tab>, BridgeEditorPort, BridgeNotices, BridgeEndpointFactory {}
 
 /** What the extension calls into the bridge host. */
 export interface BridgeHost<Tab extends BridgeTab = BridgeTab> {
@@ -303,7 +302,6 @@ export function registerBridgeHost<Tab extends BridgeTab>(deps: BridgeHostDeps<T
 		tabId: string,
 		editorId: string,
 	): Promise<BridgeEditorEndpoint | null> {
-		if (deps.ensureEndpoint !== undefined) return deps.ensureEndpoint(context, tabId, editorId);
 		const existing = bridgeEndpointOf(editorId);
 		if (existing !== null) return existing;
 		const pending = pendingBridgeEndpoints.get(editorId);
@@ -316,7 +314,7 @@ export function registerBridgeHost<Tab extends BridgeTab>(deps: BridgeHostDeps<T
 			if (bridgeScope(host.workspace, tabId, editorId) === null) return null;
 			const scope = bridgeScope(await host.records.homeWorkspace(tabId, editorId, host.workspace), tabId, editorId);
 			if (scope === null) return null;
-			const endpoint = new BridgeEditorEndpoint({
+			const endpoint = deps.createEndpoint({
 				records: host.records,
 				scope,
 				hostGeneration: hostGeneration,

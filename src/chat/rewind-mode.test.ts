@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { createChatModel, type ChatModel } from "../../chat/model.ts";
-import { NAVIGATE_REFUSAL_SENTENCES, type RewindTarget } from "../../chat/rewind.ts";
+import { createChatModel, type ChatModel } from "./model.ts";
+import { NAVIGATE_REFUSAL_SENTENCES, type RewindTarget } from "./rewind.ts";
 import { REWIND_IDLE, conversationMovedPastLeaf, reduceRewind, rewindBlockedReason, type RewindMode } from "./rewind-mode.ts";
 
 const target = (id: string): RewindTarget => ({ id, parentId: null, preview: id, images: 0, timestamp: "" });

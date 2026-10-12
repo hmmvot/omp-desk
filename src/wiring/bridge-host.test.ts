@@ -5,9 +5,11 @@
  * the route offered and acknowledged, and how the bridge of a closed editor is retired.
  *
  * The endpoint-provisioning cases bind a real `BridgeEditorEndpoint` on loopback with records in a temporary
- * directory; every other case gives the editors a fake endpoint that records what it was asked. The editor
- * coordinator is the real one-winner table; `vscode` is the stand-in of `vscode-test-stub.ts`, so this file must run
- * under `node --test`.
+ * directory; every other case gives the editors a fake endpoint that records what it was asked. Every case runs the
+ * host's own endpoint creation (single-flight, scope check, registration, the bind outcome): only the environmental
+ * `createEndpoint` port is faked, and an editor with no fake provided gets an endpoint whose listener cannot bind. The
+ * editor coordinator is the real one-winner table; `vscode` is the stand-in of `vscode-test-stub.ts`, so this file
+ * must run under `node --test`.
  */
 import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -16,7 +18,7 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { after, afterEach, beforeEach, describe, it } from "node:test";
 
-import type { BridgeEditorEndpoint } from "../host/bridge-endpoint.ts";
+import type { BridgeEditorEndpoint, BridgeEditorEndpointOptions } from "../host/bridge-endpoint.ts";
 import type { BridgeNativeBinding } from "../host/bridge-records.ts";
 import type { SessionIndex } from "../host/session-index.ts";
 import type { BridgeHost, BridgeHostDeps, BridgeTab } from "./bridge-host.ts";
@@ -47,6 +49,9 @@ const { registerBridgeHost } = await import("./bridge-host.ts");
 const { EditorCoordinator } = await import("../host/editor-coordinator.ts");
 const { bridgeViewType } = await import("../host/bridge-identity.ts");
 const { encodeHex } = await import("../protocol/bridge-protocol.ts");
+const { BridgeEditorEndpoint: RealEndpoint } = await import("../host/bridge-endpoint.ts");
+
+const realEndpoint = (options: BridgeEditorEndpointOptions): BridgeEditorEndpoint => new RealEndpoint(options);
 
 const TAB = "tab:11111111-2222-4333-8444-555555555555";
 const OTHER_TAB = "tab:99999999-2222-4333-8444-555555555555";
@@ -99,10 +104,16 @@ class FakeEndpoint {
 	committed: BridgeNativeBinding | null = null;
 	committedHash: string | null = null;
 	beginDocumentFails = false;
+	binds = 0;
+	closes = 0;
+	/** Runs while the host awaits this endpoint's bind. */
+	onBind: (() => void) | null = null;
 	constructor(editorId = EDITOR, tabId = TAB) {
 		this.scope = { workspace: "a".repeat(64), tabId, editorId };
 	}
 	panelBound(): void { this.calls.push("panelBound"); }
+	async bind(): Promise<number | null> { this.binds++; this.onBind?.(); return this.port; }
+	close(): void { this.closes++; }
 	async beginDocument(documentId: string, bootstrapId: string) {
 		this.calls.push(`beginDocument:${documentId}`);
 		if (this.beginDocumentFails) return null;
@@ -185,6 +196,7 @@ function world(overrides: Partial<BridgeHostDeps<FakeTab>> = {}) {
 	const logged: string[] = [];
 	const notes: { key: string; text: string }[] = [];
 	const requests: { editorId: string; documentId: string }[] = [];
+	const created: BridgeEditorEndpointOptions[] = [];
 	const deps: BridgeHostDeps<FakeTab> = {
 		tabs: () => state.tabs,
 		tab: key => key === null ? undefined : state.tabs.get(key) ?? [...state.tabs.values()].find(candidate => candidate.tabId === key),
@@ -214,20 +226,28 @@ function world(overrides: Partial<BridgeHostDeps<FakeTab>> = {}) {
 		},
 		handleRequest: (editorId, documentId) => { requests.push({ editorId, documentId }); },
 		log: message => { logged.push(message); },
-		ensureEndpoint: async (_context, _tabId, editorId) => {
-			calls.push(`ensureEndpoint:${editorId}`);
+		createEndpoint: options => {
+			const editorId = options.scope.editorId;
+			calls.push(`createEndpoint:${editorId}`);
+			created.push(options);
 			const provided = state.provided.get(editorId);
-			return (provided === undefined ? null : provided) as never;
+			if (provided !== undefined && provided !== null) return provided as never;
+			const unbindable = new FakeEndpoint(editorId, options.scope.tabId);
+			unbindable.port = null;
+			unbindable.failure = "no listener";
+			return unbindable as never;
 		},
 		...overrides,
 	};
 	const host: BridgeHost<FakeTab> = registerBridgeHost(deps);
 	/** The index the reconciliation reads: the rows the case set, and no committed slot binding. */
 	const index = { get: (tabId: string) => state.rows.get(tabId) ?? null, slotBinding: () => null } as unknown as SessionIndex;
-	return { state, host, deps, calls, logged, notes, requests, index };
+	return { state, host, deps, calls, logged, notes, requests, created, index };
 }
 
-const context0 = (): never => ({ subscriptions: [] as { dispose(): void }[] }) as never;
+let contexts = 0;
+/** An extension context with storage of its own, which the host's real endpoint creation reads the record store from. */
+const context0 = (): never => context(`stub-${contexts++}`);
 
 beforeEach(() => {
 	stub.window.tabGroups.all = [];
@@ -289,7 +309,7 @@ describe("documentEligible", () => {
 
 describe("provisioning an editor's endpoint and document (real endpoint)", () => {
 	it("binds the exact port once, for concurrent callers too, and mints a fresh document for each preparation", async () => {
-		const w = world({ ensureEndpoint: undefined });
+		const w = world({ createEndpoint: realEndpoint });
 		const ctx = await context("provision");
 		const slot = EDITOR;
 		w.state.editors.reserve({ tabId: TAB, editorId: slot, provenance: "saved", sequence: 1 });
@@ -319,7 +339,7 @@ describe("provisioning an editor's endpoint and document (real endpoint)", () =>
 	});
 
 	it("keeps the endpoint it created through a later preparation and hands the same listener back", async () => {
-		const w = world({ ensureEndpoint: undefined });
+		const w = world({ createEndpoint: realEndpoint });
 		const ctx = await context("again");
 		w.state.editors.reserve({ tabId: TAB, editorId: EDITOR, provenance: "saved", sequence: 1 });
 		w.state.tabs.set(EDITOR, newTab(EDITOR, { tabId: TAB }));
@@ -333,7 +353,7 @@ describe("provisioning an editor's endpoint and document (real endpoint)", () =>
 	});
 
 	it("provides no endpoint for an editor id this bridge did not mint", async () => {
-		const w = world({ ensureEndpoint: undefined });
+		const w = world({ createEndpoint: realEndpoint });
 		const ctx = await context("foreign");
 		w.state.editors.reserve({ tabId: TAB, editorId: "not-minted-by-us", provenance: "saved", sequence: 1 });
 		w.state.tabs.set("not-minted-by-us", newTab("not-minted-by-us", { tabId: TAB }));
@@ -354,7 +374,7 @@ describe("prepareDocument", () => {
 		w.state.provided.set(EDITOR, endpoint);
 		w.state.tabs.get(EDITOR)!.bridge = { editorId: EDITOR, endpoint: endpoint as never, documentId: null, bound: false };
 		assert.equal(await w.host.prepareDocument(context0(), EDITOR), null, "a passive slot may provision, but a document is kept only for the editor that holds the tab");
-		assert.deepEqual(w.calls, [`ensureEndpoint:${EDITOR}`]);
+		assert.deepEqual(w.calls, [`createEndpoint:${EDITOR}`]);
 		assert.ok(endpoint.calls.some(call => call.startsWith("retireDocument:")), "the document it minted for a slot that does not hold the tab is retired at once");
 		w.state.editors.reserve({ tabId: TAB, editorId: EDITOR, provenance: "saved", sequence: 1 });
 		assert.ok(await w.host.prepareDocument(context0(), EDITOR), "a passive slot that holds the editor gets its document");
@@ -362,15 +382,16 @@ describe("prepareDocument", () => {
 
 	it("files the document under the namespace its endpoint was bound under, not the conversation it serves now", async () => {
 		const endpoint = new FakeEndpoint(EDITOR, TAB);
-		const seen: string[] = [];
-		const w = world({ ensureEndpoint: async (_context, tabId) => { seen.push(tabId); return endpoint as never; } });
+		const w = world();
+		w.state.provided.set(EDITOR, endpoint);
 		w.state.editors.reserve({ tabId: OTHER_TAB, editorId: EDITOR, provenance: "saved", sequence: 1 });
 		w.state.tabs.set(EDITOR, newTab(EDITOR, { tabId: OTHER_TAB, bridge: { editorId: EDITOR, endpoint: endpoint as never, documentId: null, bound: false } }));
 		await w.host.prepareDocument(context0(), EDITOR);
-		assert.deepEqual(seen, [TAB]);
+		assert.deepEqual(w.created.map(options => options.scope.tabId), [TAB]);
 		w.state.tabs.get(EDITOR)!.bridge = null;
+		w.state.endpoints.clear();
 		await w.host.prepareDocument(context0(), EDITOR);
-		assert.deepEqual(seen, [TAB, OTHER_TAB], "an editor with no endpoint yet is filed under the conversation its reservation names");
+		assert.deepEqual(w.created.map(options => options.scope.tabId), [TAB, OTHER_TAB], "an editor with no endpoint yet is filed under the conversation its reservation names");
 	});
 
 	it("points the record at the endpoint and the new document", async () => {
@@ -385,7 +406,7 @@ describe("prepareDocument", () => {
 		assert.equal(prepared.endpoint, endpoint as never);
 		assert.equal(prepared.port, 4747);
 		assert.deepEqual(tab.bridge, { editorId: EDITOR, endpoint, documentId: prepared.documentId, bound: false });
-		assert.equal(w.host.endpointOf(EDITOR), null, "an endpoint provided from outside is not one of this window's own");
+		assert.equal(w.host.endpointOf(EDITOR), endpoint as never, "the endpoint the host created and bound is the window's own");
 		assert.deepEqual(endpoint.calls, [`beginDocument:${prepared.documentId}`]);
 	});
 
@@ -402,12 +423,14 @@ describe("prepareDocument", () => {
 		assert.equal(tab.bridge?.bound, false);
 	});
 
-	it("reports an endpoint it could not provide, or a document the endpoint refused", async () => {
+	it("reports an endpoint whose listener could not bind, or a document the endpoint refused", async () => {
 		const w = world();
 		w.state.editors.reserve({ tabId: TAB, editorId: EDITOR, provenance: "saved", sequence: 1 });
 		w.state.tabs.set(EDITOR, newTab(EDITOR, { tabId: TAB }));
 		w.state.provided.set(EDITOR, null);
 		assert.equal(await w.host.prepareDocument(context0(), EDITOR), null);
+		assert.ok(w.logged.includes(`tab ${TAB}: the bridge listener could not bind (no listener)`));
+		assert.equal(w.state.endpoints.size, 0, "an endpoint that did not bind is not kept");
 		const endpoint = new FakeEndpoint();
 		endpoint.beginDocumentFails = true;
 		w.state.provided.set(EDITOR, endpoint);
@@ -519,7 +542,7 @@ describe("syncEditors", () => {
 		w.state.editors.reserve({ tabId: TAB, editorId: OTHER_EDITOR, provenance: "saved", sequence: 1 });
 		membership([TAB, EDITOR]);
 		await w.host.syncEditors(context0(), w.index);
-		assert.equal(w.calls.some(call => call.startsWith("ensureEndpoint")), false);
+		assert.equal(w.calls.some(call => call.startsWith("createEndpoint")), false);
 		assert.ok(w.state.live.has(EDITOR), "it is still observed");
 	});
 
@@ -527,7 +550,7 @@ describe("syncEditors", () => {
 		const w = world();
 		membership([TAB, EDITOR]);
 		await w.host.syncEditors(context0(), w.index);
-		assert.equal(w.calls.some(call => call.startsWith("ensureEndpoint")), false);
+		assert.equal(w.calls.some(call => call.startsWith("createEndpoint")), false);
 	});
 
 	it("leaves an editor that already has a document alone", async () => {
@@ -535,7 +558,7 @@ describe("syncEditors", () => {
 		editor(w);
 		membership([TAB, EDITOR]);
 		await w.host.syncEditors(context0(), w.index);
-		assert.equal(w.calls.some(call => call.startsWith("ensureEndpoint")), false);
+		assert.equal(w.calls.some(call => call.startsWith("createEndpoint")), false);
 	});
 
 	it("gives an editor with a panel handle its endpoint, and provisions its document when it renders", async () => {
@@ -588,13 +611,9 @@ describe("syncEditors", () => {
 
 	it("forgets the endpoint of an editor that lost its reservation while it was provisioned", async () => {
 		const endpoint = new FakeEndpoint();
-		const w = world({
-			ensureEndpoint: async () => {
-				w.state.editors.release(TAB, EDITOR);
-				w.state.endpoints.set(EDITOR, endpoint as never);
-				return endpoint as never;
-			},
-		});
+		const w = world();
+		w.state.provided.set(EDITOR, endpoint);
+		endpoint.onBind = () => { w.state.editors.release(TAB, EDITOR); };
 		w.state.rows.set(TAB, { tabId: TAB });
 		membership([TAB, EDITOR]);
 		await w.host.syncEditors(context0(), w.index);

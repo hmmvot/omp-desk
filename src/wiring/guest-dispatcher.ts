@@ -78,7 +78,7 @@ export interface GuestTab {
 	readonly slotId: string;
 	/** The conversation the editor shows, or `null` for a folder shell. */
 	readonly tabId: string | null;
-	readonly mode: string;
+	readonly mode: SessionViewMode;
 	readonly panel: vscode.WebviewPanel | null;
 	/** The document the panel shows now; only a `"guest"` document has a composer to ask. */
 	readonly document: { readonly kind: string } | null;
@@ -133,7 +133,7 @@ export interface GuestChatPort<Tab extends GuestTab> {
 	/** A named chat action of the page: compact, shake, cycle model, export, share, provider login. */
 	runChatAction(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, command: GuestChatCommand): Promise<void>;
 	/** The workspace paths a composer's `@`-mention query matches below a folder. */
-	completeFiles(cwd: string, query: unknown): Promise<GuestFileCompletionsMessage["paths"]>;
+	completeFiles(cwd: string, query: string): Promise<GuestFileCompletionsMessage["paths"]>;
 }
 
 /** The editor's document and session view: what a page's announcement and a mode request drive. */
@@ -212,7 +212,7 @@ export interface GuestDispatcher<Tab extends GuestTab = GuestTab> {
 	/** Cancel only the source capture; an already-replaced document has nothing to unlock. */
 	releaseCarriedDraft(carried: CarriedDraft<Tab> | null): void;
 	/** Open, or reveal, one detail tab of the conversation an editor shows. */
-	openDetailTab(tabId: string, mode: string, request: GuestOpenDetailMessage): void;
+	openDetailTab(tabId: string, mode: SessionViewMode, request: GuestOpenDetailMessage): void;
 	/** Close the detail tabs a previous host lifetime left behind. */
 	closeLeftoverDetailTabs(): Promise<void>;
 	/** Show why a tab has no live conversation. */
@@ -394,7 +394,7 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 	 * Open, or reveal, one detail tab of the conversation an editor shows. Presentation only, so a
 	 * passive editor may ask too; the conversation comes from the sending editor, never the message.
 	 */
-	function openDetailTab(tabId: string, mode: string, request: GuestOpenDetailMessage): void {
+	function openDetailTab(tabId: string, mode: SessionViewMode, request: GuestOpenDetailMessage): void {
 		// A terminal editor and a legacy tab have no conversation page to show: nothing would arrive.
 		if (mode === "terminal" || deps.chat().kindOf(tabId) === "legacy") return;
 		const target: DetailTarget = request.kind === "agent" ? { kind: "agent", agentId: request.agentId } : { kind: request.kind };

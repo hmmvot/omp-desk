@@ -1107,6 +1107,37 @@ describe("launcher tree", () => {
 		provider.dispose();
 	});
 
+	it("reports a projection that throws and still dispatches the reads queued behind it", async () => {
+		const entries = Array.from({ length: 6 }, (_, ordinal) => entry({ tabId: `tab:${ordinal}`, cwd: ALPHA, ordinal }));
+		const flights: { tabId: string; resolve(value: { ownershipChecked: boolean }): void }[] = [];
+		const errors: unknown[] = [];
+		const fifth = Promise.withResolvers<void>();
+		let projections = 0;
+		const provider = providerFor({
+			folders: () => [folder("folder:alpha", ALPHA)],
+			entries: () => entries,
+			// Only a projection reads this, so the second one, the repaint after a completed read, throws.
+			activeTabId: () => {
+				if (++projections === 2) throw new Error("projection failed");
+				return null;
+			},
+			facts: () => NO_FACTS,
+			observeOwnership: tabId => new Promise(resolve => {
+				flights.push({ tabId, resolve });
+				if (flights.length === 5) fifth.resolve();
+			}),
+		}, { onObservationError: error => errors.push(error) });
+		provider.getChildren();
+		await nextTurn();
+		assert.deepEqual(flights.map(flight => flight.tabId), ["tab:0", "tab:1", "tab:2", "tab:3"]);
+		flights[0]!.resolve({ ownershipChecked: true });
+		await fifth.promise;
+		assert.equal(projections, 2, "the repaint after the completed read was attempted");
+		assert.deepEqual(errors.map(error => (error as Error).message), ["projection failed"]);
+		assert.equal(flights[4]!.tabId, "tab:4", "the failed projection did not stop the next read from being dispatched");
+		provider.dispose();
+	});
+
 	it("rejects stale ownership across runtime rebinding and remove/re-add without overlapping flights", async () => {
 		let entries = [entry({ tabId: "tab:one", cwd: ALPHA })];
 		let runtimeIdentity = "old";

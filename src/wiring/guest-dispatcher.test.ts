@@ -39,7 +39,7 @@ if (typeof module.registerHooks === "function") {
 }
 
 const stub = await import("./vscode-test-stub.ts");
-const { CHAT_COMMAND_TYPES, registerGuestDispatcher } = await import("./guest-dispatcher.ts");
+const { registerGuestDispatcher } = await import("./guest-dispatcher.ts");
 const { GUEST_PROTOCOL_VERSION } = await import("../protocol/messages.ts");
 const { DETAIL_VIEW_TYPE } = await import("../host/detail-tabs.ts");
 const { TAB_INPUT_VIEW_TYPE_PREFIX } = await import("../host/bridge-identity.ts");
@@ -122,11 +122,11 @@ function world(overrides: Partial<GuestDispatcherDeps<FakeTab>> = {}) {
 	const detailOpens: { conversation: string; target: unknown }[] = [];
 	const chatActions: unknown[][] = [];
 	const terminalMessages: { slot: string; type: string }[] = [];
-	const terminalCopies: unknown[] = [];
+	const terminalCopies: { tab: FakeTab; reply: Parameters<GuestDispatcherDeps<FakeTab>["acceptTerminalCopy"]>[1] }[] = [];
 	const modeSwitches: unknown[][] = [];
 	const controlRequests: unknown[][] = [];
 	const pinned: unknown[][] = [];
-	const acknowledged: { kind: string; tabId: string }[] = [];
+	const acknowledged: { kind: string; tabId: string; panel: unknown }[] = [];
 	const deps: GuestDispatcherDeps<FakeTab> = {
 		context: () => state.context,
 		tabs: () => state.tabs,
@@ -159,11 +159,11 @@ function world(overrides: Partial<GuestDispatcherDeps<FakeTab>> = {}) {
 		bridgeRouteOf: () => state.route,
 		pinBridgeOrigin: (...args) => { calls.push("pinBridgeOrigin"); pinned.push(args); },
 		redeliverBridgeBinding: async () => { calls.push("redeliverBridgeBinding"); },
-		acknowledgeBridgeRoute: tabId => { acknowledged.push({ kind: "route", tabId }); },
-		acknowledgeBridgeSecret: tabId => { acknowledged.push({ kind: "secret", tabId }); },
+		acknowledgeBridgeRoute: (tabId, panel) => { acknowledged.push({ kind: "route", tabId, panel }); },
+		acknowledgeBridgeSecret: (tabId, panel) => { acknowledged.push({ kind: "secret", tabId, panel }); },
 		isTerminalPanelType: type => type.startsWith("omp:terminal-") && type !== "omp:terminal-copy-reply",
 		handleTerminalMessage: async (slot, parsed) => { terminalMessages.push({ slot, type: parsed.type }); },
-		acceptTerminalCopy: async (_tab, reply) => { terminalCopies.push(reply); },
+		acceptTerminalCopy: async (tab, reply) => { terminalCopies.push({ tab, reply }); },
 		controlRequest: async (...args) => { controlRequests.push(args); },
 		log: message => { logged.push(message); },
 		info: message => { infos.push(message); },
@@ -228,7 +228,6 @@ describe("each message reaches its owner", () => {
 	it("sends chat commands to the conversation of the slot's tab with the panel's page", async () => {
 		const w = world();
 		const live = w.editor();
-		for (const type of ["omp:chat-prompt", "omp:chat-abort"]) assert.ok(CHAT_COMMAND_TYPES.has(type));
 		await w.dispatcher.handleMessage(index, SLOT, live.panel, { type: "omp:chat-abort", requestId: REQUEST });
 		assert.equal(w.chatMessages.length, 1);
 		assert.equal(w.chatMessages[0]!.tabId, TAB);
@@ -251,6 +250,8 @@ describe("each message reaches its owner", () => {
 		const live = w.editor();
 		await w.dispatcher.handleMessage(index, SLOT, live.panel, { type: "omp:terminal-copy-reply", requestId: HEX("b"), generation: null, text: "copied" });
 		assert.equal(w.terminalCopies.length, 1);
+		assert.equal(w.terminalCopies[0]!.tab, live.tab, "the reply is answered against the record of the editor that sent it");
+		assert.equal(w.terminalCopies[0]!.reply.text, "copied");
 	});
 
 	it("asks for a session mode switch only once the extension has a context", async () => {
@@ -279,12 +280,18 @@ describe("each message reaches its owner", () => {
 		assert.equal(w.chatActions.length, 1);
 	});
 
-	it("hands the bridge acknowledgements to the bridge", async () => {
+	it("hands a bridge acknowledgement to the bridge only from the panel that serves the slot", async () => {
 		const w = world();
 		const live = w.editor();
-		await w.dispatcher.handleMessage(index, SLOT, live.panel, { type: "omp:route-ack", hostGeneration: HEX("1"), documentId: HEX("2"), routeGeneration: HEX("3") });
-		await w.dispatcher.handleMessage(index, SLOT, live.panel, { type: "omp:bridge-ack", hostGeneration: HEX("1"), documentId: HEX("2"), bindingHash: "4".repeat(64) });
-		assert.deepEqual(w.acknowledged, [{ kind: "route", tabId: TAB }, { kind: "secret", tabId: TAB }]);
+		const stale = fakePanel();
+		const route = { type: "omp:route-ack", hostGeneration: HEX("1"), documentId: HEX("2"), routeGeneration: HEX("3") };
+		const secret = { type: "omp:bridge-ack", hostGeneration: HEX("1"), documentId: HEX("2"), bindingHash: "4".repeat(64) };
+		await w.dispatcher.handleMessage(index, SLOT, stale.panel, route);
+		await w.dispatcher.handleMessage(index, SLOT, stale.panel, secret);
+		assert.deepEqual(w.acknowledged, [], "a panel the slot no longer shows cannot acknowledge for it");
+		await w.dispatcher.handleMessage(index, SLOT, live.panel, route);
+		await w.dispatcher.handleMessage(index, SLOT, live.panel, secret);
+		assert.deepEqual(w.acknowledged, [{ kind: "route", tabId: TAB, panel: live.panel }, { kind: "secret", tabId: TAB, panel: live.panel }]);
 	});
 
 	it("traces focus into the log and keeps the popup flag of the tab in step with the page", async () => {

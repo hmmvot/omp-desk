@@ -147,7 +147,7 @@ These pure functions serve the host (command QuickPick and checks), the page and
 
 Targets and previews are limited to the **loaded window** (the 100-card admission). An older prompt becomes a target after "Load older".
 
-Page-only interaction state is a reducer, `reduceRewind` (`src/webview/lib/rewind-mode.ts`): `idle` → `picking {targetId, leafId}` → `pending` → `idle`. Picking is pinned to the leaf it started from: a snapshot that moves the leaf or drops the selected prompt ends it.
+Page-only interaction state is a reducer, `reduceRewind` (`src/chat/rewind-mode.ts`): `idle` → `picking {targetId, leafId}` → `pending` → `idle`. Picking is pinned to the leaf it started from: a snapshot that moves the leaf or drops the selected prompt ends it.
 
 ### UX
 
