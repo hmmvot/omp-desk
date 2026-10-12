@@ -46,6 +46,9 @@ export class ContextTreeProvider implements vscode.TreeDataProvider<ContextTreeI
 		item.id = `group:${group.id}`;
 		item.description = group.description ?? undefined;
 		item.tooltip = group.tooltip ?? undefined;
+		// A group row carries an icon, as the inventory views' groups do: VS Code indents a level's
+		// children by whether their parent has an icon, so an icon-less group shifts its rows left.
+		item.iconPath = new vscode.ThemeIcon("folder");
 		return item;
 	}
 	#item(row: ContextItem): ContextTreeItem {
