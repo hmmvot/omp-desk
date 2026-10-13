@@ -32,6 +32,7 @@ Run your [Oh My Pi](https://github.com/can1357/oh-my-pi) (`omp`) sessions from V
 - Each session runs in its own background process.
 - Close its tab, reload the window or close VS Code: the session keeps working.
 - Reopen it to get the same process and screen back.
+- **One exception: installing a VS Code update.** Its installer stops every `Code.exe` of the install after waiting about 30 s, and the session hosts run as `Code.exe` too, so **Restart to Update** ends the OMP processes of running sessions (a turn in progress and its sub-agents are lost). OMP Desk cannot prevent that; when it sees the updater's log naming one of its hosts, it says so, and it resumes the sessions that were running from their files.
 - Only one window writes a session at a time.
 - Stopping a session never deletes its history.
 
@@ -139,6 +140,8 @@ All commands are in the Command Palette under **OMP Desk**. The ones with defaul
 | `Ctrl+Shift+U` | Cycle thinking level (**Cycle Model** has no default key) | Chat editor |
 | `Ctrl+Alt+Shift+R` | Redraw Terminal | Terminal editor |
 | `Alt+Shift+K` | Add Selection to Session | Text editor with a selection |
+
+A keymap extension (the IntelliJ IDEA keymap, for one) that binds `Ctrl+N` or `Ctrl+Shift+N` in text editors can win over these two keys, because VS Code does not let an extension choose its place in the keybinding order. Add a user keybinding (**Preferences: Open Keyboard Shortcuts (JSON)**) with the same `when` clause: `{ "key": "ctrl+n", "command": "ompDesk.searchSymbolFromChat", "when": "activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat" }`, and the same for `ctrl+shift+n` with `ompDesk.searchFileFromChat`.
 
 Other commands include **New Session**, **Add Folder**, **Pin Folder**, **Unpin Folder**, **Resume Session**, **Switch to Chat / Terminal**, **Compact Conversation…**, **Shake Conversation…**, **Export Conversation as HTML…**, **Share Conversation Link…**, **Show Chat Keyboard Shortcuts**, **Open Stats**, **Log In to Provider…**, **Show Diagnostics** and the file-change observation commands.
 

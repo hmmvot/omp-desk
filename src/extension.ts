@@ -258,6 +258,7 @@ import type { LegacySettingsPort } from "./wiring/legacy-settings";
 import { announceRename, foreignOmpNames, legacyContextKey, registerLegacyAliases } from "./wiring/legacy-aliases";
 import { constants as fsConstants } from "node:fs";
 import { access } from "node:fs/promises";
+import { announceUpdaterTerminations, updaterNoticeFiles } from "./wiring/updater-notice";
 import type { SessionProcesses } from "./wiring/process-wiring";
 import { SettingsEditors } from "./host/omp-settings-editor";
 import type { SettingsEditorContext } from "./host/omp-settings-editor";
@@ -1297,6 +1298,8 @@ let legacyContextMirror = true;
 const LEGACY_SETTINGS_MOVE_WAIT_MS = 10_000;
 /** The profile-wide marker that the rename notice was decided (shown, or not needed on a fresh install). */
 const RENAME_NOTICE_KEY = "ompDesk.renameNotice.v1";
+/** The profile-wide name of the VS Code updater log this extension already told the user about. */
+const UPDATER_NOTICE_KEY = "ompDesk.updaterNotice.v1";
 
 /** The installed window state. Throws when no window is installed, which is the invariant every caller relies on. */
 function windowState(): WindowState {
@@ -1412,6 +1415,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     access => windowTiming("broker state access", `${Date.now() - stateAccessStartedAt} ms ok=${access.ok}`),
     () => undefined,
   );
+  // VS Code's own updater stops every Code.exe of the install, and the session brokers are Code.exe: say so when it did.
+  void announceUpdaterTerminations({
+    ...updaterNoticeFiles({ tempDir: os.tmpdir(), ptyDir: path.join(context.globalStorageUri.fsPath, "pty") }),
+    announced: () => context.globalState.get<string>(UPDATER_NOTICE_KEY) ?? null,
+    markAnnounced: name => Promise.resolve(context.globalState.update(UPDATER_NOTICE_KEY, name)),
+    log: line => log(line),
+    notify: message => { void vscode.window.showInformationMessage(`OMP: ${message}`); },
+  });
   // The longest a display-only read waits for the startup restore (see `WindowState.startupRestoreOver`).
   const startupDeferCap = setTimeout(() => s.startupRestoreOver.resolve(), STARTUP_DEFER_CAP_MS);
   startupDeferCap.unref();
