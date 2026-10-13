@@ -19,6 +19,7 @@ import type { ChatWebviewMessage } from "../protocol/chat-messages.ts";
 import type { KillSelection } from "../host/session-kill.ts";
 import type { BrokerSlotProvenance } from "../host/broker-slots.ts";
 import type { StopRecordedHostResult } from "../host/session-availability.ts";
+import type { SessionTransitionFacts } from "../host/native-session.ts";
 
 /** Who acts. Fixed when the runtime is constructed; never a per-call argument. */
 export interface RuntimeHolder {
@@ -78,6 +79,142 @@ export type StopRecordedOutcome =
 	| { readonly kind: "writer-gone" }
 	| { readonly kind: "writer-changed" };
 
+/**
+ * The runtime of a conversation as values. `attachment` names the incarnation: it increases at every launch or attach,
+ * so a re-attach of the same process is a new one, and a request that names it never reaches a different writer.
+ */
+export interface RuntimeSnapshot {
+	readonly conversation: string;
+	readonly attachment: number;
+	readonly kind: "chat" | "terminal";
+	readonly pid: number;
+	readonly cwd: string;
+	readonly slot: string;
+	readonly brokerId: string;
+	readonly brokerGeneration: string;
+	readonly childCreationTime: string | null;
+	/** A native shutdown was accepted and the process has not ended. */
+	readonly stopping: boolean;
+	/** The admission fence is up. */
+	readonly transitioning: boolean;
+	readonly controlFailure: string | null;
+	/** Whether a verified host-control channel is established. */
+	readonly control: "verified" | "unavailable";
+}
+
+/** Which gate-time checks only the window can make a flow asks of it; see `TransitionWindow`. */
+export type TransitionPhase = "gate" | "attached" | "stopped";
+
+/** One raised fence. Opaque to the window beyond naming its conversation. */
+export interface TransitionToken {
+	readonly conversation: string;
+	readonly serial: number;
+}
+
+export interface BeginTransitionRequest {
+	readonly conversation: string;
+	readonly target: number | null;
+}
+
+/**
+ * When a flow that ends keeps the fence up on purpose: `native-stopping` while a native shutdown it (or an earlier
+ * flow) asked for is accepted and its process has not ended; `dispatched-stop` while the stop it dispatched did not
+ * end the writer it captured; `none` never.
+ */
+export type TransitionRetention = "none" | "native-stopping" | "dispatched-stop";
+
+export interface ReadTransitionFactsRequest {
+	readonly conversation: string;
+	readonly target: number;
+	/** Gate-time checks of the flow that holds this fence run under the gate before the read. */
+	readonly token?: TransitionToken;
+	/** Bound the wait for the gate and the read (`withSessionReadDeadline`). */
+	readonly bounded?: boolean;
+}
+
+interface StopRequestBase {
+	readonly conversation: string;
+	readonly token: TransitionToken;
+	readonly target: number;
+	readonly mode: "graceful" | "force";
+	/** The user confirmed aborting a busy turn. */
+	readonly consent: boolean;
+	/** The facts the confirmation was shown: absent when none were captured, `null` when none could be read. */
+	readonly expected?: SessionTransitionFacts | null;
+	/** Refuse unless the session is idle now and still the one `expected` named. */
+	readonly idleOnly?: boolean;
+}
+
+/** A stop of the session: the stopped intent is recorded and the claim released. */
+export interface StopSessionRequest extends StopRequestBase {
+	readonly scope: "session";
+	/** Record the stopped intent before the stop is dispatched, so a crash in between never relaunches. */
+	readonly recordIntentFirst?: boolean;
+	/** The pid the caller verified; checked under the gate before anything is stopped. */
+	readonly expectedWriter?: { readonly pid: number };
+}
+
+/** A passive editor's copy of the session: only this window's runtime is ended, the owning window keeps the session. */
+export interface StopLocalCopyRequest extends StopRequestBase {
+	readonly scope: "local-copy";
+}
+
+export type StopRequest = StopSessionRequest | StopLocalCopyRequest;
+
+/**
+ * `refused` stopped nothing: `target-changed` (another incarnation, or the flow's own gate-time check failed),
+ * `not-idle` and `facts-changed` (the session is busy or is no longer the one the facts named). `writer-gone` and
+ * `writer-changed` report the caller's `expectedWriter`.
+ */
+export type StopResult =
+	| { readonly status: "stopped"; readonly detail: string }
+	| { readonly status: "unconfirmed"; readonly detail: string }
+	| { readonly status: "refused"; readonly code: "target-changed" | "not-idle" | "facts-changed" }
+	| { readonly status: "writer-gone" }
+	| { readonly status: "writer-changed" };
+
+/** How the writer to replace is stopped. */
+export type ReplaceStop =
+	| { readonly kind: "graceful"; readonly consent: boolean; readonly captured: SessionTransitionFacts }
+	| { readonly kind: "force"; readonly file: string; readonly durableSessionId: string };
+
+export interface ReplaceWriterRequest {
+	readonly conversation: string;
+	readonly token: TransitionToken;
+	readonly target: number;
+	/** The view the successor opens in. */
+	readonly mode: SessionViewMode;
+	/** The editor binding the replacement is made for; its generation must still be the one the flow saw. */
+	readonly binding: { readonly slot: string; readonly generation: number };
+	readonly stop: ReplaceStop;
+	/** Bound the wait for the gate: a caller that gave up is never served late, and the result is `failed`. */
+	readonly bounded?: boolean;
+}
+
+/**
+ * `replaced`: the successor was started (or refused) by the index and `outcome` says which. `refused` stopped
+ * nothing and replaced nothing, `unconfirmed` stopped nothing it can prove, `closed` ended the writer and recorded
+ * the session stopped without a successor (the durable file is gone), `failed` threw. `stopDispatched` and
+ * `writerGone` are total on every result.
+ */
+export type ReplaceWriterResult =
+	| { readonly status: "replaced"; readonly outcome: RestoreOutcome; readonly stopDispatched: true; readonly writerGone: true }
+	| { readonly status: "refused"; readonly code: ReplaceRefusal; readonly detail?: string; readonly stopDispatched: boolean; readonly writerGone: boolean }
+	| { readonly status: "unconfirmed"; readonly detail: string; readonly stopDispatched: true; readonly writerGone: false }
+	| { readonly status: "closed"; readonly code: "file-missing"; readonly stopDispatched: true; readonly writerGone: true }
+	| { readonly status: "failed"; readonly detail: string; readonly stopDispatched: boolean; readonly writerGone: boolean };
+
+/**
+ * Why a replacement was refused: `target-changed` (another incarnation, a changed binding, or the flow's own check),
+ * `facts-changed` (the facts or the busy state differ from what was confirmed), `not-durable`, `no-broker`,
+ * `no-control` (a Terminal without a verified host-control channel or a native target), `native-refused` (OMP did not
+ * accept the native shutdown), `abort-unconfirmed`, `settle-failed`, `checked-after-stop` (the flow's check failed after
+ * the process was stopped; the dead writer stays current).
+ */
+export type ReplaceRefusal =
+	| "target-changed" | "facts-changed" | "not-durable" | "no-broker" | "no-control" | "native-refused"
+	| "abort-unconfirmed" | "settle-failed" | "checked-after-stop";
+
 export interface SessionRuntime {
 	readonly conversations: ConversationPort;
 	readonly holder: RuntimeHolder;
@@ -107,6 +244,21 @@ export interface SessionRuntime {
 	verifiedWriterPid(conversation: string, options?: { readonly display?: boolean }): Promise<number | null>;
 	/** Where the durable broker slot of a conversation is recorded; an unreadable table is uncertainty, never `none`. */
 	brokerProvenance(conversation: string): BrokerSlotProvenance;
+	/** The runtime a conversation holds, as values; `null` when it holds none. */
+	snapshot(conversation: string): RuntimeSnapshot | null;
+	/**
+	 * Raise the admission fence of a conversation for one flow (raised before any dialog, kept across the port calls
+	 * and the dialogs between them). `target` is the incarnation the flow captured, or `null` when it holds none.
+	 */
+	beginTransition(request: BeginTransitionRequest): TransitionToken;
+	/** End the flow's fence; `retention` says when the fence is kept up on purpose. See {@link TransitionRetention}. */
+	endTransition(token: TransitionToken, retention: TransitionRetention): void;
+	/** The facts a stop or replacement is confirmed against, read under the gate; `null` when unreadable or the target changed. */
+	readTransitionFacts(request: ReadTransitionFactsRequest): Promise<SessionTransitionFacts | null>;
+	/** Stop the writer of a conversation this window drives and record the stop, under the conversation's gate. */
+	stop(request: StopRequest): Promise<StopResult>;
+	/** Stop the writer and open its successor on the same conversation under one hold of the gate. */
+	replaceWriter(request: ReplaceWriterRequest): Promise<ReplaceWriterResult>;
 }
 
 /** Show a stopped, blocked or resyncing session's history read-only. Never claims, launches or writes. */

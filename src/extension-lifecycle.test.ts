@@ -259,7 +259,7 @@ export const harness = {
     const w = fixtureWindow();
     w.context = context;
     w.reconciler = createOwnerReconciler(ports);
-    const runtimeDeps = sessionRuntimeDeps(w.indexForBridge, w.sessionRuntime.chat);
+    const runtimeDeps = sessionRuntimeDeps(w.indexForBridge, w.sessionRuntime.chat, () => hostLauncher);
     // The broker facts of the fixture's rows come in through the runtime's deps, not by reassigning a function of the module.
     w.sessionRuntime = new LocalSessionRuntime({
       ...runtimeDeps,

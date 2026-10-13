@@ -11,12 +11,12 @@
 import type { OwnerReconciler } from "../host/session-availability.ts";
 import type { BrokerSlotProvenance } from "../host/broker-slots.ts";
 import type { OmpHostLauncher, RestoreOutcome, RestoreReport, SessionIndex } from "../host/session-index.ts";
-import type { SessionViewMode } from "../host/session-model.ts";
-import type { TabLifecycleLease } from "../host/tab-lifecycle.ts";
 import type { SessionHostRuntime, SessionTransitionFacts } from "../host/native-session.ts";
-import type { NativeStopVerdict } from "../host/rpc-reconcile.ts";
-import type { StopOperations, StopRecord } from "./local-stop.ts";
-import type { OpenRequest, ReattachRequest, RestorePassRequest, RuntimeHolder, SessionRuntime, StopRecordedOutcome, StopRecordedRequest } from "./session-runtime.ts";
+import type { StopOperations } from "./local-stop.ts";
+import type {
+	BeginTransitionRequest, OpenRequest, ReadTransitionFactsRequest, ReattachRequest, ReplaceWriterRequest, ReplaceWriterResult, RestorePassRequest, RuntimeHolder,
+	RuntimeSnapshot, SessionRuntime, StopRecordedOutcome, StopRecordedRequest, StopRequest, StopResult, TransitionRetention, TransitionToken,
+} from "./session-runtime.ts";
 import type { LocalHostControl } from "./local-control.ts";
 import type { LocalExitOperations } from "./local-exit.ts";
 import type { LocalIdentity } from "./local-identity.ts";
@@ -25,6 +25,7 @@ import type { KillSelection } from "../host/session-kill.ts";
 import type { LocalNativeWatch } from "./local-native-watch.ts";
 import type { RecordedStopOperations } from "./local-recorded-stop.ts";
 import type { LocalWriterVerifier } from "./local-writer.ts";
+import type { LocalTransitions } from "./local-transition.ts";
 import { LocalConversations } from "./local-conversations.ts";
 import type { ChatRuntime } from "../host/chat-runtime.ts";
 import type { RpcSession } from "../host/rpc/session.ts";
@@ -43,23 +44,10 @@ export interface LocalSessionRuntimeDeps {
 	readonly exit: LocalExitOperations;
 	readonly kill: LocalKill;
 	readonly recorded: RecordedStopOperations;
+	readonly transitions: LocalTransitions;
 	readonly writer: Pick<LocalWriterVerifier, "pid">;
 	/** The row's durable broker slot, read losslessly at call time. */
 	readonly brokerProvenance: (conversation: string) => BrokerSlotProvenance;
-}
-
-/**
- * Replace the settled writer of a conversation inside the lease the caller already holds
- * (`switchSessionMode`, `restartChat`). Removed when those flows call one gated `replaceWriter`.
- */
-export interface ReplaceWriterHeldRequest {
-	readonly conversation: string;
-	readonly confirmedStopped: boolean;
-	readonly expectedPid: number;
-	readonly expectedCreationTime: string;
-	readonly mode: SessionViewMode;
-	readonly slot: string;
-	readonly emptyFile: string | null;
 }
 
 export class LocalSessionRuntime implements SessionRuntime {
@@ -136,6 +124,40 @@ export class LocalSessionRuntime implements SessionRuntime {
 		return this.#deps.brokerProvenance(conversation);
 	}
 
+	/** The incarnation number of a live runtime the caller holds. `LocalSessionRuntime` only: the port names incarnations through `snapshot`. */
+	attachmentOf(runtime: SessionHostRuntime): number {
+		return this.#deps.transitions.attachmentOf(runtime);
+	}
+
+	snapshot(conversation: string): RuntimeSnapshot | null {
+		return this.#deps.transitions.snapshot(conversation);
+	}
+
+	setControlFailure(conversation: string, detail: string | null): void {
+		this.#deps.transitions.setControlFailure(conversation, detail);
+	}
+
+	beginTransition(request: BeginTransitionRequest): TransitionToken {
+		return this.#deps.transitions.beginTransition(request);
+	}
+
+	endTransition(token: TransitionToken, retention: TransitionRetention): void {
+		this.#deps.transitions.endTransition(token, retention);
+	}
+
+	/** Under the conversation's gate: see {@link LocalTransitions.readTransitionFacts}. */
+	readTransitionFacts(request: ReadTransitionFactsRequest): Promise<SessionTransitionFacts | null> {
+		return this.#deps.transitions.readTransitionFacts(request);
+	}
+
+	stop(request: StopRequest): Promise<StopResult> {
+		return this.#deps.transitions.stop(request);
+	}
+
+	replaceWriter(request: ReplaceWriterRequest): Promise<ReplaceWriterResult> {
+		return this.#deps.transitions.replaceWriter(request);
+	}
+
 	/**
 	 * End the runtime of a session whose recorded OMP root is already gone, as its exit would have
 	 * ended it. Ungated: the exit handlers take the tab's gate themselves, so call it outside the
@@ -184,41 +206,5 @@ export class LocalSessionRuntime implements SessionRuntime {
 				attach: attachRequest => launcher.attach(attachRequest),
 			},
 		});
-	}
-
-	/** Under a lease the caller holds; see {@link ReplaceWriterHeldRequest}. */
-	replaceWriterHeld(request: ReplaceWriterHeldRequest, lease: TabLifecycleLease): Promise<RestoreOutcome> {
-		return this.#deps.index.replaceHost(request.conversation, {
-			confirmedStopped: request.confirmedStopped,
-			expectedPid: request.expectedPid,
-			expectedCreationTime: request.expectedCreationTime,
-			mode: request.mode,
-			slotId: request.slot,
-			emptyFile: request.emptyFile,
-			launcher: this.#deps.launcher(),
-		}, lease);
-	}
-
-	// Verdict-only stop operations (cut 4). They take no gate: every caller holds the tab's lease and
-	// records the outcome under it. Cut 7 folds them into the gated `stop` and `replaceWriter`.
-
-	/** Ask the exact process of `state` to stop, or recognise that it already ended; records nothing. */
-	requestStop(state: StopRecord, runtime: SessionHostRuntime, mode: "graceful" | "force", consent: boolean, expected?: SessionTransitionFacts | null): Promise<NativeStopVerdict> {
-		return this.#deps.stop.requestStop(state, runtime, mode, consent, expected);
-	}
-
-	/** A verdict for a runtime whose recorded OMP root is already gone, or `null` when that cannot be shown. */
-	confirmEnded(runtime: SessionHostRuntime): Promise<NativeStopVerdict | null> {
-		return this.#deps.stop.confirmEnded(runtime);
-	}
-
-	/** Wait, bounded, for a chat session to settle on the very facts a stop was confirmed against. */
-	awaitSettled(state: StopRecord, runtime: SessionHostRuntime, expected: SessionTransitionFacts): Promise<SessionTransitionFacts | null> {
-		return this.#deps.stop.awaitSettled(state, runtime, expected);
-	}
-
-	/** The facts a stop or replacement is confirmed against; `null` when the record no longer holds this runtime. */
-	readTransitionFacts(state: StopRecord, runtime: SessionHostRuntime): Promise<SessionTransitionFacts | null> {
-		return this.#deps.stop.readTransitionFacts(state, runtime);
 	}
 }

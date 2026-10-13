@@ -9,7 +9,6 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { OmpHostAttachRequest, OmpHostLauncher, RestoreOutcome, RestoreOptions, RestoreAllOptions, RestoreReport, SessionIndex } from "../host/session-index.ts";
 import type { OwnerReconciler } from "../host/session-availability.ts";
-import type { TabLifecycleLease } from "../host/tab-lifecycle.ts";
 import { LocalSessionRuntime } from "./local-runtime.ts";
 import type { SessionRuntime, StopRecordedRequest } from "./session-runtime.ts";
 
@@ -19,7 +18,6 @@ const restored: RestoreOutcome = { status: "attached", tabId: TAB, sessionFile: 
 interface Calls {
 	restore: [string, RestoreOptions][];
 	restoreAll: RestoreAllOptions[];
-	replaceHost: [string, Record<string, unknown>, TabLifecycleLease][];
 	observed: string[];
 	stopRecorded: StopRecordedRequest[];
 	writer: [string, { readonly display?: boolean } | undefined][];
@@ -27,7 +25,7 @@ interface Calls {
 }
 
 function fixture(overrides: { entry?: unknown; verdict?: { kind: string }; restore?: () => Promise<RestoreOutcome> } = {}) {
-	const calls: Calls = { restore: [], restoreAll: [], replaceHost: [], observed: [], stopRecorded: [], writer: [], provenance: [] };
+	const calls: Calls = { restore: [], restoreAll: [], observed: [], stopRecorded: [], writer: [], provenance: [] };
 	const report = { order: [TAB], restored: [], attached: [], conflicts: [], failures: [], drafts: [], stopped: [], skipped: [], activeTabId: null, persistError: null } as RestoreReport;
 	const entry = "entry" in overrides ? overrides.entry : { tabId: TAB, sessionFile: "s.jsonl", host: { transport: "native" }, ownership: { ownerGeneration: "gen-1", draftIdentity: null } };
 	const index = {
@@ -36,7 +34,6 @@ function fixture(overrides: { entry?: unknown; verdict?: { kind: string }; resto
 		observeOwnership: async (tabId: string) => { calls.observed.push(tabId); return { ok: true, claim: null }; },
 		restore: async (tabId: string, options: RestoreOptions) => { calls.restore.push([tabId, options]); return overrides.restore === undefined ? restored : await overrides.restore(); },
 		restoreAll: async (options: RestoreAllOptions) => { calls.restoreAll.push(options); return report; },
-		replaceHost: async (tabId: string, input: Record<string, unknown>, lease: TabLifecycleLease) => { calls.replaceHost.push([tabId, input, lease]); return restored; },
 	};
 	const attached: OmpHostAttachRequest[] = [];
 	const launches: unknown[] = [];
@@ -51,7 +48,7 @@ function fixture(overrides: { entry?: unknown; verdict?: { kind: string }; resto
 		reconciler: () => reconciler,
 		launcher: () => { launcherReads++; return hostLauncher; },
 		stop: { requestStop: async () => ({ writerGone: true, treeEmpty: true, detail: "fixture" }), confirmEnded: async () => null, awaitSettled: async () => null, readTransitionFacts: async () => null },
-		chat: {} as never, control: {} as never, identity: {} as never, nativeWatch: {} as never, exit: {} as never, kill: {} as never,
+		chat: {} as never, control: {} as never, identity: {} as never, nativeWatch: {} as never, exit: {} as never, kill: {} as never, transitions: {} as never,
 		recorded: { stopRecorded: async request => { calls.stopRecorded.push(request); return { kind: "writer-gone" }; } },
 		writer: { pid: async (conversation, options) => { calls.writer.push([conversation, options]); return 4321; } },
 		brokerProvenance: conversation => { calls.provenance.push(conversation); return { kind: "none" }; },
@@ -177,29 +174,11 @@ describe("what the runtime delegates to its own services", () => {
 	});
 });
 
-describe("replaceWriterHeld", () => {
-	it("passes the pins, the mode, the slot and the empty file to the index under the lease the caller holds", async () => {
-		const f = fixture();
-		const lease = {} as TabLifecycleLease;
-		const outcome = await f.runtime.replaceWriterHeld({
-			conversation: TAB, confirmedStopped: true, expectedPid: 51704, expectedCreationTime: "created-1", mode: "chat", slot: "slot-1", emptyFile: "fresh.jsonl",
-		}, lease);
-		assert.equal(outcome, restored);
-		assert.deepEqual(f.calls.replaceHost.map(([tabId, input, held]) => [tabId, { ...input, launcher: input.launcher === f.hostLauncher }, held]), [[
-			TAB,
-			{ confirmedStopped: true, expectedPid: 51704, expectedCreationTime: "created-1", mode: "chat", slotId: "slot-1", emptyFile: "fresh.jsonl", launcher: true },
-			lease,
-		]]);
-	});
-});
-
 describe("the port", () => {
-	it("exposes no lease-bound form and no admission the window could widen", () => {
+	it("exposes no admission the window could widen", () => {
 		const port: SessionRuntime = fixture().runtime;
 		// Type-level checks only: the closure is never called.
 		const typeChecks = () => {
-			// @ts-expect-error `replaceWriterHeld` is a member of `LocalSessionRuntime` only.
-			void port.replaceWriterHeld;
 			// @ts-expect-error a restore pass carries a cohort and nothing else.
 			void port.restore({ cohort: new Set<string>(), restoreDrafts: true });
 		};

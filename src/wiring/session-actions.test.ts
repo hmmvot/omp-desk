@@ -49,6 +49,7 @@ if (typeof module.registerHooks === "function") {
 const stub = await import("./vscode-test-stub.ts");
 const { registerSessionActions } = await import("./session-actions.ts");
 const { LocalRecordedStop } = await import("../runtime/local-recorded-stop.ts");
+const { LocalTransitions } = await import("../runtime/local-transition.ts");
 const { holderSeemsAlive } = await import("../host/holder-liveness.ts");
 const { ProcessTreeItem } = await import("../views/process-rows.ts");
 const { SessionTreeItem } = await import("../views/session-tree.ts");
@@ -57,6 +58,8 @@ const { acquireClaim, claimHolderMayBeAlive, createClaimHolder } = await import(
 const { SessionIndex: SessionIndexClass } = await import("../host/session-index.ts");
 
 const TAB = "tab:11111111-2222-4333-8444-555555555555";
+/** The identity a fixture's runtime reports, as the runtime's snapshot reads it. */
+const FAKE_IDENTITY = { slot: "host:fixture", brokerId: "broker-fixture", brokerGeneration: "gen-fixture", childCreationTime: null };
 const OTHER_TAB = "tab:99999999-2222-4333-8444-555555555555";
 const OWNER = "owner-test";
 const SLOT = "host:legacy-fixture";
@@ -103,6 +106,8 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 		facts: new Map<string, Record<string, unknown>>(),
 		deadline: async <T>(read: Promise<T>): Promise<T> => await read,
 		transition: async () => null as unknown,
+		/** Every change of a conversation's admission fence, in order. */
+		fences: [] as boolean[],
 		/** Runs inside a dialog, before its answer: what must already hold when the user is asked. */
 		beforeAnswer: undefined as (() => Promise<void>) | undefined,
 	};
@@ -135,10 +140,34 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 			holderMayBeAlive: async (claim, display) => display ? await holderSeemsAlive(claim, state.registry as never) : await claimHolderMayBeAlive(claim),
 		},
 	});
+	const stopOperations = {
+		requestStop: async () => ({ writerGone: true, treeEmpty: true, detail: "fixture" }), confirmEnded: async () => null, awaitSettled: async () => null,
+		readTransitionFacts: async () => await state.transition() as never,
+	};
+	const transitions = new LocalTransitions({
+		index: index as never,
+		window: {
+			record: tabId => deps.tab(tabId) as never,
+			fenced: (_conversation, on) => { state.fences.push(on); },
+			check: () => true,
+			prepare: async () => {},
+			endTerminal: () => {},
+			stopped: () => {},
+		},
+		chat: { sessionOf: () => null, release: () => {} },
+		stop: stopOperations,
+		control: { release: async () => {}, dispose: () => {} },
+		exit: { retireBroker: async () => {} },
+		writer,
+		attachBrokerClient: async () => null,
+		launcher: () => { throw new Error("The fixture launches nothing."); },
+		log: () => {},
+	});
 	const runtime = new LocalSessionRuntime({
 		index: index as never,
 		reconciler: () => state.reconciler,
-		stop: { requestStop: async () => ({ writerGone: true, treeEmpty: true, detail: "fixture" }), confirmEnded: async () => null, awaitSettled: async () => null, readTransitionFacts: async () => null },
+		stop: stopOperations,
+		transitions,
 		chat: {} as never, control: {} as never, identity: {} as never, nativeWatch: {} as never, exit: {} as never,
 		writer,
 		brokerProvenance: tabId => { provenanceAsked.push(tabId); return state.provenance; },
@@ -206,19 +235,11 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 			return tabId === null || entry === null ? null : { tabId, entry };
 		},
 		confirmAndStopRuntime: async (...args) => { confirmedStops.push(args.slice(2)); return true; },
-		readTransitionFacts: async () => await state.transition() as never,
 		withSessionReadDeadline: async read => await state.deadline(read),
-		fenceSessionAdmission: (_index, tab, fenced) => { tab.transitioning = fenced; },
-		pushSessionView: () => {},
-		stopSessionRuntime: async () => ({ writerGone: true, treeEmpty: true, detail: "stopped" }),
-		stopTerminalForTab: () => {},
-		disposeControlChannel: () => {},
-		retireBroker: async () => {},
 		releaseHostControl: async (tabId, owner) => { released.push([tabId, owner]); },
 		reconnectHostControl: async () => {},
 		sessionRuntime: () => runtime,
 		recordedControlOwner: entry => entry.ownership?.ownerGeneration ?? null,
-		controlOwnerFor: (_runtime, generation) => generation,
 		forgetTurnActivity: (_index, tabId) => { forgotten.push(tabId); },
 		brokerClient: async () => null,
 		attachBrokerClient: async () => null,
@@ -587,8 +608,8 @@ describe("stopping a session's recorded process", () => {
 		assert.equal(await w.actions.stopHost(w.state.context, index, TAB), true);
 		assert.equal(await w.actions.stopHost(w.state.context, index, TAB, { recorded, gracefulOnly: true }), true);
 		assert.deepEqual(w.confirmedStops, [
-			[TAB, state, runtime, "Stop", undefined],
-			[TAB, state, runtime, "Stop", { conflicting: false, captured: { epoch: "e1" }, gracefulOnly: true }],
+			[TAB, "Stop", undefined],
+			[TAB, "Stop", { target: 1, conflicting: false, captured: { epoch: "e1" }, gracefulOnly: true }],
 		]);
 	});
 
@@ -693,7 +714,7 @@ describe("the writer a session row has", () => {
 	it("is this window's own runtime when it has one", async () => {
 		const index = fakeIndex([{ tabId: TAB }]);
 		const w = await world(index);
-		w.state.tabs.set("slot-1", tabRecord("slot-1", TAB, { runtime: { pid: 4321 } as unknown as SessionHostRuntime }));
+		w.state.tabs.set("slot-1", tabRecord("slot-1", TAB, { runtime: { kind: "chat", pid: 4321, identity: FAKE_IDENTITY } as unknown as SessionHostRuntime }));
 		assert.equal(await w.deps.sessionRuntime().verifiedWriterPid(TAB), 4321);
 		assert.equal(await w.deps.sessionRuntime().verifiedWriterPid(OTHER_TAB), null, "a row the index does not have has no writer");
 	});
@@ -802,7 +823,7 @@ describe("deleting a session", () => {
 
 	it("refuses to delete a session this window is already changing or stopping", async () => {
 		const f = await legacyFixture("delete-transition", true, true);
-		f.state.tabs.set("slot-1", tabRecord("slot-1", TAB, { runtime: { kind: "chat", pid: 51704 } as unknown as SessionHostRuntime, transitioning: true }));
+		f.state.tabs.set("slot-1", tabRecord("slot-1", TAB, { runtime: { kind: "chat", pid: 51704, identity: FAKE_IDENTITY } as unknown as SessionHostRuntime, transitioning: true }));
 		try {
 			assert.equal(await f.actions.confirmAndDelete(f.index, TAB), false);
 			assert.deepEqual(f.warnings, ["The session is already changing or stopping; nothing was deleted."]);
@@ -815,18 +836,16 @@ describe("deleting a session", () => {
 
 	it("fences a running session's admission while it reads the facts the deletion binds to, and lifts the fence when the deletion did not go on", async () => {
 		const f = await legacyFixture("delete-running", true, true);
-		const state = tabRecord("slot-1", TAB, { runtime: { kind: "chat", pid: 51704 } as unknown as SessionHostRuntime });
+		const state = tabRecord("slot-1", TAB, { runtime: { kind: "chat", pid: 51704, identity: FAKE_IDENTITY } as unknown as SessionHostRuntime });
 		f.state.tabs.set("slot-1", state);
-		const fenced: boolean[] = [];
-		const fence = f.deps.fenceSessionAdmission;
-		const guarded = await world(f.index, { fenceSessionAdmission: (index, tab, value) => { fenced.push(value); fence(index, tab, value); } });
+		const guarded = await world(f.index);
 		guarded.state.tabs.set("slot-1", state);
 		guarded.state.reconciler = f.state.reconciler;
 		guarded.state.answer = undefined;
 		guarded.state.transition = async () => ({ epoch: "e1" });
 		try {
 			assert.equal(await guarded.actions.confirmAndDelete(f.index, TAB), false);
-			assert.deepEqual(fenced, [true, false]);
+			assert.deepEqual(guarded.state.fences, [true, false]);
 			assert.equal(state.transitioning, false);
 			assert.ok(f.index.get(TAB));
 		} finally {
@@ -836,7 +855,7 @@ describe("deleting a session", () => {
 
 	it("tells the user the session could not be checked, repaints, and deletes nothing when reading its state fails", async () => {
 		const f = await legacyFixture("delete-unreadable", true, true);
-		const state = tabRecord("slot-1", TAB, { runtime: { kind: "chat", pid: 51704 } as unknown as SessionHostRuntime });
+		const state = tabRecord("slot-1", TAB, { runtime: { kind: "chat", pid: 51704, identity: FAKE_IDENTITY } as unknown as SessionHostRuntime });
 		f.state.tabs.set("slot-1", state);
 		f.state.transition = async () => { throw new Error("Session state read timed out."); };
 		try {

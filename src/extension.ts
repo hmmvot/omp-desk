@@ -73,8 +73,12 @@ import { LocalSessionRuntime } from "./runtime/local-runtime";
 import type { LocalSessionRuntimeDeps } from "./runtime/local-runtime";
 import { LocalRecordedStop, createRecordedHostStopPort, readBrokerProvenance } from "./runtime/local-recorded-stop";
 import { LocalWriterVerifier } from "./runtime/local-writer";
+import { LocalTransitions } from "./runtime/local-transition";
+import type { TransitionWindow } from "./runtime/local-transition";
+import type { ReplaceRefusal, StopResult, TransitionPhase, TransitionToken } from "./runtime/session-runtime";
 import { LocalStopOperations, withSessionReadDeadline } from "./runtime/local-stop";
 import type {
+  OmpHostLauncher,
   RestoreOutcome,
   RestoreReport,
   SessionConflictKind,
@@ -980,18 +984,10 @@ function sessionActionsDeps(): SessionActionsDeps<TabState> {
     pickIndexedTab,
     sessionTarget: sessionTargetFromArgument,
     confirmAndStopRuntime,
-    readTransitionFacts: (state, runtime) => windowState().sessionRuntime.readTransitionFacts(state, runtime),
     withSessionReadDeadline,
-    fenceSessionAdmission,
-    pushSessionView,
-    stopSessionRuntime: (state, runtime, mode, consent, expected) => windowState().sessionRuntime.requestStop(state, runtime, mode, consent, expected),
-    stopTerminalForTab,
-    disposeControlChannel: record => windowState().sessionRuntime.control.dispose(record),
-    retireBroker: (tabId, runtime) => windowState().sessionRuntime.exit.retireBroker(tabId, runtime),
     releaseHostControl: (tabId, ownerGeneration) => windowState().sessionRuntime.control.release(tabId, ownerGeneration),
     reconnectHostControl: (tabId, ownerGeneration, runtime) => windowState().sessionRuntime.control.reconnect(tabId, ownerGeneration, runtime),
     recordedControlOwner,
-    controlOwnerFor,
     forgetTurnActivity,
     brokerClient,
     attachBrokerClient,
@@ -2001,17 +1997,17 @@ async function newSessionInPlace(context: vscode.ExtensionContext, index: Sessio
   if (s.replacingConversations.has(tabId)) { showWarning("This conversation is already being replaced."); return; }
   s.replacingConversations.add(tabId);
   const runtime = state.runtime;
-  fenceSessionAdmission(index, state, true);
+  const token = beginTransition(tabId, { check: () => true });
   let opened = false;
   try {
-    const captured = runtime === null ? null : await index.lifecycle.run(tabId, async () => await windowState().sessionRuntime.readTransitionFacts(state, runtime));
+    const captured = runtime === null ? null : await s.sessionRuntime.readTransitionFacts({ conversation: tabId, target: s.sessionRuntime.snapshot(tabId)?.attachment ?? -1 });
     if (runtime !== null && captured?.settled !== true) { showWarning("The session is not idle; nothing was replaced."); return; }
     const column = windowState().editorPanels.sessionTabColumn(panel.viewType) ?? panel.viewColumn ?? vscode.ViewColumn.Active;
     if (await createSessionInColumn(context, index, entry.cwd, column) === null) return;
     opened = true;
     if (runtime !== null) {
-      const preconfirmed = { conflicting: passiveReasonForSlot(state.slotId) !== null, captured, idleOnly: true };
-      if (!(await confirmAndStopRuntime(context, index, tabId, state, runtime, "Stop", preconfirmed))) {
+      const preconfirmed = { target: s.sessionRuntime.snapshot(tabId)?.attachment ?? -1, conflicting: passiveReasonForSlot(state.slotId) !== null, captured, idleOnly: true };
+      if (!(await confirmAndStopRuntime(context, index, tabId, "Stop", preconfirmed))) {
         showWarning("The new session opened, but the old session was not stopped. Its editor remains open.");
         return;
       }
@@ -2021,7 +2017,7 @@ async function newSessionInPlace(context: vscode.ExtensionContext, index: Sessio
     showError(`${opened ? "The new session opened, but the old session could not be stopped" : "The session could not be replaced"}: ${messageOf(error)}`);
   } finally {
     s.replacingConversations.delete(tabId);
-    fenceSessionAdmission(index, state, false);
+    s.sessionRuntime.endTransition(token, "none");
   }
 }
 
@@ -3089,7 +3085,7 @@ function createSessionRuntime(index: SessionIndex, chat: ChatRuntime): LocalSess
 }
 
 /** The ports of this window's session runtime; read at call time, so a replaced reconciler, launcher or root probe is used by the next call. */
-function sessionRuntimeDeps(index: SessionIndex, chat: ChatRuntime): LocalSessionRuntimeDeps {
+function sessionRuntimeDeps(index: SessionIndex, chat: ChatRuntime, launchers?: () => OmpHostLauncher): LocalSessionRuntimeDeps {
   const stop = new LocalStopOperations({
     chat: () => chat,
     attachBrokerClient,
@@ -3124,16 +3120,60 @@ function sessionRuntimeDeps(index: SessionIndex, chat: ChatRuntime): LocalSessio
     window: { forgetOutcome: conversation => { windowState().outcomes.delete(conversation); } },
     stopPort: (slot, expectedBroker) => createRecordedHostStopPort({ brokerProvenanceFor: brokerProvenance, attachBrokerClient, log }, slot, expectedBroker),
   });
+  const launcher = launchers ?? ((): OmpHostLauncher => {
+    const context = windowState().context;
+    if (context === undefined) throw new Error("The session runtime was used before activation.");
+    return localLauncher(context, index);
+  });
+  const transitions = new LocalTransitions({
+    index, window: transitionWindow(index), chat, stop, control, exit, writer, attachBrokerClient, launcher, log,
+  });
   return {
     index,
     reconciler: () => windowState().reconciler,
-    launcher: () => {
-      const context = windowState().context;
-      if (context === undefined) throw new Error("The session runtime was used before activation.");
-      return localLauncher(context, index);
-    },
-    chat, stop, control, identity, nativeWatch, exit, writer, recorded, brokerProvenance,
+    launcher,
+    chat, stop, control, identity, nativeWatch, exit, writer, recorded, brokerProvenance, transitions,
     kill: new LocalKill({ index, control, window: killWindow(index), attachBrokerClient, brokerSlots: () => windowState().brokerSlots, log }),
+  };
+}
+
+/**
+ * What one flow checks under the gate that only the window can know (the editor's role, the last view request, the
+ * identity of its panel and document), and what it refreshes between a replacement's teardown and its successor's
+ * launch. Registered by the flow right after it raised its fence, keyed by the fence's token.
+ */
+interface TransitionChecks {
+  check(phase: TransitionPhase): boolean | Promise<boolean>;
+  prepare?(): Promise<void>;
+}
+
+const transitionChecks = new WeakMap<TransitionToken, TransitionChecks>();
+
+/** Raise the admission fence of a conversation for one flow, with the checks it makes under the gate. */
+function beginTransition(conversation: string, checks: TransitionChecks): TransitionToken {
+  const sessionRuntime = windowState().sessionRuntime;
+  const token = sessionRuntime.beginTransition({ conversation, target: sessionRuntime.snapshot(conversation)?.attachment ?? null });
+  transitionChecks.set(token, checks);
+  return token;
+}
+
+/** The window's side of the gated transitions: the fence's projection onto the editors, the flow's own checks, the frontends and memories a stop ends. */
+function transitionWindow(index: SessionIndex): TransitionWindow {
+  return {
+    record: tabId => stateOf(tabId),
+    fenced(conversation) {
+      const state = stateOf(conversation);
+      if (state === undefined) refreshGuestContext();
+      else projectFence(index, state);
+    },
+    check: (token, phase) => transitionChecks.get(token)?.check(phase) ?? true,
+    prepare: token => transitionChecks.get(token)?.prepare?.() ?? Promise.resolve(),
+    endTerminal: record => stopTerminalForTab(record.slotId),
+    stopped(conversation, scope) {
+      if (scope !== "session") return;
+      windowState().outcomes.delete(conversation);
+      forgetTurnActivity(index, conversation);
+    },
   };
 }
 
@@ -3481,13 +3521,15 @@ function activateNativeEditor(state: TabState): void {
 }
 
 function fenceSessionAdmission(index: SessionIndex, state: TabState, fenced: boolean): void {
-  const s = windowState();
   state.transitioning = fenced;
+  if (state.tabId !== null) windowState().sessionRuntime.sessionOf(state.tabId)?.setMutationFence(fenced ? "Session lifecycle transition." : null);
+  projectFence(index, state);
+}
+
+/** What the editors show of a fence that changed: the guest context, the control picker, the slot's authority and the view. */
+function projectFence(index: SessionIndex, state: TabState): void {
   refreshGuestContext();
-  if (state.tabId !== null) {
-    cancelControlPicker(state.tabId);
-    s.sessionRuntime.sessionOf(state.tabId)?.setMutationFence(fenced ? "Session lifecycle transition." : null);
-  }
+  if (state.tabId !== null) cancelControlPicker(state.tabId);
   applySlotAuthority(state.slotId);
   pushSessionView(index, state);
 }
@@ -3546,7 +3588,7 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
   s.pendingSessionViewChanges.set(state, modeRequest);
   refreshGuestContext();
   let acceptedStop = false;
-  let admissionFenced = false;
+  let token: TransitionToken | null = null;
   let replacement: RestoreOutcome | null = null;
   let carried: CarriedDraft<TabState> | null = null;
   try {
@@ -3572,12 +3614,19 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
     if (state.tabId !== tabId || state.lastOpenRequest !== modeRequest || state.runtime !== runtime || passiveReasonForSlot(state.slotId) !== null) return;
     const binding = index.slotBinding(state.slotId);
     if (binding === null || binding.tabId !== tabId) return;
-    admissionFenced = true;
-    fenceSessionAdmission(index, state, true);
-    const captured = await withSessionReadDeadline(index.lifecycle.run(tabId, async () => {
-      if (state.lastOpenRequest !== modeRequest || state.runtime !== runtime || state.tabId !== tabId) return null;
-      return await windowState().sessionRuntime.readTransitionFacts(state, runtime);
-    }));
+    const held = token = beginTransition(tabId, {
+      check: () => state.lastOpenRequest === modeRequest && passiveReasonForSlot(state.slotId) === null,
+      async prepare() {
+        state.mode = mode;
+        state.controlFailure = null;
+        pushSessionView(index, state);
+        state.document = null;
+        if (state.bridge !== null) await windowState().bridgeHost.prepareDocument(context, state.bridge.editorId);
+        windowState().editorPanels.renderPanelDocument(context, state.slotId);
+      },
+    });
+    const target = s.sessionRuntime.snapshot(tabId)?.attachment ?? -1;
+    const captured = await s.sessionRuntime.readTransitionFacts({ conversation: tabId, target, token: held, bounded: true });
     if (captured === null) {
       // The facts of a session whose process already ended (killed from outside, crashed) cannot be read: end it as its exit
       // would and take the request as one for a stopped session, which Resumes it in the requested view.
@@ -3611,85 +3660,25 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
     }
     carried = state.mode === "chat" ? await s.guestDispatcher.carryDraftFrom(state.panel) : null;
     if (carried !== null) s.draftRestores.set(state.slotId, carried);
-    const admitted = Promise.withResolvers<void>();
-    const changing = index.lifecycle.run(tabId, async lease => {
-      admitted.resolve();
-      const currentBinding = index.slotBinding(state.slotId);
-      if (state.lastOpenRequest !== modeRequest || state.runtime !== runtime || state.tabId !== tabId || currentBinding?.generation !== binding.generation || passiveReasonForSlot(state.slotId) !== null) return;
-      const fresh = await windowState().sessionRuntime.readTransitionFacts(state, runtime);
-      if (fresh === null || fresh.epoch !== captured.epoch || fresh.sessionId !== captured.sessionId || fresh.file !== captured.file || (!fresh.settled && !consent)) {
-        showWarning("The OMP target or busy state changed while the action was pending; nothing was stopped.");
-        return;
-      }
-      if (fresh.file !== null && await readSessionFileHeader(fresh.file) === null && fresh.hasContent !== false) {
-        showError("The conversation is not durable yet; nothing was stopped.");
-        return;
-      }
-      const broker = await attachBrokerClient();
-      if (broker === null || runtime.identity.childCreationTime === null) { showWarning("The exact writer's broker/root identity cannot be proven; nothing was stopped."); return; }
-      let stopped: NativeStopVerdict;
-      if (runtime.kind === "terminal") {
-        if (state.control === null || fresh.nativeTarget === null) return;
-        runtime.stopping = true;
-        acceptedStop = true; // An unanswered authenticated request may already have committed.
-        const status = await withSessionReadDeadline(state.control.client.nativeShutdown(fresh.nativeTarget, consent));
-        if (status !== "accepted" && status !== "accepted-deferred") {
-          runtime.stopping = false;
-          acceptedStop = false;
-          showWarning(`Native shutdown was refused (${status}); nothing was replaced.`);
-          return;
-        }
-        stopped = await waitForManagedRootExit(runtime, broker);
-      } else {
-        // An abort or a settlement that a process which already ended cannot give is not a refusal: the proof of its root is the answer.
-        let ended: NativeStopVerdict | null = null;
-        if (consent) {
-          const abort = await withSessionReadDeadline(s.sessionRuntime.sessionOf(tabId)?.abortForShutdown() ?? Promise.resolve(undefined));
-          if (abort?.status !== "accepted") {
-            ended = await windowState().sessionRuntime.confirmEnded(runtime);
-            if (ended === null) { showWarning("Abort was not confirmed; no replacement was started."); return; }
-          }
-        }
-        if (ended === null && await windowState().sessionRuntime.awaitSettled(state, runtime, fresh) === null) {
-          ended = await windowState().sessionRuntime.confirmEnded(runtime);
-          if (ended === null) { showWarning("RPC did not settle on the captured session; nothing was replaced."); return; }
-        }
-        if (ended !== null) stopped = ended;
-        else {
-          acceptedStop = true;
-          const requested = await withSessionReadDeadline(stopRpcHost(runtime, "graceful"), 35_000);
-          stopped = requested.writerGone ? await waitForManagedRootExit(runtime, broker, 5_000) : requested;
-        }
-      }
-      log(`tab ${tabId}: view switch stop: ${stopped.diagnosticDetail ?? stopped.detail}`);
-      if (!stopped.writerGone) stopped = await windowState().sessionRuntime.confirmEnded(runtime) ?? stopped;
-      if (!stopped.writerGone) { state.controlFailure = stopped.detail; showWarning(stopped.detail); return; }
-      const credentialOwner = controlOwnerFor(runtime, row.ownership?.ownerGeneration ?? "");
-      state.nativeWatch?.();
-      state.nativeWatch = null;
-      state.runtime = null;
-      stopTerminalForTab(state.slotId);
-      await s.sessionRuntime.control.release(tabId, credentialOwner);
-      await s.sessionRuntime.exit.retireBroker(tabId, runtime);
-      s.sessionRuntime.conversations.release(tabId);
-      const fileAfterExit = fresh.file === null ? null : await readSessionFileHeader(fresh.file);
-      if (fileAfterExit !== null && index.get(tabId)?.sessionFile === null) await index.promoteDraft(tabId, fresh.file as string, lease);
-      if (row.sessionFile !== null && fileAfterExit === null) {
-        await index.closeSession(tabId, { confirmedStopped: true, detail: "The durable file is missing after disposal; no successor was launched." }, lease);
-        showError("The durable session file disappeared after disposal; no replacement was started.");
-        return;
-      }
-      state.mode = mode;
-      state.controlFailure = null;
-      pushSessionView(index, state);
-      state.document = null;
-      if (state.bridge !== null) await windowState().bridgeHost.prepareDocument(context, state.bridge.editorId);
-      windowState().editorPanels.renderPanelDocument(context, state.slotId);
-      replacement = await windowState().sessionRuntime.replaceWriterHeld({ conversation: tabId, confirmedStopped: true, expectedPid: runtime.pid, expectedCreationTime: runtime.identity.childCreationTime, mode, slot: state.slotId, emptyFile: fresh.file }, lease);
-      if (replacement.status === "failed" && state.runtime === null) await index.closeSession(tabId, { confirmedStopped: true, detail: replacement.detail }, lease);
+    const result = await s.sessionRuntime.replaceWriter({
+      conversation: tabId, token: held, target, mode, binding: { slot: state.slotId, generation: binding.generation },
+      stop: { kind: "graceful", consent, captured }, bounded: true,
     });
-    await withSessionReadDeadline(admitted.promise);
-    await changing;
+    acceptedStop = result.stopDispatched;
+    switch (result.status) {
+      case "replaced": replacement = result.outcome; break;
+      case "failed": throw new Error(result.detail);
+      case "unconfirmed":
+        state.controlFailure = result.detail;
+        showWarning(result.detail);
+        break;
+      case "closed": showError("The durable session file disappeared after disposal; no replacement was started."); break;
+      case "refused": {
+        const sentence = viewSwitchRefusal(result.code, result.detail);
+        if (sentence !== null) showWarning(sentence);
+        break;
+      }
+    }
     if (replacement !== null) await handleRestoreOutcome(context, index, tabId, replacement);
   } catch (error) {
     const superseded = state.lastOpenRequest !== modeRequest;
@@ -3710,7 +3699,7 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
       if (s.draftRestores.get(state.slotId) === carried) s.draftRestores.delete(state.slotId);
     }
     if (s.pendingSessionViewChanges.get(state) === modeRequest) s.pendingSessionViewChanges.delete(state);
-    if (admissionFenced && (state.runtime !== runtime || !acceptedStop)) fenceSessionAdmission(index, state, false);
+    if (token !== null) s.sessionRuntime.endTransition(token, "dispatched-stop");
     else pushSessionView(index, state);
     refreshGuestContext();
     refreshLauncher();
@@ -3725,6 +3714,20 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
         showWarning("The session could not be stopped from this editor. Use Stop in Processes, then reopen the session.");
       });
     }
+  }
+}
+
+/** What a refused view switch tells the user; `null` when the refusal is silent because the flow was superseded. */
+function viewSwitchRefusal(code: ReplaceRefusal, detail: string | undefined): string | null {
+  switch (code) {
+    case "target-changed": case "no-control": return null;
+    case "facts-changed": return "The OMP target or busy state changed while the action was pending; nothing was stopped.";
+    case "not-durable": return "The conversation is not durable yet; nothing was stopped.";
+    case "no-broker": return "The exact writer's broker/root identity cannot be proven; nothing was stopped.";
+    case "native-refused": return `Native shutdown was refused (${detail ?? "unknown"}); nothing was replaced.`;
+    case "abort-unconfirmed": return "Abort was not confirmed; no replacement was started.";
+    case "settle-failed": return "RPC did not settle on the captured session; nothing was replaced.";
+    case "checked-after-stop": return null;
   }
 }
 
@@ -3779,7 +3782,17 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
       session.epoch.nonce === nativeNonce && session.sessionFile !== null && controlPathEquals(session.sessionFile, file) &&
       session.sessionId === sessionId && (!requireOffered || session.restartOffered);
   };
-  fenceSessionAdmission(index, state, true);
+  const held = beginTransition(tabId, {
+    check: phase => sameTarget(phase !== "stopped"),
+    async prepare() {
+      s.draftRestores.set(state.slotId, carried as CarriedDraft<TabState>);
+      state.controlFailure = null;
+      state.document = null;
+      if (state.bridge !== null) await windowState().bridgeHost.prepareDocument(context, state.bridge.editorId);
+      windowState().editorPanels.renderPanelDocument(context, state.slotId);
+    },
+  });
+  const target = s.sessionRuntime.snapshot(tabId)?.attachment ?? -1;
   try {
     const eligible = await index.lifecycle.run(tabId, async () => {
       const header = await readSessionFileHeader(file);
@@ -3791,7 +3804,6 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
       refuse("Restart could not capture this editor's complete input. Wait for pending image reads or edits to finish and try again; nothing was stopped.");
       return;
     }
-    const captured = carried;
     const attachments = carried.reply.attachments + carried.reply.recoverable.reduce((count, original) => count + original.attachments, 0);
     const imageWarning = attachments === 0 ? "" : ` ${attachments} attachment reference${attachments === 1 ? "" : "s"} cannot be transferred; reattach the images to the preserved text after Restart.`;
     const unanswered = session.nativeStateUnanswered;
@@ -3802,47 +3814,28 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
       "Restart",
     );
     if (consent !== "Restart") return;
-    await index.lifecycle.run(tabId, async lease => {
-      const header = await readSessionFileHeader(file);
-      if (header?.sessionId !== durableSessionId || !sameTarget(true)) {
-        refuse("The writer recovered or the editor or saved conversation changed while confirmation was open. Nothing was stopped.");
-        return;
-      }
-      const broker = await attachBrokerClient();
-      if (broker === null || !sameTarget(true)) { refuse("The captured writer's broker is unavailable. Nothing was stopped."); return; }
-      stopRequested = true;
-      const requested = await withSessionReadDeadline(stopRpcHost(runtime, "force"), 35_000);
-      const stopped = await waitForManagedRootExit(runtime, broker, 5_000);
-      log(`tab ${tabId}: explicit Restart stop: ${stopped.diagnosticDetail ?? stopped.detail}; request: ${requested.diagnosticDetail ?? requested.detail}`);
-      if (!stopped.writerGone) {
-        state.controlFailure = "The exact OMP process could not be confirmed stopped. No successor was started; your original input remains here. Use Stop Session before retrying.";
-        refuse(state.controlFailure);
-        return;
-      }
-      writerGone = true;
-      if (!sameTarget(false)) { refuse("The captured process stopped, but this editor or saved binding changed. No successor was started."); return; }
-      const owner = controlOwnerFor(runtime, committed.ownerGeneration);
-      state.nativeWatch?.();
-      state.nativeWatch = null;
-      state.runtime = null;
-      stopTerminalForTab(state.slotId);
-      await s.sessionRuntime.control.release(tabId, owner);
-      await s.sessionRuntime.exit.retireBroker(tabId, runtime);
-      s.sessionRuntime.conversations.release(tabId);
-      const saved = await readSessionFileHeader(file);
-      if (saved?.sessionId !== durableSessionId) {
-        await index.closeSession(tabId, { confirmedStopped: true, detail: "The exact saved conversation is unavailable after disposal; no successor was launched." }, lease);
-        refuse("The exact saved conversation is unavailable after the process stopped. No successor was started; your input remains in this editor.");
-        return;
-      }
-      s.draftRestores.set(state.slotId, captured);
-      state.controlFailure = null;
-      state.document = null;
-      if (state.bridge !== null) await windowState().bridgeHost.prepareDocument(context, state.bridge.editorId);
-      windowState().editorPanels.renderPanelDocument(context, state.slotId);
-      replacement = await s.sessionRuntime.replaceWriterHeld({ conversation: tabId, confirmedStopped: true, expectedPid: runtime.pid, expectedCreationTime: creationTime, mode: "chat", slot: state.slotId, emptyFile: file }, lease);
-      if (replacement.status === "failed" && state.runtime === null) await index.closeSession(tabId, { confirmedStopped: true, detail: replacement.detail }, lease);
+    const result = await s.sessionRuntime.replaceWriter({
+      conversation: tabId, token: held, target, mode: "chat",
+      binding: { slot: state.slotId, generation: binding.generation }, stop: { kind: "force", file, durableSessionId },
     });
+    stopRequested = result.stopDispatched;
+    writerGone = result.writerGone;
+    switch (result.status) {
+      case "replaced": replacement = result.outcome; break;
+      case "failed": throw new Error(result.detail);
+      case "unconfirmed": {
+        const text = "The exact OMP process could not be confirmed stopped. No successor was started; your original input remains here. Use Stop Session before retrying.";
+        state.controlFailure = text;
+        refuse(text);
+        break;
+      }
+      case "closed": refuse("The exact saved conversation is unavailable after the process stopped. No successor was started; your input remains in this editor."); break;
+      case "refused":
+        refuse(result.code === "no-broker" ? "The captured writer's broker is unavailable. Nothing was stopped."
+          : result.code === "checked-after-stop" ? "The captured process stopped, but this editor or saved binding changed. No successor was started."
+          : "The writer recovered or the editor or saved conversation changed while confirmation was open. Nothing was stopped.");
+        break;
+    }
     if (replacement !== null) await handleRestoreOutcome(context, index, tabId, replacement);
   } catch (error) {
     log(`tab ${tabId}: explicit Restart failed: ${messageOf(error)}`);
@@ -3858,8 +3851,7 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
       if (s.draftRestores.get(state.slotId) === carried) s.draftRestores.delete(state.slotId);
     }
     if (s.pendingSessionViewChanges.get(state) === modeRequest) s.pendingSessionViewChanges.delete(state);
-    if (!stopRequested || writerGone || state.runtime !== runtime) fenceSessionAdmission(index, state, false);
-    else pushSessionView(index, state);
+    s.sessionRuntime.endTransition(held, "dispatched-stop");
     refreshGuestContext();
     refreshLauncher();
   }
@@ -10177,32 +10169,32 @@ async function closeSession(context: vscode.ExtensionContext, index: SessionInde
     );
     return;
   }
-  if (state !== undefined) await confirmAndStopRuntime(context, index, tabId, state, runtime, "Close");
+  if (state !== undefined) await confirmAndStopRuntime(context, index, tabId, "Close");
 }
 
 /** Dialogs never hold the gate; admission remains fenced through both stop attempts. */
 async function confirmAndStopRuntime(
-  context: vscode.ExtensionContext, index: SessionIndex, tabId: string,
-  state: TabState, runtime: SessionHostRuntime, label: "Stop" | "Close",
+  context: vscode.ExtensionContext, index: SessionIndex, tabId: string, label: "Stop" | "Close",
   /**
    * What the caller (the Processes view, which asks nothing for a single stop) captured just
    * before: whether this window's runtime was passive, and the transition facts read under the
    * gate. Its own prompt is skipped, the same checks bind to this capture, and a runtime that
-   * is no longer the captured one is refused visibly.
+   * is no longer the captured one (`target`, its incarnation) is refused visibly.
    */
-  preconfirmed?: { readonly conflicting: boolean; readonly captured: SessionTransitionFacts | null; readonly idleOnly?: boolean; readonly gracefulOnly?: boolean },
+  preconfirmed?: { readonly target: number; readonly conflicting: boolean; readonly captured: SessionTransitionFacts | null; readonly idleOnly?: boolean; readonly gracefulOnly?: boolean },
 ): Promise<boolean> {
   const s = windowState();
   const entry = index.get(tabId);
-  if (entry === null || state.runtime !== runtime || state.tabId !== tabId) {
+  const state = stateOf(tabId);
+  const target = s.sessionRuntime.snapshot(tabId)?.attachment ?? null;
+  if (entry === null || state === undefined || target === null || state.tabId !== tabId || (preconfirmed !== undefined && preconfirmed.target !== target)) {
     if (preconfirmed !== undefined) showWarning("The session changed while the stop was being prepared, so nothing was stopped.");
     return false;
   }
   const conflicting = preconfirmed?.conflicting ?? passiveReasonForSlot(state.slotId) !== null;
-  const previouslyStopping = runtime.kind === "terminal" && runtime.stopping;
-  fenceSessionAdmission(index, state, true);
+  const token = beginTransition(tabId, { check: () => (passiveReasonForSlot(state.slotId) !== null) === conflicting });
   try {
-    const captured = preconfirmed !== undefined ? preconfirmed.captured : await index.lifecycle.run(tabId, async () => await windowState().sessionRuntime.readTransitionFacts(state, runtime));
+    const captured = preconfirmed !== undefined ? preconfirmed.captured : await s.sessionRuntime.readTransitionFacts({ conversation: tabId, target });
     if (preconfirmed === undefined) {
       const choice = await vscode.window.showWarningMessage(
         `${label} the OMP session “${s.launcherProvider?.headlineFor(entry.tabId) ?? sessionHeadline(entry, null)}”?`,
@@ -10215,64 +10207,40 @@ async function confirmAndStopRuntime(
     }
     s.stoppingTabs.add(tabId);
     refreshLauncher();
-    const attempt = async (mode: "graceful" | "force"): Promise<NativeStopVerdict | null> =>
-      await index.lifecycle.run(tabId, async lease => {
-        if (state.runtime !== runtime || state.tabId !== tabId || (passiveReasonForSlot(state.slotId) !== null) !== conflicting) return null;
-        if (preconfirmed?.idleOnly === true) {
-          const fresh = await windowState().sessionRuntime.readTransitionFacts(state, runtime);
-          if (fresh?.settled !== true || (captured !== null && (fresh.epoch !== captured.epoch || fresh.file !== captured.file || fresh.sessionId !== captured.sessionId))) {
-            showWarning("The old session is no longer idle or its identity changed; nothing was stopped.");
-            return null;
-          }
-        }
-        if (mode === "force" && captured !== null) {
-          const fresh = await windowState().sessionRuntime.readTransitionFacts(state, runtime);
-          if (fresh !== null && (fresh.epoch !== captured.epoch || fresh.file !== captured.file || fresh.sessionId !== captured.sessionId)) {
-            showWarning("The session target changed while Force Stop was pending; nothing was stopped.");
-            return null;
-          }
-        }
-        const stopped = previouslyStopping && mode === "graceful"
-          ? await windowState().sessionRuntime.confirmEnded(runtime) ?? { writerGone: false, treeEmpty: false, detail: "Native shutdown is already pending; no new shutdown is sent." }
-          : await windowState().sessionRuntime.requestStop(state, runtime, mode, true, captured);
-        log(`session stop ${tabId}: ${"diagnosticDetail" in stopped ? stopped.diagnosticDetail ?? stopped.detail : stopped.detail}`);
-        if (!stopped.writerGone) {
-          state.controlFailure = stopped.detail;
-          return stopped;
-        }
-        state.runtime = null;
-        stopTerminalForTab(state.slotId);
-        state.nativeWatch?.();
-        state.nativeWatch = null;
-        s.sessionRuntime.control.dispose(state);
-        await s.sessionRuntime.control.release(tabId, controlOwnerFor(runtime, entry.ownership?.ownerGeneration ?? ""));
-        await s.sessionRuntime.exit.retireBroker(tabId, runtime);
-        if (!conflicting) {
-          await index.setRunIntent(tabId, "stopped", stopped.detail);
-          await index.closeSession(tabId, { confirmedStopped: true, detail: stopped.detail }, lease);
-          s.sessionRuntime.conversations.release(tabId);
-          forgetTurnActivity(index, tabId);
-        }
-        state.controlFailure = null;
-        return stopped;
+    const attempt = async (mode: "graceful" | "force"): Promise<StopResult> => {
+      const result = await s.sessionRuntime.stop({
+        conversation: tabId, token, target, mode, consent: true, expected: captured,
+        ...(preconfirmed?.idleOnly === true ? { idleOnly: true } : {}),
+        scope: conflicting ? "local-copy" : "session",
       });
+      if (result.status === "unconfirmed") s.sessionRuntime.setControlFailure(tabId, result.detail);
+      return result;
+    };
     let stopped = await attempt("graceful");
-    if (stopped === null) { showWarning("The captured process/editor changed; nothing was stopped."); return false; }
+    if (stopped.status === "refused") {
+      showWarning(stopped.code === "not-idle"
+        ? "The old session is no longer idle or its identity changed; nothing was stopped."
+        : "The captured process/editor changed; nothing was stopped.");
+      return false;
+    }
     // A stop another window asked for is graceful only: it never opens a Force Stop or any other modal here.
-    if (!stopped.writerGone && preconfirmed?.gracefulOnly !== true) {
+    if (stopped.status === "unconfirmed" && preconfirmed?.gracefulOnly !== true) {
       const force = await vscode.window.showWarningMessage(
         `This session could not be confirmed stopped. ${stopped.detail}`,
         { modal: true, detail: "Force Stop may lose unsaved replies and work in progress. Commands started by OMP may continue running separately. Nothing is restarted automatically; check Sessions before resuming." },
         "Force Stop",
       );
-      if (force === "Force Stop") stopped = await attempt("force");
+      if (force === "Force Stop") {
+        stopped = await attempt("force");
+        if (stopped.status === "refused" && stopped.code === "facts-changed") showWarning("The session target changed while Force Stop was pending; nothing was stopped.");
+        if (stopped.status === "refused" && stopped.code === "not-idle") showWarning("The old session is no longer idle or its identity changed; nothing was stopped.");
+      }
     }
-    if (stopped !== null && !stopped.writerGone) showWarning(stopped.detail);
-    return stopped?.writerGone === true;
+    if (stopped.status === "unconfirmed") showWarning(stopped.detail);
+    return stopped.status === "stopped";
   } finally {
     s.stoppingTabs.delete(tabId);
-    if (state.runtime !== runtime || runtime.kind !== "terminal" || !runtime.stopping) fenceSessionAdmission(index, state, false);
-    else pushSessionView(index, state);
+    s.sessionRuntime.endTransition(token, "native-stopping");
     refreshLauncher();
   }
 }

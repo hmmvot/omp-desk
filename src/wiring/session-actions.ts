@@ -21,7 +21,7 @@ import type { PtyBrokerClient } from "../host/pty-client.ts";
 import type { NativeStopVerdict } from "../host/rpc-reconcile.ts";
 import { readSessionFileHeader } from "../host/session-files.ts";
 import type { RestoreOutcome, SessionIndex } from "../host/session-index.ts";
-import type { SessionRuntime } from "../runtime/session-runtime.ts";
+import type { SessionRuntime, TransitionToken } from "../runtime/session-runtime.ts";
 import type { KillSelection } from "../host/session-kill.ts";
 import { confirmedSessionDeletion, deleteManagedSession, inspectSessionDeletion } from "../host/session-lifecycle.ts";
 import type { SessionDeletionOptions, SessionDeletionResult, SessionDeletionSubject } from "../host/session-lifecycle.ts";
@@ -122,33 +122,21 @@ export interface SessionOpenPort<Tab extends SessionTab> {
 	sessionTarget(index: SessionIndex, argument: unknown): { readonly tabId: string; readonly entry: SessionIndexEntry } | null;
 	/** The runtime of the tab is stopped through the user's own confirmation (or the capture the caller took). */
 	confirmAndStopRuntime(
-		context: vscode.ExtensionContext, index: SessionIndex, tabId: string,
-		state: Tab, runtime: SessionHostRuntime, label: "Stop" | "Close",
-		preconfirmed?: { readonly conflicting: boolean; readonly captured: SessionTransitionFacts | null; readonly idleOnly?: boolean; readonly gracefulOnly?: boolean },
+		context: vscode.ExtensionContext, index: SessionIndex, tabId: string, label: "Stop" | "Close",
+		preconfirmed?: { readonly target: number; readonly conflicting: boolean; readonly captured: SessionTransitionFacts | null; readonly idleOnly?: boolean; readonly gracefulOnly?: boolean },
 	): Promise<boolean>;
 }
 
 /** The chat runtime and host control of one tab: what a stop, a reattach and a deletion run through. */
 export interface StopReadPort<Tab extends SessionTab> {
-	readTransitionFacts(state: Tab, runtime: SessionHostRuntime): Promise<SessionTransitionFacts | null>;
 	/** Bound readback and gate admission, not a destructive transaction or a user's dialog. */
 	withSessionReadDeadline<T>(read: Promise<T>, timeoutMs?: number): Promise<T>;
-	fenceSessionAdmission(index: SessionIndex, state: Tab, fenced: boolean): void;
-	pushSessionView(index: SessionIndex | null, state: Tab): void;
-	stopSessionRuntime(state: Tab, runtime: SessionHostRuntime, mode: "graceful" | "force", consent: boolean, expected?: SessionTransitionFacts | null): Promise<NativeStopVerdict>;
-	/** Drop a tab's terminal frontend; the broker keeps running. */
-	stopTerminalForTab(slot: string): void;
-	disposeControlChannel(state: Tab): void;
-	/** Retire the stopped RPC child's broker and forget its slot. */
-	retireBroker(tabId: string, runtime: SessionHostRuntime): Promise<void>;
 	releaseHostControl(tabId: string, ownerGeneration: string | null): Promise<void>;
 	reconnectHostControl(tabId: string, ownerGeneration: string, runtime: SessionHostRuntime): Promise<void>;
 	/** This window's session runtime: lifecycle actions re-adopt a native writer through it and never launch. */
 	sessionRuntime(): SessionRuntime;
 	/** The control owner a recorded host's credentials are filed under. */
 	recordedControlOwner(entry: SessionIndexEntry): string | null;
-	/** The control owner of a live runtime's credentials. */
-	controlOwnerFor(runtime: SessionHostRuntime, ownerGeneration: string): string;
 	/** Drop everything this window remembered about a conversation that is gone. */
 	forgetTurnActivity(index: SessionIndex, tabId: string): void;
 }
@@ -197,9 +185,9 @@ export interface RecordedStopCapture {
 }
 
 /** The runtime and transition facts captured under the confirmation of one deletion. */
-interface CapturedSessionStop<Tab extends SessionTab> {
-	readonly state: Tab;
-	readonly runtime: SessionHostRuntime;
+interface CapturedSessionStop {
+	readonly token: TransitionToken;
+	readonly target: number;
 	readonly facts: SessionTransitionFacts | null;
 }
 
@@ -401,12 +389,12 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 			}
 		}
 		const liveState = deps.tab(tabId);
-		if (liveState?.runtime != null) {
-			const runtime = liveState.runtime;
+		const live = deps.sessionRuntime().snapshot(tabId);
+		if (liveState !== undefined && live !== null) {
 			const recorded = preconfirmed?.recorded;
 			if (recorded !== undefined && (
-				runtime.identity.slot !== recorded.slot || runtime.identity.brokerId !== recorded.brokerId ||
-				runtime.identity.brokerGeneration !== recorded.brokerGeneration
+				live.slot !== recorded.slot || live.brokerId !== recorded.brokerId ||
+				live.brokerGeneration !== recorded.brokerGeneration
 			)) {
 				deps.warn("The session's process changed while the stop was being prepared, so nothing was stopped.");
 				return false;
@@ -416,11 +404,12 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 			const captured = preconfirmed === undefined
 				? undefined
 				: {
+					target: live.attachment,
 					conflicting: deps.passiveReasonForSlot(liveState.slotId) !== null,
-					captured: await index.lifecycle.run(tabId, async () => await deps.readTransitionFacts(liveState, runtime)),
+					captured: await deps.sessionRuntime().readTransitionFacts({ conversation: tabId, target: live.attachment }),
 					gracefulOnly: preconfirmed.gracefulOnly === true,
 				};
-			return await deps.confirmAndStopRuntime(context, index, tabId, liveState, runtime, "Stop", captured);
+			return await deps.confirmAndStopRuntime(context, index, tabId, "Stop", captured);
 		}
 		// The transport has to exist before anything is confirmed: this row's own recorded
 		// broker slot is the only thing that can name the child, and a mapping that cannot
@@ -588,16 +577,17 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 			},
 			async captureDrivenStop(row, options) {
 				// The runtime of this window under exactly this slot, broker and generation: the row's slot alone is not it.
-				const state = [...deps.tabs().values()].find(candidate =>
-					candidate.runtime !== null && candidate.runtime.identity.slot === row.slot &&
-					candidate.runtime.identity.brokerId === row.brokerId && candidate.runtime.identity.brokerGeneration === row.generation);
-				const runtime = state?.runtime ?? null;
+				const state = [...deps.tabs().values()].find(candidate => {
+					const held = candidate.tabId === null ? null : deps.sessionRuntime().snapshot(candidate.tabId);
+					return held !== null && held.slot === row.slot && held.brokerId === row.brokerId && held.brokerGeneration === row.generation;
+				});
 				const tabId = state?.tabId ?? null;
 				const hostTabId = row.host?.kind === "session" ? row.host.tabId : null;
-				if (state === undefined || runtime === null || tabId === null || (hostTabId !== null && hostTabId !== tabId)) return null;
+				const held = tabId === null ? null : deps.sessionRuntime().snapshot(tabId);
+				if (state === undefined || held === null || tabId === null || (hostTabId !== null && hostTabId !== tabId)) return null;
 				const conflicting = deps.passiveReasonForSlot(state.slotId) !== null;
-				const captured = await index.lifecycle.run(tabId, async () => await deps.readTransitionFacts(state, runtime));
-				return { run: () => deps.confirmAndStopRuntime(context, index, tabId, state, runtime, "Stop", { conflicting, captured, gracefulOnly: !options.offerForce }) };
+				const captured = await deps.sessionRuntime().readTransitionFacts({ conversation: tabId, target: held.attachment });
+				return { run: () => deps.confirmAndStopRuntime(context, index, tabId, "Stop", { target: held.attachment, conflicting, captured, gracefulOnly: !options.offerForce }) };
 			},
 			async captureRecordedStop(row, options) {
 				const tabId = row.host?.kind === "session" ? row.host.tabId : null;
@@ -632,14 +622,13 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 	}
 
 	/** Stop the positively verified target after its caller's one confirmation. */
-	async function stopVerifiedOwnedWriter(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, pid: number, captured?: CapturedSessionStop<Tab>): Promise<boolean> {
+	async function stopVerifiedOwnedWriter(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, pid: number, captured?: CapturedSessionStop): Promise<boolean> {
 		const runtime = deps.sessionRuntime();
 		deps.stoppingTabs().add(tabId);
 		deps.refreshLauncher();
 		try {
-			const state = deps.tab(tabId);
-			const held = state?.runtime ?? null;
-			if (held === null || state === undefined) {
+			const held = runtime.snapshot(tabId);
+			if (held === null) {
 				if (captured !== undefined) {
 					deps.warn("The running session changed while confirmation was pending; nothing was stopped. Try again.");
 					return false;
@@ -666,39 +655,22 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 				}
 				return true;
 			}
-			return await index.lifecycle.run(tabId, async lease => {
-				const currentPid = await runtime.verifiedWriterPid(tabId);
-				if (currentPid !== pid) {
-					if (currentPid === null) return true;
-					deps.warn("The running OMP target changed; nothing was stopped.");
-					return false;
-				}
-				const entry = index.get(tabId);
-				if (entry === null) return false;
-				const live = state.runtime;
-				if (live === null || (captured !== undefined && (state !== captured.state || live !== captured.runtime))) {
-					deps.warn("The running session changed while confirmation was pending; nothing was stopped. Try again.");
-					return false;
-				}
-				await index.setRunIntent(tabId, "stopped", "Stop requested before continuing the user's action.");
-				const stopped = await deps.stopSessionRuntime(state, live, "graceful", true, captured?.facts);
-				deps.log(`session stop ${tabId}: ${stopped.diagnosticDetail ?? stopped.detail}`);
-				if (!stopped.writerGone) {
-					deps.warn(stopped.detail);
-					return false;
-				}
-				state.runtime = null;
-				deps.stopTerminalForTab(state.slotId);
-				state.nativeWatch?.();
-				state.nativeWatch = null;
-				deps.disposeControlChannel(state);
-				await index.setRunIntent(tabId, "stopped", stopped.detail);
-				await index.closeSession(tabId, { confirmedStopped: true, detail: stopped.detail }, lease);
-				await deps.retireBroker(tabId, live);
-				await deps.releaseHostControl(tabId, deps.controlOwnerFor(live, entry.ownership?.ownerGeneration ?? ""));
-				deps.outcomes().delete(tabId);
-				return true;
-			});
+			// Without a fence the caller held, this stop raises its own for its duration.
+			const token = captured?.token ?? runtime.beginTransition({ conversation: tabId, target: held.attachment });
+			try {
+				const result = await runtime.stop({
+					conversation: tabId, token, target: captured?.target ?? held.attachment, mode: "graceful", consent: true,
+					...(captured === undefined ? {} : { expected: captured.facts }),
+					scope: "session", recordIntentFirst: true, expectedWriter: { pid },
+				});
+				if (result.status === "stopped" || result.status === "writer-gone") return true;
+				deps.warn(result.status === "unconfirmed" ? result.detail
+					: result.status === "writer-changed" ? "The running OMP target changed; nothing was stopped."
+					: "The running session changed while confirmation was pending; nothing was stopped. Try again.");
+				return false;
+			} finally {
+				if (captured === undefined) runtime.endTransition(token, "none");
+			}
 		} finally {
 			deps.stoppingTabs().delete(tabId);
 			deps.refreshLauncher();
@@ -751,17 +723,16 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 					return false;
 				}
 			}
-			const state = tabId === null ? undefined : deps.tab(tabId);
-			const runtime = state?.runtime ?? null;
-			if (state === undefined || runtime === null || tabId === null) return await deleteSessionAfterFence(index, subject);
-			if (state.transitioning) { deps.warn("The session is already changing or stopping; nothing was deleted."); return false; }
+			const sessionRuntime = deps.sessionRuntime();
+			const held = tabId === null ? null : sessionRuntime.snapshot(tabId);
+			if (held === null || tabId === null) return await deleteSessionAfterFence(index, subject);
+			if (held.transitioning) { deps.warn("The session is already changing or stopping; nothing was deleted."); return false; }
+			const token = sessionRuntime.beginTransition({ conversation: tabId, target: held.attachment });
 			try {
-				deps.fenceSessionAdmission(index, state, true);
-				const facts = await deps.withSessionReadDeadline(index.lifecycle.run(tabId, async () => await deps.readTransitionFacts(state, runtime)));
-				return await deleteSessionAfterFence(index, subject, { state, runtime, facts });
+				const facts = await sessionRuntime.readTransitionFacts({ conversation: tabId, target: held.attachment, bounded: true });
+				return await deleteSessionAfterFence(index, subject, { token, target: held.attachment, facts });
 			} finally {
-				if (state.runtime !== runtime || runtime.kind !== "terminal" || !runtime.stopping) deps.fenceSessionAdmission(index, state, false);
-				else deps.pushSessionView(index, state);
+				sessionRuntime.endTransition(token, "native-stopping");
 			}
 		} catch (error) {
 			deps.log(`session deletion preparation failed: ${messageOf(error)}`);
@@ -774,7 +745,7 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 	async function deleteSessionAfterFence(
 		index: SessionIndex,
 		subject: SessionDeletionSubject,
-		captured?: CapturedSessionStop<Tab>,
+		captured?: CapturedSessionStop,
 	): Promise<boolean> {
 		const options: SessionDeletionOptions = {
 			index,
