@@ -132,13 +132,12 @@ describe("detail tab registry", () => {
 			{ type: "omp:chat-prompt", requestId, epoch, text: "hello" },
 			{ type: "omp:chat-abort", requestId, epoch },
 			{ type: "omp:chat-resume", requestId },
-			{ type: "omp:chat-tool-detail", epoch },
 			{ type: "omp:chat-load-older", requestId, epoch },
 			{ type: "omp:session-mode", mode: "terminal" },
 			{ type: "omp:control-request", scope: "x".repeat(32), requestId, action: "snapshot" },
 		]) await panels[0]!.send(message);
 		assert.equal(handled.length, 1, "nothing but the child read reached the runtime");
-		assert.ok(logs.length >= 7);
+		assert.ok(logs.length >= 6);
 	});
 
 	it("opens or reveals a sibling tab of the same conversation when a detail page asks, and never reaches the runtime", async () => {

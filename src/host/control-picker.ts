@@ -1,8 +1,5 @@
 import * as vscode from "vscode";
 import type { ControlModelRef } from "../protocol/control.ts";
-import type { ChatDisplayPreferences } from "../protocol/chat-messages.ts";
-
-type ToolCallDetail = ChatDisplayPreferences["toolCallDetail"];
 
 interface Choice<T> extends vscode.QuickPickItem { value?: T; current?: boolean }
 let active: { tabId?: string; finish(): void } | null = null;
@@ -69,15 +66,4 @@ export function pickControlThinking(levels: readonly string[], current: string |
 		description: THINKING_DESCRIPTION[level],
 		value: level, current: level === current,
 	})), stillCurrent, tabId);
-}
-
-/** The Tools output choices; the descriptions say what each does to the transcript, the check marks the one in force. */
-const TOOL_DETAIL_CHOICES: readonly { value: ToolCallDetail; label: string; description: string }[] = [
-	{ value: "overview", label: "Overview", description: "Group routine tool calls into one-line summaries" },
-	{ value: "detailed", label: "Detailed", description: "Show every tool call as its own row" },
-];
-
-export function pickToolCallDetail(current: ToolCallDetail, stillCurrent: () => boolean, tabId?: string): Promise<ToolCallDetail | undefined> {
-	return choose("Tools output", TOOL_DETAIL_CHOICES.map(choice => ({ label: choice.label, description: choice.description,
-		detail: choice.value === current ? "$(check) Current tools output" : undefined, value: choice.value, current: choice.value === current })), stillCurrent, tabId);
 }

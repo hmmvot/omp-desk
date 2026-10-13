@@ -140,15 +140,8 @@ export interface ChatRuntimeOptions {
 	/** Mints a snapshot id; defaults to 8 random bytes. */
 	readonly newSnapshotId?: () => string;
 	readonly readDisplayPreferences?: () => ChatDisplayPreferences;
-	readonly writeToolCallDetail?: (value: ChatDisplayPreferences["toolCallDetail"]) => Promise<void>;
 	/** Opens native profile settings, not an OMP prompt or a hosted dashboard. */
 	readonly openSettings?: (kind: SettingsKind, tabId: string) => Promise<void>;
-	/** Opens the host's native Tools output picker; resolves `undefined` when it is dismissed or the conversation is no longer current. */
-	readonly pickToolCallDetail?: (
-		current: ChatDisplayPreferences["toolCallDetail"],
-		stillCurrent: () => boolean,
-		tabId: string,
-	) => Promise<ChatDisplayPreferences["toolCallDetail"] | undefined>;
 	/** The installed OMP's builtin slash registry, or `null` while it is unknown (nothing is refused as TUI-only then). */
 	readonly slashRegistry?: () => readonly BuiltinSlashEntry[] | null;
 	/** Runs the Desk equivalent of a terminal-UI slash command. */
@@ -454,22 +447,6 @@ export class ChatRuntime {
 				if (this.#settingsRequests.size > 128) this.#settingsRequests.delete(this.#settingsRequests.keys().next().value!);
 				return operation;
 			}
-		}
-		if (message.type === "omp:chat-tool-detail") {
-			if (origin === null || !sameEpoch(this.stateOf(tabId)?.epoch ?? null, message.epoch)) return "ignored";
-			const { pickToolCallDetail, writeToolCallDetail } = this.#options;
-			if (!pickToolCallDetail || !writeToolCallDetail) return "refused";
-			// The host owns the choice end to end: the page only asked, and the setting is written from the host's own pick.
-			// Closing the picker or leaving the conversation while it is open changes nothing.
-			const stillCurrent = (): boolean => this.#conversations.get(tabId) === conversation && sameEpoch(this.stateOf(tabId)?.epoch ?? null, message.epoch);
-			let picked: ChatDisplayPreferences["toolCallDetail"] | undefined;
-			try { picked = await pickToolCallDetail(this.#displayPreferences().toolCallDetail, stillCurrent, tabId); }
-			catch { this.#tell(conversation, origin, "Could not open the Tools output picker."); return "refused"; }
-			if (picked === undefined) return "ignored";
-			try { await writeToolCallDetail(picked); }
-			catch { this.#tell(conversation, origin, "Could not save the Tools display preference."); return "refused"; }
-			this.refreshDisplayPreferences();
-			return "accepted";
 		}
 		// A session that is not running — a view-only history or one whose process stopped — has an
 		// explicit Resume that requests the extension's claim-and-launch admission. It grants no

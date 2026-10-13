@@ -191,11 +191,10 @@ export const harness = {
   handlePassiveSlotMessage, passiveReasonForSlot,
   footerIdle: () => Promise.all([...fixtureWindow().footerBindings.values()].map(binding => binding.observer?.idle())).then(() => undefined),
   restoredDraft: slot => fixtureWindow().draftRestores.get(slot)?.reply ?? null,
-  readChatDisplayPreferences, writeChatToolDetail, refreshChatDisplayPreferences,
+  readChatDisplayPreferences, refreshChatDisplayPreferences,
   configurationWrites: () => fixtureVscode.workspace.configurationWrites,
   openedDocuments: () => fixtureVscode.window.openedDocuments,
   quickPicks: () => fixtureVscode.window.quickPicks,
-  pickToolCallDetail,
   shellContext(cwd, panel) {
     const slot = createShellSlotId(), state = newTabState(slot);
     state.shellSlot = slot; state.panel = panel; fixtureWindow().tabs.set(slot, state);
@@ -458,12 +457,10 @@ interface Harness {
   terminalFontMessage(): GuestTerminalFontMessage;
   configuration(values: Record<string, unknown>): void;
   readChatDisplayPreferences(): ChatDisplayPreferences;
-  writeChatToolDetail(value: ChatDisplayPreferences["toolCallDetail"]): Promise<void>;
   refreshChatDisplayPreferences(event: { affectsConfiguration(key: string): boolean }): void;
   configurationWrites(): readonly { key: string; value: unknown; target: number }[];
   openedDocuments(): readonly { uri: { fsPath: string }; options: { preview: boolean; selection: { start: { line: number; character: number }; end: { line: number; character: number } } } }[];
   quickPicks(): readonly { title: string; items: readonly { label: string; description?: string; detail?: string }[]; disposed: boolean; choose(index: number): void; dismiss(): void }[];
-  pickToolCallDetail: NonNullable<ConstructorParameters<typeof ChatRuntime>[0]["pickToolCallDetail"]>;
   shellContext(cwd: string, panel: unknown): { slot: string; state: State };
   openSessionInMode(...args: unknown[]): Promise<void>;
   defaultSessionMode(context: unknown): "chat" | "terminal";
@@ -3241,22 +3238,19 @@ describe("same-editor Chat and native Terminal actions", () => {
 		}
 	});
 
-	it("editor preferences update both real Chat consumers from a fenced page without OMP writes, and reject a stale epoch", async () => {
+	it("editor preferences update both real Chat consumers when the configuration changes, without OMP writes, and reject a stale epoch", async () => {
 		const f = await fixture(true);
 		f.chat.dispose();
 		const host = new ChatRuntime({
 			hostNonce: "display-preference-integration", onEvent() {},
 			readDisplayPreferences: harness.readChatDisplayPreferences,
-			writeToolCallDetail: harness.writeChatToolDetail,
-			pickToolCallDetail: harness.pickToolCallDetail,
 		});
 		harness.reset(f.index, host);
 		const state = harness.state(f.row.tabId);
 		state.panel = f.panels; state.mode = "chat"; state.transitioning = true;
 		const channel = new FakeRpcChannel({ sessionFile: null, sessionId: "mode-session" });
 		await host.startLive(f.row.tabId, { channel, sessionFile: null, cwd: f.directory, title: null }).start();
-		let posted: unknown;
-		const clients = [new ChatClient({ post: message => { posted = message; return true; } }), new ChatClient({ post: () => true })];
+		const clients = [new ChatClient({ post: () => true }), new ChatClient({ post: () => true })];
 		const detached = clients.map((client, position) => host.attachPage(f.row.tabId, {
 			id: `presentation-${position}`, readOnlyReason: () => "Read-only observer",
 			post: message => { const parsed = parseGuestHostMessage(message); if (parsed !== null) client.handle(parsed); return "sent"; },
@@ -3268,42 +3262,11 @@ describe("same-editor Chat and native Terminal actions", () => {
 				{ toolCallDetail: "overview", accessibilitySupport: false, thinkingExpanded: false, toolsExpanded: false },
 				{ toolCallDetail: "overview", accessibilitySupport: false, thinkingExpanded: false, toolsExpanded: false },
 			]);
-			// The page only asks: the host opens its native picker, marks the setting in force, and writes nothing until a row is chosen.
-			assert.equal(clients[0]!.chooseToolCallDetail(), true);
-			assert.deepEqual(Object.keys(posted as Record<string, unknown>).sort(), ["epoch", "requestId", "type"], "the request carries no value");
-			const pickers = harness.quickPicks().length;
-			const choosing = harness.window().guestDispatcher.handleMessage(f.index, state.slotId, f.panels, posted);
-			for (let round = 0; round < 20 && harness.quickPicks().length === pickers; round++) await nextTurn();
-			const picker = harness.quickPicks().at(-1)!;
-			assert.equal(harness.quickPicks().length, pickers + 1);
-			assert.equal(picker.title, "Tools output");
-			assert.deepEqual(picker.items.map(item => [item.label, item.description, item.detail]), [
-				["Overview", "Group routine tool calls into one-line summaries", "$(check) Current tools output"],
-				["Detailed", "Show every tool call as its own row", undefined],
-			]);
-			assert.equal(harness.configurationWrites().length, settingsWrites, "opening the picker changes nothing");
-			picker.choose(1);
-			await choosing;
-			assert.equal(picker.disposed, true);
-			assert.deepEqual(clients.map(client => client.getDisplayPreferences()), [
-				{ toolCallDetail: "detailed", accessibilitySupport: false, thinkingExpanded: false, toolsExpanded: false },
-				{ toolCallDetail: "detailed", accessibilitySupport: false, thinkingExpanded: false, toolsExpanded: false },
-			]);
-			assert.deepEqual(harness.configurationWrites()[settingsWrites], { key: "omp.toolCallDetail", value: "detailed", target: 1 });
-			// Dismissing the picker writes nothing, and a stale epoch never reaches it.
-			const dismissed = harness.window().guestDispatcher.handleMessage(f.index, state.slotId, f.panels, posted);
-			for (let round = 0; round < 20 && harness.quickPicks().length === pickers + 1; round++) await nextTurn();
-			const second = harness.quickPicks().at(-1)!;
-			assert.equal(second.items[1]!.detail, "$(check) Current tools output", "the picker marks the setting now in force");
-			second.dismiss();
-			await dismissed;
-			assert.equal(harness.configurationWrites().length, settingsWrites + 1);
-			await harness.window().guestDispatcher.handleMessage(f.index, state.slotId, f.panels, {
-				...(posted as Record<string, unknown>),
-				epoch: { ...clients[0]!.getSnapshot().epoch!, nonce: "stale-host" },
-			});
-			assert.equal(harness.quickPicks().length, pickers + 2, "a stale request opens no picker");
-			assert.equal(harness.configurationWrites().length, settingsWrites + 1);
+			// A page's own stale route can never overwrite what the host says.
+			const before = clients[0]!.getDisplayPreferences();
+			clients[0]!.handle({ type: "omp:chat-display-preferences", epoch: { ...clients[0]!.getSnapshot().epoch!, nonce: "stale-host" }, toolCallDetail: "detailed", accessibilitySupport: true });
+			assert.equal(clients[0]!.getDisplayPreferences(), before);
+			assert.equal(harness.configurationWrites().length, settingsWrites, "presentation never writes the settings");
 			harness.configuration({ "omp.toolCallDetail": "overview", "editor.accessibilitySupport": "on" });
 			harness.refreshChatDisplayPreferences({ affectsConfiguration: key => key === "editor.accessibilitySupport" });
 			assert.deepEqual(clients.map(client => client.getDisplayPreferences()), [

@@ -182,7 +182,7 @@ import type { ChoiceOutcome, CommandResult, CompactMode, RpcSession, SendRefusal
 import { readSlashRegistry, type BuiltinSlashEntry, type DeskSlashAction, type SlashRegistry } from "./host/slash-registry";
 import { NAVIGATE_REFUSAL_SENTENCES } from "./chat/rewind";
 import type { ChatLiteState, ChatPhase } from "./chat/model";
-import { cancelControlPicker, pickControlModel, pickControlThinking, pickToolCallDetail } from "./host/control-picker";
+import { cancelControlPicker, pickControlModel, pickControlThinking } from "./host/control-picker";
 import { activitySignature, withRegistrySubagentWork } from "./protocol/activity";
 import type { TurnActivityReport } from "./protocol/activity";
 import type { ChatDisplayPreferences, ChatWebviewMessage } from "./protocol/chat-messages";
@@ -1522,8 +1522,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     log,
     onEvent: (tabId, event) => handleChatEvent(context, index, tabId, event),
     readDisplayPreferences: readChatDisplayPreferences,
-    writeToolCallDetail: writeChatToolDetail,
-    pickToolCallDetail,
     // Terminal-UI builtins typed into Chat are answered, not sent (ADR-0052); the list is the installed OMP's.
     slashRegistry: () => currentSlashRegistry(context),
     runDeskAction: async (action, tabId) => {
@@ -4622,9 +4620,9 @@ function handleBridgeRequest(
       .catch(() => refuseBridgeRequest(session, route.routeGeneration, request.requestId));
     return;
   }
-  if (request.operation === "chat-tool-detail" || request.operation === "chat-subagent-read" ||
+  if (request.operation === "chat-subagent-read" ||
       request.operation === "terminal-link-validate" || request.operation === "terminal-link-symbols" || request.operation === "terminal-link-open") {
-    // Preferences, child history and local file navigation are presentation,
+    // Child history and local file navigation are presentation,
     // not writer mutations. The authenticated current document still owns the
     // request; runtime epoch and post-I/O document checks remain authoritative.
     const parsed = parseGuestWebviewMessage({ ...(payload as Record<string, unknown>), type: `omp:${request.operation}` });
@@ -4719,7 +4717,6 @@ const BRIDGE_OPERATIONS: Record<string, true> = {
   "chat-reconnect": true,
   "chat-restart": true,
   "chat-queue-remove": true,
-  "chat-tool-detail": true,
   "chat-subagent-read": true,
   "terminal-attach": true,
   "terminal-probe": true,
@@ -5777,10 +5774,6 @@ async function toggleTranscriptDefault(key: typeof THINKING_EXPANDED_KEY | typeo
   if (activeChatTab() === null || s.context === undefined) return;
   await s.context.globalState.update(key, s.context.globalState.get<unknown>(key) !== true);
   s.sessionRuntime.conversations.refreshDisplayPreferences();
-}
-
-async function writeChatToolDetail(value: ChatDisplayPreferences["toolCallDetail"]): Promise<void> {
-  await vscode.workspace.getConfiguration("omp").update("toolCallDetail", value, vscode.ConfigurationTarget.Global);
 }
 
 function refreshChatDisplayPreferences(event: vscode.ConfigurationChangeEvent): void {
@@ -8843,7 +8836,7 @@ async function handlePassiveSlotMessage(slot: string, panel: vscode.WebviewPanel
     return;
   }
   if (parsed.type === "omp:chat-load-older" || parsed.type === "omp:chat-resume" ||
-      parsed.type === "omp:chat-tool-detail" || parsed.type === "omp:chat-subagent-read") {
+      parsed.type === "omp:chat-subagent-read") {
     await s.guestDispatcher.runChatCommand(state.tabId, parsed, panelChatPage(state, panel));
     return;
   }

@@ -237,8 +237,6 @@ function bridgeOperation(message: GuestWebviewMessage): string | null {
 			return "chat-load-older";
 		case "omp:chat-subagent-read":
 			return "chat-subagent-read";
-		case "omp:chat-tool-detail":
-			return "chat-tool-detail";
 		case "omp:chat-resume":
 			return "chat-resume";
 		case "omp:chat-reconnect":

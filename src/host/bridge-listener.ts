@@ -93,7 +93,6 @@ const MASK_BYTES = 4;
 const BRIDGE_STREAM_OPERATIONS: Record<string, true> = {
 	"guest-version": true,
 	"provider-login": true,
-	"chat-tool-detail": true,
 	"chat-subagent-read": true,
 	"terminal-attach": true,
 	"terminal-probe": true,

@@ -190,12 +190,6 @@ export interface ChatDisplayPreferencesMessage extends ChatDisplayPreferences {
 	type: "omp:chat-display-preferences";
 	epoch: ChatEpoch;
 }
-/** The page asks the host to open the native Tools output picker; the choice never travels back through the page. */
-export interface ChatToolDetailMessage {
-	type: "omp:chat-tool-detail";
-	requestId: string;
-	epoch: ChatEpoch;
-}
 
 /** One pending user message, named by the queue it waits in and its exact queue-chip text (what OMP matches on). */
 export interface ChatQueuedRef {
@@ -387,7 +381,6 @@ export interface ChatNavigateMessage {
 }
 
 export type ChatWebviewMessage =
-	| ChatToolDetailMessage
 	| ChatPromptMessage
 	| ChatSteerMessage
 	| ChatFollowUpMessage
@@ -1189,11 +1182,6 @@ export function parseChatWebviewMessage(value: unknown): ChatWebviewMessage | nu
 	if (!isChatRequestId(value.requestId)) return null;
 	const requestId = value.requestId;
 	switch (value.type) {
-		case "omp:chat-tool-detail": {
-			const epoch = parseChatEpoch(value.epoch);
-			if (epoch === null) return null;
-			return { type: value.type, epoch, requestId };
-		}
 		case "omp:chat-subagent-read": {
 			const epoch = parseChatEpoch(value.epoch);
 			if (epoch === null || !isName(value.subagentId, 256) || !isCount(value.fromByte) || (value.beforeId !== undefined && !isName(value.beforeId, MAX_ID_LENGTH))) return null;
