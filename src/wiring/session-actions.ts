@@ -133,7 +133,7 @@ export interface SessionOpenPort<Tab extends SessionTab> {
 }
 
 /** The chat runtime and host control of one tab: what a stop, a reattach and a deletion run through. */
-export interface SessionRuntimePort<Tab extends SessionTab> {
+export interface StopReadPort<Tab extends SessionTab> {
 	readTransitionFacts(state: Tab, runtime: SessionHostRuntime): Promise<SessionTransitionFacts | null>;
 	/** Bound readback and gate admission, not a destructive transaction or a user's dialog. */
 	withSessionReadDeadline<T>(read: Promise<T>, timeoutMs?: number): Promise<T>;
@@ -196,7 +196,7 @@ export interface SessionNotices {
 }
 
 export interface SessionActionsDeps<Tab extends SessionTab = SessionTab>
-	extends SessionWindowFacts, SessionEditorPort<Tab>, SessionLauncherPort, SessionOpenPort<Tab>, SessionRuntimePort<Tab>,
+	extends SessionWindowFacts, SessionEditorPort<Tab>, SessionLauncherPort, SessionOpenPort<Tab>, StopReadPort<Tab>,
 		SessionBrokerPort, SessionCatalogPort, SessionDialogs, SessionNotices {}
 
 /** What a recorded-process stop binds to: the exact attempt, slot and broker of the row's recorded host. */
