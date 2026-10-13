@@ -32,6 +32,10 @@ it with the environment it started with; -Stop it first to change keys, or to re
 A new environment starts with settings that keep VS Code's first-run prompts out of the way: no workspace trust,
 no AI sign-in or Copilot chat, no welcome page. Edit them in that window as usual; the script never rewrites them.
 
+A VS Code with a downloaded update that waits for "Restart to Update" holds the vscode-updating mutex through its
+installer, and a Code.exe started meanwhile waits 30 s and exits without a window or a log. The script stops before
+launching when it sees that mutex. Finish the update, or pass -VsCodeDir with another install folder.
+
 Keep -Root inside your user profile. OMP Desk refuses to start sessions when another user could replace a folder on
 the path to its storage, which is the case for folders created directly under a drive root such as C:\tests.
 
@@ -58,13 +62,21 @@ param(
 	[switch] $Stop,
 	# Chrome DevTools Protocol port on 127.0.0.1 for automated UI checks; applies only when this VS Code starts.
 	[ValidateRange(1024, 65535)] [int] $RemoteDebuggingPort,
-	[string] $Root = (Join-Path $env:LOCALAPPDATA 'omp-desk-test')
+	[string] $Root = (Join-Path $env:LOCALAPPDATA 'omp-desk-test'),
+	# VS Code install folder (the one with Code.exe and bin\code.cmd); default: the code.cmd found on PATH.
+	[string] $VsCodeDir
 )
 $ErrorActionPreference = 'Stop'
 
-$command = Get-Command code.cmd -ErrorAction SilentlyContinue
-if (-not $command) { throw 'code.cmd is not on PATH. Install VS Code with "Add to PATH", or add its bin folder.' }
-$code = $command.Source
+if ($VsCodeDir) {
+	$code = Join-Path ([IO.Path]::GetFullPath($VsCodeDir)) 'bin\code.cmd'
+	if (-not (Test-Path $code)) { throw "bin\code.cmd not found in -VsCodeDir '$VsCodeDir'." }
+}
+else {
+	$command = Get-Command code.cmd -ErrorAction SilentlyContinue
+	if (-not $command) { throw 'code.cmd is not on PATH. Install VS Code with "Add to PATH", or add its bin folder.' }
+	$code = $command.Source
+}
 
 $base = Join-Path ([IO.Path]::GetFullPath($Root)) $Name
 $data = Join-Path $base 'data'
@@ -264,6 +276,25 @@ try {
 	# code.cmd only relays to Code.exe; start Code.exe itself, as the relay does.
 	$exe = [IO.Path]::GetFullPath((Join-Path (Split-Path $code) '..\Code.exe'))
 	if (-not (Test-Path $exe)) { throw "Code.exe not found next to $code." }
+
+	# While an update of this VS Code is staged (a background update waiting for "Restart to Update"), the installer
+	# holds the "<win32MutexName>-updating" mutex, and a starting Code.exe waits 30 s for it and then exits with no
+	# window and no log. Say so now instead.
+	$product = Get-ChildItem -Path (Split-Path $exe) -Directory |
+		ForEach-Object { Join-Path $_.FullName 'resources\app\product.json' } | Where-Object { Test-Path $_ } | Select-Object -First 1
+	if ($running.Count -eq 0 -and $product) {
+		$info = Get-Content $product -Raw | ConvertFrom-Json
+		if ($info.win32MutexName -and $info.win32VersionedUpdate) {
+			$held = $null
+			try { $held = [Threading.Mutex]::OpenExisting("$($info.win32MutexName)-updating") }
+			catch [Threading.WaitHandleCannotBeOpenedException] { }
+			catch [UnauthorizedAccessException] { throw "The installer of a VS Code update holds the '$($info.win32MutexName)-updating' mutex." }
+			if ($held) {
+				$held.Dispose()
+				throw "VS Code at $(Split-Path $exe) is waiting to install an update (the '$($info.win32MutexName)-updating' mutex is held), so a new window would exit after 30 s without opening. Finish the update (restart VS Code from its 'Restart to Update' prompt), or pass -VsCodeDir with a VS Code install that has no update pending."
+			}
+		}
+	}
 	Set-LaunchVariable 'VSCODE_CLI' '1'
 	Set-LaunchVariable 'ELECTRON_NO_ATTACH_CONSOLE' '1'
 	$commandLine = (@($exe) + $launchArgs | ForEach-Object { ConvertTo-CommandLineArgument $_ }) -join ' '

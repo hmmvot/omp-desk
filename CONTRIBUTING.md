@@ -60,6 +60,8 @@ The launched VS Code also does not inherit the provider API keys from your envir
 
 A new environment starts with settings that skip VS Code's first-run prompts (workspace trust, AI sign-in, welcome page). Keep the root inside your user profile: OMP Desk refuses to start sessions when its storage sits under a folder other users can modify, such as a folder created directly under `C:\`. `-RemoteDebuggingPort` opens a DevTools port for automated UI checks. `-ResetVsCode` also clears VS Code and OMP Desk storage; stop the window first. Run `Get-Help ./scripts/test-vscode.ps1 -Detailed` for every option.
 
+A VS Code that has downloaded an update and waits for "Restart to Update" keeps its installer running with the `vscode-updating` mutex held, and any `Code.exe` started meanwhile waits 30 s for it and exits with no window and no log. The script checks that mutex before launching and stops with a message that says so; finish the update, or point `-VsCodeDir` at another VS Code install folder (one with `Code.exe` and `bin\code.cmd`) that has no update pending.
+
 ### End-to-end tests (Playwright over CDP)
 
 `npm run test:e2e` runs [Playwright Test](https://playwright.dev/) against a real VS Code with the real extension and the installed `omp`, on the same hidden Windows desktop as `scripts/test-vscode.ps1` (the only launcher the suite uses; no test window can appear on your screen). It needs Windows, `code.cmd` on `PATH`, an installed `omp` and `npm ci`; Playwright's own browsers are not used or downloaded.
