@@ -51,6 +51,11 @@ const EDITABLE = "input,textarea,select,[contenteditable]:not([contenteditable=f
 const KEEPS_FOCUS = ".omp-rewind-bar--picking";
 const COMPOSER = ".omp-composer-row--input textarea.omp-textarea";
 
+/** Whether `target` is, or sits inside, a field the user types into (or a menu or list that owns its keys). */
+export function isEditableTarget(target: Element): boolean {
+	return target.closest(EDITABLE) !== null;
+}
+
 /** The composer's textarea when it exists and can take text, else `null`. */
 export function writableComposer(doc: Document): HTMLTextAreaElement | null {
 	const field = doc.querySelector<HTMLTextAreaElement>(COMPOSER);
@@ -75,7 +80,7 @@ export function installTypeToFocus(win: Window & typeof globalThis): () => void 
 		});
 		if (intent === null) return;
 		const target = event.target instanceof win.Element ? event.target : doc.activeElement;
-		if (target !== null && (target.closest(EDITABLE) !== null || target.closest(KEEPS_FOCUS) !== null)) return;
+		if (target !== null && (isEditableTarget(target) || target.closest(KEEPS_FOCUS) !== null)) return;
 		const composer = writableComposer(doc);
 		if (composer === null) return;
 		composer.focus({ preventScroll: true });

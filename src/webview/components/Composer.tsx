@@ -61,6 +61,8 @@ import { reportComposerPopupOpen } from "../lib/composer-overlay";
 import { useHeldFocus } from "../lib/use-held-focus";
 import { providePanelActions } from "../lib/panel-actions";
 import { focusWhenPossible } from "../lib/focus-retry";
+import { createDoubleEscape } from "../lib/double-escape";
+import { isEditableTarget } from "../lib/type-to-focus";
 import { provideDraftHandoff, subscribeRestoredDraft, takeRestoredDraft } from "../lib/draft-handoff";
 import type { DraftCapture } from "../lib/draft-handoff";
 import { followedByBlank, spaceInsertion, subscribeInsertedText } from "../lib/insert-text";
@@ -94,8 +96,6 @@ const MAX_ROWS = 8;
 
 /** Wait after the last keystroke before asking the extension host for paths. */
 const SUGGESTION_DEBOUNCE_MS = 150;
-/** Two `Esc` presses this close together in an empty, idle composer open Rewind, as in the TUI. */
-const DOUBLE_ESCAPE_MS = 500;
 
 /** Stable empty list, so "no suggestions" does not re-render every consumer. */
 const NO_SUGGESTIONS: readonly string[] = [];
@@ -985,7 +985,24 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind 
 		if (composingRef.current) deferredRef.current.push(place);
 		else place();
 	}), [client, composingRef, publishImages, publishRecoverable]);
-	const lastEscapeRef = useRef(Number.NEGATIVE_INFINITY);
+	const doubleEscapeRef = useRef(createDoubleEscape());
+	// `Esc` `Esc` with the focus on the page around the composer (the transcript, a tool row, a link, the body) opens Rewind
+	// under the same conditions. The composer's own textarea counts through `onPromptKeyDown`, any other editable field not
+	// at all; an Escape a popup, menu or dialog took was prevented in the capture phase and never reaches this listener.
+	useEffect(() => {
+		if (onRewind === undefined) return;
+		const onKeyDown = (event: globalThis.KeyboardEvent): void => {
+			if (event.key !== "Escape" || event.defaultPrevented || event.isComposing || composingRef.current) return;
+			const target = event.target instanceof Element ? event.target : document.activeElement;
+			if (target !== null && isEditableTarget(target)) return;
+			const idle = !client.getSnapshot().working && textRef.current.length === 0 && imagesRef.current.length === 0;
+			if (!doubleEscapeRef.current.press(event.timeStamp, idle)) return;
+			event.preventDefault();
+			onRewind();
+		};
+		document.addEventListener("keydown", onKeyDown);
+		return () => document.removeEventListener("keydown", onKeyDown);
+	}, [client, composingRef, onRewind]);
 
 	// VS Code commands and keybindings reach the composer through this registry
 	// (`src/webview/lib/panel-actions.ts`): `omp.sendPrompt`, `omp.stopTurn` and
@@ -1127,13 +1144,11 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind 
 			// belongs to Stop (`omp.stopTurn`), and an open popup takes it first.
 			if (event.key === "Escape" && onRewind !== undefined && !composing && !suggestionsOpen) {
 				const idle = !client.getSnapshot().working && event.currentTarget.value.length === 0 && imagesRef.current.length === 0;
-				if (idle && event.timeStamp - lastEscapeRef.current <= DOUBLE_ESCAPE_MS) {
-					lastEscapeRef.current = Number.NEGATIVE_INFINITY;
+				if (doubleEscapeRef.current.press(event.timeStamp, idle)) {
 					event.preventDefault();
 					onRewind();
 					return;
 				}
-				lastEscapeRef.current = idle ? event.timeStamp : Number.NEGATIVE_INFINITY;
 			}
 			if (suggestionsOpen && !composing) {
 				if (visible.length > 0 && (event.key === "Home" || event.key === "End")) {

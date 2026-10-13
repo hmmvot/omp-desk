@@ -4243,6 +4243,74 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		await t.test("Esc Esc with the focus on the page around the composer opens Rewind; one Esc, a draft, a working session, an open popup or a focused input do not", async () => {
+			await reset("rewind-page-escape");
+			await pushRewind();
+			await ui.wait("document.querySelectorAll('[aria-label=\"Rewind to here\"]').length===2");
+			const composer = "document.querySelector('.omp-composer textarea')";
+			const onTranscript = async (): Promise<void> => {
+				await ui.evaluate("(()=>{const t=document.querySelector('.omp-transcript');t.setAttribute('tabindex','-1');t.focus()})()");
+				assert.equal(await ui.evaluate("document.activeElement===document.querySelector('.omp-transcript')"), true);
+			};
+			const closed = async (): Promise<void> => {
+				await settleFrames();
+				assert.equal(await ui.evaluate("document.querySelector('.omp-rewind-bar--picking')"), null);
+			};
+			await onTranscript();
+			await press("Escape", "Escape", 27);
+			await closed();
+			// The pair window runs in real time; wait it out so the lone Escape above is not the first of the pair.
+			await new Promise(resolve => setTimeout(resolve, 650));
+			await onTranscript();
+			await press("Escape", "Escape", 27);
+			await press("Escape", "Escape", 27);
+			await ui.wait(`document.querySelector('.omp-rewind-bar--picking') && ${barFocused}`);
+			assert.equal(await pickedPreview(), "fix the parser", "picking starts at the newest prompt");
+			await press("Escape", "Escape", 27);
+			await ui.wait("!document.querySelector('.omp-rewind-bar--picking')");
+			// Focus on the page body, with nothing focused.
+			await ui.evaluate("document.activeElement.blur()");
+			await press("Escape", "Escape", 27);
+			await press("Escape", "Escape", 27);
+			await ui.wait("document.querySelector('.omp-rewind-bar--picking')");
+			await press("Escape", "Escape", 27);
+			await ui.wait("!document.querySelector('.omp-rewind-bar--picking')");
+			// A draft is never replaced by Rewind.
+			await ui.evaluate(`${composer}.focus()`);
+			await ui.call("Input.insertText", { text: "x" });
+			await onTranscript();
+			await press("Escape", "Escape", 27);
+			await press("Escape", "Escape", 27);
+			await closed();
+			assert.equal(await draftValue(), "x");
+			await ui.evaluate(`${composer}.focus()`);
+			await press("Backspace", "Backspace", 8);
+			await ui.wait(`${composer}.value===''`);
+			// Another editable field keeps its own Escape and is not counted.
+			await ui.evaluate("(()=>{const i=document.createElement('input');i.id='probe-field';document.body.append(i);i.focus()})()");
+			await press("Escape", "Escape", 27);
+			await press("Escape", "Escape", 27);
+			await closed();
+			await ui.evaluate("document.getElementById('probe-field').remove()");
+			// A working session: Escape belongs to Stop.
+			await pushRewind({ working: true });
+			await onTranscript();
+			await press("Escape", "Escape", 27);
+			await press("Escape", "Escape", 27);
+			await closed();
+			await pushRewind({ working: false });
+			// An open popup takes the Escape first.
+			await ui.evaluate("document.querySelector('.omp-context-trigger').click()");
+			await ui.wait("document.querySelector('.omp-context-popover')");
+			await onTranscript();
+			await press("Escape", "Escape", 27);
+			await ui.wait("!document.querySelector('.omp-context-popover')");
+			await closed();
+			assert.equal(await ui.evaluate("window.sent.filter(message=>message.type==='omp:chat-abort').length"), 0);
+			assert.deepEqual(await navigations(), []);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("a rewound prompt fills an empty composer, a typed draft moves to a recovery card, and Undo returns and takes the unedited prompt back", async () => {
 			await reset("rewind-draft");
 			await pushRewind();
