@@ -39,9 +39,21 @@ const srcDir = path.join(root, "src");
 const toRel = (file) => path.relative(root, file).split(path.sep).join("/");
 
 function walk(dir, out) {
-  for (const name of readdirSync(dir).sort()) {
+  let names;
+  try {
+    names = readdirSync(dir).sort();
+  } catch {
+    return out; // removed while the tree was being read
+  }
+  for (const name of names) {
     const full = path.join(dir, name);
-    const stat = statSync(full);
+    // An entry another process removed between the directory read and here is not part of the tree.
+    let stat;
+    try {
+      stat = statSync(full);
+    } catch {
+      continue;
+    }
     if (stat.isDirectory()) walk(full, out);
     else if (EXTENSIONS.includes(path.extname(name))) out.push(full);
   }
@@ -124,7 +136,12 @@ while (queue.length > 0) {
   const file = queue.pop();
   const rel = toRel(file);
   const edges = [];
-  const text = readFileSync(file, "utf8");
+  let text;
+  try {
+    text = readFileSync(file, "utf8");
+  } catch {
+    continue; // removed while the tree was being read
+  }
   texts.set(rel, text);
   const vscodeLine = vscodeLineOf(text);
   if (vscodeLine !== null) vscodeImporters.set(rel, vscodeLine);
