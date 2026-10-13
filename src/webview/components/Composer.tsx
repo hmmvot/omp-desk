@@ -1223,7 +1223,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind 
 								attached.length === 1 ? "1 attached image is" : `${attached.length} attached images are`
 							} held for your next prompt`}
 					</div>
-					<div className="omp-composer-actions">
+					<div className="omp-composer-actions omp-ask-actions">
 						<button type="button" className="omp-btn" onClick={() => respond({ id: request.id, cancelled: true })}>
 							Cancel
 						</button>

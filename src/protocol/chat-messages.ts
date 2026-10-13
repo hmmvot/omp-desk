@@ -29,7 +29,7 @@
  * | `omp:chat-navigate-result` | the outcome of an in-place Rewind/Undo/branch switch, and a rewound prompt for the composer |
  *
  * Page → host: `omp:chat-prompt`, `-steer`, `-follow-up`, `-abort`, `-ui-response`,
- * `-load-older`, `-resume`, `-reconnect`, `-restart`, `-subagent-read`, `-tool-detail`, `-queue-remove`, `-navigate`.
+ * `-load-older`, `-resume`, `-reconnect`, `-restart`, `-subagent-read`, `-queue-remove`, `-navigate`.
  * Every mutation carries a page-minted `requestId`, which the host uses as the
  * exactly-once key (the rpc command id is `vsc:<requestId>`).
  */

@@ -39,6 +39,7 @@ import { MeasuredRows, type RowViewport } from "./MeasuredRows";
 import { TranscriptScrollController, type TranscriptScrollMode } from "../lib/transcript-scroll";
 import { captureToolInteraction, heldToolInteractions, restoreToolInteraction, type ToolInteraction } from "../lib/tool-interaction";
 import { NativeMessage } from "./NativeMessage";
+import { EmptyState } from "./EmptyState";
 import { AssistantContentView, NativeDisclosure } from "./MessageContent";
 import { ToolCard, type ToolCardProps } from "./ToolCard";
 import { WorkingStatus } from "./WorkingStatus";
@@ -88,6 +89,8 @@ export interface TranscriptProps {
 	cwd?: string;
 	retry?: RetryState | null;
 	toolCallDetail?: "overview" | "detailed";
+	/** The thinking level the empty state names beside the model. */
+	thinkingLevel?: string | null;
 	conversationKey?: string;
 	disclosures?: ReadonlyMap<string, boolean>;
 	onDisclosureChange?: (key: string, value: boolean) => void;
@@ -176,7 +179,12 @@ export function TranscriptCardView({ card, props, autoExpanded, clearedHistory }
 		case "assistant": {
 			const failed = !card.streaming && card.content.length === 0 && (card.message.stopReason === "error" || card.message.stopReason === "aborted");
 			const retry = card.id === props.retryTailId && <button type="button" className="omp-retry-turn" title="Retry: run the failed or aborted turn again (F5)" onClick={() => requestPanelAction("retry-turn")}><span className="codicon codicon-refresh" aria-hidden="true" />Retry</button>;
-			body = <><AssistantContentView content={card.content} streaming={card.streaming && !props.waitingForAnswer} bypassPacing={props.pagedHistory} />{failed && <div className={card.message.stopReason === "error" ? "omp-error" : "omp-warning"} role="status"><strong>{card.message.stopReason === "error" ? "Provider error" : "Aborted"}</strong>{card.message.errorMessage && <p>{card.message.errorMessage}</p>}{retry}</div>}{!failed && retry}</>;
+			const failure = card.message.errorMessage;
+			// One line each: an aborted reply is a muted note with the reply's own message, a provider error says what it is and why inline.
+			const notice = !failed ? null : card.message.stopReason === "error"
+				? <div className="omp-error omp-turn-error" role="status"><strong>Provider error</strong>{failure && <span>{failure}</span>}</div>
+				: <div className="omp-turn-aborted" role="status"><span className="codicon codicon-circle-slash" aria-hidden="true" /><span>{failure || "Aborted"}</span></div>;
+			body = <><AssistantContentView content={card.content} streaming={card.streaming && !props.waitingForAnswer} bypassPacing={props.pagedHistory} />{notice}{retry}</>;
 			break;
 		}
 		case "recovery": body = <div className="omp-native-recovery"><strong>Recovered provider error</strong>{card.message.retryRecovery?.note && <p>{card.message.retryRecovery.note}</p>}</div>; break;
@@ -512,7 +520,9 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		}}>
 			<div ref={contentRef} className="omp-transcript-content">
 			{entries.length === 0 && stream === null && !working && (
-				<div className="omp-empty">{loading ? "joining the session…" : "no activity yet"}</div>
+				loading || (props.depth ?? 0) > 0
+					? <div className="omp-empty">{loading ? "joining the session…" : "no activity yet"}</div>
+					: <EmptyState cwd={props.cwd} model={props.model} thinkingLevel={props.thinkingLevel} />
 			)}
 			{props.pagedHistory ? <nav className="omp-history-pages" aria-label="History pages">
 				<button type="button" disabled={page.previousEndId === null || heldPageEndId !== null} onClick={() => { setPageEndId(page.previousEndId); controllerRef.current?.pageStart(); }}>Previous page</button>

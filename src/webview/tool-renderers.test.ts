@@ -324,6 +324,18 @@ test("a wait stays a disclosure only where expanding adds something the line and
 	assert.match(failed, /<button/); assert.match(failed, /omp-tool--error/);
 });
 
+test("a Task row's head says how many agents and which, never the sub-agent prompt; the per-agent list is its tooltip", () => {
+	const tasks = [{ name: "ParserSurvey", agent: "scout", task: "INTERNAL_PROMPT one" }, { name: "TestSurvey", agent: "scout", task: "INTERNAL_PROMPT two" }];
+	const running = api.card({ name: "task", args: { tasks }, status: "running" });
+	const digest = /<span class="omp-tool-digest" title="([^"]*)">(.*?)<\/span>/s.exec(running);
+	assert.ok(digest, running);
+	assert.equal(digest[2]!.replace(/<[^>]+>/g, ""), "2 agents: ParserSurvey, TestSurvey");
+	assert.equal(digest[1], "ParserSurvey · scout\nTestSurvey · scout", "the old name · agent list moved to the tooltip");
+	assert.doesNotMatch(running, /INTERNAL_PROMPT/);
+	const one = api.card({ name: "task", args: { tasks: [tasks[0]] }, status: "running" });
+	assert.match(one, />1 agent: ParserSurvey</, "singular for one");
+});
+
 test("a finished wait keeps its duration in the right slot: plain when nothing more to show, a disclosure for results, errors and several jobs", () => {
 	const job = { id: "FoldersRivals", type: "task", status: "completed", label: "FoldersRivals", durationMs: 1900000 };
 	const plain = api.card({ name: "wait", args: {}, intent: "Wait for the rival folders agent", result: result("wait", "", { op: "wait", jobs: [job] }) });

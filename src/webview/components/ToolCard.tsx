@@ -85,18 +85,23 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 	}, [result, partialResult]);
 	const text = messageText(source);
 	const metadata = useMemo(() => toolPresentation({ call: { type: "toolCall", id: props.callId ?? "", name, arguments: record(args) }, entryId: "", result, active: partialResult !== undefined || streamUpdate !== undefined ? { toolCallId: props.callId ?? "", toolName: name, args, partialResult, streamUpdate, startedAt: 0 } : undefined, status: state, mutable: partial, attachments: attachments ?? [] }, props.cwd), [name, args, result, partialResult, streamUpdate, state, partial, attachments, props.callId, props.cwd]);
-	const compactTarget = useMemo(() => {
+	/** The Task row's head: `N agents: Name1, Name2` (never the sub-agent prompt), and the per-agent `name · agent · status` list as its tooltip. */
+	const compactTarget = useMemo((): { digest: string; detail: string } | null => {
 		const route = metadata.route;
-		if (route.name !== "task") return "";
-		const rows = new Map<string, string>();
-		for (const row of recordRows(route.args, "tasks")) rows.set(stringField(row, "name") ?? stringField(row, "id") ?? "Agent", `${stringField(row, "name") ?? "Agent"}${stringField(row, "agent") ? ` · ${stringField(row, "agent")}` : ""}`);
-		for (const agent of props.agents?.values() ?? []) if (props.callId && agent.parentToolCallId === props.callId) rows.set(agent.id, `${agent.id} · ${agent.agent} · ${agent.status}`);
+		if (route.name !== "task") return null;
+		const rows = new Map<string, { name: string; line: string }>();
+		for (const row of recordRows(route.args, "tasks")) {
+			const name = stringField(row, "name") ?? stringField(row, "id") ?? "Agent";
+			rows.set(name, { name, line: `${stringField(row, "name") ?? "Agent"}${stringField(row, "agent") ? ` · ${stringField(row, "agent")}` : ""}` });
+		}
+		for (const agent of props.agents?.values() ?? []) if (props.callId && agent.parentToolCallId === props.callId) rows.set(agent.id, { name: agent.id, line: `${agent.id} · ${agent.agent} · ${agent.status}` });
 		for (const field of ["progress", "results"]) for (const row of recordRows(route.details, field)) {
 			const id = stringField(row, "id") ?? "Agent";
 			const status = row.aborted === true ? "cancelled" : row.error || typeof row.exitCode === "number" && row.exitCode !== 0 ? "failed" : row.exitCode === 0 ? "completed" : stringField(row, "status");
-			rows.set(id, `${id}${stringField(row, "agent") ? ` · ${stringField(row, "agent")}` : ""}${status ? ` · ${status}` : ""}`);
+			rows.set(id, { name: id, line: `${id}${stringField(row, "agent") ? ` · ${stringField(row, "agent")}` : ""}${status ? ` · ${status}` : ""}` });
 		}
-		return [...rows.values()].join(", ");
+		if (rows.size === 0) return null;
+		return { digest: `${rows.size} agent${rows.size === 1 ? "" : "s"}: ${[...rows.values()].map(row => row.name).join(", ")}`, detail: [...rows.values()].map(row => row.line).join("\n") };
 	}, [metadata.route, props.agents, props.callId]);
 	const showBody = expanded || props.autoExpanded === true || retained || metadata.liveDetail;
 	// Wait owns its clock; Ask names the user wait even while its details are closed.
@@ -129,25 +134,25 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 	const bare = state === "complete" && result !== undefined && !retained && !failed && diagnosticCount === 0 && nontext.length === 0 && (attachments?.length ?? 0) === 0 && hasNoDetails({ name, args: record(args), details, stream, text });
 	const aux = intent?.replace(/\s+/g, " ").trim() || undefined;
 	if (bare) {
-		const target = compactTarget || metadata.target;
+		const target = compactTarget?.digest ?? metadata.target;
 		return <div ref={root} className="omp-tool omp-native-tool omp-native-tool--bare" data-tool-name={name} data-tool-family={metadata.route.name} data-tool-call-id={props.callId ?? result.toolCallId} data-tool-status={state}>
-			<div className="omp-tool-head omp-tool-head--static" title={[metadata.title, target, aux, "no output"].filter(Boolean).join(" · ")}>
+			<div className="omp-tool-head omp-tool-head--static" title={[metadata.title, compactTarget?.detail ?? target, aux, "no output"].filter(Boolean).join(" · ")}>
 				{/* A settled call shows no mark: the announced status below says "complete". */}
 				<span className={`codicon codicon-${TOOL_ICONS[metadata.route.name] ?? "tools"}`} aria-hidden="true" />
 				<span className="omp-tool-name">{metadata.title}</span>
-				{target && <span className="omp-tool-digest" title={target}><ToolTargetText category={metadata.category} paths={metadata.paths} text={displayText(target)} line={changedLine} revalidate={state} /></span>}
+				{target && <span className="omp-tool-digest" title={compactTarget?.detail ?? target}><ToolTargetText category={metadata.category} paths={metadata.paths} text={displayText(target)} line={changedLine} revalidate={state} /></span>}
 				{aux && <span className="omp-tool-aux omp-tool-aux--intent" title={aux}>{aux}</span>}
 				<span className="omp-tool-aux omp-tool-aux--none">no output</span>
 				<span className="omp-sr-only" role="status">{state}</span>
 			</div>
 		</div>;
 	}
-	const headTarget = compactTarget || view?.target || metadata.target;
+	const headTarget = compactTarget?.digest ?? view?.target ?? metadata.target;
 	const face = <>
 		{!pendingAsk && !(state === "complete" && !failed) && <span className={`codicon codicon-${failed ? "error omp-tool-status--failed" : STATE_ICONS[state]}`} aria-hidden="true" />}
 		<span className={`codicon codicon-${view?.icon ?? TOOL_ICONS[metadata.route.name] ?? "tools"}`} aria-hidden="true" />
 		<span className="omp-tool-name">{waitFace && view?.title?.startsWith("Waiting on") ? <><span className="omp-wait-title-full">{view.title}</span><span className="omp-wait-title-short">Wait</span></> : view?.title ?? metadata.title}</span>
-		{headTarget && <span className="omp-tool-digest" title={headTarget}><ToolTargetText category={metadata.category} paths={metadata.paths} text={displayText(headTarget)} line={changedLine} revalidate={state} /></span>}
+		{headTarget && <span className="omp-tool-digest" title={compactTarget?.detail ?? headTarget}><ToolTargetText category={metadata.category} paths={metadata.paths} text={displayText(headTarget)} line={changedLine} revalidate={state} /></span>}
 		{view?.inline}
 		{aux && <span className="omp-tool-aux omp-tool-aux--intent" title={aux}>{aux}</span>}
 		{view?.meta?.map((meta, index) => <span className="omp-native-tool-meta" key={index}>{displayText(meta)}</span>)}

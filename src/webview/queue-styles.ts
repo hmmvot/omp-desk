@@ -12,9 +12,12 @@ export const QUEUE_STYLES = `
 .omp-queue-head { display: flex; align-items: center; min-width: 0; height: ${HUD_HEADER_PX}px; box-sizing: border-box; }
 .omp-queue-title { display: flex; flex: 1 1 auto; min-width: 0; height: 100%; box-sizing: border-box; gap: 6px; align-items: center; padding: 4px 8px; }
 .omp-queue-all { display: flex; flex: none; gap: 4px; align-items: center; align-self: stretch; padding: 0 8px; border: 0; border-radius: var(--omp-radius); background: none; color: var(--omp-muted); font: inherit; cursor: pointer; }
+/* The title reserves the chevron slot of the TODO and Agents rows, so the three labels start at the same x. */
+.omp-queue-title::before { content: ""; flex: none; width: 16px; }
 .omp-queue-all:hover:not(:disabled), .omp-queue-action:hover:not(:disabled) { background: var(--vscode-list-hoverBackground); color: var(--vscode-foreground); }
 .omp-queue-all:focus-visible, .omp-queue-action:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
 .omp-queue-all:disabled, .omp-queue-action:disabled { opacity: 0.55; cursor: default; }
+.vscode-high-contrast .omp-queue-all, .vscode-high-contrast-light .omp-queue-all { border: 1px solid var(--omp-border); }
 .omp-queue-rows { padding-bottom: ${HUD_LIST_PAD_PX}px; }
 .omp-queue-item { display: flex; gap: 6px; align-items: center; min-width: 0; height: ${HUD_LINE_PX}px; box-sizing: border-box; padding: 1px 0; overflow: hidden; white-space: nowrap; }
 .omp-queue-kind { flex: none; color: var(--omp-muted); font-size: 0.85em; }

@@ -249,6 +249,12 @@ test("queued messages row: list, cancel, edit, already-sent race and bottom anch
 			assert.equal(same.font[0], same.font[1]);
 			assert.equal(same.head[0], same.head[1], "the same header height");
 			assert.ok(same.hover.some(value => value.includes("--vscode-list-hoverBackground")), "the same hover background");
+			// R12: the title reserves the chevron slot, so the labels start at the same x, and Queue all is a flat control.
+			const aligned = await ui.evaluate<{ labels: number[]; all: { border: string; background: string } }>(`(()=>{
+			 const left=node=>node.getBoundingClientRect().left,all=getComputedStyle(document.querySelector('.omp-queue-all'));
+			 return{labels:[left(document.querySelector('.omp-hud--todo .omp-hud-label')),left(document.querySelector('.omp-queue .omp-hud-label'))],all:{border:all.borderTopWidth,background:all.backgroundColor}}})()`);
+			assert.ok(Math.abs(aligned.labels[0]! - aligned.labels[1]!) <= 1, `the Queued label starts where the TODO label does (${aligned.labels})`);
+			assert.deepEqual(aligned.all, { border: "0px", background: "rgba(0, 0, 0, 0)" }, "Queue all has no resting border or fill");
 			await ui.evaluate("window.ui.push({todoSeed:[]});window.ui.queue([],[])");
 		});
 

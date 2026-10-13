@@ -1712,7 +1712,8 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			})()`);
 			await ui.wait("document.querySelector('[data-tool-call-id=\"wait-disclosure\"]')?.textContent.includes('settled')");
 			const task = await ui.evaluate<string>("document.querySelector('[data-tool-call-id=\"task-disclosure\"]').textContent");
-			assert.match(task, /Worker.*scout.*running/s);
+			assert.match(task, /1 agent: Worker/);
+			assert.match(await ui.evaluate<string>("document.querySelector('[data-tool-call-id=\"task-disclosure\"] .omp-tool-digest').title"), /Worker · scout · running/, "the per-agent list is the digest's tooltip");
 			assert.doesNotMatch(task, /Goal|Shared context detail|Assigned detail|Expanded agent activity|Background task started|0ms|INTERNAL_/);
 			const wait = await ui.evaluate<string>("document.querySelector('[data-tool-call-id=\"wait-disclosure\"]').textContent");
 			assert.match(wait, /Worker settled.*12s/s, "the one-line face names the job, its outcome and clock");
@@ -4346,6 +4347,132 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.wait("!document.querySelector('.omp-rewind-bar--picking')");
 			assert.equal((await navigations()).length, 1);
 			assert.equal(await ui.evaluate("window.ui.sends().length"), 0);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("an empty chat names the folder and model, shows the key hints, lists the folder's recent sessions and opens one by the answer's id and ordinal; a short answer is asked again, a full one is not", async () => {
+			await reset("empty-state");
+			await ui.evaluate("window.ui.push({header:{id:'empty-h',cwd:'D:/work/alpha-desk/',timestamp:'2026-10-13T10:00:00.000Z'},entries:[],durableCount:0,working:false,settled:true})");
+			await ui.wait("document.querySelector('.omp-empty-state') && window.sent.some(message=>message.type==='omp:recent-sessions-request')");
+			const start = await ui.evaluate<{ head: string; keys: string[]; recents: number }>("({head:document.querySelector('.omp-empty-head').textContent,keys:[...document.querySelectorAll('.omp-empty-key kbd')].map(node=>node.textContent),recents:document.querySelectorAll('.omp-empty-recent button').length})");
+			assert.match(start.head, /alpha-desk/);
+			assert.match(start.head, /Original · low/);
+			assert.deepEqual(start.keys, ["/", "@", "Alt+Enter", "Esc Esc"]);
+			assert.equal(start.recents, 0, "hints alone until the host answers");
+			// Answers the latest request in one step, so a timer cannot slip a newer request between reading its id and replying.
+			const answer = (items: string, offset = 0) => ui.evaluate<number>(`(()=>{const request=window.sent.filter(message=>message.type==='omp:recent-sessions-request').at(-1);window.ui.receive({type:'omp:recent-sessions',requestId:request.requestId+${offset},items:${items}});return request.requestId})()`);
+			const hours = (count: number) => `Date.now()-${count}*3600000`;
+			await answer(`[{title:'Stale',updatedAt:${hours(1)}}]`, 1000);
+			await settleFrames();
+			assert.equal(await ui.evaluate("document.querySelectorAll('.omp-empty-recent button').length"), 0, "an answer to another request is dropped");
+			const first = await answer(`[{title:'Replace the whitespace split in the tokenizer',updatedAt:${hours(2)}},{title:'How does the parser work?',updatedAt:${hours(24)}}]`);
+			await ui.wait("document.querySelectorAll('.omp-empty-recent button').length===2");
+			assert.deepEqual(await ui.evaluate("[...document.querySelectorAll('.omp-empty-recent button')].map(row=>[row.querySelector('.omp-empty-recent-title').textContent,row.querySelector('.omp-empty-recent-age').textContent])"), [["Replace the whitespace split in the tokenizer", "2h"], ["How does the parser work?", "1d"]]);
+			// The rows take the click: nothing of the centred frame is above them.
+			assert.equal(await ui.evaluate("(()=>{const row=document.querySelector('.omp-empty-recent button').getBoundingClientRect();return document.querySelector('.omp-empty-recent button').contains(document.elementFromPoint(row.left+row.width/2,row.top+row.height/2))})()"), true);
+			await ui.evaluate("document.querySelector('.omp-empty-recent button').click()");
+			await ui.wait("window.sent.some(message=>message.type==='omp:open-recent')");
+			assert.deepEqual(await ui.evaluate("window.sent.filter(message=>message.type==='omp:open-recent').at(-1)"), { type: "omp:open-recent", requestId: first, index: 0 });
+			// Two rows are fewer than the list holds: the tree may still be reading, so the page asks again (the fixture's clock holds the 4 s timer).
+			const asked = () => ui.evaluate<number>("window.sent.filter(message=>message.type==='omp:recent-sessions-request').length");
+			const before = await asked();
+			await ui.evaluate("window.fixtureClock.fire(4000)");
+			await ui.wait(`window.sent.filter(message=>message.type==='omp:recent-sessions-request').length>${before}`);
+			const second = await answer(`[{title:'One',updatedAt:${hours(1)}},{title:'Two',updatedAt:${hours(2)}},{title:'Three',updatedAt:${hours(3)}}]`);
+			await ui.wait("document.querySelectorAll('.omp-empty-recent button').length===3");
+			await ui.evaluate("document.querySelectorAll('.omp-empty-recent button')[2].click()");
+			await ui.wait("window.sent.filter(message=>message.type==='omp:open-recent').length===2");
+			assert.deepEqual(await ui.evaluate("window.sent.filter(message=>message.type==='omp:open-recent').at(-1)"), { type: "omp:open-recent", requestId: second, index: 2 });
+			const full = await asked();
+			await ui.evaluate("window.fixtureClock.fire(4000)");
+			await settleFrames();
+			assert.equal(await asked(), full, "a full answer is not asked for again");
+			// Once the conversation has content the empty state is gone, and the italic line was never the only thing there.
+			await ui.evaluate("window.ui.thinking([{type:'text',text:'Hello'}])");
+			await ui.wait("!document.querySelector('.omp-empty-state')");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("an aborted reply is one muted line with its own message, a provider error one line, and Handed off is set in the UI font", async () => {
+			await reset("notices");
+			await ui.evaluate(`window.row=(id,message)=>({type:'message',id,parentId:null,timestamp:'2026-10-01T00:00:00.000Z',message});
+			 window.ui.push({entries:[window.row('u1',{role:'user',timestamp:1,content:'Do it'}),window.row('a1',{role:'assistant',model:'m',timestamp:2,stopReason:'aborted',errorMessage:'Interrupted by user',content:[]}),
+			  window.row('u2',{role:'user',timestamp:3,content:'Again'}),window.row('a2',{role:'assistant',model:'m',timestamp:4,stopReason:'aborted',content:[]}),
+			  window.row('u3',{role:'user',timestamp:5,content:'Once more'}),window.row('a3',{role:'assistant',model:'m',timestamp:6,stopReason:'error',errorMessage:'Provider overloaded; try again later',content:[]}),
+			  {type:'compaction',id:'handoff',parentId:null,timestamp:'2026-10-01T00:00:00.000Z',summary:'Summary',method:'handoff',firstKeptEntryId:'u3',tokensBefore:48400,tokensAfter:9400}],durableCount:7,working:false,settled:true})`);
+			await ui.wait("document.querySelectorAll('.omp-turn-aborted').length===2 && document.querySelector('.omp-turn-error') && document.querySelector('.omp-native-summary-amount')");
+			const notices = await ui.evaluate<{ aborted: string[]; strong: number; icon: boolean; muted: boolean; role: string | null; error: { text: string; strong: string; lines: number; color: boolean }; label: string[]; amount: string[] }>(`(()=>{
+			 const [own,plain]=[...document.querySelectorAll('.omp-turn-aborted')],error=document.querySelector('.omp-turn-error'),amount=document.querySelector('.omp-native-summary-amount'),label=document.querySelector('.omp-native-summary-label');
+			 const line=getComputedStyle(error),text=error.querySelector('span');
+			 return{aborted:[own.textContent,plain.textContent],strong:own.querySelectorAll('strong').length,icon:own.querySelector('.codicon-circle-slash')!==null,muted:getComputedStyle(own).color!==getComputedStyle(document.body).color,role:own.getAttribute('role'),
+			  error:{text:error.textContent,strong:error.querySelector('strong').textContent,lines:Math.round(error.getBoundingClientRect().height/parseFloat(line.lineHeight==='normal'?'18':line.lineHeight)),color:line.color!==getComputedStyle(own).color},
+			  label:[getComputedStyle(label).fontSize],amount:[getComputedStyle(amount).fontFamily,getComputedStyle(label).fontFamily,amount.textContent]}})()`);
+			assert.deepEqual(notices.aborted, ["Interrupted by user", "Aborted"], "the reply's own message, or Aborted when it has none");
+			assert.equal(notices.strong, 0, "no bold block above the message");
+			assert.ok(notices.icon && notices.muted && notices.role === "status");
+			assert.equal(notices.error.strong, "Provider error");
+			assert.equal(notices.error.text, "Provider errorProvider overloaded; try again later");
+			assert.equal(notices.error.lines, 1, "one line at this width");
+			assert.ok(notices.error.color, "the error colour, not the muted one");
+			assert.deepEqual(notices.label, ["12px"]);
+			assert.equal(notices.amount[0], notices.amount[1], "the amount is set in the UI font like its label");
+			assert.match(notices.amount[2]!, /48\.4k → 9\.4k tokens/);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("the working row spins and shimmers, and stops under reduced motion; High Contrast keeps plain muted text", async () => {
+			await reset("working-motion");
+			await ui.evaluate("window.ui.push({working:true,settled:false,workingIntent:'Reading the parser'})");
+			await ui.wait("document.querySelector('.omp-working-status-text:not(:empty)')");
+			const motion = () => ui.evaluate<{ text: string; glyph: string; spin: string; sweep: string; clip: string; height: number }>(`(()=>{
+			 const text=document.querySelector('.omp-working-status-text'),text_=getComputedStyle(text),glyph=getComputedStyle(text,'::before');
+			 return{text:text.textContent,glyph:glyph.content,spin:glyph.animationName,sweep:text_.animationName,clip:text_.backgroundClip,height:document.querySelector('.omp-working-status').getBoundingClientRect().height}})()`);
+			const moving = await motion();
+			assert.equal(moving.text, "Reading the parser");
+			assert.equal(moving.glyph, '"\ueb19"', "the codicon loading glyph precedes the text");
+			assert.notEqual(moving.spin, "none");
+			assert.notEqual(moving.sweep, "none");
+			assert.equal(moving.clip, "text");
+			assert.equal(moving.height, 24, "the row keeps its fixed height");
+			await ui.call("Emulation.setEmulatedMedia", { features: [{ name: "prefers-reduced-motion", value: "reduce" }] });
+			const still = await motion();
+			assert.deepEqual([still.spin, still.sweep], ["none", "none"], "reduced motion stops both");
+			await ui.call("Emulation.setEmulatedMedia", { features: MOTION_ALLOWED });
+			await ui.evaluate("document.body.classList.add('vscode-high-contrast')");
+			assert.deepEqual(await ui.evaluate("(()=>{const style=getComputedStyle(document.querySelector('.omp-working-status-text'));return[style.animationName,style.backgroundImage]})()"), ["none", "none"], "no text shimmer in High Contrast");
+			await ui.evaluate("document.body.classList.remove('vscode-high-contrast')");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("the ask dialog keeps the composer toolbar, has Cancel and Stop as text buttons and flat rows, and High Contrast keeps its borders", async () => {
+			await reset("ask-flat");
+			await ui.evaluate(`window.ui.push({uiRequests:[{id:'ask-flat',method:'ask',title:'t',questions:[{id:'scope',header:'Scope',question:'Which scope?',multi:true,options:[{label:'Narrow'},{label:'Whole repository'}]},{id:'checks',question:'Which checks?',multi:false,options:[{label:'Typecheck'}]}]}],working:true,settled:false})`);
+			await ui.wait("document.querySelector('.omp-ask-option') && document.querySelector('.omp-ask-actions .omp-btn--stop')");
+			await ui.evaluate("document.documentElement.style.setProperty('--vscode-focusBorder','#007fd4')");
+			await ui.evaluate("document.querySelectorAll('.omp-ask-option')[0].click()");
+			await ui.wait("document.querySelector('.omp-ask-option--checked')");
+			const flat = () => ui.evaluate<{ toolbar: boolean; actions: string[][]; unchecked: string; checked: string; tabIdle: string; tabActive: string; primary: string }>(`(()=>{
+			 const edge=node=>getComputedStyle(node).borderTopColor,fill=node=>getComputedStyle(node).backgroundColor;
+			 return{toolbar:document.querySelector('.omp-composer-toolbar').getBoundingClientRect().height>0,
+			  actions:[...document.querySelectorAll('.omp-ask-actions .omp-btn')].map(button=>[button.textContent.trim(),edge(button),fill(button)]),
+			  unchecked:edge(document.querySelectorAll('.omp-ask-option:not(.omp-ask-option--checked)')[0]),checked:edge(document.querySelector('.omp-ask-option--checked')),
+			  tabIdle:edge(document.querySelector('.omp-ask-tab:not(.omp-ask-tab--active)')),tabActive:edge(document.querySelector('.omp-ask-tab--active')),
+			  primary:fill(document.querySelector('.omp-ask-panel .omp-btn--primary'))}})()`);
+			const normal = await flat();
+			assert.equal(normal.toolbar, true, "the toolbar stays while a question is open");
+			assert.deepEqual(normal.actions.map(([label]) => label), ["Cancel", "Stop"]);
+			for (const [label, edge, fill] of normal.actions) assert.deepEqual([edge, fill], ["rgba(0, 0, 0, 0)", "rgba(0, 0, 0, 0)"], `${label} has no resting border or fill`);
+			assert.equal(normal.unchecked, "rgba(0, 0, 0, 0)", "an unchosen option is a flat row");
+			assert.equal(normal.checked, "rgb(0, 127, 212)", "the chosen option keeps its focus edge");
+			assert.equal(normal.tabIdle, "rgba(0, 0, 0, 0)");
+			assert.equal(normal.tabActive, "rgb(0, 127, 212)");
+			assert.notEqual(normal.primary, "rgba(0, 0, 0, 0)", "Next stays the one filled control");
+			await ui.evaluate("document.documentElement.style.setProperty('--vscode-contrastBorder','#6fc3df');document.body.classList.add('vscode-high-contrast')");
+			const contrast = await flat();
+			for (const [label, edge] of contrast.actions) assert.equal(edge, "rgb(111, 195, 223)", `${label} keeps the contrast border in High Contrast`);
+			assert.equal(contrast.unchecked, "rgb(111, 195, 223)");
+			assert.equal(contrast.tabIdle, "rgb(111, 195, 223)");
+			await ui.evaluate("document.body.classList.remove('vscode-high-contrast')");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 

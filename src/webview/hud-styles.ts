@@ -20,6 +20,8 @@ export const HUD_STYLES = `
 .omp-hud-summary--warn { color: var(--vscode-editorWarning-foreground); }
 .omp-hud-counter { flex: none; color: var(--omp-muted); font-variant-numeric: tabular-nums; }
 .omp-hud-open { flex: none; align-self: stretch; padding: 0 8px; border: 0; border-radius: var(--omp-radius); background: none; color: var(--omp-muted); cursor: pointer; }
+.omp-hud-open:hover:not(:disabled) { color: var(--vscode-foreground); }
+.vscode-high-contrast .omp-hud-open, .vscode-high-contrast-light .omp-hud-open { border: 1px solid var(--omp-border); }
 .omp-hud-open:disabled, .omp-hud-agent:disabled, .omp-hud-more:disabled { opacity: 0.55; cursor: default; }
 .omp-hud-rows { list-style: none; margin: 0; padding: 0 8px ${HUD_LIST_PAD_PX}px 30px; }
 .omp-hud-line { display: flex; gap: 6px; align-items: center; min-width: 0; height: ${HUD_LINE_PX}px; box-sizing: border-box; padding: 1px 0; overflow: hidden; white-space: nowrap; }

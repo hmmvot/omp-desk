@@ -193,8 +193,37 @@ ${ANSI_STYLES}
 .omp-history-pages button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
 
 .omp-empty { color: var(--omp-muted); font-style: italic; padding: 4px 0; }
+/* The empty conversation: folder and model, the key hints and up to three recent sessions, centered in the transcript area. The frame takes no clicks except on the recent rows. */
+.omp-empty-state { position: absolute; inset: 0; display: flex; align-items: center; align-items: safe center; justify-content: center; padding: 0 24px 40px; pointer-events: none; }
+.omp-empty-state-body { width: min(520px, 100%); }
+.omp-empty-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; color: var(--omp-muted); }
+.omp-empty-head .codicon { font-size: 20px; }
+.omp-empty-head b { font-size: 15px; font-weight: 600; color: var(--vscode-foreground); }
+.omp-empty-head small { font-size: 12px; }
+.omp-empty-state h3 { margin: 18px 0 6px; font-size: 11px; font-weight: 400; letter-spacing: 0.04em; text-transform: uppercase; color: var(--omp-muted); }
+.omp-empty-keys { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; align-items: center; margin: 0; font-size: 12px; color: var(--omp-muted); }
+.omp-empty-key { display: contents; }
+.omp-empty-keys dt, .omp-empty-keys dd { margin: 0; }
+.omp-empty-keys kbd { display: inline-block; padding: 0 6px; border: 1px solid var(--omp-border); border-radius: var(--omp-radius); font: inherit; font-size: 11px; color: var(--vscode-foreground); }
+.omp-empty-recent { display: flex; flex-direction: column; margin: 0; padding: 0; list-style: none; }
+.omp-empty-recent button { display: flex; align-items: center; gap: 8px; width: calc(100% + 16px); margin: 0 -8px; padding: 4px 8px; border: 0; border-radius: var(--omp-radius); background: none; color: var(--vscode-foreground); font: inherit; text-align: left; cursor: pointer; pointer-events: auto; }
+.omp-empty-recent button:hover { background: var(--vscode-list-hoverBackground); }
+.omp-empty-recent button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+.omp-empty-recent .codicon, .omp-empty-recent-age { flex: none; color: var(--omp-muted); }
+.omp-empty-recent button:hover .codicon, .omp-empty-recent button:hover .omp-empty-recent-age, .omp-empty-recent button:focus-visible .codicon, .omp-empty-recent button:focus-visible .omp-empty-recent-age { color: var(--vscode-foreground); }
+.omp-empty-recent-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.omp-empty-recent-age { font-size: 12px; }
 .omp-working-status { box-sizing: border-box; height: 24px; min-height: 24px; max-height: 24px; display: flex; align-items: center; gap: 8px; overflow: hidden; color: var(--omp-muted); font-size: 12px; line-height: 20px; }
 .omp-working-status-text { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* The row shows that work is going on: an eight-step spinner glyph and a muted-to-foreground sweep across the text. Both stop under reduced motion; the sweep also gives way to plain muted text in High Contrast and forced colors, where text must stay a system colour. */
+.omp-working-status-text:not(:empty)::before { content: "\\eb19"; font-family: codicon; font-size: 14px; display: inline-block; vertical-align: -2px; margin-right: 6px; animation: omp-working-spin 1s steps(8) infinite; }
+.omp-working-status-text { background: linear-gradient(90deg, var(--omp-muted) 35%, var(--vscode-foreground) 50%, var(--omp-muted) 65%) 100% 0 / 300% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: omp-working-shimmer 2s linear infinite; }
+.omp-working-status-text:not(:empty)::before { -webkit-text-fill-color: var(--omp-muted); }
+@keyframes omp-working-spin { to { transform: rotate(360deg); } }
+@keyframes omp-working-shimmer { to { background-position: 0 0; } }
+@media (prefers-reduced-motion: reduce) { .omp-working-status-text, .omp-working-status-text:not(:empty)::before { animation: none; } }
+.vscode-high-contrast .omp-working-status-text, .vscode-high-contrast-light .omp-working-status-text { background: none; color: var(--omp-muted); animation: none; }
+@media (forced-colors: active) { .omp-working-status-text { background: none; color: inherit; animation: none; } .omp-working-status-text::before { -webkit-text-fill-color: currentColor; } }
 .omp-working-status-elapsed { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
 
 /* The view renders only the newest rows; this reveals the rest a step at a time. */
@@ -242,6 +271,11 @@ ${ANSI_STYLES}
 .omp-retry-turn { display: inline-flex; align-items: center; gap: 4px; margin-top: 6px; padding: 2px 8px; border: 1px solid var(--vscode-button-border, transparent); border-radius: var(--omp-radius); background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); font: inherit; cursor: pointer; }
 .omp-retry-turn:hover { background: var(--vscode-button-secondaryHoverBackground); }
 .omp-retry-turn:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+/* Turn notices: an aborted reply is one muted line, a provider error one line in the error colour that wraps only when the panel is narrow. */
+.omp-turn-aborted { display: flex; align-items: center; gap: 6px; padding: 2px 0; color: var(--omp-muted); font-size: 12px; }
+.omp-turn-error { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; color: var(--vscode-errorForeground); }
+.omp-turn-error > strong { font-weight: 600; }
+.omp-turn-error > span { min-width: 0; overflow-wrap: anywhere; }
 /* OMP extension setWidget blocks and notify notices, above or below the prompt. */
 .omp-extension-widgets { display: flex; flex-direction: column; gap: 4px; margin: 0 0 6px; }
 .omp-extension-widgets--belowEditor { margin: 6px 0 0; }
@@ -649,7 +683,7 @@ ${ANSI_STYLES}
 	min-width: 0;
 	text-align: left;
 	background: none;
-	border: 1px solid var(--omp-border);
+	border: 1px solid transparent;
 	border-radius: var(--omp-radius-card);
 	color: inherit;
 	font: inherit;
@@ -675,7 +709,7 @@ ${ANSI_STYLES}
 	min-width: 0;
 	max-width: 100%;
 	background: none;
-	border: 1px solid var(--omp-border);
+	border: 1px solid transparent;
 	border-radius: var(--omp-radius);
 	color: var(--omp-muted);
 	font: inherit;
@@ -701,7 +735,7 @@ ${ANSI_STYLES}
 	min-width: 0;
 	text-align: left;
 	background: none;
-	border: 1px solid var(--omp-border);
+	border: 1px solid transparent;
 	border-radius: var(--omp-radius-card);
 	color: inherit;
 	font: inherit;
@@ -712,6 +746,12 @@ ${ANSI_STYLES}
 .omp-ask-review-q { color: var(--omp-muted); font-size: 11px; overflow-wrap: anywhere; }
 .omp-ask-review-a { overflow-wrap: anywhere; white-space: pre-wrap; }
 .omp-ask-review-a--none { color: var(--omp-muted); }
+/* Flat rows: no resting edge in normal themes, only the checked option and the active tab keep one; High Contrast keeps its contrast border on every control. */
+.vscode-high-contrast .omp-ask-option:not(.omp-ask-option--checked), .vscode-high-contrast-light .omp-ask-option:not(.omp-ask-option--checked), .vscode-high-contrast .omp-ask-tab:not(.omp-ask-tab--active), .vscode-high-contrast-light .omp-ask-tab:not(.omp-ask-tab--active), .vscode-high-contrast .omp-ask-review-row, .vscode-high-contrast-light .omp-ask-review-row { border-color: var(--omp-border); }
+/* Cancel and Stop are text buttons; Next and Submit stay the one primary control. */
+.omp-ask-actions .omp-btn { border-color: transparent; background: transparent; color: var(--omp-muted); }
+.omp-ask-actions .omp-btn:hover:not(:disabled) { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); color: var(--vscode-foreground); }
+.vscode-high-contrast .omp-ask-actions .omp-btn, .vscode-high-contrast-light .omp-ask-actions .omp-btn { border-color: var(--omp-border); }
 
 /* ── small shared parts ─────────────────────────────────────────────────── */
 
@@ -773,8 +813,8 @@ ${QUEUE_STYLES}
 .omp-native-summary--divider > .omp-native-disclosure > summary { display: flex; align-items: center; gap: 10px; list-style: none; color: var(--omp-muted); }
 .omp-native-summary--divider > .omp-native-disclosure > summary::-webkit-details-marker { display: none; }
 .omp-native-summary--divider > .omp-native-disclosure > summary::before, .omp-native-summary--divider > .omp-native-disclosure > summary::after { content: ""; flex: 1 1 24px; border-top: 1px solid var(--omp-border); }
-.omp-native-summary-label { flex: 0 1 auto; text-align: center; }
-.omp-native-summary-amount { font-family: var(--omp-mono); font-size: var(--omp-mono-size); }
+.omp-native-summary-label { flex: 0 1 auto; text-align: center; font-size: 12px; }
+.omp-native-summary-amount { font-family: var(--vscode-font-family); }
 .omp-native-summary--divider > .omp-native-disclosure[open] > summary { margin-bottom: 8px; }
 .omp-native-badge { border: 1px solid var(--omp-border); border-radius: var(--omp-radius); padding: 0 5px; font-size: 0.85em; color: var(--omp-muted); }
 .omp-native-image { margin: 6px 0; }
@@ -795,12 +835,12 @@ ${QUEUE_STYLES}
 .omp-native-child .omp-transcript { max-height: none; min-height: 100px; overflow: visible; }
 ${TOOL_STYLES}
 /* Action buttons share VS Code's secondary tokens; transcript disclosure rows remain flat. */
-.omp-jump-latest, .omp-attachment-remove, .omp-earlier button, .omp-history-pages button, .omp-native-child button, .omp-hud-open {
+.omp-jump-latest, .omp-attachment-remove, .omp-earlier button, .omp-history-pages button, .omp-native-child button {
 	border: 1px solid var(--vscode-button-border, var(--vscode-contrastBorder, transparent));
 	background: var(--vscode-button-secondaryBackground);
 	color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
 }
-.omp-jump-latest:hover:not(:disabled), .omp-attachment-remove:hover:not(:disabled), .omp-earlier button:hover:not(:disabled), .omp-history-pages button:hover:not(:disabled), .omp-native-child button:hover:not(:disabled), .omp-hud-open:hover:not(:disabled) {
+.omp-jump-latest:hover:not(:disabled), .omp-attachment-remove:hover:not(:disabled), .omp-earlier button:hover:not(:disabled), .omp-history-pages button:hover:not(:disabled), .omp-native-child button:hover:not(:disabled) {
 	background: var(--vscode-button-secondaryHoverBackground);
 	color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
 }

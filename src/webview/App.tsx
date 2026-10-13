@@ -265,6 +265,7 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 						cwd={snapshot.header?.cwd}
 						retrySuppressedIds={snapshot.retrySuppressedIds}
 						agents={snapshot.agents}
+						thinkingLevel={snapshot.state?.thinkingLevel}
 						agentActivity={snapshot.agentActivity}
 						renderChild={renderChild}
 						model={snapshot.state?.model}
