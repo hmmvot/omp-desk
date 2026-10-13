@@ -17,9 +17,9 @@ export interface ControlProps<K extends ConfigControl["kind"]> {
   readonly onCommit: (value: ConfigValue) => void;
 }
 
-export function BooleanControl({ entry, value, disabled, onCommit }: ControlProps<"boolean">) {
-  return <label className="check"><input type="checkbox" aria-label={entry.label} checked={value === true} disabled={disabled} onChange={event => onCommit(event.target.checked)} />
-    <span>{value === true ? "On" : "Off"}</span></label>;
+export function BooleanControl({ entry, value, inherited, disabled, onCommit }: ControlProps<"boolean">) {
+  return <label className="switch-row"><span className="sw"><input type="checkbox" aria-label={entry.label} checked={value === true} disabled={disabled} onChange={event => onCommit(event.target.checked)} /><i /></span>
+    <span className={`small${inherited ? " muted" : ""}`}>{value === true ? "On" : "Off"}</span></label>;
 }
 
 export function EnumControl({ entry, control, value, inherited, disabled, onCommit }: ControlProps<"enum">) {

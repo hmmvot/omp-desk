@@ -1,51 +1,69 @@
-import { entryBadges, shownValue } from "../model";
+import { fileLayerFor, highlightParts, isModified, rowNotes, shownValue } from "../model";
+import type { View } from "../model";
 import { BooleanControl, EnumControl, MultiSelectControl, NumberControl, NumericControl, TextControl } from "./Controls";
+import { Icon } from "./Icon";
 import type { ConfigEntry, ConfigLayer, ConfigValue } from "../../../protocol/omp-config-model";
 
-/** One setting: label, description, badges and the control for the layer being edited. Presentation only. */
+/** One setting, laid out like VS Code's Settings editor: "Tab › Group: Label", id, description, control, notes. Presentation only. */
 export interface SettingRowProps {
   readonly entry: ConfigEntry;
-  readonly layer: ConfigLayer;
-  /** The layer's file exists, so Open in YAML has something to open. */
+  /** The tab's label, for the "Tab › Group: " prefix. */
+  readonly tabLabel: string;
+  readonly view: View;
+  /** The file Open config would open exists. */
   readonly layerFileExists: boolean;
-  /** The layer cannot be written in this scope (global scope has no project folder). */
-  readonly layerUnavailable: boolean;
   readonly busy: boolean;
-  readonly showTab: string | null;
+  /** The search words to mark. */
+  readonly terms: readonly string[];
   onSet(value: ConfigValue): void;
   onReset(): void;
-  onOpen(): void;
+  onOpen(layer: ConfigLayer): void;
 }
 
-export function SettingRow({ entry, layer, layerFileExists, layerUnavailable, busy, showTab, onSet, onReset, onOpen }: SettingRowProps) {
-  const { value, inherited } = shownValue(entry, layer);
-  const writable = entry.writable[layer] && !layerUnavailable;
+function Marked({ text, terms }: { readonly text: string; readonly terms: readonly string[] }) {
+  return <>{highlightParts(text, terms).map((part, index) => part.match ? <mark key={index}>{part.text}</mark> : part.text)}</>;
+}
+
+const WHY: Record<string, string> = {
+  secret: "Credential", complex: "Complex value", "runtime-options": "Choices come from OMP at run time", "condition-unknown": "Newer visibility rule", oversize: "Too large to show", unsupported: "No fixed choices",
+};
+
+export function SettingRow({ entry, tabLabel, view, layerFileExists, busy, terms, onSet, onReset, onOpen }: SettingRowProps) {
+  const { value, inherited } = shownValue(entry, view);
+  const effective = view === "effective";
+  const writable = !effective && entry.writable[view];
   const disabled = busy || !writable;
   const control = entry.control;
   const common = { entry, value, inherited, disabled, onCommit: onSet };
-  const layerSet = entry.layers[layer].state !== "unset";
-  return <li className={`row${entry.visible ? "" : " hidden-by-condition"}`} data-setting={entry.id}>
-    <div className="row-head">
-      <strong className="row-label">{entry.label}</strong>
-      {showTab !== null && <span className="badge muted">{showTab}</span>}
-      <code className="row-id">{entry.id}</code>
+  const layer = fileLayerFor(entry, view);
+  const secret = entry.readOnly?.reason === "secret";
+  const state = effective ? null : entry.layers[view];
+  const title = entry.description.length > 300 ? `${entry.description.slice(0, 300)}…` : entry.description;
+  return <li className={`srow${isModified(entry, view) ? " mod" : ""}`} data-setting={entry.id}>
+    <div className="srow-head">
+      <span className="st"><span className="cat">{tabLabel}{entry.group ? ` › ${entry.group}` : ""}: </span><Marked text={entry.label} terms={terms} /></span>
+      <span className="row-actions">
+        {!effective && state !== null && state.state !== "unset" && entry.readOnly === null && <button type="button" className="btn icon ghost" disabled={busy} title={`Reset: remove this key from the ${view} config`} aria-label={`Reset ${entry.label}`} onClick={onReset}><Icon name="discard" /></button>}
+        {!secret && <button type="button" className="btn icon ghost" disabled={!layerFileExists} title={layerFileExists ? "Open the config file at this key" : "That config file does not exist yet"} aria-label={`Open ${entry.label} in the ${layer} config file`} onClick={() => onOpen(layer)}><Icon name="go-to-file" /></button>}
+      </span>
     </div>
-    {entry.warning && <p className="row-warning" role="note">{entry.warning}</p>}
-    <p className="row-description muted">{entry.description}</p>
-    {entry.condition && <p className="row-condition small muted">{entry.condition.note}</p>}
-    <div className="row-badges">{entryBadges(entry).map(badge => <span key={badge.text} className={`badge ${badge.tone}`} title={badge.title}>{badge.text}</span>)}</div>
-    {entry.readOnly
-      ? <div className="row-readonly"><p className="small">{entry.readOnly.note}</p>
-        {entry.readOnly.reason !== "secret" && <button type="button" className="secondary" disabled={!layerFileExists || layerUnavailable} onClick={onOpen}>Open {layer} YAML at this key</button>}</div>
-      : <div className="row-control">
-        {control?.kind === "boolean" && <BooleanControl {...common} control={control} />}
-        {control?.kind === "enum" && <EnumControl {...common} control={control} />}
-        {control?.kind === "number" && <NumberControl {...common} control={control} />}
-        {control?.kind === "numeric" && <NumericControl key={String(value)} {...common} control={control} />}
-        {control?.kind === "text" && <TextControl key={String(value)} {...common} control={control} />}
-        {control?.kind === "multiselect" && <MultiSelectControl key={JSON.stringify(value)} {...common} control={control} />}
-        <button type="button" className="secondary" disabled={busy || layerUnavailable || !layerSet} title={`Remove this setting from the ${layer} layer`} onClick={onReset}>Reset</button>
-        {inherited && writable && <span className="small muted">Not set in the {layer} layer</span>}
-      </div>}
+    <div className="sid"><Marked text={entry.id} terms={terms} /></div>
+    <div className="sdesc"><Marked text={title} terms={terms} /></div>
+    {entry.warning && <div className="swarn" role="note"><Icon name="warning" /><div>{entry.warning}</div></div>}
+    <div className="sctl">
+      {entry.readOnly
+        ? <span className="row-readonly"><Icon name={secret ? "lock" : "go-to-file"} /><span className="small muted" title={entry.readOnly.note}>{WHY[entry.readOnly.reason] ?? entry.readOnly.reason}</span>
+          {state !== null && <span className="tag">{state.state === "unset" ? "not set" : secret || !state.summary ? "set" : state.summary}</span>}
+          <span className="small">{entry.readOnly.note}</span></span>
+        : <>
+          {control?.kind === "boolean" && <BooleanControl {...common} control={control} />}
+          {control?.kind === "enum" && <EnumControl {...common} control={control} />}
+          {control?.kind === "number" && <NumberControl {...common} control={control} />}
+          {control?.kind === "numeric" && <NumericControl key={String(value)} {...common} control={control} />}
+          {control?.kind === "text" && <TextControl key={String(value)} {...common} control={control} />}
+          {control?.kind === "multiselect" && <MultiSelectControl key={JSON.stringify(value)} {...common} control={control} />}
+        </>}
+    </div>
+    <div className="snote">{rowNotes(entry, view).map((note, index) => <span key={index} className={`note ${note.tone}`} title={note.title}>{note.text}</span>)}</div>
   </li>;
 }
