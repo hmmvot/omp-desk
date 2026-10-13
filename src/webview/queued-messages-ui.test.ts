@@ -145,7 +145,7 @@ test("queued messages row: list, cancel, edit, already-sent race and bottom anch
 		const html = createGuestHtml(webview, extensionUri, "tab:2c26b46b-68ff-4c1d-a3d8-1e0f9a0b7c6d", null);
 		const nonce = /<script nonce="([^"]+)"/.exec(html)![1]!;
 		response.end(html.replace("</head>", `<style nonce="${nonce}">:root {
-			--vscode-editor-background:#1e1e1e;--vscode-editor-foreground:#dddddd;--vscode-editorWidget-background:#252526;
+			--vscode-editor-background:#1e1e1e;--vscode-editor-foreground:#dddddd;--vscode-foreground:#dddddd;--vscode-editorWidget-background:#252526;
 			--vscode-button-background:#007acc;--vscode-button-foreground:white;--vscode-input-background:#3c3c3c;
 			--vscode-input-foreground:#ddd;--vscode-panel-border:#555;--vscode-font-family:Arial;--vscode-font-size:13px;
 		}</style><script nonce="${nonce}">window.sent=[];window.errors=[];window.addEventListener("error",event=>window.errors.push(event.message));

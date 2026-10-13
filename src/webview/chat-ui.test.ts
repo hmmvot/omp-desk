@@ -202,7 +202,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 		// VS Code always defines the editor font for a webview; without it the terminal's
 		// fallback chain decides, and that depends on which glyph fonts a machine has.
 		response.end(html.replace("</head>", `<style nonce="${nonce}">:root {
-			--vscode-editor-background:#1e1e1e;--vscode-editor-foreground:#dddddd;--vscode-editorWidget-background:#252526;
+			--vscode-editor-background:#1e1e1e;--vscode-editor-foreground:#dddddd;--vscode-foreground:#dddddd;--vscode-editorWidget-background:#252526;
 			--vscode-editorSuggestWidget-background:#252526;--vscode-editorSuggestWidget-foreground:#dddddd;
 			--vscode-button-background:#007acc;--vscode-button-foreground:white;--vscode-input-background:#3c3c3c;
 			--vscode-input-foreground:#ddd;--vscode-panel-border:#555;--vscode-font-family:Arial;--vscode-font-size:13px;

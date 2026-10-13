@@ -178,6 +178,12 @@ test("theme-aware controls and live native/shell terminal palettes", { skip: bro
 			for (const name of ["model", "thinking", "inline", "fenced", "tool", "reminder", "completed", "cancelled", "stop", "follow", "contextPercent"]) assert.ok(contrast(result.colors[name]!.color, result.colors[name]!.background) >= 4.5, `${theme.name}: ${name} text contrast`);
 			assert.equal(result.colors.follow!.opacity, "1", "enabled follow-up is not dimmed");
 			assert.equal(result.colors.follow!.disabled, false, "a draft can be queued as a follow-up");
+			// Muted text is a derived token (not the theme's own description colour): it must read on every surface it is painted on.
+			await page.evaluate("(()=>{for(const [name,surface] of Object.entries({page:'--vscode-editor-background',widget:'--vscode-editorWidget-background',input:'--vscode-input-background'})){let box=document.getElementById('muted-'+name);if(!box){box=document.createElement('div');box.id='muted-'+name;box.style.cssText='position:fixed;left:0;top:0;width:10px;height:10px;visibility:hidden;pointer-events:none';const text=document.createElement('span');text.className='muted-probe';text.style.color='var(--omp-muted)';text.textContent='x';box.append(text);document.body.append(box)}document.getElementById('muted-'+name).style.background='var('+surface+')'}})()");
+			for (const surface of ["page", "widget", "input"]) {
+				const probe = await page.evaluate<ThemeObservation["colors"][string]>(`window.themeColorProbe('#muted-${surface} .muted-probe')`);
+				assert.ok(contrast(probe.color, probe.background) >= 4.5, `${theme.name}: muted text on the ${surface} surface`);
+			}
 			assert.equal(result.ring.label, "4%"); assert.equal(result.ring.cap, "butt"); assert.equal(result.ring.dash, "none");
 			for (const terminal of result.terminals) { assert.equal(terminal.background, theme.expected.background); assert.equal(terminal.color, theme.expected.foreground); assert.equal(terminal.ansi, theme.expected.blue); }
 			for (const text of result.text) assert.match(text, /Screen survives a live theme switch/);
@@ -221,7 +227,7 @@ test("theme-aware controls and live native/shell terminal palettes", { skip: bro
 			assert.equal(await page.evaluate("document.querySelectorAll('.omp-tool-head .codicon-error').length"), 1);
 			assert.equal(await page.evaluate("document.querySelector('.omp-tool-body').textContent.split('The command could not complete.').length-1"), 1);
 			assert.equal(await page.evaluate("document.querySelector('.omp-tool-head .omp-chip--err')"), null);
-			const failedColors: Record<string, string> = await page.evaluate<Record<string, string>>(`(()=>{const head=document.querySelector('.omp-tool-head'),status=head.querySelector('.codicon-error'),expected=document.createElement('span');expected.style.color='var(--vscode-testing-iconFailed,var(--vscode-errorForeground))';document.body.append(expected);const colors={status:getComputedStyle(status).color,expected:getComputedStyle(expected).color,title:getComputedStyle(head.querySelector('.omp-tool-name')).color,normal:getComputedStyle(head).color,meta:getComputedStyle(head.querySelector('.omp-native-tool-meta')).color};expected.style.color='var(--vscode-descriptionForeground)';colors.muted=getComputedStyle(expected).color;expected.remove();return colors})()`);
+			const failedColors: Record<string, string> = await page.evaluate<Record<string, string>>(`(()=>{const head=document.querySelector('.omp-tool-head'),status=head.querySelector('.codicon-error'),expected=document.createElement('span');expected.style.color='var(--vscode-testing-iconFailed,var(--vscode-errorForeground))';document.body.append(expected);const colors={status:getComputedStyle(status).color,expected:getComputedStyle(expected).color,title:getComputedStyle(head.querySelector('.omp-tool-name')).color,normal:getComputedStyle(head).color,meta:getComputedStyle(head.querySelector('.omp-native-tool-meta')).color};expected.style.color='var(--omp-muted)';colors.muted=getComputedStyle(expected).color;expected.remove();return colors})()`);
 			assert.equal(failedColors.status, failedColors.expected, "one failure icon uses the native failure token");
 			assert.equal(failedColors.title, failedColors.normal, "failed title retains normal foreground");
 			assert.equal(failedColors.meta, failedColors.muted, "exit codes remain muted metadata");

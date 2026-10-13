@@ -11,7 +11,7 @@ export const HUD_STYLES = `
 .omp-hud-stack { flex: 0 0 auto; width: min(840px, calc(100% - 24px)); min-width: 0; margin: 0 auto; padding-bottom: ${HUD_STACK_PAD_PX}px; }
 .omp-hud { min-width: 0; line-height: 18px; }
 .omp-hud-head { display: flex; align-items: center; min-width: 0; height: ${HUD_HEADER_PX}px; box-sizing: border-box; }
-.omp-hud-toggle { display: flex; flex: 1 1 auto; min-width: 0; height: 100%; box-sizing: border-box; gap: 6px; align-items: center; padding: 4px 8px; border: 0; border-radius: 4px; background: none; color: inherit; font: inherit; line-height: 18px; text-align: left; cursor: pointer; }
+.omp-hud-toggle { display: flex; flex: 1 1 auto; min-width: 0; height: 100%; box-sizing: border-box; gap: 6px; align-items: center; padding: 4px 8px; border: 0; border-radius: var(--omp-radius); background: none; color: inherit; font: inherit; line-height: 18px; text-align: left; cursor: pointer; }
 .omp-hud-toggle:hover, .omp-hud-open:hover:not(:disabled), .omp-hud-agent:hover:not(:disabled), .omp-hud-more:hover:not(:disabled) { background: var(--vscode-list-hoverBackground); }
 .omp-hud-toggle:focus-visible, .omp-hud-open:focus-visible, .omp-hud-agent:focus-visible, .omp-hud-more:focus-visible, .omp-detail-agent:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
 .omp-hud .codicon { flex: none; }
@@ -19,7 +19,7 @@ export const HUD_STYLES = `
 .omp-hud-summary { flex: 1 1 auto; min-width: 0; overflow: hidden; color: var(--omp-muted); text-overflow: ellipsis; white-space: nowrap; }
 .omp-hud-summary--warn { color: var(--vscode-editorWarning-foreground); }
 .omp-hud-counter { flex: none; color: var(--omp-muted); font-variant-numeric: tabular-nums; }
-.omp-hud-open { flex: none; align-self: stretch; padding: 0 8px; border: 0; border-radius: 4px; background: none; color: var(--omp-muted); cursor: pointer; }
+.omp-hud-open { flex: none; align-self: stretch; padding: 0 8px; border: 0; border-radius: var(--omp-radius); background: none; color: var(--omp-muted); cursor: pointer; }
 .omp-hud-open:disabled, .omp-hud-agent:disabled, .omp-hud-more:disabled { opacity: 0.55; cursor: default; }
 .omp-hud-rows { list-style: none; margin: 0; padding: 0 8px ${HUD_LIST_PAD_PX}px 30px; }
 .omp-hud-line { display: flex; gap: 6px; align-items: center; min-width: 0; height: ${HUD_LINE_PX}px; box-sizing: border-box; padding: 1px 0; overflow: hidden; white-space: nowrap; }
@@ -33,9 +33,9 @@ export const HUD_STYLES = `
 .omp-hud-tone--warning { color: var(--vscode-editorWarning-foreground); }
 /* Status tones belong to glyphs, never to closed task prose. */
 .omp-hud-task.omp-hud-tone--success, .omp-hud-task.omp-hud-tone--error,
-.omp-detail-task.omp-hud-tone--success, .omp-detail-task.omp-hud-tone--error { color: var(--vscode-descriptionForeground); }
+.omp-detail-task.omp-hud-tone--success, .omp-detail-task.omp-hud-tone--error { color: var(--omp-muted); }
 .omp-hud-task.omp-hud-tone--success > .codicon, .omp-detail-task.omp-hud-tone--success > .omp-detail-task-head > .codicon { color: var(--vscode-testing-iconPassed); }
-.omp-hud-task.omp-hud-tone--error > .codicon, .omp-detail-task.omp-hud-tone--error > .omp-detail-task-head > .codicon { color: var(--vscode-descriptionForeground); }
+.omp-hud-task.omp-hud-tone--error > .codicon, .omp-detail-task.omp-hud-tone--error > .omp-detail-task-head > .codicon { color: var(--omp-muted); }
 .omp-hud-agent, .omp-hud-more { width: 100%; padding: 1px 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
 .omp-hud-more { padding: 0; color: var(--omp-muted); }
 .omp-hud-agent { flex-wrap: wrap; height: auto; min-height: ${HUD_LINE_PX}px; }

@@ -13,12 +13,22 @@
 export const BASE_CSS = `:root {
 	color-scheme: light dark;
 	--omp-gap: 8px;
+	/* Three radius steps: controls, cards, the composer. Circles and pills are shapes, not steps. */
 	--omp-radius: 4px;
-	--omp-border: var(--vscode-widget-border, var(--vscode-panel-border));
-	--omp-muted: var(--vscode-descriptionForeground);
+	--omp-radius-card: 6px;
+	--omp-radius-composer: 10px;
+	/* Hierarchy derived from the theme's own foreground and background, so every theme (Light Modern, whose description colour is its foreground, included) gets a real step. */
+	--omp-border: color-mix(in srgb, var(--vscode-foreground) 18%, transparent);
+	--omp-muted: color-mix(in srgb, var(--vscode-foreground) 72%, var(--vscode-editor-background));
 	--omp-surface: var(--vscode-editorWidget-background, var(--vscode-editor-background));
 	--omp-mono: var(--vscode-editor-font-family, ui-monospace, "Cascadia Mono", Consolas, monospace);
 	--omp-mono-size: var(--vscode-editor-font-size, 12px);
+}
+
+/* High Contrast keeps the theme's own colours: a mix of two near-black/near-white values would lower the separation these themes guarantee. */
+.vscode-high-contrast, .vscode-high-contrast-light {
+	--omp-border: var(--vscode-contrastBorder, var(--vscode-widget-border, var(--vscode-panel-border)));
+	--omp-muted: var(--vscode-descriptionForeground, var(--vscode-foreground));
 }
 
 * { box-sizing: border-box; }

@@ -56,10 +56,10 @@ ${ANSI_STYLES}
 .omp-composer-lead { display: flex; align-items: center; gap: 6px; flex: 1 1 0; min-width: 0; }
 .omp-composer-lead > .omp-footer-trigger { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 3px; min-width: 8ch; max-width: min(26ch, calc(100% - 10ch - 6px)); }
 .omp-composer-lead > .omp-footer-trigger--level { min-width: 9ch; max-width: 12ch; }
-.omp-composer-branch { display: flex; align-items: center; gap: 4px; flex: 0 1 auto; min-width: 0; color: var(--vscode-descriptionForeground); font-size: 11px; }
+.omp-composer-branch { display: flex; align-items: center; gap: 4px; flex: 0 1 auto; min-width: 0; color: var(--omp-muted); font-size: 11px; }
 .omp-composer-branch > .codicon { flex: 0 0 auto; }
 .omp-composer-branch-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.omp-composer-toolbar .omp-footer-trigger { height: 28px; border: 1px solid var(--vscode-button-border, var(--vscode-contrastBorder, transparent)); border-radius: 4px; padding: 0 4px; background: transparent; color: var(--vscode-foreground); }
+.omp-composer-toolbar .omp-footer-trigger { height: 28px; border: 1px solid var(--vscode-button-border, var(--vscode-contrastBorder, transparent)); border-radius: var(--omp-radius); padding: 0 4px; background: transparent; color: var(--vscode-foreground); }
 .omp-footer-trigger { font: inherit; cursor: pointer; white-space: nowrap; }
 .omp-footer-trigger-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .omp-footer-trigger > .codicon { flex: none; }
@@ -70,16 +70,16 @@ ${ANSI_STYLES}
 .omp-footer-trigger--pending .omp-footer-trigger-label { font-style: italic; }
 .omp-footer-feedback { margin-top: 4px; color: var(--vscode-foreground); overflow-wrap: anywhere; }
 .omp-context-indicator { position: relative; display: flex; flex: 0 0 auto; }
-.omp-context-trigger { display: flex; align-items: center; justify-content: center; gap: 4px; height: 28px; padding: 0 5px; border: 1px solid var(--vscode-button-border, var(--vscode-contrastBorder, transparent)); border-radius: 4px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); cursor: pointer; }
+.omp-context-trigger { display: flex; align-items: center; justify-content: center; gap: 4px; height: 28px; padding: 0 5px; border: 1px solid var(--vscode-button-border, var(--vscode-contrastBorder, transparent)); border-radius: var(--omp-radius); background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); cursor: pointer; }
 .omp-context-trigger:hover { background: var(--vscode-button-secondaryHoverBackground); }
 .omp-context-trigger:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
-.omp-context-percent { color: var(--vscode-descriptionForeground); font-size: 11px; white-space: nowrap; }
-.omp-context-track { stroke: var(--vscode-descriptionForeground); opacity: 0.7; }
+.omp-context-percent { color: var(--omp-muted); font-size: 11px; white-space: nowrap; }
+.omp-context-track { stroke: var(--omp-muted); opacity: 0.7; }
 .omp-context-progress { stroke: var(--vscode-foreground, var(--vscode-input-foreground)); }
 .omp-context-progress--warning { stroke: var(--vscode-editorWarning-foreground, var(--vscode-input-foreground)); }
 .omp-context-progress--critical { stroke: var(--vscode-errorForeground, var(--vscode-input-foreground)); }
 /* The hover-widget background alone is within a shade of the chat panel in several themes, so lift it a few percent toward the foreground: lighter in dark themes, darker in light ones. */
-.omp-context-popover { position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 50; display: flex; flex-direction: column; gap: 4px; width: max-content; max-width: min(260px, calc(100vw - 24px)); box-sizing: border-box; padding: 16px; border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-widget-border)); border-radius: 6px; background: color-mix(in srgb, var(--vscode-editorHoverWidget-background) 86%, var(--vscode-foreground, var(--vscode-editorHoverWidget-foreground))); color: var(--vscode-editorHoverWidget-foreground); box-shadow: 0 4px 16px var(--vscode-widget-shadow); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; pointer-events: auto; }
+.omp-context-popover { position: absolute; right: 0; bottom: calc(100% + 8px); z-index: 50; display: flex; flex-direction: column; gap: 4px; width: max-content; max-width: min(260px, calc(100vw - 24px)); box-sizing: border-box; padding: 16px; border: 1px solid var(--vscode-editorHoverWidget-border, var(--vscode-widget-border)); border-radius: var(--omp-radius-card); background: color-mix(in srgb, var(--vscode-editorHoverWidget-background) 86%, var(--vscode-foreground, var(--vscode-editorHoverWidget-foreground))); color: var(--vscode-editorHoverWidget-foreground); box-shadow: 0 4px 16px var(--vscode-widget-shadow); font-size: 12px; line-height: 1.4; overflow-wrap: anywhere; pointer-events: auto; }
 .omp-context-popover::after { content: ""; position: absolute; left: 0; right: 0; top: 100%; height: 8px; }
 .omp-context-popover strong { color: inherit; font-weight: 600; }
 .omp-context-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
@@ -187,8 +187,8 @@ ${ANSI_STYLES}
 .omp-measured-row { display: flow-root; min-width: 0; }
 .omp-measured-rows, .omp-window-spacer { overflow-anchor: none; min-width: 0; }
 .omp-window-spacer { pointer-events: none; padding: 0; margin: 0; }
-.omp-history-pages { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; padding: 4px 0 8px; color: var(--vscode-descriptionForeground); font-size: 11px; }
-.omp-history-pages button { font: inherit; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: 1px solid var(--vscode-widget-border); border-radius: 4px; padding: 3px 7px; cursor: pointer; }
+.omp-history-pages { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px; padding: 4px 0 8px; color: var(--omp-muted); font-size: 11px; }
+.omp-history-pages button { font: inherit; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground); border: 1px solid var(--vscode-widget-border); border-radius: var(--omp-radius); padding: 3px 7px; cursor: pointer; }
 .omp-history-pages button:disabled { opacity: .6; cursor: default; }
 .omp-history-pages button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
 
@@ -207,7 +207,7 @@ ${ANSI_STYLES}
 	color: var(--omp-muted);
 	background: transparent;
 	border: 1px solid var(--omp-border);
-	border-radius: 3px;
+	border-radius: var(--omp-radius);
 	cursor: pointer;
 }
 
@@ -229,7 +229,7 @@ ${ANSI_STYLES}
 	flex: 1 1 auto; min-width: 0;
 	padding: 10px 14px;
 	background: var(--vscode-editorWidget-background);
-	border: 1px solid var(--omp-border); border-radius: 8px;
+	border: 1px solid var(--omp-border); border-radius: var(--omp-radius-card);
 }
 
 .omp-row--marker { color: var(--omp-muted); font-size: 11px; }
@@ -237,7 +237,7 @@ ${ANSI_STYLES}
 .omp-row { position: relative; }
 .omp-row-actions { position: absolute; top: 2px; right: 4px; display: flex; gap: 4px; opacity: 0; }
 .omp-row:hover > .omp-row-actions, .omp-row-actions:focus-within, .omp-row-actions:has(.omp-copy-status) { opacity: 1; }
-.omp-retry-turn { display: inline-flex; align-items: center; gap: 4px; margin-top: 6px; padding: 2px 8px; border: 1px solid var(--vscode-button-border, transparent); border-radius: 3px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); font: inherit; cursor: pointer; }
+.omp-retry-turn { display: inline-flex; align-items: center; gap: 4px; margin-top: 6px; padding: 2px 8px; border: 1px solid var(--vscode-button-border, transparent); border-radius: var(--omp-radius); background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); font: inherit; cursor: pointer; }
 .omp-retry-turn:hover { background: var(--vscode-button-secondaryHoverBackground); }
 .omp-retry-turn:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
 /* OMP extension setWidget blocks and notify notices, above or below the prompt. */
@@ -251,7 +251,7 @@ ${ANSI_STYLES}
 /* Rewind (ADR-0051): the picked prompt, what would leave the branch, the bar above the composer and branch markers. */
 .omp-row--rewind-selected .omp-body-block { outline: 2px solid var(--vscode-focusBorder); outline-offset: 2px; cursor: pointer; }
 .omp-row--rewind-dimmed { opacity: 0.45; }
-.omp-rewind-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin: 0 0 6px; padding: 6px 8px; border: 1px solid var(--omp-border); border-radius: 6px; font-size: 12px; }
+.omp-rewind-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin: 0 0 6px; padding: 6px 8px; border: 1px solid var(--omp-border); border-radius: var(--omp-radius-card); font-size: 12px; }
 .omp-rewind-bar:focus { outline: 1px solid var(--vscode-focusBorder); }
 .omp-rewind-bar--picking { border-color: var(--vscode-focusBorder); flex-direction: column; align-items: stretch; }
 .omp-rewind-bar--notice > span { flex: 1 1 auto; min-width: 0; }
@@ -263,11 +263,11 @@ ${ANSI_STYLES}
 .omp-rewind-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
 .omp-rewind-legend { color: var(--omp-muted); font-size: 11px; margin-left: auto; }
 .omp-branch-point { margin-top: 6px; font-size: 11px; color: var(--omp-muted); }
-.omp-branch-point-toggle { display: inline-flex; align-items: center; gap: 4px; padding: 1px 6px; border: 1px dashed var(--omp-border); border-radius: 10px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.omp-branch-point-toggle { display: inline-flex; align-items: center; gap: 4px; padding: 1px 6px; border: 1px dashed var(--omp-border); border-radius: 999px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
 .omp-branch-point-toggle:hover { color: var(--vscode-foreground); }
 .omp-branch-point-toggle:focus-visible, .omp-branch-switch:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
 .omp-branch-list { list-style: none; margin: 4px 0 0; padding: 0 0 0 12px; display: flex; flex-direction: column; gap: 2px; }
-.omp-branch-switch { display: flex; gap: 8px; width: 100%; padding: 2px 6px; border: 0; border-radius: 3px; background: transparent; color: var(--vscode-foreground); font: inherit; text-align: left; cursor: pointer; }
+.omp-branch-switch { display: flex; gap: 8px; width: 100%; padding: 2px 6px; border: 0; border-radius: var(--omp-radius); background: transparent; color: var(--vscode-foreground); font: inherit; text-align: left; cursor: pointer; }
 .omp-branch-switch:hover:not(:disabled) { background: var(--vscode-list-hoverBackground); }
 .omp-branch-switch:disabled { cursor: default; opacity: 0.6; }
 .omp-branch-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -275,7 +275,7 @@ ${ANSI_STYLES}
 
 .omp-badge {
 	display: inline-block;
-	border-radius: 3px;
+	border-radius: var(--omp-radius);
 	padding: 0 4px;
 	background: var(--vscode-badge-background);
 	color: var(--vscode-badge-foreground, var(--vscode-foreground));
@@ -309,13 +309,13 @@ ${ANSI_STYLES}
 /* A file reference the host proved to exist, or an http(s) web link: the same characters, in the link colour, opened by a plain click. */
 .omp-file-link, .omp-web-link { color: var(--vscode-textLink-foreground); cursor: pointer; }
 .omp-file-link:hover, .omp-web-link:hover { text-decoration: underline; color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground)); }
-.omp-file-link:focus-visible, .omp-web-link:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; border-radius: 2px; text-decoration: underline; }
+.omp-file-link:focus-visible, .omp-web-link:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; border-radius: var(--omp-radius); text-decoration: underline; }
 .omp-md code {
 	font-family: var(--omp-mono);
 	font-size: var(--omp-mono-size);
 	color: var(--vscode-textPreformat-foreground, var(--vscode-foreground));
 	background: var(--vscode-textPreformat-background);
-	border-radius: 3px;
+	border-radius: var(--omp-radius);
 	padding: 1px 4px;
 }
 /* A link inside code, or code inside a link (a symbol linked to its definition): code colours, underlined as a link. */
@@ -323,12 +323,12 @@ ${ANSI_STYLES}
 .omp-md .omp-file-link > code, .omp-md .omp-web-link > code { text-decoration: underline; }
 /* A symbol with several definitions: the code colours, underlined dotted (not solid like one definition); a click opens the workspace symbol search. */
 .omp-md code .omp-symbol-search, .omp-md code .omp-symbol-search:hover { color: inherit; cursor: pointer; text-decoration: underline dotted; }
-.omp-md code .omp-symbol-search:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; border-radius: 2px; }
+.omp-md code .omp-symbol-search:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; border-radius: var(--omp-radius); }
 .omp-md pre {
 	background: var(--vscode-textCodeBlock-background);
 	color: var(--vscode-foreground);
 	border: 1px solid var(--omp-border);
-	border-radius: var(--omp-radius);
+	border-radius: var(--omp-radius-card);
 	padding: 6px 8px;
 	overflow-x: auto;
 	margin: 6px 0;
@@ -336,7 +336,7 @@ ${ANSI_STYLES}
 .omp-md pre code { color: inherit; background: none; padding: 0; font-size: var(--omp-mono-size); line-height: 1.45; }
 /* Hover Copy on fenced code blocks and user messages: hidden until the block is hovered or the button is focused. */
 .omp-code-block { position: relative; }
-.omp-copy-button { display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px; border: 1px solid var(--vscode-button-border, transparent); border-radius: 3px; background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); font: inherit; font-size: 11px; cursor: pointer; }
+.omp-copy-button { display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px; border: 1px solid var(--vscode-button-border, transparent); border-radius: var(--omp-radius); background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); font: inherit; font-size: 11px; cursor: pointer; }
 .omp-copy-button:hover { background: var(--vscode-button-secondaryHoverBackground); }
 .omp-copy-button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
 .omp-code-copy { position: absolute; top: 4px; right: 4px; opacity: 0; }
@@ -374,7 +374,7 @@ ${ANSI_STYLES}
 
 .omp-tool {
 	border: none;
-	border-radius: 4px;
+	border-radius: var(--omp-radius);
 	margin: 2px 0;
 	background: transparent;
 	overflow: hidden;
@@ -412,7 +412,7 @@ ${ANSI_STYLES}
 .omp-output-disclosure { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 6px 0; }
 .omp-tool-section { margin-bottom: 6px; }
 .omp-tool-overview { margin: 3px 0; min-width: 0; }
-.omp-overview-head { display: flex; align-items: center; gap: 7px; border: 0; padding: 6px 8px; background: transparent; color: var(--omp-muted); font: inherit; cursor: pointer; width: 100%; text-align: left; border-radius: 4px; }
+.omp-overview-head { display: flex; align-items: center; gap: 7px; border: 0; padding: 6px 8px; background: transparent; color: var(--omp-muted); font: inherit; cursor: pointer; width: 100%; text-align: left; border-radius: var(--omp-radius); }
 .omp-overview-head:hover { background: var(--vscode-list-hoverBackground); }
 .omp-overview-summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .omp-overview-member { border-left: 1px solid var(--omp-border); margin-left: 12px; padding-left: 6px; }
@@ -440,7 +440,7 @@ ${ANSI_STYLES}
 	font-size: var(--omp-mono-size);
 	background: var(--vscode-textCodeBlock-background);
 	color: var(--vscode-foreground);
-	border-radius: 3px;
+	border-radius: var(--omp-radius);
 	padding: 4px 6px;
 	margin: 0;
 	white-space: pre-wrap;
@@ -454,7 +454,7 @@ ${ANSI_STYLES}
 
 /* ── composer ───────────────────────────────────────────────────────────── */
 
-.omp-composer { position: relative; border: 1px solid var(--vscode-input-border, var(--vscode-widget-border, var(--omp-border))); border-radius: 10px; background: var(--vscode-input-background); color: var(--vscode-input-foreground); padding: 10px 12px; width: min(840px, calc(100% - 24px)); min-width: 0; margin: 0 auto 8px; flex: 0 0 auto; overflow: visible; }
+.omp-composer { position: relative; border: 1px solid var(--vscode-input-border, var(--vscode-widget-border, var(--omp-border))); border-radius: var(--omp-radius-composer); background: var(--vscode-input-background); color: var(--vscode-input-foreground); padding: 10px 12px; width: min(840px, calc(100% - 24px)); min-width: 0; margin: 0 auto 8px; flex: 0 0 auto; overflow: visible; }
 .omp-turn-progress { position: absolute; top: -1px; left: 8px; right: 8px; height: 2px; overflow: hidden; pointer-events: none; }
 .omp-turn-progress::before { content: ""; position: absolute; width: 30%; height: 2px; background: var(--vscode-progressBar-background, var(--vscode-focusBorder)); animation: omp-turn-progress 2s linear infinite; }
 @keyframes omp-turn-progress { from { transform: translateX(-100%); } to { transform: translateX(434%); } }
@@ -463,7 +463,7 @@ ${ANSI_STYLES}
 .omp-suggest-wrapper { position: relative; flex: 1 1 auto; min-width: 0; }
 /* The input row reaches 6px past the card's content box so the focus ring wraps the padded textarea while the text itself stays inset. */
 .omp-composer-row--input { margin: -4px -6px 0; }
-.omp-composer-row .omp-textarea { display: block; border: 0; border-radius: 8px; background: transparent; }
+.omp-composer-row .omp-textarea { display: block; border: 0; border-radius: var(--omp-radius-card); background: transparent; }
 .omp-suggest-list {
 	position: absolute;
 	bottom: 100%;
@@ -539,7 +539,7 @@ ${ANSI_STYLES}
 	width: 36px;
 	height: 36px;
 	object-fit: cover;
-	border-radius: 3px;
+	border-radius: var(--omp-radius);
 	border: 1px solid var(--omp-border);
 	background: var(--omp-surface);
 }
@@ -558,7 +558,7 @@ ${ANSI_STYLES}
 	flex: 0 0 auto;
 	background: none;
 	border: none;
-	border-radius: 3px;
+	border-radius: var(--omp-radius);
 	color: var(--omp-muted);
 	font: inherit;
 	line-height: 1;
@@ -574,10 +574,10 @@ ${ANSI_STYLES}
 
 /* Numbered image references: the textarea stays the editor; a click-through layer behind it paints each marker as a chip. */
 .omp-composer-row .omp-textarea { position: relative; }
-.omp-textarea-mirror { position: absolute; inset: 0; box-sizing: border-box; padding: 10px 12px; overflow: hidden; pointer-events: none; font: inherit; line-height: 20px; white-space: pre-wrap; overflow-wrap: break-word; color: transparent; border-radius: 8px; }
-.omp-image-ref-mark { color: transparent; border-radius: 3px; background: color-mix(in srgb, var(--vscode-textLink-foreground, var(--vscode-focusBorder, #3794ff)) 24%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--vscode-textLink-foreground, var(--vscode-focusBorder, #3794ff)) 55%, transparent); }
+.omp-textarea-mirror { position: absolute; inset: 0; box-sizing: border-box; padding: 10px 12px; overflow: hidden; pointer-events: none; font: inherit; line-height: 20px; white-space: pre-wrap; overflow-wrap: break-word; color: transparent; border-radius: var(--omp-radius-card); }
+.omp-image-ref-mark { color: transparent; border-radius: var(--omp-radius); background: color-mix(in srgb, var(--vscode-textLink-foreground, var(--vscode-focusBorder, #3794ff)) 24%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--vscode-textLink-foreground, var(--vscode-focusBorder, #3794ff)) 55%, transparent); }
 .omp-attachment-figure { position: relative; display: inline-flex; flex: 0 0 auto; }
-.omp-attachment-number { position: absolute; left: 1px; bottom: 1px; padding: 1px 3px; border-radius: 2px 3px 2px 2px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); font-size: 10px; line-height: 1; font-weight: 600; }
+.omp-attachment-number { position: absolute; left: 1px; bottom: 1px; padding: 1px 3px; border-radius: var(--omp-radius); background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); font-size: 10px; line-height: 1; font-weight: 600; }
 @media (forced-colors: active) {
 	.omp-image-ref-mark { forced-color-adjust: none; background: Highlight; box-shadow: none; }
 	.omp-attachment-number { border: 1px solid currentColor; }
@@ -617,7 +617,7 @@ ${ANSI_STYLES}
 	.omp-composer-lead > .omp-footer-trigger { max-width: 100%; }
 }
 
-.omp-ask { border: 1px solid var(--vscode-widget-border, var(--vscode-focusBorder)); border-radius: var(--omp-radius); padding: 8px; margin-bottom: 6px; min-width: 0; }
+.omp-ask { border: 1px solid var(--vscode-widget-border, var(--vscode-focusBorder)); border-radius: var(--omp-radius-card); padding: 8px; margin-bottom: 6px; min-width: 0; }
 .omp-ask-title { font-weight: 600; margin-bottom: 6px; }
 .omp-ask-help { color: var(--omp-muted); font-size: 11px; margin-bottom: 6px; }
 .omp-ask-options { display: flex; flex-direction: column; gap: 2px; max-height: 40vh; overflow-y: auto; min-width: 0; }
@@ -631,7 +631,7 @@ ${ANSI_STYLES}
 	text-align: left;
 	background: none;
 	border: 1px solid var(--omp-border);
-	border-radius: 4px;
+	border-radius: var(--omp-radius-card);
 	color: inherit;
 	font: inherit;
 	padding: 3px 6px;
@@ -641,7 +641,7 @@ ${ANSI_STYLES}
 .omp-ask-option:disabled { opacity: 0.5; cursor: default; }
 .omp-ask-option--checked { border-color: var(--vscode-focusBorder); }
 .omp-ask-option-marker { flex: 0 0 auto; color: var(--vscode-checkbox-foreground); }
-.omp-ask-option[role="checkbox"] .omp-ask-option-marker, .omp-ask-option-marker--checkbox { background: var(--vscode-checkbox-background); border: 1px solid var(--vscode-checkbox-border, var(--vscode-contrastBorder, transparent)); border-radius: 3px; }
+.omp-ask-option[role="checkbox"] .omp-ask-option-marker, .omp-ask-option-marker--checkbox { background: var(--vscode-checkbox-background); border: 1px solid var(--vscode-checkbox-border, var(--vscode-contrastBorder, transparent)); border-radius: var(--omp-radius); }
 .omp-ask-option-text { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
 .omp-ask-option-label { font-family: var(--vscode-font-family); font-size: inherit; overflow-wrap: anywhere; white-space: pre-wrap; }
 .omp-ask-option-desc { color: var(--omp-muted); font-size: 11px; overflow-wrap: anywhere; white-space: pre-wrap; }
@@ -683,7 +683,7 @@ ${ANSI_STYLES}
 	text-align: left;
 	background: none;
 	border: 1px solid var(--omp-border);
-	border-radius: var(--omp-radius);
+	border-radius: var(--omp-radius-card);
 	color: inherit;
 	font: inherit;
 	padding: 4px 8px;
@@ -692,7 +692,7 @@ ${ANSI_STYLES}
 .omp-ask-review-row:hover { background: var(--vscode-list-hoverBackground); }
 .omp-ask-review-q { color: var(--omp-muted); font-size: 11px; overflow-wrap: anywhere; }
 .omp-ask-review-a { overflow-wrap: anywhere; white-space: pre-wrap; }
-.omp-ask-review-a--none { color: var(--vscode-descriptionForeground); }
+.omp-ask-review-a--none { color: var(--omp-muted); }
 
 /* ── small shared parts ─────────────────────────────────────────────────── */
 
@@ -730,7 +730,7 @@ ${QUEUE_STYLES}
 .omp-native-child button:focus-visible { outline: 1px solid var(--vscode-focusBorder); }
 .omp-native-agent + .omp-native-agent { border-top: 1px solid var(--omp-border); padding-top: 8px; margin-top: 8px; }
 .omp-native-note, .omp-native-muted { color: var(--omp-muted); }
-.omp-native-todo-blocker { color: var(--vscode-descriptionForeground); }
+.omp-native-todo-blocker { color: var(--omp-muted); }
 .omp-warning { color: var(--vscode-foreground); }
 .omp-warning .codicon-warning { color: var(--vscode-editorWarning-foreground); }
 .omp-native-agent-stats { color: var(--omp-muted); }
@@ -757,13 +757,13 @@ ${QUEUE_STYLES}
 .omp-native-summary-label { flex: 0 1 auto; text-align: center; }
 .omp-native-summary-amount { font-family: var(--omp-mono); font-size: var(--omp-mono-size); }
 .omp-native-summary--divider > .omp-native-disclosure[open] > summary { margin-bottom: 8px; }
-.omp-native-badge { border: 1px solid var(--omp-border); border-radius: 4px; padding: 0 5px; font-size: 0.85em; color: var(--omp-muted); }
+.omp-native-badge { border: 1px solid var(--omp-border); border-radius: var(--omp-radius); padding: 0 5px; font-size: 0.85em; color: var(--omp-muted); }
 .omp-native-image { margin: 6px 0; }
 .omp-native-image img { display: block; max-width: 100%; max-height: 480px; object-fit: contain; }
 .omp-native-image-label { margin-top: 2px; color: var(--omp-muted); font-size: 11px; }
 .omp-native-image:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: 2px; }
 .omp-user .omp-native-image img { max-height: 240px; }
-.omp-image-ref { display: inline; padding: 0 4px; border: 0; border-radius: 3px; font: inherit; color: var(--vscode-textLink-foreground, inherit); background: color-mix(in srgb, var(--vscode-textLink-foreground, var(--vscode-focusBorder, #3794ff)) 18%, transparent); cursor: pointer; }
+.omp-image-ref { display: inline; padding: 0 4px; border: 0; border-radius: var(--omp-radius); font: inherit; color: var(--vscode-textLink-foreground, inherit); background: color-mix(in srgb, var(--vscode-textLink-foreground, var(--vscode-focusBorder, #3794ff)) 18%, transparent); cursor: pointer; }
 .omp-image-ref:hover { background: color-mix(in srgb, var(--vscode-textLink-foreground, var(--vscode-focusBorder, #3794ff)) 32%, transparent); }
 .omp-image-ref:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
 .omp-image-ref .codicon { font-size: 0.95em; margin-right: 3px; vertical-align: -1px; }
@@ -772,7 +772,7 @@ ${QUEUE_STYLES}
 .omp-success { color: var(--vscode-testing-iconPassed); }
 .omp-native-child-body { padding: 8px; border: 1px solid var(--omp-border); border-radius: var(--omp-radius); }
 .omp-native-child-toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-.omp-native-child button { font: inherit; color: var(--vscode-foreground); background: var(--vscode-button-secondaryBackground); border: 1px solid var(--omp-border); border-radius: 4px; cursor: pointer; }
+.omp-native-child button { font: inherit; color: var(--vscode-foreground); background: var(--vscode-button-secondaryBackground); border: 1px solid var(--omp-border); border-radius: var(--omp-radius); cursor: pointer; }
 .omp-native-child .omp-transcript { max-height: none; min-height: 100px; overflow: visible; }
 ${TOOL_STYLES}
 /* Action buttons share VS Code's secondary tokens; transcript disclosure rows remain flat. */

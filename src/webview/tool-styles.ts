@@ -7,7 +7,7 @@ export const TOOL_STYLES = `
 .omp-native-tool .omp-tool-head > .omp-tool-elapsed { flex: none; margin-left: auto; overflow: visible; }
 .omp-native-tool .omp-tool-head--intent .omp-tool-digest, .omp-native-tool .omp-tool-head--inline .omp-tool-digest { flex: 0 1 auto; max-width: 60%; }
 .omp-native-tool .omp-tool-head--intent .omp-tool-aux--intent { flex: 1 1 0; max-width: none; }
-.omp-native-tool-meta { color: var(--vscode-descriptionForeground); font-size: 11px; }
+.omp-native-tool-meta { color: var(--omp-muted); font-size: 11px; }
 .omp-wait-title-short { display: none; }
 @media (max-width: 300px) {
 	.omp-wait-title-full { display: none; }
@@ -55,9 +55,9 @@ export const TOOL_STYLES = `
 .omp-native-agent--failed, .omp-native-agent--merge-failed { border-color: var(--vscode-errorForeground); }
 .omp-native-finding { border-left: 2px solid var(--vscode-editorWarning-foreground); padding: 4px 8px; margin: 4px 0; }
 .omp-native-finding-location { color: var(--omp-muted); font-size: 11px; }
-.omp-native-todo--completed, .omp-native-todo--abandoned { color: var(--vscode-descriptionForeground); }
+.omp-native-todo--completed, .omp-native-todo--abandoned { color: var(--omp-muted); }
 .omp-native-todo--completed > .codicon { color: var(--vscode-testing-iconPassed); }
-.omp-native-todo--abandoned > .codicon { color: var(--vscode-descriptionForeground); }
+.omp-native-todo--abandoned > .codicon { color: var(--omp-muted); }
 .omp-native-config-change { display: flex; align-items: baseline; gap: 6px; }
 .omp-native-job-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px; }
 .omp-native-job-label { color: var(--omp-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
