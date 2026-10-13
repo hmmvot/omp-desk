@@ -41,7 +41,8 @@
     "vscode": "^1.110.0"
   },
   "categories": [
-    "Other"
+    "AI",
+    "Chat"
   ],
   "extensionKind": [
     "ui"
