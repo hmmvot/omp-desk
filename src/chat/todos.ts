@@ -90,3 +90,54 @@ export function todoHudSelection(phases: readonly TodoPhase[]): {
 	}
 	return { phase, task: inProgress ?? pending, phaseClosed: phase?.tasks.filter(isClosedTodo).length ?? 0, phaseTotal: phase?.tasks.length ?? 0, closed, total };
 }
+
+const OP_VERBS: Readonly<Record<string, string>> = { start: "Started", done: "Done", drop: "Dropped", rm: "Removed", note: "Noted on" };
+
+function opItemCount(op: Record<string, unknown>): number | null {
+	if (Array.isArray(op.items)) return op.items.length;
+	if (Array.isArray(op.list)) {
+		let count = 0;
+		for (const phase of op.list) if (isRecord(phase) && Array.isArray(phase.items)) count += phase.items.length;
+		return count;
+	}
+	return null;
+}
+
+function plural(count: number | null, noun: string): string {
+	return count === null ? `${noun}s` : `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
+
+/** One sentence for a call's `todo` op: what the call did and to which task, so identical "TODO" rows can be told apart. */
+function todoOpSentence(op: Record<string, unknown>, fallbackOp: string): string {
+	const name = typeof op.op === "string" && op.op !== "" ? op.op : fallbackOp;
+	const task = typeof op.task === "string" ? op.task.replace(/\s+/g, " ").trim() : "";
+	const phase = typeof op.phase === "string" ? op.phase.replace(/\s+/g, " ").trim() : "";
+	const subject = task !== "" ? `“${task}”` : phase !== "" ? `phase “${phase}”` : "";
+	switch (name) {
+		case "": return subject;
+		case "init": return `Planned ${plural(opItemCount(op), "task")}`;
+		case "append": return task !== "" ? `Added ${subject}` : `Added ${plural(opItemCount(op), "task")}`;
+		case "view": return "Viewed list";
+		default: return `${OP_VERBS[name] ?? name} ${subject}`.trim();
+	}
+}
+
+/**
+ * What a `todo` call did, from its arguments (`ops: [{ op, task, phase, items }]`, or one op given directly) with the
+ * result's own `op` as the fallback; `""` when the call names nothing. Several ops are joined with `, `.
+ */
+export function todoOperationText(args: Record<string, unknown>, detailsOp: unknown): string {
+	const fallback = typeof detailsOp === "string" ? detailsOp : "";
+	const ops = Array.isArray(args.ops) ? args.ops.filter(isRecord) : [args];
+	return ops.map(op => todoOpSentence(op, fallback)).filter(sentence => sentence !== "").join(", ");
+}
+
+/** `closed/total` over every task of a result's `phases`, or `null` when the result carries no task list. */
+export function todoCounter(phases: unknown): string | null {
+	const parsed = parseTodoPhases(phases);
+	if (parsed === null) return null;
+	let closed = 0;
+	let total = 0;
+	for (const phase of parsed) for (const task of phase.tasks) { total += 1; if (isClosedTodo(task)) closed += 1; }
+	return total === 0 ? null : `${closed}/${total}`;
+}

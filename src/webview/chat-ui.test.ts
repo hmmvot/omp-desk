@@ -690,7 +690,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			const drift = `(()=>{const root=document.querySelector('.omp-transcript'),a=window.regressionAnchor,row=[...root.querySelectorAll('.omp-measured-row')].find(row=>row.dataset.windowRow===a.key);return row?Math.abs(row.getBoundingClientRect().top-root.getBoundingClientRect().top-a.offset):Infinity})()`;
 			assert.ok(await ui.evaluate<number>(drift)<=2, `equivalent snapshot retains the visible source anchor: ${JSON.stringify(await ui.evaluate(`(()=>{const root=document.querySelector('.omp-transcript');return{anchor:window.regressionAnchor,top:root.scrollTop,total:root.scrollHeight,rows:[...root.querySelectorAll('.omp-measured-row')].map(row=>({key:row.dataset.windowRow,top:row.getBoundingClientRect().top-root.getBoundingClientRect().top,height:row.getBoundingClientRect().height}))}})()`))}`);
 			assert.equal(await ui.evaluate(`(()=>{const a=window.regressionAnchor,row=[...document.querySelectorAll('.omp-measured-row')].find(row=>row.dataset.windowRow===a.key);return row.getBoundingClientRect().height})()`), await ui.evaluate("window.regressionAnchor.height"), "unchanged expanded height replaces its invalidated estimate without another ResizeObserver notification");
-			// Invalidated offscreen closed rows return to the 40px estimate (within 4px of this fixture's headers).
+			// Invalidated offscreen closed rows return to the 26px tool-row estimate (within 4px of this fixture's headers).
 			assert.ok(await ui.evaluate<number>("Math.abs(document.querySelector('.omp-transcript').scrollHeight-window.regressionAnchor.total)")<=80*4, "spacers retain the tall source rather than losing its several thousand pixels");
 			await ui.evaluate("document.querySelector('.omp-transcript').style.fontSize='15px'");
 			await ui.settleGeometry(".omp-transcript");
@@ -1122,7 +1122,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			 const tool=document.querySelector('[data-tool-call-id="${id}"]'),head=tool.querySelector('.omp-tool-head'),aux=head.querySelector('.omp-tool-aux--intent'),chip=head.querySelector('.omp-chip'),box=head.getBoundingClientRect();
 			 const style=getComputedStyle(aux);
 			 return {collapsed:head.getAttribute('aria-expanded')==='false'&&!tool.querySelector('.omp-tool-body'),text:aux.textContent,title:aux.title,height:box.height,
-			  clipped:aux.scrollWidth>aux.clientWidth&&style.textOverflow==='ellipsis'&&style.whiteSpace==='nowrap',muted:style.color===getComputedStyle(head.querySelector('.omp-tool-digest')).color,
+			  clipped:aux.scrollWidth>aux.clientWidth&&style.textOverflow==='ellipsis'&&style.whiteSpace==='nowrap',muted:style.color===getComputedStyle(head.querySelector('.omp-tool-name')).color,
 			  overflow:head.scrollWidth>head.clientWidth+1,chipInside:!chip||chip.getBoundingClientRect().right<=box.right+0.5};})()`);
 			for (const width of [800, 320, 160]) {
 				await ui.call("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: false });
@@ -1133,7 +1133,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 					assert.equal(row.text, intent, `${id} shows its intent while collapsed at ${width}px`);
 					assert.equal(row.title, intent, `${id} keeps the full text in its title`);
 					assert.ok(row.height < 40, `${id} header stays one line at ${width}px (${row.height}px)`);
-					assert.equal(row.muted, true, `${id} intent uses the muted digest colour`);
+					assert.equal(row.muted, true, `${id} intent uses the same muted colour as the tool name`);
 					assert.equal(row.overflow, false, `${id} header does not overflow at ${width}px`);
 					assert.equal(row.chipInside, true, `${id} keeps its state chip inside the header at ${width}px`);
 					if (width <= 320) assert.equal(row.clipped, true, `${id} truncates with an ellipsis at ${width}px`);

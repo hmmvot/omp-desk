@@ -3,6 +3,7 @@ import { memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } fr
 import type { AgentActivity, RunningAgent } from "../../chat/agents";
 import type { ChatContent, CustomMessage, ToolResultMessage } from "../../chat/messages";
 import { isInterruptedToolResult, parseChatContent } from "../../chat/messages";
+import type { DiffStats } from "../../chat/diff-stats";
 import { DEBUG_TOOL_TITLES, toolPresentation } from "../../chat/tool-presentation";
 import { messageText } from "../../shared/format";
 import { ToolTargetText } from "./FileLinks";
@@ -36,6 +37,11 @@ export interface ToolCardProps {
 const STATE_ICONS: Record<NonNullable<ToolCardProps["status"]>, string> = {
 	queued: "clock", running: "loading codicon-modifier-spin", complete: "check", error: "error", skipped: "circle-slash",
 };
+
+/** An edit's added and removed lines: two coloured spans with text signs, so colour is never the only carrier. */
+function DiffStatSpans({ stats }: { stats: DiffStats }): ReactNode {
+	return <span className="omp-native-tool-meta omp-diff-stat"><span className="omp-diff-stat--add">+{stats.added}</span> <span className="omp-diff-stat--del">−{stats.removed}</span></span>;
+}
 
 /** Stable call identity/disclosure, with family-owned DOM bodies rather than generic JSON output. */
 export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode {
@@ -126,7 +132,7 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 		const target = compactTarget || metadata.target;
 		return <div ref={root} className="omp-tool omp-native-tool omp-native-tool--bare" data-tool-name={name} data-tool-family={metadata.route.name} data-tool-call-id={props.callId ?? result.toolCallId} data-tool-status={state}>
 			<div className="omp-tool-head omp-tool-head--static" title={[metadata.title, target, aux, "no output"].filter(Boolean).join(" · ")}>
-				<span className={`codicon codicon-${STATE_ICONS[state]}`} aria-hidden="true" />
+				{/* A settled call shows no mark: the announced status below says "complete". */}
 				<span className={`codicon codicon-${TOOL_ICONS[metadata.route.name] ?? "tools"}`} aria-hidden="true" />
 				<span className="omp-tool-name">{metadata.title}</span>
 				{target && <span className="omp-tool-digest" title={target}><ToolTargetText category={metadata.category} paths={metadata.paths} text={displayText(target)} line={changedLine} revalidate={state} /></span>}
@@ -138,13 +144,15 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 	}
 	const headTarget = compactTarget || view?.target || metadata.target;
 	const face = <>
-		{!pendingAsk && <span className={`codicon codicon-${failed ? "error omp-tool-status--failed" : STATE_ICONS[state]}`} aria-hidden="true" />}
+		{!pendingAsk && !(state === "complete" && !failed) && <span className={`codicon codicon-${failed ? "error omp-tool-status--failed" : STATE_ICONS[state]}`} aria-hidden="true" />}
 		<span className={`codicon codicon-${view?.icon ?? TOOL_ICONS[metadata.route.name] ?? "tools"}`} aria-hidden="true" />
 		<span className="omp-tool-name">{waitFace && view?.title?.startsWith("Waiting on") ? <><span className="omp-wait-title-full">{view.title}</span><span className="omp-wait-title-short">Wait</span></> : view?.title ?? metadata.title}</span>
 		{headTarget && <span className="omp-tool-digest" title={headTarget}><ToolTargetText category={metadata.category} paths={metadata.paths} text={displayText(headTarget)} line={changedLine} revalidate={state} /></span>}
 		{view?.inline}
 		{aux && <span className="omp-tool-aux omp-tool-aux--intent" title={aux}>{aux}</span>}
 		{view?.meta?.map((meta, index) => <span className="omp-native-tool-meta" key={index}>{displayText(meta)}</span>)}
+		{metadata.stats && <DiffStatSpans stats={metadata.stats} />}
+		{metadata.counter && <span className="omp-native-tool-meta omp-tool-counter">{metadata.counter}</span>}
 		{diagnosticCount > 0 && <span className="omp-chip omp-chip--warn"><span className="codicon codicon-warning" aria-hidden="true" />{diagnosticCount} diagnostics</span>}
 		{/* Failure is conveyed by one status icon; skipped calls retain their readable badge. */}
 		{!pendingAsk && state === "skipped" && <span className="omp-chip">{state}</span>}

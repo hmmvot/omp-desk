@@ -17,7 +17,7 @@ export function measuredTranscriptRows(cards: readonly DensityCard[], sources: R
 		} else if (card.kind === "tool") {
 			const expanded = (disclosures.get(`call:${namespace}:${card.tool.call.id}`) ?? false) || forcedCalls?.get(card.tool.call.id) === true;
 			revision.push(card.tool.call, card.tool.result, card.tool.active, expanded);
-			estimate = expanded ? 260 : 40;
+			estimate = expanded ? 260 : 26;
 		} else if (card.kind === "assistant") {
 			revision.push(card.message, card.streaming); growing = true;
 			estimate = card.content.reduce((height, block) => height + (block.type === "text" ? textHeight(block.text) : block.type === "image" ? 220 : 32), 16);

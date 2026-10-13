@@ -1,9 +1,9 @@
 import type { ReactNode } from "react";
 import { useState } from "react";
 import type { AgentActivity, RunningAgent } from "../../chat/agents";
-import { isClosedTodo, parseTodoPhases, selectCollapsedTodos, todoMatchesDescriptions } from "../../chat/todos";
+import { isClosedTodo, parseTodoPhases, selectCollapsedTodos, todoMatchesDescriptions, todoOperationText } from "../../chat/todos";
 import { AGENT_STATUS_ICON } from "../../chat/hud-summary";
-import { resolveToolRoute } from "../../chat/tool-presentation";
+import { normalizeToolPath, resolveToolRoute } from "../../chat/tool-presentation";
 import { isRecord } from "../../shared/guards";
 import { Markdown } from "./Markdown";
 import { FileLink, FileLinkText } from "./FileLinks";
@@ -186,13 +186,16 @@ function debug(c: ToolRenderContext): ToolSemanticView {
 		preview: 3 + (description ? 1 : 0) + (snapshot.needsConfigurationDone === true ? 1 : 0),
 		body: <>{description && <p className="omp-empty-note">{description}</p>}{snapshot.needsConfigurationDone === true && <div className="omp-native-warning">Configuration pending; set breakpoints, then continue.</div>}<TextPreview text={c.text} expanded={c.expanded} /></> };
 }
-function editSectionTitle(file: Record<string, unknown>): string {
-	return [string(file.sourcePath), scalar(file.op), string(file.path), file.firstChangedLine !== undefined ? `line ${scalar(file.firstChangedLine)}` : "", scalar(file.move ?? file.rename) ? `→ ${scalar(file.move ?? file.rename)}` : ""].filter(Boolean).join(" · ") || "Diff";
+function editSectionTitle(file: Record<string, unknown>, cwd: string | undefined): string {
+	const relative = (path: string): string => path ? normalizeToolPath(path, cwd) : path;
+	return [relative(string(file.sourcePath)), scalar(file.op), relative(string(file.path)), file.firstChangedLine !== undefined ? `line ${scalar(file.firstChangedLine)}` : "", scalar(file.move ?? file.rename) ? `→ ${relative(scalar(file.move ?? file.rename))}` : ""].filter(Boolean).join(" · ") || "Diff";
 }
 /** The section's path opens the file at the first changed line, when the result says where that is. */
-function editSectionLink(file: Record<string, unknown>): ExplicitFileLink | undefined {
+function editSectionLink(file: Record<string, unknown>, cwd: string | undefined): ExplicitFileLink | undefined {
 	const path = string(file.path);
-	return path && typeof file.firstChangedLine === "number" ? { text: path, target: `${path}:${file.firstChangedLine}`, proof: path } : undefined;
+	if (!path || typeof file.firstChangedLine !== "number") return undefined;
+	const relative = normalizeToolPath(path, cwd);
+	return { text: relative, target: `${relative}:${file.firstChangedLine}`, proof: relative };
 }
 function edit(c: ToolRenderContext): ToolSemanticView {
 	const d = c.details;
@@ -205,13 +208,14 @@ function edit(c: ToolRenderContext): ToolSemanticView {
 		firstChangedLine: d.firstChangedLine ?? preview.firstChangedLine,
 		error: d.error ?? preview.error,
 	}];
-	const path = string(files[0]?.path);
-	let added = 0; let removed = 0;
-	for (const file of files) for (const line of string(file.diff).split("\n")) { if (line.startsWith("+") && !line.startsWith("+++")) added++; if (line.startsWith("-") && !line.startsWith("---")) removed++; }
+	const relative = (value: string): string => value ? normalizeToolPath(value, c.cwd) : value;
+	const path = relative(string(files[0]?.path));
 	const failed = files.some(file => file.isError === true || string(file.error) || string(file.errorText) || string(file.displayErrorText));
 	const op = scalar(d.op ?? c.args.op ?? files[0]?.op);
-	return { title: op === "create" ? "Create" : op === "delete" ? "Delete" : "Edit", family: "edit", target: files.length > 1 ? `${files.length} files` : [string(d.sourcePath) || path, scalar(d.move ?? c.args.rename ?? files[0]?.rename) ? `→ ${scalar(d.move ?? c.args.rename ?? files[0]?.rename)}` : ""].filter(Boolean).join(" "), meta: [`+${added} −${removed}`], tone: failed ? "error" : undefined,
-		body: <>{files.map((file, index) => <Section key={index} title={editSectionTitle(file)} link={editSectionLink(file)}>
+	// A one-file edit's section would repeat the head (its verb, path, rename and first changed line), so it carries no title; added and removed counts are the head's, from the chat layer.
+	const single = files.length === 1;
+	return { title: op === "create" ? "Create" : op === "delete" ? "Delete" : "Edit", family: "edit", target: files.length > 1 ? `${files.length} files` : [relative(string(d.sourcePath) || string(files[0]?.sourcePath)) || path, scalar(d.move ?? c.args.rename ?? files[0]?.rename) ? `→ ${relative(scalar(d.move ?? c.args.rename ?? files[0]?.rename))}` : ""].filter(Boolean).join(" "), tone: failed ? "error" : undefined,
+		body: <>{files.map((file, index) => <Section key={index} title={single ? undefined : editSectionTitle(file, c.cwd)} link={single ? undefined : editSectionLink(file, c.cwd)}>
 			{string(file.displayErrorText ?? file.errorText ?? file.error) && <div className="omp-native-error"><TextPreview text={string(file.displayErrorText ?? file.errorText ?? file.error)} expanded={c.expanded} /></div>}
 			<DiffPreview text={string(file.diff)} expanded={c.expanded} /><Diagnostics value={file.diagnostics} expanded={c.expanded} />
 			{c.expanded && <OutputMetadata details={file} />}
@@ -542,12 +546,11 @@ function think(c: ToolRenderContext): ToolSemanticView {
 function todo(c: ToolRenderContext): ToolSemanticView {
 	const d = c.details;
 	const phases = parseTodoPhases(d.phases);
-	const ops = records(c.args.ops).length ? records(c.args.ops) : [c.args];
 	const descriptions = [...(c.agents?.values() ?? [])].map(agent => agent.description || agent.assignment || "").filter(Boolean);
 	const all = phases?.flatMap(phase => phase.tasks) ?? [];
 	const selected = c.expanded ? null : selectCollapsedTodos(all, descriptions);
 	const selectedSet = new Set(selected?.items ?? all);
-	return { title: "Todo", family: "todo", target: ops.map(op => [scalar(op.op || d.op), scalar(op.task), scalar(op.phase), Array.isArray(op.items) ? `${op.items.length} items` : ""].filter(Boolean).join(" ")).filter(Boolean).join(", "), meta: phases ? [`${all.filter(isClosedTodo).length}/${all.length} closed`, `${phases.length} phases`] : undefined,
+	return { title: "TODO", family: "todo", target: todoOperationText(c.args, d.op),
 		preview: "none",
 		body: <>{phases ? phases.map((phase, index) => {
 			const tasks = c.expanded ? phase.tasks : phase.tasks.filter(item => selectedSet.has(item));

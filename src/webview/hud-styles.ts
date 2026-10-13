@@ -11,7 +11,7 @@ export const HUD_STYLES = `
 .omp-hud-stack { flex: 0 0 auto; width: min(840px, calc(100% - 24px)); min-width: 0; margin: 0 auto; padding-bottom: ${HUD_STACK_PAD_PX}px; }
 .omp-hud { min-width: 0; line-height: 18px; }
 .omp-hud-head { display: flex; align-items: center; min-width: 0; height: ${HUD_HEADER_PX}px; box-sizing: border-box; }
-.omp-hud-toggle { display: flex; flex: 1 1 auto; min-width: 0; height: 100%; box-sizing: border-box; gap: 6px; align-items: center; padding: 4px 8px; border: 0; border-radius: var(--omp-radius); background: none; color: inherit; font: inherit; line-height: 18px; text-align: left; cursor: pointer; }
+.omp-hud-toggle { display: flex; flex: 1 1 auto; min-width: 0; height: 100%; box-sizing: border-box; gap: 6px; align-items: center; padding: 3px 8px; border: 0; border-radius: var(--omp-radius); background: none; color: inherit; font: inherit; line-height: 20px; text-align: left; cursor: pointer; }
 .omp-hud-toggle:hover, .omp-hud-open:hover:not(:disabled), .omp-hud-agent:hover:not(:disabled), .omp-hud-more:hover:not(:disabled) { background: var(--vscode-list-hoverBackground); }
 .omp-hud-toggle:focus-visible, .omp-hud-open:focus-visible, .omp-hud-agent:focus-visible, .omp-hud-more:focus-visible, .omp-detail-agent:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
 .omp-hud .codicon { flex: none; }

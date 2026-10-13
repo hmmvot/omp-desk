@@ -8,6 +8,22 @@ export const TOOL_STYLES = `
 .omp-native-tool .omp-tool-head--intent .omp-tool-digest, .omp-native-tool .omp-tool-head--inline .omp-tool-digest { flex: 0 1 auto; max-width: 60%; }
 .omp-native-tool .omp-tool-head--intent .omp-tool-aux--intent { flex: 1 1 0; max-width: none; }
 .omp-native-tool-meta { color: var(--omp-muted); font-size: 11px; }
+/* Calm rows: a 26 px pitch, no success mark, a quiet name, the target in the foreground, links coloured only under the pointer. */
+.omp-row--assistant:has(> .omp-body-block > .omp-native-tool) { padding-block: 0; }
+.omp-native-tool { margin: 0; }
+.omp-native-tool .omp-tool-head { padding: 3px 8px; }
+.omp-native-tool .omp-tool-name { font-weight: 400; color: var(--omp-muted); }
+.omp-native-tool .omp-tool-digest { color: var(--vscode-foreground); }
+.omp-native-tool[data-tool-status="complete"] .omp-tool-head > .codicon:not(.codicon-chevron-right):not(.codicon-chevron-down) { font-size: 14px; color: var(--omp-muted); }
+.omp-native-tool .omp-tool-digest .omp-file-link { color: var(--vscode-foreground); }
+.omp-native-tool .omp-tool-head:hover .omp-tool-digest .omp-file-link, .omp-native-tool .omp-tool-digest .omp-file-link:focus-visible { color: var(--vscode-textLink-foreground); }
+/* The row's muted words are read on the hover surface too: they take the foreground there. */
+.omp-native-tool .omp-tool-head:hover .omp-tool-name, .omp-native-tool .omp-tool-head:focus-visible .omp-tool-name, .omp-native-tool .omp-tool-head:hover .omp-tool-aux, .omp-native-tool .omp-tool-head:hover .omp-native-tool-meta { color: var(--vscode-foreground); }
+.omp-diff-stat { white-space: nowrap; }
+.omp-diff-stat--add { color: var(--vscode-gitDecoration-addedResourceForeground, var(--vscode-testing-iconPassed)); }
+.omp-diff-stat--del { color: var(--vscode-gitDecoration-deletedResourceForeground, var(--vscode-errorForeground)); }
+.omp-native-tool .omp-tool-head > .omp-tool-counter { flex: none; margin-left: auto; font-variant-numeric: tabular-nums; }
+.omp-native-tool .omp-tool-body { padding: 4px 12px 8px 30px; }
 .omp-wait-title-short { display: none; }
 @media (max-width: 300px) {
 	.omp-wait-title-full { display: none; }

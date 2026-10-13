@@ -434,3 +434,30 @@ test("diagnostic warning chips carry a decorative warning codicon instead of col
 	const html = api.card({ name: "edit", args: {}, result: result("edit", "Updated"), attachments: [{ role: "custom", customType: "native:late_diagnostics", display: true, content: "", timestamp: 1, details: { files: [{ path: "src/app.ts", messages: ["Review the changed expression"] }] } }] });
 	assert.match(html, /class="omp-chip omp-chip--warn"><span class="codicon codicon-warning" aria-hidden="true"/);
 });
+
+test("a settled call has no success mark but still announces its state, while failed and running calls keep their icon", () => {
+	const settled = api.card({ name: "edit", args: { path: "a.ts" }, result: result("edit", "Updated", { path: "a.ts", diff: "-a\n+b" }), cwd: "/repo" });
+	assert.doesNotMatch(settled, /codicon-check/);
+	assert.match(settled, /role="status">complete</);
+	assert.match(api.card({ name: "edit", args: { path: "a.ts" }, running: true, streamUpdate: { files: [{ path: "a.ts", diff: "+x" }] } }), /codicon-loading/);
+	const failed = api.card({ name: "bash", args: { command: "false" }, result: result("bash", "no", { exitCode: 1 }, true) });
+	assert.match(failed, /codicon-error/);
+	assert.match(failed, /role="status">error</);
+});
+
+test("an edit head shows the workspace-relative path and coloured added and removed counts, and its one-file body has no duplicate title", () => {
+	const html = api.card({ name: "edit", args: { path: "C:\\repo\\src\\a.ts" }, result: result("edit", "Updated", { path: "C:\\repo\\src\\a.ts", diff: "-a\n+b\n+c", firstChangedLine: 1 }), cwd: "C:/repo", initiallyExpanded: true });
+	assert.match(html, /omp-tool-digest[^>]*title="src\/a\.ts"/);
+	assert.doesNotMatch(html, /C:\/repo|C:\\repo/);
+	assert.match(html, /omp-diff-stat--add">\+2<\/span> <span class="omp-diff-stat--del">−1</);
+	assert.doesNotMatch(html, /omp-tool-section-title/);
+	const many = api.card({ name: "edit", args: {}, result: result("edit", "Updated", { perFileResults: [{ path: "/repo/src/a.ts", diff: "+a", firstChangedLine: 1 }, { path: "/repo/src/b.ts", diff: "-b", firstChangedLine: 2 }] }), cwd: "/repo", initiallyExpanded: true });
+	assert.match(many, /src\/a\.ts · line 1/);
+	assert.doesNotMatch(many, /\/repo\/src/);
+});
+
+test("a todo head names the operation and its task, with the closed counter on the right", () => {
+	const html = api.card({ name: "todo", args: { ops: [{ op: "done", task: "Write tests" }] }, result: result("todo", "ok", { phases: [{ name: "A", tasks: [{ content: "Write tests", status: "completed" }, { content: "Ship", status: "pending" }] }] }) });
+	assert.match(html, /Done “Write tests”/);
+	assert.match(html, /omp-tool-counter">1\/2</);
+});

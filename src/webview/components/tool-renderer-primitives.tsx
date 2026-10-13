@@ -90,8 +90,8 @@ export function DiffPreview({ text, expanded, lines = 40 }: { text: string; expa
 	})}</pre>;
 	return <div className="omp-native-diff">{expanded ? <OutputLines all={all} render={render} /> : render(shown, 0)}{shown.length < all.length && <div className="omp-empty-note">{all.length - shown.length} more diff lines</div>}</div>;
 }
-export function Section({ title, link, children }: { title: string; link?: ExplicitFileLink; children: ReactNode }): ReactNode {
-	return <section className="omp-tool-section"><div className="omp-tool-section-title"><FileLinkText text={title} link={link} /></div>{children}</section>;
+export function Section({ title, link, children }: { title?: string; link?: ExplicitFileLink; children: ReactNode }): ReactNode {
+	return <section className="omp-tool-section">{title !== undefined && <div className="omp-tool-section-title"><FileLinkText text={title} link={link} /></div>}{children}</section>;
 }
 /** Bounded JSON view for tool arguments and display output only; never used for `details`. */
 export function JsonOutput({ value, expanded, omitAbsent = false }: { value: unknown; expanded: boolean; omitAbsent?: boolean }): ReactNode {
