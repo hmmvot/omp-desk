@@ -20,6 +20,7 @@ import { detectWebLinks } from "../lib/chat-web-links";
 import { parseBareFileName, parseCodeSymbol } from "../../shared/code-symbols";
 import { webLinkUrl } from "../../shared/terminal-links";
 import { CodeSymbolSpan, FileLink, FileLinkText } from "./FileLinks.tsx";
+import { breakable } from "./BreakPoints.tsx";
 import { ImageReferenceToken } from "./ImageReference.tsx";
 import { WebLink } from "./WebLinks.tsx";
 import { CodeBlock } from "./CodeBlock.tsx";
@@ -42,9 +43,9 @@ const RULE = /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/;
 const QUOTE = /^\s*>\s?(.*)$/;
 const TABLE_SEPARATOR = /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/;
 
-/** Text whose file references the host has proven can become links; text without a candidate stays a bare string. */
-function files(text: string, key: string): ReactNode {
-	return detectChatFileLinks(text).length === 0 ? text : <FileLinkText key={key} text={text} />;
+/** Text whose file references the host has proven can become links; text without a candidate stays a bare string. `breaks` offers line-break points after path separators (inline code only). */
+function files(text: string, key: string, breaks = false): ReactNode {
+	return detectChatFileLinks(text).length === 0 ? (breaks ? breakable(text) : text) : <FileLinkText key={key} text={text} breaks={breaks} />;
 }
 
 /** Plain text with its bare web URLs linked and its file references offered to the host; the characters are never altered. */
@@ -55,7 +56,7 @@ function plain(text: string, key: string): ReactNode {
 	let cursor = 0;
 	web.forEach((link, index) => {
 		if (link.start > cursor) nodes.push(files(text.slice(cursor, link.start), `${key}-f${index}`));
-		nodes.push(<WebLink key={`${key}-w${index}`} url={link.target}>{text.slice(link.start, link.end)}</WebLink>);
+		nodes.push(<WebLink key={`${key}-w${index}`} url={link.target}>{breakable(text.slice(link.start, link.end))}</WebLink>);
 		cursor = link.end;
 	});
 	if (cursor < text.length) nodes.push(files(text.slice(cursor), `${key}-f${web.length}`));
@@ -72,22 +73,22 @@ function codeSpan(content: string, key: string): ReactNode {
 	const path = single && isFileLinkCandidate(whole) ? whole : null;
 	const symbol = parseCodeSymbol(content) !== null;
 	// A bare file name or path suffix (`session-index.ts:849`, `host/session-index.ts:579`) is looked up by the host in assistant text; where it links nothing the span renders as before.
-	if (symbol || parseBareFileName(content) !== null) return <CodeSymbolSpan key={key} content={content} path={path} plain={symbol || path !== null ? undefined : files(content, `${key}f`)} />;
-	return <code key={key}>{path !== null ? <FileLink target={path}>{content}</FileLink> : files(content, `${key}f`)}</code>;
+	if (symbol || parseBareFileName(content) !== null) return <CodeSymbolSpan key={key} content={content} path={path} plain={symbol || path !== null ? undefined : files(content, `${key}f`, true)} />;
+	return <code key={key}>{path !== null ? <FileLink target={path}>{breakable(content)}</FileLink> : files(content, `${key}f`, true)}</code>;
 }
 
 /** A link label keeps its inline code spans as code; nothing inside a label is linked again. */
 function linkLabel(label: string, key: string): ReactNode {
-	if (!label.includes("`")) return label;
+	if (!label.includes("`")) return breakable(label);
 	const nodes: ReactNode[] = [];
 	const spans = /`([^`]+)`/g;
 	let cursor = 0;
 	for (const span of label.matchAll(spans)) {
-		if (span.index > cursor) nodes.push(label.slice(cursor, span.index));
-		nodes.push(<code key={`${key}c${span.index}`}>{span[1]}</code>);
+		if (span.index > cursor) nodes.push(<Fragment key={`${key}t${span.index}`}>{breakable(label.slice(cursor, span.index))}</Fragment>);
+		nodes.push(<code key={`${key}c${span.index}`}>{breakable(span[1]!)}</code>);
 		cursor = span.index + span[0].length;
 	}
-	if (cursor < label.length) nodes.push(label.slice(cursor));
+	if (cursor < label.length) nodes.push(<Fragment key={`${key}t${cursor}`}>{breakable(label.slice(cursor))}</Fragment>);
 	return <Fragment key={key}>{nodes}</Fragment>;
 }
 
@@ -132,7 +133,7 @@ function renderInline(text: string, keyPrefix: string, depth = 0): ReactNode[] {
 			nodes.push(file !== null ? <FileLink key={key} target={file}>{text}</FileLink> : url === null ? <Fragment key={key}>{text}</Fragment> : <WebLink key={key} url={url}>{text}</WebLink>);
 		} else if (token.startsWith("<")) {
 			const url = webLinkUrl(token.slice(1, -1));
-			nodes.push(url === null ? plain(token, key) : <WebLink key={key} url={url}>{token.slice(1, -1)}</WebLink>);
+			nodes.push(url === null ? plain(token, key) : <WebLink key={key} url={url}>{breakable(token.slice(1, -1))}</WebLink>);
 		} else if (/^https?:/i.test(token)) {
 			// A bare URL: its trailing punctuation is prose again.
 			nodes.push(plain(token, key));

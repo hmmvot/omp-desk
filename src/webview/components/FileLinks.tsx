@@ -8,7 +8,7 @@
  * path, which re-resolves against the session cwd and refuses anything that is not an existing local file or folder.
  */
 import type { MouseEvent, KeyboardEvent, ReactNode, RefObject } from "react";
-import { createContext, useContext, useEffect, useMemo, useReducer, useRef, useState } from "react";
+import { createContext, Fragment, useContext, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import type { GuestHostMessage, GuestWebviewMessage } from "../../protocol/messages";
 import { fileLinkMenuContext } from "../../shared/terminal-links";
 import type { FileLinkAction } from "../../shared/terminal-links";
@@ -17,6 +17,7 @@ import { ChatSymbolLinks } from "../lib/chat-symbol-links";
 import type { SymbolLink } from "../lib/chat-symbol-links";
 import { useHighlightedRuns } from "../lib/use-highlighted-runs";
 import { CodeRuns } from "./CodeRuns";
+import { breakable } from "./BreakPoints";
 
 /** Exported for static renders, which cannot run the provider's effect. */
 export const FileLinksContext = createContext<ChatFileLinks | null>(null);
@@ -135,8 +136,9 @@ export interface ExplicitFileLink { readonly text: string; readonly target: stri
 /**
  * `text` with every host-proven file reference in it wrapped in a link; the characters themselves are never altered.
  * `link` names one piece of the text that is a known file at a known position (a path whose first changed line is known).
+ * `breaks` offers line-break points after path separators, for text in inline code.
  */
-export function FileLinkText({ text, link, revalidate }: { text: string; link?: ExplicitFileLink; revalidate?: unknown }): ReactNode {
+export function FileLinkText({ text, link, revalidate, breaks = false }: { text: string; link?: ExplicitFileLink; revalidate?: unknown; breaks?: boolean }): ReactNode {
 	const links = useContext(FileLinksContext);
 	const candidates = useMemo(() => {
 		if (links === null) return [];
@@ -147,16 +149,17 @@ export function FileLinkText({ text, link, revalidate }: { text: string; link?: 
 		return [...found.filter(candidate => candidate.end <= at || candidate.start >= end), { target: link.target, proof: link.proof, start: at, end }].sort((a, b) => a.start - b.start);
 	}, [links, text, link?.text, link?.target, link?.proof]);
 	const proven = useProvenTargets(links, candidates.map(candidate => candidate.proof), revalidate);
-	if (links === null || !candidates.some(candidate => proven.has(candidate.proof))) return text;
+	const piece = (value: string): ReactNode => breaks ? breakable(value) : value;
+	if (links === null || !candidates.some(candidate => proven.has(candidate.proof))) return piece(text);
 	const nodes: ReactNode[] = [];
 	let cursor = 0;
 	candidates.forEach((candidate, index) => {
 		if (!proven.has(candidate.proof) || candidate.start < cursor) return;
-		if (candidate.start > cursor) nodes.push(text.slice(cursor, candidate.start));
-		nodes.push(<Anchor key={index} links={links} target={candidate.target}>{text.slice(candidate.start, candidate.end)}</Anchor>);
+		if (candidate.start > cursor) nodes.push(<Fragment key={`t${index}`}>{piece(text.slice(cursor, candidate.start))}</Fragment>);
+		nodes.push(<Anchor key={index} links={links} target={candidate.target}>{piece(text.slice(candidate.start, candidate.end))}</Anchor>);
 		cursor = candidate.end;
 	});
-	if (cursor < text.length) nodes.push(text.slice(cursor));
+	if (cursor < text.length) nodes.push(<Fragment key="tail">{piece(text.slice(cursor))}</Fragment>);
 	return <>{nodes}</>;
 }
 
@@ -227,10 +230,10 @@ export function CodeSymbolSpan({ content, path, plain }: { content: string; path
 	const [ref, seen] = useSeen();
 	const symbol = useSymbolLink(eligible ? symbols : null, !fileProven && fileRefused && seen ? content : null);
 	if (!fileProven && links !== null && symbol?.definitions !== undefined) {
-		return <code ref={ref}><SymbolSearchAnchor links={links} symbol={content} definitions={symbol.definitions} files={symbol.files === true}>{content}</SymbolSearchAnchor></code>;
+		return <code ref={ref}><SymbolSearchAnchor links={links} symbol={content} definitions={symbol.definitions} files={symbol.files === true}>{breakable(content)}</SymbolSearchAnchor></code>;
 	}
 	const target = fileProven ? path : symbol?.target;
-	return <code ref={ref}>{links !== null && target !== undefined ? <Anchor links={links} target={target}>{content}</Anchor> : plain ?? content}</code>;
+	return <code ref={ref}>{links !== null && target !== undefined ? <Anchor links={links} target={target}>{breakable(content)}</Anchor> : plain ?? breakable(content)}</code>;
 }
 
 /** The position a read call's displayed target carries (`src/a.ts:50-200`), for the link that opens at it. */

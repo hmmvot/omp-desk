@@ -4789,6 +4789,10 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			 // The nearest ancestor that scrolls sideways: the block that owns the overflow.
 			 window.scroller=el=>{for(let p=el.parentElement;p;p=p.parentElement){const o=getComputedStyle(p).overflowX;if(o==='auto'||o==='scroll')return p}return null};
 			 window.lines=el=>({height:el.getBoundingClientRect().height,line:parseFloat(getComputedStyle(el).lineHeight),rects:el.getClientRects().length});
+			 // The last character of every line but the last one of an inline element.
+			 window.lineEnds=el=>{const walker=document.createTreeWalker(el,NodeFilter.SHOW_TEXT),chars=[];
+			  for(let node=walker.nextNode();node;node=walker.nextNode()){for(let i=0;i<node.data.length;i++){const range=document.createRange();range.setStart(node,i);range.setEnd(node,i+1);const rects=range.getClientRects();if(rects.length)chars.push({c:node.data[i],top:Math.round(rects[0].top)})}}
+			  return chars.filter((item,i)=>i+1<chars.length&&chars[i+1].top>item.top+2).map(item=>item.c)};
 			})()`);
 			/** At each width: the transcript and the page never scroll sideways, nothing sticks out of it, and `read`'s answer passes `check`. */
 			const atEachWidth = async <T>(label: string, settle: string, read: string, check: (facts: T, where: string) => void) => {
@@ -4808,17 +4812,27 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			// A reply: inline path, file and web links, a URL, long words, a list, a heading, a quote, a wide table and a long code line; then a long user message.
 			await show([assistant([{ type: "text", text: reply }]), { role: "user", timestamp: 20, content: `Please look at ${path} and ${word} and ${url}` }]);
 			await ui.wait("document.querySelector('.omp-md table') && document.querySelector('.omp-md pre') && document.querySelector('.omp-user') && document.querySelector('.omp-file-link')");
-			type Prose = { path: Lines | null; user: Lines | null; table: Block; fence: Block; links: { target: string; rects: number }[] };
+			type Prose = { path: Lines | null; ends: string[]; pathText: string; pathSelected: string | null; proven: string[]; user: Lines | null; table: Block; fence: Block; links: { target: string; rects: number }[] };
 			type Lines = { height: number; line: number; rects: number };
 			type Block = { own: boolean; scroll: [number, number] };
 			await atEachWidth<Prose>("a reply and a user message", ".omp-md table,.omp-md pre", `(()=>{
 			 const pathCode=[...document.querySelectorAll('.omp-md p code')].find(code=>code.textContent.startsWith('omp-vscode/Strings')&&!code.closest('.omp-file-link,.omp-web-link'));
 			 const block=el=>{const host=window.scroller(el);return {own:host!==null&&host!==document.querySelector('.omp-transcript'),scroll:host?[host.scrollWidth,host.clientWidth]:[0,0]}};
-			 return {path:pathCode?window.lines(pathCode):null,user:document.querySelector('.omp-user')?window.lines(document.querySelector('.omp-user')):null,
+			 const ends=pathCode?window.lineEnds(pathCode):[];
+			 const select=el=>{const range=document.createRange();range.selectNodeContents(el);const selection=getSelection();selection.removeAllRanges();selection.addRange(range);const text=selection.toString();selection.removeAllRanges();return text};
+			 const proven=document.querySelector('.omp-md [data-file-target^="proven/"]');
+			 return {ends,pathText:pathCode?.textContent,pathSelected:pathCode?select(pathCode):null,proven:proven?[proven.textContent,proven.dataset.fileTarget]:[],
+			  path:pathCode?window.lines(pathCode):null,user:document.querySelector('.omp-user')?window.lines(document.querySelector('.omp-user')):null,
 			  table:block(document.querySelector('.omp-md table')),fence:block(document.querySelector('.omp-md pre code')),
 			  links:[...document.querySelectorAll('.omp-md .omp-file-link, .omp-md .omp-web-link')].map(link=>({target:link.dataset.fileTarget??link.dataset.webUrl??'',rects:link.getClientRects().length}))}})()`,
 			(facts, where) => {
 				assert.ok(facts.path !== null && facts.path.height > facts.path.line * 1.5 && facts.path.rects > 1, `a long inline path wraps: ${where} (${facts.path?.height}px over ${facts.path?.line}px lines)`);
+				assert.ok(facts.ends.length >= 1, `the path is on several lines: ${where}`);
+				assert.ok(facts.ends.every(end => /[/._-]/.test(end)), `every line of the path ends at a separator, never mid-word: ${where} (${facts.ends.join(" ")})`);
+				if (where.endsWith("at 360px")) assert.ok(facts.ends.includes("/"), `a line of the path ends at a "/" boundary: ${where} (${facts.ends.join(" ")})`);
+				assert.equal(facts.pathText, path, `the path's text is unchanged: ${where}`);
+				assert.equal(facts.pathSelected, path, `selecting the path copies exactly it: ${where}`);
+				assert.deepEqual(facts.proven, [provenPath, provenPath], `a proven file link keeps its text and target: ${where}`);
 				assert.ok(facts.user !== null && facts.user.height > facts.user.line * 3, `a long user message wraps: ${where} (${facts.user?.height}px over ${facts.user?.line}px lines)`);
 				assert.ok(facts.links.length >= 3 && facts.links.some(link => link.target.startsWith("proven/")), `file and web links are rendered: ${where}`);
 				assert.ok(facts.table.own && facts.table.scroll[0] > facts.table.scroll[1], `the wide table scrolls inside its own block: ${where} (${facts.table.scroll.join(" over ")})`);

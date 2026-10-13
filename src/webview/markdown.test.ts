@@ -14,6 +14,8 @@ let renderSymbols: RenderSymbols;
 /** Parses every prefix of `text` of the given lengths in turn, each from the previous parse, and reports each step's markup and how many leading blocks it kept as the same element. */
 type RenderStreamed = (text: string, lengths: readonly number[]) => { html: string; kept: number }[];
 let renderStreamed: RenderStreamed;
+/** Renders as it is, line-break points included. */
+let renderBreaks: (text: string) => string;
 before(async () => {
 	const bundled = await build({ stdin: { contents: `
 		import { createElement } from "react";
@@ -25,14 +27,17 @@ before(async () => {
 		import { TerminalLinkClient } from "./lib/terminal-link-client";
 		import { SymbolLinksContext, AssistantReplyContext } from "./components/FileLinks";
 		import { ChatSymbolLinks } from "./lib/chat-symbol-links";
-		export const render = text => renderToStaticMarkup(createElement(Markdown, { text }));
+		/** The line-break points (a wbr) add no character: every comparison of characters ignores them, and renderBreaks keeps them. */
+		const characters = html => html.replaceAll("<wbr/>", "");
+		export const renderBreaks = text => renderToStaticMarkup(createElement(Markdown, { text }));
+		export const render = text => characters(renderBreaks(text));
 		export const renderLinked = async (text, existing) => {
 			const listeners = new Set();
 			const transport = { post(message) { if (message.type === "omp:terminal-link-validate") queueMicrotask(() => { for (const listener of listeners) listener({ type: "omp:terminal-link-validation", requestId: message.requestId, valid: existing.includes(message.target) }); }); return true; }, subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); } };
 			const links = new ChatFileLinks(transport);
 			const web = new TerminalLinkClient(transport);
 			for (const target of existing) await links.resolve(target);
-			const html = renderToStaticMarkup(createElement(WebLinksContext.Provider, { value: web }, createElement(FileLinksContext.Provider, { value: links }, createElement(Markdown, { text }))));
+			const html = characters(renderToStaticMarkup(createElement(WebLinksContext.Provider, { value: web }, createElement(FileLinksContext.Provider, { value: links }, createElement(Markdown, { text })))));
 			links.dispose();
 			web.dispose();
 			return html;
@@ -56,8 +61,8 @@ before(async () => {
 			const inner = createElement(Markdown, { text });
 			const eligibility = createElement(AssistantReplyContext.Provider, { value: eligible }, inner);
 			const html = provider
-				? renderToStaticMarkup(createElement(FileLinksContext.Provider, { value: links }, createElement(SymbolLinksContext.Provider, { value: symbolLinks }, eligibility)))
-				: renderToStaticMarkup(eligibility);
+				? characters(renderToStaticMarkup(createElement(FileLinksContext.Provider, { value: links }, createElement(SymbolLinksContext.Provider, { value: symbolLinks }, eligibility))))
+				: characters(renderToStaticMarkup(eligibility));
 			links.dispose();
 			symbolLinks.dispose();
 			return { html, asked };
@@ -69,19 +74,31 @@ before(async () => {
 				const parsed = parseMarkdown(text.slice(0, length), previous);
 				let kept = 0;
 				while (previous !== null && kept < previous.blocks.length && parsed.blocks[kept] === previous.blocks[kept]) kept += 1;
-				steps.push({ html: renderToStaticMarkup(createElement("div", { className: "omp-md" }, parsed.blocks)), kept });
+				steps.push({ html: characters(renderToStaticMarkup(createElement("div", { className: "omp-md" }, parsed.blocks))), kept });
 				previous = parsed;
 			}
 			return steps;
 		};
 	`, loader: "tsx", resolveDir: join(process.cwd(), "src/webview") }, bundle: true, write: false,
 		format: "cjs", platform: "node", packages: "external", jsx: "automatic", define: { "process.env.NODE_ENV": '"production"' } });
-	const module = { exports: {} as { render: typeof render; renderLinked: Provide; renderSymbols: RenderSymbols; renderStreamed: RenderStreamed } };
+	const module = { exports: {} as { render: typeof render; renderBreaks: typeof renderBreaks; renderLinked: Provide; renderSymbols: RenderSymbols; renderStreamed: RenderStreamed } };
 	new Function("require", "module", "exports", bundled.outputFiles[0]!.text)(createRequire(import.meta.url), module, module.exports);
 	render = module.exports.render;
+	renderBreaks = module.exports.renderBreaks;
 	renderLinked = module.exports.renderLinked;
 	renderSymbols = module.exports.renderSymbols;
 	renderStreamed = module.exports.renderStreamed;
+});
+
+test("inline code and link text break after path separators with a wbr that adds no character; prose and fenced code get none", () => {
+	const raw = renderBreaks("`src/webview/a.ts` and [`x/y.ts`](https://example.com/a/b) and <https://example.com/p/q> and src/plain/text.ts and a/b\n\n```\nsrc/fence/x.ts\n```");
+	assert.match(raw, /<code>src\/<wbr\/>webview\/<wbr\/>a\.ts<\/code>/);
+	assert.match(raw, /<code>x\/<wbr\/>y\.ts<\/code>/);
+	assert.match(raw, /https:\/\/<wbr\/>example\.com\/<wbr\/>p\/<wbr\/>q/);
+	assert.ok(raw.includes("src/plain/text.ts and a/b"), "text outside code and links is left alone");
+	assert.ok(raw.includes("src/fence/x.ts</code>"), "a fenced block is left alone");
+	assert.equal(raw.replaceAll("<wbr/>", ""), render("`src/webview/a.ts` and [`x/y.ts`](https://example.com/a/b) and <https://example.com/p/q> and src/plain/text.ts and a/b\n\n```\nsrc/fence/x.ts\n```"));
+	assert.equal(raw.replaceAll(/<[^>]*>/g, "").includes("src/webview/a.ts"), true, "the text, markup removed, is the characters as written");
 });
 
 test("bullets indented under a numbered item nest inside it instead of continuing the numbering", () => {
