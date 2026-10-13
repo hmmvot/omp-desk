@@ -1,3 +1,4 @@
+import { ancestorProjectNotice, NEAREST_OMP_SETTING } from "../../../protocol/omp-config-model";
 import type { ConfigSnapshot } from "../../../protocol/omp-config-model";
 import { FILTERS, VIEW_NAME } from "../model";
 import type { Filter, TocTab, View } from "../model";
@@ -76,6 +77,12 @@ export function Toc({ toc, current, onJump }: TocProps) {
       {item.groups.map(group => <button key={group.anchor} type="button" className="g" aria-current={current === group.anchor} onClick={() => onJump(group.anchor)}>{group.group}<span className="cnt">{group.count}</span></button>)}
     </div>)}
   </nav>;
+}
+
+/** The Project view's notice when an ancestor folder's .omp looks like the OMP project: a warning with a way to the setting, never a refusal. */
+export function AncestorProjectNotice({ ancestor, busy, onOpenSetting }: { readonly ancestor: string; readonly busy: boolean; onOpenSetting(): void }) {
+  return <div className="swarn project-notice" role="note"><Icon name="info" />
+    <div>{ancestorProjectNotice(ancestor)} <button type="button" className="btn sec chip" disabled={busy} title={NEAREST_OMP_SETTING} onClick={onOpenSetting}><Icon name="settings-gear" />Open the setting</button></div></div>;
 }
 
 export function Footer() {

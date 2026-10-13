@@ -4,7 +4,7 @@ import { isRecord } from "../../shared/guards";
 import type { ConfigAction, ConfigLayer, ConfigMessage, ConfigSnapshot, ConfigValue } from "../../protocol/omp-config-model";
 import { fileLayerFor, layout, modifiedCount, parseQuery, shownEntries } from "./model";
 import type { Filter, View } from "./model";
-import { Footer, Header, LayerBar, SearchBar, Toc } from "./components/Chrome";
+import { AncestorProjectNotice, Footer, Header, LayerBar, SearchBar, Toc } from "./components/Chrome";
 import { Icon } from "./components/Icon";
 import { SettingRow } from "./components/SettingRow";
 import { OMP_SETTINGS_CSS } from "./styles";
@@ -95,6 +95,7 @@ function App() {
     {snapshot && snapshot.notices.length > 0 && <ul className="notices small">{snapshot.notices.map(notice => <li key={notice}>{notice}</li>)}</ul>}
     <SearchBar query={query} chips={chips} onQuery={setQuery} onChip={toggleChip} />
     <LayerBar view={view} folder={folder} projectAvailable={projectAvailable} counts={counts} shown={shown.length} total={visibleTotal} searching={searching} onView={setView} />
+    {view === "project" && snapshot?.files.project.ancestorProject && <AncestorProjectNotice ancestor={snapshot.files.project.ancestorProject} busy={busy} onOpenSetting={() => send({ action: "open-setting" }, "Opening the setting…")} />}
     <div role="status" className={`status${status.ok ? "" : " error"}`}>{status.message ? <><Icon name={status.pending ? "loading" : status.ok ? "check" : "error"} spin={status.pending} />{status.message}</> : null}</div>
     <div className="s1grid">
       <Toc toc={toc} current={current} onJump={jump} />

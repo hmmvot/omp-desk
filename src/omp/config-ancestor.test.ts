@@ -3,7 +3,8 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test } from "node:test";
-import { ancestorContextDir, nearestOmpFolder, projectFolderFor } from "./config-ancestor.ts";
+import { ancestorContextDir, ancestorProjectFolder, nearestOmpFolder, projectFolderFor } from "./config-ancestor.ts";
+import { ancestorProjectNotice } from "../protocol/omp-config-model.ts";
 
 async function tree(files: readonly string[]): Promise<string> {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-ancestor-"));
@@ -71,4 +72,21 @@ test("the walk stops at the repository root, inclusive, and at home, which is ne
   const homeHolds = await tree([".omp/config.yml", "work/omp-vscode/Assets/.keep"]);
   assert.equal(await nearestOmpFolder(path.join(homeHolds, "work", "Game"), homeHolds), null, "no repository: the walk ends at home and home's .omp is not a project");
   assert.equal(await projectFolderFor(homeHolds, true, homeHolds), homeHolds, "the home folder itself falls back to itself (it has no project layer)");
+});
+
+test("an ancestor .omp that is the OMP project is reported with its folder, whether or not it holds context files; nothing is reported when the folder has its own .omp or is the repository root", async () => {
+  const home = "nohome";
+  // the real Unity case: the root's .omp holds config.yml, settings.json, agents, mcp.json and no context file
+  const root = await tree([".git/HEAD", ".omp/config.yml", ".omp/settings.json", ".omp/agents/a.md", ".omp/mcp.json", "omp-vscode/Assets/.keep"]);
+  const game = path.join(root, "Game");
+  assert.equal(await ancestorProjectFolder(game, path.join(root, home)), root);
+  assert.equal(await ancestorContextDir(game, path.join(root, home)), null, "no context file: the first write is not refused, only the notice is shown");
+  await fs.mkdir(path.join(game, ".omp"), { recursive: true });
+  assert.equal(await ancestorProjectFolder(game, path.join(root, home)), root, "an empty .omp of its own does not count");
+  await fs.writeFile(path.join(game, ".omp", "config.yml"), "x: 1\n");
+  assert.equal(await ancestorProjectFolder(game, path.join(root, home)), null, "a non-empty .omp of its own is the project");
+  assert.equal(await ancestorProjectFolder(root, path.join(root, home)), null, "the repository root has no ancestor to defer to");
+  const above = await tree([".omp/config.yml", "repo/.git/HEAD", "repo/omp-vscode/Assets/.keep"]);
+  assert.equal(await ancestorProjectFolder(path.join(above, "repo", "Game"), path.join(above, home)), null, "the walk stops at the repository root");
+  assert.match(ancestorProjectNotice(root), /has an \.omp above this one and looks like the OMP project: sessions that run there will not read settings written here\. Turn on ompDesk\.ompSettings\.useNearestAncestorOmpFolder to edit it instead\./);
 });

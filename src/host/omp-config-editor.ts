@@ -12,6 +12,7 @@ import { projectFolderFor } from "../omp/config-ancestor";
 import { chooseSetting } from "./settings-pickers";
 import { SettingsRefusal } from "./omp-settings-core";
 import { isRecord as record } from "../shared/guards";
+import { NEAREST_OMP_SETTING } from "../protocol/omp-config-model";
 import type { ConfigMessage } from "../protocol/omp-config-model";
 import type { ConfigRecord } from "../protocol/settings-model";
 import type { PickEntry } from "../protocol/settings-pick-items";
@@ -99,6 +100,7 @@ export class OmpConfigEditors implements vscode.Disposable {
         post: (message: ConfigMessage) => { if (!editor.disposed) void panel.webview.postMessage(message); },
         key: () => editor.key,
         openFile: (file, line) => this.#openFile(file, line),
+        openSetting: async () => { await vscode.commands.executeCommand("workbench.action.openSettings", NEAREST_OMP_SETTING); },
         pickScope: current => this.#pickScope(editor, current),
         rebind: folder => this.#rebind(editor, folder),
       }),

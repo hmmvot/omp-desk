@@ -96,6 +96,13 @@ export function parseNumericInput(text: string, integer: boolean): { readonly va
   return { value: value === 0 ? 0 : value };
 }
 
+/** The setting that makes the editor use the nearest ancestor `.omp` folder as the project (Unity projects). */
+export const NEAREST_OMP_SETTING = "ompDesk.ompSettings.useNearestAncestorOmpFolder";
+/** The Project view's notice when an ancestor folder's `.omp` looks like the OMP project (not a refusal: the user may intend this folder). */
+export function ancestorProjectNotice(ancestor: string): string {
+  return `The folder ${ancestor} has an .omp above this one and looks like the OMP project: sessions that run there will not read settings written here. Turn on ${NEAREST_OMP_SETTING} to edit it instead.`;
+}
+
 export interface ConfigFileFacts {
   readonly path: string; readonly exists: boolean;
   /**
@@ -104,6 +111,11 @@ export interface ConfigFileFacts {
    * the ancestor's files loading for sessions in this folder. Null when nothing would change.
    */
   readonly ancestorOmp?: string | null;
+  /**
+   * Project layer only: the nearest ancestor folder whose `.omp` is non-empty while this folder has none of its own. OMP sessions probably
+   * run there, so settings written here would not be read by them; the page says so and points to `ompDesk.ompSettings.useNearestAncestorOmpFolder`.
+   */
+  readonly ancestorProject?: string | null;
 }
 
 export interface ConfigSnapshot {
@@ -129,7 +141,7 @@ export type ConfigChange =
   | { readonly op: "reset"; readonly id: string; readonly layer: ConfigLayer };
 
 export type ConfigAction =
-  | { action: "ready" | "reload" | "pick-scope"; requestId: string }
+  | { action: "ready" | "reload" | "pick-scope" | "open-setting"; requestId: string }
   | { action: "set"; requestId: string; id: string; layer: ConfigLayer; value: ConfigValue }
   | { action: "reset"; requestId: string; id: string; layer: ConfigLayer }
   /** Opens the layer's YAML file in a text editor at the setting's key (read-only settings; the page offers it for them). */

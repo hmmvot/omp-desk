@@ -19,6 +19,8 @@ export interface OmpConfigPorts {
   post(message: ConfigMessage): void;
   key(): string;
   openFile(file: string, line: number | null): Promise<void>;
+  /** Shows `ompDesk.ompSettings.useNearestAncestorOmpFolder` in VS Code's Settings editor. */
+  openSetting(): Promise<void>;
   /** Asks which scope to show: a folder, null for global, undefined when dismissed. */
   pickScope(current: string | null): Promise<string | null | undefined>;
   /** Moves the editor to another folder; answers the folder it now shows (the project folder the setting may resolve it to), or a sentence when it cannot (that scope is already open). */
@@ -42,7 +44,7 @@ export function parseConfigAction(raw: unknown): ConfigAction | null {
   const layer = raw.layer === "global" || raw.layer === "project" ? raw.layer : null;
   const id = typeof raw.id === "string" && raw.id.length > 0 && raw.id.length <= 256 ? raw.id : null;
   switch (raw.action) {
-    case "ready": case "reload": case "pick-scope": return { action: raw.action, requestId };
+    case "ready": case "reload": case "pick-scope": case "open-setting": return { action: raw.action, requestId };
     case "set": {
       const value = raw.value;
       const ok = typeof value === "boolean" || typeof value === "number" && Number.isFinite(value) || typeof value === "string" && value.length <= MAX_TEXT
@@ -111,6 +113,7 @@ export class OmpConfigController {
         ? { op: "reset", id: action.id, layer: action.layer } : { op: "set", id: action.id, layer: action.layer, value: action.value });
       case "reset": return this.#save({ op: "reset", id: action.id, layer: action.layer });
       case "open-config": return this.#open(action.layer, action.id);
+      case "open-setting": await this.#ports.openSetting(); return "";
       case "pick-scope": {
         const chosen = await this.#ports.pickScope(this.#folder);
         if (chosen === undefined || chosen === this.#folder) return "";

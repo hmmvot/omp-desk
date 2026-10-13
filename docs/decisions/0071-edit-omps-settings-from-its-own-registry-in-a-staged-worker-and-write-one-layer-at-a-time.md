@@ -37,7 +37,7 @@ Choose the last option. A second staged Bun worker, `config-settings-worker`, im
 
 ### Amendment (2026-10-13): the project folder
 
-The project folder defaults to the workspace folder. The resource setting `ompDesk.ompSettings.useNearestAncestorOmpFolder` (default off) makes it the nearest ancestor with a non-empty `.omp` (the folder itself included; stop at the repository root, inclusive, or at home, which is never a project; fall back to the workspace folder), for Unity projects whose sessions run at the repository root under ADR-0057. The write rules above are unchanged; the first-write refusal names the setting. See the design.
+The project folder defaults to the workspace folder. The resource setting `ompDesk.ompSettings.useNearestAncestorOmpFolder` (default off) makes it the nearest ancestor with a non-empty `.omp` (the folder itself included; stop at the repository root, inclusive, or at home, which is never a project; fall back to the workspace folder), for Unity projects whose sessions run at the repository root under ADR-0057. The write rules above are unchanged; the first-write refusal names the setting, and with the setting off the Project view shows a notice (not a refusal) when an ancestor's non-empty `.omp` looks like the project. See the design.
 
 ## Related Documents
 

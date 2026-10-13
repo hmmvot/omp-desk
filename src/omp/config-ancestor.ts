@@ -53,3 +53,14 @@ export async function nearestOmpFolder(folder: string, home: string = os.homedir
 export async function projectFolderFor(folder: string, useNearestAncestor: boolean, home: string = os.homedir()): Promise<string> {
   return useNearestAncestor ? await nearestOmpFolder(folder, home) ?? folder : folder;
 }
+
+/**
+ * The nearest ancestor folder (never the folder itself) whose `.omp` is non-empty, when the folder has no non-empty `.omp` of its own and the
+ * walk (inclusive stop at the repository root, or home) reaches one: the folder OMP sessions run in is probably that one, not this folder.
+ */
+export async function ancestorProjectFolder(folder: string, home: string = os.homedir()): Promise<string | null> {
+  const start = path.resolve(folder);
+  if ((await entries(path.join(start, ".omp"))).length > 0) return null;
+  if ((await entries(start)).includes(".git") || same(start, path.resolve(home)) || path.dirname(start) === start) return null;
+  return nearestOmpFolder(path.dirname(start), home);
+}
