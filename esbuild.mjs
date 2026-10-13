@@ -2,6 +2,7 @@
 //
 //   src/extension.ts      -> out/extension.js          (VS Code extension host, CommonJS, `vscode` external)
 //   src/webview/main.tsx  -> media/guest.js            (browser chat editor, IIFE loaded by the WebviewPanel)
+//   src/webview/mermaid/entry.ts -> media/mermaid.js    (diagram renderer the chat page loads lazily, IIFE; options in scripts/mermaid-bundle.mjs)
 //   src/webview/shell/main.tsx -> media/shell.js       (browser folder-shell editor, IIFE)
 //   src/omp/host-control.ts -> out/omp-host-control.mjs (native OMP extension loaded with `omp -e`, ESM factory)
 //   src/broker/pty-broker.ts -> out/pty/pty-broker.js  (extension-owned PTY broker, detached Node process)
@@ -18,6 +19,7 @@ import esbuild from "esbuild";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import process from "node:process";
+import { mermaidBuildOptions } from "./scripts/mermaid-bundle.mjs";
 
 const watch = process.argv.includes("--watch");
 /** Build only the broker tree: useful while working on the PTY surface alone. */
@@ -60,6 +62,12 @@ const targets = [
       // The Webview loads one script with no module resolution: bundle React and the wire.
       define: { "process.env.NODE_ENV": '"production"' },
     },
+  },
+  {
+    // The chat page's diagram renderer, loaded by `guest.js` only when a reply has a mermaid block.
+    // It is a script of its own so the 3.4 MB of mermaid never loads for a page that has no diagram.
+    name: "mermaid",
+    options: mermaidBuildOptions,
   },
   {
     // The folder-shell editor's renderer: the same Webview rules as the chat guest, a
@@ -282,6 +290,20 @@ async function copyCodicons() {
   await fs.copyFile(path.join(source, "..", "LICENSE-CODE"), path.join("media", "codicons", "LICENSE-CODE"));
 }
 
+/**
+ * Keeps the 3.4 MB diagram renderer out of the page's own bundle and the two packages it stubs out of the renderer:
+ * either slipping back in costs megabytes the design (docs/designs/2026-10-13-chat-mermaid-diagrams.md) says are not paid.
+ * @param {string} name build target name
+ * @param {string[]} inputs every file the target bundled
+ */
+function assertBundleBoundary(name, inputs) {
+  const bundled = inputs.map(input => input.replaceAll("\\", "/"));
+  const stray = name === "guest"
+    ? bundled.filter(input => input.includes("node_modules/mermaid/") || input.includes("node_modules/@mermaid-js/"))
+    : bundled.filter(input => input.includes("node_modules/elkjs/") || input.includes("node_modules/katex/"));
+  if (stray.length > 0) throw new Error(`${name} bundle pulled in files it must not contain (${stray.length}), first: ${stray[0]}`);
+}
+
 async function main() {
   const selected = ptyOnly ? targets.filter(({ name }) => name === "pty-broker") : targets;
   if (watch) {
@@ -293,7 +315,8 @@ async function main() {
     return;
   }
   for (const { name, options } of selected) {
-    await esbuild.build({ ...shared, ...options });
+    const result = await esbuild.build({ ...shared, ...options, metafile: name === "guest" || name === "mermaid" });
+    if (result.metafile) assertBundleBoundary(name, Object.keys(result.metafile.inputs));
     console.log(`built ${name} -> ${options.outfile}`);
   }
   if (!ptyOnly) { await copyControlHelper(); await copyCodicons(); }

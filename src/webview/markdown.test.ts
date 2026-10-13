@@ -23,7 +23,7 @@ before(async () => {
 		import { WebLinksContext } from "./components/WebLinks";
 		import { ChatFileLinks } from "./lib/chat-file-links";
 		import { TerminalLinkClient } from "./lib/terminal-link-client";
-		import { SymbolLinksContext, SymbolLinksEligibleContext } from "./components/FileLinks";
+		import { SymbolLinksContext, AssistantReplyContext } from "./components/FileLinks";
 		import { ChatSymbolLinks } from "./lib/chat-symbol-links";
 		export const render = text => renderToStaticMarkup(createElement(Markdown, { text }));
 		export const renderLinked = async (text, existing) => {
@@ -54,7 +54,7 @@ before(async () => {
 			for (const path of paths) await links.resolve(path);
 			for (const token of Object.keys(symbols)) await symbolLinks.resolve(token);
 			const inner = createElement(Markdown, { text });
-			const eligibility = createElement(SymbolLinksEligibleContext.Provider, { value: eligible }, inner);
+			const eligibility = createElement(AssistantReplyContext.Provider, { value: eligible }, inner);
 			const html = provider
 				? renderToStaticMarkup(createElement(FileLinksContext.Provider, { value: links }, createElement(SymbolLinksContext.Provider, { value: symbolLinks }, eligibility)))
 				: renderToStaticMarkup(eligibility);

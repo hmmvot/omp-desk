@@ -16,6 +16,7 @@ import { ANSI_STYLES } from "./ansi-styles.ts";
 import { TERMINAL_STYLES } from "./lib/terminal-styles.ts";
 import { HUD_STYLES } from "./hud-styles.ts";
 import { QUEUE_STYLES } from "./queue-styles.ts";
+import { MERMAID_STYLES } from "./mermaid-styles.ts";
 
 const CSS = `
 ${BASE_CSS}
@@ -814,6 +815,7 @@ ${ANSI_STYLES}
 /* ── native transcript and the bottom-block HUD rows ───────────────────── */
 ${HUD_STYLES}
 ${QUEUE_STYLES}
+${MERMAID_STYLES}
 .omp-native-child button:focus-visible { outline: 1px solid var(--vscode-focusBorder); }
 .omp-native-agent + .omp-native-agent { border-top: 1px solid var(--omp-border); padding-top: 8px; margin-top: 8px; }
 .omp-native-note, .omp-native-muted { color: var(--omp-muted); }

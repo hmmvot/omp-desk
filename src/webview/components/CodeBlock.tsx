@@ -9,7 +9,7 @@ import { useHighlightedRuns } from "../lib/use-highlighted-runs.ts";
 import { CodeRuns } from "./CodeRuns.tsx";
 import { CopyButton } from "./CopyButton.tsx";
 
-export function CodeBlock({ language, source, closed }: { language: string; source: string; closed: boolean }) {
+export function CodeBlock({ language, source, closed, copy = true }: { language: string; source: string; closed: boolean; copy?: boolean }) {
 	const runs = useHighlightedRuns(language, source, closed);
 	return (
 		<div className="omp-code-block">
@@ -22,7 +22,7 @@ export function CodeBlock({ language, source, closed }: { language: string; sour
 					</code>
 				)}
 			</pre>
-			{source.length > 0 && <CopyButton text={source} label="Copy code" className="omp-code-copy" />}
+			{copy && source.length > 0 && <CopyButton text={source} label="Copy code" className="omp-code-copy" />}
 		</div>
 	);
 }

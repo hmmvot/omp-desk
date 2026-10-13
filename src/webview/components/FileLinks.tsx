@@ -22,8 +22,8 @@ import { CodeRuns } from "./CodeRuns";
 export const FileLinksContext = createContext<ChatFileLinks | null>(null);
 /** The document's code-symbol answers; present exactly when {@link FileLinksContext} is. */
 export const SymbolLinksContext = createContext<ChatSymbolLinks | null>(null);
-/** Whether code symbols below may be linked: only assistant reply text opts in; user text, tool output, notices and thinking never ask the host. */
-export const SymbolLinksEligibleContext = createContext(false);
+/** Whether the text below is the assistant's own reply text: only that opts in to features that act on a reply (code symbols linked through the host, mermaid diagrams); user text, tool output, notices and thinking never do. */
+export const AssistantReplyContext = createContext(false);
 
 /** Gives every file reference and code symbol below it the document's validation cache; `cwd` is only a cache key — the host owns resolution. */
 export function FileLinksProvider({ transport, cwd, children }: {
@@ -219,7 +219,7 @@ function useSymbolLink(symbols: ChatSymbolLinks | null, token: string | null): S
  */
 export function CodeSymbolSpan({ content, path, plain }: { content: string; path: string | null; plain?: ReactNode }): ReactNode {
 	const links = useContext(FileLinksContext);
-	const eligible = useContext(SymbolLinksEligibleContext);
+	const eligible = useContext(AssistantReplyContext);
 	const symbols = useContext(SymbolLinksContext);
 	const proven = useProvenTargets(links, links === null || path === null ? [] : [path], undefined);
 	const fileProven = path !== null && proven.has(path);

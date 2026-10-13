@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import { useEffect, useId, useRef, useState, useSyncExternalStore } from "react";
 import type { ChatContent, MessageContent } from "../../chat/messages.ts";
 import { Markdown } from "./Markdown.tsx";
-import { SymbolLinksEligibleContext } from "./FileLinks.tsx";
+import { AssistantReplyContext } from "./FileLinks.tsx";
 import { UserImageReferencesContext } from "./ImageReference.tsx";
 import { PacedMarkdown } from "./PacedMarkdown.tsx";
 import { SavedImage } from "./SavedImage.tsx";
@@ -43,7 +43,7 @@ export function NativeDisclosure({ title, children, className = "", initiallyOpe
 /** A thinking block: closed unless the transcript's thinking toggle (`Ctrl+T`) shows thinking. */
 function ThinkingDisclosure({ children }: { children: ReactNode }) {
 	const toggles = useSyncExternalStore(subscribeTranscriptToggles, getTranscriptToggles);
-	return <NativeDisclosure title="Thinking" className="omp-thinking" initiallyOpen={toggles.thinking} forceOpen={{ open: toggles.thinking, generation: toggles.generation }}><SymbolLinksEligibleContext.Provider value={false}>{children}</SymbolLinksEligibleContext.Provider></NativeDisclosure>;
+	return <NativeDisclosure title="Thinking" className="omp-thinking" initiallyOpen={toggles.thinking} forceOpen={{ open: toggles.thinking, generation: toggles.generation }}><AssistantReplyContext.Provider value={false}>{children}</AssistantReplyContext.Provider></NativeDisclosure>;
 }
 
 
@@ -79,5 +79,5 @@ export function MessageContentView({ content, pace, streaming, bypassPacing, ref
 }
 
 export function AssistantContentView({ content, streaming, bypassPacing }: AssistantContentViewProps) {
-	return <SymbolLinksEligibleContext.Provider value><MessageContentView content={content} pace streaming={streaming} bypassPacing={bypassPacing} /></SymbolLinksEligibleContext.Provider>;
+	return <AssistantReplyContext.Provider value><MessageContentView content={content} pace streaming={streaming} bypassPacing={bypassPacing} /></AssistantReplyContext.Provider>;
 }

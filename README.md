@@ -76,6 +76,7 @@ For how this works, see the [architecture](docs/architecture.md).
 - `↑`/`↓` in an empty composer walk through your earlier prompts. `Ctrl+R` searches past prompts of every conversation.
 - **Retry** (`F5` or `Alt+R`) re-runs a failed or aborted reply.
 - Copy buttons on code blocks and on your own messages.
+- Fenced `mermaid` blocks are drawn as diagrams in your theme's colours once the block is complete (flowcharts, sequence, class, state, ER, gantt, pie and the other mermaid types); until then, and when a diagram has an error, you see the code. **Diagram | Source** switches the view, Copy copies the source, and a wide diagram scales to the block and opens at full size on click. The diagram renderer is loaded only when a reply has one.
 - `Ctrl+T` shows or hides all thinking, and `Ctrl+O` expands or collapses all tool calls. Every Chat remembers both choices.
 - **Compact…** and **Shake…** in the context popover ask for OMP's mode first (`snapcompact` and `elide` preselected); **Export as HTML** and **Share** are in the editor title menu. `Alt+click` the model or thinking chip to cycle it; `Ctrl+Shift+U` cycles thinking.
 - Terminal-only slash commands such as `/hotkeys` or `/settings` are never sent to the model. Chat opens the VS Code equivalent or says where the command works.

@@ -7,7 +7,8 @@
  * transcript needs — fenced code, headings, lists, blockquotes, horizontal
  * rules, pipe tables, plus inline code/bold/italic/strikethrough/links. Web links
  * (`[label](https://…)`, `<https://…>` and bare URLs in prose) accept only
- * `http:`/`https:`; any other destination keeps its label as text.
+ * `http:`/`https:`; any other destination keeps its label as text. A fenced `mermaid`
+ * block is {@link MermaidBlock}: the diagram once the block is closed and drawn, the code before.
  *
  * This is a small project-owned renderer: a general-purpose Markdown library would
  * add a package to the bundle for behavior this panel does not need.
@@ -22,6 +23,7 @@ import { CodeSymbolSpan, FileLink, FileLinkText } from "./FileLinks.tsx";
 import { ImageReferenceToken } from "./ImageReference.tsx";
 import { WebLink } from "./WebLinks.tsx";
 import { CodeBlock } from "./CodeBlock.tsx";
+import { MermaidBlock } from "./MermaidBlock.tsx";
 
 /**
  * Inline token grammar; code wins over emphasis, bold over italic, matching markdown. A bare URL
@@ -351,7 +353,14 @@ function parseBlockRange(lines: readonly string[], from: number, firstKey: numbe
 			}
 			const closed = index < lines.length;
 			index++; // closing fence (or EOF)
-			blocks.push(<CodeBlock key={`b${key++}`} language={language} source={body.join("\n")} closed={closed} />);
+			const text = body.join("\n");
+			blocks.push(
+				language.toLowerCase() === "mermaid" ? (
+					<MermaidBlock key={`b${key++}`} source={text} closed={closed} />
+				) : (
+					<CodeBlock key={`b${key++}`} language={language} source={text} closed={closed} />
+				),
+			);
 			continue;
 		}
 
