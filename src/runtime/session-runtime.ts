@@ -16,6 +16,7 @@ import type { ChatCommandOutcome, ChatPage, ConversationActivity, RewindRead } f
 import type { NavigateOutcome, NavigateRequest } from "../host/rpc/session.ts";
 import type { ChatStatePayload } from "../chat/model.ts";
 import type { ChatWebviewMessage } from "../protocol/chat-messages.ts";
+import type { KillSelection } from "../host/session-kill.ts";
 
 /** Who acts. Fixed when the runtime is constructed; never a per-call argument. */
 export interface RuntimeHolder {
@@ -65,6 +66,11 @@ export interface SessionRuntime {
 	restore(request: RestorePassRequest, options?: { readonly signal?: AbortSignal }): Promise<RestoreReport>;
 	/** The outcome is never `restored`; a conversation that is not an attachable native writer is `skipped`. */
 	reattach(request: ReattachRequest): Promise<RestoreOutcome>;
+	/**
+	 * Kill (ADR-0060): end the process tree of the selected session or process row at once and, for a session whose
+	 * recorded process was proven gone, record it as stopped. Reports through the window's notices; never throws.
+	 */
+	kill(selection: KillSelection): Promise<void>;
 }
 
 /** Show a stopped, blocked or resyncing session's history read-only. Never claims, launches or writes. */

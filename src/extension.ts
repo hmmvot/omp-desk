@@ -63,6 +63,8 @@ import type { ExitWindow } from "./runtime/local-exit";
 import { LocalIdentity } from "./runtime/local-identity";
 import type { IdentityWindow } from "./runtime/local-identity";
 import { LocalNativeWatch } from "./runtime/local-native-watch";
+import { LocalKill } from "./runtime/local-kill";
+import type { KillWindow } from "./runtime/local-kill";
 import type { NativeWatchWindow } from "./runtime/local-native-watch";
 import type { RuntimeRecord } from "./runtime/runtime-record";
 import { createRuntimeStaging } from "./runtime/runtime-entries";
@@ -3120,6 +3122,23 @@ function sessionRuntimeDeps(index: SessionIndex, chat: ChatRuntime): LocalSessio
       return localLauncher(context, index);
     },
     chat, stop, control, identity, nativeWatch, exit,
+    kill: new LocalKill({ index, control, window: killWindow(index), attachBrokerClient, brokerSlots: () => windowState().brokerSlots, log }),
+  };
+}
+
+/** The window's side of Kill: what it reads of this window's runtime copy and the surfaces it reports through. */
+function killWindow(index: SessionIndex): KillWindow {
+  return {
+    runtimeIdentity: tabId => stateOf(tabId)?.runtime?.identity ?? null,
+    forgetOutcome: tabId => { windowState().outcomes.delete(tabId); },
+    readRows: async () => (await windowState().sessionProcesses?.refresh())?.rows ?? [],
+    launcherChanged: () => refreshLauncher(),
+    async refresh() {
+      refreshLauncher({ ownership: true });
+      await windowState().sessionProcesses?.refresh();
+    },
+    notice: (level, text) => { void (level === "info" ? vscode.window.showInformationMessage(text) : vscode.window.showWarningMessage(text)); },
+    requester: () => `the Sessions menu of window "${vscode.workspace.name ?? "no folder"}" (${index.claimHolder.id.slice(0, 8)})`,
   };
 }
 

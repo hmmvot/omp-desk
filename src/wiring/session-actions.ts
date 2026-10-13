@@ -25,8 +25,7 @@ import { claimHolderMayBeAlive } from "../host/session-claim.ts";
 import { readSessionFileHeader } from "../host/session-files.ts";
 import type { RestoreOutcome, SessionIndex } from "../host/session-index.ts";
 import type { SessionRuntime } from "../runtime/session-runtime.ts";
-import { createSessionKiller } from "../host/session-kill-wiring.ts";
-import type { CapturedHost, KillSelection, RecordedProcess } from "../host/session-kill.ts";
+import type { KillSelection } from "../host/session-kill.ts";
 import { confirmedSessionDeletion, deleteManagedSession, inspectSessionDeletion } from "../host/session-lifecycle.ts";
 import type { SessionDeletionOptions, SessionDeletionResult, SessionDeletionSubject } from "../host/session-lifecycle.ts";
 import type { OwnerReconciler, RecordedHostStopPort } from "../host/session-availability.ts";
@@ -537,73 +536,7 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 			deps.warn("Select a session or a process in Sessions to kill.");
 			return;
 		}
-		await createSessionKiller({
-			client: deps.attachBrokerClient,
-			async readRows() {
-				return (await deps.sessionProcesses()?.refresh())?.rows ?? [];
-			},
-			recordedProcess: tabId => recordedProcessOf(index, tabId),
-			async forgetStoppedSlot(slot) {
-				await index.lifecycle.run(slot, async () => {
-					// Only the broker-slot mapping of a broker shown gone. A folder shell's recovery record stays until its own owner
-					// watch proves the shell root gone too: a broker-only proof must not retire it (ADR-0060 amendment).
-					await deps.brokerSlots()?.forget(slot);
-				});
-				deps.refreshLauncher();
-			},
-			reconcileSession: (tabId, captured) => reconcileKilledSession(context, index, tabId, captured),
-			async refresh() {
-				deps.refreshLauncher({ ownership: true });
-				await deps.sessionProcesses()?.refresh();
-			},
-			requester: () => `the Sessions menu of window "${vscode.workspace.name ?? "no folder"}" (${index.claimHolder.id.slice(0, 8)})`,
-			log: deps.log,
-		})(selection);
-	}
-
-	/**
-	 * The host a session's process is recorded as: this window's own runtime identity when it has one,
-	 * else the index's record, together with the launch attempt the row's host record names, so that what
-	 * Kill examined stays one exact incarnation.
-	 */
-	function recordedProcessOf(index: SessionIndex, tabId: string): RecordedProcess | null {
-		const entry = index.get(tabId);
-		const rpc = deps.tab(tabId)?.runtime?.identity ?? (entry?.host != null && isManagedHost(entry.host) ? entry.host.rpc ?? null : null);
-		if (rpc === null) return null;
-		return {
-			slot: rpc.slot, brokerId: rpc.brokerId, brokerGeneration: rpc.brokerGeneration, brokerPid: rpc.brokerPid,
-			brokerCreationTime: rpc.brokerCreationTime, childPid: rpc.childPid, childCreationTime: rpc.childCreationTime,
-			attemptStartedAt: entry?.host?.startedAt ?? null, hostPid: entry?.host?.pid ?? null,
-		};
-	}
-
-	/**
-	 * After Kill proved a session's OMP child (and broker) gone: record the row as stopped through the index's
-	 * own incarnation-bound transaction (`SessionIndex.reconcileKilledHost`: under the tab's gate, no live rival
-	 * holder, the claim taken, and a shared write that is refused when the committed row no longer records the
-	 * killed process), then forget the broker slot and the control material of that incarnation.
-	 *
-	 * A session this window drives, one a live rival window holds, and one that now records a newer launch are
-	 * left alone (a benign skip, logged): the owner's broker watch ends the first two, and the third is not the
-	 * killed process. Anything else that left the row unrecorded throws, so the command tells the user.
-	 */
-	async function reconcileKilledSession(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, captured: CapturedHost): Promise<void> {
-		const before = index.get(tabId);
-		const result = await index.lifecycle.run(tabId, async lease => {
-			const recorded = await index.reconcileKilledHost(tabId, captured, lease);
-			if (recorded.kind === "recorded") {
-				await deps.brokerSlots()?.forget(recorded.slot);
-				deps.outcomes().delete(tabId);
-				await deps.releaseHostControl(tabId, before === null ? null : deps.recordedControlOwner(before));
-			}
-			return recorded;
-		});
-		if (result.kind === "recorded") deps.log(`tab ${tabId}: after Kill: the row is recorded as stopped`);
-		else if (result.kind === "skipped") deps.log(`tab ${tabId}: after Kill: ${result.detail}`);
-		else {
-			deps.log(`tab ${tabId}: after Kill: ${result.detail}`);
-			throw new Error(result.detail);
-		}
+		await deps.sessionRuntime().kill(selection);
 	}
 
 	/**

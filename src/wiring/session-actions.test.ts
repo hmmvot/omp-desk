@@ -21,6 +21,7 @@ import type { SessionIndex } from "../host/session-index.ts";
 import type { OwnerReconciler, RecordedHostStopPort } from "../host/session-availability.ts";
 import type { SessionIndexEntry } from "../host/session-model.ts";
 import { LocalSessionRuntime } from "../runtime/local-runtime.ts";
+import { LocalKill } from "../runtime/local-kill.ts";
 import type { SessionActionsDeps, SessionTab } from "./session-actions.ts";
 
 // The module and the views it imports load the `vscode` specifier; map it before the first import.
@@ -175,6 +176,22 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 			reconciler: () => state.reconciler,
 			stop: { requestStop: async () => ({ writerGone: true, treeEmpty: true, detail: "fixture" }), confirmEnded: async () => null, awaitSettled: async () => null, readTransitionFacts: async () => null },
 			chat: {} as never, control: {} as never, identity: {} as never, nativeWatch: {} as never, exit: {} as never,
+			kill: new LocalKill({
+				index: index as never,
+				control: { release: async (tabId: string, owner: string | null) => { released.push([tabId, owner]); } } as never,
+				window: {
+					runtimeIdentity: tabId => (deps.tab(tabId)?.runtime?.identity ?? null) as never,
+					forgetOutcome: tabId => { state.outcomes.delete(tabId); },
+					readRows: async () => ((await (state.processes as { refresh(): Promise<{ rows: unknown[] }> } | undefined)?.refresh())?.rows ?? []) as never,
+					launcherChanged: () => deps.refreshLauncher(),
+					async refresh() { deps.refreshLauncher({ ownership: true }); await (state.processes as { refresh(): Promise<unknown> } | undefined)?.refresh(); },
+					notice: (_level, text) => { stub.window.notices.push(text); },
+					requester: () => `the Sessions menu of window "${stub.workspace.name ?? "no folder"}" (${(index as SessionIndex).claimHolder.id.slice(0, 8)})`,
+				},
+				attachBrokerClient: async () => null,
+				brokerSlots: () => state.brokerSlots,
+				log: message => { logged.push(message); },
+			}),
 			launcher: () => ({
 				launch: async () => ({ state: "not-started", reason: "fixture" }),
 				attach: async request => { reattached.push([request]); return { state: "unavailable", reason: "fixture" }; },

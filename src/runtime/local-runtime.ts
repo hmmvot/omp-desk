@@ -19,6 +19,8 @@ import type { OpenRequest, ReattachRequest, RestorePassRequest, RuntimeHolder, S
 import type { LocalHostControl } from "./local-control.ts";
 import type { LocalExitOperations } from "./local-exit.ts";
 import type { LocalIdentity } from "./local-identity.ts";
+import type { LocalKill } from "./local-kill.ts";
+import type { KillSelection } from "../host/session-kill.ts";
 import type { LocalNativeWatch } from "./local-native-watch.ts";
 import { LocalConversations } from "./local-conversations.ts";
 import type { ChatRuntime } from "../host/chat-runtime.ts";
@@ -36,6 +38,7 @@ export interface LocalSessionRuntimeDeps {
 	readonly identity: LocalIdentity;
 	readonly nativeWatch: LocalNativeWatch;
 	readonly exit: LocalExitOperations;
+	readonly kill: LocalKill;
 }
 
 /**
@@ -108,6 +111,10 @@ export class LocalSessionRuntime implements SessionRuntime {
 	/** The end of a process: exit handlers, broker retirement and broker loss. */
 	get exit(): LocalExitOperations {
 		return this.#deps.exit;
+	}
+
+	kill(selection: KillSelection): Promise<void> {
+		return this.#deps.kill.kill(selection);
 	}
 
 	/**
