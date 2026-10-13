@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
-	activityMillis,
 	compareFlatRows,
 	flatFolderLabels,
 	flatRowLabel,
@@ -14,64 +13,48 @@ import {
 } from "./session-order.ts";
 
 function row(tabId: string, overrides: Partial<FlatOrderFacts> = {}): FlatOrderFacts {
-	return { tabId, stopped: false, unread: false, lastActivityAt: 0, ordinal: 0, ...overrides };
+	return { tabId, stopped: false, folder: "", title: "", ordinal: 0, ...overrides };
 }
 
 const ids = (rows: readonly FlatOrderFacts[]) => rows.map(item => item.tabId);
 
 describe("flat session order", () => {
-	it("puts unread live rows first, then live rows by last activity, newest first", () => {
+	it("sorts by folder, then by title, case-insensitively and with numbers in numeric order", () => {
 		const rows = [
-			row("read-old", { lastActivityAt: 10 }),
-			row("unread-old", { lastActivityAt: 5, unread: true }),
-			row("read-new", { lastActivityAt: 20 }),
-			row("unread-new", { lastActivityAt: 8, unread: true }),
+			row("web-b", { folder: "web", title: "beta" }),
+			row("api-10", { folder: "api", title: "Task 10" }),
+			row("web-a", { folder: "Web", title: "Alpha" }),
+			row("api-9", { folder: "api", title: "task 9" }),
 		];
-		assert.deepEqual(ids(orderFlatRows(rows)), ["unread-new", "unread-old", "read-new", "read-old"]);
+		assert.deepEqual(ids(orderFlatRows(rows)), ["api-9", "api-10", "web-a", "web-b"]);
 	});
 
-	it("always puts stopped rows last, by last activity, whatever their activity or read marker", () => {
+	it("always puts stopped rows after every live row, each group in the same alphabetical order", () => {
 		const rows = [
-			row("stopped-newest", { stopped: true, lastActivityAt: 1_000, unread: true }),
-			row("live-ancient", { lastActivityAt: 1 }),
-			row("stopped-old", { stopped: true, lastActivityAt: 50 }),
-			row("live-unread", { unread: true, lastActivityAt: 2 }),
+			row("stopped-a", { stopped: true, folder: "a", title: "a" }),
+			row("live-z", { folder: "z", title: "z" }),
+			row("stopped-b", { stopped: true, folder: "a", title: "b" }),
+			row("live-b", { folder: "b", title: "a" }),
 		];
-		assert.deepEqual(ids(orderFlatRows(rows)), ["live-unread", "live-ancient", "stopped-newest", "stopped-old"]);
+		assert.deepEqual(ids(orderFlatRows(rows)), ["live-b", "live-z", "stopped-a", "stopped-b"]);
 	});
 
-	it("breaks ties by the newer ordinal, then by id, and is independent of the input order", () => {
+	it("breaks equal titles by the older ordinal, then by id, and is independent of the input order", () => {
 		const rows = [
-			row("b", { ordinal: 1 }),
-			row("a", { ordinal: 1 }),
-			row("newer", { ordinal: 2 }),
+			row("b", { title: "same", ordinal: 2 }),
+			row("a", { title: "same", ordinal: 2 }),
+			row("older", { title: "same", ordinal: 1 }),
 		];
-		const expected = ["newer", "a", "b"];
+		const expected = ["older", "a", "b"];
 		assert.deepEqual(ids(orderFlatRows(rows)), expected);
 		assert.deepEqual(ids(orderFlatRows([...rows].reverse())), expected);
 		assert.equal(compareFlatRows(rows[0]!, rows[0]!), 0);
 	});
 
-	it("moves a session to the top when it turns unread and back by activity once read", () => {
-		const quiet = row("quiet", { lastActivityAt: 100 });
-		const finished = row("finished", { lastActivityAt: 10 });
-		assert.deepEqual(ids(orderFlatRows([quiet, finished])), ["quiet", "finished"]);
-		assert.deepEqual(ids(orderFlatRows([quiet, { ...finished, unread: true }])), ["finished", "quiet"]);
-		assert.deepEqual(ids(orderFlatRows([quiet, { ...finished, unread: false }])), ["quiet", "finished"]);
-	});
-
 	it("leaves the input untouched", () => {
-		const rows = [row("a", { lastActivityAt: 1 }), row("b", { lastActivityAt: 2 })];
+		const rows = [row("b", { title: "b" }), row("a", { title: "a" })];
 		orderFlatRows(rows);
-		assert.deepEqual(ids(rows), ["a", "b"]);
-	});
-});
-
-describe("activity time", () => {
-	it("takes the first parseable timestamp and falls back to zero", () => {
-		assert.equal(activityMillis("2026-09-25T10:00:00.000Z", "2026-09-25T11:00:00.000Z"), Date.parse("2026-09-25T10:00:00.000Z"));
-		assert.equal(activityMillis(null, undefined, "not a date", "2026-09-25T11:00:00.000Z"), Date.parse("2026-09-25T11:00:00.000Z"));
-		assert.equal(activityMillis(null, undefined), 0);
+		assert.deepEqual(ids(rows), ["b", "a"]);
 	});
 });
 

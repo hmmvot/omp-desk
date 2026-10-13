@@ -557,36 +557,39 @@ describe("launcher tree", () => {
 		);
 	});
 
-	it("orders running conversations before stopped ones and keeps tab order inside each group", async () => {
-		const stoppedLater = entry({ tabId: "tab:s2", cwd: ALPHA, kind: "session", sessionFile, ordinal: 4 });
-		const runningEarlier = entry({
+	it("orders running conversations before stopped ones, each group alphabetically by title", async () => {
+		const gone = path.join(temp, "gone.jsonl");
+		const stoppedFirstTab = entry({ tabId: "tab:s2", cwd: ALPHA, kind: "session", sessionFile: gone, title: "apple", ordinal: 4 });
+		const runningZeta = entry({
 			tabId: "tab:r1",
 			cwd: ALPHA,
 			kind: "session",
-			sessionFile,
+			sessionFile: gone,
+			title: "Zeta",
 			ordinal: 1,
 			availability: "live",
 			runIntent: "running",
 		});
-		const runningLater = entry({
+		const runningBeta = entry({
 			tabId: "tab:r2",
 			cwd: ALPHA,
 			kind: "session",
-			sessionFile,
+			sessionFile: gone,
+			title: "beta",
 			ordinal: 3,
 			availability: "live",
 			runIntent: "running",
 		});
-		const stoppedEarlier = entry({ tabId: "tab:s1", cwd: ALPHA, kind: "session", sessionFile, ordinal: 2 });
+		const stoppedOmega = entry({ tabId: "tab:s1", cwd: ALPHA, kind: "session", sessionFile: gone, title: "Omega", ordinal: 2 });
 		const { provider, roots } = await build({
 			folders: [folder("folder:alpha", ALPHA)],
-			entries: [stoppedLater, runningEarlier, runningLater, stoppedEarlier],
+			entries: [stoppedFirstTab, runningZeta, runningBeta, stoppedOmega],
 			running: new Set(["tab:r1", "tab:r2"]),
 		});
 		const children = await rowsOf(provider, roots[0]!);
 		assert.deepEqual(
 			children.map(row => row.tabId),
-			["tab:r1", "tab:r2", "tab:s1", "tab:s2"],
+			["tab:r2", "tab:r1", "tab:s2", "tab:s1"],
 		);
 	});
 
@@ -607,11 +610,12 @@ describe("launcher tree", () => {
 			entries: [titled, cached, untitled],
 		});
 		const children = await rowsOf(provider, roots[0]!);
-		await waitForRows(provider, () => children[0]?.label === "OMP title wins");
-		assert.equal(children[0]!.label, "OMP title wins");
-		assert.equal(children[1]!.label, "Last observed title");
+		const row = (tabId: string) => children.find(candidate => candidate.tabId === tabId)!;
+		await waitForRows(provider, () => row("tab:titled").label === "OMP title wins");
+		assert.equal(row("tab:titled").label, "OMP title wins");
+		assert.equal(row("tab:cached").label, "Last observed title");
 		// Never the folder name: two untitled conversations must stay distinct.
-		assert.equal(children[2]!.label, "New session 12");
+		assert.equal(row("tab:untitled").label, "New session 12");
 	});
 
 	it("dispatches the admitted open path from a row, and never starts anything itself", async () => {
@@ -649,13 +653,15 @@ describe("launcher tree", () => {
 			running: new Set(["tab:running"]),
 		});
 		const alpha = await rowsOf(provider, roots[0]!);
+		const file = alpha.find(row => row.tabId === "tab:file")!;
+		const draft = alpha.find(row => row.tabId === "tab:draft")!;
 
 		// Both offer Open; only a row with history can be deleted or viewed without launching.
-		assert.equal(alpha[0]!.resumable, true);
-		assert.equal(alpha[0]!.deletable, true);
-		assert.equal(alpha[0]!.forgettable, true);
-		assert.equal(alpha[1]!.resumable, true);
-		assert.equal(alpha[1]!.deletable, false);
+		assert.equal(file.resumable, true);
+		assert.equal(file.deletable, true);
+		assert.equal(file.forgettable, true);
+		assert.equal(draft.resumable, true);
+		assert.equal(draft.deletable, false);
 
 		const beta = await rowsOf(provider, roots[1]!);
 		assert.equal(beta[0]!.resumable, true);
@@ -1062,18 +1068,19 @@ describe("launcher tree", () => {
 		const roots = provider.getChildren() as FolderRow[];
 		const rows = provider.getChildren(roots[0]) as SessionRow[];
 		assert.deepEqual(rows.map(row => [row.tabId, row.label, row.state]), [
-			["tab:slow", "Persisted title", "checking"], ["tab:fast", "New session 1", "checking"],
+			["tab:fast", "New session 1", "checking"], ["tab:slow", "Persisted title", "checking"],
 		]);
+		const [fast, slow] = rows as [SessionRow, SessionRow];
 		assert.deepEqual(calls, [], "the first projection invokes neither ownership nor file enrichment");
-		await waitForRows(provider, () => rows[1]?.state === "draft");
-		assert.equal(rows[0]!.state, "checking", "a blocked observation cannot hold another row");
-		await waitForRows(provider, () => rows[0]?.label === "OMP title wins");
-		assert.equal(provider.headlineFor("tab:slow"), rows[0]?.label, "Processes and detail tabs reuse the file-observed name");
+		await waitForRows(provider, () => fast.state === "draft");
+		assert.equal(slow.state, "checking", "a blocked observation cannot hold another row");
+		await waitForRows(provider, () => slow.label === "OMP title wins");
+		assert.equal(provider.headlineFor("tab:slow"), slow.label, "Processes and detail tabs reuse the file-observed name");
 		assert.equal(provider.headlineFor("tab:missing"), undefined);
-		assert.equal(rows[0]!.state, "checking", "file enrichment has its own queue");
+		assert.equal(slow.state, "checking", "file enrichment has its own queue");
 		blocked.resolve({ ownershipChecked: true, heldElsewhere: true });
-		await waitForRows(provider, () => rows[0]?.state === "otherWindow");
-		assert.equal(rows[0]!.forgettable, false);
+		await waitForRows(provider, () => slow.state === "otherWindow");
+		assert.equal(slow.forgettable, false);
 	});
 
 	it("bounds ownership work and coalesces repeated invalidations to one follow-up per tab", async () => {
@@ -1302,7 +1309,7 @@ describe("launcher tree", () => {
 		const currentRoots = await rootsOf(provider);
 		assert.equal(provider.getParent(cachedRow), currentRoots[0], "an in-flight reveal can still walk its cached row");
 		const currentChildren = await rowsOf(provider, cachedFolder);
-		assert.deepEqual(currentChildren.map(row => row.tabId), ["tab:one", "tab:two", "tab:three"]);
+		assert.deepEqual(currentChildren.map(row => row.tabId), ["tab:three", "tab:one", "tab:two"], "live and unchecked rows by title, then stopped ones");
 		assert.ok(currentChildren.includes(cachedRow));
 		assert.equal(cachedRow.state, "working");
 		assert.match(cachedRow.contextValue!, /held\.working/);
@@ -1316,7 +1323,7 @@ describe("launcher tree", () => {
 		await rootsOf(provider);
 		assert.equal(provider.getParent(cachedRow), undefined, "a removed session is not revealable");
 		assert.equal(await provider.itemFor("tab:one"), undefined);
-		assert.deepEqual((await rowsOf(provider, cachedFolder)).map(row => row.tabId), ["tab:two", "tab:three"]);
+		assert.deepEqual((await rowsOf(provider, cachedFolder)).map(row => row.tabId), ["tab:three", "tab:two"]);
 	});
 
 
@@ -1413,39 +1420,41 @@ describe("launcher tree", () => {
 			});
 		}
 
-		it("shows one row per session of every folder, labelled by folder, live rows by unread then recency, stopped rows last", async () => {
+		it("shows one row per session of every folder, labelled by folder, live rows by folder and title, stopped rows last", async () => {
+			const titled = (title: string) => ({ sessionFile: path.join(temp, "gone.jsonl"), title });
 			const entries = [
-				row("tab:stopped-new", ALPHA, { ordinal: 1, lastActiveAt: "2026-09-25T12:00:00.000Z" }),
-				row("tab:live-old", ALPHA, { ...live, ordinal: 2, lastActiveAt: "2026-09-25T08:00:00.000Z" }),
-				row("tab:live-new", BETA, { ...live, ordinal: 3, lastActiveAt: "2026-09-25T11:00:00.000Z" }),
-				row("tab:live-unread", BETA, { ...live, ordinal: 4, lastActiveAt: "2026-09-25T07:00:00.000Z", lastCompletedReplyId: "event-1" }),
-				row("tab:stopped-old", BETA, { ordinal: 5, lastActiveAt: "2026-09-25T06:00:00.000Z" }),
+				row("tab:stopped-b", ALPHA, { ...titled("Beta notes"), ordinal: 1 }),
+				row("tab:live-z", ALPHA, { ...live, ...titled("zeta"), ordinal: 2 }),
+				row("tab:live-a", BETA, { ...live, ...titled("Alpha"), ordinal: 3 }),
+				row("tab:live-unread", BETA, { ...live, ...titled("beta"), ordinal: 4, lastCompletedReplyId: "event-1" }),
+				row("tab:stopped-a", BETA, { ...titled("apple"), ordinal: 5 }),
 				row("tab:elsewhere", UNREGISTERED, { ...live }),
 			];
 			const provider = flatProvider({
 				folders: [folder("folder:alpha", ALPHA), folder("folder:beta", BETA)],
 				entries,
-				running: new Set(["tab:live-old", "tab:live-new", "tab:live-unread"]),
+				running: new Set(["tab:live-z", "tab:live-a", "tab:live-unread"]),
 			});
 			provider.getChildren();
 			await waitForRows(provider, () => (provider.getChildren() as SessionRow[]).every(item => !("state" in item) || item.state !== "checking"));
 			const children = provider.getChildren();
 			assert.deepEqual(children.map(child => child.id), [
-				"tab:live-unread", "tab:live-new", "tab:live-old", "tab:stopped-new", "tab:stopped-old", "omp.newSessionRow", "omp.resumeSessionRow",
+				"tab:live-z", "tab:live-a", "tab:live-unread", "tab:stopped-b", "tab:stopped-a", "omp.newSessionRow", "omp.resumeSessionRow",
 			]);
 			const sessions = children.slice(0, 5) as SessionRow[];
-			assert.deepEqual(sessions.map(item => String(item.label).split(" · ")[0]), ["beta", "beta", "alpha", "alpha", "beta"]);
+			assert.deepEqual(sessions.map(item => String(item.label).split(" · ")[0]), ["alpha", "beta", "beta", "alpha", "beta"]);
 			assert.ok(sessions.every(item => String(item.label).includes(" · ")));
-			assert.deepEqual(sessions.map(item => item.unread), [true, false, false, false, false]);
-			assert.equal(sessions[0]!.state, "running");
-			assert.equal(sessions[0]!.description, "Unread · Running");
-			assert.ok(tooltipText(sessions[0]!).includes("Unread reply"));
+			assert.deepEqual(sessions.map(item => item.unread), [false, false, true, false, false], "the unread mark does not move a row");
+			const unread = sessions[2]!;
+			assert.equal(unread.state, "running");
+			assert.equal(unread.description, "Unread · Running");
+			assert.ok(tooltipText(unread).includes("Unread reply"));
 			assert.equal(sessions[1]!.description, "Running");
-			const badge = provider.decorations.provideFileDecoration(sessions[0]!.resourceUri!, undefined as never) as { badge: string; tooltip: string };
+			const badge = provider.decorations.provideFileDecoration(unread.resourceUri!, undefined as never) as { badge: string; tooltip: string };
 			assert.deepEqual([badge.badge, badge.tooltip], ["●", "Unread reply"]);
 			assert.equal(provider.decorations.provideFileDecoration(sessions[1]!.resourceUri!, undefined as never), undefined);
-			assert.equal(provider.getParent(sessions[0]!), undefined);
-			assert.deepEqual(provider.getChildren(sessions[0]!), []);
+			assert.equal(provider.getParent(unread), undefined);
+			assert.deepEqual(provider.getChildren(unread), []);
 		});
 
 		it("ends with New Session and Resume Session rows that ask for the folder, and is empty without folders", async () => {
@@ -1513,10 +1522,10 @@ describe("launcher tree", () => {
 			});
 			const listed = () => provider.listedSessions().map(({ item, folder: name }) => [item.tabId, name, item.headline === String(item.label)]);
 			for (let turn = 0; turn < 20 && provider.listedSessions().some(({ item }) => item.state === "checking"); turn++) await nextTurn();
-			assert.deepEqual(listed(), [["tab:unread", "beta", true], ["tab:live", "alpha", true], ["tab:stopped", "alpha", true]]);
+			assert.deepEqual(listed(), [["tab:live", "alpha", true], ["tab:unread", "beta", true], ["tab:stopped", "alpha", true]]);
 			grouping = "flat";
 			provider.refresh();
-			assert.deepEqual(listed().map(([tabId, name]) => [tabId, name]), [["tab:unread", "beta"], ["tab:live", "alpha"], ["tab:stopped", "alpha"]]);
+			assert.deepEqual(listed().map(([tabId, name]) => [tabId, name]), [["tab:live", "alpha"], ["tab:unread", "beta"], ["tab:stopped", "alpha"]]);
 			assert.deepEqual(flatProvider({ folders: [folder("folder:alpha", ALPHA)], entries: [] }).listedSessions(), []);
 		});
 

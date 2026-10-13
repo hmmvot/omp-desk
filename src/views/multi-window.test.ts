@@ -134,7 +134,7 @@ describe("two windows of one profile", () => {
 	};
 
 	/** Everything for the scenario: A runs s1, B runs s2, s3 and s4 are stopped, one folder is pinned. */
-	async function scenario(options: { s2Read?: boolean; activityOfS1?: string | null; activityOfS2?: string | null } = {}) {
+	async function scenario(options: { s2Read?: boolean } = {}) {
 		const pinnedStore = memoryStore();
 		const entries = [
 			entry({ tabId: "tab:s1", cwd: FA, ordinal: 1, runIntent: "running", availability: "live" }),
@@ -169,8 +169,8 @@ describe("two windows of one profile", () => {
 		const rowsFor = (window: SimulatedWindow): Record<string, PublishedRow> => {
 			const rows: Record<string, PublishedRow> = {};
 			// What the extension publishes: the owner's own status and activity, fenced to the run the catalog records.
-			if (window === a) rows["tab:s1"] = { status: "working", incarnation: incarnationOf("tab:s1"), binding: "slot.1", lastActivityAt: options.activityOfS1 ?? null };
-			if (window === b) rows["tab:s2"] = { status: "waiting", incarnation: incarnationOf("tab:s2"), binding: "slot.1", lastActivityAt: options.activityOfS2 ?? null };
+			if (window === a) rows["tab:s1"] = { status: "working", incarnation: incarnationOf("tab:s1"), binding: "slot.1", lastActivityAt: null };
+			if (window === b) rows["tab:s2"] = { status: "waiting", incarnation: incarnationOf("tab:s2"), binding: "slot.1", lastActivityAt: null };
 			return rows;
 		};
 		const provider = (window: SimulatedWindow, registry: InstanceType<typeof WindowRegistry>, pinned: InstanceType<typeof WorkspaceFolderRegistry>) => {
@@ -251,8 +251,8 @@ describe("two windows of one profile", () => {
 		const seenByB = content(world.providerB);
 		assert.deepEqual(seenByA, seenByB);
 		const rows = seenByA.filter((item): item is { id: string; description: string; label: string } => typeof item === "object");
-		assert.deepEqual(rows.map(row => row.id), ["tab:s2", "tab:s1", "tab:s4", "tab:s3"], "unread first, then live, then stopped");
-		assert.deepEqual(rows.map(row => row.description), ["Unread reply", "Working", "Stopped", "Stopped"]);
+		assert.deepEqual(rows.map(row => row.id), ["tab:s1", "tab:s2", "tab:s3", "tab:s4"], "live rows by folder, then stopped rows by folder");
+		assert.deepEqual(rows.map(row => row.description), ["Working", "Unread reply", "Stopped", "Stopped"]);
 		assert.ok(rows.every(row => row.label.includes(" · ")), "every row names its folder, and the folder of the other window is listed too");
 	});
 
@@ -314,19 +314,6 @@ describe("two windows of one profile", () => {
 		await world.publishAll();
 		await settle(world.providerB);
 		assert.equal((await world.providerB.itemFor("tab:s1"))!.description, "Working", "the owner's publication for the new run is applied");
-	});
-
-	it("orders a row another window runs by the activity its owner published, not by what this window happened to read", async () => {
-		// No window has read a session file here: only the owner's published activity can tell the rows apart for an observer.
-		const idsOf = (provider: SessionTreeProvider) => content(provider).filter((item): item is { id: string } => typeof item === "object").map(row => row.id);
-		const without = await scenario({ s2Read: true });
-		await without.publishAll();
-		await settle(without.providerB);
-		assert.deepEqual(idsOf(without.providerB).slice(0, 2), ["tab:s2", "tab:s1"], "with nothing published the newer ordinal decides");
-		const published = await scenario({ s2Read: true, activityOfS1: "2026-10-10T09:59:00.000Z" });
-		await published.publishAll();
-		await settle(published.providerB);
-		assert.deepEqual(idsOf(published.providerB).slice(0, 2), ["tab:s1", "tab:s2"], "the owner's newer published activity decides, although s2 has the newer ordinal");
 	});
 
 	it("drops a departed window's folder with its record, and shows Running without a window name once it is pinned", async () => {

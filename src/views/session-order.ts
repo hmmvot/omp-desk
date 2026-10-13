@@ -3,10 +3,10 @@
  *
  * Pure functions, no editor API: the provider hands rows in and renders what comes out.
  *
- * Order: every session that is not stopped comes first — unread rows before read ones,
- * each group by last activity, most recent first — and every stopped (closed) session
- * comes last, again by last activity. "Stopped" is the session's process, not its tab:
- * a running session whose editor was closed is not stopped.
+ * Order: every session that is not stopped comes first and every stopped (closed) session
+ * comes last; each group is alphabetical by folder label, then by session title (natural,
+ * case-insensitive). "Stopped" is the session's process, not its tab: a running session
+ * whose editor was closed is not stopped.
  */
 import * as path from "node:path";
 
@@ -60,39 +60,28 @@ export interface FlatOrderFacts {
 	readonly tabId: string;
 	/** The session's process is not running (see the module comment). */
 	readonly stopped: boolean;
-	/** The agent finished or asked, and the user has not looked since. */
-	readonly unread: boolean;
-	/** Epoch milliseconds of the session's last activity; `0` when unknown. */
-	readonly lastActivityAt: number;
-	/** The index's creation order, the last tie-break: newer sessions first. */
+	/** The folder label shown in front of the title; empty when none. */
+	readonly folder: string;
+	/** The session title the row shows. */
+	readonly title: string;
+	/** The index's creation order, the tie-break between equal titles: older sessions first. */
 	readonly ordinal: number;
 }
 
-/**
- * `left` before `right` when negative. A total order: equal facts only for the same row.
- * A stopped row's read marker never reorders it, so unread counts for live rows only.
- */
+const titleOrder = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+
+/** `left` before `right` when negative. A total order: equal facts only for the same row. */
 export function compareFlatRows(left: FlatOrderFacts, right: FlatOrderFacts): number {
 	return Number(left.stopped) - Number(right.stopped)
-		|| (left.stopped ? 0 : Number(right.unread) - Number(left.unread))
-		|| right.lastActivityAt - left.lastActivityAt
-		|| right.ordinal - left.ordinal
+		|| titleOrder.compare(left.folder, right.folder)
+		|| titleOrder.compare(left.title, right.title)
+		|| left.ordinal - right.ordinal
 		|| (left.tabId < right.tabId ? -1 : left.tabId > right.tabId ? 1 : 0);
 }
 
 /** Sort rows by {@link compareFlatRows}; the input is left alone. */
 export function orderFlatRows<T extends FlatOrderFacts>(rows: readonly T[]): T[] {
 	return [...rows].sort(compareFlatRows);
-}
-
-/** The first parseable timestamp among these as epoch milliseconds, `0` when there is none. */
-export function activityMillis(...candidates: readonly (string | null | undefined)[]): number {
-	for (const candidate of candidates) {
-		if (candidate === null || candidate === undefined) continue;
-		const at = Date.parse(candidate);
-		if (!Number.isNaN(at)) return at;
-	}
-	return 0;
 }
 
 /**

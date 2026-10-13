@@ -24,8 +24,8 @@
  *
  * Two arrangements share the same rows (`omp.sessionsGrouping`): the folder tree above,
  * and a flat list — the default — with one row per session of the same folders, labelled
- * `folder · title`, ordered by `src/views/session-order.ts` (live rows unread first then by
- * last activity, stopped rows last) and ended by a New Session row. A row is *unread* when
+ * `folder · title`, ordered by `src/views/session-order.ts` (live rows first, stopped rows
+ * last, each group by folder then title) and ended by a New Session row. A row is *unread* when
  * the agent finished or asked and the user has not looked since (`src/host/session-unread.ts`);
  * both arrangements mark it with a dot in the description.
  *
@@ -61,7 +61,7 @@ import type { WorkspaceFolder } from "./workspace-folders";
 import { isUnread } from "../host/session-unread";
 import { sessionIncarnation } from "../host/window-registry";
 import type { PublishedRowStatus } from "../host/window-registry";
-import { activityMillis, flatFolderLabels, flatRowLabel, orderFlatRows } from "./session-order";
+import { compareFlatRows, flatFolderLabels, flatRowLabel, orderFlatRows } from "./session-order";
 import type { FlatOrderFacts, SessionsGrouping } from "./session-order";
 import type { BrokerProcessRow, BrokerProcessSnapshot } from "../host/broker-processes";
 import { ProcessTreeItem, TerminalsGroupTreeItem } from "./process-rows";
@@ -1110,18 +1110,17 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 				// The unread marker is shared catalog state, so every window shows it; only a plain OMP
 				// process outside this extension (not a window) is not this window's to read.
 				const peer = state === "otherWindow" ? this.#source.peer?.(entry.tabId, facts.heldBy ?? null, sessionIncarnation(entry)) ?? null : null;
-				// A row another window runs is ordered, and its age shown, from what its owner published for this
-				// run (nothing published means no activity, not this window's own reading), so every window agrees.
+				// A row another window runs shows its age from what its owner published for this run
+				// (nothing published means no activity, not this window's own reading), so every window agrees.
 				if (peer?.status != null) conversation = { lastAt: peer.lastActivityAt };
 				return { entry, header: entry.sessionFile === null ? null : header?.value?.header ?? null,
 					conversation, facts, state, active: entry.tabId === activeTabId, peer,
 					folderLabel: grouping === "flat" ? folderLabels.get(folder.id) ?? null : null,
 					unread: isUnread(entry) && state !== "externalOmp",
-					processMark: sessionProcessMark(state, facts.running || facts.ownedWriterPid != null, processBySession.get(entry.tabId) ?? null) };
-			}).sort((left, right) => {
-				const stopped = (state: SessionItemState) => state === "stopped" || state === "draft" ? 1 : 0;
-				return stopped(left.state) - stopped(right.state) || left.entry.ordinal - right.entry.ordinal;
-			}),
+					processMark: sessionProcessMark(state, facts.running || facts.ownedWriterPid != null, processBySession.get(entry.tabId) ?? null),
+					order: { tabId: entry.tabId, stopped: state === "stopped" || state === "draft", folder: "", ordinal: entry.ordinal,
+						title: sessionHeadline(entry, entry.sessionFile === null ? null : header?.value?.header ?? null) } };
+			}).sort((left, right) => compareFlatRows(left.order, right.order)),
 		})).map(input => ({
 			...input,
 			tooltip: folderTooltip(input.folder, latestConversationAt(input.rows.map(row => row.conversation?.lastAt ?? null)),
@@ -1135,11 +1134,7 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 			for (const row of input.rows) {
 				if (flatFacts.has(row.entry.tabId)) continue;
 				folderNames.set(row.entry.tabId, folderLabels.get(input.folder.id) ?? "");
-				flatFacts.set(row.entry.tabId, {
-					tabId: row.entry.tabId, ordinal: row.entry.ordinal, unread: row.unread,
-					stopped: row.state === "stopped" || row.state === "draft",
-					lastActivityAt: activityMillis(row.conversation?.lastAt, row.entry.lastActiveAt),
-				});
+				flatFacts.set(row.entry.tabId, { ...row.order, folder: folderLabels.get(input.folder.id) ?? "" });
 			}
 		}
 		for (const row of orderFlatRows([...flatFacts.values()])) flatOrder.push(row.tabId);
