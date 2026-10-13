@@ -1,6 +1,7 @@
 import type { AgentDebuggerParts } from "./assemble.ts";
 import { assembleAgentDebugger } from "./assemble.ts";
 import type { DebugLimits } from "./coordinator.ts";
+import type { BreakpointOwnershipStore } from "./debug-api.ts";
 import { FakeDebugApi } from "./fake-debug-api.ts";
 import type { ConsentRequest, DebugPolicy, DebugPreset, ExpressionMode, StartMode } from "./policy.ts";
 import type { HostToolContext, HostToolDefinition, HostToolResult } from "../tools/host-tool.ts";
@@ -44,11 +45,32 @@ export interface CallOptions {
 
 export const FAST_LIMITS: Partial<DebugLimits> = { requestTimeoutMs: 150, transitionTimeoutMs: 250, launchTimeoutMs: 400, markerGraceMs: 80 };
 
-export function createHarness(options: { limits?: Partial<DebugLimits>; presets?: DebugPreset[]; beforeCoordinator?: (api: FakeDebugApi) => void } = {}): Harness {
-	const api = new FakeDebugApi();
+/** An in-memory `BreakpointOwnershipStore` that outlives a harness, like VS Code's workspace storage outlives an extension host. */
+export class MemoryOwnershipStore implements BreakpointOwnershipStore {
+	saved: unknown = undefined;
+	saves = 0;
+
+	load(): unknown { return this.saved; }
+	save(owners: Readonly<Record<string, string>>): void {
+		this.saved = JSON.parse(JSON.stringify(owners));
+		this.saves++;
+	}
+}
+
+export interface HarnessOptions {
+	limits?: Partial<DebugLimits>;
+	presets?: DebugPreset[];
+	beforeCoordinator?: (api: FakeDebugApi) => void;
+	/** Reuse a debug API (VS Code outlives an extension-host restart); a new coordinator is built over it. */
+	api?: FakeDebugApi;
+	ownershipStore?: BreakpointOwnershipStore;
+}
+
+export function createHarness(options: HarnessOptions = {}): Harness {
+	const api = options.api ?? new FakeDebugApi();
 	options.beforeCoordinator?.(api);
 	const policy = new FakePolicy();
-	const parts = assembleAgentDebugger(api, policy, () => options.presets ?? [], { breakpointSettleMs: 0, waitTickMs: 40 });
+	const parts = assembleAgentDebugger(api, policy, () => options.presets ?? [], { breakpointSettleMs: 0, waitTickMs: 40, ...(options.ownershipStore ? { ownershipStore: options.ownershipStore } : {}) });
 	// The coordinator reads its limits at construction; tests that need short timeouts replace the instance's limits.
 	Object.assign(parts.coordinator.limits, FAST_LIMITS, options.limits);
 	const tools = parts.provider.tools();

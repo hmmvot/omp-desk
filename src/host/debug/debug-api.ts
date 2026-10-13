@@ -72,6 +72,15 @@ export interface BreakpointChange {
 	readonly changed: readonly BreakpointInfo[];
 }
 
+/**
+ * Where the coordinator keeps `{ breakpointId: conversationId }` between extension-host restarts. VS Code restores a
+ * breakpoint with the same id from its workspace storage, so the record belongs in the workspace's storage too.
+ */
+export interface BreakpointOwnershipStore {
+	load(): unknown;
+	save(owners: Readonly<Record<string, string>>): void;
+}
+
 /** What an adapter reported for one breakpoint in one session (`getDebugProtocolBreakpoint`). */
 export interface ProtocolBreakpoint {
 	readonly verified: boolean;

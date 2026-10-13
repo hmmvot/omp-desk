@@ -222,6 +222,14 @@ export class FakeDebugApi implements DebugApi {
 		this.#breakpointChanges.fire({ added: [], removed, changed: [] });
 	}
 
+	/** One VS Code change that removes breakpoints and adds new ones (new ids), as an adapter-driven or bulk edit would. */
+	replaceBreakpoints(removed: readonly BreakpointInfo[], added: readonly Omit<BreakpointInfo, "id">[]): void {
+		const gone = new Set(removed.map(breakpoint => breakpoint.id));
+		const created = added.map((spec): BreakpointInfo => ({ ...spec, id: `bp${this.#nextBreakpoint++}` }));
+		this.#breakpoints = [...this.#breakpoints.filter(breakpoint => !gone.has(breakpoint.id)), ...created];
+		this.#breakpointChanges.fire({ added: created, removed, changed: [] });
+	}
+
 	onDidChangeBreakpoints(listener: (change: BreakpointChange) => void): DebugDisposable {
 		return this.#breakpointChanges.event(listener);
 	}

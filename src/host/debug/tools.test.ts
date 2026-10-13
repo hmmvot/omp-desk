@@ -4,7 +4,7 @@ import type { HostToolResult } from "../tools/host-tool.ts";
 import { HostToolRefusal } from "../tools/host-tool.ts";
 import { LAUNCH_MARKER_KEY } from "./coordinator.ts";
 import type { Harness } from "./test-harness.ts";
-import { createHarness, GateLost, sleep, text } from "./test-harness.ts";
+import { createHarness, GateLost, MemoryOwnershipStore, sleep, text } from "./test-harness.ts";
 
 /** Starts the configured "Run app" through the tool and returns the session id the grant covers. */
 async function startGranted(h: Harness, conversationId = "conv-1"): Promise<string> {
@@ -756,6 +756,142 @@ describe("vscode_debug_breakpoints", () => {
 		h.api.removeBreakpoints([id]);
 		assert.equal(h.parts.coordinator.owner(id), undefined);
 		h.dispose();
+	});
+});
+
+describe("breakpoint ownership across debug-session loss and window reload", () => {
+	const FILE = "C:\\work\\app\\main.js";
+
+	it("keeps ownership when the debug session ends (Unity domain reload): list names the owner and clear removes them", async () => {
+		const h = createHarness();
+		const session = await startGranted(h);
+		const user = h.api.addUserBreakpoint(FILE, 9);
+		const added = await h.call("vscode_debug_breakpoints", { action: "add", file: FILE, line: 2 });
+		const mine = (added.details as { id: string }).id;
+		h.api.endSession(session);
+		const listed = text(await h.call("vscode_debug_breakpoints", { action: "list" }));
+		assert.match(listed, new RegExp(`${mine}.*owner: this conversation`));
+		assert.match(listed, new RegExp(`${user}.*owner: user`));
+		const cleared = await h.call("vscode_debug_breakpoints", { action: "clear" });
+		assert.equal((cleared.details as { removed: number }).removed, 1);
+		assert.deepEqual(h.api.breakpoints().map(breakpoint => breakpoint.id), [user]);
+		h.dispose();
+	});
+
+	it("keeps ownership across an extension-host restart: VS Code keeps the breakpoint ids, the saved owners cover them", async () => {
+		const store = new MemoryOwnershipStore();
+		const before = createHarness({ ownershipStore: store });
+		const user = before.api.addUserBreakpoint(FILE, 9);
+		const mine = ((await before.call("vscode_debug_breakpoints", { action: "add", file: FILE, line: 2 })).details as { id: string }).id;
+		const theirs = ((await before.call("vscode_debug_breakpoints", { action: "add", file: FILE, line: 4 }, { conversationId: "conv-2" })).details as { id: string }).id;
+		before.dispose();
+
+		const after = createHarness({ api: before.api, ownershipStore: store });
+		assert.equal(after.parts.coordinator.owner(mine), "conv-1");
+		const listed = text(await after.call("vscode_debug_breakpoints", { action: "list" }));
+		assert.match(listed, new RegExp(`${mine}.*owner: this conversation`));
+		assert.match(listed, new RegExp(`${theirs}.*owner: another conversation`));
+		assert.match(listed, new RegExp(`${user}.*owner: user`));
+		const cleared = await after.call("vscode_debug_breakpoints", { action: "clear" });
+		assert.equal((cleared.details as { removed: number }).removed, 1);
+		assert.deepEqual(after.api.breakpoints().map(breakpoint => breakpoint.id).sort(), [user, theirs].sort());
+		after.dispose();
+	});
+
+	it("does not hand a breakpoint the user deleted and created again at the same place to the agent", async () => {
+		const store = new MemoryOwnershipStore();
+		const h = createHarness({ ownershipStore: store });
+		const mine = ((await h.call("vscode_debug_breakpoints", { action: "add", file: FILE, line: 2 })).details as { id: string }).id;
+		// While Desk watches: delete, then create again with the same content.
+		h.api.removeBreakpoints([mine]);
+		const again = h.api.addUserBreakpoint(FILE, 2);
+		assert.notEqual(again, mine);
+		assert.equal(h.parts.coordinator.owner(again), undefined);
+		const removal = await h.call("vscode_debug_breakpoints", { action: "remove", id: again });
+		assert.equal(removal.isError, true);
+		assert.match(text(removal), /owner: user/);
+		const cleared = await h.call("vscode_debug_breakpoints", { action: "clear" });
+		assert.equal((cleared.details as { removed: number }).removed, 0);
+		assert.ok(h.api.breakpoints().some(breakpoint => breakpoint.id === again));
+		h.dispose();
+	});
+
+	it("does not transfer ownership to an equal breakpoint that appears while the host is down, and forgets the vanished one", async () => {
+		const store = new MemoryOwnershipStore();
+		const before = createHarness({ ownershipStore: store });
+		const mine = ((await before.call("vscode_debug_breakpoints", { action: "add", file: FILE, line: 2 })).details as { id: string }).id;
+		before.dispose();
+		// The user deletes it and sets an equal one while no Desk coordinator listens.
+		before.api.removeBreakpoints([mine]);
+		const again = before.api.addUserBreakpoint(FILE, 2);
+
+		const after = createHarness({ api: before.api, ownershipStore: store });
+		const listed = text(await after.call("vscode_debug_breakpoints", { action: "list" }));
+		assert.match(listed, new RegExp(`${again}.*owner: user`));
+		const cleared = await after.call("vscode_debug_breakpoints", { action: "clear" });
+		assert.equal((cleared.details as { removed: number }).removed, 0);
+		assert.ok(after.api.breakpoints().some(breakpoint => breakpoint.id === again));
+		// The next claim drops the saved record of the breakpoint that no longer exists.
+		await after.call("vscode_debug_breakpoints", { action: "add", file: FILE, line: 6 });
+		assert.ok(!Object.keys(store.saved as Record<string, string>).includes(mine));
+		after.dispose();
+	});
+
+	it("does not carry ownership over a remove and re-add of equal content in one VS Code change", async () => {
+		const h = createHarness();
+		const mine = ((await h.call("vscode_debug_breakpoints", { action: "add", file: FILE, line: 2 })).details as { id: string }).id;
+		const removed = h.api.breakpoints().filter(breakpoint => breakpoint.id === mine);
+		h.api.replaceBreakpoints(removed, [{ kind: "source", path: FILE, line: 2, enabled: true }]);
+		const replacement = h.api.breakpoints().find(breakpoint => breakpoint.id !== mine)!;
+		assert.equal(h.parts.coordinator.owner(replacement.id), undefined);
+		assert.equal(h.parts.coordinator.owner(mine), undefined);
+		h.dispose();
+	});
+
+	it("a handoff passes the conversation's breakpoints to the user for good, also across a restart, and names them", async () => {
+		const store = new MemoryOwnershipStore();
+		const h = createHarness({ ownershipStore: store });
+		const session = await startGranted(h);
+		const first = ((await h.call("vscode_debug_breakpoints", { action: "add", file: FILE, line: 3 })).details as { id: string }).id;
+		const second = ((await h.call("vscode_debug_breakpoints", { action: "add", file: FILE, line: 5 })).details as { id: string }).id;
+		h.api.stop(session);
+		const result = await h.call("vscode_debug_handoff", { sessionId: session, message: "look" });
+		assert.equal(result.isError, undefined, text(result));
+		assert.match(text(result), /2 breakpoint\(s\) passed to the user and you can no longer remove them/);
+		assert.match(text(result), new RegExp(`main\\.js:3 \\(${first}\\)`));
+		assert.match(text(result), new RegExp(`main\\.js:5 \\(${second}\\)`));
+		assert.deepEqual((result.details as { passedBreakpoints: string[] }).passedBreakpoints.length, 2);
+		h.dispose();
+
+		const after = createHarness({ api: h.api, ownershipStore: store });
+		assert.equal(after.parts.coordinator.owner(first), undefined);
+		const removal = await after.call("vscode_debug_breakpoints", { action: "remove", id: first });
+		assert.equal(removal.isError, true);
+		assert.match(text(removal), /handed off a session/);
+		assert.match(text(removal), /Ask the user/);
+		after.dispose();
+	});
+
+	it("tells a conversation with no breakpoints that none passed at handoff, and why clear found nothing", async () => {
+		const h = createHarness();
+		const session = await startGranted(h);
+		h.api.addUserBreakpoint(FILE, 9);
+		h.api.stop(session);
+		const result = await h.call("vscode_debug_handoff", { sessionId: session, message: "look" });
+		assert.match(text(result), /no breakpoints set, so none passed/);
+		const cleared = await h.call("vscode_debug_breakpoints", { action: "clear" });
+		assert.match(text(cleared), /no breakpoints to remove.*1 breakpoint\(s\) in the window are the user's or another conversation's/);
+		h.dispose();
+	});
+
+	it("ignores a saved record that is not a map of conversation ids", async () => {
+		for (const saved of ["garbage", 7, ["a"], { bp1: 3, "": "conv-1", bp2: "" }]) {
+			const store = new MemoryOwnershipStore();
+			store.saved = saved;
+			const h = createHarness({ ownershipStore: store });
+			assert.deepEqual(h.parts.coordinator.ownedBreakpoints("conv-1"), []);
+			h.dispose();
+		}
 	});
 });
 

@@ -1,11 +1,13 @@
 import * as vscode from "vscode";
 import type { HostToolProvider } from "../tools/host-tool.ts";
 import { assembleAgentDebugger } from "./assemble.ts";
+import type { BreakpointOwnershipStore } from "./debug-api.ts";
 import type { DebugPolicy, ExpressionMode, StartMode } from "./policy.ts";
 import { UNITY_EXTENSION_ID, unityAttachPreset } from "./unity-preset.ts";
 import { VscodeDebugApi } from "./vscode-debug-api.ts";
 
 const SECTION = "omp.agentDebugger";
+const OWNERS_KEY = "omp.agentDebugger.breakpointOwners";
 
 /** Settings are `application` scoped: only the user's settings apply, a repository's cannot change them. */
 export function vscodePolicy(): DebugPolicy {
@@ -46,8 +48,13 @@ export function vscodePolicy(): DebugPolicy {
  */
 export function activateAgentDebugger(context: vscode.ExtensionContext, options: { log?: (line: string) => void } = {}): HostToolProvider {
 	const api = new VscodeDebugApi();
+	// Workspace scope, like VS Code's own breakpoint storage, which restores breakpoint ids after Reload Window.
+	const ownershipStore: BreakpointOwnershipStore = {
+		load: () => context.workspaceState.get(OWNERS_KEY),
+		save: owners => { void context.workspaceState.update(OWNERS_KEY, owners).then(undefined, (error: unknown) => options.log?.(`debug breakpoints: could not save owner records: ${String(error)}`)); },
+	};
 	const presets = [unityAttachPreset({ isInstalled: () => vscode.extensions.getExtension(UNITY_EXTENSION_ID) !== undefined, isFile: path => api.isFile(path) })];
-	const parts = assembleAgentDebugger(api, vscodePolicy(), () => presets, options);
+	const parts = assembleAgentDebugger(api, vscodePolicy(), () => presets, { ...options, ownershipStore });
 	context.subscriptions.push(
 		{ dispose: () => parts.dispose() },
 		vscode.workspace.onDidChangeConfiguration(event => {

@@ -1,6 +1,6 @@
 import type { HostToolDefinition, HostToolProvider } from "../tools/host-tool.ts";
 import { DebugCoordinator } from "./coordinator.ts";
-import type { DebugApi } from "./debug-api.ts";
+import type { BreakpointOwnershipStore, DebugApi } from "./debug-api.ts";
 import type { DebugPolicy, DebugPreset } from "./policy.ts";
 import { createDebugTools } from "./tools.ts";
 
@@ -18,11 +18,13 @@ export interface AssembleOptions {
 	breakpointSettleMs?: number;
 	/** Progress cadence of `vscode_debug_wait`. */
 	waitTickMs?: number;
+	/** Keeps breakpoint ownership across extension-host restarts; without it ownership lives in memory only. */
+	ownershipStore?: BreakpointOwnershipStore;
 }
 
 /** The wiring behind `activateAgentDebugger`, over any `DebugApi` and policy, so it runs under `node --test`. */
 export function assembleAgentDebugger(api: DebugApi, policy: DebugPolicy, presets: () => readonly DebugPreset[], options: AssembleOptions = {}): AgentDebuggerParts {
-	const coordinator = new DebugCoordinator(api, { log: options.log });
+	const coordinator = new DebugCoordinator(api, { log: options.log, ownershipStore: options.ownershipStore });
 	const tools = createDebugTools({ api, coordinator, policy, presets, breakpointSettleMs: options.breakpointSettleMs ?? 1000, waitTickMs: options.waitTickMs ?? 30_000 });
 	const listeners = new Set<() => void>();
 	const provider: HostToolProvider = {

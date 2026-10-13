@@ -1,5 +1,5 @@
 import { isRecord } from "../../shared/guards.ts";
-import type { BreakpointInfo, DapMessage, DebugApi, DebugDisposable, DebugSessionInfo, SessionTracker } from "./debug-api.ts";
+import type { BreakpointInfo, BreakpointOwnershipStore, DapMessage, DebugApi, DebugDisposable, DebugSessionInfo, SessionTracker } from "./debug-api.ts";
 
 /**
  * The window-lifetime debug coordinator (design section 2): a registry of VS Code debug sessions fed by trackers,
@@ -170,6 +170,19 @@ export interface BreakpointOwnership {
 	owner(id: string): string | undefined;
 }
 
+/** The saved owner records kept across extension-host restarts: bounded, oldest dropped first. */
+const MAX_SAVED_OWNERS = 500;
+
+/** Reads what a store saved; anything that is not a `{ breakpointId: conversationId }` record of strings is ignored. */
+function restoredOwners(saved: unknown): [string, string][] {
+	if (!isRecord(saved)) return [];
+	const owners: [string, string][] = [];
+	for (const [id, conversation] of Object.entries(saved)) {
+		if (id.length > 0 && typeof conversation === "string" && conversation.length > 0) owners.push([id, conversation]);
+	}
+	return owners.slice(-MAX_SAVED_OWNERS);
+}
+
 type Listener = () => void;
 
 export class DebugCoordinator implements BreakpointOwnership {
@@ -182,13 +195,21 @@ export class DebugCoordinator implements BreakpointOwnership {
 	readonly #queues = new Map<string, Promise<void>>();
 	readonly #attempts = new Map<string, LaunchAttempt>();
 	readonly #breakpointOwners = new Map<string, string>();
+	readonly #ownershipStore: BreakpointOwnershipStore | undefined;
 	#launchChain: Promise<void> = Promise.resolve();
 	#disposed = false;
 
-	constructor(api: DebugApi, options: { limits?: Partial<DebugLimits>; log?: (line: string) => void } = {}) {
+	constructor(api: DebugApi, options: { limits?: Partial<DebugLimits>; log?: (line: string) => void; ownershipStore?: BreakpointOwnershipStore } = {}) {
 		this.#api = api;
 		this.limits = { ...DEFAULT_LIMITS, ...options.limits };
 		this.#log = options.log ?? (() => {});
+		this.#ownershipStore = options.ownershipStore;
+		// VS Code keeps a breakpoint's id across a window reload (it stores the id with the breakpoint), but this window's
+		// memory does not survive an extension-host restart: the saved owners are what keeps `clear` and `remove` working.
+		if (this.#ownershipStore) {
+			for (const [id, conversation] of restoredOwners(this.#ownershipStore.load())) this.#breakpointOwners.set(id, conversation);
+			if (this.#breakpointOwners.size > 0) this.#log(`debug breakpoints: restored ${this.#breakpointOwners.size} saved owner record(s)`);
+		}
 		this.#disposables.push(
 			api.registerTrackerFactory(session => this.#trackerFor(session)),
 			api.onDidStartSession(session => this.#ensureRecord(session, false)),
@@ -438,11 +459,12 @@ export class DebugCoordinator implements BreakpointOwnership {
 
 	/**
 	 * Terminally revokes the grant of the session's whole tree (the launcher session and every target it spawned) and
-	 * passes the conversation's breakpoints to the user. Reads stay allowed.
+	 * passes the conversation's breakpoints to the user. Reads stay allowed. Returns the ids of the breakpoints that
+	 * passed to the user, so the tool can name them.
 	 */
-	handoff(id: string): void {
+	handoff(id: string): string[] {
 		const record = this.#records.get(id);
-		if (!record) return;
+		if (!record) return [];
 		const conversation = record.controlOwner;
 		const tree = new Set<string>([id]);
 		for (let grew = true; grew;) {
@@ -458,10 +480,17 @@ export class DebugCoordinator implements BreakpointOwnership {
 			target.controlOwner = undefined;
 			target.handedOff = true;
 		}
+		const passed: string[] = [];
 		if (conversation !== undefined) {
-			for (const [breakpointId, owner] of this.#breakpointOwners) if (owner === conversation) this.#breakpointOwners.delete(breakpointId);
+			for (const [breakpointId, owner] of this.#breakpointOwners) {
+				if (owner !== conversation) continue;
+				this.#breakpointOwners.delete(breakpointId);
+				passed.push(breakpointId);
+			}
+			if (passed.length > 0) this.#persistOwners();
 		}
 		this.#changed();
+		return passed;
 	}
 
 	// ---- breakpoint ownership ----
@@ -471,19 +500,45 @@ export class DebugCoordinator implements BreakpointOwnership {
 	}
 
 	claimBreakpoint(breakpointId: string, conversationId: string): void {
+		// Tool calls run long after activation, so VS Code's breakpoint list is complete here: records of breakpoints
+		// that vanished while this window was not watching (deleted while the host was down) are dropped now.
+		const present = new Set(this.#api.breakpoints().map(breakpoint => breakpoint.id));
+		for (const knownId of [...this.#breakpointOwners.keys()]) if (!present.has(knownId)) this.#breakpointOwners.delete(knownId);
 		this.#breakpointOwners.set(breakpointId, conversationId);
+		while (this.#breakpointOwners.size > MAX_SAVED_OWNERS) {
+			const oldest = this.#breakpointOwners.keys().next();
+			if (oldest.done) break;
+			this.#breakpointOwners.delete(oldest.value);
+		}
+		this.#persistOwners();
 	}
 
 	releaseBreakpoint(breakpointId: string): void {
-		this.#breakpointOwners.delete(breakpointId);
+		if (this.#breakpointOwners.delete(breakpointId)) this.#persistOwners();
 	}
 
 	ownedBreakpoints(conversationId: string): string[] {
 		return [...this.#breakpointOwners].filter(([, owner]) => owner === conversationId).map(([id]) => id);
 	}
 
+	/**
+	 * Ownership is keyed by the id VS Code gave the breakpoint, and only an id that was claimed is ever owned: a
+	 * breakpoint the user deletes and creates again at the same place is a new breakpoint with a new id, so it is the
+	 * user's. No location or content match transfers ownership.
+	 */
 	#breakpointsChanged(removed: readonly BreakpointInfo[]): void {
-		for (const breakpoint of removed) this.#breakpointOwners.delete(breakpoint.id);
+		let any = false;
+		for (const breakpoint of removed) any = this.#breakpointOwners.delete(breakpoint.id) || any;
+		if (any) this.#persistOwners();
+	}
+
+	#persistOwners(): void {
+		if (!this.#ownershipStore) return;
+		try {
+			this.#ownershipStore.save(Object.fromEntries(this.#breakpointOwners));
+		} catch (error) {
+			this.#log(`debug breakpoints: could not save owner records: ${String(error)}`);
+		}
 	}
 
 	// ---- serialization ----

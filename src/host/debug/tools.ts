@@ -1,7 +1,7 @@
 import path from "node:path";
 import { isRecord } from "../../shared/guards.ts";
 import type { HostToolContext, HostToolDefinition, HostToolResult } from "../tools/host-tool.ts";
-import { breakpointTool } from "./breakpoint-tool.ts";
+import { breakpointTool, locationOf } from "./breakpoint-tool.ts";
 import type { LaunchOutcome, SessionView } from "./coordinator.ts";
 import { describeState } from "./coordinator.ts";
 import type { ControlCommand, LaunchConfigurations, WorkspaceFolderInfo } from "./debug-api.ts";
@@ -354,7 +354,7 @@ function handoffTool(env: DebugToolEnv): HostToolDefinition {
 	return {
 		name: "vscode_debug_handoff",
 		label: "Debug handoff",
-		description: "Hand a paused debug session to the user: reveal the stopped frame in an editor, show Run and Debug and a notification with your message. This ends your control of the session (and its child sessions) for good and passes your breakpoints to the user; you may still read the session. Use it when you have found what the user should see.",
+		description: "Hand a paused debug session to the user: reveal the stopped frame in an editor, show Run and Debug and a notification with your message. This ends your control of the session (and its child sessions) for good and passes ALL your breakpoints to the user at once (including the one the program is stopped at); you may still read the session. Remove with vscode_debug_breakpoints any breakpoint you do not want to leave behind BEFORE you hand off, because afterwards only the user can remove them. Use it when you have found what the user should see.",
 		parameters: {
 			type: "object",
 			properties: {
@@ -381,7 +381,8 @@ function handoffTool(env: DebugToolEnv): HostToolDefinition {
 					admit(env, ctx);
 					requireGrant(env, ctx, sessionId);
 					// Terminal: from here the conversation no longer controls the session or owns its breakpoints.
-					env.coordinator.handoff(sessionId);
+					const passed = env.coordinator.handoff(sessionId);
+					const passedNames = passedBreakpoints(env, passed);
 					const notes: string[] = [];
 					try {
 						if (location) await env.api.revealLocation(location.path, location.line);
@@ -395,11 +396,20 @@ function handoffTool(env: DebugToolEnv): HostToolDefinition {
 						notes.push(`showing Run and Debug failed (${error instanceof Error ? error.message : String(error)})`);
 					}
 					env.api.notify(message);
-					return textResult(`Handed debug session ${sessionId} to the user. You can no longer control it or change your breakpoints; reads are still allowed.${notes.length > 0 ? ` Note: ${notes.join("; ")}.` : ""}`, { action: "handoff", sessionId });
+					return textResult(`Handed debug session ${sessionId} to the user. You can no longer control it or change your breakpoints; reads are still allowed. ${passedNames.length === 0 ? "You had no breakpoints set, so none passed to the user." : `${passedNames.length} breakpoint(s) passed to the user and you can no longer remove them: ${passedNames.join(", ")}.`}${notes.length > 0 ? ` Note: ${notes.join("; ")}.` : ""}`, { action: "handoff", sessionId, passedBreakpoints: passedNames });
 				});
 			});
 		},
 	};
+}
+
+/** The locations of the breakpoints a handoff passed to the user, for the tool result. */
+function passedBreakpoints(env: DebugToolEnv, ids: readonly string[]): string[] {
+	const byId = new Map(env.api.breakpoints().map(breakpoint => [breakpoint.id, breakpoint]));
+	return ids.map(id => {
+		const breakpoint = byId.get(id);
+		return breakpoint ? `${locationOf(breakpoint)} (${id})` : id;
+	});
 }
 
 async function topLocation(env: DebugToolEnv, ctx: HostToolContext, sessionId: string, threadId: number): Promise<{ path: string; line: number } | undefined> {

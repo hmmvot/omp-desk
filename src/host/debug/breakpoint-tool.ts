@@ -17,7 +17,14 @@ function ownershipOf(env: DebugToolEnv, id: string, conversationId: string): Own
 	return owner === conversationId ? "this conversation" : "another conversation";
 }
 
-function locationOf(breakpoint: BreakpointInfo): string {
+const OWNER_LEGEND = 'Owner: "this conversation" = you set it and may remove it; it stays yours across Reload Window until you remove it or hand off a session. "user" = the user set it, or it passed to the user when you handed off a session; you cannot change it. "another conversation" = another chat set it.';
+
+function notYoursReason(owner: Ownership): string {
+	if (owner === "another conversation") return "Another conversation set it.";
+	return "The user set it, or it passed to the user when you handed off a session (a handoff passes all your breakpoints at once, and Desk never gives them back).";
+}
+
+export function locationOf(breakpoint: BreakpointInfo): string {
 	if (breakpoint.kind === "source") return `${breakpoint.path ?? "?"}:${breakpoint.line ?? "?"}`;
 	return breakpoint.label ?? breakpoint.kind;
 }
@@ -76,7 +83,7 @@ async function list(env: DebugToolEnv, conversationId: string): Promise<HostTool
 		rows.push(described.row);
 	}
 	const more = all.length - shown.length;
-	return textResult(`${all.length} breakpoint(s). Breakpoints are window-wide and apply to every debug session.\n${lines.join("\n")}${more > 0 ? `\n... ${more} more not shown` : ""}`, { action: "list", count: all.length, rows });
+	return textResult(`${all.length} breakpoint(s). Breakpoints are window-wide and apply to every debug session.\n${OWNER_LEGEND}\n${lines.join("\n")}${more > 0 ? `\n... ${more} more not shown` : ""}`, { action: "list", count: all.length, rows });
 }
 
 async function add(env: DebugToolEnv, args: Args, ctx: HostToolContext): Promise<HostToolResult> {
@@ -121,7 +128,7 @@ async function add(env: DebugToolEnv, args: Args, ctx: HostToolContext): Promise
 			if (owner === "this conversation" && same) {
 				return textResult(`A breakpoint with these settings already exists at ${resolved}:${line} (${existing.id}).`, { action: "add", id: existing.id, location: `${resolved}:${line}`, existing: true });
 			}
-			return errorResult(`A breakpoint already exists at ${resolved}:${line} (${existing.id}, owner: ${owner}). Desk never changes an existing breakpoint${owner === "this conversation" ? "; remove it first" : ""}.`);
+			return errorResult(`A breakpoint already exists at ${resolved}:${line} (${existing.id}, owner: ${owner}). Desk never changes an existing breakpoint${owner === "this conversation" ? "; remove it first" : ""}.${owner === "this conversation" ? "" : ` ${notYoursReason(owner)}`}`);
 		}
 		admit(env, ctx);
 		const id = env.api.addSourceBreakpoint({
@@ -164,7 +171,7 @@ async function remove(env: DebugToolEnv, args: Args, ctx: HostToolContext): Prom
 		}
 		if (!target) return errorResult("No such breakpoint.");
 		const owner = ownershipOf(env, target.id, ctx.conversationId);
-		if (owner !== "this conversation") return errorResult(`Breakpoint ${target.id} at ${locationOf(target)} is not owned by this conversation (owner: ${owner}); Desk never removes a breakpoint the user or another conversation set.`);
+		if (owner !== "this conversation") return errorResult(`Breakpoint ${target.id} at ${locationOf(target)} is not yours to remove (owner: ${owner}). ${notYoursReason(owner)} Ask the user to delete it in VS Code (Run and Debug, Breakpoints) if it should go.`);
 		env.api.removeBreakpoints([target.id]);
 		env.coordinator.releaseBreakpoint(target.id);
 		return textResult(`Breakpoint ${target.id} at ${locationOf(target)} removed.`, { action: "remove", id: target.id });
@@ -178,7 +185,9 @@ async function clear(env: DebugToolEnv, ctx: HostToolContext): Promise<HostToolR
 		const owned = env.coordinator.ownedBreakpoints(ctx.conversationId).filter(id => present.has(id));
 		if (owned.length > 0) env.api.removeBreakpoints(owned);
 		for (const id of owned) env.coordinator.releaseBreakpoint(id);
-		return textResult(owned.length === 0 ? "This conversation has no breakpoints to remove." : `Removed ${owned.length} breakpoint(s) set by this conversation. The user's breakpoints are untouched.`, { action: "clear", removed: owned.length });
+		if (owned.length > 0) return textResult(`Removed ${owned.length} breakpoint(s) set by this conversation. The user's breakpoints are untouched.`, { action: "clear", removed: owned.length });
+		const foreign = env.api.breakpoints().length;
+		return textResult(`This conversation has no breakpoints to remove.${foreign > 0 ? ` The ${foreign} breakpoint(s) in the window are the user's or another conversation's, including any passed to the user by a handoff; run action "list" to see each owner.` : ""}`, { action: "clear", removed: 0 });
 	});
 }
 
@@ -186,7 +195,7 @@ export function breakpointTool(env: DebugToolEnv): HostToolDefinition {
 	return {
 		name: "vscode_debug_breakpoints",
 		label: "Debug breakpoints",
-		description: "List, add, remove or clear breakpoints in the user's VS Code window. Breakpoints are window-wide and apply to every debug session; the list shows the user's breakpoints and this conversation's, with each debug session's state (requested, verified, or unverified with the adapter's message; an adapter may verify later, for example when Unity loads the assembly). You can only remove breakpoints you added. `hitCount` is a positive integer. Conditions and log messages run code in the debuggee and need the user's permission.",
+		description: "List, add, remove or clear breakpoints in the user's VS Code window. Breakpoints are window-wide and apply to every debug session; the list shows the user's breakpoints and this conversation's, with each one's owner and each debug session's state (requested, verified, or unverified with the adapter's message; an adapter may verify later, for example when Unity loads the assembly). You can only remove breakpoints you added (owner: this conversation); they stay yours when a debug session ends, Unity reloads its domain or the window reloads, and stop being yours when you hand off a session (all of them pass to the user at once) or the user deletes them. A breakpoint the user deletes and sets again at the same place is the user's. `hitCount` is a positive integer. Conditions and log messages run code in the debuggee and need the user's permission.",
 		parameters: {
 			type: "object",
 			properties: {
