@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { CodeThemeRule } from "../../chat/code-theme.ts";
 import { styledRuns, spansOf } from "./code-highlight.ts";
-import { languageId, LANGUAGES } from "./code-languages.ts";
+import { languageForPath, languageId, LANGUAGES } from "./code-languages.ts";
 import { tokenize } from "./code-tokens.ts";
 import { createCodeThemeStyler } from "./code-theme-style.ts";
 
@@ -141,4 +141,15 @@ test("dockerfile, hcl and java take their grammars' scopes", () => {
 	assert.equal(hclScope("true"), "constant.language.hcl");
 	assert.equal(hclScope("/* block */"), "comment.hcl");
 	assert.deepEqual(painted("java", SAMPLES.java as string).filter(([text]) => ["public", "class", "int", "String", "null"].includes(text)).map(([text]) => text), ["public", "class", "int", "String", "int", "null"]);
+});
+
+test("a file path picks its language from the name, then the extension, read selectors ignored", () => {
+	const expected: Record<string, string | null> = {
+		".workspace/notes/compile_tree.py": "python", "src\\win\\Main.KT": "kotlin", "a/b/index.tsx": "tsx", "x.test.ts": "ts", "lib.rs": "rust",
+		"ci/Dockerfile": "dockerfile", "Dockerfile.dev": "dockerfile", "build.dockerfile": "dockerfile", "Makefile": "makefile", "GNUmakefile": "makefile", "rules.mk": "makefile",
+		".gitignore": "gitignore", "pkg/.dockerignore": "gitignore", ".editorconfig": "ini", "Jenkinsfile": "groovy", "Gemfile": "ruby", ".bashrc": "shell", "run.sh": "shell", "setup.ps1": "powershell",
+		"src/a.ts:12": "ts", "src/a.ts:10-40": "ts", "src/a.ts:L5-L9": "ts", "src/a.ts:raw": "ts", "src/a.ts:12:raw": "ts", "C:\\repo\\a.py": "python", "main.tf": "hcl", "x.yml": "yaml",
+		"notes.txt": null, "data.bin": null, "README": null, "noext.": null, ".hidden": null, "": null, "a.zzz": null, "dir.d/file": null, "archive.zip:src/m.go": "go",
+	};
+	for (const [path, id] of Object.entries(expected)) assert.equal(languageForPath(path), id, path);
 });

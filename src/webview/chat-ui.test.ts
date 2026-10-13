@@ -4617,6 +4617,92 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		/** One finished tool call (`details` and result text as OMP sends them), its card opened. */
+		const toolCard = async (id: string, name: string, args: unknown, details: unknown = {}, expand = true) => {
+			await ui.evaluate(`(()=>{
+			 const row=(id,parentId,message)=>({type:'message',id,parentId,timestamp:'2026-10-01T00:00:00.000Z',message});
+			 window.ui.push({entries:[row('c-${id}',null,{role:'assistant',model:'m',timestamp:1,stopReason:'toolUse',content:[{type:'toolCall',id:${JSON.stringify(id)},name:${JSON.stringify(name)},arguments:${JSON.stringify(args)}}]}),
+			  row('r-${id}','c-${id}',{role:'toolResult',timestamp:2,toolCallId:${JSON.stringify(id)},toolName:${JSON.stringify(name)},isError:false,content:[{type:'text',text:'done'}],details:${JSON.stringify(details)}})],durableCount:2,working:false,settled:true})})()`);
+			await ui.wait(`document.querySelector('[data-tool-call-id="${id}"] .omp-tool-head')`);
+			if (expand) await ui.evaluate(`document.querySelector('[data-tool-call-id="${id}"] .omp-tool-head').click()`);
+			if (expand) await ui.wait(`document.querySelector('[data-tool-call-id="${id}"] .omp-tool-body')`);
+		};
+		const codeSpans = (id: string, scope: string) => ui.evaluate<Array<[string, string]>>(`[...document.querySelectorAll('[data-tool-call-id="${id}"] ${scope} span')].filter(span=>!span.className&&span.style.color).map(span=>[span.textContent,span.style.color])`);
+
+		await t.test("a Write card's file content is coloured by the file's language with the editor theme, line numbers and copy text untouched; an unknown extension stays plain", async () => {
+			await reset("code-highlight-write");
+			const python = "def tree(a):\n    n = 1\n    return \"leaf\"\n";
+			await toolCard("hl-write-py", "write", { path: ".workspace/notes/compile_tree.py", content: python });
+			assert.deepEqual(await codeSpans("hl-write-py", ".omp-native-code-line"), [], "no theme yet: plain, as before");
+			await ui.evaluate(`window.ui.receive({type:'omp:chat-code-theme',themes:[${CODE_THEME}]})`);
+			await ui.wait("document.querySelector('[data-tool-call-id=\"hl-write-py\"] .omp-native-code-line span[style]')");
+			assert.deepEqual(await codeSpans("hl-write-py", ".omp-native-code-line"), [["def", "rgb(86, 156, 214)"], ["1", "rgb(181, 206, 168)"], ["\"leaf\"", "rgb(206, 145, 120)"]]);
+			const facts = await ui.evaluate<{ rows: string[]; numbers: string[]; text: string }>(`(()=>{const card=document.querySelector('[data-tool-call-id="hl-write-py"]');
+			 const rows=[...card.querySelectorAll('.omp-native-code-line')];
+			 return {rows:rows.map(row=>row.textContent.replace(/^\\s*\\d+\\s/,'')),numbers:rows.map(row=>row.querySelector('.omp-native-line-number').textContent),text:card.querySelector('.omp-native-code').textContent}})()`);
+			assert.deepEqual(facts.rows.slice(0, 3), ["def tree(a):\n", "    n = 1\n", "    return \"leaf\"\n"], "colour never changes the text");
+			assert.deepEqual(facts.numbers.slice(0, 3), ["1", "2", "3"], "line numbers stay");
+			await toolCard("hl-write-txt", "write", { path: "notes/readme.zzz", content: python });
+			assert.deepEqual(await codeSpans("hl-write-txt", ".omp-native-code-line"), [], "an unknown extension stays plain");
+			await toolCard("hl-write-docker", "write", { path: "ci/Dockerfile", content: "FROM node:20\nENV A=\"b\"\n" });
+			await ui.wait("document.querySelector('[data-tool-call-id=\"hl-write-docker\"] .omp-native-code-line span[style]')");
+			assert.ok((await codeSpans("hl-write-docker", ".omp-native-code-line")).some(([text]) => text === "\"b\""), "a special file name picks its language");
+			await ui.evaluate("window.ui.receive({type:'omp:chat-code-theme',themes:[]})");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("an Edit card keeps its diff backgrounds, signs and numbers and colours the code of every line", async () => {
+			await reset("code-highlight-edit");
+			await ui.evaluate(`document.documentElement.style.setProperty('--vscode-diffEditor-insertedLineBackground','rgb(10, 80, 10)');document.documentElement.style.setProperty('--vscode-diffEditor-removedLineBackground','rgb(90, 10, 10)')`);
+			await ui.evaluate(`window.ui.receive({type:'omp:chat-code-theme',themes:[${CODE_THEME}]})`);
+			await toolCard("hl-edit-ts", "edit", { path: "src/a.ts" }, { path: "src/a.ts", diff: " 1|const a = 1;\n-2|const b = \"old\";\n+2|const b = \"new\";\n 3|let c = 3;", firstChangedLine: 2 });
+			await ui.wait("document.querySelector('[data-tool-call-id=\"hl-edit-ts\"] .omp-native-diff-add span[style]')");
+			const facts = await ui.evaluate<Array<{ cls: string; sign: string; number: string; text: string; colours: Array<[string, string]>; background: string }>>(`[...document.querySelectorAll('[data-tool-call-id="hl-edit-ts"] .omp-native-diff .omp-pre > span')].map(row=>({cls:row.className,
+			 sign:row.querySelector('.omp-native-diff-sign')?.textContent,number:row.querySelector('.omp-native-line-number')?.textContent,text:row.textContent,
+			 colours:[...row.querySelectorAll('span')].filter(span=>!span.className&&span.style.color).map(span=>[span.textContent,span.style.color]),background:getComputedStyle(row).backgroundColor}))`);
+			assert.deepEqual(facts.map(row => [row.cls, row.sign, row.number]), [["", " ", "1"], ["omp-native-diff-remove", "-", "2"], ["omp-native-diff-add", "+", "2"], ["", " ", "3"]]);
+			assert.deepEqual(facts.map(row => row.text), [" 1const a = 1;\n", "-2const b = \"old\";\n", "+2const b = \"new\";\n", " 3let c = 3;\n"], "the diff's own text is unchanged");
+			assert.deepEqual(facts[1]!.colours, [["const", "rgb(86, 156, 214)"], ["\"old\"", "rgb(206, 145, 120)"]], "a removed line is read as the old file");
+			assert.deepEqual(facts[2]!.colours, [["const", "rgb(86, 156, 214)"], ["\"new\"", "rgb(206, 145, 120)"]]);
+			assert.deepEqual(facts[3]!.colours, [["let", "rgb(86, 156, 214)"], ["3", "rgb(181, 206, 168)"]], "context lines are coloured too");
+			assert.equal(facts[1]!.background, "rgb(90, 10, 10)", "the removed background stays");
+			assert.equal(facts[2]!.background, "rgb(10, 80, 10)", "the added background stays");
+			await toolCard("hl-edit-unknown", "edit", { path: "data/a.zzz" }, { path: "data/a.zzz", diff: "-1|const a = 1;\n+1|const a = 2;" });
+			assert.equal(await ui.evaluate("document.querySelectorAll('[data-tool-call-id=\"hl-edit-unknown\"] .omp-native-diff .omp-pre span[style]').length"), 0, "an unknown extension's diff stays plain");
+			await ui.evaluate("window.ui.receive({type:'omp:chat-code-theme',themes:[]})");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("a Bash card's command is coloured as shell in its header, and a Read card's file as its language", async () => {
+			await reset("code-highlight-bash-read");
+			await ui.evaluate(`window.ui.receive({type:'omp:chat-code-theme',themes:[${CODE_THEME}]})`);
+			await toolCard("hl-bash", "bash", { command: "echo \"hi\" && pwd" }, { exitCode: 0 }, false);
+			await ui.wait("document.querySelector('[data-tool-call-id=\"hl-bash\"] .omp-tool-digest span[style]')");
+			assert.deepEqual(await codeSpans("hl-bash", ".omp-tool-digest"), [["\"hi\"", "rgb(206, 145, 120)"]]);
+			assert.equal(await ui.evaluate("document.querySelector('[data-tool-call-id=\"hl-bash\"] .omp-tool-digest').textContent"), "echo \"hi\" && pwd");
+			await toolCard("hl-read", "read", { path: "src/a.ts:10-12" }, { displayContent: { text: "const a = 1;\nconst b = \"x\";", startLine: 10 } });
+			await ui.wait("document.querySelector('[data-tool-call-id=\"hl-read\"] .omp-native-code-line span[style]')");
+			assert.deepEqual(await codeSpans("hl-read", ".omp-native-code-line"), [["const", "rgb(86, 156, 214)"], ["1", "rgb(181, 206, 168)"], ["const", "rgb(86, 156, 214)"], ["\"x\"", "rgb(206, 145, 120)"]]);
+			assert.equal(await ui.evaluate("document.querySelector('[data-tool-call-id=\"hl-read\"] .omp-native-line-number').textContent"), "10", "the first line number is the read's own");
+			await ui.evaluate("window.ui.receive({type:'omp:chat-code-theme',themes:[]})");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("a Write still streaming is coloured once its text settles and keeps that colour while it grows", async () => {
+			await reset("code-highlight-write-streaming");
+			await ui.evaluate(`window.ui.receive({type:'omp:chat-code-theme',themes:[${CODE_THEME}]})`);
+			await ui.evaluate(`window.liveWrite=content=>{const args={path:'live.ts',content};const message={role:'assistant',model:'m',timestamp:1000,stopReason:'toolUse',content:[{type:'toolCall',id:'hl-live',name:'write',arguments:args}]};
+			 window.ui.push({stream:{messageId:'hl-live-message',message},streamPosition:{anchorId:null,seq:1},working:true,settled:false,activeTools:[{toolCallId:'hl-live',toolName:'write',args,startedAt:1000}]})};window.liveWrite('const a = 1;')`);
+			await ui.wait("document.querySelector('[data-tool-call-id=\"hl-live\"] .omp-native-code-line')");
+			assert.equal(await ui.evaluate("document.querySelectorAll('[data-tool-call-id=\"hl-live\"] .omp-native-code-line span[style]').length"), 0, "plain while the text may still change");
+			await ui.wait("document.querySelector('[data-tool-call-id=\"hl-live\"] .omp-native-code-line span[style]')");
+			await ui.evaluate("window.liveWrite('const a = 1;\\nconst b')");
+			await ui.wait("document.querySelectorAll('[data-tool-call-id=\"hl-live\"] .omp-native-code-line').length===2");
+			assert.ok(await ui.evaluate("document.querySelector('[data-tool-call-id=\"hl-live\"] .omp-native-code-line span[style]')!==null"), "the coloured text stays coloured while the new text arrives");
+			await ui.evaluate("window.ui.receive({type:'omp:chat-code-theme',themes:[]})");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("inline code is the theme's string colour on a tint of it, and a link in it or around it looks the same", async () => {
 			await reset("inline-code-colour");
 			const root = "document.documentElement.style";

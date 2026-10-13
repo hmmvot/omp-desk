@@ -37,6 +37,8 @@ export interface ToolCardProps {
 const STATE_ICONS: Record<NonNullable<ToolCardProps["status"]>, string> = {
 	queued: "clock", running: "loading codicon-modifier-spin", complete: "check", error: "error", skipped: "circle-slash",
 };
+/** The fence language a command tool's text is coloured as. */
+const COMMAND_LANGUAGES: Readonly<Record<string, string>> = { bash: "shell", python: "python", powershell: "powershell", pwsh: "powershell" };
 
 /** An edit's added and removed lines: two coloured spans with text signs, so colour is never the only carrier. */
 function DiffStatSpans({ stats }: { stats: DiffStats }): ReactNode {
@@ -132,6 +134,9 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 	if (name === "wait" && result && isInterruptedToolResult(result)) return null;
 	// Nothing to disclose: a settled, error-free call whose expanded details would be empty is one static row.
 	const bare = state === "complete" && result !== undefined && !retained && !failed && diagnosticCount === 0 && nontext.length === 0 && (attachments?.length ?? 0) === 0 && hasNoDetails({ name, args: record(args), details, stream, text });
+	// A command's own text is coloured by the language of the tool that runs it (the digest of several agents is not code).
+	const commandLanguage = compactTarget === null && Object.hasOwn(COMMAND_LANGUAGES, name) ? COMMAND_LANGUAGES[name] : undefined;
+	const commandClosed = state !== "running" && state !== "queued";
 	const aux = intent?.replace(/\s+/g, " ").trim() || undefined;
 	if (bare) {
 		const target = compactTarget?.digest ?? metadata.target;
@@ -140,7 +145,7 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 				{/* A settled call shows no mark: the announced status below says "complete". */}
 				<span className={`codicon codicon-${TOOL_ICONS[metadata.route.name] ?? "tools"}`} aria-hidden="true" />
 				<span className="omp-tool-name">{metadata.title}</span>
-				{target && <span className="omp-tool-digest" title={compactTarget?.detail ?? target}><ToolTargetText category={metadata.category} paths={metadata.paths} text={displayText(target)} line={changedLine} revalidate={state} /></span>}
+				{target && <span className="omp-tool-digest" title={compactTarget?.detail ?? target}><ToolTargetText category={metadata.category} paths={metadata.paths} text={displayText(target)} line={changedLine} revalidate={state} language={commandLanguage} closed={commandClosed} /></span>}
 				{aux && <span className="omp-tool-aux omp-tool-aux--intent" title={aux}>{aux}</span>}
 				<span className="omp-tool-aux omp-tool-aux--none">no output</span>
 				<span className="omp-sr-only" role="status">{state}</span>
@@ -152,7 +157,7 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 		{!pendingAsk && !(state === "complete" && !failed) && <span className={`codicon codicon-${failed ? "error omp-tool-status--failed" : STATE_ICONS[state]}`} aria-hidden="true" />}
 		<span className={`codicon codicon-${view?.icon ?? TOOL_ICONS[metadata.route.name] ?? "tools"}`} aria-hidden="true" />
 		<span className="omp-tool-name">{waitFace && view?.title?.startsWith("Waiting on") ? <><span className="omp-wait-title-full">{view.title}</span><span className="omp-wait-title-short">Wait</span></> : view?.title ?? metadata.title}</span>
-		{headTarget && <span className="omp-tool-digest" title={compactTarget?.detail ?? headTarget}><ToolTargetText category={metadata.category} paths={metadata.paths} text={displayText(headTarget)} line={changedLine} revalidate={state} /></span>}
+		{headTarget && <span className="omp-tool-digest" title={compactTarget?.detail ?? headTarget}><ToolTargetText category={metadata.category} paths={metadata.paths} text={displayText(headTarget)} line={changedLine} revalidate={state} language={commandLanguage} closed={commandClosed} /></span>}
 		{view?.inline}
 		{aux && <span className="omp-tool-aux omp-tool-aux--intent" title={aux}>{aux}</span>}
 		{view?.meta?.map((meta, index) => <span className="omp-native-tool-meta" key={index}>{displayText(meta)}</span>)}

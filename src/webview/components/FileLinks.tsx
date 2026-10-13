@@ -15,6 +15,8 @@ import type { FileLinkAction } from "../../shared/terminal-links";
 import { ChatFileLinks, detectChatFileLinks, isFileLinkCandidate } from "../lib/chat-file-links";
 import { ChatSymbolLinks } from "../lib/chat-symbol-links";
 import type { SymbolLink } from "../lib/chat-symbol-links";
+import { useHighlightedRuns } from "../lib/use-highlighted-runs";
+import { CodeRuns } from "./CodeRuns";
 
 /** Exported for static renders, which cannot run the provider's effect. */
 export const FileLinksContext = createContext<ChatFileLinks | null>(null);
@@ -237,15 +239,22 @@ function displayedPosition(displayed: string): string {
 	return selector === null ? "" : `:${selector[1]!.replace(/^L/i, "")}`;
 }
 
+/** A command's text coloured as the language of the tool that runs it; plain until coloured, and when the page has no theme. */
+function CommandText({ text, language, closed }: { text: string; language: string; closed: boolean }): ReactNode {
+	const runs = useHighlightedRuns(language, text, closed);
+	return runs === null ? text : <CodeRuns runs={runs} />;
+}
+
 /**
  * A tool row's target text. A read's path becomes a link to that file at its line selector; an
  * edit's single path (not a rename `a → b`, not `N files`) links to the file at its first changed
- * line, however the result spells the path (absolute, relative, any drive-letter case). Anything
- * else links each reference the text names.
+ * line, however the result spells the path (absolute, relative, any drive-letter case). A command is
+ * coloured as `language` (`shell` for bash). Anything else links each reference the text names.
  */
-export function ToolTargetText({ category, paths, text, line, revalidate }: { category: string; paths: readonly string[]; text: string; line?: number; revalidate?: unknown }): ReactNode {
+export function ToolTargetText({ category, paths, text, line, revalidate, language, closed = true }: { category: string; paths: readonly string[]; text: string; line?: number; revalidate?: unknown; language?: string; closed?: boolean }): ReactNode {
 	if (category === "read" && paths.length >= 1) return <FileLink target={`${paths[0]}${displayedPosition(text)}`} proof={paths[0]} revalidate={revalidate}>{text}</FileLink>;
 	const single = category === "edit" && isFileLinkCandidate(text) && !text.includes("→") && !text.includes(", ") && !/^\d+ files?$/.test(text);
 	if (single) return <FileLink target={line === undefined ? text : `${text}:${line}`} proof={text} revalidate={revalidate}>{text}</FileLink>;
+	if (category === "command" && language !== undefined) return <CommandText text={text} language={language} closed={closed} />;
 	return category === "read" || category === "edit" ? <FileLinkText text={text} revalidate={revalidate} /> : text;
 }

@@ -75,6 +75,39 @@ export function styledRuns(spans: readonly CodeSpan[], styler: CodeThemeStyler):
 	return runs;
 }
 
+/** The runs cut at every newline into one run list per line (`n` newlines make `n + 1` lines); a run never spans two lines. */
+export function runsByLine(runs: readonly StyledRun[]): StyledRun[][] {
+	const lines: StyledRun[][] = [[]];
+	for (const run of runs) {
+		const parts = run.text.split("\n");
+		parts.forEach((part, index) => {
+			if (index > 0) lines.push([]);
+			if (part !== "") lines[lines.length - 1]!.push({ text: part, style: run.style });
+		});
+	}
+	return lines;
+}
+
+/**
+ * The lines one tokenize covers, as `source` starting at line `first` of `lines`. Within the caps that
+ * is the whole text, so a comment or string that opens above the visible lines still colours them.
+ * A longer text is cut to the visible window `from..to`, as many of its leading lines as fit the caps;
+ * the lines after them are shown plain.
+ */
+export function codeWindow(lines: readonly string[], from: number, to: number): { first: number; source: string } {
+	let length = -1;
+	let fits = lines.length <= MAX_HIGHLIGHT_LINES;
+	for (let index = 0; fits && index < lines.length; index++) {
+		length += lines[index]!.length + 1;
+		fits = length <= MAX_HIGHLIGHT_CHARS;
+	}
+	if (fits) return { first: 0, source: lines.join("\n") };
+	let end = from;
+	length = -1;
+	for (const stop = Math.min(to, lines.length, from + MAX_HIGHLIGHT_LINES); end < stop && length + lines[end]!.length + 1 <= MAX_HIGHLIGHT_CHARS; end++) length += lines[end]!.length + 1;
+	return { first: from, source: lines.slice(from, end).join("\n") };
+}
+
 /** The inline style of a run: only properties that never change a glyph's advance or a line's height. */
 export function runCss(style: TokenStyle): { color?: string; fontStyle?: "italic"; fontWeight?: "bold"; textDecoration?: string } {
 	const css: { color?: string; fontStyle?: "italic"; fontWeight?: "bold"; textDecoration?: string } = {};

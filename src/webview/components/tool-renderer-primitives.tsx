@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { useState } from "react";
+import { Fragment, useMemo, useState } from "react";
 import { parseAnsi, stripAnsi, type AnsiLimits, type AnsiLine } from "../../chat/ansi";
 import { AnsiLines } from "./AnsiText";
 import { isRecord } from "../../shared/guards";
@@ -7,6 +7,9 @@ import { Markdown } from "./Markdown";
 import { FileLink, FileLinkText } from "./FileLinks";
 import type { ExplicitFileLink } from "./FileLinks";
 import { SavedImage } from "./SavedImage";
+import { CodeRuns } from "./CodeRuns";
+import { languageForPath, languageId } from "../lib/code-languages";
+import { useCodeLines } from "../lib/use-highlighted-runs";
 import { WebLink } from "./WebLinks";
 import { webLinkUrl } from "../../shared/terminal-links";
 
@@ -39,40 +42,99 @@ function OutputLines<T>({ all, render }: { all: readonly T[]; render: (lines: re
 		<span className="omp-empty-note">{hidden} lines hidden</span>
 	</div>}{tail < all.length && render(all.slice(tail), tail)}</>;
 }
-export function TextPreview({ text, expanded, lines = 3, tail = false, prose = false }: { text: string; expanded: boolean; lines?: number; tail?: boolean; prose?: boolean }): ReactNode {
+/**
+ * The lines `from..to` of `all` as plain text rows joined by newlines, coloured as `language` when the
+ * page has a theme and the language is ours; copying yields the plain text either way.
+ */
+function CodeText({ all, from, to, language, closed }: { all: readonly string[]; from: number; to: number; language: string | null; closed: boolean }): ReactNode {
+	const code = useCodeLines(language, all, from, to, closed);
+	return <>{all.slice(from, to).map((line, index) => {
+		const runs = code.at(from + index);
+		return <Fragment key={from + index}>{index > 0 && "\n"}{runs === null ? line : <CodeRuns runs={runs} />}</Fragment>;
+	})}</>;
+}
+/** `language` is a fence id or alias (`python`, `js`): the text is then code, coloured by the theme instead of read for terminal styling. */
+export function TextPreview({ text, expanded, lines = 3, tail = false, prose = false, language, closed = true }: { text: string; expanded: boolean; lines?: number; tail?: boolean; prose?: boolean; language?: string; closed?: boolean }): ReactNode {
+	const all = useMemo(() => text ? parseAnsi(text, PREVIEW_ANSI_LIMITS) : [], [text]);
+	const code = useMemo(() => !prose && language !== undefined && languageId(language) !== null ? all.map(joinedLine) : null, [all, language, prose]);
 	if (!text) return null;
-	const all = parseAnsi(text, PREVIEW_ANSI_LIMITS);
 	const hidden = expanded ? 0 : Math.max(0, all.length - lines);
 	const shown = expanded ? all : tail ? all.slice(-lines) : all.slice(0, lines);
-	const body = (part: readonly AnsiLine[]): ReactNode => prose ? <Markdown text={part.map(joinedLine).join("\n")} /> : <pre className="omp-pre"><AnsiLines lines={part} /></pre>;
+	const body = (part: readonly AnsiLine[], offset = 0): ReactNode => prose ? <Markdown text={part.map(joinedLine).join("\n")} /> : code !== null ? <pre className="omp-pre"><CodeText all={code} from={offset} to={offset + part.length} language={language!} closed={closed} /></pre> : <pre className="omp-pre"><AnsiLines lines={part} /></pre>;
 	return <div className="omp-native-preview">
 		{hidden > 0 && tail && <div className="omp-empty-note">{hidden} earlier lines</div>}
-		{shown.length > 0 && (expanded ? <OutputLines all={all} render={body} /> : <PreviewWindow lines={lines} tail={tail} code={!prose}>{body(shown)}</PreviewWindow>)}
+		{shown.length > 0 && (expanded ? <OutputLines all={all} render={body} /> : <PreviewWindow lines={lines} tail={tail} code={!prose}>{body(shown, all.length - shown.length > 0 && tail ? all.length - shown.length : 0)}</PreviewWindow>)}
 		{hidden > 0 && !tail && <div className="omp-empty-note">{hidden} more lines</div>}
 	</div>;
 }
-export function CodePreview({ text, expanded, lines = 6, start = 1, lineNumbers, tail = false }: { text: string; expanded: boolean; lines?: number; start?: number; lineNumbers?: unknown; tail?: boolean }): ReactNode {
+/** The code rows `from..to` of `all`, each behind its line number. */
+function CodeRows({ all, from, to, language, closed, numbers, start }: { all: readonly string[]; from: number; to: number; language: string | null; closed: boolean; numbers: readonly (number | null)[] | null; start: number }): ReactNode {
+	const code = useCodeLines(language, all, from, to, closed);
+	return <pre className="omp-pre omp-native-code">{all.slice(from, to).map((line, index) => {
+		const at = from + index;
+		const number = numbers ? numbers[at] : start + at;
+		const runs = code.at(at);
+		return <span className="omp-native-code-line" key={at}><span className="omp-native-line-number">{typeof number === "number" ? number : ""}</span>{" "}{runs === null ? line : <CodeRuns runs={runs} />}{"\n"}</span>;
+	})}</pre>;
+}
+/** `path` names the file the text is from: its language, when it is one of ours, colours the code. `closed` is false while the text is still being written. */
+export function CodePreview({ text, expanded, lines = 6, start = 1, lineNumbers, tail = false, path, closed = true }: { text: string; expanded: boolean; lines?: number; start?: number; lineNumbers?: unknown; tail?: boolean; path?: string; closed?: boolean }): ReactNode {
+	const all = useMemo(() => text ? displayText(text).split("\n") : [], [text]);
 	if (!text) return null;
-	const all = displayText(text).split("\n");
+	const language = path === undefined ? null : languageForPath(path);
 	const hidden = expanded ? 0 : Math.max(0, all.length - lines);
 	const offset = !expanded && tail ? hidden : 0;
-	const shown = expanded ? all : all.slice(offset, offset + lines);
-	const numbers = Array.isArray(lineNumbers) && lineNumbers.length === all.length && lineNumbers.every(number => number === null || typeof number === "number" && Number.isFinite(number)) ? lineNumbers : null;
+	const numbers = Array.isArray(lineNumbers) && lineNumbers.length === all.length && lineNumbers.every(number => number === null || typeof number === "number" && Number.isFinite(number)) ? lineNumbers as (number | null)[] : null;
+	const rows = (from: number, to: number): ReactNode => <CodeRows all={all} from={from} to={to} language={language} closed={closed} numbers={numbers} start={start} />;
 	return <div className="omp-native-source">
 		{hidden > 0 && tail && <div className="omp-empty-note">{hidden} earlier lines</div>}
-		{expanded ? <OutputLines all={all} render={(part, offset) => <pre className="omp-pre omp-native-code">{part.map((line, index) => {
-			const number = numbers ? numbers[index + offset] : start + index + offset;
-			return <span className="omp-native-code-line" key={index + offset}><span className="omp-native-line-number">{typeof number === "number" ? number : ""}</span>{" "}{line}{"\n"}</span>;
-		})}</pre>} /> : <pre className="omp-pre omp-native-code">{shown.map((line, index) => {
-			const number = numbers ? numbers[index + offset] : start + index + offset;
-			return <span className="omp-native-code-line" key={index + offset}><span className="omp-native-line-number">{typeof number === "number" ? number : ""}</span>{" "}{line}{"\n"}</span>;
-		})}</pre>}
+		{expanded ? <OutputLines all={all} render={(part, at) => rows(at, at + part.length)} /> : rows(offset, Math.min(all.length, offset + lines))}
 		{hidden > 0 && !tail && <div className="omp-empty-note">{hidden} more lines</div>}
 	</div>;
 }
-export function DiffPreview({ text, expanded, lines = 40 }: { text: string; expanded: boolean; lines?: number }): ReactNode {
+type DiffKind = "file" | "hunk" | "add" | "remove" | "other";
+/** One diff line: its class, the code it carries (`null` for headers and notes), and where that code sits in each side's text. */
+interface DiffRow { readonly line: string; readonly kind: DiffKind; readonly sign: string; readonly numbered: RegExpExecArray | null; readonly code: string | null; readonly before: number; readonly after: number }
+/**
+ * A diff read as the two texts it joins: `before` (context and removed lines) and `after` (context and
+ * added lines), so each side is tokenized as a whole file would be and multi-line constructs hold within
+ * a hunk. Hunks are not contiguous in the file, so a construct that spans a gap is cut there. The prefixes
+ * count each side's lines before row `n`, to find the window of a part of rows.
+ */
+interface DiffModel { readonly rows: readonly DiffRow[]; readonly before: readonly string[]; readonly after: readonly string[]; readonly beforePrefix: readonly number[]; readonly afterPrefix: readonly number[] }
+function diffModel(all: readonly string[]): DiffModel {
+	const rows: DiffRow[] = [], before: string[] = [], after: string[] = [], beforePrefix: number[] = [], afterPrefix: number[] = [];
+	for (const line of all) {
+		beforePrefix.push(before.length); afterPrefix.push(after.length);
+		const numbered = /^([+\- ])(\d+)\|(.*)$/.exec(line);
+		const kind: DiffKind = /^(?:diff --git|---|\+\+\+|Index:)/.test(line) ? "file" : line.startsWith("+") ? "add" : line.startsWith("-") ? "remove" : line.startsWith("@@") ? "hunk" : "other";
+		const sign = numbered ? numbered[1]! : line.charAt(0);
+		const code = numbered ? numbered[3]! : kind === "add" || kind === "remove" || kind === "other" && sign === " " ? line.slice(1) : null;
+		// Only a numbered row's sign decides its side; a `---` header never carries code.
+		const side = code === null ? "none" : sign === "+" ? "after" : sign === "-" ? "before" : "both";
+		rows.push({ line, kind, sign, numbered, code, before: side === "before" || side === "both" ? before.length : -1, after: side === "after" || side === "both" ? after.length : -1 });
+		if (side === "before" || side === "both") before.push(code!);
+		if (side === "after" || side === "both") after.push(code!);
+	}
+	beforePrefix.push(before.length); afterPrefix.push(after.length);
+	return { rows, before, after, beforePrefix, afterPrefix };
+}
+function DiffRows({ model, from, to, language, closed }: { model: DiffModel; from: number; to: number; language: string | null; closed: boolean }): ReactNode {
+	const after = useCodeLines(language, model.after, model.afterPrefix[from]!, model.afterPrefix[to]!, closed);
+	const before = useCodeLines(language, model.before, model.beforePrefix[from]!, model.beforePrefix[to]!, closed);
+	return <pre className="omp-pre">{model.rows.slice(from, to).map((row, index) => {
+		const runs = row.code === null ? null : row.kind === "remove" || row.numbered?.[1] === "-" ? before.at(row.before) : after.at(row.after);
+		const code = runs === null || row.code === null ? row.code : <CodeRuns runs={runs} />;
+		const className = row.kind === "file" ? "omp-native-diff-file" : row.kind === "add" ? "omp-native-diff-add" : row.kind === "remove" ? "omp-native-diff-remove" : row.kind === "hunk" ? "omp-native-diff-hunk" : "";
+		return <span key={from + index} className={className}>{row.numbered ? <><span className="omp-native-diff-sign">{row.sign}</span><span className="omp-native-line-number">{row.numbered[2]}</span>{code}</> : runs !== null && row.code !== null ? <>{row.sign}<CodeRuns runs={runs} /></> : row.line}{"\n"}</span>;
+	})}</pre>;
+}
+/** `path` names the file the diff is of: its language colours the code of every line; the signs, numbers and line backgrounds are the diff's own. */
+export function DiffPreview({ text, expanded, lines = 40, path, closed = true }: { text: string; expanded: boolean; lines?: number; path?: string; closed?: boolean }): ReactNode {
+	const all = useMemo(() => text ? displayText(text).split("\n") : [], [text]);
+	const model = useMemo(() => diffModel(all), [all]);
 	if (!text) return null;
-	const all = displayText(text).split("\n");
+	const language = path === undefined ? null : languageForPath(path);
 	let hunks = 0;
 	let shown = all;
 	if (!expanded) {
@@ -83,12 +145,7 @@ export function DiffPreview({ text, expanded, lines = 40 }: { text: string; expa
 		}
 		shown = all.slice(0, end);
 	}
-	const render = (part: readonly string[], offset: number): ReactNode => <pre className="omp-pre">{part.map((line, index) => {
-		const numbered = /^([+\- ])(\d+)\|(.*)$/.exec(line);
-		const className = /^(?:diff --git|---|\+\+\+|Index:)/.test(line) ? "omp-native-diff-file" : line.startsWith("+") ? "omp-native-diff-add" : line.startsWith("-") ? "omp-native-diff-remove" : line.startsWith("@@") ? "omp-native-diff-hunk" : "";
-		return <span key={index + offset} className={className}>{numbered ? <><span className="omp-native-diff-sign">{numbered[1]}</span><span className="omp-native-line-number">{numbered[2]}</span>{numbered[3]}</> : line}{"\n"}</span>;
-	})}</pre>;
-	return <div className="omp-native-diff">{expanded ? <OutputLines all={all} render={render} /> : render(shown, 0)}{shown.length < all.length && <div className="omp-empty-note">{all.length - shown.length} more diff lines</div>}</div>;
+	return <div className="omp-native-diff">{expanded ? <OutputLines all={all} render={(part, offset) => <DiffRows model={model} from={offset} to={offset + part.length} language={language} closed={closed} />} /> : <DiffRows model={model} from={0} to={shown.length} language={language} closed={closed} />}{shown.length < all.length && <div className="omp-empty-note">{all.length - shown.length} more diff lines</div>}</div>;
 }
 export function Section({ title, link, children }: { title?: string; link?: ExplicitFileLink; children: ReactNode }): ReactNode {
 	return <section className="omp-tool-section">{title !== undefined && <div className="omp-tool-section-title"><FileLinkText text={title} link={link} /></div>}{children}</section>;
@@ -167,6 +224,21 @@ export function groupedFiles(text: string): FileOutput[] {
 	}
 	return files.filter(file => file.path || file.lines.some(line => line.trim()));
 }
+/**
+ * The numbered match and context lines of one file of search output. The code after each number is coloured
+ * by the file's language as one text of the lines in order; the lines are not contiguous in the file, so a
+ * construct that spans two of them is cut between.
+ */
+function MatchLines({ path, lines }: { path: string; lines: readonly string[] }): ReactNode {
+	const rows = useMemo(() => lines.map(line => /^\s*(\*)?(\d+)(?:│|:)\s?(.*)$/.exec(line)), [lines]);
+	const codes = useMemo(() => rows.flatMap(match => match ? [match[3]!] : []), [rows]);
+	const code = useCodeLines(path ? languageForPath(path) : null, codes, 0, codes.length, true);
+	let at = 0;
+	return <pre className="omp-pre">{rows.map((match, row) => {
+		const runs = match ? code.at(at++) : null;
+		return <span key={row} className={match?.[1] ? "omp-native-match" : ""}>{match ? <>{path ? <FileLink target={`${path}:${match[2]}`} proof={path}><span className="omp-native-line-number">{match[2]}</span></FileLink> : <span className="omp-native-line-number">{match[2]}</span>}{" "}{runs ? <CodeRuns runs={runs} /> : match[3]}</> : lines[row]}{"\n"}</span>;
+	})}</pre>;
+}
 export function MatchOutput({ text, expanded, fileLimit, matchLimit }: { text: string; expanded: boolean; fileLimit?: number; matchLimit?: number }): ReactNode {
 	const all = groupedFiles(text);
 	const files = expanded || fileLimit === undefined ? all : all.slice(0, fileLimit);
@@ -177,9 +249,6 @@ export function MatchOutput({ text, expanded, fileLimit, matchLimit }: { text: s
 			if (/^\s*\*?\d+(?:│|:)/.test(line)) { if (remaining <= 0) break; remaining--; }
 			lines.push(line);
 		}
-		return <Section key={index} title={file.path || "Matches"}><pre className="omp-pre">{lines.map((line, row) => {
-			const match = /^\s*(\*)?(\d+)(?:│|:)\s?(.*)$/.exec(line);
-			return <span key={row} className={match?.[1] ? "omp-native-match" : ""}>{match ? <>{file.path ? <FileLink target={`${file.path}:${match[2]}`} proof={file.path}><span className="omp-native-line-number">{match[2]}</span></FileLink> : <span className="omp-native-line-number">{match[2]}</span>}{" "}{match[3]}</> : line}{"\n"}</span>;
-		})}</pre>{lines.length < file.lines.length && <div className="omp-empty-note">{file.lines.length - lines.length} more lines</div>}</Section>;
+		return <Section key={index} title={file.path || "Matches"}><MatchLines path={file.path} lines={lines} />{lines.length < file.lines.length && <div className="omp-empty-note">{file.lines.length - lines.length} more lines</div>}</Section>;
 	})}{files.length < all.length && <div className="omp-empty-note">{all.length - files.length} more files</div>}</>;
 }

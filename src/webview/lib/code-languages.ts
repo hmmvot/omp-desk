@@ -400,3 +400,28 @@ export function languageId(info: string): string | null {
 	const word = info.trim().toLowerCase().replace(/^\{?\.?/, "").split(/[\s,{}:]/, 1)[0] ?? "";
 	return Object.hasOwn(ALIASES, word) ? (ALIASES[word] as string) : null;
 }
+
+/** File names (lower case) whose language the extension does not tell. */
+const FILE_NAMES: Readonly<Record<string, string>> = {
+	dockerfile: "dockerfile", containerfile: "dockerfile", makefile: "makefile", gnumakefile: "makefile",
+	".gitignore": "gitignore", ".dockerignore": "gitignore", ".npmignore": "gitignore", ".gitattributes": "gitignore",
+	".editorconfig": "ini", ".gitconfig": "ini",
+	".bashrc": "shell", ".bash_profile": "shell", ".zshrc": "shell", ".profile": "shell", ".zprofile": "shell",
+	jenkinsfile: "groovy", gemfile: "ruby", rakefile: "ruby", podfile: "ruby", vagrantfile: "ruby",
+};
+/** A read selector after the file name: `:12-40`, `:L5`, `:raw`, `:conflicts`. */
+const PATH_SELECTOR = /:(?:raw|conflicts|L?\d+(?:[-+,:]L?\d+)*)$/i;
+
+/** The canonical language id of the file at `path` (its name first, then its extension), or `null` when it is not one of ours. */
+export function languageForPath(path: string): string | null {
+	let name = path;
+	for (let stripped = name.replace(PATH_SELECTOR, ""); stripped !== name; stripped = name.replace(PATH_SELECTOR, "")) name = stripped;
+	name = (name.split(/[\\/]/).pop() ?? "").toLowerCase();
+	if (name === "") return null;
+	if (Object.hasOwn(FILE_NAMES, name)) return FILE_NAMES[name] as string;
+	if (name.startsWith("dockerfile.")) return "dockerfile";
+	const dot = name.lastIndexOf(".");
+	if (dot <= 0) return null;
+	const extension = name.slice(dot + 1);
+	return /^[a-z0-9+#_-]+$/.test(extension) && Object.hasOwn(ALIASES, extension) ? (ALIASES[extension] as string) : null;
+}
