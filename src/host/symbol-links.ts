@@ -369,25 +369,37 @@ export class SymbolLinkResolver {
 
 	leaveBatch(): void { this.#batches--; }
 
-	/** Moves on whenever answers are invalidated; a batch compares it before and after to drop buffered answers. */
+	/** Moves on whenever answers are invalidated, for any reason; a batch compares it before and after to drop buffered symbol answers. */
 	get generation(): number { return this.#generation; }
 
-	/** Forget every answer: a file changed, so any of them may be stale. */
+	/** Moves on only when the set of files may have changed (see {@link invalidate}); the file lookups' own fence. */
+	get fileGeneration(): number { return this.#files?.generation ?? 0; }
+
+	/** Forget every answer: a file appeared, vanished or moved, so any of them may be stale. */
 	invalidate(): void {
-		this.#generation++;
-		this.#cache.clear();
-		this.#pending.clear();
+		this.invalidateContent();
 		this.#files?.invalidate();
 	}
 
-	/** The bare file name a span is: where the file search finds it (`none` when the host has no file search). Fenced by the same {@link generation}. */
+	/**
+	 * Forget the symbol answers: some file's contents changed (an edit, a save, a write), which may move a definition but never
+	 * changes which files exist, so the file-name answers and the file lookups under way stay valid. A busy repository changes
+	 * contents all the time (an agent writing files, a Unity editor importing); discarding file lookups for it left their spans plain.
+	 */
+	invalidateContent(): void {
+		this.#generation++;
+		this.#cache.clear();
+		this.#pending.clear();
+	}
+
+	/** The bare file name a span is: where the file search finds it (`none` when the host has no file search). Fenced by {@link fileGeneration}. */
 	resolveFileName(file: BareFileName, scope: SymbolScope): Promise<SymbolOutcome> {
 		return this.#files?.resolve(file, scope) ?? Promise.resolve(none);
 	}
 
-	/** The files a bare file name stands for, for the click that lets the user choose among several. */
-	lookupFileName(name: string, scope: SymbolScope): Promise<FileLookup> {
-		return this.#files?.lookup(name, scope) ?? Promise.resolve({ state: "none" });
+	/** The files a file reference (a name, or a name with the directories that end its path) stands for, for the click that lets the user choose among several. */
+	lookupFileName(reference: string, scope: SymbolScope): Promise<FileLookup> {
+		return this.#files?.lookup(reference, scope) ?? Promise.resolve({ state: "none" });
 	}
 
 	resolve(symbol: CodeSymbol, scope: SymbolScope): Promise<SymbolOutcome> {
@@ -613,16 +625,20 @@ export async function handleSymbolLinks(request: SymbolLinksRequest, host: Symbo
 	try {
 		const roots = host.roots();
 		const generation = resolver.generation;
+		const fileGeneration = resolver.fileGeneration;
 		const results: SymbolLinkResult[] = request.tokens.map(token => ({ token, status: "unavailable" }));
+		// Whether a result needed a symbol lookup: only those depend on the contents of files, not just on which files exist.
+		const symbolBased = request.tokens.map(() => false);
 		const tasks = request.tokens.map(async (token, index) => {
 			const scope = { cwd: host.cwd, roots };
 			// A bare file name is looked up as a file first; a span that is also a symbol (`Twin.run`) is looked up as one only when no file has that name. A file lookup that could not answer stays unanswered.
 			const file = parseBareFileName(token);
 			let outcome: SymbolOutcome = file === null || host.cwd === "" ? none : await resolver.resolveFileName(file, scope);
-			// Files changed since the batch began (the file lookup answered for an older state): no symbol lookup is started on top of it.
-			if (outcome.status === "none" && resolver.generation !== generation) outcome = { status: "unavailable" };
+			// Files appeared or vanished since the batch began (the file lookup answered for an older state): no symbol lookup is started on top of it.
+			if (outcome.status === "none" && resolver.fileGeneration !== fileGeneration) outcome = { status: "unavailable" };
 			else if (outcome.status === "none") {
 				const symbol = parseCodeSymbol(token);
+				symbolBased[index] = symbol !== null;
 				outcome = symbol === null || host.cwd === "" ? none : await resolver.resolve(symbol, scope);
 			}
 			results[index] = outcome.status === "found" ? { token, status: "found", target: outcome.target } : outcome.status === "ambiguous" ? { token, status: "ambiguous", definitions: outcome.definitions, ...(outcome.files === true ? { files: true as const } : {}) } : { token, status: outcome.status };
@@ -631,11 +647,13 @@ export async function handleSymbolLinks(request: SymbolLinksRequest, host: Symbo
 		const deadline = new Promise<void>(resolve => { timer = setTimeout(resolve, deadlineMs); });
 		try { await Promise.race([Promise.all(tasks), deadline]); }
 		finally { clearTimeout(timer); }
-		// A setting turned off or a folder removed while the provider worked revokes what it found, and a file change
-		// since the batch began makes every answer it buffered stale.
+		// A setting turned off or a folder removed while the provider worked revokes what it found, and a change to any file
+		// since the batch began makes every symbol answer it buffered stale. A file answer is not: a file lookup that was running
+		// when files changed has proven each file it reports to still exist, and a file's content does not change which files exist.
 		if (!host.enabled()) return reply(request.tokens.map(token => ({ token, status: "none" })), true);
-		if (host.roots().join("\n") !== roots.join("\n") || resolver.generation !== generation) return reply(request.tokens.map(token => ({ token, status: "unavailable" })));
-		reply(results.map(result => ({ ...result })));
+		if (host.roots().join("\n") !== roots.join("\n")) return reply(request.tokens.map(token => ({ token, status: "unavailable" })));
+		const symbolsStale = resolver.generation !== generation;
+		reply(results.map((result, index) => symbolsStale && symbolBased[index] ? { token: result.token, status: "unavailable" } : { ...result }));
 	} finally {
 		resolver.leaveBatch();
 	}

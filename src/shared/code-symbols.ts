@@ -92,11 +92,23 @@ export function parseCodeSymbol(content: string): CodeSymbol | null {
 	return { segments, name: segments.join("."), last, attribute, call };
 }
 
-/** A bare file name in inline code (`session-index.ts`, `session-index.ts:849:5`, `session-index.ts(849)`); `line` and `column` are one-based and only present when the span carried them. */
+/**
+ * A file in inline code that is not anchored to any folder: a bare name (`session-index.ts`, `session-index.ts:849:5`, `session-index.ts(849)`)
+ * or the trailing part of a path (`host/session-index.ts:579`), which names the files whose path ends that way. `line` and `column` are
+ * one-based and only present when the span carried them.
+ */
 export interface BareFileName {
+	/** The file's own name: the last segment. */
 	readonly name: string;
+	/** The directories that end the path before the name, joined by `/` (`host` for `host/session-index.ts`); absent for a name alone. */
+	readonly directory?: string;
 	readonly line?: number;
 	readonly column?: number;
+}
+
+/** The name with the directories that end its path, `/`-separated: what the file lookup is asked for and what a path glob is built from. */
+export function fileReference(file: BareFileName): string {
+	return file.directory === undefined ? file.name : `${file.directory}/${file.name}`;
 }
 
 const MAX_FILE_NAME_LENGTH = 100;
@@ -112,30 +124,35 @@ const FILE_POSITIONS = [
 ];
 
 /**
- * The bare file name one inline code span is, or `null`: one segment of letters, digits and `_ . + @ ~ $ -`
- * with a stem and a letter-led extension in one case (see {@link FILE_EXTENSION}), optionally followed by a line
- * (and column) in one of the {@link FILE_POSITIONS} forms. A path (any separator), a drive, a name with a space,
+ * The file reference one inline code span is, or `null`: a name of letters, digits and `_ . + @ ~ $ -` with a stem and a
+ * letter-led extension in one case (see {@link FILE_EXTENSION}), optionally preceded by directories written the same way
+ * and joined by `/` or `\` (the trailing part of a path, never anchored: a leading separator, `.` or `..` segment, drive or
+ * `~` is not one), optionally followed by a line (and column) in one of the {@link FILE_POSITIONS} forms. A name with a space,
  * glob character or colon elsewhere, a version number (`1.2.3`) and a sentence's trailing dot are not file names.
  */
 export function parseBareFileName(content: string): BareFileName | null {
 	const text = content.trim();
 	if (text.length < 3 || content.length > MAX_SYMBOL_TOKEN_LENGTH || /[`\u0000-\u001f\u007f]/.test(content)) return null;
-	let name = text;
+	let reference = text;
 	let line: number | undefined;
 	let column: number | undefined;
 	for (const form of FILE_POSITIONS) {
 		const match = form.exec(text);
 		if (match === null) continue;
-		name = match[1]!;
+		reference = match[1]!;
 		line = Number(match[2]);
 		if (match[3] !== undefined) column = Number(match[3]);
 		break;
 	}
-	if (name.length > MAX_FILE_NAME_LENGTH || !FILE_NAME.test(name) || !/^[\p{L}\p{N}_.]/u.test(name) || name.includes("..")) return null;
+	if (reference.length > MAX_FILE_NAME_LENGTH) return null;
+	const segments = reference.split(/[\\/]/u);
+	const name = segments.pop()!;
+	if (segments.some(segment => !FILE_NAME.test(segment) || !/^[\p{L}\p{N}_.]/u.test(segment) || segment === "." || segment.includes(".."))) return null;
+	if (!FILE_NAME.test(name) || !/^[\p{L}\p{N}_.]/u.test(name) || name.includes("..")) return null;
 	const parts = FILE_EXTENSION.exec(name);
 	if (parts === null || !/[\p{L}\p{N}]/u.test(parts[1]!) || parts[1]!.endsWith(".")) return null;
 	if (line !== undefined && line < 1 || column !== undefined && column < 1) return null;
-	return { name, ...(line === undefined ? {} : { line }), ...(column === undefined ? {} : { column }) };
+	return { name, ...(segments.length === 0 ? {} : { directory: segments.join("/") }), ...(line === undefined ? {} : { line }), ...(column === undefined ? {} : { column }) };
 }
 
 /** Page to host: where are these symbols defined? The session folder is the host's, never the page's. */

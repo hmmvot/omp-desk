@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { homedir, hostname } from "node:os";
 import { FILE_LINK_MENU_SECTION, WEB_LINK_MENU_SECTION, isTerminalLinkTarget, webLinkUrl } from "../shared/terminal-links.ts";
 import type { TerminalLinkRequest, TerminalLinkValidation, WebLinkMode } from "../shared/terminal-links.ts";
-import { parseBareFileName, parseCodeSymbol } from "../shared/code-symbols.ts";
+import { fileReference, parseBareFileName, parseCodeSymbol } from "../shared/code-symbols.ts";
 import type { CodeSymbol } from "../shared/code-symbols.ts";
 import type { FileLookup } from "./link-scope.ts";
 
@@ -180,8 +180,8 @@ export interface TerminalLinkHost {
 	openUrl(url: string, mode: WebLinkMode): Promise<void>;
 	/** Open VS Code's workspace symbol search (Go to Symbol in Workspace) with `query` already typed after the `#`. */
 	searchSymbols(query: string): Promise<void>;
-	/** The files a bare file name stands for inside the session's folders (the host's own file lookup, never the page's answer). */
-	lookupFileName(name: string): Promise<FileLookup>;
+	/** The files a bare file name, or a name with the directories that end its path (`host/session-index.ts`), stands for inside the session's folders (the host's own file lookup, never the page's answer). */
+	lookupFileName(reference: string): Promise<FileLookup>;
 	/** Let the user choose one of `paths`; `undefined` when dismissed. */
 	pickFile(paths: readonly string[]): Promise<string | undefined>;
 	/** Short user-visible notice, so an activation that cannot complete is never silent. */
@@ -207,7 +207,7 @@ export async function handleTerminalLink(request: TerminalLinkRequest, host: Ter
 		return;
 	}
 	if (request.type === "omp:terminal-link-open" && request.search === "file") {
-		// The page names a bare file name that several files carry, never a path: the host parses it again, searches again and lets the user choose.
+		// The page names a bare file name, or the trailing part of a path, that several files carry, never a full path: the host parses it again, searches again and lets the user choose.
 		const file = parseBareFileName(request.target);
 		if (!host.isCurrent()) return;
 		if (file === null) {
@@ -215,17 +215,17 @@ export async function handleTerminalLink(request: TerminalLinkRequest, host: Ter
 			return;
 		}
 		try {
-			const lookup = await host.lookupFileName(file.name);
+			const lookup = await host.lookupFileName(fileReference(file));
 			if (!host.isCurrent()) return;
 			if (lookup.state === "none" || lookup.state === "unavailable") {
-				host.warn(lookup.state === "none" ? `cannot open "${request.target}": no file named ${file.name} in this session's folders.` : `cannot open "${request.target}": the file search did not answer.`);
+				host.warn(lookup.state === "none" ? `cannot open "${request.target}": no file ${fileReference(file)} in this session's folders.` : `cannot open "${request.target}": the file search did not answer.`);
 				return;
 			}
 			let chosen: string | undefined = lookup.state === "unique" ? lookup.path : await host.pickFile(lookup.paths);
 			if (chosen === undefined || !host.isCurrent()) return;
 			if (lookup.state === "many") {
 				// The picker may have stayed open while files or folders changed: the choice must still be a file of the host's own current lookup (the scope is derived afresh).
-				const again = await host.lookupFileName(file.name);
+				const again = await host.lookupFileName(fileReference(file));
 				const lowered = chosen.toLowerCase();
 				const current = again.state === "unique" ? [again.path] : again.state === "many" ? again.paths : [];
 				if (!current.some(candidate => candidate.toLowerCase() === lowered)) chosen = undefined;

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseBareFileName, parseCodeSymbol, parseSymbolLinksRequest, parseSymbolLinksResolution, parseSymbolLinksRetry } from "./code-symbols.ts";
+import { fileReference, parseBareFileName, parseCodeSymbol, parseSymbolLinksRequest, parseSymbolLinksResolution, parseSymbolLinksRetry } from "./code-symbols.ts";
 
 const shape = (content: string) => {
 	const symbol = parseCodeSymbol(content);
@@ -125,14 +125,25 @@ test("a bare file name has a stem and a one-case letter-led extension, with an o
 	for (const name of ["foo.d.ts", ".eslintrc.json", "README.MD", "Makefile.am", "my-file_2.v2.tsx", "foo@2x.png", "Проект.cs", "a.b1"]) assert.ok(bare(name), name);
 });
 
-test("paths, symbols, versions, prose and anything that could be a glob or a mention are not bare file names", () => {
+test("anchored paths, symbols, versions, prose and anything that could be a glob or a mention are not file references", () => {
 	const refused = [
-		"src/a.cs", "a\\b.cs", "D:\\a.cs", "./a.cs", "~/a.cs", "a.cs:x", "a.cs:0", "a.cs:1:0", "a.cs(0)", "a.cs:12345678", "a.cs:12:3:4", "two words.cs", "a .cs",
+		"D:\\a.cs", "C:/a.cs", "./a.cs", ".\\a.cs", "../a.cs", "a/../b.cs", "a/./b.cs", "/a/b.cs", "\\a.cs", "~/a.cs", "a//b.cs", "a/b.cs/", "a/ b.cs", "my dir/a.cs", "@lib/a.cs", "-lib/a.cs", "a/*.cs", "a/b?.cs", "a/b/Makefile", "a/B.Cs", "a/b.cs:x", "a/b.cs:0",
+		"a.cs:x", "a.cs:0", "a.cs:1:0", "a.cs(0)", "a.cs:12345678", "a.cs:12:3:4", "two words.cs", "a .cs",
 		"Foo.Bar", "SessionData.Cast", "Foo.bar2Baz", "obj.Run()", "1.2.3", "v1.0", "3.14", "e.", "a.", ".cs", "..cs", "a..cs", "foo.", "Makefile", "file.c++", "a.verylongextension",
 		"*.cs", "a?.cs", "[a].cs", "{a,b}.cs", "a(b).cs", "!a.cs", "@scope.cs", "-a.cs", "+a.cs", "~a.cs", "$a.cs", "a.cs\n", "`a.cs`", "a\u0000.cs", "x".repeat(101) + ".cs", "",
 	];
 	for (const content of refused) assert.equal(bare(content), null, JSON.stringify(content));
 	assert.equal(bare(`${" ".repeat(100)}a.cs${" ".repeat(100)}`), null, "the raw length is bounded like the wire's");
+});
+
+test("the trailing part of a path is a file reference: its directories, the name and the position are kept apart", () => {
+	assert.deepEqual(bare("host/session-index.ts:579"), { name: "session-index.ts", directory: "host", line: 579 });
+	assert.deepEqual(bare("shared/code-symbols.ts"), { name: "code-symbols.ts", directory: "Reflection" });
+	assert.deepEqual(bare("src\\host\\session-index.ts(12,3)"), { name: "session-index.ts", directory: "src/host", line: 12, column: 3 }, "either separator, normalized to a slash");
+	assert.deepEqual(bare(".workspace/notes/code-symbols.ts#L9"), { name: "code-symbols.ts", directory: ".workspace/notes", line: 9 });
+	assert.equal(fileReference(bare("host/session-index.ts:579")!), "host/session-index.ts");
+	assert.equal(fileReference(bare("session-index.ts:579")!), "session-index.ts");
+	assert.equal(parseCodeSymbol("host/session-index.ts:579"), null, "a path is never a symbol");
 });
 
 test("a name that is both a bare file name and a symbol is both; a mixed-case extension is a symbol only", () => {

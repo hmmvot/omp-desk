@@ -20,7 +20,7 @@ function tick(): Promise<void> {
 	return promise;
 }
 
-/** A file search over a fixed list of paths: every path whose basename equals the name (any case) and that lies below a folder. */
+/** A file search over a fixed list of paths: every path that ends with the name (any case; the name may carry directories, `/`-separated) and lies below a folder. */
 function search(paths: readonly string[], overrides: Partial<{ truncated: boolean; fail: "throw" | "hang" | "null" }> = {}) {
 	const asked: { name: string; folders: readonly string[] }[] = [];
 	const source: FileNameSource = {
@@ -33,7 +33,7 @@ function search(paths: readonly string[], overrides: Partial<{ truncated: boolea
 				signal.addEventListener("abort", () => resolve(null), { once: true });
 				return promise;
 			}
-			const found = paths.filter(candidate => candidate.slice(candidate.lastIndexOf("\\") + 1).toLowerCase() === name.toLowerCase() && folders.some(folder => candidate.toLowerCase().startsWith(`${folder.toLowerCase()}\\`)));
+			const found = paths.filter(candidate => candidate.toLowerCase().endsWith(`\\${name.replaceAll("/", "\\").toLowerCase()}`) && folders.some(folder => candidate.toLowerCase().startsWith(`${folder.toLowerCase()}\\`)));
 			return { paths: found, truncated: overrides.truncated ?? false };
 		},
 	};
@@ -169,7 +169,7 @@ test("at most the configured searches run at once, the slot is held until the se
 	release.splice(0).forEach(done => done());
 });
 
-test("an invalidation drops cached answers and fences a search that was running: its answer is unavailable and not cached", async () => {
+test("an invalidation drops cached answers; a search that was running and found nothing that still exists is unavailable and not cached", async () => {
 	let version = 1;
 	const release: (() => void)[] = [];
 	const source: FileNameSource = { find: () => {
@@ -191,6 +191,92 @@ test("an invalidation drops cached answers and fences a search that was running:
 	assert.deepEqual(await fresh, { state: "none" }, "the new search ran: its (empty) answer is the answer, nothing stale is reused");
 });
 
+test("a search that was running when files changed still answers, with each file it found proven to exist, and caches nothing", async () => {
+	const existing = new Set([at("Assets\\Scenes\\session-index.ts"), at("Assets\\Other\\session-index.ts")]);
+	let searches = 0;
+	const release: (() => void)[] = [];
+	const source: FileNameSource = { find: () => {
+		searches++;
+		const { promise, resolve } = Promise.withResolvers<{ paths: string[]; truncated: boolean }>();
+		release.push(() => resolve({ paths: [at("Assets\\Scenes\\session-index.ts"), at("Assets\\Other\\session-index.ts")], truncated: false }));
+		return promise;
+	} };
+	const files = new FileNameLinkResolver(source, { isFile: async candidate => existing.has(candidate) });
+	const running = files.lookup("session-index.ts", scope);
+	await tick();
+	files.invalidate();
+	release.splice(0).forEach(done => done());
+	assert.deepEqual(await running, { state: "many", paths: [at("Assets\\Other\\session-index.ts"), at("Assets\\Scenes\\session-index.ts")] }, "files changing somewhere else do not discard a finished search");
+	const again = files.lookup("session-index.ts", scope);
+	await tick();
+	assert.equal(searches, 2, "the stale answer was not cached");
+	existing.delete(at("Assets\\Other\\session-index.ts"));
+	files.invalidate();
+	release.splice(0).forEach(done => done());
+	assert.deepEqual(await again, { state: "unique", path: at("Assets\\Scenes\\session-index.ts") }, "a file that vanished while the search ran is dropped from the answer");
+	existing.clear();
+	const gone = files.lookup("session-index.ts", scope);
+	await tick();
+	files.invalidate();
+	release.splice(0).forEach(done => done());
+	assert.deepEqual(await gone, { state: "unavailable" }, "nothing left to prove is no verdict: not none, since a file may have appeared meanwhile");
+});
+
+test("an invalidation does not drop a lookup that waits for a search slot: it runs after the change and is answered", async () => {
+	const release: (() => void)[] = [];
+	const asked: string[] = [];
+	const source: FileNameSource = { find: name => {
+		asked.push(name);
+		const { promise, resolve } = Promise.withResolvers<{ paths: string[]; truncated: boolean }>();
+		release.push(() => resolve({ paths: [at(`Sub\\${name}`)], truncated: false }));
+		return promise;
+	} };
+	const files = new FileNameLinkResolver(source, { isFile: async () => false, maxConcurrent: 1, queryTimeoutMs: 1000 });
+	const first = files.lookup("A.cs", scope);
+	const waiting = files.lookup("B.cs", scope);
+	await tick();
+	files.invalidate();
+	release.splice(0).forEach(done => done());
+	await tick();
+	release.splice(0).forEach(done => done());
+	assert.deepEqual(await first, { state: "unavailable" }, "the running search is stale and its file is not there to prove");
+	assert.deepEqual(await waiting, { state: "unique", path: at("Sub\\B.cs") }, "the waiting lookup searched after the invalidation: nothing stale in its answer, so nothing to throw away");
+	assert.deepEqual(asked, ["A.cs", "B.cs"]);
+	assert.equal(files.generation, 1);
+});
+
+test("the tail of a path is a lookup: it matches whole directory names at the end of the path, in any case, with either separator", async () => {
+	const { resolver: files, asked } = resolver([
+		at("omp-vscode\\Assets\\Code\\src\\host\\session-index.ts"),
+		at("omp-vscode\\Assets\\Code\\src\\Nohost\\session-index.ts"),
+		at("omp-vscode\\Assets\\Code\\src\\host\\Other.cs"),
+		at("omp-vscode\\Assets\\Code\\host\\Sub\\session-index.ts"),
+	]);
+	assert.deepEqual(await files.resolve(file("host/session-index.ts:579"), scope), { status: "found", target: "omp-vscode/Assets/Code/src/host/session-index.ts:579" });
+	assert.deepEqual(asked[0], { name: "host/session-index.ts", folders: [CWD] }, "the search is for the path tail, not for the name alone");
+	assert.deepEqual(await files.resolve(file("host\\session-index.ts(12,3)"), scope), { status: "found", target: "omp-vscode/Assets/Code/src/host/session-index.ts:12:3" }, "case and separator do not matter");
+	assert.deepEqual(await files.lookup("src/host/session-index.ts", scope), { state: "unique", path: at("omp-vscode\\Assets\\Code\\src\\host\\session-index.ts") });
+	assert.deepEqual(await files.resolve(file("Cheat/session-index.ts"), scope), { status: "none" }, "half a directory name is not the end of a path");
+	assert.deepEqual(await files.resolve(file("host/Missing.cs"), scope), { status: "none" });
+});
+
+test("several files ending with the same path are a choice, and the one in the session's folder narrows it, like a bare name", async () => {
+	const many = resolver([at("A\\host\\session-index.ts"), at("B\\host\\session-index.ts"), "D:\\Work\\Tools\\host\\session-index.ts"]);
+	const wide = { cwd: CWD, roots: [CWD, "D:\\Work"] };
+	assert.deepEqual(await many.resolver.resolve(file("host/session-index.ts"), wide), { status: "ambiguous", definitions: 3, files: true });
+	assert.deepEqual(await many.resolver.lookup("host/session-index.ts", wide), { state: "many", paths: [at("A\\host\\session-index.ts"), at("B\\host\\session-index.ts"), "D:\\Work\\Tools\\host\\session-index.ts"] });
+	const narrowed = resolver([at("A\\host\\session-index.ts"), "D:\\Work\\Tools\\host\\session-index.ts"]);
+	assert.deepEqual(await narrowed.resolver.resolve(file("host/session-index.ts"), wide), { status: "found", target: "A/host/session-index.ts" });
+});
+
+test("the path tail of a file directly below the session's folder is that file, and no search runs", async () => {
+	const own = at("host\\session-index.ts");
+	const { source, asked } = search([at("Elsewhere\\host\\session-index.ts")]);
+	const files = new FileNameLinkResolver(source, { isFile: async candidate => candidate === own });
+	assert.deepEqual(await files.resolve(file("host/session-index.ts:5"), scope), { status: "found", target: "host/session-index.ts:5" });
+	assert.deepEqual(asked, []);
+});
+
 test("the outermost folders are searched once each", () => {
 	assert.deepEqual(outermostRoots(["D:\\Work\\Game", "D:\\Work", "d:\\work", "E:\\Other"]), ["D:\\Work", "E:\\Other"]);
 	assert.deepEqual(outermostRoots(["D:\\Work\\Game"]), ["D:\\Work\\Game"]);
@@ -200,6 +286,7 @@ test("the search glob is the exact name at any depth, each letter in both cases,
 	assert.equal(fileNameGlob("session-index.ts"), "**/[sS][cC][eE][nN][eE][lL][oO][aA][dD][eE][rR].[cC][sS]");
 	assert.equal(fileNameGlob("a-b_1.d.ts"), "**/[aA]-[bB]_1.[dD].[tT][sS]");
 	assert.equal(fileNameGlob("ß.cs"), "**/ß.[cC][sS]", "a letter whose case form is longer is left alone");
+	assert.equal(fileNameGlob("host/session-index.ts"), "**/[cC][hH][eE][aA][tT][sS]/[uU][tT][iI][lL][iI][tT][iI][eE][sS].[cC][sS]", "the directories of a path tail are part of the pattern, so a name that many files carry does not fill the result limit");
 });
 
 test("the exclude glob holds every enabled pattern of files.exclude and search.exclude, nothing conditional", () => {

@@ -62,14 +62,14 @@ function plain(text: string, key: string): ReactNode {
 
 /**
  * A whole code span that is one path (spaces allowed only after a drive, home or relative prefix) links as a unit; an `@` mention and any other span link the file references they hold. A URL in code stays code.
- * A span that names a code symbol (`Session`, `A.B`, `Run()`, `[Attr]`) or is a bare file name (`session-index.ts:849`, `session-index.ts(849)`) is one {@link CodeSymbolSpan}: its path proof first when it also looks like a path, then the host's workspace symbol and file-name lookup, in assistant text only.
+ * A span that names a code symbol (`Session`, `A.B`, `Run()`, `[Attr]`) or is a bare file name or the trailing part of a path (`session-index.ts:849`, `session-index.ts(849)`, `host/session-index.ts:579`) is one {@link CodeSymbolSpan}: its path proof first when it also looks like a path, then the host's workspace symbol and file lookup, in assistant text only.
  */
 function codeSpan(content: string, key: string): ReactNode {
 	const whole = content.trim();
 	const single = !whole.startsWith("@") && (!/\s/.test(whole) || /^(?:[a-z]:[\\/]|~[\\/]|\.{1,2}[\\/]|\/)/i.test(whole) && !/\s-/.test(whole));
 	const path = single && isFileLinkCandidate(whole) ? whole : null;
 	const symbol = parseCodeSymbol(content) !== null;
-	// A bare file name (`session-index.ts:849`) is looked up by the host in assistant text; where it links nothing the span renders as before.
+	// A bare file name or path suffix (`session-index.ts:849`, `host/session-index.ts:579`) is looked up by the host in assistant text; where it links nothing the span renders as before.
 	if (symbol || parseBareFileName(content) !== null) return <CodeSymbolSpan key={key} content={content} path={path} plain={symbol || path !== null ? undefined : files(content, `${key}f`)} />;
 	return <code key={key}>{path !== null ? <FileLink target={path}>{content}</FileLink> : files(content, `${key}f`)}</code>;
 }

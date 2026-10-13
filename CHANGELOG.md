@@ -50,6 +50,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The profile catalog's commit now stages its new revision exclusively and privately, like every other atomic write.
 
 ## [0.3.2] - 2026-10-12
+- Chat: a path in inline code that is only the end of a path in the project, such as `host/session-index.ts:579` or `shared/code-symbols.ts`, is now a link to the file VS Code's file search finds, like a bare file name already was: one file links to it at the line, several files link to the pick list. Such a path was only checked against the working folder, so it stayed plain whatever the file search knew. Paths written from a fixed place (`./`, `../`, a drive, `~` or a leading slash) are not looked up this way, and `files.exclude` and `search.exclude` still hide files, so in a Unity project whose settings hide `*.meta`, `*.asset`, `*.prefab`, `*.unity` and `*.mat` those names stay plain.
+- Chat: file names and path ends in inline code linked far less often while files were being written in the project (an agent running tests, Unity importing assets): every changed file anywhere dropped the lookups under way, Chat asked again after 5 s and 20 s, and a large repository's search takes seconds, so a name such as `WorldStateSnapshotTests.cs` stayed plain for a minute. A changed or saved file no longer discards file lookups at all (it cannot change which files exist), and a lookup running while files are created, deleted or renamed now answers with the files it found that still exist.
 
 ### Added
 

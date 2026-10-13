@@ -38,10 +38,12 @@ export type FileLookup =
 
 /** The bare-file-name side as the symbol resolver uses it (`FileNameLinkResolver` in `file-name-links.ts` implements it). */
 export interface FileNameLinks {
+	/** Moves on whenever answers are forgotten; a batch compares it before and after its file lookups. */
+	readonly generation: number;
 	/** Forget every answer: a file appeared, vanished or moved. */
 	invalidate(): void;
 	/** The link outcome for one span. */
 	resolve(file: BareFileName, scope: SymbolScope): Promise<SymbolOutcome>;
-	/** The files `name` stands for inside `scope`. */
-	lookup(name: string, scope: SymbolScope): Promise<FileLookup>;
+	/** The files `reference` (a file name, or a name with the directories that end its path, `/`-separated) stands for inside `scope`. */
+	lookup(reference: string, scope: SymbolScope): Promise<FileLookup>;
 }

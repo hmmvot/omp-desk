@@ -263,6 +263,19 @@ test("a bare file name the host found one file of is a link to it, several files
 	assert.deepEqual([...new Set(asked)].sort(), ["Loader.cs(12)", "session-index.ts:849", "Settings.cs:3"], "a refused path or a span with no path shape is asked about; a mention and a mixed-case dotted name are not file names");
 });
 
+test("the tail of a path that the session's folder does not have is asked about once its path was refused, and links to the file the host found, or lets the user choose", async () => {
+	const source = "tools (`host/session-index.ts:579`, `shared\\code-symbols.ts`, `Dup/Settings.cs:3`, `Nope/Missing.cs:1`, `./session-index.ts`, `../session-index.ts:2`)";
+	const { html, asked } = await renderSymbols(source, {
+		paths: ["host/session-index.ts:579", "shared\\code-symbols.ts", "Dup/Settings.cs:3", "Nope/Missing.cs:1", "./session-index.ts", "../session-index.ts:2"],
+		symbols: { "host/session-index.ts:579": "omp-vscode/Assets/Code/src/host/session-index.ts:579", "shared\\code-symbols.ts": "omp-vscode/Assets/Code/shared/code-symbols.ts", "Dup/Settings.cs:3": { files: 2 } },
+	});
+	assert.deepEqual([...html.matchAll(/data-file-target="([^"]*)"/g)].map(match => match[1]), ["omp-vscode/Assets/Code/src/host/session-index.ts:579", "omp-vscode/Assets/Code/shared/code-symbols.ts"]);
+	assert.match(html, /<code><span class="omp-file-link"[^>]*data-file-target="omp-vscode\/Assets\/Code\/src\/host\/Utilities\.cs:579"[^>]*>host\/Utilities\.cs:579<\/span><\/code>/, "the span's own characters, as a file link");
+	assert.match(html, /<code><span class="omp-symbol-search"[^>]*data-symbol-search="Dup\/Settings\.cs:3"[^>]*title="2 files — click to choose"/);
+	assert.match(html, /<code>Nope\/Missing\.cs:1<\/code>/);
+	assert.deepEqual([...new Set(asked)].sort(), ["host/session-index.ts:579", "Dup/Settings.cs:3", "shared\\code-symbols.ts"], "the host is asked about the tails whose path was refused (the harness asks the tokens it has answers for)");
+});
+
 test("a bare file name is linked in assistant text only, and where nothing links it renders as before", async () => {
 	const off = await renderSymbols("`session-index.ts:849` and `Loader.cs(12)`", { paths: ["session-index.ts:849"], symbols: { "session-index.ts:849": "Assets/session-index.ts:849", "Loader.cs(12)": "Assets/Loader.cs:12" }, eligible: false });
 	assert.doesNotMatch(off.html, /omp-file-link|omp-symbol-search/);

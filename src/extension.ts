@@ -9237,14 +9237,17 @@ function symbolLinkResolver(): SymbolLinkResolver {
       }
     },
   });
-  const drop = () => resolver.invalidate();
+  // Which files exist and what they contain are separate questions: a created, deleted or renamed file can change a file-name
+  // answer, a change or a save cannot, and a busy repository changes contents constantly.
+  const dropFiles = () => resolver.invalidate();
+  const dropContent = () => resolver.invalidateContent();
   const watcher = vscode.workspace.createFileSystemWatcher("**/*");
   s.context?.subscriptions.push(
     watcher,
-    watcher.onDidCreate(drop), watcher.onDidChange(drop), watcher.onDidDelete(drop),
-    vscode.workspace.onDidSaveTextDocument(drop),
-    vscode.workspace.onDidRenameFiles(drop),
-    vscode.workspace.onDidChangeWorkspaceFolders(() => { resolver.resetReadiness(); drop(); }),
+    watcher.onDidCreate(dropFiles), watcher.onDidChange(dropContent), watcher.onDidDelete(dropFiles),
+    vscode.workspace.onDidSaveTextDocument(dropContent),
+    vscode.workspace.onDidRenameFiles(dropFiles),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => { resolver.resetReadiness(); dropFiles(); }),
     { dispose: () => { if (s.symbolLinks === resolver) s.symbolLinks = undefined; } },
   );
   s.symbolLinks = resolver;

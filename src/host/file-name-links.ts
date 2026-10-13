@@ -1,19 +1,21 @@
 import { stat } from "node:fs/promises";
 import path from "node:path";
+import { fileReference } from "../shared/code-symbols.ts";
 import type { BareFileName } from "../shared/code-symbols.ts";
 import { isInside } from "./link-scope.ts";
 import type { FileLookup, FileNameLinks, SymbolOutcome, SymbolScope } from "./link-scope.ts";
 
 /**
- * Where a bare file name of a Chat reply (`session-index.ts:849`) is, according to VS Code's file search
- * (docs/designs/2026-10-10-code-symbol-links.md, "Bare file names"). Pure: the search, the clock and the timers are
- * injected, so the rules, bounds and cache are tested without VS Code. Windows rules throughout, like the symbol
- * links: file names compare case-insensitively and either separator is a separator.
+ * Where a bare file name of a Chat reply (`session-index.ts:849`), or the trailing part of a path (`host/session-index.ts:579`),
+ * is, according to VS Code's file search (docs/designs/2026-10-10-code-symbol-links.md, "Bare file names"). Pure: the search,
+ * the clock and the timers are injected, so the rules, bounds and cache are tested without VS Code. Windows rules throughout,
+ * like the symbol links: file names compare case-insensitively and either separator is a separator.
  */
 
 /**
  * The search side: the paths of every file whose name is `name` (compared case-insensitively) below `folders`, or
- * `null` when it failed. `truncated` is true when a folder's search stopped at its result limit, so more files may
+ * `null` when it failed. `name` may carry the directories that end the path (`host/session-index.ts`): then only files whose path ends that way are wanted.
+ * `truncated` is true when a folder's search stopped at its result limit, so more files may
  * exist. `signal` aborts when the search outlasts its time budget; an aborted search should settle.
  */
 export interface FileNameSource {
@@ -58,9 +60,12 @@ export function outermostRoots(roots: readonly string[]): string[] {
 }
 
 /**
- * Finds the file(s) a name stands for. Answers are cached per window by (session folder, name) for a short time and
- * dropped by {@link invalidate} when files change; the same question asked while it runs shares one search; an answer
- * that was started before an invalidation is returned as `unavailable` and not cached.
+ * Finds the file(s) a name stands for, or the files whose path ends with a partial path (`host/session-index.ts`): the
+ * "reference" of a lookup. Answers are cached per window by (session folder, reference) for a short time and dropped by
+ * {@link invalidate} when files appear, vanish or move; the same question asked while it runs shares one search. A search
+ * that was running when an invalidation came is not thrown away (the files of a busy repository change all the time, and
+ * an answer that is always discarded is never delivered): each file it found is checked to still exist and the answer is
+ * returned without being cached; with nothing left to prove it is `unavailable`.
  */
 export class FileNameLinkResolver implements FileNameLinks {
 	readonly #source: FileNameSource;
@@ -79,6 +84,9 @@ export class FileNameLinkResolver implements FileNameLinks {
 	readonly #waiting: { grant(): void; timer: NodeJS.Timeout }[] = [];
 	#running = 0;
 	#generation = 0;
+
+	/** Moves on whenever {@link invalidate} forgets the answers. */
+	get generation(): number { return this.#generation; }
 
 	constructor(source: FileNameSource, options: FileNameResolverOptions = {}) {
 		this.#source = source;
@@ -101,15 +109,15 @@ export class FileNameLinkResolver implements FileNameLinks {
 		this.#pending.clear();
 	}
 
-	/** The link outcome for one span: the lookup of its name with the span's position. */
+	/** The link outcome for one span: the lookup of its reference with the span's position. */
 	async resolve(file: BareFileName, scope: SymbolScope): Promise<SymbolOutcome> {
-		return fileNameOutcome(await this.lookup(file.name, scope), file, scope.cwd);
+		return fileNameOutcome(await this.lookup(fileReference(file), scope), file, scope.cwd);
 	}
 
-	/** The files `name` stands for inside `scope`: the one in the session's folder if there is one, else what the file search finds. */
-	lookup(name: string, scope: SymbolScope): Promise<FileLookup> {
+	/** The files `reference` (a file name, or a name with the directories that end its path, `/`-separated) stands for inside `scope`: the one in the session's folder if there is one, else what the file search finds. */
+	lookup(reference: string, scope: SymbolScope): Promise<FileLookup> {
 		if (scope.roots.length === 0 || scope.cwd === "") return Promise.resolve(none);
-		const key = `${scope.cwd.toLowerCase()}\0${name.toLowerCase()}`;
+		const key = `${scope.cwd.toLowerCase()}\0${reference.toLowerCase()}`;
 		const cached = this.#cache.get(key);
 		if (cached !== undefined) {
 			if (cached.expires > this.#now()) return Promise.resolve(cached.lookup);
@@ -117,10 +125,9 @@ export class FileNameLinkResolver implements FileNameLinks {
 		}
 		const shared = this.#pending.get(key);
 		if (shared !== undefined) return shared;
-		const generation = this.#generation;
-		const pending = this.#run(name, scope, generation).then(({ lookup, ttlMs }) => {
-			if (generation !== this.#generation) return lookup;
-			this.#pending.delete(key);
+		const pending: Promise<FileLookup> = this.#run(reference, scope).then(({ lookup, ttlMs }) => {
+			// An invalidation emptied the map and a newer lookup of the same key may be in it.
+			if (this.#pending.get(key) === pending) this.#pending.delete(key);
 			if (ttlMs > 0) {
 				if (this.#cache.size >= this.#maxCached) this.#cache.clear();
 				this.#cache.set(key, { lookup, expires: this.#now() + ttlMs });
@@ -131,10 +138,11 @@ export class FileNameLinkResolver implements FileNameLinks {
 		return pending;
 	}
 
-	async #run(name: string, scope: SymbolScope, generation: number): Promise<{ lookup: FileLookup; ttlMs: number }> {
+	async #run(reference: string, scope: SymbolScope): Promise<{ lookup: FileLookup; ttlMs: number }> {
 		const startedAt = this.#now();
+		const startedGeneration = this.#generation;
 		const done = (lookup: FileLookup, ttlMs: number, verdict: string, found = 0): { lookup: FileLookup; ttlMs: number } => {
-			this.#log?.(`file name ${JSON.stringify(name)}: ${found} in scope -> ${verdict} in ${this.#now() - startedAt} ms`);
+			this.#log?.(`file name ${JSON.stringify(reference)}: ${found} in scope -> ${verdict} in ${this.#now() - startedAt} ms`);
 			return { lookup, ttlMs };
 		};
 		const failure = (failed: "invalidated" | "queue-full" | "error" | "timeout") => {
@@ -142,31 +150,42 @@ export class FileNameLinkResolver implements FileNameLinks {
 			const remember = failed === "timeout" || failed === "error";
 			return done(unavailable, remember ? this.#failedTtlMs : 0, `unavailable: ${failed}`);
 		};
-		// The session's own folder first: a file of that name there is the answer, whatever else exists. The stat is bounded like the search.
-		const own = path.win32.join(scope.cwd, name);
-		const inCwd = await this.#bounded(generation, () => this.#isFile(own));
+		// The session's own folder first: a file of that name there is the answer, whatever else exists. The stat is bounded like the search and proves the file now.
+		const own = path.win32.join(scope.cwd, ...reference.split("/"));
+		const inCwd = await this.#bounded(() => this.#isFile(own));
 		if ("failed" in inCwd) return failure(inCwd.failed);
-		if (generation !== this.#generation) return done(unavailable, 0, "unavailable: invalidated");
-		if (inCwd.value) return done({ state: "unique", path: own }, this.#foundTtlMs, "cwd");
-		const searched = await this.#bounded(generation, signal => this.#source.find(name, outermostRoots(scope.roots), signal));
+		if (inCwd.value) return done({ state: "unique", path: own }, this.#generation === startedGeneration ? this.#foundTtlMs : 0, "cwd");
+		let searchedGeneration = this.#generation;
+		const searched = await this.#bounded(signal => {
+			searchedGeneration = this.#generation;
+			return this.#source.find(reference, outermostRoots(scope.roots), signal);
+		});
 		if ("failed" in searched) return failure(searched.failed);
-		if (generation !== this.#generation) return done(unavailable, 0, "unavailable: invalidated");
 		const answer = searched.value;
-		const wanted = name.toLowerCase();
+		const ending = `\\${reference.replaceAll("/", "\\").toLowerCase()}`;
 		const seen = new Map<string, string>();
 		for (const candidate of answer.paths) {
-			if (path.win32.basename(candidate).toLowerCase() !== wanted || !scope.roots.some(root => isInside(root, candidate))) continue;
+			if (!candidate.replaceAll("/", "\\").toLowerCase().endsWith(ending) || !scope.roots.some(root => isInside(root, candidate))) continue;
 			if (!seen.has(candidate.toLowerCase())) seen.set(candidate.toLowerCase(), candidate);
 		}
-		const matches = [...seen.values()].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
-		if (matches.length === 0) return answer.truncated ? done(unavailable, 0, "unavailable: truncated") : done(none, this.#noneTtlMs, "none");
+		let matches = [...seen.values()].sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()));
+		const stale = this.#generation !== searchedGeneration;
+		if (stale && matches.length > 0) {
+			// Files appeared, vanished or moved while the search ran: what it found is shown only as far as it still exists.
+			const proven = await this.#bounded(() => Promise.all(matches.map(async candidate => (await this.#isFile(candidate)) ? candidate : null)));
+			if ("failed" in proven) return failure(proven.failed);
+			matches = proven.value.filter((candidate): candidate is string => candidate !== null);
+		}
+		const ttl = (ms: number) => (stale ? 0 : ms);
+		// A stale search that proves nothing is no verdict: it cannot say whether a file appeared meanwhile.
+		if (matches.length === 0) return stale ? failure("invalidated") : answer.truncated ? done(unavailable, 0, "unavailable: truncated") : done(none, this.#noneTtlMs, "none");
 		// A search that stopped at its limit hides files: it never proves a file unique, never narrows to the cwd, and shows only what it has.
-		if (answer.truncated) return matches.length < 2 ? done(unavailable, 0, "unavailable: truncated", matches.length) : done({ state: "many", paths: matches }, this.#foundTtlMs, "several (truncated)", matches.length);
-		if (matches.length === 1) return done({ state: "unique", path: matches[0]! }, this.#foundTtlMs, "found", 1);
+		if (answer.truncated) return matches.length < 2 ? done(unavailable, 0, "unavailable: truncated", matches.length) : done({ state: "many", paths: matches }, ttl(this.#foundTtlMs), "several (truncated)", matches.length);
+		if (matches.length === 1) return done({ state: "unique", path: matches[0]! }, ttl(this.#foundTtlMs), "found", 1);
 		// Several: exactly one inside the session's folder narrows to it, as for symbols.
 		const local = matches.filter(candidate => isInside(scope.cwd, candidate));
-		if (local.length === 1) return done({ state: "unique", path: local[0]! }, this.#foundTtlMs, "found (cwd)", matches.length);
-		return done({ state: "many", paths: matches }, this.#foundTtlMs, "several", matches.length);
+		if (local.length === 1) return done({ state: "unique", path: local[0]! }, ttl(this.#foundTtlMs), "found (cwd)", matches.length);
+		return done({ state: "many", paths: matches }, ttl(this.#foundTtlMs), "several", matches.length);
 	}
 
 	/** A search slot: at once when one is free, else after a place in a finite line; `false` when the line is full or the wait outlasts the query timeout. */
@@ -190,14 +209,11 @@ export class FileNameLinkResolver implements FileNameLinks {
 	}
 
 	/**
-	 * One bounded piece of I/O (the cwd `stat` or the search) under the window-wide limiter. A slot is held until the
-	 * work itself settles, not until the timeout; on the timeout the work's signal aborts so it settles soon. Work whose
-	 * generation was invalidated while it waited is dropped, not run. `null` from the work is a failure.
+	 * One bounded piece of I/O (the cwd `stat`, the search or the proof of its files) under the window-wide limiter. A slot is held until the
+	 * work itself settles, not until the timeout; on the timeout the work's signal aborts so it settles soon. `null` from the work is a failure.
 	 */
-	async #bounded<T>(generation: number, work: (signal: AbortSignal) => Promise<T | null>): Promise<{ readonly value: T } | { readonly failed: "invalidated" | "queue-full" | "error" | "timeout" }> {
-		if (generation !== this.#generation) return { failed: "invalidated" };
+	async #bounded<T>(work: (signal: AbortSignal) => Promise<T | null>): Promise<{ readonly value: T } | { readonly failed: "queue-full" | "error" | "timeout" }> {
 		if (!await this.#acquire()) return { failed: "queue-full" };
-		if (generation !== this.#generation) { this.#release(); return { failed: "invalidated" }; }
 		const controller = new AbortController();
 		const settled = Promise.resolve()
 			.then(() => work(controller.signal))
@@ -244,7 +260,7 @@ export interface FindFilesApi {
 	readonly CancellationTokenSource: new () => { readonly token: unknown; cancel(): void; dispose(): void };
 }
 
-/** The glob that finds exactly the file `name` at any depth, every letter written as both cases (Windows file names do not care). The alphabet of a bare file name holds no glob character. */
+/** The glob that finds exactly the file `name` at any depth (`name` may end with directories: `host/session-index.ts`), every letter written as both cases (Windows file names do not care). The alphabet of a file reference holds no glob character, and `/` is only a separator. */
 export function fileNameGlob(name: string): string {
 	let out = "";
 	for (const char of name) {

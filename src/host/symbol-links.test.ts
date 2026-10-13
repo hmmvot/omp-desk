@@ -411,6 +411,46 @@ test("without a file search a bare file name is just a symbol candidate or nothi
 	assert.deepEqual(moved.replies[0]!.results, [{ token: "Loader.cs", status: "unavailable" }], "files changed while the search ran: nothing stale is delivered");
 });
 
+test("a path tail token (`host/session-index.ts:579`) is answered from the file lookup like a bare name, and several files are a choice", async () => {
+	const find = async (name: string) => name === "host/session-index.ts" ? { paths: [`${CWD}\\omp-vscode\\Assets\\Code\\src\\host\\session-index.ts`], truncated: false }
+		: name === "Dup/Settings.cs" ? { paths: [`${CWD}\\A\\Dup\\Settings.cs`, `${CWD}\\B\\Dup\\Settings.cs`], truncated: false }
+		: { paths: [], truncated: false };
+	const { host: h, replies } = host();
+	await handleSymbolLinks({ type: "omp:terminal-link-symbols", requestId: 3, tokens: ["host/session-index.ts:579", "Dup\\Settings.cs(4)", "Nope/Missing.cs:1", "./session-index.ts"] }, h, new SymbolLinkResolver(provider({}).source, { files: new FileNameLinkResolver({ find }, { isFile: async () => false }) }));
+	assert.deepEqual(replies[0]!.results, [
+		{ token: "host/session-index.ts:579", status: "found", target: "omp-vscode/Assets/Code/src/host/session-index.ts:579" },
+		{ token: "Dup\\Settings.cs(4)", status: "ambiguous", definitions: 2, files: true },
+		{ token: "Nope/Missing.cs:1", status: "none" },
+		{ token: "./session-index.ts", status: "none" },
+	]);
+});
+
+test("a busy repository does not leave file names plain: a file lookup under way survives changes of contents and of the set of files, while symbol answers are still dropped", async () => {
+	const existing = new Set([`${CWD}\\Assets\\Loader.cs`]);
+	const search = Promise.withResolvers<{ paths: string[]; truncated: boolean }>();
+	const files = new FileNameLinkResolver({ find: () => search.promise }, { isFile: async candidate => existing.has(candidate) });
+	const resolver = new SymbolLinkResolver(provider({ Session: [entry("Session", SymbolKind.Class, "A.cs", 3)] }).source, { files });
+	const { host: h, replies } = host();
+	const batch = handleSymbolLinks({ type: "omp:terminal-link-symbols", requestId: 5, tokens: ["Loader.cs:7", "Session"] }, h, resolver);
+	await tick();
+	resolver.invalidateContent();
+	assert.equal(resolver.fileGeneration, 0, "a changed file's contents never move the file lookups' generation");
+	resolver.invalidate();
+	assert.equal(resolver.fileGeneration, 1, "a created, deleted or renamed file does");
+	search.resolve({ paths: [`${CWD}\\Assets\\Loader.cs`], truncated: false });
+	await batch;
+	assert.deepEqual(replies[0]!.results, [
+		{ token: "Loader.cs:7", status: "found", target: "Assets/Loader.cs:7" },
+		{ token: "Session", status: "unavailable" },
+	]);
+	let searches = 0;
+	const cached = new SymbolLinkResolver(provider({}).source, { files: new FileNameLinkResolver({ find: async () => { searches++; return { paths: [`${CWD}\\Assets\\Loader.cs`], truncated: false }; } }, { isFile: async () => false }) });
+	assert.deepEqual(await cached.resolveFileName({ name: "Loader.cs" }, scope), { status: "found", target: "Assets/Loader.cs" });
+	cached.invalidateContent();
+	assert.deepEqual(await cached.resolveFileName({ name: "Loader.cs" }, scope), { status: "found", target: "Assets/Loader.cs" });
+	assert.equal(searches, 1, "a change of contents keeps the file-name answers");
+});
+
 test("with the setting off the host answers none and disabled, and nothing is asked of any provider", async () => {
 	const { source, asked } = provider({ Session: [entry("Session", SymbolKind.Class, "A.cs")] });
 	const { host: h, replies } = host({ enabled: () => false });

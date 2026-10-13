@@ -291,12 +291,12 @@ test("a file choice request is re-parsed, searched again by the host, offered as
 		await ask("session-index.ts");
 		lookup = { state: "unavailable" };
 		await ask("session-index.ts");
-		await ask("src/session-index.ts");
+		await ask("./session-index.ts");
 		await ask("two words");
 		await ask("Session");
 		assert.equal(opened.length, before);
-		assert.equal(warnings.length, 7, "the two refused picks, none, unavailable, and three spans that are not bare file names each say why");
-		assert.equal(looked.filter(name => name !== "session-index.ts").length, 0, "a span that is not a bare file name is never searched");
+		assert.equal(warnings.length, 7, "the two refused picks, none, unavailable, and three spans that are not file references each say why");
+		assert.equal(looked.filter(name => name !== "session-index.ts").length, 0, "a span that is not a file reference is never searched");
 		lookup = { state: "many", paths: [second, first] };
 		choice = second;
 		const shrinking = { ...host, pickFile: async () => { lookup = { state: "many", paths: [first] }; return second; } };
@@ -310,5 +310,31 @@ test("a file choice request is re-parsed, searched again by the host, offered as
 		assert.deepEqual(parseTerminalLinkRequest({ type: "omp:terminal-link-open", requestId: 2, target: "session-index.ts", search: "file" }), { type: "omp:terminal-link-open", requestId: 2, target: "session-index.ts", search: "file" });
 		for (const search of ["files", "FILE", false, 1]) assert.equal(parseTerminalLinkRequest({ type: "omp:terminal-link-open", requestId: 2, target: "session-index.ts", search }), null, String(search));
 		assert.equal(parseTerminalLinkRequest({ type: "omp:terminal-link-validate", requestId: 2, target: "session-index.ts", search: "file" }), null, "only an open can choose");
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a file choice request for the tail of a path searches for that tail, picks among the files ending with it, and opens at the span's line", async () => {
+	const root = await mkdtemp(join(tmpdir(), "omp-file-tail-"));
+	try {
+		const first = join(root, "a", "host", "session-index.ts");
+		const second = join(root, "b", "host", "session-index.ts");
+		await mkdir(join(root, "a", "host"), { recursive: true }); await mkdir(join(root, "b", "host"), { recursive: true });
+		await writeFile(first, "x"); await writeFile(second, "x");
+		const opened: TerminalFileLocation[] = [];
+		const warnings: string[] = [];
+		const looked: string[] = [];
+		const host = {
+			cwd: root, isCurrent: () => true, reply() {}, revealInExplorer: async () => true, revealInOs: async () => {}, openUrl: async () => {}, searchSymbols: async () => { throw new Error("a file choice is not a symbol search"); },
+			openFile: async (location: TerminalFileLocation) => { opened.push(location); },
+			lookupFileName: async (reference: string) => { looked.push(reference); return { state: "many" as const, paths: [first, second] }; },
+			pickFile: async (paths: readonly string[]) => paths[1],
+			warn: (message: string) => { warnings.push(message); },
+		};
+		await handleTerminalLink({ type: "omp:terminal-link-open", requestId: 1, target: "host\\session-index.ts:579", search: "file" }, host);
+		assert.deepEqual(looked, ["host/session-index.ts", "host/session-index.ts"], "the host searches for the tail, normalized, and again once the choice is made");
+		assert.deepEqual(opened, [{ path: second, line: 579, column: 1 }]);
+		await handleTerminalLink({ type: "omp:terminal-link-open", requestId: 2, target: "../host/session-index.ts:579", search: "file" }, host);
+		assert.equal(looked.length, 2, "a path that climbs out of a folder is no tail: it is never searched");
+		assert.match(warnings.at(-1) ?? "", /not a file name/);
 	} finally { await rm(root, { recursive: true, force: true }); }
 });
