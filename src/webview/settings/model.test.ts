@@ -27,15 +27,16 @@ test("list editing moves within bounds, removes by position and never duplicates
   assert.deepEqual(list, ["a/one", "@smol", "c/two"], "editing never mutates the original list");
 });
 
+const resolution = (model?: string, thinking?: string) => ({ source: "global" as const, follows: [], model: model ? { model, status: "ok" as const } : { status: "none" as const }, thinking: thinking ? { level: thinking, source: "selector" as const } : { source: "none" as const }, trace: [], followers: [], agents: { following: [], overridden: [] } });
 test("entries describe what they resolve to now", () => {
   const snapshot = {
     models,
-    roles: [{ id: "smol", name: "smol", section: "chat", source: "global", selector: "a/three", resolved: "a/three", accepts: [], defaults: [] },
-      { id: "slow", name: "slow", section: "chat", source: "global", selector: "z/gone", accepts: [], defaults: [] }],
+    roles: [{ id: "smol", name: "smol", section: "chat", selector: "a/three", resolved: "a/three", accepts: [], defaults: [], resolution: resolution("a/three") },
+      { id: "slow", name: "slow", section: "chat", selector: "z/gone", accepts: [], defaults: [], resolution: { ...resolution(), model: { status: "login" as const, provider: "z", wanted: "z/gone" } } }],
     providers: [{ id: "a", status: "available", available: true }, { id: "z", status: "locked", available: false }],
   };
   assert.deepEqual(entryStatus("@smol", snapshot), { text: "→ a/three", ok: true });
-  assert.deepEqual(entryStatus("@slow", snapshot), { text: "role has no available model", ok: false });
+  assert.deepEqual(entryStatus("@slow", snapshot), { text: "needs login to z", ok: false });
   assert.deepEqual(entryStatus("@nope", snapshot), { text: "unknown role", ok: false });
   assert.deepEqual(entryStatus("a/*", snapshot), { text: "any model on this provider", ok: true });
   assert.deepEqual(entryStatus("z/*", snapshot), { text: "needs login", ok: false });

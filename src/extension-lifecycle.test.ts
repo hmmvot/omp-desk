@@ -195,7 +195,7 @@ export const harness = {
   terminalFontMessage, revealDesktopNotification, revealActiveSession, releaseSelectionFromOtherWindow, refreshLauncher, launcherFacts, notifierFor, forgetTurnActivity,
   copyActiveTerminalScreen, activateNativeEditor, postPanelAction,
   handleBridgeRequest,
-  subscribeProviderLoginRefresh, refreshDefaultProviderModels, refreshSessionModels, recordSessionModels, runChatAction, openProviderLogin, loginProviderFromPalette, logoutProviderFromPalette,
+  subscribeProviderLoginRefresh, refreshDefaultProviderModels, refreshSessionModels, recordSessionModels, runChatAction, openProviderLogin, loginProviderFromPalette, signInProvider, logoutProviderFromPalette,
   providerLoginFixture, providerAuthFixture,
   storedRenameFixture,
   providerModelsIdle: () => fixtureWindow().defaultProviderModelsRead ?? Promise.resolve(),
@@ -447,6 +447,7 @@ interface Harness {
   runChatAction(...args: unknown[]): Promise<void>;
   openProviderLogin(...args: unknown[]): Promise<void>;
   loginProviderFromPalette(...args: unknown[]): Promise<void>;
+  signInProvider(...args: unknown[]): Promise<string>;
   logoutProviderFromPalette(...args: unknown[]): Promise<void>;
   profilePicker(handler: (items: any, options?: any, token?: any) => Promise<any>): () => void;
   infos(): string[];
@@ -1304,6 +1305,38 @@ describe("footer host readback", () => {
       assert.equal(harness.quickPicks().length, picks, "a listed provider id skips the provider pick");
       const login = auth.spawned[0]!.written.find(frame => frame.type === "login");
       assert.equal(login?.providerId, "anthropic");
+      assert.equal(harness.window().providerAuthRun, null);
+    } finally {
+      auth.peer = original; host.dispose(); await harness.providerModelsIdle();
+      fixture.enabled = false;
+    }
+  });
+
+  it("signs in for an editor in its exact profile, whatever the extension knows, and shares the window guard with the public command", async () => {
+    await harness.providerModelsIdle();
+    const base = indexFixture(runtime(829));
+    const index = { ...base, activeTabId: null, list: () => [] };
+    const host = new ChatRuntime({ hostNonce: "provider-login-port", onEvent: () => {} });
+    harness.reset(index, host);
+    const fixture = harness.providerLoginFixture;
+    fixture.enabled = true; fixture.logins.length = 0;
+    const auth = harness.providerAuthFixture;
+    auth.starts.length = 0; auth.spawned.length = 0;
+    const original = auth.peer;
+    auth.peer = () => {
+      const peer = original();
+      const listing = peer.onFrame;
+      peer.onFrame = (frame, self) => {
+        if (frame.type === "login") self.reply(frame, true, { data: { providerId: frame.providerId } });
+        else listing?.(frame, self);
+      };
+      return peer;
+    };
+    try {
+      const outcome = await harness.signInProvider(index, { providerId: "anthropic", profile: "from-env", cwd: root });
+      assert.equal(outcome, "signed-in");
+      assert.deepEqual(auth.starts.map(start => [start.scope.env, start.scope.cwd]), [[{ OMP_PROFILE: "from-env" }, root]], "a profile the extension has never seen, and the editor's directory");
+      assert.equal(auth.spawned[0]!.written.find(frame => frame.type === "login")?.providerId, "anthropic");
       assert.equal(harness.window().providerAuthRun, null);
     } finally {
       auth.peer = original; host.dispose(); await harness.providerModelsIdle();

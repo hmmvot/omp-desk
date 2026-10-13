@@ -11,6 +11,12 @@ import type { AgentSpec, ConfigEdit, ConfigRecord, SettingsScope } from "../prot
 import { YAML } from "bun";
 import { Database } from "bun:sqlite";
 import type { NativeAuth, NativeModules } from "./settings-contracts.ts";
+import { resolveAll } from "./resolution.ts";
+import { ancestorContextDir } from "./config-ancestor.ts";
+import { ancestorMessage } from "./config-schema.ts";
+
+/** Agent settings records that can be saved to the project layer as well as the global one (ADR-0072). */
+const AGENT_OVERRIDE_MAPS = ["agentModelOverrides", "agentPrewalk", "agentAdvisor"] as const;
 
 
 interface WorkerRequest {
@@ -30,7 +36,7 @@ async function sourceImport<Name extends keyof NativeModules>(root: string, file
     "config/settings.ts": ["Settings"], "capability/index.ts": ["initializeWithSettings"],
     "auth/sqlite-credential-store.ts": ["SqliteAuthCredentialStore"], "auth-storage.ts": ["AuthStorage"],
     "config/model-registry.ts": ["ModelRegistry"],
-    "config/model-resolver.ts": ["formatModelStringWithRouting", "resolveModelRoleValue", "resolveRoleSelection", "pickDefaultAvailableModel", "resolveModelOverride", "resolveConfiguredModelPatterns", "normalizeModelPatternList", "rolePriorityDefaults"],
+    "config/model-resolver.ts": ["formatModelStringWithRouting", "resolveModelRoleValue", "resolveRoleChain", "resolveRoleSelection", "pickDefaultAvailableModel", "resolveModelOverride", "resolveConfiguredModelPatterns", "normalizeModelPatternList", "rolePriorityDefaults", "resolveExplicitModelRole", "extractExplicitThinkingSelector", "resolveAgentModelPatterns"],
     "config/model-roles.ts": ["getKnownRoleIds", "getRoleInfo"], "session/settings.ts": ["cfgDefaultThinkingLevel"],
     "types.ts": ["modelKind"], "model-thinking.ts": ["getSupportedEfforts"],
     "modes/agents-hub-deps.ts": ["createAgentsHubDeps"], "config.ts": ["getConfigDirs"],
@@ -255,10 +261,25 @@ async function main(request: WorkerRequest): Promise<unknown> {
     const registryDefinitions = await sourceImport(request.packageRoot, "config/registry.ts");
     if (request.action === "write") {
       const scope = request.scope ?? "global";
-      if (scope === "project" && (valueAt(editorSettings(settings.getProjectSettings()), ["modelRoleStorage"]) ?? valueAt(editorSettings(settings.getGlobalSettings()), ["modelRoleStorage"])) !== "project") throw new SettingsRefusal("Project role writes require OMP's modelRoleStorage setting to be project.");
-      if (scope === "project" && request.edits?.some(edit => edit.path[0] !== "modelRoles")) throw new SettingsRefusal("The native dashboards save this setting globally; project scope is only for model roles.");
-      if (scope === "project" && !isDeepStrictEqual(files.project.settings.modelRoles, settings.getProjectSettings().modelRoles)) throw new SettingsRefusal("Project model roles require a native OMP migration first. Nothing was changed.");
-      const changed = await writeConfig(request, scope === "project" ? projectFile : globalFile, utilsRoot, validate, async () => (await Settings.loadReadOnly({ cwd: request.cwd, agentDir })).getGlobalSettings());
+      const projectEdits = scope === "project" ? request.edits ?? [] : [];
+      const agentMap = (edit: ConfigEdit): string | undefined => edit.path[0] === "task" && edit.path.length === 3 && AGENT_OVERRIDE_MAPS.includes(edit.path[1] as typeof AGENT_OVERRIDE_MAPS[number]) ? edit.path[1] : undefined;
+      const projectRoleEdits = projectEdits.filter(edit => edit.path[0] === "modelRoles");
+      const projectAgentMaps = new Set(projectEdits.flatMap(edit => agentMap(edit) ?? []));
+      if (projectEdits.some(edit => edit.path[0] !== "modelRoles" && agentMap(edit) === undefined)) throw new SettingsRefusal("The native dashboards save this setting globally; project scope is only for model roles and agent model, prewalk and advisor overrides.");
+      if (projectRoleEdits.length && (valueAt(editorSettings(settings.getProjectSettings()), ["modelRoleStorage"]) ?? valueAt(editorSettings(settings.getGlobalSettings()), ["modelRoleStorage"])) !== "project") throw new SettingsRefusal("Project role writes require OMP's modelRoleStorage setting to be project.");
+      if (projectRoleEdits.length && !isDeepStrictEqual(files.project.settings.modelRoles, settings.getProjectSettings().modelRoles)) throw new SettingsRefusal("Project model roles require a native OMP migration first. Nothing was changed.");
+      // Only a key this write touches must agree with OMP's merged project layer; another agent's entry in a file OMP also reads is none of its business.
+      for (const edit of projectEdits.filter(item => agentMap(item) !== undefined)) {
+        if (!isDeepStrictEqual(valueAt(files.project.settings, edit.path), valueAt(settings.getProjectSettings(), edit.path))) throw new SettingsRefusal(`OMP does not read the project setting for ${edit.path[2]} from this folder's .omp/config.yml alone. Nothing was changed.`);
+      }
+      if (projectEdits.length) {
+        // The home folder is never an OMP project, and the first project file would hide an ancestor's context files from sessions here (ADR-0071).
+        const fold = (value: string): string => process.platform === "win32" ? path.resolve(value).toLowerCase() : path.resolve(value);
+        if (fold(request.cwd) === fold(os.homedir())) throw new SettingsRefusal("The home folder is not an OMP project, so it has no project layer. Nothing was changed.");
+        const ancestor = files.project.exists ? null : await ancestorContextDir(request.cwd);
+        if (ancestor !== null) throw new SettingsRefusal(ancestorMessage(projectFile, ancestor));
+      }
+      const changed = await writeConfig({ ...request, pruneEmpty: projectAgentMaps.size > 0 }, scope === "project" ? projectFile : globalFile, utilsRoot, validate, async () => (await Settings.loadReadOnly({ cwd: request.cwd, agentDir })).getGlobalSettings());
       return { saved: true, changed };
     }
     if (request.action === "resolve-default") {
@@ -277,14 +298,28 @@ async function main(request: WorkerRequest): Promise<unknown> {
       recent: recent.indexOf(`${model.provider}/${model.id}`), perf: perf.get(`${model.provider}/${model.id}`),
       upstreams: model.upstreamProviders ?? [],
     }));
-    const roles = roleModule.getKnownRoleIds(settings).map((id: string) => {
+    const providers = [...new Set<string>([...all.map(model => model.provider), ...registry.getDiscoverableProviders()])].map(id => ({
+      id, available: available.some(model => model.provider === id), status: registry.getProviderDiscoveryState(id)?.status ?? (auth!.keys.source(id) ? "available" : "locked"),
+    }));
+    // Launch-time role overrides from the environment, as OMP's own startup applies them. They go on a child view of the settings, which
+    // only the resolution reads: roles' saved selectors, effective values, presets and every write stay on the persisted settings.
+    const envRoles: Record<string, { name: string; value: string }> = {};
+    for (const [role, name] of [["smol", "PI_SMOL_MODEL"], ["slow", "PI_SLOW_MODEL"], ["plan", "PI_PLAN_MODEL"]] as const) {
+      const value = process.env[name]?.trim();
+      if (value) envRoles[role] = { name, value };
+    }
+    const runtime = Object.keys(envRoles).length ? settings.overlay() : settings;
+    if (runtime !== settings) runtime.overrideModelRoles(Object.fromEntries(Object.entries(envRoles).map(([role, { value }]) => [role, value])));
+    const roleIds: string[] = roleModule.getKnownRoleIds(settings);
+    const roleRows = roleIds.map(id => {
       const info = roleModule.getRoleInfo(id, settings);
-      const selector = settings.getModelRole(id);
-      const resolved = resolver.resolveRoleSelection([id], settings, available);
-      return { id, name: info.name, section: info.section, source: settings.getModelRoleProvenance(id), selector,
-        resolved: resolved?.model ? `${resolved.model.provider}/${resolved.model.id}` : undefined,
-        thinking: resolved?.thinkingLevel, accepts: available.filter(info.accepts).map(model => `${model.provider}/${model.id}`),
-        defaults: resolver.rolePriorityDefaults(id) };
+      return { id, name: info.name, section: info.section, selector: settings.getModelRole(id),
+        accepts: available.filter(info.accepts).map(model => `${model.provider}/${model.id}`), defaults: resolver.rolePriorityDefaults(id) };
+    });
+    const resolutions = resolveAll({
+      resolver, settings: runtime, available, all, roleIds, envRoles, pool: id => available.filter(roleModule.getRoleInfo(id, settings).accepts), defaultThinkingLevel: sessionSettings.cfgDefaultThinkingLevel.get(settings) as string | undefined,
+      loginProviders: new Set(providers.filter(provider => !provider.available && !auth!.keys.source(provider.id)).map(provider => provider.id)),
+      agents: agents.map(agent => ({ ...agent, effectivePrewalk: deps.effectivePrewalkPattern(agent), effectiveAdvisor: deps.effectiveAdvisorPattern(agent) })),
     });
     const effective: ConfigRecord = {};
     const provenance: Record<string, string> = {};
@@ -306,16 +341,16 @@ async function main(request: WorkerRequest): Promise<unknown> {
       snapshot: {
         profile: request.profile, cwd: request.cwd, globalFile, projectFile, agentDirectories,
         global: displaySettings(files.global.settings), project: displaySettings(files.project.settings), effective: displaySettings(effective), provenance,
-        models, roles, agents: agents.map(agent => ({
+        models, roles: roleRows.map(row => ({ ...row, resolved: resolutions.roles.get(row.id)!.model.model, resolution: resolutions.roles.get(row.id)! })),
+        agents: agents.map(agent => ({
           name: agent.name, description: agent.description, systemPrompt: agent.systemPrompt, source: agent.source,
-          hasFile: Boolean(agent.filePath), disabled: agent.disabled, model: agent.model, prewalk: agent.prewalk, advisor: agent.advisor,
-          effectiveModel: deps.effectiveModelPatterns(agent), resolvedModel: deps.resolvePatterns(deps.effectiveModelPatterns(agent)),
+          hasFile: Boolean(agent.filePath), disabled: agent.disabled, model: agent.model, prewalk: agent.prewalk, advisor: agent.advisor, thinkingLevel: agent.thinkingLevel,
+          effectiveModel: deps.effectiveModelPatterns(agent),
           effectivePrewalk: deps.effectivePrewalkPattern(agent), effectiveAdvisor: deps.effectiveAdvisorPattern(agent),
           overrideModel: agent.overrideModel, prewalkOverride: agent.prewalkOverride, advisorOverride: agent.advisorOverride,
+          resolution: resolutions.agents.get(agent.name)!,
         })),
-        providers: [...new Set<string>([...all.map(model => model.provider), ...registry.getDiscoverableProviders()])].map(id => ({
-          id, available: available.some(model => model.provider === id), status: registry.getProviderDiscoveryState(id)?.status ?? (auth!.keys.source(id) ? "available" : "locked"),
-        })),
+        providers,
         presetNames: presets.getModelPresetNames(settings), activePreset: presets.findActiveModelPreset(settings),
       },
       files: {

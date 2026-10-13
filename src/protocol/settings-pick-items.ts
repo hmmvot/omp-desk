@@ -92,7 +92,7 @@ export function modelPickEntries(input: ModelPickInput): PickEntry[] {
   const usedBy = rolesByModel(snapshot.roles);
   const entries: PickEntry[] = [];
   const push = (entry: PickEntry): void => { if ("separator" in entry || !excluded.has(entry.value)) entries.push(entry); };
-  if (purpose === "role" && input.clearable) push({ label: "$(circle-slash) Automatic", description: "Clear this role's assignment; OMP chooses the model", value: "", current: false, available: true });
+  if (purpose === "role" && input.clearable) push({ label: "$(circle-slash) Clear assignment", description: "Remove this role's model from the scope; the role falls back to what OMP does without one", value: "", current: false, available: true });
   if (purpose === "prewalk" || purpose === "advisor") {
     const fallback = purpose === "prewalk" ? "@smol" : "@advisor";
     push({ label: `${current === "on" ? "$(check) " : ""}Agent default`, description: `The agent's own model, else ${fallback}`, value: "on", current: current === "on", available: true });
@@ -101,7 +101,7 @@ export function modelPickEntries(input: ModelPickInput): PickEntry[] {
     entries.push({ separator: "Roles" });
     for (const role of snapshot.roles) {
       const value = `@${role.id}`;
-      push({ label: `${value === current ? "$(check) " : ""}${value}`, description: role.resolved ? `→ ${role.resolved}${role.thinking ? ` · ${role.thinking}` : ""}` : role.selector ? "no available model" : "automatic",
+      push({ label: `${value === current ? "$(check) " : ""}${value}`, description: role.resolved ? `→ ${role.resolved}${role.resolution.thinking.level ? ` · ${role.resolution.thinking.level}` : ""}` : role.selector ? "no available model" : "not assigned",
         value, current: value === current, available: Boolean(role.resolved) || !role.selector });
     }
   }

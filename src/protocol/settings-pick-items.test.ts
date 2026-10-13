@@ -6,15 +6,16 @@ import type { PickEntry, PickSnapshot } from "./settings-pick-items.ts";
 const model = (provider: string, id: string, extra: Record<string, unknown> = {}) => ({
   provider, id, name: id.toUpperCase(), kind: "chat", available: true, reasoning: true, efforts: ["low", "high"], recent: -1, contextWindow: 200_000, ...extra,
 });
+const resolution = (model?: string, thinking?: string) => ({ source: "global" as const, follows: [], model: model ? { model, status: "ok" as const } : { status: "none" as const }, thinking: thinking ? { level: thinking, source: "selector" as const } : { source: "none" as const }, trace: [], followers: [], agents: { following: [], overridden: [] } });
 const snapshot: PickSnapshot = {
   models: [
     model("zeta", "z-1"), model("alpha", "a-2"), model("alpha", "a-10"), model("alpha", "a-1", { recent: 0 }),
     model("beta", "b-1"), model("locked", "l-1", { available: false }), model("alpha", "img", { kind: "image" }),
   ],
   roles: [
-    { id: "default", name: "Default", section: "chat", source: "global", selector: "beta/b-1:high", resolved: "beta/b-1", thinking: "high", accepts: ["zeta/z-1", "alpha/a-2", "alpha/a-10", "alpha/a-1", "beta/b-1"], defaults: [] },
-    { id: "smol", name: "Smol", section: "chat", source: "global", selector: "beta/b-1", resolved: "beta/b-1", accepts: ["zeta/z-1", "alpha/a-2", "alpha/a-10", "alpha/a-1", "beta/b-1"], defaults: [] },
-    { id: "image", name: "Image", section: "kind", source: "default", accepts: ["alpha/img"], defaults: [] },
+    { id: "default", name: "Default", section: "chat", selector: "beta/b-1:high", resolved: "beta/b-1", accepts: ["zeta/z-1", "alpha/a-2", "alpha/a-10", "alpha/a-1", "beta/b-1"], defaults: [], resolution: resolution("beta/b-1", "high") },
+    { id: "smol", name: "Smol", section: "chat", selector: "beta/b-1", resolved: "beta/b-1", accepts: ["zeta/z-1", "alpha/a-2", "alpha/a-10", "alpha/a-1", "beta/b-1"], defaults: [], resolution: resolution("beta/b-1") },
+    { id: "image", name: "Image", section: "kind", accepts: ["alpha/img"], defaults: [], resolution: resolution() },
   ],
   providers: [{ id: "zeta", status: "available", available: true }, { id: "alpha", status: "available", available: true }, { id: "beta", status: "available", available: true }, { id: "locked", status: "locked", available: false }],
   effective: { modelProviderOrder: ["zeta"] },

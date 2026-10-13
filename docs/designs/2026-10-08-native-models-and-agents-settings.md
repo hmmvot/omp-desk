@@ -5,6 +5,8 @@ date: 2026-10-08
 
 # Native Models and Agents settings editors
 
+> Revised by the [2026-10-13 Models and Agents pages design](2026-10-13-models-agents-master-detail-and-resolution.md) and [ADR-0072](../decisions/0072-resolve-roles-and-agents-in-the-worker-with-omps-own-functions-and-write-agent-overrides-to-either-layer.md): the Models and Agents surfaces are master-detail pages with resolved values, and agent overrides can also be saved to the project config.
+
 ## Problem
 
 Frequent `/models` and `/agents` users need native, searchable VS Code editor tabs rather than a hosted terminal dashboard. RPC supports the active model but does not offer role or agent configuration CRUD. The extension must own narrow, safe configuration writes without turning these editors into session writers.

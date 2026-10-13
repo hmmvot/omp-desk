@@ -49,6 +49,8 @@ Facts (OMP 18.10.3 sources and real runs): `login` is not in `BACKGROUND_COMMAND
 - [ADR-0038](0038-host-chat-over-rpc-ui-on-a-broker-pipe-child.md): Chat's own RPC session, deliberately not used here.
 - [ADR-0052](0052-answer-terminal-only-commands-and-restore-the-queue-on-stop.md): `/login` typed into Chat stays answered locally.
 
+> Amended by [ADR-0072](0072-resolve-roles-and-agents-in-the-worker-with-omps-own-functions-and-write-agent-overrides-to-either-layer.md): the Models and Agents pages sign in through `signInProvider`, an in-process entry into this same flow (same window guard, credential refresh and outcomes) that takes the asking editor's exact profile and directory, because the public command's `profile` argument is honoured only for profiles the extension already knows. The public command's contract is unchanged.
+
 ## Architecture Review
 
 - Reviewer: architect (independent, read-only)

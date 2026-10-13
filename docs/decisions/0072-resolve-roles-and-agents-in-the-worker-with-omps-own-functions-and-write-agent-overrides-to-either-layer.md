@@ -1,0 +1,44 @@
+---
+status: accepted
+date: 2026-10-13
+---
+
+# ADR-0072: Resolve roles and agents in the worker with OMP's own functions, and write agent overrides to either layer
+
+## Context and Problem Statement
+
+The Models and Agents pages must show, for every model role and every agent, the effective model, the thinking level, where the value comes from and what it overrides. [ADR-0048](0048-write-omp-settings-directly-under-native-file-locks.md) made the worker open OMP read-only and write only through extension-owned locked transactions, and limited **project** writes to model roles; agent model, prewalk and advisor overrides were global-only. The 2026-10-13 redesign needs two decisions that ADR-0048 does not cover:
+
+1. **Where the effective values are computed.** Today the worker resolves a role with `resolveRoleSelection`, which skips unassigned roles, so roles that follow another role or a built-in priority list show as "auto"; agent thinking, source and trace are not computed at all. A page-side resolver would duplicate OMP's rules and drift at each OMP release.
+2. **Whether agent overrides may be written to the project layer.** OMP merges `task.agentModelOverrides`, `task.agentPrewalk` and `task.agentAdvisor` from the project layer over the global one per agent key (`pi-coding-agent/src/config/settings.ts`, `#deepMerge`, `3923-3945`) and registers them as plain record settings with no layer restriction (`task/settings.ts`). A user who works in several projects wants an agent to use a different model in one of them without touching the global config.
+
+## Considered Options
+
+- **Resolve in the page** from `modelRoles`, definitions and a copy of OMP's inheritance table: simplest, but a second resolver that drifts from OMP; rejected by the user.
+- **Resolve in the worker by calling OMP's resolution functions and project the result with a trace** (chosen).
+- **Copy OMP's unexported role-fallback table into the worker**: smaller than probing, but a hand-maintained duplicate of constants OMP does not export; kept only as a test oracle.
+- **Keep agent overrides global-only and show project values read-only**: no write-path change, but a project that already holds overrides could not be edited here; rejected by the user.
+- **Write project agent overrides with a `null` tombstone on reset** as roles do: for roles OMP treats a project `null` as "cleared, fall back to global"; for agent maps a `null` would instead hide the global override (`override ?? ""`), so a reset would silently change meaning. Rejected: reset removes the key.
+
+## Decision Outcome
+
+**Resolution.** The Bun worker computes the projection with OMP's own functions and sends it to the page. For a role it calls the function OMP's consumer calls: `resolveModelRoleValue("@role", …)` (the alias form: built-in lists and followed roles apply) for the alias readers, and `resolveRoleChain` over the models the role accepts for the roles whose tools resolve a chain (judge, memory, image, web, speech, dictation), plus `getModelRoleProvenance`; for agents the hub deps' `effectiveModelPatterns`, `resolveAgentModelPatterns`, `resolveModelOverride`, `resolveExplicitModelRole` and the prewalk and advisor resolvers; `rolePriorityDefaults` for built-in lists. What an unset role follows is found by probing `resolveConfiguredModelPatterns` with sentinel role values: the first element of one probe with exactly the really configured roles set says which role is used, and a probe with only one role set says whether that role would be consulted; a live test compares the result with OMP over every combination of six roles. OMP's table is not copied. The three launch-time role environment overrides (`PI_SMOL_MODEL`, `PI_SLOW_MODEL`, `PI_PLAN_MODEL`) are applied, as OMP's `main.ts` does at launch, to a child view of the settings (`Settings.overlay()`) that only the resolution reads, so saved selectors, effective values, provenance, presets and writes never see them. The page renders the projection and resolves nothing. What OMP does for a role with nothing assigned is static text keyed by role id (`src/protocol/role-notes.ts`), because that behaviour lives in each consumer; a live test checks the part OMP exposes (which roles have a built-in list).
+
+**Project agent overrides.** The worker's project scope accepts, besides `modelRoles/<role>` (still only while `modelRoleStorage` is `project`), `task/agentModelOverrides|agentPrewalk|agentAdvisor/<agent>`; everything else (notably `task.disabledAgents`) is refused as before. A project agent write is also refused, with nothing changed, when the raw `.omp/config.yml` and OMP's migrated project layer disagree for that agent's key (the rule project roles follow, per key). ADR-0071's project-layer rules apply to every project write, role or agent, and the editors bind the project folder as the OMP settings editor does (`useNearestAncestorOmpFolder`, with the ancestor notice): the home folder (never an OMP project) is refused, and so is the first project file when it would stop an ancestor's AGENTS.md, RULES.md or SYSTEM.md loading for sessions in the folder. The transaction is the unchanged `writeConfig`: installed file lock on the physical target, re-read and baseline check under the lock, targeted-key merge, validation through `assertWritable` and native model-pattern resolution, staged fsynced replace, exclusive first creation, no unlink. Reset in the project layer removes the key and prunes a mapping it leaves empty (`pruneEmpty`), so the global value shows through; role clears keep their `null` tombstone. A running session sees a persisted project value at once, but only a session whose working folder is the bound folder; the native `/agents` hub writes the global layer only, so a project override masks its edits in that folder. The page's *Save to* selector defaults to the layer holding the agent's override; Enabled stays global-only.
+
+**Sign in.** A needs-login warning offers Sign in through an in-process port into ADR-0070's login flow (`signInProvider`, same `runProviderAuth`, window guard and credential refresh as `ompDesk.loginProvider`) that takes the editor's exact profile and directory; the public command keeps its restricted argument. The page does not wait for the flow: the host reports its outcome as a notice and re-reads the snapshot.
+
+### Consequences
+
+- Positive: one source of truth for effective values (OMP's functions, pinned by live tests); the page shows followed and built-in resolutions, sources, traces and "if you reset" outcomes; agents can be tuned per project with the same write guarantees.
+- Negative: the projection grows the snapshot; the probing of followed roles relies on `resolveConfiguredModelPatterns` accepting a plain lookup (pinned by the live test and the worker's export check); the project layer now holds more of what the page can write, so a project file OMP merges with other sources can refuse saves, and the first agent write in a folder is refused where it would hide an ancestor's context files; the `env` source describes the extension host's environment only; the sign-in port is a second in-process entry into the login flow.
+
+## Related Documents
+
+[Models and Agents pages: master-detail lists that show what each role and agent runs on, and why](../designs/2026-10-13-models-agents-master-detail-and-resolution.md); [Native Models and Agents settings editors](../designs/2026-10-08-native-models-and-agents-settings.md); [ADR-0048](0048-write-omp-settings-directly-under-native-file-locks.md) (amended: project writes may also carry agent overrides); [ADR-0070](0070-log-in-through-a-dedicated-short-lived-rpc-process-and-keep-the-terminal-login-as-the-explicit-fallback.md) (Sign in); [ADR-0071](0071-edit-omps-settings-from-its-own-registry-in-a-staged-worker-and-write-one-layer-at-a-time.md) (the OMP settings editor, which shares the write transaction and does not change it; its project-layer refusals apply here).
+
+## Architecture Review
+
+- Reviewer: architect (independent, read-only; one review covers this ADR and the design)
+- Outcome: accepted after changes. Material findings fixed: roles resolved by chain readers use `resolveRoleChain`; the probing algorithm was unsound and is replaced by used/consulted probes with a 64-subset live test; environment overrides now live on a child view of the settings, not the shared instance; ADR-0071's home-folder and ancestor-context refusals now cover agent (and role) project writes; Sign in uses an internal port with the editor's exact profile, because `ompDesk.loginProvider` honours `profile` only for known profiles.
+- Notes: the review's minor findings (agent-ladder wording, thinking-level precedence, per-key disagreement check, the ADR-0048 amendment, the `/agents` hub masking, the two login paths) are folded into the design.

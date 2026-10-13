@@ -16,6 +16,8 @@ import type { SettingsKind } from "../chat/settings-command";
 import type { SettingsMessage } from "../protocol/settings-messages";
 import { chooseSetting, pickFallbackChainKey, pickSettingsModel, pickSettingsThinking } from "./settings-pickers";
 import { modelKey, roleChange, selectorBase, selectorThinking } from "../protocol/settings-pick-items";
+import { ancestorProjectFolder, projectFolderFor } from "../omp/config-ancestor";
+import { NEAREST_OMP_SETTING } from "../protocol/omp-config-model";
 import { parseModelPickRequest, parseRoleAssignment } from "./settings-pick-requests";
 import type { PickEntry } from "../protocol/settings-pick-items";
 
@@ -31,6 +33,8 @@ export interface SettingsEditorHost {
   defaultProfile(): string;
   /** Folders offered by the in-editor scope control: the folders Sessions shows. */
   folders(): readonly string[];
+  /** Signs in to a provider in exactly this profile and directory (the same flow as `ompDesk.loginProvider`); resolves with its outcome word. */
+  signIn(request: { providerId: string; profile: string; cwd: string }): Promise<string>;
 }
 interface FileBaseline { logical: string; physical: string; exists: boolean; digest: string; settings: ConfigRecord }
 interface ReadReceipt { snapshot: SettingsSnapshot; files: Record<SettingsScope, FileBaseline> }
@@ -70,7 +74,17 @@ export class SettingsEditors implements vscode.Disposable {
       }),
     );
   }
-  async open(kind: SettingsKind, binding: SettingsEditorContext): Promise<void> {
+  /**
+   * The folder an editor treats as the project, the same as the OMP settings editor's: with `ompDesk.ompSettings.useNearestAncestorOmpFolder` on, the nearest
+   * ancestor whose `.omp` is non-empty (a Unity project's repository root), else the folder itself. The setting is read for that folder.
+   */
+  async #projectFolder(folder: string | null): Promise<string | null> {
+    if (folder === null) return null;
+    const enabled = vscode.workspace.getConfiguration("ompDesk", vscode.Uri.file(folder)).get<boolean>("ompSettings.useNearestAncestorOmpFolder", false);
+    return projectFolderFor(folder, enabled);
+  }
+  async open(kind: SettingsKind, requested: SettingsEditorContext): Promise<void> {
+    const binding: SettingsEditorContext = { ...requested, folder: await this.#projectFolder(requested.folder) };
     const key = editorKey(kind, binding);
     const existing = this.#editors.get(key);
     if (existing) {
@@ -128,7 +142,8 @@ export class SettingsEditors implements vscode.Disposable {
     this.#post(editor, { type: "settings:init", key: editor.key, kind: editor.kind, folder: editor.binding.folder, canApply: Boolean(editor.binding.applyDefault), sessionLabel: editor.binding.sessionLabel });
   }
   /** Moves an open editor to another scope of the same profile; an editor already showing that scope is revealed instead. */
-  async #rebind(editor: Editor, folder: string | null): Promise<string> {
+  async #rebind(editor: Editor, chosen: string | null): Promise<string> {
+    const folder = await this.#projectFolder(chosen);
     const binding: SettingsEditorContext = { folder, profile: editor.binding.profile, ...(editor.binding.executable ? { executable: editor.binding.executable } : {}) };
     const key = editorKey(editor.kind, binding);
     if (key === editor.key) return "";
@@ -195,7 +210,9 @@ export class SettingsEditors implements vscode.Disposable {
     const result = await this.#worker(editor, { action, provider });
     if (!record(result) || !record(result.snapshot) || !record(result.files)) throw new SettingsRefusal("OMP returned an invalid settings snapshot.");
     editor.receipt = result as unknown as ReadReceipt;
-    this.#post(editor, { type: "settings:snapshot", snapshot: editor.receipt.snapshot, configExists: { global: editor.receipt.files.global.exists, project: editor.receipt.files.project.exists } });
+    const folder = editor.binding.folder;
+    const ancestorProject = folder === null ? null : await ancestorProjectFolder(folder);
+    this.#post(editor, { type: "settings:snapshot", snapshot: editor.receipt.snapshot, configExists: { global: editor.receipt.files.global.exists, project: editor.receipt.files.project.exists }, ancestorProject });
   }
   async #save(editor: Editor, scope: SettingsScope, edits: ConfigEdit[], thinking?: string, preset?: string): Promise<string> {
     const receipt = editor.receipt;
@@ -272,14 +289,17 @@ export class SettingsEditors implements vscode.Disposable {
           if (raw.action === "refresh") {
             await this.#read(editor, "refresh", raw.provider as string | undefined);
             message = "Provider catalogue refreshed. OMP may have persisted refreshed credentials; catalogue changes remain in this editor's private cache.";
-          } else {
-            const runtime = await this.#runtime(editor);
-            openProviderLoginTerminal({ executable: runtime.executable, args: ["--profile", editor.binding.profile, "login", ...(typeof raw.provider === "string" ? [raw.provider] : [])],
-              cwd: this.#cwd(editor), env: { OMP_PROFILE: editor.binding.profile }, name: "OMP settings login" });
-            message = "Complete OMP login in the visible terminal, then Reload this editor. Credentials are managed only by OMP.";
-          }
+          } else message = await this.#loginTerminal(editor, typeof raw.provider === "string" ? raw.provider : undefined);
           break;
         }
+        case "sign-in": {
+          const provider = typeof raw.provider === "string" ? raw.provider : "";
+          if (!editor.receipt?.snapshot.providers.some(item => item.id === provider)) throw new SettingsRefusal("Choose a provider this editor lists.");
+          this.#signIn(editor, provider);
+          message = `Signing in to ${provider}: follow the login prompts. This page updates when it finishes.`;
+          break;
+        }
+        case "open-nearest-setting": await vscode.commands.executeCommand("workbench.action.openSettings", NEAREST_OMP_SETTING); break;
         case "open-config": {
           const scope = this.#scope(editor, raw.scope);
           const file = editor.receipt?.snapshot[scope === "global" ? "globalFile" : "projectFile"];
@@ -331,6 +351,35 @@ export class SettingsEditors implements vscode.Disposable {
     } catch (error) {
       this.#post(editor, { type: "settings:result", requestId, ok: false, message: error instanceof SettingsRefusal ? error.message : "The native settings operation could not complete. Reload before retrying." });
     } finally { editor.busy = false; }
+  }
+  /** OMP's own login in a visible terminal, in this editor's profile. */
+  async #loginTerminal(editor: Editor, provider: string | undefined): Promise<string> {
+    const runtime = await this.#runtime(editor);
+    openProviderLoginTerminal({ executable: runtime.executable, args: ["--profile", editor.binding.profile, "login", ...(provider === undefined ? [] : [provider])],
+      cwd: this.#cwd(editor), env: { OMP_PROFILE: editor.binding.profile }, name: "OMP settings login" });
+    return "Complete OMP login in the visible terminal, then Reload this editor. Credentials are managed only by OMP.";
+  }
+  /**
+   * Starts the provider sign-in of ADR-0070 through the host's in-process port and returns at once: the flow can run for minutes
+   * and must not hold this editor's one operation slot. Its outcome arrives as a notice, followed by a fresh snapshot
+   * when no other operation is running, so the page shows the provider's models as usable.
+   */
+  #signIn(editor: Editor, provider: string): void {
+    const words: Readonly<Record<string, { ok: boolean; text: string }>> = {
+      "signed-in": { ok: true, text: `Signed in to ${provider}.` },
+      cancelled: { ok: true, text: `Sign-in to ${provider} was cancelled.` },
+      terminal: { ok: true, text: `${provider} needs an API key, so a login terminal was opened. Reload this page when you are done.` },
+      declined: { ok: true, text: `${provider} uses an API key, which OMP Desk never takes. Use the login terminal it offered, then reload this page.` },
+      busy: { ok: false, text: "Another sign-in is already running in this window." },
+    };
+    const outcome = Promise.resolve(this.host.signIn({ providerId: provider, profile: editor.binding.profile, cwd: this.#cwd(editor) }));
+    void outcome.catch(() => "failed").then(async result => {
+      if (editor.disposed) return;
+      const word = words[String(result)] ?? { ok: false, text: `Sign-in to ${provider} failed.` };
+      this.#post(editor, { type: "settings:notice", ok: word.ok, message: word.text });
+      if (editor.busy) return;
+      try { await this.#read(editor); } catch { this.#post(editor, { type: "settings:notice", ok: false, message: `${word.text} Reload to read the models again.` }); }
+    });
   }
   /**
    * OMP's hub flow: pick a model, then a thinking level for reasoning models, and save at once.

@@ -1,4 +1,4 @@
-import type { ConfigRecord, SettingsModel, SettingsSnapshot } from "../../protocol/settings-model";
+import type { ConfigRecord, ResolvedStatus, ResolvedThinking, SettingsAgent, SettingsModel, SettingsRole, SettingsSnapshot } from "../../protocol/settings-model";
 import { modelKey, selectorBase, selectorThinking } from "../../protocol/settings-pick-items.ts";
 import { isRecord } from "../../shared/guards.ts";
 export function at(data: ConfigRecord, path: readonly string[]): unknown {
@@ -35,7 +35,9 @@ export function entryStatus(entry: string, snapshot: Pick<SettingsSnapshot, "mod
   if (entry.startsWith("@")) {
     const role = snapshot.roles.find(item => item.id === entry.slice(1));
     if (!role) return { text: "unknown role", ok: false };
-    return role.resolved ? { text: `→ ${role.resolved}`, ok: true } : { text: role.selector ? "role has no available model" : "automatic", ok: !role.selector };
+    const { status, provider } = role.resolution.model;
+    if (role.resolved) return { text: `→ ${role.resolved}`, ok: true };
+    return status === "login" ? { text: `needs login to ${provider}`, ok: false } : { text: status === "none" ? "role has no model" : "role has no available model", ok: false };
   }
   if (entry.endsWith("/*")) {
     const provider = snapshot.providers.find(item => item.id === entry.slice(0, -2));
@@ -91,4 +93,73 @@ export function displayValue(value: unknown): string {
   if (typeof value === "string") return value || "(empty)";
   if (Array.isArray(value) && value.every(item => typeof item !== "object" || item === null)) return value.length ? value.join(", ") : "(empty list)";
   return typeof value === "object" ? JSON.stringify(value) : String(value);
+}
+
+/** Bars of the thinking meter: `off` has none, `xhigh` and `max` fill it. */
+export const LEVEL_BARS: Readonly<Record<string, number>> = { off: 0, minimal: 1, low: 2, medium: 3, high: 4, xhigh: 5, max: 5 };
+/** `claude-opus` of `anthropic/claude-opus`; the provider is shown in the tooltip and the detail. */
+export function shortModel(key: string | undefined): string { return key ? key.slice(key.indexOf("/") + 1) : ""; }
+export interface Pill { readonly kind: string; readonly text: string; readonly title: string }
+const SOURCE_PILLS: Readonly<Record<string, Pill>> = {
+  env: { kind: "env", text: "env", title: "Set by an environment variable of the extension host, which sessions OMP Desk starts inherit" },
+  overlay: { kind: "overlay", text: "overlay", title: "Set by a config overlay file" },
+  project: { kind: "project", text: "project", title: "Set in the project config (.omp/config.yml)" },
+  global: { kind: "global", text: "global", title: "Set in the global config" },
+  builtin: { kind: "builtin", text: "built-in", title: "Not set: OMP's built-in priority list decides" },
+  none: { kind: "none", text: "unassigned", title: "Not set, and OMP has no built-in list for this role" },
+};
+/** The source pill of a role row: where its model comes from, or what an unset role follows. */
+export function rolePill(role: SettingsRole): Pill {
+  const { source, follows } = role.resolution;
+  if (source === "inherited") return { kind: "inherited", text: "inherited", title: `Not set here: follows ${follows.map(id => `@${id}`).join(" → ")}` };
+  return SOURCE_PILLS[source]!;
+}
+/** The source pill of an agent row: its own override, a role its definition names, the definition, or the session. */
+export function agentPill(agent: SettingsAgent): Pill {
+  const { source, layer, roles } = agent.resolution;
+  if (source === "override") return { kind: "override", text: "override", title: `A ${layer} model override replaces the definition` };
+  if (source === "definition") return roles.length ? { kind: "inherited", text: `@${roles[0]}`, title: `Its definition names ${roles.map(id => `@${id}`).join(", ")}` } : { kind: "definition", text: "definition", title: "The model is pinned in the agent's definition" };
+  return { kind: "inherited", text: "session", title: "No model of its own: it runs on the model of the session that spawns it" };
+}
+export function thinkingText(thinking: ResolvedThinking): string { return thinking.level ?? "—"; }
+const THINKING_WHY: Readonly<Record<ResolvedThinking["source"], string>> = {
+  selector: "from the :level on the selector", role: "from the role it follows", definition: "from the agent's definition", model: "the model's own default level",
+  setting: "from the default thinking level setting", none: "no level of its own: whoever uses it decides",
+};
+export function thinkingWhy(thinking: ResolvedThinking): string { return THINKING_WHY[thinking.source]; }
+export type ProblemStatus = Exclude<ResolvedStatus, "ok" | "none">;
+export interface Problem { readonly scope: "role" | "agent"; readonly id: string; readonly status: ProblemStatus; readonly provider?: string; readonly wanted?: string; readonly disabled: boolean }
+/** Everything in use that cannot run: roles somebody assigned (or that follow one) and agents, with the provider to sign in to. */
+export function problems(snapshot: Pick<SettingsSnapshot, "roles" | "agents">): Problem[] {
+  const result: Problem[] = [];
+  for (const role of snapshot.roles) {
+    const { model, source } = role.resolution;
+    if (model.status !== "ok" && model.status !== "none" && source !== "builtin") result.push({ scope: "role", id: role.id, status: model.status, provider: model.provider, wanted: model.wanted, disabled: false });
+  }
+  for (const agent of snapshot.agents) {
+    const { model } = agent.resolution;
+    if (model.status !== "ok" && model.status !== "none") result.push({ scope: "agent", id: agent.name, status: model.status, provider: model.provider, wanted: model.wanted, disabled: agent.disabled });
+  }
+  return result;
+}
+/** The roles the Agents page keeps in view: the usual anchors, then every other role an agent's model selection names. */
+export function roleStripIds(snapshot: Pick<SettingsSnapshot, "roles" | "agents">): string[] {
+  const named = new Set(["default", "smol", "slow", "task", ...snapshot.agents.flatMap(agent => agent.resolution.roles)]);
+  return snapshot.roles.map(role => role.id).filter(id => named.has(id));
+}
+export type AgentFilter = "all" | "override" | "role" | "problems" | "disabled";
+export function agentCounts(agents: readonly SettingsAgent[]): Record<AgentFilter, number> {
+  const counts: Record<AgentFilter, number> = { all: agents.length, override: 0, role: 0, problems: 0, disabled: 0 };
+  for (const agent of agents) for (const filter of ["override", "role", "problems", "disabled"] as const) if (agentMatchesFilter(agent, filter)) counts[filter]++;
+  return counts;
+}
+export function agentMatchesFilter(agent: SettingsAgent, filter: AgentFilter): boolean {
+  const { source, roles, model } = agent.resolution;
+  switch (filter) {
+    case "override": return source === "override";
+    case "role": return source === "definition" && roles.length > 0;
+    case "problems": return model.status !== "ok" && model.status !== "none";
+    case "disabled": return agent.disabled;
+    default: return true;
+  }
 }

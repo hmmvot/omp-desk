@@ -1618,6 +1618,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       return active?.scope.profile ?? process.env.OMP_PROFILE ?? process.env.PI_PROFILE ?? DEFAULT_OMP_PROFILE;
     },
     folders: () => folders.list().map(folder => folder.path),
+    signIn: request => signInProvider(index, request),
   });
   context.subscriptions.push(settingsEditors);
   // The full OMP settings editor (ADR-0071): `/settings` in Chat, the palette command and the Sessions title menu. It opens on the
@@ -6793,6 +6794,14 @@ async function loginProviderFromPalette(index: SessionIndex, argument?: unknown)
     ? () => paletteProviderAuthScope(index, "Log In to Provider", "OMP profile to log in with")
     : async (): Promise<ProviderAuthScope> => ({ runtime: null, profile, cwd });
   return await runProviderAuth(index, scope, deps => runProviderLogin(deps, providerId === undefined ? {} : { providerId }));
+}
+
+/**
+ * The in-process sign-in the Models and Agents pages use (ADR-0070 amendment): the same flow, window guard and credential refresh as
+ * `ompDesk.loginProvider`, but in the exact profile and directory of the editor that asks, which the public command's restricted argument cannot name.
+ */
+async function signInProvider(index: SessionIndex, request: { readonly providerId: string; readonly profile: string; readonly cwd: string }): Promise<string> {
+  return await runProviderAuth(index, async () => ({ runtime: null, profile: request.profile, cwd: request.cwd }), deps => runProviderLogin(deps, { providerId: request.providerId }));
 }
 
 /** `ompDesk.logoutProvider`. */

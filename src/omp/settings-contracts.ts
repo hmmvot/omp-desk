@@ -1,8 +1,11 @@
 import type { ConfigRecord } from "../protocol/settings-model.ts";
 
+/** What OMP's pattern functions need of a settings object: the configured selector of a role. */
+export interface RoleLookup { getModelRole(role: string): string | undefined }
 export interface NativeModel {
   provider: string; id: string; name: string; contextWindow?: number; maxTokens?: number;
   input?: string[]; cost?: ConfigRecord; upstreamProviders?: string[]; reasoning?: boolean;
+  thinking?: { defaultLevel?: string; unverified?: boolean };
 }
 export interface NativeSetting {
   readonly default: unknown;
@@ -12,6 +15,10 @@ export interface NativeSettings {
   getGlobalSettings(): ConfigRecord; getProjectSettings(): ConfigRecord;
   getModelRoles(): Record<string, string | undefined>;
   extensionsSourceLevel(): "project" | "user"; getModelRole(id: string): string | undefined;
+  getProjectModelRole(id: string): string | undefined; getGlobalModelRole(id: string): string | undefined;
+  overrideModelRoles(roles: Record<string, string | undefined>): void;
+  /** A child view: reads fall through, and what is written to it never reaches the parent or disk. */
+  overlay(overrides?: Record<string, unknown>): NativeSettings;
   getModelRoleProvenance(id: string): string; getProvenance(setting: NativeSetting): string;
 }
 export interface NativeAuth {
@@ -23,10 +30,10 @@ export interface NativeRegistry {
   refresh(strategy: string, options?: { refreshCommandCredentials: boolean }): Promise<void>;
   refreshProvider(provider: string, strategy: string, options?: { refreshCommandCredentials: boolean }): Promise<void>;
 }
-export interface NativeRoleResolution { model?: NativeModel; thinkingLevel?: string }
+export interface NativeRoleResolution { model?: NativeModel; thinkingLevel?: string; explicitThinkingLevel?: boolean }
 export interface NativeHubAgent {
   name: string; description: string; systemPrompt: string; source: string; filePath?: string;
-  model?: string[]; prewalk?: string | boolean; advisor?: string | boolean; disabled: boolean;
+  model?: string[]; prewalk?: string | boolean; advisor?: string | boolean; thinkingLevel?: string; disabled: boolean;
   overrideModel?: string; prewalkOverride?: string; advisorOverride?: string;
 }
 export interface NativeHubDeps {
@@ -49,13 +56,18 @@ export interface NativeModules {
   "auth-storage.ts": { AuthStorage: new (store: unknown) => NativeAuth };
   "config/model-registry.ts": { ModelRegistry: new (auth: NativeAuth, modelsPath: string, options: { settings: NativeSettings; cacheDbPath: string }) => NativeRegistry };
   "config/model-resolver.ts": {
-    resolveModelRoleValue(value: string, models: NativeModel[], options: { settings: NativeSettings; roleLookup?: { getModelRole(role: string): string | undefined } }): NativeRoleResolution;
+    resolveModelRoleValue(value: string, models: NativeModel[], options: { settings: NativeSettings; roleLookup?: RoleLookup }): NativeRoleResolution;
     resolveRoleSelection(roles: string[], settings: NativeSettings, models: NativeModel[]): NativeRoleResolution | undefined;
     pickDefaultAvailableModel(models: NativeModel[]): NativeModel | undefined;
-    resolveModelOverride(patterns: string[], registry: NativeRegistry, settings: NativeSettings): NativeRoleResolution;
+    /** The attempts OMP makes for a role that tools resolve as a chain (judge, memory, image, web, speech, dictation), in order. */
+    resolveRoleChain(role: string, settings: NativeSettings, pool: NativeModel[]): { model: NativeModel; explicit: boolean; thinkingLevel?: string }[];
+    resolveModelOverride(patterns: string[], registry: { getAvailable(): NativeModel[] }, settings: NativeSettings): NativeRoleResolution;
     formatModelStringWithRouting(model: NativeModel): string;
-    resolveConfiguredModelPatterns(value: string | string[] | undefined, settings: NativeSettings): string[];
+    resolveConfiguredModelPatterns(value: string | string[] | undefined, settings: RoleLookup): string[];
     normalizeModelPatternList(value: string | string[]): string[]; rolePriorityDefaults(role: string): string[];
+    resolveExplicitModelRole(value: string | string[] | undefined, settings?: RoleLookup): string | undefined;
+    extractExplicitThinkingSelector(value: string | undefined, settings?: RoleLookup): string | undefined;
+    resolveAgentModelPatterns(options: { settingsOverride?: string | string[]; agentModel?: string | string[]; settings?: NativeSettings; activeModelPattern?: string; fallbackModelPattern?: string }): string[];
   };
   "config/model-roles.ts": { getKnownRoleIds(settings: NativeSettings): string[]; getRoleInfo(id: string, settings: NativeSettings): { name: string; section: string; accepts(model: NativeModel): boolean } };
   "session/settings.ts": { cfgDefaultThinkingLevel: NativeSetting };
