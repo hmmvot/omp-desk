@@ -519,7 +519,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 			event.preventDefault(); event.stopPropagation(); head.focus({ preventScroll: true }); presentationProps.onDisclosureChange?.(id, false);
 		}}>
 			<div ref={contentRef} className="omp-transcript-content">
-			{entries.length === 0 && stream === null && !working && (
+			{canonical.length === 0 && cleared === null && stream === null && !working && (
 				loading || (props.depth ?? 0) > 0
 					? <div className="omp-empty">{loading ? "joining the session…" : "no activity yet"}</div>
 					: <EmptyState cwd={props.cwd} model={props.model} thinkingLevel={props.thinkingLevel} />

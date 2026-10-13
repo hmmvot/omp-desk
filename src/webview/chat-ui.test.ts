@@ -4393,6 +4393,25 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		await t.test("a new session whose only entries are not rendered (model and thinking setup, memory recall, a hidden notice, a title change) still shows the empty state, and the first user message removes it", async () => {
+			await reset("empty-state-hidden-entries");
+			const stamp = "2026-10-13T10:00:00.000Z";
+			await ui.evaluate(`window.setupEntries=[
+			 {type:'model_change',id:'m0',parentId:null,timestamp:'${stamp}',model:'anthropic/claude-opus-5-5'},
+			 {type:'thinking_level_change',id:'t0',parentId:'m0',timestamp:'${stamp}',thinkingLevel:'medium',configured:null},
+			 {type:'title_change',id:'tc0',parentId:'t0',timestamp:'${stamp}',title:'New session',source:'user'},
+			 {type:'custom',id:'mr0',parentId:'tc0',timestamp:'${stamp}',customType:'memory_recall',data:{version:1}},
+			 {type:'custom_message',id:'xd0',parentId:'mr0',timestamp:'${stamp}',customType:'xdev-mount-notice',display:false,content:'<system-notice>xd:// device inventory changed.</system-notice>'}
+			];
+			window.ui.push({header:{id:'hidden-h',cwd:'D:/work/alpha-desk/',timestamp:'${stamp}'},entries:window.setupEntries,durableCount:5,working:false,settled:true})`);
+			await ui.wait("document.querySelector('.omp-empty-state')");
+			assert.deepEqual(await ui.evaluate("[...document.querySelectorAll('.omp-empty-key kbd')].map(node=>node.textContent)"), ["/", "@", "Alt+Enter", "Esc Esc"]);
+			assert.match(await ui.evaluate<string>("document.querySelector('.omp-empty-head').textContent"), /alpha-desk/);
+			await ui.evaluate(`window.ui.push({entries:[...window.setupEntries,{type:'message',id:'u1',parentId:'xd0',timestamp:'${stamp}',message:{role:'user',timestamp:1,content:'First prompt'}}],durableCount:6})`);
+			await ui.wait("!document.querySelector('.omp-empty-state') && document.querySelector('.omp-transcript')?.textContent.includes('First prompt')");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("an aborted reply is one muted line with its own message, a provider error one line, and Handed off is set in the UI font", async () => {
 			await reset("notices");
 			await ui.evaluate(`window.row=(id,message)=>({type:'message',id,parentId:null,timestamp:'2026-10-01T00:00:00.000Z',message});
