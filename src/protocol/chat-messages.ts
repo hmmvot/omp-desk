@@ -23,6 +23,7 @@
  * | `omp:chat-ui-request` / `omp:chat-ui-cancel` | one dialog, or the withdrawal of one |
  * | `omp:chat-subagent-chunk` | one chunk of a subagent transcript the page asked for |
  * | `omp:chat-display-preferences` | tool-call detail and accessibility settings |
+ * | `omp:chat-code-theme` | the token rules of the colour themes that may be active (the page picks by its theme id), for fenced code; none means plain code |
  * | `omp:chat-queue-result` | the outcome of a queue removal or promotion the page requested |
  * | `omp:chat-send-result` | correlated text admission, refusal, uncertain delivery, or a terminal-UI command the host answered itself; not a turn result |
  * | `omp:chat-abort-result` | what a Stop the page requested withdrew from OMP's queues, for its composer |
@@ -68,6 +69,7 @@ import type {
 	ChatUiResponse,
 } from "../chat/model.ts";
 import { isRecord } from "../shared/guards.ts";
+import { parseCodeThemes, type CodeTheme } from "../chat/code-theme.ts";
 
 // Bounds
 
@@ -191,6 +193,17 @@ export interface ChatDisplayPreferencesMessage extends ChatDisplayPreferences {
 	epoch: ChatEpoch;
 }
 
+/**
+ * The active editor colour theme's token rules, for the page's fenced code (`null`: no usable theme, code stays plain).
+ * Not bound to a conversation epoch: the theme belongs to the window, so the host sends it to a page when the page
+ * announces itself and again whenever the resolved theme changes.
+ */
+export interface ChatCodeThemeMessage {
+	type: "omp:chat-code-theme";
+	/** Candidates, the one `workbench.colorTheme` names first; the page uses the entry whose id is `data-vscode-theme-id`. */
+	themes: CodeTheme[];
+}
+
 /** One pending user message, named by the queue it waits in and its exact queue-chip text (what OMP matches on). */
 export interface ChatQueuedRef {
 	queue: "steering" | "followUp";
@@ -285,6 +298,7 @@ export interface ChatNavigateResultMessage {
 
 export type ChatHostMessage =
 	| ChatDisplayPreferencesMessage
+	| ChatCodeThemeMessage
 	| ChatStateMessage
 	| ChatSnapshotMessage
 	| ChatSnapshotChunkMessage
@@ -1022,6 +1036,10 @@ export function parseChatHostMessage(value: unknown): ChatHostMessage | null {
 				message.draft = { text: draft.text, images: images.images ?? [], unavailableImages: draft.unavailableImages + (images.imagesDropped ? 1 : 0) };
 			}
 			return message;
+		}
+		case "omp:chat-code-theme": {
+			const themes = parseCodeThemes(value.themes);
+			return themes === null ? null : { type: value.type, themes };
 		}
 		case "omp:chat-display-preferences": {
 			const epoch = parseChatEpoch(value.epoch);

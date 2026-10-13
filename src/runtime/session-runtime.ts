@@ -359,6 +359,7 @@ export interface ConversationPort {
 	/** Say a fixed sentence to the routes showing the conversation; `false` when there is no route to say it to. */
 	notify(conversation: string, text: string): boolean;
 	refreshDisplayPreferences(): void;
+	refreshCodeThemes(): void;
 	dispose(): void;
 
 	// The live Chat session of a conversation, by value. Every operation below names the incarnation the caller read

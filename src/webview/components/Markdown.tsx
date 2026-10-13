@@ -21,7 +21,7 @@ import { webLinkUrl } from "../../shared/terminal-links";
 import { CodeSymbolSpan, FileLink, FileLinkText } from "./FileLinks.tsx";
 import { ImageReferenceToken } from "./ImageReference.tsx";
 import { WebLink } from "./WebLinks.tsx";
-import { CopyButton } from "./CopyButton.tsx";
+import { CodeBlock } from "./CodeBlock.tsx";
 
 /**
  * Inline token grammar; code wins over emphasis, bold over italic, matching markdown. A bare URL
@@ -349,16 +349,9 @@ function parseBlockRange(lines: readonly string[], from: number, firstKey: numbe
 				body.push(lines[index] as string);
 				index++;
 			}
+			const closed = index < lines.length;
 			index++; // closing fence (or EOF)
-			const source = body.join("\n");
-			blocks.push(
-				<div key={`b${key++}`} className="omp-code-block">
-					<pre>
-						<code data-language={language}>{source}</code>
-					</pre>
-					{source.length > 0 && <CopyButton text={source} label="Copy code" className="omp-code-copy" />}
-				</div>,
-			);
+			blocks.push(<CodeBlock key={`b${key++}`} language={language} source={body.join("\n")} closed={closed} />);
 			continue;
 		}
 

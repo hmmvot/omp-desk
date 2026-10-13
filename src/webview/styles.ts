@@ -396,6 +396,8 @@ ${ANSI_STYLES}
 	color: var(--omp-muted);
 	font: inherit;
 	font-size: 11px;
+/* Coloured code: text no rule colours is the editor's own text colour, as in the editor. */
+.omp-md pre code[data-highlighted] { color: var(--vscode-editor-foreground, var(--vscode-foreground)); }
 	cursor: pointer;
 	padding: 0;
 }

@@ -148,6 +148,7 @@ import { ProcessTreeItem } from "./views/process-rows";
 import { registerInventoryViews, type InventoryHandle } from "./wiring/inventory-wiring";
 import { registerContextView, type ContextHandle } from "./wiring/context-wiring";
 import { registerUsageStatus, type UsageStatusHandle } from "./wiring/usage-status-wiring";
+import { registerCodeTheme } from "./wiring/code-theme-wiring";
 import type { ContextSession, ContextTarget } from "./host/context/context-controller";
 import { owningWindowUri, registerWindowRouting } from "./wiring/window-routing";
 import type { WindowRouting, WindowRoutingDeps } from "./wiring/window-routing";
@@ -1538,12 +1539,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push(settingsEditors);
   // Desk's host tools (ADR-0055): the debugger tools are registered for every Chat session while omp.agentDebugger.enabled is on.
   const agentDebugger = activateAgentDebugger(context, { log });
+  // The candidate colour themes of Chat's fenced code; registered with the context, re-sent to pages when they change.
+  const codeThemes = registerCodeTheme(context, { log, changed: () => s.sessionRuntime.conversations.refreshCodeThemes() });
   const chat = new ChatRuntime({
     hostNonce: createToken(),
     hostTools: agentDebugger,
     log,
     onEvent: (tabId, event) => handleChatEvent(context, index, tabId, event),
     readDisplayPreferences: readChatDisplayPreferences,
+    readCodeThemes: () => codeThemes.current(),
     // Terminal-UI builtins typed into Chat are answered, not sent (ADR-0052); the list is the installed OMP's.
     slashRegistry: () => currentSlashRegistry(context),
     runDeskAction: async (action, tabId) => {

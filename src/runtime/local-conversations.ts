@@ -115,6 +115,10 @@ export class LocalConversations implements ConversationPort {
 		this.#chat.refreshDisplayPreferences();
 	}
 
+	refreshCodeThemes(): void {
+		this.#chat.refreshCodeThemes();
+	}
+
 	dispose(): void {
 		this.#chat.dispose();
 	}

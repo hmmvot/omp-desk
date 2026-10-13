@@ -49,6 +49,7 @@ import type { TurnActivityReport } from "../protocol/activity.ts";
 import { sessionPrompts } from "../chat/prompt-history.ts";
 import { rewindBlockedReason } from "../chat/rewind-mode.ts";
 import { NAVIGATE_REFUSAL_SENTENCES, rewindPreview, rewindTargets } from "../chat/rewind.ts";
+import type { CodeTheme } from "../chat/code-theme.ts";
 
 /** One route that shows a conversation. */
 export interface ChatPage {
@@ -140,6 +141,8 @@ export interface ChatRuntimeOptions {
 	/** Mints a snapshot id; defaults to 8 random bytes. */
 	readonly newSnapshotId?: () => string;
 	readonly readDisplayPreferences?: () => ChatDisplayPreferences;
+	/** The colour themes that may be active (the page picks by its theme id); empty while unknown, which shows plain code. */
+	readonly readCodeThemes?: () => readonly CodeTheme[];
 	/** Opens native profile settings, not an OMP prompt or a hosted dashboard. */
 	readonly openSettings?: (kind: SettingsKind, tabId: string) => Promise<void>;
 	/** The installed OMP's builtin slash registry, or `null` while it is unknown (nothing is refused as TUI-only then). */
@@ -387,11 +390,17 @@ export class ChatRuntime {
 		return (this.#pages.get(tabId)?.size ?? 0) > 0;
 	}
 
-	/** Re-send the state and an authoritative snapshot to one route (`omp:ready`, a route ack, a rebind). */
+	/**
+	 * Re-send the state and an authoritative snapshot to one route (`omp:ready`, a route ack, a rebind). The code
+	 * themes go first and need no conversation: the page colours code from its own theme id, and a page attached
+	 * before its conversation exists still needs them.
+	 */
 	resend(tabId: string, pageId: string): void {
 		const page = this.#pages.get(tabId)?.get(pageId);
+		if (page === undefined) return;
+		this.#postCodeThemes(page);
 		const conversation = this.#conversations.get(tabId);
-		if (page === undefined || conversation === undefined) return;
+		if (conversation === undefined) return;
 		const state = this.stateOf(tabId);
 		if (state !== null) page.post({ type: "omp:chat-state", ...state });
 		const snapshot = conversation.session === null ? conversation.snapshot : conversation.session.snapshot();
@@ -410,6 +419,15 @@ export class ChatRuntime {
 			const state = this.stateOf(tabId);
 			if (state !== null) for (const page of pages.values()) page.post({ type: "omp:chat-display-preferences", epoch: state.epoch, ...preferences });
 		}
+	}
+
+	#postCodeThemes(page: ChatPage): void {
+		page.post({ type: "omp:chat-code-theme", themes: [...(this.#options.readCodeThemes?.() ?? [])] });
+	}
+
+	/** The candidate colour themes changed: every attached page of every tab gets them (not epoch-bound). */
+	refreshCodeThemes(): void {
+		for (const pages of this.#pages.values()) for (const page of pages.values()) this.#postCodeThemes(page);
 	}
 
 	/**

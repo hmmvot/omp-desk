@@ -115,6 +115,7 @@ import { splitChatSnapshot } from "../protocol/chat-messages";
 import { injectGuestStyles } from "./styles";
 import { injectShellStyles } from "./lib/terminal-styles";
 import { attachSessionView, sessionViewSnapshot } from "./lib/session-view";
+import { attachCodeTheme } from "./lib/code-theme-store";
 import { attachInsertedText } from "./lib/insert-text";
 import { adoptNonceForCreatedStyles } from "./lib/nonce-styles";
 import { installFocusTrace } from "./lib/focus-trace";
@@ -122,6 +123,7 @@ import { installTypeToFocus } from "./lib/type-to-focus";
 installFocusTrace(window, element => element.classList.contains("omp-textarea"), detail => guestTransport.post({ type: "omp:focus-trace", detail }));
 installTypeToFocus(window);
 attachSessionView(guestTransport);
+attachCodeTheme(guestTransport);
 attachInsertedText(guestTransport, () => sessionViewSnapshot().mode);
 const epoch = { nonce: "host-ui-test", counter: 1 };
 const original = { provider: "one", id: "old", name: "Original", contextWindow: 1000000 };
@@ -4560,6 +4562,58 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.equal(contrast.unchecked, "rgb(111, 195, 223)");
 			assert.equal(contrast.tabIdle, "rgb(111, 195, 223)");
 			await ui.evaluate("document.body.classList.remove('vscode-high-contrast')");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		const CODE_THEME = "{id:'Dark Modern',rules:[{scopes:['storage.type'],foreground:'#569CD6'},{scopes:['string'],foreground:'#CE9178'},{scopes:['constant.numeric'],foreground:'#B5CEA8'}]}";
+		const codeReply = (text: string) => `window.ui.push({entries:[{type:'message',id:'reply',parentId:null,timestamp:'2026-10-01T00:00:00.000Z',message:{role:'assistant',model:'m',timestamp:2,stopReason:'stop',content:[{type:'text',text:${JSON.stringify(text)}}]}}],durableCount:1,working:false,settled:true})`;
+
+		await t.test("fenced code is coloured with the editor theme's colours after the first paint, and Copy still gives the plain source", async () => {
+			await reset("code-highlight");
+			await ui.evaluate(`Object.defineProperty(navigator,'clipboard',{configurable:true,value:{async writeText(text){window.copied=text}}})`);
+			const source = "const a = 1; // note\nconst b = \"two\";";
+			await ui.evaluate(codeReply(`Run:\n\n\`\`\`ts\n${source}\n\`\`\`\n\n\`\`\`nosuchlang\nconst c = 3;\n\`\`\`\n\nDone.`));
+			await ui.wait("document.querySelectorAll('.omp-md pre code').length===2");
+			assert.equal(await ui.evaluate("document.querySelectorAll('code[data-highlighted]').length"), 0, "no theme yet: plain code, as before");
+			await ui.evaluate(`window.ui.receive({type:'omp:chat-code-theme',themes:[${CODE_THEME},{id:'Light Modern',rules:[{scopes:['storage.type'],foreground:'#0000FF'}]}]})`);
+			await ui.wait("document.querySelector('code[data-language=\"ts\"][data-highlighted]')");
+			const facts = await ui.evaluate<{ text: string; colours: Array<[string, string]>; plainLanguage: boolean; base: string; foreground: string }>(`(()=>{
+			 const code=document.querySelector('code[data-language="ts"]'), other=document.querySelector('code[data-language="nosuchlang"]');
+			 return {text:code.textContent,colours:[...code.querySelectorAll('span')].map(span=>[span.textContent,span.style.color]),
+			  plainLanguage:!other.hasAttribute('data-highlighted')&&other.children.length===0,base:getComputedStyle(code).color,foreground:getComputedStyle(document.documentElement).getPropertyValue('--vscode-editor-foreground').trim()}})()`);
+			assert.equal(facts.text, source, "colour never changes the text");
+			assert.deepEqual(facts.colours, [["const", "rgb(86, 156, 214)"], ["1", "rgb(181, 206, 168)"], ["const", "rgb(86, 156, 214)"], ['"two"', "rgb(206, 145, 120)"]]);
+			assert.equal(facts.plainLanguage, true, "a language we do not know stays plain");
+			assert.equal(facts.base, "rgb(221, 221, 221)", "text no rule colours is the editor's text colour");
+			await ui.evaluate("document.querySelector('.omp-code-copy').click()");
+			await ui.wait("window.copied!==undefined");
+			assert.equal(await ui.evaluate("window.copied"), source, "Copy gives the source, not the coloured text");
+			// A theme change re-colours the same text without a new render of the message.
+			// The page picks the theme VS Code says is active (its id on the body), never the first candidate by guess.
+			await ui.evaluate("document.body.setAttribute('data-vscode-theme-id','Light Modern')");
+			await ui.wait("document.querySelector('code[data-language=\"ts\"] span')?.style.color==='rgb(0, 0, 255)'");
+			await ui.evaluate("document.body.setAttribute('data-vscode-theme-id','Some Other Theme')");
+			await ui.wait("!document.querySelector('code[data-highlighted]')");
+			await ui.evaluate("document.body.setAttribute('data-vscode-theme-id','Dark Modern')");
+			await ui.wait("document.querySelector('code[data-language=\"ts\"] span')?.style.color==='rgb(86, 156, 214)'");
+			await ui.evaluate("document.body.removeAttribute('data-vscode-theme-id');window.ui.receive({type:'omp:chat-code-theme',themes:[]})");
+			await ui.wait("!document.querySelector('code[data-highlighted]')");
+			assert.equal(await ui.evaluate("document.querySelector('code[data-language=\"ts\"]').textContent"), source);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("an unfinished fence is coloured only once its text has stopped changing, and keeps its colour while it grows", async () => {
+			await reset("code-highlight-streaming");
+			await ui.evaluate(`window.ui.receive({type:'omp:chat-code-theme',themes:[${CODE_THEME}]})`);
+			await ui.evaluate(codeReply("```ts\nconst a = 1;"));
+			await ui.wait("document.querySelector('code[data-language=\"ts\"]')");
+			assert.equal(await ui.evaluate("document.querySelector('code[data-highlighted]')"), null, "an open fence is plain while it may still change");
+			await ui.wait("document.querySelector('code[data-highlighted] span')");
+			await ui.evaluate(codeReply("```ts\nconst a = 1;\nconst b"));
+			await ui.wait("document.querySelector('code[data-language=\"ts\"]').textContent==='const a = 1;\\nconst b'");
+			const grown = await ui.evaluate<{ coloured: boolean; text: string }>("({coloured:document.querySelector('code[data-language=\"ts\"]').hasAttribute('data-highlighted'),text:document.querySelector('code[data-language=\"ts\"]').textContent})");
+			assert.equal(grown.coloured, true, "the text already coloured stays coloured while the new text arrives");
+			await ui.evaluate("window.ui.receive({type:'omp:chat-code-theme',themes:[]})");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 

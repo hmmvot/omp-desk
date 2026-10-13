@@ -65,12 +65,17 @@ export interface StubTab {
 	group: StubTabGroup;
 }
 
+const configurationChanges = new EventEmitter<{ affectsConfiguration(section: string): boolean }>();
+
 export const workspace: {
 	workspaceFile: URI | undefined;
 	workspaceFolders: Array<{ uri: URI }> | undefined;
 	name: string | undefined;
 	settings: Record<string, unknown>;
 	getConfiguration(section: string): { get<T>(key: string, fallback: T): T };
+	onDidChangeConfiguration: typeof configurationChanges.event;
+	/** Fires a configuration change that affects the given full setting keys (and the sections that contain them). */
+	fireConfigurationChange(...keys: string[]): void;
 } = {
 	workspaceFile: undefined,
 	workspaceFolders: undefined,
@@ -82,11 +87,38 @@ export const workspace: {
 			return name in workspace.settings ? (workspace.settings[name] as T) : fallback;
 		},
 	}),
+	onDidChangeConfiguration: configurationChanges.event,
+	fireConfigurationChange(...keys) {
+		configurationChanges.fire({
+			affectsConfiguration: section => keys.some(key => key === section || key.startsWith(`${section}.`) || section.startsWith(`${key}.`)),
+		});
+	},
+};
+
+/** `vscode.ColorThemeKind`. */
+export const ColorThemeKind = { Light: 1, Dark: 2, HighContrast: 3, HighContrastLight: 4 } as const;
+
+const colorThemeChanges = new EventEmitter<{ readonly kind: number }>();
+const extensionChanges = new EventEmitter<void>();
+
+/** The installed extensions as a module reads them: `all` is set by a test, `fireChange` is `onDidChange`. */
+export const extensions: {
+	all: Array<{ extensionPath: string; packageJSON: unknown }>;
+	onDidChange: typeof extensionChanges.event;
+	fireChange(): void;
+} = {
+	all: [],
+	onDidChange: extensionChanges.event,
+	fireChange: () => extensionChanges.fire(),
 };
 
 const focusChanges = new EventEmitter<{ readonly focused: boolean }>();
 
 export const window: {
+	activeColorTheme: { kind: number };
+	onDidChangeActiveColorTheme: typeof colorThemeChanges.event;
+	/** Switches the active theme's kind and fires `onDidChangeActiveColorTheme`. */
+	setColorThemeKind(kind: number): void;
 	state: { focused: boolean };
 	onDidChangeWindowState: typeof focusChanges.event;
 	fireFocus(focused: boolean): void;
@@ -105,6 +137,12 @@ export const window: {
 	createStatusBarItem(id: string, alignment: number, priority?: number): StubStatusBarItem;
 	registerWebviewPanelSerializer(viewType: string, serializer: { deserializeWebviewPanel(panel: unknown, state: unknown): Thenable<void> }): { dispose(): void };
 } = {
+	activeColorTheme: { kind: ColorThemeKind.Dark },
+	onDidChangeActiveColorTheme: colorThemeChanges.event,
+	setColorThemeKind(kind) {
+		window.activeColorTheme = { kind };
+		colorThemeChanges.fire({ kind });
+	},
 	state: { focused: true },
 	onDidChangeWindowState: focusChanges.event,
 	fireFocus(focused) {
