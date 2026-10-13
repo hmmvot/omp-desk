@@ -99,15 +99,15 @@ function guestCsp(webview: vscode.Webview, nonce: string, connectSrc: string): s
 	].join("; ");
 }
 
-/** Native settings are message-only pages: no bridge listener or network capability. */
-export function createSettingsHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
+/** Native settings are message-only pages: no bridge listener or network capability. `bundle` names the page script under `media/`. */
+export function createSettingsHtml(webview: vscode.Webview, extensionUri: vscode.Uri, bundle: "settings.js" | "omp-settings.js" = "settings.js", title = "OMP Settings"): string {
 	const nonce = randomBytes(16).toString("base64url");
 	const root = extensionUri.path.replace(/\/$/, "");
-	const script = webview.asWebviewUri(extensionUri.with({ path: `${root}/media/settings.js` }));
+	const script = webview.asWebviewUri(extensionUri.with({ path: `${root}/media/${bundle}` }));
 	const icons = webview.asWebviewUri(extensionUri.with({ path: `${root}/media/codicons/codicon.css` }));
 	return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="${guestCsp(webview, nonce, "'none'")}">
-<meta name="csp-nonce" content="${nonce}"><title>OMP Settings</title><link rel="stylesheet" href="${icons}"></head>
+<meta name="csp-nonce" content="${nonce}"><title>${title}</title><link rel="stylesheet" href="${icons}"></head>
 <body><div id="root"></div><script nonce="${nonce}" src="${script}"></script></body></html>`;
 }
 

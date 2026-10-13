@@ -625,6 +625,18 @@ describe("native Models and Agents settings", () => {
 		assert.deepEqual(opened, [`${TAB}:models`, `${TAB}:agents`, `${TAB}:models`]);
 		for (const type of ["prompt", "steer", "follow_up"]) assert.equal(channel.commandsOfType(type).length, 0);
 	});
+	it("opens the full OMP settings editor for a bare /settings on every route, never sending it", async () => {
+		const opened: string[] = [];
+		const { runtime, channel } = await liveRig({}, { openSettings: async (kind, tabId) => { opened.push(`${tabId}:${kind}`); } });
+		const page = new RecordingPage("omp-settings-source");
+		page.readOnlyReason = () => "view-only route";
+		runtime.attachPage(TAB, page);
+		for (const [index, type] of ["omp:chat-prompt", "omp:chat-steer", "omp:chat-follow-up"].entries()) {
+			assert.equal(await runtime.handleMessage(TAB, { type: type as "omp:chat-prompt", requestId: `omp-settings-${index}`, text: index === 1 ? " /SETTINGS \n" : "/settings" }, page), "accepted");
+		}
+		assert.deepEqual(opened, [`${TAB}:omp`, `${TAB}:omp`, `${TAB}:omp`]);
+		for (const type of ["prompt", "steer", "follow_up"]) assert.equal(channel.commandsOfType(type).length, 0);
+	});
 	it("opens once across duplicate routes and passes model selector arguments through unchanged", async () => {
 		let opened = 0;
 		const { runtime, channel } = await liveRig({}, { openSettings: async () => { opened += 1; } });

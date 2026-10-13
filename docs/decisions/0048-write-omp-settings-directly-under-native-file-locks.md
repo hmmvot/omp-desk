@@ -5,6 +5,8 @@ date: 2026-10-08
 
 # ADR-0048: Write OMP settings directly under native file locks
 
+> Narrowly extended by [ADR-0071](0071-edit-omps-settings-from-its-own-registry-in-a-staged-worker-and-write-one-layer-at-a-time.md): the same locked transaction also writes the project layer and the global layer of every panel setting for the OMP Settings editor.
+
 ## Context and Problem Statement
 
 Native Models/Agents editor tabs must persist the configuration the installed TUI dashboards manage. RPC exposes active-model changes, not role, fallback, preset or per-agent settings writes. Hosting the TUI is explicitly not the chosen user experience. Configuration belongs to OMP profiles and projects, not VS Code settings.

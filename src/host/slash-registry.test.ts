@@ -37,6 +37,7 @@ describe("terminal-only slash commands", () => {
 		assert.deepEqual(tuiCommandGuidance("hotkeys"), { command: "hotkeys", action: "keyboard-shortcuts", line: "/hotkeys is a terminal command; opened the OMP keyboard shortcuts instead." });
 		assert.equal(tuiCommandGuidance("git").action, "source-control");
 		assert.equal(tuiCommandGuidance("login").action, "provider-login");
+		assert.deepEqual(tuiCommandGuidance("settings"), { command: "settings", action: "omp-settings", line: "/settings is a terminal command; opened the OMP settings editor instead." });
 		assert.equal(tuiCommandGuidance("copy").action, undefined);
 		assert.match(tuiCommandGuidance("vibe").line, /^\/vibe was not sent: it works only in OMP's terminal UI/);
 		for (const command of ["restart", "logout"]) assert.match(tuiCommandGuidance(command).line, /^\/\w+ was not sent: it is a terminal command\. Use the Sessions view/, "the remaining terminal-only commands keep their guidance");

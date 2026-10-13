@@ -67,7 +67,8 @@
     "onUri",
     "onWebviewPanel:omp.session",
     "onWebviewPanel:omp.shellTerminal",
-    "onWebviewPanel:omp.settings"
+    "onWebviewPanel:omp.settings",
+    "onWebviewPanel:ompDesk.ompSettings"
   ],
   "contributes": {
     "configuration": {
@@ -337,6 +338,12 @@
       }
     ],
     "commands": [
+      {
+        "command": "ompDesk.openOmpSettings",
+        "title": "Open OMP Settings",
+        "category": "OMP Desk",
+        "icon": "$(settings-gear)"
+      },
       {
         "command": "ompDesk.openModels",
         "title": "Open Models Settings",
@@ -1156,6 +1163,11 @@
         }
       ],
       "view/title": [
+        {
+          "command": "ompDesk.openOmpSettings",
+          "when": "view == ompDesk.sessions",
+          "group": "1_settings@0"
+        },
         {
           "command": "ompDesk.openModels",
           "when": "view == ompDesk.sessions",

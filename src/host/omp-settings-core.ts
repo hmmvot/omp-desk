@@ -79,8 +79,16 @@ function putValue(data: ConfigRecord, path: readonly string[], value: unknown): 
   if (value === undefined) delete parent[leaf];
   else Object.defineProperty(parent, leaf, { value, writable: true, enumerable: true, configurable: true });
 }
+function pruneEmptyParents(data: ConfigRecord, path: readonly string[]): void {
+  for (let length = path.length - 1; length >= 1; length--) {
+    const parent = valueAt(data, path.slice(0, length));
+    if (!record(parent) || Object.keys(parent).length > 0) return;
+    putValue(data, path.slice(0, length), undefined);
+  }
+}
 /** Merge only explicitly edited leaves; sibling changes and unknown keys stay intact. */
-export function mergeConfigEdits(current: ConfigRecord, baseline: ConfigRecord, edits: readonly ConfigEdit[], allowed: (path: readonly string[]) => boolean = allowedPath): ConfigRecord {
+/** `pruneEmpty` also removes a mapping a removal left empty, as OMP's own `unset` does. */
+export function mergeConfigEdits(current: ConfigRecord, baseline: ConfigRecord, edits: readonly ConfigEdit[], allowed: (path: readonly string[]) => boolean = allowedPath, pruneEmpty = false): ConfigRecord {
   if (edits.length === 0 || edits.length > 100) throw new SettingsRefusal("No valid settings changes were provided.");
   for (const edit of edits) {
     if (!allowed(edit.path)) throw new SettingsRefusal("This editor cannot write that setting.");
@@ -93,7 +101,10 @@ export function mergeConfigEdits(current: ConfigRecord, baseline: ConfigRecord, 
     }
   }
   const result = structuredClone(current);
-  for (const edit of edits) putValue(result, edit.path, structuredClone(edit.value));
+  for (const edit of edits) {
+    putValue(result, edit.path, structuredClone(edit.value));
+    if (pruneEmpty && edit.value === undefined) pruneEmptyParents(result, edit.path);
+  }
   return result;
 }
 

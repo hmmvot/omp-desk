@@ -5,6 +5,8 @@ date: 2026-10-09
 
 # ADR-0052: Answer terminal-only commands in Chat, restore the queue on Stop, and keep `queue_update` ahead of older state reads
 
+> Narrowly amended by [ADR-0071](0071-edit-omps-settings-from-its-own-registry-in-a-staged-worker-and-write-one-layer-at-a-time.md): a bare `/settings` and its terminal-only guidance now open the OMP Settings editor instead of the Models editor, and the interception runs before the advertised-name rule, as `/models` and `/agents` do.
+
 ## Context and Problem Statement
 
 Chat is an `omp --mode rpc-ui` child ([ADR-0038](0038-host-chat-over-rpc-ui-on-a-broker-pipe-child.md)). Bringing more of the terminal UI's everyday controls into Chat raised four questions:

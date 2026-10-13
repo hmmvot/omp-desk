@@ -260,6 +260,7 @@ import { access } from "node:fs/promises";
 import type { SessionProcesses } from "./wiring/process-wiring";
 import { SettingsEditors } from "./host/omp-settings-editor";
 import type { SettingsEditorContext } from "./host/omp-settings-editor";
+import { OmpConfigEditors } from "./host/omp-config-editor";
 import { SETTINGS_APPLY_NOT_LIVE } from "./host/omp-settings-apply";
 // The folder-shell owner hint and the broker's own answer about it (ADR-0030): the
 // extension can only *discover* the candidate owning instance, and it may only report
@@ -1579,6 +1580,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       }),
     };
   };
+  /** `/settings` from a Chat shows that Chat's folder and profile, so its project layer is the one the session reads. */
+  const ompConfigBinding = async (tabId: string) => {
+    const { folder, profile, executable } = await settingsBinding(tabId);
+    return { folder, profile, ...(executable ? { executable } : {}) };
+  };
   // Settings open in the global scope; the editor's scope control reaches a project folder.
   const settingsEditors = new SettingsEditors(context, {
     defaultProfile: () => {
@@ -1588,6 +1594,17 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     folders: () => folders.list().map(folder => folder.path),
   });
   context.subscriptions.push(settingsEditors);
+  // The full OMP settings editor (ADR-0071): `/settings` in Chat, the palette command and the Sessions title menu. It opens on the
+  // active session's folder (else the first workspace folder), so the project layer is one click away from the global one.
+  const ompConfigEditors = new OmpConfigEditors(context, {
+    defaultProfile: () => {
+      const active = index.activeTabId === null ? null : index.get(index.activeTabId);
+      return active?.scope.profile ?? process.env.OMP_PROFILE ?? process.env.PI_PROFILE ?? DEFAULT_OMP_PROFILE;
+    },
+    defaultFolder: () => (index.activeTabId === null ? null : index.get(index.activeTabId)?.cwd) ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null,
+    folders: () => folders.list().map(folder => folder.path),
+  });
+  context.subscriptions.push(ompConfigEditors);
   // Desk's host tools (ADR-0055): the debugger tools are registered for every Chat session while ompDesk.agentDebugger.enabled is on.
   const agentDebugger = activateAgentDebugger(context, { log });
   // The candidate colour themes of Chat's fenced code; registered with the context, re-sent to pages when they change.
@@ -1605,13 +1622,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       switch (action) {
         case "new-session": return newSessionInPlace(context, index, tabId);
         case "delete-session": return deleteSessionInPlace(context, index, tabId);
-        case "models-settings": await settingsEditors.open("models", await settingsBinding(tabId)); return;
+        case "omp-settings": await ompConfigEditors.open(await ompConfigBinding(tabId)); return;
         default: return runDeskSlashAction(action);
       }
     },
     // Models from a Chat shows that Chat's folder so its default can be applied to the session;
     // agent settings are global, so Agents opens in the global scope for the Chat's profile.
     openSettings: async (kind, tabId) => {
+      if (kind === "omp") { await ompConfigEditors.open(await ompConfigBinding(tabId)); return; }
       const binding = await settingsBinding(tabId);
       await settingsEditors.open(kind, kind === "agents" ? { folder: null, profile: binding.profile, ...(binding.executable ? { executable: binding.executable } : {}) } : binding);
     },
@@ -5299,7 +5317,7 @@ async function runChatAction(context: vscode.ExtensionContext, index: SessionInd
 }
 
 /** The Desk stand-in for a terminal-UI slash command typed into Chat (`host/slash-registry.ts`). */
-async function runDeskSlashAction(action: Exclude<DeskSlashAction, "models-settings" | "new-session" | "delete-session">): Promise<void> {
+async function runDeskSlashAction(action: Exclude<DeskSlashAction, "omp-settings" | "new-session" | "delete-session">): Promise<void> {
   switch (action) {
     case "keyboard-shortcuts":
       await showChatKeyboardShortcuts();

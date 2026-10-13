@@ -48,6 +48,8 @@ test("display projection excludes unrelated config and nested unknown preset or 
 test("native settings slash interception is exact while model selector arguments pass through", () => {
   for (const text of ["/model", "/models", " /MODELS \n"]) assert.equal(nativeSettingsCommand(text), "models");
   for (const text of ["/agents", "/agents ignored", "/agents\nignored\narguments"]) assert.equal(nativeSettingsCommand(text), "agents");
+  for (const text of ["/settings", " /SETTINGS \n"]) assert.equal(nativeSettingsCommand(text), "omp");
+  for (const text of ["/settings models", "/settingsx", "explain /settings", "/settings/other"]) assert.equal(nativeSettingsCommand(text), null);
   for (const text of ["/model p/m", "/models p/m", "explain /agents", "/agents/other", "/modeling"]) assert.equal(nativeSettingsCommand(text), null);
 });
 const nativeSource = path.join(homedir(), ".bun", "install", "global", "node_modules", "@oh-my-pi", "pi-tui", "src", "overlays", "agents-hub.ts");
@@ -70,4 +72,13 @@ test("a bare generated spec keeps code fences inside its strings, as OMP 18.8's 
   const spec = { identifier: "fence-writer", whenToUse: "Use this agent when a reply needs a fenced example", systemPrompt };
   assert.deepEqual(parseAgentSpec(JSON.stringify(spec)), spec);
   assert.deepEqual(parseAgentSpec(`\u0060\u0060\u0060json\n${JSON.stringify({ ...spec, systemPrompt: "Plain." })}\n\u0060\u0060\u0060`), { ...spec, systemPrompt: "Plain." }, "a fenced reply is still unwrapped");
+});
+
+test("pruneEmpty removes the mappings a removal emptied, as OMP's own unset does, and never one that still holds a key", () => {
+  const all = (): boolean => true;
+  const current = { lsp: { diagnosticsOnWrite: true }, tui: { vimMode: true, other: 1 }, keep: "x" };
+  assert.deepEqual(mergeConfigEdits(current, current, [{ path: ["lsp", "diagnosticsOnWrite"] }], all, true), { tui: { vimMode: true, other: 1 }, keep: "x" });
+  assert.deepEqual(mergeConfigEdits(current, current, [{ path: ["tui", "vimMode"] }], all, true), { lsp: { diagnosticsOnWrite: true }, tui: { other: 1 }, keep: "x" });
+  assert.deepEqual(mergeConfigEdits(current, current, [{ path: ["lsp", "diagnosticsOnWrite"] }], all), { lsp: {}, tui: { vimMode: true, other: 1 }, keep: "x" }, "off by default: the Models and Agents editors keep their shapes");
+  assert.deepEqual(mergeConfigEdits({ a: { b: { c: 1 } } }, { a: { b: { c: 1 } } }, [{ path: ["a", "b", "c"] }], all, true), {}, "every emptied ancestor goes");
 });

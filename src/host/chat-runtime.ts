@@ -40,7 +40,7 @@ import type { RpcChannel } from "../protocol/rpc.ts";
 import { RpcSession, readViewOnlySnapshot } from "./rpc/session.ts";
 import type { ClearOutcome, NavigateOutcome, NavigateRequest, RestoredQueue, RpcRecoveryReason, RpcSessionOptions, RpcSessionOutput, SendOutcome } from "./rpc/session.ts";
 import type { HostToolProvider } from "./tools/host-tool.ts";
-import { nativeSettingsCommand, type SettingsKind } from "../chat/settings-command.ts";
+import { nativeSettingsCommand, type NativeSettingsTarget } from "../chat/settings-command.ts";
 import { CLEAR_DEFERRED_SENTENCES, CLEAR_DONE_SENTENCE, CLEAR_REFUSAL_SENTENCES } from "../chat/clear.ts";
 import { DESK_COMMAND_ARGUMENTS_SENTENCE, DESK_COMMAND_UNAVAILABLE_SENTENCE, NEW_BUSY_SENTENCE, deskSessionCommand, type DeskSessionCommand } from "../chat/desk-commands.ts";
 import { tuiCommandGuidance, tuiOnlyCommand, type BuiltinSlashEntry, type DeskSlashAction } from "./slash-registry.ts";
@@ -144,7 +144,7 @@ export interface ChatRuntimeOptions {
 	/** The colour themes that may be active (the page picks by its theme id); empty while unknown, which shows plain code. */
 	readonly readCodeThemes?: () => readonly CodeTheme[];
 	/** Opens native profile settings, not an OMP prompt or a hosted dashboard. */
-	readonly openSettings?: (kind: SettingsKind, tabId: string) => Promise<void>;
+	readonly openSettings?: (kind: NativeSettingsTarget, tabId: string) => Promise<void>;
 	/** The installed OMP's builtin slash registry, or `null` while it is unknown (nothing is refused as TUI-only then). */
 	readonly slashRegistry?: () => readonly BuiltinSlashEntry[] | null;
 	/** Runs the Desk equivalent of a terminal-UI slash command. */

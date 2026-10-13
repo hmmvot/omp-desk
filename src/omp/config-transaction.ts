@@ -16,7 +16,7 @@ import type { NativeModules } from "./settings-contracts.ts";
  * fsync and replace, no unlink, exclusive first creation. OMP's serializer drops YAML comments.
  */
 export interface FileBaseline { logical: string; physical: string; exists: boolean; digest: string; settings: ConfigRecord }
-export interface ConfigWriteRequest { baseline?: FileBaseline; edits?: ConfigEdit[]; scope?: SettingsScope }
+export interface ConfigWriteRequest { baseline?: FileBaseline; edits?: ConfigEdit[]; scope?: SettingsScope; pruneEmpty?: boolean }
 
 /** The two OMP utility modules the transaction needs; presence is checked, not assumed. */
 async function utilsImport<Name extends "file-lock.ts" | "yaml-config.ts">(root: string, file: Name): Promise<NativeModules[Name]> {
@@ -76,7 +76,7 @@ export async function writeConfig(
     const current = await readConfig(logical);
     if (current.physical !== baseline.physical || current.exists !== baseline.exists) throw new SettingsRefusal("The config target changed. Reload before saving.");
     const layer = request.scope === "project" ? current.settings : await migratedGlobal();
-    const merged = mergeConfigEdits(layer, baseline.settings, request.edits!, allowed);
+    const merged = mergeConfigEdits(layer, baseline.settings, request.edits!, allowed, request.pruneEmpty === true);
     if (request.edits!.every(edit => isDeepStrictEqual(valueAt(layer, edit.path), edit.value))) return false;
     validate(merged, request.edits!);
     const content = stringifyYamlConfig(merged);

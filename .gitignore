@@ -5,6 +5,7 @@ media/guest.*
 media/shell.js*
 media/settings.js*
 media/desk-settings.js*
+media/omp-settings.js*
 media/mermaid.js*
 media/codicons/
 .vscode-test/
