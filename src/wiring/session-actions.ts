@@ -23,7 +23,8 @@ import type { NativeStopVerdict } from "../host/rpc-reconcile.ts";
 import { holderSeemsAlive } from "../host/holder-liveness.ts";
 import { claimHolderMayBeAlive } from "../host/session-claim.ts";
 import { readSessionFileHeader } from "../host/session-files.ts";
-import type { OmpHostAttachRequest, OmpHostAttachResult, RestoreOutcome, SessionIndex } from "../host/session-index.ts";
+import type { RestoreOutcome, SessionIndex } from "../host/session-index.ts";
+import type { SessionRuntime } from "../runtime/session-runtime.ts";
 import { createSessionKiller } from "../host/session-kill-wiring.ts";
 import type { CapturedHost, KillSelection, RecordedProcess } from "../host/session-kill.ts";
 import { confirmedSessionDeletion, deleteManagedSession, inspectSessionDeletion } from "../host/session-lifecycle.ts";
@@ -146,7 +147,8 @@ export interface SessionRuntimePort<Tab extends SessionTab> {
 	retireBroker(tabId: string, runtime: SessionHostRuntime): Promise<void>;
 	releaseHostControl(context: vscode.ExtensionContext, tabId: string, ownerGeneration: string | null): Promise<void>;
 	reconnectHostControl(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, ownerGeneration: string, runtime: SessionHostRuntime): Promise<void>;
-	attachHost(context: vscode.ExtensionContext, index: SessionIndex, request: OmpHostAttachRequest): Promise<OmpHostAttachResult>;
+	/** This window's session runtime: lifecycle actions re-adopt a native writer through it and never launch. */
+	sessionRuntime(): SessionRuntime;
 	/** The control owner a recorded host's credentials are filed under. */
 	recordedControlOwner(entry: SessionIndexEntry): string | null;
 	/** The control owner of a live runtime's credentials. */
@@ -725,21 +727,7 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 
 	/** Attach only; a lifecycle action must never launch a process to stop it. */
 	async function reattachNativeForLifecycle(context: vscode.ExtensionContext, index: SessionIndex, tabId: string): Promise<void> {
-		const entry = index.get(tabId);
-		if (entry?.host?.transport !== "native") return;
-		const observation = await index.observeOwnership(tabId);
-		const verdict = await deps.reconciler().reconcile({
-			entry, sessionFile: entry.sessionFile, draftIdentity: entry.ownership?.draftIdentity ?? null,
-			ownerGeneration: entry.ownership?.ownerGeneration ?? "", claim: observation.ok ? observation.claim : null, host: entry.host,
-		});
-		if (verdict.kind !== "attachable") return;
-		await index.restore(tabId, {
-			reconciler: deps.reconciler(), allowStoppedResume: false, mode: "terminal",
-			launcher: {
-				launch: async () => ({ state: "not-started", reason: "A lifecycle action only reattaches an existing native writer." }),
-				attach: request => deps.attachHost(context, index, request),
-			},
-		});
+		await deps.sessionRuntime().reattach({ conversation: tabId });
 		const runtime = deps.tab(tabId)?.runtime;
 		if (runtime?.kind === "terminal") await deps.reconnectHostControl(context, index, tabId, index.get(tabId)?.ownership?.ownerGeneration ?? "", runtime);
 	}

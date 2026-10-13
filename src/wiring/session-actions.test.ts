@@ -20,6 +20,7 @@ import type { SessionHostRuntime } from "../host/native-session.ts";
 import type { SessionIndex } from "../host/session-index.ts";
 import type { OwnerReconciler, RecordedHostStopPort } from "../host/session-availability.ts";
 import type { SessionIndexEntry } from "../host/session-model.ts";
+import { LocalSessionRuntime } from "../runtime/local-runtime.ts";
 import type { SessionActionsDeps, SessionTab } from "./session-actions.ts";
 
 // The module and the views it imports load the `vscode` specifier; map it before the first import.
@@ -169,7 +170,14 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 		retireBroker: async () => {},
 		releaseHostControl: async (_context, tabId, owner) => { released.push([tabId, owner]); },
 		reconnectHostControl: async () => {},
-		attachHost: async (...args) => { reattached.push(args.slice(2)); return { state: "unavailable", reason: "fixture" } as never; },
+		sessionRuntime: () => new LocalSessionRuntime({
+			index: index as never,
+			reconciler: () => state.reconciler,
+			launcher: () => ({
+				launch: async () => ({ state: "not-started", reason: "fixture" }),
+				attach: async request => { reattached.push([request]); return { state: "unavailable", reason: "fixture" }; },
+			}),
+		}),
 		recordedControlOwner: entry => entry.ownership?.ownerGeneration ?? null,
 		controlOwnerFor: (_runtime, generation) => generation,
 		forgetTurnActivity: (_index, tabId) => { forgotten.push(tabId); },

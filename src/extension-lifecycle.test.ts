@@ -250,7 +250,7 @@ export const harness = {
     const w = fixtureWindow();
     w.context = context;
     w.reconciler = createOwnerReconciler(ports);
-    launcher = () => hostLauncher;
+    w.sessionRuntime = new LocalSessionRuntime({ index: w.indexForBridge, reconciler: () => w.reconciler, launcher: () => hostLauncher });
     w.editorPanels = { ...w.editorPanels, openPanel: () => undefined };
     // The broker facts of the fixture's rows come in through the handle's deps, not by reassigning a function of the module.
     w.sessionActions = registerSessionActions({ ...sessionActionsDeps(), brokerProvenanceFor: () => ({ kind: 'slot', slot: 'host:legacy-fixture' }), recordedHostStopPort: () => stopPort });
@@ -281,7 +281,7 @@ export const harness = {
   reset(index, conversation) {
     harness.installWindow(createWindowState(fixtureContext));
     const w = fixtureWindow();
-    w.chat = conversation; w.indexForBridge = index; w.startupRestorePending = false;
+    w.chat = conversation; w.indexForBridge = index; w.sessionRuntime = createSessionRuntime(index); w.startupRestorePending = false;
     w.detailTabs = new DetailTabs({ createPanel() { throw new Error('the fixture opens no detail tab'); }, attachPage: () => () => {}, handleMessage: async () => ({ status: 'refused' }), openUrl: async () => {}, log() {} });
     fixtureVscode.window.errors.length = 0;
     fixtureVscode.env.clipboard.writes.length = 0;
@@ -1808,6 +1808,7 @@ describe("native replacement lifecycle", () => {
       await first.beginDocument(DOCUMENT, "d".repeat(32)); first.pinOrigin(DOCUMENT, ORIGIN);
       assert.ok(await first.commit(nativeBinding(native)));
       harness.reset(index, oldHost);
+      harness.window().context = saved.context;
       const panel = { reveal() {}, viewType: "omp.session", webview: { html: "", cspSource: "vscode-webview://test",
         asWebviewUri: (uri: unknown) => uri, postMessage: async () => true } };
       const priorEditor = harness.editor(index, first, panel); priorEditor.runtime = native;
@@ -1879,6 +1880,7 @@ describe("native replacement lifecycle", () => {
       const receiptPage: ChatPage = { id: "bridge-admission", post: message => restarted.pushTerminal(documentId, message) ? "sent" : "dropped" };
       resources.push(restarted);
       harness.reset(index, newHost);
+      harness.window().context = saved.context;
       const state = harness.editor(index, restarted, null); state.runtime = survivor;
       state.bridge!.documentId = documentId;
       try {
@@ -5376,6 +5378,7 @@ describe("Resume from a stopped Chat", () => {
     const rendered = new ChatClient({ post: message => { void host.handleMessage(TAB, message as ChatWebviewMessage, null); return true; } });
     host.attachPage(TAB, { id: "page", post: message => { rendered.handle(message); return "sent"; } });
     harness.reset(index, host);
+    harness.window().context = saved.context;
     const panel = { reveal() {}, viewType: "omp.session", webview: { html: "", cspSource: "vscode-webview://test",
       asWebviewUri: (uri: unknown) => uri, postMessage: async () => true } };
     harness.editor(index, {}, panel);

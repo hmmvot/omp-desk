@@ -46,6 +46,7 @@ import {
 } from "./host/session-index";
 import { isManagedHost } from "./host/session-model";
 import { normalizeSessionIdentityKey, readSessionFileHeader } from "./host/session-files";
+import { LocalSessionRuntime } from "./runtime/local-runtime";
 import type {
   OmpHostAttachRequest,
   OmpHostAttachResult,
@@ -512,6 +513,8 @@ interface WindowState {
    * builds the ports here — before any restore, open or draft pass runs.
    */
   reconciler: OwnerReconciler;
+  /** This window's session runtime (ADR-0066): open, restore and reattach go through it, never to the index directly. */
+  sessionRuntime: LocalSessionRuntime;
   /** The session index this activation created, for the bridge's own eligibility checks. */
   indexForBridge: SessionIndex | null;
   /** This window's view of the profile catalog, built once at activation (ADR-0034). */
@@ -956,6 +959,7 @@ function sessionActionsDeps(): SessionActionsDeps<TabState> {
   return {
     context: () => windowState().context,
     reconciler: () => windowState().reconciler,
+    sessionRuntime: () => windowState().sessionRuntime,
     brokerSlots: () => windowState().brokerSlots,
     shellSlots: () => windowState().shellSlots,
     launcherFolders: () => windowState().launcherFolders,
@@ -994,7 +998,6 @@ function sessionActionsDeps(): SessionActionsDeps<TabState> {
     retireBroker,
     releaseHostControl,
     reconnectHostControl,
-    attachHost,
     recordedControlOwner,
     controlOwnerFor,
     forgetTurnActivity,
@@ -1142,6 +1145,7 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
   return {
     // Session index and claims
     reconciler: undefined as never, // assigned by `activate` before anything reads it
+    sessionRuntime: undefined as never, // assigned by `activate` before anything reads it
     indexForBridge: null,
     catalogStore: undefined,
     catalogReady: Promise.resolve(),
@@ -1613,6 +1617,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // A legacy host's identical hidden VS Code terminal, held by this window.
     hasTerminal: async pid => (await findTerminalForPid(pid)) !== null,
   });
+  s.sessionRuntime = createSessionRuntime(index);
   const settingsBinding = async (tabId: string): Promise<SettingsEditorContext> => {
     const entry = index.get(tabId);
     if (entry === null) throw new Error("The launching OMP conversation is no longer registered.");
@@ -3184,12 +3189,12 @@ async function openTabOnce(
   try {
     // Restoring the editor or opening stopped history never lifts its stopped intent.
     // Only Resume (or explicitly starting a draft with no history) may do that.
-    outcome = await index.restore(tabId, {
-      reconciler: s.reconciler,
-      launcher: launcher(context, index),
+    const editorSlot = stateOf(tabId)?.slotId;
+    outcome = await s.sessionRuntime.open({
+      conversation: tabId,
       mode: opening.mode,
-      editorSlotId: stateOf(tabId)?.slotId,
       allowStoppedResume: intent === "explicit" && (verb !== "opened" || stoppedForOpen),
+      ...(editorSlot === undefined ? {} : { editorBinding: { slot: editorSlot } }),
     });
   } catch (error) {
     s.guestDispatcher.presentUnavailable(index, tabId, messageOf(error));
@@ -3204,6 +3209,20 @@ async function openTabOnce(
 
 // Launch and reconciliation ports
 
+/** This window's session runtime: its index, reconciler and launcher behind the `SessionRuntime` port. */
+function createSessionRuntime(index: SessionIndex): LocalSessionRuntime {
+  return new LocalSessionRuntime({
+    index,
+    reconciler: () => windowState().reconciler,
+    launcher: () => {
+      const context = windowState().context;
+      if (context === undefined) throw new Error("The session runtime was used before activation.");
+      return launcher(context, index);
+    },
+  });
+}
+
+/** The host launcher the runtime hands to the index (still this module's launch and attach, until cut 3). */
 function launcher(context: vscode.ExtensionContext, index: SessionIndex): OmpHostLauncher {
   return {
     launch: request => launchHost(context, index, request),
@@ -4273,7 +4292,7 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
       state.document = null;
       if (state.bridge !== null) await windowState().bridgeHost.prepareDocument(context, state.bridge.editorId);
       windowState().editorPanels.renderPanelDocument(context, state.slotId);
-      replacement = await index.replaceHost(tabId, { confirmedStopped: true, expectedPid: runtime.pid, expectedCreationTime: runtime.identity.childCreationTime, mode, slotId: state.slotId, emptyFile: fresh.file, launcher: launcher(context, index) }, lease);
+      replacement = await windowState().sessionRuntime.replaceWriterHeld({ conversation: tabId, confirmedStopped: true, expectedPid: runtime.pid, expectedCreationTime: runtime.identity.childCreationTime, mode, slot: state.slotId, emptyFile: fresh.file }, lease);
       if (replacement.status === "failed" && state.runtime === null) await index.closeSession(tabId, { confirmedStopped: true, detail: replacement.detail }, lease);
     });
     await withSessionReadDeadline(admitted.promise);
@@ -4428,7 +4447,7 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
       state.document = null;
       if (state.bridge !== null) await windowState().bridgeHost.prepareDocument(context, state.bridge.editorId);
       windowState().editorPanels.renderPanelDocument(context, state.slotId);
-      replacement = await index.replaceHost(tabId, { confirmedStopped: true, expectedPid: runtime.pid, expectedCreationTime: creationTime, mode: "chat", slotId: state.slotId, emptyFile: file, launcher: launcher(context, index) }, lease);
+      replacement = await s.sessionRuntime.replaceWriterHeld({ conversation: tabId, confirmedStopped: true, expectedPid: runtime.pid, expectedCreationTime: creationTime, mode: "chat", slot: state.slotId, emptyFile: file }, lease);
       if (replacement.status === "failed" && state.runtime === null) await index.closeSession(tabId, { confirmedStopped: true, detail: replacement.detail }, lease);
     });
     if (replacement !== null) await handleRestoreOutcome(context, index, tabId, replacement);
@@ -4773,7 +4792,7 @@ async function restoreTabs(
     // another workspace put in the shared index. Nothing waits on any other process or
     // service: each row is reconciled against its own broker slot.
     const passStartedAt = Date.now();
-    report = await index.restoreAll({ reconciler: s.reconciler, launcher: launcher(context, index), only: cohort });
+    report = await s.sessionRuntime.restore({ cohort });
     windowTiming("restore pass", `restoreAll ${Date.now() - passStartedAt} ms for ${cohort.size} rows`);
   } catch (error) {
     showError(`Stored OMP sessions could not be restored: ${messageOf(error)}`);
