@@ -411,25 +411,28 @@ function parseBlockRange(lines: readonly string[], from: number, firstKey: numbe
 				rows.push(splitTableRow(row));
 				index++;
 			}
+			// A table cannot wrap below its longest words: a wide one scrolls inside its own block, never the transcript.
 			blocks.push(
-				<table key={`b${key++}`}>
-					<thead>
-						<tr>
-							{header.map((cell, cellIndex) => (
-								<th key={`th${cellIndex}`}>{renderInline(cell, `th${cellIndex}`)}</th>
-							))}
-						</tr>
-					</thead>
-					<tbody>
-						{rows.map((row, rowIndex) => (
-							<tr key={`tr${rowIndex}`}>
-								{header.map((_, cellIndex) => (
-									<td key={`td${cellIndex}`}>{renderInline(row[cellIndex] ?? "", `td${rowIndex}-${cellIndex}`)}</td>
+				<div className="omp-table-scroll" key={`b${key++}`}>
+					<table>
+						<thead>
+							<tr>
+								{header.map((cell, cellIndex) => (
+									<th key={`th${cellIndex}`}>{renderInline(cell, `th${cellIndex}`)}</th>
 								))}
 							</tr>
-						))}
-					</tbody>
-				</table>,
+						</thead>
+						<tbody>
+							{rows.map((row, rowIndex) => (
+								<tr key={`tr${rowIndex}`}>
+									{header.map((_, cellIndex) => (
+										<td key={`td${cellIndex}`}>{renderInline(row[cellIndex] ?? "", `td${rowIndex}-${cellIndex}`)}</td>
+									))}
+								</tr>
+							))}
+						</tbody>
+					</table>
+				</div>,
 			);
 			continue;
 		}

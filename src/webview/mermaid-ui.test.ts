@@ -373,6 +373,38 @@ test("mermaid blocks in Chat", { skip: browserPath === undefined, timeout: 240_0
 			await clean();
 		});
 
+		await t.test("a wide diagram, fitted or at full size, never widens the transcript: only its own frame scrolls", async () => {
+			await open("narrow");
+			const wide = `flowchart LR\n${Array.from({ length: 9 }, (_, index) => `  N${index}[Step number ${index} of the long pipeline] --> N${index + 1}[Step number ${index + 1} of the long pipeline]`).join("\n")}`;
+			await ui.evaluate(reply(fence(wide)));
+			await ui.wait("document.querySelector('.omp-mermaid--drawn img')");
+			const sideways = (): Promise<{ transcript: [number, number]; frame: [number, number]; full: boolean }> => ui.evaluate("(()=>{const t=document.querySelector('.omp-transcript'),frame=document.querySelector('.omp-mermaid-frame');return{transcript:[t.scrollWidth,t.clientWidth],frame:[frame.scrollWidth,frame.clientWidth],full:frame.hasAttribute('data-full')}})()");
+			for (const width of [360, 480, 900]) {
+				await ui.call("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: false });
+				await ui.settle();
+				const fitted = await sideways();
+				assert.equal(fitted.full, false);
+				assert.ok(fitted.transcript[0] <= fitted.transcript[1], `fitted at ${width}px the transcript does not scroll sideways (${fitted.transcript.join(" over ")})`);
+				await ui.evaluate("document.querySelector('.omp-mermaid-zoom').click()");
+				await ui.wait("document.querySelector('.omp-mermaid-frame[data-full]')");
+				await ui.settle();
+				const full = await sideways();
+				assert.ok(full.transcript[0] <= full.transcript[1], `at full size at ${width}px the transcript does not scroll sideways (${full.transcript.join(" over ")})`);
+				assert.ok(full.frame[0] > full.frame[1], `at full size at ${width}px the diagram's own frame scrolls (${full.frame.join(" over ")})`);
+				await ui.evaluate("document.querySelector('.omp-mermaid-zoom').click()");
+				await ui.wait("!document.querySelector('.omp-mermaid-frame[data-full]')");
+			}
+			// The same source as code, with a line longer than the panel: the code block scrolls, the transcript does not.
+			await ui.evaluate(reply(fence(`flowchart LR\n  A[${"long label ".repeat(40)}] --> B`, false)));
+			await ui.wait("document.querySelector('.omp-md pre code')");
+			await ui.settle();
+			const code = await ui.evaluate<{ transcript: [number, number]; pre: [number, number] }>("(()=>{const t=document.querySelector('.omp-transcript'),pre=document.querySelector('.omp-md pre');return{transcript:[t.scrollWidth,t.clientWidth],pre:[pre.scrollWidth,pre.clientWidth]}})()");
+			assert.ok(code.transcript[0] <= code.transcript[1], "the transcript does not scroll sideways with a long source line");
+			assert.ok(code.pre[0] > code.pre[1], "the source block scrolls on its own");
+			await ui.call("Emulation.setDeviceMetricsOverride", { width: 700, height: 900, deviceScaleFactor: 1, mobile: false });
+			await clean();
+		});
+
 		await t.test("a source over the cap is refused without loading the renderer", async () => {
 			await open("oversize");
 			await ui.evaluate(reply(fence(`flowchart TD\n${"  A --> B\n".repeat(2100)}`)));

@@ -181,6 +181,8 @@ ${ANSI_STYLES}
 .omp-transcript {
 	flex: 1 1 auto;
 	overflow-y: auto;
+	/* Last guard only: everything wide wraps or scrolls in its own block. */
+	overflow-x: hidden;
 	padding: 16px max(12px, calc((100% - 840px) / 2)) 24px;
 	min-height: 0;
 	overflow-anchor: none;
@@ -252,6 +254,7 @@ ${ANSI_STYLES}
 .omp-row { display: flex; gap: var(--omp-gap); padding: 3px 0; }
 
 
+.omp-body-block { min-width: 0; }
 .omp-row--assistant .omp-body-block { flex: 1 1 auto; min-width: 0; }
 
 .omp-row--user { margin: 16px 0 20px; }
@@ -336,6 +339,8 @@ ${ANSI_STYLES}
 
 /* ── markdown ───────────────────────────────────────────────────────────── */
 
+/* Long words, URLs, paths and links wrap at the block's edge; the blocks that cannot wrap (a table, fenced code) scroll on their own below. */
+.omp-md { min-width: 0; overflow-wrap: anywhere; }
 .omp-md p { margin: 8px 0; }
 .omp-md h1, .omp-md h2, .omp-md h3, .omp-md h4, .omp-md h5, .omp-md h6 { margin: 16px 0 4px; line-height: 1.3; font-weight: 600; }
 .omp-md h1 { font-size: 1.35em; }
@@ -353,6 +358,7 @@ ${ANSI_STYLES}
  * without that the preformatted-text colours. Plain code and code that later becomes a link look the same.
  */
 .omp-md code {
+	overflow-wrap: anywhere;
 	--omp-code-ink: var(--omp-inline-code, var(--vscode-debugTokenExpression-string));
 	--omp-code-tint: color-mix(in srgb, var(--omp-code-ink) 14%, transparent);
 	font-family: var(--omp-mono);
@@ -413,9 +419,10 @@ ${ANSI_STYLES}
 	color: var(--omp-muted);
 }
 .vscode-high-contrast .omp-md blockquote, .vscode-high-contrast-light .omp-md blockquote { border-left-color: var(--vscode-contrastBorder); }
-/* Tables are ruled by their rows, not boxed in a grid. */
-.omp-md table { border-collapse: collapse; margin: 8px 0; }
-.omp-md th, .omp-md td { border: 0; border-bottom: 1px solid var(--omp-border); padding: 4px 16px 4px 0; text-align: left; }
+/* Tables are ruled by their rows, not boxed in a grid. One cannot wrap below its longest words: a wide one scrolls inside its own block, and its cells break only at spaces. */
+.omp-table-scroll { max-width: 100%; margin: 8px 0; overflow-x: auto; }
+.omp-md table { border-collapse: collapse; }
+.omp-md th, .omp-md td { border: 0; border-bottom: 1px solid var(--omp-border); padding: 4px 16px 4px 0; text-align: left; overflow-wrap: normal; }
 .omp-md th { font-weight: 600; color: var(--omp-muted); }
 
 .omp-think { margin: 4px 0; }

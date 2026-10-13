@@ -4748,6 +4748,118 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		await t.test("long lines wrap and only a block that cannot wrap scrolls: the transcript and the page never scroll sideways at 360, 480 and 900 px", async () => {
+			await reset("chat-overflow", "detailed");
+			const path = "omp-vscode/Strings/Layouts/Wrapping/Specializations/TranscriptWrapSpecialist/Talents/TranscriptWrapSpecialist_Case03_Feature_m_LongLineRules_ConfigurationOverride_Final.json";
+			const provenPath = "proven/Layouts/Wrapping/Specializations/TranscriptWrapSpecialist/Talents/TranscriptWrapSpecialist_Case03_Feature_m_LongLineRules.ts:12:4";
+			const word = "Supercalifragilisticexpialidocious".repeat(6);
+			const url = `https://example.com/very/long/path/${"segment-".repeat(24)}end?query=${"abcdef".repeat(30)}&b=1`;
+			const columns = Array.from({ length: 14 }, (_, index) => `column-name-${String(index).padStart(2, "0")}`);
+			const table = [`| ${columns.join(" | ")} |`, `| ${columns.map(() => "---").join(" | ")} |`, `| ${columns.map((_, index) => `cell-value-${index}`).join(" | ")} |`].join("\n");
+			const reply = [
+				`Path \`${path}\` ends the line.`,
+				`Proven file \`${provenPath}\` and a [link \`${path}\`](https://example.com/a) and a [${word}](https://example.com/b).`,
+				`URL ${url} then a word ${word} done.`,
+				`## Heading ${word}`,
+				`- list item with \`${path}\`\n- list item ${word}`,
+				`> quote ${word}`,
+				table,
+				`\`\`\`ts\nconst longLine = "${"0123456789".repeat(40)}";\n\`\`\``,
+			].join("\n\n");
+			const assistant = (content: unknown[], extra: Record<string, unknown> = {}) => ({ role: "assistant", model: "m", timestamp: 2, stopReason: "stop", content, ...extra });
+			const toolCall = (id: string, name: string, args: unknown) => assistant([{ type: "toolCall", id, name, arguments: args }], { stopReason: "toolUse" });
+			const toolResult = (id: string, name: string, text: string, details: unknown = {}) => ({ role: "toolResult", timestamp: 3, toolCallId: id, toolName: name, isError: false, content: [{ type: "text", text }], details });
+			/** The transcript holds exactly these messages (every one a root, as the other fixtures do). */
+			const show = (messages: unknown[]) => ui.evaluate(`(()=>{
+			 const entries=${JSON.stringify(messages)}.map((message,index)=>({type:'message',id:'of-'+index,parentId:null,timestamp:'2026-10-01T00:00:00.000Z',message}));
+			 window.ui.push({entries,durableCount:entries.length,working:false,settled:true})})()`);
+			await ui.evaluate(`(()=>{
+			 window.answered=new Set();
+			 window.answerLinks=setInterval(()=>{for(const message of window.sent){
+			  if(message.type!=='omp:terminal-link-validate'||window.answered.has(message.requestId))continue;
+			  window.answered.add(message.requestId);
+			  window.ui.receive({type:'omp:terminal-link-validation',requestId:message.requestId,valid:message.target.startsWith('proven/')});
+			 }},5);
+			 // Every element that sticks out of the transcript's right edge without a scrolling block of its own around it.
+			 window.culprits=()=>{const t=document.querySelector('.omp-transcript'),limit=t.getBoundingClientRect().right,out=[];
+			  for(const el of t.querySelectorAll('*')){const r=el.getBoundingClientRect();if(r.width===0||r.right<=limit+1)continue;
+			   let clipped=false;for(let p=el.parentElement;p&&p!==t;p=p.parentElement){const o=getComputedStyle(p).overflowX;if(o==='auto'||o==='scroll'||o==='hidden'){clipped=true;break}}
+			   if(!clipped)out.push(el.tagName.toLowerCase()+'.'+String(el.className).split(' ').join('.')+' right='+Math.round(r.right)+' "'+(el.textContent||'').slice(0,24)+'"')}
+			  return out.slice(0,40)};
+			 // The nearest ancestor that scrolls sideways: the block that owns the overflow.
+			 window.scroller=el=>{for(let p=el.parentElement;p;p=p.parentElement){const o=getComputedStyle(p).overflowX;if(o==='auto'||o==='scroll')return p}return null};
+			 window.lines=el=>({height:el.getBoundingClientRect().height,line:parseFloat(getComputedStyle(el).lineHeight),rects:el.getClientRects().length});
+			})()`);
+			/** At each width: the transcript and the page never scroll sideways, nothing sticks out of it, and `read`'s answer passes `check`. */
+			const atEachWidth = async <T>(label: string, settle: string, read: string, check: (facts: T, where: string) => void) => {
+				for (const width of [360, 480, 900]) {
+					await ui.call("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: false });
+					await ui.settleGeometry(`.omp-transcript,${settle}`);
+					const facts = await ui.evaluate<{ transcript: [number, number]; page: [number, number]; culprits: string[]; read: T }>(`(()=>{const t=document.querySelector('.omp-transcript');
+					 return {transcript:[t.scrollWidth,t.clientWidth],page:[document.documentElement.scrollWidth,innerWidth],culprits:window.culprits(),read:${read}}})()`);
+					const where = `${label} at ${width}px`;
+					assert.ok(facts.transcript[0] <= facts.transcript[1], `the transcript does not scroll sideways: ${where} (${facts.transcript.join(" over ")}); sticking out: ${facts.culprits.join(" | ")}`);
+					assert.ok(facts.page[0] <= facts.page[1], `the page does not scroll sideways: ${where}`);
+					assert.deepEqual(facts.culprits, [], `nothing sticks out of the transcript: ${where}`);
+					check(facts.read, where);
+				}
+			};
+
+			// A reply: inline path, file and web links, a URL, long words, a list, a heading, a quote, a wide table and a long code line; then a long user message.
+			await show([assistant([{ type: "text", text: reply }]), { role: "user", timestamp: 20, content: `Please look at ${path} and ${word} and ${url}` }]);
+			await ui.wait("document.querySelector('.omp-md table') && document.querySelector('.omp-md pre') && document.querySelector('.omp-user') && document.querySelector('.omp-file-link')");
+			type Prose = { path: Lines | null; user: Lines | null; table: Block; fence: Block; links: { target: string; rects: number }[] };
+			type Lines = { height: number; line: number; rects: number };
+			type Block = { own: boolean; scroll: [number, number] };
+			await atEachWidth<Prose>("a reply and a user message", ".omp-md table,.omp-md pre", `(()=>{
+			 const pathCode=[...document.querySelectorAll('.omp-md p code')].find(code=>code.textContent.startsWith('omp-vscode/Strings')&&!code.closest('.omp-file-link,.omp-web-link'));
+			 const block=el=>{const host=window.scroller(el);return {own:host!==null&&host!==document.querySelector('.omp-transcript'),scroll:host?[host.scrollWidth,host.clientWidth]:[0,0]}};
+			 return {path:pathCode?window.lines(pathCode):null,user:document.querySelector('.omp-user')?window.lines(document.querySelector('.omp-user')):null,
+			  table:block(document.querySelector('.omp-md table')),fence:block(document.querySelector('.omp-md pre code')),
+			  links:[...document.querySelectorAll('.omp-md .omp-file-link, .omp-md .omp-web-link')].map(link=>({target:link.dataset.fileTarget??link.dataset.webUrl??'',rects:link.getClientRects().length}))}})()`,
+			(facts, where) => {
+				assert.ok(facts.path !== null && facts.path.height > facts.path.line * 1.5 && facts.path.rects > 1, `a long inline path wraps: ${where} (${facts.path?.height}px over ${facts.path?.line}px lines)`);
+				assert.ok(facts.user !== null && facts.user.height > facts.user.line * 3, `a long user message wraps: ${where} (${facts.user?.height}px over ${facts.user?.line}px lines)`);
+				assert.ok(facts.links.length >= 3 && facts.links.some(link => link.target.startsWith("proven/")), `file and web links are rendered: ${where}`);
+				assert.ok(facts.table.own && facts.table.scroll[0] > facts.table.scroll[1], `the wide table scrolls inside its own block: ${where} (${facts.table.scroll.join(" over ")})`);
+				assert.ok(facts.fence.own && facts.fence.scroll[0] > facts.fence.scroll[1], `the long code line scrolls inside its own block: ${where} (${facts.fence.scroll.join(" over ")})`);
+			});
+
+			// Thinking and a provider error with long words and URLs.
+			await show([assistant([{ type: "thinking", thinking: `Thinking about ${path} and ${word}` }, { type: "text", text: `Reasoned ${word}` }], { stopReason: "error", errorMessage: `Request failed: ${word} ${url}` })]);
+			await ui.wait("document.querySelector('.omp-turn-error')");
+			await atEachWidth<null>("thinking and a provider error", ".omp-turn-error", "null", () => {});
+
+			// Tool cards, each opened: a Write line, a Bash command, an Edit diff line, a Read line and Grep matches.
+			const cards: [string, string, unknown, string, unknown][] = [
+				["of-write", "write", { path: "out/long.txt", content: `${"x".repeat(400)}\nshort` }, "done", {}],
+				["of-bash", "bash", { command: `node ${path} --flag=${"a".repeat(200)} --other ${"b".repeat(100)}` }, `${"y".repeat(400)}\nok`, { exitCode: 0 }],
+				["of-edit", "edit", { path: "src/a.ts" }, "done", { path: "src/a.ts", diff: ` 1|const a = 1;\n-2|const b = "${"o".repeat(300)}";\n+2|const b = "${"n".repeat(300)}";\n 3|let c = 3;`, firstChangedLine: 2 }],
+				["of-read", "read", { path }, "done", { displayContent: { text: `${"r".repeat(400)}\nshort`, startLine: 1 } }],
+				["of-grep", "grep", { pattern: word, path }, `${path}:12:${word}\n${path}:13:${"g".repeat(300)}`, {}],
+			];
+			for (const [id, name, args, text, details] of cards) {
+				await show([toolCall(id, name, args), toolResult(id, name, text, details)]);
+				await ui.wait(`document.querySelector('[data-tool-call-id="${id}"] .omp-tool-head')`);
+				await ui.evaluate(`document.querySelector('[data-tool-call-id="${id}"] .omp-tool-head').click()`);
+				await ui.wait(`document.querySelector('[data-tool-call-id="${id}"] .omp-tool-body')`);
+				await atEachWidth<{ right: number; limit: number }>(`the ${name} card`, `[data-tool-call-id="${id}"]`,
+					`({right:document.querySelector('[data-tool-call-id="${id}"] .omp-tool-head').getBoundingClientRect().right,limit:t.getBoundingClientRect().right})`,
+					(facts, where) => assert.ok(facts.right <= facts.limit + 1, `the title stays in its row: ${where}`));
+			}
+
+			// The Ask dialog with long options stays inside its card and the page.
+			const long = `${"An answer that goes on and on about ".repeat(3)}${word}`;
+			await show([]);
+			await ui.evaluate(`window.ui.push({uiRequests:[{id:'of-ask',method:'ask',title:'t',questions:[{id:'only',question:${JSON.stringify(`Which of ${path}?`)},multi:false,options:[{label:${JSON.stringify(long)},description:${JSON.stringify(`${url} ${word}`)}},{label:${JSON.stringify(path)}}]}]}],working:true,settled:false})`);
+			await ui.wait("document.querySelectorAll('.omp-ask-option').length===3");
+			await atEachWidth<{ card: [number, number]; outside: number }>("the Ask dialog", ".omp-ask", `(()=>{const card=document.querySelector('.omp-ask'),right=card.getBoundingClientRect().right;
+			 return {card:[card.scrollWidth,card.clientWidth],outside:[...card.querySelectorAll('*')].filter(el=>el.getBoundingClientRect().right>right+1).length}})()`,
+			(facts, where) => assert.ok(facts.card[0] <= facts.card[1] && facts.outside === 0, `long Ask options wrap inside the card: ${where} (${facts.card.join(" over ")}, ${facts.outside} outside)`));
+			await ui.evaluate("clearInterval(window.answerLinks)");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 	} finally {
 		page?.socket.close();
 		if (browser) await browser.call("Browser.close").catch(() => {});
