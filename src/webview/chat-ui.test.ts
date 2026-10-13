@@ -4617,6 +4617,51 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		await t.test("inline code is the theme's string colour on a tint of it, and a link in it or around it looks the same", async () => {
+			await reset("inline-code-colour");
+			const root = "document.documentElement.style";
+			await ui.evaluate(`${root}.setProperty('--vscode-textPreformat-foreground','#d0d0d0');${root}.setProperty('--vscode-textPreformat-background','#3c3c3c')`);
+			await ui.evaluate(`(()=>{
+			 const row=(id,message)=>({type:'message',id,parentId:null,timestamp:'2026-10-01T00:00:00.000Z',message});
+			 window.ui.push({entries:[row('reply',{role:'assistant',model:'m',timestamp:2,stopReason:'stop',content:[{type:'text',text:'Plain \`plain\`, web [\`web\`](https://example.com/a), file \`src/proof.ts\`.'}]})],durableCount:1,working:false,settled:true});
+			 const proven=['src/proof.ts'];window.answered=new Set();
+			 window.answerLinks=setInterval(()=>{for(const message of window.sent){
+			  if(message.type!=='omp:terminal-link-validate'||window.answered.has(message.requestId))continue;
+			  window.answered.add(message.requestId);
+			  window.ui.receive({type:'omp:terminal-link-validation',requestId:message.requestId,valid:proven.includes(message.target)});
+			 }},5)})()`);
+			await ui.wait("document.querySelector('.omp-file-link') && document.querySelector('.omp-web-link > code')");
+			const inline = `(()=>{
+			 const style=node=>{const s=getComputedStyle(node);return{color:s.color,background:s.backgroundColor,line:s.textDecorationLine,lineColor:s.textDecorationColor}};
+			 const plain=[...document.querySelectorAll('.omp-md p code')].find(node=>node.textContent==='plain'), web=document.querySelector('.omp-web-link > code');
+			 const link=document.querySelector('.omp-file-link'), code=link.closest('code')??link.querySelector('code')??link, mark=link.closest('code')?link:code;
+			 const painted=style(code);
+			 return{plain:style(plain),web:style(web),file:{color:painted.color,background:painted.background,line:style(mark).line,lineColor:style(mark).lineColor},linkColor:style(link)}})()`;
+			const fallback = await ui.evaluate<Record<string, Record<string, string> | null>>(inline);
+			assert.equal(fallback.plain!.color, "rgb(208, 208, 208)", "without a string colour the preformatted-text colours stand");
+			assert.equal(fallback.plain!.background, "rgb(60, 60, 60)");
+			await ui.evaluate("window.ui.receive({type:'omp:chat-code-theme',themes:[{id:'Dark Modern',rules:[{scopes:['string'],foreground:'#CE9178'}]}]})");
+			await ui.wait(`getComputedStyle(document.querySelector('.omp-md p code')).color==='rgb(206, 145, 120)'`);
+			const themed = await ui.evaluate<Record<string, Record<string, string> | null>>(inline);
+			assert.match(themed.plain!.background, /0\.14/, "the string colour at 14% on transparent");
+			assert.equal(themed.plain!.line, "none", "plain code has no underline");
+			for (const linked of ["web", "file"]) {
+				assert.equal(themed[linked]!.color, themed.plain!.color, `${linked} link code keeps the code colour`);
+				assert.equal(themed[linked]!.background, themed.plain!.background, `${linked} link code keeps the code tint`);
+				assert.equal(themed[linked]!.line, "underline", `${linked} link code is marked by an underline`);
+				assert.match(themed[linked]!.lineColor, /\/ 0\.55\)/, `${linked} link underline is faint`);
+			}
+			assert.equal(themed.linkColor!.color, themed.plain!.color, "the file link takes the code's colour");
+			// High Contrast keeps the theme's own preformatted colours: no tint.
+			await ui.evaluate("document.body.classList.add('vscode-high-contrast')");
+			const contrast = await ui.evaluate<Record<string, Record<string, string> | null>>(inline);
+			assert.equal(contrast.plain!.color, "rgb(208, 208, 208)");
+			assert.equal(contrast.plain!.background, "rgb(60, 60, 60)");
+			assert.equal(contrast.web!.background, contrast.plain!.background);
+			await ui.evaluate(`document.body.classList.remove('vscode-high-contrast');clearInterval(window.answerLinks);window.ui.receive({type:'omp:chat-code-theme',themes:[]});${root}.removeProperty('--vscode-textPreformat-foreground');${root}.removeProperty('--vscode-textPreformat-background')`);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 	} finally {
 		page?.socket.close();
 		if (browser) await browser.call("Browser.close").catch(() => {});

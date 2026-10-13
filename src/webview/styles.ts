@@ -346,19 +346,45 @@ ${ANSI_STYLES}
 .omp-file-link, .omp-web-link { color: var(--vscode-textLink-foreground); cursor: pointer; }
 .omp-file-link:hover, .omp-web-link:hover { text-decoration: underline; color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground)); }
 .omp-file-link:focus-visible, .omp-web-link:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; border-radius: var(--omp-radius); text-decoration: underline; }
+/*
+ * Inline code: the editor theme's string colour on a tint of itself. The page sets --omp-inline-code from the theme's
+ * rules; until they arrive (or when the theme has no string rule) the workbench's own string colour stands in, and
+ * without that the preformatted-text colours. Plain code and code that later becomes a link look the same.
+ */
 .omp-md code {
+	--omp-code-ink: var(--omp-inline-code, var(--vscode-debugTokenExpression-string));
+	--omp-code-tint: color-mix(in srgb, var(--omp-code-ink) 14%, transparent);
 	font-family: var(--omp-mono);
 	font-size: .92em;
-	color: var(--vscode-textPreformat-foreground, var(--vscode-foreground));
-	background: var(--vscode-textPreformat-background);
+	color: var(--omp-code-ink, var(--vscode-textPreformat-foreground, var(--vscode-foreground)));
+	background: var(--omp-code-tint, var(--vscode-textPreformat-background));
 	border-radius: var(--omp-radius);
 	padding: 0 4px;
 }
-/* A link inside code, or code inside a link (a symbol linked to its definition): code colours, underlined as a link. */
-.omp-md code .omp-file-link, .omp-md code .omp-file-link:hover { color: inherit; text-decoration: underline; }
-.omp-md .omp-file-link > code, .omp-md .omp-web-link > code { text-decoration: underline; }
-/* A symbol with several definitions: the code colours, underlined dotted (not solid like one definition); a click opens the workspace symbol search. */
-.omp-md code .omp-symbol-search, .omp-md code .omp-symbol-search:hover { color: inherit; cursor: pointer; text-decoration: underline dotted; }
+/* High Contrast keeps the theme's own preformatted colours: a tint is not distinguishable there. */
+.vscode-high-contrast .omp-md :not(pre) > code, .vscode-high-contrast-light .omp-md :not(pre) > code {
+	color: var(--vscode-textPreformat-foreground, var(--vscode-foreground));
+	background: var(--vscode-textPreformat-background);
+}
+/* A link inside code, or code inside a link (a symbol linked to its definition): the code's own colour and tint, marked only by a faint underline. */
+.omp-md code .omp-file-link, .omp-md code .omp-file-link:hover { color: inherit; }
+.omp-md code .omp-file-link, .omp-md .omp-file-link > code, .omp-md .omp-web-link > code {
+	text-decoration: underline;
+	text-decoration-color: color-mix(in srgb, currentColor 55%, transparent);
+	text-underline-offset: 2px;
+}
+.omp-md code .omp-file-link:hover, .omp-md .omp-file-link:hover > code, .omp-md .omp-web-link:hover > code { text-decoration-color: currentColor; }
+/* The link around code draws no line of its own: it would take the link colour, not the code's. */
+.omp-md .omp-file-link:has(> code), .omp-md .omp-web-link:has(> code) { text-decoration: none; }
+/* A symbol with several definitions: the same, dotted (not solid like one definition); a click opens the workspace symbol search. */
+.omp-md code .omp-symbol-search, .omp-md code .omp-symbol-search:hover {
+	color: inherit;
+	cursor: pointer;
+	text-decoration: underline dotted;
+	text-decoration-color: color-mix(in srgb, currentColor 55%, transparent);
+	text-underline-offset: 2px;
+}
+.omp-md code .omp-symbol-search:hover { text-decoration-color: currentColor; }
 .omp-md code .omp-symbol-search:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; border-radius: var(--omp-radius); }
 .omp-md pre {
 	background: var(--vscode-textCodeBlock-background);
@@ -370,6 +396,8 @@ ${ANSI_STYLES}
 	margin: 8px 0;
 }
 .omp-md pre code { color: inherit; background: none; padding: 0; font-size: var(--omp-mono-size); line-height: 1.45; }
+/* Coloured code: text no rule colours is the editor's own text colour, as in the editor. */
+.omp-md pre code[data-highlighted] { color: var(--vscode-editor-foreground, var(--vscode-foreground)); }
 /* Hover Copy on fenced code blocks and user messages: hidden until the block is hovered or the button is focused. */
 .omp-code-block { position: relative; }
 .omp-copy-button { display: inline-flex; align-items: center; gap: 4px; padding: 2px 4px; border: 1px solid var(--vscode-button-border, transparent); border-radius: var(--omp-radius); background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); font: inherit; font-size: 11px; cursor: pointer; }
@@ -396,8 +424,6 @@ ${ANSI_STYLES}
 	color: var(--omp-muted);
 	font: inherit;
 	font-size: 11px;
-/* Coloured code: text no rule colours is the editor's own text colour, as in the editor. */
-.omp-md pre code[data-highlighted] { color: var(--vscode-editor-foreground, var(--vscode-foreground)); }
 	cursor: pointer;
 	padding: 0;
 }

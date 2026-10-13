@@ -1,6 +1,7 @@
 /** VS Code built-in theme tokens captured from an isolated workbench, with checkbox/widget/testing defaults resolved from the public color registry. */
 const palettes = [
 	{ name: "Dark Modern", bodyClass: "vscode-dark", colors: {
+		"debugTokenExpression-string": "#ce9178",
 		foreground: "#cccccc", descriptionForeground: "#9d9d9d", "editor-background": "#1f1f1f", "editorWidget-background": "#202020",
 		"input-background": "#313131", "input-foreground": "#cccccc", "input-border": "#3c3c3c", "button-background": "#0078d4", "button-foreground": "#ffffff", "button-hoverBackground": "#026ec1",
 		"button-secondaryBackground": "rgba(0, 0, 0, 0)", "button-secondaryForeground": "#cccccc", "button-secondaryHoverBackground": "#2b2b2b", "button-border": "rgba(255, 255, 255, 0.1)", contrastBorder: "",
@@ -11,6 +12,7 @@ const palettes = [
 		"checkbox-background": "#313131", "checkbox-foreground": "#cccccc", "checkbox-border": "#3c3c3c", "widget-border": "#313131", "testing-iconFailed": "#f88070",
 	}, expected: { background: "rgb(31, 31, 31)", foreground: "rgb(204, 204, 204)", blue: "rgb(36, 114, 200)" } },
 	{ name: "Light Modern", bodyClass: "vscode-light", colors: {
+		"debugTokenExpression-string": "#a31515",
 		foreground: "#3b3b3b", descriptionForeground: "#3b3b3b", "editor-background": "#ffffff", "editorWidget-background": "#f8f8f8",
 		"input-background": "#ffffff", "input-foreground": "#3b3b3b", "input-border": "#cecece", "button-background": "#005fb8", "button-foreground": "#ffffff", "button-hoverBackground": "#0258a8",
 		"button-secondaryBackground": "#e5e5e5", "button-secondaryForeground": "#3b3b3b", "button-secondaryHoverBackground": "#cccccc", "button-border": "rgba(0, 0, 0, 0.1)", contrastBorder: "",
@@ -21,6 +23,7 @@ const palettes = [
 		"checkbox-background": "#f8f8f8", "checkbox-foreground": "#3b3b3b", "checkbox-border": "#cecece", "widget-border": "#e5e5e5", "testing-iconFailed": "#b01011",
 	}, expected: { background: "rgb(255, 255, 255)", foreground: "rgb(59, 59, 59)", blue: "rgb(4, 81, 165)" } },
 	{ name: "High Contrast", bodyClass: "vscode-high-contrast", colors: {
+		"debugTokenExpression-string": "#f48771",
 		foreground: "#ffffff", descriptionForeground: "rgba(255, 255, 255, 0.7)", "editor-background": "#000000", "editorWidget-background": "#0c141f",
 		"input-background": "#000000", "input-foreground": "#ffffff", "input-border": "#6fc3df", "button-background": "#000000", "button-foreground": "#ffffff", "button-hoverBackground": "#000000",
 		"button-secondaryBackground": "", "button-secondaryForeground": "#ffffff", "button-secondaryHoverBackground": "", "button-border": "#6fc3df", contrastBorder: "#6fc3df",
@@ -31,6 +34,7 @@ const palettes = [
 		"checkbox-background": "#000000", "checkbox-foreground": "#ffffff", "checkbox-border": "#6fc3df", "widget-border": "#6fc3df", "testing-iconFailed": "",
 	}, expected: { background: "rgb(0, 0, 0)", foreground: "rgb(255, 255, 255)", blue: "rgb(0, 0, 238)" } },
 	{ name: "High Contrast Light", bodyClass: "vscode-high-contrast-light", colors: {
+		"debugTokenExpression-string": "#a31515",
 		foreground: "#292929", descriptionForeground: "rgba(41, 41, 41, 0.7)", "editor-background": "#ffffff", "editorWidget-background": "#ffffff",
 		"input-background": "#ffffff", "input-foreground": "#292929", "input-border": "#0f4a85", "button-background": "#0f4a85", "button-foreground": "#ffffff", "button-hoverBackground": "#0f4a85",
 		"button-secondaryBackground": "#ffffff", "button-secondaryForeground": "#292929", "button-secondaryHoverBackground": "", "button-border": "#0f4a85", contrastBorder: "#0f4a85",
