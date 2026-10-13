@@ -149,7 +149,7 @@ Re-adopting one surviving session used four PowerShell identity readings: the br
 ### Consequences
 
 - Readings per re-adopted row (reconcile plus attach): a `managed-rpc` row whose broker attests, 0 (was 4); one whose broker is from an older build, 4 (as before; concurrent proofs of the same pid share one probe); a native Terminal row, 2 (was 4: the child once for each proof, the broker not read).
-- The probe helper (a staged copy, with two access verifications) is not staged on the trusted attach path. The attach gate waits only for hashing the packaged tree in place.
+- The probe helper (a staged copy, with two access verifications at the time of this amendment; one when the copy is already staged and nothing is written, and each pass one PowerShell start instead of four: [ADR-0012](0012-run-child-process-entries-from-staged-copies.md) and [ADR-0054](0054-verify-private-windows-storage-with-security-identifiers.md), 2026-10-13 amendments) is not staged on the trusted attach path. The attach gate waits only for hashing the packaged tree in place.
 - The state-directory access verification (a few PowerShell runs, once per window; a window now starts it at activation so it overlaps the rest of activation) and the tree staging's access verification are unchanged, and are the PowerShell a trusted attach still waits on. Caching them touches the other-account boundary and needs its own review.
 - The status gains one optional field; an older host ignores it and an older broker omits it, so no protocol version changes and mixed generations keep working.
 - Smaller notes: a silent listener on a dead broker's port still costs the 10 s handshake bound; the stop path no longer stages the probe helper up front, it stages it when a reading is needed.

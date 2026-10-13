@@ -103,6 +103,8 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 		provider: undefined as unknown,
 		view: undefined as { message?: string; visible: boolean } | undefined,
 		processes: null as { refresh(): Promise<{ rows: unknown[] }>; sync(): void; touch(): void; serveStopRequest(): Promise<never[]> } | null,
+		/** The window's startup restore: `null` once it is over (the default), otherwise what the Processes poll waits for. */
+		restoreOver: null as Promise<void> | null,
 		registry: undefined as { readOtherWindows(): Promise<{ unreadable: number; windows: unknown[] }> } | undefined,
 		shellSlots: undefined as { get(slot: string): unknown } | undefined,
 		shellEditors: new Set<string>(),
@@ -216,6 +218,7 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 		sessionProcesses: () => state.processes as never,
 		setSessionProcesses: processes => { state.processes = processes as never; },
 		catalogLoaded: () => true,
+		startupRestoreOver: () => state.restoreOver,
 		tab: key => key === null ? undefined : state.tabs.get(key) ?? [...state.tabs.values()].find(candidate => candidate.tabId === key),
 		tabs: () => state.tabs,
 		detailTabs: () => ({ closeConversation: tabId => { conversationsClosed.push(tabId); } }),
@@ -942,6 +945,91 @@ describe("the processes of the Sessions view", () => {
 		} finally {
 			for (const subscription of context.subscriptions) subscription.dispose();
 		}
+	});
+
+	describe("while the startup restore runs", () => {
+		/** One Processes registration over a visible view; `over` is what the window's startup restore settles. */
+		async function visibleProcesses(over: Promise<void> | null) {
+			const index = fakeIndex([{ tabId: TAB, cwd: "C:/proj", host: null }]);
+			const w = await world(index);
+			w.state.provenance = { kind: "none" };
+			const published: unknown[] = [];
+			const waiters: Array<{ count: number; resolve(): void }> = [];
+			w.state.view = { message: undefined, visible: true };
+			w.state.provider = { headlineFor: () => "headline", displayedState: () => "stopped", setProcesses: (snapshot: never) => {
+				published.push(snapshot);
+				for (const waiter of waiters) if (published.length >= waiter.count) waiter.resolve();
+			} };
+			w.state.restoreOver = over;
+			const storage = await mkdtemp(path.join(temp, "storage-"));
+			const context = { globalStorageUri: { fsPath: storage }, subscriptions: [] as { dispose(): void }[], extensionUri: { fsPath: storage } };
+			w.actions.setupProcesses(context as never, index as never, { name: "folders" } as never);
+			/** Settles once `count` snapshots have been served to the view. */
+			const served = (count: number): Promise<void> => {
+				const waiter = Promise.withResolvers<void>();
+				if (published.length >= count) waiter.resolve();
+				else waiters.push({ count, resolve: waiter.resolve });
+				return waiter.promise;
+			};
+			return { w, published, served, dispose: () => { for (const subscription of context.subscriptions) subscription.dispose(); } };
+		}
+
+		it("reads at once when the restore is over: showing the view is a background read that does not wait", async () => {
+			const f = await visibleProcesses(null);
+			try {
+				f.w.state.processes!.sync();
+				await f.w.state.processes!.refresh();
+				await f.served(2);
+				assert.equal(f.published.length, 2, "the view's own read ran beside the explicit one");
+			} finally {
+				f.dispose();
+			}
+		});
+
+		it("holds the view's read, which would start the probe helper and read process identities, until the restore is over", async () => {
+			const over = Promise.withResolvers<void>();
+			const f = await visibleProcesses(over.promise);
+			try {
+				f.w.state.processes!.sync();
+				// A read that was not held ends within a few milliseconds over this empty registry; the wait only gives it the chance to.
+				await new Promise<void>(resolve => setTimeout(resolve, 150));
+				assert.equal(f.published.length, 0, "the view's read is waiting for the restore");
+				over.resolve();
+				f.w.state.restoreOver = null;
+				await f.served(1);
+				assert.equal(f.published.length, 1, "once the restore is over the held read runs, once");
+			} finally {
+				f.dispose();
+			}
+		});
+
+		it("drops a held read when the view was hidden while it waited", async () => {
+			const over = Promise.withResolvers<void>();
+			const f = await visibleProcesses(over.promise);
+			try {
+				f.w.state.processes!.sync();
+				f.w.state.view!.visible = false;
+				over.resolve();
+				f.w.state.restoreOver = null;
+				await f.w.state.processes!.refresh();
+				assert.equal(f.published.length, 1, "only the explicit read ran");
+			} finally {
+				f.dispose();
+			}
+		});
+
+		it("never holds an explicit action: Refresh reads fresh while the restore is still running", async () => {
+			const over = Promise.withResolvers<void>();
+			const f = await visibleProcesses(over.promise);
+			try {
+				const snapshot = await f.w.state.processes!.refresh();
+				assert.equal(f.published.at(-1), snapshot);
+				assert.deepEqual(f.w.catalogAdoptions, [[{ name: "folders" }]], "it re-read the shared catalog first");
+			} finally {
+				over.resolve();
+				f.dispose();
+			}
+		});
 	});
 });
 

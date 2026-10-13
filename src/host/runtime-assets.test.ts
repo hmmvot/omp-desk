@@ -23,6 +23,7 @@ import { after, describe, it } from "node:test";
 import {
 	RUNTIME_ASSET_DIRECTORY,
 	stageRuntimeAssets,
+	stageRuntimeTree,
 	verifyStagedRuntimeAsset,
 } from "./runtime-assets.ts";
 import { readStorageSecurity, type PrivateStorageCommandResult, type PrivateStorageProbe } from "./private-storage.ts";
@@ -68,6 +69,8 @@ interface AccessProbe {
 	readonly probe: PrivateStorageProbe;
 	/** Every argument list the restriction was applied with. */
 	readonly applied: string[][];
+	/** The paths of every verification pass, in order: a pass reads the owners of its paths exactly once. */
+	readonly passes: string[][];
 }
 
 interface ProbeOptions {
@@ -83,6 +86,8 @@ interface ProbeOptions {
 	readonly omitPath?: string;
 	/** Make the whole owner read fail. */
 	readonly ownerReadFails?: boolean;
+	/** Runs when a verification pass reads its owners, before it answers: what the tree looks like at that moment. */
+	readonly onPass?: (paths: readonly string[]) => Promise<void> | void;
 }
 
 /**
@@ -91,6 +96,7 @@ interface ProbeOptions {
  */
 function windowsProbe(options: ProbeOptions = {}): AccessProbe {
 	const applied: string[][] = [];
+	const passes: string[][] = [];
 	let current = options.acl === undefined ? OWNER_ONLY : options.acl;
 	const probe: PrivateStorageProbe = {
 		platform: "win32",
@@ -106,6 +112,8 @@ function windowsProbe(options: ProbeOptions = {}): AccessProbe {
 			return { ok: true, stdout: "", detail: null };
 		},
 		readOwners: async (paths: readonly string[]): Promise<PrivateStorageCommandResult> => {
+			passes.push([...paths]);
+			await options.onPass?.(paths);
 			if (options.ownerReadFails === true) return { ok: false, stdout: "", detail: "Get-Acl failed" };
 			const ownerOf = options.ownerOf ?? ((): string => ACCOUNT);
 			return {
@@ -118,7 +126,7 @@ function windowsProbe(options: ProbeOptions = {}): AccessProbe {
 			};
 		},
 	};
-	return { probe, applied };
+	return { probe, applied, passes };
 }
 
 /** Run the real System32 `icacls` on one path. */
@@ -331,6 +339,210 @@ describe("staged runtime assets", () => {
 		await stageRuntimeAssets({ storageDir: root, sourcePaths: [source], access: probe });
 
 		assert.deepEqual(applied, [], "a tree that already meets the rule is not rewritten");
+	});
+
+	describe("verification passes", () => {
+		const sourcesOf = async (root: string, files: Record<string, string>) =>
+			await Promise.all(
+				Object.entries(files).map(async ([relativePath, content]) => ({
+					relativePath,
+					sourcePath: await makePackagedFile(root, relativePath.replaceAll("/", "_"), content),
+				})),
+			);
+		const has = (pass: readonly string[], file: string): boolean => pass.some(entry => entry.toLowerCase() === file.toLowerCase());
+
+		it("verifies the rules before the first byte is written and the finished layout after it, when it writes", async () => {
+			const root = await makeRoot();
+			const source = await makePackagedFile(root, "relay.js", "0;\n");
+			const target = stagedPathOf(root, "relay.js", "0;\n");
+			let existedAtFirstPass: boolean | null = null;
+			const { probe, passes } = windowsProbe({ onPass: () => { existedAtFirstPass ??= existsSync(target); } });
+
+			await stageRuntimeAssets({ storageDir: root, sourcePaths: [source], access: probe });
+
+			assert.equal(passes.length, 2, "a staging that writes keeps its two passes");
+			assert.equal(existedAtFirstPass, false, "the first pass ran before the copy existed");
+			assert.equal(has(passes[0]!, target), false);
+			assert.equal(has(passes[1]!, target), true, "the closing pass checks the copy as a file");
+		});
+
+		it("verifies the whole final layout once, and writes nothing, when every copy is already in place", async () => {
+			const root = await makeRoot();
+			const source = await makePackagedFile(root, "relay.js", "0;\n");
+			const target = stagedPathOf(root, "relay.js", "0;\n");
+			await stageRuntimeAssets({ storageDir: root, sourcePaths: [source], access: windowsProbe().probe });
+			const before = await stat(target);
+			const { probe, passes, applied } = windowsProbe();
+
+			const [staged] = await stageRuntimeAssets({ storageDir: root, sourcePaths: [source], access: probe });
+
+			assert.equal(staged!.path, target);
+			assert.equal(passes.length, 1, "one pass instead of two");
+			assert.equal(has(passes[0]!, target), true, "the one pass covers the copy as a file");
+			assert.equal(has(passes[0]!, path.dirname(target)), true, "and the digest directory");
+			assert.equal((await stat(target)).mtimeMs, before.mtimeMs, "nothing was written");
+			assert.deepEqual(applied, []);
+		});
+
+		it("still refuses, after its one pass, a copy that is in place but owned by another account", async () => {
+			const root = await makeRoot();
+			const source = await makePackagedFile(root, "relay.js", "0;\n");
+			const target = stagedPathOf(root, "relay.js", "0;\n");
+			await stageRuntimeAssets({ storageDir: root, sourcePaths: [source], access: windowsProbe().probe });
+			const { probe, passes } = windowsProbe({ ownerOf: entry => (entry === target ? "WORKSTATION\\someone-else" : ACCOUNT) });
+
+			await assert.rejects(
+				stageRuntimeAssets({ storageDir: root, sourcePaths: [source], access: probe }),
+				/owned by S-1-5-21-100-200-300-1002/,
+			);
+			assert.equal(passes.length, 1);
+		});
+
+		it("still refuses a copy in place whose own entry lets another account write it", async () => {
+			const root = await makeRoot();
+			const source = await makePackagedFile(root, "relay.js", "0;\n");
+			const target = stagedPathOf(root, "relay.js", "0;\n");
+			await stageRuntimeAssets({ storageDir: root, sourcePaths: [source], access: windowsProbe().probe });
+			const { probe } = windowsProbe({ permissive: candidate => candidate === target });
+
+			await assert.rejects(
+				stageRuntimeAssets({ storageDir: root, sourcePaths: [source], access: probe }),
+				/is readable by S-1-1-0 \(Everyone\)/,
+			);
+		});
+
+		it("rewrites an unrestricted runtime directory before a staging that writes nothing returns it", async () => {
+			const root = await makeRoot();
+			const source = await makePackagedFile(root, "relay.js", "0;\n");
+			await stageRuntimeAssets({ storageDir: root, sourcePaths: [source], access: windowsProbe().probe });
+			const { probe, applied } = windowsProbe({ acl: ["Everyone"], aclAfterRewrite: OWNER_ONLY });
+
+			await stageRuntimeAssets({ storageDir: root, sourcePaths: [source], access: probe });
+
+			assert.ok(applied.length > 0, "the directories this module owns are limited before the copy is handed out");
+		});
+
+		it("takes both passes again when one of several copies is missing, and the first sees it missing", async () => {
+			const root = await makeRoot();
+			const first = await makePackagedFile(root, "a.js", "a;\n");
+			const second = await makePackagedFile(root, "b.js", "b;\n");
+			await stageRuntimeAssets({ storageDir: root, sourcePaths: [first, second], access: windowsProbe().probe });
+			const lost = stagedPathOf(root, "b.js", "b;\n");
+			await rm(lost);
+			let lostAtFirstPass: boolean | null = null;
+			const { probe, passes } = windowsProbe({ onPass: () => { lostAtFirstPass ??= !existsSync(lost); } });
+
+			await stageRuntimeAssets({ storageDir: root, sourcePaths: [first, second], access: probe });
+
+			assert.equal(passes.length, 2);
+			assert.equal(lostAtFirstPass, true, "the missing copy is written only after the first pass");
+			assert.equal(await readFile(lost, "utf8"), "b;\n");
+		});
+
+		it("takes both passes for a tree it writes and one for a tree already complete", async () => {
+			const root = await makeRoot();
+			const sources = await sourcesOf(root, { "entry.js": "1;\n", "lib/part.js": "2;\n" });
+			const written = windowsProbe();
+
+			const tree = await stageRuntimeTree({ storageDir: root, namespace: "tree", sources, access: written.probe });
+			assert.equal(written.passes.length, 2);
+			assert.equal(has(written.passes[0]!, tree.files[0]!.path), false, "the first pass is ahead of every write");
+
+			const again = windowsProbe();
+			const before = await stat(tree.files[0]!.path);
+			const reused = await stageRuntimeTree({ storageDir: root, namespace: "tree", sources, access: again.probe });
+			assert.equal(again.passes.length, 1);
+			assert.equal(reused.directory, tree.directory);
+			assert.deepEqual(reused.files, tree.files);
+			assert.equal((await stat(tree.files[0]!.path)).mtimeMs, before.mtimeMs, "nothing was written");
+			for (const file of tree.files) assert.equal(has(again.passes[0]!, file.path), true, "every file is verified as a file");
+			assert.equal(has(again.passes[0]!, tree.directory), true, "and the tree's own directory");
+			assert.equal(has(again.passes[0]!, path.join(tree.directory, "lib")), true, "and the directory inside the tree");
+		});
+
+		it("reads the copies again after its one pass, and writes the ones that no longer hold as in a first staging (an asset)", async () => {
+			const root = await makeRoot();
+			const source = await makePackagedFile(root, "relay.js", "0;\n");
+			const [staged] = await stageRuntimeAssets({ storageDir: root, sourcePaths: [source], access: windowsProbe().probe });
+			// The copy is replaced while the one pass runs: a substitution that the pass, which judges access and not bytes, cannot see.
+			let replaced = false;
+			const { probe, passes } = windowsProbe({ onPass: async () => { if (!replaced) { replaced = true; await writeFile(staged!.path, "substituted\n", "utf8"); } } });
+
+			const [again] = await stageRuntimeAssets({ storageDir: root, sourcePaths: [source], access: probe });
+
+			assert.equal(passes.length, 3, "the no-write pass, then a first staging's two");
+			assert.equal(await readFile(again!.path, "utf8"), "0;\n", "the bytes handed out were read after the rules held");
+		});
+
+		it("reads a tree's copies again after its one pass, and writes the ones that no longer hold", async () => {
+			const root = await makeRoot();
+			const sources = await sourcesOf(root, { "entry.js": "1;\n", "lib/part.js": "2;\n" });
+			const tree = await stageRuntimeTree({ storageDir: root, namespace: "tree", sources, access: windowsProbe().probe });
+			let replaced = false;
+			const { probe, passes } = windowsProbe({ onPass: async () => { if (!replaced) { replaced = true; await writeFile(tree.files[1]!.path, "substituted\n", "utf8"); } } });
+
+			const again = await stageRuntimeTree({ storageDir: root, namespace: "tree", sources, access: probe });
+
+			assert.equal(passes.length, 3);
+			for (const file of again.files) assert.equal(await verifyStagedRuntimeAsset(file), true, "every copy holds its own bytes");
+		});
+
+		it("verifies a tree that is missing a file before that file is written", async () => {
+			const root = await makeRoot();
+			const sources = await sourcesOf(root, { "entry.js": "1;\n", "lib/part.js": "2;\n" });
+			const tree = await stageRuntimeTree({ storageDir: root, namespace: "tree", sources, access: windowsProbe().probe });
+			const lost = tree.files.find(file => file.relativePath === "lib/part.js")!.path;
+			await rm(lost);
+			let lostAtFirstPass: boolean | null = null;
+			const { probe, passes } = windowsProbe({ onPass: () => { lostAtFirstPass ??= !existsSync(lost); } });
+
+			await stageRuntimeTree({ storageDir: root, namespace: "tree", sources, access: probe });
+
+			assert.equal(passes.length, 2);
+			assert.equal(lostAtFirstPass, true);
+			assert.equal(await readFile(lost, "utf8"), "2;\n");
+		});
+
+		it("still refuses a complete tree whose copy another account owns or can write, and one it cannot read", async () => {
+			const root = await makeRoot();
+			const sources = await sourcesOf(root, { "entry.js": "1;\n" });
+			const tree = await stageRuntimeTree({ storageDir: root, namespace: "tree", sources, access: windowsProbe().probe });
+			const file = tree.files[0]!.path;
+
+			const foreign = windowsProbe({ ownerOf: entry => (entry === file ? "WORKSTATION\\someone-else" : ACCOUNT) });
+			await assert.rejects(
+				stageRuntimeTree({ storageDir: root, namespace: "tree", sources, access: foreign.probe }),
+				/owned by S-1-5-21-100-200-300-1002/,
+			);
+			assert.equal(foreign.passes.length, 1);
+			await assert.rejects(
+				stageRuntimeTree({ storageDir: root, namespace: "tree", sources, access: windowsProbe({ permissive: candidate => candidate === file }).probe }),
+				/is readable by S-1-1-0 \(Everyone\)/,
+			);
+			await assert.rejects(
+				stageRuntimeTree({ storageDir: root, namespace: "tree", sources, access: windowsProbe({ ownerReadFails: true }).probe }),
+				/not usable/,
+			);
+			await assert.rejects(
+				stageRuntimeTree({ storageDir: root, namespace: "tree", sources, access: windowsProbe({ acl: null }).probe }),
+				/not usable/,
+			);
+		});
+
+		it("never accepts a copy whose bytes changed: it is written again, behind the first pass", async () => {
+			const root = await makeRoot();
+			const source = await makePackagedFile(root, "relay.js", "0;\n");
+			const [staged] = await stageRuntimeAssets({ storageDir: root, sourcePaths: [source], access: windowsProbe().probe });
+			await writeFile(staged!.path, "tampered\n", "utf8");
+			let bytesAtFirstPass: string | null = null;
+			const { probe, passes } = windowsProbe({ onPass: async () => { bytesAtFirstPass ??= await readFile(staged!.path, "utf8"); } });
+
+			await stageRuntimeAssets({ storageDir: root, sourcePaths: [source], access: probe });
+
+			assert.equal(passes.length, 2);
+			assert.equal(bytesAtFirstPass, "tampered\n", "the replacement waits for the first pass");
+			assert.equal(await readFile(staged!.path, "utf8"), "0;\n");
+		});
 	});
 
 	it("establishes the access rules before handing out a copy of a tree another account can write", async () => {

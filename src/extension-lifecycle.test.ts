@@ -2075,6 +2075,45 @@ describe("verified-owned-writer policy fixtures", () => {
     } finally { harness.window().externalLeases = null; f.runtime.dispose(); await f.index.closeSession(TAB, { confirmedStopped: true }); }
   });
 
+  it("holds a row's display-only ownership probes until the startup restore is over, but never an explicit read", async () => {
+    const f = await legacyFixture("restore-defers-display", false, true);
+    let leaseAsked = 0;
+    harness.window().externalLeases = { holds: async () => { leaseAsked++; return true; } };
+    const over = Promise.withResolvers<void>();
+    Object.assign(harness.window(), { startupRestorePending: true, startupRestoreOver: over });
+    try {
+      let settled = false;
+      const display = harness.launcherOwnershipFacts(f.index, TAB).then(facts => { settled = true; return facts; });
+      // A fresh read is an explicit action's: it reads the lease now, whatever the restore is doing.
+      const explicit = await harness.launcherOwnershipFacts(f.index, TAB, { fresh: true });
+      assert.equal(explicit.externalOmp, true);
+      assert.equal(leaseAsked, 1, "only the explicit read asked the lease");
+      assert.equal(settled, false, "the display read is still waiting for the restore");
+      Object.assign(harness.window(), { startupRestorePending: false });
+      over.resolve();
+      const facts = await display;
+      assert.equal(facts.externalOmp, true);
+      assert.equal(leaseAsked, 2, "the display read ran once the restore was over");
+    } finally { harness.window().externalLeases = null; f.runtime.dispose(); await f.index.closeSession(TAB, { confirmedStopped: true }); }
+  });
+
+  it("does not defer the claim read of a row another live window holds: it needs no probe", async () => {
+    const values = new Map<string, unknown>();
+    const index = new harness.SessionIndex({ claimStorageDir: path.join(root, "claims-restore"), store: {
+      get<T>(key: string) { return values.get(key) as T | undefined; },
+      async update(key: string, value: unknown) { values.set(key, value); },
+    } });
+    const file = path.join(root, "remote-restore-session.jsonl");
+    await writeFile(file, JSON.stringify({ type: "session", version: 3, id: "remote-restore-session", timestamp: "2026-09-30T10:00:00Z", cwd: root }) + "\n");
+    const row = await index.trackSession({ sessionFile: file, cwd: root });
+    const rival = await harness.acquireClaim(path.join(root, "claims-restore"), file, "remote-window-owner", harness.createClaimHolder());
+    harness.reset(index, { stateOf: () => null });
+    Object.assign(harness.window(), { startupRestorePending: true, startupRestoreOver: Promise.withResolvers<void>() });
+    try {
+      assert.equal((await harness.launcherOwnershipFacts(index, row.tabId)).heldElsewhere, true, "answered while the restore is still pending");
+    } finally { await rival.release(); }
+  });
+
   it("never asks for a restored editor, a history view or when the probe cannot tell", async () => {
     const f = await legacyFixture("quiet-restore", false, true);
     const lease = { held: true as boolean | null, fresh: 0 };

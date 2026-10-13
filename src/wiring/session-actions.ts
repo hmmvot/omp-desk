@@ -81,6 +81,8 @@ export interface SessionWindowFacts {
 	setSessionProcesses(processes: SessionProcesses): void;
 	/** The profile catalog has been read in this window. */
 	catalogLoaded(): boolean;
+	/** `null` once the window's startup restore is over, otherwise a promise that settles when it is; the Processes poll waits for it. */
+	startupRestoreOver(): Promise<void> | null;
 }
 
 /** This window's editors and what hangs on a conversation. */
@@ -534,6 +536,7 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 			}),
 			indexLoadError: () => index.loadError,
 			catalogLoaded: () => catalogLoaded,
+			startupRestoreOver: deps.startupRestoreOver,
 			refreshCatalog: () => deps.adoptCatalogChanges(index, folders),
 			refreshLauncher: () => deps.refreshLauncher({ ownership: true }),
 			publish: snapshot => {

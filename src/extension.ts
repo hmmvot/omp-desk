@@ -819,6 +819,12 @@ interface WindowState {
    * the cohort will use.
    */
   startupRestorePending: boolean;
+  /**
+   * Settles when the startup restore pass is over (or after {@link STARTUP_DEFER_CAP_MS}, so a pass that never settles cannot
+   * leave a display undetermined). What only paints Sessions (ownership observations, the Processes poll, the lease probe)
+   * waits for it through {@link startupRestoreOver}; an explicit action never does.
+   */
+  readonly startupRestoreOver: PromiseWithResolvers<void>;
   /** Wall-clock time (`Date.now()`) the extension host activated; the startup timeline lines are relative to it. */
   activatedAt: number;
   /** When the startup catalog adoption settled, or `null` before; read by the startup restore's timeline line. */
@@ -950,6 +956,7 @@ function sessionActionsDeps(): SessionActionsDeps<TabState> {
     sessionProcesses: () => windowState().sessionProcesses,
     setSessionProcesses: processes => { windowState().sessionProcesses = processes; },
     catalogLoaded: () => windowState().catalogStore !== undefined,
+    startupRestoreOver: () => startupRestoreOver(),
     tab: stateOf,
     tabs: () => windowState().tabs,
     detailTabs: () => windowState().detailTabs,
@@ -1217,6 +1224,7 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     diagnostics: new DiagnosticsRecorder(),
     startupRestore: null,
     startupRestorePending: true,
+    startupRestoreOver: Promise.withResolvers<void>(),
     activatedAt: Date.now(),
     catalogAdoptedAt: null,
     editorEventSequence: 0,
@@ -1322,6 +1330,25 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // the rest of the setup; only the claims the index writes wait for it (ADR-0035), so the Sessions view, the commands
   // and the editors appear without it. A synchronous read froze every extension in the host; an awaited one held them back.
   const claimHolderCreationTime = readProcessCreationTime(process.pid);
+  // The broker client needs only the storage and extension locations, and the state directory's ACL verification (a
+  // PowerShell run, about half a second idle, 15 s on a loaded machine) is what every attach or launch waits for first.
+  // It starts before the catalog is read, the index is built or any registry exists, so it overlaps all of that; every
+  // user of the client still awaits this same promise, so a refusal still refuses them. The client starts no broker,
+  // host or session.
+  s.ptyClient = new PtyBrokerClient({
+    storageDir: context.globalStorageUri.fsPath,
+    extensionRoot: context.extensionUri.fsPath,
+    onRuntimeEvent: message => log(message),
+  });
+  const stateAccessStartedAt = Date.now();
+  void s.ptyClient.stateAccess().then(
+    access => windowTiming("broker state access", `${Date.now() - stateAccessStartedAt} ms ok=${access.ok}`),
+    () => undefined,
+  );
+  // The longest a display-only read waits for the startup restore (see `WindowState.startupRestoreOver`).
+  const startupDeferCap = setTimeout(() => s.startupRestoreOver.resolve(), STARTUP_DEFER_CAP_MS);
+  startupDeferCap.unref();
+  context.subscriptions.push({ dispose: () => clearTimeout(startupDeferCap) });
   // The report's window timeline starts here: every window-level measurement is relative to
   // the extension host's own activation.
   s.diagnostics.beginSubject(WINDOW_DIAGNOSTIC_SUBJECT, { label: "window", kind: "window" });
@@ -1402,24 +1429,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   });
   s.launcherFolders = folders;
   if (folders.loadError !== null) showWarning(folders.loadError);
-  // The in-tab terminal's own state. The broker client is created here and starts no broker,
-  // host or session: the staged runtime proof (`ready()`) is asked for lazily, so a window that
-  // never opens a managed session never stages or spawns a broker. Only the state directory's
-  // access verification (`stateAccess()`) starts at activation, below. The surface map and the
-  // shell-slot registry are durable and per workspace context, exactly like the folder list.
-  s.ptyClient = new PtyBrokerClient({
-    storageDir: context.globalStorageUri.fsPath,
-    extensionRoot: context.extensionUri.fsPath,
-    onRuntimeEvent: message => log(message),
-  });
-  // The broker state directory's ACL verification (a PowerShell run, about a second idle) is what the first
-  // attach or launch would otherwise wait for. Starting it now overlaps it with the rest of activation; every
-  // user of the client still awaits this same promise, so a refusal still refuses them.
-  const stateAccessStartedAt = Date.now();
-  void s.ptyClient.stateAccess().then(
-    access => windowTiming("broker state access", `${Date.now() - stateAccessStartedAt} ms ok=${access.ok}`),
-    () => undefined,
-  );
+  // The in-tab terminal's own state: the broker client was created at the top of `activate`, and it starts no broker,
+  // host or session. The staged runtime proof (`ready()`) is asked for lazily, so a window that never opens a managed
+  // session never stages or spawns a broker. The surface map and the shell-slot registry are durable and per workspace
+  // context, exactly like the folder list.
   // Readiness is asked for lazily and a *failed* check is not latched, so a transient
   // staging or self-check failure is retried by the next reconciliation, attach or
   // open instead of disabling the broker path for the whole activation.
@@ -3968,6 +3981,9 @@ function startStartupRestore(context: vscode.ExtensionContext, index: SessionInd
     // The pass can no longer publish anything, so a later click only has to read
     // the panels it left behind.
     if (s.startupRestore?.settled === settled) s.startupRestore = null;
+    // What only paints Sessions has been waiting for this moment (`startupRestoreOver`); its reads start now, after the
+    // restore's own PowerShell and not in competition with it.
+    s.startupRestoreOver.resolve();
     // Rows that said "Restoring" for the length of the pass are re-derived now.
     refreshLauncher();
     // Start the full runtime proof now that the attach work is done, so the first launch
@@ -3995,6 +4011,22 @@ function localRecoveryCohort(index: SessionIndex): ReadonlySet<string> {
 /** Whether one row is this window's responsibility at activation (see {@link localRecoveryCohort}). */
 function inLocalRecoveryCohort(index: SessionIndex, tabId: string): boolean {
   return index.hasLiveHost(tabId) || hasLocalEditorFor(tabId);
+}
+
+/** How long display-only reads wait for the startup restore before they run anyway. */
+const STARTUP_DEFER_CAP_MS = 120_000;
+
+/**
+ * `null` when the window's startup restore is over; otherwise a promise that settles when it is. Reads that only paint the
+ * Sessions view (a row's ownership observation, the Processes poll, the session-lease probe) wait for it: each of them
+ * starts PowerShell processes (identity readings, helper staging, the lease probe), and on a loaded machine those compete
+ * with the very restore the user is waiting for (reload timing analysis, 2026-10-13). A row the restore covers reads
+ * "Restoring" meanwhile and any other row "Checking". An explicit action (a click, an open, a stop, Kill All, Refresh)
+ * never waits: it reads fresh facts itself.
+ */
+function startupRestoreOver(): Promise<void> | null {
+  const s = windowState();
+  return s.startupRestorePending || s.startupRestore !== null ? s.startupRestoreOver.promise : null;
 }
 
 /**
@@ -7407,6 +7439,10 @@ function launcherFacts(tabId: string): SessionLauncherFacts {
  * own live claim and a verified writer under one of this extension's brokers all win, because
  * their children hold leases too. `fresh` skips the short cache, for an open that must not
  * act on a verdict older than the click.
+ *
+ * A read that only paints a row (not `fresh`) waits for the startup restore before it proves a writer or asks the lease:
+ * both start PowerShell processes that compete with the restore (`startupRestoreOver`). Until then the row reads
+ * "Restoring" or "Checking". A row another live window holds needs neither, so its claim read is not deferred.
  */
 async function launcherOwnershipFacts(index: SessionIndex, tabId: string, options: { readonly fresh?: boolean } = {}): Promise<SessionOwnershipFacts> {
   const s = windowState();
@@ -7417,6 +7453,7 @@ async function launcherOwnershipFacts(index: SessionIndex, tabId: string, option
   const heldElsewhere = claim !== null && claim.verifiable && claim.holderId !== null &&
     claim.holderId !== index.claimHolder.id && await holderSeemsAlive(claim, s.routing.registry());
   const heldHere = claim !== null && claim.holderId === index.claimHolder.id && await claimHolderMayBeAlive(claim);
+  if (options.fresh !== true && !heldElsewhere) await startupRestoreOver();
   const pid = await s.sessionRuntime.verifiedWriterPid(tabId, { display: true });
   const sessionFile = index.get(tabId)?.sessionFile ?? null;
   const externalOmp = !heldElsewhere && !heldHere && pid === null && sessionFile !== null && s.externalLeases !== null &&

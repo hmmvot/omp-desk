@@ -27,7 +27,9 @@
  * storage convention (`src/host/private-storage.ts`), which this module describes
  * as a layout rather than re-implementing: the runtime directory and every digest
  * directory (the directories this module owns, rewritten non-recursively when not
- * yet limited and *before* any copy is written, so the copies inherit them), every
+ * yet limited and, in a staging that writes, *before* the first copy is written, so
+ * the copies inherit them; a staging that finds every copy in place verifies the
+ * whole layout once instead, ADR-0012's 2026-10-13 amendment), every
  * copy itself (a file's own entries decide whether its bytes can be replaced, and
  * a parent's entries never stand in for them), and every component the tree is
  * reached through — each parent of the storage directory up to but excluding the
@@ -172,44 +174,65 @@ export async function stageRuntimeAssets(input: {
 	}
 	const root = join(storageDir, RUNTIME_ASSET_DIRECTORY);
 	await mkdir(root, { recursive: true, mode: 0o700 });
+	// Whether this call writes anything is read first (nothing is written to find out). Copies that are all in place
+	// need no rule established ahead of a write, so their one verification, over the final layout, is the only pass
+	// (ADR-0012, amendment 2026-10-13).
+	const planned: PlannedRuntimeAsset[] = [];
+	for (const sourcePath of input.sourcePaths) planned.push(await locateRuntimeAsset(storageDir, sourcePath));
+	const holds = (): Promise<boolean> => allCopiesHold(planned.map(plan => ({ target: plan.path, sha256: plan.sha256 })));
+	const verifyLayout = async (staged: readonly StagedRuntimeAsset[]): Promise<void> => {
+		const directories: string[] = [root];
+		for (const copy of staged) {
+			const directory = join(storageDir, RUNTIME_ASSET_DIRECTORY, copy.sha256);
+			if (!directories.includes(directory)) directories.push(directory);
+		}
+		// The copies and their directories exist, and they are what a substitution would have to write through:
+		// verify everything this call hands out.
+		await ensureRuntimeAccess({ root, directories, files: staged.map(copy => copy.path), probe: input.access });
+	};
+	if (await holds()) {
+		const staged = planned.map(plan => ({ path: plan.path, sha256: plan.sha256 }));
+		await verifyLayout(staged);
+		// The pass can rewrite the rules of the directories this module owns, which a copy inherits from: the bytes are
+		// read again afterwards, so what is handed out was read after the rules held. A copy that no longer holds is
+		// written as in a first staging.
+		if (await holds()) return staged;
+	}
 	// The rules are established and verified *before* anything is written, so every
 	// copy inherits entries no other account has: a directory rewritten afterwards
 	// could not fix a file that was written under the old entries. The ancestors the
 	// tree is reached through are verified in the same call, because whoever can
 	// replace the tree through one of them defeats everything inside it.
 	await ensureRuntimeAccess({ root, directories: [root], files: [], probe: input.access });
-
 	const staged: StagedRuntimeAsset[] = [];
-	const directories: string[] = [root];
-	for (const sourcePath of input.sourcePaths) {
-		const copy = await stageRuntimeAsset(storageDir, sourcePath);
-		staged.push(copy);
-		const directory = join(storageDir, RUNTIME_ASSET_DIRECTORY, copy.sha256);
-		if (!directories.includes(directory)) directories.push(directory);
-	}
-	// The copies and their directories exist now, and they are what a substitution
-	// would have to write through: verify everything this call hands out.
-	await ensureRuntimeAccess({
-		root,
-		directories,
-		files: staged.map(copy => copy.path),
-		probe: input.access,
-	});
+	for (const plan of planned) staged.push(await writeRuntimeAsset(plan));
+	await verifyLayout(staged);
 	return staged;
 }
 
-async function stageRuntimeAsset(storageDir: string, sourcePath: string): Promise<StagedRuntimeAsset> {
+/** One packaged file and where its copy belongs: the digest of its bytes names the copy's directory. */
+interface PlannedRuntimeAsset extends StagedRuntimeAsset {
+	readonly sourcePath: string;
+	readonly bytes: Buffer;
+}
+
+/** Where the copy of `sourcePath` belongs, from the packaged bytes alone. Reads only. */
+async function locateRuntimeAsset(storageDir: string, sourcePath: string): Promise<PlannedRuntimeAsset> {
 	const name = basename(sourcePath);
 	if (name.length === 0 || name === "." || name === "..") {
 		throw new Error(`runtime asset ${JSON.stringify(sourcePath)} has no file name to stage under`);
 	}
 	const bytes = await readFile(sourcePath);
 	const sha256 = createHash("sha256").update(bytes).digest("hex");
-	const directory = join(storageDir, RUNTIME_ASSET_DIRECTORY, sha256);
-	const target = join(directory, name);
+	return { path: join(storageDir, RUNTIME_ASSET_DIRECTORY, sha256, name), sha256, sourcePath, bytes };
+}
+
+async function writeRuntimeAsset(plan: PlannedRuntimeAsset): Promise<StagedRuntimeAsset> {
+	const { bytes, sha256, sourcePath } = plan;
+	const target = plan.path;
+	const directory = dirname(target);
 	// Already staged and still byte-identical: nothing is written.
 	if ((await digestOfFile(target)) === sha256) return { path: target, sha256 };
-
 	await mkdir(directory, { recursive: true, mode: 0o700 });
 	const temporary = await stageBeside(target, bytes);
 	try {
@@ -397,27 +420,53 @@ export async function stageRuntimeTree(input: {
 	const { digests, digest } = await hashRuntimeTree(input.sources);
 	const directory = join(namespaced, digest);
 
-	await ensureRuntimeAccess({ root, directories: [root, namespaced], files: [], probe: input.access });
 	const directories: string[] = [root, namespaced, directory];
-	const files: StagedRuntimeTreeFile[] = [];
-	for (const entry of digests) {
-		const target = join(directory, ...entry.relativePath.split("/"));
+	const targets = digests.map(entry => ({ entry, target: join(directory, ...entry.relativePath.split("/")) }));
+	for (const { target } of targets) {
 		for (let parent = dirname(target); parent.length > directory.length; parent = dirname(parent)) {
 			if (!directories.includes(parent)) directories.push(parent);
 		}
+	}
+	const holds = (): Promise<boolean> => allCopiesHold(targets.map(({ entry, target }) => ({ target, sha256: entry.sha256 })));
+	const verifyLayout = (files: readonly StagedRuntimeTreeFile[]): Promise<void> =>
+		ensureRuntimeAccess({ root, directories, files: files.map(file => file.path), probe: input.access });
+	// Whether this call writes anything is read first (nothing is written to find out). A tree that is already
+	// complete needs no rule established ahead of a write, so its one verification, over the whole final layout, is
+	// the only pass: the first pass below would read a strict subset of it (ADR-0012, amendment 2026-10-13).
+	if (await holds()) {
+		const files = targets.map(({ entry, target }) => ({ path: target, relativePath: entry.relativePath, sha256: entry.sha256 }));
+		await verifyLayout(files);
+		// The pass can rewrite the rules of the directories this module owns, which a copy inherits from: the bytes are
+		// read again afterwards, so what is handed out was read after the rules held. A copy that no longer holds is
+		// written as in a first staging.
+		if (await holds()) return { directory, digest, files };
+	}
+	// The rules are established and verified before the first byte is written, so every copy inherits entries no other
+	// account has.
+	await ensureRuntimeAccess({ root, directories: [root, namespaced], files: [], probe: input.access });
+	const files: StagedRuntimeTreeFile[] = [];
+	for (const { entry, target } of targets) {
 		await mkdir(dirname(target), { recursive: true, mode: 0o700 });
 		files.push(await publishTreeFile(entry.sourcePath, entry.relativePath, target, entry.sha256));
 	}
-	// Verified again after the writes: what a substitution would have had to write
-	// through is now in the layout, and every copy is checked as a file.
-	await ensureRuntimeAccess({ root, directories, files: files.map(file => file.path), probe: input.access });
+	// Verified again after the writes: what a substitution would have had to write through is now in the layout, and
+	// every copy is checked as a file.
+	await verifyLayout(files);
 	return { directory, digest, files };
+}
+
+/** Whether every `target` exists and holds the bytes its `sha256` names. Reads only. */
+async function allCopiesHold(copies: ReadonlyArray<{ readonly target: string; readonly sha256: string }>): Promise<boolean> {
+	for (const copy of copies) {
+		if ((await digestOfFile(copy.target)) !== copy.sha256) return false;
+	}
+	return true;
 }
 
 /**
  * Publish one tree file, reusing an identical path and replacing anything else.
  *
- * Same rules as {@link stageRuntimeAsset}: the publication creates the path rather
+ * Same rules as {@link writeRuntimeAsset}: the publication creates the path rather
  * than removing it, so a racing staging of the same digest is an ordinary outcome
  * and no reader ever sees the path absent.
  */

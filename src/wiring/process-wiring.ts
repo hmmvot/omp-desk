@@ -74,6 +74,13 @@ export interface ProcessWiringDeps {
 	indexLoadError(): string | null;
 	/** The profile catalog has been read in this window. */
 	catalogLoaded(): boolean;
+	/**
+	 * `null` once the window's startup restore is over, otherwise a promise that settles when it is. The background
+	 * reads of the list (its poll, a visibility read, the read after a launcher refresh) wait for it: they stage the
+	 * probe helper and read process identities, PowerShell that would compete with the restore. An explicit action
+	 * (Refresh, Stop, Kill All) never waits.
+	 */
+	startupRestoreOver(): Promise<void> | null;
 	/** Re-read the shared catalog (index, broker slots, shell slots, folders). */
 	refreshCatalog(): Promise<void>;
 	refreshLauncher(): void;
@@ -238,16 +245,29 @@ export function registerSessionProcesses(context: vscode.ExtensionContext, deps:
 		return run;
 	};
 
-	/** Background read: the cheap facts, and the child state of a row that has none yet. Never for a hidden view. */
+	/** Background read: the cheap facts, and the child state of a row that has none yet. Never for a hidden view, never during the startup restore. */
 	const tick = async (): Promise<void> => {
 		if (disposed || tickQueued || !deps.visible()) return;
 		tickQueued = true;
 		try {
+			await deps.startupRestoreOver();
+			if (disposed || !deps.visible()) return;
 			await read({ fresh: false, unreadChildren: true });
 		} catch (error) {
 			deps.log(`processes: the list could not be read: ${messageOf(error)}`);
 		} finally {
 			tickQueued = false;
+		}
+	};
+
+	/** A read the view asked for by being shown: it waits for the startup restore like the poll and re-checks the view afterwards. */
+	const backgroundRead = async (options: BrokerProcessReadOptions): Promise<void> => {
+		try {
+			await deps.startupRestoreOver();
+			if (disposed || !deps.visible()) return;
+			await read(options);
+		} catch (error) {
+			deps.log(`processes: the list could not be read: ${messageOf(error)}`);
 		}
 	};
 
@@ -360,7 +380,7 @@ export function registerSessionProcesses(context: vscode.ExtensionContext, deps:
 	return {
 		sync() {
 			schedule();
-			if (!disposed && deps.visible()) void read({ fresh: true }).catch(error => deps.log(`processes: the list could not be read: ${messageOf(error)}`));
+			if (!disposed && deps.visible()) void backgroundRead({ fresh: true });
 		},
 		touch() {
 			if (disposed || touchTimer !== undefined || !deps.visible()) return;
