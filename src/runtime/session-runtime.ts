@@ -13,8 +13,14 @@
 import type { RestoreOutcome, RestoreReport } from "../host/session-index.ts";
 import type { SessionViewMode } from "../host/session-model.ts";
 import type { ChatCommandOutcome, ChatPage, ConversationActivity, RewindRead } from "../host/chat-runtime.ts";
-import type { NavigateOutcome, NavigateRequest } from "../host/rpc/session.ts";
-import type { ChatStatePayload } from "../chat/model.ts";
+import type {
+	ChoiceOutcome, CommandResult, CycleModelResult, CycleThinkingResult, MaintenanceRequest, ModelsResult, NavigateOutcome, NavigateRequest, PromptRequest,
+	RpcSessionOutput, SendOutcome, ThinkingLevelsResult,
+} from "../host/rpc/session.ts";
+import type { ContextRead, ContextReportRead } from "../host/context/context-parse.ts";
+import type { ChatEpoch, ChatLiteState, ChatPendingControl, ChatPhase, ChatSlashCommand, ChatStatePayload } from "../chat/model.ts";
+import type { MaintenanceState } from "../chat/events.ts";
+import type { RpcToolDescriptor } from "../protocol/rpc.ts";
 import type { ChatWebviewMessage } from "../protocol/chat-messages.ts";
 import type { KillSelection } from "../host/session-kill.ts";
 import type { BrokerSlotProvenance } from "../host/broker-slots.ts";
@@ -277,6 +283,50 @@ export interface LegacyViewRequest {
 	readonly reason: string;
 }
 
+
+/**
+ * The live Chat session of a conversation, as values read at one instant. `incarnation` names the session: the
+ * number is assigned the first time a session is asked about, increases, and is never reused, so a request that
+ * names it never reaches a different session of the same conversation. Read again for fresh values; a snapshot
+ * never updates.
+ */
+export interface LiveConversation {
+	readonly incarnation: number;
+	readonly phase: ChatPhase;
+	readonly epoch: ChatEpoch;
+	/** The footer state OMP last reported: the chosen model, the thinking level, the context usage. */
+	readonly state: ChatLiteState | null;
+	readonly working: boolean;
+	readonly asyncPaused: boolean;
+	readonly maintenance: MaintenanceState | null;
+	/** Model and thinking choices OMP has not been told about yet. */
+	readonly pendingControl: ChatPendingControl | null;
+	readonly commands: readonly ChatSlashCommand[];
+	/** The exact file the process serves: the binding, or the path learned for a new conversation. */
+	readonly sessionFile: string | null;
+	readonly sessionId: string | null;
+	/** The session id of the journal header the conversation shows, or `null` before one is read. */
+	readonly headerId: string | null;
+	/** An unanswered or divergent process is offered the confirmed Restart. */
+	readonly restartOffered: boolean;
+	readonly nativeStateUnanswered: boolean;
+}
+
+/** The answer of an operation that names an incarnation the conversation no longer has; nothing was sent. */
+export interface StaleIncarnation {
+	readonly status: "stale";
+}
+
+/** `joined` once the session finished initializing (or had nothing to wait for). */
+export type JoinResult = StaleIncarnation | { readonly status: "joined" };
+
+/** The model (and thinking level) a settings editor asks the launching Chat to take. */
+export interface ModelDefault {
+	readonly provider: string;
+	readonly id: string;
+	readonly thinking?: string;
+}
+
 /**
  * What a window can ask of a conversation: show it, route its messages and read what it says. Inputs and outputs
  * are values; the page sink and the runtime's own events are callbacks that carry values, never the model or the
@@ -310,4 +360,46 @@ export interface ConversationPort {
 	notify(conversation: string, text: string): boolean;
 	refreshDisplayPreferences(): void;
 	dispose(): void;
+
+	// The live Chat session of a conversation, by value. Every operation below names the incarnation the caller read
+	// (`incarnationOf` or `liveOf`) and answers `stale` (or `null` for a plain read) without sending anything when the
+	// conversation no longer holds that session, so a flow that awaited a dialog never reaches its successor.
+
+	/** The incarnation of the conversation's live Chat session, or `null` when it has none. */
+	incarnationOf(conversation: string): number | null;
+	/** The live Chat session's facts as values, or `null` when the conversation has none. */
+	liveOf(conversation: string): LiveConversation | null;
+	/** Wait for the session's initialization (the pending start of a starting, attaching or resyncing session). */
+	join(conversation: string, incarnation: number): Promise<JoinResult>;
+	/** Observe the session's outputs; returns the unsubscribe, or `null` when the incarnation is gone. */
+	observe(conversation: string, incarnation: number, listener: (output: RpcSessionOutput) => void): (() => void) | null;
+	readAvailableModels(conversation: string, incarnation: number): Promise<ModelsResult | StaleIncarnation>;
+	readAvailableThinkingLevels(conversation: string, incarnation: number): Promise<ThinkingLevelsResult | StaleIncarnation>;
+	/** The session's cost, or `null` when unknown or the incarnation is gone. */
+	readSessionCost(conversation: string, incarnation: number): Promise<number | null>;
+	/** The provider-facing tool inventory, or `null` when unavailable or the incarnation is gone. */
+	readToolDescriptors(conversation: string, incarnation: number): Promise<readonly RpcToolDescriptor[] | null>;
+	/** The Context view's structured read, or `null` when unavailable or the incarnation is gone. */
+	readContext(conversation: string, incarnation: number): Promise<ContextRead | null>;
+	/** OMP's `/context` report, on the user's explicit request. */
+	requestContextReport(conversation: string, incarnation: number): Promise<CommandResult<ContextReportRead> | StaleIncarnation>;
+	chooseModel(conversation: string, incarnation: number, provider: string, modelId: string, name?: string): Promise<ChoiceOutcome | StaleIncarnation>;
+	chooseThinkingLevel(conversation: string, incarnation: number, level: string): Promise<ChoiceOutcome | StaleIncarnation>;
+	cycleModel(conversation: string, incarnation: number): Promise<CycleModelResult | StaleIncarnation>;
+	cycleThinkingLevel(conversation: string, incarnation: number): Promise<CycleThinkingResult | StaleIncarnation>;
+	maintain(conversation: string, incarnation: number, request: MaintenanceRequest): Promise<CommandResult<string> | StaleIncarnation>;
+	exportHtml(conversation: string, incarnation: number, outputPath: string): Promise<CommandResult<string> | StaleIncarnation>;
+	/** Send one prompt to the session (the Share action's `/share`). */
+	prompt(conversation: string, incarnation: number, request: PromptRequest): Promise<SendOutcome | StaleIncarnation>;
+	setSessionName(conversation: string, incarnation: number, name: string): Promise<SendOutcome | StaleIncarnation>;
+	/**
+	 * Raise (a reason) or lower (`null`) the mutation fence of the session the conversation holds now, if any. Not
+	 * keyed by an incarnation: a fence is the conversation's admission state, and a session attached later takes it up.
+	 */
+	setFence(conversation: string, reason: string | null): void;
+	/**
+	 * Apply a settings editor's effective default to the launching Chat when it is live and idle, confirmed by readback;
+	 * the answer is the sentence the editor shows. `stillCurrent` is the window's own check, asked before and after each step.
+	 */
+	applyModelDefault(conversation: string, incarnation: number, model: ModelDefault, stillCurrent: () => boolean): Promise<string | StaleIncarnation>;
 }

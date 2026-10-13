@@ -252,6 +252,12 @@ export interface PendingResult {
 
 export type ChoiceOutcome = SendOutcome | PendingResult;
 
+/** `cycle_model`: the model and thinking level OMP moved to, `null` when it had nothing to cycle to, or a held request. */
+export type CycleModelResult = CommandResult<{ model: ChatLiteModel; thinkingLevel: string | null } | null> | PendingResult;
+
+/** `cycle_thinking_level`: the level OMP moved to, `null` when the model has none, or a held request. */
+export type CycleThinkingResult = CommandResult<string | null> | PendingResult;
+
 /** What the host holds between a model/thinking choice and OMP being able to take it (see `RpcSession#choiceBlock`). */
 interface HeldChoices {
 	model: ChatPendingModel | null;
@@ -1522,7 +1528,7 @@ export class RpcSession {
 	 * `cycle_model`: the next role or scoped model. `null` when OMP had nothing to cycle to. While OMP cannot take
 	 * it (see {@link RpcSession.chooseModel}) the request is held and answers `pending`.
 	 */
-	cycleModel(): Promise<CommandResult<{ model: ChatLiteModel; thinkingLevel: string | null } | null> | PendingResult> {
+	cycleModel(): Promise<CycleModelResult> {
 		return this.#admitChoice({
 			hold: held => ({ ...held, modelCycles: Math.min(held.modelCycles + 1, MAX_HELD_CYCLES) }),
 			replace: null,
@@ -1546,7 +1552,7 @@ export class RpcSession {
 	}
 
 	/** `cycle_thinking_level`: the next selector of the live model. `null` when the model has none. Held like {@link RpcSession.cycleModel}. */
-	cycleThinkingLevel(): Promise<CommandResult<string | null> | PendingResult> {
+	cycleThinkingLevel(): Promise<CycleThinkingResult> {
 		return this.#admitChoice({
 			hold: held => ({ ...held, thinkingCycles: Math.min(held.thinkingCycles + 1, MAX_HELD_CYCLES) }),
 			replace: null,

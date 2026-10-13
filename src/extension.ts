@@ -77,7 +77,7 @@ import { LocalTransitions } from "./runtime/local-transition";
 import { RuntimeRecords } from "./runtime/runtime-record";
 import type { ConversationRecord } from "./runtime/runtime-record";
 import type { TransitionWindow } from "./runtime/local-transition";
-import type { ReplaceRefusal, StopResult, TransitionPhase, TransitionToken } from "./runtime/session-runtime";
+import type { LiveConversation, ReplaceRefusal, StopResult, TransitionPhase, TransitionToken } from "./runtime/session-runtime";
 import { LocalStopOperations, withSessionReadDeadline } from "./runtime/local-stop";
 import type {
   OmpHostLauncher,
@@ -147,7 +147,7 @@ import {
 import { ProcessTreeItem } from "./views/process-rows";
 import { registerInventoryViews, type InventoryHandle } from "./wiring/inventory-wiring";
 import { registerContextView, type ContextHandle } from "./wiring/context-wiring";
-import type { ContextTarget } from "./host/context/context-controller";
+import type { ContextSession, ContextTarget } from "./host/context/context-controller";
 import { owningWindowUri, registerWindowRouting } from "./wiring/window-routing";
 import type { WindowRouting, WindowRoutingDeps } from "./wiring/window-routing";
 import { registerSessionActions } from "./wiring/session-actions";
@@ -181,7 +181,7 @@ import {
   probeRpcHost,
 } from "./host/rpc-reconcile";
 import type { NativeStopVerdict } from "./host/rpc-reconcile";
-import type { ChoiceOutcome, CommandResult, CompactMode, RpcSession, SendRefusal, ShakeMode } from "./host/rpc/session";
+import type { ChoiceOutcome, CommandResult, CompactMode, SendRefusal, ShakeMode } from "./host/rpc/session";
 import { readSlashRegistry, type BuiltinSlashEntry, type DeskSlashAction, type SlashRegistry } from "./host/slash-registry";
 import { NAVIGATE_REFUSAL_SENTENCES } from "./chat/rewind";
 import type { ChatLiteState, ChatPhase } from "./chat/model";
@@ -252,7 +252,7 @@ import { importPredecessorFolders } from "./wiring/predecessor-import";
 import type { SessionProcesses } from "./wiring/process-wiring";
 import { SettingsEditors } from "./host/omp-settings-editor";
 import type { SettingsEditorContext } from "./host/omp-settings-editor";
-import { settingsSessionApply } from "./host/omp-settings-apply";
+import { SETTINGS_APPLY_NOT_LIVE } from "./host/omp-settings-apply";
 // The folder-shell owner hint and the broker's own answer about it (ADR-0030): the
 // extension can only *discover* the candidate owning instance, and it may only report
 // what the broker actually admitted.
@@ -1488,18 +1488,22 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const settingsBinding = async (tabId: string): Promise<SettingsEditorContext> => {
     const entry = index.get(tabId);
     if (entry === null) throw new Error("The launching OMP conversation is no longer registered.");
-    const session = s.sessionRuntime.sessionOf(tabId);
+    const conversations = s.sessionRuntime.conversations;
+    const live = conversations.liveOf(tabId);
     return {
       folder: entry.cwd,
       profile: entry.scope.profile ?? DEFAULT_OMP_PROFILE,
       executable: await executableFor(hostOf(stateOf(tabId)) ?? null),
       sessionLabel: entry.title ?? "launching Chat",
-      ...(session === null ? {} : {
-        applyDefault: settingsSessionApply(session, () => {
-          const current = index.get(tabId);
-          return s.sessionRuntime.sessionOf(tabId) === session && stateOf(tabId)?.mode !== "terminal" && fencedOf(stateOf(tabId)) !== true
-            && current !== null && current.cwd === entry.cwd && current.scope.profile === entry.scope.profile;
-        }),
+      ...(live === null ? {} : {
+        applyDefault: async model => {
+          const applied = await conversations.applyModelDefault(tabId, live.incarnation, model, () => {
+            const current = index.get(tabId);
+            return stateOf(tabId)?.mode !== "terminal" && fencedOf(stateOf(tabId)) !== true
+              && current !== null && current.cwd === entry.cwd && current.scope.profile === entry.scope.profile;
+          });
+          return typeof applied === "string" ? applied : SETTINGS_APPLY_NOT_LIVE;
+        },
       }),
     };
   };
@@ -3121,7 +3125,7 @@ function sessionRuntimeDeps(index: SessionIndex, chat: ChatRuntime, launchers?: 
   const launcher = launchers ?? ((): OmpHostLauncher => {
     const context = windowState().context;
     if (context === undefined) throw new Error("The session runtime was used before activation.");
-    return localLauncher(context, index);
+    return localLauncher(context, index, chat);
   });
   const transitions = new LocalTransitions({
     index, records, window: transitionWindow(index), chat, stop, control, exit, writer, attachBrokerClient, launcher, log,
@@ -3426,7 +3430,7 @@ function launcherWindow(context: vscode.ExtensionContext, index: SessionIndex): 
         refreshGuestContext();
         return;
       }
-      if (fencedOf(state)) s.sessionRuntime.sessionOf(tabId)?.setMutationFence("Session lifecycle transition.");
+      if (fencedOf(state)) s.sessionRuntime.conversations.setFence(tabId, "Session lifecycle transition.");
       attachChatRoutes(tabId, true);
     },
     notice: (level, text) => { if (level === "error") showError(text); else showWarning(text); },
@@ -3434,12 +3438,12 @@ function launcherWindow(context: vscode.ExtensionContext, index: SessionIndex): 
 }
 
 /** The host launcher the runtime hands to the index: this window's launch and attach, over `launcherWindow`'s hooks. */
-function localLauncher(context: vscode.ExtensionContext, index: SessionIndex): LocalLauncher {
+function localLauncher(context: vscode.ExtensionContext, index: SessionIndex, chat: ChatRuntime): LocalLauncher {
   const s = windowState();
   return new LocalLauncher({
     index,
     window: launcherWindow(context, index),
-    chat: s.sessionRuntime.chat,
+    chat,
     diagnostics: s.diagnostics,
     entries: () => windowState().staging.entries(),
     hosts: { launchRpc: launchRpcHost, launchNative: launchNativeHost, attachRpc: attachRpcHost, attachNative: attachNativeHost },
@@ -3544,7 +3548,7 @@ function activateNativeEditor(state: TabState): void {
 
 function fenceSessionAdmission(index: SessionIndex, state: TabState, fenced: boolean): void {
   recordFor(state).transitioning = fenced;
-  if (state.tabId !== null) windowState().sessionRuntime.sessionOf(state.tabId)?.setMutationFence(fenced ? "Session lifecycle transition." : null);
+  if (state.tabId !== null) windowState().sessionRuntime.conversations.setFence(state.tabId, fenced ? "Session lifecycle transition." : null);
   projectFence(index, state);
 }
 
@@ -3615,17 +3619,17 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
   let replacement: RestoreOutcome | null = null;
   let carried: CarriedDraft<TabState> | null = null;
   try {
-    const session = runtime.kind === "chat" ? s.sessionRuntime.sessionOf(tabId) : null;
-    const pending = runtime.kind === "terminal" ? s.sessionRuntime.control.attempt(runtime)
-      : session !== null && (session.phase === "starting" || session.phase === "attaching" || session.phase === "resyncing")
-        ? session.start() : undefined;
+    const live = runtime.kind === "chat" ? s.sessionRuntime.conversations.liveOf(tabId) : null;
+    const pending: Promise<unknown> | undefined = runtime.kind === "terminal" ? s.sessionRuntime.control.attempt(runtime)
+      : live !== null && (live.phase === "starting" || live.phase === "attaching" || live.phase === "resyncing")
+        ? s.sessionRuntime.conversations.join(tabId, live.incarnation) : undefined;
     if (pending !== undefined) {
       // Control publication needs the gate: join initialization outside it.
       const panel = state.panel;
       await withSessionReadDeadline(pending);
       if (state.lastOpenRequest !== modeRequest || hostOf(state) !== runtime || state.tabId !== tabId || state.panel !== panel ||
           passiveReasonForSlot(state.slotId) !== null || s.openingTabs.has(tabId) ||
-          (runtime.kind === "chat" && s.sessionRuntime.sessionOf(tabId) !== session)) return;
+          (runtime.kind === "chat" && s.sessionRuntime.conversations.incarnationOf(tabId) !== (live?.incarnation ?? null))) return;
     }
     const control = controlOf(state);
     if (runtime.kind === "terminal" && control !== null) {
@@ -3760,15 +3764,16 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
   const s = windowState();
   const state = stateOf(tabId);
   const runtime = hostOf(state);
-  const session = s.sessionRuntime.sessionOf(tabId);
+  const conversations = s.sessionRuntime.conversations;
+  const live = conversations.liveOf(tabId);
   const row = index.get(tabId);
   const binding = state === undefined ? null : index.slotBinding(state.slotId);
   const committed = restartBinding(index, tabId);
   const document = state?.document;
   const panel = state?.panel;
   const refuse = (text: string): void => { s.sessionRuntime.conversations.notify(tabId, text); showWarning(text); };
-  if (state === undefined || runtime?.kind !== "chat" || session === null || !session.restartOffered ||
-      session.epoch.nonce !== nativeNonce || state.mode !== "chat" || document?.kind !== "guest" || panel == null ||
+  if (state === undefined || runtime?.kind !== "chat" || live === null || !live.restartOffered ||
+      live.epoch.nonce !== nativeNonce || state.mode !== "chat" || document?.kind !== "guest" || panel == null ||
       row?.sessionFile == null || row.sessionId === null || binding === null || committed === null ||
       runtime.identity.childCreationTime === null || passiveReasonForSlot(state.slotId) !== null ||
       fencedOf(state) || s.pendingSessionViewChanges.has(state) || s.openingTabs.has(tabId)) {
@@ -3790,6 +3795,7 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
     const current = index.get(tabId);
     const currentBinding = index.slotBinding(state.slotId);
     const currentCommitted = restartBinding(index, tabId);
+    const now = liveAt(tabId, live.incarnation);
     return stateOf(tabId) === state && hostOf(state) === runtime && state.tabId === tabId &&
       state.lastOpenRequest === modeRequest && state.panel === panel && state.document === document &&
       state.mode === "chat" && passiveReasonForSlot(state.slotId) === null &&
@@ -3802,9 +3808,9 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
       committed.pid === runtime.pid && committed.processCreation === creationTime &&
       committed.slot === runtime.identity.slot && committed.brokerId === runtime.identity.brokerId &&
       committed.brokerGeneration === runtime.identity.brokerGeneration && committed.sessionFile === file &&
-      committed.sessionId === durableSessionId && s.sessionRuntime.sessionOf(tabId) === session &&
-      session.epoch.nonce === nativeNonce && session.sessionFile !== null && controlPathEquals(session.sessionFile, file) &&
-      session.sessionId === sessionId && (!requireOffered || session.restartOffered);
+      committed.sessionId === durableSessionId && now !== null &&
+      now.epoch.nonce === nativeNonce && now.sessionFile !== null && controlPathEquals(now.sessionFile, file) &&
+      now.sessionId === sessionId && (!requireOffered || now.restartOffered);
   };
   const held = beginTransition(tabId, {
     check: phase => sameTarget(phase !== "stopped"),
@@ -3830,7 +3836,7 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
     }
     const attachments = carried.reply.attachments + carried.reply.recoverable.reduce((count, original) => count + original.attachments, 0);
     const imageWarning = attachments === 0 ? "" : ` ${attachments} attachment reference${attachments === 1 ? "" : "s"} cannot be transferred; reattach the images to the preserved text after Restart.`;
-    const unanswered = session.nativeStateUnanswered;
+    const unanswered = conversations.liveOf(tabId)?.nativeStateUnanswered === true;
     const identityWarning = unanswered ? "" : " It is the exact process recorded for this conversation, but it now reports another conversation or identity; stopping it also ends whatever it is running now.";
     const consent = await vscode.window.showWarningMessage(
       unanswered ? "Stop this unresponsive OMP process and restart its saved conversation?" : "Stop the OMP process that no longer serves this conversation and restart its saved conversation?",
@@ -5062,15 +5068,17 @@ async function runChatAction(context: vscode.ExtensionContext, index: SessionInd
       entry?.cwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir());
     return;
   }
-  const session = s.sessionRuntime.sessionOf(tabId);
-  if (session === null || session.phase !== "live") {
+  const conversations = s.sessionRuntime.conversations;
+  const live = conversations.liveOf(tabId);
+  if (live === null || live.phase !== "live") {
     showWarning("This conversation is not live, so the action was not run.");
     return;
   }
-  const current = (): boolean => s.sessionRuntime.sessionOf(tabId) === session && session.phase === "live";
+  const { incarnation } = live;
+  const current = (): boolean => liveAt(tabId, incarnation)?.phase === "live";
   switch (command) {
     case "compact": {
-      const running = session.model.working;
+      const running = live.working;
       // OMP's `/compact` modes (session/compact-modes.ts); the first is preselected, so Enter runs the default.
       const modes: (vscode.QuickPickItem & { mode: CompactMode })[] = [
         { mode: "snapcompact", label: "snapcompact", description: "default", detail: "Archive the earlier conversation onto dense images the model reads back. No model call." },
@@ -5093,7 +5101,9 @@ async function runChatAction(context: vscode.ExtensionContext, index: SessionInd
         });
         if (instructions === undefined || !current()) return;
       }
-      reportMaintenance(await session.maintain({ kind: "compact", mode: picked.mode, ...(instructions === undefined ? {} : { instructions }) }), "The conversation was not compacted.");
+      const result = await conversations.maintain(tabId, incarnation, { kind: "compact", mode: picked.mode, ...(instructions === undefined ? {} : { instructions }) });
+      if (result.status === "stale") return;
+      reportMaintenance(result, "The conversation was not compacted.");
       return;
     }
     case "shake": {
@@ -5105,11 +5115,14 @@ async function runChatAction(context: vscode.ExtensionContext, index: SessionInd
       ];
       const picked = await vscode.window.showQuickPick(modes, { title: "Shake Conversation", placeHolder: "What OMP drops from the context", ignoreFocusOut: true });
       if (picked === undefined || !current()) return;
-      reportMaintenance(await session.maintain({ kind: "shake", mode: picked.mode }), "The conversation was not shaken.");
+      const result = await conversations.maintain(tabId, incarnation, { kind: "shake", mode: picked.mode });
+      if (result.status === "stale") return;
+      reportMaintenance(result, "The conversation was not shaken.");
       return;
     }
     case "cycle-model": {
-      const result = await session.cycleModel();
+      const result = await conversations.cycleModel(tabId, incarnation);
+      if (result.status === "stale") return;
       if (result.status === "pending") vscode.window.setStatusBarMessage("OMP model: the change applies as soon as OMP is ready", 4_000);
       else if (result.status === "refused") showWarning(`The model was not changed. ${chatRefusalText(result.reason)}`);
       else if (result.status === "unconfirmed") showWarning("OMP did not report whether the model changed.");
@@ -5118,7 +5131,8 @@ async function runChatAction(context: vscode.ExtensionContext, index: SessionInd
       return;
     }
     case "cycle-thinking": {
-      const result = await session.cycleThinkingLevel();
+      const result = await conversations.cycleThinkingLevel(tabId, incarnation);
+      if (result.status === "stale") return;
       if (result.status === "pending") vscode.window.setStatusBarMessage("OMP thinking level: the change applies as soon as OMP is ready", 4_000);
       else if (result.status === "refused") showWarning(`The thinking level was not changed. ${chatRefusalText(result.reason)}`);
       else if (result.status === "unconfirmed") showWarning("OMP did not report whether the thinking level changed.");
@@ -5136,7 +5150,8 @@ async function runChatAction(context: vscode.ExtensionContext, index: SessionInd
         filters: { HTML: ["html"] },
       });
       if (target === undefined || !current()) return;
-      const result = await session.exportHtml(target.fsPath);
+      const result = await conversations.exportHtml(tabId, incarnation, target.fsPath);
+      if (result.status === "stale") return;
       if (result.status !== "ok") {
         showError(result.status === "refused" ? `The conversation was not exported. ${chatRefusalText(result.reason)}` : "OMP did not report whether the export was written.");
         return;
@@ -5154,7 +5169,8 @@ async function runChatAction(context: vscode.ExtensionContext, index: SessionInd
         "Upload and Share",
       );
       if (picked !== "Upload and Share" || !current()) return;
-      const outcome = await session.prompt({ requestId: createControlRequestId(), text: "/share" });
+      const outcome = await conversations.prompt(tabId, incarnation, { requestId: createControlRequestId(), text: "/share" });
+      if (outcome.status === "stale") return;
       if (outcome.status === "refused") showWarning(`Nothing was shared. ${chatRefusalText(outcome.reason)}`);
       else if (outcome.status === "unconfirmed") showWarning("OMP did not confirm the share command. It was not sent again.");
       return;
@@ -5846,9 +5862,11 @@ async function confirmOpenUrl(event: { url: string; launchUrl?: string; instruct
 function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, event: ChatRuntimeEvent): void | Promise<void> {
   const s = windowState();
   switch (event.type) {
-    case "catalogue":
-      if (toolsTarget(index)?.key === s.sessionRuntime.sessionOf(tabId)) { s.inventoryViews?.refresh(); s.contextView?.refresh(); }
+    case "catalogue": {
+      const subject = toolsTarget(index);
+      if (subject?.tabId === tabId && subject.mode === "chat" && s.sessionRuntime.conversations.incarnationOf(tabId) !== null) { s.inventoryViews?.refresh(); s.contextView?.refresh(); }
       return;
+    }
     case "activity":
       applyTurnActivity(index, tabId, event.activity.observed, event.baseline);
       if (event.baseline) { s.inventoryViews?.sync(); s.contextView?.sync(); }
@@ -6084,11 +6102,12 @@ async function handleGuestControlRequest(
   const s = windowState();
   const state = stateOf(tabId);
   if (!state || !responder.live()) return;
-  const session = s.sessionRuntime.sessionOf(tabId);
+  const conversations = s.sessionRuntime.conversations;
+  const live = conversations.liveOf(tabId);
   ensureFooterBinding(index, tabId);
   publishFooterMetadata(tabId);
   const reply = (message: GuestControlStateMessage): void => {
-    if (stateOf(tabId) === state && s.sessionRuntime.sessionOf(tabId) === session) responder.reply(message);
+    if (stateOf(tabId) === state && conversations.incarnationOf(tabId) === (live?.incarnation ?? null)) responder.reply(message);
   };
   const unavailable = (reason: string, notice?: string): GuestControlStateMessage => ({
     type: "omp:control-state",
@@ -6105,7 +6124,7 @@ async function handleGuestControlRequest(
     reply(unavailable(fencedOf(state) ? "The session view is changing or its process is stopping." : "Chat model/thinking controls are unavailable in Terminal; use native TUI controls."));
     return;
   }
-  if (session === null || session.phase !== "live") {
+  if (live === null || live.phase !== "live") {
     reply(unavailable("This session is not live, so its model and thinking controls are not available."));
     return;
   }
@@ -6115,8 +6134,9 @@ async function handleGuestControlRequest(
     return;
   }
   if (request.action === "snapshot" && request.picker !== undefined) cancelControlPicker();
+  const nowLive = (): LiveConversation | null => liveAt(tabId, live.incarnation);
   const stillCurrent = (): boolean =>
-    responder.live() && stateOf(tabId) === state && !fencedOf(state) && state.mode === "chat" && s.sessionRuntime.sessionOf(tabId) === session && session.phase === "live";
+    responder.live() && stateOf(tabId) === state && !fencedOf(state) && state.mode === "chat" && nowLive()?.phase === "live";
   let notice: string | undefined;
   try {
     if (request.action !== "snapshot") {
@@ -6141,8 +6161,9 @@ async function handleGuestControlRequest(
           if (!stillCurrent()) throw new HostControlRefusedError("closed", "The editor or session changed before dispatch.", null);
           const outcome =
             request.action === "set-model"
-              ? await session.chooseModel(request.model!.provider, request.model!.id, request.model!.name)
-              : await session.chooseThinkingLevel(request.level!);
+              ? await conversations.chooseModel(tabId, live.incarnation, request.model!.provider, request.model!.id, request.model!.name)
+              : await conversations.chooseThinkingLevel(tabId, live.incarnation, request.level!);
+          if (outcome.status === "stale") throw new HostControlRefusedError("closed", "The editor or session changed before dispatch.", null);
           admission.settle?.(
             outcome.status === "accepted" || outcome.status === "pending" ? "applied" : outcome.status === "refused" ? "refused" : "unknown",
           );
@@ -6167,9 +6188,9 @@ async function handleGuestControlRequest(
     let selectedModel: ControlModelRef | undefined;
     let selectedThinking: string | undefined;
     if (request.action === "snapshot" && request.picker !== undefined) {
-      const beforeModel = session.model.state?.model ?? null;
+      const beforeModel = nowLive()?.state?.model ?? null;
       if (request.picker === "model") {
-        const listed = await session.getAvailableModels();
+        const listed = await conversations.readAvailableModels(tabId, live.incarnation);
         if (listed.status !== "ok") {
           notice = listed.status === "refused" && listed.reason === "busy" ? "OMP is busy with another request; open the picker again in a moment." : "OMP could not list models. Nothing was changed.";
         } else {
@@ -6181,23 +6202,23 @@ async function handleGuestControlRequest(
             recordSessionModels(index, tabId, models.length > 0);
             if (models.length === 0) await openProviderLogin(hostOf(state), entry.scope.profile, entry.cwd);
             else {
-              const picked = await pickControlModel(models, session.model.pendingControl?.model ?? beforeModel, stillCurrent, tabId);
+              const picked = await pickControlModel(models, nowLive()?.pendingControl?.model ?? beforeModel, stillCurrent, tabId);
               if (picked === "provider-login") await openProviderLogin(hostOf(state), entry.scope.profile, entry.cwd);
               else selectedModel = picked;
             }
           }
         }
       } else {
-        const thinking = await session.getAvailableThinkingLevels();
+        const thinking = await conversations.readAvailableThinkingLevels(tabId, live.incarnation);
         const sameModel = (): boolean => {
-          const current = session.model.state?.model;
+          const current = nowLive()?.state?.model;
           return stillCurrent() && beforeModel?.provider === current?.provider && beforeModel?.id === current?.id;
         };
         if (thinking.status !== "ok") notice = thinking.status === "refused" && thinking.reason === "busy" ?
           "OMP is busy with another request; open the picker again in a moment." : "OMP could not list thinking levels. Nothing was changed.";
         else if (sameModel() && thinking.levels.length > 0) selectedThinking = await pickControlThinking(
           thinking.levels.filter(level => level.length > 0 && level.length <= 64 && isSafeBoundaryText(level)),
-          session.model.pendingControl?.thinking ?? session.model.state?.thinkingLevel ?? null, sameModel, tabId);
+          nowLive()?.pendingControl?.thinking ?? nowLive()?.state?.thinkingLevel ?? null, sameModel, tabId);
         if (!sameModel() && stillCurrent()) notice = "The model changed while choosing a thinking level. Nothing was changed.";
       }
     }
@@ -6205,7 +6226,7 @@ async function handleGuestControlRequest(
       reply(unavailable("The session changed during this request.", notice ?? "The outcome is uncertain; no retry was sent."));
       return;
     }
-    const liveState = session.model.state;
+    const liveState = nowLive()?.state ?? null;
     if (liveState === null) {
       reply(unavailable("The session has not reported its model yet."));
       return;
@@ -6342,14 +6363,16 @@ function refreshSessionModels(index: SessionIndex, tabId: string): Promise<void>
   const s = windowState();
   const pending = s.sessionModelReads.get(tabId);
   if (pending) return pending;
-  const session = s.sessionRuntime.sessionOf(tabId);
-  if (session === null || session.phase !== "live") return Promise.resolve();
+  const conversations = s.sessionRuntime.conversations;
+  const live = conversations.liveOf(tabId);
+  if (live === null || live.phase !== "live") return Promise.resolve();
   // An automatic read is not worth delaying a Stop that OMP would queue behind it; a picker the user opens may read mid-turn.
-  if (session.model.working) { s.sessionModelRefreshOwed.add(tabId); return Promise.resolve(); }
-  const epoch = session.epoch;
-  const read = session.getAvailableModels().then(listed => {
-    if (s.sessionRuntime.sessionOf(tabId) !== session || session.phase !== "live" ||
-      epoch.nonce !== session.epoch.nonce || epoch.counter !== session.epoch.counter) return;
+  if (live.working) { s.sessionModelRefreshOwed.add(tabId); return Promise.resolve(); }
+  const epoch = live.epoch;
+  const read = conversations.readAvailableModels(tabId, live.incarnation).then(listed => {
+    const now = liveAt(tabId, live.incarnation);
+    if (listed.status === "stale" || now === null || now.phase !== "live" ||
+      epoch.nonce !== now.epoch.nonce || epoch.counter !== now.epoch.counter) return;
     if (listed.status === "ok") {
       s.sessionModelRefreshOwed.delete(tabId);
       recordSessionModels(index, tabId, listed.models.length > 0);
@@ -6403,16 +6426,17 @@ function refreshSessionCost(index: SessionIndex, tabId: string): void {
   const s = windowState();
   ensureFooterBinding(index, tabId);
   const binding = s.footerBindings.get(tabId);
-  const session = s.sessionRuntime.sessionOf(tabId);
+  const live = s.sessionRuntime.conversations.liveOf(tabId);
   const runtime = hostOf(stateOf(tabId));
   if (!binding) return;
   binding.message = { ...binding.message, sessionCost: undefined };
   publishFooterMetadata(tabId);
-  if (!session || session.phase !== "live" || !runtime) return;
-  const epoch = session.epoch;
-  void session.readSessionCost().then(cost => {
-    if (s.footerBindings.get(tabId) !== binding || s.sessionRuntime.sessionOf(tabId) !== session || hostOf(stateOf(tabId)) !== runtime ||
-      epoch.nonce !== session.epoch.nonce || epoch.counter !== session.epoch.counter) return;
+  if (live === null || live.phase !== "live" || !runtime) return;
+  const epoch = live.epoch;
+  void s.sessionRuntime.conversations.readSessionCost(tabId, live.incarnation).then(cost => {
+    const now = liveAt(tabId, live.incarnation);
+    if (s.footerBindings.get(tabId) !== binding || now === null || hostOf(stateOf(tabId)) !== runtime ||
+      epoch.nonce !== now.epoch.nonce || epoch.counter !== now.epoch.counter) return;
     binding.message = { ...binding.message, sessionCost: cost ?? undefined };
     publishFooterMetadata(tabId);
   });
@@ -6422,11 +6446,11 @@ function refreshFooterMetadata(index: SessionIndex, tabId: string, refreshUsage:
   const s = windowState();
   ensureFooterBinding(index, tabId);
   const binding = s.footerBindings.get(tabId);
-  const session = s.sessionRuntime.sessionOf(tabId);
+  const live = s.sessionRuntime.conversations.liveOf(tabId);
   const entry = index.get(tabId);
   const runtime = hostOf(stateOf(tabId));
   if (!binding || !entry) return;
-  const model = session?.model.state?.model ?? null;
+  const model = live?.state?.model ?? null;
   const changed = binding.message.provider !== model?.provider || binding.modelId !== model?.id;
   if (!refreshUsage && !changed) return;
   binding.modelId = model?.id ?? null;
@@ -6435,9 +6459,10 @@ function refreshFooterMetadata(index: SessionIndex, tabId: string, refreshUsage:
     publishFooterMetadata(tabId);
     return;
   }
+  const sameSession = (): boolean => s.sessionRuntime.conversations.incarnationOf(tabId) === (live?.incarnation ?? null);
   // Resolve the exact installation before selecting the scope cache; never join different cwd/profile installs.
   void executableFor(runtime).then(async executable => {
-    if (s.footerBindings.get(tabId) !== binding || s.sessionRuntime.sessionOf(tabId) !== session || hostOf(stateOf(tabId)) !== runtime) return;
+    if (s.footerBindings.get(tabId) !== binding || !sameSession() || hostOf(stateOf(tabId)) !== runtime) return;
     const scope = JSON.stringify([executable.command, executable.prefixArgs, entry.scope.profile ?? DEFAULT_OMP_PROFILE, runtime.cwd]);
     let cache = s.usageCaches.get(scope);
     if (!cache) { cache = new ProviderUsageCache(Date.now, log); s.usageCaches.set(scope, cache); }
@@ -6446,8 +6471,9 @@ function refreshFooterMetadata(index: SessionIndex, tabId: string, refreshUsage:
     const usage = await cache.refresh(model.provider, model.id, () => runOmpCli(executable,
       [...PROVIDER_USAGE_ARGS, "--provider", model.provider], PROVIDER_USAGE_TIMEOUT_MS,
       { cwd: runtime.cwd, env: ompCliScopeEnvironment(entry.scope.profile) }));
-    if (s.footerBindings.get(tabId) !== binding || s.sessionRuntime.sessionOf(tabId) !== session || hostOf(stateOf(tabId)) !== runtime ||
-      session?.model.state?.model?.provider !== model.provider || session?.model.state?.model?.id !== model.id) return;
+    const chosen = s.sessionRuntime.conversations.liveOf(tabId)?.state?.model;
+    if (s.footerBindings.get(tabId) !== binding || !sameSession() || hostOf(stateOf(tabId)) !== runtime ||
+      chosen?.provider !== model.provider || chosen?.id !== model.id) return;
     binding.message = { ...binding.message, provider: model.provider, ...usage };
     publishFooterMetadata(tabId);
   }).catch(() => log("Provider usage executable resolution failed; retaining the last value."));
@@ -6550,38 +6576,39 @@ function toolsTarget(index: SessionIndex): SessionToolsTarget | null {
   if (!state || state.tabId === null || state.shellSlot !== null) return null;
   const tabId = state.tabId;
   const runtime = hostOf(state);
-  const session = state.mode === "chat" ? s.sessionRuntime.sessionOf(tabId) : null;
+  const conversations = s.sessionRuntime.conversations;
+  const live = state.mode === "chat" ? conversations.liveOf(tabId) : null;
   const channel = activeControl(index, tabId);
   const binding = channel?.client.latestHost;
   const entry = index.get(tabId);
   return {
-    key: session ?? runtime ?? state,
+    key: runtime ?? state,
     tabId,
-    generation: JSON.stringify([state.slotId, tabId, state.mode, session?.epoch, session?.sessionFile, session?.sessionId,
+    generation: JSON.stringify([state.slotId, tabId, state.mode, live?.incarnation, live?.epoch, live?.sessionFile, live?.sessionId,
       binding?.instanceId, binding?.epoch, binding?.sessionFile]),
     mode: state.mode,
     title: entry === null ? "OMP session" : s.launcherProvider?.headlineFor(tabId) ?? sessionHeadline(entry, null),
     cwd: runtime?.cwd ?? entry?.cwd ?? null,
     profile: entry?.scope.profile ?? null,
     running: passiveReasonForSlot(state.slotId) === null && !fencedOf(state) &&
-      (state.mode === "chat" ? session?.phase === "live" : launcherFacts(tabId).running),
-    commands: session?.model.commands ?? [],
-    readDescriptors: session === null ? null : () => session.readToolDescriptors(),
+      (state.mode === "chat" ? live?.phase === "live" : launcherFacts(tabId).running),
+    commands: live?.commands ?? [],
+    readDescriptors: live === null ? null : () => conversations.readToolDescriptors(tabId, live.incarnation),
     readTools: channel === null ? null : async () => {
       const list = await channel.client.listTools();
       const current = activeControl(index, tabId);
       const host = channel.client.latestHost;
+      const now = live === null ? null : liveAt(tabId, live.incarnation);
       return hostOf(stateOf(tabId)) === runtime && current?.client === channel.client &&
         host?.instanceId === binding?.instanceId && host?.epoch === binding?.epoch &&
-        (session === null || (host?.sessionFile !== null && host?.sessionFile !== undefined &&
-          session.sessionFile !== null && controlPathEquals(host.sessionFile, session.sessionFile))) ? list : null;
+        (live === null || (host?.sessionFile !== null && host?.sessionFile !== undefined &&
+          now?.sessionFile != null && controlPathEquals(host.sessionFile, now.sessionFile))) ? list : null;
     },
   };
 }
 
 /** The Context view's subject: the inventory views' selection (editor recency) plus the tab and its Chat session. */
 function contextTarget(index: SessionIndex): ContextTarget | null {
-  const s = windowState();
   const target = toolsTarget(index);
   if (target === null) return null;
   return {
@@ -6591,7 +6618,31 @@ function contextTarget(index: SessionIndex): ContextTarget | null {
     running: target.running,
     title: target.title,
     tabId: target.tabId,
-    session: target.mode === "chat" ? s.sessionRuntime.sessionOf(target.tabId) : null,
+    session: target.mode === "chat" ? contextSessionOf(target.tabId) : null,
+  };
+}
+
+/**
+ * The Context view's handle on one incarnation of a Chat conversation: every read and request goes through the port
+ * under that incarnation, so a replaced session answers nothing. The facts are the last ones read while it was current.
+ */
+function contextSessionOf(tabId: string): ContextSession | null {
+  const conversations = windowState().sessionRuntime.conversations;
+  const first = conversations.liveOf(tabId);
+  if (first === null) return null;
+  const { incarnation } = first;
+  let last = first;
+  return {
+    get model() {
+      last = liveAt(tabId, incarnation) ?? last;
+      return last;
+    },
+    subscribe: listener => conversations.observe(tabId, incarnation, listener) ?? (() => undefined),
+    readContext: () => conversations.readContext(tabId, incarnation),
+    requestContextReport: async () => {
+      const result = await conversations.requestContextReport(tabId, incarnation);
+      return result.status === "stale" ? { status: "refused", reason: "not-live" } : result;
+    },
   };
 }
 
@@ -6624,8 +6675,14 @@ function describeModel(model: { readonly provider: string; readonly id: string }
 }
 
 
-/** The live rpc session of the active tab, or `null` (with the reason shown) when there is none. */
-function activeLiveSession(index: SessionIndex): { readonly tabId: string; readonly session: RpcSession } | null {
+/** The conversation's live Chat session as values, when it is still the incarnation the caller named. */
+function liveAt(tabId: string, incarnation: number): LiveConversation | null {
+  const live = windowState().sessionRuntime.conversations.liveOf(tabId);
+  return live !== null && live.incarnation === incarnation ? live : null;
+}
+
+/** The live Chat session of the active tab as values, or `null` (with the reason shown) when there is none. */
+function activeLiveSession(index: SessionIndex): { readonly tabId: string; readonly live: LiveConversation } | null {
   const s = windowState();
   const tabId = index.activeTabId;
   const state = tabId === null ? undefined : stateOf(tabId);
@@ -6633,12 +6690,12 @@ function activeLiveSession(index: SessionIndex): { readonly tabId: string; reado
     showWarning(fencedOf(state) ? "The session is changing view or stopping." : "Chat model/thinking controls are unavailable in Terminal; use the native TUI.");
     return null;
   }
-  const session = tabId === null ? null : s.sessionRuntime.sessionOf(tabId);
-  if (tabId === null || session === null || session.phase !== "live") {
+  const live = tabId === null ? null : s.sessionRuntime.conversations.liveOf(tabId);
+  if (tabId === null || live === null || live.phase !== "live") {
     showInfo("Open a running OMP session first: the model and thinking level belong to a live session.");
     return null;
   }
-  return { tabId, session };
+  return { tabId, live };
 }
 
 async function showHostControls(index: SessionIndex): Promise<void> {
@@ -6646,7 +6703,7 @@ async function showHostControls(index: SessionIndex): Promise<void> {
   if (active === null) return;
   const channel = activeControl(index);
   const snapshot = channel === null ? controlOf(stateOf(active.tabId))?.snapshot ?? null : await refreshControlSnapshot(channel);
-  const live = active.session.model.state;
+  const live = liveAt(active.tabId, active.live.incarnation)?.state ?? null;
   if (live === null) {
     showInfo("The session has not reported its model yet.");
     return;
@@ -6661,10 +6718,13 @@ async function showHostControls(index: SessionIndex): Promise<void> {
 
 
 async function selectHostModel(index: SessionIndex): Promise<void> {
-  const s = windowState();
+  const conversations = windowState().sessionRuntime.conversations;
   const active = activeLiveSession(index);
   if (active === null) return;
-  const listed = await active.session.getAvailableModels();
+  const { tabId } = active;
+  const { incarnation } = active.live;
+  const listed = await conversations.readAvailableModels(tabId, incarnation);
+  if (listed.status === "stale") return;
   if (listed.status === "refused") {
     showInfo(listed.reason === "busy" ? "OMP is busy with another request; select a model again in a moment." : "The session is not accepting commands right now.");
     return;
@@ -6673,42 +6733,47 @@ async function selectHostModel(index: SessionIndex): Promise<void> {
     showInfo("OMP listed no selectable models.");
     return;
   }
-  if (s.sessionRuntime.sessionOf(active.tabId) !== active.session) return;
-  recordSessionModels(index, active.tabId, listed.models.length > 0);
-  const picked = await pickControlModel(listed.models, active.session.model.pendingControl?.model ?? active.session.model.state?.model ?? null,
-    () => s.sessionRuntime.sessionOf(active.tabId) === active.session, active.tabId);
+  const current = (): boolean => conversations.incarnationOf(tabId) === incarnation;
+  if (!current()) return;
+  recordSessionModels(index, tabId, listed.models.length > 0);
+  const now = liveAt(tabId, incarnation);
+  const picked = await pickControlModel(listed.models, now?.pendingControl?.model ?? now?.state?.model ?? null, current, tabId);
   if (!picked) return;
-  if (s.sessionRuntime.sessionOf(active.tabId) !== active.session) {
+  if (!current()) {
     showWarning("The selected session changed while choosing; nothing was changed.");
     return;
   }
   if (picked === "provider-login") {
-    const entry = index.get(active.tabId);
-    if (entry !== null) await openProviderLogin(hostOf(stateOf(active.tabId)) ?? null, entry.scope.profile, entry.cwd);
+    const entry = index.get(tabId);
+    if (entry !== null) await openProviderLogin(hostOf(stateOf(tabId)) ?? null, entry.scope.profile, entry.cwd);
     return;
   }
-  const outcome = await active.session.chooseModel(picked.provider, picked.id, picked.name);
+  const outcome = await conversations.chooseModel(tabId, incarnation, picked.provider, picked.id, picked.name);
+  if (outcome.status === "stale") return;
   showInfo(controlOutcomeNotice(outcome));
 }
 
 async function selectHostThinking(index: SessionIndex): Promise<void> {
-  const s = windowState();
+  const conversations = windowState().sessionRuntime.conversations;
   const active = activeLiveSession(index);
   if (active === null) return;
-  const current = active.session.model.pendingControl?.thinking ?? active.session.model.state?.thinkingLevel;
-  const listed = await active.session.getAvailableThinkingLevels();
+  const { tabId, live } = active;
+  const current = live.pendingControl?.thinking ?? live.state?.thinkingLevel;
+  const listed = await conversations.readAvailableThinkingLevels(tabId, live.incarnation);
+  if (listed.status === "stale") return;
   if (listed.status !== "ok" || listed.levels.length === 0) {
     showInfo("OMP listed no selectable thinking levels.");
     return;
   }
-  const picked = await pickControlThinking(listed.levels, current ?? null,
-    () => s.sessionRuntime.sessionOf(active.tabId) === active.session, active.tabId);
+  const sameSession = (): boolean => conversations.incarnationOf(tabId) === live.incarnation;
+  const picked = await pickControlThinking(listed.levels, current ?? null, sameSession, tabId);
   if (!picked) return;
-  if (s.sessionRuntime.sessionOf(active.tabId) !== active.session) {
+  if (!sameSession()) {
     showWarning("The selected session changed while choosing; nothing was changed.");
     return;
   }
-  const outcome = await active.session.chooseThinkingLevel(picked);
+  const outcome = await conversations.chooseThinkingLevel(tabId, live.incarnation, picked);
+  if (outcome.status === "stale") return;
   showInfo(controlOutcomeNotice(outcome));
 }
 
@@ -10107,7 +10172,8 @@ async function renameSession(context: vscode.ExtensionContext, index: SessionInd
   }
   // A live row this window does not drive yet (a verified survivor) is renamed through its own
   // process, exactly as Reload reattaches it first; the stopped-title path refuses a live writer.
-  if (hostOf(nativeState) == null && s.sessionRuntime.sessionOf(tabId) === null && entry.sessionFile !== null && await s.sessionRuntime.verifiedWriterPid(tabId) !== null) {
+  const conversations = s.sessionRuntime.conversations;
+  if (hostOf(nativeState) == null && conversations.incarnationOf(tabId) === null && entry.sessionFile !== null && await s.sessionRuntime.verifiedWriterPid(tabId) !== null) {
     await openTab(context, index, tabId, "opened", "restored");
     if (hostOf(stateOf(tabId)) == null) {
       showWarning("The exact live editor could not be reattached. Nothing was renamed; no replacement was started.");
@@ -10116,9 +10182,8 @@ async function renameSession(context: vscode.ExtensionContext, index: SessionInd
     await renameSession(context, index, tabId);
     return;
   }
-  const session = s.sessionRuntime.sessionOf(tabId);
-  const running = session !== null && rpcPhaseIsRunning(session.phase);
-  if (!running) {
+  const live = conversations.liveOf(tabId);
+  if (live === null || !rpcPhaseIsRunning(live.phase)) {
     await renameStoppedSession(context, index, tabId, entry);
     return;
   }
@@ -10131,7 +10196,7 @@ async function renameSession(context: vscode.ExtensionContext, index: SessionInd
   if (proposed === undefined) return;
   const title = proposed.trim();
   if (title === (entry.title ?? "")) return;
-  const outcome = await session.setSessionName(title);
+  const outcome = await conversations.setSessionName(tabId, live.incarnation, title);
   if (outcome.status === "accepted") {
     await index.recordConversationState(tabId, { title });
     // The running session's own name changed, so every editor showing it says so.

@@ -223,7 +223,11 @@ const PORT_ALLOWED_NAMES = {
   "src/host/rpc-reconcile.ts": ["NativeStopVerdict"],
   "src/host/session-restore-trace.ts": ["OmpHostStepTimings"],
   "src/host/chat-runtime.ts": ["ChatPage", "ChatCommandOutcome", "ConversationActivity", "RewindRead"],
-  "src/host/rpc/session.ts": ["NavigateRequest", "NavigateOutcome"],
+  "src/host/rpc/session.ts": [
+    "NavigateRequest", "NavigateOutcome", "ChoiceOutcome", "CommandResult", "CycleModelResult", "CycleThinkingResult", "MaintenanceRequest", "ModelsResult",
+    "PromptRequest", "RpcSessionOutput", "SendOutcome", "ThinkingLevelsResult",
+  ],
+  "src/host/context/context-parse.ts": ["ContextRead", "ContextReportRead"],
   "src/host/session-kill.ts": ["KillSelection"],
   "src/host/broker-slots.ts": ["BrokerSlotProvenance"],
   "src/host/session-availability.ts": ["StopRecordedHostResult"],

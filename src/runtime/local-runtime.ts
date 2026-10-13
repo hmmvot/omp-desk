@@ -28,7 +28,6 @@ import type { LocalWriterVerifier } from "./local-writer.ts";
 import type { LocalTransitions } from "./local-transition.ts";
 import { LocalConversations } from "./local-conversations.ts";
 import type { ChatRuntime } from "../host/chat-runtime.ts";
-import type { RpcSession } from "../host/rpc/session.ts";
 import type { RuntimeRecord, RuntimeRecords } from "./runtime-record.ts";
 
 export interface LocalSessionRuntimeDeps {
@@ -71,26 +70,9 @@ export class LocalSessionRuntime implements SessionRuntime {
 		return { id: holder.id, pid: holder.pid, creationTime: holder.processCreationTime ?? null };
 	}
 
-	/**
-	 * The chat runtime itself. Transitional (`LocalSessionRuntime` only): the launcher starts a live conversation on it
-	 * (`startLive`, which hands back the `RpcSession`) and the window's lifecycle tests drive it directly.
-	 */
-	get chat(): ChatRuntime {
-		return this.#deps.chat;
-	}
-
 	/** The conversation surface (cut 6): the window's view of its conversations over the chat runtime this runtime owns. */
 	get conversations(): LocalConversations {
 		return this.#conversations;
-	}
-
-	/**
-	 * The live `RpcSession` of a conversation, or `null`. Transitional (`LocalSessionRuntime` only): the window's
-	 * footer, settings, control-picker and stop flows still drive the session itself; each moves behind
-	 * `ConversationPort` as it gets a value-typed operation.
-	 */
-	sessionOf(conversation: string): RpcSession | null {
-		return this.#deps.chat.sessionOf(conversation);
 	}
 
 	// The runtime's own services of cut 5. They are injected whole because each one is built over the window's hooks.

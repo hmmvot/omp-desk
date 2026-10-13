@@ -1,12 +1,11 @@
 import { liveOf, liveSignature, projectContext } from "./context-model.ts";
-import type { ChatModel } from "../../chat/model.ts";
 import type { CommandResult, RpcSessionOutput } from "../rpc/session.ts";
 import type { ContextRead, ContextReportRead } from "./context-parse.ts";
-import type { ContextLive, ContextViewModel } from "./context-model.ts";
+import type { ContextFacts, ContextLive, ContextViewModel } from "./context-model.ts";
 
-/** What the controller needs of the session: the footer's own model, its outputs, the structured read and the explicit report request. `RpcSession` satisfies it. */
+/** What the controller needs of the session: the footer's own facts, its outputs, the structured read and the explicit report request. */
 export interface ContextSession {
-	readonly model: ChatModel;
+	readonly model: ContextFacts;
 	subscribe(listener: (output: RpcSessionOutput) => void): () => void;
 	readContext(): Promise<ContextRead | null>;
 	requestContextReport(): Promise<CommandResult<ContextReportRead>>;

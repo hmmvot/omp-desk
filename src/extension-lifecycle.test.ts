@@ -147,6 +147,8 @@ import { providerLoginFixture, storedRenameFixture } from './host/native-termina
 import { bridgeViewType } from './host/bridge-identity';
 // The harness runs windows without an activation context: the cases that need one set it on the window.
 const fixtureContext = undefined as never;
+// The chat runtime the case built; the runtime and its launcher are constructed from it.
+let fixtureChat = undefined as never;
 const fixtureWindow = () => windowState();
 export const harness = {
   closeSession, presentRestoreOutcome, openTab, handleChatEvent, restoreTabs,
@@ -171,8 +173,8 @@ export const harness = {
   installWindow(next) { window = next; },
   window: () => windowState(),
   createWindowState,
-  localLauncher, handleTerminalGuestMessage,
-  startConversation: (index, tabId, runtime, file, replay) => localLauncher(fixtureWindow().context, index).startConversation(tabId, runtime, file, replay),
+  localLauncher: (context, index) => localLauncher(context, index, fixtureChat), handleTerminalGuestMessage,
+  startConversation: (index, tabId, runtime, file, replay) => localLauncher(fixtureWindow().context, index, fixtureChat).startConversation(tabId, runtime, file, replay),
   pushSessionView, handleShellEditorClosed,
   SessionTreeProvider,
   terminalFontMessage, revealDesktopNotification, revealActiveSession, releaseSelectionFromOtherWindow, refreshLauncher, launcherFacts, notifierFor, forgetTurnActivity,
@@ -260,7 +262,7 @@ export const harness = {
     const w = fixtureWindow();
     w.context = context;
     w.reconciler = createOwnerReconciler(ports);
-    const runtimeDeps = sessionRuntimeDeps(w.indexForBridge, w.sessionRuntime.chat, () => hostLauncher, w.sessionRuntime.records);
+    const runtimeDeps = sessionRuntimeDeps(w.indexForBridge, fixtureChat, () => hostLauncher, w.sessionRuntime.records);
     // The broker facts of the fixture's rows come in through the runtime's deps, not by reassigning a function of the module.
     w.sessionRuntime = new LocalSessionRuntime({
       ...runtimeDeps,
@@ -301,6 +303,7 @@ export const harness = {
   reset(index, conversation) {
     harness.installWindow(createWindowState(fixtureContext));
     const w = fixtureWindow();
+    fixtureChat = conversation;
     w.indexForBridge = index; w.sessionRuntime = createSessionRuntime(index, conversation); w.startupRestorePending = false;
     w.detailTabs = new DetailTabs({ createPanel() { throw new Error('the fixture opens no detail tab'); }, attachPage: () => () => {}, handleMessage: async () => ({ status: 'refused' }), openUrl: async () => {}, log() {} });
     fixtureVscode.window.errors.length = 0;

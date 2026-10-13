@@ -99,7 +99,7 @@ export interface BridgeWindowFacts<Tab extends BridgeTab> {
 	/** The session index this activation created, or `null` before activation. */
 	index(): Pick<SessionIndex, "get"> | null;
 	/** The live sessions of this window's conversations, for the verified chat host of one conversation. */
-	sessions(): Pick<LocalSessionRuntime, "sessionOf" | "records">;
+	sessions(): Pick<LocalSessionRuntime, "conversations" | "records">;
 	/** The one-winner reservation table of this window's editors (ADR-0019/0023). */
 	editors(): EditorCoordinator;
 	editorSlots(): Pick<EditorSlotRegistry, "remove">;
@@ -583,8 +583,8 @@ export function registerBridgeHost<Tab extends BridgeTab>(deps: BridgeHostDeps<T
 		// selects chat authority again after the editor serves another conversation.
 		const entry = table.get(state.tabId);
 		if (runtime === null || entry === null) return null;
-		const session = deps.sessions().sessionOf(state.tabId);
-		if (runtime.kind === "chat" && (session === null || session.phase !== "live")) return null;
+		const live = deps.sessions().conversations.liveOf(state.tabId);
+		if (runtime.kind === "chat" && (live === null || live.phase !== "live")) return null;
 		if (runtime.kind === "terminal" && (!record?.control || !isOpenControlClient(record.control.client) || runtime.observed?.available !== true || runtime.observed.sessionId !== entry.sessionId || runtime.observed.sessionFile === null || entry.sessionFile === null || !controlPathEquals(runtime.observed.sessionFile, entry.sessionFile))) return null;
 		if (entry.availability !== "live" || entry.ownership === null || entry.ownership.releasedAt !== null) return null;
 		if (entry.host?.pid !== runtime.pid) return null;
@@ -598,7 +598,7 @@ export function registerBridgeHost<Tab extends BridgeTab>(deps: BridgeHostDeps<T
 			slot: runtime.identity.slot,
 			brokerId: runtime.identity.brokerId,
 			brokerGeneration: runtime.identity.brokerGeneration,
-			sessionId: runtime.kind === "chat" ? session?.model.header?.id ?? entry.sessionId : entry.sessionId,
+			sessionId: runtime.kind === "chat" ? live?.headerId ?? entry.sessionId : entry.sessionId,
 			sessionFile: entry.sessionFile,
 		};
 	}

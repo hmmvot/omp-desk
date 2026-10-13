@@ -1,10 +1,13 @@
 import type { RpcSession } from "./rpc/session";
 
+/** The sentence of an application that was refused before anything was sent. */
+export const SETTINGS_APPLY_NOT_LIVE = "Not applied: the launching Chat is no longer live and idle.";
+
 /** Bind once; never fall back to the currently selected conversation after an asynchronous read. */
 export function settingsSessionApply(session: RpcSession, stillCurrent: () => boolean): (model: { provider: string; id: string; thinking?: string }) => Promise<string> {
   return async model => {
     const ready = (): boolean => stillCurrent() && session.phase === "live" && !session.model.working && !session.model.asyncPaused;
-    if (!ready()) return "Not applied: the launching Chat is no longer live and idle.";
+    if (!ready()) return SETTINGS_APPLY_NOT_LIVE;
     if (model.thinking === "auto") return "Not applied: RPC cannot express auto thinking. The saved configuration remains available to native OMP.";
     const available = await session.getAvailableModels();
     if (!ready() || available.status !== "ok" || !available.models.some(candidate => candidate.provider === model.provider && candidate.id === model.id)) return "Not applied: the effective default is not available in the launching Chat.";

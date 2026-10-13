@@ -34,7 +34,10 @@ export interface ContextLive {
 	readonly maintenance: MaintenanceState | null;
 }
 
-export function liveOf(model: ChatModel): ContextLive {
+/** The Chat model's fields the live header reads; a value (`ChatModel` and the port's `LiveConversation` both carry them). */
+export type ContextFacts = Pick<ChatModel, "phase" | "state" | "working" | "asyncPaused" | "maintenance">;
+
+export function liveOf(model: ContextFacts): ContextLive {
 	const state = model.state;
 	return {
 		model: state?.model ?? null,

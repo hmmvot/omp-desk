@@ -211,7 +211,7 @@ function world(overrides: Partial<BridgeHostDeps<FakeTab>> = {}) {
 			return created;
 		},
 		index: () => state.index,
-		sessions: () => ({ sessionOf: (tabId: string) => state.sessions.get(tabId) ?? null, records: state.records }) as never,
+		sessions: () => ({ conversations: { liveOf: (tabId: string) => state.sessions.get(tabId) ?? null }, records: state.records }) as never,
 		editors: () => state.editors,
 		editorSlots: () => ({ remove: (slot: string) => { state.slotsRemoved.push(slot); } }) as never,
 		endpoints: () => state.endpoints,
@@ -703,7 +703,7 @@ function verifiedChatHost(w: ReturnType<typeof world>, tab: FakeTab): BridgeNati
 		tabId: TAB, availability: "live", sessionId: "session-id", sessionFile: "/work/s.jsonl", host: { pid: 4242 },
 		ownership: { ownerGeneration: "owner-1", releasedAt: null },
 	});
-	w.state.sessions.set(TAB, { phase: "live", model: { header: { id: "header-id" } } });
+	w.state.sessions.set(TAB, { phase: "live", headerId: "header-id" });
 	return {
 		ownerGeneration: "owner-1", pid: 4242, processCreation: "ctime", slot: "slot-1", brokerId: "broker-1", brokerGeneration: "gen-1",
 		sessionId: "header-id", sessionFile: "/work/s.jsonl",
@@ -723,9 +723,9 @@ describe("liveBinding", () => {
 		const { tab } = editor(w);
 		assert.equal(w.host.liveBinding(EDITOR), null, "no runtime");
 		verifiedChatHost(w, tab);
-		w.state.sessions.set(TAB, { phase: "resyncing", model: { header: null } });
+		w.state.sessions.set(TAB, { phase: "resyncing", headerId: null });
 		assert.equal(w.host.liveBinding(EDITOR), null, "a conversation that is not live");
-		w.state.sessions.set(TAB, { phase: "live", model: { header: null } });
+		w.state.sessions.set(TAB, { phase: "live", headerId: null });
 		const row = w.state.rows.get(TAB) as Record<string, unknown>;
 		assert.ok(w.host.liveBinding(EDITOR), "the row's session id stands in for a header-less session");
 		row.ownership = { ownerGeneration: "owner-1", releasedAt: "now" };
