@@ -200,3 +200,7 @@ Owned Chromium verification in all four built-in light/dark/high-contrast themes
 
 A single-agent detail tab waits for the parent conversation's first authoritative snapshot and an initialized phase before mounting its child reader. Until then, and while the first read is in flight, it shows loading rather than interpreting a missing epoch as a stopped parent. A rejected read while the parent is running is described as a read failure; the stopped-parent explanation is reserved for a confirmed stopped or history-only parent. Existing serialized live refresh and retention of already-read rows are unchanged.
 
+
+## Agents row names (2026-10-13)
+
+The collapsed Agents row names the running agents instead of "who is doing what": `2 running: ParserSurvey, TestSurvey` (counts, then the first running agents' names). The per-agent activity fragments move to the row's tooltip. Row heights, one-line clipping and the detail tabs are unchanged. Decided in [Chat visual refresh](2026-10-13-chat-visual-refresh.md).
