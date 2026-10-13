@@ -1,0 +1,288 @@
+---
+status: proposed
+date: 2026-10-13
+---
+
+# A `SessionRuntime` port inside the extension host: one async boundary for open, restore, attach, launch and stop, with the chat runtime behind it later, enforced by a `vscode`-free layer
+
+## Problem
+
+An independent assessment of moving session management into a per-profile daemon (2026-10-13) recommended against building one now: on speed it removes little once the restore work is done, and it reverses accepted decisions (ADR-0030, ADR-0056, the workspace-independent Sessions design). It recommended one preparatory step that keeps the option open at the price of a refactor the project needs anyway: cut a `SessionRuntime` port inside the extension host, with an async, DTO-only API and no `vscode` import, that a daemon could later implement.
+
+The need is real without any daemon. `src/extension.ts` is 11,527 lines after the module-structure work (ADR-0065). What remains in it is what that design listed as a non-goal: the launch path, the restore path, the stop path and the native editor paths, interleaved with VS Code surfaces:
+
+- The launcher (`launchHost`, `attachHost`, `startConversation`, `watchRuntimeBroker`) interleaves starting and proving a process through its broker, handing the conversation to the host-owned `ChatRuntime`, and touching editors (`bridgeHost.prepareDocument`, `renderPanelDocument`, `attachChatRoutes`, `ensureTerminalPipeline`, `index.setEditorMode(slotId)`, `showWarning`).
+- The stop path mixes the verdict about a process with `TabState` fields, the terminal pipeline and dialogs.
+- `TabState` is keyed by editor slot but carries per-editor fields (`panel`, `document`, `bridge`, `chatDetach`, `pipeline`) and per-conversation runtime fields (`runtime`, `transitioning`, `nativeWatch`, `control`, `controlFailure`). `.runtime` is read or written 126 times in `extension.ts` and in four wiring modules and the lifecycle harness.
+- The window holds the per-tab lifecycle gate (ADR-0015) across sequences that span the editor and the process (`switchSessionMode`, `restartChat`, `confirmAndStopRuntime`, the kill and delete flows: 17 `lifecycle.run` calls in `extension.ts`, 9 in `wiring/session-actions.ts`).
+- Nothing states which of this code may use VS Code. `rpc-launch.ts` and `native-session.ts` look like process code but import `native-terminal.ts`, which imports `vscode` to read one setting and to open provider-login terminals; the layer rule of ADR-0065 cannot see that.
+
+A boundary that says "this side knows processes, claims and conversations; that side knows editors, dialogs and focus" gives `extension.ts` a second, checkable shape, makes the process side testable without a `vscode` stub, and is the seam a daemon would implement. It does not require building the daemon.
+
+## Goals and Non-goals
+
+- Goals:
+  - A `SessionRuntime` port whose results, events and snapshots are plain values, with admission and stop outcomes as discriminated results, no `vscode` behind it, and one in-process implementation.
+  - A layer rule that enforces that where the build already fails (`npm run typecheck`, ADR-0065's script): the runtime layer may not import `vscode`, directly or through any chain of modules, and nothing below it may import the runtime.
+  - The extension host reaches open, restore, attach, launch and the stop verdict only through the port, in cuts that each preserve behaviour and carry their own tests; what still bypasses it after the cuts of this task (the recording that follows a stop, the compound replace flows, Kill, exit handling) is named in §6 with the cut that removes it.
+  - The invariants each operation keeps (claims, lifecycle gate, restore cohort, fences, stop and kill) written down once as the port's test contract.
+  - A statement of how a daemon would implement the same port later, and what would then change in ownership, versioning and the window.
+- Non-goals:
+  - A daemon, a wire protocol, a second process, a new endpoint or any change to the brokers, their records, authentication or versions.
+  - A behaviour change: no new feature, no changed refusal, retry bound, timing or user-visible text.
+  - Moving the Sessions catalog read model (`SessionIndex.list/get`, the tree, the registry) behind the port. The port takes the index as an injected dependency; a catalog read port is a sibling step.
+  - The native terminal's byte stream. A native session's PTY is rendered by the window's `TerminalPipeline` through the broker's `PtyHandle`.
+  - Anything window-side: editors and webviews, dialogs, focus, symbol and file links, host-tool execution (ADR-0055), launch in the folder's window and the registry (ADR-0056/0057), diagnostics documents.
+
+## Current State
+
+Names are used instead of line numbers because `extension.ts` moves.
+
+**Process and conversation code that already imports nothing from `vscode`** (the import graph of the non-test sources, walked from each file): `SessionIndex` with its claims, lifecycle gate and restore (`host/session-index.ts`, `session-lifecycle.ts`, `session-claim.ts`, `session-availability.ts`); `ChatRuntime` and `RpcSession`; the broker client and handles (`pty-client.ts`, `rpc-handle.ts`); stop decisions and attach proofs (`rpc-reconcile.ts`); `control-client.ts`; `terminal-pipeline.ts`. The one exception on the launch path is `host/native-terminal.ts`, reached by `rpc-launch.ts` and `native-session.ts`; it imports `vscode` for `configuredOmpPath`, `openProviderLoginTerminal` and `findTerminalForPid`. Eight other `host/` files import `vscode` (`control-picker`, `settings-pickers`, `omp-settings-editor`, `desk-settings/view`, `debug/index`, `debug/vscode-debug-api`, `session-kill-wiring`; `guest-webview` type-only).
+
+**What `extension.ts` and the wiring modules do for a session**, by operation:
+
+| Operation | Where today | Mixed with |
+| --- | --- | --- |
+| Open (explicit or restored editor), one row | `openTabOnce` → `index.restore(tabId, { reconciler, launcher, mode, editorSlotId, allowStoppedResume })` | dialogs for external writers and legacy children, editor creation and selection, view-only history paint, election of the controlling editor |
+| Startup restore | `startStartupRestore` / `restoreTabs` → `index.restoreAll({ reconciler, launcher, only: cohort })`; `localRecoveryCohort` reads which editors VS Code restored | view-only paint, `electLocalController`, `projectRestoreReport`, `showError` |
+| Launch / attach | `launcher()` → `launchHost` / `attachHost` → `startConversation`; both end with `connectHostControl` / `reconnectHostControl` | `launchHost`'s early check that walks `s.tabs` for an authenticated native process serving the file, document retirement before a relaunch, `showWarning(runtime.notice)`, `setEditorMode`, route attachment, terminal pipeline, native watch |
+| Re-attach for a lifecycle action | `reattachNativeForLifecycle` (`wiring/session-actions.ts`) → `index.restore` with an attach-only launcher whose `attach` is `deps.attachHost`, then `reconnectHostControl` | a warning |
+| Replace a writer (view switch, Restart) | `switchSessionMode`, `restartChat`: one window-held `index.lifecycle.run(tabId, lease => …)` that stops the old process inline (`nativeShutdown`, `stopRpcHost`, `waitForManagedRootExit`), `releaseHostControl`, `retireBroker`, `promoteDraft(lease)`, re-renders documents, `index.replaceHost(…, { launcher }, lease)`, `closeSession(lease)` on failure | confirmation dialogs, pending-input capture, binding-generation and passive-role re-checks under the gate |
+| Stop one runtime | `confirmAndStopRuntime` (`extension.ts`, window-held lease around `stopSessionRuntime` → `requestSessionStop`, `alreadyEnded`, then teardown, `retireBroker`, `setRunIntent`, `closeSession(lease)`); also `stopVerifiedOwnedWriter` and the Processes captures in `wiring/session-actions.ts` | `TabState.transitioning`, `pipeline.noteReadOnly`, the host-control client in `TabState.control`, the Force Stop dialog |
+| End of a process that ended on its own | `handleRpcHostExited`, `handleNativeHostExited`, `endEndedRuntime`, `watchRuntimeBroker` | `showError`, `showWarning`, `stopTerminalForTab`, `pushSessionView`, `refreshLauncher` |
+| Stop a row with no runtime here | `index.stopRecordedHost` through `createRecordedHostStopPort` (`wiring/session-actions.ts`); it takes a temporary claim unless a live rival holds one | the Sessions view's dialogs |
+| Kill | `createSessionKiller` (`host/session-kill-wiring.ts`, imports `vscode`; `taskkill` after a creation-time check) → `index.reconcileKilledHost` | dialogs and the all-windows request fan-out (ADR-0060) |
+| Native session handover | `startNativeWatch` → `observeNativeConversation` → `index.transferNativeHost(…, slotId, …)` (moves a running native process to another session row under a two-session lock, takes the destination claim, marks the slot passive on refusal) | notifications, views, the bridge, the editor slot |
+| Conversation identity | `bindConversationIdentity`, `retryPendingIdentity` | `applyChatTabAppearance`, `bridgeHost.commitDocument` |
+| Host control | `connectHostControl`, `reconnectHostControl`, `establishControl` | SecretStorage, `TabState.control`, footer and picker consumers |
+| Chat | `s.chat: ChatRuntime`, one conversation per tab, pages attached through `attachChatRoute(s)` | `ChatPage` routes are panel or bridge `postMessage` closures |
+
+The claim holder is not a bare pid: it is `{ id (random), pid, processCreationTime (string | null, read asynchronously), windowUri }` (`host/session-claim.ts`); comparisons use the id. Every caller reads the live runtime from `TabState.runtime`; its type, `SessionHostRuntime` (`host/native-session.ts`), carries broker handles, mutable flags (`stopping`, `observed`, `observedSurvivors`) and the broker identity.
+
+## Proposed Design
+
+### 1. What is behind the port and what stays window-side
+
+The rule: **the runtime knows conversations, session files, claims, brokers and processes; the window knows editors, slots, documents, dialogs, focus and links.** The runtime never learns that an editor exists; it reports facts, and the window projects them. It also does not own a window's decision to ask: the window selects the cohort, decides which dialog precedes an action and renders every sentence.
+
+Behind the port (`src/runtime/`), at the end of the plan:
+
+- `SessionIndex`, the claims, the lifecycle gate and the owner reconciler, as the runtime's own state (injected at construction in this step).
+- The host launcher: staging of the runtime entries, broker-slot reservation, `launchRpcHost` / `launchNativeHost` / `attachRpcHost` / `attachNativeHost`, the proof of the exact child, `hostHandle`, the run-intent write.
+- The runtime half of `startConversation`: the broker watch, `ChatRuntime.startLive`, the native `handle.attach()`; of the native watch, control polling and the handover (`transferNativeHost`); notifications and view updates stay window-side.
+- Every stop: graceful, forced, of a process that already ended, of a recorded row with no runtime here, and the end-of-process handling (prove the exit through the broker, retire the broker, record the stopped intent, release credentials and the claim).
+- Conversation identity binding, host control (SecretStorage injected), and `ChatRuntime`/`RpcSession` with their mutation fences.
+
+Window-side, unchanged: cohort selection, controller elections and slot bindings, `projectRestoreReport`, the terminal pipeline, panels, documents, the bridge, `attachChatRoute(s)`, `TabState`'s editor fields, every dialog and notification, `applyChatTabAppearance`, `bridgeHost.commitDocument`, notification suppression, footer and symbol links, host-tool execution (a provider injected into the port), the registry and request routing, the diagnostics document, and the Kill dialogs.
+
+A call that has to name an editor, a panel, a dialog or a VS Code object is on the window's side. Operations that span both sides split into a window part and a runtime part; see §2.5 for how the window reaches into the runtime under the gate while it still has to.
+
+### 2. The port
+
+Types live in `src/runtime/session-runtime.ts`, whose imports are all statement-level `import type` and come only from an allow-list (§4). Illustrated below; names are final, field lists are completed per cut.
+
+```ts
+/** Who acts. Fixed when the runtime is constructed; never a per-call argument. */
+export interface RuntimeHolder { readonly id: string; readonly pid: number; readonly creationTime: string | null }
+
+export interface SessionRuntime {
+  readonly holder: RuntimeHolder;
+  /** One row, explicit or restored editor: reconcile, claim, then launch or attach. */
+  open(request: OpenRequest): Promise<RestoreOutcome>;
+  /** The startup pass over a cohort the caller captured. Always automatic. */
+  restore(request: RestorePassRequest, options?: { readonly signal?: AbortSignal }): Promise<RestoreReport>;
+  /** Attach-only: re-adopt an existing native writer for a lifecycle action; never launches. */
+  reattach(request: ReattachRequest): Promise<RestoreOutcome>;
+  /** The facts a stop or replacement is confirmed against: a pure read (cut 4). */
+  readTransitionFacts(request: ConversationRef): Promise<TransitionFacts | null>;
+  // `LocalSessionRuntime` only, until cut 7 (§2.5): `requestStop`, `awaitSettled`, `confirmEnded`, the lease-dependent stop operations.
+  // Later cuts: `stop` (verdict plus recording, gated, cut 7), `stopRecorded` (cut 7), `endEnded` (cut 5).
+  readonly conversations: ConversationPort;                              // cut 6
+  snapshot(conversation: string): RuntimeSnapshot | null;
+  snapshots(): readonly RuntimeSnapshot[];
+  subscribe(listener: (event: RuntimeEvent) => void): { dispose(): void };
+}
+```
+
+#### 2.1 Operations and results
+
+Each operation has its own result union. Expected outcomes are values; a thrown error is an invariant violation, a bug, or an I/O failure the index throws today.
+
+| Operation | Result | Admission |
+| --- | --- | --- |
+| `open` | the existing `RestoreOutcome` (`restored`, `attached`, `draft`, `conflict { kind }`, `failed { kind }`, `stopped`, `skipped`) | `restored` / `attached` accepted; `conflict`, `stopped`, `draft`, `skipped` refused with their kind; `failed` and a launch that returned `unconfirmed` are never retried |
+| `restore` | the existing `RestoreReport` (one outcome array per kind, `persistError`) | per row as `open`; a row a cancelled pass did not start is `skipped` |
+| `reattach` | `RestoreOutcome`, never `restored` | |
+| `requestStop` (`LocalSessionRuntime` only until cut 7) | the truthful verdict `{ writerGone, treeEmpty, detail, diagnosticDetail? }` (`NativeStopVerdict`, ADR-0029/0037) plus a closed `code` | `accepted` (writer gone), `refused { code }`, `unconfirmed` (the verdict says why) |
+| `stopRecorded` (cut 7) | the existing `StopRecordedHostResult` | as `requestStop` |
+| chat commands | `accepted | refused | explained | unconfirmed | ignored` (`ChatCommandOutcome`) | |
+
+`open` and `restore` keep throwing what `index.restore` and `restoreAll` throw today; the window shows `messageOf(error)` as now (`openTabOnce`, `restoreTabs`). They are not converted into values in this step because that would change which sentence the user reads.
+
+- **Codes** are a closed vocabulary extended only additively: `busy`, `not-live`, `disconnected`, `unsupported`, `not-accepted`, `target-changed`, `not-owner`, `unconfirmed`, plus the existing conflict and failure kinds. `detail` is a bounded sentence this extension authors; no child or OMP text is forwarded as a message. The one exception is the existing `extension-error` event (§2.4), which carries bounded untrusted OMP text to an error notification exactly as `handleChatEvent` does today. A receiver that meets an unknown code on a *mutating* operation treats the outcome as `unconfirmed`, never as `refused`, so it cannot invite a retry (ADR-0050).
+- **A stop request names its target**: `{ conversation, mode, consent, expectedTarget }`, where `expectedTarget` is the pid, creation time, slot, broker id, broker generation and attachment sequence the confirmation was shown for, plus `expected` transition facts for a graceful stop. If the target changed the port returns `refused { code: "target-changed" }`; it never stops a different writer under an old confirmation. Today the same check is `state.runtime !== runtime`, which also catches a re-attach of the same process; in cuts 3 to 4 `LocalSessionRuntime`'s form additionally takes the live `runtime` the caller captured and keeps that identity comparison, and the attachment sequence (§2.4) is what replaces it in the DTO form.
+
+#### 2.2 Admission fields (no `CallIntent`)
+
+Today's callers pass four independent admission options, and the port keeps them as fields, not a two-valued intent, because the cases differ:
+
+| Caller | `allowStoppedResume` | `automatic` | `restoreDrafts` | Notes |
+| --- | --- | --- | --- | --- |
+| `openTabOnce`, Resume / Start | `true` | no | n/a | may lift a durable `stopped` and start an empty draft. The Chat/Terminal switch is not an `open` call: `switchSessionMode` replaces the writer with `replaceHost` (cut 7) |
+| `openTabOnce`, any explicit Open | `true` only when a legacy writer was just stopped for the open, else `false` | no | n/a | `intent === "explicit" && (verb !== "opened" or stoppedForOpen)`. `reloadSession` calls `openTab(…, "opened", "restored")` only when a verified owned writer runs, so it is the restored row below |
+| `openTabOnce`, an editor VS Code restored (`intent === "restored"`) | `false` | no | n/a | layout restore is not a decision to resume |
+| startup `restore` pass | `false` | `true` | `false` | relaunch only with recorded-writer absence evidence |
+| `reattach` | `false` | no | n/a | its launcher refuses to launch |
+
+`OpenRequest` carries `{ conversation, mode, allowStoppedResume, editorBinding? }`; `restore` carries `{ cohort }` and nothing else, so the window cannot turn an automatic pass into an explicit one. The cut-2 test is this table.
+
+#### 2.3 Cancellation
+
+- Observation is cancelled by disposing the subscription; the runtime stops nothing for it.
+- Every gated operation accepts an `AbortSignal` that is honoured **until the gate is taken**: before each row and after each claim acquisition (today's `RestoreOptions.signal`), and while waiting for a busy gate (today's `withSessionReadDeadline` and the abandonment checks inside the gate). `TabLifecycle` has no cancellation, so the wait is a race against the signal plus a check on entering the gate. A skipped row is `skipped`; a cancelled wait for the gate returns without side effects.
+- Once the gate is held, an operation is not cancellable: a caller's cancellation or disappearance never abandons a half-done launch, replacement or stop; the operation completes and its outcome is visible in the next snapshot or event. This is the property that makes a later out-of-process implementation safe against a closing window.
+
+#### 2.4 Identity, events, snapshots, conversations
+
+- **Window.** No call carries a window id. In process the runtime instance *is* the claim holder; the port exposes it as `holder` (`SessionIndex` already acquires claims with it). A per-call window id would be a caller assertion nothing verifies; a remote implementation would bind identity at connection time from the kernel's view of the peer.
+- **Editor slot.** No call carries a slot id as identity. The runtime knows conversations. Slots appear in runtime transactions in three places, kept as opaque preconditions, not identity: `OpenRequest.editorBinding?: { slot }` is passed to `index.restore` as `editorSlotId` (the binding's mode is written in the same save as the host record); `replaceHost` takes `slotId`, writes the same and refuses when the binding changed; and `transferNativeHost(…, slotId, …)` in the native handover (cut 5). The binding store itself stays the index's until the catalog port exists. `setEditorMode` inside `startConversation` becomes the window's `prepareView` hook (§2.5).
+- **Events.** One port-wide stream, each event carrying `conversation` and an incarnation `{ ownerGeneration, brokerGeneration, attachment }`, where `attachment` is a per-conversation sequence that increases at every launch or attach, so a re-attach of the same process is a new incarnation; the window drops events of an incarnation it no longer shows. Events: `attached { kind, pid, identity }`, `exited { outcome, detail }`, `broker-lost { proven }`, `moved { from, to }` (native handover), `identity-bound { sessionFile, sessionId }`, `notice { level, code, text }`, `phase`, `activity` (a bounded projection for notifications, Sessions rows and the streaming key), `open-url`, `resume-requested`, `restart-requested`, `catalogue`, `recovery { reason }`, `extension-error { message }`, `turn-ended`. Events are delivered after the state they describe is committed and may be repeated or, in a remote implementation, missed; **snapshots** (`RuntimeSnapshot { conversation, incarnation, kind, pid, identity, cwd, phase, stopping }`) repair a gap, and a window's handlers are level-triggered: they read the snapshot and are idempotent.
+- **Conversation surface** (`ConversationPort`, cut 6): `ChatRuntime`'s API with DTO inputs and outputs: `attachPage(conversation, sink)` with today's `ChatPage` as the sink, `command`, the view-only and history reads. `ChatModel` and its reducer stay inside; today's `{ type: "model", model }` event becomes the `activity` DTO and the page receives only `omp:chat-*` snapshots and deltas, as now. The sink and `subscribe` are callbacks by design; they carry values, not live runtime objects. Requests outward (`open-url`, `resume-requested`, `restart-requested`) are events answered by explicit commands.
+
+#### 2.5 How the window reaches the runtime while it still must
+
+This is the temporary contract; the review of this design found that omitting it makes cuts 2 to 4 unbuildable. It is part of the design, not a footnote.
+
+**The lifecycle gate crosses the in-process boundary until cut 7.** `SessionIndex.replaceHost` requires the caller's lease; `switchSessionMode`, `restartChat` and `confirmAndStopRuntime` hold one lease across editor and process steps; the gate is a FIFO and not reentrant. A gated `replaceWriter` or `stop` called inside those leases would deadlock; called after releasing them it would open a gap between stop and replace, which is a behaviour change. So:
+
+- `SessionRuntime` declares forms that take the gate themselves (`open`, `restore`, `reattach`; later `stop`, `stopRecorded`) and the pure read `readTransitionFacts`. `endEnded` (cut 5) is ungated at the port: it calls the exit handlers, which take the gate themselves, and the window's `endExited` hook runs outside the gate.
+- **`requestStop`, `awaitSettled` and `confirmEnded` are `LocalSessionRuntime` members only.** `requestStop` is a mutating stop that is safe only because every caller holds the tab's lease and records the outcome afterwards under it (the stopped intent, `closeSession(lease)`); that precondition exists only in process, so it must not be declared on the port a daemon would implement. They take no gate (they touch the broker-client gate, the broker, the chat session's settlement and abort, the control client and the window's raw fence, never `lifecycle.run`), and cut 7 absorbs them into the gated `stop` and `replaceWriter`.
+- `LocalSessionRuntime` also declares **lease-bound forms** where a caller already holds a lease: `replaceWriterHeld(request, lease)` in cut 2, and `stopHeld`/`stopRecordedHeld` when cut 7 moves the recording that follows a stop. The type `SessionRuntime` exposes no lease. They are removed when the compound flows call single gated operations.
+- Compound flows that stop a process inline today (`switchSessionMode`, `restartChat`, the delete flow) and every recording step that follows a confirmed stop (`setRunIntent`, `closeSession`, `retireBroker`, `releaseHostControl`, the window's teardown) stay in the window until cut 7 and are named in §6 as remaining.
+
+**The runtime calls the window through `RuntimeWindow` hooks and accessors** (supplied at construction by `extension.ts`; contractual and in-process only; a remote implementation would carry them as request/reply or replace them with events plus snapshots):
+
+| Hook / accessor | Why | Contract | Removed |
+| --- | --- | --- | --- |
+| `retireDocument(conversation)` | a relaunch needs a fresh document capability; `launchHost` does it before reserving the broker slot | runs before the slot is reserved | cut 7 |
+| `adopt(conversation, runtime)` | writes the window's copy of the runtime (`TabState.runtime`), clears the ended notice and the control picker | runs **before the broker watch starts**: `watchBrokerLoss` stops for good at its first look when `isCurrent()` (which reads the window's copy) is false, so a later write would silently disable loss detection when the attach is slower than one poll | cut 7 |
+| `prepareView(conversation, kind)` | persists the editor mode (`setEditorMode`) and, for a native terminal, creates the pipeline and releases the chat | runs after the watch and before the stream is activated ("watch first, then activate") | terminal-stream design |
+| `attached(conversation, kind)` | attaches routes (chat) or the native watch and the guest context (terminal) | runs after `startLive` or the native `attach()` and before the run intent is written; idempotent | cut 7 |
+| `launchPrecheck(file)` | the early `not-started` check walks the window's tabs and their control clients | fresh, best effort | cut 5 |
+| `connectControl(conversation, runtime, …)` | `connectHostControl` / `reconnectHostControl`, started after launch and attach | fire-and-forget (`void`), as today | cut 5 |
+| `controlState(conversation, …)` | the control-state writes `prepareHostControl` and the stop make (`setControlFailure`, clearing `TabState.control`), and `controlOf`, the read of the verified client | the writes are the window's; the read is fresh | cut 5 |
+| `brokerLost(conversation, runtime)` | the `onLost` handler of the broker watch: detection moves in cut 3, the handling stays in the window | called outside the gate | cut 5 |
+| `chat` | the shared `ChatRuntime` object: `startLive` and `release` (cut 3), `abortForShutdown`, `readSettlement`, `epoch` (cut 4) | an injected object, not a hook; the runtime does not construct it | cut 6 |
+| `notice(level, text)` | replaces `showWarning` inside launch and exit handling | **fire-and-forget**: never awaited, so an unanswered notification cannot hold the gate | cut 5 |
+| `fence(runtime, on)` and `noteReadOnly(runtime, …)` | what `requestSessionStop` does to the window today: a raw `transitioning = true` and the pipeline's read-only note during a native stop; not `fenceSessionAdmission`, which also refreshes the guest context and would change `stopVerifiedOwnedWriter`'s path. Resolved by the captured runtime through `current(runtime)`, not by `stateOf(conversation)`, which resolves to the controlling slot | see the fence rule in §3 | cut 7 |
+| `endExited(conversation, runtime)` | the window's reaction to a process that ended (cut 5's `endEnded`) | runs outside the gate | cut 5 |
+| `rootGone(root)` and `attachBrokerClient()` | the root-gone probe and the broker-client gate that the stop operations and the watch use, late-bound thunks read at call time (the lifecycle harness overrides `rootGone`) | read-only | cut 5 / cut 7 |
+
+Every hook and listener runs under the gate of the operation that triggered it where one is taken (`open`, `restore`, `reattach`): it must not call a gated operation for the same conversation, must not wait for the user, and a throwing hook fails the operation (as a throw inside today's `startConversation` does). The ungated operations of cut 4 are called inside the callers' leases and their hooks inherit the same rule.
+
+**One copy of the runtime until cut 7: `TabState.runtime`.** The runtime keeps no table of its own, so there is nothing to drift. `current(runtime)` is a transitional accessor that returns the window record whose `runtime` is that very object (the check `state.runtime === runtime` of today); `runtimeOf`, `snapshot`, the broker watch's `isCurrent` and the cut-4 operations read through it, and the lifecycle cases that set only `harness.state(TAB).runtime = native` keep working. `adopt` is the only product writer after cut 3; the clearers are the sites enumerated in cut 3's map (`switchSessionMode`, `restartChat`, `confirmAndStopRuntime`, `stopVerifiedOwnedWriter`, `handleRpcHostExited`, `handleNativeHostExited`), each covered by a lifecycle test. The hooks keep two things `startConversation` does today: `state.mode = runtime.kind` (in `adopt`) and, after `startLive`, `setMutationFence("Session lifecycle transition.")` when `state.transitioning` is set (in `attached`).
+
+**Transitional members returning live objects** exist on `LocalSessionRuntime` only, so a type that accepts just `SessionRuntime` cannot reach them, each with its removal: `runtimeOf(conversation)` and `current(runtime)` (the window's `SessionHostRuntime` record; with `TabState.runtime`, cut 7), `controlOf` (cut 5), `terminalHandle(conversation)` (the `PtyHandle` a `TerminalPipeline` reads; when the terminal stream has its own design, which cut 7 does not remove), and the `runtime` argument of the cut-4 forms (cut 7).
+
+### 3. Invariants each operation keeps
+
+These are the port's test contract; each cut adds the tests for the operations it moves.
+
+- **Claims** (ADR-0035, ADR-0039). A launch or attach happens only under a claim this holder acquired for the conversation. Admission evidence is the claim, the holder's pid and creation time and the verdict read at that moment; registry data, request files and caller assertions are never evidence (ADR-0056). Uncertainty is unowned: a failed, unresolved or unconfirmed operation releases its lease and retains nothing as ownership. `stopRecorded` stops the row's recorded broker child after persisting the stopped intent; a verified live rival keeps its claim, and otherwise the operation holds a temporary claim that ends with it, including unknown outcomes.
+- **Lifecycle gate** (ADR-0015). Per conversation (and per slot for folder shells). Promotion, restore, attach, close, row removal, deletion, replacement and stop are serialised on it. It crosses the in-process boundary until cut 7 (§2.5) and never crosses an out-of-process one.
+- **Restore cohort.** The pass is pinned to the cohort the caller captured; a row created while it ran is never swept in. Admission is automatic (§2.2): it never lifts a durable `stopped` intent, never starts an empty draft, relaunches only with recorded-writer absence evidence, runs at most `RESTORE_CONCURRENCY` (four) rows at once and reports in cohort order.
+- **Fences (three, not one).** (a) The window's admission fence, `TabState.transitioning`, together with the chat session's lifecycle `setMutationFence` which `fenceSessionAdmission` raises with it: raised before a confirmation dialog, kept across a graceful stop, the dialog and a Force Stop, and lowered when the stop is declined, refused or not accepted (`fenceSessionAdmission(…, false)` in the `finally` blocks of `confirmAndStopRuntime`, `switchSessionMode`, `restartChat`). For a *native* session whose shutdown was accepted (`runtime.stopping`) it stays up until the exit or a re-attach. (b) `runtime.stopping`, set before a native shutdown request whose acknowledgement may have been lost, cleared only by a refusal. (c) The `RpcSession` navigation and clear fences of ADR-0050/0059, which end at phase completion, a completion marker or the process's end; a page re-subscription does not lift them, and a re-attach, which builds a new `RpcSession`, loses them, which ADR-0059 records as an approved residual, not an invariant. In cuts 2 to 4 the window raises and lowers (a) through the `fence` hook and the existing helpers, unchanged; a transition-token pair that lets one fence span two port calls and a modal dialog is the design for cut 7.
+- **Stop and kill** (ADR-0029, ADR-0037, ADR-0039, ADR-0060). Consent binds the target (§2.1). A stop that could not be confirmed is not a failure when the recorded root is proven gone (`recordedRootGone`): it completes as a confirmed stop. Stop and the all-windows tier of Kill All use authenticated broker routes; for that tier a window's port stops only rows it provably runs, and the broker fallback is allowed only on positive proof that the owner's executor ended. Kill is separate: `createSessionKiller` ends a process tree with `taskkill` after a creation-time check, then `reconcileKilledHost` records the row stopped under the gate; Kill is not part of cuts 1 to 4 (`session-kill-wiring.ts` imports `vscode` and must be split first) and is assigned to cut 7.
+- **Host tools** (ADR-0055). Execution is injected by the window as a provider; the runtime keeps broker pinning of unanswered host calls and exactly-one-result delivery.
+- **Single writer.** One live writer per session file; `launchHost`'s fresh readback of an authenticated native process serving the exact file (the early `not-started`) moves with it unchanged.
+
+### 4. The layer rule
+
+`scripts/check-imports.mjs` gains one layer, `src/runtime/`, and rules beyond ADR-0065's matrix.
+
+| Layer | May import |
+| --- | --- |
+| `src/runtime/` | `host`, `broker`, `omp`, `protocol`, `chat`, `shared` |
+| `src/wiring/` | its row plus `runtime` |
+| `src/extension.ts` | every layer except `webview`, as now (so `runtime` too) |
+
+`host`, `broker`, `omp`, `protocol`, `chat`, `shared`, `views` and `webview` may not import `runtime`: the port sits above the process code it wraps, and the views read rows through the catalog.
+
+**R-runtime-1 (`vscode`-free closure).** No file under `src/runtime/` may refer to `vscode` in any form: a static, type-only or side-effect import or export-from, a dynamic `import()`, a `require()`, an `import x = require()` or a type-position `import("vscode")`; and none may reach a non-test file that does through any chain of relative imports; the chain is printed (`src/runtime/x.ts -> src/host/y.ts -> src/host/z.ts imports vscode`). The existing checker records only relative specifiers, so the check captures the bare `vscode` specifier and the dynamic, `require` and type-position forms explicitly, in **every** non-test file (a file that reaches `vscode` only dynamically is still a `vscode` importer for the closure). Other bare specifiers (Node built-ins, npm packages) are not part of this check: no dependency imports `vscode`.
+
+**R-runtime-2 (the port module).** `src/runtime/session-runtime.ts` uses only statement-level `import type` / `export type … from`: an inline `import { type X }`, an `export *` and an `export { X } from` are violations. Its sources are allow-listed **by module and type name** in the script (everything of `src/shared/`, `src/protocol/` and `src/chat/`; and from `src/host/`, only data shapes: `RestoreOutcome`, `RestoreReport`, `OmpHostLaunchRequest`, `OmpHostAttachRequest` and their results from `session-index.ts`; the row, host and scope types of `session-model.ts`; `NativeStopVerdict` from `rpc-reconcile.ts`; `OmpHostStepTimings` from `session-restore-trace.ts`; `ChatPage` from `chat-runtime.ts`). `SessionIndex`, `OwnerReconciler`, `ChatRuntime`, `PtyHandle`, `SessionHostRuntime` and the broker clients are not on it, so a live object cannot become part of the port's contract by a type import. The page sink and `subscribe` are callbacks by design.
+
+Fixtures in the checker's test, one per rule: a runtime file importing `vscode` (static, type-only, dynamic, `require`, `import("vscode")`); a runtime file reaching `vscode` through a chain; a runtime file importing a clean `host` file (allowed); a `host`, `views`, `webview` file importing `runtime` (violations); `wiring` importing `runtime` (allowed); the port module with a value import, an inline `type`, an `export *`, and a type import from a non-allow-listed file.
+
+Prerequisite found by the first run of the check: `host/native-terminal.ts` imports `vscode` for three functions. Cut 1 moves them to a new `host/omp-vscode.ts` (`configuredOmpPath`, `openProviderLoginTerminal` with `ProviderLoginTerminalRequest`, `findTerminalForPid`), leaving `native-terminal.ts` vscode-free (its header names the split). `terminalWriterForHandle` stays where it is: it is about a PTY writer and is vscode-free already. `resolveOmpBinary`'s default explicit path becomes an injected reader, `setOmpPathReader(reader)`, registered once at activation like `setOmpResolutionLog`; **the reader is called on every resolution**, so a changed setting still takes effect on the next launch. Importers of the three moved names change their path (`extension.ts`, `omp-settings-editor.ts`, `wiring/inventory-wiring.ts`). The lifecycle harness stubs modules by the specifiers `extension.ts` imports (`native-terminal`, `rpc-launch`, `control-client`, `control-protocol`, `rpc-reconcile` in `src/extension-lifecycle.test.ts`), so the stub that provides `openProviderLoginTerminal` must be re-pointed to `omp-vscode` in the same cut or it would silently stop applying; each later cut re-points the stubs of the specifiers it changes.
+
+### 5. How a daemon would implement the same port
+
+A `RemoteSessionRuntime` in `src/runtime/` would implement `SessionRuntime` over an authenticated local pipe to one process per profile. The window code that already speaks only results, events and snapshots does not change; what does is the temporary contract of §2.5 (the hooks become request/reply or events, the lease-bound forms and live-object members are gone by then, SecretStorage and `globalState` access need a decision) and the page sinks, which would carry `omp:chat-*` frames over the connection. These are decisions for a later ADR that this design does not take:
+
+- **Ownership.** The claim holder becomes the daemon process, with its own id, pid, creation time and process-local lease; the claim's `windowUri` loses its meaning. ADR-0039's evidence is then about the daemon and a window is a client: "held by another window" row states derive from the daemon's own knowledge, and ADR-0056's registry and request channel shrink to the window-side facts (open folders, focus, host-tool routing). This reverses ADR-0056's choice of file coordination and ADR-0030's rejection of a machine-wide lifecycle service, so it needs its own ADR. Host-tool calls (ADR-0055) pin to the broker input holder; if the daemon held input they would have to be routed back to a window. The daemon sits **above the brokers and never owns the OMP pipes**: an rpc-ui child exits on stdin EOF and a pseudo console closing ends its TUI, so a daemon that owned them would end every session when it crashed or upgraded.
+- **Events and snapshots are the sync protocol.** The port's rules were chosen for this: events carry conversation and incarnation, a snapshot repairs a gap, results are values, a gated operation is not cancellable after the gate, listeners are level-triggered.
+- **Versioning.** The in-process port carries no version. A remote implementation adds a handshake with `{ major, minor }`: a minor change is additive only (optional fields, event types, codes), a receiver ignores what it does not know and treats an unknown code of a mutating operation as `unconfirmed`; a major change is a handshake refusal, and the new side serves the previous major for as long as windows of the previous build can still run, because a window keeps its loaded code until it reloads (the skew the assessment measured: 19 commits to the chat projection since 2026-09-29 against 4 to the PTY protocol). A compatibility window and a restart-on-upgrade policy are needed; neither is designed here.
+- **Security.** A window's identity would be its connection, not a kernel pair; one token would control every session where there is one per session today. That changes the other-user boundary and needs a security review of its own.
+- **Native terminal.** A broker already serves per-connection subscribers with one input owner (`broker/pty-broker.ts`), so a window could attach its own viewer to a slot given the broker identity; the output path through a daemon is not examined here.
+- **Window-side whatever happens:** host tools, launch in the folder's window, symbol links and focus.
+
+### 6. Migration plan: cuts
+
+Each cut is one commit that preserves behaviour and adds its own tests in `src/runtime/` or the touched module, and keeps `npm run typecheck`, the lifecycle test, the touched wiring tests and `npm run build` green. The procedure is the wiring-seam procedure of the module-structure design (map the region, ownership by grep, move bodies verbatim, shrink the harness's `ACCESS` block, the commit message names what remains in `extension.ts` and why). Each cut's acceptance greps (below) run over `extension.ts`, `src/wiring/` and `src/host/session-kill-wiring.ts`, with an allow-list in the cut's commit message that shrinks as cuts land.
+
+1. **A `vscode`-free `native-terminal.ts` and the `runtime` layer.** `host/omp-vscode.ts`, `setOmpPathReader`, the layer and R-runtime-1/2 in `check-imports.mjs` with fixtures, the lifecycle harness stubs re-pointed. Tests: the checker's fixtures; `native-terminal.test.ts` split along the move (the setting, provider-login terminal and terminal-by-pid cases move to `omp-vscode.test.ts`); a test that a changed `omp.executablePath` is read on the next resolution.
+2. **The port, with open, restore and reattach.** `src/runtime/session-runtime.ts`, `src/runtime/local-runtime.ts` (`LocalSessionRuntime`, built from the index, the reconciler and a `HostLauncher` dependency that is, in this cut, still `extension.ts`'s `launchHost`/`attachHost`), the lease-bound `replaceWriterHeld`. `index.restore`, `restoreAll`, `replaceHost` and the attach-only restore of `reattachNativeForLifecycle` leave `extension.ts` and `session-actions.ts`; `launcher()` and the `reconciler` argument disappear from those callers, so the lifecycle harness's `launcher = () => hostLauncher` reassignment and its `index.restore` calls with a fake launcher are rewritten in this cut (the harness builds a `LocalSessionRuntime` over its fake launcher and installs it on the window). Tests: `local-runtime.test.ts` with a fake launcher: the admission table of §2.2 row by row, cohort pinning, `reattach` never launches, `replaceWriterHeld` passes `expectedPid`/`expectedCreationTime`/`slot` through, `SessionRuntime` exposes no lease (type test), thrown errors propagate unchanged. Grep: `index.restore\(|restoreAll\(|replaceHost\(|launcher\(` outside `src/runtime/`.
+3. **Launch and attach.** `launchHost`, `attachHost`, `hostHandle`, `runtimeEntries`/`stageLeaseHelper`, host-control preparation, the runtime half of `startConversation` and `watchRuntimeBroker`'s detection move to `src/runtime/local-launcher.ts`; the hooks and accessors of §2.5 that cut 3 needs (`retireDocument`, `adopt`, `prepareView`, `attached`, `launchPrecheck`, `connectControl`, `controlState`, `brokerLost`, `notice`, and the injected `chat`) are supplied by `extension.ts`. Configuration reads (`linkReminder`), the diagnostics recorder, the broker client gate and SecretStorage arrive as injected ports. `harness.launchHost` goes, and the harness's stubs for `rpc-launch`, `control-client` and `control-protocol` are re-pointed. Tests: `local-launcher.test.ts`: the early `not-started` on an authenticated native process serving the file, slot reservation before spawn and its release only on `not-started`, `unconfirmed` keeping it, the order `retireDocument` → reserve → launch → `adopt` → watch → `prepareView` → `startLive`/`attach()` → `attached` → intent write, a **slow native attach does not disable broker-loss detection** (the watch's first look sees the adopted runtime), `notice` not awaited, a throwing hook failing the launch, the attach failure paths, `attached` run twice (idempotent); the lifecycle cases that exercised `launchHost` move. Grep: `launchHost|attachHost|startConversation|runtimeEntries`. After this cut also run the end-to-end `60-outside-crash` and `70-reload-window` scenarios.
+4. **The stop verdict family.** `requestSessionStop` and `stopSessionRuntime` become `LocalSessionRuntime.requestStop`, `alreadyEnded` becomes `confirmEnded`, `waitForRpcSettlement` becomes `awaitSettled` (all three `LocalSessionRuntime`-only, ungated, verdict-only, with the code vocabulary of §2.1 and the live `runtime` the caller captured), and `readTransitionFacts` moves as the port's pure read. They reach the window through the `fence`/`noteReadOnly`, `controlState`, `rootGone`/`attachBrokerClient` and injected `chat` accessors of §2.5, all resolved by the captured runtime through `current(runtime)`. Their callers call the runtime: `confirmAndStopRuntime`'s attempt, `stopVerifiedOwnedWriter` and the Processes captures in `wiring/session-actions.ts` (the `readTransitionFacts` and `stopSessionRuntime` dependencies; the file's own `SessionRuntimePort` interface is renamed `StopReadPort`), `switchSessionMode` (`readTransitionFacts`, `confirmEnded` three times, `awaitSettled`), `newSessionInPlace` and `endEndedRuntime`. **The recording that follows a confirmed stop stays in each caller, in each caller's own order** (`confirmAndStopRuntime` records intent and closes the session only for a non-passive editor; `stopVerifiedOwnedWriter` records the intent before the stop, closes before retiring the broker and releases credentials last): unifying them would change behaviour. Tests: consent bound to target and attachment, graceful with busy and without consent, the confirmed stop of an already-ended root, native force with survivors, truthful verdicts, a hook that raises the fence exactly as `requestSessionStop` does, and the callers' existing lifecycle and `session-actions` tests unchanged. Grep: the definitions of `requestSessionStop`, `stopSessionRuntime`, `alreadyEnded`, `waitForRpcSettlement`, `readTransitionFacts` and `deps.readTransitionFacts(`/`deps.stopSessionRuntime(` calls outside `src/runtime/`.
+
+This task's scope is cuts 1 to 4. What still bypasses the port after them, by name, is: the inline stop-and-replace halves of `switchSessionMode` and `restartChat` (`nativeShutdown`, `stopRpcHost`, `waitForManagedRootExit`, `retireBroker`, `releaseHostControl`, `promoteDraft`, and `replaceWriterHeld` under the window's lease), the stop inside the delete flow, every recording step that follows a confirmed stop (`confirmAndStopRuntime`'s attempt, `stopVerifiedOwnedWriter`), `stopRecorded` (`createRecordedHostStopPort`) and Kill (`createSessionKiller`, `reconcileKilledHost`), the end-of-process handlers and `endEndedRuntime`, identity binding, host control, `transferNativeHost` through the native watch, and the `ChatRuntime` surface. They are cuts 5 to 7:
+
+5. **End of a process, broker loss, identity, host control and the native handover.** `handleRpcHostExited`, `handleNativeHostExited`, `endEndedRuntime` as the ungated `endEnded` (it takes the gate through the handlers and calls an `endExited` hook outside the gate), `watchRuntimeBroker`'s `onLost`, `bindConversationIdentity` with `retryPendingIdentity`, `connectHostControl`/`reconnectHostControl`/`establishControl`; `startNativeWatch` split into window notifications and runtime control polling plus `transferNativeHost` (`moved` event, the third slot-bearing transaction); dialogs become `notice` events; `controlOf`, `controlState`, `connectControl`, `brokerLost`, `launchPrecheck` and `notice`'s hook form are removed.
+6. **The conversation surface.** `ChatRuntime` owned by the runtime behind `ConversationPort`; `ChatRuntimeEvent`'s `model` becomes `activity`; the three window consumers of the live `ChatModel` change.
+7. **`TabState` split, gated compound operations, `stop`/`stopRecorded`, Kill.** `TabState` becomes editor state plus a per-conversation runtime record the port owns; `runtimeOf`, `TabState.runtime`, the lease-bound forms, the remaining hooks and the window's copy go; `switchSessionMode`, `restartChat`, `deleteSession`, `confirmAndStopRuntime`, `stopVerifiedOwnedWriter` and the Kill flow (after splitting `session-kill-wiring.ts`) call single gated port operations (`stop`, `stopRecorded`, `replaceWriter`) with the transition-token fence, the gate-time preconditions (binding generation, passive role, `lastOpenRequest`, `stop.scope: "session" | "local-copy"` for a passive editor's stop) and the `stopVerifiedOwnedWriter` order preserved or changed by an explicit decision; the window is given a narrowed index type. The terminal stream gets its own design.
+
+## Alternatives
+
+- **Do nothing; keep cutting `extension.ts` by function lists.** The procedure still works, but each seam inherits `TabState` and the `vscode`-mixed launch path as its dependencies, and nothing prevents the next change from putting a `vscode` call back inside process code.
+- **Build the daemon now.** Rejected by the assessment: it reverses accepted decisions, adds a version-skew matrix over the chat projection, and the speed it buys is mostly available in process.
+- **Make `host/` itself free of `vscode`.** Nine non-test `host/` files import it; moving them to `wiring/` would let a per-layer ban replace the closure computation. Not chosen now: it moves unrelated modules (settings editors, pickers, the debug tools, the Kill wiring) and their tests for a rule the closure check already enforces, and it changes ADR-0065's layer contents. The closure rule stays correct if those moves happen later, and then reduces to the per-layer ban; it is the follow-up to take.
+- **A port in `host/` with a per-file `vscode` ban.** Rejected: a list rots and says nothing about the modules the listed files import.
+- **Make `src/wiring/` the runtime's home.** Rejected: wiring connects host services to VS Code surfaces and may import `views`; the runtime is the opposite.
+- **Project references or a separate package.** Rejected for ADR-0065's reason: one root, one esbuild build.
+- **Pass window ids and slot ids on every call.** Rejected: caller assertions nothing verifies, and they would couple the runtime to editors.
+- **Split `TabState` first.** Not needed first: the editor half can wait, but the runtime half is what the temporary contract of §2.5 pays for. It is cut 7, and a reviewer or maintainer who prefers to pay earlier can move the runtime record (runtime, control, fence, native watch) to before cut 3 without changing the port; that enlarges the first four cuts to include host control.
+- **Expose `SessionHostRuntime` directly as the snapshot.** Rejected: it holds broker handles and mutable flags.
+
+## Risks and Open Questions
+
+- **The window's copy.** `TabState.runtime` is the single copy until cut 7, so the risk is a reader that bypasses `current(runtime)` or a clearer that forgets a cleanup, not drift. Mitigation: the clearers are enumerated, each is covered by a lifecycle test, and the cut-3 greps fail on a new writer outside `adopt`.
+- **Hook ordering and the gate.** A hook that awaited the user or called a gated operation would deadlock or stall the gate. Mitigation: §2.5's contract (fire-and-forget `notice`, no gated calls, no waiting) and a test per hook.
+- **Event level-triggering.** A non-idempotent handler would break under a remote implementation's repair-by-snapshot. Mitigation: the `attached` hook is tested twice in cut 3.
+- **The native terminal's stream.** Until it has its own design the PTY handle stays an in-process member (`terminalHandle`).
+- **Tests that set `state.runtime`.** About thirty places in the lifecycle cases and wiring fixtures assign it directly; cuts 2 to 4 leave it in place so they keep working; cut 7 converts them.
+- **The index is not narrowed.** The window keeps the full `SessionIndex`, so nothing but the cut greps prevents a call that bypasses the claim until cut 7 narrows the type.
+- **Naming.** `runtime` is already used for `SessionHostRuntime`, `RpcHostRuntime`, `PtyRuntime` and `wiring/session-actions.ts`'s own `SessionRuntimePort` (renamed in cut 4 to `StopReadPort`); the directory and the port say `SessionRuntime`, and the Current State table names the others in full.
+- **Open:** whether DTOs that would cross a wire belong in `src/protocol/` once they no longer name host types (`OmpHostLaunchRequest` and `RestoreReport` are defined in `host/session-index.ts` today). Decide when a second implementation exists.
+
+## Rollout and Verification
+
+Order as in §6. After every cut: `npm run typecheck` (tsc twice and the import check), the tests of the moved code, `src/extension-lifecycle.test.ts`, `npm run build`. After the last cut of this task: the full `npm test` and the end-to-end scenarios `70-reload-window`, `20-kill-resume`, `50-cross-window-stop` and `60-outside-crash` through `npx playwright test -c test/e2e/playwright.config.ts`. `docs/architecture.md` gains a "Session runtime port" paragraph and the layer table the `runtime` row; `CHANGELOG.md` records the change as internal structure with no behaviour change.
+
+Acceptance, observable: `node scripts/check-imports.mjs` exits 0 on the tree and 1 on each fixture; the per-cut greps (function definitions and `deps.<name>(` calls, not method names the port itself exposes) are empty outside `src/runtime/` apart from the named remaining flows; `src/runtime/` contains no `vscode` reference and the closure rule passes; the port module's imports are statement-level `import type` from the allow-list; after cut 4 the lifecycle test's `ACCESS` block no longer exports `launchHost`, `requestSessionStop` or `stopSessionRuntime` (it still legitimately exports `connectHostControl`, `reconnectHostControl`, `establishControl`, `handleNativeHostExited` and `closeSession`, which are cut 5 and 7's).
+
+## Related Decisions
+
+- [ADR-0066](../decisions/0066-extract-a-session-runtime-port-and-enforce-it-with-a-vscode-free-layer.md) (accepted): the decision record.
+- [ADR-0065](../decisions/0065-enforce-one-import-direction-between-source-layers.md): the layer script this design extends with a layer and a closure rule.
+- [Extension host module structure](2026-10-12-extension-host-module-structure.md): the wiring-seam procedure and the non-goal this design continues.
+- [ADR-0015](../decisions/0015-serialize-tab-lifecycle-through-one-gate.md), [ADR-0029](../decisions/0029-report-uncontained-pty-tree-stops-as-unknown.md), [ADR-0035](../decisions/0035-distinguish-a-recorded-process-from-a-later-occupant-of-its-pid.md), [ADR-0037](../decisions/0037-stop-a-recorded-broker-owned-managed-child-without-a-chat-runtime.md), [ADR-0039](../decisions/0039-refuse-only-on-a-verified-live-writer-the-extension-owns.md), [ADR-0050](../decisions/0050-retain-uncertain-input-and-confirm-exact-file-restart.md), [ADR-0059](../decisions/0059-clear-chat-in-place-through-a-desk-registered-omp-command.md), [ADR-0060](../decisions/0060-merge-background-processes-into-sessions-and-kill-all-through-authenticated-routes.md): the invariants of §3, unchanged.
+- [ADR-0038](../decisions/0038-host-chat-over-rpc-ui-on-a-broker-pipe-child.md): the host-owned conversation the port exposes. [ADR-0055](../decisions/0055-expose-vscode-capabilities-as-rpc-host-tools-run-by-the-owning-window.md), [ADR-0056](../decisions/0056-publish-window-state-in-a-leased-registry-and-switch-windows-by-request.md), [ADR-0057](../decisions/0057-start-a-session-in-the-window-that-suits-its-folder.md): what stays window-side.
+- Daemon assessment (2026-10-13, local workspace note): the recommendation this design implements the third step of; not a repository document.
+
+## Architecture Review
+
+- Reviewer: architect
+- Outcome: accepted after three independent review rounds (2026-10-13)
+- Notes: round 1 accept-with-changes (ten material findings M1-M10), round 2 accept-with-changes (N1-N6), round 3 accept-with-changes (A: lease-dependent stop operations declared on `LocalSessionRuntime` only; B: one copy of the runtime through `current(runtime)`; plus minors m1-m9). All resolved here and in ADR-0066.
