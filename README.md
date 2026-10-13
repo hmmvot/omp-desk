@@ -93,7 +93,7 @@ For how this works, see the [architecture](docs/architecture.md).
 - Pinned rows show the TODO list and running subagents. Open a subagent's live transcript in its own tab.
 - Model and thinking pickers work at any time, also during a turn. A change OMP cannot take yet (compaction, a rewind, a reconnect) waits, shown in the picker with a clock icon, and is sent as soon as OMP is ready, before your next message. The footer shows context usage, provider quotas and the Git branch.
 - A status bar item shows the provider limits of the active Chat compactly, for example `5h 42% · 2h13m  │  7d 18% · 3d4h`: the used percent and the time left until each window resets (written like `4d4h42m`: days, hours and minutes, each only when above zero). It turns yellow from 80 % and red from 95 %, its tooltip has the exact reset times, and a click refreshes it. Right-click it to hide it.
-- Without available models, the model chip offers **Log In to Provider**. Every model picker also ends with **Log In to Provider…** to add another provider.
+- Without available models, the model chip offers **Log In to Provider**. Every model picker also ends with **Log In to Provider…** to add another provider: you pick the provider in VS Code, sign in in your browser and, where the provider asks for it, paste the authorization code into a masked box. Providers that take an API key are set up in a terminal (**Other providers** in the list, or run `omp` and use `/login`).
 - Your draft stays until OMP confirms it. Nothing is resent automatically.
 - If OMP stops responding, **Reconnect** or **Restart** the conversation.
 - Follows your light, dark or high-contrast theme.
@@ -143,7 +143,7 @@ All commands are in the Command Palette under **OMP Desk**. The ones with defaul
 
 A keymap extension (the IntelliJ IDEA keymap, for one) that binds `Ctrl+N` or `Ctrl+Shift+N` in text editors can win over these two keys, because VS Code does not let an extension choose its place in the keybinding order. Add a user keybinding (**Preferences: Open Keyboard Shortcuts (JSON)**) with the same `when` clause: `{ "key": "ctrl+n", "command": "ompDesk.searchSymbolFromChat", "when": "activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat" }`, and the same for `ctrl+shift+n` with `ompDesk.searchFileFromChat`.
 
-Other commands include **New Session**, **Add Folder**, **Pin Folder**, **Unpin Folder**, **Resume Session**, **Switch to Chat / Terminal**, **Compact Conversation…**, **Shake Conversation…**, **Export Conversation as HTML…**, **Share Conversation Link…**, **Show Chat Keyboard Shortcuts**, **Open Stats**, **Log In to Provider…**, **Show Diagnostics** and the file-change observation commands.
+Other commands include **New Session**, **Add Folder**, **Pin Folder**, **Unpin Folder**, **Resume Session**, **Switch to Chat / Terminal**, **Compact Conversation…**, **Shake Conversation…**, **Export Conversation as HTML…**, **Share Conversation Link…**, **Show Chat Keyboard Shortcuts**, **Open Stats**, **Log In to Provider…**, **Log Out of Provider…**, **Show Diagnostics** and the file-change observation commands.
 
 ## Settings
 

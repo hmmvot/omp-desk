@@ -26,6 +26,10 @@ import {
   terminalWriterForHandle,
 } from "./host/native-terminal";
 import { configuredOmpPath, findTerminalForPid, openProviderLoginTerminal } from "./host/omp-vscode";
+import { runProviderLogin, runProviderLogout } from "./host/provider-login-flow";
+import type { LoginFlowDeps } from "./host/provider-login-flow";
+import { startLoginSession } from "./host/provider-login-rpc";
+import { createLoginUi } from "./wiring/provider-login-ui";
 import { runOmpCli } from "./host/native-terminal";
 import { ProviderUsageCache, PROVIDER_USAGE_ARGS, PROVIDER_USAGE_TIMEOUT_MS } from "./host/provider-usage";
 import { observeSessionBranch } from "./host/session-branch";
@@ -802,8 +806,8 @@ interface WindowState {
   readonly sessionModelRefreshOwed: Set<string>;
   /** The provider login terminal while it is open. */
   providerLoginTerminal: vscode.Terminal | null;
-  /** A provider login terminal is being opened: a second request does nothing. */
-  providerLoginOpening: boolean;
+  /** The provider login or logout flow running in this window, if any: aborting it ends its OMP process. */
+  providerAuthRun: AbortController | null;
   /** Provider usage per launch scope. */
   readonly usageCaches: Map<string, ProviderUsageCache>;
 
@@ -1244,7 +1248,7 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     sessionModelReads: new Map<string, Promise<void>>(),
     sessionModelRefreshOwed: new Set<string>(),
     providerLoginTerminal: null,
-    providerLoginOpening: false,
+    providerAuthRun: null,
     usageCaches: new Map<string, ProviderUsageCache>(),
     // Lifecycle
     context,
@@ -1899,7 +1903,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     registerDeskCommand("ompDesk.selectModel", () => selectHostModel(index)),
     registerDeskCommand("ompDesk.selectThinking", () => selectHostThinking(index)),
     registerDeskCommand("ompDesk.copyTools", () => copyHostTools(index)),
-    registerDeskCommand("ompDesk.loginProvider", () => loginProviderFromPalette(index)),
+    registerDeskCommand("ompDesk.loginProvider", (argument?: unknown) => loginProviderFromPalette(index, argument)),
+    registerDeskCommand("ompDesk.logoutProvider", () => logoutProviderFromPalette(index)),
     registerDeskCommand("ompDesk.enableFileEvidence", () => enableFileEvidence(context, index)),
     registerDeskCommand("ompDesk.disableFileEvidence", () => disableFileEvidence(context, index)),
     registerDeskCommand("ompDesk.showFileEvidence", () => showFileEvidence(context, index)),
@@ -5220,7 +5225,8 @@ async function runChatAction(context: vscode.ExtensionContext, index: SessionInd
   const s = windowState();
   if (command === "provider-login") {
     const entry = index.get(tabId);
-    await openProviderLogin(hostOf(stateOf(tabId)) ?? null, entry?.scope.profile ?? null,
+    // The flow runs for minutes: the Chat request that asked for it is answered now, not when the sign-in ends.
+    void openProviderLogin(index, hostOf(stateOf(tabId)) ?? null, entry?.scope.profile ?? null,
       entry?.cwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir());
     return;
   }
@@ -5347,7 +5353,8 @@ async function runDeskSlashAction(action: Exclude<DeskSlashAction, "omp-settings
       await vscode.commands.executeCommand("ompDesk.tools.focus");
       return;
     case "provider-login":
-      await vscode.commands.executeCommand("ompDesk.loginProvider");
+      // The sign-in runs for minutes; the Chat request that typed /login is answered now.
+      void Promise.resolve(vscode.commands.executeCommand("ompDesk.loginProvider")).catch(() => undefined);
       return;
   }
   const exhaustive: never = action;
@@ -6353,10 +6360,10 @@ async function handleGuestControlRequest(
               ...(model.name && model.name.length <= 200 && isSafeBoundaryText(model.name) ? { name: model.name } : {}) }));
           if (stillCurrent()) {
             recordSessionModels(index, tabId, models.length > 0);
-            if (models.length === 0) await openProviderLogin(hostOf(state), entry.scope.profile, entry.cwd);
+            if (models.length === 0) void openProviderLogin(index, hostOf(state), entry.scope.profile, entry.cwd);
             else {
               const picked = await pickControlModel(models, nowLive()?.pendingControl?.model ?? beforeModel, stillCurrent, tabId);
-              if (picked === "provider-login") await openProviderLogin(hostOf(state), entry.scope.profile, entry.cwd);
+              if (picked === "provider-login") void openProviderLogin(index, hostOf(state), entry.scope.profile, entry.cwd);
               else selectedModel = picked;
             }
           }
@@ -6488,16 +6495,24 @@ function refreshDefaultProviderModels(): Promise<void> {
   return s.defaultProviderModelsRead;
 }
 
-/** Activation and the native login terminal are the only window-wide discovery triggers. */
+/** Re-read model availability here: the default profile and every indexed session. */
+function refreshProviderModelsEverywhere(index: SessionIndex): void {
+  void refreshDefaultProviderModels();
+  for (const entry of index.list()) void refreshSessionModels(index, entry.tabId);
+}
+
+/**
+ * Activation, a finished provider login or logout, and the close of the explicit `omp login` terminal are the
+ * window-wide discovery triggers. Closing the window ends a login still running.
+ */
 function subscribeProviderLoginRefresh(context: vscode.ExtensionContext, index: SessionIndex): void {
   const s = windowState();
   context.subscriptions.push(vscode.window.onDidCloseTerminal(terminal => {
     const ownedLoginClosed = terminal === s.providerLoginTerminal;
     if (ownedLoginClosed) s.providerLoginTerminal = null;
     if (!ownedLoginClosed && terminal.name !== "omp login") return;
-    void refreshDefaultProviderModels();
-    for (const entry of index.list()) void refreshSessionModels(index, entry.tabId);
-  }));
+    refreshProviderModelsEverywhere(index);
+  }), { dispose: () => { s.providerAuthRun?.abort(); } });
   void refreshDefaultProviderModels();
 }
 
@@ -6638,67 +6653,137 @@ function refreshFooterMetadata(index: SessionIndex, tabId: string, refreshUsage:
 
 
 /**
- * Start the native interactive provider login in a visible terminal.
- *
- * `omp login` prompts, opens a browser and reads a pasted redirect URL back; this extension
- * starts it and captures nothing — no output is read, no credential is stored or seen, and
- * the terminal is the user's to drive. The command runs in the session's profile scope, so
- * the credential lands where the session will read it.
+ * Where one provider login or logout runs: the session's own OMP, directory and profile, so the credential lands
+ * where that session will read it.
  */
-async function openProviderLogin(runtime: SessionHostRuntime | null, profile: string | null, cwd: string): Promise<void> {
-  const s = windowState();
-  if (s.providerLoginOpening || s.providerLoginTerminal !== null) return;
-  s.providerLoginOpening = true;
-  try { await launchProviderLogin(runtime, profile, cwd); }
-  finally { s.providerLoginOpening = false; }
-}
-
-/** Both callers hold the window's login-open guard, including their asynchronous preflight. */
-async function launchProviderLogin(runtime: SessionHostRuntime | null, profile: string | null, cwd: string): Promise<void> {
-  const s = windowState();
-  let executable: OmpCommand;
-  try {
-    executable = await executableFor(runtime);
-  } catch (error) {
-    showError(`The installed OMP could not be resolved, so no provider login was started: ${messageOf(error)}`);
-    return;
-  }
-  s.providerLoginTerminal = openProviderLoginTerminal({
-    args: ["login"],
-    executable,
-    cwd,
-    env: ompCliScopeEnvironment(profile),
-    name: "omp login",
-  });
+interface ProviderAuthScope {
+  readonly runtime: SessionHostRuntime | null;
+  readonly profile: string | null;
+  readonly cwd: string;
 }
 
 
 /**
- * Command-palette entry for the native provider login; never another tab's host. From a session's tab it logs in
- * within that session's profile. Without one it still works: a new user must log in before any session can start,
- * so it uses the default profile, or asks when the indexed sessions use more than one profile.
+ * Run one provider login or logout flow (ADR-0070) in a short-lived OMP process of the scope; this window runs one at a
+ * time. The guard is reserved before the asynchronous preflight (the profile question, executable resolution), so a
+ * repeated click opens nothing, and it is released only when the flow and its process have ended.
  */
-async function loginProviderFromPalette(index: SessionIndex): Promise<void> {
+async function runProviderAuth<T extends string>(
+  index: SessionIndex,
+  resolveScope: () => Promise<ProviderAuthScope | null>,
+  flow: (deps: LoginFlowDeps) => Promise<T>,
+): Promise<T | "busy" | "cancelled" | "failed"> {
   const s = windowState();
-  if (s.providerLoginOpening || s.providerLoginTerminal !== null) return;
-  s.providerLoginOpening = true;
+  if (s.providerLoginTerminal !== null) {
+    // A login in a terminal and one in VS Code compete for the same fixed callback ports of some providers.
+    s.providerLoginTerminal.show();
+    showInfo("An omp login terminal is still open in this window. Finish or close it first.");
+    return "busy";
+  }
+  if (s.providerAuthRun !== null) {
+    showInfo("A provider login or logout is already running in this window.");
+    return "busy";
+  }
+  const run = new AbortController();
+  s.providerAuthRun = run;
   try {
-    const tabId = index.activeTabId;
-    const runtime = tabId === null ? null : hostOf(stateOf(tabId)) ?? null;
-    if (tabId !== null && runtime !== null) {
-      await launchProviderLogin(runtime, index.get(tabId)?.scope.profile ?? null, runtime.cwd);
-      return;
+    const scope = await resolveScope();
+    if (scope === null) return "cancelled";
+    let executable: OmpCommand;
+    try {
+      executable = await executableFor(scope.runtime);
+    } catch (error) {
+      showError(`The installed OMP could not be resolved, so no provider login was started: ${messageOf(error)}`);
+      return "failed";
     }
-    const profiles = [...new Set(index.list().map(entry => entry.scope.profile ?? DEFAULT_OMP_PROFILE))].sort();
-    let profile: string = DEFAULT_OMP_PROFILE;
-    if (profiles.length > 1 || (profiles.length === 1 && profiles[0] !== DEFAULT_OMP_PROFILE)) {
-      const choices = profiles.includes(DEFAULT_OMP_PROFILE) ? profiles : [DEFAULT_OMP_PROFILE, ...profiles];
-      const picked = await vscode.window.showQuickPick(choices, { title: "Log In to Provider", placeHolder: "OMP profile to log in with" });
-      if (picked === undefined) return;
-      profile = picked;
-    }
-    await launchProviderLogin(null, profile, vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir());
-  } finally { s.providerLoginOpening = false; }
+    const env = ompCliScopeEnvironment(scope.profile);
+    return await flow({
+      ui: createLoginUi(vscode),
+      start: signal => startLoginSession({ scope: { executable, env, cwd: scope.cwd }, signal, log }),
+      openTerminal: providerId => openProviderLoginTerminalFor(executable, env, scope.cwd, providerId),
+      credentialsChanged: () => refreshProviderModelsEverywhere(index),
+      log,
+      signal: run.signal,
+    });
+  } catch (error) {
+    log(`provider login: the flow failed unexpectedly: ${messageOf(error)}`);
+    showError("The provider login could not be completed.");
+    return "failed";
+  } finally {
+    s.providerAuthRun = null;
+  }
+}
+
+/**
+ * The explicit fallback for what the RPC login refuses (a provider that takes a secret or a prompt before its
+ * sign-in address) and for API keys: OMP's own `omp login [provider]` in a visible terminal. The extension reads
+ * nothing from it; its close refreshes model availability.
+ */
+function openProviderLoginTerminalFor(executable: OmpCommand, env: Record<string, string>, cwd: string, providerId: string | undefined): void {
+  const s = windowState();
+  if (s.providerLoginTerminal !== null) {
+    s.providerLoginTerminal.show();
+    return;
+  }
+  s.providerLoginTerminal = openProviderLoginTerminal({
+    args: providerId === undefined ? ["login"] : ["login", providerId],
+    executable,
+    cwd,
+    env,
+    name: "omp login",
+  });
+}
+
+/** A session-scoped entry (Chat's model picker, its footer): log in within that session's own profile and directory. */
+async function openProviderLogin(index: SessionIndex, runtime: SessionHostRuntime | null, profile: string | null, cwd: string): Promise<void> {
+  await runProviderAuth(index, async () => ({ runtime, profile, cwd }), runProviderLogin);
+}
+
+/**
+ * The scope a palette provider login or logout runs in; never another tab's host. From a session's tab it uses that
+ * session's profile. Without one it still works: a new user must log in before any session can start, so it uses
+ * the default profile, or asks when the indexed sessions use more than one profile.
+ */
+async function paletteProviderAuthScope(index: SessionIndex, title: string, placeHolder: string): Promise<ProviderAuthScope | null> {
+  const tabId = index.activeTabId;
+  const runtime = tabId === null ? null : hostOf(stateOf(tabId)) ?? null;
+  if (tabId !== null && runtime !== null) return { runtime, profile: index.get(tabId)?.scope.profile ?? null, cwd: runtime.cwd };
+  const profiles = [...new Set(index.list().map(entry => entry.scope.profile ?? DEFAULT_OMP_PROFILE))].sort();
+  let profile: string = DEFAULT_OMP_PROFILE;
+  if (profiles.length > 1 || (profiles.length === 1 && profiles[0] !== DEFAULT_OMP_PROFILE)) {
+    const choices = profiles.includes(DEFAULT_OMP_PROFILE) ? profiles : [DEFAULT_OMP_PROFILE, ...profiles];
+    const picked = await vscode.window.showQuickPick(choices, { title, placeHolder });
+    if (picked === undefined) return null;
+    profile = picked;
+  }
+  return { runtime: null, profile, cwd: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir() };
+}
+
+/**
+ * `ompDesk.loginProvider`. Resolves with the outcome: `signed-in`, `cancelled`, `terminal` (the user chose the terminal
+ * login), `declined` (the provider takes an API key; the terminal is offered), `failed`, or `busy` (another login or logout,
+ * or a fallback terminal, is open in this window). A caller that knows its scope may pass `{ providerId?, profile? }`: a
+ * `profile` the extension already knows (the default or one of its indexed sessions') skips the profile question, and a
+ * `providerId` OMP lists as available skips the provider pick. The directory is never taken from the caller (the first
+ * workspace folder, else the home directory); anything else in the argument is ignored.
+ */
+async function loginProviderFromPalette(index: SessionIndex, argument?: unknown): Promise<string> {
+  const given = typeof argument === "object" && argument !== null ? argument as Record<string, unknown> : {};
+  const text = (key: string): string | undefined => typeof given[key] === "string" && (given[key] as string).length > 0 ? given[key] as string : undefined;
+  const known = new Set<string>([DEFAULT_OMP_PROFILE, ...index.list().map(entry => entry.scope.profile ?? DEFAULT_OMP_PROFILE)]);
+  const asked = text("profile");
+  const profile = asked !== undefined && known.has(asked) ? asked : undefined;
+  const providerId = text("providerId");
+  const cwd = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir();
+  const scope = profile === undefined
+    ? () => paletteProviderAuthScope(index, "Log In to Provider", "OMP profile to log in with")
+    : async (): Promise<ProviderAuthScope> => ({ runtime: null, profile, cwd });
+  return await runProviderAuth(index, scope, deps => runProviderLogin(deps, providerId === undefined ? {} : { providerId }));
+}
+
+/** `ompDesk.logoutProvider`. */
+async function logoutProviderFromPalette(index: SessionIndex): Promise<void> {
+  await runProviderAuth(index, () => paletteProviderAuthScope(index, "Log Out of Provider", "OMP profile to log out of"), runProviderLogout);
 }
 
 async function copyHostTools(index: SessionIndex): Promise<void> {
@@ -6902,7 +6987,7 @@ async function selectHostModel(index: SessionIndex): Promise<void> {
   }
   if (picked === "provider-login") {
     const entry = index.get(tabId);
-    if (entry !== null) await openProviderLogin(hostOf(stateOf(tabId)) ?? null, entry.scope.profile, entry.cwd);
+    if (entry !== null) void openProviderLogin(index, hostOf(stateOf(tabId)) ?? null, entry.scope.profile, entry.cwd);
     return;
   }
   const outcome = await conversations.chooseModel(tabId, incarnation, picked.provider, picked.id, picked.name);

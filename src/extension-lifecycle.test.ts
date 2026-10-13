@@ -29,6 +29,8 @@ import { ChatClient } from "./webview/lib/chat-client.ts";
 import { FakeRpcChannel } from "./host/rpc/fake-channel.ts";
 import { RpcSession } from "./host/rpc/session.ts";
 import { ManualTimers, assistantMessage, messageEntry, sessionFileText, userMessage } from "./host/rpc/test-support.ts";
+import { providerPeer } from "./host/provider-login-fake-omp.ts";
+import type { FakeOmp } from "./host/provider-login-fake-omp.ts";
 import { GUEST_PROTOCOL_VERSION, parseGuestHostMessage } from "./protocol/messages.ts";
 import type { GuestTerminalFontMessage } from "./protocol/messages.ts";
 import { URI } from "vscode-uri";
@@ -90,11 +92,19 @@ export const workspace = {
     }
   }; },
 };
-export const env = { clipboard: { writes: [], writeText: async text => { env.clipboard.writes.push(text); } } };
+export const env = { opened: [], openExternal: async uri => { env.opened.push(String(uri)); return true; }, clipboard: { writes: [], writeText: async text => { env.clipboard.writes.push(text); } } };
 export const version = 'test';
 export const StatusBarAlignment = { Left: 1, Right: 2 };
 export const FileType = { Directory: 2 };
 export const ProgressLocation = { Notification: 15 };
+export class CancellationTokenSource {
+  constructor() {
+    const listeners = new Set();
+    this.token = { isCancellationRequested: false, onCancellationRequested: listener => { listeners.add(listener); return { dispose() { listeners.delete(listener); } }; } };
+    this.cancel = () => { this.token.isCancellationRequested = true; for (const listener of [...listeners]) listener(); };
+    this.dispose = () => { listeners.clear(); };
+  }
+}
 export const ViewColumn = { Active: -1 };
 export const TreeItemCollapsibleState = { None: 0, Collapsed: 1, Expanded: 2 };
 export const Uri = { from: URI.from, parse: URI.parse, file: fsPath => ({ fsPath, toString: () => fsPath }), joinPath: (root, ...parts) => Uri.file([root.fsPath, ...parts].join('/')) };
@@ -104,7 +114,11 @@ export const window = { state: { focused: true }, errors: [], tabGroups: { all: 
   onDidCloseTerminal(listener) { return window.closedTerminals.event(listener); },
   async showTextDocument(uri, options) { window.openedDocuments.push({ uri, options }); },
   showWarningMessage: async (_message, _options, action) => action,
-  showInformationMessage: async () => undefined, showErrorMessage: async message => { window.errors.push(message); }, setStatusBarMessage() {},
+  infos: [],
+  showInformationMessage: async message => { window.infos.push(message); return undefined; }, showErrorMessage: async message => { window.errors.push(message); }, setStatusBarMessage() {},
+  showQuickPick: async () => undefined,
+  showInputBox: async () => undefined,
+  withProgress: async (_options, task) => task({ report() {} }, { isCancellationRequested: false, onCancellationRequested: () => ({ dispose() {} }) }),
   registerWebviewPanelSerializer() { return { dispose() {} }; },
   quickPicks: [],
   createQuickPick() {
@@ -144,6 +158,7 @@ import * as fixtureVscode from 'vscode';
 import { acquireClaim as fixtureClaim, createClaimHolder as fixtureHolder, setClaimFailures } from './host/session-claim';
 import { capturedDesktopXml, capturedDesktopXmls, resetDesktopXmls } from './host/desktop-notifications';
 import { providerLoginFixture, storedRenameFixture } from './host/native-terminal';
+import { providerAuthFixture } from './host/provider-login-rpc';
 import { bridgeViewType } from './host/bridge-identity';
 // The harness runs windows without an activation context: the cases that need one set it on the window.
 const fixtureContext = undefined as never;
@@ -180,8 +195,8 @@ export const harness = {
   terminalFontMessage, revealDesktopNotification, revealActiveSession, releaseSelectionFromOtherWindow, refreshLauncher, launcherFacts, notifierFor, forgetTurnActivity,
   copyActiveTerminalScreen, activateNativeEditor, postPanelAction,
   handleBridgeRequest,
-  subscribeProviderLoginRefresh, refreshDefaultProviderModels, refreshSessionModels, recordSessionModels, runChatAction, openProviderLogin, loginProviderFromPalette,
-  providerLoginFixture,
+  subscribeProviderLoginRefresh, refreshDefaultProviderModels, refreshSessionModels, recordSessionModels, runChatAction, openProviderLogin, loginProviderFromPalette, logoutProviderFromPalette,
+  providerLoginFixture, providerAuthFixture,
   storedRenameFixture,
   providerModelsIdle: () => fixtureWindow().defaultProviderModelsRead ?? Promise.resolve(),
   closeLoginTerminal: name => fixtureVscode.window.closedTerminals.fire(name === "omp login" && fixtureWindow().providerLoginTerminal !== null ? fixtureWindow().providerLoginTerminal : { name }),
@@ -215,6 +230,7 @@ export const harness = {
   },
   hostGeneration: () => fixtureWindow().bridgeHost.hostGeneration,
   clipboardWrites: () => fixtureVscode.env.clipboard.writes,
+  infos: () => fixtureVscode.window.infos,
   desktopPayload: capturedDesktopXml,
   desktopPayloads: capturedDesktopXmls,
   focusSession(active, editorId = '${EDITOR}', tabId = '${TAB}') {
@@ -367,6 +383,7 @@ interface WindowFixture {
   rootGone: (root: { readonly pid: number; readonly creationTime: string | null }) => Promise<boolean>;
   resolveAgentRoots: () => Promise<void>;
   externalLeases: { holds(file: string, options?: { fresh?: boolean }): Promise<boolean | null> } | null;
+  providerAuthRun: AbortController | null;
   launcherProvider: unknown;
   launcherView: unknown;
   launcherSelectedPath: string | null;
@@ -429,12 +446,15 @@ interface Harness {
   runChatAction(...args: unknown[]): Promise<void>;
   openProviderLogin(...args: unknown[]): Promise<void>;
   loginProviderFromPalette(...args: unknown[]): Promise<void>;
-  profilePicker(handler: (profiles: any) => Promise<any>): () => void;
+  logoutProviderFromPalette(...args: unknown[]): Promise<void>;
+  profilePicker(handler: (items: any, options?: any, token?: any) => Promise<any>): () => void;
+  infos(): string[];
   providerModelsIdle(): Promise<void>;
   closeLoginTerminal(name: string): void;
   closeOtherTerminal(name: string): void;
   sessionModelAvailability(tabId: string): boolean | undefined;
-  providerLoginFixture: { enabled: boolean; unresolved: boolean; models: unknown[]; calls: { args: string[]; options: { env: Record<string, string> } }[]; logins: { env: Record<string, string>; cwd: string }[]; read: (() => Promise<{ stdout: string; stderr: string; exitCode: number }>) | null; resolve: (() => Promise<{ command: string; prefixArgs: string[]; version: string }>) | null };
+  providerLoginFixture: { enabled: boolean; unresolved: boolean; models: unknown[]; calls: { args: string[]; options: { env: Record<string, string> } }[]; logins: { args: string[]; env: Record<string, string>; cwd: string }[]; shown?: number; read: (() => Promise<{ stdout: string; stderr: string; exitCode: number }>) | null; resolve: (() => Promise<{ command: string; prefixArgs: string[]; version: string }>) | null };
+  providerAuthFixture: { starts: { scope: { env: Record<string, string>; cwd: string } }[]; spawned: FakeOmp[]; peer: () => FakeOmp };
   storedRenameFixture: { enabled: boolean; root: string; requests: Parameters<typeof renameStoppedSessionTitle>[0][]; rename: ((input: Parameters<typeof renameStoppedSessionTitle>[0]) => ReturnType<typeof renameStoppedSessionTitle>) | null };
   restoreTabs(...args: unknown[]): Promise<void>;
   editorLifecycle(): () => void;
@@ -536,6 +556,19 @@ function setLauncherTree(provider: unknown, view: unknown): void {
   const w = harness.window();
   w.launcherProvider = provider; w.launcherView = view; w.launcherSelectedPath = null; w.launcherExpandFor = null;
 }
+/**
+ * Answers the pick lists of the provider login: a profile question gets "default", the provider picker gets its last
+ * item ("Other providers", the visible terminal login). Returns the restore function.
+ */
+function pickTerminalLogin(profile = "default"): () => void {
+  return harness.profilePicker(async (items: unknown[]) => items.every(item => typeof item === "string") ? profile : items.at(-1));
+}
+/** Wait for the window's provider login or logout to end: Chat's own requests start it without waiting for it. */
+async function authIdle(): Promise<void> {
+  for (let turns = 0; harness.window().providerAuthRun !== null && turns < 2000; turns++) await nextTurn();
+  assert.equal(harness.window().providerAuthRun, null, "the provider login ended");
+}
+
 let root: string;
 const resources: { close(): void }[] = [];
 const pages: BridgeClient[] = [];
@@ -603,7 +636,17 @@ before(async () => {
         `],
         ["omp-vscode", `
           import { providerLoginFixture } from "./host/native-terminal";
-          export function openProviderLoginTerminal(request) { providerLoginFixture.logins.push(request); return { name: request.name }; }
+          export function openProviderLoginTerminal(request) { providerLoginFixture.logins.push(request); return { name: request.name, show() { providerLoginFixture.shown = (providerLoginFixture.shown ?? 0) + 1; } }; }
+        `],
+        ["provider-login-rpc", `
+          import { startLoginSession as realStartLoginSession } from ${JSON.stringify(path.join(path.dirname(entry), "host", "provider-login-rpc.ts"))};
+          import { fakeSpawner, providerPeer } from ${JSON.stringify(path.join(path.dirname(entry), "host", "provider-login-fake-omp.ts"))};
+          export const providerAuthFixture = { starts: [], spawned: [], peer: () => providerPeer() };
+          export async function startLoginSession(options) {
+            providerAuthFixture.starts.push(options);
+            const fake = fakeSpawner(() => { const peer = providerAuthFixture.peer(); providerAuthFixture.spawned.push(peer); return peer; });
+            return realStartLoginSession({ ...options, spawner: fake.spawner, modelSelectors: ["gpt"] });
+          }
         `],
         ["rpc-launch", "export async function launchRpcHost() { return globalThis.__nativeLaunch; }"],
         ["control-client", "export async function queryControlProcessGeneration() { return 'creation-fixture'; }"],
@@ -965,6 +1008,9 @@ describe("footer host readback", () => {
     state.panel = panel;
     const fixture = harness.providerLoginFixture;
     fixture.enabled = true; fixture.logins.length = 0;
+    const auth = harness.providerAuthFixture;
+    auth.starts.length = 0; auth.spawned.length = 0;
+    const restorePicker = pickTerminalLogin();
     const subscriptions: { dispose(): void }[] = [];
     harness.subscribeProviderLoginRefresh({ subscriptions }, index);
     try {
@@ -977,7 +1023,11 @@ describe("footer host readback", () => {
       assert.ok(metadata && typeof metadata === "object" && "hasAvailableModels" in metadata);
       assert.equal(metadata.hasAvailableModels, false);
       await harness.runChatAction(saved.context, index, TAB, "provider-login");
+      await authIdle();
       assert.deepEqual(fixture.logins.at(-1)?.env, { OMP_PROFILE: "default" });
+      assert.deepEqual(fixture.logins.at(-1)?.args, ["login"]);
+      assert.deepEqual(auth.starts.map(start => [start.scope.env, start.scope.cwd]), [[{ OMP_PROFILE: "default" }, root]], "the login process runs in the session's profile and directory");
+      assert.equal(auth.spawned[0]!.exited, true, "the login process ended with the flow");
       available = [{ provider: "p", id: "m", name: "Model", contextWindow: 1000 }];
       harness.closeLoginTerminal("omp login");
       await harness.refreshSessionModels(index, TAB);
@@ -989,7 +1039,9 @@ describe("footer host readback", () => {
       assert.equal(picker.items.at(-1)?.label, "$(account) Log In to Provider…");
       picker.choose(picker.items.length - 1);
       await pending;
+      await authIdle();
       assert.equal(fixture.logins.length, 2);
+      assert.equal(auth.starts.length, 2);
       assert.equal(channel.commandsOfType("set_model").length, 0);
       const reply = messages.at(-1);
       assert.ok(reply && typeof reply === "object" && "type" in reply);
@@ -998,7 +1050,7 @@ describe("footer host readback", () => {
     } finally {
       harness.closeLoginTerminal("omp login"); host.dispose(); await harness.providerModelsIdle();
       for (const subscription of subscriptions) subscription.dispose();
-      fixture.enabled = false;
+      fixture.enabled = false; restorePicker();
     }
   });
 
@@ -1009,6 +1061,9 @@ describe("footer host readback", () => {
     harness.reset(index, host);
     const fixture = harness.providerLoginFixture;
     fixture.enabled = true; fixture.logins.length = 0;
+    const auth = harness.providerAuthFixture;
+    auth.starts.length = 0; auth.spawned.length = 0;
+    const restorePicker = pickTerminalLogin();
     const restore = harness.desktopEnvironment(saved.context);
     const panel = harness.createPanel();
     const endpoint = new BridgeEditorEndpoint({
@@ -1028,21 +1083,24 @@ describe("footer host readback", () => {
     try {
       assert.equal(harness.window().bridgeHost.documentEligible(EDITOR, DOCUMENT), false, "the real authentication/ACK eligibility rejects a passive editor");
       await harness.handlePassiveSlotMessage(EDITOR, panel, command);
+      await authIdle();
       assert.equal(fixture.logins.length, 1);
       assert.deepEqual(fixture.logins[0]!.env, { OMP_PROFILE: "default" });
+      assert.equal(auth.starts.length, 1);
       assert.equal(harness.window().bridgeHost.documentEligible(EDITOR, DOCUMENT), false, "login grants no passive bridge authority");
       harness.closeLoginTerminal("omp login");
       await harness.handlePassiveSlotMessage(EDITOR, harness.createPanel(), command);
       await harness.handlePassiveSlotMessage(EDITOR, panel, { ...command, profile: "other" });
       await harness.handlePassiveSlotMessage(EDITOR, panel, { ...command, command: "cycle-model" });
       assert.equal(fixture.logins.length, 1, "a stale panel, injected scope or model command cannot launch login even with the guard released");
+      assert.equal(auth.starts.length, 1, "nor start a login process");
       assert.equal(index.row.runIntent, "running");
       assert.equal(harness.record(state).runtime, native);
       assert.equal(host.sessionOf(TAB), null);
     } finally {
       harness.closeLoginTerminal("omp login"); host.dispose(); endpoint.close(); await harness.providerModelsIdle();
       for (const subscription of subscriptions) subscription.dispose();
-      fixture.enabled = false; restore();
+      fixture.enabled = false; restore(); restorePicker();
     }
   });
 
@@ -1053,6 +1111,9 @@ describe("footer host readback", () => {
     harness.reset(index, host);
     const fixture = harness.providerLoginFixture;
     fixture.enabled = true; fixture.logins.length = 0;
+    const auth = harness.providerAuthFixture;
+    auth.starts.length = 0; auth.spawned.length = 0;
+    const restorePicker = pickTerminalLogin();
     const restore = harness.desktopEnvironment(saved.context);
     const scope = { workspace: "a".repeat(64), tabId: TAB, editorId: EDITOR };
     const endpoint = new BridgeEditorEndpoint({
@@ -1124,10 +1185,13 @@ describe("footer host readback", () => {
       assert.equal(await bounded(repeatReply.promise), null, "the repeat is answered while the original executable preflight remains pending");
       assert.equal(resolves, 1);
       assert.equal(fixture.logins.length, 0);
+      assert.equal(auth.starts.length, 0, "no login process starts before the executable is resolved");
       gate.resolve({ command: process.execPath, prefixArgs: [], version: "fixture" });
       assert.equal(await bounded(firstReply.promise), null);
+      await authIdle();
       assert.equal(fixture.logins.length, 1);
       assert.deepEqual(fixture.logins[0]!.env, { OMP_PROFILE: "default" });
+      assert.equal(auth.starts.length, 1, "the repeat started no second login process");
       assert.equal(page.connected, true);
       assert.deepEqual(connections, priorConnections, "no disconnect or reconnect");
       assert.deepEqual(invalidations, priorInvalidations, "valid repeated login does not invalidate the native route");
@@ -1142,17 +1206,20 @@ describe("footer host readback", () => {
       fixture.resolve = null; gate.resolve({ command: process.execPath, prefixArgs: [], version: "fixture" });
       page.stop(); endpoint.close(); harness.closeLoginTerminal("omp login"); host.dispose(); await harness.providerModelsIdle();
       for (const subscription of subscriptions) subscription.dispose();
-      fixture.enabled = false; restore();
+      fixture.enabled = false; restore(); restorePicker();
     }
   });
 
-  it("coalesces concurrent login opens and releases the window guard only on its terminal close or preflight failure", async () => {
+  it("coalesces concurrent login opens and releases the window guard when the flow ends or its preflight fails", async () => {
     await harness.providerModelsIdle();
     const index = indexFixture(runtime(824));
     const host = new ChatRuntime({ hostNonce: "provider-login-guard", onEvent: () => {} });
     harness.reset(index, host);
     const fixture = harness.providerLoginFixture;
-    fixture.enabled = true; fixture.logins.length = 0;
+    fixture.enabled = true; fixture.logins.length = 0; fixture.shown = 0;
+    const auth = harness.providerAuthFixture;
+    auth.starts.length = 0; auth.spawned.length = 0;
+    const restorePicker = pickTerminalLogin();
     const subscriptions: { dispose(): void }[] = [];
     harness.subscribeProviderLoginRefresh({ subscriptions }, index);
     await harness.providerModelsIdle();
@@ -1160,31 +1227,158 @@ describe("footer host readback", () => {
     let resolves = 0;
     fixture.resolve = () => { resolves++; return gate.promise; };
     try {
-      const first = harness.openProviderLogin(null, null, root);
-      const duplicate = harness.openProviderLogin(null, null, root);
+      const first = harness.openProviderLogin(index, null, null, root);
+      const duplicate = harness.openProviderLogin(index, null, null, root);
+      await nextTurn();
       assert.equal(resolves, 1, "the in-flight guard is reserved before resolving the executable");
       gate.resolve({ command: process.execPath, prefixArgs: [], version: "fixture" });
       await Promise.all([first, duplicate]);
       fixture.resolve = null;
+      assert.equal(auth.starts.length, 1, "the duplicate started no second login process");
       assert.equal(fixture.logins.length, 1);
-      await harness.openProviderLogin(null, null, root);
+      assert.equal(harness.window().providerAuthRun, null, "the guard is released when the flow ends");
+      await harness.openProviderLogin(index, null, null, root);
+      assert.equal(auth.starts.length, 1, "a fallback terminal that is still open is shown again and starts no login process");
+      assert.equal(fixture.logins.length, 1, "a terminal that is already open is shown again, not opened twice");
+      assert.equal(fixture.shown, 1);
       harness.closeOtherTerminal("omp login");
-      await harness.openProviderLogin(null, null, root);
-      assert.equal(fixture.logins.length, 1, "another terminal with the same name cannot release the owned guard");
+      await harness.openProviderLogin(index, null, null, root);
+      assert.equal(fixture.logins.length, 1, "another terminal with the same name is not the owned login terminal");
+      assert.equal(auth.starts.length, 1);
+      assert.equal(fixture.shown, 2);
       harness.closeLoginTerminal("omp login");
-      await harness.openProviderLogin(null, null, root);
-      assert.equal(fixture.logins.length, 2, "the owned terminal close releases the guard");
+      await harness.openProviderLogin(index, null, null, root);
+      assert.equal(auth.starts.length, 2);
+      assert.equal(fixture.logins.length, 2, "the owned terminal's close lets the next fallback open a terminal");
       harness.closeLoginTerminal("omp login");
       fixture.unresolved = true;
-      await harness.openProviderLogin(null, null, root);
-      assert.equal(fixture.logins.length, 2);
+      const errors = harness.errors().length;
+      await harness.openProviderLogin(index, null, null, root);
+      assert.equal(auth.starts.length, 2, "an unresolved executable starts no login process");
+      assert.equal(harness.errors().length, errors + 1);
       fixture.unresolved = false;
-      await harness.openProviderLogin(null, null, root);
+      await harness.openProviderLogin(index, null, null, root);
       assert.equal(fixture.logins.length, 3, "a failed executable preflight does not hold the guard forever");
+      assert.ok(auth.spawned.every(peer => peer.exited), "every login process ended with its flow");
     } finally {
       fixture.resolve = null; fixture.unresolved = false;
       gate.resolve({ command: process.execPath, prefixArgs: [], version: "fixture" });
       harness.closeLoginTerminal("omp login"); host.dispose(); await harness.providerModelsIdle();
+      for (const subscription of subscriptions) subscription.dispose();
+      fixture.enabled = false; restorePicker();
+    }
+  });
+
+  it("lets a caller name a known profile and a listed provider of ompDesk.loginProvider, never a directory or an unknown profile, and resolves with the outcome", async () => {
+    await harness.providerModelsIdle();
+    const base = indexFixture(runtime(828));
+    const index = { ...base, activeTabId: null, list: () => [{ ...base.row, scope: { profile: "work" } }] };
+    const host = new ChatRuntime({ hostNonce: "provider-login-argument", onEvent: () => {} });
+    harness.reset(index, host);
+    const fixture = harness.providerLoginFixture;
+    fixture.enabled = true; fixture.logins.length = 0;
+    const auth = harness.providerAuthFixture;
+    auth.starts.length = 0; auth.spawned.length = 0;
+    const original = auth.peer;
+    auth.peer = () => {
+      const peer = original();
+      const listing = peer.onFrame;
+      peer.onFrame = (frame, self) => {
+        if (frame.type === "login") self.reply(frame, true, { data: { providerId: frame.providerId } });
+        else listing?.(frame, self);
+      };
+      return peer;
+    };
+    const picks = harness.quickPicks().length;
+    try {
+      const outcome = await harness.loginProviderFromPalette(index, { profile: "work", providerId: "anthropic", cwd: "C:\\elsewhere" });
+      assert.equal(outcome, "signed-in");
+      assert.deepEqual(auth.starts.map(start => start.scope.env), [{ OMP_PROFILE: "work" }], "the named known profile, with no profile question");
+      assert.notEqual(auth.starts[0]!.scope.cwd, "C:\\elsewhere", "the directory is never taken from the caller");
+      const restoreUnknown = harness.profilePicker(async () => undefined);
+      try {
+        assert.equal(await harness.loginProviderFromPalette(index, { profile: "stranger", providerId: "anthropic" }), "cancelled", "an unknown profile is ignored: the profile question is asked instead");
+      } finally { restoreUnknown(); }
+      assert.equal(auth.starts.length, 1);
+      assert.equal(harness.quickPicks().length, picks, "a listed provider id skips the provider pick");
+      const login = auth.spawned[0]!.written.find(frame => frame.type === "login");
+      assert.equal(login?.providerId, "anthropic");
+      assert.equal(harness.window().providerAuthRun, null);
+    } finally {
+      auth.peer = original; host.dispose(); await harness.providerModelsIdle();
+      fixture.enabled = false;
+    }
+  });
+
+  it("tells a second login request that one is running while the first waits, and ends the login process when the window disposes", async () => {
+    await harness.providerModelsIdle();
+    const index = indexFixture(runtime(827));
+    const host = new ChatRuntime({ hostNonce: "provider-login-dispose", onEvent: () => {} });
+    harness.reset(index, host);
+    const fixture = harness.providerLoginFixture;
+    fixture.enabled = true; fixture.logins.length = 0;
+    const auth = harness.providerAuthFixture;
+    auth.starts.length = 0; auth.spawned.length = 0;
+    const restorePicker = harness.profilePicker((_items, _options, token) => { const wait = Promise.withResolvers<undefined>(); token.onCancellationRequested(() => wait.resolve(undefined)); return wait.promise; });
+    const subscriptions: { dispose(): void }[] = [];
+    harness.subscribeProviderLoginRefresh({ subscriptions }, index);
+    await harness.providerModelsIdle();
+    const infos = harness.infos().length;
+    try {
+      const first = harness.openProviderLogin(index, null, null, root);
+      for (let turns = 0; turns < 5; turns++) await nextTurn();
+      assert.equal(auth.spawned.length, 1, "the process runs while the user chooses a provider");
+      await harness.openProviderLogin(index, null, null, root);
+      assert.equal(harness.infos().length, infos + 1, "the repeat is answered, not ignored in silence");
+      assert.equal(auth.starts.length, 1);
+      for (const subscription of subscriptions) subscription.dispose();
+      await first;
+      assert.equal(auth.spawned[0]!.exited, true, "closing the window ends the login process");
+      assert.deepEqual(fixture.logins, []);
+    } finally {
+      restorePicker();
+      host.dispose(); await harness.providerModelsIdle();
+      for (const subscription of subscriptions) subscription.dispose();
+      fixture.enabled = false;
+    }
+  });
+
+  it("refreshes model availability after a sign-in and after a logout, through the real flows", async () => {
+    await harness.providerModelsIdle();
+    const index = indexFixture(runtime(828));
+    const host = new ChatRuntime({ hostNonce: "provider-login-refresh", onEvent: () => {} });
+    harness.reset(index, host);
+    const fixture = harness.providerLoginFixture;
+    fixture.enabled = true; fixture.logins.length = 0; fixture.models = [{ id: "m" }]; fixture.calls.length = 0;
+    const auth = harness.providerAuthFixture;
+    auth.starts.length = 0; auth.spawned.length = 0;
+    const subscriptions: { dispose(): void }[] = [];
+    harness.subscribeProviderLoginRefresh({ subscriptions }, index);
+    await harness.providerModelsIdle();
+    const before = fixture.calls.length;
+    const previousPeer = auth.peer;
+    auth.peer = () => providerPeer((frame, peer) => {
+      if (frame.type === "login") peer.reply(frame, true, { data: { providerId: "anthropic" } });
+      if (frame.type === "get_logout_accounts") peer.reply(frame, true, { data: { accounts: [{ credentialId: 7, provider: "anthropic", label: "me@example.test", detail: "", type: "oauth", active: true }] } });
+      if (frame.type === "logout") peer.reply(frame, true, { data: {} });
+    });
+    const restorePicker = harness.profilePicker(async (items: unknown[]) => items.every(item => typeof item === "string") ? "default" : items[0]);
+    try {
+      await harness.loginProviderFromPalette(index);
+      await harness.providerModelsIdle();
+      assert.ok(fixture.calls.length > before, "a sign-in re-reads the model catalogue");
+      assert.equal(harness.window().providerAuthRun, null);
+      const afterLogin = fixture.calls.length;
+      await harness.logoutProviderFromPalette(index);
+      await harness.providerModelsIdle();
+      assert.ok(fixture.calls.length > afterLogin, "a logout re-reads the model catalogue");
+      assert.deepEqual(fixture.logins, [], "no terminal was involved");
+      assert.equal(auth.starts.length, 2);
+      assert.deepEqual(auth.starts[1]!.scope.env, { OMP_PROFILE: "default" });
+      assert.ok(auth.spawned.every(peer => peer.exited && !peer.killed), "each process ended through its stdin once its flow was done");
+    } finally {
+      auth.peer = previousPeer; restorePicker();
+      host.dispose(); await harness.providerModelsIdle();
       for (const subscription of subscriptions) subscription.dispose();
       fixture.enabled = false;
     }
@@ -1198,6 +1392,8 @@ describe("footer host readback", () => {
     harness.reset(index, host);
     const fixture = harness.providerLoginFixture;
     fixture.enabled = true; fixture.logins.length = 0;
+    const auth = harness.providerAuthFixture;
+    auth.starts.length = 0; auth.spawned.length = 0;
     const subscriptions: { dispose(): void }[] = [];
     harness.subscribeProviderLoginRefresh({ subscriptions }, index);
     await harness.providerModelsIdle();
@@ -1211,17 +1407,19 @@ describe("footer host readback", () => {
     try {
       const first = harness.loginProviderFromPalette(index);
       const duplicate = harness.loginProviderFromPalette(index);
-      await harness.openProviderLogin(null, null, root);
+      await harness.openProviderLogin(index, null, null, root);
       assert.equal(choices, 1);
+      assert.equal(auth.starts.length, 0, "no process starts while the profile is still being chosen");
       assert.equal(fixture.logins.length, 0);
       answer.resolve(undefined);
       await Promise.all([first, duplicate]);
       restorePicker();
-      const restoreSelectedPicker = harness.profilePicker(async () => "default");
+      const restoreSelectedPicker = pickTerminalLogin("default");
       try { await harness.loginProviderFromPalette(index); }
       finally { restoreSelectedPicker(); }
-      assert.equal(fixture.logins.length, 1, "cancelling the profile picker does not hold the shared guard");
-      assert.deepEqual(fixture.logins[0]!.env, { OMP_PROFILE: "default" });
+      assert.equal(auth.starts.length, 1, "cancelling the profile picker does not hold the shared guard");
+      assert.deepEqual(auth.starts[0]!.scope.env, { OMP_PROFILE: "default" });
+      assert.equal(fixture.logins.length, 1);
     } finally {
       answer.resolve(undefined); restorePicker();
       harness.closeLoginTerminal("omp login"); host.dispose(); await harness.providerModelsIdle();

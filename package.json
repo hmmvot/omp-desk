@@ -595,6 +595,12 @@
         "icon": "$(account)"
       },
       {
+        "command": "ompDesk.logoutProvider",
+        "title": "Log Out of Provider…",
+        "category": "OMP Desk",
+        "icon": "$(sign-out)"
+      },
+      {
         "command": "ompDesk.enableFileEvidence",
         "title": "Enable File Change Observation (This Session)",
         "category": "OMP Desk",
@@ -1202,6 +1208,11 @@
           "command": "ompDesk.loginProvider",
           "when": "view == ompDesk.sessions",
           "group": "1_provider@1"
+        },
+        {
+          "command": "ompDesk.logoutProvider",
+          "when": "view == ompDesk.sessions",
+          "group": "1_provider@2"
         },
         {
           "command": "ompDesk.openStats",

@@ -605,7 +605,7 @@ describe("the namespace (ADR-0068)", () => {
 		assert.deepEqual(LEGACY_COMMAND_IDS.filter(id => declared.has(id)), [], "an alias that is also a contributed command");
 		assert.deepEqual(LEGACY_COMMAND_IDS.map(legacyCommandTarget).filter(id => !declared.has(id)), [], "an alias whose target is not contributed");
 		const neverPublished = contributes.commands.map(command => command.command).filter(id => !LEGACY_COMMAND_IDS.includes("omp." + id.slice("ompDesk.".length)));
-		assert.deepEqual(neverPublished.sort(), ["ompDesk.openOmpSettings", "ompDesk.refreshUsageStatus", "ompDesk.reloadAllWindows", "ompDesk.searchFileFromChat"], "the commands 0.3.2 did not publish have no alias; a new command needs none");
+		assert.deepEqual(neverPublished.sort(), ["ompDesk.logoutProvider", "ompDesk.openOmpSettings", "ompDesk.refreshUsageStatus", "ompDesk.reloadAllWindows", "ompDesk.searchFileFromChat"], "the commands 0.3.2 did not publish have no alias; a new command needs none");
 		assert.deepEqual(LEGACY_ALIASES.map(([oldId]) => oldId).filter(id => !recording.commands.has(id)), [], "an old id with no alias at runtime");
 		const generated = LEGACY_ALIASES.filter(([, target]) => !declared.has(target)).map(([oldId, target]) => `${oldId} -> ${target}`);
 		assert.deepEqual(generated, [
