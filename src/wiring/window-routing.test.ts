@@ -18,7 +18,7 @@ import { setImmediate as nextTurn } from "node:timers/promises";
 import { URI } from "vscode-uri";
 import { sessionIncarnation } from "../host/window-registry.ts";
 import type { WindowRegistry, WindowSnapshot } from "../host/window-registry.ts";
-import { awaitPendingLaunchAnswer, awaitReloadTakenUp, awaitRequestAnswer, pendingKeyOf, postPendingLaunch, postReloadRequest, postSwitchRequest, startPendingLaunchWatch, startRequestWatch } from "../host/window-requests.ts";
+import { awaitPendingLaunchAnswer, awaitReloadTakenUp, awaitRequestAnswer, pendingKeyOf, postModelsRequest, postPendingLaunch, postReloadRequest, postSwitchRequest, startPendingLaunchWatch, startRequestWatch } from "../host/window-requests.ts";
 import type { LaunchAction, LaunchRequest, ServeContext, ServeOutcome, StopRequest, SwitchRequest, WindowRequest } from "../host/window-requests.ts";
 import type { StubTabGroup } from "./vscode-test-stub.ts";
 import type { RoutedFolder, WindowRouting, WindowRoutingDeps } from "./window-routing.ts";
@@ -106,8 +106,9 @@ interface FakeIndex {
 	slotBinding(slot: string): unknown;
 }
 
-async function world(targets: readonly Target[] = []) {
-	const storageDir = await mkdtemp(path.join(temp, `world-${created++}-`));
+/** `holderId` and `storageDir` make a second window of the same profile: it shares the request directory. */
+async function world(targets: readonly Target[] = [], options: { readonly holderId?: string; readonly storageDir?: string } = {}) {
+	const storageDir = options.storageDir ?? await mkdtemp(path.join(temp, `world-${created++}-`));
 	const served: WindowRequest[] = [];
 	for (const target of targets) {
 		if (target.serve === null) continue;
@@ -170,9 +171,10 @@ async function world(targets: readonly Target[] = []) {
 	const refreshedOwnership: string[][] = [];
 	const refreshedLauncher: number[] = [];
 	const providerRefreshes: unknown[] = [];
+	const modelRefreshes: number[] = [];
 	const requestSelections = new Set<string>();
 	const fake: FakeIndex = {
-		claimHolder: { id: "this-window" },
+		claimHolder: { id: options.holderId ?? "this-window" },
 		claimStorageDir: storageDir,
 		get: tabId => state.entries.get(tabId) ?? null,
 		list: () => [...state.entries.values()],
@@ -184,6 +186,7 @@ async function world(targets: readonly Target[] = []) {
 		registry: () => state.noRegistry ? undefined : registryHandle,
 		folders: () => launcherFolders as never,
 		index: () => fake as never,
+		refreshProviderModels: () => { modelRefreshes.push(Date.now()); },
 		requestSelections: () => requestSelections,
 		packageStale: () => state.stale,
 		unityChoices: () => state.unityStore as never,
@@ -225,7 +228,7 @@ async function world(targets: readonly Target[] = []) {
 	stub.window.state.focused = true;
 	return {
 		storageDir, served, state, deps, routing, registry, registryHandle, fake, index: fake as never, calls: stub.commands.calls, drafts, resumed, opened, selected, revealed, elected, openedTabs,
-		warnings, informed, errors, logged, released, refreshedOwnership, refreshedLauncher, providerRefreshes, requestSelections,
+		warnings, informed, errors, logged, released, refreshedOwnership, refreshedLauncher, providerRefreshes, modelRefreshes, requestSelections,
 	};
 }
 
@@ -1232,6 +1235,59 @@ describe("watching for requests", () => {
 		w.routing.rescanPendingLaunches();
 		const posted = await postSwitchRequest(w.storageDir, { to: "this-window", from: "holder-a", tabId: "tab:x", incarnation: "g_none", binding: null });
 		assert.equal(await awaitRequestAnswer(w.storageDir, "this-window", posted, { timeoutMs: 300 }), "timeout");
+	});
+});
+
+describe("telling every window that a credential changed", () => {
+	const serving = (w: World) => w.routing.serveRequests(undefined as never, w.index, { identityKeyOf: (value: string) => value } as never);
+	const settled = async (windows: readonly World[]) => { for (let turns = 0; turns < 5; turns++) { windows.forEach(w => w.routing.rescanRequests()); await nextTurn(); } };
+
+	it("makes every other window of the profile re-read its models once, and not the window that announced", async () => {
+		const sender = await world([{ holderId: "window-b", uri: null, serve: null }, { holderId: "window-c", uri: null, serve: null }], { holderId: "window-a" });
+		const second = await world([], { holderId: "window-b", storageDir: sender.storageDir });
+		const third = await world([], { holderId: "window-c", storageDir: sender.storageDir });
+		const bystander = await world([], { holderId: "window-d", storageDir: sender.storageDir });
+		for (const w of [second, third, bystander]) serving(w);
+		try {
+			await sender.routing.announceCredentialsChanged();
+			assert.deepEqual([second.modelRefreshes.length, third.modelRefreshes.length], [1, 1], "each named window re-read once");
+			assert.equal(bystander.modelRefreshes.length, 0, "a window the registry does not name is not asked");
+			assert.equal(sender.modelRefreshes.length, 0, "the announcing window refreshes through its own path, not through a request");
+			await settled([sender, second, third]);
+			assert.deepEqual([second.modelRefreshes.length, third.modelRefreshes.length], [1, 1], "a request is acted on once");
+			assert.deepEqual([await folderLeft(sender, "window-requests", ".request"), await folderLeft(sender, "window-requests", ".response")], [[], []], "nothing is left in the directory");
+			assert.deepEqual(sender.errors, []);
+			assert.equal(sender.calls.filter(call => call[0] === "workbench.action.reloadWindow").length, 0, "nothing reloads");
+		} finally {
+			for (const w of [second, third, bystander]) w.routing.dispose();
+		}
+	});
+
+	it("does not echo a notice it received, and never throws for a window that stays silent", async () => {
+		const sender = await world([{ holderId: "window-asleep", uri: null, serve: null }], { holderId: "window-a" });
+		const started = Date.now();
+		await sender.routing.announceCredentialsChanged();
+		assert.ok(Date.now() - started < 8_000);
+		assert.ok(sender.logged.some(line => line.includes("window-asleep") && line.includes("did not answer")));
+		assert.deepEqual(await folderLeft(sender, "window-requests", ".request"), [], "the unanswered request is withdrawn");
+		const receiver = await world([{ holderId: "window-a", uri: null, serve: null }], { holderId: "window-b", storageDir: sender.storageDir });
+		serving(receiver);
+		try {
+			const id = await postModelsRequest(sender.storageDir, { to: "window-b", from: "window-a" });
+			assert.equal(await awaitRequestAnswer(sender.storageDir, "window-b", id, { timeoutMs: 3_000 }), "unfocused", "answered");
+			await settled([receiver]);
+			assert.equal(receiver.modelRefreshes.length, 1);
+			assert.deepEqual(await folderLeft(receiver, "window-requests", ".request"), [], "the receiver posted nothing onward");
+		} finally {
+			receiver.routing.dispose();
+		}
+	});
+
+	it("does nothing without a session index", async () => {
+		const w = await world([{ holderId: "window-b", uri: null, serve: null }]);
+		w.deps.index = () => null;
+		await w.routing.announceCredentialsChanged();
+		assert.deepEqual(await readdir(path.join(w.storageDir)).catch(() => []), []);
 	});
 });
 

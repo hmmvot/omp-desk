@@ -394,6 +394,7 @@ interface WindowFixture {
     selectHeldTab(index: unknown, request: unknown, serveContext: { stillWanted(): Promise<boolean> }): Promise<{ ok: boolean; focused: boolean }>;
     openRestoredTabIfUncovered(context: unknown, index: unknown, tabId: string): Promise<void>;
     routeLaunch(index: unknown, folder: { path: string }, launch: unknown, answerTimeoutMs?: number): Promise<boolean>;
+    announceCredentialsChanged(): Promise<void>;
   };
   sessionActions: {
     confirmAndDelete(index: unknown, subject: unknown): Promise<boolean>;
@@ -1363,20 +1364,29 @@ describe("footer host readback", () => {
       if (frame.type === "logout") peer.reply(frame, true, { data: {} });
     });
     const restorePicker = harness.profilePicker(async (items: unknown[]) => items.every(item => typeof item === "string") ? "default" : items[0]);
+    const routing = harness.window().routing;
+    const announce = routing.announceCredentialsChanged;
+    let announced = 0;
+    routing.announceCredentialsChanged = async () => { announced++; };
     try {
       await harness.loginProviderFromPalette(index);
       await harness.providerModelsIdle();
+      assert.equal(announced, 1, "a sign-in tells the other windows of the profile");
       assert.ok(fixture.calls.length > before, "a sign-in re-reads the model catalogue");
       assert.equal(harness.window().providerAuthRun, null);
       const afterLogin = fixture.calls.length;
       await harness.logoutProviderFromPalette(index);
       await harness.providerModelsIdle();
       assert.ok(fixture.calls.length > afterLogin, "a logout re-reads the model catalogue");
+      assert.equal(announced, 2, "a logout tells the other windows too");
+      harness.closeLoginTerminal("omp login");
+      assert.equal(announced, 3, "so does a closed fallback login terminal, as the sign-in it ran may have changed a credential");
       assert.deepEqual(fixture.logins, [], "no terminal was involved");
       assert.equal(auth.starts.length, 2);
       assert.deepEqual(auth.starts[1]!.scope.env, { OMP_PROFILE: "default" });
       assert.ok(auth.spawned.every(peer => peer.exited && !peer.killed), "each process ended through its stdin once its flow was done");
     } finally {
+      routing.announceCredentialsChanged = announce;
       auth.peer = previousPeer; restorePicker();
       host.dispose(); await harness.providerModelsIdle();
       for (const subscription of subscriptions) subscription.dispose();

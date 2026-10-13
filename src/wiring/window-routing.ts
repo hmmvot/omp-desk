@@ -37,6 +37,7 @@ import {
 	planWindowFocus,
 	planWindowSwitch,
 	postLaunchRequest,
+	postModelsRequest,
 	postPendingLaunch,
 	postReloadRequest,
 	postSwitchRequest,
@@ -96,6 +97,8 @@ export interface RoutingWindowFacts {
 	registry(): WindowRegistry | undefined;
 	/** The folders the launcher shows, `undefined` before activation created them. */
 	folders(): LauncherFolders | undefined;
+	/** A credential changed (another window's provider login or logout): re-read model availability here, as the window does for its own. Never announces it again. */
+	refreshProviderModels(): void;
 	/** The session index the window publishes, `null` before activation created it. */
 	index(): SessionIndex | null;
 	/** Tabs another window asked this window to show whose editor VS Code has not revived yet. */
@@ -225,6 +228,12 @@ export interface WindowRouting {
 	 * (in practice the host is replaced first).
 	 */
 	reloadAllWindows(acceptTimeoutMs?: number): Promise<void>;
+	/**
+	 * Tell every other live window of the profile that a credential may have changed (ADR-0070), so each re-reads its model
+	 * availability. Waits at most the answer timeout per window, all at once, and never rejects: a window that does not
+	 * answer (an older build, a hung host) is logged and left, and reads the new credential at its next availability read.
+	 */
+	announceCredentialsChanged(): Promise<void>;
 	/** Serve another window's Kill All request (ADR-0060). */
 	serveStopRequest(index: SessionIndex, request: StopRequest, serveContext: ServeContext): Promise<ServeOutcome>;
 	/** Serve another window's request to show a session's tab (ADR-0056): selection only. */
@@ -870,6 +879,31 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 		return { ok: true, focused: false, afterAnswer: () => { void reloadThisWindow(`asked by window ${request.from}`); } };
 	}
 
+	/** Serve another window's credential-change notice: re-read the models here, and say nothing to anyone else. */
+	function serveModelsRequest(): ServeOutcome {
+		deps.refreshProviderModels();
+		return { ok: true, focused: false };
+	}
+
+	async function announceCredentialsChanged(): Promise<void> {
+		const index = deps.index();
+		if (index === null) return;
+		try {
+			await deps.registry()?.refresh();
+		} catch (error) {
+			deps.log(`credentials changed: the other windows could not be read afresh: ${messageOf(error)}`);
+		}
+		await Promise.all(otherWindows().map(async peer => {
+			try {
+				const id = await postModelsRequest(index.claimStorageDir, { to: peer.holderId, from: index.claimHolder.id });
+				const answer = await awaitRequestAnswer(index.claimStorageDir, peer.holderId, id);
+				if (answer === "timeout") deps.log(`credentials changed: ${peer.label} (${peer.holderId}) did not answer; it re-reads models at its next availability read`);
+			} catch (error) {
+				deps.log(`credentials changed: ${peer.label} (${peer.holderId}) could not be told: ${messageOf(error)}`);
+			}
+		}));
+	}
+
 	/** The other live windows of the profile, from the registry as it is now. */
 	function otherWindows(): readonly OpenWindow[] {
 		return (deps.registry()?.windows() ?? []).filter(window => !window.here);
@@ -1274,7 +1308,9 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 						? await serveStopRequest(index, request, requestContext)
 						: request.kind === "reload"
 							? serveReloadRequest(request)
-							: await serveLaunchRequest(context, index, request, requestContext);
+							: request.kind === "models"
+								? serveModelsRequest()
+								: await serveLaunchRequest(context, index, request, requestContext);
 				deps.timing("receiver: answer ready", `${request.id.slice(0, 8)} ok=${outcome.ok} focused=${outcome.focused}`);
 				return outcome;
 			}, { onError: detail => deps.log(`window requests: ${detail}`), debounceMs: WINDOW_REQUEST_WATCH_DEBOUNCE_MS });
@@ -1296,6 +1332,7 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 		},
 		serveLaunchRequest,
 		reloadAllWindows,
+		announceCredentialsChanged,
 		serveStopRequest,
 		selectHeldTab: selectHeldSessionTab,
 		openRestoredTabIfUncovered,

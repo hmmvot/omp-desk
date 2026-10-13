@@ -930,6 +930,10 @@ function windowRoutingDeps(): WindowRoutingDeps {
     registry: () => windowState().windowRegistry,
     folders: () => windowState().launcherFolders,
     index: () => windowState().indexForBridge,
+    refreshProviderModels: () => {
+      const index = windowState().indexForBridge;
+      if (index !== null) refreshProviderModelsEverywhere(index);
+    },
     requestSelections: () => windowState().requestSelections,
     packageStale: () => windowState().packageStale,
     unityChoices: () => windowState().context?.globalState,
@@ -6495,6 +6499,16 @@ function refreshDefaultProviderModels(): Promise<void> {
   return s.defaultProviderModelsRead;
 }
 
+/**
+ * A credential may have changed through this window's login, logout or login terminal: re-read model availability here
+ * and ask every other window of the profile to re-read its own (ADR-0070). Requests that arrive from another window
+ * call {@link refreshProviderModelsEverywhere} only, so a notice is never echoed.
+ */
+function announceCredentialsChanged(index: SessionIndex): void {
+  refreshProviderModelsEverywhere(index);
+  void windowState().routing.announceCredentialsChanged();
+}
+
 /** Re-read model availability here: the default profile and every indexed session. */
 function refreshProviderModelsEverywhere(index: SessionIndex): void {
   void refreshDefaultProviderModels();
@@ -6511,7 +6525,7 @@ function subscribeProviderLoginRefresh(context: vscode.ExtensionContext, index: 
     const ownedLoginClosed = terminal === s.providerLoginTerminal;
     if (ownedLoginClosed) s.providerLoginTerminal = null;
     if (!ownedLoginClosed && terminal.name !== "omp login") return;
-    refreshProviderModelsEverywhere(index);
+    announceCredentialsChanged(index);
   }), { dispose: () => { s.providerAuthRun?.abort(); } });
   void refreshDefaultProviderModels();
 }
@@ -6701,7 +6715,7 @@ async function runProviderAuth<T extends string>(
       ui: createLoginUi(vscode),
       start: signal => startLoginSession({ scope: { executable, env, cwd: scope.cwd }, signal, log }),
       openTerminal: providerId => openProviderLoginTerminalFor(executable, env, scope.cwd, providerId),
-      credentialsChanged: () => refreshProviderModelsEverywhere(index),
+      credentialsChanged: () => announceCredentialsChanged(index),
       log,
       signal: run.signal,
     });

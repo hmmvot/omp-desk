@@ -200,6 +200,14 @@ export interface ReloadRequest extends RequestBase {
 	readonly kind: "reload";
 }
 
+/**
+ * One request to re-read model availability (a provider login or logout finished in the sending window and may have
+ * changed a credential every window of the profile reads). It carries nothing else; the receiver re-reads its own.
+ */
+export interface ModelsRequest extends RequestBase {
+	readonly kind: "models";
+}
+
 /** What a receiver answers for one named row. */
 export type StopRowState =
 	/** The receiver's own flow stopped it and its broker is gone. */
@@ -218,7 +226,7 @@ export interface StopRowAnswer {
 }
 
 /** A request as a window receives it. */
-export type WindowRequest = SwitchRequest | LaunchRequest | StopRequest | ReloadRequest;
+export type WindowRequest = SwitchRequest | LaunchRequest | StopRequest | ReloadRequest | ModelsRequest;
 
 /** How long a request stays actionable. */
 export function requestTtlMs(request: Pick<WindowRequest, "kind">): number {
@@ -331,7 +339,7 @@ function parseRequest(text: string, fileTo: string, fileId: string): WindowReque
 		const target = parseWorkspace(workspace);
 		return action === null || target === null ? null : { kind, version: VERSION, id, to, from, createdAt, workspace: target, launch: action };
 	}
-	if (kind === "reload") return { kind, version: VERSION, id, to, from, createdAt };
+	if (kind === "reload" || kind === "models") return { kind, version: VERSION, id, to, from, createdAt };
 	if (kind === "stop") {
 		const identities = parseStopRows(rows);
 		return identities === null ? null : { kind, version: VERSION, id, to, from, createdAt, rows: identities };
@@ -495,6 +503,23 @@ export async function postReloadRequest(
 		from: request.from,
 		createdAt: new Date(now()).toISOString(),
 	};
+	await writeRequest(storageDir, record, now);
+	return id;
+}
+
+/**
+ * Ask `to` to re-read its model availability. Resolves with the request id once the file is in place; the requester then
+ * waits with {@link awaitRequestAnswer}, which also removes the answer. A window of a build that does not know the kind
+ * deletes the request and does nothing.
+ */
+export async function postModelsRequest(
+	storageDir: string,
+	request: { readonly to: string; readonly from: string },
+	now: () => number = Date.now,
+): Promise<string> {
+	if (!ID_RE.test(request.to) || !ID_RE.test(request.from)) throw new TypeError("a window request needs holder ids of letters, digits and dashes");
+	const id = randomUUID();
+	const record: ModelsRequest = { kind: "models", version: VERSION, id, to: request.to, from: request.from, createdAt: new Date(now()).toISOString() };
 	await writeRequest(storageDir, record, now);
 	return id;
 }
