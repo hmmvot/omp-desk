@@ -28,6 +28,7 @@ import { readFile } from "node:fs/promises";
 import { StringDecoder } from "node:string_decoder";
 import { isPtyCreationTime } from "./pty-protocol.ts";
 import { windowsPowerShellEnvironment, windowsPowerShellExecutable } from "./windows-powershell.ts";
+import { startToolSpawnTrace } from "./tool-spawn-trace.ts";
 
 /** Default bound for one probe: PowerShell start plus one process-table read. */
 export const PTY_PROBE_TIMEOUT_MS = 15_000;
@@ -99,6 +100,8 @@ async function runProbeHelper(
 			started: false,
 		};
 	}
+	// The mode is one of the fixed words the helper takes (`generation`, `tree`); the target pid is not traced.
+	const end = startToolSpawnTrace("powershell", `process probe ${args[1] ?? "unknown"}`);
 	const child = spawn(
 		windowsPowerShellExecutable(),
 		["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", helper.path, ...args],
@@ -114,6 +117,7 @@ async function runProbeHelper(
 	const finish = (code: number | null, started: boolean): void => {
 		if (settled) return;
 		settled = true;
+		end(child.pid, !started ? "start-failed" : timedOut ? "timeout" : code === 0 ? "ok" : "failed");
 		resolve({ code, started });
 	};
 	child.stdout?.on("data", (chunk: Buffer) => {

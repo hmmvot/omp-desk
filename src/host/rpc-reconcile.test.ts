@@ -16,6 +16,7 @@
  *
  * Runner: `node --test src/host/rpc-reconcile.test.ts`.
  */
+import type { PtyIdentityReading } from "./pty-identity.ts";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -826,6 +827,51 @@ describe("reconciliation of a recorded rpc row", () => {
 			}),
 		);
 		assert.equal(verdict.kind, "free", "another creation time is not the recorded process");
+	});
+
+	it("reads the recorded child and broker together inside one proof; either reading failing leaves no evidence of absence", async () => {
+		const readsOf = async (answer: (pid: number) => PtyIdentityReading): Promise<{ readonly requested: number[]; readonly peak: number; readonly evidence: readonly unknown[] }> => {
+			const requested: number[] = [];
+			let inFlight = 0;
+			let peak = 0;
+			const verdict = await verdictOf(
+				reconcilePorts({
+					readProcessIdentity: async pid => {
+						requested.push(pid);
+						inFlight += 1;
+						peak = Math.max(peak, inFlight);
+						// A reading takes a few turns of the event loop, as a spawn does: run one after the other, the second would start only after the first ended.
+						await Promise.resolve();
+						await Promise.resolve();
+						inFlight -= 1;
+						return answer(pid);
+					},
+				}),
+			);
+			assert.equal(verdict.kind, "free");
+			return { requested: requested.sort((a, b) => a - b), peak, evidence: verdict.kind === "free" ? verdict.evidence : [] };
+		};
+		const both = await readsOf(() => ({ kind: "gone" }));
+		assert.deepEqual(both.requested, [BROKER_PID, CHILD_PID].sort((a, b) => a - b));
+		assert.equal(both.peak, 2, "both readings were in flight at once");
+		assert.equal(both.evidence.length, 1, "both gone proves absence");
+
+		const brokerUnreadable = await readsOf(pid => pid === BROKER_PID ? { kind: "unknown", detail: "the probe printed stderr" } : { kind: "gone" });
+		assert.deepEqual(brokerUnreadable.evidence, []);
+		const childUnreadable = await readsOf(pid => pid === CHILD_PID ? { kind: "unknown", detail: "the probe printed stderr" } : { kind: "gone" });
+		assert.deepEqual(childUnreadable.evidence, []);
+		const childAlive = await readsOf(pid => pid === CHILD_PID ? { kind: "found", creationTime: CHILD_CREATION } : { kind: "gone" });
+		assert.deepEqual(childAlive.evidence, []);
+		const brokerAlive = await readsOf(pid => pid === BROKER_PID ? { kind: "found", creationTime: BROKER_CREATION } : { kind: "gone" });
+		assert.deepEqual(brokerAlive.evidence, []);
+	});
+
+	it("takes a fresh pair of readings for every proof: nothing from an earlier proof is reused", async () => {
+		const requested: number[] = [];
+		const ports = reconcilePorts({ readProcessIdentity: async pid => { requested.push(pid); return { kind: "gone" }; } });
+		await verdictOf(ports);
+		await verdictOf(ports);
+		assert.equal(requested.length, 4);
 	});
 
 

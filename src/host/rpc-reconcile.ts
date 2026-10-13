@@ -265,6 +265,68 @@ export async function verifyPinnedBrokerAttachment(input: {
 	return { ok: true };
 }
 
+/** What {@link concurrentPinProof} settled on: the verdict, how many kernel readings it took and how long it ran. */
+export interface ConcurrentPinProofResult {
+	readonly proof: { readonly ok: true } | { readonly ok: false; readonly reason: string };
+	readonly childReads: number;
+	readonly ms: number;
+}
+
+/**
+ * The exact-pin proof of one attachment, started as soon as the broker's status is known and awaited
+ * after the broker's own identity is confirmed.
+ *
+ * An attachment proves two independent things: the broker is the process its record names
+ * (`confirmBrokerIdentity`, one kernel reading when the broker does not attest itself) and the
+ * broker's child is the exact pinned one ({@link verifyPinnedBrokerAttachment}, one more reading when
+ * the broker does not attest the child). Neither is an input to the other, so with PowerShell starts
+ * costing seconds on a loaded machine they run together instead of one after the other. Each reading
+ * is still taken inside this proof and compared with the recorded creation time, so no evidence is
+ * older than the proof (ADR-0035); either failing refuses the attachment, the broker's reason first.
+ *
+ * `start` is what the attach hands to its `whileConfirming` hook. `settle` returns the proof, and
+ * starts it then if the attach never called the hook (a client that attaches without one), so the
+ * proof never goes missing.
+ */
+export function concurrentPinProof(input: {
+	readonly pin: BrokerPin;
+	readonly readNativeGeneration: NativeGenerationReader;
+	readonly kind?: "managed-rpc" | "managed-omp";
+}): {
+	readonly start: (handle: AttachedBrokerHandle) => void;
+	readonly settle: (handle: AttachedBrokerHandle) => Promise<ConcurrentPinProofResult>;
+} {
+	let started: Promise<ConcurrentPinProofResult> | null = null;
+	const start = (handle: AttachedBrokerHandle): Promise<ConcurrentPinProofResult> => {
+		if (started !== null) return started;
+		const startedAt = Date.now();
+		let childReads = 0;
+		started = (async (): Promise<ConcurrentPinProofResult> => {
+			try {
+				const proof = await verifyPinnedBrokerAttachment({
+					handle,
+					pin: input.pin,
+					...(input.kind === undefined ? {} : { kind: input.kind }),
+					readNativeGeneration: async pid => {
+						childReads += 1;
+						return await input.readNativeGeneration(pid);
+					},
+				});
+				return { proof, childReads, ms: Date.now() - startedAt };
+			} catch {
+				// No error text is forwarded (ADR-0017).
+				return {
+					proof: { ok: false, reason: "The pinned broker target could not be re-proven, so no host was adopted." },
+					childReads,
+					ms: Date.now() - startedAt,
+				};
+			}
+		})();
+		return started;
+	};
+	return { start: handle => void start(handle), settle: handle => start(handle) };
+}
+
 /**
  * The staged probe helper's kernel reading, or `null` when the runtime has none.
  *
@@ -321,7 +383,11 @@ type LookedUp =
  * caller, names what the slot is. `readRecord` and the attach are the only broker
  * operations used: nothing is launched, no owner hint is sent, no runtime is published.
  */
-async function attachRecorded(client: PtyBrokerClient, slot: string): Promise<LookedUp> {
+async function attachRecorded(
+	client: PtyBrokerClient,
+	slot: string,
+	whileConfirming?: (handle: AttachedBrokerHandle) => void,
+): Promise<LookedUp> {
 	let lookup;
 	try {
 		lookup = await client.readRecord(slot);
@@ -338,10 +404,11 @@ async function attachRecorded(client: PtyBrokerClient, slot: string): Promise<Lo
 	}
 	let outcome;
 	try {
+		const options = whileConfirming === undefined ? { adopted: true } : { adopted: true, whileConfirming };
 		outcome =
 			lookup.record.kind === "managed-rpc"
-				? await client.attachRpcRecord(lookup.record, { adopted: true })
-				: await client.attachRecord(lookup.record, { adopted: true });
+				? await client.attachRpcRecord(lookup.record, options)
+				: await client.attachRecord(lookup.record, options);
 	} catch {
 		return { kind: "failed", reason: "the recorded broker could not be authenticated for that slot" };
 	}
@@ -418,8 +485,27 @@ export async function probeRpcHost(input: {
 	}
 }
 
+/** One pin proof that has settled: its verdict, or what the reader threw (rethrown where the proof is consumed). */
+type SettledPinProof = { readonly proved: BrokerProbeResult } | { readonly threw: unknown };
+
 async function probeRpcHostOnce(input: Parameters<typeof probeRpcHost>[0]): Promise<RpcProbeResult> {
-	const attached = await attachRecorded(input.client, input.slot);
+	// The child's proof starts when the broker's status is known, together with the broker's own identity
+	// confirmation inside the attach: two independent readings of one proof, one spawn latency (ADR-0035). It
+	// starts only for a handle that can still be this row's: the verdicts below that refuse without a reading
+	// (another kind, another launch, an exited child) stay free of one.
+	const kind = input.kind ?? "managed-rpc";
+	const reader = input.readNativeGeneration ?? lazyNativeGenerationReader(input.client);
+	const prove = (target: AttachedBrokerHandle): Promise<SettledPinProof> =>
+		provedBrokerPin(target, reader, kind).then(proved => ({ proved }), (threw: unknown) => ({ threw }));
+	const early: { proof: Promise<SettledPinProof> | null } = { proof: null };
+	const attached = await attachRecorded(input.client, input.slot, candidate => {
+		if (
+			candidate.kind === kind &&
+			candidate.record.brokerId === input.expected.brokerId &&
+			candidate.record.generation === input.expected.brokerGeneration &&
+			candidate.state === "running"
+		) early.proof = prove(candidate);
+	});
 	if (attached.kind === "none") return { kind: "no-record" };
 	if (attached.kind === "failed") return { kind: "unreachable", reason: attached.reason };
 	const handle = attached.handle;
@@ -438,8 +524,9 @@ async function probeRpcHostOnce(input: Parameters<typeof probeRpcHost>[0]): Prom
 			return { kind: "child-exited", childPid: handle.nativePid, brokerGeneration: expected.brokerGeneration };
 		}
 		// The staged probe helper is only staged if a kernel reading is actually needed.
-		const reader = input.readNativeGeneration ?? lazyNativeGenerationReader(input.client);
-		const proved = await provedBrokerPin(handle, reader, input.kind ?? "managed-rpc");
+		const settled = await (early.proof ?? prove(handle));
+		if ("threw" in settled) throw settled.threw;
+		const proved = settled.proved;
 		if (!proved.ok) return { kind: "unreachable", reason: proved.reason };
 		if (proved.pin.nativePid !== expected.childPid || proved.pin.nativeCreationTime !== expected.childCreationTime) {
 			return {
@@ -696,8 +783,11 @@ async function reconcileOwner(request: OwnerReconcileRequest, ports: OwnerReconc
 			return { kind: "free", evidence: [{ kind: "broker-child-exited", slot: rpc.slot, childPid: probe.childPid, brokerGeneration: probe.brokerGeneration }] };
 		}
 		if (probe.kind === "no-record" || probe.kind === "unreachable") {
-			const child = await ports.readProcessIdentity(rpc.childPid);
-			const broker = await ports.readProcessIdentity(rpc.brokerPid);
+			// The two readings are independent and each is taken inside this proof: one spawn latency, not two.
+			const [child, broker] = await Promise.all([
+				ports.readProcessIdentity(rpc.childPid),
+				ports.readProcessIdentity(rpc.brokerPid),
+			]);
 			const childGone = child.kind === "gone" || (child.kind === "found" && child.creationTime !== rpc.childCreationTime);
 			const brokerGone = broker.kind === "gone" || (broker.kind === "found" && rpc.brokerCreationTime !== null && broker.creationTime !== rpc.brokerCreationTime);
 			if (childGone && brokerGone && rpc.brokerCreationTime !== null) {

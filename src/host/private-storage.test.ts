@@ -5,7 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { it } from "node:test";
-import { isPermittedAclPrincipal, parseWindowsAcl, permissionsPermitReplacement, readStorageAcls, readStorageOwners, restrictPrivateStorage, verifyPrivateStorage, type PrivateStorageLayout, type PrivateStorageProbe } from "./private-storage.ts";
+import { isPermittedAclPrincipal, parseStorageSecurity, parseWindowsAcl, permissionsPermitReplacement, readStorageSecurity, restrictPrivateStorage, verifyPrivateStorage, type PrivateStorageCommandResult, type PrivateStorageLayout, type PrivateStorageProbe, type PrivateStorageSecurityReport } from "./private-storage.ts";
+import { formatToolSpawn, reportToolSpawn, setToolSpawnObserver, type ToolSpawn } from "./tool-spawn-trace.ts";
 import { TEST_CURRENT_SID, fixtureAcl, fixturePrincipal } from "./private-storage-test-support.ts";
 
 // Captured with Windows .NET Encoding.GetEncoding(866), not UTF-8 literals masquerading as OEM bytes.
@@ -118,14 +119,15 @@ it("smokes real SID verification and rejects a real Users read grant, independen
 		assert.equal(restriction.restricted, true, restriction.reason ?? "real restriction failed");
 		assert.equal((await verifyPrivateStorage({ layout })).ready, true);
 		assert.deepEqual(rewritten, [root], "a clean inheriting child was rewritten from stale ACL evidence");
-		const single = await readStorageAcls([root]);
-		assert.equal(single.get(root.toLowerCase())?.ok, true);
-		const multiple = await readStorageAcls([root, child]);
-		assert.equal(multiple.size, 2, "JSON paths became a nested PowerShell array");
-		for (const target of [root, child]) assert.equal(multiple.get(target.toLowerCase())?.ok, true);
-		const owners = await readStorageOwners([root, child]);
-		assert.equal(owners.ok, true);
-		assert.equal(owners.stdout.split(/\r?\n/).filter(line => line.includes("|S-1-")).length, 2);
+		const single = await readStorageSecurity([root]);
+		assert.equal(single.sid !== null, true, "the SID was not read");
+		assert.equal(single.reports.get(root.toLowerCase())?.acl.ok, true);
+		const multiple = await readStorageSecurity([root, child]);
+		assert.equal(multiple.reports.size, 2, "JSON paths became a nested PowerShell array");
+		for (const target of [root, child]) {
+			assert.equal(multiple.reports.get(target.toLowerCase())?.acl.ok, true);
+			assert.match(multiple.reports.get(target.toLowerCase())?.owner ?? "", /^S-1-/);
+		}
 		const consoleRead = await run(path.join(system32, "cmd.exe"), ["/d", "/c", `chcp 866>nul & "${path.join(system32, "icacls.exe")}" "${root}"`], { windowsHide: true, windowsVerbatimArguments: true, encoding: "buffer" });
 		t.diagnostic(`Forced CP866 icacls run: Cyrillic path bytes present=${consoleRead.stdout.includes(Buffer.from("88a2a0ad", "hex"))}; SID verification remains independent of this output`);
 		await run(path.join(system32, "icacls.exe"), [root, "/grant", "*S-1-5-32-545:(OI)(CI)(RX)", "/Q"], { windowsHide: true });
@@ -133,4 +135,295 @@ it("smokes real SID verification and rejects a real Users read grant, independen
 		assert.equal(refused.ready, false, "a real Users read grant was admitted");
 		assert.match(refused.reason ?? "", /readable by S-1-5-32-545/);
 	} finally { await fs.rm(base, { recursive: true, force: true }); }
+});
+
+// ---- One process per verification pass (ADR-0054, amended 2026-10-13) ----
+
+const CLEAN_ENTRIES = ["NT AUTHORITY\\SYSTEM:(OI)(CI)(F)", "BUILTIN\\Administrators:(OI)(CI)(F)", "WORKSTATION\\dev:(OI)(CI)(F)"];
+
+/** What the one process reports for a clean machine; each field can be bent per path. */
+function fakeSecurity(bend: {
+	readonly sid?: string | null;
+	readonly entries?: (target: string) => readonly string[] | null;
+	readonly owner?: (target: string) => string | null;
+} = {}): { readonly read: NonNullable<PrivateStorageProbe["readSecurity"]>; readonly calls: string[][] } {
+	const calls: string[][] = [];
+	const read: NonNullable<PrivateStorageProbe["readSecurity"]> = async paths => {
+		calls.push([...paths]);
+		const reports = new Map<string, PrivateStorageSecurityReport>();
+		for (const target of paths) {
+			const entries = bend.entries === undefined ? CLEAN_ENTRIES : bend.entries(target);
+			reports.set(target.toLowerCase(), {
+				acl: entries === null
+					? { ok: false, stdout: "", detail: "the SID-based security API failed" }
+					: { ok: true, stdout: fixtureAcl(entries), detail: null },
+				owner: bend.owner === undefined ? fixturePrincipal("WORKSTATION\\dev") : bend.owner(target),
+			});
+		}
+		return { sid: bend.sid === undefined ? TEST_CURRENT_SID : bend.sid, failure: null, reports };
+	};
+	return { read, calls };
+}
+
+async function withStore<T>(run: (layout: PrivateStorageLayout, root: string) => Promise<T>): Promise<T> {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-one-process-"));
+	try {
+		return await run({ root, directories: [root], verifiedDirectories: [root], probeDirectory: root, probeText: "one-process-proof" }, root);
+	} finally { await fs.rm(root, { recursive: true, force: true }); }
+}
+
+it("verifies the SID, every access list and every owner from one reading, and replaces nothing else", async () => {
+	await withStore(async layout => {
+		const security = fakeSecurity();
+		const ready = await verifyPrivateStorage({ layout, probe: { platform: "win32", readSecurity: security.read } });
+		assert.equal(ready.ready, true, ready.reason ?? "refused");
+		assert.equal(security.calls.length, 1, "one process serves SID, ACLs and owners");
+		const [paths] = security.calls;
+		assert.ok(paths?.includes(layout.root), "the store root is in the one reading");
+		assert.ok((paths?.length ?? 0) > 1, "the carriers above the store are in the same reading");
+		// A probe that names a read replaces only that read: the SID still comes from the one reading.
+		const partly = fakeSecurity();
+		const named = await verifyPrivateStorage({ layout, probe: { platform: "win32", readSecurity: partly.read, readOwners: async targets => ({ ok: true, stdout: targets.map(target => `${target}|${fixturePrincipal("WORKSTATION\\dev")}`).join("\n"), detail: null }) } });
+		assert.equal(named.ready, true, named.reason ?? "refused");
+		assert.equal(partly.calls.length, 1);
+		// With every read named by the probe no process runs at all.
+		const none = fakeSecurity();
+		const all = await verifyPrivateStorage({ layout, probe: { platform: "win32", currentSid: TEST_CURRENT_SID, readSecurity: none.read, readAcl: async () => ({ ok: true, stdout: fixtureAcl(CLEAN_ENTRIES), detail: null }), readOwners: async targets => ({ ok: true, stdout: targets.map(target => `${target}|${fixturePrincipal("WORKSTATION\\dev")}`).join("\n"), detail: null }) } });
+		assert.equal(all.ready, true, all.reason ?? "refused");
+		assert.equal(none.calls.length, 0);
+	});
+});
+
+it("still refuses a wrong owner, an unreadable owner and a path the process left out of its report", async () => {
+	await withStore(async layout => {
+		const foreign = fakeSecurity({ owner: () => "S-1-5-21-100-200-300-9999 (OTHER\\mallory)" });
+		const wrongOwner = await verifyPrivateStorage({ layout, probe: { platform: "win32", readSecurity: foreign.read } });
+		assert.equal(wrongOwner.ready, false);
+		assert.match(wrongOwner.reason ?? "", /is owned by S-1-5-21-100-200-300-9999/);
+		// An owner no one could read is never guessed.
+		const unreadable = fakeSecurity({ owner: target => target === layout.root ? null : fixturePrincipal("WORKSTATION\\dev") });
+		const refused = await verifyPrivateStorage({ layout, probe: { platform: "win32", readSecurity: unreadable.read } });
+		assert.equal(refused.ready, false);
+		assert.match(refused.reason ?? "", /owner of .* could not be read/);
+		// A report the process left out for one path leaves that path's owner unread.
+		const missing: NonNullable<PrivateStorageProbe["readSecurity"]> = async (paths, label) => {
+			const full = await fakeSecurity().read(paths, label);
+			const reports = new Map(full.reports);
+			reports.delete(layout.root.toLowerCase());
+			return { ...full, reports };
+		};
+		const gone = await verifyPrivateStorage({ layout, probe: { platform: "win32", readSecurity: missing } });
+		assert.equal(gone.ready, false);
+		assert.match(gone.reason ?? "", /could not be verified|owner of .* could not be read|no ACL/);
+	});
+});
+
+it("still refuses an extra ACE on the store, a replace right on a carrier and an unreadable access list", async () => {
+	await withStore(async layout => {
+		const extra = fakeSecurity({ entries: target => target === layout.root ? [...CLEAN_ENTRIES, "BUILTIN\\Users:(OI)(CI)(RX)"] : CLEAN_ENTRIES });
+		const readable = await verifyPrivateStorage({ layout, probe: { platform: "win32", readSecurity: extra.read } });
+		assert.equal(readable.ready, false);
+		assert.match(readable.reason ?? "", /readable by S-1-5-32-545/);
+
+		const carrier = path.dirname(layout.root);
+		const replaceable = fakeSecurity({ entries: target => target === carrier ? [...CLEAN_ENTRIES, "BUILTIN\\Users:(OI)(CI)(M)"] : CLEAN_ENTRIES });
+		const lets = await verifyPrivateStorage({ layout, probe: { platform: "win32", readSecurity: replaceable.read } });
+		assert.equal(lets.ready, false);
+		assert.match(lets.reason ?? "", /lets S-1-5-32-545 .* replace or re-permission it/);
+
+		const unreadableAcl = fakeSecurity({ entries: target => target === layout.root ? null : CLEAN_ENTRIES });
+		const refused = await verifyPrivateStorage({ layout, probe: { platform: "win32", readSecurity: unreadableAcl.read } });
+		assert.equal(refused.ready, false);
+		assert.match(refused.reason ?? "", /could not be verified/);
+
+		const emptyAcl = fakeSecurity({ entries: target => target === layout.root ? [] : CLEAN_ENTRIES });
+		const empty = await verifyPrivateStorage({ layout, probe: { platform: "win32", readSecurity: emptyAcl.read } });
+		assert.equal(empty.ready, false);
+		assert.match(empty.reason ?? "", /could not be read/);
+	});
+});
+
+it("refuses when the one process fails, times out or prints something that is not the protocol", async () => {
+	await withStore(async layout => {
+		const verifyWith = async (result: PrivateStorageCommandResult, extra: Partial<PrivateStorageProbe> = {}) =>
+			await verifyPrivateStorage({
+				layout,
+				probe: { platform: "win32", ...extra, readSecurity: async paths => parseStorageSecurity(result, paths) },
+			});
+
+		const timedOut = await verifyWith({ ok: false, stdout: "", detail: "powershell.exe did not answer in time" });
+		assert.equal(timedOut.ready, false);
+		assert.match(timedOut.reason ?? "", /SID could not be read/);
+		// With the SID supplied the same failure reaches the access lists and then the owners.
+		const withSid = await verifyWith({ ok: false, stdout: "", detail: "powershell.exe did not answer in time" }, { currentSid: TEST_CURRENT_SID });
+		assert.equal(withSid.ready, false);
+		assert.match(withSid.reason ?? "", /could not be verified \(powershell.exe did not answer in time\)/);
+		const ownersOnly = await verifyWith({ ok: false, stdout: "", detail: "powershell.exe did not answer in time" }, {
+			currentSid: TEST_CURRENT_SID,
+			readAcl: async () => ({ ok: true, stdout: fixtureAcl(CLEAN_ENTRIES), detail: null }),
+		});
+		assert.equal(ownersOnly.ready, false);
+		assert.match(ownersOnly.reason ?? "", /store owner could not be read \(powershell.exe did not answer in time\)/);
+
+		const sid = TEST_CURRENT_SID;
+		const everything = (target: string) => ({ path: target, entries: JSON.parse(fixtureAcl(CLEAN_ENTRIES)), owner: fixturePrincipal("WORKSTATION\\dev") });
+		const good = (paths: readonly string[], overrides: Record<string, unknown> = {}) => JSON.stringify({ sid, reports: paths.map(everything), ...overrides });
+		const malformed: readonly ((paths: readonly string[]) => string)[] = [
+			() => "",
+			() => "not json",
+			() => "null",
+			() => "[]",
+			() => JSON.stringify({ sid }),
+			paths => good(paths, { reports: {} }),
+			paths => good(paths, { sid: "not-a-sid" }),
+			paths => good(paths, { sid: null }),
+			paths => JSON.stringify({ sid, reports: [...paths.map(everything), everything(paths[0] as string)] }),
+		];
+		for (const [index, produce] of malformed.entries()) {
+			const refused = await verifyPrivateStorage({
+				layout,
+				probe: { platform: "win32", readSecurity: async paths => parseStorageSecurity({ ok: true, stdout: produce(paths), detail: null }, paths) },
+			});
+			assert.equal(refused.ready, false, `malformed output ${index} was admitted`);
+		}
+		// A good document is admitted by the same path, so the refusals above are the output's doing.
+		const admitted = await verifyPrivateStorage({
+			layout,
+			probe: { platform: "win32", readSecurity: async paths => parseStorageSecurity({ ok: true, stdout: good(paths), detail: null }, paths) },
+		});
+		assert.equal(admitted.ready, true, admitted.reason ?? "refused");
+	});
+});
+
+it("parses one reading per path, keeps each read independent and ignores a path nobody asked for", () => {
+	const paths = ["C:\\a", "C:\\b"];
+	const entries = JSON.parse(fixtureAcl(CLEAN_ENTRIES));
+	const read = parseStorageSecurity({
+		ok: true,
+		detail: null,
+		stdout: JSON.stringify({
+			sid: TEST_CURRENT_SID,
+			reports: [
+				{ path: "C:\\a", entries, owner: "S-1-5-18" },
+				{ path: "C:\\b", entries: null, owner: null },
+				{ path: "C:\\not-asked", entries, owner: "S-1-5-18" },
+			],
+		}),
+	}, paths);
+	assert.equal(read.sid, TEST_CURRENT_SID);
+	assert.equal(read.failure, null);
+	assert.equal(read.reports.size, 2);
+	assert.equal(read.reports.get("c:\\a")?.acl.ok, true);
+	assert.equal(read.reports.get("c:\\a")?.owner, "S-1-5-18");
+	assert.equal(read.reports.get("c:\\b")?.acl.ok, false);
+	assert.equal(read.reports.get("c:\\b")?.owner, null);
+	const failed = parseStorageSecurity({ ok: false, stdout: "", detail: "x exited with 1" }, paths);
+	assert.equal(failed.failure, "x exited with 1");
+	assert.deepEqual([...failed.reports.values()].map(report => report.acl.ok), [false, false]);
+});
+
+it("restricts a store that is already limited with one reading and no rewrite, and rewrites from that reading otherwise", async () => {
+	await withStore(async (layout, root) => {
+		const clean = fakeSecurity();
+		const icacls: string[] = [];
+		const probe = (read: NonNullable<PrivateStorageProbe["readSecurity"]>): PrivateStorageProbe => ({
+			platform: "win32",
+			readSecurity: read,
+			applyIcacls: async target => { icacls.push(target); return { ok: true, stdout: "", detail: null }; },
+		});
+		const already = await restrictPrivateStorage({ layout, probe: probe(clean.read) });
+		assert.equal(already.restricted, true, already.reason ?? "refused");
+		assert.equal(clean.calls.length, 1, "a limited store costs one reading");
+		assert.deepEqual(icacls, []);
+
+		// Another account may read the root until it is rewritten; the rewrite then re-verifies from a fresh reading.
+		let rewritten = false;
+		const rewrites: string[] = [];
+		const broad = fakeSecurity({ entries: target => target === root && !rewritten ? [...CLEAN_ENTRIES, "BUILTIN\\Users:(OI)(CI)(RX)"] : CLEAN_ENTRIES });
+		const fixed = await restrictPrivateStorage({
+			layout,
+			probe: { ...probe(broad.read), applyIcacls: async target => { rewrites.push(target); rewritten = true; return { ok: true, stdout: "", detail: null }; } },
+		});
+		assert.equal(fixed.restricted, true, fixed.reason ?? "refused");
+		assert.deepEqual(rewrites, [root]);
+		assert.equal(broad.calls.length, 2, "the refused pass's reading decides the rewrite; one more reading verifies it");
+
+		// A rewrite that does not take is refused, never assumed.
+		const stuck = fakeSecurity({ entries: target => target === root ? [...CLEAN_ENTRIES, "BUILTIN\\Users:(OI)(CI)(RX)"] : CLEAN_ENTRIES });
+		const refused = await restrictPrivateStorage({ layout, probe: probe(stuck.read) });
+		assert.equal(refused.restricted, false);
+		assert.match(refused.reason ?? "", /readable by S-1-5-32-545/);
+
+		// A refusal no rewrite can repair (a foreign owner) stands after the one reading; nothing is rewritten and nothing is read twice.
+		const foreign = fakeSecurity({ owner: () => "S-1-5-21-100-200-300-9999 (OTHER\\mallory)" });
+		const rewritesBefore = icacls.length;
+		const owned = await restrictPrivateStorage({ layout, probe: probe(foreign.read) });
+		assert.equal(owned.restricted, false);
+		assert.match(owned.reason ?? "", /is owned by S-1-5-21-100-200-300-9999/);
+		assert.equal(foreign.calls.length, 1);
+		assert.equal(icacls.length, rewritesBefore);
+	});
+});
+
+it("leaves the access rules untouched when the account cannot be resolved, after one reading", async () => {
+	await withStore(async layout => {
+		const icacls: string[] = [];
+		let reads = 0;
+		const restriction = await restrictPrivateStorage({
+			layout,
+			probe: {
+				platform: "win32",
+				readSecurity: async paths => {
+					reads += 1;
+					return parseStorageSecurity({ ok: false, stdout: "", detail: "powershell.exe did not answer in time" }, paths);
+				},
+				applyIcacls: async target => { icacls.push(target); return { ok: true, stdout: "", detail: null }; },
+			},
+		});
+		assert.equal(restriction.restricted, false);
+		assert.match(restriction.reason ?? "", /access rules were left untouched/);
+		assert.deepEqual(icacls, []);
+		assert.equal(reads, 1, "a timed-out reading is not repeated within the same pass");
+	});
+});
+
+it("starts one PowerShell process for a limited real store and traces it with a purpose, a pid and a duration", { skip: process.platform !== "win32" }, async () => {
+	const base = await fs.mkdtemp(path.join(process.env.LOCALAPPDATA ?? os.homedir(), "omp-one-process-"));
+	const root = path.join(base, "store");
+	const layout: PrivateStorageLayout = { root, directories: [root], verifiedDirectories: [], probeDirectory: root, probeText: "one-process-real", label: "test store" };
+	const system32 = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32");
+	const traces: ToolSpawn[] = [];
+	try {
+		const first = await restrictPrivateStorage({
+			layout,
+			probe: { applyIcacls: async (target, args) => {
+				await promisify(execFile)(path.join(system32, "icacls.exe"), [target, ...args], { windowsHide: true });
+				return { ok: true, stdout: "", detail: null };
+			} },
+		});
+		assert.equal(first.restricted, true, first.reason ?? "the real store was not restricted");
+		setToolSpawnObserver(trace => traces.push(trace));
+		try {
+			const second = await restrictPrivateStorage({ layout });
+			assert.equal(second.restricted, true, second.reason ?? "the limited real store was refused");
+		} finally { setToolSpawnObserver(null); }
+		assert.equal(traces.length, 1, `a limited store is verified by one spawn: ${traces.map(formatToolSpawn).join(" | ")}`);
+		const [trace] = traces;
+		assert.equal(trace?.tool, "powershell");
+		assert.match(trace?.purpose ?? "", /^test store security read \(\d+ paths\)$/);
+		assert.equal(trace?.outcome, "ok");
+		assert.ok(typeof trace?.pid === "number" && trace.pid > 0);
+		assert.ok((trace?.ms ?? -1) >= 0);
+		const line = formatToolSpawn(trace as ToolSpawn);
+		assert.match(line, /^tool spawn: powershell test store security read \(\d+ paths\) pid \d+ \d+ ms ok$/);
+		assert.ok(!line.includes(base), "a trace names no path");
+	} finally { await fs.rm(base, { recursive: true, force: true }); }
+});
+
+it("keeps a failing observer from changing what a spawn decides", () => {
+	setToolSpawnObserver(() => { throw new Error("observer failed"); });
+	try {
+		assert.doesNotThrow(() => reportToolSpawn({ tool: "powershell", purpose: "x", pid: null, ms: 1, outcome: "ok" }));
+	} finally { setToolSpawnObserver(null); }
+	assert.equal(formatToolSpawn({ tool: "icacls", purpose: "p", pid: null, ms: 2, outcome: "timeout" }), "tool spawn: icacls p no pid 2 ms timeout");
 });

@@ -25,7 +25,7 @@ import {
 	stageRuntimeAssets,
 	verifyStagedRuntimeAsset,
 } from "./runtime-assets.ts";
-import { readStorageOwners, type PrivateStorageCommandResult, type PrivateStorageProbe } from "./private-storage.ts";
+import { readStorageSecurity, type PrivateStorageCommandResult, type PrivateStorageProbe } from "./private-storage.ts";
 import { TEST_CURRENT_SID, fixtureAcl, fixturePrincipal } from "./private-storage-test-support.ts";
 
 /** The account a simulated Windows probe runs as. */
@@ -134,9 +134,8 @@ function realIcacls(args: readonly string[]): Promise<void> {
 
 /** Give one directory the rules the shared convention establishes, with the real tool. */
 async function restrictWithRealTool(directory: string): Promise<void> {
-	const owners = await readStorageOwners([directory]);
-	const account = /\|(S-1-[0-9-]+)(?: |$)/m.exec(owners.stdout)?.[1];
-	assert.ok(owners.ok && account !== undefined, "the test directory owner SID could not be read");
+	const account = (await readStorageSecurity([directory])).sid;
+	assert.ok(account !== null, "the test account SID could not be read");
 	await realIcacls([
 		directory,
 		"/inheritance:r",

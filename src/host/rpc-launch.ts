@@ -25,7 +25,7 @@ import { isPtyProcessAlive } from "./pty-identity";
 import type { PtyBrokerClient } from "./pty-client";
 import type { PtyHandle } from "./pty-client";
 import type { RpcHandle } from "./rpc-handle";
-import { HOST_STOP_TIMEOUT_MS, decideStop, lazyNativeGenerationReader, verifyPinnedBrokerAttachment } from "./rpc-reconcile";
+import { HOST_STOP_TIMEOUT_MS, concurrentPinProof, decideStop, lazyNativeGenerationReader } from "./rpc-reconcile";
 import type { BrokerPin, NativeGenerationReader, NativeStopVerdict } from "./rpc-reconcile";
 import { readSessionFileHeader } from "./session-files";
 import type { RecordedRpcIdentity } from "./session-model";
@@ -323,8 +323,14 @@ export async function attachRpcHost(input: {
 	/** Test seam: the kernel reader; defaults to the client's, which stages the probe helper only when a reading is needed. */
 	readonly readNativeGeneration?: NativeGenerationReader;
 }): Promise<RpcAttachOutcome> {
+	const proof = concurrentPinProof({
+		pin: input.pin,
+		readNativeGeneration: input.readNativeGeneration ?? lazyNativeGenerationReader(input.client),
+	});
 	const connectStarted = Date.now();
-	const attached = await input.client.attachRpc(input.pin.slot);
+	// The child's proof starts once the broker's status is known, together with the broker's own identity
+	// confirmation: independent readings of one proof, one spawn latency instead of two (ADR-0035).
+	const attached = await input.client.attachRpc(input.pin.slot, { whileConfirming: proof.start });
 	const connectMs = Date.now() - connectStarted;
 	if (attached.handle === null) return { state: "unavailable", reason: attached.reason, runtime: null };
 	const handle = attached.handle;
@@ -332,22 +338,8 @@ export async function attachRpcHost(input: {
 		handle.disconnect();
 		return { state: "unavailable", reason, runtime: null };
 	};
-	let childReads = 0;
-	const childStarted = Date.now();
-	try {
-		const reader = input.readNativeGeneration ?? lazyNativeGenerationReader(input.client);
-		const proved = await verifyPinnedBrokerAttachment({
-			handle,
-			pin: input.pin,
-			readNativeGeneration: async pid => {
-				childReads += 1;
-				return await reader(pid);
-			},
-		});
-		if (!proved.ok) return refuse(proved.reason);
-	} catch {
-		return refuse("The pinned broker target could not be re-proven, so no host was adopted.");
-	}
+	const child = await proof.settle(handle);
+	if (!child.proof.ok) return refuse(child.proof.reason);
 	return {
 		state: "attached",
 		reason: `Re-adopted the PTY broker generation ${handle.record.generation} for pid ${handle.nativePid}${
@@ -368,8 +360,8 @@ export async function attachRpcHost(input: {
 			connectMs,
 			brokerIdentity: attached.identity?.mode ?? "probe",
 			brokerIdentityMs: attached.identity?.ms ?? 0,
-			childIdentity: childReads === 0 ? "trusted" : "probe",
-			childIdentityMs: Date.now() - childStarted,
+			childIdentity: child.childReads === 0 ? "trusted" : "probe",
+			childIdentityMs: child.ms,
 		},
 	};
 }

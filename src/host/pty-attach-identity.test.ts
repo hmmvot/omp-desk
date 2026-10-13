@@ -162,6 +162,11 @@ async function fixture(options: {
 	readonly attestation?: PtyIdentityAttestation;
 	/** The creation time the broker proves for itself in its handshake; the record names `BROKER_CREATION`. */
 	readonly brokerSays?: string;
+	/**
+	 * Hold every kernel reading until this many have been asked for: readings of one proof that run one
+	 * after the other never reach it, so a regression to sequential reads stops the test at its timeout.
+	 */
+	readonly readBarrier?: number;
 }): Promise<Fixture> {
 	counter += 1;
 	const kind = options.kind ?? "managed-rpc";
@@ -242,12 +247,15 @@ async function fixture(options: {
 		[BROKER_PID, { kind: "found", creationTime: BROKER_CREATION }],
 		[CHILD_PID, { kind: "found", creationTime: CHILD_CREATION }],
 	]);
+	const barrier = Promise.withResolvers<void>();
 	const client = new modules.PtyBrokerClient({
 		storageDir: storage,
 		extensionRoot,
 		access: ownerOnlyProbe(),
 		queryIdentity: async (_helper: PtyProbeHelper, pid: number) => {
 			readings.push(pid);
+			if (options.readBarrier === undefined || readings.length >= options.readBarrier) barrier.resolve();
+			await barrier.promise;
 			return kernel.get(pid) ?? { kind: "gone" };
 		},
 	});
@@ -474,12 +482,17 @@ describe("the state-directory access verification", { skip: WINDOWS_ONLY }, () =
 	});
 });
 
+/** Process ids in a fixed order: the two readings of one proof run together, so their order is not part of what a test asserts. */
+function pids(values: readonly number[]): number[] {
+	return [...values].sort((a, b) => a - b);
+}
+
 describe("re-adopting a broker that attests nothing (an older build's)", { skip: WINDOWS_ONLY }, () => {
 	it("falls back to one reading of the broker and one of its child", async () => {
 		const f = await fixture({});
 		const outcome = await modules.attachRpcHost({ pin: f.pin(), cwd: temp, sessionFile: null, client: f.client });
 		assert.equal(outcome.state, "attached", outcome.reason);
-		assert.deepEqual(f.readings, [BROKER_PID, CHILD_PID]);
+		assert.deepEqual(pids(f.readings), pids([BROKER_PID, CHILD_PID]), "one reading of the broker and one of its child; their order is not part of the proof");
 		assert.equal(outcome.timings?.brokerIdentity, "probe");
 		assert.equal(outcome.timings?.childIdentity, "probe");
 		outcome.runtime?.handle.disconnect();
@@ -490,11 +503,57 @@ describe("re-adopting a broker that attests nothing (an older build's)", { skip:
 		const expected = { slot: f.slot, brokerId: f.record.brokerId, brokerGeneration: f.record.generation, brokerPid: BROKER_PID, brokerCreationTime: BROKER_CREATION, childPid: CHILD_PID, childCreationTime: CHILD_CREATION };
 		const probe = await modules.probeRpcHost({ client: f.client, slot: f.slot, expected });
 		assert.equal(probe.kind, "attachable");
-		assert.deepEqual(f.readings, [BROKER_PID, CHILD_PID]);
+		assert.deepEqual(pids(f.readings), pids([BROKER_PID, CHILD_PID]));
 		const outcome = await modules.attachRpcHost({ pin: f.pin(), cwd: temp, sessionFile: null, client: f.client });
 		assert.equal(outcome.state, "attached", outcome.reason);
-		assert.deepEqual(f.readings, [BROKER_PID, CHILD_PID, BROKER_PID, CHILD_PID], "the attach proves the pair on its own readings: nothing from the reconcile is kept");
+		assert.deepEqual([pids(f.readings.slice(0, 2)), pids(f.readings.slice(2))], [pids([BROKER_PID, CHILD_PID]), pids([BROKER_PID, CHILD_PID])], "the attach proves the pair on its own readings: nothing from the reconcile is kept");
 		outcome.runtime?.handle.disconnect();
+	});
+
+	it("reads the broker and its child together inside one attach proof", { timeout: 20_000 }, async () => {
+		const f = await fixture({ readBarrier: 2 });
+		const outcome = await modules.attachRpcHost({ pin: f.pin(), cwd: temp, sessionFile: null, client: f.client });
+		assert.equal(outcome.state, "attached", outcome.reason);
+		assert.deepEqual(pids(f.readings), pids([BROKER_PID, CHILD_PID]));
+		outcome.runtime?.handle.disconnect();
+	});
+
+	it("reads the broker and its child together inside one reconcile proof", { timeout: 20_000 }, async () => {
+		const f = await fixture({ readBarrier: 2 });
+		const expected = { slot: f.slot, brokerId: f.record.brokerId, brokerGeneration: f.record.generation, brokerPid: BROKER_PID, brokerCreationTime: BROKER_CREATION, childPid: CHILD_PID, childCreationTime: CHILD_CREATION };
+		const probe = await modules.probeRpcHost({ client: f.client, slot: f.slot, expected });
+		assert.equal(probe.kind, "attachable");
+		assert.deepEqual(pids(f.readings), pids([BROKER_PID, CHILD_PID]));
+	});
+
+	it("still refuses when either concurrent reading fails, and names the broker's failure first", { timeout: 20_000 }, async () => {
+		const brokerUnreadable = await fixture({ readBarrier: 2 });
+		brokerUnreadable.kernel.set(BROKER_PID, { kind: "unknown", detail: "the probe printed stderr" });
+		const refusedBroker = await modules.attachRpcHost({ pin: brokerUnreadable.pin(), cwd: temp, sessionFile: null, client: brokerUnreadable.client });
+		assert.equal(refusedBroker.state, "unavailable");
+		assert.match(refusedBroker.reason, /could not be identified/);
+		assert.deepEqual(pids(brokerUnreadable.readings), pids([BROKER_PID, CHILD_PID]), "the child's reading was in flight too");
+
+		const childReused = await fixture({ readBarrier: 2 });
+		childReused.kernel.set(CHILD_PID, { kind: "found", creationTime: OTHER_CREATION });
+		const refusedChild = await modules.attachRpcHost({ pin: childReused.pin(), cwd: temp, sessionFile: null, client: childReused.client });
+		assert.equal(refusedChild.state, "unavailable");
+		assert.match(refusedChild.reason, /creation time does not match/);
+
+		const both = await fixture({ readBarrier: 2 });
+		both.kernel.set(BROKER_PID, { kind: "gone" });
+		both.kernel.set(CHILD_PID, { kind: "gone" });
+		const refusedBoth = await modules.attachRpcHost({ pin: both.pin(), cwd: temp, sessionFile: null, client: both.client });
+		assert.equal(refusedBoth.state, "unavailable");
+		assert.match(refusedBoth.reason, /recorded broker process \d+ is gone/, "the broker's reason, as when the readings were taken one after the other");
+
+		const expected = (f: Fixture) => ({ slot: f.slot, brokerId: f.record.brokerId, brokerGeneration: f.record.generation, brokerPid: BROKER_PID, brokerCreationTime: BROKER_CREATION, childPid: CHILD_PID, childCreationTime: CHILD_CREATION });
+		const probedChild = await fixture({ readBarrier: 2 });
+		probedChild.kernel.set(CHILD_PID, { kind: "unknown", detail: "the probe printed stderr" });
+		assert.equal((await modules.probeRpcHost({ client: probedChild.client, slot: probedChild.slot, expected: expected(probedChild) })).kind, "unreachable");
+		const probedBroker = await fixture({ readBarrier: 2 });
+		probedBroker.kernel.set(BROKER_PID, { kind: "gone" });
+		assert.equal((await modules.probeRpcHost({ client: probedBroker.client, slot: probedBroker.slot, expected: expected(probedBroker) })).kind, "unreachable");
 	});
 
 	it("refuses a pid that now belongs to another process, a dead child and an unreadable one", async () => {

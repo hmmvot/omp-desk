@@ -25,6 +25,7 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { windowsPowerShellEnvironment, windowsPowerShellExecutable } from "./windows-powershell.ts";
+import { startToolSpawnTrace, type ToolSpawn, type ToolSpawnOutcome } from "./tool-spawn-trace.ts";
 
 /** One bounded security-tool result; injected so tests never depend on machine ACLs. */
 export interface PrivateStorageCommandResult {
@@ -66,6 +67,11 @@ export interface PrivateStorageLayout {
 	readonly probeDirectory: string;
 	/** Fixed text the probe writes and reads back. */
 	readonly probeText: string;
+	/**
+	 * Fixed, code-chosen name of this store for the spawn trace (`broker state`, `runtime tree`);
+	 * never a path or anything an outside source chose. Absent reads as `private-storage`.
+	 */
+	readonly label?: string;
 }
 
 export interface PrivateStorageProbe {
@@ -78,6 +84,12 @@ export interface PrivateStorageProbe {
 	readonly applyIcacls?: (directory: string, args: readonly string[]) => Promise<PrivateStorageCommandResult>;
 	/** Reads owners as SIDs, with their resolved names for diagnostics when available. */
 	readonly readOwners?: (paths: readonly string[]) => Promise<PrivateStorageCommandResult>;
+	/**
+	 * Replaces the one process that reads the account SID, every access list and every owner
+	 * together; defaults to {@link readStorageSecurity}. It serves the reads the probe does not
+	 * name itself.
+	 */
+	readonly readSecurity?: (paths: readonly string[], label: string | undefined) => Promise<PrivateStorageSecurityRead>;
 	/**
 	 * Reads the mode `ls -ld` prints for one path, on POSIX; the mode carries the
 	 * marker for an extended access control list. Defaults to `/bin/ls -ld`.
@@ -100,7 +112,7 @@ export interface PrivateStorageReadiness {
 export interface PrivateStorageRestriction {
 	readonly restricted: boolean;
 	readonly reason: string | null;
-	/** The independent verification that ran after the rewrite; `null` if it never ran. */
+	/** The verification the result rests on: the pass that followed a rewrite, or the one that found no rewrite needed or possible; `null` if the call ended before one could decide. */
 	readonly readiness: PrivateStorageReadiness | null;
 }
 
@@ -146,6 +158,9 @@ const SETTLE_GRACE_MS = 250;
 
 /** One bounded security-tool run. */
 interface PrivateStorageToolRun {
+	readonly tool: ToolSpawn["tool"];
+	/** Fixed diagnostic vocabulary for the spawn trace; never an argument or a path. */
+	readonly purpose: string;
 	readonly command: string;
 	readonly args: readonly string[];
 	readonly timeoutMs: number;
@@ -156,6 +171,7 @@ interface PrivateStorageToolRun {
 
 /** Run one security tool and capture its output, bounded and without a shell. */
 function runCommandDefault(run: PrivateStorageToolRun): Promise<PrivateStorageCommandResult> {
+	const end = startToolSpawnTrace(run.tool, run.purpose);
 	const { promise, resolve } = Promise.withResolvers<PrivateStorageCommandResult>();
 	const child = spawn(run.command, [...run.args], {
 		windowsHide: true,
@@ -164,16 +180,17 @@ function runCommandDefault(run: PrivateStorageToolRun): Promise<PrivateStorageCo
 	const chunks: Buffer[] = [];
 	let length = 0;
 	let settled = false;
-	const finish = (result: PrivateStorageCommandResult): void => {
+	const finish = (result: PrivateStorageCommandResult, outcome: ToolSpawnOutcome): void => {
 		if (settled) return;
 		settled = true;
 		clearTimeout(timer);
+		end(child.pid, outcome);
 		resolve(result);
 	};
 	const timer = setTimeout(() => {
 		child.kill();
 		setTimeout(
-			() => finish({ ok: false, stdout: "", detail: `${run.command} did not answer in time` }),
+			() => finish({ ok: false, stdout: "", detail: `${run.command} did not answer in time` }, "timeout"),
 			SETTLE_GRACE_MS,
 		);
 	}, run.timeoutMs);
@@ -182,21 +199,19 @@ function runCommandDefault(run: PrivateStorageToolRun): Promise<PrivateStorageCo
 		length += chunk.length;
 		if (length > run.maxBytes) {
 			child.kill();
-			finish({ ok: false, stdout: "", detail: `${run.command} output exceeded the accepted size` });
+			finish({ ok: false, stdout: "", detail: `${run.command} output exceeded the accepted size` }, "output-too-large");
 			return;
 		}
 		chunks.push(chunk);
 	});
 	child.stderr.on("data", () => {});
 	child.on("error", error =>
-		finish({ ok: false, stdout: "", detail: `${run.command} could not start: ${error.name}` }),
+		finish({ ok: false, stdout: "", detail: `${run.command} could not start: ${error.name}` }, "start-failed"),
 	);
 	child.on("close", code =>
-		finish(
-			code === 0
-				? { ok: true, stdout: Buffer.concat(chunks).toString("utf8"), detail: null }
-				: { ok: false, stdout: "", detail: `${run.command} exited with ${String(code)}` },
-		),
+		code === 0
+			? finish({ ok: true, stdout: Buffer.concat(chunks).toString("utf8"), detail: null }, "ok")
+			: finish({ ok: false, stdout: "", detail: `${run.command} exited with ${String(code)}` }, "failed"),
 	);
 	return promise;
 }
@@ -218,11 +233,15 @@ function systemTool(name: string): string {
 const WINDOWS_SECURITY_SCRIPT = [
 	"$ErrorActionPreference = 'Stop'",
 	"[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)",
+	"$names = @{}",
 	"function Principal($sid) {",
+	"  $key = $sid.Value",
+	"  if ($names.ContainsKey($key)) { return $names[$key] }",
 	"  $name = $null",
 	"  try { $name = $sid.Translate([System.Security.Principal.NTAccount]).Value } catch {}",
-	"  if ($null -eq $name) { return $sid.Value }",
-	"  return ($sid.Value + ' (' + $name + ')')",
+	"  $text = if ($null -eq $name) { $key } else { $key + ' (' + $name + ')' }",
+	"  $names[$key] = $text",
+	"  return $text",
 	"}",
 	"function Security($item) {",
 	"  if ([System.IO.Directory]::Exists($item)) { return [System.IO.Directory]::GetAccessControl($item) }",
@@ -230,53 +249,119 @@ const WINDOWS_SECURITY_SCRIPT = [
 	"}",
 ].join("\n");
 
-function runSecurityScript(script: string, paths: readonly string[] = []): Promise<PrivateStorageCommandResult> {
-	return runCommandDefault({
+/**
+ * What one batched security read reported for one path: its access entries (the JSON
+ * protocol {@link parseWindowsAcl} reads) and its owner, each failing on its own.
+ */
+export interface PrivateStorageSecurityReport {
+	readonly acl: PrivateStorageCommandResult;
+	/** The owner as `SID (name)` or a bare SID; `null` when it could not be read. */
+	readonly owner: string | null;
+}
+
+/** The result of one process that read the account SID and every requested path's access and owner. */
+export interface PrivateStorageSecurityRead {
+	/** The current token's SID; `null` when the process failed or printed something that is not one. */
+	readonly sid: string | null;
+	/** Why the whole process failed (it did not start, exited non-zero, timed out, flooded); `null` otherwise. */
+	readonly failure: string | null;
+	/** One report per requested path, keyed by its lower-case spelling; empty when the output could not be trusted. */
+	readonly reports: ReadonlyMap<string, PrivateStorageSecurityReport>;
+}
+
+/**
+ * What one batched read's output says, judged as a whole: a failed process leaves every read
+ * unverified, and so do a document that is not the expected shape and a path reported twice.
+ * Each read inside a good document still fails on its own: a path whose rules cannot be read has
+ * `acl.ok === false`, one whose owner cannot be read has `owner === null`, and the SID is `null`
+ * when it is not a SID.
+ */
+export function parseStorageSecurity(
+	result: PrivateStorageCommandResult,
+	paths: readonly string[],
+): PrivateStorageSecurityRead {
+	if (!result.ok) {
+		const detail = result.detail ?? "the security reader failed";
+		return {
+			sid: null,
+			failure: detail,
+			reports: new Map(paths.map(target => [target.toLowerCase(), { acl: { ok: false, stdout: "", detail }, owner: null }])),
+		};
+	}
+	const malformed: PrivateStorageSecurityRead = { sid: null, failure: null, reports: new Map() };
+	try {
+		const parsed: unknown = JSON.parse(result.stdout);
+		if (typeof parsed !== "object" || parsed === null) return malformed;
+		const { sid, reports: listed } = parsed as { sid?: unknown; reports?: unknown };
+		if (!Array.isArray(listed)) return malformed;
+		const reports = new Map<string, PrivateStorageSecurityReport>();
+		for (const report of listed) {
+			if (typeof report?.path !== "string" || !paths.includes(report.path)) continue;
+			const key = report.path.toLowerCase();
+			if (reports.has(key)) return malformed;
+			reports.set(key, {
+				acl: {
+					ok: report.entries !== null,
+					stdout: JSON.stringify(report.entries) ?? "",
+					detail: report.entries === null ? "the SID-based security API failed" : null,
+				},
+				owner: typeof report.owner === "string" && report.owner.length > 0 ? report.owner : null,
+			});
+		}
+		return { sid: typeof sid === "string" && isSid(sid) ? sid : null, failure: null, reports };
+	} catch {
+		return malformed;
+	}
+}
+
+/**
+ * One PowerShell process reads the current account SID and, for every requested path,
+ * its access rules and its owner (ADR-0054, amended 2026-10-13). The 20 s bound and the
+ * 64 KiB output cap cover the whole process; {@link parseStorageSecurity} judges its output.
+ */
+export async function readStorageSecurity(
+	paths: readonly string[],
+	label = "private-storage",
+): Promise<PrivateStorageSecurityRead> {
+	const result = await runCommandDefault({
+		tool: "powershell",
+		purpose: `${label} security read (${paths.length} ${paths.length === 1 ? "path" : "paths"})`,
 		command: windowsPowerShellExecutable(),
-		args: ["-NoProfile", "-NonInteractive", "-Command", `${WINDOWS_SECURITY_SCRIPT}\n${script}`],
+		args: [
+			"-NoProfile",
+			"-NonInteractive",
+			"-Command",
+			`${WINDOWS_SECURITY_SCRIPT}\n${SECURITY_READ_SCRIPT}`,
+		],
 		timeoutMs: OWNER_TIMEOUT_MS,
 		maxBytes: MAX_OWNER_BYTES,
 		env: windowsPowerShellEnvironment({ OMP_PRIVATE_STORAGE_PATHS: JSON.stringify(paths) }),
 	});
+	return parseStorageSecurity(result, paths);
 }
 
-/** One process reads every requested ACL; failed individual reads remain unverified. */
-export async function readStorageAcls(paths: readonly string[]): Promise<Map<string, PrivateStorageCommandResult>> {
-	const result = await runSecurityScript([
-		"$paths = $env:OMP_PRIVATE_STORAGE_PATHS | ConvertFrom-Json",
-		"$reports = @(foreach ($item in $paths) {",
-		"  $entries = $null",
-		"  try {",
-		"    $acl = Security $item",
-		"    $entries = @($acl.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object {",
-		"      @{ principal = (Principal $_.IdentityReference); permissions = [int64]$_.FileSystemRights; denied = ($_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Deny) }",
-		"    })",
-		"  } catch {}",
-		"  @{ path = $item; entries = $entries }",
-		"})",
-		"ConvertTo-Json -Depth 6 -Compress -InputObject $reports",
-	].join("\n"), paths);
-	const reports = new Map<string, PrivateStorageCommandResult>();
-	if (!result.ok) {
-		for (const target of paths) reports.set(target.toLowerCase(), result);
-		return reports;
-	}
-	try {
-		const parsed: unknown = JSON.parse(result.stdout);
-		if (!Array.isArray(parsed)) return reports;
-		for (const report of parsed) {
-			if (typeof report?.path !== "string" || !paths.includes(report.path)) continue;
-			const key = report.path.toLowerCase();
-			if (reports.has(key)) return new Map();
-			reports.set(key, {
-				ok: report.entries !== null,
-				stdout: JSON.stringify(report.entries) ?? "",
-				detail: report.entries === null ? "the SID-based security API failed" : null,
-			});
-		}
-	} catch {}
-	return reports;
-}
+/** The reader body: SID, then per path a security descriptor read once and mined for rules and owner. */
+const SECURITY_READ_SCRIPT = [
+	"$paths = $env:OMP_PRIVATE_STORAGE_PATHS | ConvertFrom-Json",
+	"$sid = $null",
+	"try { $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value } catch {}",
+	"$reports = @(foreach ($item in $paths) {",
+	"  $entries = $null",
+	"  $owner = $null",
+	"  $security = $null",
+	"  try { $security = Security $item } catch {}",
+	"  if ($null -ne $security) {",
+	"    try {",
+	"      $entries = @($security.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object {",
+	"        @{ principal = (Principal $_.IdentityReference); permissions = [int64]$_.FileSystemRights; denied = ($_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Deny) }",
+	"      })",
+	"    } catch {}",
+	"    try { $owner = Principal ($security.GetOwner([System.Security.Principal.SecurityIdentifier])) } catch {}",
+	"  }",
+	"  @{ path = $item; entries = $entries; owner = $owner }",
+	"})",
+	"ConvertTo-Json -Depth 6 -Compress -InputObject @{ sid = $sid; reports = $reports }",
+].join("\n");
 
 function applyIcaclsDefault(
 	directory: string,
@@ -284,6 +369,8 @@ function applyIcaclsDefault(
 ): Promise<PrivateStorageCommandResult> {
 	// A rewritten directory carries retained files that must keep their access.
 	return runCommandDefault({
+		tool: "icacls",
+		purpose: "private-storage access rewrite",
 		command: systemTool("icacls.exe"),
 		args: [directory, ...args],
 		timeoutMs: ICACLS_TIMEOUT_MS * 12,
@@ -291,30 +378,11 @@ function applyIcaclsDefault(
 	});
 }
 
-/** The current token's SID, never an account name or a console-tool spelling. */
-async function readCurrentSid(): Promise<string | null> {
-	const result = await runSecurityScript("[System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value");
-	const sid = result.stdout.trim();
-	return result.ok && isSid(sid) ? sid : null;
-}
-
-/**
- * Direct .NET security APIs need no Get-Acl module. If policy blocks these too,
- * refuse rather than guess from a truncated, localized dir /q owner column.
- */
-export async function readStorageOwners(paths: readonly string[]): Promise<PrivateStorageCommandResult> {
-	return runSecurityScript([
-		"$paths = $env:OMP_PRIVATE_STORAGE_PATHS | ConvertFrom-Json",
-		"foreach ($item in $paths) {",
-		"  try { $owner = Principal ((Security $item).GetOwner([System.Security.Principal.SecurityIdentifier])) } catch { $owner = '?' }",
-		"  [Console]::WriteLine($item + '|' + $owner)",
-		"}",
-	].join("\n"), paths);
-}
-
 /** The mode `ls -ld` prints for one path, on POSIX, as the default ACL-marker read. */
 function readPosixAclDefault(target: string): Promise<PrivateStorageCommandResult> {
 	return runCommandDefault({
+		tool: "ls",
+		purpose: "private-storage mode read",
 		command: "/bin/ls",
 		args: ["-ld", target],
 		timeoutMs: DIR_TIMEOUT_MS,
@@ -612,10 +680,24 @@ async function spellsSameObject(spelled: string, real: string): Promise<boolean>
  * dataless `%`, an unreadable `?` or any other marker refuses, and so does a
  * listing whose mode cannot be read at all.
  */
-export async function verifyPrivateStorage(input: {
+export function verifyPrivateStorage(input: {
 	readonly layout: PrivateStorageLayout;
 	readonly probe?: PrivateStorageProbe;
 }): Promise<PrivateStorageReadiness> {
+	return verifyStorage(input);
+}
+
+/**
+ * The verification itself. `taken`, when given, receives the security reading this pass took (`null`
+ * when it took none), so {@link restrictPrivateStorage} can decide from it instead of reading again.
+ */
+async function verifyStorage(
+	input: {
+		readonly layout: PrivateStorageLayout;
+		readonly probe?: PrivateStorageProbe;
+	},
+	taken?: { security: PrivateStorageSecurityRead | null },
+): Promise<PrivateStorageReadiness> {
 	const layout = input.layout;
 	const platform = input.probe?.platform ?? process.platform;
 	const evidence: string[] = [];
@@ -661,12 +743,20 @@ export async function verifyPrivateStorage(input: {
 
 	const permittedPrincipals: string[] = [];
 	if (platform === "win32") {
-		const identity = input.probe?.currentSid ?? await readCurrentSid();
-		if (identity === null || !isSid(identity)) return refuse("the owning account SID could not be read");
+		const probe = input.probe;
 		const storePaths = [...new Set([layout.root, ...layout.directories, ...layout.verifiedDirectories, ...files])];
-		const reports = input.probe?.readAcl === undefined ? await readStorageAcls([...storePaths, ...carriers]) : null;
-		const readAcl = input.probe?.readAcl ?? (async (target: string) =>
-			reports?.get(target.toLowerCase()) ?? { ok: false, stdout: "", detail: "the SID reader returned no ACL" });
+		const owned = [...new Set([...storePaths, ...carriers])];
+		// One process reads the account SID, every path's access entries and every owner (ADR-0054,
+		// amended 2026-10-13). A probe replaces only the reads it names; with all three replaced no
+		// process runs.
+		const security = probe?.currentSid === undefined || probe.readAcl === undefined || probe.readOwners === undefined
+			? await (probe?.readSecurity ?? readStorageSecurity)(owned, layout.label)
+			: null;
+		if (taken !== undefined) taken.security = security;
+		const identity = probe?.currentSid ?? security?.sid ?? null;
+		if (identity === null || !isSid(identity)) return refuse("the owning account SID could not be read");
+		const readAcl = probe?.readAcl ?? (async (target: string) =>
+			security?.reports.get(target.toLowerCase())?.acl ?? { ok: false, stdout: "", detail: "the SID reader returned no ACL" });
 		for (const target of storePaths) {
 			const result = await readAcl(target);
 			if (!result.ok) {
@@ -696,15 +786,24 @@ export async function verifyPrivateStorage(input: {
 				);
 			}
 		}
-		// One owner read covers every path. An owner outside the trusted set can rewrite
-		// the access rules of what it owns, so an owner read or compared by guesswork
-		// refuses instead.
-		const owned = [...new Set([...storePaths, ...carriers])];
-		const owners = await (input.probe?.readOwners ?? readStorageOwners)(owned);
-		if (!owners.ok) {
-			return refuse(`the store owner could not be read (${owners.detail ?? "the owner tool failed"})`);
+		// An owner outside the trusted set can rewrite the access rules of what it owns, so an
+		// owner read or compared by guesswork refuses instead.
+		const ownerByPath = new Map<string, string>();
+		if (probe?.readOwners !== undefined) {
+			const owners = await probe.readOwners(owned);
+			if (!owners.ok) {
+				return refuse(`the store owner could not be read (${owners.detail ?? "the owner tool failed"})`);
+			}
+			for (const [target, owner] of ownersFrom(owners.stdout, owned)) ownerByPath.set(target, owner);
+		} else {
+			if (security?.failure !== null) {
+				return refuse(`the store owner could not be read (${security?.failure ?? "the owner tool failed"})`);
+			}
+			for (const target of owned) {
+				const owner = security.reports.get(target.toLowerCase())?.owner;
+				if (owner !== null && owner !== undefined) ownerByPath.set(target.toLowerCase(), owner);
+			}
 		}
-		const ownerByPath = ownersFrom(owners.stdout, owned);
 		for (const target of owned) {
 			const owner = ownerByPath.get(target.toLowerCase());
 			if (owner === undefined) return refuse(`the owner of ${target} could not be read`);
@@ -816,6 +915,19 @@ function ownerOnlyGrant(account: string): readonly string[] {
  * the same rules. The rewrite is followed by an independent
  * {@link verifyPrivateStorage} pass, so a failed or partial rewrite leaves
  * capture off rather than assumed safe. This is not a per-event operation.
+ *
+ * A store that already holds the rules needs no rewrite, and a verification pass proves
+ * that by itself (every directory it would rewrite is in the set the pass reads, and the
+ * pass refuses exactly what the rewrite test would act on), so the pass runs first: one
+ * PowerShell process for a store that is already limited (ADR-0054, amended 2026-10-13).
+ * Only a refusal falls through. The rewrite decides from that refusal's own reading (no
+ * access rule was written since; a pass that stopped before reading takes one fresh read
+ * of the directories), rewrites the directories that are not limited and re-reads the rest
+ * after each rewrite. When nothing was rewritten the refusal stands (nothing changed, so the
+ * same checks are not run again); after a rewrite a closing pass from a fresh reading
+ * decides. When the one reading failed as a whole there is no account SID and the rules are
+ * left untouched. The verification pass writes its probe only after every access check
+ * passed, so no byte is written into a store that was not already limited.
  */
 export async function restrictPrivateStorage(input: {
 	readonly layout: PrivateStorageLayout;
@@ -836,7 +948,14 @@ export async function restrictPrivateStorage(input: {
 	} catch (error) {
 		return { restricted: false, reason: `the store could not be created (${describeStorageError(error)})`, readiness: null };
 	}
-	const account = input.probe?.currentSid ?? (await readCurrentSid());
+	const taken: { security: PrivateStorageSecurityRead | null } = { security: null };
+	const already = await verifyStorage({ layout, ...(input.probe ? { probe: input.probe } : {}) }, taken);
+	if (already.ready) return { restricted: true, reason: null, readiness: already };
+	const directories = restrictedDirectories(layout);
+	// The refused pass read every directory it reached; one that stopped before reading leaves nothing to reuse.
+	const needsRead = input.probe?.currentSid === undefined || input.probe.readAcl === undefined;
+	const security = taken.security ?? (needsRead ? await (input.probe?.readSecurity ?? readStorageSecurity)(directories, layout.label) : null);
+	const account = input.probe?.currentSid ?? security?.sid ?? null;
 	if (account === null || !isSid(account)) {
 		return {
 			restricted: false,
@@ -844,11 +963,11 @@ export async function restrictPrivateStorage(input: {
 			readiness: null,
 		};
 	}
-	const directories = restrictedDirectories(layout);
-	let reports = input.probe?.readAcl === undefined ? await readStorageAcls(directories) : null;
+	let reports = input.probe?.readAcl === undefined ? (security?.reports ?? null) : null;
 	const readAcl = input.probe?.readAcl ?? (async (target: string) =>
-		reports?.get(target.toLowerCase()) ?? { ok: false, stdout: "", detail: "the SID reader returned no ACL" });
+		reports?.get(target.toLowerCase())?.acl ?? { ok: false, stdout: "", detail: "the SID reader returned no ACL" });
 	const applyIcacls = input.probe?.applyIcacls ?? applyIcaclsDefault;
+	let rewrote = false;
 	for (const [index, directory] of directories.entries()) {
 		// A link or reparse point is never rewritten: `icacls` would apply the rules to
 		// whatever it reaches, which is not this store. Verification refuses it next.
@@ -868,13 +987,16 @@ export async function restrictPrivateStorage(input: {
 				readiness: null,
 			};
 		}
+		rewrote = true;
 		// Inheritable grants can change every remaining directory. Never rewrite
 		// one from stale pre-parent-rewrite evidence.
 		if (input.probe?.readAcl === undefined && index + 1 < directories.length) {
-			reports = await readStorageAcls(directories.slice(index + 1));
+			reports = (await (input.probe?.readSecurity ?? readStorageSecurity)(directories.slice(index + 1), layout.label)).reports;
 		}
 	}
-	const readiness = await verifyPrivateStorage({ layout, probe: { ...input.probe, currentSid: account } });
+	// Nothing was rewritten by this call, so the refused pass's refusal stands and the same checks are not repeated.
+	if (!rewrote) return { restricted: false, reason: already.reason, readiness: already };
+	const readiness = await verifyStorage({ layout, probe: { ...input.probe, currentSid: account } });
 	return {
 		restricted: readiness.ready,
 		reason: readiness.ready ? null : readiness.reason,

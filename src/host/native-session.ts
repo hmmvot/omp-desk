@@ -9,7 +9,7 @@ import type { PtyBrokerClient, PtyHandle } from "./pty-client";
 import { isPtyProcessAlive } from "./pty-identity";
 import { recordedRpcIdentityOf, resumeWorkingDirectory } from "./rpc-launch";
 import type { AttachTimings, RpcHostRuntime, RpcLaunchRequest, RpcOmpLaunchSpec } from "./rpc-launch";
-import { brokerNativeGenerationReader, lazyNativeGenerationReader, verifyPinnedBrokerAttachment } from "./rpc-reconcile";
+import { brokerNativeGenerationReader, concurrentPinProof, lazyNativeGenerationReader } from "./rpc-reconcile";
 import type { BrokerPin, NativeGenerationReader, NativeStopVerdict } from "./rpc-reconcile";
 import { readSessionFileHeader } from "./session-files";
 
@@ -95,31 +95,31 @@ export async function launchNativeHost(request: RpcLaunchRequest, client: PtyBro
 }
 
 export async function attachNativeHost(input: { readonly pin: BrokerPin; readonly cwd: string; readonly sessionFile: string | null; readonly client: PtyBrokerClient; readonly readNativeGeneration?: NativeGenerationReader }): Promise<NativeAttachOutcome> {
+	const proof = concurrentPinProof({
+		pin: input.pin,
+		// A pseudo-console child is not held by handle (its exit is reported when its output closes, which can follow its end),
+		// so the broker does not attest it and its kernel creation time is read here, freshly for this proof.
+		readNativeGeneration: input.readNativeGeneration ?? lazyNativeGenerationReader(input.client),
+		kind: "managed-omp",
+	});
 	const connectStarted = Date.now();
-	const attached = await input.client.attach(input.pin.slot);
+	const attached = await input.client.attach(input.pin.slot, { whileConfirming: proof.start });
 	const connectMs = Date.now() - connectStarted;
 	if (attached.handle === null) return { state: "unavailable", reason: attached.reason, runtime: null };
 	const handle = attached.handle;
-	try {
-		// A pseudo-console child is not held by handle (its exit is reported when its output closes, which can follow its end),
-		// so the broker does not attest it and its kernel creation time is read here, freshly for this proof.
-		const reader = input.readNativeGeneration ?? lazyNativeGenerationReader(input.client);
-		let childReads = 0;
-		const childStarted = Date.now();
-		const proof = await verifyPinnedBrokerAttachment({ handle, pin: input.pin, readNativeGeneration: async pid => { childReads += 1; return await reader(pid); }, kind: "managed-omp" });
-		if (!proof.ok) throw new Error(proof.reason);
-		// A surviving broker is never restarted to pick up new code (that would end the OMP process it owns);
-		// its older screen mirror is covered by the repaint a restored screen is followed by, and the log says so.
-		const another = handle.buildMatches ? "" : " Its PTY broker was started by another build of this extension; the screen is repainted after it is restored.";
-		return {
-			state: "attached", reason: `Reattached the exact managed native OMP process.${another}`,
-			runtime: { kind: "terminal", handle, identity: recordedRpcIdentityOf(handle), cwd: input.cwd, sessionFile: input.sessionFile, control: null, binary: null, notice: null, pid: input.pin.nativePid, observed: null, stopping: false, observedSurvivors: [] },
-			timings: { connectMs, brokerIdentity: attached.identity?.mode ?? "probe", brokerIdentityMs: attached.identity?.ms ?? 0, childIdentity: childReads === 0 ? "trusted" : "probe", childIdentityMs: Date.now() - childStarted },
-		};
-	} catch (error) {
+	const child = await proof.settle(handle);
+	if (!child.proof.ok) {
 		handle.disconnect();
-		return { state: "unavailable", reason: error instanceof Error ? error.message : String(error), runtime: null };
+		return { state: "unavailable", reason: child.proof.reason, runtime: null };
 	}
+	// A surviving broker is never restarted to pick up new code (that would end the OMP process it owns);
+	// its older screen mirror is covered by the repaint a restored screen is followed by, and the log says so.
+	const another = handle.buildMatches ? "" : " Its PTY broker was started by another build of this extension; the screen is repainted after it is restored.";
+	return {
+		state: "attached", reason: `Reattached the exact managed native OMP process.${another}`,
+		runtime: { kind: "terminal", handle, identity: recordedRpcIdentityOf(handle), cwd: input.cwd, sessionFile: input.sessionFile, control: null, binary: null, notice: null, pid: input.pin.nativePid, observed: null, stopping: false, observedSurvivors: [] },
+		timings: { connectMs, brokerIdentity: attached.identity?.mode ?? "probe", brokerIdentityMs: attached.identity?.ms ?? 0, childIdentity: child.childReads === 0 ? "trusted" : "probe", childIdentityMs: child.ms },
+	};
 }
 
 /** Read-only settlement proof. Never closes ConPTY or signals a process. */

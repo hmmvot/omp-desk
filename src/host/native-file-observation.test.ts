@@ -45,7 +45,7 @@ import {
 	restrictNativeFileObservationStorage,
 	verifyNativeFileObservationStorage,
 } from "./native-file-observation-storage.ts";
-import { permissionsPermitReplacement, posixAccessMarker, posixAccessProblem, readStorageOwners, readStorageAcls } from "./private-storage.ts";
+import { permissionsPermitReplacement, posixAccessMarker, posixAccessProblem, readStorageSecurity } from "./private-storage.ts";
 import { TEST_CURRENT_SID, fixtureAcl, fixturePrincipal } from "./private-storage-test-support.ts";
 import { shortDirectoryAlias } from "./short-name-test-support.ts";
 import {
@@ -152,7 +152,7 @@ const runIcacls = promisify(execFile);
 
 /** This machine's real access listing for one directory or file. */
 async function realAclOf(target: string): Promise<string> {
-	const result = (await readStorageAcls([target])).get(target.toLowerCase());
+	const result = (await readStorageSecurity([target])).reports.get(target.toLowerCase())?.acl;
 	assert.equal(result?.ok, true, result?.detail ?? "the real ACL read failed");
 	return result!.stdout;
 }
@@ -163,9 +163,8 @@ async function realAclOf(target: string): Promise<string> {
  * sandbox temporary directory that carries the whole test tree.
  */
 async function restrictRealDirectory(directory: string): Promise<void> {
-	const owners = await readStorageOwners([directory]);
-	const account = /\|(S-1-[0-9-]+)(?: |$)/m.exec(owners.stdout)?.[1];
-	assert.ok(owners.ok && account !== undefined, "the test directory owner SID could not be read");
+	const account = (await readStorageSecurity([directory])).sid;
+	assert.ok(account !== null, "the test account SID could not be read");
 	await runIcacls(
 		ICACLS,
 		[
@@ -700,16 +699,11 @@ describe("native observation storage gates", () => {
 
 			// The real reads, no injected seam: whatever this machine's tools answer is
 			// what the store must be held to.
-			const owners = await readStorageOwners([base, process.env.LOCALAPPDATA ?? base, "C:\\Users"]);
-			assert.equal(owners.ok, true, owners.detail ?? "the owner read failed");
-			const reported = new Map(
-				owners.stdout
-					.split(/\r?\n/)
-					.filter(line => line.includes("|"))
-					.map(line => [line.slice(0, line.indexOf("|")), line.slice(line.indexOf("|") + 1)] as const),
-			);
-			for (const target of [base, process.env.LOCALAPPDATA ?? base, "C:\\Users"]) {
-				const owner = reported.get(target);
+			const targets = [base, process.env.LOCALAPPDATA ?? base, "C:\\Users"];
+			const security = await readStorageSecurity(targets);
+			assert.equal(security.failure, null, security.failure ?? "the owner read failed");
+			for (const target of targets) {
+				const owner = security.reports.get(target.toLowerCase())?.owner;
 				assert.equal(typeof owner, "string", `${target} has no owner in the report`);
 				assert.match(owner ?? "", /^S-1-/);
 			}
@@ -1121,17 +1115,11 @@ describe("native observation storage gates", () => {
 			await fs.mkdir(inner, { recursive: true });
 			const targets = [roots.store, inner];
 
-			const owners = await readStorageOwners(targets);
+			const security = await readStorageSecurity(targets);
 
-			assert.equal(owners.ok, true, owners.detail ?? "the listing reported no owner");
-			const reported = new Map(
-				owners.stdout
-					.split(/\r?\n/)
-					.filter(line => line.includes("|"))
-					.map(line => [line.slice(0, line.indexOf("|")), line.slice(line.indexOf("|") + 1)] as const),
-			);
+			assert.equal(security.failure, null, security.failure ?? "the listing reported no owner");
 			for (const target of targets) {
-				const owner = reported.get(target);
+				const owner = security.reports.get(target.toLowerCase())?.owner;
 				assert.equal(typeof owner, "string", `${target} has no owner in the listing`);
 				assert.match(owner ?? "", /^S-1-/);
 			}

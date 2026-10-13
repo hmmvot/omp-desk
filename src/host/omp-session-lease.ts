@@ -33,6 +33,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import * as path from "node:path";
 import { verifyStagedRuntimeAsset, type StagedRuntimeAsset } from "./runtime-assets.ts";
 import { windowsPowerShellEnvironment, windowsPowerShellExecutable } from "./windows-powershell.ts";
+import { startToolSpawnTrace, type ToolSpawnOutcome } from "./tool-spawn-trace.ts";
 
 /** First 64-bit seed OMP's native lock mixes into the path hash. The bytes spell `OMP-LOCK`. */
 const SEED_FIRST = 0x4f4d502d4c4f434bn;
@@ -223,6 +224,7 @@ export function powershellLeaseProbe(options: LeaseProbeLaunchOptions): LeasePro
 		}
 		const requested = [...new Set(mutexNames)];
 		return await new Promise<ReadonlyMap<string, LeaseState> | null>(resolve => {
+			const end = startToolSpawnTrace("powershell", `session lease probe (${requested.length} ${requested.length === 1 ? "name" : "names"})`);
 			let child: ChildProcess;
 			try {
 				child =
@@ -233,16 +235,21 @@ export function powershellLeaseProbe(options: LeaseProbeLaunchOptions): LeasePro
 						env: windowsPowerShellEnvironment(),
 					});
 			} catch (error) {
+				end(null, "start-failed");
 				log(`session lease probe could not start: ${error instanceof Error ? error.message : String(error)}`);
 				resolve(null);
 				return;
 			}
 			let stdout = "";
 			let settled = false;
-			const finish = (value: ReadonlyMap<string, LeaseState> | null, note?: string): void => {
+			const finish = (value: ReadonlyMap<string, LeaseState> | null, note?: string, outcome?: ToolSpawnOutcome): void => {
 				if (settled) return;
 				settled = true;
 				clearTimeout(timer);
+				end(
+					child.pid,
+					outcome ?? (value !== null ? "ok" : note === "timed out" ? "timeout" : note === "unexpectedly long output" ? "output-too-large" : "failed"),
+				);
 				if (note !== undefined) log(`session lease probe failed: ${note}`);
 				if (value === null) child.kill();
 				resolve(value);
@@ -254,7 +261,7 @@ export function powershellLeaseProbe(options: LeaseProbeLaunchOptions): LeasePro
 				if (stdout.length > 64 * 1024) finish(null, "unexpectedly long output");
 			});
 			child.stderr?.resume();
-			child.on("error", error => finish(null, error.message));
+			child.on("error", error => finish(null, error.message, "start-failed"));
 			child.on("close", code => {
 				if (settled) return;
 				const report = parseLeaseReport(stdout, requested);

@@ -299,6 +299,7 @@ export async function verifyPtyStateAccess(
 				verifiedFiles: files,
 				probeDirectory: root,
 				probeText: PTY_STORAGE_PROBE_TEXT,
+				label: "broker state",
 			},
 			...(access === undefined ? {} : { probe: access }),
 		});

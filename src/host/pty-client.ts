@@ -180,6 +180,17 @@ export type PtyAttachOutcome = BrokerAttachOutcome<PtyHandle>;
 export type RpcLaunchOutcome = BrokerLaunchOutcome<RpcHandle>;
 export type RpcAttachOutcome = BrokerAttachOutcome<RpcHandle>;
 
+/**
+ * Work an attach lets its caller start once the broker's status is known, concurrently with the
+ * confirmation of the broker's own identity (a kernel reading for a broker that does not attest it).
+ * The two readings of one proof are independent: neither is an input to the other, and each is taken
+ * inside this proof, so neither is older than it (ADR-0035). The hook runs synchronously, starts the
+ * work and returns; the caller keeps the work's own promise and must not let it reject unobserved.
+ */
+export interface AttachConcurrency<Handle> {
+	readonly whileConfirming?: (handle: Handle) => void;
+}
+
 export interface PtyAttachResult {
 	readonly fromPosition: number;
 	/** `true` when the broker no longer holds everything after `fromPosition`. */
@@ -454,7 +465,7 @@ export class PtyBrokerClient {
 	 * broker of this protocol: a missing record, a record this build cannot read, a
 	 * broker pid that is gone or was reused, a connection the broker refused.
 	 */
-	async attach(slot: string, options: { readonly owner?: PtyOwnerHint | null } = {}): Promise<PtyAttachOutcome> {
+	async attach(slot: string, options: { readonly owner?: PtyOwnerHint | null } & AttachConcurrency<PtyHandle> = {}): Promise<PtyAttachOutcome> {
 		const lookup = await readPtyRecord(this.options.storageDir, slot);
 		if (lookup.kind === "none") return { state: "unavailable", reason: "no broker is recorded for this slot", handle: null };
 		if (lookup.kind === "invalid") {
@@ -463,7 +474,7 @@ export class PtyBrokerClient {
 		// Pass the owner field through exactly as given: omitting it makes no ownership
 		// claim, while an explicit `null` says this authenticated frontend cannot attest an
 		// owner and must disarm the watch.
-		return await this.attachRecord(lookup.record, { adopted: true, owner: options.owner });
+		return await this.attachRecord(lookup.record, { adopted: true, owner: options.owner, whileConfirming: options.whileConfirming });
 	}
 
 	/**
@@ -473,19 +484,19 @@ export class PtyBrokerClient {
 	 * kernel identity, the handshake), then an {@link RpcHandle}. A record of another kind is
 	 * `unavailable`: its frames are not the ones an rpc child is spoken to with.
 	 */
-	async attachRpc(slot: string): Promise<RpcAttachOutcome> {
+	async attachRpc(slot: string, options: AttachConcurrency<RpcHandle> = {}): Promise<RpcAttachOutcome> {
 		const lookup = await readPtyRecord(this.options.storageDir, slot);
 		if (lookup.kind === "none") return { state: "unavailable", reason: "no broker is recorded for this slot", handle: null };
 		if (lookup.kind === "invalid") {
 			return { state: "unavailable", reason: `the broker record could not be read: ${lookup.detail}`, handle: null };
 		}
-		return await this.attachRpcRecord(lookup.record, { adopted: true });
+		return await this.attachRpcRecord(lookup.record, { adopted: true, whileConfirming: options.whileConfirming });
 	}
 
 	/** Attach to one known terminal record. See {@link attach} for the rules. */
 	async attachRecord(
 		record: PtyBrokerRecord,
-		options: { readonly adopted?: boolean; readonly owner?: PtyOwnerHint | null } = {},
+		options: { readonly adopted?: boolean; readonly owner?: PtyOwnerHint | null } & AttachConcurrency<PtyHandle> = {},
 	): Promise<PtyAttachOutcome> {
 		if (record.kind === "managed-rpc") {
 			return { state: "unavailable", reason: "the record is a managed-rpc slot; it is attached with attachRpcRecord", handle: null };
@@ -496,6 +507,7 @@ export class PtyBrokerClient {
 		let identity: BrokerIdentityProof;
 		try {
 			await handle.refreshStatus();
+			options.whileConfirming?.(handle);
 			const confirmed = await this.confirmBrokerIdentity(record, handle.statusValue);
 			if (!confirmed.ok) {
 				handle.disconnect();
@@ -532,7 +544,7 @@ export class PtyBrokerClient {
 	}
 
 	/** Attach to one known `managed-rpc` record. See {@link attachRpc}. */
-	async attachRpcRecord(record: PtyBrokerRecord, options: { readonly adopted?: boolean } = {}): Promise<RpcAttachOutcome> {
+	async attachRpcRecord(record: PtyBrokerRecord, options: { readonly adopted?: boolean } & AttachConcurrency<RpcHandle> = {}): Promise<RpcAttachOutcome> {
 		if (record.kind !== "managed-rpc") {
 			return { state: "unavailable", reason: "the record is not a managed-rpc slot", handle: null };
 		}
@@ -557,6 +569,7 @@ export class PtyBrokerClient {
 		try {
 			await handle.refreshStatus();
 			await handle.awaitChildIdentity(CHILD_IDENTITY_WAIT_MS);
+			options.whileConfirming?.(handle);
 			const confirmed = await this.confirmBrokerIdentity(record, handle.statusValue);
 			if (!confirmed.ok) {
 				handle.disconnect();
