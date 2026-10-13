@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: implemented
 date: 2026-10-13
 ---
 
@@ -110,7 +110,7 @@ The recents are the only part that needs host data. The decision, as an additive
 - Opening: the item is resolved to its `SessionTreeItem` through `launcherProvider().itemFor(tabId)` (the path `openProcess` takes for a process row) and passed to `sessionActions.click`, so window switching, ownership refusal and mode follow the existing rules and no second open path exists. A session the tree cannot return gets the same "not listed" message.
 - The page asks when the empty state mounts on a panel route, when the conversation's folder changes and when the route moves from bridge to panel; a late or mismatched reply is dropped by `requestId`. The tree reads activity asynchronously, so a chat that opens on a cold tree would be answered with fewer rows than exist: while the empty state is open and an answer holds fewer than three items, the page asks again at most twice (after 1.5 s and 4 s), then keeps what it has. On a bridge route it sends nothing and shows hints only; a timeout, an empty list or a failure also yields hints only, never an error line.
 - Host wiring touches `src/wiring/guest-dispatcher.ts` (two dependencies or delegating cases and a header line) and `src/extension.ts` (constructing the recents module over `launcherProvider()` and `sessionActions`). Both files belong to the SessionRuntime port work; the lines are agreed with its owner and made by whoever is not editing the file at that moment (recorded in the implementation notes), never written concurrently.
-- Tools output chip compatibility: this design only requires that the page stops sending `omp:chat-tool-detail`. How the host half is retired for an older surviving page that can still send it (keeping the operation classified in the bridge's mutation list and answering "ignored", or a protocol version bump) is decided by the owner of that removal, not here.
+- Tools output chip compatibility: the page stopped sending `omp:chat-tool-detail` (commit 8c98f62) and the runtime-port owner removed the host half (db425b7): the message type and parser, the bridge operation, the dispatcher allow-list entry and the QuickPick. There is no `GUEST_PROTOCOL_VERSION` bump. **Compat note:** a page of an older build that survives an extension-host restart (the bridge keeps a document alive across it) still carries the chip and can send the removed request; the restarted host no longer knows that operation and refuses it, so the chip does nothing there until the window is reloaded. `omp.toolCallDetail` and the host's readback of it to every panel and bridge route are unchanged, so the density can still be changed in Settings.
 
 ### Accessibility
 
@@ -157,6 +157,12 @@ Tests: tests that pinned the old visuals are removed or rewritten (the old check
 ## Decisions recorded by the maintainer
 
 R1 muted 72 %, border 18 %. R2 pitch 26 px, success mark hidden, regular muted name, neutral path with link on hover, workspace-relative Edit path, coloured +N/−N, duplicate title hidden. R3 quiet chips, Send pill with label, neutral disabled Send, one ring on the card. R4 inline code .92em, horizontal-rule tables, 8 px paragraphs. R5 icon-only Copy. R6 tinted bubble. R7 hints plus recents. R8 TODO operation plus task, Agents names. R9 spinner and shimmer. R10 one muted aborted line, sans muted Handed off, one-line provider error. R11 toolbar kept, text Cancel/Stop, flat options. R12 and R13 as proposed. R14 out of scope.
+
+## Implementation
+
+Commits: 62e9cbe (R1, R13), 09562c3 (R4, R5, R6), 48a465d (R2 and the TODO operation part of R8), 8c98f62 (Tools chip removed from the page), 24e6f7d (R3), d80fbe6 (R8 Agents names), eff5d9c (R7 host half: protocol messages, `src/views/recent-sessions.ts`, `src/wiring/recent-sessions.ts`, dispatcher cases and the one `extension.ts` hunk), then the page commit (R7 empty state, R8 Task digest, R9-R12) and the docs commit. Host files owned by the runtime-port work were edited only in small hunks, with that owner's agreement and while it was not editing them.
+
+Differences from the proposal's After pane, with the variants above: see `.omp/workspace/notes/assets/chat-visual-2026-10-13/implemented/README.md` next to the screenshots.
 
 ## Related Decisions
 
