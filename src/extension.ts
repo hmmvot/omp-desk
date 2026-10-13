@@ -74,6 +74,8 @@ import type { LocalSessionRuntimeDeps } from "./runtime/local-runtime";
 import { LocalRecordedStop, createRecordedHostStopPort, readBrokerProvenance } from "./runtime/local-recorded-stop";
 import { LocalWriterVerifier } from "./runtime/local-writer";
 import { LocalTransitions } from "./runtime/local-transition";
+import { RuntimeRecords } from "./runtime/runtime-record";
+import type { ConversationRecord } from "./runtime/runtime-record";
 import type { TransitionWindow } from "./runtime/local-transition";
 import type { ReplaceRefusal, StopResult, TransitionPhase, TransitionToken } from "./runtime/session-runtime";
 import { LocalStopOperations, withSessionReadDeadline } from "./runtime/local-stop";
@@ -419,11 +421,7 @@ interface TabState {
   /** The conversation this editor shows, or `null` for a folder shell. */
   tabId: string | null;
   panel: vscode.WebviewPanel | null;
-  runtime: SessionHostRuntime | null;
   mode: SessionViewMode;
-  /** Admission fence independent of the lifecycle gate and modal dialogs. */
-  transitioning: boolean;
-  nativeWatch: (() => void) | null;
   viewProjection: GuestSessionViewMessage | null;
   /**
    * Which document the bound panel shows: the guest bundle, a bounded explanation while
@@ -464,22 +462,6 @@ interface TabState {
    */
   lastOpenRequest: number;
   lastEditorClose: number;
-  /** Verified host-control channel for this tab, when one is established. */
-  control: {
-    readonly client: HostControlClient;
-    /** Last snapshot read back from the host. */
-    snapshot: ControlHostSnapshot | null;
-    /** Positive local launch capability; absence never permits probing an older server. */
-    readonly activity: boolean;
-    /** Positive local staged-host capability for the additive work response. */
-    readonly work?: boolean;
-    /** Positive local staged-host capability for the registry `subagentWork` request. */
-    readonly subagents?: boolean;
-  } | null;
-  /** Why host control is currently unavailable, shown rather than hidden. */
-  controlFailure: string | null;
-  /** What the terminal pane says when it asks for a writer that ended (killed, crashed): replaces the "not attached" wording. */
-  endedNotice: string | null;
   /** Frontend for a folder shell or the managed native session. */
   pipeline: TerminalPipeline | null;
   /** The folder-shell slot this editor carries, when this tab *is* a folder shell. */
@@ -987,7 +969,11 @@ function sessionActionsDeps(): SessionActionsDeps<TabState> {
     confirmAndStopRuntime,
     withSessionReadDeadline,
     releaseHostControl: (tabId, ownerGeneration) => windowState().sessionRuntime.control.release(tabId, ownerGeneration),
-    reconnectHostControl: (tabId, ownerGeneration, runtime) => windowState().sessionRuntime.control.reconnect(tabId, ownerGeneration, runtime),
+    releaseRuntimeRecord: tabId => windowState().sessionRuntime.records.drop(tabId),
+    reconnectHostControl: async (tabId, ownerGeneration) => {
+      const runtime = windowState().sessionRuntime.records.get(tabId)?.runtime;
+      if (runtime?.kind === "terminal") await windowState().sessionRuntime.control.reconnect(tabId, ownerGeneration, runtime);
+    },
     recordedControlOwner,
     forgetTurnActivity,
     brokerClient,
@@ -1022,6 +1008,7 @@ function guestDispatcherDeps(): GuestDispatcherDeps<TabState> {
     attachChatRoutes,
     rememberPrompt,
     runChatAction,
+    hostedCwd: tabId => windowState().sessionRuntime.records.get(tabId)?.runtime?.cwd ?? null,
     completeFiles: (cwd, query) => findFileMentions(query, {
       cwd,
       findFiles: (include, exclude, maxResults) => vscode.workspace.findFiles(include, exclude, maxResults),
@@ -1064,6 +1051,7 @@ function guestDispatcherDeps(): GuestDispatcherDeps<TabState> {
  */
 function editorPanelsDeps(): EditorPanelsDeps<TabState> {
   return {
+    records: () => windowState().sessionRuntime.records,
     tabs: () => windowState().tabs,
     tab: stateOf,
     tabState,
@@ -1504,12 +1492,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     return {
       folder: entry.cwd,
       profile: entry.scope.profile ?? DEFAULT_OMP_PROFILE,
-      executable: await executableFor(stateOf(tabId)?.runtime ?? null),
+      executable: await executableFor(hostOf(stateOf(tabId)) ?? null),
       sessionLabel: entry.title ?? "launching Chat",
       ...(session === null ? {} : {
         applyDefault: settingsSessionApply(session, () => {
           const current = index.get(tabId);
-          return s.sessionRuntime.sessionOf(tabId) === session && stateOf(tabId)?.mode !== "terminal" && stateOf(tabId)?.transitioning !== true
+          return s.sessionRuntime.sessionOf(tabId) === session && stateOf(tabId)?.mode !== "terminal" && fencedOf(stateOf(tabId)) !== true
             && current !== null && current.cwd === entry.cwd && current.scope.profile === entry.scope.profile;
         }),
       }),
@@ -2004,7 +1992,7 @@ async function newSessionInPlace(context: vscode.ExtensionContext, index: Sessio
   }
   if (s.replacingConversations.has(tabId)) { showWarning("This conversation is already being replaced."); return; }
   s.replacingConversations.add(tabId);
-  const runtime = state.runtime;
+  const runtime = hostOf(state);
   const token = beginTransition(tabId, { check: () => true });
   let opened = false;
   try {
@@ -2020,7 +2008,7 @@ async function newSessionInPlace(context: vscode.ExtensionContext, index: Sessio
         return;
       }
     }
-    if (state.tabId === tabId && state.panel === panel && state.runtime === null) panel.dispose();
+    if (state.tabId === tabId && state.panel === panel && hostOf(state) === null) panel.dispose();
   } catch (error) {
     showError(`${opened ? "The new session opened, but the old session could not be stopped" : "The session could not be replaced"}: ${messageOf(error)}`);
   } finally {
@@ -2123,7 +2111,7 @@ async function openSession(
     state = stateOf(tabId);
   }
   const panel = state?.panel ?? null;
-  if (panel !== null && state?.runtime != null) {
+  if (panel !== null && hostOf(state) != null) {
     await revealExistingTab(index, tabId, panel);
     return true;
   }
@@ -2476,7 +2464,7 @@ async function pickFolderHistoryCandidate(
   for (const state of s.tabs.values()) {
     if (state.tabId === null) continue;
     if (state.panel !== null) open.add(state.tabId);
-    if (state.runtime !== null) running.add(state.tabId);
+    if (hostOf(state) !== null) running.add(state.tabId);
   }
   let remaining = [...scan.candidates];
   const rows = (): FolderHistoryPickItem[] =>
@@ -2729,7 +2717,7 @@ async function openFolderHistoryCandidate(
   // row is what the index refuses as a duplicate, and a second panel would be a
   // second guest for one seat.
   const openPanel = stateOf(entry.tabId)?.panel ?? null;
-  if (openPanel !== null && stateOf(entry.tabId)?.runtime != null) {
+  if (openPanel !== null && hostOf(stateOf(entry.tabId)) != null) {
     showInfo(`"${candidateLabel(candidate)}" is already open in this window.`);
     await revealExistingTab(index, entry.tabId, openPanel);
     return;
@@ -2846,7 +2834,7 @@ async function editorSettled(slot: string, tabId: string): Promise<void> {
   for (;;) {
     const state = s.tabs.get(slot);
     if (state === undefined || state.panel === null) return;
-    if (!state.transitioning && !s.openingTabs.has(tabId) && passiveReasonForSlot(slot) === null) return;
+    if (!fencedOf(state) && !s.openingTabs.has(tabId) && passiveReasonForSlot(slot) === null) return;
     if (Date.now() >= deadline) return;
     await new Promise<void>(resolve => setTimeout(resolve, 50));
   }
@@ -2888,10 +2876,10 @@ async function openTab(
   // A chat whose process ended shows the ended state before its exit cleanup is finished, and offers Resume at once. A click
   // in that gap would find the dead runtime still in place, take the session for one already running here and start nothing,
   // so every open waits for the cleanup of the runtime that ended, then for the tab's queued lifecycle work (src/host/runtime-settle.ts).
-  const ending = stateOf(tabId)?.runtime ?? null;
+  const ending = hostOf(stateOf(tabId)) ?? null;
   if (ending !== null && ending.kind === "chat" && s.sessionRuntime.conversations.stateOf(tabId)?.phase === "stopped") {
     const settled = await awaitEndedRuntimeCleanup({
-      holdsEndedRuntime: () => stateOf(tabId)?.runtime === ending,
+      holdsEndedRuntime: () => hostOf(stateOf(tabId)) === ending,
       drainLifecycle: () => index.lifecycle.run(tabId, async () => undefined),
       pause: ms => delayMs(ms),
       now: () => Date.now(),
@@ -2926,11 +2914,11 @@ async function openTab(
       if (published !== null) await revealExistingTab(index, tabId, published);
     }
     const published = stateOf(tabId);
-    if (!keepLiveView && mode !== undefined && published?.runtime != null && published.mode !== mode) await switchSessionMode(context, index, published, mode);
+    if (!keepLiveView && mode !== undefined && published !== undefined && hostOf(published) != null && published.mode !== mode) await switchSessionMode(context, index, published, mode);
     return;
   }
   const state = stateOf(tabId) ?? null;
-  if (state !== null && state.panel !== null && state.runtime !== null) {
+  if (state !== null && state.panel !== null && hostOf(state) !== null) {
     // This window already runs this session, so nothing native is attempted — but the
     // editor showing it must still end up controlling it, in case its election was
     // refused earlier (before this window held the writer) and never retried.
@@ -2949,7 +2937,7 @@ async function openTab(
   const published = stateOf(tabId);
   if (published !== undefined) {
     pushSessionView(index, published);
-    if (!keepLiveView && mode !== undefined && published.runtime !== null && published.mode !== mode) await switchSessionMode(context, index, published, mode);
+    if (!keepLiveView && mode !== undefined && hostOf(published) !== null && published.mode !== mode) await switchSessionMode(context, index, published, mode);
   }
 }
 
@@ -2980,7 +2968,7 @@ async function openTabOnce(
     // facts rather than from the pass's own failure, which says nothing about who
     // owns the session.
     const connected = stateOf(tabId)?.panel ?? null;
-    const runtime = stateOf(tabId)?.runtime ?? null;
+    const runtime = hostOf(stateOf(tabId)) ?? null;
     if (verb !== "resumed" && connected !== null && runtime !== null) {
       await revealExistingTab(index, tabId, connected);
       return;
@@ -2988,7 +2976,7 @@ async function openTabOnce(
   }
   let stoppedForOpen = false;
   const recorded = index.get(tabId);
-  if (intent === "explicit" && stateOf(tabId)?.runtime == null && recorded?.host != null && !isManagedHost(recorded.host) && (verb === "resumed" || verb === "opened")) {
+  if (intent === "explicit" && hostOf(stateOf(tabId)) == null && recorded?.host != null && !isManagedHost(recorded.host) && (verb === "resumed" || verb === "opened")) {
     const pid = await s.sessionRuntime.verifiedWriterPid(tabId);
     if (pid !== null) {
       const label = "Stop and Open";
@@ -3005,7 +2993,7 @@ async function openTabOnce(
   // an explicit attempt that can launch a writer asks first (a Resume, or an Open of a row whose
   // run intent is not stopped), and OMP then saves to a sibling file (ADR-0046). A stopped row's
   // plain Open and history views start no writer here, so they never ask.
-  if (intent === "explicit" && (verb === "resumed" || recorded?.runIntent !== "stopped") && !externalConfirmed && stateOf(tabId)?.runtime == null) {
+  if (intent === "explicit" && (verb === "resumed" || recorded?.runIntent !== "stopped") && !externalConfirmed && hostOf(stateOf(tabId)) == null) {
     const fresh = await launcherOwnershipFacts(index, tabId, { fresh: true });
     if (fresh.externalOmp === true && !(await confirmOpenAnyway())) {
       s.launcherProvider?.refreshOwnership(new Set([tabId]));
@@ -3018,7 +3006,8 @@ async function openTabOnce(
     return;
   }
   const opening = tabState(tabId);
-  if (opening.runtime !== null) opening.mode = opening.runtime.kind;
+  const opened = hostOf(opening);
+  if (opened !== null) opening.mode = opened.kind;
   else if (requestedMode !== undefined) opening.mode = requestedMode;
   else if (opening.panel === null) opening.mode = intent === "restored" || s.bridgeLiveEditors.has(opening.slotId)
     ? index.slotBinding(opening.slotId)?.mode ?? defaultSessionMode(context)
@@ -3039,7 +3028,7 @@ async function openTabOnce(
     refreshLauncher();
   }
   const openedState = stateOf(tabId);
-  if (openedState?.runtime != null) {
+  if (openedState !== undefined && hostOf(openedState) != null) {
     await electLocalController(index, tabId);
     pushSessionView(index, openedState);
     return;
@@ -3093,7 +3082,8 @@ function createSessionRuntime(index: SessionIndex, chat: ChatRuntime): LocalSess
 }
 
 /** The ports of this window's session runtime; read at call time, so a replaced reconciler, launcher or root probe is used by the next call. */
-function sessionRuntimeDeps(index: SessionIndex, chat: ChatRuntime, launchers?: () => OmpHostLauncher): LocalSessionRuntimeDeps {
+function sessionRuntimeDeps(index: SessionIndex, chat: ChatRuntime, launchers?: () => OmpHostLauncher, held?: RuntimeRecords): LocalSessionRuntimeDeps {
+  const records = held ?? new RuntimeRecords(record => slotState(record.slotId)?.pipeline ?? null);
   const stop = new LocalStopOperations({
     chat: () => chat,
     attachBrokerClient,
@@ -3101,15 +3091,15 @@ function sessionRuntimeDeps(index: SessionIndex, chat: ChatRuntime, launchers?: 
     log,
   });
   const control = new LocalHostControl({
-    index, window: controlWindow(index), store: controlStore(),
+    index, records, window: controlWindow(index), store: controlStore(),
     chat: () => chat, diagnostics: () => windowState().diagnostics, log, attempts: windowState().hostControlAttempts,
   });
-  const identity = new LocalIdentity({ index, window: identityWindow(index), log });
+  const identity = new LocalIdentity({ index, records, window: identityWindow(index), log });
   const exit = new LocalExitOperations({
-    index, window: exitWindow(index), control, stop, attachBrokerClient, brokerSlots: () => windowState().brokerSlots, log,
+    index, records, window: exitWindow(index), control, stop, attachBrokerClient, brokerSlots: () => windowState().brokerSlots, log,
   });
   const nativeWatch = new LocalNativeWatch({
-    index, window: nativeWatchWindow(index), control, exit, identity,
+    index, records, window: nativeWatchWindow(index), control, exit, identity,
     reconciler: () => windowState().reconciler, brokerSlots: () => windowState().brokerSlots, log,
   });
   const brokerProvenance = (conversation: string): BrokerSlotProvenance => readBrokerProvenance({
@@ -3119,7 +3109,7 @@ function sessionRuntimeDeps(index: SessionIndex, chat: ChatRuntime, launchers?: 
   const writer = new LocalWriterVerifier({
     index, reconciler: () => windowState().reconciler,
     window: {
-      runtimePid: conversation => stateOf(conversation)?.runtime?.pid ?? null,
+      runtimePid: conversation => records.get(conversation)?.runtime?.pid ?? null,
       holderMayBeAlive: (claim, display) => display ? holderSeemsAlive(claim, windowState().routing.registry()) : claimHolderMayBeAlive(claim),
     },
   });
@@ -3134,10 +3124,11 @@ function sessionRuntimeDeps(index: SessionIndex, chat: ChatRuntime, launchers?: 
     return localLauncher(context, index);
   });
   const transitions = new LocalTransitions({
-    index, window: transitionWindow(index), chat, stop, control, exit, writer, attachBrokerClient, launcher, log,
+    index, records, window: transitionWindow(index), chat, stop, control, exit, writer, attachBrokerClient, launcher, log,
   });
   return {
     index,
+    records,
     reconciler: () => windowState().reconciler,
     launcher,
     chat, stop, control, identity, nativeWatch, exit, writer, recorded, brokerProvenance, transitions,
@@ -3160,6 +3151,8 @@ const transitionChecks = new WeakMap<TransitionToken, TransitionChecks>();
 /** Raise the admission fence of a conversation for one flow, with the checks it makes under the gate. */
 function beginTransition(conversation: string, checks: TransitionChecks): TransitionToken {
   const sessionRuntime = windowState().sessionRuntime;
+  const shown = stateOf(conversation);
+  if (shown !== undefined && shown.tabId !== null) recordFor(shown);
   const token = sessionRuntime.beginTransition({ conversation, target: sessionRuntime.snapshot(conversation)?.attachment ?? null });
   transitionChecks.set(token, checks);
   return token;
@@ -3168,7 +3161,6 @@ function beginTransition(conversation: string, checks: TransitionChecks): Transi
 /** The window's side of the gated transitions: the fence's projection onto the editors, the flow's own checks, the frontends and memories a stop ends. */
 function transitionWindow(index: SessionIndex): TransitionWindow {
   return {
-    record: tabId => stateOf(tabId),
     fenced(conversation) {
       const state = stateOf(conversation);
       if (state === undefined) refreshGuestContext();
@@ -3188,7 +3180,7 @@ function transitionWindow(index: SessionIndex): TransitionWindow {
 /** The window's side of Kill: what it reads of this window's runtime copy and the surfaces it reports through. */
 function killWindow(index: SessionIndex): KillWindow {
   return {
-    runtimeIdentity: tabId => stateOf(tabId)?.runtime?.identity ?? null,
+    runtimeIdentity: tabId => hostOf(stateOf(tabId))?.identity ?? null,
     forgetOutcome: tabId => { windowState().outcomes.delete(tabId); },
     readRows: async () => (await windowState().sessionProcesses?.refresh())?.rows ?? [],
     launcherChanged: () => refreshLauncher(),
@@ -3201,9 +3193,35 @@ function killWindow(index: SessionIndex): KillWindow {
   };
 }
 
-/** The window's tab record behind a runtime record: the runtime only ever holds the window's own `TabState` objects. */
+/** The editor's tab record behind a runtime record: the one under the slot the record says serves its conversation. */
 function tabRecord(record: RuntimeRecord): TabState {
-  return record as TabState;
+  return slotState(record.slotId) ?? tabState(record.slotId);
+}
+
+/** What the runtime holds for the conversation an editor shows; `undefined` for a folder shell and for an editor that never hosted one. */
+function recordOf(state: { readonly tabId: string | null } | null | undefined): ConversationRecord | undefined {
+  return state === null || state === undefined ? undefined : windowState().sessionRuntime.records.get(state.tabId);
+}
+
+/** The runtime's record of the conversation an editor shows, created for the editor on first use. */
+function recordFor(state: TabState): ConversationRecord {
+  if (state.tabId === null) throw new Error("A folder shell hosts no conversation.");
+  return windowState().sessionRuntime.records.acquire(state.tabId, state.slotId);
+}
+
+/** The process this window runs for the editor's conversation. */
+function hostOf(state: { readonly tabId: string | null } | null | undefined): SessionHostRuntime | null {
+  return recordOf(state)?.runtime ?? null;
+}
+
+/** The verified host-control channel of the editor's conversation. */
+function controlOf(state: { readonly tabId: string | null } | null | undefined): ConversationRecord["control"] {
+  return recordOf(state)?.control ?? null;
+}
+
+/** Whether the conversation's admission fence is up. */
+function fencedOf(state: { readonly tabId: string | null } | null | undefined): boolean {
+  return recordOf(state)?.transitioning === true;
 }
 
 /** Where this window keeps host-control material: the profile's global state and secret storage, read at call time. */
@@ -3226,7 +3244,6 @@ function controlStore(): ControlStore {
 /** The window's side of host control (design §2.5): what a published channel starts on this side. */
 function controlWindow(index: SessionIndex): ControlWindow {
   return {
-    record: tabId => stateOf(tabId),
     published(tabId, client, subagents) {
       const s = windowState();
       if (subagents) watchSubagentWork(index, tabId, client);
@@ -3240,7 +3257,6 @@ function controlWindow(index: SessionIndex): ControlWindow {
 /** The window's side of identity binding: what a bound file changes in the tab and the document. */
 function identityWindow(index: SessionIndex): IdentityWindow {
   return {
-    record: tabId => stateOf(tabId),
     bound(tabId) {
       const s = windowState();
       void applyChatTabAppearance(s.context as vscode.ExtensionContext, index, tabId);
@@ -3256,7 +3272,6 @@ function identityWindow(index: SessionIndex): IdentityWindow {
 /** The window's side of the end of a process: its terminal pane, views, launcher and notifications. */
 function exitWindow(index: SessionIndex): ExitWindow {
   return {
-    record: tabId => stateOf(tabId),
     activated: () => windowState().context !== undefined,
     fence: (record, on) => fenceSessionAdmission(index, tabRecord(record), on),
     forgetOutcome: tabId => { windowState().outcomes.delete(tabId); },
@@ -3277,8 +3292,6 @@ function exitWindow(index: SessionIndex): ExitWindow {
 /** The window's side of the native watch: completion notices, turn activity and the editor that follows a handover. */
 function nativeWatchWindow(index: SessionIndex): NativeWatchWindow {
   return {
-    record: tabId => stateOf(tabId),
-    records: () => windowState().tabs.values(),
     activated: () => windowState().context !== undefined,
     view: record => pushSessionView(index, tabRecord(record)),
     observer(record, runtime) {
@@ -3383,11 +3396,11 @@ function launcherWindow(context: vscode.ExtensionContext, index: SessionIndex): 
     adopt(tabId, runtime) {
       cancelControlPicker(tabId);
       const state = tabState(tabId);
-      state.runtime = runtime;
-      state.endedNotice = null;
+      recordFor(state).runtime = runtime;
+      recordFor(state).endedNotice = null;
       state.mode = runtime.kind;
     },
-    isCurrent: (tabId, runtime) => stateOf(tabId)?.runtime === runtime,
+    isCurrent: (tabId, runtime) => hostOf(stateOf(tabId)) === runtime,
     async prepareView(tabId, runtime) {
       const s = windowState();
       const state = tabState(tabId);
@@ -3409,11 +3422,11 @@ function launcherWindow(context: vscode.ExtensionContext, index: SessionIndex): 
       const s = windowState();
       const state = tabState(tabId);
       if (runtime.kind === "terminal") {
-        s.sessionRuntime.nativeWatch.start(state, runtime);
+        s.sessionRuntime.nativeWatch.start(recordFor(state), runtime);
         refreshGuestContext();
         return;
       }
-      if (state.transitioning) s.sessionRuntime.sessionOf(tabId)?.setMutationFence("Session lifecycle transition.");
+      if (fencedOf(state)) s.sessionRuntime.sessionOf(tabId)?.setMutationFence("Session lifecycle transition.");
       attachChatRoutes(tabId, true);
     },
     notice: (level, text) => { if (level === "error") showError(text); else showWarning(text); },
@@ -3487,7 +3500,7 @@ async function openSessionInMode(context: vscode.ExtensionContext, index: Sessio
   if (state?.panel != null) {
     await revealExistingTab(index, target.tabId, state.panel);
     // A launch another window asked for never changes the view of a session that is live here, even one that went live while this waited.
-    if (revealIfLive && (state.runtime !== null || launcherFacts(target.tabId).running)) return;
+    if (revealIfLive && (hostOf(state) !== null || launcherFacts(target.tabId).running)) return;
     await switchSessionMode(context, index, state, mode, false, revealIfLive);
     return;
   }
@@ -3499,7 +3512,7 @@ async function openSessionInMode(context: vscode.ExtensionContext, index: Sessio
 }
 
 function sessionAdmissionReason(state: TabState): string | null {
-  if (state.transitioning) return "The session view is changing or its process is stopping.";
+  if (fencedOf(state)) return "The session view is changing or its process is stopping.";
   if (state.mode === "terminal") return "Chat commands are unavailable in Terminal; use the native TUI.";
   return passiveReasonForSlot(state.slotId);
 }
@@ -3509,11 +3522,12 @@ function pushSessionView(index: SessionIndex | null, state: TabState, force = fa
   if (state.tabId === null) return;
   const entry = index?.get(state.tabId) ?? null;
   const title = entry === null ? "OMP session" : sessionHeadline(entry, null);
-  const running = state.runtime !== null;
+  const hosted = hostOf(state);
+  const running = hosted !== null;
   const starting = state.mode === "terminal" && (s.openingTabs.has(state.tabId) || (!running && s.pendingSessionViewChanges.has(state)));
-  const stopping = state.transitioning || (state.runtime?.kind === "terminal" && state.runtime.stopping);
+  const stopping = fencedOf(state) || (hosted?.kind === "terminal" && hosted.stopping);
   const canSwitch = !stopping && !s.pendingSessionViewChanges.has(state) && state.panel !== null && passiveReasonForSlot(state.slotId) === null && !s.openingTabs.has(state.tabId);
-  const reason = starting ? null : state.controlFailure ?? (stopping ? "OMP is restarting or stopping this session. It can be used again once the old process has exited." : null);
+  const reason = starting ? null : (recordOf(state)?.controlFailure ?? null) ?? (stopping ? "OMP is restarting or stopping this session. It can be used again once the old process has exited." : null);
   const previous = state.viewProjection;
   if (!force && previous !== null && previous.mode === state.mode && previous.title === title && previous.running === running && previous.starting === starting && previous.stopping === stopping && previous.canSwitch === canSwitch && previous.reason === reason) return;
   const message: GuestSessionViewMessage = { type: "omp:session-view", mode: state.mode, title, running, starting, stopping, canSwitch, reason };
@@ -3529,7 +3543,7 @@ function activateNativeEditor(state: TabState): void {
 }
 
 function fenceSessionAdmission(index: SessionIndex, state: TabState, fenced: boolean): void {
-  state.transitioning = fenced;
+  recordFor(state).transitioning = fenced;
   if (state.tabId !== null) windowState().sessionRuntime.sessionOf(state.tabId)?.setMutationFence(fenced ? "Session lifecycle transition." : null);
   projectFence(index, state);
 }
@@ -3545,17 +3559,17 @@ function projectFence(index: SessionIndex, state: TabState): void {
 /** One editor, one held claim, positively non-overlapping exact root generations. */
 async function switchSessionMode(context: vscode.ExtensionContext, index: SessionIndex, state: TabState, mode: SessionViewMode, reload = false, keepLiveView = false): Promise<void> {
   const s = windowState();
-  if (state.tabId === null || state.panel === null || state.transitioning || passiveReasonForSlot(state.slotId) !== null || s.openingTabs.has(state.tabId)) {
+  if (state.tabId === null || state.panel === null || fencedOf(state) || passiveReasonForSlot(state.slotId) !== null || s.openingTabs.has(state.tabId)) {
     showWarning("This editor cannot change views while the session is starting or stopping, or another editor controls it.");
     return;
   }
   s.editorEventSequence += 1;
   const modeRequest = state.lastOpenRequest = s.editorEventSequence;
-  const runtime = state.runtime;
+  const runtime = hostOf(state);
   if (runtime === null) {
     s.pendingSessionViewChanges.set(state, modeRequest);
     state.mode = mode;
-    state.controlFailure = null;
+    recordFor(state).controlFailure = null;
     pushSessionView(index, state);
     try {
       await index.setEditorMode(state.slotId, mode);
@@ -3574,10 +3588,10 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
     if (runtime.kind === "terminal") {
       try {
         await runtime.handle.refreshStatus();
-        if (state.runtime !== runtime || state.panel === null) return;
+        if (hostOf(state) !== runtime || state.panel === null) return;
         if (runtime.handle.state === "exited") {
-          await s.sessionRuntime.exit.nativeExited(state, runtime);
-          if (state.runtime === null) await switchSessionMode(context, index, state, mode);
+          await s.sessionRuntime.exit.nativeExited(recordFor(state), runtime);
+          if (hostOf(state) === null) await switchSessionMode(context, index, state, mode);
           else showWarning("This Terminal has stopped but could not be reopened safely. Use Stop in Processes, then open the session again.");
           return;
         }
@@ -3608,25 +3622,26 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
       // Control publication needs the gate: join initialization outside it.
       const panel = state.panel;
       await withSessionReadDeadline(pending);
-      if (state.lastOpenRequest !== modeRequest || state.runtime !== runtime || state.tabId !== tabId || state.panel !== panel ||
+      if (state.lastOpenRequest !== modeRequest || hostOf(state) !== runtime || state.tabId !== tabId || state.panel !== panel ||
           passiveReasonForSlot(state.slotId) !== null || s.openingTabs.has(tabId) ||
           (runtime.kind === "chat" && s.sessionRuntime.sessionOf(tabId) !== session)) return;
     }
-    if (runtime.kind === "terminal" && state.control !== null) {
+    const control = controlOf(state);
+    if (runtime.kind === "terminal" && control !== null) {
       try {
-        const observed = await withSessionReadDeadline(state.control.client.nativeState());
+        const observed = await withSessionReadDeadline(control.client.nativeState());
         runtime.observed = observed;
-        if (observed.available) await s.sessionRuntime.nativeWatch.observe(state, runtime, observed);
+        if (observed.available) await s.sessionRuntime.nativeWatch.observe(recordFor(state), runtime, observed);
       } catch { /* Unavailable control is refused at the fenced boundary below. */ }
     }
-    if (state.tabId !== tabId || state.lastOpenRequest !== modeRequest || state.runtime !== runtime || passiveReasonForSlot(state.slotId) !== null) return;
+    if (state.tabId !== tabId || state.lastOpenRequest !== modeRequest || hostOf(state) !== runtime || passiveReasonForSlot(state.slotId) !== null) return;
     const binding = index.slotBinding(state.slotId);
     if (binding === null || binding.tabId !== tabId) return;
     const held = token = beginTransition(tabId, {
       check: () => state.lastOpenRequest === modeRequest && passiveReasonForSlot(state.slotId) === null,
       async prepare() {
         state.mode = mode;
-        state.controlFailure = null;
+        recordFor(state).controlFailure = null;
         pushSessionView(index, state);
         state.document = null;
         if (state.bridge !== null) await windowState().bridgeHost.prepareDocument(context, state.bridge.editorId);
@@ -3638,7 +3653,7 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
     if (captured === null) {
       // The facts of a session whose process already ended (killed from outside, crashed) cannot be read: end it as its exit
       // would and take the request as one for a stopped session, which Resumes it in the requested view.
-      if (state.lastOpenRequest === modeRequest && await s.sessionRuntime.endEnded(state, runtime)) {
+      if (state.lastOpenRequest === modeRequest && await s.sessionRuntime.endEnded(recordFor(state), runtime)) {
         await switchSessionMode(context, index, state, mode, false, keepLiveView);
         return;
       }
@@ -3677,7 +3692,7 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
       case "replaced": replacement = result.outcome; break;
       case "failed": throw new Error(result.detail);
       case "unconfirmed":
-        state.controlFailure = result.detail;
+        recordFor(state).controlFailure = result.detail;
         showWarning(result.detail);
         break;
       case "closed": showError("The durable session file disappeared after disposal; no replacement was started."); break;
@@ -3693,14 +3708,15 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
     if (!superseded) state.lastOpenRequest = ++s.editorEventSequence;
     log(`tab ${tabId}: view switch failed: ${messageOf(error)}`);
     // A read or an abort that timed out on a process that already ended is not a failed switch: finish it as a Resume.
-    if (!superseded && !acceptedStop && state.runtime === runtime && await s.sessionRuntime.endEnded(state, runtime)) {
+    if (!superseded && !acceptedStop && hostOf(state) === runtime && await s.sessionRuntime.endEnded(recordFor(state), runtime)) {
       await switchSessionMode(context, index, state, mode, false, keepLiveView);
       return;
     }
-    state.controlFailure = acceptedStop
+    const failure = acceptedStop
       ? "The view switch could not finish because the session has not been confirmed stopped. Use Stop Session to recover."
       : "The view switch could not finish. The current view is still available; try switching again.";
-    showWarning(state.controlFailure);
+    recordFor(state).controlFailure = failure;
+    showWarning(failure);
   } finally {
     if (carried !== null && state.document === carried.document) {
       s.guestDispatcher.releaseCarriedDraft(carried);
@@ -3711,12 +3727,12 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
     else pushSessionView(index, state);
     refreshGuestContext();
     refreshLauncher();
-    if (acceptedStop && state.runtime === runtime) {
+    if (acceptedStop && hostOf(state) === runtime) {
       void vscode.window.showWarningMessage(
         "The session is still stopping. Stop it before trying the view switch again.",
         "Stop Session",
       ).then(action => {
-        if (action === "Stop Session" && state.runtime === runtime) return s.sessionActions.stopHost(context, index, tabId);
+        if (action === "Stop Session" && hostOf(state) === runtime) return s.sessionActions.stopHost(context, index, tabId);
       }).then(undefined, error => {
         log(`tab ${tabId}: view switch recovery failed: ${messageOf(error)}`);
         showWarning("The session could not be stopped from this editor. Use Stop in Processes, then reopen the session.");
@@ -3743,7 +3759,7 @@ function viewSwitchRefusal(code: ReplaceRefusal, detail: string | undefined): st
 async function restartChat(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, nativeNonce: string): Promise<void> {
   const s = windowState();
   const state = stateOf(tabId);
-  const runtime = state?.runtime;
+  const runtime = hostOf(state);
   const session = s.sessionRuntime.sessionOf(tabId);
   const row = index.get(tabId);
   const binding = state === undefined ? null : index.slotBinding(state.slotId);
@@ -3755,7 +3771,7 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
       session.epoch.nonce !== nativeNonce || state.mode !== "chat" || document?.kind !== "guest" || panel == null ||
       row?.sessionFile == null || row.sessionId === null || binding === null || committed === null ||
       runtime.identity.childCreationTime === null || passiveReasonForSlot(state.slotId) !== null ||
-      state.transitioning || s.pendingSessionViewChanges.has(state) || s.openingTabs.has(tabId)) {
+      fencedOf(state) || s.pendingSessionViewChanges.has(state) || s.openingTabs.has(tabId)) {
     refuse("Restart requires this controlling Chat editor, an OMP process that does not answer or no longer serves this conversation, and its exact saved conversation. Nothing was stopped.");
     return;
   }
@@ -3774,7 +3790,7 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
     const current = index.get(tabId);
     const currentBinding = index.slotBinding(state.slotId);
     const currentCommitted = restartBinding(index, tabId);
-    return stateOf(tabId) === state && state.runtime === runtime && state.tabId === tabId &&
+    return stateOf(tabId) === state && hostOf(state) === runtime && state.tabId === tabId &&
       state.lastOpenRequest === modeRequest && state.panel === panel && state.document === document &&
       state.mode === "chat" && passiveReasonForSlot(state.slotId) === null &&
       currentBinding?.generation === binding.generation && currentBinding.role === "controlling" &&
@@ -3794,7 +3810,7 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
     check: phase => sameTarget(phase !== "stopped"),
     async prepare() {
       s.draftRestores.set(state.slotId, carried as CarriedDraft<TabState>);
-      state.controlFailure = null;
+      recordFor(state).controlFailure = null;
       state.document = null;
       if (state.bridge !== null) await windowState().bridgeHost.prepareDocument(context, state.bridge.editorId);
       windowState().editorPanels.renderPanelDocument(context, state.slotId);
@@ -3833,7 +3849,7 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
       case "failed": throw new Error(result.detail);
       case "unconfirmed": {
         const text = "The exact OMP process could not be confirmed stopped. No successor was started; your original input remains here. Use Stop Session before retrying.";
-        state.controlFailure = text;
+        recordFor(state).controlFailure = text;
         refuse(text);
         break;
       }
@@ -3847,12 +3863,13 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
     if (replacement !== null) await handleRestoreOutcome(context, index, tabId, replacement);
   } catch (error) {
     log(`tab ${tabId}: explicit Restart failed: ${messageOf(error)}`);
-    state.controlFailure = writerGone
+    const failure = writerGone
       ? "The old process stopped, but Restart could not finish. The saved conversation and captured input are kept; reopen this session to recover."
       : stopRequested
         ? "Restart could not confirm that the old process stopped. No successor was started; your input is kept. Use Stop Session to recover."
         : "Restart could not finish. Nothing was stopped; your input is kept.";
-    refuse(state.controlFailure);
+    recordFor(state).controlFailure = failure;
+    refuse(failure);
   } finally {
     if (carried !== null && state.document === document) {
       s.guestDispatcher.releaseCarriedDraft(carried);
@@ -3876,7 +3893,7 @@ function restartBinding(index: SessionIndex, tabId: string): BridgeNativeBinding
   const recorded = state?.bridge?.endpoint.committedBinding() ?? null;
   if (recorded !== null) return recorded;
   const entry = index.get(tabId);
-  const runtime = state?.runtime;
+  const runtime = hostOf(state);
   if (entry === null || runtime?.kind !== "chat" || entry.ownership === null || entry.ownership.releasedAt !== null ||
       entry.sessionFile === null || entry.sessionId === null || runtime.identity.childCreationTime === null) return null;
   return {
@@ -4651,7 +4668,7 @@ function handleBridgeRequest(
   if (request.operation.startsWith("terminal-")) {
     const object = payload as Record<string, unknown>;
     const parsed = parseGuestWebviewMessage({ ...object, type: `omp:${request.operation}` });
-    if (parsed === null || !route.dispatchable || state.runtime?.kind !== "terminal" || state.mode !== "terminal" || windowState().bridgeHost.liveBinding(tabId) === null) {
+    if (parsed === null || !route.dispatchable || hostOf(state)?.kind !== "terminal" || state.mode !== "terminal" || windowState().bridgeHost.liveBinding(tabId) === null) {
       refuseBridgeRequest(session, route.routeGeneration, request.requestId);
       return;
     }
@@ -5041,7 +5058,7 @@ async function runChatAction(context: vscode.ExtensionContext, index: SessionInd
   const s = windowState();
   if (command === "provider-login") {
     const entry = index.get(tabId);
-    await openProviderLogin(stateOf(tabId)?.runtime ?? null, entry?.scope.profile ?? null,
+    await openProviderLogin(hostOf(stateOf(tabId)) ?? null, entry?.scope.profile ?? null,
       entry?.cwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir());
     return;
   }
@@ -5370,8 +5387,8 @@ function sendCandidates(context: vscode.ExtensionContext, index: SessionIndex): 
       tabId: entry.tabId,
       slotId: tab !== undefined && editorOpen ? tab.slotId : null,
       title: tab?.panel?.title ?? sessionHeadline(entry, null),
-      cwd: tab?.runtime?.cwd ?? entry.cwd,
-      mode: tab?.runtime?.kind ?? tab?.mode ?? defaultSessionMode(context),
+      cwd: hostOf(tab)?.cwd ?? entry.cwd,
+      mode: hostOf(tab)?.kind ?? tab?.mode ?? defaultSessionMode(context),
       stateLabel: sessionStateLabel(state),
       availability,
     });
@@ -5511,14 +5528,14 @@ async function deliverInsertion(
   for (;;) {
     const state = stateOf(tabId);
     const panel = state?.panel ?? null;
-    if (state !== undefined && panel !== null && state.document?.kind === "guest" && !state.transitioning
+    if (state !== undefined && panel !== null && state.document?.kind === "guest" && !fencedOf(state)
       && passiveReasonForSlot(state.slotId) === null && launcherFacts(tabId).running) {
       if (s.turnActivities.get(tabId)?.pendingRequest != null) return { ok: false, reason: "The session is waiting for your answer, which covers its input." };
       if (!revealed) {
         revealed = true;
         if (!panel.active) panel.reveal(undefined, false);
       }
-      const composed = composeInsertion(sources, state.runtime?.cwd ?? entryCwd);
+      const composed = composeInsertion(sources, hostOf(state)?.cwd ?? entryCwd);
       if (!composed.ok) return { ok: false, reason: composed.reason };
       const { text, summary } = composed;
       if (state.mode === "chat") {
@@ -5655,7 +5672,7 @@ function refreshGuestContext(): void {
   const activity = visible === null ? undefined : s.turnActivities.get(visible.tabId);
   const mode = visible?.mode ?? "";
   void vscode.commands.executeCommand("setContext", "omp.sessionMode", mode);
-  void vscode.commands.executeCommand("setContext", "omp.sessionTransitionPending", visible !== null && (visible.transitioning || s.pendingSessionViewChanges.has(visible)));
+  void vscode.commands.executeCommand("setContext", "omp.sessionTransitionPending", visible !== null && (fencedOf(visible) || s.pendingSessionViewChanges.has(visible)));
   void vscode.commands.executeCommand("setContext", STREAMING_CONTEXT, mode === "chat" && activity?.streaming === true);
   void vscode.commands.executeCommand(
     "setContext",
@@ -5691,11 +5708,11 @@ function watchSubagentWork(index: SessionIndex, tabId: string, client: HostContr
   let inFlight = false;
   const timer = setInterval(() => {
     if (inFlight) return;
-    if (stateOf(tabId)?.control?.client !== client || !isOpenControlClient(client)) { stopSubagentWatch(index, tabId); return; }
+    if (controlOf(stateOf(tabId))?.client !== client || !isOpenControlClient(client)) { stopSubagentWatch(index, tabId); return; }
     inFlight = true;
     void client.subagentWork().then(active => {
       failures = 0;
-      if (stateOf(tabId)?.control?.client === client) setSubagentWork(index, tabId, active);
+      if (controlOf(stateOf(tabId))?.client === client) setSubagentWork(index, tabId, active);
     }, error => {
       if (++failures < SUBAGENT_WORK_MAX_FAILURES) return;
       log(`tab ${tabId}: subagent work observation stopped (${describeControlError(error)})`);
@@ -5870,14 +5887,14 @@ function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, 
         void refreshSessionModels(index, tabId);
       }
       if (phase === "stopped" && event.payload.code === "child-exited") {
-        const runtime = stateOf(tabId)?.runtime ?? null;
+        const runtime = hostOf(stateOf(tabId)) ?? null;
         if (runtime?.kind === "chat") void s.sessionRuntime.exit.rpcExited(tabId, runtime);
       }
       refreshLauncher();
       return;
     }
     case "identity": {
-      const runtime = stateOf(tabId)?.runtime ?? null;
+      const runtime = hostOf(stateOf(tabId)) ?? null;
       if (runtime !== null) return s.sessionRuntime.identity.bind(tabId, runtime, event.sessionFile, event.sessionId, event.previousSessionId);
       return;
     }
@@ -5934,7 +5951,7 @@ async function resumeFromChat(context: vscode.ExtensionContext, index: SessionIn
   if (outcome !== undefined && outcome !== before && outcome.status !== "restored" && outcome.status !== "attached") return;
   // The admission was never reached (the editor or row changed, or this window still holds a process it could not
   // prove gone): say so in the footer, or on the page itself when no conversation is shown.
-  const reason = stateOf(tabId)?.controlFailure ?? "The session could not be resumed. The OMP output channel has details.";
+  const reason = (recordOf(stateOf(tabId))?.controlFailure ?? null) ?? "The session could not be resumed. The OMP output channel has details.";
   if (!s.sessionRuntime.conversations.notify(tabId, reason) && !s.sessionRuntime.conversations.has(tabId)) s.guestDispatcher.presentUnavailable(index, tabId, reason);
 }
 
@@ -6008,7 +6025,7 @@ interface GuestResponder {
 /** The responder of one bound panel. */
 function panelResponder(tabId: string, panel: vscode.WebviewPanel, actionSeq: unknown): GuestResponder {
   const state = stateOf(tabId);
-  const runtime = state?.runtime ?? null;
+  const runtime = hostOf(state) ?? null;
   const live = (): boolean => {
     const current = stateOf(tabId);
     return current !== undefined && current === state && current.panel === panel;
@@ -6084,8 +6101,8 @@ async function handleGuestControlRequest(
     reason,
     ...(notice ? { notice } : {}),
   });
-  if (state.transitioning || state.mode === "terminal") {
-    reply(unavailable(state.transitioning ? "The session view is changing or its process is stopping." : "Chat model/thinking controls are unavailable in Terminal; use native TUI controls."));
+  if (fencedOf(state) || state.mode === "terminal") {
+    reply(unavailable(fencedOf(state) ? "The session view is changing or its process is stopping." : "Chat model/thinking controls are unavailable in Terminal; use native TUI controls."));
     return;
   }
   if (session === null || session.phase !== "live") {
@@ -6099,7 +6116,7 @@ async function handleGuestControlRequest(
   }
   if (request.action === "snapshot" && request.picker !== undefined) cancelControlPicker();
   const stillCurrent = (): boolean =>
-    responder.live() && stateOf(tabId) === state && !state.transitioning && state.mode === "chat" && s.sessionRuntime.sessionOf(tabId) === session && session.phase === "live";
+    responder.live() && stateOf(tabId) === state && !fencedOf(state) && state.mode === "chat" && s.sessionRuntime.sessionOf(tabId) === session && session.phase === "live";
   let notice: string | undefined;
   try {
     if (request.action !== "snapshot") {
@@ -6162,10 +6179,10 @@ async function handleGuestControlRequest(
               ...(model.name && model.name.length <= 200 && isSafeBoundaryText(model.name) ? { name: model.name } : {}) }));
           if (stillCurrent()) {
             recordSessionModels(index, tabId, models.length > 0);
-            if (models.length === 0) await openProviderLogin(state.runtime, entry.scope.profile, entry.cwd);
+            if (models.length === 0) await openProviderLogin(hostOf(state), entry.scope.profile, entry.cwd);
             else {
               const picked = await pickControlModel(models, session.model.pendingControl?.model ?? beforeModel, stillCurrent, tabId);
-              if (picked === "provider-login") await openProviderLogin(state.runtime, entry.scope.profile, entry.cwd);
+              if (picked === "provider-login") await openProviderLogin(hostOf(state), entry.scope.profile, entry.cwd);
               else selectedModel = picked;
             }
           }
@@ -6357,7 +6374,7 @@ function ensureFooterBinding(index: SessionIndex, tabId: string): void {
   const s = windowState();
   const entry = index.get(tabId);
   if (!entry) return;
-  const cwd = stateOf(tabId)?.runtime?.cwd ?? entry.cwd;
+  const cwd = hostOf(stateOf(tabId))?.cwd ?? entry.cwd;
   const existing = s.footerBindings.get(tabId);
   if (existing?.cwd === cwd) return;
   existing?.observer?.dispose();
@@ -6365,7 +6382,7 @@ function ensureFooterBinding(index: SessionIndex, tabId: string): void {
     message: { type: "omp:footer-metadata" as const, provider: null, windows: [], accounts: [], accountSelection: null, branch: null } as FooterMetadataMessage,
     observer: null as BranchObservation | null };
   s.footerBindings.set(tabId, binding);
-  const current = (): boolean => s.footerBindings.get(tabId) === binding && (stateOf(tabId)?.runtime?.cwd ?? index.get(tabId)?.cwd) === cwd;
+  const current = (): boolean => s.footerBindings.get(tabId) === binding && (hostOf(stateOf(tabId))?.cwd ?? index.get(tabId)?.cwd) === cwd;
   const publish = (branch: string | null): void => {
     if (!current()) return;
     binding.message = { ...binding.message, branch };
@@ -6387,14 +6404,14 @@ function refreshSessionCost(index: SessionIndex, tabId: string): void {
   ensureFooterBinding(index, tabId);
   const binding = s.footerBindings.get(tabId);
   const session = s.sessionRuntime.sessionOf(tabId);
-  const runtime = stateOf(tabId)?.runtime;
+  const runtime = hostOf(stateOf(tabId));
   if (!binding) return;
   binding.message = { ...binding.message, sessionCost: undefined };
   publishFooterMetadata(tabId);
   if (!session || session.phase !== "live" || !runtime) return;
   const epoch = session.epoch;
   void session.readSessionCost().then(cost => {
-    if (s.footerBindings.get(tabId) !== binding || s.sessionRuntime.sessionOf(tabId) !== session || stateOf(tabId)?.runtime !== runtime ||
+    if (s.footerBindings.get(tabId) !== binding || s.sessionRuntime.sessionOf(tabId) !== session || hostOf(stateOf(tabId)) !== runtime ||
       epoch.nonce !== session.epoch.nonce || epoch.counter !== session.epoch.counter) return;
     binding.message = { ...binding.message, sessionCost: cost ?? undefined };
     publishFooterMetadata(tabId);
@@ -6407,7 +6424,7 @@ function refreshFooterMetadata(index: SessionIndex, tabId: string, refreshUsage:
   const binding = s.footerBindings.get(tabId);
   const session = s.sessionRuntime.sessionOf(tabId);
   const entry = index.get(tabId);
-  const runtime = stateOf(tabId)?.runtime;
+  const runtime = hostOf(stateOf(tabId));
   if (!binding || !entry) return;
   const model = session?.model.state?.model ?? null;
   const changed = binding.message.provider !== model?.provider || binding.modelId !== model?.id;
@@ -6420,7 +6437,7 @@ function refreshFooterMetadata(index: SessionIndex, tabId: string, refreshUsage:
   }
   // Resolve the exact installation before selecting the scope cache; never join different cwd/profile installs.
   void executableFor(runtime).then(async executable => {
-    if (s.footerBindings.get(tabId) !== binding || s.sessionRuntime.sessionOf(tabId) !== session || stateOf(tabId)?.runtime !== runtime) return;
+    if (s.footerBindings.get(tabId) !== binding || s.sessionRuntime.sessionOf(tabId) !== session || hostOf(stateOf(tabId)) !== runtime) return;
     const scope = JSON.stringify([executable.command, executable.prefixArgs, entry.scope.profile ?? DEFAULT_OMP_PROFILE, runtime.cwd]);
     let cache = s.usageCaches.get(scope);
     if (!cache) { cache = new ProviderUsageCache(Date.now, log); s.usageCaches.set(scope, cache); }
@@ -6429,7 +6446,7 @@ function refreshFooterMetadata(index: SessionIndex, tabId: string, refreshUsage:
     const usage = await cache.refresh(model.provider, model.id, () => runOmpCli(executable,
       [...PROVIDER_USAGE_ARGS, "--provider", model.provider], PROVIDER_USAGE_TIMEOUT_MS,
       { cwd: runtime.cwd, env: ompCliScopeEnvironment(entry.scope.profile) }));
-    if (s.footerBindings.get(tabId) !== binding || s.sessionRuntime.sessionOf(tabId) !== session || stateOf(tabId)?.runtime !== runtime ||
+    if (s.footerBindings.get(tabId) !== binding || s.sessionRuntime.sessionOf(tabId) !== session || hostOf(stateOf(tabId)) !== runtime ||
       session?.model.state?.model?.provider !== model.provider || session?.model.state?.model?.id !== model.id) return;
     binding.message = { ...binding.message, provider: model.provider, ...usage };
     publishFooterMetadata(tabId);
@@ -6484,7 +6501,7 @@ async function loginProviderFromPalette(index: SessionIndex): Promise<void> {
   s.providerLoginOpening = true;
   try {
     const tabId = index.activeTabId;
-    const runtime = tabId === null ? null : stateOf(tabId)?.runtime ?? null;
+    const runtime = tabId === null ? null : hostOf(stateOf(tabId)) ?? null;
     if (tabId !== null && runtime !== null) {
       await launchProviderLogin(runtime, index.get(tabId)?.scope.profile ?? null, runtime.cwd);
       return;
@@ -6532,7 +6549,7 @@ function toolsTarget(index: SessionIndex): SessionToolsTarget | null {
   const state = focused ?? s.editorRecency.order().map(slot => s.tabs.get(slot)).find(tab => tab?.panel !== null && tab?.tabId != null && tab.shellSlot === null);
   if (!state || state.tabId === null || state.shellSlot !== null) return null;
   const tabId = state.tabId;
-  const runtime = state.runtime;
+  const runtime = hostOf(state);
   const session = state.mode === "chat" ? s.sessionRuntime.sessionOf(tabId) : null;
   const channel = activeControl(index, tabId);
   const binding = channel?.client.latestHost;
@@ -6546,7 +6563,7 @@ function toolsTarget(index: SessionIndex): SessionToolsTarget | null {
     title: entry === null ? "OMP session" : s.launcherProvider?.headlineFor(tabId) ?? sessionHeadline(entry, null),
     cwd: runtime?.cwd ?? entry?.cwd ?? null,
     profile: entry?.scope.profile ?? null,
-    running: passiveReasonForSlot(state.slotId) === null && !state.transitioning &&
+    running: passiveReasonForSlot(state.slotId) === null && !fencedOf(state) &&
       (state.mode === "chat" ? session?.phase === "live" : launcherFacts(tabId).running),
     commands: session?.model.commands ?? [],
     readDescriptors: session === null ? null : () => session.readToolDescriptors(),
@@ -6554,7 +6571,7 @@ function toolsTarget(index: SessionIndex): SessionToolsTarget | null {
       const list = await channel.client.listTools();
       const current = activeControl(index, tabId);
       const host = channel.client.latestHost;
-      return stateOf(tabId)?.runtime === runtime && current?.client === channel.client &&
+      return hostOf(stateOf(tabId)) === runtime && current?.client === channel.client &&
         host?.instanceId === binding?.instanceId && host?.epoch === binding?.epoch &&
         (session === null || (host?.sessionFile !== null && host?.sessionFile !== undefined &&
           session.sessionFile !== null && controlPathEquals(host.sessionFile, session.sessionFile))) ? list : null;
@@ -6583,8 +6600,8 @@ function activeControl(index: SessionIndex, tabId: string | null = index.activeT
   if (tabId === null) return null;
   const state = stateOf(tabId);
   const entry = index.get(tabId);
-  const runtime = state?.runtime;
-  const control = state?.control;
+  const runtime = hostOf(state);
+  const control = controlOf(state);
   const identity = control?.client.latestHost;
   if (!runtime || !control || !identity || entry?.availability !== "live" ||
       !entry.sessionFile || entry.ownership?.releasedAt !== null ||
@@ -6596,7 +6613,7 @@ function activeControl(index: SessionIndex, tabId: string | null = index.activeT
 }
 
 function controlUnavailableMessage(index: SessionIndex): string {
-  const failure = index.activeTabId === null ? null : stateOf(index.activeTabId)?.controlFailure ?? null;
+  const failure = index.activeTabId === null ? null : (recordOf(stateOf(index.activeTabId))?.controlFailure ?? null) ?? null;
   return failure === null
     ? "Host control is not established for the selected session. Open it and run this command again."
     : `Host control is unavailable for the selected session: ${failure}`;
@@ -6612,8 +6629,8 @@ function activeLiveSession(index: SessionIndex): { readonly tabId: string; reado
   const s = windowState();
   const tabId = index.activeTabId;
   const state = tabId === null ? undefined : stateOf(tabId);
-  if (state?.mode === "terminal" || state?.transitioning) {
-    showWarning(state.transitioning ? "The session is changing view or stopping." : "Chat model/thinking controls are unavailable in Terminal; use the native TUI.");
+  if (state?.mode === "terminal" || fencedOf(state)) {
+    showWarning(fencedOf(state) ? "The session is changing view or stopping." : "Chat model/thinking controls are unavailable in Terminal; use the native TUI.");
     return null;
   }
   const session = tabId === null ? null : s.sessionRuntime.sessionOf(tabId);
@@ -6628,7 +6645,7 @@ async function showHostControls(index: SessionIndex): Promise<void> {
   const active = activeLiveSession(index);
   if (active === null) return;
   const channel = activeControl(index);
-  const snapshot = channel === null ? stateOf(active.tabId)?.control?.snapshot ?? null : await refreshControlSnapshot(channel);
+  const snapshot = channel === null ? controlOf(stateOf(active.tabId))?.snapshot ?? null : await refreshControlSnapshot(channel);
   const live = active.session.model.state;
   if (live === null) {
     showInfo("The session has not reported its model yet.");
@@ -6667,7 +6684,7 @@ async function selectHostModel(index: SessionIndex): Promise<void> {
   }
   if (picked === "provider-login") {
     const entry = index.get(active.tabId);
-    if (entry !== null) await openProviderLogin(stateOf(active.tabId)?.runtime ?? null, entry.scope.profile, entry.cwd);
+    if (entry !== null) await openProviderLogin(hostOf(stateOf(active.tabId)) ?? null, entry.scope.profile, entry.cwd);
     return;
   }
   const outcome = await active.session.chooseModel(picked.provider, picked.id, picked.name);
@@ -6704,11 +6721,12 @@ async function refreshControlSnapshot(channel: ControlChannel): Promise<ControlH
     if (
       state !== undefined &&
       mayRefreshControlSnapshot(
-        { runtime: state.runtime ?? null, runtimePid: state.runtime?.pid ?? null, controlClient: state.control?.client ?? null },
+        { runtime: hostOf(state) ?? null, runtimePid: hostOf(state)?.pid ?? null, controlClient: controlOf(state)?.client ?? null },
         channel.client,
       )
     ) {
-      if (state.control) state.control.snapshot = snapshot;
+      const control = controlOf(state);
+      if (control) control.snapshot = snapshot;
     }
     return snapshot;
   } catch (error) {
@@ -6716,7 +6734,7 @@ async function refreshControlSnapshot(channel: ControlChannel): Promise<ControlH
     const target =
       state === undefined
         ? null
-        : { runtime: state.runtime ?? null, runtimePid: state.runtime?.pid ?? null, controlClient: state.control?.client ?? null };
+        : { runtime: hostOf(state) ?? null, runtimePid: hostOf(state)?.pid ?? null, controlClient: controlOf(state)?.client ?? null };
     if (mayReportControlFailure(target, { runtime: null, pid: null, client: channel.client })) {
       windowState().sessionRuntime.control.fail(channel.tabId, describeControlError(error));
     } else {
@@ -6816,10 +6834,7 @@ function newTabState(slotId: string): TabState {
     slotId,
     tabId: isPanelTabId(slotId) ? slotId : null,
     panel: null,
-    runtime: null,
     mode: "chat",
-    transitioning: false,
-    nativeWatch: null,
     viewProjection: null,
     document: null,
     chatDetach: null,
@@ -6828,9 +6843,6 @@ function newTabState(slotId: string): TabState {
     origin: null,
     lastOpenRequest: -1,
     lastEditorClose: -1,
-    control: null,
-    controlFailure: null,
-    endedNotice: null,
     pipeline: null,
     shellSlot: null,
     ownerStopWatch: null,
@@ -7003,9 +7015,13 @@ function bindSlotToConversation(
       stale.slotId = slot;
       stale.tabId = conversation;
       s.tabs.set(slot, stale);
+      const held = s.sessionRuntime.records.get(conversation);
+      if (held !== undefined) held.slotId = slot;
     }
   }
   const state = tabState(slot);
+  // A native handover renames the conversation this editor shows: the runtime's record follows it.
+  if (state.tabId !== null && state.tabId !== conversation) s.sessionRuntime.records.move(state.tabId, conversation, state.slotId);
   state.slotId = slot;
   state.tabId = conversation;
   const before = new Map(s.editorSlots.entries().map(entry => [entry.slotId, entry]));
@@ -7023,7 +7039,7 @@ function applySlotAuthority(slot: string): void {
   const s = windowState();
   const state = slotState(slot);
   if (state === null || state.tabId === null) return;
-  const reason = state.transitioning ? "The session view is changing or its process is stopping." : passiveReasonForSlot(slot);
+  const reason = fencedOf(state) ? "The session view is changing or its process is stopping." : passiveReasonForSlot(slot);
   state.pipeline?.noteReadOnly(reason);
   // The page shows the role: its route reports the reason as `readOnlyReason` (composer
   // disabled, banner shown) and the runtime refuses its commands; re-send so it applies now.
@@ -7255,7 +7271,7 @@ async function chooseSessionsLayout(): Promise<void> {
 function launcherRuntimeIdentity(tabId: string): string | null {
   const s = windowState();
   const state = stateOf(tabId);
-  const runtime = state?.runtime;
+  const runtime = hostOf(state);
   let id: number | null = null;
   if (runtime !== null && runtime !== undefined) {
     id = s.launcherRuntimeIds.get(runtime) ?? ++s.nextLauncherRuntimeId;
@@ -7284,12 +7300,13 @@ function launcherFacts(tabId: string): SessionLauncherFacts {
   // turn state of its own session: a closed tab reports exactly what an open one does.
   const activity = s.turnActivities.get(tabId) ?? null;
   const phase = s.sessionRuntime.conversations.stateOf(tabId)?.phase ?? null;
+  const hosted = hostOf(state);
   return {
     open: state !== null && (state.panel !== null || orphan),
-    viewMode: state !== null && state.panel !== null && state.runtime !== null ? state.runtime.kind : null,
+    viewMode: state !== null && state.panel !== null && hosted !== null ? hosted.kind : null,
     // Native owns a PTY, not an RPC conversation. Use the actual writer's state.
-    running: state !== null && state.runtime !== null && (state.runtime.kind === "terminal"
-      ? state.runtime.handle.state === "running"
+    running: hosted !== null && (hosted.kind === "terminal"
+      ? hosted.handle.state === "running"
       : phase !== null && rpcPhaseIsRunning(phase)),
     launching: s.indexForBridge?.isLaunching(tabId) ?? false,
     stopping: s.stoppingTabs.has(tabId),
@@ -7598,7 +7615,7 @@ type EvidenceSessionResult =
  */
 function liveControlFacts(state: TabState | undefined): EvidenceLiveChannel | null {
   try {
-    const client = state?.control?.client ?? null;
+    const client = controlOf(state)?.client ?? null;
     if (client === null) return null;
     const live = client.binding;
     // `peerProof` is read on the same channel: it refuses once the channel has
@@ -8539,7 +8556,7 @@ function refreshSessionDiagnostics(index: SessionIndex): void {
   let resolvedTarget = false;
   for (const [tabId, state] of s.tabs) {
     if (!recorded.has(tabId)) continue;
-    const runtime = state.runtime;
+    const runtime = hostOf(state);
     if (runtime === null) continue;
     const target = runtime.binary;
     if (target !== null) {
@@ -8558,9 +8575,9 @@ function refreshSessionDiagnostics(index: SessionIndex): void {
     s.diagnostics.fact(
       tabId,
       "host control",
-      state.control !== null
+      controlOf(state) !== null
         ? "verified"
-        : `unavailable${state.controlFailure === null ? "" : ` — ${state.controlFailure}`}`,
+        : `unavailable${(recordOf(state)?.controlFailure ?? null) === null ? "" : ` — ${(recordOf(state)?.controlFailure ?? null)}`}`,
     );
     const entry = index.get(tabId);
     if (entry !== null) {
@@ -8987,7 +9004,7 @@ function ensureTerminalPipeline(
     // settled switch — must start fenced rather than learn it later, or it could take the
     // broker's input slot before anything told it not to. A folder shell has no registry
     // entry, so it is never fenced here.
-    authority: state.transitioning ? "The session view is changing or its process is stopping." : passiveReasonForSlot(state.slotId),
+    authority: fencedOf(state) ? "The session view is changing or its process is stopping." : passiveReasonForSlot(state.slotId),
     // Only the managed native OMP TUI repaints its whole screen on a size change; a folder shell's
     // prompt would just be redrawn on top of its own history.
     redrawAfterRestore: state.shellSlot === null,
@@ -9020,7 +9037,7 @@ const TERMINAL_FONT_CONFIGURATION_KEYS = [
 
 function terminalCwd(state: TabState): string | undefined {
   const s = windowState();
-  return state.runtime?.cwd ??
+  return hostOf(state)?.cwd ??
     (state.tabId === null ? undefined : s.indexForBridge?.get(state.tabId)?.cwd) ??
     (state.shellSlot === null ? undefined : s.shellSlots?.get(state.shellSlot)?.cwd);
 }
@@ -9156,7 +9173,7 @@ async function handleTerminalGuestMessage(
   // must never turn into keystrokes for a session another writer owns. Display, focus and
   // visibility keep flowing, so the screen stays readable and copyable.
   if (
-    (state.transitioning || passiveReasonForSlot(state.slotId) !== null) &&
+    (fencedOf(state) || passiveReasonForSlot(state.slotId) !== null) &&
     (parsed.type === "omp:terminal-input" || parsed.type === "omp:terminal-resize")
   ) {
     log(`slot ${state.slotId}: a non-controlling editor's ${parsed.type} was refused`);
@@ -9173,12 +9190,12 @@ async function handleTerminalGuestMessage(
       const document = state.document;
       const bridge = state.bridge;
       const documentId = bridge?.documentId;
-      const runtime = state.runtime;
+      const runtime = hostOf(state);
       const conversation = state.tabId;
       const shell = state.shellSlot;
       const isCurrent = () => stateOf(tabId) === state && state.panel === panel &&
         state.document === document && state.bridge === bridge && bridge?.documentId === documentId &&
-        state.runtime === runtime && state.tabId === conversation && state.shellSlot === shell &&
+        hostOf(state) === runtime && state.tabId === conversation && state.shellSlot === shell &&
         (terminalCwd(state) ?? "") === cwd;
       if (parsed.type === "omp:terminal-link-symbols") {
         s.symbolAskers.add(state.slotId);
@@ -9222,7 +9239,7 @@ async function handleTerminalGuestMessage(
         }
         pushTerminalUnavailable(
           tabId,
-          state.endedNotice ?? (state.mode === "terminal" ? "This native OMP session is not attached to its broker in this window." : "This folder terminal is not attached to its broker in this window."),
+          (recordOf(state)?.endedNotice ?? null) ?? (state.mode === "terminal" ? "This native OMP session is not attached to its broker in this window." : "This folder terminal is not attached to its broker in this window."),
         );
         return;
       }
@@ -9240,7 +9257,7 @@ async function handleTerminalGuestMessage(
           pushSessionView(s.indexForBridge ?? null, state, true);
           return;
         }
-        pushTerminalUnavailable(tabId, state.endedNotice ?? "This terminal is not attached to its broker in this window.");
+        pushTerminalUnavailable(tabId, (recordOf(state)?.endedNotice ?? null) ?? "This terminal is not attached to its broker in this window.");
         return;
       }
       await attached.probe(frontendId, {
@@ -9593,8 +9610,8 @@ function bindShellPanel(
 async function startShellTerminal(index: SessionIndex, slot: string, handle: PtyHandle): Promise<void> {
   const s = windowState();
   const state = tabState(slot);
-  state.runtime = null;
-  state.endedNotice = null;
+  recordFor(state).runtime = null;
+  recordFor(state).endedNotice = null;
   try {
     await handle.attach();
   } catch (error) {
@@ -9639,7 +9656,7 @@ async function startShellTerminal(index: SessionIndex, slot: string, handle: Pty
         const ended = stateOf(slot);
         if (ended !== undefined) {
           // The pane ends as for an exit the broker reported (exit banner, copyable screen), not as a lost connection.
-          ended.endedNotice = "This terminal's process has ended.";
+          recordFor(ended).endedNotice = "This terminal's process has ended.";
           ended.pipeline?.noteProcessGone();
         }
         stopTerminalForTab(slot);
@@ -9946,7 +9963,7 @@ async function renameStoppedSession(
     refreshLauncher();
     return;
   }
-  if (stateOf(tabId)?.runtime != null) {
+  if (hostOf(stateOf(tabId)) != null) {
     showError("This session's native process is still running in this window; a running session is renamed through it instead.");
     return;
   }
@@ -10058,13 +10075,14 @@ async function renameSession(context: vscode.ExtensionContext, index: SessionInd
   }
   const { tabId, entry } = target;
   const nativeState = stateOf(tabId);
-  const native = nativeState?.runtime;
+  const native = hostOf(nativeState);
   if (nativeState !== undefined && native?.kind === "terminal") {
-    if (nativeState.transitioning || passiveReasonOf(tabId) !== null || nativeState.control === null) {
+    const control = controlOf(nativeState);
+    if (fencedOf(nativeState) || passiveReasonOf(tabId) !== null || control === null) {
       showWarning("Rename is unavailable while this editor is read-only, stopping, or disconnected. Reopen its running editor and try again.");
       return;
     }
-    const client = nativeState.control.client;
+    const client = control.client;
     try {
       const snapshot = await client.snapshot();
       const facts = await client.nativeState();
@@ -10073,7 +10091,7 @@ async function renameSession(context: vscode.ExtensionContext, index: SessionInd
       const proposed = await promptSessionTitle(entry);
       if (proposed === undefined) return;
       await index.lifecycle.run(tabId, async () => {
-        if (nativeState.runtime !== native || nativeState.tabId !== tabId || nativeState.transitioning || nativeState.control?.client !== client || passiveReasonOf(tabId) !== null) return;
+        if (hostOf(nativeState) !== native || nativeState.tabId !== tabId || fencedOf(nativeState) || controlOf(nativeState)?.client !== client || passiveReasonOf(tabId) !== null) return;
         const result = await client.nativeRename(captured, proposed.trim());
         if (result !== "renamed") { showWarning(`Native Rename was refused (${result}).`); return; }
         const readback = await client.nativeState();
@@ -10089,9 +10107,9 @@ async function renameSession(context: vscode.ExtensionContext, index: SessionInd
   }
   // A live row this window does not drive yet (a verified survivor) is renamed through its own
   // process, exactly as Reload reattaches it first; the stopped-title path refuses a live writer.
-  if (nativeState?.runtime == null && s.sessionRuntime.sessionOf(tabId) === null && entry.sessionFile !== null && await s.sessionRuntime.verifiedWriterPid(tabId) !== null) {
+  if (hostOf(nativeState) == null && s.sessionRuntime.sessionOf(tabId) === null && entry.sessionFile !== null && await s.sessionRuntime.verifiedWriterPid(tabId) !== null) {
     await openTab(context, index, tabId, "opened", "restored");
-    if (stateOf(tabId)?.runtime == null) {
+    if (hostOf(stateOf(tabId)) == null) {
       showWarning("The exact live editor could not be reattached. Nothing was renamed; no replacement was started.");
       return;
     }
@@ -10155,7 +10173,7 @@ async function closeSession(context: vscode.ExtensionContext, index: SessionInde
     return;
   }
   const state = stateOf(tabId);
-  const runtime = state?.runtime ?? null;
+  const runtime = hostOf(state) ?? null;
   // A confirmation asks the user to approve stopping one exact transport, so there has
   // to be one. A row whose child this window does not drive but which recorded its own
   // broker slot (a survivor of an earlier extension host) is stopped through that slot by
@@ -10262,15 +10280,16 @@ async function reloadSession(context: vscode.ExtensionContext, index: SessionInd
   // A tab VS Code has not shown since the window loaded has no panel handle yet; showing it is what creates one.
   if (stateOf(target.tabId)?.panel === null) await reviveEditorPanel(index, target.tabId);
   let state = stateOf(target.tabId);
-  if (state?.runtime == null) {
+  if (hostOf(state) == null) {
     const pid = await windowState().sessionRuntime.verifiedWriterPid(target.tabId);
     if (pid === null) { showInfo("That session is stopped. Use Resume to start it again."); return; }
     await openTab(context, index, target.tabId, "opened", "restored");
     state = stateOf(target.tabId);
   }
-  if (state?.runtime == null || state.panel === null) {
+  const hosted = hostOf(state);
+  if (state === undefined || hosted === null || state.panel === null) {
     showWarning("OMP could not reconnect this tab to its running session, so nothing was reloaded. Run “Developer: Reload Window”, then try again; no process was started or stopped.");
     return;
   }
-  await switchSessionMode(context, index, state, state.runtime.kind, true);
+  await switchSessionMode(context, index, state, hosted.kind, true);
 }

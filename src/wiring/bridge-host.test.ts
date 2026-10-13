@@ -21,6 +21,8 @@ import { after, afterEach, beforeEach, describe, it } from "node:test";
 import type { BridgeEditorEndpoint, BridgeEditorEndpointOptions } from "../host/bridge-endpoint.ts";
 import type { BridgeNativeBinding } from "../host/bridge-records.ts";
 import type { SessionIndex } from "../host/session-index.ts";
+import { RuntimeRecords } from "../runtime/runtime-record.ts";
+import type { ConversationRecord } from "../runtime/runtime-record.ts";
 import type { BridgeHost, BridgeHostDeps, BridgeTab } from "./bridge-host.ts";
 
 // The module and the host modules it imports load the `vscode` specifier; map it before the first import.
@@ -143,7 +145,7 @@ function fakePanel() {
 }
 
 const newTab = (slotId: string, overrides: Partial<FakeTab> = {}): FakeTab => ({
-	slotId, tabId: null, panel: null, runtime: null, mode: "chat", heldReadyReport: null, control: null, bridge: null, ...overrides,
+	slotId, tabId: null, panel: null, mode: "chat", heldReadyReport: null, bridge: null, ...overrides,
 });
 
 const nextTurn = (): Promise<void> => {
@@ -186,6 +188,7 @@ function world(overrides: Partial<BridgeHostDeps<FakeTab>> = {}) {
 		index: null as Pick<SessionIndex, "get"> | null,
 		rows: new Map<string, unknown>(),
 		sessions: new Map<string, unknown>(),
+		records: new RuntimeRecords(() => null),
 		slotsRemoved: [] as string[],
 		defaultMode: "terminal" as "chat" | "terminal",
 		provided: new Map<string, FakeEndpoint | null>(),
@@ -208,7 +211,7 @@ function world(overrides: Partial<BridgeHostDeps<FakeTab>> = {}) {
 			return created;
 		},
 		index: () => state.index,
-		sessions: () => ({ sessionOf: (tabId: string) => state.sessions.get(tabId) ?? null }) as never,
+		sessions: () => ({ sessionOf: (tabId: string) => state.sessions.get(tabId) ?? null, records: state.records }) as never,
 		editors: () => state.editors,
 		editorSlots: () => ({ remove: (slot: string) => { state.slotsRemoved.push(slot); } }) as never,
 		endpoints: () => state.endpoints,
@@ -687,9 +690,12 @@ describe("replayHeldReadyReport", () => {
 	});
 });
 
+/** The runtime's record of the conversation an editor shows. */
+const hold = (w: ReturnType<typeof world>, tab: FakeTab): ConversationRecord => w.state.records.acquire(tab.tabId as string, tab.slotId);
+
 /** A verified chat host for the editor's conversation: the runtime, the index row and the live session agree. */
 function verifiedChatHost(w: ReturnType<typeof world>, tab: FakeTab): BridgeNativeBinding {
-	tab.runtime = {
+	hold(w, tab).runtime = {
 		kind: "chat", pid: 4242,
 		identity: { childCreationTime: "ctime", slot: "slot-1", brokerId: "broker-1", brokerGeneration: "gen-1" },
 	} as never;
@@ -741,16 +747,16 @@ describe("liveBinding", () => {
 		const w = world();
 		const { tab } = editor(w);
 		verifiedChatHost(w, tab);
-		tab.runtime = {
+		hold(w, tab).runtime = {
 			kind: "terminal", pid: 4242,
 			identity: { childCreationTime: "ctime", slot: "slot-1", brokerId: "broker-1", brokerGeneration: "gen-1" },
 			observed: { available: true, sessionId: "session-id", sessionFile: "/work/s.jsonl" },
 		} as never;
 		assert.equal(w.host.liveBinding(EDITOR), null, "no open control channel");
-		tab.control = { client: { peerProof: true } as never };
+		hold(w, tab).control = { client: { peerProof: true } as never, snapshot: null, activity: false };
 		const binding = w.host.liveBinding(EDITOR);
 		assert.equal(binding?.sessionId, "session-id");
-		(tab.runtime as unknown as { observed: { sessionFile: string } }).observed.sessionFile = "/work/other.jsonl";
+		(hold(w, tab).runtime as unknown as { observed: { sessionFile: string } }).observed.sessionFile = "/work/other.jsonl";
 		assert.equal(w.host.liveBinding(EDITOR), null, "another session file");
 	});
 });

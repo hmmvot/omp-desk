@@ -22,6 +22,8 @@ import type { OwnerReconciler, RecordedHostStopPort } from "../host/session-avai
 import type { SessionIndexEntry } from "../host/session-model.ts";
 import { LocalSessionRuntime } from "../runtime/local-runtime.ts";
 import { LocalKill } from "../runtime/local-kill.ts";
+import { RuntimeRecords } from "../runtime/runtime-record.ts";
+import type { ConversationRecord } from "../runtime/runtime-record.ts";
 import { LocalWriterVerifier } from "../runtime/local-writer.ts";
 import type { SessionActionsDeps, SessionTab } from "./session-actions.ts";
 
@@ -77,7 +79,7 @@ const processRow = (overrides: Record<string, unknown>, openTarget: string | nul
 	Object.assign(Object.create(ProcessTreeItem.prototype), { row: { id: "row-1", slot: "slot-1", host: null, window: "this-window", ...overrides }, openTarget });
 
 const tabRecord = (slotId: string, tabId: string | null, overrides: Partial<SessionTab> = {}): SessionTab =>
-	({ slotId, tabId, panel: null, runtime: null, transitioning: false, nativeWatch: null, ownerStopWatch: null, ...overrides });
+	({ slotId, tabId, panel: null, ownerStopWatch: null, ...overrides });
 
 interface Dialog { readonly message: string; readonly detail: string | undefined; readonly modal: boolean; readonly items: readonly string[] }
 
@@ -85,6 +87,8 @@ interface Dialog { readonly message: string; readonly detail: string | undefined
 async function world(index: unknown = null, overrides: Partial<SessionActionsDeps<SessionTab>> = {}) {
 	const state = {
 		tabs: new Map<string, SessionTab>(),
+		/** The runtime's records of the conversations the fixture's editors show. */
+		records: new RuntimeRecords(() => null),
 		outcomes: new Map<string, unknown>(),
 		stopping: new Set<string>(),
 		opening: new Map<string, Promise<void>>(),
@@ -136,7 +140,7 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 	const writer = new LocalWriterVerifier({
 		index: index as never, reconciler: () => state.reconciler,
 		window: {
-			runtimePid: tabId => deps.tab(tabId)?.runtime?.pid ?? null,
+			runtimePid: tabId => state.records.get(tabId)?.runtime?.pid ?? null,
 			holderMayBeAlive: async (claim, display) => display ? await holderSeemsAlive(claim, state.registry as never) : await claimHolderMayBeAlive(claim),
 		},
 	});
@@ -146,8 +150,8 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 	};
 	const transitions = new LocalTransitions({
 		index: index as never,
+		records: state.records,
 		window: {
-			record: tabId => deps.tab(tabId) as never,
 			fenced: (_conversation, on) => { state.fences.push(on); },
 			check: () => true,
 			prepare: async () => {},
@@ -165,6 +169,7 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 	});
 	const runtime = new LocalSessionRuntime({
 		index: index as never,
+		records: state.records,
 		reconciler: () => state.reconciler,
 		stop: stopOperations,
 		transitions,
@@ -180,7 +185,7 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 			index: index as never,
 			control,
 			window: {
-				runtimeIdentity: tabId => (deps.tab(tabId)?.runtime?.identity ?? null) as never,
+				runtimeIdentity: tabId => (state.records.get(tabId)?.runtime?.identity ?? null) as never,
 				forgetOutcome: tabId => { state.outcomes.delete(tabId); },
 				readRows: async () => ((await (state.processes as { refresh(): Promise<{ rows: unknown[] }> } | undefined)?.refresh())?.rows ?? []) as never,
 				launcherChanged: () => deps.refreshLauncher(),
@@ -238,6 +243,7 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 		withSessionReadDeadline: async read => await state.deadline(read),
 		releaseHostControl: async (tabId, owner) => { released.push([tabId, owner]); },
 		reconnectHostControl: async () => {},
+		releaseRuntimeRecord: tabId => { state.records.drop(tabId); },
 		sessionRuntime: () => runtime,
 		recordedControlOwner: entry => entry.ownership?.ownerGeneration ?? null,
 		forgetTurnActivity: (_index, tabId) => { forgotten.push(tabId); },
@@ -599,8 +605,9 @@ describe("stopping a session's recorded process", () => {
 		const runtime = { identity, kind: "chat", pid: 7 } as unknown as SessionHostRuntime;
 		const index = fakeIndex([{ tabId: TAB, cwd: "C:/proj", host: recordedHost() as never }]);
 		const w = await world(index);
-		const state = tabRecord("slot-1", TAB, { runtime });
+		const state = tabRecord("slot-1", TAB);
 		w.state.tabs.set("slot-1", state);
+		w.state.records.acquire(TAB, "slot-1").runtime = runtime;
 		w.state.transition = async () => ({ epoch: "e1" });
 		const recorded = { slot: SLOT, brokerId: "broker-1", brokerGeneration: "gen-1", attemptStartedAt: STAMP, pid: 51704 };
 		assert.equal(await w.actions.stopHost(w.state.context, index, TAB, { recorded: { ...recorded, brokerGeneration: "other" } }), false);
@@ -687,7 +694,8 @@ describe("killing a session or a process", () => {
 			const reconciled: unknown[] = [];
 			const index = fakeIndex([{ ...recordedEntry(), host: { pid: CHILD_PID, startedAt: STAMP, transport: "rpc", rpc: null } as never }], { reconcileKilledHost: async (_tabId: string, captured: unknown) => { reconciled.push(captured); return { kind: "skipped", why: "driven", detail: "driven here" }; } });
 			const w = await world(index);
-			w.state.tabs.set("slot-1", tabRecord("slot-1", TAB, { runtime: { identity: recordedIdentity, kind: "chat", pid: CHILD_PID } as unknown as SessionHostRuntime }));
+			w.state.tabs.set("slot-1", tabRecord("slot-1", TAB));
+			w.state.records.acquire(TAB, "slot-1").runtime = { identity: recordedIdentity, kind: "chat", pid: CHILD_PID } as unknown as SessionHostRuntime;
 			w.state.processes = { refresh: async () => ({ rows: [] }), sync() {}, touch() {}, serveStopRequest: async () => [] };
 			await w.actions.kill(w.state.context, index, sessionRow(TAB, "running"));
 			assert.deepEqual(reconciled, [{ slot: SLOT, brokerId: "broker-1", brokerGeneration: "gen-1", attemptStartedAt: STAMP, hostPid: CHILD_PID }]);
@@ -714,7 +722,8 @@ describe("the writer a session row has", () => {
 	it("is this window's own runtime when it has one", async () => {
 		const index = fakeIndex([{ tabId: TAB }]);
 		const w = await world(index);
-		w.state.tabs.set("slot-1", tabRecord("slot-1", TAB, { runtime: { kind: "chat", pid: 4321, identity: FAKE_IDENTITY } as unknown as SessionHostRuntime }));
+		w.state.tabs.set("slot-1", tabRecord("slot-1", TAB));
+		w.state.records.acquire(TAB, "slot-1").runtime = { kind: "chat", pid: 4321, identity: FAKE_IDENTITY } as unknown as SessionHostRuntime;
 		assert.equal(await w.deps.sessionRuntime().verifiedWriterPid(TAB), 4321);
 		assert.equal(await w.deps.sessionRuntime().verifiedWriterPid(OTHER_TAB), null, "a row the index does not have has no writer");
 	});
@@ -823,7 +832,8 @@ describe("deleting a session", () => {
 
 	it("refuses to delete a session this window is already changing or stopping", async () => {
 		const f = await legacyFixture("delete-transition", true, true);
-		f.state.tabs.set("slot-1", tabRecord("slot-1", TAB, { runtime: { kind: "chat", pid: 51704, identity: FAKE_IDENTITY } as unknown as SessionHostRuntime, transitioning: true }));
+		f.state.tabs.set("slot-1", tabRecord("slot-1", TAB));
+		Object.assign(f.state.records.acquire(TAB, "slot-1"), { runtime: { kind: "chat", pid: 51704, identity: FAKE_IDENTITY } as unknown as SessionHostRuntime, transitioning: true });
 		try {
 			assert.equal(await f.actions.confirmAndDelete(f.index, TAB), false);
 			assert.deepEqual(f.warnings, ["The session is already changing or stopping; nothing was deleted."]);
@@ -836,10 +846,10 @@ describe("deleting a session", () => {
 
 	it("fences a running session's admission while it reads the facts the deletion binds to, and lifts the fence when the deletion did not go on", async () => {
 		const f = await legacyFixture("delete-running", true, true);
-		const state = tabRecord("slot-1", TAB, { runtime: { kind: "chat", pid: 51704, identity: FAKE_IDENTITY } as unknown as SessionHostRuntime });
-		f.state.tabs.set("slot-1", state);
 		const guarded = await world(f.index);
-		guarded.state.tabs.set("slot-1", state);
+		const state: ConversationRecord = guarded.state.records.acquire(TAB, "slot-1");
+		state.runtime = { kind: "chat", pid: 51704, identity: FAKE_IDENTITY } as unknown as SessionHostRuntime;
+		guarded.state.tabs.set("slot-1", tabRecord("slot-1", TAB));
 		guarded.state.reconciler = f.state.reconciler;
 		guarded.state.answer = undefined;
 		guarded.state.transition = async () => ({ epoch: "e1" });
@@ -855,8 +865,9 @@ describe("deleting a session", () => {
 
 	it("tells the user the session could not be checked, repaints, and deletes nothing when reading its state fails", async () => {
 		const f = await legacyFixture("delete-unreadable", true, true);
-		const state = tabRecord("slot-1", TAB, { runtime: { kind: "chat", pid: 51704, identity: FAKE_IDENTITY } as unknown as SessionHostRuntime });
-		f.state.tabs.set("slot-1", state);
+		const state: ConversationRecord = f.state.records.acquire(TAB, "slot-1");
+		state.runtime = { kind: "chat", pid: 51704, identity: FAKE_IDENTITY } as unknown as SessionHostRuntime;
+		f.state.tabs.set("slot-1", tabRecord("slot-1", TAB));
 		f.state.transition = async () => { throw new Error("Session state read timed out."); };
 		try {
 			assert.equal(await f.actions.confirmAndDelete(f.index, TAB), false);

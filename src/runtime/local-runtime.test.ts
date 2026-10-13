@@ -45,6 +45,7 @@ function fixture(overrides: { entry?: unknown; verdict?: { kind: string }; resto
 	const reconciler = { reconcile: async () => overrides.verdict ?? { kind: "attachable" } } as unknown as OwnerReconciler;
 	const runtime = new LocalSessionRuntime({
 		index: index as unknown as SessionIndex,
+		records: {} as never,
 		reconciler: () => reconciler,
 		launcher: () => { launcherReads++; return hostLauncher; },
 		stop: { requestStop: async () => ({ writerGone: true, treeEmpty: true, detail: "fixture" }), confirmEnded: async () => null, awaitSettled: async () => null, readTransitionFacts: async () => null },

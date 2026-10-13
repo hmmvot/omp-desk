@@ -105,8 +105,8 @@ function fixture(options: FixtureOptions = {}): TransitionFixture {
 	let blocked: { readonly entered: PromiseWithResolvers<void>; readonly released: Promise<void> } | null = null;
 	const transitions = new mod.LocalTransitions({
 		index: index as never,
+		records: { get: (tabId: string | null) => tabId === TAB ? record : undefined } as never,
 		window: {
-			record: tabId => tabId === TAB ? record : undefined,
 			fenced: (_conversation, on) => { fenced.push(on); },
 			check: (_token, phase) => { checks.push(phase); return checkAnswer; },
 			prepare: async () => { order.push("prepare"); },
@@ -203,8 +203,9 @@ describe("the admission fence", () => {
 		let first = true;
 		const failing = new mod.LocalTransitions({
 			index: {} as never,
+			records: { get: () => f.record } as never,
 			window: {
-				record: () => f.record, fenced: () => { if (first) { first = false; throw new Error("projection failed"); } },
+				fenced: () => { if (first) { first = false; throw new Error("projection failed"); } },
 				check: () => true, prepare: async () => undefined, endTerminal: () => undefined, stopped: () => undefined,
 			},
 			chat: { sessionOf: () => null, release: () => undefined }, stop: {} as never,

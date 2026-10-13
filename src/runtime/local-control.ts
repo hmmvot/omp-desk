@@ -31,7 +31,7 @@ import type { SessionHostRuntime } from "../host/native-session.ts";
 import type { SessionIndex } from "../host/session-index.ts";
 import type { SessionIndexEntry } from "../host/session-model.ts";
 import type { NativeControlBootstrap } from "../host/native-terminal.ts";
-import type { RuntimeRecord } from "./runtime-record.ts";
+import type { RuntimeRecord, RuntimeRecords } from "./runtime-record.ts";
 
 const CONTROL_RENDEZVOUS_TIMEOUT_MS = 15_000;
 const NATIVE_CONTROL_RENDEZVOUS_TIMEOUT_MS = 60_000;
@@ -99,8 +99,6 @@ export interface ControlStore {
 
 /** What host control asks of its window; in-process only (design §2.5). */
 export interface ControlWindow {
-	/** The window's record of one conversation, or `undefined` when it has none. Read, never created. */
-	record(conversation: string): RuntimeRecord | undefined;
 	/** A verified channel was published for this conversation; `subagents` asks for the registry subagent watch. Runs under the gate. */
 	published(conversation: string, client: HostControlClient, subagents: boolean): void;
 }
@@ -108,6 +106,7 @@ export interface ControlWindow {
 export interface LocalHostControlDeps {
 	readonly index: SessionIndex;
 	readonly window: ControlWindow;
+	readonly records: RuntimeRecords;
 	readonly store: ControlStore;
 	readonly chat: () => Pick<ChatRuntime, "sessionOf">;
 	readonly diagnostics: () => DiagnosticsRecorder;
@@ -222,7 +221,7 @@ export class LocalHostControl {
 			const session = this.#deps.chat().sessionOf(tabId);
 			if (session === null) return;
 			await session.start();
-			if (this.#deps.chat().sessionOf(tabId) !== session || session.phase !== "live" || window.record(tabId)?.runtime !== runtime) return;
+			if (this.#deps.chat().sessionOf(tabId) !== session || session.phase !== "live" || this.#deps.records.get(tabId)?.runtime !== runtime) return;
 		}
 		// The pinned generation is read with the same helper the control client later compares it
 		// with, so the two readings are the same kind of value.
@@ -245,7 +244,7 @@ export class LocalHostControl {
 			subagents: true,
 		};
 		const recorded = await index.lifecycle.run(tabId, async () => {
-			if (window.record(tabId)?.runtime !== runtime) return false;
+			if (this.#deps.records.get(tabId)?.runtime !== runtime) return false;
 			await store.setRecord(controlProcessRecordKey(ownerGeneration), record);
 			return true;
 		});
@@ -318,7 +317,7 @@ export class LocalHostControl {
 		// Read, never create: evaluating a stale completion must not bring a tab back. A
 		// held channel that has closed proves nothing, so it counts as no channel: the tab's
 		// next attempt must not be blocked by a dead one.
-		const state = this.#deps.window.record(tabId);
+		const state = this.#deps.records.get(tabId);
 		if (state === undefined) return null;
 		const held = state.control?.client ?? null;
 		return {
@@ -336,7 +335,7 @@ export class LocalHostControl {
 	): Promise<void> {
 		const { index, window, store, log } = this.#deps;
 		const diagnostics = this.#deps.diagnostics();
-		const runtime = window.record(tabId)?.runtime;
+		const runtime = this.#deps.records.get(tabId)?.runtime;
 		const stillCurrent = (): boolean =>
 			mayReportControlFailure(this.#attemptTarget(tabId), { runtime: attempt.runtime, pid: attempt.pid, client: null }) &&
 			(runtime?.kind !== "terminal" || !runtime.stopping);
@@ -405,7 +404,7 @@ export class LocalHostControl {
 			// process must never be published into its successor's tab — nor over a channel a
 			// newer attempt already established.
 			await index.lifecycle.run(tabId, async () => {
-				const state = window.record(tabId);
+				const state = this.#deps.records.get(tabId);
 				if (
 					state === undefined ||
 					!mayPublishControlChannel(this.#attemptTarget(tabId), { runtime: attempt.runtime, pid: attempt.pid, client: verified.client })
@@ -449,7 +448,7 @@ export class LocalHostControl {
 	 */
 	async release(conversation: string, ownerGeneration: string | null): Promise<void> {
 		const { store, window, log } = this.#deps;
-		const state = window.record(conversation);
+		const state = this.#deps.records.get(conversation);
 		if (state) {
 			state.control?.client.close();
 			state.control = null;
@@ -487,7 +486,7 @@ export class LocalHostControl {
 
 	/** Close the conversation's channel and record why host control is unavailable. */
 	fail(conversation: string, detail: string): void {
-		const state = this.#deps.window.record(conversation);
+		const state = this.#deps.records.get(conversation);
 		if (state) {
 			state.control?.client.close();
 			state.control = null;

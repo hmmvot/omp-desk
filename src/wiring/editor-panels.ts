@@ -25,6 +25,7 @@ import { createToken } from "../protocol/bridge-protocol.ts";
 import type { GuestPanelActionMessage } from "../protocol/messages.ts";
 import { persistedTabId } from "../shared/panel-identity.ts";
 import { sessionHeadline } from "../views/session-tree.ts";
+import type { RuntimeRecords } from "../runtime/runtime-record.ts";
 import type { BridgeHost, BridgeTab } from "./bridge-host.ts";
 import type { CarriedDraft, GuestDispatcher } from "./guest-dispatcher.ts";
 import type { WindowRouting } from "./window-routing.ts";
@@ -88,6 +89,8 @@ export interface EditorWindowFacts<Tab extends EditorPanelsTab> {
 	tab(key: string | null): Tab | undefined;
 	/** The record of an editor slot, created empty when the window has none. */
 	tabState(key: string): Tab;
+	/** The runtime's record of each conversation, for the process an editor is shown. */
+	records(): RuntimeRecords;
 	/** The one-winner reservation table of this window's editors. */
 	editors(): EditorCoordinator;
 	/** Editor ids present in this window's actual editor membership right now. */
@@ -419,7 +422,7 @@ export function registerEditorPanels<Tab extends EditorPanelsTab>(deps: EditorPa
 			"passive",
 			role === "passive" ? deps.slotReasons.passive : deps.slotReasons.electing,
 		);
-		if (origin === "restored") state.mode = state.runtime?.kind ?? index.slotBinding(slot)?.mode ?? deps.defaultSessionMode(context);
+		if (origin === "restored") state.mode = deps.records().get(state.tabId)?.runtime?.kind ?? index.slotBinding(slot)?.mode ?? deps.defaultSessionMode(context);
 		// The durable binding is what a later restore resolves its conversation *and* its
 		// role from, so it is written as soon as the editor becomes a chat surface. A
 		// controlling binding demotes its rivals durably; a passive one only records this
@@ -454,7 +457,8 @@ export function registerEditorPanels<Tab extends EditorPanelsTab>(deps: EditorPa
 				.catch(error => deps.log(`slot ${slot}: its editor-slot binding could not be persisted (${messageOf(error)})`)),
 		);
 		state.panel = panel;
-		if (state.runtime?.kind === "terminal") deps.ensureTerminalPipeline(index, slot, state.runtime.handle);
+		const hosted = deps.records().get(state.tabId)?.runtime;
+		if (hosted?.kind === "terminal") deps.ensureTerminalPipeline(index, slot, hosted.handle);
 		state.origin = origin;
 		// The tab now says what this editor shows. This is the one place a chat panel
 		// becomes a surface, and a restored editor carries no icon and may carry a name

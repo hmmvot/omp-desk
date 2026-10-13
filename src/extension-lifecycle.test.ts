@@ -154,10 +154,12 @@ export const harness = {
   connectHostControl: (context, _index, tabId, owner, runtime, prepared) => { fixtureWindow().context = context; return fixtureWindow().sessionRuntime.control.connect(tabId, owner, runtime, prepared); },
   reconnectHostControl: (context, _index, tabId, owner, runtime) => { fixtureWindow().context = context; return fixtureWindow().sessionRuntime.control.reconnect(tabId, owner, runtime); },
   establishControl: (context, _index, tabId, owner, attempt, input) => { fixtureWindow().context = context; return fixtureWindow().sessionRuntime.control.establish(tabId, owner, attempt, input); },
-  startNativeWatch: (_index, state, native) => fixtureWindow().sessionRuntime.nativeWatch.start(state, native),
-  handleNativeHostExited: (_index, state, native) => fixtureWindow().sessionRuntime.exit.nativeExited(state, native),
+  startNativeWatch: (_index, state, native) => fixtureWindow().sessionRuntime.nativeWatch.start(recordFor(state), native),
+  handleNativeHostExited: (_index, state, native) => fixtureWindow().sessionRuntime.exit.nativeExited(recordFor(state), native),
   bindConversationIdentity: (_index, tabId, runtime, file, sessionId, previous) => fixtureWindow().sessionRuntime.identity.bind(tabId, runtime, file, sessionId, previous),
   retryPendingIdentity: (_index, tabId) => fixtureWindow().sessionRuntime.identity.retry(tabId),
+  /** The runtime's record of the conversation an editor shows: its process, control channel, fence and failure. */
+  record: recordFor,
   handleRestoreOutcome, renameSession, reloadSession, handleGuestControlRequest, panelResponder,
   switchSessionMode, restartChat, openSessionInMode, defaultSessionMode, chooseDefaultSessionView, newSession, startNewSession,
   newSessionInPlace, deleteSessionInPlace,
@@ -258,7 +260,7 @@ export const harness = {
     const w = fixtureWindow();
     w.context = context;
     w.reconciler = createOwnerReconciler(ports);
-    const runtimeDeps = sessionRuntimeDeps(w.indexForBridge, w.sessionRuntime.chat, () => hostLauncher);
+    const runtimeDeps = sessionRuntimeDeps(w.indexForBridge, w.sessionRuntime.chat, () => hostLauncher, w.sessionRuntime.records);
     // The broker facts of the fixture's rows come in through the runtime's deps, not by reassigning a function of the module.
     w.sessionRuntime = new LocalSessionRuntime({
       ...runtimeDeps,
@@ -332,18 +334,22 @@ harness.installWindow(createWindowState(fixtureContext));`;
 
 interface State {
   mode: "chat" | "terminal";
-  transitioning: boolean;
   tabId: string | null;
   slotId: string;
-  runtime: unknown;
   pipeline: { dispose(): void; readonly generation?: string } | null;
-  nativeWatch: (() => void) | null;
-  control: { client: unknown; snapshot: unknown; activity?: boolean; work?: boolean } | null;
-  controlFailure: string | null;
   bridge: { documentId: string; bound: boolean } | null;
   panel?: unknown;
   document?: unknown;
   lastOpenRequest?: number;
+}
+/** What the runtime holds for one conversation, as the cases see it. */
+interface RecordFixture {
+  transitioning: boolean;
+  runtime: unknown;
+  nativeWatch: (() => void) | null;
+  control: { client: unknown; snapshot: unknown; activity?: boolean; work?: boolean } | null;
+  controlFailure: string | null;
+  endedNotice: string | null;
 }
 interface ProviderModelIndexFixture {
   get(): { tabId: string; cwd: string; scope: { profile: string | null } };
@@ -398,6 +404,7 @@ interface Harness {
   installWindow(next: unknown): void;
   createWindowState(context: unknown): unknown;
   window(): WindowFixture;
+  record(state: State): RecordFixture;
   state(tabId: string): State;
   editor(index: unknown, endpoint: unknown, panel: unknown, editorId?: string, tabId?: string): State;
   connectHostControl(...args: unknown[]): Promise<void>;
@@ -710,7 +717,7 @@ describe("desktop protocol activation", () => {
     const restore = harness.desktopEnvironment({ extension: { id: "hmmvot.omp-desk" } });
     try {
       const state = harness.state(TAB);
-      state.runtime = native;
+      harness.record(state).runtime = native;
       const revealed: unknown[][] = [];
       state.panel = { viewColumn: 2, reveal: (...args: unknown[]) => revealed.push(args) };
       harness.notifierFor(index).notify(TAB, { kind: "turn-complete", outcome: null });
@@ -726,7 +733,7 @@ describe("desktop protocol activation", () => {
       assert.equal(routed.searchParams.get("windowId"), "9471");
       await harness.revealDesktopNotification(index, "hmmvot.omp-desk", URI.parse(routed.href));
       assert.deepEqual(revealed, [[2, false]]);
-      assert.equal(state.runtime, native);
+      assert.equal(harness.record(state).runtime, native);
       assert.equal(index.row.runIntent, "running");
     } finally { restore(); }
   });
@@ -734,14 +741,14 @@ describe("desktop protocol activation", () => {
     const native = runtime(825); const index = indexFixture(native);
     harness.reset(index, null);
     const state = harness.state(TAB);
-    state.runtime = native;
+    harness.record(state).runtime = native;
     const revealed: unknown[][] = [];
     const panel = { viewColumn: 2, reveal: (...args: unknown[]) => revealed.push(args) };
     state.panel = panel;
     const uri = { authority: "hmmvot.omp-desk", path: "/reveal", query: `session=${encodeURIComponent(TAB)}&windowId=ignored` };
     await harness.revealDesktopNotification(index, "hmmvot.omp-desk", uri);
     assert.deepEqual(revealed, [[2, false]]);
-    assert.equal(state.runtime, native);
+    assert.equal(harness.record(state).runtime, native);
     assert.equal(index.row.runIntent, "running");
     for (const invalid of [
       { ...uri, authority: "other.extension" },
@@ -752,7 +759,7 @@ describe("desktop protocol activation", () => {
     ]) await harness.revealDesktopNotification({ ...index, get: (id: string) => id === TAB ? index.row : null }, "hmmvot.omp-desk", invalid);
     await harness.revealDesktopNotification({ ...index, get: () => null }, "hmmvot.omp-desk", uri);
     assert.deepEqual(revealed, [[2, false]]);
-    assert.equal(state.runtime, native);
+    assert.equal(harness.record(state).runtime, native);
     assert.equal(index.row.runIntent, "running");
   });
 
@@ -761,7 +768,7 @@ describe("desktop protocol activation", () => {
     harness.reset(index, null);
     const state = harness.state(TAB);
     const initialPanel = state.panel;
-    state.runtime = native;
+    harness.record(state).runtime = native;
     const item = { tabId: TAB };
     let selected: unknown = null;
     let focused = false;
@@ -779,7 +786,7 @@ describe("desktop protocol activation", () => {
       assert.equal(selected, item);
       assert.equal(focused, true);
       assert.equal(state.panel, initialPanel);
-      assert.equal(state.runtime, native);
+      assert.equal(harness.record(state).runtime, native);
       assert.equal(index.row.runIntent, "running");
       selected = null;
       setLauncherTree({ itemFor: async () => { present = false; return item; }, sessionRowsShown: () => true, processItemFor: () => undefined }, {
@@ -787,7 +794,7 @@ describe("desktop protocol activation", () => {
       });
       await harness.revealDesktopNotification(rowIndex, "hmmvot.omp-desk", uri);
       assert.equal(selected, null);
-      assert.equal(state.runtime, native);
+      assert.equal(harness.record(state).runtime, native);
       assert.equal(index.row.runIntent, "running");
     } finally { setLauncherTree(undefined, undefined); }
   });
@@ -810,7 +817,7 @@ describe("focused-window hidden Chat notifications", () => {
     harness.reset(index, host);
     const restore = harness.desktopEnvironment(context);
     const state = harness.state(TAB);
-    state.runtime = native;
+    harness.record(state).runtime = native;
     const panel = { title: "Hidden Chat", visible: true, webview: { postMessage: async () => true } };
     state.panel = panel;
     try {
@@ -849,7 +856,7 @@ describe("footer host readback", () => {
     const rendered = new ChatClient({ post: () => true });
     harness.reset(index, host);
     const state = harness.state(TAB);
-    state.runtime = native;
+    harness.record(state).runtime = native;
     const panel = { webview: { postMessage: async () => true } };
     state.panel = panel;
     host.attachPage(TAB, { id: "status-footer", post: message => { rendered.handle(message); return "sent"; } });
@@ -949,7 +956,7 @@ describe("footer host readback", () => {
     const host = new ChatRuntime({ hostNonce: "provider-models", onEvent: () => {},
       createSession: options => new RpcSession({ ...options, timers: new ManualTimers() }) });
     harness.reset(index, host);
-    const state = harness.state(TAB); state.runtime = native;
+    const state = harness.state(TAB); harness.record(state).runtime = native;
     const messages: unknown[] = [];
     const panel = { webview: { postMessage: async (message: unknown) => { messages.push(message); return true; } } };
     state.panel = panel;
@@ -1011,7 +1018,7 @@ describe("footer host readback", () => {
     resources.push(endpoint);
     assert.ok(await endpoint.beginDocument(DOCUMENT, "d".repeat(32)));
     const state = harness.editor(index, endpoint, panel);
-    state.runtime = native;
+    harness.record(state).runtime = native;
     const subscriptions: { dispose(): void }[] = [];
     harness.subscribeProviderLoginRefresh({ subscriptions }, index);
     const command = { type: "omp:chat-command", command: "provider-login" };
@@ -1027,7 +1034,7 @@ describe("footer host readback", () => {
       await harness.handlePassiveSlotMessage(EDITOR, panel, { ...command, command: "cycle-model" });
       assert.equal(fixture.logins.length, 1, "a stale panel, injected scope or model command cannot launch login even with the guard released");
       assert.equal(index.row.runIntent, "running");
-      assert.equal(state.runtime, native);
+      assert.equal(harness.record(state).runtime, native);
       assert.equal(host.sessionOf(TAB), null);
     } finally {
       harness.closeLoginTerminal("omp login"); host.dispose(); endpoint.close(); await harness.providerModelsIdle();
@@ -1057,7 +1064,7 @@ describe("footer host readback", () => {
     assert.equal(endpoint.pinOrigin(DOCUMENT, ORIGIN), true);
     const delivery = await endpoint.commit(nativeBinding(native)); assert.ok(delivery);
     const state = harness.editor(index, endpoint, harness.createPanel());
-    state.runtime = native;
+    harness.record(state).runtime = native;
     endpoint.nativeReady(true); assert.ok(endpoint.offerBridge());
     const subscriptions: { dispose(): void }[] = [];
     harness.subscribeProviderLoginRefresh({ subscriptions }, index);
@@ -1125,7 +1132,7 @@ describe("footer host readback", () => {
       assert.equal(bindingMatches(endpoint.committedBinding()!, nativeBinding(native)), true);
       assert.equal(index.row.runIntent, "running");
       assert.equal(index.row.ownership.ownerGeneration, OWNER);
-      assert.equal(state.runtime, native);
+      assert.equal(harness.record(state).runtime, native);
       assert.equal(native.handle.state, "running");
       assert.equal(host.sessionOf(TAB), null, "login neither creates a conversation nor dispatches a prompt");
     } finally {
@@ -1363,13 +1370,13 @@ describe("native replacement lifecycle", () => {
     const saved = storage(); const native = runtime(707); const index = indexFixture(native);
     native.handle.stop = async () => ({ pidGone: false, verified: false, tree: "unknown", nativePid: native.pid, remainingPids: [], detail: "writer remains uncertain" });
     harness.reset(index, conversation({ phase: "live", start: async () => undefined }));
-    harness.state(TAB).runtime = native;
+    harness.record(harness.state(TAB)).runtime = native;
     saved.secrets.set(KEY, "still-held-key"); saved.secrets.set(RECIPIENT, "still-held-recipient");
     await harness.closeSession(saved.context, index, TAB);
     assert.equal(saved.secrets.get(KEY), "still-held-key");
     assert.equal(saved.secrets.get(RECIPIENT), "still-held-recipient");
     assert.equal(index.row.runIntent, "running");
-    assert.equal(harness.state(TAB).runtime, native);
+    assert.equal(harness.record(harness.state(TAB)).runtime, native);
   });
 
   it("closes a session whose broker and OMP process were already ended elsewhere, without a Force Stop", async () => {
@@ -1381,11 +1388,11 @@ describe("native replacement lifecycle", () => {
     };
     harness.reset(index, conversation({ phase: "live", start: async () => undefined })); harness.window().context = saved.context;
     harness.window().rootGone = async root => root.pid === native.pid;
-    harness.state(TAB).runtime = native;
+    harness.record(harness.state(TAB)).runtime = native;
     saved.secrets.set(KEY, "ended-key"); saved.secrets.set(RECIPIENT, "ended-recipient");
     await harness.closeSession(saved.context, index, TAB);
     assert.equal(index.row.runIntent, "stopped");
-    assert.equal(harness.state(TAB).runtime, null);
+    assert.equal(harness.record(harness.state(TAB)).runtime, null);
     assert.equal(saved.secrets.has(KEY), false);
     assert.equal(stops, 1, "an ended process is stopped by the first attempt; no Force Stop follows");
   });
@@ -1397,7 +1404,7 @@ describe("native replacement lifecycle", () => {
     const initialized = Promise.withResolvers<void>();
     const session = { phase: "attaching", start: () => initialized.promise };
     harness.reset(index, conversation(session)); harness.window().context = saved.context;
-    harness.state(TAB).runtime = old;
+    harness.record(harness.state(TAB)).runtime = old;
     saved.secrets.set(KEY, "old-native-key"); saved.secrets.set(RECIPIENT, "old-recipient");
     saved.records.set(RECORD, { pid: old.pid, slotId: "old-control-slot" });
     await harness.closeSession(saved.context, index, TAB);
@@ -1407,7 +1414,7 @@ describe("native replacement lifecycle", () => {
     assert.equal(index.row.runIntent, "stopped");
 
     const resumed = runtime(202);
-    harness.state(TAB).runtime = resumed;
+    harness.record(harness.state(TAB)).runtime = resumed;
     saved.secrets.set(RECIPIENT, "new-recipient");
     let attempts = 0;
     harness.controlClient.connectWithProvenKey = async () => null;
@@ -1426,10 +1433,10 @@ describe("native replacement lifecycle", () => {
     session.phase = "live"; initialized.resolve(); await pending;
     assert.equal(saved.secrets.get(KEY), "new-native-key");
     harness.reset(index, conversation(session)); // extension-host restart; same surviving native process
-    harness.state(TAB).runtime = resumed;
+    harness.record(harness.state(TAB)).runtime = resumed;
     await harness.reconnectHostControl(saved.context, index, TAB, OWNER, resumed);
     assert.equal(attempts, 2);
-    assert.notEqual(harness.state(TAB).control, null);
+    assert.notEqual(harness.record(harness.state(TAB)).control, null);
   });
 
   it("connects a slow-starting native once and reconnects after the verified channel closes", async t => {
@@ -1437,7 +1444,7 @@ describe("native replacement lifecycle", () => {
     const native = { ...runtime(909), kind: "terminal" as const, stopping: false };
     const index = indexFixture(native);
     harness.reset(index, conversation({ phase: "live", start: async () => undefined }));
-    harness.state(TAB).runtime = native;
+    harness.record(harness.state(TAB)).runtime = native;
     const owner = `native.${native.identity.slot}`;
     saved.secrets.set(`omp.hostControl.recipient.${owner}`, "native-recipient");
     t.mock.timers.enable({ apis: ["Date"], now: 0 });
@@ -1461,13 +1468,13 @@ describe("native replacement lifecycle", () => {
       await nextTurn();
       const simultaneousRecovery = harness.reconnectHostControl(saved.context, index, TAB, OWNER, native);
       await Promise.all([launch, simultaneousRecovery]);
-      assert.equal(harness.state(TAB).control?.client, initial, "late readiness must publish a verified channel");
-      assert.equal(harness.state(TAB).controlFailure, null);
+      assert.equal(harness.record(harness.state(TAB)).control?.client, initial, "late readiness must publish a verified channel");
+      assert.equal(harness.record(harness.state(TAB)).controlFailure, null);
       assert.equal(connections, 1, "a recovery request must join startup instead of opening a competing channel");
       initial.close();
       await harness.reconnectHostControl(saved.context, index, TAB, OWNER, native);
-      assert.equal(harness.state(TAB).control?.client, recovered, "a closed channel must not block recovery");
-      assert.equal(harness.state(TAB).controlFailure, null);
+      assert.equal(harness.record(harness.state(TAB)).control?.client, recovered, "a closed channel must not block recovery");
+      assert.equal(harness.record(harness.state(TAB)).controlFailure, null);
       assert.equal(saved.secrets.get(`omp.hostControl.key.${owner}`), "native-key");
     } finally {
       delete globals.__controlReadiness;
@@ -1484,7 +1491,7 @@ describe("native replacement lifecycle", () => {
     const index = indexFixture(native);
     harness.reset(index, conversation({ phase: "live", start: async () => undefined }));
     const state = harness.state(TAB);
-    state.runtime = native;
+    harness.record(state).runtime = native;
     const restore = harness.desktopEnvironment(saved.context);
     const owner = `native.${native.identity.slot}`;
     saved.secrets.set(`omp.hostControl.recipient.${owner}`, "watch-recipient");
@@ -1508,17 +1515,17 @@ describe("native replacement lifecycle", () => {
       harness.startNativeWatch(index, state, native);
       await nextTurn();
       t.mock.timers.tick(5_000); await nextTurn();
-      assert.equal(state.control?.client, initial, "the native watch must connect when startup had no channel");
+      assert.equal(harness.record(state).control?.client, initial, "the native watch must connect when startup had no channel");
       initial.close();
       t.mock.timers.tick(5_000); await nextTurn();
-      assert.equal(state.control?.client, recovered, "a dropped channel must reconnect without an explicit user action");
+      assert.equal(harness.record(state).control?.client, recovered, "a dropped channel must reconnect without an explicit user action");
       t.mock.timers.tick(750); await nextTurn();
       assert.equal(native.observed, facts, "an older host remains observable without unsupported completion-journal requests");
-      assert.equal(state.runtime, native);
+      assert.equal(harness.record(state).runtime, native);
       assert.equal(index.row.runIntent, "running");
       assert.deepEqual(harness.desktopPayloads(), [], "legacy state observations are not completion signals");
     } finally {
-      state.nativeWatch?.(); initial.close(); recovered.close(); restore();
+      harness.record(state).nativeWatch?.(); initial.close(); recovered.close(); restore();
       harness.forgetTurnActivity(index, TAB);
     }
   });
@@ -1529,7 +1536,7 @@ describe("native replacement lifecycle", () => {
     const index = indexFixture(native);
     harness.reset(index, conversation({ phase: "live", start: async () => undefined }));
     const state = harness.state(TAB);
-    state.runtime = native;
+    harness.record(state).runtime = native;
     const owner = `native.${native.identity.slot}`;
     saved.secrets.set(`omp.hostControl.recipient.${owner}`, "reload-recipient");
     saved.secrets.set(`omp.hostControl.key.${owner}`, "proven-native-key");
@@ -1549,8 +1556,8 @@ describe("native replacement lifecycle", () => {
     try {
       // Reload Window: the record was overwritten by an older host's subagent server.
       await harness.reconnectHostControl(saved.context, index, TAB, OWNER, native);
-      assert.equal(state.control?.client, clients[0]);
-      assert.equal(state.controlFailure, null);
+      assert.equal(harness.record(state).control?.client, clients[0]);
+      assert.equal(harness.record(state).controlFailure, null);
       assert.deepEqual(seen[0], { provenKey: "proven-native-key", preferredPipeName: "subagent-pipe" });
       assert.equal(saved.secrets.get(`omp.hostControl.key.${owner}`), "proven-native-key", "the pinned key is unchanged");
 
@@ -1558,8 +1565,8 @@ describe("native replacement lifecycle", () => {
       clients[0]!.close();
       record = null;
       await harness.reconnectHostControl(saved.context, index, TAB, OWNER, native);
-      assert.equal(state.control?.client, clients[1], "a missing record must not strand a host that is alive");
-      assert.equal(state.controlFailure, null);
+      assert.equal(harness.record(state).control?.client, clients[1], "a missing record must not strand a host that is alive");
+      assert.equal(harness.record(state).controlFailure, null);
       assert.equal(seen[1]?.preferredPipeName, undefined);
     } finally {
       delete globals.__controlReadiness;
@@ -1573,7 +1580,7 @@ describe("native replacement lifecycle", () => {
     const index = indexFixture(native);
     harness.reset(index, conversation({ phase: "live", start: async () => undefined }));
     const state = harness.state(TAB);
-    state.runtime = native;
+    harness.record(state).runtime = native;
     const owner = `native.${native.identity.slot}`;
     saved.secrets.set(`omp.hostControl.recipient.${owner}`, "rotation-recipient");
     saved.secrets.set(`omp.hostControl.key.${owner}`, "proven-native-key");
@@ -1600,27 +1607,27 @@ describe("native replacement lifecycle", () => {
       globals.__controlReadiness = () => ({ pipeName: "rotated-pipe" });
       await harness.reconnectHostControl(saved.context, index, TAB, OWNER, native);
       assert.deepEqual(provenKeys, [], "a rotation is not offered while the pinned server may still exist");
-      assert.notEqual(state.controlFailure, null);
+      assert.notEqual(harness.record(state).controlFailure, null);
 
       probe = "absent";
       await harness.reconnectHostControl(saved.context, index, TAB, OWNER, native);
       assert.deepEqual(provenKeys, ["proven-native-key"], "a rotation is only offered against the key pinned for this launch");
-      assert.equal(state.control?.client, rotatedClient);
+      assert.equal(harness.record(state).control?.client, rotatedClient);
       assert.equal(saved.secrets.get(`omp.hostControl.key.${owner}`), "rotated-key", "the proven rotation is pinned");
 
       // The host stops answering and publishes nothing: one clear line, with a way out.
       rotatedClient.close();
       globals.__controlReadiness = () => { t.mock.timers.tick(20_000); return null; };
       await harness.reconnectHostControl(saved.context, index, TAB, OWNER, native);
-      assert.equal(state.control, null);
-      assert.match(state.controlFailure ?? "", /^Host control lost: .* Reload the session to restore them\.$/);
-      assert.doesNotMatch(state.controlFailure ?? "", /\n|has not published/);
+      assert.equal(harness.record(state).control, null);
+      assert.match(harness.record(state).controlFailure ?? "", /^Host control lost: .* Reload the session to restore them\.$/);
+      assert.doesNotMatch(harness.record(state).controlFailure ?? "", /\n|has not published/);
 
       // Not sticky: as soon as the host's server answers the proven key, the state clears.
       probe = "attached";
       await harness.reconnectHostControl(saved.context, index, TAB, OWNER, native);
-      assert.equal(harness.state(TAB).control?.client, recoveredClient);
-      assert.equal(harness.state(TAB).controlFailure, null);
+      assert.equal(harness.record(harness.state(TAB)).control?.client, recoveredClient);
+      assert.equal(harness.record(harness.state(TAB)).controlFailure, null);
     } finally {
       delete globals.__controlReadiness;
       rotatedClient.close(); recoveredClient.close();
@@ -1630,7 +1637,7 @@ describe("native replacement lifecycle", () => {
   it("never resurrects a stopped process's key when its snapshot finishes after a successor took the tab", async () => {
     const saved = storage(); const old = runtime(303); const successor = runtime(404); const index = indexFixture(old);
     harness.reset(index, conversation({ phase: "live", start: async () => undefined }));
-    harness.state(TAB).runtime = old;
+    harness.record(harness.state(TAB)).runtime = old;
     const pendingSnapshot = Promise.withResolvers<unknown>();
     const readStarted = Promise.withResolvers<void>();
     const oldClient = client(pendingSnapshot.promise);
@@ -1640,13 +1647,13 @@ describe("native replacement lifecycle", () => {
     const pending = harness.establishControl(saved.context, index, TAB, OWNER, { runtime: old, pid: old.pid }, { directory: root, slotId: "old-slot" });
     await readStarted.promise;
     await index.lifecycle.run(TAB, async () => {
-      harness.state(TAB).runtime = successor;
+      harness.record(harness.state(TAB)).runtime = successor;
       saved.secrets.set(KEY, "successor-key");
     });
     pendingSnapshot.resolve(snapshot); await pending;
     assert.equal(saved.secrets.get(KEY), "successor-key");
     assert.equal(oldClient.closed, true);
-    assert.equal(harness.state(TAB).control, null);
+    assert.equal(harness.record(harness.state(TAB)).control, null);
   });
 
   it("panel route handshakes quiesce and replacement still fences the old writer", async () => {
@@ -1828,7 +1835,7 @@ describe("native replacement lifecycle", () => {
       harness.window().context = saved.context;
       const panel = { reveal() {}, viewType: "omp.session", webview: { html: "", cspSource: "vscode-webview://test",
         asWebviewUri: (uri: unknown) => uri, postMessage: async () => true } };
-      const priorEditor = harness.editor(index, first, panel); priorEditor.runtime = native;
+      const priorEditor = harness.editor(index, first, panel); harness.record(priorEditor).runtime = native;
       let documentId: string;
       let delivery: BridgeBootstrapDelivery;
       let survivor: NativeFixture = native;
@@ -1869,7 +1876,7 @@ describe("native replacement lifecycle", () => {
         const committed = await first.delivery(); assert.ok(committed); delivery = committed;
         assert.equal(bindingMatches(first.committedBinding()!, nativeBinding(resumed)), true);
         survivor = resumed;
-        priorEditor.runtime = resumed;
+        harness.record(priorEditor).runtime = resumed;
       } finally { oldHost.dispose(); first.close(); }
       const oldEpoch = rendered.getSnapshot().epoch;
       const newHost = makeRuntime("new-host");
@@ -1898,7 +1905,7 @@ describe("native replacement lifecycle", () => {
       resources.push(restarted);
       harness.reset(index, newHost);
       harness.window().context = saved.context;
-      const state = harness.editor(index, restarted, null); state.runtime = survivor;
+      const state = harness.editor(index, restarted, null); harness.record(state).runtime = survivor;
       state.bridge!.documentId = documentId;
       try {
         assert.equal(await restarted.bind(), port);
@@ -2277,7 +2284,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			if (reportedSessionId === undefined) assert.ok(await endpoint.commit({ ...nativeBinding({ ...native, sessionFile: file }), ownerGeneration: index.get(row.tabId)!.ownership!.ownerGeneration, sessionId: "mode-session" }));
 		}
 		const state = endpoint === null ? harness.state(row.tabId) : harness.editor(index, endpoint, panels, EDITOR, row.tabId);
-		state.panel = panels; state.runtime = native; state.mode = mode;
+		state.panel = panels; harness.record(state).runtime = native; state.mode = mode;
 		const dialogs = harness.policy(saved.context, {
 			readProcessIdentity: async () => ({ kind: "gone" }), isProcessAlive: () => false,
 			probeRpc: async () => ({ kind: "unreachable", reason: "gone" }), brokerProvenance: () => ({ kind: "none" }),
@@ -2291,7 +2298,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			if (publishNative) {
 				await harness.handleTerminalGuestMessage(row.tabId, { type: "omp:terminal-attach" }, { generation: null, cols: 80, rows: 24 });
 				await harness.startConversation(index, row.tabId, next, file, false);
-			} else state.runtime = next;
+			} else harness.record(state).runtime = next;
 			return { state: "running", host: { ...host, pid: next.pid, rpc: { ...next.identity, brokerPid: 40000, brokerCreationTime: "broker-creation", childPid: next.pid },
 				transport: request.transport, sessionId: request.sessionId ?? "fresh-mode-session" } };
 		}, attach: async () => ({ state: "unavailable", reason: "not needed" }) }, {});
@@ -2314,7 +2321,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			nativeShutdown: async (target: unknown, consent: boolean) => { shutdowns.push({ target, consent }); native.exit(); return "accepted"; },
 			nativeRename: async (_target: unknown, name: string) => { facts.name = name; return "renamed"; },
 		};
-		f.state.control = { client: control, snapshot: null };
+		harness.record(f.state).control = { client: control, snapshot: null };
 		return { facts, shutdowns, control };
 	}
 
@@ -2372,7 +2379,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			await harness.restartChat(f.saved.context, f.index, f.row.tabId, f.session.epoch.nonce);
 			assert.equal((await f.native.handle.refreshStatus()).state, "running");
 			assert.equal(f.state.document, f.sourceDocument);
-			assert.equal(f.state.transitioning, false);
+			assert.equal(harness.record(f.state).transitioning, false);
 			assert.equal(f.launches(), 0);
 			assert.equal(harness.restoredDraft(f.state.slotId), null);
 			const requests = f.panels.messages as { type: string; requestId?: number }[];
@@ -2388,7 +2395,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			assert.equal(f.state.document, f.sourceDocument);
 			assert.equal(f.launches(), 0);
 			assert.equal(f.dialogs.filter(dialog => dialog.action === "Restart").length, 0);
-			assert.equal(f.state.transitioning, false);
+			assert.equal(harness.record(f.state).transitioning, false);
 		} finally { f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true }); }
 	});
 
@@ -2436,7 +2443,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			const stop = f.native.handle.stop;
 			let forced = false;
 			f.native.handle.stop = async (...args: unknown[]) => {
-				assert.equal(f.state.runtime, f.native, "only the captured child is stopped");
+				assert.equal(harness.record(f.state).runtime, f.native, "only the captured child is stopped");
 				const options = args[0] as { mode: string };
 				assert.equal(options.mode, "force");
 				forced = true;
@@ -2536,10 +2543,10 @@ describe("same-editor Chat and native Terminal actions", () => {
 			f.native.handle.stop = async () => ({ pidGone: false, verified: false, tree: "unknown", nativePid: f.native.pid, remainingPids: [], detail: "still running" });
 			await harness.restartChat(f.saved.context, f.index, f.row.tabId, f.session.epoch.nonce);
 			assert.equal(f.launches(), 0);
-			assert.equal(f.state.runtime, f.native);
+			assert.equal(harness.record(f.state).runtime, f.native);
 			assert.equal(f.state.document, f.sourceDocument);
-			assert.equal(f.state.transitioning, true);
-			assert.ok(f.state.controlFailure);
+			assert.equal(harness.record(f.state).transitioning, true);
+			assert.ok(harness.record(f.state).controlFailure);
 			assert.ok((f.panels.messages as { type: string }[]).some(item => item.type === "omp:draft-release"));
 		} finally { f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true }); }
 	});
@@ -2547,7 +2554,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 	it("publishes native start admission before a delayed restore and clears it after failure", async () => {
 		const f = await fixture();
 		const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
-		f.state.runtime = null;
+		harness.record(f.state).runtime = null;
 		f.native.exit();
 		f.index.restore = async () => {
 			entered.resolve();
@@ -2573,13 +2580,13 @@ describe("same-editor Chat and native Terminal actions", () => {
 	it("leaves the view of a session alone that another launch brought up while a launch another window asked for waited on it", async () => {
 		const f = await fixture();
 		const entered = Promise.withResolvers<void>(), release = Promise.withResolvers<void>();
-		f.state.runtime = null;
+		harness.record(f.state).runtime = null;
 		f.state.panel = null;
 		f.native.exit();
 		f.index.restore = async () => {
 			entered.resolve();
 			await release.promise;
-			f.state.runtime = { ...runtime(41777), kind: "chat", sessionFile: f.file, cwd: f.directory, observed: null, stopping: false, observedSurvivors: [] };
+			harness.record(f.state).runtime = { ...runtime(41777), kind: "chat", sessionFile: f.file, cwd: f.directory, observed: null, stopping: false, observedSurvivors: [] };
 			f.state.mode = "chat";
 			return { tabId: f.row.tabId, status: "stopped", detail: "Fixture launch refused" };
 		};
@@ -2604,11 +2611,11 @@ describe("same-editor Chat and native Terminal actions", () => {
 
 	it("never switches a writer an open attempt only adopted, when a launch another window asked for finds it appear while it waits", async () => {
 		const f = await fixture();
-		f.state.runtime = null;
+		harness.record(f.state).runtime = null;
 		f.state.panel = null;
 		f.native.exit();
 		f.index.restore = async () => {
-			f.state.runtime = { ...runtime(41778), kind: "chat", sessionFile: f.file, cwd: f.directory, observed: null, stopping: false, observedSurvivors: [] };
+			harness.record(f.state).runtime = { ...runtime(41778), kind: "chat", sessionFile: f.file, cwd: f.directory, observed: null, stopping: false, observedSurvivors: [] };
 			f.state.mode = "chat";
 			return { tabId: f.row.tabId, status: "stopped", detail: "Fixture adopted a writer" };
 		};
@@ -2630,11 +2637,11 @@ describe("same-editor Chat and native Terminal actions", () => {
 		it(`serving ${label} another window asked for never changes the view of a writer that appears while it waits`, async () => {
 			const f = await fixture(false, "terminal");
 			const cwd = f.index.get(f.row.tabId)!.cwd;
-			f.state.runtime = null;
+			harness.record(f.state).runtime = null;
 			f.state.panel = null;
 			f.native.exit();
 			f.index.restore = async () => {
-				f.state.runtime = terminalRuntime(41779, f.file, f.directory);
+				harness.record(f.state).runtime = terminalRuntime(41779, f.file, f.directory);
 				f.state.mode = "terminal";
 				return { tabId: f.row.tabId, status: "stopped", detail: "Fixture adopted a writer" };
 			};
@@ -2656,10 +2663,10 @@ describe("same-editor Chat and native Terminal actions", () => {
 
 	it("never switches a writer adopted after the stopped editor of a launch another window asked for was closed during its view change", async () => {
 		const f = await fixture(false, "terminal");
-		f.state.runtime = null;
+		harness.record(f.state).runtime = null;
 		f.native.exit();
 		f.index.restore = async () => {
-			f.state.runtime = terminalRuntime(41780, f.file, f.directory);
+			harness.record(f.state).runtime = terminalRuntime(41780, f.file, f.directory);
 			f.state.mode = "terminal";
 			return { tabId: f.row.tabId, status: "stopped", detail: "Fixture adopted a writer" };
 		};
@@ -2685,7 +2692,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 	it("reattaches an already-native editor on repeated Terminal opens and reports an unreachable broker", async () => {
 		const f = await fixture(false, "terminal");
 		const native = terminalRuntime(f.native.pid, f.file, f.directory);
-		f.state.runtime = native;
+		harness.record(f.state).runtime = native;
 		let attached = 0;
 		native.handle.attach = async () => { attached++; };
 		const notices: unknown[] = [];
@@ -2733,7 +2740,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			assert.equal(f.index.get(f.row.tabId)?.sessionFile, f.file);
 			assert.equal(f.index.get(f.row.tabId)?.sessionId, "mode-session");
 			assert.deepEqual(f.dialogs, []);
-			assert.equal(f.state.transitioning, false);
+			assert.equal(harness.record(f.state).transitioning, false);
 		} finally { f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true }); }
 	});
 
@@ -2764,7 +2771,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			f.successor()!.output("Native continuation\r\n");
 			assert.equal(Buffer.from(frames().findLast(frame => frame.type === "omp:terminal-data")!.bytes!, "base64").toString(), "Native continuation\r\n");
 		} finally {
-			f.state.nativeWatch?.(); f.state.pipeline?.dispose();
+			harness.record(f.state).nativeWatch?.(); f.state.pipeline?.dispose();
 			f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true });
 		}
 	});
@@ -2780,7 +2787,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 				nativeControl(f, previous);
 				await harness.closeSession(f.saved.context, f.index, f.row.tabId);
 				assert.equal(f.state.pipeline, null, "a proved stopped writer cannot keep its frontend pipeline");
-				assert.equal(f.state.runtime, null);
+				assert.equal(harness.record(f.state).runtime, null);
 				assert.equal(f.index.get(f.row.tabId)?.runIntent, "stopped");
 				f.panels.messages.length = 0;
 				await harness.openSessionInMode(f.saved.context, f.index, f.row.tabId, "terminal");
@@ -2805,7 +2812,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			}
 			assert.equal(f.launches(), 4, "one initial native writer and one non-overlapping writer per restart");
 		} finally {
-			f.state.nativeWatch?.(); f.state.pipeline?.dispose();
+			harness.record(f.state).nativeWatch?.(); f.state.pipeline?.dispose();
 			f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true });
 		}
 	});
@@ -2818,11 +2825,11 @@ describe("same-editor Chat and native Terminal actions", () => {
 			const native = f.successor()!;
 			native.exit();
 			await harness.handleNativeHostExited(f.index, f.state, native);
-			assert.equal(f.state.runtime, null);
+			assert.equal(harness.record(f.state).runtime, null);
 			assert.equal(f.state.pipeline, null);
 			assert.equal(f.index.get(f.row.tabId)?.runIntent, "stopped");
 		} finally {
-			f.state.nativeWatch?.(); f.state.pipeline?.dispose();
+			harness.record(f.state).nativeWatch?.(); f.state.pipeline?.dispose();
 			f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true });
 		}
 	});
@@ -2858,7 +2865,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			await harness.openSessionInMode(f.saved.context, index, f.row.tabId, "terminal");
 			assert.deepEqual(dialogs, []);
 			assert.equal(attached, 1); assert.equal(launched, 0);
-			assert.equal(state.runtime, native); assert.equal(state.panel, f.panels);
+			assert.equal(harness.record(state).runtime, native); assert.equal(state.panel, f.panels);
 			assert.equal(native.handle.state, "running");
 			assert.equal(index.get(f.row.tabId)?.host?.pid, f.native.pid);
 			await harness.handleTerminalGuestMessage(f.row.tabId, { type: "omp:terminal-attach" }, { generation: null, cols: 80, rows: 24 });
@@ -2868,7 +2875,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			const output = (f.panels.messages as { type: string; bytes?: string }[]).findLast(frame => frame.type === "omp:terminal-data");
 			assert.equal(Buffer.from(output!.bytes!, "base64").toString(), "Recovered native continuation\r\n");
 		} finally {
-			state.nativeWatch?.(); state.pipeline?.dispose();
+			harness.record(state).nativeWatch?.(); state.pipeline?.dispose();
 			f.chat.dispose(); await index.closeSession(f.row.tabId, { confirmedStopped: true });
 		}
 	});
@@ -2891,7 +2898,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 				await nextTurn();
 			}
 			f.state.panel = null;
-			f.state.runtime = activeRuntime;
+			harness.record(f.state).runtime = activeRuntime;
 			harness.window().editorPanels.bindPanel(f.saved.context, index, "d".repeat(32), f.row.tabId, oldPanel, "created");
 			await harness.openTab(f.saved.context, index, f.row.tabId, "opened");
 			if (mode === "terminal") await harness.startConversation(index, f.row.tabId, native, f.file, false);
@@ -2902,7 +2909,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 				assert.equal((await (mode === "terminal" ? native.handle : f.native.handle).refreshStatus()).state, "running");
 				if (mode === "terminal") native.output("Output while the editor was closed\r\n");
 				if (order === "after reload") {
-					harness.state(f.row.tabId).nativeWatch?.();
+					harness.record(harness.state(f.row.tabId)).nativeWatch?.();
 					harness.state(f.row.tabId).pipeline?.dispose();
 					chat.dispose();
 					// The test process stays alive: preserve its holder while reconstructing
@@ -2938,7 +2945,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 				const reopened = current.panel as LifecyclePanel;
 				assert.notEqual(reopened, oldPanel);
 				assert.notEqual(current.slotId, "d".repeat(32));
-				assert.equal(current.runtime, activeRuntime);
+				assert.equal(harness.record(current).runtime, activeRuntime);
 				assert.equal(index.get(f.row.tabId)?.host?.pid, f.native.pid);
 				assert.equal(index.get(f.row.tabId)?.runIntent, "running");
 				if (mode === "terminal") {
@@ -2975,7 +2982,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 					assert.match(JSON.stringify(rendered.getSnapshot().entries), /Live answer after reopening/);
 				}
 			} finally {
-				harness.state(f.row.tabId).nativeWatch?.();
+				harness.record(harness.state(f.row.tabId)).nativeWatch?.();
 				harness.state(f.row.tabId).pipeline?.dispose();
 				chat.dispose();
 				for (const restore of restores.reverse()) restore();
@@ -3030,7 +3037,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			await foreign?.release();
 			first.resolve({ ownershipChecked: true });
 			setLauncherTree(undefined, undefined);
-			f.state.runtime = null;
+			harness.record(f.state).runtime = null;
 			t.mock.timers.setTime(2250);
 			await harness.retryPendingIdentity(f.index, f.row.tabId);
 			provider.dispose(); f.chat.dispose();
@@ -3041,7 +3048,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 	it("native watch projects pending asks and background work, then sends one finish after jobs and delivery drain", async t => {
 		const f = await fixture(true, "terminal");
 		const watched = terminalRuntime(f.native.pid, null, f.directory);
-		f.state.runtime = watched;
+		harness.record(f.state).runtime = watched;
 		const native = { idle: true, jobs: 0, queuedDelivery: 0 };
 		const sdk: OmpExtensionContext = {
 			mode: "tui", agent: { kind: "main" },
@@ -3057,7 +3064,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			nativeState: async () => adapter.nativeState!(false),
 			nativeActivity: async (options: { work?: true } = {}) => adapter.nativeActivity!(epoch, options.work === true),
 		});
-		f.state.control = { client: control, snapshot: null, activity: true, work: true };
+		harness.record(f.state).control = { client: control, snapshot: null, activity: true, work: true };
 		const restore = harness.desktopEnvironment({ ...f.saved.context, extension: { id: "hmmvot.omp-desk" } });
 		harness.configuration({ "omp.desktopNotifications": true });
 		harness.focusSession(false);
@@ -3096,7 +3103,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			t.mock.timers.tick(750); await nextTurn();
 			assert.equal(harness.desktopPayloads().length, 2, "one final notice without a wake or duplicate poll replay");
 		} finally {
-			f.state.nativeWatch?.();
+			harness.record(f.state).nativeWatch?.();
 			harness.forgetTurnActivity(f.index, f.row.tabId);
 			restore(); f.chat.dispose();
 			await f.index.closeSession(f.row.tabId, { confirmedStopped: true });
@@ -3106,7 +3113,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 	it("native watch shows Needs your answer for an ask that opened before it attached, with one notice across a reconnect", async t => {
 		const f = await fixture(true, "terminal");
 		const watched = terminalRuntime(f.native.pid, null, f.directory);
-		f.state.runtime = watched;
+		harness.record(f.state).runtime = watched;
 		const native = { idle: false };
 		const sdk: OmpExtensionContext = {
 			mode: "tui", agent: { kind: "main" },
@@ -3121,7 +3128,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			nativeState: async () => adapter.nativeState!(false),
 			nativeActivity: async (options: { work?: true } = {}) => adapter.nativeActivity!(epoch, options.work === true),
 		});
-		f.state.control = { client: connect(), snapshot: null, activity: true, work: true };
+		harness.record(f.state).control = { client: connect(), snapshot: null, activity: true, work: true };
 		const restore = harness.desktopEnvironment({ ...f.saved.context, extension: { id: "hmmvot.omp-desk" } });
 		harness.configuration({ "omp.desktopNotifications": true });
 		harness.focusSession(false);
@@ -3137,7 +3144,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			await nextTurn();
 			assert.equal(rowState(), "question", "a pending ask outranks the working turn");
 			assert.equal(harness.desktopPayloads().length, 1);
-			f.state.control = { client: connect(), snapshot: null, activity: true, work: true };
+			harness.record(f.state).control = { client: connect(), snapshot: null, activity: true, work: true };
 			t.mock.timers.tick(750); await nextTurn();
 			assert.equal(rowState(), "question");
 			assert.equal(harness.desktopPayloads().length, 1, "a recovered ask is announced once across a reconnect");
@@ -3157,7 +3164,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			assert.equal(rowState(), "unread", "the asks were never looked at, so the idle row stays unread");
 			assert.equal(harness.desktopPayloads().length, 2, "a cancelled ask earns no further notice");
 		} finally {
-			f.state.nativeWatch?.();
+			harness.record(f.state).nativeWatch?.();
 			harness.forgetTurnActivity(f.index, f.row.tabId);
 			restore(); f.chat.dispose();
 			await f.index.closeSession(f.row.tabId, { confirmedStopped: true });
@@ -3247,7 +3254,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 		});
 		harness.reset(f.index, host);
 		const state = harness.state(f.row.tabId);
-		state.panel = f.panels; state.mode = "chat"; state.transitioning = true;
+		state.panel = f.panels; state.mode = "chat"; harness.record(state).transitioning = true;
 		const channel = new FakeRpcChannel({ sessionFile: null, sessionId: "mode-session" });
 		await host.startLive(f.row.tabId, { channel, sessionFile: null, cwd: f.directory, title: null }).start();
 		const clients = [new ChatClient({ post: () => true }), new ChatClient({ post: () => true })];
@@ -3436,7 +3443,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 
 	it("a stalled stopped-row Delete preflight reports failure and never deletes after a late read", async t => {
 		const f = await fixture();
-		f.state.runtime = null;
+		harness.record(f.state).runtime = null;
 		await f.index.closeSession(f.row.tabId, { confirmedStopped: true });
 		const observation = Promise.withResolvers<{ ok: true; claim: null }>();
 		f.index.observeOwnership = async () => await observation.promise;
@@ -3458,7 +3465,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 		const f = await fixture();
 		await f.index.bindEditorSlot(EDITOR, f.row.tabId, "controlling");
 		const state = harness.editor(f.index, {}, Object.assign(f.panels, { active: true }), EDITOR, f.row.tabId);
-		state.runtime = f.native; state.bridge = null;
+		harness.record(state).runtime = f.native; state.bridge = null;
 		harness.focusSession(true, EDITOR, f.row.tabId);
 		const calls = harness.commandHandler(null);
 		const requested = Promise.withResolvers<void>();
@@ -3489,8 +3496,8 @@ describe("same-editor Chat and native Terminal actions", () => {
 		};
 		try {
 			await harness.switchSessionMode(f.saved.context, f.index, f.state, "terminal");
-			assert.equal(f.state.transitioning, false);
-			assert.equal(f.state.runtime, f.native);
+			assert.equal(harness.record(f.state).transitioning, false);
+			assert.equal(harness.record(f.state).runtime, f.native);
 			assert.equal(f.launches(), 0);
 			assert.equal((await f.chat.sessionOf(f.row.tabId)!.prompt({ requestId: "after-fence-error", text: "Continue" })).status, "accepted");
 			await harness.switchSessionMode(f.saved.context, f.index, f.state, "terminal");
@@ -3508,10 +3515,10 @@ describe("same-editor Chat and native Terminal actions", () => {
 		try {
 			const switching = harness.switchSessionMode(f.saved.context, f.index, f.state, "terminal");
 			await nextTurn();
-			assert.equal(f.state.transitioning, true);
+			assert.equal(harness.record(f.state).transitioning, true);
 			t.mock.timers.tick(10_000);
 			await switching;
-			assert.equal(f.state.transitioning, false);
+			assert.equal(harness.record(f.state).transitioning, false);
 			assert.equal((await f.chat.sessionOf(f.row.tabId)!.prompt({ requestId: "after-switch-timeout", text: "Continue" })).status, "accepted");
 			blocked.resolve(); await held;
 			await f.index.lifecycle.run(f.row.tabId, async () => undefined);
@@ -3534,9 +3541,9 @@ describe("same-editor Chat and native Terminal actions", () => {
 			await bounded(f.index.lifecycle.run(f.row.tabId, async () => undefined));
 			assert.equal((await f.chat.sessionOf(f.row.tabId)!.prompt({ requestId: "during-dialog", text: "Do not send" })).status, "refused");
 			answer.resolve(undefined); await switching;
-			assert.equal(f.state.runtime, f.native);
+			assert.equal(harness.record(f.state).runtime, f.native);
 			assert.equal(f.state.mode, "chat");
-			assert.equal(f.state.transitioning, false);
+			assert.equal(harness.record(f.state).transitioning, false);
 			assert.equal(f.launches(), 0);
 			assert.equal((await f.chat.sessionOf(f.row.tabId)!.prompt({ requestId: "after-dialog", text: "Continue" })).status, "accepted");
 		} finally { f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true }); }
@@ -3547,7 +3554,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 		try {
 			f.channel.child.entries = [messageEntry("unsaved", null, userMessage("Unsaved turn", 1))] as never;
 			await harness.switchSessionMode(f.saved.context, f.index, f.state, "terminal");
-			assert.equal(f.state.runtime, f.native);
+			assert.equal(harness.record(f.state).runtime, f.native);
 			assert.equal((await f.native.handle.refreshStatus()).state, "running");
 			assert.equal(f.launches(), 0);
 			f.channel.child.entries = []; f.channel.child.isStreaming = true;
@@ -3556,7 +3563,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 				return "Switch to Terminal";
 			});
 			await harness.switchSessionMode(f.saved.context, f.index, f.state, "terminal");
-			assert.equal(f.state.runtime, f.native);
+			assert.equal(harness.record(f.state).runtime, f.native);
 			assert.equal((await f.native.handle.refreshStatus()).state, "running");
 			assert.equal(f.launches(), 0);
 		} finally { f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true }); }
@@ -3569,8 +3576,8 @@ describe("same-editor Chat and native Terminal actions", () => {
 			await harness.switchSessionMode(f.saved.context, f.index, f.state, "terminal");
 			assert.equal(f.launches(), 0);
 			assert.equal(f.state.mode, "chat");
-			assert.equal(f.state.runtime, f.native);
-			assert.equal(f.state.transitioning, true);
+			assert.equal(harness.record(f.state).runtime, f.native);
+			assert.equal(harness.record(f.state).transitioning, true);
 			assert.equal((await f.chat.sessionOf(f.row.tabId)!.prompt({ requestId: "uncertain-root", text: "No second input" })).status, "refused");
 			assert.equal(f.index.get(f.row.tabId)?.runIntent, "running");
 		} finally { f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true }); }
@@ -3585,7 +3592,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			assert.equal(harness.defaultSessionMode(f.saved.context), "terminal");
 			await harness.openTab(f.saved.context, f.index, f.row.tabId, "resumed");
 			assert.equal(f.state.mode, "chat");
-			assert.equal(f.state.runtime, f.native);
+			assert.equal(harness.record(f.state).runtime, f.native);
 			assert.equal(f.launches(), 0, "ordinary Open does not replace an already-open view");
 			await harness.openSessionInMode(f.saved.context, f.index, f.row.tabId, "terminal");
 			assert.equal(f.state.mode, "terminal");
@@ -3637,7 +3644,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			ready.resolve();
 			await switching;
 			assert.equal(f.state.mode, "chat");
-			assert.equal(f.state.runtime, f.native);
+			assert.equal(harness.record(f.state).runtime, f.native);
 			assert.equal(f.launches(), 0);
 			assert.equal((await f.native.handle.refreshStatus()).state, "running", "a failed initialization cannot authorize a stop or successor");
 		} finally {
@@ -3674,7 +3681,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 	it("ordinary Open waits for the surviving native writer's pending control before applying the Chat default", async () => {
 		const f = await fixture(false, "terminal");
 		const native = terminalRuntime(f.native.pid, f.file, f.directory);
-		f.state.runtime = native; f.state.panel = null;
+		harness.record(f.state).runtime = native; f.state.panel = null;
 		const connected = Promise.withResolvers<void>();
 		harness.window().hostControlAttempts.set(native, connected.promise);
 		const restorePanels = harness.editorLifecycle();
@@ -3694,7 +3701,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			assert.equal((await native.handle.refreshStatus()).state, "exited", "the old native writer exits before Chat starts");
 		} finally {
 			connected.resolve(); harness.window().hostControlAttempts.delete(native);
-			restorePanels(); f.state.nativeWatch?.(); f.state.pipeline?.dispose();
+			restorePanels(); harness.record(f.state).nativeWatch?.(); f.state.pipeline?.dispose();
 			f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true });
 		}
 	});
@@ -3702,7 +3709,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 	it("closing the editor cancels a native mode change waiting for authentication", async () => {
 		const f = await fixture(false, "terminal");
 		const native = terminalRuntime(f.native.pid, f.file, f.directory);
-		f.state.runtime = native;
+		harness.record(f.state).runtime = native;
 		const connected = Promise.withResolvers<void>();
 		harness.window().hostControlAttempts.set(native, connected.promise);
 		const restorePanels = harness.editorLifecycle();
@@ -3721,7 +3728,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			assert.equal((await native.handle.refreshStatus()).state, "running", "closing while authentication waits does not stop the old writer");
 		} finally {
 			connected.resolve(); harness.window().hostControlAttempts.delete(native);
-			restorePanels(); f.state.nativeWatch?.(); f.state.pipeline?.dispose();
+			restorePanels(); harness.record(f.state).nativeWatch?.(); f.state.pipeline?.dispose();
 			f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true });
 		}
 	});
@@ -3729,7 +3736,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 	for (const mode of ["chat", "terminal"] as const) {
 		it(`explicit Open in ${mode} overrides the opposite default for a new editor`, async () => {
 			const f = await fixture(false, mode);
-			if (mode === "terminal") f.state.runtime = terminalRuntime(f.native.pid, f.file, f.directory);
+			if (mode === "terminal") harness.record(f.state).runtime = terminalRuntime(f.native.pid, f.file, f.directory);
 			f.state.panel = null;
 			harness.picker(mode === "chat" ? "terminal" : "chat"); await harness.chooseDefaultSessionView(f.saved.context);
 			const restorePanels = harness.editorLifecycle();
@@ -3740,7 +3747,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 				assert.equal(f.index.slotBinding(f.state.slotId)?.mode, mode);
 				assert.equal(f.launches(), 0, "matching the explicit view reuses its surviving writer");
 			} finally {
-				restorePanels(); f.state.nativeWatch?.(); f.state.pipeline?.dispose();
+				restorePanels(); harness.record(f.state).nativeWatch?.(); f.state.pipeline?.dispose();
 				f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true });
 			}
 		});
@@ -3827,7 +3834,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 				release.resolve();
 				await first;
 				assert.equal(f.index.list().length, 2, "only one successor was reserved");
-				assert.equal(f.state.runtime, f.native);
+				assert.equal(harness.record(f.state).runtime, f.native);
 				assert.equal(f.panels.disposed, false, "newly running old work is never silently stopped");
 			} finally { release.resolve(); await f.restore(); }
 		});
@@ -3931,7 +3938,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 				assert.equal(requestedColumnOf(harness.state(draft.tabId).panel), 3);
 				assert.deepEqual(operations, ["stop", "dispose"]);
 				assert.equal(f.index.get(f.row.tabId)?.runIntent, "stopped");
-				assert.equal(f.state.runtime, null);
+				assert.equal(harness.record(f.state).runtime, null);
 				assert.deepEqual(f.dialogs, []);
 				assert.deepEqual(f.calls.filter(([command]) => command !== "setContext"), [], "no window routing or chat-group arrangement");
 				assert.equal(f.requests.length, 1);
@@ -3941,7 +3948,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 
 		it("/new needs no stop for a stopped session and falls back to the panel's column", async () => {
 			const f = await replacementFixture();
-			f.state.runtime = null;
+			harness.record(f.state).runtime = null;
 			await f.index.closeSession(f.row.tabId, { confirmedStopped: true });
 			harness.tabStrip([]);
 			Object.assign(f.panels, { viewColumn: 2 });
@@ -3961,7 +3968,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			try {
 				await harness.newSessionInPlace(f.saved.context, f.index, f.row.tabId);
 				assert.equal(f.index.list().length, 1);
-				assert.equal(f.state.runtime, f.native);
+				assert.equal(harness.record(f.state).runtime, f.native);
 				assert.equal(f.panels.disposed, false);
 				assert.equal(f.requests.length, 0);
 				assert.match(harness.errors().at(-1)!, /could not be reserved/);
@@ -3973,7 +3980,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			const restoreFactory = harness.panelFactory(() => { throw new Error("fixture editor failed"); });
 			try {
 				await harness.newSessionInPlace(f.saved.context, f.index, f.row.tabId);
-				assert.equal(f.state.runtime, f.native);
+				assert.equal(harness.record(f.state).runtime, f.native);
 				assert.equal(f.panels.disposed, false);
 				assert.equal(f.requests.length, 0);
 				assert.equal(harness.window().sessionPanelColumns.size, 0);
@@ -3988,7 +3995,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			try {
 				await harness.newSessionInPlace(f.saved.context, f.index, f.row.tabId);
 				assert.equal(f.index.list().length, 2);
-				assert.equal(f.state.runtime, f.native);
+				assert.equal(harness.record(f.state).runtime, f.native);
 				assert.equal(f.panels.disposed, false);
 				assert.equal((await f.native.handle.refreshStatus()).state, "running");
 			} finally { await f.restore(); }
@@ -4023,7 +4030,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			try {
 				await harness.deleteSessionInPlace(f.saved.context, f.index, f.row.tabId);
 				assert.equal(f.index.list().length, 1);
-				assert.equal(f.state.runtime, f.native);
+				assert.equal(harness.record(f.state).runtime, f.native);
 				assert.equal(f.panels.disposed, false);
 				assert.equal(f.requests.length, 0);
 				assert.ok(await readFile(f.file!, "utf8"));
@@ -4036,7 +4043,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			try {
 				await harness.deleteSessionInPlace(f.saved.context, f.index, f.row.tabId);
 				assert.equal(f.index.list().length, 1);
-				assert.equal(f.state.runtime, f.native);
+				assert.equal(harness.record(f.state).runtime, f.native);
 				assert.equal(f.panels.disposed, false);
 				assert.equal(f.requests.length, 0);
 				assert.ok(await readFile(f.file!, "utf8"));
@@ -4095,7 +4102,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			t.mock.timers.tick(10_000);
 			await switching;
 			assert.equal(offered, true);
-			assert.equal(f.state.transitioning, true, "an irreversible shutdown must not reopen input");
+			assert.equal(harness.record(f.state).transitioning, true, "an irreversible shutdown must not reopen input");
 			assert.equal(f.launches(), 0);
 			shutdown.resolve("accepted"); await nextTurn();
 			assert.equal(f.launches(), 0, "late acknowledgement never launches a successor");
@@ -4103,8 +4110,8 @@ describe("same-editor Chat and native Terminal actions", () => {
 			await stopped.promise;
 			await f.index.lifecycle.run(f.row.tabId, async () => undefined);
 			await nextTurn();
-			assert.equal(f.state.runtime, null);
-			assert.equal(f.state.transitioning, false);
+			assert.equal(harness.record(f.state).runtime, null);
+			assert.equal(harness.record(f.state).transitioning, false);
 			assert.equal(f.index.get(f.row.tabId)?.runIntent, "stopped");
 			assert.equal(f.launches(), 0, "recovery stops only; a later explicit Open owns any successor");
 		} finally {
@@ -4122,8 +4129,8 @@ describe("same-editor Chat and native Terminal actions", () => {
 			await harness.switchSessionMode(f.saved.context, f.index, f.state, "chat");
 			assert.equal(f.launches(), 0);
 			assert.equal(f.native.stopping, true);
-			assert.equal(f.state.transitioning, true);
-			assert.equal(f.state.runtime, f.native);
+			assert.equal(harness.record(f.state).transitioning, true);
+			assert.equal(harness.record(f.state).runtime, f.native);
 			assert.equal(f.state.mode, "terminal");
 			await harness.openSessionInMode(f.saved.context, f.index, f.row.tabId, "chat");
 			assert.equal(f.launches(), 0, "an explicit retry cannot overlap the possibly stopping root");
@@ -4154,7 +4161,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			await harness.closeSession(f.saved.context, f.index, f.row.tabId);
 			assert.equal(control.shutdowns.length, 1);
 			assert.equal(f.index.get(f.row.tabId)?.runIntent, "stopped");
-			assert.equal(f.state.runtime, null);
+			assert.equal(harness.record(f.state).runtime, null);
 			assert.equal(f.launches(), 0);
 		} finally { f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true }); }
 		const survivor = await fixture(false, "terminal");
@@ -4165,8 +4172,8 @@ describe("same-editor Chat and native Terminal actions", () => {
 			};
 			await harness.closeSession(survivor.saved.context, survivor.index, survivor.row.tabId);
 			assert.deepEqual(survivor.native.observedSurvivors, [42002]);
-			assert.equal(survivor.state.runtime, survivor.native);
-			assert.equal(survivor.state.transitioning, true);
+			assert.equal(harness.record(survivor.state).runtime, survivor.native);
+			assert.equal(harness.record(survivor.state).transitioning, true);
 			await harness.openSessionInMode(survivor.saved.context, survivor.index, survivor.row.tabId, "chat");
 			assert.equal(survivor.launches(), 0);
 		} finally { survivor.chat.dispose(); await survivor.index.closeSession(survivor.row.tabId, { confirmedStopped: true }); }
@@ -4200,7 +4207,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			await harness.startConversation(f.index, f.row.tabId, terminalRuntime(f.native.pid, f.file, f.directory), f.file, false);
 			assert.equal(f.index.slotBinding(f.state.slotId)?.mode, "terminal", "native reattachment records the actual mode too");
 		} finally {
-			f.state.nativeWatch?.(); f.state.pipeline?.dispose();
+			harness.record(f.state).nativeWatch?.(); f.state.pipeline?.dispose();
 			f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true });
 		}
 	});
@@ -4210,7 +4217,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 		const restorePanels = harness.editorLifecycle();
 		try {
 			await f.index.closeSession(f.row.tabId, { confirmedStopped: true });
-			f.chat.release(f.row.tabId); f.state.runtime = null; f.state.panel = null;
+			f.chat.release(f.row.tabId); harness.record(f.state).runtime = null; f.state.panel = null;
 			await harness.openTab(f.saved.context, f.index, f.row.tabId, "opened");
 			const chatEditor = harness.state(f.row.tabId);
 			const second = await f.index.createDraft({ cwd: f.directory });
@@ -4249,7 +4256,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 		const f = await fixture(true);
 		try {
 			await f.index.closeSession(f.row.tabId, { confirmedStopped: true });
-			f.chat.release(f.row.tabId); f.state.runtime = null; f.state.panel = null;
+			f.chat.release(f.row.tabId); harness.record(f.state).runtime = null; f.state.panel = null;
 			await f.index.setEditorMode(f.row.tabId, "terminal");
 			assert.equal(harness.defaultSessionMode(f.saved.context), "chat");
 			await harness.openTab(f.saved.context, f.index, f.row.tabId, "opened", "restored");
@@ -4307,7 +4314,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 				async finish() {
 					harness.warning(async (_message, _options, action) => action);
 					harness.information(async () => undefined);
-					f.state.nativeWatch?.(); f.state.pipeline?.dispose(); f.chat.dispose();
+					harness.record(f.state).nativeWatch?.(); f.state.pipeline?.dispose(); f.chat.dispose();
 					await f.index.closeSession(f.row.tabId, { confirmedStopped: true });
 				},
 			};
@@ -4340,18 +4347,18 @@ describe("same-editor Chat and native Terminal actions", () => {
 					assert.deepEqual(ui.modals, cell.modals);
 					assert.deepEqual(requests, cell.requests);
 					if (cell.closed) {
-						assert.equal(s.state.runtime, null);
+						assert.equal(harness.record(s.state).runtime, null);
 						assert.equal(s.index.get(s.row.tabId)?.runIntent, "stopped");
 						assert.equal(await s.claimHeld(), false, "a verified stop releases the session claim");
 						assert.equal(credentialsLeft(), false, "a verified stop releases the control credentials");
 						assert.deepEqual(ui.read, [], "a stop that finished tells the user nothing went wrong");
 					} else {
-						assert.equal(s.state.runtime, s.native, "an unconfirmed stop keeps the runtime this window drives");
+						assert.equal(harness.record(s.state).runtime, s.native, "an unconfirmed stop keeps the runtime this window drives");
 						assert.equal(s.index.get(s.row.tabId)?.runIntent, "running");
 						assert.equal(await s.claimHeld(), true, "an unconfirmed stop keeps the claim");
 						assert.equal(credentialsLeft(), true, "an unconfirmed stop keeps the control credentials");
 						assert.equal(ui.read.length, 1, "the user is told once that the session could not be confirmed stopped");
-						if (cell.kind === "chat") assert.equal(s.state.transitioning, false, "a chat that stayed running is open to another try");
+						if (cell.kind === "chat") assert.equal(harness.record(s.state).transitioning, false, "a chat that stayed running is open to another try");
 					}
 				} finally { await s.finish(); }
 			});
@@ -4381,7 +4388,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			try {
 				await harness.closeSession(s.saved.context, s.index, s.row.tabId);
 				assert.deepEqual(ui.modals, ["Close"]);
-				assert.equal(s.state.runtime, null);
+				assert.equal(harness.record(s.state).runtime, null);
 				assert.equal(s.index.get(s.row.tabId)?.runIntent, "running", "the controller's row is not recorded stopped by a passive copy");
 				assert.equal(await s.claimHeld(), true, "the controller's claim is not released by a passive copy");
 			} finally { await s.finish(); }
@@ -4396,7 +4403,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 				await Promise.all([harness.closeSession(s.saved.context, s.index, s.row.tabId), harness.closeSession(s.saved.context, s.index, s.row.tabId)]);
 				assert.deepEqual(requests, ["graceful"]);
 				assert.equal(ui.modals.includes("Force Stop"), false);
-				assert.equal(s.state.runtime, null);
+				assert.equal(harness.record(s.state).runtime, null);
 				assert.equal(s.index.get(s.row.tabId)?.runIntent, "stopped");
 				assert.equal(await s.claimHeld(), false);
 				assert.equal(credentialsLeft(), false);
@@ -4411,7 +4418,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			harness.information(async message => { infos.push(String(message)); });
 			try {
 				await s.index.closeSession(s.row.tabId, { confirmedStopped: true });
-				s.state.runtime = null;
+				harness.record(s.state).runtime = null;
 				await harness.closeSession(s.saved.context, s.index, s.row.tabId);
 				assert.deepEqual([ui.modals, requests, ui.read], [[], [], []]);
 				assert.equal(infos.length, 1);
@@ -4448,7 +4455,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 					assert.equal(await harness.window().sessionActions.stopHost(s.saved.context, s.index, s.row.tabId, { recorded, gracefulOnly: true }), cell.finished);
 					assert.deepEqual(ui.modals, [], "neither the stop nor a Force Stop is asked of the user");
 					assert.deepEqual(requests, ["graceful"]);
-					assert.equal(s.state.runtime, cell.finished ? null : s.native);
+					assert.equal(harness.record(s.state).runtime, cell.finished ? null : s.native);
 					assert.equal(s.index.get(s.row.tabId)?.runIntent, cell.finished ? "stopped" : "running");
 					assert.equal(await s.claimHeld(), !cell.finished);
 					assert.equal(credentialsLeft(), !cell.finished);
@@ -4479,7 +4486,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 				assert.equal(ui.read.length, 1, "the user is told the session could not be stopped");
 				assert.ok(await readFile(s.file!, "utf8"), "the transcript is untouched");
 				assert.notEqual(s.index.get(s.row.tabId), null);
-				assert.equal(s.state.runtime, s.native);
+				assert.equal(harness.record(s.state).runtime, s.native);
 				assert.equal(await s.claimHeld(), true);
 			} finally { await s.finish(); }
 		});
@@ -4491,7 +4498,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			harness.information(async message => { infos.push(String(message)); });
 			try {
 				await stopped.index.closeSession(stopped.row.tabId, { confirmedStopped: true });
-				stopped.state.runtime = null;
+				harness.record(stopped.state).runtime = null;
 				await harness.reloadSession(stopped.saved.context, stopped.index, stopped.row.tabId);
 				assert.equal(infos.length, 1);
 				assert.match(infos[0]!, /stopped\. Use Resume/);
@@ -4503,7 +4510,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 				await harness.reloadSession(draft.saved.context, draft.index, draft.row.tabId);
 				assert.equal(asked.read.length, 1);
 				assert.match(asked.read[0]!, /has not been saved yet/);
-				assert.deepEqual([draft.launches(), asked.modals, draft.state.runtime === draft.native], [0, [], true], "a draft is never reloaded into an implicit Resume");
+				assert.deepEqual([draft.launches(), asked.modals, harness.record(draft.state).runtime === draft.native], [0, [], true], "a draft is never reloaded into an implicit Resume");
 			} finally { await draft.finish(); }
 		});
 
@@ -4526,8 +4533,8 @@ describe("same-editor Chat and native Terminal actions", () => {
 					assert.equal(s.launches(), 1, "exactly one successor");
 					assert.deepEqual(ui.modals, cell.modals, "no Force Stop, and no question for a session with nothing left to stop");
 					assert.deepEqual(ui.read, [], "nothing is reported as failed");
-					assert.notEqual(s.state.runtime, s.native);
-					assert.notEqual(s.state.runtime, null, "the successor is this window's runtime");
+					assert.notEqual(harness.record(s.state).runtime, s.native);
+					assert.notEqual(harness.record(s.state).runtime, null, "the successor is this window's runtime");
 					assert.equal(s.state.mode, cell.mode);
 					assert.equal(s.index.get(s.row.tabId)?.host?.transport, cell.transport);
 					assert.equal(s.index.get(s.row.tabId)?.sessionFile, s.file, "the successor continues the same exact file");
@@ -4549,7 +4556,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 					assert.deepEqual([s.launches(), ui.modals, requests], [0, [], []], "nothing is asked, stopped or started");
 					assert.equal(ui.read.length, 1);
 					assert.match(ui.read[0]!, /could not be verified; nothing was stopped/);
-					assert.equal(s.state.runtime, s.native);
+					assert.equal(harness.record(s.state).runtime, s.native);
 					assert.equal(s.index.get(s.row.tabId)?.runIntent, "running");
 					assert.equal(await s.claimHeld(), true);
 				} finally { await s.finish(); }
@@ -4565,12 +4572,12 @@ describe("same-editor Chat and native Terminal actions", () => {
 				try {
 					await harness.window().sessionActions.forget(s.index, s.row.tabId);
 					assert.notEqual(s.index.get(s.row.tabId), null, "a running session stays in Sessions");
-					assert.equal(s.state.runtime, s.native);
+					assert.equal(harness.record(s.state).runtime, s.native);
 					assert.equal(s.panels.disposed, false, "its editor stays open");
 					assert.equal(ui.read.length, 1, "the user is told to stop it first");
 					assert.equal(await s.claimHeld(), true);
 					await harness.closeSession(s.saved.context, s.index, s.row.tabId);
-					assert.equal(s.state.runtime, null);
+					assert.equal(harness.record(s.state).runtime, null);
 					await harness.window().sessionActions.forget(s.index, s.row.tabId);
 					assert.equal(s.index.get(s.row.tabId), null);
 					assert.equal(s.panels.disposed, true, "the forgotten row's editor closes with it");
@@ -4594,7 +4601,7 @@ describe("active native editor clipboard", () => {
     harness.editor(index, {}, inactive);
     const state = harness.editor(index, {}, active, otherEditor);
     state.mode = "terminal";
-    state.runtime = null;
+    harness.record(state).runtime = null;
     const generation = "a".repeat(32);
     state.pipeline = { generation, dispose() {} };
     harness.focusSession(true, otherEditor);
@@ -5031,12 +5038,12 @@ describe("starting a session in the window that has its folder open", () => {
       state.panel = { webview: { postMessage: async () => true }, reveal: () => {}, dispose: () => {} };
       const live = { kind: "terminal", stopping: false, handle: { state: "running" } };
       const before = state.lastOpenRequest;
-      const outcome = await harness.window().routing.serveLaunchRequest(undefined, w.index, request({ kind: "open-session", tabId: TAB, verb: "resumed", mode: "chat" }), { stillWanted: async () => { state.runtime = live; return true; } });
+      const outcome = await harness.window().routing.serveLaunchRequest(undefined, w.index, request({ kind: "open-session", tabId: TAB, verb: "resumed", mode: "chat" }), { stillWanted: async () => { harness.record(state).runtime = live; return true; } });
       assert.equal(outcome.ok, true);
       await nextTurn(); await nextTurn();
       assert.equal(state.lastOpenRequest, before, "no view change was begun for the live session");
       assert.equal(state.mode, "chat");
-      assert.equal(state.runtime, live);
+      assert.equal(harness.record(state).runtime, live);
       assert.deepEqual(w.drafts, []);
     });
   });

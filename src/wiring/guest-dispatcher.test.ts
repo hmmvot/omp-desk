@@ -53,7 +53,7 @@ const REQUEST = HEX("a");
 const SCOPE = "11111111-2222-4333-8444-555555555555";
 
 /** An editor record the cases may change after the dispatcher has seen it (a document replaced, a panel disposed). */
-type FakeTab = { -readonly [K in keyof GuestTab]: GuestTab[K] };
+type FakeTab = { -readonly [K in keyof GuestTab]: GuestTab[K] } & { hosted: { readonly cwd: string } | null };
 
 interface PostedMessage {
 	type: string;
@@ -90,7 +90,7 @@ function fakePanel(onPost?: OnPost): Pick<FakeEditor, "panel" | "posted" | "stat
 const guestDocument = (): { kind: string } => ({ kind: "guest" });
 
 function tabRecord(slotId: string, panel: unknown, overrides: Partial<FakeTab> = {}): FakeTab {
-	return { slotId, tabId: TAB, mode: "chat", panel: panel as never, document: guestDocument(), heldReadyReport: null, runtime: null, bridge: null, ...overrides };
+	return { slotId, tabId: TAB, mode: "chat", panel: panel as never, document: guestDocument(), heldReadyReport: null, hosted: null, bridge: null, ...overrides };
 }
 
 const indexOf = (entries: Record<string, { cwd: string; sessionFile: string | null; title: string | null }>): SessionIndex =>
@@ -159,6 +159,7 @@ function world(overrides: Partial<GuestDispatcherDeps<FakeTab>> = {}) {
 		attachChatRoutes: (tabId, force) => { routesAttached.push([tabId, force]); },
 		rememberPrompt: text => { remembered.push(text); },
 		runChatAction: async (...args) => { chatActions.push(args); },
+		hostedCwd: tabId => [...state.tabs.values()].find(candidate => candidate.tabId === tabId)?.hosted?.cwd ?? null,
 		completeFiles: async (cwd, query) => { calls.push(`completeFiles:${cwd}:${String(query)}`); return state.files; },
 		pushSessionView: (_index, _tab, force) => { calls.push(`pushSessionView:${force}`); },
 		noteReadyDocument: (_tab, documentId) => { calls.push(`noteReadyDocument:${documentId}`); },
@@ -337,7 +338,7 @@ describe("each message reaches its owner", () => {
 describe("file completions", () => {
 	it("answers the page that asked with the paths below its session's folder", async () => {
 		const w = world();
-		const live = w.editor(SLOT, { runtime: { cwd: "/runtime" } });
+		const live = w.editor(SLOT, { hosted: { cwd: "/runtime" } });
 		await w.dispatcher.handleMessage(index, SLOT, live.panel, { type: "omp:complete-files", requestId: 7, query: "ab" });
 		assert.deepEqual(w.calls, ["completeFiles:/runtime:ab"]);
 		assert.deepEqual(live.posted, [{ type: "omp:file-completions", requestId: 7, paths: ["a.ts", "b/c.ts"] }]);
@@ -355,7 +356,7 @@ describe("file completions", () => {
 		const tabs = new Map<string, FakeTab>();
 		const replaced = world({ tabs: () => tabs, completeFiles: async () => { tabs.set(SLOT, tabRecord(SLOT, fakePanel().panel)); return ["a.ts"]; } });
 		const gone = fakePanel();
-		tabs.set(SLOT, tabRecord(SLOT, gone.panel, { runtime: { cwd: "/runtime" } }));
+		tabs.set(SLOT, tabRecord(SLOT, gone.panel, { hosted: { cwd: "/runtime" } }));
 		await replaced.dispatcher.handleMessage(index, SLOT, gone.panel, { type: "omp:complete-files", requestId: 3, query: "x" });
 		assert.deepEqual(gone.posted, []);
 	});
@@ -369,7 +370,7 @@ describe("the empty chat's recent sessions", () => {
 	it("answers the sending editor's own folder and opens a picked row through the Sessions click", async () => {
 		const w = world();
 		w.state.recentRows = [row("t1", "2026-10-13T09:00:00.000Z"), row("t2", "2026-10-13T11:00:00.000Z"), row("elsewhere", "2026-10-13T12:00:00.000Z", "/other")];
-		const live = w.editor(SLOT, { runtime: { cwd: "/runtime" } });
+		const live = w.editor(SLOT, { hosted: { cwd: "/runtime" } });
 		await w.dispatcher.handleMessage(index, SLOT, live.panel, { type: "omp:recent-sessions-request", requestId: 4 });
 		assert.deepEqual(live.posted, [{
 			type: "omp:recent-sessions",
@@ -383,7 +384,7 @@ describe("the empty chat's recent sessions", () => {
 	it("refuses a pick it never offered and stays silent for a panel that no longer serves the slot", async () => {
 		const w = world();
 		w.state.recentRows = [row("t1", "2026-10-13T09:00:00.000Z")];
-		const live = w.editor(SLOT, { runtime: { cwd: "/runtime" } });
+		const live = w.editor(SLOT, { hosted: { cwd: "/runtime" } });
 		await w.dispatcher.handleMessage(index, SLOT, live.panel, { type: "omp:open-recent", requestId: 1, index: 0 });
 		assert.deepEqual([w.clicks, w.infos], [[], ["That session is not listed in Sessions any more. Refresh and try again."]]);
 		const stale = fakePanel();

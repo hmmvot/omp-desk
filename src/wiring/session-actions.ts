@@ -54,10 +54,6 @@ export interface SessionTab {
 	/** The conversation the editor shows, or `null` for a folder shell. */
 	readonly tabId: string | null;
 	readonly panel: Pick<vscode.WebviewPanel, "reveal" | "dispose"> | null;
-	runtime: SessionHostRuntime | null;
-	/** Admission fence independent of the lifecycle gate and modal dialogs. */
-	transitioning: boolean;
-	nativeWatch: (() => void) | null;
 	readonly ownerStopWatch: ShellExitWatchStop | null;
 }
 
@@ -132,7 +128,10 @@ export interface StopReadPort<Tab extends SessionTab> {
 	/** Bound readback and gate admission, not a destructive transaction or a user's dialog. */
 	withSessionReadDeadline<T>(read: Promise<T>, timeoutMs?: number): Promise<T>;
 	releaseHostControl(tabId: string, ownerGeneration: string | null): Promise<void>;
-	reconnectHostControl(tabId: string, ownerGeneration: string, runtime: SessionHostRuntime): Promise<void>;
+	/** Re-establish host control of the conversation's native Terminal runtime; nothing for any other runtime. */
+	reconnectHostControl(tabId: string, ownerGeneration: string): Promise<void>;
+	/** The conversation is gone: the runtime forgets its record. */
+	releaseRuntimeRecord(tabId: string): void;
 	/** This window's session runtime: lifecycle actions re-adopt a native writer through it and never launch. */
 	sessionRuntime(): SessionRuntime;
 	/** The control owner a recorded host's credentials are filed under. */
@@ -381,9 +380,9 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 			);
 			return false;
 		}
-		if (entry.host.transport === "native" && deps.tab(tabId)?.runtime == null) {
+		if (entry.host.transport === "native" && deps.sessionRuntime().snapshot(tabId) === null) {
 			await reattachNativeForLifecycle(context, index, tabId);
-			if (deps.tab(tabId)?.runtime == null) {
+			if (deps.sessionRuntime().snapshot(tabId) === null) {
 				deps.warn("This window could not reconnect to the running session. Use /exit in its Terminal, or reopen its editor and try again.");
 				return false;
 			}
@@ -529,9 +528,10 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 			shellSlots: () => deps.shellSlots(),
 			shellOpenHere: slot => deps.hasShellEditor(slot),
 			// Every runtime this window holds, by exact broker identity: a runtime with no session row (an editor-only one) is still this window's.
-			localRuntimes: () => [...deps.tabs().values()].flatMap(state => state.runtime === null
-				? []
-				: [{ slot: state.runtime.identity.slot, brokerId: state.runtime.identity.brokerId, generation: state.runtime.identity.brokerGeneration, tabId: state.tabId }]),
+			localRuntimes: () => [...deps.tabs().values()].flatMap(state => {
+				const held = state.tabId === null ? null : deps.sessionRuntime().snapshot(state.tabId);
+				return held === null ? [] : [{ slot: held.slot, brokerId: held.brokerId, generation: held.brokerGeneration, tabId: state.tabId }];
+			}),
 			indexLoadError: () => index.loadError,
 			catalogLoaded: () => catalogLoaded,
 			refreshCatalog: () => deps.adoptCatalogChanges(index, folders),
@@ -617,8 +617,7 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 	/** Attach only; a lifecycle action must never launch a process to stop it. */
 	async function reattachNativeForLifecycle(context: vscode.ExtensionContext, index: SessionIndex, tabId: string): Promise<void> {
 		await deps.sessionRuntime().reattach({ conversation: tabId });
-		const runtime = deps.tab(tabId)?.runtime;
-		if (runtime?.kind === "terminal") await deps.reconnectHostControl(tabId, index.get(tabId)?.ownership?.ownerGeneration ?? "", runtime);
+		await deps.reconnectHostControl(tabId, index.get(tabId)?.ownership?.ownerGeneration ?? "");
 	}
 
 	/** Stop the positively verified target after its caller's one confirmation. */
@@ -694,6 +693,7 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 			deps.editorSlots().remove(state.slotId);
 			deps.bridgeEditors().releaseEditor(state.slotId);
 		}
+		deps.releaseRuntimeRecord(tabId);
 		deps.outcomes().delete(tabId);
 	}
 
@@ -716,9 +716,9 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 		try {
 			const tabId = typeof subject === "string" && index.get(subject) !== null ? subject : null;
 			const activation = deps.context();
-			if (tabId !== null && activation !== undefined && deps.tab(tabId)?.runtime == null && index.get(tabId)?.host?.transport === "native") {
+			if (tabId !== null && activation !== undefined && deps.sessionRuntime().snapshot(tabId) === null && index.get(tabId)?.host?.transport === "native") {
 				await reattachNativeForLifecycle(activation, index, tabId);
-				if (deps.tab(tabId)?.runtime == null && await deps.sessionRuntime().verifiedWriterPid(tabId) !== null) {
+				if (deps.sessionRuntime().snapshot(tabId) === null && await deps.sessionRuntime().verifiedWriterPid(tabId) !== null) {
 					deps.warn("The running session could not be reconnected; nothing was deleted.");
 					return false;
 				}

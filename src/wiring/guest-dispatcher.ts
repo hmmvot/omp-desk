@@ -85,7 +85,6 @@ export interface GuestTab {
 	readonly document: { readonly kind: string } | null;
 	/** The origin report of a page that announced itself while its editor could not act yet. */
 	heldReadyReport: object | null;
-	readonly runtime: { readonly cwd: string } | null;
 	readonly bridge: GuestBridgeBinding | null;
 }
 
@@ -133,6 +132,8 @@ export interface GuestChatPort<Tab extends GuestTab> {
 	rememberPrompt(text: string): void;
 	/** A named chat action of the page: compact, shake, cycle model, export, share, provider login. */
 	runChatAction(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, command: GuestChatCommand): Promise<void>;
+	/** The folder of the process this window runs for a conversation, or `null` when it runs none. */
+	hostedCwd(tabId: string): string | null;
 	/** The workspace paths a composer's `@`-mention query matches below a folder. */
 	completeFiles(cwd: string, query: string): Promise<GuestFileCompletionsMessage["paths"]>;
 	/** The recent sessions of the page's own folder an empty chat lists, and the open of one of them. */
@@ -521,7 +522,7 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 				return;
 			case "omp:complete-files": {
 				const state = deps.tab(tabId);
-				const cwd = state?.runtime?.cwd ?? index.get(tabId)?.cwd ?? null;
+				const cwd = deps.hostedCwd(tabId) ?? index.get(tabId)?.cwd ?? null;
 				if (state?.panel !== panel || cwd === null) return;
 				const paths = await deps.completeFiles(cwd, parsed.query);
 				if (deps.tab(tabId)?.panel !== panel) return;
@@ -535,7 +536,7 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 			}
 			case "omp:recent-sessions-request": {
 				const state = deps.tab(tabId);
-				const cwd = state?.runtime?.cwd ?? index.get(tabId)?.cwd ?? null;
+				const cwd = deps.hostedCwd(tabId) ?? index.get(tabId)?.cwd ?? null;
 				if (state?.panel !== panel || cwd === null) return;
 				void panel.webview.postMessage(deps.recents.answer({ slot, panel, document: state.document }, cwd, tabId, parsed.requestId));
 				return;

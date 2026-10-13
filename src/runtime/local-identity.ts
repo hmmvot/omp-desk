@@ -11,7 +11,7 @@
 import { controlPathEquals } from "../host/control-protocol.ts";
 import type { SessionHostRuntime } from "../host/native-session.ts";
 import type { SessionIndex } from "../host/session-index.ts";
-import type { RuntimeRecord } from "./runtime-record.ts";
+import type { RuntimeRecord, RuntimeRecords } from "./runtime-record.ts";
 
 const IDENTITY_RETRY_MS = 750;
 
@@ -27,8 +27,6 @@ interface PendingIdentity {
 
 /** What identity binding asks of its window; in-process only (design §2.5). */
 export interface IdentityWindow {
-	/** The window's record of one conversation, or `undefined` when it has none. */
-	record(conversation: string): RuntimeRecord | undefined;
 	/** The conversation was bound to its file: refresh its tab appearance and commit the document the file now allows. */
 	bound(conversation: string): void;
 	/** The catalogue of sessions changed. */
@@ -38,6 +36,7 @@ export interface IdentityWindow {
 export interface LocalIdentityDeps {
 	readonly index: SessionIndex;
 	readonly window: IdentityWindow;
+	readonly records: RuntimeRecords;
 	readonly log: (message: string) => void;
 }
 
@@ -68,7 +67,7 @@ export class LocalIdentity {
 	): Promise<void> {
 		const { index, window, log } = this.#deps;
 		await index.lifecycle.run(tabId, async lease => {
-			const current = window.record(tabId);
+			const current = this.#deps.records.get(tabId);
 			if (current === undefined || current.runtime !== runtime) return;
 			// The id is recorded the moment it is known — a new session's file does not exist until its
 			// first message, but a re-adopt after any restart needs the id to tell this session from a switch.
@@ -129,7 +128,7 @@ export class LocalIdentity {
 		const { index, window, log } = this.#deps;
 		const pending = this.#pending.get(tabId);
 		if (pending === undefined || Date.now() - pending.lastTry < IDENTITY_RETRY_MS) return Promise.resolve();
-		if (window.record(tabId)?.runtime !== pending.runtime || index.get(tabId)?.sessionFile !== null) {
+		if (this.#deps.records.get(tabId)?.runtime !== pending.runtime || index.get(tabId)?.sessionFile !== null) {
 			clearTimeout(pending.timer ?? undefined);
 			this.#pending.delete(tabId);
 			return Promise.resolve();
@@ -137,7 +136,7 @@ export class LocalIdentity {
 		pending.lastTry = Date.now();
 		return index.lifecycle
 			.run(tabId, async lease => {
-				if (window.record(tabId)?.runtime !== pending.runtime || this.#pending.get(tabId) !== pending) return;
+				if (this.#deps.records.get(tabId)?.runtime !== pending.runtime || this.#pending.get(tabId) !== pending) return;
 				const promotion = await index.promoteDraft(tabId, pending.sessionFile, lease);
 				if (promotion.status !== "promoted") {
 					if (promotion.detail !== pending.lastFailureDetail) {

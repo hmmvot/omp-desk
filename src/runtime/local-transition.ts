@@ -28,7 +28,7 @@ import type { LocalHostControl } from "./local-control.ts";
 import type { LocalExitOperations } from "./local-exit.ts";
 import { withSessionReadDeadline } from "./local-stop.ts";
 import type { StopOperations } from "./local-stop.ts";
-import type { RuntimeRecord } from "./runtime-record.ts";
+import type { RuntimeRecord, RuntimeRecords } from "./runtime-record.ts";
 import type {
 	BeginTransitionRequest, ReadTransitionFactsRequest, ReplaceWriterRequest, ReplaceWriterResult, RuntimeSnapshot, StopRequest, StopResult,
 	TransitionPhase, TransitionRetention, TransitionToken,
@@ -39,8 +39,6 @@ export const TRANSITION_FENCE_REASON = "Session lifecycle transition.";
 
 /** What the transitions ask of the window; in-process only (design §2.5). Hooks never wait for the user and never take a gate. */
 export interface TransitionWindow {
-	/** The window's record of one conversation, or `undefined` when it has none. */
-	record(conversation: string): RuntimeRecord | undefined;
 	/** The fence of a conversation changed: refresh what the editors show of it. Runs after the record and the chat session were updated. */
 	fenced(conversation: string, on: boolean): void;
 	/** The flow's own gate-time checks that only the window can make. `false` refuses the operation. */
@@ -56,6 +54,7 @@ export interface TransitionWindow {
 export interface LocalTransitionDeps {
 	readonly index: SessionIndex;
 	readonly window: TransitionWindow;
+	readonly records: RuntimeRecords;
 	readonly chat: Pick<ChatRuntime, "sessionOf" | "release">;
 	readonly stop: StopOperations;
 	readonly control: Pick<LocalHostControl, "release" | "dispose">;
@@ -104,7 +103,7 @@ export class LocalTransitions {
 	}
 
 	snapshot(conversation: string): RuntimeSnapshot | null {
-		const record = this.#deps.window.record(conversation);
+		const record = this.#deps.records.get(conversation);
 		const runtime = record?.runtime ?? null;
 		if (record === undefined || runtime === null) return null;
 		return {
@@ -126,14 +125,14 @@ export class LocalTransitions {
 
 	/** Why host control is unavailable for a conversation, shown rather than hidden; `null` clears it. */
 	setControlFailure(conversation: string, detail: string | null): void {
-		const record = this.#deps.window.record(conversation);
+		const record = this.#deps.records.get(conversation);
 		if (record !== undefined) record.controlFailure = detail;
 	}
 
 	/** Raise the fence for one flow: the admission flag, the chat session's mutation fence, then the window's projection. */
 	beginTransition(request: BeginTransitionRequest): TransitionToken {
 		const { window } = this.#deps;
-		const record = window.record(request.conversation);
+		const record = this.#deps.records.get(request.conversation);
 		const runtime = record?.runtime ?? null;
 		const token: TransitionToken = { conversation: request.conversation, serial: ++this.#serial };
 		this.#fences.set(token.serial, {
@@ -156,7 +155,7 @@ export class LocalTransitions {
 	endTransition(token: TransitionToken, retention: TransitionRetention): void {
 		const fence = this.#fences.get(token.serial);
 		this.#fences.delete(token.serial);
-		const record = this.#deps.window.record(token.conversation);
+		const record = this.#deps.records.get(token.conversation);
 		const runtime = record?.runtime ?? null;
 		const current = runtime !== null && fence?.target !== null && fence !== undefined && this.attachmentOf(runtime) === fence.target;
 		const keep = current && (
@@ -170,7 +169,7 @@ export class LocalTransitions {
 	async readTransitionFacts(request: ReadTransitionFactsRequest): Promise<SessionTransitionFacts | null> {
 		const { index, window, stop } = this.#deps;
 		const read = index.lifecycle.run(request.conversation, async () => {
-			const record = window.record(request.conversation);
+			const record = this.#deps.records.get(request.conversation);
 			const runtime = record?.runtime ?? null;
 			if (record === undefined || runtime === null || this.attachmentOf(runtime) !== request.target) return null;
 			if (request.token !== undefined && !(await window.check(request.token, "gate"))) return null;
@@ -194,7 +193,7 @@ export class LocalTransitions {
 				if (current === null) return { status: "writer-gone" };
 				if (current !== request.expectedWriter.pid) return { status: "writer-changed" };
 			}
-			const record = window.record(tabId);
+			const record = this.#deps.records.get(tabId);
 			const runtime = record?.runtime ?? null;
 			if (record === undefined || runtime === null || record.tabId !== tabId || this.attachmentOf(runtime) !== request.target ||
 				!(await window.check(request.token, "gate"))) return { status: "refused", code: "target-changed" };
@@ -274,7 +273,7 @@ export class LocalTransitions {
 		const tabId = request.conversation;
 		const refused = (code: Extract<ReplaceWriterResult, { status: "refused" }>["code"], detail?: string): ReplaceWriterResult =>
 			({ status: "refused", code, ...(detail === undefined ? {} : { detail }), ...progress });
-		const record = window.record(tabId);
+		const record = this.#deps.records.get(tabId);
 		const runtime = record?.runtime ?? null;
 		const binding = index.slotBinding(request.binding.slot);
 		if (record === undefined || runtime === null || record.tabId !== tabId || this.attachmentOf(runtime) !== request.target ||
@@ -341,7 +340,7 @@ export class LocalTransitions {
 			emptyFile: file,
 			launcher: this.#deps.launcher(),
 		}, lease);
-		if (outcome.status === "failed" && window.record(tabId)?.runtime === null) {
+		if (outcome.status === "failed" && this.#deps.records.get(tabId)?.runtime === null) {
 			await index.closeSession(tabId, { confirmedStopped: true, detail: outcome.detail }, lease);
 		}
 		return { status: "replaced", outcome, stopDispatched: true, writerGone: true };
@@ -393,7 +392,7 @@ export class LocalTransitions {
 	/** Raise or lower the fence of a conversation: the flag, the chat session's mutation fence, the window's projection. */
 	#raise(conversation: string, on: boolean): void {
 		const { window, chat } = this.#deps;
-		const record = window.record(conversation);
+		const record = this.#deps.records.get(conversation);
 		if (record !== undefined) record.transitioning = on;
 		chat.sessionOf(conversation)?.setMutationFence(on ? TRANSITION_FENCE_REASON : null);
 		window.fenced(conversation, on);

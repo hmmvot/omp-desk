@@ -27,12 +27,10 @@ import type { BridgeNativeBinding, BridgeRecordScope } from "../host/bridge-reco
 import type { BridgeDocumentRoute } from "../host/bridge-route.ts";
 import type { LocalSessionRuntime } from "../runtime/local-runtime.ts";
 import { isOpenControlClient } from "../host/control-attempt.ts";
-import type { HostControlClient } from "../host/control-client.ts";
 import { controlPathEquals } from "../host/control-protocol.ts";
 import type { DiagnosticsRecorder } from "../host/diagnostics.ts";
 import type { EditorCoordinator, EditorReservationResult } from "../host/editor-coordinator.ts";
 import type { EditorSlotRegistry } from "../host/editor-slots.ts";
-import type { SessionHostRuntime } from "../host/native-session.ts";
 import type { SessionIndex } from "../host/session-index.ts";
 import type { SessionViewMode } from "../host/session-model.ts";
 import {
@@ -69,11 +67,9 @@ export interface BridgeTab {
 	/** The conversation the editor shows, or `null` for a folder shell. */
 	tabId: string | null;
 	readonly panel: vscode.WebviewPanel | null;
-	readonly runtime: SessionHostRuntime | null;
 	mode: SessionViewMode;
 	/** The origin report of a page that announced itself while its editor could not act yet. */
 	heldReadyReport: { readonly documentId: string; readonly bootstrapId: string; readonly origin: string } | null;
-	readonly control: { readonly client: HostControlClient } | null;
 	bridge: BridgeBinding | null;
 }
 
@@ -103,7 +99,7 @@ export interface BridgeWindowFacts<Tab extends BridgeTab> {
 	/** The session index this activation created, or `null` before activation. */
 	index(): Pick<SessionIndex, "get"> | null;
 	/** The live sessions of this window's conversations, for the verified chat host of one conversation. */
-	sessions(): Pick<LocalSessionRuntime, "sessionOf">;
+	sessions(): Pick<LocalSessionRuntime, "sessionOf" | "records">;
 	/** The one-winner reservation table of this window's editors (ADR-0019/0023). */
 	editors(): EditorCoordinator;
 	editorSlots(): Pick<EditorSlotRegistry, "remove">;
@@ -490,11 +486,13 @@ export function registerBridgeHost<Tab extends BridgeTab>(deps: BridgeHostDeps<T
 				deps.editorSlots().remove(held.slotId);
 				held.slotId = entry.editorId;
 				held.tabId = conversation;
+				const record = deps.sessions().records.get(conversation);
+				if (record !== undefined) record.slotId = entry.editorId;
 				deps.tabs().set(entry.editorId, held);
 			}
 			const current = deps.tabState(entry.editorId);
 			if (current.tabId === null) current.tabId = conversation;
-			if (current.panel === null) current.mode = current.runtime?.kind ?? index.slotBinding(entry.editorId)?.mode ?? deps.defaultSessionMode(context);
+			if (current.panel === null) current.mode = deps.sessions().records.get(current.tabId)?.runtime?.kind ?? index.slotBinding(entry.editorId)?.mode ?? deps.defaultSessionMode(context);
 			if (current.bridge === null || current.bridge.editorId !== entry.editorId) {
 				current.bridge = { editorId: entry.editorId, endpoint, documentId: null, bound: false };
 			}
@@ -579,14 +577,15 @@ export function registerBridgeHost<Tab extends BridgeTab>(deps: BridgeHostDeps<T
 		const state = deps.tab(tabId);
 		const table = deps.index();
 		if (state === undefined || state.tabId === null || table === null) return null;
-		const runtime = state.runtime;
+		const record = deps.sessions().records.get(state.tabId);
+		const runtime = record?.runtime ?? null;
 		// The binding is the *current* conversation's: the endpoint's namespace T never
 		// selects chat authority again after the editor serves another conversation.
 		const entry = table.get(state.tabId);
 		if (runtime === null || entry === null) return null;
 		const session = deps.sessions().sessionOf(state.tabId);
 		if (runtime.kind === "chat" && (session === null || session.phase !== "live")) return null;
-		if (runtime.kind === "terminal" && (!state.control || !isOpenControlClient(state.control.client) || runtime.observed?.available !== true || runtime.observed.sessionId !== entry.sessionId || runtime.observed.sessionFile === null || entry.sessionFile === null || !controlPathEquals(runtime.observed.sessionFile, entry.sessionFile))) return null;
+		if (runtime.kind === "terminal" && (!record?.control || !isOpenControlClient(record.control.client) || runtime.observed?.available !== true || runtime.observed.sessionId !== entry.sessionId || runtime.observed.sessionFile === null || entry.sessionFile === null || !controlPathEquals(runtime.observed.sessionFile, entry.sessionFile))) return null;
 		if (entry.availability !== "live" || entry.ownership === null || entry.ownership.releasedAt !== null) return null;
 		if (entry.host?.pid !== runtime.pid) return null;
 		// Only an exactly identified conversation is bound: a new session's file is learned

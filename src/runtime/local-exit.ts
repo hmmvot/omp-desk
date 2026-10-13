@@ -22,12 +22,10 @@ import type { SessionIndex } from "../host/session-index.ts";
 import { controlOwnerFor } from "./local-control.ts";
 import type { LocalHostControl } from "./local-control.ts";
 import type { StopOperations } from "./local-stop.ts";
-import type { RuntimeRecord } from "./runtime-record.ts";
+import type { RuntimeRecord, RuntimeRecords } from "./runtime-record.ts";
 
 /** What the end of a process asks of its window; in-process only (design §2.5). Hooks never wait for the user. */
 export interface ExitWindow {
-	/** The window's record of one conversation, or `undefined` when it has none. */
-	record(conversation: string): RuntimeRecord | undefined;
 	/** Whether the window has been activated; before that nothing can be recorded. */
 	activated(): boolean;
 	/** Raise (or lower) the window's admission fence: the transition flag and the chat session's mutation fence. */
@@ -49,6 +47,7 @@ export interface ExitWindow {
 export interface LocalExitDeps {
 	readonly index: SessionIndex;
 	readonly window: ExitWindow;
+	readonly records: RuntimeRecords;
 	readonly control: Pick<LocalHostControl, "release" | "dispose">;
 	readonly stop: Pick<StopOperations, "confirmEnded">;
 	readonly attachBrokerClient: () => Promise<PtyBrokerClient | null>;
@@ -94,7 +93,7 @@ export class LocalExitOperations {
 		// stops waiting once the runtime is gone. Nothing is mutated here: a replacement runtime
 		// may already own the tab.
 		await index.lifecycle.run(tabId, async lease => {
-			const current = window.record(tabId);
+			const current = this.#deps.records.get(tabId);
 			if (current === undefined || current.runtime !== runtime) return;
 			// The tab's last restore outcome described a host that is no longer running; what
 			// the index records from here on is the launcher's status.
@@ -206,7 +205,7 @@ export class LocalExitOperations {
 	 */
 	async brokerLost(tabId: string, runtime: SessionHostRuntime, proven: boolean): Promise<void> {
 		const { window, log } = this.#deps;
-		const isCurrent = (): boolean => window.record(tabId)?.runtime === runtime;
+		const isCurrent = (): boolean => this.#deps.records.get(tabId)?.runtime === runtime;
 		if (!proven) {
 			log(`tab ${tabId}: the broker process is gone but its OMP process pid ${runtime.pid} could not be confirmed gone; the session is kept as it is`);
 			window.notice("warning", "OMP: A session's background process ended, but its OMP process could not be confirmed ended. Check Task Manager, then use Stop Session or refresh Sessions.");
@@ -225,7 +224,7 @@ export class LocalExitOperations {
 				if (isCurrent()) incomplete("it did not finish within 10 s");
 				return;
 			}
-			const state = window.record(tabId);
+			const state = this.#deps.records.get(tabId);
 			if (state !== undefined) {
 				// The pane ends as for an exit the broker reported, not as a lost connection; stale control errors
 				// from the moments before the process ended are dropped once the exit has been recorded.

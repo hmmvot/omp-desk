@@ -13,6 +13,7 @@ import module from "node:module";
 import { beforeEach, describe, it } from "node:test";
 
 import type { SessionIndex } from "../host/session-index.ts";
+import { RuntimeRecords } from "../runtime/runtime-record.ts";
 import type { BridgeTicketFacts } from "./bridge-host.ts";
 import type { EditorPanels, EditorPanelsDeps, EditorPanelsTab } from "./editor-panels.ts";
 
@@ -92,7 +93,7 @@ function fakePanel(viewType = "", viewColumn: number | undefined = 1): FakePanel
 const context = (): never => ({ extensionUri: URI.file("/ext") }) as never;
 
 const newTab = (slotId: string, overrides: Partial<FakeTab> = {}): FakeTab => ({
-	slotId, tabId: null, panel: null, runtime: null, mode: "chat", heldReadyReport: null, control: null, bridge: null, document: null, origin: null, ...overrides,
+	slotId, tabId: null, panel: null, mode: "chat", heldReadyReport: null, bridge: null, document: null, origin: null, ...overrides,
 });
 
 interface IndexFixture {
@@ -135,6 +136,7 @@ const nextTurn = (): Promise<void> => {
 function world(overrides: Partial<EditorPanelsDeps<FakeTab>> = {}) {
 	const state = {
 		tabs: new Map<string, FakeTab>(),
+		records: new RuntimeRecords(() => null),
 		editors: new EditorCoordinator(),
 		live: new Set<string>(),
 		columns: new Map<string, number>(),
@@ -167,6 +169,7 @@ function world(overrides: Partial<EditorPanelsDeps<FakeTab>> = {}) {
 	const routeOpens: string[] = [];
 	const guestCalls: string[] = [];
 	const deps: EditorPanelsDeps<FakeTab> = {
+		records: () => state.records,
 		tabs: () => state.tabs,
 		tab: key => key === null ? undefined : state.tabs.get(key) ?? [...state.tabs.values()].find(candidate => candidate.tabId === key),
 		tabState: key => {
@@ -485,7 +488,8 @@ describe("bindPanel", () => {
 		assert.deepEqual(second.options, { enableScripts: true, localResourceRoots: [URI.file("/ext/media")] });
 
 		const third = "d".repeat(31) + "e";
-		w.state.tabs.set(third, newTab(third, { runtime: { kind: "terminal", handle: {} } as never }));
+		w.state.tabs.set(third, newTab(third));
+		w.state.records.acquire(TAB, third).runtime = { kind: "terminal", handle: {} } as never;
 		w.panels.bindPanel(context(), index, third, TAB, fakePanel() as never, "restored");
 		assert.equal(w.state.tabs.get(third)!.mode, "terminal");
 		assert.ok(w.calls.includes(`pipeline:${third}`), "a terminal runtime gets its pipeline");

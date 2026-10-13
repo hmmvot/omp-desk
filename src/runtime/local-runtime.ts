@@ -29,10 +29,12 @@ import type { LocalTransitions } from "./local-transition.ts";
 import { LocalConversations } from "./local-conversations.ts";
 import type { ChatRuntime } from "../host/chat-runtime.ts";
 import type { RpcSession } from "../host/rpc/session.ts";
-import type { RuntimeRecord } from "./runtime-record.ts";
+import type { RuntimeRecord, RuntimeRecords } from "./runtime-record.ts";
 
 export interface LocalSessionRuntimeDeps {
 	readonly index: SessionIndex;
+	/** The runtime's record of each conversation; the window files one when an editor first shows it. */
+	readonly records: RuntimeRecords;
 	/** The chat runtime this runtime owns: the window constructs it with its hooks and hands it over. */
 	readonly chat: ChatRuntime;
 	readonly reconciler: () => OwnerReconciler;
@@ -57,6 +59,11 @@ export class LocalSessionRuntime implements SessionRuntime {
 	constructor(deps: LocalSessionRuntimeDeps) {
 		this.#deps = deps;
 		this.#conversations = new LocalConversations(deps.chat);
+	}
+
+	/** The records of this window's conversations: in-process only, never part of the port. */
+	get records(): RuntimeRecords {
+		return this.#deps.records;
 	}
 
 	get holder(): RuntimeHolder {

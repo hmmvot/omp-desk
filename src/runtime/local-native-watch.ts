@@ -24,7 +24,7 @@ import { describeControlError } from "./local-control.ts";
 import type { LocalHostControl } from "./local-control.ts";
 import type { LocalExitOperations } from "./local-exit.ts";
 import type { LocalIdentity } from "./local-identity.ts";
-import type { RuntimeRecord } from "./runtime-record.ts";
+import type { RuntimeRecord, RuntimeRecords } from "./runtime-record.ts";
 
 const POLL_INTERVAL_MS = 750;
 const FIRST_CONNECTION_DELAY_MS = 5_000;
@@ -38,10 +38,6 @@ export interface NativeObserver {
 
 /** What the native watch asks of its window; in-process only (design §2.5). */
 export interface NativeWatchWindow {
-	/** The window's record of one conversation, or `undefined` when it has none. */
-	record(conversation: string): RuntimeRecord | undefined;
-	/** Every record the window holds, for the early check of a launch. */
-	records(): Iterable<RuntimeRecord>;
 	/** One observer per watch; it owns the per-watch ledger of what was already announced. */
 	observer(record: RuntimeRecord, runtime: NativeHostRuntime): NativeObserver;
 	/** Whether the window has been activated; before that no control connection can be attempted. */
@@ -69,6 +65,7 @@ export interface NativeWatchWindow {
 export interface LocalNativeWatchDeps {
 	readonly index: SessionIndex;
 	readonly window: NativeWatchWindow;
+	readonly records: RuntimeRecords;
 	readonly control: LocalHostControl;
 	readonly exit: Pick<LocalExitOperations, "nativeExited">;
 	readonly identity: LocalIdentity;
@@ -98,7 +95,7 @@ export class LocalNativeWatch {
 	 * this exact file. SDK readback is never a global writer ledger, so a failure only skips a record.
 	 */
 	async servesFile(sessionFile: string): Promise<boolean> {
-		for (const state of this.#deps.window.records()) {
+		for (const state of this.#deps.records.all()) {
 			const native = state.runtime;
 			const control = state.control?.client;
 			if (native?.kind !== "terminal" || control === undefined || !isOpenControlClient(control)) continue;
