@@ -228,9 +228,11 @@ ${ANSI_STYLES}
 .omp-row--user .omp-body-block {
 	flex: 1 1 auto; min-width: 0;
 	padding: 10px 14px;
-	background: var(--vscode-editorWidget-background);
-	border: 1px solid var(--omp-border); border-radius: var(--omp-radius-card);
+	background: var(--vscode-chat-requestBubbleBackground, color-mix(in srgb, var(--vscode-focusBorder) 18%, transparent));
+	border: 1px solid transparent; border-radius: var(--omp-radius-card);
 }
+/* A tint is not distinguishable in High Contrast, an edge is. */
+.vscode-high-contrast .omp-row--user .omp-body-block, .vscode-high-contrast-light .omp-row--user .omp-body-block { background: transparent; border-color: var(--omp-border); }
 
 .omp-row--marker { color: var(--omp-muted); font-size: 11px; }
 /* Hover actions of a row (Copy on the user's messages); shown on hover or keyboard focus. */
@@ -299,8 +301,8 @@ ${ANSI_STYLES}
 
 /* ── markdown ───────────────────────────────────────────────────────────── */
 
-.omp-md p { margin: 4px 0; }
-.omp-md h1, .omp-md h2, .omp-md h3, .omp-md h4, .omp-md h5, .omp-md h6 { margin: 8px 0 4px; line-height: 1.3; }
+.omp-md p { margin: 8px 0; }
+.omp-md h1, .omp-md h2, .omp-md h3, .omp-md h4, .omp-md h5, .omp-md h6 { margin: 16px 0 4px; line-height: 1.3; font-weight: 600; }
 .omp-md h1 { font-size: 1.35em; }
 .omp-md h2 { font-size: 1.2em; }
 .omp-md h3 { font-size: 1.08em; }
@@ -312,11 +314,11 @@ ${ANSI_STYLES}
 .omp-file-link:focus-visible, .omp-web-link:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; border-radius: var(--omp-radius); text-decoration: underline; }
 .omp-md code {
 	font-family: var(--omp-mono);
-	font-size: var(--omp-mono-size);
+	font-size: .92em;
 	color: var(--vscode-textPreformat-foreground, var(--vscode-foreground));
 	background: var(--vscode-textPreformat-background);
 	border-radius: var(--omp-radius);
-	padding: 1px 4px;
+	padding: 0 4px;
 }
 /* A link inside code, or code inside a link (a symbol linked to its definition): code colours, underlined as a link. */
 .omp-md code .omp-file-link, .omp-md code .omp-file-link:hover { color: inherit; text-decoration: underline; }
@@ -329,9 +331,9 @@ ${ANSI_STYLES}
 	color: var(--vscode-foreground);
 	border: 1px solid var(--omp-border);
 	border-radius: var(--omp-radius-card);
-	padding: 6px 8px;
+	padding: 10px 12px;
 	overflow-x: auto;
-	margin: 6px 0;
+	margin: 8px 0;
 }
 .omp-md pre code { color: inherit; background: none; padding: 0; font-size: var(--omp-mono-size); line-height: 1.45; }
 /* Hover Copy on fenced code blocks and user messages: hidden until the block is hovered or the button is focused. */
@@ -342,14 +344,16 @@ ${ANSI_STYLES}
 .omp-code-copy { position: absolute; top: 4px; right: 4px; opacity: 0; }
 .omp-code-block:hover .omp-code-copy, .omp-code-copy:focus-visible, .omp-code-copy:has(.omp-copy-status) { opacity: 1; }
 .omp-md blockquote {
-	margin: 4px 0;
-	padding: 0 8px;
-	border-left: 2px solid var(--omp-border);
+	margin: 8px 0;
+	padding: 0 0 0 12px;
+	border-left: 3px solid color-mix(in srgb, var(--vscode-foreground) 28%, transparent);
 	color: var(--omp-muted);
 }
-.omp-md table { border-collapse: collapse; margin: 6px 0; }
-.omp-md th, .omp-md td { border: 1px solid var(--omp-border); padding: 2px 6px; text-align: left; }
-.omp-md th { background: var(--omp-surface); }
+.vscode-high-contrast .omp-md blockquote, .vscode-high-contrast-light .omp-md blockquote { border-left-color: var(--vscode-contrastBorder); }
+/* Tables are ruled by their rows, not boxed in a grid. */
+.omp-md table { border-collapse: collapse; margin: 8px 0; }
+.omp-md th, .omp-md td { border: 0; border-bottom: 1px solid var(--omp-border); padding: 4px 16px 4px 0; text-align: left; }
+.omp-md th { font-weight: 600; color: var(--omp-muted); }
 
 .omp-think { margin: 4px 0; }
 .omp-think > button {
@@ -423,11 +427,14 @@ ${ANSI_STYLES}
 .omp-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; border: 0; }
 .omp-slash-description { display: block; font-family: var(--vscode-font-family); color: var(--omp-muted); font-size: 11px; white-space: normal; }
 .omp-tool-head:focus-visible, .omp-tool-body:focus-visible, .omp-overview-head:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
-.omp-reply-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 8px; color: var(--omp-muted); font-size: 11px; }
-.omp-reply-copy { display: inline-flex; align-items: center; gap: 4px; border: 0; padding: 2px 3px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
-.omp-reply-copy:hover:not(:disabled) { color: var(--vscode-foreground); background: var(--vscode-list-hoverBackground); }
+.omp-reply-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 4px; color: var(--omp-muted); font-size: 11px; }
+.omp-reply-footer > span:nth-of-type(2)::before { content: "\\00b7"; margin-right: 6px; }
+.omp-reply-copy { display: inline-flex; align-items: center; border: 0; border-radius: var(--omp-radius); padding: 2px 4px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
+.omp-reply-copy .codicon { font-size: 14px; }
+.omp-reply-copy:hover:not(:disabled) { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); }
 .omp-reply-copy:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
 .omp-reply-copy:disabled { cursor: default; }
+.vscode-high-contrast .omp-reply-copy, .vscode-high-contrast-light .omp-reply-copy { border: 1px solid var(--vscode-contrastBorder); }
 .omp-tool-section-title {
 	font-size: 10px;
 	text-transform: uppercase;
@@ -776,12 +783,12 @@ ${QUEUE_STYLES}
 .omp-native-child .omp-transcript { max-height: none; min-height: 100px; overflow: visible; }
 ${TOOL_STYLES}
 /* Action buttons share VS Code's secondary tokens; transcript disclosure rows remain flat. */
-.omp-jump-latest, .omp-reply-copy, .omp-attachment-remove, .omp-earlier button, .omp-history-pages button, .omp-native-child button, .omp-hud-open {
+.omp-jump-latest, .omp-attachment-remove, .omp-earlier button, .omp-history-pages button, .omp-native-child button, .omp-hud-open {
 	border: 1px solid var(--vscode-button-border, var(--vscode-contrastBorder, transparent));
 	background: var(--vscode-button-secondaryBackground);
 	color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
 }
-.omp-jump-latest:hover:not(:disabled), .omp-reply-copy:hover:not(:disabled), .omp-attachment-remove:hover:not(:disabled), .omp-earlier button:hover:not(:disabled), .omp-history-pages button:hover:not(:disabled), .omp-native-child button:hover:not(:disabled), .omp-hud-open:hover:not(:disabled) {
+.omp-jump-latest:hover:not(:disabled), .omp-attachment-remove:hover:not(:disabled), .omp-earlier button:hover:not(:disabled), .omp-history-pages button:hover:not(:disabled), .omp-native-child button:hover:not(:disabled), .omp-hud-open:hover:not(:disabled) {
 	background: var(--vscode-button-secondaryHoverBackground);
 	color: var(--vscode-button-secondaryForeground, var(--vscode-foreground));
 }

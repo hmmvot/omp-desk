@@ -12,10 +12,10 @@ export function ReplyFooter({ reply }: { reply: ReplyFooterData }) {
 	return <footer className="omp-reply-footer" aria-label="Finished reply">
 		<span title={timingExplanation}>{duration}</span>
 		<span title={reply.endTime === null ? "Model request started; completion time unavailable" : "Reply completed"}>{localTime}</span>
-		<button type="button" className="omp-reply-copy" disabled={reply.imageOnly} title={reply.imageOnly ? "Image-only reply: no text to copy" : "Copy canonical reply Markdown"} onClick={async () => {
+		<button type="button" className="omp-reply-copy" disabled={reply.imageOnly} aria-label="Copy reply" title={reply.imageOnly ? "Image-only reply: no text to copy" : "Copy reply"} onClick={async () => {
 			try { await navigator.clipboard.writeText(reply.text); setCopyStatus("Copied"); }
 			catch { setCopyStatus("Copy failed. Select the reply text to copy it manually."); }
-		}}><i className="codicon codicon-copy" aria-hidden="true" />Copy</button>
+		}}><i className="codicon codicon-copy" aria-hidden="true" /></button>
 		{reply.imageOnly && <span>No text to copy</span>}
 		{copyStatus !== null && <span role="status">{copyStatus}</span>}
 	</footer>;

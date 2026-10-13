@@ -821,6 +821,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate(`window.ui.thinking([{type:'thinking',thinking:'Excluded reasoning'},{type:'text',text:'**Canonical** reply'}]);
 			 Object.defineProperty(navigator,'clipboard',{configurable:true,value:{async writeText(text){window.copiedReply=text}}})`);
 			await ui.wait("document.querySelector('.omp-reply-copy')");
+			assert.deepEqual(await ui.evaluate("(()=>{const b=document.querySelector('.omp-reply-copy');return [b.getAttribute('aria-label'),b.textContent,getComputedStyle(b).borderTopWidth]})()"), ["Copy reply", "", "0px"]);
 			await ui.evaluate("document.querySelector('.omp-reply-copy').click()");
 			await ui.wait("window.copiedReply==='**Canonical** reply'");
 			assert.equal(await ui.evaluate("document.querySelector('.omp-reply-footer [role=status]').textContent"), "Copied");
