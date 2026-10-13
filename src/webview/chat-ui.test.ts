@@ -2164,8 +2164,8 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			  left:box.left-card.left,top:box.top-card.top,toolbarGap:toolbar.top-box.bottom};})()`);
 			assert.ok(frame.pl >= 10 && frame.pl <= 12 && frame.pr >= 10 && frame.pr <= 12, `horizontal padding ${frame.pl}/${frame.pr}`);
 			assert.ok(frame.pt >= 8 && frame.pt <= 10 && frame.pb >= 8 && frame.pb <= 10, `vertical padding ${frame.pt}/${frame.pb}`);
-			assert.equal(frame.outline, "solid 1px", "the focus ring is drawn on the padded textarea");
-			assert.ok(frame.offset <= 0, "and stays inside its border box, so it wraps the padding rather than the glyphs");
+			assert.equal(frame.outline.startsWith("none"), true, "the textarea draws no ring of its own");
+			assert.equal(await ui.evaluate("(()=>{const card=document.querySelector('.omp-composer');card.querySelector('textarea').focus();const probe=document.createElement('i');probe.style.color='var(--vscode-focusBorder, #007fd4)';document.body.append(probe);const same=getComputedStyle(card).borderTopColor===getComputedStyle(probe).color;probe.remove();return same})()"), true, "the focused card is the one ring");
 			assert.ok(frame.left > 0 && frame.top > 0, "the frame sits inside the rounded card");
 			assert.equal(frame.height, 2 * 20 + frame.pt + frame.pb, "a short draft autosizes to the two-line minimum plus padding");
 			assert.ok(frame.toolbarGap >= 0, "the actions row stays below the input");

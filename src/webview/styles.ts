@@ -512,6 +512,20 @@ ${ANSI_STYLES}
 .omp-composer-toolbar-actions { display: flex; flex-wrap: nowrap; gap: 6px; align-items: center; flex: 0 0 auto; margin-left: auto; }
 .omp-composer-toolbar-actions .omp-btn { height: 28px; justify-content: center; flex: 0 0 auto; }
 .omp-composer-hint { margin-top: 4px; font-size: 11px; color: var(--omp-muted); }
+/* Quiet toolbar: the controls are text and icons until the pointer is on them; Send is the one filled control, a pill with its label. */
+.omp-composer-toolbar .omp-footer-trigger, .omp-composer-toolbar .omp-context-trigger, .omp-composer-toolbar .omp-composer-attach, .omp-composer-toolbar-actions .omp-btn:not(.omp-btn--primary) { border-color: transparent; background: transparent; color: var(--omp-muted); }
+.omp-composer-toolbar .omp-footer-trigger:hover:not(:disabled), .omp-composer-toolbar .omp-context-trigger:hover, .omp-composer-toolbar .omp-composer-attach:hover:not(:disabled), .omp-composer-toolbar-actions .omp-btn:not(.omp-btn--primary):hover:not(:disabled) { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); color: var(--vscode-foreground); }
+.omp-composer-toolbar .omp-footer-trigger { padding: 0 6px; }
+.omp-composer-toolbar .omp-footer-trigger-label { font-size: 12px; }
+.vscode-high-contrast .omp-composer-toolbar .omp-footer-trigger, .vscode-high-contrast .omp-composer-toolbar .omp-context-trigger, .vscode-high-contrast .omp-composer-toolbar .omp-composer-attach, .vscode-high-contrast-light .omp-composer-toolbar .omp-footer-trigger, .vscode-high-contrast-light .omp-composer-toolbar .omp-context-trigger, .vscode-high-contrast-light .omp-composer-toolbar .omp-composer-attach { border-color: var(--vscode-contrastBorder); }
+.omp-composer-toolbar-actions .omp-btn--primary { border-radius: 14px; }
+@media (min-width: 461px) { .omp-composer-toolbar-actions .omp-btn--primary { padding: 3px 14px; } }
+/* A disabled Send is a neutral pill, not the primary colour washed out. */
+.omp-composer-toolbar-actions .omp-btn--primary:disabled { opacity: 1; background: var(--vscode-button-secondaryBackground, transparent); color: var(--vscode-disabledForeground, var(--omp-muted)); }
+.vscode-light:not(.vscode-high-contrast-light) .omp-composer-toolbar-actions .omp-btn--primary:disabled { background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent); }
+/* One focus ring: the card, not the card and the textarea inside it. */
+.omp-composer:focus-within { border-color: var(--vscode-focusBorder); }
+.omp-composer .omp-textarea:focus { outline: none; }
 /* Notices stacked above the input row keep the 6px gap of .omp-attach-error: the input row's -4px top margin would otherwise pull it over the hint's text. */
 .omp-composer > .omp-composer-hint { margin: 0 0 6px; line-height: 1.4; }
 
