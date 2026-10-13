@@ -77,7 +77,8 @@ describe("agent liveness signal: merge with the RPC roster", () => {
 		assert.equal(row?.origin, "registry");
 		const shown = agentRow(row!, model.agentActivity.get("Worker"));
 		assert.deepEqual([shown.status, shown.badge, shown.description, shown.activity], ["running", "implementer", "Fix the parser", "bash · Sleeping 45 s"]);
-		assert.match(agentsSummary(model).text, /^1 running · Worker: bash · Sleeping 45 s$/);
+		assert.match(agentsSummary(model).text, /^1 running: Worker$/);
+		assert.equal(agentsSummary(model).detail, "Worker: bash · Sleeping 45 s");
 	});
 
 	it("never duplicates an agent the RPC roster lists, and never removes its row", () => {

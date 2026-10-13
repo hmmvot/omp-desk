@@ -293,20 +293,21 @@ export function agentWindowWithin(model: AgentsModelView, lines: number): AgentW
 const SUMMARY_STATES: readonly AgentStatus[] = ["running", "pending", "completed", "failed", "aborted"];
 
 /**
- * The collapsed Agents line: counts by state, then who is doing what for the first running agents.
- * An unavailable native registry is stated, never shown as zero.
+ * The collapsed Agents line: counts by state, then the names of the first running agents (`2 running: A, B`, `+k` for the rest).
+ * `detail` is who is doing what for those agents, the row's tooltip. An unavailable native registry is stated, never shown as zero.
  */
-export function agentsSummary(model: AgentsModelView): { text: string; warn: boolean } {
-	if (model.agentAvailability === "unavailable") return { text: "registry unavailable", warn: true };
+export function agentsSummary(model: AgentsModelView): { text: string; warn: boolean; detail: string } {
+	if (model.agentAvailability === "unavailable") return { text: "registry unavailable", warn: true, detail: "" };
 	const agents = sortedAgents(model.agents);
 	const counts = SUMMARY_STATES.map(status => [status, agents.filter(agent => agent.status === status).length] as const).filter(([, count]) => count > 0);
-	const parts = counts.map(([status, count]) => `${count} ${status}`);
-	const fragments: string[] = [];
-	for (const agent of agents) {
-		if (agent.status !== "running" || fragments.length >= AGENTS_SUMMARY_NAMES) continue;
+	const running = agents.filter(agent => agent.status === "running");
+	const names = running.slice(0, AGENTS_SUMMARY_NAMES).map(agent => agent.id);
+	if (running.length > names.length) names.push(`+${running.length - names.length}`);
+	const doings = running.slice(0, AGENTS_SUMMARY_NAMES).map(agent => {
 		const row = agentRow(agent, model.agentActivity.get(agent.id));
 		const doing = row.activity || row.description || row.type;
-		fragments.push(doing.length > 0 ? `${agent.id}: ${doing}` : agent.id);
-	}
-	return { text: [parts.join(", "), ...fragments].filter(part => part.length > 0).join(" · "), warn: false };
+		return doing.length > 0 ? `${agent.id}: ${doing}` : agent.id;
+	});
+	const head = counts.map(([status, count]) => `${count} ${status}`).join(", ");
+	return { text: names.length > 0 ? `${head}: ${names.join(", ")}` : head, warn: false, detail: doings.join(" · ") };
 }

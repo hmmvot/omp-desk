@@ -129,7 +129,7 @@ describe("TODO expanded rows", () => {
 });
 
 describe("Agents rows", () => {
-	it("summarizes counts and who is doing what, for the first two running agents", () => {
+	it("names the first two running agents in the summary and keeps who is doing what for the tooltip", () => {
 		const model = view(
 			[
 				agent("ScrollJump", { index: 0, progress: { currentTool: "read", lastIntent: "Reading App.tsx" } }),
@@ -139,11 +139,12 @@ describe("Agents rows", () => {
 			],
 			[["Third", { type: "x", tool: "edit", timestamp: 1 }]],
 		);
-		assert.equal(agentsSummary(model).text, "3 running, 1 completed · ScrollJump: read · Reading App.tsx · AskDialogRefresh: Fix menu");
+		assert.equal(agentsSummary(model).text, "3 running, 1 completed: ScrollJump, AskDialogRefresh, +1");
+		assert.equal(agentsSummary(model).detail, "ScrollJump: read · Reading App.tsx · AskDialogRefresh: Fix menu");
 	});
 
 	it("names the registry as unavailable instead of showing zero", () => {
-		assert.deepEqual(agentsSummary(view([], [], "unavailable")), { text: "registry unavailable", warn: true });
+		assert.deepEqual(agentsSummary(view([], [], "unavailable")), { text: "registry unavailable", warn: true, detail: "" });
 	});
 
 	it("rows carry glyph, id, type badge, description, activity and native elapsed only", () => {

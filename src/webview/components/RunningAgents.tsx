@@ -34,6 +34,7 @@ export function RunningAgents({ model, expanded, onToggle, lines }: RunningAgent
 				name="Agents"
 				icon="organization"
 				summary={summary.text}
+				detail={summary.detail}
 				warn={summary.warn}
 				expanded={expanded}
 				controls={listId}

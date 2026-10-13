@@ -24,6 +24,8 @@ export interface HudHeaderProps {
 	/** The Codicon the same tool's transcript row uses (`todo` and `task`). */
 	icon: string;
 	summary: string;
+	/** Facts the one-line summary leaves out, appended to the row's tooltip. */
+	detail?: string;
 	warn?: boolean;
 	/** The one counter, with its full accessible name. */
 	counter?: { text: string; title: string };
@@ -39,7 +41,7 @@ export interface HudHeaderProps {
 export function HudHeader(props: HudHeaderProps): ReactNode {
 	return (
 		<div className="omp-hud-head">
-			<button type="button" className="omp-hud-toggle" aria-expanded={props.expanded} aria-controls={props.expanded ? props.controls : undefined} title={`${props.name}: ${props.summary}`} onClick={props.onToggle}>
+			<button type="button" className="omp-hud-toggle" aria-expanded={props.expanded} aria-controls={props.expanded ? props.controls : undefined} title={props.detail ? `${props.name}: ${props.summary}\n${props.detail}` : `${props.name}: ${props.summary}`} onClick={props.onToggle}>
 				<span className={`codicon codicon-chevron-${props.expanded ? "down" : "right"}`} aria-hidden="true" />
 				<span className={`codicon codicon-${props.icon}`} aria-hidden="true" />
 				<span className="omp-hud-label">{props.name}</span>
