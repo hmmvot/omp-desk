@@ -118,7 +118,9 @@ import { attachSessionView, sessionViewSnapshot } from "./lib/session-view";
 import { attachInsertedText } from "./lib/insert-text";
 import { adoptNonceForCreatedStyles } from "./lib/nonce-styles";
 import { installFocusTrace } from "./lib/focus-trace";
+import { installTypeToFocus } from "./lib/type-to-focus";
 installFocusTrace(window, element => element.classList.contains("omp-textarea"), detail => guestTransport.post({ type: "omp:focus-trace", detail }));
+installTypeToFocus(window);
 attachSessionView(guestTransport);
 attachInsertedText(guestTransport, () => sessionViewSnapshot().mode);
 const epoch = { nonce: "host-ui-test", counter: 1 };
@@ -3677,6 +3679,126 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate("document.querySelector('[data-tool-name=\"read\"] .omp-file-link').click()");
 			assert.equal((await sentOpen()).at(-1), "src/proof.ts:40", "the read row's path opens at its line selector");
 			assert.notEqual(await ui.evaluate("document.querySelector('[data-tool-name=\"read\"] .omp-tool-head').getAttribute('aria-expanded')"), "true", "the link click does not toggle the row");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+			await ui.evaluate("clearInterval(window.answerLinks)");
+		});
+
+		await t.test("typing with nothing editable focused goes into the composer exactly once, while native keys, other fields and an unwritable composer are left alone", async () => {
+			await reset("type-to-focus");
+			await ui.evaluate(`(()=>{
+			 const row=(id,message)=>({type:'message',id,parentId:null,timestamp:'2026-10-01T00:00:00.000Z',message});
+			 window.ui.push({entries:[
+			  row('user',{role:'user',timestamp:1,content:'Check please'}),
+			  row('assistant',{role:'assistant',model:'m',timestamp:2,stopReason:'stop',content:[{type:'text',text:'Reply with src/proof.ts:12 inside.'}]}),
+			  row('call',{role:'assistant',model:'m',timestamp:3,stopReason:'toolUse',content:[{type:'toolCall',id:'read-1',name:'read',arguments:{path:'src/proof.ts:40-60'}}]}),
+			  row('result',{role:'toolResult',toolCallId:'read-1',toolName:'read',timestamp:4,isError:false,content:[{type:'text',text:'forty'}]}),
+			 ],durableCount:4,working:false,settled:true});
+			 window.answered=new Set();
+			 window.answerLinks=setInterval(()=>{for(const message of window.sent){
+			  if(message.type!=='omp:terminal-link-validate'||window.answered.has(message.requestId))continue;
+			  window.answered.add(message.requestId);
+			  window.ui.receive({type:'omp:terminal-link-validation',requestId:message.requestId,valid:true});
+			 }},5);
+			})()`);
+			await ui.wait("document.querySelector('.omp-file-link') && document.querySelector('.omp-reply-copy') && document.querySelector('[data-tool-name=\"read\"] .omp-tool-head')");
+			const key = async (name: string, code: string, windowsVirtualKeyCode: number, extra: Record<string, unknown> = {}): Promise<void> => {
+				await ui.call("Input.dispatchKeyEvent", { type: "keyDown", key: name, code, windowsVirtualKeyCode, ...extra });
+				await ui.call("Input.dispatchKeyEvent", { type: "keyUp", key: name, code, windowsVirtualKeyCode });
+			};
+			const typeText = async (text: string): Promise<void> => {
+				for (const character of text) await key(character, `Key${character.toUpperCase()}`, character.toUpperCase().charCodeAt(0), { text: character });
+			};
+			const state = (): Promise<{ value: string; composerFocused: boolean }> => ui.evaluate(`(()=>{const field=document.querySelector('.omp-composer textarea');
+			 return{value:field.value,composerFocused:document.activeElement===field}})()`);
+			const clearComposer = (): Promise<void> => ui.evaluate("(()=>{const field=document.querySelector('.omp-composer textarea');field.focus();field.select();document.execCommand('delete');field.blur();})()");
+			const focusOn = (selector: string): Promise<void> => ui.evaluate(selector === "body" ? "document.activeElement?.blur()" : `document.querySelector(${JSON.stringify(selector)}).focus()`);
+
+			for (const selector of ["body", "[data-tool-name=\"read\"] .omp-tool-head", ".omp-md .omp-file-link", ".omp-reply-copy"]) {
+				await clearComposer();
+				await focusOn(selector);
+				assert.equal((await state()).composerFocused, false, `${selector} holds the focus before typing`);
+				await typeText("abc");
+				await ui.wait("document.querySelector('.omp-composer textarea').value.length>=3");
+				assert.deepEqual(await state(), { value: "abc", composerFocused: true }, `abc typed over ${selector} lands once in the composer`);
+			}
+
+			// The caret goes to the end of what the draft already holds.
+			await clearComposer();
+			await ui.evaluate("(()=>{const field=document.querySelector('.omp-composer textarea');field.focus();document.execCommand('insertText',false,'xy');field.setSelectionRange(0,0);field.blur();})()");
+			await typeText("z");
+			await ui.wait("document.querySelector('.omp-composer textarea').value.length>=3");
+			assert.equal((await state()).value, "xyz");
+
+			// Space and Enter keep their native meaning on a focused button; they neither type nor send.
+			await clearComposer();
+			const head = "[data-tool-name=\"read\"] .omp-tool-head";
+			const expanded = (): Promise<string | null> => ui.evaluate(`document.querySelector(${JSON.stringify(head)}).getAttribute('aria-expanded')`);
+			await focusOn(head);
+			const before = await expanded();
+			await key(" ", "Space", 32, { text: " " });
+			await ui.wait(`document.querySelector(${JSON.stringify(head)}).getAttribute('aria-expanded')!==${JSON.stringify(before)}`);
+			assert.deepEqual(await state(), { value: "", composerFocused: false });
+			assert.equal(await ui.evaluate(`document.activeElement===document.querySelector(${JSON.stringify(head)})`), true, "Space leaves the focus on the button it activated");
+			const afterSpace = await expanded();
+			await key("Enter", "Enter", 13, { text: "\r" });
+			await ui.wait(`document.querySelector(${JSON.stringify(head)}).getAttribute('aria-expanded')!==${JSON.stringify(afterSpace)}`);
+			assert.equal((await state()).value, "");
+			assert.equal(await ui.evaluate("window.sent.filter(message=>message.type==='omp:chat-prompt').length"), 0, "Enter on a button sends nothing");
+
+			// Chords, IME and dead keys are not text.
+			await focusOn("body");
+			await key("k", "KeyK", 75, { modifiers: 2 });
+			await key("Process", "KeyK", 229);
+			await key("Dead", "Quote", 222);
+			await key("ArrowDown", "ArrowDown", 40);
+			assert.equal((await state()).composerFocused, false, "chords, IME, dead keys and navigation keep the focus where it is");
+
+			// Another field the user is typing in is untouched.
+			await ui.evaluate("(()=>{const probe=document.createElement('input');probe.id='probe';document.body.append(probe);probe.focus();})()");
+			await typeText("k");
+			assert.equal(await ui.evaluate("document.getElementById('probe').value"), "k");
+			assert.equal((await state()).value, "", "an editable target keeps its own typing");
+			await ui.evaluate("document.getElementById('probe').remove()");
+
+			// Ctrl+V on a focused non-field pastes into the composer, once.
+			await clearComposer();
+			await focusOn(head);
+			await ui.evaluate("(()=>{const source=document.createElement('textarea');source.value='pasted text';document.body.append(source);source.select();const copied=document.execCommand('copy');source.remove();return copied;})()");
+			await ui.call("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "v", code: "KeyV", windowsVirtualKeyCode: 86, modifiers: 2, commands: ["paste"] });
+			await ui.call("Input.dispatchKeyEvent", { type: "keyUp", key: "v", code: "KeyV", windowsVirtualKeyCode: 86, modifiers: 2 });
+			await ui.wait("document.querySelector('.omp-composer textarea').value==='pasted text'");
+			assert.equal((await state()).composerFocused, true);
+
+			// A composer that cannot take text gets nothing, and the focus stays where it was.
+			await clearComposer();
+			await ui.evaluate("window.ui.push({phase:'resyncing'})");
+			await ui.wait("document.querySelector('.omp-composer textarea').disabled");
+			await focusOn(head);
+			await typeText("q");
+			assert.deepEqual(await state(), { value: "", composerFocused: false });
+			assert.equal(await ui.evaluate(`document.activeElement===document.querySelector(${JSON.stringify(head)})`), true);
+			await ui.evaluate("window.ui.push({phase:'live'})");
+			await ui.wait("!document.querySelector('.omp-composer textarea').disabled");
+			await ui.evaluate("window.ui.receive({type:'omp:draft-request',requestId:900})");
+			await ui.wait("document.querySelector('.omp-composer textarea').readOnly");
+			await focusOn(head);
+			await typeText("q");
+			assert.deepEqual(await state(), { value: "", composerFocused: false }, "a read-only composer is not a typing target");
+			await ui.evaluate("window.ui.receive({type:'omp:draft-release',requestId:900})");
+			await ui.wait("!document.querySelector('.omp-composer textarea').readOnly");
+
+			// While an ask replaces the composer there is nothing to type into; the ask keeps its focus.
+			await ui.evaluate("window.ui.push({uiRequests:[{id:'type-ask',method:'ask',title:'t',questions:[{id:'only',question:'Proceed?',multi:false,options:[{label:'Yes'},{label:'No'}]}]}],working:true,settled:false})");
+			await ui.wait("document.querySelectorAll('.omp-ask-option').length===3 && !document.querySelector('.omp-composer textarea')");
+			await ui.evaluate("document.querySelector('.omp-ask-option').focus()");
+			await typeText("x");
+			assert.equal(await ui.evaluate("document.activeElement===document.querySelector('.omp-ask-option')"), true);
+			assert.equal(await ui.evaluate("document.querySelector('.omp-composer textarea')"), null);
+			// Its own "Other" field is an editable target and keeps what is typed into it.
+			await ui.evaluate("document.querySelectorAll('.omp-ask-option')[2].click()");
+			await ui.wait("document.querySelector('.omp-ask-custom textarea')");
+			await typeText("x");
+			await ui.wait("document.querySelector('.omp-ask-custom textarea').value==='x'");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 			await ui.evaluate("clearInterval(window.answerLinks)");
 		});

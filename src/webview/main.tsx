@@ -17,12 +17,15 @@ import { attachSessionView, sessionViewSnapshot } from "./lib/session-view";
 import { attachInsertedText } from "./lib/insert-text";
 import { restoreFocusTakenByHost } from "./lib/frame-focus";
 import { installFocusTrace } from "./lib/focus-trace";
+import { installTypeToFocus } from "./lib/type-to-focus";
 
 function boot(): void {
 	// A composer that loses focus without the user moving it is reported to the OMP Desk output, with what the page saw.
 	installFocusTrace(window, element => element.classList.contains("omp-textarea"), detail => guestTransport.post({ type: "omp:focus-trace", detail }));
 	// VS Code focuses the webview again when its window gains focus, which empties the page's focus; put it back.
 	restoreFocusTakenByHost(window);
+	// Typing while the page has the keyboard focus but nothing editable does goes into the composer.
+	installTypeToFocus(window);
 	const nonce = readCspNonce();
 	adoptNonceForCreatedStyles(nonce);
 	injectGuestStyles(nonce);
