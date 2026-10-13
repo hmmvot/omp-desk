@@ -591,18 +591,20 @@ describe("the draft handoff", () => {
 	});
 });
 
-describe("the symbol search from a chat page", () => {
-	const selectionAnswering = (
-		dispatcher: GuestDispatcher<FakeTab>, text: string, sender: () => { slot: string; panel: never },
-	) => async (message: PostedMessage) => {
-		if (message.type !== "omp:selection-request") return;
-		const from = sender();
-		await dispatcher.handleMessage(index, from.slot, from.panel, { type: "omp:selection-reply", requestId: message.requestId, text });
-	};
-	const activate = (state: { active: (FakeTab & { tabId: string; panel: never }) | null }, editor: FakeEditor) => {
-		state.active = Object.assign(Object.create(null), editor.tab, { tabId: TAB, panel: editor.panel });
-	};
+/** A page that answers a selection request with `text`, as the editor `sender` names it. */
+const selectionAnswering = (
+	dispatcher: GuestDispatcher<FakeTab>, text: string, sender: () => { slot: string; panel: never },
+) => async (message: PostedMessage) => {
+	if (message.type !== "omp:selection-request") return;
+	const from = sender();
+	await dispatcher.handleMessage(index, from.slot, from.panel, { type: "omp:selection-reply", requestId: message.requestId, text });
+};
+/** Make `editor` the editor in front. */
+const activate = (state: { active: (FakeTab & { tabId: string; panel: never }) | null }, editor: FakeEditor) => {
+	state.active = Object.assign(Object.create(null), editor.tab, { tabId: TAB, panel: editor.panel });
+};
 
+describe("the symbol search from a chat page", () => {
 	it("seeds the quick open with what the page selected", async () => {
 		const w = world();
 		const live = w.editor(SLOT, {}, selectionAnswering(w.dispatcher, "  Foo  ", () => ({ slot: SLOT, panel: w.state.tabs.get(SLOT)!.panel as never })));
@@ -658,6 +660,57 @@ describe("the symbol search from a chat page", () => {
 		w.dispatcher.acceptSelectionReply(SLOT, live.panel, { type: "omp:selection-reply", requestId: 99, text: "Foo" });
 		await w.dispatcher.handleMessage(index, SLOT, live.panel, { type: "omp:selection-reply", requestId: 99, text: "Foo" });
 		assert.deepEqual(stub.commands.calls, []);
+	});
+});
+
+describe("the Go to File from a chat page", () => {
+	it("seeds the quick open with what the page selected, as plain text and not as a symbol query", async () => {
+		const w = world();
+		const live = w.editor(SLOT, {}, selectionAnswering(w.dispatcher, "  src/Foo.cs \nmore", () => ({ slot: SLOT, panel: w.state.tabs.get(SLOT)!.panel as never })));
+		activate(w.state, live);
+		await w.dispatcher.searchFileFromChat();
+		assert.deepEqual(stub.commands.calls, [["workbench.action.quickOpen", "src/Foo.cs"]]);
+	});
+
+	it("opens the empty Go to File when the selection is empty, unanswered or answered by another editor", async () => {
+		mock.timers.enable({ apis: ["setTimeout"] });
+		const empty = world();
+		const one = empty.editor(SLOT, {}, selectionAnswering(empty.dispatcher, "  \n ", () => ({ slot: SLOT, panel: empty.state.tabs.get(SLOT)!.panel as never })));
+		activate(empty.state, one);
+		await empty.dispatcher.searchFileFromChat();
+		assert.deepEqual(stub.commands.calls, [["workbench.action.quickOpen"]]);
+
+		stub.commands.calls.length = 0;
+		const silent = world();
+		const quiet = silent.editor();
+		activate(silent.state, quiet);
+		const waiting = silent.dispatcher.searchFileFromChat();
+		await nextTurn();
+		mock.timers.tick(500);
+		await waiting;
+		assert.deepEqual(stub.commands.calls, [["workbench.action.quickOpen"]]);
+
+		stub.commands.calls.length = 0;
+		const foreign = world();
+		const other = foreign.editor(OTHER_SLOT);
+		const asked = foreign.editor(SLOT, {}, selectionAnswering(foreign.dispatcher, "Foo.cs", () => ({ slot: OTHER_SLOT, panel: other.panel })));
+		activate(foreign.state, asked);
+		const answered = foreign.dispatcher.searchFileFromChat();
+		await nextTurn();
+		mock.timers.tick(500);
+		await answered;
+		assert.deepEqual(stub.commands.calls, [["workbench.action.quickOpen"]]);
+	});
+
+	it("asks no terminal editor and no page when no OMP editor is in front", async () => {
+		const w = world();
+		const shell = w.editor(SLOT, { mode: "terminal" });
+		activate(w.state, shell);
+		await w.dispatcher.searchFileFromChat();
+		w.state.active = null;
+		await w.dispatcher.searchFileFromChat();
+		assert.deepEqual(shell.posted, []);
+		assert.deepEqual(stub.commands.calls, [["workbench.action.quickOpen"], ["workbench.action.quickOpen"]]);
 	});
 });
 

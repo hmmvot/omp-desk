@@ -1,8 +1,8 @@
 /**
- * The text a Chat page offers VS Code's symbol search (Ctrl+N), and how the host turns it into a query.
+ * The text a Chat page offers VS Code's symbol search (Ctrl+N) and Go to File (Ctrl+Shift+N), and how the host turns it into a query.
  *
- * VS Code seeds that picker from the editor selection, but a webview's selection is invisible to it, so the page
- * reports its own selection to the host and the host opens `workbench.action.quickOpen` with `#` and that text.
+ * VS Code seeds those pickers from the editor selection, but a webview's selection is invisible to it, so the page
+ * reports its own selection to the host and the host opens `workbench.action.quickOpen` with the text (after `#` for symbols).
  */
 
 /** Longest query offered; a longer selection is cut, never refused. */
@@ -21,6 +21,12 @@ export function normalizeSymbolQuery(raw: string): string {
 export function symbolSearchValue(selection: string | null | undefined): string | null {
 	const query = normalizeSymbolQuery(selection ?? "");
 	return query.length === 0 ? null : `#${query}`;
+}
+
+/** The `workbench.action.quickOpen` argument for a selection (the text itself, as Go to File takes it), or `null` to open the empty Go to File. */
+export function fileSearchValue(selection: string | null | undefined): string | null {
+	const query = normalizeSymbolQuery(selection ?? "");
+	return query.length === 0 ? null : query;
 }
 
 /** The slice of a document {@link selectedText} reads. */

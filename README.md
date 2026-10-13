@@ -133,6 +133,7 @@ All commands are in the Command Palette under **OMP**. The ones with default key
 | `F5`, `Alt+R` | Retry the failed or aborted reply | Chat editor, no turn running |
 | `Ctrl+R` | Search prompt history | Chat editor |
 | `Ctrl+N` | Symbol search (`#`) prefilled with the Chat selection | Chat editor |
+| `Ctrl+Shift+N` | Go to File prefilled with the Chat selection | Chat editor |
 | `Ctrl+T` / `Ctrl+O` | Show/hide all thinking / expand/collapse all tool calls | Chat editor |
 | `Ctrl+Shift+U` | Cycle thinking level (**Cycle Model** has no default key) | Chat editor |
 | `Ctrl+Alt+Shift+R` | Redraw Terminal | Terminal editor |

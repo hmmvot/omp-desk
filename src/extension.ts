@@ -1838,6 +1838,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     registerDeskCommand("omp.showChatKeyboardShortcuts", () => showChatKeyboardShortcuts()),
     registerDeskCommand("omp.rewindConversation", () => rewindConversation()),
     registerDeskCommand("omp.sendSelection", () => addSelectionToSession(context, index)),
+    registerDeskCommand("omp.searchFileFromChat", () => s.guestDispatcher.searchFileFromChat()),
     registerDeskCommand("omp.sendFile", (clicked: unknown, selected: unknown) => addFilesToSession(context, index, clicked, selected)),
     registerDeskCommand("omp.showDiagnostics", () => showDiagnostics(context, index)),
     registerDeskCommand("omp.copyRowDiagnostics", async (item: unknown) => {

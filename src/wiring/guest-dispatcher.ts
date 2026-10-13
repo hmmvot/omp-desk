@@ -41,7 +41,7 @@ import type {
 	GuestTerminalCopyReplyMessage,
 	SessionViewMode,
 } from "../protocol/messages.ts";
-import { symbolSearchValue } from "../shared/selection-query.ts";
+import { fileSearchValue, symbolSearchValue } from "../shared/selection-query.ts";
 import type { RecentSessions } from "./recent-sessions.ts";
 
 /** The chat commands a page sends; each is deduplicated by its own request id in the conversation. */
@@ -209,6 +209,8 @@ export interface GuestDispatcher<Tab extends GuestTab = GuestTab> {
 	acceptSelectionReply(slot: string, panel: vscode.WebviewPanel, reply: GuestSelectionReplyMessage): void;
 	/** `omp.searchSymbolFromChat` (Ctrl+N over a Chat page). */
 	searchSymbolFromChat(): Promise<void>;
+	/** `omp.searchFileFromChat` (Ctrl+Shift+N over a Chat page). */
+	searchFileFromChat(): Promise<void>;
 	/** Ask one editor's page for its unsent composer draft (ADR-0025's bounded handoff). */
 	captureDraft(source: Tab): Promise<CarriedDraft<Tab> | null>;
 	/** The unsent draft of a panel that is about to be replaced by another editor of the same conversation. */
@@ -256,15 +258,29 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 		}
 	}
 
+	/** What the front Chat page has selected, or `""` when no Chat is in front or it does not answer in time. */
+	async function frontChatSelection(): Promise<string> {
+		const target = deps.activePanelTab();
+		return target !== null && target.mode === "chat" ? await askPageSelection(target.slotId, target.panel) : "";
+	}
+
 	/**
 	 * `omp.searchSymbolFromChat` (Ctrl+N over a Chat page): VS Code's symbol search seeded with what the page has selected,
 	 * as it is seeded from an editor's selection; with nothing selected it opens empty.
 	 */
 	async function searchSymbolFromChat(): Promise<void> {
-		const target = deps.activePanelTab();
-		const selection = target !== null && target.mode === "chat" ? await askPageSelection(target.slotId, target.panel) : "";
-		const value = symbolSearchValue(selection);
+		const value = symbolSearchValue(await frontChatSelection());
 		if (value === null) await vscode.commands.executeCommand("workbench.action.showAllSymbols");
+		else await vscode.commands.executeCommand("workbench.action.quickOpen", value);
+	}
+
+	/**
+	 * `omp.searchFileFromChat` (Ctrl+Shift+N over a Chat page): VS Code's Go to File seeded with what the page has selected;
+	 * with nothing selected it opens empty.
+	 */
+	async function searchFileFromChat(): Promise<void> {
+		const value = fileSearchValue(await frontChatSelection());
+		if (value === null) await vscode.commands.executeCommand("workbench.action.quickOpen");
 		else await vscode.commands.executeCommand("workbench.action.quickOpen", value);
 	}
 
@@ -602,6 +618,7 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 		replyChatSendResult,
 		acceptSelectionReply,
 		searchSymbolFromChat,
+		searchFileFromChat,
 		captureDraft,
 		carryDraftFrom,
 		releaseCarriedDraft,

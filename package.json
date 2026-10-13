@@ -571,6 +571,13 @@
         "icon": "$(symbol-class)"
       },
       {
+        "command": "omp.searchFileFromChat",
+        "enablement": "omp.sessionMode == chat",
+        "title": "Go to File from Chat Selection",
+        "category": "OMP",
+        "icon": "$(go-to-file)"
+      },
+      {
         "command": "omp.toggleThinking",
         "enablement": "omp.sessionMode == chat",
         "title": "Show/Hide All Thinking",
@@ -1369,6 +1376,11 @@
       {
         "command": "omp.searchSymbolFromChat",
         "key": "ctrl+n",
+        "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat"
+      },
+      {
+        "command": "omp.searchFileFromChat",
+        "key": "ctrl+shift+n",
         "when": "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat"
       },
       {

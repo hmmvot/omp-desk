@@ -79,7 +79,7 @@ interface PackageJson {
 	readonly contributes: {
 		readonly commands: readonly CommandDeclaration[];
 		readonly menus: Readonly<Record<string, readonly MenuEntry[]>>;
-		readonly keybindings: readonly { readonly command: string; readonly when?: string }[];
+		readonly keybindings: readonly { readonly command: string; readonly key?: string; readonly when?: string }[];
 		readonly views: Readonly<Record<string, readonly ViewDeclaration[]>>;
 		readonly viewsContainers: Readonly<Record<string, readonly { readonly id: string }[]>>;
 		readonly viewsWelcome: readonly { readonly view: string; readonly when?: string; readonly contents: string }[];
@@ -423,6 +423,16 @@ describe("commands", () => {
 		assert.deepEqual(undeclared, [], "registered without a declaration and not run by any row's click: declare it or drop it");
 		const unregisteredRowCommands = [...rowCommands].filter(id => !recording.commands.has(id));
 		assert.deepEqual(unregisteredRowCommands, [], "run by a tree row's click but never registered");
+	});
+
+	it("bind Ctrl+N and Ctrl+Shift+N inside a Chat only, under the one condition, to the symbol search and Go to File seeded from its selection", () => {
+		const bound = (key: string) => contributes.keybindings.filter(binding => binding.key === key);
+		assert.deepEqual(bound("ctrl+n").map(binding => binding.command), ["omp.searchSymbolFromChat"]);
+		assert.deepEqual(bound("ctrl+shift+n").map(binding => binding.command), ["omp.searchFileFromChat"]);
+		const chatOnly = "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat";
+		assert.equal(bound("ctrl+n")[0]?.when, chatOnly);
+		assert.equal(bound("ctrl+shift+n")[0]?.when, chatOnly);
+		assert.equal(declared.get("omp.searchFileFromChat")?.title, "Go to File from Chat Selection");
 	});
 });
 

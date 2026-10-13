@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseGuestWebviewMessage } from "../protocol/messages.ts";
-import { MAX_SYMBOL_QUERY_LENGTH, normalizeSymbolQuery, selectedText, symbolSearchValue } from "./selection-query.ts";
+import { MAX_SYMBOL_QUERY_LENGTH, fileSearchValue, normalizeSymbolQuery, selectedText, symbolSearchValue } from "./selection-query.ts";
 
 test("a selection is trimmed to its first non-empty line", () => {
 	assert.equal(normalizeSymbolQuery("  SessionData.Cast  "), "SessionData.Cast");
@@ -22,6 +22,15 @@ test("the quick open argument is '#' plus the selection; an empty selection mean
 	assert.equal(symbolSearchValue("   \n  "), null);
 	assert.equal(symbolSearchValue(null), null);
 	assert.equal(symbolSearchValue(undefined), null);
+});
+
+test("the Go to File argument is the selection itself; an empty selection means the plain Go to File", () => {
+	assert.equal(fileSearchValue("  src/Foo.cs  "), "src/Foo.cs");
+	assert.equal(fileSearchValue("Foo.cs\nmore"), "Foo.cs");
+	assert.equal(fileSearchValue(""), null);
+	assert.equal(fileSearchValue("  \n "), null);
+	assert.equal(fileSearchValue(null), null);
+	assert.equal(fileSearchValue(undefined), null);
 });
 
 test("the focused text field's selection wins over the document selection", () => {
