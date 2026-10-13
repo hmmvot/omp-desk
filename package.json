@@ -98,6 +98,12 @@
           "scope": "application",
           "description": "When a folder VS Code has open has no agent files (AGENTS.md, CLAUDE.md, .agents, .omp, .claude, .pi) but sits inside a Git repository whose root, or a folder between, has them, Sessions shows that ancestor instead, so new sessions start where OMP finds the repository's agent files. Sessions recorded in the opened folder stay listed under it. The setting applies to all windows. When off, Sessions shows the opened folder."
         },
+        "ompDesk.ompSettings.useNearestAncestorOmpFolder": {
+          "type": "boolean",
+          "default": false,
+          "scope": "resource",
+          "description": "Treat the nearest parent folder that has an `.omp` directory as the OMP project for this workspace. Use this for Unity projects, where VS Code opens the Unity project folder (for example `<repo>/omp-vscode`) while OMP sessions run at the repository root that holds `.omp`. The walk stops at the repository root and never uses your home folder. Off: the workspace folder itself is the project. Applies to OMP Desk: Open OMP Settings and `/settings`."
+        },
         "ompDesk.launchInFolderWindow": {
           "type": "boolean",
           "default": true,

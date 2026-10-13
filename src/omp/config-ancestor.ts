@@ -33,3 +33,23 @@ export async function ancestorContextDir(folder: string, home: string = os.homed
   }
   return null;
 }
+
+/**
+ * The project folder for a workspace folder when the user opted into the nearest ancestor `.omp` (Unity projects: VS Code opens
+ * `<repo>/omp-vscode` while OMP sessions run at `<repo>`, which holds `.omp`): the folder itself or its nearest ancestor whose `.omp` is
+ * non-empty, the same walk OMP's own discovery makes (inclusive stop at the repository root, or at home when there is none, and
+ * the home directory is never a project). Null when there is none.
+ */
+export async function nearestOmpFolder(folder: string, home: string = os.homedir()): Promise<string | null> {
+  const resolvedHome = path.resolve(home);
+  for (let dir = path.resolve(folder); ; dir = path.dirname(dir)) {
+    if (same(dir, resolvedHome)) return null;
+    if ((await entries(path.join(dir, ".omp"))).length > 0) return dir;
+    if ((await entries(dir)).includes(".git") || path.dirname(dir) === dir) return null;
+  }
+}
+
+/** The folder the editor treats as the project: the workspace folder, or with the setting on its nearest ancestor `.omp` folder, falling back to the workspace folder. */
+export async function projectFolderFor(folder: string, useNearestAncestor: boolean, home: string = os.homedir()): Promise<string> {
+  return useNearestAncestor ? await nearestOmpFolder(folder, home) ?? folder : folder;
+}

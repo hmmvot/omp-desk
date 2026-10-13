@@ -21,8 +21,8 @@ export interface OmpConfigPorts {
   openFile(file: string, line: number | null): Promise<void>;
   /** Asks which scope to show: a folder, null for global, undefined when dismissed. */
   pickScope(current: string | null): Promise<string | null | undefined>;
-  /** Moves the editor to another folder; returns a sentence when it cannot (that scope is already open). */
-  rebind(folder: string | null): Promise<string | null>;
+  /** Moves the editor to another folder; answers the folder it now shows (the project folder the setting may resolve it to), or a sentence when it cannot (that scope is already open). */
+  rebind(folder: string | null): Promise<{ readonly folder: string | null } | { readonly refusal: string }>;
 }
 
 /** OMP never treats the home directory as a project (`getConfigDirs` in `discovery/builtin.ts`): it has no project layer. */
@@ -114,13 +114,14 @@ export class OmpConfigController {
       case "pick-scope": {
         const chosen = await this.#ports.pickScope(this.#folder);
         if (chosen === undefined || chosen === this.#folder) return "";
-        const refusal = await this.#ports.rebind(chosen);
-        if (refusal !== null) return refusal;
-        this.#folder = chosen;
+        const moved = await this.#ports.rebind(chosen);
+        if ("refusal" in moved) return moved.refusal;
+        const shown = moved.folder;
+        this.#folder = shown;
         this.#receipt = undefined;
         this.init();
         await this.#read();
-        return chosen === null ? "Showing the global scope." : `Showing the project scope of ${chosen}.`;
+        return shown === null ? "Showing the global scope." : `Showing the project scope of ${shown}.`;
       }
     }
   }

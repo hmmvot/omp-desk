@@ -8,6 +8,7 @@ import type { OmpCommand } from "./native-terminal";
 import { runSettingsWorker } from "./omp-settings-worker";
 import { createSettingsHtml } from "./guest-webview";
 import { OmpConfigController } from "./omp-config-controller";
+import { projectFolderFor } from "../omp/config-ancestor";
 import { chooseSetting } from "./settings-pickers";
 import { SettingsRefusal } from "./omp-settings-core";
 import { isRecord as record } from "../shared/guards";
@@ -56,7 +57,17 @@ export class OmpConfigEditors implements vscode.Disposable {
       }),
     );
   }
-  async open(binding: OmpConfigBinding): Promise<void> {
+  /**
+   * The folder an editor treats as the project. With `ompDesk.ompSettings.useNearestAncestorOmpFolder` on it is the nearest ancestor whose
+   * `.omp` is non-empty (a Unity project's repository root), else the folder itself. The setting is read for that folder, as it is a resource setting.
+   */
+  async #projectFolder(folder: string | null): Promise<string | null> {
+    if (folder === null) return null;
+    const enabled = vscode.workspace.getConfiguration("ompDesk", vscode.Uri.file(folder)).get<boolean>("ompSettings.useNearestAncestorOmpFolder", false);
+    return projectFolderFor(folder, enabled);
+  }
+  async open(requested: OmpConfigBinding): Promise<void> {
+    const binding: OmpConfigBinding = { ...requested, folder: await this.#projectFolder(requested.folder) };
     const key = editorKey(binding);
     const existing = this.#editors.get(key);
     if (existing) { existing.panel.reveal(vscode.ViewColumn.Active); existing.controller.init(); return; }
@@ -149,17 +160,18 @@ export class OmpConfigEditors implements vscode.Disposable {
     return chosen?.[0]?.fsPath;
   }
   /** Moves an open editor to another scope of the same profile; a scope already open in another tab is revealed instead. */
-  async #rebind(editor: Editor, folder: string | null): Promise<string | null> {
+  async #rebind(editor: Editor, picked: string | null): Promise<{ folder: string | null } | { refusal: string }> {
+    const folder = await this.#projectFolder(picked);
     const binding: OmpConfigBinding = { folder, profile: editor.binding.profile, ...(editor.binding.executable ? { executable: editor.binding.executable } : {}) };
     const key = editorKey(binding);
     const other = this.#editors.get(key);
-    if (other && other !== editor) { other.panel.reveal(vscode.ViewColumn.Active); return "That scope is already open in another tab."; }
+    if (other && other !== editor) { other.panel.reveal(vscode.ViewColumn.Active); return { refusal: "That scope is already open in another tab." }; }
     this.#editors.delete(editor.key);
     editor.key = key; editor.binding = binding;
     this.#editors.set(key, editor);
     await this.#remember(key, binding);
     this.#title(editor);
-    return null;
+    return { folder };
   }
   dispose(): void { for (const editor of this.#editors.values()) editor.panel.dispose(); for (const item of this.#disposables) item.dispose(); }
 }
