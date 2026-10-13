@@ -37,7 +37,7 @@ import type { SessionsGrouping } from "./views/session-order";
 import { pinnedSessionTabId, selectionLeaveOtherWindow, selectionRestore } from "./views/session-selection";
 import { acquireClaim, createClaimHolder, createOwnerGeneration, readProcessCreationTime } from "./host/session-claim";
 import { startLoopLagMonitor, trackOperation } from "./host/loop-lag";
-import type { NativeControlBootstrap, OmpCommand, OmpPackageRoot } from "./host/native-terminal";
+import type { OmpCommand, OmpPackageRoot } from "./host/native-terminal";
 import {
   SESSION_INDEX_LOCAL_KEY,
   SESSION_INDEX_STORAGE_KEY,
@@ -47,18 +47,30 @@ import {
 import { isManagedHost } from "./host/session-model";
 import { normalizeSessionIdentityKey, readSessionFileHeader } from "./host/session-files";
 import { LocalLauncher, brokerLossProven } from "./runtime/local-launcher";
-import type { LauncherWindow, PreparedHostControl } from "./runtime/local-launcher";
+import type { LauncherWindow } from "./runtime/local-launcher";
+import {
+  LocalHostControl,
+  controlDirectoryOf,
+  controlOwnerFor,
+  controlProcessRecordKey,
+  controlReleaseRecordKey,
+  describeControlError,
+  recordedControlOwner,
+} from "./runtime/local-control";
+import type { ControlStore, ControlWindow, RecordedControlProcess, RecordedControlRelease } from "./runtime/local-control";
+import { LocalExitOperations } from "./runtime/local-exit";
+import type { ExitWindow } from "./runtime/local-exit";
+import { LocalIdentity } from "./runtime/local-identity";
+import type { IdentityWindow } from "./runtime/local-identity";
+import { LocalNativeWatch } from "./runtime/local-native-watch";
+import type { NativeWatchWindow } from "./runtime/local-native-watch";
+import type { RuntimeRecord } from "./runtime/runtime-record";
 import { createRuntimeStaging } from "./runtime/runtime-entries";
 import type { RuntimeStaging } from "./runtime/runtime-entries";
 import { LocalSessionRuntime } from "./runtime/local-runtime";
 import type { LocalSessionRuntimeDeps } from "./runtime/local-runtime";
 import { LocalStopOperations, withSessionReadDeadline } from "./runtime/local-stop";
 import type {
-  OmpHostAttachRequest,
-  OmpHostAttachResult,
-  OmpHostLaunchRequest,
-  OmpHostLaunchResult,
-  OmpHostLauncher,
   RestoreOutcome,
   RestoreReport,
   SessionConflictKind,
@@ -69,7 +81,7 @@ import type {
   DeferredReconciliation,
   OwnerReconciler,
 } from "./host/session-availability";
-import type { OmpHostHandle, SessionIndexEntry, SessionViewMode } from "./host/session-model";
+import type { SessionIndexEntry, SessionViewMode } from "./host/session-model";
 import type { SessionFileHeader } from "./host/session-files";
 import { claimHolderMayBeAlive, setProcessProbeObserver } from "./host/session-claim";
 import { holderSeemsAlive } from "./host/holder-liveness";
@@ -98,10 +110,8 @@ import { notificationLine } from "./shared/notification-text";
 import { NativeActivityLedger } from "./host/native-activity";
 import {
   isOpenControlClient,
-  mayPublishControlChannel,
   mayRefreshControlSnapshot,
   mayReportControlFailure,
-  type ControlAttemptPlan,
 } from "./host/control-attempt";
 import { stageRuntimeAssets, verifyStagedRuntimeAsset, type StagedRuntimeAsset } from "./host/runtime-assets";
 import { PackageDrift } from "./host/package-drift";
@@ -149,10 +159,9 @@ import type { FolderPathInspector, FolderPathVerdict, WorkspaceFolder } from "./
 import { ChatRuntime } from "./host/chat-runtime";
 import { activateAgentDebugger } from "./host/debug/index";
 import type { ChatPage, ChatRuntimeEvent } from "./host/chat-runtime";
-import { attachRpcHost, launchRpcHost, retireStoppedRpcBroker, stopRpcHost } from "./host/rpc-launch";
-import type { RpcAttachOutcome, RpcHostRuntime } from "./host/rpc-launch";
-import { attachNativeHost, brokerAndRootGone, launchNativeHost, recordedRootGone, waitForManagedRootExit } from "./host/native-session";
-import type { NativeAttachOutcome, NativeHostRuntime, SessionHostRuntime, SessionTransitionFacts } from "./host/native-session";
+import { attachRpcHost, launchRpcHost, stopRpcHost } from "./host/rpc-launch";
+import { attachNativeHost, launchNativeHost, recordedRootGone, waitForManagedRootExit } from "./host/native-session";
+import type { SessionHostRuntime, SessionTransitionFacts } from "./host/native-session";
 import {
   createOwnerReconciler,
   kernelProcessIdentity,
@@ -196,7 +205,7 @@ import { EDITOR_GROUP_FOCUS_COMMANDS } from "./host/chat-layout";
 import { PtyBrokerClient } from "./host/pty-client";
 import { createPtyReadinessGate } from "./host/pty-readiness";
 import type { PtyReadinessGate } from "./host/pty-readiness";
-import { createBrokerSlotStore, createHostSlotId, mergeBrokerSlotRecords, BROKER_SLOTS_KEY } from "./host/broker-slots";
+import { createBrokerSlotStore, mergeBrokerSlotRecords, BROKER_SLOTS_KEY } from "./host/broker-slots";
 import { createEditorSlotRegistry } from "./host/editor-slots";
 import type { EditorSlotRegistry, EditorSlotRole } from "./host/editor-slots";
 import type { BrokerSlotProvenance, BrokerSlotStore } from "./host/broker-slots";
@@ -220,8 +229,7 @@ import {
 } from "./host/shell-slots";
 import type { ShellLiveness, ShellSlotRecord, ShellSlotStore } from "./host/shell-slots";
 import { stopShellAndBroker, watchShellExit, type ShellExitWatchStop } from "./host/shell-exit";
-import { awaitWriterGone, watchBrokerLoss } from "./host/broker-loss";
-import { isPtyProcessAlive } from "./host/pty-identity";
+import { watchBrokerLoss } from "./host/broker-loss";
 import { setTimeout as delayMs } from "node:timers/promises";
 import { awaitEndedRuntimeCleanup } from "./host/runtime-settle";
 // The profile catalog (ADR-0034) is the one authority for this extension's durable
@@ -258,29 +266,20 @@ import type {
 // this one block, so a rename there is a change here and nowhere else. The channel
 // is optional: a failure to establish it never blocks a session.
 import {
-  CONTROL_RECIPIENT_DEFINE,
   createControlRequestId,
   controlPathEquals,
-  createControlSlotId,
   readControlRendezvous,
 } from "./host/control-protocol";
 import type { ControlModelRef } from "./protocol/control";
 import type {
   ControlHostSnapshot,
-  ControlRendezvous,
-  ControlNativeState,
 } from "./host/control-protocol";
 import {
   HostControlClient,
-  HostControlConfigurationError,
-  HostControlIdentityError,
   HostControlRefusedError,
-  HostControlUnavailableError,
-  createControlRecipient,
   queryControlProcessGeneration,
   setControlHelperScript,
 } from "./host/control-client";
-import type { HostControlExpectation, HostControlVerifiedConnection } from "./host/control-client";
 // Native file observation — read-only evidence. The producer lives in the native
 // host (`src/omp/file-evidence.ts`, wired in `src/omp/host-control.ts`); these are
 // the extension-side policy, reader and display helpers it is bound to.
@@ -539,8 +538,6 @@ interface WindowState {
   externalLeases: ExternalLeaseObserver | null;
   /** Claim file name per row target, resolved once: the name needs the filesystem, and a watch batch asks for every row. */
   readonly claimFileNames: Map<string, string | null>;
-  /** Session files an OMP child allocated but has not written yet, retried until each binds to its draft (one retry chain per tab). */
-  readonly pendingIdentityFiles: Map<string, PendingIdentity>;
 
   // Window registry and routing
   /** The leased registry of this profile's windows (ADR-0056), once this window activated. */
@@ -727,7 +724,7 @@ interface WindowState {
    * close, a reconnect and a serializer revival find the same slot.
    */
   readonly shellEditors: Map<string, string>;
-  /** Launch, recovery and the native watch share one attempt for the exact runtime. */
+  /** Launch, recovery and the native watch share one connection attempt for the exact runtime. */
   readonly hostControlAttempts: WeakMap<SessionHostRuntime, Promise<void>>;
 
   // Views
@@ -902,8 +899,6 @@ interface WindowState {
   readonly launcherRuntimeIds: WeakMap<SessionHostRuntime, number>;
   /** The broker watch of each runtime this window drives; a runtime that starts again replaces its own. */
   readonly brokerWatches: WeakMap<SessionHostRuntime, () => void>;
-  /** The native-host observations of one runtime, applied one after another. */
-  readonly nativeObservations: WeakMap<NativeHostRuntime, Promise<void>>;
 }
 
 /**
@@ -998,10 +993,10 @@ function sessionActionsDeps(): SessionActionsDeps<TabState> {
     pushSessionView,
     stopSessionRuntime: (state, runtime, mode, consent, expected) => windowState().sessionRuntime.requestStop(state, runtime, mode, consent, expected),
     stopTerminalForTab,
-    disposeControlChannel,
-    retireBroker,
-    releaseHostControl,
-    reconnectHostControl,
+    disposeControlChannel: record => windowState().sessionRuntime.control.dispose(record),
+    retireBroker: (tabId, runtime) => windowState().sessionRuntime.exit.retireBroker(tabId, runtime),
+    releaseHostControl: (tabId, ownerGeneration) => windowState().sessionRuntime.control.release(tabId, ownerGeneration),
+    reconnectHostControl: (tabId, ownerGeneration, runtime) => windowState().sessionRuntime.control.reconnect(tabId, ownerGeneration, runtime),
     recordedControlOwner,
     controlOwnerFor,
     forgetTurnActivity,
@@ -1155,7 +1150,6 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     catalogReady: Promise.resolve(),
     externalLeases: null,
     claimFileNames: new Map<string, string | null>(),
-    pendingIdentityFiles: new Map<string, PendingIdentity>(),
     // Window registry and routing
     windowRegistry: undefined,
     routing: registerWindowRouting(windowRoutingDeps()),
@@ -1271,7 +1265,6 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     }),
     launcherRuntimeIds: new WeakMap<SessionHostRuntime, number>(),
     brokerWatches: new WeakMap<SessionHostRuntime, () => void>(),
-    nativeObservations: new WeakMap<NativeHostRuntime, Promise<void>>(),
   };
 }
 
@@ -1283,34 +1276,6 @@ function windowState(): WindowState {
   if (window === undefined) throw new Error("The OMP Desk window state is not installed: `activate` has not run.");
   return window;
 }
-
-/** Non-secret control facts persisted per ownership so a reload can reattach. */
-interface RecordedControlProcess {
-  readonly pid: number;
-  /** Kernel creation time of that pid; the process-generation identity. */
-  readonly processCreation: string;
-  readonly slotId: string;
-  readonly directory: string;
-  readonly activity?: true;
-  readonly work?: true;
-  /** The child answers the registry `subagentWork` request; absent for a process an older build launched. */
-  readonly subagents?: true;
-}
-
-/**
- * One launch this window confirmed stopped, remembered under its claim.
- *
- * A release is the launcher's own evidence that a specific slot's process exited
- * (the stop is only confirmed after the pid is gone). It names the slot, so it can
- * only ever speak for the launch it released.
- */
-interface RecordedControlRelease {
-  readonly slotId: string;
-  readonly releasedAt: string;
-}
-
-/** Releases remembered per claim; a slot id is never reused, so this is bounded history. */
-const CONTROL_RELEASE_HISTORY = 16;
 
 /** Records that the page of the editor's current document announced itself, so text can be sent to its composer. */
 function noteReadyDocument(state: TabState, announcedDocumentId: string | undefined): void {
@@ -3129,13 +3094,31 @@ async function openTabOnce(
 
 // Launch and reconciliation ports
 
-/** This window's session runtime: its index, reconciler and launcher behind the `SessionRuntime` port. */
+/** This window's session runtime: its index, reconciler, launcher, stop operations and process services behind the `SessionRuntime` port. */
 function createSessionRuntime(index: SessionIndex): LocalSessionRuntime {
   return new LocalSessionRuntime(sessionRuntimeDeps(index));
 }
 
 /** The ports of this window's session runtime; read at call time, so a replaced reconciler, launcher or root probe is used by the next call. */
 function sessionRuntimeDeps(index: SessionIndex): LocalSessionRuntimeDeps {
+  const stop = new LocalStopOperations({
+    chat: () => windowState().chat,
+    attachBrokerClient,
+    rootGone: root => windowState().rootGone(root),
+    log,
+  });
+  const control = new LocalHostControl({
+    index, window: controlWindow(index), store: controlStore(),
+    chat: () => windowState().chat, diagnostics: () => windowState().diagnostics, log, attempts: windowState().hostControlAttempts,
+  });
+  const identity = new LocalIdentity({ index, window: identityWindow(index), log });
+  const exit = new LocalExitOperations({
+    index, window: exitWindow(index), control, stop, attachBrokerClient, brokerSlots: () => windowState().brokerSlots, log,
+  });
+  const nativeWatch = new LocalNativeWatch({
+    index, window: nativeWatchWindow(index), control, exit, identity,
+    reconciler: () => windowState().reconciler, brokerSlots: () => windowState().brokerSlots, log,
+  });
   return {
     index,
     reconciler: () => windowState().reconciler,
@@ -3144,12 +3127,170 @@ function sessionRuntimeDeps(index: SessionIndex): LocalSessionRuntimeDeps {
       if (context === undefined) throw new Error("The session runtime was used before activation.");
       return localLauncher(context, index);
     },
-    stop: new LocalStopOperations({
-      chat: () => windowState().chat,
-      attachBrokerClient,
-      rootGone: root => windowState().rootGone(root),
-      log,
-    }),
+    stop, control, identity, nativeWatch, exit,
+  };
+}
+
+/** The window's tab record behind a runtime record: the runtime only ever holds the window's own `TabState` objects. */
+function tabRecord(record: RuntimeRecord): TabState {
+  return record as TabState;
+}
+
+/** Where this window keeps host-control material: the profile's global state and secret storage, read at call time. */
+function controlStore(): ControlStore {
+  const context = (): vscode.ExtensionContext => {
+    const active = windowState().context;
+    if (active === undefined) throw new Error("Host control was used before activation.");
+    return active;
+  };
+  return {
+    directory: () => controlDirectoryOf(context().globalStorageUri.fsPath),
+    record: <T>(key: string) => context().globalState.get<T>(key),
+    setRecord: (key, value) => Promise.resolve(context().globalState.update(key, value)),
+    secret: name => Promise.resolve(context().secrets.get(name)),
+    setSecret: (name, value) => Promise.resolve(context().secrets.store(name, value)),
+    deleteSecret: name => Promise.resolve(context().secrets.delete(name)),
+  };
+}
+
+/** The window's side of host control (design §2.5): what a published channel starts on this side. */
+function controlWindow(index: SessionIndex): ControlWindow {
+  return {
+    record: tabId => stateOf(tabId),
+    published(tabId, client, subagents) {
+      const s = windowState();
+      if (subagents) watchSubagentWork(index, tabId, client);
+      s.guestDispatcher.invalidateControls(tabId);
+      void s.bridgeHost.commitDocument(tabId);
+      s.bridgeHost.refreshReadiness(tabId);
+    },
+  };
+}
+
+/** The window's side of identity binding: what a bound file changes in the tab and the document. */
+function identityWindow(index: SessionIndex): IdentityWindow {
+  return {
+    record: tabId => stateOf(tabId),
+    bound(tabId) {
+      const s = windowState();
+      void applyChatTabAppearance(s.context as vscode.ExtensionContext, index, tabId);
+      // The document could not be committed while the session had no file: the binding a
+      // surviving page authenticates against needs the exact file.
+      void s.bridgeHost.commitDocument(tabId);
+      s.bridgeHost.refreshReadiness(tabId);
+    },
+    refresh: () => refreshLauncher(),
+  };
+}
+
+/** The window's side of the end of a process: its terminal pane, views, launcher and notifications. */
+function exitWindow(index: SessionIndex): ExitWindow {
+  return {
+    record: tabId => stateOf(tabId),
+    activated: () => windowState().context !== undefined,
+    fence: (record, on) => fenceSessionAdmission(index, tabRecord(record), on),
+    forgetOutcome: tabId => { windowState().outcomes.delete(tabId); },
+    endTerminal: record => stopTerminalForTab(record.slotId),
+    view: record => pushSessionView(index, tabRecord(record)),
+    refresh: () => refreshLauncher(),
+    nativeEnded(tabId) {
+      const s = windowState();
+      s.outcomes.delete(tabId);
+      s.turnActivities.delete(tabId);
+      refreshGuestContext();
+      refreshLauncher();
+    },
+    notice: (level, text) => { if (level === "error") showError(text); else showWarning(text); },
+  };
+}
+
+/** The window's side of the native watch: completion notices, turn activity and the editor that follows a handover. */
+function nativeWatchWindow(index: SessionIndex): NativeWatchWindow {
+  return {
+    record: tabId => stateOf(tabId),
+    records: () => windowState().tabs.values(),
+    activated: () => windowState().context !== undefined,
+    view: record => pushSessionView(index, tabRecord(record)),
+    observer(record, runtime) {
+      const s = windowState();
+      const state = tabRecord(record);
+      const reportSuppressed = (kind: TurnNotice["kind"], reason: NotificationSuppression | "aborted"): void => {
+        if (state.tabId === null) return;
+        logNotificationSuppression(state.tabId, kind, reason);
+        if (reason !== "aborted") recordSessionEvent(index, state.tabId);
+      };
+      let activityLedger = new NativeActivityLedger(reportSuppressed);
+      // A reconnect builds a new ledger that recovers a still-pending dialog; its toast was already sent.
+      const announcedRequests = new Set<string>();
+      let activityClient: HostControlClient | undefined;
+      return {
+        observe(client, journal, facts) {
+          if (state.tabId === null) return;
+          if (activityClient !== client) { activityClient = client; activityLedger = new NativeActivityLedger(reportSuppressed); }
+          const notices = journal === null ? [] : activityLedger.observe(journal,
+            index.get(state.tabId)?.sessionId ?? null, notificationSuppression(index, state.tabId));
+          const work = journal?.work ?? null;
+          const activity: TurnActivity = {
+            streaming: work?.working === true, backgroundWork: work?.backgroundWork === true,
+            settled: facts.settled === true, promptStatus: null, completionOutcome: null,
+            pendingRequest: journal === null ? null : activityLedger.pendingRequest,
+            outcome: null, trailingQuestion: false,
+          };
+          const previous = s.turnActivities.get(state.tabId);
+          s.turnActivities.set(state.tabId, activity);
+          if (activity.pendingRequest === null) announcedRequests.clear();
+          for (const notice of notices) {
+            if (notice.kind === "request-pending") {
+              if (announcedRequests.has(notice.requestId)) continue;
+              announcedRequests.add(notice.requestId);
+            }
+            notifierFor(index).notify(state.tabId, notice);
+          }
+          if (previous === undefined || activitySignature(previous) !== activitySignature(activity)) {
+            log(`tab ${state.tabId}: native observation ${activity.pendingRequest !== null ? "needs your answer" : facts.settled === true ? "settled" : work?.working === true ? "working" : work?.backgroundWork === true ? "background work" : "unsettled/unknown"} (${journal === null ? "completion journal unavailable" : work === null ? "work detail unavailable" : "completion journal observed"})`);
+            refreshLauncher();
+          }
+        },
+      };
+    },
+    titled(tabId) {
+      const context = windowState().context;
+      if (context !== undefined) void applyChatTabAppearance(context, index, tabId);
+    },
+    async committed(tabId) {
+      const s = windowState();
+      await s.bridgeHost.commitDocument(tabId);
+      s.bridgeHost.refreshReadiness(tabId);
+    },
+    passive: (record, tabId, detail) => bindSlotToConversation(record.slotId, tabId, "passive", detail),
+    rebound(record, from, to, binding) {
+      const s = windowState();
+      stopTerminalForTab(record.slotId);
+      s.draftRestores.delete(record.slotId);
+      forgetTurnActivity(index, from);
+      const previousWinner = s.bridgeEditors.winner(to);
+      if (previousWinner !== null && previousWinner.editorId !== record.slotId) s.bridgeEditors.release(to, previousWinner.editorId);
+      s.bridgeEditors.rekey(from, record.slotId, to);
+      bindSlotToConversation(record.slotId, to, binding.role, binding.roleRefusal ?? null);
+    },
+    async presented(record, runtime, to) {
+      const s = windowState();
+      const state = tabRecord(record);
+      const context = s.context;
+      if (context !== undefined && state.panel !== null) {
+        state.document = null;
+        if (state.bridge !== null) await s.bridgeHost.prepareDocument(context, state.slotId);
+        s.editorPanels.renderPanelDocument(context, state.slotId);
+      }
+      ensureTerminalPipeline(index, state.slotId, runtime.handle);
+      await s.bridgeHost.commitDocument(to);
+      s.bridgeHost.refreshReadiness(to);
+    },
+    settled(to) {
+      const context = windowState().context;
+      if (context !== undefined) void applyChatTabAppearance(context, index, to);
+      refreshLauncher();
+    },
   };
 }
 
@@ -3198,68 +3339,14 @@ function launcherWindow(context: vscode.ExtensionContext, index: SessionIndex): 
       const s = windowState();
       const state = tabState(tabId);
       if (runtime.kind === "terminal") {
-        startNativeWatch(index, state, runtime);
+        s.sessionRuntime.nativeWatch.start(state, runtime);
         refreshGuestContext();
         return;
       }
       if (state.transitioning) s.chat.sessionOf(tabId)?.setMutationFence("Session lifecycle transition.");
       attachChatRoutes(tabId, true);
     },
-    async launchPrecheck(sessionFile) {
-      for (const state of windowState().tabs.values()) {
-        const native = state.runtime;
-        const control = state.control?.client;
-        if (native?.kind !== "terminal" || control === undefined || !isOpenControlClient(control)) continue;
-        try {
-          const facts = await control.nativeState();
-          if (state.runtime !== native || !facts.available) continue;
-          native.observed = facts;
-          if (facts.sessionFile !== null && controlPathEquals(facts.sessionFile, sessionFile)) return true;
-        } catch { /* SDK readback is best effort, never a global writer ledger. */ }
-      }
-      return false;
-    },
-    connectControl: (tabId, ownerGeneration, runtime, control) => connectHostControl(context, index, tabId, ownerGeneration, runtime, control),
-    reconnectControl: (tabId, ownerGeneration, runtime) => reconnectHostControl(context, index, tabId, ownerGeneration, runtime),
-    controlFailed: setControlFailure,
-    async brokerLost(tabId, runtime, proven) {
-      const isCurrent = (): boolean => stateOf(tabId)?.runtime === runtime;
-      if (!proven) {
-        log(`tab ${tabId}: the broker process is gone but its OMP process pid ${runtime.pid} could not be confirmed gone; the session is kept as it is`);
-        showWarning("OMP: A session's background process ended, but its OMP process could not be confirmed ended. Check Task Manager, then use Stop Session or refresh Sessions.");
-        return;
-      }
-      log(`tab ${tabId}: the broker process and the OMP process pid ${runtime.pid} are gone`);
-      const incomplete = (why: string): void => {
-        log(`tab ${tabId}: the broker and the OMP process are gone but the session's exit could not be completed (${why}); the session is kept as it is`);
-        showWarning("OMP: A session's process ended, but its exit could not be recorded. Refresh Sessions or reopen the session.");
-      };
-      try {
-        if (runtime.kind === "chat") {
-          runtime.handle.brokerGone();
-          // The exit handling runs from the channel's close; it is complete when the runtime is no longer this window's.
-          for (let look = 0; look < 40 && isCurrent(); look++) await delayMs(250);
-          if (isCurrent()) incomplete("it did not finish within 10 s");
-          return;
-        }
-        const state = stateOf(tabId);
-        if (state !== undefined) {
-          // The pane ends as for an exit the broker reported, not as a lost connection; stale control errors
-          // from the moments before the process ended are dropped once the exit has been recorded.
-          state.endedNotice = "This terminal's process has ended.";
-          state.pipeline?.noteProcessGone();
-          await handleNativeHostExited(index, state, runtime);
-          if (isCurrent()) incomplete("the terminal's exit handling left its runtime in place");
-          else {
-            state.controlFailure = null;
-            pushSessionView(index, state);
-          }
-        }
-      } catch (error) {
-        incomplete(messageOf(error));
-      }
-    },
-    notice: showWarning,
+    notice: (level, text) => { if (level === "error") showError(text); else showWarning(text); },
   };
 }
 
@@ -3279,272 +3366,12 @@ function localLauncher(context: vscode.ExtensionContext, index: SessionIndex): L
     brokerUnavailableReason: () => windowState().ptyGate?.reason(),
     brokerWatches: s.brokerWatches,
     linkReminder: () => vscode.workspace.getConfiguration("omp").get<boolean>("linkReminder", false),
-    control: {
-      storeRecipient: (ownerGeneration, privateKeyPkcs8Pem) => Promise.resolve(context.secrets.store(recipientSecretName(ownerGeneration), privateKeyPkcs8Pem)),
-      directory: () => controlDirectory(context),
-    },
+    control: s.sessionRuntime.control,
+    native: s.sessionRuntime.nativeWatch,
+    exit: s.sessionRuntime.exit,
     diagnosticsLabel,
     log,
   });
-}
-
-/** Native credentials follow the exact launch, never the mutable conversation row. */
-function controlOwnerFor(runtime: SessionHostRuntime, ownerGeneration: string): string {
-  return runtime.kind === "terminal" ? `native.${runtime.identity.slot}` : ownerGeneration;
-}
-
-function recordedControlOwner(entry: SessionIndexEntry): string | null {
-  return entry.host?.transport === "native" && entry.host.rpc != null ? `native.${entry.host.rpc.slot}` : entry.ownership?.ownerGeneration ?? null;
-}
-
-function startNativeWatch(index: SessionIndex, state: TabState, runtime: NativeHostRuntime): void {
-  const s = windowState();
-  state.nativeWatch?.();
-  let cancelled = false;
-  let timer: NodeJS.Timeout | null = null;
-  const onSuppressed = logNotificationSuppression;
-  const reportSuppressed = (kind: TurnNotice["kind"], reason: NotificationSuppression | "aborted"): void => {
-    if (state.tabId === null) return;
-    onSuppressed(state.tabId, kind, reason);
-    if (reason !== "aborted") recordSessionEvent(index, state.tabId);
-  };
-  let activityLedger = new NativeActivityLedger(reportSuppressed);
-  // A reconnect builds a new ledger that recovers a still-pending dialog; its toast was already sent.
-  const announcedRequests = new Set<string>();
-  let activityClient: HostControlClient | undefined;
-  let nextConnectionAttemptAt = Date.now() + 5_000;
-  let consecutiveControlFailures = 0;
-  let signalState: "available" | "control-unavailable" | "native-not-ready" | "older-host" | null = null;
-  const reportSignals = (next: typeof signalState): void => {
-    if (signalState === next || state.tabId === null) return;
-    signalState = next;
-    log(`tab ${state.tabId}: native completion signals ${next === "available" ? "available — sealed activity journal" : next === "older-host" ? "unavailable — this native host predates the completion journal; state observation continues" : next === "native-not-ready" ? "unavailable — verified host has not reported native session readiness yet" : "unavailable — waiting for verified host control; connection will retry"}`);
-  };
-  const unsubscribe = runtime.handle.subscribe(event => {
-    if (event.type === "state" && event.status.state === "exited" && state.tabId !== null) {
-      void handleNativeHostExited(index, state, runtime);
-    }
-  });
-  const tick = async (): Promise<void> => {
-    if (cancelled || state.runtime !== runtime || state.tabId === null) return;
-    let polledClient: HostControlClient | undefined;
-    try {
-      await runtime.handle.refreshStatus();
-      if (runtime.handle.state === "exited") {
-        await handleNativeHostExited(index, state, runtime);
-        return;
-      }
-      const client = state.control?.client;
-      if (!isOpenControlClient(client)) {
-        reportSignals("control-unavailable");
-        if (!state.transitioning && !runtime.stopping && s.context !== undefined &&
-            Date.now() >= nextConnectionAttemptAt && !s.hostControlAttempts.has(runtime)) {
-          nextConnectionAttemptAt = Date.now() + 5_000;
-          void reconnectHostControl(s.context, index, state.tabId, index.get(state.tabId)?.ownership?.ownerGeneration ?? "", runtime)
-            .catch(error => {
-              if (!cancelled && state.runtime === runtime && !state.transitioning && !runtime.stopping &&
-                  !isOpenControlClient(state.control?.client)) setControlFailure(state.tabId!, describeControlError(error));
-            })
-            .finally(() => {
-              // Every attempt dials the slot's pipes through a PowerShell peer proof, so a host
-              // that cannot be verified is retried less and less often: 5 s, doubling to 60 s.
-              consecutiveControlFailures = isOpenControlClient(state.control?.client) ? 0 : consecutiveControlFailures + 1;
-              nextConnectionAttemptAt = Date.now() + Math.min(60_000, 5_000 * 2 ** Math.min(consecutiveControlFailures, 4));
-            });
-        }
-      }
-      if (client !== undefined && isOpenControlClient(client) && !state.transitioning) {
-        polledClient = client;
-        if (activityClient !== client) { activityClient = client; activityLedger = new NativeActivityLedger(reportSuppressed); }
-        const journal = state.control?.activity === true
-          ? await client.nativeActivity(state.control.work === true ? { work: true } : {}) : null;
-        const facts = journal === null ? await client.nativeState() : journal.state;
-        if (state.runtime !== runtime || state.transitioning) return;
-        if (state.control?.client !== client) return;
-        reportSignals(journal === null ? "older-host" : facts.available ? "available" : "native-not-ready");
-        runtime.observed = facts;
-        if (facts.available) await observeNativeConversation(index, state, runtime, facts);
-        if (state.tabId !== null) {
-          const notices = journal === null ? [] : activityLedger.observe(journal,
-            index.get(state.tabId)?.sessionId ?? null, notificationSuppression(index, state.tabId));
-          const work = journal?.work ?? null;
-          const activity: TurnActivity = {
-            streaming: work?.working === true, backgroundWork: work?.backgroundWork === true,
-            settled: facts.settled === true, promptStatus: null, completionOutcome: null,
-            pendingRequest: journal === null ? null : activityLedger.pendingRequest,
-            outcome: null, trailingQuestion: false,
-          };
-          const previous = s.turnActivities.get(state.tabId);
-          s.turnActivities.set(state.tabId, activity);
-          if (activity.pendingRequest === null) announcedRequests.clear();
-          for (const notice of notices) {
-            if (notice.kind === "request-pending") {
-              if (announcedRequests.has(notice.requestId)) continue;
-              announcedRequests.add(notice.requestId);
-            }
-            notifierFor(index).notify(state.tabId, notice);
-          }
-          if (previous === undefined || activitySignature(previous) !== activitySignature(activity)) {
-            log(`tab ${state.tabId}: native observation ${activity.pendingRequest !== null ? "needs your answer" : facts.settled === true ? "settled" : work?.working === true ? "working" : work?.backgroundWork === true ? "background work" : "unsettled/unknown"} (${journal === null ? "completion journal unavailable" : work === null ? "work detail unavailable" : "completion journal observed"})`);
-            refreshLauncher();
-          }
-        }
-      }
-      pushSessionView(index, state);
-    } catch (error) {
-      if (state.runtime === runtime && !state.transitioning && !runtime.stopping) {
-        if (polledClient !== undefined && state.control?.client === polledClient) {
-          setControlFailure(state.tabId!, describeControlError(error));
-          reportSignals("control-unavailable");
-        } else {
-          state.controlFailure = `Native control is unavailable (${messageOf(error)}). After /restart, use native /exit or explicit force Stop; no automatic replacement is safe.`;
-        }
-      }
-      pushSessionView(index, state);
-    } finally {
-      if (!cancelled && state.runtime === runtime) {
-        timer = setTimeout(() => void tick(), 750);
-        timer.unref?.();
-      }
-    }
-  };
-  state.nativeWatch = () => { cancelled = true; clearTimeout(timer ?? undefined); unsubscribe(); };
-  void tick();
-}
-
-async function observeNativeConversation(index: SessionIndex, state: TabState, runtime: NativeHostRuntime, facts: ControlNativeState): Promise<void> {
-  const s = windowState();
-  const previous = s.nativeObservations.get(runtime) ?? Promise.resolve();
-  const next = previous.then(async () => {
-    if (state.runtime !== runtime) return;
-    runtime.observed = facts;
-    await applyNativeConversationObservation(index, state, runtime, facts);
-  });
-  s.nativeObservations.set(runtime, next.catch(() => undefined));
-  await next;
-}
-
-async function applyNativeConversationObservation(index: SessionIndex, state: TabState, runtime: NativeHostRuntime, facts: ControlNativeState): Promise<void> {
-  const s = windowState();
-  const fromId = state.tabId;
-  if (fromId === null || facts.sessionId === null || state.runtime !== runtime || state.transitioning) return;
-  const from = index.get(fromId);
-  if (from === null) return;
-  const sameId = from.sessionId === null || from.sessionId === facts.sessionId;
-  const sameFile = from.sessionFile === null || (facts.sessionFile !== null && controlPathEquals(from.sessionFile, facts.sessionFile));
-  if (sameId && sameFile) {
-    await index.recordHostSessionId(fromId, facts.sessionId);
-    if (facts.sessionFile !== null && from.sessionFile === null) await bindConversationIdentity(index, fromId, runtime, facts.sessionFile, facts.sessionId);
-    if (facts.name !== from.title) {
-      await index.recordConversationState(fromId, { title: facts.name });
-      if (s.context !== undefined) void applyChatTabAppearance(s.context, index, fromId);
-    }
-    await windowState().bridgeHost.commitDocument(fromId);
-    windowState().bridgeHost.refreshReadiness(fromId);
-    return;
-  }
-  // SDK allocated paths may not exist yet. Never import or materialize one.
-  let destination: SessionIndexEntry | null = null;
-  const observedFile = facts.sessionFile;
-  if (observedFile !== null && await readSessionFileHeader(observedFile) !== null) {
-    destination = index.list().find(entry => entry.sessionFile !== null && controlPathEquals(entry.sessionFile, observedFile)) ?? await index.trackSession({ sessionFile: observedFile, cwd: facts.cwd ?? runtime.cwd, scope: from.scope });
-  } else if (observedFile === null || !sameId) {
-    destination = index.list().find(entry => entry.sessionFile === null && entry.sessionId === facts.sessionId) ?? await index.createDraft({ cwd: facts.cwd ?? runtime.cwd, scope: from.scope });
-  }
-  if (destination === null || state.runtime !== runtime || state.transitioning || state.tabId !== fromId || runtime.identity.childCreationTime === null) return;
-  const mapping = s.brokerSlots;
-  if (mapping === undefined) return;
-  const priorDestinationSlot = mapping.forConversation(destination.tabId) ?? undefined;
-  const result = await index.transferNativeHost({
-    fromTabId: fromId, toTabId: destination.tabId, slotId: state.slotId, expectedPid: runtime.pid,
-    expectedCreationTime: runtime.identity.childCreationTime, sessionId: facts.sessionId, name: facts.name, reconciler: s.reconciler,
-    brokerMapping: { key: BROKER_SLOTS_KEY, decide: latest => {
-      const plan = mapping.planRepointAgainst(latest, fromId, destination.tabId, priorDestinationSlot);
-      return plan.ok ? { desired: plan.value } : { refused: plan.reason };
-    } },
-  });
-  if (result.status === "refused") {
-    state.controlFailure = result.detail;
-    if (result.kind === "conflict") {
-      await index.bindEditorSlot(state.slotId, fromId, "passive");
-      bindSlotToConversation(state.slotId, fromId, "passive", result.detail);
-    }
-    return;
-  }
-  mapping.reload();
-  stopTerminalForTab(state.slotId);
-  s.draftRestores.delete(state.slotId);
-  s.pendingIdentityFiles.delete(fromId);
-  forgetTurnActivity(index, fromId);
-  const previousWinner = s.bridgeEditors.winner(destination.tabId);
-  if (previousWinner !== null && previousWinner.editorId !== state.slotId) s.bridgeEditors.release(destination.tabId, previousWinner.editorId);
-  s.bridgeEditors.rekey(fromId, state.slotId, destination.tabId);
-  bindSlotToConversation(state.slotId, destination.tabId, result.binding.role, result.binding.roleRefusal ?? null);
-  if (facts.sessionFile !== null && destination.sessionFile === null) await bindConversationIdentity(index, destination.tabId, runtime, facts.sessionFile, facts.sessionId);
-  const context = s.context;
-  if (context !== undefined && state.panel !== null) {
-    state.document = null;
-    if (state.bridge !== null) await windowState().bridgeHost.prepareDocument(context, state.slotId);
-    windowState().editorPanels.renderPanelDocument(context, state.slotId);
-  }
-  ensureTerminalPipeline(index, state.slotId, runtime.handle);
-  await windowState().bridgeHost.commitDocument(destination.tabId);
-  windowState().bridgeHost.refreshReadiness(destination.tabId);
-  await index.setActiveTab(destination.tabId);
-  if (s.context !== undefined) void applyChatTabAppearance(s.context, index, destination.tabId);
-  refreshLauncher();
-}
-
-async function handleNativeHostExited(index: SessionIndex, state: TabState, runtime: NativeHostRuntime): Promise<void> {
-  const s = windowState();
-  const tabId = state.tabId;
-  const context = s.context;
-  if (tabId === null || context === undefined) return;
-  await index.lifecycle.run(tabId, async lease => {
-    if (state.runtime !== runtime || state.tabId !== tabId) return;
-    if (runtime.observedSurvivors.length > 0) {
-      state.controlFailure = `The root exited, but the broker observed surviving processes (${runtime.observedSurvivors.join(", ")}). A successor is refused; use explicit Stop to recheck.`;
-      pushSessionView(index, state);
-      return;
-    }
-    const client = await attachBrokerClient();
-    if (client === null) return;
-    const stop = await waitForManagedRootExit(runtime, client, 1_000);
-    log(`native exit ${runtime.pid}: ${stop.diagnosticDetail ?? stop.detail}`);
-    if (!stop.writerGone) { state.controlFailure = stop.detail; return; }
-    const owner = controlOwnerFor(runtime, index.get(tabId)?.ownership?.ownerGeneration ?? "");
-    state.runtime = null;
-    stopTerminalForTab(state.slotId);
-    state.nativeWatch?.();
-    state.nativeWatch = null;
-    state.transitioning = false;
-    await releaseHostControl(context, tabId, owner);
-    await index.setRunIntent(tabId, "stopped", stop.detail);
-    await index.closeSession(tabId, { confirmedStopped: true, detail: stop.detail }, lease);
-    s.outcomes.delete(tabId);
-    s.turnActivities.delete(tabId);
-    refreshGuestContext();
-    refreshLauncher();
-  });
-}
-
-/**
- * End the runtime of a session whose recorded OMP root is already gone, the way its exit would have ended it
- * (`handleRpcHostExited`, `handleNativeHostExited`: runtime cleared, credentials and claim released, row recorded stopped),
- * so that a request made for a stopped session can follow. `false` when the root is not proven gone or the exit could
- * not be completed (surviving children, no proof through the broker): the caller then reports what it found.
- * Call it outside the tab's lifecycle gate, which both handlers take.
- */
-async function endEndedRuntime(context: vscode.ExtensionContext, index: SessionIndex, state: TabState, runtime: SessionHostRuntime): Promise<boolean> {
-  const tabId = state.tabId;
-  if (tabId === null || state.runtime !== runtime || await windowState().sessionRuntime.confirmEnded(runtime) === null) return false;
-  try {
-    if (runtime.kind === "chat") await handleRpcHostExited(context, index, tabId, runtime);
-    else await handleNativeHostExited(index, state, runtime);
-  } catch (error) {
-    log(`tab ${tabId}: the session whose OMP process already ended could not be closed: ${messageOf(error)}`);
-  }
-  return state.runtime !== runtime;
 }
 
 const SESSION_DEFAULT_MODE_KEY = "omp.session.defaultMode";
@@ -3677,7 +3504,7 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
         await runtime.handle.refreshStatus();
         if (state.runtime !== runtime || state.panel === null) return;
         if (runtime.handle.state === "exited") {
-          await handleNativeHostExited(index, state, runtime);
+          await s.sessionRuntime.exit.nativeExited(state, runtime);
           if (state.runtime === null) await switchSessionMode(context, index, state, mode);
           else showWarning("This Terminal has stopped but could not be reopened safely. Use Stop in Processes, then open the session again.");
           return;
@@ -3702,7 +3529,7 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
   let carried: CarriedDraft<TabState> | null = null;
   try {
     const session = runtime.kind === "chat" ? s.chat.sessionOf(tabId) : null;
-    const pending = runtime.kind === "terminal" ? s.hostControlAttempts.get(runtime)
+    const pending = runtime.kind === "terminal" ? s.sessionRuntime.control.attempt(runtime)
       : session !== null && (session.phase === "starting" || session.phase === "attaching" || session.phase === "resyncing")
         ? session.start() : undefined;
     if (pending !== undefined) {
@@ -3717,7 +3544,7 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
       try {
         const observed = await withSessionReadDeadline(state.control.client.nativeState());
         runtime.observed = observed;
-        if (observed.available) await observeNativeConversation(index, state, runtime, observed);
+        if (observed.available) await s.sessionRuntime.nativeWatch.observe(state, runtime, observed);
       } catch { /* Unavailable control is refused at the fenced boundary below. */ }
     }
     if (state.tabId !== tabId || state.lastOpenRequest !== modeRequest || state.runtime !== runtime || passiveReasonForSlot(state.slotId) !== null) return;
@@ -3732,7 +3559,7 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
     if (captured === null) {
       // The facts of a session whose process already ended (killed from outside, crashed) cannot be read: end it as its exit
       // would and take the request as one for a stopped session, which Resumes it in the requested view.
-      if (state.lastOpenRequest === modeRequest && await endEndedRuntime(context, index, state, runtime)) {
+      if (state.lastOpenRequest === modeRequest && await s.sessionRuntime.endEnded(state, runtime)) {
         await switchSessionMode(context, index, state, mode, false, keepLiveView);
         return;
       }
@@ -3820,8 +3647,8 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
       state.nativeWatch = null;
       state.runtime = null;
       stopTerminalForTab(state.slotId);
-      await releaseHostControl(context, tabId, credentialOwner);
-      await retireBroker(tabId, runtime);
+      await s.sessionRuntime.control.release(tabId, credentialOwner);
+      await s.sessionRuntime.exit.retireBroker(tabId, runtime);
       s.chat.release(tabId);
       const fileAfterExit = fresh.file === null ? null : await readSessionFileHeader(fresh.file);
       if (fileAfterExit !== null && index.get(tabId)?.sessionFile === null) await index.promoteDraft(tabId, fresh.file as string, lease);
@@ -3847,7 +3674,7 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
     if (!superseded) state.lastOpenRequest = ++s.editorEventSequence;
     log(`tab ${tabId}: view switch failed: ${messageOf(error)}`);
     // A read or an abort that timed out on a process that already ended is not a failed switch: finish it as a Resume.
-    if (!superseded && !acceptedStop && state.runtime === runtime && await endEndedRuntime(context, index, state, runtime)) {
+    if (!superseded && !acceptedStop && state.runtime === runtime && await s.sessionRuntime.endEnded(state, runtime)) {
       await switchSessionMode(context, index, state, mode, false, keepLiveView);
       return;
     }
@@ -3977,8 +3804,8 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
       state.nativeWatch = null;
       state.runtime = null;
       stopTerminalForTab(state.slotId);
-      await releaseHostControl(context, tabId, owner);
-      await retireBroker(tabId, runtime);
+      await s.sessionRuntime.control.release(tabId, owner);
+      await s.sessionRuntime.exit.retireBroker(tabId, runtime);
       s.chat.release(tabId);
       const saved = await readSessionFileHeader(file);
       if (saved?.sessionId !== durableSessionId) {
@@ -5920,217 +5747,6 @@ function rpcPhaseIsRunning(phase: ChatPhase): boolean {
   return phase === "starting" || phase === "attaching" || phase === "resyncing" || phase === "live";
 }
 
-/**
- * Shut down the broker of a host this window just proved stopped, and forget its slot.
- *
- * See {@link retireStoppedRpcBroker}: without this the broker outlives its child for as long as
- * the machine runs. A refusal (the child not proven gone) leaves the broker and its slot exactly
- * as they were, and is only logged.
- */
-async function retireBroker(tabId: string, runtime: SessionHostRuntime): Promise<void> {
-  const s = windowState();
-  const result = await retireStoppedRpcBroker(runtime);
-  log(`tab ${tabId}: ${result.detail}`);
-  if (result.retired) await s.brokerSlots?.forget(runtime.identity.slot).catch(() => undefined);
-}
-
-/**
- * The chat process of a tab ended without this window asking for it.
- *
- * One lifecycle operation: clearing the runtime, proving the exit through the broker,
- * releasing control material and the claim, and recording the stopped intent. A close,
- * reload or relaunch that reached the tab's gate first replaced or cleared the runtime, and
- * this notification then describes a process this window no longer drives, so it does
- * nothing.
- */
-async function handleRpcHostExited(
-  context: vscode.ExtensionContext,
-  index: SessionIndex,
-  tabId: string,
-  runtime: RpcHostRuntime,
-): Promise<void> {
-  const s = windowState();
-  // Report-only boundary for the whole transaction: a failure after the runtime was cleared
-  // (stopping its terminal, disposing control) must still be visible, and the broker watch
-  // stops waiting once the runtime is gone. Nothing is mutated here: a replacement runtime
-  // may already own the tab.
-  await index.lifecycle.run(tabId, async lease => {
-    const current = stateOf(tabId);
-    if (current === undefined || current.runtime !== runtime) return;
-    // The tab's last restore outcome described a host that is no longer running; what
-    // the index records from here on is the launcher's status.
-    s.outcomes.delete(tabId);
-    const ownerGeneration = index.get(tabId)?.ownership?.ownerGeneration ?? null;
-    log(`tab ${tabId}: the OMP process exited`);
-    const broker = await attachBrokerClient();
-    if (broker === null) { fenceSessionAdmission(index, current, true); return; }
-    const stop = await waitForManagedRootExit(runtime, broker, 1_000);
-    log(`native exit ${runtime.pid}: ${stop.diagnosticDetail ?? stop.detail}`);
-    if (!stop.writerGone) {
-      current.controlFailure = stop.detail;
-      fenceSessionAdmission(index, current, true);
-      return;
-    }
-    current.runtime = null;
-    stopTerminalForTab(current.slotId);
-    current.transitioning = false;
-    disposeControlChannel(current);
-    try {
-      await retireBroker(tabId, runtime);
-      // A writer that exited is a stopped session: the durable intent is what keeps its
-      // row stopped across a reload instead of being re-launched.
-      await index.setRunIntent(tabId, "stopped", stop.detail);
-      // Control material is dropped only for a stop this window can prove.
-      if (stop.writerGone) await releaseHostControl(context, tabId, ownerGeneration);
-      else current.controlFailure = stop.detail;
-    } catch (error) {
-      log(`tab ${tabId}: the exit of the OMP process could not be recorded: ${messageOf(error)}`);
-      showError(`The OMP process exited, but its session could not be recorded as stopped: ${messageOf(error)}. Refresh Sessions before resuming it.`);
-      pushSessionView(index, current);
-      refreshLauncher();
-      return;
-    }
-    try {
-      const result = await index.closeSession(tabId, { confirmedStopped: stop.writerGone, detail: stop.detail }, lease);
-      log(`tab ${tabId}: closeSession released=${result.released} (${result.detail})`);
-      if (!result.released) {
-        showError(
-          "This session could not finish closing. Refresh Sessions before resuming it; see OMP Desk output for details.",
-        );
-      }
-    } catch (error) {
-      log(`tab ${tabId}: closeSession failed: ${messageOf(error)}`);
-      showError(`Session ownership could not be reconciled after the OMP process exited: ${messageOf(error)}`);
-    }
-    pushSessionView(index, current);
-    refreshLauncher();
-  }).catch((error: unknown) => {
-    log(`tab ${tabId}: the exit of the OMP process could not be completed: ${messageOf(error)}`);
-    showError(`The OMP process exited, but OMP Desk could not finish closing its session: ${messageOf(error)}. Refresh Sessions before resuming it.`);
-  });
-}
-
-/**
- * Bind a new conversation to the exact file its process reported.
- *
- * The process learned the path from `get_state.sessionFile`: it is the identity of the
- * conversation, so the draft row is promoted to it (keeping the tab) under the tab's
- * lifecycle, and a resumed session whose reported file differs was already refused by the
- * chat session itself.
- */
-async function bindConversationIdentity(
-  index: SessionIndex,
-  tabId: string,
-  runtime: SessionHostRuntime,
-  sessionFile: string,
-  sessionId: string,
-  previousSessionId?: string,
-): Promise<void> {
-  const s = windowState();
-  await index.lifecycle.run(tabId, async lease => {
-    const current = stateOf(tabId);
-    if (current === undefined || current.runtime !== runtime) return;
-    // The id is recorded the moment it is known — a new session's file does not exist until its
-    // first message, but a re-adopt after any restart needs the id to tell this session from a switch.
-    const recorded = await index.recordHostSessionId(tabId, sessionId, lease, previousSessionId);
-    if (!recorded) log(`tab ${tabId}: the session id ${sessionId} conflicts with the one this row recorded and was not recorded`);
-    if (!recorded && previousSessionId !== undefined) throw new Error("Accepted provider identity could not be recorded.");
-    const entry = index.get(tabId);
-    if (entry === null || entry.sessionFile !== null) return;
-    const pending = s.pendingIdentityFiles.get(tabId);
-    // Repeated native snapshots report the same allocated path before OMP writes it.
-    // Keep its retry chain: restarting binding would also invalidate every in-flight
-    // Sessions projection even though no conversation state changed.
-    if (pending?.runtime === runtime && pending.sessionId === sessionId &&
-        (pending.sessionFile === sessionFile || controlPathEquals(pending.sessionFile, sessionFile))) return;
-    clearTimeout(pending?.timer ?? undefined);
-    const promotion = await index.promoteDraft(tabId, sessionFile, lease);
-    if (promotion.status === "promoted") {
-      s.pendingIdentityFiles.delete(tabId);
-      log(`tab ${tabId}: bound to the session file ${sessionFile}`);
-      void applyChatTabAppearance(s.context as vscode.ExtensionContext, index, tabId);
-      // The document could not be committed while the session had no file: the binding a
-      // surviving page authenticates against needs the exact file, so it is committed now.
-      void windowState().bridgeHost.commitDocument(tabId);
-      windowState().bridgeHost.refreshReadiness(tabId);
-    } else {
-      // OMP creates the file lazily (first message), so the exact path is remembered and bound as
-      // soon as the file exists.
-      s.pendingIdentityFiles.set(tabId, { runtime, sessionFile, sessionId, lastTry: Date.now(), timer: null, lastFailureDetail: promotion.detail });
-      scheduleIdentityRetry(index, tabId);
-      log(`tab ${tabId}: the session file ${sessionFile} is not bound yet: ${promotion.detail}`);
-    }
-    refreshLauncher();
-  });
-}
-
-/** New sessions whose exact file is known but not written yet, by tab. */
-interface PendingIdentity {
-  readonly runtime: SessionHostRuntime;
-  readonly sessionFile: string;
-  readonly sessionId: string;
-  lastFailureDetail: string;
-  lastTry: number;
-  timer: ReturnType<typeof setTimeout> | null;
-}
-const IDENTITY_RETRY_MS = 750;
-
-/**
- * Keep trying to bind a pending new session until OMP has written its file.
- *
- * OMP writes the file lazily, a moment *after* the turn's events have gone by, so retrying
- * only when an event arrives can miss the write entirely: the last event of a turn lands
- * before the file exists and nothing else follows. A row left unbound has no session file,
- * which a later restart cannot re-adopt. The chain stops the moment the row is bound, the
- * conversation's process changes, or the pending entry is replaced.
- */
-function scheduleIdentityRetry(index: SessionIndex, tabId: string): void {
-  const s = windowState();
-  const pending = s.pendingIdentityFiles.get(tabId);
-  if (pending === undefined || pending.timer !== null) return;
-  const timer = setTimeout(() => {
-    pending.timer = null;
-    void retryPendingIdentity(index, tabId).finally(() => {
-      if (s.pendingIdentityFiles.get(tabId) === pending) scheduleIdentityRetry(index, tabId);
-    });
-  }, IDENTITY_RETRY_MS);
-  timer.unref?.();
-  pending.timer = timer;
-}
-
-/** Bind a pending new session to its file once OMP has written it; also called on conversation activity. */
-function retryPendingIdentity(index: SessionIndex, tabId: string): Promise<void> {
-  const s = windowState();
-  const pending = s.pendingIdentityFiles.get(tabId);
-  if (pending === undefined || Date.now() - pending.lastTry < IDENTITY_RETRY_MS) return Promise.resolve();
-  if (stateOf(tabId)?.runtime !== pending.runtime || index.get(tabId)?.sessionFile !== null) {
-    clearTimeout(pending.timer ?? undefined);
-    s.pendingIdentityFiles.delete(tabId);
-    return Promise.resolve();
-  }
-  pending.lastTry = Date.now();
-  return index.lifecycle
-    .run(tabId, async lease => {
-      if (stateOf(tabId)?.runtime !== pending.runtime || s.pendingIdentityFiles.get(tabId) !== pending) return;
-      const promotion = await index.promoteDraft(tabId, pending.sessionFile, lease);
-      if (promotion.status !== "promoted") {
-        if (promotion.detail !== pending.lastFailureDetail) {
-          pending.lastFailureDetail = promotion.detail;
-          log(`tab ${tabId}: the session file ${pending.sessionFile} is not bound yet: ${promotion.detail}`);
-        }
-        return;
-      }
-      clearTimeout(pending.timer ?? undefined);
-      s.pendingIdentityFiles.delete(tabId);
-      log(`tab ${tabId}: bound to the session file ${pending.sessionFile}`);
-      void applyChatTabAppearance(s.context as vscode.ExtensionContext, index, tabId);
-      void windowState().bridgeHost.commitDocument(tabId);
-      windowState().bridgeHost.refreshReadiness(tabId);
-      refreshLauncher();
-    })
-    .catch(error => log(`tab ${tabId}: binding the session file failed: ${messageOf(error)}`));
-}
-
 
 /** These are editor presentation preferences, never OMP commands. */
 function readChatDisplayPreferences(): ChatDisplayPreferences {
@@ -6212,7 +5828,7 @@ function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, 
       if (event.baseline || pickerModel?.modelId !== event.model.state?.model?.id ||
         pickerModel?.message.provider !== event.model.state?.model?.provider) void refreshSessionModels(index, tabId);
       refreshFooterMetadata(index, tabId, event.baseline);
-      void retryPendingIdentity(index, tabId);
+      void s.sessionRuntime.identity.retry(tabId);
       if (event.baseline && !diagnosticsStageMeasured(tabId, "first-paint")) {
         s.diagnostics.succeed(tabId, "first-paint", { detail: "the first authoritative snapshot of the conversation" });
       }
@@ -6242,14 +5858,14 @@ function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, 
       }
       if (phase === "stopped" && event.payload.code === "child-exited") {
         const runtime = stateOf(tabId)?.runtime ?? null;
-        if (runtime?.kind === "chat") void handleRpcHostExited(context, index, tabId, runtime);
+        if (runtime?.kind === "chat") void s.sessionRuntime.exit.rpcExited(tabId, runtime);
       }
       refreshLauncher();
       return;
     }
     case "identity": {
       const runtime = stateOf(tabId)?.runtime ?? null;
-      if (runtime !== null) return bindConversationIdentity(index, tabId, runtime, event.sessionFile, event.sessionId, event.previousSessionId);
+      if (runtime !== null) return s.sessionRuntime.identity.bind(tabId, runtime, event.sessionFile, event.sessionId, event.previousSessionId);
       return;
     }
     case "open-url":
@@ -6331,404 +5947,14 @@ function logChatConnectionPhase(tabId: string, phase: ChatPhase, code: string | 
 // The channel is established only after the host proves it is the exact process
 // this window launched (same pid, same kernel process generation, same pipe
 // server) and completes the HMAC handshake. Until then host control is reported
-// as unavailable, and a launch never depends on it succeeding.
+// as unavailable, and a launch never depends on it succeeding. The runtime owns it
+// (`src/runtime/local-control.ts`); this is the window's read side.
 
 /** A verified channel plus the tab it belongs to. */
 interface ControlChannel {
   readonly tabId: string;
   readonly client: HostControlClient;
   readonly snapshot: ControlHostSnapshot | null;
-}
-
-interface EstablishControlInput {
-  readonly directory: string;
-  readonly slotId: string;
-  readonly pid: number;
-  readonly processCreation: string;
-  readonly privateKeyPkcs8Pem: string;
-  readonly expectation: HostControlExpectation;
-  readonly activity: boolean;
-  readonly work?: boolean;
-  readonly subagents?: boolean;
-  /** Only set when reattaching a process believed to be the same one. */
-  readonly provenKey?: string | undefined;
-}
-
-function controlDirectory(context: vscode.ExtensionContext): string {
-  return path.join(context.globalStorageUri.fsPath, "host-control");
-}
-
-/** Secrets are scoped to the claim's owner generation, so windows never share one. */
-function recipientSecretName(ownerGeneration: string): string {
-  return `omp.hostControl.recipient.${ownerGeneration}`;
-}
-
-function provenKeySecretName(ownerGeneration: string): string {
-  return `omp.hostControl.key.${ownerGeneration}`;
-}
-
-function controlProcessRecordKey(ownerGeneration: string): string {
-  return `omp.hostControl.process.${ownerGeneration}`;
-}
-
-function controlReleaseRecordKey(ownerGeneration: string): string {
-  return `omp.hostControl.releasedSlots.${ownerGeneration}`;
-}
-
-/**
- * Remember that this window confirmed one launch's process stopped.
- *
- * Only a confirmed stop reaches here (the child exited and its broker reported it),
- * and the entry is keyed by the released slot so a later deletion proof
- * can never attribute it to another launch's store.
- */
-async function rememberControlRelease(
-  context: vscode.ExtensionContext,
-  ownerGeneration: string,
-  slotId: string,
-): Promise<void> {
-  const key = controlReleaseRecordKey(ownerGeneration);
-  const known = context.globalState.get<readonly RecordedControlRelease[]>(key) ?? [];
-  const next = [
-    ...known.filter(entry => entry.slotId !== slotId),
-    { slotId, releasedAt: new Date().toISOString() },
-  ];
-  await context.globalState.update(key, next.slice(-CONTROL_RELEASE_HISTORY));
-}
-
-async function singleFlightHostControl(runtime: SessionHostRuntime, connect: () => Promise<void>): Promise<void> {
-  const s = windowState();
-  const pending = s.hostControlAttempts.get(runtime);
-  if (pending !== undefined) return pending;
-  const attempt = connect();
-  s.hostControlAttempts.set(runtime, attempt);
-  try { await attempt; }
-  finally { if (s.hostControlAttempts.get(runtime) === attempt) s.hostControlAttempts.delete(runtime); }
-}
-
-/**
- * Establish the channel for a host this window just launched.
- *
- * The process generation is probed first and persisted with the ownership, so a
- * later reload can prove it is talking to the same kernel process rather than a
- * recycled pid.
- */
-async function connectHostControl(
-  context: vscode.ExtensionContext,
-  index: SessionIndex,
-  tabId: string,
-  ownerGeneration: string,
-  runtime: SessionHostRuntime,
-  prepared: PreparedHostControl,
-): Promise<void> {
-  return singleFlightHostControl(runtime, () => connectHostControlAttempt(context, index, tabId, ownerGeneration, runtime, prepared));
-}
-
-async function connectHostControlAttempt(
-  context: vscode.ExtensionContext,
-  index: SessionIndex,
-  tabId: string,
-  ownerGeneration: string,
-  runtime: SessionHostRuntime,
-  prepared: PreparedHostControl,
-): Promise<void> {
-  const s = windowState();
-  const pid = runtime.pid;
-  const attempt: ControlAttemptPlan = { runtime, pid };
-  ownerGeneration = controlOwnerFor(runtime, ownerGeneration);
-  if (runtime.kind === "chat") {
-    const session = s.chat.sessionOf(tabId);
-    if (session === null) return;
-    await session.start();
-    if (s.chat.sessionOf(tabId) !== session || session.phase !== "live" || stateOf(tabId)?.runtime !== runtime) return;
-  }
-  // The pinned generation is read with the same helper the control client later compares it
-  // with, so the two readings are the same kind of value.
-  let processCreation: string;
-  try {
-    processCreation = await queryControlProcessGeneration(pid);
-  } catch (error) {
-    if (mayReportControlFailure(attemptTargetFor(tabId), { runtime, pid, client: null })) {
-      setControlFailure(tabId, `the process generation could not be read (${messageOf(error)})`);
-    }
-    return;
-  }
-  const record: RecordedControlProcess = {
-    pid,
-    processCreation,
-    slotId: prepared.bootstrap.slotId,
-    directory: prepared.bootstrap.directory,
-    activity: true,
-    work: true,
-    subagents: true,
-  };
-  const recorded = await index.lifecycle.run(tabId, async () => {
-    if (stateOf(tabId)?.runtime !== runtime) return false;
-    await context.globalState.update(controlProcessRecordKey(ownerGeneration), record);
-    return true;
-  });
-  if (!recorded) return;
-  await establishControl(context, index, tabId, ownerGeneration, attempt, {
-    directory: record.directory,
-    slotId: record.slotId,
-    pid,
-    processCreation,
-    privateKeyPkcs8Pem: prepared.privateKeyPkcs8Pem,
-    activity: true,
-    work: true,
-    subagents: true,
-    expectation: { sessionFile: runtime.kind === "terminal" ? null : runtime.sessionFile, cwd: runtime.cwd },
-  });
-}
-
-/**
- * Re-establish the channel for a host that outlived this extension host.
- *
- * Only the previously persisted recipient is used, and the proven key is
- * supplied only when the recorded process is the one still running: with a
- * proven key a different candidate is refused by the client as host
- * replacement, which is exactly the check that keeps a recycled pid out.
- */
-async function reconnectHostControl(
-  context: vscode.ExtensionContext,
-  index: SessionIndex,
-  tabId: string,
-  ownerGeneration: string,
-  runtime: SessionHostRuntime,
-): Promise<void> {
-  return singleFlightHostControl(runtime, () => reconnectHostControlAttempt(context, index, tabId, ownerGeneration, runtime));
-}
-
-async function reconnectHostControlAttempt(
-  context: vscode.ExtensionContext,
-  index: SessionIndex,
-  tabId: string,
-  ownerGeneration: string,
-  runtime: SessionHostRuntime,
-): Promise<void> {
-  const s = windowState();
-  const pid = runtime.pid;
-  ownerGeneration = controlOwnerFor(runtime, ownerGeneration);
-  // Captured before the secret reads below await, for the same reason as above.
-  const attempt: ControlAttemptPlan = { runtime, pid };
-  const record = context.globalState.get<RecordedControlProcess>(controlProcessRecordKey(ownerGeneration));
-  const privateKey = await context.secrets.get(recipientSecretName(ownerGeneration));
-  if (record === undefined || record.pid !== pid || privateKey === undefined) {
-    s.diagnostics.notObserved(
-      tabId,
-      "host-control-verified",
-      "no control recipient was recorded for this host, so the channel was never attempted",
-    );
-    if (mayReportControlFailure(attemptTargetFor(tabId), { runtime: attempt.runtime, pid: attempt.pid, client: null })) {
-      setControlFailure(
-        tabId,
-        "no control recipient was recorded for this host, so host control stays unavailable for it",
-      );
-    } else {
-      log(`tab ${tabId}: a reattach attempt no longer owns this tab; its result was ignored`);
-    }
-    return;
-  }
-  await establishControl(context, index, tabId, ownerGeneration, attempt, {
-    directory: record.directory,
-    slotId: record.slotId,
-    pid,
-    processCreation: record.processCreation,
-    privateKeyPkcs8Pem: privateKey,
-    activity: record.activity === true,
-    work: record.work === true,
-    subagents: record.subagents === true,
-    expectation: { sessionFile: runtime.kind === "terminal" ? null : runtime.sessionFile, cwd: runtime.cwd },
-    provenKey: await context.secrets.get(provenKeySecretName(ownerGeneration)),
-  });
-}
-
-/** The tab facts a fence decision reads, or null when the tab no longer exists. */
-function attemptTargetFor(tabId: string): { runtime: unknown | null; runtimePid: number | null; controlClient: unknown | null } | null {
-  // Read, never create: evaluating a stale completion must not bring a tab back. A
-  // held channel that has closed proves nothing, so it counts as no channel: the tab's
-  // next attempt must not be blocked by a dead one.
-  const state = stateOf(tabId);
-  if (state === undefined) return null;
-  const held = state.control?.client ?? null;
-  return {
-    runtime: state.runtime ?? null,
-    runtimePid: state.runtime?.pid ?? null,
-    controlClient: isOpenControlClient(held) ? held : null,
-  };
-}
-
-async function establishControl(
-  context: vscode.ExtensionContext,
-  index: SessionIndex,
-  tabId: string,
-  ownerGeneration: string,
-  attempt: ControlAttemptPlan,
-  input: EstablishControlInput,
-): Promise<void> {
-  const s = windowState();
-  const runtime = stateOf(tabId)?.runtime;
-  const stillCurrent = (): boolean =>
-    mayReportControlFailure(attemptTargetFor(tabId), { runtime: attempt.runtime, pid: attempt.pid, client: null }) &&
-    (runtime?.kind !== "terminal" || !runtime.stopping);
-  let connected: HostControlVerifiedConnection | null = null;
-  try {
-    const provenKey = input.provenKey;
-    if (provenKey !== undefined) {
-      // A key this launch already proved identifies the host without the rendezvous
-      // record, which is last-writer-wins per slot and no longer names the original
-      // server once a subagent's server (older host builds) overwrote or removed it.
-      const published = await readControlRendezvous(input.directory, input.slotId).catch(() => null);
-      connected = await HostControlClient.connectWithProvenKey({
-        slotId: input.slotId,
-        directory: input.directory,
-        provenKey,
-        expectedPid: input.pid,
-        expectedProcessCreationTime: input.processCreation,
-        expectation: input.expectation,
-        ...(published === null ? {} : { preferredPipeName: published.pipeName }),
-      });
-    }
-    if (connected === null) {
-      // With a proven key the host already published once, so a missing record is not
-      // startup lag: the bounded wait only covers a launch that never connected.
-      const rendezvous = await waitForControlRendezvous(input.directory, input.slotId, stillCurrent,
-        provenKey !== undefined ? PROVEN_CONTROL_RENDEZVOUS_TIMEOUT_MS
-          : runtime?.kind === "terminal" ? NATIVE_CONTROL_RENDEZVOUS_TIMEOUT_MS : CONTROL_RENDEZVOUS_TIMEOUT_MS);
-      if (rendezvous === null) {
-        // The wait above is an await: the tab may run another process now, or hold a
-        // channel a newer attempt established, which this failure must not clear — nor
-        // may it leave a verification failure on a tab this attempt no longer owns.
-        if (stillCurrent()) {
-          const reason = runtime?.kind !== "terminal"
-            ? "The native host has no compatible control record. Use Reload to refresh a child from an older build."
-            : provenKey !== undefined
-              ? "Host control lost: the running OMP no longer serves a control endpoint this session can verify, so statuses and notifications are off. Reload the session to restore them."
-              : "Waiting for the native host to publish its control record; statuses and notifications start when it connects.";
-          s.diagnostics.fail(tabId, "host-control-verified", reason);
-          setControlFailure(tabId, reason);
-        } else {
-          log(`tab ${tabId}: a control attempt that found no rendezvous no longer owns this tab; nothing was changed`);
-        }
-        return;
-      }
-      if (!stillCurrent()) return;
-      connected = await HostControlClient.connectVerified({
-        rendezvous,
-        rendezvousDirectory: input.directory,
-        recipientPrivateKeyPkcs8Pem: input.privateKeyPkcs8Pem,
-        expectedPid: input.pid,
-        expectedProcessCreationTime: input.processCreation,
-        expectation: input.expectation,
-        ...(provenKey === undefined ? {} : { provenKey }),
-      });
-    }
-    if (!stillCurrent()) {
-      connected.client.close();
-      connected = null;
-      return;
-    }
-    const verified = connected;
-    if (verified.rotated) log(`tab ${tabId}: the host process (pid ${input.pid}) proved a rotated control key; the new key is pinned`);
-    const snapshot = await verified.client.snapshot();
-    // The connection awaited above: the tab's runtime may have been replaced (a
-    // relaunch) or closed while it was in flight, and a client proved for the *old*
-    // process must never be published into its successor's tab — nor over a channel a
-    // newer attempt already established.
-    await index.lifecycle.run(tabId, async () => {
-      const state = stateOf(tabId);
-      if (
-        state === undefined ||
-        !mayPublishControlChannel(attemptTargetFor(tabId), { runtime: attempt.runtime, pid: attempt.pid, client: verified.client })
-      ) {
-        log(`tab ${tabId}: a verified host-control channel was not published: this tab runs a different process now`);
-        verified.client.close();
-        connected = null;
-        return;
-      }
-      // Persistence shares the stop/relaunch gate: an old completion can neither
-      // resurrect a deleted key nor overwrite its successor's proven key.
-      await context.secrets.store(provenKeySecretName(ownerGeneration), verified.key);
-      state.control = { client: verified.client, snapshot, activity: input.activity, work: input.work === true, subagents: input.subagents === true };
-      if (input.subagents === true && state.runtime?.kind === "chat") watchSubagentWork(index, tabId, verified.client);
-      state.controlFailure = null;
-      log(`tab ${tabId}: host control verified (pid ${input.pid}, instance ${snapshot.host.instanceId})`);
-      s.diagnostics.succeed(tabId, "host-control-verified", {
-        detail: `pid ${input.pid} · instance ${snapshot.host.instanceId}`,
-      });
-      s.guestDispatcher.invalidateControls(tabId);
-      void windowState().bridgeHost.commitDocument(tabId);
-      windowState().bridgeHost.refreshReadiness(tabId);
-    });
-  } catch (error) {
-    // A failure is only reported for the attempt that still owns the tab: reporting a
-    // late failure would close the channel a newer attempt established, and would
-    // leave a verification failure on a tab this attempt no longer owns. A client this
-    // attempt connected but never published is closed here instead.
-    const outcome = { runtime: attempt.runtime, pid: attempt.pid, client: connected?.client ?? null };
-    if (mayReportControlFailure(attemptTargetFor(tabId), outcome)) {
-      s.diagnostics.fail(tabId, "host-control-verified", describeControlError(error));
-      setControlFailure(tabId, describeControlError(error));
-    } else {
-      log(`tab ${tabId}: a failed host-control attempt no longer owns this tab; its result was ignored`);
-      connected?.client.close();
-    }
-  }
-}
-
-/** Bounded wait for the native side to publish its (non-secret) rendezvous. */
-async function waitForControlRendezvous(
-  directory: string,
-  slotId: string,
-  stillCurrent: () => boolean,
-  timeoutMs: number,
-): Promise<ControlRendezvous | null> {
-  const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    if (!stillCurrent()) return null;
-    const record = await readControlRendezvous(directory, slotId).catch(() => null);
-    if (record !== null) return record;
-    if (Date.now() >= deadline) return null;
-    await delay(CONTROL_RENDEZVOUS_POLL_MS);
-  }
-}
-
-/**
- * Drop every control secret only after a stop this window could prove; the
- * caller passes a null generation when ownership is unknown, which closes the
- * channel but leaves the stored material for a later reconciliation.
- */
-async function releaseHostControl(
-  context: vscode.ExtensionContext,
-  tabId: string,
-  ownerGeneration: string | null,
-): Promise<void> {
-  const state = stateOf(tabId);
-  if (state) {
-    state.control?.client.close();
-    state.control = null;
-    state.controlFailure = null;
-  }
-  if (ownerGeneration !== null) {
-    // The released slot is remembered *before* the launch record is dropped: the
-    // deletion proof of that launch's store depends on it afterwards.
-    const record = context.globalState.get<RecordedControlProcess>(controlProcessRecordKey(ownerGeneration));
-    if (record !== undefined) await rememberControlRelease(context, ownerGeneration, record.slotId);
-    await context.secrets.delete(recipientSecretName(ownerGeneration));
-    await context.secrets.delete(provenKeySecretName(ownerGeneration));
-    await context.globalState.update(controlProcessRecordKey(ownerGeneration), undefined);
-    log(`tab ${tabId}: host-control material released after a confirmed stop`);
-  }
-}
-
-function setControlFailure(tabId: string, detail: string): void {
-  const state = stateOf(tabId);
-  if (state) {
-    state.control?.client.close();
-    state.control = null;
-    state.controlFailure = detail;
-  }
-  log(`tab ${tabId}: host control unavailable — ${detail}`);
 }
 
 /**
@@ -7363,25 +6589,6 @@ function controlUnavailableMessage(index: SessionIndex): string {
     : `Host control is unavailable for the selected session: ${failure}`;
 }
 
-function describeControlError(error: unknown): string {
-  if (error instanceof HostControlRefusedError) return `request refused (${error.code})`;
-  if (error instanceof HostControlIdentityError) {
-    return error.reason === "key-changed"
-      ? "Host control refused: the control record belongs to a different process than this session's. Reload the session to restore statuses and notifications."
-      : `host identity check failed (${error.reason})`;
-  }
-  if (error instanceof HostControlUnavailableError) return "native host connection unavailable";
-  if (error instanceof HostControlConfigurationError) return "host-control configuration invalid";
-  return "unexpected host-control failure";
-}
-
-/** Close and forget one tab's verified control channel; the failure text is cleared with it. */
-function disposeControlChannel(state: TabState): void {
-  state.control?.client.close();
-  state.control = null;
-  state.controlFailure = null;
-}
-
 function describeModel(model: { readonly provider: string; readonly id: string } | null | undefined): string {
   return model === null || model === undefined ? "unknown model" : `${model.provider}/${model.id}`;
 }
@@ -7498,7 +6705,7 @@ async function refreshControlSnapshot(channel: ControlChannel): Promise<ControlH
         ? null
         : { runtime: state.runtime ?? null, runtimePid: state.runtime?.pid ?? null, controlClient: state.control?.client ?? null };
     if (mayReportControlFailure(target, { runtime: null, pid: null, client: channel.client })) {
-      setControlFailure(channel.tabId, describeControlError(error));
+      windowState().sessionRuntime.control.fail(channel.tabId, describeControlError(error));
     } else {
       log(`tab ${channel.tabId}: a failed control read back was ignored: this tab holds a different channel now`);
     }
@@ -8439,7 +7646,7 @@ async function evidenceSession(
       reason: "the OMP session id for this tab is not known yet, and evidence is bound to that exact id",
     };
   }
-  const directory = controlDirectory(context);
+  const directory = controlDirectoryOf(context.globalStorageUri.fsPath);
   const live = liveControlFacts(stateOf(tabId));
   // The producer hashed the native process directory into its namespace; the
   // indexed cwd is the directory this window launched that process in.
@@ -11018,9 +10225,9 @@ async function confirmAndStopRuntime(
         stopTerminalForTab(state.slotId);
         state.nativeWatch?.();
         state.nativeWatch = null;
-        disposeControlChannel(state);
-        await releaseHostControl(context, tabId, controlOwnerFor(runtime, entry.ownership?.ownerGeneration ?? ""));
-        await retireBroker(tabId, runtime);
+        s.sessionRuntime.control.dispose(state);
+        await s.sessionRuntime.control.release(tabId, controlOwnerFor(runtime, entry.ownership?.ownerGeneration ?? ""));
+        await s.sessionRuntime.exit.retireBroker(tabId, runtime);
         if (!conflicting) {
           await index.setRunIntent(tabId, "stopped", stopped.detail);
           await index.closeSession(tabId, { confirmedStopped: true, detail: stopped.detail }, lease);

@@ -48,6 +48,7 @@ function fixture(overrides: { entry?: unknown; verdict?: { kind: string }; resto
 		reconciler: () => reconciler,
 		launcher: () => { launcherReads++; return hostLauncher; },
 		stop: { requestStop: async () => ({ writerGone: true, treeEmpty: true, detail: "fixture" }), confirmEnded: async () => null, awaitSettled: async () => null, readTransitionFacts: async () => null },
+		control: {} as never, identity: {} as never, nativeWatch: {} as never, exit: {} as never,
 	});
 	return { runtime, calls, report, hostLauncher, reconciler, attached, launches, launcherReads: () => launcherReads };
 }

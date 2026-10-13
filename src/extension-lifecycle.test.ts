@@ -149,7 +149,15 @@ import { bridgeViewType } from './host/bridge-identity';
 const fixtureContext = undefined as never;
 const fixtureWindow = () => windowState();
 export const harness = {
-  connectHostControl, reconnectHostControl, establishControl, closeSession, presentRestoreOutcome, openTab, handleChatEvent, restoreTabs,
+  closeSession, presentRestoreOutcome, openTab, handleChatEvent, restoreTabs,
+  // The process services live in the runtime (cut 5); these adapters keep the cases' argument shapes.
+  connectHostControl: (context, _index, tabId, owner, runtime, prepared) => { fixtureWindow().context = context; return fixtureWindow().sessionRuntime.control.connect(tabId, owner, runtime, prepared); },
+  reconnectHostControl: (context, _index, tabId, owner, runtime) => { fixtureWindow().context = context; return fixtureWindow().sessionRuntime.control.reconnect(tabId, owner, runtime); },
+  establishControl: (context, _index, tabId, owner, attempt, input) => { fixtureWindow().context = context; return fixtureWindow().sessionRuntime.control.establish(tabId, owner, attempt, input); },
+  startNativeWatch: (_index, state, native) => fixtureWindow().sessionRuntime.nativeWatch.start(state, native),
+  handleNativeHostExited: (_index, state, native) => fixtureWindow().sessionRuntime.exit.nativeExited(state, native),
+  bindConversationIdentity: (_index, tabId, runtime, file, sessionId, previous) => fixtureWindow().sessionRuntime.identity.bind(tabId, runtime, file, sessionId, previous),
+  retryPendingIdentity: (_index, tabId) => fixtureWindow().sessionRuntime.identity.retry(tabId),
   handleRestoreOutcome, renameSession, reloadSession, handleGuestControlRequest, panelResponder,
   switchSessionMode, restartChat, openSessionInMode, defaultSessionMode, chooseDefaultSessionView, newSession, startNewSession,
   newSessionInPlace, deleteSessionInPlace,
@@ -161,10 +169,10 @@ export const harness = {
   installWindow(next) { window = next; },
   window: () => windowState(),
   createWindowState,
-  localLauncher, handleTerminalGuestMessage, startNativeWatch, handleNativeHostExited,
+  localLauncher, handleTerminalGuestMessage,
   startConversation: (index, tabId, runtime, file, replay) => localLauncher(fixtureWindow().context, index).startConversation(tabId, runtime, file, replay),
   pushSessionView, handleShellEditorClosed,
-  bindConversationIdentity, retryPendingIdentity, SessionTreeProvider,
+  SessionTreeProvider,
   terminalFontMessage, revealDesktopNotification, revealActiveSession, releaseSelectionFromOtherWindow, refreshLauncher, launcherFacts, notifierFor, forgetTurnActivity,
   copyActiveTerminalScreen, activateNativeEditor, postPanelAction,
   handleBridgeRequest,
@@ -586,7 +594,8 @@ before(async () => {
         ["rpc-reconcile", "export async function brokerNativeGenerationReader() { return async () => ({ kind: 'gone' }); }"],
         // The root-absence reader is shared by the native and RPC runtime modules.
       ]) {
-        builder.onResolve({ filter: new RegExp(`^\\./host/${name}$`) }, () => ({ path: name!, namespace: "native-fixture" }));
+        // `extension.ts` imports `./host/<name>`; the runtime layer imports `../host/<name>.ts`: both are the same module.
+        builder.onResolve({ filter: new RegExp(`^(?:\\./|\\.\\./)host/${name}(?:\\.ts)?$`) }, () => ({ path: name!, namespace: "native-fixture" }));
         if (name === "rpc-reconcile") builder.onResolve({ filter: /^\.\/rpc-reconcile$/ }, () => ({ path: name, namespace: "native-fixture" }));
         builder.onLoad({ filter: new RegExp(`^${name}$`), namespace: "native-fixture" }, () => ({
           contents: `export * from ${JSON.stringify(path.join(path.dirname(entry), "host", `${name}.ts`))}; ${extra}`,
@@ -1363,7 +1372,7 @@ describe("native replacement lifecycle", () => {
       stops += 1;
       throw new Error("the recorded broker process is gone");
     };
-    harness.reset(index, conversation({ phase: "live", start: async () => undefined }));
+    harness.reset(index, conversation({ phase: "live", start: async () => undefined })); harness.window().context = saved.context;
     harness.window().rootGone = async root => root.pid === native.pid;
     harness.state(TAB).runtime = native;
     saved.secrets.set(KEY, "ended-key"); saved.secrets.set(RECIPIENT, "ended-recipient");
@@ -1380,7 +1389,7 @@ describe("native replacement lifecycle", () => {
     const index = indexFixture(old);
     const initialized = Promise.withResolvers<void>();
     const session = { phase: "attaching", start: () => initialized.promise };
-    harness.reset(index, conversation(session));
+    harness.reset(index, conversation(session)); harness.window().context = saved.context;
     harness.state(TAB).runtime = old;
     saved.secrets.set(KEY, "old-native-key"); saved.secrets.set(RECIPIENT, "old-recipient");
     saved.records.set(RECORD, { pid: old.pid, slotId: "old-control-slot" });

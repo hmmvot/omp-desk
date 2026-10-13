@@ -16,12 +16,21 @@ import type { SessionHostRuntime, SessionTransitionFacts } from "../host/native-
 import type { NativeStopVerdict } from "../host/rpc-reconcile.ts";
 import type { StopOperations, StopRecord } from "./local-stop.ts";
 import type { OpenRequest, ReattachRequest, RestorePassRequest, RuntimeHolder, SessionRuntime } from "./session-runtime.ts";
+import type { LocalHostControl } from "./local-control.ts";
+import type { LocalExitOperations } from "./local-exit.ts";
+import type { LocalIdentity } from "./local-identity.ts";
+import type { LocalNativeWatch } from "./local-native-watch.ts";
+import type { RuntimeRecord } from "./runtime-record.ts";
 
 export interface LocalSessionRuntimeDeps {
 	readonly index: SessionIndex;
 	readonly reconciler: () => OwnerReconciler;
 	readonly launcher: () => OmpHostLauncher;
 	readonly stop: StopOperations;
+	readonly control: LocalHostControl;
+	readonly identity: LocalIdentity;
+	readonly nativeWatch: LocalNativeWatch;
+	readonly exit: LocalExitOperations;
 }
 
 /**
@@ -48,6 +57,37 @@ export class LocalSessionRuntime implements SessionRuntime {
 	get holder(): RuntimeHolder {
 		const holder = this.#deps.index.claimHolder;
 		return { id: holder.id, pid: holder.pid, creationTime: holder.processCreationTime ?? null };
+	}
+
+	// The runtime's own services of cut 5. They are injected whole because each one is built over the window's hooks.
+
+	/** Host control: the verified channel to the exact process and its credentials. */
+	get control(): LocalHostControl {
+		return this.#deps.control;
+	}
+
+	/** Conversation identity binding. */
+	get identity(): LocalIdentity {
+		return this.#deps.identity;
+	}
+
+	/** The native terminal's watch and handover. */
+	get nativeWatch(): LocalNativeWatch {
+		return this.#deps.nativeWatch;
+	}
+
+	/** The end of a process: exit handlers, broker retirement and broker loss. */
+	get exit(): LocalExitOperations {
+		return this.#deps.exit;
+	}
+
+	/**
+	 * End the runtime of a session whose recorded OMP root is already gone, as its exit would have
+	 * ended it. Ungated: the exit handlers take the tab's gate themselves, so call it outside the
+	 * gate. `LocalSessionRuntime` only, because its callers capture the live `runtime`.
+	 */
+	endEnded(state: RuntimeRecord, runtime: SessionHostRuntime): Promise<boolean> {
+		return this.#deps.exit.endEnded(state, runtime);
 	}
 
 	open(request: OpenRequest): Promise<RestoreOutcome> {

@@ -47,11 +47,6 @@ function fixture(options: { precheck?: boolean; launch?: "running" | "not-starte
 		isCurrent: () => { events.push("isCurrent"); return false; },
 		async prepareView() { events.push("prepareView"); },
 		attached() { events.push("attached"); },
-		async launchPrecheck() { events.push("launchPrecheck"); return options.precheck === true; },
-		async connectControl() { events.push("connectControl"); },
-		async reconnectControl() { events.push("reconnectControl"); },
-		controlFailed() { events.push("controlFailed"); },
-		async brokerLost() { events.push("brokerLost"); },
 		notice() { events.push("notice"); },
 	};
 	const recorded: unknown[] = [];
@@ -83,7 +78,15 @@ function fixture(options: { precheck?: boolean; launch?: "running" | "not-starte
 		brokerUnavailableReason: () => null,
 		brokerWatches: new WeakMap(),
 		linkReminder: () => false,
-		control: { storeRecipient: async () => { events.push("storeRecipient"); }, directory: () => "control-dir" },
+		control: {
+			storeRecipient: async () => { events.push("storeRecipient"); },
+			directory: () => "control-dir",
+			connect: async () => { events.push("connectControl"); },
+			reconnect: async () => { events.push("reconnectControl"); },
+			fail: () => { events.push("controlFailed"); },
+		},
+		native: { servesFile: async () => { events.push("launchPrecheck"); return options.precheck === true; } },
+		exit: { brokerLost: async () => { events.push("brokerLost"); } },
 		diagnosticsLabel: cwd => cwd,
 		log: () => undefined,
 	};

@@ -3,7 +3,8 @@
  * extension-owned broker, or re-adopt one that outlived the extension host, and hand it to its
  * conversation.
  *
- * The window is reached only through the `LauncherWindow` hooks and the injected ports below. The
+ * The window is reached only through the `LauncherWindow` hooks and the injected ports below (host
+ * control, the native watch's early check and the exit operations are the runtime's own). The
  * order of one launch is part of the contract and is the order the window always had:
  *
  *   precheck → stage entries → prepare host control → open diagnostics → broker client →
@@ -28,7 +29,6 @@ import { CONTROL_RECIPIENT_DEFINE, createControlSlotId } from "../host/control-p
 import type { DiagnosticsRecorder } from "../host/diagnostics.ts";
 import { brokerAndRootGone } from "../host/native-session.ts";
 import type { attachNativeHost, launchNativeHost, NativeAttachOutcome, SessionHostRuntime } from "../host/native-session.ts";
-import type { NativeControlBootstrap } from "../host/native-terminal.ts";
 import { isPtyProcessAlive } from "../host/pty-identity.ts";
 import type { PtyBrokerClient } from "../host/pty-client.ts";
 import type { attachRpcHost, launchRpcHost, RpcAttachOutcome } from "../host/rpc-launch.ts";
@@ -43,12 +43,10 @@ import type {
 } from "../host/session-index.ts";
 import type { OmpHostHandle } from "../host/session-model.ts";
 import type { StagedRuntimeEntries } from "./runtime-entries.ts";
-
-/** The credentials of one launch: the public bootstrap the process is given and the private half stored for the window. */
-export interface PreparedHostControl {
-	readonly bootstrap: NativeControlBootstrap;
-	readonly privateKeyPkcs8Pem: string;
-}
+import type { LocalHostControl } from "./local-control.ts";
+import type { LocalExitOperations } from "./local-exit.ts";
+import type { LocalNativeWatch } from "./local-native-watch.ts";
+import type { PreparedHostControl } from "./local-control.ts";
 
 /** What the runtime asks of its window; contractual and in-process only (design §2.5). */
 export interface LauncherWindow {
@@ -65,17 +63,8 @@ export interface LauncherWindow {
 	prepareView(conversation: string, runtime: SessionHostRuntime): Promise<void>;
 	/** Attach routes (chat) or the native watch and the guest context (terminal). Idempotent. */
 	attached(conversation: string, runtime: SessionHostRuntime): void;
-	/** Fresh and best effort: whether an authenticated native process of this window currently serves this exact file. */
-	launchPrecheck(sessionFile: string): Promise<boolean>;
-	/** Fire-and-forget connections of host control, started after a launch and after an attach. */
-	connectControl(conversation: string, ownerGeneration: string, runtime: SessionHostRuntime, control: PreparedHostControl): Promise<void>;
-	reconnectControl(conversation: string, ownerGeneration: string, runtime: SessionHostRuntime): Promise<void>;
-	/** The control-state write `prepareHostControl` makes when the recipient could not be prepared. */
-	controlFailed(conversation: string, detail: string): void;
-	/** The broker and the OMP root of the current runtime are proven gone, or the proof failed. Called outside the gate. */
-	brokerLost(conversation: string, runtime: SessionHostRuntime, proven: boolean): Promise<void>;
-	/** A warning for the user; never awaited, so an unanswered notification cannot hold the gate. */
-	notice(text: string): void;
+	/** A notice for the user; never awaited, so an unanswered notification cannot hold the gate. */
+	notice(level: "warning" | "error", text: string): void;
 }
 
 export interface LocalLauncherDeps {
@@ -101,10 +90,11 @@ export interface LocalLauncherDeps {
 	/** One watch per runtime; starting a new one replaces the old. */
 	readonly brokerWatches: WeakMap<SessionHostRuntime, () => void>;
 	readonly linkReminder: () => boolean;
-	readonly control: {
-		storeRecipient(ownerGeneration: string, privateKeyPkcs8Pem: string): Promise<void>;
-		directory(): string;
-	};
+	readonly control: Pick<LocalHostControl, "connect" | "reconnect" | "fail" | "storeRecipient" | "directory">;
+	/** The early check of a launch: does an authenticated native process of this window already serve the file. */
+	readonly native: Pick<LocalNativeWatch, "servesFile">;
+	/** What follows a broker that was ended from outside. */
+	readonly exit: Pick<LocalExitOperations, "brokerLost">;
 	readonly diagnosticsLabel: (cwd: string) => string;
 	readonly log: (message: string) => void;
 }
@@ -148,7 +138,7 @@ export class LocalLauncher implements OmpHostLauncher {
 	 * process still exists (`src/host/broker-loss.ts`). Its absence is only a trigger: nothing is
 	 * published until the broker's and the OMP root's recorded creation times both name gone processes.
 	 * What follows (ending the session, or telling the user it could not be confirmed ended) is the
-	 * window's, through `brokerLost`.
+	 * exit operations', through `brokerLost`.
 	 */
 	#watchBroker(tabId: string, runtime: SessionHostRuntime): void {
 		const { brokerWatches, window, log } = this.#deps;
@@ -166,7 +156,7 @@ export class LocalLauncher implements OmpHostLauncher {
 					{ pid: runtime.pid, creationTime: runtime.identity.childCreationTime },
 				);
 				if (!isCurrent()) return;
-				await window.brokerLost(tabId, runtime, proven);
+				await this.#deps.exit.brokerLost(tabId, runtime, proven);
 			},
 		}));
 	}
@@ -299,7 +289,7 @@ export class LocalLauncher implements OmpHostLauncher {
 		await index.setRunIntent(request.tabId, "running", `attached ${outcome.reason}`);
 		lap("intent");
 		log(`tab ${request.tabId}: attached — ${outcome.reason}`);
-		void this.#deps.window.reconnectControl(request.tabId, request.ownerGeneration, runtime);
+		void this.#deps.control.reconnect(request.tabId, request.ownerGeneration, runtime);
 		return { state: "attached", host: hostHandle(runtime, request.sessionId), timings };
 	}
 
@@ -307,7 +297,7 @@ export class LocalLauncher implements OmpHostLauncher {
 		const { diagnostics, window, index, log } = this.#deps;
 		// Fresh authenticated current-file readback protects against an own native
 		// /resume hidden by a stale catalog row. Failure remains explicitly best effort.
-		if (request.sessionFile !== null && await window.launchPrecheck(request.sessionFile)) {
+		if (request.sessionFile !== null && await this.#deps.native.servesFile(request.sessionFile)) {
 			return { state: "not-started", reason: "An authenticated native OMP process in this window currently serves this exact file. No second writer was launched." };
 		}
 		// The native host-control module and the pipe helper run from a verified copy staged
@@ -409,11 +399,11 @@ export class LocalLauncher implements OmpHostLauncher {
 		await this.startConversation(request.tabId, runtime, request.sessionFile, false);
 		timings.conversation = Date.now() - conversationAt;
 		log(`tab ${request.tabId}: ${outcome.state} — ${outcome.reason}`);
-		if (runtime.notice !== null) window.notice(runtime.notice);
+		if (runtime.notice !== null) window.notice("warning", runtime.notice);
 		// The native extension receives session_start before rpc-ui handles get_state.
 		// Its exact session identity is checked only after that positive startup barrier.
 		if (control !== null) {
-			void window.connectControl(request.tabId, request.ownerGeneration, runtime, control);
+			void this.#deps.control.connect(request.tabId, request.ownerGeneration, runtime, control);
 		} else {
 			diagnostics.notObserved(
 				request.tabId,
@@ -456,7 +446,7 @@ export class LocalLauncher implements OmpHostLauncher {
 				privateKeyPkcs8Pem: recipient.privateKeyPkcs8Pem,
 			};
 		} catch {
-			this.#deps.window.controlFailed(tabId, "the host-control recipient could not be prepared");
+			this.#deps.control.fail(tabId, "the host-control recipient could not be prepared");
 			return null;
 		}
 	}

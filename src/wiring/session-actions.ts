@@ -145,8 +145,8 @@ export interface StopReadPort<Tab extends SessionTab> {
 	disposeControlChannel(state: Tab): void;
 	/** Retire the stopped RPC child's broker and forget its slot. */
 	retireBroker(tabId: string, runtime: SessionHostRuntime): Promise<void>;
-	releaseHostControl(context: vscode.ExtensionContext, tabId: string, ownerGeneration: string | null): Promise<void>;
-	reconnectHostControl(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, ownerGeneration: string, runtime: SessionHostRuntime): Promise<void>;
+	releaseHostControl(tabId: string, ownerGeneration: string | null): Promise<void>;
+	reconnectHostControl(tabId: string, ownerGeneration: string, runtime: SessionHostRuntime): Promise<void>;
 	/** This window's session runtime: lifecycle actions re-adopt a native writer through it and never launch. */
 	sessionRuntime(): SessionRuntime;
 	/** The control owner a recorded host's credentials are filed under. */
@@ -502,7 +502,7 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 				if (stopped.slot !== null && stopped.stopped) {
 					await deps.brokerSlots()?.forget(stopped.slot).catch(() => undefined);
 					deps.outcomes().delete(tabId);
-					await deps.releaseHostControl(context, tabId, deps.recordedControlOwner(entry));
+					await deps.releaseHostControl(tabId, deps.recordedControlOwner(entry));
 				}
 				return stopped;
 			});
@@ -594,7 +594,7 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 			if (recorded.kind === "recorded") {
 				await deps.brokerSlots()?.forget(recorded.slot);
 				deps.outcomes().delete(tabId);
-				await deps.releaseHostControl(context, tabId, before === null ? null : deps.recordedControlOwner(before));
+				await deps.releaseHostControl(tabId, before === null ? null : deps.recordedControlOwner(before));
 			}
 			return recorded;
 		});
@@ -729,7 +729,7 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 	async function reattachNativeForLifecycle(context: vscode.ExtensionContext, index: SessionIndex, tabId: string): Promise<void> {
 		await deps.sessionRuntime().reattach({ conversation: tabId });
 		const runtime = deps.tab(tabId)?.runtime;
-		if (runtime?.kind === "terminal") await deps.reconnectHostControl(context, index, tabId, index.get(tabId)?.ownership?.ownerGeneration ?? "", runtime);
+		if (runtime?.kind === "terminal") await deps.reconnectHostControl(tabId, index.get(tabId)?.ownership?.ownerGeneration ?? "", runtime);
 	}
 
 	/** A current owned-writer witness, never a recorded pid by itself. */
@@ -797,7 +797,7 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 					}
 					if (stopped.slot !== null) await deps.brokerSlots()?.forget(stopped.slot).catch(() => undefined);
 				}
-				await deps.releaseHostControl(context, tabId, runtime === null ? deps.recordedControlOwner(entry) : deps.controlOwnerFor(runtime, entry.ownership?.ownerGeneration ?? ""));
+				await deps.releaseHostControl(tabId, runtime === null ? deps.recordedControlOwner(entry) : deps.controlOwnerFor(runtime, entry.ownership?.ownerGeneration ?? ""));
 				deps.outcomes().delete(tabId);
 				return true;
 			});
