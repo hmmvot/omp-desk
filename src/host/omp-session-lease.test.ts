@@ -5,7 +5,9 @@ import { readFile } from "node:fs/promises";
 import { describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+	LEASE_FAILURE_BACKOFF_MAX_MS,
 	ExternalLeaseObserver,
+	leaseFailureBackoffMs,
 	LEASE_FAILURE_BACKOFF_MS,
 	LEASE_MUTEX_PREFIX,
 	nativeLockDigest,
@@ -245,6 +247,47 @@ describe("ExternalLeaseObserver", () => {
 		assert.equal(probes, 2, "after the backoff the probe is tried again");
 		assert.equal(await instance.holds("one.jsonl", { fresh: true }), null);
 		assert.equal(probes, 3, "a click that must not act on an old verdict still probes");
+	});
+
+	it("doubles the hold with each failed probe in a row, up to the cap, and starts over after one that reports", async () => {
+		assert.deepEqual([1, 2, 3, 4, 5, 6, 7].map(leaseFailureBackoffMs), [15_000, 30_000, 60_000, 120_000, 240_000, LEASE_FAILURE_BACKOFF_MAX_MS, LEASE_FAILURE_BACKOFF_MAX_MS]);
+		let probes = 0;
+		let clock = 1_000;
+		let timesOut = true;
+		const instance = new ExternalLeaseObserver({
+			probe: async requested => {
+				probes += 1;
+				return timesOut ? null : new Map<string, LeaseState>(requested.map(name => [name, "absent"]));
+			},
+			ownersDir: () => OWNERS,
+			readSessionId: async file => files.get(file) ?? null,
+			knownFiles: () => [...files.keys()],
+			now: () => clock,
+			ttlMs: 2_000,
+		});
+		// Each attempt is made the moment the previous hold lapses; the next hold must be twice as long.
+		let hold = LEASE_FAILURE_BACKOFF_MS;
+		for (let failure = 1; failure <= 4; failure += 1) {
+			assert.equal(await instance.holds("one.jsonl"), null);
+			assert.equal(probes, failure);
+			clock += hold - 1;
+			assert.equal(await instance.holds("one.jsonl"), null);
+			assert.equal(probes, failure, `inside the ${hold} ms hold after failure ${failure} nothing is probed`);
+			clock += 1;
+			hold *= 2;
+		}
+		timesOut = false;
+		assert.equal(await instance.holds("one.jsonl"), false, "the probe that finally reports is believed");
+		timesOut = true;
+		clock += 2_500;
+		assert.equal(await instance.holds("one.jsonl"), null);
+		clock += LEASE_FAILURE_BACKOFF_MS - 1;
+		const before = probes;
+		assert.equal(await instance.holds("one.jsonl"), null);
+		assert.equal(probes, before, "after a success the next failure holds the base backoff again");
+		clock += 1;
+		await instance.holds("one.jsonl");
+		assert.equal(probes, before + 1);
 	});
 
 	it("answers unknown when it cannot name the lease: no owners directory, no header, an unplain id", async () => {

@@ -282,15 +282,31 @@ export function compactConflicts(conflicts: readonly CatalogConflictRecord[]): r
  * Returns `null` when no document exists (a fresh install). Any other unreadable
  * state throws {@link CatalogError} `unavailable`: the caller must refuse to write
  * rather than treat the catalog as empty.
+ *
+ * The file is opened, read and closed within one turn of the event loop (`readFileSync`, a fraction of a millisecond for a
+ * file of this size). An asynchronous read keeps the document open across several loop turns, and on Windows an open handle
+ * makes the *committing* window's rename fail: when this window's loop is stalled between the steps of such a read (a
+ * reload starves the host for seconds) the committer retries its rename for as long as the stall lasts, holding the catalog
+ * lock the whole time. A stall *inside* the one synchronous call (disk latency, a scanner on open) still holds the document
+ * open, and it now also blocks this window's thread.
  */
 export async function readCatalogDocument(paths: CatalogPaths): Promise<CatalogDocument | null> {
   let text: string;
   try {
-    text = await fsp.readFile(paths.document, "utf8");
+    text = fs.readFileSync(paths.document, "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
     throw new CatalogError("unavailable", `The OMP profile catalog could not be read: ${messageOf(error)}`, { cause: error });
   }
+  return parseCatalogDocument(text);
+}
+
+/**
+ * Validate the text of one committed document.
+ *
+ * Throws {@link CatalogError} `unavailable` for anything that is not a document this build may write over.
+ */
+function parseCatalogDocument(text: string): CatalogDocument {
   let parsed: unknown;
   try {
     parsed = trackOperation("catalog parse", () => JSON.parse(text));
@@ -491,8 +507,11 @@ async function releaseLock(lockPath: string, token: string): Promise<void> {
  * document. A reader therefore always sees a complete revision: either the old one
  * or the new one, never a partial write, and a crash leaves the previous revision
  * in place.
+ *
+ * Returns the text it wrote, so the caller can adopt exactly what it committed without opening the file again: a
+ * re-read right after the rename keeps the document open at the moment another window's rename needs it.
  */
-async function commitDocument(paths: CatalogPaths, next: CatalogDocument): Promise<void> {
+async function commitDocument(paths: CatalogPaths, next: CatalogDocument): Promise<string> {
   const payload = trackOperation("catalog serialize", () => JSON.stringify(next));
   let staging: string;
   try {
@@ -505,7 +524,7 @@ async function commitDocument(paths: CatalogPaths, next: CatalogDocument): Promi
     // an antivirus scan, a backup tool). The rename is retried over about two seconds, then reported; the previous
     // revision is still intact either way.
     await renameReplacing(() => fsp.rename(staging, paths.document), delay);
-    return;
+    return payload;
   } catch (error) {
     await fsp.rm(staging, { force: true });
     const code = (error as NodeJS.ErrnoException).code;
@@ -540,11 +559,15 @@ export interface CatalogTransaction {
   addImport(record: CatalogImportRecord): void;
 }
 
-/** What one committed transaction produced. */
-export interface CatalogCommitResult {
-  readonly revision: number;
-  readonly changed: boolean;
-}
+/** What one committed transaction produced: nothing changed, or a new revision together with the document as it was written. */
+export type CatalogCommitResult =
+  | { readonly revision: number; readonly changed: false }
+  | {
+      readonly revision: number;
+      readonly changed: true;
+      /** The committed document, parsed from the text that was renamed into place. */
+      readonly document: CatalogDocument;
+    };
 
 export interface CatalogTransactionOptions {
   readonly lockTimeoutMs?: number;
@@ -574,6 +597,8 @@ export async function transactCatalog(
     staleMs: options.lockStaleMs ?? CATALOG_LOCK_STALE_MS,
     now,
   });
+  let written: string;
+  let revisionWritten: number;
   try {
     const current = (await readCatalogDocument(paths)) ?? emptyCatalogDocument();
     const records: Record<string, unknown> = { ...current.records };
@@ -626,11 +651,13 @@ export async function transactCatalog(
       imports,
       conflicts: compactConflicts(conflicts),
     };
-    await commitDocument(paths, next);
-    return { revision: next.revision, changed: true };
+    written = await commitDocument(paths, next);
+    revisionWritten = next.revision;
   } finally {
     await releaseLock(paths.lock, held.token);
   }
+  // After the lock is released: the validation is the one a read applies, on the exact text that was committed.
+  return { revision: revisionWritten, changed: true, document: parseCatalogDocument(written) };
 }
 
 // Window-side store
@@ -754,8 +781,9 @@ function sameValue(left: unknown, right: unknown): boolean {
  *
  * The initial read is awaited by activation, which builds its consumers only once it
  * has the real state (a sidebar built from an empty projection would show the
- * welcome view and then flicker). No read, lock or write blocks the extension host's
- * thread. Mutations are serialized inside this window as well as across windows.
+ * welcome view and then flicker). Only the read of the document blocks the extension
+ * host's thread (synchronously, see {@link readCatalogDocument}); every lock and write
+ * is asynchronous. Mutations are serialized inside this window as well as across windows.
  */
 export async function createCatalogStore(options: CatalogStoreOptions): Promise<CatalogStore> {
   const { paths, mergers } = options;
@@ -835,7 +863,7 @@ export async function createCatalogStore(options: CatalogStoreOptions): Promise<
 
   const transact = async (
     operation: (tx: CatalogTransaction) => boolean | void,
-  ): Promise<{ readonly changed: boolean; readonly revision: number }> => {
+  ): Promise<CatalogCommitResult> => {
     if (unavailable !== null) {
       throw new CatalogError("unavailable", `The OMP profile catalog is unusable: ${unavailable}`);
     }
@@ -846,7 +874,7 @@ export async function createCatalogStore(options: CatalogStoreOptions): Promise<
       clock,
     });
     if (result.changed) {
-      const document = (await readCatalogDocument(paths)) ?? emptyCatalogDocument();
+      const document = result.document;
       notify(trackOperation("catalog apply", () => applyDocument(document)));
     } else {
       revision = Math.max(revision, result.revision);
@@ -1037,7 +1065,10 @@ export function startCatalogWatch(
         return;
       }
       const name = String(filename);
-      if (name === path.basename(paths.document) || name.startsWith(`${path.basename(paths.document)}.`)) schedule();
+      // Only the document itself: a commit's staged sibling (`catalog.json.<pid>.<uuid>.tmp`) appears, is written and is flushed
+      // for tens of milliseconds before the rename, and a re-read that lands in that window holds the document open when the
+      // committing window renames over it, so the rename fails and is retried while that window holds the catalog lock.
+      if (name === path.basename(paths.document)) schedule();
     });
     watcher.on("error", error => {
       options.onError?.(`the OMP profile catalog could not be watched: ${messageOf(error)}`);

@@ -277,11 +277,25 @@ export function powershellLeaseProbe(options: LeaseProbeLaunchOptions): LeasePro
 export const LEASE_VERDICT_TTL_MS = 2_000;
 
 /**
- * How long a probe that failed (a timeout, no PowerShell, an unreadable report) answers "unknown" before another is
- * started. Without it every observation that found the failed verdict stale started the next 5 s attempt at once, up to
- * three in a row, so a busy machine ran one PowerShell after another and took longer to answer each of them.
+ * How long the first failed probe (a timeout, no PowerShell, an unreadable report) answers "unknown" before another is
+ * started; further failures in a row hold longer ({@link leaseFailureBackoffMs}). Without it every observation that found
+ * the failed verdict stale started the next 5 s attempt at once, up to three in a row, so a busy machine ran one
+ * PowerShell after another and took longer to answer each of them.
  */
 export const LEASE_FAILURE_BACKOFF_MS = 15_000;
+
+/** The longest a run of failed probes is answered from memory, so a machine that recovers is noticed within minutes. */
+export const LEASE_FAILURE_BACKOFF_MAX_MS = 300_000;
+
+/**
+ * How long the verdict of the `consecutiveFailures`-th failed probe in a row holds: {@link LEASE_FAILURE_BACKOFF_MS} after
+ * the first, doubling with each further failure up to {@link LEASE_FAILURE_BACKOFF_MAX_MS}. A probe that times out on a
+ * saturated machine takes its whole bound and is itself load; repeating it at a fixed interval kept a doomed PowerShell
+ * start running every half minute in every window for as long as the machine stayed busy.
+ */
+export function leaseFailureBackoffMs(consecutiveFailures: number): number {
+	return Math.min(LEASE_FAILURE_BACKOFF_MS * 2 ** Math.max(0, consecutiveFailures - 1), LEASE_FAILURE_BACKOFF_MAX_MS);
+}
 
 /** Most session ids probed in one helper run, so one pass stays a single short PowerShell call. */
 const MAX_BATCH = 200;
@@ -306,6 +320,8 @@ interface Verdict {
 	/** When that probe finished, and whether it produced no report at all. */
 	readonly finishedAt: number;
 	readonly failed: boolean;
+	/** How long a failed verdict answers "unknown" before another probe is started; `0` for a verdict that carries a report. */
+	readonly holdMs: number;
 	/** Ordinal of the pass that produced this, so a fresh request can demand a later one. */
 	readonly pass: number;
 }
@@ -329,6 +345,8 @@ export class ExternalLeaseObserver {
 	readonly #wanted = new Set<string>();
 	#round: Promise<void> | null = null;
 	#passesStarted = 0;
+	/** Probes that failed in a row; a probe that carries a report resets it. */
+	#failuresInARow = 0;
 	#unavailableLogged = false;
 
 	constructor(options: ExternalLeaseObserverOptions) {
@@ -369,7 +387,7 @@ export class ExternalLeaseObserver {
 	/** Whether a verdict answers this call: a later pass for a fresh one, else a recent one; a failed probe holds for the backoff. */
 	#usable(known: Verdict, fresh: boolean, since: number, passFloor: number): boolean {
 		if (fresh) return known.pass > passFloor;
-		return known.failed ? this.#now() - known.finishedAt < LEASE_FAILURE_BACKOFF_MS : known.at >= since;
+		return known.failed ? this.#now() - known.finishedAt < known.holdMs : known.at >= since;
 	}
 
 	async #run(ownersDir: string): Promise<void> {
@@ -404,8 +422,10 @@ export class ExternalLeaseObserver {
 		}
 		if (answer !== null) this.#unavailableLogged = false;
 		const finishedAt = this.#now();
+		this.#failuresInARow = answer === null ? this.#failuresInARow + 1 : 0;
+		const holdMs = answer === null ? leaseFailureBackoffMs(this.#failuresInARow) : 0;
 		for (const name of requested) {
-			this.#verdicts.set(name, { state: answer?.get(name) ?? null, at: startedAt, finishedAt, failed: answer === null, pass });
+			this.#verdicts.set(name, { state: answer?.get(name) ?? null, at: startedAt, finishedAt, failed: answer === null, holdMs, pass });
 		}
 		// Bound the cache to the names of the latest passes.
 		if (this.#verdicts.size > MAX_BATCH * 4) {

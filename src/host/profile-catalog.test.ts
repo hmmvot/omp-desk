@@ -16,11 +16,13 @@
  */
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { existsSync } from "node:fs";
+import fsModule, { existsSync, readFileSync, renameSync } from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
 import { hostname, tmpdir } from "node:os";
 import * as path from "node:path";
 import { after, describe, it } from "node:test";
-import { CATALOG_CONFLICT_GROUP_KEEP, CatalogError, catalogPaths, compactConflicts, createCatalogStore, startCatalogWatch } from "./profile-catalog.ts";
+import { setImmediate as nextTurn, setTimeout as sleep } from "node:timers/promises";
+import { CATALOG_CONFLICT_GROUP_KEEP, CatalogError, catalogPaths, compactConflicts, createCatalogStore, readCatalogDocument, startCatalogWatch, transactCatalog } from "./profile-catalog.ts";
 import type { CatalogConflictRecord, CatalogPaths, CatalogStore } from "./profile-catalog.ts";
 
 const roots: string[] = [];
@@ -360,6 +362,78 @@ describe("profile catalog", () => {
 			clearTimeout(guard);
 			dispose();
 		}
+	});
+
+	it("ignores a commit's staged sibling and reports only the document itself", async () => {
+		const { paths } = await tempCatalog();
+		const one = await window(paths);
+		await one.update("test.rows.v1", [{ id: "a", value: "1" }]);
+		let signals = 0;
+		const arrived = Promise.withResolvers<void>();
+		const dispose = startCatalogWatch(paths, () => { signals += 1; arrived.resolve(); }, { debounceMs: 5 });
+		const guard = setTimeout(() => arrived.reject(new Error("the watcher reported nothing")), 5_000);
+		guard.unref?.();
+		try {
+			// What a committing window writes beside the document before it renames over it.
+			await writeFile(`${paths.document}.${process.pid}.staged.tmp`, "{}");
+			await sleep(250);
+			assert.equal(signals, 0, "a re-read triggered by the staged file would hold the document open under the committer's rename");
+			await one.update("test.rows.v1", [{ id: "a", value: "1" }, { id: "b", value: "2" }]);
+			await arrived.promise;
+			assert.ok(signals >= 1);
+		} finally {
+			clearTimeout(guard);
+			dispose();
+		}
+	});
+
+	it("hands a commit's own document to its caller exactly as it was written", async () => {
+		const { paths } = await tempCatalog();
+		const result = await transactCatalog(paths, tx => { tx.set("test.key", { nested: [1, 2, { three: 3 }] }); });
+		assert.ok(result.changed);
+		assert.deepEqual(result.document, await readCatalogDocument(paths));
+		const unchanged = await transactCatalog(paths, () => false);
+		assert.equal(unchanged.changed, false);
+		assert.equal("document" in unchanged, false);
+	});
+
+	it("reads the document once per commit, under the lock, and not again to adopt what it just wrote", async () => {
+		const { paths } = await tempCatalog();
+		const one = await window(paths);
+		const adopted: number[] = [];
+		one.onChange(refresh => adopted.push(refresh.revision));
+		// `profile-catalog.ts` imports the `node:fs` namespace, whose live bindings follow the module object once re-synced.
+		const reads: string[] = [];
+		const original = fsModule.readFileSync;
+		fsModule.readFileSync = ((target: Parameters<typeof original>[0], ...rest: unknown[]) => {
+			reads.push(String(target));
+			return (original as (...args: unknown[]) => unknown)(target, ...rest);
+		}) as typeof original;
+		syncBuiltinESMExports();
+		try {
+			await one.update("test.rows.v1", [{ id: "a", value: "1" }]);
+		} finally {
+			fsModule.readFileSync = original;
+			syncBuiltinESMExports();
+		}
+		assert.deepEqual(reads.filter(target => target === paths.document), [paths.document], "the transaction's own read under the lock, and no other");
+		assert.deepEqual(adopted, [1]);
+		assert.deepEqual(one.get<Row[]>("test.rows.v1"), [{ id: "a", value: "1" }]);
+		assert.equal(await one.refresh(), null, "nothing newer is on disk, so a refresh has nothing to report");
+	});
+
+	it("reads the document within one turn, so a rename over it is never blocked by this window's read", { skip: process.platform !== "win32" }, async () => {
+		const { paths } = await tempCatalog();
+		const one = await window(paths);
+		await one.update("test.rows.v1", [{ id: "a", value: "1" }]);
+		const staged = `${paths.document}.${process.pid}.next.tmp`;
+		await writeFile(staged, readFileSync(paths.document));
+		// An asynchronous read has opened the file by now and keeps it open until its next turns; Windows then refuses the
+		// rename. A committing window whose neighbour's loop is stalled at this point waits for the whole stall.
+		const reading = readCatalogDocument(paths);
+		await nextTurn();
+		renameSync(staged, paths.document);
+		assert.equal((await reading)?.revision, 1);
 	});
 });
 

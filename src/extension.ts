@@ -36,6 +36,7 @@ import { normalizeSessionsGrouping, planNotificationReveal, sessionsLayoutPickIt
 import type { SessionsGrouping } from "./views/session-order";
 import { pinnedSessionTabId, selectionLeaveOtherWindow, selectionRestore } from "./views/session-selection";
 import { acquireClaim, createClaimHolder, createOwnerGeneration, readProcessCreationTime } from "./host/session-claim";
+import { CoalescedRun } from "./host/coalesced-run";
 import { startLoopLagMonitor, trackOperation } from "./host/loop-lag";
 import type { OmpCommand, OmpPackageRoot } from "./host/native-terminal";
 import {
@@ -517,6 +518,13 @@ interface WindowState {
   indexForBridge: SessionIndex | null;
   /** This window's view of the profile catalog, built once at activation (ADR-0034). */
   catalogStore: CatalogStore | undefined;
+  /**
+   * Runs this window's catalog adoptions one at a time, folding every trigger that arrives meanwhile (a commit of this window,
+   * a peer's change, focus, visibility, an explicit refresh) into one follow-up: a reload of several windows fires dozens of
+   * triggers within seconds, and an adoption per trigger ran in parallel, each waiting on the same index write queue and then
+   * re-reading and re-publishing everything at once.
+   */
+  catalogAdoption: CoalescedRun<CatalogAdoptionRequest> | undefined;
   /**
    * Resolves once the catalog has been read and the one-time import of the predecessor
    * build's folder list has settled.
@@ -1144,6 +1152,7 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     sessionRuntime: undefined as never, // assigned by `activate` before anything reads it
     indexForBridge: null,
     catalogStore: undefined,
+    catalogAdoption: undefined,
     catalogReady: Promise.resolve(),
     externalLeases: null,
     claimFileNames: new Map<string, string | null>(),
@@ -4149,6 +4158,13 @@ async function ensureCatalogReady(): Promise<void> {
   await s.catalogReady;
 }
 
+/** One request to adopt the newest catalog revision; requests folded into one run are merged. */
+interface CatalogAdoptionRequest {
+  readonly index: SessionIndex;
+  readonly folders: LauncherFolders;
+  readonly startup: boolean;
+}
+
 /**
  * Adopt whichever records another window committed since this window last read.
  *
@@ -4157,13 +4173,21 @@ async function ensureCatalogReady(): Promise<void> {
  * restores nothing and launches nothing: adopting another window's rows only makes
  * them visible here, and their ownership is proven exactly as before when the user
  * opens one.
+ *
+ * Adoptions never overlap: a request that arrives while one runs waits for a single follow-up that starts after it, so
+ * the promise this returns always covers a read made after the call.
  */
 function adoptCatalogChanges(
   index: SessionIndex,
   folders: LauncherFolders,
   options: { readonly startup?: boolean } = {},
 ): Promise<void> {
-  return trackOperation("catalog adoption", () => adoptCatalogChangesMarked(index, folders, options));
+  const s = windowState();
+  s.catalogAdoption ??= new CoalescedRun<CatalogAdoptionRequest>(
+    request => trackOperation("catalog adoption", () => adoptCatalogChangesMarked(request.index, request.folders, { startup: request.startup })),
+    (pending, next) => ({ index: next.index, folders: next.folders, startup: pending.startup || next.startup }),
+  );
+  return s.catalogAdoption.request({ index, folders, startup: options.startup === true });
 }
 
 async function adoptCatalogChangesMarked(
