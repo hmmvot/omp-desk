@@ -225,6 +225,9 @@ const PORT_ALLOWED_NAMES = {
   "src/host/chat-runtime.ts": ["ChatPage", "ChatCommandOutcome", "ConversationActivity", "RewindRead"],
   "src/host/rpc/session.ts": ["NavigateRequest", "NavigateOutcome"],
   "src/host/session-kill.ts": ["KillSelection"],
+  "src/host/broker-slots.ts": ["BrokerSlotProvenance"],
+  "src/host/session-availability.ts": ["StopRecordedHostResult"],
+  "src/host/native-session.ts": ["SessionTransitionFacts"],
 };
 const PORT_STATEMENT = /^[ \t]*(import|export)\b([^'";]*?)\bfrom\s*(['"])([^'"\n]+)\3|^[ \t]*import\s*(['"])([^'"\n]+)\5/gm;
 const PORT_DYNAMIC = /\b(?:import|require)\s*\(/g;

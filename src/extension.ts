@@ -71,6 +71,8 @@ import { createRuntimeStaging } from "./runtime/runtime-entries";
 import type { RuntimeStaging } from "./runtime/runtime-entries";
 import { LocalSessionRuntime } from "./runtime/local-runtime";
 import type { LocalSessionRuntimeDeps } from "./runtime/local-runtime";
+import { LocalRecordedStop, createRecordedHostStopPort, readBrokerProvenance } from "./runtime/local-recorded-stop";
+import { LocalWriterVerifier } from "./runtime/local-writer";
 import { LocalStopOperations, withSessionReadDeadline } from "./runtime/local-stop";
 import type {
   RestoreOutcome,
@@ -86,6 +88,7 @@ import type {
 import type { SessionIndexEntry, SessionViewMode } from "./host/session-model";
 import type { SessionFileHeader } from "./host/session-files";
 import { claimHolderMayBeAlive, setProcessProbeObserver } from "./host/session-claim";
+import { formatToolSpawn, setToolSpawnObserver } from "./host/tool-spawn-trace";
 import { holderSeemsAlive } from "./host/holder-liveness";
 import { claimFileNameFor, startClaimWatch } from "./host/claim-watch";
 import { WindowRegistry } from "./host/window-registry";
@@ -141,7 +144,7 @@ import { registerContextView, type ContextHandle } from "./wiring/context-wiring
 import type { ContextTarget } from "./host/context/context-controller";
 import { owningWindowUri, registerWindowRouting } from "./wiring/window-routing";
 import type { WindowRouting, WindowRoutingDeps } from "./wiring/window-routing";
-import { createRecordedHostStopPort, readBrokerProvenance, registerSessionActions } from "./wiring/session-actions";
+import { registerSessionActions } from "./wiring/session-actions";
 import type { SessionActions, SessionActionsDeps } from "./wiring/session-actions";
 import { CHAT_COMMAND_TYPES, registerGuestDispatcher } from "./wiring/guest-dispatcher";
 import type { CarriedDraft, GuestDispatcher, GuestDispatcherDeps } from "./wiring/guest-dispatcher";
@@ -942,14 +945,9 @@ function windowRoutingDeps(): WindowRoutingDeps {
 
 /**
  * What the session actions read of this window and call into. The getters read the installed window when they run,
- * so the actions can be created with the window, before it is installed. The lifecycle harness builds a handle from
- * these with its own `brokerProvenanceFor` and `recordedHostStopPort`.
+ * so the actions can be created with the window, before it is installed.
  */
 function sessionActionsDeps(): SessionActionsDeps<TabState> {
-  const brokerProvenanceFor = (tabId: string): BrokerSlotProvenance => readBrokerProvenance({
-    brokerSlots: windowState().brokerSlots,
-    slotsForConversation: id => windowState().indexForBridge?.slotsForConversation(id) ?? [],
-  }, tabId);
   return {
     context: () => windowState().context,
     reconciler: () => windowState().reconciler,
@@ -997,9 +995,6 @@ function sessionActionsDeps(): SessionActionsDeps<TabState> {
     forgetTurnActivity,
     brokerClient,
     attachBrokerClient,
-    brokerProvenanceFor,
-    recordedHostStopPort: (expectedSlot, expectedBroker = null) =>
-      createRecordedHostStopPort({ brokerProvenanceFor, attachBrokerClient, log }, expectedSlot, expectedBroker),
     ensureCatalogReady,
     adoptCatalogChanges,
     showWarningMessage: (message, options, ...items) => vscode.window.showWarningMessage(message, options, ...items),
@@ -1479,7 +1474,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       return null;
     },
     // Unreadable provenance proves no ownership; the user's actions remain available.
-    brokerProvenance: request => windowState().sessionActions.brokerProvenanceFor(request.entry.tabId),
+    brokerProvenance: request => windowState().sessionRuntime.brokerProvenance(request.entry.tabId),
     // Proves one rpc row's recorded child from a read-only broker attachment.
     probeRpc: async (slot, expected, kind) => {
       const client = await attachBrokerClient();
@@ -2990,7 +2985,7 @@ async function openTabOnce(
   let stoppedForOpen = false;
   const recorded = index.get(tabId);
   if (intent === "explicit" && stateOf(tabId)?.runtime == null && recorded?.host != null && !isManagedHost(recorded.host) && (verb === "resumed" || verb === "opened")) {
-    const pid = await s.sessionActions.verifiedOwnedWriterPid(index, tabId);
+    const pid = await s.sessionRuntime.verifiedWriterPid(tabId);
     if (pid !== null) {
       const label = "Stop and Open";
       const choice = await vscode.window.showWarningMessage(
@@ -3113,6 +3108,22 @@ function sessionRuntimeDeps(index: SessionIndex, chat: ChatRuntime): LocalSessio
     index, window: nativeWatchWindow(index), control, exit, identity,
     reconciler: () => windowState().reconciler, brokerSlots: () => windowState().brokerSlots, log,
   });
+  const brokerProvenance = (conversation: string): BrokerSlotProvenance => readBrokerProvenance({
+    brokerSlots: windowState().brokerSlots,
+    slotsForConversation: id => index.slotsForConversation(id),
+  }, conversation);
+  const writer = new LocalWriterVerifier({
+    index, reconciler: () => windowState().reconciler,
+    window: {
+      runtimePid: conversation => stateOf(conversation)?.runtime?.pid ?? null,
+      holderMayBeAlive: (claim, display) => display ? holderSeemsAlive(claim, windowState().routing.registry()) : claimHolderMayBeAlive(claim),
+    },
+  });
+  const recorded = new LocalRecordedStop({
+    index, writer, control, brokerSlots: () => windowState().brokerSlots,
+    window: { forgetOutcome: conversation => { windowState().outcomes.delete(conversation); } },
+    stopPort: (slot, expectedBroker) => createRecordedHostStopPort({ brokerProvenanceFor: brokerProvenance, attachBrokerClient, log }, slot, expectedBroker),
+  });
   return {
     index,
     reconciler: () => windowState().reconciler,
@@ -3121,7 +3132,7 @@ function sessionRuntimeDeps(index: SessionIndex, chat: ChatRuntime): LocalSessio
       if (context === undefined) throw new Error("The session runtime was used before activation.");
       return localLauncher(context, index);
     },
-    chat, stop, control, identity, nativeWatch, exit,
+    chat, stop, control, identity, nativeWatch, exit, writer, recorded, brokerProvenance,
     kill: new LocalKill({ index, control, window: killWindow(index), attachBrokerClient, brokerSlots: () => windowState().brokerSlots, log }),
   };
 }
@@ -7329,7 +7340,7 @@ async function launcherOwnershipFacts(index: SessionIndex, tabId: string, option
   const heldElsewhere = claim !== null && claim.verifiable && claim.holderId !== null &&
     claim.holderId !== index.claimHolder.id && await holderSeemsAlive(claim, s.routing.registry());
   const heldHere = claim !== null && claim.holderId === index.claimHolder.id && await claimHolderMayBeAlive(claim);
-  const pid = await s.sessionActions.verifiedOwnedWriterPid(index, tabId, { display: true });
+  const pid = await s.sessionRuntime.verifiedWriterPid(tabId, { display: true });
   const sessionFile = index.get(tabId)?.sessionFile ?? null;
   const externalOmp = !heldElsewhere && !heldHere && pid === null && sessionFile !== null && s.externalLeases !== null &&
     await s.externalLeases.holds(sessionFile, options) === true;
@@ -8619,6 +8630,7 @@ function messageOf(error: unknown): string {
 }
 
 setProcessProbeObserver(probe => windowTiming("process start time read", `pid ${probe.pid} ${probe.purpose} ${probe.ms} ms found=${probe.found}`));
+setToolSpawnObserver(spawn => log(formatToolSpawn(spawn)));
 
 /** One line of the hand-over timeline between windows (ADR-0056/0057); every line carries the log's own millisecond stamp. */
 function windowTiming(event: string, detail = ""): void {
@@ -9929,7 +9941,7 @@ async function renameStoppedSession(
     if (proposed === undefined) return;
     await index.lifecycle.run(tabId, async () => {
       const observed = await index.observeOwnership(tabId);
-      if ((observed.ok && observed.claim !== null && observed.claim.holderId !== index.claimHolder.id && await claimHolderMayBeAlive(observed.claim)) || await windowState().sessionActions.verifiedOwnedWriterPid(index, tabId) !== null) {
+      if ((observed.ok && observed.claim !== null && observed.claim.holderId !== index.claimHolder.id && await claimHolderMayBeAlive(observed.claim)) || await windowState().sessionRuntime.verifiedWriterPid(tabId) !== null) {
         showWarning("This session is running in another editor. Rename it there.");
         return;
       }
@@ -9998,7 +10010,7 @@ async function renameStoppedSession(
   }
   try {
     const observed = await index.observeOwnership(tabId);
-    if ((observed.ok && observed.claim !== null && observed.claim.holderId !== index.claimHolder.id && await claimHolderMayBeAlive(observed.claim)) || await windowState().sessionActions.verifiedOwnedWriterPid(index, tabId) !== null) {
+    if ((observed.ok && observed.claim !== null && observed.claim.holderId !== index.claimHolder.id && await claimHolderMayBeAlive(observed.claim)) || await windowState().sessionRuntime.verifiedWriterPid(tabId) !== null) {
       showError("This session is running in another editor. Stop it before renaming its saved conversation.");
       return;
     }
@@ -10082,7 +10094,7 @@ async function renameSession(context: vscode.ExtensionContext, index: SessionInd
   }
   // A live row this window does not drive yet (a verified survivor) is renamed through its own
   // process, exactly as Reload reattaches it first; the stopped-title path refuses a live writer.
-  if (nativeState?.runtime == null && s.sessionRuntime.sessionOf(tabId) === null && entry.sessionFile !== null && await s.sessionActions.verifiedOwnedWriterPid(index, tabId) !== null) {
+  if (nativeState?.runtime == null && s.sessionRuntime.sessionOf(tabId) === null && entry.sessionFile !== null && await s.sessionRuntime.verifiedWriterPid(tabId) !== null) {
     await openTab(context, index, tabId, "opened", "restored");
     if (stateOf(tabId)?.runtime == null) {
       showWarning("The exact live editor could not be reattached. Nothing was renamed; no replacement was started.");
@@ -10280,7 +10292,7 @@ async function reloadSession(context: vscode.ExtensionContext, index: SessionInd
   if (stateOf(target.tabId)?.panel === null) await reviveEditorPanel(index, target.tabId);
   let state = stateOf(target.tabId);
   if (state?.runtime == null) {
-    const pid = await windowState().sessionActions.verifiedOwnedWriterPid(index, target.tabId);
+    const pid = await windowState().sessionRuntime.verifiedWriterPid(target.tabId);
     if (pid === null) { showInfo("That session is stopped. Use Resume to start it again."); return; }
     await openTab(context, index, target.tabId, "opened", "restored");
     state = stateOf(target.tabId);

@@ -9,19 +9,22 @@
  * `docs/designs/2026-10-13-session-runtime-port.md` §2.5; `SessionRuntime` itself exposes no lease.
  */
 import type { OwnerReconciler } from "../host/session-availability.ts";
+import type { BrokerSlotProvenance } from "../host/broker-slots.ts";
 import type { OmpHostLauncher, RestoreOutcome, RestoreReport, SessionIndex } from "../host/session-index.ts";
 import type { SessionViewMode } from "../host/session-model.ts";
 import type { TabLifecycleLease } from "../host/tab-lifecycle.ts";
 import type { SessionHostRuntime, SessionTransitionFacts } from "../host/native-session.ts";
 import type { NativeStopVerdict } from "../host/rpc-reconcile.ts";
 import type { StopOperations, StopRecord } from "./local-stop.ts";
-import type { OpenRequest, ReattachRequest, RestorePassRequest, RuntimeHolder, SessionRuntime } from "./session-runtime.ts";
+import type { OpenRequest, ReattachRequest, RestorePassRequest, RuntimeHolder, SessionRuntime, StopRecordedOutcome, StopRecordedRequest } from "./session-runtime.ts";
 import type { LocalHostControl } from "./local-control.ts";
 import type { LocalExitOperations } from "./local-exit.ts";
 import type { LocalIdentity } from "./local-identity.ts";
 import type { LocalKill } from "./local-kill.ts";
 import type { KillSelection } from "../host/session-kill.ts";
 import type { LocalNativeWatch } from "./local-native-watch.ts";
+import type { RecordedStopOperations } from "./local-recorded-stop.ts";
+import type { LocalWriterVerifier } from "./local-writer.ts";
 import { LocalConversations } from "./local-conversations.ts";
 import type { ChatRuntime } from "../host/chat-runtime.ts";
 import type { RpcSession } from "../host/rpc/session.ts";
@@ -39,6 +42,10 @@ export interface LocalSessionRuntimeDeps {
 	readonly nativeWatch: LocalNativeWatch;
 	readonly exit: LocalExitOperations;
 	readonly kill: LocalKill;
+	readonly recorded: RecordedStopOperations;
+	readonly writer: Pick<LocalWriterVerifier, "pid">;
+	/** The row's durable broker slot, read losslessly at call time. */
+	readonly brokerProvenance: (conversation: string) => BrokerSlotProvenance;
 }
 
 /**
@@ -115,6 +122,18 @@ export class LocalSessionRuntime implements SessionRuntime {
 
 	kill(selection: KillSelection): Promise<void> {
 		return this.#deps.kill.kill(selection);
+	}
+
+	stopRecorded(request: StopRecordedRequest): Promise<StopRecordedOutcome> {
+		return this.#deps.recorded.stopRecorded(request);
+	}
+
+	verifiedWriterPid(conversation: string, options?: { readonly display?: boolean }): Promise<number | null> {
+		return this.#deps.writer.pid(conversation, options);
+	}
+
+	brokerProvenance(conversation: string): BrokerSlotProvenance {
+		return this.#deps.brokerProvenance(conversation);
 	}
 
 	/**

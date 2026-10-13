@@ -259,10 +259,20 @@ export const harness = {
     const w = fixtureWindow();
     w.context = context;
     w.reconciler = createOwnerReconciler(ports);
-    w.sessionRuntime = new LocalSessionRuntime({ ...sessionRuntimeDeps(w.indexForBridge, w.sessionRuntime.chat), launcher: () => hostLauncher });
+    const runtimeDeps = sessionRuntimeDeps(w.indexForBridge, w.sessionRuntime.chat);
+    // The broker facts of the fixture's rows come in through the runtime's deps, not by reassigning a function of the module.
+    w.sessionRuntime = new LocalSessionRuntime({
+      ...runtimeDeps,
+      launcher: () => hostLauncher,
+      brokerProvenance: () => ({ kind: 'slot', slot: 'host:legacy-fixture' }),
+      recorded: new LocalRecordedStop({
+        index: w.indexForBridge, writer: runtimeDeps.writer, control: runtimeDeps.control, brokerSlots: () => fixtureWindow().brokerSlots,
+        window: { forgetOutcome: conversation => { fixtureWindow().outcomes.delete(conversation); } },
+        stopPort: () => stopPort,
+      }),
+    });
     w.editorPanels = { ...w.editorPanels, openPanel: () => undefined };
-    // The broker facts of the fixture's rows come in through the handle's deps, not by reassigning a function of the module.
-    w.sessionActions = registerSessionActions({ ...sessionActionsDeps(), brokerProvenanceFor: () => ({ kind: 'slot', slot: 'host:legacy-fixture' }), recordedHostStopPort: () => stopPort });
+    w.sessionActions = registerSessionActions(sessionActionsDeps());
     const dialogs = [];
     fixtureVscode.window.showWarningMessage = async (message, options, action) => { dialogs.push({ message, detail: options?.detail, action }); return action; };
     fixtureVscode.window.showInputBox = async () => "Recovered draft title";

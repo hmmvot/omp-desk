@@ -17,6 +17,8 @@ import type { NavigateOutcome, NavigateRequest } from "../host/rpc/session.ts";
 import type { ChatStatePayload } from "../chat/model.ts";
 import type { ChatWebviewMessage } from "../protocol/chat-messages.ts";
 import type { KillSelection } from "../host/session-kill.ts";
+import type { BrokerSlotProvenance } from "../host/broker-slots.ts";
+import type { StopRecordedHostResult } from "../host/session-availability.ts";
 
 /** Who acts. Fixed when the runtime is constructed; never a per-call argument. */
 export interface RuntimeHolder {
@@ -55,6 +57,27 @@ export interface ReattachRequest {
 	readonly conversation: string;
 }
 
+/**
+ * Stop the recorded host of a conversation this window does not drive (a survivor of an earlier extension host, an
+ * owned writer the window never adopted). The target is named by what the caller's confirmation was shown: the slot
+ * and, when it was shown one, the broker, and the attempt the row records; the index refuses when any of them
+ * changed. `expectedWriter` is the pid the caller verified: the operation checks it under the gate and ends nothing
+ * else.
+ */
+export interface StopRecordedRequest {
+	readonly conversation: string;
+	readonly slot: string;
+	readonly broker: { readonly brokerId: string; readonly brokerGeneration: string } | null;
+	readonly expect: { readonly attemptStartedAt: string; readonly pid: number | null };
+	readonly expectedWriter?: { readonly pid: number };
+}
+
+/** `writer-gone`: nothing owned serves the conversation any more, which is the state the caller wanted. `writer-changed`: another writer does; nothing was stopped. */
+export type StopRecordedOutcome =
+	| { readonly kind: "result"; readonly result: StopRecordedHostResult }
+	| { readonly kind: "writer-gone" }
+	| { readonly kind: "writer-changed" };
+
 export interface SessionRuntime {
 	readonly conversations: ConversationPort;
 	readonly holder: RuntimeHolder;
@@ -71,6 +94,19 @@ export interface SessionRuntime {
 	 * recorded process was proven gone, record it as stopped. Reports through the window's notices; never throws.
 	 */
 	kill(selection: KillSelection): Promise<void>;
+	/**
+	 * Stop a recorded host this window does not drive, under the conversation's gate; a stop that happened also
+	 * retires the slot and the recorded owner's credentials and drops the window's remembered outcome.
+	 */
+	stopRecorded(request: StopRecordedRequest): Promise<StopRecordedOutcome>;
+	/**
+	 * The pid of the writer this window can positively verify for a conversation (its own runtime, or an owned
+	 * process the reconciler proves), or `null`. A recorded pid is never evidence by itself. `display` is the weaker
+	 * liveness read a row's label uses for a rival claim.
+	 */
+	verifiedWriterPid(conversation: string, options?: { readonly display?: boolean }): Promise<number | null>;
+	/** Where the durable broker slot of a conversation is recorded; an unreadable table is uncertainty, never `none`. */
+	brokerProvenance(conversation: string): BrokerSlotProvenance;
 }
 
 /** Show a stopped, blocked or resyncing session's history read-only. Never claims, launches or writes. */

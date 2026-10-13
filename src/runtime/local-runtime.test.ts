@@ -11,7 +11,7 @@ import type { OmpHostAttachRequest, OmpHostLauncher, RestoreOutcome, RestoreOpti
 import type { OwnerReconciler } from "../host/session-availability.ts";
 import type { TabLifecycleLease } from "../host/tab-lifecycle.ts";
 import { LocalSessionRuntime } from "./local-runtime.ts";
-import type { SessionRuntime } from "./session-runtime.ts";
+import type { SessionRuntime, StopRecordedRequest } from "./session-runtime.ts";
 
 const TAB = "tab:one";
 const restored: RestoreOutcome = { status: "attached", tabId: TAB, sessionFile: "s.jsonl", detail: "attached" };
@@ -21,10 +21,13 @@ interface Calls {
 	restoreAll: RestoreAllOptions[];
 	replaceHost: [string, Record<string, unknown>, TabLifecycleLease][];
 	observed: string[];
+	stopRecorded: StopRecordedRequest[];
+	writer: [string, { readonly display?: boolean } | undefined][];
+	provenance: string[];
 }
 
 function fixture(overrides: { entry?: unknown; verdict?: { kind: string }; restore?: () => Promise<RestoreOutcome> } = {}) {
-	const calls: Calls = { restore: [], restoreAll: [], replaceHost: [], observed: [] };
+	const calls: Calls = { restore: [], restoreAll: [], replaceHost: [], observed: [], stopRecorded: [], writer: [], provenance: [] };
 	const report = { order: [TAB], restored: [], attached: [], conflicts: [], failures: [], drafts: [], stopped: [], skipped: [], activeTabId: null, persistError: null } as RestoreReport;
 	const entry = "entry" in overrides ? overrides.entry : { tabId: TAB, sessionFile: "s.jsonl", host: { transport: "native" }, ownership: { ownerGeneration: "gen-1", draftIdentity: null } };
 	const index = {
@@ -49,6 +52,9 @@ function fixture(overrides: { entry?: unknown; verdict?: { kind: string }; resto
 		launcher: () => { launcherReads++; return hostLauncher; },
 		stop: { requestStop: async () => ({ writerGone: true, treeEmpty: true, detail: "fixture" }), confirmEnded: async () => null, awaitSettled: async () => null, readTransitionFacts: async () => null },
 		chat: {} as never, control: {} as never, identity: {} as never, nativeWatch: {} as never, exit: {} as never, kill: {} as never,
+		recorded: { stopRecorded: async request => { calls.stopRecorded.push(request); return { kind: "writer-gone" }; } },
+		writer: { pid: async (conversation, options) => { calls.writer.push([conversation, options]); return 4321; } },
+		brokerProvenance: conversation => { calls.provenance.push(conversation); return { kind: "none" }; },
 	});
 	return { runtime, calls, report, hostLauncher, reconciler, attached, launches, launcherReads: () => launcherReads };
 }
@@ -155,6 +161,19 @@ describe("reattach", () => {
 		const outcome = await f.runtime.reattach({ conversation: TAB });
 		assert.equal(outcome.status, "skipped");
 		assert.deepEqual(f.calls.restore, []);
+	});
+});
+
+describe("what the runtime delegates to its own services", () => {
+	it("stops a recorded host, verifies a writer and reads a broker provenance through them", async () => {
+		const f = fixture();
+		const request = { conversation: TAB, slot: "host:a", broker: null, expect: { attemptStartedAt: "t", pid: 1 } };
+		assert.deepEqual(await f.runtime.stopRecorded(request), { kind: "writer-gone" });
+		assert.deepEqual(f.calls.stopRecorded, [request]);
+		assert.equal(await f.runtime.verifiedWriterPid(TAB, { display: true }), 4321);
+		assert.deepEqual(f.calls.writer, [[TAB, { display: true }]]);
+		assert.deepEqual(f.runtime.brokerProvenance(TAB), { kind: "none" });
+		assert.deepEqual(f.calls.provenance, [TAB]);
 	});
 });
 

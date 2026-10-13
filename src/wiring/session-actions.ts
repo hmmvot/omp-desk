@@ -12,23 +12,20 @@
 
 import * as path from "node:path";
 import * as vscode from "vscode";
-import type { BrokerSlotProvenance, BrokerSlotStore } from "../host/broker-slots.ts";
+import type { BrokerSlotStore } from "../host/broker-slots.ts";
 import type { DetailTabs } from "../host/detail-tabs.ts";
 import type { EditorCoordinator } from "../host/editor-coordinator.ts";
 import type { EditorSlotRegistry } from "../host/editor-slots.ts";
 import type { SessionHostRuntime, SessionTransitionFacts } from "../host/native-session.ts";
 import type { PtyBrokerClient } from "../host/pty-client.ts";
-import { stopBrokerOwnedHost } from "../host/rpc-reconcile.ts";
 import type { NativeStopVerdict } from "../host/rpc-reconcile.ts";
-import { holderSeemsAlive } from "../host/holder-liveness.ts";
-import { claimHolderMayBeAlive } from "../host/session-claim.ts";
 import { readSessionFileHeader } from "../host/session-files.ts";
 import type { RestoreOutcome, SessionIndex } from "../host/session-index.ts";
 import type { SessionRuntime } from "../runtime/session-runtime.ts";
 import type { KillSelection } from "../host/session-kill.ts";
 import { confirmedSessionDeletion, deleteManagedSession, inspectSessionDeletion } from "../host/session-lifecycle.ts";
 import type { SessionDeletionOptions, SessionDeletionResult, SessionDeletionSubject } from "../host/session-lifecycle.ts";
-import type { OwnerReconciler, RecordedHostStopPort } from "../host/session-availability.ts";
+import type { OwnerReconciler } from "../host/session-availability.ts";
 import { isManagedHost } from "../host/session-model.ts";
 import type { SessionIndexEntry } from "../host/session-model.ts";
 import type { ShellExitWatchStop } from "../host/shell-exit.ts";
@@ -162,14 +159,6 @@ export interface SessionBrokerPort {
 	brokerClient(): Promise<PtyBrokerClient | null>;
 	/** The broker client for re-adopting an already-running broker. */
 	attachBrokerClient(): Promise<PtyBrokerClient | null>;
-	/** The broker provenance recorded for one row, without loss ({@link readBrokerProvenance}). */
-	brokerProvenanceFor(tabId: string): BrokerSlotProvenance;
-	/** The transport the index stops a recorded host this window does not run through ({@link createRecordedHostStopPort}). */
-	recordedHostStopPort(
-		expectedSlot: string,
-		/** The broker the caller bound the stop to, when it was shown one: the row's recorded identity must still be it. */
-		expectedBroker?: { readonly brokerId: string; readonly brokerGeneration: string } | null,
-	): RecordedHostStopPort;
 }
 
 /** The profile catalog. */
@@ -245,31 +234,14 @@ export interface SessionActions {
 	refresh(index: SessionIndex): void;
 	/** Register the background processes of the Sessions view and the Stats dashboard. */
 	setupProcesses(context: vscode.ExtensionContext, index: SessionIndex, folders: LauncherFolders): void;
-	/** A current owned-writer witness, never a recorded pid by itself. */
-	verifiedOwnedWriterPid(index: SessionIndex, tabId: string, options?: { readonly display?: boolean }): Promise<number | null>;
 	/** Stop the positively verified target after its caller's one confirmation. */
 	stopVerifiedOwnedWriter(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, pid: number): Promise<boolean>;
-	/** The broker provenance recorded for one row, without loss. */
-	brokerProvenanceFor(tabId: string): BrokerSlotProvenance;
 	/** Report a folder-list change that could not be saved. */
 	reportFolderSaveFailure(folders: LauncherFolders): void;
 }
 
 function messageOf(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
-}
-
-/** What {@link createRecordedHostStopPort} reads of the extension. */
-export interface RecordedHostStopPorts {
-	brokerProvenanceFor(tabId: string): BrokerSlotProvenance;
-	attachBrokerClient(): Promise<PtyBrokerClient | null>;
-	log(message: string): void;
-}
-
-/** What {@link readBrokerProvenance} reads of the window: the slot table and the editor slots a conversation is shown in. */
-export interface BrokerProvenanceSources {
-	brokerSlots: BrokerSlotStore | undefined;
-	slotsForConversation(tabId: string): readonly { readonly role: string; readonly slotId: string }[];
 }
 
 export function registerSessionActions<Tab extends SessionTab>(deps: SessionActionsDeps<Tab>): SessionActions {
@@ -453,7 +425,7 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 		// The transport has to exist before anything is confirmed: this row's own recorded
 		// broker slot is the only thing that can name the child, and a mapping that cannot
 		// be read is uncertainty, never "nothing was launched".
-		const provenance = deps.brokerProvenanceFor(tabId);
+		const provenance = deps.sessionRuntime().brokerProvenance(tabId);
 		if (provenance.kind !== "slot") {
 			deps.warn(
 				provenance.kind === "none"
@@ -491,22 +463,16 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 		deps.stoppingTabs().add(tabId);
 		deps.refreshLauncher();
 		try {
-			const result = await index.lifecycle.run(tabId, async lease => {
-				const stopped = await index.stopRecordedHost(tabId, {
-					stop: deps.recordedHostStopPort(provenance.slot, rpc === null ? null : { brokerId: rpc.brokerId, brokerGeneration: rpc.brokerGeneration }),
-					expect,
-				}, lease);
-				// Retire the exact slot and credentials before a queued Resume can provision
-				// a replacement; uncertainty never deletes the recorded proof.
-				if (stopped.slot !== null && stopped.stopped) {
-					await deps.brokerSlots()?.forget(stopped.slot).catch(() => undefined);
-					deps.outcomes().delete(tabId);
-					await deps.releaseHostControl(tabId, deps.recordedControlOwner(entry));
-				}
-				return stopped;
+			const outcome = await deps.sessionRuntime().stopRecorded({
+				conversation: tabId,
+				slot: provenance.slot,
+				broker: rpc === null ? null : { brokerId: rpc.brokerId, brokerGeneration: rpc.brokerGeneration },
+				expect,
 			});
-			if (!result.stopped) {
-				deps.warn(result.detail);
+			// An outcome without a result needs a writer check, which this stop asks none of.
+			if (outcome.kind !== "result") return false;
+			if (!outcome.result.stopped) {
+				deps.warn(outcome.result.detail);
 				return false;
 			}
 			return true;
@@ -555,7 +521,7 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 			client: deps.attachBrokerClient,
 			sessionRows: () => index.list().map(entry => {
 				const facts = deps.facts(entry.tabId);
-				const provenance = entry.host === null ? null : deps.brokerProvenanceFor(entry.tabId);
+				const provenance = entry.host === null ? null : deps.sessionRuntime().brokerProvenance(entry.tabId);
 				const recorded = entry.host === null
 					? null
 					: (isManagedHost(entry.host) ? entry.host.rpc?.slot ?? null : null) ?? (provenance?.kind === "slot" ? provenance.slot : null);
@@ -637,7 +603,7 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 				const tabId = row.host?.kind === "session" ? row.host.tabId : null;
 				const entry = tabId === null ? null : index.get(tabId);
 				if (tabId === null || entry === null || entry.host === null) return null;
-				const provenance = deps.brokerProvenanceFor(tabId);
+				const provenance = deps.sessionRuntime().brokerProvenance(tabId);
 				const rpc = isManagedHost(entry.host) ? entry.host.rpc ?? null : null;
 				// The stop binds to the exact slot and broker the row was derived from; a native row is
 				// reattached first by the row's own flow, which holds the same binding.
@@ -665,29 +631,43 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 		if (runtime?.kind === "terminal") await deps.reconnectHostControl(tabId, index.get(tabId)?.ownership?.ownerGeneration ?? "", runtime);
 	}
 
-	/** A current owned-writer witness, never a recorded pid by itself. */
-	async function verifiedOwnedWriterPid(index: SessionIndex, tabId: string, options: { readonly display?: boolean } = {}): Promise<number | null> {
-		const runtime = deps.tab(tabId)?.runtime ?? null;
-		if (runtime !== null) return runtime.pid;
-		const entry = index.get(tabId);
-		if (entry === null) return null;
-		const observed = await index.observeOwnership(tabId);
-		if (observed.ok && observed.claim !== null && observed.claim.holderId !== index.claimHolder.id &&
-			(options.display === true ? await holderSeemsAlive(observed.claim, deps.routing().registry()) : await claimHolderMayBeAlive(observed.claim))) return null;
-		const verdict = await deps.reconciler().reconcile({
-			entry, sessionFile: entry.sessionFile, draftIdentity: entry.ownership?.draftIdentity ?? null,
-			ownerGeneration: entry.ownership?.ownerGeneration ?? "", claim: observed.ok ? observed.claim : null, host: entry.host,
-		}).catch(() => ({ kind: "free" as const, evidence: [] }));
-		return verdict.kind === "attachable" ? verdict.host.pid : verdict.kind === "live" ? verdict.pid ?? entry.host?.pid ?? null : null;
-	}
-
 	/** Stop the positively verified target after its caller's one confirmation. */
 	async function stopVerifiedOwnedWriter(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, pid: number, captured?: CapturedSessionStop<Tab>): Promise<boolean> {
+		const runtime = deps.sessionRuntime();
 		deps.stoppingTabs().add(tabId);
 		deps.refreshLauncher();
 		try {
+			const state = deps.tab(tabId);
+			const held = state?.runtime ?? null;
+			if (held === null || state === undefined) {
+				if (captured !== undefined) {
+					deps.warn("The running session changed while confirmation was pending; nothing was stopped. Try again.");
+					return false;
+				}
+				const entry = index.get(tabId);
+				if (entry === null) return true;
+				const provenance = runtime.brokerProvenance(tabId);
+				if (provenance.kind !== "slot" || entry.host === null) return await runtime.verifiedWriterPid(tabId) === null;
+				const outcome = await runtime.stopRecorded({
+					conversation: tabId,
+					slot: provenance.slot,
+					broker: null,
+					expect: { attemptStartedAt: entry.host.startedAt, pid: entry.host.pid },
+					expectedWriter: { pid },
+				});
+				if (outcome.kind === "writer-gone") return true;
+				if (outcome.kind === "writer-changed") {
+					deps.warn("The running OMP target changed; nothing was stopped.");
+					return false;
+				}
+				if (!outcome.result.stopped) {
+					deps.warn(outcome.result.detail);
+					return await runtime.verifiedWriterPid(tabId) === null;
+				}
+				return true;
+			}
 			return await index.lifecycle.run(tabId, async lease => {
-				const currentPid = await verifiedOwnedWriterPid(index, tabId);
+				const currentPid = await runtime.verifiedWriterPid(tabId);
 				if (currentPid !== pid) {
 					if (currentPid === null) return true;
 					deps.warn("The running OMP target changed; nothing was stopped.");
@@ -695,42 +675,27 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 				}
 				const entry = index.get(tabId);
 				if (entry === null) return false;
-				const state = deps.tab(tabId);
-				const runtime = state?.runtime ?? null;
-				if (captured !== undefined && (state !== captured.state || runtime !== captured.runtime)) {
+				const live = state.runtime;
+				if (live === null || (captured !== undefined && (state !== captured.state || live !== captured.runtime))) {
 					deps.warn("The running session changed while confirmation was pending; nothing was stopped. Try again.");
 					return false;
 				}
-				if (runtime !== null && state !== undefined) {
-					await index.setRunIntent(tabId, "stopped", "Stop requested before continuing the user's action.");
-					const stopped = await deps.stopSessionRuntime(state, runtime, "graceful", true, captured?.facts);
-					deps.log(`session stop ${tabId}: ${stopped.diagnosticDetail ?? stopped.detail}`);
-					if (!stopped.writerGone) {
-						deps.warn(stopped.detail);
-						return false;
-					}
-					state.runtime = null;
-					deps.stopTerminalForTab(state.slotId);
-					state.nativeWatch?.();
-					state.nativeWatch = null;
-					deps.disposeControlChannel(state);
-					await index.setRunIntent(tabId, "stopped", stopped.detail);
-					await index.closeSession(tabId, { confirmedStopped: true, detail: stopped.detail }, lease);
-					await deps.retireBroker(tabId, runtime);
-				} else {
-					const provenance = deps.brokerProvenanceFor(tabId);
-					if (provenance.kind !== "slot" || entry.host === null) return false;
-					const stopped = await index.stopRecordedHost(tabId, {
-						stop: deps.recordedHostStopPort(provenance.slot),
-						expect: { attemptStartedAt: entry.host.startedAt, pid: entry.host.pid },
-					}, lease);
-					if (!stopped.stopped) {
-						deps.warn(stopped.detail);
-						return await verifiedOwnedWriterPid(index, tabId) === null;
-					}
-					if (stopped.slot !== null) await deps.brokerSlots()?.forget(stopped.slot).catch(() => undefined);
+				await index.setRunIntent(tabId, "stopped", "Stop requested before continuing the user's action.");
+				const stopped = await deps.stopSessionRuntime(state, live, "graceful", true, captured?.facts);
+				deps.log(`session stop ${tabId}: ${stopped.diagnosticDetail ?? stopped.detail}`);
+				if (!stopped.writerGone) {
+					deps.warn(stopped.detail);
+					return false;
 				}
-				await deps.releaseHostControl(tabId, runtime === null ? deps.recordedControlOwner(entry) : deps.controlOwnerFor(runtime, entry.ownership?.ownerGeneration ?? ""));
+				state.runtime = null;
+				deps.stopTerminalForTab(state.slotId);
+				state.nativeWatch?.();
+				state.nativeWatch = null;
+				deps.disposeControlChannel(state);
+				await index.setRunIntent(tabId, "stopped", stopped.detail);
+				await index.closeSession(tabId, { confirmedStopped: true, detail: stopped.detail }, lease);
+				await deps.retireBroker(tabId, live);
+				await deps.releaseHostControl(tabId, deps.controlOwnerFor(live, entry.ownership?.ownerGeneration ?? ""));
 				deps.outcomes().delete(tabId);
 				return true;
 			});
@@ -781,7 +746,7 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 			const activation = deps.context();
 			if (tabId !== null && activation !== undefined && deps.tab(tabId)?.runtime == null && index.get(tabId)?.host?.transport === "native") {
 				await reattachNativeForLifecycle(activation, index, tabId);
-				if (deps.tab(tabId)?.runtime == null && await verifiedOwnedWriterPid(index, tabId) !== null) {
+				if (deps.tab(tabId)?.runtime == null && await deps.sessionRuntime().verifiedWriterPid(tabId) !== null) {
 					deps.warn("The running session could not be reconnected; nothing was deleted.");
 					return false;
 				}
@@ -817,7 +782,7 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 			windowHostRunning: (id: string) => deps.facts(id).running,
 		};
 		const tabId = typeof subject === "string" && index.get(subject) !== null ? subject : null;
-		const writerPid = tabId === null ? null : await deps.withSessionReadDeadline(verifiedOwnedWriterPid(index, tabId), 5_000);
+		const writerPid = tabId === null ? null : await deps.withSessionReadDeadline(deps.sessionRuntime().verifiedWriterPid(tabId), 5_000);
 		let inspection = await deps.withSessionReadDeadline(inspectSessionDeletion(subject, writerPid === null ? options : {
 			...options, windowHostRunning: () => false,
 			reconciler: { reconcile: async () => ({ kind: "free", evidence: [] }) },
@@ -958,107 +923,7 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 		confirmAndDelete: confirmAndDeleteSession,
 		refresh: refreshSessions,
 		setupProcesses: setupSessionProcesses,
-		verifiedOwnedWriterPid,
 		stopVerifiedOwnedWriter: (context, index, tabId, pid) => stopVerifiedOwnedWriter(context, index, tabId, pid),
-		brokerProvenanceFor: tabId => deps.brokerProvenanceFor(tabId),
 		reportFolderSaveFailure,
 	};
-}
-
-/**
- * The transport the index uses to stop a recorded host this window does not run.
- *
- * The row's durable broker slot is resolved here, losslessly
- * ({@link readBrokerProvenance}), because the index owns the policy and never reads
- * the slot table itself. Every refusal is bounded text; nothing is signalled by pid.
- */
-export function createRecordedHostStopPort(
-	ports: RecordedHostStopPorts,
-	expectedSlot: string,
-	/** The broker the caller bound the stop to, when it was shown one: the row's recorded identity must still be it. */
-	expectedBroker: { readonly brokerId: string; readonly brokerGeneration: string } | null = null,
-): RecordedHostStopPort {
-	return {
-		async stopRecordedHost(entry) {
-			const provenance = ports.brokerProvenanceFor(entry.tabId);
-			const recordedRpc = entry.host !== null && isManagedHost(entry.host) ? entry.host.rpc ?? null : null;
-			if (
-				(provenance.kind === "slot" && provenance.slot !== expectedSlot) ||
-				(expectedBroker !== null && (recordedRpc === null || recordedRpc.brokerId !== expectedBroker.brokerId || recordedRpc.brokerGeneration !== expectedBroker.brokerGeneration))
-			) {
-				return {
-					kind: "unknown",
-					detail:
-						"This session changed while the confirmation was open. Nothing was stopped; try Stop again.",
-				};
-			}
-			if (provenance.kind === "unreadable") {
-				return {
-					kind: "unknown",
-					detail: "This session's connection details could not be read. Refresh Sessions and try again.",
-				};
-			}
-			if (provenance.kind === "none") {
-				return {
-					kind: "unknown",
-					detail:
-						"This session's connection details are missing. Reopen its editor and try Stop again.",
-				};
-			}
-			const client = await ports.attachBrokerClient();
-			if (client === null) {
-				return { kind: "unknown", detail: "This session is disconnected. Reopen its editor and try Stop again." };
-			}
-			if (entry.host?.transport === "native") {
-				return { kind: "unknown", detail: "Stop this session from its Terminal editor, or use /exit there." };
-			}
-			const stopped = await stopBrokerOwnedHost({
-				client,
-				slot: provenance.slot,
-				recordedPid: entry.host?.pid ?? null,
-				expected: entry.host !== null && isManagedHost(entry.host) ? (entry.host.rpc ?? null) : null,
-			});
-			if (!stopped.ok) {
-				ports.log(`recorded host stop ${entry.tabId}: ${stopped.reason}`);
-				return {
-					kind: "unknown",
-					// A refusal that never dispatched proves nothing was stopped. One that did is
-					// unconfirmed: the recorded process may have stopped or may still be running.
-					detail: stopped.dispatched
-						? "The session could not be confirmed stopped. Refresh Sessions before resuming; see OMP Desk output for details."
-						: "This window could not reach the session safely. Nothing was stopped; refresh Sessions and try again.",
-				};
-			}
-			ports.log(`recorded host stop ${entry.tabId}: ${stopped.verdict.diagnosticDetail ?? stopped.verdict.detail}`);
-			return {
-				kind: "stopped",
-				writerGone: stopped.verdict.writerGone,
-				treeEmpty: stopped.verdict.treeEmpty,
-				detail: stopped.verdict.detail,
-				slot: provenance.slot,
-			};
-		},
-	};
-}
-
-/**
- * The broker provenance recorded for one row, without loss.
- *
- * {@link BrokerSlotStore.forConversation} cannot distinguish "this row recorded no
- * slot" from "the mapping could not be read", and both the reconciler's probe and the
- * explicit stop decide whether a writer may exist, so they ask this instead: an
- * unreadable table or entry is uncertainty, never "nothing was launched".
- */
-export function readBrokerProvenance(sources: BrokerProvenanceSources, tabId: string): BrokerSlotProvenance {
-	if (sources.brokerSlots === undefined) return { kind: "unreadable" };
-	const byConversation = sources.brokerSlots.provenanceFor({ conversation: tabId });
-	if (byConversation.kind !== "none") return byConversation;
-	let unreadable = false;
-	for (const binding of sources.slotsForConversation(tabId)) {
-		if (binding.role !== "controlling") continue;
-		const byEditor = sources.brokerSlots.provenanceFor({ editor: binding.slotId });
-		if (byEditor.kind === "slot") return byEditor;
-		if (byEditor.kind === "unreadable") unreadable = true;
-	}
-	return unreadable ? { kind: "unreadable" } : { kind: "none" };
 }

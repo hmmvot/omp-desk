@@ -22,6 +22,7 @@ import type { OwnerReconciler, RecordedHostStopPort } from "../host/session-avai
 import type { SessionIndexEntry } from "../host/session-model.ts";
 import { LocalSessionRuntime } from "../runtime/local-runtime.ts";
 import { LocalKill } from "../runtime/local-kill.ts";
+import { LocalWriterVerifier } from "../runtime/local-writer.ts";
 import type { SessionActionsDeps, SessionTab } from "./session-actions.ts";
 
 // The module and the views it imports load the `vscode` specifier; map it before the first import.
@@ -46,11 +47,13 @@ if (typeof module.registerHooks === "function") {
 }
 
 const stub = await import("./vscode-test-stub.ts");
-const { createRecordedHostStopPort, readBrokerProvenance, registerSessionActions } = await import("./session-actions.ts");
+const { registerSessionActions } = await import("./session-actions.ts");
+const { LocalRecordedStop } = await import("../runtime/local-recorded-stop.ts");
+const { holderSeemsAlive } = await import("../host/holder-liveness.ts");
 const { ProcessTreeItem } = await import("../views/process-rows.ts");
 const { SessionTreeItem } = await import("../views/session-tree.ts");
 const { createOwnerReconciler } = await import("../host/rpc-reconcile.ts");
-const { acquireClaim, createClaimHolder } = await import("../host/session-claim.ts");
+const { acquireClaim, claimHolderMayBeAlive, createClaimHolder } = await import("../host/session-claim.ts");
 const { SessionIndex: SessionIndexClass } = await import("../host/session-index.ts");
 
 const TAB = "tab:11111111-2222-4333-8444-555555555555";
@@ -110,7 +113,6 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 	const logged: string[] = [];
 	const opened: unknown[][] = [];
 	const refreshes: unknown[] = [];
-	const released: unknown[][] = [];
 	const forgotten: string[] = [];
 	const editorsReleased: string[] = [];
 	const slotsRemoved: string[] = [];
@@ -123,6 +125,49 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 	const reattached: unknown[][] = [];
 	const shellsAttached: unknown[] = [];
 	const tabsAsked: string[] = [];
+	const provenanceAsked: string[] = [];
+	const released: unknown[][] = [];
+	const control = { release: async (tabId: string, owner: string | null) => { released.push([tabId, owner]); } } as never;
+	const writer = new LocalWriterVerifier({
+		index: index as never, reconciler: () => state.reconciler,
+		window: {
+			runtimePid: tabId => deps.tab(tabId)?.runtime?.pid ?? null,
+			holderMayBeAlive: async (claim, display) => display ? await holderSeemsAlive(claim, state.registry as never) : await claimHolderMayBeAlive(claim),
+		},
+	});
+	const runtime = new LocalSessionRuntime({
+		index: index as never,
+		reconciler: () => state.reconciler,
+		stop: { requestStop: async () => ({ writerGone: true, treeEmpty: true, detail: "fixture" }), confirmEnded: async () => null, awaitSettled: async () => null, readTransitionFacts: async () => null },
+		chat: {} as never, control: {} as never, identity: {} as never, nativeWatch: {} as never, exit: {} as never,
+		writer,
+		brokerProvenance: tabId => { provenanceAsked.push(tabId); return state.provenance; },
+		recorded: new LocalRecordedStop({
+			index: index as never, writer, control, brokerSlots: () => state.brokerSlots,
+			window: { forgetOutcome: tabId => { state.outcomes.delete(tabId); } },
+			stopPort: (...args) => { stopPortRequests.push(args); return state.stopPort as RecordedHostStopPort; },
+		}),
+		kill: new LocalKill({
+			index: index as never,
+			control,
+			window: {
+				runtimeIdentity: tabId => (deps.tab(tabId)?.runtime?.identity ?? null) as never,
+				forgetOutcome: tabId => { state.outcomes.delete(tabId); },
+				readRows: async () => ((await (state.processes as { refresh(): Promise<{ rows: unknown[] }> } | undefined)?.refresh())?.rows ?? []) as never,
+				launcherChanged: () => deps.refreshLauncher(),
+				async refresh() { deps.refreshLauncher({ ownership: true }); await (state.processes as { refresh(): Promise<unknown> } | undefined)?.refresh(); },
+				notice: (_level, text) => { stub.window.notices.push(text); },
+				requester: () => `the Sessions menu of window "${stub.workspace.name ?? "no folder"}" (${(index as SessionIndex).claimHolder.id.slice(0, 8)})`,
+			},
+			attachBrokerClient: async () => null,
+			brokerSlots: () => state.brokerSlots,
+			log: message => { logged.push(message); },
+		}),
+		launcher: () => ({
+			launch: async () => ({ state: "not-started", reason: "fixture" }),
+			attach: async request => { reattached.push([request]); return { state: "unavailable", reason: "fixture" }; },
+		}),
+	});
 	const deps: SessionActionsDeps<SessionTab> = {
 		context: () => state.context,
 		reconciler: () => state.reconciler,
@@ -171,39 +216,12 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 		retireBroker: async () => {},
 		releaseHostControl: async (tabId, owner) => { released.push([tabId, owner]); },
 		reconnectHostControl: async () => {},
-		sessionRuntime: () => new LocalSessionRuntime({
-			index: index as never,
-			reconciler: () => state.reconciler,
-			stop: { requestStop: async () => ({ writerGone: true, treeEmpty: true, detail: "fixture" }), confirmEnded: async () => null, awaitSettled: async () => null, readTransitionFacts: async () => null },
-			chat: {} as never, control: {} as never, identity: {} as never, nativeWatch: {} as never, exit: {} as never,
-			kill: new LocalKill({
-				index: index as never,
-				control: { release: async (tabId: string, owner: string | null) => { released.push([tabId, owner]); } } as never,
-				window: {
-					runtimeIdentity: tabId => (deps.tab(tabId)?.runtime?.identity ?? null) as never,
-					forgetOutcome: tabId => { state.outcomes.delete(tabId); },
-					readRows: async () => ((await (state.processes as { refresh(): Promise<{ rows: unknown[] }> } | undefined)?.refresh())?.rows ?? []) as never,
-					launcherChanged: () => deps.refreshLauncher(),
-					async refresh() { deps.refreshLauncher({ ownership: true }); await (state.processes as { refresh(): Promise<unknown> } | undefined)?.refresh(); },
-					notice: (_level, text) => { stub.window.notices.push(text); },
-					requester: () => `the Sessions menu of window "${stub.workspace.name ?? "no folder"}" (${(index as SessionIndex).claimHolder.id.slice(0, 8)})`,
-				},
-				attachBrokerClient: async () => null,
-				brokerSlots: () => state.brokerSlots,
-				log: message => { logged.push(message); },
-			}),
-			launcher: () => ({
-				launch: async () => ({ state: "not-started", reason: "fixture" }),
-				attach: async request => { reattached.push([request]); return { state: "unavailable", reason: "fixture" }; },
-			}),
-		}),
+		sessionRuntime: () => runtime,
 		recordedControlOwner: entry => entry.ownership?.ownerGeneration ?? null,
 		controlOwnerFor: (_runtime, generation) => generation,
 		forgetTurnActivity: (_index, tabId) => { forgotten.push(tabId); },
 		brokerClient: async () => null,
 		attachBrokerClient: async () => null,
-		brokerProvenanceFor: () => state.provenance,
-		recordedHostStopPort: (...args) => { stopPortRequests.push(args); return state.stopPort as RecordedHostStopPort; },
 		ensureCatalogReady: async () => {},
 		adoptCatalogChanges: async (...args) => { order.push("adopt"); catalogAdoptions.push(args.slice(1)); },
 		showWarningMessage: async (message, options, ...items) => {
@@ -224,7 +242,7 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 	stub.window.notices.length = 0;
 	return {
 		actions, deps, state, index: index as never, dialogs, warnings, infos, errors, logged, opened, refreshes, released, forgotten, editorsReleased, slotsRemoved,
-		conversationsClosed, stopPortRequests, confirmedStops, catalogAdoptions, order, reattached, shellsAttached, tabsAsked, commands: stub.commands.calls, notices: stub.window.notices,
+		conversationsClosed, stopPortRequests, confirmedStops, catalogAdoptions, order, reattached, shellsAttached, tabsAsked, provenanceAsked, commands: stub.commands.calls, notices: stub.window.notices,
 	};
 }
 
@@ -676,18 +694,18 @@ describe("the writer a session row has", () => {
 		const index = fakeIndex([{ tabId: TAB }]);
 		const w = await world(index);
 		w.state.tabs.set("slot-1", tabRecord("slot-1", TAB, { runtime: { pid: 4321 } as unknown as SessionHostRuntime }));
-		assert.equal(await w.actions.verifiedOwnedWriterPid(index, TAB), 4321);
-		assert.equal(await w.actions.verifiedOwnedWriterPid(index, OTHER_TAB), null, "a row the index does not have has no writer");
+		assert.equal(await w.deps.sessionRuntime().verifiedWriterPid(TAB), 4321);
+		assert.equal(await w.deps.sessionRuntime().verifiedWriterPid(OTHER_TAB), null, "a row the index does not have has no writer");
 	});
 
 	it("is the live pid the reconciler proves, never a recorded pid by itself", async () => {
 		const live = await legacyFixture("writer-live", true, true);
 		const dead = await legacyFixture("writer-dead", false, true);
 		try {
-			assert.equal(await live.actions.verifiedOwnedWriterPid(live.index, TAB), 51704);
-			assert.equal(await dead.actions.verifiedOwnedWriterPid(dead.index, TAB), null);
+			assert.equal(await live.deps.sessionRuntime().verifiedWriterPid(TAB), 51704);
+			assert.equal(await dead.deps.sessionRuntime().verifiedWriterPid(TAB), null);
 			dead.state.reconciler = { reconcile: async () => { throw new Error("probe failed"); } } as unknown as OwnerReconciler;
-			assert.equal(await dead.actions.verifiedOwnedWriterPid(dead.index, TAB), null, "a probe that fails proves no writer");
+			assert.equal(await dead.deps.sessionRuntime().verifiedWriterPid(TAB), null, "a probe that fails proves no writer");
 		} finally {
 			await live.index.closeSession(TAB, { confirmedStopped: true });
 		}
@@ -700,7 +718,7 @@ describe("the writer a session row has", () => {
 		Object.assign(f.index, { observeOwnership: async () => observed });
 		f.state.reconciler = { reconcile: async () => { throw new Error("must not be probed"); } } as unknown as OwnerReconciler;
 		try {
-			assert.equal(await f.actions.verifiedOwnedWriterPid(f.index, TAB), null);
+			assert.equal(await f.deps.sessionRuntime().verifiedWriterPid(TAB), null);
 		} finally {
 			await rival.release();
 			await f.index.closeSession(TAB, { confirmedStopped: true });
@@ -871,8 +889,8 @@ describe("the processes of the Sessions view", () => {
 			{ tabId: OTHER_TAB, cwd: "C:/other", host: { pid: 9, startedAt: STAMP, transport: "rpc", rpc: null } as never },
 			{ tabId: "tab:stopped", cwd: "C:/stopped", host: null },
 		]);
-		const provenanceAsked: string[] = [];
-		const w = await world(index, { brokerProvenanceFor: tabId => { provenanceAsked.push(tabId); return { kind: "none" }; } });
+		const w = await world(index);
+		w.state.provenance = { kind: "none" };
 		const published: { rows: { id: string; host: unknown }[]; unreadable: number }[] = [];
 		const view = { message: undefined as string | undefined, visible: false };
 		w.state.view = view;
@@ -887,70 +905,13 @@ describe("the processes of the Sessions view", () => {
 			assert.deepEqual([...stub.commands.registered.keys()].filter(id => id.startsWith("omp.")).sort(), ["omp.killAll", "omp.openStats", "omp.refreshProcesses", "omp.stopOrphanedProcesses", "omp.stopProcess"]);
 			const snapshot = await w.state.processes!.refresh();
 			assert.equal(published.at(-1), snapshot, "every read is served to the view");
-			assert.deepEqual(provenanceAsked.sort(), [OTHER_TAB, TAB].sort(), "a row with a recorded host asks for its slot provenance, a row with none does not");
+			assert.deepEqual(w.provenanceAsked.sort(), [OTHER_TAB, TAB].sort(), "a row with a recorded host asks for its slot provenance, a row with none does not");
 			assert.deepEqual(w.catalogAdoptions, [[folders]], "an explicit read re-reads the shared catalog first");
 			assert.equal(view.message, undefined);
 			assert.deepEqual(w.refreshes, [], "reading the registry asks the launcher for nothing");
 		} finally {
 			for (const subscription of context.subscriptions) subscription.dispose();
 		}
-	});
-});
-
-describe("the broker provenance of a row", () => {
-	const table = (answers: Record<string, BrokerSlotProvenance>) => ({
-		provenanceFor: (keys: { conversation?: string | null; editor?: string | null }) => answers[keys.conversation != null ? `conversation:${keys.conversation}` : `editor:${keys.editor}`] ?? { kind: "none" },
-	}) as unknown as BrokerSlotStore;
-	const sources = (brokerSlots: BrokerSlotStore | undefined, bindings: { role: string; slotId: string }[] = []) => ({ brokerSlots, slotsForConversation: () => bindings });
-
-	it("is unreadable without a slot table, never `none`", () => {
-		assert.deepEqual(readBrokerProvenance(sources(undefined), TAB), { kind: "unreadable" });
-	});
-
-	it("is what the conversation's own entry says when it says anything", () => {
-		assert.deepEqual(readBrokerProvenance(sources(table({ [`conversation:${TAB}`]: { kind: "slot", slot: "host:a" } })), TAB), { kind: "slot", slot: "host:a" });
-		assert.deepEqual(readBrokerProvenance(sources(table({ [`conversation:${TAB}`]: { kind: "unreadable" } }), [{ role: "controlling", slotId: "e1" }]), TAB), { kind: "unreadable" });
-	});
-
-	it("falls back to the slot recorded for the editor that controls the conversation, and to nothing a passive editor says", () => {
-		const slots = table({ "editor:controller": { kind: "slot", slot: "host:editor" }, "editor:passive": { kind: "slot", slot: "host:passive" } });
-		assert.deepEqual(readBrokerProvenance(sources(slots, [{ role: "passive", slotId: "passive" }, { role: "controlling", slotId: "controller" }]), TAB), { kind: "slot", slot: "host:editor" });
-		assert.deepEqual(readBrokerProvenance(sources(slots, [{ role: "passive", slotId: "passive" }]), TAB), { kind: "none" });
-	});
-
-	it("stays unreadable when an editor's entry was unreadable and no other editor named a slot", () => {
-		const slots = table({ "editor:broken": { kind: "unreadable" } });
-		assert.deepEqual(readBrokerProvenance(sources(slots, [{ role: "controlling", slotId: "broken" }, { role: "controlling", slotId: "empty" }]), TAB), { kind: "unreadable" });
-		assert.deepEqual(readBrokerProvenance(sources(slots, [{ role: "controlling", slotId: "empty" }]), TAB), { kind: "none" });
-	});
-});
-
-describe("the transport that stops a recorded host", () => {
-	const entry = (overrides: Record<string, unknown> = {}) =>
-		({ tabId: TAB, host: { pid: 51704, startedAt: STAMP, transport: "rpc", rpc: { slot: SLOT, brokerId: "broker-1", brokerGeneration: "gen-1" } }, ...overrides }) as unknown as SessionIndexEntry;
-	const port = (provenance: BrokerSlotProvenance, client: unknown = null, expectedSlot = SLOT, expectedBroker: { brokerId: string; brokerGeneration: string } | null = null) => {
-		const logged: string[] = [];
-		const stop = createRecordedHostStopPort({ brokerProvenanceFor: () => provenance, attachBrokerClient: async () => client as never, log: message => { logged.push(message); } }, expectedSlot, expectedBroker);
-		return { stop: (row: SessionIndexEntry) => stop.stopRecordedHost(row), logged };
-	};
-
-	it("refuses, saying nothing was stopped, when the row's slot or broker is not the one the confirmation named", async () => {
-		const detail = "This session changed while the confirmation was open. Nothing was stopped; try Stop again.";
-		assert.deepEqual(await port({ kind: "slot", slot: "host:other" }).stop(entry()), { kind: "unknown", detail });
-		const broker = { brokerId: "broker-1", brokerGeneration: "gen-1" };
-		assert.deepEqual(await port({ kind: "slot", slot: SLOT }, null, SLOT, { ...broker, brokerGeneration: "gen-2" }).stop(entry()), { kind: "unknown", detail });
-		assert.deepEqual(await port({ kind: "slot", slot: SLOT }, null, SLOT, broker).stop(entry({ host: { pid: 1, startedAt: STAMP, transport: "rpc", rpc: null } })), { kind: "unknown", detail });
-	});
-
-	it("names an unreadable or missing slot table as such, and never signals a pid", async () => {
-		assert.deepEqual(await port({ kind: "unreadable" }).stop(entry()), { kind: "unknown", detail: "This session's connection details could not be read. Refresh Sessions and try again." });
-		assert.deepEqual(await port({ kind: "none" }).stop(entry()), { kind: "unknown", detail: "This session's connection details are missing. Reopen its editor and try Stop again." });
-	});
-
-	it("refuses without a broker client, and for a native writer, which only its own Terminal stops", async () => {
-		assert.deepEqual(await port({ kind: "slot", slot: SLOT }, null).stop(entry()), { kind: "unknown", detail: "This session is disconnected. Reopen its editor and try Stop again." });
-		const native = entry({ host: { pid: 1, startedAt: STAMP, transport: "native", rpc: null } });
-		assert.deepEqual(await port({ kind: "slot", slot: SLOT }, {}).stop(native), { kind: "unknown", detail: "Stop this session from its Terminal editor, or use /exit there." });
 	});
 });
 
