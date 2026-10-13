@@ -259,7 +259,7 @@ export const harness = {
     const w = fixtureWindow();
     w.context = context;
     w.reconciler = createOwnerReconciler(ports);
-    w.sessionRuntime = new LocalSessionRuntime({ ...sessionRuntimeDeps(w.indexForBridge), launcher: () => hostLauncher });
+    w.sessionRuntime = new LocalSessionRuntime({ ...sessionRuntimeDeps(w.indexForBridge, w.sessionRuntime.chat), launcher: () => hostLauncher });
     w.editorPanels = { ...w.editorPanels, openPanel: () => undefined };
     // The broker facts of the fixture's rows come in through the handle's deps, not by reassigning a function of the module.
     w.sessionActions = registerSessionActions({ ...sessionActionsDeps(), brokerProvenanceFor: () => ({ kind: 'slot', slot: 'host:legacy-fixture' }), recordedHostStopPort: () => stopPort });
@@ -290,7 +290,7 @@ export const harness = {
   reset(index, conversation) {
     harness.installWindow(createWindowState(fixtureContext));
     const w = fixtureWindow();
-    w.chat = conversation; w.indexForBridge = index; w.sessionRuntime = createSessionRuntime(index); w.startupRestorePending = false;
+    w.indexForBridge = index; w.sessionRuntime = createSessionRuntime(index, conversation); w.startupRestorePending = false;
     w.detailTabs = new DetailTabs({ createPanel() { throw new Error('the fixture opens no detail tab'); }, attachPage: () => () => {}, handleMessage: async () => ({ status: 'refused' }), openUrl: async () => {}, log() {} });
     fixtureVscode.window.errors.length = 0;
     fixtureVscode.env.clipboard.writes.length = 0;
@@ -671,7 +671,7 @@ function conversation(session: { phase: string; start(): Promise<void> }) {
     model: { header: { id: "session-1" } },
     readSettlement: async () => session.phase === "live" ? ({ sessionFile: path.join(root, "session.jsonl"), sessionId: "session-1", settled: true, hasContent: false }) : null,
   });
-  return { sessionOf: () => session, modelOf: () => null, stateOf: () => ({ phase: session.phase }), startLive() {}, attachPage: () => () => undefined, release() { session.phase = "view-only"; } };
+  return { sessionOf: () => session, stateOf: () => ({ phase: session.phase }), startLive() {}, attachPage: () => () => undefined, release() { session.phase = "view-only"; } };
 }
 function client(snapshot: Promise<unknown>) {
   let closed = false;
@@ -796,7 +796,7 @@ describe("focused-window hidden Chat notifications", () => {
     const host = new ChatRuntime({ hostNonce: "hidden-reopened-chat",
       onEvent: (tabId, event) => {
         try { harness.handleChatEvent(context, index, tabId, event); }
-        catch (error) { if (event.type === "model") modelErrors.push(error); }
+        catch (error) { if (event.type === "activity") modelErrors.push(error); }
       },
       createSession: options => new RpcSession({ ...options, timers: new ManualTimers() }),
     });
@@ -1920,8 +1920,8 @@ describe("native replacement lifecycle", () => {
                 bridge!.stop(); droppedSnapshot.resolve(); return;
               }
               rendered.handle(message);
-              if (rendered.getSnapshot().phase === "live" && rendered.getSnapshot().epoch?.nonce === newHost.modelOf(TAB)?.epoch?.nonce
-                && rendered.getSnapshot().epoch?.counter === newHost.modelOf(TAB)?.epoch?.counter) freshLive.resolve();
+              if (rendered.getSnapshot().phase === "live" && rendered.getSnapshot().epoch?.nonce === newHost.sessionOf(TAB)?.model.epoch?.nonce
+                && rendered.getSnapshot().epoch?.counter === newHost.sessionOf(TAB)?.model.epoch?.counter) freshLive.resolve();
               if (message.type === "omp:chat-event" && message.frame.type === "message_end" && message.frame.messageId === "gamma-answer") receivedAnswer.resolve();
             },
           });
@@ -1931,8 +1931,8 @@ describe("native replacement lifecycle", () => {
         if (acknowledgement === "replacement") {
           await bounded(droppedSnapshot.promise);
           await bounded(disconnected.promise);
-          assert.equal(rendered.getSnapshot().epoch?.nonce, newHost.modelOf(TAB)?.epoch?.nonce, "disk paint arrived on the first connection");
-          assert.notDeepEqual(rendered.getSnapshot().epoch, newHost.modelOf(TAB)?.epoch, "the complete live snapshot was interrupted");
+          assert.equal(rendered.getSnapshot().epoch?.nonce, newHost.sessionOf(TAB)?.model.epoch?.nonce, "disk paint arrived on the first connection");
+          assert.notDeepEqual(rendered.getSnapshot().epoch, newHost.sessionOf(TAB)?.model.epoch, "the complete live snapshot was interrupted");
           dropFirstLiveSnapshot = false;
           bridge = createBridge(); pages.push(bridge); bridge.start();
         }
@@ -1948,7 +1948,7 @@ describe("native replacement lifecycle", () => {
         channel.emitMessage("message_end", "gamma-user", userMessage("GAMMA-A", 3000) as never);
         channel.emitMessage("message_end", "gamma-answer", answer as never);
         await bounded(receivedAnswer.promise);
-        assert.deepEqual(rendered.getSnapshot().epoch, newHost.modelOf(TAB)?.epoch, "the authoritative snapshot must replace the surviving page's old epoch");
+        assert.deepEqual(rendered.getSnapshot().epoch, newHost.sessionOf(TAB)?.model.epoch, "the authoritative snapshot must replace the surviving page's old epoch");
         assert.notDeepEqual(rendered.getSnapshot().epoch, oldEpoch);
         const messages = rendered.getSnapshot().entries.flatMap(entry => entry.type === "message" ? [entry.message] : []);
         assert.deepEqual(messages.map(message => "content" in message ? message.content : null), updatedHistory.map(entry => entry.type === "message" && "content" in entry.message ? entry.message.content : null));

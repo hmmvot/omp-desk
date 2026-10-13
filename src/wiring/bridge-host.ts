@@ -25,7 +25,7 @@ import type { BridgeAdmittedRequest, BridgeSession } from "../host/bridge-listen
 import { BridgeRecords, bindingMatches } from "../host/bridge-records.ts";
 import type { BridgeNativeBinding, BridgeRecordScope } from "../host/bridge-records.ts";
 import type { BridgeDocumentRoute } from "../host/bridge-route.ts";
-import type { ChatRuntime } from "../host/chat-runtime.ts";
+import type { LocalSessionRuntime } from "../runtime/local-runtime.ts";
 import { isOpenControlClient } from "../host/control-attempt.ts";
 import type { HostControlClient } from "../host/control-client.ts";
 import { controlPathEquals } from "../host/control-protocol.ts";
@@ -102,8 +102,8 @@ export interface BridgeWindowFacts<Tab extends BridgeTab> {
 	tabState(key: string): Tab;
 	/** The session index this activation created, or `null` before activation. */
 	index(): Pick<SessionIndex, "get"> | null;
-	/** The conversation runtime, for the verified chat host of one conversation. */
-	chat(): Pick<ChatRuntime, "sessionOf">;
+	/** The live sessions of this window's conversations, for the verified chat host of one conversation. */
+	sessions(): Pick<LocalSessionRuntime, "sessionOf">;
 	/** The one-winner reservation table of this window's editors (ADR-0019/0023). */
 	editors(): EditorCoordinator;
 	editorSlots(): Pick<EditorSlotRegistry, "remove">;
@@ -584,7 +584,7 @@ export function registerBridgeHost<Tab extends BridgeTab>(deps: BridgeHostDeps<T
 		// selects chat authority again after the editor serves another conversation.
 		const entry = table.get(state.tabId);
 		if (runtime === null || entry === null) return null;
-		const session = deps.chat().sessionOf(state.tabId);
+		const session = deps.sessions().sessionOf(state.tabId);
 		if (runtime.kind === "chat" && (session === null || session.phase !== "live")) return null;
 		if (runtime.kind === "terminal" && (!state.control || !isOpenControlClient(state.control.client) || runtime.observed?.available !== true || runtime.observed.sessionId !== entry.sessionId || runtime.observed.sessionFile === null || entry.sessionFile === null || !controlPathEquals(runtime.observed.sessionFile, entry.sessionFile))) return null;
 		if (entry.availability !== "live" || entry.ownership === null || entry.ownership.releasedAt !== null) return null;

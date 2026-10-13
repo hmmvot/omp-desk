@@ -44,6 +44,11 @@ import { nativeSettingsCommand, type SettingsKind } from "../chat/settings-comma
 import { CLEAR_DEFERRED_SENTENCES, CLEAR_DONE_SENTENCE, CLEAR_REFUSAL_SENTENCES } from "../chat/clear.ts";
 import { DESK_COMMAND_ARGUMENTS_SENTENCE, DESK_COMMAND_UNAVAILABLE_SENTENCE, NEW_BUSY_SENTENCE, deskSessionCommand, type DeskSessionCommand } from "../chat/desk-commands.ts";
 import { tuiCommandGuidance, tuiOnlyCommand, type BuiltinSlashEntry, type DeskSlashAction } from "./slash-registry.ts";
+import { turnActivity } from "../protocol/activity.ts";
+import type { TurnActivityReport } from "../protocol/activity.ts";
+import { sessionPrompts } from "../chat/prompt-history.ts";
+import { rewindBlockedReason } from "../chat/rewind-mode.ts";
+import { NAVIGATE_REFUSAL_SENTENCES, rewindPreview, rewindTargets } from "../chat/rewind.ts";
 
 /** One route that shows a conversation. */
 export interface ChatPage {
@@ -66,10 +71,35 @@ export interface ChatPage {
 	readonly readOnlyReason?: () => string | null;
 }
 
+/**
+ * What a live conversation's model says, as values: the turn activity the notifier and the Stop context key read
+ * (`null` while the conversation is not live) and the model the session runs. The `ChatModel` itself never leaves the runtime.
+ */
+export interface ConversationActivity {
+	readonly observed: TurnActivityReport | null;
+	readonly model: { readonly id: string; readonly provider: string } | null;
+}
+
+/** One prompt Rewind can go back to, with what leaves the branch if it is chosen (`null` when the target is unknown). */
+export interface RewindChoice {
+	readonly id: string;
+	readonly preview: string;
+	readonly timestamp: string;
+	readonly leaving: { readonly messages: number; readonly files: readonly string[] } | null;
+}
+
+/** The loaded prompts of a live conversation, newest first, pinned to the leaf they were read from; `blocked` carries the sentence the user reads. */
+export type RewindRead =
+	| { readonly status: "blocked"; readonly reason: string }
+	| { readonly status: "ready"; readonly leafId: string | null; readonly choices: readonly RewindChoice[] };
+
 /** What the extension is told about a conversation. */
 export type ChatRuntimeEvent =
-	/** The live model changed. `baseline` marks attach/resync hydration, never an ordinary live history reconcile. */
-	| { readonly type: "model"; readonly model: ChatModel; readonly baseline: boolean }
+	/**
+	 * The live conversation's turn activity (a projection of the model the runtime keeps, which never leaves it) or its
+	 * chosen model changed. `baseline` marks attach/resync hydration, never an ordinary live history reconcile.
+	 */
+	| { readonly type: "activity"; readonly activity: ConversationActivity; readonly baseline: boolean }
 	/** The phase, code, identity or bounded autonomous child-exit diagnostic changed. */
 	| { readonly type: "state"; readonly payload: ChatStatePayload }
 	/** The identity the process serves: learned for a new session, verified for a resumed one. */
@@ -188,9 +218,38 @@ export class ChatRuntime {
 		return this.#conversations.get(tabId)?.session ?? null;
 	}
 
-	/** The live chat model of a tab, or `null` when it has no live session. */
-	modelOf(tabId: string): ChatModel | null {
-		return this.#conversations.get(tabId)?.session?.model ?? null;
+	/**
+	 * What the live model of a tab says (its turn activity and chosen model), or `null` when it has no live session.
+	 * The model itself never leaves the runtime.
+	 */
+	activityOf(tabId: string): ConversationActivity | null {
+		const model = this.#conversations.get(tabId)?.session?.model;
+		return model === undefined ? null : activityOfModel(model);
+	}
+
+	/** The prompts the live conversation has loaded, oldest first; empty without a live session. */
+	promptsOf(tabId: string): string[] {
+		return sessionPrompts(this.#conversations.get(tabId)?.session?.model.entries ?? []);
+	}
+
+	/** The prompts Rewind can go back to (newest first), or the sentence that says why it cannot. */
+	rewindOf(tabId: string): RewindRead {
+		const model = this.#conversations.get(tabId)?.session?.model;
+		if (model === undefined) return { status: "blocked", reason: NAVIGATE_REFUSAL_SENTENCES["not-live"] };
+		const blocked = rewindBlockedReason(model);
+		if (blocked !== null) return { status: "blocked", reason: blocked };
+		const durable = model.entries.slice(0, model.durableCount);
+		const cwd = model.header?.cwd;
+		const choices = rewindTargets(durable).reverse().map((target): RewindChoice => {
+			const preview = rewindPreview(durable, target.id, cwd);
+			return {
+				id: target.id,
+				preview: target.preview,
+				timestamp: target.timestamp,
+				leaving: preview === null ? null : { messages: preview.messages, files: preview.files },
+			};
+		});
+		return { status: "ready", leafId: model.leafId, choices };
 	}
 
 	/** The current state payload of a conversation (any kind), or `null` when none exists. */
@@ -608,7 +667,7 @@ export class ChatRuntime {
 			case "model": {
 				const baseline = conversation.baselinePending;
 				conversation.baselinePending = false;
-				this.#options.onEvent(tabId, { type: "model", model: output.model, baseline });
+				this.#options.onEvent(tabId, { type: "activity", activity: activityOfModel(output.model), baseline });
 				return;
 			}
 		}
@@ -950,6 +1009,11 @@ export class ChatRuntime {
 		const message = this.#feedbackMessage(conversation, text);
 		if (message !== null) this.#broadcast(conversation, message);
 	}
+}
+
+function activityOfModel(model: ChatModel): ConversationActivity {
+	const chosen = model.state?.model;
+	return { observed: turnActivity(model), model: chosen === undefined || chosen === null ? null : { id: chosen.id, provider: chosen.provider } };
 }
 
 function statePayloadOf(session: RpcSession): ChatStatePayload {

@@ -134,8 +134,8 @@ function world(overrides: Partial<GuestDispatcherDeps<FakeTab>> = {}) {
 		activePanelTab: () => state.active,
 		draftRestores: () => state.draftRestores,
 		composerPopupTabs: () => state.popups,
-		chat: () => ({
-			handleMessage: async (tabId: string, message: { type: string }, page: ChatPage) => {
+		conversations: () => ({
+			command: async (tabId: string, message: { type: string }, page: ChatPage) => {
 				chatMessages.push({ tabId, message, page });
 				if (state.handleMessageThrows) throw new Error("channel failed");
 				return state.outcome;

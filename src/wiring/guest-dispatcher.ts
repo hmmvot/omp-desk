@@ -13,7 +13,8 @@
 
 import * as vscode from "vscode";
 import { TAB_INPUT_VIEW_TYPE_PREFIX } from "../host/bridge-identity.ts";
-import type { ChatCommandOutcome, ChatPage, ChatRuntime } from "../host/chat-runtime.ts";
+import type { ChatCommandOutcome, ChatPage } from "../host/chat-runtime.ts";
+import type { ConversationPort } from "../runtime/session-runtime.ts";
 import { DETAIL_VIEW_TYPE } from "../host/detail-tabs.ts";
 import type { DetailTabs } from "../host/detail-tabs.ts";
 import type { SessionIndex } from "../host/session-index.ts";
@@ -120,7 +121,7 @@ export interface GuestWindowFacts<Tab extends GuestTab> {
 
 /** The conversation runtime, what hangs on a conversation, and the actions a page runs through it. */
 export interface GuestChatPort<Tab extends GuestTab> {
-	chat(): Pick<ChatRuntime, "handleMessage" | "stateOf" | "kindOf" | "showViewOnly">;
+	conversations(): Pick<ConversationPort, "command" | "stateOf" | "kindOf" | "showViewOnly">;
 	detailTabs(): Pick<DetailTabs, "open">;
 	/** The page object the conversation answers one panel through. */
 	panelChatPage(state: Tab, panel: vscode.WebviewPanel): ChatPage;
@@ -330,17 +331,17 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 	 */
 	function paintSavedHistory(index: SessionIndex, tabId: string): void {
 		const entry = index.get(tabId);
-		if (deps.tab(tabId)?.mode !== "chat" || entry === null || entry.sessionFile === null || deps.chat().kindOf(tabId) !== null) return;
-		void deps.chat()
+		if (deps.tab(tabId)?.mode !== "chat" || entry === null || entry.sessionFile === null || deps.conversations().kindOf(tabId) !== null) return;
+		void deps.conversations()
 			.showViewOnly(tabId, { file: entry.sessionFile, cwd: entry.cwd, title: entry.title, reason: "Restoring the session…", phase: "resyncing" })
 			.then(() => {
-				if (deps.chat().kindOf(tabId) === "view-only") deps.attachChatRoutes(tabId, true);
+				if (deps.conversations().kindOf(tabId) === "view-only") deps.attachChatRoutes(tabId, true);
 			});
 	}
 
 	function replyChatSendResult(tabId: string, message: ChatWebviewMessage, page: ChatPage, outcome: ChatCommandOutcome): void {
 		if (message.type !== "omp:chat-prompt" && message.type !== "omp:chat-steer" && message.type !== "omp:chat-follow-up") return;
-		const epoch = deps.chat().stateOf(tabId)?.epoch;
+		const epoch = deps.conversations().stateOf(tabId)?.epoch;
 		if (epoch === undefined) return;
 		page.post({
 			type: "omp:chat-send-result",
@@ -360,7 +361,7 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 	async function runChatCommand(tabId: string, message: ChatWebviewMessage, page: ChatPage): Promise<ChatCommandOutcome> {
 		let outcome: ChatCommandOutcome;
 		try {
-			outcome = await deps.chat().handleMessage(tabId, message, page);
+			outcome = await deps.conversations().command(tabId, message, page);
 		} catch (error) {
 			if (message.type !== "omp:chat-prompt" && message.type !== "omp:chat-steer" && message.type !== "omp:chat-follow-up") throw error;
 			outcome = "unconfirmed";
@@ -396,7 +397,7 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 	 */
 	function openDetailTab(tabId: string, mode: SessionViewMode, request: GuestOpenDetailMessage): void {
 		// A terminal editor and a legacy tab have no conversation page to show: nothing would arrive.
-		if (mode === "terminal" || deps.chat().kindOf(tabId) === "legacy") return;
+		if (mode === "terminal" || deps.conversations().kindOf(tabId) === "legacy") return;
 		const target: DetailTarget = request.kind === "agent" ? { kind: "agent", agentId: request.agentId } : { kind: request.kind };
 		const outcome = deps.detailTabs().open(tabId, target);
 		deps.log(`tab ${tabId}: detail tab ${target.kind} was ${outcome}`);
@@ -552,7 +553,7 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 	function presentUnavailable(index: SessionIndex, tabId: string, reason: string, phase: "view-only" | "blocked" = "view-only"): void {
 		const entry = index.get(tabId);
 		if (entry === null) return;
-		void deps.chat()
+		void deps.conversations()
 			.showViewOnly(tabId, { file: entry.sessionFile, cwd: entry.cwd, title: entry.title, reason, phase })
 			.then(() => deps.attachChatRoutes(tabId, true));
 	}

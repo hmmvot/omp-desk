@@ -174,7 +174,7 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 			index: index as never,
 			reconciler: () => state.reconciler,
 			stop: { requestStop: async () => ({ writerGone: true, treeEmpty: true, detail: "fixture" }), confirmEnded: async () => null, awaitSettled: async () => null, readTransitionFacts: async () => null },
-			control: {} as never, identity: {} as never, nativeWatch: {} as never, exit: {} as never,
+			chat: {} as never, control: {} as never, identity: {} as never, nativeWatch: {} as never, exit: {} as never,
 			launcher: () => ({
 				launch: async () => ({ state: "not-started", reason: "fixture" }),
 				attach: async request => { reattached.push([request]); return { state: "unavailable", reason: "fixture" }; },

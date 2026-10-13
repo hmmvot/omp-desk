@@ -12,6 +12,10 @@
  */
 import type { RestoreOutcome, RestoreReport } from "../host/session-index.ts";
 import type { SessionViewMode } from "../host/session-model.ts";
+import type { ChatCommandOutcome, ChatPage, ConversationActivity, RewindRead } from "../host/chat-runtime.ts";
+import type { NavigateOutcome, NavigateRequest } from "../host/rpc/session.ts";
+import type { ChatStatePayload } from "../chat/model.ts";
+import type { ChatWebviewMessage } from "../protocol/chat-messages.ts";
 
 /** Who acts. Fixed when the runtime is constructed; never a per-call argument. */
 export interface RuntimeHolder {
@@ -51,6 +55,7 @@ export interface ReattachRequest {
 }
 
 export interface SessionRuntime {
+	readonly conversations: ConversationPort;
 	readonly holder: RuntimeHolder;
 	open(request: OpenRequest): Promise<RestoreOutcome>;
 	/**
@@ -60,4 +65,55 @@ export interface SessionRuntime {
 	restore(request: RestorePassRequest, options?: { readonly signal?: AbortSignal }): Promise<RestoreReport>;
 	/** The outcome is never `restored`; a conversation that is not an attachable native writer is `skipped`. */
 	reattach(request: ReattachRequest): Promise<RestoreOutcome>;
+}
+
+/** Show a stopped, blocked or resyncing session's history read-only. Never claims, launches or writes. */
+export interface ViewOnlyRequest {
+	readonly file: string | null;
+	readonly cwd: string;
+	readonly title: string | null;
+	readonly reason: string;
+	readonly phase?: "view-only" | "blocked" | "resyncing";
+}
+
+/** Show the banner-only page of a row an earlier build's host owns. */
+export interface LegacyViewRequest {
+	readonly cwd: string;
+	readonly title: string | null;
+	readonly reason: string;
+}
+
+/**
+ * What a window can ask of a conversation: show it, route its messages and read what it says. Inputs and outputs
+ * are values; the page sink and the runtime's own events are callbacks that carry values, never the model or the
+ * session. A conversation is the session row's id.
+ */
+export interface ConversationPort {
+	/** Whether a conversation of any kind exists. */
+	has(conversation: string): boolean;
+	kindOf(conversation: string): "live" | "view-only" | "legacy" | null;
+	/** The current state of a conversation of any kind, or `null` when none exists. */
+	stateOf(conversation: string): ChatStatePayload | null;
+	/** What the live model says (turn activity, chosen model), or `null` without a live session. */
+	activityOf(conversation: string): ConversationActivity | null;
+	/** The prompts the live conversation has loaded, oldest first. */
+	promptsOf(conversation: string): string[];
+	/** The prompts Rewind can go back to, newest first, or the sentence that says why none can. */
+	rewindOf(conversation: string): RewindRead;
+	showViewOnly(conversation: string, request: ViewOnlyRequest): Promise<void>;
+	showLegacy(conversation: string, request: LegacyViewRequest): void;
+	/** Drop the conversation: its session stops reading and its connection closes; the process is untouched. Pages stay attached. */
+	release(conversation: string): void;
+	/** Attach one route; returns the detach. Attaching the same page id again replaces it and re-sends. */
+	attachPage(conversation: string, page: ChatPage): () => void;
+	hasPage(conversation: string): boolean;
+	/** Re-send the state and an authoritative snapshot to one route. */
+	resend(conversation: string, pageId: string): void;
+	/** One page command, answered for the asking route's own request ledger. */
+	command(conversation: string, message: ChatWebviewMessage, origin: ChatPage | null): Promise<ChatCommandOutcome>;
+	navigate(conversation: string, request: NavigateRequest, origin: ChatPage | null): Promise<NavigateOutcome>;
+	/** Say a fixed sentence to the routes showing the conversation; `false` when there is no route to say it to. */
+	notify(conversation: string, text: string): boolean;
+	refreshDisplayPreferences(): void;
+	dispose(): void;
 }

@@ -20,10 +20,15 @@ import type { LocalHostControl } from "./local-control.ts";
 import type { LocalExitOperations } from "./local-exit.ts";
 import type { LocalIdentity } from "./local-identity.ts";
 import type { LocalNativeWatch } from "./local-native-watch.ts";
+import { LocalConversations } from "./local-conversations.ts";
+import type { ChatRuntime } from "../host/chat-runtime.ts";
+import type { RpcSession } from "../host/rpc/session.ts";
 import type { RuntimeRecord } from "./runtime-record.ts";
 
 export interface LocalSessionRuntimeDeps {
 	readonly index: SessionIndex;
+	/** The chat runtime this runtime owns: the window constructs it with its hooks and hands it over. */
+	readonly chat: ChatRuntime;
 	readonly reconciler: () => OwnerReconciler;
 	readonly launcher: () => OmpHostLauncher;
 	readonly stop: StopOperations;
@@ -49,14 +54,38 @@ export interface ReplaceWriterHeldRequest {
 
 export class LocalSessionRuntime implements SessionRuntime {
 	readonly #deps: LocalSessionRuntimeDeps;
+	readonly #conversations: LocalConversations;
 
 	constructor(deps: LocalSessionRuntimeDeps) {
 		this.#deps = deps;
+		this.#conversations = new LocalConversations(deps.chat);
 	}
 
 	get holder(): RuntimeHolder {
 		const holder = this.#deps.index.claimHolder;
 		return { id: holder.id, pid: holder.pid, creationTime: holder.processCreationTime ?? null };
+	}
+
+	/**
+	 * The chat runtime itself. Transitional (`LocalSessionRuntime` only): the launcher starts a live conversation on it
+	 * (`startLive`, which hands back the `RpcSession`) and the window's lifecycle tests drive it directly.
+	 */
+	get chat(): ChatRuntime {
+		return this.#deps.chat;
+	}
+
+	/** The conversation surface (cut 6): the window's view of its conversations over the chat runtime this runtime owns. */
+	get conversations(): LocalConversations {
+		return this.#conversations;
+	}
+
+	/**
+	 * The live `RpcSession` of a conversation, or `null`. Transitional (`LocalSessionRuntime` only): the window's
+	 * footer, settings, control-picker and stop flows still drive the session itself; each moves behind
+	 * `ConversationPort` as it gets a value-typed operation.
+	 */
+	sessionOf(conversation: string): RpcSession | null {
+		return this.#deps.chat.sessionOf(conversation);
 	}
 
 	// The runtime's own services of cut 5. They are injected whole because each one is built over the window's hooks.

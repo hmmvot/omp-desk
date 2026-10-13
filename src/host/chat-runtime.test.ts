@@ -545,7 +545,7 @@ describe("what the extension is told", () => {
 
 	it("reports the first model after a live snapshot as the baseline, and later ones as changes", async () => {
 		const { channel, events } = await liveRig();
-		const models = () => events.flatMap(event => (event.type === "model" ? [event.baseline] : []));
+		const models = () => events.flatMap(event => (event.type === "activity" ? [event.baseline] : []));
 		assert.equal(models().filter(baseline => baseline).length, 1);
 		channel.emitMessage("message_end", "m-1", assistantMessage("later", 5000) as never);
 		await tick();
@@ -562,9 +562,22 @@ describe("what the extension is told", () => {
 		channel.emit({ type: "session_settled" });
 		await tick(20);
 		assert.deepEqual(assembled(page)?.entries.map(entry => entry.id), ["history-reply"]);
-		const models = events.filter((event): event is Extract<ChatRuntimeEvent, { type: "model" }> => event.type === "model");
+		const models = events.filter((event): event is Extract<ChatRuntimeEvent, { type: "activity" }> => event.type === "activity");
 		assert.equal(models.filter(event => event.baseline).length, 1);
 		assert.equal(models.at(-1)?.baseline, false);
+		runtime.dispose();
+	});
+
+	it("answers the model's reads as values: activity, prompts and rewind, none of them without a live session", async () => {
+		const { runtime } = await liveRig();
+		const activity = runtime.activityOf(TAB);
+		assert.ok(activity !== null && activity.observed !== null, "a live conversation reports its turn activity");
+		assert.deepEqual(runtime.promptsOf(TAB), []);
+		assert.equal(runtime.rewindOf(TAB).status === "ready" || runtime.rewindOf(TAB).status === "blocked", true);
+		assert.equal(runtime.activityOf("unknown"), null);
+		assert.deepEqual(runtime.promptsOf("unknown"), []);
+		const unknown = runtime.rewindOf("unknown");
+		assert.equal(unknown.status, "blocked");
 		runtime.dispose();
 	});
 });

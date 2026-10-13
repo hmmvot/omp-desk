@@ -222,7 +222,8 @@ const PORT_ALLOWED_NAMES = {
   ],
   "src/host/rpc-reconcile.ts": ["NativeStopVerdict"],
   "src/host/session-restore-trace.ts": ["OmpHostStepTimings"],
-  "src/host/chat-runtime.ts": ["ChatPage"],
+  "src/host/chat-runtime.ts": ["ChatPage", "ChatCommandOutcome", "ConversationActivity", "RewindRead"],
+  "src/host/rpc/session.ts": ["NavigateRequest", "NavigateOutcome"],
 };
 const PORT_STATEMENT = /^[ \t]*(import|export)\b([^'";]*?)\bfrom\s*(['"])([^'"\n]+)\3|^[ \t]*import\s*(['"])([^'"\n]+)\5/gm;
 const PORT_DYNAMIC = /\b(?:import|require)\s*\(/g;

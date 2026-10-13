@@ -208,7 +208,7 @@ function world(overrides: Partial<BridgeHostDeps<FakeTab>> = {}) {
 			return created;
 		},
 		index: () => state.index,
-		chat: () => ({ sessionOf: (tabId: string) => state.sessions.get(tabId) ?? null }) as never,
+		sessions: () => ({ sessionOf: (tabId: string) => state.sessions.get(tabId) ?? null }) as never,
 		editors: () => state.editors,
 		editorSlots: () => ({ remove: (slot: string) => { state.slotsRemoved.push(slot); } }) as never,
 		endpoints: () => state.endpoints,
