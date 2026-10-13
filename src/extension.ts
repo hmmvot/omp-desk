@@ -51,6 +51,8 @@ import type { LauncherWindow, PreparedHostControl } from "./runtime/local-launch
 import { createRuntimeStaging } from "./runtime/runtime-entries";
 import type { RuntimeStaging } from "./runtime/runtime-entries";
 import { LocalSessionRuntime } from "./runtime/local-runtime";
+import type { LocalSessionRuntimeDeps } from "./runtime/local-runtime";
+import { LocalStopOperations, withSessionReadDeadline } from "./runtime/local-stop";
 import type {
   OmpHostAttachRequest,
   OmpHostAttachResult,
@@ -990,11 +992,11 @@ function sessionActionsDeps(): SessionActionsDeps<TabState> {
     pickIndexedTab,
     sessionTarget: sessionTargetFromArgument,
     confirmAndStopRuntime,
-    readTransitionFacts,
+    readTransitionFacts: (state, runtime) => windowState().sessionRuntime.readTransitionFacts(state, runtime),
     withSessionReadDeadline,
     fenceSessionAdmission,
     pushSessionView,
-    stopSessionRuntime,
+    stopSessionRuntime: (state, runtime, mode, consent, expected) => windowState().sessionRuntime.requestStop(state, runtime, mode, consent, expected),
     stopTerminalForTab,
     disposeControlChannel,
     retireBroker,
@@ -2048,7 +2050,7 @@ async function newSessionInPlace(context: vscode.ExtensionContext, index: Sessio
   fenceSessionAdmission(index, state, true);
   let opened = false;
   try {
-    const captured = runtime === null ? null : await index.lifecycle.run(tabId, async () => await readTransitionFacts(state, runtime));
+    const captured = runtime === null ? null : await index.lifecycle.run(tabId, async () => await windowState().sessionRuntime.readTransitionFacts(state, runtime));
     if (runtime !== null && captured?.settled !== true) { showWarning("The session is not idle; nothing was replaced."); return; }
     const column = windowState().editorPanels.sessionTabColumn(panel.viewType) ?? panel.viewColumn ?? vscode.ViewColumn.Active;
     if (await createSessionInColumn(context, index, entry.cwd, column) === null) return;
@@ -3129,7 +3131,12 @@ async function openTabOnce(
 
 /** This window's session runtime: its index, reconciler and launcher behind the `SessionRuntime` port. */
 function createSessionRuntime(index: SessionIndex): LocalSessionRuntime {
-  return new LocalSessionRuntime({
+  return new LocalSessionRuntime(sessionRuntimeDeps(index));
+}
+
+/** The ports of this window's session runtime; read at call time, so a replaced reconciler, launcher or root probe is used by the next call. */
+function sessionRuntimeDeps(index: SessionIndex): LocalSessionRuntimeDeps {
+  return {
     index,
     reconciler: () => windowState().reconciler,
     launcher: () => {
@@ -3137,7 +3144,13 @@ function createSessionRuntime(index: SessionIndex): LocalSessionRuntime {
       if (context === undefined) throw new Error("The session runtime was used before activation.");
       return localLauncher(context, index);
     },
-  });
+    stop: new LocalStopOperations({
+      chat: () => windowState().chat,
+      attachBrokerClient,
+      rootGone: root => windowState().rootGone(root),
+      log,
+    }),
+  };
 }
 
 /**
@@ -3516,31 +3529,6 @@ async function handleNativeHostExited(index: SessionIndex, state: TabState, runt
 }
 
 /**
- * Stop a session's process, or recognize that it already ended.
- *
- * A stop that could not be confirmed (the broker was killed or crashed, the process cannot be reached, OMP did not
- * answer) is not yet a failure: when the recorded OMP root is proven gone (`recordedRootGone`: its id unused, or now
- * another process's), the writer is gone and the session is stopped, so Close, Stop and Reload finish normally
- * instead of asking for a Force Stop that has nothing left to stop.
- */
-async function stopSessionRuntime(state: TabState, runtime: SessionHostRuntime, mode: "graceful" | "force", consent: boolean, expected?: SessionTransitionFacts | null): Promise<NativeStopVerdict> {
-  const verdict = await requestSessionStop(state, runtime, mode, consent, expected);
-  return verdict.writerGone ? verdict : await alreadyEnded(runtime) ?? verdict;
-}
-
-/** A verdict for a runtime whose recorded OMP root is already gone, or `null` when that cannot be shown. */
-async function alreadyEnded(runtime: SessionHostRuntime): Promise<NativeStopVerdict | null> {
-  const root = { pid: runtime.pid, creationTime: runtime.identity.childCreationTime };
-  if (!await windowState().rootGone(root)) return null;
-  return {
-    writerGone: true,
-    treeEmpty: false,
-    detail: "The OMP process had already ended.",
-    diagnosticDetail: `The stop was not confirmed by the broker, but the recorded OMP root pid ${root.pid} is gone.`,
-  };
-}
-
-/**
  * End the runtime of a session whose recorded OMP root is already gone, the way its exit would have ended it
  * (`handleRpcHostExited`, `handleNativeHostExited`: runtime cleared, credentials and claim released, row recorded stopped),
  * so that a request made for a stopped session can follow. `false` when the root is not proven gone or the exit could
@@ -3549,7 +3537,7 @@ async function alreadyEnded(runtime: SessionHostRuntime): Promise<NativeStopVerd
  */
 async function endEndedRuntime(context: vscode.ExtensionContext, index: SessionIndex, state: TabState, runtime: SessionHostRuntime): Promise<boolean> {
   const tabId = state.tabId;
-  if (tabId === null || state.runtime !== runtime || await alreadyEnded(runtime) === null) return false;
+  if (tabId === null || state.runtime !== runtime || await windowState().sessionRuntime.confirmEnded(runtime) === null) return false;
   try {
     if (runtime.kind === "chat") await handleRpcHostExited(context, index, tabId, runtime);
     else await handleNativeHostExited(index, state, runtime);
@@ -3557,63 +3545,6 @@ async function endEndedRuntime(context: vscode.ExtensionContext, index: SessionI
     log(`tab ${tabId}: the session whose OMP process already ended could not be closed: ${messageOf(error)}`);
   }
   return state.runtime !== runtime;
-}
-
-/** Native graceful shutdown is an SDK request, never a ConPTY close. */
-async function requestSessionStop(state: TabState, runtime: SessionHostRuntime, mode: "graceful" | "force", consent: boolean, expected?: SessionTransitionFacts | null): Promise<NativeStopVerdict> {
-  const s = windowState();
-  if (runtime.kind === "chat") {
-    const broker = await attachBrokerClient();
-    if (broker === null) return { writerGone: false, treeEmpty: false, detail: "This session is disconnected. Reopen its editor and try Stop again." };
-    if (mode === "graceful") {
-      const captured = expected ?? await readTransitionFacts(state, runtime);
-      if (captured === null) return { writerGone: false, treeEmpty: false, detail: "The running session could not be checked. Reopen its editor and try Stop again." };
-      if (!captured.settled && !consent) return { writerGone: false, treeEmpty: false, detail: "OMP is busy. Confirm that you want to abort the current turn before stopping." };
-      if (!captured.settled) {
-        const abort = await s.chat.sessionOf(state.tabId ?? "")?.abortForShutdown();
-        if (abort?.status !== "accepted") return { writerGone: false, treeEmpty: false, detail: "OMP did not confirm aborting the turn. Try Stop again." };
-      }
-      if (await waitForRpcSettlement(state, runtime, captured) === null) return { writerGone: false, treeEmpty: false, detail: "OMP is still finishing work, or the session changed. Nothing was replaced; try again when it is idle." };
-    }
-    const stopped = await stopRpcHost(runtime, mode);
-    return stopped.writerGone ? await waitForManagedRootExit(runtime, broker, 5_000) : stopped;
-  }
-  const broker = await attachBrokerClient();
-  if (broker === null) return { writerGone: false, treeEmpty: false, detail: "This session is disconnected. Reopen its editor and try Stop again." };
-  try {
-    if (mode === "force") {
-      runtime.stopping = true;
-      state.transitioning = true;
-      const forced = await runtime.handle.stop({ mode: "force", timeoutMs: 5_000 });
-      runtime.observedSurvivors = forced.remainingPids;
-      if (forced.remainingPids.length > 0) {
-        log(`native force stop: remaining pids ${forced.remainingPids.join(", ")}`);
-        return { writerGone: false, treeEmpty: false, detail: "Some commands are still running. Nothing was restarted; try Stop again." };
-      }
-      return await waitForManagedRootExit(runtime, broker, 5_000);
-    }
-    const control = state.control?.client;
-    if (control === undefined || !isOpenControlClient(control)) return { writerGone: false, treeEmpty: false, detail: "This Terminal is disconnected. Use /exit there, or choose Force Stop. Commands it started may continue running separately; no replacement is started." };
-    const snapshot = await control.snapshot();
-    const facts = await control.nativeState();
-    if (!facts.available) return { writerGone: false, treeEmpty: false, detail: facts.unavailableReason ?? "Native shutdown is unsupported by this host." };
-    if (expected !== undefined && (expected === null || expected.epoch !== snapshot.host.epoch || expected.file !== facts.sessionFile || expected.sessionId !== facts.sessionId)) {
-      return { writerGone: false, treeEmpty: false, detail: "The native target changed after confirmation; nothing was stopped." };
-    }
-    runtime.stopping = true; // A lost acknowledgement may already have committed shutdown.
-    state.transitioning = true;
-    state.pipeline?.noteReadOnly("Native OMP is stopping; queued or background work may still be finishing.");
-    const status = await control.nativeShutdown({ epoch: snapshot.host.epoch, sessionFile: facts.sessionFile, sessionId: facts.sessionId }, consent);
-    if (status !== "accepted" && status !== "accepted-deferred") {
-      runtime.stopping = false;
-      log(`native shutdown refused: ${status}`);
-      return { writerGone: false, treeEmpty: false, detail: "OMP did not accept the stop request. Try Stop again; nothing was restarted." };
-    }
-    return await waitForManagedRootExit(runtime, broker);
-  } catch (error) {
-    log(`native shutdown unconfirmed: ${messageOf(error)}`);
-    return { writerGone: false, treeEmpty: false, detail: "The session could not be confirmed stopped. Check its Terminal before trying Stop again; see OMP Desk output for details." };
-  }
 }
 
 const SESSION_DEFAULT_MODE_KEY = "omp.session.defaultMode";
@@ -3712,53 +3643,6 @@ function fenceSessionAdmission(index: SessionIndex, state: TabState, fenced: boo
   pushSessionView(index, state);
 }
 
-const SESSION_TRANSITION_READ_TIMEOUT_MS = 10_000;
-
-/** Bound readback and gate admission, not a destructive transaction or a user's dialog. */
-async function withSessionReadDeadline<T>(read: Promise<T>, timeoutMs = SESSION_TRANSITION_READ_TIMEOUT_MS): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  try {
-    return await Promise.race([
-      read,
-      new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error("Session state read timed out.")), timeoutMs);
-      }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function waitForRpcSettlement(state: TabState, runtime: SessionHostRuntime, expected: SessionTransitionFacts): Promise<SessionTransitionFacts | null> {
-  const deadline = Date.now() + 5_000;
-  do {
-    const last = await readTransitionFacts(state, runtime);
-    if (last === null || last.epoch !== expected.epoch || last.file !== expected.file || last.sessionId !== expected.sessionId) return null;
-    if (last.settled) return last;
-    await new Promise<void>(resolve => setTimeout(resolve, 50));
-  } while (Date.now() < deadline);
-  return null;
-}
-
-async function readTransitionFacts(state: TabState, runtime: SessionHostRuntime): Promise<SessionTransitionFacts | null> {
-  const s = windowState();
-  if (state.tabId === null || state.runtime !== runtime) return null;
-  if (runtime.kind === "chat") {
-    const session = s.chat.sessionOf(state.tabId);
-    if (session === null) return null;
-    const facts = await withSessionReadDeadline(session.readSettlement());
-    return facts === null ? null : { file: facts.sessionFile, sessionId: facts.sessionId, epoch: `${session.epoch.nonce}:${session.epoch.counter}`, settled: facts.settled, hasContent: facts.hasContent, nativeTarget: null };
-  }
-  const client = state.control?.client;
-  if (client === undefined || !isOpenControlClient(client)) return null;
-  const snapshot = await withSessionReadDeadline(client.snapshot());
-  const facts = await withSessionReadDeadline(client.nativeState(true));
-  if (!facts.available) return null;
-  runtime.observed = facts;
-  const target = { epoch: snapshot.host.epoch, sessionFile: facts.sessionFile, sessionId: facts.sessionId };
-  return { file: facts.sessionFile, sessionId: facts.sessionId, epoch: target.epoch, settled: facts.settled === true, hasContent: facts.hasContent, nativeTarget: target };
-}
-
 /** One editor, one held claim, positively non-overlapping exact root generations. */
 async function switchSessionMode(context: vscode.ExtensionContext, index: SessionIndex, state: TabState, mode: SessionViewMode, reload = false, keepLiveView = false): Promise<void> {
   const s = windowState();
@@ -3843,7 +3727,7 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
     fenceSessionAdmission(index, state, true);
     const captured = await withSessionReadDeadline(index.lifecycle.run(tabId, async () => {
       if (state.lastOpenRequest !== modeRequest || state.runtime !== runtime || state.tabId !== tabId) return null;
-      return await readTransitionFacts(state, runtime);
+      return await windowState().sessionRuntime.readTransitionFacts(state, runtime);
     }));
     if (captured === null) {
       // The facts of a session whose process already ended (killed from outside, crashed) cannot be read: end it as its exit
@@ -3883,7 +3767,7 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
       admitted.resolve();
       const currentBinding = index.slotBinding(state.slotId);
       if (state.lastOpenRequest !== modeRequest || state.runtime !== runtime || state.tabId !== tabId || currentBinding?.generation !== binding.generation || passiveReasonForSlot(state.slotId) !== null) return;
-      const fresh = await readTransitionFacts(state, runtime);
+      const fresh = await windowState().sessionRuntime.readTransitionFacts(state, runtime);
       if (fresh === null || fresh.epoch !== captured.epoch || fresh.sessionId !== captured.sessionId || fresh.file !== captured.file || (!fresh.settled && !consent)) {
         showWarning("The OMP target or busy state changed while the action was pending; nothing was stopped.");
         return;
@@ -3913,12 +3797,12 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
         if (consent) {
           const abort = await withSessionReadDeadline(s.chat.sessionOf(tabId)?.abortForShutdown() ?? Promise.resolve(undefined));
           if (abort?.status !== "accepted") {
-            ended = await alreadyEnded(runtime);
+            ended = await windowState().sessionRuntime.confirmEnded(runtime);
             if (ended === null) { showWarning("Abort was not confirmed; no replacement was started."); return; }
           }
         }
-        if (ended === null && await waitForRpcSettlement(state, runtime, fresh) === null) {
-          ended = await alreadyEnded(runtime);
+        if (ended === null && await windowState().sessionRuntime.awaitSettled(state, runtime, fresh) === null) {
+          ended = await windowState().sessionRuntime.confirmEnded(runtime);
           if (ended === null) { showWarning("RPC did not settle on the captured session; nothing was replaced."); return; }
         }
         if (ended !== null) stopped = ended;
@@ -3929,7 +3813,7 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
         }
       }
       log(`tab ${tabId}: view switch stop: ${stopped.diagnosticDetail ?? stopped.detail}`);
-      if (!stopped.writerGone) stopped = await alreadyEnded(runtime) ?? stopped;
+      if (!stopped.writerGone) stopped = await windowState().sessionRuntime.confirmEnded(runtime) ?? stopped;
       if (!stopped.writerGone) { state.controlFailure = stopped.detail; showWarning(stopped.detail); return; }
       const credentialOwner = controlOwnerFor(runtime, row.ownership?.ownerGeneration ?? "");
       state.nativeWatch?.();
@@ -11092,7 +10976,7 @@ async function confirmAndStopRuntime(
   const previouslyStopping = runtime.kind === "terminal" && runtime.stopping;
   fenceSessionAdmission(index, state, true);
   try {
-    const captured = preconfirmed !== undefined ? preconfirmed.captured : await index.lifecycle.run(tabId, async () => await readTransitionFacts(state, runtime));
+    const captured = preconfirmed !== undefined ? preconfirmed.captured : await index.lifecycle.run(tabId, async () => await windowState().sessionRuntime.readTransitionFacts(state, runtime));
     if (preconfirmed === undefined) {
       const choice = await vscode.window.showWarningMessage(
         `${label} the OMP session “${s.launcherProvider?.headlineFor(entry.tabId) ?? sessionHeadline(entry, null)}”?`,
@@ -11109,22 +10993,22 @@ async function confirmAndStopRuntime(
       await index.lifecycle.run(tabId, async lease => {
         if (state.runtime !== runtime || state.tabId !== tabId || (passiveReasonForSlot(state.slotId) !== null) !== conflicting) return null;
         if (preconfirmed?.idleOnly === true) {
-          const fresh = await readTransitionFacts(state, runtime);
+          const fresh = await windowState().sessionRuntime.readTransitionFacts(state, runtime);
           if (fresh?.settled !== true || (captured !== null && (fresh.epoch !== captured.epoch || fresh.file !== captured.file || fresh.sessionId !== captured.sessionId))) {
             showWarning("The old session is no longer idle or its identity changed; nothing was stopped.");
             return null;
           }
         }
         if (mode === "force" && captured !== null) {
-          const fresh = await readTransitionFacts(state, runtime);
+          const fresh = await windowState().sessionRuntime.readTransitionFacts(state, runtime);
           if (fresh !== null && (fresh.epoch !== captured.epoch || fresh.file !== captured.file || fresh.sessionId !== captured.sessionId)) {
             showWarning("The session target changed while Force Stop was pending; nothing was stopped.");
             return null;
           }
         }
         const stopped = previouslyStopping && mode === "graceful"
-          ? await alreadyEnded(runtime) ?? { writerGone: false, treeEmpty: false, detail: "Native shutdown is already pending; no new shutdown is sent." }
-          : await stopSessionRuntime(state, runtime, mode, true, captured);
+          ? await windowState().sessionRuntime.confirmEnded(runtime) ?? { writerGone: false, treeEmpty: false, detail: "Native shutdown is already pending; no new shutdown is sent." }
+          : await windowState().sessionRuntime.requestStop(state, runtime, mode, true, captured);
         log(`session stop ${tabId}: ${"diagnosticDetail" in stopped ? stopped.diagnosticDetail ?? stopped.detail : stopped.detail}`);
         if (!stopped.writerGone) {
           state.controlFailure = stopped.detail;

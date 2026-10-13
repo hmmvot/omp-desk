@@ -12,12 +12,16 @@ import type { OwnerReconciler } from "../host/session-availability.ts";
 import type { OmpHostLauncher, RestoreOutcome, RestoreReport, SessionIndex } from "../host/session-index.ts";
 import type { SessionViewMode } from "../host/session-model.ts";
 import type { TabLifecycleLease } from "../host/tab-lifecycle.ts";
+import type { SessionHostRuntime, SessionTransitionFacts } from "../host/native-session.ts";
+import type { NativeStopVerdict } from "../host/rpc-reconcile.ts";
+import type { StopOperations, StopRecord } from "./local-stop.ts";
 import type { OpenRequest, ReattachRequest, RestorePassRequest, RuntimeHolder, SessionRuntime } from "./session-runtime.ts";
 
 export interface LocalSessionRuntimeDeps {
 	readonly index: SessionIndex;
 	readonly reconciler: () => OwnerReconciler;
 	readonly launcher: () => OmpHostLauncher;
+	readonly stop: StopOperations;
 }
 
 /**
@@ -98,5 +102,28 @@ export class LocalSessionRuntime implements SessionRuntime {
 			emptyFile: request.emptyFile,
 			launcher: this.#deps.launcher(),
 		}, lease);
+	}
+
+	// Verdict-only stop operations (cut 4). They take no gate: every caller holds the tab's lease and
+	// records the outcome under it. Cut 7 folds them into the gated `stop` and `replaceWriter`.
+
+	/** Ask the exact process of `state` to stop, or recognise that it already ended; records nothing. */
+	requestStop(state: StopRecord, runtime: SessionHostRuntime, mode: "graceful" | "force", consent: boolean, expected?: SessionTransitionFacts | null): Promise<NativeStopVerdict> {
+		return this.#deps.stop.requestStop(state, runtime, mode, consent, expected);
+	}
+
+	/** A verdict for a runtime whose recorded OMP root is already gone, or `null` when that cannot be shown. */
+	confirmEnded(runtime: SessionHostRuntime): Promise<NativeStopVerdict | null> {
+		return this.#deps.stop.confirmEnded(runtime);
+	}
+
+	/** Wait, bounded, for a chat session to settle on the very facts a stop was confirmed against. */
+	awaitSettled(state: StopRecord, runtime: SessionHostRuntime, expected: SessionTransitionFacts): Promise<SessionTransitionFacts | null> {
+		return this.#deps.stop.awaitSettled(state, runtime, expected);
+	}
+
+	/** The facts a stop or replacement is confirmed against; `null` when the record no longer holds this runtime. */
+	readTransitionFacts(state: StopRecord, runtime: SessionHostRuntime): Promise<SessionTransitionFacts | null> {
+		return this.#deps.stop.readTransitionFacts(state, runtime);
 	}
 }

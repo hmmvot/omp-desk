@@ -251,7 +251,7 @@ export const harness = {
     const w = fixtureWindow();
     w.context = context;
     w.reconciler = createOwnerReconciler(ports);
-    w.sessionRuntime = new LocalSessionRuntime({ index: w.indexForBridge, reconciler: () => w.reconciler, launcher: () => hostLauncher });
+    w.sessionRuntime = new LocalSessionRuntime({ ...sessionRuntimeDeps(w.indexForBridge), launcher: () => hostLauncher });
     w.editorPanels = { ...w.editorPanels, openPanel: () => undefined };
     // The broker facts of the fixture's rows come in through the handle's deps, not by reassigning a function of the module.
     w.sessionActions = registerSessionActions({ ...sessionActionsDeps(), brokerProvenanceFor: () => ({ kind: 'slot', slot: 'host:legacy-fixture' }), recordedHostStopPort: () => stopPort });

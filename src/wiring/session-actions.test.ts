@@ -173,6 +173,7 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 		sessionRuntime: () => new LocalSessionRuntime({
 			index: index as never,
 			reconciler: () => state.reconciler,
+			stop: { requestStop: async () => ({ writerGone: true, treeEmpty: true, detail: "fixture" }), confirmEnded: async () => null, awaitSettled: async () => null, readTransitionFacts: async () => null },
 			launcher: () => ({
 				launch: async () => ({ state: "not-started", reason: "fixture" }),
 				attach: async request => { reattached.push([request]); return { state: "unavailable", reason: "fixture" }; },

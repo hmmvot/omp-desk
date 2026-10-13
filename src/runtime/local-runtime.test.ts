@@ -47,6 +47,7 @@ function fixture(overrides: { entry?: unknown; verdict?: { kind: string }; resto
 		index: index as unknown as SessionIndex,
 		reconciler: () => reconciler,
 		launcher: () => { launcherReads++; return hostLauncher; },
+		stop: { requestStop: async () => ({ writerGone: true, treeEmpty: true, detail: "fixture" }), confirmEnded: async () => null, awaitSettled: async () => null, readTransitionFacts: async () => null },
 	});
 	return { runtime, calls, report, hostLauncher, reconciler, attached, launches, launcherReads: () => launcherReads };
 }
