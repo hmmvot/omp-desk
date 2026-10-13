@@ -436,6 +436,22 @@ describe("projections", () => {
 		model = end(model, "msg-9", assistantMessage("done", 200));
 		assert.deepEqual(windowOf(model, 10, null).rows.map(row => row.id), ["u1", "live:msg-9", "event:2"]);
 	});
+
+	it("keeps a command result row when the re-read lacks the entry it was anchored to", () => {
+		const user = messageEntry("u1", null, userMessage("hi", 100));
+		const reply = messageEntry("a1", "u1", assistantMessage("done", 200));
+		let model = live({ entries: [user, reply], leafId: "a1" });
+		// An idle /shake: OMP answers with command output and no new entry; the host then re-reads the session file.
+		model = reduceChatFrame(model, { type: "auto_compaction_start", action: "shake", reason: "manual" }, { now: 3 });
+		model = reduceChatFrame(model, { type: "command_output", text: "Shook 12 tool results (~7941 tokens freed)." }, { now: 4 });
+		model = reduceChatFrame(model, { type: "auto_compaction_end", action: "shake", aborted: false, willRetry: false }, { now: 5 });
+		assert.deepEqual(model.ephemeral.map(item => [item.kind, item.anchorId]), [["command_output", "a1"], ["maintenance", "event:1"]]);
+		// The file trails the process: the reply is not on disk yet, so the re-read holds only its parent.
+		model = applyChatRewrite(model, [user], 0, "u1");
+		assert.deepEqual(model.ephemeral.map(item => [item.kind, item.anchorId]), [["command_output", "u1"], ["maintenance", "event:1"]], "the rows move to the nearest surviving ancestor");
+		model = applyChatRewrite(model, [user, reply], 0, "a1");
+		assert.equal(windowOf(model, 10, null).rows.some(row => row.id === "event:1"), true, "the result is still on screen");
+	});
 });
 
 describe("IRC and custom rows reconcile without a false 'not yet saved'", () => {

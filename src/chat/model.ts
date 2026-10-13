@@ -1249,10 +1249,25 @@ export function applyChatRewrite(
 	const ids = new Set(next.entries.map(entry => entry.id));
 	// The streaming message is not an entry yet, but rows already anchor to its id; its own message_end makes it the pending row of that id.
 	if (next.stream !== null && next.streamId !== null) ids.add(pendingEntryId(next.streamId));
+	// A row the re-read lacks (the disk trails the process, a pending row was consumed) must not take the notices anchored to it
+	// along: they move to the nearest ancestor the new rows still hold. A rewrite that shares no ancestry (a clear, another branch) drops them.
+	const parents = new Map<string, string | null>();
+	for (const entry of model.entries) parents.set(entry.id, entry.parentId);
+	for (const item of model.ephemeral) parents.set(item.id, item.anchorId);
+	const resolve = (anchorId: string): string | undefined => {
+		const visited = new Set<string>();
+		let at: string | null = anchorId;
+		while (at !== null && !ids.has(at) && !visited.has(at) && parents.has(at)) {
+			visited.add(at);
+			at = parents.get(at) ?? null;
+		}
+		return at !== null && ids.has(at) ? at : undefined;
+	};
 	const ephemeral: EphemeralItem[] = [];
 	for (const item of next.ephemeral) {
-		if (item.anchorId !== null && !ids.has(item.anchorId)) continue;
-		ephemeral.push(item);
+		const anchorId = item.anchorId === null ? null : resolve(item.anchorId);
+		if (anchorId === undefined) continue;
+		ephemeral.push(anchorId === item.anchorId ? item : { ...item, anchorId });
 		ids.add(item.id);
 	}
 	const surviving = new Map(next.pending);
