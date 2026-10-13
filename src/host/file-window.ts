@@ -1,5 +1,5 @@
 /**
- * The file window of Ctrl+Shift+M (`omp.moveFileToNewWindow`): one auxiliary VS Code window that files from the chat
+ * The file window of Ctrl+Shift+M (`ompDesk.moveFileToNewWindow`): one auxiliary VS Code window that files from the chat
  * column are collected in.
  *
  * VS Code reports an auxiliary window's editor groups in `window.tabGroups` with ordinary view columns that follow

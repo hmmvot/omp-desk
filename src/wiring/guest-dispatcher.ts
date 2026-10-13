@@ -15,7 +15,7 @@ import * as vscode from "vscode";
 import { TAB_INPUT_VIEW_TYPE_PREFIX } from "../host/bridge-identity.ts";
 import type { ChatCommandOutcome, ChatPage } from "../host/chat-runtime.ts";
 import type { ConversationPort } from "../runtime/session-runtime.ts";
-import { DETAIL_VIEW_TYPE } from "../host/detail-tabs.ts";
+import { DETAIL_VIEW_TYPE, LEGACY_DETAIL_VIEW_TYPE } from "../host/detail-tabs.ts";
 import type { DetailTabs } from "../host/detail-tabs.ts";
 import type { SessionIndex } from "../host/session-index.ts";
 import type { ChatWebviewMessage } from "../protocol/chat-messages.ts";
@@ -62,6 +62,8 @@ export const CHAT_COMMAND_TYPES: ReadonlySet<string> = new Set([
 
 /** How long a page is given to report its selection before the symbol search opens empty. */
 const SELECTION_REQUEST_TIMEOUT_MS = 500;
+/** The detail tab types a sweep closes at activation: the current one and the one before ADR-0068. */
+const DETAIL_VIEW_TYPES: readonly string[] = [DETAIL_VIEW_TYPE, LEGACY_DETAIL_VIEW_TYPE];
 
 /** How long one document is given to hand its unsent draft over before it is replaced. */
 const DRAFT_CAPTURE_TIMEOUT_MS = 1_500;
@@ -207,9 +209,9 @@ export interface GuestDispatcher<Tab extends GuestTab = GuestTab> {
 	replyChatSendResult(tabId: string, message: ChatWebviewMessage, page: ChatPage, outcome: ChatCommandOutcome): void;
 	/** The page's own answer to the selection request; a reply from another editor or panel is not the request's. */
 	acceptSelectionReply(slot: string, panel: vscode.WebviewPanel, reply: GuestSelectionReplyMessage): void;
-	/** `omp.searchSymbolFromChat` (Ctrl+N over a Chat page). */
+	/** `ompDesk.searchSymbolFromChat` (Ctrl+N over a Chat page). */
 	searchSymbolFromChat(): Promise<void>;
-	/** `omp.searchFileFromChat` (Ctrl+Shift+N over a Chat page). */
+	/** `ompDesk.searchFileFromChat` (Ctrl+Shift+N over a Chat page). */
 	searchFileFromChat(): Promise<void>;
 	/** Ask one editor's page for its unsent composer draft (ADR-0025's bounded handoff). */
 	captureDraft(source: Tab): Promise<CarriedDraft<Tab> | null>;
@@ -265,7 +267,7 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 	}
 
 	/**
-	 * `omp.searchSymbolFromChat` (Ctrl+N over a Chat page): VS Code's symbol search seeded with what the page has selected,
+	 * `ompDesk.searchSymbolFromChat` (Ctrl+N over a Chat page): VS Code's symbol search seeded with what the page has selected,
 	 * as it is seeded from an editor's selection; with nothing selected it opens empty.
 	 */
 	async function searchSymbolFromChat(): Promise<void> {
@@ -275,7 +277,7 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 	}
 
 	/**
-	 * `omp.searchFileFromChat` (Ctrl+Shift+N over a Chat page): VS Code's Go to File seeded with what the page has selected;
+	 * `ompDesk.searchFileFromChat` (Ctrl+Shift+N over a Chat page): VS Code's Go to File seeded with what the page has selected;
 	 * with nothing selected it opens empty.
 	 */
 	async function searchFileFromChat(): Promise<void> {
@@ -404,7 +406,7 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 		for (const group of vscode.window.tabGroups.all) {
 			for (const tab of group.tabs) {
 				const viewType = tab.input instanceof vscode.TabInputWebview ? tab.input.viewType : null;
-				if (viewType === DETAIL_VIEW_TYPE || viewType === `${TAB_INPUT_VIEW_TYPE_PREFIX}${DETAIL_VIEW_TYPE}`) leftovers.push(tab);
+				if (viewType !== null && DETAIL_VIEW_TYPES.some(type => viewType === type || viewType === `${TAB_INPUT_VIEW_TYPE_PREFIX}${type}`)) leftovers.push(tab);
 			}
 		}
 		if (leftovers.length > 0) await vscode.window.tabGroups.close(leftovers, true);

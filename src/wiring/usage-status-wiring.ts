@@ -3,7 +3,7 @@ import { buildUsageStatus } from "../host/usage-status.ts";
 import type { UsageSeverity, UsageStatusModel, UsageStatusSource } from "../host/usage-status.ts";
 
 /** Click target of the item; also in the Command Palette. */
-export const USAGE_STATUS_REFRESH_COMMAND = "omp.refreshUsageStatus";
+export const USAGE_STATUS_REFRESH_COMMAND = "ompDesk.refreshUsageStatus";
 const ITEM_ID = "omp.usageStatus";
 const TICK_MS = 60_000;
 /** Left side, after the items other extensions and VS Code itself put there. */

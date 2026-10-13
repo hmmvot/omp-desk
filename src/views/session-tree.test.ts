@@ -226,7 +226,7 @@ const packageJson = JSON.parse(fs.readFileSync(new URL("../../package.json", imp
  */
 function contributedCommands(contextValue: string): string[] {
 	const clauses = (packageJson.contributes.menus["view/item/context"] ?? []).filter(item =>
-		item.when.startsWith("view == omp.sessions && viewItem =~ /"),
+		item.when.startsWith("view == ompDesk.sessions && viewItem =~ /"),
 	);
 	return clauses
 		.filter(item => new RegExp(item.when.slice(item.when.indexOf("/") + 1, item.when.lastIndexOf("/"))).test(contextValue))
@@ -285,9 +285,9 @@ describe("a draft whose process was killed", () => {
 describe("session row menu per state", () => {
 	const FILE = path.join(os.tmpdir(), "omp-launcher-tree", "menu.jsonl");
 	const LIVE = ["running", "working", "background", "question", "unread", "waiting"] as const;
-	const OPEN = ["omp.openSessionInChat", "omp.openSessionInTerminal"];
-	const SHOW_BOTH = ["omp.showSessionInChat", "omp.showSessionInTerminal"];
-	const LIVE_REST = ["omp.renameSession", "omp.reloadSession", "omp.closeSession", "omp.deleteSession", "omp.killSession"];
+	const OPEN = ["ompDesk.openSessionInChat", "ompDesk.openSessionInTerminal"];
+	const SHOW_BOTH = ["ompDesk.showSessionInChat", "ompDesk.showSessionInTerminal"];
+	const LIVE_REST = ["ompDesk.renameSession", "ompDesk.reloadSession", "ompDesk.closeSession", "ompDesk.deleteSession", "ompDesk.killSession"];
 	const attached = (viewMode: "chat" | "terminal" | null): SessionLauncherFacts =>
 		({ ...NO_FACTS, open: viewMode !== null, running: true, viewMode });
 	const materialized = entry({ tabId: "tab:menu", cwd: ALPHA, kind: "session", sessionFile: FILE, availability: "live", runIntent: "running" });
@@ -300,41 +300,41 @@ describe("session row menu per state", () => {
 		readonly expected: readonly string[];
 	}> = [
 		{ name: "stopped", state: "stopped", entry: materialized, facts: NO_FACTS,
-			expected: ["omp.openSession", ...OPEN, "omp.renameSession", "omp.forgetSession", "omp.deleteSession"] },
+			expected: ["ompDesk.openSession", ...OPEN, "ompDesk.renameSession", "ompDesk.forgetSession", "ompDesk.deleteSession"] },
 		{ name: "draft", state: "draft", entry: fileless, facts: NO_FACTS,
-			expected: ["omp.openSession", ...OPEN, "omp.renameSession", "omp.forgetSession"] },
+			expected: ["ompDesk.openSession", ...OPEN, "ompDesk.renameSession", "ompDesk.forgetSession"] },
 		...LIVE.flatMap(state => [
 			{ name: `${state} shown in Chat`, state, entry: materialized, facts: attached("chat"),
-				expected: ["omp.showSessionInTerminal", ...LIVE_REST] },
+				expected: ["ompDesk.showSessionInTerminal", ...LIVE_REST] },
 			{ name: `${state} shown in Terminal`, state, entry: materialized, facts: attached("terminal"),
-				expected: ["omp.showSessionInChat", ...LIVE_REST] },
+				expected: ["ompDesk.showSessionInChat", ...LIVE_REST] },
 			{ name: `${state} with its editor closed`, state, entry: materialized, facts: attached(null),
 				expected: [...SHOW_BOTH, ...LIVE_REST] },
 		]),
 		{ name: "a fileless live draft has nothing to reload or delete", state: "working", entry: fileless, facts: attached("chat"),
-			expected: ["omp.showSessionInTerminal", "omp.renameSession", "omp.closeSession", "omp.killSession"] },
+			expected: ["ompDesk.showSessionInTerminal", "ompDesk.renameSession", "ompDesk.closeSession", "ompDesk.killSession"] },
 		{ name: "a verified live writer this window has not attached", state: "running", entry: materialized,
 			facts: { ...NO_FACTS, ownedWriterPid: 4242, ownershipChecked: true }, expected: [...SHOW_BOTH, ...LIVE_REST] },
 		{ name: "open in another window", state: "otherWindow", entry: materialized,
-			facts: { ...NO_FACTS, heldElsewhere: true, switchableWindow: true }, expected: ["omp.stopSessionHost", "omp.switchToSessionWindow", "omp.killSession"] },
+			facts: { ...NO_FACTS, heldElsewhere: true, switchableWindow: true }, expected: ["ompDesk.stopSessionHost", "ompDesk.switchToSessionWindow", "ompDesk.killSession"] },
 		{ name: "another window without a saved navigation identity", state: "otherWindow", entry: materialized,
-			facts: { ...NO_FACTS, heldElsewhere: true, switchableWindow: false }, expected: ["omp.stopSessionHost", "omp.killSession"] },
+			facts: { ...NO_FACTS, heldElsewhere: true, switchableWindow: false }, expected: ["ompDesk.stopSessionHost", "ompDesk.killSession"] },
 		{ name: "open in another OMP process", state: "externalOmp", entry: materialized,
 			facts: { ...NO_FACTS, externalOmp: true, ownershipChecked: true }, expected: OPEN },
 		{ name: "blocked by a missing transcript", state: "blocked",
 			entry: entry({ tabId: "tab:menu", cwd: ALPHA, kind: "session", sessionFile: FILE, availability: "failed" }),
-			facts: NO_FACTS, expected: ["omp.forgetSession"] },
+			facts: NO_FACTS, expected: ["ompDesk.forgetSession"] },
 		// Kill is the one explicit exception to "nothing that would race the transition": it ends the process whatever it is doing.
-		{ name: "restoring", state: "restoring", entry: materialized, facts: { ...NO_FACTS, restoring: true }, expected: ["omp.killSession"] },
-		{ name: "starting", state: "starting", entry: materialized, facts: { ...NO_FACTS, launching: true }, expected: ["omp.killSession"] },
-		{ name: "stopping", state: "stopping", entry: materialized, facts: { ...attached("chat"), stopping: true }, expected: ["omp.killSession"] },
-		{ name: "checking", state: "checking", entry: materialized, facts: { ...NO_FACTS, checking: true }, expected: ["omp.killSession"] },
+		{ name: "restoring", state: "restoring", entry: materialized, facts: { ...NO_FACTS, restoring: true }, expected: ["ompDesk.killSession"] },
+		{ name: "starting", state: "starting", entry: materialized, facts: { ...NO_FACTS, launching: true }, expected: ["ompDesk.killSession"] },
+		{ name: "stopping", state: "stopping", entry: materialized, facts: { ...attached("chat"), stopping: true }, expected: ["ompDesk.killSession"] },
+		{ name: "checking", state: "checking", entry: materialized, facts: { ...NO_FACTS, checking: true }, expected: ["ompDesk.killSession"] },
 	];
 
 	for (const row of cases) {
 		it(`offers exactly the actions that fit: ${row.name}`, () => {
 			const item = new sessionTree.SessionTreeItem(row.entry, row.state, { header: null, conversation: { lastAt: "1970-01-01T00:00:00.000Z" }, facts: row.facts, active: false, now: 0 });
-			assert.deepEqual([...contributedCommands(item.contextValue!)].sort(), ["omp.copyRowDiagnostics", ...row.expected].sort(), item.contextValue);
+			assert.deepEqual([...contributedCommands(item.contextValue!)].sort(), ["ompDesk.copyRowDiagnostics", ...row.expected].sort(), item.contextValue);
 			assert.ok(tooltipText(item).split("\n").length <= 4);
 			assert.doesNotMatch(tooltipText(item), /writer|claim|broker|Run intent|Tab order/);
 			assert.equal(JSON.parse(item.diagnostics).entry.tabId, row.entry.tabId);
@@ -478,7 +478,7 @@ describe("launcher tree", () => {
 			entries: [nested],
 		});
 		assert.deepEqual(roots[0]?.rows, []);
-		assert.equal(provider.getChildren(roots[0]!)[0]?.command?.command, "omp.newSession");
+		assert.equal(provider.getChildren(roots[0]!)[0]?.command?.command, "ompDesk.newSession");
 	});
 
 	it("keeps an empty folder visible, collapsible, and its collapse state across a rebuild", async () => {
@@ -498,7 +498,7 @@ describe("launcher tree", () => {
 		// Every added folder offers the native expand/collapse affordance even when empty.
 		assert.equal(roots[0]!.collapsibleState, TreeItemCollapsibleState.Expanded);
 		const placeholder = provider.getChildren(roots[0]!)[0]!;
-		assert.equal(placeholder.command?.command, "omp.newSession");
+		assert.equal(placeholder.command?.command, "ompDesk.newSession");
 		assert.equal(placeholder.command?.arguments?.[0], roots[0]);
 		assert.equal(provider.getParent(placeholder), roots[0]);
 		// The saved collapse value is what the node is built from, so a rebuild does
@@ -512,7 +512,7 @@ describe("launcher tree", () => {
 		provider.refresh();
 		const toggled = await rootsOf(provider);
 		assert.equal(toggled[0]!.collapsibleState, TreeItemCollapsibleState.Collapsed);
-		assert.equal(provider.getChildren(toggled[0]!)[0]?.command?.command, "omp.newSession");
+		assert.equal(provider.getChildren(toggled[0]!)[0]?.command?.command, "ompDesk.newSession");
 	});
 
 	it("places the login action above folders only while the no-model flag is set", () => {
@@ -525,7 +525,7 @@ describe("launcher tree", () => {
 		const [login, retained] = provider.getChildren();
 		assert.ok(login instanceof sessionTree.ProviderLoginTreeItem);
 		assert.equal(login.label, "Log in to a model provider to start");
-		assert.equal(login.command?.command, "omp.loginProvider");
+		assert.equal(login.command?.command, "ompDesk.loginProvider");
 		assert.equal(iconId(login), "account");
 		assert.equal(login.collapsibleState, TreeItemCollapsibleState.None);
 		assert.equal(provider.getParent(login), undefined);
@@ -630,8 +630,8 @@ describe("launcher tree", () => {
 		const rows = await rowsOf(provider, roots[0]!);
 		const open = rows.find(row => row.tabId === "tab:open")!;
 		const stopped = rows.find(row => row.tabId === "tab:stopped")!;
-		assert.equal(open.command?.command, "omp.clickSession");
-		assert.equal(stopped.command?.command, "omp.clickSession");
+		assert.equal(open.command?.command, "ompDesk.clickSession");
+		assert.equal(stopped.command?.command, "ompDesk.clickSession");
 		assert.equal(stopped.command?.arguments?.[0], stopped);
 		assert.equal(stopped.id, "tab:stopped");
 	});
@@ -698,10 +698,10 @@ describe("launcher tree", () => {
 			assert.equal(row?.resumable, false);
 			assert.equal(row?.forgettable, false);
 			assert.equal(row?.deletable, false);
-			assert.equal(row?.command?.command, "omp.clickSession");
+			assert.equal(row?.command?.command, "ompDesk.clickSession");
 			const menu = contributedCommands(row!.contextValue!);
-			assert.equal(menu.includes("omp.openSession"), false);
-			assert.ok(menu.includes("omp.stopSessionHost"));
+			assert.equal(menu.includes("ompDesk.openSession"), false);
+			assert.ok(menu.includes("ompDesk.stopSessionHost"));
 			assert.equal(menu.includes("omp.releaseStaleOwnership"), false);
 			assert.ok(tooltipText(row!).split("\n").length <= 4);
 			assert.doesNotMatch(tooltipText(row!), /claim|writer|broker|JSONL/i);
@@ -738,7 +738,7 @@ describe("launcher tree", () => {
 		assert.equal(row.resumable, false);
 		assert.equal(row.forgettable, false);
 		assert.equal(row.deletable, false);
-		assert.equal(row.command?.command, "omp.clickSession");
+		assert.equal(row.command?.command, "ompDesk.clickSession");
 		assert.ok(tooltipText(row).split("\n").length <= 4);
 		assert.equal(JSON.parse(row.diagnostics).facts.externalOmp, true);
 		assert.equal(provider.displayedState("tab:terminal"), "externalOmp");
@@ -824,9 +824,9 @@ describe("launcher tree", () => {
 		assert.equal(iconId(beta!), "folder");
 		assert.equal(alpha!.contextValue, "ompWorkspaceFolder.expanded.pinned");
 		assert.equal(beta!.contextValue, "ompWorkspaceFolder.expanded.unpinned");
-		const shared = ["omp.copyRowDiagnostics", "omp.newSession", "omp.newSession", "omp.resumeWorkspaceFolder", "omp.resumeWorkspaceFolder", "omp.openTerminal"];
-		assert.deepEqual(contributedCommands(alpha!.contextValue!), [...shared, "omp.unpinWorkspaceFolder"]);
-		assert.deepEqual(contributedCommands(beta!.contextValue!), [...shared, "omp.pinWorkspaceFolder", "omp.pinWorkspaceFolder"]);
+		const shared = ["ompDesk.copyRowDiagnostics", "ompDesk.newSession", "ompDesk.newSession", "ompDesk.resumeWorkspaceFolder", "ompDesk.resumeWorkspaceFolder", "ompDesk.openTerminal"];
+		assert.deepEqual(contributedCommands(alpha!.contextValue!), [...shared, "ompDesk.unpinWorkspaceFolder"]);
+		assert.deepEqual(contributedCommands(beta!.contextValue!), [...shared, "ompDesk.pinWorkspaceFolder", "ompDesk.pinWorkspaceFolder"]);
 		assert.ok(alpha!.accessibilityInformation?.label.includes("pinned"));
 	});
 
@@ -1462,12 +1462,12 @@ describe("launcher tree", () => {
 			const [newSession, resumeSession, ...rest] = provider.getChildren();
 			assert.deepEqual(rest, []);
 			assert.ok(newSession instanceof sessionTree.NewSessionTreeItem);
-			assert.equal(newSession.command?.command, "omp.newSession");
+			assert.equal(newSession.command?.command, "ompDesk.newSession");
 			assert.equal(newSession.command?.arguments, undefined);
 			assert.ok(resumeSession instanceof sessionTree.ResumeSessionTreeItem);
 			assert.equal(resumeSession.label, "Resume Session…");
 			assert.equal(iconId(resumeSession), "history");
-			assert.equal(resumeSession.command?.command, "omp.resumeWorkspaceFolder");
+			assert.equal(resumeSession.command?.command, "ompDesk.resumeWorkspaceFolder");
 			assert.equal(resumeSession.command?.arguments, undefined);
 			assert.equal(provider.getParent(resumeSession), undefined);
 			assert.deepEqual(provider.getChildren(resumeSession), []);
@@ -1655,7 +1655,7 @@ describe("launcher tree", () => {
 			assert.deepEqual(children.map(child => child.id), [sessionRow.id, shell.id]);
 			assert.deepEqual(children.map(child => String(child.label)), ["alpha · Fix the build", "alpha · Terminal"]);
 			assert.deepEqual(children.map(child => child.openTarget), ["session", "terminal"]);
-			assert.deepEqual(children.map(child => child.command?.command), ["omp.openProcess", "omp.openProcess"]);
+			assert.deepEqual(children.map(child => child.command?.command), ["ompDesk.openProcess", "ompDesk.openProcess"]);
 			assert.equal(terminals.sessionRowsShown(), false);
 			assert.equal(terminals.getParent(children[0]!), undefined);
 			assert.deepEqual(await terminals.getChildren(children[0]!), []);

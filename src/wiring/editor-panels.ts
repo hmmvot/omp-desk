@@ -6,7 +6,7 @@
  * restore paths (the versioned view type of one editor, and the one-time migration of the legacy generic
  * panel); `bindPanel` is the one place a panel becomes a chat surface, and `renderPanelDocument` points a bound
  * panel at the document its tab's state calls for. The chat column keeps session editors in their own locked
- * group on the left (`omp.chatColumn`). What a document connects to — the bridge endpoint, its ticket and its
+ * group on the left (`ompDesk.chatColumn`). What a document connects to — the bridge endpoint, its ticket and its
  * routes — belongs to the bridge host; the window's records, the editor-slot elections, the launcher and the
  * conversation pages all arrive through {@link EditorPanelsDeps} as getters and callbacks.
  */
@@ -208,7 +208,7 @@ export interface EditorPanels {
 	isSessionTabInput(input: unknown): boolean;
 	/** The column VS Code really shows a session editor in, from the tab it reports. */
 	sessionTabColumn(viewType: string): number | undefined;
-	/** `omp.focusComposer`: put the keyboard in a session's composer. */
+	/** `ompDesk.focusComposer`: put the keyboard in a session's composer. */
 	focusChatComposer(index: SessionIndex): Promise<void>;
 }
 
@@ -308,9 +308,9 @@ export function registerEditorPanels<Tab extends EditorPanelsTab>(deps: EditorPa
 		})();
 	}
 
-	/** Whether session editors keep their own locked editor group on the left (`omp.chatColumn`). */
+	/** Whether session editors keep their own locked editor group on the left (`ompDesk.chatColumn`). */
 	function chatColumnEnabled(): boolean {
-		return vscode.workspace.getConfiguration("omp").get<boolean>("chatColumn", true);
+		return vscode.workspace.getConfiguration("ompDesk").get<boolean>("chatColumn", true);
 	}
 
 	/** Whether a tab shows a session editor of this extension. */
@@ -363,7 +363,7 @@ export function registerEditorPanels<Tab extends EditorPanelsTab>(deps: EditorPa
 	}
 
 	/**
-	 * `omp.focusComposer` from anywhere (Ctrl+Shift+L): put the keyboard in a session's composer. The session is the
+	 * `ompDesk.focusComposer` from anywhere (Ctrl+Shift+L): put the keyboard in a session's composer. The session is the
 	 * active session editor, else the one showing in the chat group, else the last active one; a Terminal-mode session
 	 * gets the focus on its terminal. With no session editor open, the OMP Desk side bar opens instead.
 	 */
@@ -379,7 +379,7 @@ export function registerEditorPanels<Tab extends EditorPanelsTab>(deps: EditorPa
 		const panel = tabId === null ? null : (await deps.reviveEditorPanel(index, tabId)).panel;
 		const state = tabId === null ? undefined : deps.tab(tabId);
 		if (panel === null || state === undefined) {
-			await vscode.commands.executeCommand("workbench.view.extension.omp");
+			await vscode.commands.executeCommand("workbench.view.extension.ompDesk");
 			return;
 		}
 		panel.reveal(panel.viewColumn, false);

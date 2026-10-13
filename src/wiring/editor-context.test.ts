@@ -1,5 +1,5 @@
 /**
- * "OMP: Add Selection to Session" / "OMP: Add File to Session": the reference text, the paste bytes
+ * "OMP Desk: Add Selection to Session" / "OMP Desk: Add File to Session": the reference text, the paste bytes
  * and which sessions the picker offers.
  *
  * Runner: `node --test src/wiring/editor-context.test.ts`

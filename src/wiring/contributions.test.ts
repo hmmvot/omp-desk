@@ -11,7 +11,7 @@
  * Rules the cases hold the contributions to:
  * - every command a menu, keybinding or welcome link names is declared in `contributes.commands`, with a title;
  * - every declared command is registered once at runtime (a declared command that is not is a dead menu item);
- * - a registered command that is not declared is allowed only when a tree row runs it on click (`omp.clickSession`);
+ * - a registered command that is not declared is allowed only when a tree row runs it on click (`ompDesk.clickSession`);
  * - every `view == <id>` names a contributed view, in a contributed container, that the extension gave a provider;
  * - every `viewItem` clause matches a `contextValue` its view's tree produces, and every produced `contextValue`
  *   has a menu entry unless it is one of the rows that only open on click;
@@ -22,6 +22,7 @@
  * `src/`, so the activated bundle (in the temporary folder) keeps its own recording module.
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import module from "node:module";
 import { tmpdir } from "node:os";
@@ -37,6 +38,8 @@ import type { BrokerProcessRow, BrokerProcessSnapshot } from "../host/broker-pro
 import type { SessionIndexEntry } from "../host/session-model.ts";
 import type { LauncherFolder } from "../views/launcher-folders.ts";
 import type { SessionActivityFacts, SessionLauncherFacts, SessionTreeProvider } from "../views/session-tree.ts";
+import { LEGACY_ALIASES, LEGACY_COMMAND_IDS, LEGACY_CONTEXT_KEYS, legacyCommandTarget } from "./legacy-aliases.ts";
+import { LEGACY_SETTING_NAMES } from "./legacy-settings.ts";
 import { createRecordingVscode } from "./vscode-recording-stub.ts";
 import type { Recording } from "./vscode-recording-stub.ts";
 
@@ -164,7 +167,7 @@ before(async () => {
 		process.env[name] = value;
 	}
 	// No OMP to find: nothing the handlers do can start the user's installed OMP or Bun.
-	const created = createRecordingVscode({ "omp.executablePath": path.join(root, "no-such-omp.exe") });
+	const created = createRecordingVscode({ "ompDesk.executablePath": path.join(root, "no-such-omp.exe") });
 	recording = created.recording;
 	(globalThis as Record<string, unknown>).__ompContributionVscode = created.vscode;
 	extension = module.createRequire(bundle)(bundle) as ExtensionModule;
@@ -180,7 +183,7 @@ before(async () => {
 	await extension.activate(context);
 	// The catalog pass finishes after `activate` returns and registers its watchers when it does; tearing down before
 	// it ends would leave a watcher no one disposes.
-	await recording.contextSet("omp.catalogPending", false);
+	await recording.contextSet("ompDesk.catalogPending", false);
 	await nextTurn();
 	await nextTurn();
 });
@@ -368,12 +371,12 @@ function inventoryViewRows(kind: "skills" | "tools" | "mcp" | "extensions"): Pro
 /** The tree behind each contributed view id: what its rows can be. */
 async function producedByView(): Promise<Map<string, ProducedRow[]>> {
 	return new Map([
-		["omp.sessions", await sessionsViewRows()],
-		["omp.context", contextViewRows()],
-		["omp.skills", inventoryViewRows("skills")],
-		["omp.tools", inventoryViewRows("tools")],
-		["omp.mcp", inventoryViewRows("mcp")],
-		["omp.extensions", inventoryViewRows("extensions")],
+		["ompDesk.sessions", await sessionsViewRows()],
+		["ompDesk.context", contextViewRows()],
+		["ompDesk.skills", inventoryViewRows("skills")],
+		["ompDesk.tools", inventoryViewRows("tools")],
+		["ompDesk.mcp", inventoryViewRows("mcp")],
+		["ompDesk.extensions", inventoryViewRows("extensions")],
 	]);
 }
 
@@ -414,12 +417,13 @@ describe("commands", () => {
 		assert.deepEqual(iconless, [], "shown as a toolbar or inline button without an icon");
 	});
 
-	it("are registered at runtime, once each, and only the row commands are registered without a declaration", async () => {
+	it("are registered at runtime, once each, and only the row commands and the legacy aliases are registered without a declaration", async () => {
 		const rowCommands = new Set([...(await producedByView()).values()].flat().flatMap(row => (row.command === undefined ? [] : [row.command])));
 		assert.deepEqual(recording.duplicateCommands, [], "registered twice (the editor refuses the second registration)");
 		const unregistered = [...declared.keys()].filter(id => !recording.commands.has(id));
 		assert.deepEqual(unregistered, [], "declared in package.json but never registered: a menu item or palette entry that says 'command not found'");
-		const undeclared = [...recording.commands.keys()].filter(id => !declared.has(id) && !rowCommands.has(id));
+		const aliases = new Set(LEGACY_ALIASES.map(([oldId]) => oldId));
+		const undeclared = [...recording.commands.keys()].filter(id => !declared.has(id) && !rowCommands.has(id) && !aliases.has(id));
 		assert.deepEqual(undeclared, [], "registered without a declaration and not run by any row's click: declare it or drop it");
 		const unregisteredRowCommands = [...rowCommands].filter(id => !recording.commands.has(id));
 		assert.deepEqual(unregisteredRowCommands, [], "run by a tree row's click but never registered");
@@ -427,12 +431,12 @@ describe("commands", () => {
 
 	it("bind Ctrl+N and Ctrl+Shift+N inside a Chat only, under the one condition, to the symbol search and Go to File seeded from its selection", () => {
 		const bound = (key: string) => contributes.keybindings.filter(binding => binding.key === key);
-		assert.deepEqual(bound("ctrl+n").map(binding => binding.command), ["omp.searchSymbolFromChat"]);
-		assert.deepEqual(bound("ctrl+shift+n").map(binding => binding.command), ["omp.searchFileFromChat"]);
-		const chatOnly = "activeWebviewPanelId =~ /^omp[.]session/ && omp.sessionMode == chat";
+		assert.deepEqual(bound("ctrl+n").map(binding => binding.command), ["ompDesk.searchSymbolFromChat"]);
+		assert.deepEqual(bound("ctrl+shift+n").map(binding => binding.command), ["ompDesk.searchFileFromChat"]);
+		const chatOnly = "activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat";
 		assert.equal(bound("ctrl+n")[0]?.when, chatOnly);
 		assert.equal(bound("ctrl+shift+n")[0]?.when, chatOnly);
-		assert.equal(declared.get("omp.searchFileFromChat")?.title, "Go to File from Chat Selection");
+		assert.equal(declared.get("ompDesk.searchFileFromChat")?.title, "Go to File from Chat Selection");
 	});
 });
 
@@ -463,7 +467,7 @@ describe("views", () => {
 		const clauses = [...menus.map(({ menu, entry }) => ({ by: where(menu, entry), when: entry.when ?? "" })), ...contributes.viewsWelcome.map(welcome => ({ by: `viewsWelcome of ${welcome.view}`, when: welcome.when ?? "" })),
 			...contributes.keybindings.map(binding => ({ by: `keybinding ${binding.command}`, when: binding.when ?? "" }))];
 		for (const { by, when } of clauses) {
-			for (const used of when.matchAll(/\bconfig\.(omp\.[\w.]+)/g)) if (!settings.has(used[1] ?? "")) unknown.push(`${used[1]} in ${by}`);
+			for (const used of when.matchAll(/\bconfig\.(ompDesk\.[\w.]+)/g)) if (!settings.has(used[1] ?? "")) unknown.push(`${used[1]} in ${by}`);
 		}
 		assert.deepEqual(unknown, [], "tests a setting that is not contributed (the clause is never true)");
 	});
@@ -540,7 +544,99 @@ describe("the palette", () => {
 	it("only executes commands that exist when a visible command runs another", async () => {
 		const { executed } = await runPalette();
 				const viewFocus = new Set([...viewIds].map(id => `${id}.focus`));
-		const missing = [...new Set(executed)].filter(id => id.startsWith("omp.") && !viewFocus.has(id) && !recording.commands.has(id));
+		const missing = [...new Set(executed)].filter(id => id.startsWith("ompDesk.") && !viewFocus.has(id) && !recording.commands.has(id));
 		assert.deepEqual(missing, [], "executed by a command of this extension but registered by no one");
+	});
+});
+
+describe("the namespace (ADR-0068)", () => {
+	/** The only `omp.` names the manifest may still hold, each with the reason; a new entry needs a decision, not a rename. */
+	const OMP_NAMESPACE_EXCEPTIONS = new Map<string, string>([
+		["omp.session", "webview view type (activation event); persisted editor identity, not a contributed id"],
+		["omp.shellTerminal", "webview view type (activation event)"],
+		["omp.settings", "webview view type (activation event)"],
+		["omp.exe", "the program name inside a description"],
+		["omp.focusComposer", "commandsToSkipShell for the legacy alias of ompDesk.focusComposer"],
+		["omp.goToSession", "commandsToSkipShell for the legacy alias of ompDesk.goToSession"],
+		["omp.moveFileToNewWindow", "commandsToSkipShell for the legacy alias of ompDesk.moveFileToNewWindow"],
+		...LEGACY_SETTING_NAMES.map((name): [string, string] => [`omp.${name}`, "hidden deprecated setting of 0.3.x, kept so VS Code still reads, routes and syncs the old value until the migration moved it"]),
+	]);
+
+	it("gives every command the category OMP Desk and an id under ompDesk.", () => {
+		const wrong = contributes.commands.filter(command => (command as { category?: string }).category !== "OMP Desk" || !command.command.startsWith("ompDesk.")).map(command => command.command);
+		assert.deepEqual(wrong, [], "a command outside the OMP Desk category or the ompDesk. namespace");
+	});
+
+	it("contributes every command, container, view, keybinding and context key under ompDesk., apart from the listed exceptions", () => {
+		const containerIds = Object.values(contributes.viewsContainers).flat().map(container => container.id);
+		const outside = [...containerIds, ...Object.keys(contributes.views), ...views.map(view => view.id)].filter(id => !id.startsWith("ompDesk"));
+		assert.deepEqual(outside, [], "a contributed id outside the ompDesk namespace");
+		const tokens = new Set(JSON.stringify(manifest).match(/\bomp\.[A-Za-z][\w.]*/g) ?? []);
+		const unexplained = [...tokens].filter(token => !OMP_NAMESPACE_EXCEPTIONS.has(token));
+		assert.deepEqual(unexplained, [], "the manifest names something in the omp. namespace that no exception explains");
+	});
+
+	it("holds each setting of 0.3.x under ompDesk., and under omp. only as a hidden, deprecated key of the same scope", () => {
+		const properties = contributes.configuration.properties as Record<string, { scope?: string; included?: boolean; deprecationMessage?: string }>;
+		const current = Object.keys(properties).filter(key => key.startsWith("ompDesk."));
+		const old = Object.keys(properties).filter(key => key.startsWith("omp."));
+		assert.deepEqual(Object.keys(properties).filter(key => !key.startsWith("ompDesk.") && !key.startsWith("omp.")), [], "a setting outside both namespaces");
+		assert.deepEqual(old.map(key => key.slice("omp.".length)).sort(), [...LEGACY_SETTING_NAMES].sort());
+		for (const key of old) {
+			const successor = `ompDesk.${key.slice("omp.".length)}`;
+			assert.ok(current.includes(successor), `${key} has no successor`);
+			assert.equal(properties[key]?.included, false, `${key} must stay out of the Settings editor`);
+			assert.ok((properties[key]?.deprecationMessage ?? "").includes(successor), `${key} must name ${successor}`);
+			assert.equal(properties[key]?.scope, properties[successor]?.scope, `${key} keeps the scope VS Code routes it by`);
+		}
+	});
+
+	it("keeps the omp. skip-shell entries exactly for the aliases of the ompDesk. ones", () => {
+		const defaults = (manifest as unknown as { contributes: { configurationDefaults: Record<string, readonly string[]> } }).contributes.configurationDefaults["terminal.integrated.commandsToSkipShell"] ?? [];
+		const current = defaults.filter(id => id.startsWith("ompDesk."));
+		const legacy = defaults.filter(id => id.startsWith("omp."));
+		assert.deepEqual(legacy, current.map(id => "omp." + id.slice("ompDesk.".length)));
+		assert.ok(legacy.every(id => LEGACY_COMMAND_IDS.includes(id)));
+	});
+
+	it("keeps one alias for each of the 92 commands 0.3.2 published, none of them contributed, each aimed at a contributed command", () => {
+		assert.equal(LEGACY_COMMAND_IDS.length, 92);
+		assert.equal(new Set(LEGACY_COMMAND_IDS).size, 92);
+		assert.deepEqual(LEGACY_COMMAND_IDS.filter(id => declared.has(id)), [], "an alias that is also a contributed command");
+		assert.deepEqual(LEGACY_COMMAND_IDS.map(legacyCommandTarget).filter(id => !declared.has(id)), [], "an alias whose target is not contributed");
+		const neverPublished = contributes.commands.map(command => command.command).filter(id => !LEGACY_COMMAND_IDS.includes("omp." + id.slice("ompDesk.".length)));
+		assert.deepEqual(neverPublished.sort(), ["ompDesk.refreshUsageStatus", "ompDesk.reloadAllWindows", "ompDesk.searchFileFromChat"], "the commands 0.3.2 did not publish have no alias; a new command needs none");
+		assert.deepEqual(LEGACY_ALIASES.map(([oldId]) => oldId).filter(id => !recording.commands.has(id)), [], "an old id with no alias at runtime");
+		const generated = LEGACY_ALIASES.filter(([, target]) => !declared.has(target)).map(([oldId, target]) => `${oldId} -> ${target}`);
+		assert.deepEqual(generated, [
+			"workbench.view.extension.omp -> workbench.view.extension.ompDesk",
+			...["sessions", "skills", "tools", "mcp", "extensions", "context", "deskSettings"].map(name => `omp.${name}.focus -> ompDesk.${name}.focus`),
+		], "the commands VS Code generates for the container and the views");
+		for (const [, target] of LEGACY_ALIASES.filter(([oldId]) => oldId.endsWith(".focus"))) assert.ok(viewIds.has(target.slice(0, -".focus".length)), `${target} is not a contributed view's focus command`);
+	});
+
+	it("runs the new command once, with the arguments, and warns once per old id", async () => {
+		const warnings = () => recording.prompts.filter(prompt => prompt.kind === "showWarningMessage" && String(prompt.args[0]).includes("omp.openSession"));
+		const before = recording.executed.length;
+		const argument = { tabId: "tab:x" };
+		await recording.commands.get("omp.openSession")?.(argument);
+		await recording.commands.get("omp.openSession")?.(argument);
+		const forwarded = recording.executed.slice(before).filter(call => call[0] === "ompDesk.openSession");
+		assert.deepEqual(forwarded, [["ompDesk.openSession", argument], ["ompDesk.openSession", argument]]);
+		assert.equal(warnings().length, 1, "one warning for this old id, however often it runs");
+		assert.match(String(warnings()[0]?.args[0]), /omp\.openSession.*ompDesk\.openSession/);
+	});
+
+	it("declares the keys of every view's welcome content and menu in the one namespace, and sets each context key a when clause tests", () => {
+		const clauses = [...menus.map(({ entry }) => entry.when ?? ""), ...contributes.viewsWelcome.map(welcome => welcome.when ?? ""), ...contributes.keybindings.map(binding => binding.when ?? "")];
+		const configured = new Set(Object.keys(contributes.configuration.properties));
+		const tested = new Set(clauses.flatMap(clause => [...clause.matchAll(/(?<![\w.])(ompDesk\.[\w.]+)/g)].map(match => match[1] ?? "")));
+		const sources = ["../extension.ts", "./context-wiring.ts", "./inventory-wiring.ts", "./process-wiring.ts"].map(file => readFileSync(new URL(file, import.meta.url), "utf8")).join("\n");
+		const unset = [...tested].filter(key => !configured.has(key.replace(/^config\./, "")) && !viewIds.has(key) && !recording.contextKeys.has(key) && !sources.includes(`"${key}"`) && !/^ompDesk\.(skills|tools|mcp|extensions)\.scope$/.test(key));
+		assert.deepEqual(unset, [], "a when clause tests a context key nothing in the source sets (the clause is never true)");
+	});
+
+	it("publishes the context keys default keybindings tested under their old names too", () => {
+		assert.deepEqual([...LEGACY_CONTEXT_KEYS], ["sessionMode", "streaming", "composerPopupOpen"]);
 	});
 });

@@ -326,7 +326,7 @@ export interface GuestInsertTextMessage {
 }
 
 /**
- * A past prompt the user picked in the host's prompt-history search (`omp.searchPromptHistory`). The composer
+ * A past prompt the user picked in the host's prompt-history search (`ompDesk.searchPromptHistory`). The composer
  * adds it to the draft — after what the draft holds, as an edited queued message is — and never sends it.
  */
 export interface GuestRecallPromptMessage {

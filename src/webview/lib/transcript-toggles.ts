@@ -1,7 +1,7 @@
 /**
  * The transcript's two global display defaults, the TUI's `Ctrl+T` (show every thinking block) and `Ctrl+O`
  * (expand every tool call). The host owns them — one remembered value per VS Code profile, flipped by the
- * `omp.toggleThinking` / `omp.toggleToolOutput` commands — and pushes them with the display preferences.
+ * `ompDesk.toggleThinking` / `ompDesk.toggleToolOutput` commands — and pushes them with the display preferences.
  *
  * Each is a default, not a lock: a change opens or closes every block of that kind once, and a block the user
  * opens or closes afterwards keeps its own state until the next change.

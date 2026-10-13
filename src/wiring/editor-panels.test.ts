@@ -364,8 +364,8 @@ describe("openPanel", () => {
 		assert.equal(w.logged.some(line => line.startsWith("chat column:")), false);
 	});
 
-	it("keeps the active column when omp.chatColumn is off", () => {
-		stub.workspace.settings["omp.chatColumn"] = false;
+	it("keeps the active column when ompDesk.chatColumn is off", () => {
+		stub.workspace.settings["ompDesk.chatColumn"] = false;
 		const w = world();
 		w.panels.openPanel(context(), indexFixture(), TAB);
 		assert.equal(w.created[0]!.showOptions, stub.ViewColumn.Active);
@@ -831,7 +831,7 @@ describe("focusChatComposer", () => {
 		const index = indexFixture();
 		index.activeTabId = null;
 		await w.panels.focusChatComposer(index);
-		assert.deepEqual(stub.commands.calls, [["workbench.view.extension.omp"]]);
+		assert.deepEqual(stub.commands.calls, [["workbench.view.extension.ompDesk"]]);
 	});
 
 	it("focuses the composer of the active session editor's page, revealing it without taking the group", async () => {

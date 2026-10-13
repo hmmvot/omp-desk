@@ -111,7 +111,7 @@ function withReminders(messages: readonly unknown[]): unknown[] | undefined {
  * Append {@link CHAT_PROMPT} to the system prompt of every request an RPC main session prepares
  * (`before_agent_start` returns the replacement `systemPrompt`). A prompt that already carries it is left as it is.
  *
- * Only when `env` sets {@link LINK_REMINDER_ENV} to `1` (the `omp.linkReminder` setting, off by default, read when Desk
+ * Only when `env` sets {@link LINK_REMINDER_ENV} to `1` (the `ompDesk.linkReminder` setting, off by default, read when Desk
  * launches the session), the `context` event also inserts {@link LINK_REMINDER} after every user prompt of each provider request.
  */
 export function registerChatPrompt(pi: ChatPromptApi, env: Readonly<Record<string, string | undefined>> = process.env): void {

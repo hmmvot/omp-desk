@@ -8,7 +8,7 @@
  * 1. the folders VS Code has open in any live window (the single folder, or every root
  *    of a multi-root workspace; local `file` roots only), windows in the order they
  *    started and each window's folders in VS Code's order, only while
- *    `omp.showWorkspaceFolders` is on. With `omp.useAgentRootFolder` an open
+ *    `ompDesk.showWorkspaceFolders` is on. With `ompDesk.useAgentRootFolder` an open
  *    folder without agent files inside a Git repository whose root has them is shown as
  *    that ancestor (`src/views/agent-root.ts`); the opened folder stays in `openedPaths`
  *    so the sessions recorded there keep their place;
@@ -65,7 +65,7 @@ export interface LauncherFolder extends WorkspaceFolder {
 	readonly openElsewhere: boolean;
 	/**
 	 * The opened folders this one is shown instead of, because the repository's agent files live
-	 * here and not in them (`omp.useAgentRootFolder`); absent for a folder shown as itself.
+	 * here and not in them (`ompDesk.useAgentRootFolder`); absent for a folder shown as itself.
 	 * Sessions recorded in those folders are filed under this one.
 	 */
 	readonly openedPaths?: readonly string[];
@@ -100,7 +100,7 @@ export interface LauncherFoldersOptions {
 	 * already; the opened folder itself when nothing replaces it or the setting is off.
 	 */
 	readonly agentRoot?: (windowPath: string) => string;
-	/** The `omp.showWorkspaceFolders` setting. */
+	/** The `ompDesk.showWorkspaceFolders` setting. */
 	readonly showWindowFolders: () => boolean;
 	/** Working directories of the sessions that run in any live window, in window order. */
 	readonly liveSessionCwds: () => readonly string[];

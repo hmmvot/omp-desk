@@ -6,7 +6,7 @@ import type { DebugPolicy, ExpressionMode, StartMode } from "./policy.ts";
 import { UNITY_EXTENSION_ID, unityAttachPreset } from "./unity-preset.ts";
 import { VscodeDebugApi } from "./vscode-debug-api.ts";
 
-const SECTION = "omp.agentDebugger";
+const SECTION = "ompDesk.agentDebugger";
 const OWNERS_KEY = "omp.agentDebugger.breakpointOwners";
 
 /** Settings are `application` scoped: only the user's settings apply, a repository's cannot change them. */
@@ -24,7 +24,7 @@ export function vscodePolicy(): DebugPolicy {
 			const always = "Always Allow";
 			const choice = await vscode.window.showWarningMessage(
 				request.title,
-				{ modal: true, detail: [...request.lines, "", `Always Allow sets omp.agentDebugger.${request.setting} to "allow" in your user settings; later requests of this kind are not asked.`].join("\n") },
+				{ modal: true, detail: [...request.lines, "", `Always Allow sets ompDesk.agentDebugger.${request.setting} to "allow" in your user settings; later requests of this kind are not asked.`].join("\n") },
 				allow,
 				always,
 			);
@@ -32,7 +32,7 @@ export function vscodePolicy(): DebugPolicy {
 				// User settings only: the setting has application scope, and a workspace value would not apply anyway.
 				// This request is allowed either way; a failed write only means the next one asks again.
 				await vscode.workspace.getConfiguration(SECTION).update(request.setting, "allow", vscode.ConfigurationTarget.Global).then(undefined, (error: unknown) => {
-					void vscode.window.showErrorMessage(`OMP Desk could not save omp.agentDebugger.${request.setting}: ${error instanceof Error ? error.message : String(error)}`);
+					void vscode.window.showErrorMessage(`OMP Desk could not save ompDesk.agentDebugger.${request.setting}: ${error instanceof Error ? error.message : String(error)}`);
 				});
 				return true;
 			}
@@ -43,7 +43,7 @@ export function vscodePolicy(): DebugPolicy {
 
 /**
  * Registers the debug coordinator for this window (trackers for every debug type) and returns the provider of the
- * `vscode_debug_*` tools. It offers them only while `omp.agentDebugger.enabled` is on and fires `changed` when
+ * `vscode_debug_*` tools. It offers them only while `ompDesk.agentDebugger.enabled` is on and fires `changed` when
  * that, or the availability of a preset's extension, changes.
  */
 export function activateAgentDebugger(context: vscode.ExtensionContext, options: { log?: (line: string) => void } = {}): HostToolProvider {

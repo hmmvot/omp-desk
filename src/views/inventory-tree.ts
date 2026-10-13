@@ -3,7 +3,7 @@ import { emptyView } from "../host/inventory/inventory-model.ts";
 import type { ViewGroup, ViewItem, ViewModel } from "../host/inventory/inventory-model.ts";
 
 /** The command a row's click runs: open its source file. Registered by the inventory registration. */
-export const OPEN_SOURCE_COMMAND = "omp.inventory.open";
+export const OPEN_SOURCE_COMMAND = "ompDesk.inventory.open";
 
 export class InventoryTreeItem extends vscode.TreeItem {
 	readonly viewItem: ViewItem | undefined;

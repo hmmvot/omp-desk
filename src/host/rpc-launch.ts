@@ -66,7 +66,7 @@ export function rpcOmpLaunchSpec(input: {
 	/** Explicit session directory from the index scope, used for a new conversation only. */
 	readonly sessionDir: string | null;
 	readonly profile: string | null;
-	/** The `omp.linkReminder` setting; the Chat prompt module reads it from the environment. */
+	/** The `ompDesk.linkReminder` setting; the Chat prompt module reads it from the environment. */
 	readonly linkReminder: boolean;
 }): RpcOmpLaunchSpec {
 	const env: Record<string, string | null> = { [LINK_REMINDER_ENV]: input.linkReminder ? "1" : "0" };
@@ -137,7 +137,7 @@ export interface RpcLaunchRequest {
 	readonly sessionDir: string | null;
 	/** Host-control bootstrap, or `null` to launch without the channel. */
 	readonly control: NativeControlBootstrap | null;
-	/** The `omp.linkReminder` setting when this launch starts; applies to this process for its whole life. */
+	/** The `ompDesk.linkReminder` setting when this launch starts; applies to this process for its whole life. */
 	readonly linkReminder: boolean;
 }
 

@@ -391,7 +391,7 @@ describe("opening a process row", () => {
 	it("opens the Stats dashboard for the stats row", async () => {
 		const w = await world();
 		await w.actions.openProcess(w.state.context, w.index, processRow({}, "stats"));
-		assert.deepEqual(w.commands, [["omp.openStats"]]);
+		assert.deepEqual(w.commands, [["ompDesk.openStats"]]);
 	});
 
 	it("ignores a row that opens nothing and an argument that is not a process row", async () => {
@@ -460,7 +460,7 @@ describe("going to a session from anywhere", () => {
 		w.state.picked = items => { offered = items; return items.at(-1); };
 		await w.actions.goTo(w.state.context, w.index);
 		assert.deepEqual(offered.map(item => item.label), ["$(add) New Session…"], "no separator without a session");
-		assert.deepEqual(w.commands, [["omp.newSession"]]);
+		assert.deepEqual(w.commands, [["ompDesk.newSession"]]);
 		w.state.picked = () => undefined;
 		await w.actions.goTo(w.state.context, w.index);
 		w.state.provider = undefined;
@@ -935,7 +935,7 @@ describe("the processes of the Sessions view", () => {
 		w.actions.setupProcesses(context as never, index as never, folders as never);
 		try {
 			assert.ok(w.state.processes !== null, "the handle is kept for the window");
-			assert.deepEqual([...stub.commands.registered.keys()].filter(id => id.startsWith("omp.")).sort(), ["omp.killAll", "omp.openStats", "omp.refreshProcesses", "omp.stopOrphanedProcesses", "omp.stopProcess"]);
+			assert.deepEqual([...stub.commands.registered.keys()].filter(id => id.startsWith("ompDesk.")).sort(), ["ompDesk.killAll", "ompDesk.openStats", "ompDesk.refreshProcesses", "ompDesk.stopOrphanedProcesses", "ompDesk.stopProcess"]);
 			const snapshot = await w.state.processes!.refresh();
 			assert.equal(published.at(-1), snapshot, "every read is served to the view");
 			assert.deepEqual(w.provenanceAsked.sort(), [OTHER_TAB, TAB].sort(), "a row with a recorded host asks for its slot provenance, a row with none does not");

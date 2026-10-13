@@ -180,7 +180,7 @@ export interface SymbolLinkResult {
 export interface SymbolLinksResolution {
 	type: "omp:terminal-link-symbol-resolution";
 	requestId: number;
-	/** The `omp.linkCodeSymbols` setting is off: every result is `none` and the page should stop asking for a while. */
+	/** The `ompDesk.linkCodeSymbols` setting is off: every result is `none` and the page should stop asking for a while. */
 	disabled?: true;
 	results: SymbolLinkResult[];
 }

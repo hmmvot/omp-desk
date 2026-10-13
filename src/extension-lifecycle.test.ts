@@ -3108,7 +3108,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 		});
 		harness.record(f.state).control = { client: control, snapshot: null, activity: true, work: true };
 		const restore = harness.desktopEnvironment({ ...f.saved.context, extension: { id: "hmmvot.omp-desk" } });
-		harness.configuration({ "omp.desktopNotifications": true });
+		harness.configuration({ "ompDesk.desktopNotifications": true });
 		harness.focusSession(false);
 		setLauncherTree(undefined, undefined);
 		t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
@@ -3172,7 +3172,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 		});
 		harness.record(f.state).control = { client: connect(), snapshot: null, activity: true, work: true };
 		const restore = harness.desktopEnvironment({ ...f.saved.context, extension: { id: "hmmvot.omp-desk" } });
-		harness.configuration({ "omp.desktopNotifications": true });
+		harness.configuration({ "ompDesk.desktopNotifications": true });
 		harness.focusSession(false);
 		setLauncherTree(undefined, undefined);
 		t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
@@ -3316,7 +3316,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			clients[0]!.handle({ type: "omp:chat-display-preferences", epoch: { ...clients[0]!.getSnapshot().epoch!, nonce: "stale-host" }, toolCallDetail: "detailed", accessibilitySupport: true });
 			assert.equal(clients[0]!.getDisplayPreferences(), before);
 			assert.equal(harness.configurationWrites().length, settingsWrites, "presentation never writes the settings");
-			harness.configuration({ "omp.toolCallDetail": "overview", "editor.accessibilitySupport": "on" });
+			harness.configuration({ "ompDesk.toolCallDetail": "overview", "editor.accessibilitySupport": "on" });
 			harness.refreshChatDisplayPreferences({ affectsConfiguration: key => key === "editor.accessibilitySupport" });
 			assert.deepEqual(clients.map(client => client.getDisplayPreferences()), [
 				{ toolCallDetail: "overview", accessibilitySupport: true, thinkingExpanded: false, toolsExpanded: false },
@@ -3517,10 +3517,16 @@ describe("same-editor Chat and native Terminal actions", () => {
 		try {
 			const switching = harness.switchSessionMode(f.saved.context, f.index, state, "terminal");
 			await requested.promise;
-			assert.ok(calls.some(call => call[0] === "setContext" && call[1] === "omp.sessionTransitionPending" && call[2] === true));
+			assert.ok(calls.some(call => call[0] === "setContext" && call[1] === "ompDesk.sessionTransitionPending" && call[2] === true));
+			for (const key of ["sessionMode", "streaming", "composerPopupOpen"]) {
+				const current = calls.findLast(call => call[0] === "setContext" && call[1] === `ompDesk.${key}`);
+				assert.ok(current !== undefined, `${key} is set`);
+				assert.equal(calls.findLast(call => call[0] === "setContext" && call[1] === `omp.${key}`)?.[2], current[2], `${key} is also published under its old name`);
+			}
+			assert.ok(!calls.some(call => call[0] === "setContext" && call[1] === "omp.sessionTransitionPending"), "no other old context key is kept");
 			assert.ok(f.panels.messages.some(message => message !== null && typeof message === "object" && "type" in message && message.type === "omp:session-view" && "canSwitch" in message && message.canSwitch === false));
 			answer.resolve(undefined); await switching;
-			assert.equal(calls.findLast(call => call[0] === "setContext" && call[1] === "omp.sessionTransitionPending")?.[2], false);
+			assert.equal(calls.findLast(call => call[0] === "setContext" && call[1] === "ompDesk.sessionTransitionPending")?.[2], false);
 		} finally {
 			answer.resolve(undefined); harness.commandHandler(null);
 			f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true });
@@ -5003,10 +5009,10 @@ describe("starting a session in the window that has its folder open", () => {
     assert.deepEqual(left, [], "the unanswered request is withdrawn, so the window cannot start it late");
   });
 
-  it("starts here, whatever other windows have open, when omp.launchInFolderWindow is off", async () => {
+  it("starts here, whatever other windows have open, when ompDesk.launchInFolderWindow is off", async () => {
     const w = await world([{ holderId: "holder-b", uri: "file:///c%3A/b", serve: { ok: true, focused: true } }]);
     harness.folders([folderRow()], [there("holder-b")]);
-    harness.configuration({ "omp.launchInFolderWindow": false });
+    harness.configuration({ "ompDesk.launchInFolderWindow": false });
     try {
       await harness.newSession(undefined, w.index, "folder:proj-1");
     } finally { harness.configuration({}); }

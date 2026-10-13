@@ -1,5 +1,5 @@
 /**
- * "OMP: Add Selection to Session" and "OMP: Add File to Session": the pure rules.
+ * "OMP Desk: Add Selection to Session" and "OMP Desk: Add File to Session": the pure rules.
  *
  * What is sent is a **reference**, never file contents: OMP reads a mention itself, from the
  * session's working directory, when the prompt is submitted. Three facts about the installed

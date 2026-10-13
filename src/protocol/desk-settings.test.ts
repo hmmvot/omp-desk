@@ -170,11 +170,12 @@ test("search matches every term across label, key, group, description and option
 	assert.deepEqual(hits("nothing like this"), []);
 });
 
-test("the shipped manifest projects completely: every contributed omp setting has a row and a usable control", () => {
+test("the shipped manifest projects completely: every contributed ompDesk setting has a row and a usable control", () => {
 	const manifest = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { contributes: { configuration: unknown } };
 	const descriptors = projectConfiguration(manifest.contributes.configuration);
 	const sections = Array.isArray(manifest.contributes.configuration) ? manifest.contributes.configuration : [manifest.contributes.configuration];
-	const contributed = sections.flatMap((section: { properties: Record<string, unknown> }) => Object.keys(section.properties));
+	// The hidden, deprecated names of 0.3.x (`included: false`, ADR-0068) have no row: the migration moves their values.
+	const contributed = sections.flatMap((section: { properties: Record<string, { included?: boolean }> }) => Object.entries(section.properties).filter(([, property]) => property.included !== false).map(([key]) => key));
 	assert.deepEqual(descriptors.map(descriptor => descriptor.key).sort(), [...contributed].sort());
 	for (const descriptor of descriptors) {
 		assert.notEqual(descriptor.description, "", `${descriptor.key} has a description`);
@@ -184,7 +185,7 @@ test("the shipped manifest projects completely: every contributed omp setting ha
 
 test("only the explicit OMP path setting is machine-scoped, editable in place and offers Test", () => {
 	const manifest = JSON.parse(readFileSync(new URL("../../package.json", import.meta.url), "utf8")) as { contributes: { configuration: { properties: Record<string, { scope?: string; default?: unknown }> } } };
-	const property = manifest.contributes.configuration.properties["omp.executablePath"]!;
+	const property = manifest.contributes.configuration.properties["ompDesk.executablePath"]!;
 	assert.equal(property.scope, "machine", "a workspace must never be able to name the program to run");
 	assert.equal(property.default, "");
 	const descriptors = projectConfiguration(manifest.contributes.configuration);
@@ -192,10 +193,10 @@ test("only the explicit OMP path setting is machine-scoped, editable in place an
 		const descriptor = descriptors.find(candidate => candidate.key === key)!;
 		return buildView(descriptor, { defaultValue: "" }, "", { available: true, name: "w" }, []);
 	};
-	assert.equal(row("omp.executablePath").control.kind, "string");
-	assert.deepEqual(row("omp.executablePath").targets, ["user"], "no workspace layer is offered");
-	assert.equal(row("omp.executablePath").test, true);
-	assert.equal(row("omp.linkReminder").test, undefined);
+	assert.equal(row("ompDesk.executablePath").control.kind, "string");
+	assert.deepEqual(row("ompDesk.executablePath").targets, ["user"], "no workspace layer is offered");
+	assert.equal(row("ompDesk.executablePath").test, true);
+	assert.equal(row("ompDesk.linkReminder").test, undefined);
 });
 
 test("a schema the page cannot validate fully is never offered as a control", () => {

@@ -35,7 +35,7 @@ The Marketplace requires `name` and `displayName` to be unique across all extens
 
 1. **Manifest** ([manifest reference](https://code.visualstudio.com/api/references/extension-manifest)): `name`, `displayName`, `description`, `version`, `publisher`, `author`, `license`, `repository`, `bugs`, `homepage`, `categories`, `keywords`, `icon`, `galleryBanner`, `engines.vscode`, `preview` are all set and accurate. `private` is removed.
 2. **Marketplace presentation** ([tips](https://code.visualstudio.com/api/references/extension-manifest#marketplace-presentation-tips)): the README leads with what the extension does, what it needs (installed OMP, Windows) and how to start; screenshots are committed and use `https`-resolvable relative paths; the banner color suits the icon.
-3. **UX** ([UX Guidelines](https://code.visualstudio.com/api/ux-guidelines/overview)): commands carry the `OMP` category, contributions sit in the right containers (Activity Bar view, editor title actions, Command Palette), and notifications and settings follow the platform conventions.
+3. **UX** ([UX Guidelines](https://code.visualstudio.com/api/ux-guidelines/overview)): commands carry the `OMP Desk` category, contributions sit in the right containers (Activity Bar view, editor title actions, Command Palette), and notifications and settings follow the platform conventions.
 4. **Version and changelog**: bump `version` ([SemVer](https://semver.org/spec/v2.0.0.html)), move the `Unreleased` entries of [CHANGELOG.md](../CHANGELOG.md) under the new version heading with its release date ([Keep a Changelog](https://keepachangelog.com/en/1.1.0/)), and update the comparison links at the bottom.
 5. **Third-party notices**: [THIRD_PARTY_NOTICES.txt](../THIRD_PARTY_NOTICES.txt) matches `package-lock.json` for every package bundled into or shipped next to the extension.
 6. **No private data**: no absolute local paths, user names, e-mail addresses, private workspace names, or references to files that are not tracked in Git (see [AGENTS.md](../AGENTS.md)).
@@ -99,7 +99,7 @@ Local builds made before the first release used a different extension ID (publis
 3. Install OMP Desk and open the Sessions view. The folders appear automatically; session history lives in OMP's own files and reappears through each folder's **Resume Session**.
 4. Optionally delete the old extension's folder inside VS Code's `globalStorage` directory once nothing needs it.
 
-The `omp.*` settings keep their names, so user settings carry over unchanged.
+The old build's settings (`omp.*`) are moved to their `ompDesk.*` names by the settings migration of [ADR-0068](decisions/0068-rename-contributed-ids-to-ompdesk-and-migrate-settings-at-activation.md) when OMP Desk first starts, so user settings carry over.
 
 ## Sources
 

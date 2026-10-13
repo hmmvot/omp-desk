@@ -8,7 +8,7 @@ import type { DeskSettingsPort } from "./controller.ts";
 import type { ConfigLayers, JsonValue, Target, WorkspaceFacts } from "../../protocol/desk-settings.ts";
 
 /** The side-bar view that lists this extension's settings. Declared in package.json `contributes.views`. */
-export const DESK_SETTINGS_VIEW_ID = "omp.deskSettings";
+export const DESK_SETTINGS_VIEW_ID = "ompDesk.deskSettings";
 
 function bind(): DeskSettingsPort {
 	const root = () => vscode.workspace.getConfiguration();

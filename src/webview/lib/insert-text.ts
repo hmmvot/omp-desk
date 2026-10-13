@@ -1,6 +1,6 @@
 /**
  * Text the extension host adds to the composer draft (`omp:insert-text`): the `@path`
- * references of "OMP: Add Selection/File to Session".
+ * references of "OMP Desk: Add Selection/File to Session".
  *
  * Two small pieces live here so they can be tested without a DOM:
  *

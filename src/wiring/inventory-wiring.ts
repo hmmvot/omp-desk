@@ -30,10 +30,10 @@ export interface InventoryHandle extends vscode.Disposable {
 
 interface ViewSpec { readonly kind: ViewKind; readonly id: string; readonly refresh: string; readonly noun: string }
 const VIEWS: readonly ViewSpec[] = [
-	{ kind: "skills", id: "omp.skills", refresh: "omp.refreshSkills", noun: "skills" },
-	{ kind: "tools", id: "omp.tools", refresh: "omp.refreshTools", noun: "tools" },
-	{ kind: "mcp", id: "omp.mcp", refresh: "omp.refreshMcp", noun: "MCP servers" },
-	{ kind: "extensions", id: "omp.extensions", refresh: "omp.refreshExtensions", noun: "extensions" },
+	{ kind: "skills", id: "ompDesk.skills", refresh: "ompDesk.refreshSkills", noun: "skills" },
+	{ kind: "tools", id: "ompDesk.tools", refresh: "ompDesk.refreshTools", noun: "tools" },
+	{ kind: "mcp", id: "ompDesk.mcp", refresh: "ompDesk.refreshMcp", noun: "MCP servers" },
+	{ kind: "extensions", id: "ompDesk.extensions", refresh: "ompDesk.refreshExtensions", noun: "extensions" },
 ];
 const UNDO = "Undo";
 
@@ -82,7 +82,7 @@ export function registerInventoryViews(context: vscode.ExtensionContext, deps: I
 			const tree = trees.get(view);
 			if (tree !== undefined) { tree.description = model.description; tree.message = model.notice ?? undefined; }
 		},
-		scopeChanged(view, scope: InventoryScope) { void vscode.commands.executeCommand("setContext", `omp.${view}.scope`, scope); },
+		scopeChanged(view, scope: InventoryScope) { void vscode.commands.executeCommand("setContext", `ompDesk.${view}.scope`, scope); },
 		notify(message, level, undo) {
 			if (undo !== undefined) { void vscode.window.showInformationMessage(message, UNDO).then(choice => { if (choice === UNDO) undo(); }); return; }
 			void (level === "warning" ? vscode.window.showWarningMessage(message) : vscode.window.showInformationMessage(message));
@@ -106,10 +106,10 @@ export function registerInventoryViews(context: vscode.ExtensionContext, deps: I
 				}
 			}),
 			vscode.commands.registerCommand(spec.refresh, () => controller.refresh({ force: true })),
-			vscode.commands.registerCommand(`omp.${spec.kind}.showGlobal`, () => controller.setScope(spec.kind, "global")),
-			vscode.commands.registerCommand(`omp.${spec.kind}.showSession`, () => controller.setScope(spec.kind, "session")),
+			vscode.commands.registerCommand(`ompDesk.${spec.kind}.showGlobal`, () => controller.setScope(spec.kind, "global")),
+			vscode.commands.registerCommand(`ompDesk.${spec.kind}.showSession`, () => controller.setScope(spec.kind, "session")),
 		);
-		void vscode.commands.executeCommand("setContext", `omp.${spec.kind}.scope`, "global");
+		void vscode.commands.executeCommand("setContext", `ompDesk.${spec.kind}.scope`, "global");
 		controller.setVisible(spec.kind, tree.visible);
 	}
 	subscriptions.push(

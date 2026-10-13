@@ -137,7 +137,7 @@ export interface DebugToolEnv {
 export function admit(env: DebugToolEnv, ctx: HostToolContext): void {
 	if (ctx.signal.aborted) throw new OperationCancelledError();
 	ctx.checkExecutor();
-	if (!env.policy.enabled()) throw new HostToolRefusal("The agent debugger tools are disabled (setting omp.agentDebugger.enabled).");
+	if (!env.policy.enabled()) throw new HostToolRefusal("The agent debugger tools are disabled (setting ompDesk.agentDebugger.enabled).");
 }
 
 /** A mutating action on a tracked session needs the conversation's grant; reads never do. */
@@ -171,7 +171,7 @@ export class GrantError extends Error {
  */
 export async function expressionDenial(env: DebugToolEnv, ctx: HostToolContext, lines: readonly string[]): Promise<string | undefined> {
 	const mode = env.policy.expressionsMode();
-	if (mode === "off") return "Running expressions in the debuggee is switched off (setting omp.agentDebugger.expressions).";
+	if (mode === "off") return "Running expressions in the debuggee is switched off (setting ompDesk.agentDebugger.expressions).";
 	if (mode === "allow") return undefined;
 	const confirmed = await env.policy.confirm({ title: "Allow the agent to run code in the debuggee?", setting: "expressions", lines });
 	admit(env, ctx);

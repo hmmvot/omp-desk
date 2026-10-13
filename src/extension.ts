@@ -252,6 +252,11 @@ import { awaitEndedRuntimeCleanup } from "./host/runtime-settle";
 import { catalogPaths, createCatalogStore, startCatalogWatch } from "./host/profile-catalog";
 import type { CatalogStore } from "./host/profile-catalog";
 import { importPredecessorFolders } from "./wiring/predecessor-import";
+import { migrateLegacySettings } from "./wiring/legacy-settings";
+import type { LegacySettingsPort } from "./wiring/legacy-settings";
+import { announceRename, foreignOmpNames, legacyContextKey, registerLegacyAliases } from "./wiring/legacy-aliases";
+import { constants as fsConstants } from "node:fs";
+import { access } from "node:fs/promises";
 import type { SessionProcesses } from "./wiring/process-wiring";
 import { SettingsEditors } from "./host/omp-settings-editor";
 import type { SettingsEditorContext } from "./host/omp-settings-editor";
@@ -366,29 +371,29 @@ const CONTROL_RENDEZVOUS_POLL_MS = 250;
 /**
  * Contributed launcher view that owns the activity-bar session list.
  */
-const SESSIONS_VIEW_ID = "omp.sessions";
+const SESSIONS_VIEW_ID = "ompDesk.sessions";
 /**
  * Context key that keeps the launcher's welcome content off once it shows a folder:
  * a launcher with no folder (none open in this window, none pinned) has no group to
  * show, so its welcome content offers the Add Folder flow instead of an empty list.
  */
-const HAS_WORKSPACE_FOLDERS_CONTEXT = "omp.hasWorkspaceFolders";
+const HAS_WORKSPACE_FOLDERS_CONTEXT = "ompDesk.hasWorkspaceFolders";
 /** Context key the Sessions title-bar layout button reads (it picks the button's icon): the layout the view shows (`flat`, `folders` or `terminals`). */
-const SESSIONS_LAYOUT_CONTEXT = "omp.sessionsLayout";
+const SESSIONS_LAYOUT_CONTEXT = "ompDesk.sessionsLayout";
 /**
  * Context key gating the Stop keybinding: true while the OMP chat panel the user
  * is looking at reports the host running a turn. It is set from the guest's own
  * activity reports and from no other source, so the key can never offer to stop
  * a turn nobody observed.
  */
-const STREAMING_CONTEXT = "omp.streaming";
+const STREAMING_CONTEXT = "ompDesk.streaming";
 /**
  * Context key that keeps the Stop keybinding from firing on a popup dismissal:
  * true while the `@`-completion popup of the panel on screen is open. The
  * composer reports that state, it travels in the same activity report, and
  * Escape means one thing at a time because of it.
  */
-const COMPOSER_POPUP_CONTEXT = "omp.composerPopupOpen";
+const COMPOSER_POPUP_CONTEXT = "ompDesk.composerPopupOpen";
 
 /** What the user is told when a session cannot be opened safely. */
 const CONFLICT_LABEL: Record<SessionConflictKind, string> = {
@@ -869,7 +874,7 @@ interface WindowState {
   /**
    * Last host-observed turn activity per tab, projected from the conversation's own model.
    *
-   * This is the extension host's view of whether a turn is running: the `omp.streaming`
+   * This is the extension host's view of whether a turn is running: the `ompDesk.streaming`
    * context key, the Sessions rows and the completion notifications all derive from it, so a
    * hidden or closed tab is reported exactly like a visible one.
    */
@@ -1279,6 +1284,13 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
 /** This window's state; `undefined` until `activate` installs it, and the next `activate` replaces it. */
 let window: WindowState | undefined;
 
+/** ADR-0068: whether the three context keys default keybindings used are also set under their old names (not when another extension owns `omp.` names). */
+let legacyContextMirror = true;
+/** The longest activation waits for the move of the old settings; a slower write goes on in the background. */
+const LEGACY_SETTINGS_MOVE_WAIT_MS = 10_000;
+/** The profile-wide marker that the rename notice was decided (shown, or not needed on a fresh install). */
+const RENAME_NOTICE_KEY = "ompDesk.renameNotice.v1";
+
 /** The installed window state. Throws when no window is installed, which is the invariant every caller relies on. */
 function windowState(): WindowState {
   if (window === undefined) throw new Error("The OMP Desk window state is not installed: `activate` has not run.");
@@ -1341,6 +1353,36 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push({ dispose: () => setOmpResolutionLog(null) });
   setOmpPathReader(configuredOmpPath);
   context.subscriptions.push({ dispose: () => setOmpPathReader(null) });
+  // ADR-0068: the old command ids are registered first, as hidden aliases that forward to the commands registered below, so a
+  // keybinding of the previous release works as early as any command does. Then the values the `omp.` namespace held move to
+  // `ompDesk.` before anything reads a setting; a window with nothing to move does no I/O. A name another extension
+  // contributes under `omp.` is not ours to alias, mirror or migrate.
+  const foreign = foreignOmpNames(vscode.extensions?.all ?? [], context.extension?.id ?? "");
+  legacyContextMirror = !foreign.any;
+  const openKeybindingsFile = () => vscode.commands.executeCommand("workbench.action.openGlobalKeybindingsFile");
+  context.subscriptions.push(...registerLegacyAliases({
+    register: (id, handler) => vscode.commands.registerCommand(id, handler),
+    execute: (id, ...args) => vscode.commands.executeCommand(id, ...args),
+    warn: (message, action) => vscode.window.showWarningMessage(message, action),
+    openKeybindingsFile,
+    foreignCommands: foreign.commands,
+    log: line => log(line),
+  }));
+  void announceRename({
+    priorInstall: () => access(catalogPaths(context.globalStorageUri.fsPath).document).then(() => true, () => false),
+    shown: () => context.globalState.get<boolean>(RENAME_NOTICE_KEY) === true,
+    markShown: () => context.globalState.update(RENAME_NOTICE_KEY, true),
+    info: (message, action) => vscode.window.showInformationMessage(message, action),
+    openKeybindingsFile,
+    log: line => log(line),
+  });
+  const settingsMoved = migrateLegacySettings(legacySettingsPort(context, foreign.settings)).then(
+    () => undefined,
+    error => log(`settings: the move from omp.* to ompDesk.* failed and nothing more was moved: ${messageOf(error)}`),
+  );
+  // Bounded: a hung settings write must not keep the editors' serializers from registering; the move goes on in the background.
+  const moveWindow = await Promise.race([settingsMoved.then(() => "moved" as const), delayMs(LEGACY_SETTINGS_MOVE_WAIT_MS).then(() => "late" as const)]);
+  if (moveWindow === "late") log(`settings: the move from omp.* to ompDesk.* is still running after ${LEGACY_SETTINGS_MOVE_WAIT_MS} ms; activation goes on`);
   // The host's one thread is shared with every extension; a stall of 500 ms or more is logged with the Desk operations that overlapped it.
   context.subscriptions.push({ dispose: startLoopLagMonitor(message => log(message)) });
   // This host's start time is a PowerShell command, hundreds of milliseconds to seconds on a busy machine. It runs beside
@@ -1413,7 +1455,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     inspector: folderPathInspector(),
   });
   const agentRoots = new AgentRootResolver();
-  const useAgentRootFolder = () => vscode.workspace.getConfiguration("omp").get<boolean>("useAgentRootFolder", true);
+  const useAgentRootFolder = () => vscode.workspace.getConfiguration("ompDesk").get<boolean>("useAgentRootFolder", true);
   // The window registry (ADR-0056): this window's folders and live sessions are published in
   // shared storage and every window derives the same union from the leased records. Records
   // are never persisted as pinned folders.
@@ -1439,7 +1481,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // This window's entry is its own bounded snapshot, the very input every other window reads, so all windows derive the list from the same data.
     windows: () => windowsRegistry.windows().map(window => ({ holderId: window.holderId, here: window.here, startedAt: window.startedAt, focusedAt: window.focusedAt, stale: window.stale, paths: window.folders })),
     agentRoot: windowPath => (useAgentRootFolder() ? agentRoots.lookup(windowPath) : windowPath),
-    showWindowFolders: () => vscode.workspace.getConfiguration("omp").get<boolean>("showWorkspaceFolders", true),
+    showWindowFolders: () => vscode.workspace.getConfiguration("ompDesk").get<boolean>("showWorkspaceFolders", true),
     // A live row never vanishes with its folder: a session any window runs or is starting
     // keeps its folder visible although it is neither open nor pinned.
     liveSessionCwds: () => windowsRegistry.windows().flatMap(window => window.liveCwds),
@@ -1546,7 +1588,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     folders: () => folders.list().map(folder => folder.path),
   });
   context.subscriptions.push(settingsEditors);
-  // Desk's host tools (ADR-0055): the debugger tools are registered for every Chat session while omp.agentDebugger.enabled is on.
+  // Desk's host tools (ADR-0055): the debugger tools are registered for every Chat session while ompDesk.agentDebugger.enabled is on.
   const agentDebugger = activateAgentDebugger(context, { log });
   // The candidate colour themes of Chat's fenced code; registered with the context, re-sent to pages when they change.
   const codeThemes = registerCodeTheme(context, { log, changed: () => s.sessionRuntime.conversations.refreshCodeThemes() });
@@ -1707,10 +1749,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       s.routing.rescanPendingLaunches();
     }),
     vscode.workspace.onDidChangeConfiguration(event => {
-      if (event.affectsConfiguration("omp.useAgentRootFolder")) s.resolveAgentRoots();
-      if (event.affectsConfiguration("omp.showWorkspaceFolders") || event.affectsConfiguration("omp.useAgentRootFolder") ||
-        event.affectsConfiguration("omp.sessionsGrouping")) refreshLauncher();
-      if (event.affectsConfiguration("omp.sessionsGrouping")) s.sessionProcesses?.sync();
+      if (event.affectsConfiguration("ompDesk.useAgentRootFolder")) s.resolveAgentRoots();
+      if (event.affectsConfiguration("ompDesk.showWorkspaceFolders") || event.affectsConfiguration("ompDesk.useAgentRootFolder") ||
+        event.affectsConfiguration("ompDesk.sessionsGrouping")) refreshLauncher();
+      if (event.affectsConfiguration("ompDesk.sessionsGrouping")) s.sessionProcesses?.sync();
     }),
     // While a session has an open editor, its row cannot be deselected: a selection with no
     // session row in it is put back on the session viewed most recently.
@@ -1767,96 +1809,96 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         void folders.setCollapsed(event.element.folder.id, false).then(() => s.sessionActions.reportFolderSaveFailure(folders));
       }
     }),
-    registerDeskCommand("omp.newSession", (argument: unknown) => newSession(context, index, argument)),
-    registerDeskCommand("omp.openSessionInChat", (argument: unknown) => openSessionInMode(context, index, argument, "chat")),
-    registerDeskCommand("omp.openSessionInTerminal", (argument: unknown) => openSessionInMode(context, index, argument, "terminal")),
-    registerDeskCommand("omp.showSessionInChat", (argument: unknown) => openSessionInMode(context, index, argument, "chat", "show")),
-    registerDeskCommand("omp.showSessionInTerminal", (argument: unknown) => openSessionInMode(context, index, argument, "terminal", "show")),
-    registerDeskCommand("omp.switchSessionViewChat", () => switchActiveSessionView(context, index, "chat")),
-    registerDeskCommand("omp.switchSessionViewTerminal", () => switchActiveSessionView(context, index, "terminal")),
-    registerDeskCommand("omp.copyTerminalScreen", copyActiveTerminalScreen),
-    registerDeskCommand("omp.redrawTerminal", redrawActiveTerminal),
-    registerDeskCommand("omp.moveFileToNewWindow", s.routing.moveFileToNewWindow),
-    registerDeskCommand("omp.reloadAllWindows", () => s.routing.reloadAllWindows()),
-    registerDeskCommand("omp.fileLink.open", (argument: unknown) => openFileLinkFromMenu(argument, undefined)),
-    registerDeskCommand("omp.fileLink.reveal", (argument: unknown) => openFileLinkFromMenu(argument, "reveal")),
-    registerDeskCommand("omp.fileLink.revealInOs", (argument: unknown) => openFileLinkFromMenu(argument, "os")),
-    registerDeskCommand("omp.webLink.openInEditor", (argument: unknown) => openWebLinkFromMenu(argument, "editor")),
-    registerDeskCommand("omp.webLink.openInBrowser", (argument: unknown) => openWebLinkFromMenu(argument, "external")),
-    registerDeskCommand("omp.chooseDefaultSessionView", chooseDefaultView),
-    registerDeskCommand("omp.chooseDefaultSessionViewChat", chooseDefaultView),
-    registerDeskCommand("omp.chooseDefaultSessionViewTerminal", chooseDefaultView),
+    registerDeskCommand("ompDesk.newSession", (argument: unknown) => newSession(context, index, argument)),
+    registerDeskCommand("ompDesk.openSessionInChat", (argument: unknown) => openSessionInMode(context, index, argument, "chat")),
+    registerDeskCommand("ompDesk.openSessionInTerminal", (argument: unknown) => openSessionInMode(context, index, argument, "terminal")),
+    registerDeskCommand("ompDesk.showSessionInChat", (argument: unknown) => openSessionInMode(context, index, argument, "chat", "show")),
+    registerDeskCommand("ompDesk.showSessionInTerminal", (argument: unknown) => openSessionInMode(context, index, argument, "terminal", "show")),
+    registerDeskCommand("ompDesk.switchSessionViewChat", () => switchActiveSessionView(context, index, "chat")),
+    registerDeskCommand("ompDesk.switchSessionViewTerminal", () => switchActiveSessionView(context, index, "terminal")),
+    registerDeskCommand("ompDesk.copyTerminalScreen", copyActiveTerminalScreen),
+    registerDeskCommand("ompDesk.redrawTerminal", redrawActiveTerminal),
+    registerDeskCommand("ompDesk.moveFileToNewWindow", s.routing.moveFileToNewWindow),
+    registerDeskCommand("ompDesk.reloadAllWindows", () => s.routing.reloadAllWindows()),
+    registerDeskCommand("ompDesk.fileLink.open", (argument: unknown) => openFileLinkFromMenu(argument, undefined)),
+    registerDeskCommand("ompDesk.fileLink.reveal", (argument: unknown) => openFileLinkFromMenu(argument, "reveal")),
+    registerDeskCommand("ompDesk.fileLink.revealInOs", (argument: unknown) => openFileLinkFromMenu(argument, "os")),
+    registerDeskCommand("ompDesk.webLink.openInEditor", (argument: unknown) => openWebLinkFromMenu(argument, "editor")),
+    registerDeskCommand("ompDesk.webLink.openInBrowser", (argument: unknown) => openWebLinkFromMenu(argument, "external")),
+    registerDeskCommand("ompDesk.chooseDefaultSessionView", chooseDefaultView),
+    registerDeskCommand("ompDesk.chooseDefaultSessionViewChat", chooseDefaultView),
+    registerDeskCommand("ompDesk.chooseDefaultSessionViewTerminal", chooseDefaultView),
     // The in-tab terminal and the folder shell: a folder's terminal actions, the
     // explicit lifecycle actions of a session row, and the exact Reload.
-    registerDeskCommand("omp.openTerminal", (argument: unknown) => openFolderTerminal(context, index, argument)),
-    registerDeskCommand("omp.reconnectTerminal", (argument: unknown) =>
+    registerDeskCommand("ompDesk.openTerminal", (argument: unknown) => openFolderTerminal(context, index, argument)),
+    registerDeskCommand("ompDesk.reconnectTerminal", (argument: unknown) =>
       reconnectFolderTerminal(context, index, argument),
     ),
-    registerDeskCommand("omp.renameSession", (argument: unknown) => renameSession(context, index, argument)),
-    registerDeskCommand("omp.closeSession", (argument: unknown) => closeSession(context, index, argument)),
-    registerDeskCommand("omp.reloadSession", (argument: unknown) => reloadSession(context, index, argument)),
-    registerDeskCommand("omp.addWorkspaceFolder", () => addWorkspaceFolder(index)),
-    registerDeskCommand("omp.chooseSessionsLayout", () => chooseSessionsLayout()),
-    registerDeskCommand("omp.chooseSessionsLayout.flat", () => chooseSessionsLayout()),
-    registerDeskCommand("omp.chooseSessionsLayout.folders", () => chooseSessionsLayout()),
-    registerDeskCommand("omp.chooseSessionsLayout.terminals", () => chooseSessionsLayout()),
-    registerDeskCommand("omp.pinWorkspaceFolder", (argument: unknown) => pinWorkspaceFolder(index, argument)),
-    registerDeskCommand("omp.unpinWorkspaceFolder", (argument: unknown) => unpinWorkspaceFolder(index, argument)),
-    registerDeskCommand("omp.resumeWorkspaceFolder", (argument: unknown) =>
+    registerDeskCommand("ompDesk.renameSession", (argument: unknown) => renameSession(context, index, argument)),
+    registerDeskCommand("ompDesk.closeSession", (argument: unknown) => closeSession(context, index, argument)),
+    registerDeskCommand("ompDesk.reloadSession", (argument: unknown) => reloadSession(context, index, argument)),
+    registerDeskCommand("ompDesk.addWorkspaceFolder", () => addWorkspaceFolder(index)),
+    registerDeskCommand("ompDesk.chooseSessionsLayout", () => chooseSessionsLayout()),
+    registerDeskCommand("ompDesk.chooseSessionsLayout.flat", () => chooseSessionsLayout()),
+    registerDeskCommand("ompDesk.chooseSessionsLayout.folders", () => chooseSessionsLayout()),
+    registerDeskCommand("ompDesk.chooseSessionsLayout.terminals", () => chooseSessionsLayout()),
+    registerDeskCommand("ompDesk.pinWorkspaceFolder", (argument: unknown) => pinWorkspaceFolder(index, argument)),
+    registerDeskCommand("ompDesk.unpinWorkspaceFolder", (argument: unknown) => unpinWorkspaceFolder(index, argument)),
+    registerDeskCommand("ompDesk.resumeWorkspaceFolder", (argument: unknown) =>
       resumeWorkspaceFolder(context, index, argument),
     ),
-    registerDeskCommand("omp.openSession", (argument: unknown) => openSession(context, index, argument, "resumed")),
-    registerDeskCommand("omp.clickSession", (argument: unknown) => s.sessionActions.click(context, index, argument)),
-    registerDeskCommand("omp.openProcess", (argument: unknown) => s.sessionActions.openProcess(context, index, argument)),
-    registerDeskCommand("omp.goToSession", () => s.sessionActions.goTo(context, index)),
-    registerDeskCommand("omp.switchToSessionWindow", (argument: unknown) => s.routing.switchToWindow(index, tabIdArgument(argument))),
-    registerDeskCommand("omp.forgetSession", (argument: unknown) => s.sessionActions.forget(index, argument)),
-    registerDeskCommand("omp.deleteSession", (argument: unknown) => s.sessionActions.delete(index, argument)),
-    registerDeskCommand("omp.stopSessionHost", (argument: unknown) =>
+    registerDeskCommand("ompDesk.openSession", (argument: unknown) => openSession(context, index, argument, "resumed")),
+    registerDeskCommand("ompDesk.clickSession", (argument: unknown) => s.sessionActions.click(context, index, argument)),
+    registerDeskCommand("ompDesk.openProcess", (argument: unknown) => s.sessionActions.openProcess(context, index, argument)),
+    registerDeskCommand("ompDesk.goToSession", () => s.sessionActions.goTo(context, index)),
+    registerDeskCommand("ompDesk.switchToSessionWindow", (argument: unknown) => s.routing.switchToWindow(index, tabIdArgument(argument))),
+    registerDeskCommand("ompDesk.forgetSession", (argument: unknown) => s.sessionActions.forget(index, argument)),
+    registerDeskCommand("ompDesk.deleteSession", (argument: unknown) => s.sessionActions.delete(index, argument)),
+    registerDeskCommand("ompDesk.stopSessionHost", (argument: unknown) =>
       s.sessionActions.stopHost(context, index, argument),
     ),
-    registerDeskCommand("omp.killSession", (argument: unknown) => s.sessionActions.kill(context, index, argument)),
-    registerDeskCommand("omp.refreshSessions", () => s.sessionActions.refresh(index)),
-    registerDeskCommand("omp.showHostControls", () => showHostControls(index)),
-    registerDeskCommand("omp.selectModel", () => selectHostModel(index)),
-    registerDeskCommand("omp.selectThinking", () => selectHostThinking(index)),
-    registerDeskCommand("omp.copyTools", () => copyHostTools(index)),
-    registerDeskCommand("omp.loginProvider", () => loginProviderFromPalette(index)),
-    registerDeskCommand("omp.enableFileEvidence", () => enableFileEvidence(context, index)),
-    registerDeskCommand("omp.disableFileEvidence", () => disableFileEvidence(context, index)),
-    registerDeskCommand("omp.showFileEvidence", () => showFileEvidence(context, index)),
-    registerDeskCommand("omp.deleteFileEvidence", () => deleteFileEvidence(context, index)),
+    registerDeskCommand("ompDesk.killSession", (argument: unknown) => s.sessionActions.kill(context, index, argument)),
+    registerDeskCommand("ompDesk.refreshSessions", () => s.sessionActions.refresh(index)),
+    registerDeskCommand("ompDesk.showHostControls", () => showHostControls(index)),
+    registerDeskCommand("ompDesk.selectModel", () => selectHostModel(index)),
+    registerDeskCommand("ompDesk.selectThinking", () => selectHostThinking(index)),
+    registerDeskCommand("ompDesk.copyTools", () => copyHostTools(index)),
+    registerDeskCommand("ompDesk.loginProvider", () => loginProviderFromPalette(index)),
+    registerDeskCommand("ompDesk.enableFileEvidence", () => enableFileEvidence(context, index)),
+    registerDeskCommand("ompDesk.disableFileEvidence", () => disableFileEvidence(context, index)),
+    registerDeskCommand("ompDesk.showFileEvidence", () => showFileEvidence(context, index)),
+    registerDeskCommand("ompDesk.deleteFileEvidence", () => deleteFileEvidence(context, index)),
     // Keyboard/command access to actions the panel already offers, so a
     // keybinding reaches the same composer handlers the buttons use. Each of
     // these targets the actual active editor, never a merely visible split panel,
     // reports when there is none, and never starts a host.
-    registerDeskCommand("omp.sendPrompt", () => postPanelAction("send-prompt")),
-    registerDeskCommand("omp.stopTurn", () => postPanelAction("stop-turn")),
-    registerDeskCommand("omp.focusComposer", () => windowState().editorPanels.focusChatComposer(index)),
-    registerDeskCommand("omp.retryTurn", () => postChatPanelAction("retry-turn")),
-    registerDeskCommand("omp.toggleThinking", () => toggleTranscriptDefault(THINKING_EXPANDED_KEY)),
-    registerDeskCommand("omp.toggleToolOutput", () => toggleTranscriptDefault(TOOLS_EXPANDED_KEY)),
-    registerDeskCommand("omp.searchPromptHistory", () => searchPromptHistory()),
-    registerDeskCommand("omp.searchSymbolFromChat", () => s.guestDispatcher.searchSymbolFromChat()),
-    registerDeskCommand("omp.compactConversation", () => runActiveChatAction(context, index, "compact")),
-    registerDeskCommand("omp.shakeConversation", () => runActiveChatAction(context, index, "shake")),
-    registerDeskCommand("omp.cycleModel", () => runActiveChatAction(context, index, "cycle-model")),
-    registerDeskCommand("omp.cycleThinkingLevel", () => runActiveChatAction(context, index, "cycle-thinking")),
-    registerDeskCommand("omp.exportConversationHtml", () => runActiveChatAction(context, index, "export-html")),
-    registerDeskCommand("omp.shareConversation", () => runActiveChatAction(context, index, "share")),
-    registerDeskCommand("omp.showChatKeyboardShortcuts", () => showChatKeyboardShortcuts()),
-    registerDeskCommand("omp.rewindConversation", () => rewindConversation()),
-    registerDeskCommand("omp.sendSelection", () => addSelectionToSession(context, index)),
-    registerDeskCommand("omp.searchFileFromChat", () => s.guestDispatcher.searchFileFromChat()),
-    registerDeskCommand("omp.sendFile", (clicked: unknown, selected: unknown) => addFilesToSession(context, index, clicked, selected)),
-    registerDeskCommand("omp.showDiagnostics", () => showDiagnostics(context, index)),
-    registerDeskCommand("omp.copyRowDiagnostics", async (item: unknown) => {
+    registerDeskCommand("ompDesk.sendPrompt", () => postPanelAction("send-prompt")),
+    registerDeskCommand("ompDesk.stopTurn", () => postPanelAction("stop-turn")),
+    registerDeskCommand("ompDesk.focusComposer", () => windowState().editorPanels.focusChatComposer(index)),
+    registerDeskCommand("ompDesk.retryTurn", () => postChatPanelAction("retry-turn")),
+    registerDeskCommand("ompDesk.toggleThinking", () => toggleTranscriptDefault(THINKING_EXPANDED_KEY)),
+    registerDeskCommand("ompDesk.toggleToolOutput", () => toggleTranscriptDefault(TOOLS_EXPANDED_KEY)),
+    registerDeskCommand("ompDesk.searchPromptHistory", () => searchPromptHistory()),
+    registerDeskCommand("ompDesk.searchSymbolFromChat", () => s.guestDispatcher.searchSymbolFromChat()),
+    registerDeskCommand("ompDesk.compactConversation", () => runActiveChatAction(context, index, "compact")),
+    registerDeskCommand("ompDesk.shakeConversation", () => runActiveChatAction(context, index, "shake")),
+    registerDeskCommand("ompDesk.cycleModel", () => runActiveChatAction(context, index, "cycle-model")),
+    registerDeskCommand("ompDesk.cycleThinkingLevel", () => runActiveChatAction(context, index, "cycle-thinking")),
+    registerDeskCommand("ompDesk.exportConversationHtml", () => runActiveChatAction(context, index, "export-html")),
+    registerDeskCommand("ompDesk.shareConversation", () => runActiveChatAction(context, index, "share")),
+    registerDeskCommand("ompDesk.showChatKeyboardShortcuts", () => showChatKeyboardShortcuts()),
+    registerDeskCommand("ompDesk.rewindConversation", () => rewindConversation()),
+    registerDeskCommand("ompDesk.sendSelection", () => addSelectionToSession(context, index)),
+    registerDeskCommand("ompDesk.searchFileFromChat", () => s.guestDispatcher.searchFileFromChat()),
+    registerDeskCommand("ompDesk.sendFile", (clicked: unknown, selected: unknown) => addFilesToSession(context, index, clicked, selected)),
+    registerDeskCommand("ompDesk.showDiagnostics", () => showDiagnostics(context, index)),
+    registerDeskCommand("ompDesk.copyRowDiagnostics", async (item: unknown) => {
       if (!(item instanceof SessionTreeItem || item instanceof WorkspaceFolderTreeItem || item instanceof ProcessTreeItem)) return;
       try {
         await vscode.env.clipboard.writeText(redactCapabilities(item.diagnostics));
       } catch (error) {
         log(`row diagnostics copy failed: ${messageOf(error)}`);
-        showError("Diagnostics could not be copied. Try again, or use OMP: Show Diagnostics.");
+        showError("Diagnostics could not be copied. Try again, or use OMP Desk: Show Diagnostics.");
       }
     }),
     // The report is regenerated on every request from measurements this window
@@ -3495,7 +3537,7 @@ function localLauncher(context: vscode.ExtensionContext, index: SessionIndex, ch
     attachBrokerClient,
     brokerUnavailableReason: () => windowState().ptyGate?.reason(),
     brokerWatches: s.brokerWatches,
-    linkReminder: () => vscode.workspace.getConfiguration("omp").get<boolean>("linkReminder", false),
+    linkReminder: () => vscode.workspace.getConfiguration("ompDesk").get<boolean>("linkReminder", false),
     control: s.sessionRuntime.control,
     native: s.sessionRuntime.nativeWatch,
     exit: s.sessionRuntime.exit,
@@ -4083,7 +4125,7 @@ function hasLocalEditorFor(tabId: string): boolean {
 // The profile catalog
 
 /** Context key telling the sidebar the catalog is still being read. */
-const CATALOG_PENDING_CONTEXT = "omp.catalogPending";
+const CATALOG_PENDING_CONTEXT = "ompDesk.catalogPending";
 
 /**
  * Build this window's view of the profile catalog.
@@ -5016,7 +5058,7 @@ function copyActiveTerminalScreen(): void {
 }
 
 /**
- * `OMP: Redraw Terminal`: ask the native OMP program in the active editor to repaint its own
+ * `OMP Desk: Redraw Terminal`: ask the native OMP program in the active editor to repaint its own
  * screen (the resize nudge a reattach performs), for the moments its renderer and the terminal
  * disagree about rows. Native OMP panes only; a folder shell is never nudged. Failure is said
  * plainly and nothing is rewritten or hidden.
@@ -5266,10 +5308,10 @@ async function runDeskSlashAction(action: Exclude<DeskSlashAction, "models-setti
       await vscode.commands.executeCommand("workbench.view.scm");
       return;
     case "tools-view":
-      await vscode.commands.executeCommand("omp.tools.focus");
+      await vscode.commands.executeCommand("ompDesk.tools.focus");
       return;
     case "provider-login":
-      await vscode.commands.executeCommand("omp.loginProvider");
+      await vscode.commands.executeCommand("ompDesk.loginProvider");
       return;
   }
   const exhaustive: never = action;
@@ -5277,7 +5319,7 @@ async function runDeskSlashAction(action: Exclude<DeskSlashAction, "models-setti
 }
 
 async function showChatKeyboardShortcuts(): Promise<void> {
-  await vscode.commands.executeCommand("workbench.action.openGlobalKeybindings", "omp.");
+  await vscode.commands.executeCommand("workbench.action.openGlobalKeybindings", "ompDesk.");
 }
 
 /** Prompts the user sent from any Chat, newest first; VS Code's global state, so one list per VS Code profile. */
@@ -5332,7 +5374,7 @@ async function searchPromptHistory(): Promise<void> {
 }
 
 /**
- * "OMP: Rewind Conversation…" (ADR-0051), the keyboard-only route to Chat's in-place Rewind: the loaded prompts of the
+ * "OMP Desk: Rewind Conversation…" (ADR-0051), the keyboard-only route to Chat's in-place Rewind: the loaded prompts of the
  * active Chat, newest first, with what leaves the branch, then Rewind or Rewind & summarize. The request is pinned to
  * the leaf the list was built from; the answer and the prompt go to the tab's writable editor routes, whose composer
  * takes the prompt to edit and send again. Files changed afterwards are named and never restored.
@@ -5420,7 +5462,7 @@ async function loadSlashRegistry(context: vscode.ExtensionContext): Promise<void
   }
 }
 
-// "OMP: Add Selection to Session" and "OMP: Add File to Session"
+// "OMP Desk: Add Selection to Session" and "OMP Desk: Add File to Session"
 // What is added is a reference (`@src/a.ts [lines 12-30]`), composed by `wiring/editor-context` for the
 // chosen session's cwd. The target is always the user's choice from a picker, most recently focused
 // editor first; nothing is ever submitted, and the destination is revealed and focused.
@@ -5441,7 +5483,7 @@ async function addSelectionToSession(context: vscode.ExtensionContext, index: Se
   }
   const ranges = editor.selections.filter(selection => !selection.isEmpty).map(selection => selectionLines(selection.start, selection.end));
   if (ranges.length === 0) {
-    showWarning("Select some text first, or use “OMP: Add File to Session”.");
+    showWarning("Select some text first, or use “OMP Desk: Add File to Session”.");
     return;
   }
   await addToSession(context, index, [{ fsPath: editor.document.uri.fsPath, ranges }], editor.document.isDirty);
@@ -5712,7 +5754,7 @@ function notificationSuppression(index: SessionIndex, tabId: string): Notificati
   const active = editorInFrontConversation(index) === tabId;
   const visible = stateOf(tabId)?.panel?.visible ?? active;
   return desktopNotificationSuppression(
-    vscode.workspace.getConfiguration("omp").get<boolean>("desktopNotifications", true),
+    vscode.workspace.getConfiguration("ompDesk").get<boolean>("desktopNotifications", true),
     vscode.window.state.focused,
     visible,
     active,
@@ -5765,14 +5807,10 @@ function refreshGuestContext(): void {
   const visible = activePanelTab();
   const activity = visible === null ? undefined : s.turnActivities.get(visible.tabId);
   const mode = visible?.mode ?? "";
-  void vscode.commands.executeCommand("setContext", "omp.sessionMode", mode);
-  void vscode.commands.executeCommand("setContext", "omp.sessionTransitionPending", visible !== null && (fencedOf(visible) || s.pendingSessionViewChanges.has(visible)));
-  void vscode.commands.executeCommand("setContext", STREAMING_CONTEXT, mode === "chat" && activity?.streaming === true);
-  void vscode.commands.executeCommand(
-    "setContext",
-    COMPOSER_POPUP_CONTEXT,
-    visible !== null && s.composerPopupTabs.has(visible.tabId),
-  );
+  setDeskContext("ompDesk.sessionMode", mode);
+  void vscode.commands.executeCommand("setContext", "ompDesk.sessionTransitionPending", visible !== null && (fencedOf(visible) || s.pendingSessionViewChanges.has(visible)));
+  setDeskContext(STREAMING_CONTEXT, mode === "chat" && activity?.streaming === true);
+  setDeskContext(COMPOSER_POPUP_CONTEXT, visible !== null && s.composerPopupTabs.has(visible.tabId));
 }
 
 const SUBAGENT_WORK_POLL_MS = 3_000;
@@ -5880,7 +5918,7 @@ function rpcPhaseIsRunning(phase: ChatPhase): boolean {
 function readChatDisplayPreferences(): ChatDisplayPreferences {
   const s = windowState();
   return {
-    toolCallDetail: vscode.workspace.getConfiguration("omp").get<string>("toolCallDetail", "overview") === "detailed" ? "detailed" : "overview",
+    toolCallDetail: vscode.workspace.getConfiguration("ompDesk").get<string>("toolCallDetail", "overview") === "detailed" ? "detailed" : "overview",
     accessibilitySupport: vscode.workspace.getConfiguration("editor").get<string>("accessibilitySupport", "auto") === "on",
     thinkingExpanded: s.context?.globalState.get<unknown>(THINKING_EXPANDED_KEY) === true,
     toolsExpanded: s.context?.globalState.get<unknown>(TOOLS_EXPANDED_KEY) === true,
@@ -5900,7 +5938,7 @@ async function toggleTranscriptDefault(key: typeof THINKING_EXPANDED_KEY | typeo
 
 function refreshChatDisplayPreferences(event: vscode.ConfigurationChangeEvent): void {
   const s = windowState();
-  if (event.affectsConfiguration("omp.toolCallDetail") || event.affectsConfiguration("editor.accessibilitySupport")) {
+  if (event.affectsConfiguration("ompDesk.toolCallDetail") || event.affectsConfiguration("editor.accessibilitySupport")) {
     s.sessionRuntime.conversations.refreshDisplayPreferences();
   }
 }
@@ -7223,7 +7261,7 @@ function refreshLauncher(options: { readonly ownership?: boolean } = {}): void {
   s.sessionProcesses?.touch();
   s.inventoryViews?.sync();
   s.contextView?.sync();
-  if (s.context !== undefined) void vscode.commands.executeCommand("setContext", "omp.defaultSessionMode", defaultSessionMode(s.context));
+  if (s.context !== undefined) void vscode.commands.executeCommand("setContext", "ompDesk.defaultSessionMode", defaultSessionMode(s.context));
   void vscode.commands.executeCommand(
     "setContext",
     HAS_WORKSPACE_FOLDERS_CONTEXT,
@@ -7367,7 +7405,7 @@ function restorePinnedSelection(index: SessionIndex, selection: readonly Launche
 /** How Sessions arranges its rows: the setting, flat by default. */
 function sessionsGrouping(): SessionsGrouping {
   const s = windowState();
-  const grouping = normalizeSessionsGrouping(vscode.workspace.getConfiguration("omp").get("sessionsGrouping"));
+  const grouping = normalizeSessionsGrouping(vscode.workspace.getConfiguration("ompDesk").get("sessionsGrouping"));
   if (grouping !== "terminals") s.lastSessionServingLayout = grouping;
   return grouping;
 }
@@ -7381,17 +7419,17 @@ const SESSIONS_LAYOUT_WORDS: Record<SessionsGrouping, string> = {
 /** Store the chosen layout; the configuration listener redraws the view. */
 async function setSessionsGrouping(grouping: SessionsGrouping): Promise<void> {
   try {
-    await vscode.workspace.getConfiguration("omp").update("sessionsGrouping", grouping, vscode.ConfigurationTarget.Global);
+    await vscode.workspace.getConfiguration("ompDesk").update("sessionsGrouping", grouping, vscode.ConfigurationTarget.Global);
     // The picker writes the user layer; a workspace value of the same setting wins in this window, so say why the layout did not change.
-    const inEffect = normalizeSessionsGrouping(vscode.workspace.getConfiguration("omp").get("sessionsGrouping"));
+    const inEffect = normalizeSessionsGrouping(vscode.workspace.getConfiguration("ompDesk").get("sessionsGrouping"));
     if (inEffect !== grouping) {
-      const overridden = vscode.workspace.getConfiguration("omp").inspect("sessionsGrouping")?.workspaceValue !== undefined;
+      const overridden = vscode.workspace.getConfiguration("ompDesk").inspect("sessionsGrouping")?.workspaceValue !== undefined;
       void vscode.window.showWarningMessage(
         overridden
           ? `This workspace sets its own Sessions layout, which overrides your choice here. Your choice is saved in your user settings.`
           : `Sessions shows ${SESSIONS_LAYOUT_WORDS[inEffect]}, not the layout you chose: another setting changed it meanwhile.`,
         "Open Settings",
-      ).then(action => { if (action === "Open Settings") void vscode.commands.executeCommand("workbench.action.openSettings", "@id:omp.sessionsGrouping"); });
+      ).then(action => { if (action === "Open Settings") void vscode.commands.executeCommand("workbench.action.openSettings", "@id:ompDesk.sessionsGrouping"); });
     }
   } catch (error) {
     showError(`Sessions could not switch to ${SESSIONS_LAYOUT_WORDS[grouping]}: ${messageOf(error)}`);
@@ -8653,7 +8691,7 @@ async function deleteFileEvidence(context: vscode.ExtensionContext, index: Sessi
 
 // Startup and performance diagnostics
 //
-// `OMP: Show Diagnostics` renders one extension-owned, read-only document from
+// `OMP Desk: Show Diagnostics` renders one extension-owned, read-only document from
 // measurements this window already took while launching and attaching sessions.
 // Nothing in this section starts a process, probes OMP, changes a setting or
 // warms anything to produce a number: it records what happened, marks every
@@ -8758,7 +8796,7 @@ async function diagnosticsDocumentContent(
 ): Promise<string> {
   const s = windowState();
   if (uriPath !== DIAGNOSTICS_DOCUMENT_PATH) {
-    return `${redactCapabilities(uriPath)}\n\nThis diagnostics document has no report bound to this path. Run "OMP: Show Diagnostics" to open the window's report.\n`;
+    return `${redactCapabilities(uriPath)}\n\nThis diagnostics document has no report bound to this path. Run "OMP Desk: Show Diagnostics" to open the window's report.\n`;
   }
   refreshSessionDiagnostics(index);
   return s.diagnostics.render(diagnosticsEnvironment(context));
@@ -8808,6 +8846,53 @@ function windowTiming(event: string, detail = ""): void {
  */
 function registerDeskCommand(id: string, handler: (...args: never[]) => unknown): vscode.Disposable {
   return vscode.commands.registerCommand(id, (...args: never[]) => trackOperation(`command ${id}`, () => handler(...args)));
+}
+
+/**
+ * The settings the migration of ADR-0068 reads and writes. `inspect` reports a key no extension contributes, `update` can remove one,
+ * and a new key must be contributed to be written (measured in VS Code 1.141.0; see the design).
+ */
+function legacySettingsPort(context: vscode.ExtensionContext, foreignSettings: ReadonlySet<string>): LegacySettingsPort {
+  const contributed = (context.extension?.packageJSON as { contributes?: { configuration?: { properties?: Record<string, { scope?: string }> } } } | undefined)
+    ?.contributes?.configuration?.properties ?? {};
+  const workspaceSettingsFile = (): string | null => {
+    const file = vscode.workspace.workspaceFile;
+    if (file !== undefined) return file.scheme === "file" ? file.fsPath : null;
+    const folder = vscode.workspace.workspaceFolders?.[0];
+    return folder !== undefined && folder.uri.scheme === "file" ? path.join(folder.uri.fsPath, ".vscode", "settings.json") : null;
+  };
+  return {
+    inspect: key => vscode.workspace.getConfiguration().inspect(key),
+    update: (key, value, layer) => Promise.resolve(
+      vscode.workspace.getConfiguration().update(key, value, layer === "user" ? vscode.ConfigurationTarget.Global : vscode.ConfigurationTarget.Workspace),
+    ),
+    workspaceAllowed: key => {
+      const scope = contributed[key]?.scope;
+      return scope !== "application" && scope !== "machine" && scope !== "machine-overridable";
+    },
+    workspaceSettingsFile,
+    // Only a refusal of the file system counts: a missing file is created by VS Code.
+    isWritable: async file => {
+      try {
+        await access(file, fsConstants.W_OK);
+        return true;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        return code !== "EPERM" && code !== "EACCES";
+      }
+    },
+    foreignSettings,
+    log: line => log(line),
+  };
+}
+
+/** `setContext` for a key of this extension; the keys default keybindings used are also set under their old names (`legacy-aliases.ts`). */
+function setDeskContext(key: string, value: unknown): void {
+  void vscode.commands.executeCommand("setContext", key, value);
+  if (legacyContextMirror) {
+    const old = legacyContextKey(key);
+    if (old !== null) void vscode.commands.executeCommand("setContext", old, value);
+  }
 }
 
 function log(message: string): void {
@@ -9358,7 +9443,7 @@ async function handleTerminalGuestMessage(
         await handleSymbolLinks(payload as unknown as SymbolLinksRequest, {
           cwd,
           roots: () => symbolRoots(cwd, (vscode.workspace.workspaceFolders ?? []).map(folder => folder.uri.fsPath)),
-          enabled: () => vscode.workspace.getConfiguration("omp").get<boolean>("linkCodeSymbols", true),
+          enabled: () => vscode.workspace.getConfiguration("ompDesk").get<boolean>("linkCodeSymbols", true),
           isCurrent,
           reply: message => pushTerminalTo(state.slotId, message),
         }, symbolLinkResolver());
@@ -9899,7 +9984,7 @@ async function handleShellEditorClosed(
   refreshLauncher();
   // A genuine failure retains its recovery slot, but no longer represents an open
   // editor. Re-read child status so Processes offers Stop with the current facts.
-  void vscode.commands.executeCommand("omp.refreshProcesses");
+  void vscode.commands.executeCommand("ompDesk.refreshProcesses");
 }
 
 /** The broker handle for a shell slot, or `null` when it cannot be reached. */

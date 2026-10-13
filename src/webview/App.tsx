@@ -150,7 +150,7 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 	const preferences = useSyncExternalStore(client.subscribe, client.getDisplayPreferences);
 	// Screen-reader paging is not a menu choice: it follows VS Code's `editor.accessibilitySupport`, which the host pushes with the display preferences.
 	const pagedHistory = preferences.accessibilitySupport;
-	// The host's remembered thinking and tool defaults (`omp.toggleThinking`, `omp.toggleToolOutput`).
+	// The host's remembered thinking and tool defaults (`ompDesk.toggleThinking`, `ompDesk.toggleToolOutput`).
 	useEffect(() => adoptTranscriptToggles(preferences.thinkingExpanded === true, preferences.toolsExpanded === true), [preferences.thinkingExpanded, preferences.toolsExpanded]);
 
 	useEffect(() => {

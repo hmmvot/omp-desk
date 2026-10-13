@@ -59,7 +59,7 @@ const TRANSIENT_ERRNO_CODES: Record<string, true> = {
  * workspace). Empty means PATH decides. Defined here, free of `vscode`, so the Settings view's
  * pure model, the controller and the resolver agree on the key.
  */
-export const OMP_PATH_SETTING = "omp.executablePath";
+export const OMP_PATH_SETTING = "ompDesk.executablePath";
 
 /**
  * The transient cause of a failed system call (`started` for a spawn, `read` for an inspection), or

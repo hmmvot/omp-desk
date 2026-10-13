@@ -162,7 +162,7 @@ describe("the rpc-ui launch command line", () => {
 		for (const flag of ["--define", "--preload", "-e"]) assert.equal(result.args.includes(flag), false, flag);
 	});
 
-	it("passes the omp.linkReminder setting to the Chat prompt module as an environment value", () => {
+	it("passes the ompDesk.linkReminder setting to the Chat prompt module as an environment value", () => {
 		assert.equal(spec({ linkReminder: true }).env[LINK_REMINDER_ENV], "1");
 		assert.equal(spec({ linkReminder: false }).env[LINK_REMINDER_ENV], "0");
 	});

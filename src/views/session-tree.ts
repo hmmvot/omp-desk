@@ -22,7 +22,7 @@
  * opens stopped history without a writer; a rapid second click or Open launches it.
  * A fileless draft has nothing to view, so its click requests Open instead.
  *
- * Two arrangements share the same rows (`omp.sessionsGrouping`): the folder tree above,
+ * Two arrangements share the same rows (`ompDesk.sessionsGrouping`): the folder tree above,
  * and a flat list — the default — with one row per session of the same folders, labelled
  * `folder · title`, ordered by `src/views/session-order.ts` (live rows first, stopped rows
  * last, each group by folder then title) and ended by a New Session row. A row is *unread* when
@@ -589,7 +589,7 @@ export class SessionTreeItem extends vscode.TreeItem {
 		this.tabId = entry.tabId;
 		this.id = entry.tabId;
 		// Commands and TreeView.reveal retain this element across presentation changes.
-		this.command = { command: "omp.clickSession", title: "Open", arguments: [this] };
+		this.command = { command: "ompDesk.clickSession", title: "Open", arguments: [this] };
 		this.update(entry, state, row);
 	}
 
@@ -710,7 +710,7 @@ export class EmptySessionTreeItem extends vscode.TreeItem {
 		this.folderId = folder.folderId;
 		this.id = `${folder.folderId}.empty`;
 		this.iconPath = new vscode.ThemeIcon("add");
-		this.command = { command: "omp.newSession", title: "New Session", arguments: [folder] };
+		this.command = { command: "ompDesk.newSession", title: "New Session", arguments: [folder] };
 	}
 }
 
@@ -720,20 +720,20 @@ export class ProviderLoginTreeItem extends vscode.TreeItem {
 		super("Log in to a model provider to start", vscode.TreeItemCollapsibleState.None);
 		this.id = "omp.providerLogin";
 		this.iconPath = new vscode.ThemeIcon("account");
-		this.command = { command: "omp.loginProvider", title: "Log In to Provider" };
+		this.command = { command: "ompDesk.loginProvider", title: "Log In to Provider" };
 	}
 }
 
 /**
  * The flat list's row after the sessions: it asks for a folder and opens a new session there through
- * `omp.newSession`, exactly as the view's own New Session action does.
+ * `ompDesk.newSession`, exactly as the view's own New Session action does.
  */
 export class NewSessionTreeItem extends vscode.TreeItem {
 	constructor() {
 		super("New Session…", vscode.TreeItemCollapsibleState.None);
 		this.id = "omp.newSessionRow";
 		this.iconPath = new vscode.ThemeIcon("add");
-		this.command = { command: "omp.newSession", title: "New Session" };
+		this.command = { command: "ompDesk.newSession", title: "New Session" };
 		this.contextValue = "ompNewSession";
 		this.accessibilityInformation = { label: "New Session, choose a folder to start a session in" };
 	}
@@ -741,14 +741,14 @@ export class NewSessionTreeItem extends vscode.TreeItem {
 
 /**
  * The flat list's row under New Session…: it asks for a folder, then lists that folder's saved
- * sessions through `omp.resumeWorkspaceFolder`, exactly as the view's own Resume Session action does.
+ * sessions through `ompDesk.resumeWorkspaceFolder`, exactly as the view's own Resume Session action does.
  */
 export class ResumeSessionTreeItem extends vscode.TreeItem {
 	constructor() {
 		super("Resume Session…", vscode.TreeItemCollapsibleState.None);
 		this.id = "omp.resumeSessionRow";
 		this.iconPath = new vscode.ThemeIcon("history");
-		this.command = { command: "omp.resumeWorkspaceFolder", title: "Resume Session" };
+		this.command = { command: "ompDesk.resumeWorkspaceFolder", title: "Resume Session" };
 		this.contextValue = "ompResumeSession";
 		this.accessibilityInformation = { label: "Resume Session, choose a folder to resume a saved session from" };
 	}

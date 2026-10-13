@@ -235,7 +235,7 @@ export interface WindowRouting {
 	consumeRequestedSelection(tabId: string): boolean;
 	/** The view column files from the chat open in: the file window's group while that window is open, else VS Code's choice. */
 	fileWindowColumn(): number | undefined;
-	/** `omp.moveFileToNewWindow`: a toggle that moves the files group into a window of its own, or back. */
+	/** `ompDesk.moveFileToNewWindow`: a toggle that moves the files group into a window of its own, or back. */
 	moveFileToNewWindow(): Promise<void>;
 	/** Stop watching the request directories. */
 	dispose(): void;
@@ -600,14 +600,14 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 	/**
 	 * The window a launch in `folder` starts in (ADR-0057): this one when it has the workspace
 	 * the launch needs open (the folder, or the Unity project it stands for), when
-	 * `omp.launchInFolderWindow` is off, or, for an ordinary folder, when no live window has it
+	 * `ompDesk.launchInFolderWindow` is off, or, for an ordinary folder, when no live window has it
 	 * (a pinned folder, or one only a session keeps visible); otherwise the most recently focused
 	 * window that has it; and for a Unity project nobody has open, a new window on it. A window that
 	 * runs an older OMP Desk than the installed one is never chosen: when it is the only kind of
 	 * window that has the folder, the launch starts here and the user is told once.
 	 */
 	async function planLaunchRoute(folder: RoutedFolder): Promise<LaunchRoute> {
-		if (!vscode.workspace.getConfiguration("omp").get<boolean>("launchInFolderWindow", true)) return { kind: "here" };
+		if (!vscode.workspace.getConfiguration("ompDesk").get<boolean>("launchInFolderWindow", true)) return { kind: "here" };
 		const folders = deps.folders();
 		if (deps.registry() === undefined || folders === undefined) return { kind: "here" };
 		const workspace = await launchWorkspaceOf(folder);

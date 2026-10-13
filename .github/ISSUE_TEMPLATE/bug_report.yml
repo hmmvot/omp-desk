@@ -78,7 +78,7 @@ body:
       label: Logs from the OMP output channel
       description: |
         Open **View > Output**, choose **OMP** in the drop-down, and paste the relevant lines.
-        **OMP: Show Diagnostics** from the Command Palette prints a summary you can attach as well.
+        **OMP Desk: Show Diagnostics** from the Command Palette prints a summary you can attach as well.
         Redact anything private: prompts, file paths, user names and tokens.
       render: text
   - type: textarea

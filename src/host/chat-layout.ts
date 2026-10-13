@@ -1,5 +1,5 @@
 /**
- * Where a session editor opens when chat has its own editor column (`omp.chatColumn`).
+ * Where a session editor opens when chat has its own editor column (`ompDesk.chatColumn`).
  *
  * Session editors share one editor group on the left, and that group is locked. VS Code never puts a new editor into
  * a locked group unless it is targeted by its exact column, so files opened from the Explorer, Quick Open, chat links

@@ -50,7 +50,7 @@ function processTooltip(row: BrokerProcessRow, state: ProcessState, label: strin
 }
 
 /**
- * One background broker process. The row's own click (`omp.openProcess`) opens what it stands for;
+ * One background broker process. The row's own click (`ompDesk.openProcess`) opens what it stands for;
  * a row that stands for nothing a click can open has no command, and selecting it does nothing.
  */
 export class ProcessTreeItem extends vscode.TreeItem {
@@ -81,7 +81,7 @@ export class ProcessTreeItem extends vscode.TreeItem {
 		this.accessibilityInformation = {
 			label: `${label}, ${processKindWord(row)} process, ${processStateWord(row, state)}${row.stop.available ? "" : ", cannot be stopped here"}`,
 		};
-		this.command = openTarget === null ? undefined : { command: "omp.openProcess", title: "Open", arguments: [this] };
+		this.command = openTarget === null ? undefined : { command: "ompDesk.openProcess", title: "Open", arguments: [this] };
 	}
 }
 

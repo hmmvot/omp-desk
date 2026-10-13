@@ -871,7 +871,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind 
 		return subscribeRestoredDraft(apply);
 	}, [publishRecoverable]);
 
-	// "OMP: Add Selection/File to Session": the `@path` references the extension host composed in
+	// "OMP Desk: Add Selection/File to Session": the `@path` references the extension host composed in
 	// an editor are inserted at the caret (over a selection), through the editing command stack so
 	// Undo removes them, and at the end of the draft while no textarea is mounted. They are never
 	// submitted, and an IME composition is not interrupted. One that arrived before this composer
@@ -1005,8 +1005,8 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind 
 	}, [client, composingRef, onRewind]);
 
 	// VS Code commands and keybindings reach the composer through this registry
-	// (`src/webview/lib/panel-actions.ts`): `omp.sendPrompt`, `omp.stopTurn` and
-	// `omp.focusComposer` run these same handlers, so a keybinding can never send
+	// (`src/webview/lib/panel-actions.ts`): `ompDesk.sendPrompt`, `ompDesk.stopTurn` and
+	// `ompDesk.focusComposer` run these same handlers, so a keybinding can never send
 	// what the Send button refuses or stop a turn the Stop button would not.
 
 	/**
@@ -1141,7 +1141,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind 
 		(event: KeyboardEvent<HTMLTextAreaElement>): void => {
 			const composing = event.nativeEvent.isComposing || composingRef.current;
 			// `Esc` `Esc` in an empty composer while nothing runs opens Rewind, as in the TUI. While a turn runs, Escape
-			// belongs to Stop (`omp.stopTurn`), and an open popup takes it first.
+			// belongs to Stop (`ompDesk.stopTurn`), and an open popup takes it first.
 			if (event.key === "Escape" && onRewind !== undefined && !composing && !suggestionsOpen) {
 				const idle = !client.getSnapshot().working && event.currentTarget.value.length === 0 && imagesRef.current.length === 0;
 				if (doubleEscapeRef.current.press(event.timeStamp, idle)) {

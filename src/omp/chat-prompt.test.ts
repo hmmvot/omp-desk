@@ -87,7 +87,7 @@ test("the reminder reaches only an RPC main session whose launch setting allows 
 	assert.ok(remind(messages, MAIN));
 	assert.equal(remind(messages, { mode: "tui", agent: { kind: "main" } }), undefined, "the native TUI renders replies itself");
 	assert.equal(remind(messages, { mode: "rpc", agent: { kind: "sub" } }), undefined, "a subagent answers its parent, not the user");
-	assert.equal(bindEvent("context", { [LINK_REMINDER_ENV]: "0" }), undefined, "omp.linkReminder off registers no handler");
+	assert.equal(bindEvent("context", { [LINK_REMINDER_ENV]: "0" }), undefined, "ompDesk.linkReminder off registers no handler");
 	assert.ok(bindEvent("context", { [LINK_REMINDER_ENV]: "1" }));
 	assert.equal(bindEvent("context", {}), undefined, "an unset variable means the default, off");
 	assert.equal(bindEvent("context", { [LINK_REMINDER_ENV]: "1" })?.({ type: "context", messages: "no" }, MAIN), undefined, "an unexpected event shape is left alone");

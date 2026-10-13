@@ -198,7 +198,7 @@ export interface SessionActions {
 	click(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown): Promise<void>;
 	/** Click a process row: open what it stands for. */
 	openProcess(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown): Promise<void>;
-	/** `omp.goToSession`: a searchable list of every session the Sessions view shows. */
+	/** `ompDesk.goToSession`: a searchable list of every session the Sessions view shows. */
 	goTo(context: vscode.ExtensionContext, index: SessionIndex): Promise<void>;
 	/** Drop one launcher entry, without touching the OMP session file. */
 	forget(index: SessionIndex, argument: unknown): Promise<void>;
@@ -260,7 +260,7 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 		if (!(argument instanceof ProcessTreeItem) || argument.openTarget === null) return;
 		const row = argument.row;
 		if (argument.openTarget === "stats") {
-			await vscode.commands.executeCommand("omp.openStats");
+			await vscode.commands.executeCommand("ompDesk.openStats");
 			return;
 		}
 		if (argument.openTarget === "session") {
@@ -293,7 +293,7 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 	}
 
 	/**
-	 * `omp.goToSession` from anywhere: a searchable list of every session the Sessions view shows, in its
+	 * `ompDesk.goToSession` from anywhere: a searchable list of every session the Sessions view shows, in its
 	 * flat order (live unread first, then by activity, stopped last), ended by New Session. Picking a row
 	 * is a click on that row; picking New Session runs the row's command.
 	 */
@@ -314,7 +314,7 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 			matchOnDescription: true,
 		});
 		if (picked === undefined) return;
-		if (picked.row === undefined) await vscode.commands.executeCommand("omp.newSession");
+		if (picked.row === undefined) await vscode.commands.executeCommand("ompDesk.newSession");
 		else await clickSession(context, index, picked.row);
 	}
 

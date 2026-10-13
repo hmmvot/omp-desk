@@ -42,7 +42,7 @@ if (typeof module.registerHooks === "function") {
 const stub = await import("./vscode-test-stub.ts");
 const { registerGuestDispatcher } = await import("./guest-dispatcher.ts");
 const { GUEST_PROTOCOL_VERSION } = await import("../protocol/messages.ts");
-const { DETAIL_VIEW_TYPE } = await import("../host/detail-tabs.ts");
+const { DETAIL_VIEW_TYPE, LEGACY_DETAIL_VIEW_TYPE } = await import("../host/detail-tabs.ts");
 const { TAB_INPUT_VIEW_TYPE_PREFIX } = await import("../host/bridge-identity.ts");
 
 const SLOT = "slot-1";
@@ -814,7 +814,7 @@ describe("stale host-control facts", () => {
 });
 
 describe("the detail tabs of a previous host lifetime", () => {
-	it("closes every detail tab, whether it carries its own view type or the bridge's prefix, and no other", async () => {
+	it("closes every detail tab, whether it carries its own view type, the one of the release before ADR-0068 or the bridge's prefix, and no other", async () => {
 		const closed: unknown[][] = [];
 		const close = stub.window.tabGroups.close;
 		stub.window.tabGroups.close = async (...args: unknown[]) => { closed.push(args); return true; };
@@ -822,11 +822,13 @@ describe("the detail tabs of a previous host lifetime", () => {
 		try {
 			const detail = { label: "detail", input: new stub.TabInputWebview(DETAIL_VIEW_TYPE) };
 			const prefixed = { label: "bridged", input: new stub.TabInputWebview(`${TAB_INPUT_VIEW_TYPE_PREFIX}${DETAIL_VIEW_TYPE}`) };
+			const legacy = { label: "legacy", input: new stub.TabInputWebview(LEGACY_DETAIL_VIEW_TYPE) };
+			const legacyPrefixed = { label: "legacy bridged", input: new stub.TabInputWebview(`${TAB_INPUT_VIEW_TYPE_PREFIX}${LEGACY_DETAIL_VIEW_TYPE}`) };
 			const session = { label: "session", input: new stub.TabInputWebview("omp.session") };
 			const text = { label: "text", input: new stub.TabInputText(stub.Uri.file("/a")) };
-			stub.window.tabGroups.all = [{ viewColumn: 1, tabs: [detail, session, text], activeTab: undefined }, { viewColumn: 2, tabs: [prefixed], activeTab: undefined }] as never;
+			stub.window.tabGroups.all = [{ viewColumn: 1, tabs: [detail, legacy, session, text], activeTab: undefined }, { viewColumn: 2, tabs: [prefixed, legacyPrefixed], activeTab: undefined }] as never;
 			await registerGuestDispatcher(world().deps).closeLeftoverDetailTabs();
-			assert.deepEqual(closed, [[[detail, prefixed], true]]);
+			assert.deepEqual(closed, [[[detail, legacy, prefixed, legacyPrefixed], true]]);
 			closed.length = 0;
 			stub.window.tabGroups.all = [{ viewColumn: 1, tabs: [session, text], activeTab: undefined }] as never;
 			await registerGuestDispatcher(world().deps).closeLeftoverDetailTabs();

@@ -601,7 +601,7 @@ export interface SymbolLinksHost {
 	readonly cwd: string;
 	/** The folders a symbol's file may be in. */
 	roots(): readonly string[];
-	/** The `omp.linkCodeSymbols` setting, read for each request. */
+	/** The `ompDesk.linkCodeSymbols` setting, read for each request. */
 	enabled(): boolean;
 	/** Whether the document and session that asked are still current. */
 	isCurrent(): boolean;

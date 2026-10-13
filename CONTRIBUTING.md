@@ -41,7 +41,7 @@ Before opening a pull request, run `npm run typecheck`, `npm test` and `npm run 
    `code --user-data-dir <scratch-dir>\data --extensions-dir <scratch-dir>\ext --install-extension out\<file>.vsix`, then start VS Code with the same two flags.
 3. Open the **OMP Desk** view in the Activity Bar, add a folder and start a session.
 
-The extension writes a log to the **OMP Desk** channel of the Output panel and can print a diagnostics summary with **OMP: Show Diagnostics**.
+The extension writes a log to the **OMP Desk** channel of the Output panel and can print a diagnostics summary with **OMP Desk: Show Diagnostics**.
 
 ### Test environments with their own OMP state
 

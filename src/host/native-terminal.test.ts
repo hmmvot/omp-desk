@@ -407,7 +407,7 @@ describe("OMP resolution when a candidate cannot answer", () => {
 		const error = await onPath([onPathInstall.bin], () => refusedExplicit(broken.shim));
 
 		assert.equal(error.transientCause, undefined);
-		assert.ok(error.message.includes(`The OMP named by the omp.executablePath setting (${broken.shim}) cannot be used.`), error.message);
+		assert.ok(error.message.includes(`The OMP named by the ompDesk.executablePath setting (${broken.shim}) cannot be used.`), error.message);
 		assert.match(error.message, /exited with code 3/);
 		assert.match(error.message, /Desk does not search PATH while that setting is set/);
 		await assert.rejects(stat(ran), "the PATH install must not even be probed");

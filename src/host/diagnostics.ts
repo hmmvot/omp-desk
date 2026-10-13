@@ -1,7 +1,7 @@
 /**
  * Startup and performance diagnostics for this extension host.
  *
- * `OMP: Show Diagnostics` renders one extension-owned, read-only report from
+ * `OMP Desk: Show Diagnostics` renders one extension-owned, read-only report from
  * values this window actually observed. Five properties this file must not
  * break:
  *

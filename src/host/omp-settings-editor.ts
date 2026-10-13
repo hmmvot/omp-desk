@@ -59,8 +59,8 @@ export class SettingsEditors implements vscode.Disposable {
   readonly #disposables: vscode.Disposable[] = [];
   constructor(readonly context: vscode.ExtensionContext, readonly host: SettingsEditorHost) {
     this.#disposables.push(
-      vscode.commands.registerCommand("omp.openModels", () => this.open("models", { folder: null, profile: host.defaultProfile() })),
-      vscode.commands.registerCommand("omp.openAgents", () => this.open("agents", { folder: null, profile: host.defaultProfile() })),
+      vscode.commands.registerCommand("ompDesk.openModels", () => this.open("models", { folder: null, profile: host.defaultProfile() })),
+      vscode.commands.registerCommand("ompDesk.openAgents", () => this.open("agents", { folder: null, profile: host.defaultProfile() })),
       vscode.window.registerWebviewPanelSerializer(VIEW_TYPE, {
         deserializeWebviewPanel: async (panel, raw: unknown) => {
           const stored = record(raw) && typeof raw.key === "string" ? this.#stored().find(item => item.key === raw.key) : undefined;

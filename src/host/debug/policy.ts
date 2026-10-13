@@ -16,11 +16,11 @@ export interface ConsentRequest {
 }
 
 export interface DebugPolicy {
-	/** `omp.agentDebugger.enabled`. */
+	/** `ompDesk.agentDebugger.enabled`. */
 	enabled(): boolean;
-	/** `omp.agentDebugger.start`. */
+	/** `ompDesk.agentDebugger.start`. */
 	startMode(): StartMode;
-	/** `omp.agentDebugger.expressions`. */
+	/** `ompDesk.agentDebugger.expressions`. */
 	expressionsMode(): ExpressionMode;
 	/** One blocking confirmation; resolves `false` when declined or dismissed. */
 	confirm(request: ConsentRequest): Promise<boolean>;

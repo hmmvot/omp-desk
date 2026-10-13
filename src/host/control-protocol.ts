@@ -83,7 +83,7 @@ export const CONTROL_NATIVE_ACTIVITY_QUESTION_POINTS = 200;
  */
 export const CONTROL_DIR_ENV = "OMP_VSCODE_CONTROL_DIR";
 export const CONTROL_SLOT_ENV = "OMP_VSCODE_CONTROL_SLOT";
-/** `0` when the `omp.linkReminder` setting is off for this launch; the Chat prompt module then adds no per-message reminder. */
+/** `0` when the `ompDesk.linkReminder` setting is off for this launch; the Chat prompt module then adds no per-message reminder. */
 export const LINK_REMINDER_ENV = "OMP_VSCODE_LINK_REMINDER";
 
 /**

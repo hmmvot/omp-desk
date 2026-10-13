@@ -502,10 +502,10 @@ describe("starting a session in the window that has its folder open", () => {
 		assert.deepEqual([w.served, w.calls], [[], []]);
 	});
 
-	it("starts here, whatever other windows have open, when omp.launchInFolderWindow is off", async () => {
+	it("starts here, whatever other windows have open, when ompDesk.launchInFolderWindow is off", async () => {
 		const w = await world([{ holderId: "holder-b", uri: "file:///b", serve: { ok: true, focused: true } }]);
 		w.state.opening = opening({ [FOLDER]: [there("holder-b")] });
-		stub.workspace.settings = { "omp.launchInFolderWindow": false };
+		stub.workspace.settings = { "ompDesk.launchInFolderWindow": false };
 		try {
 			assert.equal(await hand(w), false);
 		} finally { stub.workspace.settings = {}; }

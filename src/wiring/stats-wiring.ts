@@ -84,7 +84,7 @@ export function registerStatsDashboard(context: vscode.ExtensionContext, deps: {
 		if (panel !== undefined) { panel.reveal(); return; }
 		const uri = await vscode.env.asExternalUri(vscode.Uri.parse(`${STATS_ORIGIN}/`));
 		if (disposed) return;
-		panel = vscode.window.createWebviewPanel("omp.stats", "OMP Stats", vscode.ViewColumn.Active, {
+		panel = vscode.window.createWebviewPanel("ompDesk.stats", "OMP Stats", vscode.ViewColumn.Active, {
 			enableScripts: true, retainContextWhenHidden: true, localResourceRoots: [],
 		});
 		panel.iconPath = new vscode.ThemeIcon("graph");
@@ -92,14 +92,14 @@ export function registerStatsDashboard(context: vscode.ExtensionContext, deps: {
 		panel.onDidDispose(() => { panel = undefined; });
 	};
 	context.subscriptions.push(
-		vscode.commands.registerCommand("omp.openStats", () => {
+		vscode.commands.registerCommand("ompDesk.openStats", () => {
 			if (opening !== undefined) return opening;
 			opening = Promise.resolve(vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "Opening OMP Stats", cancellable: false }, open))
 				.then(() => undefined, (error: unknown) => {
 					const message = error instanceof Error ? error.message : "The Stats dashboard could not be opened. See OMP Desk output.";
 					deps.log(`stats: ${message}`);
 					void vscode.window.showErrorMessage(`OMP: ${message}`);
-				}).finally(() => { opening = undefined; void vscode.commands.executeCommand("omp.refreshProcesses"); });
+				}).finally(() => { opening = undefined; void vscode.commands.executeCommand("ompDesk.refreshProcesses"); });
 			return opening;
 		}),
 		{ dispose: () => { disposed = true; panel?.dispose(); } },

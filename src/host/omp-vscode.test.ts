@@ -93,21 +93,21 @@ after(async () => {
 });
 
 describe("the explicit OMP path setting", () => {
-	it("is the trimmed omp.executablePath value", () => {
-		stub().settings["omp.executablePath"] = "  C:\\tools\\omp.exe  ";
+	it("is the trimmed ompDesk.executablePath value", () => {
+		stub().settings["ompDesk.executablePath"] = "  C:\\tools\\omp.exe  ";
 		assert.equal(mod.configuredOmpPath(), "C:\\tools\\omp.exe");
 	});
 
 	it("is empty when the setting is unset or not a string, so PATH decides", () => {
 		assert.equal(mod.configuredOmpPath(), "");
-		stub().settings["omp.executablePath"] = 7;
+		stub().settings["ompDesk.executablePath"] = 7;
 		assert.equal(mod.configuredOmpPath(), "");
 	});
 
 	it("is read afresh on every call", () => {
-		stub().settings["omp.executablePath"] = "a";
+		stub().settings["ompDesk.executablePath"] = "a";
 		assert.equal(mod.configuredOmpPath(), "a");
-		stub().settings["omp.executablePath"] = "b";
+		stub().settings["ompDesk.executablePath"] = "b";
 		assert.equal(mod.configuredOmpPath(), "b");
 	});
 });

@@ -25,11 +25,11 @@ export interface ProviderLoginTerminalRequest {
 }
 
 /**
- * The explicit OMP path the user set (`omp.executablePath`, machine scope, so a workspace can never
+ * The explicit OMP path the user set (`ompDesk.executablePath`, machine scope, so a workspace can never
  * name a program to run), or the empty string when PATH decides.
  */
 export function configuredOmpPath(): string {
-  const value = vscode.workspace.getConfiguration("omp").get<unknown>(OMP_PATH_SETTING.slice("omp.".length));
+  const value = vscode.workspace.getConfiguration("ompDesk").get<unknown>(OMP_PATH_SETTING.slice("ompDesk.".length));
   return typeof value === "string" ? value.trim() : "";
 }
 

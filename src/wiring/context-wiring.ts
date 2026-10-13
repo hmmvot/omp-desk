@@ -4,7 +4,7 @@ import { ContextTreeProvider, READ_BREAKDOWN_COMMAND } from "../views/context-tr
 import type { ContextTarget } from "../host/context/context-controller.ts";
 
 /** The view id, as `package.json` contributes it. */
-export const CONTEXT_VIEW_ID = "omp.context";
+export const CONTEXT_VIEW_ID = "ompDesk.context";
 
 /** What the extension supplies: the editor the view describes (the inventory views' rule), a log, and the Chat's own Compact/Shake flow. */
 export interface ContextViewDeps {
@@ -36,7 +36,7 @@ export function registerContextView(context: vscode.ExtensionContext, deps: Cont
 			tree.message = model.message ?? undefined;
 			if (canMaintain !== model.canMaintain) {
 				canMaintain = model.canMaintain;
-				void vscode.commands.executeCommand("setContext", "omp.context.canMaintain", canMaintain);
+				void vscode.commands.executeCommand("setContext", "ompDesk.context.canMaintain", canMaintain);
 			}
 		},
 		notify: message => { void vscode.window.showWarningMessage(message); },
@@ -50,13 +50,13 @@ export function registerContextView(context: vscode.ExtensionContext, deps: Cont
 	const subscriptions: vscode.Disposable[] = [
 		provider, tree, controller,
 		tree.onDidChangeVisibility(event => controller.setVisible(event.visible)),
-		vscode.commands.registerCommand("omp.refreshContext", () => controller.refresh()),
-		vscode.commands.registerCommand("omp.context.compact", () => maintain("compact")),
-		vscode.commands.registerCommand("omp.context.shake", () => maintain("shake")),
+		vscode.commands.registerCommand("ompDesk.refreshContext", () => controller.refresh()),
+		vscode.commands.registerCommand("ompDesk.context.compact", () => maintain("compact")),
+		vscode.commands.registerCommand("ompDesk.context.shake", () => maintain("shake")),
 		vscode.commands.registerCommand(READ_BREAKDOWN_COMMAND, () => controller.readBreakdown()),
 		vscode.window.tabGroups.onDidChangeTabs(() => controller.sync()),
 	];
-	void vscode.commands.executeCommand("setContext", "omp.context.canMaintain", false);
+	void vscode.commands.executeCommand("setContext", "ompDesk.context.canMaintain", false);
 	controller.setVisible(tree.visible);
 	context.subscriptions.push(...subscriptions);
 	return { sync: () => controller.sync(), refresh: () => controller.refresh(), dispose: () => { for (const item of subscriptions) item.dispose(); } };

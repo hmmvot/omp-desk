@@ -3,7 +3,7 @@ import type { ContextGroup, ContextItem, ContextViewModel, ItemTone } from "../h
 import { OPEN_SOURCE_COMMAND } from "./inventory-tree.ts";
 
 /** The command a Read breakdown row runs; registered by the Context view's registration. */
-export const READ_BREAKDOWN_COMMAND = "omp.context.readBreakdown";
+export const READ_BREAKDOWN_COMMAND = "ompDesk.context.readBreakdown";
 
 /** `contextValue` of the Used row: it carries the inline Compact and Shake actions. */
 export const USED_ROW_CONTEXT = "ompContext.used";

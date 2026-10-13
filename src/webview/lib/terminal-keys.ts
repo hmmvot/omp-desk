@@ -52,11 +52,11 @@ export function terminalCopyChord(event: TerminalKeyEventLike, hasSelection: boo
  * A chord the workbench runs, so the terminal must not encode it for the program; unlike a copy
  * chord it must still reach the workbench. Cmd stands in for Ctrl on a Mac, as for every other VS Code chord.
  *
- * - Ctrl+Alt+Shift+R, `OMP: Redraw Terminal`: no OMP default binds it (OMP uses Ctrl+Shift+O,
+ * - Ctrl+Alt+Shift+R, `OMP Desk: Redraw Terminal`: no OMP default binds it (OMP uses Ctrl+Shift+O,
  *   Alt+Shift+C/L/P/V, Ctrl+Alt+]) and no VS Code default does.
  * - Ctrl+Shift+L focuses the chat composer and Ctrl+Shift+M moves the file next to the chat into a new window.
  *   A terminal encodes them as Ctrl+L, a form feed, and Ctrl+M, a carriage return that would submit OMP's input.
- * - Ctrl+Alt+Q, `OMP: Go to Session…`: a terminal would encode it as Escape then Ctrl+Q, which OMP would read
+ * - Ctrl+Alt+Q, `OMP Desk: Go to Session…`: a terminal would encode it as Escape then Ctrl+Q, which OMP would read
  *   as Alt+Ctrl+Q; no OMP default binds it.
  */
 export function isTerminalWorkbenchChord(event: TerminalKeyEventLike): boolean {

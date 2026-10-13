@@ -236,7 +236,7 @@ export function registerSessionProcesses(context: vscode.ExtensionContext, deps:
 				deps.publish(snapshot);
 				if (!loaded) {
 					loaded = true;
-					void vscode.commands.executeCommand("setContext", "omp.processesLoaded", true);
+					void vscode.commands.executeCommand("setContext", "ompDesk.processesLoaded", true);
 				}
 			}
 			return snapshot;
@@ -364,8 +364,8 @@ export function registerSessionProcesses(context: vscode.ExtensionContext, deps:
 				clearTimeout(touchTimer);
 			},
 		},
-		vscode.commands.registerCommand("omp.refreshProcesses", () => read({ fresh: true }).catch(error => deps.log(`processes: the list could not be read: ${messageOf(error)}`))),
-		vscode.commands.registerCommand("omp.stopProcess", async (argument: unknown) => {
+		vscode.commands.registerCommand("ompDesk.refreshProcesses", () => read({ fresh: true }).catch(error => deps.log(`processes: the list could not be read: ${messageOf(error)}`))),
+		vscode.commands.registerCommand("ompDesk.stopProcess", async (argument: unknown) => {
 			const id = rowIdOf(argument);
 			if (id === null) {
 				void vscode.window.showWarningMessage("OMP: Select a process in the Sessions view to stop.");
@@ -373,8 +373,8 @@ export function registerSessionProcesses(context: vscode.ExtensionContext, deps:
 			}
 			await stopProcess(id, controllerPorts);
 		}),
-		vscode.commands.registerCommand("omp.stopOrphanedProcesses", () => stopOrphanedAndIdle(controllerPorts)),
-		vscode.commands.registerCommand("omp.killAll", () => killAll(controllerPorts)),
+		vscode.commands.registerCommand("ompDesk.stopOrphanedProcesses", () => stopOrphanedAndIdle(controllerPorts)),
+		vscode.commands.registerCommand("ompDesk.killAll", () => killAll(controllerPorts)),
 	);
 
 	return {

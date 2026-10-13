@@ -42,20 +42,20 @@ For how this works, see the [architecture](docs/architecture.md).
 - A Windows notification tells you when a session finishes or asks for input.
 - None appears for the session you are already looking at.
 - Click the notification to jump to the session.
-- Turn them off with `omp.desktopNotifications`.
+- Turn them off with `ompDesk.desktopNotifications`.
 
 ### Chat or Terminal in one tab
 
 - **Switch to Chat** and **Switch to Terminal** in the editor title change the view of the same session.
-- New sessions open in Chat. Choose Terminal for all new sessions with **OMP: Choose Default Session View…**.
+- New sessions open in Chat. Choose Terminal for all new sessions with **OMP Desk: Choose Default Session View…**.
 - Prefer the OMP terminal? Use OMP Desk as a host for native OMP terminals that survive reloads.
-- Sessions open in their own editor group on the left, and OMP Desk locks it. Files opened from Chat links, the Explorer or Quick Open go to a group on the right, so you read them next to the chat. Turn this off with `omp.chatColumn`; unlock the group from its title bar for a one-off change.
+- Sessions open in their own editor group on the left, and OMP Desk locks it. Files opened from Chat links, the Explorer or Quick Open go to a group on the right, so you read them next to the chat. Turn this off with `ompDesk.chatColumn`; unlock the group from its title bar for a one-off change.
 
 ### Sessions view
 
 ![Sessions view](media/readme/sessions.png)
 
-- Shows every OMP session, running or stopped, of the folders open in **any window** of the profile and the folders you pin, so every window shows the same list in the same order. By default it is **one flat list**, each row labelled `folder · title`; the layout button in the view's title bar opens a picker for the **flat list**, sessions **grouped under their folders** and the **Terminals** layout, which lists the background processes (`omp.sessionsGrouping`). In the flat list and the folders layout, terminals and processes that no listed session stands for are in a **Terminals** group at the very end, after the New Session… and Resume Session… rows and set off by a blank row.
+- Shows every OMP session, running or stopped, of the folders open in **any window** of the profile and the folders you pin, so every window shows the same list in the same order. By default it is **one flat list**, each row labelled `folder · title`; the layout button in the view's title bar opens a picker for the **flat list**, sessions **grouped under their folders** and the **Terminals** layout, which lists the background processes (`ompDesk.sessionsGrouping`). In the flat list and the folders layout, terminals and processes that no listed session stands for are in a **Terminals** group at the very end, after the New Session… and Resume Session… rows and set off by a blank row.
 - The flat list puts sessions that are not stopped first, unread ones on top and then the most recently active, and stopped sessions last. A **New Session…** row and a **Resume Session…** row under it, at the end, ask for the folder; Resume Session asks for the folder when several are shown, then lists that folder's saved sessions. The title bar has no New Session or Resume Session button.
 - A blue **●** at the right end of a row marks a reply you have not read: the agent finished or asked you something while you were not looking at that session. It clears when you look at the session's editor, and it survives a window reload.
 - While a session has an open editor, its row stays selected: the one you viewed most recently. Selecting a folder or the New Session or Resume Session row puts the selection back. (The Terminals layout has no session rows and keeps your selection.)
@@ -81,14 +81,14 @@ For how this works, see the [architecture](docs/architecture.md).
 - **Compact…** and **Shake…** in the context popover ask for OMP's mode first (`snapcompact` and `elide` preselected); **Export as HTML** and **Share** are in the editor title menu. `Alt+click` the model or thinking chip to cycle it; `Ctrl+Shift+U` cycles thinking.
 - Terminal-only slash commands such as `/hotkeys` or `/settings` are never sent to the model. Chat opens the VS Code equivalent or says where the command works.
 - Status lines and warnings from OMP extensions appear around the composer; their informational notices are not shown.
-- **Rewind** goes back to one of your prompts in place and puts it into the composer to edit and send again: `Esc` `Esc` in an empty composer or anywhere else on the Chat page (while no turn runs), **Rewind to here** on a prompt, `/rewind` or `/branch`, or **OMP: Rewind Conversation…**. **Undo** returns to where you were, and a marker where the conversation split switches between your branches.
+- **Rewind** goes back to one of your prompts in place and puts it into the composer to edit and send again: `Esc` `Esc` in an empty composer or anywhere else on the Chat page (while no turn runs), **Rewind to here** on a prompt, `/rewind` or `/branch`, or **OMP Desk: Rewind Conversation…**. **Undo** returns to where you were, and a marker where the conversation split switches between your branches.
 - Rewind never restores files; it lists the files changed after that point. A chat started by an older OMP Desk must be restarted before it can rewind.
 - **`/clear`, `/new`, `/delete` and `/fresh` work in Chat.** `/clear` clears model conversation history and rotates provider state in place, keeping the session file, title and tab. Only confirmed clears collapse earlier messages behind an expandable **Context cleared · N messages dropped** divider; Rewind targets stop at that boundary. A known incomplete Desk clear keeps history visible and says to retry; native/unknown markerless boundaries say **Context reset**, without hiding history. Nothing is retried automatically. Observed busy/background work is refused; settled readback cannot prove foreground bash/eval idleness. This is not complete terminal `/clear` parity: retained runtime state and fail-closed restart/reattach differences are documented in [ADR-0059](docs/decisions/0059-clear-chat-in-place-through-a-desk-registered-omp-command.md). `/fresh` rotates provider state without removing local history, with durable acceptance before admission reopens. `/new` opens a same-folder replacement and stops the old session only if its observed RPC settled predicate still allows it; a failed stop retains the old editor and reports the partial outcome. `/delete` confirms deletion before starting a replacement. Clear requires the Desk command and supported OMP entry points.
 - Slash commands suggest their arguments.
 - OMP's questions and approval requests appear as a card above the composer.
 - File paths in replies and tool rows are links. A click opens the file at that line. A bare file name in a reply (`session-index.ts:849`, `session-index.ts(849)`, `index.ts`) is a link too when VS Code's file search finds exactly one file of that name in the session's folders (the file in the session's own folder wins; `files.exclude` and `search.exclude` are honoured; on Windows the case of the name does not matter): a click opens it at the line. A name that several files carry links to a list of those files (dotted underline, tooltip "N files"): a click lets you choose. Code symbols in a reply (`Session`, `SessionData.Cast()`, `Parse<T>`, `[Tracked]`) are links too when VS Code's language extensions (C# Dev Kit, TypeScript, and others) report exactly one definition of them in the session's folders: a click opens the definition, `Ctrl+Click` shows its file in the Explorer. A symbol with several definitions links to VS Code's symbol search for its name (dotted underline, tooltip "N definitions"): a click lets you choose. A symbol none is found for stays plain code. The language extension must have loaded the workspace (a TypeScript server starts when a TypeScript file is open); symbol searches are ranked and may be capped by the language server, so in a very large workspace a common name may be missed or, rarely, linked to one of several declarations.
 - Web links in replies, tool output and the TODO and Agents tabs open in a VS Code editor tab on click or `Enter`, and in your browser on `Ctrl+Click` or `Ctrl+Enter`.
-- Routine tool calls are grouped in an **Overview**. Set `omp.toolCallDetail` to **detailed** to show every call as its own row, in every Chat.
+- Routine tool calls are grouped in an **Overview**. Set `ompDesk.toolCallDetail` to **detailed** to show every call as its own row, in every Chat.
 - Pinned rows show the TODO list and running subagents. Open a subagent's live transcript in its own tab.
 - Model and thinking pickers work at any time, also during a turn. A change OMP cannot take yet (compaction, a rewind, a reconnect) waits, shown in the picker with a clock icon, and is sent as soon as OMP is ready, before your next message. The footer shows context usage, provider quotas and the Git branch.
 - A status bar item shows the provider limits of the active Chat compactly, for example `5h 42% · 2h13m  │  7d 18% · 3d4h`: the used percent and the time left until each window resets (written like `4d4h42m`: days, hours and minutes, each only when above zero). It turns yellow from 80 % and red from 95 %, its tooltip has the exact reset times, and a click refreshes it. Right-click it to hide it.
@@ -122,7 +122,7 @@ For how this works, see the [architecture](docs/architecture.md).
 
 ## Commands and shortcuts
 
-All commands are in the Command Palette under **OMP**. The ones with default keys:
+All commands are in the Command Palette under **OMP Desk**. The ones with default keys:
 
 | Key | Command | When |
 | --- | --- | --- |
@@ -146,18 +146,26 @@ Other commands include **New Session**, **Add Folder**, **Pin Folder**, **Unpin 
 
 | Setting | Default | Meaning |
 | --- | --- | --- |
-| `omp.toolCallDetail` | `overview` | `overview` groups routine tool calls; `detailed` shows each call. Applies to every Chat. |
-| `omp.desktopNotifications` | `true` | Windows desktop notifications when a session finishes or asks for input. |
-| `omp.showWorkspaceFolders` | `true` | Show the folders VS Code has open in this window in Sessions. When off, only pinned folders (and folders with a running session) are listed. |
-| `omp.useAgentRootFolder` | `true` | When a folder VS Code has open has no agent files (`AGENTS.md`, `CLAUDE.md`, `.agents`, `.omp`, `.claude`, `.pi`) but sits inside a Git repository whose root has them, Sessions shows that ancestor instead, so new sessions start where OMP finds the repository's agent files. Sessions recorded in the opened folder stay listed under it. |
-| `omp.launchInFolderWindow` | `true` | Start a session in the window that has its folder open: New Session, Resume Session and opening a stopped session of a folder that is open only in another window run there, and that window comes to the front. A Unity project (a folder with `ProjectSettings/ProjectVersion.txt` and `Assets/`, found in the folder or two levels below it) always runs in a window that has the project folder open, or in a new window opened on it, because the Unity extensions need it; the session's working directory stays the repository folder. If that window does not answer, a message says so and nothing starts. When off, a session starts in the window you used. |
-| `omp.sessionsGrouping` | `flat` | `flat` shows one list of every session, labelled with its folder; `folders` groups sessions under their folders; `terminals` lists the background processes (session processes and terminals) instead. The layout button in the Sessions title bar (its icon shows the current layout) opens a picker that changes it. |
-| `omp.linkCodeSymbols` | `true` | Link inline code symbols in Chat replies (`Session`, `SessionData.Cast()`, `[Tracked]`) to their definition when VS Code's language extensions report exactly one definition of the symbol in the session's folders. A partial class or overloads link to one of their declarations; a symbol with several different definitions links to the symbol search; unknown symbols stay plain code. The same setting turns on linking a bare file name (`session-index.ts:849`) to the file VS Code's file search finds in the session's folders; several files of that name link to a list to choose from. |
-| `omp.linkReminder` | `false` | After every prompt you send, remind the model to write the files and folders it mentions as paths in inline code and every code symbol in its Chat replies as a link with its definition line. The reminder (about 120 tokens) is a separate message that goes to the model only; it is never saved to the session or shown, and your prompt is not changed. Applies to sessions started or resumed afterwards. |
-| `omp.chatColumn` | `true` | Open sessions in their own locked editor group on the left, with files on the right. When off, a session opens in the active editor group. |
-| `omp.executablePath` | empty | Absolute path of the OMP to run: the `omp` program itself, or a Bun-installed `omp.exe`. Empty uses the first `omp` on PATH. When set it is the only OMP Desk considers: if it cannot be used, Desk says why and does not search PATH. User settings only (a workspace cannot set it); applies to sessions started, resumed or read afterwards. The Settings view's row for it has a **Test** button that resolves the typed path without saving it. |
+| `ompDesk.toolCallDetail` | `overview` | `overview` groups routine tool calls; `detailed` shows each call. Applies to every Chat. |
+| `ompDesk.desktopNotifications` | `true` | Windows desktop notifications when a session finishes or asks for input. |
+| `ompDesk.showWorkspaceFolders` | `true` | Show the folders VS Code has open in this window in Sessions. When off, only pinned folders (and folders with a running session) are listed. |
+| `ompDesk.useAgentRootFolder` | `true` | When a folder VS Code has open has no agent files (`AGENTS.md`, `CLAUDE.md`, `.agents`, `.omp`, `.claude`, `.pi`) but sits inside a Git repository whose root has them, Sessions shows that ancestor instead, so new sessions start where OMP finds the repository's agent files. Sessions recorded in the opened folder stay listed under it. |
+| `ompDesk.launchInFolderWindow` | `true` | Start a session in the window that has its folder open: New Session, Resume Session and opening a stopped session of a folder that is open only in another window run there, and that window comes to the front. A Unity project (a folder with `ProjectSettings/ProjectVersion.txt` and `Assets/`, found in the folder or two levels below it) always runs in a window that has the project folder open, or in a new window opened on it, because the Unity extensions need it; the session's working directory stays the repository folder. If that window does not answer, a message says so and nothing starts. When off, a session starts in the window you used. |
+| `ompDesk.sessionsGrouping` | `flat` | `flat` shows one list of every session, labelled with its folder; `folders` groups sessions under their folders; `terminals` lists the background processes (session processes and terminals) instead. The layout button in the Sessions title bar (its icon shows the current layout) opens a picker that changes it. |
+| `ompDesk.linkCodeSymbols` | `true` | Link inline code symbols in Chat replies (`Session`, `SessionData.Cast()`, `[Tracked]`) to their definition when VS Code's language extensions report exactly one definition of the symbol in the session's folders. A partial class or overloads link to one of their declarations; a symbol with several different definitions links to the symbol search; unknown symbols stay plain code. The same setting turns on linking a bare file name (`session-index.ts:849`) to the file VS Code's file search finds in the session's folders; several files of that name link to a list to choose from. |
+| `ompDesk.linkReminder` | `false` | After every prompt you send, remind the model to write the files and folders it mentions as paths in inline code and every code symbol in its Chat replies as a link with its definition line. The reminder (about 120 tokens) is a separate message that goes to the model only; it is never saved to the session or shown, and your prompt is not changed. Applies to sessions started or resumed afterwards. |
+| `ompDesk.chatColumn` | `true` | Open sessions in their own locked editor group on the left, with files on the right. When off, a session opens in the active editor group. |
+| `ompDesk.executablePath` | empty | Absolute path of the OMP to run: the `omp` program itself, or a Bun-installed `omp.exe`. Empty uses the first `omp` on PATH. When set it is the only OMP Desk considers: if it cannot be used, Desk says why and does not search PATH. User settings only (a workspace cannot set it); applies to sessions started, resumed or read afterwards. The Settings view's row for it has a **Test** button that resolves the typed path without saving it. |
 
 OMP's own settings, models, tools, skills and MCP servers live in OMP's files. Configure them through OMP.
+
+### Upgrading from 0.3.x
+
+Every command, setting, view and context key moved from `omp.` to `ompDesk.` (OMP Desk no longer uses the namespace of Oh My Pi itself), and the Command Palette category is **OMP Desk**.
+
+- **Settings** move to their `ompDesk.` names by themselves the first time this version starts, in your user settings and in a workspace's settings where the setting can live there; the output channel **OMP Desk** has one line per moved setting. A value that cannot be moved (a read-only workspace settings file) stays where it is, and the line says why.
+- **Keybindings** in your own `keybindings.json` keep working for now: the old command ids are still accepted, and the first use of each shows a warning with a button that opens the file. Rename `omp.<command>` to `ompDesk.<command>` there, in `when` clauses too (`omp.sessionMode`, `omp.streaming`, `omp.composerPopupOpen` are also still set under their old names); entries that remove a default binding (`-omp.<command>`) must be renamed at once, because they cannot be forwarded. The old ids stop working in the first minor release published on or after 2027-01-13 that is at least the second after this one.
+- The OMP Desk views return to their default arrangement once (collapsed state, order, the side bar they were moved to).
 
 ## Limitations
 
@@ -173,7 +181,7 @@ Everything runs on your machine. OMP Desk talks to your local `omp` over authent
 ## Troubleshooting
 
 - **OMP not found.** Make sure `omp --version` works in a new terminal, then reload the window.
-- **Something looks wrong.** Open **View > Output** and choose **OMP Desk**, and run **OMP: Show Diagnostics**. Include both when you [report a bug](https://github.com/hmmvot/omp-desk/issues/new/choose).
+- **Something looks wrong.** Open **View > Output** and choose **OMP Desk**, and run **OMP Desk: Show Diagnostics**. Include both when you [report a bug](https://github.com/hmmvot/omp-desk/issues/new/choose).
 - **Upgrading from an early local build.** See [Moving from the unpublished local build](docs/publishing.md#moving-from-the-unpublished-local-build).
 
 ## Documentation and contributing

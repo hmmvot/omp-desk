@@ -211,7 +211,7 @@ test("concurrent writes run in order", async () => {
 
 const OMP_DESCRIPTORS = projectConfiguration({
 	properties: {
-		"omp.executablePath": { type: "string", default: "", scope: "machine", description: "The OMP to run." },
+		"ompDesk.executablePath": { type: "string", default: "", scope: "machine", description: "The OMP to run." },
 		"omp.other": { type: "string", default: "", description: "Another text setting." },
 	},
 });
@@ -234,15 +234,15 @@ function ompHarness(outcome: (path: string) => Promise<{ ok: boolean; message: s
 
 test("only the explicit OMP path row offers Test, and the row says so", () => {
 	const rows = ompHarness(async () => ({ ok: true, message: "" })).controller.state().groups.flatMap(group => group.settings);
-	assert.deepEqual(rows.map(row => [row.key, row.test === true]), [["omp.executablePath", true], ["omp.other", false]]);
+	assert.deepEqual(rows.map(row => [row.key, row.test === true]), [["ompDesk.executablePath", true], ["omp.other", false]]);
 });
 
 test("Test hands the typed value to the host's resolution and reports its outcome, saving nothing", async () => {
 	const h = ompHarness(async path => (path === "" ? { ok: true, message: "from PATH" } : { ok: false, message: `${path} is refused` }));
-	const refused = await act(h.controller, { action: "test", key: "omp.executablePath", value: "C:\\bad\\omp.exe" });
-	assert.deepEqual(refused, { type: "settings:test", requestId: refused!.requestId, key: "omp.executablePath", ok: false, message: "C:\\bad\\omp.exe is refused" });
-	const onPath = await act(h.controller, { action: "test", key: "omp.executablePath", value: "" });
-	assert.deepEqual(onPath, { type: "settings:test", requestId: onPath!.requestId, key: "omp.executablePath", ok: true, message: "from PATH" });
+	const refused = await act(h.controller, { action: "test", key: "ompDesk.executablePath", value: "C:\\bad\\omp.exe" });
+	assert.deepEqual(refused, { type: "settings:test", requestId: refused!.requestId, key: "ompDesk.executablePath", ok: false, message: "C:\\bad\\omp.exe is refused" });
+	const onPath = await act(h.controller, { action: "test", key: "ompDesk.executablePath", value: "" });
+	assert.deepEqual(onPath, { type: "settings:test", requestId: onPath!.requestId, key: "ompDesk.executablePath", ok: true, message: "from PATH" });
 	assert.deepEqual(h.tested, ["C:\\bad\\omp.exe", ""]);
 	assert.deepEqual(h.writes, [], "a Test never writes the setting");
 });
@@ -251,13 +251,13 @@ test("Test refuses a setting that has none and a value that is not text, before 
 	const h = ompHarness(async () => ({ ok: true, message: "" }));
 	const other = await act(h.controller, { action: "test", key: "omp.other", value: "x" });
 	assert.equal(other?.type === "settings:test" && other.ok, false);
-	const notText = await act(h.controller, { action: "test", key: "omp.executablePath", value: 5 });
+	const notText = await act(h.controller, { action: "test", key: "ompDesk.executablePath", value: 5 });
 	assert.equal(notText?.type === "settings:test" && notText.ok, false);
 	assert.deepEqual(h.tested, []);
 });
 
 test("a Test whose resolution throws is reported on the row, not lost", async () => {
 	const h = ompHarness(async () => { throw new Error("spawn exploded"); });
-	const failed = await act(h.controller, { action: "test", key: "omp.executablePath", value: "C:\\x\\omp.exe" });
-	assert.deepEqual(failed, { type: "settings:test", requestId: failed!.requestId, key: "omp.executablePath", ok: false, message: "spawn exploded" });
+	const failed = await act(h.controller, { action: "test", key: "ompDesk.executablePath", value: "C:\\x\\omp.exe" });
+	assert.deepEqual(failed, { type: "settings:test", requestId: failed!.requestId, key: "ompDesk.executablePath", ok: false, message: "spawn exploded" });
 });

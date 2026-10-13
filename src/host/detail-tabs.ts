@@ -39,7 +39,10 @@ export interface DetailPanel {
  * editor-title, Escape and Ctrl+Enter when-clauses match `^omp[.]session`, and a detail tab is not
  * a session editor (no mode actions, no stop or send keybindings).
  */
-export const DETAIL_VIEW_TYPE = "omp.detail";
+export const DETAIL_VIEW_TYPE = "ompDesk.detail";
+
+/** The detail panels' view type before ADR-0068; a tab of it left by an earlier release is closed like any other leftover (nothing revives it). */
+export const LEGACY_DETAIL_VIEW_TYPE = "omp.detail";
 
 export interface DetailTabsHost {
 	/** Create the editor tab with its document installed, named for what it shows. */
