@@ -25,7 +25,7 @@ export interface UsageStatusSource {
 export type UsageSeverity = "none" | "warning" | "error";
 
 export interface UsageStatusModel {
-	/** `5h - 42% - 2:13 7d - 18% - 3:04:00`. */
+	/** `5h 42% · 2:13  │  7d 18% · 3:04:00`. */
 	text: string;
 	severity: UsageSeverity;
 	/** Plain multi-line text: provider, one line per window, the account note and the reading's age. */
@@ -37,6 +37,8 @@ export const USAGE_ERROR_PERCENT = 95;
 /** The two windows the compact form is about; any other window is shown only when neither exists. */
 const PRIMARY_LABELS = ["5h", "7d"] as const;
 const MINUTE_MS = 60_000;
+/** Between two windows: U+2502 with two spaces on each side. */
+export const WINDOW_SEPARATOR = "  \u2502  ";
 
 const pad2 = (value: number): string => String(value).padStart(2, "0");
 
@@ -73,11 +75,11 @@ export function selectUsageWindows(windows: readonly UsageStatusWindow[]): Usage
 	return primary.length > 0 ? primary : informative;
 }
 
-/** `5h - 42% - 2:13`; a missing percent or an unavailable countdown leaves its part out. */
+/** `5h 42% · 2:13`; a missing percent or an unavailable countdown leaves its part out (`5h 42%`, `5h · 2:13`). */
 export function formatUsageWindow(window: UsageStatusWindow, now: number): string {
 	const percent = percentOf(window);
 	const countdown = formatResetCountdown(window.resetsAt, now);
-	return [window.label, ...(percent === null ? [] : [`${percent}%`]), ...(countdown === null ? [] : [countdown])].join(" - ");
+	return `${window.label}${percent === null ? "" : ` ${percent}%`}${countdown === null ? "" : ` · ${countdown}`}`;
 }
 
 /**
@@ -132,5 +134,5 @@ export function buildUsageStatus(source: UsageStatusSource | null, now: number, 
 		...(source.accountSelection === null ? [] : [source.accountSelection]),
 		`${formatReadingAge(source.readAt, now)}. Click to refresh.`,
 	].join("\n");
-	return { text: shown.map(window => formatUsageWindow(window, now)).join(" "), severity: usageSeverity(shown, now), tooltip };
+	return { text: shown.map(window => formatUsageWindow(window, now)).join(WINDOW_SEPARATOR), severity: usageSeverity(shown, now), tooltip };
 }

@@ -42,19 +42,19 @@ describe("formatResetCountdown", () => {
 
 describe("formatUsageWindow", () => {
 	it("joins label, rounded percent and countdown", () => {
-		assert.equal(formatUsageWindow({ label: "5h", usedPercent: 41.6, resetsAt: after(0, 2, 13) }, NOW), "5h - 42% - 2:13");
+		assert.equal(formatUsageWindow({ label: "5h", usedPercent: 41.6, resetsAt: after(0, 2, 13) }, NOW), "5h 42% · 2:13");
 	});
 
 	it("leaves out a missing percent or a missing/passed reset", () => {
-		assert.equal(formatUsageWindow({ label: "5h", usedPercent: undefined, resetsAt: after(0, 2, 13) }, NOW), "5h - 2:13");
-		assert.equal(formatUsageWindow({ label: "5h", usedPercent: Number.NaN, resetsAt: after(0, 2, 13) }, NOW), "5h - 2:13");
-		assert.equal(formatUsageWindow({ label: "7d", usedPercent: 18, resetsAt: null }, NOW), "7d - 18%");
-		assert.equal(formatUsageWindow({ label: "7d", usedPercent: 18 }, NOW), "7d - 18%");
-		assert.equal(formatUsageWindow({ label: "7d", usedPercent: 18, resetsAt: NOW - MIN }, NOW), "7d - 18%", "a reset already in the past shows no countdown until the next refresh");
+		assert.equal(formatUsageWindow({ label: "5h", usedPercent: undefined, resetsAt: after(0, 2, 13) }, NOW), "5h · 2:13");
+		assert.equal(formatUsageWindow({ label: "5h", usedPercent: Number.NaN, resetsAt: after(0, 2, 13) }, NOW), "5h · 2:13");
+		assert.equal(formatUsageWindow({ label: "7d", usedPercent: 18, resetsAt: null }, NOW), "7d 18%");
+		assert.equal(formatUsageWindow({ label: "7d", usedPercent: 18 }, NOW), "7d 18%");
+		assert.equal(formatUsageWindow({ label: "7d", usedPercent: 18, resetsAt: NOW - MIN }, NOW), "7d 18%", "a reset already in the past shows no countdown until the next refresh");
 	});
 
 	it("floors a monthly percent like the footer does", () => {
-		assert.equal(formatUsageWindow({ label: "monthly", usedPercent: 42.9, resetsAt: null }, NOW), "monthly - 42%");
+		assert.equal(formatUsageWindow({ label: "monthly", usedPercent: 42.9, resetsAt: null }, NOW), "monthly 42%");
 	});
 });
 
@@ -120,18 +120,18 @@ describe("buildUsageStatus", () => {
 			{ label: "5h", usedPercent: 42, resetsAt: after(0, 2, 13) },
 			{ label: "7d", usedPercent: 18, resetsAt: after(3, 4, 0) },
 		]), NOW, local);
-		assert.equal(model?.text, "5h - 42% - 2:13 7d - 18% - 3:04:00");
+		assert.equal(model?.text, "5h 42% · 2:13  \u2502  7d 18% · 3:04:00");
 		assert.equal(model?.severity, "none");
 	});
 
 	it("keeps a missing time or percent out of the text", () => {
-		assert.equal(buildUsageStatus(source([{ label: "5h", usedPercent: 42, resetsAt: null }, { label: "7d", usedPercent: 18, resetsAt: after(1, 0, 0) }]), NOW, local)?.text, "5h - 42% 7d - 18% - 1:00:00");
-		assert.equal(buildUsageStatus(source([{ label: "5h", resetsAt: after(0, 0, 9) }]), NOW, local)?.text, "5h - 9");
+		assert.equal(buildUsageStatus(source([{ label: "5h", usedPercent: 42, resetsAt: null }, { label: "7d", usedPercent: 18, resetsAt: after(1, 0, 0) }]), NOW, local)?.text, "5h 42%  \u2502  7d 18% · 1:00:00");
+		assert.equal(buildUsageStatus(source([{ label: "5h", resetsAt: after(0, 0, 9) }]), NOW, local)?.text, "5h · 9");
 	});
 
 	it("shows other windows in the same style when 5h and 7d are absent", () => {
-		assert.equal(buildUsageStatus(source([{ label: "monthly", usedPercent: 61.2, resetsAt: after(10, 2, 0) }]), NOW, local)?.text, "monthly - 61% - 10:02:00");
-		assert.equal(buildUsageStatus(source([{ label: "1d", usedPercent: 7, resetsAt: after(0, 5, 5) }]), NOW, local)?.text, "1d - 7% - 5:05");
+		assert.equal(buildUsageStatus(source([{ label: "monthly", usedPercent: 61.2, resetsAt: after(10, 2, 0) }]), NOW, local)?.text, "monthly 61% · 10:02:00");
+		assert.equal(buildUsageStatus(source([{ label: "1d", usedPercent: 7, resetsAt: after(0, 5, 5) }]), NOW, local)?.text, "1d 7% · 5:05");
 	});
 
 	it("is hidden without a provider, a reading or anything to show", () => {
@@ -144,7 +144,7 @@ describe("buildUsageStatus", () => {
 
 	it("shows the percent and no time once a reset has passed, until the next refresh", () => {
 		const model = buildUsageStatus(source([{ label: "5h", usedPercent: 97, resetsAt: NOW - MIN }, { label: "7d", usedPercent: 18, resetsAt: after(2, 0, 5) }]), NOW, local);
-		assert.equal(model?.text, "5h - 97% 7d - 18% - 2:00:05");
+		assert.equal(model?.text, "5h 97%  \u2502  7d 18% · 2:00:05");
 		assert.equal(model?.severity, "none", "the passed window no longer counts");
 		assert.match(model?.tooltip ?? "", /5h: 97% used · reset time T-1 has passed; waiting for the next refresh/);
 	});
