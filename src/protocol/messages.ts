@@ -68,6 +68,12 @@ export const MAX_FILE_QUERY_LENGTH = 256;
 /** Longest file path this boundary accepts from the extension host. */
 export const MAX_FILE_PATH_LENGTH = 512;
 
+/** Recent sessions the empty state lists. */
+export const RECENT_SESSIONS_LIMIT = 3;
+
+/** Longest recent-session title this boundary accepts (the host collapses and bounds it). */
+export const MAX_RECENT_TITLE_LENGTH = 120;
+
 /**
  * Longest provider id, model id, read-gap note or control notice this boundary
  * accepts. Control text is display text: it never becomes a path, a prompt line
@@ -237,6 +243,22 @@ export interface GuestFileCompletionsMessage {
 	requestId: number;
 	/** Workspace-relative (preferred) or absolute paths, already ranked and bounded. */
 	paths: string[];
+}
+
+/** One recent session of the empty state: what a row shows, nothing that could name it. */
+export interface GuestRecentSession {
+	/** One line, at most {@link MAX_RECENT_TITLE_LENGTH} characters. */
+	title: string;
+	/** Conversation's last activity, epoch milliseconds. */
+	updatedAt: number;
+}
+
+/** Answer to {@link GuestRecentSessionsRequestMessage}: at most {@link RECENT_SESSIONS_LIMIT} rows, newest first. */
+export interface GuestRecentSessionsMessage {
+	type: "omp:recent-sessions";
+	/** Echoes the request this answers; the page opens a row by this id and its ordinal. */
+	requestId: number;
+	items: GuestRecentSession[];
 }
 
 /** Answer to {@link GuestControlRequestMessage}. */
@@ -725,6 +747,7 @@ export type GuestHostMessage =
 	| GuestBridgeBindMessage
 	| GuestControlInvalidateMessage
 	| GuestFileCompletionsMessage
+	| GuestRecentSessionsMessage
 	| GuestControlStateMessage
 	| GuestPanelActionMessage
 	| GuestInsertTextMessage
@@ -794,6 +817,29 @@ export interface GuestFileCompletionRequestMessage {
 	requestId: number;
 	/** Bounded by {@link MAX_FILE_QUERY_LENGTH}, without control characters. */
 	query: string;
+}
+
+/**
+ * Ask the extension host for the recent sessions of this conversation's own folder, for the empty
+ * state. The folder is never a field of the request: the host answers for the editor that sent it.
+ */
+export interface GuestRecentSessionsRequestMessage {
+	type: "omp:recent-sessions-request";
+	/** Monotonic per panel; an answer for any other id is stale. */
+	requestId: number;
+}
+
+/**
+ * Open one session of the last answer the host gave this document. The page names it by the answer's
+ * `requestId` and its ordinal: it never names a session id, a file or a tab, so it has no authority
+ * over what opens.
+ */
+export interface GuestOpenRecentMessage {
+	type: "omp:open-recent";
+	/** The `requestId` of the {@link GuestRecentSessionsMessage} the row came from. */
+	requestId: number;
+	/** Position in that answer, below {@link RECENT_SESSIONS_LIMIT}. */
+	index: number;
 }
 
 /** What a {@link GuestControlRequestMessage} asks the host to do. */
@@ -907,6 +953,8 @@ export type GuestWebviewMessage =
 	| GuestRouteAckMessage
 	| GuestBridgeAckMessage
 	| GuestFileCompletionRequestMessage
+	| GuestRecentSessionsRequestMessage
+	| GuestOpenRecentMessage
 	| GuestControlRequestMessage
 	| GuestComposerPopupMessage
 	| GuestFocusTraceMessage
@@ -1113,6 +1161,18 @@ export function parseGuestHostMessage(value: unknown): GuestHostMessage | null {
 		// even if a future host forgets its own limit.
 		return { type: "omp:file-completions", requestId: value.requestId, paths: paths.slice(0, FILE_COMPLETION_LIMIT) };
 	}
+	if (value.type === "omp:recent-sessions") {
+		if (!isRequestId(value.requestId) || !Array.isArray(value.items)) return null;
+		const items: GuestRecentSession[] = [];
+		for (const candidate of value.items) {
+			if (!isRecord(candidate) || !isNamedBoundaryText(candidate.title, MAX_RECENT_TITLE_LENGTH)) return null;
+			const updatedAt = candidate.updatedAt;
+			if (typeof updatedAt !== "number" || !Number.isFinite(updatedAt) || updatedAt < 0) return null;
+			items.push({ title: candidate.title, updatedAt });
+		}
+		// Truncated, not rejected, like the completions: the empty state stays bounded.
+		return { type: "omp:recent-sessions", requestId: value.requestId, items: items.slice(0, RECENT_SESSIONS_LIMIT) };
+	}
 	if (value.type === "omp:control-state") return parseControlState(value);
 	if (value.type === "omp:insert-text") {
 		// One line only: a control character would corrupt the message and, once inserted, the
@@ -1251,6 +1311,14 @@ export function parseGuestWebviewMessage(value: unknown): GuestWebviewMessage | 
 			if (!isRequestId(value.requestId) || typeof value.query !== "string") return null;
 			if (value.query.length > MAX_FILE_QUERY_LENGTH || !isSafeBoundaryText(value.query)) return null;
 			return { type: "omp:complete-files", requestId: value.requestId, query: value.query };
+		}
+		case "omp:recent-sessions-request": {
+			if (!isRequestId(value.requestId)) return null;
+			return { type: "omp:recent-sessions-request", requestId: value.requestId };
+		}
+		case "omp:open-recent": {
+			if (!isRequestId(value.requestId) || !isRequestId(value.index) || value.index >= RECENT_SESSIONS_LIMIT) return null;
+			return { type: "omp:open-recent", requestId: value.requestId, index: value.index };
 		}
 		case "omp:control-request": {
 			// Neither field authorizes anything: the scope only tells a later report

@@ -23,6 +23,8 @@ import {
 	MAX_CONTROL_TEXT_LENGTH,
 	MAX_FILE_PATH_LENGTH,
 	MAX_FILE_QUERY_LENGTH,
+	MAX_RECENT_TITLE_LENGTH,
+	RECENT_SESSIONS_LIMIT,
 	MAX_THINKING_LEVEL_LENGTH,
 	MAX_TERMINAL_COLS,
 	MAX_TERMINAL_DATA_BASE64_CHARS,
@@ -260,6 +262,69 @@ describe("parseGuestHostMessage completion answers", () => {
 		const restore = { type: "omp:draft-restore", requestId: 1, text: "hello", attachments: 0, recoverable: [] };
 		assert.deepEqual(parseGuestHostMessage(restore), restore);
 		assert.equal(parseGuestHostMessage({ type: "omp:anything" }), null);
+	});
+
+	it("parses the recent-sessions request and the open-recent pick strictly", () => {
+		assert.deepEqual(parseGuestWebviewMessage({ type: "omp:recent-sessions-request", requestId: 4, extra: "x" }), {
+			type: "omp:recent-sessions-request",
+			requestId: 4,
+		});
+		for (const requestId of [undefined, null, -1, 1.5, Number.NaN, "3", {}]) {
+			assert.equal(parseGuestWebviewMessage({ type: "omp:recent-sessions-request", requestId }), null, String(requestId));
+		}
+		// A pick carries only the answer's id and an ordinal: a session id, path or tab id is dropped, never read.
+		assert.deepEqual(parseGuestWebviewMessage({ type: "omp:open-recent", requestId: 2, index: 1, tabId: "tab:x", file: "/s.jsonl" }), {
+			type: "omp:open-recent",
+			requestId: 2,
+			index: 1,
+		});
+		for (const index of [undefined, -1, RECENT_SESSIONS_LIMIT, 0.5, "0", null]) {
+			assert.equal(parseGuestWebviewMessage({ type: "omp:open-recent", requestId: 2, index }), null, String(index));
+		}
+		assert.equal(parseGuestWebviewMessage({ type: "omp:open-recent", requestId: "2", index: 0 }), null);
+	});
+
+	it("parses a bounded recent-sessions answer and rejects rows that could corrupt the empty state", () => {
+		const items = [{ title: "Fix the login flow", updatedAt: 1_760_000_000_000 }, { title: "Second", updatedAt: 0 }];
+		assert.deepEqual(parseGuestHostMessage({ type: "omp:recent-sessions", requestId: 5, items }), {
+			type: "omp:recent-sessions",
+			requestId: 5,
+			items,
+		});
+		assert.deepEqual(parseGuestHostMessage({ type: "omp:recent-sessions", requestId: 0, items: [] }), {
+			type: "omp:recent-sessions",
+			requestId: 0,
+			items: [],
+		});
+		assert.deepEqual(
+			parseGuestHostMessage({ type: "omp:recent-sessions", requestId: 1, items: [{ title: "A", updatedAt: 1, tabId: "tab:x", file: "/s" }] }),
+			{ type: "omp:recent-sessions", requestId: 1, items: [{ title: "A", updatedAt: 1 }] },
+			"only the declared fields cross",
+		);
+		const many = Array.from({ length: RECENT_SESSIONS_LIMIT + 4 }, (_, index) => ({ title: `Session ${index}`, updatedAt: index }));
+		const truncated = parseGuestHostMessage({ type: "omp:recent-sessions", requestId: 1, items: many });
+		assert.equal(truncated?.type === "omp:recent-sessions" ? truncated.items.length : -1, RECENT_SESSIONS_LIMIT);
+		const base = { type: "omp:recent-sessions", requestId: 1 };
+		assert.equal(parseGuestHostMessage({ ...base, items: "x" }), null);
+		assert.equal(parseGuestHostMessage({ ...base, requestId: -1, items: [] }), null);
+		for (const bad of [
+			null,
+			{ title: "", updatedAt: 1 },
+			{ title: 7, updatedAt: 1 },
+			{ title: "a\nb", updatedAt: 1 },
+			{ title: "a".repeat(MAX_RECENT_TITLE_LENGTH + 1), updatedAt: 1 },
+			{ title: "ok", updatedAt: Number.NaN },
+			{ title: "ok", updatedAt: Number.POSITIVE_INFINITY },
+			{ title: "ok", updatedAt: -1 },
+			{ title: "ok", updatedAt: "1" },
+			{ title: "ok" },
+		]) {
+			assert.equal(parseGuestHostMessage({ ...base, items: [bad] }), null, JSON.stringify(bad));
+		}
+		assert.notEqual(
+			parseGuestHostMessage({ ...base, items: [{ title: "a".repeat(MAX_RECENT_TITLE_LENGTH), updatedAt: 1 }] }),
+			null,
+		);
 	});
 
 	it("no longer accepts the messages of the removed Collab link flow", () => {

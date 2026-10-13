@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import type { ChatPage } from "../host/chat-runtime.ts";
 import type { SessionIndex } from "../host/session-index.ts";
 import type { CarriedDraft, GuestDispatcher, GuestDispatcherDeps, GuestTab } from "./guest-dispatcher.ts";
+import { registerRecentSessions } from "./recent-sessions.ts";
 
 // The module and the host modules it imports load the `vscode` specifier; map it before the first import.
 if (typeof module.registerHooks === "function") {
@@ -109,6 +110,7 @@ function world(overrides: Partial<GuestDispatcherDeps<FakeTab>> = {}) {
 		handleMessageThrows: false,
 		files: ["a.ts", "b/c.ts"],
 		route: null as { routeGeneration: string | null } | null,
+		recentRows: [] as { tabId: string; headline: string; entry: { kind: string; cwd: string }; conversation: { lastAt: string | null } | null }[],
 	};
 	const calls: string[] = [];
 	const logged: string[] = [];
@@ -127,6 +129,13 @@ function world(overrides: Partial<GuestDispatcherDeps<FakeTab>> = {}) {
 	const controlRequests: unknown[][] = [];
 	const pinned: unknown[][] = [];
 	const acknowledged: { kind: string; tabId: string; panel: unknown }[] = [];
+	const clicks: string[] = [];
+	const recents = registerRecentSessions({
+		listed: () => state.recentRows,
+		itemFor: async tabId => state.recentRows.find(candidate => candidate.tabId === tabId),
+		click: async (_index, picked) => { clicks.push(picked.tabId); },
+		info: message => { infos.push(message); },
+	});
 	const deps: GuestDispatcherDeps<FakeTab> = {
 		context: () => state.context,
 		tabs: () => state.tabs,
@@ -164,6 +173,7 @@ function world(overrides: Partial<GuestDispatcherDeps<FakeTab>> = {}) {
 		isTerminalPanelType: type => type.startsWith("omp:terminal-") && type !== "omp:terminal-copy-reply",
 		handleTerminalMessage: async (slot, parsed) => { terminalMessages.push({ slot, type: parsed.type }); },
 		acceptTerminalCopy: async (tab, reply) => { terminalCopies.push({ tab, reply }); },
+		recents,
 		controlRequest: async (...args) => { controlRequests.push(args); },
 		log: message => { logged.push(message); },
 		info: message => { infos.push(message); },
@@ -181,7 +191,7 @@ function world(overrides: Partial<GuestDispatcherDeps<FakeTab>> = {}) {
 	};
 	return {
 		state, dispatcher, deps, calls, logged, infos, warnings, errors, chatMessages, remembered, viewOnly, routesAttached, detailOpens,
-		chatActions, terminalMessages, terminalCopies, modeSwitches, controlRequests, pinned, acknowledged, editor,
+		chatActions, terminalMessages, terminalCopies, modeSwitches, controlRequests, pinned, acknowledged, clicks, editor,
 	};
 }
 
@@ -348,6 +358,45 @@ describe("file completions", () => {
 		tabs.set(SLOT, tabRecord(SLOT, gone.panel, { runtime: { cwd: "/runtime" } }));
 		await replaced.dispatcher.handleMessage(index, SLOT, gone.panel, { type: "omp:complete-files", requestId: 3, query: "x" });
 		assert.deepEqual(gone.posted, []);
+	});
+});
+
+describe("the empty chat's recent sessions", () => {
+	const row = (tabId: string, lastAt: string, cwd = "/runtime") => ({
+		tabId, headline: `Session ${tabId}`, entry: { kind: "session", cwd }, conversation: { lastAt },
+	});
+
+	it("answers the sending editor's own folder and opens a picked row through the Sessions click", async () => {
+		const w = world();
+		w.state.recentRows = [row("t1", "2026-10-13T09:00:00.000Z"), row("t2", "2026-10-13T11:00:00.000Z"), row("elsewhere", "2026-10-13T12:00:00.000Z", "/other")];
+		const live = w.editor(SLOT, { runtime: { cwd: "/runtime" } });
+		await w.dispatcher.handleMessage(index, SLOT, live.panel, { type: "omp:recent-sessions-request", requestId: 4 });
+		assert.deepEqual(live.posted, [{
+			type: "omp:recent-sessions",
+			requestId: 4,
+			items: [{ title: "Session t2", updatedAt: Date.UTC(2026, 9, 13, 11) }, { title: "Session t1", updatedAt: Date.UTC(2026, 9, 13, 9) }],
+		}]);
+		await w.dispatcher.handleMessage(index, SLOT, live.panel, { type: "omp:open-recent", requestId: 4, index: 1 });
+		assert.deepEqual([w.clicks, w.infos], [["t1"], []]);
+	});
+
+	it("refuses a pick it never offered and stays silent for a panel that no longer serves the slot", async () => {
+		const w = world();
+		w.state.recentRows = [row("t1", "2026-10-13T09:00:00.000Z")];
+		const live = w.editor(SLOT, { runtime: { cwd: "/runtime" } });
+		await w.dispatcher.handleMessage(index, SLOT, live.panel, { type: "omp:open-recent", requestId: 1, index: 0 });
+		assert.deepEqual([w.clicks, w.infos], [[], ["That session is not listed in Sessions any more. Refresh and try again."]]);
+		const stale = fakePanel();
+		await w.dispatcher.handleMessage(index, SLOT, stale.panel, { type: "omp:recent-sessions-request", requestId: 2 });
+		await w.dispatcher.handleMessage(index, SLOT, stale.panel, { type: "omp:open-recent", requestId: 2, index: 0 });
+		assert.deepEqual([stale.posted, w.clicks, w.infos.length], [[], [], 1]);
+	});
+
+	it("does not answer an editor with no folder", async () => {
+		const w = world();
+		const lone = w.editor();
+		await w.dispatcher.handleMessage(indexOf({}), SLOT, lone.panel, { type: "omp:recent-sessions-request", requestId: 1 });
+		assert.deepEqual(lone.posted, []);
 	});
 });
 

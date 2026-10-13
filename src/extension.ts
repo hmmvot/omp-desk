@@ -152,6 +152,7 @@ import { registerSessionActions } from "./wiring/session-actions";
 import type { SessionActions, SessionActionsDeps } from "./wiring/session-actions";
 import { CHAT_COMMAND_TYPES, registerGuestDispatcher } from "./wiring/guest-dispatcher";
 import type { CarriedDraft, GuestDispatcher, GuestDispatcherDeps } from "./wiring/guest-dispatcher";
+import { registerRecentSessions } from "./wiring/recent-sessions";
 import { registerBridgeHost } from "./wiring/bridge-host";
 import type { BridgeHost, BridgeHostDeps } from "./wiring/bridge-host";
 import { EDITOR_TAB_ICON, UPDATED_ON_DISK_DETAIL, registerEditorPanels } from "./wiring/editor-panels";
@@ -1024,6 +1025,15 @@ function guestDispatcherDeps(): GuestDispatcherDeps<TabState> {
     completeFiles: (cwd, query) => findFileMentions(query, {
       cwd,
       findFiles: (include, exclude, maxResults) => vscode.workspace.findFiles(include, exclude, maxResults),
+    }),
+    recents: registerRecentSessions({
+      listed: () => windowState().launcherProvider?.listedSessions().map(({ item }) => item) ?? [],
+      itemFor: async tabId => windowState().launcherProvider?.itemFor(tabId),
+      click: async (index, item) => {
+        const context = windowState().context;
+        if (context !== undefined) await windowState().sessionActions.click(context, index, item);
+      },
+      info: showInfo,
     }),
     pushSessionView,
     noteReadyDocument,

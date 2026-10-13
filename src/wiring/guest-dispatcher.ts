@@ -2,7 +2,7 @@
  * What the extension does with one message from a page: the dispatch of every `omp:*` page message to its owner,
  * the chat commands and their send results, the bounded handoffs that ask a page for something and wait for its
  * reply (the composer draft of a document about to be replaced, the text selected for a symbol search), the
- * detail tabs a page asks for, and the presentation of a tab that has no live conversation.
+ * detail tabs a page asks for, the empty chat's recent sessions, and the presentation of a tab that has no live conversation.
  *
  * Guest messages are untrusted UI input. This module parses nothing itself (`parseGuestWebviewMessage` is the
  * boundary), keeps nothing of the extension's own state except the two request tables no other part of the
@@ -42,6 +42,7 @@ import type {
 	SessionViewMode,
 } from "../protocol/messages.ts";
 import { symbolSearchValue } from "../shared/selection-query.ts";
+import type { RecentSessions } from "./recent-sessions.ts";
 
 /** The chat commands a page sends; each is deduplicated by its own request id in the conversation. */
 export const CHAT_COMMAND_TYPES: ReadonlySet<string> = new Set([
@@ -134,6 +135,8 @@ export interface GuestChatPort<Tab extends GuestTab> {
 	runChatAction(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, command: GuestChatCommand): Promise<void>;
 	/** The workspace paths a composer's `@`-mention query matches below a folder. */
 	completeFiles(cwd: string, query: string): Promise<GuestFileCompletionsMessage["paths"]>;
+	/** The recent sessions of the page's own folder an empty chat lists, and the open of one of them. */
+	recents: RecentSessions;
 }
 
 /** The editor's document and session view: what a page's announcement and a mode request drive. */
@@ -528,6 +531,19 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 					paths,
 				};
 				void panel.webview.postMessage(reply);
+				return;
+			}
+			case "omp:recent-sessions-request": {
+				const state = deps.tab(tabId);
+				const cwd = state?.runtime?.cwd ?? index.get(tabId)?.cwd ?? null;
+				if (state?.panel !== panel || cwd === null) return;
+				void panel.webview.postMessage(deps.recents.answer({ slot, panel, document: state.document }, cwd, tabId, parsed.requestId));
+				return;
+			}
+			case "omp:open-recent": {
+				const state = deps.tab(tabId);
+				if (state?.panel !== panel) return;
+				await deps.recents.open(index, { slot, panel, document: state.document }, parsed);
 				return;
 			}
 			case "omp:control-request":
