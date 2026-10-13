@@ -41,6 +41,10 @@ Read-only/view-only Open is never an ownership refusal; only Open that launches 
 - The extension protects its own proven active writers, not global single-writer exclusion. Overlapping unverified writers can corrupt or race deletion on the user's responsibility.
 - Delete retains its exact-path confirmation and transaction. Drafts have no transcript to delete; Forget removes their row.
 
+### Amendment 2026-10-13
+
+A recorded pid no process runs under (`process.kill(pid, 0)` answers `ESRCH`: no such process, or it has exited) is read as gone without a PowerShell probe; `EPERM` or success still runs the probe, so unverified, ambiguous or reused pids remain unowned exactly as above and no live writer is released. Accepted absence evidence for automatic relaunch and truthful stop outcomes rest on the same readings. See the [ADR-0035](0035-distinguish-a-recorded-process-from-a-later-occupant-of-its-pid.md) amendment of the same date.
+
 ## Related Documents
 
 Supersedes ADR-0033 and ADR-0036 and the explicit-release mechanism in their recovery designs. Narrows ownership uncertainty and absence prerequisites in ADR-0011, 0018, 0021, 0025, 0027, 0031, 0034, 0035, 0037 and 0038, and the Sessions, broker-restart, post-reboot, workspace-independent and lost-room/RPC-UI designs. Their exact transport, stop truthfulness, file transaction and editor identity requirements survive. Product and implemented architecture link here rather than reinstating historical refusal clauses.

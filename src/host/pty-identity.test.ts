@@ -166,6 +166,62 @@ describe("helper integrity", windowsOnly, () => {
 		assert.match(reading.detail, /could not be started/);
 		assert.equal((await queryPtyProcessTree(tampered, process.pid)).kind, "unknown");
 	});
+
+	/** A helper whose bytes match its digest and that answers the one line given, whatever pid it is asked about. */
+	async function answeringHelper(answer: string, exitCode: number): Promise<PtyProbeHelper> {
+		const root = await mkdtemp(path.join(tmpdir(), "omp-pty-probe-"));
+		roots.push(root);
+		const script = path.join(root, "helper.ps1");
+		const bytes = Buffer.from(`[Console]::Out.Write("${answer}\`n")\nexit ${exitCode}\n`, "utf8");
+		await writeFile(script, bytes);
+		return { path: script, sha256: createHash("sha256").update(bytes).digest("hex") };
+	}
+
+	it("reads a pid the kernel does not know as gone without starting the helper, even when the helper cannot start", async () => {
+		const root = await mkdtemp(path.join(tmpdir(), "omp-pty-probe-"));
+		roots.push(root);
+		const copy = path.join(root, "helper.ps1");
+		await writeFile(copy, "# replaced\n", "utf8");
+		// A helper that cannot start answers `unknown` for every pid it is asked about, so `gone` can only come from the pre-check.
+		const tampered: PtyProbeHelper = { path: copy, sha256: "f".repeat(64) };
+		assert.throws(() => process.kill(2147483000, 0), (error: NodeJS.ErrnoException) => error.code === "ESRCH");
+		assert.deepEqual(await queryPtyProcessIdentity(tampered, 2147483000), { kind: "gone" });
+		assert.deepEqual(await waitForPtyProcessGone(tampered, 2147483000, "134349421014308869", 5_000), {
+			gone: true,
+			detail: "no process is running under this id",
+		});
+		// A live pid and a pid this account may not open (EPERM: System, pid 4) still reach the helper, which cannot start here.
+		const live = await queryPtyProcessIdentity(tampered, process.pid);
+		assert.equal(live.kind, "unknown");
+		assert.match(live.detail, /could not be started/);
+		assert.throws(() => process.kill(4, 0), (error: NodeJS.ErrnoException) => error.code === "EPERM");
+		const unreadable = await queryPtyProcessIdentity(tampered, 4);
+		assert.equal(unreadable.kind, "unknown");
+		assert.match(unreadable.detail, /could not be started/);
+	});
+
+	it("keeps the helper's own answers for a pid that exists: its refusal is still gone, its creation time is still used for an EPERM pid", async () => {
+		const refusing = await answeringHelper("!ERROR PROCESS_QUERY_FAILED", 15);
+		assert.deepEqual(await queryPtyProcessIdentity(refusing, process.pid), { kind: "gone" });
+		const answering = await answeringHelper("!GENERATION 134349421014308869", 0);
+		assert.deepEqual(await queryPtyProcessIdentity(answering, 4), { kind: "found", creationTime: "134349421014308869" });
+	});
+
+	it("tells a reused id from the recorded process by creation time, as before", async () => {
+		const child = holdingChild();
+		const pid = child.pid;
+		assert.ok(typeof pid === "number");
+		const live = await queryPtyProcessIdentity(helper, pid);
+		assert.equal(live.kind, "found");
+		const creation = live.kind === "found" ? live.creationTime : "";
+		const other = holdingChild();
+		const reuse = await waitForPtyProcessGone(helper, other.pid as number, creation, 20_000);
+		assert.equal(reuse.gone, true);
+		assert.match(reuse.detail, /reused/);
+		child.kill();
+		await new Promise<void>(resolve => child.once("close", () => resolve()));
+		assert.deepEqual(await queryPtyProcessIdentity(helper, pid), { kind: "gone" });
+	});
 });
 
 describe("attachment-proof readings", () => {

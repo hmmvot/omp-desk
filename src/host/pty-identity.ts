@@ -176,9 +176,10 @@ function describeProbeFailure(run: ProbeRun): string {
 /**
  * Kernel creation time of one process.
  *
- * `gone` is reported only when the helper says it could not open the process — the
- * same reading `verified-pipe.ps1 -Mode generation` gives — and never derived from
- * a process id alone.
+ * `gone` is reported when no process runs under the id now: `process.kill(pid, 0)` answers
+ * `ESRCH` (asked first, so a dead pid costs no helper start), or the helper cannot find the
+ * process (`PROCESS_QUERY_FAILED`). An id that answers alive or `EPERM` is never judged from
+ * the id alone: the helper's creation time decides, which also tells a reused id apart.
  */
 export async function queryPtyProcessIdentity(
 	helper: PtyProbeHelper,
@@ -189,6 +190,10 @@ export async function queryPtyProcessIdentity(
 		return { kind: "unknown", detail: "process identity reading is implemented for Windows only" };
 	}
 	if (!Number.isSafeInteger(pid) || pid <= 0) return { kind: "unknown", detail: "no process id to read" };
+	// `process.kill(pid, 0)` answering ESRCH means no such process exists, which is what the helper's PROCESS_QUERY_FAILED
+	// would say for it, minus a PowerShell start (hundreds of ms to seconds on a busy machine). EPERM, or success, means
+	// the process exists or may: the helper reads it as before, and a reused pid is still told apart by its creation time.
+	if (!isPtyProcessAlive(pid)) return { kind: "gone" };
 	const run = await runProbeHelper(helper, ["-Mode", "generation", "-TargetPid", String(pid)], timeoutMs);
 	for (const line of run.lines) {
 		const parsed = parseProbeLine(line);
@@ -266,7 +271,7 @@ export async function waitForPtyProcessGone(
 	let lastDetail = "no reading was taken";
 	for (;;) {
 		const reading = await queryPtyProcessIdentity(helper, pid);
-		if (reading.kind === "gone") return { gone: true, detail: "the process id is no longer openable by the kernel" };
+		if (reading.kind === "gone") return { gone: true, detail: "no process is running under this id" };
 		if (reading.kind === "found") {
 			if (expectedCreationTime !== null && reading.creationTime !== expectedCreationTime) {
 				// The id now belongs to a different process: the one we waited for is gone.

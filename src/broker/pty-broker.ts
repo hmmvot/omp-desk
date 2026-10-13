@@ -482,8 +482,10 @@ export class PtyBroker {
 	/**
 	 * Whether a stop positively proved the exact child generation gone.
 	 *
-	 * Only a helper reading may set this — the kernel could no longer open the pid, or
-	 * opened a *different* creation time for it — so it is absence evidence about the
+	 * Only `waitForPtyProcessGone` may set this: no process runs under the pid now (`ESRCH`, or the
+	 * helper cannot find it), or the pid now belongs to a process with *another* creation time. A pid
+	 * that answers alive is not an identity, and a broker without a verified probe claims no absence
+	 * at all, so the no-probe fallback never sets it. It is absence evidence about the
 	 * process this broker spawned, never a numeric-pid liveness guess. It exists because
 	 * node-pty's Windows exit event can lag or never arrive: the shutdown gate accepts
 	 * this proof where `childExit` is still `null` ([ADR-0029](../../docs/decisions/0029-report-uncontained-pty-tree-stop-as-unknown.md)).
@@ -1192,8 +1194,8 @@ export class PtyBroker {
 				// "Stopped" means the exit event arrived *or* a stop positively proved the
 				// exact child generation gone. The second source exists because node-pty's
 				// Windows exit event can lag or never arrive at all, while `waitForPtyProcessGone`
-				// has already had the kernel confirm absence; a numeric-pid liveness reading is
-				// never that proof, so a child that is merely unobserved still refuses.
+				// has already had the kernel confirm absence; the no-probe fallback's liveness reading is not
+				// accepted as that proof, so a child that is merely unobserved still refuses.
 				const childGone = this.childExit !== null || this.childAbsenceProven;
 				if (frame.requireStopped && !childGone) {
 					refuse("child-alive", "the native process is not proven gone; stop it before shutting the broker down");
@@ -1271,9 +1273,10 @@ export class PtyBroker {
 		const helper = this.options.helper;
 		let pidGone = false;
 		/**
-		 * Positive absence evidence about the exact child generation. Only a helper
-		 * reading sets it: `isPtyProcessAlive` answers about a numeric pid, which is not
-		 * an identity, so the no-probe fallback below never proves anything.
+		 * Positive absence evidence about the exact child generation. Only `waitForPtyProcessGone`
+		 * sets it (no process runs under the pid, or the pid now has another creation time):
+		 * `isPtyProcessAlive` alone answers about a numeric pid, which is not an identity, so the
+		 * no-probe fallback below never proves anything.
 		 */
 		let absenceProven = false;
 		let detail = "";
