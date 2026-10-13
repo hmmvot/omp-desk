@@ -1,4 +1,4 @@
-// Checks the import direction between the source layers (ADR-0065) and fails on import cycles.
+// Checks the import direction between the source layers (ADR-0065), the `vscode`-free `runtime` layer (ADR-0066) and import cycles.
 //
 //   node scripts/check-imports.mjs [root]
 //
@@ -21,7 +21,8 @@ const ALLOWED = {
   omp: ["host", "broker", "protocol", "chat", "shared"],
   views: ["host", "protocol", "chat", "shared"],
   webview: ["protocol", "chat", "shared"],
-  wiring: ["host", "views", "protocol", "chat", "shared"],
+  runtime: ["host", "broker", "omp", "protocol", "chat", "shared"],
+  wiring: ["host", "views", "runtime", "protocol", "chat", "shared"],
 };
 // The bundle entry may import every layer except `webview` (page code runs in the webview, never in the host).
 const EXTENSION_ALLOWED = Object.keys(ALLOWED).filter((layer) => layer !== "webview");
@@ -85,6 +86,22 @@ function specifiersOf(text) {
   return found.sort((a, b) => a.line - b.line);
 }
 
+// Every way a file can name the `vscode` module: a static, type-only, side-effect or re-export
+// specifier, a dynamic `import()` (which also covers the type-position `import("vscode")`), a
+// `require()` and `import x = require()`. Other bare specifiers are not part of this check.
+const VSCODE_STATIC = /^[ \t]*(?:import|export)\b[^'";]*?\bfrom\s*(['"])vscode\1|^[ \t]*import\s*(['"])vscode\2/gm;
+const VSCODE_CALL = /\b(?:import|require)\s*\(\s*(['"`])vscode\1\s*\)/g;
+
+function vscodeLineOf(text) {
+  let first = Infinity;
+  for (const pattern of [VSCODE_STATIC, VSCODE_CALL]) {
+    pattern.lastIndex = 0;
+    const match = pattern.exec(text);
+    if (match !== null) first = Math.min(first, match.index);
+  }
+  return first === Infinity ? null : lineOf(text, first);
+}
+
 // `test-stub` must start a name segment: `vscode-test-stub.ts` and `test-stub.ts` are stubs, `latest-stub.ts` is not.
 const isTestFile = (rel) => /\.test\.tsx?$/.test(rel) || /(?:^|[/-])test-stub[^/]*\.tsx?$/.test(rel);
 
@@ -101,11 +118,17 @@ function layerOf(rel) {
 const graph = new Map(); // rel -> [{ to, line }]
 const queue = existsSync(srcDir) ? walk(srcDir, []) : [];
 const seen = new Set(queue);
+const texts = new Map(); // rel -> source text
+const vscodeImporters = new Map(); // rel -> line of the first reference to `vscode`
 while (queue.length > 0) {
   const file = queue.pop();
   const rel = toRel(file);
   const edges = [];
-  for (const { specifier, line } of specifiersOf(readFileSync(file, "utf8"))) {
+  const text = readFileSync(file, "utf8");
+  texts.set(rel, text);
+  const vscodeLine = vscodeLineOf(text);
+  if (vscodeLine !== null) vscodeImporters.set(rel, vscodeLine);
+  for (const { specifier, line } of specifiersOf(text)) {
     const target = resolveSpecifier(file, specifier);
     if (target === undefined) continue;
     edges.push({ to: toRel(target), line });
@@ -143,6 +166,88 @@ for (const rel of nodes) {
     } else if (!allowed.includes(target)) {
       findings.push(`${rel}:${line} imports ${to}: ${layer} may not import ${target}`);
     }
+  }
+}
+
+// R-runtime-1: nothing in `src/runtime/` refers to `vscode`, directly or through a chain of relative
+// imports between non-test files (ADR-0066). The shortest chain to each offending file is printed.
+for (const start of nodes) {
+  if (layerOf(start) !== "runtime" || isTestFile(start)) continue;
+  const parent = new Map([[start, null]]);
+  const frontier = [start];
+  for (let head = 0; head < frontier.length; head++) {
+    const rel = frontier[head];
+    if (vscodeImporters.has(rel)) {
+      const chain = [];
+      for (let at = rel; at !== null; at = parent.get(at)) chain.unshift(at);
+      const last = `${chain.pop()}:${vscodeImporters.get(rel)}`;
+      findings.push(`${[...chain, last].join(" -> ")} imports vscode: runtime may not reach vscode`);
+    }
+    for (const { to } of graph.get(rel) ?? []) {
+      if (parent.has(to) || isTestFile(to) || !graph.has(to)) continue;
+      parent.set(to, rel);
+      frontier.push(to);
+    }
+  }
+}
+
+// R-runtime-2: the port module declares data only. It uses statement-level `import type` and
+// `export type ... from`, every source and name is on this list, so a live object (an index, a
+// handle, a client, the chat runtime) cannot become part of the port's contract by a type import.
+const PORT_FILE = "src/runtime/session-runtime.ts";
+const PORT_ANY_NAME_DIRECTORIES = ["src/shared/", "src/protocol/", "src/chat/"];
+const PORT_ALLOWED_NAMES = {
+  "src/host/session-index.ts": ["OmpHostLaunchRequest", "OmpHostLaunchResult", "OmpHostAttachRequest", "OmpHostAttachResult", "RestoreOutcome", "RestoreReport"],
+  "src/host/session-model.ts": [
+    "SessionAvailability", "RunIntent", "OmpLaunchScope", "RecordedRpcIdentity", "RecordedHost", "SessionViewMode",
+    "NativeHostTransferOutcome", "RecordedOwnership", "SessionOrigin", "SessionIndexEntry", "SessionImportConflict",
+    "EditorSlotRole", "EditorSlotBinding",
+  ],
+  "src/host/rpc-reconcile.ts": ["NativeStopVerdict"],
+  "src/host/session-restore-trace.ts": ["OmpHostStepTimings"],
+  "src/host/chat-runtime.ts": ["ChatPage"],
+};
+const PORT_STATEMENT = /^[ \t]*(import|export)\b([^'";]*?)\bfrom\s*(['"])([^'"\n]+)\3|^[ \t]*import\s*(['"])([^'"\n]+)\5/gm;
+const PORT_DYNAMIC = /\b(?:import|require)\s*\(/g;
+if (graph.has(PORT_FILE)) {
+  const text = texts.get(PORT_FILE);
+  const portDir = path.dirname(path.join(root, PORT_FILE));
+  const report = (index, message) => findings.push(`${PORT_FILE}:${lineOf(text, index)} ${message}`);
+  for (const match of text.matchAll(PORT_STATEMENT)) {
+    if (match[6] !== undefined) {
+      report(match.index, `has a side-effect import of ${match[6]}: the port module uses \`import type\` only`);
+      continue;
+    }
+    const [, keyword, clause, , specifier] = match;
+    const typed = /^\s*type\s*\{([^{}]*)\}\s*$/.exec(clause);
+    const braced = typed ?? /^\s*\{([^{}]*)\}\s*$/.exec(clause);
+    const names = braced === null ? [] : braced[1].split(",").map((part) => part.trim()).filter(Boolean);
+    if (names.some((name) => /^type\s/.test(name))) {
+      report(match.index, `has an inline \`type\` modifier in the import of ${specifier}: use a statement-level \`${keyword} type\``);
+      continue;
+    }
+    if (typed === null) {
+      report(match.index, `has \`${keyword}${clause.replace(/\s+/g, " ").trimEnd()} from "${specifier}"\`: only \`${keyword} type { ... } from\` is allowed in the port module`);
+      continue;
+    }
+    const target = specifier.startsWith(".") ? resolveSpecifier(path.join(portDir, "x"), specifier) : undefined;
+    const targetRel = target === undefined ? null : toRel(target);
+    if (targetRel === null) {
+      report(match.index, `imports ${specifier}, which is not an allow-listed relative module`);
+    } else if (!PORT_ANY_NAME_DIRECTORIES.some((directory) => targetRel.startsWith(directory))) {
+      const allowedNames = PORT_ALLOWED_NAMES[targetRel];
+      if (allowedNames === undefined) {
+        report(match.index, `imports ${targetRel}, which is not an allow-listed source for the port module`);
+      } else {
+        for (const name of names) {
+          const original = name.split(/\s+as\s+/)[0].trim();
+          if (!allowedNames.includes(original)) report(match.index, `imports ${original} from ${targetRel}: not an allow-listed data type for the port module`);
+        }
+      }
+    }
+  }
+  for (const match of text.matchAll(PORT_DYNAMIC)) {
+    report(match.index, "has a dynamic import or require: the port module uses statement-level `import type` only");
   }
 }
 

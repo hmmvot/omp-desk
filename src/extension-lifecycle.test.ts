@@ -574,6 +574,9 @@ before(async () => {
             providerLoginFixture.calls.push({ args, options });
             return providerLoginFixture.read ? providerLoginFixture.read() : { stdout: JSON.stringify({ models: providerLoginFixture.models }), stderr: '', exitCode: 0 };
           }
+        `],
+        ["omp-vscode", `
+          import { providerLoginFixture } from "./host/native-terminal";
           export function openProviderLoginTerminal(request) { providerLoginFixture.logins.push(request); return { name: request.name }; }
         `],
         ["rpc-launch", "export async function launchRpcHost() { return globalThis.__nativeLaunch; }"],

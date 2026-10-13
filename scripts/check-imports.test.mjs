@@ -78,6 +78,17 @@ function check(files, expected) {
   }
 }
 
+// A tree that follows every rule: exit 0 and the one summary line.
+function checkClean(files) {
+  const root = fixture(files);
+  try {
+    const { status, lines } = run(root);
+    assert.equal(status, 0, lines.join("\n"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
 test("extension.ts may import every layer except webview", () => {
   check(
     {
@@ -100,7 +111,7 @@ test("reports a non-test file in a directory that is not a layer", () => {
       "src/other/o.test.ts": "export const t = 1;\n",
     },
     [
-      "src/other/o.ts:1 is in a directory that is not a layer (shared, chat, protocol, host, broker, omp, views, webview, wiring)",
+      "src/other/o.ts:1 is in a directory that is not a layer (shared, chat, protocol, host, broker, omp, views, webview, runtime, wiring)",
     ],
   );
 });
@@ -149,6 +160,131 @@ test("exempts test stubs by name segment only", () => {
       "src/host/latest-stub.ts": 'import { y } from "../webview/y.ts";\nexport const d = y;\n',
     },
     ["src/host/latest-stub.ts:1 imports src/webview/y.ts: host may not import webview"],
+  );
+});
+
+test("the runtime layer imports the process layers, wiring and extension.ts import it, no other layer does", () => {
+  check(
+    {
+      "src/extension.ts": 'import { r } from "./runtime/r.ts";\nexport const e = r;\n',
+      "src/runtime/r.ts": 'import { h } from "../host/h.ts";\nimport { b } from "../broker/b.ts";\nimport { o } from "../omp/o.ts";\nimport { p } from "../protocol/p.ts";\nexport const r = [h, b, o, p];\n',
+      "src/wiring/w.ts": 'import { r } from "../runtime/r.ts";\nexport const w = r;\n',
+      "src/host/h.ts": "export const h = 1;\n",
+      "src/broker/b.ts": "export const b = 1;\n",
+      "src/omp/o.ts": "export const o = 1;\n",
+      "src/protocol/p.ts": "export const p = 1;\n",
+      "src/views/v.ts": 'import { r } from "../runtime/r.ts";\nexport const v = r;\n',
+      "src/webview/y.ts": 'import { r } from "../runtime/r.ts";\nexport const y = r;\n',
+      "src/host/h2.ts": 'import { r } from "../runtime/r.ts";\nexport const h2 = r;\n',
+      "src/runtime/w.ts": 'import { w } from "../wiring/w.ts";\nimport { v } from "../views/v.ts";\nexport const x = [w, v];\n',
+    },
+    [
+      "src/host/h2.ts:1 imports src/runtime/r.ts: host may not import runtime",
+      "src/runtime/w.ts:1 imports src/wiring/w.ts: runtime may not import wiring",
+      "src/runtime/w.ts:2 imports src/views/v.ts: runtime may not import views",
+      "src/views/v.ts:1 imports src/runtime/r.ts: views may not import runtime",
+      "src/webview/y.ts:1 imports src/runtime/r.ts: webview may not import runtime",
+    ],
+  );
+});
+
+test("a runtime file may not name vscode in any form", () => {
+  check(
+    {
+      "src/runtime/static.ts": 'import * as vscode from "vscode";\nexport const a = vscode;\n',
+      "src/runtime/typeonly.ts": 'import type { Uri } from "vscode";\nexport type A = Uri;\n',
+      "src/runtime/side.ts": '\nimport "vscode";\nexport const b = 1;\n',
+      "src/runtime/reexport.ts": 'export { window } from "vscode";\n',
+      "src/runtime/dynamic.ts": 'export const c = () => import("vscode");\n',
+      "src/runtime/require.ts": 'import vscode = require("vscode");\nexport const d = vscode;\n',
+      "src/runtime/call.ts": 'export const e = require("vscode");\n',
+      "src/runtime/position.ts": 'export type F = import("vscode").Uri;\n',
+      "src/runtime/clean.ts": 'import { node } from "node:path";\nimport type { Uri } from "other-vscode-lib";\nexport const g = node;\n',
+    },
+    [
+      "src/runtime/call.ts:1 imports vscode: runtime may not reach vscode",
+      "src/runtime/dynamic.ts:1 imports vscode: runtime may not reach vscode",
+      "src/runtime/position.ts:1 imports vscode: runtime may not reach vscode",
+      "src/runtime/reexport.ts:1 imports vscode: runtime may not reach vscode",
+      "src/runtime/require.ts:1 imports vscode: runtime may not reach vscode",
+      "src/runtime/side.ts:2 imports vscode: runtime may not reach vscode",
+      "src/runtime/static.ts:1 imports vscode: runtime may not reach vscode",
+      "src/runtime/typeonly.ts:1 imports vscode: runtime may not reach vscode",
+    ],
+  );
+});
+
+test("a runtime file may not reach vscode through a chain of non-test imports", () => {
+  check(
+    {
+      "src/runtime/x.ts": 'import { y } from "../host/y.ts";\nimport { clean } from "../host/clean.ts";\nexport const x = [y, clean];\n',
+      "src/host/y.ts": 'import { z } from "./z.ts";\nexport const y = z;\n',
+      "src/host/z.ts": '\n\nconst vscode = await import("vscode");\nexport const z = vscode;\n',
+      "src/host/clean.ts": "export const clean = 1;\n",
+      // a test file that names vscode is not part of the chain
+      "src/host/clean.test.ts": 'import * as vscode from "vscode";\nexport const t = vscode;\n',
+      "src/host/only-test.ts": 'import { t } from "./clean.test.ts";\nexport const o = t;\n',
+      "src/runtime/ok.ts": 'import { o } from "../host/clean.ts";\nexport const ok = o;\n',
+    },
+    ["src/runtime/x.ts -> src/host/y.ts -> src/host/z.ts:3 imports vscode: runtime may not reach vscode"],
+  );
+});
+
+test("a file outside the runtime layer may import vscode", () => {
+  checkClean({
+    "src/host/h.ts": 'import * as vscode from "vscode";\nexport const h = vscode;\n',
+    "src/wiring/w.ts": 'import { h } from "../host/h.ts";\nexport const w = h;\n',
+  });
+});
+
+test("the port module uses only statement-level type imports from the allow-list", () => {
+  checkClean({
+    "src/runtime/session-runtime.ts": [
+      'import type { Row } from "../shared/row.ts";',
+      'import type { RestoreOutcome, RestoreReport as Report } from "../host/session-index.ts";',
+      'import type { NativeStopVerdict } from "../host/rpc-reconcile.ts";',
+      'import type { ChatFrame } from "../protocol/frame.ts";',
+      "export type Port = [Row, RestoreOutcome, Report, NativeStopVerdict, ChatFrame];",
+      'export type { ChatFrame } from "../protocol/frame.ts";',
+      "",
+    ].join("\n"),
+    "src/shared/row.ts": "export type Row = number;\n",
+    "src/protocol/frame.ts": "export type ChatFrame = string;\n",
+    "src/host/session-index.ts": "export type RestoreOutcome = string;\nexport type RestoreReport = string;\nexport class SessionIndex {}\n",
+    "src/host/rpc-reconcile.ts": "export type NativeStopVerdict = string;\n",
+  });
+});
+
+test("the port module refuses value imports, inline type modifiers, star re-exports and live types", () => {
+  check(
+    {
+      "src/runtime/session-runtime.ts": [
+        'import { index } from "../host/session-index.ts";',
+        'import { type RestoreOutcome } from "../host/session-index.ts";',
+        'import type { SessionIndex } from "../host/session-index.ts";',
+        'import type { PtyHandle } from "../host/pty-client.ts";',
+        'import type { Path } from "node:path";',
+        'import "../host/session-index.ts";',
+        'export * from "../shared/row.ts";',
+        'export { Row } from "../shared/row.ts";',
+        'export type Dynamic = import("../host/pty-client.ts").PtyHandle;',
+        "",
+      ].join("\n"),
+      "src/shared/row.ts": "export type Row = number;\n",
+      "src/host/session-index.ts": "export const index = 1;\nexport type RestoreOutcome = string;\nexport class SessionIndex {}\n",
+      "src/host/pty-client.ts": "export type PtyHandle = string;\n",
+    },
+    [
+      'src/runtime/session-runtime.ts:1 has `import { index } from "../host/session-index.ts"`: only `import type { ... } from` is allowed in the port module',
+      "src/runtime/session-runtime.ts:2 has an inline `type` modifier in the import of ../host/session-index.ts: use a statement-level `import type`",
+      "src/runtime/session-runtime.ts:3 imports SessionIndex from src/host/session-index.ts: not an allow-listed data type for the port module",
+      "src/runtime/session-runtime.ts:4 imports src/host/pty-client.ts, which is not an allow-listed source for the port module",
+      "src/runtime/session-runtime.ts:5 imports node:path, which is not an allow-listed relative module",
+      "src/runtime/session-runtime.ts:6 has a side-effect import of ../host/session-index.ts: the port module uses `import type` only",
+      'src/runtime/session-runtime.ts:7 has `export * from "../shared/row.ts"`: only `export type { ... } from` is allowed in the port module',
+      'src/runtime/session-runtime.ts:8 has `export { Row } from "../shared/row.ts"`: only `export type { ... } from` is allowed in the port module',
+      "src/runtime/session-runtime.ts:9 has a dynamic import or require: the port module uses statement-level `import type` only",
+    ],
   );
 });
 

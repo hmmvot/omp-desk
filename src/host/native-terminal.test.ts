@@ -2,10 +2,9 @@
  * Tests for the parts of `native-terminal.ts` that need no real OMP: the
  * host-control bun flags and the stopped-session rename helper runner.
  *
- * The module imports `vscode` at runtime (an API only the extension host
- * provides) and resolves its relative imports the way esbuild does, so the test
- * runner cannot import it statically. It is compiled here with the project's own
- * bundler and a `vscode` stand-in, then driven through its exports.
+ * The module resolves its relative imports the way esbuild does (extensionless specifiers), so
+ * the test runner cannot import it statically: it is compiled here with the project's own
+ * bundler and driven through its exports. It imports no `vscode`.
  *
  * The ownership reconciler, broker probes and stop live in `rpc-reconcile.ts` and are
  * tested in `rpc-reconcile.test.ts`.
@@ -25,25 +24,9 @@ import type {
 	renameStoppedSessionTitle as renameStoppedSessionTitleType,
 	resolveOmpBinary as resolveOmpBinaryType,
 	resolveOmpPackageRoot as resolveOmpPackageRootType,
+	setOmpPathReader as setOmpPathReaderType,
 	setOmpResolutionLog as setOmpResolutionLogType,
 } from "./native-terminal.ts";
-
-/** The `vscode` surface this module uses. */
-const VSCODE_STUB = `
-export const Uri = { file: (value) => ({ fsPath: value }) };
-export class ThemeIcon {
-  constructor(id) {
-    this.id = id;
-  }
-}
-export const window = {
-  createTerminal: options => ({ options }),
-  terminals: [],
-};
-export const workspace = {
-  getConfiguration: () => ({ get: () => globalThis.__ompExecutablePath }),
-};
-`;
 
 /** The part of the compiled module these tests drive. */
 interface NativeTerminalModule {
@@ -51,6 +34,7 @@ interface NativeTerminalModule {
 	readonly renameStoppedSessionTitle: typeof renameStoppedSessionTitleType;
 	readonly resolveOmpBinary: typeof resolveOmpBinaryType;
 	readonly resolveOmpPackageRoot: typeof resolveOmpPackageRootType;
+	readonly setOmpPathReader: typeof setOmpPathReaderType;
 	readonly setOmpResolutionLog: typeof setOmpResolutionLogType;
 }
 
@@ -67,15 +51,6 @@ before(async () => {
 		platform: "node",
 		format: "esm",
 		target: "node20",
-		plugins: [
-			{
-				name: "vscode-stub",
-				setup(pluginBuild) {
-					pluginBuild.onResolve({ filter: /^vscode$/ }, () => ({ path: "vscode", namespace: "stub" }));
-					pluginBuild.onLoad({ filter: /.*/, namespace: "stub" }, () => ({ contents: VSCODE_STUB, loader: "js" }));
-				},
-			},
-		],
 	});
 	// The specifier is the bundle just written, so it cannot be a static import;
 	// the module it exports is the one whose shape was compiled above.
@@ -400,18 +375,28 @@ describe("OMP resolution when a candidate cannot answer", () => {
 		assert.ok(resolved.origin.includes(named.shim), resolved.origin);
 	});
 
-	it("reads the explicit path from the omp.executablePath setting when none is passed, and an empty one means PATH", async () => {
+	it("reads the explicit path from the registered reader on every resolution, and an empty one means PATH", async () => {
 		const onPathFirst = await fakeInstall(prints("18.0.4"));
 		const named = await fakeInstall(prints("18.8.5"));
-		Reflect.set(globalThis, "__ompExecutablePath", `  ${named.shim}  `);
+		const other = await fakeInstall(prints("18.9.0"));
+		let setting = `  ${named.shim}  `;
+		native.setOmpPathReader(() => setting);
 		try {
 			const viaSetting = await onPath([onPathFirst.bin], resolve);
 			assert.equal(viaSetting.version, "18.8.5", "the setting names the OMP, trimmed");
+			setting = other.shim;
+			const changed = await onPath([onPathFirst.bin], resolve);
+			assert.equal(changed.version, "18.9.0", "a changed setting is read by the next resolution");
 			const viaEmpty = await onPath([onPathFirst.bin], () => resolveExplicit(""));
 			assert.equal(viaEmpty.version, "18.0.4", "an empty path is the PATH search");
+			setting = "";
+			const cleared = await onPath([onPathFirst.bin], resolve);
+			assert.equal(cleared.version, "18.0.4", "a cleared setting is the PATH search");
 		} finally {
-			Reflect.deleteProperty(globalThis, "__ompExecutablePath");
+			native.setOmpPathReader(null);
 		}
+		const withoutReader = await onPath([onPathFirst.bin], resolve);
+		assert.equal(withoutReader.version, "18.0.4", "without a registered reader PATH decides");
 	});
 
 	it("never falls back to PATH when the explicit OMP is refused, and says which setting named it", async () => {

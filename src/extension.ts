@@ -17,15 +17,15 @@ import { terminalFontFamily } from "./shared/terminal-theme";
 import {
   DEFAULT_OMP_PROFILE,
   delay,
-  findTerminalForPid,
-  openProviderLoginTerminal,
   renameStoppedSessionTitle,
   resolveBunRuntime,
   resolveOmpBinary,
   resolveOmpPackageRoot,
+  setOmpPathReader,
   setOmpResolutionLog,
   terminalWriterForHandle,
 } from "./host/native-terminal";
+import { configuredOmpPath, findTerminalForPid, openProviderLoginTerminal } from "./host/omp-vscode";
 import { runOmpCli } from "./host/native-terminal";
 import { ProviderUsageCache, PROVIDER_USAGE_ARGS, PROVIDER_USAGE_TIMEOUT_MS } from "./host/provider-usage";
 import { observeSessionBranch } from "./host/session-branch";
@@ -1442,6 +1442,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   s.output = vscode.window.createOutputChannel("OMP Desk");
   setOmpResolutionLog(log);
   context.subscriptions.push({ dispose: () => setOmpResolutionLog(null) });
+  setOmpPathReader(configuredOmpPath);
+  context.subscriptions.push({ dispose: () => setOmpPathReader(null) });
   // The host's one thread is shared with every extension; a stall of 500 ms or more is logged with the Desk operations that overlapped it.
   context.subscriptions.push({ dispose: startLoopLagMonitor(message => log(message)) });
   // This host's start time is a PowerShell command, hundreds of milliseconds to seconds on a busy machine. It runs beside

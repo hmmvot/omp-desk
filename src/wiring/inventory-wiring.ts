@@ -6,7 +6,8 @@ import { createRuntimeResolver, NO_BUN, noPackageSource } from "../host/inventor
 import { createInventoryRuntime } from "../host/inventory/inventory-runtime.ts";
 import { OPEN_SOURCE_COMMAND, InventoryTreeProvider } from "../views/inventory-tree.ts";
 import { runSettingsWorker } from "../host/omp-settings-worker";
-import { configuredOmpPath, resolveBunRuntime, resolveOmpBinary, resolveOmpPackageRoot } from "../host/native-terminal";
+import { resolveBunRuntime, resolveOmpBinary, resolveOmpPackageRoot } from "../host/native-terminal";
+import { configuredOmpPath } from "../host/omp-vscode";
 import { OMP_PATH_SETTING } from "../shared/omp-unavailable";
 import { stageRuntimeAssets, verifyStagedRuntimeAsset } from "../host/runtime-assets";
 import type { InventoryTreeItem } from "../views/inventory-tree.ts";
