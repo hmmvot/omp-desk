@@ -90,7 +90,7 @@ For how this works, see the [architecture](docs/architecture.md).
 - Routine tool calls are grouped in an **Overview**. Set `omp.toolCallDetail` to **detailed** to show every call as its own row, in every Chat.
 - Pinned rows show the TODO list and running subagents. Open a subagent's live transcript in its own tab.
 - Model and thinking pickers work at any time, also during a turn. A change OMP cannot take yet (compaction, a rewind, a reconnect) waits, shown in the picker with a clock icon, and is sent as soon as OMP is ready, before your next message. The footer shows context usage, provider quotas and the Git branch.
-- A status bar item shows the provider limits of the active Chat compactly, for example `5h 42% · 2:13  │  7d 18% · 3:04:00`: the used percent and the time left until each window resets (days:hours:minutes, leading zero parts dropped). It turns yellow from 80 % and red from 95 %, its tooltip has the exact reset times, and a click refreshes it. Right-click it to hide it.
+- A status bar item shows the provider limits of the active Chat compactly, for example `5h 42% · 2h13m  │  7d 18% · 3d4h`: the used percent and the time left until each window resets (written like `4d4h42m`: days, hours and minutes, each only when above zero). It turns yellow from 80 % and red from 95 %, its tooltip has the exact reset times, and a click refreshes it. Right-click it to hide it.
 - Without available models, the model chip offers **Log In to Provider**. Every model picker also ends with **Log In to Provider…** to add another provider.
 - Your draft stays until OMP confirms it. Nothing is resent automatically.
 - If OMP stops responding, **Reconnect** or **Restart** the conversation.

@@ -60,7 +60,7 @@ describe("registerUsageStatus", () => {
 		source = { provider: "anthropic", windows: [{ label: "5h", usedPercent: 42, resetsAt: T0 + 133 * MIN }, { label: "7d", usedPercent: 18, resetsAt: T0 + (3 * 1440 + 4 * 60) * MIN }], accountSelection: null, readAt: T0 };
 		handle.update();
 		assert.equal(item.visible, true);
-		assert.equal(item.text, "$(pulse) 5h 42% · 2:13  \u2502  7d 18% · 3:04:00");
+		assert.equal(item.text, "$(pulse) 5h 42% · 2h13m  \u2502  7d 18% · 3d4h");
 		assert.match(item.tooltip ?? "", /^OMP Desk provider usage: anthropic\n5h: 42% used/);
 		const background = (): string | undefined => item.backgroundColor?.id;
 		assert.equal(background(), undefined);
@@ -81,9 +81,9 @@ describe("registerUsageStatus", () => {
 		const item = stub.window.statusBarItems[0]!;
 		source = { provider: "p", windows: [{ label: "5h", usedPercent: 1, resetsAt: T0 + 5 * MIN }], accountSelection: null, readAt: T0 };
 		handle.update();
-		assert.equal(item.text, "$(pulse) 5h 1% · 5");
+		assert.equal(item.text, "$(pulse) 5h 1% · 5m");
 		mock.timers.tick(MIN);
-		assert.equal(item.text, "$(pulse) 5h 1% · 4");
+		assert.equal(item.text, "$(pulse) 5h 1% · 4m");
 		mock.timers.tick(5 * MIN);
 		assert.equal(item.text, "$(pulse) 5h 1%", "a reset that passed shows no time until the next refresh");
 		source = null;

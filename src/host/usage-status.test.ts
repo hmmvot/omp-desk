@@ -12,22 +12,23 @@ const source = (windows: UsageStatusSource["windows"], extra: Partial<UsageStatu
 	({ provider: "anthropic", windows, accountSelection: null, readAt: NOW - 3 * MIN, ...extra });
 
 describe("formatResetCountdown", () => {
-	it("trims leading zero components and pads inner ones", () => {
-		assert.equal(formatResetCountdown(after(2, 3, 5), NOW), "2:03:05");
-		assert.equal(formatResetCountdown(after(0, 4, 7), NOW), "4:07");
-		assert.equal(formatResetCountdown(after(0, 0, 9), NOW), "9");
-		assert.equal(formatResetCountdown(after(1, 0, 0), NOW), "1:00:00");
-		assert.equal(formatResetCountdown(after(0, 1, 0), NOW), "1:00");
-		assert.equal(formatResetCountdown(after(12, 23, 59), NOW), "12:23:59");
+	it("uses d, h and m with no spaces and shows only the components above zero", () => {
+		assert.equal(formatResetCountdown(after(2, 3, 5), NOW), "2d3h5m");
+		assert.equal(formatResetCountdown(after(0, 4, 42), NOW), "4h42m");
+		assert.equal(formatResetCountdown(after(0, 0, 52), NOW), "52m");
+		assert.equal(formatResetCountdown(after(1, 0, 5), NOW), "1d5m");
+		assert.equal(formatResetCountdown(after(1, 0, 0), NOW), "1d");
+		assert.equal(formatResetCountdown(after(0, 3, 0), NOW), "3h");
+		assert.equal(formatResetCountdown(after(12, 23, 59), NOW), "12d23h59m");
 	});
 
 	it("rounds the minutes up so the count never reads 0 before the reset", () => {
-		assert.equal(formatResetCountdown(NOW + 1, NOW), "1");
-		assert.equal(formatResetCountdown(NOW + 59_999, NOW), "1");
-		assert.equal(formatResetCountdown(NOW + MIN, NOW), "1");
-		assert.equal(formatResetCountdown(NOW + MIN + 1, NOW), "2");
-		assert.equal(formatResetCountdown(after(0, 0, 59) + 1, NOW), "1:00", "59 min and a bit rolls into the hour");
-		assert.equal(formatResetCountdown(after(0, 23, 59) + 1, NOW), "1:00:00", "23 h 59 min and a bit rolls into the day");
+		assert.equal(formatResetCountdown(NOW + 1, NOW), "1m");
+		assert.equal(formatResetCountdown(NOW + 59_999, NOW), "1m");
+		assert.equal(formatResetCountdown(NOW + MIN, NOW), "1m");
+		assert.equal(formatResetCountdown(NOW + MIN + 1, NOW), "2m");
+		assert.equal(formatResetCountdown(after(0, 0, 59) + 1, NOW), "1h", "59 min and a bit rolls into the hour");
+		assert.equal(formatResetCountdown(after(0, 23, 59) + 1, NOW), "1d", "23 h 59 min and a bit rolls into the day");
 	});
 
 	it("shows nothing for a reset in the past, now, missing or not a number", () => {
@@ -42,12 +43,12 @@ describe("formatResetCountdown", () => {
 
 describe("formatUsageWindow", () => {
 	it("joins label, rounded percent and countdown", () => {
-		assert.equal(formatUsageWindow({ label: "5h", usedPercent: 41.6, resetsAt: after(0, 2, 13) }, NOW), "5h 42% · 2:13");
+		assert.equal(formatUsageWindow({ label: "5h", usedPercent: 41.6, resetsAt: after(0, 2, 13) }, NOW), "5h 42% · 2h13m");
 	});
 
 	it("leaves out a missing percent or a missing/passed reset", () => {
-		assert.equal(formatUsageWindow({ label: "5h", usedPercent: undefined, resetsAt: after(0, 2, 13) }, NOW), "5h · 2:13");
-		assert.equal(formatUsageWindow({ label: "5h", usedPercent: Number.NaN, resetsAt: after(0, 2, 13) }, NOW), "5h · 2:13");
+		assert.equal(formatUsageWindow({ label: "5h", usedPercent: undefined, resetsAt: after(0, 2, 13) }, NOW), "5h · 2h13m");
+		assert.equal(formatUsageWindow({ label: "5h", usedPercent: Number.NaN, resetsAt: after(0, 2, 13) }, NOW), "5h · 2h13m");
 		assert.equal(formatUsageWindow({ label: "7d", usedPercent: 18, resetsAt: null }, NOW), "7d 18%");
 		assert.equal(formatUsageWindow({ label: "7d", usedPercent: 18 }, NOW), "7d 18%");
 		assert.equal(formatUsageWindow({ label: "7d", usedPercent: 18, resetsAt: NOW - MIN }, NOW), "7d 18%", "a reset already in the past shows no countdown until the next refresh");
@@ -120,18 +121,18 @@ describe("buildUsageStatus", () => {
 			{ label: "5h", usedPercent: 42, resetsAt: after(0, 2, 13) },
 			{ label: "7d", usedPercent: 18, resetsAt: after(3, 4, 0) },
 		]), NOW, local);
-		assert.equal(model?.text, "5h 42% · 2:13  \u2502  7d 18% · 3:04:00");
+		assert.equal(model?.text, "5h 42% · 2h13m  \u2502  7d 18% · 3d4h");
 		assert.equal(model?.severity, "none");
 	});
 
 	it("keeps a missing time or percent out of the text", () => {
-		assert.equal(buildUsageStatus(source([{ label: "5h", usedPercent: 42, resetsAt: null }, { label: "7d", usedPercent: 18, resetsAt: after(1, 0, 0) }]), NOW, local)?.text, "5h 42%  \u2502  7d 18% · 1:00:00");
-		assert.equal(buildUsageStatus(source([{ label: "5h", resetsAt: after(0, 0, 9) }]), NOW, local)?.text, "5h · 9");
+		assert.equal(buildUsageStatus(source([{ label: "5h", usedPercent: 42, resetsAt: null }, { label: "7d", usedPercent: 18, resetsAt: after(1, 0, 0) }]), NOW, local)?.text, "5h 42%  \u2502  7d 18% · 1d");
+		assert.equal(buildUsageStatus(source([{ label: "5h", resetsAt: after(0, 0, 9) }]), NOW, local)?.text, "5h · 9m");
 	});
 
 	it("shows other windows in the same style when 5h and 7d are absent", () => {
-		assert.equal(buildUsageStatus(source([{ label: "monthly", usedPercent: 61.2, resetsAt: after(10, 2, 0) }]), NOW, local)?.text, "monthly 61% · 10:02:00");
-		assert.equal(buildUsageStatus(source([{ label: "1d", usedPercent: 7, resetsAt: after(0, 5, 5) }]), NOW, local)?.text, "1d 7% · 5:05");
+		assert.equal(buildUsageStatus(source([{ label: "monthly", usedPercent: 61.2, resetsAt: after(10, 2, 0) }]), NOW, local)?.text, "monthly 61% · 10d2h");
+		assert.equal(buildUsageStatus(source([{ label: "1d", usedPercent: 7, resetsAt: after(0, 5, 5) }]), NOW, local)?.text, "1d 7% · 5h5m");
 	});
 
 	it("is hidden without a provider, a reading or anything to show", () => {
@@ -144,7 +145,7 @@ describe("buildUsageStatus", () => {
 
 	it("shows the percent and no time once a reset has passed, until the next refresh", () => {
 		const model = buildUsageStatus(source([{ label: "5h", usedPercent: 97, resetsAt: NOW - MIN }, { label: "7d", usedPercent: 18, resetsAt: after(2, 0, 5) }]), NOW, local);
-		assert.equal(model?.text, "5h 97%  \u2502  7d 18% · 2:00:05");
+		assert.equal(model?.text, "5h 97%  \u2502  7d 18% · 2d5m");
 		assert.equal(model?.severity, "none", "the passed window no longer counts");
 		assert.match(model?.tooltip ?? "", /5h: 97% used · reset time T-1 has passed; waiting for the next refresh/);
 	});
@@ -157,7 +158,7 @@ describe("buildUsageStatus", () => {
 		assert.equal(model?.severity, "warning");
 		assert.equal(model?.tooltip, [
 			"OMP Desk provider usage: anthropic",
-			"5h: 85% used · resets T133 (in 2:13)",
+			"5h: 85% used · resets T133 (in 2h13m)",
 			"7d: 18% used",
 			"Active account unavailable: showing the first provider report in OMP CLI order.",
 			"Read 3 min ago. Click to refresh.",

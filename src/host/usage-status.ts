@@ -25,7 +25,7 @@ export interface UsageStatusSource {
 export type UsageSeverity = "none" | "warning" | "error";
 
 export interface UsageStatusModel {
-	/** `5h 42% · 2:13  │  7d 18% · 3:04:00`. */
+	/** `5h 42% · 2h13m  │  7d 18% · 3d4h`. */
 	text: string;
 	severity: UsageSeverity;
 	/** Plain multi-line text: provider, one line per window, the account note and the reading's age. */
@@ -40,11 +40,9 @@ const MINUTE_MS = 60_000;
 /** Between two windows: U+2502 with two spaces on each side. */
 export const WINDOW_SEPARATOR = "  \u2502  ";
 
-const pad2 = (value: number): string => String(value).padStart(2, "0");
-
 /**
  * Time left until `resetsAt`, rounded up to whole minutes so it never reads 0 before the reset.
- * Leading zero components are dropped, inner ones are padded to two digits: `2:03:05`, `4:07`, `9`, `1:00:00`.
+ * Units `d`, `h`, `m` with no spaces, each only when above zero: `2d3h5m`, `4h42m`, `52m`, `1d5m`, `1d`, `3h`.
  * Returns `null` when the reset time is missing, not a finite number, or not in the future.
  */
 export function formatResetCountdown(resetsAt: number | null | undefined, now: number): string | null {
@@ -55,9 +53,7 @@ export function formatResetCountdown(resetsAt: number | null | undefined, now: n
 	const days = Math.floor(total / 1440);
 	const hours = Math.floor(total % 1440 / 60);
 	const minutes = total % 60;
-	if (days > 0) return `${days}:${pad2(hours)}:${pad2(minutes)}`;
-	if (hours > 0) return `${hours}:${pad2(minutes)}`;
-	return String(minutes);
+	return `${days > 0 ? `${days}d` : ""}${hours > 0 ? `${hours}h` : ""}${minutes > 0 ? `${minutes}m` : ""}`;
 }
 
 const percentOf = (window: UsageStatusWindow): number | null =>
@@ -75,7 +71,7 @@ export function selectUsageWindows(windows: readonly UsageStatusWindow[]): Usage
 	return primary.length > 0 ? primary : informative;
 }
 
-/** `5h 42% · 2:13`; a missing percent or an unavailable countdown leaves its part out (`5h 42%`, `5h · 2:13`). */
+/** `5h 42% · 2h13m`; a missing percent or an unavailable countdown leaves its part out (`5h 42%`, `5h · 2h13m`). */
 export function formatUsageWindow(window: UsageStatusWindow, now: number): string {
 	const percent = percentOf(window);
 	const countdown = formatResetCountdown(window.resetsAt, now);
