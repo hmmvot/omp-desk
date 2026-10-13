@@ -35,10 +35,16 @@
  *   all (a failed VS Code write leaves a dirty editor model of that file); any other failed
  *   write is caught per key. The old value stays, and one line names the key, the layer and
  *   the reason.
- * - **Several windows.** Windows derive the same new value from the same old one and a second
- *   write of an equal value changes nothing; a write that loses a file race fails inside VS
- *   Code, is logged and is retried by the next activation. A window that still runs the
- *   previous release reads the defaults for a moved key until it reloads.
+ * - **Several windows.** The User layer is moved by one window at a time: a window that finds
+ *   the profile's claim held waits for its release and then finds the values moved (its own
+ *   configuration follows the file a moment later), and takes over only when the values are
+ *   still there after that or the claim went stale. Windows derive the same new value from the
+ *   same old one, so a second write of an equal value changes nothing; a write that loses a
+ *   file race fails inside VS Code, is logged and is retried by the next activation. A window
+ *   that still runs the previous release reads the defaults for a moved key until it reloads.
+ * - **Cost.** A window with nothing to move answers from synchronous reads and does no I/O; the
+ *   keys of a layer move concurrently, and activation does not wait for the move (see
+ *   `extension.ts`: the first launch of a process does).
  */
 import { isDeepStrictEqual } from "node:util";
 
@@ -73,6 +79,21 @@ export interface LegacySettingsPort {
 	/** Setting ids another installed extension contributes under `omp.`. */
 	foreignSettings: ReadonlySet<string>;
 	log(line: string): void;
+	/**
+	 * The profile-wide right to write the User layer, or `null` while another window holds it. A claim that cannot be
+	 * coordinated at all (the storage refuses) is a claim, not a refusal: the move then runs as it did without one.
+	 */
+	claimUserLayer(): Promise<UserLayerClaim | null>;
+	/** Resolves `true` once the claim another window holds is released or has gone stale, `false` after `maxMs`. */
+	waitForRelease(maxMs: number): Promise<boolean>;
+	delay(ms: number): Promise<void>;
+	/** Test seam for the waits in {@link DEFAULT_WAITS}. */
+	waits?: Partial<{ releaseMs: number; graceMs: number; graceStepMs: number }>;
+}
+
+/** The right to write the User layer; released when the move ends, whatever its outcome. */
+export interface UserLayerClaim {
+	release(): Promise<void>;
 }
 
 /** What happened to one key at one layer. */
@@ -90,53 +111,128 @@ function describe(error: unknown): string {
 
 /**
  * Move every old setting that holds a value. Never throws: a failure of one key is logged and
- * the next key still runs.
+ * the other keys still run.
+ *
+ * A window with nothing to move answers from synchronous `inspect` reads alone, so the normal
+ * activation pays no I/O and no wait. When there is work, the keys of one layer move
+ * concurrently (VS Code queues the writes of one file itself; what overlaps is the reload each
+ * write waits for), and the User layer, which every window of the profile shares, is moved by
+ * one window at a time: the others wait for it and find the values moved.
  */
 export async function migrateLegacySettings(port: LegacySettingsPort): Promise<readonly MigrationOutcome[]> {
-	const outcomes: MigrationOutcome[] = [];
-	for (const list of SETTING_NAME_LISTS) {
-		try {
-			outcomes.push(...(await extendNameList(port, list)));
-		} catch (error) {
-			port.log(`settings: ${list}: the new names were not added, the step failed: ${describe(error)}`);
-		}
+	const userWork = userLayerPending(port);
+	const workspaceWork = layerHoldsOldValue(port, "workspace");
+	if (!userWork && !workspaceWork) return [];
+	const [user, workspace] = await Promise.all([
+		userWork ? moveUserLayer(port) : Promise.resolve([] as MigrationOutcome[]),
+		workspaceWork ? moveKeys(port, "workspace") : Promise.resolve([] as MigrationOutcome[]),
+	]);
+	return [...user, ...workspace];
+}
+
+/** How long a window waits for another window's move of the User layer, and for its result to reach this window's own reads. */
+const DEFAULT_WAITS = { releaseMs: 15_000, graceMs: 3_000, graceStepMs: 100 } as const;
+
+async function moveUserLayer(port: LegacySettingsPort): Promise<MigrationOutcome[]> {
+	const claim = await port.claimUserLayer();
+	if (claim !== null) return moveClaimedUserLayer(port, claim);
+	const waits = { ...DEFAULT_WAITS, ...port.waits };
+	port.log("settings: another window is moving the user settings; this window waits for it");
+	if (!(await port.waitForRelease(waits.releaseMs))) {
+		port.log(`settings: the other window's move of the user settings is still running after ${waits.releaseMs} ms; it is not waited for`);
+		return [];
 	}
-	for (const name of LEGACY_SETTING_NAMES) {
+	// The release is seen as soon as it happens; this window's own configuration follows the file a moment later.
+	for (let waited = 0; waited < waits.graceMs && userLayerPending(port); waited += waits.graceStepMs) await port.delay(waits.graceStepMs);
+	if (!userLayerPending(port)) return [];
+	const retry = await port.claimUserLayer();
+	return retry === null ? [] : moveClaimedUserLayer(port, retry);
+}
+
+async function moveClaimedUserLayer(port: LegacySettingsPort, claim: UserLayerClaim): Promise<MigrationOutcome[]> {
+	try {
+		// The two lists first: a value is never exposed to Settings Sync or another profile under a name that is not listed.
+		const listed = await Promise.all(SETTING_NAME_LISTS.map(async list => {
+			try {
+				return await extendNameList(port, list);
+			} catch (error) {
+				port.log(`settings: ${list}: the new names were not added, the step failed: ${describe(error)}`);
+				return [];
+			}
+		}));
+		return [...listed.flat(), ...(await moveKeys(port, "user"))];
+	} finally {
+		await claim.release().catch(() => undefined);
+	}
+}
+
+/** Every old key at one layer, concurrently; outcomes in the table's order. */
+async function moveKeys(port: LegacySettingsPort, layer: SettingsLayer): Promise<MigrationOutcome[]> {
+	const outcomes = await Promise.all(LEGACY_SETTING_NAMES.map(async (name): Promise<MigrationOutcome | null> => {
 		const oldKey = `omp.${name}`;
 		const newKey = `ompDesk.${name}`;
-		for (const layer of ["user", "workspace"] as const) {
-			try {
-				if (port.foreignSettings.has(oldKey)) {
-					if (valueAt(port.inspect(oldKey), layer) !== undefined) port.log(`settings: ${oldKey} → ${newKey} (${LAYER_WORDS[layer]}): left; another extension contributes ${oldKey}`);
-					continue;
-				}
-				const outcome = await migrateKey(port, oldKey, newKey, layer);
-				if (outcome !== null) outcomes.push({ key: oldKey, layer, outcome });
-			} catch (error) {
-				port.log(`settings: ${oldKey} → ${newKey} (${LAYER_WORDS[layer]}): left, the step failed: ${describe(error)}`);
-				outcomes.push({ key: oldKey, layer, outcome: "left" });
+		try {
+			if (port.foreignSettings.has(oldKey)) {
+				if (valueAt(port.inspect(oldKey), layer) !== undefined) port.log(`settings: ${oldKey} → ${newKey} (${LAYER_WORDS[layer]}): left; another extension contributes ${oldKey}`);
+				return null;
 			}
+			const outcome = await migrateKey(port, oldKey, newKey, layer);
+			return outcome === null ? null : { key: oldKey, layer, outcome };
+		} catch (error) {
+			port.log(`settings: ${oldKey} → ${newKey} (${LAYER_WORDS[layer]}): left, the step failed: ${describe(error)}`);
+			return { key: oldKey, layer, outcome: "left" };
 		}
-	}
-	return outcomes;
+	}));
+	return outcomes.filter((outcome): outcome is MigrationOutcome => outcome !== null);
 }
 
 function valueAt(values: LayerValues | undefined, layer: SettingsLayer): unknown {
 	return layer === "user" ? values?.globalValue : values?.workspaceValue;
 }
 
-/** Add `ompDesk.<name>` next to every `omp.<name>` a list of setting names holds (User layer; the old entries stay). */
-async function extendNameList(port: LegacySettingsPort, list: string): Promise<MigrationOutcome[]> {
+/** The new names a list of setting names lacks: `ompDesk.<name>` for every `omp.<name>` it holds (User layer). */
+function missingListedNames(port: LegacySettingsPort, list: string): { readonly current: readonly unknown[]; readonly missing: readonly string[] } | null {
 	const current = valueAt(port.inspect(list), "user");
-	if (!Array.isArray(current)) return [];
+	if (!Array.isArray(current)) return null;
 	const missing: string[] = [];
 	for (const name of LEGACY_SETTING_NAMES) {
 		if (current.includes(`omp.${name}`) && !current.includes(`ompDesk.${name}`) && !port.foreignSettings.has(`omp.${name}`)) missing.push(`ompDesk.${name}`);
 	}
-	if (missing.length === 0) return [];
-	await port.update(list, [...current, ...missing], "user");
-	port.log(`settings: ${list}: added ${missing.join(", ")} next to the old names it holds`);
+	return missing.length === 0 ? null : { current, missing };
+}
+
+/** Add `ompDesk.<name>` next to every `omp.<name>` a list of setting names holds (User layer; the old entries stay). */
+async function extendNameList(port: LegacySettingsPort, list: string): Promise<MigrationOutcome[]> {
+	const found = missingListedNames(port, list);
+	if (found === null) return [];
+	await port.update(list, [...found.current, ...found.missing], "user");
+	port.log(`settings: ${list}: added ${found.missing.join(", ")} next to the old names it holds`);
 	return [{ key: list, layer: "user", outcome: "listed" }];
+}
+
+/**
+ * Whether any old key holds a value at a layer (a key another extension contributes counts: it is logged, never moved). A read
+ * that throws counts as "yes": the key's own step then logs the failure.
+ */
+function layerHoldsOldValue(port: LegacySettingsPort, layer: SettingsLayer): boolean {
+	return LEGACY_SETTING_NAMES.some(name => {
+		try {
+			return valueAt(port.inspect(`omp.${name}`), layer) !== undefined;
+		} catch {
+			return true;
+		}
+	});
+}
+
+/** Whether the User layer has anything to move or list: synchronous reads only, no I/O. */
+function userLayerPending(port: LegacySettingsPort): boolean {
+	return layerHoldsOldValue(port, "user") || SETTING_NAME_LISTS.some(list => {
+		try {
+			return missingListedNames(port, list) !== null;
+		} catch {
+			return true;
+		}
+	});
 }
 
 async function migrateKey(port: LegacySettingsPort, oldKey: string, newKey: string, layer: SettingsLayer): Promise<MigrationOutcome["outcome"] | null> {

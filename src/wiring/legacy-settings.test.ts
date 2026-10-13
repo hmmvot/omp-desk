@@ -36,6 +36,10 @@ interface Store {
 	readonly file: string | null;
 	readonly foreign: Set<string>;
 	readonly writes: { key: string; value: unknown; layer: SettingsLayer }[];
+	/** The profile-wide claim on the User layer. */
+	claimed: boolean;
+	/** The holder of the claim never releases it. */
+	stuck: boolean;
 }
 
 function store(options: FakeOptions = {}): Store {
@@ -47,6 +51,8 @@ function store(options: FakeOptions = {}): Store {
 		file: options.file === undefined ? "C:\\work\\.vscode\\settings.json" : options.file,
 		foreign: new Set(options.foreign ?? []),
 		writes: [] as { key: string; value: unknown; layer: SettingsLayer }[],
+		claimed: false,
+		stuck: false,
 	};
 }
 
@@ -76,6 +82,19 @@ function window(shared: Store): { port: LegacySettingsPort; lines: string[]; che
 		workspaceSettingsFile: () => shared.file,
 		isWritable: async file => { checkedFiles.push(file); return !shared.readOnlyFile; },
 		foreignSettings: shared.foreign,
+		claimUserLayer: async () => {
+			if (shared.claimed) return null;
+			shared.claimed = true;
+			return { release: async () => { shared.claimed = false; } };
+		},
+		// A holder that never lets go is `stuck`; otherwise the wait ends the moment the holder released.
+		waitForRelease: async () => {
+			if (shared.stuck) return false;
+			while (shared.claimed) await Promise.resolve();
+			return true;
+		},
+		delay: () => Promise.resolve(),
+		waits: { releaseMs: 500, graceMs: 50, graceStepMs: 5 },
 		log: line => lines.push(line),
 	};
 	return { port, lines, checkedFiles };
@@ -175,7 +194,7 @@ describe("the User layer", () => {
 		assert.equal(shared.user.has("ompDesk.chatColumn"), false);
 		assert.equal(shared.user.get("ompDesk.linkReminder"), true, "the next key still moves");
 		assert.equal(lines.length, 2);
-		assert.match(lines[0] ?? "", /^settings: omp\.chatColumn → ompDesk\.chatColumn \(user settings\): left, the step failed: Error while writing to User Settings/);
+		assert.ok(lines.some(line => /^settings: omp\.chatColumn → ompDesk\.chatColumn \(user settings\): left, the step failed: Error while writing to User Settings/.test(line)), lines.join("\n"));
 	});
 
 	it("does not remove the old value when only the removal fails, and finishes it on the next pass", async () => {
@@ -277,6 +296,68 @@ describe("several windows of one profile activating together", () => {
 		assert.equal(shared.workspace.has("omp.chatColumn"), false);
 		const after = window(shared);
 		assert.deepEqual(await migrateLegacySettings(after.port), []);
+	});
+
+	it("move the User layer once between them: 26 writes for 13 keys, not 78, and the others log that they waited", async () => {
+		const shared = store({ user: { ...PROFILE_VALUES } });
+		const windows = [1, 2, 3].map(() => window(shared));
+		await Promise.all(windows.map(({ port }) => migrateLegacySettings(port)));
+		assert.equal(shared.writes.filter(write => write.layer === "user").length, 26);
+		const waited = windows.filter(({ lines }) => lines.some(line => line.includes("another window is moving the user settings")));
+		assert.equal(waited.length, 2);
+		assert.equal(shared.claimed, false, "the claim is released");
+		for (const [key, value] of Object.entries(PROFILE_VALUES)) assert.equal(shared.user.get(`ompDesk.${key.slice(4)}`), value, key);
+	});
+
+	it("take over when the window that held the claim let go without moving anything", async () => {
+		const shared = store({ user: { "omp.chatColumn": false } });
+		shared.claimed = true;
+		const { port } = window(shared);
+		port.waitForRelease = async () => { shared.claimed = false; return true; };
+		await migrateLegacySettings(port);
+		assert.equal(shared.user.get("ompDesk.chatColumn"), false);
+		assert.equal(shared.user.has("omp.chatColumn"), false);
+	});
+
+	it("leave the User layer alone, and say so, while the other window's claim never ends", async () => {
+		const shared = store({ user: { "omp.chatColumn": false }, workspace: { "omp.linkReminder": true } });
+		shared.claimed = true;
+		shared.stuck = true;
+		const { port, lines } = window(shared);
+		await migrateLegacySettings(port);
+		assert.equal(shared.user.get("omp.chatColumn"), false);
+		assert.ok(lines.some(line => line.includes("still running after")), lines.join("\n"));
+		assert.equal(shared.workspace.get("ompDesk.linkReminder"), true, "the window's own workspace layer does not wait for another window");
+	});
+});
+
+describe("the cost of a window", () => {
+	it("with nothing to move is synchronous reads: no claim, no write, no wait", async () => {
+		const shared = store({ user: { "editor.fontSize": 14, "ompDesk.chatColumn": false } });
+		const { port, lines } = window(shared);
+		let claims = 0;
+		const claim = port.claimUserLayer.bind(port);
+		port.claimUserLayer = () => { claims += 1; return claim(); };
+		assert.deepEqual(await migrateLegacySettings(port), []);
+		assert.equal(claims, 0);
+		assert.deepEqual(shared.writes, []);
+		assert.deepEqual(lines, []);
+	});
+
+	it("moves the keys of a layer concurrently, so the reloads VS Code runs after each write overlap", async () => {
+		const shared = store({ user: { ...PROFILE_VALUES } });
+		const { port } = window(shared);
+		const update = port.update.bind(port);
+		let inFlight = 0;
+		let peak = 0;
+		port.update = async (key, value, layer) => {
+			inFlight += 1;
+			peak = Math.max(peak, inFlight);
+			try { await update(key, value, layer); } finally { inFlight -= 1; }
+		};
+		await migrateLegacySettings(port);
+		assert.ok(peak >= 13, `at most ${peak} writes were in flight`);
+		for (const key of Object.keys(PROFILE_VALUES)) assert.equal(shared.user.has(key), false, key);
 	});
 });
 

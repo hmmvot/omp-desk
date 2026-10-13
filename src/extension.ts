@@ -253,6 +253,7 @@ import { catalogPaths, createCatalogStore, startCatalogWatch } from "./host/prof
 import type { CatalogStore } from "./host/profile-catalog";
 import { importPredecessorFolders } from "./wiring/predecessor-import";
 import { migrateLegacySettings } from "./wiring/legacy-settings";
+import { fileClaim } from "./wiring/legacy-settings-claim";
 import type { LegacySettingsPort } from "./wiring/legacy-settings";
 import { announceRename, foreignOmpNames, legacyContextKey, registerLegacyAliases } from "./wiring/legacy-aliases";
 import { constants as fsConstants } from "node:fs";
@@ -845,6 +846,9 @@ interface WindowState {
    * waits for it through {@link startupRestoreOver}; an explicit action never does.
    */
   readonly startupRestoreOver: PromiseWithResolvers<void>;
+  /** Settles when this window's move of the old `omp.*` settings ended (ADR-0068); never rejects. Awaited, bounded, by the first launch. */
+  legacySettingsMoved: Promise<void>;
+  legacySettingsLateLogged: boolean;
   /** Wall-clock time (`Date.now()`) the extension host activated; the startup timeline lines are relative to it. */
   activatedAt: number;
   /** When the startup catalog adoption settled, or `null` before; read by the startup restore's timeline line. */
@@ -1248,6 +1252,8 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     startupRestore: null,
     startupRestorePending: true,
     startupRestoreOver: Promise.withResolvers<void>(),
+    legacySettingsMoved: Promise.resolve(),
+    legacySettingsLateLogged: false,
     activatedAt: Date.now(),
     catalogAdoptedAt: null,
     editorEventSequence: 0,
@@ -1287,7 +1293,7 @@ let window: WindowState | undefined;
 
 /** ADR-0068: whether the three context keys default keybindings used are also set under their old names (not when another extension owns `omp.` names). */
 let legacyContextMirror = true;
-/** The longest activation waits for the move of the old settings; a slower write goes on in the background. */
+/** The longest the first launch of a process waits, counted from activation, for the move of the old settings. */
 const LEGACY_SETTINGS_MOVE_WAIT_MS = 10_000;
 /** The profile-wide marker that the rename notice was decided (shown, or not needed on a fresh install). */
 const RENAME_NOTICE_KEY = "ompDesk.renameNotice.v1";
@@ -1377,13 +1383,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     openKeybindingsFile,
     log: line => log(line),
   });
-  const settingsMoved = migrateLegacySettings(legacySettingsPort(context, foreign.settings)).then(
+  // ADR-0068 (amended 2026-10-13): the move starts here and activation does not wait for it. With nothing to move it is
+  // synchronous reads and no I/O; with work, the User layer is moved by one window of the profile and the keys concurrently.
+  // What must not read a half-moved setting is the first launch of a process (`executablePath`, `linkReminder`): it waits in
+  // `brokerClient`, bounded. Everything else that shows a setting re-reads it on a configuration change.
+  s.legacySettingsMoved = migrateLegacySettings(legacySettingsPort(context, foreign.settings)).then(
     () => undefined,
     error => log(`settings: the move from omp.* to ompDesk.* failed and nothing more was moved: ${messageOf(error)}`),
   );
-  // Bounded: a hung settings write must not keep the editors' serializers from registering; the move goes on in the background.
-  const moveWindow = await Promise.race([settingsMoved.then(() => "moved" as const), delayMs(LEGACY_SETTINGS_MOVE_WAIT_MS).then(() => "late" as const)]);
-  if (moveWindow === "late") log(`settings: the move from omp.* to ompDesk.* is still running after ${LEGACY_SETTINGS_MOVE_WAIT_MS} ms; activation goes on`);
   // The host's one thread is shared with every extension; a stall of 500 ms or more is logged with the Desk operations that overlapped it.
   context.subscriptions.push({ dispose: startLoopLagMonitor(message => log(message)) });
   // This host's start time is a PowerShell command, hundreds of milliseconds to seconds on a busy machine. It runs beside
@@ -8900,6 +8907,8 @@ function legacySettingsPort(context: vscode.ExtensionContext, foreignSettings: R
       }
     },
     foreignSettings,
+    ...fileClaim(path.join(context.globalStorageUri.fsPath, "settings-move.claim")),
+    delay: ms => delayMs(ms),
     log: line => log(line),
   };
 }
@@ -10102,9 +10111,24 @@ function shellSerializerFor(context: vscode.ExtensionContext, index: SessionInde
  */
 async function brokerClient(): Promise<PtyBrokerClient | null> {
   const s = windowState();
+  await legacySettingsSettled(s);
   const gate = s.ptyGate;
   if (gate === undefined) return null;
   return await gate.client();
+}
+
+/**
+ * Hold the first launch of a process until the move of the old settings ended, so `executablePath` and the other launch-time
+ * settings are not read half-moved (ADR-0068). Counted from activation and capped: a hung settings write must not keep a
+ * session from starting. Free once the move settled, which is the normal case.
+ */
+async function legacySettingsSettled(s: WindowState): Promise<void> {
+  const left = s.activatedAt + LEGACY_SETTINGS_MOVE_WAIT_MS - Date.now();
+  const outcome = await Promise.race([s.legacySettingsMoved.then(() => "moved" as const), delayMs(Math.max(0, left)).then(() => "late" as const)]);
+  if (outcome === "late" && !s.legacySettingsLateLogged) {
+    s.legacySettingsLateLogged = true;
+    log(`settings: the move from omp.* to ompDesk.* is still running ${LEGACY_SETTINGS_MOVE_WAIT_MS} ms after activation; the launch goes on`);
+  }
 }
 
 /**
