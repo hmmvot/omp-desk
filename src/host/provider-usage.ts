@@ -77,7 +77,7 @@ export function projectProviderUsage(reading: ProviderUsageReading, modelId: str
 		accountSelection: reading.accounts.length > 1 ? "Active account unavailable: showing the first provider report in OMP CLI order." : null };
 }
 
-interface Reading { attemptedAt: number; reading: ProviderUsageReading | null; pending: Promise<void> | null }
+interface Reading { attemptedAt: number; reading: ProviderUsageReading | null; /** When `reading` was last read successfully. */ readAt: number | null; pending: Promise<void> | null }
 export class ProviderUsageCache {
 	readonly #readings = new Map<string, Reading>();
 	readonly now: () => number;
@@ -90,18 +90,23 @@ export class ProviderUsageCache {
 		const reading = this.#readings.get(provider)?.reading;
 		return reading ? projectProviderUsage(reading, modelId) : EMPTY_USAGE;
 	}
-	async refresh(provider: string, modelId: string, run: () => Promise<OmpCliResult>): Promise<FooterUsage> {
+	/** When the provider's current reading was fetched successfully; `null` before the first one. */
+	readAt(provider: string): number | null {
+		return this.#readings.get(provider)?.readAt ?? null;
+	}
+	/** `force` skips the five-minute throttle (an explicit user request); a refresh already in flight is still joined. */
+	async refresh(provider: string, modelId: string, run: () => Promise<OmpCliResult>, force = false): Promise<FooterUsage> {
 		const previous = this.#readings.get(provider);
 		if (previous?.pending) { await previous.pending; return this.get(provider, modelId); }
-		if (previous && this.now() - previous.attemptedAt < PROVIDER_USAGE_REFRESH_MS) return this.get(provider, modelId);
-		const reading: Reading = { attemptedAt: this.now(), reading: previous?.reading ?? null, pending: null };
+		if (!force && previous && this.now() - previous.attemptedAt < PROVIDER_USAGE_REFRESH_MS) return this.get(provider, modelId);
+		const reading: Reading = { attemptedAt: this.now(), reading: previous?.reading ?? null, readAt: previous?.readAt ?? null, pending: null };
 		this.#readings.set(provider, reading);
 		reading.pending = (async () => {
 			try {
 				const result = await run();
 				const parsed = result.exitCode === 0 ? parseProviderUsageJson(result.stdout, provider) : null;
 				if (parsed === null) this.log("Provider usage refresh returned no valid reading; retaining the last value.");
-				else reading.reading = parsed;
+				else { reading.reading = parsed; reading.readAt = this.now(); }
 			} catch { this.log("Provider usage refresh failed; retaining the last value."); }
 			finally { reading.pending = null; }
 		})();

@@ -226,6 +226,7 @@ export function createRecordingVscode(configuration: Readonly<Record<string, unk
 		activeTextEditor: undefined as unknown,
 		createOutputChannel: output,
 		createTreeView: treeView,
+		createStatusBarItem: () => withFallback("statusBarItem", { name: "", text: "", tooltip: undefined as unknown, command: undefined as unknown, backgroundColor: undefined as unknown, show: noop, hide: noop, dispose: noop }),
 		registerTreeDataProvider: (id: string) => { recording.treeViews.push(id); return { dispose: noop }; },
 		registerWebviewViewProvider: (id: string) => { recording.webviewViews.push(id); return { dispose: noop }; },
 		showInformationMessage: prompt("showInformationMessage"),

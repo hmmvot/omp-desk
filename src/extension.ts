@@ -147,6 +147,7 @@ import {
 import { ProcessTreeItem } from "./views/process-rows";
 import { registerInventoryViews, type InventoryHandle } from "./wiring/inventory-wiring";
 import { registerContextView, type ContextHandle } from "./wiring/context-wiring";
+import { registerUsageStatus, type UsageStatusHandle } from "./wiring/usage-status-wiring";
 import type { ContextSession, ContextTarget } from "./host/context/context-controller";
 import { owningWindowUri, registerWindowRouting } from "./wiring/window-routing";
 import type { WindowRouting, WindowRoutingDeps } from "./wiring/window-routing";
@@ -633,6 +634,8 @@ interface WindowState {
     message: FooterMetadataMessage;
     observer: BranchObservation | null;
     modelId: string | null;
+    /** When the provider usage behind `message` was last read successfully (host-only; the status bar's tooltip). */
+    usageReadAt?: number | null;
   }>;
 
   // Guest dispatch
@@ -723,6 +726,8 @@ interface WindowState {
   inventoryViews: InventoryHandle | null;
   /** The context view's registration handle; `null` before it registers. */
   contextView: ContextHandle | null;
+  /** The provider-usage status bar item; `null` before it registers. */
+  usageStatus: UsageStatusHandle | null;
   /** The Sessions view's background processes: its reader, poll and stop commands. */
   sessionProcesses: SessionProcesses | null;
   /**
@@ -1171,6 +1176,7 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
       message: FooterMetadataMessage;
       observer: BranchObservation | null;
       modelId: string | null;
+      usageReadAt?: number | null;
     }>(),
     // Guest dispatch
     guestDispatcher: registerGuestDispatcher(guestDispatcherDeps()),
@@ -1195,6 +1201,7 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     // Views
     inventoryViews: null,
     contextView: null,
+    usageStatus: null,
     sessionProcesses: null,
     sessionActions: registerSessionActions(sessionActionsDeps()),
     launcherProvider: undefined,
@@ -1643,6 +1650,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     runAction: (tabId, command) => void runChatAction(context, index, tabId, command),
   });
   context.subscriptions.push({ dispose: () => { s.contextView = null; } });
+  s.usageStatus = registerUsageStatus(context, {
+    source: () => {
+      const binding = index.activeTabId === null ? undefined : s.footerBindings.get(index.activeTabId);
+      return binding === undefined ? null : { provider: binding.message.provider, windows: binding.message.windows,
+        accountSelection: binding.message.accountSelection, readAt: binding.usageReadAt ?? null };
+    },
+    refresh: () => { if (index.activeTabId !== null) refreshFooterMetadata(index, index.activeTabId, true, true); },
+  });
+  context.subscriptions.push({ dispose: () => { s.usageStatus = null; } });
   registerDeskSettingsView(context, { log });
   const chooseDefaultView = () => chooseDefaultSessionView(context);
   // Another window opening or releasing a session is only visible as a claim file appearing,
@@ -4511,6 +4527,7 @@ async function setActiveTab(index: SessionIndex, tabId: string): Promise<void> {
   } catch (error) {
     log(`tab ${tabId}: could not record the active tab: ${messageOf(error)}`);
   }
+  windowState().usageStatus?.update();
 }
 
 // Chat pages: the routes that show a host-owned conversation
@@ -5817,6 +5834,7 @@ function forgetTurnActivity(index: SessionIndex, tabId: string): void {
   s.footerBindings.get(tabId)?.observer?.dispose();
   cancelControlPicker(tabId);
   s.footerBindings.delete(tabId);
+  s.usageStatus?.update();
   notifierFor(index).forget(tabId);
   refreshGuestContext();
 }
@@ -6418,6 +6436,7 @@ function publishFooterMetadata(tabId: string): void {
   const s = windowState();
   const binding = s.footerBindings.get(tabId);
   if (!binding) return;
+  s.usageStatus?.update();
   for (const state of s.tabs.values()) {
     if (state.tabId !== tabId) continue;
     if (state.panel !== null) void state.panel.webview.postMessage(binding.message);
@@ -6474,7 +6493,7 @@ function refreshSessionCost(index: SessionIndex, tabId: string): void {
   });
 }
 
-function refreshFooterMetadata(index: SessionIndex, tabId: string, refreshUsage: boolean): void {
+function refreshFooterMetadata(index: SessionIndex, tabId: string, refreshUsage: boolean, forceUsage = false): void {
   const s = windowState();
   ensureFooterBinding(index, tabId);
   const binding = s.footerBindings.get(tabId);
@@ -6488,6 +6507,7 @@ function refreshFooterMetadata(index: SessionIndex, tabId: string, refreshUsage:
   binding.modelId = model?.id ?? null;
   if (!model || !runtime) {
     binding.message = { ...binding.message, provider: null, windows: [], accounts: [], accountSelection: null };
+    binding.usageReadAt = null;
     publishFooterMetadata(tabId);
     return;
   }
@@ -6499,14 +6519,16 @@ function refreshFooterMetadata(index: SessionIndex, tabId: string, refreshUsage:
     let cache = s.usageCaches.get(scope);
     if (!cache) { cache = new ProviderUsageCache(Date.now, log); s.usageCaches.set(scope, cache); }
     binding.message = { ...binding.message, provider: model.provider, ...cache.get(model.provider, model.id) };
+    binding.usageReadAt = cache.readAt(model.provider);
     publishFooterMetadata(tabId);
     const usage = await cache.refresh(model.provider, model.id, () => runOmpCli(executable,
       [...PROVIDER_USAGE_ARGS, "--provider", model.provider], PROVIDER_USAGE_TIMEOUT_MS,
-      { cwd: runtime.cwd, env: ompCliScopeEnvironment(entry.scope.profile) }));
+      { cwd: runtime.cwd, env: ompCliScopeEnvironment(entry.scope.profile) }), forceUsage);
     const chosen = s.sessionRuntime.conversations.liveOf(tabId)?.state?.model;
     if (s.footerBindings.get(tabId) !== binding || !sameSession() || hostOf(stateOf(tabId)) !== runtime ||
       chosen?.provider !== model.provider || chosen?.id !== model.id) return;
     binding.message = { ...binding.message, provider: model.provider, ...usage };
+    binding.usageReadAt = cache.readAt(model.provider);
     publishFooterMetadata(tabId);
   }).catch(() => log("Provider usage executable resolution failed; retaining the last value."));
 }

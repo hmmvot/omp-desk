@@ -60,3 +60,28 @@ test("per-provider attempts coalesce, throttle at five minutes and retain the la
 	await cache.refresh("other", "model", async () => { calls++; return { stdout: json([]), stderr: "", exitCode: 0 }; });
 	assert.equal(calls, 3);
 });
+
+test("a forced refresh skips the throttle, joins an in-flight read, and readAt marks only successful reads", async () => {
+	let now = 1000, calls = 0;
+	const cache = new ProviderUsageCache(() => now);
+	const ok = async () => { calls++; return { stdout: json([{ provider: "current", limits: [limit("5h", .42)] }]), stderr: "", exitCode: 0 }; };
+	assert.equal(cache.readAt("current"), null);
+	await cache.refresh("current", "model", ok);
+	assert.equal(cache.readAt("current"), 1000);
+	now = 2000;
+	await cache.refresh("current", "model", ok);
+	assert.equal(calls, 1, "within the throttle");
+	await cache.refresh("current", "model", ok, true);
+	assert.equal(calls, 2, "forced");
+	assert.equal(cache.readAt("current"), 2000);
+	now = 3000;
+	await cache.refresh("current", "model", async () => { calls++; throw new Error("down"); }, true);
+	assert.equal(cache.readAt("current"), 2000, "a failed read keeps the last successful time");
+	const pending = Promise.withResolvers<{ stdout: string; stderr: string; exitCode: number }>();
+	const first = cache.refresh("current", "model", () => { calls++; return pending.promise; }, true);
+	const joined = cache.refresh("current", "model", ok, true);
+	assert.equal(calls, 4);
+	pending.resolve({ stdout: "not json", stderr: "", exitCode: 0 });
+	await Promise.all([first, joined]);
+	assert.equal(cache.readAt("current"), 2000);
+});

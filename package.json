@@ -786,6 +786,12 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "omp.refreshUsageStatus",
+        "title": "Refresh Provider Usage",
+        "category": "OMP",
+        "icon": "$(pulse)"
+      },
+      {
         "command": "omp.context.readBreakdown",
         "title": "Read Context Breakdown",
         "category": "OMP",

@@ -18,6 +18,25 @@ export const ViewColumn = { Active: -1, One: 1, Two: 2, Beside: -2 } as const;
 
 export const QuickPickItemKind = { Separator: -1, Default: 0 } as const;
 
+export const StatusBarAlignment = { Left: 1, Right: 2 } as const;
+
+/** One status bar item as a module sets it; `visible` follows `show()` / `hide()`. */
+export interface StubStatusBarItem {
+	id: string;
+	alignment: number;
+	priority: number | undefined;
+	name: string | undefined;
+	text: string;
+	tooltip: string | undefined;
+	command: string | undefined;
+	backgroundColor: { readonly id: string } | undefined;
+	visible: boolean;
+	disposed: boolean;
+	show(): void;
+	hide(): void;
+	dispose(): void;
+}
+
 export class TabInputText {
 	readonly uri: URI;
 	constructor(uri: URI) {
@@ -81,6 +100,9 @@ export const window: {
 	showInformationMessage: (message: string, ...rest: unknown[]) => Promise<undefined>;
 	/** The webview panel serializers a module registered, by view type. */
 	serializers: Map<string, { deserializeWebviewPanel(panel: unknown, state: unknown): Thenable<void> }>;
+	/** The status bar items a module created, in order. */
+	statusBarItems: StubStatusBarItem[];
+	createStatusBarItem(id: string, alignment: number, priority?: number): StubStatusBarItem;
 	registerWebviewPanelSerializer(viewType: string, serializer: { deserializeWebviewPanel(panel: unknown, state: unknown): Thenable<void> }): { dispose(): void };
 } = {
 	state: { focused: true },
@@ -101,6 +123,17 @@ export const window: {
 		return { dispose: () => { window.serializers.delete(viewType); } };
 	},
 	serializers: new Map(),
+	statusBarItems: [],
+	createStatusBarItem(id, alignment, priority) {
+		const item: StubStatusBarItem = {
+			id, alignment, priority, name: undefined, text: "", tooltip: undefined, command: undefined, backgroundColor: undefined, visible: false, disposed: false,
+			show: () => { item.visible = true; },
+			hide: () => { item.visible = false; },
+			dispose: () => { item.visible = false; item.disposed = true; },
+		};
+		window.statusBarItems.push(item);
+		return item;
+	},
 };
 
 export const commands: {
