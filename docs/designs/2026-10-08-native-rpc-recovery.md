@@ -14,7 +14,7 @@ Native transcript events can continue while RPC commands remain unanswered. Reat
 - Keep text and attachments editable until a correlated admission result; prevent duplicate submit routes while awaiting it.
 - Distinguish refused input from uncertain delivery, retain the original when later edits change the draft, and never resend automatically.
 - Retain a truthful, explicitly dismissible recovery notice across state reconciliation.
-- Keep same-process Reconnect available. Offer a separately confirmed Restart for an unanswered state request when the controlling editor has an exact saved conversation and positively owned runtime.
+- Keep same-process Reconnect available. Offer a separately confirmed Restart for an unanswered state request when the controlling editor has an exact saved conversation and positively owned runtime. Since the 2026-10-13 amendment to ADR-0050, the same Restart also recovers a Chat that failed because its process no longer serves the conversation (`identity-mismatch`, `identity-diverged`); those codes offer no Reconnect.
 - Preserve the saved conversation, the current draft and pending/recoverable text before replacing the document. Refuse replacement when complete bounded text capture fails. Disclose and obtain consent for attachments that the existing text handoff cannot carry.
 - Do not patch OMP, infer native idle from streaming activity, automatically terminate a process, weaken ownership/role checks, or launch a successor before exact-root exit is proved.
 

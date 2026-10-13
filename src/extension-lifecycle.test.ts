@@ -2199,7 +2199,8 @@ describe("same-editor Chat and native Terminal actions", () => {
 		};
 	}
 
-	async function fixture(fileless = false, mode: "chat" | "terminal" = "chat", publishNative = false, recoveryTimers?: ManualTimers) {
+	/** `reportedSessionId`: the child reports this provider id while the row recorded `mode-session`, so the first attach fails `identity-mismatch` and no bridge document is committed. */
+	async function fixture(fileless = false, mode: "chat" | "terminal" = "chat", publishNative = false, recoveryTimers?: ManualTimers, reportedSessionId?: string) {
 		const saved = storage();
 		const directory = await mkdtemp(path.join(root, "mode-"));
 		const file = fileless ? null : path.join(directory, "session.jsonl");
@@ -2228,11 +2229,11 @@ describe("same-editor Chat and native Terminal actions", () => {
 		await index.restore(row.tabId, { reconciler: { reconcile: async () => ({ kind: "free", evidence: [{ kind: "no-recorded-host" }] }) },
 			launcher: { launch: async () => ({ state: "running", host }), attach: async () => ({ state: "unavailable", reason: "not needed" }) } });
 		await index.bindEditorSlot(recoveryTimers === undefined ? row.tabId : EDITOR, row.tabId, "controlling");
-		const channel = new FakeRpcChannel({ sessionFile: file, sessionId: "mode-session" });
+		const channel = new FakeRpcChannel({ sessionFile: file, sessionId: reportedSessionId ?? "mode-session" });
 		const chat = new ChatRuntime({ hostNonce: path.basename(directory), onEvent() {},
 			...(recoveryTimers === undefined ? {} : { createSession: (options: ConstructorParameters<typeof RpcSession>[0]) => new RpcSession({ ...options, timers: recoveryTimers, commandTimeoutMs: 10, autoRecoveryDelaysMs: [] }) }),
 		});
-		await chat.startLive(row.tabId, { channel, sessionFile: file, cwd: directory, title: null }).start();
+		await chat.startLive(row.tabId, { channel, sessionFile: file, cwd: directory, title: null, ...(reportedSessionId === undefined ? {} : { expectedProviderSessionId: "mode-session" }) }).start();
 		if (mode === "terminal") chat.release(row.tabId);
 		harness.reset(index, chat);
 		let launches = 0;
@@ -2251,7 +2252,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			assert.ok(await endpoint.bind());
 			assert.ok(await endpoint.beginDocument(DOCUMENT, "d".repeat(32)));
 			endpoint.pinOrigin(DOCUMENT, ORIGIN);
-			assert.ok(await endpoint.commit({ ...nativeBinding({ ...native, sessionFile: file }), ownerGeneration: index.get(row.tabId)!.ownership!.ownerGeneration, sessionId: "mode-session" }));
+			if (reportedSessionId === undefined) assert.ok(await endpoint.commit({ ...nativeBinding({ ...native, sessionFile: file }), ownerGeneration: index.get(row.tabId)!.ownership!.ownerGeneration, sessionId: "mode-session" }));
 		}
 		const state = endpoint === null ? harness.state(row.tabId) : harness.editor(index, endpoint, panels, EDITOR, row.tabId);
 		state.panel = panels; state.runtime = native; state.mode = mode;
@@ -2295,9 +2296,9 @@ describe("same-editor Chat and native Terminal actions", () => {
 		return { facts, shutdowns, control };
 	}
 
-	async function wedgedChat(captureComplete = true, rotate = false) {
+	async function wedgedChat(captureComplete = true, rotate = false, reportedSessionId?: string) {
 		const timers = new ManualTimers();
-		const f = await fixture(false, "chat", false, timers);
+		const f = await fixture(false, "chat", false, timers, reportedSessionId);
 		f.saved.context.extensionUri = URI.file(root);
 		const session = f.chat.sessionOf(f.row.tabId)!;
 		if (rotate) {
@@ -2314,12 +2315,14 @@ describe("same-editor Chat and native Terminal actions", () => {
 			assert.equal(f.index.get(f.row.tabId)!.host!.sessionId, "rotated-mode-session");
 			assert.equal(session.sessionId, "rotated-mode-session");
 		}
-		f.channel.handlers.set("get_state", () => "drop");
-		assert.equal(session.reconnect(), "started");
-		await nextTurn(); await nextTurn();
-		timers.advance(10); await nextTurn(); await nextTurn();
-		assert.equal(session.phase, "failed");
-		assert.equal(session.nativeStateUnanswered, true);
+		if (reportedSessionId === undefined) {
+			f.channel.handlers.set("get_state", () => "drop");
+			assert.equal(session.reconnect(), "started");
+			await nextTurn(); await nextTurn();
+			timers.advance(10); await nextTurn(); await nextTurn();
+			assert.equal(session.phase, "failed");
+			assert.equal(session.nativeStateUnanswered, true);
+		}
 		const sourceDocument = f.state.document;
 		const content = { text: "edited current draft", attachments: 1, recoverable: [
 			{ text: "pending original", attachments: 2, unconfirmed: true },
@@ -2423,6 +2426,60 @@ describe("same-editor Chat and native Terminal actions", () => {
 			assert.equal(f.launches(), 1);
 			assert.equal(f.index.get(f.row.tabId)!.sessionId, "mode-session");
 			assert.equal(f.index.get(f.row.tabId)!.host!.sessionId, "mode-session", "successor resumes the durable id, not the old provider UUID");
+			assert.equal(await readFile(f.file!, "utf8"), before);
+			assert.equal(harness.restoredDraft(f.state.slotId)!.text, f.content.text);
+		} finally { f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true }); }
+	});
+
+	it("restarts a re-adopted process that fails its first identity check, before any bridge document was committed", async () => {
+		const f = await wedgedChat(true, false, "provider-rotated-elsewhere");
+		try {
+			assert.equal(f.session.phase, "failed");
+			assert.equal(f.session.model.code, "identity-mismatch");
+			const before = await readFile(f.file!, "utf8");
+			let forced = false;
+			const stop = f.native.handle.stop;
+			f.native.handle.stop = async (...args: unknown[]) => {
+				const options = args[0];
+				assert.ok(options !== null && typeof options === "object" && "mode" in options);
+				assert.equal(options.mode, "force");
+				forced = true;
+				return stop();
+			};
+			await harness.restartChat(f.saved.context, f.index, f.row.tabId, f.session.epoch.nonce);
+			assert.equal(forced, true, "the exact recorded process is stopped");
+			assert.equal(f.launches(), 1);
+			assert.equal(f.index.get(f.row.tabId)?.sessionFile, f.file);
+			assert.equal(f.index.get(f.row.tabId)?.host?.sessionId, "mode-session", "the successor resumes the row's own conversation");
+			assert.equal(await readFile(f.file!, "utf8"), before);
+			assert.equal(harness.restoredDraft(f.state.slotId)!.text, f.content.text);
+		} finally { f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true }); }
+	});
+
+	it("restarts the same saved conversation when the attached process no longer serves it", async () => {
+		const f = await wedgedChat();
+		try {
+			const before = await readFile(f.file!, "utf8");
+			f.channel.handlers.delete("get_state");
+			f.channel.child.sessionFile = `${f.file!}.other`;
+			assert.equal(f.session.reconnect(), "started");
+			await nextTurn(); await nextTurn();
+			assert.equal(f.session.phase, "failed");
+			assert.equal(f.session.model.code, "identity-diverged");
+			assert.equal(f.session.nativeStateUnanswered, false);
+			let forced = false;
+			const stop = f.native.handle.stop;
+			f.native.handle.stop = async (...args: unknown[]) => {
+				const options = args[0];
+				assert.ok(options !== null && typeof options === "object" && "mode" in options);
+				assert.equal(options.mode, "force");
+				forced = true;
+				return stop();
+			};
+			await harness.restartChat(f.saved.context, f.index, f.row.tabId, f.session.epoch.nonce);
+			assert.equal(forced, true);
+			assert.equal(f.launches(), 1);
+			assert.equal(f.index.get(f.row.tabId)?.sessionFile, f.file, "the successor resumes the tab's own file, not the one the old process reported");
 			assert.equal(await readFile(f.file!, "utf8"), before);
 			assert.equal(harness.restoredDraft(f.state.slotId)!.text, f.content.text);
 		} finally { f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true }); }

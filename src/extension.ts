@@ -165,7 +165,7 @@ import type { ChatDisplayPreferences, ChatWebviewMessage } from "./protocol/chat
 // The reconnecting bridge (ADR-0023): one exact listener per actual editor, durable
 // records, one route per document, and one admission path for irreversible changes.
 import { BridgeEditorEndpoint, BRIDGE_GUEST_RELOAD_REASON } from "./host/bridge-endpoint";
-import { bindingMatches } from "./host/bridge-records";
+import { bindingMatches, type BridgeNativeBinding } from "./host/bridge-records";
 import { BridgeAdmissionError } from "./host/bridge-route";
 import type { BridgeDocumentRoute, BridgeEndpointState, BridgeReservation } from "./host/bridge-route";
 import { EditorCoordinator } from "./host/editor-coordinator";
@@ -4314,7 +4314,7 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
   }
 }
 
-/** Explicit owned-Chat recovery; never asks the unresponsive native dispatcher to settle. */
+/** Explicit owned-Chat recovery from an unanswered state request or a process that no longer serves this conversation; never asks that native dispatcher to settle. */
 async function restartChat(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, nativeNonce: string): Promise<void> {
   const s = windowState();
   const state = stateOf(tabId);
@@ -4322,16 +4322,16 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
   const session = s.chat.sessionOf(tabId);
   const row = index.get(tabId);
   const binding = state === undefined ? null : index.slotBinding(state.slotId);
-  const committed = state?.bridge?.endpoint.committedBinding() ?? null;
+  const committed = restartBinding(index, tabId);
   const document = state?.document;
   const panel = state?.panel;
   const refuse = (text: string): void => { s.chat.notify(tabId, text); showWarning(text); };
-  if (state === undefined || runtime?.kind !== "chat" || session === null || !session.nativeStateUnanswered ||
+  if (state === undefined || runtime?.kind !== "chat" || session === null || !session.restartOffered ||
       session.epoch.nonce !== nativeNonce || state.mode !== "chat" || document?.kind !== "guest" || panel == null ||
       row?.sessionFile == null || row.sessionId === null || binding === null || committed === null ||
       runtime.identity.childCreationTime === null || passiveReasonForSlot(state.slotId) !== null ||
       state.transitioning || s.pendingSessionViewChanges.has(state) || s.openingTabs.has(tabId)) {
-    refuse("Restart requires this controlling Chat editor, an unanswered native state request, and its exact saved conversation. Nothing was stopped.");
+    refuse("Restart requires this controlling Chat editor, an OMP process that does not answer or no longer serves this conversation, and its exact saved conversation. Nothing was stopped.");
     return;
   }
   const file = row.sessionFile;
@@ -4345,10 +4345,10 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
   let stopRequested = false;
   let writerGone = false;
   let replacement: RestoreOutcome | null = null;
-  const sameTarget = (requireUnanswered: boolean): boolean => {
+  const sameTarget = (requireOffered: boolean): boolean => {
     const current = index.get(tabId);
     const currentBinding = index.slotBinding(state.slotId);
-    const currentCommitted = state.bridge?.endpoint.committedBinding() ?? null;
+    const currentCommitted = restartBinding(index, tabId);
     return stateOf(tabId) === state && state.runtime === runtime && state.tabId === tabId &&
       state.lastOpenRequest === modeRequest && state.panel === panel && state.document === document &&
       state.mode === "chat" && passiveReasonForSlot(state.slotId) === null &&
@@ -4363,7 +4363,7 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
       committed.brokerGeneration === runtime.identity.brokerGeneration && committed.sessionFile === file &&
       committed.sessionId === durableSessionId && s.chat.sessionOf(tabId) === session &&
       session.epoch.nonce === nativeNonce && session.sessionFile !== null && controlPathEquals(session.sessionFile, file) &&
-      session.sessionId === sessionId && (!requireUnanswered || session.nativeStateUnanswered);
+      session.sessionId === sessionId && (!requireOffered || session.restartOffered);
   };
   fenceSessionAdmission(index, state, true);
   try {
@@ -4380,9 +4380,11 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
     const captured = carried;
     const attachments = carried.reply.attachments + carried.reply.recoverable.reduce((count, original) => count + original.attachments, 0);
     const imageWarning = attachments === 0 ? "" : ` ${attachments} attachment reference${attachments === 1 ? "" : "s"} cannot be transferred; reattach the images to the preserved text after Restart.`;
+    const unanswered = session.nativeStateUnanswered;
+    const identityWarning = unanswered ? "" : " It is the exact process recorded for this conversation, but it now reports another conversation or identity; stopping it also ends whatever it is running now.";
     const consent = await vscode.window.showWarningMessage(
-      "Stop this unresponsive OMP process and restart its saved conversation?",
-      { modal: true, detail: "Unconfirmed input may already have been admitted; it will be preserved, not resent. Unsaved replies and in-flight tool effects may be lost. Commands or tools started by OMP may continue running separately and still modify files. The exact old process must be confirmed stopped before the same saved conversation is reopened." + imageWarning },
+      unanswered ? "Stop this unresponsive OMP process and restart its saved conversation?" : "Stop the OMP process that no longer serves this conversation and restart its saved conversation?",
+      { modal: true, detail: "Unconfirmed input may already have been admitted; it will be preserved, not resent. Unsaved replies and in-flight tool effects may be lost. Commands or tools started by OMP may continue running separately and still modify files. The exact old process must be confirmed stopped before the same saved conversation is reopened." + identityWarning + imageWarning },
       "Restart",
     );
     if (consent !== "Restart") return;
@@ -4447,6 +4449,32 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
     refreshGuestContext();
     refreshLauncher();
   }
+}
+
+/**
+ * The native binding Restart holds its target to: the one this tab's bridge document
+ * committed, or, when none was (a session that failed before it went live in this host,
+ * such as an identity failure right after Reload Window, never commits one), the same
+ * facts read from the row and the runtime. Nothing OMP reports is part of it.
+ */
+function restartBinding(index: SessionIndex, tabId: string): BridgeNativeBinding | null {
+  const state = stateOf(tabId);
+  const recorded = state?.bridge?.endpoint.committedBinding() ?? null;
+  if (recorded !== null) return recorded;
+  const entry = index.get(tabId);
+  const runtime = state?.runtime;
+  if (entry === null || runtime?.kind !== "chat" || entry.ownership === null || entry.ownership.releasedAt !== null ||
+      entry.sessionFile === null || entry.sessionId === null || runtime.identity.childCreationTime === null) return null;
+  return {
+    ownerGeneration: entry.ownership.ownerGeneration,
+    pid: runtime.pid,
+    processCreation: runtime.identity.childCreationTime,
+    slot: runtime.identity.slot,
+    brokerId: runtime.identity.brokerId,
+    brokerGeneration: runtime.identity.brokerGeneration,
+    sessionId: entry.sessionId,
+    sessionFile: entry.sessionFile,
+  };
 }
 
 // Restore

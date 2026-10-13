@@ -532,7 +532,7 @@ export class ChatClient {
 		return this.#transport.post({ type: "omp:chat-reconnect", requestId: this.#newRequestId() }) !== false;
 	}
 
-	/** The host checks unanswered native state, ownership and exact saved identity before offering consent. */
+	/** The host checks the unanswered state or identity failure, ownership and exact saved identity before offering consent. */
 	restart(): boolean {
 		const epoch = this.#model.epoch;
 		if (this.#draftHandoffLocked || epoch === null) return false;

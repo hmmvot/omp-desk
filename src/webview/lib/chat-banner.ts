@@ -6,7 +6,7 @@
  */
 // Explicit `.ts` specifiers: this module is imported by the node:test runner.
 import type { ChatModel } from "../../chat/model.ts";
-import { isRecoverableRpcFailure, RPC_ERROR_SENTENCES } from "../../protocol/rpc.ts";
+import { isIdentityRpcFailure, isRecoverableRpcFailure, RPC_ERROR_SENTENCES } from "../../protocol/rpc.ts";
 import type { RpcErrorCode } from "../../protocol/rpc.ts";
 import { chatExitText, exitNeedsProviderLogin } from "../../chat/exit-reason.ts";
 
@@ -14,8 +14,8 @@ export interface ChatBanner {
 	level: "info" | "warn" | "error";
 	text: string;
 	icon: string;
-	/** An in-place remedy the page can offer next to the sentence. */
-	action?: "reconnect" | "provider-login";
+	/** An in-place remedy the page can offer next to the sentence. `restart` stops this process and reopens the saved conversation. */
+	action?: "reconnect" | "restart" | "provider-login";
 }
 
 const GENERIC_FAILURE = "The session is not available.";
@@ -48,7 +48,9 @@ export function chatBanner(model: Pick<ChatModel, "phase" | "code" | "readOnlyRe
 		case "view-only":
 			return { level: "info", icon: "debug-stop", text: STOPPED_TEXT };
 		case "failed":
-			return isRecoverableRpcFailure(model.code) ? { level: "error", icon: "error", text: errorSentence(model.code), action: "reconnect" } : { level: "error", icon: "error", text: errorSentence(model.code) };
+			if (isRecoverableRpcFailure(model.code)) return { level: "error", icon: "error", text: errorSentence(model.code), action: "reconnect" };
+			if (isIdentityRpcFailure(model.code)) return { level: "error", icon: "error", text: errorSentence(model.code), action: "restart" };
+			return { level: "error", icon: "error", text: errorSentence(model.code) };
 		case "blocked":
 			return { level: "warn", icon: "warning", text: model.readOnlyReason ?? "This session is open elsewhere. You can read its saved history here." };
 		case "legacy":

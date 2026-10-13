@@ -100,6 +100,7 @@ import {
 	classifySlashInput,
 	encodeCommand,
 	encodeUiResponse,
+	isIdentityRpcFailure,
 	isRecoverableRpcFailure,
 	isResponseFrame,
 	parseLiteModel,
@@ -806,6 +807,12 @@ export class RpcSession {
 	/** Same-native evidence; reattaching or transcript events cannot establish command responsiveness. */
 	get nativeStateUnanswered(): boolean {
 		return this.#nativeStateUnanswered && !this.#disposed && !this.#ended;
+	}
+
+	/** Whether an explicit Restart (stop this process, reopen the saved file) may be offered: an unanswered state request or a process that no longer serves this conversation. */
+	get restartOffered(): boolean {
+		if (this.#disposed || this.#ended) return false;
+		return this.#nativeStateUnanswered || (this.#model.phase === "failed" && isIdentityRpcFailure(this.#model.code));
 	}
 
 	/** The last broker line seq folded; a restarted host may resume from it. */
@@ -1999,11 +2006,15 @@ export class RpcSession {
 
 	#identityMismatch(state: ParsedState, bind: boolean): RpcErrorCode | null {
 		const code: RpcErrorCode = bind ? "identity-mismatch" : "identity-diverged";
+		const report = (): RpcErrorCode => {
+			this.#options.log?.(`identity check failed (${code}): OMP reports file ${state.sessionFile ?? "none"} and id ${state.sessionId ?? "none"}; this tab expects file ${this.#boundFile ?? "any"} and id ${this.#boundId ?? "any"}`);
+			return code;
+		};
 		if (this.#boundFile !== null) {
-			if (state.sessionFile === null || !samePath(state.sessionFile, this.#boundFile)) return code;
+			if (state.sessionFile === null || !samePath(state.sessionFile, this.#boundFile)) return report();
 		}
 		if (this.#boundId !== null && state.sessionId !== this.#boundId) {
-			if (!this.#rotationAllowed || state.sessionId === null) return code;
+			if (!this.#rotationAllowed || state.sessionId === null) return report();
 			const previousSessionId = this.#boundId;
 			this.#boundId = state.sessionId;
 			this.#rotationAllowed = false;

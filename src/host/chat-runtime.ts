@@ -221,7 +221,7 @@ export class ChatRuntime {
 			hostNonce: nonce,
 			...(input.initialSeq === undefined ? {} : { initialSeq: input.initialSeq }),
 			...(this.#options.hostTools === undefined ? {} : { hostTools: this.#options.hostTools }),
-			...(this.#options.log === undefined ? {} : { log: this.#options.log }),
+			...(this.#options.log === undefined ? {} : { log: tabLog(this.#options.log, tabId) }),
 		});
 		const conversation: Conversation = {
 			tabId,
@@ -445,8 +445,8 @@ export class ChatRuntime {
 		}
 		const session = conversation.session;
 		if (message.type === "omp:chat-restart") {
-			if (session === null || !session.nativeStateUnanswered || session.epoch.nonce !== message.epoch.nonce) {
-				this.#tell(conversation, origin, "Restart is unavailable: this native session has not been shown to leave state requests unanswered.");
+			if (session === null || !session.restartOffered || session.epoch.nonce !== message.epoch.nonce) {
+				this.#tell(conversation, origin, "Restart is offered only while this session's current OMP process does not answer or no longer serves this conversation.");
 				return "refused";
 			}
 			this.#options.onEvent(tabId, { type: "restart-requested", nativeNonce: message.epoch.nonce });
@@ -998,4 +998,9 @@ function withReadOnlyOverlay(page: ChatPage): ChatPage {
 			return page.post(message);
 		},
 	};
+}
+
+/** A session's diagnostics name their tab, as every other per-tab log line does. */
+function tabLog(log: (message: string) => void, tabId: string): (message: string) => void {
+	return message => log(`tab ${tabId}: ${message}`);
 }

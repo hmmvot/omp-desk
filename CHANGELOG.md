@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **OMP: Reload All Windows** reloads every open VS Code window of the profile that runs OMP Desk, then the window you ran it from, so a newly installed build takes effect everywhere in one action. It is in the Command Palette and in the Sessions title's `…` menu, and asks nothing: running sessions survive a reload as they do after Reload Window. A window that does not answer within two seconds (a build from before this command, or a window that is not responding) is logged in the OMP Desk output and left as it is; reload it by hand.
+- Chat: when a tab fails because its OMP process no longer serves the conversation ("The running OMP process is not serving this session file", or "The session identity changed inside the OMP process"), the banner offers **Restart**: after your confirmation it stops exactly that process and reopens the tab's own saved conversation, keeping your draft. Before, the banner had no action and the only way out was Kill and reopening the session from Sessions. The OMP Desk output now logs which session file and id OMP reported and which ones the tab expected.
 
 ### Changed
 

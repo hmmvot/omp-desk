@@ -2988,6 +2988,15 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.equal(await ui.evaluate("window.ui.sends().length"), 0);
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
+		await t.test("a process that no longer serves the conversation offers Restart and no Reconnect", async () => {
+			await reset("identity-restart");
+			await ui.evaluate("window.ui.push({phase:'failed',code:'identity-mismatch'})");
+			await ui.wait("[...document.querySelectorAll('.omp-notice button')].some(button=>button.textContent==='Restart')");
+			assert.equal(await ui.evaluate("[...document.querySelectorAll('.omp-notice button')].some(button=>button.textContent==='Reconnect')"), false);
+			await ui.evaluate("[...document.querySelectorAll('.omp-notice button')].find(button=>button.textContent==='Restart').click()");
+			assert.equal(await ui.evaluate("window.sent.filter(message=>message.type==='omp:chat-restart').length"), 1);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
 		await t.test("a failure banner keeps its full height and Reconnect button visible above a tall transcript", async () => {
 			await reset("reconnect-action");
 			await ui.evaluate(`(()=>{

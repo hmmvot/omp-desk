@@ -325,7 +325,7 @@ describe("a page asking to reconnect", () => {
 		refusedRuntime.dispose();
 	});
 
-	it("admits Restart only for unanswered state in the same native generation and a writable editor route", async () => {
+	it("admits Restart for unanswered state, or a process that stopped serving the conversation, in the same native generation and a writable editor route", async () => {
 		const timers = new ManualTimers();
 		const events: ChatRuntimeEvent[] = [];
 		const runtime = new ChatRuntime({
@@ -352,6 +352,27 @@ describe("a page asking to reconnect", () => {
 			assert.equal(await runtime.handleMessage(TAB, request, page), "accepted");
 			assert.deepEqual(events.filter(event => event.type === "restart-requested"), [{ type: "restart-requested", nativeNonce: session.epoch.nonce }]);
 			assert.equal(channel.written.length, commands, "the lifecycle coordinator, not RPC, owns the recovery operation");
+		} finally { runtime.dispose(); }
+	});
+
+	it("admits Restart once the attached process reports another conversation, and names both identities in the log", async () => {
+		const logs: string[] = [];
+		const events: ChatRuntimeEvent[] = [];
+		const runtime = new ChatRuntime({ hostNonce: "identity-host", onEvent: (_tab, event) => { events.push(event); }, log: message => logs.push(message) });
+		const channel = new FakeRpcChannel({ sessionFile: "D:\\scratch\\bound.jsonl" });
+		const session = runtime.startLive(TAB, { channel, sessionFile: "D:\\scratch\\bound.jsonl", cwd: "D:\\scratch", title: null });
+		try {
+			await session.start();
+			const page = new RecordingPage("editor");
+			runtime.attachPage(TAB, page);
+			const request = { type: "omp:chat-restart" as const, requestId: "restart-1", epoch: session.epoch };
+			assert.equal(await runtime.handleMessage(TAB, request, page), "refused", "a process serving this conversation is not restarted");
+			channel.child.sessionFile = "D:\\scratch\\other.jsonl";
+			session.reconnect(); await tick(); await tick();
+			assert.equal(session.model.code, "identity-diverged");
+			assert.ok(logs.some(line => line.startsWith(`tab ${TAB}: identity check failed (identity-diverged): OMP reports file D:\\scratch\\other.jsonl`) && line.includes("expects file D:\\scratch\\bound.jsonl")), logs.join("\n"));
+			assert.equal(await runtime.handleMessage(TAB, request, page), "accepted");
+			assert.deepEqual(events.filter(event => event.type === "restart-requested"), [{ type: "restart-requested", nativeNonce: session.epoch.nonce }]);
 		} finally { runtime.dispose(); }
 	});
 });

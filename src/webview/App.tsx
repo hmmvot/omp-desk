@@ -138,7 +138,7 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 		if (snapshot.code === "state-failed" && snapshot.epoch !== null) setUnansweredNative(snapshot.epoch.nonce);
 		else if (snapshot.phase === "live" || snapshot.phase === "stopped" || snapshot.phase === "view-only" || snapshot.epoch?.nonce !== unansweredNative) setUnansweredNative(null);
 	}, [snapshot.code, snapshot.phase, snapshot.epoch?.nonce, unansweredNative]);
-	const restartOffered = snapshot.epoch !== null && (snapshot.code === "state-failed" ||
+	const unansweredRestart = snapshot.epoch !== null && (snapshot.code === "state-failed" ||
 		(unansweredNative === snapshot.epoch.nonce && (snapshot.phase === "attaching" || snapshot.phase === "resyncing")));
 	// Which route the host selected for this document and this page acknowledged.
 	// A bridge route keeps the chat, the composer and the controls that need only the
@@ -213,7 +213,7 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 		? { level: "warn", icon: "debug-disconnect", text: hostRecoveryFailed
 			? "The extension connection repeatedly failed. Run Developer: Reload Window. If it still fails, copy your draft before closing and reopening this tab. OMP has not been stopped."
 			: "Lost connection to the extension host — reconnecting. Your draft is kept." }
-		: restartOffered
+		: unansweredRestart
 			? { level: "warn", icon: "debug-disconnect", text: "OMP has not answered a state request. Reconnect keeps the same process; Restart can stop it and reopen the saved conversation. Unconfirmed input is kept and never resent automatically." }
 			: banner;
 	const banners = notice === null ? null : (
@@ -221,8 +221,8 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 			<div className={`omp-notice omp-notice--${notice.level === "warn" ? "warning" : notice.level}`} role="status">
 				<span className={`codicon codicon-${notice.icon}`} aria-hidden="true" />
 				<span className={`omp-notice-description${snapshot.exitReason === undefined ? "" : " omp-notice-exit"}`}>{notice.text}</span>
-				{!hostLost && (banner?.action === "reconnect" || restartOffered) && <button type="button" className="omp-btn" disabled={snapshot.phase !== "failed"} onClick={() => client.reconnect()}>Reconnect</button>}
-				{!hostLost && restartOffered && <button type="button" className="omp-btn" onClick={() => client.restart()}>Restart</button>}
+				{!hostLost && (banner?.action === "reconnect" || unansweredRestart) && <button type="button" className="omp-btn" disabled={snapshot.phase !== "failed"} onClick={() => client.reconnect()}>Reconnect</button>}
+				{!hostLost && snapshot.epoch !== null && (unansweredRestart || banner?.action === "restart") && <button type="button" className="omp-btn" onClick={() => client.restart()}>Restart</button>}
 				{!hostLost && banner?.action === "provider-login" && <button type="button" className="omp-btn" onClick={() => guestTransport.post({ type: "omp:chat-command", command: "provider-login" })}>Log In to Provider</button>}
 			</div>
 		</div>

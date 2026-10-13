@@ -300,6 +300,11 @@ export function isRecoverableRpcFailure(code: string | null): boolean {
 	return code !== null && Object.hasOwn(RECOVERABLE_FAILURES, code);
 }
 
+/** Whether the process this tab is attached to no longer serves its saved conversation, so only a Restart on the same file recovers it. */
+export function isIdentityRpcFailure(code: string | null): boolean {
+	return code === "identity-mismatch" || code === "identity-diverged";
+}
+
 /**
  * Builtins that change the session's identity, file or process. `new`/`resume`/`fork` have no text-mode
  * handler in rpc and would be sent to the model verbatim; `handoff`/`move` change identity or cwd inside the

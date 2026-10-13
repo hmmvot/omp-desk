@@ -30,7 +30,7 @@ describe("chatBanner", () => {
 		});
 	});
 
-	it("maps a failure code to its fixed sentence and offers Reconnect only for a recoverable one", () => {
+	it("maps a failure code to its fixed sentence, offers Reconnect only for a recoverable one and Restart for an identity failure", () => {
 		assert.deepEqual(chatBanner(model("failed", { code: "ready-timeout" })), {
 			level: "error",
 			icon: "error",
@@ -39,6 +39,7 @@ describe("chatBanner", () => {
 		});
 		assert.deepEqual(chatBanner(model("failed", { code: "brand-new-code" })), { level: "error", icon: "error", text: errorSentence("brand-new-code") });
 		assert.equal(chatBanner(model("failed", { code: null }))?.action, undefined);
+		for (const code of ["identity-mismatch", "identity-diverged"]) assert.equal(chatBanner(model("failed", { code }))?.action, "restart", code);
 	});
 
 	it("shows the generic sentence for a code it does not know, never the code itself", () => {
