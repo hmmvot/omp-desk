@@ -262,7 +262,7 @@ test("Task compact rows hide context, progress and coordination details until ex
 		assert.doesNotMatch(html, /INTERNAL_|jobId|privateField|totalDurationMs|5ms|<dl|<dt/);
 		const running = api.view(context("task", { args: {}, expanded, details: { results: [], progress: [{ id: "ReaderOne", agent: "scout", status: "running", description: "Inspect source", task: "A meaningful expanded assignment", currentTool: "read", lastIntent: "Inspecting source", durationMs: 12345, tokens: 4800, cost: 0.07, agentSource: "INTERNAL_SOURCE", index: 99, parentToolCallId: "INTERNAL_PARENT", outputPath: "INTERNAL_OUTPUT", currentToolArgs: "INTERNAL_TOOL_ARGS", extractedToolData: { privateTool: [{ privateField: "INTERNAL_NESTED" }] } }] } }));
 		assert.match(running, /ReaderOne/); assert.match(running, /scout.*running/);
-		for (const content of ["Inspecting source", "12.3s", "4.8k tokens", "A meaningful expanded assignment"]) assert.equal(running.includes(content), expanded, content);
+		for (const content of ["Inspecting source", "12s", "4.8k tokens", "A meaningful expanded assignment"]) assert.equal(running.includes(content), expanded, content);
 		assert.doesNotMatch(running, /INTERNAL_|agentSource|parentToolCallId|outputPath|<dl|<dt/);
 	}
 	const settled = api.view(context("task", { expanded: true, details: { results: [{ id: "ReaderOne", agent: "scout", exitCode: 0, assignment: "Meaningful assignment", structuredOutput: { status: "success", data: { summary: "Visible structured result" }, privateField: "INTERNAL_WRAPPER" }, usage: { cost: { total: 0.07 } }, outputPath: "INTERNAL_OUTPUT", parentToolCallId: "INTERNAL_PARENT" }] } }));

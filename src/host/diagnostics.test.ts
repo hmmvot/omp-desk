@@ -125,11 +125,11 @@ describe("diagnostics measurement", () => {
 			.split("\n")
 			.find(line => line.startsWith("| Chat live "));
 		assert.equal(recorder.snapshot("tab-1")?.startedAt, startedAt);
-		assert.ok(row?.includes("| 2.40 s |"));
+		assert.ok(row?.includes("| 2 s |"));
 		// The launch mark and the closing observation are both real, so the
 		// derived offset is stated as such.
 		const cells = (row ?? "").split(" | ");
-		assert.equal(cells[4], "+2.40 s");
+		assert.equal(cells[4], "+2 s");
 	});
 });
 
@@ -235,8 +235,8 @@ describe("formatMeasured", () => {
 		assert.equal(formatMeasured(null), "not observed");
 		assert.equal(formatMeasured(0), "0 ms");
 		assert.equal(formatMeasured(999), "999 ms");
-		assert.equal(formatMeasured(1_240), "1.24 s");
-		assert.equal(formatMeasured(64_500), "1 m 4.5 s");
+		assert.equal(formatMeasured(1_240), "1 s", "whole seconds, never tenths");
+		assert.equal(formatMeasured(64_500), "1 m 5 s");
 	});
 });
 

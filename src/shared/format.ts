@@ -35,13 +35,12 @@ export function fmtCost(usd: number): string {
 	return `$${usd >= 1 ? usd.toFixed(2) : usd.toFixed(3)}`;
 }
 
-/** "847ms", "12.3s", "4m 05s", "1h 12m"; round before splitting units so lower units never show 60. */
+/** "847ms", "12s", "4m 05s", "1h 12m"; whole seconds only; round before splitting units so lower units never show 60. */
 export function fmtDuration(ms: number): string {
 	if (!Number.isFinite(ms) || ms < 0) return "0ms";
 	if (ms < 999.5) return `${Math.round(ms)}ms`;
-	const tenths = Math.round(ms / 100);
-	if (tenths < 600) return `${tenths / 10}s`;
 	const total = Math.round(ms / 1000);
+	if (total < 60) return `${total}s`;
 	const min = Math.floor(total / 60);
 	if (min < 60) return `${min}m ${String(total % 60).padStart(2, "0")}s`;
 	const h = Math.floor(min / 60);

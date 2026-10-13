@@ -80,7 +80,7 @@ export function perfLabel(perf: ConfigRecord | undefined): string {
   if (!perf) return "";
   const parts: string[] = [];
   if (typeof perf.tps === "number") parts.push(`${Math.round(perf.tps)} tokens/s`);
-  if (typeof perf.ttftMs === "number") parts.push(`first token ${(perf.ttftMs / 1000).toFixed(1)} s`);
+  if (typeof perf.ttftMs === "number") parts.push(`first token ${perf.ttftMs < 999.5 ? `${Math.round(perf.ttftMs)} ms` : `${Math.round(perf.ttftMs / 1000)} s`}`);
   if (typeof perf.samples === "number") parts.push(`${perf.samples} samples`);
   return parts.join(" · ");
 }

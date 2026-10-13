@@ -456,11 +456,10 @@ export const DIAGNOSTICS_DOCUMENT_PATH = "/diagnostics.md";
 
 export function formatMeasured(durationMs: number | null): string {
 	if (durationMs === null) return "not observed";
-	if (durationMs < 1000) return `${durationMs} ms`;
-	const seconds = durationMs / 1000;
-	if (seconds < 60) return `${seconds.toFixed(2)} s`;
-	const minutes = Math.floor(seconds / 60);
-	return `${minutes} m ${(seconds - minutes * 60).toFixed(1)} s`;
+	if (durationMs < 999.5) return `${Math.round(durationMs)} ms`;
+	const total = Math.round(durationMs / 1000);
+	if (total < 60) return `${total} s`;
+	return `${Math.floor(total / 60)} m ${total % 60} s`;
 }
 
 function stateLabel(stage: DiagnosticStage): string {

@@ -1735,7 +1735,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await reset("native-huds");
 			// The HUD rows' combined height is a share of the viewport; these bounds assume a tall one.
 			await ui.call("Emulation.setDeviceMetricsOverride", { width: 800, height: 900, deviceScaleFactor: 1, mobile: false });
-			// A running agent's time advances with the clock between progress events; pin it so the 12.3s the registry reported stays exact.
+			// A running agent's time advances with the clock between progress events; pin it so the 12s the registry reported stays exact.
 			await ui.evaluate("window.fixtureClock.setNow(1800000000000)");
 			await ui.evaluate(`window.ui.push({
 			 agents:[{id:'worker',index:0,agent:'implementer',agentSource:'INTERNAL_AGENT_SOURCE',status:'running',lastUpdate:1790907963935,parentToolCallId:'INTERNAL_PARENT_CALL',description:'Implement native UI',task:'INTERNAL_FULL_TASK',assignment:'INTERNAL_DUPLICATE_ASSIGNMENT',progress:{id:'worker',status:'running',currentTool:'read',lastIntent:'Inspecting native source',currentToolArgs:'INTERNAL_RAW_TOOL_ARGS',durationMs:12345,tokens:4800,contextTokens:3600,contextWindow:128000,cost:0.07,resolvedModel:'INTERNAL_ROUTING_MODEL',recentOutput:['INTERNAL_RECENT_OUTPUT'],privateField:'INTERNAL_PROGRESS_PAYLOAD'}}],
@@ -1754,7 +1754,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate("document.querySelectorAll('.omp-overview-member .omp-tool-head').forEach(button=>button.click())");
 			await ui.wait("document.querySelector('.omp-hud--agents .omp-hud-rows')?.textContent.includes('Inspecting native source') && document.querySelector('.omp-hud--todo .omp-hud-rows')?.textContent.includes('Pending task') && document.querySelector('.omp-transcript')?.textContent.includes('Second source output')");
 			const roster = await ui.evaluate<string>("document.querySelector('.omp-hud--agents .omp-hud-rows').textContent");
-			for (const content of ["worker", "implementer", "read · Inspecting native source", "12.3s"]) assert.ok(roster.includes(content), content);
+			for (const content of ["worker", "implementer", "read · Inspecting native source", "12s"]) assert.ok(roster.includes(content), content);
 			assert.equal(roster.includes("Implement native UI"), false, "the spawn description is the row's tooltip, not its text");
 			assert.match(await ui.evaluate<string>("document.querySelector('.omp-hud--agents .omp-hud-agent').title"), /Implement native UI/);
 			assert.doesNotMatch(roster, /INTERNAL_|1790907963935|Source|Index|Last update|Parent tool call|Assignment|Native registry|Native progress|Statistics|tokens|\$0\.07|running/);
