@@ -99,6 +99,32 @@ describe("PtyRuntimeProof", () => {
 		assert.equal(clock.pending(), 0, "a proof needs no re-run");
 	});
 
+	it("logs a proof reused from an earlier window apart from one it computed", async () => {
+		const reused: PtyRuntimeReadiness = { ...proven, reusedProof: { provedAt: "2026-10-13T08:12:03.000Z", file: "proof.json" } };
+		const fromDisk = harness([reused]);
+		assert.equal(await fromDisk.proof.ready(), reused);
+		assert.match(fromDisk.logs.join("\n"), /PTY runtime proof reused from 2026-10-13T08:12:03\.000Z/);
+		assert.doesNotMatch(fromDisk.logs.join("\n"), /proved itself/);
+		assert.equal(fromDisk.proof.provenAnswer(), reused, "a reused proof is a proof");
+
+		const computed = harness([proven]);
+		await computed.proof.ready();
+		assert.match(computed.logs.join("\n"), /PTY runtime proved itself/);
+		assert.doesNotMatch(computed.logs.join("\n"), /reused from/);
+	});
+
+	it("withdraws a reused proof so the next ready() probes again, and leaves a computed proof alone", async () => {
+		const reused: PtyRuntimeReadiness = { ...proven, reusedProof: { provedAt: "2026-10-13T08:12:03.000Z", file: "proof.json" } };
+		const fromDisk = harness([reused, proven]);
+		assert.equal(await fromDisk.proof.ready(), reused);
+		assert.deepEqual(fromDisk.proof.discardReusedProof(), reused.reusedProof);
+		assert.equal(fromDisk.proof.provenAnswer(), null, "nothing is believed any more");
+		assert.equal(await fromDisk.proof.ready(), proven, "the next launch runs the whole probe");
+		assert.deepEqual(fromDisk.deadlines, [undefined, undefined]);
+		assert.equal(fromDisk.proof.discardReusedProof(), null, "a proof computed here is not withdrawn");
+		assert.equal(fromDisk.proof.provenAnswer(), proven);
+	});
+
 	it("lets the launch proceed on an inconclusive probe instead of failing it", async () => {
 		const { proof, deadlines, logs } = harness([unproven]);
 		const readiness = await proof.ready();

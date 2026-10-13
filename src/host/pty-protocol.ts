@@ -655,6 +655,43 @@ export type PtyStopMode = "graceful" | "force";
 /** Descendant verification is an answer, not an assumption: `unknown` is never rounded to `empty`. */
 export type PtyTreeVerdict = "empty" | "remaining" | "unknown";
 
+/**
+ * What a broker vouches for about the identities its status reports (ADR-0035,
+ * amendment 2026-10-13). Absent from a broker built before this field existed: a host
+ * then takes the kernel readings it always took instead of believing the status.
+ */
+export interface PtyIdentityAttestation {
+	/**
+	 * `brokerCreationTime` is this process's own kernel creation time, read through the
+	 * staged probe before the record was published (the broker refuses to start without
+	 * it), and the status reports it unchanged.
+	 */
+	readonly brokerSelfRead: true;
+	/**
+	 * The broker still holds the child's process handle and has not seen it exit, so
+	 * `nativePid` cannot name another process and `nativeCreationTime` (read while the
+	 * handle was held) is the child's. Only a pipe child (`managed-rpc`) is held this
+	 * way; a pseudo-console child's exit is reported when its output closes, which can
+	 * follow the process's end, so it is `false` there.
+	 */
+	readonly childHandleLive: boolean;
+}
+
+function isPtyIdentityAttestation(value: unknown): value is PtyIdentityAttestation {
+	if (typeof value !== "object" || value === null) return false;
+	const attestation = value as Record<string, unknown>;
+	return attestation.brokerSelfRead === true && typeof attestation.childHandleLive === "boolean";
+}
+
+/**
+ * The attestation a status carries, or `null` when it has none or not one this build
+ * understands. A malformed or extended attestation is *absent*, never a refusal of the
+ * whole status: the host then takes the kernel readings it always took.
+ */
+export function attestationOf(status: PtyStatusPayload): PtyIdentityAttestation | null {
+	return isPtyIdentityAttestation(status.attestation) ? status.attestation : null;
+}
+
 export interface PtyStatusPayload {
 	readonly state: PtyChildState;
 	readonly exitCode: number | null;
@@ -693,6 +730,8 @@ export interface PtyStatusPayload {
 	 * host, `disarmed` with the reason when the association was not attested.
 	 */
 	readonly ownerStop: PtyOwnerStopStatus;
+	/** What this broker vouches for about the identities above; absent from an older broker. */
+	readonly attestation?: PtyIdentityAttestation;
 }
 
 /**

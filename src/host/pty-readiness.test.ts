@@ -198,9 +198,12 @@ describe("attach readiness in the gate", () => {
 		let attachCalls = 0;
 		const client = {
 			ready: () => proof.promise,
-			attachReady: async () => {
+			attachIdentity: async () => {
 				attachCalls += 1;
-				return { ready: true, reason: null, helper: { path: "probe.ps1", sha256: "x" } };
+				return { ready: true, reason: null, treeDigest: "d" };
+			},
+			attachReady: async () => {
+				throw new Error("the attach gate must not stage the probe helper");
 			},
 		} as unknown as PtyBrokerClient;
 		const gate = createPtyReadinessGate({ client });
@@ -220,17 +223,17 @@ describe("attach readiness in the gate", () => {
 		const failures: string[] = [];
 		const client = {
 			ready: async () => ({ ready: false, reason: "not used" }),
-			attachReady: async () => {
+			attachIdentity: async () => {
 				calls += 1;
 				return calls === 1
-					? { ready: false, reason: "the identity probe could not be staged", helper: null }
-					: { ready: true, reason: null, helper: { path: "probe.ps1", sha256: "x" } };
+					? { ready: false, reason: "the packaged broker tree could not be read", treeDigest: null }
+					: { ready: true, reason: null, treeDigest: "d" };
 			},
 		} as unknown as PtyBrokerClient;
 		const gate = createPtyReadinessGate({ client, onFailure: reason => failures.push(reason), now: () => time });
 
 		assert.equal(await gate.attachClient(), null);
-		assert.deepEqual(failures, ["the identity probe could not be staged"]);
+		assert.deepEqual(failures, ["the packaged broker tree could not be read"]);
 		assert.equal(await gate.attachClient(), null, "inside the retry window a pass over many rows does not retry per row");
 		assert.equal(calls, 1);
 

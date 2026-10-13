@@ -161,6 +161,17 @@ export class RpcChild {
 		return this.finished;
 	}
 
+	/**
+	 * Whether this broker still holds the live process: Node has not reported the child's exit.
+	 * While it is `true` the child's process id cannot belong to any other process (the handle
+	 * keeps it reserved), which is what lets the broker vouch for the pid and the creation time
+	 * it read for it. It is `false` from the instant the exit is observed, which can be before
+	 * the output is drained and `exited` turns true.
+	 */
+	get handleHeld(): boolean {
+		return this.exitInfo === null && this.proc.exitCode === null && this.proc.signalCode === null && !this.finished;
+	}
+
 	/** Stdout lines dropped for exceeding the bound. */
 	get droppedLineCount(): number {
 		return this.droppedLines;

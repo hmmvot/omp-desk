@@ -21,11 +21,13 @@
  *   the record is the only recovery metadata for a child or an escaped descendant that
  *   may still exist, so a broker that is gone, unparseable or of another build is
  *   reported and left completely alone (ADR-0029).
- * - **No identity, no connection.** The record names the broker's pid and its kernel
- *   creation time. The client takes its own reading of that pid through the staged
- *   probe and requires the two to be equal before it sends a single frame. A record left
- *   by a crashed process, a reused pid, or another account's directory cannot be
- *   talked to by accident.
+ * - **No identity, no session.** The record names the broker's pid and its kernel
+ *   creation time. The authenticated handshake must name the same slot, pid and creation
+ *   time, and the status must agree. A broker that attests its own identity (this build's
+ *   brokers do) is believed on its token-authenticated word; one that does not is read
+ *   through the staged probe, which is staged only then (ADR-0035, amendment 2026-10-13,
+ *   proposed). A record left by a crashed process, a reused pid, or another account's
+ *   directory cannot be talked to by accident.
  * - **A stop is believed only when it is proven.** `stop` returns the broker's verdict
  *   unchanged. `verified` needs a kernel-enforced process group, which this PTY provider
  *   does not offer, so it is `false` with a reported `pidGone` and an unproven tree
@@ -59,7 +61,13 @@ import {
 	type PtyStatusPayload,
 } from "./pty-protocol.ts";
 import { BrokerHandle, type BrokerHandleEvent, type SnapshotCollector } from "./broker-handle.ts";
-import { isPtyProcessAlive, queryPtyProcessIdentity } from "./pty-identity.ts";
+import {
+	PtyIdentityReadings,
+	isPtyProcessAlive,
+	queryPtyProcessIdentity,
+	type PtyIdentityReading,
+	type PtyProbeHelper,
+} from "./pty-identity.ts";
 import { connectPtyBroker, type PtyClientSideConnection } from "./pty-ipc.ts";
 import {
 	acquirePtySlotLock,
@@ -73,14 +81,18 @@ import {
 	type PtyRecordLookup,
 } from "./pty-registry.ts";
 import {
+	discardReusedPtyProof,
 	ensurePtyProbeHelper,
 	ensurePtyRuntime,
+	ptyPackagedTreeDigest,
 	type PtyProbeReadiness,
 	spawnPtyBroker,
 	verifyPtyRuntime,
 	type PtyRuntime,
 	type PtyRuntimeReadiness,
 } from "./pty-runtime.ts";
+import { PTY_RUNTIME_VERSION, attestationOf } from "./pty-protocol.ts";
+import type { PrivateStorageProbe } from "./private-storage.ts";
 import { PtyRuntimeProof } from "./pty-runtime-proof.ts";
 import { folderShellLaunchSpec, type PtyFolderShellRequest } from "./pty-shell.ts";
 import { RpcHandle } from "./rpc-handle.ts";
@@ -106,6 +118,12 @@ export interface PtyBrokerClientOptions {
 	readonly env?: Readonly<Record<string, string>>;
 	/** Receives runtime-proof state changes worth a log line (a provisional admission, its resolution). */
 	readonly onRuntimeEvent?: (message: string) => void;
+	/** Test seam: the access probe for the state directory and the staged trees; defaults to this machine's own. */
+	readonly access?: PrivateStorageProbe;
+	/** Test seam: the kernel creation-time reading; defaults to the staged probe helper. */
+	readonly queryIdentity?: (helper: PtyProbeHelper, pid: number) => Promise<PtyIdentityReading>;
+	/** Test seam; defaults to `Date.now`. */
+	readonly now?: () => number;
 }
 
 export interface BrokerLaunchOutcome<Handle> {
@@ -130,6 +148,29 @@ export interface BrokerAttachOutcome<Handle> {
 	readonly state: "attached" | "unavailable";
 	readonly reason: string;
 	readonly handle: Handle | null;
+	/** How an attach established the broker's identity and how long that took; absent when no attach was reached. */
+	readonly identity?: BrokerIdentityProof;
+}
+
+/**
+ * How an attach established that the process behind a record is the broker the record describes.
+ * `trusted`: the broker's own token-authenticated statement of its pid and kernel creation time,
+ * which a broker of this generation attests, with no kernel reading of this window's own.
+ * `probe`: this window read the pid's creation time through the staged helper (a broker that
+ * attests nothing, such as one started by an older build).
+ */
+export interface BrokerIdentityProof {
+	readonly mode: "trusted" | "probe";
+	readonly ms: number;
+}
+
+/** What an attach needs to know about this build's runtime, without staging anything. */
+export interface PtyAttachIdentity {
+	readonly ready: boolean;
+	readonly reason: string | null;
+	readonly runtimeVersion: number;
+	/** The digest of this build's packaged broker tree. */
+	readonly treeDigest: string | null;
 }
 
 /** The outcomes of a terminal broker (`managed-omp`, `folder-shell`). */
@@ -263,10 +304,13 @@ export class PtyBrokerClient {
 	private readonly options: PtyBrokerClientOptions;
 	private readonly proof: PtyRuntimeProof;
 	private probePromise: Promise<PtyProbeReadiness> | null = null;
+	private identityPromise: Promise<PtyAttachIdentity> | null = null;
 	private accessPromise: Promise<{ readonly ok: boolean; readonly reason: string | null }> | null = null;
+	private readonly readings: PtyIdentityReadings;
 
 	constructor(options: PtyBrokerClientOptions) {
 		this.options = options;
+		this.readings = new PtyIdentityReadings({ query: options.queryIdentity ?? queryPtyProcessIdentity });
 		this.proof = new PtyRuntimeProof({
 			probe: deadlineMs =>
 				ensurePtyRuntime({
@@ -274,6 +318,7 @@ export class PtyBrokerClient {
 					extensionRoot: options.extensionRoot,
 					...(options.nodePath === undefined ? {} : { nodePath: options.nodePath }),
 					...(options.env === undefined ? {} : { env: options.env }),
+					...(options.access === undefined ? {} : { access: options.access }),
 					...(deadlineMs === undefined ? {} : { selfCheckDeadlineMs: deadlineMs }),
 				}),
 			...(options.onRuntimeEvent === undefined ? {} : { log: options.onRuntimeEvent }),
@@ -323,12 +368,65 @@ export class PtyBrokerClient {
 		const attempt = ensurePtyProbeHelper({
 			storageDir: this.options.storageDir,
 			extensionRoot: this.options.extensionRoot,
+			...(this.options.access === undefined ? {} : { access: this.options.access }),
 		});
 		this.probePromise = attempt.catch(error => {
 			this.probePromise = null;
 			throw error;
 		});
 		return await this.probePromise;
+	}
+
+	/**
+	 * What an attach needs from this build's runtime when the broker can vouch for itself: the
+	 * runtime version and the digest of the packaged tree, hashed in place. Nothing is staged
+	 * and no PowerShell runs, so a restore's first attach does not wait on the probe helper's
+	 * staging and access verification; {@link attachReady} stages the helper only when a
+	 * kernel reading is actually needed ({@link identityReading}). Only success is cached.
+	 */
+	async attachIdentity(): Promise<PtyAttachIdentity> {
+		const proven = this.proof.provenAnswer();
+		if (proven !== null && proven.treeDigest !== null) {
+			return { ready: true, reason: null, runtimeVersion: proven.runtimeVersion, treeDigest: proven.treeDigest };
+		}
+		if (process.platform !== "win32") {
+			return {
+				ready: false,
+				reason: `the PTY broker is implemented and measured for win32 only; this host is ${process.platform}`,
+				runtimeVersion: PTY_RUNTIME_VERSION,
+				treeDigest: null,
+			};
+		}
+		const cached = this.identityPromise;
+		if (cached !== null) {
+			const known = await cached;
+			if (known.ready) return known;
+			this.identityPromise = null;
+		}
+		this.identityPromise = ptyPackagedTreeDigest(this.options.extensionRoot).then(
+			(treeDigest): PtyAttachIdentity => ({ ready: true, reason: null, runtimeVersion: PTY_RUNTIME_VERSION, treeDigest }),
+			(error: unknown): PtyAttachIdentity => ({
+				ready: false,
+				reason: `the packaged broker tree could not be read: ${messageOf(error)}`,
+				runtimeVersion: PTY_RUNTIME_VERSION,
+				treeDigest: null,
+			}),
+		);
+		return await this.identityPromise;
+	}
+
+	/**
+	 * This window's own kernel creation-time reading of one pid, for proving an attachment, an
+	 * ownership verdict or a stop's pin: it stages the probe helper on first use and shares one
+	 * probe among concurrent proofs of the same pid ({@link PtyIdentityReadings}); nothing is kept
+	 * once a probe has answered. Absence and kill decisions take their own readings instead.
+	 */
+	async identityReading(pid: number): Promise<PtyIdentityReading> {
+		const ready = await this.attachReady();
+		if (!ready.ready || ready.helper === null) {
+			return { kind: "unknown", detail: ready.reason ?? "the broker identity probe is not ready" };
+		}
+		return await this.readings.read(ready.helper, pid);
 	}
 
 	/** Every record this window can read, plus the ones it cannot. */
@@ -395,8 +493,15 @@ export class PtyBrokerClient {
 		const opened = await this.connectRecord(record);
 		if (!opened.ok) return { state: "unavailable", reason: opened.reason, handle: null };
 		const handle = new PtyHandle(opened.connection, record, options.adopted === true, opened.buildMatches);
+		let identity: BrokerIdentityProof;
 		try {
 			await handle.refreshStatus();
+			const confirmed = await this.confirmBrokerIdentity(record, handle.statusValue);
+			if (!confirmed.ok) {
+				handle.disconnect();
+				return { state: "unavailable", reason: confirmed.reason, handle: null };
+			}
+			identity = confirmed.proof;
 		} catch (error) {
 			handle.disconnect();
 			return { state: "unavailable", reason: `the broker did not report its state: ${messageOf(error)}`, handle: null };
@@ -414,6 +519,7 @@ export class PtyBrokerClient {
 					state: "attached",
 					reason: `attached, but the owner state was not reported: ${messageOf(error)}`,
 					handle,
+					identity,
 				};
 			}
 		}
@@ -421,6 +527,7 @@ export class PtyBrokerClient {
 			state: "attached",
 			reason: opened.buildMatches ? "attached" : "attached to a broker running another build's runtime",
 			handle,
+			identity,
 		};
 	}
 
@@ -434,12 +541,28 @@ export class PtyBrokerClient {
 		const reconnect = async (): Promise<PtyClientSideConnection> => {
 			const again = await this.connectRecord(record);
 			if (!again.ok) throw new Error(again.reason);
+			// A broker that attested its identity on the first attach is the same authenticated broker; one that did not is
+			// read through the kernel again, as every attach to it is.
+			if (handle.statusValue === null || attestationOf(handle.statusValue) === null) {
+				const confirmed = await this.confirmBrokerIdentity(record, handle.statusValue);
+				if (!confirmed.ok) {
+					again.connection.close("the broker's identity could not be confirmed");
+					throw new Error(confirmed.reason);
+				}
+			}
 			return again.connection;
 		};
 		const handle = new RpcHandle(opened.connection, record, options.adopted === true, opened.buildMatches, reconnect);
+		let identity: BrokerIdentityProof;
 		try {
 			await handle.refreshStatus();
 			await handle.awaitChildIdentity(CHILD_IDENTITY_WAIT_MS);
+			const confirmed = await this.confirmBrokerIdentity(record, handle.statusValue);
+			if (!confirmed.ok) {
+				handle.disconnect();
+				return { state: "unavailable", reason: confirmed.reason, handle: null };
+			}
+			identity = confirmed.proof;
 		} catch (error) {
 			handle.disconnect();
 			return { state: "unavailable", reason: `the broker did not report its state: ${messageOf(error)}`, handle: null };
@@ -448,13 +571,21 @@ export class PtyBrokerClient {
 			state: "attached",
 			reason: opened.buildMatches ? "attached" : "attached to a broker running another build's runtime",
 			handle,
+			identity,
 		};
 	}
 
 	/**
-	 * Everything an attach proves before it trusts a record's token: protocol, runtime
-	 * version, state access, the broker pid's own kernel creation time, then the
-	 * authenticated handshake naming the same slot and process.
+	 * Everything an attach proves before it sends a frame beyond the handshake: protocol,
+	 * runtime version, state access, then the authenticated handshake naming the same slot,
+	 * process and kernel creation time as the record.
+	 *
+	 * No PowerShell runs here. The handshake is a mutual proof of the record's token, which
+	 * only the broker that minted it and an owner-only reader of the record hold, and the
+	 * broker's own pid and creation time are inside its MAC; a stranger on a reused pid or port
+	 * cannot answer it, and the proof the client sends reveals nothing of the token. Whether the
+	 * broker's *claims* may replace this window's kernel reading of them is decided from its
+	 * status by {@link confirmBrokerIdentity} (ADR-0035, amendment 2026-10-13).
 	 */
 	private async connectRecord(
 		record: PtyBrokerRecord,
@@ -468,9 +599,9 @@ export class PtyBrokerClient {
 				reason: `the recorded broker speaks protocol version ${record.protocolVersion}; this build speaks ${PTY_PROTOCOL_VERSION}`,
 			};
 		}
-		const ready = await this.attachReady();
-		if (!ready.ready || ready.helper === null) {
-			return { ok: false, reason: ready.reason ?? "the broker identity probe is not ready" };
+		const ready = await this.attachIdentity();
+		if (!ready.ready || ready.treeDigest === null) {
+			return { ok: false, reason: ready.reason ?? "this build's broker runtime could not be identified" };
 		}
 		if (record.runtimeVersion !== ready.runtimeVersion) {
 			// A surviving broker of another runtime version is retained and reported, never
@@ -484,23 +615,15 @@ export class PtyBrokerClient {
 		if (!access.ok) {
 			return { ok: false, reason: `the broker state directory is not usable: ${access.reason ?? "unknown"}` };
 		}
-		// Our own kernel reading of the recorded pid: it makes the record's token safe to
-		// use and tells a live broker from a reused process id.
-		const identity = await queryPtyProcessIdentity(ready.helper, record.brokerPid);
-		if (identity.kind !== "found") {
+		if (record.brokerCreationTime === null) {
 			return {
 				ok: false,
-				reason:
-					identity.kind === "gone"
-						? `the recorded broker process ${record.brokerPid} is gone`
-						: `the recorded broker process could not be identified: ${identity.detail}`,
+				reason: `process ${record.brokerPid} is not the broker this record describes: the record carries no creation time`,
 			};
 		}
-		if (record.brokerCreationTime === null || identity.creationTime !== record.brokerCreationTime) {
-			return {
-				ok: false,
-				reason: `process ${record.brokerPid} is not the broker this record describes: its creation time does not match`,
-			};
+		// A coarse in-process liveness check only: a pid nobody holds is refused at once, before a socket is opened.
+		if (!isPtyProcessAlive(record.brokerPid)) {
+			return { ok: false, reason: `the recorded broker process ${record.brokerPid} is gone` };
 		}
 		let connection: PtyClientSideConnection;
 		try {
@@ -513,7 +636,11 @@ export class PtyBrokerClient {
 		} catch (error) {
 			return { ok: false, reason: messageOf(error) };
 		}
-		if (connection.hello.slot !== record.slot || connection.hello.brokerPid !== record.brokerPid) {
+		if (
+			connection.hello.slot !== record.slot ||
+			connection.hello.brokerPid !== record.brokerPid ||
+			connection.hello.brokerCreationTime !== record.brokerCreationTime
+		) {
 			connection.close("the broker proved a different slot or process");
 			return { ok: false, reason: "the broker proved a different slot or process than its record names" };
 		}
@@ -521,6 +648,46 @@ export class PtyBrokerClient {
 		// and a hello from the same older broker always agree, so comparing them would
 		// report an outdated build as current.
 		return { ok: true, connection, buildMatches: connection.hello.treeDigest === ready.treeDigest };
+	}
+
+	/**
+	 * Decide, from the authenticated status, whether the broker's pid and creation time stand on
+	 * the broker's own word or need this window's kernel reading.
+	 *
+	 * The status must agree with the record and the handshake, or the attach is refused. A broker
+	 * that attests its identity (`brokerSelfRead`: it read its own creation time before publishing
+	 * the record) is believed: it proved the token, so it is the process that minted it, and no
+	 * reading is taken. A broker that does not (one started by an older build) is read through the
+	 * staged probe, exactly as every attach used to read it.
+	 */
+	private async confirmBrokerIdentity(
+		record: PtyBrokerRecord,
+		status: PtyStatusPayload | null,
+	): Promise<{ readonly ok: true; readonly proof: BrokerIdentityProof } | { readonly ok: false; readonly reason: string }> {
+		const started = (this.options.now ?? Date.now)();
+		const elapsed = (): number => (this.options.now ?? Date.now)() - started;
+		if (status === null) return { ok: false, reason: "the broker did not report its state" };
+		if (status.brokerPid !== record.brokerPid || status.brokerCreationTime !== record.brokerCreationTime) {
+			return { ok: false, reason: "the broker reports another process identity than its record names" };
+		}
+		if (attestationOf(status) !== null) return { ok: true, proof: { mode: "trusted", ms: elapsed() } };
+		const identity = await this.identityReading(record.brokerPid);
+		if (identity.kind !== "found") {
+			return {
+				ok: false,
+				reason:
+					identity.kind === "gone"
+						? `the recorded broker process ${record.brokerPid} is gone`
+						: `the recorded broker process could not be identified: ${identity.detail}`,
+			};
+		}
+		if (identity.creationTime !== record.brokerCreationTime) {
+			return {
+				ok: false,
+				reason: `process ${record.brokerPid} is not the broker this record describes: its creation time does not match`,
+			};
+		}
+		return { ok: true, proof: { mode: "probe", ms: elapsed() } };
 	}
 
 	/**
@@ -677,7 +844,7 @@ export class PtyBrokerClient {
 				...(this.options.env === undefined ? {} : { env: this.options.env }),
 			});
 		} catch (error) {
-			return { state: "not-started", reason: `the broker could not be started: ${messageOf(error)}`, handle: null, adopted: false, brokerPid: null };
+			return { state: "not-started", reason: `the broker could not be started: ${messageOf(error)}${await this.withdrawReusedProof()}`, handle: null, adopted: false, brokerPid: null };
 		}
 		const spawned = child.pid ?? null;
 		const record = await this.waitForRecord(spec.slot, child);
@@ -695,7 +862,7 @@ export class PtyBrokerClient {
 			const log = await this.readLogTail(spec.slot);
 			return {
 				state: "not-started",
-				reason: `the broker exited with code ${exitCode}${log.length > 0 ? `: ${log}` : ""}`,
+				reason: `the broker exited with code ${exitCode}${log.length > 0 ? `: ${log}` : ""}${await this.withdrawReusedProof()}`,
 				handle: null,
 				adopted: false,
 				brokerPid: spawned,
@@ -712,13 +879,29 @@ export class PtyBrokerClient {
 			lastReason = attached.reason;
 			await delay(ATTACH_RETRY_MS);
 		}
+		// A broker that published its record and then ended without ever being attached failed the way a broken
+		// runtime does; one still running only answered slowly, and the proof it started on stands.
+		const withdrawn = child.exitCode === null ? "" : await this.withdrawReusedProof();
 		return {
 			state: "unconfirmed",
-			reason: `a broker owns the slot but could not be attached: ${lastReason}`,
+			reason: `a broker owns the slot but could not be attached: ${lastReason}${withdrawn}`,
 			handle: null,
 			adopted: false,
 			brokerPid: record.brokerPid,
 		};
+	}
+
+	/**
+	 * A launch failed before any broker existed. When it ran on a proof an earlier window stored, that proof
+	 * is the one thing this window did not check itself, so it is withdrawn (file and in-process copies) and
+	 * the next launch re-runs the self-check and reports a diagnosed refusal. Returns the sentence that says
+	 * so for the failure's own reason, or an empty string when the proof was computed here.
+	 */
+	private async withdrawReusedProof(): Promise<string> {
+		const reused = this.proof.discardReusedProof();
+		if (reused === null) return "";
+		await discardReusedPtyProof(reused);
+		return "; the runtime proof stored by an earlier window was discarded, so the next launch checks the runtime again";
 	}
 
 	/** Wait for the slot's record to appear, or for the started process to end. */
@@ -749,11 +932,19 @@ export class PtyBrokerClient {
 		return join(ptyStateDirectory(this.options.storageDir), "logs", `${name.split(/[\\/]/).pop() ?? "broker"}.log`);
 	}
 
-	/** Verify the record directory's access once per client, and remember a failure. */
-	private async stateAccess(): Promise<{ readonly ok: boolean; readonly reason: string | null }> {
+	/**
+	 * Verify the record directory's access once per client, and remember the outcome.
+	 *
+	 * Every attach and launch waits for this verdict before it trusts anything under the
+	 * directory. It is PowerShell work of about a second (several seconds under load), so
+	 * a window that starts it as soon as the client exists lets it run while the rest of
+	 * activation proceeds instead of in front of the first re-adoption. Starting it early
+	 * changes when the check runs, never what it checks or who has to pass it.
+	 */
+	async stateAccess(): Promise<{ readonly ok: boolean; readonly reason: string | null }> {
 		const cached = this.accessPromise;
 		if (cached !== null) return await cached;
-		this.accessPromise = ensurePtyStateAccess(this.options.storageDir).catch(error => ({
+		this.accessPromise = ensurePtyStateAccess(this.options.storageDir, this.options.access).catch(error => ({
 			ok: false,
 			reason: messageOf(error),
 		}));

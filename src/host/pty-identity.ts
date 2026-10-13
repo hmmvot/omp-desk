@@ -279,3 +279,32 @@ export async function waitForPtyProcessGone(
 		});
 	}
 }
+
+/**
+ * Creation-time readings for attachment proofs: concurrent proofs of one process share one
+ * probe. Nothing is kept once the probe has answered, so every proof that starts after an
+ * answer reads the kernel again and the evidence is never older than the proof that uses it
+ * (ADR-0031's "new" reading, ADR-0039's current evidence). Stop and absence paths that must
+ * see *now* do not use this at all.
+ */
+export class PtyIdentityReadings {
+	readonly #query: (helper: PtyProbeHelper, pid: number) => Promise<PtyIdentityReading>;
+	readonly #flights = new Map<string, Promise<PtyIdentityReading>>();
+
+	constructor(options: { readonly query?: (helper: PtyProbeHelper, pid: number) => Promise<PtyIdentityReading> } = {}) {
+		this.#query = options.query ?? queryPtyProcessIdentity;
+	}
+
+	async read(helper: PtyProbeHelper, pid: number): Promise<PtyIdentityReading> {
+		const key = `${helper.sha256}\0${pid}`;
+		const flying = this.#flights.get(key);
+		if (flying !== undefined) return await flying;
+		const flight = this.#query(helper, pid);
+		this.#flights.set(key, flight);
+		try {
+			return await flight;
+		} finally {
+			this.#flights.delete(key);
+		}
+	}
+}

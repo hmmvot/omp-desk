@@ -5,7 +5,7 @@ date: 2026-09-28
 
 # ADR-0032: Prove the staged PTY runtime with a console child's own markers, not the native exit code
 
-> Narrowly amended by the [rpc-ui design](../designs/2026-09-29-rpc-ui-chat-and-sessions.md) (ADR-0038), section 1, "Attach does not wait on runtime staging": the runtime proof below still gates every path that *starts* a child under the staged tree. Attaching to an already-running broker no longer waits for it; it needs only the staged, verified identity probe and the record's token handshake.
+> Narrowly amended by the [rpc-ui design](../designs/2026-09-29-rpc-ui-chat-and-sessions.md) (ADR-0038), section 1, "Attach does not wait on runtime staging": the runtime proof below still gates every path that *starts* a child under the staged tree. Attaching to an already-running broker no longer waits for it; it needs only the record's token handshake and, for what a current-build broker does not attest about itself, a kernel identity reading through the staged, verified probe helper (see the [ADR-0035](0035-distinguish-a-recorded-process-from-a-later-occupant-of-its-pid.md) amendment of 2026-10-13, accepted after independent architecture review: a current-build attach stages no helper at all).
 
 > Decision Outcome amended 2026-10-12 (accepted after independent architecture review): a run that only ran out of time is *inconclusive* and admits a launch provisionally, without being kept as proof; see [Amendment 2026-10-12](#amendment-2026-10-12-a-timeout-with-no-observed-fault-is-inconclusive).
 
@@ -133,6 +133,31 @@ Attaching to an already-running broker is unaffected (see the note at the top).
 - Reviewer: architect (separate, disposable read-only agent), against the source, tests and this text.
 - Outcome: accepted after three passes. Round 1 found two major defects — the host admitted any nonzero exit labelled `inconclusive` (including exit 7 and an answer to the extended re-run), and a pipe-child write error was discarded so a later timeout was excused — and four claim mismatches: re-runs that kept throwing left the runtime provisional forever, the older-answer rule, the per-phase time bound, and the exact-echo rule on normal completion. All were fixed in code, tests and this text. Round 2 found one remaining gap (an `inconclusive` answer that also reported a nonzero child exit was admitted); fixed with a regression test. Round 3 confirmed no remaining findings.
 - The choice itself (inconclusive admits provisionally, an extended re-run settles it) was not in question.
+
+## Amendment 2026-10-13 (accepted after independent architecture review): a proven runtime is remembered across windows and reloads
+
+### Context
+
+Every window re-staged and re-proved the broker tree after every reload, and a new session launch waited for it: 19–42 s measured under load, of which the self-check itself was 4–13 s. The check proves properties of the staged tree, the executable and the operating system, none of which a reload changes.
+
+### Decision
+
+A **proven** self-check is stored under `<globalStorage>/runtime/pty-proof/<sha256 of key>.json`, replaced atomically, owner-only mode where the platform has one. The key is the staged tree's content digest, the runtime version, the executable that runs the broker (path, size and modification time; plus Node, Electron and ABI versions when it is this process's own executable), the platform, the architecture and the operating system release. A window whose key equals a stored one reuses the stored answer and skips the self-check, logging `PTY runtime proof reused from <time>: ready in N ms` instead of `PTY runtime proved itself: …`.
+
+- **What is not skipped.** Staging runs as before: every copy is re-hashed and rewritten if it changed, and the access rules are verified. Only the self-check (the part this record is about) is skipped. A tree whose copies differ is another digest and another key.
+- **What invalidates.** Any change of a key field: a rebuilt tree, a replaced or different executable (VS Code or node update), a runtime-version bump, an operating-system *build number* (`os.release()` is major.minor.build on Windows, so a feature update changes it and a monthly cumulative update does **not**). A proof older than **24 hours** is not believed either. A file that is not a small regular file, is not JSON, names another key than the one wanted, carries an unreadable, future or too old time or a malformed answer, is a miss and is overwritten by the next proof.
+- **What the key does not cover.** The self-check's environment (`process.env` plus the broker's explicit `env`), security-product policy and drivers, and cumulative updates. A proof can therefore outlive a change that breaks the console spawn.
+- **Recovery from a stale proof.** When a launch that ran on a *reused* proof fails before a broker could run, the window withdraws that proof: the stored file for that key is deleted and every in-process proof is cleared, and the failure's reason says so. The triggers are: the broker process could not be spawned; it exited before publishing its record; or it published its record, could not be attached, and its process has ended (a broker that is still running only answered slowly and does not withdraw anything). The next launch therefore re-runs the self-check and reports a diagnosed refusal (or proves the runtime again) instead of repeating a generic broker exit. A proof computed by this window is never withdrawn by such a failure, and a launch that fails for a reason unrelated to the runtime (for example another broker owning the slot) costs at most one repeated self-check.
+- **What is never stored.** An inconclusive (provisional) admission, a refusal, and an answer that did not prove both halves. Such a window runs its own check, and the 2026-10-12 re-run still settles it.
+- **What the file is.** Not a secret and not an authority: it lets a window skip a smoke check of a tree it has just verified byte for byte. It sits below `runtime/`, whose access rules staging establishes before anything is written (`pty-proof/` is not separately in the list of verified directories; it inherits the verified `runtime/` rules). Another account cannot write it, and the same user who can forge it can also replace the staged tree it vouches for.
+
+### Consequences
+
+- Positive: after the first proof of a build under an executable, later windows and reloads within a day do not repeat the 4–13 s self-check, and a launch no longer waits for it.
+- Negative: a proof can outlive an environment change the key does not cover for up to a day or until a launch fails; the failure then withdraws it as above. Proof files accumulate, one per build and executable; nothing prunes them.
+- Not changed: staging time (about 2–3 s idle, dominated by the access verification) is not reduced by this amendment; caching that touches the other-account boundary and needs its own review.
+
+Status of this amendment: **accepted** after independent architecture review (2026-10-13); the review's findings were resolved before acceptance.
 
 ## Related Documents
 

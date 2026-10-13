@@ -32,7 +32,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { after, before, describe, it } from "node:test";
 import { BrokerHandle } from "./broker-handle.ts";
-import { PTY_PROTOCOL_VERSION, type PtyBrokerFrame, type PtyRequestFrame } from "./pty-protocol.ts";
+import { PTY_PROTOCOL_VERSION, attestationOf, type PtyBrokerFrame, type PtyRequestFrame } from "./pty-protocol.ts";
 import { PtyBrokerClient } from "./pty-client.ts";
 import { RpcHandle, RpcWriteError } from "./rpc-handle.ts";
 import type { RpcChannelEvent } from "../protocol/rpc.ts";
@@ -562,6 +562,23 @@ describe("managed-rpc broker end to end", { skip: SKIP }, () => {
 			assert.equal(error.code === "child-exited" || error.code === "closed", true, error.code);
 			return true;
 		});
+	});
+
+	it("attests its child's handle only while the child runs", { timeout: TEST_TIMEOUT_MS }, async () => {
+		// The host skips its own kernel reading of the child on this attestation, so the broker must withdraw it
+		// the moment the child is over; a broker that kept saying `true` would have the host trust a dead pid.
+		const handle = await launchRpc();
+		await handle.attach({ sinceSeq: 0 });
+		const running = await handle.refreshStatus();
+		assert.equal(running.state, "running");
+		assert.deepEqual(attestationOf(running), { brokerSelfRead: true, childHandleLive: true });
+		assert.equal(running.nativeCreationTime !== null, true, "the creation time the attestation vouches for was read while the handle was held");
+
+		const result = await handle.stop({ mode: "graceful", timeoutMs: 20_000 });
+		assert.equal(result.pidGone, true, result.detail);
+		const exited = await handle.refreshStatus();
+		assert.equal(exited.state, "exited");
+		assert.deepEqual(attestationOf(exited), { brokerSelfRead: true, childHandleLive: false });
 	});
 });
 

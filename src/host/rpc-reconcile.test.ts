@@ -42,7 +42,7 @@ import type {
 import type { OmpHostLauncher, SessionIndexStore } from "./session-index.ts";
 import type { OwnerReconcileRequest } from "./session-availability.ts";
 import type { OmpHostHandle, RecordedHost, RecordedRpcIdentity, SessionIndexEntry } from "./session-model.ts";
-import type { PtyBrokerRecord, PtyStopResult } from "./pty-protocol.ts";
+import type { PtyBrokerRecord, PtyStatusPayload, PtyStopResult } from "./pty-protocol.ts";
 
 /** The part of the compiled module these tests drive. */
 interface RpcReconcileModule {
@@ -348,6 +348,51 @@ describe("broker attachment proof", () => {
 		});
 		assert.equal(changed.ok, false);
 		assert.match(changed.ok ? "" : changed.reason, /changed since ownership was verified/);
+	});
+
+	describe("with a status that attests the child", () => {
+		const status = (overrides: Record<string, unknown> = {}): PtyStatusPayload =>
+			({ state: "running", nativePid: CHILD_PID, nativeCreationTime: CHILD_CREATION, attestation: { brokerSelfRead: true, childHandleLive: true }, ...overrides }) as unknown as PtyStatusPayload;
+		const proveWith = async (statusValue: PtyStatusPayload | null) => {
+			const reads: number[] = [];
+			const proof = await reconcile.provedBrokerPin(attachedHandle(statusValue === null ? {} : { statusValue }), async pid => {
+				reads.push(pid);
+				return { kind: "found", creationTime: CHILD_CREATION };
+			});
+			return { proof, reads };
+		};
+
+		it("takes the broker's own report in place of a reading", async () => {
+			const { proof, reads } = await proveWith(status());
+			assert.deepEqual(proof, { ok: true, pin: brokerPin() });
+			assert.deepEqual(reads, []);
+		});
+
+		it("reads the kernel when the attestation is missing, malformed, not about a held handle, or contradicts the handle", async () => {
+			for (const [name, statusValue] of [
+				["no status", null],
+				["an older broker", status({ attestation: undefined })],
+				["a malformed attestation", status({ attestation: { brokerSelfRead: true, childHandleLive: "yes" } })],
+				["a released handle", status({ attestation: { brokerSelfRead: true, childHandleLive: false } })],
+				["another child pid", status({ nativePid: CHILD_PID + 1 })],
+				["another creation time", status({ nativeCreationTime: "133711111111111111" })],
+				["an exited child", status({ state: "exited" })],
+			] as const) {
+				const { proof, reads } = await proveWith(statusValue);
+				assert.equal(proof.ok, true, name);
+				assert.deepEqual(reads, [CHILD_PID], `${name}: the kernel was asked`);
+			}
+		});
+
+		it("does not let an attestation excuse a child the kernel contradicts", async () => {
+			// The attested path trusts only the broker's authenticated report; a status that disagrees with the handle falls back and is judged on the reading.
+			const proof = await reconcile.provedBrokerPin(
+				attachedHandle({ statusValue: status({ nativeCreationTime: "133711111111111111" }) }),
+				async () => ({ kind: "found", creationTime: "133799999999999999" }),
+			);
+			assert.equal(proof.ok, false);
+			assert.match(proof.ok ? "" : proof.reason, /creation time does not match/);
+		});
 	});
 });
 
@@ -940,6 +985,81 @@ describe("stop of a recorded broker-owned child", () => {
 		assert.equal(disconnects, 1, "the temporary attachment is closed whatever the verdict was");
 		assert.equal(stopped.ok && stopped.verdict.writerGone, true);
 		assert.equal(stopped.ok && stopped.verdict.treeEmpty, true);
+	});
+
+	describe("with a child its broker attests", () => {
+		const attested = { state: "running", nativePid: CHILD_PID, nativeCreationTime: CHILD_CREATION, attestation: { brokerSelfRead: true, childHandleLive: true } } as unknown as PtyStatusPayload;
+		const countingReader = (reads: number[]): NativeGenerationReader => async pid => {
+			reads.push(pid);
+			return { kind: "found", creationTime: CHILD_CREATION };
+		};
+
+		it("stops the recorded child without reading the kernel", async () => {
+			const reads: number[] = [];
+			let stops = 0;
+			const stopped = await reconcile.stopBrokerOwnedHost(
+				stopInput(brokerClient({ handle: stoppable({ overrides: { statusValue: attested }, onStop: () => (stops += 1) }) }), { readNativeGeneration: countingReader(reads) }),
+			);
+			assert.equal(stops, 1);
+			assert.deepEqual(reads, [], "the broker holds the child's handle, so its own report names the child");
+			assert.equal(stopped.ok && stopped.verdict.writerGone, true);
+		});
+
+		it("still refuses before dispatching when the child is not the one the row recorded", async () => {
+			const reads: number[] = [];
+			let stops = 0;
+			const handle = (overrides: Partial<AttachedBrokerHandle>) =>
+				brokerClient({ handle: stoppable({ overrides: { statusValue: attested, ...overrides }, onStop: () => (stops += 1) }) });
+			const otherPid = await reconcile.stopBrokerOwnedHost(
+				stopInput(handle({ nativePid: 999_999, statusValue: { ...attested, nativePid: 999_999 } as PtyStatusPayload }), { readNativeGeneration: countingReader(reads) }),
+			);
+			assert.equal(otherPid.ok, false);
+			assert.match(otherPid.ok ? "" : otherPid.reason, /not the process this session recorded/);
+			const otherGeneration = await reconcile.stopBrokerOwnedHost(
+				stopInput(handle({ nativeCreationTime: "133711111111111111", statusValue: { ...attested, nativeCreationTime: "133711111111111111" } as PtyStatusPayload }), { readNativeGeneration: countingReader(reads) }),
+			);
+			assert.equal(otherGeneration.ok, false);
+			assert.match(otherGeneration.ok ? "" : otherGeneration.reason, /another launch than the one this row recorded/);
+			assert.equal(stops, 0, "nothing was handed to the broker");
+		});
+
+		it("does not need the probe helper, while an unattested child still refuses without one", async () => {
+			let helperAsks = 0;
+			const withoutHelper = (handle: unknown): Client =>
+				Object.assign(brokerClient({ handle }), {
+					identityReading: async () => {
+						helperAsks += 1;
+						return { kind: "unknown", detail: "the probe helper could not be staged" } as const;
+					},
+				}) as unknown as Client;
+			const noSeam = { readNativeGeneration: undefined } as unknown as Partial<Parameters<typeof reconcile.stopBrokerOwnedHost>[0]>;
+			let stops = 0;
+			const trusted = await reconcile.stopBrokerOwnedHost(
+				stopInput(withoutHelper(stoppable({ overrides: { statusValue: attested }, onStop: () => (stops += 1) })), noSeam),
+			);
+			assert.equal(trusted.ok && trusted.verdict.writerGone, true);
+			assert.equal(helperAsks, 0);
+
+			const unattested = await reconcile.stopBrokerOwnedHost(
+				stopInput(withoutHelper(stoppable({ onStop: () => (stops += 1) })), noSeam),
+			);
+			assert.equal(unattested.ok, false);
+			assert.equal(unattested.ok ? true : unattested.dispatched, false);
+			assert.match(unattested.ok ? "" : unattested.reason, /could not be identified/);
+			assert.equal(helperAsks, 1);
+			assert.equal(stops, 1, "only the attested stop was dispatched");
+		});
+
+		it("reads the kernel for a child whose handle the broker no longer holds", async () => {
+			const reads: number[] = [];
+			const released = { ...attested, attestation: { brokerSelfRead: true, childHandleLive: false } } as unknown as PtyStatusPayload;
+			let stops = 0;
+			await reconcile.stopBrokerOwnedHost(
+				stopInput(brokerClient({ handle: stoppable({ overrides: { statusValue: released }, onStop: () => (stops += 1) }) }), { readNativeGeneration: countingReader(reads) }),
+			);
+			assert.deepEqual(reads, [CHILD_PID]);
+			assert.equal(stops, 1);
+		});
 	});
 
 	it("confirms the writer gone from the child's exit alone, and never claims an unproven tree", async () => {

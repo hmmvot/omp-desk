@@ -50,6 +50,7 @@ import {
 	type StagedRuntimeAsset,
 	type StagedRuntimeTree,
 } from "./runtime-assets.ts";
+import { forgetPtyProof, ptyProofKey, ptyProofPath, readPtyProof, writePtyProof, type PtyProofRecord, type PtySelfCheckAnswer } from "./pty-runtime-proof-store.ts";
 import { PTY_RUNTIME_VERSION } from "./pty-protocol.ts";
 import {
 	SELF_CHECK_DEADLINE_FLAG,
@@ -102,30 +103,14 @@ export interface PtyRuntime {
 	readonly selfCheck: PtySelfCheckAnswer | null;
 }
 
-/** What the runtime reported about itself when it was asked to prove itself. */
-export interface PtySelfCheckAnswer {
-	readonly runtimeVersion: number;
-	readonly platform: NodeJS.Platform;
-	readonly arch: string;
-	readonly node: string;
-	readonly electron: string | null;
-	readonly nodePty: string | null;
-	/** Whether the ConPTY backend (`conpty.dll`) is the one in use. */
-	readonly conptyDll: boolean;
-	/** The child's own markers were read back from its pseudo console. */
-	readonly childOutput: boolean;
-	/**
-	 * A pipe child (the broker entry itself, `--pipe-echo`) echoed one JSONL line through
-	 * stdin/stdout pipes and ended when its stdin closed: what a `managed-rpc` slot runs on.
-	 */
-	readonly pipeChild: boolean;
-	/**
-	 * The child's exit code as the backend reported it, or `null` when the backend
-	 * reported none — the Windows ConPTY backend does not always have one, and the
-	 * markers are what make such a run acceptable (`src/broker/pty-self-check.ts`).
-	 */
-	readonly childExitCode: number | null;
-	readonly durationMs: number;
+export type { PtySelfCheckAnswer };
+
+/** The stored proof an answer was read from instead of being computed. */
+export interface ReusedPtyProof {
+	/** When the earlier self-check ran (ISO). */
+	readonly provedAt: string;
+	/** The file it was read from, so a failure that contradicts it can withdraw exactly that proof. */
+	readonly file: string;
 }
 
 export interface PtyRuntimeReadiness {
@@ -145,6 +130,12 @@ export interface PtyRuntimeReadiness {
 	readonly runtimeVersion: number;
 	readonly treeDigest: string | null;
 	readonly runtime: PtyRuntime | null;
+	/**
+	 * Set when this answer was not computed but read from the proof an earlier window or
+	 * reload stored for the same key (staged tree, runtime version, executable, OS build):
+	 * no self-check ran for it. `provedAt` is when that earlier self-check ran.
+	 */
+	readonly reusedProof?: ReusedPtyProof;
 }
 
 export interface PtyRuntimeOptions {
@@ -164,6 +155,13 @@ export interface PtyRuntimeOptions {
 	 * for {@link SELF_CHECK_EXTENDED_DEADLINE_MS}.
 	 */
 	readonly selfCheckDeadlineMs?: number;
+	/** Test seam: the self-check run; defaults to starting the staged entry with `--self-check`. */
+	readonly runSelfCheck?: (
+		runtime: { readonly entry: StagedRuntimeAsset; readonly tree: StagedRuntimeTree },
+		options: PtyRuntimeOptions,
+	) => Promise<SelfCheckResult>;
+	/** Test seam; defaults to `Date.now`. */
+	readonly now?: () => number;
 }
 
 /**
@@ -200,7 +198,7 @@ export function ptyRuntimeCommand(nodePath?: string): { readonly command: string
 /** What one run of the staged entry's `--self-check` concluded. */
 type SelfCheckKind = "proven" | "broken" | "inconclusive";
 
-interface SelfCheckResult {
+export interface SelfCheckResult {
 	readonly kind: SelfCheckKind;
 	readonly answer: PtySelfCheckAnswer | null;
 	readonly detail: string;
@@ -372,6 +370,30 @@ async function runSelfCheck(
  */
 const provedRuntimes = new Map<string, PtyRuntime>();
 
+/** Forget every in-process proof, so the next call reads the persistent proof or runs the check (a new window's view). */
+export function forgetProvedPtyRuntimes(): void {
+	provedRuntimes.clear();
+}
+
+/**
+ * Withdraw a proof an earlier window stored once a launch that relied on it failed before a
+ * broker existed: the stored file goes and every in-process proof with it, so the next launch
+ * runs the self-check itself and reports what it finds instead of repeating the failure.
+ */
+export async function discardReusedPtyProof(reused: ReusedPtyProof): Promise<void> {
+	provedRuntimes.clear();
+	await forgetPtyProof(reused.file);
+}
+
+/**
+ * The content digest of this build's packaged broker tree, hashed without staging or writing
+ * anything: what a broker of this build reports as its tree. An attach compares a broker's
+ * against it and needs nothing else from the runtime.
+ */
+export async function ptyPackagedTreeDigest(extensionRoot: string): Promise<string> {
+	return (await hashRuntimeTree(await ptyRuntimeSources(extensionRoot))).digest;
+}
+
 /** Where the identity probe alone is staged, apart from the whole broker tree. */
 export const PTY_PROBE_NAMESPACE = "pty-probe";
 
@@ -507,22 +529,42 @@ export async function ensurePtyRuntime(options: PtyRuntimeOptions): Promise<PtyR
 	if (!(await verifyStagedRuntimeTree(tree))) {
 		return notReady("the staged broker tree does not hold the bytes it was staged with");
 	}
-	const check = await runSelfCheck({ entry, tree }, options);
-	if (check.kind === "broken") {
-		return notReady(check.detail, tree.digest);
-	}
-	const runtime: PtyRuntime = {
+	const now = options.now ?? Date.now;
+	const { command } = ptyRuntimeCommand(options.nodePath);
+	const key = await ptyProofKey({
+		runtimeVersion: PTY_RUNTIME_VERSION,
+		treeDigest: tree.digest,
+		executable: command,
+		ownExecutable: options.nodePath === undefined,
+	});
+	const build = (selfCheck: PtySelfCheckAnswer | null): PtyRuntime => ({
 		tree,
 		entry,
 		helper: { path: helper.path, sha256: helper.sha256 },
 		ownerHelper: { path: ownerHelper.path, sha256: ownerHelper.sha256 },
 		entrySha256: entry.sha256,
-		selfCheck: check.answer,
-	};
+		selfCheck,
+	});
+	// A window or reload that finds the proof an earlier one stored under the same key skips the self-check:
+	// the tree was staged, its access verified and every copy re-hashed above exactly as for a first run.
+	if (key !== null) {
+		const stored = await readPtyProof(options.storageDir, key, now());
+		if (stored.kind === "hit") {
+			const reused = build(stored.record.selfCheck);
+			provedRuntimes.set(cacheKey, reused);
+			return { ...readyAnswer(reused), reusedProof: { provedAt: stored.record.provedAt, file: ptyProofPath(options.storageDir, key) } };
+		}
+	}
+	const check = await (options.runSelfCheck ?? runSelfCheck)({ entry, tree }, options);
+	if (check.kind === "broken") {
+		return notReady(check.detail, tree.digest);
+	}
+	const runtime = build(check.answer);
 	if (check.answer === null) {
 		// Ran out of time with nothing observed to be wrong: a slow machine, not a refuted
 		// runtime. The tree is staged and verified, so a broker may be started from it and the
-		// real spawn reports its own failure; the result is deliberately not cached as a proof.
+		// real spawn reports its own failure; the result is deliberately not cached as a proof,
+		// in this process or on disk.
 		return {
 			...readyAnswer(runtime),
 			proven: false,
@@ -530,6 +572,11 @@ export async function ensurePtyRuntime(options: PtyRuntimeOptions): Promise<PtyR
 		};
 	}
 	provedRuntimes.set(cacheKey, runtime);
+	if (key !== null) {
+		const record: PtyProofRecord = { format: 1, key, provedAt: new Date(now()).toISOString(), selfCheck: check.answer };
+		// Failing to remember a proof costs the next window one more self-check, never a launch.
+		await writePtyProof(options.storageDir, record).catch(() => undefined);
+	}
 	return readyAnswer(runtime);
 
 	function notReady(reason: string, digest: string | null = null): PtyRuntimeReadiness {

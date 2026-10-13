@@ -822,6 +822,10 @@ interface WindowState {
    * the cohort will use.
    */
   startupRestorePending: boolean;
+  /** Wall-clock time (`Date.now()`) the extension host activated; the startup timeline lines are relative to it. */
+  activatedAt: number;
+  /** When the startup catalog adoption settled, or `null` before; read by the startup restore's timeline line. */
+  catalogAdoptedAt: number | null;
   /**
    * One window-wide counter numbering every editor event — an open/view request
    * and a panel close — so their order per tab is known (`TabState.lastOpenRequest`,
@@ -1227,6 +1231,8 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     diagnostics: new DiagnosticsRecorder(),
     startupRestore: null,
     startupRestorePending: true,
+    activatedAt: Date.now(),
+    catalogAdoptedAt: null,
     editorEventSequence: 0,
     nextLauncherRuntimeId: 0,
     packageDrift: null,
@@ -1522,15 +1528,24 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   });
   s.launcherFolders = folders;
   if (folders.loadError !== null) showWarning(folders.loadError);
-  // The in-tab terminal's own state. The broker client is created here but starts
-  // nothing: `ready()` is asked for lazily, so a window that never opens a managed
-  // session never stages or spawns a broker. The surface map and the shell-slot
-  // registry are durable and per workspace context, exactly like the folder list.
+  // The in-tab terminal's own state. The broker client is created here and starts no broker,
+  // host or session: the staged runtime proof (`ready()`) is asked for lazily, so a window that
+  // never opens a managed session never stages or spawns a broker. Only the state directory's
+  // access verification (`stateAccess()`) starts at activation, below. The surface map and the
+  // shell-slot registry are durable and per workspace context, exactly like the folder list.
   s.ptyClient = new PtyBrokerClient({
     storageDir: context.globalStorageUri.fsPath,
     extensionRoot: context.extensionUri.fsPath,
     onRuntimeEvent: message => log(message),
   });
+  // The broker state directory's ACL verification (a PowerShell run, about a second idle) is what the first
+  // attach or launch would otherwise wait for. Starting it now overlaps it with the rest of activation; every
+  // user of the client still awaits this same promise, so a refusal still refuses them.
+  const stateAccessStartedAt = Date.now();
+  void s.ptyClient.stateAccess().then(
+    access => windowTiming("broker state access", `${Date.now() - stateAccessStartedAt} ms ok=${access.ok}`),
+    () => undefined,
+  );
   // Readiness is asked for lazily and a *failed* check is not latched, so a transient
   // staging or self-check failure is retried by the next reconciliation, attach or
   // open instead of disabling the broker path for the whole activation.
@@ -3375,10 +3390,19 @@ async function attachHost(
     s.diagnostics.notObserved(request.tabId, "chat-live", "the attach produced no conversation");
     s.diagnostics.notObserved(request.tabId, "host-control-verified", "the attach produced no runtime");
   };
+  // The sub-steps the index reports beside its own measurements of this call (diagnostic only).
+  const timings: Record<string, number> = {};
+  let lapAt = Date.now();
+  const lap = (step: string): void => {
+    const now = Date.now();
+    timings[step] = now - lapAt;
+    lapAt = now;
+  };
   const client = await attachBrokerClient();
+  lap("client");
   if (client === null) {
     failAll("the PTY broker is not available in this window");
-    return { state: "unavailable", reason: "The PTY broker is not available in this window." };
+    return { state: "unavailable", reason: "The PTY broker is not available in this window.", timings };
   }
   let outcome: RpcAttachOutcome | NativeAttachOutcome;
   try {
@@ -3389,22 +3413,34 @@ async function attachHost(
       client,
     });
   } catch (error) {
+    lap("connect");
     failAll(messageOf(error));
     log(`tab ${request.tabId}: attach failed — ${messageOf(error)}`);
-    return { state: "unavailable", reason: `Re-adopting the running host failed: ${messageOf(error)}` };
+    return { state: "unavailable", reason: `Re-adopting the running host failed: ${messageOf(error)}`, timings };
+  }
+  lap("connect");
+  // The attach's own account of where its time went replaces the wall-clock total of the call, and says
+  // how each identity was established ("trusted": the broker's statement was believed; "probe": a kernel reading).
+  if (outcome.state === "attached" && outcome.timings !== undefined) {
+    const t = outcome.timings;
+    timings.connect = t.connectMs;
+    timings[`broker ${t.brokerIdentity}`] = t.brokerIdentityMs;
+    timings[`child ${t.childIdentity}`] = t.childIdentityMs;
   }
   const runtime = outcome.runtime;
   if (runtime === null) {
     failAll(outcome.reason);
     log(`tab ${request.tabId}: attach unavailable — ${outcome.reason}`);
-    return { state: "unavailable", reason: outcome.reason };
+    return { state: "unavailable", reason: outcome.reason, timings };
   }
   s.diagnostics.succeed(request.tabId, "broker-launch", { detail: `pid ${runtime.pid} · ${outcome.reason}` });
   await startConversation(index, request.tabId, runtime, request.sessionFile, true);
+  lap("conversation");
   await index.setRunIntent(request.tabId, "running", `attached ${outcome.reason}`);
+  lap("intent");
   log(`tab ${request.tabId}: attached — ${outcome.reason}`);
   void reconnectHostControl(context, index, request.tabId, request.ownerGeneration, runtime);
-  return { state: "attached", host: hostHandle(runtime, request.sessionId) };
+  return { state: "attached", host: hostHandle(runtime, request.sessionId), timings };
 }
 
 async function launchHost(
@@ -3490,6 +3526,7 @@ async function launchHost(
   // no restart could find again, so a full table refuses *before* a launch.
   const reserved = await s.brokerSlots?.record({ slot, conversation: request.tabId, editor: launchEditorId });
   if (reserved !== undefined && !reserved.ok) return notStarted(reserved.reason);
+  const spawnedAt = Date.now();
   const outcome = await (request.transport === "native" ? launchNativeHost : launchRpcHost)(
     {
       slot,
@@ -3502,6 +3539,7 @@ async function launchHost(
     },
     client,
   );
+  const timings: Record<string, number> = { spawn: Date.now() - spawnedAt };
   const runtime = outcome.runtime;
   if (runtime === null) {
     // Nothing this window recorded can be a writer: release the reservation so the slot is
@@ -3526,7 +3564,9 @@ async function launchHost(
     });
   }
   s.diagnostics.succeed(request.tabId, "broker-launch", { detail: `pid ${runtime.pid} · slot ${runtime.identity.slot}` });
+  const conversationAt = Date.now();
   await startConversation(index, request.tabId, runtime, request.sessionFile, false);
+  timings.conversation = Date.now() - conversationAt;
   log(`tab ${request.tabId}: ${outcome.state} — ${outcome.reason}`);
   if (runtime.notice !== null) showWarning(runtime.notice);
   // The native extension receives session_start before rpc-ui handles get_state.
@@ -3542,10 +3582,12 @@ async function launchHost(
   }
   // A verified launch is a durable "this should be running": the row is running again after
   // a reload instead of being read as a deliberate stop.
+  const intentAt = Date.now();
   await index.setRunIntent(request.tabId, "running");
+  timings.intent = Date.now() - intentAt;
   const sessionId = runtime.kind === "chat" && request.sessionFile !== null
     ? (await readSessionFileHeader(request.sessionFile))?.sessionId ?? request.sessionId : request.sessionId;
-  return { state: "running", host: hostHandle(runtime, sessionId) };
+  return { state: "running", host: hostHandle(runtime, sessionId), timings };
 }
 
 function hostHandle(runtime: SessionHostRuntime, sessionId: string | null): OmpHostHandle {
@@ -4439,6 +4481,7 @@ function startStartupRestore(context: vscode.ExtensionContext, index: SessionInd
   const s = windowState();
   const cohort = localRecoveryCohort(index);
   s.startupRestorePending = false;
+  const restoreStartedAt = Date.now();
   const settled = (async () => {
     try {
       await restoreTabs(context, index, cohort);
@@ -4452,6 +4495,11 @@ function startStartupRestore(context: vscode.ExtensionContext, index: SessionInd
   // them now, as "Restoring" for the length of the pass.
   refreshLauncher();
   void settled.then(() => {
+    const since = (at: number): string => `+${at - s.activatedAt} ms`;
+    windowTiming(
+      "startup restore timeline",
+      `activation → catalog adopted ${s.catalogAdoptedAt === null ? "unknown" : since(s.catalogAdoptedAt)} → restore started ${since(restoreStartedAt)} → restore finished ${since(Date.now())} (${cohort.size} rows)`,
+    );
     // The pass can no longer publish anything, so a later click only has to read
     // the panels it left behind.
     if (s.startupRestore?.settled === settled) s.startupRestore = null;
@@ -4564,6 +4612,7 @@ function startCatalogActivation(context: vscode.ExtensionContext, index: Session
     await vscode.commands.executeCommand("setContext", CATALOG_PENDING_CONTEXT, false);
     // Only now is the index complete: the pass restores exactly the rows this window
     // is responsible for, and a click on any other row is an explicit open.
+    s.catalogAdoptedAt = Date.now();
     startStartupRestore(context, index);
     watchCatalogForWindow(index, folders);
   })();
@@ -4693,7 +4742,9 @@ async function restoreTabs(
     // Only the rows this window is responsible for: an automatic pass never re-derives a row
     // another workspace put in the shared index. Nothing waits on any other process or
     // service: each row is reconciled against its own broker slot.
+    const passStartedAt = Date.now();
     report = await index.restoreAll({ reconciler: s.reconciler, launcher: launcher(context, index), only: cohort });
+    windowTiming("restore pass", `restoreAll ${Date.now() - passStartedAt} ms for ${cohort.size} rows`);
   } catch (error) {
     showError(`Stored OMP sessions could not be restored: ${messageOf(error)}`);
     refreshLauncher();
@@ -4713,7 +4764,9 @@ async function restoreTabs(
   // would post no link into it, and the editor would stay connected-but-unserved. The
   // election is idempotent, so an editor that already holds the role costs one no-op
   // commit.
+  const electionsAt = Date.now();
   for (const tabId of cohort) await electLocalController(index, tabId);
+  windowTiming("restore pass", `controller elections ${Date.now() - electionsAt} ms for ${cohort.size} rows`);
   projectRestoreReport(index, report);
   refreshLauncher();
   void revealActiveSession(index);
@@ -11006,10 +11059,13 @@ async function brokerClient(): Promise<PtyBrokerClient | null> {
 }
 
 /**
- * The broker client for re-adopting an already-running broker: only the verified identity
- * probe is required, never the staged tree's staging and self-check. Attach and reconcile
- * use the durable record, the kernel creation-time check and the token handshake, none of
- * which executes the staged tree, so restore does not wait for the runtime proof.
+ * The broker client for re-adopting an already-running broker. Re-adoption uses the durable
+ * record, the token handshake (whose MAC covers the broker's pid and creation time), the
+ * broker's authenticated attestation of its own and its pipe child's identity (ADR-0035
+ * amendment 2026-10-13), and a kernel creation-time reading only for what is not attested
+ * (older brokers, pseudo-console children). It needs only an attach-ready client, never the
+ * staged tree's staging or self-check, and none of it executes the staged tree, so restore
+ * does not wait for the runtime proof.
  */
 async function attachBrokerClient(): Promise<PtyBrokerClient | null> {
   const s = windowState();

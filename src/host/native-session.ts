@@ -8,8 +8,8 @@ import type { OmpCommand } from "./native-terminal";
 import type { PtyBrokerClient, PtyHandle } from "./pty-client";
 import { isPtyProcessAlive } from "./pty-identity";
 import { recordedRpcIdentityOf, resumeWorkingDirectory } from "./rpc-launch";
-import type { RpcHostRuntime, RpcLaunchRequest, RpcOmpLaunchSpec } from "./rpc-launch";
-import { brokerNativeGenerationReader, verifyPinnedBrokerAttachment } from "./rpc-reconcile";
+import type { AttachTimings, RpcHostRuntime, RpcLaunchRequest, RpcOmpLaunchSpec } from "./rpc-launch";
+import { brokerNativeGenerationReader, lazyNativeGenerationReader, verifyPinnedBrokerAttachment } from "./rpc-reconcile";
 import type { BrokerPin, NativeGenerationReader, NativeStopVerdict } from "./rpc-reconcile";
 import { readSessionFileHeader } from "./session-files";
 
@@ -40,7 +40,7 @@ export type NativeLaunchOutcome =
 	| { readonly state: "running"; readonly reason: string; readonly runtime: NativeHostRuntime }
 	| { readonly state: "not-started" | "unconfirmed"; readonly reason: string; readonly runtime: null };
 export type NativeAttachOutcome =
-	| { readonly state: "attached"; readonly reason: string; readonly runtime: NativeHostRuntime }
+	| { readonly state: "attached"; readonly reason: string; readonly runtime: NativeHostRuntime; readonly timings?: AttachTimings }
 	| { readonly state: "unavailable"; readonly reason: string; readonly runtime: null };
 
 export function nativeOmpLaunchSpec(input: Omit<RpcLaunchRequest, "slot"> & { readonly binary: OmpCommand }): RpcOmpLaunchSpec {
@@ -94,19 +94,28 @@ export async function launchNativeHost(request: RpcLaunchRequest, client: PtyBro
 	}
 }
 
-export async function attachNativeHost(input: { readonly pin: BrokerPin; readonly cwd: string; readonly sessionFile: string | null; readonly client: PtyBrokerClient }): Promise<NativeAttachOutcome> {
+export async function attachNativeHost(input: { readonly pin: BrokerPin; readonly cwd: string; readonly sessionFile: string | null; readonly client: PtyBrokerClient; readonly readNativeGeneration?: NativeGenerationReader }): Promise<NativeAttachOutcome> {
+	const connectStarted = Date.now();
 	const attached = await input.client.attach(input.pin.slot);
+	const connectMs = Date.now() - connectStarted;
 	if (attached.handle === null) return { state: "unavailable", reason: attached.reason, runtime: null };
 	const handle = attached.handle;
 	try {
-		const reader = await brokerNativeGenerationReader(input.client);
-		if (reader === null) throw new Error("The native broker has no verified process-identity probe.");
-		const proof = await verifyPinnedBrokerAttachment({ handle, pin: input.pin, readNativeGeneration: reader, kind: "managed-omp" });
+		// A pseudo-console child is not held by handle (its exit is reported when its output closes, which can follow its end),
+		// so the broker does not attest it and its kernel creation time is read here, freshly for this proof.
+		const reader = input.readNativeGeneration ?? lazyNativeGenerationReader(input.client);
+		let childReads = 0;
+		const childStarted = Date.now();
+		const proof = await verifyPinnedBrokerAttachment({ handle, pin: input.pin, readNativeGeneration: async pid => { childReads += 1; return await reader(pid); }, kind: "managed-omp" });
 		if (!proof.ok) throw new Error(proof.reason);
 		// A surviving broker is never restarted to pick up new code (that would end the OMP process it owns);
 		// its older screen mirror is covered by the repaint a restored screen is followed by, and the log says so.
 		const another = handle.buildMatches ? "" : " Its PTY broker was started by another build of this extension; the screen is repainted after it is restored.";
-		return { state: "attached", reason: `Reattached the exact managed native OMP process.${another}`, runtime: { kind: "terminal", handle, identity: recordedRpcIdentityOf(handle), cwd: input.cwd, sessionFile: input.sessionFile, control: null, binary: null, notice: null, pid: input.pin.nativePid, observed: null, stopping: false, observedSurvivors: [] } };
+		return {
+			state: "attached", reason: `Reattached the exact managed native OMP process.${another}`,
+			runtime: { kind: "terminal", handle, identity: recordedRpcIdentityOf(handle), cwd: input.cwd, sessionFile: input.sessionFile, control: null, binary: null, notice: null, pid: input.pin.nativePid, observed: null, stopping: false, observedSurvivors: [] },
+			timings: { connectMs, brokerIdentity: attached.identity?.mode ?? "probe", brokerIdentityMs: attached.identity?.ms ?? 0, childIdentity: childReads === 0 ? "trusted" : "probe", childIdentityMs: Date.now() - childStarted },
+		};
 	} catch (error) {
 		handle.disconnect();
 		return { state: "unavailable", reason: error instanceof Error ? error.message : String(error), runtime: null };

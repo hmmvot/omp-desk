@@ -12,6 +12,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+	attestationOf,
 	PTY_MAX_OWNER_DETAIL_CHARS,
 	PTY_MAX_SNAPSHOT_CHARS,
 	PTY_MAX_FRAME_BYTES,
@@ -53,6 +54,7 @@ import {
 	verifyPtyHelloOkMac,
 	type PtyBrokerRecord,
 	type PtyOwnerStopStatus,
+	type PtyStatusPayload,
 } from "./pty-protocol.ts";
 
 /** A status payload that satisfies the protocol's own validator. */
@@ -374,6 +376,22 @@ describe("frames", () => {
 		assert.equal(isPtyStatusPayload(statusFixture({ title: "t".repeat(257) })), false);
 		assert.equal(isPtySnapshotMeta(snapshotFixture({ chars: PTY_MAX_SNAPSHOT_CHARS })), true);
 		assert.equal(isPtySnapshotMeta(snapshotFixture({ chars: PTY_MAX_SNAPSHOT_CHARS + 1 })), false);
+	});
+
+	it("reads an attestation it understands and treats any other as absent, without refusing the status", () => {
+		const attest = (attestation: unknown) => {
+			const status = statusFixture({ attestation });
+			assert.equal(isPtyStatusPayload(status), true, "an attestation never decides whether the status is accepted");
+			return attestationOf(status as unknown as PtyStatusPayload);
+		};
+		assert.deepEqual(attest({ brokerSelfRead: true, childHandleLive: true }), { brokerSelfRead: true, childHandleLive: true });
+		assert.deepEqual(attest({ brokerSelfRead: true, childHandleLive: false }), { brokerSelfRead: true, childHandleLive: false });
+		assert.equal(attest(undefined), null, "an older broker's status");
+		assert.equal(attest({ brokerSelfRead: false, childHandleLive: true }), null);
+		assert.equal(attest({ brokerSelfRead: true }), null);
+		assert.equal(attest({ brokerSelfRead: true, childHandleLive: "yes" }), null);
+		assert.equal(attest("yes"), null);
+		assert.equal(attest(null), null);
 	});
 
 	it("accepts a push that names no request, and refuses a request that names none", () => {

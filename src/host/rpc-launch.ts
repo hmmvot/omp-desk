@@ -25,8 +25,8 @@ import { isPtyProcessAlive } from "./pty-identity";
 import type { PtyBrokerClient } from "./pty-client";
 import type { PtyHandle } from "./pty-client";
 import type { RpcHandle } from "./rpc-handle";
-import { HOST_STOP_TIMEOUT_MS, brokerNativeGenerationReader, decideStop, verifyPinnedBrokerAttachment } from "./rpc-reconcile";
-import type { BrokerPin, NativeStopVerdict } from "./rpc-reconcile";
+import { HOST_STOP_TIMEOUT_MS, decideStop, lazyNativeGenerationReader, verifyPinnedBrokerAttachment } from "./rpc-reconcile";
+import type { BrokerPin, NativeGenerationReader, NativeStopVerdict } from "./rpc-reconcile";
 import { readSessionFileHeader } from "./session-files";
 import type { RecordedRpcIdentity } from "./session-model";
 
@@ -287,8 +287,22 @@ export async function launchRpcHost(request: RpcLaunchRequest, client: PtyBroker
 	};
 }
 
+/**
+ * Where one re-adoption spent its time, and how each identity was established.
+ * `trusted`: the broker's own token-authenticated statement was believed and no kernel
+ * reading was taken; `probe`: this window read the process through the staged helper.
+ */
+export interface AttachTimings {
+	/** Record read, handshake, status and the broker-identity decision, in ms. */
+	readonly connectMs: number;
+	readonly brokerIdentity: "trusted" | "probe";
+	readonly brokerIdentityMs: number;
+	readonly childIdentity: "trusted" | "probe";
+	readonly childIdentityMs: number;
+}
+
 export type RpcAttachOutcome =
-	| { readonly state: "attached"; readonly reason: string; readonly runtime: RpcHostRuntime }
+	| { readonly state: "attached"; readonly reason: string; readonly runtime: RpcHostRuntime; readonly timings?: AttachTimings }
 	| { readonly state: "unavailable"; readonly reason: string; readonly runtime: null };
 
 /**
@@ -306,25 +320,30 @@ export async function attachRpcHost(input: {
 	readonly cwd: string;
 	readonly sessionFile: string | null;
 	readonly client: PtyBrokerClient;
+	/** Test seam: the kernel reader; defaults to the client's, which stages the probe helper only when a reading is needed. */
+	readonly readNativeGeneration?: NativeGenerationReader;
 }): Promise<RpcAttachOutcome> {
+	const connectStarted = Date.now();
 	const attached = await input.client.attachRpc(input.pin.slot);
+	const connectMs = Date.now() - connectStarted;
 	if (attached.handle === null) return { state: "unavailable", reason: attached.reason, runtime: null };
 	const handle = attached.handle;
 	const refuse = (reason: string): RpcAttachOutcome => {
 		handle.disconnect();
 		return { state: "unavailable", reason, runtime: null };
 	};
+	let childReads = 0;
+	const childStarted = Date.now();
 	try {
-		let reader;
-		try {
-			reader = await brokerNativeGenerationReader(input.client);
-		} catch {
-			return refuse("The PTY broker runtime could not be verified, so the pinned child's identity cannot be re-proven.");
-		}
-		if (reader === null) {
-			return refuse("The PTY broker runtime has no process probe, so the pinned child's identity cannot be re-proven.");
-		}
-		const proved = await verifyPinnedBrokerAttachment({ handle, pin: input.pin, readNativeGeneration: reader });
+		const reader = input.readNativeGeneration ?? lazyNativeGenerationReader(input.client);
+		const proved = await verifyPinnedBrokerAttachment({
+			handle,
+			pin: input.pin,
+			readNativeGeneration: async pid => {
+				childReads += 1;
+				return await reader(pid);
+			},
+		});
 		if (!proved.ok) return refuse(proved.reason);
 	} catch {
 		return refuse("The pinned broker target could not be re-proven, so no host was adopted.");
@@ -344,6 +363,13 @@ export async function attachRpcHost(input: {
 			binary: null,
 			notice: null,
 			pid: input.pin.nativePid,
+		},
+		timings: {
+			connectMs,
+			brokerIdentity: attached.identity?.mode ?? "probe",
+			brokerIdentityMs: attached.identity?.ms ?? 0,
+			childIdentity: childReads === 0 ? "trusted" : "probe",
+			childIdentityMs: Date.now() - childStarted,
 		},
 	};
 }

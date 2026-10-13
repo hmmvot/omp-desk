@@ -803,6 +803,13 @@ export class PtyBroker {
 			oldestPosition: screen?.oldestPosition ?? this.ring.oldestSeq(),
 			notices: dropped === 0 ? [...this.notices] : [...this.notices, `${dropped} stdout line(s) above the bound were dropped`],
 			ownerStop: this.ownerMonitor.status(),
+			// The broker's own statement about the two readings above (ADR-0035, amendment 2026-10-13): its
+			// creation time was read from the kernel before the record was published, and a pipe child is
+			// still held by handle. A pseudo-console child is not (its exit report can follow its end).
+			attestation: {
+				brokerSelfRead: true,
+				childHandleLive: this.childExit === null && this.rpc !== null && this.rpc.handleHeld,
+			},
 		};
 	}
 

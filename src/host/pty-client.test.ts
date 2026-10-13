@@ -47,6 +47,7 @@ import {
 	PTY_RECORD_VERSION,
 	PTY_RUNTIME_VERSION,
 	PTY_SERVICE,
+	attestationOf,
 	createPtyToken,
 	type PtyBrokerRecord,
 } from "./pty-protocol.ts";
@@ -475,6 +476,22 @@ describe("broker end to end", { skip: SKIP }, () => {
 		assert.equal(untouched.kind === "ok" ? untouched.record.brokerId : "", bogus.brokerId);
 	});
 
+	it("attests no held child handle for a pseudo-console child, whatever the broker's kind", async () => {
+		// The host believes a broker's report of its child only while the broker holds the child's process
+		// handle. A console child's exit is reported when its output closes, which can follow the process's end,
+		// so a native Terminal broker and a folder shell must never say the handle is held.
+		const { handle: terminal } = await launchChild(nextSlot());
+		const terminalStatus = await terminal.refreshStatus();
+		assert.equal(terminalStatus.state, "running");
+		assert.deepEqual(attestationOf(terminalStatus), { brokerSelfRead: true, childHandleLive: false }, "a managed-omp broker");
+
+		const outcome = await client.launchFolderShell({ slot: nextSlot(), cwd: tmpdir(), shellPath: process.execPath, shellArgs: ["-e", MANAGED_SCRIPT], cols: 100, rows: 30 });
+		assert.equal(outcome.state, "running", outcome.reason);
+		assert.ok(outcome.handle);
+		opened.push(outcome.handle);
+		assert.deepEqual(attestationOf(await outcome.handle.refreshStatus()), { brokerSelfRead: true, childHandleLive: false }, "a folder-shell broker");
+	});
+
 	it("stops a folder shell's entire process tree, and says what it proved", async () => {
 		const slot = nextSlot();
 		const outcome = await client.launchFolderShell({
@@ -826,6 +843,13 @@ describe("broker end to end", { skip: SKIP }, () => {
 		// A shutdown closes the endpoint, not the question: the record survives as recovery
 		// metadata because nothing proved the tree gone.
 		assert.equal((await readPtyRecord(storage, slot)).kind, "ok", "the shutdown retired an unproven record");
+		// The broker closes its endpoint first and exits a moment later. The relaunch below is about a
+		// broker that is gone, so wait for that instead of racing the exit (the attach no longer spends
+		// a PowerShell run before it connects, which used to hide the race).
+		const brokerCreation = handle.record.brokerCreationTime;
+		assert.ok(brokerCreation !== null);
+		const brokerGone = await waitForPtyProcessGone(helper, handle.brokerPid, brokerCreation, 20_000);
+		assert.equal(brokerGone.gone, true, brokerGone.detail);
 		// The endpoint is gone and the tree was never proven: the slot stays occupied by an
 		// uncertain record, so no successor may take it.
 		const refused = await client.launch({

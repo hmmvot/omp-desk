@@ -9,6 +9,8 @@ date: 2026-09-27
 
 > Amended by [ADR-0038](0038-host-chat-over-rpc-ui-on-a-broker-pipe-child.md): authenticated broker re-adoption now also applies to `managed-rpc` slots and remains the only transport for them. Legacy `managed-omp` slots and hidden-terminal hosts are only *observed* (blocked, explained), never adopted or driven, and no verdict uses a Collab room.
 
+> Narrowed by the [ADR-0035](0035-distinguish-a-recorded-process-from-a-later-occupant-of-its-pid.md) amendment of 2026-10-13 (accepted after independent architecture review): the "new independent kernel reading of the child's creation time" and the broker's kernel identity reading are replaced, for a current-build broker, by the token handshake (its MAC covers the broker's pid and creation time) and by the broker's authenticated attestation that it still holds its pipe child's process handle. Older brokers and pseudo-console children keep the reading, and a reading is never reused past the proof that took it.
+
 ## Context and Problem Statement
 
 [ADR-0024](0024-own-omp-pty-for-in-tab-terminal.md) moved every new managed OMP host onto an

@@ -703,6 +703,280 @@ describe("restoreAll", () => {
 	});
 });
 
+// ── Parallel restore ────────────────────────────────────────────────────────
+
+describe("restoreAll runs rows together", () => {
+	interface RestartedRows {
+		readonly claimDir: string;
+		readonly tabIds: readonly string[];
+		readonly files: readonly string[];
+		readonly handles: ReadonlyMap<string, OmpHostHandle>;
+		readonly store: TestStore;
+	}
+
+	/** `count` rows a dead window left running: recorded hosts and held claims, as after a reload. */
+	async function restartedRows(count: number): Promise<RestartedRows> {
+		const { claimDir, sessionDir, cwd } = await tempWorkspace();
+		const store = new TestStore();
+		const first = indexFor(store, claimDir, DEAD_WINDOW);
+		const tabIds: string[] = [];
+		const files: string[] = [];
+		const handles = new Map<string, OmpHostHandle>();
+		for (let i = 0; i < count; i++) {
+			const file = await makeSessionFile(sessionDir, `S-PAR-${i}`, cwd);
+			const tab = await managedSession(first, file, cwd);
+			const base = runningHandle(`S-PAR-${i}`);
+			const handle: OmpHostHandle = { ...base, pid: 4300 + i, rpc: base.rpc === null ? null : { ...base.rpc, childPid: 4300 + i } };
+			const recorded = first.get(tab.tabId)?.sessionFile;
+			assert.ok(recorded);
+			handles.set(recorded, handle);
+			tabIds.push(tab.tabId);
+			files.push(recorded);
+		}
+		const started: OmpHostLauncher = {
+			async launch(request) {
+				const host = handles.get(request.sessionFile ?? "");
+				return host === undefined ? { state: "not-started", reason: "unscripted" } : { state: "running", host };
+			},
+			async attach() {
+				return { state: "unavailable", reason: "not scripted" };
+			},
+		};
+		const report = await first.restoreAll({ reconciler: noRecordedHost, launcher: started });
+		assert.equal(report.restored.length, count);
+		return { claimDir, tabIds, files, handles, store };
+	}
+
+	/** Proves each row's own recorded host attachable, as the real reconciler does after its identity probes. */
+	function reconcilerFor(handles: ReadonlyMap<string, OmpHostHandle>): OwnerReconciler {
+		return {
+			async reconcile(request) {
+				const host = handles.get(request.sessionFile ?? "");
+				if (host === undefined) return { kind: "unknown", detail: "no such row" };
+				return { kind: "attachable", host, pin: provenPin(host), detail: `pid ${host.pid} still hosts this session` };
+			},
+		};
+	}
+
+	/** A launcher whose attach parks each row until the test lets that row finish, and records how many were parked at once. */
+	function parkingLauncher(handles: ReadonlyMap<string, OmpHostHandle>) {
+		const arrived: string[] = [];
+		const finished: string[] = [];
+		const gates = new Map<string, PromiseWithResolvers<void>>();
+		let inFlight = 0;
+		let maxInFlight = 0;
+		const launcher: OmpHostLauncher = {
+			async launch() {
+				return { state: "not-started", reason: "an attach must never launch" };
+			},
+			async attach(request) {
+				arrived.push(request.tabId);
+				inFlight++;
+				maxInFlight = Math.max(maxInFlight, inFlight);
+				const gate = Promise.withResolvers<void>();
+				gates.set(request.tabId, gate);
+				await gate.promise;
+				inFlight--;
+				finished.push(request.tabId);
+				const host = handles.get(request.sessionFile ?? "");
+				return host === undefined ? { state: "unavailable", reason: "no such row" } : { state: "attached", host };
+			},
+		};
+		return {
+			launcher,
+			arrived,
+			finished,
+			maxInFlight: () => maxInFlight,
+			release: (tabId: string) => gates.get(tabId)?.resolve(),
+		};
+	}
+
+	/** Yield across real file-system turns, which is what a row's claim and catalog steps are made of. */
+	const turns = async (count: number): Promise<void> => {
+		for (let i = 0; i < count; i++) await stat(tmpdir());
+	};
+	/** Wait for something the restore will do, instead of guessing how long it takes. */
+	const until = async (what: string, done: () => boolean): Promise<void> => {
+		for (let i = 0; i < 5000 && !done(); i++) await turns(1);
+		assert.ok(done(), `never happened: ${what}`);
+	};
+	/** Long enough for any row that could progress to have done so; used only to show that a row did *not* progress. */
+	const settle = async (): Promise<void> => await turns(300);
+
+	it("works on rows together up to the bound, and reports them in cohort order whatever finishes first", async () => {
+		const { claimDir, tabIds, handles, store } = await restartedRows(5);
+		const index = indexFor(store, claimDir);
+		const parked = parkingLauncher(handles);
+
+		const pass = index.restoreAll({ reconciler: reconcilerFor(handles), launcher: parked.launcher, concurrency: 3 });
+		await until("three rows attaching", () => parked.arrived.length === 3);
+		await settle();
+		// Rows are started in cohort order; which of the started rows reaches the launcher first is up to their own I/O.
+		assert.deepEqual([...parked.arrived].sort(), tabIds.slice(0, 3).sort(), "the first three rows of the cohort are attached together");
+		assert.equal(parked.maxInFlight(), 3, "and no more than the bound at once");
+
+		// One row finishing frees its place for the next row of the cohort, and for no other.
+		parked.release(parked.arrived[2] as string);
+		await until("the fourth row attaching", () => parked.arrived.length === 4);
+		await settle();
+		assert.equal(parked.arrived.length, 4, "the freed place is taken once");
+		assert.equal(parked.arrived[3], tabIds[3]);
+
+		// Finish the rest in an order unrelated to the cohort's: completion order must not leak into the report.
+		parked.release(parked.arrived[3] as string);
+		await until("the fifth row attaching", () => parked.arrived.length === 5);
+		assert.equal(parked.arrived[4], tabIds[4]);
+		parked.release(parked.arrived[4] as string);
+		parked.release(parked.arrived[1] as string);
+		parked.release(parked.arrived[0] as string);
+		const report = await pass;
+
+		assert.equal(parked.maxInFlight(), 3, "the bound held for the whole pass");
+		assert.deepEqual(report.order, tabIds);
+		assert.deepEqual(report.attached.map(row => row.tabId), tabIds, "the report is in cohort order, not completion order");
+		assert.notDeepEqual(parked.finished, tabIds, "the rows really did finish in another order");
+		for (const tabId of tabIds) assert.equal(index.get(tabId)?.availability, "live");
+	});
+
+	it("takes as long as the slowest row, not the sum: three attaches that each wait for the others can only finish together", async () => {
+		const { claimDir, tabIds, handles, store } = await restartedRows(3);
+		const index = indexFor(store, claimDir);
+		// A rendezvous instead of a sleep: no attach returns until all three are inside the launcher, which a
+		// row-by-row pass could never reach. Total time is then the slowest row's, whatever the machine's speed.
+		const together = Promise.withResolvers<void>();
+		let inside = 0;
+		const rendezvous: OmpHostLauncher = {
+			async launch() {
+				return { state: "not-started", reason: "an attach must never launch" };
+			},
+			async attach(request) {
+				if (++inside === tabIds.length) together.resolve();
+				await together.promise;
+				return { state: "attached", host: handles.get(request.sessionFile ?? "") as OmpHostHandle };
+			},
+		};
+
+		const pass = index.restoreAll({ reconciler: reconcilerFor(handles), launcher: rendezvous });
+		await until("three rows attaching", () => inside === tabIds.length);
+		assert.equal(inside, tabIds.length, "all three rows were attaching at the same time");
+		const report = await pass;
+
+		assert.deepEqual(report.attached.map(row => row.tabId), tabIds);
+	});
+
+	it("lets one row's refusal or failure leave the other rows restored", async () => {
+		const { claimDir, tabIds, files, handles, store } = await restartedRows(4);
+		await rm(files[1] as string, { force: true });
+		const index = indexFor(store, claimDir);
+		const failing: OmpHostLauncher = {
+			async launch() {
+				return { state: "not-started", reason: "an attach must never launch" };
+			},
+			async attach(request) {
+				if (request.tabId === tabIds[2]) throw new Error("the broker connection was reset");
+				return { state: "attached", host: handles.get(request.sessionFile ?? "") as OmpHostHandle };
+			},
+		};
+
+		const report = await index.restoreAll({ reconciler: reconcilerFor(handles), launcher: failing });
+
+		assert.deepEqual(report.attached.map(row => row.tabId), [tabIds[0], tabIds[3]], "the rows around the bad ones are still attached");
+		assert.deepEqual(report.failures.map(row => [row.tabId, row.kind]), [[tabIds[1], "missing-file"]]);
+		assert.deepEqual(report.conflicts.map(row => [row.tabId, row.kind]), [[tabIds[2], "live"]], "a throwing attach is that row's refusal only");
+		assert.match(report.conflicts[0]?.detail ?? "", /the broker connection was reset/);
+	});
+
+	it("still keeps one writer for two rows of one batch, deciding in cohort order even when the later row is ready first", async () => {
+		const { claimDir, sessionDir, cwd } = await tempWorkspace();
+		const index = indexFor(new TestStore(), claimDir);
+		const file = await makeSessionFile(sessionDir, "S-PAR-DUP", cwd);
+		const first = await managedSession(index, file, cwd);
+		const second = await managedSession(index, file, cwd);
+		// The first row is parked inside its own lifecycle gate, so the second reaches the duplicate check
+		// well before it would in a sequential pass.
+		const gate = holdGate(index, first.tabId);
+		const { launcher, requests } = recordingLauncher({ state: "running", host: runningHandle("S-PAR-DUP") });
+
+		const pass = index.restoreAll({ reconciler: noRecordedHost, launcher });
+		await settle();
+		assert.equal(requests.length, 0, "the later row does not take the identity ahead of the earlier row");
+		gate.release();
+		const report = await pass;
+
+		assert.equal(requests.length, 1, "exactly one host is started");
+		assert.equal(requests[0]?.tabId, first.tabId);
+		assert.deepEqual(report.restored.map(row => row.tabId), [first.tabId]);
+		assert.deepEqual(report.conflicts.map(row => [row.tabId, row.kind]), [[second.tabId, "duplicate"]]);
+	});
+
+	it("does not let a row that shares no identity wait for a held row", async () => {
+		const { claimDir, tabIds, handles, store } = await restartedRows(2);
+		const index = indexFor(store, claimDir);
+		const gate = holdGate(index, tabIds[0] as string);
+		const parked = parkingLauncher(handles);
+
+		const pass = index.restoreAll({ reconciler: reconcilerFor(handles), launcher: parked.launcher });
+		await until("the free row attaching", () => parked.arrived.length >= 1);
+		await settle();
+		assert.deepEqual(parked.arrived, [tabIds[1]], "the second row is attached while the first still waits for its gate");
+		parked.release(tabIds[1] as string);
+		gate.release();
+		await until("the held row attaching", () => parked.arrived.length === 2);
+		parked.release(tabIds[0] as string);
+		const report = await pass;
+		assert.deepEqual(report.attached.map(row => row.tabId), tabIds);
+	});
+
+	it("starts no row after the signal aborted", async () => {
+		const { claimDir, tabIds, handles, store } = await restartedRows(3);
+		const index = indexFor(store, claimDir);
+		const controller = new AbortController();
+		const parked = parkingLauncher(handles);
+
+		const pass = index.restoreAll({ reconciler: reconcilerFor(handles), launcher: parked.launcher, concurrency: 1, signal: controller.signal });
+		await until("the first row attaching", () => parked.arrived.length === 1);
+		await settle();
+		assert.deepEqual(parked.arrived, [tabIds[0]]);
+		controller.abort();
+		parked.release(tabIds[0] as string);
+		const report = await pass;
+
+		assert.deepEqual(parked.arrived, [tabIds[0]], "an aborted pass attaches nothing further");
+		assert.deepEqual(report.attached.map(row => row.tabId), [tabIds[0]]);
+		assert.deepEqual(report.skipped, [tabIds[1], tabIds[2]]);
+	});
+
+	it("logs one compact line per row with the duration of each step", async () => {
+		const { claimDir, tabIds, files, handles, store } = await restartedRows(2);
+		const lines: string[] = [];
+		const index = new SessionIndex({ store, claimStorageDir: claimDir, log: line => lines.push(line) });
+		const launcher: OmpHostLauncher = {
+			async launch() {
+				return { state: "not-started", reason: "an attach must never launch" };
+			},
+			async attach(request) {
+				return {
+					state: "attached",
+					host: handles.get(request.sessionFile ?? "") as OmpHostHandle,
+					timings: { connect: 7, conversation: 3 },
+				};
+			},
+		};
+
+		await index.restoreAll({ reconciler: reconcilerFor(handles), launcher });
+
+		const rows = lines.filter(line => line.startsWith("window timing: restore tab "));
+		assert.equal(rows.length, 2);
+		for (const [position, tabId] of tabIds.entries()) {
+			const line = rows.find(candidate => candidate.startsWith(`window timing: restore tab ${tabId} `));
+			assert.ok(line !== undefined, `a line for ${tabId}`);
+			assert.ok(line.startsWith(`window timing: restore tab ${tabId} attached in `), line);
+			assert.match(line, / · admission \d+ · reconcile \d+ · attach \d+ \(connect 7, conversation 3\) · persist \d+$/);
+			assert.ok(!line.includes(files[position] as string), "a log line names no file path");
+		}
+	});
+});
+
 // ── Deferred draft reconciliation ───────────────────────────────────────────
 
 describe("reconcileDeferred", () => {

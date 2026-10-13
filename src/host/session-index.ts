@@ -16,6 +16,8 @@ import { randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
 import * as path from "node:path";
 import { FILE_OPERATION_BACKOFF_MS, retryFileOperation } from "./atomic-file.ts";
+import { IdentityTurns, RESTORE_CONCURRENCY, RestoreStepTimer, mapBounded } from "./session-restore-trace.ts";
+import type { IdentityTurn, OmpHostStepTimings } from "./session-restore-trace.ts";
 import {
 	ClaimConflictError,
 	ClaimOwnershipError,
@@ -209,7 +211,7 @@ export interface OmpHostLaunchRequest {
  * still have a writer.
  */
 export type OmpHostLaunchResult =
-	| { readonly state: "running"; readonly host: OmpHostHandle }
+	| { readonly state: "running"; readonly host: OmpHostHandle; readonly timings?: OmpHostStepTimings }
 	| { readonly state: "not-started"; readonly reason: string }
 	| { readonly state: "unconfirmed"; readonly reason: string };
 
@@ -235,9 +237,9 @@ export interface OmpHostAttachRequest extends OmpHostLaunchRequest {
 
 /** Outcome of one attach attempt. */
 export type OmpHostAttachResult =
-	| { readonly state: "attached"; readonly host: OmpHostHandle }
+	| { readonly state: "attached"; readonly host: OmpHostHandle; readonly timings?: OmpHostStepTimings }
 	/** The host could not be confirmed or reached; release the operation lease and recheck ownership. */
-	| { readonly state: "unavailable"; readonly reason: string };
+	| { readonly state: "unavailable"; readonly reason: string; readonly timings?: OmpHostStepTimings };
 
 /** Launches or reattaches the native OMP host; implemented by the caller's terminal integration. */
 export interface OmpHostLauncher {
@@ -375,6 +377,13 @@ export interface RestoreAllOptions extends RestoreOptions {
 	 * for one row, and the second is refused as a duplicate.
 	 */
 	readonly only?: ReadonlySet<string>;
+	/**
+	 * How many rows the pass restores at once. Defaults to {@link RESTORE_CONCURRENCY}.
+	 *
+	 * Each row's own steps stay in order and its tab's lifecycle gate is held throughout; only
+	 * different rows overlap. The report and the log stay in cohort order whatever the completion order.
+	 */
+	readonly concurrency?: number;
 }
 
 /** Per-tab results of one restore pass; every array is independent. */
@@ -573,6 +582,16 @@ type LaunchStep =
  * recorded, and a row with no such host stays a draft nobody starts.
  */
 type DraftRestoreIntent = "open" | "reattach";
+
+/**
+ * What a restore pass hands one row so the row can be ordered against, and timed beside, the others.
+ * Optional everywhere: a single explicit restore has neither.
+ */
+interface RestoreTrace {
+	/** This row's place among the pass's rows that name the same session identity. */
+	readonly turn: IdentityTurn;
+	readonly timer: RestoreStepTimer;
+}
 
 /**
  * Durable index of the OMP sessions this extension manages.
@@ -1135,14 +1154,39 @@ export class SessionIndex {
 		// so it also lifts a row's stopped intent for this pass.
 		const draftIntent: DraftRestoreIntent = options.restoreDrafts === true ? "open" : "reattach";
 		const pass: RestoreOptions = options.restoreDrafts === true ? { ...options, resumeStopped: true } : { ...options, automatic: true };
-		for (const tabId of order) {
+		// Rows run together, at most `concurrency` at a time, and start in cohort order. Each row
+		// is still its own tab's whole restore under that tab's lifecycle gate; what is shared is
+		// serialized where it already was: catalog writes go through the one persist chain, and the
+		// duplicate-identity rule is decided in cohort order among rows that name the same identity.
+		const rows = order.flatMap(tabId => {
 			const entry = this.#entries.get(tabId);
-			if (entry === undefined) continue;
+			return entry === undefined ? [] : [entry];
+		});
+		const turns = new IdentityTurns();
+		const outcomes = await mapBounded(rows, options.concurrency ?? RESTORE_CONCURRENCY, async (entry): Promise<RestoreOutcome> => {
+			const tabId = entry.tabId;
 			if (options.signal?.aborted === true) {
-				skipped.push(tabId);
-				continue;
+				return { status: "skipped", tabId, detail: "Restore was cancelled before this tab was started." };
 			}
-			const outcome = await this.#restoreEntry(entry, pass, takenIdentities, draftIntent);
+			const timer = new RestoreStepTimer();
+			const turn = turns.next(restoreIdentityKey(entry));
+			let outcome: RestoreOutcome;
+			try {
+				outcome = await this.#restoreEntry(entry, pass, takenIdentities, draftIntent, { turn, timer });
+			} catch (error) {
+				// One row's unexpected failure is that row's failure; the others carry on.
+				outcome = { status: "failed", tabId, kind: "index-error", detail: describeError(error) };
+			} finally {
+				turn.release();
+			}
+			const kind = outcome.status === "conflict" || outcome.status === "failed" ? `:${outcome.kind}` : "";
+			this.#log?.(`window timing: restore tab ${tabId} ${timer.finish(`${outcome.status}${kind}`)}`);
+			return outcome;
+		});
+		// The report is folded in cohort order, never in completion order.
+		for (const [position, outcome] of outcomes.entries()) {
+			const entry = rows[position] as MutableEntry;
+			const tabId = entry.tabId;
 			switch (outcome.status) {
 				case "restored":
 					restored.push({ tabId, sessionFile: outcome.sessionFile, host: outcome.host });
@@ -1422,6 +1466,7 @@ export class SessionIndex {
 		options: RestoreOptions,
 		takenIdentities: Map<string, string>,
 		draftIntent: DraftRestoreIntent,
+		trace?: RestoreTrace,
 	): Promise<RestoreOutcome> {
 		const tabId = entry.tabId;
 		if (this.#restoring.has(tabId)) {
@@ -1443,7 +1488,7 @@ export class SessionIndex {
 						detail: "This tab was removed from the session index before its host could be started.",
 					};
 				}
-				return await this.#openEntry(entry, options, takenIdentities, draftIntent);
+				return await this.#openEntry(entry, options, takenIdentities, draftIntent, trace);
 			});
 		} finally {
 			this.#restoring.delete(tabId);
@@ -1456,6 +1501,7 @@ export class SessionIndex {
 		options: RestoreOptions,
 		takenIdentities: Map<string, string>,
 		draftIntent: DraftRestoreIntent,
+		trace?: RestoreTrace,
 	): Promise<RestoreOutcome> {
 		const tabId = entry.tabId;
 		// A runtime this window drives is already open here. A record retained from a
@@ -1463,6 +1509,7 @@ export class SessionIndex {
 		// is reported through the stopped path below and its intent is never flipped
 		// back to running by a restore that adopted nothing.
 		if (this.#drivesHost(tabId)) {
+			trace?.turn.release();
 			entry.runIntent = "running";
 			await this.#touch(entry, "live", "This window is already running the native host for this tab.");
 			await this.#persist();
@@ -1473,14 +1520,15 @@ export class SessionIndex {
 		// takes no claim while deciding: only an explicit Open/Resume
 		// (`resumeStopped`) may, because opening a stopped row is exactly that.
 		if (entry.runIntent === "stopped" && options.resumeStopped !== true) {
-			return await this.#reportStoppedEntry(entry, options.reconciler);
+			trace?.turn.release();
+			return await this.#reportStoppedEntry(entry, options.reconciler, trace);
 		}
 		// A row that is still fileless when it is admitted may only be reattached to
 		// the host this index recorded; starting one stays an explicit action. A row
 		// that gained its session file before admission — a promotion that reached
 		// it first — is opened as usual.
 		if (draftIntent === "reattach" && entry.sessionFile === null) {
-			return await this.#reattachDraft(entry, options, takenIdentities);
+			return await this.#reattachDraft(entry, options, takenIdentities, trace);
 		}
 
 		try {
@@ -1535,8 +1583,12 @@ export class SessionIndex {
 			// One writable session per pass: a second tab for the same session is
 			// a conflict, never a second writer.
 			const key = normalizeSessionIdentityKey(target);
+			// Rows that name this identity pass this check one after another in cohort order, so the
+			// first row of the cohort to reach it is the one that keeps it, as in a sequential pass.
+			await trace?.turn.wait();
 			const ownerTab = takenIdentities.get(key);
 			if (ownerTab !== undefined) {
+				trace?.turn.release();
 				return {
 					status: "conflict",
 					tabId,
@@ -1545,6 +1597,7 @@ export class SessionIndex {
 				};
 			}
 			takenIdentities.set(key, tabId);
+			trace?.turn.release();
 
 			const observed = await this.#readClaim(target);
 			const claimBefore = observed.ok ? observed.claim : null;
@@ -1608,7 +1661,7 @@ export class SessionIndex {
 				// Reconcile external ownership while the claim is held: only `free`
 				// may start a process, only `attachable` may reconnect to the host
 				// this index recorded, and everything else stays a conflict.
-				const verdict = await this.#reconcile(entry, claimBefore, options.reconciler);
+				const verdict = await this.#timed(trace, "reconcile", () => this.#reconcile(entry, claimBefore, options.reconciler));
 				const classification = classifySessionAvailability({
 					entry: toEntry(entry),
 					fileExists: entry.sessionFile !== null,
@@ -1629,7 +1682,7 @@ export class SessionIndex {
 					// attachable verdict) the row stays a conflict rather than
 					// falling through to a launch.
 					if (attachable !== null && recorded !== null && pin !== null) {
-						const attached = await this.#attach(entry, claim, options.launcher, recorded, pin);
+						const attached = await this.#attach(entry, claim, options.launcher, recorded, pin, trace);
 						if (attached.kind === "attached") {
 							const handle = attached.handle;
 							this.#live.set(tabId, { claim, host: handle, sessionFile: entry.sessionFile, driven: true });
@@ -1652,7 +1705,7 @@ export class SessionIndex {
 							return { status: "attached", tabId, sessionFile: entry.sessionFile, detail: classification.detail };
 						}
 						await this.#releaseQuietly(claim);
-						const current = await this.#reconcile(entry, null, options.reconciler);
+						const current = await this.#timed(trace, "reconcile", () => this.#reconcile(entry, null, options.reconciler));
 						const stillOwned = current.kind === "live" || current.kind === "attachable";
 						const detail = `Reattaching failed: ${attached.reason}`;
 						await this.#touch(entry, stillOwned ? "live" : "saved", detail);
@@ -1703,22 +1756,22 @@ export class SessionIndex {
 					const binding = this.#bindings.get(options.editorSlotId);
 					if (binding !== undefined) this.#bindings.set(binding.slotId, { ...binding, mode: options.mode });
 				}
-				await this.#persist();
-				if (this.#persistError !== null) {
+				const recordFailure = await this.#persistNow();
+				if (recordFailure !== null) {
 					// The attempt could not be recorded, so it must not happen: an
 					// unrecorded attempt is indistinguishable from one that started.
 					entry.host = previousHost;
 					entry.sessionId = previousSessionId;
 					const release = heldBefore ? null : await this.#releaseQuietly(claim);
 					const detail = withReleaseNotice(
-						`The launch attempt could not be recorded (${this.#persistError}), so no native host was started.`,
+						`The launch attempt could not be recorded (${recordFailure}), so no native host was started.`,
 						release,
 					);
 					await this.#touch(entry, "failed", detail);
 					await this.#persist();
 					return { status: "failed", tabId, kind: "index-error", detail };
 				}
-				step = await this.#launch(entry, claim, options.launcher);
+				step = await this.#launch(entry, claim, options.launcher, trace);
 			} catch (error) {
 				// Nothing was started: reconciliation or classification failed
 				// before the launch, so the identity goes back.
@@ -1790,13 +1843,13 @@ export class SessionIndex {
 	 * `lastActiveAt` is deliberately not touched: re-deriving a row's state is not
 	 * the user being active in it, so a restart cannot move the recovered focus.
 	 */
-	async #reportStoppedEntry(entry: MutableEntry, reconciler: OwnerReconciler): Promise<RestoreOutcome> {
+	async #reportStoppedEntry(entry: MutableEntry, reconciler: OwnerReconciler, trace?: RestoreTrace): Promise<RestoreOutcome> {
 		const tabId = entry.tabId;
 		const target = entry.sessionFile ?? entry.ownership?.draftIdentity ?? null;
 		const observed = target === null ? { ok: true as const, claim: null } : await this.#readClaim(target);
 		const claim = observed.ok ? observed.claim : null;
 		const verdict = observed.ok
-			? await this.#reconcile(entry, claim, reconciler)
+			? await this.#timed(trace, "reconcile", () => this.#reconcile(entry, claim, reconciler))
 			: { kind: "unknown" as const, detail: observed.detail };
 		const classification = classifySessionAvailability({
 			entry: toEntry(entry),
@@ -1853,6 +1906,7 @@ export class SessionIndex {
 		entry: MutableEntry,
 		options: RestoreOptions,
 		takenIdentities: Map<string, string>,
+		trace?: RestoreTrace,
 	): Promise<RestoreOutcome> {
 		const tabId = entry.tabId;
 		const recorded = entry.host;
@@ -1878,7 +1932,7 @@ export class SessionIndex {
 			return { status: "failed", tabId, kind: "ambiguous-cwd", detail: cwdRefusal };
 		}
 		const observed = await this.#readClaim(identity);
-		const verdict = await this.#reconcile(entry, observed.ok ? observed.claim : null, options.reconciler);
+		const verdict = await this.#timed(trace, "reconcile", () => this.#reconcile(entry, observed.ok ? observed.claim : null, options.reconciler));
 		const classification = classifySessionAvailability({
 			entry: toEntry(entry),
 			fileExists: false,
@@ -1906,8 +1960,10 @@ export class SessionIndex {
 		// two rows claiming one reserved identity would share one claim handle, and
 		// releasing it from either row would strand the other's live record.
 		const key = normalizeSessionIdentityKey(identity);
+		await trace?.turn.wait();
 		const ownerTab = takenIdentities.get(key);
 		if (ownerTab !== undefined) {
+			trace?.turn.release();
 			const detail =
 				"This session is already open in another editor. Continue there.";
 			await this.#touch(entry, entry.sessionFile === null ? "draft" : "saved", detail);
@@ -1915,6 +1971,7 @@ export class SessionIndex {
 			return { status: "conflict", tabId, kind: "duplicate", detail };
 		}
 		takenIdentities.set(key, tabId);
+		trace?.turn.release();
 		// The classification above is authority only for the claim it was computed
 		// from. The holder lease is what keeps two windows from holding one
 		// session, so it is taken for that exact reserved identity before anything
@@ -1931,10 +1988,10 @@ export class SessionIndex {
 			await this.#persist();
 			return { status: "conflict", tabId, kind: "claim-conflict", detail };
 		}
-		const attached = await this.#attach(entry, claim, options.launcher, recorded, attachPin);
+		const attached = await this.#attach(entry, claim, options.launcher, recorded, attachPin, trace);
 		if (attached.kind !== "attached") {
 			await this.#releaseQuietly(claim);
-			const current = await this.#reconcile(entry, null, options.reconciler);
+			const current = await this.#timed(trace, "reconcile", () => this.#reconcile(entry, null, options.reconciler));
 			const stillOwned = current.kind === "live" || current.kind === "attachable";
 			const detail = `Reattaching failed: ${attached.reason}`;
 			await this.#touch(entry, stillOwned ? "live" : "draft", detail);
@@ -2714,10 +2771,16 @@ export class SessionIndex {
 		);
 	}
 
+	/** Run one launcher-or-reconcile call, timing it when the row is part of a restore pass. */
+	#timed<T>(trace: RestoreTrace | undefined, step: "reconcile" | "attach" | "launch", work: () => Promise<T>): Promise<T> {
+		return trace === undefined ? work() : trace.timer.measure(step, work);
+	}
+
 	async #launch(
 		entry: MutableEntry,
 		claim: SessionClaim,
 		launcher: OmpHostLauncher,
+		trace?: RestoreTrace,
 	): Promise<LaunchStep> {
 		const request: OmpHostLaunchRequest = {
 			tabId: entry.tabId,
@@ -2731,10 +2794,11 @@ export class SessionIndex {
 		};
 		let result: OmpHostLaunchResult;
 		try {
-			result = await launcher.launch(request);
+			result = await this.#timed(trace, "launch", () => launcher.launch(request));
 		} catch (error) {
 			return { kind: "unconfirmed", detail: `The launch integration threw: ${describeError(error)}` };
 		}
+		trace?.timer.detail("launch", result.state === "running" ? result.timings : undefined);
 		switch (result.state) {
 			case "running":
 				return { kind: "running", handle: result.host };
@@ -2757,6 +2821,7 @@ export class SessionIndex {
 		launcher: OmpHostLauncher,
 		recorded: RecordedHost,
 		pin: AttachPin,
+		trace?: RestoreTrace,
 	): Promise<{ readonly kind: "attached"; readonly handle: OmpHostHandle } | { readonly kind: "unavailable"; readonly reason: string }> {
 		const request: OmpHostAttachRequest = {
 			tabId: entry.tabId,
@@ -2772,10 +2837,11 @@ export class SessionIndex {
 		};
 		let result: OmpHostAttachResult;
 		try {
-			result = await launcher.attach(request);
+			result = await this.#timed(trace, "attach", () => launcher.attach(request));
 		} catch (error) {
 			return { kind: "unavailable", reason: `The attach integration threw: ${describeError(error)}` };
 		}
+		trace?.timer.detail("attach", result.timings);
 		if (result.state === "attached") return { kind: "attached", handle: result.host };
 		return { kind: "unavailable", reason: result.reason };
 	}
@@ -3387,6 +3453,12 @@ function withReleaseNotice(detail: string, release: string | null): string {
 
 function describeError(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+/** The identity a row would claim, normalized as the pass's duplicate rule compares it; `null` when none is known yet. */
+function restoreIdentityKey(entry: MutableEntry): string | null {
+	const target = entry.sessionFile ?? entry.ownership?.draftIdentity ?? null;
+	return target === null ? null : normalizeSessionIdentityKey(target);
 }
 
 /** Whether a value is a non-array object, the only shape a record field may have. */

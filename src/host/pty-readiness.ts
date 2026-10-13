@@ -34,9 +34,11 @@ export interface PtyReadinessGate {
 	/**
 	 * The client when it can re-adopt an already-running broker, or `null` when it cannot (yet).
 	 *
-	 * Weaker than {@link client} on purpose: an attach needs only the verified identity probe,
-	 * so it does not wait for the broker tree's staging and self-check, which guard *starting*
-	 * a child (ADR-0032). A fully proven runtime answers here too.
+	 * Weaker than {@link client} on purpose: an attach needs only this build's tree digest and
+	 * runtime version (hashed in place, nothing staged), so it waits for neither the broker
+	 * tree's staging and self-check (which guard *starting* a child, ADR-0032) nor the probe
+	 * helper's staging, which happens only when a kernel reading is needed. A fully proven
+	 * runtime answers here too.
 	 */
 	attachClient(): Promise<PtyBrokerClient | null>;
 	/** Why the last check did not prove the runtime, or `null` when it did. */
@@ -74,12 +76,14 @@ export function createPtyReadinessGate(input: {
 
 	const checkAttach = async (): Promise<boolean> => {
 		try {
-			const ready = await input.client.attachReady();
+			// Staging-free: a broker that attests itself needs no probe helper, which is staged later and
+			// only if a kernel reading is actually needed (`PtyBrokerClient.attachIdentity`).
+			const ready = await input.client.attachIdentity();
 			attachProven = ready.ready;
 			attachRetryAt = ready.ready ? 0 : now() + retryMs;
 			if (!ready.ready) {
 				reason = ready.reason;
-				input.onFailure?.(ready.reason ?? "the identity probe did not prove itself");
+				input.onFailure?.(ready.reason ?? "this build's broker runtime could not be identified");
 			}
 			return ready.ready;
 		} catch (error) {

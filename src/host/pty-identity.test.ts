@@ -21,10 +21,12 @@ import * as path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+	PtyIdentityReadings,
 	isPtyProcessAlive,
 	queryPtyProcessIdentity,
 	queryPtyProcessTree,
 	waitForPtyProcessGone,
+	type PtyIdentityReading,
 	type PtyProbeHelper,
 } from "./pty-identity.ts";
 import { windowsPowerShellEnvironment, windowsPowerShellExecutable } from "./windows-powershell.ts";
@@ -163,5 +165,54 @@ describe("helper integrity", windowsOnly, () => {
 		assert.equal(reading.kind, "unknown");
 		assert.match(reading.detail, /could not be started/);
 		assert.equal((await queryPtyProcessTree(tampered, process.pid)).kind, "unknown");
+	});
+});
+
+describe("attachment-proof readings", () => {
+	const helperOf = (sha256: string): PtyProbeHelper => ({ path: "unused.ps1", sha256 }) as PtyProbeHelper;
+
+	it("shares one probe among proofs of a pid that are in flight together, and keeps nothing afterwards", async () => {
+		const asked: number[] = [];
+		const pending: Array<PromiseWithResolvers<PtyIdentityReading>> = [];
+		const readings = new PtyIdentityReadings({
+			query: (_helper, pid) => {
+				asked.push(pid);
+				const gate = Promise.withResolvers<PtyIdentityReading>();
+				pending.push(gate);
+				return gate.promise;
+			},
+		});
+		const helper = helperOf("a");
+		const first = readings.read(helper, 10);
+		const second = readings.read(helper, 10);
+		const other = readings.read(helper, 11);
+		assert.deepEqual(asked, [10, 11], "one probe per pid while they are in flight");
+		pending[0]!.resolve({ kind: "found", creationTime: "T1" });
+		pending[1]!.resolve({ kind: "found", creationTime: "T3" });
+		assert.deepEqual(await Promise.all([first, second, other]), [
+			{ kind: "found", creationTime: "T1" },
+			{ kind: "found", creationTime: "T1" },
+			{ kind: "found", creationTime: "T3" },
+		]);
+
+		// The pid changed hands after the answer: the next proof must see that, not the earlier process.
+		const later = readings.read(helper, 10);
+		assert.deepEqual(asked, [10, 11, 10], "an answered probe is not reused");
+		pending[2]!.resolve({ kind: "found", creationTime: "T2" });
+		assert.deepEqual(await later, { kind: "found", creationTime: "T2" });
+	});
+
+	it("does not let a refused probe poison the next proof", async () => {
+		let calls = 0;
+		const readings = new PtyIdentityReadings({
+			query: async () => {
+				calls += 1;
+				if (calls === 1) throw new Error("the probe could not start");
+				return { kind: "found", creationTime: "T" };
+			},
+		});
+		const helper = helperOf("b");
+		await assert.rejects(readings.read(helper, 5), /could not start/);
+		assert.deepEqual(await readings.read(helper, 5), { kind: "found", creationTime: "T" });
 	});
 });

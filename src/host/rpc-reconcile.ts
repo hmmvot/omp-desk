@@ -21,7 +21,8 @@ import type { PtyShutdownResult } from "./broker-handle";
 import { isPtyProcessAlive, queryPtyProcessIdentity } from "./pty-identity";
 import type { PtyIdentityReading } from "./pty-identity";
 import type { PtyBrokerClient } from "./pty-client";
-import type { PtyBrokerRecord, PtyKind, PtyStopResult } from "./pty-protocol";
+import { attestationOf } from "./pty-protocol";
+import type { PtyBrokerRecord, PtyKind, PtyStatusPayload, PtyStopResult } from "./pty-protocol";
 import { isManagedHost } from "./session-model";
 import type { RecordedRpcIdentity } from "./session-model";
 import type {
@@ -60,6 +61,8 @@ export interface AttachedBrokerHandle {
 	readonly nativePid: number | null;
 	readonly nativeCreationTime: string | null;
 	readonly state: "running" | "exited" | null;
+	/** The last status the broker reported; its attestation decides whether a kernel reading of the child is needed. Absent from a test handle. */
+	readonly statusValue?: PtyStatusPayload | null;
 }
 
 /** An attached handle a probe or a stop must be able to close. */
@@ -151,10 +154,12 @@ function messageOf(error: unknown): string {
 /**
  * The exact managed host one attachment proves, or why it proves nothing.
  *
- * Every clause is a live fact the broker answered about *its own* child, plus one reading
- * this window makes itself: the child's kernel creation time, read through the staged
- * probe helper, must equal the value the broker captured when it spawned that child.
- * Without that second reading a process id alone cannot be told from a reused one.
+ * Every clause is a live fact the broker answered about *its own* child, plus one fact about
+ * the child's kernel creation time: it must equal the value the broker captured when it spawned
+ * that child. A broker that still holds the child's process handle attests that in its
+ * authenticated status, which reserves the pid, so its own report is that fact (ADR-0035,
+ * amendment 2026-10-13); every other child is read by this window through `readNativeGeneration`.
+ * Without one or the other a process id alone cannot be told from a reused one.
  */
 export async function provedBrokerPin(
 	handle: AttachedBrokerHandle,
@@ -184,22 +189,37 @@ export async function provedBrokerPin(
 				"the broker captured no kernel creation time for its child, so that process id cannot be told apart from a reused one",
 		};
 	}
-	const reading = await readNativeGeneration(pid);
-	if (reading.kind !== "found") {
-		// The helper's own detail is deliberately not forwarded (ADR-0017).
-		return {
-			ok: false,
-			reason:
-				reading.kind === "gone"
-					? `the broker's child process ${pid} is gone`
-					: `the broker's child process ${pid} could not be identified`,
-		};
-	}
-	if (reading.creationTime !== captured) {
-		return {
-			ok: false,
-			reason: `process ${pid} is not the child this broker started: its creation time does not match`,
-		};
+	// A broker that still holds its child's process handle says so in its authenticated status: the pid is
+	// reserved for that child, so its own report of the pid and creation time replaces this window's reading
+	// (ADR-0035, amendment 2026-10-13). Anything less — an older broker, a pseudo-console child, a child whose exit was
+	// already seen — is read through the kernel as before.
+	const status = handle.statusValue ?? null;
+	const attestation = status === null ? null : attestationOf(status);
+	const attested =
+		status !== null &&
+		attestation !== null &&
+		status.state === "running" &&
+		attestation.childHandleLive &&
+		status.nativePid === pid &&
+		status.nativeCreationTime === captured;
+	if (!attested) {
+		const reading = await readNativeGeneration(pid);
+		if (reading.kind !== "found") {
+			// The helper's own detail is deliberately not forwarded (ADR-0017).
+			return {
+				ok: false,
+				reason:
+					reading.kind === "gone"
+						? `the broker's child process ${pid} is gone`
+						: `the broker's child process ${pid} could not be identified`,
+			};
+		}
+		if (reading.creationTime !== captured) {
+			return {
+				ok: false,
+				reason: `process ${pid} is not the child this broker started: its creation time does not match`,
+			};
+		}
 	}
 	return {
 		ok: true,
@@ -258,6 +278,23 @@ export async function brokerNativeGenerationReader(client: PtyBrokerClient): Pro
 	const helper = ready.ready ? ready.helper : null;
 	if (helper === null) return null;
 	return pid => queryPtyProcessIdentity(helper, pid);
+}
+
+/**
+ * The kernel reader an attachment proof uses: the staged probe helper is staged on the first
+ * *call*, not before it. A proof of a child its broker attests never calls it, so the first
+ * attach of a window does not wait on the helper's staging and access verification. Readings
+ * go through {@link PtyBrokerClient.identityReading}, which shares only probes that are in
+ * flight: every proof that starts after an answer reads the kernel again.
+ */
+export function lazyNativeGenerationReader(client: PtyBrokerClient): NativeGenerationReader {
+	return async pid => {
+		try {
+			return await client.identityReading(pid);
+		} catch (error) {
+			return { kind: "unknown", detail: messageOf(error) };
+		}
+	};
 }
 
 /** The reading this window takes of a process when no broker can be asked. */
@@ -329,9 +366,10 @@ async function attachRecorded(client: PtyBrokerClient, slot: string): Promise<Lo
  *
  * The verdict is a statement about the recorded pair only: the slot must still be the
  * broker generation the row recorded, and the child either runs with the recorded pid and
- * creation time (both the broker's capture and this window's own kernel reading agree) or
- * the broker reports that exact child exited. A slot that names another generation or
- * child is a `mismatch`, never this row's writer and never its absence.
+ * creation time (the broker's capture, confirmed by its authenticated attestation that it
+ * still holds the child's process handle, or else by this window's own kernel reading taken
+ * for this proof) or the broker reports that exact child exited. A slot that names another
+ * generation or child is a `mismatch`, never this row's writer and never its absence.
  */
 export async function probeRpcHost(input: {
 	readonly client: PtyBrokerClient;
@@ -399,22 +437,8 @@ async function probeRpcHostOnce(input: Parameters<typeof probeRpcHost>[0]): Prom
 			}
 			return { kind: "child-exited", childPid: handle.nativePid, brokerGeneration: expected.brokerGeneration };
 		}
-		let reader: NativeGenerationReader | null;
-		if (input.readNativeGeneration !== undefined) {
-			reader = input.readNativeGeneration;
-		} else {
-			try {
-				reader = await brokerNativeGenerationReader(input.client);
-			} catch {
-				return { kind: "unreachable", reason: "the PTY broker runtime could not be verified" };
-			}
-		}
-		if (reader === null) {
-			return {
-				kind: "unreachable",
-				reason: "the PTY broker runtime has no process probe, so its child's identity cannot be proven",
-			};
-		}
+		// The staged probe helper is only staged if a kernel reading is actually needed.
+		const reader = input.readNativeGeneration ?? lazyNativeGenerationReader(input.client);
 		const proved = await provedBrokerPin(handle, reader, input.kind ?? "managed-rpc");
 		if (!proved.ok) return { kind: "unreachable", reason: proved.reason };
 		if (proved.pin.nativePid !== expected.childPid || proved.pin.nativeCreationTime !== expected.childCreationTime) {
@@ -470,13 +494,7 @@ export async function probeBrokerSlotForRunningChild(input: {
 		if ((input.recordedPid ?? null) !== null && pid !== input.recordedPid) {
 			return { kind: "failed", reason: "the broker's child is not the process this session recorded" };
 		}
-		let reader: NativeGenerationReader | null;
-		try {
-			reader = input.readNativeGeneration ?? await brokerNativeGenerationReader(input.client);
-		} catch {
-			return { kind: "failed", reason: "the child's process generation could not be verified" };
-		}
-		if (reader === null) return { kind: "failed", reason: "the child's process generation could not be verified" };
+		const reader = input.readNativeGeneration ?? lazyNativeGenerationReader(input.client);
 		const proved = await provedBrokerPin(handle, reader, handle.kind);
 		if (!proved.ok) return { kind: "failed", reason: proved.reason };
 		return { kind: "live", pid };
@@ -593,24 +611,10 @@ export async function stopBrokerOwnedHost(input: {
 	// Set the instant the stop request is attempted; a failure after it is uncertainty.
 	let dispatched = false;
 	try {
-		let reader: NativeGenerationReader;
-		if (input.readNativeGeneration !== undefined) {
-			reader = input.readNativeGeneration;
-		} else {
-			try {
-				const staged = await brokerNativeGenerationReader(input.client);
-				if (staged === null) {
-					return {
-						ok: false,
-						dispatched: false,
-						reason: "the PTY broker runtime has no process probe, so its child's identity cannot be proven",
-					};
-				}
-				reader = staged;
-			} catch {
-				return { ok: false, dispatched: false, reason: "the PTY broker runtime could not be verified" };
-			}
-		}
+		// Lazy, like every attach: an attested child is proved from the broker's own status and needs no
+		// helper, so the stop does not wait for one; a reading that is needed stages it then, and a runtime
+		// that cannot supply one refuses the stop before anything is dispatched.
+		const reader: NativeGenerationReader = input.readNativeGeneration ?? lazyNativeGenerationReader(input.client);
 		const kind: PtyKind = handle.kind === "managed-omp" ? "managed-omp" : "managed-rpc";
 		const proved = await provedBrokerPin(handle, reader, kind);
 		if (!proved.ok) return { ok: false, dispatched: false, reason: proved.reason };
