@@ -13,6 +13,29 @@
 import hljs from "highlight.js/lib/core";
 import type { LanguageFn } from "highlight.js";
 import bash from "highlight.js/lib/languages/bash";
+import dart from "highlight.js/lib/languages/dart";
+import dockerfile from "highlight.js/lib/languages/dockerfile";
+import dos from "highlight.js/lib/languages/dos";
+import elixir from "highlight.js/lib/languages/elixir";
+import graphql from "highlight.js/lib/languages/graphql";
+import groovy from "highlight.js/lib/languages/groovy";
+import haskell from "highlight.js/lib/languages/haskell";
+import ini from "highlight.js/lib/languages/ini";
+import java from "highlight.js/lib/languages/java";
+import kotlin from "highlight.js/lib/languages/kotlin";
+import lua from "highlight.js/lib/languages/lua";
+import makefile from "highlight.js/lib/languages/makefile";
+import nginx from "highlight.js/lib/languages/nginx";
+import objectivec from "highlight.js/lib/languages/objectivec";
+import perl from "highlight.js/lib/languages/perl";
+import php from "highlight.js/lib/languages/php";
+import properties from "highlight.js/lib/languages/properties";
+import protobuf from "highlight.js/lib/languages/protobuf";
+import r from "highlight.js/lib/languages/r";
+import ruby from "highlight.js/lib/languages/ruby";
+import scala from "highlight.js/lib/languages/scala";
+import sql from "highlight.js/lib/languages/sql";
+import swift from "highlight.js/lib/languages/swift";
 import cpp from "highlight.js/lib/languages/cpp";
 import csharp from "highlight.js/lib/languages/csharp";
 import css from "highlight.js/lib/languages/css";
@@ -28,6 +51,7 @@ import typescript from "highlight.js/lib/languages/typescript";
 import xml from "highlight.js/lib/languages/xml";
 import yaml from "highlight.js/lib/languages/yaml";
 import { LANGUAGES, languageId, type CodeLanguage, type WordStrategy } from "./code-languages.ts";
+import { highlightHcl, highlightIgnore } from "./code-mini-languages.ts";
 
 /** A run of source text and the scopes it has, outermost first (the language's root scope is the first). */
 export interface CodeSpan {
@@ -35,12 +59,16 @@ export interface CodeSpan {
 	readonly scopes: readonly string[];
 }
 
-const ENGINES: Readonly<Record<string, LanguageFn>> = { bash, cpp, csharp, css, diff, go, javascript, json, markdown, powershell, python, rust, typescript, xml, yaml };
+const ENGINES: Readonly<Record<string, LanguageFn>> = {
+	bash, cpp, csharp, css, dart, diff, dockerfile, dos, elixir, go, graphql, groovy, haskell, ini, java, javascript, json, kotlin, lua, makefile, markdown, nginx, objectivec, perl, php, powershell, properties, protobuf, python, r, ruby, rust, scala, sql, swift, typescript, xml, yaml,
+};
+/** Languages highlight.js has no grammar for: scanners that produce highlight.js's HTML shape. */
+const MINI_ENGINES: Readonly<Record<string, (source: string) => string>> = { gitignore: highlightIgnore, hcl: highlightHcl };
 const registered = new Set<string>();
 
-/** Register one engine language (and the languages an HTML document embeds); false when it is not one we ship. */
+/** Register one engine language (and the languages it embeds); false when it is not one we ship. */
 function engineFor(name: string): boolean {
-	if (registered.has(name)) return true;
+	if (Object.hasOwn(MINI_ENGINES, name) || registered.has(name)) return true;
 	const definition = Object.hasOwn(ENGINES, name) ? ENGINES[name] : undefined;
 	if (definition === undefined) return false;
 	hljs.registerLanguage(name, definition);
@@ -49,6 +77,7 @@ function engineFor(name: string): boolean {
 		engineFor("css");
 		engineFor("javascript");
 	}
+	if (name === "dockerfile") engineFor("bash");
 	return true;
 }
 
@@ -117,12 +146,27 @@ const ALL_CAPS = /^[A-Z][A-Z0-9_]+$/;
 /** `<…>` that closes before a `(` : a generic call or declaration. */
 const GENERIC_CALL = /^<[^<>()]*(?:<[^<>()]*>[^<>()]*)*>\s*\(/;
 
-const SCRIPT_LANGUAGE_VARIABLES: Readonly<Record<string, true>> = { this: true, super: true, self: true, cls: true };
+const SCRIPT_LANGUAGE_VARIABLES: Readonly<Record<string, true>> = { this: true, super: true, self: true, cls: true, $this: true };
 
 /** A word highlight.js left unmarked, by the language's strategy; `null` when the grammar leaves it unscoped. */
-function wordScope(strategy: WordStrategy, word: string, near: Around, inParameters: boolean): string | null {
+function wordScope(strategy: WordStrategy, word: string, near: Around, inParameters: boolean, plain = false): string | null {
 	const { before, after, previousWord } = near;
 	switch (strategy) {
+		case "assign":
+			return near.lineBefore.trim() === "" && /^\s*[:+?!]?=(?!=)/.test(near.source.slice(near.end, near.end + 4)) ? "variable.other" : null;
+		case "clike": {
+			if (/^(?:def|fun|func|function|fn|sub)$/.test(previousWord)) return "entity.name.function";
+			if (plain) {
+				// The grammar scopes types and declarations only: variables, members and calls stay plain.
+				if (near.lineBefore.trim() === "" && /^\s*[:+?!]?=(?!=)/.test(near.source.slice(near.end, near.end + 4))) return "variable.other";
+				return PASCAL.test(word) && !ALL_CAPS.test(word) ? "entity.name.type" : null;
+			}
+			if (after === "(") return PASCAL.test(word) && !ALL_CAPS.test(word) ? "entity.name.type" : "entity.name.function";
+			if (before === ".") return "variable.other.property";
+			if (ALL_CAPS.test(word)) return "variable.other.constant";
+			if (PASCAL.test(word)) return "entity.name.type";
+			return inParameters ? "variable.parameter" : "variable.other.readwrite";
+		}
 		case "script": {
 			if (previousWord === "function" && before !== ".") return "entity.name.function";
 			if (previousWord === "const") return "variable.other.constant";
@@ -228,12 +272,19 @@ const UNMARKED: Readonly<Record<WordStrategy, RegExp | null>> = {
 	shell: /--?[A-Za-z][\w-]*|\d+|[A-Za-z_][\w./-]*/g,
 	powershell: null,
 	css: /-?(?:\d*\.\d+|\d+)[a-z%]*|--[\w-]+|[A-Za-z][\w-]*(?=\()|[A-Za-z][\w-]*/g,
+	clike: /[A-Za-z_]\w*/g,
+	assign: /[A-Za-z_][\w.-]*/g,
 	none: null,
 };
 
-function builtinScope(language: CodeLanguage, text: string, near: Around): string | null {
+function builtinScope(language: CodeLanguage, text: string, near: Around, base: string): string | null {
 	if (Object.hasOwn(language.builtins, text)) return language.builtins[text] as string;
 	if (Object.hasOwn(language.keywords, text)) return language.keywords[text] as string;
+	if (language.modern === true) {
+		if (language.suffix === "batchfile") return "keyword.command";
+		if (PASCAL.test(text)) return base === "type" ? "entity.name.type" : "support.class";
+		return base === "type" ? "storage.type" : "support.function";
+	}
 	switch (language.suffix) {
 		case "python":
 			if (/(?:Error|Exception|Warning)$/.test(text)) return "support.type.exception";
@@ -260,7 +311,7 @@ function scopeOf(language: CodeLanguage, level: Level, text: string, enclosing: 
 	switch (base) {
 		case "comment":
 			if (suffix === "diff") return /^(?:diff|---|\+\+\+)/.test(text) ? "meta.diff.header" : null;
-			return "comment";
+			return suffix === "ignore" ? "comment.line.number-sign" : suffix === "batchfile" ? "comment.line.rem" : "comment";
 		case "doctag":
 			return suffix === "ts" || suffix === "tsx" || suffix === "js" ? "storage.type.class.jsdoc" : "keyword.other";
 		case "keyword": {
@@ -268,17 +319,22 @@ function scopeOf(language: CodeLanguage, level: Level, text: string, enclosing: 
 			if (suffix === "css") return "keyword.control.at-rule";
 			if (enclosing.some(parent => parent.base === "meta")) return "keyword.control.directive";
 			if (suffix === "python" && text === "in" && /\bfor\b[^:]*$/.test(near.lineBefore)) return "keyword.control.flow";
+			if (suffix === "makefile" && text.startsWith(".")) return "entity.name.function.target";
 			const key = language.caseInsensitive === true ? text.toLowerCase() : text;
 			return Object.hasOwn(language.keywords, key) ? (language.keywords[key] as string) : "keyword.other";
 		}
 		case "literal":
 			if (suffix === "powershell" && text.startsWith("-")) return "keyword.operator";
 			if (suffix === "shell") return "support.function.builtin";
+			if (suffix === "ini") return null;
 			if (suffix === "rust" && text === "None") return "entity.name.type";
 			return "constant.language";
 		case "number":
+			if (suffix === "dockerfile" || suffix === "ini") return null;
 			return suffix === "css" && text.startsWith("#") ? "constant.other.color.rgb-value.hex" : "constant.numeric";
 		case "string":
+			if (suffix === "properties" && !/^["']/.test(text)) return null;
+			if (suffix === "graphql" && text.startsWith('"""')) return "comment.block.documentation";
 			return stringScope(suffix, text, near, enclosing.some(parent => parent.base === "meta"));
 		case "char":
 			return modifiers.includes("escape_") ? "constant.character.escape" : "constant.character";
@@ -289,11 +345,15 @@ function scopeOf(language: CodeLanguage, level: Level, text: string, enclosing: 
 		case "built_in":
 		case "type":
 			if (suffix === "powershell" && near.before === "[" && near.after === "]") return "storage.type";
-			return builtinScope(language, text, near);
+			return builtinScope(language, text, near, base);
 		case "title": {
 			if (modifiers.includes("inherited__")) return "entity.other.inherited-class";
 			const function_ = modifiers.includes("function_") || modifiers.includes("invoke__");
 			if (suffix === "rust" && PASCAL.test(text)) return "entity.name.type";
+			if (language.modern === true && !modifiers.includes("function_")) {
+				if (PASCAL.test(text)) return modifiers.includes("class_") ? "entity.name.type.class" : "entity.name.type";
+				return "entity.name.function";
+			}
 			if (suffix === "powershell") return "entity.name.function";
 			if (function_) return "entity.name.function";
 			// highlight.js calls every capitalised name a class; it is a call, a qualifier or a type by what follows.
@@ -311,14 +371,21 @@ function scopeOf(language: CodeLanguage, level: Level, text: string, enclosing: 
 			switch (suffix) {
 				case "json": return "support.type.property-name";
 				case "yaml": return "entity.name.tag";
+				case "ini":
+				case "properties": return "keyword.other.definition";
+				case "toml": return "support.type.property-name";
 				case "html":
 				case "css": return "entity.other.attribute-name";
 				default: return "variable.other.property";
 			}
 		case "attribute":
+			if (suffix === "nginx") return "keyword.other.directive";
 			return suffix === "css" ? "support.type.property-name" : "entity.other.attribute-name";
 		case "variable":
 			if (suffix === "shell") return "variable.other.normal";
+			if (suffix === "batchfile") return "variable.parameter";
+			if (suffix === "makefile") return "string.interpolated";
+			if (suffix === "nginx") return "variable.other";
 			if (suffix === "powershell" && /^\$(?:null|true|false)$/i.test(text)) return "constant.language";
 			if (modifiers.includes("language_")) return Object.hasOwn(SCRIPT_LANGUAGE_VARIABLES, text) ? "variable.language" : "variable.other.object";
 			if (modifiers.includes("constant_")) return "variable.other.constant";
@@ -336,6 +403,11 @@ function scopeOf(language: CodeLanguage, level: Level, text: string, enclosing: 
 				case "html": return "punctuation.definition.tag";
 				case "shell": return "comment.line.shebang";
 				case "cs": return text.startsWith("[") ? "entity.name.type" : "meta.preprocessor";
+				case "java": case "kotlin": case "scala": case "groovy": return text.startsWith("@") ? "storage.type.annotation" : "meta.preprocessor";
+				case "php": return "punctuation.section.embedded";
+				case "objc": return "keyword.control.directive";
+				case "makefile": return "keyword.control";
+				case "graphql": return "entity.name.function.directive";
 				default: return "meta.preprocessor";
 			}
 		case "name":
@@ -350,7 +422,13 @@ function scopeOf(language: CodeLanguage, level: Level, text: string, enclosing: 
 		case "selector-pseudo":
 			return "entity.other.attribute-name.pseudo-class";
 		case "section":
-			return "markup.heading";
+			switch (suffix) {
+				case "ini": return "entity.name.section.group-title";
+				case "toml": return "entity.other.attribute-name.table";
+				case "makefile": return "entity.name.function.target";
+				case "nginx": return "entity.name.tag";
+				default: return "markup.heading";
+			}
 		case "bullet":
 			return suffix === "markdown" ? "punctuation.definition.list.begin" : "punctuation.definition.sequence.item";
 		case "strong":
@@ -369,7 +447,18 @@ function scopeOf(language: CodeLanguage, level: Level, text: string, enclosing: 
 			return "markup.deleted";
 		case "symbol":
 			if (suffix === "html") return "constant.character.entity";
+			if (suffix === "graphql") return "variable.other.property";
+			if (suffix === "batchfile") return "entity.name.function";
+			if (suffix === "ruby" || suffix === "elixir") return "constant.language.symbol";
 			return suffix === "rust" ? "storage.modifier.lifetime" : "constant.other.symbol";
+		case "block":
+			return "entity.name.type";
+		case "label":
+			return "variable.other.constant";
+		case "negation":
+			return "keyword.operator.negation";
+		case "glob":
+			return "keyword.operator.glob";
 		default:
 			return null;
 	}
@@ -387,7 +476,7 @@ export function tokenize(source: string, info: string): CodeSpan[] | null {
 	if (language === undefined || !engineFor(language.engine)) return null;
 	let html: string;
 	try {
-		html = hljs.highlight(source, { language: language.engine, ignoreIllegals: true }).value;
+		html = Object.hasOwn(MINI_ENGINES, language.engine) ? (MINI_ENGINES[language.engine] as (source: string) => string)(source) : hljs.highlight(source, { language: language.engine, ignoreIllegals: true }).value;
 	} catch {
 		return [{ text: source, scopes: [language.root] }];
 	}
@@ -414,7 +503,9 @@ export function tokenize(source: string, info: string): CodeSpan[] | null {
 		for (const [index, level] of levels.entries()) {
 			if (level.base.startsWith("language-")) {
 				// A sub-language the document embeds (CSS and JavaScript in HTML): its own root and words.
-				const embedded = LANGUAGES[level.base === "language-javascript" ? "js" : level.base.slice("language-".length)];
+				const embeddedId = level.base.slice("language-".length);
+				if (active.suffix === "dockerfile" && embeddedId === "bash") continue;
+				const embedded = LANGUAGES[embeddedId === "javascript" ? "js" : embeddedId === "bash" ? "shell" : embeddedId];
 				if (embedded !== undefined) { active = embedded; scopes.push(embedded.root); }
 				continue;
 			}
@@ -429,7 +520,12 @@ export function tokenize(source: string, info: string): CodeSpan[] | null {
 		const innermost = levels.at(-1)?.base;
 		const unmarked = innermost === undefined || CONTAINERS.includes(innermost) || innermost.startsWith("language-");
 		if (!unmarked) {
-			if (active.suffix === "yaml" && innermost === "attr" && raw.text.endsWith(":")) {
+			if (active.suffix === "makefile" && innermost === "section" && raw.text.includes(":")) {
+				// A target's name is the function; the colon and the prerequisites are plain.
+				const colon = raw.text.indexOf(":");
+				push(raw.text.slice(0, colon), scopes);
+				push(raw.text.slice(colon), scopes.slice(0, -1));
+			} else if (active.suffix === "yaml" && innermost === "attr" && raw.text.endsWith(":")) {
 				// A YAML key's colon is punctuation, not part of the key.
 				push(raw.text.slice(0, -1), scopes);
 				push(":", scopes.slice(0, -1));
@@ -493,7 +589,8 @@ function pushWords(
 		else if (strategy === "shell") scope = shellScope(word, near);
 		else if (strategy === "css") scope = cssScope(word, near);
 		else if (strategy !== "none" && Object.hasOwn(language.builtins, word) && !(language.suffix === "python" && near.after === "[")) scope = language.builtins[word] as string;
-		else scope = wordScope(strategy, word, near, inParameters);
+		else if (language.modern === true && (language.suffix !== "dockerfile" || word.toLowerCase() === "as") && Object.hasOwn(language.keywords, language.caseInsensitive === true ? word.toLowerCase() : word)) scope = language.keywords[language.caseInsensitive === true ? word.toLowerCase() : word] as string;
+		else scope = wordScope(strategy, word, near, inParameters, language.plainVariables === true);
 		push(word, scope === null ? scopes : [...scopes, `${scope}.${language.suffix}`]);
 		at = match.index + word.length;
 	}

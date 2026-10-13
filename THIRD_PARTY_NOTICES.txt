@@ -218,7 +218,7 @@ The project-owned overview, scroll and height-window policies are not ports.
 highlight.js (bundled into the guest Webview, media/guest.js)
 ================================================================================
 
-Package:    highlight.js 11.12.0 (the core and 15 language grammars, imported from
+Package:    highlight.js 11.12.0 (the core and 40 language grammars, imported from
             `highlight.js/lib/core` and `highlight.js/lib/languages/*`)
 Project:    highlight.js, https://highlightjs.org/
 Repository: https://github.com/highlightjs/highlight.js
