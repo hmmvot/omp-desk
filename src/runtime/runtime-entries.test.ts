@@ -1,0 +1,68 @@
+/**
+ * `createRuntimeStaging`: the staging rules that moved out of `extension.ts` (ADR-0066) keep their
+ * caching and refusal behaviour. The staged copies are real files under a temporary storage directory.
+ *
+ * The module resolves extensionless imports the way esbuild does, so it is compiled with the
+ * project's bundler.
+ *
+ * Runner: `node --test src/runtime/runtime-entries.test.ts`.
+ */
+import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { after, before, describe, it } from "node:test";
+import { build } from "esbuild";
+import type { RuntimeStagingDeps, createRuntimeStaging as createRuntimeStagingType } from "./runtime-entries.ts";
+
+let createRuntimeStaging: typeof createRuntimeStagingType;
+let temp: string;
+
+before(async () => {
+	temp = await mkdtemp(path.join(tmpdir(), "omp-staging-"));
+	const outfile = path.join(temp, "runtime-entries.mjs");
+	await build({ entryPoints: [fileURLToPath(new URL("./runtime-entries.ts", import.meta.url))], outfile, bundle: true, platform: "node", format: "esm", target: "node20" });
+	createRuntimeStaging = ((await import(pathToFileURL(outfile).href)) as { createRuntimeStaging: typeof createRuntimeStagingType }).createRuntimeStaging;
+});
+after(async () => { await rm(temp, { recursive: true, force: true }); });
+
+async function deps(overrides: Partial<RuntimeStagingDeps> = {}) {
+	const packaged = path.join(temp, `packaged-${Math.random().toString(36).slice(2)}`);
+	const files = { hostControl: "host-control.mjs", controlHelper: "verified-pipe.ps1", renameHelper: "rename.mjs", leaseHelper: "lease.ps1" };
+	await mkdir(packaged, { recursive: true });
+	for (const name of Object.values(files)) await writeFile(path.join(packaged, name), `content of ${name}`);
+	const configured: string[] = [];
+	const logs: string[] = [];
+	const base: RuntimeStagingDeps = {
+		storageDir: () => path.join(packaged, "storage"),
+		packagedPaths: () => ({
+			hostControl: path.join(packaged, files.hostControl), controlHelper: path.join(packaged, files.controlHelper),
+			renameHelper: path.join(packaged, files.renameHelper), leaseHelper: path.join(packaged, files.leaseHelper),
+		}),
+		refusal: () => null,
+		configureControlHelper: file => { configured.push(file); },
+		log: message => { logs.push(message); },
+	};
+	return { deps: { ...base, ...overrides }, configured, logs, packaged, files };
+}
+
+describe("runtime staging", () => {
+	it("refuses to stage while the packaged files are no longer the ones this host loaded, and does not cache the refusal", async () => {
+		let asked = 0;
+		const f = await deps({ refusal: () => { asked++; return "updated on disk"; } });
+		const staging = createRuntimeStaging(f.deps);
+		await assert.rejects(staging.entries(), /updated on disk/);
+		await assert.rejects(staging.entries(), /updated on disk/);
+		assert.equal(asked, 2, "the next caller asks again instead of reusing the failure");
+		assert.deepEqual(f.configured, [], "nothing was staged, so the control helper was not configured");
+	});
+
+	it("reports a lease helper that cannot be staged as no helper and logs why, once per attempt", async () => {
+		const f = await deps({ packagedPaths: () => ({ hostControl: "", controlHelper: "", renameHelper: "", leaseHelper: path.join(temp, "missing.ps1") }) });
+		const staging = createRuntimeStaging(f.deps);
+		assert.equal(await staging.leaseHelper(), null);
+		assert.equal(f.logs.length, 1);
+		assert.match(f.logs[0] ?? "", /session lease helper could not be staged/);
+	});
+});

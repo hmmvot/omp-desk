@@ -149,7 +149,7 @@ import { bridgeViewType } from './host/bridge-identity';
 const fixtureContext = undefined as never;
 const fixtureWindow = () => windowState();
 export const harness = {
-  connectHostControl, reconnectHostControl, establishControl, closeSession, launchHost, presentRestoreOutcome, openTab, handleChatEvent, restoreTabs,
+  connectHostControl, reconnectHostControl, establishControl, closeSession, presentRestoreOutcome, openTab, handleChatEvent, restoreTabs,
   handleRestoreOutcome, renameSession, reloadSession, handleGuestControlRequest, panelResponder,
   switchSessionMode, restartChat, openSessionInMode, defaultSessionMode, chooseDefaultSessionView, newSession, startNewSession,
   newSessionInPlace, deleteSessionInPlace,
@@ -161,7 +161,8 @@ export const harness = {
   installWindow(next) { window = next; },
   window: () => windowState(),
   createWindowState,
-  startConversation, handleTerminalGuestMessage, startNativeWatch, handleNativeHostExited,
+  localLauncher, handleTerminalGuestMessage, startNativeWatch, handleNativeHostExited,
+  startConversation: (index, tabId, runtime, file, replay) => localLauncher(fixtureWindow().context, index).startConversation(tabId, runtime, file, replay),
   pushSessionView, handleShellEditorClosed,
   bindConversationIdentity, retryPendingIdentity, SessionTreeProvider,
   terminalFontMessage, revealDesktopNotification, revealActiveSession, releaseSelectionFromOtherWindow, refreshLauncher, launcherFacts, notifierFor, forgetTurnActivity,
@@ -291,7 +292,7 @@ export const harness = {
     resetDesktopXmls();
     fixtureVscode.window.tabGroups.activeTabGroup.activeTab = null;
     w.reconciler = { reconcile: async () => ({ kind: 'free', evidence: [] }) };
-    runtimeEntries = async () => ({ hostControl: { path: 'fixture-host-control.mjs' }, renameHelper: { path: 'fixture-rename-session.mjs' } });
+    w.staging = { entries: async () => ({ hostControl: { path: 'fixture-host-control.mjs' }, renameHelper: { path: 'fixture-rename-session.mjs' } }), leaseHelper: async () => null };
     w.ptyGate = { client: async () => ({}) };
     w.ptyGate.attachClient = async () => ({ fixture: true });
     w.ptyGate.invalidate = () => {};
@@ -388,7 +389,7 @@ interface Harness {
   handleNativeHostExited(...args: unknown[]): Promise<void>;
   establishControl(...args: unknown[]): Promise<void>;
   closeSession(...args: unknown[]): Promise<void>;
-  launchHost(...args: unknown[]): Promise<{ state: string }>;
+  localLauncher(context: unknown, index: unknown): { launch(request: unknown): Promise<{ state: string }> };
   presentRestoreOutcome(index: SessionIndex, tabId: string, outcome: unknown): void;
   openTab(...args: unknown[]): Promise<void>;
   restoredDraft(slot: string): { requestId: number; text: string; attachments: number; recoverable: readonly { text: string; attachments: number; unconfirmed: boolean }[] } | null;
@@ -1723,7 +1724,7 @@ describe("native replacement lifecycle", () => {
     const state = harness.editor(index, first, panel);
     (globalThis as typeof globalThis & { __nativeLaunch: unknown }).__nativeLaunch = { state: "running", runtime: resumed, reason: "fixture launched" };
     harness.controlClient.connectVerified = async () => ({ client: client(Promise.resolve(snapshot)), key: "resumed-key" });
-    assert.equal((await harness.launchHost(saved.context, index, { tabId: TAB, sessionFile: resumed.sessionFile, sessionId: "session-1", cwd: root, scope: index.row.scope, ownerGeneration: OWNER, claimPath: "" })).state, "running");
+    const launched = await harness.localLauncher(saved.context, index).launch({ tabId: TAB, sessionFile: resumed.sessionFile, sessionId: "session-1", cwd: root, scope: index.row.scope, ownerGeneration: OWNER, claimPath: "" }); assert.equal(launched.state, "running", JSON.stringify(launched));
     const documentId = state.bridge!.documentId;
     assert.notEqual(documentId, DOCUMENT, "a new native process requires a fresh document capability");
     assert.equal(await records.readSecret(scope, DOCUMENT), null, "the old child's document credential is retired");

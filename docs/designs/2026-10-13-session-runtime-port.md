@@ -281,6 +281,15 @@ Acceptance, observable: `node scripts/check-imports.mjs` exits 0 on the tree and
 - [ADR-0038](../decisions/0038-host-chat-over-rpc-ui-on-a-broker-pipe-child.md): the host-owned conversation the port exposes. [ADR-0055](../decisions/0055-expose-vscode-capabilities-as-rpc-host-tools-run-by-the-owning-window.md), [ADR-0056](../decisions/0056-publish-window-state-in-a-leased-registry-and-switch-windows-by-request.md), [ADR-0057](../decisions/0057-start-a-session-in-the-window-that-suits-its-folder.md): what stays window-side.
 - Daemon assessment (2026-10-13, local workspace note): the recommendation this design implements the third step of; not a repository document.
 
+## Implementation
+
+Status: cuts 1 to 3 are implemented; cut 4 (the stop verdict family) and cuts 5 to 7 are not.
+
+- **Cut 1** (`82d2160`): `host/omp-vscode.ts` holds `configuredOmpPath`, `openProviderLoginTerminal` and `findTerminalForPid`; `native-terminal.ts` reads the setting through `setOmpPathReader`, registered at activation and called on every resolution. `scripts/check-imports.mjs` has the `runtime` layer, R-runtime-1 (closure) and R-runtime-2 (port module), each with fixtures.
+- **Cut 2** (`204ac66`): `src/runtime/session-runtime.ts` (`open`, `restore`, `reattach`, `holder`) and `local-runtime.ts` (`LocalSessionRuntime`, `replaceWriterHeld`). The window holds it as `WindowState.sessionRuntime`.
+- **Cut 3**: `src/runtime/local-launcher.ts` (`LocalLauncher`: launch, attach, `startConversation`'s runtime half, the broker-loss watch, `prepareHostControl`) and `src/runtime/runtime-entries.ts` (`createRuntimeStaging`: the runtime entries and the lease helper). Differences from §2.5 as drawn: `retireDocument` returns the editor id the broker slot is recorded for (the launch needs it after the retire); the hooks `isCurrent` and `reconnectControl` exist (the watch asks whether the window's copy is still this runtime; an attach reconnects where a launch connects); the four process functions (`launchRpcHost`, `launchNativeHost`, `attachRpcHost`, `attachNativeHost`) are injected as `hosts`, so the launcher is tested without spawning; the `brokerWatches` map is injected and still owned by the window; `chat.release` stays inside `prepareView`, as the §2.5 table says. The hook `brokerLost` receives `proven`: detection (the bounded proof) is in the runtime, the handling is the window's.
+- **Not done in this task:** cut 4 and cuts 5 to 7 as listed in §6. After cut 3 the stop paths, the end-of-process handlers, identity binding, host control, the native watch and the `ChatRuntime` surface still bypass the port.
+
 ## Architecture Review
 
 - Reviewer: architect

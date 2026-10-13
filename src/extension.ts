@@ -46,6 +46,10 @@ import {
 } from "./host/session-index";
 import { isManagedHost } from "./host/session-model";
 import { normalizeSessionIdentityKey, readSessionFileHeader } from "./host/session-files";
+import { LocalLauncher, brokerLossProven } from "./runtime/local-launcher";
+import type { LauncherWindow, PreparedHostControl } from "./runtime/local-launcher";
+import { createRuntimeStaging } from "./runtime/runtime-entries";
+import type { RuntimeStaging } from "./runtime/runtime-entries";
 import { LocalSessionRuntime } from "./runtime/local-runtime";
 import type {
   OmpHostAttachRequest,
@@ -890,10 +894,8 @@ interface WindowState {
   readonly subagentWatches: Map<string, ReturnType<typeof setInterval>>;
 
   // Caches
-  /** The verified copies of the runtime entries, staged on first use. */
-  stagedEntries: Promise<StagedRuntimeEntries> | null;
-  /** The staged session-lease probe helper, staged on first use. */
-  stagedLeaseHelper: Promise<StagedRuntimeAsset | null> | null;
+  /** The verified copies of the runtime entries and the lease helper, staged on first use (ADR-0066). */
+  staging: RuntimeStaging;
   /** The identity the launcher gave each runtime, so a restarted host reads as a new one. */
   readonly launcherRuntimeIds: WeakMap<SessionHostRuntime, number>;
   /** The broker watch of each runtime this window drives; a runtime that starts again replaces its own. */
@@ -1253,8 +1255,18 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     subagentWork: new Map<string, boolean>(),
     subagentWatches: new Map<string, ReturnType<typeof setInterval>>(),
     // Caches
-    stagedEntries: null,
-    stagedLeaseHelper: null,
+    staging: createRuntimeStaging({
+      storageDir: () => context.globalStorageUri.fsPath,
+      packagedPaths: () => ({
+        hostControl: context.asAbsolutePath(HOST_CONTROL_MODULE),
+        controlHelper: context.asAbsolutePath(CONTROL_HELPER),
+        renameHelper: context.asAbsolutePath(RENAME_HELPER_SCRIPT),
+        leaseHelper: context.asAbsolutePath(LEASE_HELPER),
+      }),
+      refusal: () => (packageChangedOnDisk() ? UPDATED_ON_DISK_ERROR : null),
+      configureControlHelper: setControlHelperScript,
+      log,
+    }),
     launcherRuntimeIds: new WeakMap<SessionHostRuntime, number>(),
     brokerWatches: new WeakMap<SessionHostRuntime, () => void>(),
     nativeObservations: new WeakMap<NativeHostRuntime, Promise<void>>(),
@@ -1304,100 +1316,6 @@ function noteReadyDocument(state: TabState, announcedDocumentId: string | undefi
   const document = state.document;
   if (document === null || (announcedDocumentId ?? null) !== document.bridgeDocumentId) return;
   s.readyDocuments.set(state, document);
-}
-
-/** Staged copies every child process of this window runs. */
-interface StagedRuntimeEntries {
-  /** The host-control module the native OMP process preloads and `-e`-loads. */
-  readonly hostControl: StagedRuntimeAsset;
-  /** The peer-verified pipe helper the control client runs per connection. */
-  readonly controlHelper: StagedRuntimeAsset;
-  /** The Bun helper a stopped-session rename runs (never an OMP session). */
-  readonly renameHelper: StagedRuntimeAsset;
-}
-
-/** Do the copies still hold the bytes their digests name? */
-async function stagedEntriesIntact(entries: StagedRuntimeEntries): Promise<boolean> {
-  for (const asset of [entries.hostControl, entries.controlHelper]) {
-    if (!(await verifyStagedRuntimeAsset(asset))) return false;
-  }
-  return true;
-}
-
-/**
- * The staged copy of the session-lease probe helper (ADR-0046), verified before it is handed out.
- *
- * Staged on its own, not with {@link runtimeEntries}: the probe is optional, so a missing or
- * changed helper only turns the probe off and must never stop a host from launching.
- */
-async function stageLeaseHelper(context: vscode.ExtensionContext): Promise<StagedRuntimeAsset | null> {
-  const s = windowState();
-  if (s.stagedLeaseHelper !== null) {
-    const cached = await s.stagedLeaseHelper;
-    if (cached !== null && await verifyStagedRuntimeAsset(cached)) return cached;
-  }
-  s.stagedLeaseHelper = stageRuntimeAssets({
-    storageDir: context.globalStorageUri.fsPath,
-    sourcePaths: [context.asAbsolutePath(LEASE_HELPER)],
-  }).then(([helper]) => helper ?? null).catch((error: unknown) => {
-    log(`session lease helper could not be staged: ${messageOf(error)}`);
-    return null;
-  });
-  return await s.stagedLeaseHelper;
-}
-
-/**
- * The verified copies of this window's runtime entries.
- *
- * Every entry is copied to `<globalStorage>/runtime/<sha256>/<name>`, and the copy
- * is re-read and re-hashed on *every* call — immediately before its caller hands
- * the path to a child process. A path that was correct when it was staged is not a
- * promise about now, so a copy that changed under us is staged again from the
- * packaged file instead of being executed. The staged tree must be writable only by
- * this account, which `stageRuntimeAssets` establishes and verifies before it
- * returns any copy.
- *
- * Running from those copies is what keeps a reinstall from waiting for a session:
- * the installed extension folder is what `code --install-extension <vsix> --force`
- * renames, and a process still reading a file inside it is what fails that rename.
- * A staged file's digest also names its directory, so this build's copies are told apart
- * from another build's.
- *
- * A failure is not cached: the next caller stages again, because the file a failed
- * attempt could not read is usually the one a half-finished install replaced.
- * Staging also points the control client at the helper copy, so `activate` calls
- * this once and every later use — including the process-generation probe for an
- * already running host — finds it configured.
- */
-async function runtimeEntries(context: vscode.ExtensionContext): Promise<StagedRuntimeEntries> {
-  const s = windowState();
-  const cached = s.stagedEntries;
-  if (cached !== null) {
-    const entries = await cached;
-    if (await stagedEntriesIntact(entries)) return entries;
-    log("a staged runtime copy no longer matches its digest; staging the packaged entries again");
-    s.stagedEntries = null;
-  }
-  const staging = (async () => {
-    // Staging copies the packaged entries. After a reinstall those are the new build's, and a child
-    // started from them would speak to this (old) host with the new build's protocol.
-    if (packageChangedOnDisk()) throw new Error(UPDATED_ON_DISK_ERROR);
-    const [hostControl, controlHelper, renameHelper] = await stageRuntimeAssets({
-      storageDir: context.globalStorageUri.fsPath,
-      sourcePaths: [
-        context.asAbsolutePath(HOST_CONTROL_MODULE),
-        context.asAbsolutePath(CONTROL_HELPER),
-        context.asAbsolutePath(RENAME_HELPER_SCRIPT),
-      ],
-    });
-    setControlHelperScript(controlHelper.path, controlHelper.sha256);
-    return { hostControl, controlHelper, renameHelper };
-  })();
-  s.stagedEntries = staging.catch((error: unknown) => {
-    s.stagedEntries = null;
-    throw error;
-  });
-  return s.stagedEntries;
 }
 
 async function revealDesktopNotification(index: SessionIndex, extensionId: string, uri: vscode.Uri): Promise<void> {
@@ -1720,7 +1638,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // extension owns through the session lease OMP itself takes (ADR-0046). The probe only opens a
   // named mutex and closes it, and a failed probe leaves every row exactly as it was.
   s.externalLeases = process.platform !== "win32" ? null : new ExternalLeaseObserver({
-    probe: powershellLeaseProbe({ helper: () => stageLeaseHelper(context), log }),
+    probe: powershellLeaseProbe({ helper: () => s.staging.leaseHelper(), log }),
     ownersDir: () => ompSessionOwnersDir({ homeDir: os.homedir(), configDirName: process.env.PI_CONFIG_DIR }),
     readSessionId: async file => (await readSessionFileHeader(file))?.sessionId ?? null,
     knownFiles: () => index.list().flatMap(entry => entry.sessionFile === null ? [] : [entry.sessionFile]),
@@ -2005,7 +1923,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // before anything can need them, so no process starts from a file inside a
   // folder a reinstall may be renaming. The launch paths stage again themselves and
   // report their own failure; this one is just early, and silent.
-  void runtimeEntries(context).catch(() => {});
+  void s.staging.entries().catch(() => {});
   log("extension activated");
 }
 
@@ -3217,65 +3135,82 @@ function createSessionRuntime(index: SessionIndex): LocalSessionRuntime {
     launcher: () => {
       const context = windowState().context;
       if (context === undefined) throw new Error("The session runtime was used before activation.");
-      return launcher(context, index);
+      return localLauncher(context, index);
     },
   });
 }
 
-/** The host launcher the runtime hands to the index (still this module's launch and attach, until cut 3). */
-function launcher(context: vscode.ExtensionContext, index: SessionIndex): OmpHostLauncher {
+/**
+ * The window's side of launch and attach (design §2.5): the hooks `LocalLauncher` calls while it
+ * starts or re-adopts a host, in the order a launch runs them.
+ */
+function launcherWindow(context: vscode.ExtensionContext, index: SessionIndex): LauncherWindow {
   return {
-    launch: request => launchHost(context, index, request),
-    attach: request => attachHost(context, index, request),
-  };
-}
-
-/**
- * Prove that a broker that no longer exists took its OMP (or shell) root with it, waiting a bounded
- * while for the root to follow (a Kill ends the broker's tree first and then the recorded root). Only
- * both recorded creation times naming gone processes is proof (`src/host/broker-loss.ts`); a broker's
- * absence alone says nothing about the writer (ADR-0029).
- */
-async function brokerLossProven(
-  isCurrent: () => boolean,
-  broker: { readonly pid: number; readonly creationTime: string | null },
-  root: { readonly pid: number; readonly creationTime: string | null },
-): Promise<boolean> {
-  const client = await attachBrokerClient();
-  if (client === null) return false;
-  return awaitWriterGone({
-    prove: () => brokerAndRootGone(client, broker, root),
-    rootAlive: () => isPtyProcessAlive(root.pid),
-    isCurrent,
-    pause: ms => delayMs(ms),
-  });
-}
-
-/**
- * Notice that the broker of a runtime this window drives was ended from outside (Kill in Sessions,
- * Task Manager, a crash). Nothing says so over the connection, so the window asks whether the broker
- * process still exists (`src/host/broker-loss.ts`). Its absence is only a trigger: nothing is
- * published until the broker's and the OMP root's recorded creation times both name gone processes.
- * Then a chat session is ended the way its child's exit ends it (the session shows the process ended
- * and `handleRpcHostExited` records the row as stopped) and a native terminal runs
- * `handleNativeHostExited`. When the root is still there, or cannot be shown gone, the runtime is
- * kept and the user is told it could not be confirmed ended.
- */
-function watchRuntimeBroker(index: SessionIndex, tabId: string, runtime: SessionHostRuntime): void {
-  const s = windowState();
-  s.brokerWatches.get(runtime)?.();
-  const isCurrent = (): boolean => stateOf(tabId)?.runtime === runtime;
-  s.brokerWatches.set(runtime, watchBrokerLoss({
-    brokerPid: runtime.handle.brokerPid,
-    isCurrent,
-    onLost: async () => {
-      log(`tab ${tabId}: the broker process ${runtime.handle.brokerPid} no longer exists; checking that its OMP process (pid ${runtime.pid}) is gone too`);
-      const proven = await brokerLossProven(
-        isCurrent,
-        { pid: runtime.handle.brokerPid, creationTime: runtime.handle.record.brokerCreationTime },
-        { pid: runtime.pid, creationTime: runtime.identity.childCreationTime },
-      );
-      if (!isCurrent()) return;
+    // A document's native binding is immutable. Resume/Reload replaces the child, so
+    // retire the old capability and remount this same editor with a fresh incarnation.
+    async retireDocument(tabId) {
+      const editor = stateOf(tabId);
+      if (editor !== undefined && editor.panel !== null && editor.bridge !== null && editor.bridge.endpoint.committedBinding() !== null) {
+        await windowState().bridgeHost.prepareDocument(context, editor.bridge.editorId);
+        windowState().editorPanels.renderPanelDocument(context, editor.bridge.editorId);
+      }
+      return stateOf(tabId)?.bridge?.editorId ?? null;
+    },
+    adopt(tabId, runtime) {
+      cancelControlPicker(tabId);
+      const state = tabState(tabId);
+      state.runtime = runtime;
+      state.endedNotice = null;
+      state.mode = runtime.kind;
+    },
+    isCurrent: (tabId, runtime) => stateOf(tabId)?.runtime === runtime,
+    async prepareView(tabId, runtime) {
+      const s = windowState();
+      const state = tabState(tabId);
+      // The selected view can differ from a surviving writer we just reattached.
+      // Persist what actually runs, not the provisional selection stamped while
+      // its editor was being created; restoration must not turn every such tab
+      // into the profile default on the next launch.
+      const binding = index.slotBinding(state.slotId);
+      if (binding?.tabId === tabId && binding.mode !== state.mode) await index.setEditorMode(state.slotId, state.mode);
+      if (runtime.kind === "terminal") {
+        s.chat.release(tabId);
+        s.detailTabs.closeConversation(tabId);
+        state.chatDetach?.();
+        state.chatDetach = null;
+        ensureTerminalPipeline(index, tabId, runtime.handle);
+      }
+    },
+    attached(tabId, runtime) {
+      const s = windowState();
+      const state = tabState(tabId);
+      if (runtime.kind === "terminal") {
+        startNativeWatch(index, state, runtime);
+        refreshGuestContext();
+        return;
+      }
+      if (state.transitioning) s.chat.sessionOf(tabId)?.setMutationFence("Session lifecycle transition.");
+      attachChatRoutes(tabId, true);
+    },
+    async launchPrecheck(sessionFile) {
+      for (const state of windowState().tabs.values()) {
+        const native = state.runtime;
+        const control = state.control?.client;
+        if (native?.kind !== "terminal" || control === undefined || !isOpenControlClient(control)) continue;
+        try {
+          const facts = await control.nativeState();
+          if (state.runtime !== native || !facts.available) continue;
+          native.observed = facts;
+          if (facts.sessionFile !== null && controlPathEquals(facts.sessionFile, sessionFile)) return true;
+        } catch { /* SDK readback is best effort, never a global writer ledger. */ }
+      }
+      return false;
+    },
+    connectControl: (tabId, ownerGeneration, runtime, control) => connectHostControl(context, index, tabId, ownerGeneration, runtime, control),
+    reconnectControl: (tabId, ownerGeneration, runtime) => reconnectHostControl(context, index, tabId, ownerGeneration, runtime),
+    controlFailed: setControlFailure,
+    async brokerLost(tabId, runtime, proven) {
+      const isCurrent = (): boolean => stateOf(tabId)?.runtime === runtime;
       if (!proven) {
         log(`tab ${tabId}: the broker process is gone but its OMP process pid ${runtime.pid} could not be confirmed gone; the session is kept as it is`);
         showWarning("OMP: A session's background process ended, but its OMP process could not be confirmed ended. Check Task Manager, then use Stop Session or refresh Sessions.");
@@ -3311,308 +3246,33 @@ function watchRuntimeBroker(index: SessionIndex, tabId: string, runtime: Session
         incomplete(messageOf(error));
       }
     },
-  }));
+    notice: showWarning,
+  };
 }
 
-/**
- * Hand one running host to its host-owned conversation.
- *
- * The conversation is the host's, not a panel's: it is attached whether or not an editor is
- * open, reads the session file's tail from disk before the process is ready (the first
- * paint), and folds the process's own frames afterwards. Every editor showing the tab is
- * pointed at it, so a panel that opened first receives the conversation the moment it exists.
- */
-async function startConversation(
-  index: SessionIndex,
-  tabId: string,
-  runtime: SessionHostRuntime,
-  sessionFile: string | null,
-  replayFromStart: boolean,
-): Promise<void> {
+/** The host launcher the runtime hands to the index: this window's launch and attach, over `launcherWindow`'s hooks. */
+function localLauncher(context: vscode.ExtensionContext, index: SessionIndex): LocalLauncher {
   const s = windowState();
-  cancelControlPicker(tabId);
-  tabState(tabId).runtime = runtime;
-  tabState(tabId).endedNotice = null;
-  watchRuntimeBroker(index, tabId, runtime);
-  const state = tabState(tabId);
-  state.mode = runtime.kind;
-  // The selected view can differ from a surviving writer we just reattached.
-  // Persist what actually runs, not the provisional selection stamped while
-  // its editor was being created; restoration must not turn every such tab
-  // into the profile default on the next launch.
-  const binding = index.slotBinding(state.slotId);
-  if (binding?.tabId === tabId && binding.mode !== state.mode) await index.setEditorMode(state.slotId, state.mode);
-  if (runtime.kind === "terminal") {
-    s.chat.release(tabId);
-    s.detailTabs.closeConversation(tabId);
-    state.chatDetach?.();
-    state.chatDetach = null;
-    ensureTerminalPipeline(index, tabId, runtime.handle);
-    // Broker authentication is not its output subscription. Watch first, then
-    // activate the native stream before publishing this frontend as available.
-    await runtime.handle.attach();
-    startNativeWatch(index, state, runtime);
-    refreshGuestContext();
-    return;
-  }
-  const entry = index.get(tabId);
-  s.chat.startLive(tabId, {
-    channel: runtime.handle,
-    sessionFile,
-    ...(replayFromStart && entry?.host?.sessionId != null ? { expectedProviderSessionId: entry.host.sessionId } : {}),
-    cwd: runtime.cwd,
-    title: entry?.title ?? null,
-    // A re-adopted child replays what its broker buffered since the beginning; a fresh one
-    // has nothing to replay.
-    ...(replayFromStart ? { initialSeq: 0 } : {}),
-  });
-  if (state.transitioning) s.chat.sessionOf(tabId)?.setMutationFence("Session lifecycle transition.");
-  attachChatRoutes(tabId, true);
-}
-
-/**
- * Re-adopt a host that outlived this extension host.
- *
- * The index calls this only after its own re-check of the recorded host, and the verdict it
- * acted on already required the exact broker generation, child and creation time. This
- * re-proves exactly that pinned target through its broker slot (and nothing else if that
- * fails): nothing is spawned, no claim is touched, and a target that cannot be proven is
- * never replaced by another transport.
- */
-async function attachHost(
-  context: vscode.ExtensionContext,
-  index: SessionIndex,
-  request: OmpHostAttachRequest,
-): Promise<OmpHostAttachResult> {
-  const s = windowState();
-  const attachedAt = Date.now();
-  s.diagnostics.beginSubject(request.tabId, {
-    label: diagnosticsLabel(request.cwd),
-    kind: "session",
-    cwd: request.cwd,
-    sessionFile: request.sessionFile,
-    startedAt: attachedAt,
-  });
-  s.diagnostics.notObserved(request.tabId, "resolution", "this host was not launched by this window");
-  s.diagnostics.begin(request.tabId, "broker-launch", {
-    provenance:
-      "extension host: this window's attachRpcHost() of an already-running host — the launch happened in an earlier extension-host generation, so it is not measured here",
-  });
-  s.diagnostics.begin(request.tabId, "first-paint");
-  s.diagnostics.begin(request.tabId, "chat-live");
-  s.diagnostics.begin(request.tabId, "host-control-verified", {
-    provenance:
-      "extension host: from this window's attach of an already-running host to connectVerified() completing with the stored key",
-  });
-  s.diagnostics.note(request.tabId, `attaching the host recorded as pid ${request.recordedHost.pid ?? "unknown"}`);
-  const failAll = (reason: string): void => {
-    s.diagnostics.fail(request.tabId, "broker-launch", reason);
-    s.diagnostics.notObserved(request.tabId, "first-paint", "the attach produced no conversation");
-    s.diagnostics.notObserved(request.tabId, "chat-live", "the attach produced no conversation");
-    s.diagnostics.notObserved(request.tabId, "host-control-verified", "the attach produced no runtime");
-  };
-  // The sub-steps the index reports beside its own measurements of this call (diagnostic only).
-  const timings: Record<string, number> = {};
-  let lapAt = Date.now();
-  const lap = (step: string): void => {
-    const now = Date.now();
-    timings[step] = now - lapAt;
-    lapAt = now;
-  };
-  const client = await attachBrokerClient();
-  lap("client");
-  if (client === null) {
-    failAll("the PTY broker is not available in this window");
-    return { state: "unavailable", reason: "The PTY broker is not available in this window.", timings };
-  }
-  let outcome: RpcAttachOutcome | NativeAttachOutcome;
-  try {
-    outcome = await (request.recordedHost.transport === "native" ? attachNativeHost : attachRpcHost)({
-      pin: request.pin,
-      cwd: request.cwd,
-      sessionFile: request.sessionFile,
-      client,
-    });
-  } catch (error) {
-    lap("connect");
-    failAll(messageOf(error));
-    log(`tab ${request.tabId}: attach failed — ${messageOf(error)}`);
-    return { state: "unavailable", reason: `Re-adopting the running host failed: ${messageOf(error)}`, timings };
-  }
-  lap("connect");
-  // The attach's own account of where its time went replaces the wall-clock total of the call, and says
-  // how each identity was established ("trusted": the broker's statement was believed; "probe": a kernel reading).
-  if (outcome.state === "attached" && outcome.timings !== undefined) {
-    const t = outcome.timings;
-    timings.connect = t.connectMs;
-    timings[`broker ${t.brokerIdentity}`] = t.brokerIdentityMs;
-    timings[`child ${t.childIdentity}`] = t.childIdentityMs;
-  }
-  const runtime = outcome.runtime;
-  if (runtime === null) {
-    failAll(outcome.reason);
-    log(`tab ${request.tabId}: attach unavailable — ${outcome.reason}`);
-    return { state: "unavailable", reason: outcome.reason, timings };
-  }
-  s.diagnostics.succeed(request.tabId, "broker-launch", { detail: `pid ${runtime.pid} · ${outcome.reason}` });
-  await startConversation(index, request.tabId, runtime, request.sessionFile, true);
-  lap("conversation");
-  await index.setRunIntent(request.tabId, "running", `attached ${outcome.reason}`);
-  lap("intent");
-  log(`tab ${request.tabId}: attached — ${outcome.reason}`);
-  void reconnectHostControl(context, index, request.tabId, request.ownerGeneration, runtime);
-  return { state: "attached", host: hostHandle(runtime, request.sessionId), timings };
-}
-
-async function launchHost(
-  context: vscode.ExtensionContext,
-  index: SessionIndex,
-  request: OmpHostLaunchRequest,
-): Promise<OmpHostLaunchResult> {
-  const s = windowState();
-  // Fresh authenticated current-file readback protects against an own native
-  // /resume hidden by a stale catalog row. Failure remains explicitly best effort.
-  if (request.sessionFile !== null) {
-    for (const state of s.tabs.values()) {
-      const native = state.runtime;
-      const control = state.control?.client;
-      if (native?.kind !== "terminal" || control === undefined || !isOpenControlClient(control)) continue;
-      try {
-        const facts = await control.nativeState();
-        if (state.runtime !== native || !facts.available) continue;
-        native.observed = facts;
-        if (facts.sessionFile !== null && controlPathEquals(facts.sessionFile, request.sessionFile)) return { state: "not-started", reason: "An authenticated native OMP process in this window currently serves this exact file. No second writer was launched." };
-      } catch { /* SDK readback is best effort, never a global writer ledger. */ }
-    }
-  }
-  // The native host-control module and the pipe helper run from a verified copy staged
-  // outside the installed extension folder, so a reinstall can rename that folder while the
-  // session runs. Staged before the recipient is generated, so a failure here is reported
-  // as such and no half-prepared launch leaves a key behind.
-  let entries: StagedRuntimeEntries;
-  try {
-    entries = await runtimeEntries(context);
-  } catch (error) {
-    return {
-      state: "not-started",
-      reason: `The extension's runtime entries could not be staged outside the installed folder: ${messageOf(error)}`,
-    };
-  }
-  // The recipient is generated and its private half stored before the process exists, so a
-  // launch can never outrun the key that decrypts its rendezvous.
-  const slot = createHostSlotId();
-  const credentialOwner = request.transport === "native" ? `native.${slot}` : request.ownerGeneration;
-  const control = await prepareHostControl(context, request.tabId, credentialOwner, entries.hostControl.path);
-  // One mark per launch: the stages below are all measured from it, so the report reads as
-  // one startup timeline (launcher → broker → first paint → live → host control).
-  s.diagnostics.beginSubject(request.tabId, {
-    label: diagnosticsLabel(request.cwd),
-    kind: "session",
-    cwd: request.cwd,
-    sessionFile: request.sessionFile,
-  });
-  s.diagnostics.begin(request.tabId, "broker-launch");
-  s.diagnostics.begin(request.tabId, "first-paint");
-  s.diagnostics.begin(request.tabId, "chat-live");
-  s.diagnostics.begin(request.tabId, "host-control-verified");
-  const notStarted = (reason: string): OmpHostLaunchResult => {
-    s.diagnostics.fail(request.tabId, "broker-launch", reason);
-    s.diagnostics.notObserved(request.tabId, "resolution", "this launch ended before the launcher reported a resolution measurement");
-    s.diagnostics.notObserved(request.tabId, "first-paint", "no host was started");
-    s.diagnostics.notObserved(request.tabId, "chat-live", "no host was started");
-    s.diagnostics.notObserved(request.tabId, "host-control-verified", "no host was started");
-    return { state: "not-started", reason };
-  };
-  // One writer, started by the extension-owned broker (ADR-0024/0038).
-  const client = await brokerClient();
-  if (client === null) {
-    return notStarted(
-      "The extension-owned PTY broker is not available in this build, so no OMP host was started. " +
-        (s.ptyGate?.reason() ?? "The staged broker runtime could not be verified."),
-    );
-  }
-  // A document's native binding is immutable. Resume/Reload replaces the child, so
-  // retire the old capability and remount this same editor with a fresh incarnation.
-  const editor = stateOf(request.tabId);
-  if (editor !== undefined && editor.panel !== null && editor.bridge !== null && editor.bridge.endpoint.committedBinding() !== null) {
-    await windowState().bridgeHost.prepareDocument(context, editor.bridge.editorId);
-    windowState().editorPanels.renderPanelDocument(context, editor.bridge.editorId);
-  }
-  // The broker slot is minted once per host and never derived from the conversation. A new
-  // launch always mints a new slot: a recorded slot may still hold a retained record whose
-  // process tree could not be proven empty, and reusing it would replay this launch into that
-  // retained slot instead of giving the new writer its own identity.
-  const launchEditorId = stateOf(request.tabId)?.bridge?.editorId ?? null;
-  // Reserved before anything is started: a broker this window could not record is a process
-  // no restart could find again, so a full table refuses *before* a launch.
-  const reserved = await s.brokerSlots?.record({ slot, conversation: request.tabId, editor: launchEditorId });
-  if (reserved !== undefined && !reserved.ok) return notStarted(reserved.reason);
-  const spawnedAt = Date.now();
-  const outcome = await (request.transport === "native" ? launchNativeHost : launchRpcHost)(
-    {
-      slot,
-      cwd: request.cwd,
-      sessionFile: request.sessionFile,
-      profile: request.scope.profile,
-      sessionDir: request.scope.sessionDir,
-      control: control === null ? null : control.bootstrap,
-      linkReminder: vscode.workspace.getConfiguration("omp").get<boolean>("linkReminder", false),
+  return new LocalLauncher({
+    index,
+    window: launcherWindow(context, index),
+    chat: s.chat,
+    diagnostics: s.diagnostics,
+    entries: () => windowState().staging.entries(),
+    hosts: { launchRpc: launchRpcHost, launchNative: launchNativeHost, attachRpc: attachRpcHost, attachNative: attachNativeHost },
+    brokerSlots: s.brokerSlots,
+    brokerClient,
+    attachBrokerClient,
+    brokerUnavailableReason: () => windowState().ptyGate?.reason(),
+    brokerWatches: s.brokerWatches,
+    linkReminder: () => vscode.workspace.getConfiguration("omp").get<boolean>("linkReminder", false),
+    control: {
+      storeRecipient: (ownerGeneration, privateKeyPkcs8Pem) => Promise.resolve(context.secrets.store(recipientSecretName(ownerGeneration), privateKeyPkcs8Pem)),
+      directory: () => controlDirectory(context),
     },
-    client,
-  );
-  const timings: Record<string, number> = { spawn: Date.now() - spawnedAt };
-  const runtime = outcome.runtime;
-  if (runtime === null) {
-    // Nothing this window recorded can be a writer: release the reservation so the slot is
-    // available again. An unconfirmed launch keeps it, because a broker may exist.
-    if (outcome.state === "not-started") await s.brokerSlots?.forget(slot).catch(() => undefined);
-    log(`tab ${request.tabId}: ${outcome.state} — ${outcome.reason}`);
-    if (outcome.state === "not-started") return notStarted(outcome.reason);
-    s.diagnostics.fail(request.tabId, "broker-launch", outcome.reason);
-    s.diagnostics.notObserved(request.tabId, "resolution", "this launch ended before the launcher reported a resolution measurement");
-    s.diagnostics.notObserved(request.tabId, "first-paint", "the launch produced no confirmed host");
-    s.diagnostics.notObserved(request.tabId, "chat-live", "the launch produced no confirmed host");
-    s.diagnostics.notObserved(request.tabId, "host-control-verified", "the launch produced no confirmed host");
-    return { state: "unconfirmed", reason: outcome.reason };
-  }
-  // The launcher's own measurement of its resolution, not a re-measurement here.
-  if (runtime.resolutionMs === undefined || runtime.binary === null) {
-    s.diagnostics.notObserved(request.tabId, "resolution", "the launcher reported no resolution measurement for this host");
-  } else {
-    s.diagnostics.observe(request.tabId, "resolution", {
-      durationMs: runtime.resolutionMs,
-      detail: `${runtime.binary.command} ${runtime.binary.prefixArgs.join(" ")}`.trim(),
-    });
-  }
-  s.diagnostics.succeed(request.tabId, "broker-launch", { detail: `pid ${runtime.pid} · slot ${runtime.identity.slot}` });
-  const conversationAt = Date.now();
-  await startConversation(index, request.tabId, runtime, request.sessionFile, false);
-  timings.conversation = Date.now() - conversationAt;
-  log(`tab ${request.tabId}: ${outcome.state} — ${outcome.reason}`);
-  if (runtime.notice !== null) showWarning(runtime.notice);
-  // The native extension receives session_start before rpc-ui handles get_state.
-  // Its exact session identity is checked only after that positive startup barrier.
-  if (control !== null) {
-    void connectHostControl(context, index, request.tabId, request.ownerGeneration, runtime, control);
-  } else {
-    s.diagnostics.notObserved(
-      request.tabId,
-      "host-control-verified",
-      "this launch had no host-control bootstrap: the recipient could not be prepared before the process started",
-    );
-  }
-  // A verified launch is a durable "this should be running": the row is running again after
-  // a reload instead of being read as a deliberate stop.
-  const intentAt = Date.now();
-  await index.setRunIntent(request.tabId, "running");
-  timings.intent = Date.now() - intentAt;
-  const sessionId = runtime.kind === "chat" && request.sessionFile !== null
-    ? (await readSessionFileHeader(request.sessionFile))?.sessionId ?? request.sessionId : request.sessionId;
-  return { state: "running", host: hostHandle(runtime, sessionId), timings };
-}
-
-function hostHandle(runtime: SessionHostRuntime, sessionId: string | null): OmpHostHandle {
-  return { pid: runtime.pid, sessionId, rpc: runtime.identity, transport: runtime.kind === "terminal" ? "native" : "rpc" };
+    diagnosticsLabel,
+    log,
+  });
 }
 
 /** Native credentials follow the exact launch, never the mutable conversation row. */
@@ -6796,12 +6456,6 @@ interface ControlChannel {
   readonly snapshot: ControlHostSnapshot | null;
 }
 
-/** What a launch needs to bootstrap the control channel. */
-interface PreparedHostControl {
-  readonly bootstrap: NativeControlBootstrap;
-  readonly privateKeyPkcs8Pem: string;
-}
-
 interface EstablishControlInput {
   readonly directory: string;
   readonly slotId: string;
@@ -6856,41 +6510,6 @@ async function rememberControlRelease(
     { slotId, releasedAt: new Date().toISOString() },
   ];
   await context.globalState.update(key, next.slice(-CONTROL_RELEASE_HISTORY));
-}
-
-/**
- * Generate this launch's recipient and persist its private half *before* the
- * process exists, so a launch can never outrun the key that decrypts its
- * rendezvous. A failure here is recorded as a visible unavailability; the
- * session still starts without the channel.
- *
- * `modulePath` is the verified copy staged outside the installed extension
- * folder: the native process preloads that copy, so a reinstall never has to wait
- * for this session to end.
- */
-async function prepareHostControl(
-  context: vscode.ExtensionContext,
-  tabId: string,
-  ownerGeneration: string,
-  modulePath: string,
-): Promise<PreparedHostControl | null> {
-  try {
-    const recipient = await createControlRecipient();
-    await context.secrets.store(recipientSecretName(ownerGeneration), recipient.privateKeyPkcs8Pem);
-    return {
-      bootstrap: {
-        defineName: CONTROL_RECIPIENT_DEFINE,
-        publicRecipient: recipient.publicKeySpkiBase64url,
-        modulePath,
-        directory: controlDirectory(context),
-        slotId: createControlSlotId(),
-      },
-      privateKeyPkcs8Pem: recipient.privateKeyPkcs8Pem,
-    };
-  } catch {
-    setControlFailure(tabId, "the host-control recipient could not be prepared");
-    return null;
-  }
 }
 
 async function singleFlightHostControl(runtime: SessionHostRuntime, connect: () => Promise<void>): Promise<void> {
@@ -9163,7 +8782,7 @@ export async function fileEvidenceDeletionRefusal(
   // staged PowerShell helper: stage it first, so a delete right after activation
   // answers from a real probe instead of refusing because no helper is configured
   // yet. A staging failure is left to that refusal, which reports it.
-  await runtimeEntries(context).catch(() => {});
+  await windowState().staging.entries().catch(() => {});
   for (const namespace of resolved.session.namespaces) {
     const proof = await producerStopProof(namespace);
     if (!proof.stopped) {
@@ -10900,7 +10519,7 @@ async function startShellTerminal(index: SessionIndex, slot: string, handle: Pty
     isCurrent: () => watchingBroker,
     onLost: async () => {
       log(`shell ${slot}: the broker process ${handle.brokerPid} no longer exists; checking that its shell (pid ${shellRoot.pid}) is gone too`);
-      const proven = shellRoot.pid > 0 && await brokerLossProven(() => watchingBroker, { pid: handle.brokerPid, creationTime: handle.record.brokerCreationTime }, shellRoot);
+      const proven = shellRoot.pid > 0 && await brokerLossProven(attachBrokerClient, () => watchingBroker, { pid: handle.brokerPid, creationTime: handle.record.brokerCreationTime }, shellRoot);
       if (!watchingBroker) return;
       if (!proven) {
         log(`shell ${slot}: the broker process is gone but its shell could not be confirmed gone; the recovery record is kept`);
@@ -11233,7 +10852,7 @@ async function renameStoppedSession(
 
   let helper: StagedRuntimeAsset;
   try {
-    helper = (await runtimeEntries(context)).renameHelper;
+    helper = (await windowState().staging.entries()).renameHelper;
   } catch (error) {
     log(`rename helper staging failed: ${messageOf(error)}`);
     showError("Session rename support could not be prepared. Resume the session and rename it there; see OMP Desk output for details.");

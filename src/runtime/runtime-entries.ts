@@ -1,0 +1,122 @@
+/**
+ * The verified copies of the runtime entries every child process of a window runs (ADR-0066 moved
+ * this out of `extension.ts`; the staging rules themselves are unchanged).
+ *
+ * Every entry is copied to `<globalStorage>/runtime/<sha256>/<name>`, and the copy is re-read and
+ * re-hashed on *every* call — immediately before its caller hands the path to a child process. A
+ * path that was correct when it was staged is not a promise about now, so a copy that changed under
+ * us is staged again from the packaged file instead of being executed. The staged tree must be
+ * writable only by this account, which `stageRuntimeAssets` establishes and verifies before it
+ * returns any copy.
+ *
+ * Running from those copies is what keeps a reinstall from waiting for a session: the installed
+ * extension folder is what `code --install-extension <vsix> --force` renames, and a process still
+ * reading a file inside it is what fails that rename. A staged file's digest also names its
+ * directory, so this build's copies are told apart from another build's.
+ *
+ * A failure is not cached: the next caller stages again, because the file a failed attempt could not
+ * read is usually the one a half-finished install replaced. Staging also points the control client
+ * at the helper copy, so `activate` stages once and every later use — including the
+ * process-generation probe for an already running host — finds it configured.
+ */
+import { stageRuntimeAssets, verifyStagedRuntimeAsset } from "../host/runtime-assets.ts";
+import type { StagedRuntimeAsset } from "../host/runtime-assets.ts";
+
+/** Staged copies every child process of this window runs. */
+export interface StagedRuntimeEntries {
+	/** The host-control module the native OMP process preloads and `-e`-loads. */
+	readonly hostControl: StagedRuntimeAsset;
+	/** The peer-verified pipe helper the control client runs per connection. */
+	readonly controlHelper: StagedRuntimeAsset;
+	/** The Bun helper a stopped-session rename runs (never an OMP session). */
+	readonly renameHelper: StagedRuntimeAsset;
+}
+
+/** What staging needs from its window; every read happens when a call stages, never at construction. */
+export interface RuntimeStagingDeps {
+	/** `<globalStorage>`: the directory the staged tree lives under. */
+	storageDir(): string;
+	/** The packaged files, as absolute paths. */
+	packagedPaths(): {
+		readonly hostControl: string;
+		readonly controlHelper: string;
+		readonly renameHelper: string;
+		readonly leaseHelper: string;
+	};
+	/**
+	 * Why the packaged entries must not be staged right now (they are no longer the files this host
+	 * loaded, so a child started from them would speak a newer protocol), or `null`.
+	 */
+	refusal(): string | null;
+	/** Points the control client at the staged helper copy. */
+	configureControlHelper(path: string, sha256: string): void;
+	log(message: string): void;
+}
+
+export interface RuntimeStaging {
+	/** The verified copies of this window's runtime entries. */
+	entries(): Promise<StagedRuntimeEntries>;
+	/**
+	 * The staged copy of the session-lease probe helper (ADR-0046), verified before it is handed out.
+	 *
+	 * Staged on its own, not with {@link RuntimeStaging.entries}: the probe is optional, so a missing
+	 * or changed helper only turns the probe off and must never stop a host from launching.
+	 */
+	leaseHelper(): Promise<StagedRuntimeAsset | null>;
+}
+
+/** Do the copies still hold the bytes their digests name? */
+async function stagedEntriesIntact(entries: StagedRuntimeEntries): Promise<boolean> {
+	for (const asset of [entries.hostControl, entries.controlHelper]) {
+		if (!(await verifyStagedRuntimeAsset(asset))) return false;
+	}
+	return true;
+}
+
+export function createRuntimeStaging(deps: RuntimeStagingDeps): RuntimeStaging {
+	let stagedEntries: Promise<StagedRuntimeEntries> | null = null;
+	let stagedLeaseHelper: Promise<StagedRuntimeAsset | null> | null = null;
+	return {
+		async entries() {
+			const cached = stagedEntries;
+			if (cached !== null) {
+				const entries = await cached;
+				if (await stagedEntriesIntact(entries)) return entries;
+				deps.log("a staged runtime copy no longer matches its digest; staging the packaged entries again");
+				stagedEntries = null;
+			}
+			const staging = (async () => {
+				// Staging copies the packaged entries. After a reinstall those are the new build's, and a child
+				// started from them would speak to this (old) host with the new build's protocol.
+				const refusal = deps.refusal();
+				if (refusal !== null) throw new Error(refusal);
+				const paths = deps.packagedPaths();
+				const [hostControl, controlHelper, renameHelper] = await stageRuntimeAssets({
+					storageDir: deps.storageDir(),
+					sourcePaths: [paths.hostControl, paths.controlHelper, paths.renameHelper],
+				});
+				deps.configureControlHelper(controlHelper.path, controlHelper.sha256);
+				return { hostControl, controlHelper, renameHelper };
+			})();
+			stagedEntries = staging.catch((error: unknown) => {
+				stagedEntries = null;
+				throw error;
+			});
+			return stagedEntries;
+		},
+		async leaseHelper() {
+			if (stagedLeaseHelper !== null) {
+				const cached = await stagedLeaseHelper;
+				if (cached !== null && (await verifyStagedRuntimeAsset(cached))) return cached;
+			}
+			stagedLeaseHelper = stageRuntimeAssets({
+				storageDir: deps.storageDir(),
+				sourcePaths: [deps.packagedPaths().leaseHelper],
+			}).then(([helper]) => helper ?? null).catch((error: unknown) => {
+				deps.log(`session lease helper could not be staged: ${error instanceof Error ? error.message : String(error)}`);
+				return null;
+			});
+			return await stagedLeaseHelper;
+		},
+	};
+}
