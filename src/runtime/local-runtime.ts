@@ -168,10 +168,13 @@ export class LocalSessionRuntime implements SessionRuntime {
 	/**
 	 * End the runtime of a session whose recorded OMP root is already gone, as its exit would have
 	 * ended it. Ungated: the exit handlers take the tab's gate themselves, so call it outside the
-	 * gate. `LocalSessionRuntime` only, because its callers capture the live `runtime`.
+	 * gate. `target` is the incarnation the caller captured (`RuntimeSnapshot.attachment`); another one is left alone.
 	 */
-	endEnded(state: RuntimeRecord, runtime: SessionHostRuntime): Promise<boolean> {
-		return this.#deps.exit.endEnded(state, runtime);
+	async endEnded(conversation: string, target: number): Promise<boolean> {
+		const record = this.#deps.records.get(conversation);
+		const runtime = record?.runtime ?? null;
+		if (record === undefined || runtime === null || this.#deps.transitions.attachmentOf(runtime) !== target) return false;
+		return await this.#deps.exit.endEnded(record, runtime);
 	}
 
 	open(request: OpenRequest): Promise<RestoreOutcome> {

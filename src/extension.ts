@@ -3611,6 +3611,7 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
   refreshGuestContext();
   let acceptedStop = false;
   let token: TransitionToken | null = null;
+  const target = s.sessionRuntime.snapshot(tabId)?.attachment ?? -1;
   let replacement: RestoreOutcome | null = null;
   let carried: CarriedDraft<TabState> | null = null;
   try {
@@ -3648,12 +3649,11 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
         windowState().editorPanels.renderPanelDocument(context, state.slotId);
       },
     });
-    const target = s.sessionRuntime.snapshot(tabId)?.attachment ?? -1;
     const captured = await s.sessionRuntime.readTransitionFacts({ conversation: tabId, target, token: held, bounded: true });
     if (captured === null) {
       // The facts of a session whose process already ended (killed from outside, crashed) cannot be read: end it as its exit
       // would and take the request as one for a stopped session, which Resumes it in the requested view.
-      if (state.lastOpenRequest === modeRequest && await s.sessionRuntime.endEnded(recordFor(state), runtime)) {
+      if (state.lastOpenRequest === modeRequest && await s.sessionRuntime.endEnded(tabId, target)) {
         await switchSessionMode(context, index, state, mode, false, keepLiveView);
         return;
       }
@@ -3708,7 +3708,7 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
     if (!superseded) state.lastOpenRequest = ++s.editorEventSequence;
     log(`tab ${tabId}: view switch failed: ${messageOf(error)}`);
     // A read or an abort that timed out on a process that already ended is not a failed switch: finish it as a Resume.
-    if (!superseded && !acceptedStop && hostOf(state) === runtime && await s.sessionRuntime.endEnded(recordFor(state), runtime)) {
+    if (!superseded && !acceptedStop && hostOf(state) === runtime && await s.sessionRuntime.endEnded(tabId, target)) {
       await switchSessionMode(context, index, state, mode, false, keepLiveView);
       return;
     }
