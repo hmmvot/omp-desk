@@ -8,7 +8,7 @@
  *   `window-requests/<holder id>.<request id>.request`   → `{ version, id, kind, to, from, createdAt, ... }`
  *   `window-requests/<holder id>.<request id>.response`  → `{ version, id, ok, focused }`
  *
- * There are three kinds. A **select** request names a session another window holds
+ * There are four kinds. A **select** request names a session another window holds
  * (`tabId`, `incarnation`, `binding`): the holder acts only to select the tab, a
  * selection-only operation that shows an editor this window already has for that session,
  * while this window still holds the session under the run incarnation the request names, and
@@ -20,12 +20,14 @@
  * requester was shown; the receiver re-reads its own processes and stops, through its own stop
  * lifecycle, only a row that still equals one named identity and that it provably runs, and it
  * answers per row. It never stops a row by anything but that identity, and a stop request never
- * names a process id.
+ * names a process id. A **reload** request (Reload All Windows) carries no argument: the receiver
+ * reloads its own window, so a newly installed build takes effect in every window at once.
  *
- * A stop is the one request that is *taken up* before it is answered (the receiver renames the request file to
- * `<holder id>.<request id>.accepted` and rewrites that file with its progress after each row), because the
- * requester must tell a window that never saw the request (it may stop that window's rows through
- * the broker) from one that took it and is working (it must not):
+ * A stop and a reload are *taken up* before they are answered (the receiver renames the request file to
+ * `<holder id>.<request id>.accepted`; a stop rewrites that file with its progress after each row), because the
+ * requester must tell a window that never saw the request (a stop may then go through the broker) from one that
+ * took it and is working (it must not). A reload is taken up so that a window that reloads cannot read the same
+ * request again once its extension host is back:
  *
  *   `window-requests/<holder id>.<request id>.accepted` → `{ version, id, done }`
  *   `window-requests/<holder id>.<request id>.response` → `{ version, id, ok, focused, rows: [{ state, reason }] }`
@@ -36,7 +38,7 @@
  * moment it acts, so a request its requester already withdrew is never acted on late. Any
  * local process can write these files, so a forged request can at most make a window show a
  * tab it already has open (and so mark it looked at) or start an idle session in a folder it
- * has open, which the same user could start directly; a forged response proves nothing about
+ * has open, or reload its own window, which the same user could do directly; a forged response proves nothing about
  * focus or ownership, and one that is not correlated to the request (version, id, shape) is
  * not an answer at all.
  *
@@ -80,6 +82,14 @@ export const LAUNCH_ANSWER_TIMEOUT_MS = 10_000;
  * bounds what a crashed requester leaves behind.
  */
 export const STOP_REQUEST_TTL_MS = 9_000;
+/**
+ * A reload request nobody took up this long after it was posted is dropped by its receiver. The requester gives up on
+ * it after {@link RELOAD_ACCEPT_TIMEOUT_MS} and withdraws it, so this only bounds what a crashed requester leaves behind:
+ * a window that wakes later must not reload for a request nobody waits for.
+ */
+export const RELOAD_REQUEST_TTL_MS = 6_000;
+/** How long a requester waits for a window to take up a reload request before it reloads itself regardless. */
+export const RELOAD_ACCEPT_TIMEOUT_MS = 2_000;
 /** How long a requester waits for a window to take up a stop request. A window that has not taken it by then is treated as not answering. */
 export const STOP_ACCEPT_TIMEOUT_MS = 8_000;
 /**
@@ -185,6 +195,11 @@ export interface StopRequest extends RequestBase {
 	readonly rows: readonly RowIdentity[];
 }
 
+/** One request to reload the receiving window (Reload All Windows). It carries nothing else: the receiver reloads itself. */
+export interface ReloadRequest extends RequestBase {
+	readonly kind: "reload";
+}
+
 /** What a receiver answers for one named row. */
 export type StopRowState =
 	/** The receiver's own flow stopped it and its broker is gone. */
@@ -203,11 +218,11 @@ export interface StopRowAnswer {
 }
 
 /** A request as a window receives it. */
-export type WindowRequest = SwitchRequest | LaunchRequest | StopRequest;
+export type WindowRequest = SwitchRequest | LaunchRequest | StopRequest | ReloadRequest;
 
 /** How long a request stays actionable. */
 export function requestTtlMs(request: Pick<WindowRequest, "kind">): number {
-	return request.kind === "launch" ? LAUNCH_REQUEST_TTL_MS : request.kind === "stop" ? STOP_REQUEST_TTL_MS : REQUEST_TTL_MS;
+	return request.kind === "launch" ? LAUNCH_REQUEST_TTL_MS : request.kind === "stop" ? STOP_REQUEST_TTL_MS : request.kind === "reload" ? RELOAD_REQUEST_TTL_MS : REQUEST_TTL_MS;
 }
 
 /** What the owner did with a request: whether it selected the tab, and whether its window is in front. */
@@ -223,6 +238,11 @@ export interface ServeOutcome {
 	readonly refusal?: RefusalReason;
 	/** A stop request's per-row answers, in the order of the request's rows; only a successful outcome carries them. */
 	readonly rows?: readonly StopRowAnswer[];
+	/**
+	 * Run once the answer is written and the request file is gone, never sent to the requester. A reload runs here, so
+	 * the window that reloads cannot read the same request again, nor reload before it answered.
+	 */
+	readonly afterAnswer?: () => void;
 }
 
 /** The reasons a refusal names; a refusal without one is the ordinary "could not do it". */
@@ -311,6 +331,7 @@ function parseRequest(text: string, fileTo: string, fileId: string): WindowReque
 		const target = parseWorkspace(workspace);
 		return action === null || target === null ? null : { kind, version: VERSION, id, to, from, createdAt, workspace: target, launch: action };
 	}
+	if (kind === "reload") return { kind, version: VERSION, id, to, from, createdAt };
 	if (kind === "stop") {
 		const identities = parseStopRows(rows);
 		return identities === null ? null : { kind, version: VERSION, id, to, from, createdAt, rows: identities };
@@ -453,6 +474,82 @@ export async function postStopRequest(
 	};
 	await writeRequest(storageDir, record, now);
 	return id;
+}
+
+/**
+ * Ask `to` to reload its window. Resolves with the request id once the file is in place; the requester then waits with
+ * {@link awaitReloadTakenUp}. A window of a build that does not know the kind deletes the request and does nothing.
+ */
+export async function postReloadRequest(
+	storageDir: string,
+	request: { readonly to: string; readonly from: string },
+	now: () => number = Date.now,
+): Promise<string> {
+	if (!ID_RE.test(request.to) || !ID_RE.test(request.from)) throw new TypeError("a window request needs holder ids of letters, digits and dashes");
+	const id = randomUUID();
+	const record: ReloadRequest = {
+		kind: "reload",
+		version: VERSION,
+		id,
+		to: request.to,
+		from: request.from,
+		createdAt: new Date(now()).toISOString(),
+	};
+	await writeRequest(storageDir, record, now);
+	return id;
+}
+
+/**
+ * How a requester's wait for a reload request ended. `taken-up`: the window renamed the request and answers it, so it
+ * reloads itself. `unanswered`: the request vanished with no trace of a take-up, which is what a window of an older
+ * build that does not know the kind does (it deletes it); that window does not reload. `timeout`: nobody took it up
+ * within the bound and it was withdrawn here, so a window that wakes later does not reload for it.
+ */
+export type ReloadAnswer = "taken-up" | "unanswered" | "timeout";
+
+async function fileExists(file: string): Promise<boolean> {
+	return await fsp.stat(file).then(() => true, () => false);
+}
+
+/**
+ * Wait until reload request `id` addressed to `to` is taken up, or gone, or `timeoutMs` (default
+ * {@link RELOAD_ACCEPT_TIMEOUT_MS}) passed, whichever comes first; on a timeout the request is withdrawn. Take-up is
+ * read from the `.accepted` file the receiver renames the request to, or its `.response` once that is gone (the
+ * receiver writes the response before it deletes the accepted file, so one of the two always shows); the response is
+ * deleted here. Never throws.
+ */
+export async function awaitReloadTakenUp(
+	storageDir: string,
+	to: string,
+	id: string,
+	options: { readonly timeoutMs?: number; readonly pollMs?: number } = {},
+): Promise<ReloadAnswer> {
+	const directory = directoryOf(storageDir);
+	const requestFile = path.join(directory, `${to}.${id}${REQUEST_SUFFIX}`);
+	const acceptedFile = path.join(directory, `${to}.${id}${ACCEPTED_SUFFIX}`);
+	const responseFile = path.join(directory, `${to}.${id}${RESPONSE_SUFFIX}`);
+	const deadline = Date.now() + (options.timeoutMs ?? RELOAD_ACCEPT_TIMEOUT_MS);
+	const pollMs = options.pollMs ?? 50;
+	const classify = async (): Promise<ReloadAnswer> => {
+		if (await fileExists(acceptedFile)) return "taken-up";
+		if (await fileExists(responseFile)) {
+			await fsp.rm(responseFile, { force: true }).catch(() => {});
+			return "taken-up";
+		}
+		return "unanswered";
+	};
+	for (;;) {
+		if (!(await fileExists(requestFile))) return await classify();
+		if (Date.now() >= deadline) {
+			// Withdraw it. A window that renamed it first wins that race: its take-up shows below, and the delete finds nothing.
+			await withdrawRequest(storageDir, to, id).catch(() => {});
+			const answer = await classify();
+			return answer === "unanswered" ? "timeout" : answer;
+		}
+		const { promise, resolve } = Promise.withResolvers<void>();
+		setTimeout(resolve, pollMs).unref?.();
+		await promise;
+	}
 }
 
 async function writeRequest(storageDir: string, record: WindowRequest, now: () => number): Promise<void> {
@@ -805,20 +902,21 @@ export function startRequestWatch(
 				return;
 			}
 			const acceptedFile = path.join(directory, `${request.to}.${request.id}${ACCEPTED_SUFFIX}`);
-			if (request.kind === "stop") {
+			const takenUp = request.kind === "stop" || request.kind === "reload";
+			if (takenUp) {
 				// Take the request up: one atomic rename, so the requester's delete and this claim cannot both win. A request
-				// the requester already withdrew is gone, and nothing is stopped for it.
+				// the requester already withdrew is gone, and nothing is done for it.
 				try {
 					await fsp.rename(file, acceptedFile);
 				} catch (error) {
-					if (errorCode(error) !== "ENOENT") report(`a stop request could not be taken up: ${messageOf(error)}`);
+					if (errorCode(error) !== "ENOENT") report(`a ${request.kind} request could not be taken up: ${messageOf(error)}`);
 					return;
 				}
 			}
 			const stillWanted = async (): Promise<boolean> => {
 				if (disposed) return false;
-				// A stop that was taken up cannot be withdrawn, and the user already confirmed it.
-				if (request.kind === "stop") return true;
+				// A stop or a reload that was taken up cannot be withdrawn (the user already confirmed the stop; the reload is the very act asked for).
+				if (takenUp) return true;
 				if (now() - Date.parse(request.createdAt) > requestTtlMs(request)) return false;
 				try {
 					return (await fsp.stat(file)).isFile();
@@ -843,7 +941,9 @@ export function startRequestWatch(
 				responseText(request.id, outcome),
 			);
 			await fsp.rm(file, { force: true });
-			if (request.kind === "stop") await fsp.rm(acceptedFile, { force: true });
+			if (takenUp) await fsp.rm(acceptedFile, { force: true });
+			// Only now is the request gone for good: a window that reloads here does not read it again.
+			outcome.afterAnswer?.();
 		} catch (error) {
 			report(`a window request could not be answered: ${messageOf(error)}`);
 		} finally {

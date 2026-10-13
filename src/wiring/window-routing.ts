@@ -27,8 +27,10 @@ import type { OpenWindow, PublishedRow, PublishedRowStatus, WindowRegistry } fro
 import {
 	LAUNCH_ANSWER_TIMEOUT_MS,
 	PENDING_ANSWER_TIMEOUT_MS,
+	RELOAD_ACCEPT_TIMEOUT_MS,
 	REQUEST_ANSWER_TIMEOUT_MS,
 	awaitPendingLaunchAnswer,
+	awaitReloadTakenUp,
 	awaitRequestAnswer,
 	pendingKeyOf,
 	planFolderLaunch,
@@ -36,6 +38,7 @@ import {
 	planWindowSwitch,
 	postLaunchRequest,
 	postPendingLaunch,
+	postReloadRequest,
 	postSwitchRequest,
 	startPendingLaunchWatch,
 	startRequestWatch,
@@ -47,6 +50,7 @@ import type {
 	LaunchRequest,
 	LaunchWorkspace,
 	RefusalReason,
+	ReloadRequest,
 	RequestAnswer,
 	RequestWatch,
 	ServeContext,
@@ -68,6 +72,8 @@ const WINDOW_REQUEST_WATCH_DEBOUNCE_MS = 30;
 const UNITY_CHOICE_KEY = "omp.unityProjectChoice.v1";
 /** VS Code's editor-group target that opens an editor in a new auxiliary window (`AUX_WINDOW_GROUP`). */
 const AUX_WINDOW_GROUP = -3;
+/** The workbench command Developer: Reload Window runs; it restarts this window's extension host. */
+const RELOAD_WINDOW_COMMAND = "workbench.action.reloadWindow";
 
 /** What the routing reads of one tab record of this window. */
 export interface RoutingTab {
@@ -213,6 +219,12 @@ export interface WindowRouting {
 	rescanPendingLaunches(): void;
 	/** Serve a request to start a launch here (ADR-0057): another window's, or a pending one this window claimed. */
 	serveLaunchRequest(context: vscode.ExtensionContext, index: SessionIndex, request: LaunchRequest, serveContext: ServeContext): Promise<ServeOutcome>;
+	/**
+	 * Reload All Windows: post a reload request to every other live window of the profile, wait briefly (bounded) for each
+	 * to take it up, then reload this window whatever each answered. Resolves once this window's reload command returns
+	 * (in practice the host is replaced first).
+	 */
+	reloadAllWindows(acceptTimeoutMs?: number): Promise<void>;
 	/** Serve another window's Kill All request (ADR-0060). */
 	serveStopRequest(index: SessionIndex, request: StopRequest, serveContext: ServeContext): Promise<ServeOutcome>;
 	/** Serve another window's request to show a session's tab (ADR-0056): selection only. */
@@ -839,6 +851,72 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 		return { ok: true, focused: await windowBecomesFocused(WINDOW_FOCUS_WAIT_MS) };
 	}
 
+	/** Reload this window through the workbench's own command (the one Developer: Reload Window runs). */
+	async function reloadThisWindow(reason: string): Promise<void> {
+		deps.log(`reload: reloading this window (${reason})`);
+		try {
+			await vscode.commands.executeCommand(RELOAD_WINDOW_COMMAND);
+		} catch (error) {
+			deps.error(`This window could not be reloaded: ${messageOf(error)}`);
+		}
+	}
+
+	/**
+	 * Serve another window's reload request (Reload All Windows): it was taken up before this runs, so it cannot be
+	 * served twice. The window reloads only after the answer is written and the request is gone, so the host that
+	 * starts afterwards finds nothing to act on.
+	 */
+	function serveReloadRequest(request: ReloadRequest): ServeOutcome {
+		return { ok: true, focused: false, afterAnswer: () => { void reloadThisWindow(`asked by window ${request.from}`); } };
+	}
+
+	/** The other live windows of the profile, from the registry as it is now. */
+	function otherWindows(): readonly OpenWindow[] {
+		return (deps.registry()?.windows() ?? []).filter(window => !window.here);
+	}
+
+	/** The Reload All Windows run in flight: a second invocation joins it instead of posting requests again. */
+	let reloadingAll: Promise<void> | undefined;
+
+	/**
+	 * Ask every other live window to reload, wait briefly (at most {@link RELOAD_ACCEPT_TIMEOUT_MS}, all windows at once)
+	 * for each to take the request up, then reload this window whatever each answered. A window that never takes the
+	 * request up (a build that predates it, a hung host) is logged and left; it never holds this window back.
+	 */
+	async function reloadEveryWindow(acceptTimeoutMs: number): Promise<void> {
+		const index = deps.index();
+		if (index === null) {
+			deps.log("reload all windows: the session index is not ready, so only this window is reloaded");
+		} else {
+			try {
+				await deps.registry()?.refresh();
+			} catch (error) {
+				deps.log(`reload all windows: the other windows could not be read afresh: ${messageOf(error)}`);
+			}
+			const peers = otherWindows();
+			if (peers.length === 0) deps.log("reload all windows: no other window is open");
+			await Promise.all(peers.map(async peer => {
+				try {
+					const id = await postReloadRequest(index.claimStorageDir, { to: peer.holderId, from: index.claimHolder.id });
+					const answer = await awaitReloadTakenUp(index.claimStorageDir, peer.holderId, id, { timeoutMs: acceptTimeoutMs });
+					deps.log(
+						answer === "taken-up" ? `reload all windows: ${peer.label} (${peer.holderId}) is reloading`
+							: answer === "unanswered" ? `reload all windows: ${peer.label} (${peer.holderId}) deleted the request without taking it up (an older build that does not know it); reload that window by hand`
+								: `reload all windows: ${peer.label} (${peer.holderId}) did not take the request up within ${acceptTimeoutMs} ms; it was withdrawn and that window is not reloaded`,
+					);
+				} catch (error) {
+					deps.log(`reload all windows: ${peer.label} (${peer.holderId}) could not be asked: ${messageOf(error)}`);
+				}
+			}));
+		}
+		await reloadThisWindow("after asking the other windows");
+	}
+
+	function reloadAllWindows(acceptTimeoutMs = RELOAD_ACCEPT_TIMEOUT_MS): Promise<void> {
+		reloadingAll ??= reloadEveryWindow(acceptTimeoutMs).finally(() => { reloadingAll = undefined; });
+		return reloadingAll;
+	}
+
 	/**
 	 * Serve another window's Kill All request (ADR-0060): stop, through this window's own stop lifecycle, the rows
 	 * the request names that this window provably runs, and answer per row.
@@ -1181,7 +1259,7 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 		noteFocused() {
 			windowFocusedAt = new Date().toISOString();
 		},
-		peers: () => (deps.registry()?.windows() ?? []).filter(window => !window.here),
+		peers: otherWindows,
 		registry: () => deps.registry(),
 		heldByAnotherWindow,
 		switchToWindow: switchToSessionWindow,
@@ -1194,7 +1272,9 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 					? await selectHeldSessionTab(index, request, requestContext)
 					: request.kind === "stop"
 						? await serveStopRequest(index, request, requestContext)
-						: await serveLaunchRequest(context, index, request, requestContext);
+						: request.kind === "reload"
+							? serveReloadRequest(request)
+							: await serveLaunchRequest(context, index, request, requestContext);
 				deps.timing("receiver: answer ready", `${request.id.slice(0, 8)} ok=${outcome.ok} focused=${outcome.focused}`);
 				return outcome;
 			}, { onError: detail => deps.log(`window requests: ${detail}`), debounceMs: WINDOW_REQUEST_WATCH_DEBOUNCE_MS });
@@ -1215,6 +1295,7 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 			pendingLaunchWatch?.rescan();
 		},
 		serveLaunchRequest,
+		reloadAllWindows,
 		serveStopRequest,
 		selectHeldTab: selectHeldSessionTab,
 		openRestoredTabIfUncovered,

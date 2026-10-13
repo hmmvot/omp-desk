@@ -420,6 +420,11 @@
         "category": "OMP"
       },
       {
+        "command": "omp.reloadAllWindows",
+        "title": "Reload All Windows",
+        "category": "OMP"
+      },
+      {
         "command": "omp.goToSession",
         "title": "Go to Session…",
         "category": "OMP"
@@ -1068,6 +1073,11 @@
           "command": "omp.addWorkspaceFolder",
           "when": "view == omp.sessions",
           "group": "2_folder@1"
+        },
+        {
+          "command": "omp.reloadAllWindows",
+          "when": "view == omp.sessions",
+          "group": "3_window@1"
         },
         {
           "command": "omp.loginProvider",

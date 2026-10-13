@@ -18,7 +18,7 @@ import { setImmediate as nextTurn } from "node:timers/promises";
 import { URI } from "vscode-uri";
 import { sessionIncarnation } from "../host/window-registry.ts";
 import type { WindowRegistry, WindowSnapshot } from "../host/window-registry.ts";
-import { awaitPendingLaunchAnswer, awaitRequestAnswer, pendingKeyOf, postPendingLaunch, postSwitchRequest, startPendingLaunchWatch, startRequestWatch } from "../host/window-requests.ts";
+import { awaitPendingLaunchAnswer, awaitReloadTakenUp, awaitRequestAnswer, pendingKeyOf, postPendingLaunch, postReloadRequest, postSwitchRequest, startPendingLaunchWatch, startRequestWatch } from "../host/window-requests.ts";
 import type { LaunchAction, LaunchRequest, ServeContext, ServeOutcome, StopRequest, SwitchRequest, WindowRequest } from "../host/window-requests.ts";
 import type { StubTabGroup } from "./vscode-test-stub.ts";
 import type { RoutedFolder, WindowRouting, WindowRoutingDeps } from "./window-routing.ts";
@@ -1232,6 +1232,129 @@ describe("watching for requests", () => {
 		w.routing.rescanPendingLaunches();
 		const posted = await postSwitchRequest(w.storageDir, { to: "this-window", from: "holder-a", tabId: "tab:x", incarnation: "g_none", binding: null });
 		assert.equal(await awaitRequestAnswer(w.storageDir, "this-window", posted, { timeoutMs: 300 }), "timeout");
+	});
+});
+
+describe("reloading every window", () => {
+	const RELOAD = "workbench.action.reloadWindow";
+	const reloadsOf = (w: World) => w.calls.filter(call => call[0] === RELOAD).length;
+	const takenUp: ServeOutcome = { ok: true, focused: false };
+	const asked = (w: World) => w.served.filter(request => request.kind === "reload");
+	after(() => { stub.commands.handler = null; });
+
+	/** What `served` held when this window ran its own reload: the peers must have been asked first. */
+	function recordReloadMoment(w: World): number[] {
+		const moments: number[] = [];
+		stub.commands.handler = command => { if (command === RELOAD) moments.push(asked(w).length); };
+		return moments;
+	}
+
+	it("asks every other window to reload, then reloads this window once", async () => {
+		const w = await world([{ holderId: "holder-b", uri: null, serve: takenUp }, { holderId: "holder-c", uri: null, serve: takenUp }]);
+		const moments = recordReloadMoment(w);
+		await w.routing.reloadAllWindows();
+		assert.deepEqual(asked(w).map(request => [request.to, request.from]).sort(), [["holder-b", "this-window"], ["holder-c", "this-window"]], "each peer, and only the peers, got a request from this window");
+		assert.equal(reloadsOf(w), 1);
+		assert.deepEqual(moments, [2], "this window reloaded after both requests had been taken up");
+		assert.equal(w.state.refreshes > 0, true, "the other windows were read afresh first");
+		assert.equal(w.logged.filter(line => line.includes("is reloading")).length, 2);
+		assert.deepEqual(w.errors, []);
+	});
+
+	it("reloads this window after posting even when a peer never takes the request up, and withdraws the request", async () => {
+		const w = await world([{ holderId: "holder-b", uri: null, serve: takenUp }, { holderId: "holder-asleep", uri: null, serve: null }]);
+		const started = Date.now();
+		await w.routing.reloadAllWindows(100);
+		assert.equal(reloadsOf(w), 1);
+		assert.deepEqual(asked(w).map(request => request.to), ["holder-b"]);
+		assert.deepEqual(await folderLeft(w, "window-requests", ".request"), [], "the request nobody took up is withdrawn, so that window never reloads late");
+		assert.ok(w.logged.some(line => line.includes("holder-asleep") && line.includes("did not take the request up")), "the silent peer is logged");
+		assert.ok(Date.now() - started < 1_500, "bounded by the wait for a window");
+	});
+
+	it("does not wait for a window that deletes the request unanswered (an older build), and says so", async () => {
+		const w = await world([{ holderId: "holder-old", uri: null, serve: null }]);
+		const deleting = (async () => {
+			const directory = path.join(w.storageDir, "window-requests");
+			for (;;) {
+				const names = await readdir(directory).catch(() => [] as string[]);
+				const posted = names.find(name => name.startsWith("holder-old.") && name.endsWith(".request"));
+				if (posted !== undefined) { await rm(path.join(directory, posted)); return; }
+				await nextTurn();
+			}
+		})();
+		await w.routing.reloadAllWindows(30_000);
+		await deleting;
+		assert.equal(reloadsOf(w), 1);
+		assert.ok(w.logged.some(line => line.includes("holder-old") && line.includes("older build")));
+	});
+
+	it("reloads only this window when no other window is open or the session index is not ready", async () => {
+		const alone = await world();
+		await alone.routing.reloadAllWindows();
+		assert.equal(reloadsOf(alone), 1);
+		assert.deepEqual(alone.served, []);
+		const starting = await world([{ holderId: "holder-b", uri: null, serve: takenUp }]);
+		starting.deps.index = () => null;
+		await starting.routing.reloadAllWindows();
+		assert.equal(reloadsOf(starting), 1);
+		assert.deepEqual(starting.served, [], "nobody could be addressed without the index");
+	});
+
+	it("still reloads this window when the other windows cannot be read, and tells the user when its own reload fails", async () => {
+		const w = await world([{ holderId: "holder-b", uri: null, serve: takenUp }]);
+		w.registry.refresh = async () => { throw new Error("locked"); };
+		await w.routing.reloadAllWindows();
+		assert.equal(reloadsOf(w), 1);
+		assert.equal(asked(w).length, 1, "the windows it already knew were still asked");
+		stub.commands.handler = () => { throw new Error("no reload today"); };
+		await w.routing.reloadAllWindows();
+		assert.deepEqual(w.errors, ["This window could not be reloaded: no reload today"]);
+	});
+
+	it("joins a reload already under way instead of asking the windows twice", async () => {
+		const w = await world([{ holderId: "holder-b", uri: null, serve: takenUp }]);
+		await Promise.all([w.routing.reloadAllWindows(), w.routing.reloadAllWindows()]);
+		assert.deepEqual([asked(w).length, reloadsOf(w)], [1, 1]);
+	});
+
+	describe("when another window asks this one", () => {
+		const serving = async () => {
+			const w = await world();
+			const reloaded = Promise.withResolvers<void>();
+			stub.commands.handler = command => { if (command === RELOAD) reloaded.resolve(); };
+			w.routing.serveRequests(undefined as never, w.index, { identityKeyOf: (value: string) => value } as never);
+			return { w, reloaded: reloaded.promise };
+		};
+
+		it("reloads this window exactly once, after answering, and leaves nothing for the restarted window to act on", async () => {
+			const { w, reloaded } = await serving();
+			try {
+				const id = await postReloadRequest(w.storageDir, { to: "this-window", from: "holder-a" });
+				assert.equal(await awaitReloadTakenUp(w.storageDir, "this-window", id, { timeoutMs: 3_000 }), "taken-up");
+				await reloaded;
+				w.routing.rescanRequests();
+				await nextTurn(); await nextTurn();
+				assert.equal(reloadsOf(w), 1);
+				assert.deepEqual([await folderLeft(w, "window-requests", ".request"), await folderLeft(w, "window-requests", ".accepted")], [[], []]);
+			} finally {
+				w.routing.dispose();
+			}
+		});
+
+		it("does not reload for a request older than its lifetime", async () => {
+			const { w } = await serving();
+			try {
+				const id = await postReloadRequest(w.storageDir, { to: "this-window", from: "holder-a" }, () => Date.now() - 60_000);
+				// The window deletes what it will not act on; that is how the requester sees it gone.
+				assert.equal(await awaitReloadTakenUp(w.storageDir, "this-window", id, { timeoutMs: 3_000 }), "unanswered");
+				w.routing.rescanRequests();
+				await nextTurn(); await nextTurn();
+				assert.equal(reloadsOf(w), 0);
+			} finally {
+				w.routing.dispose();
+			}
+		});
 	});
 });
 

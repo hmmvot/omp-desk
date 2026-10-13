@@ -1843,6 +1843,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     registerDeskCommand("omp.copyTerminalScreen", copyActiveTerminalScreen),
     registerDeskCommand("omp.redrawTerminal", redrawActiveTerminal),
     registerDeskCommand("omp.moveFileToNewWindow", s.routing.moveFileToNewWindow),
+    registerDeskCommand("omp.reloadAllWindows", () => s.routing.reloadAllWindows()),
     registerDeskCommand("omp.fileLink.open", (argument: unknown) => openFileLinkFromMenu(argument, undefined)),
     registerDeskCommand("omp.fileLink.reveal", (argument: unknown) => openFileLinkFromMenu(argument, "reveal")),
     registerDeskCommand("omp.fileLink.revealInOs", (argument: unknown) => openFileLinkFromMenu(argument, "os")),
