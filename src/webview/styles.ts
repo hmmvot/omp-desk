@@ -420,7 +420,6 @@ ${ANSI_STYLES}
 .omp-overview-head:hover { background: var(--vscode-list-hoverBackground); }
 .omp-overview-summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .omp-overview-member { border-left: 1px solid var(--omp-border); margin-left: 12px; padding-left: 6px; }
-.omp-tools-trigger { display: inline-flex; align-items: center; }
 .omp-native-event { color: var(--omp-muted); font-size: 12px; padding: 6px 0; overflow-wrap: anywhere; }
 .omp-native-skill header { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; }
 .omp-native-skill header p { margin: 0; }
@@ -509,7 +508,7 @@ ${ANSI_STYLES}
 .omp-suggest-option--active .omp-native-badge { border-color: currentColor; }
 .omp-composer-actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; flex: 0 1 auto; min-width: 0; max-width: 100%; margin-left: auto; }
 .omp-composer-actions .omp-btn { height: 28px; justify-content: center; }
-.omp-composer-toolbar .omp-composer-attach, .omp-composer-toolbar .omp-tools-trigger { width: 28px; height: 28px; padding: 0; justify-content: center; flex: 0 0 auto; }
+.omp-composer-toolbar .omp-composer-attach { width: 28px; height: 28px; padding: 0; justify-content: center; flex: 0 0 auto; }
 .omp-composer-toolbar-actions { display: flex; flex-wrap: nowrap; gap: 6px; align-items: center; flex: 0 0 auto; margin-left: auto; }
 .omp-composer-toolbar-actions .omp-btn { height: 28px; justify-content: center; flex: 0 0 auto; }
 .omp-composer-hint { margin-top: 4px; font-size: 11px; color: var(--omp-muted); }
@@ -607,7 +606,6 @@ ${ANSI_STYLES}
 	.omp-btn--icon-mid .omp-btn-label { display: none; }
 	.omp-btn--icon-mid .omp-btn-icon { display: inline; }
 }
-@media (max-width: 590px) { .omp-composer-toolbar .omp-tools-trigger { display: none; } }
 @media (max-width: 460px) {
 	.omp-btn--icon-narrow { width: 28px; padding: 0; }
 	.omp-btn--icon-narrow .omp-btn-label { display: none; }

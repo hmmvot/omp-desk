@@ -111,7 +111,6 @@ export function ChatFooter({ client, snapshot, trailingActions }: {
 		const message = snapshot.commandFeedback?.message;
 		if (message !== undefined) setCommandFeedback(message);
 	}, [snapshot.commandFeedback]);
-	const toolsOutput = preferences.toolCallDetail === "overview" ? "Overview" : "Detailed";
 	const pending = snapshot.pendingControl;
 	const modelHeld = pending?.model !== undefined || (pending?.modelCycles ?? 0) > 0;
 	const levelHeld = pending?.thinking !== undefined || (pending?.thinkingCycles ?? 0) > 0;
@@ -153,10 +152,6 @@ export function ChatFooter({ client, snapshot, trailingActions }: {
 						title={blocked ?? (levelHeld ? heldHint("thinking level", pending?.thinking ?? null) : "Change the session's thinking level · Alt+click: next level")} aria-label="Thinking level" onClick={event => event.altKey ? guestTransport.post({ type: "omp:chat-command", command: "cycle-thinking" }) : send({ action: "snapshot", picker: "thinking" })}>
 						<span className="omp-footer-trigger-label">{level ?? "Unavailable"}</span>
 						<span aria-hidden="true" className={`codicon codicon-${view.awaiting !== null && (bookRef.current?.picker === "thinking" || view.action === "set-thinking") ? "loading codicon-modifier-spin" : levelHeld ? "clock" : "chevron-down"}`} />
-					</button>
-					<button type="button" className="omp-btn omp-tools-trigger"
-						aria-label={`Tools output: ${toolsOutput}`} title={`Tools output: ${toolsOutput}`} onClick={() => client.chooseToolCallDetail()}>
-						<span aria-hidden="true" className="codicon codicon-tools" />
 					</button>
 					{metadata?.branch && <span className="omp-composer-branch" title={`Git branch of the session working directory: ${metadata.branch}`}><span aria-hidden="true" className="codicon codicon-git-branch" /><span className="omp-composer-branch-name">{metadata.branch}</span></span>}
 				</div>

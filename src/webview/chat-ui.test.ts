@@ -906,9 +906,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate("document.querySelector('[data-tool-call-id=\"read-live\"] .omp-tool-head').click();document.querySelector('.omp-composer textarea').focus()");
 			await ui.call("Input.insertText", { text: "Unsent draft survives" });
 			await ui.wait("document.querySelector('[data-tool-call-id=\"read-live\"] .omp-tool-body')?.textContent.includes('Canonical source output')");
-			// The chip only asks the host to open its native picker; the host then writes the setting and pushes the new density back.
-			await ui.evaluate("document.querySelector('.omp-tools-trigger').click()");
-			await ui.wait("window.sent.some(message=>message.type==='omp:chat-tool-detail')");
+			// The density is a setting the host pushes; the page keeps the draft and the open call across the change.
 			await ui.evaluate("window.ui.density('detailed')");
 			await ui.wait("document.querySelector('.omp-tool-overview')===null");
 			assert.equal(await ui.evaluate("document.querySelector('.omp-composer textarea').value"), "Unsent draft survives");
@@ -2081,39 +2079,22 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.equal(await ui.evaluate("document.querySelector('.omp-composer-state')"), null);
 		});
 
-		await t.test("the Tools chip and the branch live in one composer toolbar row, with no top-right Tools control, and the chip asks the host to open its native picker", async () => {
+		await t.test("the branch lives in one composer toolbar row with the pickers and Send, and there is no Tools output control", async () => {
 			await reset("tools-in-composer");
 			await ui.evaluate("window.ui.receive({type:'omp:footer-metadata',provider:'one',branch:'layout-branch',windows:[],accounts:[],accountSelection:null})");
 			await ui.wait("document.querySelector('.omp-composer-branch')");
 			assert.deepEqual(await ui.evaluate(`(()=>{
-			 const toolbar=document.querySelector('.omp-composer-toolbar'),tools=document.querySelectorAll('.omp-tools-trigger'),pickers=[...toolbar.querySelectorAll('.omp-footer-trigger')],attach=toolbar.querySelector('.omp-composer-attach').getBoundingClientRect(),
-			  centers=[...toolbar.querySelectorAll('.omp-composer-attach,.omp-footer-trigger,.omp-tools-trigger,.omp-composer-branch,.omp-context-trigger,.omp-btn--primary')].filter(node=>node.getBoundingClientRect().width>0).map(node=>{const rect=node.getBoundingClientRect();return rect.top+rect.height/2}),size=tools[0].getBoundingClientRect();
-			 return {composerToolbars:document.querySelectorAll('.omp-composer-toolbar').length,metadataRows:document.querySelectorAll('.omp-composer-metadata').length,chrome:document.querySelectorAll('.omp-chat-chrome,.omp-tools-menu,.omp-tools-options').length,
-			  tools:tools.length,toolsInToolbar:toolbar.contains(tools[0]),branchInToolbar:toolbar.contains(document.querySelector('.omp-composer-branch')),
-			  order:[...toolbar.querySelectorAll('.omp-composer-attach,.omp-footer-trigger,.omp-tools-trigger,.omp-composer-branch')].map(node=>node.className.includes('tools')?'tools':node.className.includes('branch')?'branch':node.className.includes('attach')?'attach':'picker').join(),
-			  pickers:pickers.length,iconButton:tools[0].classList.contains('omp-btn')&&!tools[0].classList.contains('omp-chip')&&size.width===28&&size.height===28&&size.width===attach.width&&size.height===attach.height,oneRow:Math.max(...centers)-Math.min(...centers)<10};})()`),
-				{ composerToolbars: 1, metadataRows: 0, chrome: 0, tools: 1, toolsInToolbar: true, branchInToolbar: true, order: "picker,picker,tools,branch,attach", pickers: 2, iconButton: true, oneRow: true });
-			assert.equal(await ui.evaluate("document.querySelector('.omp-tools-trigger').hasAttribute('aria-expanded')"), false);
-			// The chip names the live choice, and its accessible name follows the setting from either owner.
-			const chip = () => ui.evaluate<{ text: string; name: string; title: string; icon: boolean }>("(()=>{const chip=document.querySelector('.omp-tools-trigger');return{text:chip.textContent.trim(),name:chip.getAttribute('aria-label'),title:chip.title,icon:chip.querySelector('.codicon-tools')!==null}})()");
-			assert.deepEqual(await chip(), { text: "", name: "Tools output: Overview", title: "Tools output: Overview", icon: true });
-			await ui.evaluate("window.ui.density('detailed')");
-			await ui.wait("document.querySelector('.omp-tools-trigger').getAttribute('aria-label')==='Tools output: Detailed'");
-			assert.deepEqual(await chip(), { text: "", name: "Tools output: Detailed", title: "Tools output: Detailed", icon: true });
-			await ui.evaluate("window.ui.density('overview')");
-			await ui.wait("document.querySelector('.omp-tools-trigger').getAttribute('aria-label')==='Tools output: Overview'");
-			// The chip opens no in-page popover: one click is one request that asks the host for its native picker, and the page
-			// never names the value (the host writes the setting from its own pick and pushes the readback).
-			await ui.evaluate("window.sent.length=0;document.querySelector('.omp-tools-trigger').click()");
-			await ui.wait("window.sent.some(message=>message.type==='omp:chat-tool-detail')");
-			const asks = await ui.evaluate<Record<string, unknown>[]>("window.sent.filter(message=>message.type==='omp:chat-tool-detail')");
-			assert.equal(asks.length, 1);
-			assert.deepEqual(Object.keys(asks[0]!).sort(), ["epoch", "requestId", "type"]);
-			assert.equal(await ui.evaluate("document.querySelector('.omp-tools-options,[role=radiogroup],input[type=radio]')"), null, "no custom popover appears");
-			assert.equal(await ui.evaluate("document.querySelector('.omp-tools-trigger').hasAttribute('aria-expanded')"), false);
-			assert.equal((await chip()).name, "Tools output: Overview", "the chip changes only when the host pushes the new setting");
-			await ui.evaluate("window.ui.density('detailed')");
-			await ui.wait("document.querySelector('.omp-tools-trigger').getAttribute('aria-label')==='Tools output: Detailed'");
+			 const toolbar=document.querySelector('.omp-composer-toolbar'),pickers=[...toolbar.querySelectorAll('.omp-footer-trigger')],
+			  centers=[...toolbar.querySelectorAll('.omp-composer-attach,.omp-footer-trigger,.omp-composer-branch,.omp-context-trigger,.omp-btn--primary')].filter(node=>node.getBoundingClientRect().width>0).map(node=>{const rect=node.getBoundingClientRect();return rect.top+rect.height/2});
+			 return {composerToolbars:document.querySelectorAll('.omp-composer-toolbar').length,metadataRows:document.querySelectorAll('.omp-composer-metadata').length,chrome:document.querySelectorAll('.omp-chat-chrome,.omp-tools-menu,.omp-tools-options,.omp-tools-trigger').length,
+			  branchInToolbar:toolbar.contains(document.querySelector('.omp-composer-branch')),
+			  order:[...toolbar.querySelectorAll('.omp-composer-attach,.omp-footer-trigger,.omp-composer-branch')].map(node=>node.className.includes('branch')?'branch':node.className.includes('attach')?'attach':'picker').join(),
+			  pickers:pickers.length,oneRow:Math.max(...centers)-Math.min(...centers)<10};})()`),
+				{ composerToolbars: 1, metadataRows: 0, chrome: 0, branchInToolbar: true, order: "picker,picker,branch,attach", pickers: 2, oneRow: true });
+			// The density is a setting, not a control of the page: a pushed preference changes the rows and nothing is posted back.
+			await ui.evaluate("window.sent.length=0;window.ui.density('detailed')");
+			await ui.wait("document.querySelector('.omp-composer-toolbar') !== null");
+			assert.equal(await ui.evaluate("window.sent.some(message=>message.type==='omp:chat-tool-detail')"), false);
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
@@ -2128,7 +2109,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 				for (const width of [1000, 760, 590, 460, 300, 240, 160]) {
 					await ui.call("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: false });
 					await ui.settleGeometry(".omp-composer");
-					const layout = await ui.evaluate<{ overflow: boolean; contained: boolean; ordered: boolean; queued: boolean; spread: number; branch: boolean; tools: number }>(`(() => {
+					const layout = await ui.evaluate<{ overflow: boolean; contained: boolean; ordered: boolean; queued: boolean; spread: number; branch: boolean }>(`(() => {
 					 const card=document.querySelector('.omp-composer').getBoundingClientRect(),input=document.querySelector('textarea').getBoundingClientRect(),
 					  toolbar=document.querySelector('.omp-composer-toolbar'),bar=toolbar.getBoundingClientRect(),
 					  shown=node=>node!==null&&node.getBoundingClientRect().width>0,
@@ -2137,7 +2118,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 					 return {overflow:document.documentElement.scrollWidth>innerWidth,
 					  contained:controls.every(rect=>rect.left>=card.left&&rect.right<=card.right&&rect.top>=card.top&&rect.bottom<=card.bottom),
 					  ordered:input.bottom<=bar.top,spread:Math.max(...centers)-Math.min(...centers),
-					  branch:shown(document.querySelector('.omp-composer-branch')),tools:document.querySelector('.omp-tools-trigger').getBoundingClientRect().width,
+					  branch:shown(document.querySelector('.omp-composer-branch')),
 					  queued:document.querySelector('.omp-state-queued')!==null}; })()`);
 					const where = `${width}px busy=${busy}`;
 					assert.equal(layout.overflow, false, where);
@@ -2145,7 +2126,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 					assert.equal(layout.ordered, true, `${where}: the multiline input sits above the toolbar`);
 					assert.equal(layout.queued, false, "queued messages are not repeated in the toolbar");
 					assert.equal(layout.branch, width > 860, `${where}: the branch is the first thing to collapse`);
-					assert.equal(layout.tools, width > 590 ? 28 : 0, `${where}: secondary Tools gives way after the branch`);
+					assert.equal(await ui.evaluate("document.querySelector('.omp-tools-trigger')"), null, `${where}: there is no Tools output control to give way`);
 					assert.equal(await ui.evaluate("[...document.querySelectorAll('.omp-footer-trigger')].every(node=>getComputedStyle(node).flexShrink==='0' && parseFloat(getComputedStyle(node).minWidth)>0)"), true, "pickers keep a non-shrinking minimum");
 					assert.equal(await ui.evaluate("document.querySelector('.omp-footer-trigger .codicon-chevron-down').getAttribute('aria-hidden')"), "true");
 					if (busy) {
@@ -2245,7 +2226,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate(`(()=>{
 			 const card=document.querySelector('.omp-composer'),ask=card.querySelector('.omp-ask').getBoundingClientRect(),toolbar=card.querySelector('.omp-composer-toolbar').getBoundingClientRect();
 			 return {branch:card.querySelector('.omp-composer-toolbar .omp-composer-branch').textContent.trim(),
-			  controls:card.querySelectorAll('.omp-footer-trigger:not(.omp-tools-trigger)').length,enabled:!card.querySelector('.omp-footer-trigger').disabled,
+			  controls:card.querySelectorAll('.omp-footer-trigger').length,enabled:!card.querySelector('.omp-footer-trigger').disabled,
 			  afterAsk:toolbar.top>=ask.bottom,feedback:card.querySelector('.omp-footer-feedback > span').textContent,
 			  dismiss:card.querySelector('.omp-footer-feedback button')?.getAttribute('aria-label')!==null};})()`),
 				{ branch: "dock-branch", controls: 2, enabled: true, afterAsk: true, feedback: "Native command feedback", dismiss: true });

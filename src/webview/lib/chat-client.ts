@@ -165,13 +165,6 @@ export class ChatClient {
 	getSnapshot = (): ChatSnapshot => this.#model;
 	getDisplayPreferences = (): ChatDisplayPreferences => this.#displayPreferences;
 
-	/** Ask the host to open the native Tools output picker. Presentation only: no OMP/session mutation authority, even on read-only chats. */
-	chooseToolCallDetail(): boolean {
-		const epoch = this.#model.epoch;
-		if (epoch === null) return false;
-		return this.#transport.post({ type: "omp:chat-tool-detail", epoch, requestId: this.#newRequestId() }) !== false;
-	}
-
 	subscribe = (listener: () => void): (() => void) => {
 		this.#listeners.add(listener);
 		return () => {
