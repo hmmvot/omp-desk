@@ -3549,8 +3549,8 @@ describe("same-editor Chat and native Terminal actions", () => {
 		const settingsWrites = harness.configurationWrites().length;
 		try {
 			assert.deepEqual(clients.map(client => client.getDisplayPreferences()), [
-				{ toolCallDetail: "overview", accessibilitySupport: false, thinkingExpanded: false, toolsExpanded: false },
-				{ toolCallDetail: "overview", accessibilitySupport: false, thinkingExpanded: false, toolsExpanded: false },
+				{ toolCallDetail: "overview", accessibilitySupport: false, thinkingExpanded: false, toolsMode: "collapsed" },
+				{ toolCallDetail: "overview", accessibilitySupport: false, thinkingExpanded: false, toolsMode: "collapsed" },
 			]);
 			// A page's own stale route can never overwrite what the host says.
 			const before = clients[0]!.getDisplayPreferences();
@@ -3560,14 +3560,31 @@ describe("same-editor Chat and native Terminal actions", () => {
 			harness.configuration({ "ompDesk.toolCallDetail": "overview", "editor.accessibilitySupport": "on" });
 			harness.refreshChatDisplayPreferences({ affectsConfiguration: key => key === "editor.accessibilitySupport" });
 			assert.deepEqual(clients.map(client => client.getDisplayPreferences()), [
-				{ toolCallDetail: "overview", accessibilitySupport: true, thinkingExpanded: false, toolsExpanded: false },
-				{ toolCallDetail: "overview", accessibilitySupport: true, thinkingExpanded: false, toolsExpanded: false },
+				{ toolCallDetail: "overview", accessibilitySupport: true, thinkingExpanded: false, toolsMode: "collapsed" },
+				{ toolCallDetail: "overview", accessibilitySupport: true, thinkingExpanded: false, toolsMode: "collapsed" },
 			]);
 			assert.equal(channel.written.length, writes, "presentation updates never write OMP commands even when writer admission is fenced");
 		} finally {
 			for (const detach of detached) detach();
 			host.dispose();
 			await f.index.closeSession(f.row.tabId, { confirmedStopped: true });
+		}
+	});
+
+	it("reads the remembered tool display mode from the key that held the Ctrl+O boolean: true is all, \"groups\" is groups, anything else collapsed", () => {
+		const window = harness.window();
+		const before = window.context;
+		const memory = new Map<string, unknown>();
+		window.context = { globalState: { get: (key: string) => memory.get(key), update: async (key: string, value: unknown) => { memory.set(key, value); } } };
+		try {
+			const mode = (stored: unknown): unknown => { memory.set("omp.chat.toolsExpanded", stored); return harness.readChatDisplayPreferences().toolsMode; };
+			assert.equal(harness.readChatDisplayPreferences().toolsMode, "collapsed", "nothing stored");
+			assert.equal(mode(true), "all", "what every earlier build stored for an expanded default");
+			assert.equal(mode("groups"), "groups");
+			assert.equal(mode(false), "collapsed");
+			assert.equal(mode("something else"), "collapsed");
+		} finally {
+			window.context = before;
 		}
 	});
 

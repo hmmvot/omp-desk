@@ -224,7 +224,7 @@ export class ChatClient {
 			case "omp:chat-display-preferences":
 				if (!sameEpoch(model.epoch, message.epoch)) return true;
 				if (this.#displayPreferences.toolCallDetail !== message.toolCallDetail || this.#displayPreferences.accessibilitySupport !== message.accessibilitySupport ||
-					this.#displayPreferences.thinkingExpanded !== message.thinkingExpanded || this.#displayPreferences.toolsExpanded !== message.toolsExpanded) {
+					this.#displayPreferences.thinkingExpanded !== message.thinkingExpanded || this.#displayPreferences.toolsMode !== message.toolsMode) {
 					const { type: _type, epoch: _epoch, ...preferences } = message;
 					this.#displayPreferences = preferences;
 					for (const listener of this.#listeners) listener();

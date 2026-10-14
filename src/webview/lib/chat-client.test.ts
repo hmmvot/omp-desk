@@ -493,7 +493,7 @@ describe("chat quick actions", () => {
 	it("adopts the host's remembered thinking and tool defaults", () => {
 		const { client } = harness();
 		client.handle(snapshotMessage());
-		client.handle({ type: "omp:chat-display-preferences", epoch: EPOCH, toolCallDetail: "overview", accessibilitySupport: false, thinkingExpanded: true, toolsExpanded: true });
-		assert.deepEqual(client.getDisplayPreferences(), { toolCallDetail: "overview", accessibilitySupport: false, thinkingExpanded: true, toolsExpanded: true });
+		client.handle({ type: "omp:chat-display-preferences", epoch: EPOCH, toolCallDetail: "overview", accessibilitySupport: false, thinkingExpanded: true, toolsMode: "groups" });
+		assert.deepEqual(client.getDisplayPreferences(), { toolCallDetail: "overview", accessibilitySupport: false, thinkingExpanded: true, toolsMode: "groups" });
 	});
 });

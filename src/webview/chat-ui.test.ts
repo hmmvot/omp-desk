@@ -4189,7 +4189,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 
 		await t.test("the host's thinking and tool defaults open or close every block once, and a block changed afterwards keeps its own state", async () => {
 			await reset("quick-transcript-defaults");
-			const prefs = (thinkingExpanded: boolean, toolsExpanded: boolean) => ui.evaluate(`window.ui.receive({type:'omp:chat-display-preferences',epoch:window.ui.current().epoch,toolCallDetail:'overview',accessibilitySupport:false,thinkingExpanded:${thinkingExpanded},toolsExpanded:${toolsExpanded}})`);
+			const prefs = (thinkingExpanded: boolean, toolsExpanded: boolean) => ui.evaluate(`window.ui.receive({type:'omp:chat-display-preferences',epoch:window.ui.current().epoch,toolCallDetail:'overview',accessibilitySupport:false,thinkingExpanded:${thinkingExpanded},toolsMode:'${toolsExpanded ? "all" : "collapsed"}'})`);
 			await ui.evaluate(`const row=(id,message)=>({type:'message',id,parentId:null,timestamp:'2026-10-01T00:00:00.000Z',message});
 			 window.ui.push({entries:[row('u1',{role:'user',timestamp:1,content:'Look'}),
 			  row('a1',{role:'assistant',model:'m',timestamp:2,stopReason:'toolUse',content:[{type:'thinking',thinking:'Private chain'},{type:'toolCall',id:'only-read',name:'read',arguments:{path:'src/a.ts'}}]}),
@@ -4215,6 +4215,76 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 		});
 
 		// Rewind (ADR-0051): two turns; the second edits a file and runs a command, so its preview has consequences.
+		});
+
+		await t.test("the tool groups mode opens every group with its calls collapsed, a later group joins it, and Ctrl+O and a manual toggle still work from it", async () => {
+			await reset("quick-tool-groups-mode");
+			const mode = (toolsMode: "collapsed" | "groups" | "all") => ui.evaluate(`window.ui.receive({type:'omp:chat-display-preferences',epoch:window.ui.current().epoch,toolCallDetail:'overview',accessibilitySupport:false,thinkingExpanded:false,toolsMode:'${toolsMode}'})`);
+			const turn = (n: number) => `[row('u${n}',{role:'user',timestamp:${n * 10},content:'Turn ${n}'}),
+			  row('a${n}',{role:'assistant',model:'m',timestamp:${n * 10 + 1},stopReason:'toolUse',content:[{type:'toolCall',id:'edit-${n}',name:'edit',arguments:{path:'src/a${n}.ts'}},{type:'toolCall',id:'bash-${n}',name:'bash',arguments:{command:'echo ${n}'}},{type:'toolCall',id:'read-${n}',name:'read',arguments:{path:'src/b${n}.ts'}}]}),
+			  row('re${n}',{role:'toolResult',toolCallId:'edit-${n}',toolName:'edit',timestamp:${n * 10 + 2},isError:false,content:[{type:'text',text:'Updated src/a${n}.ts'}],details:{diff:'+1 new'}}),
+			  row('rb${n}',{role:'toolResult',toolCallId:'bash-${n}',toolName:'bash',timestamp:${n * 10 + 3},isError:false,content:[{type:'text',text:'${n}'}]}),
+			  row('rr${n}',{role:'toolResult',toolCallId:'read-${n}',toolName:'read',timestamp:${n * 10 + 4},isError:false,content:[{type:'text',text:'file body ${n}'}]}),
+			  row('z${n}',{role:'assistant',model:'m',timestamp:${n * 10 + 5},stopReason:'stop',content:[{type:'text',text:'Done ${n}'}]})]`;
+			const push = (turns: number[]) => ui.evaluate(`(()=>{const row=(id,message)=>({type:'message',id,parentId:null,timestamp:'2026-10-01T00:00:00.000Z',message});
+			 window.ui.push({entries:[${turns.map(turn).join(",")}].flat(),durableCount:${turns.length * 6},working:false,settled:true})})()`);
+			const facts = () => ui.evaluate<{ groups: string[]; calls: string[]; texts: string[] }>(`({groups:[...document.querySelectorAll('.omp-overview-head')].map(head=>head.getAttribute('aria-expanded')),
+			 calls:[...document.querySelectorAll('.omp-overview-member .omp-tool-head')].map(head=>head.getAttribute('aria-expanded')),texts:[...document.querySelectorAll('.omp-overview-member .omp-tool-head')].map(head=>head.textContent)})`);
+			await push([1]);
+			await ui.wait("document.querySelector('.omp-overview-head')");
+			assert.deepEqual(await facts(), { groups: ["false"], calls: [], texts: [] }, "collapsed: the group is closed");
+			assert.match(await ui.evaluate<string>("document.querySelector('.omp-overview-head').textContent"), /Edited 1 file · Ran 1 command · Read 1 file/);
+
+			await mode("groups");
+			await ui.wait("document.querySelectorAll('.omp-overview-member .omp-tool-head').length===3");
+			const opened = await facts();
+			assert.deepEqual(opened.groups, ["true"], "the group is open");
+			assert.deepEqual(opened.calls, ["false", "false", "false"], "every call inside is one collapsed line");
+			assert.match(opened.texts.join("|"), /Edit.*a1\.ts.*\|.*Bash.*echo 1.*\|.*Read.*b1\.ts/s);
+			assert.equal(await ui.evaluate("document.querySelector('.omp-tool-body')"), null, "no call shows its body");
+
+			await push([1, 2]);
+			await ui.wait("document.querySelectorAll('.omp-overview-member .omp-tool-head').length===6");
+			if (process.env.OMP_UI_SCREENSHOT_DIR) {
+				const dark = { "editor-background": "#1f1f1f", "editor-foreground": "#cccccc", foreground: "#cccccc", "editorWidget-background": "#202020", "panel-border": "#2b2b2b", "widget-border": "#313131", "input-background": "#313131", "button-background": "#0078d4", descriptionForeground: "#9d9d9d", "font-family": "'Segoe UI', sans-serif" };
+				await ui.evaluate(`document.body.className='vscode-dark';document.body.setAttribute('data-vscode-theme-id','Dark Modern');${Object.entries(dark).map(([name, value]) => `document.documentElement.style.setProperty('--vscode-${name}',${JSON.stringify(value)})`).join(";")}`);
+				await ui.call("Emulation.setDeviceMetricsOverride", { width: 760, height: 900, deviceScaleFactor: 2, mobile: false });
+				await ui.settleGeometry(".omp-transcript");
+				const image = await ui.call("Page.captureScreenshot", { format: "png" });
+				await mkdir(process.env.OMP_UI_SCREENSHOT_DIR, { recursive: true });
+				await writeFile(join(process.env.OMP_UI_SCREENSHOT_DIR, "tool-groups-mode.png"), Buffer.from(String(image.data), "base64"));
+				await ui.call("Emulation.clearDeviceMetricsOverride");
+				await ui.evaluate(`document.body.className='';document.body.removeAttribute('data-vscode-theme-id');${Object.keys(dark).map(name => `document.documentElement.style.removeProperty('--vscode-${name}')`).join(";")}`);
+			}
+			assert.deepEqual(await facts(), { groups: ["true", "true"], calls: Array(6).fill("false"), texts: (await facts()).texts }, "a group that arrives later renders open with collapsed calls");
+
+			await ui.evaluate("document.querySelector('[data-tool-call-id=\"read-2\"] .omp-tool-head').click()");
+			await ui.wait("document.querySelector('[data-tool-call-id=\"read-2\"] .omp-tool-head').getAttribute('aria-expanded')==='true'");
+			assert.deepEqual((await facts()).calls, ["false", "false", "false", "false", "false", "true"], "a call opened by hand opens alone");
+			await ui.evaluate("document.querySelectorAll('.omp-overview-head')[0].click()");
+			await ui.wait("document.querySelectorAll('.omp-overview-member .omp-tool-head').length===3");
+			assert.deepEqual((await facts()).groups, ["false", "true"], "a group closed by hand closes alone");
+			await ui.evaluate("document.querySelectorAll('.omp-overview-head')[0].click()");
+			await ui.wait("document.querySelectorAll('.omp-overview-member .omp-tool-head').length===6");
+
+			await mode("collapsed");
+			await ui.wait("!document.querySelector('.omp-overview-member')");
+			assert.deepEqual((await facts()).groups, ["false", "false"], "pressing it again collapses everything");
+			await mode("groups");
+			await ui.wait("document.querySelectorAll('.omp-overview-member .omp-tool-head').length===6");
+			assert.deepEqual(await facts(), { groups: ["true", "true"], calls: Array(6).fill("false"), texts: (await facts()).texts }, "the hand-opened call was reset by the key");
+
+			await mode("all");
+			await ui.wait("document.querySelectorAll('.omp-overview-member .omp-tool-head[aria-expanded=\"true\"]').length===6");
+			assert.deepEqual((await facts()).groups, ["true", "true"], "Ctrl+O from groups expands every call and keeps the groups open");
+			await mode("groups");
+			await ui.wait("document.querySelectorAll('.omp-overview-member .omp-tool-head[aria-expanded=\"false\"]').length===6");
+			assert.deepEqual((await facts()).groups, ["true", "true"], "the groups key from all folds the calls and keeps the groups open");
+			await mode("all");
+			await mode("collapsed");
+			await ui.wait("!document.querySelector('.omp-overview-member')");
+			assert.deepEqual((await facts()).groups, ["false", "false"], "Ctrl+O from all collapses everything");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		const rewindAt = (n: number): string => new Date(Date.UTC(2026, 9, 9, 10, 0, n)).toISOString();
 		const rewindMessage = (id: string, parentId: string | null, n: number, message: Record<string, unknown>) => ({ type: "message", id, parentId, timestamp: rewindAt(n), message: { timestamp: n, ...message } });
 		const rewindReply = (id: string, parentId: string, n: number, text: string) => rewindMessage(id, parentId, n, { role: "assistant", model: "m", stopReason: "stop", content: [{ type: "text", text }] });

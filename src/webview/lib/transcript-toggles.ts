@@ -1,7 +1,10 @@
+import type { ToolsMode } from "../../chat/tools-mode.ts";
+
 /**
- * The transcript's two global display defaults, the TUI's `Ctrl+T` (show every thinking block) and `Ctrl+O`
- * (expand every tool call). The host owns them — one remembered value per VS Code profile, flipped by the
- * `ompDesk.toggleThinking` / `ompDesk.toggleToolOutput` commands — and pushes them with the display preferences.
+ * The transcript's two global display defaults: the TUI's `Ctrl+T` (show every thinking block) and the tool display
+ * mode (`Ctrl+O` expands every tool call, `Ctrl+Shift+O` opens every group with its calls collapsed). The host owns
+ * them — one remembered value per VS Code profile, changed by the `ompDesk.toggleThinking`,
+ * `ompDesk.toggleToolOutput` and `ompDesk.toggleToolGroups` commands — and pushes them with the display preferences.
  *
  * Each is a default, not a lock: a change opens or closes every block of that kind once, and a block the user
  * opens or closes afterwards keeps its own state until the next change.
@@ -10,13 +13,13 @@
 export interface TranscriptToggles {
 	/** Thinking blocks are open by default. */
 	readonly thinking: boolean;
-	/** Tool calls and tool runs are expanded by default. */
-	readonly tools: boolean;
+	/** `groups`: tool groups open, their calls collapsed. `all`: groups open and calls expanded. */
+	readonly tools: ToolsMode;
 	/** Bumped by every change, so mounted blocks re-apply the default once. */
 	readonly generation: number;
 }
 
-let state: TranscriptToggles = { thinking: false, tools: false, generation: 0 };
+let state: TranscriptToggles = { thinking: false, tools: "collapsed", generation: 0 };
 const listeners = new Set<() => void>();
 
 export function subscribeTranscriptToggles(listener: () => void): () => void {
@@ -29,7 +32,7 @@ export function getTranscriptToggles(): TranscriptToggles {
 }
 
 /** Adopt the host's defaults; a change re-applies them to every mounted block of that kind. */
-export function adoptTranscriptToggles(thinking: boolean, tools: boolean): void {
+export function adoptTranscriptToggles(thinking: boolean, tools: ToolsMode): void {
 	if (state.thinking === thinking && state.tools === tools) return;
 	state = { thinking, tools, generation: state.generation + 1 };
 	for (const listener of [...listeners]) listener();
@@ -41,14 +44,16 @@ export function isToolDisclosureKey(key: string): boolean {
 }
 
 /**
- * The transcript's per-block disclosure map seen through the tools default: a tool block nobody opened or
- * closed since the last change reads as expanded; every other key reads as stored. Only `get` is redirected.
+ * The transcript's per-block disclosure map seen through the tool display mode: a tool block nobody opened or
+ * closed since the last change reads as the mode says. `all` opens runs (groups) and calls; `groups` opens only
+ * runs, so their calls stay one collapsed line each; every other key reads as stored. Only `get` is redirected.
  */
-export function withToolDefault(map: ReadonlyMap<string, boolean>, tools: boolean): ReadonlyMap<string, boolean> {
-	if (!tools) return map;
+export function withToolDefault(map: ReadonlyMap<string, boolean>, tools: ToolsMode): ReadonlyMap<string, boolean> {
+	if (tools === "collapsed") return map;
+	const defaultFor = (key: string): boolean | undefined => key.startsWith("run:") || (tools === "all" && key.startsWith("call:")) ? true : undefined;
 	return new Proxy(map, {
 		get(target, property) {
-			if (property === "get") return (key: string) => target.get(key) ?? (isToolDisclosureKey(key) ? true : undefined);
+			if (property === "get") return (key: string) => target.get(key) ?? defaultFor(key);
 			const value = Reflect.get(target, property, target) as unknown;
 			return typeof value === "function" ? (value as (...args: unknown[]) => unknown).bind(target) : value;
 		},

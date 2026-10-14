@@ -138,9 +138,11 @@ describe("parseChatHostMessage", () => {
 		const result = { type: "omp:chat-queue-result", epoch: EPOCH, requestId: REQUEST_ID, purpose: "promote", results: [{ status: "removed" }, { status: "gone" }] };
 		assert.deepEqual(parseChatHostMessage(result), result);
 		assert.equal(parseChatHostMessage({ ...result, purpose: "send" }), null);
-		const preferences = { type: "omp:chat-display-preferences", epoch: EPOCH, toolCallDetail: "overview", accessibilitySupport: false, thinkingExpanded: true, toolsExpanded: false };
+		const preferences = { type: "omp:chat-display-preferences", epoch: EPOCH, toolCallDetail: "overview", accessibilitySupport: false, thinkingExpanded: true, toolsMode: "groups" };
 		assert.deepEqual(parseChatHostMessage(preferences), preferences);
 		assert.equal(parseChatHostMessage({ ...preferences, thinkingExpanded: "yes" }), null);
+		assert.equal(parseChatHostMessage({ ...preferences, toolsMode: true }), null, "the old boolean is not a mode");
+		assert.equal(parseChatHostMessage({ ...preferences, toolsMode: "everything" }), null);
 	});
 
 	it("requires a target id to withdraw a dialog", () => {

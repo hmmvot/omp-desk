@@ -703,6 +703,12 @@
         "category": "OMP Desk"
       },
       {
+        "command": "ompDesk.toggleToolGroups",
+        "enablement": "ompDesk.sessionMode == chat",
+        "title": "Expand/Collapse Tool Groups",
+        "category": "OMP Desk"
+      },
+      {
         "command": "ompDesk.compactConversation",
         "enablement": "ompDesk.sessionMode == chat",
         "title": "Compact Conversation…",
@@ -1144,6 +1150,11 @@
           "group": "2_chat@4"
         },
         {
+          "command": "ompDesk.toggleToolGroups",
+          "when": "activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat",
+          "group": "2_chat@5"
+        },
+        {
           "command": "ompDesk.compactConversation",
           "when": "activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat",
           "group": "3_session@1"
@@ -1529,6 +1540,11 @@
       {
         "command": "ompDesk.toggleToolOutput",
         "key": "ctrl+o",
+        "when": "activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat"
+      },
+      {
+        "command": "ompDesk.toggleToolGroups",
+        "key": "ctrl+shift+o",
         "when": "activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat"
       },
       {

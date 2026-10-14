@@ -37,6 +37,7 @@
 // Explicit `.ts` specifiers and type-only imports: this module is imported by the node:test
 // runner, which does not resolve extensionless specifiers, and it must stay free of host code.
 import type { ImageContent } from "@oh-my-pi/pi-wire";
+import { isToolsMode, type ToolsMode } from "../chat/tools-mode.ts";
 import type { ClearDeferrable } from "../chat/clear.ts";
 import { parseChatMessage, parseChatEntry, type AssistantMessage, type ChatEntry } from "../chat/messages.ts";
 import { MAX_AGENT_IDENTITIES, parseAgentRoster, parseAgentActivity, parseSubagentFrame } from "../chat/agents.ts";
@@ -185,8 +186,8 @@ export interface ChatDisplayPreferences {
 	accessibilitySupport: boolean;
 	/** The remembered thinking default (the TUI's `Ctrl+T`); absent = closed. */
 	thinkingExpanded?: boolean;
-	/** The remembered tool-call default (the TUI's `Ctrl+O`); absent = collapsed. */
-	toolsExpanded?: boolean;
+	/** The remembered tool display mode (the TUI's `Ctrl+O` and `Ctrl+Shift+O`); absent = collapsed. */
+	toolsMode?: ToolsMode;
 }
 export interface ChatDisplayPreferencesMessage extends ChatDisplayPreferences {
 	type: "omp:chat-display-preferences";
@@ -1044,11 +1045,11 @@ export function parseChatHostMessage(value: unknown): ChatHostMessage | null {
 		case "omp:chat-display-preferences": {
 			const epoch = parseChatEpoch(value.epoch);
 			if (epoch === null || (value.toolCallDetail !== "overview" && value.toolCallDetail !== "detailed") || typeof value.accessibilitySupport !== "boolean") return null;
-			if ((value.thinkingExpanded !== undefined && typeof value.thinkingExpanded !== "boolean") || (value.toolsExpanded !== undefined && typeof value.toolsExpanded !== "boolean")) return null;
+			if ((value.thinkingExpanded !== undefined && typeof value.thinkingExpanded !== "boolean") || (value.toolsMode !== undefined && !isToolsMode(value.toolsMode))) return null;
 			return {
 				type: value.type, epoch, toolCallDetail: value.toolCallDetail, accessibilitySupport: value.accessibilitySupport,
 				...(value.thinkingExpanded === undefined ? {} : { thinkingExpanded: value.thinkingExpanded }),
-				...(value.toolsExpanded === undefined ? {} : { toolsExpanded: value.toolsExpanded }),
+				...(value.toolsMode === undefined ? {} : { toolsMode: value.toolsMode }),
 			};
 		}
 		case "omp:chat-subagent-chunk": {

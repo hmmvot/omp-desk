@@ -438,6 +438,20 @@ describe("commands", () => {
 		assert.equal(bound("ctrl+shift+n")[0]?.when, chatOnly);
 		assert.equal(declared.get("ompDesk.searchFileFromChat")?.title, "Go to File from Chat Selection");
 	});
+
+	it("bind Ctrl+O to expand/collapse all tool calls and Ctrl+Shift+O to the tool groups inside a Chat only, with a title and a Chat-only menu entry each", () => {
+		const chatOnly = "activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat";
+		const bound = (key: string) => contributes.keybindings.filter(binding => binding.key === key);
+		assert.deepEqual(bound("ctrl+o").map(binding => binding.command), ["ompDesk.toggleToolOutput"]);
+		assert.deepEqual(bound("ctrl+shift+o").map(binding => binding.command), ["ompDesk.toggleToolGroups"]);
+		assert.equal(bound("ctrl+o")[0]?.when, chatOnly);
+		assert.equal(bound("ctrl+shift+o")[0]?.when, chatOnly);
+		assert.equal(declared.get("ompDesk.toggleToolGroups")?.title, "Expand/Collapse Tool Groups");
+		for (const command of ["ompDesk.toggleToolOutput", "ompDesk.toggleToolGroups"]) {
+			const entries = menus.filter(({ entry }) => entry.command === command);
+			assert.ok(entries.length > 0 && entries.every(({ entry }) => entry.when === chatOnly), `${command} appears only in menus that require a Chat`);
+		}
+	});
 });
 
 describe("views", () => {
@@ -605,7 +619,7 @@ describe("the namespace (ADR-0068)", () => {
 		assert.deepEqual(LEGACY_COMMAND_IDS.filter(id => declared.has(id)), [], "an alias that is also a contributed command");
 		assert.deepEqual(LEGACY_COMMAND_IDS.map(legacyCommandTarget).filter(id => !declared.has(id)), [], "an alias whose target is not contributed");
 		const neverPublished = contributes.commands.map(command => command.command).filter(id => !LEGACY_COMMAND_IDS.includes("omp." + id.slice("ompDesk.".length)));
-		assert.deepEqual(neverPublished.sort(), ["ompDesk.logoutProvider", "ompDesk.openOmpSettings", "ompDesk.refreshUsageStatus", "ompDesk.reloadAllWindows", "ompDesk.searchFileFromChat"], "the commands 0.3.2 did not publish have no alias; a new command needs none");
+		assert.deepEqual(neverPublished.sort(), ["ompDesk.logoutProvider", "ompDesk.openOmpSettings", "ompDesk.refreshUsageStatus", "ompDesk.reloadAllWindows", "ompDesk.searchFileFromChat", "ompDesk.toggleToolGroups"], "the commands 0.3.2 did not publish have no alias; a new command needs none");
 		assert.deepEqual(LEGACY_ALIASES.map(([oldId]) => oldId).filter(id => !recording.commands.has(id)), [], "an old id with no alias at runtime");
 		const generated = LEGACY_ALIASES.filter(([, target]) => !declared.has(target)).map(([oldId, target]) => `${oldId} -> ${target}`);
 		assert.deepEqual(generated, [

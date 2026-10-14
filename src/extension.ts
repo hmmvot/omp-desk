@@ -191,6 +191,7 @@ import type { NativeStopVerdict } from "./host/rpc-reconcile";
 import type { ChoiceOutcome, CommandResult, CompactMode, SendRefusal, ShakeMode } from "./host/rpc/session";
 import { readSlashRegistry, type BuiltinSlashEntry, type DeskSlashAction, type SlashRegistry } from "./host/slash-registry";
 import { NAVIGATE_REFUSAL_SENTENCES } from "./chat/rewind";
+import { nextToolsMode, toolsModeFromStored, toolsModeToStored, type ToolsModeKey } from "./chat/tools-mode";
 import type { ChatLiteState, ChatPhase } from "./chat/model";
 import { cancelControlPicker, pickControlModel, pickControlThinking } from "./host/control-picker";
 import { activitySignature, withRegistrySubagentWork } from "./protocol/activity";
@@ -1922,8 +1923,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     registerDeskCommand("ompDesk.stopTurn", () => postPanelAction("stop-turn")),
     registerDeskCommand("ompDesk.focusComposer", () => windowState().editorPanels.focusChatComposer(index)),
     registerDeskCommand("ompDesk.retryTurn", () => postChatPanelAction("retry-turn")),
-    registerDeskCommand("ompDesk.toggleThinking", () => toggleTranscriptDefault(THINKING_EXPANDED_KEY)),
-    registerDeskCommand("ompDesk.toggleToolOutput", () => toggleTranscriptDefault(TOOLS_EXPANDED_KEY)),
+    registerDeskCommand("ompDesk.toggleThinking", () => toggleThinkingDefault()),
+    registerDeskCommand("ompDesk.toggleToolOutput", () => toggleToolsMode("output")),
+    registerDeskCommand("ompDesk.toggleToolGroups", () => toggleToolsMode("groups")),
     registerDeskCommand("ompDesk.searchPromptHistory", () => searchPromptHistory()),
     registerDeskCommand("ompDesk.searchSymbolFromChat", () => s.guestDispatcher.searchSymbolFromChat()),
     registerDeskCommand("ompDesk.compactConversation", () => runActiveChatAction(context, index, "compact")),
@@ -5974,18 +5976,30 @@ function readChatDisplayPreferences(): ChatDisplayPreferences {
     toolCallDetail: vscode.workspace.getConfiguration("ompDesk").get<string>("toolCallDetail", "overview") === "detailed" ? "detailed" : "overview",
     accessibilitySupport: vscode.workspace.getConfiguration("editor").get<string>("accessibilitySupport", "auto") === "on",
     thinkingExpanded: s.context?.globalState.get<unknown>(THINKING_EXPANDED_KEY) === true,
-    toolsExpanded: s.context?.globalState.get<unknown>(TOOLS_EXPANDED_KEY) === true,
+    toolsMode: toolsModeFromStored(s.context?.globalState.get<unknown>(TOOLS_EXPANDED_KEY)),
   };
 }
 
-/** The TUI's `Ctrl+T` / `Ctrl+O`: one remembered default for every Chat in this VS Code profile. */
+/**
+ * The TUI's `Ctrl+T` / `Ctrl+O` and Desk's `Ctrl+Shift+O`: one remembered default for every Chat in this VS Code profile.
+ * The tool key keeps its name from when it held a boolean; its stored form is in `toolsModeFromStored`.
+ */
 const THINKING_EXPANDED_KEY = "omp.chat.thinkingExpanded";
 const TOOLS_EXPANDED_KEY = "omp.chat.toolsExpanded";
 
-async function toggleTranscriptDefault(key: typeof THINKING_EXPANDED_KEY | typeof TOOLS_EXPANDED_KEY): Promise<void> {
+async function toggleThinkingDefault(): Promise<void> {
   const s = windowState();
   if (activeChatTab() === null || s.context === undefined) return;
-  await s.context.globalState.update(key, s.context.globalState.get<unknown>(key) !== true);
+  await s.context.globalState.update(THINKING_EXPANDED_KEY, s.context.globalState.get<unknown>(THINKING_EXPANDED_KEY) !== true);
+  s.sessionRuntime.conversations.refreshDisplayPreferences();
+}
+
+/** `Ctrl+O` (`output`) expands or collapses everything; `Ctrl+Shift+O` (`groups`) opens or closes the groups with their calls collapsed. */
+async function toggleToolsMode(key: ToolsModeKey): Promise<void> {
+  const s = windowState();
+  if (activeChatTab() === null || s.context === undefined) return;
+  const next = nextToolsMode(toolsModeFromStored(s.context.globalState.get<unknown>(TOOLS_EXPANDED_KEY)), key);
+  await s.context.globalState.update(TOOLS_EXPANDED_KEY, toolsModeToStored(next));
   s.sessionRuntime.conversations.refreshDisplayPreferences();
 }
 
