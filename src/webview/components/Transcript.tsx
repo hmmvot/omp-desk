@@ -38,6 +38,7 @@ import { measuredTranscriptRows, presentationRowId } from "../lib/transcript-lay
 import { MeasuredRows, type RowViewport } from "./MeasuredRows";
 import { TranscriptScrollController, type TranscriptScrollMode } from "../lib/transcript-scroll";
 import { captureToolInteraction, heldToolInteractions, restoreToolInteraction, type ToolInteraction } from "../lib/tool-interaction";
+import { focusAfter } from "../lib/focus-after";
 import { isHeadNavigation, nextHead } from "../lib/tool-navigation";
 import { NativeMessage } from "./NativeMessage";
 import { EmptyState } from "./EmptyState";
@@ -441,10 +442,11 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		densityInteraction.current = null;
 	}, [props.toolCallDetail]);
 	useEffect(() => {
-		const update = (): void => {
+		const update = (event: Event): void => {
 			if (!rootRef.current || densityInteraction.current) return;
-			const interaction = captureToolInteraction(rootRef.current, overviewRef.current?.runs ?? []);
-			const next = heldToolInteractions(rootRef.current, interaction.calls);
+			const active = focusAfter(event);
+			const interaction = captureToolInteraction(rootRef.current, overviewRef.current?.runs ?? [], active);
+			const next = heldToolInteractions(rootRef.current, interaction.calls, active);
 			if (next.size === forcedCalls.current.size && [...next].every(([id, body]) => forcedCalls.current.get(id) === body)) return;
 			if (next.size > 0) controllerRef.current?.retain();
 			forcedCalls.current = next; redrawInteraction(version => version + 1); controllerRef.current?.layout();

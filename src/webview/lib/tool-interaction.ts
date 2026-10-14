@@ -22,10 +22,9 @@ function elementPath(root: Element, element: Element): number[] {
 	for (let child = element; child !== root && child.parentElement; child = child.parentElement) path.unshift([...child.parentElement.children].indexOf(child));
 	return path;
 }
-/** Capture logical tool interaction before density or disclosure changes hide a call. */
-export function captureToolInteraction(root: HTMLElement, runs: readonly ToolRun[]): ToolInteraction {
+/** Capture logical tool interaction before density or disclosure changes hide a call. `active` is where focus is, or is about to be. */
+export function captureToolInteraction(root: HTMLElement, runs: readonly ToolRun[], active: Element | null = document.activeElement): ToolInteraction {
 	const calls = new Map<string, boolean>(); let focus: FocusPoint | null = null;
-	const active = document.activeElement;
 	if (active instanceof HTMLElement && root.contains(active)) {
 		const tool = toolFor(active), body = tool?.querySelector(".omp-tool-body"), callId = interactionId(tool);
 		if (callId) {
@@ -66,10 +65,10 @@ export function restoreToolInteraction(root: HTMLElement, interaction: ToolInter
 		if (start && end) document.getSelection()?.setBaseAndExtent(...start, ...end);
 	}
 }
-/** The exception ends as soon as its native focus/selection leaves those calls. */
-export function heldToolInteractions(root: HTMLElement, calls: ReadonlyMap<string, boolean>): ReadonlyMap<string, boolean> {
+/** The exception ends as soon as its native focus/selection leaves those calls. `active` is where focus is, or is about to be. */
+export function heldToolInteractions(root: HTMLElement, calls: ReadonlyMap<string, boolean>, active: Element | null = document.activeElement): ReadonlyMap<string, boolean> {
 	const next = new Map<string, boolean>(), selection = document.getSelection();
-	const nodes = [document.activeElement, selection && !selection.isCollapsed ? selection.anchorNode : null, selection && !selection.isCollapsed ? selection.focusNode : null];
+	const nodes = [active, selection && !selection.isCollapsed ? selection.anchorNode : null, selection && !selection.isCollapsed ? selection.focusNode : null];
 	for (const node of nodes) { const tool = toolFor(node), id = interactionId(tool); if (tool && root.contains(tool) && id && calls.has(id)) next.set(id, calls.get(id)!); }
 	return next;
 }

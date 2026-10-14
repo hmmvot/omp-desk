@@ -19,6 +19,7 @@ import { WINDOW_AFTER_ROWS } from "../lib/use-windowed-rows";
 import { detectOutput } from "../lib/output-format";
 import { FRESH_VIEW, useObservedToolMs, useToolViewState } from "../lib/tool-view-state";
 import { useArtifactOpener } from "../lib/artifact-opener";
+import { focusAfter } from "../lib/focus-after";
 import { rawDetailsCopy, rawDetailsView } from "../lib/raw-details";
 import { FoldAllButtons } from "./JsonRows";
 import { ToolMenu, type ToolMenuItem } from "./ToolMenu";
@@ -76,13 +77,13 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 	// A body held for a selection or focus is kept as it was, unless the reader has since changed what it shows (Show all, a format, a fold): that is applied at once.
 	const frozen = retained && retainedState.current === viewState;
 	useEffect(() => {
-		const holdsDetail = (): boolean => {
+		const holdsDetail = (active: Element | null): boolean => {
 			const element = root.current;
 			const selection = document.getSelection();
-			return Boolean(element && (element.contains(document.activeElement) && document.activeElement?.closest(".omp-tool-body") || selection && !selection.isCollapsed && element.contains(selection.anchorNode)));
+			return Boolean(element && (active && element.contains(active) && active.closest(".omp-tool-body") || selection && !selection.isCollapsed && element.contains(selection.anchorNode)));
 		};
-		const update = (): void => {
-			const held = holdsDetail();
+		const update = (event: Event): void => {
+			const held = holdsDetail(focusAfter(event));
 			setRetained(held);
 		};
 		document.addEventListener("selectionchange", update);

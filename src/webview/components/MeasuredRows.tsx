@@ -2,6 +2,7 @@ import type { ReactNode, RefObject } from "react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { TranscriptHeightIndex, visibleRowRanges, type MeasuredRow } from "../lib/transcript-virtualizer";
 import type { SourceAnchor } from "../lib/transcript-scroll";
+import { focusAfter } from "../lib/focus-after";
 
 export interface RowViewport { top: number; height: number; width: number }
 export function MeasuredRows({ rows, context, viewport, following, anchor, paged, renderRow, onLayout, onInteraction, elementRef, forcedSources, forcedRows }: {
@@ -36,12 +37,12 @@ export function MeasuredRows({ rows, context, viewport, following, anchor, paged
 		return () => { if (elementRef) elementRef.current = null; };
 	}, [elementRef]);
 	useEffect(() => {
-		const update = (): void => {
-			const element = root.current, selection = document.getSelection(), next = new Set<string>();
+		const update = (event: Event): void => {
+			const element = root.current, selection = document.getSelection(), next = new Set<string>(), active = focusAfter(event);
 			if (!element) return;
 			for (const child of element.children) {
 				if (!(child instanceof HTMLElement) || !child.dataset.windowRow) continue;
-				if (child.contains(document.activeElement) || selection && !selection.isCollapsed && selection.containsNode(child, true)) next.add(child.dataset.windowRow);
+				if (active && child.contains(active) || selection && !selection.isCollapsed && selection.containsNode(child, true)) next.add(child.dataset.windowRow);
 			}
 			setHeld(previous => previous.size === next.size && [...next].every(id => previous.has(id)) ? previous : next);
 		};

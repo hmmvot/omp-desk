@@ -682,6 +682,76 @@ test("an opened tool call rests as a bounded preview, shows its gist and footer,
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		/** The calls of a long transcript, `before` of them above `target` and `after` below: one reply each, or all in one reply (`grouped`), which the overview digests as one group. */
+		const showAround = async (target: Call, before: number, after: number, grouped: boolean): Promise<void> => {
+			const filler = real("glob-list");
+			const all: Call[] = [...Array.from({ length: before }, (_, index) => ({ ...filler, id: `before-${index}` })), target, ...Array.from({ length: after }, (_, index) => ({ ...filler, id: `after-${index}` }))];
+			const entries: unknown[] = []; let parent: string | null = null;
+			const at = 1_790_000_000_000;
+			const result = (call: Call, replyId: string, time: number): unknown => ({ type: "message", id: `r-${call.id}`, parentId: replyId, timestamp: new Date(time).toISOString(), message: { role: "toolResult", timestamp: time, toolCallId: call.id, toolName: call.tool, isError: call.isError, content: [{ type: "text", text: call.resultText }], details: call.details } });
+			const reply = (id: string, group: readonly Call[], time: number): unknown => ({ type: "message", id, parentId: parent, timestamp: new Date(time - 4_200).toISOString(), message: { role: "assistant", model: "m", timestamp: time - 4_200, stopReason: "toolUse", content: group.map(call => ({ type: "toolCall", id: call.id, name: call.tool, arguments: call.args })) } });
+			if (grouped) {
+				entries.push(reply("a-group", all, at + 5_000)); parent = "a-group";
+				for (const call of all) { entries.push(result(call, parent!, at + 5_000)); }
+			} else {
+				for (const [index, call] of all.entries()) { entries.push(reply(`a-${call.id}`, [call], at + index * 1_000)); entries.push(result(call, `a-${call.id}`, at + index * 1_000 + 200)); parent = `r-${call.id}`; }
+			}
+			await ui.evaluate(`window.ui.density(${JSON.stringify(grouped ? "overview" : "detailed")});window.ui.push({entries:${JSON.stringify(entries)},durableCount:${entries.length},working:false,settled:true})`);
+			await ui.wait(grouped ? "document.querySelector('.omp-overview-head')" : `document.querySelector(${JSON.stringify(`[data-tool-call-id=${JSON.stringify(after > 0 ? `after-${after - 1}` : target.id)}]`)})`);
+		};
+		const pointerAt = (selector: string): Promise<{ x: number; y: number }> => ui.evaluate(`(()=>{const b=document.querySelector(${JSON.stringify(selector)}).getBoundingClientRect();return{x:b.left+b.width/2,y:b.top+b.height/2}})()`);
+		const clickAt = async (point: { x: number; y: number }): Promise<void> => {
+			for (const type of ["mouseMoved", "mousePressed", "mouseReleased"]) await ui.call("Input.dispatchMouseEvent", { type, x: point.x, y: point.y, button: "left", clickCount: 1 });
+		};
+
+		/** A tool's `⋯` menu is pressed with a real pointer on an item other than the focused first one while the transcript sits mid-way: by the wheel, the way a reader scrolls away, or because the tail grew below an open menu while the reader followed it. */
+		for (const grouped of [false, true]) for (const scroll of ["wheel", "growth"] as const) await t.test(`a real mouse press on a ⋯ menu item other than the first runs it with the transcript mid-way (${grouped ? "overview group" : "detailed"}, ${scroll}): focusing a menu item never moves the transcript`, async () => {
+			const call = real("bash-trunc-middle-artifact");
+			await reset(`menu-pointer-${grouped}-${scroll}`); await showAround(call, 30, scroll === "wheel" ? 30 : 0, grouped);
+			if (grouped) { await ui.evaluate("document.querySelector('.omp-overview-head').click()"); await ui.wait(`document.querySelector(${JSON.stringify(`${card(call)} .omp-tool-head`)})`); }
+			const scrollerTop = (): Promise<number> => ui.evaluate("document.querySelector('.omp-transcript').scrollTop");
+			const headInUpperHalf = `(()=>{const h=document.querySelector(${JSON.stringify(`${card(call)} .omp-tool-head`)}),s=document.querySelector('.omp-transcript').getBoundingClientRect(),r=h?.getBoundingClientRect();return !!r&&r.top>s.top+40&&r.top<s.top+250})()`;
+			if (scroll === "wheel") {
+				const wheel = { x: 300, y: 300 };
+				await ui.call("Input.dispatchMouseEvent", { type: "mouseMoved", ...wheel });
+				for (let step = 0; step < 40 && !await ui.evaluate(headInUpperHalf); step++) {
+					await ui.call("Input.dispatchMouseEvent", { type: "mouseWheel", ...wheel, deltaX: 0, deltaY: -120 });
+					// The wheel's intent window runs on the platform clock, which no fake clock moves.
+					await ui.evaluate("(()=>{const {promise,resolve}=Promise.withResolvers();setTimeout(resolve,300);return promise})()");
+				}
+				assert.ok(await ui.evaluate(headInUpperHalf), "the wheel brought the call to the upper half of the viewport");
+			}
+			await ui.settleGeometry(".omp-transcript");
+			await clickAt(await pointerAt(`${card(call)} .omp-tool-head`));
+			await ui.wait(`document.querySelector(${JSON.stringify(`${card(call)} .omp-tool-body`)})`);
+			await ui.settleGeometry(".omp-transcript");
+			await clickAt(await pointerAt(menuButton(call)));
+			await ui.wait(`document.querySelector(${JSON.stringify(`${card(call)} [role=menu]`)})`);
+			await ui.settleGeometry(".omp-transcript");
+			if (scroll === "growth") {
+				// The reader follows the tail; a reply arrives below the open menu. The held call keeps its place, which is no longer the bottom.
+				const height = await ui.evaluate<number>("document.querySelector('.omp-transcript').scrollHeight");
+				await ui.evaluate(`(()=>{const entries=window.ui.current().entries,last=entries.at(-1),late={type:"message",id:"a-late",parentId:last.id,timestamp:new Date(1_790_000_090_000).toISOString(),message:{role:"assistant",model:"m",timestamp:1_790_000_090_000,stopReason:"stop",content:[{type:"text",text:Array.from({length:12},(_,line)=>"A late reply, paragraph "+line).join("\\n\\n")}]}};window.ui.push({entries:[...entries,late],durableCount:entries.length+1})})()`);
+				await ui.wait(`document.querySelector('.omp-transcript').scrollHeight > ${height} + 200`);
+				await ui.settleGeometry(".omp-transcript");
+				assert.equal(await ui.evaluate<boolean>("document.querySelector('.omp-jump-latest')===null"), true, "the reader is still following the tail");
+			} else assert.equal(await ui.evaluate<boolean>("document.querySelector('.omp-jump-latest')!==null"), true, "the reader has left the tail");
+			const before = await scrollerTop();
+			await ui.evaluate("window.sent.length=0");
+			const item = `${card(call)} [data-menu-item=open-full]`;
+			const point = await pointerAt(item);
+			assert.ok(point.y > 0 && point.y < 800, "the item is on screen");
+			await ui.call("Input.dispatchMouseEvent", { type: "mouseMoved", ...point });
+			await ui.call("Input.dispatchMouseEvent", { type: "mousePressed", ...point, button: "left", clickCount: 1 });
+			await ui.settleGeometry(".omp-transcript");
+			assert.equal(await ui.evaluate(`document.activeElement === document.querySelector(${JSON.stringify(item)})`), true, "the press focused the item");
+			assert.equal(await scrollerTop(), before, "focusing a menu item left the transcript where it was");
+			assert.deepEqual(await pointerAt(item), point, "the item is still under the pointer");
+			await ui.call("Input.dispatchMouseEvent", { type: "mouseReleased", ...point, button: "left", clickCount: 1 });
+			await ui.wait("window.sent.some(message=>message.type==='omp:open-artifact')");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		/** Several real calls as one reply, so the overview groups them. */
 		const showGroup = async (group: readonly Call[], at = 1_790_000_005_000): Promise<void> => {
 			const entries: unknown[] = [{ type: "message", id: "a-group", parentId: null, timestamp: new Date(at - 4_000).toISOString(), message: { role: "assistant", model: "m", timestamp: at - 4_000, stopReason: "toolUse", content: group.map(call => ({ type: "toolCall", id: call.id, name: call.tool, arguments: call.args })) } }];
@@ -742,6 +812,41 @@ test("an opened tool call rests as a bounded preview, shows its gist and footer,
 			await key("Escape");
 			await ui.wait("document.querySelector('.omp-overview-head').getAttribute('aria-expanded')==='false'");
 			assert.equal(await activeIs(head), true, "the third Escape closed the group and left focus on its row");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("a group's Expand all and Collapse all work under a real mouse press, the transcript wheel-scrolled to them each time", async () => {
+			const group = [real("glob-list"), real("read-text-file"), real("bash-long-786-lines")];
+			await reset("digest-pointer"); await showGroup(group);
+			await clickAt(await pointerAt(".omp-overview-head"));
+			await ui.wait("document.querySelector('.omp-overview-actions')");
+			const action = (index: number): string => `.omp-overview-actions button:nth-child(${index})`;
+			const wheel = { x: 300, y: 300 };
+			await ui.call("Input.dispatchMouseEvent", { type: "mouseMoved", ...wheel });
+			const onScreen = "(()=>{const r=document.querySelector('.omp-overview-actions button').getBoundingClientRect();return r.top>40&&r.bottom<700})()";
+			const wheelToActions = async (): Promise<void> => {
+				for (let step = 0; step < 20 && !await ui.evaluate(onScreen); step++) {
+					await ui.call("Input.dispatchMouseEvent", { type: "mouseWheel", ...wheel, deltaX: 0, deltaY: -200 });
+					// The wheel's intent window runs on the platform clock, which no fake clock moves.
+					await ui.evaluate("(()=>{const {promise,resolve}=Promise.withResolvers();setTimeout(resolve,300);return promise})()");
+				}
+				assert.ok(await ui.evaluate(onScreen), "the group's buttons are on screen");
+				await ui.settleGeometry(".omp-transcript");
+			};
+			await wheelToActions();
+			const before = await ui.evaluate<number>("document.querySelector('.omp-transcript').scrollTop");
+			const expand = await pointerAt(action(1));
+			await ui.call("Input.dispatchMouseEvent", { type: "mouseMoved", ...expand });
+			await ui.call("Input.dispatchMouseEvent", { type: "mousePressed", ...expand, button: "left", clickCount: 1 });
+			await ui.settleGeometry(".omp-transcript");
+			assert.equal(await ui.evaluate<number>("document.querySelector('.omp-transcript').scrollTop"), before, "focusing the group's button left the transcript where it was");
+			assert.deepEqual(await pointerAt(action(1)), expand, "the button is still under the pointer");
+			await ui.call("Input.dispatchMouseEvent", { type: "mouseReleased", ...expand, button: "left", clickCount: 1 });
+			await ui.wait("document.querySelectorAll('.omp-overview-member .omp-tool-body').length===3");
+			await wheelToActions();
+			await clickAt(await pointerAt(action(2)));
+			await ui.wait("document.querySelectorAll('.omp-overview-member .omp-tool-body').length===0");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-overview-head').getAttribute('aria-expanded')"), "true", "Collapse all closes the members, not the group");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
