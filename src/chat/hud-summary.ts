@@ -47,8 +47,6 @@ function fitWindow<T extends { rows: readonly unknown[]; hidden: number }>(build
 	if (first.hidden === 0 || first.rows.length + 1 <= lines) return first;
 	return build(Math.max(min, lines - 1));
 }
-/** Running-agent fragments a collapsed Agents line names. */
-export const AGENTS_SUMMARY_NAMES = 2;
 
 function collapse(text: string): string {
 	return text.replace(/\s+/g, " ").trim();
@@ -290,24 +288,62 @@ export function agentWindowWithin(model: AgentsModelView, lines: number): AgentW
 	return fitWindow(limit => agentWindow(model, limit), lines, 1);
 }
 
+/** The longest activity text one tooltip line carries; a longer one is cut with an ellipsis. */
+const AGENT_DOING_CHARS = 100;
+
+function truncate(text: string, limit: number): string {
+	return text.length <= limit ? text : `${text.slice(0, limit - 1).trimEnd()}…`;
+}
+
 const SUMMARY_STATES: readonly AgentStatus[] = ["running", "pending", "completed", "failed", "aborted"];
 
+/** The collapsed Agents line for the first `shown` running names: `2 running: A, B, +1`. */
+export function agentsSummaryText(head: string, names: readonly string[], shown: number): string {
+	if (names.length === 0) return head;
+	const count = Math.max(0, Math.min(shown, names.length));
+	const listed = names.slice(0, count);
+	if (count < names.length) listed.push(`+${names.length - count}`);
+	return `${head}: ${listed.join(", ")}`;
+}
+
 /**
- * The collapsed Agents line: counts by state, then the names of the first running agents (`2 running: A, B`, `+k` for the rest).
- * `detail` is who is doing what for those agents, the row's tooltip. An unavailable native registry is stated, never shown as zero.
+ * How many names of the Agents line fit `available` pixels: the most for which `measure(text)` still fits, at
+ * least one (a single name wider than the line is cut by the row's ellipsis) and never more than there are.
  */
-export function agentsSummary(model: AgentsModelView): { text: string; warn: boolean; detail: string } {
-	if (model.agentAvailability === "unavailable") return { text: "registry unavailable", warn: true, detail: "" };
+export function fitAgentNames(head: string, names: readonly string[], available: number, measure: (text: string) => number): number {
+	for (let shown = names.length; shown > 1; shown -= 1) {
+		if (measure(agentsSummaryText(head, names, shown)) <= available) return shown;
+	}
+	return Math.min(1, names.length);
+}
+
+export interface AgentsSummary {
+	/** The whole line, every running name. */
+	text: string;
+	warn: boolean;
+	/** Who is doing what for every running agent, the row's tooltip. */
+	detail: string;
+	/** The counts by state, the line without names. */
+	head: string;
+	/** Every running agent's name; the page decides how many fit. */
+	names: readonly string[];
+}
+
+/**
+ * The collapsed Agents line: counts by state, then the names of the running agents (`2 running: A, B`). The page
+ * shortens the names to the width it has with {@link fitAgentNames}. An unavailable native registry is stated, never shown as zero.
+ */
+export function agentsSummary(model: AgentsModelView): AgentsSummary {
+	if (model.agentAvailability === "unavailable") return { text: "registry unavailable", warn: true, detail: "", head: "registry unavailable", names: [] };
 	const agents = sortedAgents(model.agents);
 	const counts = SUMMARY_STATES.map(status => [status, agents.filter(agent => agent.status === status).length] as const).filter(([, count]) => count > 0);
 	const running = agents.filter(agent => agent.status === "running");
-	const names = running.slice(0, AGENTS_SUMMARY_NAMES).map(agent => agent.id);
-	if (running.length > names.length) names.push(`+${running.length - names.length}`);
-	const doings = running.slice(0, AGENTS_SUMMARY_NAMES).map(agent => {
+	const names = running.map(agent => agent.id);
+	const doings = running.map(agent => {
 		const row = agentRow(agent, model.agentActivity.get(agent.id));
 		const doing = row.activity || row.description || row.type;
-		return doing.length > 0 ? `${agent.id}: ${doing}` : agent.id;
+		return doing.length > 0 ? `${agent.id}: ${truncate(doing, AGENT_DOING_CHARS)}` : agent.id;
 	});
 	const head = counts.map(([status, count]) => `${count} ${status}`).join(", ");
-	return { text: names.length > 0 ? `${head}: ${names.join(", ")}` : head, warn: false, detail: doings.join(" · ") };
+	return { text: agentsSummaryText(head, names, names.length), warn: false, detail: doings.join("\n"), head, names };
 }

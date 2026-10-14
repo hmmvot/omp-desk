@@ -221,6 +221,30 @@ test("pinned TODO and Agents rows and their detail tabs", { skip: browserPath ==
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		await t.test("the collapsed Agents line writes out every running name that fits and folds only the rest into +N, with every name in the accessible name", async () => {
+			const line = () => ui.evaluate<{ text: string; clipped: boolean; label: string | null; title: string; overflow: number; width: number }>(`(()=>{const toggle=document.querySelector('.omp-hud--agents .omp-hud-toggle'),summary=toggle.querySelector('.omp-hud-summary');
+			 return{text:summary.textContent,clipped:summary.scrollWidth>summary.clientWidth+1,label:toggle.getAttribute('aria-label'),title:toggle.title,overflow:document.documentElement.scrollWidth,width:innerWidth}})()`);
+			const all = "3 running: Worker One, Reader1, Reader2";
+			await ui.call("Emulation.setDeviceMetricsOverride", { width: 1000, height: 900, deviceScaleFactor: 1, mobile: false });
+			await ui.wait(`document.querySelector('.omp-hud--agents .omp-hud-summary')?.textContent===${JSON.stringify(all)}`);
+			const wide = await line();
+			assert.equal(wide.text, all, "all three names fit a wide row, with no +N");
+			assert.equal(wide.clipped, false);
+			assert.ok(wide.label?.includes("Worker One: ") && !wide.label.includes("+"), "the accessible name lists every agent with its activity");
+			await ui.call("Emulation.setDeviceMetricsOverride", { width: 360, height: 900, deviceScaleFactor: 1, mobile: false });
+			await ui.wait("/\\+\\d+$/.test(document.querySelector('.omp-hud--agents .omp-hud-summary').textContent)");
+			const narrow = await line();
+			assert.match(narrow.text, /^3 running: Worker One(, Reader1)?, \+\d$/, `fewer names and a +N at 360px (${narrow.text})`);
+			assert.equal(narrow.clipped, false, "the names that stay fit without an ellipsis");
+			assert.ok(narrow.overflow <= narrow.width, "the page does not overflow");
+			assert.ok(narrow.label?.includes("Worker One: ") && narrow.label.includes("Reader1: ") && narrow.label.includes("Reader2: "), "the accessible name still lists every agent");
+			for (const name of ["Worker One: read · Inspecting 0", "Reader1: read · Inspecting 1", "Reader2: read · Inspecting 2"]) assert.ok(narrow.title.split("\n").includes(name), `the tooltip has the line "${name}" (${JSON.stringify(narrow.title)})`);
+			assert.doesNotMatch(narrow.title, /\+\d/, "the tooltip never uses +N");
+			await ui.call("Emulation.setDeviceMetricsOverride", { width: 1000, height: 900, deviceScaleFactor: 1, mobile: false });
+			await ui.wait(`document.querySelector('.omp-hud--agents .omp-hud-summary')?.textContent===${JSON.stringify(all)}`);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("expanded TODO shows a bounded walking viewport that always includes the actionable task", async () => {
 			await ui.evaluate("document.querySelector('.omp-hud--todo .omp-hud-toggle').click()");
 			await ui.wait("document.querySelector('.omp-hud--todo .omp-hud-rows')");
@@ -517,19 +541,21 @@ test("pinned TODO and Agents rows and their detail tabs", { skip: browserPath ==
 			await ui.evaluate("document.querySelectorAll('.omp-hud-toggle').forEach(toggle=>toggle.click())");
 			await ui.wait("document.querySelector('.omp-hud--todo .omp-hud-rows') && document.querySelector('.omp-hud--agents .omp-hud-rows')");
 			await ui.evaluate(frames);
-			const narrow = await ui.evaluate<{ overflow: number; width: number; stack: { left: number; right: number }; headHeights: number[]; lineHeights: number[]; escaped: string[]; truncated: boolean; openInside: boolean }>(`(()=>{
+			const narrow = await ui.evaluate<{ overflow: number; width: number; stack: { left: number; right: number }; headHeights: number[]; lineHeights: number[]; escaped: string[]; truncated: boolean; agentsClipped: boolean; agentsText: string; openInside: boolean }>(`(()=>{
 			 const stack=document.querySelector('.omp-hud-stack').getBoundingClientRect();
 			 const escaped=[...document.querySelectorAll('.omp-hud *')].filter(node=>!node.classList.contains('omp-sr-only')&&node.getBoundingClientRect().width>0&&(node.getBoundingClientRect().right>stack.right+1||node.getBoundingClientRect().left<stack.left-1)).map(node=>node.className+' '+Math.round(node.getBoundingClientRect().left)+'-'+Math.round(node.getBoundingClientRect().right)+' in '+Math.round(stack.left)+'-'+Math.round(stack.right)+' '+node.parentElement.textContent.slice(0,60));
 			 return{overflow:document.documentElement.scrollWidth,width:innerWidth,stack:{left:stack.left,right:stack.right},headHeights:[...document.querySelectorAll('.omp-hud-head')].map(node=>node.getBoundingClientRect().height),
 			  lineHeights:[...document.querySelectorAll('.omp-hud-line')].map(node=>node.getBoundingClientRect().height),escaped,
 			  truncated:[...document.querySelectorAll('.omp-hud-summary')].some(node=>node.scrollWidth>node.clientWidth),
+			  agentsClipped:(s=>s.scrollWidth>s.clientWidth+1)(document.querySelector('.omp-hud--agents .omp-hud-summary')),agentsText:document.querySelector('.omp-hud--agents .omp-hud-summary').textContent,
 			  openInside:[...document.querySelectorAll('.omp-hud-open')].every(node=>node.getBoundingClientRect().right<=stack.right+1&&node.getBoundingClientRect().width>0)}})()`);
 			assert.ok(narrow.overflow <= narrow.width, `no page-level horizontal overflow (${narrow.overflow} > ${narrow.width})`);
 			assert.ok(narrow.stack.left >= 0 && narrow.stack.right <= narrow.width);
 			assert.ok(narrow.headHeights.every(height => height <= 26.5), `each header stays one line: ${narrow.headHeights}`);
 			assert.ok(narrow.lineHeights.every(height => height <= 20.5), `each row stays one line: ${narrow.lineHeights}`);
 			assert.deepEqual(narrow.escaped, [], "nothing spills out of the column");
-			assert.equal(narrow.truncated, true, "a long summary is cut with an ellipsis, not wrapped");
+			assert.equal(narrow.agentsClipped, false, "the Agents line fits its row: names that do not fit are folded into +N, not cut");
+			assert.match(narrow.agentsText, /^3 running: .+, \+\d$/, `a +N stands for the names that do not fit (${narrow.agentsText})`);
 			assert.equal(narrow.openInside, true, "the open-in-tab button stays reachable");
 			await ui.call("Emulation.setDeviceMetricsOverride", { width: 1000, height: 900, deviceScaleFactor: 1, mobile: false });
 			assert.deepEqual(await ui.evaluate("window.errors"), []);

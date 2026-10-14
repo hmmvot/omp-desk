@@ -3,6 +3,8 @@ import { describe, it } from "node:test";
 import type { AgentActivity, RunningAgent } from "./agents.ts";
 import {
 	agentsSummary,
+	agentsSummaryText,
+	fitAgentNames,
 	agentWindow,
 	agentWindowWithin,
 	HUD_HEADER_PX,
@@ -129,7 +131,7 @@ describe("TODO expanded rows", () => {
 });
 
 describe("Agents rows", () => {
-	it("names the first two running agents in the summary and keeps who is doing what for the tooltip", () => {
+	it("names every running agent in the summary and keeps who is doing what for the tooltip", () => {
 		const model = view(
 			[
 				agent("ScrollJump", { index: 0, progress: { currentTool: "read", lastIntent: "Reading App.tsx" } }),
@@ -139,12 +141,31 @@ describe("Agents rows", () => {
 			],
 			[["Third", { type: "x", tool: "edit", timestamp: 1 }]],
 		);
-		assert.equal(agentsSummary(model).text, "3 running, 1 completed: ScrollJump, AskDialogRefresh, +1");
-		assert.equal(agentsSummary(model).detail, "ScrollJump: read · Reading App.tsx · AskDialogRefresh: Fix menu");
+		const summary = agentsSummary(model);
+		assert.equal(summary.text, "3 running, 1 completed: ScrollJump, AskDialogRefresh, Third");
+		assert.equal(summary.head, "3 running, 1 completed");
+		assert.deepEqual(summary.names, ["ScrollJump", "AskDialogRefresh", "Third"]);
+		assert.equal(summary.detail, "ScrollJump: read · Reading App.tsx\nAskDialogRefresh: Fix menu\nThird: edit", "one line per running agent");
+		const long = agentsSummary(view([agent("Wordy", { index: 0, description: "x".repeat(300) })], [])).detail;
+		assert.equal(long, `Wordy: ${"x".repeat(99)}…`, "a long activity is cut at 100 characters");
+	});
+
+	it("writes out as many names as fit and folds the rest into +N, never fewer than one", () => {
+		const names = ["ScrollJump", "AskDialogRefresh", "Third"];
+		const chars = (text: string): number => text.length;
+		assert.equal(agentsSummaryText("3 running", names, 3), "3 running: ScrollJump, AskDialogRefresh, Third");
+		assert.equal(agentsSummaryText("3 running", names, 2), "3 running: ScrollJump, AskDialogRefresh, +1");
+		assert.equal(agentsSummaryText("3 running", names, 0), "3 running: +3");
+		assert.equal(agentsSummaryText("1 completed", [], 0), "1 completed");
+		assert.equal(fitAgentNames("3 running", names, 500, chars), 3);
+		assert.equal(fitAgentNames("3 running", names, "3 running: ScrollJump, AskDialogRefresh, +1".length, chars), 2);
+		assert.equal(fitAgentNames("3 running", names, "3 running: ScrollJump, +2".length, chars), 1);
+		assert.equal(fitAgentNames("3 running", names, 3, chars), 1, "one name stays even when it does not fit; the row cuts it with an ellipsis");
+		assert.equal(fitAgentNames("3 running", [], 3, chars), 0);
 	});
 
 	it("names the registry as unavailable instead of showing zero", () => {
-		assert.deepEqual(agentsSummary(view([], [], "unavailable")), { text: "registry unavailable", warn: true, detail: "" });
+		assert.deepEqual(agentsSummary(view([], [], "unavailable")), { text: "registry unavailable", warn: true, detail: "", head: "registry unavailable", names: [] });
 	});
 
 	it("rows carry glyph, id, type badge, description, activity and native elapsed only", () => {

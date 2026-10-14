@@ -34,6 +34,7 @@ export function RunningAgents({ model, expanded, onToggle, lines }: RunningAgent
 				name="Agents"
 				icon="organization"
 				summary={summary.text}
+				fit={summary.names.length > 0 ? { head: summary.head, names: summary.names } : undefined}
 				detail={summary.detail}
 				warn={summary.warn}
 				expanded={expanded}
