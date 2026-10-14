@@ -5,6 +5,8 @@ date: 2026-10-13
 
 # ADR-0071: Edit OMP's settings from its own registry in a staged worker, and write one layer at a time
 
+> **Superseded in part by [ADR-0073](0073-run-sessions-at-the-checkout-root-and-let-the-editors-follow.md) (2026-10-14):** the ancestor-folder amendment (`ompDesk.ompSettings.useNearestAncestorOmpFolder`, its option in `config-ancestor.ts`, the ancestor notice and the button to the setting) is removed; the editor's project folder is the folder sessions run in. The home-folder refusal and the refusal of a first project file that would hide an ancestor's context files remain.
+
 ## Context and Problem Statement
 
 OMP's `/settings` is a terminal-only menu over about 414 settings in ten tabs; RPC has no settings commands. Desk covers 14 of them (model roles, chains, agents) in the Models and Agents editors (ADR-0048) and can write no project layer for anything else. The user wants the same settings in a Desk editor, writing the global and the project layer.

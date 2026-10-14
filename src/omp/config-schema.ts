@@ -69,7 +69,7 @@ export interface SchemaInput {
 
 /** Why the first project write is refused when an ancestor's `.omp` holds context files (see `ancestorContextDir`). */
 export function ancestorMessage(projectFile: string, ancestorOmp: string): string {
-  return `Saving a project setting would create ${projectFile}. OMP loads AGENTS.md, RULES.md and SYSTEM.md from the nearest non-empty .omp folder, so sessions in this folder would stop loading them from ${ancestorOmp}. Nothing was changed. If this folder is a Unity project or another folder whose OMP sessions run at the repository root, turn on the setting ompDesk.ompSettings.useNearestAncestorOmpFolder to edit that root's .omp instead; or create the file yourself if that is what you want.`;
+  return `Saving a project setting would create ${projectFile}. OMP loads AGENTS.md, RULES.md and SYSTEM.md from the nearest non-empty .omp folder, so sessions in this folder would stop loading them from ${ancestorOmp}. Nothing was changed. OMP stops looking for those files only at a Git repository root (or the home folder), and this folder is neither: it is a root of another version-control system, a folder in no checkout, a subfolder a session runs in, or a folder where ompDesk.runSessionsAtRepositoryRoot is off. Create the file yourself if hiding that .omp is what you want.`;
 }
 export const SHAPE_MESSAGE = "The installed OMP's settings schema has a shape this version of OMP Desk does not recognise, so nothing was read or changed. Use OMP's /settings in a terminal, or update OMP Desk.";
 

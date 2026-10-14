@@ -22,6 +22,7 @@ import type { SessionIndex } from "../host/session-index.ts";
 import type { ObservedClaim } from "../host/session-claim.ts";
 import type { SessionViewMode } from "../host/session-model.ts";
 import { UnityProjectCache, isUnityProject } from "../host/unity-project.ts";
+import { runsAtRepositoryRoot } from "../host/session-folder-setting.ts";
 import { PUBLISHED_ROW_STATUSES, sessionIncarnation } from "../host/window-registry.ts";
 import type { OpenWindow, PublishedRow, PublishedRowStatus, WindowRegistry } from "../host/window-registry.ts";
 import {
@@ -109,8 +110,8 @@ export interface RoutingWindowFacts {
 	unityChoices(): vscode.Memento | undefined;
 	/** The activation restore pass covers this tab. */
 	startupRestoreCovers(tabId: string): boolean;
-	/** The detached request of agent roots of the folders of every live window. */
-	resolveAgentRoots(): Promise<void>;
+	/** The detached request to resolve the session folders (the checkout roots) of the folders of every live window. */
+	resolveSessionFolders(): Promise<void>;
 	/** Whether the installed package changed under this host (publishes the verdict when it flips). */
 	packageChangedOnDisk(): boolean;
 	/** Wait until the catalog and the predecessor import have settled. */
@@ -186,11 +187,11 @@ export interface WindowRouting {
 	publishSnapshot(): void;
 	/** Re-read the other windows' records and renew this window's own; repaint when what they show changed. */
 	refresh(): void;
-	/** The folders other windows have open changed: re-resolve their agent roots and repaint. */
+	/** The folders other windows have open changed: re-resolve their session folders and repaint. */
 	registryChanged(): void;
 	/** The registry's 15 s heartbeat. */
 	heartbeat(): void;
-	/** Every folder open in a live window of the profile, for the agent-root probe. */
+	/** Every folder open in a live window of the profile, for the session-folder probe. */
 	allFolders(): string[];
 	/** This window has just been brought to the front. */
 	noteFocused(): void;
@@ -333,10 +334,13 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 				};
 			}
 		}
+		const localFolders = localWindowFolders();
+		const staying = localFolders.filter(folder => !runsAtRepositoryRoot(folder));
 		registry.setSnapshot({
 			windowUri: owningWindowUri()?.toString() ?? null,
 			label: vscode.workspace.name ?? "",
-			folders: localWindowFolders(),
+			folders: localFolders,
+			...(staying.length > 0 ? { staysInFolder: staying } : {}),
 			liveCwds: localLiveSessionCwds(index),
 			rows,
 			focusedAt: windowFocusedAt,
@@ -354,19 +358,19 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 		}, error => deps.log(`window registry: ${messageOf(error)}`));
 	}
 
-	/** The folders other windows have open changed: re-resolve their agent roots and repaint. */
+	/** The folders other windows have open changed: re-resolve their session folders and repaint. */
 	function windowRegistryChanged(): void {
-		void deps.resolveAgentRoots();
+		void deps.resolveSessionFolders();
 		deps.refreshLauncher();
 	}
 
-	/** Every folder open in a live window of the profile, for the agent-root probe. */
+	/** Every folder open in a live window of the profile, for the session-folder probe. */
 	function allWindowFolders(): string[] {
 		return (deps.registry()?.windows() ?? []).flatMap(window => [...window.folders]);
 	}
 
 	/**
-	 * Registry heartbeat (every 15 s): agent roots are re-probed whatever the registry saw, and the
+	 * Registry heartbeat (every 15 s): session folders are re-probed whatever the registry saw, and the
 	 * request directory is read again (the recovery for a watch event the platform dropped). While
 	 * the Sessions view is visible every row's ownership and conversation activity is observed
 	 * again, so a claim change whose notification was missed, a failed observation and a file
@@ -375,7 +379,7 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 	 * to date when it is shown (nobody is looking at it before that).
 	 */
 	function windowRegistryHeartbeat(): void {
-		void deps.resolveAgentRoots();
+		void deps.resolveSessionFolders();
 		windowRequestWatch?.rescan();
 		pendingLaunchWatch?.rescan();
 		const provider = deps.launcherProvider();
@@ -563,10 +567,10 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 	 * The folder the window that starts a launch in `folder` must have open (ADR-0057): the
 	 * Unity project folder the launch stands for, because the Unity extensions only work in a
 	 * window whose workspace root it is, or the folder itself. The folder is the project itself,
-	 * stands for an opened one (an agent root over an opened project folder), or holds projects
+	 * stands for an opened one (a checkout root over an opened project folder), or holds projects
 	 * down to two levels; one project is used, several are asked once and the answer is remembered
 	 * for the folder, none means the folder itself. `null` when the user dismissed the question.
-	 * The session's working directory stays the folder, so the repository's agent files load.
+	 * The session's working directory stays the folder, so the repository's agent files load (it is the checkout root).
 	 */
 	async function launchWorkspaceOf(folder: RoutedFolder): Promise<LaunchWorkspace | null> {
 		const folders = deps.folders();
@@ -786,7 +790,7 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 	 * window claimed. Admission is this window's own: the request only says what to start, and it
 	 * is performed by the same function a click in this window runs, which reads the claims and
 	 * refuses a session another writer holds. This window first waits for what a window that has
-	 * just started lacks (the catalog, its own folders in the registry, its agent roots), then
+	 * just started lacks (the catalog, its own folders in the registry, its session folders), then
 	 * refuses unless (1) it itself has the workspace the request names open (a Unity project as
 	 * one of its own roots), (2) the folder or session the request names is one it shows and *stands
 	 * under that workspace* (the folder itself, or a Unity project the folder stands for), and (3)
@@ -821,8 +825,8 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 			deps.log(`window request: the other windows could not be read: ${messageOf(error)}`);
 		}
 		deps.timing("receiver: registry read", request.id.slice(0, 8));
-		await deps.resolveAgentRoots();
-		deps.timing("receiver: agent roots resolved", request.id.slice(0, 8));
+		await deps.resolveSessionFolders();
+		deps.timing("receiver: session folders resolved", request.id.slice(0, 8));
 		const hasWorkspace = () => folders.windowsWithFolder(request.workspace.path, { exact: request.workspace.match === "root" }).some(window => window.here);
 		if (!hasWorkspace()) return refuse("this window does not have the workspace open");
 		const action = request.launch;

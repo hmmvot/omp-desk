@@ -1021,7 +1021,7 @@ describe("launcher tree", () => {
 		);
 	});
 
-	it("files sessions recorded in an opened subfolder under the agent-root folder shown instead, unless another folder names the subfolder", async () => {
+	it("files sessions recorded in an opened subfolder under the repository-root folder shown instead, unless another folder names the subfolder", async () => {
 		const unity = path.join(ALPHA, "Unity");
 		const root: LauncherFolder = { ...folder("folder:root", ALPHA, false, { pinned: false, open: true }), openedPaths: [unity] };
 		const provider = providerFor({
@@ -1033,7 +1033,9 @@ describe("launcher tree", () => {
 		const [shown] = await rootsOf(provider);
 		assert.deepEqual((await rowsOf(provider, shown!)).map(row => row.tabId), ["tab:sub", "tab:root"]);
 		const tip = tooltipText(shown!);
-		assert.ok(tip.includes(`Shown instead of the opened "${unity}" because the repository's agent files are here.`), tip);
+		assert.ok(tip.includes(`Sessions run at the repository root ${ALPHA}, not in the opened "${unity}".`), tip);
+		const [own] = await rootsOf(providerFor({ folders: () => [folder("folder:own", ALPHA, false, { pinned: false, open: true })], entries: () => [], activeTabId: () => null, facts: () => NO_FACTS }));
+		assert.ok(!tooltipText(own!).includes("Sessions run at the repository root"), "a folder that is where sessions run says nothing more");
 
 		const pinnedSub = folder("folder:sub", unity);
 		const split = providerFor({

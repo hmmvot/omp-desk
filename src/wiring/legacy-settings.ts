@@ -100,12 +100,12 @@ export interface UserLayerClaim {
 export interface MigrationOutcome {
 	readonly key: string;
 	readonly layer: SettingsLayer;
-	readonly outcome: "moved" | "already-set" | "conflict-dropped" | "left" | "listed";
+	readonly outcome: "moved" | "already-set" | "conflict-dropped" | "left" | "listed" | "dropped";
 }
 
-const LAYER_WORDS: Record<SettingsLayer, string> = { user: "user settings", workspace: "workspace settings" };
+export const LAYER_WORDS: Record<SettingsLayer, string> = { user: "user settings", workspace: "workspace settings" };
 
-function describe(error: unknown): string {
+export function describe(error: unknown): string {
 	return (error instanceof Error ? error.message : String(error)).replace(/\s+/g, " ").trim();
 }
 
@@ -134,8 +134,20 @@ export async function migrateLegacySettings(port: LegacySettingsPort): Promise<r
 const DEFAULT_WAITS = { releaseMs: 15_000, graceMs: 3_000, graceStepMs: 100 } as const;
 
 async function moveUserLayer(port: LegacySettingsPort): Promise<MigrationOutcome[]> {
+	return underUserClaim(port, () => userLayerPending(port), claim => moveClaimedUserLayer(port, claim));
+}
+
+/**
+ * Run `work` as the one window that writes the User layer: with the profile's claim, or after the window that held it released
+ * it and `pending` still says there is work. `pending` reads synchronously, so a window that finds nothing left does no I/O.
+ */
+export async function underUserClaim(
+	port: LegacySettingsPort,
+	pending: () => boolean,
+	work: (claim: UserLayerClaim) => Promise<MigrationOutcome[]>,
+): Promise<MigrationOutcome[]> {
 	const claim = await port.claimUserLayer();
-	if (claim !== null) return moveClaimedUserLayer(port, claim);
+	if (claim !== null) return work(claim);
 	const waits = { ...DEFAULT_WAITS, ...port.waits };
 	port.log("settings: another window is moving the user settings; this window waits for it");
 	if (!(await port.waitForRelease(waits.releaseMs))) {
@@ -143,10 +155,10 @@ async function moveUserLayer(port: LegacySettingsPort): Promise<MigrationOutcome
 		return [];
 	}
 	// The release is seen as soon as it happens; this window's own configuration follows the file a moment later.
-	for (let waited = 0; waited < waits.graceMs && userLayerPending(port); waited += waits.graceStepMs) await port.delay(waits.graceStepMs);
-	if (!userLayerPending(port)) return [];
+	for (let waited = 0; waited < waits.graceMs && pending(); waited += waits.graceStepMs) await port.delay(waits.graceStepMs);
+	if (!pending()) return [];
 	const retry = await port.claimUserLayer();
-	return retry === null ? [] : moveClaimedUserLayer(port, retry);
+	return retry === null ? [] : work(retry);
 }
 
 async function moveClaimedUserLayer(port: LegacySettingsPort, claim: UserLayerClaim): Promise<MigrationOutcome[]> {
@@ -186,7 +198,7 @@ async function moveKeys(port: LegacySettingsPort, layer: SettingsLayer): Promise
 	return outcomes.filter((outcome): outcome is MigrationOutcome => outcome !== null);
 }
 
-function valueAt(values: LayerValues | undefined, layer: SettingsLayer): unknown {
+export function valueAt(values: LayerValues | undefined, layer: SettingsLayer): unknown {
 	return layer === "user" ? values?.globalValue : values?.workspaceValue;
 }
 

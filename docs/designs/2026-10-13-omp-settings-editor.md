@@ -5,6 +5,8 @@ date: 2026-10-13
 
 # A full editor for OMP's own settings, global and project
 
+> **The `useNearestAncestorOmpFolder` section below (and the ancestor notice) is superseded by the [repository-root design](2026-10-14-run-sessions-at-the-repository-root.md) and ADR-0073 (2026-10-14):** the editor's project folder is the folder sessions run in.
+
 ## Problem
 
 `/settings` is OMP's terminal settings menu. It exists only in OMP's TUI (`slash-commands/builtin-modes.ts`, `showSettingsSelector`); RPC has no settings commands. A Desk user in Chat who types `/settings` is told it is a terminal command and is sent to the Models editor, which covers model roles, fallback chains and agents (about 14 of roughly 550 settings). Everything else (appearance, thinking and sampling, retries, approvals, compaction, memory, editing and LSP, shell, tools, tasks, providers) needs a terminal, and nothing in Desk can write the project layer (`.omp/config.yml` of a folder) for any of it.

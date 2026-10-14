@@ -5,6 +5,8 @@ date: 2026-10-13
 
 # Models and Agents pages: master-detail lists that show what each role and agent runs on, and why
 
+> **Amended (2026-10-14, [repository-root design](2026-10-14-run-sessions-at-the-repository-root.md)):** the editors bind the folder sessions run in; `useNearestAncestorOmpFolder` and the ancestor notice named below are gone.
+
 Amends [Native Models and Agents settings editors](2026-10-08-native-models-and-agents-settings.md) (the *Models surface*, *Agents surface* and *Page conventions* sections) and [ADR-0048](../decisions/0048-write-omp-settings-directly-under-native-file-locks.md) through [ADR-0072](../decisions/0072-resolve-roles-and-agents-in-the-worker-with-omps-own-functions-and-write-agent-overrides-to-either-layer.md). Everything else in the 2026-10-08 design (read-only open, locks, pickers, presets, browser, New agent, Chat slash routing) stays as it is.
 
 ## Problem

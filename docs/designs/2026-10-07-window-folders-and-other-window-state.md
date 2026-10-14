@@ -5,6 +5,8 @@ date: 2026-10-07
 
 # Window folders, pinned folders and the "Open in another window" row state
 
+> **The Agent root substitution amendment below is superseded by the [repository-root design](2026-10-14-run-sessions-at-the-repository-root.md) and ADR-0073 (2026-10-14):** an opened folder is shown as the root of its version-control checkout, with `ompDesk.runSessionsAtRepositoryRoot`, and agent files no longer matter. The identity, `openedPaths` and existing-session rules below still describe how the substituted folder is filed.
+
 ## Problem
 
 Two gaps in the Sessions view.

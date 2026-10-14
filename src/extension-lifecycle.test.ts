@@ -381,7 +381,7 @@ interface WindowFixture {
   windowRegistry: unknown;
   packageDrift: { check(): { kind: "same" } | { kind: "changed"; files: string[] } } | null;
   rootGone: (root: { readonly pid: number; readonly creationTime: string | null }) => Promise<boolean>;
-  resolveAgentRoots: () => Promise<void>;
+  resolveSessionFolders: () => Promise<void>;
   externalLeases: { holds(file: string, options?: { fresh?: boolean }): Promise<boolean | null> } | null;
   providerAuthRun: AbortController | null;
   launcherProvider: unknown;
@@ -5362,7 +5362,7 @@ describe("starting a session in the window that has its folder open", () => {
       await mkdir(path.join(directory, "Assets"), { recursive: true });
       await writeFile(path.join(directory, "ProjectSettings", "ProjectVersion.txt"), "m_EditorVersion: 6000.0.0f1\n");
     };
-    /** A repository folder with a Unity project below it, as the Sessions folder (the agent root). */
+    /** A repository folder with a Unity project below it, as the Sessions folder (the session folder). */
     const repoWith = async (name: string, ...projects: string[]) => {
       const repo = path.join(temp, name);
       await mkdir(repo, { recursive: true });
@@ -5373,7 +5373,7 @@ describe("starting a session in the window that has its folder open", () => {
     const opening = (open: Record<string, FixtureOpeningWindow[]>) => (folderPath: string): readonly FixtureOpeningWindow[] => open[folderPath] ?? [];
     const launch = { kind: "new-session", folderId: "folder:repo-1" } as const;
 
-    it("goes to a window that has the project open, though the agent root is open here", async () => {
+    it("goes to a window that has the project open, though the session folder is open here", async () => {
       const repo = await repoWith("repo-other", "omp-vscode");
       const unity = path.join(repo, "omp-vscode");
       const w = await world([{ holderId: "holder-unity", uri: URI.file(unity).toString(), serve: { ok: true, focused: true } }]);
@@ -5391,7 +5391,7 @@ describe("starting a session in the window that has its folder open", () => {
       const w = await world([]);
       harness.folders([unityRow(repo)], opening({ [unity]: [here] }));
       await harness.newSession(undefined, w.index, "folder:repo-1");
-      assert.deepEqual(w.drafts, [{ cwd: repo }], "the working directory is the agent root");
+      assert.deepEqual(w.drafts, [{ cwd: repo }], "the working directory is the session folder");
       assert.deepEqual(w.calls, []);
     });
 

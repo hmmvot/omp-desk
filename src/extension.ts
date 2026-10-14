@@ -173,7 +173,7 @@ import type { SessionToolsTarget } from "./host/session-tools";
 import type { LauncherTreeItem, SessionLauncherFacts, SessionOwnershipFacts } from "./views/session-tree";
 import { WorkspaceFolderRegistry, folderArgument, mergeWorkspaceFolderRecords, WORKSPACE_FOLDERS_STORAGE_KEY } from "./views/workspace-folders";
 import { LauncherFolders } from "./views/launcher-folders";
-import { AgentRootResolver } from "./views/agent-root";
+import { SessionFolderResolver } from "./host/session-folder";
 import type { LauncherFolder } from "./views/launcher-folders";
 import type { FolderPathInspector, FolderPathVerdict, WorkspaceFolder } from "./views/workspace-folders";
 // The chat over rpc-ui (ADR-0038): a host-owned conversation per tab, served to any page.
@@ -261,6 +261,8 @@ import { catalogPaths, createCatalogStore, startCatalogWatch } from "./host/prof
 import type { CatalogStore } from "./host/profile-catalog";
 import { importPredecessorFolders } from "./wiring/predecessor-import";
 import { migrateLegacySettings } from "./wiring/legacy-settings";
+import { migrateSessionFolderSettings } from "./wiring/session-folder-settings";
+import { editorProjectFolder } from "./host/session-folder-setting";
 import { fileClaim } from "./wiring/legacy-settings-claim";
 import type { LegacySettingsPort } from "./wiring/legacy-settings";
 import { announceRename, foreignOmpNames, legacyContextKey, registerLegacyAliases } from "./wiring/legacy-aliases";
@@ -559,8 +561,8 @@ interface WindowState {
   // Window registry and routing
   /** The leased registry of this profile's windows (ADR-0056), once this window activated. */
   windowRegistry: WindowRegistry | undefined;
-  /** Re-probe the agent roots of every live window's folders; set at activation. */
-  resolveAgentRoots: () => Promise<void>;
+  /** Re-probe the session folders (the checkout roots) of every live window's folders; set at activation. */
+  resolveSessionFolders: () => Promise<void>;
   /**
    * Tabs whose editor a window request has made visible and whose serializer revival has not
    * happened yet. The revival consumes the mark ({@link WindowRouting.openRestoredTabIfUncovered}) and, for a
@@ -949,7 +951,7 @@ function windowRoutingDeps(): WindowRoutingDeps {
       const startup = windowState().startupRestore;
       return startup !== null && startup.cohort.has(tabId);
     },
-    resolveAgentRoots: () => windowState().resolveAgentRoots(),
+    resolveSessionFolders: () => windowState().resolveSessionFolders(),
     packageChangedOnDisk,
     ensureCatalogReady,
     sessionProcesses: () => windowState().sessionProcesses,
@@ -1189,7 +1191,7 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     // Window registry and routing
     windowRegistry: undefined,
     routing: registerWindowRouting(windowRoutingDeps()),
-    resolveAgentRoots: async () => {},
+    resolveSessionFolders: async () => {},
     requestSelections: new Set<string>(),
     // Editor panels and bridge
     tabs: new Map<string, TabState>(),
@@ -1413,9 +1415,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // synchronous reads and no I/O; with work, the User layer is moved by one window of the profile and the keys concurrently.
   // What must not read a half-moved setting is the first launch of a process (`executablePath`, `linkReminder`): it waits in
   // `brokerClient`, bounded. Everything else that shows a setting re-reads it on a configuration change.
-  s.legacySettingsMoved = migrateLegacySettings(legacySettingsPort(context, foreign.settings)).then(
+  // The second move (ADR-0073) follows the first, which may have just written `ompDesk.useAgentRootFolder`.
+  const settingsPort = legacySettingsPort(context, foreign.settings);
+  s.legacySettingsMoved = migrateLegacySettings(settingsPort).then(
     () => undefined,
     error => log(`settings: the move from omp.* to ompDesk.* failed and nothing more was moved: ${messageOf(error)}`),
+  ).then(() => migrateSessionFolderSettings(settingsPort)).then(
+    () => undefined,
+    error => log(`settings: the move to ompDesk.runSessionsAtRepositoryRoot failed and nothing more was moved: ${messageOf(error)}`),
   );
   // The host's one thread is shared with every extension; a stall of 500 ms or more is logged with the Desk operations that overlapped it.
   context.subscriptions.push({ dispose: startLoopLagMonitor(message => log(message)) });
@@ -1496,8 +1503,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     store: catalog,
     inspector: folderPathInspector(),
   });
-  const agentRoots = new AgentRootResolver();
-  const useAgentRootFolder = () => vscode.workspace.getConfiguration("ompDesk").get<boolean>("useAgentRootFolder", true);
+  const sessionFolders = new SessionFolderResolver();
   // The window registry (ADR-0056): this window's folders and live sessions are published in
   // shared storage and every window derives the same union from the leased records. Records
   // are never persisted as pinned folders.
@@ -1508,21 +1514,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   });
   s.windowRegistry = windowsRegistry;
   if (vscode.window.state.focused) s.routing.noteFocused();
-  // Which ancestor replaces an opened folder is read from the disk off the tree's path, for the
+  // The checkout root an opened folder's sessions run at is read from the disk off the tree's path, for the
   // folders of every live window: until the answer arrives the folder shows as itself, and the
-  // tree repaints when an answer differs.
-  s.resolveAgentRoots = async () => {
-    if (!useAgentRootFolder()) return;
-    await agentRoots.resolve(s.routing.allFolders())
+  // tree repaints when an answer differs. Whether a folder uses it is its own window's setting, published in the registry.
+  s.resolveSessionFolders = async () => {
+    await sessionFolders.resolve(s.routing.allFolders())
       .then(changed => { if (changed) refreshLauncher(); })
-      .catch(error => log(`launcher: the agent root of an open folder could not be resolved: ${messageOf(error)}`));
+      .catch(error => log(`launcher: the session folder of an open folder could not be resolved: ${messageOf(error)}`));
   };
   const folders = new LauncherFolders({
     pinned: registry,
     local: context.workspaceState,
     // This window's entry is its own bounded snapshot, the very input every other window reads, so all windows derive the list from the same data.
-    windows: () => windowsRegistry.windows().map(window => ({ holderId: window.holderId, here: window.here, startedAt: window.startedAt, focusedAt: window.focusedAt, stale: window.stale, paths: window.folders })),
-    agentRoot: windowPath => (useAgentRootFolder() ? agentRoots.lookup(windowPath) : windowPath),
+    windows: () => windowsRegistry.windows().map(window => ({ holderId: window.holderId, here: window.here, startedAt: window.startedAt, focusedAt: window.focusedAt, stale: window.stale, paths: window.folders, ...(window.staysInFolder === undefined ? {} : { staysInFolder: window.staysInFolder }) })),
+    sessionFolder: windowPath => sessionFolders.lookup(windowPath),
     showWindowFolders: () => vscode.workspace.getConfiguration("ompDesk").get<boolean>("showWorkspaceFolders", true),
     // A live row never vanishes with its folder: a session any window runs or is starting
     // keeps its folder visible although it is neither open nor pinned.
@@ -1649,7 +1654,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const active = index.activeTabId === null ? null : index.get(index.activeTabId);
       return active?.scope.profile ?? process.env.OMP_PROFILE ?? process.env.PI_PROFILE ?? DEFAULT_OMP_PROFILE;
     },
-    defaultFolder: () => (index.activeTabId === null ? null : index.get(index.activeTabId)?.cwd) ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null,
+    defaultFolder: async () => {
+      // A session's own folder is the one it runs in; an opened workspace folder is resolved by the same rule as Sessions (ADR-0073).
+      const active = index.activeTabId === null ? null : index.get(index.activeTabId)?.cwd ?? null;
+      if (active !== null) return active;
+      const opened = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null;
+      return opened === null ? null : editorProjectFolder(opened);
+    },
     folders: () => folders.list().map(folder => folder.path),
   });
   context.subscriptions.push(ompConfigEditors);
@@ -1823,16 +1834,20 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // The window's own folders are shown in Sessions: a change of the open folders or of the
     // setting that hides them rebuilds the list. Resolved paths are remembered per path, so an
     // open-folder change forgets them; the only disk reads are the identity of each path and
-    // the agent-root probe of each open folder, which runs off the tree's path.
+    // the session-folder probe of each open folder, which runs off the tree's path.
     vscode.workspace.onDidChangeWorkspaceFolders(() => {
       folders.forgetIdentities();
       refreshLauncher();
-      s.resolveAgentRoots();
+      s.resolveSessionFolders();
       s.routing.rescanPendingLaunches();
     }),
     vscode.workspace.onDidChangeConfiguration(event => {
-      if (event.affectsConfiguration("ompDesk.useAgentRootFolder")) s.resolveAgentRoots();
-      if (event.affectsConfiguration("ompDesk.showWorkspaceFolders") || event.affectsConfiguration("ompDesk.useAgentRootFolder") ||
+      if (event.affectsConfiguration("ompDesk.runSessionsAtRepositoryRoot")) {
+        // The setting is read per folder and published, so other windows show the same folder; the checkout roots are already resolved.
+        s.routing.publishSnapshot();
+        s.resolveSessionFolders();
+      }
+      if (event.affectsConfiguration("ompDesk.showWorkspaceFolders") || event.affectsConfiguration("ompDesk.runSessionsAtRepositoryRoot") ||
         event.affectsConfiguration("ompDesk.sessionsGrouping")) refreshLauncher();
       if (event.affectsConfiguration("ompDesk.sessionsGrouping")) s.sessionProcesses?.sync();
     }),
@@ -1875,8 +1890,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       s.routing.refresh();
       // Being brought to the front is how a switch request reaches a window whose directory event was dropped.
       s.routing.rescanRequests();
-      // Agent files added or removed while the window was away change which ancestor is shown.
-      s.resolveAgentRoots();
+      // A repository created or removed while the window was away changes which folder is shown.
+      s.resolveSessionFolders();
     })),
     // Collapsing a folder is presentation only, and the saved value is what its node is built
     // from (durable for a pinned folder, per window otherwise); nothing here re-reads sessions or
@@ -2024,10 +2039,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // waits for the panels it publishes instead of opening a tab the pass is already
   // restoring.
   refreshLauncher();
-  s.resolveAgentRoots();
+  s.resolveSessionFolders();
   // The registry starts after the first snapshot exists, so the first record already says what
-  // this window has open. From here the other windows' records, its own lease, and the agent
-  // roots of every live window's folders are kept current by watch, heartbeat and focus.
+  // this window has open. From here the other windows' records, its own lease, and the session
+  // folders of every live window's folders are kept current by watch, heartbeat and focus.
   windowsRegistry.start({ onChange: s.routing.registryChanged, onHeartbeat: s.routing.heartbeat });
   // The editors this window already has are reconciled before any asynchronous native
   // work: their serializers are registered, and a page that survived a previous
@@ -5638,7 +5653,7 @@ async function pickSendTarget(context: vscode.ExtensionContext, index: SessionIn
   const s = windowState();
   const workspace = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(firstFsPath));
   const requestedFolder = newSessionFolder(firstFsPath, workspace?.uri.fsPath ?? null);
-  // A workspace folder shown as its repository's agent root starts the session there.
+  // A workspace folder shown as the checkout root its sessions run at starts the session there.
   const listed = s.launcherFolders?.folderForCwd(requestedFolder) ?? null;
   const folder = listed?.path ?? requestedFolder;
   const folderListed = listed !== null;

@@ -8,10 +8,10 @@
  * 1. the folders VS Code has open in any live window (the single folder, or every root
  *    of a multi-root workspace; local `file` roots only), windows in the order they
  *    started and each window's folders in VS Code's order, only while
- *    `ompDesk.showWorkspaceFolders` is on. With `ompDesk.useAgentRootFolder` an open
- *    folder without agent files inside a Git repository whose root has them is shown as
- *    that ancestor (`src/views/agent-root.ts`); the opened folder stays in `openedPaths`
- *    so the sessions recorded there keep their place;
+ *    `ompDesk.showWorkspaceFolders` is on. An open folder inside a version-control checkout is
+ *    shown as the checkout's root, where its sessions run (`ompDesk.runSessionsAtRepositoryRoot`,
+ *    `src/host/session-folder.ts`); the opened folder stays in `openedPaths` so the sessions
+ *    recorded there keep their place;
  * 2. the profile-wide **pinned** folders (`WorkspaceFolderRegistry`), in their
  *    stored order; a pinned folder that is also open keeps its place among the open
  *    ones and says it is pinned;
@@ -51,6 +51,8 @@ export interface OpenFolderWindow {
 	/** The window runs an older OMP Desk build than the installed one (ADR-0057): never chosen for a launch. */
 	readonly stale?: boolean;
 	readonly paths: readonly string[];
+	/** The opened `paths` whose sessions run in the folder itself (`ompDesk.runSessionsAtRepositoryRoot` is off for them); absent when none. */
+	readonly staysInFolder?: readonly string[];
 }
 
 /** One folder as the Sessions view shows it. */
@@ -64,9 +66,9 @@ export interface LauncherFolder extends WorkspaceFolder {
 	/** ...in another window. */
 	readonly openElsewhere: boolean;
 	/**
-	 * The opened folders this one is shown instead of, because the repository's agent files live
-	 * here and not in them (`ompDesk.useAgentRootFolder`); absent for a folder shown as itself.
-	 * Sessions recorded in those folders are filed under this one.
+	 * The opened folders this one is shown instead of, because sessions run here, at the root of the
+	 * version-control checkout they lie in (`ompDesk.runSessionsAtRepositoryRoot`); absent for a
+	 * folder shown as itself. Sessions recorded in those folders are filed under this one.
 	 */
 	readonly openedPaths?: readonly string[];
 }
@@ -96,10 +98,11 @@ export interface LauncherFoldersOptions {
 	 */
 	readonly windows: () => readonly OpenFolderWindow[];
 	/**
-	 * The folder an opened folder is shown as (its agent root), read from what was resolved
-	 * already; the opened folder itself when nothing replaces it or the setting is off.
+	 * The folder sessions run in for an opened folder (its checkout root), read from what was
+	 * resolved already; the opened folder itself when nothing replaces it. Whether a window's
+	 * folder uses it at all is the window's own published `staysInFolder`.
 	 */
-	readonly agentRoot?: (windowPath: string) => string;
+	readonly sessionFolder?: (windowPath: string) => string;
 	/** The `ompDesk.showWorkspaceFolders` setting. */
 	readonly showWindowFolders: () => boolean;
 	/** Working directories of the sessions that run in any live window, in window order. */
@@ -123,7 +126,7 @@ export class LauncherFolders {
 	readonly #pinned: PinnedFolders;
 	readonly #local: WorkspaceFolderStore;
 	readonly #windows: () => readonly OpenFolderWindow[];
-	readonly #agentRoot: (windowPath: string) => string;
+	readonly #sessionFolder: (windowPath: string) => string;
 	readonly #showWindowFolders: () => boolean;
 	readonly #liveSessionCwds: () => readonly string[];
 	readonly #identities = new Map<string, PathIdentity>();
@@ -133,7 +136,7 @@ export class LauncherFolders {
 		this.#pinned = options.pinned;
 		this.#local = options.local;
 		this.#windows = options.windows;
-		this.#agentRoot = options.agentRoot ?? (windowPath => windowPath);
+		this.#sessionFolder = options.sessionFolder ?? (windowPath => windowPath);
 		this.#showWindowFolders = options.showWindowFolders;
 		this.#liveSessionCwds = options.liveSessionCwds;
 	}
@@ -148,6 +151,11 @@ export class LauncherFolders {
 	 */
 	forgetIdentities(): void {
 		this.#identities.clear();
+	}
+
+	/** The folder an opened folder of `window` is shown as: itself where its window turned the setting off, else its resolved checkout root. */
+	#shownPath(window: OpenFolderWindow, windowPath: string): string {
+		return window.staysInFolder?.includes(windowPath) === true ? windowPath : this.#sessionFolder(windowPath);
 	}
 
 	#identityOf(folderPath: string): PathIdentity {
@@ -171,7 +179,7 @@ export class LauncherFolders {
 		const pinnedKeys = pinned.map(folder => this.#identityOf(folder.path).key);
 		const collapsedIds = this.#collapsedIds();
 		// Where each identity is open: an opened folder counts for itself and, when it is shown as
-		// its agent root, for the pinned twin of the opened folder as well.
+		// the folder sessions run in, for the pinned twin of the opened folder as well.
 		const presence = new Map<string, { here: boolean; elsewhere: boolean }>();
 		const markOpen = (key: string, here: boolean): void => {
 			const seen = presence.get(key) ?? { here: false, elsewhere: false };
@@ -182,7 +190,7 @@ export class LauncherFolders {
 		const windowEntries: Array<{ readonly identity: PathIdentity; readonly path: string; readonly opened: string[]; here: boolean; elsewhere: boolean }> = [];
 		for (const window of this.#windows()) {
 			for (const windowPath of window.paths) {
-				const shownPath = this.#agentRoot(windowPath);
+				const shownPath = this.#shownPath(window, windowPath);
 				const identity = this.#identityOf(shownPath);
 				const ownKey = this.#identityOf(windowPath).key;
 				let entry = windowEntries.find(candidate => candidate.identity.key === identity.key);
@@ -238,14 +246,14 @@ export class LauncherFolders {
 	/**
 	 * The live windows (this one included) that have this folder open, by the same identity the
 	 * list uses: a window counts when one of its opened folders is shown as this folder (its
-	 * agent root) or is this folder itself. `folderPath` is a shown folder's path. With
+	 * session folder) or is this folder itself. `folderPath` is a shown folder's path. With
 	 * `exact`, only a window whose own opened folder is this folder counts (a Unity project
 	 * must be a window's workspace root, not a folder it merely stands under).
 	 */
 	windowsWithFolder(folderPath: string, options: { readonly exact?: boolean } = {}): readonly OpenFolderWindow[] {
 		const key = this.#identityOf(folderPath).key;
 		return this.#windows().filter(window => window.paths.some(windowPath =>
-			this.#identityOf(windowPath).key === key || (options.exact !== true && this.#identityOf(this.#agentRoot(windowPath)).key === key)));
+			this.#identityOf(windowPath).key === key || (options.exact !== true && this.#identityOf(this.#shownPath(window, windowPath)).key === key)));
 	}
 
 	/** The identity key of a path: what two spellings of one directory share (the pending launches are filed under it). */

@@ -5,6 +5,8 @@ date: 2026-10-10
 
 # ADR-0057: Start a session in the window that suits its folder
 
+> **Note (2026-10-14):** the "agent root" this record names is now the folder sessions run in, the version-control checkout root ([ADR-0073](0073-run-sessions-at-the-checkout-root-and-let-the-editors-follow.md)); routing is unchanged, because it already reads the opened folders a shown folder stands for (`openedPaths`).
+
 ## Context and Problem Statement
 
 Since ADR-0056 every window lists every folder open in any window, so a session can be started from a window that does not have the folder open. The editor then lives in the wrong window, and for a Unity project the Unity extensions (vstuc, C# Dev Kit) do not work at all there: they need the project folder as the window's workspace root. ADR-0056's request channel only lets a window *select* a tab another window already has; a launch needs the other window to start something. That is a new authority for a request and a new way to start a session, so it is decided here rather than slipped into ADR-0056.

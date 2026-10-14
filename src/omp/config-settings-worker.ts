@@ -3,7 +3,7 @@ import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { globalConfigFile, readConfig, writeConfig } from "./config-transaction.ts";
 import { ancestorMessage, assertSchemaShape, baselineProjection, optionNumber, projectSnapshot, SHAPE_MESSAGE } from "./config-schema.ts";
-import { ancestorContextDir, ancestorProjectFolder } from "./config-ancestor.ts";
+import { ancestorContextDir } from "./config-ancestor.ts";
 import type { NativeLayers, NativeSetting, NativeTabs } from "./config-schema.ts";
 import { SettingsRefusal, valueAt } from "../host/omp-settings-core.ts";
 import { isRecord as record } from "../shared/guards.ts";
@@ -87,7 +87,7 @@ async function main(request: WorkerRequest): Promise<unknown> {
       tabs: n.tabs, settings: ordered, layers: settings, nativeProject: files.project.settings, lookup: n.registry.lookup,
       projectFiles: withProject ? await projectFilesOf(n, cwd, projectFile) : [],
       platform: process.platform, version, profile: request.profile,
-      files: { global: { path: globalFile, exists: files.global.exists }, project: { path: projectFile, exists: files.project.exists, ancestorOmp, ancestorProject: withProject ? await ancestorProjectFolder(cwd) : null } },
+      files: { global: { path: globalFile, exists: files.global.exists }, project: { path: projectFile, exists: files.project.exists, ancestorOmp } },
     });
     if (request.action === "read") {
       const receipt: ConfigReceipt = {

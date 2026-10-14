@@ -5,6 +5,8 @@ date: 2026-10-13
 
 # ADR-0072: Resolve roles and agents in the worker with OMP's own functions, and write agent overrides to either layer
 
+> **Amended by [ADR-0073](0073-run-sessions-at-the-checkout-root-and-let-the-editors-follow.md) (2026-10-14):** the editors no longer bind the project folder through `useNearestAncestorOmpFolder` with an ancestor notice; they bind the folder sessions run in. The home-folder and ancestor-context refusals are unchanged.
+
 ## Context and Problem Statement
 
 The Models and Agents pages must show, for every model role and every agent, the effective model, the thinking level, where the value comes from and what it overrides. [ADR-0048](0048-write-omp-settings-directly-under-native-file-locks.md) made the worker open OMP read-only and write only through extension-owned locked transactions, and limited **project** writes to model roles; agent model, prewalk and advisor overrides were global-only. The 2026-10-13 redesign needs two decisions that ADR-0048 does not cover:

@@ -16,8 +16,6 @@ export type SettingsAction =
   /** Starts GuiLogin's sign-in for a provider the snapshot lists; the flow runs on in the background and the host reports its outcome with `settings:notice`. */
   | { action: "sign-in"; requestId: string; provider: string }
   | { action: "open-config"; requestId: string; scope: SettingsScope }
-  /** Shows `ompDesk.ompSettings.useNearestAncestorOmpFolder` in VS Code's Settings editor. */
-  | { action: "open-nearest-setting"; requestId: string }
   | { action: "preset"; requestId: string; name: string; operation: "save" | "switch" | "delete" }
   | { action: "open-agent"; requestId: string; agent: string }
   | { action: "generate"; requestId: string; description: string }
@@ -36,8 +34,6 @@ export type SettingsMessage =
   /** `folder` is null for the global scope: no project layer, no project agents and global writes only. */
   | { type: "settings:init"; key: string; kind: SettingsKind; folder: string | null; canApply: boolean; sessionLabel?: string }
   | { type: "settings:snapshot"; snapshot: SettingsSnapshot; configExists: Readonly<Record<SettingsScope, boolean>>;
-    /** The nearest ancestor folder whose `.omp` is non-empty while the bound folder has none (ADR-0071): sessions probably run there. */
-    ancestorProject?: string | null;
     /** Present only for an editor opened from a running Chat session. */
     session?: SessionApply | null }
   | { type: "settings:preview"; spec: AgentSpec | null }

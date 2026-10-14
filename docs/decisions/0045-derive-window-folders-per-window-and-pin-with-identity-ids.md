@@ -5,6 +5,8 @@ date: 2026-10-07
 
 # ADR-0045: Derive window folders per window and pin them under identity-derived ids
 
+> **Superseded in part by [ADR-0073](0073-run-sessions-at-the-checkout-root-and-let-the-editors-follow.md) (2026-10-14):** item (3)'s `omp.useAgentRootFolder` (application scope) is gone; its successor `ompDesk.runSessionsAtRepositoryRoot` is `resource` scoped, and a window publishes the folders where it is off. Folder ids stay derived from the shown path.
+
 ## Context and Problem Statement
 
 Sessions should show the folders VS Code has open without the user adding them, while the durable, profile-wide folder list (ADR-0034) keeps its meaning. Three things must hold at once: a folder open in one window must not appear in other windows or outlive its workspace unless the user says so; a folder must keep one id and one tree row when it moves between "open" and "pinned"; and a folder both open and pinned must appear once.

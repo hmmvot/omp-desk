@@ -131,7 +131,7 @@ async function world(targets: readonly Target[] = [], options: { readonly holder
 		refreshes: 0,
 		stale: false,
 		packageChanged: false,
-		agentRoots: async () => {},
+		sessionFolders: async () => {},
 		catalogReady: async () => {},
 		startupCovers: false,
 		unityStore: undefined as { get(key: string): unknown; update(key: string, value: unknown): Promise<void> } | undefined,
@@ -191,7 +191,7 @@ async function world(targets: readonly Target[] = [], options: { readonly holder
 		packageStale: () => state.stale,
 		unityChoices: () => state.unityStore as never,
 		startupRestoreCovers: () => state.startupCovers,
-		resolveAgentRoots: () => state.agentRoots(),
+		resolveSessionFolders: () => state.sessionFolders(),
 		packageChangedOnDisk: () => state.packageChanged,
 		ensureCatalogReady: () => state.catalogReady(),
 		sessionProcesses: () => state.processes as never,
@@ -305,6 +305,21 @@ describe("what this window publishes", () => {
 		}
 	});
 
+	it("names the folders whose sessions stay in the folder because ompDesk.runSessionsAtRepositoryRoot is off, and none by default", async () => {
+		const w = await world();
+		stub.workspace.workspaceFolders = [{ uri: URI.file("C:/omp-vscode/one") }];
+		try {
+			w.routing.publishSnapshot();
+			assert.equal(w.state.published.at(-1)?.staysInFolder, undefined, "on by default: nothing to publish");
+			stub.workspace.settings["ompDesk.runSessionsAtRepositoryRoot"] = false;
+			w.routing.publishSnapshot();
+			assert.deepEqual(w.state.published.at(-1)?.staysInFolder, [URI.file("C:/omp-vscode/one").fsPath]);
+		} finally {
+			delete stub.workspace.settings["ompDesk.runSessionsAtRepositoryRoot"];
+			stub.workspace.workspaceFolders = undefined;
+		}
+	});
+
 	it("carries the moment this window was last brought to the front", async () => {
 		const w = await world();
 		w.routing.publishSnapshot();
@@ -344,10 +359,10 @@ describe("keeping the registry's picture current", () => {
 		assert.ok(w.logged.some(line => line === "window registry: unreadable"));
 	});
 
-	it("re-probes the agent roots and repaints when another window's folders changed, and lists every folder of every window", async () => {
+	it("re-probes the session folders and repaints when another window's folders changed, and lists every folder of every window", async () => {
 		const w = await world();
 		let probes = 0;
-		w.state.agentRoots = async () => { probes++; };
+		w.state.sessionFolders = async () => { probes++; };
 		w.registry.windows = () => [{ folders: ["C:/a", "C:/b"] }, { folders: ["C:/c"] }];
 		assert.deepEqual(w.routing.allFolders(), ["C:/a", "C:/b", "C:/c"]);
 		w.routing.registryChanged();
@@ -363,10 +378,10 @@ describe("keeping the registry's picture current", () => {
 	});
 
 	describe("the heartbeat", () => {
-		it("re-probes the agent roots, and observes every row again while the Sessions view is visible", async () => {
+		it("re-probes the session folders, and observes every row again while the Sessions view is visible", async () => {
 			const w = await world();
 			let probes = 0;
-			w.state.agentRoots = async () => { probes++; };
+			w.state.sessionFolders = async () => { probes++; };
 			w.state.viewVisible = true;
 			w.routing.heartbeat();
 			assert.equal(probes, 1);
@@ -656,7 +671,7 @@ describe("starting a session in the window that has its folder open", () => {
 			await mkdir(path.join(directory, "Assets"), { recursive: true });
 			await writeFile(path.join(directory, "ProjectSettings", "ProjectVersion.txt"), "m_EditorVersion: 6000.0.0f1\n");
 		};
-		/** A repository folder with a Unity project below it, as the Sessions folder (the agent root). */
+		/** A repository folder with a Unity project below it, as the Sessions folder (the session folder). */
 		const repoWith = async (name: string, ...projects: string[]) => {
 			const repo = path.join(unityRoot, name);
 			await mkdir(repo, { recursive: true });
@@ -665,7 +680,7 @@ describe("starting a session in the window that has its folder open", () => {
 		};
 		const launch: LaunchAction = { kind: "new-session", folderId: "folder:repo-1" };
 
-		it("goes to a window that has the project open, though the agent root is open here", async () => {
+		it("goes to a window that has the project open, though the session folder is open here", async () => {
 			const repo = await repoWith("repo-other", "omp-vscode");
 			const unity = path.join(repo, "omp-vscode");
 			const w = await world([{ holderId: "holder-unity", uri: URI.file(unity).toString(), serve: { ok: true, focused: true } }]);
@@ -883,7 +898,7 @@ describe("serving a launch another window asked for", () => {
 		const order: string[] = [];
 		const catalog = Promise.withResolvers<void>();
 		w.state.catalogReady = async () => { await catalog.promise; order.push("catalog"); };
-		w.state.agentRoots = async () => {
+		w.state.sessionFolders = async () => {
 			order.push("roots");
 			w.state.folders = [folderRow({ openHere: true })];
 		};
@@ -918,7 +933,7 @@ describe("serving a launch another window asked for", () => {
 		assert.deepEqual(await serve(w, request({ kind: "open-session", tabId: "tab:nobody", verb: "resumed", mode: null })), refused, "a session this window does not list");
 		assert.deepEqual(await serve(w, request(newSession), { ...wanted, stillWanted: async () => false }), refused, "the requester stopped waiting");
 		w.state.opening = (_folderPath, options) => options?.exact === true ? [] : [here];
-		assert.deepEqual(await serve(w, request(newSession, { path: FOLDER, match: "root" })), refused, "a workspace root this window does not have, whatever agent root it shows");
+		assert.deepEqual(await serve(w, request(newSession, { path: FOLDER, match: "root" })), refused, "a workspace root this window does not have, whatever session folder it shows");
 		await nextTurn();
 		assert.deepEqual([w.drafts, w.opened], [[], []]);
 		assert.ok(w.logged.some(line => line.startsWith("window request: refused a launch (new-session) for C:/omp-vscode/proj (folder): this window does not have the workspace open")));

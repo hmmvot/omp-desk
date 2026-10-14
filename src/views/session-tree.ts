@@ -498,7 +498,7 @@ function folderTooltip(folder: LauncherFolder, latest: string | null, hasRecover
 		folder.pinned ? `Pinned${where === null ? "" : ` · ${where}`}` : where ?? "Kept while a session runs in it",
 		latest === null ? "No session activity yet" : `Last activity: ${relativeAge(latest, now)}`,
 		...(folder.openedPaths === undefined || folder.openedPaths.length === 0 ? [] : [
-			`Shown instead of the opened ${folder.openedPaths.map(opened => `"${opened}"`).join(", ")} because the repository's agent files are here.`,
+			`Sessions run at the repository root ${folder.path}, not in the opened ${folder.openedPaths.map(opened => `"${opened}"`).join(", ")}.`,
 		]),
 	];
 	if (hasRecoverableShell) lines.push("Reconnect Terminal to reopen its terminal.");

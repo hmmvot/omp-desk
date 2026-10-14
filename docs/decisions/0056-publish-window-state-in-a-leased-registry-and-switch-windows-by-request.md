@@ -5,6 +5,8 @@ date: 2026-10-10
 
 # ADR-0056: Publish window state in a leased registry and switch windows by request
 
+> **Superseded in part by [ADR-0073](0073-run-sessions-at-the-checkout-root-and-let-the-editors-follow.md) (2026-10-14):** the application-scope decision for the agent-root setting (the "settings ... are `application` scoped" sentence) no longer holds for its successor `ompDesk.runSessionsAtRepositoryRoot`, which is `resource` scoped; the record gains the optional `staysInFolder` (opened folders where it is off) and the reader applies the session-folder substitution (formerly agent-root substitution) to every other folder. `ompDesk.showWorkspaceFolders` stays `application` scoped.
+
 ## Context and Problem Statement
 
 Sessions should read the same in every VS Code window of the profile. Two things are per window today and cannot be: the folders VS Code has open (ADR-0045 derives them per window and never shares them), and the live status of a session, which only its owner window knows. Clicking a session another window holds can only explain and ask for confirmation; the user wants that window in front with the tab selected, with no confirmation. VS Code gives an extension no API to focus another window or to message it, and a window that crashes announces nothing.

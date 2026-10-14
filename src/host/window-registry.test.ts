@@ -126,6 +126,23 @@ describe("window registry", () => {
 		assert.equal(boundWindowSnapshot({ windowUri: null, label: "", folders: [], liveCwds: [], rows: {}, focusedAt: "not a time", stale: false }).focusedAt, null);
 	});
 
+	it("publishes the opened folders whose sessions stay in the folder (ompDesk.runSessionsAtRepositoryRoot off), reads a record without the field as none, and repaints for a change", async () => {
+		const owner = windowOf("owner", 1, "2026-10-10T09:00:00.000Z", { folders: ["C:/mono/pkg", "C:/game/Game"], staysInFolder: ["C:/mono/pkg"] });
+		const reader = windowOf("reader", 2, "2026-10-10T09:05:00.000Z");
+		await publish(owner, reader);
+		assert.deepEqual(reader.windowOf("owner")?.staysInFolder, ["C:/mono/pkg"]);
+		owner.setSnapshot({ windowUri: null, label: "owner", folders: ["C:/mono/pkg", "C:/game/Game"], liveCwds: [], rows: {}, focusedAt: null, stale: false });
+		await owner.flush();
+		assert.equal(await reader.refresh(), true, "turning the setting back on changes what the others show");
+		assert.equal(reader.windowOf("owner")?.staysInFolder, undefined);
+		const record = { version: 1, holderId: "abc", pid: 5, startedAt: "2026-10-10T09:00:00.000Z", updatedAt: "2026-10-10T09:00:01.000Z", windowUri: null, label: "x", folders: ["C:/x"], liveCwds: [], rows: {} };
+		assert.equal(parseWindowRecord(JSON.stringify(record), "abc")?.staysInFolder, undefined, "an earlier build's record: the default applies");
+		assert.deepEqual(parseWindowRecord(JSON.stringify({ ...record, staysInFolder: ["C:/x"] }), "abc")?.staysInFolder, ["C:/x"]);
+		assert.equal(parseWindowRecord(JSON.stringify({ ...record, staysInFolder: [3] }), "abc"), null);
+		const bounded = boundWindowSnapshot({ windowUri: null, label: "", folders: ["C:/x"], staysInFolder: ["C:/x", "C:/not-open"], liveCwds: [], rows: {}, focusedAt: null, stale: false });
+		assert.deepEqual(bounded.staysInFolder, ["C:/x"], "only an opened folder can stay");
+	});
+
 	it("drops a window whose process is gone, and sweeps its file once the file is stale too", async () => {
 		const stays = windowOf("stays", 1, "2026-10-10T09:00:00.000Z", { folders: ["C:/a"] });
 		const crashes = windowOf("crashes", 2, "2026-10-10T09:01:00.000Z", { folders: ["C:/b"] });

@@ -52,7 +52,7 @@ test("reads OMP's schema with layer values, sources and no credential, and never
     const before = await Promise.all([fs.readFile(r.globalFile, "utf8"), fs.readFile(r.projectFile, "utf8")]);
     const receipt = await read(r);
     assert.equal(receipt.snapshot.omp.version, JSON.parse(await fs.readFile(path.join(packageRoot, "package.json"), "utf8")).version);
-    assert.deepEqual(receipt.snapshot.files, { global: { path: r.globalFile, exists: true }, project: { path: r.projectFile, exists: true, ancestorOmp: null, ancestorProject: null } });
+    assert.deepEqual(receipt.snapshot.files, { global: { path: r.globalFile, exists: true }, project: { path: r.projectFile, exists: true, ancestorOmp: null } });
     assert.ok(receipt.snapshot.entries.length > 300 && receipt.snapshot.tabs.length === 10);
     const lsp = entryOf(receipt, "lsp.diagnosticsOnWrite");
     assert.deepEqual(lsp.layers, { global: { state: "set", value: false }, project: { state: "set", value: true } });

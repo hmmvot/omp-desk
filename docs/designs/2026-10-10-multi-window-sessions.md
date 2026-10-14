@@ -5,6 +5,8 @@ date: 2026-10-10
 
 # One Sessions view across every window of the profile
 
+> **Amended (2026-10-14, [repository-root design](2026-10-14-run-sessions-at-the-repository-root.md)):** "agent root" below is the checkout root; its setting is `ompDesk.runSessionsAtRepositoryRoot` and is `resource` scoped, so a window publishes `staysInFolder`; the "Settings" paragraph's application-scope argument no longer applies to it.
+
 ## Problem
 
 Sessions is meant to be one view of the profile's work, but today it depends on which window you look at.

@@ -213,7 +213,7 @@ export function folderMatchesCwd(folderPath: string, cwd: string): boolean {
 /** A folder as far as matching sessions is concerned: its path and the opened folders it stands in for. */
 export interface CwdMatchableFolder {
 	readonly path: string;
-	/** Opened folders this folder is shown instead of (see `src/views/agent-root.ts`); empty or absent otherwise. */
+	/** Opened folders this folder is shown instead of, because sessions run at the checkout root (see `src/host/session-folder.ts`); empty or absent otherwise. */
 	readonly openedPaths?: readonly string[];
 }
 

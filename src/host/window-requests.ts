@@ -172,9 +172,9 @@ export type LaunchAction =
 
 /**
  * The folder the receiving window must have open to start a launch. `folder`: the window shows
- * it as a folder of Sessions (it has it open, or a folder it stands for as an agent root);
+ * it as a folder of Sessions (it has it open, or a folder it stands for as the folder sessions run in);
  * `root`: it is exactly one of the window's own workspace folders, which a Unity project needs
- * (the Unity extensions work from the workspace root), whatever agent root the window shows.
+ * (the Unity extensions work from the workspace root), whatever session folder the window shows.
  */
 export interface LaunchWorkspace {
 	readonly path: string;
@@ -1127,7 +1127,7 @@ export type FolderLaunchPlan =
 
 /**
  * The most suitable window for a launch in a folder, given every live window that has that
- * folder open (after agent-root substitution, `here` included): the asking window when it has
+ * folder open (after session-folder substitution, `here` included): the asking window when it has
  * the folder, otherwise the most recently focused of the others (a window that published no
  * focus time ranks last; ties go to the earlier started, then the lower holder id, so the
  * answer does not depend on input order), and the asking window again when no window has it

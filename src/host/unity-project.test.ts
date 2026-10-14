@@ -59,7 +59,7 @@ describe("unity projects", () => {
 		assert.deepEqual(await findUnityProjects(direct), [direct]);
 	});
 
-	it("finds the project below an agent root, as omp-vscode below omp-vscode", async () => {
+	it("finds the project below a repository root, as omp-vscode below omp-vscode", async () => {
 		const repo = folder("omp-vscode");
 		fs.writeFileSync(at(repo, "AGENTS.md"), "# agents\n");
 		fs.mkdirSync(at(repo, ".git"));

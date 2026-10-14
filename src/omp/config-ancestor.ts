@@ -6,6 +6,12 @@ import * as path from "node:path";
  * OMP loads AGENTS.md, RULES.md and SYSTEM.md from the nearest non-empty `.omp` directory between the folder and the repository
  * root, never from several (`findNearestProjectConfigDir` in `discovery/builtin.ts`). The home directory is never a project.
  * Creating `<folder>/.omp/config.yml` therefore makes the folder the nearest and stops an ancestor's files loading for its sessions.
+ *
+ * The editors bind the folder sessions run in: a session's own cwd, or `session-folder.ts`'s answer for the first opened workspace folder,
+ * which is the checkout root for a folder inside one. OMP stops at a Git root, so a write there hides nothing; the refusal still applies
+ * where OMP's walk reaches an ancestor `.omp`: a session folder that is not its checkout root (a session recorded in a subfolder, a pinned
+ * subfolder row, a folder chosen with the dialog), a folder in a checkout of another system (Mercurial, Plastic, Subversion: OMP knows `.git`
+ * only), a folder in none, and any folder when `ompDesk.runSessionsAtRepositoryRoot` is off.
  */
 const CONTEXT_FILES = ["AGENTS.md", "RULES.md", "SYSTEM.md", "SYSTEM_TEMPLATE.md"];
 
@@ -32,35 +38,4 @@ export async function ancestorContextDir(folder: string, home: string = os.homed
     if (path.dirname(dir) === dir) return null;
   }
   return null;
-}
-
-/**
- * The project folder for a workspace folder when the user opted into the nearest ancestor `.omp` (Unity projects: VS Code opens
- * `<repo>/omp-vscode` while OMP sessions run at `<repo>`, which holds `.omp`): the folder itself or its nearest ancestor whose `.omp` is
- * non-empty, the same walk OMP's own discovery makes (inclusive stop at the repository root, or at home when there is none, and
- * the home directory is never a project). Null when there is none.
- */
-export async function nearestOmpFolder(folder: string, home: string = os.homedir()): Promise<string | null> {
-  const resolvedHome = path.resolve(home);
-  for (let dir = path.resolve(folder); ; dir = path.dirname(dir)) {
-    if (same(dir, resolvedHome)) return null;
-    if ((await entries(path.join(dir, ".omp"))).length > 0) return dir;
-    if ((await entries(dir)).includes(".git") || path.dirname(dir) === dir) return null;
-  }
-}
-
-/** The folder the editor treats as the project: the workspace folder, or with the setting on its nearest ancestor `.omp` folder, falling back to the workspace folder. */
-export async function projectFolderFor(folder: string, useNearestAncestor: boolean, home: string = os.homedir()): Promise<string> {
-  return useNearestAncestor ? await nearestOmpFolder(folder, home) ?? folder : folder;
-}
-
-/**
- * The nearest ancestor folder (never the folder itself) whose `.omp` is non-empty, when the folder has no non-empty `.omp` of its own and the
- * walk (inclusive stop at the repository root, or home) reaches one: the folder OMP sessions run in is probably that one, not this folder.
- */
-export async function ancestorProjectFolder(folder: string, home: string = os.homedir()): Promise<string | null> {
-  const start = path.resolve(folder);
-  if ((await entries(path.join(start, ".omp"))).length > 0) return null;
-  if ((await entries(start)).includes(".git") || same(start, path.resolve(home)) || path.dirname(start) === start) return null;
-  return nearestOmpFolder(path.dirname(start), home);
 }

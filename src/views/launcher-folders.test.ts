@@ -204,7 +204,7 @@ describe("launcher folders", () => {
 		assert.equal(list[1]!.collapsed, false);
 	});
 
-	it("names the live windows that have a folder open, by the identity the list uses, agent roots included", async () => {
+	it("names the live windows that have a folder open, by the identity the list uses, session folders included", async () => {
 		const sub = path.join(alpha, "packages", "app");
 		const stamp = { startedAt: "2026-01-01T00:00:00.000Z", focusedAt: null };
 		const folders = new LauncherFolders({
@@ -216,7 +216,7 @@ describe("launcher folders", () => {
 				{ holderId: "inside", here: false, ...stamp, paths: [sub] },
 				{ holderId: "unrelated", here: false, ...stamp, paths: [gamma] },
 			],
-			agentRoot: windowPath => (windowPath === sub ? alpha : windowPath),
+			sessionFolder: windowPath => (windowPath === sub ? alpha : windowPath),
 			showWindowFolders: () => true,
 			liveSessionCwds: () => [],
 		});

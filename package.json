@@ -93,17 +93,11 @@
           "scope": "application",
           "description": "Show the folders VS Code has open in any window, or every folder of a multi-root workspace, in Sessions next to the pinned folders. The setting applies to all windows, so every window shows the same list. When off, Sessions shows only pinned folders and folders where a session is running."
         },
-        "ompDesk.useAgentRootFolder": {
+        "ompDesk.runSessionsAtRepositoryRoot": {
           "type": "boolean",
           "default": true,
-          "scope": "application",
-          "description": "When a folder VS Code has open has no agent files (AGENTS.md, CLAUDE.md, .agents, .omp, .claude, .pi) but sits inside a Git repository whose root, or a folder between, has them, Sessions shows that ancestor instead, so new sessions start where OMP finds the repository's agent files. Sessions recorded in the opened folder stay listed under it. The setting applies to all windows. When off, Sessions shows the opened folder."
-        },
-        "ompDesk.ompSettings.useNearestAncestorOmpFolder": {
-          "type": "boolean",
-          "default": false,
           "scope": "resource",
-          "description": "Treat the nearest parent folder that has an `.omp` directory as the OMP project for this workspace. Use this for Unity projects, where VS Code opens the Unity project folder (for example `<repo>/omp-vscode`) while OMP sessions run at the repository root that holds `.omp`. The walk stops at the repository root and never uses your home folder. Off: the workspace folder itself is the project. Applies to OMP Desk: Open OMP Settings and `/settings`."
+          "description": "Run sessions at the root of the version-control checkout a folder lies in. When the folder VS Code has open is inside a checkout (Git, Mercurial, Sapling, Jujutsu, Subversion, Plastic SCM / Unity Version Control, Bazaar, Fossil, Pijul, Darcs, CVS, or a Perforce workspace with a P4CONFIG file), new sessions start at that root, so a Unity project opened as `<repo>/omp-vscode` runs OMP at `<repo>`; a folder outside any checkout runs in the folder itself. Off: sessions run exactly in the opened folder (a monorepo package). Sessions that already exist keep the folder they were recorded in. The OMP Settings, Models and Agents editors write project settings to the same folder. Set it per workspace or folder to turn it off for one project."
         },
         "ompDesk.launchInFolderWindow": {
           "type": "boolean",
@@ -198,7 +192,21 @@
           "default": true,
           "scope": "application",
           "included": false,
-          "deprecationMessage": "Renamed to ompDesk.useAgentRootFolder. OMP Desk moves the value for you at the next start; this name is kept for a while so a value in a settings file stays recognised."
+          "deprecationMessage": "Renamed to ompDesk.useAgentRootFolder, which ompDesk.runSessionsAtRepositoryRoot has replaced. OMP Desk moves the value for you at the next start; this name is kept for a while so a value in a settings file stays recognised."
+        },
+        "ompDesk.useAgentRootFolder": {
+          "type": "boolean",
+          "default": true,
+          "scope": "application",
+          "included": false,
+          "deprecationMessage": "Replaced by ompDesk.runSessionsAtRepositoryRoot, which runs sessions at the root of the version-control checkout whether or not it holds agent files. OMP Desk carries an explicit false over to the new setting at the next start; this name is kept until 1.0.0 so a value in a settings file stays recognised."
+        },
+        "ompDesk.ompSettings.useNearestAncestorOmpFolder": {
+          "type": "boolean",
+          "default": false,
+          "scope": "resource",
+          "included": false,
+          "deprecationMessage": "No longer used: the OMP Settings, Models and Agents editors write project settings to the folder sessions run in (ompDesk.runSessionsAtRepositoryRoot). OMP Desk removes this value at the next start; this name is kept until 1.0.0 so a value in a settings file stays recognised."
         },
         "omp.launchInFolderWindow": {
           "type": "boolean",

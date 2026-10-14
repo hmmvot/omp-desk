@@ -109,8 +109,14 @@ export interface WindowSnapshot {
 	readonly windowUri: string | null;
 	/** The window's VS Code workspace name, for tooltips. */
 	readonly label: string;
-	/** `file` folders open in the window, in VS Code's order, as opened (before agent-root substitution). */
+	/** `file` folders open in the window, in VS Code's order, as opened (before the session-folder substitution). */
 	readonly folders: readonly string[];
+	/**
+	 * The opened folders, among `folders`, whose sessions run in the folder itself because `ompDesk.runSessionsAtRepositoryRoot` is off
+	 * for them (the setting is resource-scoped, so only the window that has the folder can read it). Absent when there is none, and in a
+	 * record of an earlier build: the setting's default applies.
+	 */
+	readonly staysInFolder?: readonly string[];
 	/** Working directories of the sessions this window runs or is launching. */
 	readonly liveCwds: readonly string[];
 	/** The sessions this window runs, by tab id. */
@@ -217,11 +223,13 @@ export function boundWindowSnapshot(snapshot: WindowSnapshot): WindowSnapshot {
 	};
 	const fits = (text: string): boolean => text.length > 0 && text.length <= MAX_TEXT;
 	const folders = take(snapshot.folders, MAX_FOLDERS, fits);
+	const stays = take(snapshot.staysInFolder ?? [], MAX_FOLDERS, item => folders.includes(item));
 	const liveCwds = take(snapshot.liveCwds, MAX_LIVE_CWDS, fits);
 	return {
 		windowUri: snapshot.windowUri !== null && snapshot.windowUri.startsWith("file:") && snapshot.windowUri.length <= MAX_TEXT ? snapshot.windowUri : null,
 		label: clampText(snapshot.label),
 		folders,
+		...(stays.length > 0 ? { staysInFolder: stays } : {}),
 		liveCwds,
 		rows,
 		focusedAt: snapshot.focusedAt !== null && isIsoTime(snapshot.focusedAt) ? snapshot.focusedAt : null,
@@ -250,6 +258,7 @@ export function parseWindowRecord(text: string, fileHolderId: string): WindowRec
 	const record = parsed as Record<string, unknown>;
 	if (record.version !== RECORD_VERSION || record.holderId !== fileHolderId || !ID_RE.test(fileHolderId)) return null;
 	const { pid, startedAt, updatedAt, windowUri, label, folders, liveCwds, rows } = record;
+	const staysInFolder = record.staysInFolder === undefined ? [] : record.staysInFolder;
 	// A record of a build that published no focus time has none.
 	const focusedAt = record.focusedAt === undefined ? null : record.focusedAt;
 	if (focusedAt !== null && !isIsoTime(focusedAt)) return null;
@@ -261,7 +270,7 @@ export function parseWindowRecord(text: string, fileHolderId: string): WindowRec
 	// Navigation is `vscode.openFolder` on a local file URI and nothing else.
 	if (windowUri !== null && (typeof windowUri !== "string" || windowUri.length > MAX_TEXT || !windowUri.startsWith("file:"))) return null;
 	if (typeof label !== "string" || label.length > MAX_TEXT) return null;
-	if (!isStringArray(folders, MAX_FOLDERS) || !isStringArray(liveCwds, MAX_LIVE_CWDS)) return null;
+	if (!isStringArray(folders, MAX_FOLDERS) || !isStringArray(liveCwds, MAX_LIVE_CWDS) || !isStringArray(staysInFolder, MAX_FOLDERS)) return null;
 	if (typeof rows !== "object" || rows === null || Array.isArray(rows)) return null;
 	const checkedRows: Record<string, PublishedRow> = {};
 	const entries = Object.entries(rows);
@@ -285,6 +294,7 @@ export function parseWindowRecord(text: string, fileHolderId: string): WindowRec
 		windowUri: windowUri === null ? null : String(windowUri),
 		label,
 		folders,
+		...(staysInFolder.length > 0 ? { staysInFolder } : {}),
 		liveCwds,
 		rows: checkedRows,
 		focusedAt,
@@ -324,7 +334,7 @@ export function orderWindows(windows: readonly OpenWindow[]): readonly OpenWindo
 }
 
 function snapshotOf(window: WindowSnapshot): Omit<WindowSnapshot, "focusedAt"> {
-	return { windowUri: window.windowUri, label: window.label, folders: window.folders, liveCwds: window.liveCwds, rows: window.rows, stale: window.stale };
+	return { windowUri: window.windowUri, label: window.label, folders: window.folders, staysInFolder: window.staysInFolder ?? [], liveCwds: window.liveCwds, rows: window.rows, stale: window.stale };
 }
 
 /** A stable text of what the windows show, never of how fresh it is (nor of which one was focused last: that is never shown). */
@@ -382,6 +392,7 @@ function openWindowOf(record: WindowRecord): OpenWindow {
 		windowUri: record.windowUri,
 		label: record.label,
 		folders: record.folders,
+		...(record.staysInFolder === undefined ? {} : { staysInFolder: record.staysInFolder }),
 		liveCwds: record.liveCwds,
 		rows: record.rows,
 		focusedAt: record.focusedAt,
@@ -455,7 +466,7 @@ export class WindowRegistry {
 	 * directory and renew the lease every heartbeat. `onChange` runs whenever what the
 	 * windows show — not how fresh it is — differs from what it last reported;
 	 * `onHeartbeat` runs on every heartbeat, for work that must be repeated whatever the
-	 * registry saw (re-probing agent roots).
+	 * registry saw (re-probing the session folders).
 	 */
 	start(hooks: { readonly onChange: () => void; readonly onHeartbeat?: () => void }): void {
 		const onChange = hooks.onChange;

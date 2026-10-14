@@ -8,11 +8,9 @@ import type { OmpCommand } from "./native-terminal";
 import { runSettingsWorker } from "./omp-settings-worker";
 import { createSettingsHtml } from "./guest-webview";
 import { OmpConfigController } from "./omp-config-controller";
-import { projectFolderFor } from "../omp/config-ancestor";
 import { chooseSetting } from "./settings-pickers";
 import { SettingsRefusal } from "./omp-settings-core";
 import { isRecord as record } from "../shared/guards";
-import { NEAREST_OMP_SETTING } from "../protocol/omp-config-model";
 import type { ConfigMessage } from "../protocol/omp-config-model";
 import type { ConfigRecord } from "../protocol/settings-model";
 import type { PickEntry } from "../protocol/settings-pick-items";
@@ -22,8 +20,8 @@ export interface OmpConfigBinding { readonly folder: string | null; readonly pro
 export interface OmpConfigEditorHost {
   /** The OMP profile a command-opened editor uses. */
   defaultProfile(): string;
-  /** The folder a command-opened editor shows: the active session's, else the first workspace folder, else null. */
-  defaultFolder(): string | null;
+  /** The folder a command-opened editor shows: the active session's own folder, else the folder sessions run in for the first workspace folder, else null. */
+  defaultFolder(): Promise<string | null>;
   /** Folders offered by the scope control: the folders Sessions shows. */
   folders(): readonly string[];
 }
@@ -48,7 +46,7 @@ export class OmpConfigEditors implements vscode.Disposable {
   readonly #disposables: vscode.Disposable[] = [];
   constructor(readonly context: vscode.ExtensionContext, readonly host: OmpConfigEditorHost) {
     this.#disposables.push(
-      vscode.commands.registerCommand("ompDesk.openOmpSettings", () => this.open({ folder: host.defaultFolder(), profile: host.defaultProfile() })),
+      vscode.commands.registerCommand("ompDesk.openOmpSettings", async () => this.open({ folder: await host.defaultFolder(), profile: host.defaultProfile() })),
       vscode.window.registerWebviewPanelSerializer(VIEW_TYPE, {
         deserializeWebviewPanel: async (panel, raw: unknown) => {
           const stored = record(raw) && typeof raw.key === "string" ? this.#stored().find(item => item.key === raw.key) : undefined;
@@ -58,17 +56,8 @@ export class OmpConfigEditors implements vscode.Disposable {
       }),
     );
   }
-  /**
-   * The folder an editor treats as the project. With `ompDesk.ompSettings.useNearestAncestorOmpFolder` on it is the nearest ancestor whose
-   * `.omp` is non-empty (a Unity project's repository root), else the folder itself. The setting is read for that folder, as it is a resource setting.
-   */
-  async #projectFolder(folder: string | null): Promise<string | null> {
-    if (folder === null) return null;
-    const enabled = vscode.workspace.getConfiguration("ompDesk", vscode.Uri.file(folder)).get<boolean>("ompSettings.useNearestAncestorOmpFolder", false);
-    return projectFolderFor(folder, enabled);
-  }
   async open(requested: OmpConfigBinding): Promise<void> {
-    const binding: OmpConfigBinding = { ...requested, folder: await this.#projectFolder(requested.folder) };
+    const binding = requested;
     const key = editorKey(binding);
     const existing = this.#editors.get(key);
     if (existing) { existing.panel.reveal(vscode.ViewColumn.Active); existing.controller.init(); return; }
@@ -100,7 +89,6 @@ export class OmpConfigEditors implements vscode.Disposable {
         post: (message: ConfigMessage) => { if (!editor.disposed) void panel.webview.postMessage(message); },
         key: () => editor.key,
         openFile: (file, line) => this.#openFile(file, line),
-        openSetting: async () => { await vscode.commands.executeCommand("workbench.action.openSettings", NEAREST_OMP_SETTING); },
         pickScope: current => this.#pickScope(editor, current),
         rebind: folder => this.#rebind(editor, folder),
       }),
@@ -163,7 +151,7 @@ export class OmpConfigEditors implements vscode.Disposable {
   }
   /** Moves an open editor to another scope of the same profile; a scope already open in another tab is revealed instead. */
   async #rebind(editor: Editor, picked: string | null): Promise<{ folder: string | null } | { refusal: string }> {
-    const folder = await this.#projectFolder(picked);
+    const folder = picked;
     const binding: OmpConfigBinding = { folder, profile: editor.binding.profile, ...(editor.binding.executable ? { executable: editor.binding.executable } : {}) };
     const key = editorKey(binding);
     const other = this.#editors.get(key);

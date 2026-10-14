@@ -19,7 +19,7 @@ const receipt = (entries: ConfigEntry[], files = { global: true, project: true }
   baselines: { global: { logical: "g", physical: "g", exists: true, digest: "d1", settings: {} }, project: { logical: "p", physical: "p", exists: true, digest: "d2", settings: {} } },
 });
 
-interface Rig { controller: OmpConfigController; messages: ConfigMessage[]; requests: ConfigRecord[]; opened: { file: string; line: number | null }[]; script: (handler: (request: ConfigRecord) => unknown) => void; ports: { pick?: string | null | undefined; rebind?: string | null; resolveTo?: string; openedSetting?: number } }
+interface Rig { controller: OmpConfigController; messages: ConfigMessage[]; requests: ConfigRecord[]; opened: { file: string; line: number | null }[]; script: (handler: (request: ConfigRecord) => unknown) => void; ports: { pick?: string | null | undefined; rebind?: string | null; resolveTo?: string } }
 function rig(folder: string | null = "C:/proj"): Rig {
   const messages: ConfigMessage[] = []; const requests: ConfigRecord[] = []; const opened: Rig["opened"] = [];
   let handler: (request: ConfigRecord) => unknown = () => receipt([entry("lsp.formatOnWrite")]);
@@ -28,7 +28,6 @@ function rig(folder: string | null = "C:/proj"): Rig {
     async worker(request) { requests.push(request); const result = handler(request); if (result instanceof Error) throw result; return result; },
     post: message => { messages.push(message); }, key: () => "key-1",
     async openFile(file, line) { opened.push({ file, line }); },
-    async openSetting() { state.openedSetting = (state.openedSetting ?? 0) + 1; },
     async pickScope() { return state.pick; }, async rebind(folder) { return state.rebind ? { refusal: state.rebind } : { folder: state.resolveTo ?? folder }; },
   };
   return { controller: new OmpConfigController(folder, "default", ports), messages, requests, opened, script: next => { handler = next; }, ports: state };
@@ -162,7 +161,7 @@ test("pick-scope moves the editor to a folder, to global, or reports a scope tha
   await r.controller.handle({ action: "pick-scope", requestId: "r4" });
   assert.equal(r.controller.folder, "C:/other");
   assert.equal(results(r).at(-1)!.message, "Showing the project scope of C:/other.");
-  // the host may resolve the picked folder to the project folder it stands for (nearest ancestor .omp); the editor then shows that one
+  // the host may resolve the picked folder to the folder sessions run in for it (the checkout root); the editor then shows that one
   r.ports.pick = "C:/repo/Game"; r.ports.resolveTo = "C:/repo";
   await r.controller.handle({ action: "pick-scope", requestId: "r5" });
   assert.equal(r.controller.folder, "C:/repo");
@@ -173,7 +172,8 @@ test("pick-scope moves the editor to a folder, to global, or reports a scope tha
 test("parseConfigAction accepts exactly the contract's shapes", () => {
   const ok = (value: unknown) => assert.notEqual(parseConfigAction(value), null, JSON.stringify(value));
   const bad = (value: unknown) => assert.equal(parseConfigAction(value), null, JSON.stringify(value));
-  ok({ action: "open-setting", requestId: "a" }); ok({ action: "ready", requestId: "a" }); ok({ action: "reload", requestId: "a" }); ok({ action: "pick-scope", requestId: "a" });
+  ok({ action: "ready", requestId: "a" }); ok({ action: "reload", requestId: "a" }); ok({ action: "pick-scope", requestId: "a" });
+  bad({ action: "open-setting", requestId: "a" });
   ok({ action: "set", requestId: "a", id: "x.y", layer: "global", value: true }); ok({ action: "set", requestId: "a", id: "x.y", layer: "project", value: ["a", "b"] });
   ok({ action: "set", requestId: "a", id: "x.y", layer: "global", value: 3 }); ok({ action: "set", requestId: "a", id: "x.y", layer: "global", value: "" });
   ok({ action: "reset", requestId: "a", id: "x", layer: "project" }); ok({ action: "open-config", requestId: "a", layer: "global" }); ok({ action: "open-config", requestId: "a", layer: "global", id: "x" });
@@ -205,12 +205,4 @@ test("an empty text save removes the key like OMP's own panel; a credential is n
   assert.equal(home.messages.find(message => message.type === "ompConfig:init")?.type === "ompConfig:init" && (home.messages[0] as { projectAvailable: boolean }).projectAvailable, false);
   await home.controller.handle({ action: "set", requestId: "h1", id: "lsp.formatOnWrite", layer: "project", value: true });
   assert.match(results(home).at(-1)!.message, /home folder/);
-});
-
-test("open-setting shows the setting that makes the editor use the ancestor .omp, without touching the files", async () => {
-  const r = rig();
-  await r.controller.handle({ action: "open-setting", requestId: "s1" });
-  assert.equal(r.ports.openedSetting, 1);
-  assert.deepEqual(results(r).at(-1), { type: "ompConfig:result", requestId: "s1", ok: true, message: "" });
-  assert.deepEqual(r.requests, []);
 });

@@ -16,8 +16,6 @@ import type { SettingsKind } from "../chat/settings-command";
 import type { SessionApply, SettingsMessage } from "../protocol/settings-messages";
 import { chooseSetting, pickFallbackChainKey, pickSettingsModel, pickSettingsThinking } from "./settings-pickers";
 import { modelKey, roleChange, selectorBase, selectorThinking } from "../protocol/settings-pick-items";
-import { ancestorProjectFolder, projectFolderFor } from "../omp/config-ancestor";
-import { NEAREST_OMP_SETTING } from "../protocol/omp-config-model";
 import { parseModelPickRequest, parseRoleAssignment } from "./settings-pick-requests";
 import type { PickEntry } from "../protocol/settings-pick-items";
 
@@ -76,17 +74,8 @@ export class SettingsEditors implements vscode.Disposable {
       }),
     );
   }
-  /**
-   * The folder an editor treats as the project, the same as the OMP settings editor's: with `ompDesk.ompSettings.useNearestAncestorOmpFolder` on, the nearest
-   * ancestor whose `.omp` is non-empty (a Unity project's repository root), else the folder itself. The setting is read for that folder.
-   */
-  async #projectFolder(folder: string | null): Promise<string | null> {
-    if (folder === null) return null;
-    const enabled = vscode.workspace.getConfiguration("ompDesk", vscode.Uri.file(folder)).get<boolean>("ompSettings.useNearestAncestorOmpFolder", false);
-    return projectFolderFor(folder, enabled);
-  }
   async open(kind: SettingsKind, requested: SettingsEditorContext): Promise<void> {
-    const binding: SettingsEditorContext = { ...requested, folder: await this.#projectFolder(requested.folder) };
+    const binding = requested;
     const key = editorKey(kind, binding);
     const existing = this.#editors.get(key);
     if (existing) {
@@ -145,7 +134,7 @@ export class SettingsEditors implements vscode.Disposable {
   }
   /** Moves an open editor to another scope of the same profile; an editor already showing that scope is revealed instead. */
   async #rebind(editor: Editor, chosen: string | null): Promise<string> {
-    const folder = await this.#projectFolder(chosen);
+    const folder = chosen;
     const binding: SettingsEditorContext = { folder, profile: editor.binding.profile, ...(editor.binding.executable ? { executable: editor.binding.executable } : {}) };
     const key = editorKey(editor.kind, binding);
     if (key === editor.key) return "";
@@ -212,10 +201,8 @@ export class SettingsEditors implements vscode.Disposable {
     const result = await this.#worker(editor, { action, provider });
     if (!record(result) || !record(result.snapshot) || !record(result.files)) throw new SettingsRefusal("OMP returned an invalid settings snapshot.");
     editor.receipt = result as unknown as ReadReceipt;
-    const folder = editor.binding.folder;
-    const ancestorProject = folder === null ? null : await ancestorProjectFolder(folder);
     const session = await this.#sessionApply(editor);
-    this.#post(editor, { type: "settings:snapshot", snapshot: editor.receipt.snapshot, configExists: { global: editor.receipt.files.global.exists, project: editor.receipt.files.project.exists }, ancestorProject, session });
+    this.#post(editor, { type: "settings:snapshot", snapshot: editor.receipt.snapshot, configExists: { global: editor.receipt.files.global.exists, project: editor.receipt.files.project.exists }, session });
   }
   /** For an editor opened from a running Chat: the session's current model and the default it would switch to. */
   async #sessionApply(editor: Editor): Promise<SessionApply | null> {
@@ -316,7 +303,6 @@ export class SettingsEditors implements vscode.Disposable {
           message = `Signing in to ${provider}: follow the login prompts. This page updates when it finishes.`;
           break;
         }
-        case "open-nearest-setting": await vscode.commands.executeCommand("workbench.action.openSettings", NEAREST_OMP_SETTING); break;
         case "open-config": {
           const scope = this.#scope(editor, raw.scope);
           const file = editor.receipt?.snapshot[scope === "global" ? "globalFile" : "projectFile"];
