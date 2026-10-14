@@ -102,7 +102,7 @@ An extension cannot rewrite `keybindings.json`. Three measures keep existing bin
 2. **Mirrored context keys.** The three keys that default keybindings use in `when` (`sessionMode`, `streaming`, `composerPopupOpen`) are also set under their old `omp.` names, so a user's own `when` clause keeps matching. Every other old context key is gone with no alias.
 3. **A one-time notice.** On the first activation of this release in a profile that already ran an earlier OMP Desk (its catalog exists), one information message says what was renamed and offers **Open keybindings.json**. A fresh install shows nothing. It covers the users the aliases cannot help (removal entries) and those who have not pressed a stale key yet. The marker (`ompDesk.renameNotice.v1` in global state) is written before the message appears.
 
-**Window.** Aliases, the context-key mirror and the old skip-shell entries are removed in the first minor release published on or after 2027-01-13 that is also at least the second minor release after the one that introduced them. The settings migration and the hidden deprecated keys last longer, because a user who skips releases would otherwise lose every setting: until the first minor release published on or after 2027-04-13. After that the old keys are plain unknown entries in the file, never deleted, and can be renamed by hand. Release counts alone are not used: this project shipped six releases in its first week, so a user who updates late jumps over several.
+**Window.** All of it is kept until **1.0.0** and removed in that release: the hidden command aliases, the context-key mirror, the old skip-shell entries, the settings migration and the hidden deprecated keys. The maintainer decided this (the first draft proposed 2027-01-13 and 2027-04-13); a rename compatibility that ends at a stated version is easier to explain than one that ends at a date, and no user loses a setting or a key binding before the 1.0 line. After 1.0.0 the old keys are plain unknown entries in the file, never deleted, and can be renamed by hand.
 
 ### Documentation
 
@@ -127,7 +127,7 @@ README, `CONTRIBUTING.md`, `.github/ISSUE_TEMPLATE/bug_report.yml`, `docs/archit
 - **Keybindings: only a notification**: every existing binding dies at the update. Kept as the one-time notice beside the aliases.
 - **Keybindings: contribute the aliases as hidden commands**: a contributed command appears in the keybindings editor, and a `commandPalette` `when: false` entry per command doubles the manifest for a temporary table.
 - **Mirror every old context key**: ~20 sites for keys no shipped binding used.
-- **A release count for the window**: see Window.
+- **A release count or dates for the window**: a user who updates late jumps over releases and dates; the maintainer chose a named end point, 1.0.0 (see Window).
 
 ## Risks and Open Questions
 
@@ -136,7 +136,7 @@ README, `CONTRIBUTING.md`, `.github/ISSUE_TEMPLATE/bug_report.yml`, `docs/archit
 - **Settings Sync.** A migration changes User settings on this machine; synced to a machine still on the previous release, the old key disappears there (the new key arrives, unknown to that release). Update all machines together.
 - **A dirty text model after a failed workspace write** is avoided for the read-only attribute; other failures (an ACL deny, a file locked by another program) can still leave it. Logged; nothing is lost.
 - **The dual-namespace `when` clause** stays: `activeWebviewPanelId =~ /^omp[.]session/` together with `ompDesk.sessionMode`. The contract test names it as deliberate.
-- **The removal dates** are proposed by this design; the maintainer sets the real ones at release time (the changelog states them).
+- **The removal point** is 1.0.0, decided by the maintainer. Until then the alias table, the mirror and the migration add startup work and 13 hidden keys to the manifest; each activation's scan is in memory and does no I/O when nothing is left to move.
 - **Marketplace.** Nothing in the manifest identity changes (`publisher.name`, `displayName`).
 
 ## Rollout and Verification
@@ -157,4 +157,4 @@ README, `CONTRIBUTING.md`, `.github/ISSUE_TEMPLATE/bug_report.yml`, `docs/archit
 
 - Reviewer: architect
 - Outcome: accepted after independent review
-- Notes: see ADR-0068; the five material findings (hidden deprecated settings and name lists, the stale-window caveat, foreign omp. names, dates instead of release counts, source-literal and upgrade tests) are resolved in this document.
+- Notes: see ADR-0068; the five material findings (hidden deprecated settings and name lists, the stale-window caveat, foreign omp. names, a compatibility window that ends at 1.0.0, source-literal and upgrade tests) are resolved in this document.

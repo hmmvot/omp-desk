@@ -15,9 +15,8 @@
  * - Three context keys that default keybindings used in `when` clauses are also published under their old
  *   names, so a user's own `when` clause keeps matching. No other old context key is kept.
  *
- * Everything here, its registration in `extension.ts` and the tests that name it are removed in the first
- * minor release published on or after 2027-01-13 that is also the second minor release after the one that
- * introduced them (ADR-0068). `legacy-settings.ts` lives longer.
+ * Everything here, its registration in `extension.ts` and the tests that name it are removed in the
+ * 1.0.0 release (ADR-0068), together with `legacy-settings.ts`.
  */
 
 /** Every command id the published 0.3.2 contributed, frozen: the new id of one is `ompDesk.` plus the rest. */
