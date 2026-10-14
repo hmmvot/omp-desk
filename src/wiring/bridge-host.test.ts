@@ -887,8 +887,12 @@ describe("routes", () => {
 		w.host.acknowledgeRoute(EDITOR, panel as never, { ...good, documentId: NEXT_DOCUMENT } as never);
 		w.host.acknowledgeRoute(EDITOR, panel as never, { ...good, routeGeneration: "z".repeat(32) } as never);
 		assert.deepEqual(endpoint.route!.acknowledgedKinds, []);
-		assert.ok(w.logged.includes(`tab ${EDITOR}: a route acknowledgement named another host generation or document`));
-		assert.ok(w.logged.includes(`tab ${EDITOR}: a route acknowledgement named a fenced generation`));
+		assert.deepEqual(
+			w.lines.filter(line => line.message === `tab ${EDITOR}: a route acknowledgement named another host generation or document`).map(line => line.level),
+			["debug", "debug"],
+			"the previous host's panel document answering its last offer is expected after a reload, not a warning",
+		);
+		assert.deepEqual(w.lines.filter(line => line.message === `tab ${EDITOR}: a route acknowledgement named a fenced generation`).map(line => line.level), ["warn"]);
 		assert.equal(panel!.posted.length, 0);
 	});
 

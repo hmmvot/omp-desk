@@ -814,7 +814,8 @@ export function registerBridgeHost<Tab extends BridgeTab>(deps: BridgeHostDeps<T
 		const route = bridgeRouteOf(tabId);
 		if (state === undefined || state.panel !== panel || route === null) return;
 		if (encodeHex(hostGeneration) !== message.hostGeneration || state.bridge?.documentId !== message.documentId) {
-			deps.log.warn(`tab ${tabId}: a route acknowledgement named another host generation or document`);
+			// Expected once per restored Chat after a reload: the panel still holds the previous host's document and answers its last offer; the new offer follows and is acknowledged normally.
+			deps.log.debug(`tab ${tabId}: a route acknowledgement named another host generation or document`);
 			return;
 		}
 		const alreadyAcknowledged = route.acknowledged;
