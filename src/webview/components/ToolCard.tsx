@@ -259,7 +259,8 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 		const target = compactTarget?.digest ?? metadata.target;
 		return <div ref={root} className="omp-tool omp-native-tool omp-native-tool--bare" data-tool-name={name} data-tool-family={metadata.route.name} data-tool-call-id={props.callId ?? result.toolCallId} data-tool-status={state}>
 			<div className="omp-tool-head omp-tool-head--static" title={[metadata.title, compactTarget?.detail ?? target, aux, "no output"].filter(Boolean).join(" · ")}>
-				{/* A settled call shows no mark: the announced status below says "complete". */}
+				{/* The empty twistie slot keeps the icon in the column of the rows that disclose. */}
+				<span className="codicon codicon-blank" aria-hidden="true" />
 				<span className={`codicon codicon-${TOOL_ICONS[metadata.route.name] ?? "tools"}`} aria-hidden="true" />
 				<span className="omp-tool-name">{metadata.title}</span>
 				{target && <span className="omp-tool-digest" title={compactTarget?.detail ?? target}><ToolTargetText category={metadata.category} paths={metadata.paths} text={displayText(target)} line={changedLine} revalidate={state} language={commandLanguage} closed={commandClosed} /></span>}
@@ -293,7 +294,7 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 	const title = [intent, view?.tooltip].filter(Boolean).join("\n");
 	if (plainRow) {
 		return <div ref={root} className="omp-tool omp-native-tool omp-native-tool--static" data-tool-name={name} data-tool-family={view?.family ?? metadata.route.name} data-tool-call-id={props.callId ?? result?.toolCallId} data-tool-status={state}>
-			<div className={`omp-tool-head omp-tool-head--static${aux ? " omp-tool-head--intent" : ""}${view?.inline ? " omp-tool-head--inline" : ""}`} title={title || undefined}>{face}</div>
+			<div className={`omp-tool-head omp-tool-head--static${aux ? " omp-tool-head--intent" : ""}${view?.inline ? " omp-tool-head--inline" : ""}`} title={title || undefined}><span className="codicon codicon-blank" aria-hidden="true" />{face}</div>
 		</div>;
 	}
 	return <div ref={root} className={`omp-tool omp-native-tool${failed ? " omp-tool--error" : ""}${state === "skipped" ? " omp-native-tool--skipped" : ""}`} data-tool-name={name} data-tool-family={view?.family ?? metadata.route.name} data-tool-call-id={props.callId ?? result?.toolCallId} data-tool-status={state} onKeyDown={event => {

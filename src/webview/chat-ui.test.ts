@@ -1077,6 +1077,8 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.ok(bare.height < 40, `one line, not three (${bare.height}px)`);
 			const gap = await ui.evaluate<number>(`(()=>{const tool=document.querySelector('[data-tool-call-id="bare-sleep"]');return tool.querySelector('.omp-tool-aux--intent').getBoundingClientRect().left-tool.querySelector('.omp-tool-digest').getBoundingClientRect().right})()`);
 			assert.ok(gap >= 0 && gap < 24, `intent follows the command directly (${gap}px)`);
+			const iconLeft = (id: string): string => `document.querySelector('[data-tool-call-id="${id}"] .omp-tool-head > .codicon:not(.codicon-chevron-right):not(.codicon-chevron-down):not(.codicon-blank)').getBoundingClientRect().left`;
+			assert.equal(await ui.evaluate<number>(`${iconLeft("bare-sleep")}-${iconLeft("bare-out")}`), 0, "a row with nothing to disclose keeps the twistie slot, so its icon stays in the column");
 			assert.equal(await ui.evaluate("document.querySelector('[data-tool-call-id=\"bare-fail\"] .omp-tool-head').tagName"), "BUTTON", "a non-zero exit keeps its details");
 			assert.equal(await ui.evaluate("document.querySelector('[data-tool-call-id=\"bare-out\"] .omp-tool-head').tagName"), "BUTTON", "real output keeps its disclosure");
 			await ui.evaluate("document.querySelector('[data-tool-call-id=\"bare-fail\"] .omp-tool-head').click()");

@@ -14,7 +14,7 @@ export const TOOL_STYLES = `
 .omp-native-tool .omp-tool-head { padding: 3px 8px; }
 .omp-native-tool .omp-tool-name { font-weight: 400; color: var(--omp-muted); }
 .omp-native-tool .omp-tool-digest { color: var(--vscode-foreground); }
-.omp-native-tool[data-tool-status="complete"] .omp-tool-head > .codicon:not(.codicon-chevron-right):not(.codicon-chevron-down) { font-size: 14px; color: var(--omp-muted); }
+.omp-native-tool[data-tool-status="complete"] .omp-tool-head > .codicon:not(.codicon-chevron-right):not(.codicon-chevron-down):not(.codicon-blank) { font-size: 14px; color: var(--omp-muted); }
 .omp-native-tool .omp-tool-digest .omp-file-link { color: var(--vscode-foreground); }
 .omp-native-tool .omp-tool-head:hover .omp-tool-digest .omp-file-link, .omp-native-tool .omp-tool-digest .omp-file-link:focus-visible { color: var(--vscode-textLink-foreground); }
 /* The row's muted words are read on the hover surface too: they take the foreground there. */
