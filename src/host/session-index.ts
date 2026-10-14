@@ -69,6 +69,7 @@ import type {
 } from "./session-model.ts";
 import { TabLifecycle } from "./tab-lifecycle.ts";
 import type { TabLifecycleLease } from "./tab-lifecycle.ts";
+import { compareReplyMarkers, laterReplyMarker } from "./session-unread.ts";
 import { mergeKeyedArray, sameRecord } from "./catalog-merge.ts";
 import type { RecordConflictDraft } from "./catalog-merge.ts";
 import type { CatalogRecordChange } from "./profile-catalog.ts";
@@ -770,6 +771,7 @@ export class SessionIndex {
 		const adopted: string[] = [];
 		const removed: string[] = [];
 		const kept: string[] = [];
+		let markersAhead = false;
 		this.#persistChain = this.#persistChain.then(() => {
 			let raw: unknown;
 			try {
@@ -790,12 +792,21 @@ export class SessionIndex {
 				}
 				if (this.#lifecycle.busy(shared.tabId) || this.#live.has(shared.tabId)) {
 					kept.push(shared.tabId);
+					// The reply identities are not a lifecycle fact: the window that runs a row must follow the
+					// window the user read it in, and must hand its own newer identity back to the catalog.
+					const completed = laterReplyMarker(null, existing.lastCompletedReplyId, shared.lastCompletedReplyId);
+					const seen = laterReplyMarker(null, existing.lastSeenReplyId, shared.lastSeenReplyId);
+					if (compareReplyMarkers(existing.lastCompletedReplyId, shared.lastCompletedReplyId)! > 0 ||
+						compareReplyMarkers(existing.lastSeenReplyId, shared.lastSeenReplyId)! > 0) markersAhead = true;
+					existing.lastCompletedReplyId = completed;
+					existing.lastSeenReplyId = seen;
 					continue;
 				}
-				this.#entries.set(
-					shared.tabId,
-					composeEntry(shared, { availability: existing.availability, detail: existing.detail }),
-				);
+				// An identity this window recorded and has not written yet must not be replaced by an older committed one.
+				const composed = composeEntry(shared, { availability: existing.availability, detail: existing.detail });
+				composed.lastCompletedReplyId = laterReplyMarker(existing.lastCompletedReplyId, existing.lastCompletedReplyId, shared.lastCompletedReplyId) ?? null;
+				composed.lastSeenReplyId = laterReplyMarker(existing.lastSeenReplyId, existing.lastSeenReplyId, shared.lastSeenReplyId) ?? null;
+				this.#entries.set(shared.tabId, composed);
 			}
 			for (const tabId of [...this.#entries.keys()]) {
 				if (present.has(tabId)) continue;
@@ -818,6 +829,9 @@ export class SessionIndex {
 			this.#nextOrdinal = Math.max(this.#nextOrdinal, raw.nextOrdinal);
 		});
 		await this.#persistChain;
+		// A reply identity this window holds and the catalog lost (a stale copy of the row was written over it) is
+		// written back, so the other windows show what the user saw here.
+		if (markersAhead) await this.#persist();
 		return { adopted, removed, kept };
 	}
 
@@ -3655,19 +3669,21 @@ export function mergeSessionIndexRecords(input: {
 		if (!mineIsLocalChange) {
 			// Untouched here: the committed row is the answer, and its absence is a
 			// committed deletion by another window — this window's stale copy must not
-			// resurrect the row it never changed.
-			if (theirs !== null) entries.push(stickyImportConflict(theirs, mine));
+			// resurrect the row it never changed. Only the reply identities may come from
+			// this side, when it holds a newer one than the committed row.
+			if (theirs !== null) entries.push(stickyImportConflict(withLaterReplyMarkers(theirs, mine, before), mine));
 			continue;
 		}
+		const merged = theirs === null ? mine : withLaterReplyMarkers(mine, theirs, before);
 		if (mineIsLocalChange && theirs !== null && !sameRecord(before, theirs)) {
 			conflicts.push({
 				identity: mine.tabId,
 				reason: "another window changed this row while this window changed it too; this window's own facts were applied",
-				retained: mine,
+				retained: merged,
 				rejected: theirs,
 			});
 		}
-		entries.push(stickyImportConflict(mine, theirs));
+		entries.push(stickyImportConflict(merged, theirs));
 	}
 	for (const candidate of latest.entries) {
 		const theirs = cloneSharedEntry(candidate);
@@ -3706,4 +3722,17 @@ export function mergeSessionIndexRecords(input: {
 function stickyImportConflict(mine: SharedEntry, theirs: SharedEntry | null): SharedEntry {
 	const marker = mine.importConflict ?? theirs?.importConflict ?? null;
 	return marker === null || marker === mine.importConflict ? mine : { ...mine, importConflict: marker };
+}
+
+/**
+ * `row` with the later of each reply identity of `row` and `other`.
+ *
+ * The row is merged as a whole, and a window holding a stale copy of it (it adopted the row, and a different window
+ * then recorded that the user read it) would otherwise take the identities back with every unrelated field it changes.
+ * An identity only advances, so the later one wins whichever side wrote it.
+ */
+function withLaterReplyMarkers(row: SharedEntry, other: SharedEntry, before: SharedEntry | null): SharedEntry {
+	const lastCompletedReplyId = laterReplyMarker(before?.lastCompletedReplyId, row.lastCompletedReplyId, other.lastCompletedReplyId);
+	const lastSeenReplyId = laterReplyMarker(before?.lastSeenReplyId, row.lastSeenReplyId, other.lastSeenReplyId);
+	return lastCompletedReplyId === row.lastCompletedReplyId && lastSeenReplyId === row.lastSeenReplyId ? row : { ...row, lastCompletedReplyId, lastSeenReplyId };
 }

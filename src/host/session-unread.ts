@@ -40,6 +40,38 @@ export function nextEventMarker(previous: string | null | undefined, now: number
 	return `${base}.${Number.isInteger(repeat) ? repeat + 1 : 1}`;
 }
 
+const EVENT_MARKER = /^event-([0-9a-z]+)(?:\.(\d+))?$/;
+
+/**
+ * The order of two reply identities: negative when `a` is the older, positive when it is the newer, `null` when the
+ * two cannot be ordered. An absent identity is older than any present one. Identities this module mints
+ * ({@link nextEventMarker}) order by their time and repeat count; any other spelling is only comparable when equal.
+ */
+export function compareReplyMarkers(a: string | null | undefined, b: string | null | undefined): number | null {
+	const left = a == null || a === "" ? null : a;
+	const right = b == null || b === "" ? null : b;
+	if (left === right) return 0;
+	if (left === null) return -1;
+	if (right === null) return 1;
+	const x = EVENT_MARKER.exec(left);
+	const y = EVENT_MARKER.exec(right);
+	if (x === null || y === null) return null;
+	const byTime = parseInt(x[1]!, 36) - parseInt(y[1]!, 36);
+	return byTime !== 0 ? byTime : Number(x[2] ?? 0) - Number(y[2] ?? 0);
+}
+
+/**
+ * One reply identity of a row two windows both hold. Both identities only ever advance (a later event replaces the
+ * newest-event identity; looking at the session moves the seen identity forward), so the later of the two is the
+ * answer, and a window that holds a stale copy of the row can never take a reply back. Identities that cannot be
+ * ordered fall back to a three-way rule: the side that changed it since `before` wins.
+ */
+export function laterReplyMarker(before: string | null | undefined, mine: string | null | undefined, theirs: string | null | undefined): string | null {
+	const order = compareReplyMarkers(mine, theirs);
+	if (order === null) return (mine === before ? theirs : mine) ?? null;
+	return (order >= 0 ? mine : theirs) ?? null;
+}
+
 /**
  * The markers after the agent finished a reply or asked a question. Looked at, the event
  * is read at once; otherwise the session turns (or stays) unread.

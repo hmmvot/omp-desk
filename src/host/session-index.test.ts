@@ -3671,3 +3671,94 @@ describe("atomic best-effort native conversation binding", () => {
 		await f.index.closeSession(f.a.tabId, { confirmedStopped: true });
 	});
 });
+
+// ── Reply identities across windows ─────────────────────────────────────────
+//
+// Regression (the Sessions row that stayed "Unread" however often it was viewed): the window that
+// adopted a row kept a stale copy of it, a window that did change an unrelated field of that row wrote the
+// copy back whole, and the catalog took back the identity of the reply the user had just read. The owner
+// window, which the user viewed the session in, kept its own newer copy and never wrote it again.
+
+describe("reply identities across windows", () => {
+	async function catalogWindows() {
+		const workspace = await tempWorkspace();
+		const open = async () => await createCatalogStore({ paths: catalogPaths(workspace.cwd), mergers: {
+			[SESSION_INDEX_STORAGE_KEY]: mergeSessionIndexRecords, [BROKER_SLOTS_KEY]: mergeBrokerSlotRecords,
+		} });
+		const ownerStore = await open();
+		const owner = indexFor(ownerStore, workspace.claimDir);
+		const file = await makeSessionFile(workspace.sessionDir, "S-READ", workspace.cwd);
+		const entry = await managedSession(owner, file, workspace.cwd);
+		await owner.recordConversationState(entry.tabId, { lastCompletedReplyId: "event-m1" });
+		return { ...workspace, open, ownerStore, owner, tabId: entry.tabId };
+	}
+
+	it("does not lose that the user read a reply to a window that holds a stale copy of the row", async () => {
+		const f = await catalogWindows();
+		const viewer = indexFor(await f.open(), f.claimDir);
+		const stale = indexFor(await f.open(), f.claimDir);
+		assert.equal(stale.get(f.tabId)?.lastSeenReplyId, null, "the stale window has not seen the read yet");
+
+		await viewer.recordConversationState(f.tabId, { lastSeenReplyId: "event-m1" });
+		await stale.setRunIntent(f.tabId, "stopped");
+
+		const committed = indexFor(await f.open(), f.claimDir).get(f.tabId);
+		assert.equal(committed?.runIntent, "stopped", "the stale window's own change is applied");
+		assert.equal(committed?.lastSeenReplyId, "event-m1", "the read is not taken back");
+		assert.equal(committed?.lastCompletedReplyId, "event-m1");
+	});
+
+	it("keeps a newer reply a stale window never saw, and a read the owner recorded meanwhile", async () => {
+		const f = await catalogWindows();
+		const stale = indexFor(await f.open(), f.claimDir);
+		await f.owner.recordConversationState(f.tabId, { lastCompletedReplyId: "event-m2", lastSeenReplyId: "event-m2" });
+		await stale.setRunIntent(f.tabId, "stopped");
+
+		const committed = indexFor(await f.open(), f.claimDir).get(f.tabId);
+		assert.equal(committed?.lastCompletedReplyId, "event-m2");
+		assert.equal(committed?.lastSeenReplyId, "event-m2");
+	});
+
+	it("lets the window that runs the row follow a read recorded in another window", async () => {
+		const f = await catalogWindows();
+		const launched = recordingLauncher({ state: "running", host: runningHandle() });
+		assert.equal((await f.owner.restoreAll({ reconciler: noRecordedHost, launcher: launched.launcher })).restored.length, 1);
+		assert.equal(f.owner.get(f.tabId)?.lastSeenReplyId, null);
+		try {
+			const viewerStore = await f.open();
+			const viewer = indexFor(viewerStore, f.claimDir);
+			await viewer.recordConversationState(f.tabId, { lastSeenReplyId: "event-m1" });
+
+			assert.ok(await f.ownerStore.refresh(), "the owner's catalog sees the commit");
+			const refresh = await f.owner.refreshFromStore();
+			assert.deepEqual(refresh.kept, [f.tabId], "the row is the owner's: its lifecycle facts are not adopted");
+			assert.equal(f.owner.get(f.tabId)?.lastSeenReplyId, "event-m1", "but the reply the user read elsewhere is");
+		} finally {
+			await f.owner.closeSession(f.tabId, { confirmedStopped: true });
+		}
+	});
+
+	it("writes back a read the catalog lost, from the window that recorded it and runs the row", async () => {
+		const workspace = await tempWorkspace();
+		const store = new TestStore();
+		const owner = indexFor(store, workspace.claimDir);
+		const file = await makeSessionFile(workspace.sessionDir, "S-READ-LOST", workspace.cwd);
+		const entry = await managedSession(owner, file, workspace.cwd);
+		const launched = recordingLauncher({ state: "running", host: runningHandle() });
+		assert.equal((await owner.restoreAll({ reconciler: noRecordedHost, launcher: launched.launcher })).restored.length, 1);
+		try {
+			await owner.recordConversationState(entry.tabId, { lastCompletedReplyId: "event-m1", lastSeenReplyId: "event-m1" });
+			const lost = structuredClone(store.value) as { entries: { tabId: string; lastSeenReplyId: string | null }[] };
+			lost.entries.find(row => row.tabId === entry.tabId)!.lastSeenReplyId = null;
+			store.value = lost;
+
+			await owner.refreshFromStore();
+
+			assert.equal(owner.get(entry.tabId)?.lastSeenReplyId, "event-m1", "the owner keeps what the user read");
+			const written = store.value as { entries: { tabId: string; lastSeenReplyId: string | null }[] };
+			assert.equal(written.entries.find(row => row.tabId === entry.tabId)?.lastSeenReplyId, "event-m1", "and the catalog has it again");
+		} finally {
+			await owner.closeSession(entry.tabId, { confirmedStopped: true });
+		}
+	});
+});

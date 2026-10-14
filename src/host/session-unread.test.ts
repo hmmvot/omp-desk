@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { isLookedAt, isUnread, markersAfterEvent, markersAfterViewing, nextEventMarker, type ReplyMarkers } from "./session-unread.ts";
+import { compareReplyMarkers, isLookedAt, isUnread, laterReplyMarker, markersAfterEvent, markersAfterViewing, nextEventMarker, type ReplyMarkers } from "./session-unread.ts";
 
 const READ: ReplyMarkers = { lastCompletedReplyId: null, lastSeenReplyId: null };
 
@@ -57,5 +57,28 @@ describe("session unread marker", () => {
 		const stored = JSON.parse(JSON.stringify(markersAfterEvent(READ, false, 42))) as ReplyMarkers;
 		assert.equal(isUnread(stored), true);
 		assert.equal(isUnread(markersAfterViewing(stored)!), false);
+	});
+
+	it("orders the identities it mints by time and repeat, and nothing else", () => {
+		const a = nextEventMarker(null, 5_000);
+		const b = nextEventMarker(a, 5_000);
+		const c = nextEventMarker(b, 6_000);
+		assert.ok(compareReplyMarkers(a, b)! < 0 && compareReplyMarkers(b, a)! > 0);
+		assert.ok(compareReplyMarkers(b, c)! < 0);
+		assert.equal(compareReplyMarkers(a, a), 0);
+		assert.ok(compareReplyMarkers(null, a)! < 0 && compareReplyMarkers(a, null)! > 0 && compareReplyMarkers(null, undefined) === 0);
+		assert.equal(compareReplyMarkers("reply-1", "reply-2"), null);
+		assert.equal(compareReplyMarkers("reply-1", a), null);
+	});
+
+	it("lets the later identity win whichever side holds it, and the side that changed an unordered one", () => {
+		const old = nextEventMarker(null, 5_000);
+		const next = nextEventMarker(old, 6_000);
+		assert.equal(laterReplyMarker(old, old, next), next, "a stale copy does not take a reply back");
+		assert.equal(laterReplyMarker(old, next, old), next);
+		assert.equal(laterReplyMarker(null, null, next), next);
+		assert.equal(laterReplyMarker(null, next, null), next);
+		assert.equal(laterReplyMarker("reply-1", "reply-1", "reply-2"), "reply-2", "unordered: the side that did not change it yields");
+		assert.equal(laterReplyMarker("reply-1", "reply-3", "reply-2"), "reply-3");
 	});
 });
