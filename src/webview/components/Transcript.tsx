@@ -109,6 +109,8 @@ export interface TranscriptProps {
 	/** Derived from `rewind`: cards after the picked prompt (dimmed), and the branch points shown after each card. */
 	rewindDimmed?: ReadonlySet<string>;
 	branchesByCard?: ReadonlyMap<string, readonly BranchPoint[]>;
+	/** Counts the user's own submissions from the composer; each increase returns the view to the tail and follows it again, as Jump to latest does. */
+	followLatest?: number;
 }
 
 export interface TranscriptRewind {
@@ -478,6 +480,15 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		return () => { controller.dispose(); controllerRef.current = null; };
 	}, [namespace, props.depth]);
 	useLayoutEffect(() => controllerRef.current?.layout(), [rows, overview, phase, props.toolCallDetail, props.pagedHistory, disclosureRevision]);
+	// The reader's own prompt (Send, a steer, a follow-up) must never leave itself and its reply off-screen: re-attach to the tail.
+	const followedLatest = useRef(props.followLatest ?? 0);
+	useLayoutEffect(() => {
+		const requested = props.followLatest ?? 0;
+		if (requested === followedLatest.current) return;
+		followedLatest.current = requested;
+		setPinnedTopId(null); setPageEndId(null); setHeldPageEndId(null);
+		controllerRef.current?.jump();
+	}, [props.followLatest]);
 	// A newly picked rewind target is brought into view, loading it into the rendered window first when needed.
 	useLayoutEffect(() => {
 		if (rewindSelected === null) return;

@@ -311,12 +311,14 @@ interface RecoverableMessage {
 	lostAttachments?: number;
 }
 
-export function Composer({ client, snapshot, progressAvailable = true, onRewind }: {
+export function Composer({ client, snapshot, progressAvailable = true, onRewind, onSubmitted }: {
 	client: ChatClient;
 	snapshot: ChatSnapshot;
 	progressAvailable?: boolean;
 	/** Open Rewind (`Esc` `Esc` in an empty idle composer, or `/rewind`); absent where Rewind is not offered. */
 	onRewind?: () => void;
+	/** The user submitted a message (a prompt, a steer or a follow-up, or a Commands row that sends one); the transcript goes back to the tail. */
+	onSubmitted?: () => void;
 }): ReactNode {
 	const [text, setText] = useState("");
 	/** Every image attached to this draft, including ones whose marker was deleted and could still come back through Undo. */
@@ -785,6 +787,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind 
 			const revision = draftRevisionRef.current;
 			pendingOriginalRef.current = { text: compacted.text, images: wire };
 			sendingRef.current = true;
+			onSubmitted?.();
 			setSending(true);
 			const result = await (!running
 				? client.sendPrompt(draft, payload)
@@ -818,7 +821,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind 
 			setAttachError(null);
 			setText("");
 		},
-		[canPrompt, client, onRewind, publishImages, publishRecoverable, readCapture, request, snapshot.commands],
+		[canPrompt, client, onRewind, onSubmitted, publishImages, publishRecoverable, readCapture, request, snapshot.commands],
 	);
 
 	/** Why the Commands list cannot offer a command now; each row adds its own rule (`lib/command-list.ts`). */
@@ -870,13 +873,14 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind 
 		textareaRef.current?.focus();
 		setSendError(null);
 		void (async () => {
+			onSubmitted?.();
 			const running = client.getSnapshot().working;
 			const result = await (running ? client.sendSteer(plan.text) : client.sendPrompt(plan.text));
 			if (!mountedRef.current) return;
 			if (!result.ok) { setSendError(result.reason); return; }
 			if (!running && result.explained !== true && nativeSettingsCommand(plan.text) === null) setSubmitted(true);
 		})();
-	}, [canPrompt, client, onRewind, request]);
+	}, [canPrompt, client, onRewind, onSubmitted, request]);
 
 	// A complete capture stays immutable through the host's confirmation and replacement.
 	useEffect(() => provideDraftHandoff({

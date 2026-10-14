@@ -3727,6 +3727,55 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		await t.test("a message the user sends from the composer returns a scrolled-up transcript to the tail and follows it: a prompt, a steer and a queued follow-up", async () => {
+			await reset("send-follows-tail");
+			await ui.evaluate(`(()=>{
+			 const row=(id,message)=>({type:'message',id,parentId:null,timestamp:new Date(1000).toISOString(),message});
+			 window.mk=(i)=>i%2===0?row('u'+i,{role:'user',timestamp:1000+i,content:'Prompt '+i}):row('a'+i,{role:'assistant',model:'m',timestamp:1000+i,stopReason:'stop',content:[{type:'text',text:'Reply '+i+'\\n\\n'+Array.from({length:6},(_,line)=>'Line '+i+'.'+line+' of readable history text.').join('\\n\\n')}]});
+			 window.hist=Array.from({length:14},(_,i)=>window.mk(i));
+			 window.ui.push({entries:window.hist,durableCount:window.hist.length,working:false,settled:true});
+			})()`);
+			await ui.settleGeometry(".omp-transcript");
+			const atTail = "(()=>{const r=document.querySelector('.omp-transcript');return Math.abs(r.scrollHeight-r.clientHeight-r.scrollTop)<=1})()";
+			const visible = (text: string) => `(()=>{const root=document.querySelector('.omp-transcript').getBoundingClientRect();return [...document.querySelectorAll('.omp-transcript *')].some(el=>el.children.length===0&&el.textContent.includes(${JSON.stringify(text)})&&el.getBoundingClientRect().bottom>root.top&&el.getBoundingClientRect().top<root.bottom)})()`;
+			const detach = async () => {
+				const point = await ui.evaluate<{ x: number; y: number }>("(()=>{const rect=document.querySelector('.omp-transcript').getBoundingClientRect();return{x:rect.left+rect.width/2,y:rect.top+rect.height/2}})()");
+				await ui.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y });
+				await ui.call("Input.dispatchMouseEvent", { type: "mouseWheel", x: point.x, y: point.y, deltaX: 0, deltaY: -2000 });
+				await ui.wait("document.querySelector('.omp-jump-latest')");
+				await ui.evaluate("new Promise(r=>setTimeout(r,600))");
+				await ui.settleGeometry(".omp-transcript");
+				assert.equal(await ui.evaluate(atTail), false, "scrolled away from the tail");
+			};
+			let next = 14;
+			for (const { kind, working, button } of [{ kind: "prompt", working: false, button: "Send message" }, { kind: "steer", working: true, button: "Steer the running turn" }, { kind: "follow-up", working: true, button: "Queue follow-up" }]) {
+				await ui.evaluate(`window.ui.push({working:${working},settled:${!working}})`);
+				await detach();
+				// New output alone leaves the reader where they are.
+				const held = await ui.evaluate<number>("document.querySelector('.omp-transcript').scrollTop");
+				await ui.evaluate(`window.hist=[...window.hist,window.mk(${next}),window.mk(${next + 1})];window.ui.push({entries:window.hist,durableCount:window.hist.length})`);
+				await ui.evaluate("new Promise(r=>setTimeout(r,400))");
+				assert.ok(Math.abs(await ui.evaluate<number>("document.querySelector('.omp-transcript').scrollTop") - held) <= 1, "output arriving while detached keeps the reading position");
+				assert.equal(await ui.evaluate("Boolean(document.querySelector('.omp-jump-latest'))"), true);
+				next += 2;
+				const sends = await ui.evaluate<number>("window.ui.sends().length");
+				await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+				await ui.call("Input.insertText", { text: `Typed while scrolled up ${kind}` });
+				await ui.evaluate(`document.querySelector('[aria-label="${button}"]').click()`);
+				await ui.wait(`window.ui.sends().length===${sends + 1}`);
+				await ui.wait("!document.querySelector('.omp-jump-latest')");
+				// The reply to it arrives after the send: the view follows it.
+				await ui.evaluate(`window.hist=[...window.hist,${JSON.stringify({ type: "message", id: `mine${next}`, parentId: null, timestamp: new Date(1000).toISOString(), message: { role: "user", timestamp: 2000 + next, content: `Typed while scrolled up ${kind}` } })},window.mk(${next + 1})];window.ui.push({entries:window.hist,durableCount:window.hist.length})`);
+				await ui.settleGeometry(".omp-transcript");
+				assert.equal(await ui.evaluate(atTail), true, `${kind}: back at the tail`);
+				assert.equal(await ui.evaluate("Boolean(document.querySelector('.omp-jump-latest'))"), false);
+				assert.equal(await ui.evaluate(visible(`Typed while scrolled up ${kind}`)), true, `${kind}: the user's own message is on screen`);
+				assert.equal(await ui.evaluate(visible(`Reply ${next + 1}`)), true, "the reply is on screen");
+				next += 2;
+			}
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("IRC messages are collapsed tool-style rows that never merge into assistant prose", async () => {
 			await reset("irc-row");
 			await ui.evaluate(`(()=>{

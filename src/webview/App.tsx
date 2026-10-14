@@ -135,6 +135,9 @@ function useRouteKind(): GuestRouteKind {
 
 function ChatView({ client }: { client: ChatClient }): ReactNode {
 	const snapshot = useChatSnapshot(client);
+	// Counts the reader's own submissions: the transcript returns to the tail and follows it again for each one.
+	const [followLatest, setFollowLatest] = useState(0);
+	const followOwnSubmit = useCallback(() => setFollowLatest(count => count + 1), []);
 	const [unansweredNative, setUnansweredNative] = useState<string | null>(null);
 	useEffect(() => {
 		if (snapshot.code === "state-failed" && snapshot.epoch !== null) setUnansweredNative(snapshot.epoch.nonce);
@@ -281,6 +284,7 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 						waitingForAnswer={snapshot.uiRequest !== null}
 						pagedHistory={pagedHistory}
 						rewind={transcriptRewind}
+						followLatest={followLatest}
 					/>
 				</div>
 			</div>
@@ -300,7 +304,7 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 					onCancel={() => { dispatchRewind({ type: "cancel" }); requestPanelAction("focus-composer"); }}
 					onUndo={() => { if (undo !== null) void navigate("undo", undo.from, snapshot.leafId, false); }}
 					onDismissNotice={() => setRewindNotice(null)} />
-				<Composer client={client} snapshot={shown} progressAvailable={!workUnknown} onRewind={startRewind} />
+				<Composer client={client} snapshot={shown} progressAvailable={!workUnknown} onRewind={startRewind} onSubmitted={followOwnSubmit} />
 			</div>
 			</FileLinksProvider>
 			</ArtifactEpochContext.Provider>
