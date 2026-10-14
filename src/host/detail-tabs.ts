@@ -49,6 +49,8 @@ export interface DetailTabsHost {
 	createPanel(conversation: string, target: DetailTarget): DetailPanel;
 	attachPage(conversation: string, page: ChatPage): () => void;
 	handleMessage(conversation: string, message: ChatWebviewMessage, origin: ChatPage): Promise<ChatCommandOutcome>;
+	/** Open, or reveal, the diagram tab of a mermaid source a detail tab's transcript could not draw inline. */
+	openMermaid(source: string): void;
 	/** Open a re-validated `http(s)` URL the user clicked; reports its own failure to the user. */
 	openUrl(url: string, mode: WebLinkMode): Promise<void>;
 	log(message: string): void;
@@ -157,6 +159,10 @@ export class DetailTabs {
 		if (message.type === "omp:open-detail") {
 			const target: DetailTarget = message.kind === "agent" ? { kind: "agent", agentId: message.agentId } : { kind: message.kind };
 			this.#host.log(`detail ${tab.page.id}: detail tab ${target.kind} was ${this.open(tab.conversation, target)}`);
+			return;
+		}
+		if (message.type === "omp:open-mermaid") {
+			this.#host.openMermaid(message.source);
 			return;
 		}
 		if (message.type === "omp:terminal-link-open") {

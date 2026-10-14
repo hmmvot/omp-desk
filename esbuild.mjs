@@ -2,6 +2,7 @@
 //
 //   src/extension.ts      -> out/extension.js          (VS Code extension host, CommonJS, `vscode` external)
 //   src/webview/main.tsx  -> media/guest.js            (browser chat editor, IIFE loaded by the WebviewPanel)
+//   src/webview/mermaid-preview/main.ts -> media/mermaid-preview.js (page of the diagram tab; loads media/mermaid.js)
 //   src/webview/mermaid/entry.ts -> media/mermaid.js    (diagram renderer the chat page loads lazily, IIFE; options in scripts/mermaid-bundle.mjs)
 //   src/webview/shell/main.tsx -> media/shell.js       (browser folder-shell editor, IIFE)
 //   src/omp/host-control.ts -> out/omp-host-control.mjs (native OMP extension loaded with `omp -e`, ESM factory)
@@ -19,7 +20,7 @@ import esbuild from "esbuild";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import process from "node:process";
-import { mermaidBuildOptions } from "./scripts/mermaid-bundle.mjs";
+import { mermaidBuildOptions, mermaidPreviewBuildOptions } from "./scripts/mermaid-bundle.mjs";
 
 const watch = process.argv.includes("--watch");
 /** Build only the broker tree: useful while working on the PTY surface alone. */
@@ -68,6 +69,11 @@ const targets = [
     // It is a script of its own so the 3.4 MB of mermaid never loads for a page that has no diagram.
     name: "mermaid",
     options: mermaidBuildOptions,
+  },
+  {
+    // The diagram tab's page script ("Open diagram in a tab"); its document loads media/mermaid.js before it.
+    name: "mermaid-preview",
+    options: mermaidPreviewBuildOptions,
   },
   {
     // The folder-shell editor's renderer: the same Webview rules as the chat guest, a
@@ -316,7 +322,7 @@ async function copyCodicons() {
  */
 function assertBundleBoundary(name, inputs) {
   const bundled = inputs.map(input => input.replaceAll("\\", "/"));
-  const stray = name === "guest"
+  const stray = name === "guest" || name === "mermaid-preview"
     ? bundled.filter(input => input.includes("node_modules/mermaid/") || input.includes("node_modules/@mermaid-js/"))
     : bundled.filter(input => input.includes("node_modules/elkjs/") || input.includes("node_modules/katex/"));
   if (stray.length > 0) throw new Error(`${name} bundle pulled in files it must not contain (${stray.length}), first: ${stray[0]}`);
@@ -333,7 +339,7 @@ async function main() {
     return;
   }
   for (const { name, options } of selected) {
-    const result = await esbuild.build({ ...shared, ...options, metafile: name === "guest" || name === "mermaid" });
+    const result = await esbuild.build({ ...shared, ...options, metafile: name === "guest" || name === "mermaid" || name === "mermaid-preview" });
     if (result.metafile) assertBundleBoundary(name, Object.keys(result.metafile.inputs));
     console.log(`built ${name} -> ${options.outfile}`);
   }

@@ -122,6 +122,7 @@ function world(overrides: Partial<GuestDispatcherDeps<FakeTab>> = {}) {
 	const viewOnly: { tabId: string; input: Record<string, unknown> }[] = [];
 	const routesAttached: unknown[][] = [];
 	const detailOpens: { conversation: string; target: unknown }[] = [];
+	const mermaidOpens: string[] = [];
 	const chatActions: unknown[][] = [];
 	const terminalMessages: { slot: string; type: string }[] = [];
 	const terminalCopies: { tab: FakeTab; reply: Parameters<GuestDispatcherDeps<FakeTab>["acceptTerminalCopy"]>[1] }[] = [];
@@ -154,6 +155,7 @@ function world(overrides: Partial<GuestDispatcherDeps<FakeTab>> = {}) {
 			showViewOnly: async (tabId: string, input: Record<string, unknown>) => { viewOnly.push({ tabId, input }); state.kind = "view-only"; },
 		}) as never,
 		detailTabs: () => ({ open: (conversation, target) => { detailOpens.push({ conversation, target }); return "created"; } }),
+		mermaidPreviews: () => ({ open: source => { mermaidOpens.push(source); return "created"; } }),
 		panelChatPage: (tab, panel) => ({ id: `page-of-${tab.slotId}`, post: () => "sent", panel }) as never,
 		attachChatRoute: (slot, force) => { calls.push(`attachChatRoute:${slot}:${force}`); },
 		attachChatRoutes: (tabId, force) => { routesAttached.push([tabId, force]); },
@@ -191,7 +193,7 @@ function world(overrides: Partial<GuestDispatcherDeps<FakeTab>> = {}) {
 		return { tab, ...page };
 	};
 	return {
-		state, dispatcher, deps, calls, logged, infos, warnings, errors, chatMessages, remembered, viewOnly, routesAttached, detailOpens,
+		state, dispatcher, deps, calls, logged, infos, warnings, errors, chatMessages, remembered, viewOnly, routesAttached, detailOpens, mermaidOpens,
 		chatActions, terminalMessages, terminalCopies, modeSwitches, controlRequests, pinned, acknowledged, clicks, editor,
 	};
 }
@@ -332,6 +334,16 @@ describe("each message reaches its owner", () => {
 		w.state.kind = "live";
 		w.dispatcher.openDetailTab(TAB, "terminal", { type: "omp:open-detail", kind: "agents" });
 		assert.equal(w.detailOpens.length, 2);
+	});
+
+	it("opens a diagram tab for the source a chat page sends, and drops one the parser refuses", async () => {
+		const w = world();
+		const live = w.editor();
+		await w.dispatcher.handleMessage(index, SLOT, live.panel, { type: "omp:open-mermaid", source: "flowchart TD\n A-->B" });
+		await w.dispatcher.handleMessage(index, SLOT, live.panel, { type: "omp:open-mermaid", source: "x".repeat(50_001) });
+		await w.dispatcher.handleMessage(index, SLOT, live.panel, { type: "omp:open-mermaid", source: "" });
+		assert.deepEqual(w.mermaidOpens, ["flowchart TD\n A-->B"]);
+		assert.deepEqual(w.logged, ["diagram tab was created", "slot slot-1: ignored an unrecognized guest message", "slot slot-1: ignored an unrecognized guest message"]);
 	});
 });
 
@@ -814,7 +826,7 @@ describe("stale host-control facts", () => {
 });
 
 describe("the detail tabs of a previous host lifetime", () => {
-	it("closes every detail tab, whether it carries its own view type, the one of the release before ADR-0068 or the bridge's prefix, and no other", async () => {
+	it("closes every detail and diagram tab, whether it carries its own view type, the one of the release before ADR-0068 or the bridge's prefix, and no other", async () => {
 		const closed: unknown[][] = [];
 		const close = stub.window.tabGroups.close;
 		stub.window.tabGroups.close = async (...args: unknown[]) => { closed.push(args); return true; };
@@ -824,11 +836,13 @@ describe("the detail tabs of a previous host lifetime", () => {
 			const prefixed = { label: "bridged", input: new stub.TabInputWebview(`${TAB_INPUT_VIEW_TYPE_PREFIX}${DETAIL_VIEW_TYPE}`) };
 			const legacy = { label: "legacy", input: new stub.TabInputWebview(LEGACY_DETAIL_VIEW_TYPE) };
 			const legacyPrefixed = { label: "legacy bridged", input: new stub.TabInputWebview(`${TAB_INPUT_VIEW_TYPE_PREFIX}${LEGACY_DETAIL_VIEW_TYPE}`) };
+			const diagram = { label: "diagram", input: new stub.TabInputWebview("ompDesk.mermaidPreview") };
+			const diagramPrefixed = { label: "diagram bridged", input: new stub.TabInputWebview(`${TAB_INPUT_VIEW_TYPE_PREFIX}ompDesk.mermaidPreview`) };
 			const session = { label: "session", input: new stub.TabInputWebview("omp.session") };
 			const text = { label: "text", input: new stub.TabInputText(stub.Uri.file("/a")) };
-			stub.window.tabGroups.all = [{ viewColumn: 1, tabs: [detail, legacy, session, text], activeTab: undefined }, { viewColumn: 2, tabs: [prefixed, legacyPrefixed], activeTab: undefined }] as never;
+			stub.window.tabGroups.all = [{ viewColumn: 1, tabs: [detail, legacy, diagram, session, text], activeTab: undefined }, { viewColumn: 2, tabs: [prefixed, legacyPrefixed, diagramPrefixed], activeTab: undefined }] as never;
 			await registerGuestDispatcher(world().deps).closeLeftoverDetailTabs();
-			assert.deepEqual(closed, [[[detail, legacy, prefixed, legacyPrefixed], true]]);
+			assert.deepEqual(closed, [[[detail, legacy, diagram, prefixed, legacyPrefixed, diagramPrefixed], true]]);
 			closed.length = 0;
 			stub.window.tabGroups.all = [{ viewColumn: 1, tabs: [session, text], activeTab: undefined }] as never;
 			await registerGuestDispatcher(world().deps).closeLeftoverDetailTabs();

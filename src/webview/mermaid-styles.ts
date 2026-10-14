@@ -21,5 +21,8 @@ export const MERMAID_STYLES = `
 .vscode-high-contrast .omp-mermaid-frame, .vscode-high-contrast-light .omp-mermaid-frame { border-color: var(--vscode-contrastBorder); }
 .vscode-high-contrast .omp-mermaid-tab, .vscode-high-contrast-light .omp-mermaid-tab { border-color: var(--vscode-contrastBorder); }
 /* Why a block is still code: one muted line under it. */
-.omp-mermaid-note { margin: -2px 0 8px; color: var(--omp-muted); font-size: 11px; }
+.omp-mermaid-note { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin: -2px 0 8px; color: var(--omp-muted); font-size: 11px; }
+.omp-mermaid-open { padding: 0; border: 0; background: none; color: var(--vscode-textLink-foreground); font: inherit; cursor: pointer; text-decoration: underline; }
+.omp-mermaid-open:hover { color: var(--vscode-textLink-activeForeground, var(--vscode-textLink-foreground)); }
+.omp-mermaid-open:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
 `;

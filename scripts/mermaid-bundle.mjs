@@ -26,3 +26,19 @@ export const mermaidBuildOptions = {
   // Nothing debugs the renderer through a map, and a map of this bundle is about ten times its size.
   sourcemap: false,
 };
+
+/**
+ * The diagram tab's own page script, `media/mermaid-preview.js`: the small page around the renderer (a status line, a toolbar, the
+ * image). It does not contain mermaid; its document loads `media/mermaid.js` first.
+ * @type {import("esbuild").BuildOptions}
+ */
+export const mermaidPreviewBuildOptions = {
+  entryPoints: [fileURLToPath(new URL("../src/webview/mermaid-preview/main.ts", import.meta.url))],
+  outfile: "media/mermaid-preview.js",
+  bundle: true,
+  platform: "browser",
+  format: "iife",
+  target: "es2022",
+  define: { "process.env.NODE_ENV": '"production"' },
+  sourcemap: false,
+};

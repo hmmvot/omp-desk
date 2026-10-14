@@ -17,6 +17,7 @@ import type { ChatCommandOutcome, ChatPage } from "../host/chat-runtime.ts";
 import type { ConversationPort } from "../runtime/session-runtime.ts";
 import { DETAIL_VIEW_TYPE, LEGACY_DETAIL_VIEW_TYPE } from "../host/detail-tabs.ts";
 import type { DetailTabs } from "../host/detail-tabs.ts";
+import { MERMAID_PREVIEW_VIEW_TYPE, type MermaidPreviews } from "../host/mermaid-previews.ts";
 import type { SessionIndex } from "../host/session-index.ts";
 import type { ChatWebviewMessage } from "../protocol/chat-messages.ts";
 import type { DetailTarget } from "../protocol/detail-target.ts";
@@ -62,8 +63,8 @@ export const CHAT_COMMAND_TYPES: ReadonlySet<string> = new Set([
 
 /** How long a page is given to report its selection before the symbol search opens empty. */
 const SELECTION_REQUEST_TIMEOUT_MS = 500;
-/** The detail tab types a sweep closes at activation: the current one and the one before ADR-0068. */
-const DETAIL_VIEW_TYPES: readonly string[] = [DETAIL_VIEW_TYPE, LEGACY_DETAIL_VIEW_TYPE];
+/** The tab types a sweep closes at activation: the detail tab (current and before ADR-0068) and the diagram tab, none of which a restart revives. */
+const DETAIL_VIEW_TYPES: readonly string[] = [DETAIL_VIEW_TYPE, LEGACY_DETAIL_VIEW_TYPE, MERMAID_PREVIEW_VIEW_TYPE];
 
 /** How long one document is given to hand its unsent draft over before it is replaced. */
 const DRAFT_CAPTURE_TIMEOUT_MS = 1_500;
@@ -124,6 +125,8 @@ export interface GuestWindowFacts<Tab extends GuestTab> {
 export interface GuestChatPort<Tab extends GuestTab> {
 	conversations(): Pick<ConversationPort, "command" | "stateOf" | "kindOf" | "showViewOnly">;
 	detailTabs(): Pick<DetailTabs, "open">;
+	/** The diagram tabs ("Open diagram in a tab"). */
+	mermaidPreviews(): Pick<MermaidPreviews, "open">;
 	/** The page object the conversation answers one panel through. */
 	panelChatPage(state: Tab, panel: vscode.WebviewPanel): ChatPage;
 	/** Send the conversation to the editor slot's page (or, with `force`, send it again). */
@@ -221,6 +224,8 @@ export interface GuestDispatcher<Tab extends GuestTab = GuestTab> {
 	releaseCarriedDraft(carried: CarriedDraft<Tab> | null): void;
 	/** Open, or reveal, one detail tab of the conversation an editor shows. */
 	openDetailTab(tabId: string, mode: SessionViewMode, request: GuestOpenDetailMessage): void;
+	/** Open, or reveal, the diagram tab of a mermaid source. Presentation only: any editor, active or passive, may ask. */
+	openMermaidTab(source: string): void;
 	/** Close the detail tabs a previous host lifetime left behind. */
 	closeLeftoverDetailTabs(): Promise<void>;
 	/** Show why a tab has no live conversation. */
@@ -424,6 +429,10 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 		deps.log(`tab ${tabId}: detail tab ${target.kind} was ${outcome}`);
 	}
 
+	function openMermaidTab(source: string): void {
+		deps.log(`diagram tab was ${deps.mermaidPreviews().open(source)}`);
+	}
+
 	/**
 	 * Guest messages are untrusted UI input. The panel may send chat commands and request one
 	 * of the explicitly bounded host-control actions, but it cannot supply a pipe identity, a
@@ -479,6 +488,10 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 		}
 		if (parsed.type === "omp:open-detail") {
 			openDetailTab(tabId, own.mode, parsed);
+			return;
+		}
+		if (parsed.type === "omp:open-mermaid") {
+			openMermaidTab(parsed.source);
 			return;
 		}
 		// File links are presentation in either mode: the Chat validates and opens the same file references as the Terminal.
@@ -625,6 +638,7 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 		carryDraftFrom,
 		releaseCarriedDraft,
 		openDetailTab,
+		openMermaidTab,
 		closeLeftoverDetailTabs,
 		presentUnavailable,
 		invalidateControls: invalidateGuestControls,

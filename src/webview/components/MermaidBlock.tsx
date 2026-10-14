@@ -12,8 +12,11 @@
  * - not the assistant's own reply text (a user message, a tool result, thinking): the plain code block, nothing drawn.
  */
 import { useContext, useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { guestTransport } from "../bridge.ts";
 import { mermaidSourceRefusal } from "../mermaid/contract.ts";
-import { mermaidKind, mermaidPreference, mermaidVersion, peekMermaid, requestMermaid, setMermaidPreference, subscribeMermaid, type MermaidOutcome, type MermaidPreference } from "../lib/mermaid-render.ts";
+import { isOpenableMermaidSource } from "../../protocol/mermaid-preview.ts";
+import { mermaidKind } from "../../shared/mermaid-source.ts";
+import { mermaidPreference, mermaidVersion, peekMermaid, requestMermaid, setMermaidPreference, subscribeMermaid, type MermaidOutcome, type MermaidPreference } from "../lib/mermaid-render.ts";
 import { AssistantReplyContext } from "./FileLinks.tsx";
 import { CodeBlock } from "./CodeBlock.tsx";
 import { CopyButton } from "./CopyButton.tsx";
@@ -30,6 +33,8 @@ export function MermaidBlock({ source, closed }: { source: string; closed: boole
 }
 
 function DiagramBlock({ source, closed }: { source: string; closed: boolean }) {
+	// The tab is opened through the panel; a bridged editor (after an extension-host restart) cannot ask, and says so.
+	const [notOpened, setNotOpened] = useState(false);
 	const version = useSyncExternalStore(subscribeMermaid, mermaidVersion, mermaidVersion);
 	const refusal = closed ? mermaidSourceRefusal(source) : null;
 	const wanted = closed && refusal === null;
@@ -44,10 +49,22 @@ function DiagramBlock({ source, closed }: { source: string; closed: boolean }) {
 	if (diagram !== null) return <MermaidFigure source={source} diagram={diagram} />;
 
 	const reason = refusal ?? (outcome?.kind === "failed" ? outcome.message : null);
+	// A refusal and a diagram drawn too large are limits of the transcript; the diagram tab has wider ones and the reader may ask for it.
+	const tabHelps = (refusal !== null || (outcome?.kind === "failed" && outcome.tab)) && isOpenableMermaidSource(source);
 	return (
 		<div className="omp-mermaid">
 			<CodeBlock language="mermaid" source={source} closed={closed} />
-			{reason !== null && <div className="omp-mermaid-note">Diagram not rendered: {reason.length > NOTE_CHARS ? `${reason.slice(0, NOTE_CHARS - 1)}…` : reason}</div>}
+			{reason !== null && (
+				<div className="omp-mermaid-note">
+					<span>Diagram not rendered: {reason.length > NOTE_CHARS ? `${reason.slice(0, NOTE_CHARS - 1)}…` : reason}</span>
+					{tabHelps && (
+						<button type="button" className="omp-mermaid-open" title="Draw this diagram in an editor tab of its own, without the transcript's size limits" onClick={() => setNotOpened(!guestTransport.post({ type: "omp:open-mermaid", source }))}>
+							Open diagram in a tab
+						</button>
+					)}
+					{notOpened && <span role="status">The tab cannot be opened from this editor now. Reload the window.</span>}
+				</div>
+			)}
 		</div>
 	);
 }

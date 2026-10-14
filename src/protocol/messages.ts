@@ -36,6 +36,7 @@ import { isRecord } from "../shared/guards.ts";
 import { MAX_CHAT_TEXT_LENGTH, parseChatHostMessage, parseChatWebviewMessage } from "./chat-messages.ts";
 import type { ChatHostMessage, ChatWebviewMessage } from "./chat-messages.ts";
 import { isPanelTabId } from "../shared/panel-identity.ts";
+import { isOpenableMermaidSource } from "./mermaid-preview.ts";
 import { parseFooterMetadata } from "../shared/footer-metadata.ts";
 import type { FooterMetadataMessage } from "../shared/footer-metadata.ts";
 import { parseTerminalLinkRequest, parseTerminalLinkValidation } from "../shared/terminal-links.ts";
@@ -926,6 +927,16 @@ export type GuestOpenDetailMessage =
 	| { type: "omp:open-detail"; kind: "agent"; agentId: string };
 
 /**
+ * Ask the host to open a mermaid source in a diagram tab (ADR-0069 amendment): the "Open diagram in a tab" button of a block
+ * the chat page refused to draw inline. The source is at most `MAX_MERMAID_OPEN_CHARS` (`mermaid-preview.ts`) units; the host reads nothing
+ * else from it and the request carries no conversation, path or command.
+ */
+export interface GuestOpenMermaidMessage {
+	type: "omp:open-mermaid";
+	source: string;
+}
+
+/**
  * A Chat action the page asks the host to run with its own consent UI: `compact` and `shake` (a mode QuickPick, and
  * for a summarizing compaction an instructions InputBox), `cycle-model` / `cycle-thinking` (the TUI's role and
  * thinking cycling), `export-html` (save dialog) and `share` (a modal confirmation naming what is uploaded). The page
@@ -973,6 +984,7 @@ export type GuestWebviewMessage =
 	| GuestDraftReplyMessage
 	| GuestDraftRestoredMessage
 	| GuestOpenDetailMessage
+	| GuestOpenMermaidMessage
 	| GuestSelectionReplyMessage
 	| GuestChatCommandMessage;
 
@@ -1276,6 +1288,10 @@ export function parseGuestWebviewMessage(value: unknown): GuestWebviewMessage | 
 		case "omp:chat-command": {
 			const command = typeof value.command === "string" && Object.keys(value).length === 2 ? CHAT_COMMANDS[value.command] : undefined;
 			return command === undefined ? null : { type: "omp:chat-command", command };
+		}
+		case "omp:open-mermaid": {
+			if (Object.keys(value).length !== 2 || !isOpenableMermaidSource(value.source)) return null;
+			return { type: "omp:open-mermaid", source: value.source };
 		}
 		case "omp:open-detail": {
 			if (value.kind === "agent") {

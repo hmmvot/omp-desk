@@ -11,13 +11,15 @@
  * again when its block comes back. The queue runs one diagram at a time, one task each: so the transcript keeps
  * taking input between diagrams, and because mermaid's configuration is global and two renders at once would mix it.
  */
-import { MERMAID_CONTRACT, MERMAID_GLOBAL, mermaidKeyword, mermaidSourceRefusal, type MermaidRenderResult, type MermaidTheme, type OmpMermaid } from "../mermaid/contract.ts";
-import { mermaidThemeFrom, themeKey } from "./mermaid-theme.ts";
+import { MERMAID_CONTRACT, MERMAID_GLOBAL, mermaidSourceRefusal, type MermaidRenderResult, type MermaidTheme, type OmpMermaid } from "../mermaid/contract.ts";
+import { mermaidImage } from "./mermaid-image.ts";
+import { readPageTheme, watchPageTheme, type PageTheme } from "./mermaid-theme-dom.ts";
 
 /** What the page shows for one source in one theme. */
 export type MermaidOutcome =
 	| { readonly kind: "diagram"; readonly src: string; readonly width: number; readonly height: number }
-	| { readonly kind: "failed"; readonly message: string };
+	/** `tab`: the diagram tab's wider limits may draw it (a refused or too large diagram). */
+	| { readonly kind: "failed"; readonly message: string; readonly tab: boolean };
 
 /**
  * The script this bundle runs from: the renderer is its sibling, and its nonce is the document's.
@@ -58,46 +60,21 @@ export function mermaidVersion(): number {
 
 // ---- theme ----------------------------------------------------------------------------------
 
-interface ThemeState {
-	readonly theme: MermaidTheme;
-	readonly key: string;
-}
+let themeState: PageTheme | null = null;
+let stopWatching: (() => void) | null = null;
 
-let themeState: ThemeState | null = null;
-let themeObserver: MutationObserver | null = null;
-
-/** The theme the page is in now. `<body>` inherits the variables VS Code sets on `<html>`, so reading them there sees both. */
-function readTheme(): ThemeState {
-	const styles = getComputedStyle(document.body);
-	const highContrast = document.body.classList.contains("vscode-high-contrast") || document.body.classList.contains("vscode-high-contrast-light");
-	const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-	const theme = mermaidThemeFrom(name => styles.getPropertyValue(name), highContrast, reducedMotion);
-	return { theme, key: themeKey(theme) };
-}
-
-/** Read the theme again; true when it is not the one the page last saw. */
-function refreshTheme(): boolean {
-	const next = readTheme();
-	const moved = next.key !== themeState?.key;
-	themeState = next;
-	return moved;
-}
-
-/** VS Code rewrites `<html>`'s variables and `<body>`'s classes on a theme change; both are watched, once, for the page's life, and so is the motion preference. */
+/** Watched once, for the page's life, when the first block subscribes. */
 function watchTheme(): void {
-	if (themeObserver !== null || typeof MutationObserver === "undefined") return;
-	refreshTheme();
-	const onChange = (): void => {
-		if (refreshTheme()) changed();
-	};
-	themeObserver = new MutationObserver(onChange);
-	themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["style", "class"] });
-	themeObserver.observe(document.body, { attributes: true, attributeFilter: ["class", "data-vscode-theme-id", "data-vscode-theme-name"] });
-	window.matchMedia("(prefers-reduced-motion: reduce)").addEventListener("change", onChange);
+	if (stopWatching !== null) return;
+	themeState = readPageTheme();
+	stopWatching = watchPageTheme(() => themeState, next => {
+		themeState = next;
+		changed();
+	});
 }
 
-function activeTheme(): ThemeState {
-	themeState ??= readTheme();
+function activeTheme(): PageTheme {
+	themeState ??= readPageTheme();
 	return themeState;
 }
 
@@ -244,19 +221,12 @@ async function draw(job: Job): Promise<MermaidOutcome> {
 		const renderer = await loadRenderer();
 		result = await renderer.render(`b${++diagramCounter}`, job.source, job.theme);
 	} catch (error) {
-		return { kind: "failed", message: error instanceof Error ? error.message : "Diagram renderer unavailable" };
+		return { kind: "failed", message: error instanceof Error ? error.message : "Diagram renderer unavailable", tab: false };
 	}
-	if (!result.ok) return { kind: "failed", message: result.message };
-	const src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(result.svg)}`;
-	// An image the browser cannot decode would show as a broken icon after the swap; find out first.
-	try {
-		const probe = new Image();
-		probe.src = src;
-		await probe.decode();
-	} catch {
-		return { kind: "failed", message: "The diagram could not be displayed" };
-	}
-	return { kind: "diagram", src, width: Math.ceil(result.width), height: Math.ceil(result.height) };
+	if (!result.ok) return { kind: "failed", message: result.message, tab: result.tabHelps === true };
+	const image = await mermaidImage(result.svg);
+	if (!image.ok) return { kind: "failed", message: image.message, tab: false };
+	return { kind: "diagram", src: image.src, width: Math.ceil(result.width), height: Math.ceil(result.height) };
 }
 
 // ---- what the reader chose ------------------------------------------------------------------------
@@ -277,12 +247,4 @@ export function setMermaidPreference(source: string, preference: MermaidPreferen
 	preferences.delete(source);
 	preferences.set(source, preference);
 	if (preferences.size > PREFERENCE_ENTRIES) preferences.delete(preferences.keys().next().value as string);
-}
-
-/** `flowchart`, `sequence`, `class` … from the diagram's first keyword, for a label; `diagram` when there is none. */
-export function mermaidKind(source: string): string {
-	const keyword = mermaidKeyword(source);
-	if (keyword === null) return "diagram";
-	if (keyword === "graph") return "flowchart";
-	return keyword.replace(/-beta$/, "").replace(/diagram(-v2)?$/, "").replace(/-v2$/, "") || "diagram";
 }

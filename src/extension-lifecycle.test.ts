@@ -321,7 +321,7 @@ export const harness = {
     const w = fixtureWindow();
     fixtureChat = conversation;
     w.indexForBridge = index; w.sessionRuntime = createSessionRuntime(index, conversation); w.startupRestorePending = false;
-    w.detailTabs = new DetailTabs({ createPanel() { throw new Error('the fixture opens no detail tab'); }, attachPage: () => () => {}, handleMessage: async () => ({ status: 'refused' }), openUrl: async () => {}, log() {} });
+    w.detailTabs = new DetailTabs({ createPanel() { throw new Error('the fixture opens no detail tab'); }, attachPage: () => () => {}, handleMessage: async () => ({ status: 'refused' }), openUrl: async () => {}, openMermaid() {}, log() {} });
     fixtureVscode.window.errors.length = 0;
     fixtureVscode.env.clipboard.writes.length = 0;
     fixtureVscode.workspace.configurationValues = {};

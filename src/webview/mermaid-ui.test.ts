@@ -10,8 +10,9 @@ import { once } from "node:events";
 import { test } from "node:test";
 import { build } from "esbuild";
 import type * as vscode from "vscode";
-import { mermaidBuildOptions } from "../../scripts/mermaid-bundle.mjs";
-import { createGuestHtml } from "../host/guest-webview.ts";
+import { mermaidBuildOptions, mermaidPreviewBuildOptions } from "../../scripts/mermaid-bundle.mjs";
+import { createGuestHtml, createMermaidPreviewHtml } from "../host/guest-webview.ts";
+import { mermaidSourceRefusal } from "./mermaid/contract.ts";
 import { THEMES } from "./theme-ui-fixtures.ts";
 
 const browserPath = [process.env.OMP_TEST_CHROMIUM,
@@ -140,6 +141,8 @@ test("mermaid blocks in Chat", { skip: browserPath === undefined, timeout: 240_0
 	// The renderer exactly as `npm run build` makes it (same options module), kept in memory.
 	const renderer = await build({ ...mermaidBuildOptions, write: false, minify: true, legalComments: "none", logLevel: "silent" });
 	const rendererScript = renderer.outputFiles[0]!.text;
+	// The diagram tab's own page script, as built for the package.
+	const previewScript = (await build({ ...mermaidPreviewBuildOptions, write: false, logLevel: "silent" })).outputFiles[0]!.text;
 	let rendererHits = 0;
 	let rendererStatus = 200;
 	const server = createServer((request, response) => {
@@ -154,6 +157,9 @@ test("mermaid blocks in Chat", { skip: browserPath === undefined, timeout: 240_0
 		if (pathname === "/ui.js") {
 			response.setHeader("Content-Type", "text/javascript"); response.end(script); return;
 		}
+		if (pathname === "/preview.js") {
+			response.setHeader("Content-Type", "text/javascript"); response.end(previewScript); return;
+		}
 		if (pathname === "/mermaid.js") {
 			rendererHits++;
 			response.statusCode = rendererStatus;
@@ -162,14 +168,15 @@ test("mermaid blocks in Chat", { skip: browserPath === undefined, timeout: 240_0
 			return;
 		}
 		response.setHeader("Content-Type", "text/html");
+		const isPreview = pathname === "/preview";
 		const webview = {
 			cspSource: "'self'",
-			asWebviewUri: (uri: { path: string }) => ({ toString: () => uri.path.endsWith(".js") ? "/ui.js" : "/codicons/codicon.css" }),
+			asWebviewUri: (uri: { path: string }) => ({ toString: () => uri.path.endsWith("/mermaid.js") ? "/mermaid.js" : uri.path.endsWith("/mermaid-preview.js") ? "/preview.js" : uri.path.endsWith(".js") ? "/ui.js" : "/codicons/codicon.css" }),
 		} as unknown as vscode.Webview;
 		const extensionUri = {
 			path: "/extension", with({ path }: { path: string }) { return { path }; },
 		} as unknown as vscode.Uri;
-		const html = createGuestHtml(webview, extensionUri, "tab:2c26b46b-68ff-4c1d-a3d8-1e0f9a0b7c6d", null);
+		const html = isPreview ? createMermaidPreviewHtml(webview, extensionUri) : createGuestHtml(webview, extensionUri, "tab:2c26b46b-68ff-4c1d-a3d8-1e0f9a0b7c6d", null);
 		const nonce = /<script nonce="([^"]+)"/.exec(html)![1]!;
 		response.end(html.replace("</head>", `<style nonce="${nonce}">:root{${themeRules("Dark Modern")};--vscode-font-family:Arial;--vscode-font-size:13px;--vscode-editor-font-family:Consolas, "Courier New", monospace}</style>
 		<script nonce="${nonce}">window.sent=[];window.errors=[];window.violations=[];window.alerted=false;window.alert=()=>{window.alerted=true};
@@ -212,6 +219,16 @@ test("mermaid blocks in Chat", { skip: browserPath === undefined, timeout: 240_0
 			await loaded;
 			await ui.wait(`window.ui?.token === '?${name}' && document.querySelector('#root').firstElementChild`);
 		}
+		async function openPreview(name: string): Promise<void> {
+			rendererHits = 0;
+			rendererStatus = 200;
+			const loaded = ui.event("Page.loadEventFired");
+			await ui.call("Page.navigate", { url: `${url}preview?${name}` });
+			await loaded;
+			await ui.wait("window.sent.some(message=>message.type==='omp:mermaid-preview-ready') && document.querySelector('.bar')");
+		}
+		/** What the host does once the tab says it listens: send the source. */
+		const sendSource = (source: string): Promise<unknown> => ui.evaluate(`window.dispatchEvent(new MessageEvent('message',{data:{type:'omp:mermaid-preview-source',source:${JSON.stringify(source)}}}))`);
 		/** The SVG a drawn block shows, parsed in the page: its text and every tag and attribute it carries. */
 		// The image is parsed here only to be read. Its `<style>` text is taken out first and counted as text: the page's policy would
 		// (rightly) refuse a nonce-less inline style in the page's own document, and the image never needs it there.
@@ -409,7 +426,7 @@ test("mermaid blocks in Chat", { skip: browserPath === undefined, timeout: 240_0
 			await open("oversize");
 			await ui.evaluate(reply(fence(`flowchart TD\n${"  A --> B\n".repeat(2100)}`)));
 			await ui.wait("document.querySelector('.omp-mermaid-note')");
-			assert.equal(await ui.evaluate("document.querySelector('.omp-mermaid-note').textContent"), "Diagram not rendered: The source is over 8,000 characters");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-mermaid-note > span').textContent"), "Diagram not rendered: The source is over 8,000 characters");
 			await ui.settle();
 			assert.equal(rendererHits, 0);
 			assert.equal(await ui.evaluate("document.querySelector('.omp-mermaid img')"), null);
@@ -436,9 +453,9 @@ test("mermaid blocks in Chat", { skip: browserPath === undefined, timeout: 240_0
 			assert.ok(packed.length < 8_000, "under the character cap, over the statement cap");
 			await ui.evaluate(reply(fence(packed)));
 			await ui.wait("document.querySelector('.omp-mermaid-note')");
-			assert.equal(await ui.evaluate("document.querySelector('.omp-mermaid-note').textContent"), "Diagram not rendered: The source is over 80 statements");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-mermaid-note > span').textContent"), "Diagram not rendered: The source is over 80 statements");
 			await ui.evaluate(reply(fence("block-beta\n  columns 3\n  a b c")));
-			await ui.wait("document.querySelector('.omp-mermaid-note')?.textContent==='Diagram not rendered: Block diagrams are not drawn'");
+			await ui.wait("document.querySelector('.omp-mermaid-note > span')?.textContent==='Diagram not rendered: Block diagrams are not drawn'");
 			await ui.settle();
 			assert.equal(rendererHits, 0);
 			assert.equal(await ui.evaluate("document.querySelector('.omp-mermaid img')"), null);
@@ -522,6 +539,23 @@ test("mermaid blocks in Chat", { skip: browserPath === undefined, timeout: 240_0
 			await clean();
 		});
 
+		await t.test("a refused block, and only a refused block, offers to open the diagram in a tab; the click posts the source", async () => {
+			await open("open-in-tab");
+			const long = `flowchart TD\n${"  A --> B\n".repeat(120)}`;
+			const block = "block-beta\n  columns 3\n  a b c";
+			await ui.evaluate(reply(`${fence(long)}\n\nand\n\n\`\`\`mermaid\n${block}\n\`\`\`\n\nand\n\n\`\`\`mermaid\nflowchart TD\n  A --> \n\`\`\`\n\nand\n\n\`\`\`mermaid\n${"x".repeat(50_001)}\n\`\`\``));
+			await ui.wait("document.querySelectorAll('.omp-mermaid-note').length===4");
+			assert.deepEqual(await ui.evaluate<number[]>("[...document.querySelectorAll('.omp-mermaid')].map(block=>block.querySelectorAll('.omp-mermaid-open').length)"), [1, 1, 0, 0], "the two refused blocks have the button; a parse error and an over-the-cap source do not");
+			// The long source is over the statement limit; its request is the whole source.
+			await ui.evaluate("document.querySelectorAll('.omp-mermaid-open')[0].click()");
+			await ui.evaluate("document.querySelectorAll('.omp-mermaid-open')[1].click()");
+			const sent = await ui.evaluate<{ type: string; source: string }[]>("window.sent.filter(message=>message.type==='omp:open-mermaid')");
+			assert.deepEqual(sent, [{ type: "omp:open-mermaid", source: long }, { type: "omp:open-mermaid", source: block }]);
+			assert.equal(await ui.evaluate("document.querySelector('.omp-mermaid img')"), null, "the transcript draws none of them");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-mermaid-open').textContent"), "Open diagram in a tab");
+			await clean();
+		});
+
 		await t.test("a renderer that is missing or from another build is reported on the block and not requested again", async () => {
 			await open("missing");
 			rendererStatus = 404;
@@ -542,6 +576,140 @@ test("mermaid blocks in Chat", { skip: browserPath === undefined, timeout: 240_0
 			assert.equal(await ui.evaluate("document.querySelector('.omp-mermaid-note').textContent"), "Diagram not rendered: Diagram renderer is out of date. Reload the window");
 			assert.equal(rendererHits, 0);
 			assert.deepEqual(await ui.evaluate("window.violations"), []);
+		});
+
+		await t.test("the diagram tab shows Rendering… before a render that blocks, then draws a flowchart far over the chat limits", async () => {
+			await openPreview("tab-large");
+			assert.equal(await ui.evaluate("document.querySelector('.status').textContent"), "Waiting for the diagram…");
+			assert.equal(await ui.evaluate("[...document.querySelectorAll('.bar button')].filter(button=>!button.hidden).every(button=>button.disabled||button.textContent==='Copy source')"), true, "nothing to zoom yet");
+			// The renderer is held up for a moment, as a slow diagram would: the busy state is what the reader sees meanwhile.
+			await ui.evaluate("(()=>{const renderer=window.ompMermaid,original=renderer.render;window.paintedBusy=null;renderer.render=async(...args)=>{window.paintedBusy=document.querySelector('.status').textContent+'|'+(document.querySelector('.stage .waiting')?.textContent??'');await new Promise(resolve=>setTimeout(resolve,300));return original(...args)}})()");
+			const large = `flowchart TD\n${Array.from({ length: 150 }, (_, index) => `  N${index} --> N${index + 1}`).join("\n")}`;
+			assert.match(mermaidSourceRefusal(large) ?? "", /over 80 statements/, "the chat page would refuse it");
+			await sendSource(large);
+			await ui.wait("window.paintedBusy!==null");
+			assert.equal(await ui.evaluate("window.paintedBusy"), "Rendering…|Rendering…", "the status and the waiting view were on screen when the render started");
+			await ui.wait("document.querySelector('.stage img')");
+			assert.equal(await ui.evaluate("document.querySelector('.stage img').complete && document.querySelector('.stage img').naturalWidth>0 && document.querySelector('.stage img').src.startsWith('data:image/svg+xml')"), true);
+			assert.ok((await svgFacts(".stage img")).text.includes("N150"), "the last node is in the drawing");
+			assert.equal(await ui.evaluate("document.querySelector('.status').textContent"), "");
+			assert.equal(await ui.evaluate("document.querySelector('.stage .waiting')"), null);
+			assert.equal(await ui.evaluate("[...document.querySelectorAll('.bar button')].every(button=>!button.disabled)"), true);
+			assert.equal(await ui.evaluate("window.ompMermaid.contract"), 2);
+			await clean();
+		});
+
+		await t.test("the diagram tab draws a block diagram the chat page refuses, and zooms: fit, 100 %, zoom in and out", async () => {
+			await openPreview("tab-zoom");
+			await sendSource("block-beta\n  columns 3\n  a[\"Alpha\"] b[\"Beta\"] c[\"Gamma\"]\n  d e f");
+			await ui.wait("document.querySelector('.stage img')");
+			assert.ok((await svgFacts(".stage img")).text.includes("Alpha"));
+			const widths = () => ui.evaluate<{ natural: number; shown: number; fit: boolean }>("(()=>{const img=document.querySelector('.stage img');return{natural:Number(img.getAttribute('width')),shown:img.clientWidth,fit:document.querySelector('.stage').hasAttribute('data-fit')}})()");
+			const click = (label: string) => ui.evaluate(`[...document.querySelectorAll('.bar button')].find(button=>button.textContent===${JSON.stringify(label)}).click()`);
+			const first = await widths();
+			assert.equal(first.fit, true);
+			await click("100%");
+			assert.deepEqual(await widths(), { natural: first.natural, shown: first.natural, fit: false });
+			await click("+");
+			assert.equal((await widths()).shown, Math.round(first.natural * 1.25));
+			await click("−");
+			await click("−");
+			assert.equal((await widths()).shown, Math.round(first.natural / 1.25));
+			await click("Fit");
+			assert.equal((await widths()).fit, true);
+			await clean();
+		});
+
+		await t.test("the diagram tab shows the message and the source of a diagram that cannot be drawn, and Copy source copies it", async () => {
+			await openPreview("tab-broken");
+			await ui.evaluate("Object.defineProperty(navigator,'clipboard',{configurable:true,value:{async writeText(text){window.copied=text}}})");
+			const broken = "flowchart TD\n  A --> ";
+			await sendSource(broken);
+			await ui.wait("document.querySelector('.failure')");
+			assert.match(await ui.evaluate<string>("document.querySelector('.failure h1').textContent"), /^Diagram not rendered: Parse error on line \d+$/);
+			assert.equal(await ui.evaluate("document.querySelector('.failure pre code').textContent"), broken);
+			assert.equal(await ui.evaluate("document.querySelector('.stage img')"), null);
+			assert.equal(await ui.evaluate("[...document.querySelectorAll('.bar button')].filter(button=>button.textContent!=='Copy source'&&!button.hidden).every(button=>button.disabled)"), true);
+			assert.equal(await ui.evaluate("document.querySelector('.status').textContent"), "");
+			await ui.evaluate("[...document.querySelectorAll('.bar button')].find(button=>button.textContent==='Copy source').click()");
+			await ui.wait("window.copied!==undefined");
+			assert.equal(await ui.evaluate("window.copied"), broken);
+			await clean();
+		});
+
+		await t.test("the diagram tab follows the theme: another theme draws it again", async () => {
+			await openPreview("tab-theme");
+			await sendSource(FLOWCHART);
+			await ui.wait("document.querySelector('.stage img')");
+			const dark = await ui.evaluate<string>("document.querySelector('.stage img').src");
+			await ui.evaluate(`document.body.className='vscode-light';for(const rule of ${JSON.stringify(themeRules("Light Modern"))}.split(';')){const at=rule.indexOf(':');document.documentElement.style.setProperty(rule.slice(0,at),rule.slice(at+1))}`);
+			await ui.wait("document.querySelector('.stage img').src!==" + JSON.stringify(dark));
+			const facts = await svgFacts(".stage img");
+			assert.ok(facts.text.includes("#3b3b3b") && !facts.text.includes("#cccccc"), "drawn in Light Modern");
+			assert.equal(await ui.evaluate("document.querySelector('.bar button:not([hidden])') && [...document.querySelectorAll('.bar button')].find(button=>button.textContent==='Redraw').hidden"), true, "a quick render is drawn again by itself");
+			await clean();
+		});
+
+		await t.test("a diagram that took long is not drawn again by a theme change until Redraw is pressed", async () => {
+			await openPreview("tab-redraw");
+			await ui.evaluate("(()=>{const renderer=window.ompMermaid,original=renderer.render;window.renders=0;const clock=performance.now.bind(performance);let skew=0;performance.now=()=>clock()+skew;renderer.render=async(...args)=>{window.renders++;skew+=2500;return original(...args)}})()");
+			await sendSource(FLOWCHART);
+			await ui.wait("document.querySelector('.stage img')");
+			const dark = await ui.evaluate<string>("document.querySelector('.stage img').src");
+			await ui.evaluate(`document.body.className='vscode-light';for(const rule of ${JSON.stringify(themeRules("Light Modern"))}.split(';')){const at=rule.indexOf(':');document.documentElement.style.setProperty(rule.slice(0,at),rule.slice(at+1))}`);
+			await ui.wait("[...document.querySelectorAll('.bar button')].find(button=>button.textContent==='Redraw')?.hidden===false");
+			await ui.settle();
+			assert.equal(await ui.evaluate("window.renders"), 1, "no second render by itself");
+			assert.equal(await ui.evaluate("document.querySelector('.stage img').src"), dark, "the previous drawing stays");
+			assert.equal(await ui.evaluate("document.querySelector('.status').textContent"), "The theme changed.");
+			await ui.evaluate("[...document.querySelectorAll('.bar button')].find(button=>button.textContent==='Redraw').click()");
+			await ui.wait("window.renders===2 && document.querySelector('.stage img').src!==" + JSON.stringify(dark));
+			assert.equal(await ui.evaluate("[...document.querySelectorAll('.bar button')].find(button=>button.textContent==='Redraw').hidden"), true);
+			await clean();
+		});
+
+		await t.test("a theme change while the first render runs lets it finish and show; a quick one is drawn again, a slow one offers Redraw", async () => {
+			// A page variable changes without a DOM mutation, which `wait` watches for: poll it.
+			const poll = (condition: string) => ui.evaluate(`new Promise(resolve=>{const check=()=>{if(${condition})resolve();else setTimeout(check,20)};check()})`);
+			const THEME = `for(const rule of ${JSON.stringify(themeRules("Light Modern"))}.split(';')){const at=rule.indexOf(':');document.documentElement.style.setProperty(rule.slice(0,at),rule.slice(at+1))}`;
+			for (const slow of [false, true]) {
+				await openPreview(slow ? "tab-first-slow" : "tab-first-quick");
+				await ui.evaluate(`(()=>{const renderer=window.ompMermaid,original=renderer.render;window.renders=0;window.release=null;const clock=performance.now.bind(performance);let skew=0;performance.now=()=>clock()+skew;
+				 renderer.render=async(...args)=>{window.renders++;await new Promise(resolve=>{window.release=resolve});skew+=${slow ? 2500 : 0};return original(...args)}})()`);
+				await sendSource(FLOWCHART);
+				await poll("window.renders===1");
+				// The reader switches theme while the first render is under way.
+				await ui.evaluate(`document.body.className='vscode-light';${THEME}`);
+				await ui.settle();
+				assert.equal(await ui.evaluate("window.renders"), 1, "no second render starts under the first");
+				await ui.evaluate("window.release()");
+				if (slow) {
+					await ui.wait("[...document.querySelectorAll('.bar button')].find(button=>button.textContent==='Redraw')?.hidden===false");
+					assert.ok((await svgFacts(".stage img")).text.includes("#cccccc"), "the finished drawing is shown, in the theme it was asked for");
+					assert.equal(await ui.evaluate("window.renders"), 1);
+				} else {
+					await poll("window.renders===2");
+					await ui.evaluate("window.release()");
+					await ui.wait("document.querySelector('.stage img') && !document.querySelector('.status').textContent");
+					await ui.wait("decodeURIComponent(document.querySelector('.stage img').src).includes('#3b3b3b')");
+				}
+				await clean();
+			}
+		});
+
+		await t.test("the diagram tab ignores a source over the cap and a message that is not the host's, and its renderer takes the tab limits from the document", async () => {
+			await openPreview("tab-cap");
+			await sendSource("x".repeat(50_001));
+			await ui.evaluate("window.dispatchEvent(new MessageEvent('message',{data:{type:'omp:mermaid-preview-source',source:'flowchart TD\\n A-->B',extra:1}}))");
+			await ui.settle();
+			assert.equal(await ui.evaluate("document.querySelector('.status').textContent"), "Waiting for the diagram…");
+			assert.equal(await ui.evaluate("document.querySelector('.stage img')"), null);
+			// The chat page's document says nothing, so it keeps the chat limits whatever it asks for.
+			await open("scope-chat");
+			await ui.evaluate(reply(fence(FLOWCHART)));
+			await ui.wait("document.querySelector('.omp-mermaid--drawn img')");
+			const refused = await ui.evaluate<{ ok: boolean; message?: string }>("window.ompMermaid.render('x','flowchart TD\\n'+' A-->B\\n'.repeat(120),{darkMode:true,fontFamily:'Arial',fontSize:'13px',reducedMotion:false,variables:{}},'tab')");
+			assert.deepEqual(refused, { ok: false, message: "The source is over 80 statements" });
 		});
 	} finally {
 		browser?.socket.close();

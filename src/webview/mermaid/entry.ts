@@ -23,12 +23,22 @@
  */
 import mermaid from "mermaid";
 import {
-	MAX_MERMAID_SIDE_PX, MAX_MERMAID_SVG_CHARS, MAX_MERMAID_SOURCE_CHARS, MERMAID_CONTRACT, MERMAID_GLOBAL, mermaidKindRefusal, mermaidSourceRefusal,
-	type MermaidRenderResult, type MermaidTheme, type OmpMermaid,
+	MAX_MERMAID_SIDE_PX, MAX_MERMAID_SVG_CHARS, MAX_MERMAID_SOURCE_CHARS, MAX_MERMAID_TAB_SIDE_PX, MAX_MERMAID_TAB_SOURCE_CHARS, MAX_MERMAID_TAB_SVG_CHARS,
+	MERMAID_CONTRACT, MERMAID_GLOBAL,
+	mermaidKindRefusal, mermaidSourceRefusal,
+	type MermaidRenderResult, type MermaidScope, type MermaidTheme, type OmpMermaid,
 } from "./contract.ts";
+import { MERMAID_SCOPE_META } from "../../protocol/mermaid-preview.ts";
 
-/** Edges a flowchart may have (mermaid enforces it in the flowchart parser only). */
-const MAX_EDGES = 200;
+/**
+ * The limits this document draws under, read once: the diagram tab's document says so in a meta tag its host wrote; a caller cannot
+ * ask for wider ones.
+ */
+const SCOPE: MermaidScope = document.querySelector(`meta[name="${MERMAID_SCOPE_META}"]`)?.getAttribute("content") === "tab" ? "tab" : "chat";
+
+/** Edges a flowchart may have (mermaid enforces it in the flowchart parser only), by where it is drawn. */
+const MAX_EDGES: Readonly<Record<MermaidScope, number>> = { chat: 200, tab: 2_000 };
+const MAX_TEXT: Readonly<Record<MermaidScope, number>> = { chat: MAX_MERMAID_SOURCE_CHARS, tab: MAX_MERMAID_TAB_SOURCE_CHARS };
 
 /** Keys a diagram's own directive or front matter may not set, on top of mermaid's own secure keys. */
 const SECURE_KEYS = [
@@ -49,8 +59,8 @@ function configuration(theme: MermaidTheme): Parameters<typeof mermaid.initializ
 		look: "classic",
 		htmlLabels: false,
 		flowchart: { htmlLabels: false },
-		maxTextSize: MAX_MERMAID_SOURCE_CHARS,
-		maxEdges: MAX_EDGES,
+		maxTextSize: MAX_TEXT[SCOPE],
+		maxEdges: MAX_EDGES[SCOPE],
 		fontFamily: theme.fontFamily,
 		themeCSS: theme.reducedMotion ? STILL_CSS : "",
 		secure: SECURE_KEYS,
@@ -114,7 +124,7 @@ function sizeOf(svg: string): { width: number; height: number } | null {
 let sequence = 0;
 
 async function render(id: string, source: string, theme: MermaidTheme): Promise<MermaidRenderResult> {
-	const refusal = mermaidSourceRefusal(source);
+	const refusal = mermaidSourceRefusal(source, SCOPE);
 	if (refusal !== null) return { ok: false, message: refusal };
 	// Mermaid wants an element id that is unique in the document and starts with a letter.
 	const elementId = `omp-mermaid-${++sequence}-${id.replace(/[^A-Za-z0-9_-]/g, "")}`;
@@ -122,15 +132,16 @@ async function render(id: string, source: string, theme: MermaidTheme): Promise<
 		configure(theme);
 		// Mermaid's own reading of the type decides: a header written to fool the page's keyword check is still a block diagram here. Parsing is cheap; layout is the cost.
 		const parsed = await mermaid.parse(source, { suppressErrors: true });
-		const undrawn = parsed === false ? null : mermaidKindRefusal(parsed.diagramType);
-		if (undrawn !== null) return { ok: false, message: undrawn };
+		const undrawn = SCOPE === "tab" || parsed === false ? null : mermaidKindRefusal(parsed.diagramType);
+		if (undrawn !== null) return { ok: false, message: undrawn, tabHelps: true };
 		const { svg: drawn } = await mermaid.render(elementId, source, measuringContainer());
-		if (drawn.length > MAX_MERMAID_SVG_CHARS) return { ok: false, message: "The diagram is too large" };
+		if (drawn.length > (SCOPE === "tab" ? MAX_MERMAID_TAB_SVG_CHARS : MAX_MERMAID_SVG_CHARS)) return { ok: false, message: `The diagram is too large: its drawing is ${(drawn.length / 1_000_000).toFixed(1)} million characters`, ...(SCOPE === "chat" ? { tabHelps: true as const } : {}) };
 		const svg = asXml(drawn);
 		if (svg === null) return { ok: false, message: "The diagram has no drawing" };
 		const size = sizeOf(svg);
 		if (size === null) return { ok: false, message: "The diagram has no size" };
-		if (size.width > MAX_MERMAID_SIDE_PX || size.height > MAX_MERMAID_SIDE_PX) return { ok: false, message: "The diagram is too large" };
+		const side = SCOPE === "tab" ? MAX_MERMAID_TAB_SIDE_PX : MAX_MERMAID_SIDE_PX;
+		if (size.width > side || size.height > side) return { ok: false, message: `The diagram is too large: its canvas is ${Math.round(size.width).toLocaleString("en-US")} × ${Math.round(size.height).toLocaleString("en-US")} px`, ...(SCOPE === "chat" ? { tabHelps: true as const } : {}) };
 		return { ok: true, svg, ...size };
 	} catch (error) {
 		return { ok: false, message: firstLine(error) };

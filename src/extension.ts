@@ -10,7 +10,7 @@ import { createHash } from "node:crypto";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
-import { UNAVAILABLE_RELOAD_MESSAGE, createDetailHtml, createShellHtml, createUnavailableGuestHtml } from "./host/guest-webview";
+import { UNAVAILABLE_RELOAD_MESSAGE, createDetailHtml, createMermaidPreviewHtml, createShellHtml, createUnavailableGuestHtml } from "./host/guest-webview";
 import { chatExitText, type ChatExitReason } from "./chat/exit-reason";
 import { installedNerdFonts } from "./host/terminal-fonts";
 import { terminalFontFamily } from "./shared/terminal-theme";
@@ -218,6 +218,7 @@ import {
 import { isPanelTabId, persistedShellSlotId, shellIdentityBootstrapSource } from "./shared/panel-identity";
 import { isSafeBoundaryText, parseGuestWebviewMessage, type GuestChatCommand, type GuestRecallPromptMessage } from "./protocol/messages";
 import { DETAIL_VIEW_TYPE, DetailTabs } from "./host/detail-tabs";
+import { MERMAID_PREVIEW_VIEW_TYPE, MermaidPreviews } from "./host/mermaid-previews";
 import { EDITOR_GROUP_FOCUS_COMMANDS } from "./host/chat-layout";
 // The folder shell's terminal (ADR-0024): the extension-owned PTY broker is the writer, the
 // panel is only a frontend, and this module owns the glue between them.
@@ -882,6 +883,8 @@ interface WindowState {
    * are presentation pages of a conversation, not editor slots: no binding, claim, bridge or restore.
    */
   detailTabs: DetailTabs;
+  /** Diagram tabs: a mermaid source the chat page would not draw inline, drawn in a tab of its own (ADR-0069 amendment). */
+  mermaidPreviews: MermaidPreviews;
   /**
    * Last host-observed turn activity per tab, projected from the conversation's own model.
    *
@@ -1044,6 +1047,7 @@ function guestDispatcherDeps(): GuestDispatcherDeps<TabState> {
     composerPopupTabs: () => windowState().composerPopupTabs,
     conversations: () => windowState().sessionRuntime.conversations,
     detailTabs: () => windowState().detailTabs,
+    mermaidPreviews: () => windowState().mermaidPreviews,
     panelChatPage,
     attachChatRoute,
     attachChatRoutes,
@@ -1273,6 +1277,7 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     packageStale: false,
     // Conversations
     detailTabs: undefined as never, // assigned by `activate` before anything reads it
+    mermaidPreviews: undefined as never, // assigned by `activate` before anything reads it
     turnActivities: new Map<string, TurnActivity>(),
     editorRecency: new EditorRecency(),
     turnNotifier: undefined,
@@ -1669,6 +1674,19 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     },
   });
   s.sessionRuntime = createSessionRuntime(index, chat);
+  s.mermaidPreviews = new MermaidPreviews({
+    createPanel: title => {
+      const panel = vscode.window.createWebviewPanel(MERMAID_PREVIEW_VIEW_TYPE, title, vscode.ViewColumn.Active, {
+        enableScripts: true,
+        retainContextWhenHidden: true,
+        localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, "media")],
+      });
+      panel.iconPath = vscode.Uri.joinPath(context.extensionUri, EDITOR_TAB_ICON);
+      panel.webview.html = createMermaidPreviewHtml(panel.webview, context.extensionUri);
+      return panel;
+    },
+    log,
+  });
   s.detailTabs = new DetailTabs({
     createPanel: (conversation, target) => {
       const entry = index.get(conversation);
@@ -1685,6 +1703,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     },
     attachPage: (conversation, page) => s.sessionRuntime.conversations.attachPage(conversation, page),
     handleMessage: (conversation, message, origin) => s.sessionRuntime.conversations.command(conversation, message, origin),
+    openMermaid: source => { log(`diagram tab was ${s.mermaidPreviews.open(source)}`); },
     openUrl: async (url, mode) => {
       try { await openPageWebLink(url, mode); }
       catch (error) { log(`detail link: cannot open ${url}: ${messageOf(error)}`); showWarning(`cannot open ${url}: ${messageOf(error)}`); }
@@ -1694,6 +1713,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push({ dispose: () => {
     cancelControlPicker();
     s.detailTabs.dispose();
+    s.mermaidPreviews.dispose();
     s.sessionRuntime.conversations.dispose();
     for (const binding of s.footerBindings.values()) binding.observer?.dispose();
     s.footerBindings.clear();
@@ -9271,6 +9291,10 @@ async function handlePassiveSlotMessage(slot: string, panel: vscode.WebviewPanel
   }
   if (parsed.type === "omp:open-detail") {
     s.guestDispatcher.openDetailTab(state.tabId, state.mode, parsed);
+    return;
+  }
+  if (parsed.type === "omp:open-mermaid") {
+    s.guestDispatcher.openMermaidTab(parsed.source);
     return;
   }
   if (parsed.type === "omp:ready") {

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mermaidKeyword, mermaidSourceRefusal } from "./contract.ts";
+import { mermaidKeyword } from "../../shared/mermaid-source.ts";
+import { mermaidSourceRefusal } from "./contract.ts";
 
 test("the diagram type is read after front matter, directives and comments", () => {
 	assert.equal(mermaidKeyword("flowchart TD\n A-->B"), "flowchart");
@@ -20,4 +21,10 @@ test("limits count statements, not just lines", () => {
 	assert.match(mermaidSourceRefusal(`flowchart LR\n${"A-->B;".repeat(100)}`) ?? "", /over 80 statements/);
 	assert.match(mermaidSourceRefusal(`flowchart LR\n${"A-->B\n".repeat(100)}`) ?? "", /over 80 statements/);
 	assert.match(mermaidSourceRefusal("x".repeat(8001)) ?? "", /over 8,000 characters/);
+});
+
+test("the tab scope has no statement limit and draws block diagrams, up to the message cap", () => {
+	assert.equal(mermaidSourceRefusal(`flowchart LR\n${"A-->B\n".repeat(500)}`, "tab"), null);
+	assert.equal(mermaidSourceRefusal("block-beta\n  columns 3\n  a b c", "tab"), null);
+	assert.match(mermaidSourceRefusal("x".repeat(50_001), "tab") ?? "", /over 50,000 characters/);
 });

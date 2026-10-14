@@ -25,6 +25,7 @@ import { randomBytes } from "node:crypto";
 import type * as vscode from "vscode";
 import { PANEL_BRIDGE_META, PANEL_IDENTITY_META, isPanelTabId, panelBridgeMetaValue, panelDocumentIdentityBootstrapSource, panelDocumentScriptSource } from "../shared/panel-identity.ts";
 import { SHELL_SLOT_META, isShellSlotId } from "../shared/panel-identity.ts";
+import { MERMAID_SCOPE_META } from "../protocol/mermaid-preview.ts";
 import { DETAIL_META, detailMetaValue, type DetailTarget } from "../protocol/detail-target.ts";
 
 
@@ -109,6 +110,21 @@ export function createSettingsHtml(webview: vscode.Webview, extensionUri: vscode
 <meta http-equiv="Content-Security-Policy" content="${guestCsp(webview, nonce, "'none'")}">
 <meta name="csp-nonce" content="${nonce}"><title>${title}</title><link rel="stylesheet" href="${icons}"></head>
 <body><div id="root"></div><script nonce="${nonce}" src="${script}"></script></body></html>`;
+}
+
+/**
+ * The diagram tab's document (`ompDesk.mermaidPreview`): the guest policy with no network at all, the renderer `media/mermaid.js`
+ * and the tab's own page script `media/mermaid-preview.js`, each with this document's nonce. The mermaid source is not in the
+ * HTML: the page asks for it over the message channel.
+ */
+export function createMermaidPreviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
+	const nonce = randomBytes(16).toString("base64url");
+	const root = extensionUri.path.replace(/\/$/, "");
+	const script = (file: string): string => webview.asWebviewUri(extensionUri.with({ path: `${root}/media/${file}` })).toString();
+	return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="${guestCsp(webview, nonce, "'none'")}">
+<meta name="csp-nonce" content="${nonce}"><meta name="${MERMAID_SCOPE_META}" content="tab"><title>Diagram</title></head>
+<body><script nonce="${nonce}" src="${script("mermaid.js")}"></script><script nonce="${nonce}" src="${script("mermaid-preview.js")}"></script></body></html>`;
 }
 
 /**

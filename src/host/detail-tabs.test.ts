@@ -35,6 +35,7 @@ function fixture() {
 	const handled: { conversation: string; message: ChatWebviewMessage }[] = [];
 	const logs: string[] = [];
 	const opened: { url: string; mode: string }[] = [];
+	const mermaid: string[] = [];
 	const host: DetailTabsHost = {
 		createPanel() { const panel = new FakePanel(); panels.push(panel); return panel; },
 		attachPage(conversation, page) {
@@ -44,9 +45,10 @@ function fixture() {
 		},
 		async handleMessage(conversation, message) { handled.push({ conversation, message }); return "accepted"; },
 		async openUrl(url, mode) { opened.push({ url, mode }); },
+		openMermaid(source) { mermaid.push(source); },
 		log: message => { logs.push(message); },
 	};
-	return { tabs: new DetailTabs(host), panels, attached, handled, logs, opened };
+	return { tabs: new DetailTabs(host), panels, attached, handled, logs, opened, mermaid };
 }
 
 const todo: DetailTarget = { kind: "todo" };
@@ -151,6 +153,16 @@ describe("detail tab registry", () => {
 		assert.equal(panels[1]!.revealed, 1);
 		await panels[1]!.send({ type: "omp:open-detail", kind: "todo" });
 		assert.equal(tabs.size, 3);
+		assert.equal(handled.length, 0);
+	});
+
+	it("forwards a diagram-tab request from a detail tab's transcript and nothing the parser refuses", async () => {
+		const { tabs, panels, mermaid, handled } = fixture();
+		tabs.open("tab:a", todo);
+		await panels[0]!.send({ type: "omp:open-mermaid", source: "flowchart TD\n A-->B" });
+		await panels[0]!.send({ type: "omp:open-mermaid", source: "" });
+		await panels[0]!.send({ type: "omp:open-mermaid", source: "x", extra: 1 });
+		assert.deepEqual(mermaid, ["flowchart TD\n A-->B"]);
 		assert.equal(handled.length, 0);
 	});
 

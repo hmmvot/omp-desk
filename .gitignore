@@ -7,5 +7,6 @@ media/settings.js*
 media/desk-settings.js*
 media/omp-settings.js*
 media/mermaid.js*
+media/mermaid-preview.js*
 media/codicons/
 .vscode-test/
