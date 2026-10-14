@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Chat: a skill the agent loads reads as a skill. `read skill://omp-desk-release` (or `skill://<name>/<file>`, with or without a line selector) is now a **Skill** row with the book icon of the skill prompt block and the skill name as its target (`omp-desk-release`, or `omp-desk-release / scripts/x.md` for a file inside the skill) instead of `Read skill://omp-desk-release`; the name opens the real `SKILL.md` (or the file) in the editor once the result names it, and stays plain text while the call runs, fails, or the result carries no path (an MCP-served skill). Expanded, the row shows the skill text without OMP's `[Skill file: …]` first line (the raw view keeps it), and a group or the Overview says `Loaded 1 skill` where it said `1 tool call`. `agent://`, `proc://`, `artifact://`, `history://` and `local://` reads render as before.
+
 ### Fixed
 
 - Chat: code is no longer wrapped, it scrolls sideways. An expanded Grep, Read, Bash or Eval result broke a long source line onto a second row under the line-number gutter (and the highlighted match with it); the 12-row preview and any full view of up to 120 rows wrapped by default, and Command output and the Bash and Python execution blocks wrapped too. Every code block now keeps one row per line, scrolls horizontally with the line numbers and highlight bands intact (a highlighted row spans the whole scroll width), and leaves the vertical wheel to the transcript (Shift+wheel or a horizontal wheel scrolls the block). The toolbar's **Wrap** switch is now off at every size and wraps only when you turn it on, per card. Long inline code, such as a path in a paragraph or a list item, still wraps; the earlier wrapping change had reached code blocks too.

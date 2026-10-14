@@ -17,17 +17,19 @@ export function isOverviewMessage(card: TranscriptCard): card is Extract<Transcr
 }
 export function overviewMemberId(card: OverviewMember): string { return card.kind === "tool" ? card.tool.call.id : `irc:${card.id}`; }
 function memberKey(card: OverviewMember): string { return card.kind === "entry" ? overviewMemberId(card) : card.ownership === "orphan" ? `orphan:${card.id}:${card.tool.call.id}` : `call:${card.tool.call.id}`; }
+type Bucket = {calls:number;paths:Set<string>;unknown:number;incomplete:number;running:number;agents:number;jobs:Set<string>;jobless:number;skills:Set<string>};
+const newBucket = ():Bucket => ({calls:0,paths:new Set<string>(),unknown:0,incomplete:0,running:0,agents:0,jobs:new Set<string>(),jobless:0,skills:new Set<string>()});
 function summarize(members: readonly OverviewMember[], cwd?: string): Omit<ToolRun,"kind"|"id"|"sourceIds"|"memberKeys"|"members"> {
- const buckets = new Map<ToolCategory,{calls:number;paths:Set<string>;unknown:number;incomplete:number;running:number;agents:number;jobs:Set<string>;jobless:number}>();
+ const buckets = new Map<ToolCategory,Bucket>();
  let runningCount=0, failureCount=0, warningCount=0, skippedCount=0, unavailableCount=0;
  const liveEditIds: string[]=[];
  let messageCount = 0;
  for (const card of members) {
   if (card.kind === "entry") { messageCount++; continue; }
   const metadata=toolPresentation(card.tool,cwd);
-  const bucket=buckets.get(metadata.category) ?? {calls:0,paths:new Set<string>(),unknown:0,incomplete:0,running:0,agents:0,jobs:new Set<string>(),jobless:0};
+  const bucket=buckets.get(metadata.category) ?? newBucket();
   bucket.calls++; bucket.agents+=metadata.agents; for (const job of metadata.jobs) bucket.jobs.add(job); if (metadata.category === "wait" && metadata.jobs.length === 0) bucket.jobless++;
-  if (metadata.paths.length) for (const path of metadata.paths) bucket.paths.add(path); else bucket.unknown++;
+  if (metadata.skill) bucket.skills.add(metadata.skill.name); else if (metadata.paths.length) for (const path of metadata.paths) bucket.paths.add(path); else bucket.unknown++;
   buckets.set(metadata.category,bucket);
   if (card.tool.status === "queued" || card.tool.status === "running") { runningCount++; bucket.running++; }
   if (!metadata.completed) bucket.incomplete++;
@@ -38,19 +40,20 @@ function summarize(members: readonly OverviewMember[], cwd?: string): Omit<ToolR
   if (metadata.liveDetail) liveEditIds.push(card.tool.call.id);
  }
  if (messageCount) {
-  const bucket = buckets.get("message") ?? {calls:0,paths:new Set<string>(),unknown:0,incomplete:0,running:0,agents:0,jobs:new Set<string>(),jobless:0};
+  const bucket = buckets.get("message") ?? newBucket();
   bucket.calls += messageCount;
   buckets.set("message", bucket);
  }
  const parts:string[]=[];
  const plural=(count:number,noun:string):string=>`${count} ${noun}${count===1?"":noun==="search"?"es":"s"}`;
- for (const category of ["edit","command","read","search","agent","wait","message","other"] as const) {
+ for (const category of ["edit","command","read","skill","search","agent","wait","message","other"] as const) {
   const bucket=buckets.get(category); if (!bucket) continue;
   if (category === "edit" || category === "read") {
    const verb=category === "edit" ? bucket.running ? "Editing" : bucket.incomplete ? "Attempted edits to" : "Edited" : bucket.running ? "Reading" : bucket.incomplete ? "Attempted reads of" : "Read";
    if (bucket.paths.size) parts.push(`${verb} ${plural(bucket.paths.size,"file")}`);
    if (bucket.unknown) parts.push(`${bucket.running ? category === "edit" ? "Preparing" : "Reading" : bucket.incomplete ? "Attempted" : "Completed"} ${plural(bucket.unknown,category)}`);
-  } else if (category === "command") parts.push(`${bucket.running?"Running":bucket.incomplete?"Attempted":"Ran"} ${plural(bucket.calls,"command")}`);
+  } else if (category === "skill") parts.push(`${bucket.running?"Loading":bucket.incomplete?"Attempted to load":"Loaded"} ${plural(bucket.skills.size,"skill")}`);
+  else if (category === "command") parts.push(`${bucket.running?"Running":bucket.incomplete?"Attempted":"Ran"} ${plural(bucket.calls,"command")}`);
   else if (category === "agent") parts.push(`${bucket.incomplete?"Attempted to spawn":"Spawned"} ${plural(bucket.agents,"agent")}`);
   else if (category === "wait") {
    if (bucket.incomplete) parts.push(`Attempted ${plural(bucket.calls,"wait")}`);

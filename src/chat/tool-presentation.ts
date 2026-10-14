@@ -2,6 +2,8 @@
 import { isRecord } from "../shared/guards.ts";
 import type { ProjectedTool } from "./transcript.ts";
 import { editDiffStats, type DiffStats } from "./diff-stats.ts";
+import { skillReadView, type SkillReadView } from "./skill-read.ts";
+import { messageText } from "../shared/format.ts";
 import { todoCounter, todoOperationText } from "./todos.ts";
 export interface ToolRoute { kind: "native" | "agent" | "process" | "config" | "device" | "help"; name: string; args: Record<string, unknown>; details: Record<string, unknown> }
 const record = (value: unknown): Record<string, unknown> => isRecord(value) ? value : {};
@@ -28,12 +30,13 @@ export function resolveToolRoute(name: string, args: Record<string, unknown>, de
  }
  return {kind:"native",name,args,details};
 }
-export type ToolCategory = "edit" | "command" | "read" | "search" | "agent" | "wait" | "message" | "other";
+export type ToolCategory = "edit" | "command" | "read" | "skill" | "search" | "agent" | "wait" | "message" | "other";
 /**
  * `agents` is how many subagents a task call spawns; `jobs` are the distinct jobs a settled wait reports (both empty for other tools).
  * `stats` is an edit call's added/removed line counts and `counter` a todo call's `closed/total`: facts the collapsed head shows without running the family renderer.
+ * `skill` is a `read` of a `skill://` URL (category `skill`); its `paths` hold the skill file the settled result names, none until then.
  */
-export interface ToolPresentation { route: ToolRoute; title: string; target: string; category: ToolCategory; eligible: boolean; paths: readonly string[]; agents: number; jobs: readonly string[]; liveDetail: boolean; failed: boolean; completed: boolean; warnings: number; stats: DiffStats | null; counter: string | null }
+export interface ToolPresentation { route: ToolRoute; title: string; target: string; category: ToolCategory; eligible: boolean; paths: readonly string[]; agents: number; jobs: readonly string[]; liveDetail: boolean; failed: boolean; completed: boolean; warnings: number; stats: DiffStats | null; counter: string | null; skill: SkillReadView | null }
 /** Row titles of the host-run `vscode_debug_*` tools (docs/designs/2026-10-10-agent-debugger-tools.md section 5). */
 export const DEBUG_TOOL_TITLES: Readonly<Record<string,string>> = {vscode_debug_configs:"Debug setup",vscode_debug_breakpoints:"Breakpoints",vscode_debug_start:"Debug start",vscode_debug_wait:"Wait for stop",vscode_debug_inspect:"Debug inspect",vscode_debug_control:"Debug control",vscode_debug_handoff:"Hand off to you"};
 const titles: Readonly<Record<string,string>> = {...DEBUG_TOOL_TITLES,ask:"Ask",task:"Task",read:"Read",edit:"Edit",apply_patch:"Edit",ast_edit:"AST edit",write:"Write",bash:"Bash",python:"Python",eval:"Eval",grep:"Grep",ast_grep:"AST grep",glob:"Glob",find:"Find",web_search:"Web search",todo:"TODO",wait:"Wait",debug:"Debug",lsp:"LSP",goal:"Goal",resolve:"Resolve",reject:"Reject",github:"GitHub",think:"Think",retain:"Retain",recall:"Recall",reflect:"Reflect"};
@@ -78,14 +81,15 @@ export function toolPresentation(tool: ProjectedTool, cwd?: string): ToolPresent
  const {name,args,details} = route;
  const native = route.kind === "native" || route.kind === "device";
  const named = (value: string): boolean => native && name === value;
- const category: ToolCategory = route.kind === "agent" ? "message" : named("task") ? "agent" : named("wait") ? "wait" : native && ["edit","apply_patch","ast_edit","write"].includes(name) && !(route.kind === "device" && name === "write") ? "edit" : native && ["bash","python","eval"].includes(name) ? "command" : native && name === "read" && !/^[a-z][a-z0-9+.-]*:\/\//i.test(text(args.path)) ? "read" : native && ["grep","ast_grep","find","glob","web_search"].includes(name) ? "search" : "other";
+ const skill = native && name === "read" ? skillReadView(args.path,details,tool.result === undefined ? "" : messageText(tool.result),tool.result !== undefined && tool.status !== "error" && tool.result.isError !== true) : null;
+ const category: ToolCategory = route.kind === "agent" ? "message" : named("task") ? "agent" : named("wait") ? "wait" : native && ["edit","apply_patch","ast_edit","write"].includes(name) && !(route.kind === "device" && name === "write") ? "edit" : native && ["bash","python","eval"].includes(name) ? "command" : skill !== null ? "skill" : native && name === "read" && !/^[a-z][a-z0-9+.-]*:\/\//i.test(text(args.path)) ? "read" : native && ["grep","ast_grep","find","glob","web_search"].includes(name) ? "search" : "other";
  const path = text(args.path ?? args.file_path ?? args.file);
  const fileRows = [details.perFileResults, details.files, record(tool.active?.streamUpdate).files, record(tool.active?.streamUpdate).perFileDiffPreview].flatMap(value => Array.isArray(value) ? value.filter(isRecord) : []);
  const files = fileRows.flatMap(file => { const value = text(file.path ?? file.file_path); return value ? [value] : []; });
  // OMP's hashline `edit` carries its files only as `[PATH#TAG]` section headers in `input`; its result names one `path`.
  const editPaths = category !== "edit" ? [] : text(details.path) ? [text(details.path)] : path ? [path] : [...text(args.input).matchAll(/^\[([^\]\n#]+)#[0-9A-Fa-f]{4}\]/gm)].map(match => match[1]!.trim());
  const filePath = category === "read" ? text(details.resolvedPath) || readFilePath(path) : path;
- const paths = category === "edit" || category === "read" ? [...new Set((files.length ? files : category === "edit" ? editPaths : filePath ? [filePath] : []).map(value => normalizeToolPath(value,cwd)))] : [];
+ const paths = category === "skill" ? skill?.path ? [skill.path] : [] : category === "edit" || category === "read" ? [...new Set((files.length ? files : category === "edit" ? editPaths : filePath ? [filePath] : []).map(value => normalizeToolPath(value,cwd)))] : [];
  const stream = record(tool.active?.streamUpdate);
  const preview = (value: unknown): boolean => typeof value === "string" ? value.trim().length > 0 : Array.isArray(value) ? value.length > 0 : false;
  const liveDetail = category === "edit" && (tool.status === "queued" || tool.status === "running") && [args.content,args.newText,args.patch,args.input,args.previewDiff,args.diff,details.diff,record(stream.editDiffPreview).diff,stream.editStreamingFallback,...(Array.isArray(stream.files) ? stream.files.filter(isRecord).map(file => file.diff) : []),...(Array.isArray(stream.perFileDiffPreview) ? stream.perFileDiffPreview.filter(isRecord).map(file => file.diff) : []),partial.editDiffPreview,partial.content].some(preview);
@@ -99,9 +103,9 @@ export function toolPresentation(tool: ProjectedTool, cwd?: string): ToolPresent
  const jobs = category === "wait" ? [...new Set(settledJobs.map(job => text(job.name) || text(job.id)).filter(Boolean))] : [];
  // A running task or wait keeps its own live row and joins the adjacent group once it settles.
  const excluded = ["ask","resolve","reject","approve","approval","question","confirm"].includes(name) || (name === "task" || name === "wait" || name === "vscode_debug_wait") && pending || name.startsWith("vibe_") || details.requiresApproval === true || details.pendingApproval === true;
- const target = route.kind === "agent" ? `→ ${text(record(details.message).to) || path.replace(/^agent:\/\//i,"")}` : route.kind === "process" || route.kind === "config" ? path : named("todo") ? todoOperationText(args,details.op) : text(args.command ?? args.code ?? args.query ?? args.pattern ?? args.objective) || (category === "read" && path ? normalizeToolPath(path,cwd) : paths.join(", ")) || path;
+ const target = route.kind === "agent" ? `→ ${text(record(details.message).to) || path.replace(/^agent:\/\//i,"")}` : route.kind === "process" || route.kind === "config" ? path : skill !== null ? skill.label : named("todo") ? todoOperationText(args,details.op) : text(args.command ?? args.code ?? args.query ?? args.pattern ?? args.objective) || (category === "read" && path ? normalizeToolPath(path,cwd) : paths.join(", ")) || path;
  const failed = tool.status !== "skipped" && (tool.status === "error" || tool.result?.isError === true || details.isError === true || Boolean(details.error) ||
   category === "command" && (typeof details.exitCode === "number" && details.exitCode !== 0 || Array.isArray(details.cells) && details.cells.filter(isRecord).some(cell => cell.status === "error" || typeof cell.exitCode === "number" && cell.exitCode !== 0)) ||
   category === "edit" && fileRows.some(file => file.isError === true || Boolean(text(file.error) || text(file.errorText) || text(file.displayErrorText))));
- return {route,title:route.kind === "agent" ? "IRC" : route.kind === "process" ? "Process" : route.kind === "config" ? "Config" : route.kind === "help" ? name : named("eval") ? evalTitle(args,details) : titles[name] ?? name,target,category,eligible:!excluded,paths,agents,jobs,liveDetail,failed,completed:tool.status === "complete" && tool.result !== undefined && !failed,warnings,stats:category === "edit" ? editDiffStats({args,details,stream,settled:tool.result !== undefined}) : null,counter:named("todo") ? todoCounter(details.phases) : null};
+ return {route,title:route.kind === "agent" ? "IRC" : route.kind === "process" ? "Process" : route.kind === "config" ? "Config" : route.kind === "help" ? name : skill !== null ? "Skill" : named("eval") ? evalTitle(args,details) : titles[name] ?? name,target,category,eligible:!excluded,paths,agents,jobs,liveDetail,failed,completed:tool.status === "complete" && tool.result !== undefined && !failed,warnings,stats:category === "edit" ? editDiffStats({args,details,stream,settled:tool.result !== undefined}) : null,counter:named("todo") ? todoCounter(details.phases) : null,skill};
 }

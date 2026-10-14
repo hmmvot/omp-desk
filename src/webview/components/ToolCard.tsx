@@ -13,6 +13,7 @@ import { Diagnostics, displayText, JsonOutput, OUTPUT_SCOPE, record, scalar, Sec
 import { describeTool, hasNoDetails, hasWaitRows, TOOL_ICONS } from "./tool-renderers";
 import type { ToolSemanticView } from "./tool-render-types";
 import { formatGistDuration, toolGist, type GistPart } from "../../chat/tool-gist";
+import { stripSkillHeader } from "../../chat/skill-read";
 import { exitCodeOf, footerParts, splitToolNotices } from "../../chat/tool-notices";
 import { useSecondTick } from "../lib/live-clock";
 import { detectOutput } from "../lib/output-format";
@@ -247,20 +248,22 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 	// A command's own text is coloured by the language of the tool that runs it (the digest of several agents is not code).
 	const commandLanguage = compactTarget === null && Object.hasOwn(COMMAND_LANGUAGES, name) ? COMMAND_LANGUAGES[name] : undefined;
 	const commandClosed = state !== "running" && state !== "queued";
+	// A skill load wears the skill-prompt block's book, whether or not its renderer has run yet.
+	const toolIcon = metadata.skill !== null ? "book" : view?.icon ?? TOOL_ICONS[metadata.route.name] ?? "tools";
 	const aux = intent?.replace(/\s+/g, " ").trim() || undefined;
 	// The head says what a result says at a glance; the digest of agents and the wait face say it themselves.
 	const elapsed = live && props.startedAt !== undefined ? Math.max(0, Date.now() - props.startedAt) : undefined;
 	const gist: readonly GistPart[] = compactTarget !== null || waitFace || pendingAsk || state === "skipped" || state === "queued" ? []
 		: live ? elapsed !== undefined && elapsed >= 1000 ? [{ text: formatGistDuration(elapsed), tone: "plain" }] : []
 		: result === undefined ? []
-		: toolGist({ name: route.name, args: route.args, details: route.details, body: text, notices: split.notices, failed, settled: true, startedAt: props.startedAt, endedAt: props.endedAt, observedMs });
+		: toolGist({ name: route.name, args: route.args, details: route.details, body: metadata.skill !== null ? stripSkillHeader(text) : text, notices: split.notices, failed, settled: true, startedAt: props.startedAt, endedAt: props.endedAt, observedMs });
 	if (bare) {
 		const target = compactTarget?.digest ?? metadata.target;
 		return <div ref={root} className="omp-tool omp-native-tool omp-native-tool--bare" data-tool-name={name} data-tool-family={metadata.route.name} data-tool-call-id={props.callId ?? result.toolCallId} data-tool-status={state}>
 			<div className="omp-tool-head omp-tool-head--static" title={[metadata.title, compactTarget?.detail ?? target, aux, "no output"].filter(Boolean).join(" · ")}>
 				{/* The empty twistie slot keeps the icon in the column of the rows that disclose. */}
 				<span className="codicon codicon-blank" aria-hidden="true" />
-				<span className={`codicon codicon-${TOOL_ICONS[metadata.route.name] ?? "tools"}`} aria-hidden="true" />
+				<span className={`codicon codicon-${toolIcon}`} aria-hidden="true" />
 				<span className="omp-tool-name">{metadata.title}</span>
 				{target && <span className="omp-tool-digest" title={compactTarget?.detail ?? target}><ToolTargetText category={metadata.category} paths={metadata.paths} text={displayText(target)} line={changedLine} revalidate={state} language={commandLanguage} closed={commandClosed} /></span>}
 				{aux && <span className="omp-tool-aux omp-tool-aux--intent" title={aux}>{aux}</span>}
@@ -272,7 +275,7 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 	const headTarget = compactTarget?.digest ?? view?.target ?? metadata.target;
 	const face = <>
 		{!pendingAsk && !(state === "complete" && !failed) && <span className={`codicon codicon-${failed ? "error omp-tool-status--failed" : STATE_ICONS[state]}`} aria-hidden="true" />}
-		<span className={`codicon codicon-${view?.icon ?? TOOL_ICONS[metadata.route.name] ?? "tools"}`} aria-hidden="true" />
+		<span className={`codicon codicon-${toolIcon}`} aria-hidden="true" />
 		<span className="omp-tool-name">{waitFace && view?.title?.startsWith("Waiting on") ? <><span className="omp-wait-title-full">{view.title}</span><span className="omp-wait-title-short">Wait</span></> : view?.title ?? metadata.title}</span>
 		{headTarget && <span className="omp-tool-digest" title={compactTarget?.detail ?? headTarget}><ToolTargetText category={metadata.category} paths={metadata.paths} text={displayText(headTarget)} line={changedLine} revalidate={state} language={commandLanguage} closed={commandClosed} /></span>}
 		{view?.inline}

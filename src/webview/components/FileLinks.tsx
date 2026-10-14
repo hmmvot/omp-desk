@@ -249,12 +249,14 @@ function CommandText({ text, language, closed }: { text: string; language: strin
 }
 
 /**
- * A tool row's target text. A read's path becomes a link to that file at its line selector; an
+ * A tool row's target text. A read's path becomes a link to that file at its line selector; a skill read's name (and
+ * file) a link to the real skill file once the result names it, plain text before; an
  * edit's single path (not a rename `a → b`, not `N files`) links to the file at its first changed
  * line, however the result spells the path (absolute, relative, any drive-letter case). A command is
  * coloured as `language` (`shell` for bash). Anything else links each reference the text names.
  */
 export function ToolTargetText({ category, paths, text, line, revalidate, language, closed = true }: { category: string; paths: readonly string[]; text: string; line?: number; revalidate?: unknown; language?: string; closed?: boolean }): ReactNode {
+	if (category === "skill") return paths.length >= 1 ? <FileLink target={paths[0]!} revalidate={revalidate}>{text}</FileLink> : text;
 	if (category === "read" && paths.length >= 1) return <FileLink target={`${paths[0]}${displayedPosition(text)}`} proof={paths[0]} revalidate={revalidate}>{text}</FileLink>;
 	const single = category === "edit" && isFileLinkCandidate(text) && !text.includes("→") && !text.includes(", ") && !/^\d+ files?$/.test(text);
 	if (single) return <FileLink target={line === undefined ? text : `${text}:${line}`} proof={text} revalidate={revalidate}>{text}</FileLink>;

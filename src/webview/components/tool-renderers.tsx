@@ -4,6 +4,7 @@ import type { AgentActivity, RunningAgent } from "../../chat/agents";
 import { isClosedTodo, parseTodoPhases, todoMatchesDescriptions, todoOperationText } from "../../chat/todos";
 import { AGENT_STATUS_ICON } from "../../chat/hud-summary";
 import { evalTitle, normalizeToolPath, resolveToolRoute } from "../../chat/tool-presentation";
+import { skillReadView, stripSkillHeader } from "../../chat/skill-read";
 import { isRecord } from "../../shared/guards";
 import { Markdown } from "./Markdown";
 import { FileLink, FileLinkText } from "./FileLinks";
@@ -371,11 +372,14 @@ function read(c: ToolRenderContext): ToolSemanticView {
 	if (d.proc !== undefined || /^proc:\/\//i.test(path)) return processRoute(c, false);
 	if (d.cfg !== undefined || /^cfg:\/\//i.test(path)) return config(c, false);
 	const display = record(d.displayContent);
+	const skill = skillReadView(path, d, c.text, c.hasResult && !c.isError && !c.partial);
 	const url = d.kind === "url" || /^https?:\/\//i.test(path);
-	const target = strings(d.displayReadTargets).length ? strings(d.displayReadTargets).join(", ") : path;
-	return { title: "Read", family: url ? "read-url" : d.isDirectory === true ? "read-directory" : "read", target, meta: [d.conflictCount !== undefined ? `${scalar(d.conflictCount)} conflicts` : "", d.totalLines !== undefined ? `${scalar(d.totalLines)} lines` : "", d.fileSize !== undefined ? `${scalar(d.fileSize)} bytes` : "", d.suffixResolution ? "resolved suffix" : ""].filter(Boolean), tone: d.suffixResolution ? "warning" : undefined,
-		output: { label: "Content", copy: string(display.text) },
-		body: <>{d.contentType === "text/markdown" && !/:raw(?:$|:)/i.test(path) && c.args.raw !== true ? <TextPreview text={string(display.text) || c.text} expanded={c.expanded} prose /> : <CodePreview text={string(display.text) || c.text} expanded={c.expanded} start={typeof display.startLine === "number" ? display.startLine : Number(/:(\d+)(?:[-+:]|$)/.exec(path)?.[1] ?? 1)} lineNumbers={display.lineNumbers} path={path} />}</> };
+	const target = skill !== null ? skill.label : strings(d.displayReadTargets).length ? strings(d.displayReadTargets).join(", ") : path;
+	// A skill's `[Skill file: …]` first line only repeats the path the head links; the raw view keeps it.
+	const content = skill !== null ? stripSkillHeader(string(display.text) || c.text) : string(display.text) || c.text;
+	return { title: skill !== null ? "Skill" : "Read", family: skill !== null ? "skill" : url ? "read-url" : d.isDirectory === true ? "read-directory" : "read", target, meta: [d.conflictCount !== undefined ? `${scalar(d.conflictCount)} conflicts` : "", d.totalLines !== undefined ? `${scalar(d.totalLines)} lines` : "", d.fileSize !== undefined ? `${scalar(d.fileSize)} bytes` : "", d.suffixResolution ? "resolved suffix" : ""].filter(Boolean), tone: d.suffixResolution ? "warning" : undefined,
+		output: { label: "Content", copy: skill !== null ? content : string(display.text) },
+		body: <>{d.contentType === "text/markdown" && !/:raw(?:$|:)/i.test(path) && c.args.raw !== true ? <TextPreview text={content} expanded={c.expanded} prose /> : <CodePreview text={content} expanded={c.expanded} start={typeof display.startLine === "number" ? display.startLine : Number(/:(\d+)(?:[-+:]|$)/.exec(path)?.[1] ?? 1)} lineNumbers={display.lineNumbers} path={path} />}</> };
 }
 function resolution(c: ToolRenderContext): ToolSemanticView {
 	const d = c.details;

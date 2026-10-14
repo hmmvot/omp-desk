@@ -3875,6 +3875,67 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate("clearInterval(window.answerLinks)");
 		});
 
+		await t.test("a skill read is a Skill row with the book icon and the skill name, linked to the real SKILL.md once the result names it, and groups as Loaded N skill", async () => {
+			const skillFile = "C:\\Users\\me\\.omp\\skills\\omp-desk-release\\SKILL.md";
+			const subFile = "C:\\Users\\me\\.omp\\skills\\omp-desk-release\\scripts\\x.md";
+			const entries = (settled: boolean): string => `(()=>{
+			 const row=(id,message)=>({type:'message',id,parentId:null,timestamp:'2026-10-01T00:00:00.000Z',message});
+			 const call=(id,path)=>({type:'toolCall',id,name:'read',arguments:{path},intent:'Loading the release skill'});
+			 const result=(id,text,details)=>row('res-'+id,{role:'toolResult',toolCallId:id,toolName:'read',timestamp:4,isError:false,content:[{type:'text',text}],details});
+			 const entries=[
+			  row('user',{role:'user',timestamp:1,content:'Release it'}),
+			  row('calls',{role:'assistant',model:'m',timestamp:3,stopReason:'toolUse',content:[call('skill-main','skill://omp-desk-release'),call('skill-sub','skill://omp-desk-release/scripts/x.md'),call('skill-pending','skill://brainstorm'),call('file-read','src/a.ts')]}),
+			  result('skill-main','[Skill file: '+${JSON.stringify(skillFile)}+']\\n# Release skill\\nStep one',{resolvedPath:${JSON.stringify(skillFile)},contentType:'text/markdown'}),
+			  result('skill-sub','[Skill file: '+${JSON.stringify(subFile)}+']\\nsub file text',{}),
+			  result('file-read','file text',{}),
+			  ...(${settled} ? [result('skill-pending','[Skill file: C:\\\\skills\\\\brainstorm\\\\SKILL.md]\\nbrainstorm text',{})] : []),
+			 ];
+			 window.ui.push({entries,durableCount:entries.length,working:false,settled:true});
+			 window.answered=new Set();
+			 window.answerLinks=setInterval(()=>{for(const message of window.sent){
+			  if(message.type!=='omp:terminal-link-validate'||window.answered.has(message.requestId))continue;
+			  window.answered.add(message.requestId);
+			  window.ui.receive({type:'omp:terminal-link-validation',requestId:message.requestId,valid:[${JSON.stringify(skillFile)},${JSON.stringify(subFile)}].includes(message.target)});
+			 }},5);
+			})()`;
+			await reset("skill-read", "detailed");
+			await ui.evaluate(entries(false));
+			await ui.wait("document.querySelectorAll('[data-tool-call-id=\"skill-main\"] .omp-file-link, [data-tool-call-id=\"skill-sub\"] .omp-file-link').length===2");
+			const rowFacts = (id: string): Promise<{ icons: string[]; name: string; digest: string; links: string[]; linkText: string[]; intent: string }> => ui.evaluate(`(()=>{
+			 const head=document.querySelector('[data-tool-call-id="${id}"] .omp-tool-head');
+			 const links=[...head.querySelectorAll('.omp-file-link')];
+			 return {icons:[...head.querySelectorAll(':scope > .codicon')].map(node=>node.className.replace('codicon codicon-','')),name:head.querySelector('.omp-tool-name').textContent,digest:head.querySelector('.omp-tool-digest').textContent,
+			  links:links.map(link=>link.dataset.fileTarget),linkText:links.map(link=>link.textContent),intent:head.querySelector('.omp-tool-aux--intent')?.textContent??''}})()`);
+			const main = await rowFacts("skill-main");
+			assert.ok(main.icons.includes("book") && !main.icons.includes("file"), `the book icon, not the file icon (${main.icons})`);
+			assert.deepEqual([main.name, main.digest, main.links, main.linkText], ["Skill", "omp-desk-release", [skillFile], ["omp-desk-release"]]);
+			assert.equal(main.intent, "Loading the release skill", "the intent stays as for other tools");
+			const sub = await rowFacts("skill-sub");
+			assert.deepEqual([sub.name, sub.digest, sub.links], ["Skill", "omp-desk-release / scripts/x.md", [subFile]], "the sub-file opens from the header line when the details name no path");
+			const pending = await rowFacts("skill-pending");
+			assert.deepEqual([pending.name, pending.digest, pending.links], ["Skill", "brainstorm", []], "no result yet: the name without a link");
+			assert.equal(await ui.evaluate("document.querySelector('[data-tool-call-id=\"file-read\"] .omp-tool-name').textContent"), "Read", "an ordinary read keeps its title");
+			const sentOpen = (): Promise<string[]> => ui.evaluate("window.sent.filter(message=>message.type==='omp:terminal-link-open').map(message=>message.target)");
+			assert.deepEqual(await sentOpen(), []);
+			await ui.evaluate("document.querySelector('[data-tool-call-id=\"skill-main\"] .omp-file-link').click()");
+			assert.deepEqual(await sentOpen(), [skillFile], "a click on the name posts the open request for the SKILL.md path");
+			assert.equal(await ui.evaluate("document.querySelector('[data-tool-call-id=\"skill-main\"] .omp-tool-head').getAttribute('aria-expanded')"), "false", "the link click does not toggle the row");
+			await ui.evaluate("document.querySelector('[data-tool-call-id=\"skill-main\"] .omp-tool-head').click()");
+			await ui.wait("document.querySelector('[data-tool-call-id=\"skill-main\"] .omp-tool-body')?.textContent.includes('Step one')");
+			const body = await ui.evaluate<string>("document.querySelector('[data-tool-call-id=\"skill-main\"] .omp-tool-body').textContent");
+			assert.ok(body.includes("Release skill") && !body.includes("[Skill file:"), "the body is the skill text without the metadata line");
+			assert.equal(await ui.evaluate("document.querySelector('[data-tool-call-id=\"skill-main\"] .omp-tool-name').textContent"), "Skill", "the expanded head keeps its title");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+			await ui.evaluate("clearInterval(window.answerLinks)");
+
+			await reset("skill-read-overview", "overview");
+			await ui.evaluate(entries(true));
+			await ui.wait("document.querySelector('.omp-overview-head')");
+			assert.deepEqual(await ui.evaluate("[...document.querySelectorAll('.omp-overview-head')].map(node=>node.textContent)"), ["Read 1 file · Loaded 2 skills"]);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+			await ui.evaluate("clearInterval(window.answerLinks)");
+		});
+
 		await t.test("typing with nothing editable focused goes into the composer exactly once, while native keys, other fields and an unwritable composer are left alone", async () => {
 			await reset("type-to-focus");
 			await ui.evaluate(`(()=>{
