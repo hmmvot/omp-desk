@@ -49,11 +49,11 @@ export function useRowFilter(expanded: boolean): string {
 
 const grouped = (count: number): string => count.toLocaleString("en-US");
 
-/** `Show all 783 lines`; the button that switches the card to its full view. */
-export function ShowAll({ count, unit }: { count: number; unit: string }): ReactNode {
+/** `Show all 783 lines`; the button that switches the card to its full view. `count` is the rows the full view has; `named` is the count and unit the button states when those are not rows (records). */
+export function ShowAll({ count, unit, named }: { count: number; unit: string; named?: { readonly count: number; readonly unit: string } }): ReactNode {
 	const { showAll } = useToolViewContext();
 	if (showAll === undefined) return null;
-	return <button type="button" className="omp-output-more" onClick={() => showAll(count)}>Show all {grouped(count)} {unit}</button>;
+	return <button type="button" className="omp-output-more" onClick={() => showAll(count)}>Show all {grouped(named?.count ?? count)} {named?.unit ?? unit}</button>;
 }
 
 /** A row window the card shows in full: the head 200 rows and the last 20, each step 200 more (replaced by the windowed list). */
@@ -110,6 +110,8 @@ export interface OutputRowsProps<T> {
 	readonly fixed?: boolean;
 	/** The width of the longest row in characters: a windowed list is as wide as the whole, whichever rows are mounted. */
 	readonly widthCh?: number;
+	/** What the Show all button names when it is not the rows (a count of records, not of the rows they unfold to). */
+	readonly named?: { readonly count: number; readonly unit: string };
 	/** The marker's words for what a head preview hides; the rows it hides are `all.slice(limit)`. */
 	readonly hidden?: (rows: readonly T[]) => string;
 }
@@ -118,7 +120,7 @@ export interface OutputRowsProps<T> {
  * Rows, bounded: at most `limit` when the card is not full, with the marker that says what is not shown and the
  * button that shows it. A remainder of three rows or fewer is shown instead. A tail preview puts the marker first.
  */
-export function OutputRows<T>({ all, render, expanded, limit = PREVIEW_ROWS, tail = false, unit = "line", units = `${unit}s`, hidden, fixed = false, widthCh }: OutputRowsProps<T>): ReactNode {
+export function OutputRows<T>({ all, render, expanded, limit = PREVIEW_ROWS, tail = false, unit = "line", units = `${unit}s`, hidden, fixed = false, widthCh, named }: OutputRowsProps<T>): ReactNode {
 	const { live } = useToolViewContext();
 	if (expanded) return <FullRows all={all} render={render} fixed={fixed} widthCh={widthCh} />;
 	const count = all.length;
@@ -127,13 +129,13 @@ export function OutputRows<T>({ all, render, expanded, limit = PREVIEW_ROWS, tai
 	const word = rest === 1 ? unit : units;
 	if (tail) {
 		return <>
-			<div className="omp-output-marker omp-output-marker--top"><span>… ({grouped(rest)} earlier {word}, showing {limit} of {grouped(count)}){live ? " · live" : ""}</span><ShowAll count={count} unit={units} /></div>
+			<div className="omp-output-marker omp-output-marker--top"><span>… ({grouped(rest)} earlier {word}, showing {limit} of {grouped(count)}){live ? " · live" : ""}</span><ShowAll count={count} unit={units} named={named} /></div>
 			{render(all.slice(-limit), count - limit)}
 		</>;
 	}
 	return <>
 		{render(all.slice(0, limit), 0)}
-		<div className="omp-output-marker omp-output-marker--bottom"><span>… {hidden === undefined ? `${grouped(rest)} more ${word}` : hidden(all.slice(limit))}</span><ShowAll count={count} unit={units} /></div>
+		<div className="omp-output-marker omp-output-marker--bottom"><span>… {hidden === undefined ? `${grouped(rest)} more ${word}` : hidden(all.slice(limit))}</span><ShowAll count={count} unit={units} named={named} /></div>
 	</>;
 }
 

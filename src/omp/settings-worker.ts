@@ -287,7 +287,7 @@ async function main(request: WorkerRequest): Promise<unknown> {
       const model = selected?.model ?? resolver.pickDefaultAvailableModel(registry.getAvailable());
       if (!model) throw new SettingsRefusal("No available default model can be applied.");
       if (resolver.formatModelStringWithRouting(model) !== `${model.provider}/${model.id}`) throw new SettingsRefusal("Not applied: the effective default has upstream routing that RPC cannot express.");
-      return { provider: model.provider, id: model.id, thinking: selected?.thinkingLevel ?? sessionSettings.cfgDefaultThinkingLevel.get(settings) };
+      return { provider: model.provider, id: model.id, thinking: selected?.thinkingLevel ?? sessionSettings.cfgDefaultThinkingLevel.get(settings), efforts: getSupportedEfforts(model) };
     }
     const all = registry.getAll("all");
     const availableKeys = new Set(available.map(model => `${model.provider}/${model.id}`));

@@ -80,7 +80,7 @@
           "enum": ["overview", "detailed"],
           "default": "overview",
           "scope": "application",
-          "description": "Tool presentation in every Chat. Overview groups routine calls; Detailed shows individual calls. The Tools output picker in the chat footer changes this global setting live."
+          "description": "Tool presentation in every Chat. Overview groups routine calls; Detailed shows individual calls. Applies live to every open Chat."
         },
         "ompDesk.desktopNotifications": {
           "type": "boolean",

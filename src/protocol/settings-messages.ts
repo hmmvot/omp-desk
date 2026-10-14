@@ -23,11 +23,12 @@ export type SettingsAction =
 /**
  * What "use the default model in this Chat session" would do, read by the host when it sends a snapshot. `current` is the model and
  * thinking level the session reports now; `target` is the effective default role, or `unavailable` says why none can be applied.
+ * `target.thinkingUnsupported` says the target model cannot take `target.thinking`: the model is switched and the level is kept.
  */
 export interface SessionApply {
   readonly label: string; readonly busy: boolean;
   readonly current?: { readonly model: string; readonly thinking?: string };
-  readonly target?: { readonly model: string; readonly thinking?: string };
+  readonly target?: { readonly model: string; readonly thinking?: string; readonly thinkingUnsupported?: true };
   readonly unavailable?: string;
 }
 export type SettingsMessage =

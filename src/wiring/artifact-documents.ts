@@ -5,7 +5,7 @@
  * as the window has one. The route and the provider share `host/artifact-lookup.ts`.
  */
 import * as vscode from "vscode";
-import { ARTIFACT_SCHEME, artifactDocumentText, artifactUriParts, findArtifact } from "../host/artifact-lookup.ts";
+import { ARTIFACT_SCHEME, artifactDocumentText, artifactTool, artifactUriParts, findArtifact } from "../host/artifact-lookup.ts";
 
 /** What opening an artifact came to: opened, or the sentence that says why not. */
 export type ArtifactOpenOutcome = { readonly opened: true } | { readonly opened: false; readonly reason: string };
@@ -25,7 +25,7 @@ export function registerArtifactDocuments(subscriptions: { push(...items: vscode
 			const found = await findArtifact(sessionFile, artifactId);
 			if (found.status === "refused") return { opened: false, reason: found.reason };
 			try {
-				const document = await vscode.workspace.openTextDocument(vscode.Uri.from({ scheme: ARTIFACT_SCHEME, ...artifactUriParts(artifactId, sessionFile) }));
+				const document = await vscode.workspace.openTextDocument(vscode.Uri.from({ scheme: ARTIFACT_SCHEME, ...artifactUriParts(artifactId, sessionFile, artifactTool(found.artifact.name)) }));
 				await vscode.window.showTextDocument(document, { preview: true });
 				return { opened: true };
 			} catch (error) {

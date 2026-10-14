@@ -166,6 +166,15 @@ test("Current session is hidden when the session already uses the default, and s
   assert.doesNotMatch(refused, /in this session<\/button>/);
 });
 
+test("Current session does not promise a thinking level the target model lacks, offers only the model switch, and goes away once the model is the session's", () => {
+  const lacking = { ...live, target: { model: "a/sonnet", thinking: "high", thinkingUnsupported: true } };
+  const offered = withSession(lacking);
+  assert.match(offered, /does not support high thinking/);
+  assert.doesNotMatch(offered, /sonnet · high/, "the heading names no level that will not be set");
+  assert.match(offered, /in this session<\/button>/);
+  assert.doesNotMatch(withSession({ ...lacking, current: { model: "a/sonnet", thinking: "off" } }), /Current session/, "the model already applied is all that can apply");
+});
+
 test("Current session disables the button with the reason while the session is busy", () => {
   const html = withSession({ ...live, busy: true });
   assert.match(html, /<button type="button" disabled="" title="The session is busy\. Try again when it is idle\.">Use sonnet in this session<\/button>/);

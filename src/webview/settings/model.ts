@@ -172,20 +172,22 @@ export interface SessionBlock {
 const quoted = (label: string): string => `the Chat session “${label}”`;
 /**
  * The "Current session" block: what the button would do to the open Chat session, in words. Null when there is nothing to offer:
- * no session, or it already uses the default model (and thinking level, when one would be set).
+ * no session, or it already uses the default model (and thinking level, when one would be set). A default thinking level the target
+ * model does not support is never set, so it neither keeps the block open nor is promised; the block says the model lacks it.
  */
 export function sessionBlock(session: SessionApply | null | undefined): SessionBlock | null {
   if (!session) return null;
   const who = quoted(session.label);
   const line = `Saved settings apply to new sessions. This changes the model of ${who} now.`;
   if (!session.target) return { heading: "Switch this Chat session to the default model", line, unavailable: `${session.unavailable ?? "The default model could not be resolved."} Nothing can be switched.` };
-  const level = session.target.thinking !== undefined && session.target.thinking !== "auto" ? session.target.thinking : undefined;
+  const level = session.target.thinking !== undefined && session.target.thinking !== "auto" && session.target.thinkingUnsupported !== true ? session.target.thinking : undefined;
   if (session.current?.model === session.target.model && (level === undefined || session.current.thinking === level)) return null;
   const model = shortModel(session.target.model);
   return {
     heading: `Switch ${who} to ${session.target.model}${level ? ` · ${level}` : ""}`,
     button: `Use ${model} in this session`, line,
     ...(session.target.thinking === "auto" ? { note: "Auto thinking is not applied; the session keeps its current level." } : {}),
+    ...(session.target.thinkingUnsupported === true ? { note: `${model} does not support ${session.target.thinking} thinking, the default thinking level, so the session keeps its current level.` } : {}),
     ...(session.busy ? { blocked: "The session is busy. Try again when it is idle." } : {}),
   };
 }

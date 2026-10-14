@@ -12,6 +12,7 @@ import {
 	MAX_ARTIFACT_BYTES,
 	artifactDocumentText,
 	artifactNotice,
+	artifactTool,
 	artifactUriParts,
 	findArtifact,
 	parseArtifactUri,
@@ -49,6 +50,14 @@ describe("artifact URIs", () => {
 		assert.equal(parseArtifactUri({ scheme: ARTIFACT_SCHEME, path: "/1234567890", query: parts.query }), null);
 		assert.equal(parseArtifactUri({ scheme: ARTIFACT_SCHEME, path: "/12", query: "session=a&x=b" }), null);
 		assert.equal(parseArtifactUri({ scheme: ARTIFACT_SCHEME, path: "/12", query: "session=%E0%A4%A" }), null);
+	});
+
+	it("titles the tab by the last path segment with the tool and the id, and still resolves an old bare-id address", () => {
+		const parts = artifactUriParts("12", session, artifactTool("12.bash.log"));
+		assert.equal(parts.path.split("/").pop(), "Full output · bash · artifact 12");
+		assert.deepEqual(parseArtifactUri({ scheme: ARTIFACT_SCHEME, ...parts }), { artifactId: "12", sessionFile: session });
+		assert.deepEqual(parseArtifactUri({ scheme: ARTIFACT_SCHEME, path: "/12", query: parts.query }), { artifactId: "12", sessionFile: session });
+		assert.equal(artifactTool("notes.txt"), null);
 	});
 });
 

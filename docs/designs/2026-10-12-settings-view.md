@@ -7,7 +7,7 @@ date: 2026-10-12
 
 ## Problem
 
-OMP Desk contributes a dozen `omp.*` settings (tool presentation, notifications, Sessions layout and visibility, link behaviour, the agent debugger's permissions). The only way to see or change them is VS Code's Settings editor, searched by extension, or a hand edit of `settings.json`. Several are changed from elsewhere in Desk (the Tools output picker in the Chat footer, the Sessions layout picker, the debugger consent prompt's "always allow"), so the user cannot tell from Desk itself what is currently set, where the value comes from, or how to undo it.
+OMP Desk contributes a dozen `omp.*` settings (tool presentation, notifications, Sessions layout and visibility, link behaviour, the agent debugger's permissions). The only way to see or change them is VS Code's Settings editor, searched by extension, or a hand edit of `settings.json`. Several are changed from elsewhere in Desk (the Sessions layout picker, the debugger consent prompt's "always allow"), so the user cannot tell from Desk itself what is currently set, where the value comes from, or how to undo it.
 
 ## Goals and Non-goals
 
@@ -24,7 +24,7 @@ OMP Desk contributes a dozen `omp.*` settings (tool presentation, notifications,
 
 ## Current State
 
-Settings are contributed under one `contributes.configuration` section titled "OMP Desk". Desk reads them with `workspace.getConfiguration("omp").get(...)` (no resource, so a folder layer never applies) and writes some of them to the user layer from its own surfaces: `toolCallDetail` (Chat footer picker), `sessionsGrouping` (Sessions layout picker) and the debugger consent ("Always Allow"). The container hosts Sessions, Skills, Tools, MCP, Extensions (and Context) as tree views; the inventory views read only while visible ([design](2026-10-11-skills-tools-mcp-extensions-views.md)). Two existing Webview pages are message-only (the Models/Agents editors; `createSettingsHtml`), built as an esbuild IIFE bundle with React and a nonce-gated stylesheet.
+Settings are contributed under one `contributes.configuration` section titled "OMP Desk". Desk reads them with `workspace.getConfiguration("omp").get(...)` (no resource, so a folder layer never applies) and writes some of them to the user layer from its own surfaces: `sessionsGrouping` (Sessions layout picker) and the debugger consent ("Always Allow"). The container hosts Sessions, Skills, Tools, MCP, Extensions (and Context) as tree views; the inventory views read only while visible ([design](2026-10-11-skills-tools-mcp-extensions-views.md)). Two existing Webview pages are message-only (the Models/Agents editors; `createSettingsHtml`), built as an esbuild IIFE bundle with React and a nonce-gated stylesheet.
 
 ## Proposed Design
 
@@ -69,7 +69,7 @@ Decision (ADR-0062): **user by default; workspace when it already overrides or t
 
 ### Live update and the page's state
 
-The controller owns no cache. `workspace.onDidChangeConfiguration` (filtered to the projected keys) and `onDidChangeWorkspaceFolders` make the provider push a fresh state to the page **while the view is visible**; a hidden view is not passively read, and showing it again re-reads. A write already admitted when the view hides still finishes and is read back. So a `settings.json` edit, the Settings editor, another window's write and Desk's other surfaces (the Chat footer picker) all appear without a command.
+The controller owns no cache. `workspace.onDidChangeConfiguration` (filtered to the projected keys) and `onDidChangeWorkspaceFolders` make the provider push a fresh state to the page **while the view is visible**; a hidden view is not passively read, and showing it again re-reads. A write already admitted when the view hides still finishes and is read back. So a `settings.json` edit, the Settings editor, another window's write and Desk's other surfaces (the Sessions layout picker) all appear without a command.
 
 The page keeps its state in a pure reducer (`src/webview/desk-settings/page-state.ts`, tested) with these rules:
 - Every write has a request id. A toggle or choice shows its new value at once as *pending* for that setting; **an unrelated snapshot never rolls a pending write back**; a result for that request settles it (success: kept until the next snapshot confirms it; failure: dropped, so the control returns to the stored value); an older request's result never clears a newer pending write.

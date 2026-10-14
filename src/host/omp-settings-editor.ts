@@ -16,6 +16,9 @@ import type { SettingsKind } from "../chat/settings-command";
 import type { SessionApply, SettingsMessage } from "../protocol/settings-messages";
 import { chooseSetting, pickFallbackChainKey, pickSettingsModel, pickSettingsThinking } from "./settings-pickers";
 import { modelKey, roleChange, selectorBase, selectorThinking } from "../protocol/settings-pick-items";
+import { onDiskFolder } from "./folder-display.ts";
+import { thinkingUnsupported } from "./omp-settings-apply";
+import { normalizeWorkspaceDirectory } from "./session-files.ts";
 import { parseModelPickRequest, parseRoleAssignment } from "./settings-pick-requests";
 import type { PickEntry } from "../protocol/settings-pick-items";
 
@@ -26,7 +29,7 @@ export interface SettingsEditorContext {
   readonly sessionLabel?: string;
   /** The open Chat session's model, thinking level and whether it is busy, read when a snapshot is sent; null when it cannot be read. */
   readonly sessionState?: () => { model?: string; thinking?: string; busy: boolean } | null;
-  readonly applyDefault?: (model: { provider: string; id: string; thinking?: string }) => Promise<string>;
+  readonly applyDefault?: (model: { provider: string; id: string; thinking?: string; efforts?: readonly string[] }) => Promise<string>;
 }
 export interface SettingsEditorHost {
   /** The OMP profile a command-opened editor uses. */
@@ -51,8 +54,11 @@ interface Editor {
 const VIEW_TYPE = "omp.settings";
 const STORED_CONTEXTS = "omp.settings.contexts";
 const PICK_TITLES = { "fallback-entry": "Add to the fallback chain", "agent-override": "Add to the agent's model override", prewalk: "Prewalk model", advisor: "Advisor model" } as const;
+/** The key compares a folder by its identity (case-folded on Windows); `binding.folder` is the display spelling. */
 const editorKey = (kind: SettingsKind, binding: SettingsEditorContext): string =>
-  createHash("sha256").update(JSON.stringify([kind, binding.folder === null ? null : path.resolve(binding.folder), binding.profile])).digest("hex");
+  createHash("sha256").update(JSON.stringify([kind, binding.folder === null ? null : normalizeWorkspaceDirectory(binding.folder), binding.profile])).digest("hex");
+/** The efforts a resolved default model supports, as the worker sent them; `undefined` when it sent none (support unknown). */
+const effortsOf = (value: unknown): readonly string[] | undefined => Array.isArray(value) && value.every((item): item is string => typeof item === "string") ? value : undefined;
 
 /**
  * One editor per native profile and scope (global, or one project folder), independent of conversation
@@ -75,7 +81,7 @@ export class SettingsEditors implements vscode.Disposable {
     );
   }
   async open(kind: SettingsKind, requested: SettingsEditorContext): Promise<void> {
-    const binding = requested;
+    const binding: SettingsEditorContext = requested.folder === null ? requested : { ...requested, folder: await onDiskFolder(requested.folder) };
     const key = editorKey(kind, binding);
     const existing = this.#editors.get(key);
     if (existing) {
@@ -134,7 +140,7 @@ export class SettingsEditors implements vscode.Disposable {
   }
   /** Moves an open editor to another scope of the same profile; an editor already showing that scope is revealed instead. */
   async #rebind(editor: Editor, chosen: string | null): Promise<string> {
-    const folder = chosen;
+    const folder = chosen === null ? null : await onDiskFolder(chosen);
     const binding: SettingsEditorContext = { folder, profile: editor.binding.profile, ...(editor.binding.executable ? { executable: editor.binding.executable } : {}) };
     const key = editorKey(editor.kind, binding);
     if (key === editor.key) return "";
@@ -152,7 +158,7 @@ export class SettingsEditors implements vscode.Disposable {
   }
   async #pickScope(editor: Editor): Promise<string | null | undefined> {
     const current = editor.binding.folder;
-    const folders = [...new Set([...this.host.folders(), ...(current === null ? [] : [current])])];
+    const folders = [...new Map([...this.host.folders(), ...(current === null ? [] : [current])].map(folder => [normalizeWorkspaceDirectory(folder), folder])).values()];
     const entries: PickEntry[] = [
       { label: `${current === null ? "$(check) " : ""}$(globe) Global`, description: editor.kind === "agents" ? "Global config, user and bundled agents; no project layer" : "Global config; no project layer", value: "global", current: current === null, available: true },
       ...(folders.length ? [{ separator: "Project folder" }] : []),
@@ -213,7 +219,8 @@ export class SettingsEditors implements vscode.Disposable {
     try {
       const result = await this.#worker(editor, { action: "resolve-default" });
       if (!record(result) || typeof result.provider !== "string" || typeof result.id !== "string") return { ...base, unavailable: "OMP did not resolve a default model." };
-      return { ...base, target: { model: `${result.provider}/${result.id}`, ...(typeof result.thinking === "string" ? { thinking: result.thinking } : {}) } };
+      const thinking = typeof result.thinking === "string" ? result.thinking : undefined;
+      return { ...base, target: { model: `${result.provider}/${result.id}`, ...(thinking ? { thinking } : {}), ...(thinkingUnsupported(thinking, effortsOf(result.efforts)) ? { thinkingUnsupported: true as const } : {}) } };
     } catch (error) {
       return { ...base, unavailable: error instanceof SettingsRefusal ? error.message : "The default model could not be resolved." };
     }
@@ -345,7 +352,8 @@ export class SettingsEditors implements vscode.Disposable {
           const result = await this.#worker(editor, { action: "resolve-default" });
           if (editor.binding.applyDefault !== apply) throw new SettingsRefusal("The launching Chat changed while resolving the default. Nothing was applied.");
           if (!record(result) || typeof result.provider !== "string" || typeof result.id !== "string" || (result.thinking !== undefined && typeof result.thinking !== "string")) throw new SettingsRefusal("OMP did not resolve a default model.");
-          message = await apply({ provider: result.provider, id: result.id, thinking: result.thinking as string | undefined });
+          const efforts = effortsOf(result.efforts);
+          message = await apply({ provider: result.provider, id: result.id, thinking: result.thinking as string | undefined, ...(efforts ? { efforts } : {}) });
           // The block that offered the switch must reflect the session as it is now.
           await this.#read(editor).catch(() => undefined);
           break;

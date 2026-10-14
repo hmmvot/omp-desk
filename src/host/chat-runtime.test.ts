@@ -672,6 +672,18 @@ describe("native Models and Agents settings", () => {
 		await apply({ provider: "p", id: "target" });
 		assert.equal(channel.commandsOfType("set_model").length, writesAfterAuto);
 	});
+	it("applies the model of a default whose thinking level the model does not support, leaves the session's level and reports applied", async () => {
+		const { runtime, channel } = await liveRig();
+		const session = runtime.sessionOf(TAB); assert.ok(session);
+		const apply = settingsSessionApply(session, () => true);
+		channel.handlers.set("get_available_models", () => ({ data: { models: [{ provider: "p", id: "plain", name: "Plain" }] } }));
+		channel.handlers.set("set_model", command => { channel.child.model = { provider: command.provider, id: command.modelId, name: "Plain" }; return { data: channel.child.model }; });
+		const message = await apply({ provider: "p", id: "plain", thinking: "high", efforts: [] });
+		assert.doesNotMatch(message, /readback did not match/);
+		assert.match(message, /^Applied p\/plain/);
+		assert.equal(channel.child.model?.id, "plain");
+		assert.equal(channel.commandsOfType("set_thinking_level").length, 0, "an unsupported level is never sent");
+	});
 });
 
 describe("terminal-UI builtins typed into Chat", () => {

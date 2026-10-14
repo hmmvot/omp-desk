@@ -320,11 +320,12 @@ export interface StaleIncarnation {
 /** `joined` once the session finished initializing (or had nothing to wait for). */
 export type JoinResult = StaleIncarnation | { readonly status: "joined" };
 
-/** The model (and thinking level) a settings editor asks the launching Chat to take. */
+/** The model (and thinking level) a settings editor asks the launching Chat to take. `efforts` are the levels the model supports, when known. */
 export interface ModelDefault {
 	readonly provider: string;
 	readonly id: string;
 	readonly thinking?: string;
+	readonly efforts?: readonly string[];
 }
 
 /**

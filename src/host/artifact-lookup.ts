@@ -19,7 +19,7 @@ export const ARTIFACT_SCHEME = "omp-artifact";
 /** What one artifact document shows at most; a larger file is named and not read. */
 export const MAX_ARTIFACT_BYTES = 16 * 1024 * 1024;
 const ARTIFACT_ID = /^\d{1,9}$/;
-const ARTIFACT_NAME = /^(\d{1,9})\.[A-Za-z0-9_-]+\.[A-Za-z0-9]+$/;
+const ARTIFACT_NAME = /^(\d{1,9})\.([A-Za-z0-9_-]+)\.[A-Za-z0-9]+$/;
 
 /** An artifact the lookup found: where it is, its file name and its size. */
 export interface FoundArtifact {
@@ -39,15 +39,24 @@ export type ArtifactRead =
 
 const refused = (reason: string): { readonly status: "refused"; readonly reason: string } => ({ status: "refused", reason });
 
-/** The URI parts of an artifact document: `omp-artifact:/<id>?session=<encoded session file>`. */
-export function artifactUriParts(artifactId: string, sessionFile: string): { readonly path: string; readonly query: string } {
-	return { path: `/${artifactId}`, query: `session=${encodeURIComponent(sessionFile)}` };
+/** The tool an artifact file name names (`12.bash.log` is bash's), or `null` for a name of another shape. */
+export function artifactTool(name: string): string | null {
+	return ARTIFACT_NAME.exec(name)?.[2] ?? null;
 }
 
-/** The artifact id and session file of an `omp-artifact:` URI, or `null` for anything else. */
+/**
+ * The URI parts of an artifact document: `omp-artifact:/<id>/<title>?session=<encoded session file>`. The editor tab is
+ * titled by the last path segment, so that segment is the title (`Full output · bash · artifact 12`), not the bare id.
+ */
+export function artifactUriParts(artifactId: string, sessionFile: string, tool: string | null = null): { readonly path: string; readonly query: string } {
+	const title = `Full output · ${tool === null ? "" : `${tool} · `}artifact ${artifactId}`;
+	return { path: `/${artifactId}/${title}`, query: `session=${encodeURIComponent(sessionFile)}` };
+}
+
+/** The artifact id and session file of an `omp-artifact:` URI, or `null` for anything else. The title segment is display only; a tab saved before it existed (`/<id>`) still resolves. */
 export function parseArtifactUri(uri: { readonly scheme: string; readonly path: string; readonly query: string }): { readonly artifactId: string; readonly sessionFile: string } | null {
 	if (uri.scheme !== ARTIFACT_SCHEME) return null;
-	const artifactId = /^\/(\d{1,9})$/.exec(uri.path)?.[1];
+	const artifactId = /^\/(\d{1,9})(?:\/[^/]+)?$/.exec(uri.path)?.[1];
 	const query = /^session=([^&]+)$/.exec(uri.query)?.[1];
 	if (artifactId === undefined || query === undefined) return null;
 	try {

@@ -9,6 +9,8 @@ import { runSettingsWorker } from "./omp-settings-worker";
 import { createSettingsHtml } from "./guest-webview";
 import { OmpConfigController } from "./omp-config-controller";
 import { chooseSetting } from "./settings-pickers";
+import { onDiskFolder } from "./folder-display.ts";
+import { normalizeWorkspaceDirectory } from "./session-files.ts";
 import { SettingsRefusal } from "./omp-settings-core";
 import { isRecord as record } from "../shared/guards";
 import type { ConfigMessage } from "../protocol/omp-config-model";
@@ -33,8 +35,9 @@ interface Editor {
 }
 const VIEW_TYPE = "ompDesk.ompSettings";
 const STORED_CONTEXTS = "ompDesk.ompSettings.contexts";
+/** The key compares a folder by its identity (case-folded on Windows); `binding.folder` is the display spelling. */
 const editorKey = (binding: OmpConfigBinding): string =>
-  createHash("sha256").update(JSON.stringify([binding.folder === null ? null : path.resolve(binding.folder), binding.profile])).digest("hex");
+  createHash("sha256").update(JSON.stringify([binding.folder === null ? null : normalizeWorkspaceDirectory(binding.folder), binding.profile])).digest("hex");
 
 /**
  * The full OMP settings editor (ADR-0071): one editor per OMP profile and scope (global, or one project folder),
@@ -57,7 +60,7 @@ export class OmpConfigEditors implements vscode.Disposable {
     );
   }
   async open(requested: OmpConfigBinding): Promise<void> {
-    const binding = requested;
+    const binding: OmpConfigBinding = requested.folder === null ? requested : { ...requested, folder: await onDiskFolder(requested.folder) };
     const key = editorKey(binding);
     const existing = this.#editors.get(key);
     if (existing) { existing.panel.reveal(vscode.ViewColumn.Active); existing.controller.init(); return; }
@@ -134,11 +137,11 @@ export class OmpConfigEditors implements vscode.Disposable {
     await vscode.window.showTextDocument(document, { preview: false, selection: new vscode.Range(position, position) });
   }
   async #pickScope(editor: Editor, current: string | null): Promise<string | null | undefined> {
-    const folders = [...new Set([...this.host.folders(), ...(current === null ? [] : [current])])];
+    const folders = [...new Map([...this.host.folders(), ...(current === null ? [] : [current])].map(folder => [normalizeWorkspaceDirectory(folder), folder])).values()];
     const entries: PickEntry[] = [
       { label: `${current === null ? "$(check) " : ""}$(globe) Global`, description: "Global config only; no project layer", value: "global", current: current === null, available: true },
       ...(folders.length ? [{ separator: "Project folder" }] : []),
-      ...folders.map(folder => ({ label: `${folder === current ? "$(check) " : ""}$(folder) ${path.basename(folder) || folder}`, description: folder, value: `folder:${folder}`, current: folder === current, available: true })),
+      ...folders.map(folder => { const here = current !== null && normalizeWorkspaceDirectory(folder) === normalizeWorkspaceDirectory(current); return { label: `${here ? "$(check) " : ""}$(folder) ${path.basename(folder) || folder}`, description: folder, value: `folder:${folder}`, current: here, available: true }; }),
       { separator: "" },
       { label: "$(folder-opened) Choose another folder…", value: "browse", current: false, available: true },
     ];
@@ -151,7 +154,7 @@ export class OmpConfigEditors implements vscode.Disposable {
   }
   /** Moves an open editor to another scope of the same profile; a scope already open in another tab is revealed instead. */
   async #rebind(editor: Editor, picked: string | null): Promise<{ folder: string | null } | { refusal: string }> {
-    const folder = picked;
+    const folder = picked === null ? null : await onDiskFolder(picked);
     const binding: OmpConfigBinding = { folder, profile: editor.binding.profile, ...(editor.binding.executable ? { executable: editor.binding.executable } : {}) };
     const key = editorKey(binding);
     const other = this.#editors.get(key);
