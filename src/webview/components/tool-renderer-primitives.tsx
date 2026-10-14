@@ -13,6 +13,8 @@ import { WebLink } from "./WebLinks";
 import { webLinkUrl } from "../../shared/terminal-links";
 import { OutputRows, PREVIEW_ROWS, ShowAll, useRowFilter, useToolViewContext } from "./tool-view";
 import { JsonRows } from "./JsonRows";
+import { RowsView } from "./RowsView";
+import { lineTone } from "../lib/output-rows";
 import type { JsonSource } from "../lib/json-rows";
 import { jsonTreeOfValue, MAX_ROW_CHARS } from "../lib/json-tokens";
 
@@ -54,7 +56,7 @@ function Prose({ lines, expanded }: { lines: readonly string[]; expanded: boolea
  * Plain text rows, at most `lines` of them (the last ones for `tail`) until the card shows everything.
  * `language` is a fence id or alias (`python`, `js`): the text is then code, coloured by the theme.
  */
-export function TextPreview({ text, expanded, lines = PREVIEW_ROWS, tail = false, prose = false, language, closed = true }: { text: string; expanded: boolean; lines?: number; tail?: boolean; prose?: boolean; language?: string; closed?: boolean }): ReactNode {
+export function TextPreview({ text, expanded, lines = PREVIEW_ROWS, tail = false, prose = false, language, closed = true, tint = false }: { text: string; expanded: boolean; lines?: number; tail?: boolean; prose?: boolean; language?: string; closed?: boolean; tint?: boolean }): ReactNode {
 	const source = useMemo(() => text.trim() ? displayText(text).replace(/\s+$/, "").split("\n") : [], [text]);
 	const filter = useRowFilter(expanded && !prose);
 	const all = useMemo(() => filter === "" ? expanded ? source : source.map(cutRow) : source.filter(line => line.toLowerCase().includes(filter)), [source, filter, expanded]);
@@ -64,7 +66,7 @@ export function TextPreview({ text, expanded, lines = PREVIEW_ROWS, tail = false
 	const code = !prose && language !== undefined && languageId(language) !== null ? language : null;
 	return <div className="omp-native-preview">{prose
 		? <Prose lines={source} expanded={expanded} />
-		: <OutputRows all={all} expanded={expanded} limit={lines} tail={tail} fixed widthCh={widthCh} render={(rows, offset) => <pre className="omp-pre">{code !== null ? <CodeText all={all} from={offset} to={offset + rows.length} language={code} closed={closed} /> : rows.map((row, index) => <span key={offset + index}>{row}{"\n"}</span>)}</pre>} />}</div>;
+		: <OutputRows all={all} expanded={expanded} limit={lines} tail={tail} fixed widthCh={widthCh} render={(rows, offset) => <pre className="omp-pre">{code !== null ? <CodeText all={all} from={offset} to={offset + rows.length} language={code} closed={closed} /> : rows.map((row, index) => <span key={offset + index} className={tint && lineTone(row) !== null ? `omp-tone--${lineTone(row)}` : undefined}>{row}{"\n"}</span>)}</pre>} />}</div>;
 }
 /** A line of a preview is shown up to this many characters, with a note of the rest: the height of a preview is bounded. */
 function cutRow(line: string): string {
@@ -166,7 +168,8 @@ export const OUTPUT_SCOPE = "output";
  */
 export function OutputText({ text, expanded, tail = false }: { text: string; expanded: boolean; tail?: boolean }): ReactNode {
 	const { structured, view } = useToolViewContext();
-	if (structured === undefined || structured.text !== text || (view?.format ?? "formatted") === "text") return <TextPreview text={text} expanded={expanded} tail={tail} />;
+	if (structured === undefined || structured.text !== text || (view?.format ?? "formatted") === "text") return <TextPreview text={text} expanded={expanded} tail={tail} tint />;
+	if (structured.format.kind === "rows") return <RowsView format={structured.format} expanded={expanded} tail={tail} />;
 	return <JsonRows source={structured.format} scope={OUTPUT_SCOPE} expanded={expanded} />;
 }
 /**

@@ -5,7 +5,7 @@
 import type { CSSProperties, ReactNode } from "react";
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import type { FooterPart } from "../../chat/tool-notices";
-import type { OutputFormat } from "../lib/json-tokens";
+import type { OutputFormat } from "../lib/output-format";
 import { useScreenReaderMode } from "../lib/screen-reader";
 import type { FoldState, ToolViewState } from "../lib/tool-view-state";
 import { READER_MAX_ROWS, useWindowedRows, WINDOW_AFTER_ROWS, WRAP_MAX_ROWS } from "../lib/use-windowed-rows";

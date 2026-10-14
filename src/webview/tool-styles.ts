@@ -129,6 +129,19 @@ export const TOOL_STYLES = `
 .omp-segment:hover { color: var(--vscode-foreground); }
 .omp-segment[aria-pressed="true"] { background: var(--vscode-button-secondaryBackground, var(--vscode-toolbar-hoverBackground)); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); }
 .vscode-high-contrast .omp-segment[aria-pressed="true"], .vscode-high-contrast-light .omp-segment[aria-pressed="true"] { outline: 1px solid var(--vscode-contrastActiveBorder, var(--vscode-focusBorder)); outline-offset: -1px; }
+/* Tables, stack traces and the light tint of error, warning and pass lines. Colour never carries the meaning alone: the words stay. */
+.omp-row { display: block; min-height: 1em; }
+.omp-grid-row { display: grid; column-gap: 2ch; white-space: pre; }
+.omp-grid-row > span { overflow: hidden; text-overflow: ellipsis; }
+.omp-cell--right { text-align: right; }
+.omp-grid-row--head { color: var(--omp-muted); font-weight: 600; }
+.omp-row--frame { color: var(--omp-muted); }
+.omp-row--frame .omp-file-link { color: inherit; text-decoration: underline; }
+.omp-tone--err { color: var(--vscode-errorForeground); }
+.omp-tone--warn { color: var(--vscode-editorWarning-foreground); }
+.omp-tone--pass { color: var(--vscode-testing-iconPassed); }
+.omp-window .omp-row, .omp-rows--nowrap .omp-row { white-space: pre; }
+.omp-window .omp-row { height: var(--omp-row-h); }
 .omp-fold-all { display: inline-flex; }
 @media (max-width: 460px) { .omp-fold-all { display: none; } }
 `;

@@ -16,7 +16,7 @@ import { formatGistDuration, toolGist, type GistPart } from "../../chat/tool-gis
 import { exitCodeOf, footerParts, splitToolNotices } from "../../chat/tool-notices";
 import { useSecondTick } from "../lib/live-clock";
 import { WINDOW_AFTER_ROWS } from "../lib/use-windowed-rows";
-import { detectOutputFormat } from "../lib/json-tokens";
+import { detectOutput } from "../lib/output-format";
 import { FRESH_VIEW, useObservedToolMs, useToolViewState } from "../lib/tool-view-state";
 import { FoldAllButtons } from "./JsonRows";
 import { ToolCopyButton, ToolFooter, ToolViewContext } from "./tool-view";
@@ -147,7 +147,7 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 	const chips = metaInHead ? [] : view?.meta ?? [];
 	// A format detected in the output (once it settled): its badge, the Formatted | Text switch and the fold buttons live in the bar.
 	const structuredText = view?.output?.structured;
-	const format = useMemo(() => structuredText === undefined || partial ? null : detectOutputFormat(structuredText), [structuredText, partial]);
+	const format = useMemo(() => structuredText === undefined || partial ? null : detectOutput(structuredText), [structuredText, partial]);
 	const formatted = format !== null && viewState.format === "formatted";
 	const copyText = formatted && structuredText !== undefined && !view?.output?.copy ? format.copy : view?.output?.copy || text;
 	const outputLabel = view?.output?.label ?? "Output";
@@ -176,7 +176,7 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 				<span className="omp-segmented" role="group" aria-label="Output format">
 					{(["formatted", "text"] as const).map(choice => <button key={choice} type="button" className="omp-segment" aria-pressed={viewState.format === choice} onClick={() => setViewState({ format: choice })}>{choice === "formatted" ? "Formatted" : "Text"}</button>)}
 				</span>
-				{formatted && <FoldAllButtons source={format} scope={OUTPUT_SCOPE} />}
+				{formatted && format.kind !== "rows" && <FoldAllButtons source={format} scope={OUTPUT_SCOPE} />}
 			</>}
 			{copyText !== "" && <ToolCopyButton text={copyText} label={`Copy ${outputLabel.toLowerCase()}`} what={`the ${outputLabel.toLowerCase()}`} />}
 		</div> : null;

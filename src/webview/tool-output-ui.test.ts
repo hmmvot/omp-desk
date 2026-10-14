@@ -551,6 +551,46 @@ test("an opened tool call rests as a bounded preview, shows its gist and footer,
 			await ui.evaluate("window.ui.receive({type:'omp:chat-code-theme',themes:[]});document.body.removeAttribute('data-vscode-theme-id')");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
+
+		await t.test("an ls -l listing is a table in a grid of its columns, the Text switch gives the same lines as text, and the badge says what was detected", async () => {
+			const call = real("bash-table-ls-la");
+			await reset("table"); await show(call); await open(call);
+			assert.match(await text(`${card(call)} .omp-format-badge`), /^Table · \d+ rows$/);
+			const row = `${card(call)} .omp-grid-row`;
+			assert.ok(await countOf(row) >= 2);
+			assert.equal(await ui.evaluate(`getComputedStyle(document.querySelector(${JSON.stringify(row)})).display`), "grid");
+			assert.equal(await ui.evaluate(`document.querySelectorAll(${JSON.stringify(`${row}:first-child > span`)}).length`) , 7, "seven cells to a row of ls -l");
+			assert.equal(await ui.evaluate(`document.querySelector(${JSON.stringify(`${row} > span:nth-child(5)`)}).classList.contains('omp-cell--right')`), true, "sizes are right-aligned");
+			await ui.evaluate(`[...document.querySelectorAll(${JSON.stringify(`${card(call)} .omp-segment`)})].find(b=>b.textContent==='Text').click()`);
+			await ui.wait(`!document.querySelector(${JSON.stringify(row)})`);
+			await ui.evaluate(`[...document.querySelectorAll(${JSON.stringify(`${card(call)} .omp-segment`)})].find(b=>b.textContent==='Formatted').click()`);
+			await ui.wait(`document.querySelector(${JSON.stringify(row)})`);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("a stack trace dims its frames and links the path the host proves, opening it at its line and column", async () => {
+			const trace = "TypeError: x is not a function\n    at run (src/proof.ts:12:5)\n    at main (src/proof.ts:30:1)\n    at node:internal/main:1:1";
+			const call: Call = { id: "bash-trace-link", tool: "bash", args: { command: "node src/proof.ts" }, resultText: trace, details: {}, isError: true };
+			await reset("trace"); await show(call); await open(call);
+			assert.match(await text(`${card(call)} .omp-format-badge`), /^Stack trace · 2 frames$/);
+			assert.equal(await countOf(`${card(call)} .omp-row--frame`), 2, "the node: frame is not a project frame");
+			await ui.wait("window.sent.some(message=>message.type==='omp:terminal-link-validate' && message.target==='src/proof.ts')");
+			await ui.evaluate(`window.sent.filter(message=>message.type==='omp:terminal-link-validate').forEach(message=>window.ui.receive({type:'omp:terminal-link-validation',requestId:message.requestId,valid:message.target==='src/proof.ts'}))`);
+			await ui.wait(`document.querySelector(${JSON.stringify(`${card(call)} .omp-row--frame .omp-file-link[data-file-target="src/proof.ts:12:5"]`)})`);
+			assert.equal(await text(`${card(call)} .omp-row--frame .omp-file-link`), "src/proof.ts:12:5", "the characters are the same as the text");
+			await ui.evaluate(`document.querySelector(${JSON.stringify(`${card(call)} .omp-row--frame .omp-file-link`)}).click()`);
+			await ui.wait("window.sent.some(message=>message.type==='omp:terminal-link-open' && message.target==='src/proof.ts:12:5')");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("error, warning and pass lines are tinted by their words and plain lines are not", async () => {
+			const call = real("bash-tsc-npm-typecheck-fail");
+			await reset("tone"); await show(call); await open(call);
+			assert.equal(await text(`${card(call)} .omp-tone--err`), "src/extension.ts(902,13): error TS2304: Cannot find name 'handleGuestControlRequest'.\n");
+			assert.equal(await countOf(`${card(call)} .omp-tone--err`), 1);
+			assert.equal(await ui.evaluate(`document.querySelector(${JSON.stringify(`${card(call)} .omp-tone--err`)}).textContent.includes('Command exited')`), false);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
 	} finally {
 		page?.socket.close(); browser?.socket.close();
 		child.kill();
