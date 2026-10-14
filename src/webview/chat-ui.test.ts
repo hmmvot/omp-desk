@@ -1243,7 +1243,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.ok(firstPlain > 0, "there are GUI commands and plain ones");
 			assert.ok(listed.slice(0, firstPlain).every(row => row.marked && row.group === "gui") && listed.slice(firstPlain).every(row => !row.marked), "GUI rows come first and only they are marked");
 			assert.deepEqual(listed.slice(firstPlain).map(row => row.name), ["/fix", "/skill:review", "/usage"], "ordinary commands follow, alphabetically");
-			for (const name of ["/settings", "/models", "/agents", "/rewind", "/clear", "/compact", "/export", "/hotkeys", "/git", "/login"]) assert.ok(listed.some(row => row.name === name && row.group === "gui"), `${name} is GUI-supported`);
+			for (const name of ["/settings", "/models", "/agents", "/rewind", "/clear", "/compact", "/export", "/hotkeys", "/git", "/login", "/logout"]) assert.ok(listed.some(row => row.name === name && row.group === "gui"), `${name} is GUI-supported`);
 			assert.deepEqual(listed.filter(row => ["/tree", "/handoff", "/vibe"].includes(row.name)), [], "commands Chat cannot run are not listed");
 			assert.deepEqual([listed.find(row => row.name === "/fix")!.chip, listed.find(row => row.name === "/skill:review")!.chip, listed.find(row => row.name === "/export")!.chip, listed.find(row => row.name === "/settings")!.chip], ["Prompt", "Skill", "OMP", "Desk"]);
 			assert.match(await ui.evaluate<string>("[...document.querySelectorAll('.omp-commands-option')].find(row=>row.textContent.startsWith('/settings')).querySelector('.omp-commands-gui').title"), /OMP Settings editor/);
@@ -1270,6 +1270,9 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await open();
 			await ui.evaluate("[...document.querySelectorAll('.omp-commands-option')].find(row=>row.textContent.startsWith('/hotkeys')).click()");
 			assert.deepEqual(await actions(), ["export-html", "keyboard-shortcuts"]);
+			await open();
+			await ui.evaluate("[...document.querySelectorAll('.omp-commands-option')].find(row=>row.textContent.startsWith('/logout')).click()");
+			assert.deepEqual(await actions(), ["export-html", "keyboard-shortcuts", "provider-logout"]);
 			await open();
 			await ui.evaluate("[...document.querySelectorAll('.omp-commands-option')].find(row=>row.textContent.startsWith('/settings')).click()");
 			await ui.wait("window.sent.some(message=>message.type==='omp:chat-prompt'&&message.text==='/settings')");
@@ -1317,7 +1320,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.match((await state("/new")).reason, /Stop it first/);
 			assert.match((await state("/clear")).reason, /abort it before resetting/);
 			assert.match((await state("/rewind")).reason, /./, "Rewind says why it cannot open during a turn");
-			for (const name of ["/skill:review", "/settings", "/compact", "/export", "/hotkeys", "/login"]) assert.deepEqual(await state(name), { disabled: false, reason: "" }, name);
+			for (const name of ["/skill:review", "/settings", "/compact", "/export", "/hotkeys", "/login", "/logout"]) assert.deepEqual(await state(name), { disabled: false, reason: "" }, name);
 			await ui.evaluate("[...document.querySelectorAll('.omp-commands-option')].find(row=>row.textContent.startsWith('/usage')).click()");
 			assert.ok(await ui.evaluate("Boolean(document.querySelector('.omp-commands-popup'))"), "a disabled row does nothing and the list stays open");
 			assert.deepEqual(await ui.evaluate("window.sent.filter(message=>message.type==='omp:chat-prompt'||message.type==='omp:chat-steer').length"), 0);

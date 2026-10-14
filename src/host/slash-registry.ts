@@ -80,7 +80,7 @@ export function readSlashRegistry(input: { readonly bunPath: string; readonly he
 }
 
 /** A Desk action that stands in for a terminal-UI command. */
-export type DeskSlashAction = "keyboard-shortcuts" | "source-control" | "tools-view" | "provider-login" | "omp-settings" | "new-session" | "delete-session";
+export type DeskSlashAction = "keyboard-shortcuts" | "source-control" | "tools-view" | "provider-login" | "provider-logout" | "omp-settings" | "new-session" | "delete-session";
 
 /** What Chat does with a terminal-UI command instead of sending it. */
 export interface TuiCommandGuidance {
@@ -134,8 +134,9 @@ export function tuiCommandGuidance(command: string): TuiCommandGuidance {
 			return { command, line: `${slash} was not sent: queued messages are listed above the composer, with Edit, Remove and Send now.` };
 		case "branch":
 			return { command, line: `${slash} was not sent. Rewind takes no arguments: send /rewind or /branch alone, press Esc twice in an empty composer, or use the message's Rewind action.` };
-		case "restart":
 		case "logout":
+			return { command, action: "provider-logout", line: `${slash} is a terminal command; opened Log Out of Provider instead.` };
+		case "restart":
 			return { command, line: `${slash} was not sent: it is a terminal command. Use the Sessions view to start, stop or resume sessions.` };
 		default:
 			return { command, line: `${slash} was not sent: it works only in OMP's terminal UI. Switch this editor to Terminal to use it.` };

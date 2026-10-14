@@ -28,7 +28,7 @@ test("GUI-supported commands come first and are marked; each group is alphabetic
 	for (const group of [rows.slice(0, firstPlain), rows.slice(firstPlain)]) {
 		assert.deepEqual(group.map(row => row.name), [...group.map(row => row.name)].sort((a, b) => a.localeCompare(b, "en")));
 	}
-	assert.deepEqual(rows.slice(0, firstPlain).map(row => row.name), ["agents", "clear", "compact", "delete", "export", "extensions", "fresh", "git", "hotkeys", "login", "models", "new", "rewind", "settings", "setup", "skills"]);
+	assert.deepEqual(rows.slice(0, firstPlain).map(row => row.name), ["agents", "clear", "compact", "delete", "export", "extensions", "fresh", "git", "hotkeys", "login", "logout", "models", "new", "rewind", "settings", "setup", "skills"]);
 });
 
 test("the marker names the surface a command opens", () => {
@@ -39,6 +39,7 @@ test("the marker names the surface a command opens", () => {
 	assert.match(rowOf("compact").gui!.ui, /mode picker/);
 	assert.match(rowOf("hotkeys").gui!.ui, /Keyboard Shortcuts/);
 	assert.match(rowOf("login").gui!.ui, /Log In to Provider/);
+	assert.match(rowOf("logout").gui!.ui, /Log Out of Provider/);
 	assert.equal(rowOf("usage").gui, null);
 	assert.equal(rowOf("skill:review").gui, null);
 });
@@ -85,6 +86,7 @@ test("a pick runs the GUI action, completes a command that takes arguments, or s
 	assert.deepEqual(pickPlan(rowOf("export")), { kind: "action", command: "export-html" });
 	assert.deepEqual(pickPlan(rowOf("compact")), { kind: "action", command: "compact" }, "a GUI command runs its action even though it takes arguments");
 	assert.deepEqual(pickPlan(rowOf("hotkeys")), { kind: "action", command: "keyboard-shortcuts" });
+	assert.deepEqual(pickPlan(rowOf("logout")), { kind: "action", command: "provider-logout" });
 	assert.deepEqual(pickPlan(rowOf("skill:review")), { kind: "insert", name: "skill:review" });
 	assert.deepEqual(pickPlan(rowOf("usage")), { kind: "send", text: "/usage" });
 	assert.deepEqual(pickPlan(rowOf("fix")), { kind: "send", text: "/fix" });

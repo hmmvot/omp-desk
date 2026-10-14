@@ -87,6 +87,7 @@ const VIEW_COMMANDS: readonly (ChatSlashCommand & { gui: GuiSupport })[] = [
 	{ name: "extensions", aliases: ["status"], source: "builtin", description: "Browse extensions, skills and tools", gui: { ui: "Opens the Skills and Tools view of the OMP Desk side bar", route: { kind: "action", command: "tools-view", needs: "none" } } },
 	{ name: "setup", aliases: ["providers"], source: "builtin", description: "Set up a model provider", gui: { ui: "Opens the Log In to Provider picker, then signs in through your browser", route: { kind: "action", command: "provider-login", needs: "none" } } },
 	{ name: "login", source: "builtin", description: "Log in to a model provider", gui: { ui: "Opens the Log In to Provider picker, then signs in through your browser", route: { kind: "action", command: "provider-login", needs: "none" } } },
+	{ name: "logout", source: "builtin", description: "Log out of a model provider", gui: { ui: "Opens the Log Out of Provider picker, then confirms before removing the account", route: { kind: "action", command: "provider-logout", needs: "none" } } },
 ];
 
 /** The chip for a catalogue source: where the command comes from, in the words the list uses. */

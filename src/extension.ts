@@ -5249,6 +5249,12 @@ async function runChatAction(context: vscode.ExtensionContext, index: SessionInd
     return;
   }
   const conversations = s.sessionRuntime.conversations;
+  if (command === "provider-logout") {
+    const entry = index.get(tabId);
+    void openProviderLogout(index, hostOf(stateOf(tabId)) ?? null, entry?.scope.profile ?? null,
+      entry?.cwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir());
+    return;
+  }
   const live = conversations.liveOf(tabId);
   if (live === null || live.phase !== "live") {
     showWarning("This conversation is not live, so the action was not run.");
@@ -5380,6 +5386,10 @@ async function runDeskSlashAction(action: Exclude<DeskSlashAction, "omp-settings
 }
 
 async function showChatKeyboardShortcuts(): Promise<void> {
+    case "provider-logout":
+      // Same route as /login: the palette command, which uses the active session's profile and directory.
+      void Promise.resolve(vscode.commands.executeCommand("ompDesk.logoutProvider")).catch(() => undefined);
+      return;
   await vscode.commands.executeCommand("workbench.action.openGlobalKeybindings", "ompDesk.");
 }
 
@@ -6835,6 +6845,11 @@ async function logoutProviderFromPalette(index: SessionIndex): Promise<void> {
 }
 
 async function copyHostTools(index: SessionIndex): Promise<void> {
+/** A session-scoped entry (the Commands list's /logout): log out within that session's own profile and directory, as {@link openProviderLogin} does for login. */
+async function openProviderLogout(index: SessionIndex, runtime: SessionHostRuntime | null, profile: string | null, cwd: string): Promise<void> {
+  await runProviderAuth(index, async () => ({ runtime, profile, cwd }), runProviderLogout);
+}
+
   const channel = activeControl(index);
   if (channel === null) {
     showInfo(controlUnavailableMessage(index));

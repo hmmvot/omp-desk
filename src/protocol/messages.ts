@@ -941,9 +941,9 @@ export interface GuestChatCommandMessage {
  * views that stand in for the terminal-only `/hotkeys`, `/git`, `/skills` and `/extensions`; the Commands list runs them
  * directly so they never depend on a typed command being classified by the installed OMP's registry.
  */
-export type GuestChatCommand = "compact" | "shake" | "cycle-model" | "cycle-thinking" | "export-html" | "share" | "provider-login" | "keyboard-shortcuts" | "source-control" | "tools-view";
+export type GuestChatCommand = "compact" | "shake" | "cycle-model" | "cycle-thinking" | "export-html" | "share" | "provider-login" | "provider-logout" | "keyboard-shortcuts" | "source-control" | "tools-view";
 
-const CHAT_COMMANDS: Record<string, GuestChatCommand> = { compact: "compact", shake: "shake", "cycle-model": "cycle-model", "cycle-thinking": "cycle-thinking", "export-html": "export-html", share: "share", "provider-login": "provider-login", "keyboard-shortcuts": "keyboard-shortcuts", "source-control": "source-control", "tools-view": "tools-view" };
+const CHAT_COMMANDS: Record<string, GuestChatCommand> = { compact: "compact", shake: "shake", "cycle-model": "cycle-model", "cycle-thinking": "cycle-thinking", "export-html": "export-html", share: "share", "provider-login": "provider-login", "provider-logout": "provider-logout", "keyboard-shortcuts": "keyboard-shortcuts", "source-control": "source-control", "tools-view": "tools-view" };
 
 /** `StopReason` of the newest assistant reply, as the wire package defines it. */
 export type GuestTurnOutcome = "stop" | "length" | "toolUse" | "error" | "aborted";
