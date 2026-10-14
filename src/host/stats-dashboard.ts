@@ -3,7 +3,9 @@ import { request } from "node:http";
 import { createConnection } from "node:net";
 import type { PtyBrokerClient, PtyHandle } from "./pty-client";
 import type { PtyBrokerRecord, PtyLaunchSpec } from "./pty-protocol";
-import type { OmpCommand } from "./native-terminal";
+import type { OmpBinary, OmpCliResult, OmpCommand } from "./native-terminal";
+import { NO_RUNTIME_FLAGS, planRuntimeFlags } from "./runtime-flags.ts";
+import type { RuntimeFlagPlan } from "./runtime-flags.ts";
 import { acquirePtySlotLock, releasePtySlotLock } from "./pty-registry.ts";
 
 export const STATS_PORT = 3847;
@@ -39,10 +41,11 @@ export async function probeStatsDashboard(): Promise<StatsProbe> {
 	return await tcp.promise;
 }
 
-export function statsLaunchSpec(binary: OmpCommand, cwd: string, preload: string | null = null): PtyLaunchSpec {
+export function statsLaunchSpec(binary: OmpCommand, cwd: string, runtime: RuntimeFlagPlan = NO_RUNTIME_FLAGS): PtyLaunchSpec {
 	return {
 		slot: `stats:${randomUUID()}`, kind: "stats-dashboard", file: binary.command,
-		args: [...(preload === null ? [] : ["--preload", preload]), ...binary.prefixArgs, "stats", "--host", "127.0.0.1", "--port", String(STATS_PORT)],
+		args: [...runtime.args, ...binary.prefixArgs, "stats", "--host", "127.0.0.1", "--port", String(STATS_PORT)],
+		...(Object.keys(runtime.env).length === 0 ? {} : { env: runtime.env }),
 		cwd, title: "Stats dashboard", cols: 120, rows: 30,
 	};
 }
@@ -52,10 +55,37 @@ export function statsPreloadSupported(result: { readonly exitCode: number; reado
 	return result.exitCode === 0 && `${result.stdout}\n${result.stderr}`.split(/\r?\n/).includes("OMP_DESK_STATS_PRELOAD_READY");
 }
 
+/**
+ * How the verified opener preload reaches this launcher, or `null` when it cannot (ADR-0049, ADR-0075).
+ * Bun's own CLI takes `--preload` ahead of the entry; OMP's compiled program gets it only through `BUN_OPTIONS`,
+ * never on its command line, where it would be OMP's unknown flag. Either way a harmless `--version` run must
+ * show the preload's marker before the dashboard is launched with it.
+ */
+export async function planStatsPreload(
+	binary: OmpBinary | OmpCommand,
+	preload: string,
+	options: {
+		readonly cwd: string;
+		/** Runs one CLI invocation; the window passes `runOmpCli`. */
+		readonly run: (executable: OmpCommand, args: readonly string[], timeoutMs: number, options: { readonly cwd?: string; readonly env?: Readonly<Record<string, string>> }) => Promise<OmpCliResult>;
+		readonly inheritedBunOptions?: string | undefined;
+	},
+): Promise<RuntimeFlagPlan | null> {
+	const launcher = "launcher" in binary ? binary.launcher : undefined;
+	const plan = planRuntimeFlags({ define: null, preload }, launcher === "bun-shim" ? "argv" : "bun-options", options.inheritedBunOptions ?? process.env.BUN_OPTIONS);
+	const probe = await options.run(
+		{ command: binary.command, prefixArgs: [...plan.args, ...binary.prefixArgs] },
+		["--version"],
+		5_000,
+		{ cwd: options.cwd, env: plan.env },
+	);
+	return statsPreloadSupported(probe) ? plan : null;
+}
+
 /** Unsupported builds require per-start consent; never remember or bypass that choice. */
-export async function admitStatsLaunch(binary: OmpCommand, cwd: string, verifiedPreload: string | null, confirmBrowser: () => Promise<boolean>): Promise<PtyLaunchSpec | null> {
+export async function admitStatsLaunch(binary: OmpCommand, cwd: string, verifiedPreload: RuntimeFlagPlan | null, confirmBrowser: () => Promise<boolean>): Promise<PtyLaunchSpec | null> {
 	if (verifiedPreload === null && !(await confirmBrowser())) return null;
-	return statsLaunchSpec(binary, cwd, verifiedPreload);
+	return statsLaunchSpec(binary, cwd, verifiedPreload ?? NO_RUNTIME_FLAGS);
 }
 
 /** Fixed interprocess admission key, separate from fresh retained recovery-record slots. */

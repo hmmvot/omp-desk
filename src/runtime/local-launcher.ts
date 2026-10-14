@@ -90,7 +90,7 @@ export interface LocalLauncherDeps {
 	/** One watch per runtime; starting a new one replaces the old. */
 	readonly brokerWatches: WeakMap<SessionHostRuntime, () => void>;
 	readonly linkReminder: () => boolean;
-	readonly control: Pick<LocalHostControl, "connect" | "reconnect" | "fail" | "storeRecipient" | "directory">;
+	readonly control: Pick<LocalHostControl, "connect" | "reconnect" | "fail" | "storeRecipient" | "directory" | "withhold">;
 	/** The early check of a launch: does an authenticated native process of this window already serve the file. */
 	readonly native: Pick<LocalNativeWatch, "servesFile">;
 	/** What follows a broker that was ended from outside. */
@@ -317,7 +317,7 @@ export class LocalLauncher implements OmpHostLauncher {
 		// launch can never outrun the key that decrypts its rendezvous.
 		const slot = createHostSlotId();
 		const credentialOwner = request.transport === "native" ? `native.${slot}` : request.ownerGeneration;
-		const control = await this.#prepareHostControl(request.tabId, credentialOwner, entries.hostControl.path);
+		const control = await this.#prepareHostControl(request.tabId, credentialOwner, entries.hostControl.path, entries.runtimeProbe.path);
 		// One mark per launch: the stages below are all measured from it, so the report reads as
 		// one startup timeline (launcher → broker → first paint → live → host control).
 		diagnostics.beginSubject(request.tabId, {
@@ -402,8 +402,11 @@ export class LocalLauncher implements OmpHostLauncher {
 		if (runtime.notice !== null) window.notice("warning", runtime.notice);
 		// The native extension receives session_start before rpc-ui handles get_state.
 		// Its exact session identity is checked only after that positive startup barrier.
-		if (control !== null) {
+		if (control !== null && runtime.control !== null) {
 			void this.#deps.control.connect(request.tabId, request.ownerGeneration, runtime, control);
+		} else if (control !== null) {
+			// The launcher cannot carry the recipient (ADR-0075): remember that, so nothing looks for a channel later.
+			void this.#deps.control.withhold(request.tabId, request.ownerGeneration, runtime, control, "this OMP launcher does not accept the startup options host control needs, so none were passed (see the launch notice)");
 		} else {
 			diagnostics.notObserved(
 				request.tabId,
@@ -431,7 +434,7 @@ export class LocalLauncher implements OmpHostLauncher {
 	 * folder: the native process preloads that copy, so a reinstall never has to wait
 	 * for this session to end.
 	 */
-	async #prepareHostControl(tabId: string, ownerGeneration: string, modulePath: string): Promise<PreparedHostControl | null> {
+	async #prepareHostControl(tabId: string, ownerGeneration: string, modulePath: string, probeModulePath: string): Promise<PreparedHostControl | null> {
 		try {
 			const recipient = await createControlRecipient();
 			await this.#deps.control.storeRecipient(ownerGeneration, recipient.privateKeyPkcs8Pem);
@@ -440,6 +443,7 @@ export class LocalLauncher implements OmpHostLauncher {
 					defineName: CONTROL_RECIPIENT_DEFINE,
 					publicRecipient: recipient.publicKeySpkiBase64url,
 					modulePath,
+					probeModulePath,
 					directory: this.#deps.control.directory(),
 					slotId: createControlSlotId(),
 				},

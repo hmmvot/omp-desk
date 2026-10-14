@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 import type { PtyHandle } from "./pty-client.ts";
 import type { PtyBrokerRecord } from "./pty-protocol.ts";
 import { isPtyKind } from "./pty-protocol.ts";
-import { admitStatsLaunch, compatibleStatsResponse, ensureStatsDashboard, statsLaunchSpec, statsPreloadSupported } from "./stats-dashboard.ts";
+import { admitStatsLaunch, compatibleStatsResponse, ensureStatsDashboard, planStatsPreload, statsLaunchSpec, statsPreloadSupported } from "./stats-dashboard.ts";
 import type { StatsDashboardPorts, StatsProbe } from "./stats-dashboard.ts";
 import { statsWebviewHtml } from "./stats-webview.ts";
 
@@ -157,9 +157,47 @@ describe("Stats browser-side-effect admission", () => {
 	});
 	it("uses verified preload before the installed entry without asking to open a browser", async () => {
 		let asks = 0;
-		const spec = await admitStatsLaunch(binary, "C:/fixture", "C:/preload.mjs", async () => { asks++; return false; });
+		const spec = await admitStatsLaunch(binary, "C:/fixture", { carrier: "argv", args: ["--preload", "C:/preload.mjs"], env: {} }, async () => { asks++; return false; });
 		assert.deepEqual(spec?.args.slice(0, 3), ["--preload", "C:/preload.mjs", "entry.ts"]);
+		assert.equal(spec?.env, undefined);
 		assert.equal(asks, 0);
+	});
+	it("hands a verified BUN_OPTIONS preload to the broker as environment, with nothing before OMP's own arguments", async () => {
+		const spec = await admitStatsLaunch({ command: "omp.exe", prefixArgs: [] }, "C:/fixture", { carrier: "bun-options", args: [], env: { BUN_OPTIONS: "--preload C:/preload.mjs", OMP_VSCODE_BUN_OPTIONS_BASE: "" } }, async () => false);
+		assert.deepEqual(spec?.args.slice(0, 1), ["stats"]);
+		assert.deepEqual(spec?.env, { BUN_OPTIONS: "--preload C:/preload.mjs", OMP_VSCODE_BUN_OPTIONS_BASE: "" });
+	});
+	describe("the carrier follows the launcher", () => {
+		const marker = { exitCode: 0, stdout: "18.10.3\n", stderr: "OMP_DESK_STATS_PRELOAD_READY\n" };
+		const probe = (launcher: "bun-shim" | "program" | undefined, command: string, prefixArgs: readonly string[], answer: typeof marker | { exitCode: number; stdout: string; stderr: string }) => {
+			const runs: { command: string; args: readonly string[]; env: Readonly<Record<string, string>> | undefined }[] = [];
+			const plan = planStatsPreload(
+				{ command, prefixArgs, ...(launcher === undefined ? {} : { launcher }) },
+				"C:/stats opener.mjs",
+				{ cwd: "C:/", inheritedBunOptions: undefined, run: async (executable, args, _timeout, options) => { runs.push({ command: executable.command, args: [...executable.prefixArgs, ...args], env: options.env }); return answer; } },
+			);
+			return { plan, runs };
+		};
+		it("probes a bun shim through its command line, as before", async () => {
+			const { plan, runs } = probe("bun-shim", "bun.exe", ["entry.ts"], marker);
+			assert.deepEqual(await plan, { carrier: "argv", args: ["--preload", "C:/stats opener.mjs"], env: {} });
+			assert.deepEqual(runs[0]?.args, ["--preload", "C:/stats opener.mjs", "entry.ts", "--version"]);
+		});
+		it("probes OMP's compiled program through BUN_OPTIONS and never on its command line", async () => {
+			const { plan, runs } = probe("program", "omp.exe", [], marker);
+			const result = await plan;
+			assert.equal(result?.carrier, "bun-options");
+			assert.deepEqual(runs[0]?.args, ["--version"], "no Bun flag reaches OMP's own parser");
+			assert.equal(runs[0]?.env?.BUN_OPTIONS, "--preload C:/stats\\ opener.mjs");
+		});
+		it("treats an unknown launcher like a compiled program: BUN_OPTIONS only", async () => {
+			const { runs } = probe(undefined, "mystery.exe", [], marker);
+			await Promise.resolve();
+			assert.deepEqual(runs[0]?.args, ["--version"]);
+		});
+		it("admits nothing from a launcher that did not report the preload", async () => {
+			assert.equal(await probe("program", "omp.exe", [], { exitCode: 0, stdout: "18.0.4", stderr: "" }).plan, null);
+		});
 	});
 	it("never starts or opens a tab after unsupported-build Cancel", async () => {
 		let asks = 0;

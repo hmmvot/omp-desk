@@ -15,12 +15,13 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { CONTROL_DIR_ENV, CONTROL_SLOT_ENV, LINK_REMINDER_ENV } from "./control-protocol";
+import { planControlLaunch } from "./launch-capability";
 import {
 	DEFAULT_OMP_PROFILE,
-	controlRuntimeFlags,
 	resolveOmpBinary,
 } from "./native-terminal";
 import type { NativeControlBootstrap, OmpBinary, OmpCommand } from "./native-terminal";
+import type { RuntimeFlagPlan } from "./runtime-flags";
 import { isPtyProcessAlive } from "./pty-identity";
 import type { PtyBrokerClient } from "./pty-client";
 import type { PtyHandle } from "./pty-client";
@@ -46,12 +47,12 @@ export interface RpcOmpLaunchSpec {
 /**
  * The command line of one `omp --mode rpc-ui` process.
  *
- * Order: bun's own flags first (`--define`, `--preload`), then the launcher's prefix
- * arguments (a bun shim's prefix names the entry script, and a flag after it would reach
- * OMP instead of bun), then OMP's arguments, then the host-control module. `--session` pins
- * the exact file of a resume; a new conversation passes no session flag and learns its exact
- * path from `get_state`. `@file` arguments, `--fork`, `--continue` and bare `--resume` are
- * never used.
+ * Order: Bun's own flags first when the launcher takes them on its command line (`runtime.args`: `--define`,
+ * `--preload`), then the launcher's prefix arguments (a bun shim's prefix names the entry script, and a flag
+ * after it would reach OMP instead of bun), then OMP's arguments, then the host-control module. A launcher that
+ * does not take Bun's flags there carries them in the environment instead (`runtime.env`, ADR-0075) or not at
+ * all. `--session` pins the exact file of a resume; a new conversation passes no session flag and learns its
+ * exact path from `get_state`. `@file` arguments, `--fork`, `--continue` and bare `--resume` are never used.
  *
  * The profile is always explicit: a session whose index scope recorded no named profile
  * gets OMP's verified `--profile default` sentinel, so an `OMP_PROFILE` inherited from this
@@ -60,6 +61,8 @@ export interface RpcOmpLaunchSpec {
 export function rpcOmpLaunchSpec(input: {
 	readonly binary: OmpCommand;
 	readonly control: NativeControlBootstrap | null;
+	/** How Bun's runtime flags reach this launcher; decided by `planControlLaunch` for the launcher in use. */
+	readonly runtime: RuntimeFlagPlan;
 	readonly cwd: string;
 	/** The exact existing file to resume, or `null` for a new conversation. */
 	readonly sessionFile: string | null;
@@ -75,7 +78,7 @@ export function rpcOmpLaunchSpec(input: {
 		env[CONTROL_SLOT_ENV] = input.control.slotId;
 	}
 	const args = [
-		...controlRuntimeFlags(input.control),
+		...input.runtime.args,
 		...input.binary.prefixArgs,
 		"--mode",
 		"rpc-ui",
@@ -87,7 +90,7 @@ export function rpcOmpLaunchSpec(input: {
 	if (input.sessionFile !== null) args.push("--session", input.sessionFile);
 	else if (input.sessionDir !== null) args.push("--session-dir", input.sessionDir);
 	if (input.control !== null) args.push("-e", input.control.modulePath);
-	return { file: input.binary.command, args, cwd: input.cwd, env };
+	return { file: input.binary.command, args, cwd: input.cwd, env: { ...env, ...input.runtime.env } };
 }
 
 /** The broker/child identity one handle has observed, in the shape a row records. */
@@ -232,9 +235,11 @@ export async function launchRpcHost(request: RpcLaunchRequest, client: PtyBroker
 		}
 	}
 
+	const controlPlan = await planControlLaunch(binary, request.control);
 	const spec = rpcOmpLaunchSpec({
 		binary,
 		control: request.control,
+		runtime: controlPlan.runtime,
 		cwd,
 		sessionFile: request.sessionFile,
 		sessionDir: request.sessionDir,
@@ -271,16 +276,16 @@ export async function launchRpcHost(request: RpcLaunchRequest, client: PtyBroker
 	}
 	return {
 		state: "running",
-		reason: `Chat host launched from ${binary.origin} under the PTY broker.`,
+		reason: `Chat host launched from ${binary.origin} under the PTY broker${controlPlan.log === null ? "" : `; ${controlPlan.log}`}.`,
 		runtime: {
 			kind: "chat",
 			handle,
 			identity,
 			cwd,
 			sessionFile: request.sessionFile,
-			control: request.control,
+			control: controlPlan.delivered ? request.control : null,
 			binary,
-			notice,
+			notice: [notice, controlPlan.notice].filter(part => part !== null).join(" ") || null,
 			resolutionMs,
 			pid: identity.childPid,
 		},

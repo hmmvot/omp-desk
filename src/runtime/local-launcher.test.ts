@@ -34,10 +34,11 @@ const request: OmpHostLaunchRequest = {
 	transport: "rpc", ownerGeneration: "gen-1", claimPath: "",
 };
 
-function fixture(options: { precheck?: boolean; launch?: "running" | "not-started" | "unconfirmed"; stagingFails?: boolean } = {}) {
+function fixture(options: { precheck?: boolean; launch?: "running" | "not-started" | "unconfirmed"; stagingFails?: boolean; undelivered?: boolean } = {}) {
 	const events: string[] = [];
 	const runtime = {
 		kind: "chat", pid: 4242, cwd: request.cwd, notice: null, binary: null, resolutionMs: undefined,
+		...(options.undelivered === true ? { control: null } : {}),
 		identity: { slot: "slot-x", childCreationTime: "created" },
 		handle: { brokerPid: process.pid, record: { brokerCreationTime: null } },
 	} as unknown as SessionHostRuntime;
@@ -64,7 +65,7 @@ function fixture(options: { precheck?: boolean; launch?: "running" | "not-starte
 		diagnostics,
 		entries: async () => {
 			if (options.stagingFails === true) throw new Error("staging failed");
-			return { hostControl: { path: "control.mjs" } } as never;
+			return { hostControl: { path: "control.mjs" }, runtimeProbe: { path: "runtime-probe.mjs" } } as never;
 		},
 		hosts: {
 			launchRpc: async () => { events.push("launch"); return state === "running" ? { state, reason: "ok", runtime } : { state, reason: "no", runtime: null }; },
@@ -83,6 +84,7 @@ function fixture(options: { precheck?: boolean; launch?: "running" | "not-starte
 			directory: () => "control-dir",
 			connect: async () => { events.push("connectControl"); },
 			reconnect: async () => { events.push("reconnectControl"); },
+			withhold: async () => { events.push("withholdControl"); },
 			fail: () => { events.push("controlFailed"); },
 		},
 		native: { servesFile: async () => { events.push("launchPrecheck"); return options.precheck === true; } },
@@ -104,6 +106,15 @@ describe("launch", () => {
 			"storeRecipient", "retireDocument", "reserve", "launch", "adopt", "prepareView", "startLive", "attached", "connectControl", "setRunIntent",
 		]);
 		assert.deepEqual(f.recorded.map(entry => (entry as { editor: string | null }).editor), ["editor-1"], "the slot is recorded for the editor the document hook returned");
+	});
+
+	it("withholds host control instead of connecting when the launcher could not carry the recipient (ADR-0075)", async () => {
+		const f = fixture({ undelivered: true });
+		const result = await f.launcher.launch(request);
+		f.deps.brokerWatches.get(f.runtime)?.();
+		assert.equal(result.state, "running");
+		assert.ok(f.events.includes("withholdControl"), "the marker is recorded, so a reload or the watch never looks for a channel");
+		assert.ok(!f.events.includes("connectControl"));
 	});
 
 	it("refuses a second writer for a file this window's native process already serves, before staging anything", async () => {

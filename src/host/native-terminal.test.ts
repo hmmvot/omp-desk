@@ -12,14 +12,13 @@
  * Runner: `node --test src/host/native-terminal.test.ts`.
  */
 import assert from "node:assert/strict";
-import { chmod, copyFile, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, chmod, copyFile, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { after, before, describe, it } from "node:test";
 import { build } from "esbuild";
 import type {
-	controlRuntimeFlags as controlRuntimeFlagsType,
 	OmpBinary,
 	renameStoppedSessionTitle as renameStoppedSessionTitleType,
 	resolveOmpBinary as resolveOmpBinaryType,
@@ -30,7 +29,6 @@ import type {
 
 /** The part of the compiled module these tests drive. */
 interface NativeTerminalModule {
-	readonly controlRuntimeFlags: typeof controlRuntimeFlagsType;
 	readonly renameStoppedSessionTitle: typeof renameStoppedSessionTitleType;
 	readonly resolveOmpBinary: typeof resolveOmpBinaryType;
 	readonly resolveOmpPackageRoot: typeof resolveOmpPackageRootType;
@@ -59,29 +57,6 @@ before(async () => {
 
 after(async () => {
 	await rm(temp, { recursive: true, force: true });
-});
-
-describe("host-control bun flags", () => {
-	it("passes nothing when there is no control bootstrap", () => {
-		assert.deepEqual(native.controlRuntimeFlags(null), []);
-	});
-
-	it("hands bun only the public recipient and the preload module, ahead of everything else", () => {
-		const flags = native.controlRuntimeFlags({
-			defineName: "OMP_CONTROL_RECIPIENT",
-			publicRecipient: "recipient",
-			modulePath: path.join(temp, "control.mjs"),
-			directory: path.join(temp, "control"),
-			slotId: "tab:one",
-		});
-
-		assert.deepEqual(flags, [
-			"--define",
-			'OMP_CONTROL_RECIPIENT:"recipient"',
-			"--preload",
-			path.join(temp, "control.mjs"),
-		]);
-	});
 });
 
 
@@ -266,6 +241,7 @@ describe("OMP resolution when a candidate cannot answer", () => {
 		const resolved = await onPath([first.bin, second.bin], resolve);
 
 		assert.deepEqual(resolved.prefixArgs, [first.entry]);
+		assert.equal(resolved.launcher, "bun-shim", "a bun shim runs as Bun's own CLI, which takes Bun's flags on its command line");
 		assert.equal(resolved.version, "18.8.5");
 	});
 
@@ -286,6 +262,23 @@ describe("OMP resolution when a candidate cannot answer", () => {
 		const resolved = await onPath([foreign.bin, working.bin], resolve);
 
 		assert.deepEqual(resolved.prefixArgs, [working.entry]);
+	});
+
+	it("classifies OMP's own compiled program as `program`, which has no command line for Bun's flags", async () => {
+		// What the file carries, not what it is called, makes it OMP's program: OMP's identity plus an embedded
+		// JavaScript engine. A copy of the test runner with both markers appended answers `--version` like one.
+		const bin = path.join(temp, `program-${installs++}`);
+		await mkdir(bin, { recursive: true });
+		const program = path.join(bin, isWindows ? "omp.exe" : "omp");
+		await copyFile(path.join(tools, isWindows ? "bun.exe" : "bun"), program);
+		await chmod(program, 0o755);
+		await appendFile(program, "\n@oh-my-pi/pi-coding-agent JavaScriptCore oven-sh/bun\n");
+
+		const resolved = await onPath([bin], resolve);
+
+		assert.equal(resolved.command, program);
+		assert.deepEqual(resolved.prefixArgs, []);
+		assert.equal(resolved.launcher, "program");
 	});
 
 	it("reports a resolution where every candidate was refused as definitive, with each reason", async () => {

@@ -85,6 +85,26 @@ export const CONTROL_DIR_ENV = "OMP_VSCODE_CONTROL_DIR";
 export const CONTROL_SLOT_ENV = "OMP_VSCODE_CONTROL_SLOT";
 /** `0` when the `ompDesk.linkReminder` setting is off for this launch; the Chat prompt module then adds no per-message reminder. */
 export const LINK_REMINDER_ENV = "OMP_VSCODE_LINK_REMINDER";
+/**
+ * Carries the value `BUN_OPTIONS` had before a launch appended Desk's runtime flags to it (empty: it was
+ * unset). Only a launcher that cannot take Bun's flags on its command line (a standalone compiled OMP) uses
+ * `BUN_OPTIONS`; the first module Bun preloads puts the original back, so the flags reach Bun at startup and
+ * no child process of OMP inherits them (see `restoreInheritedBunOptions`).
+ */
+export const BUN_OPTIONS_BASE_ENV = "OMP_VSCODE_BUN_OPTIONS_BASE";
+
+/**
+ * Put `BUN_OPTIONS` back to what it was before the launch, once Bun has read it. A preloaded Desk module calls
+ * this as its first act, so a command OMP starts later (a shell tool running `bun`, an MCP server) neither
+ * preloads Desk's module nor needs it to still exist. Does nothing when the launch did not use `BUN_OPTIONS`.
+ */
+export function restoreInheritedBunOptions(env: Record<string, string | undefined>): void {
+	const base = env[BUN_OPTIONS_BASE_ENV];
+	if (base === undefined) return;
+	delete env[BUN_OPTIONS_BASE_ENV];
+	if (base === "") delete env.BUN_OPTIONS;
+	else env.BUN_OPTIONS = base;
+}
 
 /**
  * Identifier Bun's `--define` replaces with the run's public recipient key, as a

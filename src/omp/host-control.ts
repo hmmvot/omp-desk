@@ -5,7 +5,8 @@
  *
  * This file is bundled standalone (`out/omp-host-control.mjs`, ESM, node
  * platform) and loaded into each managed native or rpc-ui OMP child with `-e`.
- * The recipient literal rides Bun's `--define`/`--preload`, which work in either mode.
+ * The recipient literal rides Bun's `--define`/`--preload`, which work in either mode: on the command line of
+ * Bun's own CLI, or in `BUN_OPTIONS` for OMP's own compiled program (ADR-0075).
  * It owns the named pipe (POSIX socket off Windows),
  * authenticates the client before disclosing anything reusable, answers
  * `snapshot`, publishes only non-secret discovery metadata into the
@@ -96,6 +97,7 @@ import {
 	isControlToolName,
 	parseControlClientFrame,
 	readControlRecipientPublicKey,
+	restoreInheritedBunOptions,
 	removeOwnControlRendezvous,
 	verifyControlRequestMac,
 	writeControlRendezvous,
@@ -109,6 +111,10 @@ import { registerClearCommand } from "./clear-command.ts";
 import { isLiveSubagentRef, registerAgentLiveness, stopAgentLiveness, type OmpAgentRegistry } from "./agent-liveness.ts";
 import { registerChatPrompt } from "./chat-prompt.ts";
 import type { FileEvidenceOmpHooks, FileEvidenceStatus } from "./file-evidence.ts";
+
+// Runs when Bun preloads this module, before OMP starts anything: a launcher that took Desk's flags through
+// `BUN_OPTIONS` gets its own value back for every process OMP starts afterwards.
+restoreInheritedBunOptions(process.env);
 
 // OMP extension surface (declared structurally)
 

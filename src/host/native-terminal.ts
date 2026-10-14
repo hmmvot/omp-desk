@@ -56,11 +56,21 @@ export interface OmpCommand {
   readonly prefixArgs: readonly string[];
 }
 
+/** What a resolved launch target is; see {@link OmpBinary.launcher}. */
+export type OmpLauncherKind = "bun-shim" | "program";
+
 export interface OmpBinary extends OmpCommand {
   /** Release `omp --version` reported, when it reported one; a diagnostic only. */
   readonly version: string | null;
   /** How this target was resolved; surfaced in diagnostics. */
   readonly origin: string;
+  /**
+   * What the launch is. `bun-shim`: `command` is Bun's own CLI running OMP's entry (`prefixArgs`), which takes
+   * Bun's flags on its command line. `program`: OMP's own compiled executable (the winget portable package,
+   * the `omp.sh` binary install, a mise install), whose command line is OMP's alone: Bun's flags there are
+   * OMP's unknown flags. Absent when a caller built the value by hand; nothing then assumes either.
+   */
+  readonly launcher?: OmpLauncherKind;
 }
 
 export interface OmpCliResult {
@@ -291,6 +301,8 @@ interface OmpLaunchCandidate {
   readonly origin: string;
   /** The file PATH named, for messages: the program itself, or the bun shim that forwards to the entry. */
   readonly label: string;
+  /** What the launch is: the program itself, or `bun.exe` running an entry the shim named. */
+  readonly launcher: OmpLauncherKind;
 }
 
 /** One target to try, in search order, with the file path that identifies it. */
@@ -351,7 +363,7 @@ function launchTargets(): PendingTarget[] {
           return {
             kind: "direct",
             key: file,
-            candidate: { executable: { command: file, prefixArgs: [] }, origin: "the OMP launcher directory", label: file },
+            candidate: { executable: { command: file, prefixArgs: [] }, origin: "the OMP launcher directory", label: file, launcher: "program" },
           };
         }
         return { kind: "unusable", key: file, reason: `${file} ${FOREIGN_LAUNCHER_REASON}` };
@@ -373,7 +385,7 @@ async function pathTarget(file: string, origin: string): Promise<LaunchTarget> {
     return {
       kind: "direct",
       key: file,
-      candidate: { executable: { command: file, prefixArgs: [] }, origin, label: file },
+      candidate: { executable: { command: file, prefixArgs: [] }, origin, label: file, launcher: "program" },
     };
   }
   if (identity === "bun-shim") return { kind: "bun-shim", key: file, shim: file };
@@ -585,6 +597,7 @@ async function bunShimCandidate(shim: string): Promise<OmpLaunchCandidate | stri
     executable: { command: bun, prefixArgs: [entry] },
     origin: `the bun shim ${shim}, resolved to ${entry}`,
     label: shim,
+    launcher: "bun-shim",
   };
 }
 
@@ -712,7 +725,7 @@ async function verifyLaunchCandidate(
       { transientCause },
     );
   }
-  return { command, prefixArgs, version, origin: candidate.origin };
+  return { command, prefixArgs, version, origin: candidate.origin, launcher: candidate.launcher };
 }
 
 function describeRejections(rejections: readonly string[]): string {
@@ -833,22 +846,9 @@ export async function runOmpCli(
  */
 export const DEFAULT_OMP_PROFILE = "default";
 
-/**
- * bun flags that hand the public recipient to the native module.
- *
- * The recipient is public by construction, so a `--define` literal is the right
- * carrier: only the public recipient appears in Bun argv, while the control key
- * and private recipient remain absent from argv, the environment, and stdin.
- */
-export function controlRuntimeFlags(control: NativeControlBootstrap | null): string[] {
-  if (control === null) return [];
-  return [
-    "--define",
-    `${control.defineName}:${JSON.stringify(control.publicRecipient)}`,
-    "--preload",
-    control.modulePath,
-  ];
-}
+// The runtime flags that hand the public recipient to the host-control module are built in
+// `runtime-flags.ts`, by the launcher's kind; the recipient is public by construction, so a `--define` literal
+// is the right carrier: the control key and the private recipient stay out of argv, the environment and stdin.
 
 /** Host-control bootstrap for one launch; the module itself is never secret. */
 export interface NativeControlBootstrap {
@@ -862,6 +862,11 @@ export interface NativeControlBootstrap {
    * the native process holds no file there and a reinstall can rename it.
    */
   readonly modulePath: string;
+  /**
+   * Absolute path of the staged module a launcher capability probe preloads (`launch-capability.ts`) to learn
+   * whether the launcher honours `--preload` and `--define` carried by `BUN_OPTIONS`.
+   */
+  readonly probeModulePath: string;
   /** Directory the native host publishes its rendezvous record into. */
   readonly directory: string;
   /** Non-secret slot id for this launch. */

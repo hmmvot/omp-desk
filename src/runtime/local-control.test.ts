@@ -7,7 +7,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { HostControlRefusedError, HostControlUnavailableError } from "../host/control-client.ts";
 import type { HostControlClient } from "../host/control-client.ts";
-import { describeControlError, LocalHostControl } from "./local-control.ts";
+import { controlProcessRecordKey, describeControlError, LocalHostControl } from "./local-control.ts";
+import type { RecordedControlProcess } from "./local-control.ts";
 import type { RuntimeRecord } from "./runtime-record.ts";
 
 const TAB = "tab:one";
@@ -48,5 +49,38 @@ describe("host control failure reporting", () => {
 			assert.match(logs.join("\n"), /host control unavailable — /);
 		}
 		assert.equal(describeControlError(new HostControlUnavailableError("channel is not open")), "native host connection unavailable");
+	});
+});
+
+describe("a host launched without a control channel (ADR-0075)", () => {
+	const reason = "this OMP launcher does not accept the startup options host control needs";
+	const runtime = { kind: "chat", pid: 4242, identity: { slot: "slot-1" } } as never;
+	function withheldFixture(recordedPid: number) {
+		const record = { tabId: TAB, runtime, control: null, controlFailure: null as string | null } as unknown as RuntimeRecord;
+		const observations: string[] = [];
+		const logs: string[] = [];
+		const stored: RecordedControlProcess = { pid: recordedPid, processCreation: "2026-10-14T00:00:00Z", slotId: "slot-1", directory: "C:/control", withheld: reason };
+		const control = new LocalHostControl({
+			records: { get: (tabId: string | null) => tabId === TAB ? record : undefined } as never,
+			store: { record: (key: string) => key === controlProcessRecordKey("owner") ? stored : undefined, secret: async () => undefined } as never,
+			diagnostics: () => ({ notObserved: (_tab: string, _stage: string, detail: string) => observations.push(detail) }) as never,
+			attempts: new WeakMap(),
+			log: (message: string) => logs.push(message),
+		} as never);
+		return { control, record, observations, logs };
+	}
+
+	it("is not looked for again: a reconnect says why once, and records no failure for the session", async () => {
+		const f = withheldFixture(4242);
+		await f.control.reconnect(TAB, "owner", runtime);
+		assert.equal(f.record.controlFailure, null, "no warning is raised for a launch that was never offered a channel");
+		assert.deepEqual(f.observations, [reason]);
+		assert.doesNotMatch(f.logs.join("\n"), /unavailable|never attempted|no control recipient/);
+	});
+
+	it("still reports a different process's missing record as before", async () => {
+		const f = withheldFixture(1);
+		await f.control.reconnect(TAB, "owner", runtime);
+		assert.match(f.record.controlFailure ?? "", /no control recipient was recorded/);
 	});
 });

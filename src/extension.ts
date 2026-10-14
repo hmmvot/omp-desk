@@ -374,6 +374,8 @@ const LEASE_HELPER = "out/session-lease-probe.ps1";
  * other child entry, so a reinstall of the extension cannot rename it away.
  */
 const RENAME_HELPER_SCRIPT = "media/rename-session.mjs";
+/** Packaged module a launcher capability probe preloads (`host/launch-capability.ts`). */
+const RUNTIME_PROBE_MODULE = "media/runtime-probe.mjs";
 /** Packaged Bun helper that lists the installed OMP's builtin slash commands (`host/slash-registry.ts`). */
 const SLASH_REGISTRY_HELPER = "media/slash-registry.mjs";
 /** Chat publishes promptly; native startup can wait on a heavy workspace. */
@@ -1302,6 +1304,7 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
         hostControl: context.asAbsolutePath(HOST_CONTROL_MODULE),
         controlHelper: context.asAbsolutePath(CONTROL_HELPER),
         renameHelper: context.asAbsolutePath(RENAME_HELPER_SCRIPT),
+        runtimeProbe: context.asAbsolutePath(RUNTIME_PROBE_MODULE),
         leaseHelper: context.asAbsolutePath(LEASE_HELPER),
       }),
       refusal: () => (packageChangedOnDisk() ? UPDATED_ON_DISK_ERROR : null),

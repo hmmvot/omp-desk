@@ -59,6 +59,8 @@ export interface RecordedControlProcess {
 	readonly work?: true;
 	/** The child answers the registry `subagentWork` request; absent for a process an older build launched. */
 	readonly subagents?: true;
+	/** Why this launch carried no host-control recipient (its launcher cannot take the startup options); the process runs without a channel. */
+	readonly withheld?: string;
 }
 
 /**
@@ -207,6 +209,40 @@ export class LocalHostControl {
 		return this.#singleFlight(runtime, () => this.#connectAttempt(conversation, ownerGeneration, runtime, prepared));
 	}
 
+	/**
+	 * Record that host control was deliberately not started for a host this window just launched, and why: its
+	 * launcher cannot carry the recipient (ADR-0075). The marker lives where a started channel's record would, so a
+	 * reload, the native watch and a reattach all find it and stay quiet instead of looking for a channel that was
+	 * never offered; the recipient's private half is dropped because nothing can ever use it.
+	 */
+	withhold(conversation: string, ownerGeneration: string, runtime: SessionHostRuntime, prepared: PreparedHostControl, reason: string): Promise<void> {
+		return this.#singleFlight(runtime, async () => {
+			const { index, store, log } = this.#deps;
+			const owner = controlOwnerFor(runtime, ownerGeneration);
+			let processCreation: string;
+			try {
+				processCreation = await queryControlProcessGeneration(runtime.pid);
+			} catch (error) {
+				log(`tab ${conversation}: host control was withheld (${reason}) and its marker could not be recorded: ${messageOf(error)}`);
+				return;
+			}
+			const record: RecordedControlProcess = {
+				pid: runtime.pid,
+				processCreation,
+				slotId: prepared.bootstrap.slotId,
+				directory: prepared.bootstrap.directory,
+				withheld: reason,
+			};
+			await index.lifecycle.run(conversation, async () => {
+				if (this.#deps.records.get(conversation)?.runtime !== runtime) return;
+				await store.setRecord(controlProcessRecordKey(owner), record);
+				await store.deleteSecret(recipientSecretName(owner));
+			});
+			this.#deps.diagnostics().notObserved(conversation, "host-control-verified", reason);
+			log(`tab ${conversation}: host control withheld — ${reason}`);
+		});
+	}
+
 	async #connectAttempt(
 		tabId: string,
 		ownerGeneration: string,
@@ -282,6 +318,12 @@ export class LocalHostControl {
 		const attempt: ControlAttemptPlan = { runtime, pid };
 		const record = store.record<RecordedControlProcess>(controlProcessRecordKey(ownerGeneration));
 		const privateKey = await store.secret(recipientSecretName(ownerGeneration));
+		if (record !== undefined && record.pid === pid && record.withheld !== undefined) {
+			// This launch never carried the recipient (its launcher cannot take the startup options): there is no
+			// channel to find, and saying "never recorded" would misname the cause on every retry.
+			this.#deps.diagnostics().notObserved(tabId, "host-control-verified", record.withheld);
+			return;
+		}
 		if (record === undefined || record.pid !== pid || privateKey === undefined) {
 			this.#deps.diagnostics().notObserved(
 				tabId,

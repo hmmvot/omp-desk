@@ -30,6 +30,8 @@ export interface StagedRuntimeEntries {
 	readonly controlHelper: StagedRuntimeAsset;
 	/** The Bun helper a stopped-session rename runs (never an OMP session). */
 	readonly renameHelper: StagedRuntimeAsset;
+	/** The module a launcher capability probe preloads (`host/launch-capability.ts`); it only reports a nonce. */
+	readonly runtimeProbe: StagedRuntimeAsset;
 }
 
 /** What staging needs from its window; every read happens when a call stages, never at construction. */
@@ -41,6 +43,7 @@ export interface RuntimeStagingDeps {
 		readonly hostControl: string;
 		readonly controlHelper: string;
 		readonly renameHelper: string;
+		readonly runtimeProbe: string;
 		readonly leaseHelper: string;
 	};
 	/**
@@ -67,7 +70,7 @@ export interface RuntimeStaging {
 
 /** Do the copies still hold the bytes their digests name? */
 async function stagedEntriesIntact(entries: StagedRuntimeEntries): Promise<boolean> {
-	for (const asset of [entries.hostControl, entries.controlHelper]) {
+	for (const asset of [entries.hostControl, entries.controlHelper, entries.runtimeProbe]) {
 		if (!(await verifyStagedRuntimeAsset(asset))) return false;
 	}
 	return true;
@@ -91,12 +94,12 @@ export function createRuntimeStaging(deps: RuntimeStagingDeps): RuntimeStaging {
 				const refusal = deps.refusal();
 				if (refusal !== null) throw new Error(refusal);
 				const paths = deps.packagedPaths();
-				const [hostControl, controlHelper, renameHelper] = await stageRuntimeAssets({
+				const [hostControl, controlHelper, renameHelper, runtimeProbe] = await stageRuntimeAssets({
 					storageDir: deps.storageDir(),
-					sourcePaths: [paths.hostControl, paths.controlHelper, paths.renameHelper],
+					sourcePaths: [paths.hostControl, paths.controlHelper, paths.renameHelper, paths.runtimeProbe],
 				});
 				deps.configureControlHelper(controlHelper.path, controlHelper.sha256);
-				return { hostControl, controlHelper, renameHelper };
+				return { hostControl, controlHelper, renameHelper, runtimeProbe };
 			})();
 			stagedEntries = staging.catch((error: unknown) => {
 				stagedEntries = null;

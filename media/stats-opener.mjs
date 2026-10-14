@@ -1,5 +1,14 @@
 // A temporary per-child workaround until OMP exposes `stats --no-open` (ADR-0049).
 // Nothing changes browser registration, PATH, SystemRoot or another process.
+
+// A launcher that cannot take --preload on its command line carries it in BUN_OPTIONS; Bun has read it by now, so
+// put the original back and let no process OMP starts later inherit it (same rule as the host-control module).
+const optionsBase = process.env.OMP_VSCODE_BUN_OPTIONS_BASE;
+if (optionsBase !== undefined) {
+  delete process.env.OMP_VSCODE_BUN_OPTIONS_BASE;
+  if (optionsBase === "") delete process.env.BUN_OPTIONS;
+  else process.env.BUN_OPTIONS = optionsBase;
+}
 export const STATS_PRELOAD_MARKER = "OMP_DESK_STATS_PRELOAD_READY";
 
 export function statsWindowsOpenerTarget(command, dashboardUrl) {

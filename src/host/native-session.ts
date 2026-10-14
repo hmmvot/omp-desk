@@ -3,8 +3,10 @@ import * as path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { CONTROL_DIR_ENV, CONTROL_SLOT_ENV } from "./control-protocol";
 import type { ControlNativeState, ControlNativeTarget } from "./control-protocol";
-import { controlRuntimeFlags, DEFAULT_OMP_PROFILE, resolveOmpBinary } from "./native-terminal";
+import { planControlLaunch } from "./launch-capability";
+import { DEFAULT_OMP_PROFILE, resolveOmpBinary } from "./native-terminal";
 import type { OmpCommand } from "./native-terminal";
+import type { RuntimeFlagPlan } from "./runtime-flags";
 import type { PtyBrokerClient, PtyHandle } from "./pty-client";
 import { isPtyProcessAlive } from "./pty-identity";
 import { recordedRpcIdentityOf, resumeWorkingDirectory } from "./rpc-launch";
@@ -43,16 +45,21 @@ export type NativeAttachOutcome =
 	| { readonly state: "attached"; readonly reason: string; readonly runtime: NativeHostRuntime; readonly timings?: AttachTimings }
 	| { readonly state: "unavailable"; readonly reason: string; readonly runtime: null };
 
-export function nativeOmpLaunchSpec(input: Omit<RpcLaunchRequest, "slot"> & { readonly binary: OmpCommand }): RpcOmpLaunchSpec {
-	const env: Record<string, string | null> = {};
-	if (input.control !== null) {
-		env[CONTROL_DIR_ENV] = input.control.directory;
-		env[CONTROL_SLOT_ENV] = input.control.slotId;
+/**
+ * The command line of one native `omp` terminal. Without host control (`control` null, or a launcher that cannot
+ * take Bun's startup flags: `runtime` empty) the host-control module is not loaded at all.
+ */
+export function nativeOmpLaunchSpec(input: Omit<RpcLaunchRequest, "slot"> & { readonly binary: OmpCommand; readonly runtime: RuntimeFlagPlan }): RpcOmpLaunchSpec {
+	const control = input.runtime.carrier === "none" ? null : input.control;
+	const env: Record<string, string | null> = { ...input.runtime.env };
+	if (control !== null) {
+		env[CONTROL_DIR_ENV] = control.directory;
+		env[CONTROL_SLOT_ENV] = control.slotId;
 	}
-	const args = [...controlRuntimeFlags(input.control), ...input.binary.prefixArgs, "--cwd", input.cwd, "--profile", input.profile ?? DEFAULT_OMP_PROFILE];
+	const args = [...input.runtime.args, ...input.binary.prefixArgs, "--cwd", input.cwd, "--profile", input.profile ?? DEFAULT_OMP_PROFILE];
 	if (input.sessionFile !== null) args.push("--resume", input.sessionFile);
 	else if (input.sessionDir !== null) args.push("--session-dir", input.sessionDir);
-	if (input.control !== null) args.push("-e", input.control.modulePath);
+	if (control !== null) args.push("-e", control.modulePath);
 	return { file: input.binary.command, args, cwd: input.cwd, env };
 }
 
@@ -70,7 +77,8 @@ export async function launchNativeHost(request: RpcLaunchRequest, client: PtyBro
 			chosen = await resumeWorkingDirectory(header.cwd, request.cwd);
 		} else if (request.sessionDir !== null) await fs.mkdir(request.sessionDir, { recursive: true });
 		if (request.control !== null) await fs.mkdir(request.control.directory, { recursive: true });
-		const spec = nativeOmpLaunchSpec({ ...request, ...chosen, binary });
+		const controlPlan = await planControlLaunch(binary, request.control);
+		const spec = nativeOmpLaunchSpec({ ...request, ...chosen, binary, runtime: controlPlan.runtime });
 		possiblyStarted = true;
 		const launched = await client.launch({ ...spec, slot: request.slot, kind: "managed-omp", title: `OMP: ${path.basename(chosen.cwd)}` });
 		if (launched.handle === null) return { state: launched.state === "not-started" ? "not-started" : "unconfirmed", reason: launched.reason, runtime: null };
@@ -86,8 +94,8 @@ export async function launchNativeHost(request: RpcLaunchRequest, client: PtyBro
 			return { state: "unconfirmed", reason: "The native broker did not prove its exact child identity.", runtime: null };
 		}
 		return {
-			state: "running", reason: `Native OMP launched from ${binary.origin} under the PTY broker.`,
-			runtime: { kind: "terminal", handle, identity, cwd: chosen.cwd, sessionFile: request.sessionFile, control: request.control, binary, notice: chosen.notice, pid: identity.childPid, resolutionMs, observed: null, stopping: false, observedSurvivors: [] },
+			state: "running", reason: `Native OMP launched from ${binary.origin} under the PTY broker${controlPlan.log === null ? "" : `; ${controlPlan.log}`}.`,
+			runtime: { kind: "terminal", handle, identity, cwd: chosen.cwd, sessionFile: request.sessionFile, control: controlPlan.delivered ? request.control : null, binary, notice: [chosen.notice, controlPlan.notice].filter(part => part !== null).join(" ") || null, pid: identity.childPid, resolutionMs, observed: null, stopping: false, observedSurvivors: [] },
 		};
 	} catch (error) {
 		return { state: possiblyStarted ? "unconfirmed" : "not-started", reason: error instanceof Error ? error.message : String(error), runtime: null };

@@ -3,7 +3,8 @@ import * as os from "node:os";
 import * as vscode from "vscode";
 import type { PtyBrokerClient } from "../host/pty-client";
 import { resolveOmpBinary, runOmpCli } from "../host/native-terminal";
-import { admitStatsLaunch, ensureStatsDashboard, probeStatsDashboard, statsPreloadSupported, STATS_ORIGIN, withStatsLaunchLock } from "../host/stats-dashboard";
+import type { RuntimeFlagPlan } from "../host/runtime-flags";
+import { admitStatsLaunch, ensureStatsDashboard, planStatsPreload, probeStatsDashboard, STATS_ORIGIN, withStatsLaunchLock } from "../host/stats-dashboard";
 import { statsWebviewHtml } from "../host/stats-webview";
 import { isPtyProcessAlive, queryPtyProcessIdentity, waitForPtyProcessGone } from "../host/pty-identity";
 import { stageRuntimeAssets, verifyStagedRuntimeAsset } from "../host/runtime-assets";
@@ -40,20 +41,17 @@ export function registerStatsDashboard(context: vscode.ExtensionContext, deps: {
 			async resolveLaunch() {
 				const binary = await resolveOmpBinary();
 				binaryKey = JSON.stringify([binary.command, binary.prefixArgs, binary.version]);
-				let preload: string | null = null;
+				let preload: RuntimeFlagPlan | null = null;
 				if (!unchangedOpeners.has(binaryKey)) {
 					try {
 						const [asset] = await stageRuntimeAssets({
 							storageDir: context.globalStorageUri.fsPath,
 							sourcePaths: [vscode.Uri.joinPath(context.extensionUri, "media", "stats-opener.mjs").fsPath],
 						});
-						if (asset !== undefined && await verifyStagedRuntimeAsset(asset)) {
-							const probe = await runOmpCli({ command: binary.command, prefixArgs: ["--preload", asset.path, ...binary.prefixArgs] }, ["--version"], 5_000, { cwd: os.homedir() });
-							if (statsPreloadSupported(probe)) preload = asset.path;
-						}
+						if (asset !== undefined && await verifyStagedRuntimeAsset(asset)) preload = await planStatsPreload(binary, asset.path, { cwd: os.homedir(), run: runOmpCli });
 					} catch { deps.log("stats: browser-opener preload capability was not established"); }
 				}
-				if (preload !== null) deps.log("stats: browser-opener preload capability verified");
+				if (preload !== null) deps.log(`stats: browser-opener preload capability verified (${preload.carrier})`);
 				return await admitStatsLaunch(binary, os.homedir(), preload, async () => {
 					const start = await vscode.window.showInformationMessage("This OMP build opens the dashboard in your browser as well. Start it?", { modal: true }, "Start");
 					if (start !== "Start") return false;

@@ -23,6 +23,8 @@ import { after, before, describe, it } from "node:test";
 import { build } from "esbuild";
 import { CONTROL_DIR_ENV, CONTROL_SLOT_ENV, LINK_REMINDER_ENV } from "./control-protocol.ts";
 import type { NativeControlBootstrap } from "./native-terminal.ts";
+import { controlRuntimeFlagSet, NO_RUNTIME_FLAGS, planRuntimeFlags } from "./runtime-flags.ts";
+import type { RuntimeFlagPlan } from "./runtime-flags.ts";
 import type {
 	resumeWorkingDirectory as resumeWorkingDirectoryType,
 	RpcOmpLaunchSpec,
@@ -81,6 +83,7 @@ describe("the rpc-ui launch command line", () => {
 		defineName: "__OMP_VSCODE_RECIPIENT__",
 		publicRecipient: "cHVibGljLXJlY2lwaWVudA",
 		modulePath: path.join(temp, "host-control.js"),
+		probeModulePath: path.join(temp, "runtime-probe.mjs"),
 		directory: path.join(temp, "control"),
 		slotId: "slot-1",
 	});
@@ -92,12 +95,18 @@ describe("the rpc-ui launch command line", () => {
 			readonly sessionDir?: string | null;
 			readonly control?: NativeControlBootstrap | null;
 			readonly prefixArgs?: readonly string[];
+			/** How the flags reach the launcher; the default is a bun shim's command line. */
+			readonly carrier?: RuntimeFlagPlan["carrier"];
+			readonly inheritedBunOptions?: string;
 			readonly linkReminder?: boolean;
 		} = {},
 	): RpcOmpLaunchSpec {
+		const control = overrides.control === undefined ? null : overrides.control;
+		const runtime = control === null ? NO_RUNTIME_FLAGS : planRuntimeFlags(controlRuntimeFlagSet(control), overrides.carrier ?? "argv", overrides.inheritedBunOptions);
 		return launch.rpcOmpLaunchSpec({
 			binary: { command: "omp", prefixArgs: overrides.prefixArgs ?? [] },
-			control: overrides.control === undefined ? null : overrides.control,
+			control,
+			runtime,
 			cwd: cwd(),
 			sessionFile: overrides.sessionFile === undefined ? null : overrides.sessionFile,
 			sessionDir: overrides.sessionDir === undefined ? null : overrides.sessionDir,
@@ -190,6 +199,35 @@ describe("the rpc-ui launch command line", () => {
 		assert.ok(prefix > result.args.indexOf("--preload"));
 		assert.ok(prefix < result.args.indexOf("--mode"));
 		assert.ok(result.args.indexOf("-e") > result.args.indexOf("--mode"), "OMP's -e follows OMP's own arguments");
+	});
+
+	it("never puts Bun's flags on the command line of a launcher that carries them in BUN_OPTIONS", () => {
+		// OMP's own compiled program has a command line that is OMP's alone: `--define` and `--preload` there are
+		// OMP's unknown flags (`OMP exited with code 2`).
+		const control = controlOf();
+		const result = spec({ control, carrier: "bun-options" });
+		for (const flag of ["--define", "--preload"]) assert.equal(result.args.includes(flag), false, flag);
+		assert.deepEqual(result.args.slice(0, 2), ["--mode", "rpc-ui"], "nothing precedes OMP's own arguments");
+		assert.equal(valueOf(result.args, "-e"), control.modulePath, "OMP's own -e still loads the module");
+		assert.equal(result.env.BUN_OPTIONS?.includes("--preload"), true);
+		assert.equal(result.env.BUN_OPTIONS?.includes(control.defineName), true);
+		assert.equal(result.env[CONTROL_DIR_ENV], control.directory);
+		assert.equal(result.env.OMP_VSCODE_BUN_OPTIONS_BASE, "", "the unset BUN_OPTIONS is what the module restores");
+	});
+
+	it("keeps a BUN_OPTIONS the user already has in front of Desk's", () => {
+		const result = spec({ control: controlOf(), carrier: "bun-options", inheritedBunOptions: "--smol" });
+		assert.ok(result.env.BUN_OPTIONS?.startsWith("--smol --define "), result.env.BUN_OPTIONS ?? "unset");
+		assert.equal(result.env.OMP_VSCODE_BUN_OPTIONS_BASE, "--smol");
+	});
+
+	it("passes no Bun flag and no BUN_OPTIONS to a launcher that honours neither, and still loads Chat's own commands", () => {
+		const control = controlOf();
+		const result = spec({ control, carrier: "none" });
+		for (const flag of ["--define", "--preload"]) assert.equal(result.args.includes(flag), false, flag);
+		assert.equal("BUN_OPTIONS" in result.env, false);
+		assert.equal(valueOf(result.args, "-e"), control.modulePath, "rewind, clear and the Chat prompt need no control channel");
+		assert.equal(result.env[CONTROL_SLOT_ENV], control.slotId);
 	});
 });
 
