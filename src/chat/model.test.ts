@@ -355,6 +355,18 @@ describe("command output and presentation", () => {
 		assert.deepEqual([model.maintenance?.status, model.ephemeral], ["skipped", []]);
 	});
 
+	it("shows one failure notice when OMP announces a failed compaction as its own notice and again as the report line, in either order", () => {
+		const announced = { type: "notice", level: "warning", message: "snapcompact needs a vision-capable model", source: "compaction" } as const;
+		const report = { type: "command_output", text: "Compaction failed: snapcompact cannot run locally" } as const;
+		const expected = [["notice", { type: "notice", level: "warning", message: "snapcompact cannot run locally", source: "Compaction failed" }]];
+		let model = reduceChatFrame(reduceChatFrame(live(), announced, { now: 1 }), report, { now: 2 });
+		assert.deepEqual(model.ephemeral.map(item => [item.kind, item.payload]), expected);
+		model = reduceChatFrame(reduceChatFrame(live(), report, { now: 1 }), announced, { now: 2 });
+		assert.deepEqual(model.ephemeral.map(item => [item.kind, item.payload]), expected);
+		model = reduceChatFrame(live(), announced, { now: 3 });
+		assert.deepEqual(model.ephemeral.map(item => item.kind), ["notice"], "a compaction notice without a report stays");
+	});
+
 	it("keeps SGR styling of a handled command's output whole and removes every other sequence, never just the ESC byte", () => {
 		const styled = "\u001b[38;2;0;180;255m░░░\u001b[39m] 1%\u001b[2K\u001b]0;title\u0007 \u001b[1;31mdone\u001b[0m";
 		const model = reduceChatFrame(live(), { type: "command_output", text: styled });

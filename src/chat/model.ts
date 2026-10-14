@@ -308,6 +308,9 @@ export const MAX_WIDGET_LINES = 100;
 export const MAX_COMMAND_FEEDBACK_TEXT = 2_000;
 export const MAX_COMMAND_OUTPUT_TEXT = 16_000;
 
+const COMPACTION_NOTICE_SOURCE = "compaction";
+const COMPACTION_FAILED_SOURCE = "Compaction failed";
+
 /** What OMP's `/compact` builtin prints when it ends: `Compaction complete[. Tokens: a -> b (saved c).]` or `Compaction failed: <reason>`. */
 export function compactionReportOf(text: string): { status: "complete" } | { status: "failed"; reason: string } | null {
 	if (/^Compaction complete\b/.test(text)) return { status: "complete" };
@@ -951,6 +954,11 @@ export function reduceChatFrame(model: ChatModel, frame: ChatEventFrame, clock: 
 		case "notice":
 			// OMP announces xd:// device mounts for the model's benefit; in Chat they only list tool names.
 			if (frame.level === "info" && frame.source === "xdev") return model;
+			// A failed `/compact` is announced by this notice and again by its report line; the report's notice is the one kept.
+			if (frame.source === COMPACTION_NOTICE_SOURCE) {
+				const previous = model.ephemeral.at(-1);
+				if (previous?.kind === "notice" && isObject(previous.payload) && previous.payload.source === COMPACTION_FAILED_SOURCE) return model;
+			}
 			return appendEphemeral(model, frame.type, frame, now);
 		case "ttsr_triggered": {
 			const last = positionTranscript(model.entries, model.durableCount, model.pending, model.ephemeral, model.stream && model.streamId && model.streamPosition ? { message: model.stream, messageId: model.streamId, position: model.streamPosition } : null, model.durablePositions).at(-1);
@@ -1083,7 +1091,11 @@ export function reduceChatFrame(model: ChatModel, frame: ChatEventFrame, clock: 
 			// OMP's `/compact` report: the compaction entry is the divider, so a completed one adds nothing and a failure is a notice.
 			const report = compactionReportOf(frame.text);
 			if (report?.status === "complete") return model;
-			if (report?.status === "failed") return appendEphemeral(model, "notice", { type: "notice", level: "warning", message: report.reason, source: "Compaction failed" }, now);
+			if (report?.status === "failed") {
+				const previous = model.ephemeral.at(-1);
+				const base = previous?.kind === "notice" && isObject(previous.payload) && previous.payload.source === COMPACTION_NOTICE_SOURCE ? { ...model, ephemeral: model.ephemeral.slice(0, -1) } : model;
+				return appendEphemeral(base, "notice", { type: "notice", level: "warning", message: report.reason, source: COMPACTION_FAILED_SOURCE }, now);
+			}
 			return appendEphemeral(model, "command_output", { text: clampStyledText(frame.text, MAX_COMMAND_OUTPUT_TEXT) }, now);
 		}
 		case "ui_status": {
