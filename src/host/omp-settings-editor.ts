@@ -13,7 +13,7 @@ import { parseAgentSpec, SettingsRefusal, valueAt } from "./omp-settings-core";
 import { isRecord as record } from "../shared/guards";
 import type { AgentSpec, ConfigEdit, ConfigRecord, SettingsScope, SettingsSnapshot } from "../protocol/settings-model";
 import type { SettingsKind } from "../chat/settings-command";
-import type { SettingsMessage } from "../protocol/settings-messages";
+import type { SessionApply, SettingsMessage } from "../protocol/settings-messages";
 import { chooseSetting, pickFallbackChainKey, pickSettingsModel, pickSettingsThinking } from "./settings-pickers";
 import { modelKey, roleChange, selectorBase, selectorThinking } from "../protocol/settings-pick-items";
 import { ancestorProjectFolder, projectFolderFor } from "../omp/config-ancestor";
@@ -26,6 +26,8 @@ export interface SettingsEditorContext {
   readonly folder: string | null;
   readonly profile: string; readonly executable?: OmpCommand;
   readonly sessionLabel?: string;
+  /** The open Chat session's model, thinking level and whether it is busy, read when a snapshot is sent; null when it cannot be read. */
+  readonly sessionState?: () => { model?: string; thinking?: string; busy: boolean } | null;
   readonly applyDefault?: (model: { provider: string; id: string; thinking?: string }) => Promise<string>;
 }
 export interface SettingsEditorHost {
@@ -212,7 +214,22 @@ export class SettingsEditors implements vscode.Disposable {
     editor.receipt = result as unknown as ReadReceipt;
     const folder = editor.binding.folder;
     const ancestorProject = folder === null ? null : await ancestorProjectFolder(folder);
-    this.#post(editor, { type: "settings:snapshot", snapshot: editor.receipt.snapshot, configExists: { global: editor.receipt.files.global.exists, project: editor.receipt.files.project.exists }, ancestorProject });
+    const session = await this.#sessionApply(editor);
+    this.#post(editor, { type: "settings:snapshot", snapshot: editor.receipt.snapshot, configExists: { global: editor.receipt.files.global.exists, project: editor.receipt.files.project.exists }, ancestorProject, session });
+  }
+  /** For an editor opened from a running Chat: the session's current model and the default it would switch to. */
+  async #sessionApply(editor: Editor): Promise<SessionApply | null> {
+    const { applyDefault, sessionState, sessionLabel } = editor.binding;
+    if (!applyDefault) return null;
+    const state = sessionState?.() ?? null;
+    const base = { label: sessionLabel ?? "launching Chat", busy: state?.busy ?? false, ...(state?.model ? { current: { model: state.model, ...(state.thinking ? { thinking: state.thinking } : {}) } } : {}) };
+    try {
+      const result = await this.#worker(editor, { action: "resolve-default" });
+      if (!record(result) || typeof result.provider !== "string" || typeof result.id !== "string") return { ...base, unavailable: "OMP did not resolve a default model." };
+      return { ...base, target: { model: `${result.provider}/${result.id}`, ...(typeof result.thinking === "string" ? { thinking: result.thinking } : {}) } };
+    } catch (error) {
+      return { ...base, unavailable: error instanceof SettingsRefusal ? error.message : "The default model could not be resolved." };
+    }
   }
   async #save(editor: Editor, scope: SettingsScope, edits: ConfigEdit[], thinking?: string, preset?: string): Promise<string> {
     const receipt = editor.receipt;
@@ -343,6 +360,8 @@ export class SettingsEditors implements vscode.Disposable {
           if (editor.binding.applyDefault !== apply) throw new SettingsRefusal("The launching Chat changed while resolving the default. Nothing was applied.");
           if (!record(result) || typeof result.provider !== "string" || typeof result.id !== "string" || (result.thinking !== undefined && typeof result.thinking !== "string")) throw new SettingsRefusal("OMP did not resolve a default model.");
           message = await apply({ provider: result.provider, id: result.id, thinking: result.thinking as string | undefined });
+          // The block that offered the switch must reflect the session as it is now.
+          await this.#read(editor).catch(() => undefined);
           break;
         }
         default: throw new SettingsRefusal("This settings action is unavailable.");

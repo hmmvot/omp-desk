@@ -88,6 +88,8 @@ function Outcome({ outcome }: { outcome: AgentOutcome }) {
 function Unusable({ agent, snapshot, send }: { agent: SettingsAgent; snapshot: SettingsSnapshot; send: Send }) {
   const { model } = agent.resolution;
   if (model.status === "ok" || model.status === "none") return null;
+  // A disabled agent is not in use: say so quietly, with no warning.
+  if (agent.disabled) return <p className="small muted"><Icon name="info" /> Disabled, so it is not in use. Its model {model.wanted} {model.status === "login" ? "would need login" : model.status === "missing" ? "is not a model OMP knows" : "is not available"}.</p>;
   const provider = model.provider ? snapshot.providers.find(item => item.id === model.provider) : undefined;
   const what = model.status === "login" ? "needs login" : model.status === "missing" ? "is not a model OMP knows" : "is not available";
   return <div className="banner inner"><Icon name="warning" /><div className="grow"><strong>{model.wanted}</strong> {what}. Until that changes, this agent runs on the model of the session that spawns it.</div>

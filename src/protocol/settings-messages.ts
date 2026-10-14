@@ -22,12 +22,24 @@ export type SettingsAction =
   | { action: "open-agent"; requestId: string; agent: string }
   | { action: "generate"; requestId: string; description: string }
   | { action: "create"; requestId: string; scope: SettingsScope };
+/**
+ * What "use the default model in this Chat session" would do, read by the host when it sends a snapshot. `current` is the model and
+ * thinking level the session reports now; `target` is the effective default role, or `unavailable` says why none can be applied.
+ */
+export interface SessionApply {
+  readonly label: string; readonly busy: boolean;
+  readonly current?: { readonly model: string; readonly thinking?: string };
+  readonly target?: { readonly model: string; readonly thinking?: string };
+  readonly unavailable?: string;
+}
 export type SettingsMessage =
   /** `folder` is null for the global scope: no project layer, no project agents and global writes only. */
   | { type: "settings:init"; key: string; kind: SettingsKind; folder: string | null; canApply: boolean; sessionLabel?: string }
   | { type: "settings:snapshot"; snapshot: SettingsSnapshot; configExists: Readonly<Record<SettingsScope, boolean>>;
     /** The nearest ancestor folder whose `.omp` is non-empty while the bound folder has none (ADR-0071): sessions probably run there. */
-    ancestorProject?: string | null }
+    ancestorProject?: string | null;
+    /** Present only for an editor opened from a running Chat session. */
+    session?: SessionApply | null }
   | { type: "settings:preview"; spec: AgentSpec | null }
   /** The value chosen in a `pick-model` or `pick-chain-key` QuickPick, null when dismissed; always followed by the request's `settings:result`. */
   | { type: "settings:picked"; requestId: string; value: string | null }

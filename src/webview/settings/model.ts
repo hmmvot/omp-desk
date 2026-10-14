@@ -1,3 +1,4 @@
+import type { SessionApply } from "../../protocol/settings-messages";
 import type { ConfigRecord, ResolvedStatus, ResolvedThinking, SettingsAgent, SettingsModel, SettingsRole, SettingsSnapshot } from "../../protocol/settings-model";
 import { modelKey, selectorBase, selectorThinking } from "../../protocol/settings-pick-items.ts";
 import { isRecord } from "../../shared/guards.ts";
@@ -162,4 +163,29 @@ export function agentMatchesFilter(agent: SettingsAgent, filter: AgentFilter): b
     case "disabled": return agent.disabled;
     default: return true;
   }
+}
+
+export interface SessionBlock {
+  readonly heading: string; readonly button?: string; readonly line: string; readonly note?: string;
+  /** Why the button cannot be used now. */ readonly blocked?: string; readonly unavailable?: string;
+}
+const quoted = (label: string): string => `the Chat session “${label}”`;
+/**
+ * The "Current session" block: what the button would do to the open Chat session, in words. Null when there is nothing to offer:
+ * no session, or it already uses the default model (and thinking level, when one would be set).
+ */
+export function sessionBlock(session: SessionApply | null | undefined): SessionBlock | null {
+  if (!session) return null;
+  const who = quoted(session.label);
+  const line = `Saved settings apply to new sessions. This changes the model of ${who} now.`;
+  if (!session.target) return { heading: "Switch this Chat session to the default model", line, unavailable: `${session.unavailable ?? "The default model could not be resolved."} Nothing can be switched.` };
+  const level = session.target.thinking !== undefined && session.target.thinking !== "auto" ? session.target.thinking : undefined;
+  if (session.current?.model === session.target.model && (level === undefined || session.current.thinking === level)) return null;
+  const model = shortModel(session.target.model);
+  return {
+    heading: `Switch ${who} to ${session.target.model}${level ? ` · ${level}` : ""}`,
+    button: `Use ${model} in this session`, line,
+    ...(session.target.thinking === "auto" ? { note: "Auto thinking is not applied; the session keeps its current level." } : {}),
+    ...(session.busy ? { blocked: "The session is busy. Try again when it is idle." } : {}),
+  };
 }

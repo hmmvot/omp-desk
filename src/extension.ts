@@ -1595,6 +1595,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       profile: entry.scope.profile ?? DEFAULT_OMP_PROFILE,
       executable: await executableFor(hostOf(stateOf(tabId)) ?? null),
       sessionLabel: entry.title ?? "launching Chat",
+      sessionState: () => {
+        const now = conversations.liveOf(tabId);
+        if (now === null) return null;
+        const model = now.state?.model;
+        return { ...(model ? { model: `${model.provider}/${model.id}` } : {}), ...(now.state?.thinkingLevel ? { thinking: now.state.thinkingLevel } : {}), busy: now.working || now.asyncPaused || now.state?.isStreaming === true };
+      },
       ...(live === null ? {} : {
         applyDefault: async model => {
           const applied = await conversations.applyModelDefault(tabId, live.incarnation, model, () => {

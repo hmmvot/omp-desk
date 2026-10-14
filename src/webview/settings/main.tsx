@@ -2,7 +2,7 @@ import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { isRecord } from "../../shared/guards";
 import type { SettingsScope, SettingsSnapshot } from "../../protocol/settings-model";
-import type { SettingsAction, SettingsMessage } from "../../protocol/settings-messages";
+import type { SessionApply, SettingsAction, SettingsMessage } from "../../protocol/settings-messages";
 import { at, compactCount, count, displayValue, filteredModels, patternList, perfLabel, priceLabel, problems, providerStatus, sameList, sourceLabel } from "./model";
 import { ancestorProjectNotice } from "../../protocol/omp-config-model";
 import { SETTINGS_CSS } from "./styles";
@@ -27,6 +27,7 @@ function useHost() {
   const [configExists, setConfigExists] = useState<ConfigExists>({ global: false, project: false });
   const [revision, setRevision] = useState(0);
   const [ancestorProject, setAncestorProject] = useState<string | null>(null);
+  const [session, setSession] = useState<SessionApply | null>(null);
   const [preview, setPreview] = useState<Preview>(null);
   const [busy, setBusy] = useState(true);
   const [status, setStatus] = useState<Status>({ ok: true, pending: true, message: "Reading the installed OMP settings…" });
@@ -41,7 +42,7 @@ function useHost() {
       const message = event.data as unknown as SettingsMessage;
       switch (message.type) {
         case "settings:init": setInit(message); vscode.setState({ key: message.key }); break;
-        case "settings:snapshot": setSnapshot(message.snapshot); setConfigExists(message.configExists); setAncestorProject(message.ancestorProject ?? null); setRevision(value => value + 1); break;
+        case "settings:snapshot": setSnapshot(message.snapshot); setConfigExists(message.configExists); setAncestorProject(message.ancestorProject ?? null); setSession(message.session ?? null); setRevision(value => value + 1); break;
         case "settings:preview": setPreview(message.spec); break;
         // A sign-in outlives the request that started it: its outcome has no request waiting.
         case "settings:notice": setStatus({ ok: message.ok, pending: false, message: message.message }); break;
@@ -85,7 +86,7 @@ function useHost() {
     if (requestId === undefined) resolve(null); else picks.current.set(requestId, { value: null, resolve });
     return promise;
   };
-  return { init, snapshot, configExists, ancestorProject, revision, preview, busy, status, send, pick };
+  return { init, snapshot, configExists, ancestorProject, session, revision, preview, busy, status, send, pick };
 }
 const MODEL_SECTIONS = [["roles", "Roles & routing"], ["browse", "Model browser"], ["presets", "Presets"]] as const;
 const AGENT_SECTIONS = [["agents", "Agents"], ["new", "New agent"]] as const;
@@ -130,7 +131,7 @@ function App() {
       <Tabs items={kind === "agents" ? AGENT_SECTIONS : MODEL_SECTIONS} selected={section} onSelect={setSection} />
       <fieldset disabled={host.busy}>
         {kind === "models" ? <>
-          <Panel id="roles" section={section}><ModelsRoles {...surface} init={host.init} /></Panel>
+          <Panel id="roles" section={section}><ModelsRoles {...surface} init={host.init} session={host.session} /></Panel>
           <Panel id="browse" section={section}><ModelBrowser {...surface} /></Panel>
           <Panel id="presets" section={section}><Presets {...surface} /></Panel>
         </> : <>

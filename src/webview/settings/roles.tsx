@@ -3,7 +3,8 @@ import { isRecord } from "../../shared/guards";
 import { modelKey, selectorBase } from "../../protocol/settings-pick-items";
 import { roleNote } from "../../protocol/role-notes";
 import type { RoleResolution, SettingsRole, SettingsScope, SettingsSnapshot } from "../../protocol/settings-model";
-import { at, count, patternList, problems, rolePill, sameList, sourceLabel, withEntry } from "./model";
+import type { SessionApply } from "../../protocol/settings-messages";
+import { at, count, patternList, problems, rolePill, sameList, sessionBlock, sourceLabel, withEntry } from "./model";
 import { Badge, EntryStatusText, Icon, InlineStatus, ListBox, Meter, ModelChip, NAME_HINT, NAME_PATTERN, OrderedList, SourcePill, Trace } from "./common";
 import type { Init, Pick, Send, SurfaceProps } from "./common";
 import { SignIn } from "./health";
@@ -15,7 +16,7 @@ function placeholderRole(id: string, models: readonly string[]): SettingsRole {
   return { id, name: id, section: "custom", accepts: models, defaults: [], resolution };
 }
 /** The roles a Models page lists: groups of built-in roles, then custom ones, each with its model, thinking level and source. */
-export function ModelsRoles(props: SurfaceProps & { init?: Init }) {
+export function ModelsRoles(props: SurfaceProps & { init?: Init; session?: SessionApply | null }) {
   const { snapshot, send, revision, folder } = props;
   const [selected, setSelected] = useState("default");
   const [custom, setCustom] = useState("");
@@ -52,7 +53,7 @@ export function ModelsRoles(props: SurfaceProps & { init?: Init }) {
       </section>
       {role && <RoleDetail key={`${role.id}:${scope}`} snapshot={snapshot} role={role} scope={scope} projectAllowed={projectAllowed} setScope={setScope} send={send} assign={step => assign(role.id, step)} />}
     </div>
-    <CurrentSession init={props.init} send={send} />
+    <CurrentSession init={props.init} session={props.session} send={send} />
     <Cycle key={`cycle:${revision}`} {...props} />
     <Fallback {...props} />
   </>;
@@ -117,11 +118,16 @@ function RoleDetail({ snapshot, role, scope, projectAllowed, setScope, send, ass
     {candidates.length > 0 && <details><summary className="small">{resolution.candidates ? "Then OMP tries, in order" : "OMP's candidates when it chooses"}</summary><ol className="small plain-list">{candidates.map(item => <li key={item}><code>{item}</code></li>)}</ol></details>}
   </section>;
 }
-export function CurrentSession({ init, send }: { init?: Init; send: Send }) {
+export function CurrentSession({ init, session, send }: { init?: Init; session?: SessionApply | null; send: Send }) {
   if (!init?.canApply) return <p className="small muted hint"><Icon name="info" /> Saved roles apply to new sessions. To switch a running Chat, open Models with <code>/models</code> from that Chat.</p>;
+  const block = sessionBlock(session);
+  if (!block) return null;
   return <section className="card"><h3>Current session</h3>
-    <p className="small muted">Saving never switches a running session. This applies the effective default model to {init.sessionLabel ?? "the launching Chat"} while it is idle. RPC cannot apply auto thinking or upstream routing.</p>
-    <button type="button" onClick={() => send({ action: "apply-default" }, "session")}>Apply default to {init.sessionLabel ?? "launching Chat"}</button>
+    <p><strong>{block.heading}</strong></p>
+    <p className="small muted">{block.line}</p>
+    {block.note && <p className="small">{block.note}</p>}
+    {block.unavailable && <p className="small warning-text"><Icon name="warning" />{block.unavailable}</p>}
+    {block.button && <div className="toolbar"><button type="button" disabled={block.blocked !== undefined} title={block.blocked} onClick={() => send({ action: "apply-default" }, "session")}>{block.button}</button>{block.blocked && <span className="small muted">{block.blocked}</span>}</div>}
     <InlineStatus origin="session" />
   </section>;
 }

@@ -664,10 +664,13 @@ describe("native Models and Agents settings", () => {
 		assert.match(await apply({ provider: "p", id: "target", thinking: "high" }), /confirmed by OMP readback/);
 		assert.equal(channel.child.model?.id, "target"); assert.equal(channel.child.thinkingLevel, "high");
 		const writes = channel.commandsOfType("set_model").length;
-		assert.match(await apply({ provider: "p", id: "target", thinking: "auto" }), /Not applied/);
+		assert.match(await apply({ provider: "p", id: "target", thinking: "auto" }), /Auto thinking is not applied; the session keeps its current level/);
+		assert.equal(channel.child.thinkingLevel, "high", "auto thinking leaves the level alone");
+		const writesAfterAuto = channel.commandsOfType("set_model").length;
+		assert.equal(writesAfterAuto, writes + 1);
 		current = false;
 		await apply({ provider: "p", id: "target" });
-		assert.equal(channel.commandsOfType("set_model").length, writes);
+		assert.equal(channel.commandsOfType("set_model").length, writesAfterAuto);
 	});
 });
 
@@ -675,6 +678,7 @@ describe("terminal-UI builtins typed into Chat", () => {
 	const REGISTRY = [
 		{ name: "hotkeys", aliases: ["keys"], handled: false },
 		{ name: "copy", aliases: [], handled: false },
+		{ name: "logout", aliases: [], handled: false },
 		{ name: "compact", aliases: [], handled: true },
 		{ name: "review", aliases: [], handled: false },
 	];
@@ -693,6 +697,8 @@ describe("terminal-UI builtins typed into Chat", () => {
 			"/hotkeys is a terminal command; opened the OMP Desk keyboard shortcuts instead.",
 			"/copy was not sent: use the Copy buttons on replies, code blocks and your messages.",
 		]);
+		assert.equal(await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "tui-3", text: "/logout" }, page), "explained");
+		assert.deepEqual(ran, [`${TAB}:keyboard-shortcuts`, `${TAB}:provider-logout`], "/logout runs the provider logout flow");
 		assert.equal(channel.commandsOfType("prompt").length + channel.commandsOfType("steer").length, 0, "nothing reaches OMP");
 	});
 

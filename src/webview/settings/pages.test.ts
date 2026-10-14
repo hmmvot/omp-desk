@@ -119,8 +119,10 @@ test("an agent whose model needs login explains the fallback and offers Sign in,
   assert.match(html, /<strong>z\/gone<\/strong> needs login\. Until that changes, this agent runs on the model of the session that spawns it\./);
   assert.match(html, /aria-label="Sign in to z"/);
   const banner = render.health({ problems: [{ scope: "agent", id: "retired", status: "login", provider: "z", wanted: "z/gone", disabled: true }], providers: [{ id: "z", available: false }], send() {} });
-  assert.match(banner, /Nothing in use is affected/);
-  assert.doesNotMatch(banner, /Sign in to z/);
+  assert.equal(banner, "", "a disabled agent affects nothing in use, so there is no warning banner");
+  const quiet = render.agents(props(snapshot(roles, [retired])));
+  assert.match(quiet, /Disabled, so it is not in use\. Its model z\/gone would need login\./);
+  assert.doesNotMatch(quiet, /class="banner/);
 });
 
 test("the health banner names what is affected and signs in once per provider that is not signed in", () => {
@@ -139,4 +141,32 @@ test("Sign in sends the sign-in action for its provider from the health origin",
   const sent: unknown[] = [];
   render.signIn({ provider: "z", send: (...args: unknown[]) => { sent.push(args); return "id"; } }).props.onClick();
   assert.deepEqual(sent, [[{ action: "sign-in", provider: "z" }, "health"]]);
+});
+
+const withSession = (session: unknown, canApply = true): string => render.models({ ...props(snapshot([role("default", roleResolution({}))], [])), init: { type: "settings:init", key: "k", kind: "models", folder: null, canApply, sessionLabel: "omp-desk-0.4.0" }, session } as unknown as SurfaceProps);
+const live = { label: "omp-desk-0.4.0", busy: false, current: { model: "a/old", thinking: "low" }, target: { model: "a/sonnet", thinking: "high" } };
+
+test("Current session names the session as a session, the model and level it will set, and a button that says what it does", () => {
+  const html = withSession(live);
+  assert.match(html, /Switch the Chat session \u201Comp-desk-0\.4\.0\u201D to a\/sonnet \u00B7 high/);
+  assert.match(html, /Saved settings apply to new sessions\. This changes the model of the Chat session \u201Comp-desk-0\.4\.0\u201D now\./);
+  assert.match(html, />Use sonnet in this session<\/button>/);
+  assert.doesNotMatch(html, /RPC|Apply default/);
+});
+
+test("Current session is hidden when the session already uses the default, and says what cannot be applied", () => {
+  assert.doesNotMatch(withSession({ ...live, current: { model: "a/sonnet", thinking: "high" } }), /Current session/);
+  assert.match(withSession({ ...live, current: { model: "a/sonnet" } }), /Current session/, "same model, different level: still offered");
+  const auto = withSession({ ...live, target: { model: "a/sonnet", thinking: "auto" } });
+  assert.match(auto, /Auto thinking is not applied; the session keeps its current level\./);
+  assert.match(auto, /to a\/sonnet<\/strong>/, "no level is named when none will be set");
+  assert.doesNotMatch(withSession({ ...live, current: { model: "a/sonnet", thinking: "low" }, target: { model: "a/sonnet", thinking: "auto" } }), /Current session/, "auto changes nothing, so a session on the model needs no switch");
+  const refused = withSession({ label: "x", busy: false, unavailable: "Not applied: the effective default has upstream routing that RPC cannot express." });
+  assert.match(refused, /upstream routing/);
+  assert.doesNotMatch(refused, /in this session<\/button>/);
+});
+
+test("Current session disables the button with the reason while the session is busy", () => {
+  const html = withSession({ ...live, busy: true });
+  assert.match(html, /<button type="button" disabled="" title="The session is busy\. Try again when it is idle\.">Use sonnet in this session<\/button>/);
 });
