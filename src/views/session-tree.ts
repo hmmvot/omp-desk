@@ -468,6 +468,7 @@ function sessionTooltip(
 	unread = false,
 	where: string | null = null,
 	processMark: string | null = null,
+	rootNote: string | null = null,
 ): string {
 	const lines = [
 		sessionHeadline(entry, header).replace(/\r\n|\r|\n/g, " "),
@@ -479,6 +480,7 @@ function sessionTooltip(
 	if (unread && state !== "unread") lines.push("Unread reply");
 	if (where !== null) lines.push(where);
 	if (processMark !== null) lines.push(processMark);
+	if (rootNote !== null) lines.push(rootNote);
 	if (state === "stopped" || state === "draft") lines.push("Resume to send a message.");
 	if (state === "externalOmp") lines.push("Open here to choose whether to continue separately.");
 	return lines.join("\n");
@@ -490,16 +492,21 @@ function latestConversationAt(times: readonly (string | null)[]): string | null 
 		at !== null && (latest === null || Date.parse(at) > Date.parse(latest)) ? at : latest, null);
 }
 
+/** Why sessions of a folder run where the window did not open: at the repository root, not in the opened folder(s); `null` when the folder is where sessions run. */
+function repositoryRootNote(folder: LauncherFolder): string | null {
+	if (folder.openedPaths === undefined || folder.openedPaths.length === 0) return null;
+	return `Sessions run at the repository root ${folder.path}, not in the opened ${folder.openedPaths.map(opened => `"${opened}"`).join(", ")}.`;
+}
+
 function folderTooltip(folder: LauncherFolder, latest: string | null, hasRecoverableShell: boolean, now: number): string {
 	const where = folder.openHere && folder.openElsewhere ? "Open in this and another window"
 		: folder.openHere ? "Open in this window" : folder.openElsewhere ? "Open in another window" : null;
+	const rootNote = repositoryRootNote(folder);
 	const lines = [
 		folderHeadline(folder.path).replace(/\r\n|\r|\n/g, " "),
 		folder.pinned ? `Pinned${where === null ? "" : ` · ${where}`}` : where ?? "Kept while a session runs in it",
 		latest === null ? "No session activity yet" : `Last activity: ${relativeAge(latest, now)}`,
-		...(folder.openedPaths === undefined || folder.openedPaths.length === 0 ? [] : [
-			`Sessions run at the repository root ${folder.path}, not in the opened ${folder.openedPaths.map(opened => `"${opened}"`).join(", ")}.`,
-		]),
+		...(rootNote === null ? [] : [rootNote]),
 	];
 	if (hasRecoverableShell) lines.push("Reconnect Terminal to reopen its terminal.");
 	return lines.join("\n");
@@ -514,6 +521,8 @@ interface SessionRowPresentation {
 	now: number;
 	/** The flat list's folder name in front of the title, or `null`/absent under a folder node. */
 	folderLabel?: string | null;
+	/** The flat list's tooltip sentence for a folder that is the repository root of the opened folder, or `null`/absent (see {@link repositoryRootNote}). */
+	rootNote?: string | null;
 	/** The agent finished or asked and the user has not looked since (see `src/host/session-unread.ts`). */
 	unread?: boolean;
 	/** The window another window's claim shows holding this row: its published status and name, or `null` when unknown. */
@@ -616,7 +625,7 @@ export class SessionTreeItem extends vscode.TreeItem {
 		const shown = shownSessionState(state, row.peer ?? null, this.unread);
 		const status = STATE_LABEL[shown];
 		this.description = this.unread && shown !== "unread" ? `Unread · ${status}` : status;
-		this.tooltip = sessionTooltip(entry, shown, row.header, row.conversation, row.now, this.unread, hold(state, row), row.processMark ?? null);
+		this.tooltip = sessionTooltip(entry, shown, row.header, row.conversation, row.now, this.unread, hold(state, row), row.processMark ?? null, row.rootNote ?? null);
 		this.#diagnosticFacts = row.facts;
 		this.#diagnosticActive = row.active;
 		this.iconPath = STATE_ICON[shown];
@@ -1116,6 +1125,8 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 				return { entry, header: entry.sessionFile === null ? null : header?.value?.header ?? null,
 					conversation, facts, state, active: entry.tabId === activeTabId, peer,
 					folderLabel: grouping === "flat" ? folderLabels.get(folder.id) ?? null : null,
+					// The folder row says it under the folder tree; the flat list has none, so each row does.
+					rootNote: grouping === "flat" ? repositoryRootNote(folder) : null,
 					unread: isUnread(entry) && state !== "externalOmp",
 					processMark: sessionProcessMark(state, facts.running || facts.ownedWriterPid != null, processBySession.get(entry.tabId) ?? null),
 					order: { tabId: entry.tabId, stopped: state === "stopped" || state === "draft", folder: "", ordinal: entry.ordinal,
@@ -1188,14 +1199,14 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 		const byTabId = new Map<string, SessionTreeItem>();
 		const rowChanges: SessionTreeItem[] = [];
 		const newItems = inputs.map(input => {
-			const rows = input.rows.map(({ entry, header, conversation, facts, state, active, folderLabel, unread, peer, processMark }) => {
+			const rows = input.rows.map(({ entry, header, conversation, facts, state, active, folderLabel, rootNote, unread, peer, processMark }) => {
 				// The relative age is part of the key, so a refresh repaints a stale "x minutes ago".
 				const age = conversation?.lastAt == null ? null : relativeAge(conversation.lastAt, now);
-				const key = JSON.stringify([entry, header, conversation, age, facts, active, folderLabel, unread, peer, processMark]);
+				const key = JSON.stringify([entry, header, conversation, age, facts, active, folderLabel, rootNote, unread, peer, processMark]);
 				let row = previousRows.get(entry.tabId);
-				if (row === undefined) row = new SessionTreeItem(entry, state, { header, conversation, facts, active, now, folderLabel, unread, peer, processMark });
+				if (row === undefined) row = new SessionTreeItem(entry, state, { header, conversation, facts, active, now, folderLabel, rootNote, unread, peer, processMark });
 				else if (this.#presentation.get(entry.tabId) !== key) {
-					row.update(entry, state, { header, conversation, facts, active, now, folderLabel, unread, peer, processMark });
+					row.update(entry, state, { header, conversation, facts, active, now, folderLabel, rootNote, unread, peer, processMark });
 					rowChanges.push(row);
 				}
 				this.#presentation.set(entry.tabId, key);

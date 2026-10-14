@@ -1499,6 +1499,29 @@ describe("launcher tree", () => {
 			assert.ok(String(provider.getChildren()[0]!.label).startsWith("alpha · "));
 		});
 
+		it("says on each session row, where there is no folder row to say it, that sessions run at the repository root and not in the opened folder", () => {
+			const unity = path.join(ALPHA, "Unity");
+			const root: LauncherFolder = { ...folder("folder:root", ALPHA, false, { pinned: false, open: true }), openedPaths: [unity] };
+			const own = folder("folder:beta", BETA, false, { pinned: false, open: true });
+			let grouping: "flat" | "folders" = "flat";
+			const provider = flatProvider({
+				folders: [root, own],
+				entries: [row("tab:root", ALPHA, { ordinal: 1 }), row("tab:sub", unity, { ordinal: 2 }), row("tab:own", BETA, { ordinal: 3 })],
+				grouping: () => grouping,
+			});
+			const note = `Sessions run at the repository root ${ALPHA}, not in the opened "${unity}".`;
+			const rows = () => provider.getChildren().filter((item): item is SessionRow => item instanceof sessionTree.SessionTreeItem);
+			const tip = (tabId: string) => tooltipText(rows().find(item => item.tabId === tabId)!);
+			assert.ok(tip("tab:root").includes(note), tip("tab:root"));
+			assert.ok(tip("tab:sub").includes(note), "a session recorded in the opened subfolder is filed under the root and says so");
+			assert.ok(!tip("tab:own").includes("Sessions run at the repository root"), "a folder that is where sessions run says nothing more");
+			grouping = "folders";
+			provider.refresh();
+			const [shown] = provider.getChildren();
+			assert.ok(!(provider.getChildren(shown) as SessionRow[]).some(item => tooltipText(item).includes("Sessions run at the repository root")), "under the folder tree the folder row says it, the rows do not repeat it");
+			assert.ok(tooltipText(shown!).includes(note));
+		});
+
 		it("tells apart two folders with the same name in the row labels", () => {
 			const one = path.join(os.tmpdir(), "omp-launcher-tree", "one", "app");
 			const two = path.join(os.tmpdir(), "omp-launcher-tree", "two", "app");
