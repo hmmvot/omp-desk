@@ -5235,6 +5235,11 @@ async function runChatAction(context: vscode.ExtensionContext, index: SessionInd
       entry?.cwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir());
     return;
   }
+  if (command === "keyboard-shortcuts" || command === "source-control" || command === "tools-view") {
+    // Desk's own views for the terminal-only /hotkeys, /git and /skills; none of them needs a live conversation.
+    await runDeskSlashAction(command);
+    return;
+  }
   const conversations = s.sessionRuntime.conversations;
   const live = conversations.liveOf(tabId);
   if (live === null || live.phase !== "live") {
@@ -5243,11 +5248,6 @@ async function runChatAction(context: vscode.ExtensionContext, index: SessionInd
   }
   const { incarnation } = live;
   const current = (): boolean => liveAt(tabId, incarnation)?.phase === "live";
-  if (command === "keyboard-shortcuts" || command === "source-control" || command === "tools-view") {
-    // Desk's own views for the terminal-only /hotkeys, /git and /skills; none of them needs a live conversation.
-    await runDeskSlashAction(command);
-    return;
-  }
   switch (command) {
     case "compact": {
       const running = live.working;
