@@ -20,6 +20,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { Logger } from "../shared/logger.ts";
+import type { OmpLauncherKind } from "./chat-broker-runtime";
 import type { PtyHandle } from "./pty-client";
 import type { PtyStatusPayload } from "./pty-protocol";
 import type { PtyBrokerRecord } from "./pty-protocol";
@@ -57,8 +58,7 @@ export interface OmpCommand {
   readonly prefixArgs: readonly string[];
 }
 
-/** What a resolved launch target is; see {@link OmpBinary.launcher}. */
-export type OmpLauncherKind = "bun-shim" | "program";
+export type { OmpLauncherKind };
 
 export interface OmpBinary extends OmpCommand {
   /** Release `omp --version` reported, when it reported one; a diagnostic only. */

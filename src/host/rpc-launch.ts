@@ -24,6 +24,7 @@ import type { NativeControlBootstrap, OmpBinary, OmpCommand } from "./native-ter
 import type { RuntimeFlagPlan } from "./runtime-flags";
 import { isPtyProcessAlive } from "./pty-identity";
 import type { PtyBrokerClient } from "./pty-client";
+import type { PtyBrokerRuntime } from "./pty-protocol";
 import type { PtyHandle } from "./pty-client";
 import type { RpcHandle } from "./rpc-handle";
 import { HOST_STOP_TIMEOUT_MS, concurrentPinProof, decideStop, lazyNativeGenerationReader } from "./rpc-reconcile";
@@ -178,6 +179,12 @@ export async function resumeWorkingDirectory(
 	};
 }
 
+/** What a record says about the runtime its broker runs on; an absent statement is an earlier build's `Code.exe` broker. */
+export function describeRecordedRuntime(runtime: PtyBrokerRuntime | undefined): string {
+	if (runtime === undefined) return "VS Code (Code.exe), from before brokers named their runtime";
+	return runtime.engine === "bun" ? `Bun ${runtime.version}` : runtime.engine === "electron" ? `VS Code (Electron ${runtime.version})` : `Node ${runtime.version}`;
+}
+
 /**
  * Launch one chat process under the extension-owned PTY broker.
  *
@@ -256,7 +263,7 @@ export async function launchRpcHost(request: RpcLaunchRequest, client: PtyBroker
 		cwd: spec.cwd,
 		env: spec.env,
 		title: `OMP: ${path.basename(cwd)}`,
-	});
+	}, { ompBinary: binary });
 	if (launched.handle === null) {
 		// Nothing was spawned (`not-started`), or a broker exists and could not be driven: a
 		// writer may exist, so only the former lets a claim go.
@@ -351,7 +358,7 @@ export async function attachRpcHost(input: {
 	if (!child.proof.ok) return refuse(child.proof.reason);
 	return {
 		state: "attached",
-		reason: `Re-adopted the PTY broker generation ${handle.record.generation} for pid ${handle.nativePid}${
+		reason: `Re-adopted the PTY broker generation ${handle.record.generation} for pid ${handle.nativePid} (broker runtime: ${describeRecordedRuntime(handle.record.runtime)})${
 			handle.buildMatches ? "" : " (started by another build of this extension)"
 		}.`,
 		runtime: {

@@ -48,6 +48,7 @@ import {
 	parsePtyBrokerRecord,
 	parsePtyFrame,
 	parsePtyTitle,
+	ptyBrokerRuntimeOf,
 	ptyHelloMac,
 	ptyHelloOkMac,
 	verifyPtyHelloMac,
@@ -189,6 +190,47 @@ describe("broker record", () => {
 		for (const slot of ["", "with space", "new\nline", "x".repeat(257), 12]) {
 			assert.equal(isPtySlot(slot), false, String(slot));
 		}
+	});
+
+	it("carries the runtime a broker names for itself (ADR-0074)", () => {
+		const parsed = parsePtyBrokerRecord(JSON.parse(JSON.stringify(record({ runtime: { engine: "bun", version: "1.4.3" } }))));
+		assert.deepEqual(parsed.runtime, { engine: "bun", version: "1.4.3" });
+		for (const engine of ["electron", "node"] as const) {
+			assert.deepEqual(parsePtyBrokerRecord(JSON.parse(JSON.stringify(record({ runtime: { engine, version: "24.1.0" } })))).runtime, { engine, version: "24.1.0" });
+		}
+	});
+
+	it("parses a record an earlier build wrote, without a runtime", () => {
+		const parsed = parsePtyBrokerRecord(JSON.parse(JSON.stringify(record())));
+		assert.equal(parsed.runtime, undefined);
+		assert.equal(Object.hasOwn(parsed, "runtime"), false);
+	});
+
+	it("drops a malformed runtime statement and keeps the record", () => {
+		const malformed: unknown[] = [
+			{ engine: "deno", version: "2.0.0" },
+			{ engine: "bun", version: "" },
+			{ engine: "bun", version: "1".repeat(65) },
+			{ engine: "bun", version: 143 },
+			{ engine: "bun" },
+			"bun 1.4.3",
+			17,
+			null,
+			[],
+		];
+		for (const runtime of malformed) {
+			const parsed = parsePtyBrokerRecord({ ...record(), runtime });
+			assert.equal(parsed.runtime, undefined, `kept ${JSON.stringify(runtime)}`);
+			assert.equal(parsed.slot, "tab:1");
+		}
+		assert.deepEqual(parsePtyBrokerRecord({ ...record(), runtime: { engine: "bun", version: "1".repeat(64) } }).runtime, { engine: "bun", version: "1".repeat(64) });
+	});
+
+	it("names the runtime from process.versions: bun over electron over node", () => {
+		assert.deepEqual(ptyBrokerRuntimeOf({ node: "24.0.0", electron: "39.0.0", bun: "1.4.3" }), { engine: "bun", version: "1.4.3" });
+		assert.deepEqual(ptyBrokerRuntimeOf({ node: "24.0.0", electron: "39.0.0" }), { engine: "electron", version: "39.0.0" });
+		assert.deepEqual(ptyBrokerRuntimeOf({ node: "24.0.0" }), { engine: "node", version: "24.0.0" });
+		assert.deepEqual(ptyBrokerRuntimeOf({}), { engine: "node", version: "unknown" });
 	});
 });
 

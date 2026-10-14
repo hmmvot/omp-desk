@@ -29,7 +29,15 @@ import {
 } from "./pty-runtime.ts";
 import { PtyBrokerClient } from "./pty-client.ts";
 import { PtyRuntimeProof } from "./pty-runtime-proof.ts";
-import { PTY_PROOF_DIRECTORY, type PtySelfCheckAnswer } from "./pty-runtime-proof-store.ts";
+import {
+	PTY_PROOF_DIRECTORY,
+	ptyProofKey,
+	ptyProofPath,
+	readPtyProof,
+	writePtyProof,
+	type PtyProofKey,
+	type PtySelfCheckAnswer,
+} from "./pty-runtime-proof-store.ts";
 import { PTY_PROTOCOL_VERSION, PTY_RECORD_VERSION, PTY_RUNTIME_VERSION, PTY_SERVICE, createPtyGeneration, createPtyToken } from "./pty-protocol.ts";
 import type { PtyBrokerRecord } from "./pty-protocol.ts";
 import { ptyRecordPath } from "./pty-registry.ts";
@@ -381,5 +389,96 @@ describe("a stored runtime proof that goes stale", { skip: WINDOWS_ONLY }, () =>
 			assert.doesNotMatch(outcome.reason, /discarded/);
 			assert.equal((await proofFiles(storage)).length, 1);
 		});
+	});
+});
+
+describe("a pipe-only runtime proof (ADR-0074)", { skip: WINDOWS_ONLY }, () => {
+	const PIPE_ONLY_ANSWER: PtySelfCheckAnswer = { ...ANSWER, childOutput: false, childExitCode: null, pipeOnly: true, bun: "1.4.3", execPath: "C:\\Users\\me\\.bun\\bin\\bun.exe" };
+
+	async function keys(): Promise<{ full: PtyProofKey; pipeOnly: PtyProofKey }> {
+		const base = { runtimeVersion: 2, treeDigest: "b".repeat(64), executable: process.execPath, ownExecutable: true };
+		const full = await ptyProofKey(base);
+		const pipeOnly = await ptyProofKey({ ...base, pipeOnly: true });
+		assert.ok(full !== null && pipeOnly !== null);
+		return { full, pipeOnly };
+	}
+
+	it("has its own key and file, and a full key stays exactly as it was", async () => {
+		const storage = await temp("omp-proof-pipe-only-key-");
+		const { full, pipeOnly } = await keys();
+		assert.equal(pipeOnly.pipeOnly, true);
+		assert.equal(Object.hasOwn(full, "pipeOnly"), false);
+		assert.notEqual(ptyProofPath(storage, full), ptyProofPath(storage, pipeOnly));
+		const explicitFalse = await ptyProofKey({ runtimeVersion: 2, treeDigest: "b".repeat(64), executable: process.execPath, ownExecutable: true, pipeOnly: false });
+		assert.deepEqual(explicitFalse, full);
+		assert.equal(ptyProofPath(storage, explicitFalse as PtyProofKey), ptyProofPath(storage, full));
+	});
+
+	it("round-trips a pipe-only answer", async () => {
+		const storage = await temp("omp-proof-pipe-only-roundtrip-");
+		const { pipeOnly } = await keys();
+		const provedAt = new Date().toISOString();
+		await writePtyProof(storage, { format: 1, key: pipeOnly, provedAt, selfCheck: PIPE_ONLY_ANSWER });
+		const lookup = await readPtyProof(storage, pipeOnly);
+		assert.equal(lookup.kind, "hit");
+		if (lookup.kind !== "hit") return;
+		assert.deepEqual(lookup.record.selfCheck, PIPE_ONLY_ANSWER);
+		assert.equal(lookup.record.selfCheck.childOutput, false);
+		assert.equal(lookup.record.selfCheck.pipeOnly, true);
+		assert.equal(lookup.record.selfCheck.bun, "1.4.3");
+		assert.equal(lookup.record.selfCheck.childExitCode, null);
+		assert.equal(lookup.record.provedAt, provedAt);
+	});
+
+	it("is not a hit for the full key, and a full proof is not a hit for the pipe-only key", async () => {
+		const storage = await temp("omp-proof-pipe-only-apart-");
+		const { full, pipeOnly } = await keys();
+		const provedAt = new Date().toISOString();
+		await writePtyProof(storage, { format: 1, key: pipeOnly, provedAt, selfCheck: PIPE_ONLY_ANSWER });
+		assert.equal((await readPtyProof(storage, full)).kind, "miss");
+		await rm(path.join(storage, "runtime", PTY_PROOF_DIRECTORY), { recursive: true, force: true });
+		await writePtyProof(storage, { format: 1, key: full, provedAt, selfCheck: ANSWER });
+		assert.equal((await readPtyProof(storage, pipeOnly)).kind, "miss");
+		assert.equal((await readPtyProof(storage, full)).kind, "hit");
+	});
+
+	it("does not believe a pipe-only file moved to the full key's name, or a full file moved to the pipe-only key's", async () => {
+		const storage = await temp("omp-proof-pipe-only-moved-");
+		const { full, pipeOnly } = await keys();
+		const provedAt = new Date().toISOString();
+		await writePtyProof(storage, { format: 1, key: pipeOnly, provedAt, selfCheck: PIPE_ONLY_ANSWER });
+		await copyFile(ptyProofPath(storage, pipeOnly), ptyProofPath(storage, full));
+		const moved = await readPtyProof(storage, full);
+		assert.equal(moved.kind, "miss");
+		await writePtyProof(storage, { format: 1, key: full, provedAt, selfCheck: ANSWER });
+		await copyFile(ptyProofPath(storage, full), ptyProofPath(storage, pipeOnly));
+		assert.equal((await readPtyProof(storage, pipeOnly)).kind, "miss");
+	});
+
+	it("misses a pipe-only file whose answer lacks the Bun version or the executable path, or says it ran a console child", async () => {
+		const storage = await temp("omp-proof-pipe-only-malformed-");
+		const { pipeOnly } = await keys();
+		const provedAt = new Date().toISOString();
+		const { bun: _bun, ...withoutBun } = PIPE_ONLY_ANSWER;
+		const { execPath: _execPath, ...withoutExecPath } = PIPE_ONLY_ANSWER;
+		const cases: { name: string; answer: Record<string, unknown> }[] = [
+			{ name: "no bun", answer: withoutBun },
+			{ name: "null bun", answer: { ...PIPE_ONLY_ANSWER, bun: null } },
+			{ name: "numeric bun", answer: { ...PIPE_ONLY_ANSWER, bun: 143 } },
+			{ name: "no execPath", answer: withoutExecPath },
+			{ name: "null execPath", answer: { ...PIPE_ONLY_ANSWER, execPath: null } },
+			{ name: "numeric execPath", answer: { ...PIPE_ONLY_ANSWER, execPath: 7 } },
+			{ name: "childOutput true", answer: { ...PIPE_ONLY_ANSWER, childOutput: true } },
+			{ name: "no pipeOnly marker", answer: { ...PIPE_ONLY_ANSWER, pipeOnly: undefined } },
+			{ name: "an exit code", answer: { ...PIPE_ONLY_ANSWER, childExitCode: 0 } },
+		];
+		for (const { name, answer } of cases) {
+			const file = ptyProofPath(storage, pipeOnly);
+			await mkdir(path.dirname(file), { recursive: true });
+			await writeFile(file, `${JSON.stringify({ format: 1, key: pipeOnly, provedAt, selfCheck: answer })}\n`, "utf8");
+			const lookup = await readPtyProof(storage, pipeOnly);
+			assert.equal(lookup.kind, "miss", name);
+			if (lookup.kind === "miss") assert.match(lookup.why, /malformed/, name);
+		}
 	});
 });

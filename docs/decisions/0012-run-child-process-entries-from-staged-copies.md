@@ -9,6 +9,8 @@ date: 2026-09-24
 
 **Narrow amendment (2026-10-13):** a staging that finds every copy already in place and writes nothing verifies the finished layout once instead of twice; see "Amendment 2026-10-13" below. Decision 5's rule that the rules are established before the first byte is written is unchanged for every staging that writes (its "only before any copy is written" describes the writing flow; a staging that writes nothing has no write to precede).
 
+> **Narrow amendment (accepted):** [ADR-0074](0074-run-chat-brokers-on-the-sessions-own-bun-runtime-with-code-exe-as-fallback.md) states how a runtime executable that is not staged is trusted: a Chat broker may run on the session's `bun.exe` in place, under ADR-0054's access rule applied to the executable's path. The staging of everything the extension ships, and this record's rules for it, are unchanged.
+
 ## Context and Problem Statement
 
 Three packaged files are executed from inside the installed extension folder:

@@ -435,6 +435,30 @@ export function isPtyOwnerStopStatus(value: unknown): value is PtyOwnerStopStatu
 
 // Durable record
 
+/** What a broker says it runs on. */
+export interface PtyBrokerRuntime {
+	readonly engine: "bun" | "electron" | "node";
+	readonly version: string;
+}
+
+/** The longest runtime version text a record may carry. */
+const MAX_RUNTIME_VERSION_CHARS = 64;
+
+/** The statement a broker makes about its own runtime: Bun if it is Bun, else Electron-as-Node, else Node. */
+export function ptyBrokerRuntimeOf(versions: Readonly<Record<string, string | undefined>>): PtyBrokerRuntime {
+	if (typeof versions.bun === "string") return { engine: "bun", version: versions.bun };
+	if (typeof versions.electron === "string") return { engine: "electron", version: versions.electron };
+	return { engine: "node", version: versions.node ?? "unknown" };
+}
+
+function parsePtyBrokerRuntime(value: unknown): PtyBrokerRuntime | null {
+	if (typeof value !== "object" || value === null) return null;
+	const runtime = value as Record<string, unknown>;
+	if (runtime.engine !== "bun" && runtime.engine !== "electron" && runtime.engine !== "node") return null;
+	if (typeof runtime.version !== "string" || runtime.version.length === 0 || runtime.version.length > MAX_RUNTIME_VERSION_CHARS) return null;
+	return { engine: runtime.engine, version: runtime.version };
+}
+
 /**
  * The record a broker claims its slot with, inside verified private storage.
  *
@@ -465,6 +489,12 @@ export interface PtyBrokerRecord {
 	readonly cols: number;
 	readonly rows: number;
 	readonly title: string | null;
+	/**
+	 * The runtime the broker reports it runs on, read from its own `process.versions`
+	 * ([ADR-0074](../../docs/decisions/0074-run-chat-brokers-on-the-sessions-own-bun-runtime-with-code-exe-as-fallback.md)).
+	 * Absent in a record an earlier build wrote: such a broker was always `Code.exe`.
+	 */
+	readonly runtime?: PtyBrokerRuntime;
 }
 
 export const PTY_RECORD_VERSION = 1;
@@ -506,6 +536,8 @@ export function parsePtyBrokerRecord(value: unknown): PtyBrokerRecord {
 		throw new PtyProtocolError("a broker record's rows are out of range");
 	}
 	const title = record.title === null ? null : text(record.title, MAX_TITLE_CHARS, "title");
+	// Optional and informational: a malformed statement is dropped, never a reason to refuse the record.
+	const runtime = parsePtyBrokerRuntime(record.runtime);
 	return {
 		version: PTY_RECORD_VERSION,
 		service: PTY_SERVICE,
@@ -524,6 +556,7 @@ export function parsePtyBrokerRecord(value: unknown): PtyBrokerRecord {
 		cols,
 		rows,
 		title,
+		...(runtime === null ? {} : { runtime }),
 	};
 }
 

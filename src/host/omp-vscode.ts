@@ -9,6 +9,7 @@
 import * as vscode from "vscode";
 import type { OmpCommand } from "./native-terminal";
 import { OMP_PATH_SETTING } from "../shared/omp-unavailable";
+import { CHAT_BROKER_RUNTIME_SETTING, type ChatBrokerRuntimeSetting } from "./chat-broker-runtime";
 
 /** One visible provider-login terminal: the command, where it runs, and its scope. */
 export interface ProviderLoginTerminalRequest {
@@ -31,6 +32,15 @@ export interface ProviderLoginTerminalRequest {
 export function configuredOmpPath(): string {
   const value = vscode.workspace.getConfiguration("ompDesk").get<unknown>(OMP_PATH_SETTING.slice("ompDesk.".length));
   return typeof value === "string" ? value.trim() : "";
+}
+
+/**
+ * The runtime Chat brokers start on (`ompDesk.chatBrokerRuntime`, machine scope, so a workspace cannot choose).
+ * Anything but the one non-default value reads as the default, `auto`.
+ */
+export function configuredChatBrokerRuntime(): ChatBrokerRuntimeSetting {
+  const value = vscode.workspace.getConfiguration("ompDesk").get<unknown>(CHAT_BROKER_RUNTIME_SETTING.slice("ompDesk.".length));
+  return value === "vscode" ? "vscode" : "auto";
 }
 
 /**

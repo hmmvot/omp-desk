@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A running Chat survives a VS Code update.** A Chat's background broker, the process that keeps its OMP alive when VS Code closes, used to be VS Code's own `Code.exe`, which VS Code's updater ends along with every other `Code.exe` of the install, taking the Chat's OMP process (and an unfinished turn) with it. A new Chat now starts its broker on the `bun.exe` that runs its OMP when Desk can prove that Bun (Bun 1.4.0 or newer, in a folder only you and administrators can change; a pipe-only self-check), so the updater does not touch it and the next window re-adopts the same OMP process and transcript. This needs OMP launched through Bun (the Bun global install, `bun omp.js`): an OMP installed as its own program (the winget package `can1357.oh-my-pi`, the `omp.sh` binary install, a mise install) has no Bun to share, so its Chats keep a `Code.exe` broker and still end in an update. Anything else (no Bun launch, an older Bun, a refused check, **`ompDesk.chatBrokerRuntime`** set to `vscode`) starts the broker on `Code.exe` as before, and the OMP Desk output says which one each Chat uses and why. Terminals, folder shells and Stats still end in an update. A Bun broker keeps about 110 MB more committed memory than a `Code.exe` one (working set about the same). Chats already running keep the broker they have. Changing the setting affects new brokers only; to move a running Chat, stop it and open it again.
+
 ## [0.4.2] - 2026-10-14
 
 ### Changed

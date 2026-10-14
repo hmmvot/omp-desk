@@ -62,6 +62,12 @@ export interface PtySelfCheckAnswer {
 	 */
 	readonly childExitCode: number | null;
 	readonly durationMs: number;
+	/** Set only by the pipe-only check of a Chat-only runtime (ADR-0074): no console child ran, so `childOutput` is false. */
+	readonly pipeOnly?: true;
+	/** The Bun version that ran a pipe-only check; `null` when the runtime that ran it was not Bun. */
+	readonly bun?: string | null;
+	/** The executable that ran a pipe-only check, as the runtime itself reports it (`process.execPath`); the host holds it to the file it judged. */
+	readonly execPath?: string;
 }
 
 /** Directory below `runtime/` holding one proof file per key. */
@@ -97,6 +103,8 @@ export interface PtyProofKey {
 	readonly platform: string;
 	readonly arch: string;
 	readonly osRelease: string;
+	/** Present (`true`) only for a pipe-only proof. */
+	readonly pipeOnly?: true;
 }
 
 /** What one proven self-check left behind. */
@@ -123,6 +131,8 @@ export async function ptyProofKey(input: {
 	readonly executable: string;
 	/** `true` when the executable is this process's own, so its versions are known. */
 	readonly ownExecutable: boolean;
+	/** `true` for the pipe-only check of a Chat-only runtime: its proof is another file and never answers a full lookup. */
+	readonly pipeOnly?: boolean;
 }): Promise<PtyProofKey | null> {
 	let identity;
 	try {
@@ -142,6 +152,8 @@ export async function ptyProofKey(input: {
 		platform: platform(),
 		arch: arch(),
 		osRelease: release(),
+		// Present only for a pipe-only proof, so every existing full-proof key keeps its hash.
+		...(input.pipeOnly === true ? { pipeOnly: true as const } : {}),
 	};
 }
 
@@ -169,7 +181,7 @@ export async function forgetPtyProof(file: string): Promise<void> {
 }
 
 /** The answer one proven self-check recorded, or `null` when the stored value is not exactly that shape. */
-function parseSelfCheck(value: unknown): PtySelfCheckAnswer | null {
+function parseSelfCheck(value: unknown, pipeOnly: boolean): PtySelfCheckAnswer | null {
 	if (typeof value !== "object" || value === null) return null;
 	const answer = value as Record<string, unknown>;
 	const { electron, nodePty, childExitCode } = answer;
@@ -181,9 +193,9 @@ function parseSelfCheck(value: unknown): PtySelfCheckAnswer | null {
 		(electron !== null && typeof electron !== "string") ||
 		(nodePty !== null && typeof nodePty !== "string") ||
 		typeof answer.conptyDll !== "boolean" ||
-		answer.childOutput !== true ||
+		(pipeOnly ? answer.childOutput !== false : answer.childOutput !== true) ||
 		answer.pipeChild !== true ||
-		(childExitCode !== null && childExitCode !== 0) ||
+		(pipeOnly ? answer.pipeOnly !== true || typeof answer.bun !== "string" || typeof answer.execPath !== "string" || childExitCode !== null : childExitCode !== null && childExitCode !== 0) ||
 		typeof answer.durationMs !== "number"
 	) {
 		return null;
@@ -196,10 +208,11 @@ function parseSelfCheck(value: unknown): PtySelfCheckAnswer | null {
 		electron,
 		nodePty,
 		conptyDll: answer.conptyDll,
-		childOutput: true,
+		childOutput: !pipeOnly,
 		pipeChild: true,
-		childExitCode,
+		childExitCode: childExitCode === 0 ? 0 : null,
 		durationMs: answer.durationMs,
+		...(pipeOnly ? { pipeOnly: true as const, bun: answer.bun as string, execPath: answer.execPath as string } : {}),
 	};
 }
 
@@ -226,7 +239,7 @@ export async function readPtyProof(storageDir: string, key: PtyProofKey, now: nu
 	if (canonicalJson(record.key) !== canonicalJson(key)) return { kind: "miss", why: "the proof file names another key" };
 	const provedAt = isoTime(record.provedAt, now);
 	if (provedAt === null) return { kind: "miss", why: "the proof file carries an unreadable time" };
-	const selfCheck = parseSelfCheck(record.selfCheck);
+	const selfCheck = parseSelfCheck(record.selfCheck, key.pipeOnly === true);
 	if (selfCheck === null) return { kind: "miss", why: "the proof file's self-check answer is malformed" };
 	return {
 		kind: "hit",

@@ -9,6 +9,8 @@ date: 2026-09-28
 
 > Decision Outcome amended 2026-10-12 (accepted after independent architecture review): a run that only ran out of time is *inconclusive* and admits a launch provisionally, without being kept as proof; see [Amendment 2026-10-12](#amendment-2026-10-12-a-timeout-with-no-observed-fault-is-inconclusive).
 
+> **Narrow amendment (accepted):** [ADR-0074](0074-run-chat-brokers-on-the-sessions-own-bun-runtime-with-code-exe-as-fallback.md): a Chat broker started on `bun.exe` needs no console child and loads no native addon, so it is admitted by a pipe-only self-check (a pipe child plus a loopback line probe) with its own proof key, never by this record's console-child proof, and an inconclusive pipe-only check falls back instead of admitting provisionally. Every other path keeps the proof below.
+
 ## Context and Problem Statement
 
 [ADR-0024](0024-own-omp-pty-for-in-tab-terminal.md) requires the broker runtime and its native

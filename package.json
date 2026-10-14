@@ -137,6 +137,17 @@
           "scope": "machine",
           "description": "Absolute path of the OMP to run: the `omp` program itself, or a Bun-installed `omp.exe` shim. Empty uses the first `omp` on PATH. When set, this is the only OMP Desk considers: if it cannot be used, Desk says why and does not search PATH. Applies to sessions started, resumed or read afterwards. User settings only; a workspace cannot set it."
         },
+        "ompDesk.chatBrokerRuntime": {
+          "type": "string",
+          "enum": ["auto", "vscode"],
+          "enumDescriptions": [
+            "A Chat's background broker runs on the Bun that runs the session's OMP when Desk can prove that Bun (Bun 1.4.0 or newer, installed where only you and administrators can change it): a VS Code update then does not end the Chat. Otherwise, for an OMP installed as its own program (winget, omp.sh, mise: it has no Bun to share), and for Terminal, folder shells and Stats, it runs on VS Code's own executable.",
+            "A Chat's background broker always runs on VS Code's own executable (Code.exe), which a VS Code update ends together with the Chat's OMP process."
+          ],
+          "default": "auto",
+          "scope": "machine",
+          "description": "Which program keeps a Chat's OMP process alive in the background. `auto` uses the Bun that runs OMP, so a running Chat survives a VS Code update; `vscode` always uses VS Code's own executable. Desk logs which one each Chat broker uses. Applies to Chats started or restarted afterwards; a running broker is never restarted for it. User settings only; a workspace cannot set it."
+        },
         "ompDesk.agentDebugger.enabled": {
           "type": "boolean",
           "default": true,

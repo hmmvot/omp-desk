@@ -36,6 +36,10 @@ The resolver already admits only a recognised bun shim or a file that carries OM
 - Without host control a Terminal session loses what rides the channel: native `/resume` tracking, authenticated Stop and the Terminal/Chat switch facts, and the check that a native process already serves a file. Stop and Kill fall back to the broker routes that never needed it. The same state already existed when a recipient could not be prepared; it is now also the designed outcome for a launcher that cannot carry it, and a launch records why (`RecordedControlProcess.withheld`) so a reload, the native watch and a reattach stay quiet instead of looking for a channel that was never offered. Chat keeps Rewind, Clear, the Chat prompt and agent liveness, which need no channel.
 - ADR-0049's rule that the stats preload is installed only after its marker was observed is kept; its sentence excluding any environment preload is narrowed to this probed, scrubbed, launcher-kind-bound carrier.
 
+### Amendment note (2026-10-14, after merging with ADR-0074)
+
+[ADR-0074](0074-run-chat-brokers-on-the-sessions-own-bun-runtime-with-code-exe-as-fallback.md) reads the same `OmpBinary.launcher` to choose the runtime of a Chat's broker, and changes nothing here. Only a `bun-shim` launch can have its broker on that `bun.exe`; a `program` or unknown launch (the ones that use the `BUN_OPTIONS` carrier above) always has a `Code.exe` broker, so the environment carrier is never in the environment of a broker that runs on Bun, and a `bun-shim` Chat's flags stay on the command line a Bun broker passes to the OMP child. The probe cache above (per OMP executable) and ADR-0074's proof, trust read and hold (per `bun.exe` file) are independent.
+
 ## Related Documents
 
 - [Architecture: Launch](../architecture.md)

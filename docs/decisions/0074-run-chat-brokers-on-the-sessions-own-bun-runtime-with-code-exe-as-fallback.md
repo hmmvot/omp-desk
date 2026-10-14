@@ -1,0 +1,65 @@
+---
+status: accepted
+date: 2026-10-14
+---
+
+# ADR-0074: Run Chat brokers on the session's own Bun runtime, with Code.exe as the fallback
+
+## Context and Problem Statement
+
+A session's OMP process is kept alive by a detached broker. Today the broker is the extension host's own executable run as Node (`Code.exe` with `ELECTRON_RUN_AS_NODE=1`, ADR-0024, ADR-0012). VS Code's updater (Inno Updater) terminates every `Code.exe` of the install that is still running 30 s after "Restart to Update", so an update ends every broker and, because a Chat's OMP child lives on its broker's pipe (ADR-0038), every Chat's agent with it. A Chat that was working loses its in-flight turn.
+
+The Chat OMP process is `bun.exe`. The updater captures processes by the name `Code.exe` and the full image path of the install's `Code.exe`; a broker on `bun.exe` is outside that rule. Research on 2026-10-14 (a scratch worktree, a scratch copy of VS Code 1.141.1 and a mock model server; Bun 1.4.x, OMP 18.10.3; the floor of 1.4.0 was then re-measured on 1.4.0, the Bun this machine runs) found the choice feasible: the broker's unit suites and a real-broker suite pass on Bun after one line-reader fix (already merged); the broker's process-handle liveness guarantee holds on Bun; an emulated Inno capture of a scratch install killed `Code.exe` brokers and left the Bun broker and its OMP child alive, and a fresh host re-adopted the same pids; the Restart Manager's listing for the install does not name `bun.exe`; no console window appears; memory under load is at parity for working set and +~110 MB commit.
+
+## Considered Options
+
+- **Chat brokers on the session's own `bun.exe` when eligible, `Code.exe` otherwise (chosen).** Survives the updater for the work users lose; no new binary; terminals unaffected. Costs: commit memory, a second runtime to support, a trust rule for a path.
+- **Everything on `Code.exe` as today.** No new risk; the update keeps ending sessions.
+- **A per-install copy of `Code.exe` as the broker host.** Survives by path, but 200+ MB per VS Code release, Electron's memory profile and a cleanup story.
+- **A staged copy of `bun.exe`.** Literal ADR-0012 staging; 100 MB per release, hashing cost, and `bun upgrade` no longer reaches brokers.
+- **Standalone `omp.exe` with `BUN_BE_BUN=1`.** Works on the official build; unsigned, version-coupled, not an OMP contract.
+- **Bun for every kind.** `node-pty` on Bun is unproven through Desk's PTY broker; terminals are not what the user loses in an update.
+
+## Decision Outcome
+
+Chosen: Chat (`managed-rpc`) brokers start on the `bun.exe` of the session's own OMP launch when the plan in the design is eligible, and on `Code.exe` otherwise. The design document carries the details; the decisions that matter beyond it:
+
+1. **Selection is per launch and Chat-only.** Terminal, folder-shell and Stats brokers keep `Code.exe`. Eligibility: setting `ompDesk.chatBrokerRuntime` is `auto` (machine scope; `vscode` forces `Code.exe`), Windows x64, the OMP launch is a bun shim, the `bun.exe` passes the trust rule, and the pipe-only proof reports Bun >= 1.4.0.
+2. **The broker names its own runtime in its record** (`runtime: { engine, version }`, optional, taken from `process.versions`). Record and runtime versions are not bumped. An absent field means an earlier build's `Code.exe` broker. No admission decision in an attach depends on the field.
+3. **Fallback is automatic and logged,** per launch, with the reason (`setting`, `platform`, `launcher`, `executable`, `trust`, `proof`, `version`, `changed`, `start`). A Bun broker is retried once on `Code.exe`, under the same slot lock, when the file or the staged tree changed after it was proven, when the spawn threw, or when the process exited and a fresh read finds no record (a broker claims its record before it spawns its child, so none means no child). A broker that published a record owns its slot as before, and one still alive at the deadline is `unconfirmed` and never retried. A file that failed to start stays off the Bun path until its size, mtime or file id changes; a Bun broker that published a record but could not be attached, or was silent at the deadline, leaves its Chat `unconfirmed` (never retried) and holds the file (until it changes if the broker exited, 10 minutes if it is alive); a check that timed out holds it for 10 minutes.
+4. **The self-check for this runtime is pipe-only:** the staged entry runs under the exact executable, a real pipe child carries a JSONL line through stdin and stdout, and the runtime's loopback sockets carry about 724 KB of line-framed traffic (2,048 short lines and one 200,000-character line, in one write) through the broker's line reader. It reports `execPath`, which must resolve to the judged file, and the Bun version. It does not prove the handshake, the record, the creation-time reading or behaviour over time. Its proof key is distinct (`pipeOnly`, executable path/size/mtime), it never satisfies a full-proof lookup, and the in-process proof is re-made when the file's size, mtime or file id changes. An inconclusive check falls back and is not admitted provisionally.
+5. **Trust rule for the executable, from ADR-0054, replacing staging for the runtime executable:** the path the OMP launch resolved, judged at its real path; one security read of the file and every directory above it below the volume root, on every Bun-eligible launch (the verdict is not kept; this read and the staged tree's access pass are two PowerShell starts per Chat start). Owners and principals are judged with ADR-0054's permitted set (the current account, SYSTEM, Administrators, TrustedInstaller and the owner placeholders CREATOR OWNER, OWNER RIGHTS and SELF). The file and its own folder admit other principals with read and execute rights only; folders above admit no principal who can replace or re-permission them. The file's identity is re-read before the spawn. This keeps another account from changing what the broker runs; content addressing is not reproduced, and the same-user residual is ADR-0006's. Signatures are not a gate. ADR-0012's staging stays for the broker's own entry tree.
+6. **Mixed generations:** existing `Code.exe` brokers are re-adopted unchanged; an earlier build adopts a Bun broker through its record like any other build's broker.
+7. **Narrow amendments.** This decision amends earlier ones only as stated. ADR-0012 stages every entry the extension ships and ADR-0024's decision on the native runtime load tree extends that to the broker's whole native runtime load tree; neither stages the runtime executable (`Code.exe` has always run in place from the VS Code install). This decision keeps that and states the rule for a runtime in a user directory: a Chat broker's `bun.exe` runs in place under the trust rule above, and the broker's own entry tree is still staged. ADR-0024's matching runtime/ABI proof, and ADR-0032's console-child proof, are required where a native addon or a console child is in use; a Chat broker on Bun loads no native module and opens no console, so the pipe-only proof applies to it. Each of those ADRs carries a banner pointing here.
+
+### Consequences
+
+- Positive: a VS Code update no longer ends a running Chat; a fresh window re-adopts the same OMP process and transcript. No change to terminals.
+- Positive: the full PTY self-check (console child, `node-pty` load) is no longer a prerequisite for starting a Chat on Bun, so a Chat's first start does not wait for it when the pipe-only proof is cached.
+- Negative: about +110 MB commit per Bun-hosted Chat (accepted by the user); physical memory unchanged.
+- Negative: every Bun-eligible Chat start pays two PowerShell starts (the trust read and the staged tree's access pass), about 1 s on an idle machine; adopting or reopening a running Chat pays neither.
+- Negative: two runtimes to test; the Bun version can break the broker independently of VS Code (the version gate and proof guard launches only).
+- Negative: terminals, folder shells, Stats and fallen-back Chats still end in an update; the notice and the architecture document say which.
+- Negative: ARM64 is not verified and is excluded.
+- Negative: a long-running Bun broker holds the old `bun.exe` image after `bun upgrade`, which makes a second upgrade fail until it ends (already true of the OMP child); a broker can outlive its session, so it can hold that image longer than the session does (Stop or Kill All ends it).
+
+## Amendment (2026-10-14, after merging with ADR-0075)
+
+[ADR-0075](0075-carry-bun-runtime-flags-by-launcher-kind-and-probe-before-using-an-environment-carrier.md) landed on `main` while this decision was on a branch. Both add `OmpBinary.launcher` (`bun-shim` | `program`) with the same meaning and the same resolver-side values, so the merge keeps one definition (the type lives in `src/host/chat-broker-runtime.ts` and `native-terminal.ts` re-exports it). The interaction, stated once:
+
+1. **Only `bun-shim` can host a Chat broker.** A `program` launch (OMP's own compiled `omp.exe`: winget, `omp.sh`, mise) and a launch with no launcher kind start their Chat broker on `Code.exe`, reason `launcher`, whatever the setting says. The Bun inside a compiled program is private to it and is not used as a broker runtime (`BUN_BE_BUN=1` stays rejected, now also for ADR-0075's reason that the variable would be inherited by every `omp` OMP starts). A standalone-OMP Chat therefore still ends in a VS Code update; that is the stated non-goal of this decision, not a regression. The fallback line names it (`OMP's own compiled program (a standalone install; the Bun inside it is private to it)`).
+2. **No change to ADR-0075's carrier rule.** A `bun-shim` Chat carries Bun's flags on the command line, which a Bun broker passes to the OMP child unchanged (the child's environment is the launch spec's, never the broker's); a `program` Chat carries them in `BUN_OPTIONS` after ADR-0075's probe, and its broker is `Code.exe`. A broker on Bun therefore never receives or needs `BUN_OPTIONS`, and the probe cache (per OMP executable identity) and this decision's proof, trust read and hold (per `bun.exe` file identity, including the file id) are independent: neither is read for the other's verdict.
+3. **Log levels.** The runtime line follows the extension's `Logger` levels ([architecture](../architecture.md), the log paragraph): `info` when the broker starts on Bun and when it does not by setting, platform, launcher kind or install form (`setting`, `platform`, `launcher`, `executable`); `warn` when a Bun that qualified in principle was not used (`trust`, `proof`, `version`, `changed`, `start`).
+
+This amendment adds no behaviour beyond the launcher-kind message and the log levels, and it has not had a separate architecture review; the two decisions it composes were each reviewed.
+
+## Related Documents
+
+- [Design: Chat brokers on the session's own Bun runtime](../designs/2026-10-14-chat-brokers-on-the-session-bun-runtime.md)
+- ADR-0006, ADR-0012, ADR-0024, ADR-0031, ADR-0032, ADR-0038, ADR-0054, ADR-0062
+
+## Architecture Review
+
+- Reviewer: architect (two independent read-only passes)
+- Outcome: accepted after corrections
+- Notes: see the design's Architecture Review. The first pass's five material findings and the second pass's two (a hold after a post-record failure, and the updater notice wording) are fixed; the verification results are in the design.

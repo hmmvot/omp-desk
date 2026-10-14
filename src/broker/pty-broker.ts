@@ -75,6 +75,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { createServer, connect, type Socket } from "node:net";
 import { randomBytes } from "node:crypto";
 import { appendFile, mkdir } from "node:fs/promises";
 import { dirname, isAbsolute } from "node:path";
@@ -91,6 +92,7 @@ import {
 	isPtyRpcOnlyRequest,
 	isPtyTerminalOnlyRequest,
 	PTY_RECORD_VERSION,
+	ptyBrokerRuntimeOf,
 	PTY_RUNTIME_VERSION,
 	PTY_SERVICE,
 	PTY_DEFAULT_OWNER_GRACE_MS,
@@ -128,7 +130,7 @@ import {
 	waitForPtyProcessGone,
 	type PtyProbeHelper,
 } from "../host/pty-identity.ts";
-import { startPtyBrokerServer, type PtyBrokerServer, type PtyBrokerSideConnection } from "../host/pty-ipc.ts";
+import { createLineReader, startPtyBrokerServer, type PtyBrokerServer, type PtyBrokerSideConnection } from "../host/pty-ipc.ts";
 import { claimPtyRecord, ensurePtyStateAccess, retirePtyRecord } from "../host/pty-registry.ts";
 import type * as PtyScreenModule from "./pty-screen.ts";
 import type { PtyScreenChunk, PtyScreenModel } from "./pty-screen.ts";
@@ -574,6 +576,7 @@ export class PtyBroker {
 			brokerPid: process.pid,
 			brokerCreationTime: creation,
 			startedAt: new Date().toISOString(),
+			runtime: ptyBrokerRuntimeOf(process.versions as Record<string, string | undefined>),
 			cols: this.options.cols,
 			rows: this.options.rows,
 			title: this.options.title,
@@ -1531,6 +1534,119 @@ function messageOf(error: unknown): string {
 }
 
 /**
+ * The transport half of the pipe-only proof: this runtime's own loopback sockets carry the broker's line framing
+ * under load. A server in this process echoes every line it reads back through {@link createLineReader}; a client sends
+ * about 600 KB as 2,048 short lines in one write and one line of 200,000 characters, and every echo must come back
+ * whole and in order. That is the shape of an RPC stream of tool output, and the case where a runtime that delivers
+ * larger socket chunks than Node once broke the line reader. It proves the socket and framing, not the handshake, the
+ * record or the pipe child's behaviour over time.
+ */
+async function proveLoopbackLines(deadlineMs: number): Promise<void> {
+	const shortLines = Array.from({ length: 2048 }, (_, index) => `${String(index).padStart(5, "0")}${"x".repeat(250)}`);
+	const longLine = `L${"y".repeat(199_999)}`;
+	const expected = [...shortLines, longLine];
+	const verdict = Promise.withResolvers<void>();
+	const server = createServer(socket => {
+		socket.setEncoding("utf8");
+		const reader = createLineReader();
+		socket.on("data", (chunk: string) => {
+			if (reader.push(chunk).overflow) {
+				verdict.reject(new Error("the loopback server's line reader refused a chunk"));
+				socket.destroy();
+				return;
+			}
+			for (let line = reader.take(); line !== null; line = reader.take()) socket.write(`${line}\n`);
+		});
+		socket.on("error", error => verdict.reject(error));
+	});
+	let client: Socket | null = null;
+	const timer = setTimeout(() => {
+		verdict.reject(new SelfCheckInconclusive(`the loopback line check did not finish within ${Math.round(deadlineMs / 1000)} s`));
+	}, deadlineMs);
+	try {
+		const listening = Promise.withResolvers<void>();
+		server.once("error", listening.reject);
+		server.listen(0, "127.0.0.1", () => listening.resolve());
+		await listening.promise;
+		const address = server.address();
+		if (address === null || typeof address === "string") throw new Error("the loopback server has no port");
+		client = connect(address.port, "127.0.0.1");
+		client.setEncoding("utf8");
+		const reader = createLineReader();
+		let received = 0;
+		client.on("data", (chunk: string) => {
+			if (reader.push(chunk).overflow) {
+				verdict.reject(new Error("the loopback client's line reader refused a chunk"));
+				return;
+			}
+			for (let line = reader.take(); line !== null; line = reader.take()) {
+				if (line !== expected[received]) {
+					verdict.reject(new Error(`loopback line ${received} came back changed`));
+					return;
+				}
+				received += 1;
+			}
+			if (received === expected.length) verdict.resolve();
+		});
+		client.on("error", error => verdict.reject(error));
+		client.write(`${expected.join("\n")}\n`);
+		await verdict.promise;
+	} finally {
+		clearTimeout(timer);
+		client?.destroy();
+		server.close();
+	}
+}
+
+/**
+ * The self-check of a Chat-only runtime (`--self-check --pipe-only`,
+ * [ADR-0074](../../docs/decisions/0074-run-chat-brokers-on-the-sessions-own-bun-runtime-with-code-exe-as-fallback.md)).
+ *
+ * A `managed-rpc` broker needs one thing from its runtime that the full check also proves: a
+ * real pipe child that carries a JSONL line and ends when its stdin closes. This variant runs
+ * only that. It loads no `node-pty`, opens no console and claims nothing about either, and
+ * its answer says so (`pipeOnly: true`, `childOutput: false`), so a host can never take it
+ * for the full proof. It reports which runtime ran it, which is what the host's version gate reads.
+ */
+async function runPipeOnlySelfCheck(deadlineMs: number): Promise<number> {
+	const started = Date.now();
+	const report: Record<string, unknown> = {
+		runtimeVersion: PTY_RUNTIME_VERSION,
+		platform: process.platform,
+		arch: process.arch,
+		node: process.versions.node,
+		bun: (process.versions as Record<string, string | undefined>).bun ?? null,
+		electron: process.versions.electron ?? null,
+		runtime: ptyBrokerRuntimeOf(process.versions as Record<string, string | undefined>),
+		pipeOnly: true,
+		pipeChild: false,
+		childOutput: false,
+		loopback: false,
+		execPath: process.execPath,
+		childExitCode: null,
+		durationMs: 0,
+	};
+	try {
+		await proveRpcPipeChild(deadlineMs);
+		report.pipeChild = true;
+		await proveLoopbackLines(deadlineMs);
+		report.loopback = true;
+		report.ok = true;
+		report.outcome = "proven";
+	} catch (error) {
+		const inconclusive = error instanceof SelfCheckInconclusive;
+		report.ok = false;
+		report.outcome = inconclusive ? "inconclusive" : "broken";
+		report.deadlineMs = deadlineMs;
+		report.detail = messageOf(error);
+	}
+	report.durationMs = Date.now() - started;
+	process.stdout.write(`${JSON.stringify(report)}\n`);
+	if (report.ok === true) return PTY_BROKER_EXIT.ok;
+	return report.outcome === "inconclusive" ? PTY_BROKER_EXIT.selfCheckInconclusive : PTY_BROKER_EXIT.selfCheckFailed;
+}
+
+/**
  * Prove this runtime, from inside it.
  *
  * Asked for with `--self-check` (which `src/host/pty-runtime.ts` runs once per staged
@@ -1690,6 +1806,7 @@ async function main(): Promise<number> {
 			process.stderr.write(`pty-broker: ${messageOf(error)}\n`);
 			return PTY_BROKER_EXIT.arguments;
 		}
+		if (process.argv.slice(2).includes("--pipe-only")) return await runPipeOnlySelfCheck(deadlineMs);
 		return await runSelfCheck(deadlineMs);
 	}
 	if (process.argv.slice(2).includes("--pipe-echo")) return await runPipeEcho();

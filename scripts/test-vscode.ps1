@@ -58,7 +58,7 @@ param(
 	# Also delete VS Code user data and extensions: a first VS Code start, OMP Desk's storage included.
 	[switch] $ResetVsCode,
 	[switch] $KeepProviderKeys,
-	# Stop the running window for -Name (its Code.exe processes and their children) and start nothing.
+	# Stop the running window for -Name (its Code.exe processes, and any bun.exe broker, with their children) and start nothing.
 	[switch] $Stop,
 	# Chrome DevTools Protocol port on 127.0.0.1 for automated UI checks; applies only when this VS Code starts.
 	[ValidateRange(1024, 65535)] [int] $RemoteDebuggingPort,
@@ -86,7 +86,9 @@ $extensions = Join-Path $base 'ext'
 $agent = Join-Path $base 'agent'
 
 # A running window for this environment keeps its environment, and deleting state under it breaks the open sessions.
-$running = @(Get-CimInstance Win32_Process -Filter "Name = 'Code.exe'" |
+# A Chat's background broker may run on bun.exe (ADR-0074), outliving the window it was started from: its command line
+# names this environment's data directory too, and it belongs to the environment as much as a Code.exe does.
+$running = @(Get-CimInstance Win32_Process -Filter "Name = 'Code.exe' OR Name = 'bun.exe'" |
 	Where-Object { $_.CommandLine -and $_.CommandLine.IndexOf($data, [StringComparison]::OrdinalIgnoreCase) -ge 0 })
 if ($running.Count -gt 0 -and -not $Stop) {
 	if ($Reset -or $ResetVsCode) { throw "VS Code for '$Name' is running. Stop it (-Stop), then reset." }
@@ -286,7 +288,7 @@ try {
 	# window and no log. Say so now instead.
 	$product = Get-ChildItem -Path (Split-Path $exe) -Directory |
 		ForEach-Object { Join-Path $_.FullName 'resources\app\product.json' } | Where-Object { Test-Path $_ } | Select-Object -First 1
-	if ($running.Count -eq 0 -and $product) {
+	if (@($running | Where-Object { $_.Name -eq 'Code.exe' }).Count -eq 0 -and $product) {
 		$info = Get-Content $product -Raw | ConvertFrom-Json
 		if ($info.win32MutexName -and $info.win32VersionedUpdate) {
 			$held = $null

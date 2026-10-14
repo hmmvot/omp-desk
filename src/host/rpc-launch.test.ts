@@ -25,7 +25,10 @@ import { CONTROL_DIR_ENV, CONTROL_SLOT_ENV, LINK_REMINDER_ENV } from "./control-
 import type { NativeControlBootstrap } from "./native-terminal.ts";
 import { controlRuntimeFlagSet, NO_RUNTIME_FLAGS, planRuntimeFlags } from "./runtime-flags.ts";
 import type { RuntimeFlagPlan } from "./runtime-flags.ts";
+import type { OmpBinary, resolveOmpBinary as resolveOmpBinaryType } from "./native-terminal.ts";
 import type {
+	describeRecordedRuntime as describeRecordedRuntimeType,
+	launchRpcHost as launchRpcHostType,
 	resumeWorkingDirectory as resumeWorkingDirectoryType,
 	RpcOmpLaunchSpec,
 	retireStoppedRpcBroker as retireStoppedRpcBrokerType,
@@ -42,6 +45,12 @@ interface LaunchModule {
 	rpcOmpLaunchSpec: typeof rpcOmpLaunchSpecType;
 	resumeWorkingDirectory: typeof resumeWorkingDirectoryType;
 	retireStoppedRpcBroker: typeof retireStoppedRpcBrokerType;
+	describeRecordedRuntime: typeof describeRecordedRuntimeType;
+}
+
+interface LaunchWithResolverModule extends LaunchModule {
+	launchRpcHost: typeof launchRpcHostType;
+	resolveOmpBinary: typeof resolveOmpBinaryType;
 }
 
 let temp: string;
@@ -317,5 +326,84 @@ describe("letting a stopped host's broker go", () => {
 		}, []) as unknown as { handle: { brokerPid: number } };
 		alive.handle.brokerPid = process.pid;
 		assert.equal((await launch.retireStoppedRpcBroker(alive as unknown as Parameters<LaunchModule["retireStoppedRpcBroker"]>[0])).retired, false, "a broker that still exists and did not shut down is not retired");
+	});
+});
+
+describe("what a record says about its broker's runtime", () => {
+	it("names Bun, the extension host's Electron and Node by their versions", () => {
+		assert.equal(launch.describeRecordedRuntime({ engine: "bun", version: "1.4.3" }), "Bun 1.4.3");
+		assert.equal(launch.describeRecordedRuntime({ engine: "electron", version: "39.2.7" }), "VS Code (Electron 39.2.7)");
+		assert.equal(launch.describeRecordedRuntime({ engine: "node", version: "24.1.0" }), "Node 24.1.0");
+	});
+
+	it("takes a record without a statement for an earlier build's Code.exe broker", () => {
+		assert.equal(launch.describeRecordedRuntime(undefined), "VS Code (Code.exe), from before brokers named their runtime");
+	});
+});
+
+describe("the runtime facts a launch hands the client", () => {
+	let withResolver: LaunchWithResolverModule;
+	let resolved: OmpBinary | null = null;
+	let unavailable = "";
+
+	before(async () => {
+		const outfile = path.join(temp, "rpc-launch-with-resolver.mjs");
+		await build({
+			stdin: {
+				contents: 'export * from "./rpc-launch.ts"; export { resolveOmpBinary } from "./native-terminal.ts";',
+				resolveDir: path.dirname(fileURLToPath(new URL("./rpc-launch.ts", import.meta.url))),
+				sourcefile: "rpc-launch-with-resolver.ts",
+				loader: "ts",
+			},
+			outfile,
+			bundle: true,
+			platform: "node",
+			format: "esm",
+			target: "node20",
+			plugins: [
+				{
+					name: "vscode-stub",
+					setup(pluginBuild) {
+						pluginBuild.onResolve({ filter: /^vscode$/ }, () => ({ path: "vscode", namespace: "stub" }));
+						pluginBuild.onLoad({ filter: /.*/, namespace: "stub" }, () => ({ contents: VSCODE_STUB, loader: "js" }));
+					},
+				},
+			],
+		});
+		withResolver = (await import(pathToFileURL(outfile).href)) as LaunchWithResolverModule;
+		try {
+			resolved = await withResolver.resolveOmpBinary();
+		} catch (error) {
+			unavailable = error instanceof Error ? error.message : String(error);
+		}
+	});
+
+	it("passes the resolved OMP binary as the second argument of launchRpc", async (context) => {
+		if (resolved === null) {
+			context.skip(`no OMP install resolves on this machine: ${unavailable.split("\n")[0]}`);
+			return;
+		}
+		const calls: { spec: Record<string, unknown>; options: unknown }[] = [];
+		const client = {
+			launchRpc: async (spec: Record<string, unknown>, options: unknown) => {
+				calls.push({ spec, options });
+				return { state: "not-started", reason: "stand-in client", handle: null, adopted: false, brokerPid: null };
+			},
+		};
+		const outcome = await withResolver.launchRpcHost(
+			{ slot: "host:binary-facts", cwd: temp, sessionFile: null, profile: null, sessionDir: null, control: null, linkReminder: false },
+			client as unknown as Parameters<LaunchWithResolverModule["launchRpcHost"]>[1],
+		);
+		assert.equal(outcome.state, "not-started");
+		assert.equal(outcome.reason, "stand-in client");
+		assert.equal(calls.length, 1);
+		const options = calls[0]?.options as { ompBinary?: { command: string; prefixArgs: readonly string[]; launcher?: string } } | undefined;
+		assert.ok(options?.ompBinary, "the launch's binary was not passed");
+		assert.deepEqual(options.ompBinary, resolved);
+		assert.equal(calls[0]?.spec.kind, "managed-rpc");
+		assert.equal(calls[0]?.spec.slot, "host:binary-facts");
+		// The broker is told about the very command the session runs.
+		assert.equal(calls[0]?.spec.file, resolved.command);
+		assert.ok(options.ompBinary.launcher === "bun-shim" || options.ompBinary.launcher === "program", `launcher ${String(options.ompBinary.launcher)}`);
 	});
 });
