@@ -31,6 +31,21 @@ it("an edit call's presentation carries its workspace-relative path and its adde
 	assert.equal(toolPresentation(call("read", { path: "a.ts" }, {}), "C:/repo").stats, null);
 });
 
+it("titles an eval call by the language it runs: Python, JavaScript, and a neutral Eval when unknown or mixed", () => {
+	const title = (args: Record<string, unknown>, details?: Record<string, unknown>) => toolPresentation(call("eval", args, details, details === undefined ? "running" : "complete")).title;
+	assert.equal(title({ language: "py", code: "print(1)" }), "Python");
+	assert.equal(title({ language: "js", code: "1" }), "JavaScript");
+	assert.equal(title({ language: "js", code: "1" }, { language: "javascript", cells: [{ language: "javascript", code: "1" }] }), "JavaScript", "OMP's result names the language in full");
+	assert.equal(title({ code: "1" }, { cells: [{ language: "python", code: "1" }] }), "Python");
+	assert.equal(title({ cells: [{ language: "js", code: "1" }] }), "JavaScript", "cells still being streamed");
+	assert.equal(title({}), "Eval", "arguments still streaming");
+	assert.equal(title({ language: "ruby", code: "1" }), "Eval");
+	assert.equal(title({ language: "constructor", code: "1" }), "Eval");
+	assert.equal(title({}, { cells: [{ language: "python", code: "1" }, { language: "javascript", code: "2" }] }), "Eval", "mixed languages");
+	assert.equal(toolPresentation(call("python", { code: "1" })).title, "Python");
+	assert.equal(toolPresentation(call("eval", { language: "js", code: "1" }, {})).category, "command");
+});
+
 it("names what a todo call did and to which task", () => {
 	assert.equal(todoOperationText({ ops: [{ op: "start", task: "Write tests" }] }, ""), "Started “Write tests”");
 	assert.equal(todoOperationText({ ops: [{ op: "done", task: "Write tests" }, { op: "start", task: "Ship" }] }, ""), "Done “Write tests”, Started “Ship”");

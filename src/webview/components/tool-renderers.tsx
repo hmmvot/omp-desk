@@ -3,7 +3,7 @@ import { useState } from "react";
 import type { AgentActivity, RunningAgent } from "../../chat/agents";
 import { isClosedTodo, parseTodoPhases, todoMatchesDescriptions, todoOperationText } from "../../chat/todos";
 import { AGENT_STATUS_ICON } from "../../chat/hud-summary";
-import { normalizeToolPath, resolveToolRoute } from "../../chat/tool-presentation";
+import { evalTitle, normalizeToolPath, resolveToolRoute } from "../../chat/tool-presentation";
 import { isRecord } from "../../shared/guards";
 import { Markdown } from "./Markdown";
 import { FileLink, FileLinkText } from "./FileLinks";
@@ -210,7 +210,7 @@ function StatusEvents({ events, expanded }: { events: unknown; expanded: boolean
 function evaluate(c: ToolRenderContext): ToolSemanticView {
 	const d = c.details;
 	const cells = records(d.cells).length ? records(d.cells) : records(c.args.cells).length ? records(c.args.cells) : c.args.code !== undefined ? [c.args] : [];
-	return { title: "Eval", family: "eval", target: cells.length > 1 ? `${cells.length} cells` : string(cells[0]?.title), meta: [...new Set(cells.map(cell => string(cell.language) || string(d.language)).filter(Boolean)), scalar(record(d.async).state)].filter(Boolean), tone: cells.some(cell => cell.status === "error") || d.isError === true ? "error" : undefined,
+	return { title: evalTitle(c.args, d), family: "eval", target: cells.length > 1 ? `${cells.length} cells` : string(cells[0]?.title), meta: [...new Set(cells.map(cell => string(cell.language) || string(d.language)).filter(Boolean)), scalar(record(d.async).state)].filter(Boolean), tone: cells.some(cell => cell.status === "error") || d.isError === true ? "error" : undefined,
 		body: <>{cells.map((cell, index) => <Section key={index} title={[`${index + 1}/${cells.length}`, string(cell.title), string(cell.language), string(cell.status), cell.exitCode !== undefined ? `exit ${scalar(cell.exitCode)}` : ""].filter(Boolean).join(" · ")}><TextPreview text={string(cell.code)} expanded={c.expanded} lines={8} tail={!c.hasResult} language={string(cell.language) || string(d.language) || undefined} closed={c.hasResult && !c.partial} /><Section title="Output"><TextPreview text={string(cell.output) || (index === cells.length - 1 && d.cells === undefined ? c.text : "")} expanded={c.expanded} tail prose={cell.hasMarkdown === true} /><StatusEvents events={cell.statusEvents} expanded={c.expanded} /></Section>{typeof cell.durationMs === "number" && <span className="omp-empty-note">{fmtDuration(cell.durationMs)}</span>}</Section>)}{cells.length === 0 && <TextPreview text={string(c.stream.output) || c.text} expanded={c.expanded} tail />}<StatusEvents events={d.statusEvents} expanded={c.expanded} />{Array.isArray(d.jsonOutputs) && <Section title="Display output"><LimitedList items={d.jsonOutputs} expanded={c.expanded} render={(value, at) => <JsonOutput value={value} expanded={c.expanded} id={`display.${at}`} />} /></Section>}{Array.isArray(d.images) && <Section title="Images">{d.images.map((image, index) => <ToolImage key={index} value={image} />)}</Section>}{d.notice !== undefined && <div className="omp-empty-note">{scalar(d.notice)}</div>}</> };
 }
 function find(c: ToolRenderContext): ToolSemanticView {

@@ -68,6 +68,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Chat: an `eval` call is titled by the language it runs, `JavaScript` for `js` and `Python` for `py`, instead of always `Python`; the title is a neutral `Eval` while the language is not known yet or the cells of one call mix languages.
 - Chat: sending a message from the composer (Send, Enter, a steer or a queued follow-up) while the transcript is scrolled up returns it to the latest messages and follows them again, so your message and its reply are no longer left off-screen. New output that arrives while you read earlier messages still leaves you where you are.
 - Sessions: a folder's path is shown with an upper-case drive letter (`C:\Users\…\repo`), as the scope picker already did, instead of the lower-case one VS Code reports (`c:\Users\…\repo`). It applies to the "Sessions run at the repository root … not in the opened …" tooltip (on the folder row and on session rows in the flat list), the folder row's path and screen-reader label, the folder pickers, the Unity project picker and the "no longer records" notice.
 - Chat: a tool row with nothing to open (a command with no output, a call whose details would only repeat its header) keeps an empty slot where the other rows have their expand arrow, so its icon and name line up with the rows around it instead of starting further left.

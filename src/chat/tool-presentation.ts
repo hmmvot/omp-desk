@@ -36,7 +36,20 @@ export type ToolCategory = "edit" | "command" | "read" | "search" | "agent" | "w
 export interface ToolPresentation { route: ToolRoute; title: string; target: string; category: ToolCategory; eligible: boolean; paths: readonly string[]; agents: number; jobs: readonly string[]; liveDetail: boolean; failed: boolean; completed: boolean; warnings: number; stats: DiffStats | null; counter: string | null }
 /** Row titles of the host-run `vscode_debug_*` tools (docs/designs/2026-10-10-agent-debugger-tools.md section 5). */
 export const DEBUG_TOOL_TITLES: Readonly<Record<string,string>> = {vscode_debug_configs:"Debug setup",vscode_debug_breakpoints:"Breakpoints",vscode_debug_start:"Debug start",vscode_debug_wait:"Wait for stop",vscode_debug_inspect:"Debug inspect",vscode_debug_control:"Debug control",vscode_debug_handoff:"Hand off to you"};
-const titles: Readonly<Record<string,string>> = {...DEBUG_TOOL_TITLES,ask:"Ask",task:"Task",read:"Read",edit:"Edit",apply_patch:"Edit",ast_edit:"AST edit",write:"Write",bash:"Bash",python:"Python",eval:"Python",grep:"Grep",ast_grep:"AST grep",glob:"Glob",find:"Find",web_search:"Web search",todo:"TODO",wait:"Wait",debug:"Debug",lsp:"LSP",goal:"Goal",resolve:"Resolve",reject:"Reject",github:"GitHub",think:"Think",retain:"Retain",recall:"Recall",reflect:"Reflect"};
+const titles: Readonly<Record<string,string>> = {...DEBUG_TOOL_TITLES,ask:"Ask",task:"Task",read:"Read",edit:"Edit",apply_patch:"Edit",ast_edit:"AST edit",write:"Write",bash:"Bash",python:"Python",eval:"Eval",grep:"Grep",ast_grep:"AST grep",glob:"Glob",find:"Find",web_search:"Web search",todo:"TODO",wait:"Wait",debug:"Debug",lsp:"LSP",goal:"Goal",resolve:"Resolve",reject:"Reject",github:"GitHub",think:"Think",retain:"Retain",recall:"Recall",reflect:"Reflect"};
+const EVAL_LANGUAGE_TITLES: Readonly<Record<string,string>> = {py:"Python",python:"Python",ipython:"Python",js:"JavaScript",javascript:"JavaScript"};
+/**
+ * The name of an `eval` call by the language it runs: Python for `py`, JavaScript for `js`, a neutral Eval while the language is not known
+ * yet (arguments still streaming) or the cells of one call mix languages. The cells and their languages are read where OMP reports them
+ * (`details.cells`, then `args.cells`, then the single `language` of `args` or `details`).
+ */
+export function evalTitle(args: Record<string,unknown>, details: Record<string,unknown>): string {
+ const cells = Array.isArray(details.cells) && details.cells.some(isRecord) ? details.cells.filter(isRecord) : Array.isArray(args.cells) && args.cells.some(isRecord) ? args.cells.filter(isRecord) : [];
+ const titleOf = (language: string): string => { const key = language.trim().toLowerCase(); return Object.hasOwn(EVAL_LANGUAGE_TITLES, key) ? EVAL_LANGUAGE_TITLES[key]! : ""; };
+ const languages = new Set((cells.length > 0 ? cells.map(cell => text(cell.language) || text(details.language) || text(args.language)) : [text(args.language) || text(details.language)]).map(titleOf));
+ const [only] = languages;
+ return languages.size === 1 && only ? only : titles.eval!;
+}
 export function normalizeToolPath(path: string, cwd?: string): string {
  const normalized = path.replaceAll("\\", "/").replace(/^\.\//, "");
  const root = cwd?.replaceAll("\\", "/").replace(/\/$/, "");
@@ -90,5 +103,5 @@ export function toolPresentation(tool: ProjectedTool, cwd?: string): ToolPresent
  const failed = tool.status !== "skipped" && (tool.status === "error" || tool.result?.isError === true || details.isError === true || Boolean(details.error) ||
   category === "command" && (typeof details.exitCode === "number" && details.exitCode !== 0 || Array.isArray(details.cells) && details.cells.filter(isRecord).some(cell => cell.status === "error" || typeof cell.exitCode === "number" && cell.exitCode !== 0)) ||
   category === "edit" && fileRows.some(file => file.isError === true || Boolean(text(file.error) || text(file.errorText) || text(file.displayErrorText))));
- return {route,title:route.kind === "agent" ? "IRC" : route.kind === "process" ? "Process" : route.kind === "config" ? "Config" : route.kind === "help" ? name : titles[name] ?? name,target,category,eligible:!excluded,paths,agents,jobs,liveDetail,failed,completed:tool.status === "complete" && tool.result !== undefined && !failed,warnings,stats:category === "edit" ? editDiffStats({args,details,stream,settled:tool.result !== undefined}) : null,counter:named("todo") ? todoCounter(details.phases) : null};
+ return {route,title:route.kind === "agent" ? "IRC" : route.kind === "process" ? "Process" : route.kind === "config" ? "Config" : route.kind === "help" ? name : named("eval") ? evalTitle(args,details) : titles[name] ?? name,target,category,eligible:!excluded,paths,agents,jobs,liveDetail,failed,completed:tool.status === "complete" && tool.result !== undefined && !failed,warnings,stats:category === "edit" ? editDiffStats({args,details,stream,settled:tool.result !== undefined}) : null,counter:named("todo") ? todoCounter(details.phases) : null};
 }
