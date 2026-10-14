@@ -2,7 +2,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,6 +12,7 @@ import { build } from "esbuild";
 import type * as vscode from "vscode";
 import { createGuestHtml } from "../host/guest-webview.ts";
 import { splitToolNotices } from "../chat/tool-notices.ts";
+import { THEMES } from "./theme-ui-fixtures.ts";
 
 const browserPath = [process.env.OMP_TEST_CHROMIUM,
 	"C:/Program Files/Google/Chrome/Application/chrome.exe",
@@ -731,6 +732,54 @@ test("an opened tool call rests as a bounded preview, shows its gist and footer,
 			await key("Escape");
 			await ui.wait("document.querySelector('.omp-overview-head').getAttribute('aria-expanded')==='false'");
 			assert.equal(await activeIs(head), true, "the third Escape closed the group and left focus on its row");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		// Evidence, not a check: `OMP_UI_SCREENSHOT_DIR=<dir> node --test src/webview/tool-output-ui.test.ts` writes the scenes in three themes at two widths.
+		await t.test("screenshots of the opened tool call in Dark Modern, Light Modern and High Contrast at 360 and 720 px", { skip: process.env.OMP_UI_SCREENSHOT_DIR === undefined }, async () => {
+			const directory = process.env.OMP_UI_SCREENSHOT_DIR!;
+			await mkdir(directory, { recursive: true });
+			const codeThemes: Record<string, string> = {
+				"Dark Modern": "{id:'Dark Modern',rules:[{scopes:['support.type.property-name'],foreground:'#9CDCFE'},{scopes:['string'],foreground:'#CE9178'},{scopes:['constant.numeric'],foreground:'#B5CEA8'},{scopes:['constant.language'],foreground:'#569CD6'}]}",
+				"Light Modern": "{id:'Light Modern',rules:[{scopes:['support.type.property-name'],foreground:'#0451A5'},{scopes:['string'],foreground:'#A31515'},{scopes:['constant.numeric'],foreground:'#098658'},{scopes:['constant.language'],foreground:'#0000FF'}]}",
+				"High Contrast": "{id:'High Contrast',rules:[{scopes:['support.type.property-name'],foreground:'#9CDCFE'},{scopes:['string'],foreground:'#CE9178'},{scopes:['constant.numeric'],foreground:'#B5CEA8'},{scopes:['constant.language'],foreground:'#569CD6'}]}",
+			};
+			const trunc = real("bash-trunc-middle-artifact");
+			const scenes: { name: string; run: (width: number) => Promise<void> }[] = [
+				{ name: "ndjson", run: async () => { const call = real("bash-ndjson"); await show(call); await open(call); await ui.wait(`document.querySelector(${JSON.stringify(`${card(call)} .omp-json-row`)})`); } },
+				{ name: "bash-long", run: async () => { const call = real("bash-long-786-lines"); await show(call); await open(call); } },
+				{ name: "menu-truncated", run: async () => {
+					await show(trunc); await open(trunc);
+					await ui.evaluate(`document.querySelector(${JSON.stringify(`${card(trunc)} .omp-tool-head`)}).scrollIntoView({block:'start'})`);
+					await ui.evaluate(`document.querySelector(${JSON.stringify(`${card(trunc)} .omp-output-bar .omp-tool-menu > button`)}).click()`);
+					await ui.wait(`document.querySelector(${JSON.stringify(`${card(trunc)} [role=menu]`)})`);
+				} },
+				{ name: "group", run: async () => {
+					await showGroup([real("glob-list"), real("read-text-file"), real("bash-tsc-npm-typecheck-fail")]);
+					await ui.evaluate("document.querySelector('.omp-overview-head').click()");
+					await ui.wait("document.querySelector('.omp-overview-actions')");
+					await ui.evaluate("[...document.querySelectorAll('.omp-overview-actions button')][0].click()");
+					await ui.wait("document.querySelectorAll('.omp-overview-member .omp-tool-body').length===3");
+					await ui.evaluate("document.querySelector('.omp-overview-head').scrollIntoView({block:'start'})");
+				} },
+			];
+			for (const themeName of ["Dark Modern", "Light Modern", "High Contrast"]) {
+				const theme = THEMES.find(candidate => candidate.name === themeName) ?? assert.fail(themeName);
+				const slug = themeName.toLowerCase().replaceAll(" ", "-");
+				for (const width of [360, 720]) {
+					await ui.call("Emulation.setDeviceMetricsOverride", { width, height: 820, deviceScaleFactor: 1, mobile: false });
+					for (const scene of scenes) {
+						await reset(`shot-${slug}-${width}-${scene.name}`);
+						await ui.evaluate(`(()=>{document.body.className=${JSON.stringify(theme.bodyClass)};document.body.setAttribute('data-vscode-theme-id',${JSON.stringify(themeName)});for(const [name,value] of Object.entries(${JSON.stringify(theme.tokens)}))if(value!=='')document.documentElement.style.setProperty(name,value);document.documentElement.style.setProperty('--vscode-editor-foreground',${JSON.stringify(theme.tokens["--vscode-foreground"])});window.ui.receive({type:'omp:chat-code-theme',themes:[${codeThemes[themeName]}]})})()`);
+						await scene.run(width);
+						await ui.evaluate("document.fonts.ready.then(()=>true)");
+						await ui.settleGeometry(".omp-transcript");
+						const image = await ui.call("Page.captureScreenshot", { format: "png" });
+						await writeFile(join(directory, `${slug}-${width}-${scene.name}.png`), Buffer.from(String(image.data), "base64"));
+					}
+				}
+			}
+			await ui.call("Emulation.setDeviceMetricsOverride", { width: 720, height: 900, deviceScaleFactor: 1, mobile: false });
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 	} finally {

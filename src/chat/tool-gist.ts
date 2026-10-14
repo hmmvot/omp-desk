@@ -26,14 +26,17 @@ export interface GistInput {
 	readonly failed: boolean;
 	/** A result (not a partial one) has arrived. */
 	readonly settled: boolean;
-	/** The assistant message's timestamp and the result's: only their difference is used, and marked `≈`. */
+	/**
+	 * The timestamp of the assistant **entry** that made the call (the message's own precedes the model's whole generation) and the result's:
+	 * only their difference is used, and marked `≈`.
+	 */
 	readonly startedAt?: number;
 	readonly endedAt?: number;
 	/** How long the call ran, measured by a page that watched it run: exact, so it carries no `≈`. */
 	readonly observedMs?: number;
 }
 
-/** A derived duration is shown only above this; shorter ones are mostly the model's own time. */
+/** A duration that is not the tool's own (derived from timestamps, or observed by the page) is shown only above this; shorter ones are mostly queueing and the transport. */
 export const DERIVED_DURATION_FLOOR_MS = 1500;
 
 const record = (value: unknown): Record<string, unknown> => isRecord(value) ? value : {};
@@ -137,7 +140,8 @@ export function toolGist(input: GistInput): readonly GistPart[] {
 			if (jobs.length === 0) { if (details.interrupted === true || input.failed) say("interrupted", "warn"); break; }
 			const settled = jobs.filter(job => job.status !== "running");
 			say(settled.length > 0 ? `${plural(settled.length, "job")} settled` : plural(jobs.length, "job"));
-			exactMs = num((settled[0] ?? jobs[0])?.durationMs);
+			// Jobs wait together, so the call took as long as the longest of the jobs it settled (all of them while none has).
+			exactMs = (settled.length > 0 ? settled : jobs).reduce<number | undefined>((longest, job) => { const ms = num(job.durationMs); return ms === undefined ? longest : Math.max(longest ?? 0, ms); }, undefined);
 			if (exactMs !== undefined) say(formatGistDuration(exactMs));
 			break;
 		}

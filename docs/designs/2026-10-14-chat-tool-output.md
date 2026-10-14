@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: implemented
 date: 2026-10-14
 ---
 
@@ -94,14 +94,14 @@ The head is built from the chat layer (`toolPresentation` plus a new `toolGist`)
 | find | `N hits`, cost (optional) |
 | eval | language (optional), `exit N`, `cell.durationMs`, `N cells` |
 | task | `N agents`, `background` |
-| wait | `N jobs settled` or `interrupted`; the longest job duration |
+| wait | `N jobs settled` or `interrupted`; the longest duration among the settled jobs (the jobs wait together) |
 | web_search | provider (optional), `N sources` |
 | ask | `N questions` |
 | MCP / unknown | `failed`, else `JSON` or `N lines` (optional) |
 | lsp, debug | `failed` |
 | any | `failed` first when the call failed and no part is already an error; a **duration**: exact when known, else derived and shown only above 1.5 s as `≈ 4.2 s` |
 
-**Durations.** The derived duration is the result's timestamp minus the **assistant entry's** timestamp (`ProjectedTool.startedAt`, from `Date.parse(entry.timestamp)`), not the message's own, which can precede the entry by the model's whole generation. Where a call was watched live the page records its **observed** duration (`lib/tool-view-state.ts`, `recordObservedToolMs`, written when a live call leaves `activeTools`); an observed duration is exact (no `≈`). A reattached page restarts a live call's clock from the moment of reattach; accepted, and that call's settled gist then carries the derived `≈` figure.
+**Durations.** The derived duration is the result's timestamp minus the **assistant entry's** timestamp (`ProjectedTool.startedAt`, from `Date.parse(entry.timestamp)`), not the message's own, which can precede the entry by the model's whole generation. Where a call was watched live the page records its **observed** duration (`lib/tool-view-state.ts`, `recordObservedToolMs`, written when a live call leaves `activeTools`); an observed duration is exact (no `≈`) and is recorded only for a call whose `tool_execution_start` the model saw (`ActiveTool.startObserved`); a record that began at an update has no true start. A reattached page restarts a live call's clock from the moment of reattach; accepted, and that call's settled gist then carries the derived `≈` figure.
 
 A running call shows a spinner, the **live elapsed** time (`ActiveTool.startedAt`, ticked by the page's shared second tick) and, when the stream carries output, its line count; the gist appears when it settles. `N lines` in the gist is the number of lines **shown** of the cleaned text (a read's total comes from its `details`). **Head failure** is the chat layer's `failed` plus a renderer's `tone: error` (a `warning` tone, such as zero matches, is not a failure and stays out of the head), kept because some tools (task, debug, eval) know their failure only from `details`; the task and debug counters (`2 failed`, `stopped`) stay renderer chips in the output bar, not in the chat layer. Edit and todo keep their own `+N −N` and `done/total` head items.
 
@@ -236,7 +236,7 @@ Every `c.expanded` branch in the renderers was dead (always `true` once the body
 
 - **Wrong detection.** A heuristic can misread text (a log that happens to be 80 % JSON lines). Mitigation: only the two JSON detectors, tables and traces change the layout; each has a badge and a Text switch; the original text is never lost; detectors run on settled results only.
 - **Windowing and virtualisation interplay.** The transcript already measures rows and keeps estimates for unmounted ones; a windowed block has a fixed height, so it should not disturb measurement, but a card remounted at the bottom of a long list must not jump. Tests assert DOM row count, a stable scroll position on opening and a held body while focused.
-- **The ≈ duration** is the assistant **entry's** timestamp to the result's, so a late parallel call can read longer than it ran. It is shown only above 1.5 s and only with `≈`, as accepted.
+- **The ≈ duration** is the assistant **entry's** timestamp to the result's, so a call that queued behind others of the same reply reads longer than it ran. It is shown only above 1.5 s and only with `≈`, as accepted. A duration the page observed is exact and has no `≈`, but it is held to the same 1.5 s floor: below it the head stays silent, like a derived one.
 - **`details` in Raw** can hold large strings and paths; bounded as above, on request only.
 - **Row height** is read from the computed style once per block (the font-size token can raise it); a diff, code and JSON row share one line height.
 - **Gist rules drift.** They duplicate knowledge of each tool's `details`; tests pin them against the 37 real calls in `src/webview/fixtures/tool-calls.json`.

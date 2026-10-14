@@ -51,3 +51,15 @@ it("says failed for a failed call that no part already marks as an error", () =>
 it("formats durations as the gist shows them", () => {
 	assert.deepEqual([205, 4670, 41300, 125000].map(formatGistDuration), ["205 ms", "4.67 s", "41.3 s", "2m 5s"]);
 });
+
+it("says a wait took as long as the longest job it settled", () => {
+	const parts = toolGist({ name: "wait", args: {}, details: { jobs: [{ id: "a", status: "completed", durationMs: 1200 }, { id: "b", status: "completed", durationMs: 9100 }, { id: "c", status: "running", durationMs: 99000 }] }, body: "", notices: [], failed: false, settled: true });
+	assert.deepEqual(parts.map(part => part.text), ["2 jobs settled", "9.10 s"]);
+});
+
+it("holds an observed duration to the same floor as a derived one, and marks only the derived one approximate", () => {
+	const base = { name: "lsp", args: {}, details: {}, body: "", notices: [], failed: false, settled: true } as const;
+	assert.deepEqual(toolGist({ ...base, observedMs: 1400 }).map(part => part.text), []);
+	assert.deepEqual(toolGist({ ...base, observedMs: 4200 }).map(part => part.text), ["4.20 s"]);
+	assert.deepEqual(toolGist({ ...base, startedAt: 1_000, endedAt: 5_200 }).map(part => part.text), ["≈ 4.20 s"]);
+});

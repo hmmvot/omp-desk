@@ -989,6 +989,7 @@ export function reduceChatFrame(model: ChatModel, frame: ChatEventFrame, clock: 
 				args: frame.args,
 				intent: frame.intent,
 				startedAt: now,
+				startObserved: true,
 			};
 			return { ...model, workingIntent: workingIntent(frame.args, frame.intent) ?? model.workingIntent, activeTools: new Map(model.activeTools).set(frame.toolCallId, tool) };
 		}

@@ -582,6 +582,7 @@ function parseActiveTool(value: unknown): ActiveTool | null {
 	if (intent !== undefined) tool.intent = intent;
 	if (value.partialResult !== undefined) tool.partialResult = value.partialResult;
 	if (value.streamUpdate !== undefined) tool.streamUpdate = value.streamUpdate;
+	if (value.startObserved === true) tool.startObserved = true;
 	return tool;
 }
 

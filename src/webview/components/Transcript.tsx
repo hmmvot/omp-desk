@@ -252,7 +252,8 @@ export function Transcript(props: TranscriptProps): ReactNode {
 	useEffect(() => {
 		const now = Date.now();
 		for (const [id, startedAt] of watchedTools.current) if (!activeTools.has(id)) { recordObservedToolMs(id, now - startedAt); watchedTools.current.delete(id); }
-		for (const tool of activeTools.values()) if (!watchedTools.current.has(tool.toolCallId)) watchedTools.current.set(tool.toolCallId, tool.startedAt);
+		// Only a call whose start was seen has a measurable duration: one first seen at an update began earlier than `startedAt` says.
+		for (const tool of activeTools.values()) if (tool.startObserved === true && !watchedTools.current.has(tool.toolCallId)) watchedTools.current.set(tool.toolCallId, tool.startedAt);
 	}, [activeTools]);
 
 	/**

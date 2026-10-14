@@ -54,6 +54,19 @@ function end(model: ChatModel, messageId: string, message: ChatMessage): ChatMod
 
 const ids = (model: ChatModel): string[] => model.entries.map(entry => entry.id);
 
+describe("a tool's observed start", () => {
+	it("is marked only when tool_execution_start was seen, not when the record began at an update", () => {
+		let model = reduceChatFrame(live(), { type: "tool_execution_start", toolCallId: "seen", toolName: "read", args: {} }, { now: 100 });
+		model = reduceChatFrame(model, { type: "tool_execution_update", toolCallId: "late", toolName: "read", args: {}, partialResult: {} }, { now: 250 });
+		assert.equal(model.activeTools.get("seen")?.startObserved, true);
+		assert.equal(model.activeTools.get("late")?.startObserved, undefined);
+		assert.equal(model.activeTools.get("late")?.startedAt, 250);
+		const restored = applyChatSnapshot(createChatModel(), snapshotOf(model, EPOCH));
+		assert.equal(restored.activeTools.get("seen")?.startObserved, true, "a snapshot carries it");
+		assert.equal(restored.activeTools.get("late")?.startObserved, undefined);
+	});
+});
+
 describe("turn working status", () => {
 	it("retains streamed and active intents across engine gaps, snapshots and asks until settle", () => {
 		let model = reduceChatFrame(live(), { type: "agent_start" }, { now: 100 });
