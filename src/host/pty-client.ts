@@ -106,6 +106,7 @@ import {
 	type BunLaunchDeps,
 	type ChatBrokerFallback,
 	type ChatBrokerRuntimeChoice,
+	runtimeMismatchFallback,
 	type ChatBrokerFallbackCode,
 	type ChatBrokerRuntimeSetting,
 } from "./chat-broker-runtime.ts";
@@ -868,7 +869,7 @@ export class PtyBrokerClient {
 		const answer = readiness.runtime.selfCheck;
 		const ranAs = answer?.execPath === undefined ? null : await realpath(answer.execPath).catch(() => null);
 		if (ranAs === null || ranAs.toLowerCase() !== executable.toLowerCase()) {
-			return refuse("launcher", `the check ran as ${answer?.execPath ?? "an unknown executable"}, not as ${executable}: a launcher that starts another image is not a broker runtime`);
+			return { kind: "vscode", fallback: runtimeMismatchFallback(answer?.execPath, executable) };
 		}
 		const bun = answer?.bun ?? null;
 		if (bun === null || !isSupportedBunVersion(bun)) {
@@ -997,24 +998,35 @@ export class PtyBrokerClient {
 		attach: (record: PtyBrokerRecord, adopted: boolean) => Promise<BrokerAttachOutcome<Handle>>,
 		chooseRuntime?: () => Promise<ChatBrokerPlan>,
 	): Promise<BrokerLaunchOutcome<Handle>> {
+		let bunAttemptMs: number | null = null;
 		if (chooseRuntime !== undefined) {
 			const planStartedAt = Date.now();
 			const plan = await chooseRuntime();
-			this.logChatBrokerChoice(plan.kind === "bun" ? { kind: "bun", executable: plan.executable, version: plan.version } : plan);
 			if (plan.kind === "bun") {
+				// One runtime line per launch, written once the outcome is known: a line written first would say a VS Code
+				// update does not end a broker that the start then refuses.
 				const started = await this.startBrokerOn(spec, launcherId, attach, plan, planStartedAt);
-				if (!isBunStartRefusal(started)) return started;
+				if (!isBunStartRefusal(started)) {
+					// A broker that exists (running, or started and not yet confirmed) is on Bun; a launch that ended with no broker says nothing about it.
+					if (started.state !== "not-started") this.logChatBrokerChoice({ kind: "bun", executable: plan.executable, version: plan.version });
+					return started;
+				}
 				this.logChatBrokerChoice({ kind: "vscode", fallback: started.refused });
+				bunAttemptMs = Date.now() - planStartedAt;
 				await this.discardBunPlan(plan);
 				// A Bun that could not start a broker would repeat that on every launch, each paying a Bun start and then the
 				// fallback's: it stays off the Bun path until the file changes.
 				if (started.refused.code === "start") this.holdBun(plan, started.refused, null);
+			} else {
+				this.logChatBrokerChoice(plan);
 			}
 		}
 		const started = await this.startBrokerOn(spec, launcherId, attach, null, Date.now());
 		if (isBunStartRefusal(started)) {
 			return { state: "not-started", reason: started.refused.detail, handle: null, adopted: false, brokerPid: null };
 		}
+		// The time of a failed Bun attempt (plan, trust read, proof, a refused or failed start) is a phase of its own.
+		if (bunAttemptMs !== null && started.timings !== undefined) return { ...started, timings: { "bun attempt": bunAttemptMs, ...started.timings } };
 		return started;
 	}
 

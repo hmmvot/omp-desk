@@ -16,6 +16,7 @@ import {
 	describeChatBrokerChoice,
 	inspectBunLaunch,
 	isSupportedBunVersion,
+	runtimeMismatchFallback,
 } from "./chat-broker-runtime.ts";
 
 const BUN = "C:\\Users\\someone\\.bun\\bin\\bun.exe";
@@ -134,7 +135,7 @@ describe("chatBrokerChoiceLevel", () => {
 		for (const code of ["setting", "platform", "launcher", "executable"] as const) {
 			assert.equal(chatBrokerChoiceLevel({ kind: "vscode", fallback: { code, detail: "x" } }), "info", code);
 		}
-		for (const code of ["trust", "proof", "version", "changed", "start"] as const) {
+		for (const code of ["trust", "proof", "runtime-mismatch", "version", "changed", "start"] as const) {
 			assert.equal(chatBrokerChoiceLevel({ kind: "vscode", fallback: { code, detail: "x" } }), "warn", code);
 		}
 	});
@@ -150,5 +151,19 @@ describe("the fallback of a launch that is not a bun shim", () => {
 		assert.match(program.fallback.detail, /compiled program \(a standalone install/);
 		assert.doesNotMatch(unknown.fallback.detail, /standalone/);
 		for (const result of [program, unknown]) assert.match(result.fallback.detail, /not launched through a bun shim/);
+	});
+});
+
+describe("a check that ran as another image than the judged bun.exe", () => {
+	it("has its own reason, names both files, and is logged at warn", () => {
+		const fallback = runtimeMismatchFallback("C:\\tools\\real-bun.exe", BUN);
+		assert.equal(fallback.code, "runtime-mismatch");
+		assert.ok(fallback.detail.includes("C:\\tools\\real-bun.exe"), fallback.detail);
+		assert.ok(fallback.detail.includes(BUN), fallback.detail);
+		assert.match(fallback.detail, /a launcher that starts another image is not a broker runtime/);
+		assert.match(runtimeMismatchFallback(undefined, BUN).detail, /an unknown executable/);
+		const line = describeChatBrokerChoice({ kind: "vscode", fallback });
+		assert.match(line, /^Chat broker runtime: VS Code \(Code\.exe\), because the check ran as /);
+		assert.equal(chatBrokerChoiceLevel({ kind: "vscode", fallback }), "warn");
 	});
 });

@@ -30,11 +30,29 @@ export interface OmpLaunchFacts {
 export const MIN_BUN_VERSION = "1.4.0";
 
 /** Why a Chat broker is not started on Bun. The text is for the log; the code is for tests and counting. */
-export type ChatBrokerFallbackCode = "setting" | "platform" | "launcher" | "executable" | "trust" | "proof" | "version" | "changed" | "start";
+export type ChatBrokerFallbackCode =
+	| "setting"
+	| "platform"
+	| "launcher"
+	| "executable"
+	| "trust"
+	| "proof"
+	| "runtime-mismatch"
+	| "version"
+	| "changed"
+	| "start";
 
 export interface ChatBrokerFallback {
 	readonly code: ChatBrokerFallbackCode;
 	readonly detail: string;
+}
+
+/** The fallback of a pipe-only check that ran as another image than the file judged: a launcher or forwarding shim, not a broker runtime. */
+export function runtimeMismatchFallback(execPath: string | undefined, executable: string): ChatBrokerFallback {
+	return {
+		code: "runtime-mismatch",
+		detail: `the check ran as ${execPath ?? "an unknown executable"}, not as ${executable}: a launcher that starts another image is not a broker runtime`,
+	};
 }
 
 /** The runtime one Chat broker start decided on. */
@@ -50,10 +68,9 @@ export function describeChatBrokerChoice(choice: ChatBrokerRuntimeChoice): strin
 }
 
 /**
- * The log level of that sentence. A launch that is not on Bun because of what the user set or how OMP was installed
- * (`setting`, `platform`, `launcher`, `executable`: a standalone `omp.exe` has no Bun of its own to share) is the
- * expected outcome and `info`; one that lost Bun to something that was eligible in principle (`trust`, `proof`,
- * `version`, `changed`, `start`) is degraded-but-continuing and `warn`.
+ * The log level of that sentence: `info` for Bun and for the reasons the user's configuration or the install form
+ * decides, `warn` for every other reason (a Bun that was eligible in principle and was not used). The reasons and
+ * what each means are listed once, in `docs/architecture.md` ("Levels of the Chat broker runtime line").
  */
 export function chatBrokerChoiceLevel(choice: ChatBrokerRuntimeChoice): "info" | "warn" {
 	if (choice.kind === "bun") return "info";

@@ -125,8 +125,8 @@ function windowWith(
 		readonly grant?: { readonly principal: string; readonly permissions: number };
 		/** The client's own seams: the identity reading and the clock the holds are kept by. */
 		readonly client?: Pick<PtyBrokerClientOptions, "queryIdentity" | "now">;
-		/** Sees every runtime event as it is logged, before the launch goes on. */
-		readonly onEvent?: (message: string) => void;
+		/** Runs when the trust read is asked, which is while the Bun plan is made, before any broker is spawned. */
+		readonly onTrustRead?: () => void;
 	} = {},
 ): Window {
 	const events: string[] = [];
@@ -134,7 +134,6 @@ function windowWith(
 	const recorder = recordingLogger(levelled);
 	const note = (message: string): void => {
 		events.push(message);
-		options.onEvent?.(message);
 	};
 	const log: Logger = {
 		error: message => (recorder.error(message), note(message)),
@@ -152,6 +151,7 @@ function windowWith(
 			trust: {
 				readSecurity: async paths => {
 					trustReads.push(paths);
+					options.onTrustRead?.();
 					return await readSecurity(paths);
 				},
 			},
@@ -277,6 +277,28 @@ describe("a Chat broker on the session's Bun", { skip: SKIP }, () => {
 			assert.equal((window.trustReads[0] ?? [])[0]?.toLowerCase(), (await realpath(REAL.executable)).toLowerCase());
 			assert.ok(!(window.trustReads[0] ?? []).some(target => /^[A-Za-z]:\\?$/.test(target)));
 			assert.equal(handle.record.kind, "managed-rpc");
+		});
+
+		it("passes a bun-shim launch's Bun flags to the OMP child exactly as written: --define and --preload ahead of the entry, nothing in BUN_OPTIONS", { timeout: TEST_TIMEOUT_MS, skip: NEEDS_BUN }, async () => {
+			assert.ok(REAL);
+			const dir = path.join(scratch, "flags-through-broker");
+			mkdirSync(dir, { recursive: true });
+			const marker = path.join(dir, "child-saw.json");
+			const preload = path.join(dir, "preload.mjs");
+			const entry = path.join(dir, "entry.mjs");
+			writeFileSync(preload, "globalThis.__DESK_TEST_PRELOADED__ = true;\n");
+			// The stand-in for OMP's entry: records what reached it, then behaves as the rpc child does.
+			writeFileSync(entry, `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(marker)}, JSON.stringify({ define: __DESK_TEST_RECIPIENT__, preloaded: globalThis.__DESK_TEST_PRELOADED__ === true, bunOptions: process.env.BUN_OPTIONS ?? null, argv: process.argv.slice(2) }));\n${RPC_CHILD_SCRIPT}`);
+			const flags = ["--define", '__DESK_TEST_RECIPIENT__:"public-recipient"', "--preload", preload];
+			const window = windowWith({});
+			const spec = (slot: string): PtyLaunchSpec => ({ ...specFor(slot), file: REAL.executable, args: [...flags, entry, "--mode", "rpc-ui"] });
+			const handle = runningHandle(await launch(window, { command: REAL.executable, launcher: "bun-shim" }, nextSlot(), spec));
+			assert.deepEqual(recordedRuntime(handle), { engine: "bun", version: REAL.version }, "the broker is on Bun");
+			const saw = JSON.parse(readFileSync(marker, "utf8")) as { define: string; preloaded: boolean; bunOptions: string | null; argv: string[] };
+			assert.equal(saw.define, "public-recipient", "--define reached the entry");
+			assert.equal(saw.preloaded, true, "--preload ran before the entry");
+			assert.equal(saw.bunOptions, process.env.BUN_OPTIONS ?? null, "the broker added nothing to the child's BUN_OPTIONS");
+			assert.deepEqual(saw.argv, ["--mode", "rpc-ui"], "the entry's own arguments follow the entry untouched");
 		});
 
 		it("decides afresh on every launch: the trust read runs again, the in-process proof is reused", { timeout: TEST_TIMEOUT_MS, skip: NEEDS_BUN }, async () => {
@@ -406,10 +428,11 @@ describe("a Chat broker on the session's Bun", { skip: SKIP }, () => {
 			const first = await launch(window, command, undefined, specWithRelativeFile);
 			assert.equal(first.state, "not-started", first.reason);
 			const firstLines = runtimeLines(window);
-			assert.equal(firstLines.length, 2, firstLines.join("\n"));
-			assert.ok((firstLines[0] ?? "").startsWith(`Chat broker runtime: Bun ${REAL.version} (`), firstLines[0]);
-			assert.match(firstLines[1] ?? "", /^Chat broker runtime: VS Code \(Code\.exe\), because the Bun broker exited with code \d+ before it published a record/);
-			const heldDetail = /because ([\s\S]*?); a VS Code update ends it/.exec(firstLines[1] ?? "")?.[1];
+			// One line per launch, written when the outcome is known: a refused Bun start logs only the fallback.
+			assert.equal(firstLines.length, 1, firstLines.join("\n"));
+			assert.match(firstLines[0] ?? "", /^Chat broker runtime: VS Code \(Code\.exe\), because the Bun broker exited with code \d+ before it published a record/);
+			assert.equal(levelOfRuntimeLine(window, "exited with code"), "warn");
+			const heldDetail = /because ([\s\S]*?); a VS Code update ends it/.exec(firstLines[0] ?? "")?.[1];
 			assert.ok(heldDetail);
 
 			// The same file again: held off Bun, the reason is the one that held it, and nothing is read or proven.
@@ -427,7 +450,8 @@ describe("a Chat broker on the session's Bun", { skip: SKIP }, () => {
 			await utimes(heldBun, later, later);
 			window.events.length = 0;
 			await launch(window, command, undefined, specWithRelativeFile);
-			assert.ok((runtimeLines(window)[0] ?? "").startsWith(`Chat broker runtime: Bun ${REAL.version} (`), runtimeLines(window).join("\n"));
+			// The file was tried on Bun again (a second trust read), and the refused start logs only its fallback line.
+			assert.match(runtimeLines(window)[0] ?? "", /^Chat broker runtime: VS Code \(Code\.exe\), because the Bun broker exited with code/);
 			assert.equal(window.trustReads.length, 2);
 		});
 	});
@@ -517,8 +541,9 @@ describe("a Chat broker on the session's Bun", { skip: SKIP }, () => {
 			// slot and ends, leaving those bytes, so the client finds a record it cannot read and no broker that answers.
 			const window = windowWith({}, {
 				client: { now: () => Date.now() + clock.offset },
-				onEvent: message => {
-					if (planted || !message.startsWith("Chat broker runtime: Bun")) return;
+				// The trust read runs while the Bun plan is made, before the broker is spawned: plant the unreadable record then.
+				onTrustRead: () => {
+					if (planted) return;
 					planted = true;
 					const file = ptyRecordPath(storage, slot);
 					mkdirSync(path.dirname(file), { recursive: true });
