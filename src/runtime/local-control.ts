@@ -20,6 +20,7 @@ import {
 	HostControlClient,
 	HostControlConfigurationError,
 	HostControlIdentityError,
+	HostControlPeerError,
 	HostControlRefusedError,
 	HostControlUnavailableError,
 	queryControlProcessGeneration,
@@ -40,6 +41,9 @@ const NATIVE_CONTROL_RENDEZVOUS_TIMEOUT_MS = 60_000;
 /** A host this launch already proved published once; a missing record is not startup lag. */
 const PROVEN_CONTROL_RENDEZVOUS_TIMEOUT_MS = 3_000;
 const CONTROL_RENDEZVOUS_POLL_MS = 250;
+/** A process-generation probe that times out is retried; the probe itself is bounded at 5 s, so this is a bounded wait. */
+const GENERATION_PROBE_ATTEMPTS = 4;
+const GENERATION_PROBE_RETRY_DELAY_MS = 3_000;
 
 /** Releases remembered per claim; a slot id is never reused, so this is bounded history. */
 const CONTROL_RELEASE_HISTORY = 16;
@@ -126,6 +130,10 @@ export interface LocalHostControlDeps {
 	 * first, and nothing that does not spawn it waits for staging.
 	 */
 	readonly stagedHelper: () => Promise<void>;
+	/** Reads a process's kernel generation; tests substitute it. */
+	readonly generationProbe?: (pid: number) => Promise<string>;
+	/** Wait between timed-out generation probes; tests shorten it. */
+	readonly generationProbeRetryDelayMs?: number;
 }
 
 /** Secrets are scoped to the claim's owner generation, so windows never share one. */
@@ -273,15 +281,24 @@ export class LocalHostControl {
 		}
 		// The pinned generation is read with the same helper the control client later compares it
 		// with, so the two readings are the same kind of value.
-		let processCreation: string;
-		try {
-			await this.#deps.stagedHelper();
-			processCreation = await queryControlProcessGeneration(pid);
-		} catch (error) {
-			if (mayReportControlFailure(this.#attemptTarget(tabId), { runtime, pid, client: null })) {
-				this.fail(tabId, `the process generation could not be read (${messageOf(error)})`);
+		let processCreation: string | null = null;
+		for (let probe = 1; processCreation === null; probe += 1) {
+			try {
+				await this.#deps.stagedHelper();
+				processCreation = await (this.#deps.generationProbe ?? queryControlProcessGeneration)(pid);
+			} catch (error) {
+				// A probe that did not answer in time says the machine is busy, like a busy host: it is retried a bounded number of
+				// times while this attempt still owns the tab. Any other failure, or the last timeout, ends host control as before.
+				const busy = error instanceof HostControlPeerError && error.reason === "timeout";
+				const current = mayReportControlFailure(this.#attemptTarget(tabId), { runtime, pid, client: null });
+				if (busy && probe < GENERATION_PROBE_ATTEMPTS && current) {
+					this.#deps.log.warn(`tab ${tabId}: host control paused — the process generation probe did not answer in time (attempt ${probe} of ${GENERATION_PROBE_ATTEMPTS}); it is retried`);
+					await delay(this.#deps.generationProbeRetryDelayMs ?? GENERATION_PROBE_RETRY_DELAY_MS);
+					continue;
+				}
+				if (current) this.fail(tabId, `the process generation could not be read (${messageOf(error)})`);
+				return;
 			}
-			return;
 		}
 		const record: RecordedControlProcess = {
 			pid,
@@ -478,8 +495,8 @@ export class LocalHostControl {
 				state.control = { client: verified.client, snapshot, activity: input.activity, work: input.work === true, subagents: input.subagents === true };
 				state.controlFailure = null;
 				log.info(`tab ${tabId}: host control verified (pid ${input.pid}, instance ${snapshot.host.instanceId})`);
-				const sinceCommandMs = this.#deps.timeline?.finish(tabId) ?? null;
-				if (sinceCommandMs !== null) log.info(`window timing: new session ${tabId} host control verified ${sinceCommandMs} ms after the command`);
+				const finished = this.#deps.timeline?.finish(tabId) ?? null;
+				if (finished !== null) log.info(`window timing: ${finished.kind} ${tabId} host control verified ${finished.totalMs} ms after the command`);
 				diagnostics.succeed(tabId, "host-control-verified", {
 					detail: `pid ${input.pid} · instance ${snapshot.host.instanceId}`,
 				});

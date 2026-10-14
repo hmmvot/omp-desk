@@ -19,7 +19,7 @@ describe("launch timeline", () => {
 
 	it("lists laps and timed phases in order, and a lap excludes a phase the caller timed itself", () => {
 		const t = timeline();
-		t.instance.begin("tab:a");
+		t.instance.begin("tab:a", "new session");
 		t.advance(30);
 		t.instance.lap("tab:a", "panel");
 		t.advance(200);
@@ -27,28 +27,49 @@ describe("launch timeline", () => {
 		t.advance(10);
 		t.instance.lap("tab:a", "rest");
 		t.advance(5);
-		assert.deepEqual(t.instance.summary("tab:a"), { totalMs: 245, phases: "panel 30 · runtime proof 150 · rest 10" });
+		assert.deepEqual(t.instance.summary("tab:a"), { kind: "new session", totalMs: 245, phases: "panel 30 · runtime proof 150 · rest 10" });
 	});
 
-	it("ends the run at finish with the time since the command", () => {
+	it("ends the run at finish with its kind and the time since the command", () => {
 		const t = timeline();
-		t.instance.begin("tab:a");
+		t.instance.begin("tab:a", "resume");
 		t.advance(35_000);
-		assert.equal(t.instance.finish("tab:a"), 35_000);
+		assert.deepEqual(t.instance.finish("tab:a"), { kind: "resume", totalMs: 35_000 });
 		assert.equal(t.instance.has("tab:a"), false);
 		assert.equal(t.instance.finish("tab:a"), null);
 	});
 
 	it("starts a tab's run again from begin, and drops a run that was never finished once it is old", () => {
 		const t = timeline();
-		t.instance.begin("tab:a");
+		t.instance.begin("tab:a", "new session");
 		t.advance(50);
 		t.instance.lap("tab:a", "panel");
-		t.instance.begin("tab:a");
-		assert.deepEqual(t.instance.summary("tab:a"), { totalMs: 0, phases: "" });
+		t.instance.begin("tab:a", "new session");
+		assert.deepEqual(t.instance.summary("tab:a"), { kind: "new session", totalMs: 0, phases: "" });
 		t.advance(11 * 60_000);
-		t.instance.begin("tab:b");
+		t.instance.begin("tab:b", "new session");
 		assert.equal(t.instance.has("tab:a"), false);
 		assert.equal(t.instance.has("tab:b"), true);
+	});
+
+	it("times a Resume from the moment the command was entered, not from the moment the run began", () => {
+		const t = timeline();
+		t.advance(400);
+		t.instance.begin("tab:a", "resume", 1000);
+		t.advance(100);
+		t.instance.lap("tab:a", "panel");
+		assert.deepEqual(t.instance.summary("tab:a"), { kind: "resume", totalMs: 500, phases: "panel 500" });
+	});
+
+	it("drops the run of a command whose launch never reached the launcher, and keeps one the launcher took", () => {
+		const t = timeline();
+		t.instance.begin("tab:a", "open");
+		t.instance.abandon("tab:a");
+		assert.equal(t.instance.has("tab:a"), false, "an Open that launched nothing leaves no run for a later launch to claim");
+		t.instance.begin("tab:b", "open");
+		assert.equal(t.instance.reached("tab:b"), "open");
+		t.instance.abandon("tab:b");
+		assert.equal(t.instance.has("tab:b"), true, "the launcher owns a run it took");
+		assert.equal(t.instance.reached("tab:none"), null);
 	});
 });

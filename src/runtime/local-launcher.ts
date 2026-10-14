@@ -98,7 +98,7 @@ export interface LocalLauncherDeps {
 	/** What follows a broker that was ended from outside. */
 	readonly exit: Pick<LocalExitOperations, "brokerLost">;
 	readonly diagnosticsLabel: (cwd: string) => string;
-	/** Where a new session's launch spent its time; absent for a window that reports none. A launch that began no run adds nothing. */
+	/** Where an explicitly started launch spent its time (New Session, Resume, Open); absent for a window that reports none. A launch that began no run adds nothing. */
 	readonly timeline?: LaunchTimeline;
 	readonly log: Logger;
 }
@@ -299,9 +299,10 @@ export class LocalLauncher implements OmpHostLauncher {
 
 	async launch(request: OmpHostLaunchRequest): Promise<OmpHostLaunchResult> {
 		const { diagnostics, window, index, log, timeline } = this.#deps;
-		if (timeline?.has(request.tabId) === true) {
+		const launchKind = timeline?.reached(request.tabId) ?? null;
+		if (launchKind !== null && timeline !== undefined) {
 			timeline.lap(request.tabId, "admission");
-			log.debug(`window timing: new session ${request.tabId} launch started ${timeline.summary(request.tabId)?.totalMs ?? 0} ms after the command`);
+			log.debug(`window timing: ${launchKind} ${request.tabId} launch started ${timeline.summary(request.tabId)?.totalMs ?? 0} ms after the command`);
 		}
 		// Fresh authenticated current-file readback protects against an own native
 		// /resume hidden by a stale catalog row. Failure remains explicitly best effort.
@@ -439,7 +440,9 @@ export class LocalLauncher implements OmpHostLauncher {
 		timings.intent = Date.now() - intentAt;
 		timeline?.lap(request.tabId, "run intent");
 		const summary = timeline?.summary(request.tabId) ?? null;
-		if (summary !== null) log.info(`window timing: new session ${request.tabId} running in ${summary.totalMs} ms · ${summary.phases}`);
+		if (summary !== null) log.info(`window timing: ${summary.kind} ${request.tabId} running in ${summary.totalMs} ms · ${summary.phases}`);
+		// Without host control nothing reports the second line, so the run ends here and cannot be taken by a later launch of the tab.
+		if (runtime.control === null) timeline?.discard(request.tabId);
 		const sessionId = runtime.kind === "chat" && request.sessionFile !== null
 			? (await readSessionFileHeader(request.sessionFile))?.sessionId ?? request.sessionId : request.sessionId;
 		return { state: "running", host: hostHandle(runtime, sessionId), timings };

@@ -5,7 +5,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { HostControlRefusedError, HostControlUnavailableError } from "../host/control-client.ts";
+import { HostControlPeerError, HostControlRefusedError, HostControlUnavailableError } from "../host/control-client.ts";
 import type { HostControlClient } from "../host/control-client.ts";
 import { recordingLogger } from "../shared/logger.ts";
 import type { LoggedLine } from "../shared/logger.ts";
@@ -52,6 +52,51 @@ describe("host control failure reporting", () => {
 			assert.match(logs.map(line => line.message).join("\n"), /host control unavailable — /);
 		}
 		assert.equal(describeControlError(new HostControlUnavailableError("channel is not open")), "native host connection unavailable");
+	});
+});
+
+describe("a process-generation probe that does not answer in time (busy machine)", () => {
+	const runtime = { kind: "terminal", pid: 4242, identity: { slot: "slot-1" } } as never;
+	const prepared = { bootstrap: { slotId: "slot-1", directory: "C:/control" }, privateKeyPkcs8Pem: "pem" } as never;
+	const timeout = () => new HostControlPeerError("timeout", "generation probe did not answer in time");
+
+	function probeFixture(answers: readonly (() => Error)[]) {
+		const record = { tabId: TAB, runtime, control: null, controlFailure: null as string | null } as unknown as RuntimeRecord;
+		const logs: LoggedLine[] = [];
+		let calls = 0;
+		const control = new LocalHostControl({
+			records: { get: (tabId: string | null) => tabId === TAB ? record : undefined } as never,
+			attempts: new WeakMap(),
+			stagedHelper: async () => {},
+			generationProbe: async () => { throw (answers[Math.min(calls++, answers.length - 1)] as () => Error)(); },
+			generationProbeRetryDelayMs: 0,
+			log: recordingLogger(logs),
+		} as never);
+		return { control, record, logs, calls: () => calls };
+	}
+
+	it("is retried while the tab still runs this process, and does not record a failure meanwhile", async () => {
+		const f = probeFixture([timeout, timeout, () => new HostControlPeerError("helper-failed", "generation probe failed: gone")]);
+		await f.control.connect(TAB, "owner", runtime, prepared);
+		assert.equal(f.calls(), 3, "two timeouts are retried, the first other failure ends it");
+		const messages = f.logs.map(line => line.message);
+		assert.equal(messages.filter(message => /host control paused — the process generation probe did not answer in time .* it is retried/.test(message)).length, 2);
+		assert.match(f.record.controlFailure ?? "", /generation probe failed: gone/);
+	});
+
+	it("still ends in a failure when every attempt times out", async () => {
+		const f = probeFixture([timeout]);
+		await f.control.connect(TAB, "owner", runtime, prepared);
+		assert.equal(f.calls(), 4);
+		assert.match(f.record.controlFailure ?? "", /the process generation could not be read \(generation probe did not answer in time\)/);
+	});
+
+	it("fails at once when the probe fails for any other reason", async () => {
+		const f = probeFixture([() => new HostControlPeerError("helper-failed", "generation probe failed: gone")]);
+		await f.control.connect(TAB, "owner", runtime, prepared);
+		assert.equal(f.calls(), 1);
+		assert.match(f.record.controlFailure ?? "", /generation probe failed: gone/);
+		assert.doesNotMatch(f.logs.map(line => line.message).join("\n"), /paused/);
 	});
 });
 

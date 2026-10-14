@@ -1,21 +1,31 @@
 /**
- * Where one new session's launch spent its time.
+ * Where one explicitly started launch spent its time: New Session, and Resume or Open of an existing session.
  *
  * Restore has a per-row step timer (`session-restore-trace.ts`) and a log line per row; a session the user starts has
  * neither, so a launch that took half a minute left a log with nothing between "panel bound" and "running". A run
- * starts when the New Session command reserves its draft ({@link LaunchTimeline.begin}); the launch path then adds the
- * duration of every phase it already measures ({@link LaunchTimeline.add}) and the lap from the previous mark to now
- * ({@link LaunchTimeline.lap}); the launcher asks for the summary when the host is running, and the host-control step
- * asks how long after the command its channel was verified.
+ * starts when the command is entered ({@link LaunchTimeline.begin}, with the kind of the command: New Session reserves a
+ * draft, Resume from the composer, a folder's history or Resume Session, and Open of a row, which launches when the row is
+ * stopped); the launch path then adds the duration of every phase it already measures ({@link LaunchTimeline.add}) and the
+ * lap from the previous mark to now ({@link LaunchTimeline.lap}); the launcher claims the run when it takes the launch
+ * ({@link LaunchTimeline.reached}) and asks for the summary when the host is running, and the host-control step asks how
+ * long after the command its channel was verified ({@link LaunchTimeline.finish}). A command whose launch never reaches the
+ * launcher (the session is already running, the admission refused it, another window runs it) drops its run with
+ * {@link LaunchTimeline.abandon}, so a later launch of the tab is not reported as that command's.
  *
- * Only a launch that began a run is reported, so a restore, a Resume or a mode switch adds no line. Diagnostic only:
+ * Only a launch that began a run is reported, so the startup restore and a mode switch add no line. Diagnostic only:
  * nothing here decides anything. Nothing here imports `vscode`.
  */
 
+/** What the user asked for; the word the timing lines carry. */
+export type LaunchKind = "new session" | "resume" | "open";
+
 interface Run {
+	readonly kind: LaunchKind;
 	readonly startedAt: number;
 	/** Where the last lap ended. */
 	lastMark: number;
+	/** The launcher took the launch this run was begun for. */
+	launched: boolean;
 	readonly phases: [name: string, ms: number][];
 }
 
@@ -25,6 +35,8 @@ const RUN_KEEP_MS = 10 * 60_000;
 const RUN_KEEP_MAX = 16;
 
 export interface LaunchSummary {
+	/** What the user asked for. */
+	readonly kind: LaunchKind;
 	/** Whole milliseconds from the command to now. */
 	readonly totalMs: number;
 	/** `a 12 · b 340`, in the order recorded; empty when nothing was recorded. */
@@ -40,13 +52,13 @@ export class LaunchTimeline {
 	}
 
 	/**
-	 * The New Session command asked for a draft (at `startedAt`, default now): the clock of this tab's run starts.
+	 * A command that starts this tab's launch was entered (at `startedAt`, default now): the clock of this tab's run starts.
 	 * An earlier run of the tab is replaced.
 	 */
-	begin(tabId: string, startedAt: number = this.#now()): void {
+	begin(tabId: string, kind: LaunchKind, startedAt: number = this.#now()): void {
 		const at = this.#now();
 		this.#runs.delete(tabId);
-		this.#runs.set(tabId, { startedAt, lastMark: startedAt, phases: [] });
+		this.#runs.set(tabId, { kind, startedAt, lastMark: startedAt, launched: false, phases: [] });
 		for (const [id, run] of this.#runs) {
 			if (this.#runs.size <= RUN_KEEP_MAX && at - run.startedAt < RUN_KEEP_MS) break;
 			this.#runs.delete(id);
@@ -56,6 +68,14 @@ export class LaunchTimeline {
 	/** Whether a run of the tab is open. */
 	has(tabId: string): boolean {
 		return this.#runs.has(tabId);
+	}
+
+	/** The launcher took the launch the tab's run was begun for: the run now belongs to it. Returns the run's kind, or `null` when the tab has none. */
+	reached(tabId: string): LaunchKind | null {
+		const run = this.#runs.get(tabId);
+		if (run === undefined) return null;
+		run.launched = true;
+		return run.kind;
 	}
 
 	/** Record `phase` as the time since the previous lap (or the command). No run: nothing happens. */
@@ -80,17 +100,23 @@ export class LaunchTimeline {
 		const run = this.#runs.get(tabId);
 		if (run === undefined) return null;
 		return {
+			kind: run.kind,
 			totalMs: Math.round(this.#now() - run.startedAt),
 			phases: run.phases.map(([name, ms]) => `${name} ${Math.round(ms)}`).join(" · "),
 		};
 	}
 
-	/** Whole milliseconds since the command, and the run ends: the second report of a launch is its last. */
-	finish(tabId: string): number | null {
+	/** The run ends and its kind and whole milliseconds since the command are returned: the second report of a launch is its last. */
+	finish(tabId: string): { readonly kind: LaunchKind; readonly totalMs: number } | null {
 		const run = this.#runs.get(tabId);
 		if (run === undefined) return null;
 		this.#runs.delete(tabId);
-		return Math.round(this.#now() - run.startedAt);
+		return { kind: run.kind, totalMs: Math.round(this.#now() - run.startedAt) };
+	}
+
+	/** The command that began the run ended without any launch reaching the launcher (already running, refused, another window's): the run is dropped unreported. A run the launcher took is left to its own end. */
+	abandon(tabId: string): void {
+		if (this.#runs.get(tabId)?.launched === false) this.#runs.delete(tabId);
 	}
 
 	/** The tab's run ends without a report (the launch failed or the tab closed). */

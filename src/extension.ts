@@ -101,7 +101,7 @@ import type { SessionFileHeader } from "./host/session-files";
 import { claimHolderMayBeAlive, setProcessProbeObserver } from "./host/session-claim";
 import { formatToolSpawn, setToolSpawnObserver } from "./host/tool-spawn-trace";
 import { type Logger, prefixedLogger } from "./shared/logger";
-import { LaunchTimeline } from "./host/launch-timeline";
+import { LaunchTimeline, type LaunchKind } from "./host/launch-timeline";
 import { holderSeemsAlive } from "./host/holder-liveness";
 import { claimFileNameFor, startClaimWatch } from "./host/claim-watch";
 import { WindowRegistry } from "./host/window-registry";
@@ -2142,7 +2142,7 @@ async function startNewSession(context: vscode.ExtensionContext, index: SessionI
   try {
     const commandAt = Date.now();
     entry = await index.createDraft({ cwd: current.path });
-    windowState().launchTimeline.begin(entry.tabId, commandAt);
+    windowState().launchTimeline.begin(entry.tabId, "new session", commandAt);
     windowState().launchTimeline.lap(entry.tabId, "draft");
   } catch (error) {
     showError(`A new OMP session could not be reserved: ${messageOf(error)}`);
@@ -2256,6 +2256,7 @@ async function openSession(
   keepLiveView = false,
 ): Promise<boolean> {
   const s = windowState();
+  const commandAt = Date.now();
   const tabId =
     tabIdArgument(argument) ??
     (await pickIndexedTab(index, verb === "resumed" ? "Open an OMP session" : "View OMP session history"));
@@ -2317,7 +2318,7 @@ async function openSession(
     await revealExistingTab(index, tabId, panel);
     return true;
   }
-  await openTab(context, index, tabId, externalConfirmed ? "resumed" : verb, "explicit", undefined, externalConfirmed, keepLiveView);
+  await timedLaunch(tabId, "open", commandAt, () => openTab(context, index, tabId, externalConfirmed ? "resumed" : verb, "explicit", undefined, externalConfirmed, keepLiveView));
   return true;
 }
 
@@ -2840,6 +2841,7 @@ async function openFolderHistoryCandidate(
   candidate: FolderHistoryCandidate,
   keepLiveView = false,
 ): Promise<void> {
+  const commandAt = Date.now();
   const inspection = await inspectSessionFile(candidate.file);
   if (inspection.kind === "missing") {
     showError(`That OMP session file is no longer there: ${inspection.detail}`);
@@ -2925,7 +2927,7 @@ async function openFolderHistoryCandidate(
     return;
   }
   log.info(`tab ${entry.tabId}: resumed folder session ${candidate.file} (${candidate.source}) from ${folder.path}`);
-  await openTab(context, index, entry.tabId, "resumed", "explicit", undefined, false, keepLiveView);
+  await timedLaunch(entry.tabId, "resume", commandAt, () => openTab(context, index, entry.tabId, "resumed", "explicit", undefined, false, keepLiveView));
 }
 
 /**
@@ -3039,6 +3041,23 @@ async function editorSettled(slot: string, tabId: string): Promise<void> {
     if (!fencedOf(state) && !s.openingTabs.has(tabId) && passiveReasonForSlot(slot) === null) return;
     if (Date.now() >= deadline) return;
     await new Promise<void>(resolve => setTimeout(resolve, 50));
+  }
+}
+
+/**
+ * Run one explicit launch command (`openTab` or the view change that ends in it) under a timeline run that began when the
+ * command was entered (`commandAt`): the launcher then reports click-to-running and click-to-host-control for it
+ * ({@link LaunchTimeline}). A run already open for the tab (a launch in flight) is kept; a run this command began is dropped
+ * when the command ends without a launch having reached the launcher, so nothing later is reported as this command's.
+ */
+async function timedLaunch<T>(tabId: string, kind: LaunchKind, commandAt: number, run: () => Promise<T>): Promise<T> {
+  const timeline = windowState().launchTimeline;
+  if (timeline.has(tabId)) return run();
+  timeline.begin(tabId, kind, commandAt);
+  try {
+    return await run();
+  } finally {
+    timeline.abandon(tabId);
   }
 }
 
@@ -3684,6 +3703,7 @@ async function chooseDefaultSessionView(context: vscode.ExtensionContext): Promi
  * `noRouting` keeps it in this window; `revealIfLive` (a launch another window asked for) leaves the view of a session that is live here alone.
  */
 async function openSessionInMode(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown, mode: SessionViewMode, verb: "open" | "show" = "open", noRouting = false, revealIfLive = false): Promise<void> {
+  const commandAt = Date.now();
   const s = windowState();
   const target = sessionTargetFromArgument(index, argument);
   if (target === null) { showWarning(`Select an OMP session to ${verb}.`); return; }
@@ -3706,14 +3726,17 @@ async function openSessionInMode(context: vscode.ExtensionContext, index: Sessio
     await revealExistingTab(index, target.tabId, state.panel);
     // A launch another window asked for never changes the view of a session that is live here, even one that went live while this waited.
     if (revealIfLive && (hostOf(state) !== null || launcherFacts(target.tabId).running)) return;
-    await switchSessionMode(context, index, state, mode, false, revealIfLive);
+    // A live session's view change is a mode switch, which is not a launch the user is waiting on; a stopped one is.
+    const view = state;
+    if (hostOf(view) === null) await timedLaunch(target.tabId, "open", commandAt, () => switchSessionMode(context, index, view, mode, false, revealIfLive));
+    else await switchSessionMode(context, index, view, mode, false, revealIfLive);
     return;
   }
   if (state?.bridge != null && s.bridgeLiveEditors.has(state.bridge.editorId)) {
     showWarning("This tab was kept running while OMP restarted in the background, so its view cannot be changed from here. Run “Developer: Reload Window”, then try again.");
     return;
   }
-  await openTab(context, index, target.tabId, "resumed", "explicit", mode, false, revealIfLive);
+  await timedLaunch(target.tabId, "open", commandAt, () => openTab(context, index, target.tabId, "resumed", "explicit", mode, false, revealIfLive));
 }
 
 function sessionAdmissionReason(state: TabState): string | null {
@@ -6218,9 +6241,10 @@ function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, 
  */
 async function resumeFromChat(context: vscode.ExtensionContext, index: SessionIndex, tabId: string): Promise<void> {
   const s = windowState();
+  const commandAt = Date.now();
   const before = s.outcomes.get(tabId);
   try {
-    await openTab(context, index, tabId, "resumed");
+    await timedLaunch(tabId, "resume", commandAt, () => openTab(context, index, tabId, "resumed"));
   } catch (error) {
     log.error(`tab ${tabId}: Resume from Chat failed: ${messageOf(error)}`);
     const reason = `The session could not be resumed: ${messageOf(error)}`;
