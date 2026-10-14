@@ -38,6 +38,7 @@ import { measuredTranscriptRows, presentationRowId } from "../lib/transcript-lay
 import { MeasuredRows, type RowViewport } from "./MeasuredRows";
 import { TranscriptScrollController, type TranscriptScrollMode } from "../lib/transcript-scroll";
 import { captureToolInteraction, heldToolInteractions, restoreToolInteraction, type ToolInteraction } from "../lib/tool-interaction";
+import { isHeadNavigation, nextHead } from "../lib/tool-navigation";
 import { NativeMessage } from "./NativeMessage";
 import { EmptyState } from "./EmptyState";
 import { AssistantContentView, NativeDisclosure } from "./MessageContent";
@@ -521,7 +522,14 @@ export function Transcript(props: TranscriptProps): ReactNode {
 	return (
 		<div className="omp-transcript-frame">
 		<div ref={rootRef} className="omp-transcript" role="region" aria-label="Conversation transcript" onKeyDown={event => {
-			if (event.key !== "Escape" || event.defaultPrevented) return;
+			if (event.defaultPrevented) return;
+			// Arrows, Home and End on a head move to the previous, next, first or last head that is mounted; inside a body, a filter or a menu they are not ours.
+			if (rootRef.current !== null && event.target instanceof Element && isHeadNavigation(event.key, event.target)) {
+				event.preventDefault();
+				nextHead(rootRef.current, event.target, event.key)?.focus();
+				return;
+			}
+			if (event.key !== "Escape") return;
 			const element = event.target instanceof Element ? event.target : null;
 			const id = element?.closest<HTMLElement>("[data-run-id]")?.dataset.runId ?? element?.closest<HTMLElement>(".omp-tool-overview")?.dataset.sourceId;
 			if (!id || !shown.get(id)) return;
@@ -559,8 +567,12 @@ export function Transcript(props: TranscriptProps): ReactNode {
 			<MeasuredRows rows={measuredRows} context={`${namespace}:${props.toolCallDetail}`} viewport={viewport}
 				elementRef={measuredRef} following={readerMode === "following" && !bodyHeld} anchor={controllerRef.current?.anchor} paged={props.pagedHistory || (props.depth ?? 0) > 0} forcedSources={forcedCalls.current} forcedRows={heldRunIds}
 				onLayout={() => controllerRef.current?.layout()} onInteraction={held => { if (props.pagedHistory) setHeldPageEndId(held ? page.endId : null); }}
-				renderRow={index => { const card = densityRows[index]!; if (card.kind === "run") return <ToolOverview run={card} expanded={shown.get(card.id) ?? false}
-					onExpandedChange={value => presentationProps.onDisclosureChange?.(card.id, value)} />;
+				renderRow={index => { const card = densityRows[index]!; if (card.kind === "run") {
+					const callKeys = card.members.flatMap(member => member.kind === "tool" ? [`call:${props.conversationKey ?? "chat"}:${member.tool.call.id}`] : []);
+					return <ToolOverview run={card} expanded={shown.get(card.id) ?? false}
+						onExpandedChange={value => presentationProps.onDisclosureChange?.(card.id, value)}
+						calls={{ total: callKeys.length, open: callKeys.filter(key => shown.get(key) === true).length, setAll: open => { for (const key of callKeys) presentationProps.onDisclosureChange?.(key, open); } }} />;
+				}
 					const run = card.kind === "tool" || isOverviewMessage(card) ? groupByCall.get(overviewMemberId(card)) : undefined;
 					const body = <TranscriptCardView card={card} props={presentationProps} autoExpanded={card.kind === "tool" && autoCalls.get(card.tool.call.id) === true}
 						clearedHistory={cleared !== null && card.kind === "entry" && card.id === cleared.boundary.id ? <ClearedHistory history={cleared} props={presentationProps} earlier={earlier} /> : undefined} />;

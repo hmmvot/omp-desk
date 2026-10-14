@@ -4240,6 +4240,9 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 
 		await t.test("the tool groups mode opens every group with its calls collapsed, a later group joins it, and Ctrl+O and a manual toggle still work from it", async () => {
 			await reset("quick-tool-groups-mode");
+			// Two open groups with six expanded calls are taller than the default window: the transcript mounts only what is near the viewport, so the test gives it room.
+			const window0 = await ui.evaluate<{ width: number; height: number }>("({width:innerWidth,height:innerHeight})");
+			await ui.call("Emulation.setDeviceMetricsOverride", { width: window0.width, height: 1400, deviceScaleFactor: 1, mobile: false });
 			const mode = (toolsMode: "collapsed" | "groups" | "all") => ui.evaluate(`window.ui.receive({type:'omp:chat-display-preferences',epoch:window.ui.current().epoch,toolCallDetail:'overview',accessibilitySupport:false,thinkingExpanded:false,toolsMode:'${toolsMode}'})`);
 			const turn = (n: number) => `[row('u${n}',{role:'user',timestamp:${n * 10},content:'Turn ${n}'}),
 			  row('a${n}',{role:'assistant',model:'m',timestamp:${n * 10 + 1},stopReason:'toolUse',content:[{type:'toolCall',id:'edit-${n}',name:'edit',arguments:{path:'src/a${n}.ts'}},{type:'toolCall',id:'bash-${n}',name:'bash',arguments:{command:'echo ${n}'}},{type:'toolCall',id:'read-${n}',name:'read',arguments:{path:'src/b${n}.ts'}}]}),
@@ -4306,6 +4309,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.wait("!document.querySelector('.omp-overview-member')");
 			assert.deepEqual((await facts()).groups, ["false", "false"], "Ctrl+O from all collapses everything");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
+			await ui.call("Emulation.setDeviceMetricsOverride", { ...window0, deviceScaleFactor: 1, mobile: false });
 		});
 
 		// Rewind (ADR-0051): two turns; the second edits a file and runs a command, so its preview has consequences.

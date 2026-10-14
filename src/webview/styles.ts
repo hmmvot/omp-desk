@@ -490,6 +490,8 @@ ${ANSI_STYLES}
 .omp-tool-overview { margin: 3px 0; min-width: 0; }
 .omp-overview-head { display: flex; align-items: center; gap: 7px; border: 0; padding: 6px 8px; background: transparent; color: var(--omp-muted); font: inherit; cursor: pointer; width: 100%; text-align: left; border-radius: var(--omp-radius); }
 .omp-overview-head:hover { background: var(--vscode-list-hoverBackground); }
+.omp-overview-actions { display: flex; flex-wrap: wrap; gap: 4px; padding: 0 8px 2px 24px; font-size: 11px; }
+.omp-overview-actions [aria-disabled="true"] { opacity: 0.5; cursor: default; text-decoration: none; }
 .omp-overview-summary { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .omp-overview-member { border-left: 1px solid var(--omp-border); margin-left: 12px; padding-left: 6px; }
 .omp-native-event { color: var(--omp-muted); font-size: 12px; padding: 6px 0; overflow-wrap: anywhere; }

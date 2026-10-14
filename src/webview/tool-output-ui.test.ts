@@ -670,6 +670,69 @@ test("an opened tool call rests as a bounded preview, shows its gist and footer,
 			assert.deepEqual(await ui.evaluate("window.sent.filter(message=>message.type==='omp:open-artifact')"), [{ type: "omp:open-artifact", artifactId: "69", epoch }]);
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
+
+		/** Several real calls as one reply, so the overview groups them. */
+		const showGroup = async (group: readonly Call[], at = 1_790_000_005_000): Promise<void> => {
+			const entries: unknown[] = [{ type: "message", id: "a-group", parentId: null, timestamp: new Date(at - 4_000).toISOString(), message: { role: "assistant", model: "m", timestamp: at - 4_000, stopReason: "toolUse", content: group.map(call => ({ type: "toolCall", id: call.id, name: call.tool, arguments: call.args })) } }];
+			let parent = "a-group";
+			for (const call of group) {
+				entries.push({ type: "message", id: `r-${call.id}`, parentId: parent, timestamp: new Date(at).toISOString(), message: { role: "toolResult", timestamp: at, toolCallId: call.id, toolName: call.tool, isError: call.isError, content: [{ type: "text", text: call.resultText }], details: call.details } });
+				parent = `r-${call.id}`;
+			}
+			await ui.evaluate(`window.ui.density('overview');window.ui.push({entries:${JSON.stringify(entries)},durableCount:${entries.length},working:false,settled:true})`);
+			await ui.wait("document.querySelector('.omp-overview-head')");
+		};
+
+		await t.test("a group's Expand all N and Collapse all set its members' own disclosures; arrows, Home and End travel the heads; Escape closes the menu, then the card, then the group", async () => {
+			const group = [real("glob-list"), real("read-text-file"), real("bash-long-786-lines")];
+			await reset("digest"); await showGroup(group);
+			const head = ".omp-overview-head";
+			const activeIs = (selector: string): Promise<boolean> => ui.evaluate(`document.activeElement?.matches(${JSON.stringify(selector)}) === true`);
+			const activeCall = (): Promise<string | null> => ui.evaluate("document.activeElement?.closest('[data-tool-call-id]')?.dataset.toolCallId ?? null");
+			const bodies = (): Promise<number> => countOf(".omp-overview-member .omp-tool-body");
+			assert.equal(await countOf(".omp-overview-actions"), 0, "a closed group offers no actions");
+			await ui.evaluate(`document.querySelector(${JSON.stringify(head)}).click()`);
+			await ui.wait("document.querySelector('.omp-overview-actions')");
+			const actions = (): Promise<{ text: string; disabled: boolean }[]> => ui.evaluate("[...document.querySelectorAll('.omp-overview-actions button')].map(b=>({text:b.textContent,disabled:b.getAttribute('aria-disabled')==='true'}))");
+			assert.deepEqual(await actions(), [{ text: "Expand all 3", disabled: false }, { text: "Collapse all", disabled: true }]);
+			assert.equal(await bodies(), 0);
+			await ui.evaluate("[...document.querySelectorAll('.omp-overview-actions button')][0].click()");
+			await ui.wait("document.querySelectorAll('.omp-overview-member .omp-tool-body').length===3");
+			assert.deepEqual(await actions(), [{ text: "Expand all 3", disabled: true }, { text: "Collapse all", disabled: false }]);
+			assert.equal(await ui.evaluate("document.querySelector('.omp-overview-head').getAttribute('aria-expanded')"), "true", "the group stays open");
+			await ui.evaluate("[...document.querySelectorAll('.omp-overview-actions button')][1].click()");
+			await ui.wait("document.querySelectorAll('.omp-overview-member .omp-tool-body').length===0");
+			assert.equal(await countOf(".omp-overview-member .omp-tool-head"), 3, "Collapse all closes the members, not the group");
+
+			// Arrows, Home and End travel the heads: the group row, then each member's head.
+			await ui.evaluate(`document.querySelector(${JSON.stringify(head)}).focus()`);
+			await key("ArrowDown"); assert.equal(await activeCall(), group[0]!.id);
+			await key("ArrowDown"); assert.equal(await activeCall(), group[1]!.id);
+			await key("End"); assert.equal(await activeCall(), group[2]!.id);
+			await key("ArrowDown"); assert.equal(await activeCall(), group[2]!.id, "the last head stays the last");
+			await key("ArrowUp"); assert.equal(await activeCall(), group[1]!.id);
+			await key("Home"); assert.equal(await activeIs(head), true, "Home goes to the first head, the group row");
+			await key("ArrowUp"); assert.equal(await activeIs(head), true);
+
+			// Escape closes a menu first, then the card, then the group.
+			await ui.evaluate("[...document.querySelectorAll('.omp-overview-actions button')][0].click()");
+			await ui.wait("document.querySelectorAll('.omp-overview-member .omp-tool-body').length===3");
+			const second = `[data-tool-call-id=${JSON.stringify(group[1]!.id)}]`;
+			await ui.evaluate(`document.querySelector(${JSON.stringify(`${second} .omp-output-bar .omp-tool-menu > button`)}).click()`);
+			await ui.wait(`document.querySelector(${JSON.stringify(`${second} [role=menu]`)})`);
+			await key("ArrowDown"); await key("ArrowUp");
+			await key("Escape");
+			await ui.wait(`!document.querySelector(${JSON.stringify(`${second} [role=menu]`)})`);
+			assert.equal(await bodies(), 3, "the first Escape closed only the menu");
+			await key("Escape");
+			await ui.wait("document.querySelectorAll('.omp-overview-member .omp-tool-body').length===2");
+			assert.equal(await activeCall(), group[1]!.id, "the second Escape closed the card and left focus on its head");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-overview-head').getAttribute('aria-expanded')"), "true");
+			await key("Escape");
+			await ui.wait("document.querySelector('.omp-overview-head').getAttribute('aria-expanded')==='false'");
+			assert.equal(await activeIs(head), true, "the third Escape closed the group and left focus on its row");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
 	} finally {
 		page?.socket.close(); browser?.socket.close();
 		child.kill();

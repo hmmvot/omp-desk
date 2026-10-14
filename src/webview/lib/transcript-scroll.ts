@@ -1,3 +1,4 @@
+import { isHeadNavigation } from "./tool-navigation";
 export type TranscriptScrollMode = "following" | "detached";
 /** `offset` is the anchor's distance below the viewport top when captured at viewport `height`. */
 export interface SourceAnchor { sources: readonly string[]; offset: number; height: number; order: readonly string[]; index: number }
@@ -37,6 +38,8 @@ export class TranscriptScrollController {
 		listen("keydown", event => {
 			const target = event.target instanceof Element ? event.target : null;
 			if (target?.closest("input,textarea,select,[contenteditable=true],[role=menu],[role=combobox]")) return;
+			// Arrows, Home and End on a tool head or a group row move between heads (the transcript's own handler); they scroll nothing.
+			if (isHeadNavigation(event.key, target)) return;
 			const direction = ["PageUp", "Home", "ArrowUp"].includes(event.key) ? -1 : ["PageDown", "End", "ArrowDown"].includes(event.key) || event.key === " " && !target?.closest("button,summary") ? 1 : 0;
 			if (direction) this.#evidence(false, direction < 0);
 		}, { capture: true });
