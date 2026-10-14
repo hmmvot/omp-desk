@@ -60,7 +60,7 @@ export const PTY_HANDSHAKE_TIMEOUT_MS = 10_000;
 /** Largest queue of unflushed frame bytes one connection may accumulate. */
 export const PTY_MAX_SEND_QUEUE_BYTES = 8 * 1024 * 1024;
 
-/** Largest unterminated line one connection may accumulate before it is refused. */
+/** Largest single line (one frame, delimiter excluded) a connection accepts, and so the largest unterminated tail it buffers. */
 const MAX_LINE_BYTES = PTY_MAX_FRAME_BYTES;
 
 /**
@@ -153,6 +153,10 @@ export interface LineReader {
 
 export function createLineReader(): LineReader {
 	let buffered = "";
+	// Length of the unterminated part of `buffered`. Complete lines never count against the
+	// bound as a group: a socket read may carry any number of them (Bun delivers up to
+	// 512 KiB at once), and each is checked on its own against the per-frame limit.
+	let tailLength = 0;
 	return {
 		take() {
 			const newline = buffered.indexOf("\n");
@@ -162,16 +166,33 @@ export function createLineReader(): LineReader {
 			return line;
 		},
 		push(chunk) {
+			let lineStart = 0;
+			let carried = tailLength;
+			for (let newline = chunk.indexOf("\n"); newline >= 0; newline = chunk.indexOf("\n", lineStart)) {
+				if (carried + newline - lineStart > MAX_LINE_BYTES) {
+					buffered = "";
+					tailLength = 0;
+					return { overflow: true };
+				}
+				carried = 0;
+				lineStart = newline + 1;
+			}
+			carried += chunk.length - lineStart;
+			if (carried > MAX_LINE_BYTES) {
+				buffered = "";
+				tailLength = 0;
+				return { overflow: true };
+			}
 			buffered += chunk;
-			if (buffered.length <= MAX_LINE_BYTES) return { overflow: false };
-			buffered = "";
-			return { overflow: true };
+			tailLength = carried;
+			return { overflow: false };
 		},
 		unshift(line) {
 			buffered = `${line}\n${buffered}`;
 		},
 		reset() {
 			buffered = "";
+			tailLength = 0;
 		},
 	};
 }
@@ -306,7 +327,7 @@ function pumpFrames(state: ConnectionState): void {
 		if (state.closed) return;
 		const pushed = state.reader.push(chunk);
 		if (pushed.overflow) {
-			closeConnection(state, "the peer sent more than one frame's worth of bytes without a line end");
+			closeConnection(state, "the peer sent a frame above the frame bound");
 			return;
 		}
 		for (;;) {
@@ -387,7 +408,10 @@ export async function startPtyBrokerServer(options: PtyBrokerServerOptions): Pro
 		timer.unref();
 		const onHandshakeData = (chunk: string): void => {
 			bufferedHandshake += chunk;
-			if (bufferedHandshake.length > MAX_LINE_BYTES) {
+			// Only the opening line is bounded here; whatever follows it belongs to the frame reader,
+			// which bounds each of its own lines.
+			const firstNewline = bufferedHandshake.indexOf("\n");
+			if ((firstNewline < 0 ? bufferedHandshake.length : firstNewline) > MAX_LINE_BYTES) {
 				abort("frame-too-large", "the handshake frame is above the frame bound");
 				return;
 			}
@@ -471,15 +495,20 @@ export async function startPtyBrokerServer(options: PtyBrokerServerOptions): Pro
 				closed: false,
 			};
 			// Anything past the handshake line belongs to the frame reader.
+			let leftoverOverflow = false;
 			if (bufferedHandshake.length > 0) {
 				const leftover = bufferedHandshake;
 				bufferedHandshake = "";
-				reader.push(leftover);
+				leftoverOverflow = reader.push(leftover).overflow;
 			}
 			open.add(state);
 			socket.on("close", () => open.delete(state));
 			socket.on("drain", () => handleDrain(state));
 			pumpFrames(state);
+			if (leftoverOverflow) {
+				closeConnection(state, "the peer sent a frame above the frame bound");
+				return;
+			}
 			const connection = makeConnection<PtyClientFrame>(state);
 			for (const listener of connectionListeners) listener(connection);
 		};

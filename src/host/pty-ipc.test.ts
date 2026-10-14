@@ -27,6 +27,7 @@ import {
 	type PtyBrokerSideConnection,
 } from "./pty-ipc.ts";
 import {
+	PTY_MAX_FRAME_BYTES,
 	PTY_PROTOCOL_VERSION,
 	createPtyGeneration,
 	createPtyNonce,
@@ -183,6 +184,83 @@ describe("line framing", () => {
 		reader.push(`us"}\n`);
 
 		assert.equal(reader.take(), `{"t":"status"}`);
+	});
+
+	it("accepts one chunk of many complete small lines that total above the frame bound", () => {
+		const reader = createLineReader();
+		const lines = Array.from({ length: 4096 }, (_, index) => `${index}:${"x".repeat(125)}`);
+		const chunk = `${lines.join("\n")}\n`;
+		assert.ok(chunk.length > PTY_MAX_FRAME_BYTES * 1.5, "the chunk must be well above one frame");
+
+		assert.deepEqual(reader.push(chunk), { overflow: false });
+		for (const expected of lines) assert.equal(reader.take(), expected);
+		assert.equal(reader.take(), null);
+	});
+
+	it("accepts one complete line at the frame bound inside a larger chunk", () => {
+		const reader = createLineReader();
+		const atBound = "y".repeat(PTY_MAX_FRAME_BYTES);
+
+		assert.deepEqual(reader.push(`${atBound}\n${atBound}\n`), { overflow: false });
+		assert.equal(reader.take(), atBound);
+		assert.equal(reader.take(), atBound);
+	});
+
+	it("refuses a complete line longer than the frame bound, whatever else the chunk holds", () => {
+		const reader = createLineReader();
+		const tooLong = "z".repeat(PTY_MAX_FRAME_BYTES + 1);
+
+		assert.deepEqual(reader.push(`{"t":"ok"}\n${tooLong}\n`), { overflow: true });
+		assert.equal(reader.take(), null, "a refused push leaves nothing to read");
+	});
+
+	it("refuses an unterminated tail longer than the frame bound", () => {
+		const reader = createLineReader();
+
+		assert.deepEqual(reader.push(`{"t":"ok"}\n${"z".repeat(PTY_MAX_FRAME_BYTES + 1)}`), { overflow: true });
+		assert.equal(reader.take(), null);
+	});
+
+	it("bounds the tail across chunks, not each chunk", () => {
+		const reader = createLineReader();
+		const half = "w".repeat(PTY_MAX_FRAME_BYTES / 2 + 1);
+
+		assert.deepEqual(reader.push(half), { overflow: false });
+		assert.deepEqual(reader.push(half), { overflow: true });
+	});
+
+	it("does not carry a taken line's length into the next line's bound", () => {
+		const reader = createLineReader();
+		const big = "q".repeat(PTY_MAX_FRAME_BYTES - 10);
+
+		assert.deepEqual(reader.push(`${big}\n`), { overflow: false });
+		assert.equal(reader.take(), big);
+		assert.deepEqual(reader.push(`${big}\n`), { overflow: false });
+		assert.equal(reader.take(), big);
+	});
+
+	it("reassembles lines split across chunks, including a split inside the delimiter pair", () => {
+		const reader = createLineReader();
+
+		assert.deepEqual(reader.push(`{"a":1`), { overflow: false });
+		assert.equal(reader.take(), null);
+		assert.deepEqual(reader.push(`}\n{"b":`), { overflow: false });
+		assert.equal(reader.take(), `{"a":1}`);
+		assert.equal(reader.take(), null);
+		assert.deepEqual(reader.push(`2}\r`), { overflow: false });
+		assert.equal(reader.take(), null);
+		assert.deepEqual(reader.push(`\n{"c":3}\n`), { overflow: false });
+		assert.equal(reader.take(), `{"b":2}`);
+		assert.equal(reader.take(), `{"c":3}`);
+		assert.equal(reader.take(), null);
+	});
+
+	it("forgets the tail on reset", () => {
+		const reader = createLineReader();
+		reader.push("z".repeat(PTY_MAX_FRAME_BYTES));
+		reader.reset();
+
+		assert.deepEqual(reader.push("z".repeat(PTY_MAX_FRAME_BYTES)), { overflow: false });
 	});
 });
 

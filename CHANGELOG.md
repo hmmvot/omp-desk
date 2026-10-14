@@ -68,6 +68,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The broker connection (Chat, Terminal and folder shells) no longer closes with "more than one frame's worth of bytes without a line end" when one socket read carries many complete lines or one large complete line. Only the unterminated tail of the buffer and each single line are held to the 256 KiB frame limit; a socket read of any size is split into its frames first. Node rarely delivers such reads, and a runtime with larger socket reads (Bun delivers up to 512 KiB) hit it.
 - Chat: the editor tab of **Open full output** (an `omp-artifact:` document) is titled `Full output · bash · artifact 0` (the tool and the artifact id), where it was just `0`. A tab of the old address that Reload Window restores still opens.
 - Chat: unfolding one record of an NDJSON result no longer changes the preview's button from **Show all 25 records** to **Show all 36 lines**; the button keeps counting records (the marker above it still counts the hidden rows).
 - OMP Settings, Models and Agents: the project folder shows with the case it has on disk (`Game`, not `game`) in the page, the tab title and the scope list; the folder is still compared case-insensitively, so one folder never opens in two tabs.
