@@ -9,7 +9,7 @@ import { runSettingsWorker } from "./omp-settings-worker";
 import { createSettingsHtml } from "./guest-webview";
 import { OmpConfigController } from "./omp-config-controller";
 import { chooseSetting } from "./settings-pickers";
-import { onDiskFolder } from "./folder-display.ts";
+import { onDiskFolder, scopePickerFolders } from "./folder-display.ts";
 import { normalizeWorkspaceDirectory } from "./session-files.ts";
 import { SettingsRefusal } from "./omp-settings-core";
 import { isRecord as record } from "../shared/guards";
@@ -137,7 +137,7 @@ export class OmpConfigEditors implements vscode.Disposable {
     await vscode.window.showTextDocument(document, { preview: false, selection: new vscode.Range(position, position) });
   }
   async #pickScope(editor: Editor, current: string | null): Promise<string | null | undefined> {
-    const folders = [...new Map([...this.host.folders(), ...(current === null ? [] : [current])].map(folder => [normalizeWorkspaceDirectory(folder), folder])).values()];
+    const folders = await scopePickerFolders(this.host.folders(), current);
     const entries: PickEntry[] = [
       { label: `${current === null ? "$(check) " : ""}$(globe) Global`, description: "Global config only; no project layer", value: "global", current: current === null, available: true },
       ...(folders.length ? [{ separator: "Project folder" }] : []),

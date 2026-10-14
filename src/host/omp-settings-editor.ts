@@ -16,7 +16,7 @@ import type { SettingsKind } from "../chat/settings-command";
 import type { SessionApply, SettingsMessage } from "../protocol/settings-messages";
 import { chooseSetting, pickFallbackChainKey, pickSettingsModel, pickSettingsThinking } from "./settings-pickers";
 import { modelKey, roleChange, selectorBase, selectorThinking } from "../protocol/settings-pick-items";
-import { onDiskFolder } from "./folder-display.ts";
+import { onDiskFolder, scopePickerFolders } from "./folder-display.ts";
 import { thinkingUnsupported } from "./omp-settings-apply";
 import { normalizeWorkspaceDirectory } from "./session-files.ts";
 import { parseModelPickRequest, parseRoleAssignment } from "./settings-pick-requests";
@@ -158,11 +158,11 @@ export class SettingsEditors implements vscode.Disposable {
   }
   async #pickScope(editor: Editor): Promise<string | null | undefined> {
     const current = editor.binding.folder;
-    const folders = [...new Map([...this.host.folders(), ...(current === null ? [] : [current])].map(folder => [normalizeWorkspaceDirectory(folder), folder])).values()];
+    const folders = await scopePickerFolders(this.host.folders(), current);
     const entries: PickEntry[] = [
       { label: `${current === null ? "$(check) " : ""}$(globe) Global`, description: editor.kind === "agents" ? "Global config, user and bundled agents; no project layer" : "Global config; no project layer", value: "global", current: current === null, available: true },
       ...(folders.length ? [{ separator: "Project folder" }] : []),
-      ...folders.map(folder => ({ label: `${folder === current ? "$(check) " : ""}$(folder) ${path.basename(folder) || folder}`, description: folder, value: `folder:${folder}`, current: folder === current, available: true })),
+      ...folders.map(folder => { const here = current !== null && normalizeWorkspaceDirectory(folder) === normalizeWorkspaceDirectory(current); return { label: `${here ? "$(check) " : ""}$(folder) ${path.basename(folder) || folder}`, description: folder, value: `folder:${folder}`, current: here, available: true }; }),
       { separator: "" },
       { label: "$(folder-opened) Choose another folder…", value: "browse", current: false, available: true },
     ];

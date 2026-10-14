@@ -23,3 +23,12 @@ export async function onDiskFolder(folder: string): Promise<string> {
 		return folder;
 	}
 }
+
+/**
+ * The folders a scope picker lists: `listed` (the Sessions folders, whose paths are case-folded keys on Windows) and the
+ * folder the editor is on, one entry per directory, each spelled for display. The editor's own folder wins a tie.
+ */
+export async function scopePickerFolders(listed: readonly string[], current: string | null): Promise<string[]> {
+	const unique = new Map([...listed, ...(current === null ? [] : [current])].map(folder => [normalizeWorkspaceDirectory(folder), folder]));
+	return await Promise.all([...unique.values()].map(onDiskFolder));
+}
