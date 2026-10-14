@@ -21,17 +21,35 @@ export interface ToolViewState {
 	readonly format: "formatted" | "text";
 	/** The folds of each tree of rows the card shows, by the tree's id. */
 	readonly folds: ReadonlyMap<string, FoldState>;
+	/** Only the lines that contain this (any case) are shown in the full view; empty shows them all. */
+	readonly filter: string;
+	/** Long lines wrap (`true`), or run on and scroll sideways (`false`); `null` is the card's default for the size of its output. */
+	readonly wrap: boolean | null;
+	/** How many lines the output had when the card went full: the transcript estimates the height of a card it has not measured from it. */
+	readonly rows: number;
 }
 
-const INITIAL: ToolViewState = { full: false, format: "formatted", folds: new Map() };
+const INITIAL: ToolViewState = { full: false, format: "formatted", folds: new Map(), filter: "", wrap: null, rows: 0 };
 /** What a card forgets when it closes. */
-export const FRESH_VIEW: Partial<ToolViewState> = { full: false, format: "formatted", folds: new Map() };
+export const FRESH_VIEW: Partial<ToolViewState> = { full: false, format: "formatted", folds: new Map(), filter: "", wrap: null, rows: 0 };
 const MAX_ENTRIES = 256;
 const states = new Map<string, ToolViewState>();
 const listeners = new Set<() => void>();
 
+let version = 0;
 function emit(): void {
+	version++;
 	for (const listener of [...listeners]) listener();
+}
+
+/** The state of card `key` now, for code that is not a card (the transcript's layout estimates). */
+export function peekToolView(key: string): ToolViewState | undefined {
+	return states.get(key);
+}
+
+/** Changes whenever the state of any card does. */
+export function useToolViewVersion(): number {
+	return useSyncExternalStore(subscribe, () => version, () => 0);
 }
 function subscribe(listener: () => void): () => void {
 	listeners.add(listener);

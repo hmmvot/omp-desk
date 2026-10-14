@@ -47,7 +47,7 @@ import { CopyButton } from "./CopyButton";
 import { messageText } from "../../shared/format";
 import { requestPanelAction } from "../lib/panel-actions";
 import { clearToolDisclosures, getTranscriptToggles, subscribeTranscriptToggles, withToolDefault } from "../lib/transcript-toggles";
-import { recordObservedToolMs, resetAllToolViews } from "../lib/tool-view-state";
+import { peekToolView, recordObservedToolMs, resetAllToolViews, useToolViewVersion } from "../lib/tool-view-state";
 import type { BranchPoint } from "../../chat/rewind";
 import { BranchPointMarker } from "./Rewind";
 
@@ -417,7 +417,8 @@ export function Transcript(props: TranscriptProps): ReactNode {
 	for (const inBody of forcedCalls.current.values()) if (inBody) { bodyHeld = true; break; }
 	const bindingsRef = useRef({ sourceBindings, topId, bodyHeld });
 	bindingsRef.current = { sourceBindings, topId, bodyHeld };
-	const measuredRows = useMemo(() => measuredTranscriptRows(densityRows, sourceBindings.sources, viewport.width, shown, namespace, autoCalls), [densityRows, sourceBindings, viewport.width, disclosureRevision, namespace, autoCalls, shown]);
+	const toolViewVersion = useToolViewVersion();
+	const measuredRows = useMemo(() => measuredTranscriptRows(densityRows, sourceBindings.sources, viewport.width, shown, namespace, autoCalls, peekToolView), [densityRows, sourceBindings, viewport.width, disclosureRevision, namespace, autoCalls, shown, toolViewVersion]);
 	const updateViewport = (): void => {
 		const root = rootRef.current, measured = measuredRef.current;
 		if (!root || !measured) return;

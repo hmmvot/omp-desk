@@ -51,7 +51,19 @@ export const TOOL_STYLES = `
 .omp-tool-footer { margin-top: 6px; color: var(--omp-muted); font-size: 11px; overflow-wrap: anywhere; }
 .omp-tool-footer-warn { color: var(--vscode-editorWarning-foreground); }
 .omp-artifact-link { border: 0; background: transparent; padding: 0; font: inherit; color: var(--vscode-textLink-foreground); cursor: pointer; text-decoration: underline; }
-.omp-tool-collapse { margin-top: 6px; }
+/* A sticky element sticks inside the padding of its scroller, so the toolbar reaches back over the transcript's top padding. */
+.omp-tool-toolbar { position: sticky; top: calc(-1 * var(--omp-transcript-pad-top, 0px)); z-index: 2; display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 0 -4px 4px; padding: 3px 4px; background: var(--vscode-editor-background); border-bottom: 1px solid var(--omp-border); }
+.omp-tool-filter { flex: 1 1 120px; min-width: 0; max-width: 260px; box-sizing: border-box; height: 22px; padding: 0 6px; border: 1px solid var(--vscode-input-border, var(--omp-border)); border-radius: var(--omp-radius); background: var(--vscode-input-background); color: var(--vscode-input-foreground); font: inherit; font-size: 11px; }
+.omp-tool-filter:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+.omp-tool-filter-count { color: var(--omp-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.omp-iconbtn[aria-pressed="true"] { color: var(--vscode-foreground); background: var(--vscode-toolbar-activeBackground, var(--vscode-toolbar-hoverBackground)); }
+/* The windowed full view: a block of fixed-height rows in the normal flow of the transcript. There is no scroller of its own: it clips sideways only. */
+.omp-window { position: relative; overflow-x: auto; overflow-y: hidden; padding-bottom: 14px; box-sizing: content-box; font-family: var(--omp-mono); font-size: var(--omp-mono-size); background: var(--vscode-textCodeBlock-background); border-radius: var(--omp-radius); }
+.omp-window-layer { position: absolute; left: 0; min-width: 100%; }
+.omp-window .omp-pre, .omp-rows--nowrap .omp-pre { white-space: pre; word-break: normal; }
+.omp-window .omp-pre { background: transparent; line-height: var(--omp-row-h); overflow: visible; }
+.omp-window .omp-native-code-line, .omp-window .omp-native-diff .omp-pre > span { white-space: pre; height: var(--omp-row-h); }
+.omp-rows--nowrap .omp-native-code-line, .omp-rows--nowrap .omp-native-diff .omp-pre > span { white-space: pre; }
 .omp-prose-clip { max-height: 21em; overflow: hidden; }
 .omp-native-tool .omp-tool-head > .omp-gist { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--omp-muted); font-variant-numeric: tabular-nums; }
 .omp-gist--err { color: var(--vscode-errorForeground); }

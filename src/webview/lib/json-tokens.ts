@@ -115,6 +115,8 @@ export interface JsonTree {
 	readonly size: Int32Array;
 	/** For such a row: how deeply the container is nested (the root is 0). */
 	readonly level: Uint16Array;
+	/** For every row: the row that opens the container it is in (a closing row: its own container), or -1 at the top. */
+	readonly enclosing: Int32Array;
 	/** The document has at least one container that folds. */
 	readonly foldable: boolean;
 }
@@ -155,11 +157,13 @@ function treeOfRows(rows: readonly string[]): JsonTree {
 	const end = new Int32Array(rows.length).fill(-1);
 	const size = new Int32Array(rows.length);
 	const level = new Uint16Array(rows.length);
+	const enclosing = new Int32Array(rows.length).fill(-1);
 	interface Open { row: number; column: number; level: number; commas: number; any: boolean }
 	const stack: Open[] = [];
 	let foldable = false;
 	for (let row = 0; row < rows.length; row++) {
 		const line = rows[row]!;
+		enclosing[row] = stack.at(-1)?.row ?? -1;
 		let inString = false;
 		for (let column = 0; column < line.length; column++) {
 			const code = line.charCodeAt(column);
@@ -182,7 +186,7 @@ function treeOfRows(rows: readonly string[]): JsonTree {
 			else if (code !== CODE_SPACE && code !== CODE_TAB && code !== CODE_CR && code !== 58) { const top = stack.at(-1); if (top) top.any = true; }
 		}
 	}
-	return { rows, end, size, level, foldable };
+	return { rows, end, size, level, enclosing, foldable };
 }
 
 /** The rows of `text`, a JSON document: its own rows when it has several lines, else re-indented by tokens. */

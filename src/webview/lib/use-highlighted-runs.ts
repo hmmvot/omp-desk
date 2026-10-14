@@ -7,7 +7,7 @@
  * text that was already coloured stays coloured and only the new text is plain.
  */
 import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
-import { cachedSpans, codeWindow, enqueueHighlight, isHighlightable, runsByLine, SETTLE_MS, spansOf, styledRuns, type StyledRun } from "./code-highlight.ts";
+import { cachedSpans, CHUNK_LINES, codeChunks, enqueueHighlight, isHighlightable, runsByLine, SETTLE_MS, spansOf, styledRuns, withinCaps, type StyledRun } from "./code-highlight.ts";
 import type { CodeSpan } from "./code-tokens.ts";
 import { codeThemeSnapshot, subscribeCodeTheme } from "./code-theme-store.ts";
 
@@ -72,18 +72,55 @@ export interface CodeLines {
 }
 
 const PLAIN: CodeLines = { at: () => null };
+const NO_CHUNKS: readonly { first: number; source: string }[] = [];
 
 /**
- * Colours the lines `from..to` of `lines` that a view shows, tokenizing the whole text when it is within the
- * caps so multi-line constructs keep their colour, and only the window otherwise ({@link codeWindow}).
- * Lines that stay plain answer `null`.
+ * The runs of each chunk a view of a long text touches, as lines. A chunk is coloured once, from a later task, and stays in the
+ * cache: moving the view over the text never recolours a row, and a row is plain only until its chunk has been tokenized.
+ */
+function useChunkRuns(language: string | null, chunks: readonly { first: number; source: string }[], closed: boolean): ReadonlyMap<number, readonly (readonly StyledRun[])[]> {
+	const { styler } = useSyncExternalStore(subscribeCodeTheme, codeThemeSnapshot, codeThemeSnapshot);
+	const [done, setDone] = useState(0);
+	useEffect(() => {
+		if (language === null || styler === null) return;
+		const pending: Array<() => void> = [];
+		const timers: ReturnType<typeof setTimeout>[] = [];
+		for (const chunk of chunks) {
+			if (chunk.source === "" || !isHighlightable(language, chunk.source) || cachedSpans(language, chunk.source) !== null) continue;
+			timers.push(setTimeout(() => { pending.push(enqueueHighlight(() => { spansOf(language, chunk.source); setDone(count => count + 1); })); }, closed ? 0 : SETTLE_MS));
+		}
+		return () => { for (const timer of timers) clearTimeout(timer); for (const withdraw of pending) withdraw(); };
+	}, [language, styler, chunks, closed]);
+	return useMemo(() => {
+		const runs = new Map<number, readonly (readonly StyledRun[])[]>();
+		if (language === null || styler === null) return runs;
+		for (const chunk of chunks) {
+			const spans = chunk.source === "" ? null : cachedSpans(language, chunk.source);
+			if (spans !== null) runs.set(chunk.first, runsByLine(styledRuns(spans, styler)));
+		}
+		return runs;
+		// `done` is what tells this a chunk was tokenized since.
+	}, [language, styler, chunks, done]);
+}
+
+/**
+ * Colours the lines `from..to` of `lines` that a view shows. A text within the caps is tokenized whole so multi-line
+ * constructs keep their colour; a longer one in aligned chunks of 100 lines that stay in the cache as the view moves,
+ * so a row's colours never change under a scroll. Lines that stay plain answer `null`.
  */
 export function useCodeLines(language: string | null, lines: readonly string[], from: number, to: number, closed: boolean): CodeLines {
-	const window = useMemo(() => (language === null ? null : codeWindow(lines, from, to)), [language, lines, from, to]);
-	const runs = useHighlightedRuns(language, window?.source ?? "", closed);
+	const whole = useMemo(() => language !== null && withinCaps(lines), [language, lines]);
+	const source = useMemo(() => (whole ? lines.join("\n") : ""), [whole, lines]);
+	const runs = useHighlightedRuns(whole ? language : null, source, closed);
+	const chunks = useMemo(() => (language === null || whole ? NO_CHUNKS : codeChunks(lines, from, to)), [language, whole, lines, from, to]);
+	const chunked = useChunkRuns(whole ? null : language, chunks, closed);
 	return useMemo(() => {
-		if (runs === null || window === null) return PLAIN;
-		const split = runsByLine(runs);
-		return { at: (index: number) => split[index - window.first] ?? null };
-	}, [runs, window]);
+		if (whole) {
+			if (runs === null) return PLAIN;
+			const split = runsByLine(runs);
+			return { at: (index: number) => split[index] ?? null };
+		}
+		if (chunked.size === 0) return PLAIN;
+		return { at: (index: number) => chunked.get(Math.floor(index / CHUNK_LINES) * CHUNK_LINES)?.[index % CHUNK_LINES] ?? null };
+	}, [whole, runs, chunked]);
 }

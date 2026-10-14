@@ -15,6 +15,7 @@ import type { ToolSemanticView } from "./tool-render-types";
 import { formatGistDuration, toolGist, type GistPart } from "../../chat/tool-gist";
 import { exitCodeOf, footerParts, splitToolNotices } from "../../chat/tool-notices";
 import { useSecondTick } from "../lib/live-clock";
+import { WINDOW_AFTER_ROWS } from "../lib/use-windowed-rows";
 import { detectOutputFormat } from "../lib/json-tokens";
 import { FRESH_VIEW, useObservedToolMs, useToolViewState } from "../lib/tool-view-state";
 import { FoldAllButtons } from "./JsonRows";
@@ -150,12 +151,12 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 	const formatted = format !== null && viewState.format === "formatted";
 	const copyText = formatted && structuredText !== undefined && !view?.output?.copy ? format.copy : view?.output?.copy || text;
 	const outputLabel = view?.output?.label ?? "Output";
-	const showAll = useCallback(() => setViewState({ full: true }), [setViewState]);
+	const showAll = useCallback((rows: number) => setViewState({ full: true, rows }), [setViewState]);
 	const toolView = useMemo(() => ({ live: partial, showAll, view: viewState, update: setViewState, structured: format !== null && structuredText !== undefined ? { text: structuredText, format } : undefined }), [partial, showAll, viewState, setViewState, format, structuredText]);
 	const live = state === "running" && result === undefined;
 	useSecondTick(live && props.startedAt !== undefined);
 	const observedMs = useObservedToolMs(props.callId);
-	const touched = full || viewState.format !== "formatted" || viewState.folds.size > 0;
+	const touched = full || viewState.format !== "formatted" || viewState.folds.size > 0 || viewState.filter !== "" || viewState.wrap !== null;
 	useEffect(() => { if (!showBody && touched) setViewState(FRESH_VIEW); }, [showBody, touched, setViewState]);
 	const collapse = (): void => {
 		// Focus and selection inside the body hold it open: leave them first, then close.
@@ -179,7 +180,21 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 			</>}
 			{copyText !== "" && <ToolCopyButton text={copyText} label={`Copy ${outputLabel.toLowerCase()}`} what={`the ${outputLabel.toLowerCase()}`} />}
 		</div> : null;
+	// The sticky toolbar of the full view: Collapse, the filter, the wrap switch. Filter and wrap work on the whole text, not on the rows in the page.
+	const outputLines = useMemo(() => full ? copyText.split("\n") : [], [full, copyText]);
+	const filterText = viewState.filter.trim().toLowerCase();
+	const filterMatches = useMemo(() => filterText === "" ? 0 : outputLines.filter(line => line.toLowerCase().includes(filterText)).length, [outputLines, filterText]);
+	const wrapOn = viewState.wrap ?? outputLines.length <= WINDOW_AFTER_ROWS;
+	const toolbar = full ? <div className="omp-tool-toolbar">
+		<span className="omp-tool-collapse"><button type="button" className="omp-output-more" onClick={collapse}><span className="codicon codicon-chevron-up" aria-hidden="true" />Collapse</button></span>
+		<input type="text" className="omp-tool-filter" aria-label="Filter lines" placeholder="Filter lines" value={viewState.filter} spellCheck={false}
+			onChange={event => setViewState({ filter: event.target.value })}
+			onKeyDown={event => { if (event.key === "Escape" && viewState.filter !== "") { event.preventDefault(); event.stopPropagation(); setViewState({ filter: "" }); } }} />
+		{filterText !== "" && <span className="omp-tool-filter-count" role="status">{filterMatches.toLocaleString("en-US")} of {outputLines.length.toLocaleString("en-US")} lines</span>}
+		<button type="button" className="omp-iconbtn" aria-label="Wrap long lines" aria-pressed={wrapOn} title={wrapOn ? "Long lines wrap" : "Long lines scroll sideways"} onClick={() => setViewState({ wrap: !wrapOn })}><span className="codicon codicon-word-wrap" aria-hidden="true" /></button>
+	</div> : null;
 	const body = frozen ? retainedBody.current : <ToolViewContext.Provider value={toolView}>
+		{toolbar}
 		{errorText && !text.includes(errorText) && <Section title="Error"><TextPreview text={errorText} expanded={full} lines={4} /></Section>}
 		{state === "skipped" ? <div className="omp-empty-note">Skipped — this call did not complete.</div> : <>
 			{view?.input?.map(block => <div className="omp-tool-input" key={block.label}>
@@ -194,7 +209,6 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 			{lateDiagnosticsFiles(attachment.details).map((file, fileIndex) => <Section key={fileIndex} title={file.path ?? "File diagnostics"}><Diagnostics value={file} expanded={full} /></Section>)}
 		</Section>)}
 		<ToolFooter parts={footerParts(split.notices, details)} />
-		{full && <div className="omp-tool-collapse"><button type="button" className="omp-output-more" onClick={collapse}><span className="codicon codicon-chevron-up" aria-hidden="true" />Collapse</button></div>}
 	</ToolViewContext.Provider>;
 	useLayoutEffect(() => {
 		if (!frozen && showBody) { retainedBody.current = body; retainedView.current = view; retainedState.current = viewState; }

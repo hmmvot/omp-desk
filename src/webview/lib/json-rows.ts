@@ -50,13 +50,30 @@ export function defaultDepth(source: JsonSource): number {
 	return source.kind === "ndjson" ? DEFAULT_DEPTH.records : DEFAULT_DEPTH.json;
 }
 
-/** The rows on screen, in order. */
-export function visibleRows(source: JsonSource, folds: ReadonlyMap<string, FoldState>, scope: string, fallback: number): number[] {
-	if (source.kind === "json") return visibleTreeRows(source.tree, folds.get(scope), fallback);
+/**
+ * The rows of a document that contain `filter` (lower case) and the rows that open the containers they are in, for the whole
+ * tree and not only the rows a fold leaves visible: a match opens its ancestors for as long as the filter stands.
+ */
+function filteredTreeRows(tree: JsonTree, filter: string): number[] {
+	const keep = new Uint8Array(tree.rows.length);
+	tree.rows.forEach((row, index) => {
+		if (!row.toLowerCase().includes(filter)) return;
+		keep[index] = 1;
+		for (let at = tree.enclosing[index]!; at >= 0 && keep[at] === 0; at = tree.enclosing[at]!) keep[at] = 1;
+	});
+	const rows: number[] = [];
+	keep.forEach((flag, index) => { if (flag === 1) rows.push(index); });
+	return rows;
+}
+
+/** The rows on screen, in order; with a `filter` (lower case) only the lines that contain it, in a document with the containers around them. */
+export function visibleRows(source: JsonSource, folds: ReadonlyMap<string, FoldState>, scope: string, fallback: number, filter = ""): number[] {
+	if (source.kind === "json") return filter === "" ? visibleTreeRows(source.tree, folds.get(scope), fallback) : filteredTreeRows(source.tree, filter);
 	const own = folds.get(scope);
 	const rows: number[] = [];
 	source.records.forEach((record, index) => {
 		const base = index * RECORD;
+		if (filter !== "" && !record.line.toLowerCase().includes(filter)) return;
 		if (!record.json || folded(0, index, own, DEFAULT_DEPTH.records)) { rows.push(base); return; }
 		const tree = treeOfRecord(record);
 		for (const row of visibleTreeRows(tree, folds.get(`${scope}#${index}`), subDepth(own))) rows.push(base + row + 1);
@@ -91,7 +108,9 @@ function treeRow(tree: JsonTree, row: number, scope: string, fold: FoldState | u
 }
 
 /** The row `id` of `visibleRows`, ready to draw. */
-export function displayRow(source: JsonSource, id: number, folds: ReadonlyMap<string, FoldState>, scope: string, fallback: number): JsonDisplayRow {
+export function displayRow(source: JsonSource, id: number, folds: ReadonlyMap<string, FoldState>, scope: string, fallback: number, filter = ""): JsonDisplayRow {
+	// A filtered document is a list of lines: nothing in it folds.
+	if (source.kind === "json" && filter !== "") return { key: id, ...cut(source.tree.rows[id]!), plain: false };
 	if (source.kind === "json") return treeRow(source.tree, id, scope, folds.get(scope), fallback, id);
 	const index = Math.floor(id / RECORD), row = id % RECORD;
 	const record = source.records[index]!;

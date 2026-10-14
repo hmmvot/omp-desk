@@ -2,18 +2,20 @@
  * The shared parts of an open tool card: what the card's state means for a block of rows (`ToolViewContext`), the
  * bounded preview of rows with its exact markers (`OutputRows`), the output bar, the footer line and Copy.
  */
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import type { FooterPart } from "../../chat/tool-notices";
 import type { OutputFormat } from "../lib/json-tokens";
+import { useScreenReaderMode } from "../lib/screen-reader";
 import type { FoldState, ToolViewState } from "../lib/tool-view-state";
+import { READER_MAX_ROWS, useWindowedRows, WINDOW_AFTER_ROWS, WRAP_MAX_ROWS } from "../lib/use-windowed-rows";
 
 /** What a block of rows needs to know of the card around it. */
 export interface ToolViewContextValue {
 	/** The call is still running: rows are the tail of what has arrived. */
 	readonly live: boolean;
 	/** Switch the card to showing everything; absent where there is no card (a static render). */
-	readonly showAll?: () => void;
+	readonly showAll?: (rows: number) => void;
 	/** Open the full output of artifact `id` in an editor tab; absent where the page cannot ask. */
 	readonly openArtifact?: (id: string) => void;
 	/** What the card remembers of its view (folds, format), and how to change it; absent where there is no card. */
@@ -39,13 +41,19 @@ export function useFolds(): readonly [ReadonlyMap<string, FoldState>, (next: Rea
 	return [view?.folds ?? local, set];
 }
 
+/** The filter of the card's full view, lower-cased; empty in a preview and where there is no card. */
+export function useRowFilter(expanded: boolean): string {
+	const { view } = useToolViewContext();
+	return expanded && view !== undefined ? view.filter.trim().toLowerCase() : "";
+}
+
 const grouped = (count: number): string => count.toLocaleString("en-US");
 
 /** `Show all 783 lines`; the button that switches the card to its full view. */
 export function ShowAll({ count, unit }: { count: number; unit: string }): ReactNode {
 	const { showAll } = useToolViewContext();
 	if (showAll === undefined) return null;
-	return <button type="button" className="omp-output-more" onClick={showAll}>Show all {grouped(count)} {unit}</button>;
+	return <button type="button" className="omp-output-more" onClick={() => showAll(count)}>Show all {grouped(count)} {unit}</button>;
 }
 
 /** A row window the card shows in full: the head 200 rows and the last 20, each step 200 more (replaced by the windowed list). */
@@ -60,6 +68,33 @@ function PagedRows<T>({ all, render }: { all: readonly T[]; render: (rows: reado
 	</div>}{tail < all.length && render(all.slice(tail), tail)}</>;
 }
 
+/** Rows of one height in the normal flow of the page, of which only the visible ones are in the DOM (see `useWindowedRows`). */
+function WindowedList<T>({ all, render, widthCh }: { all: readonly T[]; render: (rows: readonly T[], offset: number) => ReactNode; widthCh?: number }): ReactNode {
+	const { ref, rowHeight, first, last } = useWindowedRows(all.length);
+	const style = { height: all.length * rowHeight, "--omp-row-h": `${rowHeight}px` } as CSSProperties;
+	return <div ref={ref} className="omp-window" style={style} data-window-rows={all.length}>
+		<div className="omp-window-layer" style={{ top: first * rowHeight, minWidth: widthCh === undefined ? undefined : `${widthCh}ch` }}>{render(all.slice(first, last), first)}</div>
+	</div>;
+}
+
+/**
+ * The full view of a block of rows. Rows of one height (text, code, diff and JSON rows: `fixed`) are windowed once
+ * there are more than 120 of them and wrap is off (the default beyond 120 rows); with wrap on at most 1,500 are rendered,
+ * and a screen reader gets the whole text up to 5,000 rows. Anything else is paged.
+ */
+function FullRows<T>({ all, render, fixed, widthCh }: { all: readonly T[]; render: (rows: readonly T[], offset: number) => ReactNode; fixed: boolean; widthCh?: number }): ReactNode {
+	const { view } = useToolViewContext();
+	const reader = useScreenReaderMode();
+	if (!fixed) return <PagedRows all={all} render={render} />;
+	const count = all.length;
+	const wrap = view?.wrap ?? count <= WINDOW_AFTER_ROWS;
+	const whole = count <= WINDOW_AFTER_ROWS || reader && count <= READER_MAX_ROWS;
+	if (whole) return <div className={wrap ? undefined : "omp-rows--nowrap"}>{render(all, 0)}</div>;
+	if (wrap) {
+		return <div>{render(all.slice(0, WRAP_MAX_ROWS), 0)}{count > WRAP_MAX_ROWS && <div className="omp-empty-note">Wrapped lines show the first {grouped(WRAP_MAX_ROWS)} of {grouped(count)} lines; turn wrap off to go through all of them.</div>}</div>;
+	}
+	return <div className="omp-rows--nowrap"><WindowedList all={all} render={render} widthCh={widthCh} /></div>;
+}
 export interface OutputRowsProps<T> {
 	readonly all: readonly T[];
 	/** The rows `rows`, which start at `offset` of `all`. */
@@ -71,6 +106,10 @@ export interface OutputRowsProps<T> {
 	readonly tail?: boolean;
 	readonly unit?: string;
 	readonly units?: string;
+	/** The rows are single lines of one height (text, code, diff, JSON), so the full view can window them. */
+	readonly fixed?: boolean;
+	/** The width of the longest row in characters: a windowed list is as wide as the whole, whichever rows are mounted. */
+	readonly widthCh?: number;
 	/** The marker's words for what a head preview hides; the rows it hides are `all.slice(limit)`. */
 	readonly hidden?: (rows: readonly T[]) => string;
 }
@@ -79,9 +118,9 @@ export interface OutputRowsProps<T> {
  * Rows, bounded: at most `limit` when the card is not full, with the marker that says what is not shown and the
  * button that shows it. A remainder of three rows or fewer is shown instead. A tail preview puts the marker first.
  */
-export function OutputRows<T>({ all, render, expanded, limit = PREVIEW_ROWS, tail = false, unit = "line", units = `${unit}s`, hidden }: OutputRowsProps<T>): ReactNode {
+export function OutputRows<T>({ all, render, expanded, limit = PREVIEW_ROWS, tail = false, unit = "line", units = `${unit}s`, hidden, fixed = false, widthCh }: OutputRowsProps<T>): ReactNode {
 	const { live } = useToolViewContext();
-	if (expanded) return <PagedRows all={all} render={render} />;
+	if (expanded) return <FullRows all={all} render={render} fixed={fixed} widthCh={widthCh} />;
 	const count = all.length;
 	if (count <= limit + SLACK_ROWS) return <>{render(all, 0)}</>;
 	const rest = count - limit;

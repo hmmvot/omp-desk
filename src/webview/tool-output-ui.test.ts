@@ -259,7 +259,7 @@ test("an opened tool call rests as a bounded preview, shows its gist and footer,
 			for (const type of ["mouseMoved", "mousePressed", "mouseReleased"]) await ui.call("Input.dispatchMouseEvent", { type, x: point.x, y: point.y, button: "left", clickCount: 1 });
 			await ui.wait(`document.querySelector(${JSON.stringify(`${card(call)} .omp-tool-collapse`)})`);
 			assert.equal(await ui.evaluate(`document.querySelector(${JSON.stringify(`${card(call)} .omp-output-marker`)})`), null, "the preview marker is gone");
-			assert.match(await text(`${card(call)} .omp-output-disclosure`), /lines hidden/, "the full view pages a very long result");
+			assert.equal(await ui.evaluate(`document.querySelector(${JSON.stringify(`${card(call)} .omp-window`)}).dataset.windowRows`), String(outputLines(call)), "the full view windows a long result: one spacer of n rows");
 			await ui.evaluate(`document.querySelector(${JSON.stringify(`${card(call)} .omp-tool-collapse button`)}).focus()`);
 			await ui.call("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13, text: "\r" });
 			await ui.call("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
@@ -373,7 +373,7 @@ test("an opened tool call rests as a bounded preview, shows its gist and footer,
 			await ui.wait(`document.querySelector(${JSON.stringify(`${card(call)} .omp-tool-collapse`)})`);
 			assert.equal(await countOf(rowsOf(call)), 25, "Show all gives every record");
 			// A record opens as a tree of its own, one level deep (the first record the transcript's scroll position leaves in view).
-			const seen = await ui.evaluate<number>(`[...document.querySelectorAll(${JSON.stringify(rowsOf(call))})].findIndex(row=>row.getBoundingClientRect().top>=0&&row.getBoundingClientRect().bottom<=innerHeight)+1`);
+			const seen = await ui.evaluate<number>(`[...document.querySelectorAll(${JSON.stringify(rowsOf(call))})].findIndex(row=>row.getBoundingClientRect().top>=document.querySelector('.omp-tool-toolbar').getBoundingClientRect().bottom&&row.getBoundingClientRect().bottom<=innerHeight)+1`);
 			assert.ok(seen >= 1, "a record row is in view");
 			await pointerClick(`${rowsOf(call)}:nth-child(${seen}) .omp-json-twisty`);
 			await ui.wait(`document.querySelectorAll(${JSON.stringify(rowsOf(call))}).length>25`);
@@ -400,14 +400,15 @@ test("an opened tool call rests as a bounded preview, shows its gist and footer,
 			assert.ok((await countOf(rowsOf(call))) <= 15, "the preview is 12 rows of the folded tree");
 			await ui.evaluate(`document.querySelector(${JSON.stringify(`${card(call)} [aria-label="Expand all"]`)}).click()`);
 			await pointerClick(`${card(call)} .omp-output-more`);
-			await ui.wait(`document.querySelector(${JSON.stringify(`${card(call)} .omp-output-disclosure`)})`);
+			await ui.wait(`document.querySelector(${JSON.stringify(`${card(call)} .omp-window`)})`);
 			const rows = await countOf(rowsOf(call));
-			assert.ok(rows >= 200 && rows <= 230, `the full view pages a 531-line document (got ${rows} rows in the DOM)`);
-			assert.ok((await ui.evaluate<string>(`document.querySelector(${JSON.stringify(`${card(call)} .omp-pre--rows`)}).parentElement.parentElement.querySelectorAll('.omp-pre--rows')[1].textContent`)).includes("\"warnings\""), "the last rows are shown");
+			assert.ok(rows > 0 && rows <= 130, `the full view windows a 531-line document (got ${rows} rows in the DOM)`);
+			await ui.evaluate("document.querySelector('.omp-transcript').scrollTop=1e9");
+			await ui.wait(`[...document.querySelectorAll(${JSON.stringify(rowsOf(call))})].some(row=>row.textContent.includes('"warnings"'))`);
 			// Text is the text it came as; Formatted is back where it was.
 			await ui.evaluate(`[...document.querySelectorAll(${JSON.stringify(`${card(call)} .omp-segment`)})].find(b=>b.textContent==='Text').click()`);
 			await ui.wait(`!document.querySelector(${JSON.stringify(`${card(call)} .omp-tool-body > .omp-json`)})`);
-			assert.equal(await text(`${card(call)} .omp-tool-body pre:not(.omp-tool-input *)`).then(value => value.startsWith('{\n  "success": true')), true);
+			assert.equal(await ui.evaluate(`document.querySelector(${JSON.stringify(`${card(call)} .omp-window`)}).dataset.windowRows`), String(outputLines(call)), "Text is the lines of the text it came as");
 			assert.equal(await ui.evaluate(`[...document.querySelectorAll(${JSON.stringify(`${card(call)} .omp-segment`)})].map(b=>b.getAttribute('aria-pressed')).join()`), "false,true");
 			await ui.evaluate(`[...document.querySelectorAll(${JSON.stringify(`${card(call)} .omp-segment`)})].find(b=>b.textContent==='Formatted').click()`);
 			await ui.wait(`document.querySelector(${JSON.stringify(`${card(call)} .omp-tool-body > .omp-json`)})`);
@@ -427,10 +428,127 @@ test("an opened tool call rests as a bounded preview, shows its gist and footer,
 			await ui.wait(`document.querySelectorAll(${JSON.stringify(rowsOf(call))}).length>12`);
 			await ui.evaluate(`[...document.querySelectorAll(${JSON.stringify(`${card(call)} .omp-segment`)})].find(b=>b.textContent==='Text').click()`);
 			await ui.wait(`!document.querySelector(${JSON.stringify(`${card(call)} .omp-tool-body > .omp-json`)})`);
-			assert.equal(await text(`${card(call)} .omp-tool-body > .omp-native-preview pre`), compact, "Text is exactly the text the tool returned");
+			assert.equal((await text(`${card(call)} .omp-tool-body > .omp-native-preview pre`)).replace(/\n$/, ""), compact, "Text is exactly the text the tool returned");
 			// Arguments of an unknown tool are a tree too, one level deep, with their own fold state.
 			await ui.evaluate(`[...document.querySelectorAll(${JSON.stringify(`${card(call)} .omp-segment`)})].find(b=>b.textContent==='Formatted').click()`);
 			assert.match(await text(`${card(call)} .omp-tool-section .omp-json`), /"query": "x"/);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		const longCall: Call = {
+			id: "bash-4200-lines", tool: "bash", args: { command: "seq 1 4200" }, isError: false, details: { exitCode: 0, wallTimeMs: 12 },
+			resultText: Array.from({ length: 4200 }, (_, index) => `line ${index + 1}: ${index % 100 === 0 ? "needle" : "hay"} ${"x".repeat(24)}`).join("\n"),
+		};
+		const windowRows = (call: Call): Promise<string[]> => ui.evaluate<string[]>(`[...document.querySelectorAll(${JSON.stringify(`${card(call)} .omp-window-layer pre > span`)})].map(row=>row.textContent.replace(/\\n$/,''))`);
+		const press = async (key: string, code: string, keyCode: number): Promise<void> => {
+			await ui.call("Input.dispatchKeyEvent", { type: "keyDown", key, code, windowsVirtualKeyCode: keyCode });
+			await ui.call("Input.dispatchKeyEvent", { type: "keyUp", key, code, windowsVirtualKeyCode: keyCode });
+		};
+		// A reader scrolling away from the bottom (a wheel turn is what tells the transcript to stop following the latest output).
+		const scrollTo = async (call: Call, row: number): Promise<void> => {
+			await ui.call("Input.dispatchMouseEvent", { type: "mouseWheel", x: 300, y: 300, deltaX: 0, deltaY: -40 });
+			await ui.evaluate(`(()=>{const scroller=document.querySelector('.omp-transcript'),block=document.querySelector(${JSON.stringify(`${card(call)} .omp-window`)});scroller.scrollTop+=block.getBoundingClientRect().top-scroller.getBoundingClientRect().top+${row}*(block.getBoundingClientRect().height-14)/Number(block.dataset.windowRows)-100})()`);
+		};
+
+		await t.test("a 4,200-line output is windowed: the DOM stays bounded whatever the scroll position, and the toolbar sticks to the top of the transcript", async () => {
+			const call = longCall;
+			await reset("windowed"); await show(call); await open(call);
+			assert.equal(await text(`${card(call)} .omp-output-marker > span`), "… (4188 earlier lines, showing 12 of 4,200)".replace("4188", "4,188"));
+			await pointerClick(`${card(call)} .omp-output-more`);
+			await ui.wait(`document.querySelector(${JSON.stringify(`${card(call)} .omp-window`)})`);
+			assert.equal(await ui.evaluate(`document.querySelector(${JSON.stringify(`${card(call)} .omp-window`)}).dataset.windowRows`), "4200");
+			assert.ok((await windowRows(call)).length <= 140, "the rows in the DOM are the visible ones and a margin");
+			assert.ok(await ui.evaluate<number>(`document.querySelectorAll(${JSON.stringify(`${card(call)} .omp-tool-body *`)}).length`) < 700, "the DOM of a 4,200-line result stays small");
+			assert.equal(await ui.evaluate("Array.from(document.querySelector('.omp-transcript').querySelectorAll('*')).some(node=>/auto|scroll/.test(getComputedStyle(node).overflowY))"), false, "no nested vertical scroll owner");
+			await scrollTo(call, 2500);
+			await ui.wait(`[...document.querySelectorAll(${JSON.stringify(`${card(call)} .omp-window-layer pre > span`)})].some(row=>row.textContent.startsWith('line 2501:'))`);
+			assert.ok((await windowRows(call)).length <= 140, "scrolling moves the window and keeps it bounded");
+			const geometry = await ui.evaluate<{ stuck: number; height: number }>("(()=>{const bar=document.querySelector('.omp-tool-toolbar').getBoundingClientRect(),scroller=document.querySelector('.omp-transcript').getBoundingClientRect();return{stuck:bar.top-scroller.top,height:bar.height}})()");
+			assert.ok(geometry.stuck >= -1 && geometry.stuck <= 2, `the toolbar sticks to the top of the transcript while its block scrolls (${geometry.stuck})`);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("the filter works on the whole text, Escape clears it before it collapses the card, and Collapse leaves from the toolbar", async () => {
+			const call = longCall;
+			await reset("filter"); await show(call); await open(call);
+			await pointerClick(`${card(call)} .omp-output-more`);
+			await ui.wait(`document.querySelector(${JSON.stringify(`${card(call)} .omp-tool-filter`)})`);
+			await ui.evaluate(`document.querySelector(${JSON.stringify(`${card(call)} .omp-tool-filter`)}).focus()`);
+			await ui.call("Input.insertText", { text: "needle" });
+			await ui.wait(`document.querySelector(${JSON.stringify(`${card(call)} .omp-tool-filter-count`)})?.textContent==='42 of 4,200 lines'`);
+			const shown = await ui.evaluate<string[]>(`[...document.querySelectorAll(${JSON.stringify(`${card(call)} .omp-tool-body > .omp-native-preview pre > span`)})].map(row=>row.textContent)`);
+			assert.equal(shown.length, 42, "the matches of the whole text, not of the rows in the page");
+			assert.ok(shown.every(row => row.includes("needle")));
+			await ui.evaluate("window.clip=null;Object.defineProperty(navigator,'clipboard',{configurable:true,value:{async writeText(value){window.clip=value}}})");
+			await ui.evaluate(`document.querySelector(${JSON.stringify(`${card(call)} .omp-output-bar .omp-iconbtn[aria-label^=Copy]`)}).click()`);
+			await ui.wait("window.clip!==null");
+			assert.equal(await ui.evaluate<number>("window.clip.split('\\n').length"), 4200, "Copy gives the whole text, not the filtered lines");
+			await press("Escape", "Escape", 27);
+			await ui.wait(`document.querySelector(${JSON.stringify(`${card(call)} .omp-tool-filter`)}).value===''`);
+			assert.equal(await ui.evaluate(`!!document.querySelector(${JSON.stringify(`${card(call)} .omp-tool-body`)})`), true, "the first Escape only cleared the filter");
+			await ui.wait(`document.querySelector(${JSON.stringify(`${card(call)} .omp-window`)})`);
+			await press("Escape", "Escape", 27);
+			await ui.wait(`!document.querySelector(${JSON.stringify(`${card(call)} .omp-tool-body`)})`);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("wrap shows at most 1,500 lines and says so; turning it off windows the whole text again", async () => {
+			const call = longCall;
+			await reset("wrap"); await show(call); await open(call);
+			await pointerClick(`${card(call)} .omp-output-more`);
+			await ui.wait(`document.querySelector(${JSON.stringify(`${card(call)} .omp-window`)})`);
+			const wrapButton = `${card(call)} .omp-tool-toolbar [aria-label="Wrap long lines"]`;
+			assert.equal(await ui.evaluate(`document.querySelector(${JSON.stringify(wrapButton)}).getAttribute('aria-pressed')`), "false", "beyond 120 lines wrap starts off");
+			await ui.evaluate(`document.querySelector(${JSON.stringify(wrapButton)}).click()`);
+			await ui.wait(`!document.querySelector(${JSON.stringify(`${card(call)} .omp-window`)})`);
+			assert.equal(await countOf(`${card(call)} .omp-tool-body > div > .omp-native-preview pre > span, ${card(call)} .omp-tool-body .omp-native-preview pre > span`), 1500);
+			assert.match(await text(`${card(call)} .omp-tool-body`), /show the first 1,500 of 4,200 lines/);
+			await ui.evaluate(`document.querySelector(${JSON.stringify(wrapButton)}).click()`);
+			await ui.wait(`document.querySelector(${JSON.stringify(`${card(call)} .omp-window`)})`);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("a screen reader gets the whole text of a long output in the page, up to 5,000 lines", async () => {
+			const call = longCall;
+			await reset("reader");
+			await ui.evaluate("window.ui.receive({type:'omp:chat-display-preferences',epoch:window.ui.current().epoch,toolCallDetail:'detailed',accessibilitySupport:true})");
+			await show(call); await open(call);
+			await pointerClick(`${card(call)} .omp-output-more`);
+			await ui.wait(`document.querySelector(${JSON.stringify(`${card(call)} .omp-tool-toolbar`)})`);
+			assert.equal(await ui.evaluate(`document.querySelector(${JSON.stringify(`${card(call)} .omp-window`)})`), null, "no window: a windowed list is unreadable to a reader");
+			assert.equal(await countOf(`${card(call)} .omp-tool-body .omp-native-preview pre > span`), 4200);
+			await ui.evaluate("window.ui.receive({type:'omp:chat-display-preferences',epoch:window.ui.current().epoch,toolCallDetail:'detailed',accessibilitySupport:false})");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("rows a selection reaches stay mounted while the window moves, so a native copy gives everything selected", async () => {
+			const call = longCall;
+			await reset("selection"); await show(call); await open(call);
+			await pointerClick(`${card(call)} .omp-output-more`);
+			await ui.wait(`document.querySelector(${JSON.stringify(`${card(call)} .omp-window`)})`);
+			await ui.evaluate(`(()=>{const rows=document.querySelectorAll(${JSON.stringify(`${card(call)} .omp-window-layer pre > span`)});const a=rows[2].firstChild,b=rows[6].firstChild;window.anchor=rows[2];getSelection().setBaseAndExtent(a,0,b,5)})()`);
+			await scrollTo(call, 1200);
+			await ui.wait(`[...document.querySelectorAll(${JSON.stringify(`${card(call)} .omp-window-layer pre > span`)})].some(row=>row.textContent.startsWith('line 1201:'))`);
+			assert.equal(await ui.evaluate("window.anchor.isConnected"), true, "the row holding the start of the selection is still mounted");
+			assert.match(await ui.evaluate<string>("getSelection().toString()"), /^line 3:/, "and the selection is intact");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("code above the highlight caps is coloured in aligned chunks, so a scroll shows colour in the rows that arrive and never recolours the ones that stay", async () => {
+			const content = Array.from({ length: 3000 }, (_, index) => `const v${index} = ${index};`).join("\n");
+			const call: Call = { id: "write-3000-lines", tool: "write", args: { path: "big.ts", content }, resultText: "Successfully wrote big.ts", details: {}, isError: false };
+			await reset("chunked-colour");
+			await ui.evaluate(`document.body.setAttribute('data-vscode-theme-id','Dark Modern');window.ui.receive({type:'omp:chat-code-theme',themes:[${THEME}]})`);
+			await show(call); await open(call);
+			await pointerClick(`${card(call)} .omp-output-more`);
+			await ui.wait(`document.querySelector(${JSON.stringify(`${card(call)} .omp-window`)})`);
+			const coloured = (row: number): Promise<string | null> => ui.evaluate<string | null>(`(()=>{const line=[...document.querySelectorAll(${JSON.stringify(`${card(call)} .omp-window .omp-native-code-line`)})].find(l=>l.textContent.includes('const v${row} ='));return line?.querySelector('span[style]')?.style.color??null})()`);
+			await ui.wait(`[...document.querySelectorAll(${JSON.stringify(`${card(call)} .omp-window .omp-native-code-line span[style]`)})].length>0`);
+			await scrollTo(call, 2000);
+			await ui.wait(`[...document.querySelectorAll(${JSON.stringify(`${card(call)} .omp-window .omp-native-code-line`)})].some(l=>l.textContent.includes('const v2000 ='))`);
+			await ui.wait(`[...document.querySelectorAll(${JSON.stringify(`${card(call)} .omp-window .omp-native-code-line`)})].find(l=>l.textContent.includes('const v2000 ='))?.querySelector('span[style]')`);
+			assert.equal(await coloured(2000), "rgb(181, 206, 168)", "a row far past the first 400 lines is coloured (its number)");
+			await ui.evaluate("window.ui.receive({type:'omp:chat-code-theme',themes:[]});document.body.removeAttribute('data-vscode-theme-id')");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 	} finally {

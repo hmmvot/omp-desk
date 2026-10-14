@@ -183,7 +183,8 @@ ${ANSI_STYLES}
 	overflow-y: auto;
 	/* Last guard only: everything wide wraps or scrolls in its own block. */
 	overflow-x: hidden;
-	padding: 16px max(12px, calc((100% - 840px) / 2)) 24px;
+	--omp-transcript-pad-top: 16px;
+	padding: var(--omp-transcript-pad-top) max(12px, calc((100% - 840px) / 2)) 24px;
 	min-height: 0;
 	overflow-anchor: none;
 }
@@ -451,7 +452,8 @@ ${ANSI_STYLES}
 	border-radius: var(--omp-radius);
 	margin: 2px 0;
 	background: transparent;
-	overflow: hidden;
+	/* clip, not hidden: it still rounds the corners but is no scroll container, so the sticky toolbar of a full view sticks to the transcript. */
+	overflow: clip;
 }
 .omp-tool-status--failed { color: var(--vscode-testing-iconFailed, var(--vscode-errorForeground)); }
 

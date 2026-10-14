@@ -4,9 +4,9 @@ import { styledRuns } from "../lib/code-highlight";
 import { codeThemeSnapshot, subscribeCodeTheme } from "../lib/code-theme-store";
 import type { CodeThemeStyler } from "../lib/code-theme-style";
 import { defaultDepth, displayRow, foldAll, foldable, toggleFold, visibleRows, type JsonDisplayRow, type JsonSource } from "../lib/json-rows";
-import { lexJsonLine } from "../lib/json-tokens";
+import { lexJsonLine, MAX_ROW_CHARS } from "../lib/json-tokens";
 import { CodeRuns } from "./CodeRuns";
-import { OutputRows, useFolds } from "./tool-view";
+import { OutputRows, useFolds, useRowFilter } from "./tool-view";
 
 interface RowProps {
 	readonly row: JsonDisplayRow;
@@ -38,12 +38,14 @@ const JsonRow = memo(function JsonRow({ row, styler, onToggle }: RowProps): Reac
 export function JsonRows({ source, scope, expanded }: { source: JsonSource; scope: string; expanded: boolean }): ReactNode {
 	const [folds, setFolds] = useFolds();
 	const fallback = defaultDepth(source);
-	const all = useMemo(() => visibleRows(source, folds, scope, fallback), [source, folds, scope, fallback]);
+	const filter = useRowFilter(expanded);
+	const all = useMemo(() => visibleRows(source, folds, scope, fallback, filter), [source, folds, scope, fallback, filter]);
+	const widthCh = useMemo(() => 12 + (source.kind === "ndjson" ? MAX_ROW_CHARS : Math.min(MAX_ROW_CHARS, source.tree.rows.reduce((width, row) => Math.max(width, row.length), 0))), [source]);
 	const { styler } = useSyncExternalStore(subscribeCodeTheme, codeThemeSnapshot, codeThemeSnapshot);
 	const onToggle = useMemo(() => (at: string, row: number): void => setFolds(toggleFold(folds, at, row)), [folds, setFolds]);
 	const unit = source.kind === "ndjson" && all.length === source.records.length ? "record" : "line";
 	return <div className="omp-native-preview omp-json" data-json-kind={source.kind}>
-		<OutputRows all={all} expanded={expanded} unit={unit} render={ids => <pre className="omp-pre omp-pre--rows">{ids.map(id => <JsonRow key={id} row={displayRow(source, id, folds, scope, fallback)} styler={styler} onToggle={onToggle} />)}</pre>} />
+		{all.length === 0 && filter !== "" ? <div className="omp-empty-note">No line contains “{filter}”</div> : <OutputRows all={all} expanded={expanded} unit={unit} fixed widthCh={widthCh} render={ids => <pre className="omp-pre omp-pre--rows">{ids.map(id => <JsonRow key={id} row={displayRow(source, id, folds, scope, fallback, filter)} styler={styler} onToggle={onToggle} />)}</pre>} />}
 	</div>;
 }
 

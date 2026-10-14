@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { Fragment, useMemo } from "react";
+import { useMemo } from "react";
 import { stripAnsi } from "../../chat/ansi";
 import { isRecord } from "../../shared/guards";
 import { Markdown } from "./Markdown";
@@ -11,10 +11,10 @@ import { languageForPath, languageId } from "../lib/code-languages";
 import { useCodeLines } from "../lib/use-highlighted-runs";
 import { WebLink } from "./WebLinks";
 import { webLinkUrl } from "../../shared/terminal-links";
-import { OutputRows, PREVIEW_ROWS, ShowAll, useToolViewContext } from "./tool-view";
+import { OutputRows, PREVIEW_ROWS, ShowAll, useRowFilter, useToolViewContext } from "./tool-view";
 import { JsonRows } from "./JsonRows";
 import type { JsonSource } from "../lib/json-rows";
-import { jsonTreeOfValue } from "../lib/json-tokens";
+import { jsonTreeOfValue, MAX_ROW_CHARS } from "../lib/json-tokens";
 
 export function record(value: unknown): Record<string, unknown> { return isRecord(value) ? value : {}; }
 export function string(value: unknown): string { return typeof value === "string" ? value : ""; }
@@ -38,7 +38,7 @@ function CodeText({ all, from, to, language, closed }: { all: readonly string[];
 	const code = useCodeLines(language, all, from, to, closed);
 	return <>{all.slice(from, to).map((line, index) => {
 		const runs = code.at(from + index);
-		return <Fragment key={from + index}>{index > 0 && "\n"}{runs === null ? line : <CodeRuns runs={runs} />}</Fragment>;
+		return <span key={from + index}>{runs === null ? line : <CodeRuns runs={runs} />}{"\n"}</span>;
 	})}</>;
 }
 /** Markdown clipped at about 14 lines until the card shows everything; the clip is CSS over a bounded amount of rendered source. */
@@ -55,12 +55,26 @@ function Prose({ lines, expanded }: { lines: readonly string[]; expanded: boolea
  * `language` is a fence id or alias (`python`, `js`): the text is then code, coloured by the theme.
  */
 export function TextPreview({ text, expanded, lines = PREVIEW_ROWS, tail = false, prose = false, language, closed = true }: { text: string; expanded: boolean; lines?: number; tail?: boolean; prose?: boolean; language?: string; closed?: boolean }): ReactNode {
-	const all = useMemo(() => text.trim() ? displayText(text).replace(/\s+$/, "").split("\n") : [], [text]);
-	if (all.length === 0) return null;
+	const source = useMemo(() => text.trim() ? displayText(text).replace(/\s+$/, "").split("\n") : [], [text]);
+	const filter = useRowFilter(expanded && !prose);
+	const all = useMemo(() => filter === "" ? expanded ? source : source.map(cutRow) : source.filter(line => line.toLowerCase().includes(filter)), [source, filter, expanded]);
+	const widthCh = useMemo(() => longest(all), [all]);
+	if (source.length === 0) return null;
+	if (all.length === 0) return <div className="omp-empty-note">No line contains “{filter}”</div>;
 	const code = !prose && language !== undefined && languageId(language) !== null ? language : null;
 	return <div className="omp-native-preview">{prose
-		? <Prose lines={all} expanded={expanded} />
-		: <OutputRows all={all} expanded={expanded} limit={lines} tail={tail} render={(rows, offset) => <pre className="omp-pre">{code !== null ? <CodeText all={all} from={offset} to={offset + rows.length} language={code} closed={closed} /> : rows.join("\n")}</pre>} />}</div>;
+		? <Prose lines={source} expanded={expanded} />
+		: <OutputRows all={all} expanded={expanded} limit={lines} tail={tail} fixed widthCh={widthCh} render={(rows, offset) => <pre className="omp-pre">{code !== null ? <CodeText all={all} from={offset} to={offset + rows.length} language={code} closed={closed} /> : rows.map((row, index) => <span key={offset + index}>{row}{"\n"}</span>)}</pre>} />}</div>;
+}
+/** A line of a preview is shown up to this many characters, with a note of the rest: the height of a preview is bounded. */
+function cutRow(line: string): string {
+	return line.length > MAX_ROW_CHARS ? `${line.slice(0, MAX_ROW_CHARS)} … +${(line.length - MAX_ROW_CHARS).toLocaleString("en-US")} characters` : line;
+}
+/** The length of the longest of `rows`, for the width of a windowed block (the widest row decides, whichever rows are mounted). */
+function longest(rows: readonly string[]): number {
+	let width = 0;
+	for (const row of rows) if (row.length > width) width = row.length;
+	return Math.min(width, 2 * MAX_ROW_CHARS);
 }
 /** The code rows `from..to` of `all`, each behind its line number. */
 function CodeRows({ all, from, to, language, closed, numbers, start }: { all: readonly string[]; from: number; to: number; language: string | null; closed: boolean; numbers: readonly (number | null)[] | null; start: number }): ReactNode {
@@ -74,11 +88,18 @@ function CodeRows({ all, from, to, language, closed, numbers, start }: { all: re
 }
 /** `path` names the file the text is from: its language, when it is one of ours, colours the code. `closed` is false while the text is still being written. */
 export function CodePreview({ text, expanded, lines = PREVIEW_ROWS, start = 1, lineNumbers, tail = false, path, closed = true }: { text: string; expanded: boolean; lines?: number; start?: number; lineNumbers?: unknown; tail?: boolean; path?: string; closed?: boolean }): ReactNode {
-	const all = useMemo(() => text ? displayText(text).split("\n") : [], [text]);
+	const source = useMemo(() => text ? displayText(text).split("\n") : [], [text]);
+	const filter = useRowFilter(expanded);
+	// The rows that show: every row, or the ones that contain the filter (by their index in `source`), cut for a preview.
+	const kept = useMemo(() => filter === "" ? null : source.flatMap((line, index) => line.toLowerCase().includes(filter) ? [index] : []), [source, filter]);
+	const all = useMemo(() => kept !== null ? kept.map(index => source[index]!) : expanded ? source : source.map(cutRow), [source, kept, expanded]);
+	const widthCh = useMemo(() => longest(all) + 8, [all]);
 	if (!text) return null;
+	if (all.length === 0) return <div className="omp-empty-note">No line contains “{filter}”</div>;
 	const language = path === undefined ? null : languageForPath(path);
-	const numbers = Array.isArray(lineNumbers) && lineNumbers.length === all.length && lineNumbers.every(number => number === null || typeof number === "number" && Number.isFinite(number)) ? lineNumbers as (number | null)[] : null;
-	return <div className="omp-native-source"><OutputRows all={all} expanded={expanded} limit={lines} tail={tail} render={(rows, at) => <CodeRows all={all} from={at} to={at + rows.length} language={language} closed={closed} numbers={numbers} start={start} />} /></div>;
+	const given = Array.isArray(lineNumbers) && lineNumbers.length === source.length && lineNumbers.every(number => number === null || typeof number === "number" && Number.isFinite(number)) ? lineNumbers as (number | null)[] : null;
+	const numbers = kept === null ? given : kept.map(index => given === null ? start + index : given[index]!);
+	return <div className="omp-native-source"><OutputRows all={all} expanded={expanded} limit={lines} tail={tail} fixed widthCh={widthCh} render={(rows, at) => <CodeRows all={all} from={at} to={at + rows.length} language={language} closed={closed} numbers={numbers} start={start} />} /></div>;
 }
 type DiffKind = "file" | "hunk" | "gap" | "add" | "remove" | "other";
 /** One diff line: its class, the code it carries (`null` for headers and notes), and where that code sits in each side's text. */
@@ -119,11 +140,15 @@ function DiffRows({ model, from, to, language, closed }: { model: DiffModel; fro
 }
 /** `path` names the file the diff is of: its language colours the code of every line; the signs, numbers and line backgrounds are the diff's own. */
 export function DiffPreview({ text, expanded, lines = PREVIEW_ROWS, path, closed = true }: { text: string; expanded: boolean; lines?: number; path?: string; closed?: boolean }): ReactNode {
-	const all = useMemo(() => text ? displayText(text).replace(/\s+$/, "").split("\n") : [], [text]);
+	const source = useMemo(() => text ? displayText(text).replace(/\s+$/, "").split("\n") : [], [text]);
+	const filter = useRowFilter(expanded);
+	const all = useMemo(() => filter === "" ? source : source.filter(line => line.toLowerCase().includes(filter)), [source, filter]);
 	const model = useMemo(() => diffModel(all), [all]);
-	if (all.length === 0) return null;
+	const widthCh = useMemo(() => longest(all) + 8, [all]);
+	if (source.length === 0) return null;
+	if (all.length === 0) return <div className="omp-empty-note">No line contains “{filter}”</div>;
 	const language = path === undefined ? null : languageForPath(path);
-	return <div className="omp-native-diff"><OutputRows all={all} expanded={expanded} limit={lines} unit="line" render={(rows, offset) => <DiffRows model={model} from={offset} to={offset + rows.length} language={language} closed={closed} />}
+	return <div className="omp-native-diff"><OutputRows all={all} expanded={expanded} limit={lines} unit="line" fixed widthCh={widthCh} render={(rows, offset) => <DiffRows model={model} from={offset} to={offset + rows.length} language={language} closed={closed} />}
 		hidden={rest => {
 			const gaps = rest.filter(line => line.trim() === "" || line.startsWith("@@")).length, more = rest.length - gaps;
 			return gaps > 0 ? `(${gaps} more ${gaps === 1 ? "hunk" : "hunks"}, ${more} more ${more === 1 ? "line" : "lines"})` : `${more} more ${more === 1 ? "line" : "lines"}`;

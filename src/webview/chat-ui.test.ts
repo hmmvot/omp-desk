@@ -699,7 +699,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.ok(await ui.evaluate<number>(drift)<=2, "font remeasure stays detached and anchored");
 			assert.ok(await ui.evaluate("Boolean(document.querySelector('.omp-jump-latest'))"));
 			await ui.evaluate("document.querySelector('.omp-output-more').click()");
-			await ui.wait("document.querySelector('.omp-output-disclosure')");
+			await ui.wait("document.querySelector('.omp-window')");
 			await ui.settleGeometry(".omp-transcript");
 			assert.ok(await ui.evaluate<number>(drift)<=2, "in-flow More preserves the detached source anchor");
 			for (const deltaY of [-800,-5000,600,5000]) {
@@ -821,16 +821,9 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 				await ui.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: button.x, y: button.y });
 				await ui.call("Input.dispatchMouseEvent", { type: "mousePressed", x: button.x, y: button.y, button: "left", clickCount: 1 });
 				await ui.call("Input.dispatchMouseEvent", { type: "mouseReleased", x: button.x, y: button.y, button: "left", clickCount: 1 });
-				await ui.wait("document.querySelector('.omp-output-disclosure')");
-				const initial = await ui.evaluate<string>("document.querySelector('.omp-tool-body').textContent");
-				assert.match(initial, /OUTPUT_LINE_0_END/); assert.match(initial, /OUTPUT_LINE_499_END/);
-				assert.doesNotMatch(initial, /OUTPUT_LINE_250_END|OUTPUT_LINE_450_END/);
-				await ui.evaluate("document.querySelector('.omp-output-disclosure button').click()");
-				await ui.wait("document.querySelector('.omp-tool-body').textContent.includes('OUTPUT_LINE_250_END')");
-				assert.doesNotMatch(await ui.evaluate<string>("document.querySelector('.omp-tool-body').textContent"), /OUTPUT_LINE_450_END/);
-				await ui.evaluate("document.querySelector('.omp-output-disclosure button:nth-child(2)').click()");
-				await ui.wait("!document.querySelector('.omp-output-disclosure')");
-				assert.match(await ui.evaluate<string>("document.querySelector('.omp-tool-body').textContent"), /OUTPUT_LINE_450_END/);
+				await ui.wait("document.querySelector('.omp-window')");
+				assert.ok(Number(await ui.evaluate("document.querySelector('.omp-window').dataset.windowRows")) >= 500, "the full view of a long output is windowed");
+				assert.doesNotMatch(await ui.evaluate<string>("document.querySelector('.omp-tool-body').textContent"), /OUTPUT_LINE_250_END/, "rows far from the visible ones are not in the page");
 				// Collapse closes the card even with focus inside it, and the card starts at the preview when opened again.
 				await ui.evaluate("document.querySelector('.omp-tool-collapse button').focus()");
 				await ui.evaluate("document.querySelector('.omp-tool-collapse button').click()");
@@ -838,7 +831,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 				assert.equal(await ui.evaluate("document.activeElement?.classList.contains('omp-tool-head')"), true, "focus returns to the head");
 				await ui.evaluate("document.querySelector('[data-tool-call-id=\"long-output\"] .omp-tool-head').click()");
 				await ui.wait("document.querySelector('.omp-output-marker')");
-				assert.equal(await ui.evaluate("document.querySelector('.omp-output-disclosure')"), null, "Show all was reset by the collapse");
+				assert.equal(await ui.evaluate("document.querySelector('.omp-window')"), null, "Show all was reset by the collapse");
 			}
 		});
 
@@ -5016,7 +5009,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			 // Every element that sticks out of the transcript's right edge without a scrolling block of its own around it.
 			 window.culprits=()=>{const t=document.querySelector('.omp-transcript'),limit=t.getBoundingClientRect().right,out=[];
 			  for(const el of t.querySelectorAll('*')){const r=el.getBoundingClientRect();if(r.width===0||r.right<=limit+1)continue;
-			   let clipped=false;for(let p=el.parentElement;p&&p!==t;p=p.parentElement){const o=getComputedStyle(p).overflowX;if(o==='auto'||o==='scroll'||o==='hidden'){clipped=true;break}}
+			   let clipped=false;for(let p=el.parentElement;p&&p!==t;p=p.parentElement){const o=getComputedStyle(p).overflowX;if(o==='auto'||o==='scroll'||o==='hidden'||o==='clip'){clipped=true;break}}
 			   if(!clipped)out.push(el.tagName.toLowerCase()+'.'+String(el.className).split(' ').join('.')+' right='+Math.round(r.right)+' "'+(el.textContent||'').slice(0,24)+'"')}
 			  return out.slice(0,40)};
 			 // The nearest ancestor that scrolls sideways: the block that owns the overflow.

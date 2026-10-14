@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { CodeThemeRule } from "../../chat/code-theme.ts";
-import { cachedSpans, codeWindow, isHighlightable, MAX_HIGHLIGHT_CHARS, MAX_HIGHLIGHT_LINES, runCss, runsByLine, spansOf, styledRuns } from "./code-highlight.ts";
+import { cachedSpans, codeChunks, isHighlightable, MAX_HIGHLIGHT_CHARS, MAX_HIGHLIGHT_LINES, withinCaps, runCss, runsByLine, spansOf, styledRuns } from "./code-highlight.ts";
 import { createCodeThemeStyler, FONT_BOLD, FONT_ITALIC, FONT_UNDERLINE } from "./code-theme-style.ts";
 
 /** The colours Dark Modern gives these scopes (its tokenColors, abridged). */
@@ -122,18 +122,19 @@ test("runs are cut into one list per line, and a run never spans two lines", () 
 	assert.deepEqual(runsByLine([]).map(line => line.length), [0]);
 });
 
-test("a text within the caps is tokenized whole; a longer one only from the visible window, up to the caps", () => {
-	const short = ["a", "b", "c", "d"];
-	assert.deepEqual(codeWindow(short, 2, 3), { first: 0, source: "a\nb\nc\nd" });
+test("a text within the caps is tokenized whole; a longer one in aligned chunks, each up to the caps", () => {
+	assert.equal(withinCaps(["a", "b", "c", "d"]), true);
 	const many = Array.from({ length: MAX_HIGHLIGHT_LINES + 50 }, (_, index) => `l${index}`);
-	const window = codeWindow(many, 10, many.length);
-	assert.equal(window.first, 10);
-	assert.equal(window.source.split("\n").length, MAX_HIGHLIGHT_LINES, "capped at the line cap");
-	assert.equal(window.source.startsWith("l10\nl11"), true);
-	assert.deepEqual(codeWindow(many, 420, 430), { first: 420, source: many.slice(420, 430).join("\n") }, "the window alone when it is short");
+	assert.equal(withinCaps(many), false, "over the line cap");
+	assert.equal(withinCaps(Array.from({ length: 10 }, () => "x".repeat(MAX_HIGHLIGHT_CHARS / 4))), false, "over the character cap");
+	const chunks = codeChunks(many, 120, 330);
+	assert.deepEqual(chunks.map(chunk => chunk.first), [100, 200, 300], "chunks start at multiples of 100 whatever the window");
+	assert.equal(chunks[0]!.source, many.slice(100, 200).join("\n"));
+	assert.equal(codeChunks(many, 130, 160)[0]!.source, chunks[0]!.source, "moving the window inside a chunk does not change what is tokenized");
+	assert.equal(codeChunks(many, 420, 430)[0]!.source, many.slice(400).join("\n"), "the last chunk is the rest");
 	const wide = Array.from({ length: 10 }, () => "x".repeat(MAX_HIGHLIGHT_CHARS / 4));
-	const cut = codeWindow(wide, 0, 10);
+	const cut = codeChunks(wide, 0, 10)[0]!;
 	assert.equal(cut.source.split("\n").length, 3, "capped at the character cap");
 	assert.ok(cut.source.length <= MAX_HIGHLIGHT_CHARS);
-	assert.deepEqual(codeWindow([`${"y".repeat(MAX_HIGHLIGHT_CHARS + 1)}`], 0, 1), { first: 0, source: "" }, "one line over the cap stays plain");
+	assert.equal(codeChunks([`${"y".repeat(MAX_HIGHLIGHT_CHARS + 1)}`], 0, 1)[0]!.source, "", "one line over the cap stays plain");
 });
