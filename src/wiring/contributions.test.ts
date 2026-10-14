@@ -613,13 +613,13 @@ describe("the namespace (ADR-0068)", () => {
 		assert.ok(legacy.every(id => LEGACY_COMMAND_IDS.includes(id)));
 	});
 
-	it("keeps one alias for each of the 92 commands 0.3.2 published, none of them contributed, each aimed at a contributed command", () => {
+	it("keeps one alias for each of the 92 commands that existed before the rename (0.3.1's 87 plus five added on the way to 0.4.0), none of them contributed, each aimed at a contributed command", () => {
 		assert.equal(LEGACY_COMMAND_IDS.length, 92);
 		assert.equal(new Set(LEGACY_COMMAND_IDS).size, 92);
 		assert.deepEqual(LEGACY_COMMAND_IDS.filter(id => declared.has(id)), [], "an alias that is also a contributed command");
 		assert.deepEqual(LEGACY_COMMAND_IDS.map(legacyCommandTarget).filter(id => !declared.has(id)), [], "an alias whose target is not contributed");
-		const neverPublished = contributes.commands.map(command => command.command).filter(id => !LEGACY_COMMAND_IDS.includes("omp." + id.slice("ompDesk.".length)));
-		assert.deepEqual(neverPublished.sort(), ["ompDesk.logoutProvider", "ompDesk.openOmpSettings", "ompDesk.refreshUsageStatus", "ompDesk.reloadAllWindows", "ompDesk.searchFileFromChat", "ompDesk.toggleToolGroups"], "the commands 0.3.2 did not publish have no alias; a new command needs none");
+		const addedAfterRename = contributes.commands.map(command => command.command).filter(id => !LEGACY_COMMAND_IDS.includes("omp." + id.slice("ompDesk.".length)));
+		assert.deepEqual(addedAfterRename.sort(), ["ompDesk.logoutProvider", "ompDesk.openOmpSettings", "ompDesk.refreshUsageStatus", "ompDesk.reloadAllWindows", "ompDesk.searchFileFromChat", "ompDesk.toggleToolGroups"], "the commands added after the rename have no alias; a new command needs none");
 		assert.deepEqual(LEGACY_ALIASES.map(([oldId]) => oldId).filter(id => !recording.commands.has(id)), [], "an old id with no alias at runtime");
 		const generated = LEGACY_ALIASES.filter(([, target]) => !declared.has(target)).map(([oldId, target]) => `${oldId} -> ${target}`);
 		assert.deepEqual(generated, [

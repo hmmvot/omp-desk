@@ -9,7 +9,7 @@
  * ## Rules
  *
  * - **The old keys stay contributed.** Marked deprecated and hidden from the Settings editor
- *   (`package.json`), with the scope they had in 0.3.2. That keeps VS Code reading, routing and
+ *   (`package.json`), with the scope they had before the rename. That keeps VS Code reading, routing and
  *   syncing them as before: an application-scoped value lives in the default profile's file and
  *   is only visible to a window of another profile while its key is registered, and a machine
  *   setting stays out of Settings Sync.

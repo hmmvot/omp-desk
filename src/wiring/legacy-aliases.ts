@@ -1,15 +1,15 @@
 /**
  * OMP Desk — the old command ids, kept for a bounded window (ADR-0068).
  *
- * The first release after 0.3.2 moved every contributed id from the bare `omp.` namespace, which is Oh My Pi's
+ * The first release after 0.3.1 (0.4.0) moved every contributed id from the bare `omp.` namespace, which is Oh My Pi's
  * own, to `ompDesk.`. An extension cannot rewrite the user's `keybindings.json`, so for the window in which
  * users are told to change it each old command id stays registered as an alias: a command that is **not
  * contributed** (no palette entry, no menu, no generated activation event) and forwards its arguments to the new
  * command and returns its result. The first use of each alias in an extension host names both ids in one warning
  * with an **Open keybindings.json** action; every use is logged.
  *
- * - The table is the set of commands the published 0.3.2 contributed (92), plus the commands VS Code generates
- *   from the container and view ids. A command that was never published has no alias.
+ * - The table is the set of commands contributed before the rename (92: the 87 of the released 0.3.1 plus five added on the way to 0.4.0), plus the commands VS Code generates
+ *   from the container and view ids. A command added after the rename has no alias.
  * - An id another extension contributes (the namespace is Oh My Pi's, and its own integration may use it) is
  *   neither registered nor mirrored: the old name belongs to its owner now.
  * - Three context keys that default keybindings used in `when` clauses are also published under their old
@@ -19,7 +19,7 @@
  * 1.0.0 release (ADR-0068), together with `legacy-settings.ts`.
  */
 
-/** Every command id the published 0.3.2 contributed, frozen: the new id of one is `ompDesk.` plus the rest. */
+/** Every command id contributed before the rename (0.3.1's 87 plus five added on the way to 0.4.0), frozen: the new id of one is `ompDesk.` plus the rest. */
 export const LEGACY_COMMAND_IDS: readonly string[] = [
 	"omp.openModels", "omp.openAgents", "omp.newSession", "omp.addWorkspaceFolder", "omp.chooseSessionsLayout",
 	"omp.chooseSessionsLayout.flat", "omp.chooseSessionsLayout.folders", "omp.chooseSessionsLayout.terminals",
@@ -45,7 +45,7 @@ export const LEGACY_COMMAND_IDS: readonly string[] = [
 	"omp.context.compact", "omp.context.shake",
 ];
 
-/** The view ids of 0.3.2 (without prefix), each with the `.focus` command VS Code generates for it. */
+/** The view ids before the rename (without prefix), each with the `.focus` command VS Code generates for it. */
 const LEGACY_VIEW_NAMES: readonly string[] = ["sessions", "skills", "tools", "mcp", "extensions", "context", "deskSettings"];
 
 const OLD_PREFIX = "omp.";
