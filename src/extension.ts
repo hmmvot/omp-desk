@@ -5243,18 +5243,18 @@ async function runChatAction(context: vscode.ExtensionContext, index: SessionInd
       entry?.cwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir());
     return;
   }
-  if (command === "keyboard-shortcuts" || command === "source-control" || command === "tools-view") {
-    // Desk's own views for the terminal-only /hotkeys, /git and /skills; none of them needs a live conversation.
-    await runDeskSlashAction(command);
-    return;
-  }
-  const conversations = s.sessionRuntime.conversations;
   if (command === "provider-logout") {
     const entry = index.get(tabId);
     void openProviderLogout(index, hostOf(stateOf(tabId)) ?? null, entry?.scope.profile ?? null,
       entry?.cwd ?? vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir());
     return;
   }
+  if (command === "keyboard-shortcuts" || command === "source-control" || command === "tools-view") {
+    // Desk's own views for the terminal-only /hotkeys, /git and /skills; none of them needs a live conversation.
+    await runDeskSlashAction(command);
+    return;
+  }
+  const conversations = s.sessionRuntime.conversations;
   const live = conversations.liveOf(tabId);
   if (live === null || live.phase !== "live") {
     showWarning("This conversation is not live, so the action was not run.");
@@ -5380,16 +5380,16 @@ async function runDeskSlashAction(action: Exclude<DeskSlashAction, "omp-settings
       // The sign-in runs for minutes; the Chat request that typed /login is answered now.
       void Promise.resolve(vscode.commands.executeCommand("ompDesk.loginProvider")).catch(() => undefined);
       return;
+    case "provider-logout":
+      // Same route as /login: the palette command, which uses the active session's profile and directory.
+      void Promise.resolve(vscode.commands.executeCommand("ompDesk.logoutProvider")).catch(() => undefined);
+      return;
   }
   const exhaustive: never = action;
   throw new Error(`Unsupported Desk slash action: ${exhaustive}`);
 }
 
 async function showChatKeyboardShortcuts(): Promise<void> {
-    case "provider-logout":
-      // Same route as /login: the palette command, which uses the active session's profile and directory.
-      void Promise.resolve(vscode.commands.executeCommand("ompDesk.logoutProvider")).catch(() => undefined);
-      return;
   await vscode.commands.executeCommand("workbench.action.openGlobalKeybindings", "ompDesk.");
 }
 
@@ -6789,6 +6789,11 @@ async function openProviderLogin(index: SessionIndex, runtime: SessionHostRuntim
   await runProviderAuth(index, async () => ({ runtime, profile, cwd }), runProviderLogin);
 }
 
+/** A session-scoped entry (the Commands list's /logout): log out within that session's own profile and directory, as {@link openProviderLogin} does for login. */
+async function openProviderLogout(index: SessionIndex, runtime: SessionHostRuntime | null, profile: string | null, cwd: string): Promise<void> {
+  await runProviderAuth(index, async () => ({ runtime, profile, cwd }), runProviderLogout);
+}
+
 /**
  * The scope a palette provider login or logout runs in; never another tab's host. From a session's tab it uses that
  * session's profile. Without one it still works: a new user must log in before any session can start, so it uses
@@ -6845,11 +6850,6 @@ async function logoutProviderFromPalette(index: SessionIndex): Promise<void> {
 }
 
 async function copyHostTools(index: SessionIndex): Promise<void> {
-/** A session-scoped entry (the Commands list's /logout): log out within that session's own profile and directory, as {@link openProviderLogin} does for login. */
-async function openProviderLogout(index: SessionIndex, runtime: SessionHostRuntime | null, profile: string | null, cwd: string): Promise<void> {
-  await runProviderAuth(index, async () => ({ runtime, profile, cwd }), runProviderLogout);
-}
-
   const channel = activeControl(index);
   if (channel === null) {
     showInfo(controlUnavailableMessage(index));

@@ -4217,9 +4217,6 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
-		// Rewind (ADR-0051): two turns; the second edits a file and runs a command, so its preview has consequences.
-		});
-
 		await t.test("the tool groups mode opens every group with its calls collapsed, a later group joins it, and Ctrl+O and a manual toggle still work from it", async () => {
 			await reset("quick-tool-groups-mode");
 			const mode = (toolsMode: "collapsed" | "groups" | "all") => ui.evaluate(`window.ui.receive({type:'omp:chat-display-preferences',epoch:window.ui.current().epoch,toolCallDetail:'overview',accessibilitySupport:false,thinkingExpanded:false,toolsMode:'${toolsMode}'})`);
@@ -4288,6 +4285,9 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.wait("!document.querySelector('.omp-overview-member')");
 			assert.deepEqual((await facts()).groups, ["false", "false"], "Ctrl+O from all collapses everything");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		// Rewind (ADR-0051): two turns; the second edits a file and runs a command, so its preview has consequences.
 		const rewindAt = (n: number): string => new Date(Date.UTC(2026, 9, 9, 10, 0, n)).toISOString();
 		const rewindMessage = (id: string, parentId: string | null, n: number, message: Record<string, unknown>) => ({ type: "message", id, parentId, timestamp: rewindAt(n), message: { timestamp: n, ...message } });
 		const rewindReply = (id: string, parentId: string, n: number, text: string) => rewindMessage(id, parentId, n, { role: "assistant", model: "m", stopReason: "stop", content: [{ type: "text", text }] });

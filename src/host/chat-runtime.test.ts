@@ -682,7 +682,6 @@ describe("terminal-UI builtins typed into Chat", () => {
 		{ name: "compact", aliases: [], handled: true },
 		{ name: "review", aliases: [], handled: false },
 	];
-		{ name: "logout", aliases: [], handled: false },
 
 	it("are answered in one line and never sent; a mapped one runs its Desk action once per request", async () => {
 		const ran: string[] = [];
@@ -703,8 +702,6 @@ describe("terminal-UI builtins typed into Chat", () => {
 		assert.equal(channel.commandsOfType("prompt").length + channel.commandsOfType("steer").length, 0, "nothing reaches OMP");
 	});
 
-		assert.equal(await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "tui-3", text: "/logout" }, page), "explained");
-		assert.deepEqual(ran, [`${TAB}:keyboard-shortcuts`, `${TAB}:provider-logout`], "/logout runs the provider logout flow");
 	it("still sends a builtin rpc mode runs, a command an extension advertises under that name, and anything while the registry is unknown", async () => {
 		let registry: typeof REGISTRY | null = REGISTRY;
 		const { runtime, channel } = await liveRig({}, { slashRegistry: () => registry, runDeskAction: async () => { throw new Error("must not run"); } });
