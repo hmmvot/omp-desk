@@ -216,9 +216,9 @@ describe("the target picker", () => {
 		assert.deepEqual(entries, [{ kind: "new", folder: "D:\\Work\\Repo", label: "New session in Repo", description: "Terminal · D:\\Work\\Repo" }]);
 	});
 
-	it("says on the new-session row when choosing it pins the folder to the OMP launcher", () => {
+	it("says on the new-session row when choosing it pins the folder to the Sessions view", () => {
 		const [entry] = pickerEntries([], [], "D:\\Elsewhere", "chat", false);
-		assert.equal(entry?.kind === "new" ? entry.description : null, "Chat · D:\\Elsewhere · pins this folder to the OMP launcher");
+		assert.equal(entry?.kind === "new" ? entry.description : null, "Chat · D:\\Elsewhere · pins this folder to the Sessions view");
 	});
 
 	it("shows title, folder, mode and status on each row", () => {

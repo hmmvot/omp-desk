@@ -34,10 +34,10 @@ describe("terminal-only slash commands", () => {
 	});
 
 	it("maps the commands Desk has an equivalent for and explains every other one", () => {
-		assert.deepEqual(tuiCommandGuidance("hotkeys"), { command: "hotkeys", action: "keyboard-shortcuts", line: "/hotkeys is a terminal command; opened the OMP keyboard shortcuts instead." });
+		assert.deepEqual(tuiCommandGuidance("hotkeys"), { command: "hotkeys", action: "keyboard-shortcuts", line: "/hotkeys is a terminal command; opened the OMP Desk keyboard shortcuts instead." });
 		assert.equal(tuiCommandGuidance("git").action, "source-control");
 		assert.equal(tuiCommandGuidance("login").action, "provider-login");
-		assert.deepEqual(tuiCommandGuidance("settings"), { command: "settings", action: "omp-settings", line: "/settings is a terminal command; opened the OMP settings editor instead." });
+		assert.deepEqual(tuiCommandGuidance("settings"), { command: "settings", action: "omp-settings", line: "/settings is a terminal command; opened OMP settings in OMP Desk instead." });
 		assert.equal(tuiCommandGuidance("copy").action, undefined);
 		assert.match(tuiCommandGuidance("vibe").line, /^\/vibe was not sent: it works only in OMP's terminal UI/);
 		for (const command of ["restart", "logout"]) assert.match(tuiCommandGuidance(command).line, /^\/\w+ was not sent: it is a terminal command\. Use the Sessions view/, "the remaining terminal-only commands keep their guidance");

@@ -94,11 +94,11 @@ export function registerStatsDashboard(context: vscode.ExtensionContext, deps: {
 	context.subscriptions.push(
 		vscode.commands.registerCommand("ompDesk.openStats", () => {
 			if (opening !== undefined) return opening;
-			opening = Promise.resolve(vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "Opening OMP Stats", cancellable: false }, open))
+			opening = Promise.resolve(vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "OMP Desk: Opening OMP Stats", cancellable: false }, open))
 				.then(() => undefined, (error: unknown) => {
 					const message = error instanceof Error ? error.message : "The Stats dashboard could not be opened. See OMP Desk output.";
 					deps.log(`stats: ${message}`);
-					void vscode.window.showErrorMessage(`OMP: ${message}`);
+					void vscode.window.showErrorMessage(`OMP Desk: ${message}`);
 				}).finally(() => { opening = undefined; void vscode.commands.executeCommand("ompDesk.refreshProcesses"); });
 			return opening;
 		}),

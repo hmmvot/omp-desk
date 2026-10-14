@@ -659,7 +659,7 @@ describe("killing a session or a process", () => {
 		} finally {
 			stub.workspace.name = undefined;
 		}
-		assert.deepEqual(w.notices, ["OMP: This row has no process Desk knows of, so there is nothing to kill."]);
+		assert.deepEqual(w.notices, ["This row has no process Desk knows of, so there is nothing to kill."]);
 		assert.equal(reads, 1, "the rows the kill plans from");
 		assert.ok(w.logged.some(line => line.includes('requested by the Sessions menu of window "proj" (this-win)')), JSON.stringify(w.logged));
 	});

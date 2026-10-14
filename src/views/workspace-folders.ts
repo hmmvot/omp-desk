@@ -365,7 +365,7 @@ export class WorkspaceFolderRegistry {
 	async remove(id: string): Promise<RemoveWorkspaceFolderResult> {
 		const index = this.#folders.findIndex(folder => folder.id === id);
 		if (index < 0) {
-			return { removed: false, reason: "That folder is no longer in the OMP launcher." };
+			return { removed: false, reason: "That folder is no longer in the Sessions view." };
 		}
 		const folder = this.#folders[index];
 		this.#folders = [...this.#folders.slice(0, index), ...this.#folders.slice(index + 1)];
@@ -422,18 +422,18 @@ export class WorkspaceFolderRegistry {
 		try {
 			raw = this.#store.get<unknown>(WORKSPACE_FOLDERS_STORAGE_KEY);
 		} catch (error) {
-			this.#loadError = `The registered OMP folders could not be read: ${describeError(error)}`;
+			this.#loadError = `The registered OMP Desk folders could not be read: ${describeError(error)}`;
 			return [];
 		}
 		this.#loadedBase = raw;
 		const read = readFolderRecords(raw);
 		if (!read.readable) {
 			this.#loadError =
-				"The persisted OMP folder list did not match the schema of this version and was discarded; no folder, session or file was touched.";
+				"The persisted OMP Desk folder list did not match the schema of this version and was discarded; no folder, session or file was touched.";
 			return [];
 		}
 		if (read.duplicates > 0) {
-			this.#loadError = `${read.duplicates} stored OMP folder record(s) were invalid or duplicated and were dropped; no folder, session or file was touched.`;
+			this.#loadError = `${read.duplicates} stored OMP Desk folder record(s) were invalid or duplicated and were dropped; no folder, session or file was touched.`;
 		}
 		return read.folders;
 	}
@@ -449,7 +449,7 @@ export class WorkspaceFolderRegistry {
 				this.#loadedBase = snapshot;
 				this.#persistError = null;
 			} catch (error) {
-				this.#persistError = `The OMP folder list could not be saved: ${describeError(error)}`;
+				this.#persistError = `The OMP Desk folder list could not be saved: ${describeError(error)}`;
 			}
 		});
 		await this.#persistChain;
@@ -526,7 +526,7 @@ export function mergeWorkspaceFolderRecords(input: {
 		desired: desired.folders,
 		latest: latest.folders,
 		key: folder => folder.id,
-		label: "registered OMP folder",
+		label: "registered OMP Desk folder",
 		conflicts,
 	});
 	// Earlier builds minted random ids per window, so two windows adding the same directory
@@ -599,7 +599,7 @@ export function unionWorkspaceFolderRecords(input: {
 			value: input.existing,
 			conflicts: [],
 			added: 0,
-			quarantined: ["the registered OMP folder list did not match the schema of this version"],
+			quarantined: ["the registered OMP Desk folder list did not match the schema of this version"],
 		};
 	}
 	const conflicts: RecordConflictDraft[] = [];

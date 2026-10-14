@@ -322,10 +322,10 @@ export function registerSessionProcesses(context: vscode.ExtensionContext, deps:
 			return request.options.find(option => option.label === picked)?.id ?? null;
 		},
 		async withProgress(title, work) {
-			await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `OMP: ${title}` }, work);
+			await vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: `OMP Desk: ${title}` }, work);
 		},
-		info: message => void vscode.window.showInformationMessage(`OMP: ${message}`),
-		warn: message => void vscode.window.showWarningMessage(`OMP: ${message}`),
+		info: message => void vscode.window.showInformationMessage(`OMP Desk: ${message}`),
+		warn: message => void vscode.window.showWarningMessage(`OMP Desk: ${message}`),
 		captureDrivenStop: (row, options) => deps.captureDrivenStop(row, options),
 		captureRecordedStop: (row, options) => deps.captureRecordedStop(row, options),
 		stopThroughBroker: (target, mode) => deps.runBrokerStop(target, () => stopBrokerThroughBroker(target, mode, stopPorts)),
@@ -368,7 +368,7 @@ export function registerSessionProcesses(context: vscode.ExtensionContext, deps:
 		vscode.commands.registerCommand("ompDesk.stopProcess", async (argument: unknown) => {
 			const id = rowIdOf(argument);
 			if (id === null) {
-				void vscode.window.showWarningMessage("OMP: Select a process in the Sessions view to stop.");
+				void vscode.window.showWarningMessage("OMP Desk: Select a process in the Sessions view to stop.");
 				return;
 			}
 			await stopProcess(id, controllerPorts);
@@ -397,7 +397,7 @@ export function registerSessionProcesses(context: vscode.ExtensionContext, deps:
 			if (acted.length > 0) {
 				const stopped = acted.filter(answer => answer.state === "stopped").length;
 				deps.log(`processes: a stop requested by another window: ${stopped} of ${acted.length} stopped here`);
-				void vscode.window.showInformationMessage(`OMP: Another window ran Kill All. ${stopped} of ${acted.length} of this window's OMP ${acted.length === 1 ? "process was" : "processes were"} stopped.`);
+				void vscode.window.showInformationMessage(`OMP Desk: Another window ran Kill All. ${stopped} of ${acted.length} of this window's OMP ${acted.length === 1 ? "process was" : "processes were"} stopped.`);
 			}
 			return answers;
 		},

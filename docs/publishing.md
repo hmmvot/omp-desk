@@ -81,7 +81,7 @@ Before publishing:
 
 - `tar -tf omp-desk-win32-x64-0.1.0.vsix` (and the arm64 file) lists each package's contents; `npx vsce ls --no-dependencies` lists the working tree as a build without `OMP_DESK_TARGET` would package it. Each VSIX must contain `extension/README.md`, `extension/CHANGELOG.md`, `extension/LICENSE.txt`, `extension/THIRD_PARTY_NOTICES.txt`, `extension/licenses/paseo/`, `extension/media/` (without `media/readme/`) and `extension/out/`, and must not contain `src/`, `docs/`, `.github/`, `scripts/`, source maps, test files, `*.vsix`, or `node_modules/` other than `out/pty/node_modules/node-pty`. The `node-pty` tree of the x64 package holds only `prebuilds/win32-x64`, and the arm64 package only `prebuilds/win32-arm64`.
 - Both packages build without `vsce` warnings; read every warning.
-- Install each package into a throw-away VS Code profile (`code --user-data-dir <dir> --extensions-dir <dir> --install-extension <file>`) and check that the Sessions view opens, a Chat session and a Terminal session start against a real `omp`, and the OMP output channel shows no errors. The arm64 package can only be checked on an arm64 machine.
+- Install each package into a throw-away VS Code profile (`code --user-data-dir <dir> --extensions-dir <dir> --install-extension <file>`) and check that the Sessions view opens, a Chat session and a Terminal session start against a real `omp`, and the OMP Desk output channel shows no errors. The arm64 package can only be checked on an arm64 machine.
 - Re-read the README as rendered by `vsce`'s link rewriting: every image and link must resolve on GitHub.
 
 After publishing:

@@ -79,7 +79,7 @@
           "enum": ["overview", "detailed"],
           "default": "overview",
           "scope": "application",
-          "description": "Tool presentation in every OMP Chat. Overview groups routine calls; Detailed shows individual calls. The Tools output picker in the chat footer changes this global setting live."
+          "description": "Tool presentation in every Chat. Overview groups routine calls; Detailed shows individual calls. The Tools output picker in the chat footer changes this global setting live."
         },
         "ompDesk.desktopNotifications": {
           "type": "boolean",
@@ -146,7 +146,7 @@
           "type": "boolean",
           "default": true,
           "scope": "application",
-          "description": "Give the agent of an OMP Chat session tools (`vscode_debug_*`) to drive VS Code's debugger: set breakpoints, start a launch configuration, wait for a stop, read the stack and variables, step, and hand the paused program to you. The agent works through VS Code's own debug sessions, so you see the same breakpoints and paused state in Run and Debug and can take over at any time. The tools are available in the main session of Chat editors only. These permissions are consent prompts, not a sandbox: a launch configuration can run programs and tasks, and the agent can also edit your workspace. Applies to sessions started or resumed afterwards."
+          "description": "Give the agent of a Chat session tools (`vscode_debug_*`) to drive VS Code's debugger: set breakpoints, start a launch configuration, wait for a stop, read the stack and variables, step, and hand the paused program to you. The agent works through VS Code's own debug sessions, so you see the same breakpoints and paused state in Run and Debug and can take over at any time. The tools are available in the main session of Chat editors only. These permissions are consent prompts, not a sandbox: a launch configuration can run programs and tasks, and the agent can also edit your workspace. Applies to sessions started or resumed afterwards."
         },
         "ompDesk.agentDebugger.start": {
           "type": "string",

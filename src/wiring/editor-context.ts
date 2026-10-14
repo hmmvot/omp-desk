@@ -251,7 +251,7 @@ export function pickerEntries(
 ): PickerEntry[] {
 	const entries: PickerEntry[] = orderCandidates(candidates, recency).map(candidate => ({ kind: "session", candidate }));
 	// Choosing the row for a folder the launcher does not show is the explicit act of pinning it; it says so.
-	const listing = folderListed ? "" : " · pins this folder to the OMP launcher";
+	const listing = folderListed ? "" : " · pins this folder to the Sessions view";
 	entries.push({ kind: "new", folder, label: `New session in ${folderName(folder)}`, description: `${MODE_LABEL[defaultMode]} · ${folder}${listing}` });
 	return entries;
 }

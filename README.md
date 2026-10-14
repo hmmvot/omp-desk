@@ -119,7 +119,7 @@ For how this works, see the [architecture](docs/architecture.md).
 
 - **Background processes** are part of **Sessions**: a running session shows `Process: running` in its tooltip, and terminals and processes that no listed session stands for are in a **Terminals** group at the end of the list. The **Terminals** layout lists every process with its folder; a click opens its session or terminal, and **Stop** ends one. **Stop Orphaned and Idle** cleans up unused processes. **Kill All** stops everything in this window, and after you confirm, in all windows.
 - **Stats** in the Sessions title opens OMP's usage dashboard in an editor tab. If your OMP build would also open a browser, OMP Desk asks first.
-- **Tools** lists the tools of the session in the active OMP editor, and its skills in Chat.
+- **Tools** lists the tools of the session in the active session editor, and its skills in Chat.
 
 ## Commands and shortcuts
 

@@ -109,7 +109,7 @@ function SessionView({ client }: { client: ChatClient }): ReactNode {
 						<button type="button" disabled={disabled} onClick={() => guestTransport.post({ type: "omp:session-mode", mode: "terminal" })}>Start in Terminal</button>
 						<button type="button" disabled={disabled} onClick={() => guestTransport.post({ type: "omp:session-mode", mode: "chat" })}>Open in Chat</button>
 					</div>}
-					{route === "bridge" && <div className="omp-route-notice">OMP reconnected after restarting in the background. Reload the window to switch between Chat and Terminal.</div>}
+					{route === "bridge" && <div className="omp-route-notice">OMP Desk reconnected after restarting in the background. Reload the window to switch between Chat and Terminal.</div>}
 				</div>
 			)}
 		</div>
@@ -283,7 +283,7 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 			{/* Only panel-only composer/editor requests are unavailable on a bridge route. */}
 			{route === "bridge" && (
 				<div className="omp-route-notice">
-					OMP reconnected after restarting in the background. Reload the window to use @ file completion
+					OMP Desk reconnected after restarting in the background. Reload the window to use @ file completion
 					and editor commands.
 				</div>
 			)}

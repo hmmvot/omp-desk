@@ -297,7 +297,7 @@ export class LauncherFolders {
 	/** Pin a folder the view shows. The pinned record carries the folder's own id and collapsed state. */
 	async pin(id: string): Promise<PinFolderResult> {
 		const folder = this.get(id);
-		if (folder === null) return { ok: false, reason: "That folder is no longer in the OMP launcher." };
+		if (folder === null) return { ok: false, reason: "That folder is no longer in the Sessions view." };
 		if (folder.pinned) return { ok: true, folder, created: false };
 		const added = await this.#pinned.add(folder.path, { collapsed: folder.collapsed });
 		if (!added.ok) return { ok: false, reason: added.reason };
@@ -315,7 +315,7 @@ export class LauncherFolders {
 	async unpin(id: string): Promise<UnpinFolderResult> {
 		const folder = this.get(id);
 		if (folder === null || !folder.pinned) {
-			return { unpinned: false, reason: "That folder is no longer pinned in the OMP launcher." };
+			return { unpinned: false, reason: "That folder is no longer pinned in the Sessions view." };
 		}
 		const removed = await this.#pinned.remove(id);
 		if (!removed.removed) return { unpinned: false, reason: removed.reason };
@@ -354,7 +354,7 @@ export class LauncherFolders {
 			await Promise.resolve(this.#local.update(WINDOW_FOLDER_COLLAPSED_KEY, { version: 1, collapsed: [...ids] }));
 			this.#localPersistError = null;
 		} catch (error) {
-			this.#localPersistError = `The collapsed state of an OMP folder could not be saved: ${describeError(error)}`;
+			this.#localPersistError = `The collapsed state of an OMP Desk folder could not be saved: ${describeError(error)}`;
 		}
 	}
 }

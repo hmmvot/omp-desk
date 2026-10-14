@@ -87,7 +87,7 @@ export interface ContextViewModel {
 	readonly canMaintain: boolean;
 }
 
-export const NO_SESSION_MESSAGE = "Open an OMP Chat to see its context.";
+export const NO_SESSION_MESSAGE = "Open an OMP Desk Chat to see its context.";
 export const TERMINAL_MESSAGE = "This session is open as a Terminal. OMP reports its context only to a Chat editor.";
 export const NOT_RUNNING_MESSAGE = "This session is not running, so OMP reports no context.";
 export const READING_MESSAGE = "Reading context…";

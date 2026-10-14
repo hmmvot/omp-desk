@@ -117,7 +117,7 @@ export function tuiCommandGuidance(command: string): TuiCommandGuidance {
 	const slash = `/${command}`;
 	switch (command) {
 		case "hotkeys":
-			return { command, action: "keyboard-shortcuts", line: `${slash} is a terminal command; opened the OMP keyboard shortcuts instead.` };
+			return { command, action: "keyboard-shortcuts", line: `${slash} is a terminal command; opened the OMP Desk keyboard shortcuts instead.` };
 		case "git":
 			return { command, action: "source-control", line: `${slash} is a terminal command; opened Source Control instead.` };
 		case "skills":
@@ -127,7 +127,7 @@ export function tuiCommandGuidance(command: string): TuiCommandGuidance {
 		case "login":
 			return { command, action: "provider-login", line: `${slash} is a terminal command; opened provider login instead.` };
 		case "settings":
-			return { command, action: "omp-settings", line: `${slash} is a terminal command; opened the OMP settings editor instead.` };
+			return { command, action: "omp-settings", line: `${slash} is a terminal command; opened OMP settings in OMP Desk instead.` };
 		case "copy":
 			return { command, line: `${slash} was not sent: use the Copy buttons on replies, code blocks and your messages.` };
 		case "queue":

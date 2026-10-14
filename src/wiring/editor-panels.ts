@@ -47,13 +47,13 @@ function messageOf(error: unknown): string {
 
 /** A document can be prepared while this editor's link to the extension is still being set up. */
 const BRIDGE_PENDING_DETAIL =
-	"This tab is still connecting to OMP. It will fill in on its own in a moment.";
+	"This tab is still connecting to OMP Desk. It will fill in on its own in a moment.";
 const GUEST_UNAVAILABLE_DETAIL =
-	"OMP could not connect this tab to its session. Details are in the OMP output channel.";
+	"OMP Desk could not connect this tab to its session. Details are in the OMP Desk output channel.";
 /** Shown by a restored editor whose persisted identity is not one this window wrote. */
 const UNIDENTIFIED_PANEL_DETAIL =
-	"VS Code restored this tab, but OMP does not recognize which session it belonged to, so nothing was opened. " +
-	"Close this tab and open the session you want from the OMP Sessions view.";
+	"VS Code restored this tab, but OMP Desk does not recognize which session it belonged to, so nothing was opened. " +
+	"Close this tab and open the session you want from the Sessions view.";
 /** Shown by a legacy editor that lost this tab to an editor already serving it. */
 const LEGACY_DUPLICATE_DETAIL =
 	"Another tab for this OMP session is already open in this window, so this old tab was left as a note instead of " +
@@ -61,8 +61,8 @@ const LEGACY_DUPLICATE_DETAIL =
 
 /** Shown by a restored editor whose identity names a row this workspace no longer has. */
 const STALE_PANEL_DETAIL =
-	"VS Code restored this tab for a session that is no longer in the OMP Sessions view, so nothing was opened. " +
-	"Close this tab and start the session from the OMP Sessions view.";
+	"VS Code restored this tab for a session that is no longer in the Sessions view, so nothing was opened. " +
+	"Close this tab and start the session from the Sessions view.";
 
 
 /** One bound panel's document: the guest bundle, or a bounded explanation. */
@@ -271,7 +271,7 @@ export function registerEditorPanels<Tab extends EditorPanelsTab>(deps: EditorPa
 		const placement = column === undefined && chatColumnEnabled() ? chatPlacementNow() : null;
 		const panel = deps.createWebviewPanel(
 			viewType,
-			entry === null ? "OMP session" : sessionHeadline(entry, null),
+			entry === null ? "OMP Desk session" : sessionHeadline(entry, null),
 			column ?? placement?.column ?? vscode.ViewColumn.Active,
 			{
 				enableScripts: true,
@@ -671,7 +671,7 @@ export function registerEditorPanels<Tab extends EditorPanelsTab>(deps: EditorPa
 					// one-winner rule exists to prevent.
 					deps.log(`slot ${slot}: a second restored webview for this conversation was closed`);
 					panel.dispose();
-					deps.info("An OMP editor restored for this window was closed: it was a duplicate of one already open for the same session.");
+					deps.info("An OMP Desk editor restored for this window was closed: it was a duplicate of one already open for the same session.");
 					return;
 				}
 				const superseded = reservation.outcome === "replaced" ? deps.tabs().get(conversation)?.panel ?? null : null;

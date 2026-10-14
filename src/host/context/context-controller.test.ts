@@ -89,7 +89,7 @@ describe("selection", () => {
 		second.model = { ...second.model, state: { ...second.model.state!, contextUsage: { tokens: 900, contextWindow: 1000, percent: 90 } } };
 		const h = harness(null);
 		h.controller.setVisible(true);
-		assert.match(h.last().message ?? "", /Open an OMP Chat/);
+		assert.match(h.last().message ?? "", /Open an OMP Desk Chat/);
 		h.state.target = target(null, { mode: "terminal", key: {} });
 		h.controller.sync();
 		assert.match(h.last().message ?? "", /Terminal/);

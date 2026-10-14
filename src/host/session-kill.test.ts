@@ -280,7 +280,7 @@ describe("the Kill command", () => {
 
 		const stranger = commandPorts(fakeKernel({ 4100: "134349421019999999" }));
 		await killSelection({ kind: "process", row: terminal }, stranger.ports);
-		assert.ok(stranger.events.some(event => event.startsWith("info OMP: ") && /already gone/.test(event)), "the user is told it is already gone");
+		assert.ok(stranger.events.some(event => event.startsWith("info ") && /already gone/.test(event)), "the user is told it is already gone");
 		assert.ok(stranger.events.includes("forget tab:one"), "a recorded process proven not running leaves a stale record: it is reconciled");
 	});
 
@@ -290,7 +290,7 @@ describe("the Kill command", () => {
 		kernel.ports.run = { started: true, exitCode: 5, output: "Access is denied", timedOut: false };
 		const { ports, events } = commandPorts(kernel);
 		await killSelection({ kind: "session", tabId: "tab-1", title: "Fix the build" }, ports);
-		assert.ok(events.some(event => event.startsWith("warn OMP: ") && /could not be killed/.test(event)));
+		assert.ok(events.some(event => event.startsWith("warn ") && /could not be killed/.test(event)));
 		assert.ok(!events.some(event => event.startsWith("reconcile") || event.startsWith("forget")));
 		assert.ok(events.includes("refresh"));
 		assert.ok(events.some(event => event.startsWith("log") && /FAILED/.test(event)), "every kill is logged, failures included");
@@ -299,12 +299,12 @@ describe("the Kill command", () => {
 	it("says there is nothing to kill for a session with no process, and for a row with no recorded identity", async () => {
 		const none = commandPorts(fakeKernel({}), { recordedProcess: () => null });
 		await killSelection({ kind: "session", tabId: "tab-1", title: "x" }, none.ports);
-		assert.ok(none.events.some(event => event.startsWith("info OMP: This row has no process")));
+		assert.ok(none.events.some(event => event.startsWith("info This row has no process")));
 		assert.deepEqual(none.events.filter(event => event.startsWith("reconcile") || event.startsWith("forget")), []);
 
 		const unidentified = commandPorts(fakeKernel({ 4100: BROKER_CREATED }), { recordedProcess: () => null });
 		await killSelection({ kind: "process", row: row({ brokerCreationTime: "" }) }, unidentified.ports);
-		assert.ok(unidentified.events.some(event => event.startsWith("warn OMP: ") && /recorded no process identity/.test(event)));
+		assert.ok(unidentified.events.some(event => event.startsWith("warn ") && /recorded no process identity/.test(event)));
 	});
 
 	it("survives a records update that throws: the kill stands, the user and the log are told", async () => {
@@ -312,7 +312,7 @@ describe("the Kill command", () => {
 		const { ports, events } = commandPorts(kernel, { reconcileSession: async () => { throw new Error("catalog locked"); } });
 		await killSelection({ kind: "session", tabId: "tab-1", title: "Fix the build" }, ports);
 		assert.ok(events.some(event => event.startsWith("log") && /records could not be updated \(catalog locked\)/.test(event)));
-		assert.ok(events.some(event => event.startsWith("warn OMP: ") && /could not update its own records/.test(event)), "a failed reconciliation is not silent");
+		assert.ok(events.some(event => event.startsWith("warn ") && /could not update its own records/.test(event)), "a failed reconciliation is not silent");
 		assert.ok(events.includes("refresh"));
 	});
 
@@ -343,7 +343,7 @@ describe("the Kill command", () => {
 		kernel.ports.run = { started: true, exitCode: 1, output: "ERROR: the process 4300 could not be terminated.", timedOut: false };
 		const { ports, events } = commandPorts(kernel);
 		await killSelection({ kind: "session", tabId: "tab-1", title: "Fix the build" }, ports);
-		assert.ok(events.some(event => event.startsWith("warn OMP: ") && /could not end every process/.test(event)));
+		assert.ok(events.some(event => event.startsWith("warn ") && /could not end every process/.test(event)));
 		assert.ok(events.includes("reconcile tab-1"));
 		assert.ok(events.some(event => event.startsWith("log") && /incomplete: taskkill exited with 1; taskkill said: ERROR: the process 4300/.test(event)), "the log keeps taskkill's own words");
 	});

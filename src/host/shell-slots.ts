@@ -61,7 +61,7 @@ export function shellClosePrompt(input: {
 		message: `Close terminal “${input.label}”?`,
 		detail: input.liveness === "running"
 			? "The terminal is still running. Terminate tries to stop it; commands it started may keep running."
-			: "OMP cannot reach this terminal. Keep it open to reconnect, or try Terminate.",
+			: "OMP Desk cannot reach this terminal. Keep it open to reconnect, or try Terminate.",
 		confirmLabel: "Terminate",
 	};
 }

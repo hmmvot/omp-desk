@@ -208,13 +208,13 @@ export class LocalExitOperations {
 		const isCurrent = (): boolean => this.#deps.records.get(tabId)?.runtime === runtime;
 		if (!proven) {
 			log(`tab ${tabId}: the broker process is gone but its OMP process pid ${runtime.pid} could not be confirmed gone; the session is kept as it is`);
-			window.notice("warning", "OMP: A session's background process ended, but its OMP process could not be confirmed ended. Check Task Manager, then use Stop Session or refresh Sessions.");
+			window.notice("warning", "A session's background process ended, but its OMP process could not be confirmed ended. Check Task Manager, then use Stop Session or refresh Sessions.");
 			return;
 		}
 		log(`tab ${tabId}: the broker process and the OMP process pid ${runtime.pid} are gone`);
 		const incomplete = (why: string): void => {
 			log(`tab ${tabId}: the broker and the OMP process are gone but the session's exit could not be completed (${why}); the session is kept as it is`);
-			window.notice("warning", "OMP: A session's process ended, but its exit could not be recorded. Refresh Sessions or reopen the session.");
+			window.notice("warning", "A session's process ended, but its exit could not be recorded. Refresh Sessions or reopen the session.");
 		};
 		try {
 			if (runtime.kind === "chat") {

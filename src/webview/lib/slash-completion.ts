@@ -10,7 +10,7 @@ import { classifySlashInput } from "../../protocol/rpc.ts";
 const DESK_COMMANDS: readonly ChatSlashCommand[] = [
  { name: "models", aliases: ["model"], source: "OMP Desk", description: "Open native Models settings (selector arguments retain OMP RPC semantics)" },
  { name: "agents", source: "OMP Desk", description: "Open native Agents settings" },
- { name: "settings", source: "OMP Desk", description: "Open the OMP settings editor (global and project layers)" },
+ { name: "settings", source: "OMP Desk", description: "Open OMP Desk's editor for OMP settings (global and project layers)" },
  { name: "rewind", aliases: ["branch"], source: "OMP Desk", description: "Rewind the conversation to an earlier message (Esc Esc)" },
  { name: "clear", source: "OMP Desk", description: "Clear the conversation context in place; the session, its file and its title stay" },
  { name: "fresh", source: "OMP Desk", description: "Rotate provider state without clearing local conversation history" },

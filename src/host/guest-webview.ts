@@ -150,7 +150,7 @@ export function createGuestHtml(
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 		<meta http-equiv="Content-Security-Policy" content="${csp}" />
 ${identityMeta(tabId)}${bridgeMeta(bridge)}\t\t<meta name="omp-session-mode" content="${mode}" />
-		<title>OMP session</title>
+		<title>OMP Desk session</title>
 		<link rel="stylesheet" href="${iconsUri.toString()}" />
 	</head>
 	<body>
@@ -181,7 +181,7 @@ export function createDetailHtml(webview: vscode.Webview, extensionUri: vscode.U
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 		<meta http-equiv="Content-Security-Policy" content="${guestCsp(webview, nonce, "'none'")}" />
 		<meta name="${DETAIL_META}" content="${detailMetaValue(target)}" />
-		<title>OMP detail</title>
+		<title>OMP Desk detail</title>
 		<link rel="stylesheet" href="${iconsUri.toString()}" />
 	</head>
 	<body>
@@ -250,8 +250,8 @@ export function createUnavailableGuestHtml(detail: string, identity?: GuestFallb
 			? `\t\t<p class="reason">${escapeText(detail)}</p>\n\t\t<p><button id="reload" type="button">Reload Window</button></p>\n`
 			: `\t\t<p class="reason">${escapeText(detail)}</p>
 		<p>
-			This editor is kept rather than closed. The OMP output channel records what is missing. If this condition
-			persists, use the session's row in the OMP launcher to reopen the session without discarding this tab.
+			This editor is kept rather than closed. The OMP Desk output channel records what is missing. If this condition
+			persists, use the session's row in the Sessions view to reopen the session without discarding this tab.
 		</p>
 `;
 
@@ -261,7 +261,7 @@ export function createUnavailableGuestHtml(detail: string, identity?: GuestFallb
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 		<meta http-equiv="Content-Security-Policy" content="${csp}" />
-${identityMeta(identified)}\t\t<title>OMP session</title>
+${identityMeta(identified)}\t\t<title>OMP Desk session</title>
 		<style nonce="${nonce}">
 			body { font-family: var(--vscode-font-family); color: var(--vscode-foreground); padding: 1.25rem; line-height: 1.5; }
 			h1 { font-size: 1rem; margin: 0 0 0.5rem; }
@@ -272,7 +272,7 @@ ${identityMeta(identified)}\t\t<title>OMP session</title>
 		</style>
 	</head>
 	<body>
-		<h1>OMP session</h1>
+		<h1>OMP Desk session</h1>
 ${body}${script}\t</body>
 </html>
 `;
@@ -340,7 +340,7 @@ export function createShellHtml(webview: vscode.Webview, extensionUri: vscode.Ur
 		<meta charset="UTF-8" />
 		<meta name="viewport" content="width=device-width, initial-scale=1.0" />
 		<meta http-equiv="Content-Security-Policy" content="${csp}" />
-${slotMeta}\t\t<title>OMP terminal</title>
+${slotMeta}\t\t<title>OMP Desk terminal</title>
 		<link rel="stylesheet" href="${iconsUri.toString()}" />
 	</head>
 	<body>

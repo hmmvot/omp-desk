@@ -697,7 +697,7 @@ export class WorkspaceFolderTreeItem extends vscode.TreeItem {
 		this.contextValue =
 			`ompWorkspaceFolder.${hasRecoverableShell ? "shells." : ""}${folder.collapsed ? "collapsed" : "expanded"}.${folder.pinned ? "pinned" : "unpinned"}`;
 		this.accessibilityInformation = {
-			label: `${folderHeadline(folder.path)}, ${folder.path}, OMP folder, ${folder.pinned ? "pinned, " : ""}${rows.length === 0 ? "no session" : `${rows.length} session(s)`}`,
+			label: `${folderHeadline(folder.path)}, ${folder.path}, OMP Desk folder, ${folder.pinned ? "pinned, " : ""}${rows.length === 0 ? "no session" : `${rows.length} session(s)`}`,
 		};
 	}
 }

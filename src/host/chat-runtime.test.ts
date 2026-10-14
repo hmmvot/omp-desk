@@ -690,7 +690,7 @@ describe("terminal-UI builtins typed into Chat", () => {
 		assert.deepEqual(ran, [`${TAB}:keyboard-shortcuts`], "an alias resolves to its builtin, and a repeated request runs nothing again");
 		assert.equal(await runtime.handleMessage(TAB, { type: "omp:chat-steer", requestId: "tui-2", text: "/copy that" }, page), "explained");
 		assert.deepEqual(page.notices(), [
-			"/hotkeys is a terminal command; opened the OMP keyboard shortcuts instead.",
+			"/hotkeys is a terminal command; opened the OMP Desk keyboard shortcuts instead.",
 			"/copy was not sent: use the Copy buttons on replies, code blocks and your messages.",
 		]);
 		assert.equal(channel.commandsOfType("prompt").length + channel.commandsOfType("steer").length, 0, "nothing reaches OMP");

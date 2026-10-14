@@ -206,7 +206,7 @@ describe("workspace folder registry", () => {
 		);
 		const stale = await folders.remove(firstId);
 		assert.equal(stale.removed, false);
-		assert.match(stale.removed ? "" : stale.reason, /no longer in the OMP launcher/);
+		assert.match(stale.removed ? "" : stale.reason, /no longer in the Sessions view/);
 	});
 
 	it("matches a session folder only on exact canonical equality", async () => {

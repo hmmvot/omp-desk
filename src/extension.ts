@@ -405,7 +405,7 @@ const COMPOSER_POPUP_CONTEXT = "ompDesk.composerPopupOpen";
 /** What the user is told when a session cannot be opened safely. */
 const CONFLICT_LABEL: Record<SessionConflictKind, string> = {
   live: "Another OMP process is already hosting this session",
-  "claim-conflict": "Another OMP window holds this session",
+  "claim-conflict": "Another OMP Desk window holds this session",
   duplicate: "This session is already open in another tab",
 };
 
@@ -1429,7 +1429,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     announced: () => context.globalState.get<string>(UPDATER_NOTICE_KEY) ?? null,
     markAnnounced: name => Promise.resolve(context.globalState.update(UPDATER_NOTICE_KEY, name)),
     log: line => log(line),
-    notify: message => { void vscode.window.showInformationMessage(`OMP: ${message}`); },
+    notify: message => { void vscode.window.showInformationMessage(`OMP Desk: ${message}`); },
   });
   // The longest a display-only read waits for the startup restore (see `WindowState.startupRestoreOver`).
   const startupDeferCap = setTimeout(() => s.startupRestoreOver.resolve(), STARTUP_DEFER_CAP_MS);
@@ -1976,7 +1976,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     }),
   );
   if (index.loadError !== null) {
-    showWarning(`The stored OMP session index could not be read and was reset: ${index.loadError}`);
+    showWarning(`The stored session index could not be read and was reset: ${index.loadError}`);
   }
   // Show the registered folders and the sessions whose editors VS Code restored
   // before any host is reconciled, so the sidebar never flickers through an empty
@@ -2055,7 +2055,7 @@ async function newSession(
   const folders = s.launcherFolders;
   if (folders === undefined) return;
   const folder = await chooseFolder(index, folders, argument, {
-    title: "Choose the OMP folder for a new session",
+    title: "Choose the folder for a new session",
     addWhenEmpty: true,
   });
   if (folder === null) return;
@@ -2313,7 +2313,7 @@ async function addWorkspaceFolder(index: SessionIndex): Promise<LauncherFolder |
   if (chosenPath === null) return null;
   const added = await folders.add(chosenPath);
   if (!added.ok) {
-    showError(`The OMP folder was not added: ${added.reason}`);
+    showError(`The folder was not added: ${added.reason}`);
     return null;
   }
   refreshLauncher();
@@ -2348,7 +2348,7 @@ async function pickFolderToAdd(folders: LauncherFolders): Promise<string | null>
       },
     ],
     {
-      title: "Pin a folder to the OMP launcher",
+      title: "Pin a folder to the Sessions view",
       placeHolder: "Pick the folder to pin, or browse for another one",
     },
   );
@@ -2362,8 +2362,8 @@ async function browseForFolder(): Promise<string | null> {
     canSelectFiles: false,
     canSelectFolders: true,
     canSelectMany: false,
-    openLabel: "Add OMP Folder",
-    title: "Add a folder to the OMP launcher",
+    openLabel: "Add Folder",
+    title: "Add a folder to the Sessions view",
   });
   const uri = chosen?.[0];
   if (uri === undefined) return null;
@@ -2386,10 +2386,10 @@ async function pinWorkspaceFolder(index: SessionIndex, argument: unknown): Promi
   const folders = s.launcherFolders;
   if (folders === undefined) return;
   const folder = await chooseFolder(index, folders, argument, {
-    title: "Pin a folder to the OMP launcher",
+    title: "Pin a folder to the Sessions view",
     addWhenEmpty: false,
     only: "unpinned",
-    nothing: "Every folder shown in the OMP launcher is already pinned.",
+    nothing: "Every folder shown in Sessions is already pinned.",
   });
   if (folder === null) return;
   const result = await folders.pin(folder.id);
@@ -2465,7 +2465,7 @@ async function chooseFolder(
   const candidates = options.only === undefined ? shown : shown.filter(folder => folder.pinned === (options.only === "pinned"));
   if (candidates.length === 0) {
     if (options.only !== undefined) {
-      showInfo(options.nothing ?? "No OMP folder matches.");
+      showInfo(options.nothing ?? "No folder matches.");
       return null;
     }
     if (!options.addWhenEmpty) {
@@ -2669,7 +2669,7 @@ async function resumeWorkspaceFolder(
   const folders = s.launcherFolders;
   if (folders === undefined) return;
   const folder = await chooseFolder(index, folders, argument, {
-    title: "Choose the OMP folder to resume a session from",
+    title: "Choose the folder to resume a session from",
     addWhenEmpty: true,
   });
   if (folder === null) return;
@@ -2731,7 +2731,7 @@ async function resumeFromFolderHistory(
     if (scan.incomplete) {
       showWarning(
         `No OMP session could be read for "${folderHeadline(folder.path)}", and some session locations could not be read either, ` +
-          `so this is not a complete answer. The OMP output channel names every path and error.`,
+          `so this is not a complete answer. The OMP Desk output channel names every path and error.`,
       );
     } else {
       showInfo(`No readable OMP session records "${folderHeadline(folder.path)}" as its working directory.`);
@@ -2741,7 +2741,7 @@ async function resumeFromFolderHistory(
   if (scan.incomplete) {
     showWarning(
       `Some OMP session locations of "${folderHeadline(folder.path)}" could not be read, so this list may be incomplete. ` +
-        `The OMP output channel names every path and error.`,
+        `The OMP Desk output channel names every path and error.`,
     );
   }
   const picked = await pickFolderHistoryCandidate(index, folder, scan);
@@ -3323,7 +3323,7 @@ function killWindow(index: SessionIndex): KillWindow {
       refreshLauncher({ ownership: true });
       await windowState().sessionProcesses?.refresh();
     },
-    notice: (level, text) => { void (level === "info" ? vscode.window.showInformationMessage(text) : vscode.window.showWarningMessage(text)); },
+    notice: (level, text) => { void (level === "info" ? vscode.window.showInformationMessage(`OMP Desk: ${text}`) : vscode.window.showWarningMessage(`OMP Desk: ${text}`)); },
     requester: () => `the Sessions menu of window "${vscode.workspace.name ?? "no folder"}" (${index.claimHolder.id.slice(0, 8)})`,
   };
 }
@@ -4194,7 +4194,7 @@ function createProfileCatalog(context: vscode.ExtensionContext): Promise<Catalog
       log(`the OMP profile catalog is unusable, so nothing will be saved this session: ${reason}`);
       showWarning(
         "The saved OMP sessions and folders could not be read, so this window is running without them and will not overwrite them. " +
-          `See the OMP output channel. (${reason})`,
+          `See the OMP Desk output channel. (${reason})`,
       );
     },
   });
@@ -4564,7 +4564,7 @@ function localSlotFor(tabId: string): string | null {
 
 /** Shown by a restored panel for a draft that no explicit action has started yet. */
 const DRAFT_NO_HOST_DETAIL =
-  "This OMP session has not been started yet. Its tab was kept; click the session's row in the OMP Sessions view to start it.";
+  "This OMP session has not been started yet. Its tab was kept; click the session's row in the Sessions view to start it.";
 
 /**
  * Reserve one editor for one conversation, letting a committed controller take a
@@ -5138,7 +5138,7 @@ async function acceptTerminalCopy(state: TabState, reply: GuestTerminalCopyReply
   }
   try {
     await vscode.env.clipboard.writeText(reply.text);
-    vscode.window.setStatusBarMessage("OMP: Native screen and scrollback copied.", 3_000);
+    vscode.window.setStatusBarMessage("OMP Desk: Native screen and scrollback copied.", 3_000);
   } catch {
     showWarning("The clipboard refused the native screen copy.");
   }
@@ -5194,7 +5194,7 @@ function activeChatTab(): string | null {
     return null;
   }
   if (target === null || target.mode !== "chat") {
-    showWarning("No OMP Chat editor is active, so there is nothing for this command to act on.");
+    showWarning("No Chat editor is active, so there is nothing for this command to act on.");
     return null;
   }
   return target.tabId;
@@ -5290,21 +5290,21 @@ async function runChatAction(context: vscode.ExtensionContext, index: SessionInd
     case "cycle-model": {
       const result = await conversations.cycleModel(tabId, incarnation);
       if (result.status === "stale") return;
-      if (result.status === "pending") vscode.window.setStatusBarMessage("OMP model: the change applies as soon as OMP is ready", 4_000);
+      if (result.status === "pending") vscode.window.setStatusBarMessage("OMP Desk: the model change applies as soon as OMP is ready", 4_000);
       else if (result.status === "refused") showWarning(`The model was not changed. ${chatRefusalText(result.reason)}`);
       else if (result.status === "unconfirmed") showWarning("OMP did not report whether the model changed.");
       else if (result.value === null) showInfo("OMP has no other model to cycle to. Configure model roles in OMP settings.");
-      else vscode.window.setStatusBarMessage(`OMP model: ${result.value.model.name ?? result.value.model.id}${result.value.thinkingLevel ? ` · ${result.value.thinkingLevel}` : ""}`, 4_000);
+      else vscode.window.setStatusBarMessage(`OMP Desk: model ${result.value.model.name ?? result.value.model.id}${result.value.thinkingLevel ? ` · ${result.value.thinkingLevel}` : ""}`, 4_000);
       return;
     }
     case "cycle-thinking": {
       const result = await conversations.cycleThinkingLevel(tabId, incarnation);
       if (result.status === "stale") return;
-      if (result.status === "pending") vscode.window.setStatusBarMessage("OMP thinking level: the change applies as soon as OMP is ready", 4_000);
+      if (result.status === "pending") vscode.window.setStatusBarMessage("OMP Desk: the thinking level change applies as soon as OMP is ready", 4_000);
       else if (result.status === "refused") showWarning(`The thinking level was not changed. ${chatRefusalText(result.reason)}`);
       else if (result.status === "unconfirmed") showWarning("OMP did not report whether the thinking level changed.");
       else if (result.value === null) showInfo("The current model has no thinking levels to cycle through.");
-      else vscode.window.setStatusBarMessage(`OMP thinking level: ${result.value}`, 4_000);
+      else vscode.window.setStatusBarMessage(`OMP Desk: thinking level ${result.value}`, 4_000);
       return;
     }
     case "export-html": {
@@ -5324,7 +5324,7 @@ async function runChatAction(context: vscode.ExtensionContext, index: SessionInd
         return;
       }
       const written = vscode.Uri.file(result.value);
-      const picked = await vscode.window.showInformationMessage(`OMP: Exported the conversation to ${result.value}.`, "Open", "Reveal in File Explorer");
+      const picked = await vscode.window.showInformationMessage(`OMP Desk: Exported the conversation to ${result.value}.`, "Open", "Reveal in File Explorer");
       if (picked === "Open") await vscode.env.openExternal(written);
       else if (picked === "Reveal in File Explorer") await vscode.commands.executeCommand("revealFileInOS", written);
       return;
@@ -5677,7 +5677,7 @@ async function addToSession(context: vscode.ExtensionContext, index: SessionInde
   const delivered = await deliverInsertion(tabId, sources, cwd);
   if (!delivered.ok) {
     log(`tab ${tabId}: editor references were not added (${delivered.reason})`);
-    void vscode.window.showWarningMessage(`OMP: ${delivered.reason} Nothing was added.`, "Copy reference").then(choice => {
+    void vscode.window.showWarningMessage(`OMP Desk: ${delivered.reason} Nothing was added.`, "Copy reference").then(choice => {
       if (choice === "Copy reference") {
         const composed = composeInsertion(sources, cwd);
         if (composed.ok) void vscode.env.clipboard.writeText(composed.text);
@@ -5688,7 +5688,7 @@ async function addToSession(context: vscode.ExtensionContext, index: SessionInde
   log(`tab ${tabId}: ${stateOf(tabId)?.mode ?? "chat"} received ${sources.length} editor reference(s)`);
   const notes: string[] = [];
   if (unsaved) notes.push("unsaved changes are not included");
-  if (folderAdded) notes.push(`${sessionFolderName(cwd)} was pinned to the OMP launcher`);
+  if (folderAdded) notes.push(`${sessionFolderName(cwd)} was pinned to the Sessions view`);
   // OMP expands @mentions only in a prompt sent while it is idle, not in a steering or queued follow-up message.
   if (s.turnActivities.get(tabId)?.streaming === true) notes.push("the session is busy: send it once the turn ends so the files are read");
   vscode.window.setStatusBarMessage(`Added ${delivered.summary} to «${delivered.title}»${notes.length > 0 ? ` — ${notes.join("; ")}` : ""}`, notes.length > 0 ? 10_000 : 6_000);
@@ -6100,7 +6100,7 @@ function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, 
       log(`tab ${tabId}: chat connection recovery (${event.reason}).`);
       return;
     case "extension-error":
-      void vscode.window.showErrorMessage(`OMP extension: ${event.message}`);
+      showError(`An OMP extension reported an error: ${event.message}`);
       return;
   }
 }
@@ -6134,7 +6134,7 @@ async function resumeFromChat(context: vscode.ExtensionContext, index: SessionIn
   if (outcome !== undefined && outcome !== before && outcome.status !== "restored" && outcome.status !== "attached") return;
   // The admission was never reached (the editor or row changed, or this window still holds a process it could not
   // prove gone): say so in the footer, or on the page itself when no conversation is shown.
-  const reason = (recordOf(stateOf(tabId))?.controlFailure ?? null) ?? "The session could not be resumed. The OMP output channel has details.";
+  const reason = (recordOf(stateOf(tabId))?.controlFailure ?? null) ?? "The session could not be resumed. The OMP Desk output channel has details.";
   if (!s.sessionRuntime.conversations.notify(tabId, reason) && !s.sessionRuntime.conversations.has(tabId)) s.guestDispatcher.presentUnavailable(index, tabId, reason);
 }
 
@@ -6978,7 +6978,7 @@ async function showHostControls(index: SessionIndex): Promise<void> {
     log(`control[${active.tabId}]: host: instance ${snapshot.host.instanceId}, epoch ${snapshot.host.epoch}`);
     log(`control[${active.tabId}]: session file: ${snapshot.host.sessionFile ?? "not materialized"}`);
   }
-  showInfo(`The session runs ${describeModel(live.model)} with thinking ${live.thinkingLevel ?? "unknown"}. See the OMP output channel for details.`);
+  showInfo(`The session runs ${describeModel(live.model)} with thinking ${live.thinkingLevel ?? "unknown"}. See the OMP Desk output channel for details.`);
 }
 
 
@@ -7879,7 +7879,7 @@ const COMPARE_OBSERVATION_LABEL = "Compare with the previous observation of this
  * was observed, which the store reports separately.
  */
 const OBSERVATION_DOCUMENT_UNAVAILABLE =
-  "This observation document cannot be shown: it is no longer resolvable or the stored observation is gone. It is not an empty observation — reopen the list from OMP's file-observation command.";
+  "This observation document cannot be shown: it is no longer resolvable or the stored observation is gone. It is not an empty observation — reopen the list from the OMP Desk file-observation command.";
 
 /** What one read-only observation document displays; never stored bytes. */
 interface ObservationDocumentBinding {
@@ -8565,7 +8565,7 @@ async function enableFileEvidence(context: vscode.ExtensionContext, index: Sessi
       : []),
   ].join("\n");
   const picked = await vscode.window.showWarningMessage(
-    "OMP: Store file observations for this workspace and session?",
+    "OMP Desk: Store file observations for this workspace and session?",
     { modal: true, detail },
     ENABLE_EVIDENCE_LABEL,
   );
@@ -8625,7 +8625,7 @@ async function disableFileEvidence(context: vscode.ExtensionContext, index: Sess
   for (const namespace of session.namespaces) {
     const disabled = await disableNativeFileObservationCapture({
       paths: namespace.paths,
-      reason: "disabled from the OMP launcher",
+      reason: "disabled from the Sessions view",
     });
     if (!disabled.disabled) failed = disabled.detail ?? "the disable marker was not written";
   }
@@ -8768,7 +8768,7 @@ async function deleteFileEvidence(context: vscode.ExtensionContext, index: Sessi
     "Removal is an ordinary file-system delete, not a secure erase of the underlying storage.",
   ].join("\n");
   const picked = await vscode.window.showWarningMessage(
-    "OMP: Delete stored file observations?",
+    "OMP Desk: Delete stored file observations?",
     { modal: true, detail },
     DELETE_SESSION_LABEL,
     DELETE_LAUNCH_LABEL,
@@ -8961,15 +8961,15 @@ async function showDiagnostics(context: vscode.ExtensionContext, index: SessionI
 }
 
 function showError(message: string): void {
-  void vscode.window.showErrorMessage(`OMP: ${message}`);
+  void vscode.window.showErrorMessage(`OMP Desk: ${message}`);
 }
 
 function showWarning(message: string): void {
-  void vscode.window.showWarningMessage(`OMP: ${message}`);
+  void vscode.window.showWarningMessage(`OMP Desk: ${message}`);
 }
 
 function showInfo(message: string): void {
-  void vscode.window.showInformationMessage(`OMP: ${message}`);
+  void vscode.window.showInformationMessage(`OMP Desk: ${message}`);
 }
 
 function messageOf(error: unknown): string {
@@ -9713,7 +9713,7 @@ async function openFolderTerminal(
   index: SessionIndex,
   argument: unknown,
 ): Promise<void> {
-  const folder = await terminalFolder(index, argument, "Choose the OMP folder to open a terminal in");
+  const folder = await terminalFolder(index, argument, "Choose the folder to open a terminal in");
   if (folder === null) return;
   await launchFolderShell(context, index, folder.path, newShellSlot());
 }
@@ -9730,7 +9730,7 @@ async function reconnectFolderTerminal(
   argument: unknown,
 ): Promise<void> {
   const s = windowState();
-  const folder = await terminalFolder(index, argument, "Choose the OMP folder whose terminal to reconnect");
+  const folder = await terminalFolder(index, argument, "Choose the folder whose terminal to reconnect");
   if (folder === null) return;
   // Explicit Reconnect can also rebind an editor this host can still reach.
   const key = canonicalFolderKey(folder.path);
@@ -10032,7 +10032,7 @@ async function startShellTerminal(index: SessionIndex, slot: string, handle: Pty
       if (!watchingBroker) return;
       if (!proven) {
         log(`shell ${slot}: the broker process is gone but its shell could not be confirmed gone; the recovery record is kept`);
-        showWarning("OMP: A terminal's background process ended, but its shell could not be confirmed ended. Check Task Manager or refresh Sessions.");
+        showWarning("A terminal's background process ended, but its shell could not be confirmed ended. Check Task Manager or refresh Sessions.");
         return;
       }
       await index.lifecycle.run(slot, async () => {

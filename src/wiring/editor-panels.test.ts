@@ -330,7 +330,7 @@ describe("openPanel", () => {
 		assert.equal(w.state.editors.winner(TAB)?.editorId, editorId);
 		assert.equal(w.state.editors.winner(TAB)?.provenance, "transient");
 		assert.deepEqual(w.registered, [made!.viewType]);
-		assert.equal(made!.title, "OMP session", "the title is the row's headline once the row is known; bound later");
+		assert.equal(made!.title, "OMP Desk session", "the title is the row's headline once the row is known; bound later");
 		assert.deepEqual(made!.options, {
 			enableScripts: true,
 			retainContextWhenHidden: true,
@@ -631,7 +631,7 @@ describe("the versioned serializer", () => {
 		const w = world();
 		const panel = fakePanel(viewType);
 		await w.panels.bridgeSerializerFor(context(), indexFixture(), viewType).deserializeWebviewPanel(panel as never, state);
-		assert.match(panel.html, /no longer in the OMP Sessions view/);
+		assert.match(panel.html, /no longer in the Sessions view/);
 		assert.ok(w.logged.includes("a restored OMP editor named a tab this workspace no longer has; it was left as an explanation"));
 		assert.equal(w.state.tabs.size, 0);
 	});
@@ -656,7 +656,7 @@ describe("the versioned serializer", () => {
 		const panel = fakePanel(viewType);
 		await w.panels.bridgeSerializerFor(context(), index, viewType).deserializeWebviewPanel(panel as never, state);
 		assert.equal(panel.disposed, true);
-		assert.deepEqual(w.infos, ["An OMP editor restored for this window was closed: it was a duplicate of one already open for the same session."]);
+		assert.deepEqual(w.infos, ["An OMP Desk editor restored for this window was closed: it was a duplicate of one already open for the same session."]);
 		assert.ok(w.logged.includes(`slot ${EDITOR}: a second restored webview for this conversation was closed`));
 		assert.equal(w.state.tabs.size, 0);
 	});
@@ -734,7 +734,7 @@ describe("the legacy serializer", () => {
 		const w = world();
 		const panel = fakePanel("omp.session");
 		await w.panels.legacySerializerFor(context(), indexFixture()).deserializeWebviewPanel(panel as never, { version: 1, tabId: TAB });
-		assert.match(panel.html, /no longer in the OMP Sessions view/);
+		assert.match(panel.html, /no longer in the Sessions view/);
 		assert.equal(w.created.length, 0);
 	});
 

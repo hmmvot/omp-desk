@@ -378,29 +378,29 @@ export async function killSelection(selection: KillSelection, ports: KillCommand
 		}
 	} catch (error) {
 		ports.log(`kill: the target could not be planned (${error instanceof Error ? error.message : String(error)})`);
-		ports.warn("OMP: Kill could not find the process of this row. Refresh Sessions and try again.");
+		ports.warn("Kill could not find the process of this row. Refresh Sessions and try again.");
 		return;
 	}
 	if (targets.length === 0) {
 		ports.log(`kill: requested by ${ports.requester}: no recorded process for ${selection.kind === "session" ? `session ${selection.tabId}` : selection.row.id}`);
-		ports.info("OMP: This row has no process Desk knows of, so there is nothing to kill.");
+		ports.info("This row has no process Desk knows of, so there is nothing to kill.");
 		return;
 	}
 	try {
 		for (const target of targets) {
 			if (target.roots.length === 0) {
 				ports.log(`kill: requested by ${ports.requester}: ${target.label}: no process identity is recorded (no creation time), so nothing was killed`);
-				ports.warn(`OMP: ${target.label} recorded no process identity, so Kill cannot tell it from another process and killed nothing. Use Stop, or Task Manager.`);
+				ports.warn(`${target.label} recorded no process identity, so Kill cannot tell it from another process and killed nothing. Use Stop, or Task Manager.`);
 				continue;
 			}
 			const outcome = await killProcessTree(target, ports);
 			ports.log(`kill: requested by ${ports.requester}: ${target.label}${target.slot === null ? "" : ` (slot ${target.slot})`}: ${outcome.kind}: ${outcome.detail}`);
 			if (outcome.kind === "failed") {
-				ports.warn(`OMP: ${outcome.message}`);
+				ports.warn(outcome.message);
 				continue;
 			}
-			if (outcome.kind === "gone") ports.info(`OMP: ${outcome.message}`);
-			else if (outcome.incomplete) ports.warn(`OMP: ${outcome.message}`);
+			if (outcome.kind === "gone") ports.info(outcome.message);
+			else if (outcome.incomplete) ports.warn(outcome.message);
 			// Every root of the target is proven gone (killed now, or not running): what its records say is stale.
 			await reconcile(target, ports);
 		}
@@ -415,6 +415,6 @@ async function reconcile(target: KillTarget, ports: KillCommandPorts): Promise<v
 		else if (target.reconcile.kind === "session") await ports.reconcileSession(target.reconcile.tabId, target.reconcile.captured);
 	} catch (error) {
 		ports.log(`kill: ${target.label}: its records could not be updated (${error instanceof Error ? error.message : String(error)})`);
-		ports.warn(`OMP: ${target.label} was killed, but Desk could not update its own records. Refresh Sessions; see the OMP Desk output.`);
+		ports.warn(`${target.label} was killed, but Desk could not update its own records. Refresh Sessions; see the OMP Desk output.`);
 	}
 }

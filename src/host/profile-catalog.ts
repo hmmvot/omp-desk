@@ -296,7 +296,7 @@ export async function readCatalogDocument(paths: CatalogPaths): Promise<CatalogD
     text = fs.readFileSync(paths.document, "utf8");
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw new CatalogError("unavailable", `The OMP profile catalog could not be read: ${messageOf(error)}`, { cause: error });
+    throw new CatalogError("unavailable", `The OMP Desk profile catalog could not be read: ${messageOf(error)}`, { cause: error });
   }
   return parseCatalogDocument(text);
 }
@@ -313,30 +313,30 @@ function parseCatalogDocument(text: string): CatalogDocument {
   } catch (error) {
     throw new CatalogError(
       "unavailable",
-      `The OMP profile catalog is not valid JSON and was left untouched: ${messageOf(error)}`,
+      `The OMP Desk profile catalog is not valid JSON and was left untouched: ${messageOf(error)}`,
       { cause: error },
     );
   }
   if (!isPlainObject(parsed)) {
-    throw new CatalogError("unavailable", "The OMP profile catalog is not a JSON object and was left untouched.");
+    throw new CatalogError("unavailable", "The OMP Desk profile catalog is not a JSON object and was left untouched.");
   }
   if (parsed.version !== CATALOG_VERSION) {
     throw new CatalogError(
       "unavailable",
-      `The OMP profile catalog was written by another version (${String(parsed.version)}); this build reads version ${CATALOG_VERSION} and will not replace it.`,
+      `The OMP Desk profile catalog was written by another version (${String(parsed.version)}); this build reads version ${CATALOG_VERSION} and will not replace it.`,
     );
   }
   const revision = parsed.revision;
   if (typeof revision !== "number" || !Number.isFinite(revision) || revision < 0) {
-    throw new CatalogError("unavailable", "The OMP profile catalog carries no usable revision and was left untouched.");
+    throw new CatalogError("unavailable", "The OMP Desk profile catalog carries no usable revision and was left untouched.");
   }
   if (!isPlainObject(parsed.records)) {
-    throw new CatalogError("unavailable", "The OMP profile catalog carries no usable record table and was left untouched.");
+    throw new CatalogError("unavailable", "The OMP Desk profile catalog carries no usable record table and was left untouched.");
   }
   const imports: CatalogImportRecord[] = [];
   if (parsed.imports !== undefined) {
     if (!Array.isArray(parsed.imports)) {
-      throw new CatalogError("unavailable", "The OMP profile catalog carries a malformed import ledger and was left untouched.");
+      throw new CatalogError("unavailable", "The OMP Desk profile catalog carries a malformed import ledger and was left untouched.");
     }
     for (const candidate of parsed.imports) {
       const record = readImportRecord(candidate);
@@ -346,7 +346,7 @@ function parseCatalogDocument(text: string): CatalogDocument {
   const conflicts: CatalogConflictRecord[] = [];
   if (parsed.conflicts !== undefined) {
     if (!Array.isArray(parsed.conflicts)) {
-      throw new CatalogError("unavailable", "The OMP profile catalog carries a malformed conflict ledger and was left untouched.");
+      throw new CatalogError("unavailable", "The OMP Desk profile catalog carries a malformed conflict ledger and was left untouched.");
     }
     for (const candidate of parsed.conflicts) {
       const record = readConflictRecord(candidate);
@@ -425,7 +425,7 @@ async function tryCreateLock(lockPath: string, token: string): Promise<boolean> 
     return true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "EEXIST") return false;
-    throw new CatalogError("lock", `The OMP profile catalog lock could not be created: ${messageOf(error)}`, { cause: error });
+    throw new CatalogError("lock", `The OMP Desk profile catalog lock could not be created: ${messageOf(error)}`, { cause: error });
   }
 }
 
@@ -473,7 +473,7 @@ async function acquireLock(lockPath: string, options: AcquireLockOptions): Promi
     if (options.now() >= deadline) {
       throw new CatalogError(
         "busy",
-        "Another VS Code window is writing the OMP profile catalog, so this change was not saved. It will be retried by the next action.",
+        "Another VS Code window is writing the OMP Desk profile catalog, so this change was not saved. It will be retried by the next action.",
       );
     }
     await delay(15 + Math.floor(Math.random() * 25));
@@ -517,7 +517,7 @@ async function commitDocument(paths: CatalogPaths, next: CatalogDocument): Promi
   try {
     staging = await stageBeside(paths.document, payload, { sync: true });
   } catch (error) {
-    throw new CatalogError("write", `The OMP profile catalog could not be written: ${messageOf(error)}`, { cause: error });
+    throw new CatalogError("write", `The OMP Desk profile catalog could not be written: ${messageOf(error)}`, { cause: error });
   }
   try {
     // Windows refuses a replace while another process has the destination open (another window re-reading the catalog,
@@ -531,7 +531,7 @@ async function commitDocument(paths: CatalogPaths, next: CatalogDocument): Promi
     const held = code === "EPERM" || code === "EACCES" || code === "EBUSY"
       ? " Another program kept the file open for too long; this window keeps the change and saves it again on its next save."
       : "";
-    throw new CatalogError("write", `The OMP profile catalog could not be replaced: ${messageOf(error)}.${held}`, { cause: error });
+    throw new CatalogError("write", `The OMP Desk profile catalog could not be replaced: ${messageOf(error)}.${held}`, { cause: error });
   }
 }
 
@@ -865,7 +865,7 @@ export async function createCatalogStore(options: CatalogStoreOptions): Promise<
     operation: (tx: CatalogTransaction) => boolean | void,
   ): Promise<CatalogCommitResult> => {
     if (unavailable !== null) {
-      throw new CatalogError("unavailable", `The OMP profile catalog is unusable: ${unavailable}`);
+      throw new CatalogError("unavailable", `The OMP Desk profile catalog is unusable: ${unavailable}`);
     }
     const result = await transactCatalog(paths, operation, {
       lockTimeoutMs: options.lockTimeoutMs,
@@ -1071,10 +1071,10 @@ export function startCatalogWatch(
       if (name === path.basename(paths.document)) schedule();
     });
     watcher.on("error", error => {
-      options.onError?.(`the OMP profile catalog could not be watched: ${messageOf(error)}`);
+      options.onError?.(`the OMP Desk profile catalog could not be watched: ${messageOf(error)}`);
     });
   } catch (error) {
-    options.onError?.(`the OMP profile catalog could not be watched: ${messageOf(error)}`);
+    options.onError?.(`the OMP Desk profile catalog could not be watched: ${messageOf(error)}`);
   }
   return () => {
     if (timer !== null) clearTimeout(timer);
