@@ -38,6 +38,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
+import { stat } from "node:fs/promises";
 import { join } from "node:path";
 import process from "node:process";
 import type { PrivateStorageProbe } from "./private-storage.ts";
@@ -160,6 +161,15 @@ export interface PtyRuntimeOptions {
 		runtime: { readonly entry: StagedRuntimeAsset; readonly tree: StagedRuntimeTree },
 		options: PtyRuntimeOptions,
 	) => Promise<SelfCheckResult>;
+	/**
+	 * Prove only what a Chat (`managed-rpc`) broker needs: the staged entry runs under this runtime and a pipe child
+	 * carries a line (`--self-check --pipe-only`,
+	 * [ADR-0074](../../docs/decisions/0074-run-chat-brokers-on-the-sessions-own-bun-runtime-with-code-exe-as-fallback.md)).
+	 * Its proof is kept apart from the full proof (own key, own cache entry) and its answer says `pipeOnly`.
+	 */
+	readonly pipeOnly?: boolean;
+	/** Arguments the runtime itself takes before the entry script (for Bun, `--no-install`). */
+	readonly runtimeArgs?: readonly string[];
 	/** Test seam; defaults to `Date.now`. */
 	readonly now?: () => number;
 }
@@ -232,6 +242,16 @@ function selfCheckAnswerDetail(stdout: string): string {
 	return typeof detail === "string" ? detail.replace(/\s+/g, " ").slice(0, 400).trim() : "";
 }
 
+/** The identity of one executable file that a cached proof was taken under: size, modification time and file id. */
+async function executableStamp(file: string): Promise<string> {
+	try {
+		const status = await stat(file, { bigint: true });
+		return `${status.size}:${status.mtimeMs}:${status.ino}`;
+	} catch {
+		return "unreadable";
+	}
+}
+
 /**
  * Run the staged entry's `--self-check` and read its answer.
  *
@@ -247,7 +267,7 @@ async function runSelfCheck(
 ): Promise<SelfCheckResult> {
 	const { command, env } = ptyRuntimeCommand(options.nodePath);
 	const deadlineMs = options.selfCheckDeadlineMs ?? SELF_CHECK_DEADLINE_MS;
-	const args = [runtime.entry.path, "--self-check"];
+	const args = [...(options.runtimeArgs ?? []), runtime.entry.path, "--self-check", ...(options.pipeOnly === true ? ["--pipe-only"] : [])];
 	if (options.selfCheckDeadlineMs !== undefined) args.push(`${SELF_CHECK_DEADLINE_FLAG}=${options.selfCheckDeadlineMs}`);
 	const child = spawn(command, args, {
 		cwd: runtime.tree.directory,
@@ -329,7 +349,7 @@ async function runSelfCheck(
 	// The child's own markers read back from its pseudo console are the positive half
 	// of the proof: an exit report alone says only that something ended, which a
 	// backend that delivered nothing to the child would also produce.
-	if (record.childOutput !== true) {
+	if (options.pipeOnly !== true && record.childOutput !== true) {
 		return refuse("the runtime self-check did not prove the child's output reached its pseudo console");
 	}
 	if (record.pipeChild !== true) {
@@ -341,8 +361,11 @@ async function runSelfCheck(
 	if (record.childExitCode !== 0 && record.childExitCode !== null) {
 		return refuse(`the runtime self-check child did not exit cleanly (${String(record.childExitCode)})`);
 	}
-	if (!Number.isSafeInteger(record.childPid) || (record.childPid as number) <= 0) {
+	if (options.pipeOnly !== true && (!Number.isSafeInteger(record.childPid) || (record.childPid as number) <= 0)) {
 		return refuse("the runtime self-check did not report the child process it started");
+	}
+	if (options.pipeOnly === true && (record.pipeOnly !== true || record.childOutput !== false || record.loopback !== true || typeof record.execPath !== "string")) {
+		return refuse("the pipe-only runtime self-check answered as something else");
 	}
 	const answer: PtySelfCheckAnswer = {
 		runtimeVersion: typeof record.runtimeVersion === "number" ? record.runtimeVersion : PTY_RUNTIME_VERSION,
@@ -352,10 +375,13 @@ async function runSelfCheck(
 		electron: typeof record.electron === "string" ? record.electron : null,
 		nodePty: typeof record.nodePty === "string" ? record.nodePty : null,
 		conptyDll: record.conptyDll === true,
-		childOutput: true,
+		childOutput: options.pipeOnly !== true,
 		pipeChild: true,
-		childExitCode: record.childExitCode,
+		childExitCode: options.pipeOnly === true ? null : (record.childExitCode as number | null),
 		durationMs: typeof record.durationMs === "number" ? record.durationMs : -1,
+		...(options.pipeOnly === true
+			? { pipeOnly: true as const, bun: typeof record.bun === "string" ? record.bun : null, execPath: record.execPath as string }
+			: {}),
 	};
 	return { kind: "proven", answer, detail: "the runtime proved itself" };
 }
@@ -379,9 +405,16 @@ export function forgetProvedPtyRuntimes(): void {
  * Withdraw a proof an earlier window stored once a launch that relied on it failed before a
  * broker existed: the stored file goes and every in-process proof with it, so the next launch
  * runs the self-check itself and reports what it finds instead of repeating the failure.
+ *
+ * With `pipeOnly`, only the pipe-only in-process proofs go: a Chat broker's failure on Bun says nothing about the
+ * full proof a Terminal launch stands on (ADR-0074).
  */
-export async function discardReusedPtyProof(reused: ReusedPtyProof): Promise<void> {
-	provedRuntimes.clear();
+export async function discardReusedPtyProof(reused: ReusedPtyProof, scope: { readonly pipeOnly?: boolean } = {}): Promise<void> {
+	if (scope.pipeOnly === true) {
+		for (const key of [...provedRuntimes.keys()]) if (key.includes("\0pipe-only\0")) provedRuntimes.delete(key);
+	} else {
+		provedRuntimes.clear();
+	}
 	await forgetPtyProof(reused.file);
 }
 
@@ -523,7 +556,9 @@ export async function ensurePtyRuntime(options: PtyRuntimeOptions): Promise<PtyR
 	if (entry === undefined || helper === undefined || ownerHelper === undefined) {
 		return notReady("the staged broker tree lost its entry, its identity probe or its owner-watch helper");
 	}
-	const cacheKey = `${options.storageDir}\0${tree.digest}\0${options.nodePath ?? ""}`;
+	const cacheKey = `${options.storageDir}\0${tree.digest}\0${options.nodePath ?? ""}\0${
+		options.pipeOnly === true ? `pipe-only\0${await executableStamp(ptyRuntimeCommand(options.nodePath).command)}` : "full"
+	}`;
 	const cached = provedRuntimes.get(cacheKey);
 	if (cached !== undefined) return readyAnswer(cached);
 	if (!(await verifyStagedRuntimeTree(tree))) {
@@ -536,6 +571,7 @@ export async function ensurePtyRuntime(options: PtyRuntimeOptions): Promise<PtyR
 		treeDigest: tree.digest,
 		executable: command,
 		ownExecutable: options.nodePath === undefined,
+		pipeOnly: options.pipeOnly === true,
 	});
 	const build = (selfCheck: PtySelfCheckAnswer | null): PtyRuntime => ({
 		tree,
@@ -621,13 +657,16 @@ export function spawnPtyBroker(
 	options: PtyRuntimeOptions,
 ): ChildProcess {
 	const { command, env } = ptyRuntimeCommand(options.nodePath);
-	const child = spawn(command, [runtime.entry.path, ...args], {
+	const child = spawn(command, [...(options.runtimeArgs ?? []), runtime.entry.path, ...args], {
 		cwd: runtime.tree.directory,
 		detached: true,
 		windowsHide: true,
 		stdio: ["ignore", "ignore", "ignore"],
 		env: { ...env, ...options.env },
 	});
+	// A file that cannot be started reports ENOENT or EACCES asynchronously on Windows; the caller reads the
+	// outcome from the exit code and the record, so the event itself is only kept from becoming an uncaught error.
+	child.on("error", () => {});
 	child.unref();
 	return child;
 }

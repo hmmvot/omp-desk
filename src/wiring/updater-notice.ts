@@ -1,11 +1,12 @@
 /**
  * OMP Desk — tell the user when VS Code's own updater ended the session processes.
  *
- * Every session runs in an OMP process that a detached broker keeps alive when VS Code closes. The broker is this extension's
- * Electron started as plain Node, so its image is VS Code's own `Code.exe`. "Restart to Update" runs Inno Updater, which
- * waits about 30 s for every `Code.exe` of the install to exit, then terminates
- * the ones still running (observed 2026-10-13: five brokers and the stats broker, VS Code 1.141.0 to 1.141.1). The OMP
- * process of each ends with its broker, so the next window relaunches the session from its file instead of re-adopting it.
+ * Every session runs in an OMP process that a detached broker keeps alive when VS Code closes. A Terminal, folder-shell or Stats
+ * broker, and a Chat broker that could not use Bun (ADR-0074), is this extension's Electron started as plain Node, so its image is
+ * VS Code's own `Code.exe`. "Restart to Update" runs Inno Updater, which waits about 30 s for every `Code.exe` of the install to
+ * exit, then terminates the ones still running (observed 2026-10-13: five brokers and the stats broker, VS Code 1.141.0 to
+ * 1.141.1). The OMP process of each ends with its broker, so the next window relaunches the session from its file instead of
+ * re-adopting it. A Chat broker on the session's `bun.exe` is not a `Code.exe` and is not in that list.
  *
  * Desk cannot prevent that, but it can recognise it: the updater writes `vscode-inno-updater-<epoch seconds>.log` in the temp
  * directory and names every pid it terminated, and the broker descriptors in Desk's storage carry the pids of the brokers. A
@@ -83,8 +84,8 @@ export async function announceUpdaterTerminations(port: UpdaterNoticePort): Prom
 			port.log(`VS Code's updater (${entry.name}) terminated ${ended.pids.length} Code.exe processes at ${ended.stamp}, ${ours.length} of them background processes of this extension (pids ${ours.map(descriptor => descriptor.brokerPid).join(", ")}); the OMP processes they kept ended with them`);
 			await port.markAnnounced(entry.name);
 			port.notify(
-				`VS Code's update ended ${sessions === 0 ? "OMP Desk's background processes" : `the ${sessions === 1 ? "process" : `${sessions} processes`} of the sessions that were running`} at ${ended.stamp.slice(-8)}: the installer stops every Code.exe of the install, and the session hosts run as Code.exe. ` +
-				"Sessions that were running are resumed from their files; a turn in progress and its sub-agents did not survive.",
+				`VS Code's update ended ${sessions === 0 ? "OMP Desk's background processes" : `the ${sessions === 1 ? "process" : `${sessions} processes`} of the sessions that were running`} at ${ended.stamp.slice(-8)}: the installer stops every Code.exe of the install, and these hosts ran as Code.exe. ` +
+				"Sessions that were running are resumed from their files; a turn in progress and its sub-agents did not survive. Chats whose background process runs on Bun are not stopped by an update.",
 			);
 			return;
 		}

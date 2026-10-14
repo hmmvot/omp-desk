@@ -25,7 +25,7 @@ import {
   setOmpResolutionLog,
   terminalWriterForHandle,
 } from "./host/native-terminal";
-import { configuredOmpPath, findTerminalForPid, openProviderLoginTerminal } from "./host/omp-vscode";
+import { configuredChatBrokerRuntime, configuredOmpPath, findTerminalForPid, openProviderLoginTerminal } from "./host/omp-vscode";
 import { runProviderLogin, runProviderLogout } from "./host/provider-login-flow";
 import type { LoginFlowDeps } from "./host/provider-login-flow";
 import { startLoginSession } from "./host/provider-login-rpc";
@@ -1440,13 +1440,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     storageDir: context.globalStorageUri.fsPath,
     extensionRoot: context.extensionUri.fsPath,
     onRuntimeEvent: message => log(message),
+    chatBrokerRuntime: { setting: configuredChatBrokerRuntime },
   });
   const stateAccessStartedAt = Date.now();
   void s.ptyClient.stateAccess().then(
     access => windowTiming("broker state access", `${Date.now() - stateAccessStartedAt} ms ok=${access.ok}`),
     () => undefined,
   );
-  // VS Code's own updater stops every Code.exe of the install, and the session brokers are Code.exe: say so when it did.
+  // VS Code's own updater stops every Code.exe of the install: the Terminal, folder-shell and Stats brokers (and any Chat broker that fell back to
+  // Code.exe) are Code.exe, so say so when it did. A Chat broker on Bun is not.
   void announceUpdaterTerminations({
     ...updaterNoticeFiles({ tempDir: os.tmpdir(), ptyDir: path.join(context.globalStorageUri.fsPath, "pty") }),
     announced: () => context.globalState.get<string>(UPDATER_NOTICE_KEY) ?? null,

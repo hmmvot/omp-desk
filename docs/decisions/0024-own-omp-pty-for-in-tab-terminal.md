@@ -11,6 +11,8 @@ date: 2026-09-26
 
 > Narrowly amended by accepted [ADR-0043](0043-place-session-mode-actions-in-editor-title.md) for managed in-pane controls: mode navigation and Copy Screen move to the native editor title. [ADR-0044](0044-resynchronize-on-stream-discontinuity-and-retain-broker-ownership.md) refines stream recovery and broker-authoritative frontend ownership. Mode/writer lifecycle and independent folder-shell authority remain unchanged.
 
+> Narrowly amended by accepted [ADR-0074](0074-run-chat-brokers-on-the-sessions-own-bun-runtime-with-code-exe-as-fallback.md): a `managed-rpc` broker may run on the session's `bun.exe` instead of the extension host's executable. That runtime loads no native module, so the matching runtime/addon ABI proof above is replaced for it by a pipe-only self-check; terminal and folder-shell brokers keep this record's runtime and proof.
+
 ## Context and problem statement
 
 The accepted native host runs in a hidden VS Code `Terminal`, while its Collab guest renders the GUI in a Webview editor. VS Code's terminal API can reveal the terminal in an editor group, but it opens a **different editor tab** and does not expose an existing ordinary terminal's bidirectional PTY stream to the Webview. The user requires the genuine native OMP TUI and chat to replace one another **inside the same editor tab**, with no second OMP writer. Closing the editor must leave the process running; a verified surviving host must be reattachable across an extension-host restart.

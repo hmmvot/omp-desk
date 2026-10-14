@@ -46,7 +46,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
 	PTY_DEFAULT_OWNER_GRACE_MS,
@@ -90,12 +90,80 @@ import {
 	verifyPtyRuntime,
 	type PtyRuntime,
 	type PtyRuntimeReadiness,
+	type ReusedPtyProof,
 } from "./pty-runtime.ts";
 import { PTY_RUNTIME_VERSION, attestationOf } from "./pty-protocol.ts";
 import type { PrivateStorageProbe } from "./private-storage.ts";
+import {
+	CHAT_BROKER_RUNTIME_SETTING,
+	MIN_BUN_VERSION,
+	describeChatBrokerChoice,
+	inspectBunLaunch,
+	isSupportedBunVersion,
+	type OmpLaunchFacts,
+	type BunLaunchDeps,
+	type ChatBrokerFallback,
+	type ChatBrokerFallbackCode,
+	type ChatBrokerRuntimeSetting,
+} from "./chat-broker-runtime.ts";
+import { verifyExecutableTrust, type ExecutableTrustProbe } from "./executable-trust.ts";
 import { PtyRuntimeProof } from "./pty-runtime-proof.ts";
 import { folderShellLaunchSpec, type PtyFolderShellRequest } from "./pty-shell.ts";
 import { RpcHandle } from "./rpc-handle.ts";
+
+/** What a window supplies to let Chat brokers start on Bun. */
+export interface ChatBrokerRuntimePolicy {
+	/** The `ompDesk.chatBrokerRuntime` setting, read at each launch. */
+	readonly setting: () => ChatBrokerRuntimeSetting;
+	/** Test seam: the executable's security read; defaults to the SID reader of ADR-0054. */
+	readonly trust?: ExecutableTrustProbe;
+	/** Test seam: how the launch's `bun.exe` is located. */
+	readonly bunLaunch?: BunLaunchDeps;
+}
+
+/** A proven Bun plan: the staged tree proved pipe-only under this exact file. */
+interface BunBrokerPlan {
+	readonly kind: "bun";
+	readonly runtime: PtyRuntime;
+	readonly executable: string;
+	readonly version: string;
+	/** The file's size, modification time and file id when it was proven; re-read just before the spawn. */
+	readonly stamp: string;
+	readonly reused: ReusedPtyProof | null;
+	/** The executable's path and {@link stamp}: what a hold is keyed to. */
+	readonly key: string;
+}
+
+type ChatBrokerPlan = BunBrokerPlan | { readonly kind: "vscode"; readonly fallback: ChatBrokerFallback };
+
+/** A Bun start that produced no broker: the reason to start one on the extension host's executable instead. */
+interface BunStartRefusal {
+	readonly refused: ChatBrokerFallback;
+}
+
+function isBunStartRefusal(value: object): value is BunStartRefusal {
+	return "refused" in value;
+}
+
+/** What the Bun runtime takes before the broker entry: no automatic package installs from a stray project file. */
+const BUN_RUNTIME_ARGS: readonly string[] = ["--no-install"];
+
+/** How long a Bun check that ran out of time keeps that file off the Bun path. */
+const BUN_INCONCLUSIVE_HOLD_MS = 10 * 60_000;
+
+/** Size, modification time and file id of one executable, or `null` when it cannot be read. */
+async function bunStamp(file: string): Promise<string | null> {
+	try {
+		const status = await stat(file, { bigint: true });
+		return `${status.size}:${status.mtimeMs}:${status.ino}`;
+	} catch {
+		return null;
+	}
+}
+
+async function bunExecutableUnchanged(plan: BunBrokerPlan): Promise<boolean> {
+	return (await bunStamp(plan.executable)) === plan.stamp;
+}
 
 /** How long a spawned broker gets to publish its record before it is reported unconfirmed. */
 const DEFAULT_START_TIMEOUT_MS = 30_000;
@@ -118,6 +186,12 @@ export interface PtyBrokerClientOptions {
 	readonly env?: Readonly<Record<string, string>>;
 	/** Receives runtime-proof state changes worth a log line (a provisional admission, its resolution). */
 	readonly onRuntimeEvent?: (message: string) => void;
+	/**
+	 * Lets a Chat (`managed-rpc`) broker start on the `bun.exe` of the session's own OMP launch
+	 * ([ADR-0074](../../docs/decisions/0074-run-chat-brokers-on-the-sessions-own-bun-runtime-with-code-exe-as-fallback.md)).
+	 * Without it, every broker starts on the extension host's executable.
+	 */
+	readonly chatBrokerRuntime?: ChatBrokerRuntimePolicy;
 	/** Test seam: the access probe for the state directory and the staged trees; defaults to this machine's own. */
 	readonly access?: PrivateStorageProbe;
 	/** Test seam: the kernel creation-time reading; defaults to the staged probe helper. */
@@ -314,6 +388,8 @@ export class PtyHandle extends BrokerHandle<PtyHandleEvent> {
 export class PtyBrokerClient {
 	private readonly options: PtyBrokerClientOptions;
 	private readonly proof: PtyRuntimeProof;
+	/** Executable files kept off the Bun path, by exact file identity ({@link BunBrokerPlan.key}). */
+	private readonly bunHeld = new Map<string, { readonly until: number | null; readonly fallback: ChatBrokerFallback }>();
 	private probePromise: Promise<PtyProbeReadiness> | null = null;
 	private identityPromise: Promise<PtyAttachIdentity> | null = null;
 	private accessPromise: Promise<{ readonly ok: boolean; readonly reason: string | null }> | null = null;
@@ -717,17 +793,102 @@ export class PtyBrokerClient {
 		return await this.launchSlot(spec, (record, adopted) => this.attachRecord(record, { adopted, owner: spec.owner }));
 	}
 
-	/** Own a `managed-rpc` slot under the same rules as {@link launch}: adopt, or start only when no record exists. */
-	async launchRpc(spec: PtyLaunchSpec): Promise<RpcLaunchOutcome> {
+	/**
+	 * Own a `managed-rpc` slot under the same rules as {@link launch}: adopt, or start only when no record exists.
+	 *
+	 * With the OMP launch the session runs, and a configured {@link PtyBrokerClientOptions.chatBrokerRuntime}, a broker
+	 * that has to be started is started on that launch's `bun.exe` when it is eligible (ADR-0074); everything else,
+	 * and every refusal, starts on the extension host's executable as before.
+	 */
+	async launchRpc(spec: PtyLaunchSpec, options: { readonly ompBinary?: OmpLaunchFacts } = {}): Promise<RpcLaunchOutcome> {
 		if (spec.kind !== "managed-rpc") {
 			return { state: "not-started", reason: "launchRpc starts a managed-rpc slot only", handle: null, adopted: false, brokerPid: null };
 		}
-		return await this.launchSlot(spec, (record, adopted) => this.attachRpcRecord(record, { adopted }));
+		const policy = this.options.chatBrokerRuntime;
+		const binary = options.ompBinary;
+		const choose = policy === undefined || binary === undefined ? undefined : () => this.chooseChatRuntime(binary, policy);
+		return await this.launchSlot(spec, (record, adopted) => this.attachRpcRecord(record, { adopted }), choose);
+	}
+
+	/**
+	 * Decide whether this Chat broker starts on Bun, in the order the design states: the setting, the launch, the file,
+	 * its trust and the pipe-only proof (the two run together), the executable the proof ran as, and the version.
+	 *
+	 * Nothing about the file is kept between launches except what is keyed to its exact identity: the access read runs on
+	 * every Bun-eligible launch (ADR-0054 and ADR-0032 reserve keeping an access verdict), and the in-process proof is
+	 * keyed to the file's size, time and file id, so a `bun upgrade` between launches is proven afresh by the next one.
+	 * A file whose start failed, or whose check ran out of time, is held ineligible ({@link holdBun}).
+	 */
+	private async chooseChatRuntime(binary: OmpLaunchFacts, policy: ChatBrokerRuntimePolicy): Promise<ChatBrokerPlan> {
+		const refuse = (code: ChatBrokerFallbackCode, detail: string): ChatBrokerPlan => ({ kind: "vscode", fallback: { code, detail } });
+		if (policy.setting() === "vscode") return refuse("setting", `${CHAT_BROKER_RUNTIME_SETTING} is set to "vscode"`);
+		const inspected = await inspectBunLaunch(binary, policy.bunLaunch);
+		if (!inspected.ok) return { kind: "vscode", fallback: inspected.fallback };
+		const executable = inspected.executable;
+		const stamp = await bunStamp(executable);
+		if (stamp === null) return refuse("executable", `${executable} could not be read`);
+		const key = `${executable.toLowerCase()}\0${stamp}`;
+		const held = this.bunHeld.get(key);
+		if (held !== undefined) {
+			if (held.until === null || (this.options.now ?? Date.now)() < held.until) return { kind: "vscode", fallback: held.fallback };
+			this.bunHeld.delete(key);
+		}
+		const [trust, readiness] = await Promise.all([
+			verifyExecutableTrust(executable, policy.trust),
+			ensurePtyRuntime({
+				storageDir: this.options.storageDir,
+				extensionRoot: this.options.extensionRoot,
+				nodePath: executable,
+				pipeOnly: true,
+				runtimeArgs: BUN_RUNTIME_ARGS,
+				...(this.options.env === undefined ? {} : { env: this.options.env }),
+				...(this.options.access === undefined ? {} : { access: this.options.access }),
+			}),
+		]);
+		if (!trust.ok) return refuse("trust", `${executable} is not trusted to host a broker: ${trust.reason}`);
+		if (!readiness.ready || readiness.runtime === null) {
+			return refuse("proof", `the pipe-only self-check on ${executable} refused it: ${readiness.reason ?? "no reason given"}`);
+		}
+		if (!readiness.proven) {
+			const fallback: ChatBrokerFallback = {
+				code: "proof",
+				detail: `the pipe-only self-check on ${executable} did not finish in time (${readiness.reason ?? "inconclusive"})`,
+			};
+			this.bunHeld.set(key, { until: (this.options.now ?? Date.now)() + BUN_INCONCLUSIVE_HOLD_MS, fallback });
+			return { kind: "vscode", fallback };
+		}
+		const answer = readiness.runtime.selfCheck;
+		const ranAs = answer?.execPath === undefined ? null : await realpath(answer.execPath).catch(() => null);
+		if (ranAs === null || ranAs.toLowerCase() !== executable.toLowerCase()) {
+			return refuse("launcher", `the check ran as ${answer?.execPath ?? "an unknown executable"}, not as ${executable}: a launcher that starts another image is not a broker runtime`);
+		}
+		const bun = answer?.bun ?? null;
+		if (bun === null || !isSupportedBunVersion(bun)) {
+			return refuse("version", `${executable} reports ${bun === null ? "no Bun version" : `Bun ${bun}`}; a Chat broker needs Bun ${MIN_BUN_VERSION} or newer`);
+		}
+		return { kind: "bun", runtime: readiness.runtime, executable, version: bun, stamp, reused: readiness.reusedProof ?? null, key };
+	}
+
+	/** Keep one executable file off the Bun path until it changes (`until: null`) or until a time. */
+	private holdBun(plan: BunBrokerPlan, refusal: ChatBrokerFallback, until: number | null): void {
+		this.bunHeld.set(plan.key, { until, fallback: refusal });
+	}
+
+	/**
+	 * Withdraw the stored proof a Bun start that produced no broker ran on, when an earlier window wrote that proof:
+	 * the next launch proves the file again. Only the pipe-only proofs go; the full proof a terminal stands on is not
+	 * this launch's to withdraw. Returns the sentence that says so, or `""`.
+	 */
+	private async discardBunPlan(plan: BunBrokerPlan): Promise<string> {
+		if (plan.reused === null) return "";
+		await discardReusedPtyProof(plan.reused, { pipeOnly: true });
+		return "; the Bun runtime proof stored by an earlier window was discarded, so the next launch checks it again";
 	}
 
 	private async launchSlot<Handle extends { readonly buildMatches: boolean }>(
 		spec: PtyLaunchSpec,
 		attach: (record: PtyBrokerRecord, adopted: boolean) => Promise<BrokerAttachOutcome<Handle>>,
+		chooseRuntime?: () => Promise<ChatBrokerPlan>,
 	): Promise<BrokerLaunchOutcome<Handle>> {
 		const launcherId = `launch-${randomBytes(12).toString("hex")}`;
 		// Decide under the slot's interprocess lock. Another window may claim a
@@ -798,7 +959,7 @@ export class PtyBrokerClient {
 					brokerPid: lookup.record.brokerPid,
 				};
 			}
-			return await this.startBroker(spec, launcherId, attach);
+			return await this.startBroker(spec, launcherId, attach, chooseRuntime);
 		} finally {
 			await releasePtySlotLock(this.options.storageDir, spec.slot, launcherId);
 		}
@@ -814,20 +975,66 @@ export class PtyBrokerClient {
 		return await folderShellLaunchSpec(request);
 	}
 
-	/** Start a broker and wait for its record and handshake: one writer, or an honest report. */
+	/**
+	 * Start a broker and wait for its record and handshake: one writer, or an honest report.
+	 *
+	 * A Chat launch that asks for a runtime choice ({@link launchRpc}) starts on the session's `bun.exe` when the plan
+	 * is eligible. A Bun broker that never came to exist (it could not be spawned, or it ended before it published a
+	 * record) is replaced by one on the extension host's executable, once, under the same slot lock; a broker that
+	 * published a record owns the slot and is never replaced (ADR-0074).
+	 */
 	private async startBroker<Handle extends { readonly buildMatches: boolean }>(
 		spec: PtyLaunchSpec,
 		launcherId: string,
 		attach: (record: PtyBrokerRecord, adopted: boolean) => Promise<BrokerAttachOutcome<Handle>>,
+		chooseRuntime?: () => Promise<ChatBrokerPlan>,
 	): Promise<BrokerLaunchOutcome<Handle>> {
-		const ready = await this.ready();
-		if (!ready.ready || ready.runtime === null) {
-			return { state: "not-started", reason: ready.reason ?? "the broker runtime is not ready", handle: null, adopted: false, brokerPid: null };
+		if (chooseRuntime !== undefined) {
+			const plan = await chooseRuntime();
+			this.options.onRuntimeEvent?.(
+				describeChatBrokerChoice(plan.kind === "bun" ? { kind: "bun", executable: plan.executable, version: plan.version } : plan),
+			);
+			if (plan.kind === "bun") {
+				const started = await this.startBrokerOn(spec, launcherId, attach, plan);
+				if (!isBunStartRefusal(started)) return started;
+				this.options.onRuntimeEvent?.(describeChatBrokerChoice({ kind: "vscode", fallback: started.refused }));
+				await this.discardBunPlan(plan);
+				// A Bun that could not start a broker would repeat that on every launch, each paying a Bun start and then the
+				// fallback's: it stays off the Bun path until the file changes.
+				if (started.refused.code === "start") this.holdBun(plan, started.refused, null);
+			}
 		}
-		const runtime: PtyRuntime = ready.runtime;
+		const started = await this.startBrokerOn(spec, launcherId, attach, null);
+		if (isBunStartRefusal(started)) {
+			return { state: "not-started", reason: started.refused.detail, handle: null, adopted: false, brokerPid: null };
+		}
+		return started;
+	}
+
+	/**
+	 * The one start of a broker on one runtime: `bun` for a Chat broker on its proven `bun.exe`, `null` for the
+	 * extension host's own executable behind the full proof. Only a Bun start can answer with a refusal to retry.
+	 */
+	private async startBrokerOn<Handle extends { readonly buildMatches: boolean }>(
+		spec: PtyLaunchSpec,
+		launcherId: string,
+		attach: (record: PtyBrokerRecord, adopted: boolean) => Promise<BrokerAttachOutcome<Handle>>,
+		bun: BunBrokerPlan | null,
+	): Promise<BrokerLaunchOutcome<Handle> | BunStartRefusal> {
+		let runtime: PtyRuntime;
+		if (bun !== null) {
+			runtime = bun.runtime;
+		} else {
+			const ready = await this.ready();
+			if (!ready.ready || ready.runtime === null) {
+				return { state: "not-started", reason: ready.reason ?? "the broker runtime is not ready", handle: null, adopted: false, brokerPid: null };
+			}
+			runtime = ready.runtime;
+		}
 		// Re-read every staged file immediately before starting: a path says nothing
 		// about the bytes that are there now.
 		if (!(await verifyPtyRuntime(runtime))) {
+			if (bun !== null) return { refused: { code: "changed", detail: "the staged broker runtime no longer holds the bytes it was staged with" } };
 			return {
 				state: "not-started",
 				reason: "the staged broker runtime no longer holds the bytes it was staged with, so it was not started",
@@ -835,6 +1042,11 @@ export class PtyBrokerClient {
 				adopted: false,
 				brokerPid: null,
 			};
+		}
+		// The executable runs in place, so what was proven and trusted is the file's size and time; the same read
+		// as the staged tree's, taken last.
+		if (bun !== null && !(await bunExecutableUnchanged(bun))) {
+			return { refused: { code: "changed", detail: `${bun.executable} changed after it was proven` } };
 		}
 		const access = await this.stateAccess();
 		if (!access.ok) {
@@ -849,21 +1061,37 @@ export class PtyBrokerClient {
 		const logPath = this.logPathFor(spec.slot);
 		const args = buildBrokerArguments(spec, runtime, this.options.storageDir, logPath, launcherId);
 		let child: { readonly pid?: number; readonly exitCode: number | null };
+		const nodePath = bun?.executable ?? this.options.nodePath;
 		try {
 			child = spawnPtyBroker(runtime, args, {
 				storageDir: this.options.storageDir,
 				extensionRoot: this.options.extensionRoot,
-				...(this.options.nodePath === undefined ? {} : { nodePath: this.options.nodePath }),
+				...(nodePath === undefined ? {} : { nodePath }),
+				...(bun === null ? {} : { runtimeArgs: BUN_RUNTIME_ARGS }),
 				...(this.options.env === undefined ? {} : { env: this.options.env }),
 			});
 		} catch (error) {
+			if (bun !== null) return { refused: { code: "start", detail: `the Bun broker could not be started: ${messageOf(error)}` } };
 			return { state: "not-started", reason: `the broker could not be started: ${messageOf(error)}${await this.withdrawReusedProof()}`, handle: null, adopted: false, brokerPid: null };
 		}
 		const spawned = child.pid ?? null;
-		const record = await this.waitForRecord(spec.slot, child);
+		let record = await this.waitForRecord(spec.slot, child);
+		if (record === null && bun !== null && child.exitCode !== null) {
+			// The process is gone. If it never published a record nothing owns the slot and the fallback may start one; if it
+			// did publish one just before it ended, or left bytes this build cannot read, a broker may have existed.
+			const lookup = await readPtyRecord(this.options.storageDir, spec.slot);
+			if (lookup.kind === "none") {
+				const log = await this.readLogTail(spec.slot);
+				return { refused: { code: "start", detail: `the Bun broker exited with code ${child.exitCode} before it published a record${log.length > 0 ? `: ${log}` : ""}` } };
+			}
+			if (lookup.kind === "ok") record = lookup.record;
+		}
 		if (record === null) {
 			const exitCode = child.exitCode;
 			if (exitCode === null) {
+				// Still alive and silent: the Chat is unconfirmed and never retried, but a Bun that cannot publish in time
+				// would do the same for the next Chat, so the file waits out the inconclusive hold.
+				if (bun !== null) this.holdBun(bun, { code: "start", detail: `the Bun broker had not published a record after the deadline` }, (this.options.now ?? Date.now)() + BUN_INCONCLUSIVE_HOLD_MS);
 				return {
 					state: "unconfirmed",
 					reason: "the broker did not publish a record in time; it may still be starting",
@@ -872,10 +1100,11 @@ export class PtyBrokerClient {
 					brokerPid: spawned,
 				};
 			}
+			if (bun !== null) this.holdBun(bun, { code: "start", detail: `the Bun broker exited with code ${exitCode} and left a record this build could not read` }, null);
 			const log = await this.readLogTail(spec.slot);
 			return {
 				state: "not-started",
-				reason: `the broker exited with code ${exitCode}${log.length > 0 ? `: ${log}` : ""}${await this.withdrawReusedProof()}`,
+				reason: `the broker exited with code ${exitCode}${log.length > 0 ? `: ${log}` : ""}${bun === null ? await this.withdrawReusedProof() : await this.discardBunPlan(bun)}`,
 				handle: null,
 				adopted: false,
 				brokerPid: spawned,
@@ -894,7 +1123,11 @@ export class PtyBrokerClient {
 		}
 		// A broker that published its record and then ended without ever being attached failed the way a broken
 		// runtime does; one still running only answered slowly, and the proof it started on stands.
-		const withdrawn = child.exitCode === null ? "" : await this.withdrawReusedProof();
+		if (bun !== null) {
+			// This Chat is unconfirmed and never retried (a record exists); the next Chat does not repeat it on the same file.
+			this.holdBun(bun, { code: "start", detail: `a Bun broker on this file could not be attached: ${lastReason}` }, child.exitCode === null ? (this.options.now ?? Date.now)() + BUN_INCONCLUSIVE_HOLD_MS : null);
+		}
+		const withdrawn = child.exitCode === null ? "" : bun === null ? await this.withdrawReusedProof() : await this.discardBunPlan(bun);
 		return {
 			state: "unconfirmed",
 			reason: `a broker owns the slot but could not be attached: ${lastReason}${withdrawn}`,

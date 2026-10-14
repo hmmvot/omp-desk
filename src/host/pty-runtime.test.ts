@@ -16,8 +16,9 @@
  */
 
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, utimes, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -26,14 +27,18 @@ import { createHash } from "node:crypto";
 import type { PrivateStorageCommandResult, PrivateStorageProbe } from "./private-storage.ts";
 import { TEST_CURRENT_SID, fixtureAcl, fixturePrincipal } from "./private-storage-test-support.ts";
 import { hashRuntimeTree, stageRuntimeTree, verifyStagedRuntimeTree, type RuntimeTreeSource } from "./runtime-assets.ts";
+import type { PtySelfCheckAnswer } from "./pty-runtime-proof-store.ts";
 import {
 	PTY_BROKER_ENTRY,
 	PTY_OWNER_HELPER,
 	PTY_PROBE_HELPER,
 	ensurePtyProbeHelper,
 	ensurePtyRuntime,
+	discardReusedPtyProof,
+	forgetProvedPtyRuntimes,
 	ptyRuntimeCommand,
 	ptyRuntimeSources,
+	spawnPtyBroker,
 } from "./pty-runtime.ts";
 
 const EXTENSION_ROOT = fileURLToPath(new URL("../..", import.meta.url));
@@ -473,5 +478,315 @@ describe("runtime proof", { skip: built ? false : "the packaged broker tree is a
 		const again = await ensurePtyRuntime({ storageDir: storage, extensionRoot: EXTENSION_ROOT });
 		assert.equal(again.treeDigest, readiness.treeDigest);
 		assert.equal(again.runtime?.tree.directory, runtime.tree.directory);
+	});
+});
+
+/** A runnable real Bun of this machine, whatever its version (the pipe-only proof does not gate on one): `BUN_INSTALL`, the profile's `.bun`, then `PATH`. */
+function findRealBun(): { readonly executable: string; readonly version: string } | null {
+	const candidates = [
+		...(process.env.BUN_INSTALL === undefined ? [] : [path.join(process.env.BUN_INSTALL, "bin", "bun.exe")]),
+		path.join(homedir(), ".bun", "bin", "bun.exe"),
+		...(process.env.PATH ?? "").split(path.delimiter).filter(entry => entry.length > 0).map(entry => path.join(entry, "bun.exe")),
+	];
+	for (const candidate of candidates) {
+		if (!existsSync(candidate)) continue;
+		const probe = spawnSync(candidate, ["--version"], { encoding: "utf8", windowsHide: true, timeout: 20_000 });
+		const version = probe.status === 0 ? probe.stdout.trim() : "";
+		if (/^\d+\.\d+\.\d+/.test(version)) return { executable: candidate, version };
+	}
+	return null;
+}
+
+describe("pipe-only runtime proof (ADR-0074)", { skip: process.platform !== "win32" ? "the runtime proof is Windows-only" : false }, () => {
+	const FULL_ANSWER: PtySelfCheckAnswer = {
+		runtimeVersion: 2,
+		platform: "win32",
+		arch: "x64",
+		node: "24.0.0",
+		electron: null,
+		nodePty: "fake",
+		conptyDll: true,
+		childOutput: true,
+		pipeChild: true,
+		childExitCode: null,
+		durationMs: 1,
+	};
+	const PIPE_ONLY_ANSWER: PtySelfCheckAnswer = { ...FULL_ANSWER, nodePty: null, conptyDll: false, childOutput: false, pipeOnly: true, bun: "1.4.3", execPath: "C:\\bun\\bun.exe" };
+
+	it("keeps a full proof and a pipe-only proof of the same tree and executable apart, in process and on disk", async () => {
+		forgetProvedPtyRuntimes();
+		const root = await packagedTree({ [PTY_BROKER_ENTRY]: "// entry", [PTY_PROBE_HELPER]: "# probe", [PTY_OWNER_HELPER]: "# owner" });
+		const storageDir = await makeTemp("omp-pty-pipe-only-storage-");
+		const seen: (boolean | undefined)[] = [];
+		const run = (pipeOnly: boolean | undefined) => ensurePtyRuntime({
+			storageDir,
+			extensionRoot: root,
+			nodePath: process.execPath,
+			access: ownerOnlyProbe(),
+			...(pipeOnly === undefined ? {} : { pipeOnly }),
+			runSelfCheck: async (_runtime, options) => {
+				seen.push(options.pipeOnly);
+				return { kind: "proven", answer: options.pipeOnly === true ? PIPE_ONLY_ANSWER : FULL_ANSWER, detail: "the runtime proved itself" };
+			},
+		});
+		const full = await run(undefined);
+		const pipeOnly = await run(true);
+		assert.equal(seen.length, 2, "the pipe-only call must not be answered from the full proof's cache entry");
+		assert.deepEqual(seen, [undefined, true]);
+		assert.equal(full.runtime?.selfCheck?.childOutput, true);
+		assert.equal(pipeOnly.runtime?.selfCheck?.childOutput, false);
+		assert.equal(pipeOnly.runtime?.selfCheck?.pipeOnly, true);
+		assert.equal(pipeOnly.runtime?.selfCheck?.bun, "1.4.3");
+		// Each is now cached in process under its own entry.
+		assert.equal((await run(undefined)).runtime?.selfCheck?.childOutput, true);
+		assert.equal((await run(true)).runtime?.selfCheck?.pipeOnly, true);
+		assert.equal((await run(false)).runtime?.selfCheck?.childOutput, true);
+		assert.equal(seen.length, 2);
+		// A new window finds each proof under its own file.
+		forgetProvedPtyRuntimes();
+		const reusedFull = await run(undefined);
+		const reusedPipeOnly = await run(true);
+		assert.equal(seen.length, 2, "both proofs were stored");
+		assert.ok(reusedFull.reusedProof && reusedPipeOnly.reusedProof);
+		assert.notEqual(reusedFull.reusedProof.file, reusedPipeOnly.reusedProof.file);
+		assert.equal(reusedFull.runtime?.selfCheck?.childOutput, true);
+		assert.equal(reusedPipeOnly.runtime?.selfCheck?.pipeOnly, true);
+		assert.equal(reusedPipeOnly.runtime?.selfCheck?.bun, "1.4.3");
+	});
+
+	describe("the in-process proof of a pipe-only runtime, keyed to the executable file", () => {
+		/** A run of `ensurePtyRuntime` whose self-check is a counted seam, on an executable that is any small file. */
+		async function counted() {
+			forgetProvedPtyRuntimes();
+			const root = await packagedTree({ [PTY_BROKER_ENTRY]: "// entry", [PTY_PROBE_HELPER]: "# probe", [PTY_OWNER_HELPER]: "# owner" });
+			const storageDir = await makeTemp("omp-pty-stamp-storage-");
+			const executable = path.join(await makeTemp("omp-pty-stamp-exe-"), "bun.exe");
+			await copyFile(fileURLToPath(import.meta.url), executable);
+			let runs = 0;
+			const run = (pipeOnly: boolean) => ensurePtyRuntime({
+				storageDir,
+				extensionRoot: root,
+				nodePath: executable,
+				access: ownerOnlyProbe(),
+				pipeOnly,
+				runSelfCheck: async () => {
+					runs += 1;
+					return { kind: "proven", answer: pipeOnly ? PIPE_ONLY_ANSWER : FULL_ANSWER, detail: "the runtime proved itself" };
+				},
+			});
+			return { executable, storageDir, run, runs: () => runs };
+		}
+
+		it("proves the file again once its modification time changes, and not before", async () => {
+			const { executable, run, runs } = await counted();
+			assert.equal((await run(true)).proven, true);
+			assert.equal(runs(), 1);
+			assert.equal((await run(true)).proven, true);
+			assert.equal(runs(), 1, "an unchanged file is answered from the cache");
+			const later = new Date(Date.now() + 120_000);
+			await utimes(executable, later, later);
+			assert.equal((await run(true)).proven, true);
+			assert.equal(runs(), 2, "a changed file is a different executable and is proven afresh");
+			assert.equal((await run(true)).proven, true);
+			assert.equal(runs(), 2);
+		});
+
+		it("keeps a full proof's cache entry when a pipe-only proof is discarded", async () => {
+			const { run, runs } = await counted();
+			await run(false);
+			await run(true);
+			assert.equal(runs(), 2);
+			// A later window finds both stored proofs; the pipe-only one is then withdrawn after a failed Bun start.
+			forgetProvedPtyRuntimes();
+			const full = await run(false);
+			const pipeOnly = await run(true);
+			assert.equal(runs(), 2, "both proofs were stored");
+			assert.ok(full.reusedProof && pipeOnly.reusedProof);
+			await discardReusedPtyProof(pipeOnly.reusedProof, { pipeOnly: true });
+			const fullAgain = await run(false);
+			assert.equal(fullAgain.reusedProof, undefined, "the full proof is still in the in-process cache");
+			assert.equal(runs(), 2);
+			const pipeOnlyAgain = await run(true);
+			assert.equal(pipeOnlyAgain.proven, true);
+			assert.equal(pipeOnlyAgain.reusedProof, undefined, "the stored pipe-only proof is gone");
+			assert.equal(runs(), 3, "the pipe-only proof is run again");
+		});
+
+		it("drops the full proof's cache entry too when the discard is not limited to pipe-only", async () => {
+			const { run, runs } = await counted();
+			await run(false);
+			await run(true);
+			forgetProvedPtyRuntimes();
+			const full = await run(false);
+			const pipeOnly = await run(true);
+			assert.ok(full.reusedProof && pipeOnly.reusedProof);
+			await discardReusedPtyProof(pipeOnly.reusedProof);
+			const fullAgain = await run(false);
+			assert.ok(fullAgain.reusedProof, "the full proof is read from its stored file again, not from the in-process cache");
+			assert.equal(runs(), 2);
+		});
+	});
+
+	describe("the default self-check, against an entry that answers by script", () => {
+		/** An entry that records its runtime options and its argument line, then prints `answer` and exits 0. */
+		const entryWith = (log: string, answer: Record<string, unknown>): string =>
+			`require("node:fs").appendFileSync(${JSON.stringify(log)}, JSON.stringify({ execArgv: process.execArgv, args: process.argv.slice(2) }) + "\\n");` +
+			`process.stdout.write(JSON.stringify(${JSON.stringify(answer)}) + "\\n");`;
+		const pipeOnlyReport = { ok: true, runtimeVersion: 2, platform: "win32", arch: "x64", node: "24.0.0", bun: "1.4.3", electron: null, pipeOnly: true, pipeChild: true, childOutput: false, loopback: true, execPath: "C:\\bun\\bun.exe", childExitCode: null, durationMs: 1 };
+
+		async function readinessFor(answer: Record<string, unknown>, pipeOnly: boolean, runtimeArgs?: readonly string[]) {
+			forgetProvedPtyRuntimes();
+			const log = path.join(await makeTempUnder(homedir(), ".omp-pty-log-"), "runs.log");
+			const root = await fakeRuntimeTree(entryWith(log, answer));
+			const readiness = await ensurePtyRuntime({
+				storageDir: await makeTempUnder(homedir(), ".omp-pty-storage-"),
+				extensionRoot: root,
+				nodePath: process.execPath,
+				...(pipeOnly ? { pipeOnly: true } : {}),
+				...(runtimeArgs === undefined ? {} : { runtimeArgs }),
+			});
+			const runs = (await readFile(log, "utf8")).trim().split("\n").map(line => JSON.parse(line) as { execArgv: string[]; args: string[] });
+			return { readiness, runs };
+		}
+
+		it("asks for `--self-check --pipe-only` and reads the pipe-only answer", async () => {
+			const { readiness, runs } = await readinessFor(pipeOnlyReport, true);
+			assert.deepEqual(runs, [{ execArgv: [], args: ["--self-check", "--pipe-only"] }]);
+			assert.equal(readiness.ready, true, readiness.reason ?? "not ready");
+			assert.equal(readiness.proven, true);
+			const answer = readiness.runtime?.selfCheck;
+			assert.equal(answer?.pipeOnly, true);
+			assert.equal(answer?.childOutput, false);
+			assert.equal(answer?.childExitCode, null);
+			assert.equal(answer?.bun, "1.4.3");
+			assert.equal(answer?.execPath, "C:\\bun\\bun.exe");
+		});
+
+		it("reports no Bun version when the runtime that answered was not Bun", async () => {
+			const { readiness } = await readinessFor({ ...pipeOnlyReport, bun: null }, true);
+			assert.equal(readiness.ready, true, readiness.reason ?? "not ready");
+			assert.equal(readiness.runtime?.selfCheck?.bun, null);
+		});
+
+		it("puts the runtime's own arguments before the entry", async () => {
+			const { readiness, runs } = await readinessFor(pipeOnlyReport, true, ["--no-warnings"]);
+			assert.equal(readiness.ready, true, readiness.reason ?? "not ready");
+			assert.deepEqual(runs, [{ execArgv: ["--no-warnings"], args: ["--self-check", "--pipe-only"] }]);
+		});
+
+		it("refuses an answer that does not say it is the pipe-only one", async () => {
+			const answers = [
+				{ ...pipeOnlyReport, pipeOnly: undefined },
+				{ ...pipeOnlyReport, childOutput: true, childPid: 4242 },
+				{ ...pipeOnlyReport, loopback: undefined },
+				{ ...pipeOnlyReport, loopback: false },
+				{ ...pipeOnlyReport, execPath: undefined },
+				{ ...pipeOnlyReport, execPath: 7 },
+			];
+			for (const answer of answers) {
+				const { readiness } = await readinessFor(answer, true);
+				assert.equal(readiness.ready, false, JSON.stringify(answer));
+				assert.match(readiness.reason ?? "", /answered as something else/);
+			}
+		});
+
+		it("does not ask a full check for `--pipe-only`", async () => {
+			const { runs } = await readinessFor({ ...pipeOnlyReport, childOutput: true, childPid: 4242, pipeOnly: undefined }, false);
+			assert.deepEqual(runs, [{ execArgv: [], args: ["--self-check"] }]);
+		});
+	});
+
+	describe("the real packaged entry", { skip: built ? false : "the packaged broker tree is absent: run `node esbuild.mjs --pty` first" }, () => {
+		async function proveWith(nodePath: string) {
+			forgetProvedPtyRuntimes();
+			return await ensurePtyRuntime({
+				storageDir: await makeTempUnder(homedir(), ".omp-pty-storage-"),
+				extensionRoot: EXTENSION_ROOT,
+				nodePath,
+				pipeOnly: true,
+			});
+		}
+
+		const bun = findRealBun();
+
+		it("is proven under the real Bun, which names its own version", { skip: bun === null ? "no Bun was found (BUN_INSTALL, ~/.bun/bin, PATH)" : false, timeout: 120_000 }, async () => {
+			assert.ok(bun);
+			const readiness = await proveWith(bun.executable);
+			assert.equal(readiness.ready, true, readiness.reason ?? "not ready");
+			assert.equal(readiness.proven, true);
+			const answer = readiness.runtime?.selfCheck;
+			assert.ok(answer, "a proven runtime carries what its self-check observed");
+			assert.equal(answer.pipeOnly, true);
+			assert.equal(answer.childOutput, false);
+			assert.equal(answer.pipeChild, true);
+			assert.equal(answer.bun, bun.version);
+			assert.equal(answer.conptyDll, false);
+			assert.equal(answer.childExitCode, null);
+			assert.equal((await realpath(answer.execPath ?? "")).toLowerCase(), (await realpath(bun.executable)).toLowerCase(), "the answer names the executable that ran it");
+		});
+
+		it("is proven under Node, which is not Bun, so the answer carries no Bun version", { timeout: 120_000 }, async () => {
+			const readiness = await proveWith(process.execPath);
+			assert.equal(readiness.ready, true, readiness.reason ?? "not ready");
+			assert.equal(readiness.proven, true);
+			const answer = readiness.runtime?.selfCheck;
+			assert.ok(answer);
+			assert.equal(answer.pipeOnly, true);
+			assert.equal(answer.childOutput, false);
+			assert.equal(answer.bun, null);
+			assert.equal(answer.execPath, process.execPath);
+		});
+	});
+});
+
+const SPAWN_TEST_ANSWER: PtySelfCheckAnswer = {
+	runtimeVersion: 2,
+	platform: "win32",
+	arch: "x64",
+	node: "24.0.0",
+	electron: null,
+	nodePty: "fake",
+	conptyDll: true,
+	childOutput: true,
+	pipeChild: true,
+	childExitCode: null,
+	durationMs: 1,
+};
+
+describe("spawning a broker on an executable that is not there", { skip: process.platform !== "win32" ? "the runtime proof is Windows-only" : false }, () => {
+	it("raises no uncaught exception, reports no pid, and leaves the caller an exit code to read", { timeout: 30_000 }, async () => {
+		forgetProvedPtyRuntimes();
+		const root = await packagedTree({ [PTY_BROKER_ENTRY]: "// entry", [PTY_PROBE_HELPER]: "# probe", [PTY_OWNER_HELPER]: "# owner" });
+		const storageDir = await makeTemp("omp-pty-missing-exe-");
+		const readiness = await ensurePtyRuntime({
+			storageDir,
+			extensionRoot: root,
+			nodePath: process.execPath,
+			access: ownerOnlyProbe(),
+			runSelfCheck: async () => ({ kind: "proven", answer: SPAWN_TEST_ANSWER, detail: "the runtime proved itself" }),
+		});
+		assert.ok(readiness.runtime, readiness.reason ?? "no runtime");
+		const missing = path.join(await makeTemp("omp-pty-missing-exe-dir-"), "gone", "bun.exe");
+		const uncaught: Error[] = [];
+		const onUncaught = (error: Error): void => {
+			uncaught.push(error);
+		};
+		process.on("uncaughtException", onUncaught);
+		try {
+			const child = spawnPtyBroker(readiness.runtime, ["--slot", "tab:missing"], { storageDir, extensionRoot: root, nodePath: missing, runtimeArgs: ["--no-install"] });
+			assert.ok(child.listenerCount("error") >= 1, "an error listener is attached, so a failed spawn cannot become an uncaught error");
+			assert.equal(child.pid, undefined, "a file that is not there has no process");
+			const closed = Promise.withResolvers<void>();
+			child.once("close", () => closed.resolve());
+			await closed.promise;
+			// One turn of the event loop, so an error event queued behind the close is delivered before the check.
+			const turned = Promise.withResolvers<void>();
+			setImmediate(() => turned.resolve());
+			await turned.promise;
+			assert.deepEqual(uncaught.map(error => error.message), []);
+			assert.notEqual(child.exitCode, null, "the caller reads the failure from the exit code");
+		} finally {
+			process.off("uncaughtException", onUncaught);
+		}
 	});
 });

@@ -51,6 +51,9 @@ export function startVsCode(options: LaunchOptions): Promise<RunResult> {
 	if (options.vsix) args.push("-Vsix", options.vsix);
 	if (options.port) args.push("-RemoteDebuggingPort", String(options.port));
 	if (options.reset) args.push("-Reset", "-ResetVsCode");
+	// A VS Code install other than the everyday one (a scratch copy), for scenarios that must not touch the real install and for a
+	// machine whose own install is waiting for "Restart to Update" (test-vscode.ps1 refuses to start it).
+	if (process.env.E2E_VSCODE_DIR) args.push("-VsCodeDir", process.env.E2E_VSCODE_DIR);
 	return launcher(args);
 }
 

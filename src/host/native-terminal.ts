@@ -19,6 +19,7 @@ import { constants as fsConstants } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { OmpLauncherKind } from "./chat-broker-runtime";
 import type { PtyHandle } from "./pty-client";
 import type { PtyStatusPayload } from "./pty-protocol";
 import type { PtyBrokerRecord } from "./pty-protocol";
@@ -56,11 +57,19 @@ export interface OmpCommand {
   readonly prefixArgs: readonly string[];
 }
 
+export type { OmpLauncherKind };
+
 export interface OmpBinary extends OmpCommand {
   /** Release `omp --version` reported, when it reported one; a diagnostic only. */
   readonly version: string | null;
   /** How this target was resolved; surfaced in diagnostics. */
   readonly origin: string;
+  /**
+   * How the launch was resolved. `bun-shim` means `command` is the `bun.exe` that runs OMP's entry
+   * (`prefixArgs`); `program` is OMP's own compiled executable. Absent when a caller built the value
+   * by hand, which no consumer treats as a bun launch.
+   */
+  readonly launcher?: OmpLauncherKind;
 }
 
 export interface OmpCliResult {
@@ -291,6 +300,8 @@ interface OmpLaunchCandidate {
   readonly origin: string;
   /** The file PATH named, for messages: the program itself, or the bun shim that forwards to the entry. */
   readonly label: string;
+  /** What the launch is: the program itself, or `bun.exe` running an entry the shim named. */
+  readonly launcher: OmpLauncherKind;
 }
 
 /** One target to try, in search order, with the file path that identifies it. */
@@ -351,7 +362,7 @@ function launchTargets(): PendingTarget[] {
           return {
             kind: "direct",
             key: file,
-            candidate: { executable: { command: file, prefixArgs: [] }, origin: "the OMP launcher directory", label: file },
+            candidate: { executable: { command: file, prefixArgs: [] }, origin: "the OMP launcher directory", label: file, launcher: "program" },
           };
         }
         return { kind: "unusable", key: file, reason: `${file} ${FOREIGN_LAUNCHER_REASON}` };
@@ -373,7 +384,7 @@ async function pathTarget(file: string, origin: string): Promise<LaunchTarget> {
     return {
       kind: "direct",
       key: file,
-      candidate: { executable: { command: file, prefixArgs: [] }, origin, label: file },
+      candidate: { executable: { command: file, prefixArgs: [] }, origin, label: file, launcher: "program" },
     };
   }
   if (identity === "bun-shim") return { kind: "bun-shim", key: file, shim: file };
@@ -585,6 +596,7 @@ async function bunShimCandidate(shim: string): Promise<OmpLaunchCandidate | stri
     executable: { command: bun, prefixArgs: [entry] },
     origin: `the bun shim ${shim}, resolved to ${entry}`,
     label: shim,
+    launcher: "bun-shim",
   };
 }
 
@@ -712,7 +724,7 @@ async function verifyLaunchCandidate(
       { transientCause },
     );
   }
-  return { command, prefixArgs, version, origin: candidate.origin };
+  return { command, prefixArgs, version, origin: candidate.origin, launcher: candidate.launcher };
 }
 
 function describeRejections(rejections: readonly string[]): string {
