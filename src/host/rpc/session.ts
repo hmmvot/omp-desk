@@ -30,6 +30,7 @@ import {
 	askAnswersMatch,
 	applyChatUiCancel,
 	applyChatUiRequest,
+	compactionReportOf,
 	createChatModel,
 	dropPendingSavedElsewhere,
 	markPendingUnsaved,
@@ -2278,7 +2279,11 @@ export class RpcSession {
 			if (report !== null) {
 				this.#maintenanceReport = null;
 				report(typeof frame.text === "string" ? frame.text : "");
-			} else if (this.#live) void this.#refreshState();
+			} else if (this.#live) {
+				void this.#refreshState();
+				// The commit precedes the report, and nothing else asks for the file here: without this read the divider would wait for the next turn.
+				if (typeof frame.text === "string" && compactionReportOf(frame.text)?.status === "complete") void this.#rebuild();
+			}
 		}
 		// Only a navigation or a maintenance pass sends a prompt with an internal id: a result after its wait ended
 		// (timeout, fall-through) is not a user turn. It lifts a navigation's fence; the re-read shows the outcome.

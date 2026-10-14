@@ -4262,6 +4262,91 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		await t.test("every compaction path ends as one divider: OMP's report text never shows as command output, a failure is a notice, and no row is empty", async () => {
+			const at = new Date(Date.UTC(2026, 9, 9, 9, 45)).toISOString();
+			const user = { type: "message", id: "u1", parentId: null, timestamp: at, message: { role: "user", content: [{ type: "text", text: "earlier work" }], timestamp: 1 } };
+			const compaction = { type: "compaction", id: "c1", parentId: "u1", timestamp: at, summary: "Summary of the earlier work", firstKeptEntryId: "u1", tokensBefore: 269158, tokensAfter: 58986 };
+			const REPORT = "Compaction complete. Tokens: 269158 -> 58986 (saved 210172).";
+			const FAILURE = "Compaction failed: Nothing to compact (session too small)";
+			const start = async (name: string) => {
+				await reset(name);
+				await ui.evaluate(`window.ui.push(${JSON.stringify({ entries: [user], durableCount: 1, leafId: "u1" })})`);
+			};
+			const frame = (value: Record<string, unknown>) => ui.evaluate(`window.ui.receive({type:'omp:chat-event',epoch:window.ui.current().epoch,frame:${JSON.stringify(value)}})`);
+			// The session file trails the report: its compaction entry reaches the page as a later reconciled row.
+			const entryArrives = () => ui.evaluate(`window.ui.receive({type:'omp:chat-entries',epoch:window.ui.current().epoch,entries:${JSON.stringify([compaction])},leafId:'c1'})`);
+			const shown = () => ui.evaluate<{ dividers: string[]; text: string; empty: number; notices: string[] }>(`(()=>{
+			 const root=document.querySelector('.omp-transcript');
+			 return{dividers:[...root.querySelectorAll('.omp-native-summary--divider summary')].map(summary=>summary.textContent),text:root.textContent,
+			  empty:[...root.querySelectorAll('.omp-row')].filter(row=>row.textContent.trim()==='').length,
+			  notices:[...root.querySelectorAll('.omp-native-message.omp-warning')].map(notice=>notice.textContent)}})()`);
+			const settle = () => ui.evaluate("(()=>{const done=Promise.withResolvers();requestAnimationFrame(()=>requestAnimationFrame(done.resolve));return done.promise})()");
+			const oneDivider = async (label: string) => {
+				await ui.wait("document.querySelector('.omp-native-summary--divider summary')");
+				await settle();
+				const view = await shown();
+				assert.deepEqual(view.dividers, ["Compacted · 269k → 59k tokens"], `${label}: exactly one divider with the amount`);
+				assert.equal(view.text.includes("Command output"), false, `${label}: no command output block`);
+				assert.equal(view.text.includes("Compaction complete"), false, `${label}: OMP's report text is not shown`);
+				assert.equal(view.empty, 0, `${label}: no empty box`);
+			};
+
+			// `/compact` typed in the composer, or the Commands popup's picker answered by the host as the same prompt: OMP emits no maintenance event, only the report after the commit.
+			await start("quick-compaction-typed");
+			await frame({ type: "command_output", text: REPORT });
+			await settle();
+			let view = await shown();
+			assert.equal(view.text.includes("Command output") || view.text.includes("Compaction complete"), false, "typed: the report is not shown before the entry arrives");
+			assert.equal(view.empty, 0, "typed: no empty box before the entry arrives");
+			await entryArrives();
+			await oneDivider("typed");
+
+			// Context view or popover Compact (`session.maintain`): the host's own progress pair wraps OMP's report.
+			await start("quick-compaction-maintain");
+			await frame({ type: "auto_compaction_start", action: "snapcompact", reason: "manual" });
+			await frame({ type: "command_output", text: REPORT });
+			await frame({ type: "auto_compaction_end", action: "snapcompact", aborted: false, willRetry: false });
+			await entryArrives();
+			await oneDivider("maintain");
+
+			// OMP's own automatic compaction: only the event pair.
+			await start("quick-compaction-auto");
+			await frame({ type: "auto_compaction_start", action: "context-full", reason: "threshold" });
+			await frame({ type: "auto_compaction_end", action: "context-full", aborted: false, willRetry: false });
+			await entryArrives();
+			await oneDivider("auto");
+
+			// A failure is a short notice in the transcript's notice style, for the typed command and for the host's pass alike, and a shake's own output keeps its block.
+			await start("quick-compaction-failed-typed");
+			await frame({ type: "command_output", text: FAILURE });
+			await ui.wait("document.querySelector('.omp-transcript').textContent.includes('Nothing to compact')");
+			view = await shown();
+			assert.equal(view.text.includes("Command output"), false, "failed typed: not raw command output");
+			assert.equal(view.notices.length, 1, "failed typed: one notice");
+			assert.match(view.notices[0]!, /Compaction failed.*Nothing to compact \(session too small\)/);
+			assert.equal(view.empty, 0);
+			await start("quick-compaction-failed-maintain");
+			await frame({ type: "auto_compaction_start", action: "soft", reason: "manual" });
+			await frame({ type: "command_output", text: FAILURE });
+			await frame({ type: "auto_compaction_end", action: "soft", aborted: false, willRetry: false, skipped: true });
+			await ui.wait("document.querySelector('.omp-transcript').textContent.includes('Nothing to compact')");
+			await settle();
+			view = await shown();
+			assert.equal(view.text.includes("Command output"), false, "failed maintain: not raw command output");
+			assert.equal(view.notices.length, 1, "failed maintain: one notice");
+			assert.equal(view.empty, 0, "failed maintain: no empty box");
+			await start("quick-shake-output");
+			await frame({ type: "auto_compaction_start", action: "shake", reason: "manual" });
+			await frame({ type: "command_output", text: "Shook 12 tool results (~7941 tokens freed)." });
+			await frame({ type: "auto_compaction_end", action: "shake", aborted: false, willRetry: false });
+			await ui.wait("document.querySelector('.omp-command-output')");
+			await settle();
+			view = await shown();
+			assert.match(view.text, /Command output.*Shook 12 tool results/);
+			assert.equal(view.empty, 0, "shake: no empty box after a completed pass");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("the host's thinking and tool defaults open or close every block once, and a block changed afterwards keeps its own state", async () => {
 			await reset("quick-transcript-defaults");
 			const prefs = (thinkingExpanded: boolean, toolsExpanded: boolean) => ui.evaluate(`window.ui.receive({type:'omp:chat-display-preferences',epoch:window.ui.current().epoch,toolCallDetail:'overview',accessibilitySupport:false,thinkingExpanded:${thinkingExpanded},toolsMode:'${toolsExpanded ? "all" : "collapsed"}'})`);

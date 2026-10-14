@@ -308,6 +308,13 @@ export const MAX_WIDGET_LINES = 100;
 export const MAX_COMMAND_FEEDBACK_TEXT = 2_000;
 export const MAX_COMMAND_OUTPUT_TEXT = 16_000;
 
+/** What OMP's `/compact` builtin prints when it ends: `Compaction complete[. Tokens: a -> b (saved c).]` or `Compaction failed: <reason>`. */
+export function compactionReportOf(text: string): { status: "complete" } | { status: "failed"; reason: string } | null {
+	if (/^Compaction complete\b/.test(text)) return { status: "complete" };
+	const failed = /^Compaction failed:\s*([\s\S]*)$/.exec(text);
+	return failed === null ? null : { status: "failed", reason: clampText(failed[1]!.trim() || "no reason given", MAX_COMMAND_FEEDBACK_TEXT) };
+}
+
 /** Prefix of the synthetic id of a pending row. */
 export const PENDING_ID_PREFIX = "live:";
 
@@ -921,7 +928,8 @@ export function reduceChatFrame(model: ChatModel, frame: ChatEventFrame, clock: 
 			return { ...model, maintenance: { action: frame.action, reason: frame.reason, status: "working" } };
 		case "auto_compaction_end": {
 			const maintenance: MaintenanceState = { action: frame.action, status: frame.aborted ? "cancelled" : frame.skipped ? "skipped" : frame.errorMessage ? "failed" : "complete", errorMessage: frame.errorMessage, willRetry: frame.willRetry };
-			return appendEphemeral({ ...model, maintenance }, "maintenance", maintenance, now);
+			// A completed or skipped pass has nothing to say: the compaction entry draws the divider.
+			return maintenance.status === "complete" || maintenance.status === "skipped" ? { ...model, maintenance } : appendEphemeral({ ...model, maintenance }, "maintenance", maintenance, now);
 		}
 		case "auto_retry_start": {
 			const retry: RetryState = { attempt: frame.attempt, maxAttempts: frame.maxAttempts, delayMs: frame.delayMs, errorMessage: frame.errorMessage, status: "waiting" };
@@ -1071,8 +1079,13 @@ export function reduceChatFrame(model: ChatModel, frame: ChatEventFrame, clock: 
 			return model;
 		case "available_commands_update":
 			return { ...model, commands: frame.commands.slice(0, MAX_COMMANDS) };
-		case "command_output":
+		case "command_output": {
+			// OMP's `/compact` report: the compaction entry is the divider, so a completed one adds nothing and a failure is a notice.
+			const report = compactionReportOf(frame.text);
+			if (report?.status === "complete") return model;
+			if (report?.status === "failed") return appendEphemeral(model, "notice", { type: "notice", level: "warning", message: report.reason, source: "Compaction failed" }, now);
 			return appendEphemeral(model, "command_output", { text: clampStyledText(frame.text, MAX_COMMAND_OUTPUT_TEXT) }, now);
+		}
 		case "ui_status": {
 			const entries = new Map(model.statusEntries);
 			if (frame.text === null || frame.text.length === 0) entries.delete(frame.key);

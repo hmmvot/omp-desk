@@ -1612,6 +1612,22 @@ describe("chat quick actions", () => {
 		session.dispose();
 	});
 
+	it("re-reads the session file when a typed /compact reports completion, so its divider does not wait for the next turn, and not for other output", async () => {
+		const { session, channel } = await boot({ child });
+		channel.handlers.set("prompt", () => ({ data: { agentInvoked: false } }));
+		assert.equal((await session.prompt({ requestId: "typed-compact", text: "/compact" })).status, "accepted");
+		await tick();
+		const reads = channel.commandsOfType("get_entries").length;
+		channel.emit({ type: "command_output", text: "Shook 3 tool results." });
+		await tick();
+		assert.equal(channel.commandsOfType("get_entries").length, reads, "other output reads no file");
+		channel.emit({ type: "command_output", text: "Compaction complete. Tokens: 800000 -> 90000 (saved 710000)." });
+		await tick();
+		assert.ok(channel.commandsOfType("get_entries").length > reads, "the compaction entry is read");
+		assert.deepEqual(session.model.ephemeral.map(item => item.kind), ["command_output"], "only the other output is a row");
+		session.dispose();
+	});
+
 	it("cycles the model and thinking level and folds the answer into the footer state at once", async () => {
 		const { session, channel } = await boot({ child });
 		channel.handlers.set("cycle_model", () => ({ data: { model: { provider: "prov", id: "next", name: "Next" }, thinkingLevel: "high", isScoped: false } }));

@@ -341,6 +341,20 @@ describe("command output and presentation", () => {
 		assert.deepEqual(model.ephemeral.at(-1)?.payload, { text: "line one\nline two" });
 	});
 
+	it("shows OMP's compaction-complete report as nothing and its failure as a warning notice, not as command output", () => {
+		let model = reduceChatFrame(live(), { type: "command_output", text: "Compaction complete. Tokens: 269158 -> 58986 (saved 210172)." }, { now: 1 });
+		model = reduceChatFrame(model, { type: "command_output", text: "Compaction complete." }, { now: 2 });
+		assert.deepEqual(model.ephemeral, []);
+		model = reduceChatFrame(model, { type: "command_output", text: "Compaction failed: Nothing to compact (session too small)" }, { now: 3 });
+		assert.deepEqual(model.ephemeral.map(item => [item.kind, item.payload]), [["notice", { type: "notice", level: "warning", message: "Nothing to compact (session too small)", source: "Compaction failed" }]]);
+		model = reduceChatFrame(model, { type: "command_output", text: "The Compaction complete line inside other output stays." }, { now: 4 });
+		assert.equal(model.ephemeral.at(-1)?.kind, "command_output");
+		model = reduceChatFrame(live(), { type: "auto_compaction_end", action: "context-full", aborted: false, willRetry: false }, { now: 5 });
+		assert.deepEqual([model.maintenance?.status, model.ephemeral], ["complete", []], "a completed pass keeps its state and adds no row");
+		model = reduceChatFrame(live(), { type: "auto_compaction_end", action: "soft", aborted: false, willRetry: false, skipped: true }, { now: 6 });
+		assert.deepEqual([model.maintenance?.status, model.ephemeral], ["skipped", []]);
+	});
+
 	it("keeps SGR styling of a handled command's output whole and removes every other sequence, never just the ESC byte", () => {
 		const styled = "\u001b[38;2;0;180;255m░░░\u001b[39m] 1%\u001b[2K\u001b]0;title\u0007 \u001b[1;31mdone\u001b[0m";
 		const model = reduceChatFrame(live(), { type: "command_output", text: styled });
@@ -458,10 +472,10 @@ describe("projections", () => {
 		model = reduceChatFrame(model, { type: "auto_compaction_start", action: "shake", reason: "manual" }, { now: 3 });
 		model = reduceChatFrame(model, { type: "command_output", text: "Shook 12 tool results (~7941 tokens freed)." }, { now: 4 });
 		model = reduceChatFrame(model, { type: "auto_compaction_end", action: "shake", aborted: false, willRetry: false }, { now: 5 });
-		assert.deepEqual(model.ephemeral.map(item => [item.kind, item.anchorId]), [["command_output", "a1"], ["maintenance", "event:1"]]);
+		assert.deepEqual(model.ephemeral.map(item => [item.kind, item.anchorId]), [["command_output", "a1"]], "a completed pass leaves no row of its own");
 		// The file trails the process: the reply is not on disk yet, so the re-read holds only its parent.
 		model = applyChatRewrite(model, [user], 0, "u1");
-		assert.deepEqual(model.ephemeral.map(item => [item.kind, item.anchorId]), [["command_output", "u1"], ["maintenance", "event:1"]], "the rows move to the nearest surviving ancestor");
+		assert.deepEqual(model.ephemeral.map(item => [item.kind, item.anchorId]), [["command_output", "u1"]], "the row moves to the nearest surviving ancestor");
 		model = applyChatRewrite(model, [user, reply], 0, "a1");
 		assert.equal(windowOf(model, 10, null).rows.some(row => row.id === "event:1"), true, "the result is still on screen");
 	});
