@@ -51,6 +51,7 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
 import { readSessionFileActivity, readSessionFileHeaderReading } from "../host/session-files";
+import { displayFolderPath } from "../host/folder-display.ts";
 import type { SessionFileActivity, SessionFileHeader, SessionFileHeaderReading } from "../host/session-files";
 import type { RestoreOutcome } from "../host/session-index";
 import type { SessionIndexEntry } from "../host/session-model";
@@ -495,7 +496,7 @@ function latestConversationAt(times: readonly (string | null)[]): string | null 
 /** Why sessions of a folder run where the window did not open: at the repository root, not in the opened folder(s); `null` when the folder is where sessions run. */
 function repositoryRootNote(folder: LauncherFolder): string | null {
 	if (folder.openedPaths === undefined || folder.openedPaths.length === 0) return null;
-	return `Sessions run at the repository root ${folder.path}, not in the opened ${folder.openedPaths.map(opened => `"${opened}"`).join(", ")}.`;
+	return `Sessions run at the repository root ${displayFolderPath(folder.path)}, not in the opened ${folder.openedPaths.map(opened => `"${displayFolderPath(opened)}"`).join(", ")}.`;
 }
 
 function folderTooltip(folder: LauncherFolder, latest: string | null, hasRecoverableShell: boolean, now: number): string {
@@ -696,7 +697,7 @@ export class WorkspaceFolderTreeItem extends vscode.TreeItem {
 		this.rows = rows;
 		this.hasRecoverableShell = hasRecoverableShell;
 		this.iconPath = new vscode.ThemeIcon(folder.pinned ? "pinned" : "folder", new vscode.ThemeColor("descriptionForeground"));
-		this.description = folderPathDescription(folder.path);
+		this.description = folderPathDescription(displayFolderPath(folder.path));
 		this.tooltip = folderTooltip(folder, latestConversationAt(rows.map(row => row.conversation?.lastAt ?? null)), hasRecoverableShell, now);
 		// The menu contract, exactly as the folder menus expect it:
 		// `ompWorkspaceFolder.[shells.]<collapsed|expanded>.<pinned|unpinned>`. A folder with a
@@ -706,7 +707,7 @@ export class WorkspaceFolderTreeItem extends vscode.TreeItem {
 		this.contextValue =
 			`ompWorkspaceFolder.${hasRecoverableShell ? "shells." : ""}${folder.collapsed ? "collapsed" : "expanded"}.${folder.pinned ? "pinned" : "unpinned"}`;
 		this.accessibilityInformation = {
-			label: `${folderHeadline(folder.path)}, ${folder.path}, OMP Desk folder, ${folder.pinned ? "pinned, " : ""}${rows.length === 0 ? "no session" : `${rows.length} session(s)`}`,
+			label: `${folderHeadline(folder.path)}, ${displayFolderPath(folder.path)}, OMP Desk folder, ${folder.pinned ? "pinned, " : ""}${rows.length === 0 ? "no session" : `${rows.length} session(s)`}`,
 		};
 	}
 }

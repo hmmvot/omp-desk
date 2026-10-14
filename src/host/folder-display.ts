@@ -10,6 +10,15 @@ import { normalizeWorkspaceDirectory } from "./session-files.ts";
 const realpathNative = promisify(realpath.native);
 
 /**
+ * `folder` with a Windows drive letter in upper case. VS Code's `Uri.fsPath` spells the drive in lower case (`c:\repo`), and
+ * everything built from it (the opened folders, the checkout root derived from them) keeps that spelling, while the file system
+ * and the scope pickers say `C:\repo`. A path that does not start with a drive letter is returned as it is.
+ */
+export function displayFolderPath(folder: string): string {
+	return /^[a-z]:(?=[\\/]|$)/.test(folder) ? folder[0]!.toUpperCase() + folder.slice(1) : folder;
+}
+
+/**
  * `folder` spelled as the file system spells it, on Windows only (elsewhere the case is already exact). Only a difference
  * of case is taken: a junction, a drive alias or a short name resolves to another path, and `folder` is kept then.
  * A folder that is gone keeps its given spelling.
@@ -18,9 +27,9 @@ export async function onDiskFolder(folder: string): Promise<string> {
 	if (process.platform !== "win32") return folder;
 	try {
 		const real = await realpathNative(folder);
-		return normalizeWorkspaceDirectory(real) === normalizeWorkspaceDirectory(folder) ? real : folder;
+		return normalizeWorkspaceDirectory(real) === normalizeWorkspaceDirectory(folder) ? real : displayFolderPath(folder);
 	} catch {
-		return folder;
+		return displayFolderPath(folder);
 	}
 }
 

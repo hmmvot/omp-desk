@@ -68,6 +68,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Sessions: a folder's path is shown with an upper-case drive letter (`C:\Users\…\repo`), as the scope picker already did, instead of the lower-case one VS Code reports (`c:\Users\…\repo`). It applies to the "Sessions run at the repository root … not in the opened …" tooltip (on the folder row and on session rows in the flat list), the folder row's path and screen-reader label, the folder pickers, the Unity project picker and the "no longer records" notice.
 - Chat: a tool row with nothing to open (a command with no output, a call whose details would only repeat its header) keeps an empty slot where the other rows have their expand arrow, so its icon and name line up with the rows around it instead of starting further left.
 - The broker connection (Chat, Terminal and folder shells) no longer closes with "more than one frame's worth of bytes without a line end" when one socket read carries many complete lines or one large complete line. Only the unterminated tail of the buffer and each single line are held to the 256 KiB frame limit; a socket read of any size is split into its frames first. Node rarely delivers such reads, and a runtime with larger socket reads (Bun delivers up to 512 KiB) hit it.
 - Chat: the editor tab of **Open full output** (an `omp-artifact:` document) is titled `Full output · bash · artifact 0` (the tool and the artifact id), where it was just `0`. A tab of the old address that Reload Window restores still opens.

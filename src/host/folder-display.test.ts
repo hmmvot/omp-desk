@@ -5,7 +5,7 @@ import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
-import { onDiskFolder, scopePickerFolders } from "./folder-display.ts";
+import { displayFolderPath, onDiskFolder, scopePickerFolders } from "./folder-display.ts";
 
 let root = "";
 
@@ -26,6 +26,23 @@ describe("onDiskFolder", () => {
 	it("keeps a folder that is gone as it was given", async () => {
 		const gone = path.join(root, "gone");
 		assert.equal(await onDiskFolder(gone), gone);
+	});
+});
+
+describe("displayFolderPath", () => {
+	it("upper-cases a lower-case Windows drive letter and nothing else", () => {
+		assert.equal(displayFolderPath("c:\\Users\\me\\repo"), "C:\\Users\\me\\repo");
+		assert.equal(displayFolderPath("d:/work/game"), "D:/work/game");
+		assert.equal(displayFolderPath("c:"), "C:");
+		assert.equal(displayFolderPath("C:\\Users\\me"), "C:\\Users\\me");
+		assert.equal(displayFolderPath("\\\\host\\share\\x"), "\\\\host\\share\\x");
+		assert.equal(displayFolderPath("/home/c:/x"), "/home/c:/x");
+		assert.equal(displayFolderPath("cd:\\x"), "cd:\\x");
+	});
+
+	it("is what a folder that is gone is shown as, on Windows", { skip: process.platform !== "win32" }, async () => {
+		const gone = path.join(root, "gone");
+		assert.equal(await onDiskFolder(gone.replace(/^[A-Z]/, letter => letter.toLowerCase())), gone);
 	});
 });
 

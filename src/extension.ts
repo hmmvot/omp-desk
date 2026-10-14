@@ -174,6 +174,7 @@ import type { LauncherTreeItem, SessionLauncherFacts, SessionOwnershipFacts } fr
 import { WorkspaceFolderRegistry, folderArgument, mergeWorkspaceFolderRecords, WORKSPACE_FOLDERS_STORAGE_KEY } from "./views/workspace-folders";
 import { LauncherFolders } from "./views/launcher-folders";
 import { SessionFolderResolver } from "./host/session-folder";
+import { displayFolderPath } from "./host/folder-display";
 import type { LauncherFolder } from "./views/launcher-folders";
 import type { FolderPathInspector, FolderPathVerdict, WorkspaceFolder } from "./views/workspace-folders";
 // The chat over rpc-ui (ADR-0038): a host-owned conversation per tab, served to any page.
@@ -2389,7 +2390,7 @@ async function pickFolderToAdd(folders: LauncherFolders): Promise<string | null>
     [
       ...suggestions.map(folder => ({
         label: folderHeadline(folder.path),
-        description: folder.path,
+        description: displayFolderPath(folder.path),
         detail: "Open in this window",
         addPath: folder.path as string | null,
       })),
@@ -2535,7 +2536,7 @@ async function chooseFolder(
         : (folder.open ? "open in a window" : "kept because a session runs in it");
       return {
         label: folderHeadline(folder.path),
-        description: folder.path,
+        description: displayFolderPath(folder.path),
         detail: `${source}, ${folder.collapsed ? "collapsed" : "expanded"} in Sessions`,
         folder,
       };
@@ -2846,7 +2847,7 @@ async function openFolderHistoryCandidate(
   const headerKey = canonicalFolderKey(inspection.header.cwd);
   if (folderKey === null || headerKey === null || folderKey !== headerKey) {
     showWarning(
-      `That OMP session no longer records "${folder.path}" as its working directory, so it was not resumed here. ` +
+      `That OMP session no longer records "${displayFolderPath(folder.path)}" as its working directory, so it was not resumed here. ` +
         `Refresh Sessions, or resume it from the folder it now records.`,
     );
     refreshLauncher();

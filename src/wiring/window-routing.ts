@@ -61,6 +61,7 @@ import type {
 	SwitchRequest,
 	WindowFocusPlan,
 } from "../host/window-requests.ts";
+import { displayFolderPath } from "../host/folder-display.ts";
 import type { LauncherFolder, LauncherFolders } from "../views/launcher-folders.ts";
 import { folderHeadline, sessionItemState } from "../views/session-tree.ts";
 import type { SessionLauncherFacts, SessionTreeProvider } from "../views/session-tree.ts";
@@ -585,7 +586,7 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 		const known = remembered === undefined ? undefined : candidates.find(candidate => folders.identityKeyOf(candidate) === folders.identityKeyOf(remembered));
 		if (known !== undefined) return { path: known, match: "root" };
 		const picked = await vscode.window.showQuickPick(
-			candidates.map(candidate => ({ label: path.basename(candidate), description: candidate, candidate })),
+			candidates.map(candidate => ({ label: path.basename(candidate), description: displayFolderPath(candidate), candidate })),
 			{ title: `Which Unity project should sessions in ${folderHeadline(folder.path)} run in?`, placeHolder: "The session runs in a window that has this project open; the choice is remembered for the folder" },
 		);
 		if (picked === undefined) return null;
