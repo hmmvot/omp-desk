@@ -10,7 +10,7 @@ import { FileLink, FileLinkText } from "./FileLinks";
 import type { ExplicitFileLink } from "./FileLinks";
 import { fmtDuration, fmtTokens } from "../../shared/format";
 import { useLiveDurations } from "../lib/live-clock";
-import { CodePreview, Diagnostics, DiffPreview, groupedFiles, JsonOutput, LimitedList, Link, MatchOutput, record, records, scalar, Section, string, strings, TextPreview, ToolImage } from "./tool-renderer-primitives";
+import { CodePreview, Diagnostics, DiffPreview, groupedFiles, JsonOutput, LimitedList, Link, MatchOutput, OutputText, record, records, scalar, Section, string, strings, TextPreview, ToolImage } from "./tool-renderer-primitives";
 import { AgentProgressView } from "./AgentProgress";
 import { DEBUG_TOOL_ICONS, debugToolRenderers } from "./debug-tool-renderers";
 import type { ToolRenderContext, ToolSemanticView } from "./tool-render-types";
@@ -106,8 +106,9 @@ function bash(c: ToolRenderContext): ToolSemanticView {
 	const rawCommand = string(c.args.command);
 	const longCommand = rawCommand.includes("\n") || rawCommand.length > 100;
 	return { title: c.args.name ? `Bash · ${scalar(c.args.name)}` : "Bash", family: "bash", target: command, tone: d.timedOut === true ? "warning" : undefined,
+		output: { structured: c.text },
 		input: longCommand ? [{ label: "Command", copy: rawCommand, node: <TextPreview text={rawCommand} expanded={c.expanded} lines={6} language="shell" /> }] : undefined,
-		body: <><TextPreview text={string(c.stream.output) || c.text} expanded={c.expanded} tail />{serviceParts.length > 0 && <p className="omp-empty-note">{serviceParts.join(" · ")}</p>}</> };
+		body: <><OutputText text={string(c.stream.output) || c.text} expanded={c.expanded} tail />{serviceParts.length > 0 && <p className="omp-empty-note">{serviceParts.join(" · ")}</p>}</> };
 }
 /** True when the details carry no truncation, limit or artifact notice. */
 function noNotices(details: Record<string, unknown>): boolean {
@@ -210,7 +211,7 @@ function evaluate(c: ToolRenderContext): ToolSemanticView {
 	const d = c.details;
 	const cells = records(d.cells).length ? records(d.cells) : records(c.args.cells).length ? records(c.args.cells) : c.args.code !== undefined ? [c.args] : [];
 	return { title: "Eval", family: "eval", target: cells.length > 1 ? `${cells.length} cells` : string(cells[0]?.title), meta: [...new Set(cells.map(cell => string(cell.language) || string(d.language)).filter(Boolean)), scalar(record(d.async).state)].filter(Boolean), tone: cells.some(cell => cell.status === "error") || d.isError === true ? "error" : undefined,
-		body: <>{cells.map((cell, index) => <Section key={index} title={[`${index + 1}/${cells.length}`, string(cell.title), string(cell.language), string(cell.status), cell.exitCode !== undefined ? `exit ${scalar(cell.exitCode)}` : ""].filter(Boolean).join(" · ")}><TextPreview text={string(cell.code)} expanded={c.expanded} lines={8} tail={!c.hasResult} language={string(cell.language) || string(d.language) || undefined} closed={c.hasResult && !c.partial} /><Section title="Output"><TextPreview text={string(cell.output) || (index === cells.length - 1 && d.cells === undefined ? c.text : "")} expanded={c.expanded} tail prose={cell.hasMarkdown === true} /><StatusEvents events={cell.statusEvents} expanded={c.expanded} /></Section>{typeof cell.durationMs === "number" && <span className="omp-empty-note">{fmtDuration(cell.durationMs)}</span>}</Section>)}{cells.length === 0 && <TextPreview text={string(c.stream.output) || c.text} expanded={c.expanded} tail />}<StatusEvents events={d.statusEvents} expanded={c.expanded} />{Array.isArray(d.jsonOutputs) && <Section title="Display output"><LimitedList items={d.jsonOutputs} expanded={c.expanded} render={value => <JsonOutput value={value} expanded={c.expanded} />} /></Section>}{Array.isArray(d.images) && <Section title="Images">{d.images.map((image, index) => <ToolImage key={index} value={image} />)}</Section>}{d.notice !== undefined && <div className="omp-empty-note">{scalar(d.notice)}</div>}</> };
+		body: <>{cells.map((cell, index) => <Section key={index} title={[`${index + 1}/${cells.length}`, string(cell.title), string(cell.language), string(cell.status), cell.exitCode !== undefined ? `exit ${scalar(cell.exitCode)}` : ""].filter(Boolean).join(" · ")}><TextPreview text={string(cell.code)} expanded={c.expanded} lines={8} tail={!c.hasResult} language={string(cell.language) || string(d.language) || undefined} closed={c.hasResult && !c.partial} /><Section title="Output"><TextPreview text={string(cell.output) || (index === cells.length - 1 && d.cells === undefined ? c.text : "")} expanded={c.expanded} tail prose={cell.hasMarkdown === true} /><StatusEvents events={cell.statusEvents} expanded={c.expanded} /></Section>{typeof cell.durationMs === "number" && <span className="omp-empty-note">{fmtDuration(cell.durationMs)}</span>}</Section>)}{cells.length === 0 && <TextPreview text={string(c.stream.output) || c.text} expanded={c.expanded} tail />}<StatusEvents events={d.statusEvents} expanded={c.expanded} />{Array.isArray(d.jsonOutputs) && <Section title="Display output"><LimitedList items={d.jsonOutputs} expanded={c.expanded} render={(value, at) => <JsonOutput value={value} expanded={c.expanded} id={`display.${at}`} />} /></Section>}{Array.isArray(d.images) && <Section title="Images">{d.images.map((image, index) => <ToolImage key={index} value={image} />)}</Section>}{d.notice !== undefined && <div className="omp-empty-note">{scalar(d.notice)}</div>}</> };
 }
 function find(c: ToolRenderContext): ToolSemanticView {
 	const d = c.details;
@@ -461,7 +462,7 @@ function TaskAgent({ row, context: c, depth = 0, ancestors = [] }: { row: Record
 			{Object.keys(retryFailure).length > 0 && <div className="omp-native-error">Auto-retry gave up after {scalar(retryFailure.attempt)} attempts: {scalar(retryFailure.errorMessage)}</div>}
 			{p.error !== undefined && <div className="omp-native-error">{scalar(p.error)}</div>}{p.abortReason !== undefined && <div className="omp-native-warning">{scalar(p.abortReason)}</div>}{p.truncated === true && <div className="omp-native-warning">Output truncated</div>}
 			<TaskReview row={p} /></>}
-		{open && <div className="omp-native-agent-body"><Section title="Assignment"><Markdown text={string(p.assignment || p.task)} /></Section>{typeof p.resolvedModelRoute === "string" && <p className="omp-empty-note">{p.resolvedModelRoute}</p>}{structured !== undefined ? <Section title="Result"><JsonOutput value={structured} expanded={open} /></Section> : p.output !== undefined && <Section title="Result"><Markdown text={string(p.output)} /></Section>}{status !== "completed" && typeof p.stderr === "string" && p.stderr.trim() && <Section title="Standard error"><TextPreview text={p.stderr} expanded /></Section>}{status === "completed" && p.hasRootChanges !== false && typeof p.patchPath === "string" && <p className="omp-empty-note">Patch: {p.patchPath}</p>}{status === "completed" && typeof p.branchName === "string" && <p className="omp-empty-note">Branch: {p.branchName}</p>}<OutputMetadata details={record(p.outputMeta)} />
+		{open && <div className="omp-native-agent-body"><Section title="Assignment"><Markdown text={string(p.assignment || p.task)} /></Section>{typeof p.resolvedModelRoute === "string" && <p className="omp-empty-note">{p.resolvedModelRoute}</p>}{structured !== undefined ? <Section title="Result"><JsonOutput value={structured} expanded={open} id={`result.${id}`} /></Section> : p.output !== undefined && <Section title="Result"><Markdown text={string(p.output)} /></Section>}{status !== "completed" && typeof p.stderr === "string" && p.stderr.trim() && <Section title="Standard error"><TextPreview text={p.stderr} expanded /></Section>}{status === "completed" && p.hasRootChanges !== false && typeof p.patchPath === "string" && <p className="omp-empty-note">Patch: {p.patchPath}</p>}{status === "completed" && typeof p.branchName === "string" && <p className="omp-empty-note">Branch: {p.branchName}</p>}<OutputMetadata details={record(p.outputMeta)} />
 			{nested.map((details, index) => <Section key={index} title="Nested agents">{depth >= 8 ? <div className="omp-empty-note">Native nested progress limit reached.</div> : ancestors.includes(details) ? <div className="omp-empty-note">Nested progress already shown</div> : <TaskRows details={details} context={c} depth={depth + 1} ancestors={[...ancestors, details]} />}</Section>)}
 			{id && c.renderChild && <Section title="Read-only child transcript">{c.renderChild(id)}</Section>}
 		</div>}
@@ -567,12 +568,7 @@ function write(c: ToolRenderContext): ToolSemanticView {
 function unknown(c: ToolRenderContext): ToolSemanticView {
 	const args = Object.fromEntries(Object.entries(c.args).filter(([key, value]) => value != null && key !== "i" && key !== "__partialJson"));
 	const output = c.text.trimEnd();
-	let parsed: unknown;
-	let json = false;
-	if (output.length <= 65536 && (output.startsWith("{") || output.startsWith("["))) {
-		try { parsed = JSON.parse(output); json = true; } catch { /* Actual non-JSON output stays text. */ }
-	}
-	return { title: c.name, family: "unknown", body: <>{Object.keys(args).length > 0 && <Section title="Args"><JsonOutput value={args} expanded omitAbsent /></Section>}{c.hasResult && !output ? <div className="omp-empty-note">(no output)</div> : json ? <JsonOutput value={parsed} expanded={c.expanded} /> : <TextPreview text={output} expanded={c.expanded} />}</> };
+	return { title: c.name, family: "unknown", output: { structured: output }, body: <>{Object.keys(args).length > 0 && <Section title="Args"><JsonOutput value={args} expanded={c.expanded} omitAbsent id="args" /></Section>}{c.hasResult && !output ? <div className="omp-empty-note">(no output)</div> : <OutputText text={output} expanded={c.expanded} />}</> };
 }
 
 /** Icon name per native tool; every name here also has a renderer in `nativeToolRenderers`. */

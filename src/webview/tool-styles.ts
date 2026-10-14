@@ -101,4 +101,22 @@ export const TOOL_STYLES = `
 .omp-native-irc .omp-irc-kind { flex: none; color: var(--omp-muted); font-size: 11px; }
 .omp-native-irc .omp-irc-preview { flex: 1 1 0; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--omp-muted); font-size: 11px; }
 .omp-native-irc .omp-tool-body p { margin: 0 0 4px; }
+/* JSON and newline-delimited JSON: a gutter for the fold button and the record number. */
+.omp-json-gutter { position: relative; display: inline-block; width: 2.2ch; user-select: none; }
+.omp-json[data-json-kind="ndjson"] .omp-json-gutter { width: 8ch; }
+.omp-json[data-json-kind="ndjson"] .omp-json-gutter::before { content: attr(data-n); display: inline-block; width: 5ch; margin-right: 1ch; text-align: right; color: var(--vscode-editorLineNumber-foreground, var(--omp-muted)); }
+.omp-json-twisty { position: absolute; right: 0; top: 0; width: 2ch; height: 100%; padding: 0; border: 0; background: transparent; color: var(--omp-muted); font: inherit; line-height: inherit; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+.omp-json-twisty:hover { color: var(--vscode-foreground); }
+.omp-json-twisty:focus-visible, .omp-json-ghost--fold:focus-visible, .omp-segment:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+.omp-json-twisty .codicon { font-size: 11px; }
+.omp-json-ghost { color: var(--omp-muted); font-style: italic; }
+.omp-json-ghost--fold { border: 0; border-radius: var(--omp-radius); padding: 0; background: var(--vscode-editorWidget-background); font-family: inherit; font-size: inherit; cursor: pointer; }
+.omp-json-ghost--fold:hover { color: var(--vscode-foreground); }
+.omp-segmented { display: inline-flex; border: 1px solid var(--omp-border); border-radius: var(--omp-radius); overflow: hidden; }
+.omp-segment { border: 0; padding: 0 7px; background: transparent; color: var(--omp-muted); font: inherit; line-height: 18px; cursor: pointer; }
+.omp-segment:hover { color: var(--vscode-foreground); }
+.omp-segment[aria-pressed="true"] { background: var(--vscode-button-secondaryBackground, var(--vscode-toolbar-hoverBackground)); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); }
+.vscode-high-contrast .omp-segment[aria-pressed="true"], .vscode-high-contrast-light .omp-segment[aria-pressed="true"] { outline: 1px solid var(--vscode-contrastActiveBorder, var(--vscode-focusBorder)); outline-offset: -1px; }
+.omp-fold-all { display: inline-flex; }
+@media (max-width: 460px) { .omp-fold-all { display: none; } }
 `;

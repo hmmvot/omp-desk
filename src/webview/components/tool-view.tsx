@@ -3,8 +3,10 @@
  * bounded preview of rows with its exact markers (`OutputRows`), the output bar, the footer line and Copy.
  */
 import type { ReactNode } from "react";
-import { createContext, useContext, useEffect, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useState } from "react";
 import type { FooterPart } from "../../chat/tool-notices";
+import type { OutputFormat } from "../lib/json-tokens";
+import type { FoldState, ToolViewState } from "../lib/tool-view-state";
 
 /** What a block of rows needs to know of the card around it. */
 export interface ToolViewContextValue {
@@ -14,6 +16,11 @@ export interface ToolViewContextValue {
 	readonly showAll?: () => void;
 	/** Open the full output of artifact `id` in an editor tab; absent where the page cannot ask. */
 	readonly openArtifact?: (id: string) => void;
+	/** What the card remembers of its view (folds, format), and how to change it; absent where there is no card. */
+	readonly view?: ToolViewState;
+	readonly update?: (patch: Partial<ToolViewState>) => void;
+	/** The text the card detected a format in (JSON, newline-delimited JSON), once it settled, and what it found. */
+	readonly structured?: { readonly text: string; readonly format: OutputFormat };
 }
 
 export const ToolViewContext = createContext<ToolViewContextValue>({ live: false });
@@ -23,6 +30,14 @@ export const useToolViewContext = (): ToolViewContextValue => useContext(ToolVie
 export const PREVIEW_ROWS = 12;
 /** A hidden remainder of this many rows or fewer is shown instead of a marker: the marker would cost about as much as the rows. */
 export const SLACK_ROWS = 3;
+
+/** The folds of the card's trees and a way to change them; a block outside a card keeps its own. */
+export function useFolds(): readonly [ReadonlyMap<string, FoldState>, (next: ReadonlyMap<string, FoldState>) => void] {
+	const { view, update } = useToolViewContext();
+	const [local, setLocal] = useState<ReadonlyMap<string, FoldState>>(() => new Map());
+	const set = useCallback((next: ReadonlyMap<string, FoldState>) => { if (update !== undefined) update({ folds: next }); else setLocal(next); }, [update]);
+	return [view?.folds ?? local, set];
+}
 
 const grouped = (count: number): string => count.toLocaleString("en-US");
 

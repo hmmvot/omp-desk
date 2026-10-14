@@ -49,7 +49,7 @@ function body(c: ToolRenderContext): ReactNode {
 	const args = Object.fromEntries(Object.entries(c.args).filter(([key, value]) => value != null && key !== "i" && key !== "__partialJson"));
 	const text = c.text.trimEnd();
 	return <>
-		{Object.keys(args).length > 0 && <Section title="Arguments"><JsonOutput value={args} expanded={c.expanded} omitAbsent /></Section>}
+		{Object.keys(args).length > 0 && <Section title="Arguments"><JsonOutput value={args} expanded={c.expanded} omitAbsent id="args" /></Section>}
 		{c.hasResult && (text ? <Section title="Result"><TextPreview text={text} expanded={c.expanded} lines={6} /></Section> : <div className="omp-empty-note">(no output)</div>)}
 	</>;
 }

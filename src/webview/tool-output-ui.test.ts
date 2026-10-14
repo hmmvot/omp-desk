@@ -312,13 +312,13 @@ test("an opened tool call rests as a bounded preview, shows its gist and footer,
 			const call = real("bash-ndjson");
 			await reset("copy"); await show(call); await open(call);
 			await ui.evaluate("window.clip=null;Object.defineProperty(navigator,'clipboard',{configurable:true,value:{async writeText(value){window.clip=value}}})");
-			await ui.evaluate(`document.querySelector(${JSON.stringify(`${card(call)} .omp-output-bar:not(.omp-tool-input *) .omp-iconbtn`)}).click()`);
+			await ui.evaluate(`document.querySelector(${JSON.stringify(`${card(call)} .omp-output-bar:not(.omp-tool-input *) .omp-iconbtn[aria-label^=Copy]`)}).click()`);
 			await ui.wait("window.clip!==null");
 			assert.equal(await ui.evaluate("window.clip"), splitToolNotices(call.resultText).body);
 			await ui.wait(`document.querySelector(${JSON.stringify(`${card(call)} .omp-output-bar [role=status]`)})`);
 			assert.match(await text(`${card(call)} .omp-output-bar [role=status]`), /^Copied the output \(25 lines, [\d,]+ characters\)$/);
 			await ui.evaluate("navigator.clipboard.writeText=async()=>{throw new Error('Denied')}");
-			await ui.evaluate(`document.querySelector(${JSON.stringify(`${card(call)} .omp-output-bar:not(.omp-tool-input *) .omp-iconbtn`)}).click()`);
+			await ui.evaluate(`document.querySelector(${JSON.stringify(`${card(call)} .omp-output-bar:not(.omp-tool-input *) .omp-iconbtn[aria-label^=Copy]`)}).click()`);
 			await ui.wait(`document.querySelector(${JSON.stringify(`${card(call)} .omp-output-bar [role=status]`)})?.textContent.startsWith('Copy failed')`);
 		});
 
@@ -350,6 +350,87 @@ test("an opened tool call rests as a bounded preview, shows its gist and footer,
 			await ui.wait("document.querySelector('[data-tool-call-id=\"live-bash\"] .omp-gist')?.textContent==='5.00 s'");
 			await ui.evaluate("window.fixtureClock.setNow(107000);window.fixtureClock.tick()");
 			await ui.wait("document.querySelector('[data-tool-call-id=\"live-bash\"] .omp-gist')?.textContent==='7.00 s'");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		const THEME = "{id:'Dark Modern',rules:[{scopes:['support.type.property-name'],foreground:'#9CDCFE'},{scopes:['string'],foreground:'#CE9178'},{scopes:['constant.numeric'],foreground:'#B5CEA8'},{scopes:['constant.language'],foreground:'#569CD6'}]}";
+		const rowsOf = (call: Call): string => `${card(call)} .omp-json-row`;
+		const countOf = (selector: string): Promise<number> => ui.evaluate<number>(`document.querySelectorAll(${JSON.stringify(selector)}).length`);
+		const pointerClick = async (selector: string): Promise<void> => {
+			const point = await ui.evaluate<{ x: number; y: number }>(`(async()=>{const e=document.querySelector(${JSON.stringify(selector)});e.scrollIntoView({block:'center',behavior:'instant'});await new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));const b=e.getBoundingClientRect();return{x:b.left+b.width/2,y:b.top+b.height/2}})()`);
+			for (const type of ["mouseMoved", "mousePressed", "mouseReleased"]) await ui.call("Input.dispatchMouseEvent", { type, x: point.x, y: point.y, button: "left", clickCount: 1 });
+		};
+
+		await t.test("newline-delimited JSON is one foldable row per record, with a count, a preview, Show all and every record in Copy", async () => {
+			const call = real("bash-ndjson");
+			await reset("ndjson"); await show(call); await open(call);
+			assert.equal(await text(`${card(call)} .omp-format-badge`), "NDJSON · 25 records");
+			assert.equal(await countOf(rowsOf(call)), 12, "the preview is 12 records");
+			assert.equal(await text(`${card(call)} .omp-output-marker > span`), "… 13 more records");
+			assert.equal(await ui.evaluate(`document.querySelector(${JSON.stringify(rowsOf(call))}).textContent.startsWith('{"name":"asset_add_component"')`), true, "a record row is the record's own text");
+			assert.equal(await ui.evaluate(`document.querySelector(${JSON.stringify(`${rowsOf(call)} .omp-json-gutter`)}).dataset.n`), "1", "the record number is the gutter");
+			await pointerClick(`${card(call)} .omp-output-more`);
+			await ui.wait(`document.querySelector(${JSON.stringify(`${card(call)} .omp-tool-collapse`)})`);
+			assert.equal(await countOf(rowsOf(call)), 25, "Show all gives every record");
+			// A record opens as a tree of its own, one level deep (the first record the transcript's scroll position leaves in view).
+			const seen = await ui.evaluate<number>(`[...document.querySelectorAll(${JSON.stringify(rowsOf(call))})].findIndex(row=>row.getBoundingClientRect().top>=0&&row.getBoundingClientRect().bottom<=innerHeight)+1`);
+			assert.ok(seen >= 1, "a record row is in view");
+			await pointerClick(`${rowsOf(call)}:nth-child(${seen}) .omp-json-twisty`);
+			await ui.wait(`document.querySelectorAll(${JSON.stringify(rowsOf(call))}).length>25`);
+			assert.equal(await ui.evaluate(`document.querySelector(${JSON.stringify(`${rowsOf(call)}:nth-child(${seen}) .omp-json-twisty`)}).getAttribute('aria-label')`), "Collapse record");
+			assert.match(await ui.evaluate<string>(`[...document.querySelectorAll(${JSON.stringify(rowsOf(call))})].slice(${seen - 1},${seen + 3}).map(row=>row.textContent.replace(/\\n$/,'')).join('|')`), /^\{\|  "name": "asset_[a-z_]+",\|  "params": \[ … \d+ items \]\|\}(?:\|\{"name":"asset_.*)?$/);
+			await ui.evaluate("window.clip=null;Object.defineProperty(navigator,'clipboard',{configurable:true,value:{async writeText(value){window.clip=value}}})");
+			await ui.evaluate(`document.querySelector(${JSON.stringify(`${card(call)} .omp-output-bar:not(.omp-tool-input *) .omp-iconbtn[aria-label^=Copy]`)}).click()`);
+			await ui.wait("window.clip!==null");
+			assert.equal(await ui.evaluate("window.clip"), splitToolNotices(call.resultText).body, "Copy gives every record");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("a JSON document over 400 lines is coloured with the theme, folds, expands, and switches to the text it came as", async () => {
+			const call = real("bash-json-long-columntruncated");
+			await reset("json-long");
+			await ui.evaluate(`document.body.setAttribute('data-vscode-theme-id','Dark Modern');window.ui.receive({type:'omp:chat-code-theme',themes:[${THEME}]})`);
+			await show(call); await open(call);
+			assert.equal(await text(`${card(call)} .omp-format-badge`), "JSON · lines cut", "OMP cut long lines: the document is shown as JSON, never as parsed data");
+			await ui.wait(`document.querySelector(${JSON.stringify(`${rowsOf(call)} span[style]`)})`);
+			const colours = await ui.evaluate<Array<[string, string]>>(`[...document.querySelectorAll(${JSON.stringify(`${rowsOf(call)} span[style]`)})].slice(0,6).map(span=>[span.textContent,span.style.color])`);
+			assert.deepEqual(colours.slice(0, 3), [['"success"', "rgb(156, 220, 254)"], ["true", "rgb(86, 156, 214)"], ['"command"', "rgb(156, 220, 254)"]]);
+			// Folded to two levels: the nested containers of the document are one row each.
+			assert.match(await text(`${rowsOf(call)}:nth-child(4)`), /"data": \{ … \d+ keys \},?\s*$|"data": \{\s*$/);
+			assert.ok((await countOf(rowsOf(call))) <= 15, "the preview is 12 rows of the folded tree");
+			await ui.evaluate(`document.querySelector(${JSON.stringify(`${card(call)} [aria-label="Expand all"]`)}).click()`);
+			await pointerClick(`${card(call)} .omp-output-more`);
+			await ui.wait(`document.querySelector(${JSON.stringify(`${card(call)} .omp-output-disclosure`)})`);
+			const rows = await countOf(rowsOf(call));
+			assert.ok(rows >= 200 && rows <= 230, `the full view pages a 531-line document (got ${rows} rows in the DOM)`);
+			assert.ok((await ui.evaluate<string>(`document.querySelector(${JSON.stringify(`${card(call)} .omp-pre--rows`)}).parentElement.parentElement.querySelectorAll('.omp-pre--rows')[1].textContent`)).includes("\"warnings\""), "the last rows are shown");
+			// Text is the text it came as; Formatted is back where it was.
+			await ui.evaluate(`[...document.querySelectorAll(${JSON.stringify(`${card(call)} .omp-segment`)})].find(b=>b.textContent==='Text').click()`);
+			await ui.wait(`!document.querySelector(${JSON.stringify(`${card(call)} .omp-tool-body > .omp-json`)})`);
+			assert.equal(await text(`${card(call)} .omp-tool-body pre:not(.omp-tool-input *)`).then(value => value.startsWith('{\n  "success": true')), true);
+			assert.equal(await ui.evaluate(`[...document.querySelectorAll(${JSON.stringify(`${card(call)} .omp-segment`)})].map(b=>b.getAttribute('aria-pressed')).join()`), "false,true");
+			await ui.evaluate(`[...document.querySelectorAll(${JSON.stringify(`${card(call)} .omp-segment`)})].find(b=>b.textContent==='Formatted').click()`);
+			await ui.wait(`document.querySelector(${JSON.stringify(`${card(call)} .omp-tool-body > .omp-json`)})`);
+			await ui.evaluate("window.ui.receive({type:'omp:chat-code-theme',themes:[]});document.body.removeAttribute('data-vscode-theme-id')");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("a compact document is re-indented without changing a single number, and a container folds to its size and back", async () => {
+			const compact = '{"id":12345678901234567890,"big":1e400,"zero":-0,"list":[1,2,3],"meta":{"a":{"b":{"c":1}}}}';
+			const call: Call = { id: "mcp-compact-json", tool: "mcp__demo_tool", args: { query: "x" }, resultText: compact, details: {}, isError: false };
+			await reset("json-compact"); await show(call); await open(call);
+			assert.equal(await text(`${card(call)} .omp-format-badge`), "JSON · 17 lines");
+			const shown = await ui.evaluate<string>(`[...document.querySelectorAll(${JSON.stringify(rowsOf(call))})].map(row=>row.textContent).join('\\n')`);
+			assert.match(shown, /"id": 12345678901234567890,/); assert.match(shown, /"big": 1e400,/); assert.match(shown, /"zero": -0,/);
+			assert.match(shown, /"a": \{ … 1 key \}/, "containers two levels down start folded");
+			await ui.evaluate(`document.querySelector(${JSON.stringify(`${rowsOf(call)} .omp-json-ghost--fold`)}).click()`);
+			await ui.wait(`document.querySelectorAll(${JSON.stringify(rowsOf(call))}).length>12`);
+			await ui.evaluate(`[...document.querySelectorAll(${JSON.stringify(`${card(call)} .omp-segment`)})].find(b=>b.textContent==='Text').click()`);
+			await ui.wait(`!document.querySelector(${JSON.stringify(`${card(call)} .omp-tool-body > .omp-json`)})`);
+			assert.equal(await text(`${card(call)} .omp-tool-body > .omp-native-preview pre`), compact, "Text is exactly the text the tool returned");
+			// Arguments of an unknown tool are a tree too, one level deep, with their own fold state.
+			await ui.evaluate(`[...document.querySelectorAll(${JSON.stringify(`${card(call)} .omp-segment`)})].find(b=>b.textContent==='Formatted').click()`);
+			assert.match(await text(`${card(call)} .omp-tool-section .omp-json`), /"query": "x"/);
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 	} finally {

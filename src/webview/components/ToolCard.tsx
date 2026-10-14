@@ -9,13 +9,15 @@ import { messageText } from "../../shared/format";
 import { ToolTargetText } from "./FileLinks";
 import { MessageContentView } from "./MessageContent";
 import { lateDiagnosticsFiles, recordRows, stringField } from "./native-message-helpers";
-import { Diagnostics, displayText, record, scalar, Section, TextPreview } from "./tool-renderer-primitives";
+import { Diagnostics, displayText, OUTPUT_SCOPE, record, scalar, Section, TextPreview } from "./tool-renderer-primitives";
 import { describeTool, hasNoDetails, hasWaitRows, TOOL_ICONS } from "./tool-renderers";
 import type { ToolSemanticView } from "./tool-render-types";
 import { formatGistDuration, toolGist, type GistPart } from "../../chat/tool-gist";
 import { exitCodeOf, footerParts, splitToolNotices } from "../../chat/tool-notices";
 import { useSecondTick } from "../lib/live-clock";
-import { useObservedToolMs, useToolViewState } from "../lib/tool-view-state";
+import { detectOutputFormat } from "../lib/json-tokens";
+import { FRESH_VIEW, useObservedToolMs, useToolViewState } from "../lib/tool-view-state";
+import { FoldAllButtons } from "./JsonRows";
 import { ToolCopyButton, ToolFooter, ToolViewContext } from "./tool-view";
 
 export interface ToolCardProps {
@@ -142,27 +144,39 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 	// The Wait, Debug and Ask faces say their facts in the head even while closed; every other card says them in its output bar.
 	const metaInHead = waitFace || debugFace || route.name === "ask";
 	const chips = metaInHead ? [] : view?.meta ?? [];
-	const copyText = view?.output?.copy || text;
+	// A format detected in the output (once it settled): its badge, the Formatted | Text switch and the fold buttons live in the bar.
+	const structuredText = view?.output?.structured;
+	const format = useMemo(() => structuredText === undefined || partial ? null : detectOutputFormat(structuredText), [structuredText, partial]);
+	const formatted = format !== null && viewState.format === "formatted";
+	const copyText = formatted && structuredText !== undefined && !view?.output?.copy ? format.copy : view?.output?.copy || text;
 	const outputLabel = view?.output?.label ?? "Output";
 	const showAll = useCallback(() => setViewState({ full: true }), [setViewState]);
-	const toolView = useMemo(() => ({ live: partial, showAll }), [partial, showAll]);
+	const toolView = useMemo(() => ({ live: partial, showAll, view: viewState, update: setViewState, structured: format !== null && structuredText !== undefined ? { text: structuredText, format } : undefined }), [partial, showAll, viewState, setViewState, format, structuredText]);
 	const live = state === "running" && result === undefined;
 	useSecondTick(live && props.startedAt !== undefined);
 	const observedMs = useObservedToolMs(props.callId);
-	useEffect(() => { if (!showBody && full) setViewState({ full: false }); }, [showBody, full, setViewState]);
+	const touched = full || viewState.format !== "formatted" || viewState.folds.size > 0;
+	useEffect(() => { if (!showBody && touched) setViewState(FRESH_VIEW); }, [showBody, touched, setViewState]);
 	const collapse = (): void => {
 		// Focus and selection inside the body hold it open: leave them first, then close.
 		root.current?.querySelector<HTMLButtonElement>(".omp-tool-head")?.focus();
 		const selection = document.getSelection();
 		if (selection && root.current?.contains(selection.anchorNode)) selection.removeAllRanges();
-		setRetained(false); setLocalExpanded(false); props.onExpandedChange?.(false); setViewState({ full: false });
+		setRetained(false); setLocalExpanded(false); props.onExpandedChange?.(false); setViewState(FRESH_VIEW);
 	};
-	const outputBar = view !== undefined && state !== "skipped" && (chips.length > 0 || exit !== undefined && exit !== 0 || copyText !== "")
+	const outputBar = view !== undefined && state !== "skipped" && (chips.length > 0 || exit !== undefined && exit !== 0 || copyText !== "" || format !== null)
 		? <div className="omp-output-bar">
 			{copyText !== "" && <span className="omp-output-label">{outputLabel}</span>}
+			{format !== null && <span className="omp-chip omp-format-badge">{format.badge}</span>}
 			{exit !== undefined && exit !== 0 && <span className="omp-chip omp-chip--err">EXIT {exit}</span>}
 			{chips.map((chip, index) => <span className="omp-chip" key={index}>{displayText(chip)}</span>)}
 			<span className="omp-output-spacer" />
+			{format !== null && <>
+				<span className="omp-segmented" role="group" aria-label="Output format">
+					{(["formatted", "text"] as const).map(choice => <button key={choice} type="button" className="omp-segment" aria-pressed={viewState.format === choice} onClick={() => setViewState({ format: choice })}>{choice === "formatted" ? "Formatted" : "Text"}</button>)}
+				</span>
+				{formatted && <FoldAllButtons source={format} scope={OUTPUT_SCOPE} />}
+			</>}
 			{copyText !== "" && <ToolCopyButton text={copyText} label={`Copy ${outputLabel.toLowerCase()}`} what={`the ${outputLabel.toLowerCase()}`} />}
 		</div> : null;
 	const body = frozen ? retainedBody.current : <ToolViewContext.Provider value={toolView}>

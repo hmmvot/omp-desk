@@ -27,7 +27,7 @@ export interface ToolSemanticView {
 	/** Blocks of what was asked that the head cannot carry (a long or multi-line command, eval code): shown above the output bar. */
 	input?: readonly ToolInputBlock[];
 	/** The output bar's label (default `Output`) and what Copy puts on the clipboard (default the result text without OMP's notices). */
-	output?: { readonly label?: string; readonly copy?: string };
+	output?: { readonly label?: string; readonly copy?: string; /** The text a format is detected in (JSON, newline-delimited JSON): the output the `OutputText` block of the body shows. */ readonly structured?: string };
 	/** One-line face extras rendered in the collapsed header after the target. */
 	inline?: ReactNode;
 	/** Right-aligned header slot, after every other face element (a component may own a clock). */

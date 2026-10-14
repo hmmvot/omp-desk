@@ -11,7 +11,10 @@ import { languageForPath, languageId } from "../lib/code-languages";
 import { useCodeLines } from "../lib/use-highlighted-runs";
 import { WebLink } from "./WebLinks";
 import { webLinkUrl } from "../../shared/terminal-links";
-import { OutputRows, PREVIEW_ROWS, ShowAll } from "./tool-view";
+import { OutputRows, PREVIEW_ROWS, ShowAll, useToolViewContext } from "./tool-view";
+import { JsonRows } from "./JsonRows";
+import type { JsonSource } from "../lib/json-rows";
+import { jsonTreeOfValue } from "../lib/json-tokens";
 
 export function record(value: unknown): Record<string, unknown> { return isRecord(value) ? value : {}; }
 export function string(value: unknown): string { return typeof value === "string" ? value : ""; }
@@ -129,34 +132,24 @@ export function DiffPreview({ text, expanded, lines = PREVIEW_ROWS, path, closed
 export function Section({ title, link, children }: { title?: string; link?: ExplicitFileLink; children: ReactNode }): ReactNode {
 	return <section className="omp-tool-section">{title !== undefined && <div className="omp-tool-section-title"><FileLinkText text={title} link={link} /></div>}{children}</section>;
 }
-/** Bounded JSON view for tool arguments and display output. */
-export function JsonOutput({ value, expanded, omitAbsent = false }: { value: unknown; expanded: boolean; omitAbsent?: boolean }): ReactNode {
-	const maxDepth = 6;
-	const maxLines = 400;
-	const maxScalar = 2000;
-	const lines: string[] = [];
-	let truncated = false;
-	function visit(item: unknown, label: string, depth: number): void {
-		if (omitAbsent && item == null) return;
-		if (lines.length >= maxLines) { truncated = true; return; }
-		const prefix = `${"  ".repeat(depth)}${label}`;
-		if (item !== null && typeof item === "object") {
-			const array = Array.isArray(item);
-			lines.push(`${prefix}${array ? "[]" : "{}"}`);
-			for (const key in item) {
-				if (!Object.hasOwn(item, key) || depth === 0 && (key === "i" || key === "__partialJson")) continue;
-				const child = array ? item[Number(key)] : (item as Record<string, unknown>)[key];
-				if (omitAbsent && child == null) continue;
-				if (depth >= maxDepth || lines.length >= maxLines) { truncated = true; break; }
-				visit(child, `${array ? `[${key}]` : displayText(key)}: `, depth + 1);
-			}
-			return;
-		}
-		const text = typeof item === "string" ? JSON.stringify(displayText(item)) : String(item);
-		lines.push(`${prefix}${text.length > maxScalar ? `${text.slice(0, maxScalar)}…` : text}`);
-	}
-	visit(value, "", 0);
-	return <><OutputRows all={lines} expanded={expanded} render={rows => <pre className="omp-pre">{rows.join("\n")}</pre>} />{truncated && <div className="omp-empty-note">…</div>}</>;
+/** The id the card's primary output keeps its folds under. */
+export const OUTPUT_SCOPE = "output";
+/**
+ * A tool's primary output as text: the format the card detected in it (JSON, newline-delimited JSON) shown as a
+ * folding tree unless the reader chose Text, else plain rows. Output the card detected nothing in, and any other
+ * text, is a `TextPreview`.
+ */
+export function OutputText({ text, expanded, tail = false }: { text: string; expanded: boolean; tail?: boolean }): ReactNode {
+	const { structured, view } = useToolViewContext();
+	if (structured === undefined || structured.text !== text || (view?.format ?? "formatted") === "text") return <TextPreview text={text} expanded={expanded} tail={tail} />;
+	return <JsonRows source={structured.format} scope={OUTPUT_SCOPE} expanded={expanded} />;
+}
+/**
+ * A value tool arguments or display output carry, as a folding tree. `id` is where the card keeps its folds.
+ */
+export function JsonOutput({ value, expanded, omitAbsent = false, id = "value" }: { value: unknown; expanded: boolean; omitAbsent?: boolean; id?: string }): ReactNode {
+	const source = useMemo((): JsonSource => ({ kind: "json", tree: jsonTreeOfValue(value, { absent: omitAbsent, rootKeys: ["i", "__partialJson"] }) }), [value, omitAbsent]);
+	return <JsonRows source={source} scope={id} expanded={expanded} />;
 }
 export function ToolImage({ value }: { value: unknown }): ReactNode {
 	const image = record(value);
