@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Chat: code is no longer wrapped, it scrolls sideways. An expanded Grep, Read, Bash or Eval result broke a long source line onto a second row under the line-number gutter (and the highlighted match with it); the 12-row preview and any full view of up to 120 rows wrapped by default, and Command output and the Bash and Python execution blocks wrapped too. Every code block now keeps one row per line, scrolls horizontally with the line numbers and highlight bands intact (a highlighted row spans the whole scroll width), and leaves the vertical wheel to the transcript (Shift+wheel or a horizontal wheel scrolls the block). The toolbar's **Wrap** switch is now off at every size and wraps only when you turn it on, per card. Long inline code, such as a path in a paragraph or a list item, still wraps; the earlier wrapping change had reached code blocks too.
+
 ## [0.4.1] - 2026-10-14
 
 ### Fixed

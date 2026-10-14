@@ -166,8 +166,11 @@ ${ANSI_STYLES}
 
 .omp-command-output {
 	margin: 0;
-	white-space: pre-wrap;
-	overflow-wrap: anywhere;
+	/* Command output is code: it scrolls sideways, it does not wrap. */
+	white-space: pre;
+	overflow-wrap: normal;
+	overflow-x: auto;
+	overflow-y: hidden;
 	font-family: var(--omp-mono);
 	font-size: var(--omp-mono-size);
 }
@@ -359,7 +362,6 @@ ${ANSI_STYLES}
  * without that the preformatted-text colours. Plain code and code that later becomes a link look the same.
  */
 .omp-md code {
-	overflow-wrap: anywhere;
 	--omp-code-ink: var(--omp-inline-code, var(--vscode-debugTokenExpression-string));
 	--omp-code-tint: color-mix(in srgb, var(--omp-code-ink) 14%, transparent);
 	font-family: var(--omp-mono);
@@ -369,6 +371,8 @@ ${ANSI_STYLES}
 	border-radius: var(--omp-radius);
 	padding: 0 4px;
 }
+/* Only inline code wraps (a long path breaks at the paragraph's edge); a code block never does. */
+.omp-md :not(pre) > code { overflow-wrap: anywhere; }
 /* High Contrast keeps the theme's own preformatted colours: a tint is not distinguishable there. */
 .vscode-high-contrast .omp-md :not(pre) > code, .vscode-high-contrast-light .omp-md :not(pre) > code {
 	color: var(--vscode-textPreformat-foreground, var(--vscode-foreground));
@@ -401,6 +405,10 @@ ${ANSI_STYLES}
 	border-radius: var(--omp-radius-card);
 	padding: 10px 12px;
 	overflow-x: auto;
+	overflow-y: hidden;
+	/* Fenced code scrolls sideways; only inline code in a paragraph wraps. */
+	white-space: pre;
+	overflow-wrap: normal;
 	margin: 8px 0;
 }
 .omp-md pre code { color: inherit; background: none; padding: 0; font-size: var(--omp-mono-size); line-height: 1.45; }
@@ -523,8 +531,11 @@ ${ANSI_STYLES}
 	border-radius: var(--omp-radius);
 	padding: 4px 6px;
 	margin: 0;
-	white-space: pre-wrap;
-	word-break: break-word;
+	/* A grid of one column: every row is as wide as the widest line or the block, whichever is wider, so a highlighted row (a match, an added line) spans the whole scroll width, not just the viewport. */
+	display: grid;
+	white-space: pre;
+	overflow-wrap: normal;
+	word-break: normal;
 	max-height: none;
 	overflow-x: auto;
 	overflow-y: hidden;
@@ -863,7 +874,7 @@ ${MERMAID_STYLES}
 .omp-native-message h4 { margin: 8px 0; }
 .omp-native-disclosure, .omp-native-child { margin: 6px 0; }
 .omp-native-disclosure > summary, .omp-native-child > summary { cursor: pointer; color: var(--omp-muted); }
-.omp-native-code, .omp-native-output, .omp-native-message pre { font-family: var(--omp-mono); font-size: var(--omp-mono-size); white-space: pre-wrap; overflow-wrap: anywhere; max-width: 100%; }
+.omp-native-code, .omp-native-output, .omp-native-message pre { font-family: var(--omp-mono); font-size: var(--omp-mono-size); white-space: pre; overflow-wrap: normal; overflow-x: auto; overflow-y: hidden; max-width: 100%; }
 .omp-native-code { padding: 8px; color: var(--vscode-foreground); background: var(--vscode-textCodeBlock-background); border-radius: var(--omp-radius); }
 .omp-native-status, .omp-native-divider { padding: 6px 0; color: var(--omp-muted); }
 .omp-native-divider { border-top: 1px solid var(--omp-border); }

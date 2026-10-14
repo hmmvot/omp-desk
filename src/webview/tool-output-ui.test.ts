@@ -516,6 +516,110 @@ test("an opened tool call rests as a bounded preview, shows its gist and footer,
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		// A source line of 200+ characters: wider than the 720 px panel.
+		const wide = `Session.Current.Window.Options.SetOption(flag, options.GetOption(flag)); // ${"x".repeat(120)}`;
+		/** Geometry of one code block: its scroll box, how it breaks and the heights of its rows (one value when no row wrapped). */
+		const blockOf = (selector: string): Promise<{ scroll: [number, number]; whiteSpace: string; rowHeights: number[]; overflowY: string }> => ui.evaluate(`(()=>{
+		 const pre=document.querySelector(${JSON.stringify(selector)}),rows=[...pre.children].filter(node=>node.tagName==='SPAN');
+		 return{scroll:[pre.scrollWidth,pre.clientWidth],whiteSpace:getComputedStyle(pre).whiteSpace,overflowY:getComputedStyle(pre).overflowY,rowHeights:[...new Set(rows.map(row=>Math.round(row.getBoundingClientRect().height)))]}})()`);
+		const frames = (): Promise<void> => ui.evaluate("new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)))");
+		const wideCalls: readonly Call[] = [
+			{ id: "grep-wide-line", tool: "grep", args: { pattern: "SetOption", path: "src" }, isError: false, details: {}, resultText: `# src/\n## Session.cs#ABCD\n 75:    if (flag != null) {\n*76:${wide}\n 77:    }` },
+			{ id: "read-wide-line", tool: "read", args: { path: "src/Session.cs" }, isError: false, details: {}, resultText: `1:using System;\n2:${wide}\n3:}` },
+			{ id: "bash-wide-line", tool: "bash", args: { command: "cat Session.cs" }, isError: false, details: { exitCode: 0, wallTimeMs: 12 }, resultText: `using System;\n${wide}\n}` },
+		];
+
+		await t.test("a long source line of a grep, a read or a command stays one row and scrolls sideways, in the preview and by default in the full view", async () => {
+			for (const call of wideCalls) {
+				await reset(`wide-${call.id}`); await show(call); await open(call);
+				const preview = await blockOf(`${card(call)} .omp-tool-body pre.omp-pre:not(.omp-tool-input *)`);
+				assert.equal(preview.whiteSpace, "pre", `${call.tool}: code does not wrap`);
+				assert.equal(preview.rowHeights.length, 1, `${call.tool}: every row, the long one too, is one row high (${preview.rowHeights})`);
+				assert.ok(preview.scroll[0] > preview.scroll[1], `${call.tool}: the block scrolls sideways (${preview.scroll})`);
+				assert.equal(preview.overflowY, "hidden", `${call.tool}: the block is no vertical scroll owner`);
+			}
+			// The match band of the grep spans the whole scroll width, not only the viewport.
+			const grep = wideCalls[0]!;
+			await reset("wide-grep-band"); await show(grep); await open(grep);
+			const band = await ui.evaluate<{ match: number; scroll: number; short: number }>(`(()=>{const pre=document.querySelector(${JSON.stringify(`${card(grep)} .omp-tool-body pre.omp-pre`)}),match=pre.querySelector('.omp-native-match'),short=[...pre.children].find(span=>!span.classList.contains('omp-native-match')&&span.textContent.includes('flag != null'));
+			 const style=getComputedStyle(pre),padding=parseFloat(style.paddingLeft)+parseFloat(style.paddingRight);return{match:match.getBoundingClientRect().width,scroll:pre.scrollWidth-padding,short:short.getBoundingClientRect().width}})()`);
+			assert.ok(Math.abs(band.match - band.scroll) <= 1, `the highlighted row is as wide as the whole scroll width (${band.match} of ${band.scroll})`);
+			assert.ok(Math.abs(band.short - band.scroll) <= 1, "and so is every other row");
+			// A full view of up to 120 rows (a 40-line file) starts with wrap off and scrolls too.
+			const file: Call = { id: "read-wide-40", tool: "read", args: { path: "src/Session.cs" }, isError: false, details: {}, resultText: Array.from({ length: 40 }, (_, index) => `${index + 1}:${index === 20 ? wide : `line ${index + 1}`}`).join("\n") };
+			await reset("wide-full"); await show(file); await open(file);
+			await pointerClick(`${card(file)} .omp-output-more`);
+			await ui.wait(`document.querySelector(${JSON.stringify(`${card(file)} .omp-tool-toolbar`)})`);
+			const wrapButton = `${card(file)} .omp-tool-toolbar [aria-label="Wrap long lines"]`;
+			const pre = `${card(file)} .omp-tool-body pre.omp-pre`;
+			assert.equal(await ui.evaluate(`document.querySelector(${JSON.stringify(wrapButton)}).getAttribute('aria-pressed')`), "false", "wrap starts off at 40 lines as at 4,200");
+			const nowrap = await blockOf(pre);
+			assert.equal(nowrap.rowHeights.length, 1);
+			assert.ok(nowrap.scroll[0] > nowrap.scroll[1], "the full view of 40 lines scrolls sideways");
+			const height = await ui.evaluate<number>(`document.querySelector(${JSON.stringify(pre)}).getBoundingClientRect().height`);
+			// The explicit Wrap switch still wraps, and switching it off scrolls again.
+			await ui.evaluate(`document.querySelector(${JSON.stringify(wrapButton)}).click()`);
+			await ui.wait(`document.querySelector(${JSON.stringify(wrapButton)}).getAttribute('aria-pressed')==='true'`);
+			const wrapped = await blockOf(pre);
+			assert.equal(wrapped.whiteSpace, "pre-wrap");
+			assert.ok(wrapped.scroll[0] <= wrapped.scroll[1], `wrapped, the block does not scroll (${wrapped.scroll})`);
+			assert.ok(await ui.evaluate<number>(`document.querySelector(${JSON.stringify(pre)}).getBoundingClientRect().height`) > height, "the long line takes more than one row");
+			await ui.evaluate(`document.querySelector(${JSON.stringify(wrapButton)}).click()`);
+			await ui.wait(`document.querySelector(${JSON.stringify(wrapButton)}).getAttribute('aria-pressed')==='false'`);
+			assert.equal((await blockOf(pre)).whiteSpace, "pre");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("a vertical wheel over a wide block scrolls the transcript; a horizontal wheel and Shift+wheel scroll the block", async () => {
+			const call: Call = { id: "read-wide-300", tool: "read", args: { path: "src/Session.cs" }, isError: false, details: {}, resultText: Array.from({ length: 300 }, (_, index) => `${index + 1}:${wide}`).join("\n") };
+			await reset("wide-wheel"); await show(call); await open(call);
+			await pointerClick(`${card(call)} .omp-output-more`);
+			await ui.wait(`document.querySelector(${JSON.stringify(`${card(call)} .omp-window`)})`);
+			const block = `${card(call)} .omp-window`;
+			const state = (): Promise<{ top: number; left: number; max: number }> => ui.evaluate(`(()=>{const t=document.querySelector('.omp-transcript'),w=document.querySelector(${JSON.stringify(block)});return{top:t.scrollTop,left:w.scrollLeft,max:w.scrollWidth-w.clientWidth}})()`);
+			assert.ok((await state()).max > 0, "the windowed block has something to scroll sideways");
+			await ui.evaluate(`document.querySelector(${JSON.stringify(block)}).scrollIntoView({block:'start',behavior:'instant'})`);
+			await frames();
+			const at = await ui.evaluate<{ x: number; y: number }>(`(()=>{const b=document.querySelector(${JSON.stringify(block)}).getBoundingClientRect(),t=document.querySelector('.omp-transcript').getBoundingClientRect();return{x:b.left+b.width/2,y:(Math.max(b.top,t.top)+Math.min(b.bottom,t.bottom))/2}})()`);
+			const until = (expression: string): Promise<boolean> => ui.evaluate(`(async()=>{const end=performance.now()+3000;while(performance.now()<end){if(${expression})return true;await new Promise(resolve=>requestAnimationFrame(resolve))}return false})()`);
+			const transcript = "document.querySelector('.omp-transcript')", scroller = `document.querySelector(${JSON.stringify(block)})`;
+			const before = await state();
+			await ui.call("Input.dispatchMouseEvent", { type: "mouseMoved", ...at });
+			// Upward: it also detaches the transcript from the tail, which would otherwise pin it back to the bottom.
+			await ui.call("Input.dispatchMouseEvent", { type: "mouseWheel", ...at, deltaX: 0, deltaY: -120 });
+			assert.equal(await until(`${transcript}.scrollTop<${before.top}`), true, "a vertical wheel scrolled the transcript");
+			assert.equal((await state()).left, 0, "and left the block where it was");
+			await ui.call("Input.dispatchMouseEvent", { type: "mouseWheel", ...at, deltaX: 120, deltaY: 0 });
+			assert.equal(await until(`${scroller}.scrollLeft>0`), true, "a horizontal wheel scrolled the block");
+			await ui.evaluate(`(async()=>{let last=-1,stable=0;while(stable<12){await new Promise(resolve=>requestAnimationFrame(resolve));const top=${transcript}.scrollTop;stable=top===last?stable+1:0;last=top}${scroller}.scrollLeft=0})()`);
+			const mark = await state();
+			await ui.call("Input.dispatchMouseEvent", { type: "mouseWheel", ...at, deltaX: 0, deltaY: 120, modifiers: 8 });
+			assert.equal(await until(`${scroller}.scrollLeft>0`), true, "Shift+wheel scrolled the block");
+			assert.equal((await state()).top, mark.top, "and not the transcript");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("a fenced Markdown block and a command output scroll sideways, while long inline code in a paragraph and a list item still wraps", async () => {
+			await reset("md-code");
+			const longPath = "src/webview/components/some/very/deeply/nested/directory/structure/with/a/long/file-name-that-keeps-going-and-going.component.test.tsx";
+			const text = `A paragraph that mentions \`${longPath}\` in the middle of a sentence.\n\n- an item with \`${longPath}\`\n\n\`\`\`cs\n${wide}\n\`\`\`\n`;
+			const entries = [{ type: "message", id: "m1", parentId: null, timestamp: "2026-10-02T00:00:00Z", message: { role: "assistant", model: "m", timestamp: 1, stopReason: "stop", content: [{ type: "text", text }] } }];
+			await ui.evaluate(`window.ui.push({entries:${JSON.stringify(entries)},durableCount:1,working:false,settled:true,ephemeral:[{id:'command',kind:'command_output',anchorId:'m1',seq:1,timestamp:2,payload:{text:${JSON.stringify(wide)}}}]})`);
+			await ui.wait("document.querySelector('.omp-md pre code') && document.querySelector('.omp-command-output')");
+			await frames();
+			const shown = await ui.evaluate<{ fence: [number, number]; fenceSpace: string; command: [number, number]; commandSpace: string; commandRows: number; inline: { lines: number; overflow: boolean }[]; transcript: [number, number] }>(`(()=>{
+			 const box=el=>[el.scrollWidth,el.clientWidth],t=document.querySelector('.omp-transcript'),fence=document.querySelector('.omp-md pre'),command=document.querySelector('.omp-command-output');
+			 const inline=['.omp-md p code','.omp-md li code'].map(selector=>{const code=document.querySelector(selector),host=code.closest('p,li');return{lines:new Set([...code.getClientRects()].map(rect=>Math.round(rect.top))).size,overflow:host.scrollWidth>host.clientWidth}});
+			 const lines=el=>{const range=document.createRange();range.selectNodeContents(el);return new Set([...range.getClientRects()].map(rect=>Math.round(rect.top))).size};
+			 return{fence:box(fence),fenceSpace:getComputedStyle(fence).whiteSpace,command:box(command),commandSpace:getComputedStyle(command).whiteSpace,commandRows:lines(command),inline,transcript:box(t)}})()`);
+			assert.equal(shown.fenceSpace, "pre"); assert.ok(shown.fence[0] > shown.fence[1], `the fenced block scrolls (${shown.fence})`);
+			assert.equal(shown.commandSpace, "pre"); assert.ok(shown.command[0] > shown.command[1], `the command output scrolls (${shown.command})`);
+			assert.ok(shown.commandRows <= 1, `the command output is one row (${shown.commandRows})`);
+			for (const inline of shown.inline) { assert.ok(inline.lines > 1, "long inline code breaks over lines"); assert.equal(inline.overflow, false, "and does not overflow its paragraph"); }
+			assert.ok(shown.transcript[0] <= shown.transcript[1], "the transcript never scrolls sideways");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("a screen reader gets the whole text of a long output in the page, up to 5,000 lines", async () => {
 			const call = longCall;
 			await reset("reader");

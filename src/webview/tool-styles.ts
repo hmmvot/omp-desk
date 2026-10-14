@@ -71,10 +71,10 @@ export const TOOL_STYLES = `
 /* The windowed full view: a block of fixed-height rows in the normal flow of the transcript. There is no scroller of its own: it clips sideways only. */
 .omp-window { position: relative; overflow-x: auto; overflow-y: hidden; padding-bottom: 14px; box-sizing: content-box; font-family: var(--omp-mono); font-size: var(--omp-mono-size); background: var(--vscode-textCodeBlock-background); border-radius: var(--omp-radius); }
 .omp-window-layer { position: absolute; left: 0; min-width: 100%; }
-.omp-window .omp-pre, .omp-rows--nowrap .omp-pre { white-space: pre; word-break: normal; }
 .omp-window .omp-pre { background: transparent; line-height: var(--omp-row-h); overflow: visible; }
-.omp-window .omp-native-code-line, .omp-window .omp-native-diff .omp-pre > span { white-space: pre; height: var(--omp-row-h); }
-.omp-rows--nowrap .omp-native-code-line, .omp-rows--nowrap .omp-native-diff .omp-pre > span { white-space: pre; }
+.omp-window .omp-native-code-line, .omp-window .omp-native-diff .omp-pre > span { height: var(--omp-row-h); }
+/* Code never wraps: every block of rows scrolls sideways. Only the reader's explicit Wrap (the toolbar switch) wraps them. */
+.omp-rows--wrap .omp-pre { white-space: pre-wrap; word-break: break-word; overflow-wrap: anywhere; }
 .omp-prose-clip { max-height: 21em; overflow: hidden; }
 .omp-native-tool .omp-tool-head > .omp-gist { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--omp-muted); font-variant-numeric: tabular-nums; }
 .omp-gist--err { color: var(--vscode-errorForeground); }
@@ -92,9 +92,8 @@ export const TOOL_STYLES = `
 .omp-native-match { background: var(--vscode-editor-findMatchHighlightBackground); }
 .omp-native-line-number { display: inline-block; min-width: 3em; margin-right: 10px; text-align: right; color: var(--vscode-editorLineNumber-foreground, var(--omp-muted)); user-select: none; }
 .omp-native-code-line, .omp-native-diff .omp-pre > span { display: block; min-height: 1em; }
-.omp-native-code-line { white-space: pre-wrap; }
 .omp-native-diff .omp-pre { padding: 0; }
-.omp-native-diff .omp-pre > span { padding: 0 6px; white-space: pre-wrap; }
+.omp-native-diff .omp-pre > span { padding: 0 6px; }
 .omp-native-diff-sign { display: inline-block; width: 1em; }
 .omp-native-diff-add { background: var(--vscode-diffEditor-insertedLineBackground, var(--vscode-diffEditor-insertedTextBackground)); }
 .omp-native-diff-remove { color: var(--vscode-gitDecoration-deletedResourceForeground, var(--vscode-testing-iconFailed)); background: var(--vscode-diffEditor-removedLineBackground, var(--vscode-diffEditor-removedTextBackground)); }
@@ -151,7 +150,6 @@ export const TOOL_STYLES = `
 .omp-tone--err { color: var(--vscode-errorForeground); }
 .omp-tone--warn { color: var(--vscode-editorWarning-foreground); }
 .omp-tone--pass { color: var(--vscode-testing-iconPassed); }
-.omp-window .omp-row, .omp-rows--nowrap .omp-row { white-space: pre; }
 .omp-window .omp-row { height: var(--omp-row-h); }
 .omp-fold-all { display: inline-flex; }
 @media (max-width: 460px) { .omp-fold-all { display: none; } }

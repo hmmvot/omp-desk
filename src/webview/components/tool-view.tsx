@@ -79,21 +79,21 @@ function WindowedList<T>({ all, render, widthCh }: { all: readonly T[]; render: 
 
 /**
  * The full view of a block of rows. Rows of one height (text, code, diff and JSON rows: `fixed`) are windowed once
- * there are more than 120 of them and wrap is off (the default beyond 120 rows); with wrap on at most 1,500 are rendered,
- * and a screen reader gets the whole text up to 5,000 rows. Anything else is paged.
+ * there are more than 120 of them and wrap is off (the default: code scrolls sideways); with wrap on (the reader's
+ * explicit choice) at most 1,500 are rendered, and a screen reader gets the whole text up to 5,000 rows. Anything else is paged.
  */
 function FullRows<T>({ all, render, fixed, widthCh }: { all: readonly T[]; render: (rows: readonly T[], offset: number) => ReactNode; fixed: boolean; widthCh?: number }): ReactNode {
 	const { view } = useToolViewContext();
 	const reader = useScreenReaderMode();
 	if (!fixed) return <PagedRows all={all} render={render} />;
 	const count = all.length;
-	const wrap = view?.wrap ?? count <= WINDOW_AFTER_ROWS;
+	const wrap = view?.wrap === true;
 	const whole = count <= WINDOW_AFTER_ROWS || reader && count <= READER_MAX_ROWS;
-	if (whole) return <div className={wrap ? undefined : "omp-rows--nowrap"}>{render(all, 0)}</div>;
+	if (whole) return <div className={wrap ? "omp-rows--wrap" : undefined}>{render(all, 0)}</div>;
 	if (wrap) {
-		return <div>{render(all.slice(0, WRAP_MAX_ROWS), 0)}{count > WRAP_MAX_ROWS && <div className="omp-empty-note">Wrapped lines show the first {grouped(WRAP_MAX_ROWS)} of {grouped(count)} lines; turn wrap off to go through all of them.</div>}</div>;
+		return <div className="omp-rows--wrap">{render(all.slice(0, WRAP_MAX_ROWS), 0)}{count > WRAP_MAX_ROWS && <div className="omp-empty-note">Wrapped lines show the first {grouped(WRAP_MAX_ROWS)} of {grouped(count)} lines; turn wrap off to go through all of them.</div>}</div>;
 	}
-	return <div className="omp-rows--nowrap"><WindowedList all={all} render={render} widthCh={widthCh} /></div>;
+	return <WindowedList all={all} render={render} widthCh={widthCh} />;
 }
 export interface OutputRowsProps<T> {
 	readonly all: readonly T[];

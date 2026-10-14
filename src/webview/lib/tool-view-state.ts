@@ -23,17 +23,17 @@ export interface ToolViewState {
 	readonly folds: ReadonlyMap<string, FoldState>;
 	/** Only the lines that contain this (any case) are shown in the full view; empty shows them all. */
 	readonly filter: string;
-	/** Long lines wrap (`true`), or run on and scroll sideways (`false`); `null` is the card's default for the size of its output. */
-	readonly wrap: boolean | null;
+	/** Long lines wrap (`true`), or run on and scroll sideways (`false`, the default: code is never wrapped unless the reader turns Wrap on). */
+	readonly wrap: boolean;
 	/** How many lines the output had when the card went full: the transcript estimates the height of a card it has not measured from it. */
 	readonly rows: number;
 	/** The card shows its raw result and details under the body (the `⋯` menu's View raw result and details). */
 	readonly raw: boolean;
 }
 
-const INITIAL: ToolViewState = { full: false, format: "formatted", folds: new Map(), filter: "", wrap: null, rows: 0, raw: false };
+const INITIAL: ToolViewState = { full: false, format: "formatted", folds: new Map(), filter: "", wrap: false, rows: 0, raw: false };
 /** What a card forgets when it closes. */
-export const FRESH_VIEW: Partial<ToolViewState> = { full: false, format: "formatted", folds: new Map(), filter: "", wrap: null, rows: 0, raw: false };
+export const FRESH_VIEW: Partial<ToolViewState> = { full: false, format: "formatted", folds: new Map(), filter: "", wrap: false, rows: 0, raw: false };
 const MAX_ENTRIES = 256;
 const states = new Map<string, ToolViewState>();
 const listeners = new Set<() => void>();

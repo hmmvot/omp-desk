@@ -15,7 +15,6 @@ import type { ToolSemanticView } from "./tool-render-types";
 import { formatGistDuration, toolGist, type GistPart } from "../../chat/tool-gist";
 import { exitCodeOf, footerParts, splitToolNotices } from "../../chat/tool-notices";
 import { useSecondTick } from "../lib/live-clock";
-import { WINDOW_AFTER_ROWS } from "../lib/use-windowed-rows";
 import { detectOutput } from "../lib/output-format";
 import { FRESH_VIEW, useObservedToolMs, useToolViewState } from "../lib/tool-view-state";
 import { useArtifactOpener } from "../lib/artifact-opener";
@@ -163,7 +162,7 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 	const live = state === "running" && result === undefined;
 	useSecondTick(live && props.startedAt !== undefined);
 	const observedMs = useObservedToolMs(props.callId);
-	const touched = full || viewState.raw || viewState.format !== "formatted" || viewState.folds.size > 0 || viewState.filter !== "" || viewState.wrap !== null;
+	const touched = full || viewState.raw || viewState.format !== "formatted" || viewState.folds.size > 0 || viewState.filter !== "" || viewState.wrap;
 	useEffect(() => { if (!showBody && touched) setViewState(FRESH_VIEW); }, [showBody, touched, setViewState]);
 	const collapse = (): void => {
 		// Focus and selection inside the body hold it open: leave them first, then close.
@@ -201,7 +200,7 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 	const outputLines = useMemo(() => full ? copyText.split("\n") : [], [full, copyText]);
 	const filterText = viewState.filter.trim().toLowerCase();
 	const filterMatches = useMemo(() => filterText === "" ? 0 : outputLines.filter(line => line.toLowerCase().includes(filterText)).length, [outputLines, filterText]);
-	const wrapOn = viewState.wrap ?? outputLines.length <= WINDOW_AFTER_ROWS;
+	const wrapOn = viewState.wrap;
 	const toolbar = full ? <div className="omp-tool-toolbar">
 		<span className="omp-tool-collapse"><button type="button" className="omp-output-more" onClick={collapse}><span className="codicon codicon-chevron-up" aria-hidden="true" />Collapse</button></span>
 		<input type="text" className="omp-tool-filter" aria-label="Filter lines" placeholder="Filter lines" value={viewState.filter} spellCheck={false}
