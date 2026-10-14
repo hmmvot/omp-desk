@@ -55,7 +55,7 @@ function body(c: ToolRenderContext): ReactNode {
 }
 
 function view(c: ToolRenderContext, title: string, target: string, patch: Partial<ToolSemanticView> = {}): ToolSemanticView {
-	return { title, family: "vscode-debug", target: target || undefined, preview: "none", body: body(c), tone: c.isError ? "error" : undefined, ...patch };
+	return { title, family: "vscode-debug", target: target || undefined, body: body(c), tone: c.isError ? "error" : undefined, ...patch };
 }
 
 function configs(c: ToolRenderContext): ToolSemanticView {

@@ -1,5 +1,5 @@
 import type { ReactNode } from "react";
-import { memo, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { AgentActivity, RunningAgent } from "../../chat/agents";
 import type { ChatContent, CustomMessage, ToolResultMessage } from "../../chat/messages";
 import { isInterruptedToolResult, parseChatContent } from "../../chat/messages";
@@ -12,6 +12,11 @@ import { lateDiagnosticsFiles, recordRows, stringField } from "./native-message-
 import { Diagnostics, displayText, record, scalar, Section, TextPreview } from "./tool-renderer-primitives";
 import { describeTool, hasNoDetails, hasWaitRows, TOOL_ICONS } from "./tool-renderers";
 import type { ToolSemanticView } from "./tool-render-types";
+import { formatGistDuration, toolGist, type GistPart } from "../../chat/tool-gist";
+import { exitCodeOf, footerParts, splitToolNotices } from "../../chat/tool-notices";
+import { useSecondTick } from "../lib/live-clock";
+import { useObservedToolMs, useToolViewState } from "../lib/tool-view-state";
+import { ToolCopyButton, ToolFooter, ToolViewContext } from "./tool-view";
 
 export interface ToolCardProps {
 	name: string;
@@ -32,6 +37,11 @@ export interface ToolCardProps {
 	onExpandedChange?: (expanded: boolean) => void;
 	autoExpanded?: boolean;
 	cwd?: string;
+	/** Where the card keeps what it remembers beyond being open (it shows everything): one key per call. */
+	viewKey?: string;
+	/** When the call began (a running call's live clock) and, once settled, when its result arrived (the head gist's derived duration). */
+	startedAt?: number;
+	endedAt?: number;
 }
 
 const STATE_ICONS: Record<NonNullable<ToolCardProps["status"]>, string> = {
@@ -54,6 +64,11 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 	const retainedView = useRef<ToolSemanticView | undefined>(undefined);
 	const retainedBody = useRef<ReactNode>(null);
 	const bodyId = useId();
+	const [viewState, setViewState] = useToolViewState(props.viewKey);
+	const full = viewState.full;
+	const retainedState = useRef(viewState);
+	// A body held for a selection or focus is kept as it was, unless the reader has since changed what it shows (Show all, a format, a fold): that is applied at once.
+	const frozen = retained && retainedState.current === viewState;
 	useEffect(() => {
 		const holdsDetail = (): boolean => {
 			const element = root.current;
@@ -85,7 +100,9 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 		if (!Array.isArray(value)) return [];
 		return value.map(parseChatContent).filter((block): block is ChatContent => block !== null);
 	}, [result, partialResult]);
-	const text = messageText(source);
+	const rawText = messageText(source);
+	const split = useMemo(() => splitToolNotices(displayText(rawText)), [rawText]);
+	const text = split.body;
 	const metadata = useMemo(() => toolPresentation({ call: { type: "toolCall", id: props.callId ?? "", name, arguments: record(args) }, entryId: "", result, active: partialResult !== undefined || streamUpdate !== undefined ? { toolCallId: props.callId ?? "", toolName: name, args, partialResult, streamUpdate, startedAt: 0 } : undefined, status: state, mutable: partial, attachments: attachments ?? [] }, props.cwd), [name, args, result, partialResult, streamUpdate, state, partial, attachments, props.callId, props.cwd]);
 	/** The Task row's head: `N agents: Name1, Name2` (never the sub-agent prompt), and the per-agent `name · agent · status` list as its tooltip. */
 	const compactTarget = useMemo((): { digest: string; detail: string } | null => {
@@ -111,33 +128,76 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 	const pendingAsk = metadata.route.name === "ask" && result === undefined && (state === "running" || state === "queued");
 	// The host-run debug tools carry their one-line face (outcome, clock) in their renderer, so it is built while collapsed too.
 	const debugFace = Object.hasOwn(DEBUG_TOOL_TITLES, name);
-	const view = showBody || waitFace || debugFace || metadata.route.name === "ask" ? retained && retainedView.current ? retainedView.current : describeTool({
-		name, args: record(args), details, stream, text, expanded: showBody, partial,
+	const view = showBody || waitFace || debugFace || metadata.route.name === "ask" ? frozen && retainedView.current ? retainedView.current : describeTool({
+		name, args: record(args), details, stream, text, expanded: full, partial,
 		hasResult: metadata.route.name === "ask" ? result !== undefined : source !== undefined, isError: state === "error",
 		callId: props.callId, agents: props.agents, agentActivity: props.agentActivity, renderChild: props.renderChild, cwd: props.cwd,
 	}) : undefined;
-	const failed = state !== "skipped" && (metadata.failed || !retained && view?.tone === "error");
+	const failed = state !== "skipped" && (metadata.failed || !frozen && view?.tone === "error");
 	const diagnosticCount = metadata.warnings;
 	const nontext = content.filter(block => block.type !== "text");
 	const errorText = failed ? scalar(details.error) : "";
-	const body = retained ? retainedBody.current : <>
-		{errorText && !text.includes(errorText) && <Section title="Error"><TextPreview text={errorText} expanded={expanded} lines={4} /></Section>}
-		{state === "skipped" ? <div className="omp-empty-note">Skipped — this call did not complete.</div> : view?.body}
+	const route = metadata.route;
+	const exit = route.name === "bash" ? exitCodeOf(route.details, split.notices) : undefined;
+	// The Wait, Debug and Ask faces say their facts in the head even while closed; every other card says them in its output bar.
+	const metaInHead = waitFace || debugFace || route.name === "ask";
+	const chips = metaInHead ? [] : view?.meta ?? [];
+	const copyText = view?.output?.copy || text;
+	const outputLabel = view?.output?.label ?? "Output";
+	const showAll = useCallback(() => setViewState({ full: true }), [setViewState]);
+	const toolView = useMemo(() => ({ live: partial, showAll }), [partial, showAll]);
+	const live = state === "running" && result === undefined;
+	useSecondTick(live && props.startedAt !== undefined);
+	const observedMs = useObservedToolMs(props.callId);
+	useEffect(() => { if (!showBody && full) setViewState({ full: false }); }, [showBody, full, setViewState]);
+	const collapse = (): void => {
+		// Focus and selection inside the body hold it open: leave them first, then close.
+		root.current?.querySelector<HTMLButtonElement>(".omp-tool-head")?.focus();
+		const selection = document.getSelection();
+		if (selection && root.current?.contains(selection.anchorNode)) selection.removeAllRanges();
+		setRetained(false); setLocalExpanded(false); props.onExpandedChange?.(false); setViewState({ full: false });
+	};
+	const outputBar = view !== undefined && state !== "skipped" && (chips.length > 0 || exit !== undefined && exit !== 0 || copyText !== "")
+		? <div className="omp-output-bar">
+			{copyText !== "" && <span className="omp-output-label">{outputLabel}</span>}
+			{exit !== undefined && exit !== 0 && <span className="omp-chip omp-chip--err">EXIT {exit}</span>}
+			{chips.map((chip, index) => <span className="omp-chip" key={index}>{displayText(chip)}</span>)}
+			<span className="omp-output-spacer" />
+			{copyText !== "" && <ToolCopyButton text={copyText} label={`Copy ${outputLabel.toLowerCase()}`} what={`the ${outputLabel.toLowerCase()}`} />}
+		</div> : null;
+	const body = frozen ? retainedBody.current : <ToolViewContext.Provider value={toolView}>
+		{errorText && !text.includes(errorText) && <Section title="Error"><TextPreview text={errorText} expanded={full} lines={4} /></Section>}
+		{state === "skipped" ? <div className="omp-empty-note">Skipped — this call did not complete.</div> : <>
+			{view?.input?.map(block => <div className="omp-tool-input" key={block.label}>
+				<div className="omp-output-bar"><span className="omp-output-label">{block.label}</span><span className="omp-output-spacer" /><ToolCopyButton text={block.copy} label={`Copy ${block.label.toLowerCase()}`} what={`the ${block.label.toLowerCase()}`} /></div>
+				{block.node}
+			</div>)}
+			{outputBar}
+			{view?.body}
+		</>}
 		{nontext.length > 0 && <MessageContentView content={nontext} />}
 		{attachments?.map((attachment, index) => <Section key={`${attachment.timestamp}:${index}`} title={`Late diagnostics${attachment.attribution ? ` · ${attachment.attribution}` : ""}`}>
-			{lateDiagnosticsFiles(attachment.details).map((file, fileIndex) => <Section key={fileIndex} title={file.path ?? "File diagnostics"}><Diagnostics value={file} expanded={expanded} /></Section>)}
+			{lateDiagnosticsFiles(attachment.details).map((file, fileIndex) => <Section key={fileIndex} title={file.path ?? "File diagnostics"}><Diagnostics value={file} expanded={full} /></Section>)}
 		</Section>)}
-	</>;
+		<ToolFooter parts={footerParts(split.notices, details)} />
+		{full && <div className="omp-tool-collapse"><button type="button" className="omp-output-more" onClick={collapse}><span className="codicon codicon-chevron-up" aria-hidden="true" />Collapse</button></div>}
+	</ToolViewContext.Provider>;
 	useLayoutEffect(() => {
-		if (!retained && showBody) { retainedBody.current = body; retainedView.current = view; }
-	}, [retained, showBody, body, view]);
+		if (!frozen && showBody) { retainedBody.current = body; retainedView.current = view; retainedState.current = viewState; }
+	}, [frozen, showBody, body, view, viewState]);
 	if (name === "wait" && result && isInterruptedToolResult(result)) return null;
 	// Nothing to disclose: a settled, error-free call whose expanded details would be empty is one static row.
-	const bare = state === "complete" && result !== undefined && !retained && !failed && diagnosticCount === 0 && nontext.length === 0 && (attachments?.length ?? 0) === 0 && hasNoDetails({ name, args: record(args), details, stream, text });
+	const bare = state === "complete" && result !== undefined && !frozen && !failed && diagnosticCount === 0 && nontext.length === 0 && (attachments?.length ?? 0) === 0 && hasNoDetails({ name, args: record(args), details, stream, text });
 	// A command's own text is coloured by the language of the tool that runs it (the digest of several agents is not code).
 	const commandLanguage = compactTarget === null && Object.hasOwn(COMMAND_LANGUAGES, name) ? COMMAND_LANGUAGES[name] : undefined;
 	const commandClosed = state !== "running" && state !== "queued";
 	const aux = intent?.replace(/\s+/g, " ").trim() || undefined;
+	// The head says what a result says at a glance; the digest of agents and the wait face say it themselves.
+	const elapsed = live && props.startedAt !== undefined ? Math.max(0, Date.now() - props.startedAt) : undefined;
+	const gist: readonly GistPart[] = compactTarget !== null || waitFace || pendingAsk || state === "skipped" || state === "queued" ? []
+		: live ? elapsed !== undefined && elapsed >= 1000 ? [{ text: formatGistDuration(elapsed), tone: "plain" }] : []
+		: result === undefined ? []
+		: toolGist({ name: route.name, args: route.args, details: route.details, body: text, notices: split.notices, failed, settled: true, startedAt: props.startedAt, endedAt: props.endedAt, observedMs });
 	if (bare) {
 		const target = compactTarget?.digest ?? metadata.target;
 		return <div ref={root} className="omp-tool omp-native-tool omp-native-tool--bare" data-tool-name={name} data-tool-family={metadata.route.name} data-tool-call-id={props.callId ?? result.toolCallId} data-tool-status={state}>
@@ -160,7 +220,8 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 		{headTarget && <span className="omp-tool-digest" title={compactTarget?.detail ?? headTarget}><ToolTargetText category={metadata.category} paths={metadata.paths} text={displayText(headTarget)} line={changedLine} revalidate={state} language={commandLanguage} closed={commandClosed} /></span>}
 		{view?.inline}
 		{aux && <span className="omp-tool-aux omp-tool-aux--intent" title={aux}>{aux}</span>}
-		{view?.meta?.map((meta, index) => <span className="omp-native-tool-meta" key={index}>{displayText(meta)}</span>)}
+		{gist.length > 0 && <span className="omp-gist">{gist.map((part, index) => <span key={index} className={`omp-gist-part${part.tone === "plain" ? "" : ` omp-gist--${part.tone}`}${part.optional ? " omp-gist-opt" : ""}`}>{index > 0 && <span aria-hidden="true"> · </span>}{part.text}</span>)}</span>}
+		{metaInHead && view?.meta?.map((meta, index) => <span className="omp-native-tool-meta" key={index}>{displayText(meta)}</span>)}
 		{metadata.stats && <DiffStatSpans stats={metadata.stats} />}
 		{metadata.counter && <span className="omp-native-tool-meta omp-tool-counter">{metadata.counter}</span>}
 		{diagnosticCount > 0 && <span className="omp-chip omp-chip--warn"><span className="codicon codicon-warning" aria-hidden="true" />{diagnosticCount} diagnostics</span>}
@@ -171,7 +232,7 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 		{view?.trailing}
 	</>;
 	// The expanded body would only repeat the header and its tooltip: no chevron, no toggle, nothing focusable.
-	const plainRow = view?.expandable === false && !failed && diagnosticCount === 0 && nontext.length === 0 && (attachments?.length ?? 0) === 0 && !retained;
+	const plainRow = view?.expandable === false && !failed && diagnosticCount === 0 && nontext.length === 0 && (attachments?.length ?? 0) === 0 && !frozen;
 	const title = [intent, view?.tooltip].filter(Boolean).join("\n");
 	if (plainRow) {
 		return <div ref={root} className="omp-tool omp-native-tool omp-native-tool--static" data-tool-name={name} data-tool-family={view?.family ?? metadata.route.name} data-tool-call-id={props.callId ?? result?.toolCallId} data-tool-status={state}>
@@ -180,8 +241,8 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 	}
 	return <div ref={root} className={`omp-tool omp-native-tool${failed ? " omp-tool--error" : ""}${state === "skipped" ? " omp-native-tool--skipped" : ""}`} data-tool-name={name} data-tool-family={view?.family ?? metadata.route.name} data-tool-call-id={props.callId ?? result?.toolCallId} data-tool-status={state} onKeyDown={event => {
 		if (event.key !== "Escape" || !showBody || !root.current?.contains(document.activeElement)) return;
-		event.preventDefault(); event.stopPropagation(); root.current.querySelector<HTMLButtonElement>(".omp-tool-head")?.focus();
-		setLocalExpanded(false); props.onExpandedChange?.(false);
+		event.preventDefault(); event.stopPropagation();
+		collapse();
 	}}>
 		<button type="button" className={`omp-tool-head${aux ? " omp-tool-head--intent" : ""}${view?.inline ? " omp-tool-head--inline" : ""}`} aria-expanded={showBody} aria-controls={bodyId} onClick={() => { const next = !expanded; setLocalExpanded(next); props.onExpandedChange?.(next); }} title={title || (showBody ? "Hide tool details" : "Show complete tool details")}>
 			<span className={`codicon codicon-${showBody ? "chevron-down" : "chevron-right"}`} aria-hidden="true" />

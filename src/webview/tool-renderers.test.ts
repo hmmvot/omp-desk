@@ -96,17 +96,17 @@ test("final edit result displaces stale streaming preview for a delete or no-op"
 	assert.doesNotMatch(html, /stale-change|stale.ts/);
 });
 
-test("diff previews cap at forty lines and eight hunks, then expansion exposes everything", () => {
+test("diff previews show twelve rows with an exact marker, hide a remainder of three or fewer by showing it, and Show all exposes everything", () => {
 	const lines = Array.from({ length: 41 }, (_, index) => `+change-${index}`);
 	const closed = api.view(context("edit", { details: { diff: lines.join("\n") } }));
-	assert.match(closed, /change-39/); assert.doesNotMatch(closed, /change-40/); assert.match(closed, /1 more diff lines/);
+	assert.match(closed, /change-11/); assert.doesNotMatch(closed, /change-12/); assert.match(closed, /29 more lines/);
 	assert.match(api.view(context("edit", { details: { diff: lines.join("\n") }, expanded: true })), /change-40/);
 	const hunks = Array.from({ length: 9 }, (_, index) => `@@ -${index + 1} +${index + 1} @@\n+block-${index}`).join("\n");
 	const limited = api.view(context("edit", { details: { diff: hunks } }));
-	assert.match(limited, /block-7/); assert.doesNotMatch(limited, /block-8/);
+	assert.match(limited, /block-5/); assert.doesNotMatch(limited, /block-6/); assert.match(limited, /3 more hunks, 3 more lines/);
 	assert.match(api.view(context("edit", { details: { diff: hunks }, expanded: true })), /block-8/);
-	const exact = api.view(context("edit", { details: { diff: lines.slice(0, 40).join("\n") } }));
-	assert.doesNotMatch(exact, /more diff lines/);
+	assert.doesNotMatch(api.view(context("edit", { details: { diff: lines.slice(0, 15).join("\n") } })), /more lines/, "a remainder of three rows costs as much as its marker");
+	assert.match(api.view(context("edit", { details: { diff: lines.slice(0, 16).join("\n") } })), /4 more lines/);
 });
 
 test("closed flat tool rows do not mount output; disclosure exposes complete output", () => {
@@ -118,14 +118,14 @@ test("closed flat tool rows do not mount output; disclosure exposes complete out
 	assert.match(open, /row-0\n/); assert.match(open, /row-10/); assert.match(open, /aria-expanded="true"/);
 });
 
-test("Bash previews contain command output and recovery hints, not generated model notices", () => {
-	const notice = "Backgrounded as job INTERNAL_JOB; its output is injected into the conversation as a follow-up the moment it finishes. Do NOT poll for it (no `sleep`, `ps`, `pgrep`, `top`, `pidwait`, log tailing): every poll is a wasted turn. Do other work, or end your reply and wait to be woken.";
+test("Bash shows command output only: OMP's appended notices become one footer line, never output", () => {
+	const notice = "Backgrounded as job bg_7 (killed once it has run 900s in total); its output is injected into the conversation as a follow-up the moment it finishes. Do NOT poll for it (no `sleep`, `ps`, `pgrep`, `top`, `pidwait`, log tailing): every poll is a wasted turn. Do other work, or end your reply and wait to be woken.";
 	const output = `Visible command output\n${notice}\nCommand exited with code 0\nWall time: 1.23 seconds\n[raw output: artifact://812]`;
-	for (const initiallyExpanded of [false, true]) {
-		const html = api.view(context("bash", { args: { command: "print output" }, expanded: initiallyExpanded, text: output, details: { async: { state: "running", jobId: "INTERNAL_JOB" }, exitCode: 0, wallTimeMs: 1234, meta: { artifactId: "812" } } }));
-		assert.match(html, /Visible command output/); assert.match(html, /Read artifact:\/\/812 for full output/);
-		assert.doesNotMatch(html, /INTERNAL_JOB|Do NOT poll|Command exited with code|Wall time:|\[raw output:/);
-	}
+	const html = api.card({ name: "bash", args: { command: "print output" }, initiallyExpanded: true, result: result("bash", output, { async: { state: "running", jobId: "bg_7" }, exitCode: 0, wallTimeMs: 1234, meta: { artifactId: "812" } }) });
+	assert.match(html, /Visible command output/);
+	assert.match(html, /omp-tool-footer[^]*artifact:\/\/812[^]*running in background as bg_7/);
+	assert.doesNotMatch(html, /Do NOT poll|Command exited with code|Wall time:|\[raw output:/);
+	assert.match(html, /omp-gist[^]*background[^]*1\.23 s/, "the head says it ran in the background and how long");
 });
 
 test("Bash exposes command and full output but not private execution payloads", () => {
@@ -156,7 +156,7 @@ test("native interrupted waits are absent but returned job snapshots and real fa
 	assert.equal(api.card({ name: "wait", args: {}, result: result("wait", "MODEL_ONLY_RETRY_GUIDANCE", { source: "interrupt_skipped", __synthetic: true }, true) }), "");
 	const snapshot = api.view(context("wait", { details: { interrupted: true, jobs: [{ id: "Worker", type: "task", status: "completed", resultText: "Visible worker result" }] } }));
 	assert.match(snapshot, /Worker/);
-	assert.doesNotMatch(snapshot, /Visible worker result/);
+	assert.match(snapshot, /Visible worker result/);
 	assert.match(api.card({ name: "wait", args: {}, initiallyExpanded: true, result: result("wait", "", { interrupted: true, jobs: [{ id: "Worker", type: "task", status: "completed", resultText: "Visible worker result" }] }) }), /Visible worker result/);
 	const failure = api.card({ name: "wait", args: {}, initiallyExpanded: true, result: result("wait", "Actual wait failure", { __interrupted: true }, true) });
 	assert.match(failure, /Actual wait failure/);
@@ -171,27 +171,30 @@ test("read source retains original numbers and elisions, malformed numbering use
 	assert.match(malformed, /omp-native-line-number">21/); assert.match(malformed, /omp-native-line-number">22/);
 });
 
-test("AST edit converts numbered change groups to hunks and keeps whole first group", () => {
+test("AST edit converts numbered change groups to hunks and previews whole groups", () => {
 	const displayContent = "# src/\n## one.ts (2 replacements)\n-12│old\n+12│new\n-99│second-old\n+99│second-new\n## two.ts\n-1│third-old\n+1│third-new";
-	const closed = api.view(context("ast_edit", { details: { displayContent, totalReplacements: 3 } }));
-	assert.match(closed, /src\/one.ts/); assert.match(closed, /@@ -12 \+12 @@/); assert.match(closed, /omp-native-diff-add">\+new/);
-	assert.match(closed, /2 more changes/); assert.doesNotMatch(closed, /third-new/);
-	assert.match(api.view(context("ast_edit", { details: { displayContent }, expanded: true })), /third-new/);
+	const small = api.view(context("ast_edit", { details: { displayContent, totalReplacements: 3 } }));
+	assert.match(small, /src\/one.ts/); assert.match(small, /@@ -12 \+12 @@/); assert.match(small, /omp-native-diff-add">\+new/);
+	assert.match(small, /third-new/); assert.doesNotMatch(small, /more changes/);
+	const many = "## one.ts\n" + [10, 20, 30, 40, 50].map(line => `-${line}│old-${line}\n+${line}│new-${line}`).join("\n");
+	const closed = api.view(context("ast_edit", { details: { displayContent: many, totalReplacements: 5 } }));
+	assert.match(closed, /new-30/); assert.doesNotMatch(closed, /new-40/); assert.match(closed, /2 more changes/);
+	assert.match(api.view(context("ast_edit", { details: { displayContent: many }, expanded: true })), /new-50/);
 });
 
 
-test("read previews follow native twelve-line code-cell boundary", () => {
-	const text = Array.from({ length: 13 }, (_, index) => `source-${index}`).join("\n");
+test("read previews show twelve code rows and the exact count of the rest", () => {
+	const text = Array.from({ length: 20 }, (_, index) => `source-${index}`).join("\n");
 	const closed = api.view(context("read", { text }));
-	assert.match(closed, /source-11/); assert.doesNotMatch(closed, /source-12/); assert.match(closed, /1 more lines/);
-	assert.match(api.view(context("read", { text, expanded: true })), /source-12/);
+	assert.match(closed, /source-11/); assert.doesNotMatch(closed, /source-12/); assert.match(closed, /8 more lines/);
+	assert.match(api.view(context("read", { text, expanded: true })), /source-19/);
+	assert.doesNotMatch(api.view(context("read", { text: text.split("\n").slice(0, 15).join("\n") })), /more lines/);
 });
-test("Task review stays expansion-only and retains full native findings and locations", () => {
+test("Task review shows full native findings and locations", () => {
 	const findings = [3, 0, 2, 1].map(priority => ({ title: `finding-${priority}`, body: `explanation-${priority}`, priority, confidence: .9, file_path: "src/client.ts", line_start: 41, line_end: 43 }));
 	const details = { results: [{ id: "Reviewer", agent: "reviewer", exitCode: 0, structuredOutput: { source: "yield", status: "success", data: { findings, summary: { overall_correctness: "incorrect", explanation: "Fix required", confidence: .95 } } } }] };
 	const closed = api.view(context("task", { details }));
 	assert.match(closed, /Reviewer/); assert.match(closed, /completed/);
-	assert.doesNotMatch(closed, /finding-|Patch is|client.ts|explanation-|95% confidence/);
 	const open = api.card({ name: "task", args: {}, result: result("task", "", details), initiallyExpanded: true });
 	assert.ok(open.indexOf("finding-3") < open.indexOf("finding-0")); assert.match(open, /explanation-3/); assert.match(open, /client.ts:41–43/);
 	assert.match(open, /Patch is incorrect/); assert.match(open, /95% confidence/);
@@ -206,12 +209,12 @@ test("task review assembles incremental yields and narrows malformed optional fi
 	assert.match(html, /Patch is correct/); assert.match(html, /80% confidence/); assert.match(html, /Findings: none/); assert.doesNotMatch(html, /\[object Object\]/);
 });
 
-test("LSP references collapse by three files and one location, expand to three locations per file", () => {
-	const text = "7 reference(s)\na.ts:1:1\na.ts:2:1\na.ts:3:1\na.ts:4:1\nb.ts:1:1\nc.ts:1:1\nd.ts:1:1";
+test("LSP references preview twelve files and three locations per file, Show all exposes the rest", () => {
+	const text = "12 reference(s)\n" + [1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(line => `a.ts:${line}:1`).join("\n") + "\nb.ts:1:1\nc.ts:1:1";
 	const closed = api.view(context("lsp", { args: { action: "references" }, text }));
-	assert.match(closed, /a.ts · 4 references/); assert.match(closed, /line 1, col 1/); assert.doesNotMatch(closed, /line 2, col 1|d.ts/); assert.match(closed, /1 more items/);
+	assert.match(closed, /a.ts · 10 references/); assert.match(closed, /line 3, col 1/); assert.doesNotMatch(closed, /line 4, col 1/); assert.match(closed, /7 more references/); assert.match(closed, /c.ts/);
 	const open = api.view(context("lsp", { args: { action: "references" }, text, expanded: true }));
-	assert.match(open, /d.ts/); assert.match(open, /line 3, col 1/); assert.doesNotMatch(open, /line 4, col 1/);
+	assert.match(open, /line 10, col 1/);
 });
 
 test("xd write dispatch uses inner device semantics, help and unknown safe fallback", () => {
@@ -253,19 +256,17 @@ test("failed closed rows retain an error status without mounting details; skippe
 	assert.match(skipped, /data-tool-status="skipped"/); assert.doesNotMatch(skipped, /omp-tool--error/);
 });
 
-test("Task compact rows hide context, progress and coordination details until expansion", () => {
+test("Task rows show the shared context, progress and coordination details, never private payloads", () => {
 	const async = { results: [], async: { state: "running", jobId: "INTERNAL_JOB_ID", type: "task" }, totalDurationMs: 5, privateField: "INTERNAL_PAYLOAD" };
-	for (const expanded of [false, true]) {
-		const html = api.view(context("task", { args: { context: "# Goal\nShared context details", tasks: [{ name: "ReaderOne", agent: "scout", task: "Inspect source" }] }, expanded, text: "INTERNAL_MODEL_ACK", details: async }));
-		assert.match(html, /ReaderOne/); assert.match(html, /scout/); assert.doesNotMatch(html, /Background task started|0ms/);
-		assert.equal(html.includes("Shared context details"), expanded);
-		assert.doesNotMatch(html, /INTERNAL_|jobId|privateField|totalDurationMs|5ms|<dl|<dt/);
-		const running = api.view(context("task", { args: {}, expanded, details: { results: [], progress: [{ id: "ReaderOne", agent: "scout", status: "running", description: "Inspect source", task: "A meaningful expanded assignment", currentTool: "read", lastIntent: "Inspecting source", durationMs: 12345, tokens: 4800, cost: 0.07, agentSource: "INTERNAL_SOURCE", index: 99, parentToolCallId: "INTERNAL_PARENT", outputPath: "INTERNAL_OUTPUT", currentToolArgs: "INTERNAL_TOOL_ARGS", extractedToolData: { privateTool: [{ privateField: "INTERNAL_NESTED" }] } }] } }));
-		assert.match(running, /ReaderOne/); assert.match(running, /scout.*running/);
-		for (const content of ["Inspecting source", "12s", "4.8k tokens", "A meaningful expanded assignment"]) assert.equal(running.includes(content), expanded, content);
-		assert.doesNotMatch(running, /INTERNAL_|agentSource|parentToolCallId|outputPath|<dl|<dt/);
-	}
-	const settled = api.view(context("task", { expanded: true, details: { results: [{ id: "ReaderOne", agent: "scout", exitCode: 0, assignment: "Meaningful assignment", structuredOutput: { status: "success", data: { summary: "Visible structured result" }, privateField: "INTERNAL_WRAPPER" }, usage: { cost: { total: 0.07 } }, outputPath: "INTERNAL_OUTPUT", parentToolCallId: "INTERNAL_PARENT" }] } }));
+	const html = api.view(context("task", { args: { context: "# Goal\nShared context details", tasks: [{ name: "ReaderOne", agent: "scout", task: "Inspect source" }] }, text: "INTERNAL_MODEL_ACK", details: async }));
+	assert.match(html, /ReaderOne/); assert.match(html, /scout/); assert.doesNotMatch(html, /Background task started|0ms/);
+	assert.ok(html.includes("Shared context details"));
+	assert.doesNotMatch(html, /INTERNAL_|jobId|privateField|totalDurationMs|5ms|<dl|<dt/);
+	const running = api.view(context("task", { args: {}, details: { results: [], progress: [{ id: "ReaderOne", agent: "scout", status: "running", description: "Inspect source", task: "A meaningful expanded assignment", currentTool: "read", lastIntent: "Inspecting source", durationMs: 12345, tokens: 4800, cost: 0.07, agentSource: "INTERNAL_SOURCE", index: 99, parentToolCallId: "INTERNAL_PARENT", outputPath: "INTERNAL_OUTPUT", currentToolArgs: "INTERNAL_TOOL_ARGS", extractedToolData: { privateTool: [{ privateField: "INTERNAL_NESTED" }] } }] } }));
+	assert.match(running, /ReaderOne/); assert.match(running, /scout.*running/);
+	for (const content of ["Inspecting source", "12s", "4.8k tokens", "A meaningful expanded assignment"]) assert.ok(running.includes(content), content);
+	assert.doesNotMatch(running, /INTERNAL_|agentSource|parentToolCallId|outputPath|<dl|<dt/);
+	const settled = api.view(context("task", { details: { results: [{ id: "ReaderOne", agent: "scout", exitCode: 0, assignment: "Meaningful assignment", structuredOutput: { status: "success", data: { summary: "Visible structured result" }, privateField: "INTERNAL_WRAPPER" }, usage: { cost: { total: 0.07 } }, outputPath: "INTERNAL_OUTPUT", parentToolCallId: "INTERNAL_PARENT" }] } }));
 	assert.match(settled, /Meaningful assignment/); assert.match(settled, /Visible structured result/); assert.match(settled, /\$0\.07/);
 	assert.doesNotMatch(settled, /INTERNAL_|outputPath|parentToolCallId|<dl|<dt/);
 });
@@ -275,14 +276,18 @@ test("Wait orders native job rows and summarizes results without model or owners
 		{ id: "FinishedReader", type: "task", status: "completed", label: "Completed analysis", durationMs: 12000, resultText: '<task-result id="INTERNAL_ENVELOPE"><output>\nVisible result one\nVisible result two\nVisible result three\nVisible result four\nHidden fifth line\n</output></task-result>', resolvedModelIdentity: "INTERNAL_MODEL_ID", resolvedModel: "INTERNAL_MODEL", resolvedThinkingLevel: "INTERNAL_THINKING", agentUrlId: "INTERNAL_AGENT_URL", structured: { privateField: "INTERNAL_RESULT_PAYLOAD" } },
 		{ id: "ActiveReader", type: "task", status: "running", label: "Reading source", durationMs: 3000, parentId: "INTERNAL_PARENT" },
 	], agents: [{ id: "Peer", activity: "Inspecting source", live: true, ageMs: 2000, parentId: "INTERNAL_PARENT", acceptedAt: 1790907963935 }], cancelled: [{ id: "OldReader", status: "cancelled", message: "Cancellation completed", privateField: "INTERNAL_CANCEL" }] };
+	const long = Array.from({ length: 30 }, (_, index) => `Report line ${index}`).join("\n");
 	for (const expanded of [false, true]) {
 		const html = api.view(context("wait", { expanded, details, text: "INTERNAL_TOP_LEVEL_PAYLOAD" }));
 		assert.ok(html.indexOf("ActiveReader") < html.indexOf("FinishedReader"));
 		for (const text of ["task", "running", "completed", "12s", "Inspecting source", "Cancellation completed"]) assert.ok(html.includes(text), text);
-		assert.equal(html.includes("Visible result one"), expanded);
-		assert.doesNotMatch(html, /INTERNAL_|resolvedModel|resolvedThinkingLevel|agentUrlId|acceptedAt|1790907963935|<dl|<dt|Hidden fifth line/);
-		assert.equal(html.includes("Visible result four"), expanded);
+		for (const text of ["Visible result one", "Visible result four", "Hidden fifth line"]) assert.ok(html.includes(text), `${text}: a result is not cut to four lines`);
+		assert.doesNotMatch(html, /INTERNAL_|resolvedModel|resolvedThinkingLevel|agentUrlId|acceptedAt|1790907963935|<dl|<dt/);
 	}
+	const report = { jobs: [{ id: "Reviewer", type: "task", status: "completed", resultText: long }] };
+	const clamped = api.view(context("wait", { details: report }));
+	assert.match(clamped, /Report line 11/); assert.doesNotMatch(clamped, /Report line 12/); assert.match(clamped, /18 more lines/);
+	assert.match(api.view(context("wait", { details: report, expanded: true })), /Report line 29/);
 });
 
 // One header line, nothing beneath it: either a disclosure button or, when expanding would only repeat the line, a plain row.
@@ -367,7 +372,9 @@ test("running and failed tools have one status icon rather than a repeated badge
 	assert.match(running, /data-tool-status="running"/); assert.match(running, /codicon-loading/); assert.doesNotMatch(running, /omp-chip/);
 	const failed = api.card({ name: "bash", args: { command: "false" }, status: "error", result: result("bash", "boom", { exitCode: 1 }, true), initiallyExpanded: true });
 	assert.equal((failed.match(/codicon-error/g) ?? []).length, 1);
-	assert.doesNotMatch(failed, /omp-chip--err/);
+	assert.equal((failed.match(/omp-chip--err/g) ?? []).length, 1, "the exit code is one red chip, in the output bar and not in the head");
+	assert.match(failed, /omp-output-bar[^]*omp-chip--err">EXIT 1</);
+	assert.match(failed, /omp-gist--err">exit 1</, "the head says it failed with an exit code");
 	assert.equal((failed.match(/boom/g) ?? []).length, 1, "stderr is not repeated in an Error block");
 	assert.match(api.card({ name: "bash", args: { command: "x" }, status: "skipped" }), /omp-chip">skipped</);
 });
@@ -472,4 +479,22 @@ test("a todo head names the operation and its task, with the closed counter on t
 	const html = api.card({ name: "todo", args: { ops: [{ op: "done", task: "Write tests" }] }, result: result("todo", "ok", { phases: [{ name: "A", tasks: [{ content: "Write tests", status: "completed" }, { content: "Ship", status: "pending" }] }] }) });
 	assert.match(html, /Done “Write tests”/);
 	assert.match(html, /omp-tool-counter">1\/2</);
+});
+
+test("on every real call the preview shows every section the full view has: Show all only reveals more rows", async () => {
+	const { readFileSync } = await import("node:fs");
+	const fixtures: { id: string; tool: string; args: Record<string, unknown>; resultText: string; details: Record<string, unknown>; isError: boolean }[] = JSON.parse(readFileSync(new URL("./fixtures/tool-calls.json", import.meta.url), "utf8"));
+	const titles = (html: string): string[] => [...html.matchAll(/omp-tool-section-title[^>]*>([^<]*)</g)].map(match => match[1]!);
+	let compared = 0;
+	for (const call of fixtures) {
+		const base = { args: call.args, details: call.details, text: call.resultText, isError: call.isError };
+		const previewHtml = api.view(context(call.tool, { ...base, expanded: false }));
+		const preview = titles(previewHtml);
+		const full = titles(api.view(context(call.tool, { ...base, expanded: true })));
+		const missing = full.filter(title => !preview.includes(title));
+		// A group title that is itself a row (a file of a grep, say) may sit behind the preview's exact marker; a fixed section never may.
+		if (missing.length > 0) assert.match(previewHtml, /omp-output-marker/, `${call.id}: ${missing[0]} is missing and no marker accounts for it`);
+		compared += full.length;
+	}
+	assert.ok(compared > 20, "the fixtures carry sectioned results, so the comparison is not vacuous");
 });

@@ -37,12 +37,26 @@ export const TOOL_STYLES = `
 .omp-tool-aux--intent { flex: 0 1 auto; max-width: 45%; }
 .omp-tool-aux--none { flex: none; }
 .omp-native-tool .omp-tool-body { overflow-wrap: anywhere; }
-.omp-native-preview-window { overflow: hidden; line-height: 1.45; }
-.omp-native-preview-window--code { font-size: var(--omp-mono-size); }
-.omp-native-preview-window--tail { display: flex; flex-direction: column; justify-content: flex-end; }
-.omp-native-preview-window-content { flex: 0 0 auto; }
-.omp-native-preview-window .omp-pre { max-height: none; overflow: visible; line-height: inherit; }
-.omp-native-preview-window--code .omp-pre { font-size: inherit; }
+.omp-output-marker { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 4px 0; color: var(--omp-muted); font-size: 11px; }
+.omp-output-more { display: inline-flex; align-items: center; gap: 4px; border: 0; padding: 1px 6px; background: transparent; color: var(--vscode-textLink-foreground); font: inherit; cursor: pointer; border-radius: var(--omp-radius); }
+.omp-output-more:hover { text-decoration: underline; }
+.omp-output-more:focus-visible, .omp-iconbtn:focus-visible, .omp-artifact-link:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+.omp-output-bar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin: 2px 0 4px; font-size: 11px; color: var(--omp-muted); }
+.omp-output-label { text-transform: uppercase; letter-spacing: 0.04em; font-size: 10px; }
+.omp-output-spacer { flex: 1 1 0; }
+.omp-iconbtn { display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border: 0; border-radius: var(--omp-radius); background: transparent; color: var(--omp-muted); cursor: pointer; }
+.omp-iconbtn:hover { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground); }
+.vscode-high-contrast .omp-iconbtn, .vscode-high-contrast-light .omp-iconbtn { border: 1px solid var(--vscode-contrastBorder); }
+.omp-tool-input { margin-bottom: 6px; }
+.omp-tool-footer { margin-top: 6px; color: var(--omp-muted); font-size: 11px; overflow-wrap: anywhere; }
+.omp-tool-footer-warn { color: var(--vscode-editorWarning-foreground); }
+.omp-artifact-link { border: 0; background: transparent; padding: 0; font: inherit; color: var(--vscode-textLink-foreground); cursor: pointer; text-decoration: underline; }
+.omp-tool-collapse { margin-top: 6px; }
+.omp-prose-clip { max-height: 21em; overflow: hidden; }
+.omp-native-tool .omp-tool-head > .omp-gist { flex: 0 1 auto; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--omp-muted); font-variant-numeric: tabular-nums; }
+.omp-gist--err { color: var(--vscode-errorForeground); }
+.omp-gist--warn { color: var(--vscode-editorWarning-foreground); }
+@media (max-width: 460px) { .omp-gist-opt { display: none; } }
 .omp-native-agent-head--compact { cursor: default; flex-wrap: nowrap; overflow: hidden; white-space: nowrap; padding: 2px 0; }
 .omp-native-agent-head--compact strong { overflow: hidden; text-overflow: ellipsis; }
 .omp-native-tool--skipped { opacity: .7; }

@@ -47,6 +47,7 @@ import { CopyButton } from "./CopyButton";
 import { messageText } from "../../shared/format";
 import { requestPanelAction } from "../lib/panel-actions";
 import { clearToolDisclosures, getTranscriptToggles, subscribeTranscriptToggles, withToolDefault } from "../lib/transcript-toggles";
+import { recordObservedToolMs, resetAllToolViews } from "../lib/tool-view-state";
 import type { BranchPoint } from "../../chat/rewind";
 import { BranchPointMarker } from "./Rewind";
 
@@ -164,6 +165,7 @@ export function TranscriptCardView({ card, props, autoExpanded, clearedHistory }
 		attachments: tool.attachments, agents: props.agents, agentActivity: props.agentActivity, renderChild, cwd: props.cwd,
 		expanded: props.disclosures?.get(`call:${props.conversationKey ?? "chat"}:${tool.call.id}`) ?? false,
 		onExpandedChange: value => props.onDisclosureChange?.(`call:${props.conversationKey ?? "chat"}:${tool.call.id}`, value),
+		viewKey: `call:${props.conversationKey ?? "chat"}:${tool.call.id}`, startedAt: tool.active?.startedAt ?? tool.startedAt, endedAt: tool.result?.timestamp,
 		autoExpanded,
 	});
 	const unsaved = card.sourceIds.some(id => props.pending.get(id)?.unsaved === true);
@@ -244,6 +246,13 @@ function ClearedHistory({ history, props, earlier }: { history: ClearedHistorySp
 
 export function Transcript(props: TranscriptProps): ReactNode {
 	const { entries, stream, activeTools, working, phase, olderCount, onLoadOlder, pending, cards } = props;
+	// A call this page watched run has an exact duration, which its head gist shows instead of an approximation from timestamps.
+	const watchedTools = useRef(new Map<string, number>());
+	useEffect(() => {
+		const now = Date.now();
+		for (const [id, startedAt] of watchedTools.current) if (!activeTools.has(id)) { recordObservedToolMs(id, now - startedAt); watchedTools.current.delete(id); }
+		for (const tool of activeTools.values()) if (!watchedTools.current.has(tool.toolCallId)) watchedTools.current.set(tool.toolCallId, tool.startedAt);
+	}, [activeTools]);
 
 	/**
 	 * The oldest row the reader is holding, or null while the view follows the
@@ -297,6 +306,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		controllerRef.current?.retain();
 		clearToolDisclosures(disclosures.current);
 	}
+	useEffect(() => { if (toggles.generation > 0) resetAllToolViews(); }, [toggles.generation]);
 	const shown = useMemo(() => withToolDefault(disclosures.current, toggles.tools), [toggles.tools, toggles.generation]);
 	// A failed or aborted last reply offers Retry (the TUI's F5) while nothing runs.
 	const retryTailId = useMemo(() => {

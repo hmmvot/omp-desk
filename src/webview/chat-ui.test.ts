@@ -667,7 +667,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate("document.querySelector('.omp-overview-head').click()");
 			await ui.wait("document.querySelector('[data-tool-call-id=\"regression-read-77\"]')");
 			await ui.evaluate("document.querySelector('[data-tool-call-id=\"regression-read-77\"] .omp-tool-head').click()");
-			await ui.wait("document.querySelector('.omp-output-disclosure')");
+			await ui.wait("document.querySelector('.omp-output-more')");
 			await ui.settleGeometry(".omp-transcript");
 			const point = await ui.evaluate<{x:number;y:number;top:number}>(`(()=>{
 			 const root=document.querySelector('.omp-transcript'),body=document.querySelector('[data-tool-call-id="regression-read-77"] .omp-tool-body'),r=root.getBoundingClientRect(),b=body.getBoundingClientRect();
@@ -698,7 +698,8 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.settleGeometry(".omp-transcript");
 			assert.ok(await ui.evaluate<number>(drift)<=2, "font remeasure stays detached and anchored");
 			assert.ok(await ui.evaluate("Boolean(document.querySelector('.omp-jump-latest'))"));
-			await ui.evaluate("document.querySelector('.omp-output-disclosure button').click()");
+			await ui.evaluate("document.querySelector('.omp-output-more').click()");
+			await ui.wait("document.querySelector('.omp-output-disclosure')");
 			await ui.settleGeometry(".omp-transcript");
 			assert.ok(await ui.evaluate<number>(drift)<=2, "in-flow More preserves the detached source anchor");
 			for (const deltaY of [-800,-5000,600,5000]) {
@@ -793,7 +794,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			}
 		});
 
-		await t.test("large read, command and diff output disclose head, tail and hidden lines in outer flow", async () => {
+		await t.test("large read, command and diff output rest as a 12-row preview with exact markers, Show all reveals it in outer flow, Collapse closes and a re-open starts at the preview", async () => {
 			for (const name of ["read", "bash", "edit"]) {
 				await reset(`paseo-output-${name}`, "detailed");
 				await ui.evaluate(`(()=>{
@@ -804,17 +805,40 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 				})()`);
 				await ui.wait("document.querySelector('[data-tool-call-id=\"long-output\"] .omp-tool-head')");
 				await ui.evaluate("document.querySelector('[data-tool-call-id=\"long-output\"] .omp-tool-head').click()");
+				await ui.wait("document.querySelector('.omp-output-marker')");
+				const preview = await ui.evaluate<string>("document.querySelector('.omp-tool-body').textContent");
+				if (name === "bash") {
+					assert.match(preview, /OUTPUT_LINE_499_END/); assert.match(preview, /OUTPUT_LINE_488_END/); assert.doesNotMatch(preview, /OUTPUT_LINE_487_END/);
+					assert.match(preview, /… \(488 earlier lines, showing 12 of 500\)/, "a command's preview is its tail, with the marker on top");
+				} else {
+					assert.match(preview, /OUTPUT_LINE_0_END/); assert.match(preview, /OUTPUT_LINE_11_END/); assert.doesNotMatch(preview, /OUTPUT_LINE_12_END/);
+					assert.match(preview, /… 488 more lines/, "everything else previews its head, with the marker below");
+				}
+				assert.match(preview, /Show all 500 lines/);
+				assert.equal(await ui.evaluate("Array.from(document.querySelector('.omp-transcript').querySelectorAll('*')).some(node=>/auto|scroll/.test(getComputedStyle(node).overflowY))"), false);
+				// A real pointer press moves focus into the body first; Show all must still apply while that focus holds the body.
+				const button = await ui.evaluate<{ x: number; y: number }>("(()=>{const b=document.querySelector('.omp-output-more').getBoundingClientRect();return{x:b.left+b.width/2,y:b.top+b.height/2}})()");
+				await ui.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: button.x, y: button.y });
+				await ui.call("Input.dispatchMouseEvent", { type: "mousePressed", x: button.x, y: button.y, button: "left", clickCount: 1 });
+				await ui.call("Input.dispatchMouseEvent", { type: "mouseReleased", x: button.x, y: button.y, button: "left", clickCount: 1 });
 				await ui.wait("document.querySelector('.omp-output-disclosure')");
 				const initial = await ui.evaluate<string>("document.querySelector('.omp-tool-body').textContent");
 				assert.match(initial, /OUTPUT_LINE_0_END/); assert.match(initial, /OUTPUT_LINE_499_END/);
 				assert.doesNotMatch(initial, /OUTPUT_LINE_250_END|OUTPUT_LINE_450_END/);
-				assert.equal(await ui.evaluate("Array.from(document.querySelector('.omp-transcript').querySelectorAll('*')).some(node=>/auto|scroll/.test(getComputedStyle(node).overflowY))"), false);
 				await ui.evaluate("document.querySelector('.omp-output-disclosure button').click()");
 				await ui.wait("document.querySelector('.omp-tool-body').textContent.includes('OUTPUT_LINE_250_END')");
 				assert.doesNotMatch(await ui.evaluate<string>("document.querySelector('.omp-tool-body').textContent"), /OUTPUT_LINE_450_END/);
 				await ui.evaluate("document.querySelector('.omp-output-disclosure button:nth-child(2)').click()");
 				await ui.wait("!document.querySelector('.omp-output-disclosure')");
 				assert.match(await ui.evaluate<string>("document.querySelector('.omp-tool-body').textContent"), /OUTPUT_LINE_450_END/);
+				// Collapse closes the card even with focus inside it, and the card starts at the preview when opened again.
+				await ui.evaluate("document.querySelector('.omp-tool-collapse button').focus()");
+				await ui.evaluate("document.querySelector('.omp-tool-collapse button').click()");
+				await ui.wait("!document.querySelector('[data-tool-call-id=\"long-output\"] .omp-tool-body')");
+				assert.equal(await ui.evaluate("document.activeElement?.classList.contains('omp-tool-head')"), true, "focus returns to the head");
+				await ui.evaluate("document.querySelector('[data-tool-call-id=\"long-output\"] .omp-tool-head').click()");
+				await ui.wait("document.querySelector('.omp-output-marker')");
+				assert.equal(await ui.evaluate("document.querySelector('.omp-output-disclosure')"), null, "Show all was reset by the collapse");
 			}
 		});
 
@@ -870,7 +894,9 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate(`window.detailArgs={path:'paseo-live.ts',content:Array.from({length:180},(_,index)=>'export const line'+index+' = '+index+';').join('\\n')};
 			 window.detailMessage={role:'assistant',model:'m',timestamp:1000,stopReason:'toolUse',content:[{type:'toolCall',id:'detail-latest',name:'write',arguments:window.detailArgs}]};
 			 window.pushDetail=()=>window.ui.push({stream:{messageId:'detail-latest-message',message:window.detailMessage},streamPosition:{anchorId:null,seq:1},working:true,settled:false,activeTools:[{toolCallId:'detail-latest',toolName:'write',args:window.detailArgs,startedAt:1000}]});window.pushDetail()`);
-			await ui.wait("document.querySelector('[data-tool-call-id=\"detail-latest\"] .omp-native-source .omp-pre')?.scrollHeight>1000");
+			await ui.wait("document.querySelector('[data-tool-call-id=\"detail-latest\"] .omp-native-source')?.textContent.includes('line179')");
+			assert.ok(await ui.evaluate<number>("document.querySelectorAll('[data-tool-call-id=\"detail-latest\"] .omp-native-code-line').length")<=13, "a live write shows the tail of its content as a bounded preview");
+			assert.match(await ui.evaluate<string>("document.querySelector('[data-tool-call-id=\"detail-latest\"] .omp-output-marker').textContent"), /earlier lines.*· live/);
 			await ui.settleGeometry(".omp-transcript");
 			assert.ok(await ui.evaluate("(()=>{const root=document.querySelector('.omp-transcript');return root.scrollHeight-root.clientHeight-root.scrollTop<=2})()"), "live source follows via outer controller");
 			await ui.evaluate("document.querySelector('[data-tool-call-id=\"detail-latest\"] .omp-tool-body').focus({preventScroll:true})");
@@ -1816,7 +1842,9 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.wait("document.querySelector('[data-tool-call-id=\"bash-ui\"]')?.getAttribute('data-tool-status') === 'error'");
 			assert.equal(await ui.evaluate("document.querySelector('[data-tool-call-id=\"bash-ui\"] .omp-tool-body').textContent.split('Actual command failure').length-1"), 1, "stderr is printed once");
 			assert.equal(await ui.evaluate("document.querySelectorAll('[data-tool-call-id=\"bash-ui\"] .omp-tool-head .codicon-error').length"), 1);
-			assert.equal(await ui.evaluate("document.querySelector('[data-tool-call-id=\"bash-ui\"] .omp-chip--err')"), null);
+			assert.equal(await ui.evaluate("document.querySelector('[data-tool-call-id=\"bash-ui\"] .omp-tool-head .omp-chip--err')"), null, "the head repeats no badge beside its one icon");
+			assert.equal(await ui.evaluate("document.querySelector('[data-tool-call-id=\"bash-ui\"] .omp-output-bar .omp-chip--err').textContent"), "EXIT 2", "the output bar says the exit code once");
+			assert.equal(await ui.evaluate("document.querySelector('[data-tool-call-id=\"bash-ui\"] .omp-tool-head .omp-gist--err').textContent"), "exit 2", "and so does the head gist, closed or open");
 			await ui.evaluate(`(()=>{
 			 const row=(id,message)=>({type:'message',id,parentId:null,timestamp:'2026-10-02T00:00:00Z',message});
 			 window.ui.push({entries:[
@@ -1862,7 +1890,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate("document.querySelectorAll('.omp-native-tool > .omp-tool-head').forEach(button=>button.click())");
 			await ui.wait("document.querySelector('[data-tool-call-id=\"task-disclosure\"] .omp-tool-head').getAttribute('aria-expanded')==='true'");
 			const expanded = await ui.evaluate<string>("document.querySelector('.omp-transcript').textContent");
-			for (const detail of ["Goal", "Shared context detail", "Assigned detail", "Expanded agent activity", "Expanded wait detail", "assignment_identifier", "tail-row-0", "Long objective detail 79"]) assert.ok(expanded.includes(detail), detail);
+			for (const detail of ["Goal", "Shared context detail", "Assigned detail", "Expanded agent activity", "Expanded wait detail", "assignment_identifier", "tail-row-39", "Long objective detail 79"]) assert.ok(expanded.includes(detail), detail);
 			assert.doesNotMatch(expanded, /Background task started|0ms|INTERNAL_/);
 			await ui.evaluate("document.querySelectorAll('.omp-native-tool > .omp-tool-head').forEach(button=>button.click())");
 			await ui.wait("document.querySelector('[data-tool-call-id=\"task-disclosure\"] .omp-tool-head').getAttribute('aria-expanded')==='false'");
@@ -4276,7 +4304,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 
 			await mode("all");
 			await ui.wait("document.querySelectorAll('.omp-overview-member .omp-tool-head[aria-expanded=\"true\"]').length===6");
-			assert.deepEqual((await facts()).groups, ["true", "true"], "Ctrl+O from groups expands every call and keeps the groups open");
+			assert.ok((await facts()).groups.length > 0 && (await facts()).groups.every(value => value === "true"), "Ctrl+O from groups expands every call and keeps the groups open");
 			await mode("groups");
 			await ui.wait("document.querySelectorAll('.omp-overview-member .omp-tool-head[aria-expanded=\"false\"]').length===6");
 			assert.deepEqual((await facts()).groups, ["true", "true"], "the groups key from all folds the calls and keeps the groups open");

@@ -12,6 +12,8 @@ export interface ProjectedTool {
 	active?: ActiveTool;
 	status: "queued" | "running" | "complete" | "error" | "skipped";
 	mutable: boolean;
+	/** When the assistant entry that made the call was recorded (the message was complete), the start of a gist's derived `≈` duration: the result's timestamp minus this. The message's own timestamp is when its request began, which includes the model's thinking. */
+	startedAt?: number;
 	attachments: readonly CustomMessage[];
 }
 interface CardBase { id: string; sourceIds: readonly string[] }
@@ -97,7 +99,7 @@ export function projectTranscript(entries: readonly ChatEntry[], options: Transc
 
 		cards.push(card);
 	};
-	const emitAssistant = (entryId: string, message: AssistantMessage, streaming: boolean): void => {
+	const emitAssistant = (entryId: string, message: AssistantMessage, streaming: boolean, recordedAt?: number): void => {
 		const recovered = message.retryRecovery?.status;
 		let emitted = 0;
 		let content: ChatContent[] = [];
@@ -125,7 +127,7 @@ export function projectTranscript(entries: readonly ChatEntry[], options: Transc
 			const failed = message.stopReason === "error" || message.stopReason === "aborted";
 			const status = result !== undefined ? isInterruptedToolResult(result.message) ? "skipped" : result.message.isError ? "error" : "complete" : active !== undefined ? "running" : failed ? message.stopReason === "aborted" ? "skipped" : "error" : mutable ? "queued" : "skipped";
 			const id = emitted++ === 0 ? entryId : `${entryId}:tool:${block.id}`;
-			emitTool(id, { call: block, entryId, result: result?.message, active, status, mutable, attachments: [] });
+			emitTool(id, { call: block, entryId, result: result?.message, active, status, mutable, attachments: [], startedAt: streaming || recordedAt === undefined || !Number.isFinite(recordedAt) ? undefined : recordedAt });
 		}
 		flush();
 		if (recovered === "recovered") { cards.push({ kind: "recovery", id: `${entryId}:recovery`, sourceIds: [entryId], message }); }
@@ -148,7 +150,7 @@ export function projectTranscript(entries: readonly ChatEntry[], options: Transc
 		}
 		const message = entryMessage(entry);
 		if (message?.role === "user" || message?.role === "assistant" || message?.role === "bashExecution" || message?.role === "pythonExecution") initializing = false;
-		if (message?.role === "assistant") { emitAssistant(entry.id, message, entry.id === `live:${options.streamId}` && options.streamId != null); continue; }
+		if (message?.role === "assistant") { emitAssistant(entry.id, message, entry.id === `live:${options.streamId}` && options.streamId != null, Date.parse(entry.timestamp)); continue; }
 		if (message?.role === "toolResult") {
 			if (suppressed.has(message.toolCallId) || results.get(message.toolCallId)?.entryId !== entry.id) continue;
 			if (message.toolName === "wait" && isInterruptedToolResult(message)) continue;
