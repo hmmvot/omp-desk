@@ -5,6 +5,8 @@ date: 2026-10-08
 
 # ADR-0049: Intercept the Stats browser opener through a verified child preload
 
+> **Narrowly amended by [ADR-0075](0075-carry-bun-runtime-flags-by-launcher-kind-and-probe-before-using-an-environment-carrier.md):** the exclusion of an environment-only preload. For a launcher that is not Bun's own CLI the preload travels in `BUN_OPTIONS`, and only after a harmless `--version` run showed the installation marker; Bun's own CLI keeps `--preload` on the command line.
+
 ## Context and Problem Statement
 
 Actual `omp stats` starts the normal usage dashboard and standalone Frustration judge, but unconditionally opens a system browser. An editor iframe needs that exact dashboard without an extra browser tab. Neither installed runtime exposes the stats package as an embedded extension import. The package installation supports explicit Bun `--preload`; the separately installed compiled runtime does not honour it. An environment-only preload was ignored and caused an unintended desktop browser side effect during investigation; it is not used by the implementation.

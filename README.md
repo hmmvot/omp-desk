@@ -16,7 +16,7 @@ Run your [Oh My Pi](https://github.com/can1357/oh-my-pi) (`omp`) sessions from V
 
 - Windows 10 or 11, x64 or arm64.
 - VS Code 1.110 or newer, in a trusted workspace.
-- [Oh My Pi](https://github.com/can1357/oh-my-pi) installed, on your `PATH` and logged in to a provider. OMP Desk never bundles, installs or updates OMP; it runs the `omp` you already have.
+- [Oh My Pi](https://github.com/can1357/oh-my-pi) installed, on your `PATH` and logged in to a provider. OMP Desk never bundles, installs or updates OMP; it runs the `omp` you already have. Either install form works: the Bun global install (`bun install -g @oh-my-pi/pi-coding-agent`, also what the `omp.sh` installer does when Bun is present) and OMP's own compiled program (winget `can1357.oh-my-pi`, the `omp.sh` binary install, mise). With the compiled program, host control (model readback, subagent work indicators, Terminal status) needs a build that accepts Bun's startup options from `BUN_OPTIONS`; Desk checks that once per executable and, when it does not, runs the session without host control and says so. Chat itself is unaffected.
 
 ## Getting started
 
