@@ -1195,7 +1195,7 @@ export class SessionIndex {
 				turn.release();
 			}
 			const kind = outcome.status === "conflict" || outcome.status === "failed" ? `:${outcome.kind}` : "";
-			this.#log?.debug(`window timing: restore tab ${tabId} ${timer.finish(`${outcome.status}${kind}`)}`);
+			this.#log?.info(`window timing: restore tab ${tabId} ${timer.finish(`${outcome.status}${kind}`)}`);
 			return outcome;
 		});
 		// The report is folded in cohort order, never in completion order.

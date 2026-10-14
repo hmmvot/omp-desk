@@ -968,7 +968,7 @@ describe("restoreAll runs rows together", () => {
 
 		const rows = lines.filter(line => line.message.startsWith("window timing: restore tab "));
 		assert.equal(rows.length, 2);
-		assert.ok(rows.every(row => row.level === "debug"), "per-row restore timing is a debug line");
+		assert.ok(rows.every(row => row.level === "info"), "per-row restore timing is an info line: it shows where a slow restore spent its time");
 		for (const [position, tabId] of tabIds.entries()) {
 			const line = rows.find(candidate => candidate.message.startsWith(`window timing: restore tab ${tabId} `))?.message;
 			assert.ok(line !== undefined, `a line for ${tabId}`);
