@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-10-14
+
 ### Fixed
 
 - Terminal: an OMP that is busy no longer puts a `native host connection unavailable` warning above the terminal. While OMP works through a large input its event loop does not answer OMP Desk's status requests for a while; Desk reported that as a lost connection, and the warning stayed until the connection came back. A host that was reached and did not answer in time is now retried quietly (the OMP Desk output says `host control paused — OMP did not answer in time (it may be busy)`); a host that cannot be reached or refuses a request still shows its warning.
@@ -241,7 +243,8 @@ First public preview of OMP Desk: a Windows-only VS Code extension that runs you
 - OMP is not bundled. The extension launches the `omp` found on `PATH` and never installs, downloads or updates it.
 - OMP Desk is an unofficial, independent integration, not an official OMP distribution.
 
-[Unreleased]: https://github.com/hmmvot/omp-desk/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/hmmvot/omp-desk/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/hmmvot/omp-desk/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/hmmvot/omp-desk/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/hmmvot/omp-desk/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/hmmvot/omp-desk/compare/v0.2.1...v0.3.0
