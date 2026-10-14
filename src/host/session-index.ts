@@ -1470,10 +1470,11 @@ export class SessionIndex {
 	 * taken *before* the tab's lifecycle gate, so the second caller still gets the
 	 * refusal rather than queueing and running a whole second restore.
 	 *
-	 * Once admitted, the row is re-read by id and the restore proceeds only if it
-	 * is still this index's row for the tab: the gate may have been held by a
-	 * removal, and opening a detached entry would start a host and publish a live
-	 * record for a tab the index no longer has.
+	 * Once admitted, the row is re-read by id and the restore proceeds with the row
+	 * the index holds now: a catalog refresh may have replaced the object of a tab that
+	 * was queued, and that is the same tab. Only a row the index no longer names is
+	 * refused: the gate may have been held by a removal, and opening a detached entry
+	 * would start a host and publish a live record for a tab the index no longer has.
 	 */
 	async #restoreEntry(
 		entry: MutableEntry,
@@ -1494,7 +1495,10 @@ export class SessionIndex {
 		this.#restoring.add(tabId);
 		try {
 			return await this.withinTabLifecycle(tabId, undefined, async () => {
-				if (this.#entries.get(tabId) !== entry) {
+				// The row is looked up again: a catalog refresh replaces the row object of a tab that was queued but not yet running,
+				// and that is still the same tab. Only a tab the index no longer names is refused.
+				const current = this.#entries.get(tabId);
+				if (current === undefined) {
 					return {
 						status: "failed",
 						tabId,
@@ -1502,7 +1506,7 @@ export class SessionIndex {
 						detail: "This tab was removed from the session index before its host could be started.",
 					};
 				}
-				return await this.#openEntry(entry, options, takenIdentities, draftIntent, trace);
+				return await this.#openEntry(current, options, takenIdentities, draftIntent, trace);
 			});
 		} finally {
 			this.#restoring.delete(tabId);

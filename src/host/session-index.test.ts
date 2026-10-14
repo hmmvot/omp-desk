@@ -2604,6 +2604,27 @@ describe("lifecycle coordination", () => {
 		assert.equal(index.get(draft.tabId), null);
 	});
 
+	it("restores a row whose object a catalog refresh replaced while it waited behind the pass's concurrency limit", async () => {
+		const { claimDir, cwd } = await tempWorkspace();
+		const index = indexFor(new TestStore(), claimDir);
+		const first = await index.createDraft({ cwd });
+		const second = await index.createDraft({ cwd });
+		let refreshed = false;
+		const refreshing: OwnerReconciler = {
+			async reconcile(...args: Parameters<OwnerReconciler["reconcile"]>) {
+				// The first row is running; the second has not started, so the refresh adopts it as a new row object.
+				if (!refreshed) { refreshed = true; await index.refreshFromStore(); }
+				return noRecordedHost.reconcile(...args);
+			},
+		};
+
+		const report = await index.restoreAll({ reconciler: refreshing, launcher: recordingLauncher({ state: "running", host: runningHandle("S-NONE") }).launcher, concurrency: 1 });
+
+		assert.ok(refreshed, "the refresh ran while the first row was restoring");
+		assert.deepEqual(report.failures, [], "a replaced row object is still the same tab");
+		assert.deepEqual(report.drafts.map(draft => draft.tabId), [first.tabId, second.tabId]);
+	});
+
 	it("refuses a deferred adoption while this window runs the host for the tab", async () => {
 		const { claimDir, sessionDir, cwd } = await tempWorkspace();
 		const index = indexFor(new TestStore(), claimDir);
