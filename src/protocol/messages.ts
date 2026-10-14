@@ -493,8 +493,13 @@ export const MAX_TERMINAL_SNAPSHOT_BASE64_CHARS = Math.floor(MAX_TERMINAL_SNAPSH
  * at most this size, in order, on one transport, and a chunk boundary may fall
  * inside a UTF-8 sequence — which is safe because the host writes the bytes to the
  * single PTY in that same order.
+ *
+ * A multiple of 3 on purpose: only then does a full chunk encode to exactly the
+ * {@link MAX_TERMINAL_INPUT_BASE64_CHARS} the boundary accepts. 8 KiB itself is
+ * not (it encodes to 10,924 characters against a bound of 10,920), and the host
+ * then refused every full chunk of a paste, delivering only its last, short one.
  */
-export const MAX_TERMINAL_INPUT_BYTES = 8 * 1024;
+export const MAX_TERMINAL_INPUT_BYTES = Math.floor((8 * 1024) / 3) * 3;
 /** Base64 characters {@link MAX_TERMINAL_INPUT_BYTES} occupies, bounded as for output. */
 export const MAX_TERMINAL_INPUT_BASE64_CHARS = Math.floor(MAX_TERMINAL_INPUT_BYTES / 3) * 4;
 

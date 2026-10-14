@@ -41,7 +41,9 @@ import {
 	parseGuestHostMessage,
 	parseGuestWebviewMessage,
 	spliceMention,
+	MAX_TERMINAL_INPUT_BYTES,
 } from "./messages.ts";
+import { decodeBase64, encodeUtf8Chunks } from "../shared/bytes-base64.ts";
 
 const FILE_MENTION_REGEX = /@(?:"([^"]+)"|'([^']+)'|([^\s@]+))/g;
 const LEADING_PUNCTUATION_REGEX = /^[`"'([{<]+/;
@@ -695,6 +697,22 @@ describe("parseGuestWebviewMessage terminal frames", () => {
 		]) {
 			assert.equal(parseGuestWebviewMessage(refused), null, `accepted ${JSON.stringify(refused)}`);
 		}
+	});
+
+	it("accepts every chunk the pane cuts a large paste into, so no part of a paste is dropped", () => {
+		// About 200 KB of mixed-width text: full chunks, a chunk boundary inside a multi-byte character, and a short tail.
+		const paste = `\u001b[200~${Array.from({ length: 2500 }, (_, index) => `line ${index} é€😀 ${"x".repeat(60)}`).join("\r")}\u001b[201~`;
+		const chunks = encodeUtf8Chunks(paste, MAX_TERMINAL_INPUT_BYTES);
+		assert.ok(chunks.length > 20, "the paste spans many chunks");
+		const received: number[] = [];
+		for (const [index, data] of chunks.entries()) {
+			const parsed = parseGuestWebviewMessage({ type: "omp:terminal-input", generation: TERMINAL_GENERATION, data });
+			assert.notEqual(parsed, null, `chunk ${index} of ${chunks.length} (${data.length} base64 characters) was refused`);
+			received.push(...(decodeBase64(data) ?? []));
+		}
+		assert.equal(Buffer.from(received).toString("utf8"), paste);
+		// A full chunk is exactly the largest message the boundary accepts: no padding, no spare character.
+		assert.equal(chunks[0]!.length, MAX_TERMINAL_INPUT_BASE64_CHARS);
 	});
 
 	it("accepts input up to its byte budget and refuses an over-long or non-base64 one", () => {
