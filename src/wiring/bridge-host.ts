@@ -47,6 +47,7 @@ import type {
 	GuestRouteAckMessage,
 	GuestRouteOfferMessage,
 } from "../protocol/messages.ts";
+import type { Logger } from "../shared/logger.ts";
 import { isPanelTabId } from "../shared/panel-identity.ts";
 
 /** The bridge endpoint of an editor and the document its panel shows, as one editor record holds them. */
@@ -135,7 +136,7 @@ export interface BridgeEditorPort {
 
 /** The log. */
 export interface BridgeNotices {
-	log(message: string): void;
+	log: Logger;
 }
 
 /** The environmental port behind an editor's endpoint: the one place a listener object comes into being. */
@@ -317,25 +318,25 @@ export function registerBridgeHost<Tab extends BridgeTab>(deps: BridgeHostDeps<T
 				eligible: documentId => bridgeDocumentEligible(editorId, documentId),
 				onRequest: (session, documentId, request) => deps.handleRequest(editorId, documentId, session, request),
 				onStateChanged: (documentId, state) => {
-					deps.log(`tab ${tabId}: bridge document ${documentId.slice(0, 8)} is ${state}`);
+					deps.log.debug(`tab ${tabId}: bridge document ${documentId.slice(0, 8)} is ${state}`);
 					deps.diagnostics().note(tabId, `bridge: document ${documentId.slice(0, 8)} is ${state}`);
 					// A surviving page becomes reachable (or stops being) as its route state moves.
 					deps.attachChatRoute(editorId);
 					deps.refreshLauncher();
 				},
 				onDiagnostic: (code, detail) => {
-					deps.log(`tab ${tabId}: bridge ${code} — ${detail}`);
+					deps.log.warn(`tab ${tabId}: bridge ${code} — ${detail}`);
 					deps.diagnostics().note(tabId, `bridge: ${code}`);
 				},
 			});
 			const port = await endpoint.bind();
 			if (port === null) {
-				deps.log(`tab ${tabId}: the bridge listener could not bind (${endpoint.failure ?? "unknown"})`);
+				deps.log.warn(`tab ${tabId}: the bridge listener could not bind (${endpoint.failure ?? "unknown"})`);
 				endpoint.close();
 				return null;
 			}
 			deps.endpoints().set(editorId, endpoint);
-			deps.log(`tab ${tabId}: bridge listener bound on 127.0.0.1:${port} for editor ${editorId.slice(0, 8)}`);
+			deps.log.debug(`tab ${tabId}: bridge listener bound on 127.0.0.1:${port} for editor ${editorId.slice(0, 8)}`);
 			return endpoint;
 		})();
 		pendingBridgeEndpoints.set(editorId, creation);
@@ -377,7 +378,7 @@ export function registerBridgeHost<Tab extends BridgeTab>(deps: BridgeHostDeps<T
 		const document = await endpoint.beginDocument(documentId, bootstrapId);
 		const port = endpoint.port;
 		if (document === null || port === null) {
-			deps.log(`slot ${editorId}: this editor's bridge document could not be prepared`);
+			deps.log.warn(`slot ${editorId}: this editor's bridge document could not be prepared`);
 			return null;
 		}
 		if (deps.tabs().get(editorId) !== state || !deps.editors().holdsEditor(editorId)) {
@@ -510,7 +511,7 @@ export function registerBridgeHost<Tab extends BridgeTab>(deps: BridgeHostDeps<T
 			deps.editors().noteDocument(entry.editorId, entry.editorId, adopted.documentId);
 			endpoint.offerBridge();
 			refreshBridgeReadiness(entry.editorId);
-			deps.log(`slot ${entry.editorId}: adopted surviving bridge document ${adopted.documentId.slice(0, 8)}`);
+			deps.log.debug(`slot ${entry.editorId}: adopted surviving bridge document ${adopted.documentId.slice(0, 8)}`);
 			deps.refreshLauncher();
 		}
 	}
@@ -541,16 +542,16 @@ export function registerBridgeHost<Tab extends BridgeTab>(deps: BridgeHostDeps<T
 		const bridge = state?.bridge ?? null;
 		if (state === undefined || bridge === null || state.panel !== panel) return;
 		if (bridge.documentId !== report.documentId) {
-			deps.log(`tab ${tabId}: an origin report named a document this host no longer serves`);
+			deps.log.warn(`tab ${tabId}: an origin report named a document this host no longer serves`);
 			return;
 		}
 		const document = bridge.endpoint.document;
 		if (document === null || document.bootstrapId !== report.bootstrapId) {
-			deps.log(`tab ${tabId}: an origin report named a bootstrap this host did not mint`);
+			deps.log.warn(`tab ${tabId}: an origin report named a bootstrap this host did not mint`);
 			return;
 		}
 		if (!bridge.endpoint.pinOrigin(report.documentId, report.origin)) return;
-		deps.log(`tab ${tabId}: bridge origin pinned for document ${report.documentId.slice(0, 8)}`);
+		deps.log.debug(`tab ${tabId}: bridge origin pinned for document ${report.documentId.slice(0, 8)}`);
 		void commitBridgeDocument(tabId);
 	}
 
@@ -623,7 +624,7 @@ export function registerBridgeHost<Tab extends BridgeTab>(deps: BridgeHostDeps<T
 		const delivery = await bridge.endpoint.commit(binding);
 		if (delivery === null) return;
 		bridge.bound = false;
-		deps.log(`tab ${tabId}: bridge document ${delivery.documentId.slice(0, 8)} committed`);
+		deps.log.debug(`tab ${tabId}: bridge document ${delivery.documentId.slice(0, 8)} committed`);
 		// The endpoint, the document and the binding are bounded facts; the secret and the
 		// binding's own fields are not recorded.
 		deps.diagnostics().note(
@@ -664,7 +665,7 @@ export function registerBridgeHost<Tab extends BridgeTab>(deps: BridgeHostDeps<T
 			secret: encodeBase64Url(delivery.secret),
 		};
 		void panel.webview.postMessage(message);
-		deps.log(`tab ${tabId}: bridge secret delivered for document ${delivery.documentId.slice(0, 8)}`);
+		deps.log.debug(`tab ${tabId}: bridge secret delivered for document ${delivery.documentId.slice(0, 8)}`);
 	}
 
 	/** Re-send the current document's bridge secret, without rotating it. */
@@ -722,7 +723,7 @@ export function registerBridgeHost<Tab extends BridgeTab>(deps: BridgeHostDeps<T
 			void retireClosedEditorBridge({ tabId: namespaceTabId, editorId: slot, endpoint, editors: deps.editors() })
 				.then(result => {
 					if (!result.retired) return;
-					deps.log(`slot ${slot}: the closed editor's bridge was retired`);
+					deps.log.debug(`slot ${slot}: the closed editor's bridge was retired`);
 					deps.diagnostics().note(slot, `bridge: editor ${slot.slice(0, 8)} closed; endpoint and records retired`);
 				})
 				.catch(() => undefined);
@@ -813,12 +814,12 @@ export function registerBridgeHost<Tab extends BridgeTab>(deps: BridgeHostDeps<T
 		const route = bridgeRouteOf(tabId);
 		if (state === undefined || state.panel !== panel || route === null) return;
 		if (encodeHex(hostGeneration) !== message.hostGeneration || state.bridge?.documentId !== message.documentId) {
-			deps.log(`tab ${tabId}: a route acknowledgement named another host generation or document`);
+			deps.log.warn(`tab ${tabId}: a route acknowledgement named another host generation or document`);
 			return;
 		}
 		const alreadyAcknowledged = route.acknowledged;
 		if (!route.acknowledge(message.routeGeneration, "panel")) {
-			deps.log(`tab ${tabId}: a route acknowledgement named a fenced generation`);
+			deps.log.warn(`tab ${tabId}: a route acknowledgement named a fenced generation`);
 			return;
 		}
 		// Repeated delivery is valid, but an ACK of the ready-status offer must not
@@ -836,11 +837,11 @@ export function registerBridgeHost<Tab extends BridgeTab>(deps: BridgeHostDeps<T
 		if (encodeHex(hostGeneration) !== message.hostGeneration || bridge.documentId !== message.documentId) return;
 		const recorded = bridge.endpoint.committedBindingHash();
 		if (recorded === null || recorded !== message.bindingHash) {
-			deps.log(`tab ${tabId}: a bridge acknowledgement named a binding this host did not commit`);
+			deps.log.warn(`tab ${tabId}: a bridge acknowledgement named a binding this host did not commit`);
 			return;
 		}
 		bridge.bound = true;
-		deps.log(`tab ${tabId}: the panel acknowledged its bridge secret`);
+		deps.log.debug(`tab ${tabId}: the panel acknowledged its bridge secret`);
 		deps.diagnostics().note(tabId, `bridge: the panel acknowledged the secret for document ${bridge.documentId?.slice(0, 8) ?? "unknown"}`);
 		refreshBridgeReadiness(tabId);
 	}

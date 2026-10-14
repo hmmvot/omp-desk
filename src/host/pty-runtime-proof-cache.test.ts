@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { after, describe, it } from "node:test";
 import type { PrivateStorageCommandResult, PrivateStorageProbe } from "./private-storage.ts";
+import { type LoggedLine, recordingLogger } from "../shared/logger.ts";
 import { TEST_CURRENT_SID, fixtureAcl, fixturePrincipal } from "./private-storage-test-support.ts";
 import {
 	PTY_BROKER_ENTRY,
@@ -294,8 +295,8 @@ describe("a stored runtime proof that goes stale", { skip: WINDOWS_ONLY }, () =>
 		assert.equal((await proofFiles(storage)).length, 1, "an earlier window stored its proof");
 
 		forgetProvedPtyRuntimes();
-		const events: string[] = [];
-		const client = new PtyBrokerClient({ storageDir: storage, extensionRoot: root, nodePath: process.execPath, access: ownerOnlyProbe(), onRuntimeEvent: message => events.push(message) });
+		const events: LoggedLine[] = [];
+		const client = new PtyBrokerClient({ storageDir: storage, extensionRoot: root, nodePath: process.execPath, access: ownerOnlyProbe(), log: recordingLogger(events) });
 		const launch = (slot: string) => client.launch({ slot, kind: "managed-omp", file: process.execPath, args: [], cwd: tmpdir() });
 
 		const failed = await launch("tab:heal-1");
@@ -303,7 +304,7 @@ describe("a stored runtime proof that goes stale", { skip: WINDOWS_ONLY }, () =>
 		assert.match(failed.reason, /the broker exited with code 1/);
 		assert.match(failed.reason, /proof stored by an earlier window was discarded/);
 		assert.deepEqual(await proofFiles(storage), [], "the stored proof is gone");
-		assert.ok(events.some(message => /reused from .* withdrawn/.test(message)), events.join("\n"));
+		assert.ok(events.some(event => /reused from .* withdrawn/.test(event.message)), events.map(event => event.message).join("\n"));
 
 		// The next launch no longer trusts anything it did not check: the self-check itself runs against the dead entry.
 		const next = await launch("tab:heal-2");

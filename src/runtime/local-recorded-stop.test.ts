@@ -14,6 +14,8 @@ import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { after, before, describe, it } from "node:test";
 import { build } from "esbuild";
+import { recordingLogger } from "../shared/logger.ts";
+import type { LoggedLine } from "../shared/logger.ts";
 import type { BrokerSlotProvenance, BrokerSlotStore } from "../host/broker-slots.ts";
 import type { StopRecordedHostResult } from "../host/session-availability.ts";
 import type { SessionIndex } from "../host/session-index.ts";
@@ -66,8 +68,8 @@ describe("the transport that stops a recorded host", () => {
 	const entry = (overrides: Record<string, unknown> = {}) =>
 		({ tabId: TAB, host: { pid: 51704, startedAt: STAMP, transport: "rpc", rpc: { slot: SLOT, brokerId: "broker-1", brokerGeneration: "gen-1" } }, ...overrides }) as unknown as SessionIndexEntry;
 	const port = (provenance: BrokerSlotProvenance, client: unknown = null, expectedSlot = SLOT, expectedBroker: { brokerId: string; brokerGeneration: string } | null = null) => {
-		const logged: string[] = [];
-		const stop = mod.createRecordedHostStopPort({ brokerProvenanceFor: () => provenance, attachBrokerClient: async () => client as never, log: (message: string) => { logged.push(message); } }, expectedSlot, expectedBroker);
+		const logged: LoggedLine[] = [];
+		const stop = mod.createRecordedHostStopPort({ brokerProvenanceFor: () => provenance, attachBrokerClient: async () => client as never, log: recordingLogger(logged) }, expectedSlot, expectedBroker);
 		return { stop: (row: SessionIndexEntry) => stop.stopRecordedHost(row), logged };
 	};
 

@@ -47,6 +47,7 @@
  *   `extension.ts`: the first launch of a process does).
  */
 import { isDeepStrictEqual } from "node:util";
+import type { Logger } from "../shared/logger.ts";
 
 /** The thirteen settings of 0.3.x, without prefix: `omp.<name>` became `ompDesk.<name>`. */
 export const LEGACY_SETTING_NAMES: readonly string[] = [
@@ -78,7 +79,7 @@ export interface LegacySettingsPort {
 	isWritable(file: string): PromiseLike<boolean>;
 	/** Setting ids another installed extension contributes under `omp.`. */
 	foreignSettings: ReadonlySet<string>;
-	log(line: string): void;
+	log: Logger;
 	/**
 	 * The profile-wide right to write the User layer, or `null` while another window holds it. A claim that cannot be
 	 * coordinated at all (the storage refuses) is a claim, not a refusal: the move then runs as it did without one.
@@ -149,9 +150,9 @@ export async function underUserClaim(
 	const claim = await port.claimUserLayer();
 	if (claim !== null) return work(claim);
 	const waits = { ...DEFAULT_WAITS, ...port.waits };
-	port.log("settings: another window is moving the user settings; this window waits for it");
+	port.log.info("settings: another window is moving the user settings; this window waits for it");
 	if (!(await port.waitForRelease(waits.releaseMs))) {
-		port.log(`settings: the other window's move of the user settings is still running after ${waits.releaseMs} ms; it is not waited for`);
+		port.log.warn(`settings: the other window's move of the user settings is still running after ${waits.releaseMs} ms; it is not waited for`);
 		return [];
 	}
 	// The release is seen as soon as it happens; this window's own configuration follows the file a moment later.
@@ -168,7 +169,7 @@ async function moveClaimedUserLayer(port: LegacySettingsPort, claim: UserLayerCl
 			try {
 				return await extendNameList(port, list);
 			} catch (error) {
-				port.log(`settings: ${list}: the new names were not added, the step failed: ${describe(error)}`);
+				port.log.warn(`settings: ${list}: the new names were not added, the step failed: ${describe(error)}`);
 				return [];
 			}
 		}));
@@ -185,13 +186,13 @@ async function moveKeys(port: LegacySettingsPort, layer: SettingsLayer): Promise
 		const newKey = `ompDesk.${name}`;
 		try {
 			if (port.foreignSettings.has(oldKey)) {
-				if (valueAt(port.inspect(oldKey), layer) !== undefined) port.log(`settings: ${oldKey} → ${newKey} (${LAYER_WORDS[layer]}): left; another extension contributes ${oldKey}`);
+				if (valueAt(port.inspect(oldKey), layer) !== undefined) port.log.info(`settings: ${oldKey} → ${newKey} (${LAYER_WORDS[layer]}): left; another extension contributes ${oldKey}`);
 				return null;
 			}
 			const outcome = await migrateKey(port, oldKey, newKey, layer);
 			return outcome === null ? null : { key: oldKey, layer, outcome };
 		} catch (error) {
-			port.log(`settings: ${oldKey} → ${newKey} (${LAYER_WORDS[layer]}): left, the step failed: ${describe(error)}`);
+			port.log.warn(`settings: ${oldKey} → ${newKey} (${LAYER_WORDS[layer]}): left, the step failed: ${describe(error)}`);
 			return { key: oldKey, layer, outcome: "left" };
 		}
 	}));
@@ -218,7 +219,7 @@ async function extendNameList(port: LegacySettingsPort, list: string): Promise<M
 	const found = missingListedNames(port, list);
 	if (found === null) return [];
 	await port.update(list, [...found.current, ...found.missing], "user");
-	port.log(`settings: ${list}: added ${found.missing.join(", ")} next to the old names it holds`);
+	port.log.info(`settings: ${list}: added ${found.missing.join(", ")} next to the old names it holds`);
 	return [{ key: list, layer: "user", outcome: "listed" }];
 }
 
@@ -253,12 +254,12 @@ async function migrateKey(port: LegacySettingsPort, oldKey: string, newKey: stri
 	const where = `${oldKey} → ${newKey} (${LAYER_WORDS[layer]})`;
 	if (layer === "workspace") {
 		if (!port.workspaceAllowed(newKey)) {
-			port.log(`settings: ${where}: left; this setting is read from user settings only, so the value was already ignored here`);
+			port.log.info(`settings: ${where}: left; this setting is read from user settings only, so the value was already ignored here`);
 			return "left";
 		}
 		const file = port.workspaceSettingsFile();
 		if (file !== null && !(await port.isWritable(file))) {
-			port.log(`settings: ${where}: left; the file is read-only`);
+			port.log.warn(`settings: ${where}: left; the file is read-only`);
 			return "left";
 		}
 	}
@@ -267,13 +268,13 @@ async function migrateKey(port: LegacySettingsPort, oldKey: string, newKey: stri
 	let outcome: MigrationOutcome["outcome"];
 	if (current === undefined) {
 		await port.update(newKey, old, layer);
-		port.log(`settings: ${where}: moved`);
+		port.log.info(`settings: ${where}: moved`);
 		outcome = "moved";
 	} else if (isDeepStrictEqual(current, old)) {
-		port.log(`settings: ${where}: the new key already holds this value; the old key removed`);
+		port.log.info(`settings: ${where}: the new key already holds this value; the old key removed`);
 		outcome = "already-set";
 	} else {
-		port.log(`settings: ${where}: the new key already holds ${JSON.stringify(current)}; the old value ${JSON.stringify(old)} was dropped`);
+		port.log.info(`settings: ${where}: the new key already holds ${JSON.stringify(current)}; the old value ${JSON.stringify(old)} was dropped`);
 		outcome = "conflict-dropped";
 	}
 	await port.update(oldKey, undefined, layer);

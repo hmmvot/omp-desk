@@ -48,6 +48,7 @@
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { join } from "node:path";
+import type { Logger } from "../shared/logger.ts";
 import type { BrokerProcessRow } from "./broker-processes.ts";
 import type { PtyGoneReading, PtyIdentityReading } from "./pty-identity.ts";
 
@@ -359,7 +360,7 @@ export interface KillCommandPorts extends TreeKillPorts {
 	refresh(): Promise<unknown>;
 	info(message: string): void;
 	warn(message: string): void;
-	log(message: string): void;
+	readonly log: Logger;
 	/** Who asked, for the log. */
 	readonly requester: string;
 }
@@ -377,24 +378,27 @@ export async function killSelection(selection: KillSelection, ports: KillCommand
 			targets = planSessionKill(selection.tabId, selection.title, recorded, recorded !== null && recorded.brokerCreationTime !== null ? [] : await ports.readRows());
 		}
 	} catch (error) {
-		ports.log(`kill: the target could not be planned (${error instanceof Error ? error.message : String(error)})`);
+		ports.log.error(`kill: the target could not be planned (${error instanceof Error ? error.message : String(error)})`);
 		ports.warn("Kill could not find the process of this row. Refresh Sessions and try again.");
 		return;
 	}
 	if (targets.length === 0) {
-		ports.log(`kill: requested by ${ports.requester}: no recorded process for ${selection.kind === "session" ? `session ${selection.tabId}` : selection.row.id}`);
+		ports.log.info(`kill: requested by ${ports.requester}: no recorded process for ${selection.kind === "session" ? `session ${selection.tabId}` : selection.row.id}`);
 		ports.info("This row has no process Desk knows of, so there is nothing to kill.");
 		return;
 	}
 	try {
 		for (const target of targets) {
 			if (target.roots.length === 0) {
-				ports.log(`kill: requested by ${ports.requester}: ${target.label}: no process identity is recorded (no creation time), so nothing was killed`);
+				ports.log.warn(`kill: requested by ${ports.requester}: ${target.label}: no process identity is recorded (no creation time), so nothing was killed`);
 				ports.warn(`${target.label} recorded no process identity, so Kill cannot tell it from another process and killed nothing. Use Stop, or Task Manager.`);
 				continue;
 			}
 			const outcome = await killProcessTree(target, ports);
-			ports.log(`kill: requested by ${ports.requester}: ${target.label}${target.slot === null ? "" : ` (slot ${target.slot})`}: ${outcome.kind}: ${outcome.detail}`);
+			const line = `kill: requested by ${ports.requester}: ${target.label}${target.slot === null ? "" : ` (slot ${target.slot})`}: ${outcome.kind}: ${outcome.detail}`;
+			if (outcome.kind === "failed") ports.log.error(line);
+			else if (outcome.incomplete) ports.log.warn(line);
+			else ports.log.info(line);
 			if (outcome.kind === "failed") {
 				ports.warn(outcome.message);
 				continue;
@@ -414,7 +418,7 @@ async function reconcile(target: KillTarget, ports: KillCommandPorts): Promise<v
 		if (target.reconcile.kind === "slot") await ports.forgetStoppedSlot(target.reconcile.slot);
 		else if (target.reconcile.kind === "session") await ports.reconcileSession(target.reconcile.tabId, target.reconcile.captured);
 	} catch (error) {
-		ports.log(`kill: ${target.label}: its records could not be updated (${error instanceof Error ? error.message : String(error)})`);
+		ports.log.error(`kill: ${target.label}: its records could not be updated (${error instanceof Error ? error.message : String(error)})`);
 		ports.warn(`${target.label} was killed, but Desk could not update its own records. Refresh Sessions; see the OMP Desk output.`);
 	}
 }

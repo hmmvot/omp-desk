@@ -13,6 +13,7 @@
  * runtime can check it checks as data (the incarnation, the editor binding's generation, the facts, the
  * durable file). A hook never waits for the user and never takes the gate.
  */
+import type { Logger } from "../shared/logger.ts";
 import { isOpenControlClient } from "../host/control-attempt.ts";
 import type { ChatRuntime } from "../host/chat-runtime.ts";
 import { waitForManagedRootExit } from "../host/native-session.ts";
@@ -62,7 +63,7 @@ export interface LocalTransitionDeps {
 	readonly writer: { pid(conversation: string): Promise<number | null> };
 	readonly attachBrokerClient: () => Promise<PtyBrokerClient | null>;
 	readonly launcher: () => OmpHostLauncher;
-	readonly log: (message: string) => void;
+	readonly log: Logger;
 }
 
 /** What the runtime keeps of one flow's fence between its calls. */
@@ -214,7 +215,7 @@ export class LocalTransitions {
 			const verdict = fence?.pendingNative === true && request.mode === "graceful"
 				? await this.#deps.stop.confirmEnded(runtime) ?? { writerGone: false, treeEmpty: false, detail: "Native shutdown is already pending; no new shutdown is sent." }
 				: await this.#deps.stop.requestStop(record, runtime, request.mode, request.consent, request.expected);
-			log(`session stop ${tabId}: ${verdict.diagnosticDetail ?? verdict.detail}`);
+			log.info(`session stop ${tabId}: ${verdict.diagnosticDetail ?? verdict.detail}`);
 			if (!verdict.writerGone) return { status: "unconfirmed", detail: verdict.detail };
 			const ownerGeneration = index.get(tabId)?.ownership?.ownerGeneration ?? "";
 			this.#end(record);
@@ -261,7 +262,7 @@ export class LocalTransitions {
 			}
 			return await running;
 		} catch (error) {
-			log(`tab ${request.conversation}: replacing the writer failed: ${messageOf(error)}`);
+			log.error(`tab ${request.conversation}: replacing the writer failed: ${messageOf(error)}`);
 			return { status: "failed", detail: messageOf(error), ...progress };
 		} finally {
 			if (fence !== undefined) fence.keep = request.stop.kind === "force" ? progress.stopDispatched && !progress.writerGone : progress.stopDispatched;
@@ -300,7 +301,7 @@ export class LocalTransitions {
 			progress.stopDispatched = true;
 			const requested = await withSessionReadDeadline(stopRpcHost(runtime, "force"), 35_000);
 			verdict = await waitForManagedRootExit(runtime, broker as PtyBrokerClient, 5_000);
-			log(`tab ${tabId}: explicit Restart stop: ${verdict.diagnosticDetail ?? verdict.detail}; request: ${requested.diagnosticDetail ?? requested.detail}`);
+			log.info(`tab ${tabId}: explicit Restart stop: ${verdict.diagnosticDetail ?? verdict.detail}; request: ${requested.diagnosticDetail ?? requested.detail}`);
 			if (!verdict.writerGone) return { status: "unconfirmed", detail: verdict.detail, stopDispatched: true, writerGone: false };
 			progress.writerGone = true;
 			if (!(await window.check(request.token, "stopped"))) return refused("checked-after-stop");
@@ -308,7 +309,7 @@ export class LocalTransitions {
 			const stopped = await this.#stopGraceful(record, runtime, broker as PtyBrokerClient, request.stop, fresh as SessionTransitionFacts, progress);
 			if ("refusal" in stopped) return stopped.refusal;
 			verdict = stopped.verdict;
-			log(`tab ${tabId}: view switch stop: ${verdict.diagnosticDetail ?? verdict.detail}`);
+			log.info(`tab ${tabId}: view switch stop: ${verdict.diagnosticDetail ?? verdict.detail}`);
 			if (!verdict.writerGone) verdict = await this.#deps.stop.confirmEnded(runtime) ?? verdict;
 			if (!verdict.writerGone) return { status: "unconfirmed", detail: verdict.detail, stopDispatched: true, writerGone: false };
 			progress.writerGone = true;
@@ -365,7 +366,7 @@ export class LocalTransitions {
 			if (status !== "accepted" && status !== "accepted-deferred") {
 				runtime.stopping = false;
 				progress.stopDispatched = false;
-				this.#deps.log(`tab ${tabId}: native shutdown was refused (${status})`);
+				this.#deps.log.warn(`tab ${tabId}: native shutdown was refused (${status})`);
 				return { refusal: { status: "refused", code: "native-refused", detail: status, ...progress } };
 			}
 			return { verdict: await waitForManagedRootExit(runtime, broker) };

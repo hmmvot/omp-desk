@@ -25,6 +25,8 @@ import { LocalKill } from "../runtime/local-kill.ts";
 import { RuntimeRecords } from "../runtime/runtime-record.ts";
 import type { ConversationRecord } from "../runtime/runtime-record.ts";
 import { LocalWriterVerifier } from "../runtime/local-writer.ts";
+import type { LoggedLine } from "../shared/logger.ts";
+import { recordingLogger, silentLogger } from "../shared/logger.ts";
 import type { SessionActionsDeps, SessionTab } from "./session-actions.ts";
 
 // The module and the views it imports load the `vscode` specifier; map it before the first import.
@@ -121,7 +123,7 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 	const warnings: string[] = [];
 	const infos: string[] = [];
 	const errors: string[] = [];
-	const logged: string[] = [];
+	const lines: LoggedLine[] = [];
 	const opened: unknown[][] = [];
 	const refreshes: unknown[] = [];
 	const forgotten: string[] = [];
@@ -167,7 +169,7 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 		writer,
 		attachBrokerClient: async () => null,
 		launcher: () => { throw new Error("The fixture launches nothing."); },
-		log: () => {},
+		log: silentLogger,
 	});
 	const runtime = new LocalSessionRuntime({
 		index: index as never,
@@ -197,7 +199,7 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 			},
 			attachBrokerClient: async () => null,
 			brokerSlots: () => state.brokerSlots,
-			log: message => { logged.push(message); },
+			log: recordingLogger(lines),
 		}),
 		launcher: () => ({
 			launch: async () => ({ state: "not-started", reason: "fixture" }),
@@ -260,7 +262,7 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 			return state.answer === "first" ? items[0] : undefined;
 		},
 		showQuickPick: (async (items: { label: string }[]) => state.picked?.(items)) as never,
-		log: message => { logged.push(message); },
+		log: recordingLogger(lines),
 		info: message => { infos.push(message); },
 		warn: message => { warnings.push(message); },
 		error: message => { errors.push(message); },
@@ -271,7 +273,7 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 	stub.commands.handler = null;
 	stub.window.notices.length = 0;
 	return {
-		actions, deps, state, index: index as never, dialogs, warnings, infos, errors, logged, opened, refreshes, released, forgotten, editorsReleased, slotsRemoved,
+		actions, deps, state, index: index as never, dialogs, warnings, infos, errors, get logged(): string[] { return lines.map(line => line.message); }, lines, opened, refreshes, released, forgotten, editorsReleased, slotsRemoved,
 		conversationsClosed, stopPortRequests, confirmedStops, catalogAdoptions, order, reattached, shellsAttached, tabsAsked, provenanceAsked, commands: stub.commands.calls, notices: stub.window.notices,
 	};
 }
@@ -875,7 +877,7 @@ describe("deleting a session", () => {
 		try {
 			assert.equal(await f.actions.confirmAndDelete(f.index, TAB), false);
 			assert.deepEqual(f.errors, ["The session could not be checked for deletion. Nothing was deleted. Refresh Sessions and try again."]);
-			assert.ok(f.logged.includes("session deletion preparation failed: Session state read timed out."));
+			assert.ok(f.lines.some(line => line.level === "error" && line.message === "session deletion preparation failed: Session state read timed out."));
 			assert.deepEqual(f.refreshes, [undefined]);
 			assert.deepEqual(f.dialogs, []);
 			assert.ok(f.index.get(TAB));
@@ -903,7 +905,7 @@ describe("refreshing the launcher", () => {
 		w.state.folders = {};
 		w.actions.refresh(w.index);
 		await new Promise<void>(resolve => setImmediate(resolve));
-		assert.ok(w.logged.includes("catalog: the newest revision could not be adopted: catalog locked"));
+		assert.ok(w.lines.some(line => line.level === "warn" && line.message === "catalog: the newest revision could not be adopted: catalog locked"));
 	});
 
 	it("warns about a folder-list change that could not be saved, and about nothing else", async () => {

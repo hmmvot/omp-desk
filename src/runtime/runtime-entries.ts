@@ -19,6 +19,7 @@
  * at the helper copy, so `activate` stages once and every later use — including the
  * process-generation probe for an already running host — finds it configured.
  */
+import type { Logger } from "../shared/logger.ts";
 import { stageRuntimeAssets, verifyStagedRuntimeAsset } from "../host/runtime-assets.ts";
 import type { StagedRuntimeAsset } from "../host/runtime-assets.ts";
 
@@ -53,7 +54,7 @@ export interface RuntimeStagingDeps {
 	refusal(): string | null;
 	/** Points the control client at the staged helper copy. */
 	configureControlHelper(path: string, sha256: string): void;
-	log(message: string): void;
+	readonly log: Logger;
 }
 
 export interface RuntimeStaging {
@@ -85,7 +86,7 @@ export function createRuntimeStaging(deps: RuntimeStagingDeps): RuntimeStaging {
 			if (cached !== null) {
 				const entries = await cached;
 				if (await stagedEntriesIntact(entries)) return entries;
-				deps.log("a staged runtime copy no longer matches its digest; staging the packaged entries again");
+				deps.log.warn("a staged runtime copy no longer matches its digest; staging the packaged entries again");
 				stagedEntries = null;
 			}
 			const staging = (async () => {
@@ -116,7 +117,7 @@ export function createRuntimeStaging(deps: RuntimeStagingDeps): RuntimeStaging {
 				storageDir: deps.storageDir(),
 				sourcePaths: [deps.packagedPaths().leaseHelper],
 			}).then(([helper]) => helper ?? null).catch((error: unknown) => {
-				deps.log(`session lease helper could not be staged: ${error instanceof Error ? error.message : String(error)}`);
+				deps.log.warn(`session lease helper could not be staged: ${error instanceof Error ? error.message : String(error)}`);
 				return null;
 			});
 			return await stagedLeaseHelper;

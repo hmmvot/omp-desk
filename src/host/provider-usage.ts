@@ -1,5 +1,6 @@
 /** Installed OMP usage report -> current-provider quota facts, never token-derived limits. */
 import type { FooterAccountUsage, FooterQuotaWindow, FooterUsage } from "../shared/footer-metadata.ts";
+import { silentLogger, type Logger } from "../shared/logger.ts";
 import type { OmpCliResult } from "./native-terminal.ts";
 export const PROVIDER_USAGE_ARGS = ["usage", "--json", "--redact"] as const;
 export const PROVIDER_USAGE_TIMEOUT_MS = 20_000;
@@ -81,8 +82,8 @@ interface Reading { attemptedAt: number; reading: ProviderUsageReading | null; /
 export class ProviderUsageCache {
 	readonly #readings = new Map<string, Reading>();
 	readonly now: () => number;
-	readonly log: (message: string) => void;
-	constructor(now: () => number = Date.now, log: (message: string) => void = () => {}) {
+	readonly log: Logger;
+	constructor(now: () => number = Date.now, log: Logger = silentLogger) {
 		this.now = now;
 		this.log = log;
 	}
@@ -105,9 +106,9 @@ export class ProviderUsageCache {
 			try {
 				const result = await run();
 				const parsed = result.exitCode === 0 ? parseProviderUsageJson(result.stdout, provider) : null;
-				if (parsed === null) this.log("Provider usage refresh returned no valid reading; retaining the last value.");
+				if (parsed === null) this.log.warn("Provider usage refresh returned no valid reading; retaining the last value.");
 				else { reading.reading = parsed; reading.readAt = this.now(); }
-			} catch { this.log("Provider usage refresh failed; retaining the last value."); }
+			} catch { this.log.warn("Provider usage refresh failed; retaining the last value."); }
 			finally { reading.pending = null; }
 		})();
 		await reading.pending;

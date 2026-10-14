@@ -4,6 +4,7 @@ import { FRESH_MS, InventoryController } from "./inventory-controller.ts";
 import type { InventoryControllerDeps } from "./inventory-controller.ts";
 import type { InventoryResult, InventoryRow, InventoryScope, InventorySnapshot, ViewKind, ViewModel } from "./inventory-model.ts";
 import type { InventoryRuntime, InventoryReadRequest, ToggleRequest, ToggleResult } from "./inventory-runtime.ts";
+import { recordingLogger, type LoggedLine } from "../../shared/logger.ts";
 import type { SessionToolsTarget } from "../session-tools.ts";
 
 const skill: InventoryRow = { kind: "skill", name: "review", description: null, path: "C:/s/SKILL.md", provider: "native", providerName: "OMP", level: "user", state: "active", shadowed: false, shadowedBy: null,
@@ -17,17 +18,17 @@ function target(overrides: Partial<SessionToolsTarget> = {}): SessionToolsTarget
 function harness(initial: SessionToolsTarget | null) {
 	const state = { clock: 1_000_000, target: initial, reads: [] as InventoryReadRequest[], toggles: [] as ToggleRequest[], published: [] as Array<[ViewKind, ViewModel]>, scopes: [] as Array<[ViewKind, InventoryScope]>,
 		toggleGate: null as Promise<void> | null,
-		notices: [] as Array<[string, string]>, undos: [] as Array<() => void>, logs: [] as string[], delays: [] as number[], gate: null as Promise<void> | null, toggleResult: { ok: true, changed: true, writes: [] } as ToggleResult, readResult: null as ((request: InventoryReadRequest) => InventoryResult) | null };
+		notices: [] as Array<[string, string]>, undos: [] as Array<() => void>, logs: [] as LoggedLine[], delays: [] as number[], gate: null as Promise<void> | null, toggleResult: { ok: true, changed: true, writes: [] } as ToggleResult, readResult: null as ((request: InventoryReadRequest) => InventoryResult) | null };
 	const runtime: InventoryRuntime = {
 		async read(request) { state.reads.push(request); if (state.gate) await state.gate; return state.readResult?.(request) ?? snapshot(request.cwd, request.profile); },
 		async toggle(request) { state.toggles.push(request); if (state.toggleGate) await state.toggleGate; return state.toggleResult; },
 	};
 	const deps: InventoryControllerDeps = { target: () => state.target, runtime, neutralCwd: "C:/", publish: (view, model) => { state.published.push([view, model]); },
-		scopeChanged: (view, scope) => { state.scopes.push([view, scope]); }, notify: (message, level, undo) => { state.notices.push([level, message]); if (undo !== undefined) state.undos.push(undo); }, log: message => { state.logs.push(message); }, delay: async ms => { state.delays.push(ms); }, now: () => state.clock };
+		scopeChanged: (view, scope) => { state.scopes.push([view, scope]); }, notify: (message, level, undo) => { state.notices.push([level, message]); if (undo !== undefined) state.undos.push(undo); }, log: recordingLogger(state.logs), delay: async ms => { state.delays.push(ms); }, now: () => state.clock };
 	const controller = new InventoryController(deps);
 	const settle = async () => { for (let turn = 0; turn < 20; turn++) await new Promise(resolve => setImmediate(resolve)); };
 	/** Switch lines only: timing lines are informational and differ per run. */
-	const switchLogs = (): string[] => state.logs.filter(line => /inventory: switch/.test(line));
+	const switchLogs = (): LoggedLine[] => state.logs.filter(line => /inventory: switch/.test(line.message));
 	const last = (view: ViewKind) => state.published.filter(([kind]) => kind === view).at(-1)![1];
 	const shown = (view: ViewKind): InventoryRow => last(view).groups[0]!.items[0]!.row!;
 	return { state, controller, settle, last, shown, switchLogs };
@@ -256,12 +257,12 @@ describe("inventory controller switches", () => {
 		h.state.toggleResult = { ok: false, message: "OMP no longer lists this item." };
 		await h.controller.toggle("skills", h.shown("skills"), false);
 		assert.deepEqual(h.switchLogs(), [
-			"inventory: switch requested in the skills view: skill:review enabled→disabled (global configuration of profile default; list shown: session, folder D:/proj)",
-			"inventory: switch skill:review enabled→disabled: written: disabledExtensions + skill:review (C:/u/config.yml)",
-			"inventory: switch requested in the skills view: skill:review disabled→enabled (global configuration of profile default; list shown: session, folder D:/proj)",
-			"inventory: switch skill:review disabled→enabled: already as requested; nothing written",
-			"inventory: switch requested in the skills view: skill:review enabled→disabled (global configuration of profile default; list shown: session, folder D:/proj)",
-			"inventory: switch skill:review enabled→disabled: refused: OMP no longer lists this item.",
+			{ level: "info", message: "inventory: switch requested in the skills view: skill:review enabled→disabled (global configuration of profile default; list shown: session, folder D:/proj)" },
+			{ level: "info", message: "inventory: switch skill:review enabled→disabled: written: disabledExtensions + skill:review (C:/u/config.yml)" },
+			{ level: "info", message: "inventory: switch requested in the skills view: skill:review disabled→enabled (global configuration of profile default; list shown: session, folder D:/proj)" },
+			{ level: "info", message: "inventory: switch skill:review disabled→enabled: already as requested; nothing written" },
+			{ level: "info", message: "inventory: switch requested in the skills view: skill:review enabled→disabled (global configuration of profile default; list shown: session, folder D:/proj)" },
+			{ level: "warn", message: "inventory: switch skill:review enabled→disabled: refused: OMP no longer lists this item." },
 		]);
 	});
 	it("logs a failed read with its list, profile and folder", async () => {
@@ -269,7 +270,7 @@ describe("inventory controller switches", () => {
 		h.state.readResult = () => ({ unavailable: "No Bun." });
 		h.controller.setVisible("skills", true);
 		await h.settle();
-		assert.deepEqual(h.state.logs.filter(line => /read failed/.test(line)).map(line => line.replace(/ after \d+ ms/, "")), ["inventory: read failed (session list, profile default, folder D:/proj): No Bun."]);
+		assert.deepEqual(h.state.logs.filter(line => /read failed/.test(line.message)).map(line => ({ level: line.level, message: line.message.replace(/ after \d+ ms/, "") })), [{ level: "warn", message: "inventory: read failed (session list, profile default, folder D:/proj): No Bun." }]);
 	});
 	it("offers Undo only on a successful disable, and Undo enables the same row again", async () => {
 		const h = harness(target());

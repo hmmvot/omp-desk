@@ -14,6 +14,7 @@ import { HOST_TOOL_EARLIER_ATTACHMENT_ERROR } from "../tools/host-tool-calls.ts"
 import type { HostToolContext, HostToolDefinition, HostToolProvider, HostToolResult } from "../tools/host-tool.ts";
 import { FakeRpcChannel, responseLine } from "./fake-channel.ts";
 import { RpcSession, type RpcSessionOptions } from "./session.ts";
+import { recordingLogger, type LoggedLine } from "../../shared/logger.ts";
 import { ManualTimers, tick } from "./test-support.ts";
 
 const FILE = "D:\\scratch\\host-tools.jsonl";
@@ -71,7 +72,7 @@ interface Rig {
 	readonly session: RpcSession;
 	readonly provider: Provider;
 	readonly timers: ManualTimers;
-	readonly logs: string[];
+	readonly logs: LoggedLine[];
 }
 
 const sessions: RpcSession[] = [];
@@ -85,7 +86,7 @@ async function boot(options: { provider?: Provider | null; setup?: (channel: Fak
 	const channel = new FakeRpcChannel({ sessionFile: FILE });
 	options.setup?.(channel, provider);
 	const timers = new ManualTimers();
-	const logs: string[] = [];
+	const logs: LoggedLine[] = [];
 	const session = new RpcSession({
 		channel,
 		sessionFile: FILE,
@@ -99,7 +100,7 @@ async function boot(options: { provider?: Provider | null; setup?: (channel: Fak
 		reattachDelaysMs: [0],
 		autoRecoveryDelaysMs: [],
 		hostTools: provider,
-		log: message => logs.push(message),
+		log: recordingLogger(logs),
 		...options.session,
 	});
 	sessions.push(session);
@@ -181,7 +182,7 @@ describe("registration", () => {
 	it("keeps Chat working and refuses every call when OMP rejects the registration", async () => {
 		const { channel, session, provider, logs } = await boot({ setup: channel => { channel.hostToolsAnswer = "reject"; } });
 		assert.equal(session.phase, "live");
-		assert.match(logs.join("\n"), /rejected set_host_tools/);
+		assert.deepEqual(logs.filter(line => /rejected set_host_tools/.test(line.message)).map(line => line.level), ["warn"]);
 		channel.emitHostCall("call-1", "vscode_probe");
 		await tick();
 		assert.equal(provider.started.length, 0, "an unavailable debugger runs nothing");
@@ -197,7 +198,7 @@ describe("registration", () => {
 		timers.advance(10);
 		await tick();
 		assert.equal(session.phase, "live", "a registration timeout does not fail the session");
-		assert.match(logs.join("\n"), /did not answer set_host_tools/);
+		assert.deepEqual(logs.filter(line => /did not answer set_host_tools/.test(line.message)).map(line => line.level), ["warn"]);
 		channel.emitHostCall("call-1", "vscode_probe");
 		await tick();
 		assert.equal(provider.started.length, 0);

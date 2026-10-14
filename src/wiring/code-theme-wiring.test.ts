@@ -8,6 +8,9 @@ import assert from "node:assert/strict";
 import module from "node:module";
 import { afterEach, beforeEach, describe, it, mock } from "node:test";
 
+import type { LoggedLine } from "../shared/logger.ts";
+import { recordingLogger } from "../shared/logger.ts";
+
 if (typeof module.registerHooks === "function") {
 	const stubUrl = new URL("./vscode-test-stub.ts", import.meta.url).href;
 	module.registerHooks({
@@ -40,7 +43,7 @@ const ids = (themes: readonly { id: string }[]): string[] => themes.map(theme =>
 describe("registerCodeTheme", () => {
 	let reads: string[];
 	let changed: number;
-	let logs: string[];
+	let logs: LoggedLine[];
 	let subscriptions: { dispose(): void }[];
 	let files: Record<string, string>;
 	let gate: Promise<void> | null;
@@ -55,7 +58,7 @@ describe("registerCodeTheme", () => {
 	const start = () =>
 		registerCodeTheme({ subscriptions } as never, {
 			changed: () => { changed++; },
-			log: message => { logs.push(message); },
+			log: recordingLogger(logs),
 			...ports,
 		});
 	const debounce = async (): Promise<void> => {
@@ -120,12 +123,13 @@ describe("registerCodeTheme", () => {
 		start();
 		await settle();
 		assert.equal(logs.length, 1);
-		assert.match(logs[0]!, /^code theme: themes "Demo Dark" \(1 rules\)$/);
+		assert.equal(logs[0]!.level, "info");
+		assert.match(logs[0]!.message, /^code theme: themes "Demo Dark" \(1 rules\)$/);
 		stub.workspace.settings = { "workbench.colorTheme": "Not Installed" };
 		stub.workspace.fireConfigurationChange("workbench.colorTheme");
 		await debounce();
 		assert.equal(logs.length, 2);
-		assert.match(logs[1]!, /^code theme: no themes for dark .*"Not Installed"/);
+		assert.match(logs[1]!.message, /^code theme: no themes for dark .*"Not Installed"/);
 	});
 
 	it("announces nothing when the first resolution is empty, like the value current() already has", async () => {
@@ -250,18 +254,20 @@ describe("registerCodeTheme", () => {
 			Object.defineProperty(stub.extensions, "all", { configurable: true, writable: true, value: [] });
 		}
 		assert.deepEqual(handle.current(), []);
-		assert.match(logs.join("\n"), /resolution failed: host gone/);
+		assert.match(logs.map(line => line.message).join("\n"), /resolution failed: host gone/);
+		assert.ok(logs.some(line => line.level === "warn" && line.message.includes("resolution failed")));
 		assert.equal(changed, 2);
 	});
 
 	it("logs a failing change callback without throwing", async () => {
 		registerCodeTheme({ subscriptions } as never, {
 			changed() { throw new Error("pages gone"); },
-			log: message => { logs.push(message); },
+			log: recordingLogger(logs),
 			...ports,
 		});
 		await settle();
-		assert.match(logs.join("\n"), /change notification failed: pages gone/);
+		assert.match(logs.map(line => line.message).join("\n"), /change notification failed: pages gone/);
+		assert.ok(logs.some(line => line.level === "warn" && line.message.includes("change notification failed")));
 	});
 
 	it("stops reacting once disposed, and drops a resolution still in flight", async () => {

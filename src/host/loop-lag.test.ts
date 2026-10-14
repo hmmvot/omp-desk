@@ -1,16 +1,18 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { type LoggedLine, recordingLogger } from "../shared/logger.ts";
 import { EventLoopLagMonitor, startLoopLagMonitor, trackOperation } from "./loop-lag.ts";
 
 /** A monitor on a clock the test moves: `tick(ms)` is "the timer fired `ms` after the previous sample". */
 function monitor(options: { thresholdMs?: number; tickMs?: number } = {}) {
 	let now = 1000;
 	let cpu = 0;
-	const lines: string[] = [];
-	const instance = new EventLoopLagMonitor({ report: line => lines.push(line), now: () => now, cpuMs: () => cpu, ...options });
+	const logged: LoggedLine[] = [];
+	const instance = new EventLoopLagMonitor({ log: recordingLogger(logged), now: () => now, cpuMs: () => cpu, ...options });
 	return {
 		instance,
-		lines,
+		logged,
+		get lines(): string[] { return logged.map(line => line.message); },
 		advance(ms: number) { now += ms; },
 		burn(ms: number) { cpu += ms; },
 		/** The timer fires `ms` after the last one. */
@@ -34,6 +36,20 @@ describe("event loop lag monitor", () => {
 		assert.equal(m.lines.length, 1);
 		assert.match(m.lines[0]!, /event loop blocked for 1234 ms/);
 		assert.match(m.lines[0]!, /process CPU 40 ms in 1334 ms/);
+	});
+
+	it("logs a stall of a second or more as a warning and a shorter one as debug", () => {
+		const m = monitor();
+		m.tick(100 + 700);
+		m.tick(100 + 1000);
+		assert.deepEqual(m.logged.map(line => line.level), ["debug", "warn"]);
+	});
+
+	it("logs how long an operation held the thread before its first await at the stall's level", () => {
+		const m = monitor({ thresholdMs: 500 });
+		m.instance.run("short hold", () => m.advance(600));
+		m.instance.run("long hold", () => m.advance(1500));
+		assert.deepEqual(m.logged.map(line => line.level), ["debug", "warn"]);
 	});
 
 	it("says so when no marked Desk operation overlapped the stall", () => {
@@ -105,10 +121,11 @@ describe("event loop lag monitor", () => {
 	it("detects a real stall of this thread through the started timer", async () => {
 		const lines: string[] = [];
 		const stalled = Promise.withResolvers<void>();
-		const stop = startLoopLagMonitor(line => {
+		const record = (line: string): void => {
 			lines.push(line);
 			if (line.startsWith("event loop blocked")) stalled.resolve();
-		});
+		};
+		const stop = startLoopLagMonitor({ error: record, warn: record, info: record, debug: record, trace: record });
 		try {
 			trackOperation("busy section", () => {
 				const until = Date.now() + 700;

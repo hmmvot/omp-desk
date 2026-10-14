@@ -35,6 +35,7 @@ import { isPtyProcessAlive, queryPtyProcessIdentity, waitForPtyProcessGone } fro
 import { identifyPeerExecutor, proveExecutorGone } from "../host/peer-executor.ts";
 import type { PeerExecutorProbe } from "../host/peer-executor.ts";
 import type { PtyBrokerClient } from "../host/pty-client.ts";
+import type { Logger } from "../shared/logger.ts";
 import type { ShellSlotStore } from "../host/shell-slots.ts";
 import { ProcessTreeItem } from "../views/process-rows";
 import type { SessionsGrouping } from "../views/session-order";
@@ -88,7 +89,7 @@ export interface ProcessWiringDeps {
 	captureRecordedStop(row: BrokerProcessRow, options: { readonly offerForce: boolean }): Promise<CapturedRowStop | null>;
 	/** Hold the owning shell lifecycle for the whole authenticated stop/shutdown sequence. */
 	runBrokerStop(target: BrokerStopTarget, operation: () => Promise<BrokerStopOutcome>): Promise<BrokerStopOutcome>;
-	log(message: string): void;
+	log: Logger;
 }
 
 /** Another live window as the window registry names it, with the extension host that serves its requests. */
@@ -191,7 +192,7 @@ export function createBrokerProcessReaderFor(deps: ProcessWiringDeps): BrokerPro
 	return createBrokerProcessReader({
 		listRecords: list,
 		async catalog(fresh) {
-			if (fresh) await deps.refreshCatalog().catch(error => deps.log(`processes: the catalog could not be refreshed: ${messageOf(error)}`));
+			if (fresh) await deps.refreshCatalog().catch(error => deps.log.warn(`processes: the catalog could not be refreshed: ${messageOf(error)}`));
 			return buildBrokerProcessCatalog(catalogSourcesFrom(deps));
 		},
 		isAlive: isPtyProcessAlive,
@@ -254,7 +255,7 @@ export function registerSessionProcesses(context: vscode.ExtensionContext, deps:
 			if (disposed || !deps.visible()) return;
 			await read({ fresh: false, unreadChildren: true });
 		} catch (error) {
-			deps.log(`processes: the list could not be read: ${messageOf(error)}`);
+			deps.log.warn(`processes: the list could not be read: ${messageOf(error)}`);
 		} finally {
 			tickQueued = false;
 		}
@@ -267,7 +268,7 @@ export function registerSessionProcesses(context: vscode.ExtensionContext, deps:
 			if (disposed || !deps.visible()) return;
 			await read(options);
 		} catch (error) {
-			deps.log(`processes: the list could not be read: ${messageOf(error)}`);
+			deps.log.warn(`processes: the list could not be read: ${messageOf(error)}`);
 		}
 	};
 
@@ -285,11 +286,11 @@ export function registerSessionProcesses(context: vscode.ExtensionContext, deps:
 		(await vscode.window.showWarningMessage(request.message, { modal: true, detail: request.detail }, request.label)) === request.label;
 
 	const stopPorts: BrokerStopPorts = {
-		log: message => deps.log(message),
+		log: deps.log,
 		async attach(target) {
 			const client = await deps.client();
 			if (client === null) return { ok: false, reason: "Background process support is unavailable. Reload the window and try Stop again." };
-			return await brokerStopAttachFor(client, message => deps.log(message))(target);
+			return await brokerStopAttachFor(client, deps.log)(target);
 		},
 		async waitBrokerGone(target, timeoutMs) {
 			const client = await deps.client();
@@ -346,7 +347,7 @@ export function registerSessionProcesses(context: vscode.ExtensionContext, deps:
 		askWindowToStop: (holderId, rows) => deps.askWindowToStop(holderId, rows),
 		async refresh() {
 			deps.refreshLauncher();
-			await read({ fresh: true }).catch(error => deps.log(`processes: the list could not be read: ${messageOf(error)}`));
+			await read({ fresh: true }).catch(error => deps.log.warn(`processes: the list could not be read: ${messageOf(error)}`));
 		},
 	};
 
@@ -364,7 +365,7 @@ export function registerSessionProcesses(context: vscode.ExtensionContext, deps:
 				clearTimeout(touchTimer);
 			},
 		},
-		vscode.commands.registerCommand("ompDesk.refreshProcesses", () => read({ fresh: true }).catch(error => deps.log(`processes: the list could not be read: ${messageOf(error)}`))),
+		vscode.commands.registerCommand("ompDesk.refreshProcesses", () => read({ fresh: true }).catch(error => deps.log.error(`processes: the list could not be read: ${messageOf(error)}`))),
 		vscode.commands.registerCommand("ompDesk.stopProcess", async (argument: unknown) => {
 			const id = rowIdOf(argument);
 			if (id === null) {
@@ -396,7 +397,7 @@ export function registerSessionProcesses(context: vscode.ExtensionContext, deps:
 			const acted = answers.filter(answer => answer.state === "stopped" || answer.state === "unconfirmed");
 			if (acted.length > 0) {
 				const stopped = acted.filter(answer => answer.state === "stopped").length;
-				deps.log(`processes: a stop requested by another window: ${stopped} of ${acted.length} stopped here`);
+				deps.log.info(`processes: a stop requested by another window: ${stopped} of ${acted.length} stopped here`);
 				void vscode.window.showInformationMessage(`OMP Desk: Another window ran Kill All. ${stopped} of ${acted.length} of this window's OMP ${acted.length === 1 ? "process was" : "processes were"} stopped.`);
 			}
 			return answers;

@@ -24,6 +24,7 @@ import type { SessionViewMode } from "../host/session-model.ts";
 import { createToken } from "../protocol/bridge-protocol.ts";
 import type { GuestPanelActionMessage } from "../protocol/messages.ts";
 import { persistedTabId } from "../shared/panel-identity.ts";
+import type { Logger } from "../shared/logger.ts";
 import { sessionHeadline } from "../views/session-tree.ts";
 import type { RuntimeRecords } from "../runtime/runtime-record.ts";
 import type { BridgeHost, BridgeTab } from "./bridge-host.ts";
@@ -176,7 +177,7 @@ export interface EditorWorkbenchPort<Tab extends EditorPanelsTab> {
 
 /** The log and the notifications. Notifications carry the extension's own prefix. */
 export interface EditorNotices {
-	log(message: string): void;
+	log: Logger;
 	info(message: string): void;
 	warn(message: string): void;
 }
@@ -280,9 +281,9 @@ export function registerEditorPanels<Tab extends EditorPanelsTab>(deps: EditorPa
 			},
 		);
 		if (placement !== null) {
-			deps.log(`chat column: session editor placed at column ${placement.column} (${placement.arrange})`);
+			deps.log.debug(`chat column: session editor placed at column ${placement.column} (${placement.arrange})`);
 			void arrangeSessionPanelGroup(placement, panel, viewType)
-				.catch(error => deps.log(`chat column: the chat group could not be arranged: ${messageOf(error)}`));
+				.catch(error => deps.log.warn(`chat column: the chat group could not be arranged: ${messageOf(error)}`));
 		}
 		bindPanel(context, index, ownEditorId, tabId, panel, "created");
 		void deps.setActiveTab(index, tabId);
@@ -298,7 +299,7 @@ export function registerEditorPanels<Tab extends EditorPanelsTab>(deps: EditorPa
 				// host-only restart — and nothing more. The chat, the composer and every
 				// panel-served control keep working, so the panel is rendered without a bridge
 				// rather than being left on an explanation.
-				deps.log(`slot ${ownEditorId}: this editor has no bridge endpoint (${deps.bridge().endpointOf(ownEditorId)?.failure ?? "unknown"})`);
+				deps.log.warn(`slot ${ownEditorId}: this editor has no bridge endpoint (${deps.bridge().endpointOf(ownEditorId)?.failure ?? "unknown"})`);
 				const current = deps.tabs().get(ownEditorId);
 				if (current !== undefined) current.bridge = null;
 				renderPanelDocument(context, ownEditorId);
@@ -343,7 +344,7 @@ export function registerEditorPanels<Tab extends EditorPanelsTab>(deps: EditorPa
 		}
 		const live = { get active() { return panel.active; }, get viewColumn() { return sessionTabColumn(viewType) ?? panel.viewColumn; }, onDidChangeViewState: (listener: () => void) => panel.onDidChangeViewState(listener) };
 		const landed = live.viewColumn;
-		deps.log(`chat column: the session editor is at column ${landed} (asked for ${placement.column})`);
+		deps.log.debug(`chat column: the session editor is at column ${landed} (asked for ${placement.column})`);
 		await arrangeChatGroup({ executeCommand: command => vscode.commands.executeCommand(command) }, placement, live);
 		// The editor missed the requested group, so that group is still there, emptied. VS Code reports the move a moment later.
 		if (placement.arrange !== "move-left-and-lock" || landed === placement.column) return;
@@ -351,7 +352,7 @@ export function registerEditorPanels<Tab extends EditorPanelsTab>(deps: EditorPa
 			const groups = vscode.window.tabGroups;
 			const strays = strayEmptyGroups(groups.all, isSessionTabInput);
 			if (strays.length > 0) {
-				deps.log(`chat column: closing ${strays.length} empty group(s) beside the chat group`);
+				deps.log.debug(`chat column: closing ${strays.length} empty group(s) beside the chat group`);
 				await groups.close(strays);
 				return;
 			}
@@ -359,7 +360,7 @@ export function registerEditorPanels<Tab extends EditorPanelsTab>(deps: EditorPa
 			setTimeout(resolve, 50);
 			await promise;
 		}
-		deps.log(`chat column: no empty group to close found; groups: ${vscode.window.tabGroups.all.map(group => `${group.viewColumn}:${group.tabs.length}`).join(" ")}`);
+		deps.log.debug(`chat column: no empty group to close found; groups: ${vscode.window.tabGroups.all.map(group => `${group.viewColumn}:${group.tabs.length}`).join(" ")}`);
 	}
 
 	/**
@@ -385,7 +386,7 @@ export function registerEditorPanels<Tab extends EditorPanelsTab>(deps: EditorPa
 		panel.reveal(panel.viewColumn, false);
 		if (state.mode !== "chat") return;
 		const delivered = await panel.webview.postMessage({ type: "omp:webview-action", action: "focus-composer" } satisfies GuestPanelActionMessage);
-		deps.log(`tab ${tabId}: focus-composer asked from a VS Code command or keybinding (delivered=${delivered}, panel visible=${panel.visible}, active=${panel.active}, column ${panel.viewColumn})`);
+		deps.log.debug(`tab ${tabId}: focus-composer asked from a VS Code command or keybinding (delivered=${delivered}, panel visible=${panel.visible}, active=${panel.active}, column ${panel.viewColumn})`);
 	}
 
 	/**
@@ -447,14 +448,14 @@ export function registerEditorPanels<Tab extends EditorPanelsTab>(deps: EditorPa
 					} else {
 						deps.bindSlotToConversation(slot, conversation, "passive", binding.roleRefusal ?? deps.slotReasons.passive);
 						deps.applySlotAuthority(slot);
-						deps.log(`slot ${slot}: this editor is not controlling ${conversation} (${binding.roleRefusal ?? "no reason reported"})`);
+						deps.log.info(`slot ${slot}: this editor is not controlling ${conversation} (${binding.roleRefusal ?? "no reason reported"})`);
 					}
 					// The view mode is only bookkeeping for a later restore. It is recorded *after* the role
 					// is published: it costs another durable write, and the editor must not stay
 					// passive for the length of it.
 					await index.setEditorMode(slot, state.mode);
 				})
-				.catch(error => deps.log(`slot ${slot}: its editor-slot binding could not be persisted (${messageOf(error)})`)),
+				.catch(error => deps.log.warn(`slot ${slot}: its editor-slot binding could not be persisted (${messageOf(error)})`)),
 		);
 		state.panel = panel;
 		const hosted = deps.records().get(state.tabId)?.runtime;
@@ -535,7 +536,7 @@ export function registerEditorPanels<Tab extends EditorPanelsTab>(deps: EditorPa
 				// The document is built from this extension's own inputs, so a failure is a defect
 				// rather than an input: it is logged and the panel keeps an honest document instead
 				// of a broken one with a weaker CSP.
-				deps.log(`slot ${state.slotId}: the panel document could not be built: ${messageOf(error)}`);
+				deps.log.error(`slot ${state.slotId}: the panel document could not be built: ${messageOf(error)}`);
 			}
 		}
 		let updatedOnDisk = false;
@@ -638,16 +639,16 @@ export function registerEditorPanels<Tab extends EditorPanelsTab>(deps: EditorPa
 				) {
 					panel.webview.html = createUnavailableGuestHtml(UNIDENTIFIED_PANEL_DETAIL);
 					if (stored === null && persistedTabId(state) !== null) {
-						deps.log(
+						deps.log.warn(
 							"a restored OMP editor carried a legacy version-1 identity that its view type and durable controlling binding do not prove; it was left as an explanation",
 						);
 					} else {
-						deps.log("a restored OMP editor carried no usable bridge identity; it was left as an explanation");
+						deps.log.warn("a restored OMP editor carried no usable bridge identity; it was left as an explanation");
 					}
 					return;
 				}
 				if (stored === null) {
-					deps.log(
+					deps.log.info(
 						`slot ${saved.editorId.slice(0, 8)}: a legacy version-1 identity was adopted because this editor's view type and durable controlling binding proved it`,
 					);
 				}
@@ -661,7 +662,7 @@ export function registerEditorPanels<Tab extends EditorPanelsTab>(deps: EditorPa
 				const conversation = committed === null || index.get(committed.tabId) === null ? namespaceTabId : committed.tabId;
 				if (index.get(conversation) === null) {
 					panel.webview.html = createUnavailableGuestHtml(STALE_PANEL_DETAIL);
-					deps.log("a restored OMP editor named a tab this workspace no longer has; it was left as an explanation");
+					deps.log.warn("a restored OMP editor named a tab this workspace no longer has; it was left as an explanation");
 					return;
 				}
 				const reservation = deps.reserveSlot(index, conversation, slot, "saved");
@@ -669,7 +670,7 @@ export function registerEditorPanels<Tab extends EditorPanelsTab>(deps: EditorPa
 					// Another editor of this conversation holds it: this one is a duplicate of a
 					// session that is already open, and a second chat for one session is what the
 					// one-winner rule exists to prevent.
-					deps.log(`slot ${slot}: a second restored webview for this conversation was closed`);
+					deps.log.info(`slot ${slot}: a second restored webview for this conversation was closed`);
 					panel.dispose();
 					deps.info("An OMP Desk editor restored for this window was closed: it was a duplicate of one already open for the same session.");
 					return;
@@ -694,7 +695,7 @@ export function registerEditorPanels<Tab extends EditorPanelsTab>(deps: EditorPa
 						// ordinary panel route still carries its conversation.
 						const current = deps.tabs().get(slot);
 						if (current?.bridge?.editorId === slot) current.bridge = null;
-						deps.log(`slot ${slot}: restored editor has no reconnect bridge; serving its chat through the panel`);
+						deps.log.warn(`slot ${slot}: restored editor has no reconnect bridge; serving its chat through the panel`);
 					}
 					renderPanelDocument(context, slot);
 				}
@@ -743,13 +744,13 @@ export function registerEditorPanels<Tab extends EditorPanelsTab>(deps: EditorPa
 				await deps.ensureCatalogReady();
 				if (tabId === null) {
 					panel.webview.html = createUnavailableGuestHtml(UNIDENTIFIED_PANEL_DETAIL);
-					deps.log("a restored OMP editor carried no usable panel identity; it was left as an explanation");
+					deps.log.warn("a restored OMP editor carried no usable panel identity; it was left as an explanation");
 					return;
 				}
 				const entry = index.get(tabId);
 				if (entry === null) {
 					panel.webview.html = createUnavailableGuestHtml(STALE_PANEL_DETAIL);
-					deps.log("a restored OMP editor named a tab this workspace no longer has; it was left as an explanation");
+					deps.log.warn("a restored OMP editor named a tab this workspace no longer has; it was left as an explanation");
 					return;
 				}
 				// This panel is this tab's editor until its successor replaces it — and it stays
@@ -770,14 +771,14 @@ export function registerEditorPanels<Tab extends EditorPanelsTab>(deps: EditorPa
 					// This legacy panel keeps the version-1 identity the static type persists, so a
 					// later restart still restores it (and the legacy serializer accepts that state).
 					panel.webview.html = createUnavailableGuestHtml(LEGACY_DUPLICATE_DETAIL, { tabId, editorId: null });
-					deps.log(`tab ${tabId}: a legacy panel was left as an explanation because another editor already owns this conversation`);
+					deps.log.warn(`tab ${tabId}: a legacy panel was left as an explanation because another editor already owns this conversation`);
 					return;
 				}
 				const ownEditorId = reservation.reservation.editorId;
 				const ticket = deps.editors().claimTransition(tabId, ownEditorId);
 				if (ticket === null) {
 					panel.webview.html = createUnavailableGuestHtml(LEGACY_DUPLICATE_DETAIL, { tabId, editorId: null });
-					deps.log(`tab ${tabId}: a legacy migration is already running for this tab`);
+					deps.log.warn(`tab ${tabId}: a legacy migration is already running for this tab`);
 					return;
 				}
 				const previousPanel = deps.tabs().get(tabId)?.panel ?? null;
@@ -786,7 +787,7 @@ export function registerEditorPanels<Tab extends EditorPanelsTab>(deps: EditorPa
 					// editor VS Code restored wins — it is the one the user's own layout names —
 					// and the transient panel is retired without releasing anything native: the
 					// tab keeps its runtime, its claim and its in-flight restore.
-					deps.log(`tab ${tabId}: a restored webview replaced the panel an explicit open had created`);
+					deps.log.info(`tab ${tabId}: a restored webview replaced the panel an explicit open had created`);
 				}
 				const viewType = bridgeViewType(tabId, ownEditorId);
 				deps.bridge().registerSerializer(context, index, viewType);
@@ -819,11 +820,11 @@ export function registerEditorPanels<Tab extends EditorPanelsTab>(deps: EditorPa
 					if (prepared === null) {
 						const current = deps.tabs().get(ownEditorId);
 						if (current?.bridge?.editorId === ownEditorId) current.bridge = null;
-						deps.log(`slot ${ownEditorId}: migrated editor has no reconnect bridge; serving its chat through the panel`);
+						deps.log.warn(`slot ${ownEditorId}: migrated editor has no reconnect bridge; serving its chat through the panel`);
 					}
 					renderPanelDocument(context, ownEditorId);
 				}
-				deps.log(`tab ${tabId}: a legacy editor was migrated onto a versioned successor`);
+				deps.log.info(`tab ${tabId}: a legacy editor was migrated onto a versioned successor`);
 				// Only a panel VS Code actually made active describes the user's selection,
 				// so the index follows that and nothing here reveals, moves or focuses a
 				// restored editor: its saved position and group are already its own.

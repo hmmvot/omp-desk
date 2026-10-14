@@ -65,6 +65,7 @@ import { displayFolderPath } from "../host/folder-display.ts";
 import type { LauncherFolder, LauncherFolders } from "../views/launcher-folders.ts";
 import { folderHeadline, sessionItemState } from "../views/session-tree.ts";
 import type { SessionLauncherFacts, SessionTreeProvider } from "../views/session-tree.ts";
+import type { Logger } from "../shared/logger.ts";
 import type { SessionProcesses } from "./process-wiring.ts";
 
 /** How long an owner window waits to hold the focus before it tells a requester that it is not in front. */
@@ -157,7 +158,7 @@ export interface RoutingLaunchPort {
 
 /** The log and the notifications. Notifications carry the extension's own prefix. */
 export interface RoutingNotices {
-	log(message: string): void;
+	log: Logger;
 	/** One line of the hand-over timeline between windows. */
 	timing(event: string, detail?: string): void;
 	info(message: string): void;
@@ -356,7 +357,7 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 		void registry.flush();
 		void registry.refresh().then(changed => {
 			if (changed) windowRegistryChanged();
-		}, error => deps.log(`window registry: ${messageOf(error)}`));
+		}, error => deps.log.warn(`window registry: ${messageOf(error)}`));
 	}
 
 	/** The folders other windows have open changed: re-resolve their session folders and repaint. */
@@ -605,7 +606,7 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 	 * window, and always logged.
 	 */
 	function noteOlderBuildWindow(holderIds: readonly string[], folderPath: string): void {
-		deps.log(`window request: the window(s) ${holderIds.join(", ")} with ${folderPath} run an older OMP Desk build; the launch starts here`);
+		deps.log.warn(`window request: the window(s) ${holderIds.join(", ")} with ${folderPath} run an older OMP Desk build; the launch starts here`);
 		if (holderIds.every(id => olderBuildNoticed.has(id))) return;
 		for (const id of holderIds) olderBuildNoticed.add(id);
 		deps.info(`The VS Code window with ${folderHeadline(folderPath)} runs an older OMP Desk build; reload it (Developer: Reload Window). The session opened here.`);
@@ -809,7 +810,7 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 	): Promise<ServeOutcome> {
 		const folders = deps.folders();
 		const refuse = (reason: string, refusal?: RefusalReason): ServeOutcome => {
-			deps.log(`window request: refused a launch (${request.launch.kind}) for ${request.workspace.path} (${request.workspace.match}): ${reason}`);
+			deps.log.warn(`window request: refused a launch (${request.launch.kind}) for ${request.workspace.path} (${request.workspace.match}): ${reason}`);
 			return { ok: false, focused: false, ...(refusal === undefined ? {} : { refusal }) };
 		};
 		// Before anything else: after a reinstall this window cannot build the view a launch needs, and the requester
@@ -823,7 +824,7 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 		try {
 			if (await deps.registry()?.refresh()) deps.refreshLauncher();
 		} catch (error) {
-			deps.log(`window request: the other windows could not be read: ${messageOf(error)}`);
+			deps.log.warn(`window request: the other windows could not be read: ${messageOf(error)}`);
 		}
 		deps.timing("receiver: registry read", request.id.slice(0, 8));
 		await deps.resolveSessionFolders();
@@ -859,7 +860,7 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 		// Nothing is awaited between this last look at this window and the beginning of the launch.
 		if (!hasWorkspace() || !targetExists()) return refuse("the workspace or the target changed while it waited");
 		void start().catch(error => {
-			deps.log(`window request: the launch asked for by another window failed: ${messageOf(error)}`);
+			deps.log.error(`window request: the launch asked for by another window failed: ${messageOf(error)}`);
 			deps.error(`The session another window asked for could not be started: ${messageOf(error)}`);
 		});
 		return { ok: true, focused: await windowBecomesFocused(WINDOW_FOCUS_WAIT_MS) };
@@ -867,7 +868,7 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 
 	/** Reload this window through the workbench's own command (the one Developer: Reload Window runs). */
 	async function reloadThisWindow(reason: string): Promise<void> {
-		deps.log(`reload: reloading this window (${reason})`);
+		deps.log.info(`reload: reloading this window (${reason})`);
 		try {
 			await vscode.commands.executeCommand(RELOAD_WINDOW_COMMAND);
 		} catch (error) {
@@ -896,15 +897,15 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 		try {
 			await deps.registry()?.refresh();
 		} catch (error) {
-			deps.log(`credentials changed: the other windows could not be read afresh: ${messageOf(error)}`);
+			deps.log.warn(`credentials changed: the other windows could not be read afresh: ${messageOf(error)}`);
 		}
 		await Promise.all(otherWindows().map(async peer => {
 			try {
 				const id = await postModelsRequest(index.claimStorageDir, { to: peer.holderId, from: index.claimHolder.id });
 				const answer = await awaitRequestAnswer(index.claimStorageDir, peer.holderId, id);
-				if (answer === "timeout") deps.log(`credentials changed: ${peer.label} (${peer.holderId}) did not answer; it re-reads models at its next availability read`);
+				if (answer === "timeout") deps.log.warn(`credentials changed: ${peer.label} (${peer.holderId}) did not answer; it re-reads models at its next availability read`);
 			} catch (error) {
-				deps.log(`credentials changed: ${peer.label} (${peer.holderId}) could not be told: ${messageOf(error)}`);
+				deps.log.warn(`credentials changed: ${peer.label} (${peer.holderId}) could not be told: ${messageOf(error)}`);
 			}
 		}));
 	}
@@ -925,26 +926,25 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 	async function reloadEveryWindow(acceptTimeoutMs: number): Promise<void> {
 		const index = deps.index();
 		if (index === null) {
-			deps.log("reload all windows: the session index is not ready, so only this window is reloaded");
+			deps.log.warn("reload all windows: the session index is not ready, so only this window is reloaded");
 		} else {
 			try {
 				await deps.registry()?.refresh();
 			} catch (error) {
-				deps.log(`reload all windows: the other windows could not be read afresh: ${messageOf(error)}`);
+				deps.log.warn(`reload all windows: the other windows could not be read afresh: ${messageOf(error)}`);
 			}
 			const peers = otherWindows();
-			if (peers.length === 0) deps.log("reload all windows: no other window is open");
+			if (peers.length === 0) deps.log.info("reload all windows: no other window is open");
 			await Promise.all(peers.map(async peer => {
 				try {
 					const id = await postReloadRequest(index.claimStorageDir, { to: peer.holderId, from: index.claimHolder.id });
 					const answer = await awaitReloadTakenUp(index.claimStorageDir, peer.holderId, id, { timeoutMs: acceptTimeoutMs });
-					deps.log(
-						answer === "taken-up" ? `reload all windows: ${peer.label} (${peer.holderId}) is reloading`
-							: answer === "unanswered" ? `reload all windows: ${peer.label} (${peer.holderId}) deleted the request without taking it up (an older build that does not know it); reload that window by hand`
-								: `reload all windows: ${peer.label} (${peer.holderId}) did not take the request up within ${acceptTimeoutMs} ms; it was withdrawn and that window is not reloaded`,
-					);
+					const peerName = `reload all windows: ${peer.label} (${peer.holderId})`;
+					if (answer === "taken-up") deps.log.info(`${peerName} is reloading`);
+					else if (answer === "unanswered") deps.log.warn(`${peerName} deleted the request without taking it up (an older build that does not know it); reload that window by hand`);
+					else deps.log.warn(`${peerName} did not take the request up within ${acceptTimeoutMs} ms; it was withdrawn and that window is not reloaded`);
 				} catch (error) {
-					deps.log(`reload all windows: ${peer.label} (${peer.holderId}) could not be asked: ${messageOf(error)}`);
+					deps.log.warn(`reload all windows: ${peer.label} (${peer.holderId}) could not be asked: ${messageOf(error)}`);
 				}
 			}));
 		}
@@ -979,12 +979,12 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 		try {
 			await deps.registry()?.refresh();
 		} catch (error) {
-			deps.log(`stop request: the other windows could not be read: ${messageOf(error)}`);
+			deps.log.warn(`stop request: the other windows could not be read: ${messageOf(error)}`);
 		}
 		const requester = deps.registry()?.windows().find(window => window.holderId === request.from && !window.here);
 		if (requester === undefined || request.from === index.claimHolder.id) return answerAll("refused", "the asking window is not another open window of this profile");
 		if (!(await serveContext.stillWanted())) return answerAll("unconfirmed", "this window is closing; nothing was stopped");
-		deps.log(`stop request ${request.id.slice(0, 8)} from window ${request.from.slice(0, 8)}: ${request.rows.length} row(s)`);
+		deps.log.info(`stop request ${request.id.slice(0, 8)} from window ${request.from.slice(0, 8)}: ${request.rows.length} row(s)`);
 		return { ok: true, focused: false, rows: await processes.serveStopRequest(request.rows, done => serveContext.progress(done)) };
 	}
 
@@ -1084,7 +1084,7 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 		try {
 			await vscode.commands.executeCommand("workbench.action.enableWindowAlwaysOnTop");
 		} catch (error) {
-			deps.log(`file window: it could not be kept on top: ${messageOf(error)}`);
+			deps.log.warn(`file window: it could not be kept on top: ${messageOf(error)}`);
 		}
 	}
 
@@ -1160,7 +1160,7 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 			}
 			return true;
 		} catch (error) {
-			deps.log(`file window: a tab could not be reopened there: ${messageOf(error)}`);
+			deps.log.warn(`file window: a tab could not be reopened there: ${messageOf(error)}`);
 			return false;
 		}
 	}
@@ -1200,7 +1200,7 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 		const active = window.activeTab;
 		const filesColumn = filesGroupColumn(candidates, groups.activeTabGroup.viewColumn, deps.isSessionTabInput);
 		let target = candidates.find(group => group.viewColumn === filesColumn) ?? null;
-		deps.log(`file window: return of ${tabs.length} tab(s) from column ${window.viewColumn}; active column ${groups.activeTabGroup.viewColumn}, files group ${target === null ? "missing" : `at column ${target.viewColumn}`}`);
+		deps.log.debug(`file window: return of ${tabs.length} tab(s) from column ${window.viewColumn}; active column ${groups.activeTabGroup.viewColumn}, files group ${target === null ? "missing" : `at column ${target.viewColumn}`}`);
 		const moved: vscode.Tab[] = [];
 		const kept: vscode.Tab[] = [];
 		for (const tab of tabs) {
@@ -1226,7 +1226,7 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 				}
 				target = await groupHoldingReopened(tab, window);
 				if (target === null) {
-					deps.log("file window: the reopened file was not found in the main window; the tabs stay in the file window");
+					deps.log.warn("file window: the reopened file was not found in the main window; the tabs stay in the file window");
 					deps.info("The files could not be moved back to the main window.");
 					return;
 				}
@@ -1268,12 +1268,12 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 			// The workbench's own open command; the public `vscode.open` drops the `auxiliary` option.
 			await vscode.commands.executeCommand("_workbench.open", uri, [AUX_WINDOW_GROUP, { pinned: true, selection: range, auxiliary: { bounds: FILE_WINDOW_SIZE } }]);
 		} catch (error) {
-			deps.log(`file window: ${uri.fsPath} could not be opened there: ${messageOf(error)}`);
+			deps.log.warn(`file window: ${uri.fsPath} could not be opened there: ${messageOf(error)}`);
 			return false;
 		}
 		const created = appearedGroup(before, vscode.window.tabGroups.all);
 		if (created === null) {
-			deps.log("file window: opening the file created no window; the files stay where they were");
+			deps.log.warn("file window: opening the file created no window; the files stay where they were");
 			return true;
 		}
 		fileWindow.adopt(created);
@@ -1318,14 +1318,14 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 								: await serveLaunchRequest(context, index, request, requestContext);
 				deps.timing("receiver: answer ready", `${request.id.slice(0, 8)} ok=${outcome.ok} focused=${outcome.focused}`);
 				return outcome;
-			}, { onError: detail => deps.log(`window requests: ${detail}`), debounceMs: WINDOW_REQUEST_WATCH_DEBOUNCE_MS });
+			}, { onError: detail => deps.log.warn(`window requests: ${detail}`), debounceMs: WINDOW_REQUEST_WATCH_DEBOUNCE_MS });
 			windowRequestWatch = requestWatch;
 			pendingLaunchWatch = startPendingLaunchWatch(
 				index.claimStorageDir,
 				index.claimHolder.id,
 				() => localWindowFolders().map(folder => pendingKeyOf(folders.identityKeyOf(folder))),
 				(request, requestContext) => serveLaunchRequest(context, index, request, requestContext),
-				{ onError: detail => deps.log(`pending launches: ${detail}`) },
+				{ onError: detail => deps.log.warn(`pending launches: ${detail}`) },
 			);
 		},
 		rescanPendingLaunches() {

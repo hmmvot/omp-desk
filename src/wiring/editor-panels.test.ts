@@ -14,6 +14,8 @@ import { beforeEach, describe, it } from "node:test";
 
 import type { SessionIndex } from "../host/session-index.ts";
 import { RuntimeRecords } from "../runtime/runtime-record.ts";
+import type { LoggedLine } from "../shared/logger.ts";
+import { recordingLogger } from "../shared/logger.ts";
 import type { BridgeTicketFacts } from "./bridge-host.ts";
 import type { EditorPanels, EditorPanelsDeps, EditorPanelsTab } from "./editor-panels.ts";
 
@@ -159,7 +161,7 @@ function world(overrides: Partial<EditorPanelsDeps<FakeTab>> = {}) {
 		prepareDelay: null as Promise<void> | null,
 	};
 	const calls: string[] = [];
-	const logged: string[] = [];
+	const lines: LoggedLine[] = [];
 	const warnings: string[] = [];
 	const infos: string[] = [];
 	const elections: Promise<void>[] = [];
@@ -241,13 +243,13 @@ function world(overrides: Partial<EditorPanelsDeps<FakeTab>> = {}) {
 		setActiveTab: async (_index, tabId) => { calls.push(`setActive:${tabId}`); },
 		requestSessionRowExpand: tabId => { calls.push(`expand:${tabId}`); },
 		ensureCatalogReady: async () => { calls.push("catalogReady"); },
-		log: message => { logged.push(message); },
+		log: recordingLogger(lines),
 		info: message => { infos.push(message); },
 		warn: message => { warnings.push(message); },
 		...overrides,
 	};
 	const panels: EditorPanels = registerEditorPanels(deps);
-	return { state, panels, deps, calls, logged, warnings, infos, elections, created, registered, lifecycle, routeOpens, guestCalls };
+	return { state, panels, deps, calls, get logged(): string[] { return lines.map(line => line.message); }, lines, warnings, infos, elections, created, registered, lifecycle, routeOpens, guestCalls };
 }
 
 const ticket = (port = 4242): BridgeTicketFacts => ({ editorId: EDITOR, documentId: DOCUMENT, bootstrapId: BOOTSTRAP, port });
@@ -394,7 +396,7 @@ describe("openPanel", () => {
 		const editorId = decodeBridgeViewType(w.created[0]!.viewType)!.editorIdHex;
 		w.state.tabs.get(editorId)!.bridge = { editorId, endpoint: {} as never, documentId: null, bound: false };
 		await settle();
-		assert.ok(w.logged.includes(`slot ${editorId}: this editor has no bridge endpoint (port in use)`));
+		assert.ok(w.lines.some(line => line.level === "warn" && line.message === `slot ${editorId}: this editor has no bridge endpoint (port in use)`));
 		assert.equal(w.state.tabs.get(editorId)!.bridge, null);
 		assert.match(w.created[0]!.panel.html, /connect-src 'none'/);
 		assert.equal(w.state.tabs.get(editorId)!.document?.kind, "guest");

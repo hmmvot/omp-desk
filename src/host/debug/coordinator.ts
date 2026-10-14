@@ -1,4 +1,5 @@
 import { isRecord } from "../../shared/guards.ts";
+import { silentLogger, type Logger } from "../../shared/logger.ts";
 import type { BreakpointInfo, BreakpointOwnershipStore, DapMessage, DebugApi, DebugDisposable, DebugSessionInfo, SessionTracker } from "./debug-api.ts";
 
 /**
@@ -188,7 +189,7 @@ type Listener = () => void;
 export class DebugCoordinator implements BreakpointOwnership {
 	readonly limits: DebugLimits;
 	readonly #api: DebugApi;
-	readonly #log: (line: string) => void;
+	readonly #log: Logger;
 	readonly #records = new Map<string, SessionRecord>();
 	readonly #disposables: DebugDisposable[] = [];
 	readonly #listeners = new Set<Listener>();
@@ -199,16 +200,16 @@ export class DebugCoordinator implements BreakpointOwnership {
 	#launchChain: Promise<void> = Promise.resolve();
 	#disposed = false;
 
-	constructor(api: DebugApi, options: { limits?: Partial<DebugLimits>; log?: (line: string) => void; ownershipStore?: BreakpointOwnershipStore } = {}) {
+	constructor(api: DebugApi, options: { limits?: Partial<DebugLimits>; log?: Logger; ownershipStore?: BreakpointOwnershipStore } = {}) {
 		this.#api = api;
 		this.limits = { ...DEFAULT_LIMITS, ...options.limits };
-		this.#log = options.log ?? (() => {});
+		this.#log = options.log ?? silentLogger;
 		this.#ownershipStore = options.ownershipStore;
 		// VS Code keeps a breakpoint's id across a window reload (it stores the id with the breakpoint), but this window's
 		// memory does not survive an extension-host restart: the saved owners are what keeps `clear` and `remove` working.
 		if (this.#ownershipStore) {
 			for (const [id, conversation] of restoredOwners(this.#ownershipStore.load())) this.#breakpointOwners.set(id, conversation);
-			if (this.#breakpointOwners.size > 0) this.#log(`debug breakpoints: restored ${this.#breakpointOwners.size} saved owner record(s)`);
+			if (this.#breakpointOwners.size > 0) this.#log.info(`debug breakpoints: restored ${this.#breakpointOwners.size} saved owner record(s)`);
 		}
 		this.#disposables.push(
 			api.registerTrackerFactory(session => this.#trackerFor(session)),
@@ -237,7 +238,7 @@ export class DebugCoordinator implements BreakpointOwnership {
 
 	#changed(): void {
 		for (const listener of [...this.#listeners]) {
-			try { listener(); } catch (error) { this.#log(`debug coordinator listener failed: ${String(error)}`); }
+			try { listener(); } catch (error) { this.#log.warn(`debug coordinator listener failed: ${String(error)}`); }
 		}
 	}
 
@@ -352,7 +353,7 @@ export class DebugCoordinator implements BreakpointOwnership {
 	#transitionTimedOut(record: SessionRecord, transition: Transition): void {
 		if (record.transition !== transition) return;
 		record.transition = undefined;
-		this.#log(`debug session ${record.id}: ${transition.action} not resolved in ${this.limits.transitionTimeoutMs} ms; state unknown`);
+		this.#log.warn(`debug session ${record.id}: ${transition.action} not resolved in ${this.limits.transitionTimeoutMs} ms; state unknown`);
 		this.#setState(record, { kind: "unknown" });
 	}
 
@@ -437,7 +438,7 @@ export class DebugCoordinator implements BreakpointOwnership {
 		// Kept even when the session already ended: the error usually arrives just before or after the end.
 		record.adapterError = error.message;
 		if (record.state.kind === "terminated") return;
-		this.#log(`debug session ${record.id}: adapter error: ${error.message}`);
+		this.#log.warn(`debug session ${record.id}: adapter error: ${error.message}`);
 		this.#clearTransition(record);
 		this.#setState(record, { kind: "unknown" });
 	}
@@ -537,7 +538,7 @@ export class DebugCoordinator implements BreakpointOwnership {
 		try {
 			this.#ownershipStore.save(Object.fromEntries(this.#breakpointOwners));
 		} catch (error) {
-			this.#log(`debug breakpoints: could not save owner records: ${String(error)}`);
+			this.#log.warn(`debug breakpoints: could not save owner records: ${String(error)}`);
 		}
 	}
 

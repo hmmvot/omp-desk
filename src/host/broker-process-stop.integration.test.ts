@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import { after, before, describe, it } from "node:test";
 import { brokerStopAttachFor, stopBrokerThroughBroker } from "./broker-process-stop.ts";
 import type { BrokerStopPorts, BrokerStopTarget } from "./broker-process-stop.ts";
+import type { Logger } from "../shared/logger.ts";
 import { PtyBrokerClient } from "./pty-client.ts";
 import type { PtyHandle } from "./pty-client.ts";
 import { isPtyProcessAlive, waitForPtyProcessGone } from "./pty-identity.ts";
@@ -110,10 +111,19 @@ async function whenExited(handle: PtyHandle): Promise<void> {
 	if ((await handle.refreshStatus()).state !== "exited") await exited;
 }
 
+/** Prints every level, so a failing run shows what the stop logged. */
+const consoleLogger: Logger = {
+	error: message => console.log(`error: ${message}`),
+	warn: message => console.log(`warn: ${message}`),
+	info: message => console.log(`info: ${message}`),
+	debug: message => console.log(`debug: ${message}`),
+	trace: message => console.log(`trace: ${message}`),
+};
+
 function realPorts(): BrokerStopPorts {
 	return {
-		log: message => console.log(message),
-		attach: brokerStopAttachFor(client, message => console.log(message)),
+		log: consoleLogger,
+		attach: brokerStopAttachFor(client, consoleLogger),
 		waitBrokerGone: async (target, timeoutMs) => {
 			const reading = await waitForPtyProcessGone(helper, target.brokerPid, target.brokerCreationTime, timeoutMs);
 			return { gone: reading.gone, detail: reading.detail };

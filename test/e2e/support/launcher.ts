@@ -47,7 +47,11 @@ export interface LaunchOptions {
 
 /** Starts (or, for a running `name`, opens another window of) the test VS Code. */
 export function startVsCode(options: LaunchOptions): Promise<RunResult> {
+	// Debug by default: the scenarios read `window timing:` lines, which the Info level of the OMP Desk log leaves out.
+	// `E2E_DESK_LOG_LEVEL=default` leaves VS Code's own level (Info) in place.
+	const level = process.env.E2E_DESK_LOG_LEVEL ?? "debug";
 	const args = ["-Name", options.name, "-Root", options.root, "-Folder", options.folder];
+	if (level !== "default") args.push("-DeskLogLevel", level);
 	if (options.vsix) args.push("-Vsix", options.vsix);
 	if (options.port) args.push("-RemoteDebuggingPort", String(options.port));
 	if (options.reset) args.push("-Reset", "-ResetVsCode");

@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
+import { silentLogger } from "../shared/logger.ts";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { after, before, describe, it } from "node:test";
 import { build } from "esbuild";
@@ -41,7 +42,7 @@ function fixture(options: { rootGone?: boolean; broker?: boolean; settled?: bool
 		chat: () => ({ sessionOf: () => session }) as never,
 		attachBrokerClient: async () => (options.broker === false ? null : ({}) as never),
 		rootGone: async () => options.rootGone === true,
-		log: () => undefined,
+		log: silentLogger,
 	});
 	const record: StopRecord = { tabId: TAB, runtime, control: null, transitioning: false, pipeline: null };
 	return { ops, record, aborts: () => aborted };

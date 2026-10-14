@@ -2,6 +2,7 @@ import { liveOf, liveSignature, projectContext } from "./context-model.ts";
 import type { CommandResult, RpcSessionOutput } from "../rpc/session.ts";
 import type { ContextRead, ContextReportRead } from "./context-parse.ts";
 import type { ContextFacts, ContextLive, ContextViewModel } from "./context-model.ts";
+import type { Logger } from "../../shared/logger.ts";
 
 /** What the controller needs of the session: the footer's own facts, its outputs, the structured read and the explicit report request. */
 export interface ContextSession {
@@ -33,7 +34,7 @@ export interface ContextControllerDeps {
 	schedule(handler: () => void, ms: number): unknown;
 	cancel(handle: unknown): void;
 	now(): number;
-	log(message: string): void;
+	readonly log: Logger;
 }
 
 /** A deep read waits this long after the last change that asked for it. */
@@ -129,7 +130,7 @@ export class ContextController {
 		try {
 			result = await session.requestContextReport();
 		} catch (error) {
-			this.#deps.log(`context: breakdown request failed: ${error instanceof Error ? error.message : String(error)}`);
+			this.#deps.log.warn(`context: breakdown request failed: ${error instanceof Error ? error.message : String(error)}`);
 			result = { status: "unconfirmed" };
 		}
 		if (attachment !== this.#attachment || revision !== this.#revision) return;
@@ -249,7 +250,7 @@ export class ContextController {
 			read = await session.readContext();
 		} catch (error) {
 			failed = true;
-			this.#deps.log(`context: read failed: ${error instanceof Error ? error.message : String(error)}`);
+			this.#deps.log.warn(`context: read failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
 		// The attachment changed: whoever changed it reset the reading flag and owns what follows.
 		if (attachment !== this.#attachment) return;
@@ -264,7 +265,7 @@ export class ContextController {
 			this.#missed = false;
 		} else if (read === null) {
 			this.#missed = true;
-			if (!failed) this.#deps.log("context: the session gave no answer to the deep read; it is asked again when the session next changes state");
+			if (!failed) this.#deps.log.warn("context: the session gave no answer to the deep read; it is asked again when the session next changes state");
 		}
 		this.#publish();
 		const again = this.#again || overtaken;

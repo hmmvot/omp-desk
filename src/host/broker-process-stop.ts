@@ -23,6 +23,7 @@
  *    this module never touches one.
  */
 
+import type { Logger } from "../shared/logger.ts";
 import type { ProbeHandle } from "./rpc-reconcile";
 import type { PtyBrokerClient } from "./pty-client.ts";
 import type { PtyKind } from "./pty-protocol.ts";
@@ -51,7 +52,7 @@ export interface BrokerStopPorts {
 	attach(target: BrokerStopTarget): Promise<BrokerStopAttach>;
 	/** Wait for the broker PID to disappear, by creation-time readings. */
 	waitBrokerGone(target: BrokerStopTarget, timeoutMs: number): Promise<{ readonly gone: boolean; readonly detail: string }>;
-	log(message: string): void;
+	readonly log: Logger;
 	readonly stopTimeoutMs?: number;
 	readonly exitTimeoutMs?: number;
 }
@@ -100,7 +101,7 @@ export async function stopBrokerThroughBroker(
 			try {
 				result = await handle.stop({ mode, timeoutMs: ports.stopTimeoutMs ?? BROKER_PROCESS_STOP_TIMEOUT_MS });
 			} catch (error) {
-				ports.log(`broker stop ${target.slot}: ${messageOf(error)}`);
+				ports.log.error(`broker stop ${target.slot}: ${messageOf(error)}`);
 				return {
 					kind: "unconfirmed",
 					detail: "The stop request could not be confirmed. Try Stop again; see OMP Desk output for details.",
@@ -108,7 +109,7 @@ export async function stopBrokerThroughBroker(
 				};
 			}
 			if (!result.pidGone) {
-				ports.log(`broker stop ${target.slot}: ${result.detail}`);
+				ports.log.error(`broker stop ${target.slot}: ${result.detail}`);
 				return {
 					kind: "unconfirmed",
 					detail: "It could not be confirmed stopped. Try Stop again; see OMP Desk output for details.",
@@ -123,7 +124,7 @@ export async function stopBrokerThroughBroker(
 		try {
 			shutdown = await handle.shutdown({ requireStopped: true });
 		} catch (error) {
-			ports.log(`broker shutdown ${target.slot}: ${messageOf(error)}`);
+			ports.log.error(`broker shutdown ${target.slot}: ${messageOf(error)}`);
 			return {
 				kind: "unconfirmed",
 				detail: `${childDetail} Its background process did not close. Try Stop again.`,
@@ -131,7 +132,7 @@ export async function stopBrokerThroughBroker(
 			};
 		}
 		if (!shutdown.stopped) {
-			ports.log(`broker shutdown ${target.slot}: ${JSON.stringify(shutdown)}`);
+			ports.log.error(`broker shutdown ${target.slot}: ${JSON.stringify(shutdown)}`);
 			return {
 				kind: "unconfirmed",
 				detail: `${childDetail} Its background process did not close. Try Stop again.`,
@@ -139,7 +140,7 @@ export async function stopBrokerThroughBroker(
 			};
 		}
 		const gone = await ports.waitBrokerGone(target, ports.exitTimeoutMs ?? BROKER_PROCESS_EXIT_TIMEOUT_MS);
-		ports.log(`broker exit ${target.slot}: ${gone.detail}`);
+		ports.log.info(`broker exit ${target.slot}: ${gone.detail}`);
 		return {
 			kind: "stopped",
 			childWasRunning,
@@ -155,13 +156,13 @@ export async function stopBrokerThroughBroker(
  * The real attach: the record's own kind picks the attach path, and the record must still
  * be the captured broker before the connection is trusted.
  */
-export function brokerStopAttachFor(client: PtyBrokerClient, log: (message: string) => void): BrokerStopPorts["attach"] {
+export function brokerStopAttachFor(client: PtyBrokerClient, log: Logger): BrokerStopPorts["attach"] {
 	return async target => {
 		let lookup;
 		try {
 			lookup = await client.readRecord(target.slot);
 		} catch (error) {
-			log(`broker record ${target.slot}: ${messageOf(error)}`);
+			log.error(`broker record ${target.slot}: ${messageOf(error)}`);
 			return { ok: false, reason: "the saved connection could not be read; refresh Processes and try again" };
 		}
 		if (lookup.kind === "none") return { ok: false, reason: "that process is no longer listed; refresh Processes" };
@@ -183,7 +184,7 @@ export function brokerStopAttachFor(client: PtyBrokerClient, log: (message: stri
 					? await client.attachRpcRecord(record, { adopted: true })
 					: await client.attachRecord(record, { adopted: true });
 		} catch (error) {
-			log(`broker attach ${target.slot}: ${messageOf(error)}`);
+			log.error(`broker attach ${target.slot}: ${messageOf(error)}`);
 			return { ok: false, reason: "this window could not connect to that process safely; refresh Processes and try again" };
 		}
 		if (outcome.handle === null) {

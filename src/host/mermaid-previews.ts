@@ -10,6 +10,7 @@
  */
 import { createHash } from "node:crypto";
 import { isOpenableMermaidSource, parseMermaidPreviewMessage, type MermaidPreviewSourceMessage } from "../protocol/mermaid-preview.ts";
+import type { Logger } from "../shared/logger.ts";
 import { mermaidKind } from "../shared/mermaid-source.ts";
 
 /** The slice of a VS Code WebviewPanel this registry uses. */
@@ -29,7 +30,7 @@ export const MERMAID_PREVIEW_VIEW_TYPE = "ompDesk.mermaidPreview";
 export interface MermaidPreviewsHost {
 	/** Create the editor tab with its document installed. */
 	createPanel(title: string): MermaidPreviewPanel;
-	log(message: string): void;
+	readonly log: Logger;
 }
 
 /** The key a source is a tab under. */
@@ -58,10 +59,10 @@ export class MermaidPreviews {
 		this.#panels.set(key, panel);
 		panel.webview.onDidReceiveMessage(raw => {
 			if (parseMermaidPreviewMessage(raw) === null) {
-				this.#host.log("diagram tab: ignored an unrecognized message");
+				this.#host.log.debug("diagram tab: ignored an unrecognized message");
 				return;
 			}
-			void Promise.resolve(panel.webview.postMessage({ type: "omp:mermaid-preview-source", source })).catch(() => this.#host.log("diagram tab: the source could not be delivered"));
+			void Promise.resolve(panel.webview.postMessage({ type: "omp:mermaid-preview-source", source })).catch(() => this.#host.log.warn("diagram tab: the source could not be delivered"));
 		});
 		panel.onDidDispose(() => {
 			if (this.#panels.get(key) === panel) this.#panels.delete(key);

@@ -13,10 +13,11 @@
  * reported process CPU time tells apart). Nothing here imports `vscode`.
  */
 import { performance } from "node:perf_hooks";
+import type { Logger } from "../shared/logger";
 
 export interface LoopLagOptions {
-	/** Receives one line per detected stall. */
-	readonly report: (line: string) => void;
+	/** Receives one line per detected stall: `warn` from {@link LOOP_LAG_WARN_MS}, `debug` below it. */
+	readonly log: Logger;
 	/** A stall at least this long is reported. Default 500. */
 	readonly thresholdMs?: number;
 	/** How often the timer is expected to fire. Default 100. */
@@ -41,11 +42,13 @@ const SUSPEND_MS = 10 * 60_000;
 /** Finished marks are kept this long, to name an operation that ended inside a stall. */
 const KEEP_FINISHED_MS = 30_000;
 const KEEP_FINISHED_MAX = 64;
+/** A stall this long is a `warn`; a shorter one only matters when diagnosing, so it is a `debug`. */
+export const LOOP_LAG_WARN_MS = 1000;
 /** How many operations one report names. */
 const NAMED_MAX = 6;
 
 export class EventLoopLagMonitor {
-	readonly #report: (line: string) => void;
+	readonly #log: Logger;
 	readonly #thresholdMs: number;
 	readonly #tickMs: number;
 	readonly #now: () => number;
@@ -56,7 +59,7 @@ export class EventLoopLagMonitor {
 	#lastCpu: number;
 
 	constructor(options: LoopLagOptions) {
-		this.#report = options.report;
+		this.#log = options.log;
 		this.#thresholdMs = options.thresholdMs ?? 500;
 		this.#tickMs = options.tickMs ?? 100;
 		this.#now = options.now ?? (() => performance.now());
@@ -124,9 +127,9 @@ export class EventLoopLagMonitor {
 		this.#lastCpu = cpu;
 		const lag = at - from - this.#tickMs;
 		if (lag < this.#thresholdMs || lag > SUSPEND_MS) return;
-		this.#report(
-			`event loop blocked for ${Math.round(lag)} ms (the host's timers ran that late; process CPU ${Math.round(cpuUsed)} ms in ${Math.round(at - from)} ms): ${this.#describe(from, at)}`,
-		);
+		const text = `event loop blocked for ${Math.round(lag)} ms (the host's timers ran that late; process CPU ${Math.round(cpuUsed)} ms in ${Math.round(at - from)} ms): ${this.#describe(from, at)}`;
+		if (lag >= LOOP_LAG_WARN_MS) this.#log.warn(text);
+		else this.#log.debug(text);
 	}
 
 	#open(name: string): { readonly mark: Mark; readonly end: () => void } {
@@ -145,7 +148,9 @@ export class EventLoopLagMonitor {
 	#settleSync(mark: Mark): void {
 		mark.syncMs = this.#now() - mark.start;
 		if (mark.syncMs >= this.#thresholdMs) {
-			this.#report(`${mark.name} held the event loop for ${Math.round(mark.syncMs)} ms before its first await`);
+			const text = `${mark.name} held the event loop for ${Math.round(mark.syncMs)} ms before its first await`;
+			if (mark.syncMs >= LOOP_LAG_WARN_MS) this.#log.warn(text);
+			else this.#log.debug(text);
 		}
 	}
 
@@ -173,11 +178,11 @@ function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
 let shared: EventLoopLagMonitor | null = null;
 
 /**
- * Start the host-wide monitor, reporting to `report`. Operations marked with {@link trackOperation} before it starts run
+ * Start the host-wide monitor, reporting to `log`. Operations marked with {@link trackOperation} before it starts run
  * unmarked. Returns the function that stops it.
  */
-export function startLoopLagMonitor(report: (line: string) => void): () => void {
-	shared = new EventLoopLagMonitor({ report });
+export function startLoopLagMonitor(log: Logger): () => void {
+	shared = new EventLoopLagMonitor({ log });
 	const stop = shared.start();
 	return () => {
 		stop();

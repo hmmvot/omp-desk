@@ -12,6 +12,7 @@
  * control client, and raises the raw fence a native stop raises (`transitioning`, the pipeline's
  * read-only note), never `fenceSessionAdmission`.
  */
+import type { Logger } from "../shared/logger.ts";
 import { isOpenControlClient } from "../host/control-attempt.ts";
 import type { HostControlClient } from "../host/control-client.ts";
 import type { ChatRuntime } from "../host/chat-runtime.ts";
@@ -36,7 +37,7 @@ export interface LocalStopDeps {
 	readonly attachBrokerClient: () => Promise<PtyBrokerClient | null>;
 	/** Whether the recorded OMP root is gone; read at call time. */
 	readonly rootGone: (root: { readonly pid: number; readonly creationTime: string | null }) => Promise<boolean>;
-	readonly log: (message: string) => void;
+	readonly log: Logger;
 }
 
 export const SESSION_TRANSITION_READ_TIMEOUT_MS = 10_000;
@@ -157,7 +158,7 @@ export class LocalStopOperations implements StopOperations {
 				const forced = await runtime.handle.stop({ mode: "force", timeoutMs: 5_000 });
 				runtime.observedSurvivors = forced.remainingPids;
 				if (forced.remainingPids.length > 0) {
-					log(`native force stop: remaining pids ${forced.remainingPids.join(", ")}`);
+					log.warn(`native force stop: remaining pids ${forced.remainingPids.join(", ")}`);
 					return { writerGone: false, treeEmpty: false, detail: "Some commands are still running. Nothing was restarted; try Stop again." };
 				}
 				return await waitForManagedRootExit(runtime, broker, 5_000);
@@ -176,12 +177,12 @@ export class LocalStopOperations implements StopOperations {
 			const status = await control.nativeShutdown({ epoch: snapshot.host.epoch, sessionFile: facts.sessionFile, sessionId: facts.sessionId }, consent);
 			if (status !== "accepted" && status !== "accepted-deferred") {
 				runtime.stopping = false;
-				log(`native shutdown refused: ${status}`);
+				log.warn(`native shutdown refused: ${status}`);
 				return { writerGone: false, treeEmpty: false, detail: "OMP did not accept the stop request. Try Stop again; nothing was restarted." };
 			}
 			return await waitForManagedRootExit(runtime, broker);
 		} catch (error) {
-			log(`native shutdown unconfirmed: ${messageOf(error)}`);
+			log.error(`native shutdown unconfirmed: ${messageOf(error)}`);
 			return { writerGone: false, treeEmpty: false, detail: "The session could not be confirmed stopped. Check its Terminal before trying Stop again; see OMP Desk output for details." };
 		}
 	}

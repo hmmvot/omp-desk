@@ -2,6 +2,7 @@ import { readSessionEvidence } from "../session-tools.ts";
 import { emptyView, isUnavailable, projectView, toggleMessage, VIEW_KINDS, appliesTo } from "./inventory-model.ts";
 import type { InventoryResult, InventoryRow, InventoryScope, SessionEvidence, ViewKind, ViewModel } from "./inventory-model.ts";
 import type { InventoryRuntime } from "./inventory-runtime.ts";
+import type { Logger } from "../../shared/logger.ts";
 import type { SessionToolsTarget } from "../session-tools.ts";
 
 export interface InventoryControllerDeps {
@@ -15,7 +16,7 @@ export interface InventoryControllerDeps {
 	/** `undo`, when given, is offered as an Undo button on the notice. */
 	notify(message: string, level: "info" | "warning", undo?: () => void): void;
 	/** One line per switch request and its outcome: the only trace of who changed OMP's `config.yml` from a view. */
-	log(message: string): void;
+	readonly log: Logger;
 	/** After a live switch, OMP's config watcher needs a moment before a running session shows it. */
 	delay(ms: number): Promise<void>;
 	/** Clock, injectable for tests. */
@@ -121,10 +122,10 @@ export class InventoryController {
 		const started = this.#now();
 		const run = this.#deps.runtime.read({ cwd: plan.cwd, profile: plan.profile, scope: plan.scope }).then(result => {
 			const took = this.#now() - started;
-			if (isUnavailable(result)) this.#deps.log(`inventory: read failed after ${took} ms (${plan.scope} list, profile ${plan.profile}, folder ${plan.cwd}): ${result.unavailable}`);
+			if (isUnavailable(result)) this.#deps.log.warn(`inventory: read failed after ${took} ms (${plan.scope} list, profile ${plan.profile}, folder ${plan.cwd}): ${result.unavailable}`);
 			else {
-				this.#deps.log(`inventory: read ${plan.scope} list in ${took} ms (${result.rows.length} rows, profile ${plan.profile})`);
-				for (const entry of result.incompleteReasons) this.#deps.log(`inventory: ${entry.view} list incomplete (${plan.scope} list, folder ${plan.cwd}): ${entry.reason}`);
+				this.#deps.log.debug(`inventory: read ${plan.scope} list in ${took} ms (${result.rows.length} rows, profile ${plan.profile})`);
+				for (const entry of result.incompleteReasons) this.#deps.log.warn(`inventory: ${entry.view} list incomplete (${plan.scope} list, folder ${plan.cwd}): ${entry.reason}`);
 			}
 			if (this.#epoch === epoch) {
 				if (!isUnavailable(result)) this.#cache.set(plan.key, { result, at: this.#now() });
@@ -182,7 +183,7 @@ export class InventoryController {
 			const evidenceStarted = this.#now();
 			const [entries, evidence] = await Promise.all([
 				Promise.all(wanted.map(async plan => [plan.key, await this.#read(plan)] as const)),
-				needsEvidence ? readSessionEvidence(target).then(read => { this.#deps.log(`inventory: session evidence read in ${this.#now() - evidenceStarted} ms`); return read; }) : Promise.resolve(null),
+				needsEvidence ? readSessionEvidence(target).then(read => { this.#deps.log.debug(`inventory: session evidence read in ${this.#now() - evidenceStarted} ms`); return read; }) : Promise.resolve(null),
 			]);
 			if (target !== null && evidence !== null) this.#evidence.set(target.key, { generation: target.generation, evidence });
 			if (!fenced()) return;
@@ -195,7 +196,7 @@ export class InventoryController {
 				else if (answered !== undefined) project(plan, answered, evidence, null);
 				else project(plan, hit?.result ?? { unavailable: "OMP's inventory is not available." }, evidence, null);
 			}
-			this.#deps.log(`inventory: ${plans.length} view(s) published in ${this.#now() - began} ms (${wanted.length} worker run(s) awaited)`);
+			this.#deps.log.debug(`inventory: ${plans.length} view(s) published in ${this.#now() - began} ms (${wanted.length} worker run(s) awaited)`);
 		} finally {
 			this.#pending = false;
 			if (this.#again && !this.#disposed) { this.#again = false; void this.#cycle(); }
@@ -215,9 +216,10 @@ export class InventoryController {
 		if (context === undefined) { this.#deps.notify("Refresh the view before switching.", "warning"); return; }
 		const { plan, running } = context;
 		const subject = `${row.kind}:${row.name} ${enabled ? "disabled→enabled" : "enabled→disabled"}`;
-		this.#deps.log(`inventory: switch requested in the ${view} view: ${subject} (global configuration of profile ${plan.profile}; list shown: ${plan.scope}, folder ${plan.cwd})`);
+		this.#deps.log.info(`inventory: switch requested in the ${view} view: ${subject} (global configuration of profile ${plan.profile}; list shown: ${plan.scope}, folder ${plan.cwd})`);
 		const result = await this.#deps.runtime.toggle({ cwd: plan.cwd, profile: plan.profile, scope: plan.scope, kind: row.kind, name: row.name, enabled });
-		this.#deps.log(`inventory: switch ${subject}: ${result.ok ? (result.changed ? `written: ${result.writes.map(write => `${write.what} (${write.file ?? "OMP's own store"})`).join("; ")}` : "already as requested; nothing written") : `refused: ${result.message}`}`);
+		if (result.ok) this.#deps.log.info(`inventory: switch ${subject}: ${result.changed ? `written: ${result.writes.map(write => `${write.what} (${write.file ?? "OMP's own store"})`).join("; ")}` : "already as requested; nothing written"}`);
+		else this.#deps.log.warn(`inventory: switch ${subject}: refused: ${result.message}`);
 		this.#invalidate();
 		if (!result.ok) {
 			this.#deps.notify(result.message, "warning");

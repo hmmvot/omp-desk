@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import { describe, it } from "node:test";
 import { GUEST_PROTOCOL_VERSION } from "../protocol/messages.ts";
 import type { ChatWebviewMessage } from "../protocol/chat-messages.ts";
+import { recordingLogger, type LoggedLine } from "../shared/logger.ts";
 import type { ChatPage } from "./chat-runtime.ts";
 import { DETAIL_READ_ONLY_REASON, DETAIL_VIEW_TYPE, DetailTabs, type DetailPanel, type DetailTabsHost } from "./detail-tabs.ts";
 import type { DetailTarget } from "../protocol/detail-target.ts";
@@ -33,7 +34,7 @@ function fixture() {
 	const panels: FakePanel[] = [];
 	const attached: { conversation: string; page: ChatPage; detached: boolean }[] = [];
 	const handled: { conversation: string; message: ChatWebviewMessage }[] = [];
-	const logs: string[] = [];
+	const logs: LoggedLine[] = [];
 	const opened: { url: string; mode: string }[] = [];
 	const mermaid: string[] = [];
 	const artifacts: { conversation: string; artifactId: string }[] = [];
@@ -48,7 +49,7 @@ function fixture() {
 		async openUrl(url, mode) { opened.push({ url, mode }); },
 		openMermaid(source) { mermaid.push(source); },
 		async openArtifact(conversation, request) { artifacts.push({ conversation, artifactId: request.artifactId }); },
-		log: message => { logs.push(message); },
+		log: recordingLogger(logs),
 	};
 	return { tabs: new DetailTabs(host), panels, attached, handled, logs, opened, mermaid, artifacts };
 }
@@ -98,7 +99,7 @@ describe("detail tab registry", () => {
 		assert.equal(attached.length, 0, "nothing is sent to a document that may not be listening");
 		await panels[0]!.send({ type: "omp:ready", protocolVersion: GUEST_PROTOCOL_VERSION + 1 });
 		assert.equal(attached.length, 0);
-		assert.ok(logs.some(line => line.includes("guest protocol")));
+		assert.ok(logs.some(line => line.level === "warn" && line.message.includes("guest protocol")));
 		await panels[0]!.send({ type: "omp:ready", protocolVersion: GUEST_PROTOCOL_VERSION });
 		assert.equal(attached.length, 1);
 		assert.equal(attached[0]!.conversation, "tab:a");

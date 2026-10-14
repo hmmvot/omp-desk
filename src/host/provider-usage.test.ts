@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { recordingLogger, type LoggedLine } from "../shared/logger.ts";
 import { parseProviderUsageJson, projectProviderUsage, ProviderUsageCache, PROVIDER_USAGE_REFRESH_MS } from "./provider-usage.ts";
 
 function limit(window: string, usedFraction: number, scope: Record<string, unknown> = {}) {
@@ -38,8 +39,8 @@ test("ambiguous accounts use documented first-report fallback and preserve all m
 
 test("per-provider attempts coalesce, throttle at five minutes and retain the last reading after errors", async () => {
 	let now = 0, calls = 0;
-	const logged: string[] = [];
-	const cache = new ProviderUsageCache(() => now, message => logged.push(message));
+	const logged: LoggedLine[] = [];
+	const cache = new ProviderUsageCache(() => now, recordingLogger(logged));
 	const pending = Promise.withResolvers<{ stdout: string; stderr: string; exitCode: number }>();
 	const run = () => { calls++; return pending.promise; };
 	const first = cache.refresh("current", "model", run);
@@ -54,7 +55,7 @@ test("per-provider attempts coalesce, throttle at five minutes and retain the la
 	const result = await cache.refresh("current", "model", async () => { calls++; throw new Error("secret account identity"); });
 	assert.equal(calls, 2);
 	assert.equal(result.windows[0]?.usedPercent, 42);
-	assert.deepEqual(logged, ["Provider usage refresh failed; retaining the last value."]);
+	assert.deepEqual(logged, [{ level: "warn", message: "Provider usage refresh failed; retaining the last value." }]);
 	await cache.refresh("current", "model", run);
 	assert.equal(calls, 2);
 	await cache.refresh("other", "model", async () => { calls++; return { stdout: json([]), stderr: "", exitCode: 0 }; });

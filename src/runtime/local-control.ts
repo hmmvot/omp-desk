@@ -12,6 +12,7 @@
  */
 import * as path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import type { Logger } from "../shared/logger.ts";
 import type { ChatRuntime } from "../host/chat-runtime.ts";
 import { isOpenControlClient, mayPublishControlChannel, mayReportControlFailure } from "../host/control-attempt.ts";
 import type { ControlAttemptPlan } from "../host/control-attempt.ts";
@@ -27,6 +28,7 @@ import type { HostControlExpectation, HostControlVerifiedConnection } from "../h
 import { readControlRendezvous } from "../host/control-protocol.ts";
 import type { ControlRendezvous } from "../host/control-protocol.ts";
 import type { DiagnosticsRecorder } from "../host/diagnostics.ts";
+import type { LaunchTimeline } from "../host/launch-timeline.ts";
 import type { SessionHostRuntime } from "../host/native-session.ts";
 import type { SessionIndex } from "../host/session-index.ts";
 import type { SessionIndexEntry } from "../host/session-model.ts";
@@ -112,7 +114,9 @@ export interface LocalHostControlDeps {
 	readonly store: ControlStore;
 	readonly chat: () => Pick<ChatRuntime, "sessionOf">;
 	readonly diagnostics: () => DiagnosticsRecorder;
-	readonly log: (message: string) => void;
+	readonly log: Logger;
+	/** The new-session timeline: the verified channel ends it with its second report. */
+	readonly timeline?: LaunchTimeline;
 	/** Launch, recovery and the native watch share one attempt for the exact runtime; the window owns the table, as it owns the broker watches. */
 	readonly attempts: WeakMap<SessionHostRuntime, Promise<void>>;
 	/**
@@ -231,7 +235,7 @@ export class LocalHostControl {
 				await this.#deps.stagedHelper();
 				processCreation = await queryControlProcessGeneration(runtime.pid);
 			} catch (error) {
-				log(`tab ${conversation}: host control was withheld (${reason}) and its marker could not be recorded: ${messageOf(error)}`);
+				log.warn(`tab ${conversation}: host control was withheld (${reason}) and its marker could not be recorded: ${messageOf(error)}`);
 				return;
 			}
 			const record: RecordedControlProcess = {
@@ -247,7 +251,7 @@ export class LocalHostControl {
 				await store.deleteSecret(recipientSecretName(owner));
 			});
 			this.#deps.diagnostics().notObserved(conversation, "host-control-verified", reason);
-			log(`tab ${conversation}: host control withheld — ${reason}`);
+			log.warn(`tab ${conversation}: host control withheld — ${reason}`);
 		});
 	}
 
@@ -345,7 +349,7 @@ export class LocalHostControl {
 					"no control recipient was recorded for this host, so host control stays unavailable for it",
 				);
 			} else {
-				log(`tab ${tabId}: a reattach attempt no longer owns this tab; its result was ignored`);
+				log.debug(`tab ${tabId}: a reattach attempt no longer owns this tab; its result was ignored`);
 			}
 			return;
 		}
@@ -430,7 +434,7 @@ export class LocalHostControl {
 						diagnostics.fail(tabId, "host-control-verified", reason);
 						this.fail(tabId, reason);
 					} else {
-						log(`tab ${tabId}: a control attempt that found no rendezvous no longer owns this tab; nothing was changed`);
+						log.debug(`tab ${tabId}: a control attempt that found no rendezvous no longer owns this tab; nothing was changed`);
 					}
 					return;
 				}
@@ -451,7 +455,7 @@ export class LocalHostControl {
 				return;
 			}
 			const verified = connected;
-			if (verified.rotated) log(`tab ${tabId}: the host process (pid ${input.pid}) proved a rotated control key; the new key is pinned`);
+			if (verified.rotated) log.info(`tab ${tabId}: the host process (pid ${input.pid}) proved a rotated control key; the new key is pinned`);
 			const snapshot = await verified.client.snapshot();
 			// The connection awaited above: the tab's runtime may have been replaced (a
 			// relaunch) or closed while it was in flight, and a client proved for the *old*
@@ -463,7 +467,7 @@ export class LocalHostControl {
 					state === undefined ||
 					!mayPublishControlChannel(this.#attemptTarget(tabId), { runtime: attempt.runtime, pid: attempt.pid, client: verified.client })
 				) {
-					log(`tab ${tabId}: a verified host-control channel was not published: this tab runs a different process now`);
+					log.warn(`tab ${tabId}: a verified host-control channel was not published: this tab runs a different process now`);
 					verified.client.close();
 					connected = null;
 					return;
@@ -473,7 +477,9 @@ export class LocalHostControl {
 				await store.setSecret(provenKeySecretName(ownerGeneration), verified.key);
 				state.control = { client: verified.client, snapshot, activity: input.activity, work: input.work === true, subagents: input.subagents === true };
 				state.controlFailure = null;
-				log(`tab ${tabId}: host control verified (pid ${input.pid}, instance ${snapshot.host.instanceId})`);
+				log.info(`tab ${tabId}: host control verified (pid ${input.pid}, instance ${snapshot.host.instanceId})`);
+				const sinceCommandMs = this.#deps.timeline?.finish(tabId) ?? null;
+				if (sinceCommandMs !== null) log.info(`window timing: new session ${tabId} host control verified ${sinceCommandMs} ms after the command`);
 				diagnostics.succeed(tabId, "host-control-verified", {
 					detail: `pid ${input.pid} · instance ${snapshot.host.instanceId}`,
 				});
@@ -489,7 +495,7 @@ export class LocalHostControl {
 				diagnostics.fail(tabId, "host-control-verified", describeControlError(error));
 				this.reportFailure(tabId, error);
 			} else {
-				log(`tab ${tabId}: a failed host-control attempt no longer owns this tab; its result was ignored`);
+				log.debug(`tab ${tabId}: a failed host-control attempt no longer owns this tab; its result was ignored`);
 				connected?.client.close();
 			}
 		}
@@ -516,7 +522,7 @@ export class LocalHostControl {
 			await store.deleteSecret(recipientSecretName(ownerGeneration));
 			await store.deleteSecret(provenKeySecretName(ownerGeneration));
 			await store.setRecord(controlProcessRecordKey(ownerGeneration), undefined);
-			log(`tab ${conversation}: host-control material released after a confirmed stop`);
+			log.info(`tab ${conversation}: host-control material released after a confirmed stop`);
 		}
 	}
 
@@ -546,7 +552,7 @@ export class LocalHostControl {
 			state.control = null;
 			state.controlFailure = detail;
 		}
-		this.#deps.log(`tab ${conversation}: host control unavailable — ${detail}`);
+		this.#deps.log.warn(`tab ${conversation}: host control unavailable — ${detail}`);
 	}
 
 	/**
@@ -558,7 +564,7 @@ export class LocalHostControl {
 	 */
 	reportFailure(conversation: string, error: unknown): void {
 		if (!(error instanceof HostControlUnavailableError && error.timedOut)) {
-			this.#deps.log(`tab ${conversation}: host control failure detail: ${messageOf(error).slice(0, 300)}`);
+			this.#deps.log.warn(`tab ${conversation}: host control failure detail: ${messageOf(error).slice(0, 300)}`);
 			this.fail(conversation, describeControlError(error));
 			return;
 		}
@@ -567,7 +573,7 @@ export class LocalHostControl {
 			state.control?.client.close();
 			state.control = null;
 		}
-		this.#deps.log(`tab ${conversation}: host control paused — ${describeControlError(error)}; it is retried`);
+		this.#deps.log.warn(`tab ${conversation}: host control paused — ${describeControlError(error)}; it is retried`);
 	}
 
 	/** Close and forget one record's verified control channel; the failure text is cleared with it. */

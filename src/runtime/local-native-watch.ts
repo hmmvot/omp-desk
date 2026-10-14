@@ -9,6 +9,7 @@
  * activity, the editor's document and panel) is its hooks, run after the state they describe is
  * committed. The watch never launches anything: an exit is recorded by the exit operations.
  */
+import type { Logger } from "../shared/logger.ts";
 import { isOpenControlClient } from "../host/control-attempt.ts";
 import type { HostControlClient } from "../host/control-client.ts";
 import { BROKER_SLOTS_KEY } from "../host/broker-slots.ts";
@@ -71,7 +72,7 @@ export interface LocalNativeWatchDeps {
 	readonly reconciler: () => OwnerReconciler;
 	/** The durable broker slot table, `undefined` before activation created it. */
 	readonly brokerSlots: () => BrokerSlotStore | undefined;
-	readonly log: (message: string) => void;
+	readonly log: Logger;
 }
 
 type SignalState = "available" | "control-unavailable" | "native-not-ready" | "older-host";
@@ -121,7 +122,7 @@ export class LocalNativeWatch {
 		const reportSignals = (next: SignalState): void => {
 			if (signalState === next || state.tabId === null) return;
 			signalState = next;
-			log(`tab ${state.tabId}: native completion signals ${next === "available" ? "available — sealed activity journal" : next === "older-host" ? "unavailable — this native host predates the completion journal; state observation continues" : next === "native-not-ready" ? "unavailable — verified host has not reported native session readiness yet" : "unavailable — waiting for verified host control; connection will retry"}`);
+			log.info(`tab ${state.tabId}: native completion signals ${next === "available" ? "available — sealed activity journal" : next === "older-host" ? "unavailable — this native host predates the completion journal; state observation continues" : next === "native-not-ready" ? "unavailable — verified host has not reported native session readiness yet" : "unavailable — waiting for verified host control; connection will retry"}`);
 		};
 		const unsubscribe = runtime.handle.subscribe(event => {
 			if (event.type === "state" && event.status.state === "exited" && state.tabId !== null) {

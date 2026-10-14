@@ -4,12 +4,13 @@ import type { CodeTheme } from "../chat/code-theme.ts";
 import { resolveCodeThemes } from "../host/code-theme.ts";
 import type { CodeThemeContribution, CodeThemeInput, CodeThemeKind } from "../host/code-theme.ts";
 import { isRecord } from "../shared/guards.ts";
+import type { Logger } from "../shared/logger.ts";
 
 /** What the extension supplies: the reaction to changed themes and a diagnostic log; the file ports are for tests. */
 export interface CodeThemeDeps {
 	/** The resolved themes differ from the ones `current()` returned before: push them to the pages. */
 	changed(): void;
-	log(message: string): void;
+	log: Logger;
 	/** The file's text, or `null` when unreadable; defaults to the file system. */
 	readFile?(path: string): Promise<string | null>;
 	/** The file's size, or `null` when missing or not a regular file; defaults to the file system. */
@@ -126,6 +127,7 @@ export function registerCodeTheme(context: vscode.ExtensionContext, deps: CodeTh
 		const mine = ++generation;
 		let resolved: readonly CodeTheme[] = [];
 		let summary: string;
+		let failed = false;
 		try {
 			const input = readInput(files);
 			if (input === null) {
@@ -139,10 +141,12 @@ export function registerCodeTheme(context: vscode.ExtensionContext, deps: CodeTh
 			}
 		} catch (error) {
 			resolved = [];
+			failed = true;
 			summary = `no themes: resolution failed: ${error instanceof Error ? error.message : String(error)}`;
 		}
 		if (disposed || mine !== generation) return;
-		deps.log(`code theme: ${summary}`);
+		if (failed) deps.log.warn(`code theme: ${summary}`);
+		else deps.log.info(`code theme: ${summary}`);
 		const next = JSON.stringify(resolved);
 		if (next === serialised) return;
 		themes = resolved;
@@ -150,7 +154,7 @@ export function registerCodeTheme(context: vscode.ExtensionContext, deps: CodeTh
 		try {
 			deps.changed();
 		} catch (error) {
-			deps.log(`code theme: change notification failed: ${error instanceof Error ? error.message : String(error)}`);
+			deps.log.warn(`code theme: change notification failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	};
 	const schedule = (): void => {

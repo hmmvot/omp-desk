@@ -3,6 +3,7 @@ import { afterEach, describe, it } from "node:test";
 import { FakeRpcChannel } from "../rpc/fake-channel.ts";
 import { RpcSession } from "../rpc/session.ts";
 import { ManualTimers, tick } from "../rpc/test-support.ts";
+import { silentLogger } from "../../shared/logger.ts";
 import { ContextController } from "./context-controller.ts";
 import type { ContextControllerDeps, ContextTarget } from "./context-controller.ts";
 import type { ContextViewModel } from "./context-model.ts";
@@ -33,7 +34,7 @@ function rig() {
 		schedule: handler => { const timer: Timer = { handler, live: true }; state.timers.push(timer); return timer; },
 		cancel: handle => { for (const timer of state.timers) if (timer === handle) timer.live = false; },
 		now: () => 0,
-		log: () => {},
+		log: silentLogger,
 	};
 	const controller = new ContextController(deps);
 	// The extension syncs on the baseline publication that makes the session live.

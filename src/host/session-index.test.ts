@@ -19,6 +19,7 @@ import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { after, describe, it } from "node:test";
+import { recordingLogger, type LoggedLine } from "../shared/logger.ts";
 import { claimPathFor, createOwnerGeneration, acquireClaim, createClaimHolder, readClaim } from "./session-claim.ts";
 import type { ClaimHolder } from "./session-claim.ts";
 import {
@@ -948,8 +949,8 @@ describe("restoreAll runs rows together", () => {
 
 	it("logs one compact line per row with the duration of each step", async () => {
 		const { claimDir, tabIds, files, handles, store } = await restartedRows(2);
-		const lines: string[] = [];
-		const index = new SessionIndex({ store, claimStorageDir: claimDir, log: line => lines.push(line) });
+		const lines: LoggedLine[] = [];
+		const index = new SessionIndex({ store, claimStorageDir: claimDir, log: recordingLogger(lines) });
 		const launcher: OmpHostLauncher = {
 			async launch() {
 				return { state: "not-started", reason: "an attach must never launch" };
@@ -965,10 +966,11 @@ describe("restoreAll runs rows together", () => {
 
 		await index.restoreAll({ reconciler: reconcilerFor(handles), launcher });
 
-		const rows = lines.filter(line => line.startsWith("window timing: restore tab "));
+		const rows = lines.filter(line => line.message.startsWith("window timing: restore tab "));
 		assert.equal(rows.length, 2);
+		assert.ok(rows.every(row => row.level === "debug"), "per-row restore timing is a debug line");
 		for (const [position, tabId] of tabIds.entries()) {
-			const line = rows.find(candidate => candidate.startsWith(`window timing: restore tab ${tabId} `));
+			const line = rows.find(candidate => candidate.message.startsWith(`window timing: restore tab ${tabId} `))?.message;
 			assert.ok(line !== undefined, `a line for ${tabId}`);
 			assert.ok(line.startsWith(`window timing: restore tab ${tabId} attached in `), line);
 			assert.match(line, / · admission \d+ · reconcile \d+ · attach \d+ \(connect 7, conversation 3\) · persist \d+$/);

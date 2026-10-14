@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { MERMAID_PREVIEW_VIEW_TYPE, MermaidPreviews, mermaidPreviewKey, type MermaidPreviewPanel } from "./mermaid-previews.ts";
+import { recordingLogger, type LoggedLine } from "../shared/logger.ts";
 
 class FakePanel implements MermaidPreviewPanel {
 	revealed = 0;
@@ -25,10 +26,10 @@ class FakePanel implements MermaidPreviewPanel {
 
 function fixture() {
 	const panels: FakePanel[] = [];
-	const logs: string[] = [];
+	const logs: LoggedLine[] = [];
 	const previews = new MermaidPreviews({
 		createPanel(title) { const panel = new FakePanel(title); panels.push(panel); return panel; },
-		log: message => { logs.push(message); },
+		log: recordingLogger(logs),
 	});
 	return { previews, panels, logs };
 }

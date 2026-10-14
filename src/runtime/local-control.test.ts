@@ -7,23 +7,25 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { HostControlRefusedError, HostControlUnavailableError } from "../host/control-client.ts";
 import type { HostControlClient } from "../host/control-client.ts";
+import { recordingLogger } from "../shared/logger.ts";
+import type { LoggedLine } from "../shared/logger.ts";
 import { controlProcessRecordKey, describeControlError, LocalHostControl } from "./local-control.ts";
 import type { RecordedControlProcess } from "./local-control.ts";
 import type { RuntimeRecord } from "./runtime-record.ts";
 
 const TAB = "tab:one";
 
-function fixture(): { readonly control: LocalHostControl; readonly record: RuntimeRecord; readonly logs: string[]; readonly closed: () => number } {
+function fixture(): { readonly control: LocalHostControl; readonly record: RuntimeRecord; readonly logs: LoggedLine[]; readonly closed: () => number } {
 	let closes = 0;
 	const client = { close: () => { closes += 1; } } as unknown as HostControlClient;
 	const record = {
 		tabId: TAB, slotId: "slot-1", runtime: null, control: { client, snapshot: null, activity: true }, controlFailure: null as string | null,
 		endedNotice: null, transitioning: false, nativeWatch: null, pipeline: null,
 	} satisfies RuntimeRecord as RuntimeRecord;
-	const logs: string[] = [];
+	const logs: LoggedLine[] = [];
 	const control = new LocalHostControl({
 		records: { get: (tabId: string | null) => tabId === TAB ? record : undefined } as never,
-		log: (message: string) => logs.push(message),
+		log: recordingLogger(logs),
 	} as never);
 	return { control, record, logs, closed: () => closes };
 }
@@ -36,8 +38,9 @@ describe("host control failure reporting", () => {
 		assert.equal(record.controlFailure, null, "the text that becomes a warning above the terminal stays empty");
 		assert.equal(record.control, null, "the channel is dropped so the next attempt starts clean");
 		assert.equal(closed(), 1);
-		assert.match(logs.join("\n"), /host control paused — OMP did not answer in time \(it may be busy\); it is retried/);
-		assert.doesNotMatch(logs.join("\n"), /unavailable/);
+		assert.match(logs.map(line => line.message).join("\n"), /host control paused — OMP did not answer in time \(it may be busy\); it is retried/);
+		assert.deepEqual(logs.map(line => line.level), ["warn"], "a busy host is a degraded state, not a failure");
+		assert.doesNotMatch(logs.map(line => line.message).join("\n"), /unavailable/);
 	});
 
 	it("keeps recording a host that cannot be reached or refused the request", () => {
@@ -46,7 +49,7 @@ describe("host control failure reporting", () => {
 			control.reportFailure(TAB, error);
 			assert.equal(record.controlFailure, describeControlError(error));
 			assert.equal(record.control, null);
-			assert.match(logs.join("\n"), /host control unavailable — /);
+			assert.match(logs.map(line => line.message).join("\n"), /host control unavailable — /);
 		}
 		assert.equal(describeControlError(new HostControlUnavailableError("channel is not open")), "native host connection unavailable");
 	});
@@ -58,14 +61,14 @@ describe("a host launched without a control channel (ADR-0075)", () => {
 	function withheldFixture(recordedPid: number) {
 		const record = { tabId: TAB, runtime, control: null, controlFailure: null as string | null } as unknown as RuntimeRecord;
 		const observations: string[] = [];
-		const logs: string[] = [];
+		const logs: LoggedLine[] = [];
 		const stored: RecordedControlProcess = { pid: recordedPid, processCreation: "2026-10-14T00:00:00Z", slotId: "slot-1", directory: "C:/control", withheld: reason };
 		const control = new LocalHostControl({
 			records: { get: (tabId: string | null) => tabId === TAB ? record : undefined } as never,
 			store: { record: (key: string) => key === controlProcessRecordKey("owner") ? stored : undefined, secret: async () => undefined } as never,
 			diagnostics: () => ({ notObserved: (_tab: string, _stage: string, detail: string) => observations.push(detail) }) as never,
 			attempts: new WeakMap(),
-			log: (message: string) => logs.push(message),
+			log: recordingLogger(logs),
 		} as never);
 		return { control, record, observations, logs };
 	}
@@ -75,7 +78,7 @@ describe("a host launched without a control channel (ADR-0075)", () => {
 		await f.control.reconnect(TAB, "owner", runtime);
 		assert.equal(f.record.controlFailure, null, "no warning is raised for a launch that was never offered a channel");
 		assert.deepEqual(f.observations, [reason]);
-		assert.doesNotMatch(f.logs.join("\n"), /unavailable|never attempted|no control recipient/);
+		assert.doesNotMatch(f.logs.map(line => line.message).join("\n"), /unavailable|never attempted|no control recipient/);
 	});
 
 	it("still reports a different process's missing record as before", async () => {
@@ -93,7 +96,7 @@ describe("a re-adopted host's control proof waits for the staged pipe helper, an
 		let release!: () => void;
 		const staged = new Promise<void>(resolve => { release = resolve; });
 		const events: string[] = [];
-		const logs: string[] = [];
+		const logs: LoggedLine[] = [];
 		const control = new LocalHostControl({
 			// No record for the tab: the attempt that starts after the wait finds it no longer owns the tab and ends at once,
 			// so the test never reaches the real pipe client.
@@ -105,7 +108,7 @@ describe("a re-adopted host's control proof waits for the staged pipe helper, an
 			diagnostics: () => { events.push("establish"); return {} as never; },
 			attempts: new WeakMap(),
 			stagedHelper: () => { events.push("staging awaited"); return staged; },
-			log: (message: string) => logs.push(message),
+			log: recordingLogger(logs),
 		} as never);
 		return { control, events, logs, release };
 	}
@@ -118,6 +121,6 @@ describe("a re-adopted host's control proof waits for the staged pipe helper, an
 		f.release();
 		await attempt;
 		assert.deepEqual(f.events, ["staging awaited", "establish"]);
-		assert.match(f.logs.join("\n"), /no longer owns this tab/);
+		assert.match(f.logs.map(line => line.message).join("\n"), /no longer owns this tab/);
 	});
 });

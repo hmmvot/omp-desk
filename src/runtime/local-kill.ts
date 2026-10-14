@@ -10,6 +10,7 @@
  * `KillWindow`.
  */
 import { setTimeout as delay } from "node:timers/promises";
+import type { Logger } from "../shared/logger.ts";
 import type { BrokerProcessRow } from "../host/broker-processes.ts";
 import type { BrokerSlotStore } from "../host/broker-slots.ts";
 import { isPtyProcessAlive, queryPtyProcessIdentity, waitForPtyProcessGone } from "../host/pty-identity.ts";
@@ -47,7 +48,7 @@ export interface LocalKillDeps {
 	/** The broker client, or `null` when brokers are unavailable in this window. Its verified probe helper reads identities. */
 	readonly attachBrokerClient: () => Promise<PtyBrokerClient | null>;
 	readonly brokerSlots: () => BrokerSlotStore | undefined;
-	readonly log: (message: string) => void;
+	readonly log: Logger;
 }
 
 export class LocalKill {
@@ -135,10 +136,10 @@ export class LocalKill {
 			}
 			return recorded;
 		});
-		if (result.kind === "recorded") log(`tab ${tabId}: after Kill: the row is recorded as stopped`);
-		else if (result.kind === "skipped") log(`tab ${tabId}: after Kill: ${result.detail}`);
+		if (result.kind === "recorded") log.info(`tab ${tabId}: after Kill: the row is recorded as stopped`);
+		else if (result.kind === "skipped") log.info(`tab ${tabId}: after Kill: ${result.detail}`);
 		else {
-			log(`tab ${tabId}: after Kill: ${result.detail}`);
+			log.error(`tab ${tabId}: after Kill: ${result.detail}`);
 			throw new Error(result.detail);
 		}
 	}

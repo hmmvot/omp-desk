@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { describe, it } from "node:test";
+import { recordingLogger, type LoggedLine } from "../shared/logger.ts";
 import { FakeOmp, fakeSpawner, providerPeer } from "./provider-login-fake-omp.ts";
 import type { FakeFrame } from "./provider-login-fake-omp.ts";
 import { boundedText, LoginStartError, parseLoginProviders, parseLogoutAccounts, startLoginSession } from "./provider-login-rpc.ts";
@@ -346,11 +347,11 @@ describe("a real child process", () => {
 				console.log(JSON.stringify({ type: "response", id: frame.id, command: frame.type, success: true, data: { providers: [{ id: "anthropic", name: "Anthropic", available: true, authenticated: false }] } }));
 			}).on("close", () => process.exit(0));
 		`;
-		const logs: string[] = [];
+		const logs: LoggedLine[] = [];
 		const session = await startLoginSession({
 			scope: { executable: { command: process.execPath, prefixArgs: ["-e", script, "--"] }, env: {}, cwd: process.cwd() },
 			spawner: (command, args, options) => spawn(command, [...args], { cwd: options.cwd, env: options.env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true }),
-			log: message => logs.push(message),
+			log: recordingLogger(logs),
 		});
 		assert.deepEqual((await session.providers()).map(provider => provider.id), ["anthropic"]);
 		session.dispose();

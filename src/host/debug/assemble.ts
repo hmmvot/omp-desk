@@ -1,3 +1,4 @@
+import type { Logger } from "../../shared/logger.ts";
 import type { HostToolDefinition, HostToolProvider } from "../tools/host-tool.ts";
 import { DebugCoordinator } from "./coordinator.ts";
 import type { BreakpointOwnershipStore, DebugApi } from "./debug-api.ts";
@@ -13,7 +14,7 @@ export interface AgentDebuggerParts {
 }
 
 export interface AssembleOptions {
-	log?: (line: string) => void;
+	log?: Logger;
 	/** How long adding a breakpoint waits for adapters to verify it. */
 	breakpointSettleMs?: number;
 	/** Progress cadence of `vscode_debug_wait`. */

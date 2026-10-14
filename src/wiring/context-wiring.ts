@@ -2,6 +2,7 @@ import * as vscode from "vscode";
 import { ContextController } from "../host/context/context-controller.ts";
 import { ContextTreeProvider, READ_BREAKDOWN_COMMAND } from "../views/context-tree.ts";
 import type { ContextTarget } from "../host/context/context-controller.ts";
+import type { Logger } from "../shared/logger.ts";
 
 /** The view id, as `package.json` contributes it. */
 export const CONTEXT_VIEW_ID = "ompDesk.context";
@@ -9,7 +10,7 @@ export const CONTEXT_VIEW_ID = "ompDesk.context";
 /** What the extension supplies: the editor the view describes (the inventory views' rule), a log, and the Chat's own Compact/Shake flow. */
 export interface ContextViewDeps {
 	target(): ContextTarget | null;
-	log(message: string): void;
+	log: Logger;
 	/** Run the Chat footer's Compact or Shake for `tabId` (its pickers, prompts and refusal texts). */
 	runAction(tabId: string, command: "compact" | "shake"): void;
 }
@@ -43,7 +44,7 @@ export function registerContextView(context: vscode.ExtensionContext, deps: Cont
 		schedule: (handler, ms) => setTimeout(handler, ms),
 		cancel: handle => clearTimeout(handle as NodeJS.Timeout),
 		now: () => Date.now(),
-		log: message => deps.log(message),
+		log: deps.log,
 	});
 	// The action acts on the session the tree shows, not on the focused editor: a click in the side bar must not redirect it.
 	const maintain = (command: "compact" | "shake") => { if (shown !== null && shown.mode === "chat" && shown.running) deps.runAction(shown.tabId, command); };

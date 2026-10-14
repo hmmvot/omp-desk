@@ -14,6 +14,8 @@ import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { after, before, describe, it } from "node:test";
 import { build } from "esbuild";
+import { recordingLogger } from "../shared/logger.ts";
+import type { LoggedLine } from "../shared/logger.ts";
 import type { RuntimeStagingDeps, createRuntimeStaging as createRuntimeStagingType } from "./runtime-entries.ts";
 
 let createRuntimeStaging: typeof createRuntimeStagingType;
@@ -33,7 +35,7 @@ async function deps(overrides: Partial<RuntimeStagingDeps> = {}) {
 	await mkdir(packaged, { recursive: true });
 	for (const name of Object.values(files)) await writeFile(path.join(packaged, name), `content of ${name}`);
 	const configured: string[] = [];
-	const logs: string[] = [];
+	const logs: LoggedLine[] = [];
 	const base: RuntimeStagingDeps = {
 		storageDir: () => path.join(packaged, "storage"),
 		packagedPaths: () => ({
@@ -42,7 +44,7 @@ async function deps(overrides: Partial<RuntimeStagingDeps> = {}) {
 		}),
 		refusal: () => null,
 		configureControlHelper: file => { configured.push(file); },
-		log: message => { logs.push(message); },
+		log: recordingLogger(logs),
 	};
 	return { deps: { ...base, ...overrides }, configured, logs, packaged, files };
 }
@@ -63,6 +65,7 @@ describe("runtime staging", () => {
 		const staging = createRuntimeStaging(f.deps);
 		assert.equal(await staging.leaseHelper(), null);
 		assert.equal(f.logs.length, 1);
-		assert.match(f.logs[0] ?? "", /session lease helper could not be staged/);
+		assert.match(f.logs[0]?.message ?? "", /session lease helper could not be staged/);
+		assert.equal(f.logs[0]?.level, "warn");
 	});
 });

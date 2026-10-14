@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createChatModel } from "../../chat/model.ts";
 import { breakdownFailure, ContextController, DEEP_READ_DEBOUNCE_MS } from "./context-controller.ts";
+import { recordingLogger, type LoggedLine } from "../../shared/logger.ts";
 import { parseContextReport } from "./context-parse.ts";
 import type { ChatModel } from "../../chat/model.ts";
 import type { CommandResult, RpcSessionOutput } from "../rpc/session.ts";
@@ -36,7 +37,7 @@ class FakeSession implements ContextSession {
 }
 
 function harness(initial: ContextTarget | null) {
-	const state = { target: initial, published: [] as ContextViewModel[], notices: [] as string[], logs: [] as string[], timers: [] as Array<{ handler: () => void; ms: number; live: boolean }>, now: Date.parse("2026-10-12T12:00:00.000Z") };
+	const state = { target: initial, published: [] as ContextViewModel[], notices: [] as string[], logs: [] as LoggedLine[], timers: [] as Array<{ handler: () => void; ms: number; live: boolean }>, now: Date.parse("2026-10-12T12:00:00.000Z") };
 	const deps: ContextControllerDeps = {
 		// A new object per call, as the extension builds it: nothing may be fenced by the wrapper's identity.
 		target: () => (state.target === null ? null : { ...state.target }),
@@ -45,7 +46,7 @@ function harness(initial: ContextTarget | null) {
 		schedule: (handler, ms) => { const timer = { handler, ms, live: true }; state.timers.push(timer); return timer; },
 		cancel: handle => { (handle as { live: boolean }).live = false; },
 		now: () => state.now,
-		log: message => { state.logs.push(message); },
+		log: recordingLogger(state.logs),
 	};
 	const controller = new ContextController(deps);
 	/** Fire the pending timer, as the debounce elapsing. */
@@ -207,7 +208,7 @@ describe("refresh policy", () => {
 		h.controller.setVisible(true);
 		h.fire();
 		await flush();
-		assert.deepEqual(h.state.logs, ["context: read failed: boom"]);
+		assert.deepEqual(h.state.logs, [{ level: "warn", message: "context: read failed: boom" }]);
 		assert.ok(h.last().groups.length > 0);
 	});
 	it("does nothing for a session that is not running or a Terminal", () => {

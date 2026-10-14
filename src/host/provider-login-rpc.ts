@@ -12,6 +12,7 @@
  */
 import { spawn } from "node:child_process";
 import { isRecord } from "../shared/guards.ts";
+import type { Logger } from "../shared/logger.ts";
 import { encodeUiResponse, isResponseFrame } from "../protocol/rpc.ts";
 import type { OmpCommand } from "./native-terminal.ts";
 import { runTaskkillTree } from "./session-kill.ts";
@@ -467,7 +468,7 @@ export interface StartLoginOptions {
 	readonly timers?: LoginTimers;
 	readonly modelSelectors?: readonly string[];
 	/** Reports a fixed diagnostic sentence (never a frame, stderr or an error string OMP produced). */
-	readonly log?: (message: string) => void;
+	readonly log?: Logger;
 	/** Aborts the start: the process is ended and the start rejects with a {@link LoginStartError}. */
 	readonly signal?: AbortSignal;
 	/** Overrides for tests: the tree kill (default: Windows `taskkill /T /F`). */
@@ -505,7 +506,7 @@ function startOnce(options: StartLoginOptions, selector: string): Promise<LoginS
 	try {
 		child = spawner(scope.executable.command, args, { cwd: scope.cwd, env: { ...process.env, ...scope.env } });
 	} catch {
-		options.log?.("provider login: the OMP process could not be started");
+		options.log?.error("provider login: the OMP process could not be started");
 		return Promise.reject(new LoginStartError("spawn"));
 	}
 	const session = new LoginSession(child, timers, options.treeKill);

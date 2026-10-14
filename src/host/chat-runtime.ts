@@ -30,6 +30,7 @@ import type {
 	ChatSnapshotPayload,
 	ChatStatePayload,
 } from "../chat/model.ts";
+import { prefixedLogger, type Logger } from "../shared/logger.ts";
 import { chatTurnInProgress, createChatModel, sameEpoch, setChatPhase, snapshotOf } from "../chat/model.ts";
 import { MAX_CHAT_TEXT_LENGTH, splitChatSnapshot } from "../protocol/chat-messages.ts";
 import type { ChatHostMessage, ChatWebviewMessage, ChatSubagentRequestMessage, ChatDisplayPreferences, ChatQueueRemoveMessage, ChatQueueResultEntry, ChatAbortResultMessage, ChatNavigateResultMessage } from "../protocol/chat-messages.ts";
@@ -152,7 +153,7 @@ export interface ChatRuntimeOptions {
 	/** Desk's host tools for every live session (ADR-0055); absent: sessions register none. */
 	readonly hostTools?: HostToolProvider;
 	/** Diagnostics sink handed to every live session. */
-	readonly log?: (message: string) => void;
+	readonly log?: Logger;
 }
 
 /**
@@ -276,7 +277,7 @@ export class ChatRuntime {
 			hostNonce: nonce,
 			...(input.initialSeq === undefined ? {} : { initialSeq: input.initialSeq }),
 			...(this.#options.hostTools === undefined ? {} : { hostTools: this.#options.hostTools }),
-			...(this.#options.log === undefined ? {} : { log: tabLog(this.#options.log, tabId) }),
+			...(this.#options.log === undefined ? {} : { log: prefixedLogger(this.#options.log, `tab ${tabId}: `) }),
 		});
 		const conversation: Conversation = {
 			tabId,
@@ -1057,9 +1058,4 @@ function withReadOnlyOverlay(page: ChatPage): ChatPage {
 			return page.post(message);
 		},
 	};
-}
-
-/** A session's diagnostics name their tab, as every other per-tab log line does. */
-function tabLog(log: (message: string) => void, tabId: string): (message: string) => void {
-	return message => log(`tab ${tabId}: ${message}`);
 }

@@ -93,6 +93,7 @@ import {
 } from "./pty-runtime.ts";
 import { PTY_RUNTIME_VERSION, attestationOf } from "./pty-protocol.ts";
 import type { PrivateStorageProbe } from "./private-storage.ts";
+import type { Logger } from "../shared/logger.ts";
 import { PtyRuntimeProof } from "./pty-runtime-proof.ts";
 import { folderShellLaunchSpec, type PtyFolderShellRequest } from "./pty-shell.ts";
 import { RpcHandle } from "./rpc-handle.ts";
@@ -116,8 +117,8 @@ export interface PtyBrokerClientOptions {
 	readonly nodePath?: string;
 	/** Extra environment for the broker process. */
 	readonly env?: Readonly<Record<string, string>>;
-	/** Receives runtime-proof state changes worth a log line (a provisional admission, its resolution). */
-	readonly onRuntimeEvent?: (message: string) => void;
+	/** Runtime-proof state changes worth a log line (a provisional admission, its resolution), at their own levels. */
+	readonly log?: Logger;
 	/** Test seam: the access probe for the state directory and the staged trees; defaults to this machine's own. */
 	readonly access?: PrivateStorageProbe;
 	/** Test seam: the kernel creation-time reading; defaults to the staged probe helper. */
@@ -142,6 +143,8 @@ export interface BrokerLaunchOutcome<Handle> {
 	readonly adopted: boolean;
 	/** Broker pid, when a process was started or found. */
 	readonly brokerPid: number | null;
+	/** Milliseconds of the phases of a broker this call started (runtime check, verify, broker spawn, handshake); diagnostic only. */
+	readonly timings?: Readonly<Record<string, number>>;
 }
 
 export interface BrokerAttachOutcome<Handle> {
@@ -332,7 +335,7 @@ export class PtyBrokerClient {
 					...(options.access === undefined ? {} : { access: options.access }),
 					...(deadlineMs === undefined ? {} : { selfCheckDeadlineMs: deadlineMs }),
 				}),
-			...(options.onRuntimeEvent === undefined ? {} : { log: options.onRuntimeEvent }),
+			...(options.log === undefined ? {} : { log: options.log }),
 		});
 	}
 
@@ -820,11 +823,13 @@ export class PtyBrokerClient {
 		launcherId: string,
 		attach: (record: PtyBrokerRecord, adopted: boolean) => Promise<BrokerAttachOutcome<Handle>>,
 	): Promise<BrokerLaunchOutcome<Handle>> {
+		const proofStartedAt = Date.now();
 		const ready = await this.ready();
 		if (!ready.ready || ready.runtime === null) {
 			return { state: "not-started", reason: ready.reason ?? "the broker runtime is not ready", handle: null, adopted: false, brokerPid: null };
 		}
 		const runtime: PtyRuntime = ready.runtime;
+		const proofMs = Date.now() - proofStartedAt;
 		// Re-read every staged file immediately before starting: a path says nothing
 		// about the bytes that are there now.
 		if (!(await verifyPtyRuntime(runtime))) {
@@ -846,6 +851,8 @@ export class PtyBrokerClient {
 				brokerPid: null,
 			};
 		}
+		const verifiedMs = Date.now() - proofStartedAt - proofMs;
+		const spawnStartedAt = Date.now();
 		const logPath = this.logPathFor(spec.slot);
 		const args = buildBrokerArguments(spec, runtime, this.options.storageDir, logPath, launcherId);
 		let child: { readonly pid?: number; readonly exitCode: number | null };
@@ -881,13 +888,16 @@ export class PtyBrokerClient {
 				brokerPid: spawned,
 			};
 		}
+		const spawnMs = Date.now() - spawnStartedAt;
+		const handshakeStartedAt = Date.now();
 		// The record exists, so a broker owns the slot. Attach, retrying while the broker
 		// reads its own child's identity.
 		let lastReason = "the broker did not answer the handshake";
 		for (let attempt = 0; attempt < ATTACH_ATTEMPTS; attempt += 1) {
 			const attached = await attach(record, false);
 			if (attached.state === "attached") {
-				return { state: "running", reason: "started", handle: attached.handle, adopted: false, brokerPid: record.brokerPid };
+				const timings = { "runtime check": proofMs, verify: verifiedMs, "broker spawn": spawnMs, handshake: Date.now() - handshakeStartedAt };
+				return { state: "running", reason: "started", handle: attached.handle, adopted: false, brokerPid: record.brokerPid, timings };
 			}
 			lastReason = attached.reason;
 			await delay(ATTACH_RETRY_MS);

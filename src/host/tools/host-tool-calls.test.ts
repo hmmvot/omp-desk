@@ -10,6 +10,7 @@
 
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
+import { recordingLogger, silentLogger, type LoggedLine } from "../../shared/logger.ts";
 import { ManualTimers, tick } from "../rpc/test-support.ts";
 import {
 	HOST_TOOL_CLOSED_CACHE,
@@ -58,7 +59,7 @@ class Rig {
 	readonly accepted: Written[] = [];
 	readonly updates: Written[] = [];
 	readonly lostAck: Written[] = [];
-	readonly logs: string[] = [];
+	readonly logs: LoggedLine[] = [];
 	writeMode: "ok" | "refuse-not-owner" | "closed" | "lose-ack" | "child-exited" = "ok";
 	tools: HostToolDefinition[];
 	readonly timers = new ManualTimers();
@@ -94,7 +95,7 @@ class Rig {
 			ownerGeneration: () => this.ownerGeneration,
 			tools: () => this.tools,
 			timers: this.timers,
-			log: message => this.logs.push(message),
+			log: recordingLogger(this.logs),
 			...(maxRunning === undefined ? {} : { maxRunning }),
 		});
 	}
@@ -391,7 +392,8 @@ describe("outbox", () => {
 		await tick();
 		assert.equal(r.calls.outstandingResults, count);
 		assert.equal(r.logs.length, 1);
-		assert.match(r.logs[0] ?? "", /waiting for delivery/);
+		assert.match(r.logs[0]?.message ?? "", /waiting for delivery/);
+		assert.equal(r.logs[0]?.level, "warn");
 		r.writeMode = "ok";
 		r.calls.ownerChanged();
 		await tick(count + 4);
@@ -733,7 +735,7 @@ describe("progress updates", () => {
 			ownerGeneration: () => 1,
 			tools: () => [probe.definition()],
 			timers: new ManualTimers(),
-			log: () => undefined,
+			log: silentLogger,
 		});
 		try {
 			calls.attached(0);

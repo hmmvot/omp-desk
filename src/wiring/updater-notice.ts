@@ -13,6 +13,7 @@
  */
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
+import type { Logger } from "../shared/logger.ts";
 
 /** What an updater log says it terminated. */
 export interface UpdaterTermination {
@@ -53,7 +54,7 @@ export interface UpdaterNoticePort {
 	markAnnounced(name: string): Promise<void>;
 	/** Milliseconds since the epoch. */
 	now(): number;
-	log(line: string): void;
+	log: Logger;
 	notify(message: string): void;
 }
 
@@ -80,7 +81,7 @@ export async function announceUpdaterTerminations(port: UpdaterNoticePort): Prom
 			const ours = (await port.brokerDescriptors()).filter(descriptor => killed.has(descriptor.brokerPid));
 			if (ours.length === 0) continue;
 			const sessions = ours.filter(descriptor => descriptor.kind === "managed-rpc" || descriptor.kind === "managed-omp").length;
-			port.log(`VS Code's updater (${entry.name}) terminated ${ended.pids.length} Code.exe processes at ${ended.stamp}, ${ours.length} of them background processes of this extension (pids ${ours.map(descriptor => descriptor.brokerPid).join(", ")}); the OMP processes they kept ended with them`);
+			port.log.info(`VS Code's updater (${entry.name}) terminated ${ended.pids.length} Code.exe processes at ${ended.stamp}, ${ours.length} of them background processes of this extension (pids ${ours.map(descriptor => descriptor.brokerPid).join(", ")}); the OMP processes they kept ended with them`);
 			await port.markAnnounced(entry.name);
 			port.notify(
 				`VS Code's update ended ${sessions === 0 ? "OMP Desk's background processes" : `the ${sessions === 1 ? "process" : `${sessions} processes`} of the sessions that were running`} at ${ended.stamp.slice(-8)}: the installer stops every Code.exe of the install, and the session hosts run as Code.exe. ` +
@@ -89,7 +90,7 @@ export async function announceUpdaterTerminations(port: UpdaterNoticePort): Prom
 			return;
 		}
 	} catch (error) {
-		port.log(`updater notice: not checked: ${error instanceof Error ? error.message : String(error)}`);
+		port.log.warn(`updater notice: not checked: ${error instanceof Error ? error.message : String(error)}`);
 	}
 }
 

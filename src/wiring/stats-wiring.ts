@@ -8,10 +8,11 @@ import { admitStatsLaunch, ensureStatsDashboard, planStatsPreload, probeStatsDas
 import { statsWebviewHtml } from "../host/stats-webview";
 import { isPtyProcessAlive, queryPtyProcessIdentity, waitForPtyProcessGone } from "../host/pty-identity";
 import { stageRuntimeAssets, verifyStagedRuntimeAsset } from "../host/runtime-assets";
+import type { Logger } from "../shared/logger.ts";
 
 export function registerStatsDashboard(context: vscode.ExtensionContext, deps: {
 	client(): Promise<PtyBrokerClient | null>;
-	log(message: string): void;
+	log: Logger;
 }): void {
 	let panel: vscode.WebviewPanel | undefined;
 	let opening: Promise<void> | undefined;
@@ -49,13 +50,13 @@ export function registerStatsDashboard(context: vscode.ExtensionContext, deps: {
 							sourcePaths: [vscode.Uri.joinPath(context.extensionUri, "media", "stats-opener.mjs").fsPath],
 						});
 						if (asset !== undefined && await verifyStagedRuntimeAsset(asset)) preload = await planStatsPreload(binary, asset.path, { cwd: os.homedir(), run: runOmpCli });
-					} catch { deps.log("stats: browser-opener preload capability was not established"); }
+					} catch { deps.log.warn("stats: browser-opener preload capability was not established"); }
 				}
-				if (preload !== null) deps.log(`stats: browser-opener preload capability verified (${preload.carrier})`);
+				if (preload !== null) deps.log.info(`stats: browser-opener preload capability verified (${preload.carrier})`);
 				return await admitStatsLaunch(binary, os.homedir(), preload, async () => {
 					const start = await vscode.window.showInformationMessage("This OMP build opens the dashboard in your browser as well. Start it?", { modal: true }, "Start");
 					if (start !== "Start") return false;
-					deps.log("stats: user admitted this build's native one-time browser opening");
+					deps.log.info("stats: user admitted this build's native one-time browser opening");
 					return true;
 				});
 			},
@@ -66,10 +67,9 @@ export function registerStatsDashboard(context: vscode.ExtensionContext, deps: {
 					await promise;
 					const snapshot = await handle.snapshot();
 					if (binaryKey !== null && snapshot.data.includes("OMP_DESK_STATS_OPENER_UNCHANGED") && !snapshot.data.includes("OMP_DESK_STATS_OPENER_SUPPRESSED")) unchangedOpeners.add(binaryKey);
-					deps.log(snapshot.data.includes("OMP_DESK_STATS_OPENER_SUPPRESSED")
-						? "stats: the exact dashboard browser opener was suppressed"
-						: "stats: browser-opener suppression was not observed; native browser opening may have occurred");
-				} catch { deps.log("stats: browser-opener suppression could not be observed"); }
+					if (snapshot.data.includes("OMP_DESK_STATS_OPENER_SUPPRESSED")) deps.log.info("stats: the exact dashboard browser opener was suppressed");
+					else deps.log.warn("stats: browser-opener suppression was not observed; native browser opening may have occurred");
+				} catch { deps.log.warn("stats: browser-opener suppression could not be observed"); }
 			},
 			probe: probeStatsDashboard, now: Date.now,
 			wait: ms => {
@@ -95,7 +95,7 @@ export function registerStatsDashboard(context: vscode.ExtensionContext, deps: {
 			opening = Promise.resolve(vscode.window.withProgress({ location: vscode.ProgressLocation.Notification, title: "OMP Desk: Opening OMP Stats", cancellable: false }, open))
 				.then(() => undefined, (error: unknown) => {
 					const message = error instanceof Error ? error.message : "The Stats dashboard could not be opened. See OMP Desk output.";
-					deps.log(`stats: ${message}`);
+					deps.log.error(`stats: ${message}`);
 					void vscode.window.showErrorMessage(`OMP Desk: ${message}`);
 				}).finally(() => { opening = undefined; void vscode.commands.executeCommand("ompDesk.refreshProcesses"); });
 			return opening;

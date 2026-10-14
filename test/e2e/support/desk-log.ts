@@ -1,7 +1,8 @@
 /**
  * The OMP Desk output channel of every window of the profile, read from the log files VS Code keeps for it
- * (<data>/logs/<session>/window<N>/exthost/output_logging_*\/<n>-OMP Desk.log). Reading the files keeps the tests off
- * the Output panel; each window has its own extension host and its own file.
+ * (<data>/logs/<session>/window<N>/exthost/hmmvot.omp-desk/OMP Desk.log). The channel is a LogOutputChannel, which VS Code
+ * writes continuously, so the files are current without the Output panel ever being shown; each window has its own
+ * extension host and its own file.
  */
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";

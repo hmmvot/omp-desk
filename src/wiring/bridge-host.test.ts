@@ -23,6 +23,8 @@ import type { BridgeNativeBinding } from "../host/bridge-records.ts";
 import type { SessionIndex } from "../host/session-index.ts";
 import { RuntimeRecords } from "../runtime/runtime-record.ts";
 import type { ConversationRecord } from "../runtime/runtime-record.ts";
+import { recordingLogger } from "../shared/logger.ts";
+import type { LoggedLine } from "../shared/logger.ts";
 import type { BridgeHost, BridgeHostDeps, BridgeTab } from "./bridge-host.ts";
 
 // The module and the host modules it imports load the `vscode` specifier; map it before the first import.
@@ -196,7 +198,7 @@ function world(overrides: Partial<BridgeHostDeps<FakeTab>> = {}) {
 	};
 	state.index = { get: (tabId: string) => (state.rows.get(tabId) ?? null) as never };
 	const calls: string[] = [];
-	const logged: string[] = [];
+	const lines: LoggedLine[] = [];
 	const notes: { key: string; text: string }[] = [];
 	const requests: { editorId: string; documentId: string }[] = [];
 	const created: BridgeEditorEndpointOptions[] = [];
@@ -228,7 +230,7 @@ function world(overrides: Partial<BridgeHostDeps<FakeTab>> = {}) {
 			return { deserializeWebviewPanel: async () => {} };
 		},
 		handleRequest: (editorId, documentId) => { requests.push({ editorId, documentId }); },
-		log: message => { logged.push(message); },
+		log: recordingLogger(lines),
 		createEndpoint: options => {
 			const editorId = options.scope.editorId;
 			calls.push(`createEndpoint:${editorId}`);
@@ -245,7 +247,7 @@ function world(overrides: Partial<BridgeHostDeps<FakeTab>> = {}) {
 	const host: BridgeHost<FakeTab> = registerBridgeHost(deps);
 	/** The index the reconciliation reads: the rows the case set, and no committed slot binding. */
 	const index = { get: (tabId: string) => state.rows.get(tabId) ?? null, slotBinding: () => null } as unknown as SessionIndex;
-	return { state, host, deps, calls, logged, notes, requests, created, index };
+	return { state, host, deps, calls, get logged(): string[] { return lines.map(line => line.message); }, lines, notes, requests, created, index };
 }
 
 let contexts = 0;
@@ -432,7 +434,7 @@ describe("prepareDocument", () => {
 		w.state.tabs.set(EDITOR, newTab(EDITOR, { tabId: TAB }));
 		w.state.provided.set(EDITOR, null);
 		assert.equal(await w.host.prepareDocument(context0(), EDITOR), null);
-		assert.ok(w.logged.includes(`tab ${TAB}: the bridge listener could not bind (no listener)`));
+		assert.ok(w.lines.some(line => line.level === "warn" && line.message === `tab ${TAB}: the bridge listener could not bind (no listener)`));
 		assert.equal(w.state.endpoints.size, 0, "an endpoint that did not bind is not kept");
 		const endpoint = new FakeEndpoint();
 		endpoint.beginDocumentFails = true;

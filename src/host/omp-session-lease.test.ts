@@ -19,6 +19,7 @@ import {
 	type LeaseProbe,
 	type LeaseState,
 } from "./omp-session-lease.ts";
+import { recordingLogger, silentLogger, type LoggedLine } from "../shared/logger.ts";
 import { windowsPowerShellEnvironment, windowsPowerShellExecutable } from "./windows-powershell.ts";
 
 const HELPER = fileURLToPath(new URL("./session-lease-probe.ps1", import.meta.url));
@@ -146,27 +147,28 @@ describe("powershellLeaseProbe with a stand-in helper", () => {
 	});
 
 	it("fails the probe, with a log line, when the staged helper changed", async () => {
-		const logs: string[] = [];
+		const logs: LoggedLine[] = [];
 		const probe = powershellLeaseProbe({
 			helper: async () => ({ path: HELPER, sha256: "0".repeat(64) }),
 			launch: () => { throw new Error("must not start"); },
-			log: line => logs.push(line),
+			log: recordingLogger(logs),
 		});
 		assert.equal(await probe(names), null);
 		assert.equal(logs.length, 1);
-		assert.match(logs[0]!, /missing or changed/);
+		assert.equal(logs[0]!.level, "warn");
+		assert.match(logs[0]!.message, /missing or changed/);
 	});
 
 	it("fails the probe when the helper exits with a malformed report, crashes or times out", async () => {
-		const logs: string[] = [];
+		const logs: LoggedLine[] = [];
 		const run = (script: string, timeoutMs?: number) =>
-			powershellLeaseProbe({ helper: stagedHelper, launch: standIn(script), log: line => logs.push(line), ...(timeoutMs === undefined ? {} : { timeoutMs }) })(names);
+			powershellLeaseProbe({ helper: stagedHelper, launch: standIn(script), log: recordingLogger(logs), ...(timeoutMs === undefined ? {} : { timeoutMs }) })(names);
 		assert.equal(await run(`console.log("!ERROR bad-name"); process.exit(2);`), null);
 		assert.equal(await run(`process.exit(1);`), null);
 		// A helper that never answers: the probe bounds it with its own timeout (a real, short one by design).
 		assert.equal(await run(`require("node:net").createServer().listen(0);`, 100), null);
 		assert.equal(logs.length, 3);
-		assert.match(logs[2]!, /timed out/);
+		assert.match(logs[2]!.message, /timed out/);
 	});
 });
 
@@ -175,7 +177,7 @@ describe("ExternalLeaseObserver", () => {
 	const files = new Map([["one.jsonl", "id-one"], ["two.jsonl", "id-two"], ["three.jsonl", "id-three"]]);
 	const nameOf = (id: string) => sessionLeaseMutexName(id, OWNERS)!;
 
-	function observer(held: ReadonlySet<string>, overrides: { probe?: LeaseProbe; now?: () => number; ownersDir?: () => string | null; logs?: string[] } = {}) {
+	function observer(held: ReadonlySet<string>, overrides: { probe?: LeaseProbe; now?: () => number; ownersDir?: () => string | null; logs?: LoggedLine[] } = {}) {
 		const calls: string[][] = [];
 		const probe: LeaseProbe = overrides.probe ?? (async requested => {
 			calls.push([...requested]);
@@ -189,7 +191,7 @@ describe("ExternalLeaseObserver", () => {
 			knownFiles: () => [...files.keys()],
 			now: overrides.now ?? (() => clock),
 			ttlMs: 2_000,
-			log: line => overrides.logs?.push(line),
+			log: overrides.logs === undefined ? silentLogger : recordingLogger(overrides.logs),
 		});
 		return { instance, calls, advance: (ms: number) => { clock += ms; } };
 	}
@@ -215,13 +217,14 @@ describe("ExternalLeaseObserver", () => {
 	});
 
 	it("answers unknown, never absent, when the probe fails, and logs it once", async () => {
-		const logs: string[] = [];
+		const logs: LoggedLine[] = [];
 		const { instance, advance } = observer(new Set(), { probe: async () => null, logs });
 		assert.equal(await instance.holds("one.jsonl"), null);
 		advance(5_000);
 		assert.equal(await instance.holds("two.jsonl"), null);
 		assert.equal(logs.length, 1);
-		assert.match(logs[0]!, /unavailable/);
+		assert.equal(logs[0]!.level, "warn");
+		assert.match(logs[0]!.message, /unavailable/);
 	});
 
 	it("does not start another probe for each observation while the last one failed, and tries again after the backoff", async () => {
@@ -306,10 +309,10 @@ describe("ExternalLeaseObserver", () => {
 	});
 
 	it("treats a probe that throws as a failed probe", async () => {
-		const logs: string[] = [];
+		const logs: LoggedLine[] = [];
 		const { instance } = observer(new Set(), { probe: async () => { throw new Error("boom"); }, logs });
 		assert.equal(await instance.holds("one.jsonl"), null);
-		assert.match(logs.join("\n"), /boom/);
+		assert.match(logs.map(line => line.message).join("\n"), /boom/);
 	});
 });
 

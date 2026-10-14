@@ -23,6 +23,7 @@
  *   staging pass the next call may see fixed.
  */
 import { SELF_CHECK_EXTENDED_DEADLINE_MS } from "../broker/pty-self-check.ts";
+import type { Logger } from "../shared/logger.ts";
 import type { PtyRuntimeReadiness, ReusedPtyProof } from "./pty-runtime.ts";
 
 /** How long after a provisional admission the extended re-run starts. */
@@ -38,7 +39,7 @@ export interface PtyRuntimeProofInput {
 	/** One probe; `undefined` is the entry's default deadline. */
 	probe(deadlineMs: number | undefined): Promise<PtyRuntimeReadiness>;
 	/** Where state changes worth a log line go. */
-	readonly log?: (message: string) => void;
+	readonly log?: Logger;
 	/** Test seam; defaults to `Date.now`. */
 	readonly now?: () => number;
 	/** Test seam: runs `run` after `delayMs` and returns its cancel. Defaults to an unreferenced timer. */
@@ -94,7 +95,7 @@ export class PtyRuntimeProof {
 		const reused = this.proven?.reusedProof ?? null;
 		if (reused === null) return null;
 		this.proven = null;
-		this.input.log?.(`PTY runtime proof reused from ${reused.provedAt} withdrawn after a launch failed; the next launch runs the self-check`);
+		this.input.log?.warn(`PTY runtime proof reused from ${reused.provedAt} withdrawn after a launch failed; the next launch runs the self-check`);
 		return reused;
 	}
 
@@ -119,14 +120,14 @@ export class PtyRuntimeProof {
 			const readiness = await this.input.probe(undefined);
 			if (readiness.ready && readiness.proven) {
 				this.proven = readiness;
-				this.input.log?.(
+				this.input.log?.info(
 					readiness.reusedProof === undefined
 						? `PTY runtime proved itself: ${probeTiming(readiness, this.now() - started)}`
 						: `PTY runtime proof reused from ${readiness.reusedProof.provedAt}: ready in ${this.now() - started} ms`,
 				);
 			} else if (readiness.ready) {
 				this.provisional = readiness;
-				this.input.log?.(`PTY runtime admitted unproven after ${this.now() - started} ms: ${readiness.reason ?? "the self-check was inconclusive"}`);
+				this.input.log?.warn(`PTY runtime admitted unproven after ${this.now() - started} ms: ${readiness.reason ?? "the self-check was inconclusive"}`);
 				this.reprobes = 0;
 				this.scheduleReprobe();
 			}
@@ -147,7 +148,7 @@ export class PtyRuntimeProof {
 		try {
 			readiness = await this.input.probe(SELF_CHECK_EXTENDED_DEADLINE_MS);
 		} catch (error) {
-			this.input.log?.(`PTY runtime re-check could not run: ${error instanceof Error ? error.message : String(error)}`);
+			this.input.log?.warn(`PTY runtime re-check could not run: ${error instanceof Error ? error.message : String(error)}`);
 			if (this.reprobes < PTY_REPROBE_ATTEMPTS) {
 				this.scheduleReprobe();
 			} else {
@@ -159,7 +160,7 @@ export class PtyRuntimeProof {
 		if (readiness.ready && readiness.proven) {
 			this.proven = readiness;
 			this.provisional = null;
-			this.input.log?.(
+			this.input.log?.info(
 				readiness.reusedProof === undefined
 					? `PTY runtime proved itself on the repeated self-check: ${probeTiming(readiness, this.now() - started)}`
 					: `PTY runtime proof reused from ${readiness.reusedProof.provedAt}: ready in ${this.now() - started} ms`,
@@ -168,7 +169,7 @@ export class PtyRuntimeProof {
 			// Cannot happen with the extended deadline (the host refuses a late answer to it),
 			// but a probe that did not decide is not kept: the next launch probes afresh.
 			this.provisional = null;
-			this.input.log?.(`PTY runtime still unproven after the repeated self-check: ${readiness.reason ?? "inconclusive"}`);
+			this.input.log?.warn(`PTY runtime still unproven after the repeated self-check: ${readiness.reason ?? "inconclusive"}`);
 		} else {
 			const refused: PtyRuntimeReadiness = {
 				...readiness,
@@ -176,7 +177,7 @@ export class PtyRuntimeProof {
 			};
 			this.provisional = null;
 			this.fault = { readiness: refused, until: this.now() + PTY_FAULT_HOLD_MS };
-			this.input.log?.(`PTY runtime refused: ${refused.reason}`);
+			this.input.log?.error(`PTY runtime refused: ${refused.reason}`);
 		}
 	}
 }

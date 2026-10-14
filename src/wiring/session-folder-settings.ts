@@ -79,23 +79,23 @@ async function carryAgentRootKey(port: LegacySettingsPort): Promise<MigrationOut
 			const current = valueAt(port.inspect(RUN_AT_ROOT_KEY), "user");
 			if (current === undefined) {
 				await port.update(RUN_AT_ROOT_KEY, false, "user");
-				port.log(`settings: ${where}: moved`);
+				port.log.info(`settings: ${where}: moved`);
 				outcome = "moved";
 			} else if (current === false) {
-				port.log(`settings: ${where}: the new key already holds this value; the old key removed`);
+				port.log.info(`settings: ${where}: the new key already holds this value; the old key removed`);
 				outcome = "already-set";
 			} else {
-				port.log(`settings: ${where}: the new key already holds ${JSON.stringify(current)}; the old value false was dropped`);
+				port.log.info(`settings: ${where}: the new key already holds ${JSON.stringify(current)}; the old value false was dropped`);
 				outcome = "conflict-dropped";
 			}
 		} else {
-			port.log(`settings: ${where}: dropped; ${JSON.stringify(old)} is what sessions do by default now (they run at the repository root)`);
+			port.log.info(`settings: ${where}: dropped; ${JSON.stringify(old)} is what sessions do by default now (they run at the repository root)`);
 			outcome = "dropped";
 		}
 		await port.update(OLD_AGENT_ROOT_KEY, undefined, "user");
 		return { key: OLD_AGENT_ROOT_KEY, layer: "user", outcome };
 	} catch (error) {
-		port.log(`settings: ${where}: left, the step failed: ${describe(error)}`);
+		port.log.warn(`settings: ${where}: left, the step failed: ${describe(error)}`);
 		return { key: OLD_AGENT_ROOT_KEY, layer: "user", outcome: "left" };
 	}
 }
@@ -108,15 +108,15 @@ async function dropAncestorKey(port: LegacySettingsPort, layer: SettingsLayer): 
 		if (layer === "workspace") {
 			const file = port.workspaceSettingsFile();
 			if (file !== null && !(await port.isWritable(file))) {
-				port.log(`settings: ${where}: left; the file is read-only`);
+				port.log.warn(`settings: ${where}: left; the file is read-only`);
 				return { key: OLD_ANCESTOR_KEY, layer, outcome: "left" };
 			}
 		}
 		await port.update(OLD_ANCESTOR_KEY, undefined, layer);
-		port.log(`settings: ${where}: dropped (it held ${JSON.stringify(old)}); the Settings, Models and Agents editors now use the folder sessions run in`);
+		port.log.info(`settings: ${where}: dropped (it held ${JSON.stringify(old)}); the Settings, Models and Agents editors now use the folder sessions run in`);
 		return { key: OLD_ANCESTOR_KEY, layer, outcome: "dropped" };
 	} catch (error) {
-		port.log(`settings: ${where}: left, the step failed: ${describe(error)}`);
+		port.log.warn(`settings: ${where}: left, the step failed: ${describe(error)}`);
 		return { key: OLD_ANCESTOR_KEY, layer, outcome: "left" };
 	}
 }

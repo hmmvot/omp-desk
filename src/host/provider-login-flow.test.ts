@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { recordingLogger, type LoggedLine } from "../shared/logger.ts";
 import { FakeOmp, fakeSpawner, providerPeer } from "./provider-login-fake-omp.ts";
 import type { FakeFrame } from "./provider-login-fake-omp.ts";
 import { API_KEY_HINT, runProviderLogin, runProviderLogout } from "./provider-login-flow.ts";
@@ -83,7 +84,7 @@ interface Harness {
 	readonly ui: FakeUi;
 	/** The browser settle timer: `fire()` runs it now. */
 	readonly settle: { fire(): void; readonly pending: () => boolean };
-	readonly logs: string[];
+	readonly logs: LoggedLine[];
 	readonly terminals: (string | undefined)[];
 	readonly changed: { count: number };
 	readonly window: AbortController;
@@ -92,7 +93,7 @@ interface Harness {
 }
 
 function harness(make: () => FakeOmp, ui = new FakeUi()): Harness {
-	const logs: string[] = [];
+	const logs: LoggedLine[] = [];
 	const terminals: (string | undefined)[] = [];
 	const changed = { count: 0 };
 	const window = new AbortController();
@@ -104,7 +105,7 @@ function harness(make: () => FakeOmp, ui = new FakeUi()): Harness {
 		start: signal => startLoginSession({ scope: { executable: { command: "omp", prefixArgs: [] }, env: {}, cwd: "D:\\work" }, spawner, signal, modelSelectors: ["gpt"] }),
 		openTerminal: providerId => { terminals.push(providerId); },
 		credentialsChanged: () => { changed.count++; },
-		log: message => logs.push(message),
+		log: recordingLogger(logs),
 		signal: window.signal,
 		timers: { setTimeout: callback => { timer = callback; return 1; }, clearTimeout: () => { timer = null; } },
 	};
@@ -248,7 +249,7 @@ describe("a sign-in", () => {
 		assert.ok(run.ui.notices[0]!.message.endsWith(`${API_KEY_HINT}.`));
 		assert.deepEqual(run.terminals, ["openrouter"]);
 		assert.equal(run.changed.count, 0);
-		assert.ok(![...run.logs, ...run.ui.shown].some(line => line.includes("DeepSeek") || line.includes("deepseek")), "nothing OMP's prompt said is logged or shown");
+		assert.ok(![...run.logs.map(line => line.message), ...run.ui.shown].some(line => line.includes("DeepSeek") || line.includes("deepseek")), "nothing OMP's prompt said is logged or shown");
 	});
 
 	it("never lets the pasted code, the sign-in address or OMP's text into the log, a notice or a progress line", async () => {
@@ -258,10 +259,10 @@ describe("a sign-in", () => {
 		assert.equal(await runProviderLogin(run.deps), "failed");
 		const peer = run.spawned[0]!;
 		assert.ok(peer.stdinText.includes(SECRET), "the code went to OMP, which is its only destination");
-		const everything = [...run.logs, ...run.ui.notices.map(notice => notice.message), ...run.ui.progressReports, ...run.ui.progressTitles].join("\n");
+		const everything = [...run.logs.map(line => line.message), ...run.ui.notices.map(notice => notice.message), ...run.ui.progressReports, ...run.ui.progressTitles].join("\n");
 		for (const forbidden of [SECRET, "STATE-TOKEN", "CHALLENGE", "oauth/authorize", "41999", "exchange failed"]) assert.ok(!everything.includes(forbidden), `${forbidden} reached a diagnostic or notice`);
-		assert.ok(run.logs.some(line => line.includes("https://claude.ai")), "the origin alone is logged");
-		assert.ok(run.logs.every(line => !line.includes("?") || !line.includes("http")));
+		assert.ok(run.logs.some(line => line.level === "info" && line.message.includes("https://claude.ai")), "the origin alone is logged");
+		assert.ok(run.logs.every(line => !line.message.includes("?") || !line.message.includes("http")));
 	});
 
 	it("keeps the secret out of the log on success as well", async () => {
@@ -272,7 +273,7 @@ describe("a sign-in", () => {
 		const peer = run.spawned[0]!;
 		peer.reply(peer.written.find(frame => frame.type === "login")!, true, { data: { providerId: "anthropic" } });
 		await flow;
-		assert.ok(![...run.logs, ...run.ui.shown].some(line => line.includes(SECRET)));
+		assert.ok(![...run.logs.map(line => line.message), ...run.ui.shown].some(line => line.includes(SECRET)));
 	});
 
 	it("cancels mid-flow: Cancel on the progress ends the process, resolves cancelled and reports no failure", async () => {
@@ -289,7 +290,7 @@ describe("a sign-in", () => {
 		assert.deepEqual(peer.uiResponses(), [], "the pending prompt is not answered");
 		assert.equal(run.changed.count, 1, "OMP stores a credential before it refreshes online: the models are re-read");
 		assert.deepEqual(run.ui.notices, []);
-		assert.ok(run.logs.some(line => line.endsWith("was cancelled")));
+		assert.ok(run.logs.some(line => line.level === "info" && line.message.endsWith("was cancelled")));
 	});
 
 	it("cancels when the user dismisses the masked prompt", async () => {
@@ -401,7 +402,7 @@ describe("logout", () => {
 		assert.deepEqual({ providerId: logout.providerId, credentialId: logout.credentialId }, { providerId: "anthropic", credentialId: 9 });
 		assert.equal(run.changed.count, 1);
 		assert.match(run.ui.notices.at(-1)!.message, /Logged out of Anthropic .* still signs in through env ANTHROPIC_API_KEY/);
-		assert.ok(![...run.logs].some(line => line.includes("example.test")), "an account label is never logged");
+		assert.ok(!run.logs.some(line => line.message.includes("example.test")), "an account label is never logged");
 		assertClosedGracefully(peer);
 	});
 

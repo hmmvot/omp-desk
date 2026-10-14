@@ -10,6 +10,10 @@ import { describe, it } from "node:test";
 
 import { LEGACY_SETTING_NAMES, SETTING_NAME_LISTS, migrateLegacySettings } from "./legacy-settings.ts";
 import type { LayerValues, LegacySettingsPort, SettingsLayer } from "./legacy-settings.ts";
+import type { LoggedLine } from "../shared/logger.ts";
+import { recordingLogger } from "../shared/logger.ts";
+
+const texts = (lines: readonly LoggedLine[]): string[] => lines.map(line => line.message);
 
 const manifest = JSON.parse(await readFile(new URL("../../package.json", import.meta.url), "utf8")) as {
 	contributes: { configuration: { properties: Record<string, { scope?: string; included?: boolean; deprecationMessage?: string }> } };
@@ -56,8 +60,8 @@ function store(options: FakeOptions = {}): Store {
 	};
 }
 
-function window(shared: Store): { port: LegacySettingsPort; lines: string[]; checkedFiles: string[] } {
-	const lines: string[] = [];
+function window(shared: Store): { port: LegacySettingsPort; lines: LoggedLine[]; checkedFiles: string[] } {
+	const lines: LoggedLine[] = [];
 	const checkedFiles: string[] = [];
 	const layer = (name: SettingsLayer) => (name === "user" ? shared.user : shared.workspace);
 	const port: LegacySettingsPort = {
@@ -95,7 +99,7 @@ function window(shared: Store): { port: LegacySettingsPort; lines: string[]; che
 		},
 		delay: () => Promise.resolve(),
 		waits: { releaseMs: 500, graceMs: 50, graceStepMs: 5 },
-		log: line => lines.push(line),
+		log: recordingLogger(lines),
 	};
 	return { port, lines, checkedFiles };
 }
@@ -133,8 +137,8 @@ describe("the User layer", () => {
 		assert.equal(outcomes.length, 13);
 		assert.ok(outcomes.every(outcome => outcome.outcome === "moved" && outcome.layer === "user"));
 		assert.equal(lines.length, 13);
-		assert.ok(lines.includes("settings: omp.sessionsGrouping → ompDesk.sessionsGrouping (user settings): moved"), "the Sessions layout setting is mapped, not dropped");
-		assert.ok(lines.every(line => !line.includes("folders") && !line.includes("C:\\bin")), "a moved value is not logged");
+		assert.ok(texts(lines).includes("settings: omp.sessionsGrouping → ompDesk.sessionsGrouping (user settings): moved"), "the Sessions layout setting is mapped, not dropped");
+		assert.ok(lines.every(line => !line.message.includes("folders") && !line.message.includes("C:\\bin")), "a moved value is not logged");
 	});
 
 	it("writes the new key before it removes the old one", async () => {
@@ -173,7 +177,7 @@ describe("the User layer", () => {
 		assert.equal(shared.user.get("ompDesk.toolCallDetail"), "overview");
 		assert.equal(shared.user.has("omp.toolCallDetail"), false);
 		assert.deepEqual(outcomes, [{ key: "omp.toolCallDetail", layer: "user", outcome: "conflict-dropped" }]);
-		assert.deepEqual(lines, ['settings: omp.toolCallDetail → ompDesk.toolCallDetail (user settings): the new key already holds "overview"; the old value "detailed" was dropped']);
+		assert.deepEqual(lines, [{ level: "info", message: 'settings: omp.toolCallDetail → ompDesk.toolCallDetail (user settings): the new key already holds "overview"; the old value "detailed" was dropped' }]);
 	});
 
 	it("only removes the old key when the new one already holds the same value (an interrupted earlier pass)", async () => {
@@ -194,7 +198,7 @@ describe("the User layer", () => {
 		assert.equal(shared.user.has("ompDesk.chatColumn"), false);
 		assert.equal(shared.user.get("ompDesk.linkReminder"), true, "the next key still moves");
 		assert.equal(lines.length, 2);
-		assert.ok(lines.some(line => /^settings: omp\.chatColumn → ompDesk\.chatColumn \(user settings\): left, the step failed: Error while writing to User Settings/.test(line)), lines.join("\n"));
+		assert.ok(lines.some(line => line.level === "warn" && /^settings: omp\.chatColumn → ompDesk\.chatColumn \(user settings\): left, the step failed: Error while writing to User Settings/.test(line.message)), texts(lines).join("\n"));
 	});
 
 	it("does not remove the old value when only the removal fails, and finishes it on the next pass", async () => {
@@ -223,7 +227,7 @@ describe("the User layer", () => {
 		port.inspect = key => { if (key === "omp.chatColumn") throw new Error("boom"); return inspect(key); };
 		await migrateLegacySettings(port);
 		assert.equal(shared.user.get("ompDesk.linkReminder"), true);
-		assert.ok(lines.some(line => line.includes("omp.chatColumn") && line.includes("boom")));
+		assert.ok(lines.some(line => line.level === "warn" && line.message.includes("omp.chatColumn") && line.message.includes("boom")));
 	});
 });
 
@@ -240,7 +244,7 @@ describe("the Workspace layer", () => {
 		assert.deepEqual(outcomes.map(outcome => `${outcome.key}:${outcome.layer}:${outcome.outcome}`).sort(), [
 			"omp.chatColumn:user:moved", "omp.chatColumn:workspace:moved", "omp.linkReminder:workspace:moved",
 		]);
-		assert.ok(lines.includes("settings: omp.linkReminder → ompDesk.linkReminder (workspace settings): moved"));
+		assert.ok(texts(lines).includes("settings: omp.linkReminder → ompDesk.linkReminder (workspace settings): moved"));
 		assert.deepEqual(checkedFiles, ["C:\\work\\.vscode\\settings.json", "C:\\work\\.vscode\\settings.json"]);
 	});
 
@@ -252,7 +256,7 @@ describe("the Workspace layer", () => {
 		assert.deepEqual(shared.writes, []);
 		assert.equal(shared.workspace.get("omp.toolCallDetail"), "detailed");
 		assert.equal(lines.length, 2);
-		assert.match(lines[0] ?? "", /omp\.toolCallDetail → ompDesk\.toolCallDetail \(workspace settings\): left; this setting is read from user settings only/);
+		assert.match(lines[0]?.message ?? "", /omp\.toolCallDetail → ompDesk\.toolCallDetail \(workspace settings\): left; this setting is read from user settings only/);
 	});
 
 	it("does not write a read-only workspace settings file and keeps the old value", async () => {
@@ -263,7 +267,7 @@ describe("the Workspace layer", () => {
 		assert.equal(shared.workspace.get("omp.chatColumn"), false);
 		assert.equal(shared.workspace.has("ompDesk.chatColumn"), false);
 		assert.deepEqual(outcomes.filter(outcome => outcome.layer === "workspace"), [{ key: "omp.chatColumn", layer: "workspace", outcome: "left" }]);
-		assert.ok(lines.includes("settings: omp.chatColumn → ompDesk.chatColumn (workspace settings): left; the file is read-only"));
+		assert.ok(lines.some(line => line.level === "warn" && line.message === "settings: omp.chatColumn → ompDesk.chatColumn (workspace settings): left; the file is read-only"));
 	});
 
 	it("logs and keeps the old value when VS Code refuses the write (a lock, a permission the attribute does not show)", async () => {
@@ -272,7 +276,7 @@ describe("the Workspace layer", () => {
 		await migrateLegacySettings(port);
 		assert.equal(shared.workspace.get("omp.chatColumn"), false);
 		assert.equal(shared.workspace.has("ompDesk.chatColumn"), false);
-		assert.match(lines[0] ?? "", /\(workspace settings\): left, the step failed: Unable to write file \(EPERM\)/);
+		assert.match(lines[0]?.message ?? "", /\(workspace settings\): left, the step failed: Unable to write file \(EPERM\)/);
 	});
 
 	it("asks no file when the workspace has no settings file on disk, and still moves the value", async () => {
@@ -303,7 +307,7 @@ describe("several windows of one profile activating together", () => {
 		const windows = [1, 2, 3].map(() => window(shared));
 		await Promise.all(windows.map(({ port }) => migrateLegacySettings(port)));
 		assert.equal(shared.writes.filter(write => write.layer === "user").length, 26);
-		const waited = windows.filter(({ lines }) => lines.some(line => line.includes("another window is moving the user settings")));
+		const waited = windows.filter(({ lines }) => lines.some(line => line.message.includes("another window is moving the user settings")));
 		assert.equal(waited.length, 2);
 		assert.equal(shared.claimed, false, "the claim is released");
 		for (const [key, value] of Object.entries(PROFILE_VALUES)) assert.equal(shared.user.get(`ompDesk.${key.slice(4)}`), value, key);
@@ -326,7 +330,7 @@ describe("several windows of one profile activating together", () => {
 		const { port, lines } = window(shared);
 		await migrateLegacySettings(port);
 		assert.equal(shared.user.get("omp.chatColumn"), false);
-		assert.ok(lines.some(line => line.includes("still running after")), lines.join("\n"));
+		assert.ok(lines.some(line => line.level === "warn" && line.message.includes("still running after")), texts(lines).join("\n"));
 		assert.equal(shared.workspace.get("ompDesk.linkReminder"), true, "the window's own workspace layer does not wait for another window");
 	});
 });
@@ -377,7 +381,7 @@ describe("the lists of setting names", () => {
 		assert.deepEqual(outcomes.filter(outcome => outcome.outcome === "listed").map(outcome => outcome.key), ["settingsSync.ignoredSettings", "workbench.settings.applyToAllProfiles"]);
 		const listWrites = shared.writes.map(write => write.key);
 		assert.ok(listWrites.indexOf("workbench.settings.applyToAllProfiles") < listWrites.indexOf("ompDesk.executablePath"), "the lists are written before the first value moves");
-		assert.ok(lines.some(line => line.startsWith("settings: settingsSync.ignoredSettings: added ompDesk.executablePath")));
+		assert.ok(lines.some(line => line.message.startsWith("settings: settingsSync.ignoredSettings: added ompDesk.executablePath")));
 		assert.equal(shared.user.get("ompDesk.executablePath"), "C:\\bin\\omp.exe");
 	});
 
@@ -400,6 +404,6 @@ describe("a key another extension contributes under omp.", () => {
 		assert.equal(shared.user.has("ompDesk.executablePath"), false);
 		assert.equal(shared.user.get("ompDesk.chatColumn"), false, "our own key still moves");
 		assert.deepEqual(shared.user.get("settingsSync.ignoredSettings"), ["omp.executablePath", "omp.chatColumn", "ompDesk.chatColumn"]);
-		assert.ok(lines.includes("settings: omp.executablePath → ompDesk.executablePath (user settings): left; another extension contributes omp.executablePath"));
+		assert.ok(texts(lines).includes("settings: omp.executablePath → ompDesk.executablePath (user settings): left; another extension contributes omp.executablePath"));
 	});
 });

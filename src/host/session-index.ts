@@ -15,6 +15,7 @@
 import { randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
 import * as path from "node:path";
+import type { Logger } from "../shared/logger.ts";
 import { FILE_OPERATION_BACKOFF_MS, retryFileOperation } from "./atomic-file.ts";
 import { IdentityTurns, RESTORE_CONCURRENCY, RestoreStepTimer, mapBounded } from "./session-restore-trace.ts";
 import type { IdentityTurn, OmpHostStepTimings } from "./session-restore-trace.ts";
@@ -498,7 +499,7 @@ export interface SessionIndexOptions {
 	/** Clock injection for tests; defaults to the system clock. */
 	readonly now?: () => Date;
 	/** Technical failure details for the extension's Output channel, separate from user-facing status. */
-	readonly log?: (message: string) => void;
+	readonly log?: Logger;
 }
 
 export interface TrackSessionInput {
@@ -613,7 +614,7 @@ export class SessionIndex {
 	readonly #localStore: SessionIndexStore;
 	readonly #claimStorageDir: string;
 	readonly #now: () => Date;
-	readonly #log: ((message: string) => void) | undefined;
+	readonly #log: Logger | undefined;
 	/**
 	 * This window's live holder lease for every claim it takes. Minted once per
 	 * index (one extension host), never persisted: two windows of one workspace
@@ -1194,7 +1195,7 @@ export class SessionIndex {
 				turn.release();
 			}
 			const kind = outcome.status === "conflict" || outcome.status === "failed" ? `:${outcome.kind}` : "";
-			this.#log?.(`window timing: restore tab ${tabId} ${timer.finish(`${outcome.status}${kind}`)}`);
+			this.#log?.debug(`window timing: restore tab ${tabId} ${timer.finish(`${outcome.status}${kind}`)}`);
 			return outcome;
 		});
 		// The report is folded in cohort order, never in completion order.
@@ -1347,7 +1348,7 @@ export class SessionIndex {
 			let claim: SessionClaim;
 			try { claim = await this.#adoptClaim(to, target); }
 			catch (error) {
-				this.#log?.(`native destination claim failed: ${describeError(error)}`);
+				this.#log?.error(`native destination claim failed: ${describeError(error)}`);
 				return { status: "refused", kind: "unavailable", detail: "This conversation could not be opened. Refresh Sessions and try again." };
 			}
 			const beforeFrom = { ...from };
@@ -2083,7 +2084,7 @@ export class SessionIndex {
 			const claim = live?.claim ?? (await this.#adoptClaim(entry, target));
 			await claim.release();
 		} catch (error) {
-			this.#log?.(`session close claim release failed: ${describeError(error)}`);
+			this.#log?.error(`session close claim release failed: ${describeError(error)}`);
 			const detail = "This session could not finish closing. Refresh Sessions and try again.";
 			await this.#touch(entry, entry.sessionFile === null ? "draft" : "saved", detail);
 			await this.#persist();
@@ -2914,7 +2915,7 @@ export class SessionIndex {
 			// layer; the identity is free either way. Any other failure leaves a
 			// claim behind and is reported instead of hidden.
 			if (error instanceof ClaimOwnershipError) return null;
-			this.#log?.(`session claim release failed: ${describeError(error)}`);
+			this.#log?.error(`session claim release failed: ${describeError(error)}`);
 			return "This session could not finish closing. Refresh Sessions and try again.";
 		}
 		return null;

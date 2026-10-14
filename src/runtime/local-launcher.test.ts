@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
+import { silentLogger } from "../shared/logger.ts";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { after, before, describe, it } from "node:test";
 import { build } from "esbuild";
@@ -90,7 +91,7 @@ function fixture(options: { precheck?: boolean; launch?: "running" | "not-starte
 		native: { servesFile: async () => { events.push("launchPrecheck"); return options.precheck === true; } },
 		exit: { brokerLost: async () => { events.push("brokerLost"); } },
 		diagnosticsLabel: cwd => cwd,
-		log: () => undefined,
+		log: silentLogger,
 	};
 	const launcher = new LocalLauncher(deps);
 	return { launcher, events, recorded, forgotten, runtime, deps };

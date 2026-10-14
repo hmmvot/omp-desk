@@ -9,6 +9,7 @@ import { runSettingsWorker } from "../host/omp-settings-worker";
 import { resolveBunRuntime, resolveOmpBinary, resolveOmpPackageRoot } from "../host/native-terminal";
 import { configuredOmpPath } from "../host/omp-vscode";
 import { OMP_PATH_SETTING } from "../shared/omp-unavailable";
+import type { Logger } from "../shared/logger.ts";
 import { stageRuntimeAssets, verifyStagedRuntimeAsset } from "../host/runtime-assets";
 import type { InventoryTreeItem } from "../views/inventory-tree.ts";
 import type { InventoryScope, ViewKind } from "../host/inventory/inventory-model.ts";
@@ -18,7 +19,7 @@ import type { SessionToolsTarget } from "../host/session-tools.ts";
 /** What the extension supplies: the editor the views describe (editor recency, not row selection) and a log. */
 export interface InventoryViewsDeps {
 	target(): SessionToolsTarget | null;
-	log(message: string): void;
+	log: Logger;
 }
 /** The calls `extension.ts` makes when the active editor or its session changes. */
 export interface InventoryHandle extends vscode.Disposable {
@@ -60,10 +61,10 @@ export function registerInventoryViews(context: vscode.ExtensionContext, deps: I
 				const [asset] = await stageRuntimeAssets({ storageDir: storage, sourcePaths: [vscode.Uri.joinPath(context.extensionUri, "out", "inventory-worker.mjs").fsPath] });
 				if (asset === undefined || !(await verifyStagedRuntimeAsset(asset))) return { unavailable: "The inventory worker is missing from this extension build or its staged copy changed." };
 				const total = Date.now() - started;
-				if (total > 250) deps.log(`inventory: environment took ${total} ms (staging and verifying the worker ${Date.now() - verifyStarted} ms)`);
+				if (total > 250) deps.log.debug(`inventory: environment took ${total} ms (staging and verifying the worker ${Date.now() - verifyStarted} ms)`);
 				return { bun: location.bun, packageRoot: location.packageRoot, helperPath: asset.path };
 			} catch (error) {
-				deps.log(`inventory: environment unavailable: ${error instanceof Error ? error.message : String(error)}`);
+				deps.log.warn(`inventory: environment unavailable: ${error instanceof Error ? error.message : String(error)}`);
 				return { unavailable: "The inventory worker could not be prepared." };
 			}
 		},
@@ -87,7 +88,7 @@ export function registerInventoryViews(context: vscode.ExtensionContext, deps: I
 			if (undo !== undefined) { void vscode.window.showInformationMessage(message, UNDO).then(choice => { if (choice === UNDO) undo(); }); return; }
 			void (level === "warning" ? vscode.window.showWarningMessage(message) : vscode.window.showInformationMessage(message));
 		},
-		log: message => deps.log(message),
+		log: deps.log,
 		delay: ms => sleep(ms),
 	});
 	const subscriptions: vscode.Disposable[] = [];

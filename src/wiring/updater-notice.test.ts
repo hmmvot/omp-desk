@@ -8,6 +8,8 @@ import { describe, it } from "node:test";
 
 import { announceUpdaterTerminations, parseUpdaterLog, UPDATER_NOTICE_MAX_AGE_MS } from "./updater-notice.ts";
 import type { BrokerDescriptor, UpdaterNoticePort } from "./updater-notice.ts";
+import type { LoggedLine } from "../shared/logger.ts";
+import { recordingLogger } from "../shared/logger.ts";
 
 const LOG = [
 	"Oct 13 23:02:54.344 INFO 7 processes still running: [180700, 158360, 120040, 17240], waiting...",
@@ -26,8 +28,8 @@ const LOG = [
 const STARTED = Date.UTC(2026, 9, 13, 21, 2, 54);
 const NAME = `vscode-inno-updater-${STARTED / 1000}.log`;
 
-function port(overrides: Partial<UpdaterNoticePort> & { logs?: Record<string, string>; descriptors?: BrokerDescriptor[] } = {}): UpdaterNoticePort & { lines: string[]; notices: string[]; marked: string[] } {
-	const lines: string[] = [];
+function port(overrides: Partial<UpdaterNoticePort> & { logs?: Record<string, string>; descriptors?: BrokerDescriptor[] } = {}): UpdaterNoticePort & { lines: LoggedLine[]; notices: string[]; marked: string[] } {
+	const lines: LoggedLine[] = [];
 	const notices: string[] = [];
 	const marked: string[] = [];
 	const logs = overrides.logs ?? { [NAME]: LOG };
@@ -42,7 +44,7 @@ function port(overrides: Partial<UpdaterNoticePort> & { logs?: Record<string, st
 		announced: () => null,
 		markAnnounced: async name => { marked.push(name); },
 		now: () => STARTED + 90_000,
-		log: line => lines.push(line),
+		log: recordingLogger(lines),
 		notify: message => notices.push(message),
 		...overrides,
 		lines, notices, marked,
@@ -64,7 +66,7 @@ describe("the notice", () => {
 		const p = port();
 		await announceUpdaterTerminations(p);
 		assert.equal(p.lines.length, 1);
-		assert.match(p.lines[0] ?? "", /terminated 4 Code\.exe processes at Oct 13 23:03:24, 2 of them background processes of this extension \(pids 158360, 17240\)/);
+		assert.match(p.lines[0]?.message ?? "", /terminated 4 Code\.exe processes at Oct 13 23:03:24, 2 of them background processes of this extension \(pids 158360, 17240\)/);
 		assert.equal(p.notices.length, 1);
 		assert.match(p.notices[0] ?? "", /the 2 processes of the sessions that were running at 23:03:24/);
 		assert.deepEqual(p.marked, [NAME]);
@@ -91,6 +93,6 @@ describe("the notice", () => {
 	it("never throws: an unreadable temp directory is one log line", async () => {
 		const p = port({ updaterLogNames: async () => { throw new Error("EPERM"); } });
 		await announceUpdaterTerminations(p);
-		assert.deepEqual(p.lines, ["updater notice: not checked: EPERM"]);
+		assert.deepEqual(p.lines, [{ level: "warn", message: "updater notice: not checked: EPERM" }]);
 	});
 });

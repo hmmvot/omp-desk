@@ -145,7 +145,7 @@ export interface RpcLaunchRequest {
 }
 
 export type RpcLaunchOutcome =
-	| { readonly state: "running"; readonly reason: string; readonly runtime: RpcHostRuntime }
+	| { readonly state: "running"; readonly reason: string; readonly runtime: RpcHostRuntime; readonly timings: Readonly<Record<string, number>> }
 	| { readonly state: "not-started" | "unconfirmed"; readonly reason: string; readonly runtime: null };
 
 async function isEnterableDirectory(directory: string): Promise<boolean> {
@@ -235,7 +235,9 @@ export async function launchRpcHost(request: RpcLaunchRequest, client: PtyBroker
 		}
 	}
 
+	const controlPlanStartedAt = Date.now();
 	const controlPlan = await planControlLaunch(binary, request.control);
+	const controlPlanMs = Date.now() - controlPlanStartedAt;
 	const spec = rpcOmpLaunchSpec({
 		binary,
 		control: request.control,
@@ -265,6 +267,7 @@ export async function launchRpcHost(request: RpcLaunchRequest, client: PtyBroker
 		};
 	}
 	const handle = launched.handle;
+	const identityStartedAt = Date.now();
 	await handle.awaitChildIdentity(CHILD_IDENTITY_TIMEOUT_MS);
 	const identity = recordedRpcIdentityOf(handle);
 	if (identity.childPid === null || !Number.isInteger(identity.childPid) || identity.childPid < 1) {
@@ -276,6 +279,7 @@ export async function launchRpcHost(request: RpcLaunchRequest, client: PtyBroker
 	}
 	return {
 		state: "running",
+		timings: { resolution: resolutionMs, "launcher probe": controlPlanMs, ...launched.timings, "child identity": Date.now() - identityStartedAt },
 		reason: `Chat host launched from ${binary.origin} under the PTY broker${controlPlan.log === null ? "" : `; ${controlPlan.log}`}.`,
 		runtime: {
 			kind: "chat",

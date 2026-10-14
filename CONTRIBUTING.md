@@ -41,7 +41,7 @@ Before opening a pull request, run `npm run typecheck`, `npm test` and `npm run 
    `code --user-data-dir <scratch-dir>\data --extensions-dir <scratch-dir>\ext --install-extension out\<file>.vsix`, then start VS Code with the same two flags.
 3. Open the **OMP Desk** view in the Activity Bar, add a folder and start a session.
 
-The extension writes a log to the **OMP Desk** channel of the Output panel and can print a diagnostics summary with **OMP Desk: Show Diagnostics**.
+The extension writes a log to the **OMP Desk** channel of the Output panel and can print a diagnostics summary with **OMP Desk: Show Diagnostics**. The channel is a VS Code log channel (`LogOutputChannel`): it adds its own time and level, writes to its file continuously (`<logs>/<session>/window<N>/exthost/hmmvot.omp-desk/OMP Desk.log`, whether or not the Output panel is open) and shows Info and above by default. Code logs through the `Logger` interface of `src/shared/logger.ts` (`log.error`, `log.warn`, `log.info`, `log.debug`, `log.trace`; there is no plain-string log function): `error` for a failure that broke a user action, `warn` for degraded-but-continuing, `info` for lifecycle and summaries, `debug` for high-frequency diagnostics (per-spawn and per-tab timings, lookups, bridge and focus traces). Do not put a timestamp or the level in a message. To see Debug, use the gear in the Output panel's toolbar or **Developer: Set Log Level…** → **OMP Desk**, or start a test window with `-DeskLogLevel debug` (below). A test that reads log lines uses `recordingLogger` (`LoggedLine` carries the level) or `silentLogger`.
 
 ### Test environments with their own OMP state
 
@@ -57,6 +57,8 @@ The window never appears on your screen and cannot take the foreground or keyboa
 Each `-Name` keeps VS Code data, extensions and an OMP directory under `%LOCALAPPDATA%\omp-desk-test\<name>`. The script points OMP's default profile there with `PI_CODING_AGENT_DIR`. It is the default profile that OMP Desk launches sessions in; `OMP_PROFILE` would not work, because Desk always passes an explicit `--profile`.
 
 The launched VS Code also does not inherit the provider API keys from your environment, so it sees only what was logged in inside the test environment. Pass `-KeepProviderKeys` to keep them.
+
+`-DeskLogLevel <error|warn|info|debug|trace>` starts the window with that level for the OMP Desk log (VS Code's `--log=hmmvot.omp-desk:<level>`); without it the log is at VS Code's own level, Info. The end-to-end suite passes `debug`, because its scenarios read `window timing:` lines; `E2E_DESK_LOG_LEVEL=default` (or another level) in the environment of `npm run test:e2e` overrides that.
 
 A new environment starts with settings that skip VS Code's first-run prompts (workspace trust, AI sign-in, welcome page). Keep the root inside your user profile: OMP Desk refuses to start sessions when its storage sits under a folder other users can modify, such as a folder created directly under `C:\`. `-RemoteDebuggingPort` opens a DevTools port for automated UI checks. `-ResetVsCode` also clears VS Code and OMP Desk storage; stop the window first. Run `Get-Help ./scripts/test-vscode.ps1 -Detailed` for every option.
 

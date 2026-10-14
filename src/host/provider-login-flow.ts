@@ -7,6 +7,7 @@
  * error string OMP produced, a provider's address, a credential label, instructions, or anything the user
  * typed into a prompt (a pasted code can complete a login: ADR-0017).
  */
+import type { Logger } from "../shared/logger.ts";
 import { webLinkUrl } from "../shared/terminal-links.ts";
 import type { LoginProvider, LoginSession, LogoutAccount } from "./provider-login-rpc.ts";
 
@@ -43,7 +44,7 @@ export interface LoginFlowDeps {
 	openTerminal(providerId: string | undefined): void;
 	/** A credential was added or removed: re-read model availability. */
 	credentialsChanged(): void;
-	log(message: string): void;
+	readonly log: Logger;
 	/** Ends everything this flow has running (the window closing). */
 	readonly signal: AbortSignal;
 	/** Timers for the browser settle window; the real ones when omitted. */
@@ -111,7 +112,7 @@ async function startAndList(deps: LoginFlowDeps, title: string): Promise<Started
 	} catch {
 		(session as LoginSession | null)?.dispose();
 		if (cancelled.signal.aborted || deps.signal.aborted) return "cancelled";
-		deps.log("provider login: OMP could not be started or did not list its providers");
+		deps.log.error("provider login: OMP could not be started or did not list its providers");
 		offerTerminal(deps, "OMP could not be started for provider login.", TERMINAL_ACTION, undefined);
 		return null;
 	}
@@ -136,7 +137,7 @@ export async function runProviderLogin(deps: LoginFlowDeps, options: { readonly 
 		const choice = await deps.ui.pick(items, { title: "Log In to Provider", placeholder: `Sign in to an OAuth provider · ${API_KEY_HINT}` }, deps.signal);
 		if (choice === undefined) return "cancelled";
 		if (choice.kind === "terminal") {
-			deps.log("provider login: the user chose the terminal login");
+			deps.log.info("provider login: the user chose the terminal login");
 			deps.openTerminal(undefined);
 			return "terminal";
 		}
@@ -158,18 +159,18 @@ async function signIn(deps: LoginFlowDeps, session: LoginSession, provider: Logi
 		const abort = AbortSignal.any([signal, deps.signal]);
 		abort.addEventListener("abort", () => { userCancelled = true; session.dispose(); }, { once: true });
 		report("Starting the sign-in…");
-		deps.log(`provider login: signing in to ${id}`);
+		deps.log.info(`provider login: signing in to ${id}`);
 		const openBrowser = (): void => {
 			const pending = held.current;
 			if (pending === null) return;
 			held.current = null;
 			timers.clearTimeout(pending.timer);
 			const url = new URL(pending.address);
-			deps.log(`provider login: opening ${url.origin} in the external browser`);
+			deps.log.info(`provider login: opening ${url.origin} in the external browser`);
 			report(`Complete the sign-in in your browser (${url.host}).${pending.instructions === undefined ? "" : ` ${pending.instructions}`}`);
 			void deps.ui.openExternal(pending.address).then(async opened => {
 				if (opened || session.closed) return;
-				deps.log("provider login: the browser could not be opened");
+				deps.log.warn("provider login: the browser could not be opened");
 				const picked = await deps.ui.notify("warning", "The browser could not be opened. Copy the sign-in link and open it yourself.", ["Copy Link"]);
 				if (picked === "Copy Link") await deps.ui.copy(pending.address);
 			}).catch(() => undefined);
@@ -180,7 +181,7 @@ async function signIn(deps: LoginFlowDeps, session: LoginSession, provider: Logi
 					const address = webLinkUrl(request.url);
 					if (address === null) {
 						unsafeAddress = true;
-						deps.log("provider login: OMP asked to open an address that is not a web link; nothing was opened");
+						deps.log.warn("provider login: OMP asked to open an address that is not a web link; nothing was opened");
 						session.dispose();
 						return;
 					}
@@ -190,7 +191,7 @@ async function signIn(deps: LoginFlowDeps, session: LoginSession, provider: Logi
 				prompt: (prompt, promptSignal) => {
 					if (!PASTED_CODE_PROMPT.test(prompt.title)) {
 						declined = true;
-						deps.log(`provider login: ${id} asks for input other than a pasted sign-in code`);
+						deps.log.warn(`provider login: ${id} asks for input other than a pasted sign-in code`);
 						session.dispose();
 						return Promise.resolve(undefined);
 					}
@@ -214,25 +215,25 @@ async function signIn(deps: LoginFlowDeps, session: LoginSession, provider: Logi
 	// started can still have left one: the models are re-read unless OMP refused or the flow declined before anything was stored.
 	if (result.kind === "signed-in" || (!declined && (result.kind === "failed" || result.kind === "closed"))) deps.credentialsChanged();
 	if (result.kind === "signed-in") {
-		deps.log(`provider login: signed in to ${id}`);
+		deps.log.info(`provider login: signed in to ${id}`);
 		void deps.ui.notify("info", `Signed in to ${provider.name}.`, []);
 		return "signed-in";
 	}
 	if (declined || result.kind === "refused") {
-		deps.log(`provider login: ${id} needs input this window cannot take`);
+		deps.log.warn(`provider login: ${id} needs input this window cannot take`);
 		offerTerminal(deps, `${provider.name} cannot sign in from VS Code: it asks for something other than a browser sign-in. ${API_KEY_HINT}.`, TERMINAL_ACTION, provider.id);
 		return "declined";
 	}
 	if (result.kind === "unknown-provider") {
-		deps.log(`provider login: OMP does not know ${id}`);
+		deps.log.warn(`provider login: OMP does not know ${id}`);
 		void deps.ui.notify("warning", `OMP no longer lists ${provider.name}.`, []);
 		return "failed";
 	}
 	if (cancelled) {
-		deps.log(`provider login: ${id} was cancelled`);
+		deps.log.info(`provider login: ${id} was cancelled`);
 		return "cancelled";
 	}
-	deps.log(`provider login: signing in to ${id} did not complete`);
+	deps.log.error(`provider login: signing in to ${id} did not complete`);
 	const message = unsafeAddress
 		? `Signing in to ${provider.name} did not complete: OMP gave an address that is not a web link, so nothing was opened.`
 		: `Signing in to ${provider.name} did not complete.`;
@@ -266,7 +267,7 @@ export async function runProviderLogout(deps: LoginFlowDeps): Promise<"logged-ou
 				return await session.logoutAccounts(provider.id);
 			}, { cancellable: false });
 		} catch {
-			deps.log(`provider login: the stored accounts of ${id} could not be read`);
+			deps.log.error(`provider login: the stored accounts of ${id} could not be read`);
 			void deps.ui.notify("warning", `The stored accounts of ${provider.name} could not be read.`, []);
 			return "failed";
 		}
@@ -297,14 +298,14 @@ export async function runProviderLogout(deps: LoginFlowDeps): Promise<"logged-ou
 				report(`Removing the credential of ${provider.name}…`);
 				return await session.logout(provider.id, account.credentialId);
 			}, { cancellable: false });
-			deps.log(`provider login: removed a stored credential of ${id}`);
+			deps.log.info(`provider login: removed a stored credential of ${id}`);
 			deps.credentialsChanged();
 			// An account label is chosen by whoever owns the account: no markup characters in a notification.
 			const plain = (text: string): string => text.replace(/[\[\]]/g, " ");
 			void deps.ui.notify("info", `Logged out of ${provider.name} (${plain(who)}).${removed.remainingSource === undefined ? "" : ` ${provider.name} still signs in through ${plain(removed.remainingSource)}.`}`, []);
 			return "logged-out";
 		} catch {
-			deps.log(`provider login: a stored credential of ${id} could not be removed`);
+			deps.log.error(`provider login: a stored credential of ${id} could not be removed`);
 			// A timed-out or closed request may still have removed it.
 			deps.credentialsChanged();
 			void deps.ui.notify("warning", `The credential of ${provider.name} could not be removed.`, []);

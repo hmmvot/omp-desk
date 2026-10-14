@@ -12,6 +12,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { SELF_CHECK_EXTENDED_DEADLINE_MS } from "../broker/pty-self-check.ts";
+import { recordingLogger, type LoggedLine } from "../shared/logger.ts";
 import { PTY_FAULT_HOLD_MS, PTY_REPROBE_DELAY_MS, PtyRuntimeProof } from "./pty-runtime-proof.ts";
 import type { PtyRuntimeReadiness } from "./pty-runtime.ts";
 
@@ -67,14 +68,14 @@ interface Harness {
 	readonly clock: FakeClock;
 	/** The deadline each probe was asked for, in order; `undefined` is the default. */
 	readonly deadlines: (number | undefined)[];
-	readonly logs: string[];
+	readonly logs: LoggedLine[];
 }
 
 /** A proof over probes that answer from `answers` in order, the last replayed. */
 function harness(answers: readonly (PtyRuntimeReadiness | "throw")[]): Harness {
 	const clock = new FakeClock();
 	const deadlines: (number | undefined)[] = [];
-	const logs: string[] = [];
+	const logs: LoggedLine[] = [];
 	const proof = new PtyRuntimeProof({
 		probe: async deadlineMs => {
 			const answer = answers[Math.min(deadlines.length, answers.length - 1)]!;
@@ -82,12 +83,14 @@ function harness(answers: readonly (PtyRuntimeReadiness | "throw")[]): Harness {
 			if (answer === "throw") throw new Error("the staged runtime could not be checked");
 			return answer;
 		},
-		log: message => logs.push(message),
+		log: recordingLogger(logs),
 		now: clock.now,
 		schedule: clock.schedule,
 	});
 	return { proof, clock, deadlines, logs };
 }
+
+const text = (lines: readonly LoggedLine[]): string => lines.map(line => line.message).join("\n");
 
 describe("PtyRuntimeProof", () => {
 	it("keeps a proven runtime and never probes again", async () => {
@@ -103,14 +106,15 @@ describe("PtyRuntimeProof", () => {
 		const reused: PtyRuntimeReadiness = { ...proven, reusedProof: { provedAt: "2026-10-13T08:12:03.000Z", file: "proof.json" } };
 		const fromDisk = harness([reused]);
 		assert.equal(await fromDisk.proof.ready(), reused);
-		assert.match(fromDisk.logs.join("\n"), /PTY runtime proof reused from 2026-10-13T08:12:03\.000Z/);
-		assert.doesNotMatch(fromDisk.logs.join("\n"), /proved itself/);
+		assert.match(text(fromDisk.logs), /PTY runtime proof reused from 2026-10-13T08:12:03\.000Z/);
+		assert.doesNotMatch(text(fromDisk.logs), /proved itself/);
 		assert.equal(fromDisk.proof.provenAnswer(), reused, "a reused proof is a proof");
 
 		const computed = harness([proven]);
 		await computed.proof.ready();
-		assert.match(computed.logs.join("\n"), /PTY runtime proved itself/);
-		assert.doesNotMatch(computed.logs.join("\n"), /reused from/);
+		assert.match(text(computed.logs), /PTY runtime proved itself/);
+		assert.doesNotMatch(text(computed.logs), /reused from/);
+		assert.deepEqual(computed.logs.map(line => line.level), ["info"]);
 	});
 
 	it("withdraws a reused proof so the next ready() probes again, and leaves a computed proof alone", async () => {
@@ -134,7 +138,8 @@ describe("PtyRuntimeProof", () => {
 		// Later callers are answered from the provisional state: no second probe on the launch path.
 		assert.equal((await proof.ready()).proven, false);
 		assert.deepEqual(deadlines, [undefined]);
-		assert.match(logs.join("\n"), /admitted unproven/);
+		assert.match(text(logs), /admitted unproven/);
+		assert.equal(logs[0]?.level, "warn");
 	});
 
 	it("re-runs the probe with the extended deadline after the delay, not before", async () => {
@@ -155,7 +160,7 @@ describe("PtyRuntimeProof", () => {
 		assert.equal(proof.provenAnswer(), proven);
 		assert.equal(await proof.ready(), proven);
 		assert.equal(deadlines.length, 2, "nothing probes after the proof");
-		assert.match(logs.join("\n"), /proved itself on the repeated/);
+		assert.match(text(logs), /proved itself on the repeated/);
 	});
 
 	it("hands a fault the re-run found to the next launch and holds it, so a broken tree is not admitted again", async () => {
@@ -167,7 +172,8 @@ describe("PtyRuntimeProof", () => {
 		assert.equal(first.ready, false);
 		assert.match(first.reason ?? "", /repeated self-check refused the runtime that was admitted unproven/);
 		assert.match(first.reason ?? "", /exited with code 3/, "the entry's own reason survives");
-		assert.match(logs.join("\n"), /PTY runtime refused/);
+		assert.match(text(logs), /PTY runtime refused/);
+		assert.equal(logs.at(-1)?.level, "error");
 		// Held: a fresh short probe would only be inconclusive on the same tree and admit it again.
 		await clock.advance(PTY_FAULT_HOLD_MS - 1);
 		assert.equal((await proof.ready()).ready, false);
@@ -227,7 +233,7 @@ describe("PtyRuntimeProof", () => {
 		await clock.advance(PTY_REPROBE_DELAY_MS);
 		await clock.advance(10 * PTY_REPROBE_DELAY_MS);
 		assert.equal(deadlines.length, 4, "the first probe and three re-runs, then no more");
-		assert.equal(logs.filter(line => /could not run/.test(line)).length, 3);
+		assert.equal(logs.filter(line => /could not run/.test(line.message)).length, 3);
 		// Not left admitted on a check that never ran: the next call is a new first probe.
 		assert.equal(await proof.ready(), proven);
 		assert.deepEqual(deadlines, [undefined, SELF_CHECK_EXTENDED_DEADLINE_MS, SELF_CHECK_EXTENDED_DEADLINE_MS, SELF_CHECK_EXTENDED_DEADLINE_MS, undefined]);

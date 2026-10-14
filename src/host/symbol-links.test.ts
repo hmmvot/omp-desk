@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseCodeSymbol } from "../shared/code-symbols.ts";
 import type { SymbolLinksResolution } from "../shared/code-symbols.ts";
+import { recordingLogger, type LoggedLine } from "../shared/logger.ts";
 import { SymbolKind, SymbolLinkResolver, handleSymbolLinks, isNameCandidate, matchSymbol, symbolEntry, symbolRoots, symbolTarget } from "./symbol-links.ts";
 import { isInside } from "./link-scope.ts";
 import { FileNameLinkResolver } from "./file-name-links.ts";
@@ -575,19 +576,21 @@ test("a name candidate is an exact name, its attribute form or an entry too long
 });
 
 test("a lookup writes one compact line with the counts and the verdict; a provider answer of only fuzzy entries is a miss, an empty one is unavailable", async () => {
-	const lines: string[] = [];
+	const logged: LoggedLine[] = [];
 	const answers = provider({
 		Game: Object.assign([entry("Game", SymbolKind.Class, "Session.cs", 3, "omp-vscode"), entry("Game", SymbolKind.Class, "Game.GameModes.cs", 7, "omp-vscode")], { total: 40 }),
 		Fuzzy: Object.assign([], { total: 25 }),
 		Silent: [],
 		Slow: "hang",
 	});
-	const resolver = new SymbolLinkResolver(answers.source, { log: line => lines.push(line), queryTimeoutMs: 10 });
+	const resolver = new SymbolLinkResolver(answers.source, { log: recordingLogger(logged), queryTimeoutMs: 10 });
 	assert.deepEqual(await resolver.resolve(symbol("Game"), scope), { status: "found", target: "Session.cs:3:5" });
 	assert.deepEqual(await resolver.resolve(symbol("Fuzzy"), scope), { status: "none" });
 	assert.deepEqual(await resolver.resolve(symbol("Silent"), scope), { status: "none" }, "once the provider has answered a symbol, an empty answer is a real miss");
 	assert.deepEqual(await resolver.resolve(symbol("Slow"), scope), { status: "pending" });
+	const lines = logged.map(line => line.message);
 	assert.equal(lines.length, 4);
+	assert.ok(logged.every(line => line.level === "debug"), "a lookup line is a debug line");
 	assert.match(lines[0]!, /^code symbol "Game": 1 query, 40 provider entries, 2 in scope, 2 matching locations -> found \(partial\) in \d+ ms$/);
 	assert.match(lines[1]!, /-> none in/);
 	assert.match(lines[2]!, /0 provider entries.* -> none in/);
@@ -603,22 +606,22 @@ test("a call with arguments names the method: the argument list is stripped", ()
 test("until the provider has answered a symbol an empty answer parks the token; a canary probe finds the provider ready and signals a retry once", async () => {
 	let loaded = false;
 	const asked: string[] = [];
-	const lines: string[] = [];
+	const logged: LoggedLine[] = [];
 	let retries = 0;
 	const source: SymbolSource = {
 		query: text => { asked.push(text); return Promise.resolve(Object.assign(loaded ? [entry("Session", SymbolKind.Class, "A.cs", 3)] : [], { total: loaded ? 5 : 0 })); },
 	};
-	const resolver = new SymbolLinkResolver(source, { probeDelaysMs: [5, 5], log: line => lines.push(line), onRetry: () => { retries++; } });
+	const resolver = new SymbolLinkResolver(source, { probeDelaysMs: [5, 5], log: recordingLogger(logged), onRetry: () => { retries++; } });
 	const results = await Promise.all(["Session", "Alpha", "Bravo"].map(name => resolver.resolve(symbol(name), scope)));
 	assert.deepEqual(results, [{ status: "pending" }, { status: "pending" }, { status: "pending" }], "a loading server is not a verdict");
-	assert.match(lines[0]!, /-> parked \(not ready\) in/);
+	assert.match(logged[0]!.message, /-> parked \(not ready\) in/);
 	await new Promise(resolve => setTimeout(resolve, 40));
 	assert.equal(retries, 0, "still loading: the probes keep failing quietly");
 	assert.ok(asked.length > 3, "canary queries were sent");
 	loaded = true;
 	await new Promise(resolve => setTimeout(resolve, 60));
 	assert.equal(retries, 1, "ready: one signal");
-	assert.match(lines.at(-1)!, /^code symbols: provider ready after \d+ s, re-running 3 parked$/);
+	assert.match(logged.at(-1)!.message, /^code symbols: provider ready after \d+ s, re-running 3 parked$/);
 	assert.deepEqual(await resolver.resolve(symbol("Session"), scope), { status: "found", target: "A.cs:3:5" });
 	loaded = false;
 	assert.deepEqual(await resolver.resolve(symbol("Unknown"), scope), { status: "none" }, "after readiness an empty answer is a real miss");

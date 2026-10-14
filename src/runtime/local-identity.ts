@@ -8,6 +8,7 @@
  * itself. OMP writes the file lazily (first message), so the exact path is remembered and bound
  * as soon as the file exists.
  */
+import type { Logger } from "../shared/logger.ts";
 import { controlPathEquals } from "../host/control-protocol.ts";
 import type { SessionHostRuntime } from "../host/native-session.ts";
 import type { SessionIndex } from "../host/session-index.ts";
@@ -37,7 +38,7 @@ export interface LocalIdentityDeps {
 	readonly index: SessionIndex;
 	readonly window: IdentityWindow;
 	readonly records: RuntimeRecords;
-	readonly log: (message: string) => void;
+	readonly log: Logger;
 }
 
 function messageOf(error: unknown): string {
@@ -72,7 +73,7 @@ export class LocalIdentity {
 			// The id is recorded the moment it is known — a new session's file does not exist until its
 			// first message, but a re-adopt after any restart needs the id to tell this session from a switch.
 			const recorded = await index.recordHostSessionId(tabId, sessionId, lease, previousSessionId);
-			if (!recorded) log(`tab ${tabId}: the session id ${sessionId} conflicts with the one this row recorded and was not recorded`);
+			if (!recorded) log.warn(`tab ${tabId}: the session id ${sessionId} conflicts with the one this row recorded and was not recorded`);
 			if (!recorded && previousSessionId !== undefined) throw new Error("Accepted provider identity could not be recorded.");
 			const entry = index.get(tabId);
 			if (entry === null || entry.sessionFile !== null) return;
@@ -86,7 +87,7 @@ export class LocalIdentity {
 			const promotion = await index.promoteDraft(tabId, sessionFile, lease);
 			if (promotion.status === "promoted") {
 				this.#pending.delete(tabId);
-				log(`tab ${tabId}: bound to the session file ${sessionFile}`);
+				log.info(`tab ${tabId}: bound to the session file ${sessionFile}`);
 				// The document could not be committed while the session had no file: the binding a
 				// surviving page authenticates against needs the exact file, so it is committed now.
 				window.bound(tabId);
@@ -95,7 +96,7 @@ export class LocalIdentity {
 				// soon as the file exists.
 				this.#pending.set(tabId, { runtime, sessionFile, sessionId, lastTry: Date.now(), timer: null, lastFailureDetail: promotion.detail });
 				this.#scheduleRetry(tabId);
-				log(`tab ${tabId}: the session file ${sessionFile} is not bound yet: ${promotion.detail}`);
+				log.debug(`tab ${tabId}: the session file ${sessionFile} is not bound yet: ${promotion.detail}`);
 			}
 			window.refresh();
 		});
@@ -141,16 +142,16 @@ export class LocalIdentity {
 				if (promotion.status !== "promoted") {
 					if (promotion.detail !== pending.lastFailureDetail) {
 						pending.lastFailureDetail = promotion.detail;
-						log(`tab ${tabId}: the session file ${pending.sessionFile} is not bound yet: ${promotion.detail}`);
+						log.debug(`tab ${tabId}: the session file ${pending.sessionFile} is not bound yet: ${promotion.detail}`);
 					}
 					return;
 				}
 				clearTimeout(pending.timer ?? undefined);
 				this.#pending.delete(tabId);
-				log(`tab ${tabId}: bound to the session file ${pending.sessionFile}`);
+				log.info(`tab ${tabId}: bound to the session file ${pending.sessionFile}`);
 				window.bound(tabId);
 				window.refresh();
 			})
-			.catch(error => log(`tab ${tabId}: binding the session file failed: ${messageOf(error)}`));
+			.catch(error => log.warn(`tab ${tabId}: binding the session file failed: ${messageOf(error)}`));
 	}
 }

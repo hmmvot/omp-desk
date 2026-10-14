@@ -100,6 +100,8 @@ import type { SessionIndexEntry, SessionViewMode } from "./host/session-model";
 import type { SessionFileHeader } from "./host/session-files";
 import { claimHolderMayBeAlive, setProcessProbeObserver } from "./host/session-claim";
 import { formatToolSpawn, setToolSpawnObserver } from "./host/tool-spawn-trace";
+import { type Logger, prefixedLogger } from "./shared/logger";
+import { LaunchTimeline } from "./host/launch-timeline";
 import { holderSeemsAlive } from "./host/holder-liveness";
 import { claimFileNameFor, startClaimWatch } from "./host/claim-watch";
 import { WindowRegistry } from "./host/window-registry";
@@ -829,9 +831,11 @@ interface WindowState {
    */
   context: vscode.ExtensionContext | undefined;
   /** The "OMP Desk" output channel; `log` writes to it. */
-  output: vscode.OutputChannel | undefined;
+  output: vscode.LogOutputChannel | undefined;
   /** The window's diagnostics recorder: the timeline the report document renders. */
   readonly diagnostics: DiagnosticsRecorder;
+  /** Where a new session's launch spends its time: begun by New Session, reported by the launcher and the host-control step. */
+  readonly launchTimeline: LaunchTimeline;
   /**
    * The activation restore pass, while it is still running.
    *
@@ -1274,6 +1278,7 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     context,
     output: undefined,
     diagnostics: new DiagnosticsRecorder(),
+    launchTimeline: new LaunchTimeline(),
     startupRestore: null,
     startupRestorePending: true,
     startupRestoreOver: Promise.withResolvers<void>(),
@@ -1379,7 +1384,7 @@ async function revealDesktopNotification(index: SessionIndex, extensionId: strin
       }
     }
   }
-  log("The notified session has no retained editor or Sessions row in this window.");
+  log.warn("The notified session has no retained editor or Sessions row in this window.");
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
@@ -1387,7 +1392,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const s = windowState();
   // The `omp-artifact:` scheme first, synchronously: an editor tab of it that Reload Window restores is served as soon as the window has the provider.
   s.artifactDocuments = registerArtifactDocuments(context.subscriptions);
-  s.output = vscode.window.createOutputChannel("OMP Desk");
+  s.output = vscode.window.createOutputChannel("OMP Desk", { log: true });
   setOmpResolutionLog(log);
   context.subscriptions.push({ dispose: () => setOmpResolutionLog(null) });
   setOmpPathReader(configuredOmpPath);
@@ -1405,7 +1410,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     warn: (message, action) => vscode.window.showWarningMessage(message, action),
     openKeybindingsFile,
     foreignCommands: foreign.commands,
-    log: line => log(line),
+    log,
   }));
   void announceRename({
     priorInstall: () => access(catalogPaths(context.globalStorageUri.fsPath).document).then(() => true, () => false),
@@ -1413,7 +1418,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     markShown: () => context.globalState.update(RENAME_NOTICE_KEY, true),
     info: (message, action) => vscode.window.showInformationMessage(message, action),
     openKeybindingsFile,
-    log: line => log(line),
+    log,
   });
   // ADR-0068 (amended 2026-10-13): the move starts here and activation does not wait for it. With nothing to move it is
   // synchronous reads and no I/O; with work, the User layer is moved by one window of the profile and the keys concurrently.
@@ -1423,13 +1428,13 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const settingsPort = legacySettingsPort(context, foreign.settings);
   s.legacySettingsMoved = migrateLegacySettings(settingsPort).then(
     () => undefined,
-    error => log(`settings: the move from omp.* to ompDesk.* failed and nothing more was moved: ${messageOf(error)}`),
+    error => log.warn(`settings: the move from omp.* to ompDesk.* failed and nothing more was moved: ${messageOf(error)}`),
   ).then(() => migrateSessionFolderSettings(settingsPort)).then(
     () => undefined,
-    error => log(`settings: the move to ompDesk.runSessionsAtRepositoryRoot failed and nothing more was moved: ${messageOf(error)}`),
+    error => log.warn(`settings: the move to ompDesk.runSessionsAtRepositoryRoot failed and nothing more was moved: ${messageOf(error)}`),
   );
   // The host's one thread is shared with every extension; a stall of 500 ms or more is logged with the Desk operations that overlapped it.
-  context.subscriptions.push({ dispose: startLoopLagMonitor(message => log(message)) });
+  context.subscriptions.push({ dispose: startLoopLagMonitor(log) });
   // This host's start time is a PowerShell command, hundreds of milliseconds to seconds on a busy machine. It runs beside
   // the rest of the setup; only the claims the index writes wait for it (ADR-0035), so the Sessions view, the commands
   // and the editors appear without it. A synchronous read froze every extension in the host; an awaited one held them back.
@@ -1442,7 +1447,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   s.ptyClient = new PtyBrokerClient({
     storageDir: context.globalStorageUri.fsPath,
     extensionRoot: context.extensionUri.fsPath,
-    onRuntimeEvent: message => log(message),
+    log,
   });
   const stateAccessStartedAt = Date.now();
   void s.ptyClient.stateAccess().then(
@@ -1454,7 +1459,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     ...updaterNoticeFiles({ tempDir: os.tmpdir(), ptyDir: path.join(context.globalStorageUri.fsPath, "pty") }),
     announced: () => context.globalState.get<string>(UPDATER_NOTICE_KEY) ?? null,
     markAnnounced: name => Promise.resolve(context.globalState.update(UPDATER_NOTICE_KEY, name)),
-    log: line => log(line),
+    log,
     notify: message => { void vscode.window.showInformationMessage(`OMP Desk: ${message}`); },
   });
   // The longest a display-only read waits for the startup restore (see `WindowState.startupRestoreOver`).
@@ -1492,7 +1497,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     claimStorageDir: context.globalStorageUri.fsPath,
     claimHolder,
     claimHolderCreationTime,
-    log: message => log(message),
+    log,
   });
   // Protocol activation only reveals an existing handle; it never acquires or starts work.
   context.subscriptions.push(vscode.window.registerUriHandler({
@@ -1514,7 +1519,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const windowsRegistry = new WindowRegistry({
     storageDir: context.globalStorageUri.fsPath,
     holderId: claimHolder.id,
-    onError: detail => log(`window registry: ${detail}`),
+    onError: detail => log.warn(`window registry: ${detail}`),
   });
   s.windowRegistry = windowsRegistry;
   if (vscode.window.state.focused) s.routing.noteFocused();
@@ -1524,7 +1529,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   s.resolveSessionFolders = async () => {
     await sessionFolders.resolve(s.routing.allFolders())
       .then(changed => { if (changed) refreshLauncher(); })
-      .catch(error => log(`launcher: the session folder of an open folder could not be resolved: ${messageOf(error)}`));
+      .catch(error => log.warn(`launcher: the session folder of an open folder could not be resolved: ${messageOf(error)}`));
   };
   const folders = new LauncherFolders({
     pinned: registry,
@@ -1548,7 +1553,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // open instead of disabling the broker path for the whole activation.
   s.ptyGate = createPtyReadinessGate({
     client: s.ptyClient,
-    onFailure: reason => log(`the PTY broker runtime is not usable yet: ${reason}`),
+    onFailure: reason => log.warn(`the PTY broker runtime is not usable yet: ${reason}`),
   });
   s.shellSlots = createShellSlotStore(catalog);
   s.brokerSlots = createBrokerSlotStore(catalog);
@@ -1727,11 +1732,11 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     },
     attachPage: (conversation, page) => s.sessionRuntime.conversations.attachPage(conversation, page),
     handleMessage: (conversation, message, origin) => s.sessionRuntime.conversations.command(conversation, message, origin),
-    openMermaid: source => { log(`diagram tab was ${s.mermaidPreviews.open(source)}`); },
+    openMermaid: source => { log.debug(`diagram tab was ${s.mermaidPreviews.open(source)}`); },
     openArtifact: (conversation, request) => s.guestDispatcher.openArtifact(conversation, request),
     openUrl: async (url, mode) => {
       try { await openPageWebLink(url, mode); }
-      catch (error) { log(`detail link: cannot open ${url}: ${messageOf(error)}`); showWarning(`cannot open ${url}: ${messageOf(error)}`); }
+      catch (error) { log.warn(`detail link: cannot open ${url}: ${messageOf(error)}`); showWarning(`cannot open ${url}: ${messageOf(error)}`); }
     },
     log,
   });
@@ -1757,7 +1762,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // A detail tab shows live data from its session and persists nothing. No serializer exists for
   // it: one that survived a window restart or a host-only restart has nothing to show and no way
   // to learn the host is gone, so every leftover is closed at activation.
-  void s.guestDispatcher.closeLeftoverDetailTabs().catch(error => log(`detail tabs: leftovers could not be closed (${messageOf(error)})`));
+  void s.guestDispatcher.closeLeftoverDetailTabs().catch(error => log.warn(`detail tabs: leftovers could not be closed (${messageOf(error)})`));
   // A plain omp outside this extension writing one of these sessions is told from the sessions this
   // extension owns through the session lease OMP itself takes (ADR-0046). The probe only opens a
   // named mutex and closes it, and a failed probe leaves every row exactly as it was.
@@ -1789,7 +1794,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const current = published !== undefined && incarnation !== null && published.incarnation === incarnation;
       return { status: current ? published.status : null, lastActivityAt: current ? published.lastActivityAt : null, window: holder.label };
     },
-  }, { onObservationError: error => log(`launcher: row observation failed: ${messageOf(error)}`) });
+  }, { onObservationError: error => log.warn(`launcher: row observation failed: ${messageOf(error)}`) });
   s.launcherProvider = provider;
   const view = vscode.window.createTreeView(SESSIONS_VIEW_ID, { treeDataProvider: provider });
   s.launcherView = view;
@@ -1819,7 +1824,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const claimWatch = startClaimWatch(
     index.claimStorageDir,
     claimFiles => refreshRowsForClaims(index, claimFiles),
-    { onError: detail => log(`claims: ${detail}`) },
+    { onError: detail => log.warn(`claims: ${detail}`) },
   );
   s.routing.serveRequests(context, index, folders);
   context.subscriptions.push(
@@ -1877,7 +1882,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       if (!event.visible) return;
       // A missed catalog notification is recovered here rather than leaving another
       // window's sessions or folders invisible until a restart.
-      void adoptCatalogChanges(index, folders).catch(error => log(`catalog: the newest revision could not be adopted: ${messageOf(error)}`));
+      void adoptCatalogChanges(index, folders).catch(error => log.warn(`catalog: the newest revision could not be adopted: ${messageOf(error)}`));
       refreshLauncher({ ownership: true });
       s.routing.refresh();
     }),
@@ -1887,7 +1892,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       const active = activePanelTab();
       if (active !== null) activateNativeEditor(active);
       // Focus is the recovery point for a notification this window missed.
-      void adoptCatalogChanges(index, folders).catch(error => log(`catalog: the newest revision could not be adopted: ${messageOf(error)}`));
+      void adoptCatalogChanges(index, folders).catch(error => log.warn(`catalog: the newest revision could not be adopted: ${messageOf(error)}`));
       refreshLauncher({ ownership: true });
       // A row another window runs may have been left selected by a click that switched there; this window selects only its own session.
       releaseSelectionFromOtherWindow(index);
@@ -2000,7 +2005,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       try {
         await vscode.env.clipboard.writeText(redactCapabilities(item.diagnostics));
       } catch (error) {
-        log(`row diagnostics copy failed: ${messageOf(error)}`);
+        log.error(`row diagnostics copy failed: ${messageOf(error)}`);
         showError("Diagnostics could not be copied. Try again, or use OMP Desk: Show Diagnostics.");
       }
     }),
@@ -2028,7 +2033,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     vscode.window.tabGroups.onDidChangeTabs(() => {
       settleViewedSession(index);
       void windowState().bridgeHost.syncEditors(context, index, { retireMissing: true }).catch(error =>
-        log(`bridge: the editor membership could not be reconciled: ${messageOf(error)}`),
+        log.warn(`bridge: the editor membership could not be reconciled: ${messageOf(error)}`),
       );
     }),
   );
@@ -2052,7 +2057,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // work: their serializers are registered, and a page that survived a previous
   // extension host is adopted with the document its records name, so its reconnect has
   // something to authenticate against as soon as it dials in.
-  void windowState().bridgeHost.syncEditors(context, index).catch(error => log(`bridge: the editor membership could not be reconciled: ${messageOf(error)}`));
+  void windowState().bridgeHost.syncEditors(context, index).catch(error => log.warn(`bridge: the editor membership could not be reconciled: ${messageOf(error)}`));
   // The catalog is read, the predecessor build's folder list is imported into it, and
   // only then does the activation restore pass run — pinned to the rows this window is
   // responsible for. An editor VS Code restores for a row this pass does not cover is
@@ -2064,7 +2069,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // folder a reinstall may be renaming. The launch paths stage again themselves and
   // report their own failure; this one is just early, and silent.
   void s.staging.entries().catch(() => {});
-  log("extension activated");
+  log.info("extension activated");
 }
 
 export function deactivate(): void {
@@ -2133,7 +2138,10 @@ async function newSession(
 async function startNewSession(context: vscode.ExtensionContext, index: SessionIndex, current: LauncherFolder): Promise<void> {
   let entry: SessionIndexEntry;
   try {
+    const commandAt = Date.now();
     entry = await index.createDraft({ cwd: current.path });
+    windowState().launchTimeline.begin(entry.tabId, commandAt);
+    windowState().launchTimeline.lap(entry.tabId, "draft");
   } catch (error) {
     showError(`A new OMP session could not be reserved: ${messageOf(error)}`);
     return;
@@ -2578,12 +2586,12 @@ function indexedRowsForHistory(index: SessionIndex): FolderHistoryIndexedEntry[]
  * is a fact about the pass, not a hidden session.
  */
 function logFolderScan(folder: WorkspaceFolder, scan: FolderHistoryScan): void {
-  log(
+  log.debug(
     `folder history: ${scan.candidates.length} candidate(s) for ${folder.path} over ${scan.roots.length} root(s), ` +
       `${scan.issues.length} issue(s), ${scan.skippedFiles} skipped, incomplete=${scan.incomplete}, cancelled=${scan.cancelled}`,
   );
   for (const issue of scan.issues) {
-    log(`folder history (${issue.kind})${issue.path === null ? "" : ` ${issue.path}`}: ${issue.detail}`);
+    log.warn(`folder history (${issue.kind})${issue.path === null ? "" : ` ${issue.path}`}: ${issue.detail}`);
   }
 }
 
@@ -2914,7 +2922,7 @@ async function openFolderHistoryCandidate(
     await revealExistingTab(index, entry.tabId, openPanel);
     return;
   }
-  log(`tab ${entry.tabId}: resumed folder session ${candidate.file} (${candidate.source}) from ${folder.path}`);
+  log.info(`tab ${entry.tabId}: resumed folder session ${candidate.file} (${candidate.source}) from ${folder.path}`);
   await openTab(context, index, entry.tabId, "resumed", "explicit", undefined, false, keepLiveView);
 }
 
@@ -3076,7 +3084,7 @@ async function openTab(
       pause: ms => delayMs(ms),
       now: () => Date.now(),
     }, 15_000);
-    if (!settled) log(`tab ${tabId}: the exit cleanup of the ended session had not finished after 15 s; the open continues without it`);
+    if (!settled) log.warn(`tab ${tabId}: the exit cleanup of the ended session had not finished after 15 s; the open continues without it`);
   }
   // Number this request before it can wait: a close during the wait overrides
   // it, while a subsequent explicit click is a new request to open the editor.
@@ -3211,12 +3219,13 @@ async function openTabOnce(
   // it does open one. The rest of the attempt runs either way, so the row is
   // reconciled exactly once and a refused or failed restore is still retried.
   if (tabState(tabId).lastOpenRequest <= tabState(tabId).lastEditorClose) {
-    log(`tab ${tabId}: its editor was closed while this open was waiting; no editor is opened for it`);
+    log.debug(`tab ${tabId}: its editor was closed while this open was waiting; no editor is opened for it`);
   } else {
     // The editor is created (or revealed) before anything native happens: it is where the
     // user sees whatever comes next, and a launch that is slow or cannot start must not
     // delay the chat surface or hide the reason it is unavailable.
     windowState().editorPanels.openPanel(context, index, tabId);
+    windowState().launchTimeline.lap(tabId, "panel");
     refreshLauncher();
   }
   const openedState = stateOf(tabId);
@@ -3284,7 +3293,7 @@ function sessionRuntimeDeps(index: SessionIndex, chat: ChatRuntime, launchers?: 
   });
   const control = new LocalHostControl({
     index, records, window: controlWindow(index), store: controlStore(),
-    chat: () => chat, diagnostics: () => windowState().diagnostics, log, attempts: windowState().hostControlAttempts,
+    chat: () => chat, diagnostics: () => windowState().diagnostics, log, attempts: windowState().hostControlAttempts, timeline: windowState().launchTimeline,
     stagedHelper: () => windowState().staging.entries().then(() => undefined, () => undefined),
   });
   const identity = new LocalIdentity({ index, records, window: identityWindow(index), log });
@@ -3523,7 +3532,7 @@ function nativeWatchWindow(index: SessionIndex): NativeWatchWindow {
             notifierFor(index).notify(state.tabId, notice);
           }
           if (previous === undefined || activitySignature(previous) !== activitySignature(activity)) {
-            log(`tab ${state.tabId}: native observation ${activity.pendingRequest !== null ? "needs your answer" : facts.settled === true ? "settled" : work?.working === true ? "working" : work?.backgroundWork === true ? "background work" : "unsettled/unknown"} (${journal === null ? "completion journal unavailable" : work === null ? "work detail unavailable" : "completion journal observed"})`);
+            log.debug(`tab ${state.tabId}: native observation ${activity.pendingRequest !== null ? "needs your answer" : facts.settled === true ? "settled" : work?.working === true ? "working" : work?.backgroundWork === true ? "background work" : "unsettled/unknown"} (${journal === null ? "completion journal unavailable" : work === null ? "work detail unavailable" : "completion journal observed"})`);
             refreshLauncher();
           }
         },
@@ -3646,6 +3655,7 @@ function localLauncher(context: vscode.ExtensionContext, index: SessionIndex, ch
     native: s.sessionRuntime.nativeWatch,
     exit: s.sessionRuntime.exit,
     diagnosticsLabel,
+    timeline: s.launchTimeline,
     log,
   });
 }
@@ -3793,7 +3803,7 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
         pushSessionView(index, state, true);
         activateNativeEditor(state);
       } catch (error) {
-        log(`tab ${state.tabId}: Terminal reopen failed: ${messageOf(error)}`);
+        log.error(`tab ${state.tabId}: Terminal reopen failed: ${messageOf(error)}`);
         showWarning("This Terminal could not be reconnected. Use Stop in Processes, then open the session again.");
       }
     }
@@ -3899,7 +3909,7 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
   } catch (error) {
     const superseded = state.lastOpenRequest !== modeRequest;
     if (!superseded) state.lastOpenRequest = ++s.editorEventSequence;
-    log(`tab ${tabId}: view switch failed: ${messageOf(error)}`);
+    log.error(`tab ${tabId}: view switch failed: ${messageOf(error)}`);
     // A read or an abort that timed out on a process that already ended is not a failed switch: finish it as a Resume.
     if (!superseded && !acceptedStop && hostOf(state) === runtime && await s.sessionRuntime.endEnded(tabId, target)) {
       await switchSessionMode(context, index, state, mode, false, keepLiveView);
@@ -3927,7 +3937,7 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
       ).then(action => {
         if (action === "Stop Session" && hostOf(state) === runtime) return s.sessionActions.stopHost(context, index, tabId);
       }).then(undefined, error => {
-        log(`tab ${tabId}: view switch recovery failed: ${messageOf(error)}`);
+        log.error(`tab ${tabId}: view switch recovery failed: ${messageOf(error)}`);
         showWarning("The session could not be stopped from this editor. Use Stop in Processes, then reopen the session.");
       });
     }
@@ -4057,7 +4067,7 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
     }
     if (replacement !== null) await handleRestoreOutcome(context, index, tabId, replacement);
   } catch (error) {
-    log(`tab ${tabId}: explicit Restart failed: ${messageOf(error)}`);
+    log.error(`tab ${tabId}: explicit Restart failed: ${messageOf(error)}`);
     const failure = writerGone
       ? "The old process stopped, but Restart could not finish. The saved conversation and captured input are kept; reopen this session to recover."
       : stopRequested
@@ -4140,7 +4150,7 @@ function startStartupRestore(context: vscode.ExtensionContext, index: SessionInd
     try {
       await restoreTabs(context, index, cohort);
     } catch (error) {
-      log(`restore: the startup pass failed: ${messageOf(error)}`);
+      log.error(`restore: the startup pass failed: ${messageOf(error)}`);
     }
   })();
   s.startupRestore = { settled, cohort };
@@ -4153,6 +4163,7 @@ function startStartupRestore(context: vscode.ExtensionContext, index: SessionInd
     windowTiming(
       "startup restore timeline",
       `activation → catalog adopted ${s.catalogAdoptedAt === null ? "unknown" : since(s.catalogAdoptedAt)} → restore started ${since(restoreStartedAt)} → restore finished ${since(Date.now())} (${cohort.size} rows)`,
+      "info",
     );
     // The pass can no longer publish anything, so a later click only has to read
     // the panels it left behind.
@@ -4249,7 +4260,7 @@ function createProfileCatalog(context: vscode.ExtensionContext): Promise<Catalog
       [SHELL_SLOTS_KEY]: mergeShellSlotRecords,
     },
     onUnavailable: reason => {
-      log(`the OMP profile catalog is unusable, so nothing will be saved this session: ${reason}`);
+      log.warn(`the OMP profile catalog is unusable, so nothing will be saved this session: ${reason}`);
       showWarning(
         "The saved OMP sessions and folders could not be read, so this window is running without them and will not overwrite them. " +
           `See the OMP Desk output channel. (${reason})`,
@@ -4275,12 +4286,12 @@ function startCatalogActivation(context: vscode.ExtensionContext, index: Session
         log,
       });
     } catch (error) {
-      log(`predecessor import: the pass failed and nothing was changed by it: ${messageOf(error)}`);
+      log.warn(`predecessor import: the pass failed and nothing was changed by it: ${messageOf(error)}`);
     }
     try {
       await adoptCatalogChanges(index, folders, { startup: true });
     } catch (error) {
-      log(`catalog: the recovered records could not be adopted: ${messageOf(error)}`);
+      log.warn(`catalog: the recovered records could not be adopted: ${messageOf(error)}`);
     }
     await vscode.commands.executeCommand("setContext", CATALOG_PENDING_CONTEXT, false);
     // Staging is not awaited here. The restore re-adopts running sessions, and only the step that proves a Chat's
@@ -4367,7 +4378,7 @@ async function adoptCatalogChangesMarked(
   reconcileLocalRoles(index);
   const foldersChanged = await folders.reload();
   if (adopted.adopted.length > 0 || adopted.removed.length > 0 || foldersChanged || options.startup === true) {
-    log(
+    log.info(
       `catalog: adopted ${adopted.adopted.length} new row(s), dropped ${adopted.removed.length}, ` +
         `kept ${adopted.kept.length} in use${foldersChanged ? ", and the folder list changed" : ""}`,
     );
@@ -4386,14 +4397,14 @@ function watchCatalogForWindow(index: SessionIndex, folders: LauncherFolders): v
   const catalog = s.catalogStore;
   if (catalog === undefined) return;
   const notify = (): void => {
-    void adoptCatalogChanges(index, folders).catch(error => log(`catalog: another window's change could not be adopted: ${messageOf(error)}`));
+    void adoptCatalogChanges(index, folders).catch(error => log.warn(`catalog: another window's change could not be adopted: ${messageOf(error)}`));
   };
   // The watcher reports *other* windows' commits; this window's own commits publish the
   // same signal through the store, so a record another window's change was merged into
   // reaches the consumer that owns it before that consumer writes again.
   const unsubscribe = catalog.onChange(notify);
   s.context?.subscriptions.push({ dispose: unsubscribe });
-  const dispose = startCatalogWatch(catalog.paths, notify, { onError: detail => log(detail) });
+  const dispose = startCatalogWatch(catalog.paths, notify, { onError: detail => log.warn(detail) });
   s.context?.subscriptions.push({ dispose });
 }
 
@@ -4463,16 +4474,16 @@ async function restoreTabs(
   refreshLauncher();
   void revealActiveSession(index);
 
-  log(
+  log.info(
     `restore: ${report.restored.length} running, ${report.attached.length} already open, ` +
       `${report.drafts.length} draft, ${report.stopped.length} stopped, ${report.conflicts.length} conflict, ` +
       `${report.failures.length} failed, ${report.skipped.length} skipped`,
   );
   for (const conflict of report.conflicts) {
-    log(`restore conflict (${conflict.kind}) on tab ${conflict.tabId}: ${conflict.detail}`);
+    log.warn(`restore conflict (${conflict.kind}) on tab ${conflict.tabId}: ${conflict.detail}`);
   }
   for (const failure of report.failures) {
-    log(`restore failure (${failure.kind}) on tab ${failure.tabId}: ${failure.detail}`);
+    log.error(`restore failure (${failure.kind}) on tab ${failure.tabId}: ${failure.detail}`);
   }
   if (report.persistError !== null) {
     showWarning(`The OMP session index could not be saved: ${report.persistError}`);
@@ -4492,19 +4503,19 @@ async function handleRestoreOutcome(
   refreshLauncher();
   switch (outcome.status) {
     case "restored":
-      log(`tab ${tabId}: OMP host running`);
+      log.info(`tab ${tabId}: OMP host running`);
       // The election comes first: a page is only served the conversation when it is the
       // controlling editor here. The conversation itself was attached by the launch.
       await electLocalController(index, tabId);
       attachChatRoutes(tabId, true);
       return;
     case "attached":
-      log(`tab ${tabId}: ${outcome.detail}`);
+      log.info(`tab ${tabId}: ${outcome.detail}`);
       await electLocalController(index, tabId);
       attachChatRoutes(tabId, true);
       return;
     case "skipped":
-      log(`tab ${tabId}: skipped: ${outcome.detail}`);
+      log.info(`tab ${tabId}: skipped: ${outcome.detail}`);
       return;
     default:
       if (outcome.status === "draft" || outcome.status === "stopped" || outcome.status === "failed") await electLocalController(index, tabId);
@@ -4527,23 +4538,23 @@ function presentRestoreOutcome(
 ): void {
   switch (outcome.status) {
     case "draft":
-      log(`tab ${tabId}: draft tab restored without a process`);
+      log.info(`tab ${tabId}: draft tab restored without a process`);
       windowState().guestDispatcher.presentUnavailable(index, tabId, DRAFT_NO_HOST_DETAIL);
       return;
     case "stopped":
       // The row stays exactly as the user left it. A restored editor for it shows its saved
       // history and why nothing was started.
-      log(`tab ${tabId}: stopped by its durable run intent; nothing was started or attached`);
+      log.info(`tab ${tabId}: stopped by its durable run intent; nothing was started or attached`);
       windowState().guestDispatcher.presentUnavailable(index, tabId, outcome.detail);
       return;
     case "conflict": {
-      log(`tab ${tabId}: conflict (${outcome.kind}): ${outcome.detail}`);
+      log.error(`tab ${tabId}: conflict (${outcome.kind}): ${outcome.detail}`);
       presentConflict(index, tabId, outcome.detail);
       showError(`${CONFLICT_LABEL[outcome.kind]}. ${outcome.detail}`);
       return;
     }
     case "failed":
-      log(`tab ${tabId}: failed (${outcome.kind}): ${outcome.detail}`);
+      log.error(`tab ${tabId}: failed (${outcome.kind}): ${outcome.detail}`);
       windowState().guestDispatcher.presentUnavailable(index, tabId, outcome.detail);
       showError(`The OMP session could not be started: ${outcome.detail}`);
       return;
@@ -4585,7 +4596,7 @@ async function electLocalController(index: SessionIndex, tabId: string): Promise
         applySlotAuthority(slot);
       }
     } catch (error) {
-      log(`tab ${tabId}: its editor-slot role could not be published (${messageOf(error)})`);
+      log.warn(`tab ${tabId}: its editor-slot role could not be published (${messageOf(error)})`);
     }
   })());
 }
@@ -4704,7 +4715,7 @@ async function setActiveTab(index: SessionIndex, tabId: string): Promise<void> {
   try {
     await index.setActiveTab(tabId);
   } catch (error) {
-    log(`tab ${tabId}: could not record the active tab: ${messageOf(error)}`);
+    log.warn(`tab ${tabId}: could not record the active tab: ${messageOf(error)}`);
   }
   windowState().usageStatus?.update();
 }
@@ -4927,7 +4938,7 @@ function handleBridgeRequest(
     const object = typeof request.payload === "object" && request.payload !== null ? request.payload : {};
     const parsed = parseGuestWebviewMessage({ ...(object as Record<string, unknown>), type: chatType });
     if (parsed === null || !route.dispatchable) {
-      log(
+      log.warn(
         `tab ${tabId}: a bridge ${chatType} was refused (${parsed === null ? "the payload was not a valid chat command" : "this route cannot dispatch: the native side is not verified for this document"})`,
       );
       if (parsed !== null) s.guestDispatcher.replyChatSendResult(tabId, parsed as ChatWebviewMessage, bridgeChatPage(bridge, documentId), "refused");
@@ -4937,13 +4948,13 @@ function handleBridgeRequest(
     void s.guestDispatcher.runChatCommand(tabId, parsed as ChatWebviewMessage, bridgeChatPage(bridge, documentId))
       .then(() => session.reply(request.requestId, null))
       .catch(() => {
-        log(`tab ${tabId}: a bridge chat command could not be processed`);
+        log.warn(`tab ${tabId}: a bridge chat command could not be processed`);
         session.reply(request.requestId, null);
       });
     return;
   }
   void handleGuestMessageOverBridge(table, tabId, responder, payload).catch(() => {
-    log(`tab ${tabId}: a bridge request could not be processed`);
+    log.warn(`tab ${tabId}: a bridge request could not be processed`);
   });
 }
 
@@ -5093,7 +5104,7 @@ function admitBridgeMutation(
       payload: mutation.payload,
     });
   } catch (error) {
-    log(`tab ${tabId}: a bridge mutation was not admitted (${error instanceof BridgeAdmissionError ? error.code : "refused"})`);
+    log.warn(`tab ${tabId}: a bridge mutation was not admitted (${error instanceof BridgeAdmissionError ? error.code : "refused"})`);
     return null;
   }
   return {
@@ -5241,7 +5252,7 @@ function postPanelAction(action: GuestPanelAction): void {
   }
   const message: GuestPanelActionMessage = { type: "omp:webview-action", action };
   void target.panel.webview.postMessage(message);
-  log(`tab ${target.tabId}: ${action} asked from a VS Code command or keybinding`);
+  log.debug(`tab ${target.tabId}: ${action} asked from a VS Code command or keybinding`);
 }
 
 // Chat quick actions (ADR-0052): the TUI's retry, history search, compaction, cycling, export and share,
@@ -5576,14 +5587,14 @@ async function loadSlashRegistry(context: vscode.ExtensionContext): Promise<void
     if (helper === undefined) return;
     const commands = await readSlashRegistry({ bunPath: bun, helperPath: helper.path, packageRoot: pkg.root, cwd: path.dirname(helper.path) });
     if (commands === null) {
-      log(`the slash-command registry of ${key} could not be read; terminal-only commands are not refused`);
+      log.warn(`the slash-command registry of ${key} could not be read; terminal-only commands are not refused`);
       return;
     }
     s.slashRegistry = { key, commands };
     s.slashRegistryFailedKey = null;
-    log(`read ${commands.length} builtin slash commands from ${key}`);
+    log.debug(`read ${commands.length} builtin slash commands from ${key}`);
   } catch (error) {
-    log(`the slash-command registry could not be read: ${messageOf(error)}`);
+    log.warn(`the slash-command registry could not be read: ${messageOf(error)}`);
   }
 }
 
@@ -5753,7 +5764,7 @@ async function addToSession(context: vscode.ExtensionContext, index: SessionInde
   }
   const delivered = await deliverInsertion(tabId, sources, cwd);
   if (!delivered.ok) {
-    log(`tab ${tabId}: editor references were not added (${delivered.reason})`);
+    log.warn(`tab ${tabId}: editor references were not added (${delivered.reason})`);
     void vscode.window.showWarningMessage(`OMP Desk: ${delivered.reason} Nothing was added.`, "Copy reference").then(choice => {
       if (choice === "Copy reference") {
         const composed = composeInsertion(sources, cwd);
@@ -5762,7 +5773,7 @@ async function addToSession(context: vscode.ExtensionContext, index: SessionInde
     });
     return;
   }
-  log(`tab ${tabId}: ${stateOf(tabId)?.mode ?? "chat"} received ${sources.length} editor reference(s)`);
+  log.debug(`tab ${tabId}: ${stateOf(tabId)?.mode ?? "chat"} received ${sources.length} editor reference(s)`);
   const notes: string[] = [];
   if (unsaved) notes.push("unsaved changes are not included");
   if (folderAdded) notes.push(`${sessionFolderName(cwd)} was pinned to the Sessions view`);
@@ -5837,12 +5848,12 @@ function notifierFor(index: SessionIndex): TurnNotifier {
       notifier: new TurnNotifier({
         send: async (tabId, notice) => {
           if (vscode.env.uriScheme !== "vscode") {
-            log(`tab ${tabId}: desktop notification ${notice.kind} suppressed (unsupported-product).`);
+            log.debug(`tab ${tabId}: desktop notification ${notice.kind} suppressed (unsupported-product).`);
             return;
           }
           const entry = index.get(tabId);
           if (entry === null || s.context === undefined) {
-            log(`tab ${tabId}: desktop notification ${notice.kind} failed (${entry === null ? "session-unavailable" : "host-unavailable"}).`);
+            log.warn(`tab ${tabId}: desktop notification ${notice.kind} failed (${entry === null ? "session-unavailable" : "host-unavailable"}).`);
             return;
           }
           const uri = vscode.Uri.from({
@@ -5860,9 +5871,9 @@ function notifierFor(index: SessionIndex): TurnNotifier {
             body: `${notificationLine(path.basename(entry.cwd), 60) || "Workspace"} — ${reason}`,
             launchUri: launchUri.toString(true),
           }, log);
-          log(`tab ${tabId}: desktop notification ${notice.kind} ${submitted === null ? "suppressed (unsupported-platform)" : "sent"}.`);
+          log.debug(`tab ${tabId}: desktop notification ${notice.kind} ${submitted === null ? "suppressed (unsupported-platform)" : "sent"}.`);
         },
-        onError: (tabId, kind) => log(`tab ${tabId}: desktop notification ${kind} failed (submission-failed).`),
+        onError: (tabId, kind) => log.warn(`tab ${tabId}: desktop notification ${kind} failed (submission-failed).`),
         onSuppressed: logNotificationSuppression,
         onEarned: tabId => recordSessionEvent(index, tabId),
       }),
@@ -5872,7 +5883,7 @@ function notifierFor(index: SessionIndex): TurnNotifier {
 }
 
 function logNotificationSuppression(tabId: string, kind: TurnNotice["kind"], reason: NotificationSuppression | "aborted"): void {
-  log(`tab ${tabId}: desktop notification ${kind} suppressed (${reason}).`);
+  log.debug(`tab ${tabId}: desktop notification ${kind} suppressed (${reason}).`);
 }
 
 function notificationSuppression(index: SessionIndex, tabId: string): NotificationSuppression | null {
@@ -5904,7 +5915,7 @@ function recordSessionEvent(index: SessionIndex, tabId: string): void {
   const markers = markersAfterEvent(entry, sessionLookedAt(index, tabId), Date.now());
   void index.recordConversationState(tabId, markers).then(
     () => s.launcherProvider?.refresh(),
-    error => log(`tab ${tabId}: the unread marker could not be saved: ${messageOf(error)}`),
+    error => log.warn(`tab ${tabId}: the unread marker could not be saved: ${messageOf(error)}`),
   );
 }
 
@@ -5918,7 +5929,7 @@ function settleViewedSession(index: SessionIndex): void {
   if (read === null) return;
   void index.recordConversationState(tabId, { lastSeenReplyId: read.lastSeenReplyId }).then(
     () => s.launcherProvider?.refresh(),
-    error => log(`tab ${tabId}: the unread marker could not be cleared: ${messageOf(error)}`),
+    error => log.warn(`tab ${tabId}: the unread marker could not be cleared: ${messageOf(error)}`),
   );
 }
 
@@ -5972,7 +5983,7 @@ function watchSubagentWork(index: SessionIndex, tabId: string, client: HostContr
       if (controlOf(stateOf(tabId))?.client === client) setSubagentWork(index, tabId, active);
     }, error => {
       if (++failures < SUBAGENT_WORK_MAX_FAILURES) return;
-      log(`tab ${tabId}: subagent work observation stopped (${describeControlError(error)})`);
+      log.warn(`tab ${tabId}: subagent work observation stopped (${describeControlError(error)})`);
       stopSubagentWatch(index, tabId);
     }).finally(() => { inFlight = false; });
   }, SUBAGENT_WORK_POLL_MS);
@@ -6006,7 +6017,7 @@ function applyTurnActivity(index: SessionIndex, tabId: string, observed: TurnAct
   }
   s.turnActivities.set(tabId, activity);
   if (baseline || previous === null || previous.settled !== activity.settled) {
-    log(`tab ${tabId}: desktop notification Chat observation (${baseline ? "baseline" : "live"}; settled=${activity.settled}; prompt=${activity.promptStatus ?? "none"}; completion=${activity.completionOutcome ?? "none"}; pending=${activity.pendingRequest !== null}).`);
+    log.debug(`tab ${tabId}: desktop notification Chat observation (${baseline ? "baseline" : "live"}; settled=${activity.settled}; prompt=${activity.promptStatus ?? "none"}; completion=${activity.completionOutcome ?? "none"}; pending=${activity.pendingRequest !== null}).`);
   }
   if (baseline) {
     notifierFor(index).baseline(tabId, activity);
@@ -6084,7 +6095,7 @@ async function openWebLinkFromMenu(argument: unknown, mode: WebLinkMode): Promis
   const url = webLinkMenuUrl(argument);
   if (url === null) return;
   try { await openPageWebLink(url, mode); }
-  catch (error) { log(`web link: cannot open ${url}: ${messageOf(error)}`); showWarning(`cannot open ${url}: ${messageOf(error)}`); }
+  catch (error) { log.warn(`web link: cannot open ${url}: ${messageOf(error)}`); showWarning(`cannot open ${url}: ${messageOf(error)}`); }
 }
 
 /**
@@ -6092,7 +6103,7 @@ async function openWebLinkFromMenu(argument: unknown, mode: WebLinkMode): Promis
  * tab (Simple Browser) or the external browser. Only the origin is logged, never the path or query.
  */
 async function openPageWebLink(url: string, mode: WebLinkMode): Promise<void> {
-  log(`web link: opening ${new URL(url).origin} in ${mode === "external" ? "the external browser" : "an editor tab"}`);
+  log.debug(`web link: opening ${new URL(url).origin} in ${mode === "external" ? "the external browser" : "an editor tab"}`);
   await openWebLink(vscode, url, mode);
 }
 
@@ -6146,7 +6157,7 @@ function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, 
           void index.recordConversationState(tabId, { title: name }).then(() => {
             refreshLauncher();
             return applyChatTabAppearance(context, index, tabId);
-          }).catch(error => log(`Session title could not be refreshed: ${messageOf(error)}`));
+          }).catch(error => log.warn(`Session title could not be refreshed: ${messageOf(error)}`));
         }
         if (!diagnosticsStageMeasured(tabId, "chat-live")) {
           s.diagnostics.succeed(tabId, "chat-live", { detail: "the conversation reached its live phase" });
@@ -6186,7 +6197,7 @@ function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, 
       s.footerBindings.get(tabId)?.observer?.refresh();
       return;
     case "recovery":
-      log(`tab ${tabId}: chat connection recovery (${event.reason}).`);
+      log.warn(`tab ${tabId}: chat connection recovery (${event.reason}).`);
       return;
     case "extension-error":
       showError(`An OMP extension reported an error: ${event.message}`);
@@ -6209,7 +6220,7 @@ async function resumeFromChat(context: vscode.ExtensionContext, index: SessionIn
   try {
     await openTab(context, index, tabId, "resumed");
   } catch (error) {
-    log(`tab ${tabId}: Resume from Chat failed: ${messageOf(error)}`);
+    log.error(`tab ${tabId}: Resume from Chat failed: ${messageOf(error)}`);
     const reason = `The session could not be resumed: ${messageOf(error)}`;
     if (!s.sessionRuntime.conversations.notify(tabId, reason) && !s.sessionRuntime.conversations.has(tabId)) s.guestDispatcher.presentUnavailable(index, tabId, reason);
     return;
@@ -6217,7 +6228,7 @@ async function resumeFromChat(context: vscode.ExtensionContext, index: SessionIn
   const phase = s.sessionRuntime.conversations.stateOf(tabId)?.phase ?? null;
   if (phase === "live" || phase === "starting" || phase === "attaching" || phase === "resyncing") return;
   const outcome = s.outcomes.get(tabId);
-  log(`tab ${tabId}: Resume from Chat did not start the session (${outcome?.status ?? "no outcome"})`);
+  log.warn(`tab ${tabId}: Resume from Chat did not start the session (${outcome?.status ?? "no outcome"})`);
   // A refused, failed or conflicting admission already put its reason on the page (banner and, for a
   // conflict, an error): `handleRestoreOutcome` presents every outcome that is not a running host.
   if (outcome !== undefined && outcome !== before && outcome.status !== "restored" && outcome.status !== "attached") return;
@@ -6236,11 +6247,11 @@ function logChatConnectionPhase(tabId: string, phase: ChatPhase, code: string | 
   const previous = s.loggedChatPhases.get(tabId);
   if (phase === "failed" || phase === "stopped") {
     s.loggedChatPhases.set(tabId, phase);
-    log(`tab ${tabId}: chat connection ${phase}${code === null ? "" : ` (${code})`}.`);
-    if (phase === "stopped" && exitReason !== undefined) log(`tab ${tabId}: ${chatExitText(exitReason)}`);
+    log[phase === "failed" ? "warn" : "info"](`tab ${tabId}: chat connection ${phase}${code === null ? "" : ` (${code})`}.`);
+    if (phase === "stopped" && exitReason !== undefined) log.warn(`tab ${tabId}: ${chatExitText(exitReason)}`);
   } else if (phase === "live") {
     s.loggedChatPhases.delete(tabId);
-    if (previous === "failed") log(`tab ${tabId}: chat connection restored; the same session is live again.`);
+    if (previous === "failed") log.info(`tab ${tabId}: chat connection restored; the same session is live again.`);
   }
 }
 
@@ -6330,7 +6341,7 @@ function panelResponder(tabId: string, panel: vscode.WebviewPanel, actionSeq: un
           settle: outcome => reservation.settle(outcome),
         };
       } catch (error) {
-        log(`tab ${tabId}: a panel mutation was not admitted (${error instanceof BridgeAdmissionError ? error.code : "refused"})`);
+        log.warn(`tab ${tabId}: a panel mutation was not admitted (${error instanceof BridgeAdmissionError ? error.code : "refused"})`);
         return null;
       }
     },
@@ -6583,7 +6594,7 @@ function refreshDefaultProviderModels(): Promise<void> {
         if (typeof parsed !== "object" || parsed === null || !("models" in parsed) || !Array.isArray(parsed.models)) continue;
         s.defaultProviderModelsAvailable = parsed.models.length > 0;
         s.launcherProvider?.setProviderLoginRequired(!s.defaultProviderModelsAvailable);
-      } catch { log("Default-profile models could not be read; retaining the last availability."); }
+      } catch { log.warn("Default-profile models could not be read; retaining the last availability."); }
     } while (s.defaultProviderModelsDirty);
   })().finally(() => { s.defaultProviderModelsRead = null; });
   return s.defaultProviderModelsRead;
@@ -6691,7 +6702,7 @@ function ensureFooterBinding(index: SessionIndex, tabId: string): void {
     const api = exports.getAPI(1); // Keep the CLI observer if Git is disabled/unavailable.
     binding.observer?.dispose();
     binding.observer = observeSessionBranch(cwd, api, publish);
-  }).catch(() => log("Git footer observation could not activate the built-in Git extension."));
+  }).catch(() => log.warn("Git footer observation could not activate the built-in Git extension."));
 }
 
 /** Session cost has its own attach/end readback; it must not inherit the quota cache's five-minute throttle. */
@@ -6752,7 +6763,7 @@ function refreshFooterMetadata(index: SessionIndex, tabId: string, refreshUsage:
     binding.message = { ...binding.message, provider: model.provider, ...usage };
     binding.usageReadAt = cache.readAt(model.provider);
     publishFooterMetadata(tabId);
-  }).catch(() => log("Provider usage executable resolution failed; retaining the last value."));
+  }).catch(() => log.warn("Provider usage executable resolution failed; retaining the last value."));
 }
 
 
@@ -6810,7 +6821,7 @@ async function runProviderAuth<T extends string>(
       signal: run.signal,
     });
   } catch (error) {
-    log(`provider login: the flow failed unexpectedly: ${messageOf(error)}`);
+    log.error(`provider login: the flow failed unexpectedly: ${messageOf(error)}`);
     showError("The provider login could not be completed.");
     return "failed";
   } finally {
@@ -7067,10 +7078,10 @@ async function showHostControls(index: SessionIndex): Promise<void> {
     showInfo("The session has not reported its model yet.");
     return;
   }
-  log(`control[${active.tabId}]: model: ${describeModel(live.model)}, thinking: ${live.thinkingLevel ?? "unknown"}`);
+  log.info(`control[${active.tabId}]: model: ${describeModel(live.model)}, thinking: ${live.thinkingLevel ?? "unknown"}`);
   if (snapshot !== null) {
-    log(`control[${active.tabId}]: host: instance ${snapshot.host.instanceId}, epoch ${snapshot.host.epoch}`);
-    log(`control[${active.tabId}]: session file: ${snapshot.host.sessionFile ?? "not materialized"}`);
+    log.info(`control[${active.tabId}]: host: instance ${snapshot.host.instanceId}, epoch ${snapshot.host.epoch}`);
+    log.info(`control[${active.tabId}]: session file: ${snapshot.host.sessionFile ?? "not materialized"}`);
   }
   showInfo(`The session runs ${describeModel(live.model)} with thinking ${live.thinkingLevel ?? "unknown"}. See the OMP Desk output channel for details.`);
 }
@@ -7162,7 +7173,7 @@ async function refreshControlSnapshot(channel: ControlChannel): Promise<ControlH
     if (mayReportControlFailure(target, { runtime: null, pid: null, client: channel.client })) {
       windowState().sessionRuntime.control.reportFailure(channel.tabId, error);
     } else {
-      log(`tab ${channel.tabId}: a failed control read back was ignored: this tab holds a different channel now`);
+      log.debug(`tab ${channel.tabId}: a failed control read back was ignored: this tab holds a different channel now`);
     }
     return null;
   }
@@ -7556,7 +7567,7 @@ function revealActiveSession(index: SessionIndex): Promise<void> {
           if (expand) s.launcherExpandFor = null;
         }
       } catch (error) {
-        log(`launcher: could not select tab ${tabId}: ${messageOf(error)}`);
+        log.warn(`launcher: could not select tab ${tabId}: ${messageOf(error)}`);
       } finally {
         reserved.release();
       }
@@ -8336,7 +8347,7 @@ export async function fileEvidenceDeletionRefusal(
   for (const namespace of resolved.session.namespaces) {
     const proof = await producerStopProof(namespace);
     if (!proof.stopped) {
-      log(`file observation delete refused: ${proof.detail}`);
+      log.warn(`file observation delete refused: ${proof.detail}`);
       return "A session may still be recording file changes. Stop it before deleting its observations.";
     }
   }
@@ -8643,7 +8654,7 @@ async function enableFileEvidence(context: vscode.ExtensionContext, index: Sessi
   }
   const namespace = before.binding.namespace;
   const disabled = await readNativeFileObservationDisable({ paths: namespace.paths });
-  log(`file observation consent: session ${namespace.paths.sessionId}, pid ${namespace.pid ?? "unknown"}, access ${readiness.evidence.join("; ")}`);
+  log.info(`file observation consent: session ${namespace.paths.sessionId}, pid ${namespace.pid ?? "unknown"}, access ${readiness.evidence.join("; ")}`);
   const detail = [
     ...NATIVE_FILE_OBSERVATION_DISCLOSURE,
     "",
@@ -8690,7 +8701,7 @@ async function enableFileEvidence(context: vscode.ExtensionContext, index: Sessi
     showError(`File observation stayed off: ${granted.reason ?? "the consent record was not stored"}.`);
     return;
   }
-  log(`file observation enabled for session namespace ${grantedFor.binding.namespace.paths.sessionDigest}`);
+  log.info(`file observation enabled for session namespace ${grantedFor.binding.namespace.paths.sessionDigest}`);
   showInfo(
     "File observation is enabled for this session. Recorded observations are read-only evidence: no undo, redo, rollback or checkpoint restore is offered from them.",
   );
@@ -8739,7 +8750,7 @@ async function disableFileEvidence(context: vscode.ExtensionContext, index: Sess
       if (result.revoked) revoked += 1;
     }
   }
-  log(
+  log.info(
     `file observation disabled for ${session.namespaces.length} namespace(s); ${revoked} consent record(s) revoked`,
   );
   // Open documents re-read the store: disabling keeps retained history, so they
@@ -8919,7 +8930,7 @@ async function deleteFileEvidence(context: vscode.ExtensionContext, index: Sessi
     showWarning(`File observations were ${removed}, but the store reported: ${failure}.`);
     return;
   }
-  log(`file observations deleted (${scope}): ${removed}`);
+  log.info(`file observations deleted (${scope}): ${removed}`);
   showInfo(
     `File observations deleted: ${removed}.${
       revoked ? " Their consent records were removed as well." : ""
@@ -9048,7 +9059,7 @@ async function showDiagnostics(context: vscode.ExtensionContext, index: SessionI
     await vscode.window.showTextDocument(document, { preview: false });
     // An already-open report holds the previous content; ask it to re-read.
     s.diagnosticsDocumentChanges.fire(diagnosticsUri());
-    log("diagnostics report shown");
+    log.debug("diagnostics report shown");
   } catch (error) {
     showError(`The diagnostics report could not be shown: ${messageOf(error)}`);
   }
@@ -9071,11 +9082,11 @@ function messageOf(error: unknown): string {
 }
 
 setProcessProbeObserver(probe => windowTiming("process start time read", `pid ${probe.pid} ${probe.purpose} ${probe.ms} ms found=${probe.found}`));
-setToolSpawnObserver(spawn => log(formatToolSpawn(spawn)));
+setToolSpawnObserver(spawn => log[spawn.outcome === "ok" ? "debug" : "warn"](formatToolSpawn(spawn)));
 
-/** One line of the hand-over timeline between windows (ADR-0056/0057); every line carries the log's own millisecond stamp. */
-function windowTiming(event: string, detail = ""): void {
-  log(`window timing: ${event}${detail === "" ? "" : ` ${detail}`}`);
+/** One line of the hand-over timeline between windows (ADR-0056/0057); the log stamps each line itself. Per-step lines are `debug`; a summary is passed `info`. */
+function windowTiming(event: string, detail = "", level: "debug" | "info" = "debug"): void {
+  log[level](`window timing: ${event}${detail === "" ? "" : ` ${detail}`}`);
 }
 
 /**
@@ -9122,7 +9133,7 @@ function legacySettingsPort(context: vscode.ExtensionContext, foreignSettings: R
     foreignSettings,
     ...fileClaim(path.join(context.globalStorageUri.fsPath, "settings-move.claim")),
     delay: ms => delayMs(ms),
-    log: line => log(line),
+    log,
   };
 }
 
@@ -9135,10 +9146,14 @@ function setDeskContext(key: string, value: unknown): void {
   }
 }
 
-function log(message: string): void {
-  // Silent before activation: the log is the one function that must not require a window.
-  window?.output?.appendLine(`[${new Date().toISOString()}] ${message}`);
-}
+/** The OMP Desk log: silent before activation (there is no window yet), the window's `LogOutputChannel` after. */
+const log: Logger = {
+  error: message => window?.output?.error(message),
+  warn: message => window?.output?.warn(message),
+  info: message => window?.output?.info(message),
+  debug: message => window?.output?.debug(message),
+  trace: message => window?.output?.trace(message),
+};
 
 // Reinstall under a running window
 
@@ -9166,7 +9181,7 @@ function packageChangedOnDisk(): boolean {
   }
   if (!s.packageDriftAnnounced) {
     s.packageDriftAnnounced = true;
-    log(`the installed extension changed on disk under this window (${verdict.files.join(", ")}); a reload finishes the update.`);
+    log.warn(`the installed extension changed on disk under this window (${verdict.files.join(", ")}); a reload finishes the update.`);
     void vscode.window.showWarningMessage(UPDATED_ON_DISK_DETAIL, RELOAD_WINDOW_LABEL).then(choice => {
       if (choice === RELOAD_WINDOW_LABEL) void vscode.commands.executeCommand("workbench.action.reloadWindow");
     });
@@ -9209,7 +9224,7 @@ function registerPanelLifecycle(
     }
     const handling = dispatchSlotMessage(index, slot, panel, message);
     void handling.catch(() => {
-      log(`slot ${slot}: a guest message could not be processed`);
+      log.warn(`slot ${slot}: a guest message could not be processed`);
     });
   });
   panel.onDidDispose(() => {
@@ -9217,7 +9232,7 @@ function registerPanelLifecycle(
     if (current === undefined || current.panel !== panel) {
       // A superseded panel. This slot is bound to the panel that replaced it, and
       // this close must not clear the replacement's page.
-      log(`slot ${slot}: a superseded webview closed`);
+      log.debug(`slot ${slot}: a superseded webview closed`);
       return;
     }
     if (current.tabId !== null) cancelControlPicker(current.tabId);
@@ -9243,7 +9258,7 @@ function registerPanelLifecycle(
     // editor's records. A host-only restart disposes no editor, and its records must
     // survive for the page that is still running.
     windowState().bridgeHost.retireClosedEditor(slot);
-    log(`slot ${slot}: webview closed; the OMP process keeps running`);
+    log.debug(`slot ${slot}: webview closed; the OMP process keeps running`);
     refreshLauncher();
   });
   panel.onDidChangeViewState(event => {
@@ -9312,7 +9327,7 @@ async function handlePassiveSlotMessage(slot: string, panel: vscode.WebviewPanel
   const parsed = parseGuestWebviewMessage(message);
   if (parsed === null) return;
   if (parsed.type === "omp:focus-trace") {
-    log(`tab ${state.tabId}: focus (non-controlling editor): ${parsed.detail}`);
+    log.debug(`tab ${state.tabId}: focus (non-controlling editor): ${parsed.detail}`);
     return;
   }
   if (parsed.type === "omp:selection-reply") {
@@ -9375,7 +9390,7 @@ async function handlePassiveSlotMessage(slot: string, panel: vscode.WebviewPanel
       ...(parsed.action === "snapshot" ? {} : { notice: "No change was sent." }),
     };
     void panel.webview.postMessage(refusal);
-    log(`slot ${slot}: a non-controlling editor's ${parsed.type} was answered as unavailable`);
+    log.debug(`slot ${slot}: a non-controlling editor's ${parsed.type} was answered as unavailable`);
     return;
   }
   if (CHAT_COMMAND_TYPES.has(parsed.type)) {
@@ -9392,7 +9407,7 @@ async function handlePassiveSlotMessage(slot: string, panel: vscode.WebviewPanel
     showWarning(`${passiveReasonForSlot(slot) ?? PASSIVE_REASON_DEFAULT} The action was not run.`);
     return;
   }
-  log(`slot ${slot}: a non-controlling editor's ${parsed.type} was refused`);
+  log.debug(`slot ${slot}: a non-controlling editor's ${parsed.type} was refused`);
 }
 
 // In-tab terminal: one managed writer, one frontend per editor (ADR-0024)
@@ -9665,7 +9680,7 @@ async function handleTerminalGuestMessage(
     (fencedOf(state) || passiveReasonForSlot(state.slotId) !== null) &&
     (parsed.type === "omp:terminal-input" || parsed.type === "omp:terminal-resize")
   ) {
-    log(`slot ${state.slotId}: a non-controlling editor's ${parsed.type} was refused`);
+    log.debug(`slot ${state.slotId}: a non-controlling editor's ${parsed.type} was refused`);
     return;
   }
   const pipeline = () => stateOf(tabId)?.pipeline ?? null;
@@ -9704,7 +9719,7 @@ async function handleTerminalGuestMessage(
         openFile: location => openTerminalFile(vscode, location, s.routing.fileWindowColumn()),
         revealInExplorer: target => revealPathInExplorer(vscode, target),
         revealInOs: target => revealPathInOs(target),
-        warn: message => { log(`terminal link: ${message}`); showWarning(message); },
+        warn: message => { log.warn(`terminal link: ${message}`); showWarning(message); },
         openUrl: openPageWebLink,
         searchSymbols: async query => { await vscode.commands.executeCommand("workbench.action.quickOpen", `#${query}`); },
         lookupFileName: name => symbolLinkResolver().lookupFileName(name, { cwd, roots: symbolRoots(cwd, (vscode.workspace.workspaceFolders ?? []).map(folder => folder.uri.fsPath)) }),
@@ -10008,7 +10023,7 @@ function watchShellPanelOwnerStop(slot: string, panel: vscode.WebviewPanel, hand
     // and a later disarm — a lost helper, an unattested topology — is what a support log
     // needs. The broker's own reason is recorded verbatim; this is not an error.
     if (status?.state === "disarmed") {
-      log(`shell ${slot}: automatic owner-exit cleanup is disarmed: ${status.detail}`);
+      log.warn(`shell ${slot}: automatic owner-exit cleanup is disarmed: ${status.detail}`);
     }
   });
 }
@@ -10082,7 +10097,7 @@ function bindShellPanel(
     const parsed = parseGuestWebviewMessage(message);
     if (parsed === null || TERMINAL_PANEL_TYPES[parsed.type] !== true) return;
     void handleTerminalGuestMessage(slot, parsed, parsed as unknown as Record<string, unknown>).catch(() => {
-      log(`shell ${slot}: a terminal message could not be processed`);
+      log.warn(`shell ${slot}: a terminal message could not be processed`);
     });
   });
   panel.onDidDispose(() => {
@@ -10104,7 +10119,7 @@ async function startShellTerminal(index: SessionIndex, slot: string, handle: Pty
   try {
     await handle.attach();
   } catch (error) {
-    log(`shell ${slot}: the broker could not be attached: ${messageOf(error)}`);
+    log.warn(`shell ${slot}: the broker could not be attached: ${messageOf(error)}`);
   }
   if (stateOf(slot)?.panel == null) return;
   ensureTerminalPipeline(index, slot, handle);
@@ -10115,7 +10130,7 @@ async function startShellTerminal(index: SessionIndex, slot: string, handle: Pty
       await s.brokerSlots?.forget(slot);
       refreshLauncher();
     },
-    log: message => log(`shell ${slot}: ${message}`),
+    log: prefixedLogger(log, `shell ${slot}: `),
     runRetirement: operation => index.lifecycle.run(slot, operation),
   });
   // The shell's broker may be ended from outside (Kill in Sessions, Task Manager, a crash) without a word over the
@@ -10129,17 +10144,17 @@ async function startShellTerminal(index: SessionIndex, slot: string, handle: Pty
     brokerPid: handle.brokerPid,
     isCurrent: () => watchingBroker,
     onLost: async () => {
-      log(`shell ${slot}: the broker process ${handle.brokerPid} no longer exists; checking that its shell (pid ${shellRoot.pid}) is gone too`);
+      log.warn(`shell ${slot}: the broker process ${handle.brokerPid} no longer exists; checking that its shell (pid ${shellRoot.pid}) is gone too`);
       const proven = shellRoot.pid > 0 && await brokerLossProven(attachBrokerClient, () => watchingBroker, { pid: handle.brokerPid, creationTime: handle.record.brokerCreationTime }, shellRoot);
       if (!watchingBroker) return;
       if (!proven) {
-        log(`shell ${slot}: the broker process is gone but its shell could not be confirmed gone; the recovery record is kept`);
+        log.warn(`shell ${slot}: the broker process is gone but its shell could not be confirmed gone; the recovery record is kept`);
         showWarning("A terminal's background process ended, but its shell could not be confirmed ended. Check Task Manager or refresh Sessions.");
         return;
       }
       await index.lifecycle.run(slot, async () => {
         if (!watchingBroker || stateOf(slot)?.ownerStopWatch !== ownStop) return;
-        log(`shell ${slot}: the broker process and the shell pid ${shellRoot.pid} are gone`);
+        log.info(`shell ${slot}: the broker process and the shell pid ${shellRoot.pid} are gone`);
         await s.shellSlots?.remove(slot);
         await s.brokerSlots?.forget(slot);
         const ended = stateOf(slot);
@@ -10200,7 +10215,7 @@ async function handleShellEditorClosed(
     s.tabs.delete(slot);
     s.shellEditors.delete(slot);
     await s.shellSlots?.remove(slot);
-    log(`shell ${slot}: closed after its process exited; no tree-stop claim made`);
+    log.info(`shell ${slot}: closed after its process exited; no tree-stop claim made`);
     refreshLauncher();
     return;
   }
@@ -10222,7 +10237,7 @@ async function handleShellEditorClosed(
     // visible editor.
     const reattached = await attachFolderShell(context, index, record);
     if (!reattached) {
-      log(`shell ${slot}: terminal for ${record.cwd} could not be reattached`);
+      log.warn(`shell ${slot}: terminal for ${record.cwd} could not be reattached`);
       showWarning("This terminal could not be reconnected. Use Reconnect Terminal to try again.");
     }
     refreshLauncher();
@@ -10275,7 +10290,7 @@ async function terminateFolderShell(slot: string, record: ShellSlotRecord): Prom
   const s = windowState();
   const handle = await shellWriterFor(slot);
   if (handle === null) {
-    log(`shell ${slot}: terminal for ${record.cwd} could not be reached for termination`);
+    log.warn(`shell ${slot}: terminal for ${record.cwd} could not be reached for termination`);
     showWarning("This terminal could not be reached. Use Stop in Processes to try again.");
     return;
   }
@@ -10286,7 +10301,7 @@ async function terminateFolderShell(slot: string, record: ShellSlotRecord): Prom
       s.tabs.delete(slot);
       s.shellEditors.delete(slot);
     },
-    log: message => log(`shell ${slot}: ${message}`),
+    log: prefixedLogger(log, `shell ${slot}: `),
   });
   if (outcome.kind === "unconfirmed") {
     showWarning(outcome.stage === "retirement"
@@ -10313,7 +10328,7 @@ function shellSerializerFor(context: vscode.ExtensionContext, index: SessionInde
       bindShellPanel(context, index, slot, panel, "restored");
       const attached = await attachFolderShell(context, index, record);
       if (!attached) {
-        log(`shell ${slot}: the restored editor could not reattach its broker`);
+        log.warn(`shell ${slot}: the restored editor could not reattach its broker`);
       }
     },
   };
@@ -10348,7 +10363,7 @@ async function legacySettingsSettled(s: WindowState): Promise<void> {
   const outcome = await Promise.race([s.legacySettingsMoved.then(() => "moved" as const), delayMs(Math.max(0, left)).then(() => "late" as const)]);
   if (outcome === "late" && !s.legacySettingsLateLogged) {
     s.legacySettingsLateLogged = true;
-    log(`settings: the move from omp.* to ompDesk.* is still running ${LEGACY_SETTINGS_MOVE_WAIT_MS} ms after activation; the launch goes on`);
+    log.warn(`settings: the move from omp.* to ompDesk.* is still running ${LEGACY_SETTINGS_MOVE_WAIT_MS} ms after activation; the launch goes on`);
   }
 }
 
@@ -10480,7 +10495,7 @@ async function renameStoppedSession(
   try {
     helper = (await windowState().staging.entries()).renameHelper;
   } catch (error) {
-    log(`rename helper staging failed: ${messageOf(error)}`);
+    log.error(`rename helper staging failed: ${messageOf(error)}`);
     showError("Session rename support could not be prepared. Resume the session and rename it there; see OMP Desk output for details.");
     return;
   }
@@ -10498,7 +10513,7 @@ async function renameStoppedSession(
   try {
     pkg = await resolveOmpPackageRoot(await resolveOmpBinary());
   } catch (error) {
-    log(`the installed OMP could not be resolved for a rename: ${messageOf(error)}`);
+    log.error(`the installed OMP could not be resolved for a rename: ${messageOf(error)}`);
     showError(
       `The installed OMP could not be resolved, so a stopped session's stored title cannot be changed here: ${messageOf(error).split(/\r?\n/)[0]}`,
     );
@@ -10520,7 +10535,7 @@ async function renameStoppedSession(
   try {
     claim = await acquireClaim(context.globalStorageUri.fsPath, file, ownerGeneration, await index.claimHolderReady());
   } catch (error) {
-    log(`rename claim failed: ${messageOf(error)}`);
+    log.error(`rename claim failed: ${messageOf(error)}`);
     showError("This session could not be opened for renaming. Refresh Sessions and try again; see OMP Desk output for details.");
     return;
   }
@@ -10667,7 +10682,7 @@ async function closeSession(context: vscode.ExtensionContext, index: SessionInde
     return;
   }
   const { tabId, entry } = target;
-  log(
+  log.debug(
     `close: target ${tabId} (argument ${argument === undefined ? "none" : typeof argument}); ` +
       `editor in front ${editorInFrontConversation(index) ?? "none"}; index active ${index.activeTabId ?? "none"}`,
   );

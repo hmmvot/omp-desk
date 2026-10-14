@@ -1,4 +1,5 @@
 import { isTransientOmpFailure } from "../../shared/omp-unavailable.ts";
+import type { Logger } from "../../shared/logger.ts";
 
 /**
  * Where Bun and the selected OMP's package source are (ADR-0061). Finding them runs the same launcher
@@ -26,7 +27,7 @@ export interface RuntimeResolverDeps {
 	 * another key describes another OMP: it is neither served nor kept across a failure.
 	 */
 	key?(): string;
-	log(message: string): void;
+	readonly log: Logger;
 	now?(): number;
 }
 export const RESOLVE_TTL_MS = 60_000;
@@ -56,10 +57,10 @@ export function createRuntimeResolver(deps: RuntimeResolverDeps): () => Promise<
 		try {
 			const result = await deps.resolve();
 			if (result.ok) {
-				deps.log(`inventory: resolved Bun (${result.bun}) and the OMP package (${result.packageRoot}, launcher ${result.launcher}${result.release === null ? "" : ` release ${result.release}`}) in ${now() - started} ms`);
+				deps.log.debug(`inventory: resolved Bun (${result.bun}) and the OMP package (${result.packageRoot}, launcher ${result.launcher}${result.release === null ? "" : ` release ${result.release}`}) in ${now() - started} ms`);
 				// The answer belongs to the read that asked; it is cached only while the setting still is what it was asked under.
 				if (!current()) {
-					deps.log("inventory: the OMP setting changed or was resolved again while resolving; this answer is not kept");
+					deps.log.debug("inventory: the OMP setting changed or was resolved again while resolving; this answer is not kept");
 					return { bun: result.bun, packageRoot: result.packageRoot };
 				}
 				good = { at: now(), bun: result.bun, packageRoot: result.packageRoot };
@@ -72,17 +73,17 @@ export function createRuntimeResolver(deps: RuntimeResolverDeps): () => Promise<
 			transient = isTransientOmpFailure(error);
 			failure = `The installed OMP could not be resolved: ${text.split(/\r?\n/)[0]!.slice(0, 300)}`;
 		}
-		deps.log(`inventory: resolving Bun and the OMP package failed after ${now() - started} ms (${transient ? "transient" : "definitive"}): ${failure}`);
+		deps.log.warn(`inventory: resolving Bun and the OMP package failed after ${now() - started} ms (${transient ? "transient" : "definitive"}): ${failure}`);
 		// Only an answer found under this very setting by the attempt that is still the current one describes the OMP that failed.
 		if (current() && good !== null && goodKey === key) {
 			if (transient) {
 				// Nothing was learned about the install, and resolution does not substitute another one; a worker that cannot start reports it itself.
 				good = { ...good, at: now() };
-				deps.log("inventory: keeping the Bun and OMP package found earlier");
+				deps.log.warn("inventory: keeping the Bun and OMP package found earlier");
 				return good;
 			}
 			good = null;
-			deps.log("inventory: dropping the Bun and OMP package found earlier; Desk no longer resolves them");
+			deps.log.warn("inventory: dropping the Bun and OMP package found earlier; Desk no longer resolves them");
 		}
 		return { unavailable: failure };
 	};
@@ -90,7 +91,7 @@ export function createRuntimeResolver(deps: RuntimeResolverDeps): () => Promise<
 		const key = currentKey();
 		if (good !== null && goodKey !== key) {
 			good = null;
-			deps.log("inventory: the OMP setting changed; the Bun and OMP package found earlier are not reused");
+			deps.log.debug("inventory: the OMP setting changed; the Bun and OMP package found earlier are not reused");
 		}
 		if (good !== null && now() - good.at <= RESOLVE_TTL_MS) return good;
 		if (running === null || running.key !== key) {

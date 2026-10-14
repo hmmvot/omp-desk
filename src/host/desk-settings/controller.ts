@@ -9,6 +9,7 @@ import {
 	sameValue,
 } from "../../protocol/desk-settings.ts";
 import type { ConfigLayers, DeskSettingsMessage, JsonValue, SettingDescriptor, Target, WorkspaceFacts } from "../../protocol/desk-settings.ts";
+import type { Logger } from "../../shared/logger.ts";
 
 /** What the controller needs from VS Code. Tests substitute a fake; `view.ts` binds the real configuration API. */
 export interface DeskSettingsPort {
@@ -52,9 +53,9 @@ export class DeskSettingsController {
 
 	readonly descriptors: readonly SettingDescriptor[];
 	readonly port: DeskSettingsPort;
-	readonly log: (message: string) => void;
+	readonly log: Logger;
 
-	constructor(descriptors: readonly SettingDescriptor[], port: DeskSettingsPort, log: (message: string) => void) {
+	constructor(descriptors: readonly SettingDescriptor[], port: DeskSettingsPort, log: Logger) {
 		this.descriptors = descriptors;
 		this.port = port;
 		this.log = log;
@@ -100,10 +101,10 @@ export class DeskSettingsController {
 				if (!checked.ok || typeof checked.value !== "string") return reply(false, checked.ok ? "The value must be text." : checked.message);
 				try {
 					const outcome = await this.port.testOmp(checked.value);
-					this.log(`settings view: test of ${descriptor.key} (${checked.value === "" ? "PATH search" : checked.value}): ${outcome.ok ? "resolved" : "refused"}`);
+					this.log.info(`settings view: test of ${descriptor.key} (${checked.value === "" ? "PATH search" : checked.value}): ${outcome.ok ? "resolved" : "refused"}`);
 					return reply(outcome.ok, outcome.message);
 				} catch (error) {
-					this.log(`settings view: test of ${descriptor.key} failed: ${errorText(error)}`);
+					this.log.error(`settings view: test of ${descriptor.key} failed: ${errorText(error)}`);
 					return reply(false, errorText(error));
 				}
 			}
@@ -122,7 +123,7 @@ export class DeskSettingsController {
 			await open();
 			return { type: "settings:result", requestId, key: descriptor.key, ok: true, message: "" };
 		} catch (error) {
-			this.log(`settings view: could not open ${descriptor.key}: ${errorText(error)}`);
+			this.log.error(`settings view: could not open ${descriptor.key}: ${errorText(error)}`);
 			return { type: "settings:result", requestId, key: descriptor.key, ok: false, message: `Could not open it: ${errorText(error)}` };
 		}
 	}
@@ -139,10 +140,10 @@ export class DeskSettingsController {
 		try {
 			await this.port.update(descriptor.key, checked.value, chosen.target);
 		} catch (error) {
-			this.log(`settings view: writing ${descriptor.key} to ${layer} settings failed: ${errorText(error)}`);
+			this.log.error(`settings view: writing ${descriptor.key} to ${layer} settings failed: ${errorText(error)}`);
 			return result(false, `Could not save to ${layer} settings: ${errorText(error)}`);
 		}
-		this.log(`settings view: ${descriptor.key} = ${JSON.stringify(checked.value)} saved to ${layer} settings`);
+		this.log.info(`settings view: ${descriptor.key} = ${JSON.stringify(checked.value)} saved to ${layer} settings`);
 		const after = this.port.inspect(descriptor.key);
 		const inEffect = this.port.effective(descriptor.key);
 		if (sameValue(inEffect, checked.value)) return result(true, `Saved to ${layer} settings.`);
@@ -163,11 +164,11 @@ export class DeskSettingsController {
 				await this.port.update(descriptor.key, undefined, target);
 				cleared.push(LAYER_NAMES[target]);
 			} catch (error) {
-				this.log(`settings view: resetting ${descriptor.key} in ${LAYER_NAMES[target]} settings failed: ${errorText(error)}`);
+				this.log.error(`settings view: resetting ${descriptor.key} in ${LAYER_NAMES[target]} settings failed: ${errorText(error)}`);
 				return result(false, `Could not reset in ${LAYER_NAMES[target]} settings: ${errorText(error)}${cleared.length > 0 ? ` (${cleared.join(" and ")} settings were cleared.)` : ""}`);
 			}
 		}
-		this.log(`settings view: ${descriptor.key} reset (cleared ${cleared.join(" and ")} settings)`);
+		this.log.info(`settings view: ${descriptor.key} reset (cleared ${cleared.join(" and ")} settings)`);
 		const clearedText = `cleared ${cleared.join(" and ")} settings`;
 		// The queue excludes neither another window nor a hand edit, so what is in effect is read back before the default is claimed.
 		const defaultValue = this.port.inspect(descriptor.key).defaultValue;

@@ -12,6 +12,7 @@
  * is committed.
  */
 import { setTimeout as delay } from "node:timers/promises";
+import type { Logger } from "../shared/logger.ts";
 import { waitForManagedRootExit } from "../host/native-session.ts";
 import type { NativeHostRuntime, SessionHostRuntime } from "../host/native-session.ts";
 import type { PtyBrokerClient } from "../host/pty-client.ts";
@@ -53,7 +54,7 @@ export interface LocalExitDeps {
 	readonly attachBrokerClient: () => Promise<PtyBrokerClient | null>;
 	/** The durable broker slot table, `undefined` before activation created it. */
 	readonly brokerSlots: () => BrokerSlotStore | undefined;
-	readonly log: (message: string) => void;
+	readonly log: Logger;
 }
 
 function messageOf(error: unknown): string {
@@ -76,7 +77,7 @@ export class LocalExitOperations {
 	 */
 	async retireBroker(tabId: string, runtime: SessionHostRuntime): Promise<void> {
 		const result = await retireStoppedRpcBroker(runtime);
-		this.#deps.log(`tab ${tabId}: ${result.detail}`);
+		this.#deps.log.info(`tab ${tabId}: ${result.detail}`);
 		if (result.retired) await this.#deps.brokerSlots()?.forget(runtime.identity.slot).catch(() => undefined);
 	}
 
@@ -99,11 +100,11 @@ export class LocalExitOperations {
 			// the index records from here on is the launcher's status.
 			window.forgetOutcome(tabId);
 			const ownerGeneration = index.get(tabId)?.ownership?.ownerGeneration ?? null;
-			log(`tab ${tabId}: the OMP process exited`);
+			log.info(`tab ${tabId}: the OMP process exited`);
 			const broker = await this.#deps.attachBrokerClient();
 			if (broker === null) { window.fence(current, true); return; }
 			const stop = await waitForManagedRootExit(runtime, broker, 1_000);
-			log(`native exit ${runtime.pid}: ${stop.diagnosticDetail ?? stop.detail}`);
+			log.info(`native exit ${runtime.pid}: ${stop.diagnosticDetail ?? stop.detail}`);
 			if (!stop.writerGone) {
 				current.controlFailure = stop.detail;
 				window.fence(current, true);
@@ -122,7 +123,7 @@ export class LocalExitOperations {
 				if (stop.writerGone) await control.release(tabId, ownerGeneration);
 				else current.controlFailure = stop.detail;
 			} catch (error) {
-				log(`tab ${tabId}: the exit of the OMP process could not be recorded: ${messageOf(error)}`);
+				log.error(`tab ${tabId}: the exit of the OMP process could not be recorded: ${messageOf(error)}`);
 				window.notice("error", `The OMP process exited, but its session could not be recorded as stopped: ${messageOf(error)}. Refresh Sessions before resuming it.`);
 				window.view(current);
 				window.refresh();
@@ -130,7 +131,7 @@ export class LocalExitOperations {
 			}
 			try {
 				const result = await index.closeSession(tabId, { confirmedStopped: stop.writerGone, detail: stop.detail }, lease);
-				log(`tab ${tabId}: closeSession released=${result.released} (${result.detail})`);
+				log.info(`tab ${tabId}: closeSession released=${result.released} (${result.detail})`);
 				if (!result.released) {
 					window.notice(
 						"error",
@@ -138,13 +139,13 @@ export class LocalExitOperations {
 					);
 				}
 			} catch (error) {
-				log(`tab ${tabId}: closeSession failed: ${messageOf(error)}`);
+				log.error(`tab ${tabId}: closeSession failed: ${messageOf(error)}`);
 				window.notice("error", `Session ownership could not be reconciled after the OMP process exited: ${messageOf(error)}`);
 			}
 			window.view(current);
 			window.refresh();
 		}).catch((error: unknown) => {
-			log(`tab ${tabId}: the exit of the OMP process could not be completed: ${messageOf(error)}`);
+			log.error(`tab ${tabId}: the exit of the OMP process could not be completed: ${messageOf(error)}`);
 			window.notice("error", `The OMP process exited, but OMP Desk could not finish closing its session: ${messageOf(error)}. Refresh Sessions before resuming it.`);
 		});
 	}
@@ -164,7 +165,7 @@ export class LocalExitOperations {
 			const client = await this.#deps.attachBrokerClient();
 			if (client === null) return;
 			const stop = await waitForManagedRootExit(runtime, client, 1_000);
-			log(`native exit ${runtime.pid}: ${stop.diagnosticDetail ?? stop.detail}`);
+			log.info(`native exit ${runtime.pid}: ${stop.diagnosticDetail ?? stop.detail}`);
 			if (!stop.writerGone) { state.controlFailure = stop.detail; return; }
 			const owner = controlOwnerFor(runtime, index.get(tabId)?.ownership?.ownerGeneration ?? "");
 			state.runtime = null;
@@ -193,7 +194,7 @@ export class LocalExitOperations {
 			if (runtime.kind === "chat") await this.rpcExited(tabId, runtime);
 			else await this.nativeExited(state, runtime);
 		} catch (error) {
-			this.#deps.log(`tab ${tabId}: the session whose OMP process already ended could not be closed: ${messageOf(error)}`);
+			this.#deps.log.warn(`tab ${tabId}: the session whose OMP process already ended could not be closed: ${messageOf(error)}`);
 		}
 		return state.runtime !== runtime;
 	}
@@ -207,13 +208,13 @@ export class LocalExitOperations {
 		const { window, log } = this.#deps;
 		const isCurrent = (): boolean => this.#deps.records.get(tabId)?.runtime === runtime;
 		if (!proven) {
-			log(`tab ${tabId}: the broker process is gone but its OMP process pid ${runtime.pid} could not be confirmed gone; the session is kept as it is`);
+			log.warn(`tab ${tabId}: the broker process is gone but its OMP process pid ${runtime.pid} could not be confirmed gone; the session is kept as it is`);
 			window.notice("warning", "A session's background process ended, but its OMP process could not be confirmed ended. Check Task Manager, then use Stop Session or refresh Sessions.");
 			return;
 		}
-		log(`tab ${tabId}: the broker process and the OMP process pid ${runtime.pid} are gone`);
+		log.info(`tab ${tabId}: the broker process and the OMP process pid ${runtime.pid} are gone`);
 		const incomplete = (why: string): void => {
-			log(`tab ${tabId}: the broker and the OMP process are gone but the session's exit could not be completed (${why}); the session is kept as it is`);
+			log.warn(`tab ${tabId}: the broker and the OMP process are gone but the session's exit could not be completed (${why}); the session is kept as it is`);
 			window.notice("warning", "A session's process ended, but its exit could not be recorded. Refresh Sessions or reopen the session.");
 		};
 		try {

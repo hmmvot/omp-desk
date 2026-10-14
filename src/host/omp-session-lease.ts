@@ -31,6 +31,7 @@
  */
 import { spawn, type ChildProcess } from "node:child_process";
 import * as path from "node:path";
+import { silentLogger, type Logger } from "../shared/logger.ts";
 import { verifyStagedRuntimeAsset, type StagedRuntimeAsset } from "./runtime-assets.ts";
 import { windowsPowerShellEnvironment, windowsPowerShellExecutable } from "./windows-powershell.ts";
 import { startToolSpawnTrace, type ToolSpawnOutcome } from "./tool-spawn-trace.ts";
@@ -198,7 +199,7 @@ export interface LeaseProbeLaunchOptions {
 	readonly timeoutMs?: number;
 	/** Replaces the PowerShell start; a test supplies a child that speaks the same line protocol. */
 	readonly launch?: (helper: StagedRuntimeAsset) => ChildProcess;
-	readonly log?: (message: string) => void;
+	readonly log?: Logger;
 }
 
 /**
@@ -206,7 +207,7 @@ export interface LeaseProbeLaunchOptions {
  * Any failure resolves to `null` and one log line; nothing is retried.
  */
 export function powershellLeaseProbe(options: LeaseProbeLaunchOptions): LeaseProbe {
-	const log = options.log ?? (() => {});
+	const log = options.log ?? silentLogger;
 	return async mutexNames => {
 		if (mutexNames.length === 0) return new Map();
 		if (!mutexNames.every(name => LEASE_MUTEX_NAME.test(name))) return null;
@@ -214,12 +215,12 @@ export function powershellLeaseProbe(options: LeaseProbeLaunchOptions): LeasePro
 		try {
 			helper = await options.helper();
 		} catch (error) {
-			log(`session lease probe skipped: the helper is unavailable (${error instanceof Error ? error.message : String(error)})`);
+			log.warn(`session lease probe skipped: the helper is unavailable (${error instanceof Error ? error.message : String(error)})`);
 			return null;
 		}
 		// A path that was correct when it was staged says nothing about the bytes there now.
 		if (helper === null || !(await verifyStagedRuntimeAsset(helper))) {
-			log("session lease probe skipped: the staged helper is missing or changed");
+			log.warn("session lease probe skipped: the staged helper is missing or changed");
 			return null;
 		}
 		const requested = [...new Set(mutexNames)];
@@ -236,7 +237,7 @@ export function powershellLeaseProbe(options: LeaseProbeLaunchOptions): LeasePro
 					});
 			} catch (error) {
 				end(null, "start-failed");
-				log(`session lease probe could not start: ${error instanceof Error ? error.message : String(error)}`);
+				log.warn(`session lease probe could not start: ${error instanceof Error ? error.message : String(error)}`);
 				resolve(null);
 				return;
 			}
@@ -250,7 +251,7 @@ export function powershellLeaseProbe(options: LeaseProbeLaunchOptions): LeasePro
 					child.pid,
 					outcome ?? (value !== null ? "ok" : note === "timed out" ? "timeout" : note === "unexpectedly long output" ? "output-too-large" : "failed"),
 				);
-				if (note !== undefined) log(`session lease probe failed: ${note}`);
+				if (note !== undefined) log.warn(`session lease probe failed: ${note}`);
 				if (value === null) child.kill();
 				resolve(value);
 			};
@@ -310,7 +311,7 @@ export interface ExternalLeaseObserverOptions {
 	readonly knownFiles: () => readonly string[];
 	readonly now?: () => number;
 	readonly ttlMs?: number;
-	readonly log?: (message: string) => void;
+	readonly log?: Logger;
 }
 
 interface Verdict {
@@ -414,11 +415,11 @@ export class ExternalLeaseObserver {
 		try {
 			answer = await this.#options.probe(requested);
 		} catch (error) {
-			this.#options.log?.(`session lease probe threw: ${error instanceof Error ? error.message : String(error)}`);
+			this.#options.log?.warn(`session lease probe threw: ${error instanceof Error ? error.message : String(error)}`);
 		}
 		if (answer === null && !this.#unavailableLogged) {
 			this.#unavailableLogged = true;
-			this.#options.log?.("session lease probe unavailable: rows keep their ordinary ownership state");
+			this.#options.log?.warn("session lease probe unavailable: rows keep their ordinary ownership state");
 		}
 		if (answer !== null) this.#unavailableLogged = false;
 		const finishedAt = this.#now();

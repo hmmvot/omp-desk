@@ -10,6 +10,7 @@
  */
 
 import { isRecord } from "../../shared/guards.ts";
+import type { Logger } from "../../shared/logger.ts";
 import type { RpcHostToolDefinition } from "../../protocol/rpc.ts";
 import type { HostToolCalls } from "./host-tool-calls.ts";
 import type { HostToolProvider } from "./host-tool.ts";
@@ -28,7 +29,7 @@ export interface HostToolRegistrationDeps {
 	send(tools: readonly RpcHostToolDefinition[]): Promise<HostToolSendOutcome>;
 	/** Whether the session can still send a command (not disposed, not ended). */
 	canSend(): boolean;
-	log(message: string): void;
+	readonly log: Logger;
 }
 
 export class HostToolRegistration {
@@ -89,11 +90,11 @@ export class HostToolRegistration {
 		this.#deps.calls.setRegistered(new Set());
 		if (outcome.status === "unconfirmed") {
 			this.#availability = "unknown";
-			this.#deps.log("OMP did not answer set_host_tools; Desk's host tools stay unavailable until a registration succeeds.");
+			this.#deps.log.warn("OMP did not answer set_host_tools; Desk's host tools stay unavailable until a registration succeeds.");
 			return;
 		}
 		this.#availability = "rejected";
-		this.#deps.log("OMP rejected set_host_tools or answered without the expected tool names; Desk's host tools are unavailable in this session.");
+		this.#deps.log.warn("OMP rejected set_host_tools or answered without the expected tool names; Desk's host tools are unavailable in this session.");
 	}
 }
 

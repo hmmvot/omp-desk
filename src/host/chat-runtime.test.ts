@@ -15,6 +15,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { createChatModel, setChatPhase, snapshotOf } from "../chat/model.ts";
+import { recordingLogger, type LoggedLine } from "../shared/logger.ts";
 import type { ChatEpoch } from "../chat/model.ts";
 import { ChatSnapshotAssembler } from "../protocol/chat-messages.ts";
 import type { ChatHostMessage, ChatSnapshotChunkMessage, ChatSnapshotMessage } from "../protocol/chat-messages.ts";
@@ -356,9 +357,9 @@ describe("a page asking to reconnect", () => {
 	});
 
 	it("admits Restart once the attached process reports another conversation, and names both identities in the log", async () => {
-		const logs: string[] = [];
+		const logs: LoggedLine[] = [];
 		const events: ChatRuntimeEvent[] = [];
-		const runtime = new ChatRuntime({ hostNonce: "identity-host", onEvent: (_tab, event) => { events.push(event); }, log: message => logs.push(message) });
+		const runtime = new ChatRuntime({ hostNonce: "identity-host", onEvent: (_tab, event) => { events.push(event); }, log: recordingLogger(logs) });
 		const channel = new FakeRpcChannel({ sessionFile: "D:\\scratch\\bound.jsonl" });
 		const session = runtime.startLive(TAB, { channel, sessionFile: "D:\\scratch\\bound.jsonl", cwd: "D:\\scratch", title: null });
 		try {
@@ -370,7 +371,7 @@ describe("a page asking to reconnect", () => {
 			channel.child.sessionFile = "D:\\scratch\\other.jsonl";
 			session.reconnect(); await tick(); await tick();
 			assert.equal(session.model.code, "identity-diverged");
-			assert.ok(logs.some(line => line.startsWith(`tab ${TAB}: identity check failed (identity-diverged): OMP reports file D:\\scratch\\other.jsonl`) && line.includes("expects file D:\\scratch\\bound.jsonl")), logs.join("\n"));
+			assert.ok(logs.some(({ message }) => message.startsWith(`tab ${TAB}: identity check failed (identity-diverged): OMP reports file D:\\scratch\\other.jsonl`) && message.includes("expects file D:\\scratch\\bound.jsonl")), logs.map(({ message }) => message).join("\n"));
 			assert.equal(await runtime.handleMessage(TAB, request, page), "accepted");
 			assert.deepEqual(events.filter(event => event.type === "restart-requested"), [{ type: "restart-requested", nativeNonce: session.epoch.nonce }]);
 		} finally { runtime.dispose(); }

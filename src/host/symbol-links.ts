@@ -1,6 +1,7 @@
 import path from "node:path";
 import { parseBareFileName, parseCodeSymbol } from "../shared/code-symbols.ts";
 import type { BareFileName, CodeSymbol, SymbolLinkResult, SymbolLinksRequest, SymbolLinksResolution } from "../shared/code-symbols.ts";
+import { silentLogger, type Logger } from "../shared/logger.ts";
 import { isInside } from "./link-scope.ts";
 import type { FileLookup, FileNameLinks, SymbolOutcome, SymbolScope } from "./link-scope.ts";
 
@@ -276,7 +277,7 @@ export interface SymbolResolverOptions {
 	readonly noneTtlMs?: number;
 	readonly maxCached?: number;
 	/** One compact line per finished lookup (the extension's output channel). */
-	readonly log?: (line: string) => void;
+	readonly log?: Logger;
 	/** Called when parked tokens may be asked again: the provider became ready or its queue drained. */
 	readonly onRetry?: () => void;
 	/** Delays of the not-ready canary probes (the last one repeats). */
@@ -324,7 +325,7 @@ export class SymbolLinkResolver {
 	readonly #foundTtlMs: number;
 	readonly #noneTtlMs: number;
 	readonly #maxCached: number;
-	readonly #log: ((line: string) => void) | undefined;
+	readonly #log: Logger;
 	readonly #onRetry: (() => void) | undefined;
 	readonly #files: FileNameLinks | undefined;
 	readonly #probeDelays: readonly number[];
@@ -354,7 +355,7 @@ export class SymbolLinkResolver {
 		this.#foundTtlMs = options.foundTtlMs ?? 60_000;
 		this.#noneTtlMs = options.noneTtlMs ?? 15_000;
 		this.#maxCached = options.maxCached ?? 1024;
-		this.#log = options.log;
+		this.#log = options.log ?? silentLogger;
 		this.#onRetry = options.onRetry;
 		this.#probeDelays = options.probeDelaysMs ?? [2000, 4000, 8000, 16_000, 30_000];
 		this.#files = options.files;
@@ -442,7 +443,7 @@ export class SymbolLinkResolver {
 		let locations = 0;
 		let via = "";
 		const done = (outcome: SymbolOutcome, verdict: string): SymbolOutcome => {
-			this.#log?.(`code symbol ${JSON.stringify(symbol.name)}: ${queries} quer${queries === 1 ? "y" : "ies"}, ${total} provider entries, ${inScope(entries).length} in scope, ${locations} matching locations -> ${verdict}${via === "" ? "" : ` (${via})`} in ${this.#now() - startedAt} ms`);
+			this.#log.debug(`code symbol ${JSON.stringify(symbol.name)}: ${queries} quer${queries === 1 ? "y" : "ies"}, ${total} provider entries, ${inScope(entries).length} in scope, ${locations} matching locations -> ${verdict}${via === "" ? "" : ` (${via})`} in ${this.#now() - startedAt} ms`);
 			return outcome;
 		};
 		const ask = async (text: string): Promise<{ answer: { readonly entries: readonly SymbolEntry[]; readonly total: number } } | { verdict: string; parked: boolean }> => {
@@ -516,7 +517,7 @@ export class SymbolLinkResolver {
 			if (!this.#queueRetryDue || this.#running > 0) return;
 			this.#queueRetryDue = false;
 			this.#lastQueueRetry = this.#now();
-			this.#log?.("code symbols: provider queue drained, asking parked tokens again");
+			this.#log.debug("code symbols: provider queue drained, asking parked tokens again");
 			this.#onRetry?.();
 		}, delay);
 		this.#queueRetryTimer.unref?.();
@@ -531,7 +532,7 @@ export class SymbolLinkResolver {
 		const parked = this.#parkedKeys.size;
 		this.#parkedKeys.clear();
 		if (parked > 0) {
-			this.#log?.(`code symbols: provider ready after ${Math.round((this.#now() - this.#notReadySince) / 1000)} s, re-running ${parked} parked`);
+			this.#log.debug(`code symbols: provider ready after ${Math.round((this.#now() - this.#notReadySince) / 1000)} s, re-running ${parked} parked`);
 			this.#onRetry?.();
 		}
 	}

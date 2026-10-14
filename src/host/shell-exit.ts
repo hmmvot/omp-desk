@@ -1,4 +1,5 @@
 /** Retire a folder shell after its authenticated broker proves the child exited. */
+import type { Logger } from "../shared/logger.ts";
 import type { PtyHandle } from "./pty-client.ts";
 
 export type ShellExitSource = Pick<PtyHandle, "kind" | "state" | "subscribe" | "shutdown">;
@@ -11,7 +12,7 @@ export function watchShellExit(
 	source: ShellExitSource,
 	ports: {
 		retireSlot(): Promise<void>;
-		log(message: string): void;
+		readonly log: Logger;
 		runRetirement(operation: () => Promise<void>): Promise<void>;
 	},
 ): ShellExitWatchStop {
@@ -27,15 +28,15 @@ export function watchShellExit(
 			try {
 				await ports.retireSlot();
 			} catch (error) {
-				ports.log(`shell slot retirement failed: ${error instanceof Error ? error.message : String(error)}`);
+				ports.log.warn(`shell slot retirement failed: ${error instanceof Error ? error.message : String(error)}`);
 			}
 			try {
 				const result = await source.shutdown({ requireStopped: true });
-				if (!result.stopped) ports.log("the exited shell broker did not accept shutdown");
+				if (!result.stopped) ports.log.warn("the exited shell broker did not accept shutdown");
 			} catch (error) {
-				ports.log(`exited shell broker shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
+				ports.log.warn(`exited shell broker shutdown failed: ${error instanceof Error ? error.message : String(error)}`);
 			}
-		}).catch(error => ports.log(`exited shell lifecycle failed: ${error instanceof Error ? error.message : String(error)}`));
+		}).catch(error => ports.log.warn(`exited shell lifecycle failed: ${error instanceof Error ? error.message : String(error)}`));
 	};
 	const unsubscribe = source.subscribe(event => {
 		if (event.type === "state" && event.status.state === "exited") retire();
@@ -57,17 +58,19 @@ export type ShellStopOutcome =
 /** An explicitly confirmed Terminate stops the shell and retires its broker, not an unproven tree. */
 export async function stopShellAndBroker(
 	source: ShellStopSource,
-	ports: { retireSlot(): Promise<void>; log(message: string): void },
+	ports: { retireSlot(): Promise<void>; readonly log: Logger },
 ): Promise<ShellStopOutcome> {
 	let stage: "stop" | "shutdown" | "retirement" = "stop";
 	try {
 		if (source.kind !== "folder-shell" || source.state === null) {
-			ports.log("shell stop refused: no authenticated folder-shell child state");
+			ports.log.error("shell stop refused: no authenticated folder-shell child state");
 			return { kind: "unconfirmed", stage };
 		}
 		if (source.state === "running") {
 			const result = await source.stop({ mode: "graceful" });
-			ports.log(`shell stop: pidGone=${result.pidGone}, tree=${result.tree}, verified=${result.verified}; ${result.detail}`);
+			const line = `shell stop: pidGone=${result.pidGone}, tree=${result.tree}, verified=${result.verified}; ${result.detail}`;
+			if (result.pidGone) ports.log.info(line);
+			else ports.log.error(line);
 			if (!result.pidGone) return { kind: "unconfirmed", stage };
 			// The provider cannot prove escaped descendants ended. That does not undo
 			// its exact-child absence proof or require keeping an empty broker alive.
@@ -75,15 +78,15 @@ export async function stopShellAndBroker(
 		stage = "shutdown";
 		const shutdown = await source.shutdown({ requireStopped: true });
 		if (!shutdown.stopped) {
-			ports.log("shell broker shutdown did not confirm child exit");
+			ports.log.error("shell broker shutdown did not confirm child exit");
 			return { kind: "unconfirmed", stage };
 		}
-		ports.log("shell broker acknowledged shutdown after confirmed child exit; no tree-stop claim made");
+		ports.log.info("shell broker acknowledged shutdown after confirmed child exit; no tree-stop claim made");
 		stage = "retirement";
 		await ports.retireSlot();
 		return { kind: "stopped" };
 	} catch (error) {
-		ports.log(`shell ${stage} failed: ${error instanceof Error ? error.message : String(error)}`);
+		ports.log.error(`shell ${stage} failed: ${error instanceof Error ? error.message : String(error)}`);
 		return { kind: "unconfirmed", stage };
 	} finally {
 		source.disconnect();

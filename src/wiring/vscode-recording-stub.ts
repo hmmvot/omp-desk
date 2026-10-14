@@ -215,7 +215,7 @@ export function createRecordingVscode(configuration: Readonly<Record<string, unk
 		getCommands: async (): Promise<string[]> => [...commands.keys()],
 	};
 
-	const output = () => ({ name: "OMP Desk", appendLine: noop, append: noop, replace: noop, clear: noop, show: noop, hide: noop, dispose: noop });
+	const output = () => ({ name: "OMP Desk", logLevel: 3, onDidChangeLogLevel: () => ({ dispose: noop }), error: noop, warn: noop, info: noop, debug: noop, trace: noop, appendLine: noop, append: noop, replace: noop, clear: noop, show: noop, hide: noop, dispose: noop });
 	const windowState = { focused: false, active: false };
 	const tabGroups = withFallback("window.tabGroups", { all: [] as unknown[], activeTabGroup: { tabs: [] as unknown[], viewColumn: 1, activeTab: undefined as unknown } });
 	const windowApi = withFallback("window", {

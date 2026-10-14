@@ -12,6 +12,7 @@ import { readFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
+import type { LogLevel } from "../shared/logger.ts";
 import type { BrokerProcessRow } from "./broker-processes.ts";
 import { isPtyProcessAlive, queryPtyProcessIdentity, waitForPtyProcessGone } from "./pty-identity.ts";
 import type { PtyIdentityReading, PtyProbeHelper } from "./pty-identity.ts";
@@ -233,6 +234,7 @@ describe("failures", () => {
 
 function commandPorts(kernel: ReturnType<typeof fakeKernel>, overrides: Partial<KillCommandPorts> = {}) {
 	const events: string[] = [];
+	const logAt = (level: LogLevel) => (message: string): void => void events.push(`log ${level} ${message}`);
 	const ports: KillCommandPorts = {
 		...kernel.ports,
 		readRows: async () => {
@@ -245,7 +247,7 @@ function commandPorts(kernel: ReturnType<typeof fakeKernel>, overrides: Partial<
 		refresh: async () => void events.push("refresh"),
 		info: message => void events.push(`info ${message}`),
 		warn: message => void events.push(`warn ${message}`),
-		log: message => void events.push(`log ${message}`),
+		log: { error: logAt("error"), warn: logAt("warn"), info: logAt("info"), debug: logAt("debug"), trace: logAt("trace") },
 		requester: "the test",
 		...overrides,
 	};
@@ -259,7 +261,7 @@ describe("the Kill command", () => {
 		await killSelection({ kind: "session", tabId: "tab-1", title: "Fix the build" }, ports);
 		assert.deepEqual(events.filter(event => !event.startsWith("log")), ["reconcile tab-1", "refresh"]);
 		const log = events.find(event => event.startsWith("log"));
-		assert.match(log ?? "", /requested by the test/);
+		assert.match(log ?? "", /^log info .*requested by the test/);
 		assert.match(log ?? "", /broker pid 4100: tree kill issued, root gone/);
 		assert.ok(!events.includes("readRows"), "a recorded host needs no read of the live rows");
 	});
@@ -293,7 +295,7 @@ describe("the Kill command", () => {
 		assert.ok(events.some(event => event.startsWith("warn ") && /could not be killed/.test(event)));
 		assert.ok(!events.some(event => event.startsWith("reconcile") || event.startsWith("forget")));
 		assert.ok(events.includes("refresh"));
-		assert.ok(events.some(event => event.startsWith("log") && /FAILED/.test(event)), "every kill is logged, failures included");
+		assert.ok(events.some(event => event.startsWith("log error ") && /FAILED/.test(event)), "every kill is logged, failures included");
 	});
 
 	it("says there is nothing to kill for a session with no process, and for a row with no recorded identity", async () => {
@@ -311,7 +313,7 @@ describe("the Kill command", () => {
 		const kernel = fakeKernel({ 4100: BROKER_CREATED });
 		const { ports, events } = commandPorts(kernel, { reconcileSession: async () => { throw new Error("catalog locked"); } });
 		await killSelection({ kind: "session", tabId: "tab-1", title: "Fix the build" }, ports);
-		assert.ok(events.some(event => event.startsWith("log") && /records could not be updated \(catalog locked\)/.test(event)));
+		assert.ok(events.some(event => event.startsWith("log error ") && /records could not be updated \(catalog locked\)/.test(event)));
 		assert.ok(events.some(event => event.startsWith("warn ") && /could not update its own records/.test(event)), "a failed reconciliation is not silent");
 		assert.ok(events.includes("refresh"));
 	});
@@ -345,7 +347,7 @@ describe("the Kill command", () => {
 		await killSelection({ kind: "session", tabId: "tab-1", title: "Fix the build" }, ports);
 		assert.ok(events.some(event => event.startsWith("warn ") && /could not end every process/.test(event)));
 		assert.ok(events.includes("reconcile tab-1"));
-		assert.ok(events.some(event => event.startsWith("log") && /incomplete: taskkill exited with 1; taskkill said: ERROR: the process 4300/.test(event)), "the log keeps taskkill's own words");
+		assert.ok(events.some(event => event.startsWith("log warn ") && /incomplete: taskkill exited with 1; taskkill said: ERROR: the process 4300/.test(event)), "the log keeps taskkill's own words");
 	});
 });
 

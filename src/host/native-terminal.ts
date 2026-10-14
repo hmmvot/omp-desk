@@ -19,6 +19,7 @@ import { constants as fsConstants } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { Logger } from "../shared/logger.ts";
 import type { PtyHandle } from "./pty-client";
 import type { PtyStatusPayload } from "./pty-protocol";
 import type { PtyBrokerRecord } from "./pty-protocol";
@@ -199,14 +200,14 @@ async function explicitTarget(file: string): Promise<LaunchTarget> {
   return await pathTarget(file, `the ${OMP_PATH_SETTING} setting`);
 }
 
-let ompResolutionLog: ((message: string) => void) | null = null;
+let ompResolutionLog: Logger | null = null;
 let ompPathReader: (() => string) | null = null;
 let otherInstallsReported = false;
 let otherInstallsInFlight = false;
 
 /** Where resolution notes go (the OMP Desk output); the extension sets it once, at activation. */
-export function setOmpResolutionLog(sink: ((message: string) => void) | null): void {
-  ompResolutionLog = sink;
+export function setOmpResolutionLog(logger: Logger | null): void {
+  ompResolutionLog = logger;
 }
 
 /**
@@ -234,7 +235,7 @@ function noteOtherInstalls(selectedFile: string, selected: OmpBinary, rest: read
       const message = await reportOtherInstalls(selectedFile, selected, rest);
       // The sink may have been replaced or cleared while the probes ran (the window's output closed).
       if (message !== null && ompResolutionLog === log) {
-        log(message);
+        log.info(message);
         otherInstallsReported = true;
       }
     } catch {

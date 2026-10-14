@@ -19,6 +19,8 @@ import { URI } from "vscode-uri";
 import { sessionIncarnation } from "../host/window-registry.ts";
 import type { WindowRegistry, WindowSnapshot } from "../host/window-registry.ts";
 import { awaitPendingLaunchAnswer, awaitReloadTakenUp, awaitRequestAnswer, pendingKeyOf, postModelsRequest, postPendingLaunch, postReloadRequest, postSwitchRequest, startPendingLaunchWatch, startRequestWatch } from "../host/window-requests.ts";
+import type { LoggedLine } from "../shared/logger.ts";
+import { recordingLogger } from "../shared/logger.ts";
 import type { LaunchAction, LaunchRequest, ServeContext, ServeOutcome, StopRequest, SwitchRequest, WindowRequest } from "../host/window-requests.ts";
 import type { StubTabGroup } from "./vscode-test-stub.ts";
 import type { RoutedFolder, WindowRouting, WindowRoutingDeps } from "./window-routing.ts";
@@ -166,7 +168,7 @@ async function world(targets: readonly Target[] = [], options: { readonly holder
 	const warnings: string[] = [];
 	const informed: string[] = [];
 	const errors: string[] = [];
-	const logged: string[] = [];
+	const lines: LoggedLine[] = [];
 	const released: unknown[] = [];
 	const refreshedOwnership: string[][] = [];
 	const refreshedLauncher: number[] = [];
@@ -216,7 +218,7 @@ async function world(targets: readonly Target[] = [], options: { readonly holder
 		startNewSession: async (_context, _index, folder) => { drafts.push({ cwd: folder.path }); },
 		resumeFromFolderHistory: async (_context, _index, _folders, folder, keepLiveView) => { resumed.push({ cwd: folder.path, keepLiveView }); },
 		openTab: async (...args) => { openedTabs.push(args.slice(2)); },
-		log: message => { logged.push(message); },
+		log: recordingLogger(lines),
 		timing: () => {},
 		info: message => { informed.push(message); },
 		warn: message => { warnings.push(message); },
@@ -228,7 +230,7 @@ async function world(targets: readonly Target[] = [], options: { readonly holder
 	stub.window.state.focused = true;
 	return {
 		storageDir, served, state, deps, routing, registry, registryHandle, fake, index: fake as never, calls: stub.commands.calls, drafts, resumed, opened, selected, revealed, elected, openedTabs,
-		warnings, informed, errors, logged, released, refreshedOwnership, refreshedLauncher, providerRefreshes, modelRefreshes, requestSelections,
+		warnings, informed, errors, get logged(): string[] { return lines.map(line => line.message); }, lines, released, refreshedOwnership, refreshedLauncher, providerRefreshes, modelRefreshes, requestSelections,
 	};
 }
 
@@ -936,7 +938,7 @@ describe("serving a launch another window asked for", () => {
 		assert.deepEqual(await serve(w, request(newSession, { path: FOLDER, match: "root" })), refused, "a workspace root this window does not have, whatever session folder it shows");
 		await nextTurn();
 		assert.deepEqual([w.drafts, w.opened], [[], []]);
-		assert.ok(w.logged.some(line => line.startsWith("window request: refused a launch (new-session) for C:/omp-vscode/proj (folder): this window does not have the workspace open")));
+		assert.ok(w.lines.some(line => line.level === "warn" && line.message.startsWith("window request: refused a launch (new-session) for C:/omp-vscode/proj (folder): this window does not have the workspace open")));
 	});
 
 	it("refuses first, as definitely not started, when the installed package changed under this window", async () => {
@@ -1339,7 +1341,7 @@ describe("reloading every window", () => {
 		assert.equal(reloadsOf(w), 1);
 		assert.deepEqual(asked(w).map(request => request.to), ["holder-b"]);
 		assert.deepEqual(await folderLeft(w, "window-requests", ".request"), [], "the request nobody took up is withdrawn, so that window never reloads late");
-		assert.ok(w.logged.some(line => line.includes("holder-asleep") && line.includes("did not take the request up")), "the silent peer is logged");
+		assert.ok(w.lines.some(line => line.level === "warn" && line.message.includes("holder-asleep") && line.message.includes("did not take the request up")), "the silent peer is logged");
 		assert.ok(Date.now() - started < 1_500, "bounded by the wait for a window");
 	});
 

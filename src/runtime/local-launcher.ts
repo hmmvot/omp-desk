@@ -20,6 +20,7 @@
  * must not call a gated operation for the same conversation and must not wait for the user.
  */
 import { setTimeout as delay } from "node:timers/promises";
+import type { Logger } from "../shared/logger.ts";
 import { awaitWriterGone, watchBrokerLoss } from "../host/broker-loss.ts";
 import { createHostSlotId } from "../host/broker-slots.ts";
 import type { BrokerSlotStore } from "../host/broker-slots.ts";
@@ -27,6 +28,7 @@ import type { ChatRuntime } from "../host/chat-runtime.ts";
 import { createControlRecipient } from "../host/control-client.ts";
 import { CONTROL_RECIPIENT_DEFINE, createControlSlotId } from "../host/control-protocol.ts";
 import type { DiagnosticsRecorder } from "../host/diagnostics.ts";
+import type { LaunchTimeline } from "../host/launch-timeline.ts";
 import { brokerAndRootGone } from "../host/native-session.ts";
 import type { attachNativeHost, launchNativeHost, NativeAttachOutcome, SessionHostRuntime } from "../host/native-session.ts";
 import { isPtyProcessAlive } from "../host/pty-identity.ts";
@@ -96,7 +98,9 @@ export interface LocalLauncherDeps {
 	/** What follows a broker that was ended from outside. */
 	readonly exit: Pick<LocalExitOperations, "brokerLost">;
 	readonly diagnosticsLabel: (cwd: string) => string;
-	readonly log: (message: string) => void;
+	/** Where a new session's launch spent its time; absent for a window that reports none. A launch that began no run adds nothing. */
+	readonly timeline?: LaunchTimeline;
+	readonly log: Logger;
 }
 
 /**
@@ -148,7 +152,7 @@ export class LocalLauncher implements OmpHostLauncher {
 			brokerPid: runtime.handle.brokerPid,
 			isCurrent,
 			onLost: async () => {
-				log(`tab ${tabId}: the broker process ${runtime.handle.brokerPid} no longer exists; checking that its OMP process (pid ${runtime.pid}) is gone too`);
+				log.warn(`tab ${tabId}: the broker process ${runtime.handle.brokerPid} no longer exists; checking that its OMP process (pid ${runtime.pid}) is gone too`);
 				const proven = await brokerLossProven(
 					this.#deps.attachBrokerClient,
 					isCurrent,
@@ -265,7 +269,7 @@ export class LocalLauncher implements OmpHostLauncher {
 		} catch (error) {
 			lap("connect");
 			failAll(messageOf(error));
-			log(`tab ${request.tabId}: attach failed — ${messageOf(error)}`);
+			log.warn(`tab ${request.tabId}: attach failed — ${messageOf(error)}`);
 			return { state: "unavailable", reason: `Re-adopting the running host failed: ${messageOf(error)}`, timings };
 		}
 		lap("connect");
@@ -280,7 +284,7 @@ export class LocalLauncher implements OmpHostLauncher {
 		const runtime = outcome.runtime;
 		if (runtime === null) {
 			failAll(outcome.reason);
-			log(`tab ${request.tabId}: attach unavailable — ${outcome.reason}`);
+			log.warn(`tab ${request.tabId}: attach unavailable — ${outcome.reason}`);
 			return { state: "unavailable", reason: outcome.reason, timings };
 		}
 		diagnostics.succeed(request.tabId, "broker-launch", { detail: `pid ${runtime.pid} · ${outcome.reason}` });
@@ -288,13 +292,17 @@ export class LocalLauncher implements OmpHostLauncher {
 		lap("conversation");
 		await index.setRunIntent(request.tabId, "running", `attached ${outcome.reason}`);
 		lap("intent");
-		log(`tab ${request.tabId}: attached — ${outcome.reason}`);
+		log.info(`tab ${request.tabId}: attached — ${outcome.reason}`);
 		void this.#deps.control.reconnect(request.tabId, request.ownerGeneration, runtime);
 		return { state: "attached", host: hostHandle(runtime, request.sessionId), timings };
 	}
 
 	async launch(request: OmpHostLaunchRequest): Promise<OmpHostLaunchResult> {
-		const { diagnostics, window, index, log } = this.#deps;
+		const { diagnostics, window, index, log, timeline } = this.#deps;
+		if (timeline?.has(request.tabId) === true) {
+			timeline.lap(request.tabId, "admission");
+			log.debug(`window timing: new session ${request.tabId} launch started ${timeline.summary(request.tabId)?.totalMs ?? 0} ms after the command`);
+		}
 		// Fresh authenticated current-file readback protects against an own native
 		// /resume hidden by a stale catalog row. Failure remains explicitly best effort.
 		if (request.sessionFile !== null && await this.#deps.native.servesFile(request.sessionFile)) {
@@ -313,11 +321,13 @@ export class LocalLauncher implements OmpHostLauncher {
 				reason: `The extension's runtime entries could not be staged outside the installed folder: ${messageOf(error)}`,
 			};
 		}
+		timeline?.lap(request.tabId, "stage");
 		// The recipient is generated and its private half stored before the process exists, so a
 		// launch can never outrun the key that decrypts its rendezvous.
 		const slot = createHostSlotId();
 		const credentialOwner = request.transport === "native" ? `native.${slot}` : request.ownerGeneration;
 		const control = await this.#prepareHostControl(request.tabId, credentialOwner, entries.hostControl.path, entries.runtimeProbe.path);
+		timeline?.lap(request.tabId, "host control keys");
 		// One mark per launch: the stages below are all measured from it, so the report reads as
 		// one startup timeline (launcher → broker → first paint → live → host control).
 		diagnostics.beginSubject(request.tabId, {
@@ -331,6 +341,7 @@ export class LocalLauncher implements OmpHostLauncher {
 		diagnostics.begin(request.tabId, "chat-live");
 		diagnostics.begin(request.tabId, "host-control-verified");
 		const notStarted = (reason: string): OmpHostLaunchResult => {
+			timeline?.discard(request.tabId);
 			diagnostics.fail(request.tabId, "broker-launch", reason);
 			diagnostics.notObserved(request.tabId, "resolution", "this launch ended before the launcher reported a resolution measurement");
 			diagnostics.notObserved(request.tabId, "first-paint", "no host was started");
@@ -340,6 +351,8 @@ export class LocalLauncher implements OmpHostLauncher {
 		};
 		// One writer, started by the extension-owned broker (ADR-0024/0038).
 		const client = await this.#deps.brokerClient();
+		// The broker client waits for the runtime proof the first launch of a window runs, so that wait shows in this lap.
+		timeline?.lap(request.tabId, "runtime proof");
 		if (client === null) {
 			return notStarted(
 				"The extension-owned PTY broker is not available in this build, so no OMP host was started. " +
@@ -349,6 +362,7 @@ export class LocalLauncher implements OmpHostLauncher {
 		// A document's native binding is immutable. Resume/Reload replaces the child, so
 		// retire the old capability and remount this same editor with a fresh incarnation.
 		const launchEditorId = await window.retireDocument(request.tabId);
+		timeline?.lap(request.tabId, "editor document");
 		// The broker slot is minted once per host and never derived from the conversation. A new
 		// launch always mints a new slot: a recorded slot may still hold a retained record whose
 		// process tree could not be proven empty, and reusing it would replay this launch into that
@@ -357,6 +371,7 @@ export class LocalLauncher implements OmpHostLauncher {
 		// no restart could find again, so a full table refuses *before* a launch.
 		const reserved = await this.#deps.brokerSlots?.record({ slot, conversation: request.tabId, editor: launchEditorId });
 		if (reserved !== undefined && !reserved.ok) return notStarted(reserved.reason);
+		timeline?.lap(request.tabId, "broker slot");
 		const spawnedAt = Date.now();
 		const outcome = await (request.transport === "native" ? this.#deps.hosts.launchNative : this.#deps.hosts.launchRpc)(
 			{
@@ -371,12 +386,14 @@ export class LocalLauncher implements OmpHostLauncher {
 			client,
 		);
 		const timings: Record<string, number> = { spawn: Date.now() - spawnedAt };
+		if ("timings" in outcome) for (const [phase, ms] of Object.entries(outcome.timings)) timeline?.add(request.tabId, phase, ms);
 		const runtime = outcome.runtime;
 		if (runtime === null) {
+			timeline?.discard(request.tabId);
 			// Nothing this window recorded can be a writer: release the reservation so the slot is
 			// available again. An unconfirmed launch keeps it, because a broker may exist.
 			if (outcome.state === "not-started") await this.#deps.brokerSlots?.forget(slot).catch(() => undefined);
-			log(`tab ${request.tabId}: ${outcome.state} — ${outcome.reason}`);
+			log.error(`tab ${request.tabId}: ${outcome.state} — ${outcome.reason}`);
 			if (outcome.state === "not-started") return notStarted(outcome.reason);
 			diagnostics.fail(request.tabId, "broker-launch", outcome.reason);
 			diagnostics.notObserved(request.tabId, "resolution", "this launch ended before the launcher reported a resolution measurement");
@@ -397,8 +414,9 @@ export class LocalLauncher implements OmpHostLauncher {
 		diagnostics.succeed(request.tabId, "broker-launch", { detail: `pid ${runtime.pid} · slot ${runtime.identity.slot}` });
 		const conversationAt = Date.now();
 		await this.startConversation(request.tabId, runtime, request.sessionFile, false);
+		timeline?.lap(request.tabId, "conversation");
 		timings.conversation = Date.now() - conversationAt;
-		log(`tab ${request.tabId}: ${outcome.state} — ${outcome.reason}`);
+		log.info(`tab ${request.tabId}: ${outcome.state} — ${outcome.reason}`);
 		if (runtime.notice !== null) window.notice("warning", runtime.notice);
 		// The native extension receives session_start before rpc-ui handles get_state.
 		// Its exact session identity is checked only after that positive startup barrier.
@@ -419,6 +437,9 @@ export class LocalLauncher implements OmpHostLauncher {
 		const intentAt = Date.now();
 		await index.setRunIntent(request.tabId, "running");
 		timings.intent = Date.now() - intentAt;
+		timeline?.lap(request.tabId, "run intent");
+		const summary = timeline?.summary(request.tabId) ?? null;
+		if (summary !== null) log.info(`window timing: new session ${request.tabId} running in ${summary.totalMs} ms · ${summary.phases}`);
 		const sessionId = runtime.kind === "chat" && request.sessionFile !== null
 			? (await readSessionFileHeader(request.sessionFile))?.sessionId ?? request.sessionId : request.sessionId;
 		return { state: "running", host: hostHandle(runtime, sessionId), timings };

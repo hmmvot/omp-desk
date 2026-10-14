@@ -18,6 +18,7 @@
  * Everything here, its registration in `extension.ts` and the tests that name it are removed in the
  * 1.0.0 release (ADR-0068), together with `legacy-settings.ts`.
  */
+import type { Logger } from "../shared/logger.ts";
 
 /** Every command id contributed before the rename (0.3.1's 87 plus five added on the way to 0.4.0), frozen: the new id of one is `ompDesk.` plus the rest. */
 export const LEGACY_COMMAND_IDS: readonly string[] = [
@@ -123,7 +124,7 @@ export interface LegacyAliasPort {
 	openKeybindingsFile(): PromiseLike<unknown>;
 	/** Command ids another extension contributes under `omp.`; an alias for one of them is not registered. */
 	foreignCommands: ReadonlySet<string>;
-	log(line: string): void;
+	log: Logger;
 }
 
 export const OPEN_KEYBINDINGS_ACTION = "Open keybindings.json";
@@ -140,12 +141,12 @@ export function registerLegacyAliases(port: LegacyAliasPort): { dispose(): void 
 	const registered: { dispose(): void }[] = [];
 	for (const [oldId, target] of LEGACY_ALIASES) {
 		if (port.foreignCommands.has(oldId)) {
-			port.log(`legacy command ${oldId}: another extension contributes it, so it is not an alias of ${target}`);
+			port.log.info(`legacy command ${oldId}: another extension contributes it, so it is not an alias of ${target}`);
 			continue;
 		}
 		try {
 			registered.push(port.register(oldId, (...args: unknown[]) => {
-				port.log(`legacy command ${oldId} ran ${target}; update the keybinding or setting that names it`);
+				port.log.info(`legacy command ${oldId} ran ${target}; update the keybinding or setting that names it`);
 				if (!warned.has(oldId)) {
 					warned.add(oldId);
 					void port.warn(
@@ -156,7 +157,7 @@ export function registerLegacyAliases(port: LegacyAliasPort): { dispose(): void 
 				return port.execute(target, ...args);
 			}));
 		} catch (error) {
-			port.log(`legacy command ${oldId} was not registered: ${error instanceof Error ? error.message : String(error)}`);
+			port.log.warn(`legacy command ${oldId} was not registered: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
 	return registered;
@@ -170,7 +171,7 @@ export interface RenameNoticePort {
 	markShown(): PromiseLike<void>;
 	info(message: string, action: string): PromiseLike<string | undefined>;
 	openKeybindingsFile(): PromiseLike<unknown>;
-	log(line: string): void;
+	log: Logger;
 }
 
 export const RENAME_NOTICE_TEXT =
@@ -187,10 +188,10 @@ export async function announceRename(port: RenameNoticePort): Promise<void> {
 		const upgraded = await port.priorInstall();
 		await port.markShown();
 		if (!upgraded) return;
-		port.log("rename notice shown");
+		port.log.info("rename notice shown");
 		const action = await port.info(RENAME_NOTICE_TEXT, OPEN_KEYBINDINGS_ACTION);
 		if (action === OPEN_KEYBINDINGS_ACTION) await port.openKeybindingsFile();
 	} catch (error) {
-		port.log(`rename notice failed: ${error instanceof Error ? error.message : String(error)}`);
+		port.log.warn(`rename notice failed: ${error instanceof Error ? error.message : String(error)}`);
 	}
 }

@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { notificationLine } from "../shared/notification-text.ts";
+import type { Logger } from "../shared/logger.ts";
 import { windowsPowerShellEnvironment, windowsPowerShellExecutable } from "./windows-powershell.ts";
 
 export interface DesktopNotification {
@@ -58,10 +59,10 @@ const ENCODED_TOAST_SCRIPT = Buffer.from(WINDOWS_TOAST_SCRIPT, "utf16le").toStri
 /** Submit to Windows only; a successful return is submission, not presentation proof. */
 export async function sendDesktopNotification(
 	notification: DesktopNotification,
-	log: (message: string) => void,
+	log: Logger,
 ): Promise<DesktopNotificationIdentity | null> {
 	if (process.platform !== "win32") {
-		log("Desktop notifications are unavailable on this platform (Windows only).");
+		log.warn("Desktop notifications are unavailable on this platform (Windows only).");
 		return null;
 	}
 	const identity: DesktopNotificationIdentity = {

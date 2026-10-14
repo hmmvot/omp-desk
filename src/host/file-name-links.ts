@@ -2,6 +2,7 @@ import { stat } from "node:fs/promises";
 import path from "node:path";
 import { fileReference } from "../shared/code-symbols.ts";
 import type { BareFileName } from "../shared/code-symbols.ts";
+import { silentLogger, type Logger } from "../shared/logger.ts";
 import { isInside } from "./link-scope.ts";
 import type { FileLookup, FileNameLinks, SymbolOutcome, SymbolScope } from "./link-scope.ts";
 
@@ -38,7 +39,7 @@ export interface FileNameResolverOptions {
 	/** Whether `file` is an existing file (the cwd check); defaults to `stat`. */
 	readonly isFile?: (file: string) => Promise<boolean>;
 	/** One compact line per finished lookup (the extension's output channel). */
-	readonly log?: (line: string) => void;
+	readonly log?: Logger;
 }
 
 /** Results of one folder a search keeps; an answer that reaches it is still several files. */
@@ -78,7 +79,7 @@ export class FileNameLinkResolver implements FileNameLinks {
 	readonly #failedTtlMs: number;
 	readonly #maxCached: number;
 	readonly #isFile: (file: string) => Promise<boolean>;
-	readonly #log: ((line: string) => void) | undefined;
+	readonly #log: Logger;
 	readonly #cache = new Map<string, { lookup: FileLookup; expires: number }>();
 	readonly #pending = new Map<string, Promise<FileLookup>>();
 	readonly #waiting: { grant(): void; timer: NodeJS.Timeout }[] = [];
@@ -99,7 +100,7 @@ export class FileNameLinkResolver implements FileNameLinks {
 		this.#failedTtlMs = options.failedTtlMs ?? 30_000;
 		this.#maxCached = options.maxCached ?? 512;
 		this.#isFile = options.isFile ?? statIsFile;
-		this.#log = options.log;
+		this.#log = options.log ?? silentLogger;
 	}
 
 	/** Forget every answer: a file appeared, vanished or moved, so any of them may be stale. */
@@ -142,7 +143,7 @@ export class FileNameLinkResolver implements FileNameLinks {
 		const startedAt = this.#now();
 		const startedGeneration = this.#generation;
 		const done = (lookup: FileLookup, ttlMs: number, verdict: string, found = 0): { lookup: FileLookup; ttlMs: number } => {
-			this.#log?.(`file name ${JSON.stringify(reference)}: ${found} in scope -> ${verdict} in ${this.#now() - startedAt} ms`);
+			this.#log.debug(`file name ${JSON.stringify(reference)}: ${found} in scope -> ${verdict} in ${this.#now() - startedAt} ms`);
 			return { lookup, ttlMs };
 		};
 		const failure = (failed: "invalidated" | "queue-full" | "error" | "timeout") => {

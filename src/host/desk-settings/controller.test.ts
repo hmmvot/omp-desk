@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { DeskSettingsController } from "./controller.ts";
 import { projectConfiguration } from "../../protocol/desk-settings.ts";
 import type { DeskSettingsPort } from "./controller.ts";
+import { recordingLogger, type LoggedLine } from "../../shared/logger.ts";
 import type { ConfigLayers, JsonValue, Target } from "../../protocol/desk-settings.ts";
 
 const DESCRIPTORS = projectConfiguration({
@@ -62,8 +63,8 @@ function fake(): Fake {
 	return state;
 }
 
-const logs: string[] = [];
-const controller = (state: Fake) => new DeskSettingsController(DESCRIPTORS, state.port, message => logs.push(message));
+const logs: LoggedLine[] = [];
+const controller = (state: Fake) => new DeskSettingsController(DESCRIPTORS, state.port, recordingLogger(logs));
 let request = 0;
 const act = (c: DeskSettingsController, body: Record<string, unknown>) => c.handle({ requestId: `r${++request}`, ...body });
 
@@ -162,7 +163,7 @@ test("a failed write reports the reason and a later write still runs", async () 
 	const failed = await act(c, { action: "set", key: "t.limit", value: 4 });
 	assert.deepEqual([failed!.ok, failed!.message], [false, "Could not save to User settings: Unable to write into user settings."]);
 	assert.equal((await act(c, { action: "set", key: "t.limit", value: 4 }))!.ok, true);
-	assert.match(logs.join("\n"), /writing t\.limit to User settings failed/);
+	assert.deepEqual(logs.filter(line => /writing t\.limit to User settings failed/.test(line.message)).map(line => line.level), ["error"]);
 });
 
 test("requests from the page are distrusted: unknown keys, missing ids and unknown actions do nothing", async () => {
@@ -229,7 +230,7 @@ function ompHarness(outcome: (path: string) => Promise<{ ok: boolean; message: s
 		async openSettingsJson() {},
 		async testOmp(path) { tested.push(path); return outcome(path); },
 	};
-	return { writes, tested, controller: new DeskSettingsController(OMP_DESCRIPTORS, port, message => logs.push(message)) };
+	return { writes, tested, controller: new DeskSettingsController(OMP_DESCRIPTORS, port, recordingLogger(logs)) };
 }
 
 test("only the explicit OMP path row offers Test, and the row says so", () => {

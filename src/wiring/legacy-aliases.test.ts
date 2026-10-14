@@ -9,13 +9,15 @@ import {
 	registerLegacyAliases,
 } from "./legacy-aliases.ts";
 import type { LegacyAliasPort, RenameNoticePort } from "./legacy-aliases.ts";
+import type { LoggedLine } from "../shared/logger.ts";
+import { recordingLogger } from "../shared/logger.ts";
 
 function aliasPort(overrides: Partial<LegacyAliasPort> = {}) {
 	const handlers = new Map<string, (...args: unknown[]) => unknown>();
 	const executed: unknown[][] = [];
 	const warnings: string[] = [];
 	const opened: number[] = [];
-	const lines: string[] = [];
+	const lines: LoggedLine[] = [];
 	const port: LegacyAliasPort = {
 		register: (id, handler) => {
 			if (handlers.has(id)) throw new Error(`command '${id}' already exists`);
@@ -26,7 +28,7 @@ function aliasPort(overrides: Partial<LegacyAliasPort> = {}) {
 		warn: async message => { warnings.push(message); return OPEN_KEYBINDINGS_ACTION; },
 		openKeybindingsFile: async () => { opened.push(1); },
 		foreignCommands: new Set(),
-		log: line => lines.push(line),
+		log: recordingLogger(lines),
 		...overrides,
 	};
 	return { port, handlers, executed, warnings, opened, lines };
@@ -65,7 +67,7 @@ describe("the aliases", () => {
 		assert.equal(warnings.length, 1);
 		assert.match(warnings[0] ?? "", /omp\.focusComposer.*ompDesk\.focusComposer/);
 		assert.deepEqual(opened, [1], "the action opens keybindings.json");
-		assert.equal(lines.filter(line => line.startsWith("legacy command omp.focusComposer ran ompDesk.focusComposer")).length, 2, "every use is logged");
+		assert.equal(lines.filter(line => line.message.startsWith("legacy command omp.focusComposer ran ompDesk.focusComposer")).length, 2, "every use is logged");
 		await handlers.get("omp.goToSession")!();
 		assert.equal(warnings.length, 2, "another old id warns on its own");
 	});
@@ -90,8 +92,8 @@ describe("the aliases", () => {
 		assert.equal(taken.handlers.has("omp.newSession"), false);
 		assert.equal(taken.handlers.get("omp.openSession")?.toString(), "() => undefined", "an id someone registered first keeps its handler");
 		assert.equal(taken.handlers.size, LEGACY_ALIASES.length - 1);
-		assert.ok(taken.lines.some(line => line.includes("omp.newSession") && line.includes("another extension contributes it")));
-		assert.ok(taken.lines.some(line => line.includes("omp.openSession was not registered") && line.includes("already exists")));
+		assert.ok(taken.lines.some(line => line.message.includes("omp.newSession") && line.message.includes("another extension contributes it")));
+		assert.ok(taken.lines.some(line => line.level === "warn" && line.message.includes("omp.openSession was not registered") && line.message.includes("already exists")));
 	});
 });
 
@@ -119,14 +121,14 @@ describe("the other extensions' omp. names", () => {
 
 describe("the rename notice", () => {
 	function noticePort(overrides: Partial<RenameNoticePort> = {}) {
-		const state = { shown: false, messages: [] as string[], opened: 0, lines: [] as string[] };
+		const state = { shown: false, messages: [] as string[], opened: 0, lines: [] as LoggedLine[] };
 		const port: RenameNoticePort = {
 			priorInstall: async () => true,
 			shown: () => state.shown,
 			markShown: async () => { state.shown = true; },
 			info: async message => { state.messages.push(message); return OPEN_KEYBINDINGS_ACTION; },
 			openKeybindingsFile: async () => { state.opened += 1; },
-			log: line => state.lines.push(line),
+			log: recordingLogger(state.lines),
 			...overrides,
 		};
 		return { port, state };
@@ -162,6 +164,6 @@ describe("the rename notice", () => {
 		const { port, state } = noticePort({ markShown: async () => { throw new Error("storage busy"); } });
 		await announceRename(port);
 		assert.deepEqual(state.messages, []);
-		assert.ok(state.lines.some(line => line.includes("storage busy")));
+		assert.ok(state.lines.some(line => line.level === "warn" && line.message.includes("storage busy")));
 	});
 });

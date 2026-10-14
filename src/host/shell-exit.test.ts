@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { recordingLogger, type LoggedLine } from "../shared/logger.ts";
 import { stopShellAndBroker, watchShellExit, type ShellExitSource, type ShellStopSource } from "./shell-exit.ts";
 import type { PtyHandleEvent } from "./pty-client.ts";
 import type { PtyStatusPayload, PtyStopResult } from "./pty-protocol.ts";
@@ -9,7 +10,7 @@ function fixture(initial: ShellExitSource["state"] = "running", kind: ShellExitS
 	let state = initial;
 	const listeners = new Set<(event: PtyHandleEvent) => void>();
 	const calls: string[] = [];
-	const logs: string[] = [];
+	const logs: LoggedLine[] = [];
 	const source: ShellExitSource = {
 		kind, get state() { return state; },
 		subscribe(listener) { listeners.add(listener); return () => { listeners.delete(listener); }; },
@@ -27,7 +28,7 @@ function fixture(initial: ShellExitSource["state"] = "running", kind: ShellExitS
 		source, calls, logs,
 		ports: {
 			async retireSlot() { calls.push("remove-shell-slot", "forget-broker-mapping"); },
-			log(message: string) { logs.push(message); },
+			log: recordingLogger(logs),
 			runRetirement: (operation: () => Promise<void>) => operation(),
 		},
 		push(next: "running" | "exited") { state = next; for (const listener of listeners) listener({ type: "state", status: status(next) }); },
@@ -161,7 +162,7 @@ test("ordinary editor teardown preserves a natural exit already queued on the sh
 
 function stopFixture(state: ShellStopSource["state"] = "running") {
 	const calls: string[] = [];
-	const logs: string[] = [];
+	const logs: LoggedLine[] = [];
 	let result: PtyStopResult = {
 		mode: "graceful", verified: false, pidGone: true, nativePid: 11,
 		tree: "unknown", treeEvidence: "parent-links-only",
@@ -185,7 +186,7 @@ function stopFixture(state: ShellStopSource["state"] = "running") {
 		source, calls, logs,
 		ports: {
 			async retireSlot() { calls.push("remove-shell-slot", "forget-broker-mapping"); },
-			log(message: string) { logs.push(message); },
+			log: recordingLogger(logs),
 		},
 		setResult(next: Partial<PtyStopResult>) { result = { ...result, ...next }; },
 	};
@@ -195,8 +196,8 @@ test("confirmed Terminate retires a stopped shell and broker even when descendan
 	const f = stopFixture();
 	assert.deepEqual(await stopShellAndBroker(f.source, f.ports), { kind: "stopped" });
 	assert.deepEqual(f.calls, ["stop", "shutdown", "remove-shell-slot", "forget-broker-mapping", "disconnect"]);
-	assert.ok(f.logs.some(log => log.includes("tree=unknown") && log.includes("verified=false")));
-	assert.ok(f.logs.some(log => log.includes("no tree-stop claim")));
+	assert.ok(f.logs.some(log => log.level === "info" && log.message.includes("tree=unknown") && log.message.includes("verified=false")));
+	assert.ok(f.logs.some(log => log.level === "info" && log.message.includes("no tree-stop claim")));
 });
 
 test("observed descendants remain diagnostic evidence, not a false whole-tree success or a live-shell failure", async () => {
@@ -205,7 +206,7 @@ test("observed descendants remain diagnostic evidence, not a false whole-tree su
 	assert.deepEqual(await stopShellAndBroker(f.source, f.ports), { kind: "stopped" });
 	assert.ok(f.calls.includes("shutdown"));
 	assert.ok(f.calls.includes("remove-shell-slot"));
-	assert.ok(f.logs.some(log => log.includes("tree=remaining") && log.includes("verified=false")));
+	assert.ok(f.logs.some(log => log.message.includes("tree=remaining") && log.message.includes("verified=false")));
 });
 
 test("a child still alive keeps recovery metadata and never requests broker shutdown", async () => {

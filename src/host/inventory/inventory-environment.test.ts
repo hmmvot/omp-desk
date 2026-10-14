@@ -3,12 +3,13 @@ import { describe, it } from "node:test";
 import { OmpUnavailableError } from "../../shared/omp-unavailable.ts";
 import { createRuntimeResolver, NO_BUN, noPackageSource, RESOLVE_TTL_MS } from "./inventory-environment.ts";
 import type { RuntimeResolution } from "./inventory-environment.ts";
+import { recordingLogger, silentLogger, type LoggedLine } from "../../shared/logger.ts";
 
 const good: RuntimeResolution = { ok: true, bun: "C:/b/bun.exe", packageRoot: "C:/b/pkg", launcher: "C:/b/omp.exe", release: "18.8.5" };
 function harness(results: Array<RuntimeResolution | Error>) {
-	const state = { clock: 0, calls: 0, logs: [] as string[], gate: null as Promise<void> | null, key: "" };
+	const state = { clock: 0, calls: 0, logs: [] as LoggedLine[], gate: null as Promise<void> | null, key: "" };
 	const resolve = createRuntimeResolver({
-		now: () => state.clock, log: message => { state.logs.push(message); }, key: () => state.key,
+		now: () => state.clock, log: recordingLogger(state.logs), key: () => state.key,
 		async resolve() { const next = results[Math.min(state.calls++, results.length - 1)]!; if (state.gate) await state.gate; if (next instanceof Error) throw next; return next; },
 	});
 	return { state, resolve };
@@ -39,8 +40,8 @@ describe("runtime resolver", () => {
 		assert.deepEqual(await h.resolve(), { at: h.state.clock, bun: "C:/b/bun.exe", packageRoot: "C:/b/pkg" });
 		h.state.clock += RESOLVE_TTL_MS + 1;
 		assert.deepEqual(await h.resolve(), { at: h.state.clock, bun: "C:/b/bun.exe", packageRoot: "C:/b/pkg" });
-		assert.equal(h.state.logs.filter(line => /failed after .*\(transient\)/.test(line)).length, 2);
-		assert.equal(h.state.logs.filter(line => /keeping the Bun and OMP package found earlier/.test(line)).length, 2);
+		assert.deepEqual(h.state.logs.filter(line => /failed after .*\(transient\)/.test(line.message)).map(line => line.level), ["warn", "warn"]);
+		assert.deepEqual(h.state.logs.filter(line => /keeping the Bun and OMP package found earlier/.test(line.message)).map(line => line.level), ["warn", "warn"]);
 		assert.equal(h.state.calls, 3, "the kept answer is only reused for the minute, then resolution is tried again");
 	});
 	it("drops the earlier answer when the failure is definitive: the install it described is no longer what Desk resolves", async () => {
@@ -53,9 +54,9 @@ describe("runtime resolver", () => {
 		assert.ok("bun" in await h.resolve(), "an unavailable answer is not cached; the next read resolves again");
 		h.state.clock += RESOLVE_TTL_MS + 1;
 		assert.deepEqual(await h.resolve(), { unavailable: "The installed OMP could not be resolved: No usable OMP launcher was found." });
-		assert.equal(h.state.logs.filter(line => /failed after .*\(definitive\)/.test(line)).length, 2);
-		assert.equal(h.state.logs.filter(line => /dropping the Bun and OMP package found earlier/.test(line)).length, 2);
-		assert.equal(h.state.logs.filter(line => /keeping the Bun and OMP package found earlier/.test(line)).length, 0);
+		assert.equal(h.state.logs.filter(line => /failed after .*\(definitive\)/.test(line.message)).length, 2);
+		assert.equal(h.state.logs.filter(line => /dropping the Bun and OMP package found earlier/.test(line.message)).length, 2);
+		assert.equal(h.state.logs.filter(line => /keeping the Bun and OMP package found earlier/.test(line.message)).length, 0);
 	});
 	it("without an earlier answer, names the real cause rather than a generic compiled-only claim", async () => {
 		const noBun = await harness([{ ok: false, unavailable: NO_BUN }]).resolve();
@@ -92,7 +93,7 @@ describe("runtime resolver", () => {
 			const gates: Array<PromiseWithResolvers<RuntimeResolution | Error>> = [];
 			const state = { key: "A", clock: 0 };
 			const resolve = createRuntimeResolver({
-				now: () => state.clock, log: () => {}, key: () => state.key,
+				now: () => state.clock, log: silentLogger, key: () => state.key,
 				async resolve() {
 					const gate = Promise.withResolvers<RuntimeResolution | Error>();
 					gates.push(gate);

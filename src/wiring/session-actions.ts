@@ -29,6 +29,7 @@ import type { OwnerReconciler } from "../host/session-availability.ts";
 import { isManagedHost } from "../host/session-model.ts";
 import type { SessionIndexEntry } from "../host/session-model.ts";
 import type { ShellExitWatchStop } from "../host/shell-exit.ts";
+import type { Logger } from "../shared/logger.ts";
 import type { ShellSlotRecord, ShellSlotStore } from "../host/shell-slots.ts";
 import type { WindowRegistry } from "../host/window-registry.ts";
 import { askWindowToStop } from "../host/window-requests.ts";
@@ -166,7 +167,7 @@ export interface SessionDialogs {
 
 /** The log and the notifications. Notifications carry the extension's own prefix. */
 export interface SessionNotices {
-	log(message: string): void;
+	log: Logger;
 	info(message: string): void;
 	warn(message: string): void;
 	error(message: string): void;
@@ -572,7 +573,7 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 					const stopWatch = deps.tab(target.slot)?.ownerStopWatch;
 					const result = await operation();
 					if (result.kind === "stopped") {
-						deps.log(`shell ${target.slot}: Sessions Stop acknowledged broker shutdown; no tree-stop claim made`);
+						deps.log.info(`shell ${target.slot}: Sessions Stop acknowledged broker shutdown; no tree-stop claim made`);
 						stopWatch?.({ cancelQueuedRetirement: true });
 					}
 					return result;
@@ -738,7 +739,7 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 				sessionRuntime.endTransition(token, "native-stopping");
 			}
 		} catch (error) {
-			deps.log(`session deletion preparation failed: ${messageOf(error)}`);
+			deps.log.error(`session deletion preparation failed: ${messageOf(error)}`);
 			deps.error("The session could not be checked for deletion. Nothing was deleted. Refresh Sessions and try again.");
 			deps.refreshLauncher();
 			return false;
@@ -777,7 +778,7 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 			deps.refreshLauncher();
 			return false;
 		}
-		deps.log(`Session deletion targets: ${JSON.stringify({ cwd: inspection.cwd, targets: inspection.targets, notes: inspection.notes })}`);
+		deps.log.info(`Session deletion targets: ${JSON.stringify({ cwd: inspection.cwd, targets: inspection.targets, notes: inspection.notes })}`);
 		const header = await readSessionFileHeader(sessionFile);
 		const entry = tabId === null ? null : index.get(tabId);
 		const name = entry === null ? displaySessionTitle(header?.title ?? "") || displaySessionTitle(header?.promptTitle ?? "") || "OMP session" : sessionHeadline(entry, header);
@@ -822,19 +823,19 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 							return held;
 						});
 		} catch (error) {
-			deps.log(`session deletion failed: ${messageOf(error)}`);
+			deps.log.error(`session deletion failed: ${messageOf(error)}`);
 			deps.error(`This session was not deleted: ${messageOf(error)}`);
 			deps.refreshLauncher();
 			return false;
 		}
 		if (!result.deleted) {
-			deps.log(`session deletion refused or failed (${result.kind ?? "unknown"}): ${result.detail}`);
+			deps.log.warn(`session deletion refused or failed (${result.kind ?? "unknown"}): ${result.detail}`);
 			deps.warn(`The OMP session was not deleted: ${result.detail}`);
 			deps.refreshLauncher();
 			return false;
 		}
 		deps.refreshLauncher();
-		deps.log(`deleted session files ${result.removedPaths.join(", ")}`);
+		deps.log.info(`deleted session files ${result.removedPaths.join(", ")}`);
 		const partial = result.partial || result.leftovers.length > 0;
 		if (!partial) {
 			deps.info(result.detail);
@@ -868,12 +869,12 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 		// it adopts the newest committed revision before re-reading anything.
 		const folders = deps.launcherFolders();
 		if (folders !== undefined) {
-			void deps.adoptCatalogChanges(index, folders).catch(error => deps.log(`catalog: the newest revision could not be adopted: ${messageOf(error)}`));
+			void deps.adoptCatalogChanges(index, folders).catch(error => deps.log.warn(`catalog: the newest revision could not be adopted: ${messageOf(error)}`));
 		}
 		deps.refreshLauncher({ ownership: true });
 		// Refresh never discovers anything: a folder's other sessions are read only when
 		// the user asks to resume one.
-		deps.log("launcher: refreshed from the folder list, the session index and this window's editors");
+		deps.log.debug("launcher: refreshed from the folder list, the session index and this window's editors");
 	}
 
 	/**

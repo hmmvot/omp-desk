@@ -18,6 +18,7 @@ import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { after, before, describe, it } from "node:test";
 import { build } from "esbuild";
+import { recordingLogger, type LoggedLine } from "../shared/logger.ts";
 import type {
 	OmpBinary,
 	renameStoppedSessionTitle as renameStoppedSessionTitleType,
@@ -317,11 +318,15 @@ describe("OMP resolution when a candidate cannot answer", () => {
 	it("logs once per window, with both paths and releases, that two installs are on PATH", async () => {
 		const current = await fakeInstall(prints("18.8.5"));
 		const older = await fakeInstall(prints("18.0.4"));
-		const lines: string[] = [];
-		const logged = Promise.withResolvers<string>();
-		native.setOmpResolutionLog(line => {
-			lines.push(line);
-			logged.resolve(line);
+		const lines: LoggedLine[] = [];
+		const logged = Promise.withResolvers<LoggedLine>();
+		const recorder = recordingLogger(lines);
+		native.setOmpResolutionLog({
+			...recorder,
+			info: message => {
+				recorder.info(message);
+				logged.resolve(lines.at(-1)!);
+			},
 		});
 		try {
 			await onPath([current.bin, older.bin], async () => {
@@ -331,8 +336,9 @@ describe("OMP resolution when a candidate cannot answer", () => {
 				const first = await resolve();
 				assert.equal(first.version, "18.8.5", "the log changes nothing about what is selected");
 				const line = await logged.promise;
-				assert.ok(line.includes(`${current.shim} (release 18.8.5, in use)`), line);
-				assert.ok(line.includes(`${older.shim} (release 18.0.4, not used)`), line);
+				assert.equal(line.level, "info");
+				assert.ok(line.message.includes(`${current.shim} (release 18.8.5, in use)`), line.message);
+				assert.ok(line.message.includes(`${older.shim} (release 18.0.4, not used)`), line.message);
 				await resolve();
 			});
 			// A second line could only come from a probe that is still running in the background, so a

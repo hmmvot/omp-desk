@@ -1,5 +1,6 @@
 import { isRecord } from "../../shared/guards.ts";
 import { randomBytes } from "node:crypto";
+import type { Logger } from "../../shared/logger.ts";
 import * as vscode from "vscode";
 import { resolveOmpBinary } from "../native-terminal";
 import { DeskSettingsController } from "./controller.ts";
@@ -104,7 +105,7 @@ class DeskSettingsViewProvider implements vscode.WebviewViewProvider {
 			void view.webview.postMessage(result);
 			this.push();
 		} catch (error) {
-			this.controller.log(`settings view: ${error instanceof Error ? error.message : String(error)}`);
+			this.controller.log.error(`settings view: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
 }
@@ -114,7 +115,7 @@ class DeskSettingsViewProvider implements vscode.WebviewViewProvider {
  * extension's own manifest, read at runtime, so a setting added to package.json appears with no
  * other change. Values are read live from VS Code's configuration while the view shows.
  */
-export function registerDeskSettingsView(context: vscode.ExtensionContext, deps: { readonly log: (message: string) => void }): vscode.Disposable {
+export function registerDeskSettingsView(context: vscode.ExtensionContext, deps: { readonly log: Logger }): vscode.Disposable {
 	const manifest: unknown = context.extension.packageJSON;
 	const contributes = isRecord(manifest) ? manifest.contributes : undefined;
 	const descriptors = projectConfiguration(isRecord(contributes) ? contributes.configuration : undefined);

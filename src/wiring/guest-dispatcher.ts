@@ -45,6 +45,7 @@ import type {
 	GuestTerminalCopyReplyMessage,
 	SessionViewMode,
 } from "../protocol/messages.ts";
+import type { Logger } from "../shared/logger.ts";
 import { fileSearchValue, symbolSearchValue } from "../shared/selection-query.ts";
 import type { RecentSessions } from "./recent-sessions.ts";
 
@@ -195,7 +196,7 @@ export interface GuestControlPort {
 
 /** The log and the notifications. Notifications carry the extension's own prefix. */
 export interface GuestNotices {
-	log(message: string): void;
+	log: Logger;
 	info(message: string): void;
 	warn(message: string): void;
 	error(message: string): void;
@@ -409,7 +410,9 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 			deps.rememberPrompt(message.text);
 		}
 		if (outcome !== "accepted" || message.type === "omp:chat-abort") {
-			deps.log(`tab ${tabId}: ${message.type} ${message.requestId.slice(0, 8)} was ${outcome}`);
+			const line = `tab ${tabId}: ${message.type} ${message.requestId.slice(0, 8)} was ${outcome}`;
+			if (outcome === "accepted") deps.log.info(line);
+			else deps.log.warn(line);
 		}
 		return outcome;
 	}
@@ -438,17 +441,17 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 		if (mode === "terminal" || deps.conversations().kindOf(tabId) === "legacy") return;
 		const target: DetailTarget = request.kind === "agent" ? { kind: "agent", agentId: request.agentId } : { kind: request.kind };
 		const outcome = deps.detailTabs().open(tabId, target);
-		deps.log(`tab ${tabId}: detail tab ${target.kind} was ${outcome}`);
+		deps.log.debug(`tab ${tabId}: detail tab ${target.kind} was ${outcome}`);
 	}
 
 	function openMermaidTab(source: string): void {
-		deps.log(`diagram tab was ${deps.mermaidPreviews().open(source)}`);
+		deps.log.debug(`diagram tab was ${deps.mermaidPreviews().open(source)}`);
 	}
 
 	async function openArtifact(tabId: string, request: GuestOpenArtifactMessage): Promise<void> {
 		// A page that outlived its conversation (another epoch is live now) opens nothing: the id would name another transcript's file.
 		if (!sameEpoch(deps.conversations().stateOf(tabId)?.epoch ?? null, request.epoch)) {
-			deps.log(`tab ${tabId}: artifact ${request.artifactId} request was dropped: the page shows another conversation`);
+			deps.log.warn(`tab ${tabId}: artifact ${request.artifactId} request was dropped: the page shows another conversation`);
 			return;
 		}
 		const sessionFile = deps.sessionFileOf(tabId);
@@ -458,7 +461,7 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 		}
 		const outcome = await deps.artifactDocuments().open(sessionFile, request.artifactId);
 		if (!outcome.opened) {
-			deps.log(`tab ${tabId}: artifact ${request.artifactId} was refused: ${outcome.reason}`);
+			deps.log.warn(`tab ${tabId}: artifact ${request.artifactId} was refused: ${outcome.reason}`);
 			deps.warn(outcome.reason);
 		}
 	}
@@ -487,7 +490,7 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 		const tabId = own.tabId;
 		const parsed = parseGuestWebviewMessage(message);
 		if (!parsed) {
-			deps.log(`slot ${slot}: ignored an unrecognized guest message`);
+			deps.log.debug(`slot ${slot}: ignored an unrecognized guest message`);
 			return;
 		}
 		// The bounded draft handoff's own answer. It authorizes nothing and is answered before
@@ -546,7 +549,7 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 				return;
 			case "omp:ready": {
 				if (parsed.protocolVersion !== GUEST_PROTOCOL_VERSION) {
-					deps.log(`tab ${tabId}: guest protocol ${parsed.protocolVersion} != ${GUEST_PROTOCOL_VERSION}; the conversation was not sent`);
+					deps.log.error(`tab ${tabId}: guest protocol ${parsed.protocolVersion} != ${GUEST_PROTOCOL_VERSION}; the conversation was not sent`);
 					deps.error(
 						"The chat panel and extension are using different versions. Run Developer: Reload Window, then try again.",
 					);
@@ -578,7 +581,7 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 				return;
 			}
 			case "omp:focus-trace":
-				deps.log(`tab ${tabId}: focus: ${parsed.detail}`);
+				deps.log.debug(`tab ${tabId}: focus: ${parsed.detail}`);
 				return;
 			case "omp:composer-popup":
 				if (parsed.open) deps.composerPopupTabs().add(tabId);
@@ -622,7 +625,7 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 			}
 			default:
 				// The terminal vocabulary belongs to the folder shell, never to a chat editor.
-				deps.log(`slot ${slot}: ignored a ${parsed.type} message from a chat editor`);
+				deps.log.debug(`slot ${slot}: ignored a ${parsed.type} message from a chat editor`);
 				return;
 		}
 	}

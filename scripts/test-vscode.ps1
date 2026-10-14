@@ -64,7 +64,9 @@ param(
 	[ValidateRange(1024, 65535)] [int] $RemoteDebuggingPort,
 	[string] $Root = (Join-Path $env:LOCALAPPDATA 'omp-desk-test'),
 	# VS Code install folder (the one with Code.exe and bin\code.cmd); default: the code.cmd found on PATH.
-	[string] $VsCodeDir
+	[string] $VsCodeDir,
+	# Log level of the OMP Desk output channel for this window (`--log=hmmvot.omp-desk:<level>`); without it VS Code's own level (Info) applies.
+	[ValidateSet('error', 'warn', 'info', 'debug', 'trace')] [string] $DeskLogLevel
 )
 $ErrorActionPreference = 'Stop'
 
@@ -271,6 +273,8 @@ try {
 	}
 	$launchArgs = @($profileArgs) + '--new-window'
 	if ($RemoteDebuggingPort) { $launchArgs += "--remote-debugging-port=$RemoteDebuggingPort" }
+	# The OMP Desk output channel is a LogOutputChannel: VS Code's own --log flag sets its level for this window.
+	if ($DeskLogLevel) { $launchArgs += "--log=hmmvot.omp-desk:$DeskLogLevel" }
 	if ($Folder) { $launchArgs += (Resolve-Path $Folder).Path }
 
 	# code.cmd only relays to Code.exe; start Code.exe itself, as the relay does.

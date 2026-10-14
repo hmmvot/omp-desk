@@ -19,6 +19,7 @@
 import { GUEST_PROTOCOL_VERSION, parseGuestWebviewMessage } from "../protocol/messages.ts";
 import type { GuestOpenArtifactMessage } from "../protocol/messages.ts";
 import { detailKey, type DetailTarget } from "../protocol/detail-target.ts";
+import type { Logger } from "../shared/logger.ts";
 import { webLinkUrl, type WebLinkMode } from "../shared/terminal-links.ts";
 import type { ChatCommandOutcome, ChatPage } from "./chat-runtime.ts";
 import type { ChatWebviewMessage } from "../protocol/chat-messages.ts";
@@ -56,7 +57,7 @@ export interface DetailTabsHost {
 	openArtifact(conversation: string, request: GuestOpenArtifactMessage): Promise<void>;
 	/** Open a re-validated `http(s)` URL the user clicked; reports its own failure to the user. */
 	openUrl(url: string, mode: WebLinkMode): Promise<void>;
-	log(message: string): void;
+	readonly log: Logger;
 }
 
 /** Shown by the runtime for any command a detail tab should never send. */
@@ -108,7 +109,7 @@ export class DetailTabs {
 		};
 		this.#tabs.set(key, tab);
 		panel.webview.onDidReceiveMessage(message => {
-			void this.#receive(tab, message).catch(() => this.#host.log(`detail ${tab.page.id}: a message could not be processed`));
+			void this.#receive(tab, message).catch(() => this.#host.log.debug(`detail ${tab.page.id}: a message could not be processed`));
 		});
 		panel.onDidDispose(() => {
 			tab.disposed = true;
@@ -146,12 +147,12 @@ export class DetailTabs {
 		if (tab.disposed) return;
 		const message = parseGuestWebviewMessage(raw);
 		if (message === null) {
-			this.#host.log(`detail ${tab.page.id}: ignored an unrecognized message`);
+			this.#host.log.debug(`detail ${tab.page.id}: ignored an unrecognized message`);
 			return;
 		}
 		if (message.type === "omp:ready") {
 			if (message.protocolVersion !== GUEST_PROTOCOL_VERSION) {
-				this.#host.log(`detail ${tab.page.id}: guest protocol ${message.protocolVersion} != ${GUEST_PROTOCOL_VERSION}; the conversation was not sent`);
+				this.#host.log.warn(`detail ${tab.page.id}: guest protocol ${message.protocolVersion} != ${GUEST_PROTOCOL_VERSION}; the conversation was not sent`);
 				return;
 			}
 			// A document that announces itself again (reload, shown again) is sent the conversation fresh.
@@ -161,7 +162,7 @@ export class DetailTabs {
 		}
 		if (message.type === "omp:open-detail") {
 			const target: DetailTarget = message.kind === "agent" ? { kind: "agent", agentId: message.agentId } : { kind: message.kind };
-			this.#host.log(`detail ${tab.page.id}: detail tab ${target.kind} was ${this.open(tab.conversation, target)}`);
+			this.#host.log.debug(`detail ${tab.page.id}: detail tab ${target.kind} was ${this.open(tab.conversation, target)}`);
 			return;
 		}
 		if (message.type === "omp:open-mermaid") {
@@ -181,9 +182,9 @@ export class DetailTabs {
 		}
 		if (message.type === "omp:chat-subagent-read") {
 			const outcome = await this.#host.handleMessage(tab.conversation, message, tab.page);
-			if (outcome !== "accepted") this.#host.log(`detail ${tab.page.id}: ${message.type} was ${outcome}`);
+			if (outcome !== "accepted") this.#host.log.debug(`detail ${tab.page.id}: ${message.type} was ${outcome}`);
 			return;
 		}
-		this.#host.log(`detail ${tab.page.id}: a ${message.type} request was refused`);
+		this.#host.log.warn(`detail ${tab.page.id}: a ${message.type} request was refused`);
 	}
 }

@@ -13,6 +13,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
+import { silentLogger } from "../shared/logger.ts";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { after, before, describe, it } from "node:test";
 import { build } from "esbuild";
@@ -130,7 +131,7 @@ function fixture(options: FixtureOptions = {}): TransitionFixture {
 		writer: { pid: async () => pid },
 		attachBrokerClient: async () => options.broker === false ? null : ({}) as never,
 		launcher: () => { throw new Error("The fixture launches nothing."); },
-		log: () => undefined,
+		log: silentLogger,
 	});
 	return {
 		transitions, record, runtime, order, gateHolders, fenced, mutationFences, stopCalls,
@@ -210,7 +211,7 @@ describe("the admission fence", () => {
 			},
 			chat: { sessionOf: () => null, release: () => undefined }, stop: {} as never,
 			control: {} as never, exit: {} as never, writer: { pid: async () => null }, attachBrokerClient: async () => null,
-			launcher: () => { throw new Error("unused"); }, log: () => undefined,
+			launcher: () => { throw new Error("unused"); }, log: silentLogger,
 		});
 		assert.throws(() => failing.beginTransition({ conversation: TAB, target: null }), /projection failed/);
 		assert.equal(f.record.transitioning, false);

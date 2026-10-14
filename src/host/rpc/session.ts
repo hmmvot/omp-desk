@@ -90,6 +90,7 @@ import { blobsDirectoryFor, resolveBlobImages } from "./history-blobs.ts";
 import { parseAgentRoster } from "../../chat/agents.ts";
 import { childPageFromNative, type SubagentTranscriptPage } from "../../chat/subagent-transcript.ts";
 import { isRecord } from "../../shared/guards.ts";
+import { silentLogger, type Logger } from "../../shared/logger.ts";
 import { readJournalCost, readJournalFacts, type JournalFacts } from "../session-cost.ts";
 import { extractContextFiles, isContextReportText, parseContextReport, parseSessionStats } from "../context/context-parse.ts";
 import type { ContextRead, ContextReportRead } from "../context/context-parse.ts";
@@ -193,7 +194,7 @@ export interface RpcSessionOptions {
 	/** Desk's host tools (ADR-0055). Absent: the session registers none and ignores host tool frames. */
 	hostTools?: HostToolProvider;
 	/** Diagnostics sink for soft-limit and registration notes. */
-	log?: (message: string) => void;
+	log?: Logger;
 }
 
 export type RpcSessionOutput =
@@ -767,7 +768,7 @@ export class RpcSession {
 				ownerGeneration: () => this.#channel.ownerGeneration,
 				tools: () => provider.tools(),
 				timers: this.#timers,
-				log: message => this.#options.log?.(message),
+				log: this.#options.log ?? silentLogger,
 			});
 			this.#hostCalls = calls;
 			this.#hostRegistration = new HostToolRegistration({
@@ -775,7 +776,7 @@ export class RpcSession {
 				calls,
 				send: tools => this.#sendHostTools(tools),
 				canSend: () => !this.#disposed && !this.#ended && this.#hostRetention,
-				log: message => this.#options.log?.(message),
+				log: this.#options.log ?? silentLogger,
 			});
 		}
 	}
@@ -1929,7 +1930,7 @@ export class RpcSession {
 		this.#hostRetention = result.hostToolRetention;
 		this.#hostAttach += 1;
 		this.#hostCalls?.attached(result.latestSeq);
-		if (result.hostCallOverflow) this.#options.log?.("The broker holds more unanswered host tool calls than its soft limit; none was dropped.");
+		if (result.hostCallOverflow) this.#options.log?.warn("The broker holds more unanswered host tool calls than its soft limit; none was dropped.");
 		if (result.truncated) this.#agentLiveness.forgetLast();
 		if (result.child.state === "exited") {
 			await this.#paint;
@@ -2014,7 +2015,7 @@ export class RpcSession {
 	#identityMismatch(state: ParsedState, bind: boolean): RpcErrorCode | null {
 		const code: RpcErrorCode = bind ? "identity-mismatch" : "identity-diverged";
 		const report = (): RpcErrorCode => {
-			this.#options.log?.(`identity check failed (${code}): OMP reports file ${state.sessionFile ?? "none"} and id ${state.sessionId ?? "none"}; this tab expects file ${this.#boundFile ?? "any"} and id ${this.#boundId ?? "any"}`);
+			this.#options.log?.warn(`identity check failed (${code}): OMP reports file ${state.sessionFile ?? "none"} and id ${state.sessionId ?? "none"}; this tab expects file ${this.#boundFile ?? "any"} and id ${this.#boundId ?? "any"}`);
 			return code;
 		};
 		if (this.#boundFile !== null) {

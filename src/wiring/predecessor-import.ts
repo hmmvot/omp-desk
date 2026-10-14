@@ -25,6 +25,7 @@ import * as path from "node:path";
 import { WORKSPACE_FOLDERS_STORAGE_KEY, unionWorkspaceFolderRecords } from "../views/workspace-folders.ts";
 import { catalogDigest, catalogPaths, readCatalogDocument } from "../host/profile-catalog.ts";
 import type { CatalogStore } from "../host/profile-catalog.ts";
+import type { Logger } from "../shared/logger.ts";
 
 /** The extension id of the builds this one replaces. */
 export const PREDECESSOR_EXTENSION_ID = "omp-vscode.omp-vscode";
@@ -37,7 +38,7 @@ export interface PredecessorImportDeps {
 	readonly store: CatalogStore;
 	/** This extension's global storage directory (`globalStorageUri.fsPath`). */
 	readonly storageDir: string;
-	readonly log: (message: string) => void;
+	readonly log: Logger;
 	readonly now?: () => Date;
 }
 
@@ -78,7 +79,7 @@ export async function importPredecessorFolders(deps: PredecessorImportDeps): Pro
 			: undefined;
 	} catch (error) {
 		const detail = messageOf(error);
-		deps.log(`predecessor import: the folder list of ${PREDECESSOR_EXTENSION_ID} could not be read and was not imported: ${detail}`);
+		deps.log.warn(`predecessor import: the folder list of ${PREDECESSOR_EXTENSION_ID} could not be read and was not imported: ${detail}`);
 		return { status: "failed", folders: 0, detail };
 	}
 	const at = (deps.now ?? (() => new Date()))().toISOString();
@@ -116,10 +117,10 @@ export async function importPredecessorFolders(deps: PredecessorImportDeps): Pro
 		});
 	} catch (error) {
 		const detail = messageOf(error);
-		deps.log(`predecessor import: the folder list of ${PREDECESSOR_EXTENSION_ID} was not imported: ${detail}`);
+		deps.log.warn(`predecessor import: the folder list of ${PREDECESSOR_EXTENSION_ID} was not imported: ${detail}`);
 		return { status: "failed", folders: 0, detail };
 	}
-	deps.log(`predecessor import: ${counts.folders} folder(s) were imported from ${PREDECESSOR_EXTENSION_ID}`);
+	deps.log.info(`predecessor import: ${counts.folders} folder(s) were imported from ${PREDECESSOR_EXTENSION_ID}`);
 	return { status: "imported", folders: counts.folders, detail: null };
 }
 

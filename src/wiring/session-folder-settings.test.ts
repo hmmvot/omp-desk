@@ -9,6 +9,8 @@ import { describe, it } from "node:test";
 
 import { migrateLegacySettings } from "./legacy-settings.ts";
 import type { LayerValues, LegacySettingsPort, SettingsLayer } from "./legacy-settings.ts";
+import type { LoggedLine } from "../shared/logger.ts";
+import { recordingLogger } from "../shared/logger.ts";
 import { OLD_AGENT_ROOT_KEY, OLD_ANCESTOR_KEY, RUN_AT_ROOT_KEY, migrateSessionFolderSettings } from "./session-folder-settings.ts";
 
 const manifest = JSON.parse(await readFile(new URL("../../package.json", import.meta.url), "utf8")) as {
@@ -29,8 +31,8 @@ function shared(user: Record<string, unknown> = {}, workspace: Record<string, un
 	return { user: new Map(Object.entries(user)), workspace: new Map(Object.entries(workspace)), writes: [], readOnlyFile: false, claimed: false, refuse: {} };
 }
 
-function window(state: Shared): { port: LegacySettingsPort; lines: string[]; checkedFiles: string[] } {
-	const lines: string[] = [];
+function window(state: Shared): { port: LegacySettingsPort; lines: LoggedLine[]; checkedFiles: string[] } {
+	const lines: LoggedLine[] = [];
 	const checkedFiles: string[] = [];
 	const layer = (name: SettingsLayer) => (name === "user" ? state.user : state.workspace);
 	const port: LegacySettingsPort = {
@@ -59,7 +61,7 @@ function window(state: Shared): { port: LegacySettingsPort; lines: string[]; che
 		waitForRelease: async () => { while (state.claimed) await Promise.resolve(); return true; },
 		delay: () => Promise.resolve(),
 		waits: { releaseMs: 500, graceMs: 50, graceStepMs: 5 },
-		log: line => lines.push(line),
+		log: recordingLogger(lines),
 	};
 	return { port, lines, checkedFiles };
 }
@@ -83,7 +85,7 @@ describe("the move to ompDesk.runSessionsAtRepositoryRoot", () => {
 		assert.equal(state.user.has(OLD_AGENT_ROOT_KEY), false);
 		assert.deepEqual(outcomes, [{ key: OLD_AGENT_ROOT_KEY, layer: "user", outcome: "moved" }]);
 		assert.deepEqual(state.writes, [{ key: RUN_AT_ROOT_KEY, value: false, layer: "user" }, { key: OLD_AGENT_ROOT_KEY, value: undefined, layer: "user" }]);
-		assert.deepEqual(lines, ["settings: ompDesk.useAgentRootFolder → ompDesk.runSessionsAtRepositoryRoot (user settings): moved"]);
+		assert.deepEqual(lines, [{ level: "info", message: "settings: ompDesk.useAgentRootFolder → ompDesk.runSessionsAtRepositoryRoot (user settings): moved" }]);
 	});
 
 	it("removes an explicit useAgentRootFolder=true without a successor: it is what the new default does", async () => {
@@ -93,7 +95,7 @@ describe("the move to ompDesk.runSessionsAtRepositoryRoot", () => {
 		assert.equal(state.user.has(RUN_AT_ROOT_KEY), false);
 		assert.equal(state.user.has(OLD_AGENT_ROOT_KEY), false);
 		assert.equal(lines.length, 1);
-		assert.match(lines[0]!, /dropped; true is what sessions do by default now/);
+		assert.match(lines[0]!.message, /dropped; true is what sessions do by default now/);
 	});
 
 	it("drops an explicit useNearestAncestorOmpFolder at the user and workspace layers, because the editors now follow sessions", async () => {
@@ -104,7 +106,7 @@ describe("the move to ompDesk.runSessionsAtRepositoryRoot", () => {
 		assert.equal(state.user.size + state.workspace.size, 0);
 		assert.equal(state.user.has(RUN_AT_ROOT_KEY), false, "no successor");
 		assert.equal(lines.length, 2);
-		assert.ok(lines.some(line => /\(user settings\): dropped \(it held true\); the Settings, Models and Agents editors now use the folder sessions run in/.test(line)), lines.join("\n"));
+		assert.ok(lines.some(line => /\(user settings\): dropped \(it held true\); the Settings, Models and Agents editors now use the folder sessions run in/.test(line.message)), lines.map(line => line.message).join("\n"));
 		assert.deepEqual(checkedFiles, ["C:\\work\\.vscode\\settings.json"], "the workspace file is checked before it is written");
 	});
 
@@ -114,7 +116,7 @@ describe("the move to ompDesk.runSessionsAtRepositoryRoot", () => {
 		assert.deepEqual((await migrateSessionFolderSettings(port)).map(outcome => outcome.outcome), ["conflict-dropped"]);
 		assert.equal(state.user.get(RUN_AT_ROOT_KEY), true);
 		assert.equal(state.user.has(OLD_AGENT_ROOT_KEY), false);
-		assert.match(lines[0]!, /the new key already holds true; the old value false was dropped/);
+		assert.match(lines[0]!.message, /the new key already holds true; the old value false was dropped/);
 		const same = shared({ [OLD_AGENT_ROOT_KEY]: false, [RUN_AT_ROOT_KEY]: false });
 		assert.deepEqual((await migrateSessionFolderSettings(window(same).port)).map(outcome => outcome.outcome), ["already-set"]);
 		assert.deepEqual(same.writes, [{ key: OLD_AGENT_ROOT_KEY, value: undefined, layer: "user" }]);
@@ -152,7 +154,8 @@ describe("the move to ompDesk.runSessionsAtRepositoryRoot", () => {
 		assert.deepEqual((await migrateSessionFolderSettings(port)).map(outcome => outcome.outcome), ["left"]);
 		assert.equal(state.workspace.get(OLD_ANCESTOR_KEY), true);
 		assert.deepEqual(state.writes, []);
-		assert.match(lines[0]!, /\(workspace settings\): left; the file is read-only/);
+		assert.equal(lines[0]!.level, "warn");
+		assert.match(lines[0]!.message, /\(workspace settings\): left; the file is read-only/);
 	});
 
 	it("logs a refused write and still runs the other key", async () => {
@@ -163,7 +166,7 @@ describe("the move to ompDesk.runSessionsAtRepositoryRoot", () => {
 		assert.deepEqual(outcomes.map(outcome => [outcome.key, outcome.outcome]), [[OLD_AGENT_ROOT_KEY, "left"], [OLD_ANCESTOR_KEY, "dropped"]]);
 		assert.equal(state.user.get(OLD_AGENT_ROOT_KEY), false, "the old value stays for the next activation");
 		assert.equal(state.user.has(OLD_ANCESTOR_KEY), false);
-		assert.ok(lines.some(line => line.includes("left, the step failed: Unable to write file (EPERM)")));
+		assert.ok(lines.some(line => line.level === "warn" && line.message.includes("left, the step failed: Unable to write file (EPERM)")));
 	});
 
 	it("is moved by one window of the profile at a time", async () => {

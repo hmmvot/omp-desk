@@ -17,6 +17,7 @@ import {
 	stopBrokerThroughBroker,
 } from "./broker-process-stop.ts";
 import type { BrokerStopAttach, BrokerStopPorts, BrokerStopTarget } from "./broker-process-stop.ts";
+import { recordingLogger, silentLogger, type LoggedLine } from "../shared/logger.ts";
 import type { PtyBrokerClient } from "./pty-client.ts";
 import {
 	PTY_PROTOCOL_VERSION,
@@ -127,12 +128,12 @@ function fakeHandle(options: FakeHandleOptions = {}) {
 function portsFor(
 	attached: BrokerStopAttach,
 	overrides: Partial<BrokerStopPorts> = {},
-): { ports: BrokerStopPorts; waits: Array<{ target: BrokerStopTarget; timeoutMs: number }>; attaches: BrokerStopTarget[]; diagnostics: string[] } {
+): { ports: BrokerStopPorts; waits: Array<{ target: BrokerStopTarget; timeoutMs: number }>; attaches: BrokerStopTarget[]; diagnostics: LoggedLine[] } {
 	const waits: Array<{ target: BrokerStopTarget; timeoutMs: number }> = [];
 	const attaches: BrokerStopTarget[] = [];
-	const diagnostics: string[] = [];
+	const diagnostics: LoggedLine[] = [];
 	const ports: BrokerStopPorts = {
-		log: message => diagnostics.push(message),
+		log: recordingLogger(diagnostics),
 		attach: async target => {
 			attaches.push(target);
 			return attached;
@@ -239,7 +240,7 @@ describe("stopBrokerThroughBroker", () => {
 		const outcome = await stopBrokerThroughBroker(targetOf(fake.handle.record), "graceful", ports);
 		assert.equal(outcome.kind, "unconfirmed");
 		assert.equal(outcome.kind === "unconfirmed" ? outcome.canForce : null, true);
-		assert.ok(diagnostics.some(message => message.includes("it still answers")));
+		assert.ok(diagnostics.some(line => line.level === "error" && line.message.includes("it still answers")));
 		// A broker whose child may still run is never asked to shut down.
 		assert.deepEqual(fake.log, ["stop:graceful", "disconnect"]);
 		assert.deepEqual(waits, []);
@@ -287,7 +288,7 @@ describe("stopBrokerThroughBroker", () => {
 		const outcome = await stopBrokerThroughBroker(targetOf(fake.handle.record), "graceful", ports);
 		assert.equal(outcome.kind, "unconfirmed");
 		assert.equal(outcome.kind === "unconfirmed" ? outcome.canForce : null, false);
-		assert.ok(diagnostics.some(message => message.includes("child-alive")));
+		assert.ok(diagnostics.some(line => line.level === "error" && line.message.includes("child-alive")));
 		assert.deepEqual(fake.log, ["shutdown", "disconnect"]);
 	});
 
@@ -300,7 +301,7 @@ describe("stopBrokerThroughBroker", () => {
 		const outcome = await stopBrokerThroughBroker(targetOf(fake.handle.record), "graceful", ports);
 		assert.equal(outcome.kind, "stopped");
 		assert.equal(outcome.kind === "stopped" ? outcome.brokerGone : null, false);
-		assert.ok(diagnostics.some(message => message.includes("it was still listed after 10s")));
+		assert.ok(diagnostics.some(line => line.level === "info" && line.message.includes("it was still listed after 10s")));
 		assert.deepEqual(fake.log, ["stop:graceful", "shutdown", "disconnect"]);
 	});
 });
@@ -338,7 +339,7 @@ describe("brokerStopAttachFor", () => {
 		const stored = record({ kind: "managed-rpc" });
 		const handle = fakeHandle({ record: stored }).handle;
 		const fake = fakeClient({ kind: "ok", record: stored }, handle);
-		const outcome = await brokerStopAttachFor(fake.client, () => {})(targetOf(stored));
+		const outcome = await brokerStopAttachFor(fake.client, silentLogger)(targetOf(stored));
 		assert.deepEqual(outcome, { ok: true, handle });
 		assert.deepEqual(fake.reads, [stored.slot]);
 		assert.equal(fake.calls.length, 1);
@@ -352,7 +353,7 @@ describe("brokerStopAttachFor", () => {
 			const stored = record({ kind });
 			const handle = fakeHandle({ record: stored }).handle;
 			const fake = fakeClient({ kind: "ok", record: stored }, handle);
-			const outcome = await brokerStopAttachFor(fake.client, () => {})(targetOf(stored));
+			const outcome = await brokerStopAttachFor(fake.client, silentLogger)(targetOf(stored));
 			assert.equal(outcome.ok, true);
 			assert.equal(fake.calls.length, 1);
 			assert.equal(fake.calls[0]?.method, "attachRecord");
@@ -363,7 +364,7 @@ describe("brokerStopAttachFor", () => {
 
 	it("refuses a slot with no record, without attaching", async () => {
 		const fake = fakeClient({ kind: "none" }, null);
-		const outcome = await brokerStopAttachFor(fake.client, () => {})(targetOf(record()));
+		const outcome = await brokerStopAttachFor(fake.client, silentLogger)(targetOf(record()));
 		assert.equal(outcome.ok, false);
 		assert.deepEqual(fake.calls, []);
 	});
@@ -371,7 +372,7 @@ describe("brokerStopAttachFor", () => {
 	it("refuses a record that cannot be read, without attaching", async () => {
 		for (const lookup of [{ kind: "invalid", detail: "bad json" } as const, new Error("EBUSY")]) {
 			const fake = fakeClient(lookup, null);
-			const outcome = await brokerStopAttachFor(fake.client, () => {})(targetOf(record()));
+			const outcome = await brokerStopAttachFor(fake.client, silentLogger)(targetOf(record()));
 			assert.equal(outcome.ok, false);
 			assert.deepEqual(fake.calls, []);
 		}
@@ -390,7 +391,7 @@ describe("brokerStopAttachFor", () => {
 			it(`a changed ${name}`, async () => {
 				const captured = record();
 				const fake = fakeClient({ kind: "ok", record: { ...captured, ...change } }, fakeHandle().handle);
-				const outcome = await brokerStopAttachFor(fake.client, () => {})(targetOf(captured));
+				const outcome = await brokerStopAttachFor(fake.client, silentLogger)(targetOf(captured));
 				assert.equal(outcome.ok, false);
 				assert.deepEqual(fake.calls, []);
 			});
@@ -400,7 +401,7 @@ describe("brokerStopAttachFor", () => {
 	it("refuses when the attach yields no handle", async () => {
 		const stored = record();
 		const fake = fakeClient({ kind: "ok", record: stored }, null);
-		const outcome = await brokerStopAttachFor(fake.client, () => {})(targetOf(stored));
+		const outcome = await brokerStopAttachFor(fake.client, silentLogger)(targetOf(stored));
 		assert.equal(outcome.ok, false);
 		assert.equal(fake.calls.length, 1);
 	});
@@ -416,9 +417,9 @@ describe("brokerStopAttachFor", () => {
 				throw new Error("handshake refused");
 			},
 		} as unknown as PtyBrokerClient;
-		const diagnostics: string[] = [];
-		const outcome = await brokerStopAttachFor(client, message => diagnostics.push(message))(targetOf(stored));
+		const diagnostics: LoggedLine[] = [];
+		const outcome = await brokerStopAttachFor(client, recordingLogger(diagnostics))(targetOf(stored));
 		assert.equal(outcome.ok, false);
-		assert.ok(diagnostics.some(message => message.includes("handshake refused")));
+		assert.ok(diagnostics.some(line => line.message.includes("handshake refused")));
 	});
 });

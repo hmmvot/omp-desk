@@ -15,6 +15,8 @@ import { afterEach, beforeEach, describe, it, mock } from "node:test";
 
 import type { ChatPage } from "../host/chat-runtime.ts";
 import type { SessionIndex } from "../host/session-index.ts";
+import type { LoggedLine } from "../shared/logger.ts";
+import { recordingLogger } from "../shared/logger.ts";
 import type { CarriedDraft, GuestDispatcher, GuestDispatcherDeps, GuestTab } from "./guest-dispatcher.ts";
 import { registerRecentSessions } from "./recent-sessions.ts";
 
@@ -115,7 +117,7 @@ function world(overrides: Partial<GuestDispatcherDeps<FakeTab>> = {}) {
 		recentRows: [] as { tabId: string; headline: string; entry: { kind: string; cwd: string }; conversation: { lastAt: string | null } | null }[],
 	};
 	const calls: string[] = [];
-	const logged: string[] = [];
+	const lines: LoggedLine[] = [];
 	const infos: string[] = [];
 	const warnings: string[] = [];
 	const errors: string[] = [];
@@ -188,7 +190,7 @@ function world(overrides: Partial<GuestDispatcherDeps<FakeTab>> = {}) {
 		acceptTerminalCopy: async (tab, reply) => { terminalCopies.push({ tab, reply }); },
 		recents,
 		controlRequest: async (...args) => { controlRequests.push(args); },
-		log: message => { logged.push(message); },
+		log: recordingLogger(lines),
 		info: message => { infos.push(message); },
 		warn: message => { warnings.push(message); },
 		error: message => { errors.push(message); },
@@ -203,7 +205,7 @@ function world(overrides: Partial<GuestDispatcherDeps<FakeTab>> = {}) {
 		return { tab, ...page };
 	};
 	return {
-		state, dispatcher, deps, calls, logged, infos, warnings, errors, chatMessages, remembered, viewOnly, routesAttached, detailOpens, mermaidOpens, artifactOpens,
+		state, dispatcher, deps, calls, get logged(): string[] { return lines.map(line => line.message); }, lines, infos, warnings, errors, chatMessages, remembered, viewOnly, routesAttached, detailOpens, mermaidOpens, artifactOpens,
 		chatActions, terminalMessages, terminalCopies, modeSwitches, controlRequests, pinned, acknowledged, clicks, editor,
 	};
 }
@@ -496,7 +498,7 @@ describe("omp:ready", () => {
 		assert.deepEqual(w.calls, []);
 		assert.equal(w.errors.length, 1);
 		assert.match(w.errors[0]!, /different versions/);
-		assert.deepEqual(w.logged, [`tab ${TAB}: guest protocol ${GUEST_PROTOCOL_VERSION + 1} != ${GUEST_PROTOCOL_VERSION}; the conversation was not sent`]);
+		assert.deepEqual(w.lines, [{ level: "error", message: `tab ${TAB}: guest protocol ${GUEST_PROTOCOL_VERSION + 1} != ${GUEST_PROTOCOL_VERSION}; the conversation was not sent` }]);
 	});
 
 	it("pins the origin a page reports with its ticket and drops the report held for it", async () => {
@@ -800,7 +802,7 @@ describe("running a chat command", () => {
 		}
 		assert.deepEqual(w.remembered, []);
 		assert.equal(w.logged.length, 4);
-		assert.equal(w.logged[0], `tab ${TAB}: omp:chat-prompt ${REQUEST.slice(0, 8)} was explained`);
+		assert.deepEqual(w.lines[0], { level: "warn", message: `tab ${TAB}: omp:chat-prompt ${REQUEST.slice(0, 8)} was explained` });
 	});
 
 	it("reports a send whose channel failed as unconfirmed, but lets another command's failure through", async () => {
@@ -815,7 +817,7 @@ describe("running a chat command", () => {
 		const w = world();
 		await w.dispatcher.runChatCommand(TAB, { type: "omp:chat-abort", requestId: REQUEST } as never, page as never);
 		assert.deepEqual(page.posted, []);
-		assert.deepEqual(w.logged, [`tab ${TAB}: omp:chat-abort ${REQUEST.slice(0, 8)} was accepted`]);
+		assert.deepEqual(w.lines, [{ level: "info", message: `tab ${TAB}: omp:chat-abort ${REQUEST.slice(0, 8)} was accepted` }]);
 	});
 
 	it("sends no result when the conversation has no state, and tells the page a refused send through the handle", async () => {

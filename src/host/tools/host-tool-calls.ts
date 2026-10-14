@@ -24,6 +24,7 @@
  */
 
 import { isRecord } from "../../shared/guards.ts";
+import type { Logger } from "../../shared/logger.ts";
 import { writeErrorCode } from "../../protocol/rpc.ts";
 import { HostToolRefusal, type HostToolContext, type HostToolDefinition, type HostToolResult } from "./host-tool.ts";
 
@@ -62,7 +63,7 @@ export interface HostToolCallPorts {
 	/** The tools the settings allow right now. */
 	tools(): readonly HostToolDefinition[];
 	readonly timers: HostToolTimers;
-	log(message: string): void;
+	readonly log: Logger;
 	readonly maxRunning?: number;
 	readonly localCancelGraceMs?: number;
 }
@@ -442,7 +443,7 @@ export class HostToolCalls {
 		call.state = "completed";
 		const outstanding = this.outstandingResults;
 		if (outstanding > HOST_TOOL_OUTBOX_WARN) {
-			if (!this.#overflowLogged) this.#ports.log(`${outstanding} host tool results are waiting for delivery (soft limit ${HOST_TOOL_OUTBOX_WARN}); none is dropped.`);
+			if (!this.#overflowLogged) this.#ports.log.warn(`${outstanding} host tool results are waiting for delivery (soft limit ${HOST_TOOL_OUTBOX_WARN}); none is dropped.`);
 			this.#overflowLogged = true;
 		} else this.#overflowLogged = false;
 		this.#pump();

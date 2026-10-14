@@ -9,6 +9,7 @@
  * stop that happened (the slot is forgotten, the remembered outcome dropped, the credentials of the
  * recorded owner released).
  */
+import type { Logger } from "../shared/logger.ts";
 import type { BrokerSlotProvenance, BrokerSlotStore } from "../host/broker-slots.ts";
 import type { PtyBrokerClient } from "../host/pty-client.ts";
 import { stopBrokerOwnedHost } from "../host/rpc-reconcile.ts";
@@ -24,7 +25,7 @@ import type { StopRecordedOutcome, StopRecordedRequest } from "./session-runtime
 export interface RecordedHostStopPorts {
 	brokerProvenanceFor(tabId: string): BrokerSlotProvenance;
 	attachBrokerClient(): Promise<PtyBrokerClient | null>;
-	log(message: string): void;
+	readonly log: Logger;
 }
 
 /** What {@link readBrokerProvenance} reads of the window: the slot table and the editor slots a conversation is shown in. */
@@ -107,7 +108,7 @@ export function createRecordedHostStopPort(
 				expected: entry.host !== null && isManagedHost(entry.host) ? (entry.host.rpc ?? null) : null,
 			});
 			if (!stopped.ok) {
-				ports.log(`recorded host stop ${entry.tabId}: ${stopped.reason}`);
+				ports.log.warn(`recorded host stop ${entry.tabId}: ${stopped.reason}`);
 				return {
 					kind: "unknown",
 					// A refusal that never dispatched proves nothing was stopped. One that did is
@@ -117,7 +118,7 @@ export function createRecordedHostStopPort(
 						: "This window could not reach the session safely. Nothing was stopped; refresh Sessions and try again.",
 				};
 			}
-			ports.log(`recorded host stop ${entry.tabId}: ${stopped.verdict.diagnosticDetail ?? stopped.verdict.detail}`);
+			ports.log.info(`recorded host stop ${entry.tabId}: ${stopped.verdict.diagnosticDetail ?? stopped.verdict.detail}`);
 			return {
 				kind: "stopped",
 				writerGone: stopped.verdict.writerGone,

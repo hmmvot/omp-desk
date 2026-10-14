@@ -15,6 +15,8 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { after, describe, it } from "node:test";
+import type { LoggedLine } from "../shared/logger.ts";
+import { recordingLogger } from "../shared/logger.ts";
 import { WORKSPACE_FOLDERS_STORAGE_KEY, mergeWorkspaceFolderRecords } from "../views/workspace-folders.ts";
 import {
 	PREDECESSOR_EXTENSION_ID,
@@ -67,10 +69,8 @@ function foldersOf(store: CatalogStore): readonly { id: string; path: string }[]
 	return record?.folders ?? [];
 }
 
-const logs: string[] = [];
-const log = (message: string): void => {
-	logs.push(message);
-};
+const logs: LoggedLine[] = [];
+const log = recordingLogger(logs);
 
 describe("predecessorStorageDir", () => {
 	it("is the sibling of this extension's global storage named after the old id", () => {
@@ -105,7 +105,7 @@ describe("importPredecessorFolders", () => {
 		assert.equal(ledger[0]?.outcome, "imported");
 		assert.deepEqual(ledger[0]?.keys, [WORKSPACE_FOLDERS_STORAGE_KEY]);
 		assert.equal(await readFile(file, "utf8"), before, "the predecessor's catalog is never written");
-		assert.ok(logs.some(line => line.includes("2 folder(s) were imported")));
+		assert.ok(logs.some(line => line.level === "info" && line.message.includes("2 folder(s) were imported")));
 	});
 
 	it("happens once: a folder removed afterwards is not brought back, even by another window", async () => {
