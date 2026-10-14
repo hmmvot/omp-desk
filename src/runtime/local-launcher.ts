@@ -424,7 +424,7 @@ export class LocalLauncher implements OmpHostLauncher {
 			void this.#deps.control.connect(request.tabId, request.ownerGeneration, runtime, control);
 		} else if (control !== null) {
 			// The launcher cannot carry the recipient (ADR-0075): remember that, so nothing looks for a channel later.
-			void this.#deps.control.withhold(request.tabId, request.ownerGeneration, runtime, control, "this OMP launcher does not accept the startup options host control needs, so none were passed (see the launch notice)");
+			void this.#deps.control.withhold(request.tabId, request.ownerGeneration, runtime, control, "this OMP launcher did not carry the startup options host control needs (it does not accept them, or that could not be checked), so none were passed (see the launch notice)");
 		} else {
 			diagnostics.notObserved(
 				request.tabId,

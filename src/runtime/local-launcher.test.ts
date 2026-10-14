@@ -37,6 +37,7 @@ const request: OmpHostLaunchRequest = {
 
 function fixture(options: { precheck?: boolean; launch?: "running" | "not-started" | "unconfirmed"; stagingFails?: boolean; undelivered?: boolean } = {}) {
 	const events: string[] = [];
+	const withheld: string[] = [];
 	const runtime = {
 		kind: "chat", pid: 4242, cwd: request.cwd, notice: null, binary: null, resolutionMs: undefined,
 		...(options.undelivered === true ? { control: null } : {}),
@@ -85,7 +86,7 @@ function fixture(options: { precheck?: boolean; launch?: "running" | "not-starte
 			directory: () => "control-dir",
 			connect: async () => { events.push("connectControl"); },
 			reconnect: async () => { events.push("reconnectControl"); },
-			withhold: async () => { events.push("withholdControl"); },
+			withhold: async (_tab: string, _generation: unknown, _runtime: unknown, _control: unknown, reason: string) => { events.push("withholdControl"); withheld.push(reason); },
 			fail: () => { events.push("controlFailed"); },
 		},
 		native: { servesFile: async () => { events.push("launchPrecheck"); return options.precheck === true; } },
@@ -94,7 +95,7 @@ function fixture(options: { precheck?: boolean; launch?: "running" | "not-starte
 		log: silentLogger,
 	};
 	const launcher = new LocalLauncher(deps);
-	return { launcher, events, recorded, forgotten, runtime, deps };
+	return { launcher, events, recorded, forgotten, runtime, deps, withheld };
 }
 
 describe("launch", () => {
@@ -116,6 +117,11 @@ describe("launch", () => {
 		assert.equal(result.state, "running");
 		assert.ok(f.events.includes("withholdControl"), "the marker is recorded, so a reload or the watch never looks for a channel");
 		assert.ok(!f.events.includes("connectControl"));
+		// A launcher that could not be checked is not reported as one that refuses: the reason covers both and points at the notice.
+		assert.equal(f.withheld.length, 1);
+		assert.match(f.withheld[0] ?? "", /did not carry the startup options host control needs/);
+		assert.match(f.withheld[0] ?? "", /could not be checked/);
+		assert.doesNotMatch(f.withheld[0] ?? "", /^this OMP launcher does not accept/);
 	});
 
 	it("refuses a second writer for a file this window's native process already serves, before staging anything", async () => {
