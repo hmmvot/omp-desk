@@ -153,7 +153,7 @@ export function describeControlError(error: unknown): string {
 			? "Host control refused: the control record belongs to a different process than this session's. Reload the session to restore statuses and notifications."
 			: `host identity check failed (${error.reason})`;
 	}
-	if (error instanceof HostControlUnavailableError) return "native host connection unavailable";
+	if (error instanceof HostControlUnavailableError) return error.timedOut ? "OMP did not answer in time (it may be busy)" : "native host connection unavailable";
 	if (error instanceof HostControlConfigurationError) return "host-control configuration invalid";
 	return "unexpected host-control failure";
 }
@@ -433,7 +433,7 @@ export class LocalHostControl {
 			const outcome = { runtime: attempt.runtime, pid: attempt.pid, client: connected?.client ?? null };
 			if (mayReportControlFailure(this.#attemptTarget(tabId), outcome)) {
 				diagnostics.fail(tabId, "host-control-verified", describeControlError(error));
-				this.fail(tabId, describeControlError(error));
+				this.reportFailure(tabId, error);
 			} else {
 				log(`tab ${tabId}: a failed host-control attempt no longer owns this tab; its result was ignored`);
 				connected?.client.close();
@@ -493,6 +493,27 @@ export class LocalHostControl {
 			state.controlFailure = detail;
 		}
 		this.#deps.log(`tab ${conversation}: host control unavailable — ${detail}`);
+	}
+
+	/**
+	 * Report why a control attempt or read failed. A host that was reached but did not answer in
+	 * time is busy (OMP working through a large input), not gone: its channel is dropped so the next
+	 * attempt starts clean, and the log says so, but no failure is recorded, because that text is
+	 * shown as a warning above the terminal and calls a busy session unavailable. Every other
+	 * failure is recorded as before.
+	 */
+	reportFailure(conversation: string, error: unknown): void {
+		if (!(error instanceof HostControlUnavailableError && error.timedOut)) {
+			this.#deps.log(`tab ${conversation}: host control failure detail: ${messageOf(error).slice(0, 300)}`);
+			this.fail(conversation, describeControlError(error));
+			return;
+		}
+		const state = this.#deps.records.get(conversation);
+		if (state) {
+			state.control?.client.close();
+			state.control = null;
+		}
+		this.#deps.log(`tab ${conversation}: host control paused — ${describeControlError(error)}; it is retried`);
 	}
 
 	/** Close and forget one record's verified control channel; the failure text is cleared with it. */

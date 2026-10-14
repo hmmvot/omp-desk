@@ -20,7 +20,6 @@ import type { OwnerReconciler } from "../host/session-availability.ts";
 import { readSessionFileHeader } from "../host/session-files.ts";
 import type { SessionIndex } from "../host/session-index.ts";
 import type { EditorSlotBinding, SessionIndexEntry } from "../host/session-model.ts";
-import { describeControlError } from "./local-control.ts";
 import type { LocalHostControl } from "./local-control.ts";
 import type { LocalExitOperations } from "./local-exit.ts";
 import type { LocalIdentity } from "./local-identity.ts";
@@ -147,7 +146,7 @@ export class LocalNativeWatch {
 						void control.reconnect(state.tabId, this.#deps.index.get(state.tabId)?.ownership?.ownerGeneration ?? "", runtime)
 							.catch(error => {
 								if (!cancelled && state.runtime === runtime && !state.transitioning && !runtime.stopping &&
-									!isOpenControlClient(state.control?.client)) control.fail(state.tabId!, describeControlError(error));
+									!isOpenControlClient(state.control?.client)) control.reportFailure(state.tabId!, error);
 							})
 							.finally(() => {
 								// Every attempt dials the slot's pipes through a PowerShell peer proof, so a host
@@ -173,7 +172,7 @@ export class LocalNativeWatch {
 			} catch (error) {
 				if (state.runtime === runtime && !state.transitioning && !runtime.stopping) {
 					if (polledClient !== undefined && state.control?.client === polledClient) {
-						control.fail(state.tabId!, describeControlError(error));
+						control.reportFailure(state.tabId!, error);
 						reportSignals("control-unavailable");
 					} else {
 						state.controlFailure = `Native control is unavailable (${messageOf(error)}). After /restart, use native /exit or explicit force Stop; no automatic replacement is safe.`;

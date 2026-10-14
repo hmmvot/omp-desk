@@ -7152,7 +7152,7 @@ async function refreshControlSnapshot(channel: ControlChannel): Promise<ControlH
         ? null
         : { runtime: hostOf(state) ?? null, runtimePid: hostOf(state)?.pid ?? null, controlClient: controlOf(state)?.client ?? null };
     if (mayReportControlFailure(target, { runtime: null, pid: null, client: channel.client })) {
-      windowState().sessionRuntime.control.fail(channel.tabId, describeControlError(error));
+      windowState().sessionRuntime.control.reportFailure(channel.tabId, error);
     } else {
       log(`tab ${channel.tabId}: a failed control read back was ignored: this tab holds a different channel now`);
     }

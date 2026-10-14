@@ -271,6 +271,7 @@ interface StartedChannel {
 		expectedSessionFile?: string | null;
 		recipientPrivateKeyPkcs8Pem?: string;
 		bridge?: ControlPeerBridge;
+		requestTimeoutMs?: number;
 	}): Promise<HostControlVerifiedConnection>;
 	attach(overrides: {
 		provenKey: string;
@@ -323,6 +324,7 @@ async function startChannel(prefix: string, options: FakeAdapterOptions = {}): P
 						overrides?.expectedProcessCreationTime ?? TEST_GENERATION,
 					expectation: { sessionFile: overrides?.expectedSessionFile ?? null, cwd: process.cwd() },
 					...(overrides?.provenKey === undefined ? {} : { provenKey: overrides.provenKey }),
+					...(overrides?.requestTimeoutMs === undefined ? {} : { requestTimeoutMs: overrides.requestTimeoutMs }),
 				},
 				overrides?.bridge ?? fakePeerBridge(directory),
 			),
@@ -807,6 +809,16 @@ describe("host control channel", () => {
 			}),
 		);
 		assert.ok(tooMany instanceof HostControlUnavailableError, `unexpected error: ${tooMany.message}`);
+		// A server that was listed and did not answer in time is a busy host; one that cannot be reached is not.
+		const attachWith = (reason: "timeout" | "pipe-unreachable"): Promise<Error> =>
+			caught(channel.attach({ provenKey, bridge: fakePeerBridge(channel.directory, { fail: new HostControlPeerError(reason, "fixture") }) }));
+		const silent = await attachWith("timeout");
+		assert.ok(silent instanceof HostControlUnavailableError);
+		assert.equal((silent as HostControlUnavailableError).timedOut, true, "every examined server timed out");
+		const gone = await attachWith("pipe-unreachable");
+		assert.ok(gone instanceof HostControlUnavailableError);
+		assert.equal((gone as HostControlUnavailableError).timedOut, false);
+		assert.equal((tooMany as HostControlUnavailableError).timedOut, false);
 
 		const wrongSession = await caught(
 			channel.attach({ provenKey, expectedSessionFile: path.join("C:", "sessions", "other.jsonl") }),
@@ -1240,6 +1252,25 @@ describe("host control tool catalogue", () => {
 		} finally {
 			client.close();
 		}
+	});
+
+	it("tells a host that was reached but did not answer in time from one that cannot be reached", async () => {
+		// A busy OMP (a large input being processed) answers late: that is a timeout, never an unreachable host.
+		const fake = createFakeAdapter();
+		const never = new Promise<never>(() => {});
+		const channel = await startChannel("omp-control-busy-", { adapter: { ...fake.adapter, listTools: () => never } });
+		const { client } = await channel.connect({ requestTimeoutMs: 150 });
+		try {
+			const busy = await caught(client.listTools());
+			assert.ok(busy instanceof HostControlUnavailableError);
+			assert.equal((busy as HostControlUnavailableError).timedOut, true);
+			assert.match(busy.message, /did not answer/);
+		} finally {
+			client.close();
+		}
+		const closed = await caught(client.listTools());
+		assert.ok(closed instanceof HostControlUnavailableError);
+		assert.equal((closed as HostControlUnavailableError).timedOut, false, "a closed channel is unreachable, not busy");
 	});
 
 	it("does not expose tool selection or model/thinking mutations on the control channel", () => {

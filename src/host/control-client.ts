@@ -118,11 +118,19 @@ export class HostControlConfigurationError extends Error {
 	}
 }
 
-/** The endpoint could not be reached, or the host is gone. */
+/**
+ * The endpoint could not be reached, or the host is gone.
+ *
+ * `timedOut` is set when the host did not answer within the deadline. A process that is busy
+ * (OMP working through a large input, a long synchronous turn) answers late, which is a
+ * different fact from a host that cannot be reached, and callers must not report it as an outage.
+ */
 export class HostControlUnavailableError extends Error {
-	constructor(message: string) {
+	readonly timedOut: boolean;
+	constructor(message: string, options: { readonly timedOut?: boolean } = {}) {
 		super(message);
 		this.name = "HostControlUnavailableError";
+		this.timedOut = options.timedOut === true;
 	}
 }
 
@@ -864,7 +872,8 @@ export class HostControlClient {
 		// A pipe counts as "not the pinned server" only when it answered conclusively: another
 		// process's pipe, or a server that proved a different key. A pipe that could not be
 		// reached or examined may still be the pinned server, so absence is not concluded.
-		let inconclusive = ordered.length > MAX_PROVEN_KEY_CANDIDATES;
+		const causes: string[] = ordered.length > MAX_PROVEN_KEY_CANDIDATES ? ["too-many-servers"] : [];
+		let inconclusive = causes.length > 0;
 		for (const pipeName of ordered.slice(0, MAX_PROVEN_KEY_CANDIDATES)) {
 			let channel: ControlPeerChannel;
 			try {
@@ -881,6 +890,7 @@ export class HostControlClient {
 				}
 				if (!(error instanceof HostControlPeerError && (error.reason === "pid-mismatch" || error.reason === "generation-mismatch"))) {
 					inconclusive = true;
+					causes.push(error instanceof HostControlPeerError ? error.reason : "unavailable");
 				}
 				continue;
 			}
@@ -911,14 +921,18 @@ export class HostControlClient {
 				if (error instanceof HostControlIdentityError && error.reason === "key-mismatch") continue;
 				if (error instanceof HostControlUnavailableError || error instanceof HostControlRefusedError) {
 					inconclusive = true;
+					causes.push(error instanceof HostControlUnavailableError && error.timedOut ? "timeout" : "unavailable");
 					continue;
 				}
 				throw error;
 			}
 		}
 		if (inconclusive) {
+			// Every examined server that did not answer in time is a host that is busy; one that
+			// could not be reached, or refused, is not, and decides the verdict.
 			throw new HostControlUnavailableError(
-				"the slot's control servers could not all be examined, so the host is not treated as replaced",
+				`the slot's control servers could not all be examined, so the host is not treated as replaced (${causes.join(", ")})`,
+				{ timedOut: causes.length > 0 && causes.every(cause => cause === "timeout") },
 			);
 		}
 		return null;
@@ -1266,7 +1280,7 @@ export class HostControlClient {
 		const answered = Promise.withResolvers<ControlResponseFrame | ControlErrorFrame>();
 		const timer = setNodeTimeout(() => {
 			if (this.#pending?.requestId === id) this.#pending = null;
-			answered.reject(new HostControlUnavailableError(`host did not answer ${method} in time`));
+			answered.reject(new HostControlUnavailableError(`host did not answer ${method} in time`, { timedOut: true }));
 		}, this.#requestTimeoutMs);
 		timer.unref();
 		this.#pending = { requestId: id, settle: answered.resolve, timer };
@@ -1361,7 +1375,7 @@ export class HostControlClient {
 	async #withTimeout<T>(work: Promise<T>, ms: number, label: string): Promise<T> {
 		const raced = Promise.withResolvers<T>();
 		const timer = setNodeTimeout(() => {
-			raced.reject(new HostControlUnavailableError(`${label} did not complete within ${ms}ms`));
+			raced.reject(new HostControlUnavailableError(`${label} did not complete within ${ms}ms`, { timedOut: true }));
 		}, ms);
 		timer.unref();
 		work.then(

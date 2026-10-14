@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Terminal: an OMP that is busy no longer puts a `native host connection unavailable` warning above the terminal. While OMP works through a large input its event loop does not answer OMP Desk's status requests for a while; Desk reported that as a lost connection, and the warning stayed until the connection came back. A host that was reached and did not answer in time is now retried quietly (the OMP Desk output says `host control paused — OMP did not answer in time (it may be busy)`); a host that cannot be reached or refuses a request still shows its warning.
 - Terminal: a paste of more than about 8 KB reaches OMP whole. The Terminal pane cut a paste into 8 KiB messages and the host refused every full-size one (its length check was four characters short of what 8 KiB encodes to), so only the last, shorter piece arrived, without its opening `ESC[200~` bracketed-paste marker: OMP read it as typed text and sent each line as its own message, one reply after another with OMP busy. A 2,500-line paste (250 KB) now reaches OMP whole and opens its large-paste menu in about 6 s, an 800-line one in under 2 s. Pastes of up to 8,190 bytes were never affected.
 
 ## [0.4.0] - 2026-10-14
