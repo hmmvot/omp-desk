@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: implemented
 date: 2026-10-14
 ---
 
@@ -179,6 +179,14 @@ Nothing is written when none of the old keys is present. An existing explicit `r
 3. Migration with tests (explicit false carried, ancestor key dropped, no writes when nothing to move).
 4. Documentation and a CHANGELOG Changed entry with the migration note.
 5. Isolated VS Code window (`scripts/test-vscode.ps1`): a Unity-like git layout `repo/Game`, open `repo/Game`, start a session, read the session file header's cwd; open `/settings`, Project view, confirm it targets `repo/.omp`; seed the old settings in the scratch profile and read the migration lines in the OMP Desk log.
+
+### Verification evidence (2026-10-14, installed VSIX in an isolated window, scratch profile)
+
+- Layout: `repo/.git`, `repo/AGENTS.md`, `repo/omp-vscode/Assets`, `repo/Game/ProjectSettings/ProjectVersion.txt`; VS Code opened on `repo/Game`.
+- Migration: a profile seeded with `ompDesk.useAgentRootFolder: false` and `ompDesk.ompSettings.useNearestAncestorOmpFolder: true` logged `settings: ompDesk.useAgentRootFolder → ompDesk.runSessionsAtRepositoryRoot (user settings): moved` and `... useNearestAncestorOmpFolder (user settings): dropped (it held true) ...`; `settings.json` then held only `ompDesk.runSessionsAtRepositoryRoot: false`.
+- Off: a New Session created OMP's session directory `...-repo-Game` (cwd `repo/Game`) and the window's registry record published `staysInFolder`.
+- On (key removed from settings.json): a New Session created `...-repo`, the record's `liveCwds` was `repo` and `staysInFolder` was gone; the session started without a model login, so no session file was written and the directory name is the cwd evidence.
+- Editors: `OMP Desk: Open OMP Settings` with that session active opened "OMP Settings · repo", Project · repo (the session's folder), not `Game`.
 
 ## Related Decisions
 
