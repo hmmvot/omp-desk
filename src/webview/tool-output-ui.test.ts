@@ -534,7 +534,10 @@ test("an opened tool call rests as a bounded preview, shows its gist and footer,
 			await reset("selection"); await show(call); await open(call);
 			await pointerClick(`${card(call)} .omp-output-more`);
 			await ui.wait(`document.querySelector(${JSON.stringify(`${card(call)} .omp-window`)})`);
-			await ui.evaluate(`(()=>{const rows=document.querySelectorAll(${JSON.stringify(`${card(call)} .omp-window-layer pre > span`)});const a=rows[2].firstChild,b=rows[6].firstChild;window.anchor=rows[2];getSelection().setBaseAndExtent(a,0,b,5)})()`);
+			// The transcript follows the end of the content, so Show all on a call at the bottom leaves the window at the last rows: go to the first rows before selecting them.
+			await scrollTo(call, 0);
+			await ui.wait(`[...document.querySelectorAll(${JSON.stringify(`${card(call)} .omp-window-layer pre > span`)})].some(row=>row.textContent.startsWith('line 1:'))`);
+			await ui.evaluate(`(()=>{const rows=[...document.querySelectorAll(${JSON.stringify(`${card(call)} .omp-window-layer pre > span`)})];const start=rows.find(row=>row.textContent.startsWith('line 3:')),end=rows.find(row=>row.textContent.startsWith('line 7:'));window.anchor=start;getSelection().setBaseAndExtent(start.firstChild,0,end.firstChild,5)})()`);
 			await scrollTo(call, 1200);
 			await ui.wait(`[...document.querySelectorAll(${JSON.stringify(`${card(call)} .omp-window-layer pre > span`)})].some(row=>row.textContent.startsWith('line 1201:'))`);
 			assert.equal(await ui.evaluate("window.anchor.isConnected"), true, "the row holding the start of the selection is still mounted");
