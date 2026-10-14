@@ -3285,6 +3285,7 @@ function sessionRuntimeDeps(index: SessionIndex, chat: ChatRuntime, launchers?: 
   const control = new LocalHostControl({
     index, records, window: controlWindow(index), store: controlStore(),
     chat: () => chat, diagnostics: () => windowState().diagnostics, log, attempts: windowState().hostControlAttempts,
+    stagedHelper: () => windowState().staging.entries().then(() => undefined, () => undefined),
   });
   const identity = new LocalIdentity({ index, records, window: identityWindow(index), log });
   const exit = new LocalExitOperations({
@@ -4282,10 +4283,10 @@ function startCatalogActivation(context: vscode.ExtensionContext, index: Session
       log(`catalog: the recovered records could not be adopted: ${messageOf(error)}`);
     }
     await vscode.commands.executeCommand("setContext", CATALOG_PENDING_CONTEXT, false);
-    // The restore re-adopts running sessions and proves their host control with the staged pipe helper, which only
-    // staging configures; a proof made before it refuses with helper-unavailable and nothing retries a Chat's. A
-    // staging failure is left to the launch paths, which report their own.
-    await s.staging.entries().catch(() => {});
+    // Staging is not awaited here. The restore re-adopts running sessions, and only the step that proves a Chat's
+    // host control needs the staged pipe helper: `LocalHostControl` waits for it itself (`stagedHelper`), so the
+    // catalog adoption, the restore start, the broker attach and the panel binding never queue behind the security
+    // reads staging performs.
     // Only now is the index complete: the pass restores exactly the rows this window
     // is responsible for, and a click on any other row is an explicit open.
     s.catalogAdoptedAt = Date.now();

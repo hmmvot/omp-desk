@@ -115,6 +115,13 @@ export interface LocalHostControlDeps {
 	readonly log: (message: string) => void;
 	/** Launch, recovery and the native watch share one attempt for the exact runtime; the window owns the table, as it owns the broker watches. */
 	readonly attempts: WeakMap<SessionHostRuntime, Promise<void>>;
+	/**
+	 * Settles once the window's staged pipe helper is configured, or once staging failed (the proof then refuses
+	 * visibly with `helper-unavailable`, as it always has). The control client has no helper until staging has run,
+	 * so every step that spawns it — the process-generation read and the peer-verified connection — waits here
+	 * first, and nothing that does not spawn it waits for staging.
+	 */
+	readonly stagedHelper: () => Promise<void>;
 }
 
 /** Secrets are scoped to the claim's owner generation, so windows never share one. */
@@ -221,6 +228,7 @@ export class LocalHostControl {
 			const owner = controlOwnerFor(runtime, ownerGeneration);
 			let processCreation: string;
 			try {
+				await this.#deps.stagedHelper();
 				processCreation = await queryControlProcessGeneration(runtime.pid);
 			} catch (error) {
 				log(`tab ${conversation}: host control was withheld (${reason}) and its marker could not be recorded: ${messageOf(error)}`);
@@ -263,6 +271,7 @@ export class LocalHostControl {
 		// with, so the two readings are the same kind of value.
 		let processCreation: string;
 		try {
+			await this.#deps.stagedHelper();
 			processCreation = await queryControlProcessGeneration(pid);
 		} catch (error) {
 			if (mayReportControlFailure(this.#attemptTarget(tabId), { runtime, pid, client: null })) {
@@ -340,6 +349,9 @@ export class LocalHostControl {
 			}
 			return;
 		}
+		// The first use of the helper: a re-adopted host after a reload onto a new build is attached before staging is
+		// done, and a proof made without the helper refuses, which a Chat's attempt never retries.
+		await this.#deps.stagedHelper();
 		await this.establish(tabId, ownerGeneration, attempt, {
 			directory: record.directory,
 			slotId: record.slotId,

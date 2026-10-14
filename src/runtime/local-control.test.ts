@@ -84,3 +84,40 @@ describe("a host launched without a control channel (ADR-0075)", () => {
 		assert.match(f.record.controlFailure ?? "", /no control recipient was recorded/);
 	});
 });
+
+describe("a re-adopted host's control proof waits for the staged pipe helper, and only it does", () => {
+	const runtime = { kind: "chat", pid: 4242, identity: { slot: "slot-1" } } as never;
+	const stored: RecordedControlProcess = { pid: 4242, processCreation: "2026-10-14T00:00:00Z", slotId: "slot-1", directory: "C:/control" };
+
+	function fixture() {
+		let release!: () => void;
+		const staged = new Promise<void>(resolve => { release = resolve; });
+		const events: string[] = [];
+		const logs: string[] = [];
+		const control = new LocalHostControl({
+			// No record for the tab: the attempt that starts after the wait finds it no longer owns the tab and ends at once,
+			// so the test never reaches the real pipe client.
+			records: { get: () => undefined } as never,
+			store: {
+				record: (key: string) => key === controlProcessRecordKey("owner") ? stored : undefined,
+				secret: async (name: string) => name.startsWith("omp.hostControl.recipient.") ? "pem" : undefined,
+			} as never,
+			diagnostics: () => { events.push("establish"); return {} as never; },
+			attempts: new WeakMap(),
+			stagedHelper: () => { events.push("staging awaited"); return staged; },
+			log: (message: string) => logs.push(message),
+		} as never);
+		return { control, events, logs, release };
+	}
+
+	it("does not start the proof before staging is done, and runs it once staging is", async () => {
+		const f = fixture();
+		const attempt = f.control.reconnect(TAB, "owner", runtime);
+		for (let turn = 0; turn < 5; turn += 1) await new Promise<void>(resolve => setImmediate(resolve));
+		assert.deepEqual(f.events, ["staging awaited"], "the proof is held back, not started without the helper");
+		f.release();
+		await attempt;
+		assert.deepEqual(f.events, ["staging awaited", "establish"]);
+		assert.match(f.logs.join("\n"), /no longer owns this tab/);
+	});
+});
