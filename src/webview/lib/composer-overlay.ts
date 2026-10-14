@@ -13,7 +13,7 @@
  */
 const listeners = new Set<(open: boolean) => void>();
 /** Every chat popup whose open state must keep Escape from also stopping a running turn. */
-export type ComposerPopupOwner = "completion" | "context" | "commands";
+export type ComposerPopupOwner = "completion" | "context" | "commands" | "tool-menu";
 const owners = new Set<ComposerPopupOwner>();
 let open = false;
 

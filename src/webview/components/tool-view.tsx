@@ -137,6 +137,15 @@ export function OutputRows<T>({ all, render, expanded, limit = PREVIEW_ROWS, tai
 	</>;
 }
 
+/** Put `value` on the clipboard and say what happened: the sentence both a Copy button and a menu item announce. */
+export async function copyToClipboard(value: string, what: string): Promise<string> {
+	try {
+		await navigator.clipboard.writeText(value);
+		const lines = value === "" ? 0 : value.split("\n").length;
+		return `Copied ${what} (${grouped(lines)} ${lines === 1 ? "line" : "lines"}, ${grouped(value.length)} characters)`;
+	} catch { return `Copy failed. Select the text to copy ${what} manually.`; }
+}
+
 /** Copy: puts exactly `text` on the clipboard and says what it copied, to the eye and to a screen reader. */
 export function ToolCopyButton({ text, label, what }: { text: string | (() => string); label: string; what: string }): ReactNode {
 	const [status, setStatus] = useState<string | null>(null);
@@ -148,12 +157,7 @@ export function ToolCopyButton({ text, label, what }: { text: string | (() => st
 	return (
 		<button type="button" className="omp-iconbtn" aria-label={label} title={status ?? label} onClick={async event => {
 			event.stopPropagation();
-			const value = typeof text === "function" ? text() : text;
-			try {
-				await navigator.clipboard.writeText(value);
-				const lines = value === "" ? 0 : value.split("\n").length;
-				setStatus(`Copied ${what} (${grouped(lines)} ${lines === 1 ? "line" : "lines"}, ${grouped(value.length)} characters)`);
-			} catch { setStatus(`Copy failed. Select the text to copy ${what} manually.`); }
+			setStatus(await copyToClipboard(typeof text === "function" ? text() : text, what));
 		}}>
 			<span className={`codicon codicon-${status === null ? "copy" : status.startsWith("Copy failed") ? "warning" : "check"}`} aria-hidden="true" />
 			{status !== null && <span className="omp-sr-only" role="status">{status}</span>}

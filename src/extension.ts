@@ -162,6 +162,8 @@ import type { SessionActions, SessionActionsDeps } from "./wiring/session-action
 import { CHAT_COMMAND_TYPES, registerGuestDispatcher } from "./wiring/guest-dispatcher";
 import type { CarriedDraft, GuestDispatcher, GuestDispatcherDeps } from "./wiring/guest-dispatcher";
 import { registerRecentSessions } from "./wiring/recent-sessions";
+import { registerArtifactDocuments } from "./wiring/artifact-documents";
+import type { ArtifactDocuments } from "./wiring/artifact-documents";
 import { registerBridgeHost } from "./wiring/bridge-host";
 import type { BridgeHost, BridgeHostDeps } from "./wiring/bridge-host";
 import { EDITOR_TAB_ICON, UPDATED_ON_DISK_DETAIL, registerEditorPanels } from "./wiring/editor-panels";
@@ -885,6 +887,8 @@ interface WindowState {
   detailTabs: DetailTabs;
   /** Diagram tabs: a mermaid source the chat page would not draw inline, drawn in a tab of its own (ADR-0069 amendment). */
   mermaidPreviews: MermaidPreviews;
+  /** The read-only `omp-artifact:` documents (tool output design, slice 5); registered at the start of `activate`. */
+  artifactDocuments: ArtifactDocuments;
   /**
    * Last host-observed turn activity per tab, projected from the conversation's own model.
    *
@@ -1048,6 +1052,8 @@ function guestDispatcherDeps(): GuestDispatcherDeps<TabState> {
     conversations: () => windowState().sessionRuntime.conversations,
     detailTabs: () => windowState().detailTabs,
     mermaidPreviews: () => windowState().mermaidPreviews,
+    artifactDocuments: () => windowState().artifactDocuments,
+    sessionFileOf: tabId => windowState().indexForBridge?.get(tabId)?.sessionFile ?? null,
     panelChatPage,
     attachChatRoute,
     attachChatRoutes,
@@ -1278,6 +1284,7 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     // Conversations
     detailTabs: undefined as never, // assigned by `activate` before anything reads it
     mermaidPreviews: undefined as never, // assigned by `activate` before anything reads it
+    artifactDocuments: undefined as never, // assigned by `activate`, first thing
     turnActivities: new Map<string, TurnActivity>(),
     editorRecency: new EditorRecency(),
     turnNotifier: undefined,
@@ -1372,6 +1379,8 @@ async function revealDesktopNotification(index: SessionIndex, extensionId: strin
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   window = createWindowState(context);
   const s = windowState();
+  // The `omp-artifact:` scheme first, synchronously: an editor tab of it that Reload Window restores is served as soon as the window has the provider.
+  s.artifactDocuments = registerArtifactDocuments(context.subscriptions);
   s.output = vscode.window.createOutputChannel("OMP Desk");
   setOmpResolutionLog(log);
   context.subscriptions.push({ dispose: () => setOmpResolutionLog(null) });
@@ -1704,6 +1713,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     attachPage: (conversation, page) => s.sessionRuntime.conversations.attachPage(conversation, page),
     handleMessage: (conversation, message, origin) => s.sessionRuntime.conversations.command(conversation, message, origin),
     openMermaid: source => { log(`diagram tab was ${s.mermaidPreviews.open(source)}`); },
+    openArtifact: (conversation, request) => s.guestDispatcher.openArtifact(conversation, request),
     openUrl: async (url, mode) => {
       try { await openPageWebLink(url, mode); }
       catch (error) { log(`detail link: cannot open ${url}: ${messageOf(error)}`); showWarning(`cannot open ${url}: ${messageOf(error)}`); }
@@ -9295,6 +9305,10 @@ async function handlePassiveSlotMessage(slot: string, panel: vscode.WebviewPanel
   }
   if (parsed.type === "omp:open-mermaid") {
     s.guestDispatcher.openMermaidTab(parsed.source);
+    return;
+  }
+  if (parsed.type === "omp:open-artifact") {
+    await s.guestDispatcher.openArtifact(state.tabId, parsed);
     return;
   }
   if (parsed.type === "omp:ready") {

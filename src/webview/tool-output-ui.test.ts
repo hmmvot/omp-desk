@@ -591,6 +591,85 @@ test("an opened tool call rests as a bounded preview, shows its gist and footer,
 			assert.equal(await ui.evaluate(`document.querySelector(${JSON.stringify(`${card(call)} .omp-tone--err`)}).textContent.includes('Command exited')`), false);
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
+
+		const menuButton = (call: Call): string => `${card(call)} .omp-output-bar .omp-tool-menu > button`;
+		const items = (call: Call): Promise<{ id: string; disabled: boolean; reason: string }[]> => ui.evaluate(`[...document.querySelectorAll(${JSON.stringify(`${card(call)} .omp-output-bar [role=menuitem]`)})].map(item=>({id:item.dataset.menuItem,disabled:item.getAttribute('aria-disabled')==='true',reason:item.querySelector('.omp-tool-menu-reason')?.textContent??''}))`);
+		const key = (name: string): Promise<void> => ui.call("Input.dispatchKeyEvent", { type: "keyDown", key: name, code: name }).then(() => ui.call("Input.dispatchKeyEvent", { type: "keyUp", key: name, code: name })).then(() => undefined);
+		const installClipboard = (): Promise<void> => ui.evaluate("window.clip=null;Object.defineProperty(navigator,'clipboard',{configurable:true,value:{async writeText(value){window.clip=value}}})");
+
+		await t.test("the ⋯ menu is a menu: arrows, Home and End move, Escape closes it before the card collapses, and a disabled item says why", async () => {
+			const call = real("bash-long-786-lines");
+			await reset("menu"); await show(call); await open(call);
+			assert.equal(await ui.evaluate(`document.querySelector(${JSON.stringify(menuButton(call))}).getAttribute('aria-haspopup')`), "menu");
+			await ui.evaluate(`document.querySelector(${JSON.stringify(menuButton(call))}).click()`);
+			await ui.wait(`document.querySelector(${JSON.stringify(`${card(call)} [role=menu]`)})`);
+			assert.deepEqual((await items(call)).map(item => item.id), ["copy-command", "copy-output", "copy-details", "raw", "open-full"]);
+			const open_ = (await items(call)).find(item => item.id === "open-full")!;
+			assert.equal(open_.disabled, true);
+			assert.match(open_.reason, /not truncated/, "an untruncated output has no full copy, and the item says so");
+			const focused = (): Promise<string> => ui.evaluate("document.activeElement?.dataset?.menuItem ?? null");
+			assert.equal(await focused(), "copy-command", "the first item takes focus");
+			await key("ArrowDown"); assert.equal(await focused(), "copy-output");
+			await key("End"); assert.equal(await focused(), "open-full");
+			await key("ArrowDown"); assert.equal(await focused(), "copy-command", "the arrows wrap");
+			await key("ArrowUp"); assert.equal(await focused(), "open-full");
+			await key("Home"); assert.equal(await focused(), "copy-command");
+			await key("Escape");
+			await ui.wait(`!document.querySelector(${JSON.stringify(`${card(call)} [role=menu]`)})`);
+			assert.equal(await ui.evaluate(`document.activeElement === document.querySelector(${JSON.stringify(menuButton(call))})`), true, "Escape returns focus to the menu button");
+			assert.ok(await ui.evaluate(`Boolean(document.querySelector(${JSON.stringify(`${card(call)} .omp-tool-body`)}))`), "the first Escape only closed the menu; the card is still open");
+			await key("Escape");
+			await ui.wait(`!document.querySelector(${JSON.stringify(`${card(call)} .omp-tool-body`)})`);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("View raw result and details shows the result as the model sees it and the details cut, Copy details JSON copies the object", async () => {
+			const call = real("bash-trunc-middle-artifact");
+			await reset("raw"); await show(call); await open(call); await installClipboard();
+			const choose = async (id: string): Promise<void> => {
+				await ui.evaluate(`document.querySelector(${JSON.stringify(menuButton(call))}).click()`);
+				await ui.wait(`document.querySelector(${JSON.stringify(`${card(call)} [data-menu-item=${id}]`)})`);
+				await ui.evaluate(`document.querySelector(${JSON.stringify(`${card(call)} [data-menu-item=${id}]`)}).click()`);
+			};
+			assert.equal(await ui.evaluate(`document.querySelector(${JSON.stringify(`${card(call)} .omp-tool-raw`)})`), null);
+			await choose("raw");
+			await ui.wait(`document.querySelector(${JSON.stringify(`${card(call)} .omp-tool-raw`)})`);
+			assert.equal(await countOf(`${card(call)} .omp-tool-raw .omp-tool-input`), 2, "two blocks: the result text and the details");
+			await ui.evaluate(`document.querySelector(${JSON.stringify(`${card(call)} .omp-tool-raw [aria-label="Copy raw result"]`)}).click()`);
+			await ui.wait("window.clip !== null");
+			assert.equal(await ui.evaluate("window.clip"), call.resultText, "the raw result is the text exactly as the model sees it, notices included, which the body strips");
+			assert.match(await ui.evaluate<string>("window.clip"), /artifact:\/\/69/);
+			assert.match(await text(`${card(call)} .omp-tool-raw .omp-json`), /wallTimeMs/, "the details are a JSON tree");
+			await choose("copy-details");
+			await ui.wait("window.clip !== null");
+			assert.deepEqual(JSON.parse(await ui.evaluate("window.clip")), JSON.parse(JSON.stringify(call.details)), "the whole details object, as JSON");
+			assert.match(await text(`${card(call)} .omp-tool-menu [role=status]`), /^Copied the details \(\d+ lines, \d+ characters\)$/);
+			await choose("copy-output");
+			await ui.wait(`window.clip !== null && !window.clip.startsWith('{')`);
+			assert.equal(await ui.evaluate("window.clip"), splitToolNotices(call.resultText).body, "Copy output copies the cleaned output");
+			assert.ok(!(await ui.evaluate<string>("window.clip")).includes("artifact://69"), "without the notices");
+			await choose("raw");
+			await ui.wait(`!document.querySelector(${JSON.stringify(`${card(call)} .omp-tool-raw`)})`);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("the footer's artifact link and the menu's Open full output both ask the host for that artifact, with the page's epoch and no path", async () => {
+			const call = real("bash-trunc-middle-artifact");
+			await reset("artifact"); await show(call); await open(call);
+			await ui.evaluate("window.sent.length=0");
+			await ui.evaluate(`document.querySelector(${JSON.stringify(`${card(call)} .omp-tool-footer .omp-artifact-link`)}).click()`);
+			await ui.wait("window.sent.some(message=>message.type==='omp:open-artifact')");
+			const epoch = await ui.evaluate<{ nonce: string; counter: number }>("window.ui.current().epoch");
+			assert.deepEqual(await ui.evaluate("window.sent.filter(message=>message.type==='omp:open-artifact')"), [{ type: "omp:open-artifact", artifactId: "69", epoch }]);
+			await ui.evaluate("window.sent.length=0");
+			await ui.evaluate(`document.querySelector(${JSON.stringify(menuButton(call))}).click()`);
+			await ui.wait(`document.querySelector(${JSON.stringify(`${card(call)} [data-menu-item=open-full]`)})`);
+			assert.equal((await items(call)).find(item => item.id === "open-full")?.disabled, false);
+			await ui.evaluate(`document.querySelector(${JSON.stringify(`${card(call)} [data-menu-item=open-full]`)}).click()`);
+			await ui.wait("window.sent.some(message=>message.type==='omp:open-artifact')");
+			assert.deepEqual(await ui.evaluate("window.sent.filter(message=>message.type==='omp:open-artifact')"), [{ type: "omp:open-artifact", artifactId: "69", epoch }]);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
 	} finally {
 		page?.socket.close(); browser?.socket.close();
 		child.kill();

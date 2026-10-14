@@ -36,6 +36,7 @@ function fixture() {
 	const logs: string[] = [];
 	const opened: { url: string; mode: string }[] = [];
 	const mermaid: string[] = [];
+	const artifacts: { conversation: string; artifactId: string }[] = [];
 	const host: DetailTabsHost = {
 		createPanel() { const panel = new FakePanel(); panels.push(panel); return panel; },
 		attachPage(conversation, page) {
@@ -46,9 +47,10 @@ function fixture() {
 		async handleMessage(conversation, message) { handled.push({ conversation, message }); return "accepted"; },
 		async openUrl(url, mode) { opened.push({ url, mode }); },
 		openMermaid(source) { mermaid.push(source); },
+		async openArtifact(conversation, request) { artifacts.push({ conversation, artifactId: request.artifactId }); },
 		log: message => { logs.push(message); },
 	};
-	return { tabs: new DetailTabs(host), panels, attached, handled, logs, opened, mermaid };
+	return { tabs: new DetailTabs(host), panels, attached, handled, logs, opened, mermaid, artifacts };
 }
 
 const todo: DetailTarget = { kind: "todo" };
@@ -163,6 +165,17 @@ describe("detail tab registry", () => {
 		await panels[0]!.send({ type: "omp:open-mermaid", source: "" });
 		await panels[0]!.send({ type: "omp:open-mermaid", source: "x", extra: 1 });
 		assert.deepEqual(mermaid, ["flowchart TD\n A-->B"]);
+		assert.equal(handled.length, 0);
+	});
+
+	it("forwards an artifact request of a detail tab's transcript under the tab's own conversation, and nothing the parser refuses", async () => {
+		const { tabs, panels, artifacts, handled } = fixture();
+		tabs.open("tab:a", todo);
+		const epoch = { nonce: "n", counter: 1 };
+		await panels[0]!.send({ type: "omp:open-artifact", artifactId: "12", epoch });
+		await panels[0]!.send({ type: "omp:open-artifact", artifactId: "12", epoch, conversation: "tab:b" });
+		await panels[0]!.send({ type: "omp:open-artifact", artifactId: "x", epoch });
+		assert.deepEqual(artifacts, [{ conversation: "tab:a", artifactId: "12" }]);
 		assert.equal(handled.length, 0);
 	});
 

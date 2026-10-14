@@ -33,8 +33,9 @@
 // extensionless specifiers (the Webview bundle itself does not care).
 import type { ControlModelRef } from "./control.ts";
 import { isRecord } from "../shared/guards.ts";
-import { MAX_CHAT_TEXT_LENGTH, parseChatHostMessage, parseChatWebviewMessage } from "./chat-messages.ts";
+import { MAX_CHAT_TEXT_LENGTH, parseChatEpoch, parseChatHostMessage, parseChatWebviewMessage } from "./chat-messages.ts";
 import type { ChatHostMessage, ChatWebviewMessage } from "./chat-messages.ts";
+import type { ChatEpoch } from "../chat/model.ts";
 import { isPanelTabId } from "../shared/panel-identity.ts";
 import { isOpenableMermaidSource } from "./mermaid-preview.ts";
 import { parseFooterMetadata } from "../shared/footer-metadata.ts";
@@ -937,6 +938,19 @@ export interface GuestOpenMermaidMessage {
 }
 
 /**
+ * Ask the host to open one artifact of the conversation the page shows (`artifact://N`, the full output of a truncated tool result)
+ * in a read-only editor tab. Fire-and-forget: the page learns nothing back. `epoch` is the conversation epoch the page was rendered
+ * for, and the host drops a request of any other, so a page that outlived its conversation opens nothing. The request names no path:
+ * the host resolves the id against the session file of the conversation the sending editor shows.
+ */
+export interface GuestOpenArtifactMessage {
+	type: "omp:open-artifact";
+	/** One to nine ASCII digits. */
+	artifactId: string;
+	epoch: ChatEpoch;
+}
+
+/**
  * A Chat action the page asks the host to run with its own consent UI: `compact` and `shake` (a mode QuickPick, and
  * for a summarizing compaction an instructions InputBox), `cycle-model` / `cycle-thinking` (the TUI's role and
  * thinking cycling), `export-html` (save dialog) and `share` (a modal confirmation naming what is uploaded). The page
@@ -985,6 +999,7 @@ export type GuestWebviewMessage =
 	| GuestDraftRestoredMessage
 	| GuestOpenDetailMessage
 	| GuestOpenMermaidMessage
+	| GuestOpenArtifactMessage
 	| GuestSelectionReplyMessage
 	| GuestChatCommandMessage;
 
@@ -1292,6 +1307,11 @@ export function parseGuestWebviewMessage(value: unknown): GuestWebviewMessage | 
 		case "omp:open-mermaid": {
 			if (Object.keys(value).length !== 2 || !isOpenableMermaidSource(value.source)) return null;
 			return { type: "omp:open-mermaid", source: value.source };
+		}
+		case "omp:open-artifact": {
+			const epoch = parseChatEpoch(value.epoch);
+			if (Object.keys(value).length !== 3 || typeof value.artifactId !== "string" || !/^\d{1,9}$/.test(value.artifactId) || epoch === null) return null;
+			return { type: "omp:open-artifact", artifactId: value.artifactId, epoch };
 		}
 		case "omp:open-detail": {
 			if (value.kind === "agent") {

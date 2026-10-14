@@ -109,6 +109,8 @@ function world(overrides: Partial<GuestDispatcherDeps<FakeTab>> = {}) {
 		outcome: "accepted" as string,
 		handleMessageThrows: false,
 		files: ["a.ts", "b/c.ts"],
+		sessionFile: "C:\\sessions\\a.jsonl" as string | null,
+		artifactOutcome: { opened: true } as { opened: true } | { opened: false; reason: string },
 		route: null as { routeGeneration: string | null } | null,
 		recentRows: [] as { tabId: string; headline: string; entry: { kind: string; cwd: string }; conversation: { lastAt: string | null } | null }[],
 	};
@@ -123,6 +125,7 @@ function world(overrides: Partial<GuestDispatcherDeps<FakeTab>> = {}) {
 	const routesAttached: unknown[][] = [];
 	const detailOpens: { conversation: string; target: unknown }[] = [];
 	const mermaidOpens: string[] = [];
+	const artifactOpens: { sessionFile: string; artifactId: string }[] = [];
 	const chatActions: unknown[][] = [];
 	const terminalMessages: { slot: string; type: string }[] = [];
 	const terminalCopies: { tab: FakeTab; reply: Parameters<GuestDispatcherDeps<FakeTab>["acceptTerminalCopy"]>[1] }[] = [];
@@ -156,6 +159,13 @@ function world(overrides: Partial<GuestDispatcherDeps<FakeTab>> = {}) {
 		}) as never,
 		detailTabs: () => ({ open: (conversation, target) => { detailOpens.push({ conversation, target }); return "created"; } }),
 		mermaidPreviews: () => ({ open: source => { mermaidOpens.push(source); return "created"; } }),
+		artifactDocuments: () => ({
+			open: async (sessionFile, artifactId) => {
+				artifactOpens.push({ sessionFile, artifactId });
+				return state.artifactOutcome;
+			},
+		}),
+		sessionFileOf: () => state.sessionFile,
 		panelChatPage: (tab, panel) => ({ id: `page-of-${tab.slotId}`, post: () => "sent", panel }) as never,
 		attachChatRoute: (slot, force) => { calls.push(`attachChatRoute:${slot}:${force}`); },
 		attachChatRoutes: (tabId, force) => { routesAttached.push([tabId, force]); },
@@ -193,7 +203,7 @@ function world(overrides: Partial<GuestDispatcherDeps<FakeTab>> = {}) {
 		return { tab, ...page };
 	};
 	return {
-		state, dispatcher, deps, calls, logged, infos, warnings, errors, chatMessages, remembered, viewOnly, routesAttached, detailOpens, mermaidOpens,
+		state, dispatcher, deps, calls, logged, infos, warnings, errors, chatMessages, remembered, viewOnly, routesAttached, detailOpens, mermaidOpens, artifactOpens,
 		chatActions, terminalMessages, terminalCopies, modeSwitches, controlRequests, pinned, acknowledged, clicks, editor,
 	};
 }
@@ -344,6 +354,46 @@ describe("each message reaches its owner", () => {
 		await w.dispatcher.handleMessage(index, SLOT, live.panel, { type: "omp:open-mermaid", source: "" });
 		assert.deepEqual(w.mermaidOpens, ["flowchart TD\n A-->B"]);
 		assert.deepEqual(w.logged, ["diagram tab was created", "slot slot-1: ignored an unrecognized guest message", "slot slot-1: ignored an unrecognized guest message"]);
+	});
+});
+
+describe("omp:open-artifact", () => {
+	const request = (overrides: Record<string, unknown> = {}) => ({ type: "omp:open-artifact", artifactId: "7", epoch: { nonce: "n", counter: 4 }, ...overrides });
+
+	it("opens the artifact of the session file the sending editor's conversation has, and names no path of the page's", async () => {
+		const w = world();
+		const live = w.editor();
+		await w.dispatcher.handleMessage(index, SLOT, live.panel, request());
+		assert.deepEqual(w.artifactOpens, [{ sessionFile: "C:\\sessions\\a.jsonl", artifactId: "7" }]);
+		assert.deepEqual(w.warnings, []);
+	});
+
+	it("drops a request of another conversation epoch, one with no session file, and anything the parser refuses", async () => {
+		const w = world();
+		const live = w.editor();
+		await w.dispatcher.handleMessage(index, SLOT, live.panel, request({ epoch: { nonce: "n", counter: 3 } }));
+		await w.dispatcher.handleMessage(index, SLOT, live.panel, request({ epoch: { nonce: "other", counter: 4 } }));
+		assert.deepEqual(w.artifactOpens, []);
+		w.state.sessionFile = null;
+		await w.dispatcher.handleMessage(index, SLOT, live.panel, request());
+		assert.deepEqual(w.artifactOpens, []);
+		assert.equal(w.warnings.length, 1);
+		w.state.sessionFile = "C:\\sessions\\a.jsonl";
+		for (const bad of [request({ artifactId: "../x" }), request({ artifactId: "" }), request({ sessionFile: "C:\\x" }), { type: "omp:open-artifact", artifactId: "7" }]) {
+			await w.dispatcher.handleMessage(index, SLOT, live.panel, bad);
+		}
+		assert.deepEqual(w.artifactOpens, []);
+	});
+
+	it("warns with the reason when the lookup refuses, and answers a passive or detail caller through the same function", async () => {
+		const w = world();
+		const live = w.editor();
+		w.state.artifactOutcome = { opened: false, reason: "Artifact 7 is not in this session's artifacts directory." };
+		await w.dispatcher.handleMessage(index, SLOT, live.panel, request());
+		assert.deepEqual(w.warnings, ["Artifact 7 is not in this session's artifacts directory."]);
+		w.state.artifactOutcome = { opened: true };
+		await w.dispatcher.openArtifact(TAB, request() as never);
+		assert.equal(w.artifactOpens.length, 2);
 	});
 });
 

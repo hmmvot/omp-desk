@@ -17,6 +17,7 @@
  * registry has no vscode import so its rules are testable with fake panels.
  */
 import { GUEST_PROTOCOL_VERSION, parseGuestWebviewMessage } from "../protocol/messages.ts";
+import type { GuestOpenArtifactMessage } from "../protocol/messages.ts";
 import { detailKey, type DetailTarget } from "../protocol/detail-target.ts";
 import { webLinkUrl, type WebLinkMode } from "../shared/terminal-links.ts";
 import type { ChatCommandOutcome, ChatPage } from "./chat-runtime.ts";
@@ -51,6 +52,8 @@ export interface DetailTabsHost {
 	handleMessage(conversation: string, message: ChatWebviewMessage, origin: ChatPage): Promise<ChatCommandOutcome>;
 	/** Open, or reveal, the diagram tab of a mermaid source a detail tab's transcript could not draw inline. */
 	openMermaid(source: string): void;
+	/** Open one artifact of the conversation a detail tab's transcript belongs to (the host checks the epoch and resolves the session file). */
+	openArtifact(conversation: string, request: GuestOpenArtifactMessage): Promise<void>;
 	/** Open a re-validated `http(s)` URL the user clicked; reports its own failure to the user. */
 	openUrl(url: string, mode: WebLinkMode): Promise<void>;
 	log(message: string): void;
@@ -163,6 +166,10 @@ export class DetailTabs {
 		}
 		if (message.type === "omp:open-mermaid") {
 			this.#host.openMermaid(message.source);
+			return;
+		}
+		if (message.type === "omp:open-artifact") {
+			await this.#host.openArtifact(tab.conversation, message);
 			return;
 		}
 		if (message.type === "omp:terminal-link-open") {

@@ -9,7 +9,7 @@ import { messageText } from "../../shared/format";
 import { ToolTargetText } from "./FileLinks";
 import { MessageContentView } from "./MessageContent";
 import { lateDiagnosticsFiles, recordRows, stringField } from "./native-message-helpers";
-import { Diagnostics, displayText, OUTPUT_SCOPE, record, scalar, Section, TextPreview } from "./tool-renderer-primitives";
+import { Diagnostics, displayText, JsonOutput, OUTPUT_SCOPE, record, scalar, Section, TextPreview } from "./tool-renderer-primitives";
 import { describeTool, hasNoDetails, hasWaitRows, TOOL_ICONS } from "./tool-renderers";
 import type { ToolSemanticView } from "./tool-render-types";
 import { formatGistDuration, toolGist, type GistPart } from "../../chat/tool-gist";
@@ -18,8 +18,11 @@ import { useSecondTick } from "../lib/live-clock";
 import { WINDOW_AFTER_ROWS } from "../lib/use-windowed-rows";
 import { detectOutput } from "../lib/output-format";
 import { FRESH_VIEW, useObservedToolMs, useToolViewState } from "../lib/tool-view-state";
+import { useArtifactOpener } from "../lib/artifact-opener";
+import { rawDetailsCopy, rawDetailsView } from "../lib/raw-details";
 import { FoldAllButtons } from "./JsonRows";
-import { ToolCopyButton, ToolFooter, ToolViewContext } from "./tool-view";
+import { ToolMenu, type ToolMenuItem } from "./ToolMenu";
+import { copyToClipboard, ToolCopyButton, ToolFooter, ToolViewContext } from "./tool-view";
 
 export interface ToolCardProps {
 	name: string;
@@ -152,11 +155,14 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 	const copyText = formatted && structuredText !== undefined && !view?.output?.copy ? format.copy : view?.output?.copy || text;
 	const outputLabel = view?.output?.label ?? "Output";
 	const showAll = useCallback((rows: number) => setViewState({ full: true, rows }), [setViewState]);
-	const toolView = useMemo(() => ({ live: partial, showAll, view: viewState, update: setViewState, structured: format !== null && structuredText !== undefined ? { text: structuredText, format } : undefined }), [partial, showAll, viewState, setViewState, format, structuredText]);
+	const artifacts = useArtifactOpener();
+	const toolView = useMemo(() => ({ live: partial, showAll, openArtifact: artifacts.open, view: viewState, update: setViewState, structured: format !== null && structuredText !== undefined ? { text: structuredText, format } : undefined }), [partial, showAll, artifacts.open, viewState, setViewState, format, structuredText]);
+	const footer = useMemo(() => footerParts(split.notices, details), [split.notices, details]);
+	const fullOutputArtifact = (footer.find(part => part.artifact !== undefined && part.text === "full output") ?? footer.find(part => part.artifact !== undefined))?.artifact;
 	const live = state === "running" && result === undefined;
 	useSecondTick(live && props.startedAt !== undefined);
 	const observedMs = useObservedToolMs(props.callId);
-	const touched = full || viewState.format !== "formatted" || viewState.folds.size > 0 || viewState.filter !== "" || viewState.wrap !== null;
+	const touched = full || viewState.raw || viewState.format !== "formatted" || viewState.folds.size > 0 || viewState.filter !== "" || viewState.wrap !== null;
 	useEffect(() => { if (!showBody && touched) setViewState(FRESH_VIEW); }, [showBody, touched, setViewState]);
 	const collapse = (): void => {
 		// Focus and selection inside the body hold it open: leave them first, then close.
@@ -165,7 +171,16 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 		if (selection && root.current?.contains(selection.anchorNode)) selection.removeAllRanges();
 		setRetained(false); setLocalExpanded(false); props.onExpandedChange?.(false); setViewState(FRESH_VIEW);
 	};
-	const outputBar = view !== undefined && state !== "skipped" && (chips.length > 0 || exit !== undefined && exit !== 0 || copyText !== "" || format !== null)
+	const commandText = view?.input?.find(block => block.label === "Command")?.copy ?? stringField(route.args, "command") ?? "";
+	const hasDetails = Object.keys(details).length > 0;
+	const menuItems: readonly ToolMenuItem[] = [
+		{ id: "copy-command", label: "Copy command", icon: "terminal", disabled: commandText === "" ? "This call has no command" : null, run: () => copyToClipboard(commandText, "the command") },
+		{ id: "copy-output", label: "Copy output", icon: "copy", disabled: copyText === "" ? "This call has no output" : null, run: () => copyToClipboard(copyText, `the ${outputLabel.toLowerCase()}`) },
+		{ id: "copy-details", label: "Copy details JSON", icon: "json", disabled: hasDetails ? null : "This result has no details", run: () => copyToClipboard(rawDetailsCopy(details), "the details") },
+		{ id: "raw", label: viewState.raw ? "Hide raw result and details" : "View raw result and details", icon: "code", disabled: source === undefined ? "There is no result yet" : null, run: () => { setViewState({ raw: !viewState.raw }); } },
+		{ id: "open-full", label: "Open full output", icon: "go-to-file", disabled: fullOutputArtifact === undefined ? "This output was not truncated, so no full copy was saved" : artifacts.open === undefined ? artifacts.reason : null, run: () => { if (fullOutputArtifact !== undefined) artifacts.open?.(fullOutputArtifact); } },
+	];
+	const outputBar = view !== undefined && state !== "skipped" && source !== undefined
 		? <div className="omp-output-bar">
 			{copyText !== "" && <span className="omp-output-label">{outputLabel}</span>}
 			{format !== null && <span className="omp-chip omp-format-badge">{format.badge}</span>}
@@ -179,6 +194,7 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 				{formatted && format.kind !== "rows" && <FoldAllButtons source={format} scope={OUTPUT_SCOPE} />}
 			</>}
 			{copyText !== "" && <ToolCopyButton text={copyText} label={`Copy ${outputLabel.toLowerCase()}`} what={`the ${outputLabel.toLowerCase()}`} />}
+			<ToolMenu items={menuItems} />
 		</div> : null;
 	// The sticky toolbar of the full view: Collapse, the filter, the wrap switch. Filter and wrap work on the whole text, not on the rows in the page.
 	const outputLines = useMemo(() => full ? copyText.split("\n") : [], [full, copyText]);
@@ -192,6 +208,8 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 			onKeyDown={event => { if (event.key === "Escape" && viewState.filter !== "") { event.preventDefault(); event.stopPropagation(); setViewState({ filter: "" }); } }} />
 		{filterText !== "" && <span className="omp-tool-filter-count" role="status">{filterMatches.toLocaleString("en-US")} of {outputLines.length.toLocaleString("en-US")} lines</span>}
 		<button type="button" className="omp-iconbtn" aria-label="Wrap long lines" aria-pressed={wrapOn} title={wrapOn ? "Long lines wrap" : "Long lines scroll sideways"} onClick={() => setViewState({ wrap: !wrapOn })}><span className="codicon codicon-word-wrap" aria-hidden="true" /></button>
+		{copyText !== "" && <ToolCopyButton text={copyText} label={`Copy ${outputLabel.toLowerCase()}`} what={`the ${outputLabel.toLowerCase()}`} />}
+		<ToolMenu items={menuItems} />
 	</div> : null;
 	const body = frozen ? retainedBody.current : <ToolViewContext.Provider value={toolView}>
 		{toolbar}
@@ -203,12 +221,22 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 			</div>)}
 			{outputBar}
 			{view?.body}
+			{viewState.raw && source !== undefined && <section className="omp-tool-raw" aria-label="Raw result and details">
+				<div className="omp-tool-input">
+					<div className="omp-output-bar"><span className="omp-output-label">Raw result</span><span className="omp-output-spacer" /><ToolCopyButton text={rawText} label="Copy raw result" what="the raw result" /></div>
+					{rawText === "" ? <div className="omp-empty-note">The result has no text.</div> : <TextPreview text={rawText} expanded={full} />}
+				</div>
+				<div className="omp-tool-input">
+					<div className="omp-output-bar"><span className="omp-output-label">Details</span><span className="omp-output-spacer" /><ToolCopyButton text={() => rawDetailsCopy(details)} label="Copy details JSON" what="the details" /></div>
+					{hasDetails ? <JsonOutput value={rawDetailsView(details)} expanded={full} id="raw-details" /> : <div className="omp-empty-note">The result has no details.</div>}
+				</div>
+			</section>}
 		</>}
 		{nontext.length > 0 && <MessageContentView content={nontext} />}
 		{attachments?.map((attachment, index) => <Section key={`${attachment.timestamp}:${index}`} title={`Late diagnostics${attachment.attribution ? ` · ${attachment.attribution}` : ""}`}>
 			{lateDiagnosticsFiles(attachment.details).map((file, fileIndex) => <Section key={fileIndex} title={file.path ?? "File diagnostics"}><Diagnostics value={file} expanded={full} /></Section>)}
 		</Section>)}
-		<ToolFooter parts={footerParts(split.notices, details)} />
+		<ToolFooter parts={footer} />
 	</ToolViewContext.Provider>;
 	useLayoutEffect(() => {
 		if (!frozen && showBody) { retainedBody.current = body; retainedView.current = view; retainedState.current = viewState; }

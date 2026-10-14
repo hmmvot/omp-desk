@@ -19,6 +19,8 @@ import { DETAIL_VIEW_TYPE, LEGACY_DETAIL_VIEW_TYPE } from "../host/detail-tabs.t
 import type { DetailTabs } from "../host/detail-tabs.ts";
 import { MERMAID_PREVIEW_VIEW_TYPE, type MermaidPreviews } from "../host/mermaid-previews.ts";
 import type { SessionIndex } from "../host/session-index.ts";
+import { sameEpoch } from "../chat/model.ts";
+import type { ArtifactDocuments } from "./artifact-documents.ts";
 import type { ChatWebviewMessage } from "../protocol/chat-messages.ts";
 import type { DetailTarget } from "../protocol/detail-target.ts";
 import {
@@ -35,6 +37,7 @@ import type {
 	GuestDraftRestoreMessage,
 	GuestFileCompletionsMessage,
 	GuestHostMessage,
+	GuestOpenArtifactMessage,
 	GuestOpenDetailMessage,
 	GuestRouteAckMessage,
 	GuestSelectionReplyMessage,
@@ -127,6 +130,10 @@ export interface GuestChatPort<Tab extends GuestTab> {
 	detailTabs(): Pick<DetailTabs, "open">;
 	/** The diagram tabs ("Open diagram in a tab"). */
 	mermaidPreviews(): Pick<MermaidPreviews, "open">;
+	/** The read-only `omp-artifact:` documents ("Open full output" of a truncated tool result). */
+	artifactDocuments(): Pick<ArtifactDocuments, "open">;
+	/** The session transcript file of a conversation, or `null` when it has none (a conversation that was never saved). */
+	sessionFileOf(tabId: string): string | null;
 	/** The page object the conversation answers one panel through. */
 	panelChatPage(state: Tab, panel: vscode.WebviewPanel): ChatPage;
 	/** Send the conversation to the editor slot's page (or, with `force`, send it again). */
@@ -226,6 +233,11 @@ export interface GuestDispatcher<Tab extends GuestTab = GuestTab> {
 	openDetailTab(tabId: string, mode: SessionViewMode, request: GuestOpenDetailMessage): void;
 	/** Open, or reveal, the diagram tab of a mermaid source. Presentation only: any editor, active or passive, may ask. */
 	openMermaidTab(source: string): void;
+	/**
+	 * Open one artifact of the conversation an editor or detail tab shows, in a read-only editor tab. Presentation only, so any
+	 * editor may ask; the page names the artifact and the epoch it was rendered for, never a path.
+	 */
+	openArtifact(tabId: string, request: GuestOpenArtifactMessage): Promise<void>;
 	/** Close the detail tabs a previous host lifetime left behind. */
 	closeLeftoverDetailTabs(): Promise<void>;
 	/** Show why a tab has no live conversation. */
@@ -433,6 +445,24 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 		deps.log(`diagram tab was ${deps.mermaidPreviews().open(source)}`);
 	}
 
+	async function openArtifact(tabId: string, request: GuestOpenArtifactMessage): Promise<void> {
+		// A page that outlived its conversation (another epoch is live now) opens nothing: the id would name another transcript's file.
+		if (!sameEpoch(deps.conversations().stateOf(tabId)?.epoch ?? null, request.epoch)) {
+			deps.log(`tab ${tabId}: artifact ${request.artifactId} request was dropped: the page shows another conversation`);
+			return;
+		}
+		const sessionFile = deps.sessionFileOf(tabId);
+		if (sessionFile === null) {
+			deps.warn("This conversation has no saved session file yet, so its artifacts cannot be opened.");
+			return;
+		}
+		const outcome = await deps.artifactDocuments().open(sessionFile, request.artifactId);
+		if (!outcome.opened) {
+			deps.log(`tab ${tabId}: artifact ${request.artifactId} was refused: ${outcome.reason}`);
+			deps.warn(outcome.reason);
+		}
+	}
+
 	/**
 	 * Guest messages are untrusted UI input. The panel may send chat commands and request one
 	 * of the explicitly bounded host-control actions, but it cannot supply a pipe identity, a
@@ -492,6 +522,10 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 		}
 		if (parsed.type === "omp:open-mermaid") {
 			openMermaidTab(parsed.source);
+			return;
+		}
+		if (parsed.type === "omp:open-artifact") {
+			await openArtifact(tabId, parsed);
 			return;
 		}
 		// File links are presentation in either mode: the Chat validates and opens the same file references as the Terminal.
@@ -639,6 +673,7 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 		releaseCarriedDraft,
 		openDetailTab,
 		openMermaidTab,
+		openArtifact,
 		closeLeftoverDetailTabs,
 		presentUnavailable,
 		invalidateControls: invalidateGuestControls,

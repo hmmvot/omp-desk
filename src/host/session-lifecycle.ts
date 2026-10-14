@@ -306,7 +306,7 @@ export async function decideSessionDeletion(facts: SessionDeletionFacts): Promis
  * come out as the transcript itself or as its own parent directory (a transcript
  * literally named `.jsonl`) is reported as absent rather than removed.
  */
-function sessionFileLayout(file: string): { readonly artifactsDirectory: string | null } | null {
+export function sessionFileLayout(file: string): { readonly artifactsDirectory: string | null } | null {
 	if (!file.toLowerCase().endsWith(SESSION_FILE_SUFFIX)) return null;
 	const directory = path.resolve(path.dirname(file));
 	const base = path.basename(file);

@@ -24,6 +24,28 @@ describe("omp:open-mermaid", () => {
 	});
 });
 
+describe("omp:open-artifact", () => {
+	const epoch = { nonce: "n", counter: 2 };
+
+	it("carries a numeric artifact id and the page's conversation epoch, nothing else", () => {
+		assert.deepEqual(parseGuestWebviewMessage({ type: "omp:open-artifact", artifactId: "12", epoch }), { type: "omp:open-artifact", artifactId: "12", epoch });
+		assert.equal(parseGuestWebviewMessage({ type: "omp:open-artifact", artifactId: "123456789", epoch })?.type, "omp:open-artifact");
+	});
+
+	it("refuses a path-shaped, empty, oversized, numeric, epoch-less or padded request", () => {
+		for (const message of [
+			{ type: "omp:open-artifact", artifactId: "../1", epoch },
+			{ type: "omp:open-artifact", artifactId: "1.txt", epoch },
+			{ type: "omp:open-artifact", artifactId: "", epoch },
+			{ type: "omp:open-artifact", artifactId: "1234567890", epoch },
+			{ type: "omp:open-artifact", artifactId: 7, epoch },
+			{ type: "omp:open-artifact", artifactId: "7" },
+			{ type: "omp:open-artifact", artifactId: "7", epoch: { nonce: "n" } },
+			{ type: "omp:open-artifact", artifactId: "7", epoch, path: "C:\\x" },
+		]) assert.equal(parseGuestWebviewMessage(message), null, JSON.stringify(message));
+	});
+});
+
 describe("the diagram tab's own messages", () => {
 	it("accepts exactly the announcement from the tab and exactly the source from the host", () => {
 		assert.deepEqual(parseMermaidPreviewMessage({ type: "omp:mermaid-preview-ready" }), { type: "omp:mermaid-preview-ready" });

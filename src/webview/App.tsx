@@ -42,6 +42,7 @@ import { TerminalPane } from "./components/TerminalPane";
 import { sessionViewSnapshot, subscribeSessionView } from "./lib/session-view";
 import { adoptTranscriptToggles } from "./lib/transcript-toggles";
 import { setScreenReaderMode } from "./lib/screen-reader";
+import { ArtifactEpochContext } from "./lib/artifact-opener";
 
 export function App({ client }: { client: ChatClient }): ReactNode {
 	if (!guestTransport.hosted) {
@@ -240,6 +241,7 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 		<div className="omp-chat">
 			{banners}
 			{/* One link-validation cache for the transcript and the rewind bar's changed files (a context only, no DOM). */}
+			<ArtifactEpochContext.Provider value={snapshot.epoch}>
 			<FileLinksProvider transport={guestTransport} cwd={snapshot.header?.cwd}>
 			<div className="omp-body">
 				<div className="omp-main">
@@ -301,6 +303,7 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 				<Composer client={client} snapshot={shown} progressAvailable={!workUnknown} onRewind={startRewind} />
 			</div>
 			</FileLinksProvider>
+			</ArtifactEpochContext.Provider>
 		</div>
 	);
 }

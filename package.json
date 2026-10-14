@@ -57,6 +57,7 @@
   "main": "./out/extension.js",
   "activationEvents": [
     "onStartupFinished",
+    "onFileSystem:omp-artifact",
     "onView:ompDesk.sessions",
     "onView:ompDesk.skills",
     "onView:ompDesk.tools",

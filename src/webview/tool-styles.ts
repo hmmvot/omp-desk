@@ -48,6 +48,17 @@ export const TOOL_STYLES = `
 .omp-iconbtn:hover { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground); }
 .vscode-high-contrast .omp-iconbtn, .vscode-high-contrast-light .omp-iconbtn { border: 1px solid var(--vscode-contrastBorder); }
 .omp-tool-input { margin-bottom: 6px; }
+.omp-tool-raw { margin-top: 8px; padding-top: 6px; border-top: 1px solid var(--omp-border); }
+.omp-tool-menu { position: relative; display: inline-flex; }
+.omp-tool-menu-list { position: absolute; right: 0; top: calc(100% + 2px); z-index: 30; display: flex; flex-direction: column; min-width: 190px; max-width: min(320px, 86vw); padding: 4px; border: 1px solid var(--vscode-menu-border, var(--vscode-editorWidget-border, var(--omp-border))); border-radius: var(--omp-radius-card); background: var(--vscode-menu-background, var(--vscode-editorWidget-background)); color: var(--vscode-menu-foreground, var(--vscode-foreground)); box-shadow: 0 2px 8px var(--vscode-widget-shadow, rgba(0, 0, 0, 0.3)); font-size: 12px; text-align: left; }
+.vscode-high-contrast .omp-tool-menu-list, .vscode-high-contrast-light .omp-tool-menu-list { border-color: var(--vscode-contrastBorder); box-shadow: none; }
+.omp-tool-menu-item { display: flex; align-items: flex-start; gap: 8px; width: 100%; box-sizing: border-box; padding: 4px 8px; border: 0; border-radius: var(--omp-radius); background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer; }
+.omp-tool-menu-item:hover:not([aria-disabled="true"]), .omp-tool-menu-item:focus-visible:not([aria-disabled="true"]) { background: var(--vscode-menu-selectionBackground, var(--vscode-list-hoverBackground)); color: var(--vscode-menu-selectionForeground, inherit); }
+.omp-tool-menu-item:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+.omp-tool-menu-item[aria-disabled="true"] { cursor: default; opacity: 0.75; }
+.omp-tool-menu-item > .codicon { flex: none; margin-top: 2px; }
+.omp-tool-menu-label { display: flex; flex-direction: column; min-width: 0; overflow-wrap: anywhere; }
+.omp-tool-menu-reason { color: var(--omp-muted); font-size: 11px; }
 .omp-tool-footer { margin-top: 6px; color: var(--omp-muted); font-size: 11px; overflow-wrap: anywhere; }
 .omp-tool-footer-warn { color: var(--vscode-editorWarning-foreground); }
 .omp-artifact-link { border: 0; background: transparent; padding: 0; font: inherit; color: var(--vscode-textLink-foreground); cursor: pointer; text-decoration: underline; }

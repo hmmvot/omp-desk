@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { ArtifactEpochContext } from "../lib/artifact-opener";
 import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 import type { RunningAgent } from "../../chat/agents";
 import type { ChatModel } from "../../chat/model";
@@ -188,11 +189,13 @@ export function DetailView({ client, target }: { client: ChatClient; target: Det
 		document.title = `${title} · ${snapshot.title}`;
 	}, [title, snapshot.title]);
 	return (
-		<div className={`omp-detail omp-detail--${target.kind}`}>
-			<EndedNote snapshot={snapshot} />
-			{target.kind === "todo" && <TodoDetail snapshot={snapshot} />}
-			{target.kind === "agents" && <AgentsDetail snapshot={snapshot} />}
-			{target.kind === "agent" && <AgentDetail client={client} snapshot={snapshot} agentId={target.agentId} />}
-		</div>
+		<ArtifactEpochContext.Provider value={snapshot.epoch}>
+			<div className={`omp-detail omp-detail--${target.kind}`}>
+				<EndedNote snapshot={snapshot} />
+				{target.kind === "todo" && <TodoDetail snapshot={snapshot} />}
+				{target.kind === "agents" && <AgentsDetail snapshot={snapshot} />}
+				{target.kind === "agent" && <AgentDetail client={client} snapshot={snapshot} agentId={target.agentId} />}
+			</div>
+		</ArtifactEpochContext.Provider>
 	);
 }

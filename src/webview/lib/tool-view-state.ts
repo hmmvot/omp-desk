@@ -27,11 +27,13 @@ export interface ToolViewState {
 	readonly wrap: boolean | null;
 	/** How many lines the output had when the card went full: the transcript estimates the height of a card it has not measured from it. */
 	readonly rows: number;
+	/** The card shows its raw result and details under the body (the `⋯` menu's View raw result and details). */
+	readonly raw: boolean;
 }
 
-const INITIAL: ToolViewState = { full: false, format: "formatted", folds: new Map(), filter: "", wrap: null, rows: 0 };
+const INITIAL: ToolViewState = { full: false, format: "formatted", folds: new Map(), filter: "", wrap: null, rows: 0, raw: false };
 /** What a card forgets when it closes. */
-export const FRESH_VIEW: Partial<ToolViewState> = { full: false, format: "formatted", folds: new Map(), filter: "", wrap: null, rows: 0 };
+export const FRESH_VIEW: Partial<ToolViewState> = { full: false, format: "formatted", folds: new Map(), filter: "", wrap: null, rows: 0, raw: false };
 const MAX_ENTRIES = 256;
 const states = new Map<string, ToolViewState>();
 const listeners = new Set<() => void>();
