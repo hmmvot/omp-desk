@@ -4282,6 +4282,10 @@ function startCatalogActivation(context: vscode.ExtensionContext, index: Session
       log(`catalog: the recovered records could not be adopted: ${messageOf(error)}`);
     }
     await vscode.commands.executeCommand("setContext", CATALOG_PENDING_CONTEXT, false);
+    // The restore re-adopts running sessions and proves their host control with the staged pipe helper, which only
+    // staging configures; a proof made before it refuses with helper-unavailable and nothing retries a Chat's. A
+    // staging failure is left to the launch paths, which report their own.
+    await s.staging.entries().catch(() => {});
     // Only now is the index complete: the pass restores exactly the rows this window
     // is responsible for, and a click on any other row is an explicit open.
     s.catalogAdoptedAt = Date.now();
