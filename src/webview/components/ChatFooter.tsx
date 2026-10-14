@@ -19,9 +19,11 @@ type ControlRequest =
 interface ControlBook { client: ChatClient; scope: string; nextId: number; lastSent: number; action: GuestControlAction; picker?: "model" | "thinking" }
 interface ControlView { client: ChatClient; state: GuestControlStateMessage | null; awaiting: number | null; action: GuestControlAction; feedback: string | null }
 
-export function ChatFooter({ client, snapshot, trailingActions }: {
+export function ChatFooter({ client, snapshot, commandsAction, trailingActions }: {
 	client: ChatClient;
 	snapshot: ChatSnapshot;
+	/** The Commands button, between the context ring and the prompt actions. */
+	commandsAction?: ReactNode;
 	trailingActions?: ReactNode;
 }): ReactNode {
 	const preferences = useSyncExternalStore(client.subscribe, client.getDisplayPreferences);
@@ -162,6 +164,7 @@ export function ChatFooter({ client, snapshot, trailingActions }: {
 						onShake={() => guestTransport.post({ type: "omp:chat-command", command: "shake" })}
 						maintenanceBlocked={blocked ?? (snapshot.maintenance?.status === "working" ? "Context maintenance is already running." : null)}
 						compactHint={snapshot.working ? "Interrupts the running turn, compacts, then the turn continues" : undefined} />
+					{commandsAction}
 					{trailingActions}
 				</div>
 			</div>

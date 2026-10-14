@@ -1225,6 +1225,138 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.sent.filter(message=>message.type==='omp:chat-prompt').map(message=>message.text)"), ["/trim images","/shake thinking","/shake"]);
 		});
 
+		await t.test("the Commands button lists GUI-supported commands first and marked, searches, runs a GUI command, completes one that takes arguments and sends one that takes none, never touching the draft", async () => {
+			await reset("commands-button");
+			await ui.evaluate("window.ui.push({commands:[{name:'usage',source:'builtin',description:'Show usage'},{name:'compact',source:'builtin',description:'Compact the context',inputHint:'[focus instructions]'},{name:'export',source:'builtin',description:'Export as HTML'},{name:'skill:review',source:'skill',description:'Review code',inputHint:'arguments'},{name:'fix',source:'file',description:'Fix a bug'},{name:'tree',source:'builtin',description:'Identity change'},{name:'handoff',source:'builtin',description:'Identity change'}]})");
+			const key = async (key: string, code = key, windowsVirtualKeyCode = 0) => { await ui.call("Input.dispatchKeyEvent", { type: "keyDown", key, code, windowsVirtualKeyCode }); await ui.call("Input.dispatchKeyEvent", { type: "keyUp", key, code, windowsVirtualKeyCode }); };
+			const rows = () => ui.evaluate<{ name: string; group: string; marked: boolean; chip: string; disabled: boolean }[]>("[...document.querySelectorAll('.omp-commands-option')].map(row=>({name:row.querySelector('strong').textContent,group:row.dataset.group,marked:row.querySelector('.omp-commands-gui')!==null,chip:row.querySelector('.omp-native-badge').textContent,disabled:row.getAttribute('aria-disabled')==='true'}))");
+			const open = async () => { await ui.evaluate("document.querySelector('.omp-composer-commands').click()"); await ui.wait("document.querySelector('.omp-commands-popup')"); };
+			const prompts = () => ui.evaluate<string[]>("window.sent.filter(message=>message.type==='omp:chat-prompt'||message.type==='omp:chat-steer').map(message=>message.text)");
+			const actions = () => ui.evaluate<string[]>("window.sent.filter(message=>message.type==='omp:chat-command').map(message=>message.command)");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-composer-toolbar-actions .omp-composer-commands .codicon-terminal-cmd')!==null"), true);
+			assert.equal(await ui.evaluate("document.querySelector('.omp-composer-commands').getAttribute('aria-label')"), "Commands");
+			assert.match(await ui.evaluate<string>("document.querySelector('.omp-composer-commands').title"), /type \//);
+			await open();
+			assert.equal(await ui.evaluate("document.activeElement===document.querySelector('.omp-commands-search')"), true, "the search box is focused on open");
+			const listed = await rows();
+			const firstPlain = listed.findIndex(row => row.group === "command");
+			assert.ok(firstPlain > 0, "there are GUI commands and plain ones");
+			assert.ok(listed.slice(0, firstPlain).every(row => row.marked && row.group === "gui") && listed.slice(firstPlain).every(row => !row.marked), "GUI rows come first and only they are marked");
+			assert.deepEqual(listed.slice(firstPlain).map(row => row.name), ["/fix", "/skill:review", "/usage"], "ordinary commands follow, alphabetically");
+			for (const name of ["/settings", "/models", "/agents", "/rewind", "/clear", "/compact", "/export", "/hotkeys", "/git", "/login"]) assert.ok(listed.some(row => row.name === name && row.group === "gui"), `${name} is GUI-supported`);
+			assert.deepEqual(listed.filter(row => ["/tree", "/handoff", "/vibe"].includes(row.name)), [], "commands Chat cannot run are not listed");
+			assert.deepEqual([listed.find(row => row.name === "/fix")!.chip, listed.find(row => row.name === "/skill:review")!.chip, listed.find(row => row.name === "/export")!.chip, listed.find(row => row.name === "/settings")!.chip], ["Prompt", "Skill", "OMP", "Desk"]);
+			assert.match(await ui.evaluate<string>("[...document.querySelectorAll('.omp-commands-option')].find(row=>row.textContent.startsWith('/settings')).querySelector('.omp-commands-gui').title"), /OMP Settings editor/);
+			assert.match(await ui.evaluate<string>("[...document.querySelectorAll('.omp-commands-option')].find(row=>row.textContent.startsWith('/export')).querySelector('.omp-commands-gui').getAttribute('aria-label')"), /Save dialog/);
+			// Search filters; a GUI match stays ahead of a plain one.
+			await ui.call("Input.insertText", { text: "/ex" });
+			await ui.wait("document.querySelectorAll('.omp-commands-option').length<8");
+			assert.deepEqual((await rows()).slice(0, 2).map(row => row.name), ["/export", "/extensions"]);
+			assert.equal((await rows()).some(row => row.name === "/usage"), false);
+			await ui.evaluate("(()=>{const input=document.querySelector('.omp-commands-search');const set=Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set;set.call(input,'zzz');input.dispatchEvent(new Event('input',{bubbles:true}))})()");
+			await ui.wait("document.querySelector('.omp-commands-empty')");
+			// Escape closes and returns focus to the button.
+			await key("Escape", "Escape", 27);
+			await ui.wait("!document.querySelector('.omp-commands-popup')");
+			assert.equal(await ui.evaluate("document.activeElement===document.querySelector('.omp-composer-commands')"), true);
+			assert.deepEqual(await prompts(), [], "opening and closing sent nothing");
+			// A GUI command runs its action directly: a host action message, or the typed text Desk's host answers.
+			await open();
+			await ui.call("Input.insertText", { text: "export" });
+			await ui.wait("document.querySelectorAll('.omp-commands-option').length===1");
+			await key("Enter", "Enter", 13);
+			await ui.wait("!document.querySelector('.omp-commands-popup')");
+			assert.deepEqual(await actions(), ["export-html"]);
+			await open();
+			await ui.evaluate("[...document.querySelectorAll('.omp-commands-option')].find(row=>row.textContent.startsWith('/hotkeys')).click()");
+			assert.deepEqual(await actions(), ["export-html", "keyboard-shortcuts"]);
+			await open();
+			await ui.evaluate("[...document.querySelectorAll('.omp-commands-option')].find(row=>row.textContent.startsWith('/settings')).click()");
+			await ui.wait("window.sent.some(message=>message.type==='omp:chat-prompt'&&message.text==='/settings')");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-composer textarea').value"), "");
+			// A command that takes arguments completes the draft: `/name ` with the caret after it, the rest of the draft kept.
+			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+			await ui.call("Input.insertText", { text: "keep this text" });
+			await open();
+			await ui.evaluate("[...document.querySelectorAll('.omp-commands-option')].find(row=>row.textContent.startsWith('/skill:review')).click()");
+			await ui.wait("document.querySelector('.omp-composer textarea').value==='/skill:review keep this text'");
+			assert.deepEqual(await ui.evaluate("(()=>{const t=document.querySelector('.omp-composer textarea');return[document.activeElement===t,t.selectionStart,t.selectionEnd]})()"), [true, 14, 14]);
+			assert.deepEqual(await prompts(), ["/settings"], "an argument command is never sent by the pick");
+			// A command that takes none is sent as its own message; the draft stays exactly as it is.
+			await open();
+			await ui.evaluate("[...document.querySelectorAll('.omp-commands-option')].find(row=>row.textContent.startsWith('/usage')).click()");
+			await ui.wait("window.sent.some(message=>message.type==='omp:chat-prompt'&&message.text==='/usage')");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-composer textarea').value"), "/skill:review keep this text");
+			// An empty draft takes the completion alone.
+			await ui.evaluate("(()=>{const t=document.querySelector('.omp-composer textarea');t.focus();t.select();document.execCommand('delete')})()");
+			await ui.wait("document.querySelector('.omp-composer textarea').value===''");
+			await open();
+			await ui.evaluate("[...document.querySelectorAll('.omp-commands-option')].find(row=>row.textContent.startsWith('/skill:review')).click()");
+			await ui.wait("document.querySelector('.omp-composer textarea').value==='/skill:review '");
+			assert.deepEqual(await ui.evaluate("(()=>{const t=document.querySelector('.omp-composer textarea');return[t.selectionStart,t.selectionEnd]})()"), [14, 14]);
+			// Keyboard: arrows move the highlight, Enter picks.
+			await ui.evaluate("(()=>{const t=document.querySelector('.omp-composer textarea');t.focus();t.select();document.execCommand('delete')})()");
+			await open();
+			assert.equal(await ui.evaluate("document.querySelector('.omp-commands-option--active').getAttribute('aria-selected')"), "true");
+			await key("ArrowUp", "ArrowUp", 38);
+			assert.equal(await ui.evaluate("document.querySelector('.omp-commands-option--active').querySelector('strong').textContent"), "/usage", "ArrowUp from the first row wraps to the last");
+			await key("ArrowDown", "ArrowDown", 40);
+			assert.equal(await ui.evaluate("document.querySelector('.omp-commands-option--active').querySelector('strong').textContent"), "/agents");
+			await key("Escape", "Escape", 27);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("the Commands list disables what cannot run now, with the reason, and keeps working while a turn runs", async () => {
+			await reset("commands-states");
+			await ui.evaluate("window.ui.push({commands:[{name:'usage',source:'builtin',description:'Show usage'},{name:'skill:review',source:'skill',inputHint:'arguments'},{name:'compact',source:'builtin',inputHint:'[focus]'},{name:'export',source:'builtin'}],working:true})");
+			await ui.evaluate("document.querySelector('.omp-composer-commands').click()");
+			await ui.wait("document.querySelector('.omp-commands-popup')");
+			const state = (name: string) => ui.evaluate<{ disabled: boolean; reason: string }>(`(()=>{const row=[...document.querySelectorAll('.omp-commands-option')].find(row=>row.querySelector('strong').textContent===${JSON.stringify(name)});return{disabled:row.getAttribute('aria-disabled')==='true',reason:row.querySelector('.omp-commands-reason')?.textContent??''}})()`);
+			assert.equal((await state("/usage")).disabled, true);
+			assert.match((await state("/usage")).reason, /only between turns/);
+			assert.match((await state("/new")).reason, /Stop it first/);
+			assert.match((await state("/clear")).reason, /abort it before resetting/);
+			assert.match((await state("/rewind")).reason, /./, "Rewind says why it cannot open during a turn");
+			for (const name of ["/skill:review", "/settings", "/compact", "/export", "/hotkeys", "/login"]) assert.deepEqual(await state(name), { disabled: false, reason: "" }, name);
+			await ui.evaluate("[...document.querySelectorAll('.omp-commands-option')].find(row=>row.textContent.startsWith('/usage')).click()");
+			assert.ok(await ui.evaluate("Boolean(document.querySelector('.omp-commands-popup'))"), "a disabled row does nothing and the list stays open");
+			assert.deepEqual(await ui.evaluate("window.sent.filter(message=>message.type==='omp:chat-prompt'||message.type==='omp:chat-steer').length"), 0);
+			await ui.evaluate("[...document.querySelectorAll('.omp-commands-option')].find(row=>row.textContent.startsWith('/settings')).click()");
+			await ui.wait("window.sent.some(message=>message.type==='omp:chat-steer'&&message.text==='/settings')");
+			await ui.evaluate("window.ui.push({working:false,phase:'stopped'})");
+			await ui.wait("document.querySelector('.omp-composer textarea').disabled");
+			await ui.evaluate("document.querySelector('.omp-composer-commands').click()");
+			await ui.wait("document.querySelector('.omp-commands-popup')");
+			assert.match((await state("/usage")).reason, /not running/);
+			assert.match((await state("/export")).reason, /not running/);
+			assert.deepEqual(await state("/hotkeys"), { disabled: false, reason: "" }, "a Desk view needs no live session");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("the Commands list fits a 360px panel and the toolbar keeps its rows", async () => {
+			await reset("commands-narrow");
+			await ui.evaluate("window.ui.push({commands:[{name:'skill:a-rather-long-skill-name-for-narrow-panels',source:'skill',description:'A description long enough to wrap onto several lines inside the narrow list so the popup width is really exercised',inputHint:'arguments'}]})");
+			for (const width of [360, 240]) {
+				await ui.call("Emulation.setDeviceMetricsOverride", { width, height: 700, deviceScaleFactor: 1, mobile: false });
+				await ui.settleGeometry(".omp-composer");
+				await ui.evaluate("document.querySelector('.omp-composer-commands').click()");
+				await ui.wait("document.querySelector('.omp-commands-popup')");
+				await ui.settleGeometry(".omp-commands-popup");
+				const fit = await ui.evaluate<{ left: number; right: number; top: number; overflow: boolean; scrolls: boolean; rowsWide: boolean; button: boolean }>(`(()=>{const p=document.querySelector('.omp-commands-popup').getBoundingClientRect(),b=document.querySelector('.omp-composer-commands').getBoundingClientRect(),card=document.querySelector('.omp-composer').getBoundingClientRect(),list=document.querySelector('.omp-commands-list');
+				 return{left:p.left,right:p.right,top:p.top,overflow:document.documentElement.scrollWidth>innerWidth,scrolls:list.scrollWidth>list.clientWidth,rowsWide:[...document.querySelectorAll('.omp-commands-option')].some(row=>row.getBoundingClientRect().right>p.right+0.5),button:b.left>=card.left&&b.right<=card.right&&b.bottom<=card.bottom}})()`);
+				assert.ok(fit.left >= 0 && fit.right <= width && fit.top >= 0, `the popup stays inside the ${width}px panel`);
+				assert.equal(fit.overflow || fit.scrolls || fit.rowsWide, false, `${width}px: nothing overflows horizontally`);
+				assert.equal(fit.button, true, `${width}px: the button stays inside the card`);
+				await ui.call("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+				await ui.wait("!document.querySelector('.omp-commands-popup')");
+			}
+			await ui.call("Emulation.setDeviceMetricsOverride", { width: 360, height: 700, deviceScaleFactor: 1, mobile: false });
+			await ui.settleGeometry(".omp-composer");
+			const rowsOfToolbar = await ui.evaluate<number>("new Set([...document.querySelectorAll('.omp-composer-toolbar-actions button')].filter(node=>node.getBoundingClientRect().width>2).map(node=>Math.round(node.getBoundingClientRect().top))).size");
+			assert.equal(rowsOfToolbar, 1, "the toolbar's action buttons, Commands included, share one row at 360px");
+			await ui.call("Emulation.clearDeviceMetricsOverride");
+		});
+
 		await t.test("optional-empty and hint-only Enter send; required-empty stays open across Escape and every submit route", async () => {
 			await reset("slash-argument-enter");
 			await ui.evaluate("window.ui.push({commands:[{name:'shake',inputHint:'[variant]',subcommands:[{name:'elide'}]},{name:'focus',inputHint:'[focus instructions]'},{name:'join',inputHint:'<link>'},{name:'required',inputHint:'<action>',subcommands:[{name:'one'}]},{name:'raw',inputHint:'unrecognized hint syntax'}]});document.querySelector('.omp-composer textarea').focus()");

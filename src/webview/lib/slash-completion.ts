@@ -26,11 +26,15 @@ export function slashQueryAt(text: string, caret: number): { query: string; end:
  return { query: text.slice(1, caret).toLowerCase(), end: match[0].length };
 }
 
+/** Every command Chat can act on, before any query: Desk's own commands, then what the session advertises (denied owners and their aliases never appear). */
+export function slashCatalogue(commands: readonly ChatSlashCommand[]): readonly ChatSlashCommand[] {
+ const catalogue = [...DESK_COMMANDS, ...commands.filter(command => !DESK_COMMANDS.some(local => local.name === command.name || local.aliases?.includes(command.name)))];
+ return catalogue.filter(command => DESK_COMMANDS.includes(command) || !classifySlashInput(`/${command.name}`, commands).denied);
+}
+
 /** Denied owners and every advertised alias disappear together; selection dispatches the owner. */
 export function slashSuggestions(commands: readonly ChatSlashCommand[], query: string): readonly ChatSlashCommand[] {
- const catalogue = [...DESK_COMMANDS, ...commands.filter(command => !DESK_COMMANDS.some(local => local.name === command.name || local.aliases?.includes(command.name)))];
- return catalogue.filter(command => (DESK_COMMANDS.includes(command) || !classifySlashInput(`/${command.name}`, commands).denied) &&
-  (command.name.toLowerCase().includes(query) || command.aliases?.some(alias => alias.toLowerCase().includes(query)))).slice(0, 50);
+ return slashCatalogue(commands).filter(command => command.name.toLowerCase().includes(query) || command.aliases?.some(alias => alias.toLowerCase().includes(query))).slice(0, 50);
 }
 
 /** Whether a draft is Chat's own `/rewind` or `/branch` (case-insensitive, nothing after it): the page opens Rewind instead of sending. */

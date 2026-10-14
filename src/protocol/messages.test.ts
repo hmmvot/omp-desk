@@ -793,7 +793,7 @@ describe("composer command boundary", () => {
 	});
 
 	it("lets the page name only the fixed Chat actions the host asks consent for", () => {
-		for (const command of ["compact", "shake", "cycle-model", "cycle-thinking", "export-html", "share"]) {
+		for (const command of ["compact", "shake", "cycle-model", "cycle-thinking", "export-html", "share", "provider-login", "keyboard-shortcuts", "source-control", "tools-view"]) {
 			assert.deepEqual(parseGuestWebviewMessage({ type: "omp:chat-command", command }), { type: "omp:chat-command", command });
 		}
 		assert.equal(parseGuestWebviewMessage({ type: "omp:chat-command", command: "bash" }), null);

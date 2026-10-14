@@ -201,6 +201,25 @@ test("theme-aware controls and live native/shell terminal palettes", { skip: bro
 			const hover = await page.evaluate<ThemeObservation["colors"][string]>("window.themeColorProbe('.omp-context-popover')");
 			assert.ok(contrast(hover.color, hover.background) >= 4.5, `${theme.name}: context hover contrast`);
 			await capture(`${name}-context`);
+			await page.evaluate("window.themeFixture.push({commands:[{name:'usage',source:'builtin',description:'Show usage'},{name:'compact',source:'builtin',description:'Compact the context',inputHint:'[focus instructions]'},{name:'export',source:'builtin',description:'Export as HTML'},{name:'skill:review',source:'skill',description:'Review code',inputHint:'arguments'},{name:'fix',source:'file',description:'Fix a bug'}]})");
+			await page.evaluate("(async()=>{document.querySelector('.omp-composer-commands').click();const frame=Promise.withResolvers();requestAnimationFrame(()=>requestAnimationFrame(frame.resolve));await frame.promise})()");
+			assert.ok(await page.evaluate("!!document.querySelector('.omp-commands-popup')"), "the Commands button opens its list");
+			for (const [part, selector] of Object.entries({ name: ".omp-commands-option:not(.omp-commands-option--disabled):not(.omp-commands-option--active) strong", description: ".omp-commands-option:not(.omp-commands-option--disabled):not(.omp-commands-option--active) .omp-slash-description", chip: ".omp-commands-option:not(.omp-commands-option--disabled):not(.omp-commands-option--active) .omp-native-badge", marker: ".omp-commands-option:not(.omp-commands-option--disabled):not(.omp-commands-option--active) .omp-commands-gui", heading: ".omp-commands-heading", reason: ".omp-commands-reason", note: ".omp-commands-note", active: ".omp-commands-option--active strong", search: ".omp-commands-search" })) {
+				const probe = await page.evaluate<ThemeObservation["colors"][string]>(`window.themeColorProbe(${JSON.stringify(selector)})`);
+				assert.ok(contrast(probe.color, probe.background) >= 4.5, `${theme.name}: Commands list ${part} contrast`);
+			}
+			if (theme.bodyClass.includes("high-contrast")) assert.notEqual((await page.evaluate<ThemeObservation["colors"][string]>("window.themeColorProbe('.omp-commands-popup')")).border, "rgba(0, 0, 0, 0)", "the Commands list has a high-contrast border");
+			await capture(`${name}-commands`);
+			await page.call("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+			await page.evaluate("(()=>{const {promise,resolve}=Promise.withResolvers();requestAnimationFrame(()=>requestAnimationFrame(resolve));return promise})()");
+			assert.ok(await page.evaluate("!document.querySelector('.omp-commands-popup')"), "Escape closes the Commands list");
+			await page.call("Emulation.setDeviceMetricsOverride", { width: 360, height: 740, deviceScaleFactor: 1, mobile: false });
+			await page.evaluate("(async()=>{document.querySelector('.omp-composer-commands').click();const frame=Promise.withResolvers();requestAnimationFrame(()=>requestAnimationFrame(frame.resolve));await frame.promise})()");
+			assert.equal(await page.evaluate("(()=>{const rect=document.querySelector('.omp-commands-popup').getBoundingClientRect();return rect.left>=0&&rect.right<=innerWidth&&rect.top>=0&&document.documentElement.scrollWidth<=innerWidth})()"), true, `${theme.name}: the Commands list fits 360px`);
+			await capture(`${name}-commands-360`);
+			await page.call("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
+			await page.call("Emulation.setDeviceMetricsOverride", { width: 1050, height: 740, deviceScaleFactor: 1, mobile: false });
+			await page.evaluate("(()=>{const {promise,resolve}=Promise.withResolvers();requestAnimationFrame(()=>requestAnimationFrame(resolve));return promise})()");
 			await page.evaluate("window.themeFixture.push({phase:'legacy'})");
 			const warning = await page.evaluate<ThemeObservation["colors"][string]>("window.themeColorProbe('.omp-notice--warning')");
 			assert.ok(contrast(warning.color, warning.background) >= 4.5, `${theme.name}: warning notice contrast`);

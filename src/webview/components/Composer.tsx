@@ -87,6 +87,9 @@ import { useDismissibleLayer } from "../lib/dismissible-layer";
 import { ExtensionNoticeLine, ExtensionWidgets } from "./ExtensionSurfaces";
 import { argumentSuggestions, isRewindCommand, missingRequiredArgument, slashArgumentAt, slashQueryAt, slashSuggestions, spliceArgument, spliceSlash } from "../lib/slash-completion";
 import { ChatFooter } from "./ChatFooter";
+import { CommandsMenu } from "./CommandsMenu";
+import { insertCommandIntoDraft, pickPlan, type CommandContext, type CommandRow } from "../lib/command-list";
+import { rewindBlockedReason } from "../../chat/rewind-mode";
 
 /** Textarea line height, kept in sync with `.omp-textarea`; vertical padding and border are read from the element. */
 const LINE_PX = 20;
@@ -818,6 +821,63 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind 
 		[canPrompt, client, onRewind, publishImages, publishRecoverable, readCapture, request, snapshot.commands],
 	);
 
+	/** Why the Commands list cannot offer a command now; each row adds its own rule (`lib/command-list.ts`). */
+	const commandContext = useMemo<CommandContext>(() => ({
+		promptBlocked: !canPrompt ? snapshot.readOnlyReason ?? "This session is not running." : captureLocked ? "Your input is held while this editor is being replaced." : request !== null ? "Answer the open question first." : null,
+		sessionBlocked: snapshot.phase !== "live" ? "This session is not running." : snapshot.readOnlyReason,
+		sendInFlight: sending,
+		turnRunning: chatTurnInProgress(snapshot),
+		maintenanceRunning: snapshot.maintenance?.status === "working" || snapshot.state?.isCompacting === true,
+		rewindBlocked: onRewind === undefined ? "Rewind is not available in this editor." : rewindBlockedReason(snapshot),
+	}), [canPrompt, captureLocked, onRewind, request, sending, snapshot]);
+
+	/**
+	 * One row picked in the Commands list. A GUI command runs its own action; a command that takes arguments is put in the
+	 * draft as `/name ` with the caret after it (the typed completion's rule, so the rest of the draft stays); every other
+	 * command is sent the way the Send button sends a draft, but as its own message: the draft itself is never touched.
+	 */
+	const runCommand = useCallback((row: CommandRow): void => {
+		const plan = pickPlan(row);
+		if (plan.kind === "rewind") { onRewind?.(); return; }
+		if (plan.kind === "action") {
+			if (!guestTransport.post({ type: "omp:chat-command", command: plan.command })) setSendError("OMP Desk could not reach the editor host. Try the command again in a moment.");
+			textareaRef.current?.focus();
+			return;
+		}
+		if (captureRef.current !== null || !canPrompt || request !== null) return;
+		if (plan.kind === "insert") {
+			const spliced = insertCommandIntoDraft(textRef.current, plan.name);
+			historyRef.current = null;
+			pendingQueryRef.current = null;
+			requestSeqRef.current++;
+			setSuggestions(NO_SUGGESTIONS);
+			setDismissedCompletion(null);
+			if (spliced.text === textRef.current) {
+				const element = textareaRef.current;
+				element?.focus();
+				element?.setSelectionRange(spliced.caret, spliced.caret);
+				caretRef.current = spliced.caret;
+				setCaret(spliced.caret);
+				return;
+			}
+			draftRevisionRef.current++;
+			textRef.current = spliced.text;
+			pendingCaretRef.current = spliced.caret;
+			setText(spliced.text);
+			return;
+		}
+		if (sendingRef.current) return;
+		textareaRef.current?.focus();
+		setSendError(null);
+		void (async () => {
+			const running = client.getSnapshot().working;
+			const result = await (running ? client.sendSteer(plan.text) : client.sendPrompt(plan.text));
+			if (!mountedRef.current) return;
+			if (!result.ok) { setSendError(result.reason); return; }
+			if (!running && result.explained !== true && nativeSettingsCommand(plan.text) === null) setSubmitted(true);
+		})();
+	}, [canPrompt, client, onRewind, request]);
+
 	// A complete capture stays immutable through the host's confirmation and replacement.
 	useEffect(() => provideDraftHandoff({
 		read(requestId) {
@@ -1487,6 +1547,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind 
 			<ExtensionWidgets snapshot={snapshot} placement="belowEditor" />
 			</>}
 			<ChatFooter client={client} snapshot={snapshot}
+				commandsAction={<CommandsMenu commands={snapshot.commands} context={commandContext} disabled={captureLocked} onPick={runCommand} />}
 				trailingActions={dialog === null ? promptActions : undefined} />
 		</div>
 	);
