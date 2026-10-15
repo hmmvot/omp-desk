@@ -5211,8 +5211,8 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 
 		await t.test("long lines wrap and only a block that cannot wrap scrolls: the transcript and the page never scroll sideways at 360, 480 and 900 px", async () => {
 			await reset("chat-overflow", "detailed");
-			const path = "omp-vscode/Strings/Layouts/Wrapping/Specializations/TranscriptWrapSpecialist/Talents/TranscriptWrapSpecialist_Case03_Feature_m_LongLineRules_ConfigurationOverride_Final.json";
-			const provenPath = "proven/Layouts/Wrapping/Specializations/TranscriptWrapSpecialist/Talents/TranscriptWrapSpecialist_Case03_Feature_m_LongLineRules.ts:12:4";
+			const path = "omp-vscode/src/Transcript/Layouts/Wrapping/Specializations/TranscriptWrapSpecialist/Cases/TranscriptWrapSpecialist_Case03_Feature_m_LongLineRules_ConfigurationOverride_Final.json";
+			const provenPath = "proven/Transcript/Layouts/Wrapping/Specializations/TranscriptWrapSpecialist/Cases/TranscriptWrapSpecialist_Case03_Feature_m_LongLineRules.ts:12:4";
 			const word = "Supercalifragilisticexpialidocious".repeat(6);
 			const url = `https://example.com/very/long/path/${"segment-".repeat(24)}end?query=${"abcdef".repeat(30)}&b=1`;
 			const columns = Array.from({ length: 14 }, (_, index) => `column-name-${String(index).padStart(2, "0")}`);
@@ -5277,7 +5277,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			type Lines = { height: number; line: number; rects: number };
 			type Block = { own: boolean; scroll: [number, number] };
 			await atEachWidth<Prose>("a reply and a user message", ".omp-md table,.omp-md pre", `(()=>{
-			 const pathCode=[...document.querySelectorAll('.omp-md p code')].find(code=>code.textContent.startsWith('omp-vscode/Strings')&&!code.closest('.omp-file-link,.omp-web-link'));
+			 const pathCode=[...document.querySelectorAll('.omp-md p code')].find(code=>code.textContent.startsWith('omp-vscode/src')&&!code.closest('.omp-file-link,.omp-web-link'));
 			 const block=el=>{const host=window.scroller(el);return {own:host!==null&&host!==document.querySelector('.omp-transcript'),scroll:host?[host.scrollWidth,host.clientWidth]:[0,0]}};
 			 const ends=pathCode?window.lineEnds(pathCode):[];
 			 const select=el=>{const range=document.createRange();range.selectNodeContents(el);const selection=getSelection();selection.removeAllRanges();selection.addRange(range);const text=selection.toString();selection.removeAllRanges();return text};

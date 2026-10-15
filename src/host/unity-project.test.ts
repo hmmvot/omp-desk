@@ -59,8 +59,8 @@ describe("unity projects", () => {
 		assert.deepEqual(await findUnityProjects(direct), [direct]);
 	});
 
-	it("finds the project below a repository root, as omp-vscode below omp-vscode", async () => {
-		const repo = folder("omp-vscode");
+	it("finds the project below a repository root, as `omp-vscode` below a repository", async () => {
+		const repo = folder("repo");
 		fs.writeFileSync(at(repo, "AGENTS.md"), "# agents\n");
 		fs.mkdirSync(at(repo, ".git"));
 		const unity = project(at(repo, "omp-vscode"));
@@ -70,7 +70,7 @@ describe("unity projects", () => {
 
 	it("finds several projects, down to two levels, in a stable order", async () => {
 		const repo = folder("many");
-		const second = project(at(repo, "Games", "Beta"));
+		const second = project(at(repo, "Projects", "Beta"));
 		const first = project(at(repo, "Alpha"));
 		assert.deepEqual(await findUnityProjects(repo), [first, second]);
 	});

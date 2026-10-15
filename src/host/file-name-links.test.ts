@@ -5,7 +5,7 @@ import type { BareFileName } from "../shared/code-symbols.ts";
 import { FileNameLinkResolver, MAX_FILE_NAME_RESULTS, distinctRoots, excludeGlob, fileChoiceLabel, fileNameGlob, fileNameOutcome, fileNameTarget, workspaceFileNameSource } from "./file-name-links.ts";
 import type { FileNameResolverOptions, FileNameSource, FindFilesApi } from "./file-name-links.ts";
 
-const CWD = "D:\\Work\\Game";
+const CWD = "D:\\Work\\omp-vscode";
 const scope = { cwd: CWD, roots: [CWD] };
 const file = (content: string): BareFileName => {
 	const parsed = parseBareFileName(content);
@@ -45,11 +45,11 @@ const resolver = (paths: readonly string[], options: FileNameResolverOptions = {
 };
 
 test("one file of that name below the session's folder is a link to it, relative to the cwd, with the span's line and column", async () => {
-	const { resolver: files, asked } = resolver([at("Assets\\Scenes\\session-index.ts"), at("Assets\\Scenes\\Other.cs")]);
-	assert.deepEqual(await files.resolve(file("session-index.ts:849"), scope), { status: "found", target: "Assets/Scenes/session-index.ts:849" });
-	assert.deepEqual(await files.resolve(file("session-index.ts:849:7"), scope), { status: "found", target: "Assets/Scenes/session-index.ts:849:7" });
-	assert.deepEqual(await files.resolve(file("session-index.ts(849,3)"), scope), { status: "found", target: "Assets/Scenes/session-index.ts:849:3" });
-	assert.deepEqual(await files.resolve(file("session-index.ts"), scope), { status: "found", target: "Assets/Scenes/session-index.ts" }, "no position, none in the target");
+	const { resolver: files, asked } = resolver([at("src\\host\\session-index.ts"), at("src\\host\\Other.cs")]);
+	assert.deepEqual(await files.resolve(file("session-index.ts:849"), scope), { status: "found", target: "src/host/session-index.ts:849" });
+	assert.deepEqual(await files.resolve(file("session-index.ts:849:7"), scope), { status: "found", target: "src/host/session-index.ts:849:7" });
+	assert.deepEqual(await files.resolve(file("session-index.ts(849,3)"), scope), { status: "found", target: "src/host/session-index.ts:849:3" });
+	assert.deepEqual(await files.resolve(file("session-index.ts"), scope), { status: "found", target: "src/host/session-index.ts" }, "no position, none in the target");
 	assert.equal(asked.length, 1, "the position is not part of the question: the four spans share one search");
 	assert.deepEqual(asked[0], { name: "session-index.ts", folders: [CWD] });
 });
@@ -92,7 +92,7 @@ test("exactly one of several inside the cwd narrows to it; a workspace folder ab
 });
 
 test("a file outside the session's folders, or a non-file location, never counts", async () => {
-	const { resolver: files } = resolver(["D:\\Work\\Elsewhere\\Loader.cs", at("Loader.cs.bak"), "D:\\Work\\GameExtra\\Loader.cs"]);
+	const { resolver: files } = resolver(["D:\\Work\\Elsewhere\\Loader.cs", at("Loader.cs.bak"), "D:\\Work\\omp-vscode-extra\\Loader.cs"]);
 	assert.deepEqual(await files.resolve(file("Loader.cs"), scope), { status: "none" }, "a source that returns more than asked, a sibling folder with a longer name, a different file name");
 	const stray = new FileNameLinkResolver({ find: async () => ({ paths: ["D:\\Work\\Elsewhere\\Loader.cs", at("Loader.cs"), "vscode-remote://x/Loader.cs"], truncated: false }) }, { isFile: async () => false });
 	assert.deepEqual(await stray.resolve(file("Loader.cs"), scope), { status: "found", target: "Loader.cs" });
@@ -100,11 +100,11 @@ test("a file outside the session's folders, or a non-file location, never counts
 });
 
 test("Windows rules: names and paths compare case-insensitively, and the same file reported twice is one", async () => {
-	const { resolver: files } = resolver([at("Assets\\session-index.ts")]);
-	assert.deepEqual(await files.resolve(file("Session-Index.ts:2"), scope), { status: "found", target: "Assets/session-index.ts:2" }, "the model's spelling of the name finds the file");
-	const duplicate = new FileNameLinkResolver({ find: async () => ({ paths: [at("Assets\\session-index.ts"), at("assets\\Session-Index.ts")], truncated: false }) }, { isFile: async () => false });
-	assert.deepEqual(await duplicate.resolve(file("Session-Index.ts:2"), scope), { status: "found", target: "Assets/session-index.ts:2" });
-	assert.deepEqual(fileNameTarget("D:\\work\\GAME\\a\\B.cs", CWD, { line: 3 }), "a/B.cs:3", "containment is case-insensitive");
+	const { resolver: files } = resolver([at("src\\session-index.ts")]);
+	assert.deepEqual(await files.resolve(file("Session-Index.ts:2"), scope), { status: "found", target: "src/session-index.ts:2" }, "the model's spelling of the name finds the file");
+	const duplicate = new FileNameLinkResolver({ find: async () => ({ paths: [at("src\\session-index.ts"), at("src\\Session-Index.ts")], truncated: false }) }, { isFile: async () => false });
+	assert.deepEqual(await duplicate.resolve(file("SESSION-INDEX.TS:2"), scope), { status: "found", target: "src/session-index.ts:2" });
+	assert.deepEqual(fileNameTarget("D:\\work\\OMP-VSCODE\\a\\B.cs", CWD, { line: 3 }), "a/B.cs:3", "containment is case-insensitive");
 });
 
 test("a search that stopped at its limit never proves a file unique and never narrows to the cwd", async () => {
@@ -192,13 +192,13 @@ test("an invalidation drops cached answers; a search that was running and found 
 });
 
 test("a search that was running when files changed still answers, with each file it found proven to exist, and caches nothing", async () => {
-	const existing = new Set([at("Assets\\Scenes\\session-index.ts"), at("Assets\\Other\\session-index.ts")]);
+	const existing = new Set([at("src\\host\\session-index.ts"), at("src\\other\\session-index.ts")]);
 	let searches = 0;
 	const release: (() => void)[] = [];
 	const source: FileNameSource = { find: () => {
 		searches++;
 		const { promise, resolve } = Promise.withResolvers<{ paths: string[]; truncated: boolean }>();
-		release.push(() => resolve({ paths: [at("Assets\\Scenes\\session-index.ts"), at("Assets\\Other\\session-index.ts")], truncated: false }));
+		release.push(() => resolve({ paths: [at("src\\host\\session-index.ts"), at("src\\other\\session-index.ts")], truncated: false }));
 		return promise;
 	} };
 	const files = new FileNameLinkResolver(source, { isFile: async candidate => existing.has(candidate) });
@@ -206,14 +206,14 @@ test("a search that was running when files changed still answers, with each file
 	await tick();
 	files.invalidate();
 	release.splice(0).forEach(done => done());
-	assert.deepEqual(await running, { state: "many", paths: [at("Assets\\Other\\session-index.ts"), at("Assets\\Scenes\\session-index.ts")] }, "files changing somewhere else do not discard a finished search");
+	assert.deepEqual(await running, { state: "many", paths: [at("src\\host\\session-index.ts"), at("src\\other\\session-index.ts")] }, "files changing somewhere else do not discard a finished search");
 	const again = files.lookup("session-index.ts", scope);
 	await tick();
 	assert.equal(searches, 2, "the stale answer was not cached");
-	existing.delete(at("Assets\\Other\\session-index.ts"));
+	existing.delete(at("src\\other\\session-index.ts"));
 	files.invalidate();
 	release.splice(0).forEach(done => done());
-	assert.deepEqual(await again, { state: "unique", path: at("Assets\\Scenes\\session-index.ts") }, "a file that vanished while the search ran is dropped from the answer");
+	assert.deepEqual(await again, { state: "unique", path: at("src\\host\\session-index.ts") }, "a file that vanished while the search ran is dropped from the answer");
 	existing.clear();
 	const gone = files.lookup("session-index.ts", scope);
 	await tick();
@@ -247,16 +247,16 @@ test("an invalidation does not drop a lookup that waits for a search slot: it ru
 
 test("the tail of a path is a lookup: it matches whole directory names at the end of the path, in any case, with either separator", async () => {
 	const { resolver: files, asked } = resolver([
-		at("omp-vscode\\Assets\\Code\\src\\host\\session-index.ts"),
-		at("omp-vscode\\Assets\\Code\\src\\Nohost\\session-index.ts"),
-		at("omp-vscode\\Assets\\Code\\src\\host\\Other.cs"),
-		at("omp-vscode\\Assets\\Code\\host\\Sub\\session-index.ts"),
+		at("omp-vscode\\src\\host\\session-index.ts"),
+		at("omp-vscode\\src\\nohost\\session-index.ts"),
+		at("omp-vscode\\src\\host\\Other.cs"),
+		at("omp-vscode\\src\\host\\Sub\\session-index.ts"),
 	]);
-	assert.deepEqual(await files.resolve(file("host/session-index.ts:579"), scope), { status: "found", target: "omp-vscode/Assets/Code/src/host/session-index.ts:579" });
+	assert.deepEqual(await files.resolve(file("host/session-index.ts:579"), scope), { status: "found", target: "omp-vscode/src/host/session-index.ts:579" });
 	assert.deepEqual(asked[0], { name: "host/session-index.ts", folders: [CWD] }, "the search is for the path tail, not for the name alone");
-	assert.deepEqual(await files.resolve(file("host\\session-index.ts(12,3)"), scope), { status: "found", target: "omp-vscode/Assets/Code/src/host/session-index.ts:12:3" }, "case and separator do not matter");
-	assert.deepEqual(await files.lookup("src/host/session-index.ts", scope), { state: "unique", path: at("omp-vscode\\Assets\\Code\\src\\host\\session-index.ts") });
-	assert.deepEqual(await files.resolve(file("Cheat/session-index.ts"), scope), { status: "none" }, "half a directory name is not the end of a path");
+	assert.deepEqual(await files.resolve(file("HOST\\SESSION-INDEX.ts(12,3)"), scope), { status: "found", target: "omp-vscode/src/host/session-index.ts:12:3" }, "case and separator do not matter");
+	assert.deepEqual(await files.lookup("src/host/session-index.ts", scope), { state: "unique", path: at("omp-vscode\\src\\host\\session-index.ts") });
+	assert.deepEqual(await files.resolve(file("hos/session-index.ts"), scope), { status: "none" }, "half a directory name is not the end of a path");
 	assert.deepEqual(await files.resolve(file("host/Missing.cs"), scope), { status: "none" });
 });
 
@@ -278,36 +278,36 @@ test("the path tail of a file directly below the session's folder is that file, 
 });
 
 test("each workspace folder is searched once, a folder inside another too", () => {
-	assert.deepEqual(distinctRoots(["D:\\Work\\Game", "D:\\Work", "d:\\work", "E:\\Other"]), ["D:\\Work\\Game", "D:\\Work", "E:\\Other"]);
-	assert.deepEqual(distinctRoots(["D:\\Work\\Game"]), ["D:\\Work\\Game"]);
+	assert.deepEqual(distinctRoots(["D:\\Work\\omp-vscode", "D:\\Work", "d:\\work", "E:\\Other"]), ["D:\\Work\\omp-vscode", "D:\\Work", "E:\\Other"]);
+	assert.deepEqual(distinctRoots(["D:\\Work\\omp-vscode"]), ["D:\\Work\\omp-vscode"]);
 });
 
 test("a file of a project opened next to the repository root that hides it is found, once", async () => {
-	// The user's layout: workspace folders `omp-vscode\omp-vscode` (the Unity project) and `omp-vscode` (the repository), whose own files.exclude hides `omp-vscode`.
-	const repo = "D:\\Work\\omp-vscode";
+	// Workspace folders `repo\omp-vscode` (a Unity project) and `repo` (the repository), whose own files.exclude hides `omp-vscode`.
+	const repo = "D:\\Work\\repo";
 	const project = `${repo}\\omp-vscode`;
-	const loader = `${project}\\Assets\\session-index.ts`;
+	const loader = `${project}\\src\\session-index.ts`;
 	const api: FindFilesApi = {
 		workspace: {
 			async findFiles(include, exclude) {
 				const base = (include as { base: string }).base;
 				return base === repo && exclude === "omp-vscode" ? [] : [{ scheme: "file", fsPath: loader }];
 			},
-			getConfiguration: (section, scope) => ({ get: <T>(key: string) => (section === "files" && key === "exclude" && (scope as { path: string }).path === repo ? { omp-vscode: true } : undefined) as T | undefined }),
+			getConfiguration: (section, scope) => ({ get: <T>(key: string) => (section === "files" && key === "exclude" && (scope as { path: string }).path === repo ? { "omp-vscode": true } : undefined) as T | undefined }),
 		},
 		RelativePattern: class { base: string; pattern: string; constructor(base: string, pattern: string) { this.base = base; this.pattern = pattern; } },
 		CancellationTokenSource: class { token = {}; cancel() {} dispose() {} },
 		Uri: { file: (path: string) => ({ path }) },
 	};
 	const files = new FileNameLinkResolver(workspaceFileNameSource(api), { isFile: async () => false });
-	assert.deepEqual(await files.resolve(file("session-index.ts"), { cwd: repo, roots: [project, repo] }), { status: "found", target: "omp-vscode/Assets/session-index.ts" });
+	assert.deepEqual(await files.resolve(file("session-index.ts"), { cwd: repo, roots: [project, repo] }), { status: "found", target: "omp-vscode/src/session-index.ts" });
 });
 
 test("the search glob is the exact name at any depth, each letter in both cases, with no glob character of its own", () => {
-	assert.equal(fileNameGlob("session-index.ts"), "**/[sS][cC][eE][nN][eE][lL][oO][aA][dD][eE][rR].[cC][sS]");
+	assert.equal(fileNameGlob("session-index.ts"), "**/[sS][eE][sS][sS][iI][oO][nN]-[iI][nN][dD][eE][xX].[tT][sS]");
 	assert.equal(fileNameGlob("a-b_1.d.ts"), "**/[aA]-[bB]_1.[dD].[tT][sS]");
 	assert.equal(fileNameGlob("ß.cs"), "**/ß.[cC][sS]", "a letter whose case form is longer is left alone");
-	assert.equal(fileNameGlob("host/session-index.ts"), "**/[cC][hH][eE][aA][tT][sS]/[uU][tT][iI][lL][iI][tT][iI][eE][sS].[cC][sS]", "the directories of a path tail are part of the pattern, so a name that many files carry does not fill the result limit");
+	assert.equal(fileNameGlob("host/session-index.ts"), "**/[hH][oO][sS][tT]/[sS][eE][sS][sS][iI][oO][nN]-[iI][nN][dD][eE][xX].[tT][sS]", "the directories of a path tail are part of the pattern, so a name that many files carry does not fill the result limit");
 });
 
 test("the exclude glob holds every enabled pattern of files.exclude and search.exclude, nothing conditional", () => {
@@ -347,7 +347,7 @@ test("the VS Code adapter searches each folder with the pattern, the excludes an
 test("the outcome of a lookup, the picker row of a file and the span grammar", () => {
 	assert.deepEqual(fileNameOutcome({ state: "none" }, file("A.cs"), CWD), { status: "none" });
 	assert.deepEqual(fileNameOutcome({ state: "unavailable" }, file("A.cs"), CWD), { status: "unavailable" });
-	assert.deepEqual(fileChoiceLabel(at("Assets\\Scenes\\session-index.ts"), CWD, [CWD]), { label: "session-index.ts", description: "Assets/Scenes" });
+	assert.deepEqual(fileChoiceLabel(at("src\\host\\session-index.ts"), CWD, [CWD]), { label: "session-index.ts", description: "src/host" });
 	assert.deepEqual(fileChoiceLabel(at("session-index.ts"), CWD, [CWD]), { label: "session-index.ts", description: "." });
 	assert.deepEqual(fileChoiceLabel("D:\\Work\\Tools\\a.cs", CWD, [CWD, "D:\\Work"]), { label: "a.cs", description: "Tools" }, "relative to the workspace folder that holds it");
 	assert.deepEqual(fileChoiceLabel("E:\\Else\\a.cs", CWD, [CWD]), { label: "a.cs", description: "E:/Else" }, "absolute when no folder holds it");

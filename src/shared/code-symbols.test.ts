@@ -9,18 +9,18 @@ const shape = (content: string) => {
 
 test("a bare capitalized name, a dotted name, a call and an attribute are symbols, and spelling variants normalize to one name", () => {
 	assert.deepEqual(shape("Session"), { name: "Session", last: "Session", attribute: false, call: false });
-	assert.deepEqual(shape("SessionData.Cast"), { name: "SessionData.Cast", last: "Cast", attribute: false, call: false });
-	assert.deepEqual(shape("SessionData.Cast()"), { name: "SessionData.Cast", last: "Cast", attribute: false, call: true });
-	assert.deepEqual(shape("SessionData.Cast(unit, 3)"), { name: "SessionData.Cast", last: "Cast", attribute: false, call: true });
+	assert.deepEqual(shape("SessionData.Load"), { name: "SessionData.Load", last: "Load", attribute: false, call: false });
+	assert.deepEqual(shape("SessionData.Load()"), { name: "SessionData.Load", last: "Load", attribute: false, call: true });
+	assert.deepEqual(shape("SessionData.Load(unit, 3)"), { name: "SessionData.Load", last: "Load", attribute: false, call: true });
 	assert.deepEqual(shape("SessionStoreBase<T>"), { name: "SessionStoreBase", last: "SessionStoreBase", attribute: false, call: false });
 	assert.deepEqual(shape("Dictionary<string, List<int>>"), { name: "Dictionary", last: "Dictionary", attribute: false, call: false });
-	assert.deepEqual(shape("OmpDesk.Sessions.SessionData<T>.Cast<TArg>(x)"), { name: "OmpDesk.Sessions.SessionData.Cast", last: "Cast", attribute: false, call: true });
+	assert.deepEqual(shape("OmpDesk.Sessions.SessionData<T>.Load<TArg>(x)"), { name: "OmpDesk.Sessions.SessionData.Load", last: "Load", attribute: false, call: true });
 	assert.deepEqual(shape("[Tracked]"), { name: "Tracked", last: "Tracked", attribute: true, call: false });
-	assert.deepEqual(shape("[Tracked(typeof(Unit))]"), { name: "Tracked", last: "Tracked", attribute: true, call: true });
+	assert.deepEqual(shape("[Tracked(typeof(Store))]"), { name: "Tracked", last: "Tracked", attribute: true, call: true });
 	assert.deepEqual(shape("ISessionStoreRestriction"), { name: "ISessionStoreRestriction", last: "ISessionStoreRestriction", attribute: false, call: false });
 	assert.deepEqual(shape("SessionRoutine"), { name: "SessionRoutine", last: "SessionRoutine", attribute: false, call: false });
 	assert.deepEqual(shape("Items[]"), { name: "Items", last: "Items", attribute: false, call: false });
-	assert.deepEqual(shape("Unit?"), { name: "Unit", last: "Unit", attribute: false, call: false });
+	assert.deepEqual(shape("Store?"), { name: "Store", last: "Store", attribute: false, call: false });
 	assert.deepEqual(shape("  Session  "), { name: "Session", last: "Session", attribute: false, call: false });
 	assert.deepEqual(shape("snake_case_name"), { name: "snake_case_name", last: "snake_case_name", attribute: false, call: false });
 	assert.deepEqual(shape("$store"), { name: "$store", last: "$store", attribute: false, call: false });
@@ -129,7 +129,7 @@ test("anchored paths, symbols, versions, prose and anything that could be a glob
 	const refused = [
 		"D:\\a.cs", "C:/a.cs", "./a.cs", ".\\a.cs", "../a.cs", "a/../b.cs", "a/./b.cs", "/a/b.cs", "\\a.cs", "~/a.cs", "a//b.cs", "a/b.cs/", "a/ b.cs", "my dir/a.cs", "@lib/a.cs", "-lib/a.cs", "a/*.cs", "a/b?.cs", "a/b/Makefile", "a/B.Cs", "a/b.cs:x", "a/b.cs:0",
 		"a.cs:x", "a.cs:0", "a.cs:1:0", "a.cs(0)", "a.cs:12345678", "a.cs:12:3:4", "two words.cs", "a .cs",
-		"Foo.Bar", "SessionData.Cast", "Foo.bar2Baz", "obj.Run()", "1.2.3", "v1.0", "3.14", "e.", "a.", ".cs", "..cs", "a..cs", "foo.", "Makefile", "file.c++", "a.verylongextension",
+		"Foo.Bar", "SessionData.Load", "Foo.bar2Baz", "obj.Run()", "1.2.3", "v1.0", "3.14", "e.", "a.", ".cs", "..cs", "a..cs", "foo.", "Makefile", "file.c++", "a.verylongextension",
 		"*.cs", "a?.cs", "[a].cs", "{a,b}.cs", "a(b).cs", "!a.cs", "@scope.cs", "-a.cs", "+a.cs", "~a.cs", "$a.cs", "a.cs\n", "`a.cs`", "a\u0000.cs", "x".repeat(101) + ".cs", "",
 	];
 	for (const content of refused) assert.equal(bare(content), null, JSON.stringify(content));
@@ -138,7 +138,7 @@ test("anchored paths, symbols, versions, prose and anything that could be a glob
 
 test("the trailing part of a path is a file reference: its directories, the name and the position are kept apart", () => {
 	assert.deepEqual(bare("host/session-index.ts:579"), { name: "session-index.ts", directory: "host", line: 579 });
-	assert.deepEqual(bare("shared/code-symbols.ts"), { name: "code-symbols.ts", directory: "Reflection" });
+	assert.deepEqual(bare("shared/code-symbols.ts"), { name: "code-symbols.ts", directory: "shared" });
 	assert.deepEqual(bare("src\\host\\session-index.ts(12,3)"), { name: "session-index.ts", directory: "src/host", line: 12, column: 3 }, "either separator, normalized to a slash");
 	assert.deepEqual(bare(".workspace/notes/code-symbols.ts#L9"), { name: "code-symbols.ts", directory: ".workspace/notes", line: 9 });
 	assert.equal(fileReference(bare("host/session-index.ts:579")!), "host/session-index.ts");

@@ -57,9 +57,9 @@ describe("checkout root", () => {
 			const base = `unity-${marker.vcs}-${marker.name}-${marker.kind}`;
 			if (marker.kind === "directory") await make(base, marker.name);
 			else await write([base, marker.name], "gitdir: elsewhere");
-			await make(base, "Game", "Assets");
-			await write([base, "Game", "ProjectSettings", "ProjectVersion.txt"]);
-			for (const folder of [dir(base, "Game"), dir(base, "Game", "Assets"), dir(base)]) {
+			await make(base, "omp-vscode", "Assets");
+			await write([base, "omp-vscode", "ProjectSettings", "ProjectVersion.txt"]);
+			for (const folder of [dir(base, "omp-vscode"), dir(base, "omp-vscode", "Assets"), dir(base)]) {
 				assert.deepEqual(await findCheckoutRoot(folder, search()), { root: dir(base), vcs: marker.vcs }, folder);
 			}
 		});
@@ -87,9 +87,9 @@ describe("checkout root", () => {
 		await make("mixed", "hg", "pkg");
 		await make("svn", ".svn");
 		await make("svn", "ws", ".plastic");
-		await make("svn", "ws", "Game");
+		await make("svn", "ws", "omp-vscode");
 		assert.deepEqual(await findCheckoutRoot(dir("mixed", "hg", "pkg"), search()), { root: dir("mixed", "hg"), vcs: "mercurial" });
-		assert.deepEqual(await findCheckoutRoot(dir("svn", "ws", "Game"), search()), { root: dir("svn", "ws"), vcs: "plastic" });
+		assert.deepEqual(await findCheckoutRoot(dir("svn", "ws", "omp-vscode"), search()), { root: dir("svn", "ws"), vcs: "plastic" });
 	});
 
 	it("is the folder itself when the folder holds the marker, and the same root for a colocated Jujutsu and Git root", async () => {
@@ -125,29 +125,29 @@ describe("checkout root", () => {
 	describe("Perforce", () => {
 		it("takes a .p4config file at the workspace root", async () => {
 			await write(["p4", "ws", ".p4config"], "P4CLIENT=ws");
-			await make("p4", "ws", "Game");
-			assert.deepEqual(await findCheckoutRoot(dir("p4", "ws", "Game"), search()), { root: dir("p4", "ws"), vcs: "perforce" });
+			await make("p4", "ws", "omp-vscode");
+			assert.deepEqual(await findCheckoutRoot(dir("p4", "ws", "omp-vscode"), search()), { root: dir("p4", "ws"), vcs: "perforce" });
 		});
 
 		it("takes the file the P4CONFIG variable names, as well as .p4config", async () => {
 			await write(["p4b", "ws", "p4settings.txt"]);
-			await make("p4b", "ws", "Game");
-			assert.equal(await findCheckoutRoot(dir("p4b", "ws", "Game"), search()), null, "without the variable the name means nothing");
-			assert.deepEqual(await findCheckoutRoot(dir("p4b", "ws", "Game"), search({ p4config: "p4settings.txt" })), { root: dir("p4b", "ws"), vcs: "perforce" });
+			await make("p4b", "ws", "omp-vscode");
+			assert.equal(await findCheckoutRoot(dir("p4b", "ws", "omp-vscode"), search()), null, "without the variable the name means nothing");
+			assert.deepEqual(await findCheckoutRoot(dir("p4b", "ws", "omp-vscode"), search({ p4config: "p4settings.txt" })), { root: dir("p4b", "ws"), vcs: "perforce" });
 		});
 
 		it("never follows a P4CONFIG value that is a path", async () => {
 			await write(["p4c", "ws", "evil"]);
 			await write(["p4c", "evil"]);
-			await make("p4c", "ws", "Game");
-			for (const value of ["../evil", "ws/evil", "..", ".", ""]) assert.equal(await findCheckoutRoot(dir("p4c", "ws", "Game"), search({ p4config: value })), null, JSON.stringify(value));
+			await make("p4c", "ws", "omp-vscode");
+			for (const value of ["../evil", "ws/evil", "..", ".", ""]) assert.equal(await findCheckoutRoot(dir("p4c", "ws", "omp-vscode"), search({ p4config: value })), null, JSON.stringify(value));
 		});
 
 		it("is nearer than a repository above it", async () => {
 			await make("p4d", ".git");
 			await write(["p4d", "ws", ".p4config"]);
-			await make("p4d", "ws", "Game");
-			assert.deepEqual(await findCheckoutRoot(dir("p4d", "ws", "Game"), search()), { root: dir("p4d", "ws"), vcs: "perforce" });
+			await make("p4d", "ws", "omp-vscode");
+			assert.deepEqual(await findCheckoutRoot(dir("p4d", "ws", "omp-vscode"), search()), { root: dir("p4d", "ws"), vcs: "perforce" });
 		});
 	});
 

@@ -18,7 +18,7 @@ export interface CodeSymbol {
 	readonly last: string;
 	/** Written as an attribute: `[Tracked]`. */
 	readonly attribute: boolean;
-	/** Written with a call suffix: `parse()`, `Cast(x)`. */
+	/** Written with a call suffix: `parse()`, `Load(x)`. */
 	readonly call: boolean;
 }
 

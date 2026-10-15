@@ -85,7 +85,7 @@ describe("one row per MCP server name", () => {
     const { row } = foldMcpServer([owner], hooks({ shadowedBy: () => "x" }));
     assert.equal(row.shadowedBy, null);
   });
-  it("the whole omp-vscode entry set (three overrides over five definitions) yields five rows and none shadowed", () => {
+  it("the whole project entry set (three overrides over five definitions) yields five rows and none shadowed", () => {
     const all: McpEntry[] = [
       override("unity", false), override("devtools", true), override("playwright", true),
       definition("unity", projectDefinitions.unity!), definition("playwright", projectDefinitions.playwright!), definition("devtools", projectDefinitions.devtools!),
@@ -95,7 +95,7 @@ describe("one row per MCP server name", () => {
     const byName = new Map<string, McpEntry[]>();
     for (const entry of all) byName.set(entry.name, [...(byName.get(entry.name) ?? []), entry]);
     const rows = [...byName.values()].map(entries => foldMcpServer(entries, hooks()).row);
-    assert.deepEqual(rows.map(row => row.name).sort(), ["devtools", "playwright", "symbols", "omnisharp", "unity"]);
+    assert.deepEqual(rows.map(row => row.name).sort(), ["devtools", "omnisharp", "playwright", "symbols", "unity"]);
     assert.equal(rows.filter(row => row.shadowed || row.state === "shadowed").length, 0);
   });
 });

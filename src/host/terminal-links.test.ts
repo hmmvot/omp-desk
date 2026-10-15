@@ -227,13 +227,13 @@ test("a symbol search request opens the workspace symbol search for the symbol's
 	const host = { cwd: "D:\\Work", isCurrent: () => current, reply() {}, openFile: async () => {}, revealInExplorer: async () => true, revealInOs: async () => {}, openUrl: async () => {}, searchSymbols: async (query: string) => { searches.push(query); }, lookupFileName: async () => ({ state: "none" as const }), pickFile: async () => undefined, warn: (message: string) => { warnings.push(message); } };
 	const ask = (target: string) => handleTerminalLink({ type: "omp:terminal-link-open", requestId: 1, target, search: true }, host);
 	await ask("Session");
-	await ask("SessionData.Cast(x, 3)");
+	await ask("SessionData.Load(x, 3)");
 	await ask("[Tracked]");
 	await ask("SessionStoreBase<T>");
-	assert.deepEqual(searches, ["Session", "Cast", "Tracked", "SessionStoreBase"]);
+	assert.deepEqual(searches, ["Session", "Load", "Tracked", "SessionStoreBase"]);
 	await ask("workbench.action.reloadWindow; rm -rf");
 	await ask("two words");
-	assert.deepEqual(searches, ["Session", "Cast", "Tracked", "SessionStoreBase"], "not a code symbol: nothing runs");
+	assert.deepEqual(searches, ["Session", "Load", "Tracked", "SessionStoreBase"], "not a code symbol: nothing runs");
 	assert.equal(warnings.length, 2);
 	current = false;
 	await ask("Session");

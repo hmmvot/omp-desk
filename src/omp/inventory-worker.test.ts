@@ -205,7 +205,7 @@ test("installed OMP inventory: an MCP name with a definition and a by-name overr
     const snapshot = parseSnapshot(await runSettingsWorker({ bunPath, helperPath, packageRoot, cwd: projectDir, profile: "default", request: { action: "read", scope: "session" }, env }));
     assert.ok(snapshot, "the receipt parses as an inventory");
     const servers = snapshot.rows.filter(candidate => candidate.kind === "mcp" && ["unity", "symbols", "playwright", "omnisharp", "devtools"].includes(candidate.name));
-    assert.deepEqual(servers.map(server => server.name).sort(), ["devtools", "playwright", "symbols", "omnisharp", "unity"], "one row per name");
+    assert.deepEqual(servers.map(server => server.name).sort(), ["devtools", "omnisharp", "playwright", "symbols", "unity"], "one row per name");
     const named = (name: string): InventoryRow => servers.find(server => server.name === name)!;
     for (const name of ["unity", "devtools", "playwright"]) {
       assert.equal(named(name).state, "disabled", name);

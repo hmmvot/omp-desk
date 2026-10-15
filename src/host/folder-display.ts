@@ -1,6 +1,6 @@
 /**
  * How a folder is spelled for display. The session index and the folder identity keep a Windows path case-folded
- * (`normalizeWorkspaceDirectory`, right for comparing), so a title or a label built from them shows `game` for `Game`.
+ * (`normalizeWorkspaceDirectory`, right for comparing), so a title or a label built from them shows `omp-vscode` for `Omp-Vscode`.
  * The editors compare by that key and show this spelling.
  */
 import { realpath } from "node:fs";

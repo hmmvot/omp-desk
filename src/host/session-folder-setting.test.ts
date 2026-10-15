@@ -43,9 +43,9 @@ describe("the folder the editors bind is the folder Sessions runs sessions in", 
 		temp = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-editor-folder-"));
 		for (const [name, marker] of [["git", ".git"], ["plastic", ".plastic"], ["hg", ".hg"], ["svn", ".svn"], ["jj", ".jj"]] as const) {
 			await make(name, marker);
-			await make(name, "Game", "Assets");
-			await make(name, "Game", "ProjectSettings");
-			await fs.promises.writeFile(dir(name, "Game", "ProjectSettings", "ProjectVersion.txt"), "m_EditorVersion: 6000.0.1f1");
+			await make(name, "omp-vscode", "Assets");
+			await make(name, "omp-vscode", "ProjectSettings");
+			await fs.promises.writeFile(dir(name, "omp-vscode", "ProjectSettings", "ProjectVersion.txt"), "m_EditorVersion: 6000.0.1f1");
 		}
 	});
 	after(async () => { await fs.promises.rm(temp, { recursive: true, force: true }); });
@@ -69,18 +69,18 @@ describe("the folder the editors bind is the folder Sessions runs sessions in", 
 
 	for (const name of ["git", "plastic", "hg", "svn", "jj"]) {
 		it(`agree for a Unity project under ${name}: sessions and editors at the root, or both in the opened folder when the setting is off`, async () => {
-			const game = dir(name, "Game");
-			assert.equal(await sessionsFolderFor(game), dir(name));
-			assert.equal(await editorProjectFolder(game), dir(name));
+			const unityProject = dir(name, "omp-vscode");
+			assert.equal(await sessionsFolderFor(unityProject), dir(name));
+			assert.equal(await editorProjectFolder(unityProject), dir(name));
 			stub.workspace.settings[SETTING] = false;
-			assert.equal(await sessionsFolderFor(game), game);
-			assert.equal(await editorProjectFolder(game), game);
+			assert.equal(await sessionsFolderFor(unityProject), unityProject);
+			assert.equal(await editorProjectFolder(unityProject), unityProject);
 		});
 	}
 
 	it("reads the setting for the folder, so a monorepo folder can turn it off", () => {
-		assert.equal(runsAtRepositoryRoot(dir("git", "Game")), true, "on by default");
+		assert.equal(runsAtRepositoryRoot(dir("git", "omp-vscode")), true, "on by default");
 		stub.workspace.settings[SETTING] = false;
-		assert.equal(runsAtRepositoryRoot(dir("git", "Game")), false);
+		assert.equal(runsAtRepositoryRoot(dir("git", "omp-vscode")), false);
 	});
 });

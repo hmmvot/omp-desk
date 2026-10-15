@@ -215,15 +215,15 @@ test("bare URLs in prose become web links without their trailing punctuation, an
 	assert.match(linked, /<pre><code[^>]*>https:\/\/fenced\.test\/stays<\/code><\/pre>/, "fenced code stays text");
 });
 
-const SYMBOL_PROSE = "`Session` and `SessionData.Cast()` and `SessionStoreBase<T>` and `[Tracked]` and `Ambiguous` and `Unknown`, but `two words`, `a + b` and `src/gone.ts`.";
-const SYMBOL_TARGETS = { Session: "src/Session.cs:12:5", "SessionData.Cast()": "src/SessionData.cs:40:9", "SessionStoreBase<T>": "src/Unit.cs:3:1", "[Tracked]": "src/Tracked.cs:7:3" };
+const SYMBOL_PROSE = "`Session` and `SessionData.Load()` and `SessionStoreBase<T>` and `[Tracked]` and `Ambiguous` and `Unknown`, but `two words`, `a + b` and `src/gone.ts`.";
+const SYMBOL_TARGETS = { Session: "src/Session.cs:12:5", "SessionData.Load()": "src/SessionData.cs:40:9", "SessionStoreBase<T>": "src/SessionStoreBase.cs:3:1", "[Tracked]": "src/Tracked.cs:7:3" };
 
 test("an inline code span the host found one definition of renders as a code-path link to it; every other span stays code", async () => {
-	const { html, asked } = await renderSymbols(SYMBOL_PROSE, { symbols: SYMBOL_TARGETS, paths: ["SessionData.Cast()", "src/gone.ts"] });
+	const { html, asked } = await renderSymbols(SYMBOL_PROSE, { symbols: SYMBOL_TARGETS, paths: ["SessionData.Load()", "src/gone.ts"] });
 	const targets = [...html.matchAll(/data-file-target="([^"]*)"/g)].map(match => match[1]);
-	assert.deepEqual(targets, ["src/Session.cs:12:5", "src/SessionData.cs:40:9", "src/Unit.cs:3:1", "src/Tracked.cs:7:3"]);
+	assert.deepEqual(targets, ["src/Session.cs:12:5", "src/SessionData.cs:40:9", "src/SessionStoreBase.cs:3:1", "src/Tracked.cs:7:3"]);
 	assert.match(html, /<code><span class="omp-file-link" role="link" tabindex="0" data-file-target="src\/Session\.cs:12:5"[^>]*>Session<\/span><\/code>/, "underlined code like a path link: the anchor inside the code element");
-	assert.match(html, /<code><span class="omp-file-link"[^>]*data-file-target="src\/SessionData\.cs:40:9"[^>]*>SessionData\.Cast\(\)<\/span><\/code>/, "a dotted call is a symbol once its path-shaped reading is refused");
+	assert.match(html, /<code><span class="omp-file-link"[^>]*data-file-target="src\/SessionData\.cs:40:9"[^>]*>SessionData\.Load\(\)<\/span><\/code>/, "a dotted call is a symbol once its path-shaped reading is refused");
 	assert.match(html, /<code><span class="omp-file-link"[^>]*>SessionStoreBase&lt;T&gt;<\/span><\/code>/, "the characters are the model's, not the normalized name");
 	assert.match(html, /<code><span class="omp-file-link"[^>]*>\[Tracked\]<\/span><\/code>/);
 	assert.match(html, /<code>Ambiguous<\/code>/);
@@ -251,7 +251,7 @@ test("a span that is a path the host proves stays a file link and the symbol is 
 });
 
 test("code blocks and link labels never ask about symbols; a code span inside emphasis is a candidate like any other", async () => {
-	const { html } = await renderSymbols("```ts\nAbility\n```\n\n[`Session`](docs/a.md)", { symbols: { Session: "src/Session.cs:12:5" } });
+	const { html } = await renderSymbols("```ts\nSession\n```\n\n[`Session`](docs/a.md)", { symbols: { Session: "src/Session.cs:12:5" } });
 	assert.doesNotMatch(html, /<pre><code[^>]*><span/);
 	assert.equal([...html.matchAll(/data-file-target="src\/Session\.cs/g)].length, 0);
 	const emphasized = await renderSymbols("**`Session`** and *`Session`* and ~~`Session`~~", { symbols: { Session: "src/Session.cs:12:5" } });
@@ -269,36 +269,36 @@ test("a symbol with several definitions renders as a dotted search link with its
 
 test("a bare file name the host found one file of is a link to it, several files are a dotted choice, none stays code; it is asked about only after its path was refused", async () => {
 	const source = "`session-index.ts:849` and `Loader.cs(12)` and `Settings.cs:3` and `Missing.cs:1` and `@lib/c.ts` and `Util.Run` and **`session-index.ts:849`**";
-	const { html, asked } = await renderSymbols(source, { paths: ["session-index.ts:849", "Settings.cs:3", "Missing.cs:1"], symbols: { "session-index.ts:849": "Assets/session-index.ts:849", "Loader.cs(12)": "Assets/Loader.cs:12", "Settings.cs:3": { files: 3 } } });
-	assert.deepEqual([...html.matchAll(/data-file-target="([^"]*)"/g)].map(match => match[1]), ["Assets/session-index.ts:849", "Assets/Loader.cs:12", "Assets/session-index.ts:849"]);
-	assert.match(html, /<code><span class="omp-file-link"[^>]*data-file-target="Assets\/session-index\.cs:849"[^>]*>session-index\.cs:849<\/span><\/code>/, "the span's own characters, as a file link");
+	const { html, asked } = await renderSymbols(source, { paths: ["session-index.ts:849", "Settings.cs:3", "Missing.cs:1"], symbols: { "session-index.ts:849": "src/session-index.ts:849", "Loader.cs(12)": "Assets/Loader.cs:12", "Settings.cs:3": { files: 3 } } });
+	assert.deepEqual([...html.matchAll(/data-file-target="([^"]*)"/g)].map(match => match[1]), ["src/session-index.ts:849", "Assets/Loader.cs:12", "src/session-index.ts:849"]);
+	assert.match(html, /<code><span class="omp-file-link"[^>]*data-file-target="src\/session-index\.ts:849"[^>]*>session-index\.ts:849<\/span><\/code>/, "the span's own characters, as a file link");
 	assert.match(html, /<code><span class="omp-file-link"[^>]*data-file-target="Assets\/Loader\.cs:12"[^>]*>Loader\.cs\(12\)<\/span><\/code>/, "the MSBuild form links without being a path");
 	assert.match(html, /<code><span class="omp-symbol-search"[^>]*data-symbol-search="Settings\.cs:3"[^>]*title="3 files — click to choose"/, "several files are a choice, said in files");
 	assert.match(html, /<code>Missing\.cs:1<\/code>/);
-	assert.match(html, /<strong><code><span class="omp-file-link"[^>]*>session-index\.cs:849<\/span><\/code><\/strong>/);
+	assert.match(html, /<strong><code><span class="omp-file-link"[^>]*>session-index\.ts:849<\/span><\/code><\/strong>/);
 	assert.doesNotMatch(html, /data-vscode-context="[^"]*Settings/, "no file menu for a choice");
-	assert.deepEqual([...new Set(asked)].sort(), ["Loader.cs(12)", "session-index.ts:849", "Settings.cs:3"], "a refused path or a span with no path shape is asked about; a mention and a mixed-case dotted name are not file names");
+	assert.deepEqual([...new Set(asked)].sort(), ["Loader.cs(12)", "Settings.cs:3", "session-index.ts:849"], "a refused path or a span with no path shape is asked about; a mention and a mixed-case dotted name are not file names");
 });
 
 test("the tail of a path that the session's folder does not have is asked about once its path was refused, and links to the file the host found, or lets the user choose", async () => {
 	const source = "tools (`host/session-index.ts:579`, `shared\\code-symbols.ts`, `Dup/Settings.cs:3`, `Nope/Missing.cs:1`, `./session-index.ts`, `../session-index.ts:2`)";
 	const { html, asked } = await renderSymbols(source, {
 		paths: ["host/session-index.ts:579", "shared\\code-symbols.ts", "Dup/Settings.cs:3", "Nope/Missing.cs:1", "./session-index.ts", "../session-index.ts:2"],
-		symbols: { "host/session-index.ts:579": "omp-vscode/Assets/Code/src/host/session-index.ts:579", "shared\\code-symbols.ts": "omp-vscode/Assets/Code/shared/code-symbols.ts", "Dup/Settings.cs:3": { files: 2 } },
+		symbols: { "host/session-index.ts:579": "omp-vscode/src/host/session-index.ts:579", "shared\\code-symbols.ts": "omp-vscode/src/shared/code-symbols.ts", "Dup/Settings.cs:3": { files: 2 } },
 	});
-	assert.deepEqual([...html.matchAll(/data-file-target="([^"]*)"/g)].map(match => match[1]), ["omp-vscode/Assets/Code/src/host/session-index.ts:579", "omp-vscode/Assets/Code/shared/code-symbols.ts"]);
-	assert.match(html, /<code><span class="omp-file-link"[^>]*data-file-target="omp-vscode\/Assets\/Code\/src\/host\/Utilities\.cs:579"[^>]*>host\/Utilities\.cs:579<\/span><\/code>/, "the span's own characters, as a file link");
+	assert.deepEqual([...html.matchAll(/data-file-target="([^"]*)"/g)].map(match => match[1]), ["omp-vscode/src/host/session-index.ts:579", "omp-vscode/src/shared/code-symbols.ts"]);
+	assert.match(html, /<code><span class="omp-file-link"[^>]*data-file-target="omp-vscode\/src\/host\/session-index\.ts:579"[^>]*>host\/session-index\.ts:579<\/span><\/code>/, "the span's own characters, as a file link");
 	assert.match(html, /<code><span class="omp-symbol-search"[^>]*data-symbol-search="Dup\/Settings\.cs:3"[^>]*title="2 files — click to choose"/);
 	assert.match(html, /<code>Nope\/Missing\.cs:1<\/code>/);
-	assert.deepEqual([...new Set(asked)].sort(), ["host/session-index.ts:579", "Dup/Settings.cs:3", "shared\\code-symbols.ts"], "the host is asked about the tails whose path was refused (the harness asks the tokens it has answers for)");
+	assert.deepEqual([...new Set(asked)].sort(), ["Dup/Settings.cs:3", "host/session-index.ts:579", "shared\\code-symbols.ts"], "the host is asked about the tails whose path was refused (the harness asks the tokens it has answers for)");
 });
 
 test("a bare file name is linked in assistant text only, and where nothing links it renders as before", async () => {
-	const off = await renderSymbols("`session-index.ts:849` and `Loader.cs(12)`", { paths: ["session-index.ts:849"], symbols: { "session-index.ts:849": "Assets/session-index.ts:849", "Loader.cs(12)": "Assets/Loader.cs:12" }, eligible: false });
+	const off = await renderSymbols("`session-index.ts:849` and `Loader.cs(12)`", { paths: ["session-index.ts:849"], symbols: { "session-index.ts:849": "src/session-index.ts:849", "Loader.cs(12)": "Assets/Loader.cs:12" }, eligible: false });
 	assert.doesNotMatch(off.html, /omp-file-link|omp-symbol-search/);
-	assert.match(off.html, /<code>session-index\.cs:849<\/code> and <code>Loader\.cs\(12\)<\/code>/);
+	assert.match(off.html, /<code>session-index\.ts:849<\/code> and <code>Loader\.cs\(12\)<\/code>/);
 	const linked = await renderLinked("`session-index.ts:849` and `Loader.cs`", ["session-index.ts:849", "Loader.cs"]);
-	assert.match(linked, /<code><span class="omp-file-link"[^>]*data-file-target="session-index\.cs:849"/, "a file the cwd has keeps the path link, in any text");
+	assert.match(linked, /<code><span class="omp-file-link"[^>]*data-file-target="session-index\.ts:849"/, "a file the cwd has keeps the path link, in any text");
 	assert.match(linked, /<code><span class="omp-file-link"[^>]*data-file-target="Loader\.cs"/);
 });
 

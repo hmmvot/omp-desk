@@ -127,11 +127,11 @@ describe("window registry", () => {
 	});
 
 	it("publishes the opened folders whose sessions stay in the folder (ompDesk.runSessionsAtRepositoryRoot off), reads a record without the field as none, and repaints for a change", async () => {
-		const owner = windowOf("owner", 1, "2026-10-10T09:00:00.000Z", { folders: ["C:/mono/pkg", "C:/game/Game"], staysInFolder: ["C:/mono/pkg"] });
+		const owner = windowOf("owner", 1, "2026-10-10T09:00:00.000Z", { folders: ["C:/mono/pkg", "C:/repo/omp-vscode"], staysInFolder: ["C:/mono/pkg"] });
 		const reader = windowOf("reader", 2, "2026-10-10T09:05:00.000Z");
 		await publish(owner, reader);
 		assert.deepEqual(reader.windowOf("owner")?.staysInFolder, ["C:/mono/pkg"]);
-		owner.setSnapshot({ windowUri: null, label: "owner", folders: ["C:/mono/pkg", "C:/game/Game"], liveCwds: [], rows: {}, focusedAt: null, stale: false });
+		owner.setSnapshot({ windowUri: null, label: "owner", folders: ["C:/mono/pkg", "C:/repo/omp-vscode"], liveCwds: [], rows: {}, focusedAt: null, stale: false });
 		await owner.flush();
 		assert.equal(await reader.refresh(), true, "turning the setting back on changes what the others show");
 		assert.equal(reader.windowOf("owner")?.staysInFolder, undefined);

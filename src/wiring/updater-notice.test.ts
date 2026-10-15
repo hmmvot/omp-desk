@@ -37,7 +37,7 @@ function port(overrides: Partial<UpdaterNoticePort> & { logs?: Record<string, st
 		updaterLogNames: async () => Object.keys(logs),
 		readUpdaterLog: async name => logs[name] ?? null,
 		brokerDescriptors: async () => overrides.descriptors ?? [
-			{ brokerPid: 158360, title: "OMP: omp-vscode-e2e", kind: "managed-rpc" },
+			{ brokerPid: 158360, title: "OMP: omp-vscode", kind: "managed-rpc" },
 			{ brokerPid: 17240, title: "OMP: omp-vscode-docs", kind: "managed-rpc" },
 			{ brokerPid: 4242, title: "OMP: other", kind: "managed-rpc" },
 		],

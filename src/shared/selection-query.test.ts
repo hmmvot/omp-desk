@@ -4,7 +4,7 @@ import { parseGuestWebviewMessage } from "../protocol/messages.ts";
 import { MAX_SYMBOL_QUERY_LENGTH, fileSearchValue, normalizeSymbolQuery, selectedText, symbolSearchValue } from "./selection-query.ts";
 
 test("a selection is trimmed to its first non-empty line", () => {
-	assert.equal(normalizeSymbolQuery("  SessionData.Cast  "), "SessionData.Cast");
+	assert.equal(normalizeSymbolQuery("  SessionData.Load  "), "SessionData.Load");
 	assert.equal(normalizeSymbolQuery("\r\n  \n  Session  \nsecond line"), "Session");
 	assert.equal(normalizeSymbolQuery(" \t\r\n "), "");
 });
@@ -17,7 +17,7 @@ test("a long selection is cut to the cap and an overlong single line never grows
 
 test("the quick open argument is '#' plus the selection; an empty selection means the plain symbol search", () => {
 	assert.equal(symbolSearchValue("Session"), "#Session");
-	assert.equal(symbolSearchValue("  Cast()\nmore"), "#Cast()");
+	assert.equal(symbolSearchValue("  Load()\nmore"), "#Load()");
 	assert.equal(symbolSearchValue(""), null);
 	assert.equal(symbolSearchValue("   \n  "), null);
 	assert.equal(symbolSearchValue(null), null);
@@ -35,10 +35,10 @@ test("the Go to File argument is the selection itself; an empty selection means 
 
 test("the focused text field's selection wins over the document selection", () => {
 	const doc = {
-		activeElement: { tagName: "TEXTAREA", value: "call Session.Cast now", selectionStart: 5, selectionEnd: 17 },
+		activeElement: { tagName: "TEXTAREA", value: "call Session.Load now", selectionStart: 5, selectionEnd: 17 },
 		getSelection: () => ({ toString: () => "document text" }),
 	};
-	assert.equal(selectedText(doc), "Session.Cast");
+	assert.equal(selectedText(doc), "Session.Load");
 });
 
 test("a collapsed text field or another element falls back to the document selection", () => {

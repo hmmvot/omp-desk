@@ -8,7 +8,7 @@ import { isInside } from "./link-scope.ts";
 import { FileNameLinkResolver } from "./file-name-links.ts";
 import type { SymbolEntry, SymbolSource } from "./symbol-links.ts";
 
-const CWD = "D:\\Work\\Game";
+const CWD = "D:\\Work\\omp-vscode";
 const entry = (name: string, kind: number, file: string, line = 10, container = "", column = 5): SymbolEntry =>
 	({ name, kind, container, path: `${CWD}\\${file}`, line, column });
 const symbol = (content: string) => {
@@ -30,24 +30,24 @@ function tick(): Promise<void> {
 test("a bare name matches its exact name case-sensitively, and parameter and generic lists on the provider's name are ignored", () => {
 	const entries = [entry("Session", SymbolKind.Class, "A.cs", 3), entry("SessionData", SymbolKind.Class, "B.cs"), entry("session", SymbolKind.Class, "C.cs")];
 	assert.equal(unique("Session", entries), "A.cs:3");
-	assert.equal(unique("Abilit", entries), "none");
+	assert.equal(unique("Sessio", entries), "none");
 	assert.equal(unique("Session", [entry("Session<T>", SymbolKind.Class, "G.cs", 7)]), "G.cs:7");
-	assert.equal(unique("Cast()", [entry("Cast(Unit unit, int n)", SymbolKind.Method, "M.cs", 9, "SessionData")]), "M.cs:9");
-	assert.equal(unique("Cast", [entry("cast", SymbolKind.Method, "M.cs")]), "none", "case matters");
+	assert.equal(unique("Load()", [entry("Load(Store store, int n)", SymbolKind.Method, "M.cs", 9, "SessionData")]), "M.cs:9");
+	assert.equal(unique("Load", [entry("cast", SymbolKind.Method, "M.cs")]), "none", "case matters");
 });
 
 test("a dotted name needs its preceding segments to end the entry's container; a container-less entry never matches", () => {
-	const cast = (container: string, file = "M.cs") => entry("Cast", SymbolKind.Method, file, 20, container);
-	assert.equal(unique("SessionData.Cast", [cast("SessionData")]), "M.cs:20");
-	assert.equal(unique("SessionData.Cast", [cast("OmpDesk.Sessions.SessionData")]), "M.cs:20", "a qualified container ends with the segment");
-	assert.equal(unique("SessionData.Cast", [cast("OmpDesk.Sessions.SessionData<T>")]), "M.cs:20", "generic arguments of the container are ignored");
-	assert.equal(unique("Sessions.SessionData.Cast", [cast("OmpDesk.Sessions.SessionData")]), "M.cs:20");
-	assert.equal(unique("Other.SessionData.Cast", [cast("OmpDesk.Sessions.SessionData")]), "none");
-	assert.equal(unique("SessionData.Cast", [cast("OtherData")]), "none");
-	assert.equal(unique("SessionData.Cast", [cast("")]), "none");
-	assert.equal(unique("Data.Cast", [cast("SessionData")]), "none", "a segment is compared whole, not as a suffix of text");
-	assert.equal(unique("SessionData.Cast", [cast("SessionData", "A.cs"), cast("Other.SessionData", "B.cs")]), "ambiguous", "two classes of one name each hold the member");
-	assert.equal(unique("Game.SessionData", [entry("SessionData", SymbolKind.Class, "A.cs", 4, "Game")]), "A.cs:4", "a qualified type matches through its namespace");
+	const cast = (container: string, file = "M.cs") => entry("Load", SymbolKind.Method, file, 20, container);
+	assert.equal(unique("SessionData.Load", [cast("SessionData")]), "M.cs:20");
+	assert.equal(unique("SessionData.Load", [cast("OmpDesk.Sessions.SessionData")]), "M.cs:20", "a qualified container ends with the segment");
+	assert.equal(unique("SessionData.Load", [cast("OmpDesk.Sessions.SessionData<T>")]), "M.cs:20", "generic arguments of the container are ignored");
+	assert.equal(unique("Sessions.SessionData.Load", [cast("OmpDesk.Sessions.SessionData")]), "M.cs:20");
+	assert.equal(unique("Other.SessionData.Load", [cast("OmpDesk.Sessions.SessionData")]), "none");
+	assert.equal(unique("SessionData.Load", [cast("OtherData")]), "none");
+	assert.equal(unique("SessionData.Load", [cast("")]), "none");
+	assert.equal(unique("Data.Load", [cast("SessionData")]), "none", "a segment is compared whole, not as a suffix of text");
+	assert.equal(unique("SessionData.Load", [cast("SessionData", "A.cs"), cast("Other.SessionData", "B.cs")]), "ambiguous", "two classes of one name each hold the member");
+	assert.equal(unique("OmpDesk.SessionData", [entry("SessionData", SymbolKind.Class, "A.cs", 4, "OmpDesk")]), "A.cs:4", "a qualified type matches through its namespace");
 	assert.equal(unique("Color.Red", [entry("Red", SymbolKind.EnumMember, "C.cs", 2, "Color")]), "C.cs:2");
 });
 
@@ -116,11 +116,11 @@ test("a Roslyn type, partial type and delegate still link; the project, file and
 	assert.equal(unique("Deep", [roslyn("Deep", SymbolKind.Method, "PartA.cs", 3, IN("Split.Nest"))]), "PartA.cs:3");
 	const handler = roslyn("Handler", SymbolKind.Function, "G.cs", 6, "in  (project Probe (net8.0))");
 	assert.equal(unique("Handler", [handler]), "G.cs:6", "a delegate in the global scope has no type in its container");
-	assert.equal(unique("Game.Handler", [handler]), "none");
+	assert.equal(unique("OmpDesk.Handler", [handler]), "none");
 	assert.equal(unique("Split.Two", [roslyn("Two", SymbolKind.Method, "PartB.cs", 3, IN("Split")), roslyn("Two", SymbolKind.Method, "PartA.cs", 9, IN("Split"))]), "PartA.cs:9", "one member name in two files of a partial type is one symbol");
 });
 
-test("a lookup of `SessionIndex.Reload` finds the member in the bare-name answer (the failing case of the omp-vscode log)", async () => {
+test("a lookup of `SessionIndex.Reload` finds the member in the bare-name answer (the failing case of a real log)", async () => {
 	const answer = [
 		roslyn("Reload", SymbolKind.Method, "SessionIndex.cs", 73, IN("SessionIndex", "Assembly-CSharp (netstandard2.1)")),
 		roslyn("Reload", SymbolKind.Method, "SessionIndex.cs", 80, IN("SessionIndex", "Assembly-CSharp (netstandard2.1)")),
@@ -132,7 +132,7 @@ test("a lookup of `SessionIndex.Reload` finds the member in the bare-name answer
 
 test("a bare capitalized name prefers a type over members of that name; members are accepted when no type matches", () => {
 	const type = entry("Session", SymbolKind.Class, "T.cs", 1);
-	const member = entry("Session", SymbolKind.Property, "P.cs", 2, "Unit");
+	const member = entry("Session", SymbolKind.Property, "P.cs", 2, "Store");
 	assert.equal(unique("Session", [type, member]), "T.cs:1");
 	assert.equal(unique("Session", [member]), "P.cs:2");
 	assert.equal(unique("Session", [member, entry("Session", SymbolKind.Field, "F.cs", 3, "Other")]), "ambiguous");
@@ -143,19 +143,19 @@ test("a bare capitalized name prefers a type over members of that name; members 
 });
 
 test("overloads, partial classes and a duplicate report of one declaration: distinct locations are counted, one location is one definition", () => {
-	assert.equal(unique("Cast", [entry("Cast(int)", SymbolKind.Method, "M.cs", 30, "SessionData"), entry("Cast(string)", SymbolKind.Method, "M.cs", 20, "SessionData")]), "M.cs:20", "overloads of one member in one container are one symbol: the first by position");
-	assert.equal(unique("Cast", [entry("Cast", SymbolKind.Method, "M.cs", 20, "SessionData"), entry("Cast", SymbolKind.Method, "M.cs", 30, "OtherData")]), "ambiguous", "same name in two containers");
-	assert.equal(unique("Cast", [entry("Cast", SymbolKind.Method, "M.cs", 20, "SessionData"), entry("Cast", SymbolKind.Property, "M.cs", 30, "SessionData")]), "ambiguous", "a method and a property are two symbols");
-	assert.equal(unique("Unit", [entry("Unit", SymbolKind.Class, "Unit.Combat.cs", 5), entry("Unit", SymbolKind.Class, "Unit.cs", 9), entry("Unit", SymbolKind.Class, "Unit.Items.cs", 2)]), "Unit.cs:9", "partial parts: the type's own file");
-	assert.equal(unique("Unit", [entry("Unit", SymbolKind.Class, "B.cs", 5, "Game"), entry("Unit", SymbolKind.Class, "A.cs", 9, "Game")]), "A.cs:9", "partial parts without an own file: the first by path");
-	assert.equal(unique("Unit", [entry("Unit<T>", SymbolKind.Class, "U1.cs", 5), entry("Unit", SymbolKind.Class, "U2.cs", 9)]), "ambiguous", "a generic and a non-generic type are two types");
-	assert.equal(unique("Unit", [entry("Unit", SymbolKind.Class, "U1.ts", 5), entry("Unit", SymbolKind.Class, "U2.ts", 9)]), "ambiguous", "outside C# a container-less type is never merged");
-	assert.equal(unique("Unit", [entry("Unit", SymbolKind.Class, "A.cs", 5, "One"), entry("Unit", SymbolKind.Class, "B.cs", 9, "Two")]), "ambiguous", "two namespaces");
-	const twins = [entry("Unit", SymbolKind.Class, "A.cs", 5, "One"), entry("Unit", SymbolKind.Class, "sub\\B.cs", 9, "Two")];
-	const near = matchSymbol(symbol("Unit"), twins, `${CWD}\\sub`);
+	assert.equal(unique("Load", [entry("Load(int)", SymbolKind.Method, "M.cs", 30, "SessionData"), entry("Load(string)", SymbolKind.Method, "M.cs", 20, "SessionData")]), "M.cs:20", "overloads of one member in one container are one symbol: the first by position");
+	assert.equal(unique("Load", [entry("Load", SymbolKind.Method, "M.cs", 20, "SessionData"), entry("Load", SymbolKind.Method, "M.cs", 30, "OtherData")]), "ambiguous", "same name in two containers");
+	assert.equal(unique("Load", [entry("Load", SymbolKind.Method, "M.cs", 20, "SessionData"), entry("Load", SymbolKind.Property, "M.cs", 30, "SessionData")]), "ambiguous", "a method and a property are two symbols");
+	assert.equal(unique("Store", [entry("Store", SymbolKind.Class, "Store.Cache.cs", 5), entry("Store", SymbolKind.Class, "Store.cs", 9), entry("Store", SymbolKind.Class, "Store.Items.cs", 2)]), "Store.cs:9", "partial parts: the type's own file");
+	assert.equal(unique("Store", [entry("Store", SymbolKind.Class, "B.cs", 5, "OmpDesk"), entry("Store", SymbolKind.Class, "A.cs", 9, "OmpDesk")]), "A.cs:9", "partial parts without an own file: the first by path");
+	assert.equal(unique("Store", [entry("Store<T>", SymbolKind.Class, "U1.cs", 5), entry("Store", SymbolKind.Class, "U2.cs", 9)]), "ambiguous", "a generic and a non-generic type are two types");
+	assert.equal(unique("Store", [entry("Store", SymbolKind.Class, "U1.ts", 5), entry("Store", SymbolKind.Class, "U2.ts", 9)]), "ambiguous", "outside C# a container-less type is never merged");
+	assert.equal(unique("Store", [entry("Store", SymbolKind.Class, "A.cs", 5, "One"), entry("Store", SymbolKind.Class, "B.cs", 9, "Two")]), "ambiguous", "two namespaces");
+	const twins = [entry("Store", SymbolKind.Class, "A.cs", 5, "One"), entry("Store", SymbolKind.Class, "sub\\B.cs", 9, "Two")];
+	const near = matchSymbol(symbol("Store"), twins, `${CWD}\\sub`);
 	assert.ok(near.state === "unique" && near.via === "cwd" && near.entry.path.endsWith("B.cs"), "exactly one same-named type lies inside the session folder");
-	assert.equal(matchSymbol(symbol("Unit"), twins, CWD).state, "ambiguous", "both lie inside it");
-	assert.equal(unique("Unit", [entry("Unit", SymbolKind.Class, "Unit.cs", 5), entry("Unit", SymbolKind.Class, "unit.CS", 5)]), "Unit.cs:5", "the same declaration reported twice (any path case)");
+	assert.equal(matchSymbol(symbol("Store"), twins, CWD).state, "ambiguous", "both lie inside it");
+	assert.equal(unique("Store", [entry("Store", SymbolKind.Class, "Store.cs", 5), entry("Store", SymbolKind.Class, "store.CS", 5)]), "Store.cs:5", "the same declaration reported twice (any path case)");
 });
 
 test("attributes match the type of the name or of the name with the Attribute suffix, and nothing else", () => {
@@ -176,15 +176,15 @@ test("kinds that are not a symbol of the code never match", () => {
 });
 
 test("only a file inside the session folder or an open workspace folder that contains it counts", () => {
-	assert.equal(isInside("D:\\Work\\Game", "D:\\Work\\Game\\src\\a.ts"), true);
-	assert.equal(isInside("D:\\Work\\Game", "d:/work/game/src/a.ts"), true, "case and separators");
-	assert.equal(isInside("D:\\Work\\Game", "D:\\Work\\Game"), true);
-	assert.equal(isInside("D:\\Work\\Game", "D:\\Work\\Game2\\a.ts"), false, "a sibling that shares a prefix");
-	assert.equal(isInside("D:\\Work\\Game", "D:\\Work\\a.ts"), false);
-	assert.equal(isInside("D:\\Work\\Game", "E:\\Work\\Game\\a.ts"), false, "another drive");
-	assert.equal(isInside("D:\\Work\\Game", ""), false, "a non-file location has no path");
+	assert.equal(isInside("D:\\Work\\omp-vscode", "D:\\Work\\omp-vscode\\src\\a.ts"), true);
+	assert.equal(isInside("D:\\Work\\omp-vscode", "d:/work/omp-vscode/src/a.ts"), true, "case and separators");
+	assert.equal(isInside("D:\\Work\\omp-vscode", "D:\\Work\\omp-vscode"), true);
+	assert.equal(isInside("D:\\Work\\omp-vscode", "D:\\Work\\omp-vscode2\\a.ts"), false, "a sibling that shares a prefix");
+	assert.equal(isInside("D:\\Work\\omp-vscode", "D:\\Work\\a.ts"), false);
+	assert.equal(isInside("D:\\Work\\omp-vscode", "E:\\Work\\omp-vscode\\a.ts"), false, "another drive");
+	assert.equal(isInside("D:\\Work\\omp-vscode", ""), false, "a non-file location has no path");
 	assert.equal(isInside("", "D:\\x"), false);
-	assert.deepEqual(symbolRoots("D:\\Work\\Game", ["D:\\Work\\Game", "D:\\Work", "D:\\Work\\Game\\Sub", "D:\\Other"]), ["D:\\Work\\Game", "D:\\Work"], "the cwd and a workspace folder that contains it");
+	assert.deepEqual(symbolRoots("D:\\Work\\omp-vscode", ["D:\\Work\\omp-vscode", "D:\\Work", "D:\\Work\\omp-vscode\\Sub", "D:\\Other"]), ["D:\\Work\\omp-vscode", "D:\\Work"], "the cwd and a workspace folder that contains it");
 	assert.deepEqual(symbolRoots("", ["D:\\Work"]), []);
 });
 
@@ -238,16 +238,16 @@ test("a unique definition inside the folder is found; ambiguous, outside and unk
 });
 
 test("a dotted name asks for its last segment, and only when that finds nothing for the full dotted text", async () => {
-	const cast = entry("Cast", SymbolKind.Method, "M.cs", 20, "SessionData");
-	const byLast = provider({ Cast: [cast, entry("Cast", SymbolKind.Method, "N.cs", 4, "Other")] });
-	assert.deepEqual(await new SymbolLinkResolver(byLast.source).resolve(symbol("SessionData.Cast()"), scope), { status: "found", target: "M.cs:20:5" });
-	assert.deepEqual(byLast.asked, ["Cast"]);
-	const qualified = provider({ Cast: [entry("Cast", SymbolKind.Method, "N.cs", 4, "Other")], "SessionData.Cast": [cast] });
-	assert.deepEqual(await new SymbolLinkResolver(qualified.source).resolve(symbol("SessionData.Cast"), scope), { status: "found", target: "M.cs:20:5" });
-	assert.deepEqual(qualified.asked, ["Cast", "SessionData.Cast"], "a second, qualified question only after the plain one found nothing");
-	const ambiguous = provider({ Cast: [cast, entry("Cast", SymbolKind.Method, "N.cs", 4, "Other.SessionData")] });
-	assert.deepEqual(await new SymbolLinkResolver(ambiguous.source).resolve(symbol("SessionData.Cast"), scope), { status: "ambiguous", definitions: 2 });
-	assert.deepEqual(ambiguous.asked, ["Cast"], "an ambiguous answer is final");
+	const cast = entry("Load", SymbolKind.Method, "M.cs", 20, "SessionData");
+	const byLast = provider({ Load: [cast, entry("Load", SymbolKind.Method, "N.cs", 4, "Other")] });
+	assert.deepEqual(await new SymbolLinkResolver(byLast.source).resolve(symbol("SessionData.Load()"), scope), { status: "found", target: "M.cs:20:5" });
+	assert.deepEqual(byLast.asked, ["Load"]);
+	const qualified = provider({ Load: [entry("Load", SymbolKind.Method, "N.cs", 4, "Other")], "SessionData.Load": [cast] });
+	assert.deepEqual(await new SymbolLinkResolver(qualified.source).resolve(symbol("SessionData.Load"), scope), { status: "found", target: "M.cs:20:5" });
+	assert.deepEqual(qualified.asked, ["Load", "SessionData.Load"], "a second, qualified question only after the plain one found nothing");
+	const ambiguous = provider({ Load: [cast, entry("Load", SymbolKind.Method, "N.cs", 4, "Other.SessionData")] });
+	assert.deepEqual(await new SymbolLinkResolver(ambiguous.source).resolve(symbol("SessionData.Load"), scope), { status: "ambiguous", definitions: 2 });
+	assert.deepEqual(ambiguous.asked, ["Load"], "an ambiguous answer is final");
 });
 
 test("an empty answer, an error and a timeout are unavailable, never cached; a real answer is cached with its own lifetime", async () => {
@@ -413,13 +413,13 @@ test("without a file search a bare file name is just a symbol candidate or nothi
 });
 
 test("a path tail token (`host/session-index.ts:579`) is answered from the file lookup like a bare name, and several files are a choice", async () => {
-	const find = async (name: string) => name === "host/session-index.ts" ? { paths: [`${CWD}\\omp-vscode\\Assets\\Code\\src\\host\\session-index.ts`], truncated: false }
+	const find = async (name: string) => name === "host/session-index.ts" ? { paths: [`${CWD}\\omp-vscode\\src\\host\\session-index.ts`], truncated: false }
 		: name === "Dup/Settings.cs" ? { paths: [`${CWD}\\A\\Dup\\Settings.cs`, `${CWD}\\B\\Dup\\Settings.cs`], truncated: false }
 		: { paths: [], truncated: false };
 	const { host: h, replies } = host();
 	await handleSymbolLinks({ type: "omp:terminal-link-symbols", requestId: 3, tokens: ["host/session-index.ts:579", "Dup\\Settings.cs(4)", "Nope/Missing.cs:1", "./session-index.ts"] }, h, new SymbolLinkResolver(provider({}).source, { files: new FileNameLinkResolver({ find }, { isFile: async () => false }) }));
 	assert.deepEqual(replies[0]!.results, [
-		{ token: "host/session-index.ts:579", status: "found", target: "omp-vscode/Assets/Code/src/host/session-index.ts:579" },
+		{ token: "host/session-index.ts:579", status: "found", target: "omp-vscode/src/host/session-index.ts:579" },
 		{ token: "Dup\\Settings.cs(4)", status: "ambiguous", definitions: 2, files: true },
 		{ token: "Nope/Missing.cs:1", status: "none" },
 		{ token: "./session-index.ts", status: "none" },
@@ -497,26 +497,26 @@ test("a locally truncated answer never makes a unique match; a failed qualified 
 	const exact = provider({ Session: [entry("Session", SymbolKind.Class, "A.cs", 3), ...filler(999)] });
 	assert.deepEqual(await new SymbolLinkResolver(exact.source).resolve(symbol("Session"), scope), { status: "found", target: "A.cs:3:5" }, "exactly the bound is not a cut");
 
-	const unrelated = [entry("Cast", SymbolKind.Method, "N.cs", 4, "Other")];
+	const unrelated = [entry("Load", SymbolKind.Method, "N.cs", 4, "Other")];
 	for (const failure of ["throw", "hang"] as const) {
-		const failing = provider({ Cast: unrelated, "SessionData.Cast": failure });
-		assert.deepEqual(await new SymbolLinkResolver(failing.source, { queryTimeoutMs: 10 }).resolve(symbol("SessionData.Cast"), scope), { status: failure === "hang" ? "pending" : "unavailable" }, failure);
+		const failing = provider({ Load: unrelated, "SessionData.Load": failure });
+		assert.deepEqual(await new SymbolLinkResolver(failing.source, { queryTimeoutMs: 10 }).resolve(symbol("SessionData.Load"), scope), { status: failure === "hang" ? "pending" : "unavailable" }, failure);
 	}
-	const completed = provider({ Cast: unrelated, "SessionData.Cast": [] });
-	assert.deepEqual(await new SymbolLinkResolver(completed.source).resolve(symbol("SessionData.Cast"), scope), { status: "none" }, "a qualified query that completed and found nothing is a miss");
+	const completed = provider({ Load: unrelated, "SessionData.Load": [] });
+	assert.deepEqual(await new SymbolLinkResolver(completed.source).resolve(symbol("SessionData.Load"), scope), { status: "none" }, "a qualified query that completed and found nothing is a miss");
 });
 
 test("declarations without a position are one symbol when they are overloads in one container, and the positioned one is opened", () => {
 	const bare = (name: string, file: string, container = "SessionData") => entry(name, SymbolKind.Method, file, 0, container, 0);
-	assert.equal(unique("Cast", [bare("Cast(int)", "M.cs"), bare("Cast(string)", "M.cs")]), "M.cs:0", "two unresolved overloads in one file open the file");
-	assert.equal(unique("Cast", [bare("Cast(int)", "M.cs"), entry("Cast(string)", SymbolKind.Method, "M.cs", 30, "SessionData")]), "M.cs:30", "unresolved beside resolved: the resolved one");
-	assert.equal(unique("Cast", [bare("Cast(int)", "M.cs"), bare("Cast(int)", "M.cs", "OtherData")]), "ambiguous", "unresolved in two containers");
-	assert.equal(unique("Cast", [bare("Cast", "M.cs")]), "M.cs:0", "one unresolved declaration opens its file");
+	assert.equal(unique("Load", [bare("Load(int)", "M.cs"), bare("Load(string)", "M.cs")]), "M.cs:0", "two unresolved overloads in one file open the file");
+	assert.equal(unique("Load", [bare("Load(int)", "M.cs"), entry("Load(string)", SymbolKind.Method, "M.cs", 30, "SessionData")]), "M.cs:30", "unresolved beside resolved: the resolved one");
+	assert.equal(unique("Load", [bare("Load(int)", "M.cs"), bare("Load(int)", "M.cs", "OtherData")]), "ambiguous", "unresolved in two containers");
+	assert.equal(unique("Load", [bare("Load", "M.cs")]), "M.cs:0", "one unresolved declaration opens its file");
 });
 
 test("a path component that merely starts with dots is inside the folder; a real parent traversal is not", () => {
-	assert.equal(isInside("D:\\Work\\Game", "D:\\Work\\Game\\..helpers\\a.ts"), true);
-	assert.equal(isInside("D:\\Work\\Game", "D:\\Work\\Game\\..\\a.ts"), false);
+	assert.equal(isInside("D:\\Work\\omp-vscode", "D:\\Work\\omp-vscode\\..helpers\\a.ts"), true);
+	assert.equal(isInside("D:\\Work\\omp-vscode", "D:\\Work\\omp-vscode\\..\\a.ts"), false);
 });
 
 test("a lookup that waits for a slot is dropped by an invalidation instead of reaching the provider, and a batch drops answers a file change made stale", async () => {
@@ -545,12 +545,12 @@ test("a lookup that waits for a slot is dropped by an invalidation instead of re
 });
 
 test("an entry too long to match makes the lookup uncertain: it can hide the only rival of a unique match", async () => {
-	const long = symbolEntry({ name: `Cast(${"int, ".repeat(100)})`, kind: SymbolKind.Method, containerName: "SessionData", location: { uri: { scheme: "file", fsPath: `${CWD}\\M.cs` }, range: { start: { line: 29, character: 0 }, end: { line: 29, character: 4 } } } });
+	const long = symbolEntry({ name: `Load(${"int, ".repeat(100)})`, kind: SymbolKind.Method, containerName: "SessionData", location: { uri: { scheme: "file", fsPath: `${CWD}\\M.cs` }, range: { start: { line: 29, character: 0 }, end: { line: 29, character: 4 } } } });
 	assert.equal(long.kind, -1);
-	const one = provider({ Cast: [entry("Cast(int)", SymbolKind.Method, "M.cs", 20, "SessionData"), long] });
-	assert.deepEqual(await new SymbolLinkResolver(one.source).resolve(symbol("Cast"), scope), { status: "unavailable" });
-	const rivals = provider({ Cast: [entry("Cast(int)", SymbolKind.Method, "M.cs", 20, "SessionData"), entry("Cast(string)", SymbolKind.Method, "M.cs", 30, "OtherData"), long] });
-	assert.deepEqual(await new SymbolLinkResolver(rivals.source).resolve(symbol("Cast"), scope), { status: "ambiguous", definitions: 2 }, "an ambiguity already seen stays one");
+	const one = provider({ Load: [entry("Load(int)", SymbolKind.Method, "M.cs", 20, "SessionData"), long] });
+	assert.deepEqual(await new SymbolLinkResolver(one.source).resolve(symbol("Load"), scope), { status: "unavailable" });
+	const rivals = provider({ Load: [entry("Load(int)", SymbolKind.Method, "M.cs", 20, "SessionData"), entry("Load(string)", SymbolKind.Method, "M.cs", 30, "OtherData"), long] });
+	assert.deepEqual(await new SymbolLinkResolver(rivals.source).resolve(symbol("Load"), scope), { status: "ambiguous", definitions: 2 }, "an ambiguity already seen stays one");
 });
 
 test("the host works on a bounded number of batches at once and refuses the rest at once", async () => {
@@ -566,32 +566,32 @@ test("the host works on a bounded number of batches at once and refuses the rest
 });
 
 test("a name candidate is an exact name, its attribute form or an entry too long to tell; fuzzy neighbours are not", () => {
-	assert.equal(isNameCandidate("Game", "Game"), true);
-	assert.equal(isNameCandidate("Game<T>", "Game"), true);
-	assert.equal(isNameCandidate("Cast(int, string)", "Cast"), true);
-	assert.equal(isNameCandidate("GameAttribute", "Game"), true);
-	assert.equal(isNameCandidate("DeskManager", "Game"), false);
-	assert.equal(isNameCandidate("game", "Game"), false);
-	assert.equal(isNameCandidate(`Cast(${"x".repeat(300)})`, "Cast"), true, "oversize cannot be judged here");
+	assert.equal(isNameCandidate("Desk", "Desk"), true);
+	assert.equal(isNameCandidate("Desk<T>", "Desk"), true);
+	assert.equal(isNameCandidate("Load(int, string)", "Load"), true);
+	assert.equal(isNameCandidate("DeskAttribute", "Desk"), true);
+	assert.equal(isNameCandidate("DeskManager", "Desk"), false);
+	assert.equal(isNameCandidate("desk", "Desk"), false);
+	assert.equal(isNameCandidate(`Load(${"x".repeat(300)})`, "Load"), true, "oversize cannot be judged here");
 });
 
 test("a lookup writes one compact line with the counts and the verdict; a provider answer of only fuzzy entries is a miss, an empty one is unavailable", async () => {
 	const logged: LoggedLine[] = [];
 	const answers = provider({
-		Game: Object.assign([entry("Game", SymbolKind.Class, "Session.cs", 3, "omp-vscode"), entry("Game", SymbolKind.Class, "Game.GameModes.cs", 7, "omp-vscode")], { total: 40 }),
+		Desk: Object.assign([entry("Desk", SymbolKind.Class, "Desk.cs", 3, "omp-vscode"), entry("Desk", SymbolKind.Class, "Desk.DeskModes.cs", 7, "omp-vscode")], { total: 40 }),
 		Fuzzy: Object.assign([], { total: 25 }),
 		Silent: [],
 		Slow: "hang",
 	});
 	const resolver = new SymbolLinkResolver(answers.source, { log: recordingLogger(logged), queryTimeoutMs: 10 });
-	assert.deepEqual(await resolver.resolve(symbol("Game"), scope), { status: "found", target: "Session.cs:3:5" });
+	assert.deepEqual(await resolver.resolve(symbol("Desk"), scope), { status: "found", target: "Desk.cs:3:5" });
 	assert.deepEqual(await resolver.resolve(symbol("Fuzzy"), scope), { status: "none" });
 	assert.deepEqual(await resolver.resolve(symbol("Silent"), scope), { status: "none" }, "once the provider has answered a symbol, an empty answer is a real miss");
 	assert.deepEqual(await resolver.resolve(symbol("Slow"), scope), { status: "pending" });
 	const lines = logged.map(line => line.message);
 	assert.equal(lines.length, 4);
 	assert.ok(logged.every(line => line.level === "debug"), "a lookup line is a debug line");
-	assert.match(lines[0]!, /^code symbol "Game": 1 query, 40 provider entries, 2 in scope, 2 matching locations -> found \(partial\) in \d+ ms$/);
+	assert.match(lines[0]!, /^code symbol "Desk": 1 query, 40 provider entries, 2 in scope, 2 matching locations -> found \(partial\) in \d+ ms$/);
 	assert.match(lines[1]!, /-> none in/);
 	assert.match(lines[2]!, /0 provider entries.* -> none in/);
 	assert.match(lines[3]!, /-> parked \(timeout\) in/);
@@ -599,7 +599,7 @@ test("a lookup writes one compact line with the counts and the verdict; a provid
 
 test("a call with arguments names the method: the argument list is stripped", () => {
 	assert.equal(symbol("HandleTurnBasedModeSwitched(false)").name, "HandleTurnBasedModeSwitched");
-	assert.equal(symbol("Game.Spawn(unit, 3, new Vector3(1, 2, 3))").name, "Game.Spawn");
+	assert.equal(symbol("Sessions.Spawn(session, 3, new Vector3(1, 2, 3))").name, "Sessions.Spawn");
 	assert.equal(symbol("Run<T>(x)").name, "Run");
 });
 
@@ -654,13 +654,13 @@ test("a pending token is answered pending on the wire and is not cached", async 
 
 test("an ambiguous symbol is answered with its number of different definitions, partial parts and overloads counted once, and is cached like a found one", async () => {
 	let now = 0;
-	const answers = provider({ Unit: [entry("Unit", SymbolKind.Class, "Unit.cs", 5, "One"), entry("Unit", SymbolKind.Class, "Unit.Combat.cs", 9, "One"), entry("Unit", SymbolKind.Class, "B.cs", 2, "Two"), entry("Unit", SymbolKind.Class, "C.cs", 2, "Three")] });
+	const answers = provider({ Store: [entry("Store", SymbolKind.Class, "Store.cs", 5, "One"), entry("Store", SymbolKind.Class, "Store.Cache.cs", 9, "One"), entry("Store", SymbolKind.Class, "B.cs", 2, "Two"), entry("Store", SymbolKind.Class, "C.cs", 2, "Three")] });
 	const resolver = new SymbolLinkResolver(answers.source, { now: () => now, foundTtlMs: 100, noneTtlMs: 10 });
-	assert.deepEqual(await resolver.resolve(symbol("Unit"), scope), { status: "ambiguous", definitions: 3 });
+	assert.deepEqual(await resolver.resolve(symbol("Store"), scope), { status: "ambiguous", definitions: 3 });
 	now += 50;
-	await resolver.resolve(symbol("Unit"), scope);
+	await resolver.resolve(symbol("Store"), scope);
 	assert.equal(answers.asked.length, 1, "kept as long as a found answer");
 	const { host: h, replies } = host();
-	await handleSymbolLinks({ type: "omp:terminal-link-symbols", requestId: 3, tokens: ["Unit"] }, h, resolver);
-	assert.deepEqual(replies[0]!.results, [{ token: "Unit", status: "ambiguous", definitions: 3 }]);
+	await handleSymbolLinks({ type: "omp:terminal-link-symbols", requestId: 3, tokens: ["Store"] }, h, resolver);
+	assert.deepEqual(replies[0]!.results, [{ token: "Store", status: "ambiguous", definitions: 3 }]);
 });

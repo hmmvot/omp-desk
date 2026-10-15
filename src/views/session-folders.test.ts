@@ -50,7 +50,7 @@ describe("Sessions folders at the repository root", () => {
 		await make("repo", "tools", ".agents");
 		// A Plastic workspace and a plain folder.
 		await make("plastic", ".plastic");
-		await make("plastic", "Game");
+		await make("plastic", "omp-vscode");
 		await make("loose", "project");
 	});
 
@@ -95,9 +95,9 @@ describe("Sessions folders at the repository root", () => {
 	});
 
 	it("shows a Plastic workspace's Unity project as the workspace root", async () => {
-		const [only] = (await windowOver({ open: [dir("plastic", "Game")] })).list();
+		const [only] = (await windowOver({ open: [dir("plastic", "omp-vscode")] })).list();
 		assert.equal(only!.path, dir("plastic"));
-		assert.deepEqual(only!.openedPaths, [dir("plastic", "Game")]);
+		assert.deepEqual(only!.openedPaths, [dir("plastic", "omp-vscode")]);
 	});
 
 	it("shows a subfolder with agent files of its own at the root too: only the checkout counts", async () => {
@@ -126,7 +126,7 @@ describe("Sessions folders at the repository root", () => {
 	});
 
 	it("shows the opened folder where its window published that sessions stay in it, and the root for a folder of the same window that did not", async () => {
-		const folders = await windowOver({ open: [dir("repo", "Unity"), dir("plastic", "Game")], staying: [dir("repo", "Unity")] });
+		const folders = await windowOver({ open: [dir("repo", "Unity"), dir("plastic", "omp-vscode")], staying: [dir("repo", "Unity")] });
 		const list = folders.list();
 		assert.deepEqual(list.map(folder => folder.path), [dir("repo", "Unity"), dir("plastic")]);
 		assert.equal(list[0]!.openedPaths, undefined);

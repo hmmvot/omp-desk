@@ -23,11 +23,11 @@ describe("session folder", () => {
 	const confined: PathKindProbe = async target => (target.startsWith(temp + path.sep) ? probePathKind(target) : null);
 	const search = () => ({ probe: confined, home: dir("home"), p4config: null });
 
-	/** `<name>/<marker>`, `<name>/omp-vscode/Assets`, `<name>/Game/ProjectSettings/ProjectVersion.txt`: VS Code opens `<name>/Game`. */
+	/** `<name>/<marker>`, `<name>/omp-vscode/Assets`, `<name>/omp-vscode/ProjectSettings/ProjectVersion.txt`: VS Code opens `<name>/omp-vscode`. */
 	async function unity(name: string, marker: (name: string) => Promise<void>): Promise<void> {
 		await marker(name);
-		await make(name, "Game", "Assets");
-		await write([name, "Game", "ProjectSettings", "ProjectVersion.txt"], "m_EditorVersion: 6000.0.1f1");
+		await make(name, "omp-vscode", "Assets");
+		await write([name, "omp-vscode", "ProjectSettings", "ProjectVersion.txt"], "m_EditorVersion: 6000.0.1f1");
 	}
 
 	before(async () => {
@@ -51,15 +51,15 @@ describe("session folder", () => {
 		it(`runs the sessions of a Unity project opened below a ${system} root at the root`, async () => {
 			const name = `unity-${system.replace(/\W+/g, "-")}`;
 			await unity(name, marker);
-			assert.equal(await sessionFolderFor(dir(name, "Game"), true, search()), dir(name));
-			assert.equal(await sessionFolderFor(dir(name, "Game", "Assets"), true, search()), dir(name));
+			assert.equal(await sessionFolderFor(dir(name, "omp-vscode"), true, search()), dir(name));
+			assert.equal(await sessionFolderFor(dir(name, "omp-vscode", "Assets"), true, search()), dir(name));
 			assert.equal(await sessionFolderFor(dir(name), true, search()), dir(name), "the root itself");
 		});
 	}
 
 	it("is the opened folder itself when the setting is off, whatever encloses it", async () => {
 		await unity("off", name => make(name, ".git"));
-		assert.equal(await sessionFolderFor(dir("off", "Game"), false, search()), dir("off", "Game"));
+		assert.equal(await sessionFolderFor(dir("off", "omp-vscode"), false, search()), dir("off", "omp-vscode"));
 	});
 
 	it("is the opened folder itself when no checkout encloses it", async () => {
@@ -119,13 +119,13 @@ describe("session folder", () => {
 		});
 
 		it("notices a repository created after the folder was first resolved", async () => {
-			await make("later", "Game");
+			await make("later", "omp-vscode");
 			const resolver = new SessionFolderResolver(search());
-			await resolver.resolve([dir("later", "Game")]);
-			assert.equal(resolver.lookup(dir("later", "Game")), dir("later", "Game"));
+			await resolver.resolve([dir("later", "omp-vscode")]);
+			assert.equal(resolver.lookup(dir("later", "omp-vscode")), dir("later", "omp-vscode"));
 			await make("later", ".git");
-			assert.equal(await resolver.resolve([dir("later", "Game")]), true);
-			assert.equal(resolver.lookup(dir("later", "Game")), dir("later"));
+			assert.equal(await resolver.resolve([dir("later", "omp-vscode")]), true);
+			assert.equal(resolver.lookup(dir("later", "omp-vscode")), dir("later"));
 		});
 
 		it("settles a superseded call only once the newest call has published, so awaiting it is a readiness barrier", async () => {

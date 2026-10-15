@@ -93,7 +93,7 @@ function bareName(text: string): string {
 	return out.trim();
 }
 
-/** The identifiers of a dotted type path, outermost first: `OmpDesk.Sessions.SessionData<T>` is `["Game", "Sessions", "SessionData"]`. */
+/** The identifiers of a dotted type path, outermost first: `OmpDesk.Sessions.SessionData<T>` is `["OmpDesk", "Sessions", "SessionData"]`. */
 function pathSegments(text: string): string[] {
 	return bareName(text).split(/[.:]+/).map(segment => segment.trim()).filter(segment => segment !== "");
 }
@@ -133,9 +133,9 @@ function trailingGroup(text: string): { head: string; group: string } | null {
  *
  * Most providers give the enclosing path itself (`OmpDesk.Sessions.SessionData<T>`). The C# language server (Roslyn,
  * behind both the C# and C# Dev Kit extensions) gives a localized display text instead: a member's container is
- * `in SessionIndex (project omp-vscode (net8.0))` (`в SessionIndex (проект Game (net8.0))` in a Russian window), a nested type of a
- * partial type `in Outer (Outer.cs - Game (net8.0))`, and a top-level type has only the project or file
- * (`project omp-vscode (net8.0)`, `Unit.cs - Game (net8.0)`), never a namespace. The enclosing type path is the one word
+ * `in SessionIndex (project omp-vscode (net8.0))` (`в SessionIndex (проект omp-vscode (net8.0))` in a Russian window), a nested type of a
+ * partial type `in Outer (Outer.cs - omp-vscode (net8.0))`, and a top-level type has only the project or file
+ * (`project omp-vscode (net8.0)`, `Store.cs - omp-vscode (net8.0)`), never a namespace. The enclosing type path is the one word
  * of the text before its trailing group that is not the localized "in" (its place differs between languages), so
  * every such word is an alternative; the group, which names the project, stays part of the identity so same-named
  * types of two projects are not one symbol.
@@ -197,7 +197,7 @@ function byPosition(a: SymbolEntry, b: SymbolEntry): number {
 	return (a.line > 0 ? 0 : 1) - (b.line > 0 ? 0 : 1) || a.path.toLowerCase().localeCompare(b.path.toLowerCase()) || a.line - b.line || a.column - b.column;
 }
 
-/** The declaration to open for several parts of one symbol: a type's own file (`Session.cs` for `Game`), else the first by path and line. */
+/** The declaration to open for several parts of one symbol: a type's own file (`Desk.cs` for `Desk`), else the first by path and line. */
 function representative(parts: readonly SymbolEntry[]): SymbolEntry {
 	const sorted = [...parts].sort(byPosition);
 	const own = sorted.find(entry => {

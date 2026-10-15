@@ -1051,10 +1051,10 @@ describe("launcher tree", () => {
 	});
 
 	it("spells a lower-case drive letter (VS Code's fsPath) in upper case in the folder row's tooltip, description and accessibility label, as the scope picker does", async () => {
-		const root: LauncherFolder = { ...folder("folder:root", "c:\\Users\\me\\repo", false, { pinned: false, open: true }), openedPaths: ["c:\\Users\\me\\repo\\Game"] };
+		const root: LauncherFolder = { ...folder("folder:root", "c:\\Users\\me\\repo", false, { pinned: false, open: true }), openedPaths: ["c:\\Users\\me\\repo\\omp-vscode"] };
 		const [shown] = await rootsOf(providerFor({ folders: () => [root], entries: () => [], activeTabId: () => null, facts: () => NO_FACTS }));
 		const tip = tooltipText(shown!);
-		assert.ok(tip.includes(`Sessions run at the repository root C:\\Users\\me\\repo, not in the opened "C:\\Users\\me\\repo\\Game".`), tip);
+		assert.ok(tip.includes(`Sessions run at the repository root C:\\Users\\me\\repo, not in the opened "C:\\Users\\me\\repo\\omp-vscode".`), tip);
 		assert.ok(!tip.includes("c:\\"), tip);
 		assert.ok(String(shown!.description).startsWith("C:\\"), String(shown!.description));
 		assert.ok((shown!.accessibilityInformation?.label ?? "").includes(", C:\\Users\\me\\repo,"));

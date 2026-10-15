@@ -37,23 +37,23 @@ test("a folder that is the repository root has nothing above it to lose, whateve
   assert.equal(await ancestorContextDir(path.join(root, "repo"), path.join(root, "nohome")), null);
 });
 
-const unityLayout = [".git/HEAD", ".omp/config.yml", ".omp/AGENTS.md", "omp-vscode/Assets/.keep", "Game/ProjectSettings/ProjectVersion.txt"];
+const unityLayout = [".git/HEAD", ".omp/config.yml", ".omp/AGENTS.md", "omp-vscode/Assets/.keep", "omp-vscode/ProjectSettings/ProjectVersion.txt"];
 
 test("a Unity-like layout: with sessions at the repository root the editors write the root's .omp and lose nothing; with the setting off the first write below it is refused", async () => {
   const root = await tree(unityLayout);
   const home = path.join(root, "nohome");
-  const game = path.join(root, "Game");
-  assert.equal(await sessionFolderFor(game, true, { home }), root);
+  const unityProject = path.join(root, "omp-vscode");
+  assert.equal(await sessionFolderFor(unityProject, true, { home }), root);
   assert.equal(await ancestorContextDir(root, home), null, "on: the project is the root itself, nothing above it is lost");
-  assert.equal(await sessionFolderFor(game, false, { home }), game);
-  assert.equal(await ancestorContextDir(game, home), path.join(root, ".omp"), "off: creating Game/.omp would stop the root's AGENTS.md loading, so the write is refused");
+  assert.equal(await sessionFolderFor(unityProject, false, { home }), unityProject);
+  assert.equal(await ancestorContextDir(unityProject, home), path.join(root, ".omp"), "off: creating omp-vscode/.omp would stop the root's AGENTS.md loading, so the write is refused");
 });
 
 test("the refusal still protects a checkout of another system and a folder in none, because OMP's own walk knows .git only", async () => {
   const mercurial = await tree([".omp/AGENTS.md", "repo/.hg/store/.keep", "repo/omp-vscode/Assets/.keep"]);
   const home = path.join(mercurial, "nohome");
   const repo = path.join(mercurial, "repo");
-  assert.equal(await sessionFolderFor(path.join(repo, "Game"), true, { home }), repo, "sessions and the editors use the Mercurial root");
+  assert.equal(await sessionFolderFor(path.join(repo, "omp-vscode"), true, { home }), repo, "sessions and the editors use the Mercurial root");
   assert.equal(await ancestorContextDir(repo, home), path.join(mercurial, ".omp"), "OMP walks above a root without .git to the .omp there: writing repo/.omp would hide its AGENTS.md");
   const loose = await tree([".omp/RULES.md", "project/file.txt"]);
   assert.equal(await sessionFolderFor(path.join(loose, "project"), true, { home: path.join(loose, "nohome") }), path.join(loose, "project"));

@@ -162,7 +162,7 @@ test("pick-scope moves the editor to a folder, to global, or reports a scope tha
   assert.equal(r.controller.folder, "C:/other");
   assert.equal(results(r).at(-1)!.message, "Showing the project scope of C:/other.");
   // the host may resolve the picked folder to the folder sessions run in for it (the checkout root); the editor then shows that one
-  r.ports.pick = "C:/repo/Game"; r.ports.resolveTo = "C:/repo";
+  r.ports.pick = "C:/repo/omp-vscode"; r.ports.resolveTo = "C:/repo";
   await r.controller.handle({ action: "pick-scope", requestId: "r5" });
   assert.equal(r.controller.folder, "C:/repo");
   assert.equal(results(r).at(-1)!.message, "Showing the project scope of C:/repo.");

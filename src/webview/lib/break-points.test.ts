@@ -19,9 +19,9 @@ test("no break between two slashes, after a trailing separator or in a short seg
 });
 
 test("a segment longer than the limit also breaks after . _ and -, never between two separators", () => {
-	const segment = "TranscriptWrapSpecialist_Case03_Feature-m.json";
+	const segment = "ChatTranscriptRenderer_Layout03_Feature-m.json";
 	assert.ok(segment.length > LONG_SEGMENT);
-	assert.deepEqual(breakPieces(`dir/${segment}`), ["dir/", "TranscriptWrapSpecialist_", "Case03_", "Feature-", "m.", "json"]);
+	assert.deepEqual(breakPieces(`dir/${segment}`), ["dir/", "ChatTranscriptRenderer_", "Layout03_", "Feature-", "m.", "json"]);
 	const long = "a".repeat(LONG_SEGMENT);
 	assert.deepEqual(breakPieces(`${long}__b`), [`${long}__`, "b"]);
 	assert.deepEqual(breakPieces(`${long}_._b`), [`${long}_._`, "b"]);
