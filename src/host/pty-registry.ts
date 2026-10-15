@@ -192,6 +192,9 @@ export type PtyRecordLookup =
 	| { readonly kind: "ok"; readonly record: PtyBrokerRecord }
 	| { readonly kind: "invalid"; readonly detail: string };
 
+/** The largest broker record this window reads: a real one is under a kilobyte, and the read is synchronous on the host's thread. A larger file is invalid. */
+const PTY_RECORD_MAX_BYTES = 64 * 1024;
+
 /**
  * Read one slot's record. A malformed record is reported, never treated as absent. On a verified local NTFS volume the read is
  * one synchronous step (ADR-0076, decision 15): the restore reads one record per tab, and four asynchronous pool jobs, each
@@ -201,7 +204,7 @@ export async function readPtyRecord(storageDir: string, slot: string): Promise<P
 	const path = ptyRecordPath(storageDir, slot);
 	let text: string;
 	try {
-		text = await localFs(path).readFile(path, "utf8");
+		text = await localFs(path).readSmallFile(path, PTY_RECORD_MAX_BYTES);
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") return { kind: "none" };
 		return { kind: "invalid", detail: `the broker record could not be read (${errorCode(error)})` };

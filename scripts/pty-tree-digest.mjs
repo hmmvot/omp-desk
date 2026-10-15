@@ -12,7 +12,7 @@ import path from "node:path";
 export const PTY_TREE_DIGEST_FILE = "out/pty-tree.json";
 
 /** Marks the digest layout, so a later change of it cannot collide with a record of this one. */
-const FORMAT = "omp-runtime-tree/v1";
+const FORMAT = "omp-runtime-tree/v2";
 
 /** Every file of the tree as `{ relativePath, sourcePath }`, exactly as `ptyRuntimeSources` lists them. */
 async function treeSources(root) {
@@ -33,7 +33,8 @@ async function treeSources(root) {
 
 /** The digest of the tree under `root`, and how many files it covers. */
 export async function computePtyTreeDigest(root = ".") {
-  const sources = (await treeSources(root)).sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+  // Code-unit order, as `hashRuntimeTree` sorts: the record is built on one machine and hashed on another, whose locale may order names differently.
+  const sources = (await treeSources(root)).sort((left, right) => (left.relativePath < right.relativePath ? -1 : left.relativePath > right.relativePath ? 1 : 0));
   let manifest = "";
   for (const source of sources) {
     const sha256 = createHash("sha256").update(await fs.readFile(source.sourcePath)).digest("hex");

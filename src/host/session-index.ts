@@ -13,7 +13,8 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { useSynchronousLocalFsFor, localFs } from "./local-fs.ts";
+import { lstatSync } from "node:fs";
+import { stat } from "node:fs/promises";
 import { synchronousLocalPaths } from "./private-storage.ts";
 import * as path from "node:path";
 import type { Logger } from "../shared/logger.ts";
@@ -3552,14 +3553,21 @@ function resolveWorkspaceDirectoryInput(value: string, caller: string): string {
 }
 
 /**
- * Whether `file` is a regular file. The folder of a recorded OMP session file is proved local like Desk's own storage (ADR-0076,
- * decision 15), once per folder, and the `stat` is then one synchronous step: the restore asks once per tab before anything else,
- * and an asynchronous `stat` came back after 0.6 s in every tab of a reload that kept the host's event loop busy.
+ * Whether `file` is a regular file. When every folder on the way to a recorded OMP session file is a plain directory of one
+ * local fixed NTFS volume (`synchronousLocalPaths`, asked again on every call, so a folder replaced by a link is noticed by the
+ * next one), the check is one synchronous `lstat` (ADR-0076, decision 15): the restore asks once per tab before anything else,
+ * and an asynchronous `stat` came back after 0.6 s in every tab of a reload that kept the host's event loop busy. Nothing is
+ * remembered about the folder and no other call of this process becomes synchronous because of it. A session file directly in a
+ * drive root, one that is itself a link, and every other volume keep the asynchronous `stat`.
  */
 async function fileExists(file: string): Promise<boolean> {
 	try {
-		await useSynchronousLocalFsFor(path.dirname(file), synchronousLocalPaths);
-		return (await localFs(file).stat(file)).isFile();
+		if (path.dirname(file) !== path.parse(file).root && (await synchronousLocalPaths([file]))) {
+			const stats = lstatSync(file, { throwIfNoEntry: false });
+			if (stats === undefined) return false;
+			if (!stats.isSymbolicLink()) return stats.isFile();
+		}
+		return (await stat(file)).isFile();
 	} catch {
 		return false;
 	}

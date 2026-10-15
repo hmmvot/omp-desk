@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -38,6 +39,29 @@ describe("the build's record of the packaged tree digest", () => {
     const computed = await computePtyTreeDigest(root);
     assert.equal(computed.files, 6, "the source map is not part of the tree");
     assert.equal(computed.digest, await ptyPackagedTreeDigest(root));
+  });
+
+  it("orders names by code unit, whatever the host's locale: the file list is sorted as bytes and the digest is the one that order gives", async () => {
+    // Capital letters sort before lower-case ones by code unit and after them in every locale `localeCompare` knows for Latin text,
+    // and `th`, `uz`, `om` and `haw` reorder punctuation and digits too, so a locale-aware sort cannot give this digest on all hosts.
+    const files = {
+      "out/pty/pty-broker.js": "// entry",
+      "out/pty/pty-owner-watch.ps1": "# owner watch",
+      "out/pty/a.js": "a",
+      "out/pty/B.js": "b",
+      "out/pty/node_modules/_x/index.js": "x",
+      "out/pty/node_modules/-y/index.js": "y",
+      "out/pty/node_modules/Z/1.js": "1",
+      "out/pty/node_modules/Z/a.js": "2",
+    };
+    const root = await tree(files);
+    const names = ["B.js", "a.js", "node_modules/-y/index.js", "node_modules/Z/1.js", "node_modules/Z/a.js", "node_modules/_x/index.js", "pty-broker.js", "pty-owner-watch.ps1"];
+    let manifest = "";
+    for (const name of names) manifest += `${name}\0${createHash("sha256").update(files[`out/pty/${name}`]).digest("hex")}\n`;
+    const expected = createHash("sha256").update(`omp-runtime-tree/v2\n${manifest}`).digest("hex");
+    assert.equal((await computePtyTreeDigest(root)).digest, expected);
+    assert.equal(await ptyPackagedTreeDigest(root), expected);
+    assert.ok(names.indexOf("B.js") < names.indexOf("a.js"), "capitals first, as bytes order them");
   });
 
   it("changes with any file of the tree and with the native module, and not with a source map", async () => {
@@ -92,7 +116,7 @@ describe("the build's record of the packaged tree digest", () => {
   });
 
   it("is ignored when it is not a digest of this layout", async () => {
-    const root = await tree({ ...COMPLETE, "out/pty-tree.json": JSON.stringify({ format: "omp-runtime-tree/v1", digest: "not-a-digest", files: 1 }) });
+    const root = await tree({ ...COMPLETE, "out/pty-tree.json": JSON.stringify({ format: "omp-runtime-tree/v2", digest: "not-a-digest", files: 1 }) });
     assert.equal(await ptyRecordedTreeDigest(root), null);
     await fs.writeFile(path.join(root, "out/pty-tree.json"), JSON.stringify({ format: "omp-runtime-tree/v0", digest: "a".repeat(64) }));
     assert.equal(await ptyRecordedTreeDigest(root), null);

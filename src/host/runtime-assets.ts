@@ -366,7 +366,9 @@ export async function hashRuntimeTree(
 	readonly digests: ReadonlyArray<{ readonly relativePath: string; readonly sourcePath: string; readonly sha256: string }>;
 	readonly digest: string;
 }> {
-	const ordered = [...sources].sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+	// Code-unit order, never the host's locale: the build records this digest on another machine (`scripts/pty-tree-digest.mjs`), and
+	// `localeCompare` orders some names differently in `th`, `uz`, `om` and `haw` than in `en` (ADR-0076, decision 14).
+	const ordered = [...sources].sort((left, right) => (left.relativePath < right.relativePath ? -1 : left.relativePath > right.relativePath ? 1 : 0));
 	const cleaned = ordered.map(source => {
 		const clean = source.relativePath.replace(/\\/g, "/");
 		if (clean.length === 0 || clean.startsWith("/") || clean.split("/").some(part => part === "" || part === "." || part === "..")) {
@@ -394,7 +396,7 @@ export async function hashRuntimeTree(
 	}
 	// A format marker is part of the digest so a later layout change cannot collide
 	// with an older tree that happened to hold the same files.
-	const digest = createHash("sha256").update(`omp-runtime-tree/v1\n${manifest}`).digest("hex");
+	const digest = createHash("sha256").update(`omp-runtime-tree/v2\n${manifest}`).digest("hex");
 	return { digests, digest };
 }
 

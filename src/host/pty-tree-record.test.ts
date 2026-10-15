@@ -25,7 +25,7 @@ async function extension(record: string | null): Promise<{ readonly root: string
 		await writeFile(path.join(root, name), text, "utf8");
 	}
 	const hashed = await ptyPackagedTreeDigest(root);
-	if (record !== null) await writeFile(path.join(root, ...PTY_TREE_DIGEST_FILE.split("/")), JSON.stringify({ format: "omp-runtime-tree/v1", digest: record, files: 3 }), "utf8");
+	if (record !== null) await writeFile(path.join(root, ...PTY_TREE_DIGEST_FILE.split("/")), JSON.stringify({ format: "omp-runtime-tree/v2", digest: record, files: 3 }), "utf8");
 	return { root, hashed };
 }
 
@@ -52,7 +52,7 @@ describe("the broker tree digest an attach compares", { skip: process.platform !
 
 	it("is checked against the installed tree later: a matching record stays", async () => {
 		const { root, hashed } = await extension(null);
-		await writeFile(path.join(root, ...PTY_TREE_DIGEST_FILE.split("/")), JSON.stringify({ format: "omp-runtime-tree/v1", digest: hashed, files: 3 }), "utf8");
+		await writeFile(path.join(root, ...PTY_TREE_DIGEST_FILE.split("/")), JSON.stringify({ format: "omp-runtime-tree/v2", digest: hashed, files: 3 }), "utf8");
 		const lines: LoggedLine[] = [];
 		const client = clientOver(root, lines);
 		assert.equal((await client.attachIdentity()).treeDigest, hashed);
@@ -71,5 +71,23 @@ describe("the broker tree digest an attach compares", { skip: process.platform !
 		assert.equal(lines[0]?.level, "warn");
 		assert.match(lines[0]?.message ?? "", /installed broker tree hashes to .* not to the .* the build recorded/);
 		assert.equal(await client.verifyPackagedTree(), "not-recorded", "a corrected identity is not checked twice");
+	});
+
+	it("is not taken from a record outside a packaged install: the tree is hashed", async () => {
+		const { root, hashed } = await extension(RECORDED);
+		const client = new PtyBrokerClient({ storageDir: path.join(root, "storage"), extensionRoot: root, useBuildRecord: false });
+		assert.equal((await client.attachIdentity()).treeDigest, hashed, "the record is not read");
+		assert.equal(await client.verifyPackagedTree(), "not-recorded");
+	});
+
+	it("stays unchecked, with a warning, when the installed tree cannot be hashed", async () => {
+		const { root } = await extension(RECORDED);
+		const lines: LoggedLine[] = [];
+		const client = clientOver(root, lines);
+		assert.equal((await client.attachIdentity()).treeDigest, RECORDED);
+		await rm(path.join(root, "out", "pty"), { recursive: true, force: true });
+		assert.equal(await client.verifyPackagedTree(), "unchecked");
+		assert.match(lines[0]?.message ?? "", /could not be hashed to check the build's record/);
+		assert.equal((await client.attachIdentity()).treeDigest, RECORDED, "the record stays in use as it was");
 	});
 });

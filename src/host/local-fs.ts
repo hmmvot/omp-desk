@@ -33,6 +33,8 @@ export interface LocalFileHandle {
 export interface LocalFs {
 	mkdir(directory: string, options: { readonly recursive?: boolean; readonly mode?: number }): Promise<unknown>;
 	readFile(file: string, encoding: "utf8"): Promise<string>;
+	/** {@link readFile} of a file that must be at most `maxBytes`: the size is read from the open file first, and a larger one fails with the code `EFBIG` before it is read. */
+	readSmallFile(file: string, maxBytes: number): Promise<string>;
 	rm(target: string, options: { readonly force?: boolean; readonly recursive?: boolean }): Promise<void>;
 	rename(from: string, to: string): Promise<void>;
 	link(existing: string, created: string): Promise<void>;
@@ -40,9 +42,25 @@ export interface LocalFs {
 	open(file: string, flags: string, mode?: number): Promise<LocalFileHandle>;
 }
 
+/** The error of a bounded read of a file larger than its bound: the code `EFBIG`, as the system's own "file too large". */
+function assertSmall(file: string, size: number, maxBytes: number): void {
+	if (size > maxBytes) throw Object.assign(new Error(`${file} is ${size} bytes, over the ${maxBytes} this read accepts`), { code: "EFBIG" });
+}
+
 const asynchronousFs: LocalFs = {
 	mkdir: (directory, options) => fsp.mkdir(directory, options),
 	readFile: (file, encoding) => fsp.readFile(file, encoding),
+	readSmallFile: async (file, maxBytes) => {
+		const handle = await fsp.open(file, "r");
+		try {
+			assertSmall(file, (await handle.stat()).size, maxBytes);
+			const text = await handle.readFile("utf8");
+			assertSmall(file, Buffer.byteLength(text, "utf8"), maxBytes);
+			return text;
+		} finally {
+			await handle.close();
+		}
+	},
 	rm: (target, options) => fsp.rm(target, options),
 	rename: (from, to) => fsp.rename(from, to),
 	link: (existing, created) => fsp.link(existing, created),
@@ -71,6 +89,17 @@ function synchronousHandle(descriptor: number): LocalFileHandle {
 const synchronousFs: LocalFs = {
 	mkdir: async (directory, options) => fsSync.mkdirSync(directory, options),
 	readFile: async (file, encoding) => fsSync.readFileSync(file, encoding),
+	readSmallFile: async (file, maxBytes) => {
+		const descriptor = fsSync.openSync(file, "r");
+		try {
+			assertSmall(file, fsSync.fstatSync(descriptor).size, maxBytes);
+			const text = fsSync.readFileSync(descriptor, "utf8");
+			assertSmall(file, Buffer.byteLength(text, "utf8"), maxBytes);
+			return text;
+		} finally {
+			fsSync.closeSync(descriptor);
+		}
+	},
 	rm: async (target, options) => { fsSync.rmSync(target, options); },
 	rename: async (from, to) => { fsSync.renameSync(from, to); },
 	link: async (existing, created) => { fsSync.linkSync(existing, created); },
@@ -95,36 +124,17 @@ export function markSynchronousLocalRoots(roots: readonly string[]): () => void 
 /**
  * Serve every file call below `roots` synchronously from now on when `verdict` says they may be. The caller passes
  * `synchronousLocalPaths`, which proves them local fixed NTFS paths reached through plain directories. Returns the
- * verdict; a `false` leaves every call asynchronous.
+ * verdict; a `false` leaves every call asynchronous. Only Desk's own directories belong here, because the match is by prefix
+ * and covers everything below them: a root that is a drive root or a UNC share root is refused without asking.
  */
 export async function useSynchronousLocalFs(
 	roots: readonly string[],
 	verdict: (targets: readonly string[]) => Promise<boolean>,
 ): Promise<boolean> {
+	if (roots.some(root => keyOf(root) === path.parse(path.resolve(root)).root.toLowerCase())) return false;
 	if (!(await verdict(roots))) return false;
 	markSynchronousLocalRoots(roots);
 	return true;
-}
-
-/** The verdict of each directory {@link useSynchronousLocalFsFor} was asked about, by lower-cased resolved path. */
-const directoryVerdicts = new Map<string, Promise<boolean>>();
-
-/**
- * {@link useSynchronousLocalFs} for one directory Desk does not own and cannot name at activation (the folder of a recorded OMP
- * session file): asked at the first call that needs it, remembered per directory, so every later call on it (the next tab of the
- * same project) is answered from the map. A directory with a `false` verdict stays on the asynchronous calls.
- */
-export function useSynchronousLocalFsFor(
-	directory: string,
-	verdict: (targets: readonly string[]) => Promise<boolean>,
-): Promise<boolean> {
-	const key = keyOf(directory);
-	let known = directoryVerdicts.get(key);
-	if (known === undefined) {
-		known = useSynchronousLocalFs([directory], verdict).catch(() => false);
-		directoryVerdicts.set(key, known);
-	}
-	return known;
 }
 
 /** The file operations to use for `target`: synchronous below a verified root, asynchronous anywhere else. */

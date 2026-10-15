@@ -99,8 +99,9 @@ export interface Win32Native {
 	 */
 	openPipeClient(name: string): PipeClientOpening;
 	/**
-	 * The kind of drive and the file system of the volume a root path (`C:\`) is on: `GetDriveTypeW` (3 is a fixed disk, 4 a
-	 * network drive) and `GetVolumeInformationW`. Synchronous; a volume that cannot be read has no file system name.
+	 * The kind of drive and, for a fixed disk only, the file system of the volume a root path (`C:\`) is on: `GetDriveTypeW` (3 is a
+	 * fixed disk, 4 a network drive), then `GetVolumeInformationW` (never on another drive type, where it can wait on a server or a
+	 * device). Synchronous; a volume that cannot be read has no file system name.
 	 */
 	volumeOf(root: string): VolumeKind;
 	/**
@@ -304,6 +305,8 @@ function bindProcess(koffi: Koffi): Pick<Win32Native, "processCreation" | "proce
 }
 
 const VOLUME_NAME_CHARS = 64;
+/** `GetDriveTypeW`'s `DRIVE_FIXED`. */
+const DRIVE_FIXED_TYPE = 3;
 
 function bindVolume(koffi: Koffi): Pick<Win32Native, "volumeOf"> {
 	const kernel32 = koffi.load("kernel32.dll");
@@ -314,6 +317,9 @@ function bindVolume(koffi: Koffi): Pick<Win32Native, "volumeOf"> {
 	return {
 		volumeOf(root) {
 			const driveType = getDriveType(root);
+			// `GetVolumeInformationW` on a network or removable root can wait for a server or a device on the calling thread, so it is
+			// asked of a fixed disk only (ADR-0076, decision 15); every other drive type has no file system name.
+			if (driveType !== DRIVE_FIXED_TYPE) return { driveType, fileSystem: null };
 			const name = Buffer.alloc(VOLUME_NAME_CHARS * 2);
 			if (!getVolumeInformation(root, null, 0, null, null, null, name, VOLUME_NAME_CHARS)) return { driveType, fileSystem: null };
 			let end = 0;

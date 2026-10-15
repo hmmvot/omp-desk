@@ -1584,6 +1584,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     extensionRoot: context.extensionUri.fsPath,
     log,
     chatBrokerRuntime: { setting: configuredChatBrokerRuntime },
+    useBuildRecord: context.extensionMode === EXTENSION_MODE_PRODUCTION,
   });
   const stateAccessStartedAt = Date.now();
   void s.ptyClient.stateAccess().then(

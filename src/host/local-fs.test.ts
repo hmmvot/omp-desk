@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, it } from "node:test";
-import { localFs, markSynchronousLocalRoots, useSynchronousLocalFs, useSynchronousLocalFsFor } from "./local-fs.ts";
+import { localFs, markSynchronousLocalRoots, useSynchronousLocalFs } from "./local-fs.ts";
 import { ptyRecordPath, ptyStateDirectory, readPtyRecord } from "./pty-registry.ts";
 import { ptyRecordedTreeDigest, ptyRecordedTreeDigestFile } from "./pty-runtime.ts";
 import { catalogPaths, readCatalogDocument, transactCatalog } from "./profile-catalog.ts";
@@ -149,7 +149,7 @@ describe("synchronous local file calls", () => {
 		await mkdir(ptyStateDirectory(storage), { recursive: true });
 		for (const root of [extension, unbuilt]) await mkdir(path.dirname(ptyRecordedTreeDigestFile(root)), { recursive: true });
 		await writeFile(ptyRecordPath(storage, "tab:bad"), "{ this is not json", "utf8");
-		await writeFile(ptyRecordedTreeDigestFile(extension), `${JSON.stringify({ format: "omp-runtime-tree/v1", digest: "ab".repeat(32), files: 3 })}\n`, "utf8");
+		await writeFile(ptyRecordedTreeDigestFile(extension), `${JSON.stringify({ format: "omp-runtime-tree/v2", digest: "ab".repeat(32), files: 3 })}\n`, "utf8");
 		const asynchronous = [await readPtyRecord(storage, "tab:bad"), await readPtyRecord(storage, "tab:none"), await ptyRecordedTreeDigest(extension), await ptyRecordedTreeDigest(unbuilt)];
 		assert.deepEqual(asynchronous.map(answer => (typeof answer === "object" && answer !== null ? answer.kind : answer)), ["invalid", "none", "ab".repeat(32), null]);
 
@@ -162,27 +162,35 @@ describe("synchronous local file calls", () => {
 		assert.deepEqual(synchronous, asynchronous);
 	});
 
-	it("ask once per directory whether a file there may be reached synchronously, and keep the answer", async () => {
-		const yes = await tempDir();
-		const no = await tempDir();
-		await writeFile(path.join(yes, "a.jsonl"), "a", "utf8");
-		await writeFile(path.join(yes, "b.jsonl"), "b", "utf8");
-		await writeFile(path.join(no, "c.jsonl"), "c", "utf8");
+	it("refuse a broker record over 64 KiB and a digest file over 4 KiB before reading them, the same way in both call styles", async () => {
+		const storage = await tempDir();
+		const extension = await tempDir();
+		await mkdir(ptyStateDirectory(storage), { recursive: true });
+		await mkdir(path.dirname(ptyRecordedTreeDigestFile(extension)), { recursive: true });
+		await writeFile(ptyRecordPath(storage, "tab:big"), JSON.stringify({ padding: "x".repeat(64 * 1024) }), "utf8");
+		await writeFile(ptyRecordedTreeDigestFile(extension), JSON.stringify({ format: "omp-runtime-tree/v2", digest: "ab".repeat(32), padding: "x".repeat(4 * 1024) }), "utf8");
+		const answer = async () => [await readPtyRecord(storage, "tab:big"), await ptyRecordedTreeDigest(extension)];
+		const asynchronous = await answer();
+		assert.match(asynchronous[0] !== null && typeof asynchronous[0] === "object" && asynchronous[0].kind === "invalid" ? asynchronous[0].detail : "", /EFBIG/);
+		assert.equal(asynchronous[1], null, "a digest file over its bound is no record");
+		unmark.push(markSynchronousLocalRoots([ptyStateDirectory(storage), path.dirname(ptyRecordedTreeDigestFile(extension))]));
+		assert.deepEqual(await answer(), asynchronous);
+		const io = localFs(ptyStateDirectory(storage));
+		assert.equal(await io.readSmallFile(ptyRecordPath(storage, "tab:big"), 64 * 1024 + 64), JSON.stringify({ padding: "x".repeat(64 * 1024) }), "a file within the bound reads whole");
+		await assert.rejects(io.readSmallFile(path.join(ptyStateDirectory(storage), "missing"), 10), { code: "ENOENT" });
+	});
+
+	it("never takes a drive root or a share root as a synchronous root: the match is by prefix and would cover the whole volume", async () => {
 		const asked: string[] = [];
-		const verdict = async (targets: readonly string[]): Promise<boolean> => {
-			asked.push(...targets);
-			return targets[0] === yes;
-		};
-		const asynchronous = localFs(yes);
-		assert.equal(await useSynchronousLocalFsFor(yes, verdict), true);
-		unmark.push(markSynchronousLocalRoots([yes]));
-		assert.equal(await useSynchronousLocalFsFor(yes, verdict), true);
-		assert.equal(await useSynchronousLocalFsFor(no, verdict), false);
-		assert.equal(await useSynchronousLocalFsFor(no, verdict), false);
-		assert.deepEqual(asked, [yes, no], "each directory was judged once");
-		assert.notEqual(localFs(path.join(yes, "a.jsonl")), asynchronous);
-		assert.equal(localFs(path.join(no, "c.jsonl")), asynchronous, "a directory judged no keeps the asynchronous calls");
-		assert.equal(await useSynchronousLocalFsFor(yes, async () => { throw new Error("native module failed"); }), true, "the first answer stays");
-		assert.equal(await useSynchronousLocalFsFor(path.join(yes, "sub"), async () => { throw new Error("native module failed"); }), false, "a verdict that fails is no");
+		const yes = async (targets: readonly string[]): Promise<boolean> => { asked.push(...targets); return true; };
+		assert.equal(await useSynchronousLocalFs([path.parse(tmpdir()).root], yes), false);
+		assert.equal(await useSynchronousLocalFs(["\\\\server\\share\\"], yes), false);
+		assert.deepEqual(asked, [], "refused without asking");
+		const before = localFs(path.join(path.parse(tmpdir()).root, "x"));
+		const dir = await tempDir();
+		assert.equal(await useSynchronousLocalFs([dir], yes), true);
+		unmark.push(markSynchronousLocalRoots([dir]));
+		assert.notEqual(localFs(path.join(dir, "x")), before);
+		assert.equal(localFs(path.join(path.parse(tmpdir()).root, "x")), before, "the drive root itself stayed asynchronous");
 	});
 });

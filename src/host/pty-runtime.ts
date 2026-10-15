@@ -454,7 +454,10 @@ export async function ptyPackagedTreeDigest(extensionRoot: string, options: { re
 export const PTY_TREE_DIGEST_FILE = "out/pty-tree.json";
 
 /** The layout marker of a recorded digest, the one `hashRuntimeTree` puts in the digest itself. */
-const PTY_TREE_DIGEST_FORMAT = "omp-runtime-tree/v1";
+const PTY_TREE_DIGEST_FORMAT = "omp-runtime-tree/v2";
+
+/** The largest digest record this window reads (a real one is about 100 bytes); a larger file is no record, and the tree is hashed. */
+const PTY_TREE_DIGEST_MAX_BYTES = 4 * 1024;
 
 /** The file of {@link ptyRecordedTreeDigest}. */
 export function ptyRecordedTreeDigestFile(extensionRoot: string): string {
@@ -468,7 +471,7 @@ export function ptyRecordedTreeDigestFile(extensionRoot: string): string {
 export async function ptyRecordedTreeDigest(extensionRoot: string): Promise<string | null> {
 	try {
 		const file = ptyRecordedTreeDigestFile(extensionRoot);
-		const parsed: unknown = JSON.parse(await localFs(file).readFile(file, "utf8"));
+		const parsed: unknown = JSON.parse(await localFs(file).readSmallFile(file, PTY_TREE_DIGEST_MAX_BYTES));
 		if (typeof parsed !== "object" || parsed === null || !("format" in parsed) || !("digest" in parsed)) return null;
 		return parsed.format === PTY_TREE_DIGEST_FORMAT && isPtyDigest(parsed.digest) ? parsed.digest : null;
 	} catch {

@@ -178,6 +178,12 @@ export interface PtyBrokerClientOptions {
 	readonly storageDir: string;
 	/** Extension root, so the packaged `out/pty` tree can be found. */
 	readonly extensionRoot: string;
+	/**
+	 * Whether the digest the build recorded next to the tree may stand for this build's until the installed tree has been hashed
+	 * (ADR-0076, decision 14). Default true; the extension passes false outside a packaged install (a development host, a test
+	 * host), where `out/` is rebuilt in place and a record can outlive the bytes it described.
+	 */
+	readonly useBuildRecord?: boolean;
 	/** Node binary for the broker; defaults to the extension host's own executable. */
 	readonly nodePath?: string;
 	/** Extra environment for the broker process. */
@@ -431,10 +437,11 @@ export class PtyBrokerClient {
 	}
 
 	/**
-	 * What an attach needs from this build's runtime when the broker can vouch for itself: the
-	 * runtime version and the digest of the packaged tree, hashed in place. Nothing is staged,
-	 * so a restore's first attach does not wait on the runtime's staging and access verification;
-	 * a kernel reading ({@link identityReading}) needs only the process's native module. Only success is cached.
+	 * What an attach needs from this build's runtime when the broker can vouch for itself: the runtime version and the digest of
+	 * the packaged tree. That is the proof's own digest once the runtime has proved itself (it takes precedence over everything
+	 * below), else the build's record in a packaged install, else the tree hashed in place. Nothing is staged, so a restore's first
+	 * attach does not wait on the runtime's staging and access verification; a kernel reading ({@link identityReading}) needs only
+	 * the process's native module. Only success is cached.
 	 */
 	async attachIdentity(): Promise<PtyAttachIdentity> {
 		const proven = this.proof.provenAnswer();
@@ -467,7 +474,7 @@ export class PtyBrokerClient {
 	 */
 	private async packagedIdentity(): Promise<PtyAttachIdentity> {
 		try {
-			const recorded = await ptyRecordedTreeDigest(this.options.extensionRoot);
+			const recorded = this.options.useBuildRecord === false ? null : await ptyRecordedTreeDigest(this.options.extensionRoot);
 			if (recorded !== null) {
 				this.identityFromRecord = true;
 				return { ready: true, reason: null, runtimeVersion: PTY_RUNTIME_VERSION, treeDigest: recorded };
@@ -491,15 +498,16 @@ export class PtyBrokerClient {
 	 * does not describe it) is logged, and the hash replaces the record's digest for every later attach, which is the identity
 	 * this window used before the record existed. Does nothing when the identity already came from hashing.
 	 */
-	async verifyPackagedTree(): Promise<"verified" | "corrected" | "not-recorded"> {
+	async verifyPackagedTree(): Promise<"verified" | "corrected" | "unchecked" | "not-recorded"> {
 		const known = this.identityPromise === null ? null : await this.identityPromise;
 		if (known === null || !known.ready || !this.identityFromRecord) return "not-recorded";
 		let hashed: string;
 		try {
 			hashed = await ptyPackagedTreeDigest(this.options.extensionRoot, { concurrency: 2 });
 		} catch (error) {
+			// The tree could not be read: the record is neither confirmed nor refuted, and stays in use as it was.
 			this.options.log?.warn(`the packaged broker tree could not be hashed to check the build's record of its digest: ${messageOf(error)}`);
-			return "verified";
+			return "unchecked";
 		}
 		if (hashed === known.treeDigest) return "verified";
 		this.options.log?.warn(

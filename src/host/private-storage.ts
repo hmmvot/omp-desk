@@ -271,14 +271,24 @@ export async function readVerifiedStorageSecurity(paths: readonly string[]): Pro
 
 const localVolumes = new WeakMap<Win32Native, Map<string, boolean>>();
 
-/** Whether `target` is on a local fixed NTFS volume, by the volume of its root, remembered for the module's life. */
+/** A drive-letter root such as `c:\`: the only kind {@link onLocalFixedNtfs} asks Windows about. */
+const DRIVE_LETTER_ROOT = /^[a-z]:\\$/;
+
+/**
+ * Whether `target` is on a local fixed NTFS volume, by the volume of its root, remembered per root for the module's life. A UNC
+ * path (`\\server\share\`), an extended or device path (`\\?\`, `\\?\UNC\`, `\\.\`) and anything else that is not a drive-letter
+ * root is refused by its spelling, before any native call: `GetVolumeInformationW` on such a root can wait on a server or a
+ * device on the host's one thread (ADR-0076, decision 15). A drive letter that is a network mapping is refused by its drive type,
+ * which Windows answers from its own table.
+ */
 export function onLocalFixedNtfs(native: Win32Native, target: string): boolean {
 	const root = path.parse(target).root.toLowerCase();
+	if (!DRIVE_LETTER_ROOT.test(root)) return false;
 	let known = localVolumes.get(native);
 	if (known === undefined) localVolumes.set(native, known = new Map());
 	let local = known.get(root);
 	if (local === undefined) {
-		const volume = root === "" ? { driveType: 0, fileSystem: null } : native.volumeOf(root);
+		const volume = native.volumeOf(root);
 		known.set(root, local = volume.driveType === 3 && volume.fileSystem === "NTFS");
 	}
 	return local;
@@ -613,12 +623,14 @@ async function ensureDirectories(layout: PrivateStorageLayout, io: StorageFs = a
 }
 
 /**
- * Whether a verification of these paths may use synchronous file system calls (ADR-0076, decision 12): on Windows with the native
- * module, when every path is on a local fixed NTFS volume and every ancestor of every path is an existing, plain directory,
- * checked outermost first with `lstat` (which never follows the component it asks about). Each step then reaches only
- * objects that are already known to be local, so no call can wait on a network or a domain controller; the first ancestor that is
- * missing, a link, or not local ends the question, and the verification takes the asynchronous path, which reports the refusal.
- * A path that does not exist yet is fine: its parents are what the calls reach.
+ * Whether a verification of these paths may use synchronous file system calls (ADR-0076, decisions 12 and 15): on Windows with the
+ * native module, when every path is on a local fixed NTFS volume and every ancestor of every path is an existing, plain directory
+ * on that same volume, checked outermost first with `lstat` (which never follows the component it asks about) and by the
+ * volume serial (`dev`) of the drive root, so a folder that has another volume mounted on it is not walked. Each step then reaches
+ * only objects that are already known to be local, so no call can wait on a network or a domain controller; the first ancestor that
+ * is missing, a link, or not local ends the question, and the verification takes the asynchronous path, which reports the refusal.
+ * A path that does not exist yet is fine: its parents are what the calls reach. Only the volume answer per root is remembered;
+ * the walk is made again on every call, so a folder replaced by a link is noticed by the next one.
  */
 export async function synchronousLocalPaths(targets: readonly string[], platform: string = process.platform): Promise<boolean> {
 	if (platform !== "win32") return false;
@@ -626,13 +638,21 @@ export async function synchronousLocalPaths(targets: readonly string[], platform
 	if (native === null) return false;
 	try {
 		const known = new Set<string>();
+		const volumes = new Map<string, bigint>();
 		for (const target of targets) {
 			if (!onLocalFixedNtfs(native, target)) return false;
+			const root = path.parse(path.resolve(target)).root.toLowerCase();
+			let serial = volumes.get(root);
+			if (serial === undefined) {
+				const rootStats = fsSync.lstatSync(root, { bigint: true, throwIfNoEntry: false });
+				if (rootStats === undefined) return false;
+				volumes.set(root, serial = rootStats.dev);
+			}
 			for (const directory of [...ancestorComponents(target)].reverse()) {
 				const key = directory.toLowerCase();
 				if (known.has(key)) continue;
-				const stats = fsSync.lstatSync(directory, { throwIfNoEntry: false });
-				if (stats === undefined || stats.isSymbolicLink() || !stats.isDirectory()) return false;
+				const stats = fsSync.lstatSync(directory, { bigint: true, throwIfNoEntry: false });
+				if (stats === undefined || stats.isSymbolicLink() || !stats.isDirectory() || stats.dev !== serial) return false;
 				known.add(key);
 			}
 		}

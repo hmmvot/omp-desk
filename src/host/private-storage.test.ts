@@ -531,3 +531,37 @@ it("walks synchronously only where every path and every ancestor is a plain loca
 		} finally { setWin32NativeForTest(realNative ?? undefined); }
 	} finally { await fs.rm(base, { recursive: true, force: true }); }
 });
+
+it("judges the folder of a file too: a folder that is a junction or a directory symlink is not walked, and nothing is remembered", { skip: process.platform !== "win32" }, async () => {
+	const base = await fs.mkdtemp(path.join(process.env.LOCALAPPDATA ?? os.homedir(), "omp-sync-folder-"));
+	try {
+		const plain = path.join(base, "plain");
+		await fs.mkdir(plain);
+		const file = path.join(plain, "session.jsonl");
+		assert.equal(await synchronousLocalPaths([file]), true, "a plain folder, however deep, on the volume of its root");
+		const target = path.join(base, "elsewhere");
+		await fs.mkdir(target);
+		const junction = path.join(base, "junction-folder");
+		await fs.symlink(target, junction, "junction");
+		assert.equal(await synchronousLocalPaths([path.join(junction, "session.jsonl")]), false, "the file's own folder is a junction");
+		const directoryLink = path.join(base, "symlink-folder");
+		const linked = await fs.symlink(target, directoryLink, "dir").then(() => true, () => false);
+		if (linked) assert.equal(await synchronousLocalPaths([path.join(directoryLink, "session.jsonl")]), false, "the file's own folder is a directory symlink");
+		// The walk is made again on every call: a folder that becomes a link after a yes is a no on the next question.
+		await fs.rm(plain, { recursive: true });
+		await fs.symlink(target, plain, "junction");
+		assert.equal(await synchronousLocalPaths([file]), false, "a folder replaced by a link since the last answer");
+	} finally { await fs.rm(base, { recursive: true, force: true }); }
+});
+
+it("refuses UNC, extended and device paths by their spelling, before any native call, and asks about a volume only for a fixed disk", { skip: process.platform !== "win32" }, async () => {
+	const read: Win32SecurityRead = { sid: TEST_CURRENT_SID, failure: null, reports: new Map() };
+	const asked: string[] = [];
+	setWin32NativeForTest({ ...fakeNative(read), volumeOf: root => { asked.push(root); return { driveType: 3, fileSystem: "NTFS" }; } });
+	try {
+		for (const target of ["\\\\server\\share\\dir\\file", "\\\\?\\UNC\\server\\share\\dir\\file", "\\\\?\\C:\\dir\\file", "\\\\.\\C:\\dir\\file", "relative\\file"]) {
+			assert.equal(await synchronousLocalPaths([target]), false, target);
+		}
+		assert.deepEqual(asked, [], "no volume was asked about for any of them");
+	} finally { setWin32NativeForTest(realNative ?? undefined); }
+});
