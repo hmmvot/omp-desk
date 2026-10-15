@@ -3,13 +3,14 @@
  *
  * The verifier child (`runtime/native-stage.ts`) establishes and verifies the owner-only layout of the staged `koffi.node`
  * natively: the runtime directory, the digest directory, the file, and every ancestor the tree is reached through. After it
- * passed, it records what it verified as the identity of each of those paths (`lstat`: file id and, for the three paths Desk
- * owns, size, last-write and change times in nanoseconds). A later activation that finds every path with the identical
+ * passed, it records what it verified as the identity of each of those paths (`lstat`: file id and, for the digest directory and
+ * the file, size, last-write and change times in nanoseconds). A later activation that finds every path with the identical
  * identity, in a record at most a day old, skips the child. What the loader consumes is the path chain, and a chain whose every
- * link has the file id it had is the chain that was verified; the owned paths, which hold the module, also keep their times,
- * so a change of their access rules, owner or entries changes a change time. The ancestors' times are not compared: other
- * programs add and remove entries in the roaming profile and in VS Code's global storage all day, and each of those moves the
- * directory's times without touching anything the verification said about the chain. The staged bytes are still hashed
+ * link has the file id it had is the chain that was verified; the digest directory and the file, which hold
+ * the module and nothing else, also keep their times, so a change of their access rules, owner or entries changes a change time.
+ * The times of every other directory are not compared: other programs add and remove entries in the roaming profile and in VS
+ * Code's global storage all day, and Desk itself adds a sibling to the runtime directory whenever it stages another asset; each
+ * of those moves the directory's times without touching anything the verification said about the chain. The staged bytes are still hashed
  * before every load. Everything else (`warmNativeAsset`) is one synchronous step: no await, no process, no event-loop turn.
  *
  * Anything the proof cannot vouch for reads as "no proof": a file system that reports no file id or no change time (a network
@@ -38,7 +39,7 @@ const DECIMAL = /^[0-9]+$/;
 
 /**
  * The identity of one verified path, as `lstat` reports it; numbers are decimal strings because they exceed 2^53. The size and
- * the two times are present for the paths Desk owns (`strict`) and absent for the ancestors the tree is reached through.
+ * the two times are present for the digest directory and the file (`strict`) and absent for every directory above them.
  */
 export interface ProofEntry {
 	readonly path: string;
@@ -80,7 +81,7 @@ export function stagedNativePath(storageDir: string, packagedPath: string, sha25
 	return path.join(storageDir, RUNTIME_ASSET_DIRECTORY, sha256, path.basename(packagedPath));
 }
 
-/** One link of the verified chain; `strict` links (the ones Desk owns) are compared with their times, the others by file id. */
+/** One link of the verified chain; `strict` links (the digest directory and the file) are compared with their times, the others by file id. */
 export interface ProofLink {
 	readonly path: string;
 	readonly kind: "directory" | "file";
@@ -96,7 +97,7 @@ export function proofChain(stagedPath: string): readonly ProofLink[] {
 	const runtimeDirectory = path.dirname(digestDirectory);
 	return [
 		...[...ancestorComponents(runtimeDirectory)].reverse().map(p => ({ path: p, kind: "directory" as const, strict: false })),
-		{ path: runtimeDirectory, kind: "directory" as const, strict: true },
+		{ path: runtimeDirectory, kind: "directory" as const, strict: false },
 		{ path: digestDirectory, kind: "directory" as const, strict: true },
 		{ path: stagedPath, kind: "file" as const, strict: true },
 	];
@@ -193,7 +194,7 @@ export function warmNativeAsset(input: { readonly storageDir: string; readonly p
 		const identity = identityOf(item.path, item.kind, item.strict);
 		if ("refusal" in identity) return none(identity.refusal);
 		const now = identity.entry;
-		// A link the record holds without times (or an owned one that lost them) is not the record this code writes.
+		// A link the record holds without times (or a strict one that lost them) is not the record this code writes.
 		if ((expected.ctimeNs === undefined) === item.strict) return none("the record does not cover the current path chain");
 		if (now.ino !== expected.ino || now.size !== expected.size || now.mtimeNs !== expected.mtimeNs || now.ctimeNs !== expected.ctimeNs) {
 			return none(`${item.path} changed since it was verified`);

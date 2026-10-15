@@ -77,13 +77,13 @@ describe("parsing a record", () => {
 });
 
 describe("the path chain", () => {
-	it("runs from the outermost ancestor below the volume root to the staged file, never names the volume root, and compares only the owned paths by their times", () => {
+	it("runs from the outermost ancestor below the volume root to the staged file, never names the volume root, and compares only the digest directory and the file by their times", () => {
 		const staged = path.join("C:\\", "Users", "x", "AppData", "Roaming", "Code", "User", "globalStorage", "hmmvot.omp-desk", "runtime", "d".repeat(64), "koffi.node");
 		const chain = proofChain(staged);
 		assert.equal(chain[0]!.path, path.join("C:\\", "Users"));
 		assert.deepEqual(chain.slice(-3).map(item => [path.basename(item.path), item.kind]), [["runtime", "directory"], ["d".repeat(64), "directory"], ["koffi.node", "file"]]);
 		assert.ok(chain.every(item => item.path !== "C:\\"), "the volume root is the platform's anchor, not a link of the chain");
-		assert.deepEqual(chain.filter(item => item.strict).map(item => path.basename(item.path)), ["runtime", "d".repeat(64), "koffi.node"]);
+		assert.deepEqual(chain.filter(item => item.strict).map(item => path.basename(item.path)), ["d".repeat(64), "koffi.node"]);
 	});
 });
 
@@ -136,10 +136,10 @@ describe("a warm start", windowsOnly, () => {
 		assert.match(future.kind === "none" ? future.reason : "", /future/);
 	});
 
-	it("notices a change of any path Desk owns: the file, its directory, the runtime directory", async () => {
+	it("notices a change of the file or of its directory", async () => {
 		const { storageDir, packagedPath, stagedPath } = await stagedStore();
 		const chain = proofChain(stagedPath);
-		const owned = chain.slice(-3).map(item => item.path);
+		const owned = chain.slice(-2).map(item => item.path);
 
 		// A touched file (its times move; its bytes do not).
 		const later = new Date(Date.now() + 5_000);
@@ -153,8 +153,8 @@ describe("a warm start", windowsOnly, () => {
 		assert.equal((await stageNativeModule(asset.path, storageDir)).kind, "staged");
 		assert.equal(warmNativeAsset({ storageDir, packagedPath }).kind, "proven");
 
-		// An entry added to the digest directory and to the runtime directory (each a change of that directory's times).
-		for (const directory of [owned[1]!, owned[0]!]) {
+		// An entry added to the digest directory (a change of its times).
+		for (const directory of [owned[0]!]) {
 			await writeFile(path.join(directory, "stray.txt"), "x");
 			warm = warmNativeAsset({ storageDir, packagedPath });
 			assert.equal(warm.kind, "none", `an entry added to ${path.basename(directory)} went unnoticed`);
@@ -165,9 +165,9 @@ describe("a warm start", windowsOnly, () => {
 		}
 	});
 
-	it("does not mind entries other programs add to the directories above the store, which is what they do all day", async () => {
+	it("does not mind entries added to the runtime directory (Desk stages other assets there) or to the directories above the store", async () => {
 		const { storageDir, packagedPath } = await stagedStore();
-		for (const directory of [storageDir, path.dirname(storageDir)]) {
+		for (const directory of [path.join(storageDir, "runtime"), storageDir, path.dirname(storageDir)]) {
 			const stray = path.join(directory, "stray.txt");
 			await writeFile(stray, "x");
 			await utimes(directory, new Date(Date.now() + 7_000), new Date(Date.now() + 7_000));
