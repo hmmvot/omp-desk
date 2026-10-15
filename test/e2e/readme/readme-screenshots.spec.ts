@@ -162,7 +162,7 @@ test("capture the README images in the user layout", async ({ desk, state }) => 
 	const timing = await startSession(desk, page, TIMING_REQUEST);
 	await expect(timing.getByText(/1 running/)).toBeVisible({ timeout: 120_000 });
 	// While a turn runs the composer is the steer box: found by its role, not by its idle name.
-	const steer = desk.composerWhileBusy(timing);
+	const steer = timing.locator("[role=combobox]").first();
 	await steer.fill(QUEUED_FOLLOW_UP);
 	await steer.press("Alt+Enter");
 	await expect(timing.getByText("Queued")).toBeVisible();
