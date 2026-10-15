@@ -52,12 +52,16 @@ async function statIsFile(file: string): Promise<boolean> {
 	try { return (await stat(file)).isFile(); } catch { return false; }
 }
 
-/** `roots` without duplicates (case-insensitive) and without any root that lies inside another: one search covers them. */
-export function outermostRoots(roots: readonly string[]): string[] {
+/**
+ * `roots` without duplicates (case-insensitive). A root that lies inside another is still searched on its own: the outer
+ * root's own `files.exclude` may hide it, as a repository root that hides its Unity project does when that project is
+ * opened next to it as a second workspace folder, and the outer search alone would then never find the project's files.
+ * A file both searches find is one match.
+ */
+export function distinctRoots(roots: readonly string[]): string[] {
 	const unique = new Map<string, string>();
 	for (const root of roots) if (root !== "" && !unique.has(root.toLowerCase())) unique.set(root.toLowerCase(), root);
-	const all = [...unique.values()];
-	return all.filter(root => !all.some(other => other !== root && isInside(other, root)));
+	return [...unique.values()];
 }
 
 /**
@@ -159,7 +163,7 @@ export class FileNameLinkResolver implements FileNameLinks {
 		let searchedGeneration = this.#generation;
 		const searched = await this.#bounded(signal => {
 			searchedGeneration = this.#generation;
-			return this.#source.find(reference, outermostRoots(scope.roots), signal);
+			return this.#source.find(reference, distinctRoots(scope.roots), signal);
 		});
 		if ("failed" in searched) return failure(searched.failed);
 		const answer = searched.value;
@@ -255,10 +259,11 @@ export function fileChoiceLabel(file: string, cwd: string, roots: readonly strin
 export interface FindFilesApi {
 	readonly workspace: {
 		findFiles(include: unknown, exclude: string | null, maxResults: number, token: unknown): PromiseLike<readonly { readonly scheme: string; readonly fsPath: string }[]>;
-		getConfiguration(section: string): { get<T>(key: string): T | undefined };
+		getConfiguration(section: string, scope?: unknown): { get<T>(key: string): T | undefined };
 	};
 	readonly RelativePattern: new (base: string, pattern: string) => unknown;
 	readonly CancellationTokenSource: new () => { readonly token: unknown; cancel(): void; dispose(): void };
+	readonly Uri: { file(path: string): unknown };
 }
 
 /** The glob that finds exactly the file `name` at any depth (`name` may end with directories: `host/session-index.ts`), every letter written as both cases (Windows file names do not care). The alphabet of a file reference holds no glob character, and `/` is only a separator. */
@@ -283,16 +288,19 @@ export function excludeGlob(...settings: readonly unknown[]): string | null {
 	return all.length === 0 ? null : all.length === 1 ? all[0]! : `{${all.join(",")}}`;
 }
 
-/** The file search through `vscode.workspace.findFiles`: one search per folder, `files.exclude` and `search.exclude` honoured, a bounded result count, cancelled with the signal. */
+/** The file search through `vscode.workspace.findFiles`: one search per folder, that folder's `files.exclude` and `search.exclude` honoured, a bounded result count, cancelled with the signal. */
 export function workspaceFileNameSource(api: FindFilesApi): FileNameSource {
+	const excludeOf = (folder: string): string | null => {
+		const scope = api.Uri.file(folder);
+		return excludeGlob(api.workspace.getConfiguration("files", scope).get("exclude"), api.workspace.getConfiguration("search", scope).get("exclude"));
+	};
 	return {
 		async find(name, folders, signal) {
-			const exclude = excludeGlob(api.workspace.getConfiguration("files").get("exclude"), api.workspace.getConfiguration("search").get("exclude"));
 			const source = new api.CancellationTokenSource();
 			const cancel = () => source.cancel();
 			if (signal.aborted) cancel(); else signal.addEventListener("abort", cancel, { once: true });
 			try {
-				const found = await Promise.all(folders.map(folder => api.workspace.findFiles(new api.RelativePattern(folder, fileNameGlob(name)), exclude, MAX_FILE_NAME_RESULTS, source.token)));
+				const found = await Promise.all(folders.map(folder => api.workspace.findFiles(new api.RelativePattern(folder, fileNameGlob(name)), excludeOf(folder), MAX_FILE_NAME_RESULTS, source.token)));
 				return { paths: found.flat().filter(uri => uri.scheme === "file").map(uri => uri.fsPath), truncated: found.some(list => list.length >= MAX_FILE_NAME_RESULTS) };
 			} finally {
 				signal.removeEventListener("abort", cancel);

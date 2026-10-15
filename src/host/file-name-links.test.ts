@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseBareFileName } from "../shared/code-symbols.ts";
 import type { BareFileName } from "../shared/code-symbols.ts";
-import { FileNameLinkResolver, MAX_FILE_NAME_RESULTS, excludeGlob, fileChoiceLabel, fileNameGlob, fileNameOutcome, fileNameTarget, outermostRoots, workspaceFileNameSource } from "./file-name-links.ts";
+import { FileNameLinkResolver, MAX_FILE_NAME_RESULTS, distinctRoots, excludeGlob, fileChoiceLabel, fileNameGlob, fileNameOutcome, fileNameTarget, workspaceFileNameSource } from "./file-name-links.ts";
 import type { FileNameResolverOptions, FileNameSource, FindFilesApi } from "./file-name-links.ts";
 
 const CWD = "D:\\Work\\Game";
@@ -84,7 +84,7 @@ test("exactly one of several inside the cwd narrows to it; a workspace folder ab
 	const inner = { cwd: CWD, roots: [CWD, project] };
 	const { resolver: files, asked } = resolver([at("src\\index.ts"), "D:\\Work\\Tools\\index.ts", "D:\\Work\\Web\\index.ts"]);
 	assert.deepEqual(await files.resolve(file("index.ts:4"), inner), { status: "found", target: "src/index.ts:4" });
-	assert.deepEqual(asked[0]!.folders, [project], "the outermost folder is searched once: the cwd lies inside it");
+	assert.deepEqual(asked[0]!.folders, [CWD, project], "every workspace folder is searched, the one inside another too; a file both find is one match");
 	const outside = resolver(["D:\\Work\\Tools\\index.ts"]);
 	assert.deepEqual(await outside.resolver.resolve(file("index.ts"), inner), { status: "found", target: "D:\\Work\\Tools\\index.ts" }, "outside the cwd the target is absolute");
 	const twoInside = resolver([at("a\\index.ts"), at("b\\index.ts"), "D:\\Work\\Tools\\index.ts"]);
@@ -277,9 +277,30 @@ test("the path tail of a file directly below the session's folder is that file, 
 	assert.deepEqual(asked, []);
 });
 
-test("the outermost folders are searched once each", () => {
-	assert.deepEqual(outermostRoots(["D:\\Work\\Game", "D:\\Work", "d:\\work", "E:\\Other"]), ["D:\\Work", "E:\\Other"]);
-	assert.deepEqual(outermostRoots(["D:\\Work\\Game"]), ["D:\\Work\\Game"]);
+test("each workspace folder is searched once, a folder inside another too", () => {
+	assert.deepEqual(distinctRoots(["D:\\Work\\Game", "D:\\Work", "d:\\work", "E:\\Other"]), ["D:\\Work\\Game", "D:\\Work", "E:\\Other"]);
+	assert.deepEqual(distinctRoots(["D:\\Work\\Game"]), ["D:\\Work\\Game"]);
+});
+
+test("a file of a project opened next to the repository root that hides it is found, once", async () => {
+	// The user's layout: workspace folders `omp-vscode\omp-vscode` (the Unity project) and `omp-vscode` (the repository), whose own files.exclude hides `omp-vscode`.
+	const repo = "D:\\Work\\omp-vscode";
+	const project = `${repo}\\omp-vscode`;
+	const loader = `${project}\\Assets\\session-index.ts`;
+	const api: FindFilesApi = {
+		workspace: {
+			async findFiles(include, exclude) {
+				const base = (include as { base: string }).base;
+				return base === repo && exclude === "omp-vscode" ? [] : [{ scheme: "file", fsPath: loader }];
+			},
+			getConfiguration: (section, scope) => ({ get: <T>(key: string) => (section === "files" && key === "exclude" && (scope as { path: string }).path === repo ? { omp-vscode: true } : undefined) as T | undefined }),
+		},
+		RelativePattern: class { base: string; pattern: string; constructor(base: string, pattern: string) { this.base = base; this.pattern = pattern; } },
+		CancellationTokenSource: class { token = {}; cancel() {} dispose() {} },
+		Uri: { file: (path: string) => ({ path }) },
+	};
+	const files = new FileNameLinkResolver(workspaceFileNameSource(api), { isFile: async () => false });
+	assert.deepEqual(await files.resolve(file("session-index.ts"), { cwd: repo, roots: [project, repo] }), { status: "found", target: "omp-vscode/Assets/session-index.ts" });
 });
 
 test("the search glob is the exact name at any depth, each letter in both cases, with no glob character of its own", () => {
@@ -306,6 +327,7 @@ test("the VS Code adapter searches each folder with the pattern, the excludes an
 		},
 		RelativePattern: class { base: string; pattern: string; constructor(base: string, pattern: string) { this.base = base; this.pattern = pattern; } },
 		CancellationTokenSource: class { token = {}; cancel() { cancelled++; } dispose() { disposed++; } },
+		Uri: { file: (path: string) => ({ path }) },
 	};
 	const found = await workspaceFileNameSource(api).find("A.cs", ["D:\\Work", "E:\\More"], new AbortController().signal);
 	assert.deepEqual(found, { paths: [at("a\\A.cs"), at("a\\A.cs")], truncated: false });
