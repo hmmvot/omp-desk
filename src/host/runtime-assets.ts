@@ -361,6 +361,7 @@ const TREE_READ_CONCURRENCY = 8;
  */
 export async function hashRuntimeTree(
 	sources: readonly RuntimeTreeSource[],
+	options: { /** Files read at once; the default suits a start, a background check passes fewer. */ readonly concurrency?: number } = {},
 ): Promise<{
 	readonly digests: ReadonlyArray<{ readonly relativePath: string; readonly sourcePath: string; readonly sha256: string }>;
 	readonly digest: string;
@@ -383,7 +384,7 @@ export async function hashRuntimeTree(
 			hashes[index] = createHash("sha256").update(await readFile(ordered[index]!.sourcePath)).digest("hex");
 		}
 	};
-	await Promise.all(Array.from({ length: Math.min(TREE_READ_CONCURRENCY, ordered.length) }, worker));
+	await Promise.all(Array.from({ length: Math.min(options.concurrency ?? TREE_READ_CONCURRENCY, ordered.length) }, worker));
 	const digests: Array<{ readonly relativePath: string; readonly sourcePath: string; readonly sha256: string }> = [];
 	let manifest = "";
 	for (const [index, source] of ordered.entries()) {

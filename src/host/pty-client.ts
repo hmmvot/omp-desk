@@ -78,6 +78,7 @@ import {
 	discardReusedPtyProof,
 	ensurePtyRuntime,
 	ptyPackagedTreeDigest,
+	ptyRecordedTreeDigest,
 	spawnPtyBroker,
 	verifyPtyRuntime,
 	type PtyRuntime,
@@ -395,6 +396,8 @@ export class PtyBrokerClient {
 	/** Executable files kept off the Bun path, by exact file identity ({@link BunBrokerPlan.key}). */
 	private readonly bunHeld = new Map<string, { readonly until: number | null; readonly fallback: ChatBrokerFallback }>();
 	private identityPromise: Promise<PtyAttachIdentity> | null = null;
+	/** Whether {@link identityPromise}'s digest came from the build's record and has not been checked against the tree yet. */
+	private identityFromRecord = false;
 	private accessPromise: Promise<{ readonly ok: boolean; readonly reason: string | null }> | null = null;
 
 	constructor(options: PtyBrokerClientOptions) {
@@ -452,16 +455,59 @@ export class PtyBrokerClient {
 			if (known.ready) return known;
 			this.identityPromise = null;
 		}
-		this.identityPromise = ptyPackagedTreeDigest(this.options.extensionRoot).then(
-			(treeDigest): PtyAttachIdentity => ({ ready: true, reason: null, runtimeVersion: PTY_RUNTIME_VERSION, treeDigest }),
-			(error: unknown): PtyAttachIdentity => ({
+		this.identityPromise = this.packagedIdentity();
+		return await this.identityPromise;
+	}
+
+	/**
+	 * This build's tree digest: the one the build recorded next to the tree (one small read), else the hash of the tree.
+	 * What an attach does with it is only to say whether a surviving broker runs this build's tree, and a broker reports the
+	 * digest of the bytes it was staged from, so a match with the build's record means those are the bytes this package
+	 * shipped (ADR-0076, decision 14). {@link verifyPackagedTree} hashes the installed tree once, later, to check the record.
+	 */
+	private async packagedIdentity(): Promise<PtyAttachIdentity> {
+		try {
+			const recorded = await ptyRecordedTreeDigest(this.options.extensionRoot);
+			if (recorded !== null) {
+				this.identityFromRecord = true;
+				return { ready: true, reason: null, runtimeVersion: PTY_RUNTIME_VERSION, treeDigest: recorded };
+			}
+			this.identityFromRecord = false;
+			const treeDigest = await ptyPackagedTreeDigest(this.options.extensionRoot);
+			return { ready: true, reason: null, runtimeVersion: PTY_RUNTIME_VERSION, treeDigest };
+		} catch (error) {
+			return {
 				ready: false,
 				reason: `the packaged broker tree could not be read: ${messageOf(error)}`,
 				runtimeVersion: PTY_RUNTIME_VERSION,
 				treeDigest: null,
-			}),
+			};
+		}
+	}
+
+	/**
+	 * Hash the installed tree and compare it with the digest taken from the build's record, off the restore path (two reads at
+	 * a time, so it does not queue behind a user's action). A difference (a tree changed after it was packaged, or a record that
+	 * does not describe it) is logged, and the hash replaces the record's digest for every later attach, which is the identity
+	 * this window used before the record existed. Does nothing when the identity already came from hashing.
+	 */
+	async verifyPackagedTree(): Promise<"verified" | "corrected" | "not-recorded"> {
+		const known = this.identityPromise === null ? null : await this.identityPromise;
+		if (known === null || !known.ready || !this.identityFromRecord) return "not-recorded";
+		let hashed: string;
+		try {
+			hashed = await ptyPackagedTreeDigest(this.options.extensionRoot, { concurrency: 2 });
+		} catch (error) {
+			this.options.log?.warn(`the packaged broker tree could not be hashed to check the build's record of its digest: ${messageOf(error)}`);
+			return "verified";
+		}
+		if (hashed === known.treeDigest) return "verified";
+		this.options.log?.warn(
+			`the installed broker tree hashes to ${hashed.slice(0, 12)}, not to the ${known.treeDigest?.slice(0, 12) ?? "recorded"} the build recorded; the hash is used from now on (attaches made until now, such as the startup restore's re-adoptions, compared with the record)`,
 		);
-		return await this.identityPromise;
+		this.identityFromRecord = false;
+		this.identityPromise = Promise.resolve({ ready: true, reason: null, runtimeVersion: PTY_RUNTIME_VERSION, treeDigest: hashed });
+		return "corrected";
 	}
 
 	/**

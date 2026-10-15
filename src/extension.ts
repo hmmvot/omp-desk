@@ -1588,10 +1588,16 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     access => windowTiming("broker state access", `${Date.now() - stateAccessStartedAt} ms ok=${access.ok} (${s.ptyClient?.stateAccessPhases() ?? ""})`, "info"),
     () => undefined,
   );
-  // The digest of the packaged broker tree (about 30 ms for 3 MB) is the other thing every re-adoption needs first. It only
-  // decides "same build" for a broker that attests its own identity (ADR-0024, ADR-0035), so it is hashed here once, beside
-  // the rest of activation, and cached; a refusal is not cached and the first attach that needs it asks again.
+  // The digest of the packaged broker tree is the other thing every re-adoption needs first. It only decides "same build" for a
+  // broker that attests its own identity (ADR-0024, ADR-0035). The build records it next to the tree, so this is one small read;
+  // the installed tree is hashed once, after the startup restore, to check that record (ADR-0076, decision 14), and a build with
+  // no record (from source, a watch build) hashes the tree here as before. A refusal is not cached and the first attach asks again.
   void s.ptyClient.attachIdentity();
+  const ptyClientForTreeCheck = s.ptyClient;
+  void s.startupRestoreOver.promise.then(() => {
+    const check = setTimeout(() => { void ptyClientForTreeCheck.verifyPackagedTree().catch(() => undefined); }, PACKAGED_TREE_CHECK_DELAY_MS);
+    check.unref();
+  });
   // VS Code's own updater stops every Code.exe of the install: the Terminal, folder-shell and Stats brokers (and any Chat broker that fell back to
   // Code.exe) are Code.exe, so say so when it did. A Chat broker on Bun is not.
   void announceUpdaterTerminations({
@@ -4503,6 +4509,9 @@ function inLocalRecoveryCohort(index: SessionIndex, tabId: string): boolean {
 
 /** How long display-only reads wait for the startup restore before they run anyway. */
 const STARTUP_DEFER_CAP_MS = 120_000;
+
+/** How long after the startup restore the installed broker tree is hashed to check the build's record of its digest. */
+const PACKAGED_TREE_CHECK_DELAY_MS = 10_000;
 
 /**
  * `null` when the window's startup restore is over; otherwise a promise that settles when it is. Reads that only paint the

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A reload no longer hashes the broker's files to re-adopt a running Chat.** Deciding that a surviving broker runs this build's runtime meant reading and hashing 24 files (2.9 MB, binaries among them) at every window start, 1.9–2.3 s of every tab's reconcile at a reload on a busy machine, and the file reads it queued delayed the next tab's own file checks. The build now records that digest in `out/pty-tree.json`, next to the tree, and the window reads it in one small read. Ten seconds after the restore the installed files are hashed once to check the record; if they do not match it, the log says so and the hash is used from then on, as before. A build that fails part-way, a build from source and a watch build leave no record, and the window hashes at start as before. See [ADR-0076](docs/decisions/0076-call-win32-in-process-through-a-staged-koffi-module-instead-of-starting-powershell.md), decision 14.
+
 ## [0.4.3] - 2026-10-15
 
 ### Added

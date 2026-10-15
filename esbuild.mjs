@@ -22,6 +22,7 @@ import * as path from "node:path";
 import process from "node:process";
 import { mermaidBuildOptions, mermaidPreviewBuildOptions } from "./scripts/mermaid-bundle.mjs";
 import { ensureKoffiAddon, nativeTarget } from "./scripts/native-assets.mjs";
+import { recordPtyTreeDigestAfter, removePtyTreeDigest } from "./scripts/pty-tree-digest.mjs";
 
 const watch = process.argv.includes("--watch");
 /** Build only the broker tree: useful while working on the PTY surface alone. */
@@ -341,6 +342,8 @@ function assertBundleBoundary(name, inputs) {
 async function main() {
   const selected = ptyOnly ? targets.filter(({ name }) => name === "pty-broker") : targets;
   if (watch) {
+    // A watch build rewrites the broker after every change, so no record is kept and the host hashes the tree itself.
+    await removePtyTreeDigest();
     const contexts = await Promise.all(selected.map(({ options }) => esbuild.context({ ...shared, ...options })));
     await Promise.all(contexts.map(context => context.watch()));
     if (!ptyOnly) await copyCodicons();
@@ -349,14 +352,19 @@ async function main() {
     console.log(`watching ${selected.length} build targets`);
     return;
   }
-  for (const { name, options } of selected) {
-    const result = await esbuild.build({ ...shared, ...options, metafile: name === "guest" || name === "mermaid" || name === "mermaid-preview" });
-    if (result.metafile) assertBundleBoundary(name, Object.keys(result.metafile.inputs));
-    console.log(`built ${name} -> ${options.outfile}`);
-  }
-  if (!ptyOnly) await copyCodicons();
-  await copyNativeAddon();
-  await copyPtyRuntime();
+  // The host takes the recorded digest as the identity of the broker runtime instead of hashing the tree at every start, so a
+  // record may exist only when the build that wrote it finished: it is removed before the first output and written last.
+  const recorded = await recordPtyTreeDigestAfter(async () => {
+    for (const { name, options } of selected) {
+      const result = await esbuild.build({ ...shared, ...options, metafile: name === "guest" || name === "mermaid" || name === "mermaid-preview" });
+      if (result.metafile) assertBundleBoundary(name, Object.keys(result.metafile.inputs));
+      console.log(`built ${name} -> ${options.outfile}`);
+    }
+    if (!ptyOnly) await copyCodicons();
+    await copyNativeAddon();
+    await copyPtyRuntime();
+  });
+  console.log(recorded === null ? "no pty tree digest recorded (tree incomplete)" : `recorded pty tree digest ${recorded.digest.slice(0, 12)} (${recorded.files} files) -> out/pty-tree.json`);
 }
 
 main().catch(error => {

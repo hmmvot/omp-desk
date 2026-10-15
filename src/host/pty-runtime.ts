@@ -38,7 +38,7 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import process from "node:process";
 import type { PrivateStorageProbe } from "./private-storage.ts";
@@ -52,7 +52,7 @@ import {
 	type StagedRuntimeTree,
 } from "./runtime-assets.ts";
 import { forgetPtyProof, ptyProofKey, ptyProofPath, readPtyProof, writePtyProof, type PtyProofRecord, type PtySelfCheckAnswer } from "./pty-runtime-proof-store.ts";
-import { PTY_RUNTIME_VERSION } from "./pty-protocol.ts";
+import { isPtyDigest, PTY_RUNTIME_VERSION } from "./pty-protocol.ts";
 import {
 	SELF_CHECK_DEADLINE_FLAG,
 	SELF_CHECK_DEADLINE_MS,
@@ -442,10 +442,31 @@ export async function discardReusedPtyProof(reused: ReusedPtyProof, scope: { rea
 /**
  * The content digest of this build's packaged broker tree, hashed without staging or writing
  * anything: what a broker of this build reports as its tree. An attach compares a broker's
- * against it and needs nothing else from the runtime.
+ * against it and needs nothing else from the runtime. It reads every file of the tree, so a window takes the
+ * build's own record of it ({@link ptyRecordedTreeDigest}) and hashes only to check that record, in the background.
  */
-export async function ptyPackagedTreeDigest(extensionRoot: string): Promise<string> {
-	return (await hashRuntimeTree(await ptyRuntimeSources(extensionRoot))).digest;
+export async function ptyPackagedTreeDigest(extensionRoot: string, options: { readonly concurrency?: number } = {}): Promise<string> {
+	return (await hashRuntimeTree(await ptyRuntimeSources(extensionRoot), options)).digest;
+}
+
+/** Where the build records the digest of the packaged tree, relative to the extension root (`scripts/pty-tree-digest.mjs`). */
+export const PTY_TREE_DIGEST_FILE = "out/pty-tree.json";
+
+/** The layout marker of a recorded digest, the one `hashRuntimeTree` puts in the digest itself. */
+const PTY_TREE_DIGEST_FORMAT = "omp-runtime-tree/v1";
+
+/**
+ * The digest of the packaged tree as the build recorded it, or `null` when there is no usable record (a build from source or
+ * a watch build, a record that is missing, unreadable or not a digest): the caller then hashes the tree. One small read.
+ */
+export async function ptyRecordedTreeDigest(extensionRoot: string): Promise<string | null> {
+	try {
+		const parsed: unknown = JSON.parse(await readFile(join(extensionRoot, ...PTY_TREE_DIGEST_FILE.split("/")), "utf8"));
+		if (typeof parsed !== "object" || parsed === null || !("format" in parsed) || !("digest" in parsed)) return null;
+		return parsed.format === PTY_TREE_DIGEST_FORMAT && isPtyDigest(parsed.digest) ? parsed.digest : null;
+	} catch {
+		return null;
+	}
 }
 
 /**
