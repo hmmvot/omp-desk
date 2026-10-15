@@ -1576,7 +1576,7 @@ export class SessionIndex {
 
 		try {
 			// A materialized session must still exist before anything is claimed.
-			if (entry.sessionFile !== null && !(await fileExists(entry.sessionFile))) {
+			if (entry.sessionFile !== null && !(await this.#admit(trace, "session file", () => fileExists(entry.sessionFile!)))) {
 				const detail = `The recorded session file is missing: ${entry.sessionFile}`;
 				await this.#touch(entry, "failed", detail);
 				await this.#persist();
@@ -1585,7 +1585,7 @@ export class SessionIndex {
 			// A row whose recorded directory is not absolute is refused here, before
 			// any claim is taken or attempt recorded: launching it would have to
 			// guess a folder. Only the session file's own header may repair it.
-			const cwdRefusal = await this.#workspaceDirectoryRefusal(entry);
+			const cwdRefusal = await this.#admit(trace, "workspace directory", () => this.#workspaceDirectoryRefusal(entry));
 			if (cwdRefusal !== null) {
 				await this.#touch(entry, "failed", cwdRefusal);
 				await this.#persist();
@@ -1628,7 +1628,7 @@ export class SessionIndex {
 			const key = normalizeSessionIdentityKey(target);
 			// Rows that name this identity pass this check one after another in cohort order, so the
 			// first row of the cohort to reach it is the one that keeps it, as in a sequential pass.
-			await trace?.turn.wait();
+			await this.#admit(trace, "identity turn", async () => { await trace?.turn.wait(); });
 			const ownerTab = takenIdentities.get(key);
 			if (ownerTab !== undefined) {
 				trace?.turn.release();
@@ -1642,11 +1642,11 @@ export class SessionIndex {
 			takenIdentities.set(key, tabId);
 			trace?.turn.release();
 
-			const observed = await this.#readClaim(target);
+			const observed = await this.#admit(trace, "claim read", () => this.#readClaim(target));
 			const claimBefore = observed.ok ? observed.claim : null;
 			const generation = entry.ownership?.ownerGeneration ?? createOwnerGeneration();
 			const heldBefore = claimBefore !== null;
-			if (claimBefore !== null && claimBefore.holderId !== this.#claimHolder.id && await claimHolderMayBeAlive(claimBefore)) {
+			if (claimBefore !== null && claimBefore.holderId !== this.#claimHolder.id && await this.#admit(trace, "claim holder alive", () => claimHolderMayBeAlive(claimBefore))) {
 				const detail = "This session is open in another window. Continue there.";
 				await this.#touch(entry, "live", detail);
 				await this.#persist();
@@ -1658,11 +1658,11 @@ export class SessionIndex {
 			try {
 				// Retry only admission before any launcher call; never replay a restore
 				// after it may have started a writer.
-				const holder = await this.#claimHolderReady;
-				claim = await retryFileOperation(
+				const holder = await this.#admit(trace, "claim holder", () => this.#claimHolderReady);
+				claim = await this.#admit(trace, "claim take", () => retryFileOperation(
 					() => acquireClaim(this.#claimStorageDir, target, generation, holder),
 					FILE_OPERATION_BACKOFF_MS.slice(0, 2),
-				);
+				));
 			} catch (error) {
 				if (error instanceof ClaimConflictError) {
 					const detail = "This session is open in another window. Continue there.";
@@ -2819,6 +2819,11 @@ export class SessionIndex {
 	/** Run one launcher-or-reconcile call, timing it when the row is part of a restore pass. */
 	#timed<T>(trace: RestoreTrace | undefined, step: "reconcile" | "attach" | "launch", work: (steps: StepSink | undefined) => Promise<T>): Promise<T> {
 		return trace === undefined ? work(undefined) : trace.timer.measure(step, () => work(step === "reconcile" ? trace.timer.sink("reconcile") : undefined));
+	}
+
+	/** Run one piece of a row's admission, timing it under `name` when the row is part of a restore pass. */
+	#admit<T>(trace: RestoreTrace | undefined, name: string, work: () => Promise<T>): Promise<T> {
+		return trace === undefined ? work() : trace.timer.sink("admission").measure(name, work);
 	}
 
 	async #launch(

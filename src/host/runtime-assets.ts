@@ -350,6 +350,9 @@ export async function listRuntimeTreeFiles(directory: string): Promise<string[]>
 	return paths.sort();
 }
 
+/** How many files of a tree are read at once when it is hashed. */
+const TREE_READ_CONCURRENCY = 8;
+
 /**
  * Hash every source once and name the tree from its content.
  *
@@ -362,17 +365,31 @@ export async function hashRuntimeTree(
 	readonly digests: ReadonlyArray<{ readonly relativePath: string; readonly sourcePath: string; readonly sha256: string }>;
 	readonly digest: string;
 }> {
-	const digests: Array<{ readonly relativePath: string; readonly sourcePath: string; readonly sha256: string }> = [];
-	let manifest = "";
-	for (const source of [...sources].sort((left, right) => left.relativePath.localeCompare(right.relativePath))) {
+	const ordered = [...sources].sort((left, right) => left.relativePath.localeCompare(right.relativePath));
+	const cleaned = ordered.map(source => {
 		const clean = source.relativePath.replace(/\\/g, "/");
 		if (clean.length === 0 || clean.startsWith("/") || clean.split("/").some(part => part === "" || part === "." || part === "..")) {
 			throw new Error(`runtime tree entry ${JSON.stringify(source.relativePath)} is not a relative path inside the tree`);
 		}
-		const bytes = await readFile(source.sourcePath);
-		const sha256 = createHash("sha256").update(bytes).digest("hex");
-		digests.push({ relativePath: clean, sourcePath: source.sourcePath, sha256 });
-		manifest += `${clean}\0${sha256}\n`;
+		return clean;
+	});
+	// The reads overlap, a few at a time: each is one turn through the file-system pool, and a tree of dozens of files read one
+	// after another waits that many turns, which the host measured at seconds when the pool was busy. The order of the digests,
+	// and so the digest itself, is the sorted order whatever order the reads finish in.
+	const hashes = new Array<string>(ordered.length);
+	let next = 0;
+	const worker = async (): Promise<void> => {
+		for (let index = next++; index < ordered.length; index = next++) {
+			hashes[index] = createHash("sha256").update(await readFile(ordered[index]!.sourcePath)).digest("hex");
+		}
+	};
+	await Promise.all(Array.from({ length: Math.min(TREE_READ_CONCURRENCY, ordered.length) }, worker));
+	const digests: Array<{ readonly relativePath: string; readonly sourcePath: string; readonly sha256: string }> = [];
+	let manifest = "";
+	for (const [index, source] of ordered.entries()) {
+		const sha256 = hashes[index]!;
+		digests.push({ relativePath: cleaned[index]!, sourcePath: source.sourcePath, sha256 });
+		manifest += `${cleaned[index]!}\0${sha256}\n`;
 	}
 	// A format marker is part of the digest so a later layout change cannot collide
 	// with an older tree that happened to hold the same files.

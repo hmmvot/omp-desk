@@ -98,8 +98,10 @@ export class RestoreStepTimer {
 	/**
 	 * A sink that adds the time of each named piece of work to `step`'s sub-steps, summed over every call of the row.
 	 * A piece that waited on a promise another caller started names itself as such (`… (shared)`); the sink only records.
+	 * `admission` has no measured span of its own: its pieces account for where the time before the first reconcile went,
+	 * run one after another, and the part they do not cover is the row's own bookkeeping.
 	 */
-	sink(step: "reconcile"): StepSink {
+	sink(step: "admission" | "reconcile"): StepSink {
 		return {
 			measure: async (name, work) => {
 				const begin = this.#now();

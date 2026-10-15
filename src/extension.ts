@@ -43,6 +43,7 @@ import type { SessionsGrouping } from "./views/session-order";
 import { pinnedSessionTabId, selectionLeaveOtherWindow, selectionRestore } from "./views/session-selection";
 import { acquireClaim, createClaimHolder, createOwnerGeneration, readProcessCreationTime } from "./host/session-claim";
 import { CoalescedRun } from "./host/coalesced-run";
+import { startFsTurnaroundProbe } from "./host/fs-turnaround";
 import { startLoopLagMonitor, trackOperation } from "./host/loop-lag";
 import type { OmpCommand, OmpPackageRoot } from "./host/native-terminal";
 import {
@@ -1545,6 +1546,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
   // The host's one thread is shared with every extension; a stall of 500 ms or more is logged with the Desk operations that overlapped it.
   context.subscriptions.push({ dispose: startLoopLagMonitor(log) });
+  context.subscriptions.push({ dispose: startFsTurnaroundProbe({ log, target: os.tmpdir() }) });
   activation.mark("commands, legacy aliases, settings move");
   // This host's start time is one native call once the module is loaded. It runs beside the rest of the setup; only the
   // claims the index writes wait for it (ADR-0035), so the Sessions view, the commands and the editors appear without it.

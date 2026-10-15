@@ -54,6 +54,20 @@ describe("RestoreStepTimer", () => {
 		);
 	});
 
+	it("names the pieces of admission under it, in the order they ran", async () => {
+		let clock = 0;
+		const timer = new RestoreStepTimer(() => clock);
+		const admission = timer.sink("admission");
+		await admission.measure("session file", async () => { clock += 2; });
+		await admission.measure("claim take", async () => { clock += 3_900; });
+		clock += 5;
+		await timer.measure("reconcile", async () => { clock += 40; });
+		assert.equal(
+			timer.finish("attached"),
+			"attached in 3947 ms · admission 3907 (session file 2, claim take 3900) · reconcile 40 · persist 0",
+		);
+	});
+
 	it("still times a row that ended before any measured step", () => {
 		let clock = 0;
 		const timer = new RestoreStepTimer(() => clock);

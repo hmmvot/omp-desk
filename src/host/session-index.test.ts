@@ -975,7 +975,7 @@ describe("restoreAll runs rows together", () => {
 			const line = rows.find(candidate => candidate.message.startsWith(`window timing: restore tab ${tabId} `))?.message;
 			assert.ok(line !== undefined, `a line for ${tabId}`);
 			assert.ok(line.startsWith(`window timing: restore tab ${tabId} attached in `), line);
-			assert.match(line, / · admission \d+ · reconcile \d+ · attach \d+ \(connect 7, conversation 3\) · persist \d+$/);
+			assert.match(line, / · admission \d+ \(session file \d+, workspace directory \d+, identity turn \d+, claim read \d+, claim holder alive \d+, claim holder \d+, claim take \d+\) · reconcile \d+ · attach \d+ \(connect 7, conversation 3\) · persist \d+$/);
 			assert.ok(!line.includes(files[position] as string), "a log line names no file path");
 		}
 	});
