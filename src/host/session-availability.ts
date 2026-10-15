@@ -281,11 +281,12 @@ function describeAttachMismatch(
 	}
 	// Native identity is best-effort readback, not attachment authority.
 	if (recorded.transport === "native") return null;
+	// Only two ids that were both recorded and differ prove a session switch. A row that never learned its id (a reload
+	// right after New Session, before the first `get_state` answered) has nothing to differ from: the attach carries no
+	// expected id, so the session learns it from the process — and a row with a file is checked against that file by the
+	// session itself (`identity-mismatch`), so a different session is still refused there, never silently attached.
 	const expectedSessionId = recorded.sessionId ?? entry.sessionId;
-	if (expectedSessionId === null || host.sessionId === null) {
-		return "this index never recorded an OMP session id for that host, so an attach could not be told apart from a session switch";
-	}
-	if (host.sessionId !== expectedSessionId) {
+	if (expectedSessionId !== null && host.sessionId !== null && host.sessionId !== expectedSessionId) {
 		return "the reported OMP session id does not match the recorded one";
 	}
 	return null;
@@ -330,7 +331,11 @@ export function classifySessionAvailability(input: SessionClassificationInput): 
 		if (mismatch === null) {
 			return decide("live", verdict.detail, [], verdict.host, verdict.pin);
 		}
-		return decide("live", `${verdict.detail} Not attaching: ${mismatch}.`);
+		return decide(
+			"live",
+			`This session's OMP process is still running, but this window cannot prove it is the one it started (${mismatch}), so Resume cannot reconnect to it. ` +
+				"Use Stop or Kill on this session in Sessions to end that process, then Resume to start it again.",
+		);
 	}
 	const evidence = verdict.kind === "free" ? verdict.evidence : [];
 	if (entry.kind === "session") {

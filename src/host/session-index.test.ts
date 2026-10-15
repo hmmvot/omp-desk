@@ -1405,6 +1405,30 @@ describe("live draft reattach", () => {
 		assert.equal(requests.length, 0);
 	});
 
+	it("adopts a live draft whose OMP session id was never recorded (reload right after New Session), and lets the session learn it", async () => {
+		const { claimDir, cwd } = await tempWorkspace();
+		const store = new TestStore();
+		const launching = indexFor(store, claimDir, DEAD_WINDOW);
+		const draft = await launching.createDraft({ cwd });
+		const idless: OmpHostHandle = { ...runningHandle("S-UNKNOWN"), sessionId: null };
+		const started = recordingLauncher({ state: "running", host: idless });
+		assert.equal((await launching.restore(draft.tabId, { reconciler: noRecordedHost, launcher: started.launcher })).status, "restored");
+		assert.equal(launching.get(draft.tabId)?.host?.sessionId, null, "the window went away before the first get_state answered");
+
+		const restarted = indexFor(store, claimDir);
+		const { launcher, requests, attachRequests } = attachingLauncher({ state: "attached", host: idless });
+		const report = await restarted.restoreAll({ reconciler: attachableHost(idless), launcher });
+		assert.equal(report.conflicts.length, 0, JSON.stringify(report.conflicts));
+		assert.equal(report.attached.length, 1);
+		assert.equal(attachRequests.length, 1);
+		assert.equal(requests.length, 0, "nothing is started");
+		assert.equal(attachRequests[0]?.recordedHost.sessionId, null, "no expected id is carried, so the session reads it from the process");
+
+		// The id the attached session then reports is recorded like any new session's.
+		assert.equal(await restarted.recordHostSessionId(draft.tabId, "S-LEARNED"), true);
+		assert.equal(restarted.get(draft.tabId)?.host?.sessionId, "S-LEARNED");
+	});
+
 	it("leaves a fileless draft a provably dead writer owned to an explicit open", async () => {
 		const { claimDir, store, tabId, handle } = await draftLeftLiveByAReload();
 		const restarted = indexFor(store, claimDir);

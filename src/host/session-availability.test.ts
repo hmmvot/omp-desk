@@ -217,6 +217,38 @@ describe("availability policy", () => {
 		const mismatched = classify(observed(generation), { ...handle, pid: 999 });
 		assert.equal(mismatched.availability, "live");
 		assert.equal(mismatched.attachableHost, null);
-		assert.match(mismatched.detail, /Not attaching/);
+		assert.match(mismatched.detail, /cannot prove it is the one it started/);
+	});
+
+	describe("a live host whose OMP session id was never recorded (a reload right after New Session)", () => {
+		const idless = (handle: OmpHostHandle): OmpHostHandle => ({ ...handle, sessionId: null });
+		const attachable = (entry: SessionIndexEntry, host: OmpHostHandle) => classifySessionAvailability({
+			entry, fileExists: entry.sessionFile !== null, claim: null, localLive: false,
+			verdict: { kind: "attachable", host, pin: provenPin(host), detail: "This session is running. Resume to reconnect to it." },
+		});
+
+		it("is attachable for a fileless row, so its session learns the id from the process", () => {
+			const handle = idless(runningHandle());
+			const entry: SessionIndexEntry = { ...recordedEntry(handle), kind: "draft", sessionFile: null, sessionId: null, availability: "draft" };
+			const classified = attachable(entry, handle);
+			assert.equal(classified.availability, "live");
+			assert.deepEqual(classified.attachableHost, handle);
+		});
+
+		it("is attachable for a row with a file but no recorded id: the session checks the process against the file", () => {
+			const handle = idless(runningHandle());
+			const entry: SessionIndexEntry = { ...recordedEntry(handle), sessionId: null };
+			assert.deepEqual(attachable(entry, handle).attachableHost, handle);
+		});
+
+		it("still refuses a reported id that differs from the recorded one, and says what to do", () => {
+			const recorded = runningHandle("S-RECORDED");
+			const entry = recordedEntry(recorded);
+			const switched = attachable(entry, runningHandle("S-OTHER"));
+			assert.equal(switched.attachableHost, null);
+			assert.match(switched.detail, /does not match the recorded one/);
+			assert.match(switched.detail, /Stop or Kill/);
+			assert.doesNotMatch(switched.detail, /Resume to reconnect/, "no advice that cannot work");
+		});
 	});
 });
