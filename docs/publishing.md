@@ -101,7 +101,7 @@ Before publishing:
 - Each VSIX also holds `extension/out/native-stage.js` (ADR-0076): the one-shot child that stages and verifies `koffi.node` before the host loads it. It is built by the `native-stage` target of `esbuild.mjs` like the other bundles and needs nothing extra to package.
 - Both packages build without `vsce` warnings; read every warning.
 - Install each package into a throw-away VS Code profile (`code --user-data-dir <dir> --extensions-dir <dir> --install-extension <file>`) and check that the Sessions view opens, a Chat session and a Terminal session start against a real `omp`, and the OMP Desk output channel shows no errors. The arm64 package can only be checked on an arm64 machine.
-- Re-read the README as rendered by `vsce`'s link rewriting: every image and link must resolve on GitHub.
+- Re-read the README as rendered by `vsce`'s link rewriting: every image and link must resolve on GitHub. Extract `extension/readme.md` and `extension/changelog.md` from the VSIX (`tar -xf <file>.vsix extension/readme.md extension/changelog.md`): with `repository` set in `package.json`, `vsce` rewrites a relative link to `https://github.com/hmmvot/omp-desk/blob/HEAD/<path>` (keeping its `#anchor`) and an image to `https://github.com/hmmvot/omp-desk/raw/HEAD/<path>`. The README links to the user guide in `docs/guide/`, which the package does not contain (`docs/**` is in `.vscodeignore`), so those links work only for a commit that is on GitHub: push before publishing. Check that every relative link of the README, the changelog and `docs/guide/` resolves in the repository, and that the in-product link to the troubleshooting page (`NATIVE_TROUBLESHOOTING_URL` in `src/extension.ts`) still names an existing heading.
 
 After publishing:
 
