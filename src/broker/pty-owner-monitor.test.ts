@@ -532,11 +532,22 @@ async function helperCopy(): Promise<PtyOwnerWatchHelper> {
 
 const windowsOnly = { skip: process.platform !== "win32" ? "the owner-watch helper is implemented for Windows only" : false };
 
+/**
+ * How long a helper that never answers is waited for, which is not an expectation of how fast one starts. The helper is a
+ * PowerShell script that compiles its C# on start; on a shared CI runner busy with other test files the first start took
+ * 21 s, past the production bound of 20 s, and the test failed for the runner's speed and not for the helper's answer.
+ */
+const HELPER_HANG_BOUND_MS = 180_000;
+
+/** The monitor's own launch, with the hang bound: what `PtyOwnerMonitor` does by default, except for how long it waits. */
+const realWatcherFor = (helper: PtyOwnerWatchHelper, brokerPid: number) => (events: PtyOwnerWatchEvents): Promise<PtyOwnerWatcherLaunch> =>
+	startPtyOwnerWatcher(events, { helper, brokerPid, admitTimeoutMs: HELPER_HANG_BOUND_MS });
+
 describe("owner watch against real processes", windowsOnly, () => {
 	it("admits modern default and debug hosts only with their independently read role pair", async () => {
 		const started = await startPtyOwnerWatcher(
 			{ onSignaledMain: () => undefined, onWatchLost: () => undefined },
-			{ helper: await helperCopy(), brokerPid: process.pid, admitTimeoutMs: 20_000 },
+			{ helper: await helperCopy(), brokerPid: process.pid, admitTimeoutMs: HELPER_HANG_BOUND_MS },
 		);
 		assert.ok(started.watcher, started.detail ?? "the watch did not start");
 		try {
@@ -565,7 +576,7 @@ describe("owner watch against real processes", windowsOnly, () => {
 	it("refuses generic, conflicting and misleading utility roles without admitting a main", async () => {
 		const started = await startPtyOwnerWatcher(
 			{ onSignaledMain: () => assert.fail("no refused role may retain an owner handle"), onWatchLost: () => undefined },
-			{ helper: await helperCopy(), brokerPid: process.pid, admitTimeoutMs: 20_000 },
+			{ helper: await helperCopy(), brokerPid: process.pid, admitTimeoutMs: HELPER_HANG_BOUND_MS },
 		);
 		assert.ok(started.watcher, started.detail ?? "the watch did not start");
 		const cases: Array<{ args: string[]; env?: Record<string, string> }> = [
@@ -607,6 +618,7 @@ describe("owner watch against real processes", windowsOnly, () => {
 			kind: "folder-shell",
 			brokerPid: process.pid,
 			helper,
+			launchWatcher: realWatcherFor(helper, process.pid),
 			graceMs: 300,
 			onStatusChanged: () => undefined,
 			onAutoStop: async reason => {
@@ -668,7 +680,7 @@ describe("owner watch against real processes", windowsOnly, () => {
 				onSignaledMain: (pid, creationTime) => signals.push({ pid, creationTime }),
 				onWatchLost: detail => losses.push(detail),
 			},
-			{ helper, brokerPid: process.pid, admitTimeoutMs: 20_000 },
+			{ helper, brokerPid: process.pid, admitTimeoutMs: HELPER_HANG_BOUND_MS },
 		);
 		assert.ok(started.watcher, started.detail ?? "the watch did not start");
 		const watcher = started.watcher;
@@ -696,6 +708,7 @@ describe("owner watch against real processes", windowsOnly, () => {
 			kind: "folder-shell",
 			brokerPid: 4242,
 			helper,
+			launchWatcher: realWatcherFor(helper, 4242),
 			graceMs: 200,
 			onStatusChanged: () => undefined,
 			onAutoStop: async () => {
@@ -717,6 +730,7 @@ describe("owner watch against real processes", windowsOnly, () => {
 			kind: "folder-shell",
 			brokerPid: 4242,
 			helper,
+			launchWatcher: realWatcherFor(helper, 4242),
 			graceMs: 200,
 			onStatusChanged: () => undefined,
 			onAutoStop: async () => {
