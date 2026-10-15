@@ -250,8 +250,11 @@ describe("managed-rpc broker end to end", { skip: SKIP }, () => {
 		assert.equal(attached.child.state, "running");
 		assert.ok((attached.child.pid ?? 0) > 0);
 		assert.notEqual(attached.child.pid, handle.brokerPid);
-		assert.equal(attached.rpcProtocol, 2, "the broker negotiated after ready");
-		assert.equal(JSON.parse(attached.ready ?? "{}").type, "ready");
+		// The child's `ready` line can arrive after the attach answered; the broker then pushes it once, as an event.
+		const late = attached.rpcProtocol === null ? await seen.whenEvent(event => event.type === "ready") : null;
+		const readyLine = late?.type === "ready" ? late.line : attached.ready;
+		assert.equal(late?.type === "ready" ? late.rpcProtocol : attached.rpcProtocol, 2, "the broker negotiated after ready");
+		assert.equal(JSON.parse(readyLine ?? "{}").type, "ready");
 		assert.equal(handle.inputOwned, true);
 
 		await send(handle, { type: "echo", text: "hello" });

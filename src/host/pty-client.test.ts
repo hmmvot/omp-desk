@@ -649,8 +649,11 @@ describe("broker end to end", { skip: SKIP }, () => {
 			assert.equal(handle.statusValue?.ownerStop.owners[0]?.signaled, true);
 			assert.equal(isPtyProcessAlive(shellPid), false, "the owning instance exited and the shell survived");
 			// The attempt is the broker's ordinary identity-safe stop, so it claims exactly
-			// what it proved and keeps the slot recoverable (ADR-0029).
-			assert.match(handle.statusValue?.ownerStop.detail ?? "", /tree unknown/);
+			// what it proved and keeps the slot recoverable (ADR-0029). The process-table read
+			// that follows the stop names the shell's grandchild while it is still alive
+			// (`remaining`) and nothing once ConPTY has reaped it (`unknown`): which one it reads
+			// is a matter of milliseconds, and neither is ever `empty`.
+			assert.match(handle.statusValue?.ownerStop.detail ?? "", /descendant tree (unknown|remaining) \(parent-links-only\)/);
 			assert.equal((await readPtyRecord(storage, slot)).kind, "ok");
 			const logName = path.basename(client.recordPath(slot)).replace(/\.json$/, "");
 			assert.match(await readFile(path.join(client.stateDirectory(), "logs", `${logName}.log`), "utf8"), /owner stop attempt/);
@@ -702,7 +705,7 @@ describe("broker end to end", { skip: SKIP }, () => {
 			await waitForStatus(reattached.handle, status => status.state === "exited" && status.ownerStop.state === "stopped");
 			const after = reattached.handle.statusValue;
 			assert.equal(after?.ownerStop.owners[0]?.signaled, true);
-			assert.match(after?.ownerStop.detail ?? "", /tree unknown/);
+			assert.match(after?.ownerStop.detail ?? "", /descendant tree (unknown|remaining) \(parent-links-only\)/);
 			assert.equal((await readPtyRecord(storage, slot)).kind, "ok");
 		} finally {
 			try {
