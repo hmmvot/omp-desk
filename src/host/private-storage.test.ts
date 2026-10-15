@@ -412,6 +412,7 @@ it("leaves the access rules untouched when the account cannot be resolved, after
 		});
 		assert.equal(restriction.restricted, false);
 		assert.match(restriction.reason ?? "", /access rules were left untouched/);
+		assert.match(restriction.reason ?? "", /could not be resolved \(the security read did not finish in 20000 ms\)/, "the cause of the failed reading is in the refusal");
 		assert.deepEqual(icacls, []);
 		assert.equal(reads, 1, "a timed-out reading is not repeated within the same pass");
 	});

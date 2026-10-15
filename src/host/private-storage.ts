@@ -884,7 +884,7 @@ export async function restrictPrivateStorage(input: {
 	if (account === null || !isSid(account)) {
 		return {
 			restricted: false,
-			reason: "the owning account could not be resolved, so the access rules were left untouched",
+			reason: `the owning account could not be resolved${security?.failure ? ` (${security.failure})` : ""}, so the access rules were left untouched`,
 			readiness: null,
 		};
 	}
