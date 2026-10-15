@@ -54,7 +54,7 @@ import {
 import { PtyBrokerClient, type PtyHandle, type PtyHandleEvent } from "./pty-client.ts";
 import { PtyRequestError } from "./broker-handle.ts";
 import { connectPtyBroker } from "./pty-ipc.ts";
-import { isPtyProcessAlive, queryPtyProcessTree, waitForPtyProcessGone } from "./pty-identity.ts";
+import { isPtyProcessAlive, queryPtyProcessIdentity, queryPtyProcessTree, waitForPtyProcessGone } from "./pty-identity.ts";
 import { loadWin32Native, setWin32NativeForTest } from "./win32-native.ts";
 import { installedAddonAsset } from "./win32-test-support.ts";
 import { ptyRecordPath, readPtyRecord } from "./pty-registry.ts";
@@ -519,6 +519,8 @@ describe("broker end to end", { skip: SKIP }, () => {
 		const tree = await queryPtyProcessTree(nativePid as number);
 		assert.equal(tree.kind, "found");
 		assert.equal(tree.kind === "found" ? tree.pids.includes(grandchild) : false, true);
+		const grandchildIdentity = await queryPtyProcessIdentity(grandchild);
+		assert.equal(grandchildIdentity.kind, "found", "the descendant's creation time is read while it runs, so its end is told from a reused id");
 
 		const stopped = await handle.stop({ timeoutMs: 30_000 });
 		// The writer (the shell itself) is proven gone; the tree beyond it is not provable
@@ -526,10 +528,13 @@ describe("broker end to end", { skip: SKIP }, () => {
 		assert.equal(stopped.pidGone, true, stopped.detail);
 		assert.equal(stopped.verified, false, stopped.detail);
 		assert.equal(stopped.treeEvidence, "parent-links-only");
-		// The root's exit is asserted through `pidGone`, the broker's identity-safe
-		// reading, not by asking the kernel about a bare process id: a numeric id alone is
-		// not evidence, because a reused id reads as alive.
-		assert.equal(isPtyProcessAlive(grandchild), false, "the shell's descendant outlived the stop");
+		// The shell's exit is asserted through `pidGone`, the broker's identity-safe reading, and the stop says nothing
+		// about the descendant beyond the survivors it happened to see. Closing the pseudo console ends a descendant that
+		// shares it, but the console host does that after the shell is gone, not before `stop` answers: the descendant's
+		// end is awaited by its own creation time (a bare numeric id is not evidence, a reused id reads as alive), under a
+		// bound that only a descendant that is never ended can reach.
+		const descendantEnd = await waitForPtyProcessGone(grandchild, grandchildIdentity.kind === "found" ? grandchildIdentity.creationTime : null, 60_000);
+		assert.equal(descendantEnd.gone, true, `the shell's descendant outlived the stop: ${descendantEnd.detail}`);
 		// The broker keeps its record and stays reachable: the slot must remain recoverable
 		// while the tree is unproven.
 		assert.equal((await readPtyRecord(storage, slot)).kind, "ok");
