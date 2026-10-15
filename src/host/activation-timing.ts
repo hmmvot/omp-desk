@@ -59,11 +59,11 @@ export class ActivationTimer {
 	 * One line: the lead-in the caller measured before this timer started (module evaluation, the host's age), each phase as
 	 * `name wall ms (cpu N)`, and the total. Milliseconds are rounded; a phase under 1 ms still reads `0`.
 	 */
-	summary(leadIn: ReadonlyArray<readonly [string, number]> = []): string {
+	summary(leadIn: ReadonlyArray<readonly [name: string, wallMs: number, cpuMs?: number]> = []): string {
 		const total = this.#mark.wall - this.#started.wall;
 		const totalCpu = this.#mark.cpu - this.#started.cpu;
 		const parts = [
-			...leadIn.map(([name, ms]) => `${name} ${Math.round(ms)}`),
+			...leadIn.map(([name, ms, cpu]) => `${name} ${Math.round(ms)}${cpu === undefined ? "" : ` (cpu ${Math.round(cpu)})`}`),
 			...this.#phases.map(phase => `${phase.name} ${Math.round(phase.wallMs)} (cpu ${Math.round(phase.cpuMs)})`),
 		];
 		return [...parts, `activate() total ${Math.round(total)} (cpu ${Math.round(totalCpu)})`].join(" · ");

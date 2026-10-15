@@ -34,6 +34,11 @@ describe("the activation timer", () => {
 		);
 	});
 
+	it("gives a lead-in its CPU time when it has one", () => {
+		const { timer } = clock();
+		assert.equal(timer.summary([["bundle evaluation", 140.4, 120.6], ["host up", 5]]), "bundle evaluation 140 (cpu 121) · host up 5 · activate() total 0 (cpu 0)");
+	});
+
 	it("reads without a lead-in or phases", () => {
 		const { timer } = clock();
 		assert.equal(timer.summary(), "activate() total 0 (cpu 0)");

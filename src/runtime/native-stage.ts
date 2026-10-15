@@ -14,6 +14,7 @@
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { stageRuntimeAssets } from "../host/runtime-assets.ts";
+import { recordNativeProof } from "../host/native-proof.ts";
 import { startWin32Native, win32NativeFailure } from "../host/win32-native.ts";
 
 /** Where the child's time went, in milliseconds: its process age when staging began (runtime boot and module load), loading the packaged module, staging the copy. */
@@ -25,7 +26,7 @@ export interface NativeStageTiming {
 
 /** What the child reports on its one line of output. */
 export type NativeStageVerdict =
-	| { readonly kind: "staged"; readonly path: string; readonly sha256: string; readonly timing?: NativeStageTiming }
+	| { readonly kind: "staged"; readonly path: string; readonly sha256: string; readonly timing?: NativeStageTiming; /** `recorded`, or why no proof was recorded. */ readonly proof?: string }
 	| { readonly kind: "refused"; readonly reason: string };
 
 /** Stage the packaged module under `storageDir`; never throws, every failure is a `refused` verdict. */
@@ -38,7 +39,16 @@ export async function stageNativeModule(packaged: string, storageDir: string): P
 		if (native === null) return { kind: "refused", reason: win32NativeFailure() ?? "the packaged native module did not load" };
 		const [staged] = await stageRuntimeAssets({ storageDir, sourcePaths: [packaged] });
 		if (staged === undefined) return { kind: "refused", reason: "staging returned no copy" };
-		return { kind: "staged", path: staged.path, sha256: staged.sha256, timing: { bootMs, loadMs: loaded - bootMs, stageMs: performance.now() - loaded } };
+		const stagedAt = performance.now();
+		// The verification passed: record it, so the next activation can skip this child (ADR-0076, decision 11). A record that
+		// cannot be written costs only that warm start; the staging itself succeeded.
+		let proof = "recorded";
+		try {
+			await recordNativeProof({ storageDir, packagedSha256: sha256, stagedPath: staged.path });
+		} catch (error) {
+			proof = error instanceof Error ? error.message : String(error);
+		}
+		return { kind: "staged", path: staged.path, sha256: staged.sha256, proof, timing: { bootMs, loadMs: loaded - bootMs, stageMs: stagedAt - loaded } };
 	} catch (error) {
 		return { kind: "refused", reason: error instanceof Error ? error.message : String(error) };
 	}

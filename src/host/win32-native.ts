@@ -15,6 +15,7 @@
  * There is deliberately no PowerShell fallback.
  */
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import type { Logger } from "../shared/logger.ts";
 import { silentLogger } from "../shared/logger.ts";
@@ -480,48 +481,155 @@ function bindSecurity(koffi: Koffi, lane: CallLane): Pick<Win32Native, "readSecu
 	};
 }
 
-/**
- * Load the staged addon and bind the calls.
- *
- * Throws, naming the cause, when the copy no longer holds the bytes its digest names, is not an
- * image for this process's architecture, or does not load. `dlopen` is the one load of this file
- * in this process: the bytes just hashed are the bytes a directly following load maps (the gap
- * between them follows a verification that passed, ADR-0076 decision 4).
- */
-export async function loadWin32Native(asset: NativeModuleAsset, arch: string = process.arch): Promise<Win32Native> {
-	const expected = PE_MACHINES[arch];
-	if (expected === undefined) throw new Error(`no native module is shipped for ${arch}`);
-	let bytes: Buffer;
-	try {
-		bytes = await readFile(asset.path);
-	} catch (error) {
-		throw new Error(`the staged native module cannot be read (${error instanceof Error ? error.message : String(error)})`);
-	}
+/** One timed step of loading the addon: wall time, and the host process's CPU time (user + system) over the same span. */
+export interface NativeLoadStep {
+	readonly name: "read" | "hash" | "dlopen" | "bind";
+	readonly wallMs: number;
+	readonly cpuMs: number;
+}
+
+/** `process.cpuUsage()` in milliseconds. */
+function processCpuMs(): number {
+	const usage = process.cpuUsage();
+	return (usage.user + usage.system) / 1000;
+}
+
+/** Times consecutive steps of one load; the steps land in `into`. */
+function stepClock(into: NativeLoadStep[] | undefined): (name: NativeLoadStep["name"]) => void {
+	let wall = performance.now();
+	let cpu = processCpuMs();
+	return name => {
+		const nextWall = performance.now();
+		const nextCpu = processCpuMs();
+		into?.push({ name, wallMs: nextWall - wall, cpuMs: nextCpu - cpu });
+		wall = nextWall;
+		cpu = nextCpu;
+	};
+}
+
+/** Everything after the bytes are in memory: digest, image type, the one `dlopen`, the bindings. Synchronous. */
+function loadFromBytes(asset: NativeModuleAsset, bytes: Buffer, arch: string, expected: number, step: (name: NativeLoadStep["name"]) => void): Win32Native {
 	if (createHash("sha256").update(bytes).digest("hex") !== asset.sha256) throw new Error("the staged native module does not match its digest");
 	const machine = peMachineOf(bytes);
 	if (machine !== expected) {
 		throw new Error(`the staged native module is not a ${arch} image (PE machine ${machine === null ? "none" : `0x${machine.toString(16)}`})`);
 	}
+	step("hash");
 	const holder: { exports: unknown } = { exports: {} };
 	try {
 		process.dlopen(holder, asset.path);
 	} catch (error) {
 		throw new Error(`the native module did not load (${error instanceof Error ? error.message : String(error)})`);
 	}
+	step("dlopen");
 	const koffi = holder.exports as Koffi;
-	return { ...bindMutex(koffi), ...bindProcess(koffi), ...bindPipe(koffi), ...bindSecurity(koffi, new CallLane()) };
+	const native: Win32Native = { ...bindMutex(koffi), ...bindProcess(koffi), ...bindPipe(koffi), ...bindSecurity(koffi, new CallLane()) };
+	step("bind");
+	return native;
+}
+
+function expectedMachine(arch: string): number {
+	const expected = PE_MACHINES[arch];
+	if (expected === undefined) throw new Error(`no native module is shipped for ${arch}`);
+	return expected;
+}
+
+function unreadable(error: unknown): Error {
+	return new Error(`the staged native module cannot be read (${error instanceof Error ? error.message : String(error)})`);
+}
+
+/**
+ * Load the staged addon and bind the calls.
+ *
+ * Throws, naming the cause, when the copy no longer holds the bytes its digest names, is not an
+ * image for this process's architecture, or does not load. `dlopen` is the one load of this file
+ * in this process: the bytes just hashed are the bytes a directly following load maps (the gap
+ * between them follows a verification that passed, ADR-0076 decision 4). `steps` receives the
+ * timing of the load's parts.
+ */
+export async function loadWin32Native(asset: NativeModuleAsset, arch: string = process.arch, steps?: NativeLoadStep[]): Promise<Win32Native> {
+	const expected = expectedMachine(arch);
+	const step = stepClock(steps);
+	let bytes: Buffer;
+	try {
+		bytes = await readFile(asset.path);
+	} catch (error) {
+		throw unreadable(error);
+	}
+	step("read");
+	return loadFromBytes(asset, bytes, arch, expected, step);
+}
+
+/**
+ * The same load in one synchronous step, for a caller that must not spend a turn of the host's event loop on any await
+ * (the warm start, ADR-0076 decision 11).
+ */
+export function loadWin32NativeSync(asset: NativeModuleAsset, arch: string = process.arch, steps?: NativeLoadStep[]): Win32Native {
+	const expected = expectedMachine(arch);
+	const step = stepClock(steps);
+	let bytes: Buffer;
+	try {
+		bytes = readFileSync(asset.path);
+	} catch (error) {
+		throw unreadable(error);
+	}
+	step("read");
+	return loadFromBytes(asset, bytes, arch, expected, step);
 }
 
 let shared: Promise<Win32Native | null> | null = null;
 /** The message of the failure that made the load settle as unavailable; `null` while loading, after a load and when none was started. */
 let failure: string | null = null;
+/** The timing of the parts of the load that produced the shared module; empty before one. */
+let loadSteps: readonly NativeLoadStep[] = [];
+/** The steps of the load as one phrase: `read 3 (cpu 2) · hash 4 (cpu 4) · dlopen 20 (cpu 18) · bind 12 (cpu 12)`. */
+export function describeLoadSteps(steps: readonly NativeLoadStep[]): string {
+	return steps.map(step => `${step.name} ${Math.round(step.wallMs)} (cpu ${Math.round(step.cpuMs)})`).join(" · ");
+}
+
+/** Whether the shared module came from the synchronous warm start. */
+let startedWarm = false;
+
+/** The parts of the load that produced the shared module, timed; empty before one. */
+export function win32NativeLoadSteps(): readonly NativeLoadStep[] {
+	return loadSteps;
+}
+
+/** Whether the shared module came from the synchronous warm start (ADR-0076 decision 11) rather than from a staging child. */
+export function win32NativeStartedWarm(): boolean {
+	return startedWarm;
+}
 
 /**
  * Start the one load of this process. Called first thing in activation, before any reader asks:
  * every reader awaits {@link win32Native}, and `null` is only ever the settled "unavailable".
  * `source` throws, naming the cause, when it has no module to give: the message is kept for {@link win32NativeFailure}.
+ *
+ * `warm`, when given, runs first and synchronously: a module it names that loads is the shared module before this call returns, with
+ * no turn of the event loop in between (ADR-0076 decision 11). A warm start that has nothing, or fails in any way, falls through to
+ * `source`, which reports the cause.
  */
-export function startWin32Native(source: () => Promise<NativeModuleAsset | null>, log: Logger = silentLogger): Promise<Win32Native | null> {
+export function startWin32Native(
+	source: () => Promise<NativeModuleAsset | null>,
+	log: Logger = silentLogger,
+	warm?: () => NativeModuleAsset | null,
+): Promise<Win32Native | null> {
+	if (shared === null && warm !== undefined) {
+		try {
+			const asset = warm();
+			if (asset !== null) {
+				const steps: NativeLoadStep[] = [];
+				const native = loadWin32NativeSync(asset, process.arch, steps);
+				failure = null;
+				loadSteps = steps;
+				startedWarm = true;
+				shared = Promise.resolve(native);
+				return shared;
+			}
+		} catch (error) {
+			log.debug(`the warm start of the native module did not load: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
 	shared ??= (async () => {
 		failure = null;
 		try {
@@ -531,7 +639,10 @@ export function startWin32Native(source: () => Promise<NativeModuleAsset | null>
 				log.warn(`the native module is unavailable: ${failure}; Windows checks read as unknown`);
 				return null;
 			}
-			return await loadWin32Native(asset);
+			const steps: NativeLoadStep[] = [];
+			const native = await loadWin32Native(asset, process.arch, steps);
+			loadSteps = steps;
+			return native;
 		} catch (error) {
 			failure = error instanceof Error ? error.message : String(error);
 			log.warn(`the native module is unavailable: ${failure}; Windows checks read as unknown`);
@@ -554,5 +665,7 @@ export function win32Native(): Promise<Win32Native | null> {
 /** Replace the process's native module. Tests only. */
 export function setWin32NativeForTest(native: Win32Native | null | undefined): void {
 	failure = null;
+	loadSteps = [];
+	startedWarm = false;
 	shared = native === undefined ? null : Promise.resolve(native);
 }

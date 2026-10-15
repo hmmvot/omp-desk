@@ -10,7 +10,7 @@ import { createHash } from "node:crypto";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
-import { MODULE_EVALUATION_STARTED_AT } from "./host/module-clock";
+import { MODULE_EVALUATION_STARTED_AT, MODULE_EVALUATION_STARTED_CPU_MS } from "./host/module-clock";
 import { ActivationTimer } from "./host/activation-timing";
 import { UNAVAILABLE_RELOAD_MESSAGE, createDetailHtml, createMermaidPreviewHtml, createShellHtml, createUnavailableGuestHtml } from "./host/guest-webview";
 import { chatExitText, type ChatExitReason } from "./chat/exit-reason";
@@ -116,7 +116,8 @@ import { holderSeemsAlive } from "./host/holder-liveness";
 import { claimFileNameFor, startClaimWatch } from "./host/claim-watch";
 import { WindowRegistry } from "./host/window-registry";
 import { ExternalLeaseObserver, nativeLeaseProbe, ompSessionOwnersDir } from "./host/omp-session-lease";
-import { startWin32Native, win32Native, win32NativeFailure } from "./host/win32-native";
+import { describeLoadSteps, startWin32Native, win32Native, win32NativeFailure, win32NativeLoadSteps, win32NativeStartedWarm } from "./host/win32-native";
+import { warmNativeAsset } from "./host/native-proof";
 import { announceNativeFailure, nativeDiagnosticsFor, simulatedNativeDelayMs, simulatedNativeFailure } from "./wiring/native-module-notice";
 import { canonicalFolderKey, folderHistoryDeletionSubject, inspectSessionFile, scanFolderHistory } from "./host/folder-history";
 import type { FolderHistoryCandidate, FolderHistoryIndexedEntry, FolderHistoryScan } from "./host/folder-history";
@@ -1435,6 +1436,7 @@ async function revealDesktopNotification(index: SessionIndex, extensionId: strin
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
   const activationEnteredAt = performance.now();
+  const activationEnteredCpu = (process.cpuUsage().user + process.cpuUsage().system) / 1000;
   const activation = new ActivationTimer();
   window = createWindowState(context);
   const s = windowState();
@@ -1451,6 +1453,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   if (process.platform === "win32") {
     const nativeStartedAt = performance.now();
     let nativeStagedAfter = 0;
+    let warmRefusal = "";
+    let warmAgeMs = 0;
     const nativeLoad = startWin32Native(async () => {
       const delayMs = simulatedNativeDelayMs(process.env.OMPDESK_TEST_NATIVE_DELAY_MS);
       if (delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs));
@@ -1461,10 +1465,26 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       // The load records why it has nothing to load; staging's own words are the cause the notice classifies.
       if (asset === null) throw new Error(s.staging.nativeRefusal() ?? "the native module could not be staged");
       return asset;
-    }, log);
+    }, log, () => {
+      // A warm start (ADR-0076, decision 11): the layout was verified by an earlier staging and nothing it covered changed, so the
+      // staged copy loads in this very step, with no child process and no turn of the event loop. The test hooks ask for the slow
+      // or the failing path, so they bypass it.
+      if (simulatedNativeDelayMs(process.env.OMPDESK_TEST_NATIVE_DELAY_MS) > 0 || simulatedNativeFailure(process.env.OMPDESK_TEST_NATIVE_FAILURE) !== null) return null;
+      const warm = warmNativeAsset({ storageDir: context.globalStorageUri.fsPath, packagedPath: context.asAbsolutePath(NATIVE_ADDON) });
+      if (warm.kind === "none") {
+        warmRefusal = warm.reason;
+        return null;
+      }
+      warmAgeMs = warm.ageMs;
+      return warm.asset;
+    });
     // Once per window: a load that settled as unavailable says so, with what to do (ADR-0076, decision 6).
     void nativeLoad.then(native => {
-      log.info(`window timing: native module ${native === null ? "unavailable" : "ready"} ${Math.round(performance.now() - nativeStartedAt)} ms after activation began (staging child ${Math.round(nativeStagedAfter)} ms, load ${Math.round(performance.now() - nativeStartedAt - nativeStagedAfter)} ms)`);
+      const ready = Math.round(performance.now() - nativeStartedAt);
+      const steps = describeLoadSteps(win32NativeLoadSteps());
+      log.info(win32NativeStartedWarm()
+        ? `window timing: native module ready ${ready} ms after activation began (warm start from a verification ${Math.round(warmAgeMs / 60_000)} min old, no staging child; ${steps})`
+        : `window timing: native module ${native === null ? "unavailable" : "ready"} ${ready} ms after activation began (staging child ${Math.round(nativeStagedAfter)} ms, load ${Math.round(ready - nativeStagedAfter)} ms${steps === "" ? "" : `: ${steps}`}; no warm start: ${warmRefusal === "" ? "not tried" : warmRefusal})`);
       return announceNativeFailure({
         failure: win32NativeFailure,
         showError: (message, buttons) => vscode.window.showErrorMessage(`OMP Desk: ${message}`, ...buttons),
@@ -2173,7 +2193,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // report their own failure; this one is just early, and silent.
   void s.staging.entries().catch(() => {});
   activation.mark("rest of setup");
-  log.info(`window timing: activation ${activation.summary([["host up when the bundle began loading", MODULE_EVALUATION_STARTED_AT], ["bundle evaluation", activationEnteredAt - MODULE_EVALUATION_STARTED_AT]])}`);
+  log.info(`window timing: activation ${activation.summary([["host up when the bundle began loading", MODULE_EVALUATION_STARTED_AT], ["bundle evaluation", activationEnteredAt - MODULE_EVALUATION_STARTED_AT, activationEnteredCpu - MODULE_EVALUATION_STARTED_CPU_MS]])}`);
   log.info("extension activated");
 }
 

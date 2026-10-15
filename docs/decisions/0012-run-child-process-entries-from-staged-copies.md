@@ -11,6 +11,8 @@ date: 2026-09-24
 
 > **Narrow amendment (accepted):** [ADR-0074](0074-run-chat-brokers-on-the-sessions-own-bun-runtime-with-code-exe-as-fallback.md) states how a runtime executable that is not staged is trusted: a Chat broker may run on the session's `bun.exe` in place, under ADR-0054's access rule applied to the executable's path. The staging of everything the extension ships, and this record's rules for it, are unchanged.
 
+> **Narrow amendment ([ADR-0076](0076-call-win32-in-process-through-a-staged-koffi-module-instead-of-starting-powershell.md), decision 11):** for the native module only, a staging verified within the last 24 hours and unchanged since (a recorded stat proof) is not verified again by a child at the next window start; the module's bytes are still re-hashed before every load. The rules for every other staged file are unchanged.
+
 ## Context and Problem Statement
 
 Three packaged files are executed from inside the installed extension folder:

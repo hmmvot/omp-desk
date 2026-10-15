@@ -120,7 +120,7 @@ export function createRuntimeStaging(deps: RuntimeStagingDeps): RuntimeStaging {
 						if (verdict.timing !== undefined) {
 							const total = performance.now() - startedAt;
 							const { bootMs, loadMs, stageMs } = verdict.timing;
-							deps.log.info(`window timing: native staging child ${Math.round(total)} ms (runtime boot ${Math.round(bootMs)}, load ${Math.round(loadMs)}, stage and verify ${Math.round(stageMs)}, start and exit ${Math.round(total - bootMs - loadMs - stageMs)})`);
+							deps.log.info(`window timing: native staging child ${Math.round(total)} ms (runtime boot ${Math.round(bootMs)}, load ${Math.round(loadMs)}, stage and verify ${Math.round(stageMs)}, start and exit ${Math.round(total - bootMs - loadMs - stageMs)}); verification proof ${verdict.proof ?? "not reported"}`);
 						}
 						return { path: verdict.path, sha256: verdict.sha256 };
 					}

@@ -5,8 +5,8 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
-import { recordingLogger, type LoggedLine } from "../shared/logger.ts";
-import { loadWin32Native, peMachineOf, setWin32NativeForTest, startWin32Native, win32Native, win32NativeFailure } from "./win32-native.ts";
+import { recordingLogger, silentLogger, type LoggedLine } from "../shared/logger.ts";
+import { describeLoadSteps, loadWin32Native, peMachineOf, setWin32NativeForTest, startWin32Native, win32Native, win32NativeFailure, win32NativeLoadSteps, win32NativeStartedWarm } from "./win32-native.ts";
 import { holdMutex, installedAddonAsset, releaseMutex } from "./win32-test-support.ts";
 
 describe("peMachineOf", () => {
@@ -297,5 +297,43 @@ describe("the process's native module", () => {
 		const native = await startWin32Native(async () => asset);
 		assert.notEqual(native, null);
 		assert.strictEqual(await win32Native(), native);
+	});
+
+	it("times the parts of a load", { skip: process.platform !== "win32" }, async () => {
+		assert.deepEqual(win32NativeLoadSteps(), []);
+		await startWin32Native(async () => installedAddonAsset());
+		assert.deepEqual(win32NativeLoadSteps().map(step => step.name), ["read", "hash", "dlopen", "bind"]);
+		assert.ok(win32NativeLoadSteps().every(step => step.wallMs >= 0 && step.cpuMs >= 0));
+		assert.match(describeLoadSteps(win32NativeLoadSteps()), /^read \d+ \(cpu \d+\) · hash \d+ \(cpu \d+\) · dlopen \d+ \(cpu \d+\) · bind \d+ \(cpu \d+\)$/);
+		assert.equal(win32NativeStartedWarm(), false);
+	});
+
+	it("takes a warm start in the very call that asks, without ever running the slow source", { skip: process.platform !== "win32" }, async () => {
+		const asset = await installedAddonAsset();
+		let slow = 0;
+		const promise = startWin32Native(async () => { slow++; return null; }, silentLogger, () => asset);
+		assert.equal(win32NativeStartedWarm(), true, "settled before the call returned, with no turn of the event loop");
+		assert.notEqual(await promise, null);
+		assert.strictEqual(await win32Native(), await promise);
+		assert.equal(slow, 0);
+		assert.deepEqual(win32NativeLoadSteps().map(step => step.name), ["read", "hash", "dlopen", "bind"]);
+		assert.equal(win32NativeFailure(), null);
+	});
+
+	it("falls through to the slow source when the warm start has nothing or cannot load, and says why only at debug", { skip: process.platform !== "win32" }, async () => {
+		const asset = await installedAddonAsset();
+		let slow = 0;
+		const none = await startWin32Native(async () => { slow++; return asset; }, silentLogger, () => null);
+		assert.notEqual(none, null);
+		assert.equal(slow, 1);
+		assert.equal(win32NativeStartedWarm(), false);
+		setWin32NativeForTest(undefined);
+		const logs: LoggedLine[] = [];
+		const broken = await startWin32Native(async () => { slow++; return asset; }, recordingLogger(logs), () => ({ path: asset.path, sha256: "0".repeat(64) }));
+		assert.notEqual(broken, null, "the slow source loaded it");
+		assert.equal(slow, 2);
+		assert.equal(win32NativeStartedWarm(), false);
+		assert.deepEqual(logs.map(line => line.level), ["debug"]);
+		assert.match(logs[0]!.message, /warm start .* does not match its digest/);
 	});
 });

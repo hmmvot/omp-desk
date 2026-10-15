@@ -7,6 +7,8 @@ date: 2026-10-09
 
 > **Narrowly amended by [ADR-0076](0076-call-win32-in-process-through-a-staged-koffi-module-instead-of-starting-powershell.md):** the module-free .NET reader (decision 1) and the rejected "native in-process reader" are replaced by an in-process native reader (`GetNamedSecurityInfoW` through a staged `koffi.node`), with the same refusal semantics, SID rule and 20 s bound; a NULL DACL reads as an Everyone entry and an unknown ACE type refuses.
 
+> **Narrow amendment ([ADR-0076](0076-call-win32-in-process-through-a-staged-koffi-module-instead-of-starting-powershell.md), decision 11):** the verification of the staged native module's own layout is reused on a warm start, on a recorded stat proof that expires after 24 hours, instead of being repeated by a child process at every window start. Every other store is verified at every use as here.
+
 ## Context and Problem Statement
 
 OMP Desk 0.1.0 rejects legitimate private storage on localized Windows. Its `icacls` listing is decoded as UTF-8 although the tool writes console OEM bytes, and the allowlist compares English account names. Russian Administrators therefore appears as twelve replacement characters and remains refused even if decoded correctly. Owner and current-account names have the same encoding problem.

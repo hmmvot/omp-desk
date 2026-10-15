@@ -3933,3 +3933,53 @@ describe("a save that loses the catalog lock to another window", () => {
 		await until(() => index.persistError === null, "the retry to persist");
 	});
 });
+
+/** A memento that counts the writes of the shared index record that reach it. */
+class CountingStore extends TestStore {
+	writes = 0;
+
+	override async update(key: string, value: unknown): Promise<void> {
+		if (key === SESSION_INDEX_STORAGE_KEY) this.writes++;
+		await super.update(key, value);
+	}
+}
+
+describe("saves that queue behind each other", () => {
+	it("write the index once for every save that had not yet taken its turn, with what all of them changed", async () => {
+		const store = new CountingStore();
+		const { claimDir, cwd } = await tempWorkspace();
+		const index = new SessionIndex({ store, claimStorageDir: claimDir });
+		const entry = await index.createDraft({ cwd });
+		await index.bindEditorSlot("slot:a", entry.tabId, "passive");
+		await index.bindEditorSlot("slot:b", entry.tabId, "passive");
+		const before = store.writes;
+		await Promise.all([
+			index.setEditorMode("slot:a", "terminal"),
+			index.setEditorMode("slot:b", "terminal"),
+			index.setEditorMode("slot:a", "chat"),
+		]);
+		assert.equal(store.writes - before, 1, "three queued saves are one write");
+		const written = store.value as PersistedBindings;
+		assert.equal(written.bindings.find(binding => binding.slotId === "slot:a")?.mode, "chat");
+		assert.equal(written.bindings.find(binding => binding.slotId === "slot:b")?.mode, "terminal");
+
+		await index.setEditorMode("slot:a", "terminal");
+		assert.equal(store.writes - before, 2, "a save after the queue drained is a write of its own");
+	});
+
+	it("share the failure of the write they joined, and write again afterwards", async () => {
+		const store = new RefusingStore();
+		const { claimDir, cwd } = await tempWorkspace();
+		const index = new SessionIndex({ store, claimStorageDir: claimDir, persistRetry: { firstMs: 2, maxMs: 8 } });
+		const entry = await index.createDraft({ cwd });
+		await index.bindEditorSlot("slot:a", entry.tabId, "passive");
+		await index.bindEditorSlot("slot:b", entry.tabId, "passive");
+		store.failure = new CatalogError("busy", "Another VS Code window is writing the OMP Desk profile catalog, so this change was not saved yet.");
+		await Promise.all([index.setEditorMode("slot:a", "terminal"), index.setEditorMode("slot:b", "terminal")]);
+		assert.equal(index.persistBusy, true);
+		store.failure = null;
+		await until(() => index.persistError === null, "the background retry to persist");
+		const written = store.value as PersistedBindings;
+		assert.deepEqual(written.bindings.map(binding => binding.mode).sort(), ["terminal", "terminal"]);
+	});
+});

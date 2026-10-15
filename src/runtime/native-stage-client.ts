@@ -79,9 +79,9 @@ export function parseVerdict(stdout: string): NativeStageVerdict {
 	try {
 		const value: unknown = JSON.parse(line);
 		if (typeof value === "object" && value !== null) {
-			const { kind, path, sha256, reason, timing } = value as Record<string, unknown>;
+			const { kind, path, sha256, reason, timing, proof } = value as Record<string, unknown>;
 			if (kind === "staged" && typeof path === "string" && typeof sha256 === "string" && /^[0-9a-f]{64}$/.test(sha256)) {
-				return { kind, path, sha256, ...parseTiming(timing) };
+				return { kind, path, sha256, ...(typeof proof === "string" ? { proof: proof.slice(0, 300) } : {}), ...parseTiming(timing) };
 			}
 			if (kind === "refused" && typeof reason === "string") return { kind, reason };
 		}

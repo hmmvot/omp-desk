@@ -675,6 +675,8 @@ export class SessionIndex {
 	 * window's rows is chained here too, so it never interleaves with a mutation.
 	 */
 	#persistChain: Promise<void> = Promise.resolve();
+	/** The ordinary save that is queued but has not taken its turn; a later ordinary save waits for it (see `#persistNow`). */
+	#queuedOrdinarySave: Promise<string | null> | null = null;
 	/** Whether the last failed shared write only lost the catalog lock to another window. */
 	#persistBusy = false;
 	/** When the current run of contention began; `null` while writes land. */
@@ -3130,10 +3132,33 @@ export class SessionIndex {
 		/** Make this window's own state follow a landed write. */
 		publish(): void;
 	}): Promise<string | null> {
+		// An ordinary save writes the whole in-memory index as it is at its turn. One that has not reached its turn yet therefore
+		// already carries what a later ordinary save would write, and that later save waits for it instead of queueing a second
+		// write of the same document: a restore that records two rows, or a burst of title and unread edits, costs one catalog
+		// transaction (a lock, a read, a flushed write, a rename) and not one for each.
+		const ordinary = companion === undefined && identity === undefined && expectHost === undefined;
+		if (ordinary && this.#queuedOrdinarySave !== null) return this.#queuedOrdinarySave;
+		const save = this.#persistTurn(companion, identity, expectHost, ordinary ? () => { this.#queuedOrdinarySave = null; } : undefined);
+		if (ordinary) this.#queuedOrdinarySave = save;
+		return save;
+	}
+
+	/** One save queued behind the earlier ones; `atTurn` runs when it is this save's turn, before it captures its snapshot. */
+	async #persistTurn(companion: CatalogRecordChange | undefined, identity: {
+		readonly before: SharedEntry;
+		readonly sessionId: string;
+		readonly previousSessionId?: string;
+	} | undefined, expectHost: {
+		readonly tabId: string;
+		matches(host: { readonly startedAt: string; readonly pid: number | null; readonly rpc?: RecordedRpcIdentity | null } | null): boolean;
+		apply(row: SharedEntry): void;
+		publish(): void;
+	} | undefined, atTurn: (() => void) | undefined): Promise<string | null> {
 		let failure: string | null = null;
 		// Capture each snapshot only at its serialized turn. An earlier identity transaction
 		// publishes or refuses before another save can capture that row, preserving other edits.
 		this.#persistChain = this.#persistChain.then(async () => {
+			atTurn?.();
 			let rejectedIdentity: SharedEntry | null = null;
 			let hostChanged = false;
 			const snapshot: SharedSnapshot = {

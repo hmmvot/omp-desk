@@ -416,7 +416,7 @@ export function permissionsPermitReplacement(permissions: number): boolean {
  * anchor is named in the readiness evidence so the boundary is stated rather than
  * implied, and every component between it and the store is verified.
  */
-function ancestorComponents(root: string): readonly string[] {
+export function ancestorComponents(root: string): readonly string[] {
 	const components: string[] = [];
 	let current = path.dirname(path.resolve(root));
 	while (path.dirname(current) !== current) {
