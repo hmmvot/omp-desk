@@ -500,6 +500,8 @@ interface TabState {
    * external-writer question closes it again unless the row's run intent is `stopped` (ADR-0046, editor first). Cleared when the attempt ends.
    */
   editorOfAttempt: boolean;
+  /** The verb of the open attempt now in flight for this tab, or `null`: a `resumed` click joining a history view upgrades it to a launch. */
+  openingVerb: "started" | "opened" | "resumed" | null;
   /** The last open attempt of this tab ended at a Cancel of its external-writer question (so `openSession` reports it as not opened). */
   openDeclined: boolean;
   /** Frontend for a folder shell or the managed native session. */
@@ -3248,7 +3250,14 @@ async function openTab(
       windowState().editorPanels.openPanel(context, index, tabId);
       refreshLauncher();
     }
+    const inFlightVerb = tabState(tabId).openingVerb;
     await inFlight;
+    // The second click of a double click on a stopped row arrives while the first click's history view is still being opened. It is a
+    // launch request: the history view it joined is over, so the launch runs now (the row already says `Starting`) instead of being dropped.
+    if (verb === "resumed" && inFlightVerb === "opened") {
+      await openTab(context, index, tabId, verb, openIntent, requestedMode, externalConfirmed, keepLiveView, externalRowClicked);
+      return;
+    }
     if (intent.lastOpenRequest > intent.lastEditorClose) {
       const published = stateOf(tabId)?.panel ?? null;
       if (published !== null) await revealExistingTab(index, tabId, published);
@@ -3269,10 +3278,11 @@ async function openTab(
   }
   const attempt = openTabOnce(context, index, tabId, verb, openIntent, mode, externalConfirmed, externalRowClicked);
   s.openingTabs.set(tabId, attempt);
+  tabState(tabId).openingVerb = verb;
   try {
     await attempt;
   } finally {
-    if (s.openingTabs.get(tabId) === attempt) s.openingTabs.delete(tabId);
+    if (s.openingTabs.get(tabId) === attempt) { s.openingTabs.delete(tabId); tabState(tabId).openingVerb = null; }
     tabState(tabId).editorOfAttempt = false;
   }
   const published = stateOf(tabId);
@@ -7471,6 +7481,7 @@ function newTabState(slotId: string): TabState {
     lastOpenRequest: -1,
     lastEditorClose: -1,
     editorOfAttempt: false,
+    openingVerb: null,
     openDeclined: false,
     pipeline: null,
     shellSlot: null,

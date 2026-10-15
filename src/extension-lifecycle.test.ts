@@ -2440,6 +2440,20 @@ describe("verified-owned-writer policy fixtures", () => {
     } finally { provider.dispose(); setLauncherTree(undefined, undefined); harness.window().externalLeases = null; f.runtime.dispose(); }
   });
 
+  it("a launch click that arrives while the first click's history view is still being opened upgrades that attempt to a launch instead of being dropped (double click on a stopped row)", async () => {
+    const f = await legacyFixture("double-click-join", false, true);
+    const events: string[] = [];
+    harness.window().externalLeases = { holds: async () => false };
+    const panels = recordingPanels(events);
+    const operation = pendingOf().begin(TAB, "resume");
+    try {
+      const history = harness.openTab(storage().context, f.index, TAB, "opened");
+      const launch = harness.openTab(storage().context, f.index, TAB, "resumed");
+      await Promise.all([history, launch]);
+      assert.deepEqual(f.operations, ["launch rpc"], "the second click's launch ran after the history view it joined");
+    } finally { operation.end("running"); panels.restore(); harness.window().externalLeases = null; f.runtime.dispose(); await f.index.closeSession(TAB, { confirmedStopped: true }); }
+  });
+
   /** The window's pending-operation registry, which the harness's window type does not list. */
   const pendingOf = (): { begin(key: string, kind: string): { end(status: string): void }; get(key: string): { step: string } | undefined } =>
     (harness.window() as unknown as { pending: ReturnType<typeof pendingOf> }).pending;
