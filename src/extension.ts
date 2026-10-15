@@ -9818,7 +9818,7 @@ function symbolLinkResolver(): SymbolLinkResolver {
       const found = await vscode.commands.executeCommand<vscode.SymbolInformation[] | undefined>("vscode.executeWorkspaceSymbolProvider", text);
       if (!Array.isArray(found)) return null;
       // Providers return fuzzy, ranked lists. Only entries that could be a declaration named `last` are converted,
-      // so unrelated neighbours (`DeskManager` for `Game`) never crowd the exact ones out of the bound; one past
+      // so unrelated neighbours (`DeskManager` for `Desk`) never crowd the exact ones out of the bound; one past
       // the bound tells the resolver the answer was cut.
       const candidates: vscode.SymbolInformation[] = [];
       for (const symbol of found) {
