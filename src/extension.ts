@@ -322,7 +322,6 @@ import {
   HostControlClient,
   HostControlRefusedError,
   queryControlProcessGeneration,
-  setControlHelperScript,
 } from "./host/control-client";
 // Native file observation — read-only evidence. The producer lives in the native
 // host (`src/omp/file-evidence.ts`, wired in `src/omp/host-control.ts`); these are
@@ -374,8 +373,6 @@ const PANEL_VIEW_TYPE = "omp.session";
 // fails the rename with EPERM.
 /** Packaged native host-control module, loaded by `--preload` and `-e`. */
 const HOST_CONTROL_MODULE = "out/omp-host-control.mjs";
-/** Packaged peer-verified pipe helper, run per control connection. */
-const CONTROL_HELPER = "out/verified-pipe.ps1";
 /** Packaged koffi addon the Windows checks run through, staged before it is loaded (ADR-0076). */
 const NATIVE_ADDON = "out/native/koffi.node";
 /** Packaged one-shot child that stages that addon and verifies the tree it lands in (ADR-0076). */
@@ -1349,7 +1346,6 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
       storageDir: () => context.globalStorageUri.fsPath,
       packagedPaths: () => ({
         hostControl: context.asAbsolutePath(HOST_CONTROL_MODULE),
-        controlHelper: context.asAbsolutePath(CONTROL_HELPER),
         renameHelper: context.asAbsolutePath(RENAME_HELPER_SCRIPT),
         runtimeProbe: context.asAbsolutePath(RUNTIME_PROBE_MODULE),
       }),
@@ -1359,7 +1355,6 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
         storageDir: context.globalStorageUri.fsPath,
       }),
       refusal: () => (packageChangedOnDisk() ? UPDATED_ON_DISK_ERROR : null),
-      configureControlHelper: setControlHelperScript,
       log,
     }),
     launcherRuntimeIds: new WeakMap<SessionHostRuntime, number>(),

@@ -10,8 +10,12 @@ import { ptyRuntimeCommand } from "../host/pty-runtime.ts";
 import { startToolSpawnTrace } from "../host/tool-spawn-trace.ts";
 import type { NativeStageVerdict } from "./native-stage.ts";
 
-/** Longest the child may take: it stages one file and verifies a handful of paths. */
-export const NATIVE_STAGE_DEADLINE_MS = 20_000;
+/**
+ * Longest the child may take. It stages one file and verifies a handful of paths in 0.15–0.3 s, but one run on the
+ * development machine took about 15 s (cause not established; a scanner's first look at the unsigned `koffi.node` is the
+ * likely one), and a timeout leaves every Windows check unknown for the life of the window, so the bound is generous.
+ */
+export const NATIVE_STAGE_DEADLINE_MS = 60_000;
 const MAX_VERDICT_BYTES = 16 * 1024;
 
 export async function runNativeStage(input: {

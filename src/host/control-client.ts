@@ -7,16 +7,13 @@
  * Security and native lifecycle contract (ADR-0040):
  *
  * - **No unchecked socket connect.** The production path is
- *   {@link HostControlClient.connectVerified}: a bounded Windows PowerShell
- *   helper opens the named pipe once, proves the server's kernel identity
- *   (`GetNamedPipeServerProcessId` on that same handle, plus the process creation
- *   time from a retained process handle) and only then relays bounded frames
- *   over its private stdio. There is no fallback to a direct socket, and a
- *   blocked helper refuses visibly. The helper is started from a
- *   content-addressed copy outside the installed extension folder (see
- *   {@link setControlHelperScript}), re-hashed immediately before every spawn, so
- *   a reinstall can rename that folder while a host is being verified and a copy
- *   that changed under us is refused rather than executed.
+ *   {@link HostControlClient.connectVerified}: the named pipe is opened once in
+ *   process, the server's kernel identity is proven on that same handle
+ *   (`GetNamedPipeServerProcessId`, plus the process creation time read from the
+ *   kernel) and only then is the handle adopted as the socket the frames travel
+ *   over (ADR-0076 decision 8). Nothing is read or written before the proof, there
+ *   is no fallback to a direct socket, and an unavailable native module refuses
+ *   visibly.
  * - **The key is generated in OMP and sealed to a launch-pinned recipient.** The
  *   rendezvous carries RSA-OAEP-SHA256 ciphertext, never the plaintext; this side
  *   unwraps a *candidate* and trusts it only after the peer proof and the HMAC
@@ -38,14 +35,15 @@
  * handed to the caller only after the genuine host has proved it.
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
-import { createHash, createPublicKey, generateKeyPair } from "node:crypto";
-import { readFile } from "node:fs/promises";
-import { StringDecoder } from "node:string_decoder";
+import { closeSync } from "node:fs";
+import { createPublicKey, generateKeyPair } from "node:crypto";
+import { Socket } from "node:net";
+import { setTimeout as sleep } from "node:timers/promises";
 import { clearTimeout as clearNodeTimeout, setTimeout as setNodeTimeout } from "node:timers";
-import { win32Native } from "./win32-native.ts";
+import { win32Native, type ProcessCreationReading } from "./win32-native.ts";
 import {
 	CONTROL_MAX_FRAME_BYTES,
+	CONTROL_PIPE_NAME_RE,
 	CONTROL_PROTOCOL_VERSION,
 	CONTROL_SERVICE,
 	type ControlChallengeFrame,
@@ -83,7 +81,6 @@ import {
 	verifyControlHandshakeMac,
 	verifyControlResponseMac,
 } from "./control-protocol.ts";
-import { windowsPowerShellEnvironment, windowsPowerShellExecutable } from "./windows-powershell.ts";
 
 export {
 	controlRecipientFingerprint,
@@ -104,11 +101,6 @@ const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 const MAX_MESSAGE_LENGTH = 512;
 const MAX_SEEN_SERVER_NONCES = 256;
-/** One bridged line carries at most this much base64; frames stay far below it. */
-const MAX_BRIDGE_LINE_CHARS = 512 * 1024;
-/** PowerShell's decoder refuses a decoded input line above this bound. */
-const MAX_BRIDGE_CHUNK_BYTES = 64 * 1024;
-const CONTROL_HELPER_BASENAME = "verified-pipe.ps1";
 
 /** Local misconfiguration: malformed rendezvous, recipient key or options. */
 export class HostControlConfigurationError extends Error {
@@ -280,137 +272,6 @@ export interface ControlPeerBridge {
 	}): Promise<ControlPeerChannel>;
 }
 
-/** The verified helper copy this window runs: its path, and the digest of its bytes. */
-let controlHelper: { readonly path: string; readonly sha256: string } | null = null;
-
-/**
- * Point the peer bridge at the verified `verified-pipe.ps1` copy to run.
- *
- * The packaged helper lives inside the installed extension folder, which
- * `code --install-extension <vsix> --force` renames, so nothing here starts
- * PowerShell from that folder: activation stages a content-addressed copy
- * (`src/host/runtime-assets.ts`) and configures it once, before any peer proof. Until
- * then there is no helper at all, and every proof refuses visibly with
- * `helper-unavailable` — there is still no unchecked fallback.
- *
- * The digest is kept with the path because the helper is re-read and re-hashed
- * immediately before every spawn: a copy that no longer holds those bytes is
- * refused rather than executed under an identity it no longer has.
- */
-export function setControlHelperScript(scriptPath: string, sha256: string): void {
-	controlHelper = scriptPath.length === 0 ? null : { path: scriptPath, sha256 };
-}
-
-interface HelperProcess {
-	readonly child: ChildProcess;
-	readonly exited: Promise<string | null>;
-	/** Typed failure when the helper could not start or exited non-zero. */
-	readonly failure: () => ControlPeerFailure | null;
-	onLine(listener: (line: string) => void): void;
-	writeLine(line: string): void;
-	close(): void;
-}
-
-/** Spawn the helper with private stdio and line-oriented, bounded output. */
-async function spawnControlHelper(args: readonly string[], label: string): Promise<HelperProcess> {
-	const helper = controlHelper;
-	if (helper === null) {
-		throw new HostControlPeerError(
-			"helper-unavailable",
-			`no verified ${CONTROL_HELPER_BASENAME} copy was staged for this window, so the pipe server's identity cannot be proven`,
-		);
-	}
-	// Re-read immediately before the spawn: a path is not a memory of the bytes that
-	// were written to it, and PowerShell is about to run whatever is there now.
-	const bytes = await readFile(helper.path).catch(() => null);
-	const digest = bytes === null ? null : createHash("sha256").update(bytes).digest("hex");
-	if (digest !== helper.sha256) {
-		throw new HostControlPeerError(
-			"helper-unavailable",
-			`the staged ${CONTROL_HELPER_BASENAME} no longer holds the bytes it was staged with, so the pipe server's identity cannot be proven`,
-		);
-	}
-	// The operating system's own interpreter, never a `PATH` look-alike, with a module path it can load.
-	const child = spawn(
-		windowsPowerShellExecutable(),
-		["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", helper.path, ...args],
-		{ windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: windowsPowerShellEnvironment() },
-	);
-	const listeners: Array<(line: string) => void> = [];
-	const decoder = new StringDecoder("utf8");
-	let buffered = "";
-	let stderr = "";
-	let settled = false;
-	let failure: ControlPeerFailure | null = null;
-	const exited = Promise.withResolvers<string | null>();
-
-	const finish = (reason: string | null): void => {
-		if (settled) return;
-		settled = true;
-		exited.resolve(reason);
-	};
-	child.on("error", error => {
-		failure = "helper-unavailable";
-		finish(`${label} could not start: ${error.message}`);
-	});
-	child.on("close", code => {
-		if (code !== 0) failure ??= "helper-failed";
-		finish(code === 0 ? null : `${label} exited with code ${code}`);
-	});
-	child.stdout?.on("data", (chunk: Buffer) => {
-		buffered += decoder.write(chunk);
-		for (;;) {
-			const newline = buffered.indexOf("\n");
-			if (newline < 0) break;
-			const line = buffered.slice(0, newline).replace(/\r$/, "");
-			buffered = buffered.slice(newline + 1);
-			if (line.length === 0) continue;
-			if (line.length > MAX_BRIDGE_LINE_CHARS) {
-				// A peer that floods the bridge is refused, not buffered.
-				failure = "helper-failed";
-				for (const listener of listeners) listener("!ERROR line-too-long");
-				child.kill();
-				return;
-			}
-			for (const listener of listeners) listener(line);
-		}
-		if (buffered.length > MAX_BRIDGE_LINE_CHARS) {
-			failure = "helper-failed";
-			for (const listener of listeners) listener("!ERROR line-too-long");
-			child.kill();
-		}
-	});
-	child.stderr?.on("data", (chunk: Buffer) => {
-		if (stderr.length < MAX_MESSAGE_LENGTH) stderr += decoder.write(chunk);
-	});
-	return {
-		child,
-		exited: exited.promise,
-		failure: () => failure,
-		onLine(listener) {
-			listeners.push(listener);
-		},
-		writeLine(line) {
-			child.stdin?.write(`${line}\n`);
-		},
-		close() {
-			child.stdin?.end();
-			child.kill();
-			finish("closed by caller");
-		},
-	};
-}
-
-/** `!<KIND> fields` control lines of the bridge helper. */
-const HELPER_FIELD_SEPARATOR = /\s+/;
-
-function parseHelperControlLine(line: string): { kind: string; fields: string[] } | null {
-	if (!line.startsWith("!")) return null;
-	const fields = line.slice(1).split(HELPER_FIELD_SEPARATOR);
-	const kind = fields.shift();
-	return kind === undefined ? null : { kind, fields };
-}
-
 /**
  * Kernel creation time of `pid`, as the FILETIME decimal string the bridge also reports. Call it
  * promptly after the terminal's process id resolves and record the result with the host
@@ -444,12 +305,26 @@ export async function queryControlProcessGeneration(pid: number): Promise<string
 	);
 }
 
+/** How long to wait between attempts while every instance of the pipe is in use. */
+const PIPE_BUSY_RETRY_MS = 50;
+
+/** Close a pipe descriptor `openPipeClient` opened and nothing adopted. */
+function closeUnadoptedPipe(fd: number): void {
+	try {
+		closeSync(fd);
+	} catch {
+		// The descriptor is already gone: nothing is left to close.
+	}
+}
+
 /**
- * Default peer verifier: the staged PowerShell helper opens the pipe once,
- * checks the server PID on that handle and the retained process creation time,
- * and relays frames over its private stdio. Any failure is a visible refusal.
+ * Default peer verifier, in process (ADR-0006, ADR-0076 decision 8): the pipe is opened with `CreateFileW`, the server's
+ * process id is read from that same handle (`GetNamedPipeServerProcessId`) and its creation time from the kernel, and only
+ * a server that is exactly the expected process generation gets the handle adopted as a `net.Socket` (through the libuv
+ * this process runs on). Nothing is read from or written to the pipe before the proof, and a failed proof closes the
+ * handle unread. There is no unchecked fallback: an unavailable native module refuses.
  */
-export const powershellControlPeerBridge: ControlPeerBridge = {
+export const nativeControlPeerBridge: ControlPeerBridge = {
 	async open(request) {
 		if (process.platform !== "win32") {
 			throw new HostControlPeerError(
@@ -457,144 +332,86 @@ export const powershellControlPeerBridge: ControlPeerBridge = {
 				"peer-verified pipes are implemented for Windows only",
 			);
 		}
-		const helper = await spawnControlHelper(
-			[
-				"-Mode",
-				"bridge",
-				"-PipeName",
-				request.pipeName,
-				"-ExpectPid",
-				String(request.expectedPid),
-				"-ExpectCreation",
-				request.expectedCreationTime,
-				"-TimeoutSeconds",
-				String(Math.ceil(request.timeoutMs / 1000)),
-			],
-			"peer bridge",
-		);
-		const verified = Promise.withResolvers<ControlPeerProof>();
-		const dataListeners: Array<(bytes: Buffer) => void> = [];
-		// The native server sends its challenge immediately after connect. The
-		// helper can forward it before `open()` returns and the client subscribes.
-		const pendingData: Buffer[] = [];
-		let pendingBytes = 0;
-		let stderrHint = "";
-		helper.onLine(line => {
-			const control = parseHelperControlLine(line);
-			if (control) {
-				if (control.kind === "PEER_VERIFIED") {
-					const pid = Number(control.fields[0]);
-					const creation = control.fields[1] ?? "";
-					if (!Number.isSafeInteger(pid) || pid <= 0 || creation.length === 0) {
-						verified.reject(
-							new HostControlPeerError("helper-failed", "peer bridge verified claim was malformed"),
-						);
-						return;
-					}
-					verified.resolve({ serverPid: pid, serverCreationTime: creation });
-					return;
-				}
-				if (control.kind === "ERROR") {
-					const code = control.fields[0] ?? "unknown";
-					verified.reject(
-						new HostControlPeerError(
-							code === "PIPE_PID_MISMATCH"
-								? "pid-mismatch"
-								: code === "PIPE_GENERATION_MISMATCH"
-									? "generation-mismatch"
-									: "helper-failed",
-							`peer verification failed: ${code}`,
-						),
-					);
-					return;
-				}
-				if (control.kind === "STDERR") {
-					stderrHint = control.fields.join(" ").slice(0, MAX_MESSAGE_LENGTH);
-					return;
-				}
-				return;
-			}
-			// Anything else is a base64 data chunk from the pipe.
-			let bytes: Buffer;
-			try {
-				bytes = Buffer.from(line, "base64");
-			} catch {
-				return;
-			}
-			if (dataListeners.length === 0) {
-				pendingBytes += bytes.length;
-				if (pendingBytes > CONTROL_MAX_FRAME_BYTES) {
-					helper.close();
-					return;
-				}
-				pendingData.push(bytes);
-			} else {
-				for (const listener of dataListeners) listener(bytes);
-			}
-		});
-
-		void helper.exited.then(reason => {
-			if (reason !== null) {
-				verified.reject(new HostControlPeerError(helper.failure() ?? "helper-failed", reason));
-			}
-		});
-		const timer = setNodeTimeout(() => {
-			verified.reject(new HostControlPeerError("timeout", "peer bridge did not verify the pipe in time"));
-			helper.close();
-		}, request.timeoutMs);
-		timer.unref();
-
-		let proof: ControlPeerProof;
-		try {
-			proof = await verified.promise;
-		} catch (error) {
-			clearNodeTimeout(timer);
-			const reason = error instanceof HostControlPeerError ? error.reason : "helper-failed";
-			helper.close();
-			const hint = stderrHint.length > 0 ? ` (${stderrHint})` : "";
+		const native = await win32Native();
+		if (native === null) {
 			throw new HostControlPeerError(
-				reason,
-				`${error instanceof Error ? error.message : String(error)}${hint}`,
+				"helper-unavailable",
+				"the native module is unavailable, so the pipe server's identity cannot be proven",
 			);
 		}
-		clearNodeTimeout(timer);
-
-		// Re-check the proof here as well: the comparison belongs to this side, and
-		// the helper's own refusal is not taken on trust.
-		if (proof.serverPid !== request.expectedPid) {
-			helper.close();
+		if (!CONTROL_PIPE_NAME_RE.test(request.pipeName)) {
+			throw new HostControlPeerError("helper-failed", "the control pipe name is malformed");
+		}
+		const pipePath = controlEndpoint(request.pipeName, "");
+		const deadline = Date.now() + request.timeoutMs;
+		let opening = native.openPipeClient(pipePath);
+		while (opening.kind === "busy") {
+			if (Date.now() >= deadline) {
+				throw new HostControlPeerError("timeout", "every instance of the pipe stayed in use until the deadline");
+			}
+			await sleep(PIPE_BUSY_RETRY_MS);
+			opening = native.openPipeClient(pipePath);
+		}
+		if (opening.kind === "unreachable") {
+			throw new HostControlPeerError("pipe-unreachable", "the control pipe does not exist");
+		}
+		if (opening.kind === "unknown") {
+			throw new HostControlPeerError("helper-failed", `the control pipe could not be opened: ${opening.detail}`);
+		}
+		const { fd, serverPid } = opening;
+		if (serverPid !== request.expectedPid) {
+			closeUnadoptedPipe(fd);
 			throw new HostControlPeerError(
 				"pid-mismatch",
-				`pipe server pid ${proof.serverPid} is not the launched pid ${request.expectedPid}`,
+				`pipe server pid ${serverPid} is not the launched pid ${request.expectedPid}`,
 			);
 		}
-		if (proof.serverCreationTime !== request.expectedCreationTime) {
-			helper.close();
+		let reading: ProcessCreationReading;
+		try {
+			reading = native.processCreation(serverPid);
+		} catch (error) {
+			closeUnadoptedPipe(fd);
+			throw new HostControlPeerError("helper-failed", `generation probe failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		if (reading.kind !== "found") {
+			closeUnadoptedPipe(fd);
+			throw new HostControlPeerError(
+				reading.kind === "gone" ? "pipe-unreachable" : "helper-failed",
+				reading.kind === "gone" ? "the pipe server process ended while it was being verified" : `generation probe failed: ${reading.detail}`,
+			);
+		}
+		if (reading.filetime !== request.expectedCreationTime) {
+			closeUnadoptedPipe(fd);
 			throw new HostControlPeerError(
 				"generation-mismatch",
 				"pipe server process generation does not match the recorded one",
 			);
 		}
-
+		let socket: Socket;
+		try {
+			socket = new Socket({ fd, readable: true, writable: true });
+		} catch (error) {
+			closeUnadoptedPipe(fd);
+			throw new HostControlPeerError("helper-failed", `the verified pipe could not be adopted: ${error instanceof Error ? error.message : String(error)}`);
+		}
+		// Paused until `onData`: what the server sent before this side subscribed waits in the stream, bounded by its buffer.
+		socket.pause();
 		const closed = Promise.withResolvers<string | null>();
-		void helper.exited.then(reason => closed.resolve(reason ?? "peer bridge exited"));
+		let failure: string | null = null;
+		socket.on("error", error => { failure ??= error.message; });
+		socket.on("close", () => closed.resolve(failure ?? "peer connection closed"));
 		return {
-			proof,
+			proof: { serverPid, serverCreationTime: reading.filetime },
 			write(bytes) {
-				for (let offset = 0; offset < bytes.byteLength; offset += MAX_BRIDGE_CHUNK_BYTES) {
-					const chunk = bytes.subarray(offset, offset + MAX_BRIDGE_CHUNK_BYTES);
-					helper.writeLine(Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength).toString("base64"));
-				}
+				if (!socket.destroyed) socket.write(bytes);
 			},
 			onData(listener) {
-				dataListeners.push(listener);
-				for (const bytes of pendingData) listener(bytes);
-				pendingData.length = 0;
-				pendingBytes = 0;
+				socket.on("data", chunk => listener(chunk));
+				socket.resume();
 			},
 			closed: closed.promise,
 			close() {
-				helper.close();
+				socket.destroy();
 			},
 		};
 	},
@@ -722,7 +539,7 @@ export class HostControlClient {
 	 */
 	static async connectVerified(
 		options: HostControlConnectVerifiedOptions,
-		bridge: ControlPeerBridge = powershellControlPeerBridge,
+		bridge: ControlPeerBridge = nativeControlPeerBridge,
 	): Promise<HostControlVerifiedConnection> {
 		const { rendezvous } = options;
 		if (rendezvous.service !== CONTROL_SERVICE) {
@@ -828,7 +645,7 @@ export class HostControlClient {
 	 */
 	static async connectWithProvenKey(
 		options: HostControlProvenKeyOptions,
-		bridge: ControlPeerBridge = powershellControlPeerBridge,
+		bridge: ControlPeerBridge = nativeControlPeerBridge,
 	): Promise<HostControlVerifiedConnection | null> {
 		if (!isControlSlotId(options.slotId)) {
 			throw new HostControlConfigurationError("control slot id is malformed");

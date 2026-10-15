@@ -32,23 +32,21 @@ after(async () => { await rm(temp, { recursive: true, force: true }); });
 
 async function deps(overrides: Partial<RuntimeStagingDeps> = {}) {
 	const packaged = path.join(temp, `packaged-${Math.random().toString(36).slice(2)}`);
-	const files = { hostControl: "host-control.mjs", controlHelper: "verified-pipe.ps1", renameHelper: "rename.mjs", runtimeProbe: "runtime-probe.mjs" };
+	const files = { hostControl: "host-control.mjs", renameHelper: "rename.mjs", runtimeProbe: "runtime-probe.mjs" };
 	await mkdir(packaged, { recursive: true });
 	for (const name of Object.values(files)) await writeFile(path.join(packaged, name), `content of ${name}`);
-	const configured: string[] = [];
 	const logs: LoggedLine[] = [];
 	const base: RuntimeStagingDeps = {
 		storageDir: () => path.join(packaged, "storage"),
 		packagedPaths: () => ({
-			hostControl: path.join(packaged, files.hostControl), controlHelper: path.join(packaged, files.controlHelper),
+			hostControl: path.join(packaged, files.hostControl),
 			renameHelper: path.join(packaged, files.renameHelper), runtimeProbe: path.join(packaged, files.runtimeProbe),
 		}),
 		stageNative: async () => ({ kind: "refused", reason: "not staged in this test" }),
 		refusal: () => null,
-		configureControlHelper: file => { configured.push(file); },
 		log: recordingLogger(logs),
 	};
-	return { deps: { ...base, ...overrides }, configured, logs, packaged, files };
+	return { deps: { ...base, ...overrides }, logs, packaged, files };
 }
 
 describe("runtime staging", () => {
@@ -59,7 +57,6 @@ describe("runtime staging", () => {
 		await assert.rejects(staging.entries(), /updated on disk/);
 		await assert.rejects(staging.entries(), /updated on disk/);
 		assert.equal(asked, 2, "the next caller asks again instead of reusing the failure");
-		assert.deepEqual(f.configured, [], "nothing was staged, so the control helper was not configured");
 	});
 
 	it("reports a native module the child refused as no module and logs why, once per attempt", async () => {

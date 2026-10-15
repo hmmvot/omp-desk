@@ -49,6 +49,13 @@ export type ProcessTreeReading =
 	| { readonly kind: "found"; readonly pids: readonly number[] }
 	| { readonly kind: "unknown"; readonly detail: string };
 
+/** What opening a named pipe as a client found. */
+export type PipeClientOpening =
+	| { readonly kind: "opened"; readonly fd: number; readonly serverPid: number }
+	| { readonly kind: "busy" }
+	| { readonly kind: "unreachable" }
+	| { readonly kind: "unknown"; readonly detail: string };
+
 /** The Win32 facts Desk reads. Each method mirrors the contract of the script it replaced. */
 export interface Win32Native {
 	/**
@@ -73,6 +80,15 @@ export interface Win32Native {
 	 * A process without children, or one that is gone, has none (`found` with no pids); a failed snapshot is `unknown`.
 	 */
 	processDescendants(pid: number): ProcessTreeReading;
+	/**
+	 * Open a named pipe as a client and read the server's process id from that same handle
+	 * (`CreateFileW`, `GetNamedPipeServerProcessId`; ADR-0006 peer proof, ADR-0076 decision 8). `opened` hands over a
+	 * C-runtime descriptor of the libuv this process runs on (`uv_open_osfhandle`) that owns the handle: the caller
+	 * compares the pid, then either adopts it with `new net.Socket({ fd })` or closes it with `fs.closeSync(fd)`.
+	 * Nothing is read or written here, so the server has said nothing yet. `busy` is every instance in use, `unreachable`
+	 * no such pipe, anything else `unknown`.
+	 */
+	openPipeClient(name: string): PipeClientOpening;
 	/**
 	 * The account SID of this process's token and, for every path, its owner and every grant and denial of its
 	 * DACL (`GetNamedSecurityInfoW`; ADR-0054). Runs on the one worker-thread lane under a deadline; a read that
@@ -266,6 +282,70 @@ function bindProcess(koffi: Koffi): Pick<Win32Native, "processCreation" | "proce
 	};
 }
 
+const ERROR_PIPE_BUSY = 231;
+const PIPE_NAMESPACE = "\\\\.\\pipe\\";
+const HOST_PATH_CHARS = 1024;
+const GENERIC_READ = 0x80000000;
+const GENERIC_WRITE = 0x40000000;
+const OPEN_EXISTING = 3;
+const FILE_FLAG_OVERLAPPED = 0x40000000;
+/** `SECURITY_SQOS_PRESENT | SECURITY_IDENTIFICATION`: the server may learn who connects, never act as the client. */
+const PIPE_CLIENT_QOS = 0x00100000 | 0x00010000;
+
+function bindPipe(koffi: Koffi): Pick<Win32Native, "openPipeClient"> {
+	const kernel32 = koffi.load("kernel32.dll");
+	const createFile = kernel32.func(
+		"intptr_t __stdcall CreateFileW(str16 name, uint32 access, uint32 share, void* security, uint32 disposition, uint32 flags, void* template)",
+	) as (name: string, access: number, share: number, security: null, disposition: number, flags: number, template: null) => number | bigint;
+	const serverPid = kernel32.func("bool __stdcall GetNamedPipeServerProcessId(intptr_t pipe, _Out_ uint32* pid)") as (pipe: number | bigint, pid: number[]) => boolean;
+	const closeHandle = kernel32.func("bool __stdcall CloseHandle(intptr_t handle)") as (handle: number | bigint) => boolean;
+	const lastError = kernel32.func("uint32 __stdcall GetLastError()") as () => number;
+	const getModuleFileName = kernel32.func("uint32 __stdcall GetModuleFileNameW(void* module, _Out_ uint8_t* buffer, uint32 size)") as (module: null, buffer: Buffer, size: number) => number;
+	/**
+	 * `uv_open_osfhandle` of the libuv this process runs on, found in the executable the kernel says this process was started
+	 * from (`GetModuleFileNameW(NULL)`, never the overwritable `process.execPath`): the C runtime that numbers the descriptor is
+	 * the one libuv reads, so a second copy of the executable must never be loaded here.
+	 */
+	let adopt: ((handle: number | bigint) => number) | null | undefined;
+	const uvOpenOsHandle = (): ((handle: number | bigint) => number) | null => {
+		if (adopt !== undefined) return adopt;
+		try {
+			const buffer = Buffer.alloc(HOST_PATH_CHARS * 2);
+			const chars = getModuleFileName(null, buffer, HOST_PATH_CHARS);
+			if (chars <= 0 || chars >= HOST_PATH_CHARS) throw new Error("the host executable's path is not readable");
+			adopt = koffi.load(buffer.toString("utf16le", 0, chars * 2)).func("int uv_open_osfhandle(intptr_t handle)") as (handle: number | bigint) => number;
+		} catch {
+			adopt = null;
+		}
+		return adopt;
+	};
+	return {
+		openPipeClient(name) {
+			if (!name.startsWith(PIPE_NAMESPACE)) return { kind: "unknown", detail: "only a name in the local pipe namespace is opened" };
+			const adoptHandle = uvOpenOsHandle();
+			if (adoptHandle === null) return { kind: "unknown", detail: "this process's libuv does not export uv_open_osfhandle" };
+			const handle = createFile(name, GENERIC_READ | GENERIC_WRITE, 0, null, OPEN_EXISTING, FILE_FLAG_OVERLAPPED | PIPE_CLIENT_QOS, null);
+			if (Number(handle) === -1) {
+				const error = lastError();
+				if (error === ERROR_PIPE_BUSY) return { kind: "busy" };
+				if (error === ERROR_FILE_NOT_FOUND || error === ERROR_PATH_NOT_FOUND) return { kind: "unreachable" };
+				return { kind: "unknown", detail: `CreateFileW failed with Win32 error ${error}` };
+			}
+			let adopted = false;
+			try {
+				const pid = [0];
+				if (!serverPid(handle, pid)) return { kind: "unknown", detail: `GetNamedPipeServerProcessId failed with Win32 error ${lastError()}` };
+				const fd = adoptHandle(handle);
+				if (fd < 0) return { kind: "unknown", detail: "uv_open_osfhandle refused the pipe handle" };
+				adopted = true;
+				return { kind: "opened", fd, serverPid: pid[0] as number };
+			} finally {
+				if (!adopted) closeHandle(handle);
+			}
+		},
+	};
+}
+
 /** A koffi function, called synchronously or on its worker threads. */
 type NativeCall = ((...args: unknown[]) => unknown) & { async(...args: unknown[]): void };
 
@@ -429,7 +509,7 @@ export async function loadWin32Native(asset: NativeModuleAsset, arch: string = p
 		throw new Error(`the native module did not load (${error instanceof Error ? error.message : String(error)})`);
 	}
 	const koffi = holder.exports as Koffi;
-	return { ...bindMutex(koffi), ...bindProcess(koffi), ...bindSecurity(koffi, new CallLane()) };
+	return { ...bindMutex(koffi), ...bindProcess(koffi), ...bindPipe(koffi), ...bindSecurity(koffi, new CallLane()) };
 }
 
 let shared: Promise<Win32Native | null> | null = null;

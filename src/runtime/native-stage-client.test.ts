@@ -13,23 +13,12 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, it } from "node:test";
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
 import { build } from "esbuild";
 import { formatToolSpawn, setToolSpawnObserver, type ToolSpawn } from "../host/tool-spawn-trace.ts";
-import { installedAddonAsset } from "../host/win32-test-support.ts";
+import { electronCode, installedAddonAsset } from "../host/win32-test-support.ts";
 import { parseVerdict, runNativeStage } from "./native-stage-client.ts";
 
 const ENTRY = fileURLToPath(new URL("./native-stage.ts", import.meta.url));
-
-/** VS Code's own executable (an Electron app), which is what runs the stage child in production; `null` when none is installed. */
-function electronCode(): string | null {
-	for (const root of [process.env.LOCALAPPDATA === undefined ? null : path.join(process.env.LOCALAPPDATA, "Programs"), process.env.ProgramFiles ?? null]) {
-		if (root === null) continue;
-		const candidate = path.join(root, "Microsoft VS Code", "Code.exe");
-		if (existsSync(candidate)) return candidate;
-	}
-	return null;
-}
 
 describe("parseVerdict", () => {
 	const digest = "a".repeat(64);

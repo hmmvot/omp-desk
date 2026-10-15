@@ -6,7 +6,7 @@
  * real named pipe: `startHostControlServer` runs the engine an OMP `-e` extension
  * would run, with a fake host adapter standing in for OMP, and a real
  * `HostControlClient` connects through a **fake peer bridge**. The fake bridge
- * stands in only for the PowerShell helper's OS query: it reports the peer facts
+ * stands in only for the native peer proof's OS query: it reports the peer facts
  * it was told to report, while the production comparison, key unwrap, HMAC
  * handshake and refusal logic all run unchanged. Adversarial cases use scripted
  * peers on their own pipe.
@@ -16,6 +16,8 @@
  */
 
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { build } from "esbuild";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { connect, createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -56,6 +58,7 @@ import {
 import {
 	type ControlPeerBridge,
 	HostControlClient,
+	nativeControlPeerBridge,
 	HostControlIdentityError,
 	HostControlPeerError,
 	HostControlUnavailableError,
@@ -79,8 +82,8 @@ import {
 	readControlLaunchMetadata,
 	startHostControlServer,
 } from "../omp/host-control.ts";
-import { loadWin32Native, setWin32NativeForTest } from "./win32-native.ts";
-import { installedAddonAsset } from "./win32-test-support.ts";
+import { loadWin32Native, setWin32NativeForTest, win32Native } from "./win32-native.ts";
+import { electronCode, installedAddonAsset } from "./win32-test-support.ts";
 import { NativeActivityLedger } from "./native-activity.ts";
 
 const tempDirs: string[] = [];
@@ -265,6 +268,7 @@ interface StartedChannel {
 		provenKey: string;
 		preferredPipeName?: string | undefined;
 		expectedSessionFile?: string | null;
+		expectedProcessCreationTime?: string;
 		bridge?: ControlPeerBridge;
 		listPipes?: (slotId: string, directory: string) => Promise<string[]>;
 	}): Promise<HostControlVerifiedConnection | null>;
@@ -323,7 +327,7 @@ async function startChannel(prefix: string, options: FakeAdapterOptions = {}): P
 					directory,
 					provenKey: overrides.provenKey,
 					expectedPid: process.pid,
-					expectedProcessCreationTime: TEST_GENERATION,
+					expectedProcessCreationTime: overrides.expectedProcessCreationTime ?? TEST_GENERATION,
 					expectation: { sessionFile: overrides.expectedSessionFile ?? null, cwd: process.cwd() },
 					...(overrides.preferredPipeName === undefined ? {} : { preferredPipeName: overrides.preferredPipeName }),
 					...(overrides.listPipes === undefined ? {} : { listPipes: overrides.listPipes }),
@@ -584,7 +588,7 @@ describe("host control channel", () => {
 		const unavailable = await caught(
 			channel.connect({
 				bridge: fakePeerBridge(channel.directory, {
-					fail: new HostControlPeerError("helper-unavailable", "powershell is blocked here"),
+					fail: new HostControlPeerError("helper-unavailable", "the native module is blocked here"),
 				}),
 			}),
 		);
@@ -818,7 +822,7 @@ describe("host control channel", () => {
 			channel.attach({
 				provenKey,
 				bridge: fakePeerBridge(channel.directory, {
-					fail: new HostControlPeerError("helper-unavailable", "powershell is blocked here"),
+					fail: new HostControlPeerError("helper-unavailable", "the native module is blocked here"),
 				}),
 			}),
 		);
@@ -1186,6 +1190,159 @@ describe("host control channel", () => {
 			// A native module that could not be loaded refuses rather than falling back to an unchecked socket.
 			setWin32NativeForTest(null);
 			const unavailable = await caught(queryControlProcessGeneration(process.pid));
+			assert.ok(unavailable instanceof HostControlPeerError, `unexpected error: ${unavailable.message}`);
+			assert.equal(unavailable.reason, "helper-unavailable");
+		} finally {
+			setWin32NativeForTest(undefined);
+		}
+	});
+});
+
+describe("native peer bridge", { skip: process.platform !== "win32" }, () => {
+	/** A named pipe served by this test process, remembering what each connection sent and whether it ended. */
+	async function servePipe(greeting: string): Promise<{ readonly name: string; readonly received: Buffer[]; readonly ended: Promise<void>; close(): Promise<void> }> {
+		const name = `omp-peer-bridge-test-${process.pid}-${Math.random().toString(36).slice(2)}`;
+		const received: Buffer[] = [];
+		const ended = Promise.withResolvers<void>();
+		const server = createServer(socket => {
+			socket.on("data", chunk => { received.push(chunk); if (chunk.toString("utf8") === "ping") socket.write("pong"); });
+			socket.on("close", () => ended.resolve());
+			socket.on("error", () => ended.resolve());
+			socket.write(greeting);
+		});
+		const listening = Promise.withResolvers<void>();
+		server.once("error", listening.reject);
+		server.listen(`\\\\.\\pipe\\${name}`, () => listening.resolve());
+		await listening.promise;
+		return { name, received, ended: ended.promise, close: () => new Promise<void>(resolve => { server.close(() => resolve()); }) };
+	}
+
+	async function withNative<T>(run: (generation: string) => Promise<T>): Promise<T> {
+		setWin32NativeForTest(await loadWin32Native(await installedAddonAsset()));
+		try {
+			return await run(await queryControlProcessGeneration(process.pid));
+		} finally {
+			setWin32NativeForTest(undefined);
+		}
+	}
+
+	it("proves the server on the connected handle, then relays both ways and delivers what the server said first", async () => {
+		await withNative(async generation => {
+			const pipe = await servePipe("hello");
+			try {
+				const channel = await nativeControlPeerBridge.open({ pipeName: pipe.name, expectedPid: process.pid, expectedCreationTime: generation, timeoutMs: 5_000 });
+				assert.deepEqual(channel.proof, { serverPid: process.pid, serverCreationTime: generation });
+				const seen = Promise.withResolvers<string>();
+				let text = "";
+				channel.onData(bytes => {
+					text += bytes.toString("utf8");
+					if (text.includes("pong")) seen.resolve(text);
+				});
+				channel.write(Buffer.from("ping"));
+				assert.equal(await seen.promise, "hellopong");
+				channel.close();
+				assert.match(String(await channel.closed), /./);
+			} finally {
+				await pipe.close();
+			}
+		});
+	});
+
+	it("does the same under VS Code's own Electron runtime", { skip: electronCode() === null ? "no VS Code installation was found" : false }, async () => {
+		const addon = await installedAddonAsset();
+		await withNative(async generation => {
+			const pipe = await servePipe("hello");
+			try {
+				const dir = await makeTempDir("omp-peer-electron-");
+				const bundle = path.join(dir, "bridge.mjs");
+				const entry = path.join(dir, "entry.ts");
+				await writeFile(entry, `
+					import { loadWin32Native, setWin32NativeForTest } from ${JSON.stringify(fileURLToPath(new URL("./win32-native.ts", import.meta.url)))};
+					import { nativeControlPeerBridge } from ${JSON.stringify(fileURLToPath(new URL("./control-client.ts", import.meta.url)))};
+					const [path, sha256, pipeName, pid, creation] = process.argv.slice(2);
+					setWin32NativeForTest(await loadWin32Native({ path, sha256 }));
+					const channel = await nativeControlPeerBridge.open({ pipeName, expectedPid: Number(pid), expectedCreationTime: creation, timeoutMs: 5000 });
+					let text = "";
+					channel.onData(bytes => {
+						text += bytes.toString("utf8");
+						if (text.includes("pong")) { console.log(JSON.stringify({ text, serverPid: channel.proof.serverPid })); process.exit(0); }
+					});
+					channel.write(Buffer.from("ping"));
+				`);
+				await build({ entryPoints: [entry], outfile: bundle, bundle: true, platform: "node", format: "esm", target: "node20", logLevel: "silent" });
+				const done = Promise.withResolvers<{ code: number | null; stdout: string }>();
+				const child = spawn(electronCode()!, [bundle, addon.path, addon.sha256, pipe.name, String(process.pid), generation], {
+					env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+					windowsHide: true,
+					stdio: ["ignore", "pipe", "ignore"],
+				});
+				let stdout = "";
+				child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); });
+				child.on("close", code => done.resolve({ code, stdout }));
+				const result = await done.promise;
+				assert.equal(result.code, 0, result.stdout);
+				assert.deepEqual(JSON.parse(result.stdout.trim().split("\n").at(-1)!), { text: "hellopong", serverPid: process.pid });
+			} finally {
+				await pipe.close();
+			}
+		});
+	});
+
+	it("refuses another pid or generation before sending a byte, and closes the connection", async () => {
+		await withNative(async generation => {
+			const pipe = await servePipe("hello");
+			try {
+				const wrongPid = await caught(nativeControlPeerBridge.open({ pipeName: pipe.name, expectedPid: process.pid + 4, expectedCreationTime: generation, timeoutMs: 5_000 }));
+				assert.ok(wrongPid instanceof HostControlPeerError, `unexpected error: ${wrongPid.message}`);
+				assert.equal(wrongPid.reason, "pid-mismatch");
+				await pipe.ended;
+				const other = await servePipe("hello");
+				try {
+					const wrongGeneration = await caught(nativeControlPeerBridge.open({ pipeName: other.name, expectedPid: process.pid, expectedCreationTime: "1", timeoutMs: 5_000 }));
+					assert.ok(wrongGeneration instanceof HostControlPeerError, `unexpected error: ${wrongGeneration.message}`);
+					assert.equal(wrongGeneration.reason, "generation-mismatch");
+					await other.ended;
+					assert.deepEqual(other.received, [], "a refused server never receives a byte");
+				} finally {
+					await other.close();
+				}
+				assert.deepEqual(pipe.received, [], "a refused server never receives a byte");
+			} finally {
+				await pipe.close();
+			}
+		});
+	});
+
+	it("connects a verified host-control client to the real control server through it", async () => {
+		await withNative(async generation => {
+			const channel = await startChannel("omp-control-native-bridge-");
+			const { client, key } = await channel.connect({ bridge: nativeControlPeerBridge, expectedProcessCreationTime: generation });
+			try {
+				assert.ok(key.length > 0);
+				assert.equal((await client.snapshot()).host.pid, process.pid);
+				const proven = await channel.attach({ provenKey: key, bridge: nativeControlPeerBridge, expectedProcessCreationTime: generation });
+				assert.ok(proven, "the proven key finds the same server through the native bridge");
+				proven.client.close();
+			} finally {
+				client.close();
+			}
+		});
+	});
+
+	it("reports a missing pipe as unreachable and an unavailable native module as a refusal", async () => {
+		await withNative(async generation => {
+			const missing = await caught(nativeControlPeerBridge.open({ pipeName: `omp-peer-bridge-missing-${process.pid}`, expectedPid: process.pid, expectedCreationTime: generation, timeoutMs: 1_000 }));
+			assert.ok(missing instanceof HostControlPeerError, `unexpected error: ${missing.message}`);
+			assert.equal(missing.reason, "pipe-unreachable");
+			const malformed = await caught(nativeControlPeerBridge.open({ pipeName: "..\\..\\anything", expectedPid: process.pid, expectedCreationTime: generation, timeoutMs: 1_000 }));
+			assert.ok(malformed instanceof HostControlPeerError, `unexpected error: ${malformed.message}`);
+			assert.equal(malformed.reason, "helper-failed", "only a short control pipe name is ever turned into a pipe path");
+			const native = await win32Native();
+			assert.equal(native?.openPipeClient(path.join(tmpdir(), "not-a-pipe")).kind, "unknown", "the native call opens nothing outside the local pipe namespace");
+		});
+		setWin32NativeForTest(null);
+		try {
+			const unavailable = await caught(nativeControlPeerBridge.open({ pipeName: "omp-peer-bridge-none", expectedPid: process.pid, expectedCreationTime: "1", timeoutMs: 1_000 }));
 			assert.ok(unavailable instanceof HostControlPeerError, `unexpected error: ${unavailable.message}`);
 			assert.equal(unavailable.reason, "helper-unavailable");
 		} finally {

@@ -197,7 +197,7 @@ describe("staged runtime assets", () => {
 			const tree = path.join(shared, "ompsandbox");
 			await mkdir(tree, { recursive: true });
 			await restrictWithRealTool(tree);
-			const source = await makePackagedFile(root, "verified-pipe.ps1", "param()\n");
+			const source = await makePackagedFile(root, "entry.mjs", "param()\n");
 
 			// The tree itself is owned and restricted, but it sits under a directory
 			// Everyone may modify: the shared rule refuses the carrier, and the stage must
@@ -220,7 +220,7 @@ describe("staged runtime assets", () => {
 			if (localAppData.length === 0) return;
 			const root = await mkdtemp(path.join(localAppData, "omp-runtime-"));
 			roots.push(root);
-			const source = await makePackagedFile(root, "verified-pipe.ps1", "param()\n");
+			const source = await makePackagedFile(root, "entry.mjs", "param()\n");
 
 			// Real `icacls`, real ancestor walk, real owner read and real rename
 			// publication: no seam is injected at all.
@@ -248,7 +248,7 @@ describe("staged runtime assets", () => {
 
 	it("replaces a staged copy whose bytes no longer match its digest", async () => {
 		const root = await makeRoot();
-		const source = await makePackagedFile(root, "verified-pipe.ps1", "param()\n");
+		const source = await makePackagedFile(root, "entry.mjs", "param()\n");
 		const { probe } = windowsProbe();
 		const [staged] = await stageRuntimeAssets({ storageDir: root, sourcePaths: [source], access: probe });
 		await writeFile(staged.path, "tampered\n", "utf8");
@@ -573,8 +573,8 @@ describe("staged runtime assets", () => {
 
 	it("refuses a copy whose own entry lets another account write it", async () => {
 		const root = await makeRoot();
-		const source = await makePackagedFile(root, "verified-pipe.ps1", "param()\n");
-		const target = stagedPathOf(root, "verified-pipe.ps1", "param()\n");
+		const source = await makePackagedFile(root, "entry.mjs", "param()\n");
+		const target = stagedPathOf(root, "entry.mjs", "param()\n");
 		// The parent directory is limited, but this file carries an explicit entry of its
 		// own — which a parent's entries do not override.
 		const { probe } = windowsProbe({ permissive: candidate => candidate === target });

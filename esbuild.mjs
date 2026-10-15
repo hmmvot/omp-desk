@@ -205,30 +205,6 @@ const shared = {
 };
 
 /**
- * Ship the host-control PowerShell helper next to the extension bundle.
- *
- * The extension stages this file, together with the host-control module, into
- * extension global storage and runs PowerShell from that verified copy
- * (`src/host/runtime-assets.ts`), so nothing starts it out of the installed extension
- * folder. The copy here is still part of the build rather than a manual step, and
- * host control refuses visibly when staging finds no helper.
- */
-async function copyControlHelper() {
-  for (const name of ["verified-pipe.ps1"]) {
-    const source = path.join("src", "host", name);
-    try {
-      await fs.access(source);
-    } catch {
-      // No helper in this checkout: nothing to copy; staging reports it at run time.
-      continue;
-    }
-    await fs.mkdir("out", { recursive: true });
-    await fs.copyFile(source, path.join("out", name));
-    console.log(`copied helper -> out/${name}`);
-  }
-}
-
-/**
  * Ship koffi's prebuilt `koffi.node` as `out/native/koffi.node` (ADR-0076).
  *
  * One file per build: the architecture of `OMP_DESK_TARGET`, else of this machine, so a
@@ -367,7 +343,7 @@ async function main() {
   if (watch) {
     const contexts = await Promise.all(selected.map(({ options }) => esbuild.context({ ...shared, ...options })));
     await Promise.all(contexts.map(context => context.watch()));
-    if (!ptyOnly) { await copyControlHelper(); await copyCodicons(); }
+    if (!ptyOnly) await copyCodicons();
     await copyNativeAddon();
     await copyPtyRuntime();
     console.log(`watching ${selected.length} build targets`);
@@ -378,7 +354,7 @@ async function main() {
     if (result.metafile) assertBundleBoundary(name, Object.keys(result.metafile.inputs));
     console.log(`built ${name} -> ${options.outfile}`);
   }
-  if (!ptyOnly) { await copyControlHelper(); await copyCodicons(); }
+  if (!ptyOnly) await copyCodicons();
   await copyNativeAddon();
   await copyPtyRuntime();
 }

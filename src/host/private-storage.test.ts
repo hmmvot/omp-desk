@@ -194,6 +194,7 @@ function fakeNative(read: Win32SecurityRead, names: ReadonlyMap<string, string> 
 		mutexState: unused,
 		processCreation: unused,
 		processDescendants: unused,
+		openPipeClient: unused,
 		readSecurity: async (_paths, deadlineMs) => { deadlines.push(deadlineMs); return read; },
 		lookupAccountNames: async sids => new Map([...names].filter(([sid]) => sids.includes(sid))),
 	};

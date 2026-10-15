@@ -15,9 +15,7 @@
  * directory, so this build's copies are told apart from another build's.
  *
  * A failure is not cached: the next caller stages again, because the file a failed attempt could not
- * read is usually the one a half-finished install replaced. Staging also points the control client
- * at the helper copy, so `activate` stages once and every later use — including the
- * process-generation probe for an already running host — finds it configured.
+ * read is usually the one a half-finished install replaced.
  */
 import type { Logger } from "../shared/logger.ts";
 import { stageRuntimeAssets, verifyStagedRuntimeAsset } from "../host/runtime-assets.ts";
@@ -28,8 +26,6 @@ import type { NativeStageVerdict } from "./native-stage.ts";
 export interface StagedRuntimeEntries {
 	/** The host-control module the native OMP process preloads and `-e`-loads. */
 	readonly hostControl: StagedRuntimeAsset;
-	/** The peer-verified pipe helper the control client runs per connection. */
-	readonly controlHelper: StagedRuntimeAsset;
 	/** The Bun helper a stopped-session rename runs (never an OMP session). */
 	readonly renameHelper: StagedRuntimeAsset;
 	/** The module a launcher capability probe preloads (`host/launch-capability.ts`); it only reports a nonce. */
@@ -43,7 +39,6 @@ export interface RuntimeStagingDeps {
 	/** The packaged files, as absolute paths. */
 	packagedPaths(): {
 		readonly hostControl: string;
-		readonly controlHelper: string;
 		readonly renameHelper: string;
 		readonly runtimeProbe: string;
 	};
@@ -54,8 +49,6 @@ export interface RuntimeStagingDeps {
 	 * loaded, so a child started from them would speak a newer protocol), or `null`.
 	 */
 	refusal(): string | null;
-	/** Points the control client at the staged helper copy. */
-	configureControlHelper(path: string, sha256: string): void;
 	readonly log: Logger;
 }
 
@@ -75,7 +68,7 @@ export interface RuntimeStaging {
 
 /** Do the copies still hold the bytes their digests name? */
 async function stagedEntriesIntact(entries: StagedRuntimeEntries): Promise<boolean> {
-	for (const asset of [entries.hostControl, entries.controlHelper, entries.runtimeProbe]) {
+	for (const asset of [entries.hostControl, entries.runtimeProbe]) {
 		if (!(await verifyStagedRuntimeAsset(asset))) return false;
 	}
 	return true;
@@ -99,12 +92,11 @@ export function createRuntimeStaging(deps: RuntimeStagingDeps): RuntimeStaging {
 				const refusal = deps.refusal();
 				if (refusal !== null) throw new Error(refusal);
 				const paths = deps.packagedPaths();
-				const [hostControl, controlHelper, renameHelper, runtimeProbe] = await stageRuntimeAssets({
+				const [hostControl, renameHelper, runtimeProbe] = await stageRuntimeAssets({
 					storageDir: deps.storageDir(),
-					sourcePaths: [paths.hostControl, paths.controlHelper, paths.renameHelper, paths.runtimeProbe],
+					sourcePaths: [paths.hostControl, paths.renameHelper, paths.runtimeProbe],
 				});
-				deps.configureControlHelper(controlHelper.path, controlHelper.sha256);
-				return { hostControl, controlHelper, renameHelper, runtimeProbe };
+				return { hostControl, renameHelper, runtimeProbe };
 			})();
 			stagedEntries = staging.catch((error: unknown) => {
 				stagedEntries = null;

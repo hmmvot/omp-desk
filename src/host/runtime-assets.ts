@@ -2,10 +2,10 @@
  * Content-addressed copies of the entries this extension runs *outside* its own
  * install folder.
  *
- * Two packaged files are executed from inside the installed extension folder:
+ * Packaged files a child process executes from inside the installed extension folder:
  * the native host-control module the OMP process loads with `-e`
- * (`out/omp-host-control.mjs`) and the PowerShell peer helper
- * (`out/verified-pipe.ps1`). Every process reading one of them is a reference into
+ * (`out/omp-host-control.mjs`), the rename helper and the capability probe. Every process
+ * reading one of them is a reference into
  * that folder, so `code --install-extension <vsix> --force` cannot rename it and
  * fails with EPERM ("Please restart VS Code before reinstalling"); a process that
  * outlives the extension host also keeps running the previous version's code,

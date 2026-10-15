@@ -25,7 +25,6 @@ export const PACKAGE_DRIFT_FILES: readonly string[] = [
 	"media/guest.js",
 	"media/shell.js",
 	"out/omp-host-control.mjs",
-	"out/verified-pipe.ps1",
 	"out/pty/pty-broker.js",
 ];
 

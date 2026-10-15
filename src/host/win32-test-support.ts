@@ -6,6 +6,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { StagedRuntimeAsset } from "./runtime-assets.ts";
 
@@ -59,4 +61,14 @@ export async function releaseMutex(child: ChildProcess): Promise<void> {
 	child.once("exit", () => resolve());
 	child.stdin!.end();
 	await exited;
+}
+
+/** VS Code's own executable (an Electron app), which is what runs the extension host; `null` when none is installed. */
+export function electronCode(): string | null {
+	for (const root of [process.env.LOCALAPPDATA === undefined ? null : path.join(process.env.LOCALAPPDATA, "Programs"), process.env.ProgramFiles ?? null]) {
+		if (root === null) continue;
+		const candidate = path.join(root, "Microsoft VS Code", "Code.exe");
+		if (existsSync(candidate)) return candidate;
+	}
+	return null;
 }
