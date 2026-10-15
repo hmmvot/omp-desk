@@ -10,7 +10,7 @@ date: 2026-10-14
 Two settings answered one question from two sides, and a third question hid behind them.
 
 - `ompDesk.useAgentRootFolder` (default on) decided where a session launches: from an opened folder with no agent file (`AGENTS.md`, `CLAUDE.md`, `.agents/`, `.omp/`, `.claude/`, `.pi/`) it climbed to the nearest ancestor that has one, never above the nearest `.git`. It knew Git only, and its answer depended on which files happened to exist.
-- `ompDesk.ompSettings.useNearestAncestorOmpFolder` (default off) decided which `.omp` the Settings, Models and Agents editors write project settings to. A Unity user has to turn it on, because VS Code opens `repo/Game` while sessions run at `repo`; with it off the Project view shows a notice with a button to the setting.
+- `ompDesk.ompSettings.useNearestAncestorOmpFolder` (default off) decided which `.omp` the Settings, Models and Agents editors write project settings to. A Unity user has to turn it on, because VS Code opens `repo/omp-vscode` while sessions run at `repo`; with it off the Project view shows a notice with a button to the setting.
 - The two disagreed by construction: the editors climbed to an ancestor `.omp`, sessions to the nearest ancestor with any agent file, so a folder could launch sessions in one directory and write its project settings to another.
 
 A user whose team uses Plastic SCM (Unity Version Control), Mercurial, Subversion or Jujutsu also got no climb at all, because the walk stopped at `.git`.
@@ -91,7 +91,7 @@ A folder opened inside a checkout is shown as the checkout root (the existing `o
 
 A session row records the cwd the session was launched from, and the catalog files a session under the folder whose path equals that cwd (`folderOwnsCwd`). Nothing is rewritten:
 
-- Existing sessions keep their recorded cwd. While `repo/Game` is opened and shown as `repo`, `folderOwnsCwd` files a session recorded in `repo/Game` under `repo` through the folder's `openedPaths`, so it neither disappears nor appears twice, exactly as under the agent-root rule. When no shown folder owns `repo/Game` any more (the folder was closed and is not pinned), a stopped session recorded there is filed under no shown folder and is not listed, as before; a running one keeps its folder visible.
+- Existing sessions keep their recorded cwd. While `repo/omp-vscode` is opened and shown as `repo`, `folderOwnsCwd` files a session recorded in `repo/omp-vscode` under `repo` through the folder's `openedPaths`, so it neither disappears nor appears twice, exactly as under the agent-root rule. When no shown folder owns `repo/omp-vscode` any more (the folder was closed and is not pinned), a stopped session recorded there is filed under no shown folder and is not listed, as before; a running one keeps its folder visible.
 - New launches, New Session and the folder pickers use the session folder. Folder Resume scans the history of the shown folder's own cwd only: a session file recorded in the opened subfolder that the index does not hold yet is not offered there. The agent-root rule had the same limit (see the 2026-10-07 amendment, "Existing sessions"); more folders now move up, so it reaches more history. Indexed sessions are listed through `openedPaths`. Scanning the opened folders too would also have to register a found file with its recorded folder (it registers with the shown folder's path today), which this change does not touch.
 - Rows are never re-parented by a path rewrite; `sessionFile`, `sessionId` and the recorded cwd are untouched.
 
@@ -108,7 +108,7 @@ In each case the row id changes with the shown path. The collapsed state of an u
 
 ### Unity window routing (ADR-0057)
 
-VS Code opens `repo/Game`; sessions run at `repo`. The Unity extensions need a window that has the Unity project folder as workspace root, so ADR-0057 routes a session to a window that has the project open or opens one. `unityCandidatesOf` (`src/wiring/window-routing.ts`) collects the Unity projects a launch in a folder stands for: the projects in the folder or up to two levels below it, plus every opened folder the shown folder stands for (`openedPaths`) that is a Unity project. With the session folder `repo` and `openedPaths = [repo/Game]`, `repo/Game` is a candidate both ways, so the launch is routed to the window that has `repo/Game` open, as before. Routing code is unchanged by this design; it already received `openedPaths` from the agent-root substitution. A deeper layout (`repo/a/b/Game`) is found through `openedPaths` only while that folder is open, which is the case routing is about.
+VS Code opens `repo/omp-vscode`; sessions run at `repo`. The Unity extensions need a window that has the Unity project folder as workspace root, so ADR-0057 routes a session to a window that has the project open or opens one. `unityCandidatesOf` (`src/wiring/window-routing.ts`) collects the Unity projects a launch in a folder stands for: the projects in the folder or up to two levels below it, plus every opened folder the shown folder stands for (`openedPaths`) that is a Unity project. With the session folder `repo` and `openedPaths = [repo/omp-vscode]`, `repo/omp-vscode` is a candidate both ways, so the launch is routed to the window that has `repo/omp-vscode` open, as before. Routing code is unchanged by this design; it already received `openedPaths` from the agent-root substitution. A deeper layout (`repo/a/b/omp-vscode`) is found through `openedPaths` only while that folder is open, which is the case routing is about.
 
 ### Window registry
 
@@ -178,15 +178,15 @@ Nothing is written when none of the old keys is present. An existing explicit `r
 2. Replace `AgentRootResolver` consumers (launcher folders, window routing, Sessions tooltips, the registry's `staysInFolder`), then the editors' `editorProjectFolder`, then remove the old option from `config-ancestor.ts` and the notice from the pages.
 3. Migration with tests (explicit false carried, ancestor key dropped, no writes when nothing to move).
 4. Documentation and a CHANGELOG Changed entry with the migration note.
-5. Isolated VS Code window (`scripts/test-vscode.ps1`): a Unity-like git layout `repo/Game`, open `repo/Game`, start a session, read the session file header's cwd; open `/settings`, Project view, confirm it targets `repo/.omp`; seed the old settings in the scratch profile and read the migration lines in the OMP Desk log.
+5. Isolated VS Code window (`scripts/test-vscode.ps1`): a Unity-like git layout `repo/omp-vscode`, open `repo/omp-vscode`, start a session, read the session file header's cwd; open `/settings`, Project view, confirm it targets `repo/.omp`; seed the old settings in the scratch profile and read the migration lines in the OMP Desk log.
 
 ### Verification evidence (2026-10-14, installed VSIX in an isolated window, scratch profile)
 
-- Layout: `repo/.git`, `repo/AGENTS.md`, `repo/omp-vscode/Assets`, `repo/Game/ProjectSettings/ProjectVersion.txt`; VS Code opened on `repo/Game`.
+- Layout: `repo/.git`, `repo/AGENTS.md`, `repo/omp-vscode/Assets`, `repo/omp-vscode/ProjectSettings/ProjectVersion.txt`; VS Code opened on `repo/omp-vscode`.
 - Migration: a profile seeded with `ompDesk.useAgentRootFolder: false` and `ompDesk.ompSettings.useNearestAncestorOmpFolder: true` logged `settings: ompDesk.useAgentRootFolder → ompDesk.runSessionsAtRepositoryRoot (user settings): moved` and `... useNearestAncestorOmpFolder (user settings): dropped (it held true) ...`; `settings.json` then held only `ompDesk.runSessionsAtRepositoryRoot: false`.
-- Off: a New Session created OMP's session directory `...-repo-Game` (cwd `repo/Game`) and the window's registry record published `staysInFolder`.
+- Off: a New Session created OMP's session directory `...-repo-omp-vscode` (cwd `repo/omp-vscode`) and the window's registry record published `staysInFolder`.
 - On (key removed from settings.json): a New Session created `...-repo`, the record's `liveCwds` was `repo` and `staysInFolder` was gone; the session started without a model login, so no session file was written and the directory name is the cwd evidence.
-- Editors: `OMP Desk: Open OMP Settings` with that session active opened "OMP Settings · repo", Project · repo (the session's folder), not `Game`.
+- Editors: `OMP Desk: Open OMP Settings` with that session active opened "OMP Settings · repo", Project · repo (the session's folder), not `omp-vscode`.
 
 ## Related Decisions
 

@@ -10,7 +10,7 @@ date: 2026-10-10
 A session is a process the extension starts for a folder, and the window that starts it also shows its editor. Since [ADR-0056](../decisions/0056-publish-window-state-in-a-leased-registry-and-switch-windows-by-request.md) every window lists every folder open in any window, so the user can start a session for a folder from a window that does not have that folder open. Two things go wrong:
 
 1. The session's editor is in a window whose workspace has nothing to do with the folder. The user has to move it, or live with a window that is not the project's.
-2. For a **Unity project** it is worse: the Unity extensions (vstuc, C# Dev Kit) only work in a window whose workspace root is the Unity project folder. A session that edits C# in a window without that root has no Unity tooling at all. The OMP session's working directory is usually the repository root (the *agent root* of [ADR-0045](../decisions/0045-derive-window-folders-per-window-and-pin-with-identity-ids.md)'s substitution, e.g. `D:/Workspace/omp-vscode` for the opened `D:/Workspace/omp-vscode/omp-vscode`), which carries `AGENTS.md`, so only the window choice may change.
+2. For a **Unity project** it is worse: the Unity extensions (vstuc, C# Dev Kit) only work in a window whose workspace root is the Unity project folder. A session that edits C# in a window without that root has no Unity tooling at all. The OMP session's working directory is usually the repository root (the *agent root* of [ADR-0045](../decisions/0045-derive-window-folders-per-window-and-pin-with-identity-ids.md)'s substitution, e.g. `<repo>` for the opened `<repo>/omp-vscode`), which carries `AGENTS.md`, so only the window choice may change.
 
 ## Goals and Non-goals
 
@@ -136,7 +136,7 @@ Any process of the same user can write these files. A forged launch request can 
 
 ## Rollout and Verification
 
-Unit tests: Unity detection against a real temporary tree (a project, an agent root over a omp-vscode-like child, two projects, none, excluded directories, depth limit, nested project, cache), the routing decision and request handling (here, other window, two targets, no target, refusal, timeout, duplicate delivery, stale and withdrawn requests, forged files, exact workspace match, the Unity cases including a new window and its timeout), pending launches (claim by exactly one of three racing windows, claim after the watcher started, another window's key, expiry, withdrawal, forged files), the registry's `focusedAt`. Then installed two-window observation in the isolated `manual` profile, with a fake Unity tree inside a fake repository.
+Unit tests: Unity detection against a real temporary tree (a project, an agent root over a Unity project child, two projects, none, excluded directories, depth limit, nested project, cache), the routing decision and request handling (here, other window, two targets, no target, refusal, timeout, duplicate delivery, stale and withdrawn requests, forged files, exact workspace match, the Unity cases including a new window and its timeout), pending launches (claim by exactly one of three racing windows, claim after the watcher started, another window's key, expiry, withdrawal, forged files), the registry's `focusedAt`. Then installed two-window observation in the isolated `manual` profile, with a fake Unity tree inside a fake repository.
 
 ## Related Decisions
 

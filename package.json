@@ -124,7 +124,7 @@
         "ompDesk.linkCodeSymbols": {
           "type": "boolean",
           "default": true,
-          "description": "Link inline code symbols in Chat replies (`Session`, `SessionData.Cast`, `Parse()`) to their definition when VS Code's language extensions (C# Dev Kit, TypeScript, ...) find exactly one definition of the symbol in the session's folders, and a bare file name such as `session-index.ts:849` to the file when VS Code's file search finds it in the session's folders (several files of that name link to a list to choose from). Ambiguous or unknown symbols stay plain code. When off, only the links the model writes itself and file paths are links."
+          "description": "Link inline code symbols in Chat replies (`Session`, `SessionData.Load`, `Parse()`) to their definition when VS Code's language extensions (C# Dev Kit, TypeScript, ...) find exactly one definition of the symbol in the session's folders, and a bare file name such as `session-index.ts:849` to the file when VS Code's file search finds it in the session's folders (several files of that name link to a list to choose from). Ambiguous or unknown symbols stay plain code. When off, only the links the model writes itself and file paths are links."
         },
         "ompDesk.linkReminder": {
           "type": "boolean",

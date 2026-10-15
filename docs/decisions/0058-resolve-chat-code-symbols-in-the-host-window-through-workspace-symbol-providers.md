@@ -7,7 +7,7 @@ date: 2026-10-10
 
 ## Context and Problem Statement
 
-A Chat reply names code symbols in inline code (`Session`, `SessionData.Cast()`, `[Tracked]`). The model is asked to link them to their definition line, and does so for only some of them. Making every resolvable symbol a link needs something that knows where a symbol is defined. Candidates for that knowledge: the model, OMP's own `lsp` tool, VS Code's language providers, or an index of our own. The decision has lasting effects: it adds a page-triggered call into VS Code's language providers, a maintained bridge operation, and a visible promise ("a link means exactly one definition") that users and later changes will rely on. It must not be confused with the rejected agent-facing language-provider bridge ([ADR-0013](0013-authenticated-reverse-rpc-for-vscode-language-providers.md)).
+A Chat reply names code symbols in inline code (`Session`, `SessionData.Load()`, `[Tracked]`). The model is asked to link them to their definition line, and does so for only some of them. Making every resolvable symbol a link needs something that knows where a symbol is defined. Candidates for that knowledge: the model, OMP's own `lsp` tool, VS Code's language providers, or an index of our own. The decision has lasting effects: it adds a page-triggered call into VS Code's language providers, a maintained bridge operation, and a visible promise ("a link means exactly one definition") that users and later changes will rely on. It must not be confused with the rejected agent-facing language-provider bridge ([ADR-0013](0013-authenticated-reverse-rpc-for-vscode-language-providers.md)).
 
 ## Considered Options
 
