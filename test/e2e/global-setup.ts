@@ -11,26 +11,32 @@
  * file changed. `E2E_KEEP_ENV=1` keeps the VS Code and its profile running so the next run attaches to it (development
  * loop); stop it with `npm run test:e2e:stop`.
  */
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, statSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { startMockServer, type MockServer } from "./fixtures/mock-openai-server.ts";
 import { describeChanges, fingerprintUserState, startWatchdog, watchGuardedFiles, type Fingerprint, type Watchdog } from "./support/guard.ts";
 import { freePort, REPO_ROOT, startVsCode, stopVsCode, waitForCdp } from "./support/launcher.ts";
 import { writeFixtureSkill, writeMockAgentConfig, writeProfileSettings } from "./support/omp-agent.ts";
+import { ENVIRONMENT_PREFIX, readCommandLines, selectStaleEnvironments } from "./support/stale-environments.ts";
 import { STATE_ENV, type RunState } from "./support/state.ts";
 import { resolveVsix } from "./support/vsix.ts";
 
 const RESULTS_DIR = join(REPO_ROOT, "out", "e2e-results");
 const KEPT_FILE = join(RESULTS_DIR, "kept-env.json");
-const NAME_PREFIX = "e2e-run-";
+const NAME_PREFIX = ENVIRONMENT_PREFIX;
 
+/**
+ * Removes the environments earlier runs left behind. Other agents and checkouts run the suite in the same root at the same
+ * time, so a folder goes only when no process names it and it is old enough (see `stale-environments.ts`).
+ */
 async function sweepStaleEnvironments(root: string, keep: string | undefined): Promise<void> {
 	if (!existsSync(root)) return;
-	for (const entry of readdirSync(root)) {
-		if (!entry.startsWith(NAME_PREFIX) || entry === keep) continue;
-		await stopVsCode(entry, root);
-		await rm(join(root, entry), { recursive: true, force: true, maxRetries: 10, retryDelay: 500 });
+	const entries = readdirSync(root).filter(name => name.startsWith(NAME_PREFIX)).map(name => ({ name, modifiedAt: statSync(join(root, name)).mtimeMs }));
+	const commandLines = await readCommandLines();
+	if (commandLines === undefined) console.log("[e2e] could not read the running processes: no earlier test environment is removed");
+	for (const name of selectStaleEnvironments(entries, { root, keep, now: Date.now(), commandLines })) {
+		await rm(join(root, name), { recursive: true, force: true, maxRetries: 10, retryDelay: 500 });
 	}
 }
 
