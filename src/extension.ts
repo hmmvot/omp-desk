@@ -1505,6 +1505,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     access => windowTiming("broker state access", `${Date.now() - stateAccessStartedAt} ms ok=${access.ok}`),
     () => undefined,
   );
+  // The digest of the packaged broker tree (about 30 ms for 3 MB) is the other thing every re-adoption needs first. It only
+  // decides "same build" for a broker that attests its own identity (ADR-0024, ADR-0035), so it is hashed here once, beside
+  // the rest of activation, and cached; a refusal is not cached and the first attach that needs it asks again.
+  void s.ptyClient.attachIdentity();
   // VS Code's own updater stops every Code.exe of the install: the Terminal, folder-shell and Stats brokers (and any Chat broker that fell back to
   // Code.exe) are Code.exe, so say so when it did. A Chat broker on Bun is not.
   void announceUpdaterTerminations({

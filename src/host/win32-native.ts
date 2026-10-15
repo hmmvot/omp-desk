@@ -133,7 +133,6 @@ interface Koffi {
 	struct(name: string, members: Record<string, unknown>): unknown;
 	array(type: string, length: number, hint?: string): unknown;
 	sizeof(type: unknown): number;
-	view(address: unknown, length: number): ArrayBuffer;
 }
 
 function bindMutex(koffi: Koffi): Pick<Win32Native, "mutexState"> {
@@ -297,8 +296,16 @@ function bindSecurity(koffi: Koffi, lane: CallLane): Pick<Win32Native, "readSecu
 	const closeHandle = kernel32.func("bool __stdcall CloseHandle(void* handle)") as NativeCall;
 	const localFree = kernel32.func("void* __stdcall LocalFree(void* memory)") as NativeCall;
 
-	/** Bytes at a native address koffi returned, copied out before the memory is freed. */
-	const copyNative = (address: unknown, length: number): Buffer => Buffer.from(koffi.view(address, length));
+	const moveMemory = kernel32.func("void __stdcall RtlMoveMemory(_Out_ uint8_t* destination, void* source, size_t length)") as NativeCall;
+	/**
+	 * Bytes at a native address koffi returned, copied out before the memory is freed. `RtlMoveMemory` into a Buffer, never
+	 * `koffi.view`: the extension host is Electron, whose V8 sandbox refuses an ArrayBuffer over external memory and aborts the process.
+	 */
+	const copyNative = (address: unknown, length: number): Buffer => {
+		const bytes = Buffer.alloc(length);
+		moveMemory(bytes, address, length);
+		return bytes;
+	};
 
 	/** The SID of this process's token (`TokenUser`), or `null`. */
 	function tokenSid(): string | null {

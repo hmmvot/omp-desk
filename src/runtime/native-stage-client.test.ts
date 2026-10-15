@@ -12,11 +12,24 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, it } from "node:test";
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { build } from "esbuild";
 import { formatToolSpawn, setToolSpawnObserver, type ToolSpawn } from "../host/tool-spawn-trace.ts";
 import { installedAddonAsset } from "../host/win32-test-support.ts";
 import { parseVerdict, runNativeStage } from "./native-stage-client.ts";
 
 const ENTRY = fileURLToPath(new URL("./native-stage.ts", import.meta.url));
+
+/** VS Code's own executable (an Electron app), which is what runs the stage child in production; `null` when none is installed. */
+function electronCode(): string | null {
+	for (const root of [process.env.LOCALAPPDATA === undefined ? null : path.join(process.env.LOCALAPPDATA, "Programs"), process.env.ProgramFiles ?? null]) {
+		if (root === null) continue;
+		const candidate = path.join(root, "Microsoft VS Code", "Code.exe");
+		if (existsSync(candidate)) return candidate;
+	}
+	return null;
+}
 
 describe("parseVerdict", () => {
 	const digest = "a".repeat(64);
@@ -86,5 +99,24 @@ describe("runNativeStage against a real child", { skip: process.platform !== "wi
 		assert.equal(verdict.kind, "refused");
 		assert.match(verdict.kind === "refused" ? verdict.reason : "", /did not answer in 1 ms/);
 		assert.equal(traces[0]?.outcome, "timeout");
+	});
+
+	it("runs under VS Code's own Electron runtime, which refuses external ArrayBuffers (koffi.view aborts it)", { skip: electronCode() === null ? "no VS Code installation was found" : false }, async () => {
+		const addon = await installedAddonAsset();
+		const storageDir = await storage();
+		const bundle = path.join(storageDir, "native-stage.js");
+		await build({ entryPoints: [ENTRY], outfile: bundle, bundle: true, platform: "node", format: "cjs", target: "node20", logLevel: "silent" });
+		const { promise, resolve } = Promise.withResolvers<{ code: number | null; stdout: string }>();
+		const child = spawn(electronCode()!, [bundle, addon.path, path.join(storageDir, "store")], {
+			env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+			windowsHide: true,
+			stdio: ["ignore", "pipe", "ignore"],
+		});
+		let stdout = "";
+		child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); });
+		child.on("close", code => resolve({ code, stdout }));
+		const result = await promise;
+		const verdict = parseVerdict(result.stdout);
+		assert.equal(verdict.kind, "staged", `exit ${String(result.code)}: ${result.stdout.slice(0, 300)}`);
 	});
 });
