@@ -582,6 +582,7 @@ describe("the namespace (ADR-0068)", () => {
 		["omp.shellTerminal", "webview view type (activation event)"],
 		["omp.settings", "webview view type (activation event)"],
 		["omp.exe", "the program name inside a description"],
+		["omp.sh", "the name of OMP's binary install script inside a description"],
 		["omp.focusComposer", "commandsToSkipShell for the legacy alias of ompDesk.focusComposer"],
 		["omp.goToSession", "commandsToSkipShell for the legacy alias of ompDesk.goToSession"],
 		["omp.moveFileToNewWindow", "commandsToSkipShell for the legacy alias of ompDesk.moveFileToNewWindow"],
