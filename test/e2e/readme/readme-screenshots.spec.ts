@@ -1,6 +1,6 @@
 /**
- * The six README images (`media/readme/chat.png`, `sessions.png`, `chat-agents.png`, `terminal.png`, `models.png`,
- * `omp-settings.png`), captured from one hidden test window in the user layout (layout.ts) on the README scene (scene.ts):
+ * The seven README images (`media/readme/chat.png`, `sessions.png`, `chat-agents.png`, `terminal.png`, `models.png`,
+ * `omp-settings.png`, `chat-features.png`), captured from one hidden test window in the user layout (layout.ts) on the README scene (scene.ts):
  * scripted conversations of the project itself, no real model, no personal data. The window has its own OMP profile: its agent
  * directory (`PI_CODING_AGENT_DIR`) and its own home folder (`-IsolateHome`), where OMP finds the user-level agents; the Agents
  * editor's sources are checked before the Models and OMP Settings images are taken (profile-guard.ts). Run with
@@ -16,11 +16,16 @@ import type { Desk } from "../support/desk.ts";
 import { expect, test } from "../support/fixtures.ts";
 import { REPO_ROOT } from "../support/launcher.ts";
 import { agentSourceLabels, expectOwnProfile, openAgentsEditor } from "../support/profile-guard.ts";
-import { IMAGE_QUESTION, IMAGE_TITLE, QUEUED_FOLLOW_UP, STOPPED_SESSIONS, TERMINAL_REQUEST, TERMINAL_TITLE, TIMING_REQUEST, TIMING_TITLE, WORKING_REQUEST, WORKING_TITLE } from "./scripts.ts";
+import { FEATURES_DRAFT_AFTER_IMAGE, FEATURES_DRAFT_BEFORE_IMAGE, FEATURES_DRAFT_CODE, FEATURES_QUESTION, FEATURES_QUEUED, FEATURES_RUNNING, FEATURES_TITLE, IMAGE_QUESTION, IMAGE_TITLE, QUEUED_FOLLOW_UP, STOPPED_SESSIONS, TERMINAL_REQUEST, TERMINAL_TITLE, TIMING_REQUEST, TIMING_TITLE, WORKING_REQUEST, WORKING_TITLE } from "./scripts.ts";
 import { ATTACHMENTS_PATH, FIXTURE_AGENTS, sourceFacts, WORKSPACE_NAME } from "./scene.ts";
+import { fixtureImagePng } from "./fixture-image.ts";
 
 const OUTPUT_DIR = join(REPO_ROOT, "media", "readme");
 const VIEWPORT = { width: 1760, height: 900 };
+/** The features image is narrower than the others: the Marketplace shows a README image about 900 px wide, so a 1760 px frame would be read at half size. */
+const FEATURES_VIEWPORT = { width: 1100, height: 1010 };
+/** `E2E_README_ONLY=features` captures only the features image (the other images are left as they are), for iterating on it. */
+const ONLY_FEATURES = process.env.E2E_README_ONLY === "features";
 const SIDEBAR_SCALE = 2;
 /** A session start on a busy machine can take far longer than the suite's default. */
 const START_TIMEOUT = 120_000;
@@ -109,7 +114,7 @@ async function editorShows(page: Page, text: RegExp): Promise<void> {
 	}).toPass({ timeout: 60_000 });
 }
 
-test("capture the README images in the user layout", async ({ desk, state }) => {
+(ONLY_FEATURES ? test.skip : test)("capture the README images in the user layout", async ({ desk, state }) => {
 	const page = await desk.window(WORKSPACE_NAME);
 	await desk.ready(page);
 	await page.setViewportSize(VIEWPORT);
@@ -197,4 +202,63 @@ test("capture the README images in the user layout", async ({ desk, state }) => 
 	await expect(sessionRows(page)).toHaveCount(9);
 	await settle(page);
 	await page.screenshot({ path: join(OUTPUT_DIR, "terminal.png") });
+});
+
+/**
+ * features.png: one Chat filling the frame, showing what the README's "rich Chat" line promises. The transcript holds a reply with a
+ * drawn mermaid diagram and links to a file line and to code symbols; the turn after it is running, with a follow-up queued; the draft
+ * holds prose, an image chip with its thumbnail and a fenced code block. Taken last, in a narrower window (FEATURES_VIEWPORT), with every other
+ * editor closed and the side bar hidden.
+ */
+test("capture the Chat features image", async ({ desk, state }) => {
+	const page = await desk.window(WORKSPACE_NAME);
+	await desk.ready(page);
+	await page.setViewportSize(VIEWPORT);
+	page.setDefaultTimeout(60_000);
+	mkdirSync(OUTPUT_DIR, { recursive: true });
+
+	// The language server must know the source for the reply's code symbols to link: its file is open while the reply renders.
+	if (await page.getByRole("tab", { name: /^attachments\.ts/ }).count() === 0) {
+		await openFileAt(page, `${ATTACHMENTS_PATH.split("/").at(-1)}:1`);
+		await expect(page.getByRole("tab", { name: /^attachments\.ts/ })).toBeVisible({ timeout: 60_000 });
+	}
+	const chat = await startSession(desk, page, FEATURES_QUESTION);
+	await expect(chat.getByText(/before anything is read/)).toBeVisible({ timeout: 120_000 });
+	await expect(chat.locator(".omp-mermaid--drawn"), "the diagram is drawn").toBeVisible({ timeout: 60_000 });
+	await expect(chat.locator(".omp-md .omp-file-link"), "the file line and both code symbols are links").toHaveCount(3, { timeout: 60_000 });
+	await nameSession(desk, page, FEATURES_TITLE);
+
+	// The frame: this Chat alone and no side bar.
+	for (let closed = 0; closed < 10; closed++) {
+		const others = page.locator("[id='workbench.parts.editor']").getByRole("tab").filter({ hasNotText: new RegExp(`^${FEATURES_TITLE}`) });
+		if (await others.count() === 0) break;
+		await others.first().click({ button: "middle" });
+	}
+	await runCommand(page, "View: Toggle Primary Side Bar Visibility");
+	await expect(page.locator("[id='workbench.parts.sidebar']")).toBeHidden();
+	await page.setViewportSize(FEATURES_VIEWPORT);
+
+	// A turn that keeps running, a queued follow-up behind it and a draft: prose, an image chip, a fenced block.
+	await desk.send(chat, FEATURES_RUNNING);
+	await expect(chat.getByText(/Writing the test, then running/)).toBeVisible({ timeout: 120_000 });
+	const box = desk.composerWhileBusy(chat);
+	await box.fill(FEATURES_QUEUED);
+	await box.press("Alt+Enter");
+	await expect(chat.getByText("Queued")).toBeVisible();
+	const picture = join(state.base, "screenshot.png");
+	writeFileSync(picture, fixtureImagePng());
+	await box.click();
+	await box.pressSequentially(FEATURES_DRAFT_BEFORE_IMAGE);
+	await chat.locator("input.omp-file-input").setInputFiles(picture);
+	await expect(chat.locator(".omp-attachment-thumb")).toHaveCount(1, { timeout: 60_000 });
+	await box.press("Control+End");
+	await box.pressSequentially(FEATURES_DRAFT_AFTER_IMAGE);
+	await box.press("Shift+Enter");
+	await box.pressSequentially("```ts");
+	await box.press("Enter");
+	await box.pressSequentially(FEATURES_DRAFT_CODE[0]!);
+	await expect(chat.locator(".omp-composer-input .omp-line--code"), "the block's lines have the band").toHaveCount(FEATURES_DRAFT_CODE.length + 2);
+	await box.blur();
+	await settle(page);
+	await page.screenshot({ path: join(OUTPUT_DIR, "chat-features.png") });
 });

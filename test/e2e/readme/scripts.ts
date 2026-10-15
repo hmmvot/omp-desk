@@ -11,6 +11,8 @@ export interface SourceFacts {
 	readonly draftBytesLine: number;
 	/** Names of the exported functions, in source order. */
 	readonly functions: readonly string[];
+	/** Line of `export function sizeRejection` in the attachments source (a symbol the diagram reply cites). */
+	readonly sizeRejectionLine: number;
 }
 
 /** The names the screenshots give their sessions (the Sessions view's Rename). */
@@ -18,12 +20,23 @@ export const IMAGE_TITLE = "chat-image-limits";
 export const TIMING_TITLE = "fix-reload-timing";
 export const WORKING_TITLE = "native-win32-checks";
 export const TERMINAL_TITLE = "attachments-exports";
+export const FEATURES_TITLE = "image-attachments";
 
 export const IMAGE_QUESTION = "Where does the Chat composer check the size of an attached image?";
 export const TIMING_REQUEST = "Reload Window is slow with many Chat tabs. Make a todo list, have one subagent measure where the time goes, and wait for its report before changing anything.";
 export const QUEUED_FOLLOW_UP = "Then list the exported functions of src/webview/lib/attachments.ts.";
 export const WORKING_REQUEST = "Run the native Win32 checks and tell me about every failure.";
 export const TERMINAL_REQUEST = "Summarize what src/webview/lib/attachments.ts exports.";
+/** The first turn of the features image: answered with a diagram, links and a symbol. */
+export const FEATURES_QUESTION = "How does an attached image get from the composer to OMP? Show it as a small diagram.";
+/** The second turn keeps running (a long command) while the draft below is typed. */
+export const FEATURES_RUNNING = "Add a test for the 5 MiB image limit and run the attachment tests.";
+/** Queued behind the running turn. */
+export const FEATURES_QUEUED = "When it passes, update the changelog entry too.";
+/** The draft of the features image: prose, an image chip (attached by the scene), more prose and a fenced block. */
+export const FEATURES_DRAFT_BEFORE_IMAGE = "Why does this screenshot fail?";
+export const FEATURES_DRAFT_AFTER_IMAGE = " Check it against this limit:";
+export const FEATURES_DRAFT_CODE = ["expect(sizeRejection(file, 0)).toBe(null);"];
 
 const SUBAGENT_TASK = "Measure where Reload Window spends its time with the reload timing probe, and report the slowest step.";
 
@@ -104,6 +117,39 @@ export function readmeScripts(facts: SourceFacts): ModelScript[] {
 					promptTokens: 31_000,
 				},
 			],
+		},
+		{
+			prompt: FEATURES_QUESTION,
+			steps: [
+				{
+					tools: [
+						{ name: "read", args: { path: "src/webview/lib/attachments.ts" } },
+						{ name: "grep", args: { pattern: "sizeRejection", path: "src" } },
+					],
+					promptTokens: 29_000,
+				},
+				{
+					text: [
+						"An image is checked twice before it leaves the composer:",
+						"",
+						"```mermaid",
+						"flowchart LR",
+						"  A[Attach or paste] --> B{Size OK?}",
+						"  B -- no --> C[Refuse with a message]",
+						"  B -- yes --> D[Sniff the bytes]",
+						"  D --> E[Chip in the draft]",
+						"```",
+						"",
+						`\`sizeRejection\` (\`src/webview/lib/attachments.ts:${facts.sizeRejectionLine}\`) judges the file size before anything is read, so an oversized pick is never loaded; \`readImageAttachment\` then checks the bytes and builds the \`[Image #1]\` chip.`,
+					].join("\n"),
+					promptTokens: 36_000,
+				},
+			],
+		},
+		{
+			prompt: FEATURES_RUNNING,
+			// The command is real: the scene's attachments.test.ts (scene.ts) waits half an hour, so the turn stays running.
+			steps: [{ text: "Writing the test, then running the attachment tests.", tools: [{ name: "bash", args: { command: "node --test src/webview/lib/attachments.test.ts", timeout: 1800 } }], promptTokens: 38_000 }],
 		},
 		...STOPPED_SESSIONS.map(session => ({ prompt: session.prompt, steps: [{ text: session.reply }] })),
 	];

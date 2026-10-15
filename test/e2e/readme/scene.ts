@@ -64,6 +64,8 @@ export async function createFolders(base: string): Promise<{ folderA: string; fo
 	const folder = join(base, "ws", WORKSPACE_NAME);
 	await mkdir(join(folder, dirname(ATTACHMENTS_PATH)), { recursive: true });
 	await writeFile(join(folder, ATTACHMENTS_PATH), await readFile(join(REPO_ROOT, ATTACHMENTS_PATH), "utf8"));
+	// The test the features image "runs": it waits half an hour, so the turn that runs it is still running when the picture is taken.
+	await writeFile(join(folder, "src/webview/lib/attachments.test.ts"), `import { test } from "node:test";\nimport { setTimeout as sleep } from "node:timers/promises";\n\ntest("an image over 5 MiB is refused before it is read", async () => {\n\tawait sleep(30 * 60_000);\n});\n`);
 	// The copy imports modules the workspace does not hold: no red squiggles in the picture.
 	await mkdir(join(folder, ".vscode"), { recursive: true });
 	await writeFile(join(folder, ".vscode", "settings.json"), JSON.stringify({ "typescript.validate.enable": false }, null, 2));
@@ -80,6 +82,7 @@ export function sourceFacts(attachments: string): SourceFacts {
 	return {
 		attachmentBytesLine: lineOf(attachments, "export const MAX_ATTACHMENT_BYTES"),
 		draftBytesLine: lineOf(attachments, "export const MAX_DRAFT_BYTES"),
+		sizeRejectionLine: lineOf(attachments, "export function sizeRejection"),
 		functions: [...attachments.matchAll(/^export (?:async )?function (\w+)/gm)].map(match => match[1]),
 	};
 }

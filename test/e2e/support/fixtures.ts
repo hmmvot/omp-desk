@@ -7,10 +7,11 @@
  * with one screenshot of every window and the OMP Desk log of every window. Open a trace with `npx playwright show-trace <trace.zip>`.
  *
  * The clean slate keeps one failed scenario from failing the next: open menus and QuickPicks are dismissed and any
- * window other than the first (`alpha-desk`) is closed.
+ * window other than the first (the one whose title names the first folder of the run, `alpha-desk` in the suite) is closed.
  */
 import { test as base } from "@playwright/test";
 import { writeFileSync } from "node:fs";
+import { basename } from "node:path";
 import { readDeskLogs } from "./desk-log.ts";
 import { Desk } from "./desk.ts";
 import { readState, type RunState } from "./state.ts";
@@ -43,12 +44,13 @@ export const test = base.extend<{ failureTrace: void; cleanSlate: void }, Worker
 		}
 		await desk.context.tracing.stop(failed ? { path: testInfo.outputPath("trace.zip") } : undefined);
 	}, { auto: true }],
-	cleanSlate: [async ({ desk }, use) => {
+	cleanSlate: [async ({ desk, state }, use) => {
 		await use();
+		const firstWindow = basename(state.folderA);
 		for (const page of desk.context.pages()) {
 			if (page.isClosed()) continue;
 			const title = await page.title().catch(() => "");
-			if (!title.includes("alpha-desk")) {
+			if (!title.includes(firstWindow)) {
 				await page.close().catch(() => undefined);
 				continue;
 			}

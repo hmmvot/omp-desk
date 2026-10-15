@@ -2,7 +2,7 @@
 
 Chat is the rich editor view of a session. It opens in an editor tab, shows the conversation as it streams, and follows your light, dark or high-contrast theme. The same tab can be switched to OMP's native [Terminal](terminal.md) at any time. New sessions open in Chat.
 
-![A Chat with tool rows, TODO and Agents](../../media/readme/chat-agents.png)
+![A Chat mid-turn: a drawn diagram and links in the reply, a running turn with a queued follow-up, and a draft with an image and a code block](../../media/readme/chat-features.png)
 
 ## Writing and sending
 
@@ -50,6 +50,8 @@ Type a line of three backticks, with a language if you like (`` ```ts ``), and p
 - Routine tool calls are grouped in an **Overview**. Set [`ompDesk.toolCallDetail`](settings.md) to **detailed** to show every call as its own row, in every Chat. The setting decides whether calls are grouped; the tool display mode above decides only what is open. In Detailed there are no groups, so the groups mode looks like collapsed there (every call is already one line).
 - Pinned rows show the TODO list and running subagents. Open a subagent's live transcript in its own tab.
 - Status lines and warnings from OMP extensions appear around the composer; their informational notices are not shown.
+
+![A Chat with tool rows, TODO and Agents](../../media/readme/chat-agents.png)
 
 ### Mermaid diagrams
 

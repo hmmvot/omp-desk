@@ -26,7 +26,7 @@ Run your [Oh My Pi](https://github.com/can1357/oh-my-pi) (`omp`) sessions from V
 
 **A rich Chat.** Steer or queue a message while a turn runs, Rewind with branches, mermaid diagrams, links to files and code symbols, image attachments and code blocks in the draft. [More](docs/guide/chat.md)
 
-![Chat with tool rows, TODO and Agents](media/readme/chat-agents.png)
+![A Chat mid-turn: a drawn diagram and links in the reply, a running turn with a queued follow-up, and a draft with an image and a code block](media/readme/chat-features.png)
 
 **A GUI for OMP's own settings and features.** Models and Agents editors (who runs on what, and why), an OMP Settings editor with global and project layers, Skills, Tools and MCP views, provider login, Stats, the slash-command list and a provider quota status bar. [More](docs/guide/omp-settings.md)
 
