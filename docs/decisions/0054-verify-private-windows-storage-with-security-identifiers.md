@@ -7,7 +7,7 @@ date: 2026-10-09
 
 > **Narrowly amended by [ADR-0076](0076-call-win32-in-process-through-a-staged-koffi-module-instead-of-starting-powershell.md):** the module-free .NET reader (decision 1) and the rejected "native in-process reader" are replaced by an in-process native reader (`GetNamedSecurityInfoW` through a staged `koffi.node`), with the same refusal semantics, SID rule and 20 s bound; a NULL DACL reads as an Everyone entry and an unknown ACE type refuses.
 
-> **Narrow amendment ([ADR-0076](0076-call-win32-in-process-through-a-staged-koffi-module-instead-of-starting-powershell.md), decision 11):** the verification of the staged native module's own layout is reused on a warm start, on a recorded stat proof that expires after 24 hours, instead of being repeated by a child process at every window start. Every other store is verified at every use as here.
+> **Narrow amendment ([ADR-0076](0076-call-win32-in-process-through-a-staged-koffi-module-instead-of-starting-powershell.md), decision 11):** the verification of the staged native module's own layout is reused on a warm start, on a recorded stat proof that expires after 24 hours and is bound to the account and to a local fixed NTFS volume, instead of being repeated by a child process at every window start; the carrier replace-rights rule and the owner rule are judged again natively by the loading activation before the module is shared, so the cache lifts this ADR's reservation of verdict caching for this layout only (see ADR-0076, decision 11). Every other store is verified at every use as here.
 
 ## Context and Problem Statement
 
