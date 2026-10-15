@@ -30,6 +30,8 @@ Run your [Oh My Pi](https://github.com/can1357/oh-my-pi) (`omp`) sessions from V
 
 **A GUI for OMP's own settings and features.** Models and Agents editors (who runs on what, and why), an OMP Settings editor with global and project layers, Skills, Tools and MCP views, provider login, Stats, the slash-command list and a provider quota status bar. [More](docs/guide/omp-settings.md)
 
+![The Models editor](media/readme/models.png)
+
 ![The OMP Settings editor](media/readme/omp-settings.png)
 
 **Desktop notifications** when the agent finishes or asks you something. [More](docs/guide/notifications.md)

@@ -1,7 +1,10 @@
 /**
- * The five README images (`media/readme/chat.png`, `sessions.png`, `chat-agents.png`, `terminal.png`, `omp-settings.png`), captured from one
- * hidden test window in the user layout (layout.ts) on the README scene (scene.ts): scripted conversations of the project
- * itself, no real model, no personal data. Run with `npm run readme:screenshots`.
+ * The six README images (`media/readme/chat.png`, `sessions.png`, `chat-agents.png`, `terminal.png`, `models.png`,
+ * `omp-settings.png`), captured from one hidden test window in the user layout (layout.ts) on the README scene (scene.ts):
+ * scripted conversations of the project itself, no real model, no personal data. The window has its own OMP profile: its agent
+ * directory (`PI_CODING_AGENT_DIR`) and its own home folder (`-IsolateHome`), where OMP finds the user-level agents; the Agents
+ * editor's sources are checked before the Models and OMP Settings images are taken (profile-guard.ts). Run with
+ * `npm run readme:screenshots`.
  *
  * Fixed capture: the window's viewport is 1760 x 900 CSS pixels at device scale 1; `sessions.png` is a clip of the side bar
  * at device scale 2. The images are written over the committed ones.
@@ -12,8 +15,9 @@ import { join } from "node:path";
 import type { Desk } from "../support/desk.ts";
 import { expect, test } from "../support/fixtures.ts";
 import { REPO_ROOT } from "../support/launcher.ts";
+import { agentSourceLabels, expectOwnProfile, openAgentsEditor } from "../support/profile-guard.ts";
 import { IMAGE_QUESTION, IMAGE_TITLE, QUEUED_FOLLOW_UP, STOPPED_SESSIONS, TERMINAL_REQUEST, TERMINAL_TITLE, TIMING_REQUEST, TIMING_TITLE, WORKING_REQUEST, WORKING_TITLE } from "./scripts.ts";
-import { ATTACHMENTS_PATH, sourceFacts, WORKSPACE_NAME } from "./scene.ts";
+import { ATTACHMENTS_PATH, FIXTURE_AGENTS, sourceFacts, WORKSPACE_NAME } from "./scene.ts";
 
 const OUTPUT_DIR = join(REPO_ROOT, "media", "readme");
 const VIEWPORT = { width: 1760, height: 900 };
@@ -94,6 +98,17 @@ async function settle(page: Page): Promise<void> {
 	await page.waitForTimeout(1_500);
 }
 
+/** Waits until a visible editor webview (not the Chat, not a side bar view) shows `text`. */
+async function editorShows(page: Page, text: RegExp): Promise<void> {
+	const selector = "iframe.webview.ready:visible:not([src*='purpose=webviewView'])";
+	await expect(async () => {
+		const count = await page.locator(selector).count();
+		let loaded = false;
+		for (let index = 0; index < count; index++) loaded ||= (await page.frameLocator(selector).nth(index).frameLocator("iframe#active-frame").getByText(text).count()) > 0;
+		expect(loaded).toBe(true);
+	}).toPass({ timeout: 60_000 });
+}
+
 test("capture the README images in the user layout", async ({ desk, state }) => {
 	const page = await desk.window(WORKSPACE_NAME);
 	await desk.ready(page);
@@ -117,22 +132,20 @@ test("capture the README images in the user layout", async ({ desk, state }) => 
 	await expect(question.getByText(/before Send instead of failing later/)).toBeVisible({ timeout: 120_000 });
 	await nameSession(desk, page, IMAGE_TITLE);
 
-	// The editors on the right: OMP's own settings editors and a source file at a line.
-	await runCommand(page, "OMP Desk: Open Agents Settings");
-	await expect(page.getByRole("tab", { name: /^OMP Agents/ })).toBeVisible({ timeout: 60_000 });
+	// The editors on the right: OMP's own settings editors and a source file at a line. They run on the scene's own profile (the
+	// agent directory and the home folder of the window, see scene.ts); the Agents editor's sources prove it before anything is captured.
+	await openAgentsEditor(page);
+	expectOwnProfile(await agentSourceLabels(page), FIXTURE_AGENTS.length);
 	await runCommand(page, "OMP Desk: Open Models Settings");
 	await expect(page.getByRole("tab", { name: /^OMP Models/ })).toBeVisible({ timeout: 60_000 });
-	// omp-settings.png: the OMP Settings editor beside the Chat. The Models and Agents editors are not captured: their attention banner can name agents that come from outside the isolated agent directory.
+	await page.getByRole("tab", { name: /^OMP Models/ }).click();
+	await editorShows(page, /Model roles/);
+	await settle(page);
+	await page.screenshot({ path: join(OUTPUT_DIR, "models.png") });
 	await runCommand(page, "OMP Desk: Open OMP Settings");
 	await expect(page.getByRole("tab", { name: /^OMP Settings/ })).toBeVisible({ timeout: 60_000 });
 	await page.getByRole("tab", { name: /^OMP Settings/ }).click();
-	await expect(async () => {
-		const frames = page.frameLocator("iframe.webview.ready:visible:not([src*='purpose=webviewView'])");
-		const count = await page.locator("iframe.webview.ready:visible:not([src*='purpose=webviewView'])").count();
-		let loaded = false;
-		for (let index = 0; index < count; index++) loaded ||= (await frames.nth(index).frameLocator("iframe#active-frame").getByText(/Credentials are never shown/).count()) > 0;
-		expect(loaded).toBe(true);
-	}).toPass({ timeout: 60_000 });
+	await editorShows(page, /Credentials are never shown/);
 	await settle(page);
 	await page.screenshot({ path: join(OUTPUT_DIR, "omp-settings.png") });
 	await closeTab(page, /^OMP Settings/);
@@ -149,7 +162,7 @@ test("capture the README images in the user layout", async ({ desk, state }) => 
 	const timing = await startSession(desk, page, TIMING_REQUEST);
 	await expect(timing.getByText(/1 running/)).toBeVisible({ timeout: 120_000 });
 	// While a turn runs the composer is the steer box: found by its role, not by its idle name.
-	const steer = timing.locator("[role=combobox]").first();
+	const steer = desk.composerWhileBusy(timing);
 	await steer.fill(QUEUED_FOLLOW_UP);
 	await steer.press("Alt+Enter");
 	await expect(timing.getByText("Queued")).toBeVisible();

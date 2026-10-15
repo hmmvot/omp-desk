@@ -8,6 +8,8 @@ export interface RunState {
 	readonly root: string;
 	readonly base: string;
 	readonly agentDir: string;
+	/** The window's own home folder (`test-vscode.ps1 -IsolateHome`): `~` of VS Code, OMP and OMP Desk in the test window. */
+	readonly homeDir: string;
 	readonly dataDir: string;
 	readonly cdpPort: number;
 	readonly mockUrl: string;

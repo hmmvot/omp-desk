@@ -149,11 +149,12 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
 			mock = scene === undefined ? await startMockServer() : await scene.startModelServer(folders.folderA);
 			await writeMockAgentConfig(join(base, "agent"), mock.url, scene?.AGENT_CONFIG);
 			await writeFixtureSkill(join(base, "agent"));
+			await scene?.writeHomeProfile(join(base, "home"));
 			const layout = layoutFromEnv();
 			await writeProfileSettings(join(base, "data"), layoutSettings(layout));
 			seedGlobalState(join(base, "data"), layout);
 			const cdpPort = await freePort();
-			state = { name, root, base, agentDir: join(base, "agent"), dataDir: join(base, "data"), cdpPort, mockUrl: mock.url, ...folders, vsix, resultsDir: RESULTS_DIR, layout };
+			state = { name, root, base, agentDir: join(base, "agent"), homeDir: join(base, "home"), dataDir: join(base, "data"), cdpPort, mockUrl: mock.url, ...folders, vsix, resultsDir: RESULTS_DIR, layout };
 			await startVsCode({ name, root, folder: folders.folderA, vsix, port: cdpPort });
 			await waitForCdp(cdpPort, 180_000);
 			if (keep) await writeFile(KEPT_FILE, JSON.stringify(state, null, 2));

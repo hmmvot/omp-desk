@@ -20,8 +20,11 @@ serves screenshots (Page.captureScreenshot; send Emulation.setFocusEmulationEnab
 and close it with -Stop or Browser.close over CDP. Processes started
 from the window inherit the hidden desktop, so a browser or window that OMP opens appears there as well.
 
-PI_CODING_AGENT_DIR does not move everything: OMP keeps installed plugins under ~/.omp/plugins whatever it says. A
-Plugins row switched in the Extensions view of a test window changes your real plugin lock.
+PI_CODING_AGENT_DIR does not move everything: OMP keeps installed plugins under ~/.omp/plugins whatever it says, finds the
+user-level agents it hands to subagents in ~/.omp/agent/agents (the home folder, not PI_CODING_AGENT_DIR), and also reads
+~/.claude, ~/.codex and ~/.gemini. A Plugins row switched in the Extensions view of a test window changes your real plugin
+lock, and the Models and Agents editors list your real agents. -IsolateHome closes that: it gives the window its own home
+folder (home\ next to agent\) through USERPROFILE and HOME, so every ~ lookup of VS Code, OMP and OMP Desk lands there.
 
 Provider API keys in the environment (ANTHROPIC_API_KEY and similar) would give OMP models even without a login,
 so they are removed from the launched VS Code unless -KeepProviderKeys is given.
@@ -58,6 +61,8 @@ param(
 	# Also delete VS Code user data and extensions: a first VS Code start, OMP Desk's storage included.
 	[switch] $ResetVsCode,
 	[switch] $KeepProviderKeys,
+	# Launch with USERPROFILE and HOME (and HOMEDRIVE/HOMEPATH) set to <Root>\<Name>\home: nothing of the real home folder is read or written. -Reset deletes it too.
+	[switch] $IsolateHome,
 	# Stop the running window for -Name (its Code.exe processes, and any bun.exe broker, with their children) and start nothing.
 	[switch] $Stop,
 	# Chrome DevTools Protocol port on 127.0.0.1 for automated UI checks; applies only when this VS Code starts.
@@ -104,6 +109,8 @@ if ($Stop) {
 
 if ($ResetVsCode) { foreach ($dir in $data, $extensions) { if (Test-Path $dir) { Remove-Item -Recurse -Force $dir } } }
 if ($Reset -and (Test-Path $agent)) { Remove-Item -Recurse -Force $agent }
+$fixtureHome = Join-Path $base 'home'
+if ($Reset -and (Test-Path $fixtureHome)) { Remove-Item -Recurse -Force $fixtureHome }
 New-Item -ItemType Directory -Force -Path $data, $extensions, $agent | Out-Null
 $settings = Join-Path $data 'User\settings.json'
 if (-not (Test-Path $settings)) {
@@ -135,6 +142,14 @@ foreach ($key in [Environment]::GetEnvironmentVariables('Process').Keys) {
 	if ($key -match $drop) { Set-LaunchVariable $key $null; $removed += $key }
 }
 Set-LaunchVariable 'PI_CODING_AGENT_DIR' $agent
+if ($IsolateHome) {
+	New-Item -ItemType Directory -Force -Path $fixtureHome | Out-Null
+	$drive = [IO.Path]::GetPathRoot($fixtureHome).TrimEnd('\')
+	Set-LaunchVariable 'USERPROFILE' $fixtureHome
+	Set-LaunchVariable 'HOME' $fixtureHome
+	Set-LaunchVariable 'HOMEDRIVE' $drive
+	Set-LaunchVariable 'HOMEPATH' $fixtureHome.Substring($drive.Length)
+}
 
 # Every test window lives on its own hidden desktop; see .DESCRIPTION.
 $desktopName = "omp-desk-test-$Name"

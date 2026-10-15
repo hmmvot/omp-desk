@@ -24,8 +24,28 @@ export const AGENT_CONFIG: MockAgentOptions = {
 	contextWindow: 200_000,
 	inputKinds: "text, image",
 	reasoning: true,
-	extraConfig: ["defaultThinkingLevel: high", "title:", "  icons: boring", "startup:", "  quiet: true", "  checkUpdate: false", "  changelogMode: hidden", "statusLine:", "  preset: custom", "  leftSegments: [pi, model, mode, git]"],
+	// The first two lines continue the `modelRoles:` block of the config: the roles the Models editor shows assigned.
+	extraConfig: ["  smol: demo/demo-model", "  slow: demo/demo-model", "defaultThinkingLevel: high", "title:", "  icons: boring", "startup:", "  quiet: true", "  checkUpdate: false", "  changelogMode: hidden", "statusLine:", "  preset: custom", "  leftSegments: [pi, model, mode, git]"],
 };
+
+/** The agents of the scene's own OMP profile, neutral and for this project only (the names of the Agents editor besides OMP's bundled ones). */
+export const FIXTURE_AGENTS: readonly { readonly name: string; readonly description: string; readonly model: string; readonly tools: string }[] = [
+	{ name: "docs-writer", description: "Writes and updates the project documentation", model: "demo/demo-model", tools: "read, find, grep, write" },
+	{ name: "test-runner", description: "Runs the test suite and reports the failures", model: "\"@smol\"", tools: "read, find, grep, bash" },
+];
+
+/**
+ * The scene's home folder (`<base>/home`, which test-vscode.ps1 -IsolateHome makes `~` for VS Code, OMP and OMP Desk). OMP finds
+ * the user-level agents it hands to subagents in `~/.omp/agent/agents` (the home folder, not `PI_CODING_AGENT_DIR`), so they
+ * are written there. Nothing of the real home folder is read in this scene.
+ */
+export async function writeHomeProfile(home: string): Promise<void> {
+	const agents = join(home, ".omp", "agent", "agents");
+	await mkdir(agents, { recursive: true });
+	for (const agent of FIXTURE_AGENTS) {
+		await writeFile(join(agents, `${agent.name}.md`), `---\nname: ${agent.name}\ndescription: ${agent.description}\ntools: ${agent.tools}\nmodel: ${agent.model}\nthinking-level: medium\n---\n\nYou work on the omp-vscode project. ${agent.description}.\n`, "utf8");
+	}
+}
 
 const GIT_IDENTITY = ["-c", "user.name=Maintainer", "-c", "user.email=maintainer@example.invalid"];
 

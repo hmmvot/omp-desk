@@ -2,6 +2,8 @@
 
 OMP Desk gives OMP's own configuration a VS Code interface. Models, Agents and OMP's settings open as editors; skills, tools, MCP servers, extensions and the context of a session are views in the OMP Desk side bar; providers are signed in from VS Code.
 
+![The Models editor](../../media/readme/models.png)
+
 ## Models and Agents
 
 **Models** and **Agents** (`/models`, `/agents`, or the Command Palette: **OMP Desk: Open Models Settings**, **OMP Desk: Open Agents Settings**) list every role and agent with the model it runs on, its thinking level and where that comes from (environment, project, global, a role it follows, OMP's built-in list, an override or its definition).

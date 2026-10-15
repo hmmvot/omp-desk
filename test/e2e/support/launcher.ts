@@ -51,6 +51,8 @@ export function startVsCode(options: LaunchOptions): Promise<RunResult> {
 	// `E2E_DESK_LOG_LEVEL=default` leaves VS Code's own level (Info) in place.
 	const level = process.env.E2E_DESK_LOG_LEVEL ?? "debug";
 	const args = ["-Name", options.name, "-Root", options.root, "-Folder", options.folder];
+	// The window gets its own home folder (`<base>/home`): OMP reads user-level agents, plugins and other harnesses' folders from `~`, which `PI_CODING_AGENT_DIR` does not move (see test-vscode.ps1).
+	args.push("-IsolateHome");
 	if (level !== "default") args.push("-DeskLogLevel", level);
 	if (options.vsix) args.push("-Vsix", options.vsix);
 	if (options.port) args.push("-RemoteDebuggingPort", String(options.port));
