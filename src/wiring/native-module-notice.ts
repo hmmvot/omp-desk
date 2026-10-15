@@ -111,3 +111,13 @@ export function simulatedNativeFailure(value: string | undefined): string | null
 			return null;
 	}
 }
+
+/**
+ * Test-only: how long the native module's staging is held back, so a slow machine can be reproduced by slowing only that one step
+ * (every Windows check waits for the module). `OMPDESK_TEST_NATIVE_DELAY_MS` is a number of milliseconds; anything else, including
+ * unset, is no delay.
+ */
+export function simulatedNativeDelayMs(value: string | undefined): number {
+	const ms = Number(value);
+	return Number.isFinite(ms) && ms > 0 ? Math.min(ms, 60_000) : 0;
+}

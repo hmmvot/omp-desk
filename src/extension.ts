@@ -117,7 +117,7 @@ import { claimFileNameFor, startClaimWatch } from "./host/claim-watch";
 import { WindowRegistry } from "./host/window-registry";
 import { ExternalLeaseObserver, nativeLeaseProbe, ompSessionOwnersDir } from "./host/omp-session-lease";
 import { startWin32Native, win32Native, win32NativeFailure } from "./host/win32-native";
-import { announceNativeFailure, nativeDiagnosticsFor, simulatedNativeFailure } from "./wiring/native-module-notice";
+import { announceNativeFailure, nativeDiagnosticsFor, simulatedNativeDelayMs, simulatedNativeFailure } from "./wiring/native-module-notice";
 import { canonicalFolderKey, folderHistoryDeletionSubject, inspectSessionFile, scanFolderHistory } from "./host/folder-history";
 import type { FolderHistoryCandidate, FolderHistoryIndexedEntry, FolderHistoryScan } from "./host/folder-history";
 import { findFileMentions } from "./host/file-mentions";
@@ -1452,6 +1452,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const nativeStartedAt = performance.now();
     let nativeStagedAfter = 0;
     const nativeLoad = startWin32Native(async () => {
+      const delayMs = simulatedNativeDelayMs(process.env.OMPDESK_TEST_NATIVE_DELAY_MS);
+      if (delayMs > 0) await new Promise(resolve => setTimeout(resolve, delayMs));
       const simulated = simulatedNativeFailure(process.env.OMPDESK_TEST_NATIVE_FAILURE);
       if (simulated !== null) throw new Error(simulated);
       const asset = await s.staging.native();

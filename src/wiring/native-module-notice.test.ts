@@ -16,6 +16,7 @@ import {
 	NATIVE_NOTICE_TROUBLESHOOTING,
 	announceNativeFailure,
 	nativeDiagnosticsFor,
+	simulatedNativeDelayMs,
 	simulatedNativeFailure,
 } from "./native-module-notice.ts";
 import type { NativeNoticePort } from "./native-module-notice.ts";
@@ -173,5 +174,13 @@ describe("the diagnostics of a window", () => {
 		});
 		assert.match(text, /Shipped SHA-256: unreadable/);
 		assert.match(text, /Staged koffi\.node: unknown/);
+	});
+});
+
+describe("the simulated delay", () => {
+	it("is a positive number of milliseconds, bounded, and nothing for any other value", () => {
+		assert.equal(simulatedNativeDelayMs("4000"), 4000);
+		assert.equal(simulatedNativeDelayMs("900000"), 60_000);
+		for (const value of [undefined, "", "0", "-5", "soon", "NaN"]) assert.equal(simulatedNativeDelayMs(value), 0, String(value));
 	});
 });
