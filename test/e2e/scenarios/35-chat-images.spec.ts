@@ -47,8 +47,12 @@ test("a 770 KB and a 4 MB screenshot attach, send, reach the model and render in
 	await expect(chat.locator(".omp-attachment-number"), "both files attach: neither is refused for its size").toHaveCount(2, { timeout: 60_000 });
 	await expect(chat.locator(".omp-attach-error"), "no refusal text is shown").toHaveCount(0);
 
-	await desk.send(chat, "look at these");
-	const reply = chat.getByText(/Mock reply to: look at these.*\[image bytes: \d+,\d+\]/);
+	// Attaching put the images' markers into the draft, and only a marker in the text sends its image: type after them, never over them (`desk.send` fills the box).
+	const box = chat.getByRole("combobox", { name: "Message OMP" });
+	await box.press("Control+End");
+	await box.pressSequentially("look at these");
+	await chat.getByRole("button", { name: "Send message" }).click();
+	const reply = chat.getByText(/Mock reply to: .*look at these.*\[image bytes: \d+,\d+\]/);
 	await expect(reply, "the model received both images").toBeVisible({ timeout: 120_000 });
 	const sizes = /\[image bytes: (\d+),(\d+)\]/.exec(await reply.innerText());
 	expect(sizes, "the reply names the size of each image the model saw").not.toBeNull();
@@ -57,6 +61,6 @@ test("a 770 KB and a 4 MB screenshot attach, send, reach the model and render in
 	expect(seenLarge, "OMP resizes a screenshot well under the 4 MB it was sent").toBeLessThan(4 * 1024 * 1024);
 
 	await expect(chat.locator(".omp-native-image"), "the user's message renders both images").toHaveCount(2, { timeout: 60_000 });
-	const loaded = await chat.locator(".omp-native-image").evaluateAll(images => images.map(image => (image instanceof HTMLImageElement ? image.naturalWidth : 0)));
+	const loaded = await chat.locator(".omp-native-image img").evaluateAll(images => images.map(image => (image instanceof HTMLImageElement ? image.naturalWidth : 0)));
 	expect(loaded.every(width => width > 0), `every image decoded: ${JSON.stringify(loaded)}`).toBe(true);
 });
