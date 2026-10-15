@@ -420,6 +420,10 @@ export function appliesTo(row: Pick<InventoryRow, "kind">): Applies {
 		default: return "next-session";
 	}
 }
+/** The pending-operation key of a row's switch: one row, one switch at a time (`<inventory kind>:<row name>`). */
+export function inventoryPendingKey(row: Pick<InventoryRow, "kind" | "name">): string {
+	return `${row.kind}:${row.name}`;
+}
 export function toggleMessage(row: Pick<InventoryRow, "kind" | "name">, enabled: boolean, changed: boolean, sessionRunning: boolean): string {
 	const verb = enabled ? "Enabled" : "Disabled";
 	const what = row.kind === "builtin-tool" ? "tool" : row.kind === "extension-module" ? "extension" : row.kind === "custom-tool" ? "tool" : row.kind === "mcp" ? "MCP server" : row.kind;

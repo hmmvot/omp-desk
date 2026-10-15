@@ -1,5 +1,5 @@
 import * as vscode from "vscode";
-import { emptyView } from "../host/inventory/inventory-model.ts";
+import { emptyView, inventoryPendingKey } from "../host/inventory/inventory-model.ts";
 import type { ViewGroup, ViewItem, ViewModel } from "../host/inventory/inventory-model.ts";
 
 /** The command a row's click runs: open its source file. Registered by the inventory registration. */
@@ -19,9 +19,14 @@ export class InventoryTreeItem extends vscode.TreeItem {
 export class InventoryTreeProvider implements vscode.TreeDataProvider<InventoryTreeItem>, vscode.Disposable {
 	readonly #changed = new vscode.EventEmitter<InventoryTreeItem | undefined>();
 	readonly onDidChangeTreeData = this.#changed.event;
+	readonly #saving: (key: string) => boolean;
 	#model: ViewModel = emptyView("Reading OMP's inventory…");
+	/** `saving` says whether the row with a pending-operation key is being switched now: such a row reads `Saving <name>…`. */
+	constructor(saving: (key: string) => boolean = () => false) { this.#saving = saving; }
 	get model(): ViewModel { return this.#model; }
 	setModel(model: ViewModel): void { this.#model = model; this.#changed.fire(undefined); }
+	/** A row began or finished being saved. */
+	repaint(): void { this.#changed.fire(undefined); }
 	getTreeItem(item: InventoryTreeItem): vscode.TreeItem { return item; }
 	getChildren(parent?: InventoryTreeItem): InventoryTreeItem[] {
 		const model = this.#model;
@@ -41,7 +46,7 @@ export class InventoryTreeProvider implements vscode.TreeDataProvider<InventoryT
 	#item(row: ViewItem): InventoryTreeItem {
 		const item = new InventoryTreeItem(row.label, vscode.TreeItemCollapsibleState.None, { viewItem: row });
 		item.id = row.key;
-		item.description = row.description;
+		item.description = row.row !== null && this.#saving(inventoryPendingKey(row.row)) ? `Saving ${row.row.name}…` : row.description;
 		item.tooltip = row.tooltip;
 		item.iconPath = new vscode.ThemeIcon(row.icon);
 		item.contextValue = row.checked === null ? "inventory.readonly" : "inventory.switchable";

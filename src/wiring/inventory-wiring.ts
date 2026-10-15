@@ -15,10 +15,13 @@ import type { InventoryTreeItem } from "../views/inventory-tree.ts";
 import type { InventoryScope, ViewKind } from "../host/inventory/inventory-model.ts";
 import type { WorkerEnvironment } from "../host/inventory/inventory-runtime.ts";
 import type { SessionToolsTarget } from "../host/session-tools.ts";
+import type { PendingOperations } from "../host/pending-operations.ts";
 
 /** What the extension supplies: the editor the views describe (editor recency, not row selection) and a log. */
 export interface InventoryViewsDeps {
 	target(): SessionToolsTarget | null;
+	/** The window's pending-operation registry: a switched row reads `Saving <name>…` until its write is done. */
+	readonly pending: PendingOperations;
 	log: Logger;
 }
 /** The calls `extension.ts` makes when the active editor or its session changes. */
@@ -90,10 +93,12 @@ export function registerInventoryViews(context: vscode.ExtensionContext, deps: I
 		},
 		log: deps.log,
 		delay: ms => sleep(ms),
+		pending: deps.pending,
+		pendingChanged() { for (const provider of providers.values()) provider.repaint(); },
 	});
 	const subscriptions: vscode.Disposable[] = [];
 	for (const spec of VIEWS) {
-		const provider = new InventoryTreeProvider();
+		const provider = new InventoryTreeProvider(key => deps.pending.get(key, kind => kind === "inventory-toggle") !== undefined);
 		providers.set(spec.kind, provider);
 		const tree = vscode.window.createTreeView(spec.id, { treeDataProvider: provider });
 		trees.set(spec.kind, tree);

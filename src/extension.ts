@@ -1839,7 +1839,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const view = vscode.window.createTreeView(SESSIONS_VIEW_ID, { treeDataProvider: provider });
   s.launcherView = view;
   subscribeProviderLoginRefresh(context, index);
-  s.inventoryViews = registerInventoryViews(context, { target: () => toolsTarget(index), log });
+  s.inventoryViews = registerInventoryViews(context, { target: () => toolsTarget(index), pending: s.pending, log });
   context.subscriptions.push({ dispose: () => { s.inventoryViews = null; } });
   s.contextView = registerContextView(context, {
     target: () => contextTarget(index),

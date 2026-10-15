@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { FRESH_MS, InventoryController } from "./inventory-controller.ts";
 import type { InventoryControllerDeps } from "./inventory-controller.ts";
+import { PendingOperations } from "../pending-operations.ts";
 import type { InventoryResult, InventoryRow, InventoryScope, InventorySnapshot, ViewKind, ViewModel } from "./inventory-model.ts";
 import type { InventoryRuntime, InventoryReadRequest, ToggleRequest, ToggleResult } from "./inventory-runtime.ts";
 import { recordingLogger, type LoggedLine } from "../../shared/logger.ts";
@@ -15,8 +16,8 @@ function target(overrides: Partial<SessionToolsTarget> = {}): SessionToolsTarget
 	return { key: {}, generation: "g1", tabId: "tab-1", mode: "chat", running: true, title: "Work", cwd: "D:/proj", profile: null, commands: [], readDescriptors: null, readTools: null, ...overrides };
 }
 
-function harness(initial: SessionToolsTarget | null) {
-	const state = { clock: 1_000_000, target: initial, reads: [] as InventoryReadRequest[], toggles: [] as ToggleRequest[], published: [] as Array<[ViewKind, ViewModel]>, scopes: [] as Array<[ViewKind, InventoryScope]>,
+function harness(initial: SessionToolsTarget | null, extra: Partial<InventoryControllerDeps> = {}) {
+	const state = { clock: 1_000_000, repaints: 0, target: initial, reads: [] as InventoryReadRequest[], toggles: [] as ToggleRequest[], published: [] as Array<[ViewKind, ViewModel]>, scopes: [] as Array<[ViewKind, InventoryScope]>,
 		toggleGate: null as Promise<void> | null,
 		notices: [] as Array<[string, string]>, undos: [] as Array<() => void>, logs: [] as LoggedLine[], delays: [] as number[], gate: null as Promise<void> | null, toggleResult: { ok: true, changed: true, writes: [] } as ToggleResult, readResult: null as ((request: InventoryReadRequest) => InventoryResult) | null };
 	const runtime: InventoryRuntime = {
@@ -24,7 +25,7 @@ function harness(initial: SessionToolsTarget | null) {
 		async toggle(request) { state.toggles.push(request); if (state.toggleGate) await state.toggleGate; return state.toggleResult; },
 	};
 	const deps: InventoryControllerDeps = { target: () => state.target, runtime, neutralCwd: "C:/", publish: (view, model) => { state.published.push([view, model]); },
-		scopeChanged: (view, scope) => { state.scopes.push([view, scope]); }, notify: (message, level, undo) => { state.notices.push([level, message]); if (undo !== undefined) state.undos.push(undo); }, log: recordingLogger(state.logs), delay: async ms => { state.delays.push(ms); }, now: () => state.clock };
+		scopeChanged: (view, scope) => { state.scopes.push([view, scope]); }, notify: (message, level, undo) => { state.notices.push([level, message]); if (undo !== undefined) state.undos.push(undo); }, log: recordingLogger(state.logs), delay: async ms => { state.delays.push(ms); }, now: () => state.clock, ...extra };
 	const controller = new InventoryController(deps);
 	const settle = async () => { for (let turn = 0; turn < 20; turn++) await new Promise(resolve => setImmediate(resolve)); };
 	/** Switch lines only: timing lines are informational and differ per run. */
@@ -339,6 +340,31 @@ describe("inventory controller switches", () => {
 		release();
 		await Promise.all([first, second]);
 		assert.deepEqual(h.state.toggles.map(toggle => toggle.enabled), [false, true]);
+	});
+	it("says Saving from the click and drops a second switch of that row until the first is written", async () => {
+		const pending = new PendingOperations();
+		const changes: string[] = [];
+		pending.onDidChange(change => { changes.push(change.key); });
+		const h = harness(target(), { pending, pendingChanged: () => { h.state.repaints += 1; } });
+		h.controller.setVisible("skills", true);
+		await h.settle();
+		let release!: () => void;
+		h.state.toggleGate = new Promise<void>(resolve => { release = resolve; });
+		const row = h.shown("skills");
+		const first = h.controller.toggle("skills", row, false);
+		assert.equal(pending.get("skill:review")?.kind, "inventory-toggle", "pending before anything is awaited");
+		assert.equal(pending.get("skill:review")?.step, "saving");
+		const repaints = h.state.repaints;
+		await h.controller.toggle("skills", row, true);
+		assert.equal(h.state.repaints, repaints + 1, "the ignored click repaints the row as it is");
+		await h.settle();
+		assert.deepEqual(h.state.toggles.map(toggle => toggle.enabled), [false], "the second switch of the row is not queued");
+		release();
+		await first;
+		assert.equal(pending.get("skill:review"), undefined, "the row is free once the write is done");
+		await h.controller.toggle("skills", row, true);
+		assert.deepEqual(h.state.toggles.map(toggle => toggle.enabled), [false, true]);
+		assert.equal(pending.get("skill:review"), undefined);
 	});
 	it("writes the profile of the list the row came from even when the selected session changes while a switch waits", async () => {
 		const h = harness(target({ profile: "alpha" }));

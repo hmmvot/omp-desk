@@ -1,9 +1,10 @@
 import { readSessionEvidence } from "../session-tools.ts";
-import { emptyView, isUnavailable, projectView, toggleMessage, VIEW_KINDS, appliesTo } from "./inventory-model.ts";
+import { emptyView, inventoryPendingKey, isUnavailable, projectView, toggleMessage, VIEW_KINDS, appliesTo } from "./inventory-model.ts";
 import type { InventoryResult, InventoryRow, InventoryScope, SessionEvidence, ViewKind, ViewModel } from "./inventory-model.ts";
 import type { InventoryRuntime } from "./inventory-runtime.ts";
 import type { Logger } from "../../shared/logger.ts";
 import type { SessionToolsTarget } from "../session-tools.ts";
+import type { PendingOperations } from "../pending-operations.ts";
 
 export interface InventoryControllerDeps {
 	target(): SessionToolsTarget | null;
@@ -19,6 +20,10 @@ export interface InventoryControllerDeps {
 	readonly log: Logger;
 	/** After a live switch, OMP's config watcher needs a moment before a running session shows it. */
 	delay(ms: number): Promise<void>;
+	/** The registry the Sessions surfaces read: a row being switched shows `Saving` from the click. Display only. */
+	readonly pending?: Pick<PendingOperations, "begin" | "get">;
+	/** A row began or ended its pending state: the tree repaints it. */
+	pendingChanged?(): void;
 	/** Clock, injectable for tests. */
 	now?(): number;
 }
@@ -203,15 +208,33 @@ export class InventoryController {
 		}
 	}
 
-	/** Serialized: two switches never interleave their writes. The folder, profile and scope are those of the list the row was published in, captured now. */
+	/**
+	 * Serialized: two switches never interleave their writes. The folder, profile and scope are those of the list the row was published in, captured now.
+	 * The row says `Saving` from the click until its write is done, and a second switch of that row in the meantime is dropped (the tree repaints the row as it is).
+	 */
 	toggle(view: ViewKind, row: InventoryRow, enabled: boolean): Promise<void> {
+		const pending = this.#deps.pending;
+		const key = inventoryPendingKey(row);
+		if (pending?.get(key) !== undefined) {
+			this.#deps.log.info(`inventory: switch ${row.kind}:${row.name} ignored: the previous switch of this row is still being saved`);
+			this.#deps.pendingChanged?.();
+			return Promise.resolve();
+		}
+		const handle = pending?.begin(key, "inventory-toggle", { origin: "row", step: "saving" });
+		if (handle !== undefined) this.#deps.pendingChanged?.();
+		const finish = (status: "running" | "failed"): void => {
+			if (handle === undefined) return;
+			handle.end(status);
+			this.#deps.pendingChanged?.();
+		};
 		const context = this.#contexts.get(row);
-		const run = this.#switching.then(() => this.#toggle(view, context, row, enabled));
+		const run = this.#switching.then(() => this.#toggle(view, context, row, enabled, finish));
 		this.#switching = run.catch(() => {});
+		run.then(() => finish("running"), () => finish("failed"));
 		return run;
 	}
 
-	async #toggle(view: ViewKind, context: PublishedContext | undefined, row: InventoryRow, enabled: boolean): Promise<void> {
+	async #toggle(view: ViewKind, context: PublishedContext | undefined, row: InventoryRow, enabled: boolean, finish: (status: "running" | "failed") => void): Promise<void> {
 		if (this.#disposed) return;
 		if (context === undefined) { this.#deps.notify("Refresh the view before switching.", "warning"); return; }
 		const { plan, running } = context;
@@ -224,11 +247,13 @@ export class InventoryController {
 		if (!result.ok) {
 			this.#deps.notify(result.message, "warning");
 			this.refresh({ force: true });
+			finish("failed");
 			return;
 		}
 		// Disabling is the switch an accidental keystroke or click hurts: the notice offers to put it back.
 		this.#deps.notify(toggleMessage(row, enabled, result.changed, running), "info", result.changed && !enabled ? () => { void this.toggle(view, row, true); } : undefined);
 		this.refresh({ force: true });
+		finish("running");
 		if (result.changed && running && appliesTo(row) === "live") {
 			await this.#deps.delay(LIVE_SETTLE_MS);
 			this.#invalidate();
