@@ -1,6 +1,6 @@
 /**
- * Identity binding when the process serves a conversation another tab already owns: the tab says so and the
- * retry chain ends, instead of staying attached to a process with no file.
+ * Identity binding when the process serves a conversation another tab already owns: the tab says so once and keeps
+ * retrying, so it binds when the other conversation releases the file.
  *
  * Runner: `node --test src/runtime/local-identity.test.ts`.
  */
@@ -18,20 +18,20 @@ const TAB = "tab:draft";
 const FILE = "C:\\sessions\\taken.jsonl";
 
 describe("binding a draft to the file its process reported", () => {
-	it("ends the retry chain and tells the user when another conversation owns that file", async () => {
+	it("tells the user once while another conversation owns that file, then binds once it is released", async t => {
+		t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
 		const runtime = {} as unknown as SessionHostRuntime;
 		const events: string[] = [];
 		const conflicts: string[] = [];
 		const lines: LoggedLine[] = [];
-		let promotions = 0;
+		let foreignClaim = true;
 		const index = {
 			lifecycle: { run: <T>(_tab: string, work: (lease: object) => Promise<T>): Promise<T> => work({}) },
 			recordHostSessionId: async () => true,
 			get: () => ({ sessionFile: null }),
-			promoteDraft: async () => {
-				promotions += 1;
-				return { status: "claim-conflict", detail: "This conversation is already open in another window." };
-			},
+			promoteDraft: async () => foreignClaim
+				? { status: "claim-conflict", detail: "This conversation is already open in another window." }
+				: { status: "promoted" },
 		} as unknown as SessionIndex;
 		const records = { get: () => ({ runtime }) } as unknown as RuntimeRecords;
 		const window: IdentityWindow = {
@@ -48,7 +48,14 @@ describe("binding a draft to the file its process reported", () => {
 		assert.equal(events.includes("bound"), false, "nothing was bound");
 		assert.ok(lines.some(line => line.level === "error" && line.message.includes(FILE)));
 
+		t.mock.timers.setTime(750);
 		await identity.retry(TAB);
-		assert.equal(promotions, 1, "no retry chain is left behind");
+		assert.equal(conflicts.length, 1, "the same conflict is not reported again on every retry");
+		assert.equal(events.includes("bound"), false);
+
+		foreignClaim = false;
+		t.mock.timers.setTime(1500);
+		await identity.retry(TAB);
+		assert.equal(events.includes("bound"), true, "the retained retry binds once the foreign claim is gone");
 	});
 });

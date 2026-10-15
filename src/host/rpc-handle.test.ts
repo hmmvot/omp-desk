@@ -35,6 +35,8 @@ import { BrokerHandle } from "./broker-handle.ts";
 import { PTY_PROTOCOL_VERSION, attestationOf, type PtyBrokerFrame, type PtyRequestFrame } from "./pty-protocol.ts";
 import { PtyBrokerClient } from "./pty-client.ts";
 import { RpcHandle, RpcWriteError } from "./rpc-handle.ts";
+import { loadWin32Native, setWin32NativeForTest } from "./win32-native.ts";
+import { installedAddonAsset } from "./win32-test-support.ts";
 import type { RpcChannelEvent } from "../protocol/rpc.ts";
 
 const EXTENSION_ROOT = fileURLToPath(new URL("../..", import.meta.url));
@@ -233,6 +235,8 @@ after(async () => {
 
 describe("managed-rpc broker end to end", { skip: SKIP }, () => {
 	before(async () => {
+		// Staging reads the account and its access rules through the process's native module.
+		setWin32NativeForTest(await loadWin32Native(await installedAddonAsset()));
 		const readiness = await client.ready();
 		assert.equal(readiness.ready, true, readiness.reason ?? "not ready");
 	});

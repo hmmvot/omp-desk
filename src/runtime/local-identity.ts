@@ -87,10 +87,6 @@ export class LocalIdentity {
 				(pending.sessionFile === sessionFile || controlPathEquals(pending.sessionFile, sessionFile))) return;
 			clearTimeout(pending?.timer ?? undefined);
 			const promotion = await index.promoteDraft(tabId, sessionFile, lease);
-			if (promotion.status === "claim-conflict") {
-				this.#refuseBinding(tabId, sessionFile, promotion.detail);
-				return;
-			}
 			if (promotion.status === "promoted") {
 				this.#pending.delete(tabId);
 				log.info(`tab ${tabId}: bound to the session file ${sessionFile}`);
@@ -102,7 +98,8 @@ export class LocalIdentity {
 				// soon as the file exists.
 				this.#pending.set(tabId, { runtime, sessionFile, sessionId, lastTry: Date.now(), timer: null, lastFailureDetail: promotion.detail });
 				this.#scheduleRetry(tabId);
-				log.debug(`tab ${tabId}: the session file ${sessionFile} is not bound yet: ${promotion.detail}`);
+				if (promotion.status === "claim-conflict") this.#reportConflict(tabId, sessionFile, promotion.detail);
+				else log.debug(`tab ${tabId}: the session file ${sessionFile} is not bound yet: ${promotion.detail}`);
 			}
 			window.refresh();
 		});
@@ -145,14 +142,11 @@ export class LocalIdentity {
 			.run(tabId, async lease => {
 				if (this.#deps.records.get(tabId)?.runtime !== pending.runtime || this.#pending.get(tabId) !== pending) return;
 				const promotion = await index.promoteDraft(tabId, pending.sessionFile, lease);
-				if (promotion.status === "claim-conflict") {
-					this.#refuseBinding(tabId, pending.sessionFile, promotion.detail);
-					return;
-				}
 				if (promotion.status !== "promoted") {
 					if (promotion.detail !== pending.lastFailureDetail) {
 						pending.lastFailureDetail = promotion.detail;
-						log.debug(`tab ${tabId}: the session file ${pending.sessionFile} is not bound yet: ${promotion.detail}`);
+						if (promotion.status === "claim-conflict") this.#reportConflict(tabId, pending.sessionFile, promotion.detail);
+						else log.debug(`tab ${tabId}: the session file ${pending.sessionFile} is not bound yet: ${promotion.detail}`);
 					}
 					return;
 				}
@@ -166,16 +160,13 @@ export class LocalIdentity {
 	}
 
 	/**
-	 * The session file this tab's process serves belongs to a conversation that is already open elsewhere (a re-adopted draft
-	 * whose process turns out to serve another session). Retrying cannot change that, so the chain ends and the tab says so
-	 * with a way out, instead of staying attached with no file.
+	 * The session file this tab's process serves is claimed by another conversation (a re-adopted draft whose process
+	 * turns out to serve another session). The tab says so with a way out, once per distinct reason, and keeps its retry
+	 * chain: when that conversation closes and releases its claim, this live writer is the file's owner and binds.
 	 */
-	#refuseBinding(tabId: string, sessionFile: string, detail: string): void {
+	#reportConflict(tabId: string, sessionFile: string, detail: string): void {
 		const { window, log } = this.#deps;
-		const pending = this.#pending.get(tabId);
-		clearTimeout(pending?.timer ?? undefined);
-		this.#pending.delete(tabId);
 		log.error(`tab ${tabId}: its OMP process serves ${sessionFile}, which another conversation owns: ${detail}`);
-		window.conflict(tabId, `${detail} This tab's OMP process serves that conversation, so it was not bound; use Stop or Kill on it in Sessions.`);
+		window.conflict(tabId, `${detail} This tab's OMP process serves that conversation, so it is not bound; it binds once that conversation closes, or use Stop or Kill on it in Sessions.`);
 	}
 }
