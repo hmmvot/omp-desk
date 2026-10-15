@@ -5,6 +5,8 @@ date: 2026-10-15
 
 # Code blocks in the Chat composer
 
+> **Superseded in part, once implemented, by [the contenteditable surface design](2026-10-15-composer-contenteditable-surface.md) and [ADR-0077](../decisions/0077-edit-the-chat-draft-in-a-contenteditable-surface-rendered-from-the-markdown-string.md)** (accepted; implementation in progress). The maintainer decided (2026-10-15) that only the fenced block is monospace and prose stays proportional, which settles the "open for the maintainer" reading below in favour of per-line fonts. Superseded here: the Goals bullet "Native Undo/Redo", the `execCommand` and `blockEditRef` mechanism of section 2, section 3 (Rendering), Alternatives 1 and 2, the Risks "Prose changes font", "Re-wrap at a fence" and "A line that ends in blanks…", the band and hit-test items of Rollout step 3, and the Smoke section. The fence grammar (section 1), the keys inside a block (section 2's table), the hint, the completion gate (section 4), the indentation rule (section 5) and what is sent (section 6) stay in force. Until the surface is implemented, the text below describes the shipped textarea composer.
+
 ## Problem
 
 The Chat composer is a plain `<textarea>` where `Enter` sends. A message that carries a snippet (a diff hunk, a stack trace, an `omp-vscode` source excerpt) cannot be typed in it comfortably:
