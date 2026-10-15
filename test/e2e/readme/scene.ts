@@ -1,19 +1,19 @@
 /**
  * The scene of the README screenshots (`E2E_SCENE=readme`, see global-setup.ts): a workspace named `omp-vscode` holding a
- * committed copy of one of this repository's own sources (`workspace/attachments.ts.txt`, kept as it was at commit ceb1106
- * so the numbers the scripted replies cite stay true) in a git repository of its own (so the editor shows an inline blame
- * line), a scripted model server instead of the plain mock and a model with a neutral name. Nothing here refers to anything
+ * copy of one of this repository's own sources, taken from the current tree when the scene is created so the line numbers
+ * and names the replies cite cannot go stale (src/webview/lib/attachments.ts), in a git repository of its own (so the editor
+ * shows an inline blame line), a scripted model server instead of the plain mock and a model with a neutral name. Nothing here refers to anything
  * outside this repository.
  */
 import { execFileSync } from "node:child_process";
-import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
-import { dirname, join, resolve } from "node:path";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { REPO_ROOT } from "../support/launcher.ts";
 import type { MockAgentOptions } from "../support/omp-agent.ts";
 import { readmeScripts, type SourceFacts } from "./scripts.ts";
 import { startScriptedModelServer, type ScriptedModelServer } from "./scripted-model-server.ts";
 
 export const WORKSPACE_NAME = "omp-vscode";
-const SOURCE_COPY = resolve(__dirname, "workspace", "attachments.ts.txt");
 export const ATTACHMENTS_PATH = "src/webview/lib/attachments.ts";
 
 /** What `writeMockAgentConfig` writes for this scene: a model with a neutral name that accepts images, quiet OMP startup, and a status line without the working directory (it would show the throwaway checkout path). */
@@ -35,7 +35,7 @@ function git(cwd: string, args: readonly string[], env: NodeJS.ProcessEnv = proc
 
 function lineOf(text: string, needle: string): number {
 	const index = text.split("\n").findIndex(line => line.startsWith(needle));
-	if (index < 0) throw new Error(`"${needle}" not found in the workspace copy`);
+	if (index < 0) throw new Error(`"${needle}" not found in the attachments source`);
 	return index + 1;
 }
 
@@ -43,7 +43,7 @@ function lineOf(text: string, needle: string): number {
 export async function createFolders(base: string): Promise<{ folderA: string; folderB: string }> {
 	const folder = join(base, "ws", WORKSPACE_NAME);
 	await mkdir(join(folder, dirname(ATTACHMENTS_PATH)), { recursive: true });
-	await copyFile(SOURCE_COPY, join(folder, ATTACHMENTS_PATH));
+	await writeFile(join(folder, ATTACHMENTS_PATH), await readFile(join(REPO_ROOT, ATTACHMENTS_PATH), "utf8"));
 	// The copy imports modules the workspace does not hold: no red squiggles in the picture.
 	await mkdir(join(folder, ".vscode"), { recursive: true });
 	await writeFile(join(folder, ".vscode", "settings.json"), JSON.stringify({ "typescript.validate.enable": false }, null, 2));
@@ -55,12 +55,16 @@ export async function createFolders(base: string): Promise<{ folderA: string; fo
 }
 
 /** The scripted model server for the workspace created by `createFolders`. */
-export async function startModelServer(folder: string, port = 0): Promise<ScriptedModelServer> {
-	const attachments = await readFile(join(folder, ATTACHMENTS_PATH), "utf8");
-	const facts: SourceFacts = {
+/** The lines and names the replies cite, read from `attachments`. */
+export function sourceFacts(attachments: string): SourceFacts {
+	return {
 		attachmentBytesLine: lineOf(attachments, "export const MAX_ATTACHMENT_BYTES"),
 		draftBytesLine: lineOf(attachments, "export const MAX_DRAFT_BYTES"),
+		functions: [...attachments.matchAll(/^export (?:async )?function (\w+)/gm)].map(match => match[1]),
 	};
-	return startScriptedModelServer(readmeScripts(facts), port);
 }
 
+/** The scripted model server for the workspace created by `createFolders`. */
+export async function startModelServer(folder: string, port = 0): Promise<ScriptedModelServer> {
+	return startScriptedModelServer(readmeScripts(sourceFacts(await readFile(join(folder, ATTACHMENTS_PATH), "utf8"))), port);
+}

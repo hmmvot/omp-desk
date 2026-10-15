@@ -5,10 +5,12 @@
  */
 import type { ModelScript } from "./scripted-model-server.ts";
 
-/** Line numbers of the constants the Chat reply cites, read from the workspace copy of the sources. */
+/** What the replies cite, read from the current attachments source (scene.ts), so no number in a reply can go stale. */
 export interface SourceFacts {
 	readonly attachmentBytesLine: number;
 	readonly draftBytesLine: number;
+	/** Names of the exported functions, in source order. */
+	readonly functions: readonly string[];
 }
 
 /** The names the screenshots give their sessions (the Sessions view's Rename). */
@@ -17,7 +19,7 @@ export const TIMING_TITLE = "fix-reload-timing";
 export const WORKING_TITLE = "native-win32-checks";
 export const TERMINAL_TITLE = "attachments-exports";
 
-export const IMAGE_QUESTION = "What is this limit?";
+export const IMAGE_QUESTION = "Where does the Chat composer check the size of an attached image?";
 export const TIMING_REQUEST = "Reload Window is slow with many Chat tabs. Make a todo list, have one subagent measure where the time goes, and wait for its report before changing anything.";
 export const QUEUED_FOLLOW_UP = "Then list the exported functions of src/webview/lib/attachments.ts.";
 export const WORKING_REQUEST = "Run the native Win32 checks and tell me about every failure.";
@@ -34,6 +36,12 @@ export const STOPPED_SESSIONS: readonly { readonly prompt: string; readonly titl
 	{ prompt: "Where is the chat broker started?", title: "chat-broker-runtime", reply: "On the bun.exe that runs the session's OMP, with Code.exe as the fallback." },
 ];
 
+/** "`a`, `b` and `c`" */
+function listOf(names: readonly string[]): string {
+	const quoted = names.map(name => `\`${name}\``);
+	return quoted.length < 2 ? quoted.join("") : `${quoted.slice(0, -1).join(", ")} and ${quoted.at(-1)}`;
+}
+
 export function readmeScripts(facts: SourceFacts): ModelScript[] {
 	return [
 		{
@@ -49,14 +57,12 @@ export function readmeScripts(facts: SourceFacts): ModelScript[] {
 				},
 				{
 					text: [
-						"That limit belongs to OMP Desk, not to OMP or the model. The Chat composer enforces two limits:",
+						"The composer checks it before Send. Two constants in `src/webview/lib/attachments.ts` hold the limits:",
 						"",
-						`- \`MAX_ATTACHMENT_BYTES = 512 KB\` for one image, in \`src/webview/lib/attachments.ts:${facts.attachmentBytesLine}\`;`,
-						`- \`MAX_DRAFT_BYTES = 576 KB\` for all images of one message, in \`src/webview/lib/attachments.ts:${facts.draftBytesLine}\`.`,
+						`- \`MAX_ATTACHMENT_BYTES\` for one image, in \`src/webview/lib/attachments.ts:${facts.attachmentBytesLine}\`;`,
+						`- \`MAX_DRAFT_BYTES\` for all images of one message, in \`src/webview/lib/attachments.ts:${facts.draftBytesLine}\`.`,
 						"",
-						`The extension host checks the same numbers in the chat message grammar (\`MAX_CHAT_IMAGE_BASE64_CHARS\`), so an oversized image is refused before Send instead of failing later.`,
-						"",
-						"A PNG screenshot is usually larger than 512 KB, like the 770 KB one you attached. **Options:** shrink the image before attaching it, or raise both constants together with the transport limits.",
+						"Both come from the chat message grammar in `src/protocol/chat-messages.ts`, so the extension host refuses exactly the sizes the composer refuses, and an oversized image is turned away before Send instead of failing later.",
 					].join("\n"),
 					promptTokens: 52_000,
 				},
@@ -94,7 +100,7 @@ export function readmeScripts(facts: SourceFacts): ModelScript[] {
 			steps: [
 				{ tools: [{ name: "read", args: { path: "src/webview/lib/attachments.ts" } }], promptTokens: 24_000 },
 				{
-					text: "`src/webview/lib/attachments.ts` exports the attachment limits (`MAX_ATTACHMENT_BYTES`, `MAX_DRAFT_BYTES`), `formatBytes`, `rawTotal`, `sizeRejection`, `readImageAttachment` and `imageFilesFrom`.",
+					text: `\`src/webview/lib/attachments.ts\` exports the attachment limits (\`MAX_ATTACHMENT_BYTES\`, \`MAX_DRAFT_BYTES\`) and ${listOf(facts.functions)}.`,
 					promptTokens: 31_000,
 				},
 			],

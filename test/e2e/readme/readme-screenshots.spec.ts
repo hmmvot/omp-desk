@@ -7,20 +7,19 @@
  * at device scale 2. The images are written over the committed ones.
  */
 import type { FrameLocator, Locator, Page } from "@playwright/test";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Desk } from "../support/desk.ts";
 import { expect, test } from "../support/fixtures.ts";
 import { REPO_ROOT } from "../support/launcher.ts";
 import { IMAGE_QUESTION, IMAGE_TITLE, QUEUED_FOLLOW_UP, STOPPED_SESSIONS, TERMINAL_REQUEST, TERMINAL_TITLE, TIMING_REQUEST, TIMING_TITLE, WORKING_REQUEST, WORKING_TITLE } from "./scripts.ts";
-import { ATTACHMENTS_PATH, WORKSPACE_NAME } from "./scene.ts";
+import { ATTACHMENTS_PATH, sourceFacts, WORKSPACE_NAME } from "./scene.ts";
 
 const OUTPUT_DIR = join(REPO_ROOT, "media", "readme");
 const VIEWPORT = { width: 1760, height: 900 };
 const SIDEBAR_SCALE = 2;
 /** A session start on a busy machine can take far longer than the suite's default. */
 const START_TIMEOUT = 120_000;
-const IMAGE_TEXT = "image.png: 770 KB exceeds the 512 KB limit per image.";
 
 function sessionsTree(page: Page) {
 	return page.locator("[id='workbench.parts.sidebar']").getByRole("tree", { name: "Sessions" });
@@ -57,24 +56,6 @@ async function startSession(desk: Desk, page: Page, prompt: string): Promise<Fra
 	const chat = await desk.newChatSession(page, WORKSPACE_NAME, START_TIMEOUT);
 	await desk.send(chat, prompt);
 	return chat;
-}
-
-/** A small PNG of an error line, drawn in the workbench renderer (no browser of its own is started). */
-async function drawErrorImage(page: Page): Promise<string> {
-	const dataUrl = await page.evaluate((text: string) => {
-		const canvas = document.createElement("canvas");
-		canvas.width = 640;
-		canvas.height = 120;
-		const context = canvas.getContext("2d")!;
-		context.fillStyle = "#2b2323";
-		context.fillRect(0, 0, canvas.width, canvas.height);
-		context.fillStyle = "#e5534b";
-		context.font = "bold 22px Segoe UI, sans-serif";
-		context.textBaseline = "middle";
-		context.fillText(text, 24, canvas.height / 2);
-		return canvas.toDataURL("image/png");
-	}, IMAGE_TEXT);
-	return dataUrl.slice("data:image/png;base64,".length);
 }
 
 /** Gives the selected session its name through the Sessions view's Rename; a rename box that lost the typing is dismissed and tried again. */
@@ -131,15 +112,9 @@ test("capture the README images in the user layout", async ({ desk, state }) => 
 		await closeTab(page, new RegExp(`^${session.title}`));
 	}
 
-	// The session of chat.png: a question with an image attached.
-	const image = join(state.resultsDir, "attached-image.png");
-	writeFileSync(image, Buffer.from(await drawErrorImage(page), "base64"));
-	const question = await desk.newChatSession(page, WORKSPACE_NAME, START_TIMEOUT);
-	await question.locator("input.omp-file-input").setInputFiles(image);
-	await expect(question.getByRole("button", { name: /Remove/ }).first()).toBeVisible();
-	await question.getByRole("combobox", { name: "Message OMP" }).fill(IMAGE_QUESTION);
-	await question.getByRole("button", { name: "Send message" }).click();
-	await expect(question.getByText(/Options:/)).toBeVisible({ timeout: 120_000 });
+	// The session of chat.png: a question about the code, answered from the attachments source.
+	const question = await startSession(desk, page, IMAGE_QUESTION);
+	await expect(question.getByText(/before Send instead of failing later/)).toBeVisible({ timeout: 120_000 });
 	await nameSession(desk, page, IMAGE_TITLE);
 
 	// The editors on the right: OMP's own settings editors and a source file at a line.
@@ -147,7 +122,7 @@ test("capture the README images in the user layout", async ({ desk, state }) => 
 	await expect(page.getByRole("tab", { name: /^OMP Agents/ })).toBeVisible({ timeout: 60_000 });
 	await runCommand(page, "OMP Desk: Open Models Settings");
 	await expect(page.getByRole("tab", { name: /^OMP Models/ })).toBeVisible({ timeout: 60_000 });
-	await openFileAt(page, `${ATTACHMENTS_PATH.split("/").at(-1)}:40`);
+	await openFileAt(page, `${ATTACHMENTS_PATH.split("/").at(-1)}:${sourceFacts(readFileSync(join(REPO_ROOT, ATTACHMENTS_PATH), "utf8")).attachmentBytesLine}`);
 	await expect(page.getByRole("tab", { name: /^attachments\.ts/ })).toBeVisible({ timeout: 60_000 });
 
 	// A session that keeps working with its tab closed: its row keeps spinning.
