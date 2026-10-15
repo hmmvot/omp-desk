@@ -1,8 +1,8 @@
 /**
  * Scenario: Ctrl+Alt+N (New Session) and Ctrl+Alt+R (Resume Session) work from anywhere. They carry no `when` clause, so
  * the chord has to reach the workbench from a text editor, from the Chat webview (which forwards the keys it does not
- * handle itself) and from the integrated terminal (where VS Code's own Ctrl+Alt+R is Run Recent Command, and a key the
- * terminal does not skip goes to the shell); both commands then run as they do from the Sessions rows.
+ * handle itself) and from the integrated terminal (where VS Code's own Ctrl+Alt+R is Run Recent Command, so the
+ * contributed binding has to win there); both commands then run as they do from the Sessions rows.
  */
 import { expect, test } from "../support/fixtures.ts";
 
@@ -36,14 +36,21 @@ test("Ctrl+Alt+R opens the Resume picker and Ctrl+Alt+N starts a session, from a
 		await expect(composer).toBeVisible({ timeout: 30_000 });
 	};
 
-	// From a text editor: Quick Open puts hello.txt in an editor that holds the keyboard focus.
+	// From a text editor: Quick Open puts hello.txt in an editor that holds the keyboard focus. The title bar takes the
+	// focus off the Chat page first, as Desk.reloadWindow does.
+	await page.locator("[id='workbench.parts.titlebar']").click({ position: { x: 5, y: 5 } });
 	await page.keyboard.press("Control+p");
 	await picker.locator(".quick-input-box input").fill("hello.txt");
+	await expect(picker.getByRole("option", { name: /hello\.txt/ }).first()).toBeVisible({ timeout: 60_000 });
 	await page.keyboard.press("Enter");
-	const editor = page.locator(".monaco-editor[data-uri$='hello.txt'] .inputarea");
-	await expect(editor, "hello.txt is open in a text editor").toBeFocused({ timeout: 30_000 });
+	const file = page.locator(".monaco-editor[data-uri$='hello.txt']");
+	await expect(file, "hello.txt is open in a text editor").toBeVisible({ timeout: 30_000 });
+	// The file opens beside the Chat, whose webview may keep the focus: a click puts it in the text.
+	await file.locator(".view-lines").click();
+	const editor = page.locator(".monaco-editor.focused[data-uri$='hello.txt']");
+	await expect(editor, "the text editor holds the keyboard focus").toBeVisible();
 	await resumeFrom("a text editor");
-	await expect(editor, "dismissing the picker returns the focus to the editor").toBeFocused();
+	await expect(editor, "dismissing the picker returns the focus to the editor").toBeVisible();
 	await startFrom("a text editor");
 
 	// From the Chat composer, which is a webview: the page forwards the chord to the workbench.

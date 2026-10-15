@@ -454,12 +454,12 @@ describe("commands", () => {
 		}
 	});
 
-	it("bind Ctrl+Alt+N to New Session and Ctrl+Alt+R to Resume Session from anywhere, and keep both out of the terminal's shell", () => {
+	it("bind Ctrl+Alt+N to New Session and Ctrl+Alt+R to Resume Session from anywhere, and list both commands in the terminal's commandsToSkipShell", () => {
 		const bound = (key: string) => contributes.keybindings.filter(binding => binding.key === key);
 		assert.deepEqual(bound("ctrl+alt+n").map(binding => [binding.command, binding.when]), [["ompDesk.newSession", undefined]], "no when clause: the chord works in an editor, a Chat, the Sessions view and the terminal");
 		assert.deepEqual(bound("ctrl+alt+r").map(binding => [binding.command, binding.when]), [["ompDesk.resumeWorkspaceFolder", undefined]]);
 		const skipShell = contributes.configurationDefaults["terminal.integrated.commandsToSkipShell"] ?? [];
-		for (const command of ["ompDesk.newSession", "ompDesk.resumeWorkspaceFolder"]) assert.ok(skipShell.includes(command), `${command} is in commandsToSkipShell, or a focused terminal would send the chord to the shell`);
+		for (const command of ["ompDesk.newSession", "ompDesk.resumeWorkspaceFolder"]) assert.ok(skipShell.includes(command), `${command} is in commandsToSkipShell, like the other workbench keys`);
 		// The rows these chords stand for run the same commands.
 		assert.equal(declared.get("ompDesk.newSession")?.title, "New Session");
 		assert.equal(declared.get("ompDesk.resumeWorkspaceFolder")?.title, "Resume Session");
