@@ -1,5 +1,5 @@
 /**
- * The four README images (`media/readme/chat.png`, `sessions.png`, `chat-agents.png`, `terminal.png`), captured from one
+ * The five README images (`media/readme/chat.png`, `sessions.png`, `chat-agents.png`, `terminal.png`, `omp-settings.png`), captured from one
  * hidden test window in the user layout (layout.ts) on the README scene (scene.ts): scripted conversations of the project
  * itself, no real model, no personal data. Run with `npm run readme:screenshots`.
  *
@@ -122,6 +122,20 @@ test("capture the README images in the user layout", async ({ desk, state }) => 
 	await expect(page.getByRole("tab", { name: /^OMP Agents/ })).toBeVisible({ timeout: 60_000 });
 	await runCommand(page, "OMP Desk: Open Models Settings");
 	await expect(page.getByRole("tab", { name: /^OMP Models/ })).toBeVisible({ timeout: 60_000 });
+	// omp-settings.png: the OMP Settings editor beside the Chat. The Models and Agents editors are not captured: their attention banner can name agents that come from outside the isolated agent directory.
+	await runCommand(page, "OMP Desk: Open OMP Settings");
+	await expect(page.getByRole("tab", { name: /^OMP Settings/ })).toBeVisible({ timeout: 60_000 });
+	await page.getByRole("tab", { name: /^OMP Settings/ }).click();
+	await expect(async () => {
+		const frames = page.frameLocator("iframe.webview.ready:visible:not([src*='purpose=webviewView'])");
+		const count = await page.locator("iframe.webview.ready:visible:not([src*='purpose=webviewView'])").count();
+		let loaded = false;
+		for (let index = 0; index < count; index++) loaded ||= (await frames.nth(index).frameLocator("iframe#active-frame").getByText(/Credentials are never shown/).count()) > 0;
+		expect(loaded).toBe(true);
+	}).toPass({ timeout: 60_000 });
+	await settle(page);
+	await page.screenshot({ path: join(OUTPUT_DIR, "omp-settings.png") });
+	await closeTab(page, /^OMP Settings/);
 	await openFileAt(page, `${ATTACHMENTS_PATH.split("/").at(-1)}:${sourceFacts(readFileSync(join(REPO_ROOT, ATTACHMENTS_PATH), "utf8")).attachmentBytesLine}`);
 	await expect(page.getByRole("tab", { name: /^attachments\.ts/ })).toBeVisible({ timeout: 60_000 });
 

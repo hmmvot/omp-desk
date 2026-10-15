@@ -5,7 +5,7 @@
  * a session and re-attaching a running Chat refuse. A person who sees only "the broker state directory is not usable" cannot act
  * on that, so the window shows this message when the one load settles as unavailable. It classifies the cause where Windows
  * lets us, keeps the raw error in the log, and offers the three things an administrator needs: the facts for an allow rule,
- * the README section that explains it, and a Reload Window that stages and loads again.
+ * the user-guide section that explains it, and a Reload Window that stages and loads again.
  *
  * Retry is a window reload, not an in-place reload of the module: other readers of this window already hold the unavailable
  * answer (the broker client's cached state-directory verdict, this window's claim without its creation time), and a module

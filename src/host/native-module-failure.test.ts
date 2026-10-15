@@ -66,7 +66,7 @@ describe("what the person is told", () => {
 		it(`says what happened, what to do and what does not work for ${kind}`, () => {
 			const message = nativeFailureMessage(classifyNativeFailure(raw));
 			assert.match(message, /koffi\.node/);
-			assert.match(message, /README/);
+			assert.match(message, /Troubleshooting in the OMP Desk user guide/);
 			assert.ok(message.endsWith(NATIVE_FAILURE_EFFECT));
 			assert.match(message, /New Session/);
 			assert.match(message, /re-attaching a running Chat/);

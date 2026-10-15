@@ -382,8 +382,8 @@ const HOST_CONTROL_MODULE = "out/omp-host-control.mjs";
 const NATIVE_ADDON = "out/native/koffi.node";
 /** Packaged one-shot child that stages that addon and verifies the tree it lands in (ADR-0076). */
 const NATIVE_STAGE_CHILD = "out/native-stage.js";
-/** The README section that explains a native module that cannot load and how an administrator allows it. */
-const NATIVE_TROUBLESHOOTING_URL = "https://github.com/hmmvot/omp-desk#the-native-module-is-blocked-or-missing";
+/** The user-guide section that explains a native module that cannot load and how an administrator allows it. */
+const NATIVE_TROUBLESHOOTING_URL = "https://github.com/hmmvot/omp-desk/blob/main/docs/guide/troubleshooting.md#the-native-module-is-blocked-or-missing";
 /**
  * The Bun helper that renames a *stopped* session's stored title through the
  * installed agent's own storage code. It is a plain packaged ESM file: it is not

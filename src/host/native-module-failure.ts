@@ -68,7 +68,7 @@ export interface NativeFailureText {
 	readonly remedy: string;
 }
 
-const REMEDY_MORE = "See Troubleshooting in the OMP Desk README.";
+const REMEDY_MORE = "See Troubleshooting in the OMP Desk user guide.";
 
 /** What the failure means for the person using the window. */
 export function describeNativeFailure(failure: NativeFailure): NativeFailureText {
