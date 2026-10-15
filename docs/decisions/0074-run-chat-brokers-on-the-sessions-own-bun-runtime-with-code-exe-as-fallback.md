@@ -5,6 +5,8 @@ date: 2026-10-14
 
 # ADR-0074: Run Chat brokers on the session's own Bun runtime, with Code.exe as the fallback
 
+> **Narrowly amended by [ADR-0076](0076-call-win32-in-process-through-a-staged-koffi-module-instead-of-starting-powershell.md):** a Chat broker on Bun loads `koffi.node` (the broker's creation-time and tree readings are in-process Win32 calls). Both stored proofs, the full one and the pipe-only one, include the addon digest, and the self-check loads the addon and reads one creation time.
+
 ## Context and Problem Statement
 
 A session's OMP process is kept alive by a detached broker. Today the broker is the extension host's own executable run as Node (`Code.exe` with `ELECTRON_RUN_AS_NODE=1`, ADR-0024, ADR-0012). VS Code's updater (Inno Updater) terminates every `Code.exe` of the install that is still running 30 s after "Restart to Update", so an update ends every broker and, because a Chat's OMP child lives on its broker's pipe (ADR-0038), every Chat's agent with it. A Chat that was working loses its in-flight turn.

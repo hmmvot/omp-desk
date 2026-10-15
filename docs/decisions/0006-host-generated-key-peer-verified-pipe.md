@@ -7,6 +7,8 @@ date: 2026-09-24
 
 > **Narrowly amended by [ADR-0075](0075-carry-bun-runtime-flags-by-launcher-kind-and-probe-before-using-an-environment-carrier.md):** decision 1's carrier clause. The public recipient reaches the preloaded module in Bun's `--define` on the command line for Bun's own CLI and in `BUN_OPTIONS` (read by Bun at startup, restored by the module) for OMP's own compiled program, after an observed probe; the key and the private recipient never travel in either.
 
+> **Narrowly amended by [ADR-0076](0076-call-win32-in-process-through-a-staged-koffi-module-instead-of-starting-powershell.md):** the "no packaged native binary" reason no longer holds (Desk ships `koffi.node`); the peer's pid and creation time are still read from one pipe handle, and the PowerShell bridge is replaced only if ADR-0076's slice 4 gate passes.
+
 ## Context and Problem Statement
 
 [ADR-0003](0003-native-host-control-pipe.md) requires a fresh, secret per-host authentication key that survives extension-host reload, excludes substituted pipe servers and never appears in VS Code's public terminal options, argv, logs, child environments or Webview traffic. [ADR-0005](0005-preload-control-key-before-omp-startup.md) rejects both terminal-environment and plaintext `Terminal.sendText` delivery: other extensions can read creation options, and VS Code logs sendText arguments before the PTY write. The native OMP TUI must remain its own Bun process and entrypoint, without OMP core edits. The original ADR-0003 wording also treated arbitrary same-user processes as untrusted; Windows SecretStorage uses user-scoped protection and cannot meet that stronger claim.

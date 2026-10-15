@@ -5,6 +5,8 @@ date: 2026-10-07
 
 # ADR-0046: Detect an outside OMP writer by opening OMP's own session-lease mutex, read-only
 
+> **Narrowly amended by [ADR-0076](0076-call-win32-in-process-through-a-staged-koffi-module-instead-of-starting-powershell.md):** the probe is an in-process `OpenMutexW` call through a staged `koffi.node`, not a staged PowerShell helper. The mapping of absent, held and error is unchanged (`ERROR_INVALID_HANDLE` joins absent); the 5 s bound and timeout backoff no longer apply to a call that cannot hang.
+
 ## Context and Problem Statement
 
 The extension only knows the writers it owns. A plain `omp` in a terminal writing the same session is invisible to it, so the row reads "Stopped" and Open starts a second writer. OMP protects the file itself (it moves the second writer to a sibling file), but the user is told nothing. Installed OMP exposes exactly one exact, kernel-maintained signal of "a live process is writing this session": its session ownership lease. The signal relies on an OMP-internal detail, which is why this choice needs a record.
