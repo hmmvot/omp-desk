@@ -28,6 +28,9 @@ import { LocalWriterVerifier } from "../runtime/local-writer.ts";
 import type { LoggedLine } from "../shared/logger.ts";
 import { recordingLogger, silentLogger } from "../shared/logger.ts";
 import type { SessionActionsDeps, SessionTab } from "./session-actions.ts";
+import { PendingOperations } from "../host/pending-operations.ts";
+
+const pendingOperations = new PendingOperations();
 
 // The module and the views it imports load the `vscode` specifier; map it before the first import.
 if (typeof module.registerHooks === "function") {
@@ -218,6 +221,7 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 		stoppingTabs: () => state.stopping,
 		routing: () => ({ registry: () => state.registry as never }),
 		sessionProcesses: () => state.processes as never,
+		pending: () => pendingOperations,
 		setSessionProcesses: processes => { state.processes = processes as never; },
 		catalogLoaded: () => true,
 		startupRestoreOver: () => state.restoreOver,

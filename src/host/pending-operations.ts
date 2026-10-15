@@ -157,9 +157,13 @@ export class PendingOperations {
 		};
 	}
 
-	/** Name the step of the displayed launch-family operation of `key`; nothing happens when it has none. For code that does not hold the handle. */
-	step(key: string, step: PendingStep): void {
-		const operation = this.#byKey.get(key)?.findLast(candidate => isLaunchFamily(candidate.kind));
+	/**
+	 * Name the step of the displayed launch-family operation of `key`, or of its latest operation of `kind` when one is given; nothing
+	 * happens when there is none. For code that does not hold the handle.
+	 */
+	step(key: string, step: PendingStep, kind?: PendingKind): void {
+		const live = this.#byKey.get(key);
+		const operation = kind === undefined ? live?.findLast(candidate => isLaunchFamily(candidate.kind)) : live?.findLast(candidate => candidate.kind === kind);
 		if (operation === undefined || operation.step === step) return;
 		operation.step = step;
 		this.#emit({ key });

@@ -1031,6 +1031,7 @@ function sessionActionsDeps(): SessionActionsDeps<TabState> {
     stoppingTabs: () => windowState().stoppingTabs,
     routing: () => windowState().routing,
     sessionProcesses: () => windowState().sessionProcesses,
+    pending: () => windowState().pending,
     setSessionProcesses: processes => { windowState().sessionProcesses = processes; },
     catalogLoaded: () => windowState().catalogStore !== undefined,
     startupRestoreOver: () => startupRestoreOver(),
@@ -10605,6 +10606,7 @@ const MAX_SESSION_TITLE_CHARS = 200;
 
 /** Ask for a session's stored name, validated by the same rules every writer uses. */
 async function promptSessionTitle(entry: SessionIndexEntry): Promise<string | undefined> {
+  windowState().pending.step(entry.tabId, "confirm", "rename");
   const proposed = await vscode.window.showInputBox({
     title: `Rename ${path.basename(entry.cwd)}`,
     prompt: "The name OMP stores for this session, shown in its own TUI and in OMP's history.",
@@ -10760,12 +10762,17 @@ async function renameStoppedSession(
  * title-slot rewrite is forbidden, so nothing else edits the file.
  */
 async function renameSession(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown): Promise<void> {
-  const s = windowState();
   const target = sessionTargetFromArgument(index, argument);
   if (target === null) {
     showWarning("Select an OMP session to rename.");
     return;
   }
+  // The live-row checks before the title prompt can take seconds: the row says it is renaming from the click.
+  await pendingEntry(target.tabId, "rename", { origin: "row", step: "checking" }, () => renameSessionChecked(context, index, target));
+}
+
+async function renameSessionChecked(context: vscode.ExtensionContext, index: SessionIndex, target: NonNullable<ReturnType<typeof sessionTargetFromArgument>>): Promise<void> {
+  const s = windowState();
   const { tabId, entry } = target;
   const nativeState = stateOf(tabId);
   const native = hostOf(nativeState);
@@ -10874,7 +10881,7 @@ async function closeSession(context: vscode.ExtensionContext, index: SessionInde
   // transport is told that, with the row's own reason, and nothing is stopped.
   if (runtime === null) {
     if (entry.host !== null) {
-      await windowState().sessionActions.stopHost(context, index, argument);
+      await pendingEntry(tabId, "close", { origin: "row", step: "checking" }, () => windowState().sessionActions.stopHost(context, index, argument));
       return;
     }
     showWarning(
@@ -10883,7 +10890,7 @@ async function closeSession(context: vscode.ExtensionContext, index: SessionInde
     );
     return;
   }
-  if (state !== undefined) await confirmAndStopRuntime(context, index, tabId, "Close");
+  if (state !== undefined) await pendingEntry(tabId, "close", { origin: "row", step: "checking" }, () => confirmAndStopRuntime(context, index, tabId, "Close"));
 }
 
 /** Dialogs never hold the gate; admission remains fenced through both stop attempts. */
@@ -10910,6 +10917,7 @@ async function confirmAndStopRuntime(
   try {
     const captured = preconfirmed !== undefined ? preconfirmed.captured : await s.sessionRuntime.readTransitionFacts({ conversation: tabId, target });
     if (preconfirmed === undefined) {
+      s.pending.step(tabId, "confirm", "close");
       const choice = await vscode.window.showWarningMessage(
         `${label} the OMP session “${s.launcherProvider?.headlineFor(entry.tabId) ?? sessionHeadline(entry, null)}”?`,
         { modal: true, detail: conflicting
@@ -10919,6 +10927,7 @@ async function confirmAndStopRuntime(
       );
       if (choice !== label) return false;
     }
+    s.pending.step(tabId, "working", "close");
     s.stoppingTabs.add(tabId);
     refreshLauncher();
     const attempt = async (mode: "graceful" | "force"): Promise<StopResult> => {

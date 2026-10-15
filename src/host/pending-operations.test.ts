@@ -120,3 +120,19 @@ describe("pending operations", () => {
 		assert.deepEqual(Object.keys(STEP_AFTER_LAP).sort(), [...laps].sort());
 	});
 });
+
+describe("naming the step of an action that is not a launch", () => {
+	it("moves the latest operation of the given kind, and leaves a launch alone when none of that kind is pending", () => {
+		const w = world();
+		const launch = w.pending.begin("tab:a", "resume");
+		w.pending.step("tab:a", "working", "delete");
+		assert.equal(w.pending.get("tab:a")?.step, "waiting", "no delete is pending: nothing moves");
+		const removal = w.pending.begin("tab:a", "delete", { step: "checking" });
+		w.pending.step("tab:a", "working", "delete");
+		assert.equal(w.pending.get("tab:a")?.kind, "delete");
+		assert.equal(w.pending.get("tab:a")?.step, "working");
+		removal.end("running");
+		assert.equal(w.pending.get("tab:a")?.step, "waiting", "the launch kept its own step");
+		launch.end("running");
+	});
+});

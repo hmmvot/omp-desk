@@ -37,7 +37,8 @@ import { askWindowToStop } from "../host/window-requests.ts";
 import type { LauncherFolders } from "../views/launcher-folders.ts";
 import { ProcessTreeItem } from "../views/process-rows.ts";
 import { SessionClickRecognizer } from "../views/session-click.ts";
-import type { PendingOrigin } from "../shared/pending-operation.ts";
+import type { PendingKind, PendingOrigin, PendingStep } from "../shared/pending-operation.ts";
+import type { PendingOperations } from "../host/pending-operations.ts";
 import type { SessionsGrouping } from "../views/session-order.ts";
 import { SessionTreeItem, displaySessionTitle, sessionHeadline } from "../views/session-tree.ts";
 import type { LauncherTreeItem, SessionLauncherFacts, SessionTreeProvider } from "../views/session-tree.ts";
@@ -81,6 +82,8 @@ export interface SessionWindowFacts {
 	routing(): { registry(): WindowRegistry | undefined };
 	/** The processes of this window's Sessions view, `null` until {@link SessionActions.setupProcesses} registered them. */
 	sessionProcesses(): SessionProcesses | null;
+	/** The actions the user asked for that are still being processed: the rows say so (display only). */
+	pending(): PendingOperations;
 	setSessionProcesses(processes: SessionProcesses): void;
 	/** The profile catalog has been read in this window. */
 	catalogLoaded(): boolean;
@@ -328,6 +331,22 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 	 * extension-owned writer or verified rival window. Unreadable/stale claims do not
 	 * veto it. The native transcript is never removed here.
 	 */
+	/**
+	 * Run one action of a row as a pending operation: the row says what it is doing from the click, until the action ends (display only).
+	 * The action moves its own step on (`deps.pending().step(tabId, "working", kind)`) once the user has confirmed.
+	 */
+	async function pendingAction<T>(tabId: string, kind: PendingKind, step: PendingStep, run: () => Promise<T>): Promise<T> {
+		const handle = deps.pending().begin(tabId, kind, { origin: "row", step });
+		try {
+			const result = await run();
+			handle.end("running");
+			return result;
+		} catch (error) {
+			handle.end("failed");
+			throw error;
+		}
+	}
+
 	async function forgetSession(index: SessionIndex, argument: unknown): Promise<void> {
 		const tabId = deps.tabIdArgument(argument) ?? (await deps.pickIndexedTab(index, "Forget a launcher entry"));
 		if (tabId === null) return;
@@ -336,16 +355,19 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 			deps.error("This session is no longer in Sessions. Refresh and try again.");
 			return;
 		}
-		const result = await index.remove(tabId, deps.reconciler());
-		if (!result.removed) {
-			deps.warn(result.detail);
+		// The reconcile that decides whether the entry may go can take seconds: the row says it is checking from the click.
+		await pendingAction(tabId, "forget", "checking", async () => {
+			const result = await index.remove(tabId, deps.reconciler());
+			if (!result.removed) {
+				deps.warn(result.detail);
+				deps.refreshLauncher();
+				return;
+			}
+			// A panel without a running host is inactive, but it would outlive the entry
+			// it belongs to: close it, then drop everything this window kept for the tab.
+			forgetConversationState(tabId);
 			deps.refreshLauncher();
-			return;
-		}
-		// A panel without a running host is inactive, but it would outlive the entry
-		// it belongs to: close it, then drop everything this window kept for the tab.
-		forgetConversationState(tabId);
-		deps.refreshLauncher();
+		});
 	}
 
 	/**
@@ -493,6 +515,11 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 		}
 		if (selection === null) {
 			deps.warn("Select a session or a process in Sessions to kill.");
+			return;
+		}
+		// Kill asks nothing; the identity probe and the process-tree kill take seconds, so the row says `Killing` from the click.
+		if (selection.kind === "session") {
+			await pendingAction(selection.tabId, "kill", "checking", () => deps.sessionRuntime().kill(selection));
 			return;
 		}
 		await deps.sessionRuntime().kill(selection);
@@ -719,6 +746,15 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 	 * process elsewhere is not this session's owner and does not veto the deletion.
 	 */
 	async function confirmAndDeleteSession(index: SessionIndex, subject: SessionDeletionSubject): Promise<boolean> {
+		const tabId = typeof subject === "string" && index.get(subject) !== null ? subject : null;
+		if (tabId === null) return deleteAfterChecks(index, subject);
+		// The checks before the confirmation (a native writer may have to be reattached and probed) take seconds: the row says
+		// `Deleting · checking` from the click, and `Deleting · working` once the user has confirmed (`deleteSessionAfterFence`).
+		return pendingAction(tabId, "delete", "checking", () => deleteAfterChecks(index, subject));
+	}
+
+	/** The deletion flow itself, from the checks to the removal. */
+	async function deleteAfterChecks(index: SessionIndex, subject: SessionDeletionSubject): Promise<boolean> {
 		try {
 			const tabId = typeof subject === "string" && index.get(subject) !== null ? subject : null;
 			const activation = deps.context();
@@ -793,6 +829,7 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 		if (picked !== deleteLabel) {
 			return false;
 		}
+		if (tabId !== null) deps.pending().step(tabId, "working", "delete");
 		if (writerPid !== null && tabId !== null) {
 			const context = deps.context();
 			if (context === undefined || !(await stopVerifiedOwnedWriter(context, index, tabId, writerPid, captured))) return false;
