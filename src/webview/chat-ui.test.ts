@@ -2617,10 +2617,14 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			// The broker then grants this pane input: the PTY is resized to the pane's fit, and the terminal must follow it.
 			await ui.evaluate(`window.ui.receive({type:'omp:terminal-state',generation:'${generation}',seq:0,phase:'attached',input:true,cols:80,rows:10,snapshot:'none'})`);
 			await ui.wait("(window.fixtureClock.fire(120),window.sent.some(message=>message.type==='omp:terminal-resize'))");
-			const resized = await ui.evaluate<{ cols: number; rows: number }>("(()=>{const m=window.sent.filter(message=>message.type==='omp:terminal-resize').at(-1);return {cols:m.cols,rows:m.rows}})()");
+			// The fit at attach is measured while the layout is still settling (here it is a row short), so the report that matters is the
+			// last one: each report is debounced behind the fixture clock, and a layout that settles after the first one has its own
+			// report after the next tick. The wait fires the clock on every DOM change and every message the page posts, and is done
+			// when the terminal shows exactly the rows of the newest report, whichever layout step that report came from.
+			const lastReport = "window.sent.filter(message=>message.type==='omp:terminal-resize').at(-1)";
+			await ui.wait(`(window.fixtureClock.fire(120),document.querySelectorAll('.xterm-rows > div').length===${lastReport}.rows)`);
+			const resized = await ui.evaluate<{ cols: number; rows: number }>(`(()=>{const m=${lastReport};return {cols:m.cols,rows:m.rows}})()`);
 			assert.equal(resized.cols, fit.cols, "the PTY is asked for the pane's own columns");
-			// The fit at attach is measured while the layout is still settling (here it is a row short), so the PTY gets the settled one.
-			await ui.wait(`document.querySelectorAll('.xterm-rows > div').length===${resized.rows}`);
 			assert.ok(await ui.evaluate<boolean>("document.querySelector('.xterm-rows').textContent.includes('Restored at the host grid')"), "the restored screen is still there");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
