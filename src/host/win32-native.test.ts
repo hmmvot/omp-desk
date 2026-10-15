@@ -173,9 +173,13 @@ describe("process readings against real processes", { skip: process.platform !==
 
 	it("lists every live descendant of a process and none for a leaf or an id no process has", async () => {
 		const native = await loadWin32Native(await installedAddonAsset());
+		// The child has no console (DETACHED_PROCESS): a child with one gets a console host as its own child, created by the system
+		// a moment after the child exists, so a second reading of the table could find a helper under a process the first showed
+		// as a leaf. Without a console nothing is ever started under the child, so the deepest entry of every reading is a leaf
+		// whenever the readings are taken (the parent's own console host is a leaf as well).
 		const parent = idle(
 			`const { spawn } = require("node:child_process");
-			const child = spawn(process.execPath, ["-e", "process.stdin.resume()"], { stdio: ["pipe", "ignore", "ignore"], windowsHide: true });
+			const child = spawn(process.execPath, ["-e", "process.stdin.resume()"], { stdio: ["pipe", "ignore", "ignore"], detached: true });
 			console.log(child.pid);
 			process.stdin.resume();`,
 		);
