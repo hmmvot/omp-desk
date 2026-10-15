@@ -517,8 +517,14 @@ test("mermaid blocks in Chat", { skip: browserPath === undefined, timeout: 240_0
 			};
 			await press("Enter", "Enter", 13, "\r");
 			await ui.wait("document.querySelector('.omp-mermaid-frame[data-full]')");
+			// The full-size frame is laid out and measured before the next key: the state in which the control once read "nothing to enlarge".
+			await ui.settle();
+			// Every change to the control's `disabled` is recorded: a flicker takes focus away at a moment no frame boundary shows.
+			await ui.evaluate("(()=>{window.zoomDisabledChanges=0;new MutationObserver(records=>{window.zoomDisabledChanges+=records.filter(record=>record.attributeName==='disabled'&&record.target.className==='omp-mermaid-zoom').length}).observe(document.querySelector('.omp-mermaid-zoom'),{attributes:true})})()");
 			await press(" ", "Space", 32, " ");
 			await ui.wait("!document.querySelector('.omp-mermaid-frame[data-full]')");
+			await ui.settle();
+			assert.equal(await ui.evaluate("window.zoomDisabledChanges"), 0, "the control is never disabled while it is fitted back and still has something to enlarge");
 			assert.equal(await ui.evaluate("document.activeElement.className"), "omp-mermaid-zoom", "focus stays on the control");
 			await clean();
 		});

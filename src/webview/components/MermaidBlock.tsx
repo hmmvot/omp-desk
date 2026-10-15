@@ -76,13 +76,17 @@ function MermaidFigure({ source, diagram }: { source: string; diagram: Diagram }
 		setMermaidPreference(source, next);
 	};
 	const frame = useRef<HTMLDivElement>(null);
-	const image = useRef<HTMLImageElement>(null);
-	// A diagram wider than the block is scaled down to fit; only then is there anything for a click to enlarge.
+	// A diagram wider than the block is scaled down to fit; only then is there anything for a click to enlarge. The width the
+	// block offers is measured, never the image's own: at full size the image is as wide as the diagram, which would read as
+	// "nothing to enlarge" and disable the control the reader just pressed, taking their keyboard focus with it.
 	const [scaled, setScaled] = useState(false);
 	useEffect(() => {
 		const element = frame.current;
 		if (element === null) return;
-		const measure = (): void => setScaled((image.current?.clientWidth ?? diagram.width) < diagram.width - 1);
+		const measure = (): void => {
+			const style = getComputedStyle(element);
+			setScaled(element.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight) < diagram.width - 1);
+		};
 		const observer = new ResizeObserver(measure);
 		observer.observe(element);
 		measure();
@@ -103,7 +107,7 @@ function MermaidFigure({ source, diagram }: { source: string; diagram: Diagram }
 						title={preference.full ? "Fit to width" : "Show full size"}
 						onClick={() => choose({ ...preference, full: !preference.full })}
 					>
-						<img ref={image} src={diagram.src} width={diagram.width} height={diagram.height} alt={`Mermaid ${kind} diagram`} draggable={false} />
+						<img src={diagram.src} width={diagram.width} height={diagram.height} alt={`Mermaid ${kind} diagram`} draggable={false} />
 					</button>
 				</div>
 			) : (
