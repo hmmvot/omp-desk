@@ -74,7 +74,7 @@ describe("the native module notice", () => {
 			assert.deepEqual(f.shown[0]!.buttons, [NATIVE_NOTICE_COPY, NATIVE_NOTICE_TROUBLESHOOTING, NATIVE_NOTICE_RELOAD]);
 			assert.match(f.shown[0]!.message, headline);
 			assert.match(f.shown[0]!.message, /New Session, Resume, and re-attaching a running Chat/);
-			assert.match(f.shown[0]!.message, /Saved conversations stay readable/);
+			assert.match(f.shown[0]!.message, /saved sessions are still listed/);
 			assert.equal(f.logs.length, 1);
 			assert.equal(f.logs[0]!.level, "warn");
 			assert.ok(f.logs[0]!.message.includes(raw), "the raw error is in the log");

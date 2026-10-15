@@ -204,7 +204,7 @@ OMP Desk answers its Windows questions inside VS Code's extension host instead o
 An organization that only allows signed code (AppLocker or Windows Defender Application Control, WDAC), or a security product that quarantines unknown DLLs, can refuse to load it. There is **no fallback**: OMP Desk would rather not start a session than start one it cannot check. While the module is unavailable:
 
 - **Do not work:** New Session, Resume, and re-attaching a running Chat after a reload; the Sessions view cannot tell whether another OMP holds a session.
-- **Still work:** your saved conversations stay readable in the History view and can be opened read-only, and the rest of VS Code is untouched.
+- **Still work:** the Sessions view and **Resume Session** still list your saved sessions, and a stopped session still opens, read-only, in its tab; the rest of VS Code is untouched.
 
 Desk shows one message per window with the cause where Windows names it (policy block, missing or quarantined file, a stage that timed out, anything else) and three buttons: **Copy diagnostics**, **Open troubleshooting** (this section) and **Reload Window**, which stages and loads the module again once you have fixed the cause. The exact error is always in the **OMP Desk** output channel. A Windows that shows its errors in another language can make Desk report the cause as "not recognized"; the error text in the log and in the diagnostics is still the one to give your administrator.
 

@@ -98,7 +98,7 @@ export function describeNativeFailure(failure: NativeFailure): NativeFailureText
 
 /** What works and what does not while the module is unavailable; the same for every class. */
 export const NATIVE_FAILURE_EFFECT =
-	"Until it loads, New Session, Resume, and re-attaching a running Chat after a reload do not work, and the Sessions view cannot tell whether another OMP holds a session. Saved conversations stay readable.";
+	"Until it loads, New Session, Resume, and re-attaching a running Chat after a reload do not work, and the Sessions view cannot tell whether another OMP holds a session. Your saved sessions are still listed, and a stopped one still opens, read-only.";
 
 /** The whole text of the notification, with the effect. */
 export function nativeFailureMessage(failure: NativeFailure): string {

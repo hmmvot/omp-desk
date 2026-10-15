@@ -70,7 +70,7 @@ describe("what the person is told", () => {
 			assert.ok(message.endsWith(NATIVE_FAILURE_EFFECT));
 			assert.match(message, /New Session/);
 			assert.match(message, /re-attaching a running Chat/);
-			assert.match(message, /Saved conversations stay readable/);
+			assert.match(message, /saved sessions are still listed/);
 		});
 	}
 
