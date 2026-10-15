@@ -154,7 +154,16 @@ describe("stopped-session rename helper", () => {
  */
 describe("OMP resolution when a candidate cannot answer", () => {
 	const isWindows = process.platform === "win32";
-	const PROBE_TIMEOUT_MS = 3000;
+	/**
+	 * Two bounds, because the tests ask two different things. A candidate that never answers is waited for this long: any bound
+	 * would do, a longer one only slows the test, and the message under test names it ("3 s").
+	 */
+	const HANG_BOUND_MS = 3000;
+	/**
+	 * A candidate that answers, or exits with a refusal, is waited for as long as a busy machine needs to start a process and
+	 * has it say so; the bound only has to be reached by a candidate that is stuck, so how fast the machine is cannot decide a test.
+	 */
+	const ANSWER_BOUND_MS = 120_000;
 	let tools: string;
 	let installs = 0;
 
@@ -208,14 +217,14 @@ describe("OMP resolution when a candidate cannot answer", () => {
 		}
 	}
 
-	const resolve = (): Promise<OmpBinary> => native.resolveOmpBinary({ probeTimeoutMs: PROBE_TIMEOUT_MS });
+	const resolve = (probeTimeoutMs = ANSWER_BOUND_MS): Promise<OmpBinary> => native.resolveOmpBinary({ probeTimeoutMs });
 
 	/** The error a refused resolution throws, with the field the classification reads. */
 	type ResolutionError = Error & { readonly transientCause?: string };
 
-	async function refused(): Promise<ResolutionError> {
+	async function refused(probeTimeoutMs = ANSWER_BOUND_MS): Promise<ResolutionError> {
 		try {
-			await resolve();
+			await resolve(probeTimeoutMs);
 		} catch (error) {
 			assert.ok(error instanceof Error, "a refused resolution throws an Error");
 			return error as ResolutionError;
@@ -228,7 +237,7 @@ describe("OMP resolution when a candidate cannot answer", () => {
 		const slow = await fakeInstall(NEVER_ANSWERS);
 		const older = await fakeInstall(`require("node:fs").writeFileSync(${JSON.stringify(lower)}, "ran"); ${prints("18.0.4")}`);
 
-		const error = await onPath([slow.bin, older.bin], refused);
+		const error = await onPath([slow.bin, older.bin], () => refused(HANG_BOUND_MS));
 
 		assert.equal(error.transientCause, "did not finish within 3 s");
 		assert.ok(error.message.includes(`\`omp --version\` of ${slow.shim} did not finish within 3 s; Desk does not fall back to another OMP`), error.message);
@@ -264,7 +273,7 @@ describe("OMP resolution when a candidate cannot answer", () => {
 
 		const slow = await fakeInstall(NEVER_ANSWERS);
 		await withManifest(slow, { name: "@oh-my-pi/pi-coding-agent" });
-		const error = await onPath([slow.bin], refused);
+		const error = await onPath([slow.bin], () => refused(HANG_BOUND_MS));
 		assert.equal(error.transientCause, "did not finish within 3 s", "the question, when it is still asked, keeps its transient timeout");
 	});
 
@@ -332,7 +341,7 @@ describe("OMP resolution when a candidate cannot answer", () => {
 		const slow = await fakeInstall(NEVER_ANSWERS);
 		const older = await fakeInstall(prints("18.0.4"));
 
-		const error = await onPath([foreign.bin, slow.bin, older.bin], refused);
+		const error = await onPath([foreign.bin, slow.bin, older.bin], () => refused(HANG_BOUND_MS));
 
 		assert.equal(error.transientCause, "did not finish within 3 s");
 		assert.ok(error.message.includes(slow.shim), error.message);
@@ -383,12 +392,12 @@ describe("OMP resolution when a candidate cannot answer", () => {
 		}
 	});
 
-	const resolveExplicit = (explicitPath: string): Promise<OmpBinary> =>
-		native.resolveOmpBinary({ probeTimeoutMs: PROBE_TIMEOUT_MS, explicitPath });
+	const resolveExplicit = (explicitPath: string, probeTimeoutMs = ANSWER_BOUND_MS): Promise<OmpBinary> =>
+		native.resolveOmpBinary({ probeTimeoutMs, explicitPath });
 
-	async function refusedExplicit(explicitPath: string): Promise<ResolutionError> {
+	async function refusedExplicit(explicitPath: string, probeTimeoutMs = ANSWER_BOUND_MS): Promise<ResolutionError> {
 		try {
-			await resolveExplicit(explicitPath);
+			await resolveExplicit(explicitPath, probeTimeoutMs);
 		} catch (error) {
 			assert.ok(error instanceof Error, "a refused resolution throws an Error");
 			return error as ResolutionError;
@@ -449,7 +458,7 @@ describe("OMP resolution when a candidate cannot answer", () => {
 		const onPathInstall = await fakeInstall(prints("18.0.4"));
 		const slow = await fakeInstall(NEVER_ANSWERS);
 
-		const error = await onPath([onPathInstall.bin], () => refusedExplicit(slow.shim));
+		const error = await onPath([onPathInstall.bin], () => refusedExplicit(slow.shim, HANG_BOUND_MS));
 
 		assert.equal(error.transientCause, "did not finish within 3 s");
 		assert.ok(error.message.includes(`\`omp --version\` of ${slow.shim} did not finish within 3 s; Desk does not fall back to another OMP`), error.message);
