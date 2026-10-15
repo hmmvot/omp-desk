@@ -112,7 +112,7 @@ describe("acquireClaim", () => {
 	it("retains the owning folder or saved workspace URI without affecting holder exclusion", async () => {
 		const storage = await makeStorageDir();
 		const file = await makeSessionFile();
-		const owner = { ...holder(), windowUri: "file:///C:/omp-vscode/sample.code-workspace" };
+		const owner = { ...holder(), windowUri: "file:///C:/omp-vscode/omp-vscode.code-workspace" };
 		const claim = await acquireClaim(storage, file, createOwnerGeneration(), owner);
 		assert.equal((await readClaim(storage, file))?.windowUri, owner.windowUri);
 		await assert.rejects(acquireClaim(storage, file, claim.ownerGeneration, holder()), ClaimConflictError);

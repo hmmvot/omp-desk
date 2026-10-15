@@ -246,7 +246,7 @@ describe("the identity of this window", () => {
 	it("is a saved workspace for multiple roots, the folder for one root, and none for an unsaved multi-root window", () => {
 		const one = URI.file("C:/omp-vscode/one");
 		const two = URI.file("C:/omp-vscode/two");
-		const saved = URI.file("C:/omp-vscode/sample.code-workspace");
+		const saved = URI.file("C:/omp-vscode/omp-vscode.code-workspace");
 		const set = (file: URI | undefined, folders: URI[]) => {
 			stub.workspace.workspaceFile = file;
 			stub.workspace.workspaceFolders = folders.map(uri => ({ uri }));
@@ -424,7 +424,7 @@ describe("switching to the window that holds a session", () => {
 	}
 
 	it("switches at once to the verified holder's workspace and has it select the tab, with no message", async () => {
-		const target = URI.file("C:/omp-vscode/sample.code-workspace");
+		const target = URI.file("C:/omp-vscode/omp-vscode.code-workspace");
 		const w = await holderOf(target.toString(), { ok: true, focused: true });
 		await w.routing.switchToWindow(w.index, TAB);
 		assert.equal(w.calls.length, 1, "nothing is launched and nothing else is run");

@@ -368,7 +368,7 @@ test("an opened tool call rests as a bounded preview, shows its gist and footer,
 			assert.equal(await text(`${card(call)} .omp-format-badge`), "NDJSON · 25 records");
 			assert.equal(await countOf(rowsOf(call)), 12, "the preview is 12 records");
 			assert.equal(await text(`${card(call)} .omp-output-marker > span`), "… 13 more records");
-			assert.equal(await ui.evaluate(`document.querySelector(${JSON.stringify(rowsOf(call))}).textContent.startsWith('{"name":"asset_add_component"')`), true, "a record row is the record's own text");
+			assert.equal(await ui.evaluate(`document.querySelector(${JSON.stringify(rowsOf(call))}).textContent.startsWith('{"name":"session_add_tag"')`), true, "a record row is the record's own text");
 			assert.equal(await ui.evaluate(`document.querySelector(${JSON.stringify(`${rowsOf(call)} .omp-json-gutter`)}).dataset.n`), "1", "the record number is the gutter");
 			// One record unfolded: its rows count in the marker, but the button still counts records; folded again, the rest of the test starts from 25 rows.
 			const twisty = `${rowsOf(call)}:nth-child(1) .omp-json-twisty`;
@@ -386,7 +386,7 @@ test("an opened tool call rests as a bounded preview, shows its gist and footer,
 			await pointerClick(`${rowsOf(call)}:nth-child(${seen}) .omp-json-twisty`);
 			await ui.wait(`document.querySelectorAll(${JSON.stringify(rowsOf(call))}).length>25`);
 			assert.equal(await ui.evaluate(`document.querySelector(${JSON.stringify(`${rowsOf(call)}:nth-child(${seen}) .omp-json-twisty`)}).getAttribute('aria-label')`), "Collapse record");
-			assert.match(await ui.evaluate<string>(`[...document.querySelectorAll(${JSON.stringify(rowsOf(call))})].slice(${seen - 1},${seen + 3}).map(row=>row.textContent.replace(/\\n$/,'')).join('|')`), /^\{\|  "name": "asset_[a-z_]+",\|  "params": \[ … \d+ items \]\|\}(?:\|\{"name":"asset_.*)?$/);
+			assert.match(await ui.evaluate<string>(`[...document.querySelectorAll(${JSON.stringify(rowsOf(call))})].slice(${seen - 1},${seen + 3}).map(row=>row.textContent.replace(/\\n$/,'')).join('|')`), /^\{\|  "name": "session_[a-z_]+",\|  "params": \[ … \d+ items \]\|\}(?:\|\{"name":"session_.*)?$/);
 			await ui.evaluate("window.clip=null;Object.defineProperty(navigator,'clipboard',{configurable:true,value:{async writeText(value){window.clip=value}}})");
 			await ui.evaluate(`document.querySelector(${JSON.stringify(`${card(call)} .omp-output-bar:not(.omp-tool-input *) .omp-iconbtn[aria-label^=Copy]`)}).click()`);
 			await ui.wait("window.clip!==null");
