@@ -1008,6 +1008,71 @@ describe("restoreAll runs rows together", () => {
 		assert.equal(line?.level, "info");
 		assert.match(line?.message ?? "", / · reconcile \d+ \(record \d+, state access \(shared\) \d+\) · attach \d+/);
 	});
+
+	/** A restored row whose host is attachable again, one row, over a store the test can hold up or fail. */
+	async function attachOver<S extends TestStore>(makeStore: (seed: Map<string, unknown>) => S) {
+		const { claimDir, tabIds, handles, store } = await restartedRows(1);
+		const held = makeStore(store.values);
+		const index = new SessionIndex({ store: held, claimStorageDir: claimDir });
+		const launcher: OmpHostLauncher = {
+			async launch() {
+				return { state: "not-started", reason: "an attach must never launch" };
+			},
+			async attach(request) {
+				return { state: "attached", host: handles.get(request.sessionFile ?? "") as OmpHostHandle };
+			},
+		};
+		const tabId = tabIds[0];
+		assert.ok(tabId !== undefined);
+		return { index, held, tabId, run: () => index.restoreAll({ reconciler: reconcilerFor(handles), launcher }) };
+	}
+
+	it("returns before the saves of its rows land, and each still lands", async () => {
+		const gate = Promise.withResolvers<void>();
+		class HeldStore extends TestStore {
+			holding = false;
+			readonly written: string[] = [];
+			override async update(key: string, value: unknown): Promise<void> {
+				if (this.holding) await gate.promise;
+				this.written.push(key);
+				await super.update(key, value);
+			}
+		}
+		const f = await attachOver(seed => {
+			const store = new HeldStore();
+			for (const [key, value] of seed) store.values.set(key, value);
+			return store;
+		});
+		const held = f.held;
+		held.holding = true;
+		const report = await f.run();
+		assert.equal(report.attached.length, 1, "the row's outcome does not wait for its save");
+		assert.equal(held.written.length, 0, "the save is still held up when the pass returns");
+		let settled = false;
+		void report.saved.then(() => { settled = true; });
+		await new Promise(resolve => setTimeout(resolve, 20));
+		assert.equal(settled, false);
+		gate.resolve();
+		assert.equal(await report.saved, null);
+		assert.ok(held.written.includes(SESSION_INDEX_STORAGE_KEY), "the shared record was written after the pass returned");
+		const stored = held.value;
+		assert.ok(typeof stored === "object" && stored !== null && "entries" in stored && Array.isArray(stored.entries));
+		const row = stored.entries.find((entry: { tabId: string }) => entry.tabId === f.tabId);
+		assert.equal(row?.runIntent, "running");
+	});
+
+	it("names the failure of a save the pass did not wait for", async () => {
+		const f = await attachOver(seed => {
+			const store = new FlakyStore();
+			for (const [key, value] of seed) store.values.set(key, value);
+			store.failWrites = true;
+			return store;
+		});
+		const report = await f.run();
+		assert.equal(report.attached.length, 1);
+		assert.match(await report.saved ?? "", /could not be persisted/);
+		assert.match(f.index.persistError ?? "", /could not be persisted/);
+	});
 });
 
 // ── Deferred draft reconciliation ───────────────────────────────────────────

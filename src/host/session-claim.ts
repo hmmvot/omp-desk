@@ -15,7 +15,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import * as fsSync from "node:fs";
-import * as fsp from "node:fs/promises";
+import { localFs } from "./local-fs.ts";
 import * as path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { FILE_OPERATION_BACKOFF_MS, replaceFileAtomic, stageBeside } from "./atomic-file.ts";
@@ -493,7 +493,7 @@ export async function acquireClaim(
 		return handle();
 	}
 	try {
-		await fsp.mkdir(path.dirname(claimPath), { recursive: true, mode: 0o700 });
+		await localFs(claimPath).mkdir(path.dirname(claimPath), { recursive: true, mode: 0o700 });
 		return await withIdentityLock(location, async () => {
 			if (await publishClaimFile(claimPath, record)) return handle();
 			const observed = await readClaimFile(claimPath, normalizedIdentity);
@@ -586,7 +586,7 @@ async function publishStagedFile(target: string, content: string): Promise<boole
 	const staged = await stageBeside(target, content);
 	try {
 		try {
-			await fsp.link(staged, target);
+			await localFs(target).link(staged, target);
 			return true;
 		} catch (error) {
 			if (isErrorCode(error, "EEXIST")) return false;
@@ -603,7 +603,7 @@ async function publishStagedFile(target: string, content: string): Promise<boole
 		}
 	} finally {
 		// The staged entry is inert once linked; never leave it behind.
-		await fsp.rm(staged, { force: true }).catch(() => undefined);
+		await localFs(staged).rm(staged, { force: true }).catch(() => undefined);
 	}
 }
 
@@ -617,19 +617,19 @@ async function publishStagedFile(target: string, content: string): Promise<boole
  * ignoring the lock put in its place.
  */
 async function writeExclusiveFile(target: string, content: string): Promise<void> {
-	const handle = await fsp.open(target, "wx", 0o600);
+	const handle = await localFs(target).open(target, "wx", 0o600);
 	const created = await handle.stat();
 	try {
 		await handle.writeFile(content, "utf8");
 	} catch (error) {
 		await handle.close().catch(() => undefined);
-		const current = await fsp.stat(target).catch(() => null);
+		const current = await localFs(target).stat(target).catch(() => null);
 		const replaced =
 			created.ino !== 0 &&
 			current !== null &&
 			current.ino !== 0 &&
 			(created.ino !== current.ino || created.dev !== current.dev);
-		if (!replaced) await fsp.rm(target, { force: true }).catch(() => undefined);
+		if (!replaced) await localFs(target).rm(target, { force: true }).catch(() => undefined);
 		throw error;
 	}
 	await handle.close();
@@ -756,7 +756,7 @@ async function releaseClaimFile(
 			);
 		}
 		if (confirmed.holderId !== holderId) throw new ClaimHolderError(confirmed, identity, holderId);
-		await fsp.rm(claimPath, { force: true });
+		await localFs(claimPath).rm(claimPath, { force: true });
 	});
 }
 
@@ -775,7 +775,7 @@ async function withIdentityLock<T>(location: ClaimLocation, operation: () => Pro
 	const deadline = Date.now() + CLAIM_LOCK_WAIT_MS;
 	for (;;) {
 		try {
-			await fsp.mkdir(mutexPath, { mode: 0o700 });
+			await localFs(mutexPath).mkdir(mutexPath, { mode: 0o700 });
 			break;
 		} catch (error) {
 			if (!isErrorCode(error, "EEXIST")) throw error;
@@ -789,7 +789,7 @@ async function withIdentityLock<T>(location: ClaimLocation, operation: () => Pro
 	} finally {
 		// Best effort: if this fails the mutex stays behind and later operations
 		// fail closed rather than proceeding unguarded.
-		await fsp.rm(mutexPath, { recursive: true, force: true }).catch(() => undefined);
+		await localFs(mutexPath).rm(mutexPath, { recursive: true, force: true }).catch(() => undefined);
 	}
 }
 
@@ -815,7 +815,7 @@ interface ClaimRecord {
 async function readClaimFile(claimPath: string, normalizedIdentity: string): Promise<ObservedClaim | null> {
 	let content: string;
 	try {
-		content = await fsp.readFile(claimPath, "utf8");
+		content = await localFs(claimPath).readFile(claimPath, "utf8");
 	} catch (error) {
 		if (isErrorCode(error, "ENOENT")) return null;
 		throw error;

@@ -409,8 +409,16 @@ export interface RestoreReport {
 	readonly skipped: readonly string[];
 	/** Tab that should be focused after restoration. */
 	readonly activeTabId: string | null;
-	/** Set when the index could not persist its state during this pass. */
+	/**
+	 * Why the index could not persist its state, as far as the pass knew when it returned. The saves the rows queued are not
+	 * waited for (see {@link saved}), so a `null` here does not say they landed.
+	 */
 	readonly persistError: string | null;
+	/**
+	 * Settles, after every save the pass's rows queued has run, to the failure text that stands then or `null`. A caller that
+	 * reports a failed save reports it from here; the saves are queued in order behind and ahead of all other writes either way.
+	 */
+	readonly saved: Promise<string | null>;
 }
 
 /** Result of promoting a reserved draft to its materialized session file. */
@@ -603,6 +611,8 @@ interface RestoreTrace {
 	/** This row's place among the pass's rows that name the same session identity. */
 	readonly turn: IdentityTurn;
 	readonly timer: RestoreStepTimer;
+	/** The saves this row queued and did not wait for, each settling to the failure text or `null`; the pass owns them. */
+	readonly saves: Array<Promise<string | null>>;
 }
 
 /**
@@ -1202,6 +1212,7 @@ export class SessionIndex {
 			return entry === undefined ? [] : [entry];
 		});
 		const turns = new IdentityTurns();
+		const saves: Array<Promise<string | null>> = [];
 		const outcomes = await mapBounded(rows, options.concurrency ?? RESTORE_CONCURRENCY, async (entry): Promise<RestoreOutcome> => {
 			const tabId = entry.tabId;
 			if (options.signal?.aborted === true) {
@@ -1211,7 +1222,7 @@ export class SessionIndex {
 			const turn = turns.next(restoreIdentityKey(entry));
 			let outcome: RestoreOutcome;
 			try {
-				outcome = await this.#restoreEntry(entry, pass, takenIdentities, draftIntent, { turn, timer });
+				outcome = await this.#restoreEntry(entry, pass, takenIdentities, draftIntent, { turn, timer, saves });
 			} catch (error) {
 				// One row's unexpected failure is that row's failure; the others carry on.
 				outcome = { status: "failed", tabId, kind: "index-error", detail: describeError(error) };
@@ -1262,6 +1273,7 @@ export class SessionIndex {
 			skipped,
 			activeTabId: this.activeTabId,
 			persistError: this.#persistError,
+			saved: Promise.all(saves).then(() => this.#persistError),
 		};
 	}
 
@@ -1555,7 +1567,7 @@ export class SessionIndex {
 			trace?.turn.release();
 			entry.runIntent = "running";
 			await this.#touch(entry, "live", "This window is already running the native host for this tab.");
-			await this.#persist();
+			await this.#persist(trace);
 			return { status: "attached", tabId, sessionFile: entry.sessionFile, detail: "Already open in this window." };
 		}
 		// The user's own stop intent is an admission rule, not a hint. A pass that
@@ -1579,7 +1591,7 @@ export class SessionIndex {
 			if (entry.sessionFile !== null && !(await this.#admit(trace, "session file", () => fileExists(entry.sessionFile!)))) {
 				const detail = `The recorded session file is missing: ${entry.sessionFile}`;
 				await this.#touch(entry, "failed", detail);
-				await this.#persist();
+				await this.#persist(trace);
 				return { status: "failed", tabId, kind: "missing-file", detail };
 			}
 			// A row whose recorded directory is not absolute is refused here, before
@@ -1588,7 +1600,7 @@ export class SessionIndex {
 			const cwdRefusal = await this.#admit(trace, "workspace directory", () => this.#workspaceDirectoryRefusal(entry));
 			if (cwdRefusal !== null) {
 				await this.#touch(entry, "failed", cwdRefusal);
-				await this.#persist();
+				await this.#persist(trace);
 				return { status: "failed", tabId, kind: "ambiguous-cwd", detail: cwdRefusal };
 			}
 			// Every claimed tab needs an owner generation, and it must be on disk
@@ -1619,7 +1631,7 @@ export class SessionIndex {
 			if (target === null) {
 				const detail = "The tab has no session file and no reserved draft identity.";
 				await this.#touch(entry, "failed", detail);
-				await this.#persist();
+				await this.#persist(trace);
 				return { status: "failed", tabId, kind: "index-error", detail };
 			}
 
@@ -1649,7 +1661,7 @@ export class SessionIndex {
 			if (claimBefore !== null && claimBefore.holderId !== this.#claimHolder.id && await this.#admit(trace, "claim holder alive", () => claimHolderMayBeAlive(claimBefore))) {
 				const detail = "This session is open in another window. Continue there.";
 				await this.#touch(entry, "live", detail);
-				await this.#persist();
+				await this.#persist(trace);
 				return { status: "conflict", tabId, kind: "claim-conflict", detail };
 			}
 
@@ -1667,12 +1679,12 @@ export class SessionIndex {
 				if (error instanceof ClaimConflictError) {
 					const detail = "This session is open in another window. Continue there.";
 					await this.#touch(entry, "live", detail);
-					await this.#persist();
+					await this.#persist(trace);
 					return { status: "conflict", tabId, kind: "claim-conflict", detail };
 				}
 				const detail = describeError(error);
 				await this.#touch(entry, "failed", detail);
-				await this.#persist();
+				await this.#persist(trace);
 				return { status: "failed", tabId, kind: "claim-error", detail };
 			}
 
@@ -1744,7 +1756,7 @@ export class SessionIndex {
 							};
 							entry.runIntent = "running";
 							await this.#touch(entry, "live", classification.detail);
-							await this.#persist();
+							await this.#persist(trace);
 							return { status: "attached", tabId, sessionFile: entry.sessionFile, detail: classification.detail };
 						}
 						await this.#releaseQuietly(claim);
@@ -1752,7 +1764,7 @@ export class SessionIndex {
 						const stillOwned = current.kind === "live" || current.kind === "attachable";
 						const detail = `Reattaching failed: ${attached.reason}`;
 						await this.#touch(entry, stillOwned ? "live" : "saved", detail);
-						await this.#persist();
+						await this.#persist(trace);
 						return stillOwned ? { status: "conflict", tabId, kind: "live", detail } : { status: "failed", tabId, kind: "launch-failed", detail };
 					}
 					// A claim that was already held (ours, from an earlier window)
@@ -1768,13 +1780,13 @@ export class SessionIndex {
 						detail = withReleaseNotice(classification.detail, await this.#releaseQuietly(claim));
 					}
 					await this.#touch(entry, availability, detail);
-					await this.#persist();
+					await this.#persist(trace);
 					return { status: "conflict", tabId, kind: availability, detail };
 				}
 				if (options.automatic === true && classification.evidence.every(item => !acceptOwnerAbsenceEvidence(toEntry(entry), item))) {
 					await this.#releaseQuietly(claim);
 					await this.#touch(entry, entry.sessionFile === null ? "draft" : "saved", "This session is not running here. Resume to continue.");
-					await this.#persist();
+					await this.#persist(trace);
 					return { status: "stopped", tabId, detail: entry.detail ?? "" };
 				}
 				// Persist the attempt before launch so reload and automatic recovery
@@ -1811,7 +1823,7 @@ export class SessionIndex {
 						release,
 					);
 					await this.#touch(entry, "failed", detail);
-					await this.#persist();
+					await this.#persist(trace);
 					return { status: "failed", tabId, kind: "index-error", detail };
 				}
 				step = await this.#launch(entry, claim, options.launcher, trace);
@@ -1831,7 +1843,7 @@ export class SessionIndex {
 				entry.sessionId = previousSessionId;
 				const detail = withReleaseNotice(step.detail, release);
 				await this.#touch(entry, "failed", detail);
-				await this.#persist();
+				await this.#persist(trace);
 				return { status: "failed", tabId, kind: "launch-failed", detail };
 			}
 			if (step.kind === "unconfirmed") {
@@ -1839,7 +1851,7 @@ export class SessionIndex {
 				this.#dropReleaseProof(entry);
 				entry.runIntent = "stopped";
 				await this.#touch(entry, entry.sessionFile === null ? "draft" : "saved", step.detail);
-				await this.#persist();
+				await this.#persist(trace);
 				return { status: "failed", tabId, kind: "launch-failed", detail: step.detail };
 			}
 
@@ -1859,12 +1871,12 @@ export class SessionIndex {
 			};
 			entry.runIntent = "running";
 			await this.#touch(entry, "live", "Native host launched from the indexed session.");
-			await this.#persist();
+			await this.#persist(trace);
 			return { status: "restored", tabId, sessionFile: entry.sessionFile, host: step.handle };
 		} catch (error) {
 			const detail = describeError(error);
 			await this.#touch(entry, "failed", detail);
-			await this.#persist();
+			await this.#persist(trace);
 			return { status: "failed", tabId, kind: "index-error", detail };
 		} finally {
 			this.#launching.delete(tabId);
@@ -1911,7 +1923,7 @@ export class SessionIndex {
 		const changed = entry.availability !== stored || entry.detail !== detail;
 		entry.availability = stored;
 		entry.detail = detail;
-		if (changed) await this.#persist();
+		if (changed) await this.#persist(trace);
 		switch (stored) {
 			case "live":
 				return { status: "conflict", tabId, kind: "live", detail };
@@ -1971,7 +1983,7 @@ export class SessionIndex {
 		const cwdRefusal = await this.#workspaceDirectoryRefusal(entry);
 		if (cwdRefusal !== null) {
 			await this.#touch(entry, "failed", cwdRefusal);
-			await this.#persist();
+			await this.#persist(trace);
 			return { status: "failed", tabId, kind: "ambiguous-cwd", detail: cwdRefusal };
 		}
 		const observed = await this.#readClaim(identity);
@@ -2010,7 +2022,7 @@ export class SessionIndex {
 			const detail =
 				"This session is already open in another editor. Continue there.";
 			await this.#touch(entry, entry.sessionFile === null ? "draft" : "saved", detail);
-			await this.#persist();
+			await this.#persist(trace);
 			return { status: "conflict", tabId, kind: "duplicate", detail };
 		}
 		takenIdentities.set(key, tabId);
@@ -2028,7 +2040,7 @@ export class SessionIndex {
 				? "This new session is open in another window. Continue there."
 				: describeError(error);
 			await this.#touch(entry, "live", detail);
-			await this.#persist();
+			await this.#persist(trace);
 			return { status: "conflict", tabId, kind: "claim-conflict", detail };
 		}
 		const attached = await this.#attach(entry, claim, options.launcher, recorded, attachPin, trace);
@@ -2038,7 +2050,7 @@ export class SessionIndex {
 			const stillOwned = current.kind === "live" || current.kind === "attachable";
 			const detail = `Reattaching failed: ${attached.reason}`;
 			await this.#touch(entry, stillOwned ? "live" : "draft", detail);
-			await this.#persist();
+			await this.#persist(trace);
 			return stillOwned ? { status: "conflict", tabId, kind: "live", detail } : { status: "failed", tabId, kind: "launch-failed", detail };
 		}
 		const handle = attached.handle;
@@ -2059,7 +2071,7 @@ export class SessionIndex {
 		};
 		entry.runIntent = "running";
 		await this.#touch(entry, "live", classification.detail);
-		await this.#persist();
+		await this.#persist(trace);
 		return { status: "attached", tabId, sessionFile: null, detail: classification.detail };
 	}
 
@@ -3105,8 +3117,18 @@ export class SessionIndex {
 		return { version: LOCAL_VERSION, activeTabId, observations };
 	}
 
-	async #persist(): Promise<void> {
-		await this.#persistNow();
+	/**
+	 * The ordinary save. A row of a restore pass does not wait for it: the row's outcome is already decided and nothing here
+	 * can change it, while the save is a catalog transaction (the lock other windows contend for, a flushed write, a rename)
+	 * that costs a loaded machine seconds. The save is queued exactly as an awaited one is, behind the earlier ones and ahead
+	 * of the later ones, so no write is lost or reordered; the pass collects its outcome in {@link RestoreReport.saved}.
+	 */
+	async #persist(trace?: RestoreTrace): Promise<void> {
+		if (trace === undefined) {
+			await this.#persistNow();
+			return;
+		}
+		trace.saves.push(this.#persistNow().then(failure => failure, error => describeError(error)));
 	}
 
 	/**

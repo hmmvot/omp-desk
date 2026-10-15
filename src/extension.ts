@@ -41,7 +41,9 @@ import { relativeAge } from "./shared/relative-age";
 import { normalizeSessionsGrouping, planNotificationReveal, sessionsLayoutPickItems } from "./views/session-order";
 import type { SessionsGrouping } from "./views/session-order";
 import { pinnedSessionTabId, selectionLeaveOtherWindow, selectionRestore } from "./views/session-selection";
-import { acquireClaim, createClaimHolder, createOwnerGeneration, readProcessCreationTime } from "./host/session-claim";
+import { useSynchronousLocalFs } from "./host/local-fs";
+import { synchronousLocalPaths } from "./host/private-storage";
+import { acquireClaim, claimsDirectory, createClaimHolder, createOwnerGeneration, readProcessCreationTime } from "./host/session-claim";
 import { CoalescedRun } from "./host/coalesced-run";
 import { startFsTurnaroundProbe } from "./host/fs-turnaround";
 import { startLoopLagMonitor, trackOperation } from "./host/loop-lag";
@@ -1505,9 +1507,27 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     });
   }
   activation.mark("native load started");
+  // The session claims and the profile catalog are read and written by many small file calls. Each asynchronous call is a job in
+  // the host's pool of four file threads and then a turn of its event loop, behind whatever every extension queued at the same
+  // moment: at a reload a call that takes a tenth of a millisecond came back after tens or hundreds, and a claim's fifteen calls
+  // took seconds. Once the volume is proven local, fixed NTFS (the proof state access already uses), the same calls run as
+  // synchronous steps; the locks still wait on timers (ADR-0076, decision 12). Without the native module they stay asynchronous.
+  const catalogReadStartedAt = performance.now();
+  const synchronousFileCalls = useSynchronousLocalFs(
+    [claimsDirectory(context.globalStorageUri.fsPath), catalogPaths(context.globalStorageUri.fsPath).root],
+    targets => synchronousLocalPaths(targets),
+  );
+  let catalogReadMs = 0;
+  let fileCalls = "asynchronous";
   // The profile catalog's first read is file I/O whose completion waits for a turn of the host's one thread, which other
   // extensions share; it starts now so that wait overlaps the synchronous setup below instead of following it.
-  const catalogRead = createProfileCatalog(context);
+  const catalogRead = synchronousFileCalls.then(synchronous => {
+    fileCalls = synchronous ? "synchronous" : "asynchronous";
+    return createProfileCatalog(context);
+  }).then(store => {
+    catalogReadMs = performance.now() - catalogReadStartedAt;
+    return store;
+  });
   // ADR-0068: the old command ids are registered first, as hidden aliases that forward to the commands registered below, so a
   // keybinding of the previous release works as early as any command does. Then the values the `omp.` namespace held move to
   // `ompDesk.` before anything reads a setting; a window with nothing to move does no I/O. A name another extension
@@ -2195,7 +2215,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // report their own failure; this one is just early, and silent.
   void s.staging.entries().catch(() => {});
   activation.mark("rest of setup");
-  log.info(`window timing: activation ${activation.summary([["host up when the bundle began loading", MODULE_EVALUATION_STARTED_AT], ["bundle evaluation", activationEnteredAt - MODULE_EVALUATION_STARTED_AT, activationEnteredCpu - MODULE_EVALUATION_STARTED_CPU_MS]])}`);
+  log.info(`window timing: activation ${activation.summary([["host up when the bundle began loading", MODULE_EVALUATION_STARTED_AT], ["bundle evaluation", activationEnteredAt - MODULE_EVALUATION_STARTED_AT, activationEnteredCpu - MODULE_EVALUATION_STARTED_CPU_MS], [`catalog read (${fileCalls} file calls, from the start of the setup)`, catalogReadMs]])}`);
   log.info("extension activated");
 }
 
@@ -4767,6 +4787,12 @@ async function restoreTabs(
     log.error(`restore failure (${failure.kind}) on tab ${failure.tabId}: ${failure.detail}`);
   }
   windowState().persistFailures.report({ persistError: report.persistError, persistBusy: index.persistBusy }, "The OMP session index could not be saved: ");
+  // The saves the rows queued are not waited for (the pass's end must not wait for catalog transactions across windows); a failure
+  // they end with is reported when they have run, unless the pass already reported that very failure.
+  void report.saved.then(failure => {
+    if (failure === null || failure === report.persistError) return;
+    windowState().persistFailures.report({ persistError: failure, persistBusy: index.persistBusy }, "The OMP session index could not be saved: ");
+  });
 }
 
 async function handleRestoreOutcome(

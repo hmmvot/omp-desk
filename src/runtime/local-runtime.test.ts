@@ -26,7 +26,7 @@ interface Calls {
 
 function fixture(overrides: { entry?: unknown; verdict?: { kind: string }; restore?: () => Promise<RestoreOutcome> } = {}) {
 	const calls: Calls = { restore: [], restoreAll: [], observed: [], stopRecorded: [], writer: [], provenance: [] };
-	const report = { order: [TAB], restored: [], attached: [], conflicts: [], failures: [], drafts: [], stopped: [], skipped: [], activeTabId: null, persistError: null } as RestoreReport;
+	const report = { order: [TAB], restored: [], attached: [], conflicts: [], failures: [], drafts: [], stopped: [], skipped: [], activeTabId: null, persistError: null, saved: Promise.resolve(null) } as RestoreReport;
 	const entry = "entry" in overrides ? overrides.entry : { tabId: TAB, sessionFile: "s.jsonl", host: { transport: "native" }, ownership: { ownerGeneration: "gen-1", draftIdentity: null } };
 	const index = {
 		claimHolder: { id: "holder-1", pid: 4242, processCreationTime: undefined },

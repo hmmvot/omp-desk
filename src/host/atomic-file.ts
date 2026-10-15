@@ -14,6 +14,7 @@
 import { randomUUID } from "node:crypto";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
+import { localFs } from "./local-fs.ts";
 
 /**
  * Waits between rename attempts, about 2.1 s in all. On Windows a rename over a file fails for as long as any process
@@ -101,7 +102,8 @@ export async function stageBeside(target: string, content: string | Uint8Array, 
 	const staged = options.stagingDirectory === undefined
 		? `${target}.${unique}`
 		: path.join(options.stagingDirectory, `${path.basename(target)}.${unique}`);
-	const handle = await fsp.open(staged, "wx", options.mode ?? 0o600);
+	const io = localFs(staged);
+	const handle = await io.open(staged, "wx", options.mode ?? 0o600);
 	try {
 		try {
 			await handle.writeFile(content, "utf8");
@@ -110,7 +112,7 @@ export async function stageBeside(target: string, content: string | Uint8Array, 
 			await handle.close();
 		}
 	} catch (error) {
-		await fsp.rm(staged, { force: true }).catch(() => {});
+		await io.rm(staged, { force: true }).catch(() => {});
 		throw error;
 	}
 	return staged;
@@ -126,12 +128,13 @@ export interface ReplaceFileOptions extends StageBesideOptions {
 
 /** Replace the file at `target` with `content` in one rename; the old content stays whole until the new lands. */
 export async function replaceFileAtomic(target: string, content: string | Uint8Array, options: ReplaceFileOptions = {}): Promise<void> {
-	if (options.createDirectory !== false) await fsp.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+	const io = localFs(target);
+	if (options.createDirectory !== false) await io.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
 	const staged = await stageBeside(target, content, options);
 	try {
-		await retryFileOperation(() => fsp.rename(staged, target), options.backoff ?? RENAME_BACKOFF_MS);
+		await retryFileOperation(() => io.rename(staged, target), options.backoff ?? RENAME_BACKOFF_MS);
 	} finally {
-		await fsp.rm(staged, { force: true }).catch(() => {});
+		await io.rm(staged, { force: true }).catch(() => {});
 	}
 }
 

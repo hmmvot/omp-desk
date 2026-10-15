@@ -78,7 +78,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
-import * as fsp from "node:fs/promises";
+import { localFs } from "./local-fs.ts";
 import * as os from "node:os";
 import * as path from "node:path";
 import { renameReplacing, stageBeside } from "./atomic-file.ts";
@@ -379,7 +379,7 @@ interface LockRecord {
 
 async function readLockRecord(lockPath: string): Promise<LockRecord | null> {
   try {
-    const parsed = JSON.parse(await fsp.readFile(lockPath, "utf8")) as Partial<LockRecord>;
+    const parsed = JSON.parse(await localFs(lockPath).readFile(lockPath, "utf8")) as Partial<LockRecord>;
     if (typeof parsed.token !== "string" || parsed.token.length === 0) return null;
     if (typeof parsed.pid !== "number" || !Number.isFinite(parsed.pid)) return null;
     return {
@@ -422,7 +422,7 @@ interface HeldLock {
 
 async function tryCreateLock(lockPath: string, token: string): Promise<boolean> {
   try {
-    const handle = await fsp.open(lockPath, "wx");
+    const handle = await localFs(lockPath).open(lockPath, "wx");
     try {
       const record: LockRecord = { token, pid: process.pid, host: osHostname(), at: new Date().toISOString() };
       await handle.writeFile(JSON.stringify(record));
@@ -470,7 +470,7 @@ async function acquireLock(lockPath: string, options: AcquireLockOptions): Promi
         // partial write cannot be committed as this window's values.
         try {
           const current = await readLockRecord(lockPath);
-          if (current !== null && current.token === record.token) await fsp.rm(lockPath, { force: true });
+          if (current !== null && current.token === record.token) await localFs(lockPath).rm(lockPath, { force: true });
           reclaimedFrom = record;
           continue;
         } catch {
@@ -490,7 +490,7 @@ async function acquireLock(lockPath: string, options: AcquireLockOptions): Promi
 
 async function lockAgeMs(lockPath: string, now: () => number): Promise<number | null> {
   try {
-    return now() - (await fsp.stat(lockPath)).mtimeMs;
+    return now() - (await localFs(lockPath).stat(lockPath)).mtimeMs;
   } catch {
     return null;
   }
@@ -500,7 +500,7 @@ async function releaseLock(lockPath: string, token: string): Promise<void> {
   const record = await readLockRecord(lockPath);
   if (record === null || record.token !== token) return;
   try {
-    await fsp.rm(lockPath, { force: true });
+    await localFs(lockPath).rm(lockPath, { force: true });
   } catch {
     /* the lock is left for a dead-owner reclaim; the commit already landed */
   }
@@ -531,10 +531,10 @@ async function commitDocument(paths: CatalogPaths, next: CatalogDocument): Promi
     // Windows refuses a replace while another process has the destination open (another window re-reading the catalog,
     // an antivirus scan, a backup tool). The rename is retried over about two seconds, then reported; the previous
     // revision is still intact either way.
-    await renameReplacing(() => fsp.rename(staging, paths.document), delay);
+    await renameReplacing(() => localFs(staging).rename(staging, paths.document), delay);
     return payload;
   } catch (error) {
-    await fsp.rm(staging, { force: true });
+    await localFs(staging).rm(staging, { force: true });
     const code = (error as NodeJS.ErrnoException).code;
     const held = code === "EPERM" || code === "EACCES" || code === "EBUSY"
       ? " Another program kept the file open for too long; this window keeps the change and saves it again on its next save."
@@ -597,7 +597,7 @@ export async function transactCatalog(
   operation: (tx: CatalogTransaction) => boolean | void,
   options: CatalogTransactionOptions = {},
 ): Promise<CatalogCommitResult> {
-  await fsp.mkdir(paths.root, { recursive: true });
+  await localFs(paths.root).mkdir(paths.root, { recursive: true });
   const now = options.now ?? (() => Date.now());
   const clock = options.clock ?? (() => new Date());
   const held = await acquireLock(paths.lock, {
@@ -817,7 +817,7 @@ export async function createCatalogStore(options: CatalogStoreOptions): Promise<
   let chain: Promise<unknown> = Promise.resolve();
 
   try {
-    await fsp.mkdir(paths.root, { recursive: true });
+    await localFs(paths.root).mkdir(paths.root, { recursive: true });
     const document = await readCatalogDocument(paths);
     if (document !== null) {
       records = document.records;
