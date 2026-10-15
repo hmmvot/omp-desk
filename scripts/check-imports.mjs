@@ -208,6 +208,15 @@ for (const start of nodes) {
   }
 }
 
+// R-native-1: only `src/host/win32-native.ts` loads a native addon by hand (`process.dlopen`), so the FFI surface
+// of the extension is one reviewed module (ADR-0076). Tests and their support module are exempt.
+const DLOPEN_ALLOWED = new Set(["src/host/win32-native.ts", "src/host/win32-test-support.ts"]);
+for (const rel of nodes) {
+  if (isTestFile(rel) || DLOPEN_ALLOWED.has(rel)) continue;
+  const match = /\.dlopen\s*\(/.exec(texts.get(rel) ?? "");
+  if (match !== null) findings.push(`${rel}:${lineOf(texts.get(rel), match.index)} loads a native addon: only src/host/win32-native.ts may call dlopen`);
+}
+
 // R-runtime-2: the port module declares data only. It uses statement-level `import type` and
 // `export type ... from`, every source and name is on this list, so a live object (an index, a
 // handle, a client, the chat runtime) cannot become part of the port's contract by a type import.

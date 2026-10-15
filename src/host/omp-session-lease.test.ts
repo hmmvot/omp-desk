@@ -1,28 +1,23 @@
 import assert from "node:assert/strict";
-import { spawn, type ChildProcess } from "node:child_process";
-import { createHash, randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
 import {
 	LEASE_FAILURE_BACKOFF_MAX_MS,
 	ExternalLeaseObserver,
 	leaseFailureBackoffMs,
 	LEASE_FAILURE_BACKOFF_MS,
 	LEASE_MUTEX_PREFIX,
+	nativeLeaseProbe,
 	nativeLockDigest,
 	ompSessionOwnersDir,
-	parseLeaseReport,
-	powershellLeaseProbe,
 	sessionLeaseMutexName,
 	xxh64,
 	type LeaseProbe,
 	type LeaseState,
 } from "./omp-session-lease.ts";
 import { recordingLogger, silentLogger, type LoggedLine } from "../shared/logger.ts";
-import { windowsPowerShellEnvironment, windowsPowerShellExecutable } from "./windows-powershell.ts";
-
-const HELPER = fileURLToPath(new URL("./session-lease-probe.ps1", import.meta.url));
+import { loadWin32Native, type MutexState, type Win32Native } from "./win32-native.ts";
+import { holdMutex, installedAddonAsset, releaseMutex } from "./win32-test-support.ts";
 
 /**
  * Lock paths and the 32-digit names installed OMP 18.6.3's native `FileLock.tryAcquire` gave
@@ -92,83 +87,50 @@ describe("OMP session lease name", () => {
 	});
 });
 
-describe("lease helper report", () => {
-	const a = `${LEASE_MUTEX_PREFIX}${"a".repeat(32)}`;
-	const b = `${LEASE_MUTEX_PREFIX}${"b".repeat(32)}`;
-
-	it("accepts exactly one verdict per requested name followed by the count", () => {
-		const report = parseLeaseReport(`!LEASE held ${a}\r\n!LEASE absent ${b}\r\n!DONE 2\r\n`, [a, b]);
-		assert.deepEqual([...(report ?? [])], [[a, "held"], [b, "absent"]]);
-	});
-
-	it("leaves a name the helper could not open out of the answer", () => {
-		const report = parseLeaseReport(`!LEASE error ${a}\n!LEASE held ${b}\n!DONE 2\n`, [a, b]);
-		assert.deepEqual([...(report ?? [])], [[b, "held"]]);
-	});
-
-	it("trusts nothing from a malformed or partial report", () => {
-		assert.equal(parseLeaseReport(`!LEASE held ${a}\n`, [a]), null, "no terminator");
-		assert.equal(parseLeaseReport(`!LEASE held ${a}\n!DONE 2\n`, [a]), null, "wrong count");
-		assert.equal(parseLeaseReport(`!DONE 1\n`, [a]), null, "no verdict");
-		assert.equal(parseLeaseReport(`!LEASE held ${a}\n!LEASE held ${a}\n!DONE 2\n`, [a, b]), null, "repeated name");
-		assert.equal(parseLeaseReport(`!LEASE held ${b}\n!DONE 1\n`, [a]), null, "unrequested name");
-		assert.equal(parseLeaseReport(`!LEASE maybe ${a}\n!DONE 1\n`, [a]), null, "unknown verdict");
-		assert.equal(parseLeaseReport(`!LEASE held ${a}\n!DONE 1\n!LEASE held ${a}\n`, [a]), null, "output after the end");
-		assert.equal(parseLeaseReport(`!ERROR bad-name\n`, [a]), null);
-	});
-});
-
-describe("powershellLeaseProbe with a stand-in helper", () => {
+describe("nativeLeaseProbe", () => {
 	const names = [`${LEASE_MUTEX_PREFIX}${"1".repeat(32)}`, `${LEASE_MUTEX_PREFIX}${"2".repeat(32)}`];
-	async function stagedHelper() {
-		const bytes = await readFile(HELPER);
-		return { path: HELPER, sha256: createHash("sha256").update(bytes).digest("hex") };
-	}
+	const states: Readonly<Record<string, MutexState>> = { [names[0]!]: "held", [names[1]!]: "absent" };
+	const stub = (answer: (name: string) => MutexState): Win32Native => ({ mutexState: answer });
 
-	const standIn = (script: string): ((helper: unknown) => ChildProcess) => () =>
-		spawn(process.execPath, ["-e", script], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
-
-	it("sends the names on stdin and reads the verdicts", async () => {
-		const script = `let input = ""; process.stdin.on("data", c => input += c).on("end", () => {
-			const names = input.split("\\n").filter(Boolean);
-			names.forEach((name, at) => console.log("!LEASE " + (at === 0 ? "held" : "absent") + " " + name));
-			console.log("!DONE " + names.length);
-		});`;
-		const probe = powershellLeaseProbe({ helper: stagedHelper, launch: standIn(script) });
-		const answer = await probe(names);
+	it("asks the native module once per distinct name and reads the verdicts", async () => {
+		const asked: string[] = [];
+		const probe = nativeLeaseProbe({ native: async () => stub(name => { asked.push(name); return states[name]!; }) });
+		const answer = await probe([names[0]!, names[1]!, names[0]!]);
 		assert.deepEqual([...(answer ?? [])], [[names[0], "held"], [names[1], "absent"]]);
+		assert.deepEqual(asked, [names[0], names[1]]);
 	});
 
-	it("never starts the helper for a name that is not a lease mutex name", async () => {
-		let launched = false;
-		const probe = powershellLeaseProbe({ helper: stagedHelper, launch: () => { launched = true; throw new Error("must not start"); } });
+	it("leaves a name that could not be opened out of the answer", async () => {
+		const probe = nativeLeaseProbe({ native: async () => stub(name => (name === names[0] ? "error" : "held")) });
+		assert.deepEqual([...((await probe(names)) ?? [])], [[names[1], "held"]]);
+	});
+
+	it("answers an empty batch without waiting for the native module", async () => {
+		const probe = nativeLeaseProbe({ native: async () => { throw new Error("must not be asked"); } });
+		assert.deepEqual([...((await probe([])) ?? [])], []);
+	});
+
+	it("never opens a name that is not a lease mutex name", async () => {
+		let asked = false;
+		const probe = nativeLeaseProbe({ native: async () => { asked = true; return stub(() => "held"); } });
 		assert.equal(await probe(["Global\\something-else"]), null);
-		assert.equal(launched, false);
+		assert.equal(asked, false);
 	});
 
-	it("fails the probe, with a log line, when the staged helper changed", async () => {
+	it("fails the probe, with one log line, when the native module is unavailable", async () => {
 		const logs: LoggedLine[] = [];
-		const probe = powershellLeaseProbe({
-			helper: async () => ({ path: HELPER, sha256: "0".repeat(64) }),
-			launch: () => { throw new Error("must not start"); },
-			log: recordingLogger(logs),
-		});
+		const probe = nativeLeaseProbe({ native: async () => null, log: recordingLogger(logs) });
 		assert.equal(await probe(names), null);
 		assert.equal(logs.length, 1);
 		assert.equal(logs[0]!.level, "warn");
-		assert.match(logs[0]!.message, /missing or changed/);
+		assert.match(logs[0]!.message, /native module is unavailable/);
 	});
 
-	it("fails the probe when the helper exits with a malformed report, crashes or times out", async () => {
+	it("fails the probe, with a log line, when a native call throws", async () => {
 		const logs: LoggedLine[] = [];
-		const run = (script: string, timeoutMs?: number) =>
-			powershellLeaseProbe({ helper: stagedHelper, launch: standIn(script), log: recordingLogger(logs), ...(timeoutMs === undefined ? {} : { timeoutMs }) })(names);
-		assert.equal(await run(`console.log("!ERROR bad-name"); process.exit(2);`), null);
-		assert.equal(await run(`process.exit(1);`), null);
-		// A helper that never answers: the probe bounds it with its own timeout (a real, short one by design).
-		assert.equal(await run(`require("node:net").createServer().listen(0);`, 100), null);
-		assert.equal(logs.length, 3);
-		assert.match(logs[2]!.message, /timed out/);
+		const probe = nativeLeaseProbe({ native: async () => stub(() => { throw new Error("boom"); }), log: recordingLogger(logs) });
+		assert.equal(await probe(names), null);
+		assert.match(logs.map(line => line.message).join("\n"), /boom/);
 	});
 });
 
@@ -318,46 +280,25 @@ describe("ExternalLeaseObserver", () => {
 
 /**
  * The real thing, without OMP: a child process holds a real Windows named mutex under the name
- * this module derives for a throwaway session id, the production helper sees it, and sees it gone
- * once that process exits. The id is random and the owners directory synthetic, so no session of
- * a real OMP can share the name.
+ * this module derives for a throwaway session id, the production probe (the real native module)
+ * sees it, and sees it gone once that process exits. The id is random and the owners directory
+ * synthetic, so no session of a real OMP can share the name.
  */
 describe("session lease probe against a real named mutex", { skip: process.platform !== "win32" }, () => {
-	async function holder(mutexName: string): Promise<ChildProcess> {
-		const child = spawn(
-			windowsPowerShellExecutable(),
-			[
-				"-NoLogo", "-NoProfile", "-NonInteractive", "-Command",
-				`$m = New-Object System.Threading.Mutex($false, '${mutexName}'); [Console]::Out.WriteLine('ready'); [Console]::Out.Flush(); [void][Console]::In.ReadLine()`,
-			],
-			{ windowsHide: true, stdio: ["pipe", "pipe", "ignore"], env: windowsPowerShellEnvironment() },
-		);
-		await new Promise<void>((resolve, reject) => {
-			child.stdout!.setEncoding("utf8");
-			child.stdout!.on("data", chunk => { if (String(chunk).includes("ready")) resolve(); });
-			child.once("error", reject);
-			child.once("exit", () => reject(new Error("the mutex holder exited early")));
-		});
-		return child;
-	}
-
 	it("sees the mutex while its holder lives and its absence afterwards, without ever taking it", async () => {
 		const owners = "C:\\omp-desk-lease-test\\run\\session-owners";
 		const name = sessionLeaseMutexName(randomUUID(), owners)!;
 		const other = sessionLeaseMutexName(randomUUID(), owners)!;
-		const bytes = await readFile(HELPER);
-		const staged = { path: HELPER, sha256: createHash("sha256").update(bytes).digest("hex") };
-		const probe = powershellLeaseProbe({ helper: async () => staged });
+		const native = await loadWin32Native(await installedAddonAsset());
+		const probe = nativeLeaseProbe({ native: async () => native });
 		assert.deepEqual([...((await probe([name, other])) ?? [])], [[name, "absent"], [other, "absent"]]);
-		const child = await holder(name);
+		const child = await holdMutex(name);
 		try {
 			assert.deepEqual([...((await probe([name, other])) ?? [])], [[name, "held"], [other, "absent"]]);
 			// Probing again changes nothing: a probe never becomes the owner or releases the holder's claim.
 			assert.deepEqual([...((await probe([name])) ?? [])], [[name, "held"]]);
 		} finally {
-			const exited = new Promise<void>(resolve => child.once("exit", () => resolve()));
-			child.stdin!.end("\n");
-			await exited;
+			await releaseMutex(child);
 		}
 		assert.deepEqual([...((await probe([name])) ?? [])], [[name, "absent"]]);
 	});

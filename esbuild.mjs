@@ -21,6 +21,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import process from "node:process";
 import { mermaidBuildOptions, mermaidPreviewBuildOptions } from "./scripts/mermaid-bundle.mjs";
+import { ensureKoffiAddon, nativeTarget } from "./scripts/native-assets.mjs";
 
 const watch = process.argv.includes("--watch");
 /** Build only the broker tree: useful while working on the PTY surface alone. */
@@ -199,7 +200,7 @@ const shared = {
  * host control refuses visibly when staging finds no helper.
  */
 async function copyControlHelper() {
-  for (const name of ["verified-pipe.ps1", "session-lease-probe.ps1"]) {
+  for (const name of ["verified-pipe.ps1"]) {
     const source = path.join("src", "host", name);
     try {
       await fs.access(source);
@@ -211,6 +212,24 @@ async function copyControlHelper() {
     await fs.copyFile(source, path.join("out", name));
     console.log(`copied helper -> out/${name}`);
   }
+}
+
+/**
+ * Ship koffi's prebuilt `koffi.node` as `out/native/koffi.node` (ADR-0076).
+ *
+ * One file per build: the architecture of `OMP_DESK_TARGET`, else of this machine, so a
+ * platform-specific VSIX never carries another architecture's binary. The extension stages it
+ * like every other file it loads (`src/host/runtime-assets.ts`). `ensureKoffiAddon` refuses a
+ * file that is not the pinned bytes or is built for another architecture, and never builds
+ * koffi from source.
+ */
+async function copyNativeAddon() {
+  const target = nativeTarget();
+  const source = await ensureKoffiAddon(target, process.cwd());
+  const destination = path.join("out", "native", "koffi.node");
+  await fs.mkdir(path.dirname(destination), { recursive: true });
+  await fs.copyFile(source, destination);
+  console.log(`copied native addon (${target}) -> ${destination.split(path.sep).join("/")}`);
 }
 
 /** File names of `node-pty` that the staged broker tree needs at run time. */
@@ -333,7 +352,7 @@ async function main() {
   if (watch) {
     const contexts = await Promise.all(selected.map(({ options }) => esbuild.context({ ...shared, ...options })));
     await Promise.all(contexts.map(context => context.watch()));
-    if (!ptyOnly) { await copyControlHelper(); await copyCodicons(); }
+    if (!ptyOnly) { await copyControlHelper(); await copyNativeAddon(); await copyCodicons(); }
     await copyPtyRuntime();
     console.log(`watching ${selected.length} build targets`);
     return;
@@ -343,7 +362,7 @@ async function main() {
     if (result.metafile) assertBundleBoundary(name, Object.keys(result.metafile.inputs));
     console.log(`built ${name} -> ${options.outfile}`);
   }
-  if (!ptyOnly) { await copyControlHelper(); await copyCodicons(); }
+  if (!ptyOnly) { await copyControlHelper(); await copyNativeAddon(); await copyCodicons(); }
   await copyPtyRuntime();
 }
 

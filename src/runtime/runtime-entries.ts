@@ -45,7 +45,7 @@ export interface RuntimeStagingDeps {
 		readonly controlHelper: string;
 		readonly renameHelper: string;
 		readonly runtimeProbe: string;
-		readonly leaseHelper: string;
+		readonly nativeAddon: string;
 	};
 	/**
 	 * Why the packaged entries must not be staged right now (they are no longer the files this host
@@ -61,12 +61,12 @@ export interface RuntimeStaging {
 	/** The verified copies of this window's runtime entries. */
 	entries(): Promise<StagedRuntimeEntries>;
 	/**
-	 * The staged copy of the session-lease probe helper (ADR-0046), verified before it is handed out.
+	 * The staged copy of the native module (`koffi.node`, ADR-0076), verified before it is handed out.
 	 *
-	 * Staged on its own, not with {@link RuntimeStaging.entries}: the probe is optional, so a missing
-	 * or changed helper only turns the probe off and must never stop a host from launching.
+	 * Staged on its own, not with {@link RuntimeStaging.entries}: a module that cannot be staged only makes
+	 * the Windows readings it serves unknown and must never stop a host from launching.
 	 */
-	leaseHelper(): Promise<StagedRuntimeAsset | null>;
+	native(): Promise<StagedRuntimeAsset | null>;
 }
 
 /** Do the copies still hold the bytes their digests name? */
@@ -79,7 +79,7 @@ async function stagedEntriesIntact(entries: StagedRuntimeEntries): Promise<boole
 
 export function createRuntimeStaging(deps: RuntimeStagingDeps): RuntimeStaging {
 	let stagedEntries: Promise<StagedRuntimeEntries> | null = null;
-	let stagedLeaseHelper: Promise<StagedRuntimeAsset | null> | null = null;
+	let stagedNative: Promise<StagedRuntimeAsset | null> | null = null;
 	return {
 		async entries() {
 			const cached = stagedEntries;
@@ -108,19 +108,19 @@ export function createRuntimeStaging(deps: RuntimeStagingDeps): RuntimeStaging {
 			});
 			return stagedEntries;
 		},
-		async leaseHelper() {
-			if (stagedLeaseHelper !== null) {
-				const cached = await stagedLeaseHelper;
+		async native() {
+			if (stagedNative !== null) {
+				const cached = await stagedNative;
 				if (cached !== null && (await verifyStagedRuntimeAsset(cached))) return cached;
 			}
-			stagedLeaseHelper = stageRuntimeAssets({
+			stagedNative = stageRuntimeAssets({
 				storageDir: deps.storageDir(),
-				sourcePaths: [deps.packagedPaths().leaseHelper],
-			}).then(([helper]) => helper ?? null).catch((error: unknown) => {
-				deps.log.warn(`session lease helper could not be staged: ${error instanceof Error ? error.message : String(error)}`);
+				sourcePaths: [deps.packagedPaths().nativeAddon],
+			}).then(([addon]) => addon ?? null).catch((error: unknown) => {
+				deps.log.warn(`the native module could not be staged: ${error instanceof Error ? error.message : String(error)}`);
 				return null;
 			});
-			return await stagedLeaseHelper;
+			return await stagedNative;
 		},
 	};
 }

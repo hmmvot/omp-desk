@@ -29,12 +29,9 @@
  * Holding a lease is "the named object exists": the native lock creates the mutex without
  * taking initial ownership and treats `ERROR_ALREADY_EXISTS` as "held by someone else".
  */
-import { spawn, type ChildProcess } from "node:child_process";
 import * as path from "node:path";
 import { silentLogger, type Logger } from "../shared/logger.ts";
-import { verifyStagedRuntimeAsset, type StagedRuntimeAsset } from "./runtime-assets.ts";
-import { windowsPowerShellEnvironment, windowsPowerShellExecutable } from "./windows-powershell.ts";
-import { startToolSpawnTrace, type ToolSpawnOutcome } from "./tool-spawn-trace.ts";
+import type { Win32Native } from "./win32-native.ts";
 
 /** First 64-bit seed OMP's native lock mixes into the path hash. The bytes spell `OMP-LOCK`. */
 const SEED_FIRST = 0x4f4d502d4c4f434bn;
@@ -44,7 +41,7 @@ const SEED_SECOND = 0x50492d46494c454cn;
 /** Prefix of every named mutex the native lock creates on Windows. */
 export const LEASE_MUTEX_PREFIX = "Global\\omp-file-lock-";
 
-/** What a mutex name must look like before it is handed to the helper. */
+/** What a mutex name must look like before it is opened. */
 const LEASE_MUTEX_NAME = /^Global\\omp-file-lock-[0-9a-f]{32}$/;
 
 /** A session id OMP uses verbatim as the lease's file name. */
@@ -158,119 +155,35 @@ export type LeaseState = "held" | "absent";
  */
 export type LeaseProbe = (mutexNames: readonly string[]) => Promise<ReadonlyMap<string, LeaseState> | null>;
 
-/** Bound for one helper run: PowerShell's own start plus a handful of `OpenMutex` calls. An open waits for it at most. */
-export const LEASE_PROBE_TIMEOUT_MS = 5_000;
-
-const HELPER_LINE = /^!LEASE (held|absent|error) (Global\\omp-file-lock-[0-9a-f]{32})$/;
+/** The native module, once its load has settled; `null` when it is unavailable ({@link win32Native}). */
+export type NativeSource = () => Promise<Win32Native | null>;
 
 /**
- * Read a helper's stdout. `!LEASE <verdict> <name>` per requested name, then `!DONE <count>`.
- * Anything else, a repeated or unrequested name, or a count that does not match is a failed
- * probe: no partial answer is trusted.
+ * The production probe: each name is opened with `SYNCHRONIZE` only, in process (ADR-0076).
+ * A name that could not be opened for a reason other than "absent" or "held" is left out of the
+ * answer. An unavailable native module resolves the whole batch to `null`; nothing is retried here.
  */
-export function parseLeaseReport(output: string, requested: readonly string[]): ReadonlyMap<string, LeaseState> | null {
-	const wanted = new Set(requested);
-	const seen = new Map<string, LeaseState | "error">();
-	let done = false;
-	for (const raw of output.split(/\r?\n/)) {
-		const line = raw.trim();
-		if (line === "") continue;
-		if (done) return null;
-		const verdict = HELPER_LINE.exec(line);
-		if (verdict !== null) {
-			const name = verdict[2]!;
-			if (!wanted.has(name) || seen.has(name)) return null;
-			seen.set(name, verdict[1] as LeaseState | "error");
-			continue;
-		}
-		const finished = /^!DONE (\d+)$/.exec(line);
-		if (finished === null || Number(finished[1]) !== wanted.size) return null;
-		done = true;
-	}
-	if (!done || seen.size !== wanted.size) return null;
-	const states = new Map<string, LeaseState>();
-	for (const [name, verdict] of seen) if (verdict !== "error") states.set(name, verdict);
-	return states;
-}
-
-/** How the helper process is created. Production leaves this out. */
-export interface LeaseProbeLaunchOptions {
-	readonly helper: () => Promise<StagedRuntimeAsset | null>;
-	readonly timeoutMs?: number;
-	/** Replaces the PowerShell start; a test supplies a child that speaks the same line protocol. */
-	readonly launch?: (helper: StagedRuntimeAsset) => ChildProcess;
-	readonly log?: Logger;
-}
-
-/**
- * The production probe: the staged PowerShell helper opens each name with `SYNCHRONIZE` only.
- * Any failure resolves to `null` and one log line; nothing is retried.
- */
-export function powershellLeaseProbe(options: LeaseProbeLaunchOptions): LeaseProbe {
+export function nativeLeaseProbe(options: { readonly native: NativeSource; readonly log?: Logger }): LeaseProbe {
 	const log = options.log ?? silentLogger;
 	return async mutexNames => {
 		if (mutexNames.length === 0) return new Map();
 		if (!mutexNames.every(name => LEASE_MUTEX_NAME.test(name))) return null;
-		let helper: StagedRuntimeAsset | null;
+		const native = await options.native();
+		if (native === null) {
+			log.warn("session lease probe skipped: the native module is unavailable");
+			return null;
+		}
+		const answer = new Map<string, LeaseState>();
 		try {
-			helper = await options.helper();
-		} catch (error) {
-			log.warn(`session lease probe skipped: the helper is unavailable (${error instanceof Error ? error.message : String(error)})`);
-			return null;
-		}
-		// A path that was correct when it was staged says nothing about the bytes there now.
-		if (helper === null || !(await verifyStagedRuntimeAsset(helper))) {
-			log.warn("session lease probe skipped: the staged helper is missing or changed");
-			return null;
-		}
-		const requested = [...new Set(mutexNames)];
-		return await new Promise<ReadonlyMap<string, LeaseState> | null>(resolve => {
-			const end = startToolSpawnTrace("powershell", `session lease probe (${requested.length} ${requested.length === 1 ? "name" : "names"})`);
-			let child: ChildProcess;
-			try {
-				child =
-					options.launch?.(helper!) ??
-					spawn(windowsPowerShellExecutable(), ["-NoLogo", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", helper!.path], {
-						windowsHide: true,
-						stdio: ["pipe", "pipe", "pipe"],
-						env: windowsPowerShellEnvironment(),
-					});
-			} catch (error) {
-				end(null, "start-failed");
-				log.warn(`session lease probe could not start: ${error instanceof Error ? error.message : String(error)}`);
-				resolve(null);
-				return;
+			for (const name of new Set(mutexNames)) {
+				const state = native.mutexState(name);
+				if (state !== "error") answer.set(name, state);
 			}
-			let stdout = "";
-			let settled = false;
-			const finish = (value: ReadonlyMap<string, LeaseState> | null, note?: string, outcome?: ToolSpawnOutcome): void => {
-				if (settled) return;
-				settled = true;
-				clearTimeout(timer);
-				end(
-					child.pid,
-					outcome ?? (value !== null ? "ok" : note === "timed out" ? "timeout" : note === "unexpectedly long output" ? "output-too-large" : "failed"),
-				);
-				if (note !== undefined) log.warn(`session lease probe failed: ${note}`);
-				if (value === null) child.kill();
-				resolve(value);
-			};
-			const timer = setTimeout(() => finish(null, "timed out"), options.timeoutMs ?? LEASE_PROBE_TIMEOUT_MS);
-			child.stdout?.setEncoding("utf8");
-			child.stdout?.on("data", (chunk: string) => {
-				stdout += chunk;
-				if (stdout.length > 64 * 1024) finish(null, "unexpectedly long output");
-			});
-			child.stderr?.resume();
-			child.on("error", error => finish(null, error.message, "start-failed"));
-			child.on("close", code => {
-				if (settled) return;
-				const report = parseLeaseReport(stdout, requested);
-				finish(report, report === null ? `exit code ${code ?? "none"} with an unreadable report` : undefined);
-			});
-			child.stdin?.on("error", () => {});
-			child.stdin?.end(`${requested.join("\n")}\n`);
-		});
+		} catch (error) {
+			log.warn(`session lease probe failed: ${error instanceof Error ? error.message : String(error)}`);
+			return null;
+		}
+		return answer;
 	};
 }
 
@@ -278,10 +191,9 @@ export function powershellLeaseProbe(options: LeaseProbeLaunchOptions): LeasePro
 export const LEASE_VERDICT_TTL_MS = 2_000;
 
 /**
- * How long the first failed probe (a timeout, no PowerShell, an unreadable report) answers "unknown" before another is
+ * How long the first failed probe (an unavailable native module) answers "unknown" before another is
  * started; further failures in a row hold longer ({@link leaseFailureBackoffMs}). Without it every observation that found
- * the failed verdict stale started the next 5 s attempt at once, up to three in a row, so a busy machine ran one
- * PowerShell after another and took longer to answer each of them.
+ * the failed verdict stale probed again, and logged the same unavailable module each time.
  */
 export const LEASE_FAILURE_BACKOFF_MS = 15_000;
 
@@ -291,14 +203,14 @@ export const LEASE_FAILURE_BACKOFF_MAX_MS = 300_000;
 /**
  * How long the verdict of the `consecutiveFailures`-th failed probe in a row holds: {@link LEASE_FAILURE_BACKOFF_MS} after
  * the first, doubling with each further failure up to {@link LEASE_FAILURE_BACKOFF_MAX_MS}. A probe that times out on a
- * saturated machine takes its whole bound and is itself load; repeating it at a fixed interval kept a doomed PowerShell
- * start running every half minute in every window for as long as the machine stayed busy.
+ * saturated machine took its whole bound and was itself load; the native probe cannot hang, but a module that stays
+ * unavailable is not worth asking again at a fixed interval either.
  */
 export function leaseFailureBackoffMs(consecutiveFailures: number): number {
 	return Math.min(LEASE_FAILURE_BACKOFF_MS * 2 ** Math.max(0, consecutiveFailures - 1), LEASE_FAILURE_BACKOFF_MAX_MS);
 }
 
-/** Most session ids probed in one helper run, so one pass stays a single short PowerShell call. */
+/** Most session ids probed in one pass: 200 `OpenMutexW` calls are well under a millisecond. */
 const MAX_BATCH = 200;
 
 export interface ExternalLeaseObserverOptions {
@@ -330,7 +242,7 @@ interface Verdict {
 /**
  * Answers "does a live OMP hold this session file's lease?" for many rows at a time.
  *
- * A burst of row observations is served by one helper run: the first request that finds no
+ * A burst of row observations is served by one probe pass: the first request that finds no
  * fresh verdict probes every file the view shows, and the others reuse that answer for a
  * short time. `fresh` asks for a verdict probed after the call, which a click or an open uses
  * before it decides anything.

@@ -122,6 +122,24 @@ binaries are redistributed by `node-pty` under its own MIT terms:
                                 (`node-pty/deps/winpty/LICENSE`)
 
 ================================================================================
+koffi (shipped as one prebuilt file: out/native/koffi.node)
+================================================================================
+
+Project:      koffi
+Repository:   https://github.com/Koromix/koffi
+Version:      3.3.3 (exact)
+License:      MIT
+Copyright (C) 2026  Niels Martignène <niels.martignene@protonmail.com>
+
+Each VSIX ships the one `koffi.node` built for its architecture (win32-x64 or
+win32-arm64), taken unmodified from koffi's own platform package and pinned by
+SHA-256 in `scripts/native-assets.mjs`. Only the prebuilt Node-API addon is
+shipped; koffi's JavaScript is not. Desk loads it with `process.dlopen` from a
+staged, hashed copy and calls `kernel32` and `advapi32` through it
+(`src/host/win32-native.ts`, ADR-0076). The MIT permission text below applies to
+it unchanged.
+
+================================================================================
 xterm.js (bundled and shipped as a package)
 ================================================================================
 

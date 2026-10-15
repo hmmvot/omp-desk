@@ -111,7 +111,8 @@ import { PersistFailureReporter } from "./host/persist-report";
 import { holderSeemsAlive } from "./host/holder-liveness";
 import { claimFileNameFor, startClaimWatch } from "./host/claim-watch";
 import { WindowRegistry } from "./host/window-registry";
-import { ExternalLeaseObserver, ompSessionOwnersDir, powershellLeaseProbe } from "./host/omp-session-lease";
+import { ExternalLeaseObserver, nativeLeaseProbe, ompSessionOwnersDir } from "./host/omp-session-lease";
+import { startWin32Native, win32Native } from "./host/win32-native";
 import { canonicalFolderKey, folderHistoryDeletionSubject, inspectSessionFile, scanFolderHistory } from "./host/folder-history";
 import type { FolderHistoryCandidate, FolderHistoryIndexedEntry, FolderHistoryScan } from "./host/folder-history";
 import { findFileMentions } from "./host/file-mentions";
@@ -373,8 +374,8 @@ const PANEL_VIEW_TYPE = "omp.session";
 const HOST_CONTROL_MODULE = "out/omp-host-control.mjs";
 /** Packaged peer-verified pipe helper, run per control connection. */
 const CONTROL_HELPER = "out/verified-pipe.ps1";
-/** Packaged helper that opens OMP's session-lease mutex without taking it (ADR-0046). */
-const LEASE_HELPER = "out/session-lease-probe.ps1";
+/** Packaged koffi addon the Windows checks run through, staged before it is loaded (ADR-0076). */
+const NATIVE_ADDON = "out/native/koffi.node";
 /**
  * The Bun helper that renames a *stopped* session's stored title through the
  * installed agent's own storage code. It is a plain packaged ESM file: it is not
@@ -1345,7 +1346,7 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
         controlHelper: context.asAbsolutePath(CONTROL_HELPER),
         renameHelper: context.asAbsolutePath(RENAME_HELPER_SCRIPT),
         runtimeProbe: context.asAbsolutePath(RUNTIME_PROBE_MODULE),
-        leaseHelper: context.asAbsolutePath(LEASE_HELPER),
+        nativeAddon: context.asAbsolutePath(NATIVE_ADDON),
       }),
       refusal: () => (packageChangedOnDisk() ? UPDATED_ON_DISK_ERROR : null),
       configureControlHelper: setControlHelperScript,
@@ -1470,6 +1471,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
   // The host's one thread is shared with every extension; a stall of 500 ms or more is logged with the Desk operations that overlapped it.
   context.subscriptions.push({ dispose: startLoopLagMonitor(log) });
+  // The native module (ADR-0076) answers every Windows question below in process. Its one load starts here, before the
+  // first reader asks, and every reader awaits it: a reader that ran ahead of an unfinished load would file this window's
+  // claims without a creation time for good.
+  if (process.platform === "win32") void startWin32Native(() => s.staging.native(), log);
   // This host's start time is a PowerShell command, hundreds of milliseconds to seconds on a busy machine. It runs beside
   // the rest of the setup; only the claims the index writes wait for it (ADR-0035), so the Sessions view, the commands
   // and the editors appear without it. A synchronous read froze every extension in the host; an awaited one held them back.
@@ -1807,7 +1812,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // extension owns through the session lease OMP itself takes (ADR-0046). The probe only opens a
   // named mutex and closes it, and a failed probe leaves every row exactly as it was.
   s.externalLeases = process.platform !== "win32" ? null : new ExternalLeaseObserver({
-    probe: powershellLeaseProbe({ helper: () => s.staging.leaseHelper(), log }),
+    probe: nativeLeaseProbe({ native: win32Native, log }),
     ownersDir: () => ompSessionOwnersDir({ homeDir: os.homedir(), configDirName: process.env.PI_CONFIG_DIR }),
     readSessionId: async file => (await readSessionFileHeader(file))?.sessionId ?? null,
     knownFiles: () => index.list().flatMap(entry => entry.sessionFile === null ? [] : [entry.sessionFile]),

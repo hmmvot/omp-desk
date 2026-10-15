@@ -31,7 +31,7 @@ after(async () => { await rm(temp, { recursive: true, force: true }); });
 
 async function deps(overrides: Partial<RuntimeStagingDeps> = {}) {
 	const packaged = path.join(temp, `packaged-${Math.random().toString(36).slice(2)}`);
-	const files = { hostControl: "host-control.mjs", controlHelper: "verified-pipe.ps1", renameHelper: "rename.mjs", runtimeProbe: "runtime-probe.mjs", leaseHelper: "lease.ps1" };
+	const files = { hostControl: "host-control.mjs", controlHelper: "verified-pipe.ps1", renameHelper: "rename.mjs", runtimeProbe: "runtime-probe.mjs", nativeAddon: "koffi.node" };
 	await mkdir(packaged, { recursive: true });
 	for (const name of Object.values(files)) await writeFile(path.join(packaged, name), `content of ${name}`);
 	const configured: string[] = [];
@@ -40,7 +40,7 @@ async function deps(overrides: Partial<RuntimeStagingDeps> = {}) {
 		storageDir: () => path.join(packaged, "storage"),
 		packagedPaths: () => ({
 			hostControl: path.join(packaged, files.hostControl), controlHelper: path.join(packaged, files.controlHelper),
-			renameHelper: path.join(packaged, files.renameHelper), runtimeProbe: path.join(packaged, files.runtimeProbe), leaseHelper: path.join(packaged, files.leaseHelper),
+			renameHelper: path.join(packaged, files.renameHelper), runtimeProbe: path.join(packaged, files.runtimeProbe), nativeAddon: path.join(packaged, files.nativeAddon),
 		}),
 		refusal: () => null,
 		configureControlHelper: file => { configured.push(file); },
@@ -60,12 +60,12 @@ describe("runtime staging", () => {
 		assert.deepEqual(f.configured, [], "nothing was staged, so the control helper was not configured");
 	});
 
-	it("reports a lease helper that cannot be staged as no helper and logs why, once per attempt", async () => {
-		const f = await deps({ packagedPaths: () => ({ hostControl: "", controlHelper: "", renameHelper: "", runtimeProbe: "", leaseHelper: path.join(temp, "missing.ps1") }) });
+	it("reports a native module that cannot be staged as no module and logs why, once per attempt", async () => {
+		const f = await deps({ packagedPaths: () => ({ hostControl: "", controlHelper: "", renameHelper: "", runtimeProbe: "", nativeAddon: path.join(temp, "missing.node") }) });
 		const staging = createRuntimeStaging(f.deps);
-		assert.equal(await staging.leaseHelper(), null);
+		assert.equal(await staging.native(), null);
 		assert.equal(f.logs.length, 1);
-		assert.match(f.logs[0]?.message ?? "", /session lease helper could not be staged/);
+		assert.match(f.logs[0]?.message ?? "", /native module could not be staged/);
 		assert.equal(f.logs[0]?.level, "warn");
 	});
 });

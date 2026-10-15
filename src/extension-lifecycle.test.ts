@@ -330,7 +330,7 @@ export const harness = {
     resetDesktopXmls();
     fixtureVscode.window.tabGroups.activeTabGroup.activeTab = null;
     w.reconciler = { reconcile: async () => ({ kind: 'free', evidence: [] }) };
-    w.staging = { entries: async () => ({ hostControl: { path: 'fixture-host-control.mjs' }, renameHelper: { path: 'fixture-rename-session.mjs' }, runtimeProbe: { path: 'fixture-runtime-probe.mjs' } }), leaseHelper: async () => null };
+    w.staging = { entries: async () => ({ hostControl: { path: 'fixture-host-control.mjs' }, renameHelper: { path: 'fixture-rename-session.mjs' }, runtimeProbe: { path: 'fixture-runtime-probe.mjs' } }), native: async () => null };
     w.ptyGate = { client: async () => ({}) };
     w.ptyGate.attachClient = async () => ({ fixture: true });
     w.ptyGate.invalidate = () => {};
