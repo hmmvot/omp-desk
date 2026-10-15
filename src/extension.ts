@@ -73,6 +73,7 @@ import type { KillWindow } from "./runtime/local-kill";
 import type { NativeWatchWindow } from "./runtime/local-native-watch";
 import type { RuntimeRecord } from "./runtime/runtime-record";
 import { createRuntimeStaging } from "./runtime/runtime-entries";
+import { timedStep } from "./host/session-restore-trace";
 import { runNativeStage } from "./runtime/native-stage-client";
 import type { RuntimeStaging } from "./runtime/runtime-entries";
 import { LocalSessionRuntime } from "./runtime/local-runtime";
@@ -1651,10 +1652,10 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     // Unreadable provenance proves no ownership; the user's actions remain available.
     brokerProvenance: request => windowState().sessionRuntime.brokerProvenance(request.entry.tabId),
     // Proves one rpc row's recorded child from a read-only broker attachment.
-    probeRpc: async (slot, expected, kind) => {
-      const client = await attachBrokerClient();
+    probeRpc: async (slot, expected, kind, steps) => {
+      const client = await timedStep(steps, "broker client", () => attachBrokerClient());
       if (client === null) return { kind: "unreachable", reason: "the PTY broker is not available in this window" };
-      return await probeRpcHost({ client, slot, expected, ...(kind === undefined ? {} : { kind }) });
+      return await probeRpcHost({ client, slot, expected, ...(kind === undefined ? {} : { kind }), ...(steps === undefined ? {} : { steps }) });
     },
     // A slot's running child is the only writer an unidentified attempt can still be caught
     // by, because it recorded no process id to compare.

@@ -18,7 +18,7 @@ import * as path from "node:path";
 import type { Logger } from "../shared/logger.ts";
 import { FILE_OPERATION_BACKOFF_MS, retryFileOperation } from "./atomic-file.ts";
 import { IdentityTurns, RESTORE_CONCURRENCY, RestoreStepTimer, mapBounded } from "./session-restore-trace.ts";
-import type { IdentityTurn, OmpHostStepTimings } from "./session-restore-trace.ts";
+import type { IdentityTurn, OmpHostStepTimings, StepSink } from "./session-restore-trace.ts";
 import {
 	ClaimConflictError,
 	ClaimOwnershipError,
@@ -1702,7 +1702,7 @@ export class SessionIndex {
 				// Reconcile external ownership while the claim is held: only `free`
 				// may start a process, only `attachable` may reconnect to the host
 				// this index recorded, and everything else stays a conflict.
-				const verdict = await this.#timed(trace, "reconcile", () => this.#reconcile(entry, claimBefore, options.reconciler));
+				const verdict = await this.#timed(trace, "reconcile", steps => this.#reconcile(entry, claimBefore, options.reconciler, steps));
 				const classification = classifySessionAvailability({
 					entry: toEntry(entry),
 					fileExists: entry.sessionFile !== null,
@@ -1746,7 +1746,7 @@ export class SessionIndex {
 							return { status: "attached", tabId, sessionFile: entry.sessionFile, detail: classification.detail };
 						}
 						await this.#releaseQuietly(claim);
-						const current = await this.#timed(trace, "reconcile", () => this.#reconcile(entry, null, options.reconciler));
+						const current = await this.#timed(trace, "reconcile", steps => this.#reconcile(entry, null, options.reconciler, steps));
 						const stillOwned = current.kind === "live" || current.kind === "attachable";
 						const detail = `Reattaching failed: ${attached.reason}`;
 						await this.#touch(entry, stillOwned ? "live" : "saved", detail);
@@ -1890,7 +1890,7 @@ export class SessionIndex {
 		const observed = target === null ? { ok: true as const, claim: null } : await this.#readClaim(target);
 		const claim = observed.ok ? observed.claim : null;
 		const verdict = observed.ok
-			? await this.#timed(trace, "reconcile", () => this.#reconcile(entry, claim, reconciler))
+			? await this.#timed(trace, "reconcile", steps => this.#reconcile(entry, claim, reconciler, steps))
 			: { kind: "unknown" as const, detail: observed.detail };
 		const classification = classifySessionAvailability({
 			entry: toEntry(entry),
@@ -1973,7 +1973,7 @@ export class SessionIndex {
 			return { status: "failed", tabId, kind: "ambiguous-cwd", detail: cwdRefusal };
 		}
 		const observed = await this.#readClaim(identity);
-		const verdict = await this.#timed(trace, "reconcile", () => this.#reconcile(entry, observed.ok ? observed.claim : null, options.reconciler));
+		const verdict = await this.#timed(trace, "reconcile", steps => this.#reconcile(entry, observed.ok ? observed.claim : null, options.reconciler, steps));
 		const classification = classifySessionAvailability({
 			entry: toEntry(entry),
 			fileExists: false,
@@ -2032,7 +2032,7 @@ export class SessionIndex {
 		const attached = await this.#attach(entry, claim, options.launcher, recorded, attachPin, trace);
 		if (attached.kind !== "attached") {
 			await this.#releaseQuietly(claim);
-			const current = await this.#timed(trace, "reconcile", () => this.#reconcile(entry, null, options.reconciler));
+			const current = await this.#timed(trace, "reconcile", steps => this.#reconcile(entry, null, options.reconciler, steps));
 			const stillOwned = current.kind === "live" || current.kind === "attachable";
 			const detail = `Reattaching failed: ${attached.reason}`;
 			await this.#touch(entry, stillOwned ? "live" : "draft", detail);
@@ -2815,8 +2815,8 @@ export class SessionIndex {
 	}
 
 	/** Run one launcher-or-reconcile call, timing it when the row is part of a restore pass. */
-	#timed<T>(trace: RestoreTrace | undefined, step: "reconcile" | "attach" | "launch", work: () => Promise<T>): Promise<T> {
-		return trace === undefined ? work() : trace.timer.measure(step, work);
+	#timed<T>(trace: RestoreTrace | undefined, step: "reconcile" | "attach" | "launch", work: (steps: StepSink | undefined) => Promise<T>): Promise<T> {
+		return trace === undefined ? work(undefined) : trace.timer.measure(step, () => work(step === "reconcile" ? trace.timer.sink("reconcile") : undefined));
 	}
 
 	async #launch(
@@ -2893,6 +2893,7 @@ export class SessionIndex {
 		entry: MutableEntry,
 		claim: ObservedClaim | null,
 		reconciler: OwnerReconciler,
+		steps?: StepSink,
 	): Promise<OwnerVerdict> {
 		if (claim !== null && claim.holderId !== this.#claimHolder.id && await claimHolderMayBeAlive(claim)) {
 			return { kind: "live", detail: "Another live window of this extension holds this session." };
@@ -2905,6 +2906,7 @@ export class SessionIndex {
 				ownerGeneration: entry.ownership?.ownerGeneration ?? "",
 				claim,
 				host: entry.host === null ? null : { ...entry.host },
+				...(steps === undefined ? {} : { steps }),
 			});
 		} catch (error) {
 			return { kind: "unknown", detail: `Ownership reconciliation failed: ${describeError(error)}` };

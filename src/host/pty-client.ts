@@ -104,6 +104,7 @@ import {
 } from "./chat-broker-runtime.ts";
 import { verifyExecutableTrust, type ExecutableTrustProbe } from "./executable-trust.ts";
 import { PtyRuntimeProof } from "./pty-runtime-proof.ts";
+import { timedStep, type StepSink } from "./session-restore-trace.ts";
 import { folderShellLaunchSpec, type PtyFolderShellRequest } from "./pty-shell.ts";
 import { RpcHandle } from "./rpc-handle.ts";
 
@@ -264,6 +265,8 @@ export type RpcAttachOutcome = BrokerAttachOutcome<RpcHandle>;
  */
 export interface AttachConcurrency<Handle> {
 	readonly whileConfirming?: (handle: Handle) => void;
+	/** Where the pieces of this attach are timed for the restore line; diagnostic only. */
+	readonly steps?: StepSink;
 }
 
 export interface PtyAttachResult {
@@ -531,14 +534,14 @@ export class PtyBrokerClient {
 		if (record.kind === "managed-rpc") {
 			return { state: "unavailable", reason: "the record is a managed-rpc slot; it is attached with attachRpcRecord", handle: null };
 		}
-		const opened = await this.connectRecord(record);
+		const opened = await this.connectRecord(record, options.steps);
 		if (!opened.ok) return { state: "unavailable", reason: opened.reason, handle: null };
 		const handle = new PtyHandle(opened.connection, record, options.adopted === true, opened.buildMatches);
 		let identity: BrokerIdentityProof;
 		try {
-			await handle.refreshStatus();
+			await timedStep(options.steps, "status", () => handle.refreshStatus());
 			options.whileConfirming?.(handle);
-			const confirmed = await this.confirmBrokerIdentity(record, handle.statusValue);
+			const confirmed = await timedStep(options.steps, "broker confirm", () => this.confirmBrokerIdentity(record, handle.statusValue));
 			if (!confirmed.ok) {
 				handle.disconnect();
 				return { state: "unavailable", reason: confirmed.reason, handle: null };
@@ -578,7 +581,7 @@ export class PtyBrokerClient {
 		if (record.kind !== "managed-rpc") {
 			return { state: "unavailable", reason: "the record is not a managed-rpc slot", handle: null };
 		}
-		const opened = await this.connectRecord(record);
+		const opened = await this.connectRecord(record, options.steps);
 		if (!opened.ok) return { state: "unavailable", reason: opened.reason, handle: null };
 		const reconnect = async (): Promise<PtyClientSideConnection> => {
 			const again = await this.connectRecord(record);
@@ -597,10 +600,10 @@ export class PtyBrokerClient {
 		const handle = new RpcHandle(opened.connection, record, options.adopted === true, opened.buildMatches, reconnect);
 		let identity: BrokerIdentityProof;
 		try {
-			await handle.refreshStatus();
-			await handle.awaitChildIdentity(CHILD_IDENTITY_WAIT_MS);
+			await timedStep(options.steps, "status", () => handle.refreshStatus());
+			await timedStep(options.steps, "child identity", () => handle.awaitChildIdentity(CHILD_IDENTITY_WAIT_MS));
 			options.whileConfirming?.(handle);
-			const confirmed = await this.confirmBrokerIdentity(record, handle.statusValue);
+			const confirmed = await timedStep(options.steps, "broker confirm", () => this.confirmBrokerIdentity(record, handle.statusValue));
 			if (!confirmed.ok) {
 				handle.disconnect();
 				return { state: "unavailable", reason: confirmed.reason, handle: null };
@@ -632,6 +635,7 @@ export class PtyBrokerClient {
 	 */
 	private async connectRecord(
 		record: PtyBrokerRecord,
+		steps?: StepSink,
 	): Promise<
 		| { readonly ok: true; readonly connection: PtyClientSideConnection; readonly buildMatches: boolean }
 		| { readonly ok: false; readonly reason: string }
@@ -642,7 +646,10 @@ export class PtyBrokerClient {
 				reason: `the recorded broker speaks protocol version ${record.protocolVersion}; this build speaks ${PTY_PROTOCOL_VERSION}`,
 			};
 		}
-		const ready = await this.attachIdentity();
+		// The tree digest and the state access are shared work: the first attach of a client starts each, every later
+		// one (and the second tab of a restore) waits for it, and the line names which it did.
+		const hashing = this.identityPromise === null;
+		const ready = await timedStep(steps, hashing ? "tree digest" : "tree digest (shared)", () => this.attachIdentity());
 		if (!ready.ready || ready.treeDigest === null) {
 			return { ok: false, reason: ready.reason ?? "this build's broker runtime could not be identified" };
 		}
@@ -654,7 +661,8 @@ export class PtyBrokerClient {
 				reason: `the recorded broker runs runtime version ${record.runtimeVersion}; this build runs ${ready.runtimeVersion}`,
 			};
 		}
-		const access = await this.stateAccess();
+		const checking = this.accessPromise === null;
+		const access = await timedStep(steps, checking ? "state access" : "state access (shared)", () => this.stateAccess());
 		if (!access.ok) {
 			return { ok: false, reason: `the broker state directory is not usable: ${access.reason ?? "unknown"}` };
 		}
@@ -670,12 +678,12 @@ export class PtyBrokerClient {
 		}
 		let connection: PtyClientSideConnection;
 		try {
-			connection = await connectPtyBroker({
+			connection = await timedStep(steps, "connect", () => connectPtyBroker({
 				token: record.token,
 				brokerId: record.brokerId,
 				generation: record.generation,
 				port: record.port,
-			});
+			}));
 		} catch (error) {
 			return { ok: false, reason: messageOf(error) };
 		}

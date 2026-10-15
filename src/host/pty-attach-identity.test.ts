@@ -319,6 +319,21 @@ describe("re-adopting a broker that attests its own identity", { skip: WINDOWS_O
 		outcome.runtime?.handle.disconnect();
 	});
 
+	it("times the pieces of a reconcile, and names the shared work a second reconcile waited for", async () => {
+		const f = await fixture({ attestation: ATTESTS_PIPE_CHILD });
+		const expected = { slot: f.slot, brokerId: f.record.brokerId, brokerGeneration: f.record.generation, brokerPid: BROKER_PID, brokerCreationTime: BROKER_CREATION, childPid: CHILD_PID, childCreationTime: CHILD_CREATION };
+		const timed = async (): Promise<string[]> => {
+			const names: string[] = [];
+			const steps = { measure: async <T>(name: string, work: () => Promise<T>): Promise<T> => { names.push(name); return await work(); } };
+			assert.equal((await modules.probeRpcHost({ client: f.client, slot: f.slot, expected, steps })).kind, "attachable");
+			return names;
+		};
+		const first = await timed();
+		assert.deepEqual(first, ["record", "tree digest", "state access", "connect", "status", "child identity", "broker confirm", "pin proof"]);
+		const second = await timed();
+		assert.deepEqual(second, ["record", "tree digest (shared)", "state access (shared)", "connect", "status", "child identity", "broker confirm", "pin proof"]);
+	});
+
 	it("refuses a child the broker reports as exited, without a reading to excuse it", async () => {
 		const f = await fixture({ attestation: ATTESTS_PIPE_CHILD });
 		f.broker.state = "exited";

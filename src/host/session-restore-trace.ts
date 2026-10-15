@@ -33,6 +33,19 @@ export async function mapBounded<T, R>(items: readonly T[], limit: number, work:
 /** Milliseconds of the sub-steps an integration measured inside one launcher call; diagnostic only, never a decision input. */
 export type OmpHostStepTimings = Readonly<Record<string, number>>;
 
+/**
+ * Times the named pieces of one step as they run. Passed down into the code a step calls so its log line can say where
+ * the step's time went; it never takes part in a decision, and a caller without one measures nothing.
+ */
+export interface StepSink {
+	measure<T>(name: string, work: () => Promise<T>): Promise<T>;
+}
+
+/** Run `work` under `name` when a sink is given, and as plain `work` otherwise. */
+export function timedStep<T>(steps: StepSink | undefined, name: string, work: () => Promise<T>): Promise<T> {
+	return steps === undefined ? work() : steps.measure(name, work);
+}
+
 /** The named steps of one row's restore, in the order the log line reports them. */
 const STEP_ORDER = ["admission", "reconcile", "attach", "launch", "persist"] as const;
 type RestoreStep = (typeof STEP_ORDER)[number];
@@ -51,6 +64,7 @@ export class RestoreStepTimer {
 	readonly #startedAt: number;
 	readonly #steps = new Map<RestoreStep, number>();
 	readonly #details = new Map<RestoreStep, OmpHostStepTimings>();
+	readonly #sub = new Map<RestoreStep, Record<string, number>>();
 	#mark: number;
 	#measured = false;
 
@@ -81,6 +95,25 @@ export class RestoreStepTimer {
 		if (timings !== undefined) this.#details.set(step, timings);
 	}
 
+	/**
+	 * A sink that adds the time of each named piece of work to `step`'s sub-steps, summed over every call of the row.
+	 * A piece that waited on a promise another caller started names itself as such (`… (shared)`); the sink only records.
+	 */
+	sink(step: "reconcile"): StepSink {
+		return {
+			measure: async (name, work) => {
+				const begin = this.#now();
+				try {
+					return await work();
+				} finally {
+					const sub = this.#sub.get(step) ?? {};
+					sub[name] = (sub[name] ?? 0) + Math.max(0, this.#now() - begin);
+					this.#sub.set(step, sub);
+				}
+			},
+		};
+	}
+
 	/** One compact line, without identifiers; `outcome` is the restore status word. */
 	finish(outcome: string): string {
 		const end = this.#now();
@@ -90,8 +123,9 @@ export class RestoreStepTimer {
 		for (const step of STEP_ORDER) {
 			const ms = this.#steps.get(step);
 			if (ms === undefined) continue;
-			const detail = this.#details.get(step);
-			const inner = detail === undefined ? "" : ` (${Object.entries(detail).map(([name, value]) => `${name} ${Math.round(value)}`).join(", ")})`;
+			const detail = { ...this.#details.get(step), ...this.#sub.get(step) };
+			const entries = Object.entries(detail);
+			const inner = entries.length === 0 ? "" : ` (${entries.map(([name, value]) => `${name} ${Math.round(value)}`).join(", ")})`;
 			parts.push(`${step} ${Math.round(ms)}${inner}`);
 		}
 		return `${outcome} in ${Math.round(end - this.#startedAt)} ms · ${parts.join(" · ")}`;

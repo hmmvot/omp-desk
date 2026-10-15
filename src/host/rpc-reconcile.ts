@@ -24,6 +24,8 @@ import { attestationOf } from "./pty-protocol";
 import type { PtyBrokerRecord, PtyKind, PtyStatusPayload, PtyStopResult } from "./pty-protocol";
 import { isManagedHost } from "./session-model";
 import type { RecordedRpcIdentity } from "./session-model";
+import { timedStep } from "./session-restore-trace";
+import type { StepSink } from "./session-restore-trace";
 import type {
 	AttachPin,
 	OwnerAbsenceEvidence,
@@ -128,7 +130,7 @@ export interface OwnerReconcilePorts {
 	 */
 	brokerProvenance(request: OwnerReconcileRequest): BrokerSlotProvenance;
 	/** Prove one `managed-rpc` row's recorded child from a read-only broker attachment. */
-	probeRpc(slot: string, expected: RecordedRpcIdentity, kind?: "managed-rpc" | "managed-omp"): Promise<RpcProbeResult>;
+	probeRpc(slot: string, expected: RecordedRpcIdentity, kind?: "managed-rpc" | "managed-omp", steps?: StepSink): Promise<RpcProbeResult>;
 	/**
 	 * Whether one slot's broker record still owns a *running* child, read-only.
 	 *
@@ -371,10 +373,11 @@ async function attachRecorded(
 	client: PtyBrokerClient,
 	slot: string,
 	whileConfirming?: (handle: AttachedBrokerHandle) => void,
+	steps?: StepSink,
 ): Promise<LookedUp> {
 	let lookup;
 	try {
-		lookup = await client.readRecord(slot);
+		lookup = await timedStep(steps, "record", () => client.readRecord(slot));
 	} catch {
 		return { kind: "failed", reason: "the broker record for that slot could not be read" };
 	}
@@ -388,7 +391,7 @@ async function attachRecorded(
 	}
 	let outcome;
 	try {
-		const options = whileConfirming === undefined ? { adopted: true } : { adopted: true, whileConfirming };
+		const options = { adopted: true, ...(whileConfirming === undefined ? {} : { whileConfirming }), ...(steps === undefined ? {} : { steps }) };
 		outcome =
 			lookup.record.kind === "managed-rpc"
 				? await client.attachRpcRecord(lookup.record, options)
@@ -429,6 +432,8 @@ export async function probeRpcHost(input: {
 	readonly kind?: "managed-rpc" | "managed-omp";
 	/** Test seam: the kernel reader; defaults to the client's own readings. */
 	readonly readNativeGeneration?: NativeGenerationReader;
+	/** Where the pieces of this proof are timed for the restore line; diagnostic only. */
+	readonly steps?: StepSink;
 }): Promise<RpcProbeResult> {
 	// Concurrent equivalent reads share one in-flight RPC proof so they cannot exhaust the
 	// broker's bounded client slots while each waits for the kernel identity.
@@ -455,7 +460,7 @@ export async function probeRpcHost(input: {
 			recorded.brokerCreationTime === expected.brokerCreationTime &&
 			recorded.childPid === expected.childPid &&
 			recorded.childCreationTime === expected.childCreationTime
-		) return await flight.promise;
+		) return await timedStep(input.steps, "probe (shared)", () => flight.promise);
 	}
 	const promise = probeRpcHostOnce(input);
 	const flight: RpcProbeFlight = { expected, reader: input.readNativeGeneration, promise };
@@ -489,7 +494,7 @@ async function probeRpcHostOnce(input: Parameters<typeof probeRpcHost>[0]): Prom
 			candidate.record.generation === input.expected.brokerGeneration &&
 			candidate.state === "running"
 		) early.proof = prove(candidate);
-	});
+	}, input.steps);
 	if (attached.kind === "none") return { kind: "no-record" };
 	if (attached.kind === "failed") return { kind: "unreachable", reason: attached.reason };
 	const handle = attached.handle;
@@ -508,7 +513,7 @@ async function probeRpcHostOnce(input: Parameters<typeof probeRpcHost>[0]): Prom
 			return { kind: "child-exited", childPid: handle.nativePid, brokerGeneration: expected.brokerGeneration };
 		}
 		// A kernel reading is taken only if the proof needs one.
-		const settled = await (early.proof ?? prove(handle));
+		const settled = await timedStep(input.steps, "pin proof", () => early.proof ?? prove(handle));
 		if ("threw" in settled) throw settled.threw;
 		const proved = settled.proved;
 		if (!proved.ok) return { kind: "unreachable", reason: proved.reason };
@@ -754,7 +759,7 @@ async function reconcileOwner(request: OwnerReconcileRequest, ports: OwnerReconc
 	if (recorded === null) return { kind: "free", evidence: [{ kind: "no-recorded-host" }] };
 	const rpc = isManagedHost(recorded) ? recorded.rpc ?? null : null;
 	if (rpc !== null && rpc.childPid !== null && rpc.childCreationTime !== null) {
-		const probe = await ports.probeRpc(rpc.slot, rpc, recorded.transport === "native" ? "managed-omp" : "managed-rpc");
+		const probe = await ports.probeRpc(rpc.slot, rpc, recorded.transport === "native" ? "managed-omp" : "managed-rpc", request.steps);
 		if (probe.kind === "attachable") {
 			return {
 				kind: "attachable",

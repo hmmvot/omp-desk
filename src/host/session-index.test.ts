@@ -979,6 +979,35 @@ describe("restoreAll runs rows together", () => {
 			assert.ok(!line.includes(files[position] as string), "a log line names no file path");
 		}
 	});
+
+	it("breaks the reconcile of a row into the pieces its reconciler timed, at info", async () => {
+		const { claimDir, tabIds, handles, store } = await restartedRows(1);
+		const lines: LoggedLine[] = [];
+		const index = new SessionIndex({ store, claimStorageDir: claimDir, log: recordingLogger(lines) });
+		const base = reconcilerFor(handles);
+		const reconciler: OwnerReconciler = {
+			async reconcile(request) {
+				assert.ok(request.steps !== undefined, "a restore pass hands its reconciler a sink");
+				await request.steps.measure("record", async () => {});
+				await request.steps.measure("state access (shared)", async () => {});
+				return await base.reconcile(request);
+			},
+		};
+		const launcher: OmpHostLauncher = {
+			async launch() {
+				return { state: "not-started", reason: "an attach must never launch" };
+			},
+			async attach(request) {
+				return { state: "attached", host: handles.get(request.sessionFile ?? "") as OmpHostHandle };
+			},
+		};
+
+		await index.restoreAll({ reconciler, launcher });
+
+		const line = lines.find(candidate => candidate.message.startsWith(`window timing: restore tab ${tabIds[0]} `));
+		assert.equal(line?.level, "info");
+		assert.match(line?.message ?? "", / · reconcile \d+ \(record \d+, state access \(shared\) \d+\) · attach \d+/);
+	});
 });
 
 // ── Deferred draft reconciliation ───────────────────────────────────────────

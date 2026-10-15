@@ -10,6 +10,7 @@
 
 import type { ObservedClaim } from "./session-claim.ts";
 import { isManagedHost } from "./session-model.ts";
+import type { StepSink } from "./session-restore-trace.ts";
 import type {
 	OmpHostHandle,
 	RecordedHost,
@@ -134,6 +135,8 @@ export interface OwnerReconcileRequest {
 	readonly claim: ObservedClaim | null;
 	/** Last host this extension launched for the entry, when one was launched. */
 	readonly host: RecordedHost | null;
+	/** Where the restore pass wants the pieces of this reconcile timed; diagnostic only, never read by a verdict. */
+	readonly steps?: StepSink;
 }
 
 /** Read-only positive ownership witnesses. Absence evidence gates automatic relaunch only. */

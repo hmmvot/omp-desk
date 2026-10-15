@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { IdentityTurns, RestoreStepTimer, mapBounded } from "./session-restore-trace.ts";
+import { IdentityTurns, RestoreStepTimer, mapBounded, timedStep } from "./session-restore-trace.ts";
 
 describe("mapBounded", () => {
 	it("returns results by input position and never runs more than the limit at once", async () => {
@@ -66,6 +66,34 @@ describe("RestoreStepTimer", () => {
 		const timer = new RestoreStepTimer(() => clock);
 		await assert.rejects(timer.measure("attach", async () => { clock += 30; throw new Error("reset"); }));
 		assert.match(timer.finish("failed"), /attach 30/);
+	});
+
+	it("breaks a reconcile into the pieces its sink timed, summed over calls and in the order first seen", async () => {
+		let clock = 0;
+		const timer = new RestoreStepTimer(() => clock);
+		await timer.measure("reconcile", async () => {
+			const sink = timer.sink("reconcile");
+			await sink.measure("record", async () => { clock += 3; });
+			await sink.measure("tree digest (shared)", async () => { clock += 8_100; });
+			await sink.measure("connect", async () => { clock += 40; });
+		});
+		await timer.measure("reconcile", async () => {
+			await timer.sink("reconcile").measure("record", async () => { clock += 2; });
+		});
+		assert.equal(
+			timer.finish("attached"),
+			"attached in 8145 ms · admission 0 · reconcile 8145 (record 5, tree digest (shared) 8100, connect 40) · persist 0",
+		);
+	});
+
+	it("times a piece that threw and runs a piece unmeasured when no sink is given", async () => {
+		let clock = 0;
+		const timer = new RestoreStepTimer(() => clock);
+		await timer.measure("reconcile", async () => {
+			await assert.rejects(timer.sink("reconcile").measure("connect", async () => { clock += 7; throw new Error("refused"); }));
+		});
+		assert.match(timer.finish("failed"), /reconcile 7 \(connect 7\)/);
+		assert.equal(await timedStep(undefined, "connect", async () => 42), 42);
 	});
 });
 
