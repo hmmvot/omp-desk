@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { recordingLogger, type LoggedLine } from "../shared/logger.ts";
-import { parseProviderUsageJson, projectProviderUsage, ProviderUsageCache, PROVIDER_USAGE_REFRESH_MS } from "./provider-usage.ts";
+import { parseProviderUsageJson, projectProviderUsage, ProviderUsageCache, PROVIDER_USAGE_REFRESH_MS, UsageFailureNotes } from "./provider-usage.ts";
 
 function limit(window: string, usedFraction: number, scope: Record<string, unknown> = {}) {
 	return { id: window, window: { id: window, resetsAt: 2_000_000 }, amount: { usedFraction }, scope };
@@ -55,7 +55,7 @@ test("per-provider attempts coalesce, throttle at five minutes and retain the la
 	const result = await cache.refresh("current", "model", async () => { calls++; throw new Error("secret account identity"); });
 	assert.equal(calls, 2);
 	assert.equal(result.windows[0]?.usedPercent, 42);
-	assert.deepEqual(logged, [{ level: "warn", message: "Provider usage refresh failed; retaining the last value." }]);
+	assert.deepEqual(logged, [{ level: "warn", message: "Provider usage refresh failed (Error); retaining the last value." }], "the kind is logged, never the text of the failure");
 	await cache.refresh("current", "model", run);
 	assert.equal(calls, 2);
 	await cache.refresh("other", "model", async () => { calls++; return { stdout: json([]), stderr: "", exitCode: 0 }; });
@@ -85,4 +85,25 @@ test("a forced refresh skips the throttle, joins an in-flight read, and readAt m
 	pending.resolve({ stdout: "not json", stderr: "", exitCode: 0 });
 	await Promise.all([first, joined]);
 	assert.equal(cache.readAt("current"), 2000);
+});
+
+test("a failed usage read names its cause, once for each distinct cause per owner", () => {
+	const notes = new UsageFailureNotes();
+	const tab = {};
+	const timeout = new Error("The OMP --version probe did not finish within 15 s");
+	assert.equal(
+		notes.note(tab, "resolving the OMP executable", timeout),
+		"Provider usage: resolving the OMP executable failed (The OMP --version probe did not finish within 15 s); retaining the last value.",
+	);
+	assert.equal(notes.note(tab, "resolving the OMP executable", timeout), null, "the same cause is not repeated for this tab");
+	assert.match(notes.note(tab, "resolving the OMP executable", new Error("No usable OMP launcher was found.")) ?? "", /No usable OMP launcher/);
+	assert.match(notes.note(tab, "publishing the usage", timeout) ?? "", /publishing the usage failed/, "a refresh failure is a different cause from a resolution failure");
+	assert.notEqual(notes.note({}, "resolving the OMP executable", timeout), null, "another tab says it again");
+});
+
+test("a refresh that throws logs why", async () => {
+	const lines: LoggedLine[] = [];
+	const cache = new ProviderUsageCache(Date.now, recordingLogger(lines));
+	await cache.refresh("anthropic", "m", async () => { throw Object.assign(new Error("spawn EPERM for account a@b.c"), { code: "EPERM" }); });
+	assert.match(lines.map(line => line.message).join("\n"), /Provider usage refresh failed \(Error EPERM\)/);
 });

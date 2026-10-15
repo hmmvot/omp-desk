@@ -31,6 +31,8 @@ import type { ControlRendezvous } from "../host/control-protocol.ts";
 import type { DiagnosticsRecorder } from "../host/diagnostics.ts";
 import type { LaunchTimeline } from "../host/launch-timeline.ts";
 import type { SessionHostRuntime } from "../host/native-session.ts";
+import { PersistRetry } from "../host/persist-retry.ts";
+import type { PersistRetryOptions } from "../host/persist-retry.ts";
 import type { SessionIndex } from "../host/session-index.ts";
 import type { SessionIndexEntry } from "../host/session-model.ts";
 import type { NativeControlBootstrap } from "../host/native-terminal.ts";
@@ -40,6 +42,10 @@ const CONTROL_RENDEZVOUS_TIMEOUT_MS = 15_000;
 const NATIVE_CONTROL_RENDEZVOUS_TIMEOUT_MS = 60_000;
 /** A host this launch already proved published once; a missing record is not startup lag. */
 const PROVEN_CONTROL_RENDEZVOUS_TIMEOUT_MS = 3_000;
+/** A host that did not answer in time is tried again this many times (waits of 2, 4, 8, 16 and 30 s), then reported unavailable. */
+const CONTROL_BUSY_RETRIES = 5;
+const CONTROL_BUSY_RETRY_FIRST_MS = 2_000;
+const CONTROL_BUSY_RETRY_MAX_MS = 30_000;
 const CONTROL_RENDEZVOUS_POLL_MS = 250;
 /** A process-generation probe that times out is retried; the probe itself is bounded at 5 s, so this is a bounded wait. */
 const GENERATION_PROBE_ATTEMPTS = 4;
@@ -130,6 +136,10 @@ export interface LocalHostControlDeps {
 	 * first, and nothing that does not spawn it waits for staging.
 	 */
 	readonly stagedHelper: () => Promise<void>;
+	/** Wait between retries of a host that did not answer in time; tests shorten it. */
+	readonly controlRetry?: PersistRetryOptions;
+	/** Opens the verified connection; tests substitute it. */
+	readonly connection?: Pick<typeof HostControlClient, "connectVerified" | "connectWithProvenKey">;
 	/** Reads a process's kernel generation; tests substitute it. */
 	readonly generationProbe?: (pid: number) => Promise<string>;
 	/** Wait between timed-out generation probes; tests shorten it. */
@@ -184,6 +194,8 @@ function messageOf(error: unknown): string {
 }
 
 export class LocalHostControl {
+	/** Tabs whose control attempt found the host busy: the retry that brings the channel back, for exactly that runtime. */
+	readonly #paused = new Map<string, { readonly runtime: SessionHostRuntime; readonly retry: PersistRetry }>();
 	readonly #deps: LocalHostControlDeps;
 	constructor(deps: LocalHostControlDeps) {
 		this.#deps = deps;
@@ -411,6 +423,7 @@ export class LocalHostControl {
 		const { index, window, store, log } = this.#deps;
 		const diagnostics = this.#deps.diagnostics();
 		const runtime = this.#deps.records.get(tabId)?.runtime;
+		if (runtime != null && runtime === attempt.runtime) this.#pause(tabId, ownerGeneration, runtime);
 		const stillCurrent = (): boolean =>
 			mayReportControlFailure(this.#attemptTarget(tabId), { runtime: attempt.runtime, pid: attempt.pid, client: null }) &&
 			(runtime?.kind !== "terminal" || !runtime.stopping);
@@ -422,7 +435,7 @@ export class LocalHostControl {
 				// record, which is last-writer-wins per slot and no longer names the original
 				// server once a subagent's server (older host builds) overwrote or removed it.
 				const published = await readControlRendezvous(input.directory, input.slotId).catch(() => null);
-				connected = await HostControlClient.connectWithProvenKey({
+				connected = await (this.#deps.connection ?? HostControlClient).connectWithProvenKey({
 					slotId: input.slotId,
 					directory: input.directory,
 					provenKey,
@@ -456,7 +469,7 @@ export class LocalHostControl {
 					return;
 				}
 				if (!stillCurrent()) return;
-				connected = await HostControlClient.connectVerified({
+				connected = await (this.#deps.connection ?? HostControlClient).connectVerified({
 					rendezvous,
 					rendezvousDirectory: input.directory,
 					recipientPrivateKeyPkcs8Pem: input.privateKeyPkcs8Pem,
@@ -494,6 +507,7 @@ export class LocalHostControl {
 				await store.setSecret(provenKeySecretName(ownerGeneration), verified.key);
 				state.control = { client: verified.client, snapshot, activity: input.activity, work: input.work === true, subagents: input.subagents === true };
 				state.controlFailure = null;
+				this.#forgetPaused(tabId);
 				log.info(`tab ${tabId}: host control verified (pid ${input.pid}, instance ${snapshot.host.instanceId})`);
 				const finished = this.#deps.timeline?.finish(tabId) ?? null;
 				if (finished !== null) log.info(`window timing: ${finished.kind} ${tabId} host control verified ${finished.totalMs} ms after the command`);
@@ -524,6 +538,7 @@ export class LocalHostControl {
 	 * channel but leaves the stored material for a later reconciliation.
 	 */
 	async release(conversation: string, ownerGeneration: string | null): Promise<void> {
+		this.#forgetPaused(conversation);
 		const { store, window, log } = this.#deps;
 		const state = this.#deps.records.get(conversation);
 		if (state) {
@@ -581,6 +596,7 @@ export class LocalHostControl {
 	 */
 	reportFailure(conversation: string, error: unknown): void {
 		if (!(error instanceof HostControlUnavailableError && error.timedOut)) {
+			this.#forgetPaused(conversation);
 			this.#deps.log.warn(`tab ${conversation}: host control failure detail: ${messageOf(error).slice(0, 300)}`);
 			this.fail(conversation, describeControlError(error));
 			return;
@@ -590,14 +606,52 @@ export class LocalHostControl {
 			state.control?.client.close();
 			state.control = null;
 		}
-		this.#deps.log.warn(`tab ${conversation}: host control paused — ${describeControlError(error)}; it is retried`);
+		const paused = this.#paused.get(conversation);
+		if (paused === undefined || state?.runtime !== paused.runtime) {
+			// Nothing says which launch's credentials this was: it cannot be reconnected from here.
+			this.#deps.log.warn(`tab ${conversation}: host control paused — ${describeControlError(error)}`);
+			return;
+		}
+		if (paused.retry.attempts >= CONTROL_BUSY_RETRIES) {
+			this.#forgetPaused(conversation);
+			this.fail(conversation, `${describeControlError(error)}; ${CONTROL_BUSY_RETRIES} later attempts did not reach it`);
+			return;
+		}
+		this.#deps.log.warn(`tab ${conversation}: host control paused — ${describeControlError(error)}; it is retried (${paused.retry.attempts + 1} of ${CONTROL_BUSY_RETRIES})`);
+		paused.retry.schedule(CONTROL_BUSY_RETRIES);
+	}
+
+	/**
+	 * A busy host does not come back by itself: the channel is dropped and the attempt that found it busy is made again, a
+	 * bounded number of times with a doubling wait, for exactly the runtime and pid that was paused. A tab that runs
+	 * another process by then, holds a channel again, or is stopping is left alone.
+	 */
+	#pause(tabId: string, ownerGeneration: string, runtime: SessionHostRuntime): void {
+		const existing = this.#paused.get(tabId);
+		if (existing?.runtime === runtime) return;
+		existing?.retry.reset();
+		const retry: PersistRetry = new PersistRetry(async () => {
+			const target = this.#attemptTarget(tabId);
+			if (!mayReportControlFailure(target, { runtime, pid: runtime.pid, client: null }) || (runtime.kind === "terminal" && runtime.stopping)) {
+				this.#forgetPaused(tabId);
+				return;
+			}
+			await this.reconnect(tabId, ownerGeneration, runtime);
+		}, this.#deps.controlRetry ?? { firstMs: CONTROL_BUSY_RETRY_FIRST_MS, maxMs: CONTROL_BUSY_RETRY_MAX_MS });
+		this.#paused.set(tabId, { runtime, retry });
 	}
 
 	/** Close and forget one record's verified control channel; the failure text is cleared with it. */
 	dispose(state: RuntimeRecord): void {
+		if (state.tabId !== null) this.#forgetPaused(state.tabId);
 		state.control?.client.close();
 		state.control = null;
 		state.controlFailure = null;
+	}
+
+	#forgetPaused(tabId: string): void {
+		this.#paused.get(tabId)?.retry.reset();
+		this.#paused.delete(tabId);
 	}
 }
 

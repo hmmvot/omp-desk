@@ -31,7 +31,7 @@ import type { LoginFlowDeps } from "./host/provider-login-flow";
 import { startLoginSession } from "./host/provider-login-rpc";
 import { createLoginUi } from "./wiring/provider-login-ui";
 import { runOmpCli } from "./host/native-terminal";
-import { ProviderUsageCache, PROVIDER_USAGE_ARGS, PROVIDER_USAGE_TIMEOUT_MS } from "./host/provider-usage";
+import { ProviderUsageCache, PROVIDER_USAGE_ARGS, PROVIDER_USAGE_TIMEOUT_MS, UsageFailureNotes } from "./host/provider-usage";
 import { observeSessionBranch } from "./host/session-branch";
 import type { GitApi, BranchObservation } from "./host/session-branch";
 import type { FooterMetadataMessage } from "./shared/footer-metadata";
@@ -6768,7 +6768,19 @@ function ompCliScopeEnvironment(profile: string | null): Record<string, string> 
  * or — for a re-adopted host that did not record it — the one a launch would resolve now.
  */
 async function executableFor(runtime: SessionHostRuntime | null): Promise<OmpCommand> {
-  return runtime?.binary ?? (await resolveOmpBinary());
+  if (runtime?.binary != null) return runtime.binary;
+  // One resolution at a time: every concurrent caller (the footer of each tab after a restore, the first of them under load)
+  // used to run its own `omp --version` probe, which only made a busy machine busier and every probe slower.
+  resolvingExecutable ??= resolveOmpBinary().finally(() => { resolvingExecutable = null; });
+  return resolvingExecutable;
+}
+let resolvingExecutable: Promise<OmpCommand> | null = null;
+
+const usageFailureNotes = new UsageFailureNotes();
+/** A provider-usage failure goes to the log with its cause, once per distinct cause for each tab. */
+function noteUsageFailure(binding: object, stage: string, error: unknown): void {
+  const line = usageFailureNotes.note(binding, stage, error);
+  if (line !== null) log.warn(line);
 }
 
 /** Cache only a successful default-profile catalogue; unresolved OMP adds no onboarding UI. */
@@ -6965,7 +6977,7 @@ function refreshFooterMetadata(index: SessionIndex, tabId: string, refreshUsage:
     binding.message = { ...binding.message, provider: model.provider, ...usage };
     binding.usageReadAt = cache.readAt(model.provider);
     publishFooterMetadata(tabId);
-  }).catch(() => log.warn("Provider usage executable resolution failed; retaining the last value."));
+  }, error => noteUsageFailure(binding, "resolving the OMP executable", error)).catch(error => noteUsageFailure(binding, "publishing the usage", error));
 }
 
 

@@ -4,7 +4,7 @@
  * Runner: `node --test src/runtime/local-control.test.ts`.
  */
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe, it, mock } from "node:test";
 import { HostControlPeerError, HostControlRefusedError, HostControlUnavailableError } from "../host/control-client.ts";
 import type { HostControlClient } from "../host/control-client.ts";
 import { recordingLogger } from "../shared/logger.ts";
@@ -38,7 +38,8 @@ describe("host control failure reporting", () => {
 		assert.equal(record.controlFailure, null, "the text that becomes a warning above the terminal stays empty");
 		assert.equal(record.control, null, "the channel is dropped so the next attempt starts clean");
 		assert.equal(closed(), 1);
-		assert.match(logs.map(line => line.message).join("\n"), /host control paused — OMP did not answer in time \(it may be busy\); it is retried/);
+		assert.match(logs.map(line => line.message).join("\n"), /host control paused — OMP did not answer in time \(it may be busy\)/);
+		assert.doesNotMatch(logs.map(line => line.message).join("\n"), /it is retried/, "no launch's credentials are known for this record, so nothing is retried and nothing says so");
 		assert.deepEqual(logs.map(line => line.level), ["warn"], "a busy host is a degraded state, not a failure");
 		assert.doesNotMatch(logs.map(line => line.message).join("\n"), /unavailable/);
 	});
@@ -52,6 +53,90 @@ describe("host control failure reporting", () => {
 			assert.match(logs.map(line => line.message).join("\n"), /host control unavailable — /);
 		}
 		assert.equal(describeControlError(new HostControlUnavailableError("channel is not open")), "native host connection unavailable");
+	});
+});
+
+describe("a host that did not answer in time is tried again, a bounded number of times", () => {
+	const runtime = { kind: "chat", pid: 4242, identity: { slot: "slot-1" } } as never;
+	const stored: RecordedControlProcess = { pid: 4242, processCreation: "2026-10-15T00:00:00Z", slotId: "slot-1", directory: "C:/control" };
+	const busy = () => new HostControlUnavailableError("host did not answer snapshot in time", { timedOut: true });
+	const flush = async () => { for (let turn = 0; turn < 8; turn += 1) await new Promise<void>(resolve => setImmediate(resolve)); };
+
+	function rig(failures: number) {
+		mock.timers.enable({ apis: ["setTimeout"] });
+		const record = { tabId: TAB, runtime, control: null, controlFailure: null as string | null } as unknown as RuntimeRecord;
+		const logs: LoggedLine[] = [];
+		let calls = 0;
+		const client = { peerProof: {}, close: () => {}, snapshot: async () => ({ host: { instanceId: "inst-1" } }) };
+		const control = new LocalHostControl({
+			records: { get: (tabId: string | null) => tabId === TAB ? record : undefined } as never,
+			store: {
+				record: (key: string) => key === controlProcessRecordKey("owner") ? stored : undefined,
+				secret: async () => "secret",
+				setSecret: async () => {},
+			} as never,
+			index: { lifecycle: { run: async (_tab: string, work: () => Promise<unknown>) => work() } } as never,
+			window: { published: () => {} },
+			diagnostics: () => ({ notObserved: () => {}, fail: () => {}, succeed: () => {} }) as never,
+			attempts: new WeakMap(),
+			stagedHelper: async () => {},
+			connection: {
+				connectWithProvenKey: async () => {
+					calls += 1;
+					if (calls <= failures) throw busy();
+					return { client, key: "key", rotated: false };
+				},
+				connectVerified: async () => { throw new Error("not used"); },
+			} as never,
+			controlRetry: { firstMs: 1, maxMs: 1 },
+			log: recordingLogger(logs),
+		} as never);
+		const messages = () => logs.map(line => line.message);
+		return { control, record, logs, messages, calls: () => calls };
+	}
+
+	it("brings the channel back once the host answers, and clears the paused state", async () => {
+		const f = rig(2);
+		try {
+			await f.control.reconnect(TAB, "owner", runtime);
+			assert.equal(f.calls(), 1);
+			assert.equal(f.record.control, null);
+			assert.equal(f.record.controlFailure, null, "a busy host is not recorded as unavailable");
+			assert.ok(f.messages().some(message => /host control paused — .*it is retried \(1 of 5\)/.test(message)));
+			mock.timers.tick(1); await flush();
+			assert.equal(f.calls(), 2);
+			assert.ok(f.messages().some(message => /it is retried \(2 of 5\)/.test(message)));
+			mock.timers.tick(1); await flush();
+			assert.equal(f.calls(), 3);
+			assert.notEqual(f.record.control, null, "the third attempt reached it");
+			assert.ok(f.messages().some(message => /host control verified/.test(message)));
+			assert.ok(!f.messages().some(message => /unavailable/.test(message)));
+			mock.timers.tick(10); await flush();
+			assert.equal(f.calls(), 3, "a success ends the retries");
+		} finally { mock.timers.reset(); }
+	});
+
+	it("reports host control unavailable once when every try finds it busy", async () => {
+		const f = rig(Number.POSITIVE_INFINITY);
+		try {
+			await f.control.reconnect(TAB, "owner", runtime);
+			for (let turn = 0; turn < 10; turn += 1) { mock.timers.tick(1); await flush(); }
+			assert.equal(f.calls(), 6, "the attempt and five retries, no more");
+			assert.match(f.record.controlFailure ?? "", /did not answer in time.*5 later attempts did not reach it/);
+			assert.equal(f.messages().filter(message => /host control unavailable/.test(message)).length, 1);
+		} finally { mock.timers.reset(); }
+	});
+
+	it("does not retry for a runtime the tab no longer runs", async () => {
+		const f = rig(Number.POSITIVE_INFINITY);
+		try {
+			await f.control.reconnect(TAB, "owner", runtime);
+			(f.record as { runtime: unknown }).runtime = { kind: "chat", pid: 4242, identity: { slot: "slot-2" } };
+			mock.timers.tick(1); await flush();
+			mock.timers.tick(1); await flush();
+			assert.equal(f.calls(), 1, "another launch's process is never reconnected with this launch's credentials");
+			assert.equal(f.record.controlFailure, null);
+		} finally { mock.timers.reset(); }
 	});
 });
 

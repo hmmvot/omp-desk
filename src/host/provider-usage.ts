@@ -5,6 +5,31 @@ import type { OmpCliResult } from "./native-terminal.ts";
 export const PROVIDER_USAGE_ARGS = ["usage", "--json", "--redact"] as const;
 export const PROVIDER_USAGE_TIMEOUT_MS = 20_000;
 export const PROVIDER_USAGE_REFRESH_MS = 5 * 60_000;
+
+function describeUsageCause(error: unknown): string {
+	return (error instanceof Error ? error.message : String(error)).slice(0, 300);
+}
+
+/** The kind of a failure of the usage command itself, without its text: that text can carry what the command read (account identity), which the log never holds. */
+function describeUsageKind(error: unknown): string {
+	if (!(error instanceof Error)) return "not an Error";
+	const code = (error as NodeJS.ErrnoException).code;
+	return typeof code === "string" ? `${error.name} ${code}` : error.name;
+}
+
+/** What a failed provider-usage read says, once for each distinct cause per owner (a tab), however often the read is repeated. */
+export class UsageFailureNotes {
+	readonly #seen = new WeakMap<object, Set<string>>();
+	/** The log line for this failure, or `null` when this owner already has it. */
+	note(owner: object, stage: string, error: unknown): string | null {
+		const line = `Provider usage: ${stage} failed (${describeUsageCause(error)}); retaining the last value.`;
+		const seen = this.#seen.get(owner) ?? new Set<string>();
+		this.#seen.set(owner, seen);
+		if (seen.has(line)) return null;
+		seen.add(line);
+		return line;
+	}
+}
 const record = (value: unknown): Record<string, unknown> | null => typeof value === "object" && value !== null ? value as Record<string, unknown> : null;
 const text = (value: unknown): value is string => typeof value === "string" && value.length > 0 && value.length <= 200 && !/[\u0000-\u001f\u007f]/.test(value);
 interface Candidate extends FooterQuotaWindow { id: string; modelId: string | null; tier: string | null }
@@ -108,7 +133,7 @@ export class ProviderUsageCache {
 				const parsed = result.exitCode === 0 ? parseProviderUsageJson(result.stdout, provider) : null;
 				if (parsed === null) this.log.warn("Provider usage refresh returned no valid reading; retaining the last value.");
 				else { reading.reading = parsed; reading.readAt = this.now(); }
-			} catch { this.log.warn("Provider usage refresh failed; retaining the last value."); }
+			} catch (error) { this.log.warn(`Provider usage refresh failed (${describeUsageKind(error)}); retaining the last value.`); }
 			finally { reading.pending = null; }
 		})();
 		await reading.pending;
