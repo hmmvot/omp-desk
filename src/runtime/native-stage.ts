@@ -44,7 +44,7 @@ export async function stageNativeModule(packaged: string, storageDir: string): P
 		// cannot be written costs only that warm start; the staging itself succeeded.
 		let proof = "recorded";
 		try {
-			await recordNativeProof({ storageDir, packagedSha256: sha256, stagedPath: staged.path });
+			await recordNativeProof({ storageDir, packagedSha256: sha256, stagedPath: staged.path, native });
 		} catch (error) {
 			proof = error instanceof Error ? error.message : String(error);
 		}

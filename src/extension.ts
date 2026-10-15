@@ -1476,14 +1476,14 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
         return null;
       }
       warmAgeMs = warm.ageMs;
-      return warm.asset;
+      return { asset: warm.asset, verify: warm.verify };
     });
     // Once per window: a load that settled as unavailable says so, with what to do (ADR-0076, decision 6).
     void nativeLoad.then(native => {
       const ready = Math.round(performance.now() - nativeStartedAt);
       const steps = describeLoadSteps(win32NativeLoadSteps());
       log.info(win32NativeStartedWarm()
-        ? `window timing: native module ready ${ready} ms after activation began (warm start from a verification ${Math.round(warmAgeMs / 60_000)} min old, no staging child; ${steps})`
+        ? `window timing: native module ${native === null ? "unavailable" : "ready"} ${ready} ms after activation began (warm start from a verification ${Math.round(warmAgeMs / 60_000)} min old, no staging child; ${steps})`
         : `window timing: native module ${native === null ? "unavailable" : "ready"} ${ready} ms after activation began (staging child ${Math.round(nativeStagedAfter)} ms, load ${Math.round(ready - nativeStagedAfter)} ms${steps === "" ? "" : `: ${steps}`}; no warm start: ${warmRefusal === "" ? "not tried" : warmRefusal})`);
       return announceNativeFailure({
         failure: win32NativeFailure,

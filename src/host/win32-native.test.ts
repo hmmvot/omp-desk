@@ -311,7 +311,7 @@ describe("the process's native module", () => {
 	it("takes a warm start in the very call that asks, without ever running the slow source", { skip: process.platform !== "win32" }, async () => {
 		const asset = await installedAddonAsset();
 		let slow = 0;
-		const promise = startWin32Native(async () => { slow++; return null; }, silentLogger, () => asset);
+		const promise = startWin32Native(async () => { slow++; return null; }, silentLogger, () => ({ asset }));
 		assert.equal(win32NativeStartedWarm(), true, "settled before the call returned, with no turn of the event loop");
 		assert.notEqual(await promise, null);
 		assert.strictEqual(await win32Native(), await promise);
@@ -329,11 +329,43 @@ describe("the process's native module", () => {
 		assert.equal(win32NativeStartedWarm(), false);
 		setWin32NativeForTest(undefined);
 		const logs: LoggedLine[] = [];
-		const broken = await startWin32Native(async () => { slow++; return asset; }, recordingLogger(logs), () => ({ path: asset.path, sha256: "0".repeat(64) }));
+		const broken = await startWin32Native(async () => { slow++; return asset; }, recordingLogger(logs), () => ({ asset: { path: asset.path, sha256: "0".repeat(64) } }));
 		assert.notEqual(broken, null, "the slow source loaded it");
 		assert.equal(slow, 2);
 		assert.equal(win32NativeStartedWarm(), false);
 		assert.deepEqual(logs.map(line => line.level), ["debug"]);
 		assert.match(logs[0]!.message, /warm start .* does not match its digest/);
+	});
+
+	it("shares a warm module only after its chain check passed, and settles as unavailable with the refusal otherwise", { skip: process.platform !== "win32" }, async () => {
+		const asset = await installedAddonAsset();
+		const logs: LoggedLine[] = [];
+		let seen = 0;
+		const passed = await startWin32Native(async () => null, recordingLogger(logs), () => ({ asset, verify: async native => { seen++; assert.equal(native.processCreation(process.pid).kind, "found"); return null; } }));
+		assert.notEqual(passed, null);
+		assert.equal(seen, 1);
+		assert.deepEqual(win32NativeLoadSteps().map(step => step.name), ["read", "hash", "dlopen", "bind", "verify"]);
+		assert.equal(win32NativeFailure(), null);
+
+		setWin32NativeForTest(undefined);
+		const refused = await startWin32Native(async () => asset, recordingLogger(logs), () => ({ asset, verify: async () => "the component C:\\x on the path to the store lets S-1-5-32-545 replace or re-permission it" }));
+		assert.equal(refused, null, "the slow source is not tried: the module is loaded and its layout is wrong");
+		assert.equal(await win32Native(), null);
+		assert.match(win32NativeFailure() ?? "", /lets S-1-5-32-545 replace/);
+		assert.ok(logs.some(line => line.level === "warn" && /native module is unavailable: .*lets S-1-5-32-545/.test(line.message)));
+
+		setWin32NativeForTest(undefined);
+		const failed = await startWin32Native(async () => asset, silentLogger, () => ({ asset, verify: async () => { throw new Error("the lane died"); } }));
+		assert.equal(failed, null);
+		assert.match(win32NativeFailure() ?? "", /could not be verified \(the lane died\)/);
+	});
+
+	it("tells a fixed NTFS volume from anything else", { skip: process.platform !== "win32" }, async () => {
+		const native = await loadWin32Native(await installedAddonAsset());
+		const system = native.volumeOf(path.parse(process.env.SystemRoot ?? "C:\\Windows").root);
+		assert.equal(system.driveType, 3);
+		assert.equal(system.fileSystem, "NTFS");
+		const absent = native.volumeOf("Q:\\no-such-volume\\");
+		assert.equal(absent.fileSystem, null);
 	});
 });

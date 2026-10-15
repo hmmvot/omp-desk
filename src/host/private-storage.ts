@@ -24,7 +24,7 @@ import * as fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { win32Native, win32NativeFailure } from "./win32-native.ts";
+import { win32Native, win32NativeFailure, type Win32Native } from "./win32-native.ts";
 import { nativeUnavailableDetail } from "./native-module-failure.ts";
 import { startToolSpawnTrace, type ToolSpawn, type ToolSpawnOutcome } from "./tool-spawn-trace.ts";
 
@@ -251,7 +251,11 @@ export interface PrivateStorageSecurityRead {
  * Principals are bare SIDs; {@link namedPrincipal} adds a name to the ones a refusal quotes.
  */
 export async function readStorageSecurity(paths: readonly string[]): Promise<PrivateStorageSecurityRead> {
-	const native = await win32Native();
+	return readSecurityOn(await win32Native(), paths);
+}
+
+/** {@link readStorageSecurity} on a given module: for the one caller that judges a module before it is shared. */
+export async function readSecurityOn(native: Win32Native | null, paths: readonly string[]): Promise<PrivateStorageSecurityRead> {
 	if (native === null) {
 		const detail = nativeUnavailableDetail(win32NativeFailure());
 		return {
@@ -273,6 +277,44 @@ export async function readStorageSecurity(paths: readonly string[]): Promise<Pri
 		});
 	}
 	return { sid: read.sid !== null && isSid(read.sid) ? read.sid : null, failure: read.failure, reports };
+}
+
+/**
+ * Judge one security read of the staged native module's path chain by the rules the verifier applies (ADR-0054, ADR-0012
+ * decision 5): every access entry of an `owned` path names a permitted principal, no other account's entry on a `carrier` lets it
+ * replace or re-permission it, and every path is owned by a permitted principal. Returns the refusal, or `null` when the chain
+ * is as the verifier accepts it. Synchronous: the read is the only wait.
+ */
+export function chainSecurityProblem(read: PrivateStorageSecurityRead, chain: { readonly owned: readonly string[]; readonly carriers: readonly string[] }): string | null {
+	if (read.failure !== null) return `the access of the staged native module's path could not be read (${read.failure})`;
+	const identity = read.sid;
+	if (identity === null) return "the owning account SID could not be read";
+	for (const target of chain.owned) {
+		const report = read.reports.get(target.toLowerCase());
+		if (report === undefined || !report.acl.ok) return `the store access of ${target} could not be verified (${report?.acl.detail ?? "the SID reader returned no ACL"})`;
+		const acl = parseWindowsAcl(report.acl.stdout);
+		if (!acl.parsed) return `the store access listing of ${target} could not be read`;
+		for (const principal of acl.principals) {
+			if (!isPermittedAclPrincipal(principal, identity)) return `the store path ${target} is readable by ${principal}, beyond the same-user boundary`;
+		}
+	}
+	for (const target of chain.carriers) {
+		const report = read.reports.get(target.toLowerCase());
+		if (report === undefined || !report.acl.ok) return `the component ${target} on the path to the store could not be verified (${report?.acl.detail ?? "the SID reader returned no ACL"})`;
+		const acl = parseWindowsAcl(report.acl.stdout);
+		if (!acl.parsed) return `the access listing of ${target} on the path to the store could not be read`;
+		for (const entry of acl.entries) {
+			if (entry.denied || isPermittedAclPrincipal(entry.principal, identity)) continue;
+			if (!permissionsPermitReplacement(entry.permissions)) continue;
+			return `the component ${target} on the path to the store lets ${entry.principal} replace or re-permission it (${entry.permissions})`;
+		}
+	}
+	for (const target of [...chain.owned, ...chain.carriers]) {
+		const owner = read.reports.get(target.toLowerCase())?.owner;
+		if (owner === null || owner === undefined) return `the owner of ${target} could not be read`;
+		if (!isPermittedAclPrincipal(owner, identity)) return `the store path ${target} is owned by ${owner}, beyond the same-user boundary`;
+	}
+	return null;
 }
 
 /**

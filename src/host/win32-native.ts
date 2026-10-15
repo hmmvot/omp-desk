@@ -57,6 +57,14 @@ export type PipeClientOpening =
 	| { readonly kind: "unreachable" }
 	| { readonly kind: "unknown"; readonly detail: string };
 
+/** What `volumeOf` found. */
+export interface VolumeKind {
+	/** `GetDriveTypeW`: 3 is `DRIVE_FIXED`, 4 `DRIVE_REMOTE`. */
+	readonly driveType: number;
+	/** The file system name (`NTFS`), or `null` when the volume could not be read. */
+	readonly fileSystem: string | null;
+}
+
 /** The Win32 facts Desk reads. Each method mirrors the contract of the script it replaced. */
 export interface Win32Native {
 	/**
@@ -90,6 +98,11 @@ export interface Win32Native {
 	 * no such pipe, anything else `unknown`.
 	 */
 	openPipeClient(name: string): PipeClientOpening;
+	/**
+	 * The kind of drive and the file system of the volume a root path (`C:\`) is on: `GetDriveTypeW` (3 is a fixed disk, 4 a
+	 * network drive) and `GetVolumeInformationW`. Synchronous; a volume that cannot be read has no file system name.
+	 */
+	volumeOf(root: string): VolumeKind;
 	/**
 	 * The account SID of this process's token and, for every path, its owner and every grant and denial of its
 	 * DACL (`GetNamedSecurityInfoW`; ADR-0054). Runs on the one worker-thread lane under a deadline; a read that
@@ -279,6 +292,26 @@ function bindProcess(koffi: Koffi): Pick<Win32Native, "processCreation" | "proce
 				}
 			}
 			return { kind: "found", pids: found };
+		},
+	};
+}
+
+const VOLUME_NAME_CHARS = 64;
+
+function bindVolume(koffi: Koffi): Pick<Win32Native, "volumeOf"> {
+	const kernel32 = koffi.load("kernel32.dll");
+	const getDriveType = kernel32.func("uint32 __stdcall GetDriveTypeW(str16 root)") as (root: string) => number;
+	const getVolumeInformation = kernel32.func(
+		"bool __stdcall GetVolumeInformationW(str16 root, void* label, uint32 labelChars, void* serial, void* maxComponent, void* flags, void* fileSystem, uint32 fileSystemChars)",
+	) as (root: string, label: null, labelChars: number, serial: null, maxComponent: null, flags: null, fileSystem: Buffer, fileSystemChars: number) => boolean;
+	return {
+		volumeOf(root) {
+			const driveType = getDriveType(root);
+			const name = Buffer.alloc(VOLUME_NAME_CHARS * 2);
+			if (!getVolumeInformation(root, null, 0, null, null, null, name, VOLUME_NAME_CHARS)) return { driveType, fileSystem: null };
+			let end = 0;
+			while (end + 1 < name.length && (name[end] !== 0 || name[end + 1] !== 0)) end += 2;
+			return { driveType, fileSystem: name.toString("utf16le", 0, end) };
 		},
 	};
 }
@@ -483,7 +516,7 @@ function bindSecurity(koffi: Koffi, lane: CallLane): Pick<Win32Native, "readSecu
 
 /** One timed step of loading the addon: wall time, and the host process's CPU time (user + system) over the same span. */
 export interface NativeLoadStep {
-	readonly name: "read" | "hash" | "dlopen" | "bind";
+	readonly name: "read" | "hash" | "dlopen" | "bind" | "verify";
 	readonly wallMs: number;
 	readonly cpuMs: number;
 }
@@ -523,7 +556,7 @@ function loadFromBytes(asset: NativeModuleAsset, bytes: Buffer, arch: string, ex
 	}
 	step("dlopen");
 	const koffi = holder.exports as Koffi;
-	const native: Win32Native = { ...bindMutex(koffi), ...bindProcess(koffi), ...bindPipe(koffi), ...bindSecurity(koffi, new CallLane()) };
+	const native: Win32Native = { ...bindMutex(koffi), ...bindProcess(koffi), ...bindPipe(koffi), ...bindVolume(koffi), ...bindSecurity(koffi, new CallLane()) };
 	step("bind");
 	return native;
 }
@@ -600,30 +633,52 @@ export function win32NativeStartedWarm(): boolean {
 	return startedWarm;
 }
 
+/** A staged module a warm start names, and the check of its path chain that must pass before it is shared. */
+export interface WarmStart {
+	readonly asset: NativeModuleAsset;
+	/** The refusal of the module's path chain, or `null`; runs after the module loaded, before it is shared. */
+	readonly verify?: (native: Win32Native) => Promise<string | null>;
+}
+
 /**
  * Start the one load of this process. Called first thing in activation, before any reader asks:
  * every reader awaits {@link win32Native}, and `null` is only ever the settled "unavailable".
  * `source` throws, naming the cause, when it has no module to give: the message is kept for {@link win32NativeFailure}.
  *
- * `warm`, when given, runs first and synchronously: a module it names that loads is the shared module before this call returns, with
- * no turn of the event loop in between (ADR-0076 decision 11). A warm start that has nothing, or fails in any way, falls through to
- * `source`, which reports the cause.
+ * `warm`, when given, runs first and synchronously: a module it names that loads is loaded before this call returns, with no turn
+ * of the event loop in between (ADR-0076 decision 11). It is shared once its `verify` (the owner and access list of the module's
+ * path chain, read natively) has found nothing wrong; a refusal settles the load as unavailable with that cause, as a staging child's
+ * refusal does. A warm start that has nothing, or fails to load, falls through to `source`, which reports the cause.
  */
 export function startWin32Native(
 	source: () => Promise<NativeModuleAsset | null>,
 	log: Logger = silentLogger,
-	warm?: () => NativeModuleAsset | null,
+	warm?: () => WarmStart | null,
 ): Promise<Win32Native | null> {
 	if (shared === null && warm !== undefined) {
 		try {
-			const asset = warm();
-			if (asset !== null) {
+			const start = warm();
+			if (start !== null) {
 				const steps: NativeLoadStep[] = [];
-				const native = loadWin32NativeSync(asset, process.arch, steps);
+				const native = loadWin32NativeSync(start.asset, process.arch, steps);
 				failure = null;
 				loadSteps = steps;
 				startedWarm = true;
-				shared = Promise.resolve(native);
+				const refuse = (cause: string): null => {
+					failure = cause;
+					log.warn(`the native module is unavailable: ${cause}; Windows checks read as unknown`);
+					return null;
+				};
+				const verifying = start.verify === undefined ? undefined : { verify: start.verify, wall: performance.now(), cpu: processCpuMs() };
+				shared = verifying === undefined
+					? Promise.resolve(native)
+					: verifying.verify(native).then(
+						problem => {
+							steps.push({ name: "verify", wallMs: performance.now() - verifying.wall, cpuMs: processCpuMs() - verifying.cpu });
+							return problem === null ? native : refuse(problem);
+						},
+						(error: unknown) => refuse(`the layout of the native module could not be verified (${error instanceof Error ? error.message : String(error)})`),
+					);
 				return shared;
 			}
 		} catch (error) {
