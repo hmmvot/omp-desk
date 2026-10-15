@@ -288,9 +288,13 @@
         "ompDesk.focusComposer",
         "ompDesk.goToSession",
         "ompDesk.moveFileToNewWindow",
+        "ompDesk.newSession",
+        "ompDesk.resumeWorkspaceFolder",
         "omp.focusComposer",
         "omp.goToSession",
-        "omp.moveFileToNewWindow"
+        "omp.moveFileToNewWindow",
+        "omp.newSession",
+        "omp.resumeWorkspaceFolder"
       ]
     },
     "viewsContainers": {
@@ -1510,6 +1514,16 @@
         "command": "ompDesk.goToSession",
         "key": "ctrl+alt+q",
         "mac": "cmd+alt+q"
+      },
+      {
+        "command": "ompDesk.newSession",
+        "key": "ctrl+alt+n",
+        "mac": "cmd+alt+n"
+      },
+      {
+        "command": "ompDesk.resumeWorkspaceFolder",
+        "key": "ctrl+alt+r",
+        "mac": "cmd+alt+r"
       },
       {
         "command": "ompDesk.sendPrompt",

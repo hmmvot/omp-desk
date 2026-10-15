@@ -131,6 +131,8 @@ All commands are in the Command Palette under **OMP Desk**. The ones with defaul
 | --- | --- | --- |
 | `Ctrl+Shift+L` | Focus the chat composer of the active or visible session; opens the OMP Desk side bar when no session is open | Anywhere, including the integrated terminal (takes over VS Code's Select All Occurrences of Find Match key; rebind it with a user keybinding) |
 | `Ctrl+Alt+Q` | Go to Session: a searchable list of every session (title, folder, status; unread first, stopped last, as in Sessions) that opens the one you pick, with **New Session…** at the end | Anywhere, including the integrated terminal |
+| `Ctrl+Alt+N` | New Session: the **New Session…** row of Sessions (asks for the folder when several are shown) | Anywhere, including the integrated terminal |
+| `Ctrl+Alt+R` | Resume Session: the **Resume Session…** row of Sessions (asks for the folder when several are shown, then lists its saved sessions) | Anywhere, including the integrated terminal (takes over VS Code's Terminal: Run Recent Command key there; rebind it with a user keybinding) |
 | `Ctrl+Shift+M` | Toggle the file window: the first press moves all files of the group next to the chat into one window that stays on top (files from Chat links open there too); the next press brings them back next to the chat and closes it | Anywhere, including the integrated terminal (replaces VS Code's Problems key; a keymap extension that binds it in text editors wins there unless you add a user keybinding) |
 | `Ctrl+Enter` | Send composer prompt (`Enter` in the composer also sends) | Chat editor focused |
 | `Esc` | Stop current turn | Chat editor, turn running |

@@ -58,10 +58,13 @@ export function terminalCopyChord(event: TerminalKeyEventLike, hasSelection: boo
  *   A terminal encodes them as Ctrl+L, a form feed, and Ctrl+M, a carriage return that would submit OMP's input.
  * - Ctrl+Alt+Q, `OMP Desk: Go to Session…`: a terminal would encode it as Escape then Ctrl+Q, which OMP would read
  *   as Alt+Ctrl+Q; no OMP default binds it.
+ * - Ctrl+Alt+N, `OMP Desk: New Session`, and Ctrl+Alt+R, `OMP Desk: Resume Session`: encoded as Escape then Ctrl+N or Ctrl+R,
+ *   which OMP would read as Alt+Ctrl+N and Alt+Ctrl+R; its documented defaults bind neither (Ctrl+R is history search,
+ *   Alt+R retries). Ctrl+Alt+Shift+R above is the different Redraw Terminal chord.
  */
 export function isTerminalWorkbenchChord(event: TerminalKeyEventLike): boolean {
 	if (!(event.ctrlKey || event.metaKey)) return false;
-	if (!event.shiftKey) return event.altKey && isKey(event, "q", "KeyQ");
+	if (!event.shiftKey) return event.altKey && (isKey(event, "q", "KeyQ") || isKey(event, "n", "KeyN") || isKey(event, "r", "KeyR"));
 	return event.altKey ? isKey(event, "r", "KeyR") : isKey(event, "l", "KeyL") || isKey(event, "m", "KeyM");
 }
 

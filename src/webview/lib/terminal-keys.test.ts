@@ -61,7 +61,13 @@ describe("isTerminalWorkbenchChord", () => {
 		assert.equal(isTerminalWorkbenchChord(key("m", { ctrlKey: true, altKey: true })), false);
 		assert.equal(isTerminalWorkbenchChord(key("r", { ctrlKey: true })), false);
 		assert.equal(isTerminalWorkbenchChord(key("R", { ctrlKey: true, shiftKey: true })), false);
-		assert.equal(isTerminalWorkbenchChord(key("R", { ctrlKey: true, altKey: true })), false);
+		assert.equal(isTerminalWorkbenchChord(key("R", { ctrlKey: true, altKey: true })), true, "Ctrl+Alt+R is Resume Session");
+		assert.equal(isTerminalWorkbenchChord(key("n", { ctrlKey: true, altKey: true })), true, "Ctrl+Alt+N is New Session");
+		assert.equal(isTerminalWorkbenchChord({ ...key("\u0442", { ctrlKey: true, altKey: true }), code: "KeyN" }), true, "on any layout");
+		assert.equal(isTerminalWorkbenchChord({ ...key("\u043a", { ctrlKey: true, altKey: true }), code: "KeyR" }), true, "on any layout");
+		assert.equal(isTerminalWorkbenchChord(key("n", { metaKey: true, altKey: true })), true);
+		assert.equal(isTerminalWorkbenchChord(key("n", { ctrlKey: true })), false, "Ctrl+N is the program's own key");
+		assert.equal(isTerminalWorkbenchChord(key("N", { ctrlKey: true, altKey: true, shiftKey: true })), false);
 		assert.equal(isTerminalWorkbenchChord(key("L", { ctrlKey: true, altKey: true, shiftKey: true })), false);
 		assert.equal(isTerminalWorkbenchChord(key("l", { ctrlKey: true })), false, "Ctrl+L is OMP's live-mode key");
 	});

@@ -87,6 +87,7 @@ interface PackageJson {
 		readonly viewsContainers: Readonly<Record<string, readonly { readonly id: string }[]>>;
 		readonly viewsWelcome: readonly { readonly view: string; readonly when?: string; readonly contents: string }[];
 		readonly configuration: { readonly properties: Readonly<Record<string, unknown>> };
+		readonly configurationDefaults: Readonly<Record<string, readonly string[]>>;
 	};
 }
 const manifest = JSON.parse(await readFile(new URL("../../package.json", import.meta.url), "utf8")) as PackageJson;
@@ -452,6 +453,17 @@ describe("commands", () => {
 			assert.ok(entries.length > 0 && entries.every(({ entry }) => entry.when === chatOnly), `${command} appears only in menus that require a Chat`);
 		}
 	});
+
+	it("bind Ctrl+Alt+N to New Session and Ctrl+Alt+R to Resume Session from anywhere, and keep both out of the terminal's shell", () => {
+		const bound = (key: string) => contributes.keybindings.filter(binding => binding.key === key);
+		assert.deepEqual(bound("ctrl+alt+n").map(binding => [binding.command, binding.when]), [["ompDesk.newSession", undefined]], "no when clause: the chord works in an editor, a Chat, the Sessions view and the terminal");
+		assert.deepEqual(bound("ctrl+alt+r").map(binding => [binding.command, binding.when]), [["ompDesk.resumeWorkspaceFolder", undefined]]);
+		const skipShell = contributes.configurationDefaults["terminal.integrated.commandsToSkipShell"] ?? [];
+		for (const command of ["ompDesk.newSession", "ompDesk.resumeWorkspaceFolder"]) assert.ok(skipShell.includes(command), `${command} is in commandsToSkipShell, or a focused terminal would send the chord to the shell`);
+		// The rows these chords stand for run the same commands.
+		assert.equal(declared.get("ompDesk.newSession")?.title, "New Session");
+		assert.equal(declared.get("ompDesk.resumeWorkspaceFolder")?.title, "Resume Session");
+	});
 });
 
 describe("views", () => {
@@ -573,6 +585,8 @@ describe("the namespace (ADR-0068)", () => {
 		["omp.focusComposer", "commandsToSkipShell for the legacy alias of ompDesk.focusComposer"],
 		["omp.goToSession", "commandsToSkipShell for the legacy alias of ompDesk.goToSession"],
 		["omp.moveFileToNewWindow", "commandsToSkipShell for the legacy alias of ompDesk.moveFileToNewWindow"],
+		["omp.newSession", "commandsToSkipShell for the legacy alias of ompDesk.newSession"],
+		["omp.resumeWorkspaceFolder", "commandsToSkipShell for the legacy alias of ompDesk.resumeWorkspaceFolder"],
 		...LEGACY_SETTING_NAMES.map((name): [string, string] => [`omp.${name}`, "hidden deprecated setting of 0.3.x, kept so VS Code still reads, routes and syncs the old value until the migration moved it"]),
 	]);
 
@@ -606,7 +620,7 @@ describe("the namespace (ADR-0068)", () => {
 	});
 
 	it("keeps the omp. skip-shell entries exactly for the aliases of the ompDesk. ones", () => {
-		const defaults = (manifest as unknown as { contributes: { configurationDefaults: Record<string, readonly string[]> } }).contributes.configurationDefaults["terminal.integrated.commandsToSkipShell"] ?? [];
+		const defaults = contributes.configurationDefaults["terminal.integrated.commandsToSkipShell"] ?? [];
 		const current = defaults.filter(id => id.startsWith("ompDesk."));
 		const legacy = defaults.filter(id => id.startsWith("omp."));
 		assert.deepEqual(legacy, current.map(id => "omp." + id.slice("ompDesk.".length)));
