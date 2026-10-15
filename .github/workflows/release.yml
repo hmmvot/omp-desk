@@ -4,16 +4,24 @@ name: Release
 # before the tag: the release does not run the tests itself, it waits for the CI workflow's
 # run on the tagged commit and fails unless that run's latest attempt concluded `success`.
 # After a red CI, re-run the failed jobs of that CI run, then re-run this workflow.
-# A manual run must be started from that tag (Use workflow from: Tags), not from a branch.
+# A manual run must be started from that tag (Use workflow from: Tags), not from a branch,
+# unless it only publishes an existing GitHub Release to the Marketplace (input below).
 #
-# Marketplace publishing is not automated yet. It will be added as a step running
-# `vsce publish --oidc` (trusted publishing, no stored secret) once vsce releases that
-# flag; neither vsce 3.9.2 nor 4.0.0 has it.
+# The `marketplace` job then publishes the same two VSIX files, downloaded from that
+# GitHub Release, to the Visual Studio Marketplace. It signs in with Microsoft Entra ID
+# through GitHub OIDC (no stored secret) in the `marketplace` environment; see
+# docs/publishing.md#authentication. An already published version is skipped, so a
+# re-run after a failed Marketplace step is safe.
 
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      marketplace_tag:
+        description: "Only publish the existing GitHub Release of this tag (v<version>) to the Marketplace"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -24,6 +32,7 @@ concurrency:
 
 jobs:
   release:
+    if: ${{ !inputs.marketplace_tag }}
     runs-on: windows-latest
     permissions:
       contents: write
@@ -88,3 +97,47 @@ jobs:
             --verify-tag \
             --title "OMP Desk $version" \
             --notes-file "$RUNNER_TEMP/release-notes.md"
+
+  marketplace:
+    needs: release
+    # Runs after a successful release, or alone when a manual run names an existing release.
+    if: ${{ !cancelled() && (needs.release.result == 'success' || (needs.release.result == 'skipped' && inputs.marketplace_tag != '')) }}
+    runs-on: windows-latest
+    environment: marketplace
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Download the released VSIX files
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.marketplace_tag || github.ref_name }}
+        run: |
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::'$TAG' is not a v<major>.<minor>.<patch> tag."
+            exit 1
+          fi
+          gh release download "$TAG" --pattern "*.vsix" --dir "$RUNNER_TEMP/vsix"
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - name: Check publish rights for the publisher
+        run: npx vsce verify-pat hmmvot --azure-credential
+      - name: Publish to the Marketplace
+        shell: bash
+        env:
+          TAG: ${{ inputs.marketplace_tag || github.ref_name }}
+        run: |
+          version="${TAG#v}"
+          npx vsce publish --azure-credential --skip-duplicate --packagePath \
+            "$RUNNER_TEMP/vsix/omp-desk-win32-x64-$version.vsix" \
+            "$RUNNER_TEMP/vsix/omp-desk-win32-arm64-$version.vsix"
