@@ -113,7 +113,7 @@ A *composition window* opens at the first `compositionstart` (or at a non-cancel
 - **The composer's guard is the window**: `composingRef.current` reads `surface.composing` (the window, not a React timer) and is `false` when no surface is mounted; `onSettled` flushes `deferredRef`; the draft hand-off's `read` refuses while the window is open or `deferredRef` is not empty. The AskEditor keeps its own textarea guard.
 - Completions do not open or accept during the window (unchanged rule); caret and selection are not reported to React during it; a freeze cannot start inside it (`read` refuses first).
 
-What a script cannot prove is how real Windows IMEs behave. The manual list below is a release condition for the maintainer.
+What a script cannot prove is how real Windows IMEs behave. The manual list below is kept as guidance; the maintainer decided (2026-10-15) that running it is not a release condition.
 
 ### 5. Paste, copy, cut and drop
 
@@ -159,9 +159,9 @@ The model offset of a DOM point is the sum of the lengths of the lines before it
 
 ## Risks and Open Questions
 
-- **IME on real Windows engines** (Japanese, Chinese Pinyin, Korean) is the largest risk and is untested by script. The manual list is a release condition for the maintainer. Rollback is reverting the change: the stored and sent string is unchanged, so no migration exists.
+- **IME on real Windows engines** (Japanese, Chinese Pinyin, Korean) is the largest risk and is untested by script. The maintainer decided (2026-10-15) not to make the manual list a release condition; the risk is accepted and a reported IME defect is fixed when it appears. Rollback is reverting the change: the stored and sent string is unchanged, so no migration exists.
 - **Edit menu and context-menu Undo, Redo, Cut, Copy and Paste.** Edit > Undo and Redo are inert for the composer (the workbench's `execCommand` finds nothing to act on, and the page ignores `historyUndo`). Cut, Copy and Paste from the menu arrive as events and work. The keyboard shortcuts work. Verified by an end-to-end check in a real window.
-- **Behaviour changes the maintainer is told about:** prompt-history recall, queued-message restore, `set_editor_text`, accepted completions and Commands-row inserts become undoable steps; plain-text drop is new; in-editor drag-move of selected text, native spell-check suggestions and the Edit-menu undo are gone.
+- **Behaviour changes the maintainer accepted (2026-10-15):** prompt-history recall, queued-message restore, `set_editor_text`, accepted completions and Commands-row inserts become undoable steps; plain-text drop is new; in-editor drag-move of selected text, native spell-check suggestions and the Edit-menu undo are gone.
 - **Lost native conveniences:** none beyond the above that the textarea provided and the composer used.
 - **Assistive technology** has not been run: NVDA, JAWS and Narrator behaviour for `role=textbox` with `contenteditable`, the named chips, the hint live region, the suggestion count announcement and the `aria-controls`/`aria-activedescendant` pair is on the manual list. Forced-colours rendering of chips and band is checked only in the owned Chromium's emulation.
 - **Large drafts.** Rendering is incremental by line (text updates in place); the fence scan is linear; a 10 000-line paste renders once. Undo snapshots are capped by characters.
@@ -212,7 +212,7 @@ A failure to report: a message sent early, a lost, doubled or reordered characte
 | Owned-Chromium tests (`chat-ui.test.ts`, 185 tests: undo and redo by real keys, plain paste, copy and cut, drop at the pointer, every-offset caret round trip, ARIA attributes and the suggestion status, retained selection, `Input.imeSetComposition`, send-then-compose, deferral and a dialog replacing the field, freeze) | Pass |
 | Real-window scenario `37-chat-composer-surface.spec.ts` (`Ctrl+Z`, `Ctrl+Y`, `Ctrl+Shift+Z`, `Ctrl+X`, `Ctrl+C`, `Ctrl+V`, `fill`, caret kept after Tab, Shift+Tab, a click away and `Ctrl+Shift+L`) and `05`, `35`, `36` | Pass, without the retained-selection hardening of `focus` that was tried and dropped: re-entering the field by Shift+Tab and by the host's focus command keeps the caret, so the hardening has no reproducing case |
 | Smoke screenshots in the hidden test window (prose proportional, block monospace on a band) | Taken, see the release notes of the slice |
-| Real Windows IMEs (Japanese, Chinese, Korean), screen readers, voice typing, the touch keyboard | **Not run.** The maintainer's run of the list above, baseline build first, is a release condition |
+| Real Windows IMEs (Japanese, Chinese, Korean), screen readers, voice typing, the touch keyboard | **Not run.** Not a release condition by the maintainer's decision (2026-10-15); the list above stays as guidance |
 
 ## Related Decisions
 
