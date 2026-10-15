@@ -1445,6 +1445,46 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   context.subscriptions.push({ dispose: () => setOmpResolutionLog(null) });
   setOmpPathReader(configuredOmpPath);
   context.subscriptions.push({ dispose: () => setOmpPathReader(null) });
+  // The native module (ADR-0076) answers every Windows question below in process. Its one load starts here, before the
+  // first reader asks, and every reader awaits it: a reader that ran ahead of an unfinished load would file this window's
+  // claims without a creation time for good.
+  if (process.platform === "win32") {
+    const nativeStartedAt = performance.now();
+    let nativeStagedAfter = 0;
+    const nativeLoad = startWin32Native(async () => {
+      const simulated = simulatedNativeFailure(process.env.OMPDESK_TEST_NATIVE_FAILURE);
+      if (simulated !== null) throw new Error(simulated);
+      const asset = await s.staging.native();
+      nativeStagedAfter = performance.now() - nativeStartedAt;
+      // The load records why it has nothing to load; staging's own words are the cause the notice classifies.
+      if (asset === null) throw new Error(s.staging.nativeRefusal() ?? "the native module could not be staged");
+      return asset;
+    }, log);
+    // Once per window: a load that settled as unavailable says so, with what to do (ADR-0076, decision 6).
+    void nativeLoad.then(native => {
+      log.info(`window timing: native module ${native === null ? "unavailable" : "ready"} ${Math.round(performance.now() - nativeStartedAt)} ms after activation began (staging child ${Math.round(nativeStagedAfter)} ms, load ${Math.round(performance.now() - nativeStartedAt - nativeStagedAfter)} ms)`);
+      return announceNativeFailure({
+        failure: win32NativeFailure,
+        showError: (message, buttons) => vscode.window.showErrorMessage(`OMP Desk: ${message}`, ...buttons),
+        copy: text => vscode.env.clipboard.writeText(text),
+        openTroubleshooting: () => vscode.env.openExternal(vscode.Uri.parse(NATIVE_TROUBLESHOOTING_URL)),
+        reloadWindow: () => vscode.commands.executeCommand("workbench.action.reloadWindow"),
+        diagnostics: failure => nativeDiagnosticsFor({
+          failure,
+          shippedPath: context.asAbsolutePath(NATIVE_ADDON),
+          storageDir: context.globalStorageUri.fsPath,
+          vscodeVersion: vscode.version,
+          deskVersion: diagnosticsEnvironment(context).extensionVersion,
+          arch: process.arch,
+        }),
+        log,
+      });
+    });
+  }
+  activation.mark("native load started");
+  // The profile catalog's first read is file I/O whose completion waits for a turn of the host's one thread, which other
+  // extensions share; it starts now so that wait overlaps the synchronous setup below instead of following it.
+  const catalogRead = createProfileCatalog(context);
   // ADR-0068: the old command ids are registered first, as hidden aliases that forward to the commands registered below, so a
   // keybinding of the previous release works as early as any command does. Then the values the `omp.` namespace held move to
   // `ompDesk.` before anything reads a setting; a window with nothing to move does no I/O. A name another extension
@@ -1484,49 +1524,12 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // The host's one thread is shared with every extension; a stall of 500 ms or more is logged with the Desk operations that overlapped it.
   context.subscriptions.push({ dispose: startLoopLagMonitor(log) });
   activation.mark("commands, legacy aliases, settings move");
-  // The native module (ADR-0076) answers every Windows question below in process. Its one load starts here, before the
-  // first reader asks, and every reader awaits it: a reader that ran ahead of an unfinished load would file this window's
-  // claims without a creation time for good.
-  if (process.platform === "win32") {
-    const nativeStartedAt = performance.now();
-    let nativeStagedAfter = 0;
-    const nativeLoad = startWin32Native(async () => {
-      const simulated = simulatedNativeFailure(process.env.OMPDESK_TEST_NATIVE_FAILURE);
-      if (simulated !== null) throw new Error(simulated);
-      const asset = await s.staging.native();
-      nativeStagedAfter = performance.now() - nativeStartedAt;
-      // The load records why it has nothing to load; staging's own words are the cause the notice classifies.
-      if (asset === null) throw new Error(s.staging.nativeRefusal() ?? "the native module could not be staged");
-      return asset;
-    }, log);
-    // Once per window: a load that settled as unavailable says so, with what to do (ADR-0076, decision 6).
-    void nativeLoad.then(native => {
-      log.info(`window timing: native module ${native === null ? "unavailable" : "ready"} ${Math.round(performance.now() - nativeStartedAt)} ms after activation began (staging child ${Math.round(nativeStagedAfter)} ms, load ${Math.round(performance.now() - nativeStartedAt - nativeStagedAfter)} ms)`);
-      return announceNativeFailure({
-        failure: win32NativeFailure,
-        showError: (message, buttons) => vscode.window.showErrorMessage(`OMP Desk: ${message}`, ...buttons),
-        copy: text => vscode.env.clipboard.writeText(text),
-        openTroubleshooting: () => vscode.env.openExternal(vscode.Uri.parse(NATIVE_TROUBLESHOOTING_URL)),
-        reloadWindow: () => vscode.commands.executeCommand("workbench.action.reloadWindow"),
-        diagnostics: failure => nativeDiagnosticsFor({
-          failure,
-          shippedPath: context.asAbsolutePath(NATIVE_ADDON),
-          storageDir: context.globalStorageUri.fsPath,
-          vscodeVersion: vscode.version,
-          deskVersion: diagnosticsEnvironment(context).extensionVersion,
-          arch: process.arch,
-        }),
-        log,
-      });
-    });
-  }
-  activation.mark("native load started");
-  // This host's start time is a PowerShell command, hundreds of milliseconds to seconds on a busy machine. It runs beside
-  // the rest of the setup; only the claims the index writes wait for it (ADR-0035), so the Sessions view, the commands
-  // and the editors appear without it. A synchronous read froze every extension in the host; an awaited one held them back.
+  // This host's start time is one native call once the module is loaded. It runs beside the rest of the setup; only the
+  // claims the index writes wait for it (ADR-0035), so the Sessions view, the commands and the editors appear without it.
+  // A synchronous read froze every extension in the host; an awaited one held them back.
   const claimHolderCreationTime = readProcessCreationTime(process.pid);
-  // The broker client needs only the storage and extension locations, and the state directory's ACL verification (a
-  // PowerShell run, about half a second idle, 15 s on a loaded machine) is what every attach or launch waits for first.
+  // The broker client needs only the storage and extension locations, and the state directory's ACL verification (native
+  // reads once the module is loaded) is what every attach or launch waits for first.
   // It starts before the catalog is read, the index is built or any registry exists, so it overlaps all of that; every
   // user of the client still awaits this same promise, so a refusal still refuses them. The client starts no broker,
   // host or session.
@@ -1572,8 +1575,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     context.subscriptions.push({ dispose: () => clearInterval(poll) });
   }
   activation.mark("broker client, updater notice, drift capture");
-  const catalog = await createProfileCatalog(context);
-  activation.mark("profile catalog");
+  const catalog = await catalogRead;
+  activation.mark("profile catalog (waited after the setup above)");
   s.catalogStore = catalog;
   // The launcher reports that it is still reading the profile's stored sessions until
   // the one-time import of the predecessor build's folder list has settled, so an empty
