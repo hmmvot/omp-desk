@@ -78,14 +78,27 @@ test("a result whose long lines OMP cut is shown as JSON with its lines cut, nev
 	assert.ok(found.tree.foldable);
 });
 
-test("a result over 1 MiB is text, and detection stays fast under the cap", () => {
+test("a result over 1 MiB is text, and detection cost grows in proportion to the size under the cap", () => {
 	assert.equal(detectOutputFormat(`[${"1,".repeat(MAX_JSON_BYTES)}1]`), null);
-	const big = JSON.stringify(Array.from({ length: 20_000 }, (_, index) => ({ id: index, name: `item-${index}`, tags: ["a", "b"] })));
-	assert.ok(big.length < MAX_JSON_BYTES);
-	const started = performance.now();
-	const found = detectOutputFormat(big);
-	assert.equal(found?.kind, "json");
-	assert.ok(performance.now() - started < 400, "one uninterrupted task stays bounded");
+	// The property is that one detection stays one bounded task up to the cap, which holds only while the cost is linear in the text. An
+	// absolute time bound measures the machine as much as the code, so the cost of a document 8 times larger is compared with the cost
+	// of the small one in this same process: linear work costs about 8 times as much, quadratic work about 64 times. The fastest of
+	// several runs on each side leaves out a pause the machine took; each run is a different text because detection is cached by text.
+	const fastest = (items: number): number => {
+		let best = Infinity;
+		for (let salt = 0; salt < 5; salt++) {
+			const text = JSON.stringify(Array.from({ length: items }, (_, index) => ({ id: index, name: `item-${salt}-${index}`, tags: ["a", "b"] })));
+			assert.ok(text.length < MAX_JSON_BYTES);
+			const started = performance.now();
+			const found = detectOutputFormat(text);
+			best = Math.min(best, performance.now() - started);
+			assert.equal(found?.kind, "json");
+		}
+		return best;
+	};
+	const small = fastest(2_500);
+	const large = fastest(20_000);
+	assert.ok(large < small * 24, `8 times the text costs ${(large / small).toFixed(1)} times as much (linear is about 8, quadratic about 64)`);
 });
 
 test("a tree of data leaves out nulls and the named root keys on request", () => {
