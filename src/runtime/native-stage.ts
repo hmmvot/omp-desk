@@ -16,20 +16,29 @@ import { readFile } from "node:fs/promises";
 import { stageRuntimeAssets } from "../host/runtime-assets.ts";
 import { startWin32Native, win32NativeFailure } from "../host/win32-native.ts";
 
+/** Where the child's time went, in milliseconds: its process age when staging began (runtime boot and module load), loading the packaged module, staging the copy. */
+export interface NativeStageTiming {
+	readonly bootMs: number;
+	readonly loadMs: number;
+	readonly stageMs: number;
+}
+
 /** What the child reports on its one line of output. */
 export type NativeStageVerdict =
-	| { readonly kind: "staged"; readonly path: string; readonly sha256: string }
+	| { readonly kind: "staged"; readonly path: string; readonly sha256: string; readonly timing?: NativeStageTiming }
 	| { readonly kind: "refused"; readonly reason: string };
 
 /** Stage the packaged module under `storageDir`; never throws, every failure is a `refused` verdict. */
 export async function stageNativeModule(packaged: string, storageDir: string): Promise<NativeStageVerdict> {
 	try {
+		const bootMs = performance.now();
 		const sha256 = createHash("sha256").update(await readFile(packaged)).digest("hex");
 		const native = await startWin32Native(async () => ({ path: packaged, sha256 }));
+		const loaded = performance.now();
 		if (native === null) return { kind: "refused", reason: win32NativeFailure() ?? "the packaged native module did not load" };
 		const [staged] = await stageRuntimeAssets({ storageDir, sourcePaths: [packaged] });
 		if (staged === undefined) return { kind: "refused", reason: "staging returned no copy" };
-		return { kind: "staged", path: staged.path, sha256: staged.sha256 };
+		return { kind: "staged", path: staged.path, sha256: staged.sha256, timing: { bootMs, loadMs: loaded - bootMs, stageMs: performance.now() - loaded } };
 	} catch (error) {
 		return { kind: "refused", reason: error instanceof Error ? error.message : String(error) };
 	}

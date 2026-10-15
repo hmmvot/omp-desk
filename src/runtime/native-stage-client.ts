@@ -8,7 +8,7 @@
 import { spawn } from "node:child_process";
 import { ptyRuntimeCommand } from "../host/pty-runtime.ts";
 import { startToolSpawnTrace } from "../host/tool-spawn-trace.ts";
-import type { NativeStageVerdict } from "./native-stage.ts";
+import type { NativeStageTiming, NativeStageVerdict } from "./native-stage.ts";
 
 /**
  * Longest the child may take. It stages one file and verifies a handful of paths in 0.15–0.3 s, but one run on the
@@ -65,15 +65,23 @@ export async function runNativeStage(input: {
 	return promise;
 }
 
+/** The child's own timings when it reported three finite non-negative numbers; absent otherwise (an older child, a mangled line). */
+function parseTiming(value: unknown): { readonly timing: NativeStageTiming } | Record<string, never> {
+	if (typeof value !== "object" || value === null) return {};
+	const { bootMs, loadMs, stageMs } = value as Record<string, unknown>;
+	for (const part of [bootMs, loadMs, stageMs]) if (typeof part !== "number" || !Number.isFinite(part) || part < 0) return {};
+	return { timing: { bootMs: bootMs as number, loadMs: loadMs as number, stageMs: stageMs as number } };
+}
+
 /** The child's last line as a verdict; anything that is not one is a refusal. */
 export function parseVerdict(stdout: string): NativeStageVerdict {
 	const line = stdout.trim().split(/\r?\n/).at(-1) ?? "";
 	try {
 		const value: unknown = JSON.parse(line);
 		if (typeof value === "object" && value !== null) {
-			const { kind, path, sha256, reason } = value as Record<string, unknown>;
+			const { kind, path, sha256, reason, timing } = value as Record<string, unknown>;
 			if (kind === "staged" && typeof path === "string" && typeof sha256 === "string" && /^[0-9a-f]{64}$/.test(sha256)) {
-				return { kind, path, sha256 };
+				return { kind, path, sha256, ...parseTiming(timing) };
 			}
 			if (kind === "refused" && typeof reason === "string") return { kind, reason };
 		}

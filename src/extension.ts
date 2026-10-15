@@ -10,6 +10,8 @@ import { createHash } from "node:crypto";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
+import { MODULE_EVALUATION_STARTED_AT } from "./host/module-clock";
+import { ActivationTimer } from "./host/activation-timing";
 import { UNAVAILABLE_RELOAD_MESSAGE, createDetailHtml, createMermaidPreviewHtml, createShellHtml, createUnavailableGuestHtml } from "./host/guest-webview";
 import { chatExitText, type ChatExitReason } from "./chat/exit-reason";
 import { installedNerdFonts } from "./host/terminal-fonts";
@@ -1432,6 +1434,8 @@ async function revealDesktopNotification(index: SessionIndex, extensionId: strin
 }
 
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  const activationEnteredAt = performance.now();
+  const activation = new ActivationTimer();
   window = createWindowState(context);
   const s = windowState();
   // The `omp-artifact:` scheme first, synchronously: an editor tab of it that Reload Window restores is served as soon as the window has the provider.
@@ -1479,36 +1483,44 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   );
   // The host's one thread is shared with every extension; a stall of 500 ms or more is logged with the Desk operations that overlapped it.
   context.subscriptions.push({ dispose: startLoopLagMonitor(log) });
+  activation.mark("commands, legacy aliases, settings move");
   // The native module (ADR-0076) answers every Windows question below in process. Its one load starts here, before the
   // first reader asks, and every reader awaits it: a reader that ran ahead of an unfinished load would file this window's
   // claims without a creation time for good.
   if (process.platform === "win32") {
+    const nativeStartedAt = performance.now();
+    let nativeStagedAfter = 0;
     const nativeLoad = startWin32Native(async () => {
       const simulated = simulatedNativeFailure(process.env.OMPDESK_TEST_NATIVE_FAILURE);
       if (simulated !== null) throw new Error(simulated);
       const asset = await s.staging.native();
+      nativeStagedAfter = performance.now() - nativeStartedAt;
       // The load records why it has nothing to load; staging's own words are the cause the notice classifies.
       if (asset === null) throw new Error(s.staging.nativeRefusal() ?? "the native module could not be staged");
       return asset;
     }, log);
     // Once per window: a load that settled as unavailable says so, with what to do (ADR-0076, decision 6).
-    void nativeLoad.then(() => announceNativeFailure({
-      failure: win32NativeFailure,
-      showError: (message, buttons) => vscode.window.showErrorMessage(`OMP Desk: ${message}`, ...buttons),
-      copy: text => vscode.env.clipboard.writeText(text),
-      openTroubleshooting: () => vscode.env.openExternal(vscode.Uri.parse(NATIVE_TROUBLESHOOTING_URL)),
-      reloadWindow: () => vscode.commands.executeCommand("workbench.action.reloadWindow"),
-      diagnostics: failure => nativeDiagnosticsFor({
-        failure,
-        shippedPath: context.asAbsolutePath(NATIVE_ADDON),
-        storageDir: context.globalStorageUri.fsPath,
-        vscodeVersion: vscode.version,
-        deskVersion: diagnosticsEnvironment(context).extensionVersion,
-        arch: process.arch,
-      }),
-      log,
-    }));
+    void nativeLoad.then(native => {
+      log.info(`window timing: native module ${native === null ? "unavailable" : "ready"} ${Math.round(performance.now() - nativeStartedAt)} ms after activation began (staging child ${Math.round(nativeStagedAfter)} ms, load ${Math.round(performance.now() - nativeStartedAt - nativeStagedAfter)} ms)`);
+      return announceNativeFailure({
+        failure: win32NativeFailure,
+        showError: (message, buttons) => vscode.window.showErrorMessage(`OMP Desk: ${message}`, ...buttons),
+        copy: text => vscode.env.clipboard.writeText(text),
+        openTroubleshooting: () => vscode.env.openExternal(vscode.Uri.parse(NATIVE_TROUBLESHOOTING_URL)),
+        reloadWindow: () => vscode.commands.executeCommand("workbench.action.reloadWindow"),
+        diagnostics: failure => nativeDiagnosticsFor({
+          failure,
+          shippedPath: context.asAbsolutePath(NATIVE_ADDON),
+          storageDir: context.globalStorageUri.fsPath,
+          vscodeVersion: vscode.version,
+          deskVersion: diagnosticsEnvironment(context).extensionVersion,
+          arch: process.arch,
+        }),
+        log,
+      });
+    });
   }
+  activation.mark("native load started");
   // This host's start time is a PowerShell command, hundreds of milliseconds to seconds on a busy machine. It runs beside
   // the rest of the setup; only the claims the index writes wait for it (ADR-0035), so the Sessions view, the commands
   // and the editors appear without it. A synchronous read froze every extension in the host; an awaited one held them back.
@@ -1559,7 +1571,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     const poll = setInterval(() => { packageChangedOnDisk(); }, PACKAGE_DRIFT_POLL_MS);
     context.subscriptions.push({ dispose: () => clearInterval(poll) });
   }
+  activation.mark("broker client, updater notice, drift capture");
   const catalog = await createProfileCatalog(context);
+  activation.mark("profile catalog");
   s.catalogStore = catalog;
   // The launcher reports that it is still reading the profile's stored sessions until
   // the one-time import of the predecessor build's folder list has settled, so an empty
@@ -2153,6 +2167,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // folder a reinstall may be renaming. The launch paths stage again themselves and
   // report their own failure; this one is just early, and silent.
   void s.staging.entries().catch(() => {});
+  activation.mark("rest of setup");
+  log.info(`window timing: activation ${activation.summary([["host up when the bundle began loading", MODULE_EVALUATION_STARTED_AT], ["bundle evaluation", activationEnteredAt - MODULE_EVALUATION_STARTED_AT]])}`);
   log.info("extension activated");
 }
 

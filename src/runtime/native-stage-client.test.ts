@@ -22,6 +22,13 @@ const ENTRY = fileURLToPath(new URL("./native-stage.ts", import.meta.url));
 
 describe("parseVerdict", () => {
 	const digest = "a".repeat(64);
+	it("reads the child's timings when all three are sound numbers, and drops them otherwise", () => {
+		const staged = { kind: "staged", path: "C:\\x\\koffi.node", sha256: digest };
+		assert.deepEqual(parseVerdict(JSON.stringify({ ...staged, timing: { bootMs: 150.5, loadMs: 10, stageMs: 30 } })), { ...staged, timing: { bootMs: 150.5, loadMs: 10, stageMs: 30 } });
+		for (const timing of [{ bootMs: 1, loadMs: 2 }, { bootMs: -1, loadMs: 2, stageMs: 3 }, { bootMs: "1", loadMs: 2, stageMs: 3 }, "slow", null]) {
+			assert.deepEqual(parseVerdict(JSON.stringify({ ...staged, timing })), staged);
+		}
+	});
 	it("reads a staged verdict and a refusal from the last line", () => {
 		assert.deepEqual(parseVerdict(`noise\n${JSON.stringify({ kind: "staged", path: "C:\\x\\koffi.node", sha256: digest })}\n`), { kind: "staged", path: "C:\\x\\koffi.node", sha256: digest });
 		assert.deepEqual(parseVerdict(`{"kind":"refused","reason":"no"}`), { kind: "refused", reason: "no" });
@@ -61,8 +68,10 @@ describe("runNativeStage against a real child", { skip: process.platform !== "wi
 		assert.deepEqual(traces.map(trace => `${trace.tool} ${trace.purpose} ${trace.outcome}`), ["node native module staging ok"]);
 		assert.ok(!formatToolSpawn(traces[0]!).includes(storageDir), "a trace names no path");
 
+		assert.ok(verdict.timing !== undefined && verdict.timing.bootMs > 0 && verdict.timing.loadMs >= 0 && verdict.timing.stageMs >= 0, "the child reports where its time went");
 		// A second run finds the copy in place and reports the same one.
-		assert.deepEqual(await runNativeStage({ entry: ENTRY, packaged: addon.path, storageDir }), verdict);
+		const again = await runNativeStage({ entry: ENTRY, packaged: addon.path, storageDir });
+		assert.deepEqual(again.kind === "staged" ? { path: again.path, sha256: again.sha256 } : again, { path: verdict.path, sha256: verdict.sha256 });
 	});
 
 	it("refuses a packaged file that is not a loadable module and names why", async () => {
