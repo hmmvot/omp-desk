@@ -1,8 +1,8 @@
 /**
  * One bounded diagnostic line per security or probe tool this extension starts.
  *
- * Restore waits on PowerShell starts (private-storage verification, the identity probe helper,
- * the session-lease probe), and a start that takes seconds on a loaded machine is otherwise
+ * Restore waits on PowerShell starts (private-storage verification, the session-lease probe, the owner-watch helper),
+ * and a start that takes seconds on a loaded machine is otherwise
  * invisible: nothing says which spawn was slow or why it ran. Each spawn reports its fixed
  * purpose, its duration from spawn to exit and the child's pid, so a log attributes every second.
  *
@@ -22,8 +22,8 @@ export type ToolSpawnOutcome =
 
 /** One finished tool run. */
 export interface ToolSpawn {
-	/** The tool: `powershell`, `icacls` or `ls`. */
-	readonly tool: "powershell" | "icacls" | "ls";
+	/** The tool: `powershell`, `icacls`, `ls` or `node` (the one-shot native module stager). */
+	readonly tool: "powershell" | "icacls" | "ls" | "node";
 	/** Why it ran, from a fixed vocabulary (e.g. `private-storage read (9 paths)`). */
 	readonly purpose: string;
 	/** The child's pid when it started; `null` when it never did. */

@@ -18,14 +18,15 @@ import path from "node:path";
 import {
 	isPermittedAclPrincipal,
 	parseWindowsAcl,
+	namedPrincipal,
 	readStorageSecurity,
 	permissionsPermitReplacement,
 	type PrivateStorageSecurityRead,
 } from "./private-storage.ts";
 
 export interface ExecutableTrustProbe {
-	/** Replaces the one PowerShell process that reads the account SID, every access list and every owner. */
-	readonly readSecurity?: (paths: readonly string[], label: string | undefined) => Promise<PrivateStorageSecurityRead>;
+	/** Replaces the native read of the account SID, every access list and every owner. */
+	readonly readSecurity?: (paths: readonly string[]) => Promise<PrivateStorageSecurityRead>;
 }
 
 export type ExecutableTrust =
@@ -65,7 +66,7 @@ export async function verifyExecutableTrust(file: string, probe: ExecutableTrust
 	const paths = [file, ...directories];
 	let security: PrivateStorageSecurityRead;
 	try {
-		security = await (probe.readSecurity ?? readStorageSecurity)(paths, "runtime executable");
+		security = await (probe.readSecurity ?? readStorageSecurity)(paths);
 	} catch (error) {
 		return { ok: false, reason: `the access of ${file} could not be read (${error instanceof Error ? error.message : String(error)})` };
 	}
@@ -91,13 +92,13 @@ export async function verifyExecutableTrust(file: string, probe: ExecutableTrust
 			if (!excessive) continue;
 			return {
 				ok: false,
-				reason: `${label} ${target} lets ${entry.principal} ${strict ? "change" : "replace or re-permission"} it (${entry.permissions})`,
+				reason: `${label} ${target} lets ${await namedPrincipal(entry.principal)} ${strict ? "change" : "replace or re-permission"} it (${entry.permissions})`,
 			};
 		}
 		// An owner outside the trusted set can rewrite the access rules of what it owns.
 		if (report.owner === null) return { ok: false, reason: `the owner of ${target} could not be read` };
 		if (!isPermittedAclPrincipal(report.owner, sid)) {
-			return { ok: false, reason: `${label} ${target} is owned by ${report.owner}, beyond the same-user boundary` };
+			return { ok: false, reason: `${label} ${target} is owned by ${await namedPrincipal(report.owner)}, beyond the same-user boundary` };
 		}
 	}
 	return { ok: true, paths };

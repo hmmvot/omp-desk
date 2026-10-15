@@ -8,21 +8,21 @@
  * recorded, a probe that cannot decide) must not be reported as stopped.
  *
  * `native-session.ts` imports `vscode` through its siblings without file extensions, so it is compiled
- * here with the project's bundler and a `vscode` stand-in, and the real staged probe helper reads the
+ * here with the project's bundler and a `vscode` stand-in, and the readings go through this test's own native module to the
  * real kernel.
  *
  * Runner: `node --test src/host/native-session.test.ts`.
  */
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { after, before, describe, it } from "node:test";
 import { build } from "esbuild";
 import { queryPtyProcessIdentity } from "./pty-identity.ts";
-import type { PtyProbeHelper } from "./pty-identity.ts";
+import { loadWin32Native, setWin32NativeForTest } from "./win32-native.ts";
+import { installedAddonAsset } from "./win32-test-support.ts";
 import type { brokerAndRootGone as brokerAndRootGoneType, recordedRootGone as recordedRootGoneType, waitForManagedRootExit as waitForManagedRootExitType } from "./native-session.ts";
 
 const VSCODE_STUB = `
@@ -31,7 +31,6 @@ export class ThemeIcon { constructor(id) { this.id = id; } }
 export const window = { createTerminal: options => ({ options }), terminals: [] };
 `;
 
-const HELPER = fileURLToPath(new URL("./pty-process-probe.ps1", import.meta.url));
 /** An id no process has. */
 const ABSENT_PID = 2147483000;
 
@@ -39,7 +38,6 @@ let temp: string;
 let wait: typeof waitForManagedRootExitType;
 let bothGone: typeof brokerAndRootGoneType;
 let rootGone: typeof recordedRootGoneType;
-let helper: PtyProbeHelper;
 let ownCreation: string;
 
 before(async () => {
@@ -66,8 +64,8 @@ before(async () => {
 	wait = loaded.waitForManagedRootExit;
 	bothGone = loaded.brokerAndRootGone;
 	rootGone = loaded.recordedRootGone;
-	helper = { path: HELPER, sha256: createHash("sha256").update(await readFile(HELPER)).digest("hex") };
-	const own = await queryPtyProcessIdentity(helper, process.pid);
+	setWin32NativeForTest(await loadWin32Native(await installedAddonAsset()));
+	const own = await queryPtyProcessIdentity(process.pid);
 	assert.equal(own.kind, "found");
 	ownCreation = own.kind === "found" ? own.creationTime : "";
 });
@@ -94,7 +92,8 @@ function deadBrokerRuntime(facts: { brokerPid: number; brokerCreationTime: strin
 	} as unknown as Parameters<typeof waitForManagedRootExitType>[0];
 }
 
-const client = () => ({ attachReady: async () => ({ ready: true, helper }) }) as unknown as Parameters<typeof waitForManagedRootExitType>[1];
+/** A broker client that reads the kernel through this test's own native module, as the real one does. */
+const client = () => ({ identityReading: queryPtyProcessIdentity }) as unknown as Parameters<typeof waitForManagedRootExitType>[1];
 
 describe("the writer of a session whose broker no longer answers", { skip: process.platform !== "win32" ? "the identity probe is implemented for Windows only" : false }, () => {
 	it("is stopped when the broker's and the OMP root's recorded processes are both gone", async () => {
@@ -136,9 +135,9 @@ describe("the proof that a broker and its root are both gone", { skip: process.p
 		assert.equal(await bothGone(client(), { pid: ABSENT_PID, creationTime: GONE_CREATION }, { pid: ABSENT_PID - 1, creationTime: null }), false);
 	});
 
-	it("does not hold without a verified probe", async () => {
-		const noProbe = { attachReady: async () => ({ ready: true, helper: null }) } as unknown as Parameters<typeof waitForManagedRootExitType>[1];
-		assert.equal(await bothGone(noProbe, { pid: ABSENT_PID, creationTime: GONE_CREATION }, { pid: ABSENT_PID - 1, creationTime: GONE_CREATION }), false);
+	it("does not hold when the native module cannot answer", async () => {
+		const noNative = { identityReading: async () => ({ kind: "unknown", detail: "the native module is not available" }) } as unknown as Parameters<typeof waitForManagedRootExitType>[1];
+		assert.equal(await bothGone(noNative, { pid: ABSENT_PID, creationTime: GONE_CREATION }, { pid: ABSENT_PID - 1, creationTime: GONE_CREATION }), false);
 	});
 });
 

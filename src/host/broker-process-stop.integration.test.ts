@@ -24,7 +24,8 @@ import type { Logger } from "../shared/logger.ts";
 import { PtyBrokerClient } from "./pty-client.ts";
 import type { PtyHandle } from "./pty-client.ts";
 import { isPtyProcessAlive, waitForPtyProcessGone } from "./pty-identity.ts";
-import type { PtyProbeHelper } from "./pty-identity.ts";
+import { loadWin32Native, setWin32NativeForTest } from "./win32-native.ts";
+import { installedAddonAsset } from "./win32-test-support.ts";
 import { readPtyRecord } from "./pty-registry.ts";
 
 const EXTENSION_ROOT = fileURLToPath(new URL("../..", import.meta.url));
@@ -35,12 +36,11 @@ const LIVE_SCRIPT = "process.stdout.write('READY\\r\\n'); setInterval(() => {}, 
 const EXITING_SCRIPT = "process.stdout.write('DONE'); process.exit(0);";
 
 const WINDOWS_ONLY = process.platform !== "win32" ? "the process identity readings are implemented for Windows only" : false;
-const BUILT = existsSync(path.join(EXTENSION_ROOT, "out", "pty", "pty-broker.js"));
-const SKIP = WINDOWS_ONLY || (BUILT ? false : "the packaged broker tree is absent: run `node esbuild.mjs --pty` first");
+const BUILT = existsSync(path.join(EXTENSION_ROOT, "out", "pty", "pty-broker.js")) && existsSync(path.join(EXTENSION_ROOT, "out", "native", "koffi.node"));
+const SKIP = WINDOWS_ONLY || (BUILT ? false : "the packaged broker tree or native module is absent: run `node esbuild.mjs` first");
 
 let storage = "";
 let client: PtyBrokerClient;
-let helper: PtyProbeHelper;
 const opened: PtyHandle[] = [];
 let counter = 0;
 
@@ -124,19 +124,17 @@ function realPorts(): BrokerStopPorts {
 	return {
 		log: consoleLogger,
 		attach: brokerStopAttachFor(client, consoleLogger),
-		waitBrokerGone: async (target, timeoutMs) => {
-			const reading = await waitForPtyProcessGone(helper, target.brokerPid, target.brokerCreationTime, timeoutMs);
-			return { gone: reading.gone, detail: reading.detail };
-		},
+		waitBrokerGone: (target, timeoutMs) => waitForPtyProcessGone(target.brokerPid, target.brokerCreationTime, timeoutMs),
 	};
 }
 
 describe("stopBrokerThroughBroker against the real broker", { skip: SKIP }, () => {
 	before(async () => {
+		// Staging reads the account and its access rules through the process's native module.
+		setWin32NativeForTest(await loadWin32Native(await installedAddonAsset()));
 		const readiness = await client.ready();
 		assert.equal(readiness.ready, true, readiness.reason ?? "not ready");
 		assert.ok(readiness.runtime);
-		helper = readiness.runtime.helper;
 	});
 
 	it("stops a running child gracefully, shuts the broker down, and keeps its record", async () => {

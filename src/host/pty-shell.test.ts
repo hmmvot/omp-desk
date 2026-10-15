@@ -114,7 +114,10 @@ describe("folder shell", () => {
 				spec.file,
 				"--cwd",
 				process.cwd(),
-				"--no-helper",
+				"--native",
+				"koffi.node",
+				"--native-sha256",
+				"b".repeat(64),
 			];
 			const parsed = parsePtyBrokerArgs(argv);
 			assert.equal(typeof parsed === "string", false, `the broker refused the default shell: ${String(parsed)}`);
@@ -163,9 +166,9 @@ describe("folder shell", () => {
 			process.cwd(),
 		];
 		const helpers = [
-			"--helper",
-			"probe.ps1",
-			"--helper-sha256",
+			"--native",
+			"koffi.node",
+			"--native-sha256",
 			"b".repeat(64),
 			"--owner-helper",
 			"owner.ps1",
@@ -194,8 +197,12 @@ describe("folder shell", () => {
 		);
 		// A half-configured helper is refused rather than dropped.
 		assert.match(
-			String(parsePtyBrokerArgs([...base, "--helper", "probe.ps1", "--helper-sha256", "b".repeat(64), "--owner-helper", "owner.ps1"])),
+			String(parsePtyBrokerArgs([...base, "--native", "koffi.node", "--native-sha256", "b".repeat(64), "--owner-helper", "owner.ps1"])),
 			/must be given together/,
 		);
+		// The native module is required whole: a broker that could not read its own identity never starts.
+		assert.match(String(parsePtyBrokerArgs([...base, "--owner-helper", "owner.ps1", "--owner-helper-sha256", "c".repeat(64)])), /--native and --native-sha256 are required/);
+		assert.match(String(parsePtyBrokerArgs([...base, "--native", "koffi.node"])), /--native and --native-sha256 are required/);
+		assert.match(String(parsePtyBrokerArgs([...base, "--native", "koffi.node", "--native-sha256", "not-a-digest"])), /--native-sha256 must be a sha256 digest/);
 	});
 });

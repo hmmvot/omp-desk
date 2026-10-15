@@ -73,6 +73,7 @@ import type { KillWindow } from "./runtime/local-kill";
 import type { NativeWatchWindow } from "./runtime/local-native-watch";
 import type { RuntimeRecord } from "./runtime/runtime-record";
 import { createRuntimeStaging } from "./runtime/runtime-entries";
+import { runNativeStage } from "./runtime/native-stage-client";
 import type { RuntimeStaging } from "./runtime/runtime-entries";
 import { LocalSessionRuntime } from "./runtime/local-runtime";
 import type { LocalSessionRuntimeDeps } from "./runtime/local-runtime";
@@ -376,6 +377,8 @@ const HOST_CONTROL_MODULE = "out/omp-host-control.mjs";
 const CONTROL_HELPER = "out/verified-pipe.ps1";
 /** Packaged koffi addon the Windows checks run through, staged before it is loaded (ADR-0076). */
 const NATIVE_ADDON = "out/native/koffi.node";
+/** Packaged one-shot child that stages that addon and verifies the tree it lands in (ADR-0076). */
+const NATIVE_STAGE_CHILD = "out/native-stage.js";
 /**
  * The Bun helper that renames a *stopped* session's stored title through the
  * installed agent's own storage code. It is a plain packaged ESM file: it is not
@@ -1348,7 +1351,11 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
         controlHelper: context.asAbsolutePath(CONTROL_HELPER),
         renameHelper: context.asAbsolutePath(RENAME_HELPER_SCRIPT),
         runtimeProbe: context.asAbsolutePath(RUNTIME_PROBE_MODULE),
-        nativeAddon: context.asAbsolutePath(NATIVE_ADDON),
+      }),
+      stageNative: () => runNativeStage({
+        entry: context.asAbsolutePath(NATIVE_STAGE_CHILD),
+        packaged: context.asAbsolutePath(NATIVE_ADDON),
+        storageDir: context.globalStorageUri.fsPath,
       }),
       refusal: () => (packageChangedOnDisk() ? UPDATED_ON_DISK_ERROR : null),
       configureControlHelper: setControlHelperScript,
@@ -1619,9 +1626,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // provenance keeps the legacy exact-PID terminal path.
   s.reconciler = createOwnerReconciler({
     // The one reading that tells a recycled pid apart from the child this window launched:
-    // the kernel creation time, read through the broker's own staged probe helper. A
-    // platform or helper that cannot answer returns `unknown`, which keeps the recorded
-    // claim rather than freeing it.
+    // the kernel creation time, which the broker reads in process through the staged native
+    // module. A platform or broker that cannot answer returns `unknown`, which keeps the
+    // recorded claim rather than freeing it.
     readProcessIdentity: async pid => {
       const client = await attachBrokerClient();
       if (client === null) return { kind: "unknown", detail: "the PTY broker is not available in this window" };
@@ -3509,7 +3516,7 @@ function sessionRuntimeDeps(index: SessionIndex, chat: ChatRuntime, launchers?: 
     reconciler: () => windowState().reconciler,
     launcher,
     chat, stop, control, identity, nativeWatch, exit, writer, recorded, brokerProvenance, transitions,
-    kill: new LocalKill({ index, control, window: killWindow(index), attachBrokerClient, brokerSlots: () => windowState().brokerSlots, log }),
+    kill: new LocalKill({ index, control, window: killWindow(index), brokerSlots: () => windowState().brokerSlots, log }),
   };
 }
 

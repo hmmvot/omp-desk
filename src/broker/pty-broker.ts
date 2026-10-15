@@ -22,7 +22,8 @@
  *
  * It is run from a content-addressed copy of a staged tree outside the installed
  * extension folder ([ADR-0012](../../docs/decisions/0012-run-child-process-entries-from-staged-copies.md)):
- * this entry, the PowerShell identity probe, and the `node-pty` package with its
+ * this entry, the native module the process checks run through, the PowerShell owner-watch
+ * helper, and the `node-pty` package with its
  * native addon, `conpty.dll` and `OpenConsole.exe`. Nothing it loads is inside the
  * installed extension folder, so a forced reinstall can rename that folder while a
  * session keeps running.
@@ -123,13 +124,7 @@ import {
 	type PtyTreeEvidence,
 	type PtyTreeVerdict,
 } from "../host/pty-protocol.ts";
-import {
-	isPtyProcessAlive,
-	queryPtyProcessIdentity,
-	queryPtyProcessTree,
-	waitForPtyProcessGone,
-	type PtyProbeHelper,
-} from "../host/pty-identity.ts";
+import { isPtyProcessAlive, queryPtyProcessIdentity, queryPtyProcessTree, waitForPtyProcessGone } from "../host/pty-identity.ts";
 import { createLineReader, startPtyBrokerServer, type PtyBrokerServer, type PtyBrokerSideConnection } from "../host/pty-ipc.ts";
 import { claimPtyRecord, ensurePtyStateAccess, retirePtyRecord } from "../host/pty-registry.ts";
 import type * as PtyScreenModule from "./pty-screen.ts";
@@ -141,6 +136,7 @@ import {
 	SELF_CHECK_OUTPUT_LIMIT,
 	SELF_CHECK_INCONCLUSIVE_EXIT,
 	SelfCheckInconclusive,
+	proveNativeCreationTime,
 	watchPipeEcho,
 	selfCheckChild,
 	selfCheckDeadlineFromArgs,
@@ -148,6 +144,9 @@ import {
 	selfCheckTools,
 	selfCheckVerdict,
 } from "./pty-self-check.ts";
+import { silentLogger } from "../shared/logger.ts";
+import { startWin32Native } from "../host/win32-native.ts";
+import type { StagedRuntimeAsset } from "../host/runtime-assets.ts";
 
 /** Exit codes of this entry, for a caller that only has the child's status. */
 export const PTY_BROKER_EXIT = {
@@ -235,9 +234,9 @@ interface BrokerOptions {
 	readonly scrollbackLines: number;
 	readonly backlogChars: number;
 	readonly snapshotChars: number;
-	readonly helper: PtyProbeHelper | null;
+	readonly native: StagedRuntimeAsset;
 	/** The staged owner-watch helper, or `null` when this build has none. */
-	readonly ownerHelper: PtyProbeHelper | null;
+	readonly ownerHelper: StagedRuntimeAsset | null;
 	/** The owner hint a launch was started with; a hint only, never authority. */
 	readonly ownerHint: PtyOwnerHint | null;
 	/** Finite grace between every admitted owning VS Code main process having signaled and the one stop attempt. */
@@ -264,8 +263,8 @@ const VALUED_FLAGS: Record<string, true> = {
 	scrollback: true,
 	backlog: true,
 	"snapshot-chars": true,
-	helper: true,
-	"helper-sha256": true,
+	native: true,
+	"native-sha256": true,
 	"owner-helper": true,
 	"owner-helper-sha256": true,
 	"owner-grace-ms": true,
@@ -287,7 +286,6 @@ const OWNER_HINT_FLAGS = ["owner-host-pid", "owner-parent-pid", "owner-main-pid"
 export function parsePtyBrokerArgs(argv: readonly string[]): BrokerOptions | string {
 	const values = new Map<string, string>();
 	const repeated = new Map<string, string[]>();
-	const flags = new Set<string>();
 	for (let index = 0; index < argv.length; index += 1) {
 		const token = argv[index];
 		if (token === undefined) break;
@@ -307,10 +305,6 @@ export function parsePtyBrokerArgs(argv: readonly string[]): BrokerOptions | str
 			if (value === undefined) return `--${name} needs a value`;
 			index += 1;
 			values.set(name, value);
-			continue;
-		}
-		if (name === "no-helper") {
-			flags.add(name);
 			continue;
 		}
 		return `unknown argument --${name}`;
@@ -343,19 +337,15 @@ export function parsePtyBrokerArgs(argv: readonly string[]): BrokerOptions | str
 	);
 	const launchId = values.get("launch-id") ?? null;
 	if (launchId !== null && !/^[A-Za-z0-9_-]{8,64}$/.test(launchId)) return "--launch-id is not a usable launcher id";
-	const helperPath = values.get("helper");
-	const helperDigest = values.get("helper-sha256");
-	const noHelper = flags.has("no-helper");
-	if (!noHelper && (helperPath === undefined || helperDigest === undefined)) {
-		// A half-configured probe is refused rather than silently ignored: a broker
+	const nativePath = values.get("native");
+	const nativeDigest = values.get("native-sha256");
+	if (nativePath === undefined || nativeDigest === undefined) {
+		// A half-configured native module is refused rather than silently ignored: a broker
 		// that quietly stops proving identity is exactly what this design must not do.
-		return "--helper and --helper-sha256 are required unless --no-helper is given";
+		return "--native and --native-sha256 are required";
 	}
-	const helper =
-		noHelper || helperPath === undefined || helperDigest === undefined
-			? null
-			: { path: helperPath, sha256: helperDigest };
-	if (helper !== null && !isPtyDigest(helper.sha256)) return "--helper-sha256 must be a sha256 digest";
+	if (!isPtyDigest(nativeDigest)) return "--native-sha256 must be a sha256 digest";
+	const native = { path: nativePath, sha256: nativeDigest };
 	const ownerHelperPath = values.get("owner-helper");
 	const ownerHelperDigest = values.get("owner-helper-sha256");
 	if ((ownerHelperPath === undefined) !== (ownerHelperDigest === undefined)) {
@@ -402,7 +392,7 @@ export function parsePtyBrokerArgs(argv: readonly string[]): BrokerOptions | str
 		scrollbackLines: boundedInt(values.get("scrollback"), DEFAULT_SCROLLBACK_LINES, 50, 100_000),
 		backlogChars: boundedInt(values.get("backlog"), DEFAULT_BACKLOG_CHARS, 64 * 1024, 64 * 1024 * 1024),
 		snapshotChars: boundedInt(values.get("snapshot-chars"), PTY_MAX_SNAPSHOT_CHARS, 64 * 1024, 16 * 1024 * 1024),
-		helper,
+		native,
 		ownerHelper,
 		ownerHint,
 		ownerGraceMs: boundedInt(
@@ -485,9 +475,9 @@ export class PtyBroker {
 	 * Whether a stop positively proved the exact child generation gone.
 	 *
 	 * Only `waitForPtyProcessGone` may set this: no process runs under the pid now (`ESRCH`, or the
-	 * helper cannot find it), or the pid now belongs to a process with *another* creation time. A pid
-	 * that answers alive is not an identity, and a broker without a verified probe claims no absence
-	 * at all, so the no-probe fallback never sets it. It is absence evidence about the
+	 * kernel cannot find it), or the pid now belongs to a process with *another* creation time. A pid
+	 * that answers alive is not an identity, and a broker whose native module did not load reads
+	 * every process as `unknown`, so it claims no absence at all. It is absence evidence about the
 	 * process this broker spawned, never a numeric-pid liveness guess. It exists because
 	 * node-pty's Windows exit event can lag or never arrive: the shutdown gate accepts
 	 * this proof where `childExit` is still `null` ([ADR-0029](../../docs/decisions/0029-report-uncontained-pty-tree-stop-as-unknown.md)).
@@ -524,6 +514,10 @@ export class PtyBroker {
 	 */
 	async run(): Promise<number> {
 		await this.log(`start pid=${process.pid} slot=${this.options.slot} kind=${this.options.kind} runtime=${PTY_RUNTIME_VERSION}`);
+		// The one load of the native module, before the first reading of any kind (the state directory's access
+		// rules are read through it too); a module that cannot load leaves every reading `unknown`, so this broker
+		// claims no identity and refuses below.
+		await startWin32Native(async () => this.options.native, { ...silentLogger, warn: message => void this.log(message) });
 		const access = await ensurePtyStateAccess(this.options.storageDir).catch(error => ({
 			ok: false,
 			reason: messageOf(error),
@@ -752,12 +746,7 @@ export class PtyBroker {
 	}
 
 	private async readChildIdentity(pid: number): Promise<void> {
-		const helper = this.options.helper;
-		if (helper === null) {
-			this.notices.push("no process probe was configured, so the native process identity is not proven");
-			return;
-		}
-		const reading = await queryPtyProcessIdentity(helper, pid);
+		const reading = await queryPtyProcessIdentity(pid);
 		if (reading.kind === "found") {
 			this.nativeCreationTime = reading.creationTime;
 			await this.log(`child identity pid=${pid} creation=${reading.creationTime}`);
@@ -771,9 +760,7 @@ export class PtyBroker {
 	}
 
 	private async readOwnCreationTime(): Promise<string | null> {
-		const helper = this.options.helper;
-		if (helper === null) return null;
-		const reading = await queryPtyProcessIdentity(helper, process.pid);
+		const reading = await queryPtyProcessIdentity(process.pid);
 		return reading.kind === "found" ? reading.creationTime : null;
 	}
 
@@ -1197,7 +1184,7 @@ export class PtyBroker {
 				// "Stopped" means the exit event arrived *or* a stop positively proved the
 				// exact child generation gone. The second source exists because node-pty's
 				// Windows exit event can lag or never arrive at all, while `waitForPtyProcessGone`
-				// has already had the kernel confirm absence; the no-probe fallback's liveness reading is not
+				// has already had the kernel confirm absence; a liveness reading is not
 				// accepted as that proof, so a child that is merely unobserved still refuses.
 				const childGone = this.childExit !== null || this.childAbsenceProven;
 				if (frame.requireStopped && !childGone) {
@@ -1273,39 +1260,23 @@ export class PtyBroker {
 			}
 		}
 		if (mode === "force" && rpc === null) await this.escalateWithinHandles();
-		const helper = this.options.helper;
-		let pidGone = false;
-		/**
-		 * Positive absence evidence about the exact child generation. Only `waitForPtyProcessGone`
-		 * sets it (no process runs under the pid, or the pid now has another creation time):
-		 * `isPtyProcessAlive` alone answers about a numeric pid, which is not an identity, so the
-		 * no-probe fallback below never proves anything.
-		 */
-		let absenceProven = false;
-		let detail = "";
-		if (helper === null) {
-			pidGone = !isPtyProcessAlive(pid);
-			detail = "no process probe is configured, so liveness was read without a creation-time check";
-		} else {
-			const gone = await waitForPtyProcessGone(helper, pid, this.nativeCreationTime, timeoutMs);
-			pidGone = gone.gone;
-			absenceProven = gone.gone;
-			detail = gone.detail;
-			if (!gone.gone && mode === "graceful" && rpc === null) {
-				// A graceful stop that did not take effect is escalated once, within the
-				// handles this broker holds, so a stuck child never leaves the caller without
-				// a bounded next step — and no numeric process id is ever signalled.
-				await this.escalateWithinHandles();
-				const retry = await waitForPtyProcessGone(helper, pid, this.nativeCreationTime, timeoutMs);
-				pidGone = retry.gone;
-				absenceProven = retry.gone;
-				detail = retry.detail;
-			}
+		// Absence evidence about the exact child generation comes only from `waitForPtyProcessGone`
+		// (no process runs under the pid, or the pid now has another creation time):
+		// `isPtyProcessAlive` alone answers about a numeric pid, which is not an identity.
+		let gone = await waitForPtyProcessGone(pid, this.nativeCreationTime, timeoutMs);
+		if (!gone.gone && mode === "graceful" && rpc === null) {
+			// A graceful stop that did not take effect is escalated once, within the
+			// handles this broker holds, so a stuck child never leaves the caller without
+			// a bounded next step — and no numeric process id is ever signalled.
+			await this.escalateWithinHandles();
+			gone = await waitForPtyProcessGone(pid, this.nativeCreationTime, timeoutMs);
 		}
+		const pidGone = gone.gone;
+		let detail = gone.detail;
 		// The proof is about the process, not about its tree: it stands even when the
 		// descendant read is unavailable, and it is what lets an explicit shutdown proceed
 		// when the exit event itself never arrives.
-		if (absenceProven) this.childAbsenceProven = true;
+		if (pidGone) this.childAbsenceProven = true;
 		// A live-table walk cannot prove a tree empty (see `PtyTreeEvidence`): this provider
 		// has no kernel-enforced group, so the strongest honest answer is `unknown` with the
 		// survivors it did see reported. The constant names that, so the verdict's meaning is
@@ -1314,24 +1285,20 @@ export class PtyBroker {
 		let tree: PtyTreeVerdict = "unknown";
 		let checked: number[] = [];
 		let treeEvidence: PtyTreeEvidence = "unavailable";
-		if (helper === null) {
-			detail = `${detail}; descendant evidence needs a process probe`;
-		} else {
-			const reading = await queryPtyProcessTree(helper, pid);
-			if (reading.kind === "found") {
-				checked = [...reading.pids];
-				// A live-table walk only reaches a child whose parent link still leads back
-				// to this pid: a descendant whose intermediary already exited is invisible to
-				// it, so an empty answer is *not* proof of an empty tree and is never reported
-				// as one. Survivors it did see are reported as such.
-				tree = checked.length === 0 ? "unknown" : "remaining";
-				treeEvidence = "parent-links-only";
-				if (checked.length === 0) {
-					detail = `${detail}; no live process names ${pid} as its parent, but a descendant whose intermediate parent already exited cannot be reached from a process-table snapshot and no kernel-enforced group is available through this PTY provider`;
-				}
-			} else {
-				detail = `${detail}; the descendant read failed: ${reading.detail}`;
+		const reading = await queryPtyProcessTree(pid);
+		if (reading.kind === "found") {
+			checked = [...reading.pids];
+			// A live-table walk only reaches a child whose parent link still leads back
+			// to this pid: a descendant whose intermediary already exited is invisible to
+			// it, so an empty answer is *not* proof of an empty tree and is never reported
+			// as one. Survivors it did see are reported as such.
+			tree = checked.length === 0 ? "unknown" : "remaining";
+			treeEvidence = "parent-links-only";
+			if (checked.length === 0) {
+				detail = `${detail}; no live process names ${pid} as its parent, but a descendant whose intermediate parent already exited cannot be reached from a process-table snapshot and no kernel-enforced group is available through this PTY provider`;
 			}
+		} else {
+			detail = `${detail}; the descendant read failed: ${reading.detail}`;
 		}
 		this.treeUnproven = !treeProvenEmpty;
 		if (this.treeUnproven) {
@@ -1608,7 +1575,7 @@ async function proveLoopbackLines(deadlineMs: number): Promise<void> {
  * its answer says so (`pipeOnly: true`, `childOutput: false`), so a host can never take it
  * for the full proof. It reports which runtime ran it, which is what the host's version gate reads.
  */
-async function runPipeOnlySelfCheck(deadlineMs: number): Promise<number> {
+async function runPipeOnlySelfCheck(deadlineMs: number, args: readonly string[]): Promise<number> {
 	const started = Date.now();
 	const report: Record<string, unknown> = {
 		runtimeVersion: PTY_RUNTIME_VERSION,
@@ -1627,6 +1594,7 @@ async function runPipeOnlySelfCheck(deadlineMs: number): Promise<number> {
 		durationMs: 0,
 	};
 	try {
+		await proveNativeCreationTime(args);
 		await proveRpcPipeChild(deadlineMs);
 		report.pipeChild = true;
 		await proveLoopbackLines(deadlineMs);
@@ -1662,7 +1630,7 @@ async function runPipeOnlySelfCheck(deadlineMs: number): Promise<number> {
  * not always report one). The child is a plain console client rather than this
  * runtime's own executable, for the measurement `selfCheckChild` records.
  */
-async function runSelfCheck(deadlineMs: number): Promise<number> {
+async function runSelfCheck(deadlineMs: number, args: readonly string[]): Promise<number> {
 	const started = Date.now();
 	const plan = selfCheckPlan(randomBytes(8).toString("hex"));
 	const childCommand = selfCheckChild({
@@ -1685,6 +1653,7 @@ async function runSelfCheck(deadlineMs: number): Promise<number> {
 	};
 	report.pipeChild = false;
 	try {
+		await proveNativeCreationTime(args);
 		// Loaded here and not at the top: a `managed-rpc` broker must never load node-pty.
 		const pty = await import("node-pty");
 		if (typeof pty.spawn !== "function") throw new Error("the staged node-pty package exposes no spawn");
@@ -1806,8 +1775,9 @@ async function main(): Promise<number> {
 			process.stderr.write(`pty-broker: ${messageOf(error)}\n`);
 			return PTY_BROKER_EXIT.arguments;
 		}
-		if (process.argv.slice(2).includes("--pipe-only")) return await runPipeOnlySelfCheck(deadlineMs);
-		return await runSelfCheck(deadlineMs);
+		const args = process.argv.slice(2);
+		if (args.includes("--pipe-only")) return await runPipeOnlySelfCheck(deadlineMs, args);
+		return await runSelfCheck(deadlineMs, args);
 	}
 	if (process.argv.slice(2).includes("--pipe-echo")) return await runPipeEcho();
 	const parsed = parsePtyBrokerArgs(process.argv.slice(2));

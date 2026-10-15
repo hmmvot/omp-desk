@@ -54,7 +54,9 @@ import {
 import { PtyBrokerClient, type PtyHandle, type PtyHandleEvent } from "./pty-client.ts";
 import { PtyRequestError } from "./broker-handle.ts";
 import { connectPtyBroker } from "./pty-ipc.ts";
-import { isPtyProcessAlive, queryPtyProcessTree, waitForPtyProcessGone, type PtyProbeHelper } from "./pty-identity.ts";
+import { isPtyProcessAlive, queryPtyProcessTree, waitForPtyProcessGone } from "./pty-identity.ts";
+import { loadWin32Native, setWin32NativeForTest } from "./win32-native.ts";
+import { installedAddonAsset } from "./win32-test-support.ts";
 import { ptyRecordPath, readPtyRecord } from "./pty-registry.ts";
 
 const EXTENSION_ROOT = fileURLToPath(new URL("../..", import.meta.url));
@@ -75,8 +77,8 @@ const SHELL_SCRIPT = [
 ].join(" ");
 
 const WINDOWS_ONLY = process.platform !== "win32" ? "the process identity readings are implemented for Windows only" : false;
-const BUILT = existsSync(path.join(EXTENSION_ROOT, "out", "pty", "pty-broker.js"));
-const SKIP = WINDOWS_ONLY || (BUILT ? false : "the packaged broker tree is absent: run `node esbuild.mjs --pty` first");
+const BUILT = existsSync(path.join(EXTENSION_ROOT, "out", "pty", "pty-broker.js")) && existsSync(path.join(EXTENSION_ROOT, "out", "native", "koffi.node"));
+const SKIP = WINDOWS_ONLY || (BUILT ? false : "the packaged broker tree or native module is absent: run `node esbuild.mjs` first");
 
 /** Strip escape sequences, so an assertion is about text rather than ConPTY's cursor moves. */
 function plain(text: string): string {
@@ -141,7 +143,6 @@ function refusesWith(code: string): (error: unknown) => boolean {
 const opened: PtyHandle[] = [];
 let storage: string;
 let client: PtyBrokerClient;
-let helper: PtyProbeHelper;
 
 /**
  * A "main" process that starts an "extension-host-role" child, both this runtime's own
@@ -267,10 +268,11 @@ async function launchChild(slot: string, script = MANAGED_SCRIPT): Promise<{ han
 
 describe("broker end to end", { skip: SKIP }, () => {
 	before(async () => {
+		// Staging reads the account and its access rules through the process's native module.
+		setWin32NativeForTest(await loadWin32Native(await installedAddonAsset()));
 		const readiness = await client.ready();
 		assert.equal(readiness.ready, true, readiness.reason ?? "not ready");
 		assert.ok(readiness.runtime);
-		helper = readiness.runtime.helper;
 	});
 
 	it("runs a terminal nobody is watching, and records the child's own identity", async () => {
@@ -417,7 +419,7 @@ describe("broker end to end", { skip: SKIP }, () => {
 		const creation = handle.record.brokerCreationTime;
 		assert.ok(creation !== null);
 		process.kill(gone);
-		const absence = await waitForPtyProcessGone(helper, gone, creation, 20_000);
+		const absence = await waitForPtyProcessGone(gone, creation, 20_000);
 		assert.equal(absence.gone, true, absence.detail);
 		handle.disconnect();
 
@@ -514,7 +516,7 @@ describe("broker end to end", { skip: SKIP }, () => {
 		assert.ok(grandchild > 0, text);
 		const nativePid = (await handle.refreshStatus()).nativePid;
 		assert.ok(nativePid !== null);
-		const tree = await queryPtyProcessTree(helper, nativePid as number);
+		const tree = await queryPtyProcessTree(nativePid as number);
 		assert.equal(tree.kind, "found");
 		assert.equal(tree.kind === "found" ? tree.pids.includes(grandchild) : false, true);
 
@@ -689,7 +691,7 @@ describe("broker end to end", { skip: SKIP }, () => {
 			assert.equal(handle.closed, true);
 
 			assert.equal(fixture.main.kill(), true);
-			const gone = await waitForPtyProcessGone(helper, shellPid, shellCreation, 30_000);
+			const gone = await waitForPtyProcessGone(shellPid, shellCreation, 30_000);
 			assert.equal(gone.gone, true, `the orphaned shell survived its owning instance: ${gone.detail}`);
 
 			// The broker is still there, with its recovery record and the verdict it reached.
@@ -848,7 +850,7 @@ describe("broker end to end", { skip: SKIP }, () => {
 		// a PowerShell run before it connects, which used to hide the race).
 		const brokerCreation = handle.record.brokerCreationTime;
 		assert.ok(brokerCreation !== null);
-		const brokerGone = await waitForPtyProcessGone(helper, handle.brokerPid, brokerCreation, 20_000);
+		const brokerGone = await waitForPtyProcessGone(handle.brokerPid, brokerCreation, 20_000);
 		assert.equal(brokerGone.gone, true, brokerGone.detail);
 		// The endpoint is gone and the tree was never proven: the slot stays occupied by an
 		// uncertain record, so no successor may take it.
@@ -873,7 +875,7 @@ describe("broker end to end", { skip: SKIP }, () => {
 		const creation = handle.record.brokerCreationTime;
 		assert.ok(creation !== null);
 		process.kill(brokerPid, "SIGTERM");
-		const gone = await waitForPtyProcessGone(helper, brokerPid, creation, 20_000);
+		const gone = await waitForPtyProcessGone(brokerPid, creation, 20_000);
 		assert.equal(gone.gone, true, gone.detail);
 		handle.disconnect();
 		// The broker exited on a signal: the record stays as recovery metadata.
@@ -942,7 +944,7 @@ describe("broker end to end", { skip: SKIP }, () => {
 		// it: absence proof is what the gate reads, not the event alone.
 		const closed = await handle.shutdown();
 		assert.equal(closed.stopped, true);
-		const absence = await waitForPtyProcessGone(helper, handle.brokerPid, handle.record.brokerCreationTime, 20_000);
+		const absence = await waitForPtyProcessGone(handle.brokerPid, handle.record.brokerCreationTime, 20_000);
 		assert.equal(absence.gone, true, absence.detail);
 		// The root is gone and the tree was never proven: an explicit shutdown still leaves
 		// the record, so a later window can tell an uncertain stop from one that never ran.

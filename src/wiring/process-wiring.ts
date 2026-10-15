@@ -77,8 +77,8 @@ export interface ProcessWiringDeps {
 	catalogLoaded(): boolean;
 	/**
 	 * `null` once the window's startup restore is over, otherwise a promise that settles when it is. The background
-	 * reads of the list (its poll, a visibility read, the read after a launcher refresh) wait for it: they stage the
-	 * probe helper and read process identities, PowerShell that would compete with the restore. An explicit action
+	 * reads of the list (its poll, a visibility read, the read after a launcher refresh) wait for it: they read process
+	 * identities and the catalog, which would compete with the restore. An explicit action
 	 * (Refresh, Stop, Kill All) never waits.
 	 */
 	startupRestoreOver(): Promise<void> | null;
@@ -196,20 +196,14 @@ export function createBrokerProcessReaderFor(deps: ProcessWiringDeps): BrokerPro
 			return buildBrokerProcessCatalog(catalogSourcesFrom(deps));
 		},
 		isAlive: isPtyProcessAlive,
-		async readCreationTime(pid) {
-			const client = await deps.client();
-			const ready = client === null ? null : await client.attachReady().catch(() => null);
-			if (ready === null || ready.helper === null) return { kind: "unknown", detail: "the process probe is not available" };
-			return await queryPtyProcessIdentity(ready.helper, pid);
-		},
+		readCreationTime: queryPtyProcessIdentity,
 		async readChild(facts) {
 			const client = await deps.client();
 			return client === null ? "unknown" : await readChildState(client, facts);
 		},
 		async buildDigest() {
 			const client = await deps.client();
-			const ready = client === null ? null : await client.attachReady().catch(() => null);
-			return ready?.treeDigest ?? null;
+			return client === null ? null : (await client.attachIdentity()).treeDigest;
 		},
 		now: Date.now,
 	});
@@ -292,24 +286,10 @@ export function registerSessionProcesses(context: vscode.ExtensionContext, deps:
 			if (client === null) return { ok: false, reason: "Background process support is unavailable. Reload the window and try Stop again." };
 			return await brokerStopAttachFor(client, deps.log)(target);
 		},
-		async waitBrokerGone(target, timeoutMs) {
-			const client = await deps.client();
-			const ready = client === null ? null : await client.attachReady().catch(() => null);
-			if (ready === null || ready.helper === null) return { gone: false, detail: "the process probe is not available" };
-			return await waitForPtyProcessGone(ready.helper, target.brokerPid, target.brokerCreationTime, timeoutMs);
-		},
+		waitBrokerGone: (target, timeoutMs) => waitForPtyProcessGone(target.brokerPid, target.brokerCreationTime, timeoutMs),
 	};
-	/** The kernel probes behind a peer's executor identity, or `null` when the broker client has no verified helper. */
-	const peerProbe = async (): Promise<PeerExecutorProbe | null> => {
-		const client = await deps.client();
-		const ready = client === null ? null : await client.attachReady().catch(() => null);
-		const helper = ready?.helper ?? null;
-		if (helper === null) return null;
-		return {
-			read: pid => queryPtyProcessIdentity(helper, pid),
-			waitGone: (pid, creationTime, timeoutMs) => waitForPtyProcessGone(helper, pid, creationTime, timeoutMs),
-		};
-	};
+	/** The kernel probes behind a peer's executor identity. */
+	const peerProbe: PeerExecutorProbe = { read: queryPtyProcessIdentity, waitGone: waitForPtyProcessGone };
 
 	const controllerPorts: ProcessControllerPorts = {
 		read,
@@ -338,11 +318,10 @@ export function registerSessionProcesses(context: vscode.ExtensionContext, deps:
 		waitBrokerGone: (target, timeoutMs) => stopPorts.waitBrokerGone(target, timeoutMs),
 		async peers() {
 			const windows = await deps.peers();
-			const probe = await peerProbe();
-			return await Promise.all(windows.map(async window => ({ holderId: window.holderId, label: window.label, executor: await identifyPeerExecutor(window.hostPid, probe) })));
+			return await Promise.all(windows.map(async window => ({ holderId: window.holderId, label: window.label, executor: await identifyPeerExecutor(window.hostPid, peerProbe) })));
 		},
 		async peerExecutorGone(peer) {
-			return await proveExecutorGone(peer, await peerProbe());
+			return await proveExecutorGone(peer, peerProbe);
 		},
 		askWindowToStop: (holderId, rows) => deps.askWindowToStop(holderId, rows),
 		async refresh() {

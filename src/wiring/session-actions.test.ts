@@ -200,7 +200,6 @@ async function world(index: unknown = null, overrides: Partial<SessionActionsDep
 				notice: (_level, text) => { stub.window.notices.push(text); },
 				requester: () => `the Sessions menu of window "${stub.workspace.name ?? "no folder"}" (${(index as SessionIndex).claimHolder.id.slice(0, 8)})`,
 			},
-			attachBrokerClient: async () => null,
 			brokerSlots: () => state.brokerSlots,
 			log: recordingLogger(lines),
 		}),

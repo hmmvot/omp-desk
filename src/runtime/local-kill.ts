@@ -3,7 +3,7 @@
  * row at once, then record a killed session as stopped.
  *
  * What Kill is, and why it may signal a process id, is in `host/session-kill.ts`. This module only
- * builds its ports: the identity probe and `taskkill` it ends trees with, the recorded process it
+ * builds its ports: the kernel identity readings and `taskkill` it ends trees with, the recorded process it
  * examines (this window's own runtime identity, else the index's record) and the recording that
  * follows a proven kill, through the index's incarnation-bound `reconcileKilledHost`. Everything the
  * user sees (the selection, the notifications, the launcher refreshes) is the window's, through
@@ -14,8 +14,6 @@ import type { Logger } from "../shared/logger.ts";
 import type { BrokerProcessRow } from "../host/broker-processes.ts";
 import type { BrokerSlotStore } from "../host/broker-slots.ts";
 import { isPtyProcessAlive, queryPtyProcessIdentity, waitForPtyProcessGone } from "../host/pty-identity.ts";
-import type { PtyProbeHelper } from "../host/pty-identity.ts";
-import type { PtyBrokerClient } from "../host/pty-client.ts";
 import { killSelection, runTaskkillTree } from "../host/session-kill.ts";
 import type { CapturedHost, KillSelection, RecordedProcess } from "../host/session-kill.ts";
 import type { SessionIndex } from "../host/session-index.ts";
@@ -45,8 +43,6 @@ export interface LocalKillDeps {
 	readonly index: SessionIndex;
 	readonly control: LocalHostControl;
 	readonly window: KillWindow;
-	/** The broker client, or `null` when brokers are unavailable in this window. Its verified probe helper reads identities. */
-	readonly attachBrokerClient: () => Promise<PtyBrokerClient | null>;
 	readonly brokerSlots: () => BrokerSlotStore | undefined;
 	readonly log: Logger;
 }
@@ -61,24 +57,12 @@ export class LocalKill {
 	/** The Kill command: one selection in, the report out. Never throws. */
 	kill(selection: KillSelection): Promise<void> {
 		const { index, window, log } = this.#deps;
-		/** The identity probe, or `null`: without it no process can be told from a stranger, so nothing is killed. */
-		const helper = async (): Promise<PtyProbeHelper | null> => {
-			const client = await this.#deps.attachBrokerClient();
-			const ready = client === null ? null : await client.attachReady().catch(() => null);
-			return ready?.helper ?? null;
-		};
 		return killSelection(selection, {
 			isAlive: isPtyProcessAlive,
 			pause: ms => delay(ms),
-			async readIdentity(pid) {
-				const probe = await helper();
-				return probe === null ? { kind: "unknown", detail: "the process probe is not available in this window" } : await queryPtyProcessIdentity(probe, pid);
-			},
+			readIdentity: queryPtyProcessIdentity,
 			killTree: pid => runTaskkillTree(pid),
-			async waitGone(pid, creationTime, timeoutMs) {
-				const probe = await helper();
-				return probe === null ? { gone: false, detail: "the process probe is not available in this window" } : await waitForPtyProcessGone(probe, pid, creationTime, timeoutMs);
-			},
+			waitGone: waitForPtyProcessGone,
 			readRows: () => window.readRows(),
 			recordedProcess: tabId => this.#recordedProcessOf(tabId),
 			forgetStoppedSlot: async slot => {

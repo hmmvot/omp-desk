@@ -4,8 +4,8 @@
  * [ADR-0012](../../docs/decisions/0012-run-child-process-entries-from-staged-copies.md),
  * [ADR-0032](../../docs/decisions/0032-prove-the-pty-runtime-with-a-console-child.md)).
  *
- * A broker is not a single file. It is an entry script, a PowerShell identity probe,
- * and a `node-pty` package whose native addon loads `conpty.dll` and
+ * A broker is not a single file. It is an entry script, the native module the process
+ * checks run through, a PowerShell owner-watch helper, and a `node-pty` package whose native addon loads `conpty.dll` and
  * `OpenConsole.exe` from beside itself and a worker script from a path relative to
  * its own directory. All of that has to keep the layout it was built with, has to
  * live outside the installed extension folder while a session runs, and has to be
@@ -13,8 +13,8 @@
  *
  * So this module does three things and refuses to guess at any of them:
  *
- * 1. it enumerates the packaged tree (`out/pty/**`, produced by `esbuild.mjs` from
- *    `node-pty` plus the checked-in helper), and hands it to the shared tree staging;
+ * 1. it enumerates the packaged tree (`out/pty/**` plus `out/native/koffi.node`, produced by `esbuild.mjs` from
+ *    `node-pty`, the checked-in helper and koffi), and hands it to the shared tree staging;
  * 2. it *proves* the runtime instead of assuming it: the staged entry is started once
  *    with `--self-check`, which loads the addon in the same runtime the broker will
  *    use, runs a real child through a real pseudo console in the staged tree, and
@@ -57,9 +57,10 @@ import {
 	SELF_CHECK_DEADLINE_FLAG,
 	SELF_CHECK_DEADLINE_MS,
 	SELF_CHECK_INCONCLUSIVE_EXIT,
+	SELF_CHECK_NATIVE_DIGEST_FLAG,
+	SELF_CHECK_NATIVE_FLAG,
 	selfCheckTimeoutMayBeLateness,
 } from "../broker/pty-self-check.ts";
-import type { PtyProbeHelper } from "./pty-identity.ts";
 
 /** Directory in the installed extension holding the packaged broker tree. */
 export const PTY_RUNTIME_DIRECTORY = "out/pty";
@@ -70,8 +71,11 @@ export const PTY_RUNTIME_NAMESPACE = "pty-tree";
 /** Entry script of the broker inside the tree. */
 export const PTY_BROKER_ENTRY = "pty-broker.js";
 
-/** Identity probe helper inside the tree. */
-export const PTY_PROBE_HELPER = "pty-process-probe.ps1";
+/** The native module inside the tree: the build's `out/native/koffi.node`, staged with the rest (ADR-0076). */
+export const PTY_NATIVE_ADDON = "native/koffi.node";
+
+/** Where the build puts that module, relative to the extension root. */
+export const PTY_NATIVE_SOURCE = "out/native/koffi.node";
 
 /** Owner-watch helper inside the tree; the tree is incomplete without it (ADR-0030). */
 export const PTY_OWNER_HELPER = "pty-owner-watch.ps1";
@@ -95,9 +99,10 @@ const KNOWN_PLATFORMS: Record<string, true> = {
 export interface PtyRuntime {
 	readonly tree: StagedRuntimeTree;
 	readonly entry: StagedRuntimeAsset;
-	readonly helper: PtyProbeHelper;
+	/** The staged native module (ADR-0076): handed to a broker on its command line, which re-hashes and loads it. */
+	readonly native: StagedRuntimeAsset;
 	/** The staged owner-watch helper, run for a folder shell that was given a hint. */
-	readonly ownerHelper: PtyProbeHelper;
+	readonly ownerHelper: StagedRuntimeAsset;
 	/** `sha256` of the entry script, re-verified before it is started. */
 	readonly entrySha256: string;
 	/** What the self-check observed, for diagnostics; `null` for a tree admitted before its probe finished. */
@@ -158,7 +163,7 @@ export interface PtyRuntimeOptions {
 	readonly selfCheckDeadlineMs?: number;
 	/** Test seam: the self-check run; defaults to starting the staged entry with `--self-check`. */
 	readonly runSelfCheck?: (
-		runtime: { readonly entry: StagedRuntimeAsset; readonly tree: StagedRuntimeTree },
+		runtime: { readonly entry: StagedRuntimeAsset; readonly native: StagedRuntimeAsset; readonly tree: StagedRuntimeTree },
 		options: PtyRuntimeOptions,
 	) => Promise<SelfCheckResult>;
 	/**
@@ -190,6 +195,13 @@ export async function ptyRuntimeSources(extensionRoot: string): Promise<readonly
 	for (const relativePath of files) {
 		if (relativePath.endsWith(".map")) continue;
 		sources.push({ relativePath, sourcePath: join(root, ...relativePath.split("/")) });
+	}
+	// The addon is packaged beside the tree, not inside it, because the extension host loads it too
+	// (ADR-0076). It rides in the tree so its digest is part of the tree's, and so of every stored proof.
+	// A build without it yields an incomplete tree, which `ensurePtyRuntime` reports by name.
+	const nativeSource = join(extensionRoot, ...PTY_NATIVE_SOURCE.split("/"));
+	if ((await stat(nativeSource).catch(() => null))?.isFile() === true) {
+		sources.push({ relativePath: PTY_NATIVE_ADDON, sourcePath: nativeSource });
 	}
 	return sources;
 }
@@ -262,12 +274,21 @@ async function executableStamp(file: string): Promise<string> {
  * still only have been lateness ({@link selfCheckTimeoutMayBeLateness}).
  */
 async function runSelfCheck(
-	runtime: { readonly entry: StagedRuntimeAsset; readonly tree: StagedRuntimeTree },
+	runtime: { readonly entry: StagedRuntimeAsset; readonly native: StagedRuntimeAsset; readonly tree: StagedRuntimeTree },
 	options: PtyRuntimeOptions,
 ): Promise<SelfCheckResult> {
 	const { command, env } = ptyRuntimeCommand(options.nodePath);
 	const deadlineMs = options.selfCheckDeadlineMs ?? SELF_CHECK_DEADLINE_MS;
-	const args = [...(options.runtimeArgs ?? []), runtime.entry.path, "--self-check", ...(options.pipeOnly === true ? ["--pipe-only"] : [])];
+	const args = [
+		...(options.runtimeArgs ?? []),
+		runtime.entry.path,
+		"--self-check",
+		...(options.pipeOnly === true ? ["--pipe-only"] : []),
+		SELF_CHECK_NATIVE_FLAG,
+		runtime.native.path,
+		SELF_CHECK_NATIVE_DIGEST_FLAG,
+		runtime.native.sha256,
+	];
 	if (options.selfCheckDeadlineMs !== undefined) args.push(`${SELF_CHECK_DEADLINE_FLAG}=${options.selfCheckDeadlineMs}`);
 	const child = spawn(command, args, {
 		cwd: runtime.tree.directory,
@@ -427,84 +448,15 @@ export async function ptyPackagedTreeDigest(extensionRoot: string): Promise<stri
 	return (await hashRuntimeTree(await ptyRuntimeSources(extensionRoot))).digest;
 }
 
-/** Where the identity probe alone is staged, apart from the whole broker tree. */
-export const PTY_PROBE_NAMESPACE = "pty-probe";
-
-/** What an attach needs from the runtime: the verified identity probe, and nothing that is executed as a session. */
-export interface PtyProbeReadiness {
-	readonly ready: boolean;
-	readonly reason: string | null;
-	readonly runtimeVersion: number;
-	/** The digest this build's packaged broker tree has (what a broker of this build reports), computed without staging it. */
-	readonly treeDigest: string | null;
-	readonly helper: PtyProbeHelper | null;
-}
-
-const stagedProbes = new Map<string, PtyProbeHelper>();
-
-/**
- * Stage and verify only the identity probe helper.
- *
- * Re-adopting an already-running broker reads its durable record, takes the kernel creation
- * time of the recorded pid through this helper, and authenticates with the record's token; it
- * never executes the staged broker tree, so the tree's self-check (which guards *starting* a
- * child under it) is not part of this path. The helper gets the same treatment as any staged
- * file: content-addressed, copied into owner-only storage, access-verified, and re-read and
- * re-hashed by the probe immediately before every spawn. The tree digest an attach compares a
- * broker's against is computed by hashing the packaged files, which writes nothing.
- */
-export async function ensurePtyProbeHelper(options: PtyRuntimeOptions): Promise<PtyProbeReadiness> {
-	const fail = (reason: string): PtyProbeReadiness => ({
-		ready: false,
-		reason,
-		runtimeVersion: PTY_RUNTIME_VERSION,
-		treeDigest: null,
-		helper: null,
-	});
-	if (process.platform !== PTY_SUPPORTED_PLATFORM) {
-		return fail(`the PTY broker is implemented and measured for ${PTY_SUPPORTED_PLATFORM} only; this host is ${process.platform}`);
-	}
-	let all: readonly RuntimeTreeSource[];
-	let treeDigest: string;
-	try {
-		all = await ptyRuntimeSources(options.extensionRoot);
-		treeDigest = (await hashRuntimeTree(all)).digest;
-	} catch (error) {
-		return fail(`the packaged broker tree could not be read: ${messageOf(error)}`);
-	}
-	const sources = all.filter(source => source.relativePath === PTY_PROBE_HELPER);
-	if (sources.length !== 1) return fail(`the packaged broker tree is incomplete: ${PTY_PROBE_HELPER} is missing (run the build)`);
-	let tree: StagedRuntimeTree;
-	try {
-		tree = await stageRuntimeTree({
-			storageDir: options.storageDir,
-			namespace: PTY_PROBE_NAMESPACE,
-			sources,
-			...(options.access === undefined ? {} : { access: options.access }),
-		});
-	} catch (error) {
-		return fail(`the identity probe could not be staged: ${messageOf(error)}`);
-	}
-	const file = tree.files.find(candidate => candidate.relativePath === PTY_PROBE_HELPER);
-	if (file === undefined) return fail("the staged identity probe went missing");
-	const cacheKey = `${options.storageDir}\0${tree.digest}`;
-	const known = stagedProbes.get(cacheKey);
-	if (known !== undefined) return { ready: true, reason: null, runtimeVersion: PTY_RUNTIME_VERSION, treeDigest, helper: known };
-	if (!(await verifyStagedRuntimeTree(tree))) return fail("the staged identity probe does not hold the bytes it was staged with");
-	const helper: PtyProbeHelper = { path: file.path, sha256: file.sha256 };
-	stagedProbes.set(cacheKey, helper);
-	return { ready: true, reason: null, runtimeVersion: PTY_RUNTIME_VERSION, treeDigest, helper };
-}
-
 /**
  * Stage the broker tree and prove it.
  *
  * A proven answer (`ready` and `proven`) means: every packaged file was copied into
  * owner-only storage outside the installed extension, every copy was re-hashed, the
- * entry, the identity probe and the owner-watch helper are all present, and the staged
- * entry proved a real child and a pipe child in the runtime that will be used for
- * sessions. A tree that fails any of that is reported unready with the reason, and the
- * caller must not start a broker from it.
+ * entry, the native module and the owner-watch helper are all present, and the staged
+ * entry loaded the native module and proved a real child and a pipe child in the runtime
+ * that will be used for sessions. A tree that fails any of that is reported unready with
+ * the reason, and the caller must not start a broker from it.
  *
  * The one other ready answer is the provisional one (`ready` without `proven`): the
  * tree is staged and verified, but the self-check ran out of time with nothing observed
@@ -533,7 +485,7 @@ export async function ensurePtyRuntime(options: PtyRuntimeOptions): Promise<PtyR
 		return notReady(`the packaged broker tree could not be listed: ${messageOf(error)}`);
 	}
 	const missing: string[] = [];
-	for (const required of [PTY_BROKER_ENTRY, PTY_PROBE_HELPER, PTY_OWNER_HELPER]) {
+	for (const required of [PTY_BROKER_ENTRY, PTY_NATIVE_ADDON, PTY_OWNER_HELPER]) {
 		if (!sources.some(source => source.relativePath === required)) missing.push(required);
 	}
 	if (missing.length > 0) {
@@ -551,10 +503,10 @@ export async function ensurePtyRuntime(options: PtyRuntimeOptions): Promise<PtyR
 		return notReady(`the broker tree could not be staged: ${messageOf(error)}`);
 	}
 	const entry = tree.files.find(file => file.relativePath === PTY_BROKER_ENTRY);
-	const helper = tree.files.find(file => file.relativePath === PTY_PROBE_HELPER);
+	const native = tree.files.find(file => file.relativePath === PTY_NATIVE_ADDON);
 	const ownerHelper = tree.files.find(file => file.relativePath === PTY_OWNER_HELPER);
-	if (entry === undefined || helper === undefined || ownerHelper === undefined) {
-		return notReady("the staged broker tree lost its entry, its identity probe or its owner-watch helper");
+	if (entry === undefined || native === undefined || ownerHelper === undefined) {
+		return notReady("the staged broker tree lost its entry, its native module or its owner-watch helper");
 	}
 	const cacheKey = `${options.storageDir}\0${tree.digest}\0${options.nodePath ?? ""}\0${
 		options.pipeOnly === true ? `pipe-only\0${await executableStamp(ptyRuntimeCommand(options.nodePath).command)}` : "full"
@@ -576,7 +528,7 @@ export async function ensurePtyRuntime(options: PtyRuntimeOptions): Promise<PtyR
 	const build = (selfCheck: PtySelfCheckAnswer | null): PtyRuntime => ({
 		tree,
 		entry,
-		helper: { path: helper.path, sha256: helper.sha256 },
+		native: { path: native.path, sha256: native.sha256 },
 		ownerHelper: { path: ownerHelper.path, sha256: ownerHelper.sha256 },
 		entrySha256: entry.sha256,
 		selfCheck,
@@ -591,7 +543,7 @@ export async function ensurePtyRuntime(options: PtyRuntimeOptions): Promise<PtyR
 			return { ...readyAnswer(reused), reusedProof: { provedAt: stored.record.provedAt, file: ptyProofPath(options.storageDir, key) } };
 		}
 	}
-	const check = await (options.runSelfCheck ?? runSelfCheck)({ entry, tree }, options);
+	const check = await (options.runSelfCheck ?? runSelfCheck)({ entry, native, tree }, options);
 	if (check.kind === "broken") {
 		return notReady(check.detail, tree.digest);
 	}

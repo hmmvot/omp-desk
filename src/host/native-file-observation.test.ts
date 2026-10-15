@@ -48,6 +48,8 @@ import {
 import { permissionsPermitReplacement, posixAccessMarker, posixAccessProblem, readStorageSecurity } from "./private-storage.ts";
 import { TEST_CURRENT_SID, fixtureAcl, fixturePrincipal } from "./private-storage-test-support.ts";
 import { shortDirectoryAlias } from "./short-name-test-support.ts";
+import { loadWin32Native, setWin32NativeForTest } from "./win32-native.ts";
+import { installedAddonAsset } from "./win32-test-support.ts";
 import {
 	createFileEvidenceHooks,
 	createFileEvidenceObserver,
@@ -298,6 +300,7 @@ async function blobFilesOf(paths: ReturnType<typeof pathsFor>): Promise<string[]
 }
 
 before(async () => {
+	if (process.platform === "win32") setWin32NativeForTest(await loadWin32Native(await installedAddonAsset()));
 	temp = await fs.mkdtemp(path.join(os.tmpdir(), "omp-file-evidence-"));
 	workspace = path.join(temp, "ws");
 	store = path.join(temp, "store");

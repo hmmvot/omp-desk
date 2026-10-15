@@ -22,6 +22,7 @@
 import type { Logger } from "../shared/logger.ts";
 import { stageRuntimeAssets, verifyStagedRuntimeAsset } from "../host/runtime-assets.ts";
 import type { StagedRuntimeAsset } from "../host/runtime-assets.ts";
+import type { NativeStageVerdict } from "./native-stage.ts";
 
 /** Staged copies every child process of this window runs. */
 export interface StagedRuntimeEntries {
@@ -45,8 +46,9 @@ export interface RuntimeStagingDeps {
 		readonly controlHelper: string;
 		readonly renameHelper: string;
 		readonly runtimeProbe: string;
-		readonly nativeAddon: string;
 	};
+	/** Stages the packaged native module and verifies the tree it lands in, in a child that loads the packaged copy. */
+	stageNative(): Promise<NativeStageVerdict>;
 	/**
 	 * Why the packaged entries must not be staged right now (they are no longer the files this host
 	 * loaded, so a child started from them would speak a newer protocol), or `null`.
@@ -63,8 +65,10 @@ export interface RuntimeStaging {
 	/**
 	 * The staged copy of the native module (`koffi.node`, ADR-0076), verified before it is handed out.
 	 *
-	 * Staged on its own, not with {@link RuntimeStaging.entries}: a module that cannot be staged only makes
-	 * the Windows readings it serves unknown and must never stop a host from launching.
+	 * Staged by the one-shot child (`deps.stageNative`), never by this process: this process reads access
+	 * natively, so it cannot verify the tree the module is staged into before it has the module. Staged on its
+	 * own, not with {@link RuntimeStaging.entries}: a module that cannot be staged only makes the Windows
+	 * readings it serves unknown and must never stop a host from launching.
 	 */
 	native(): Promise<StagedRuntimeAsset | null>;
 }
@@ -113,13 +117,17 @@ export function createRuntimeStaging(deps: RuntimeStagingDeps): RuntimeStaging {
 				const cached = await stagedNative;
 				if (cached !== null && (await verifyStagedRuntimeAsset(cached))) return cached;
 			}
-			stagedNative = stageRuntimeAssets({
-				storageDir: deps.storageDir(),
-				sourcePaths: [deps.packagedPaths().nativeAddon],
-			}).then(([addon]) => addon ?? null).catch((error: unknown) => {
-				deps.log.warn(`the native module could not be staged: ${error instanceof Error ? error.message : String(error)}`);
-				return null;
-			});
+			stagedNative = deps.stageNative().then(
+				verdict => {
+					if (verdict.kind === "staged") return { path: verdict.path, sha256: verdict.sha256 };
+					deps.log.warn(`the native module could not be staged: ${verdict.reason}`);
+					return null;
+				},
+				(error: unknown) => {
+					deps.log.warn(`the native module could not be staged: ${error instanceof Error ? error.message : String(error)}`);
+					return null;
+				},
+			);
 			return await stagedNative;
 		},
 	};

@@ -20,7 +20,6 @@ import { TEST_CURRENT_SID, fixtureAcl, fixturePrincipal } from "./private-storag
 import {
 	PTY_BROKER_ENTRY,
 	PTY_OWNER_HELPER,
-	PTY_PROBE_HELPER,
 	ensurePtyRuntime,
 	forgetProvedPtyRuntimes,
 	type PtyRuntimeOptions,
@@ -81,7 +80,8 @@ async function packagedTree(entry = "// entry"): Promise<string> {
 	const directory = path.join(root, "out", "pty");
 	await mkdir(directory, { recursive: true });
 	await writeFile(path.join(directory, PTY_BROKER_ENTRY), entry, "utf8");
-	await writeFile(path.join(directory, PTY_PROBE_HELPER), "# probe", "utf8");
+	await mkdir(path.join(root, "out", "native"), { recursive: true });
+	await writeFile(path.join(root, "out", "native", "koffi.node"), "native", "utf8");
 	await writeFile(path.join(directory, PTY_OWNER_HELPER), "# owner watch", "utf8");
 	return root;
 }

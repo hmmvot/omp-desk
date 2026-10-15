@@ -140,7 +140,6 @@ async function ensureRuntimeAccess(input: {
 		verifiedFiles: input.files,
 		probeDirectory: input.root,
 		probeText: RUNTIME_PROBE_TEXT,
-		label: "runtime tree",
 	};
 	const restriction = await restrictPrivateStorage({
 		layout,

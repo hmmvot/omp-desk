@@ -27,16 +27,12 @@ export function registerStatsDashboard(context: vscode.ExtensionContext, deps: {
 			withLaunchLock: work => withStatsLaunchLock(context.globalStorageUri.fsPath, work),
 			brokerAlive: isPtyProcessAlive,
 			async brokerGone(record) {
-				const ready = await client.attachReady();
-				if (ready.helper === null) return false;
-				const reading = await queryPtyProcessIdentity(ready.helper, record.brokerPid);
+				const reading = await queryPtyProcessIdentity(record.brokerPid);
 				return reading.kind === "gone" || (reading.kind === "found" && reading.creationTime !== record.brokerCreationTime);
 			},
 			async retireExited(handle) {
 				if (!(await handle.shutdown({ requireStopped: true })).stopped) throw new Error("The exited Stats background process could not close. Use Stop in Processes and try again.");
-				const ready = await client.attachReady();
-				if (ready.helper === null) throw new Error("The Stats background process could not be confirmed closed. Use Stop in Processes and try again.");
-				const gone = await waitForPtyProcessGone(ready.helper, handle.brokerPid, handle.record.brokerCreationTime, 10_000);
+				const gone = await waitForPtyProcessGone(handle.brokerPid, handle.record.brokerCreationTime, 10_000);
 				if (!gone.gone) throw new Error("The Stats background process is still closing. Use Stop in Processes and try again.");
 			},
 			async resolveLaunch() {

@@ -32,6 +32,8 @@ import { PtyBrokerClient, type ChatBrokerRuntimePolicy, type PtyBrokerClientOpti
 import { ptyRecordPath } from "./pty-registry.ts";
 import type { PtyBrokerRuntime, PtyLaunchSpec } from "./pty-protocol.ts";
 import type { RpcHandle } from "./rpc-handle.ts";
+import { loadWin32Native, setWin32NativeForTest } from "./win32-native.ts";
+import { installedAddonAsset } from "./win32-test-support.ts";
 
 const EXTENSION_ROOT = fileURLToPath(new URL("../..", import.meta.url));
 
@@ -224,6 +226,8 @@ const NEEDS_BUN: string | false = REAL === null ? "no Bun was found (BUN_INSTALL
 
 before(async () => {
 	if (SKIP) return;
+	// The host's access reads (the tree staging, the runtime and executable trust verdicts) are native calls.
+	setWin32NativeForTest(await loadWin32Native(await installedAddonAsset()));
 	// The record directory must satisfy the real access convention: it lives in this account's profile.
 	storage = await mkdtemp(path.join(homedir(), ".omp-bun-e2e-"));
 	scratch = await mkdtemp(path.join(tmpdir(), "omp-bun-e2e-"));
@@ -233,6 +237,7 @@ before(async () => {
 });
 
 after(async () => {
+	setWin32NativeForTest(undefined);
 	for (const handle of opened) {
 		try {
 			await handle.stop({ mode: "force", timeoutMs: 10_000 });

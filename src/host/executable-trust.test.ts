@@ -80,10 +80,10 @@ function security(overrides: Overrides = {}): PrivateStorageSecurityRead {
 
 /** Runs the verifier with a recording seam. */
 async function verify(read: PrivateStorageSecurityRead | (() => Promise<PrivateStorageSecurityRead>), file = FILE) {
-	const calls: { paths: readonly string[]; label: string | undefined }[] = [];
+	const calls: { paths: readonly string[] }[] = [];
 	const result = await verifyExecutableTrust(file, {
-		readSecurity: async (paths, label) => {
-			calls.push({ paths, label });
+		readSecurity: async paths => {
+			calls.push({ paths });
 			return typeof read === "function" ? read() : read;
 		},
 	});
@@ -118,7 +118,6 @@ describe("verifyExecutableTrust", { skip: process.platform === "win32" ? false :
 		assert.deepEqual(result, { ok: true, paths: CHAIN });
 		assert.equal(calls.length, 1);
 		assert.deepEqual(calls[0]?.paths, CHAIN);
-		assert.equal(calls[0]?.label, "runtime executable");
 	});
 
 	it("reads the file plus every directory above it and never the volume root", async () => {

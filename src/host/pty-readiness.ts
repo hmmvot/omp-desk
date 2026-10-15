@@ -76,8 +76,8 @@ export function createPtyReadinessGate(input: {
 
 	const checkAttach = async (): Promise<boolean> => {
 		try {
-			// Staging-free: a broker that attests itself needs no probe helper, which is staged later and
-			// only if a kernel reading is actually needed (`PtyBrokerClient.attachIdentity`).
+			// Staging-free: a broker that attests itself needs no kernel reading, which is taken later and
+			// only if one is actually needed (`PtyBrokerClient.attachIdentity`).
 			const ready = await input.client.attachIdentity();
 			attachProven = ready.ready;
 			attachRetryAt = ready.ready ? 0 : now() + retryMs;

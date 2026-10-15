@@ -19,7 +19,7 @@ import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { FILE_OPERATION_BACKOFF_MS, replaceFileAtomic, stageBeside } from "./atomic-file.ts";
-import { windowsPowerShellEnvironment, windowsPowerShellExecutable } from "./windows-powershell.ts";
+import { win32Native } from "./win32-native.ts";
 
 /** Directory created under `storageDir` that owns every claim file. */
 export const CLAIM_DIRECTORY = "session-claims";
@@ -923,10 +923,10 @@ function generationMatches(observed: ObservedClaim, creationTime: string): boole
  * or refuse a launch, a stop or a deletion: those keep asking {@link claimHolderMayBeAlive},
  * which reads the start time itself, now, at each verdict (ADR-0039).
  *
- * The cost it removes: reading a start time is a PowerShell (or `ps`) command, 200 to 450 ms
- * measured, seconds with a real-time scanner. The Sessions view asks about every row another
- * window holds on every claim change, and a window switch changes claims; as one synchronous
- * command per verdict that froze every window's extension host for up to 22 seconds.
+ * The cost it removes: a start time used to be a PowerShell (or `ps`) command, 200 to 450 ms measured, seconds with a
+ * real-time scanner; it is now an in-process call on Windows (ADR-0076). The Sessions view asks about every row another
+ * window holds on every claim change, and a window switch changes claims; as one synchronous command per verdict that
+ * froze every window's extension host for up to 22 seconds. The reading stays asynchronous and kept for a while.
  *
  * A reading only speaks for a claim that existed when it was taken. It is a sample of the process
  * that held the pid then; a claim filed after it may be a newer process that reused the pid, so
@@ -962,7 +962,7 @@ const advisoryReadings = new Map<number, AdvisoryReading>();
 const advisoryInFlight = new Map<number, { readonly sample: { readonly sampledAt: number }; readonly reading: Promise<AdvisoryReading> }>();
 /** How long a reading backs the display of a holder. */
 const ADVISORY_READING_MS = 20_000;
-/** A reading that found nothing (no PowerShell, a timeout, no such process) is believed this long, so a missing tool is not retried for every row. */
+/** A reading that found nothing (an unavailable native module, no such process) is believed this long, so it is not retried for every row. */
 const FAILED_READING_MS = 10_000;
 
 function readAdvisory(pid: number): Promise<AdvisoryReading> {
@@ -1006,11 +1006,35 @@ export function setProcessProbeObserver(observer: ((probe: ProcessProbe) => void
 	probeObserver = observer;
 }
 
-/** The command that prints one process's start time, and its environment. */
-function creationTimeCommand(pid: number): { readonly file: string; readonly args: string[]; readonly env: NodeJS.ProcessEnv | undefined } {
-	return process.platform === "win32"
-		? { file: windowsPowerShellExecutable(), args: ["-NoProfile", "-NonInteractive", "-Command", `(Get-Process -Id ${pid} -ErrorAction Stop).StartTime.ToUniversalTime().ToString('o')`], env: windowsPowerShellEnvironment() }
-		: { file: "ps", args: ["-o", "lstart=", "-p", String(pid)], env: undefined };
+/** FILETIME (100 ns ticks since 1601) of the Unix epoch. */
+const UNIX_EPOCH_AS_FILETIME = 116444736000000000n;
+
+/**
+ * The creation time of a process on Windows, in process (ADR-0076), as the ISO string a claim records: the creation
+ * FILETIME floored to whole milliseconds, which is what V8 made of the 7-digit fraction PowerShell used to print, so
+ * claims filed by an earlier build still compare equal. `null` when the native module is unavailable or the process
+ * cannot be read.
+ */
+async function readNativeCreationTime(pid: number): Promise<string | null> {
+	const native = await win32Native();
+	if (native === null) return null;
+	const reading = native.processCreation(pid);
+	if (reading.kind !== "found") return null;
+	return new Date(Number((BigInt(reading.filetime) - UNIX_EPOCH_AS_FILETIME) / 10_000n)).toISOString();
+}
+
+/** The start time `ps` prints for one process, or `null`; the non-Windows command. */
+async function readPsCreationTime(pid: number): Promise<string | null> {
+	const time = await new Promise<string | null>(resolve => {
+		try {
+			execFile("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", timeout: 5000 }, (error, stdout) => {
+				resolve(error === null ? parseCreationTime(stdout) : null);
+			});
+		} catch {
+			resolve(null);
+		}
+	});
+	return time;
 }
 
 function parseCreationTime(raw: string): string | null {
@@ -1019,21 +1043,12 @@ function parseCreationTime(raw: string): string | null {
 }
 
 /**
- * Run the start-time command and parse its output; every failure (no such process, no PowerShell, a timeout) is
- * `null`, because an unavailable reading never proves a claim holder.
+ * Read one process's start time; every failure (no such process, an unavailable native module) is `null`, because an
+ * unavailable reading never proves a claim holder.
  */
 async function readCreationTime(pid: number, purpose: ProcessProbePurpose): Promise<string | null> {
 	const startedAt = Date.now();
-	const command = creationTimeCommand(pid);
-	const time = await new Promise<string | null>(resolve => {
-		try {
-			execFile(command.file, command.args, { encoding: "utf8", timeout: 5000, windowsHide: true, ...(command.env === undefined ? {} : { env: command.env }) }, (error, stdout) => {
-				resolve(error === null ? parseCreationTime(stdout) : null);
-			});
-		} catch {
-			resolve(null);
-		}
-	});
+	const time = process.platform === "win32" ? await readNativeCreationTime(pid) : await readPsCreationTime(pid);
 	probeObserver?.({ pid, ms: Date.now() - startedAt, purpose, found: time !== null });
 	return time;
 }

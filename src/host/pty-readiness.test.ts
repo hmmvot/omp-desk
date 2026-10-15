@@ -202,9 +202,6 @@ describe("attach readiness in the gate", () => {
 				attachCalls += 1;
 				return { ready: true, reason: null, treeDigest: "d" };
 			},
-			attachReady: async () => {
-				throw new Error("the attach gate must not stage the probe helper");
-			},
 		} as unknown as PtyBrokerClient;
 		const gate = createPtyReadinessGate({ client });
 

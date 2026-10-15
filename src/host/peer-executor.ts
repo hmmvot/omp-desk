@@ -24,8 +24,8 @@ export interface PeerExecutorProbe {
 }
 
 /** The host process behind `hostPid` as the kernel reports it now, or `null` when it cannot be identified (it is then never provably gone). */
-export async function identifyPeerExecutor(hostPid: number | null, probe: PeerExecutorProbe | null): Promise<PeerExecutor | null> {
-	if (hostPid === null || probe === null) return null;
+export async function identifyPeerExecutor(hostPid: number | null, probe: PeerExecutorProbe): Promise<PeerExecutor | null> {
+	if (hostPid === null) return null;
 	try {
 		const reading = await probe.read(hostPid);
 		return reading.kind === "found" ? { pid: hostPid, creationTime: reading.creationTime } : null;
@@ -37,11 +37,10 @@ export async function identifyPeerExecutor(hostPid: number | null, probe: PeerEx
 /** Whether the executor `peer` was identified as is positively gone. Never throws; anything undecided is `gone: false`. */
 export async function proveExecutorGone(
 	peer: Pick<KillAllPeer, "executor">,
-	probe: PeerExecutorProbe | null,
+	probe: PeerExecutorProbe,
 	timeoutMs: number = PEER_EXECUTOR_PROBE_MS,
 ): Promise<{ readonly gone: boolean; readonly detail: string }> {
 	if (peer.executor === null) return { gone: false, detail: "the window's process could not be identified when it was asked" };
-	if (probe === null) return { gone: false, detail: "the process probe is not available" };
 	try {
 		return await probe.waitGone(peer.executor.pid, peer.executor.creationTime, timeoutMs);
 	} catch (error) {

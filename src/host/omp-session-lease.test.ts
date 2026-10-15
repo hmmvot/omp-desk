@@ -90,7 +90,7 @@ describe("OMP session lease name", () => {
 describe("nativeLeaseProbe", () => {
 	const names = [`${LEASE_MUTEX_PREFIX}${"1".repeat(32)}`, `${LEASE_MUTEX_PREFIX}${"2".repeat(32)}`];
 	const states: Readonly<Record<string, MutexState>> = { [names[0]!]: "held", [names[1]!]: "absent" };
-	const stub = (answer: (name: string) => MutexState): Win32Native => ({ mutexState: answer });
+	const stub = (answer: (name: string) => MutexState): Pick<Win32Native, "mutexState"> => ({ mutexState: answer });
 
 	it("asks the native module once per distinct name and reads the verdicts", async () => {
 		const asked: string[] = [];

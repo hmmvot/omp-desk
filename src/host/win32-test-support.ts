@@ -42,20 +42,21 @@ export async function holdMutex(objectName: string, kind: keyof typeof CREATE_CA
 		process.stdin.on("end", () => process.exit(0));
 	`;
 	const child = spawn(process.execPath, ["-e", script], { windowsHide: true, stdio: ["pipe", "pipe", "ignore"] });
-	await new Promise<void>((resolve, reject) => {
-		child.stdout!.setEncoding("utf8");
-		child.stdout!.on("data", chunk => {
-			if (String(chunk).includes("ready")) resolve();
-		});
-		child.once("error", reject);
-		child.once("exit", () => reject(new Error("the object holder exited early")));
+	const ready = Promise.withResolvers<void>();
+	child.stdout!.setEncoding("utf8");
+	child.stdout!.on("data", chunk => {
+		if (String(chunk).includes("ready")) ready.resolve();
 	});
+	child.once("error", ready.reject);
+	child.once("exit", () => ready.reject(new Error("the object holder exited early")));
+	await ready.promise;
 	return child;
 }
 
 /** End a {@link holdMutex} child and wait until its object is gone. */
 export async function releaseMutex(child: ChildProcess): Promise<void> {
-	const exited = new Promise<void>(resolve => child.once("exit", () => resolve()));
+	const { promise: exited, resolve } = Promise.withResolvers<void>();
+	child.once("exit", () => resolve());
 	child.stdin!.end();
 	await exited;
 }

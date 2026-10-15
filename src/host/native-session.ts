@@ -133,7 +133,7 @@ export async function attachNativeHost(input: { readonly pin: BrokerPin; readonl
 /** Read-only settlement proof. Never closes ConPTY or signals a process. */
 export async function waitForManagedRootExit(runtime: SessionHostRuntime, client: PtyBrokerClient, timeoutMs = 30_000): Promise<NativeStopVerdict> {
 	const reader = await brokerNativeGenerationReader(client);
-	if (reader === null || runtime.identity.childCreationTime === null) return { writerGone: false, treeEmpty: false, detail: "This session could not be checked safely. Reopen its editor and try Stop again.", diagnosticDetail: "The exact OMP root exit cannot be proven without its creation-time probe." };
+	if (runtime.identity.childCreationTime === null) return { writerGone: false, treeEmpty: false, detail: "This session could not be checked safely. Reopen its editor and try Stop again.", diagnosticDetail: "The exact OMP root exit cannot be proven without its recorded creation time." };
 	const deadline = Date.now() + timeoutMs;
 	do {
 		try {
@@ -178,8 +178,7 @@ export async function brokerAndRootGone(
 	broker: { readonly pid: number; readonly creationTime: string | null },
 	root: { readonly pid: number; readonly creationTime: string | null },
 ): Promise<boolean> {
-	const reader = await brokerNativeGenerationReader(client).catch(() => null);
-	if (reader === null) return false;
+	const reader = await brokerNativeGenerationReader(client);
 	return await processGone(reader, broker.pid, broker.creationTime) && await processGone(reader, root.pid, root.creationTime);
 }
 
@@ -198,7 +197,6 @@ export async function recordedRootGone(
 	if (!Number.isSafeInteger(root.pid) || root.pid <= 0) return false;
 	if (!isAlive(root.pid)) return true;
 	if (client === null) return false;
-	const reader = await brokerNativeGenerationReader(client).catch(() => null);
-	if (reader === null) return false;
+	const reader = await brokerNativeGenerationReader(client);
 	return await processGone(reader, root.pid, root.creationTime);
 }

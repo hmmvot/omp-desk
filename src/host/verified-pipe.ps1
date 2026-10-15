@@ -1,12 +1,8 @@
 <#
 OMP host-control peer verification bridge (ADR-0006).
 
-Two modes, both driven by `control-client.ts` with `-NoProfile -NonInteractive`:
-
-  -Mode generation -TargetPid <n>
-      Print `!GENERATION <filetime>` for that process, the kernel creation time as
-      a FILETIME decimal string. The extension records it right after the
-      terminal's process id resolves.
+One mode, driven by `control-client.ts` with `-NoProfile -NonInteractive` (the process
+generation of a host's pid is read in process, ADR-0076):
 
   -Mode bridge -PipeName <name> -ExpectPid <n> [-ExpectCreation <filetime>]
                [-TimeoutSeconds <n>]
@@ -32,9 +28,8 @@ caller must treat EOF or an exit here as an unknown mutation result.
 #>
 [CmdletBinding()]
 param(
-	[ValidateSet('generation', 'bridge')]
+	[ValidateSet('bridge')]
 	[string]$Mode = 'bridge',
-	[int]$TargetPid = 0,
 	[string]$PipeName = '',
 	[int]$ExpectPid = 0,
 	[string]$ExpectCreation = '',
@@ -99,24 +94,6 @@ public static class OmpControlPeer
         {
             CloseHandle(handle);
         }
-    }
-
-    public static int Generation(int pid, Stream stdout)
-    {
-        Stdout = stdout;
-        if (pid <= 0)
-        {
-            Emit("!ERROR BAD_ARGUMENTS");
-            return 20;
-        }
-        string creation = CreationTimeOf((uint)pid);
-        if (creation == null)
-        {
-            Emit("!ERROR PROCESS_QUERY_FAILED");
-            return 15;
-        }
-        Emit("!GENERATION " + creation);
-        return 0;
     }
 
     public static int Bridge(string pipeName, int expectPid, string expectCreation, int timeoutSeconds, Stream stdin, Stream stdout)
@@ -276,13 +253,5 @@ public static class OmpControlPeer
 Add-Type -TypeDefinition $source -Language CSharp | Out-Null
 
 $stdout = [Console]::OpenStandardOutput()
-$code = 0
-
-if ($Mode -eq 'generation') {
-	$code = [OmpControlPeer]::Generation($TargetPid, $stdout)
-} else {
-	$stdin = [Console]::OpenStandardInput()
-	$code = [OmpControlPeer]::Bridge($PipeName, $ExpectPid, $ExpectCreation, $TimeoutSeconds, $stdin, $stdout)
-}
-
-exit $code
+$stdin = [Console]::OpenStandardInput()
+exit [OmpControlPeer]::Bridge($PipeName, $ExpectPid, $ExpectCreation, $TimeoutSeconds, $stdin, $stdout)

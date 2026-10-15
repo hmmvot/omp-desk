@@ -3,8 +3,8 @@
  *
  * Runner: `node --test src/host/pty-runtime.test.ts`
  *
- * A broker is a tree, not a file: the entry, the PowerShell identity probe and the
- * `node-pty` package with its native addon and its DLLs. What matters is that the
+ * A broker is a tree, not a file: the entry, the native module the process checks run through, the
+ * owner-watch helper and the `node-pty` package with its native addon and its DLLs. What matters is that the
  * packaged tree is enumerated as it is (minus the bundle's source map), that a staged
  * tree is named by the content it holds — so two builds cannot be handed each other's
  * copy — that a copy which changed is detected before anything runs from it, and that
@@ -22,20 +22,22 @@ import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, utimes, writeFile } f
 import { homedir, tmpdir } from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { after, describe, it } from "node:test";
+import { after, before, describe, it } from "node:test";
 import { createHash } from "node:crypto";
 import type { PrivateStorageCommandResult, PrivateStorageProbe } from "./private-storage.ts";
 import { TEST_CURRENT_SID, fixtureAcl, fixturePrincipal } from "./private-storage-test-support.ts";
 import { hashRuntimeTree, stageRuntimeTree, verifyStagedRuntimeTree, type RuntimeTreeSource } from "./runtime-assets.ts";
+import { loadWin32Native, setWin32NativeForTest } from "./win32-native.ts";
+import { installedAddonAsset } from "./win32-test-support.ts";
 import type { PtySelfCheckAnswer } from "./pty-runtime-proof-store.ts";
 import {
 	PTY_BROKER_ENTRY,
+	PTY_NATIVE_ADDON,
 	PTY_OWNER_HELPER,
-	PTY_PROBE_HELPER,
-	ensurePtyProbeHelper,
 	ensurePtyRuntime,
 	discardReusedPtyProof,
 	forgetProvedPtyRuntimes,
+	ptyPackagedTreeDigest,
 	ptyRuntimeCommand,
 	ptyRuntimeSources,
 	spawnPtyBroker,
@@ -48,7 +50,13 @@ const OWNER_ONLY = [ACCOUNT, "NT AUTHORITY\\SYSTEM", "BUILTIN\\Administrators"];
 
 const roots: string[] = [];
 
+before(async () => {
+	// Staging for real reads the account and its access rules through the process's native module.
+	if (process.platform === "win32") setWin32NativeForTest(await loadWin32Native(await installedAddonAsset()));
+});
+
 after(async () => {
+	setWin32NativeForTest(undefined);
 	for (const root of roots) await rm(root, { recursive: true, force: true });
 });
 
@@ -86,12 +94,16 @@ function ownerOnlyProbe(): PrivateStorageProbe {
 }
 
 /** A packaged tree with the layout the runtime expects, and one file it must ignore. */
-async function packagedTree(files: Record<string, string>): Promise<string> {
+async function packagedTree(files: Record<string, string>, native: string | null = "native"): Promise<string> {
 	const root = await makeTemp("omp-pty-tree-");
 	for (const [relative, content] of Object.entries(files)) {
 		const target = path.join(root, "out", "pty", ...relative.split("/"));
 		await mkdir(path.dirname(target), { recursive: true });
 		await writeFile(target, content, "utf8");
+	}
+	if (native !== null) {
+		await mkdir(path.join(root, "out", "native"), { recursive: true });
+		await writeFile(path.join(root, "out", "native", "koffi.node"), native, "utf8");
 	}
 	return root;
 }
@@ -101,18 +113,18 @@ describe("packaged tree listing", () => {
 		const root = await packagedTree({
 			"pty-broker.js": "// entry",
 			"pty-broker.js.map": "{}",
-			"pty-process-probe.ps1": "# probe",
 			"node_modules/node-pty/package.json": "{}",
 			"node_modules/node-pty/lib/index.js": "// index",
 			"node_modules/node-pty/prebuilds/win32-x64/pty.node": "binary",
 		});
 		const listed = (await ptyRuntimeSources(root)).map(source => source.relativePath);
+		// The addon is packaged beside the tree (`out/native`), so it is listed after the tree's own files.
 		assert.deepEqual(listed, [
 			"node_modules/node-pty/lib/index.js",
 			"node_modules/node-pty/package.json",
 			"node_modules/node-pty/prebuilds/win32-x64/pty.node",
 			"pty-broker.js",
-			"pty-process-probe.ps1",
+			"native/koffi.node",
 		]);
 	});
 
@@ -124,7 +136,7 @@ describe("packaged tree listing", () => {
 
 describe("staged tree", () => {
 	it("is named by the content it holds, and is reused when it has not changed", async () => {
-		const root = await packagedTree({ "pty-broker.js": "// entry", "pty-process-probe.ps1": "# probe" });
+		const root = await packagedTree({ "pty-broker.js": "// entry" });
 		const storage = await makeTemp("omp-pty-storage-");
 		const sources = await ptyRuntimeSources(root);
 		const first = await stageRuntimeTree({
@@ -146,7 +158,7 @@ describe("staged tree", () => {
 
 		// A changed file is a different tree, and the old copy is left alone: a process
 		// may still be running from it.
-		const changed = await packagedTree({ "pty-broker.js": "// entry v2", "pty-process-probe.ps1": "# probe" });
+		const changed = await packagedTree({ "pty-broker.js": "// entry v2" });
 		const third = await stageRuntimeTree({
 			storageDir: storage,
 			namespace: "pty-tree",
@@ -158,7 +170,7 @@ describe("staged tree", () => {
 	});
 
 	it("detects a copy that no longer holds the bytes it was staged with", async () => {
-		const root = await packagedTree({ "pty-broker.js": "// entry", "pty-process-probe.ps1": "# probe" });
+		const root = await packagedTree({ "pty-broker.js": "// entry" });
 		const storage = await makeTemp("omp-pty-storage-");
 		const tree = await stageRuntimeTree({
 			storageDir: storage,
@@ -193,6 +205,18 @@ describe("runtime command", () => {
 });
 
 /**
+ * A self-check argument line without the staged native module's pair, after asserting the run carried it:
+ * both forms (`--self-check` and `--self-check --pipe-only`) load the addon before they prove anything.
+ */
+function withoutNative(args: readonly string[]): string[] {
+	const at = args.indexOf("--native");
+	assert.ok(at >= 0 && args[at + 2] === "--native-sha256", `the run carried no native module: ${args.join(" ")}`);
+	assert.match(args[at + 1] ?? "", /native[\\/]koffi\.node$/);
+	assert.match(args[at + 3] ?? "", /^[a-f0-9]{64}$/);
+	return [...args.slice(0, at), ...args.slice(at + 4)];
+}
+
+/**
  * A packaged tree whose entry answers `--self-check` however the test wants, so the
  * gate's own decisions can be exercised without a native addon in the loop.
  */
@@ -200,44 +224,32 @@ async function fakeRuntimeTree(entry: string): Promise<string> {
 	const root = await makeTempUnder(homedir(), ".omp-pty-fake-");
 	const directory = path.join(root, "out", "pty");
 	await mkdir(directory, { recursive: true });
-	await writeFile(path.join(directory, PTY_PROBE_HELPER), "# probe", "utf8");
+	await mkdir(path.join(root, "out", "native"), { recursive: true });
+	await writeFile(path.join(root, "out", "native", "koffi.node"), "native", "utf8");
 	await writeFile(path.join(directory, PTY_OWNER_HELPER), "# owner watch", "utf8");
 	await writeFile(path.join(directory, PTY_BROKER_ENTRY), entry, "utf8");
 	return root;
 }
 
-const built = existsSync(path.join(EXTENSION_ROOT, "out", "pty", PTY_BROKER_ENTRY));
+const built = existsSync(path.join(EXTENSION_ROOT, "out", "pty", PTY_BROKER_ENTRY)) && existsSync(path.join(EXTENSION_ROOT, "out", "native", "koffi.node"));
 
-describe("attach readiness", { skip: process.platform !== "win32" ? "the runtime is Windows-only" : false }, () => {
-	it("stages and verifies only the identity probe, without running the tree's entry, and names the build's whole tree", async () => {
-		// The entry is a script that would fail loudly if anything executed it: an attach must
-		// never start the staged tree, only read the probe helper from it.
-		const root = await packagedTree({
-			[PTY_PROBE_HELPER]: "# probe",
-			[PTY_BROKER_ENTRY]: "process.exit(9);",
-			[PTY_OWNER_HELPER]: "# owner",
-			"node_modules/node-pty/index.js": "// pty",
-		});
-		const storageDir = await makeTemp("omp-pty-storage-");
-		const readiness = await ensurePtyProbeHelper({ storageDir, extensionRoot: root, access: ownerOnlyProbe() });
+describe("native module in the packaged tree", () => {
+	it("is staged with the tree as native/koffi.node, so the tree's digest, and with it both stored proofs, change with the addon", async () => {
+		const root = await packagedTree({ [PTY_BROKER_ENTRY]: "// entry", [PTY_OWNER_HELPER]: "# owner" });
+		const sources = await ptyRuntimeSources(root);
+		const native = sources.find(source => source.relativePath === PTY_NATIVE_ADDON);
+		assert.ok(native, "the packaged addon is part of the tree");
+		assert.equal(native.sourcePath, path.join(root, "out", "native", "koffi.node"));
+		const digest = await ptyPackagedTreeDigest(root);
+		assert.equal(digest, (await hashRuntimeTree(sources)).digest, "a broker of this build reports the whole tree's digest, which an attach compares");
 
-		assert.equal(readiness.ready, true, readiness.reason ?? "");
-		assert.ok(readiness.helper !== null);
-		assert.equal(await readFile(readiness.helper.path, "utf8"), "# probe");
-		assert.equal(readiness.helper.sha256, createHash("sha256").update("# probe").digest("hex"));
-		assert.equal(path.basename(readiness.helper.path), PTY_PROBE_HELPER);
-		const whole = await hashRuntimeTree(await ptyRuntimeSources(root));
-		assert.equal(readiness.treeDigest, whole.digest, "a broker of this build reports the whole tree's digest, which an attach compares");
-		// Nothing but the probe was copied: the staged tree is not there to be run.
-		assert.equal(existsSync(path.join(path.dirname(readiness.helper.path), PTY_BROKER_ENTRY)), false);
+		const other = await packagedTree({ [PTY_BROKER_ENTRY]: "// entry", [PTY_OWNER_HELPER]: "# owner" }, "another addon build");
+		assert.notEqual(await ptyPackagedTreeDigest(other), digest);
 	});
 
-	it("refuses a packaged tree that has no identity probe", async () => {
-		const root = await packagedTree({ [PTY_BROKER_ENTRY]: "// entry" });
-		const readiness = await ensurePtyProbeHelper({ storageDir: await makeTemp("omp-pty-storage-"), extensionRoot: root, access: ownerOnlyProbe() });
-		assert.equal(readiness.ready, false);
-		assert.match(readiness.reason ?? "", /pty-process-probe\.ps1/);
-		assert.equal(readiness.helper, null);
+	it("is absent from the tree of a build that was not given one", async () => {
+		const root = await packagedTree({ [PTY_BROKER_ENTRY]: "// entry", [PTY_OWNER_HELPER]: "# owner" }, null);
+		assert.equal((await ptyRuntimeSources(root)).some(source => source.relativePath === PTY_NATIVE_ADDON), false);
 	});
 });
 
@@ -249,7 +261,8 @@ describe("runtime proof gate", { skip: process.platform !== "win32" ? "the runti
 		const root = await makeTempUnder(homedir(), ".omp-pty-fake-");
 		const directory = path.join(root, "out", "pty");
 		await mkdir(directory, { recursive: true });
-		await writeFile(path.join(directory, PTY_PROBE_HELPER), "# probe", "utf8");
+		await mkdir(path.join(root, "out", "native"), { recursive: true });
+		await writeFile(path.join(root, "out", "native", "koffi.node"), "native", "utf8");
 		await writeFile(path.join(directory, PTY_BROKER_ENTRY), "// entry", "utf8");
 		const readiness = await ensurePtyRuntime({
 			storageDir: await makeTempUnder(homedir(), ".omp-pty-storage-"),
@@ -257,6 +270,36 @@ describe("runtime proof gate", { skip: process.platform !== "win32" ? "the runti
 		});
 		assert.equal(readiness.ready, false);
 		assert.match(readiness.reason ?? "", /pty-owner-watch\.ps1/);
+	});
+
+	it("refuses a tree that has no native module, naming it, because a broker without it could never prove an identity", async () => {
+		const root = await fakeRuntimeTree("// entry");
+		await rm(path.join(root, "out", "native"), { recursive: true });
+		const readiness = await ensurePtyRuntime({ storageDir: await makeTempUnder(homedir(), ".omp-pty-storage-"), extensionRoot: root });
+		assert.equal(readiness.ready, false);
+		assert.match(readiness.reason ?? "", /native\/koffi\.node/);
+	});
+
+	it("hands the staged native module, not the packaged one, to the self-check", async () => {
+		forgetProvedPtyRuntimes();
+		const root = await packagedTree({ [PTY_BROKER_ENTRY]: "// entry", [PTY_OWNER_HELPER]: "# owner" }, "native bytes");
+		const storageDir = await makeTemp("omp-pty-native-storage-");
+		const handed: { path: string; sha256: string }[] = [];
+		const readiness = await ensurePtyRuntime({
+			storageDir,
+			extensionRoot: root,
+			nodePath: process.execPath,
+			access: ownerOnlyProbe(),
+			runSelfCheck: async runtime => {
+				handed.push(runtime.native);
+				return { kind: "broken", answer: null, detail: "stop here" };
+			},
+		});
+		assert.equal(readiness.ready, false);
+		assert.equal(handed.length, 1);
+		assert.equal(handed[0]?.sha256, createHash("sha256").update("native bytes").digest("hex"));
+		assert.equal(await readFile(handed[0]?.path ?? "", "utf8"), "native bytes");
+		assert.equal(handed[0]?.path.startsWith(root), false, "the addon is loaded from the staged tree, never from the install folder");
 	});
 
 	it("refuses a runtime whose self-check child failed, and one that ran no child", async () => {
@@ -386,8 +429,8 @@ describe("runtime proof gate", { skip: process.platform !== "win32" ? "the runti
 			await ensurePtyRuntime({ storageDir, extensionRoot: root });
 			await ensurePtyRuntime({ storageDir, extensionRoot: root, selfCheckDeadlineMs: 90_000 });
 			const runs = (await readFile(log, "utf8")).trim().split("\n").map(line => JSON.parse(line) as string[]);
-			assert.deepEqual(runs[0], ["--self-check"]);
-			assert.deepEqual(runs[1], ["--self-check", "--self-check-deadline-ms=90000"]);
+			assert.deepEqual(withoutNative(runs[0] ?? []), ["--self-check"]);
+			assert.deepEqual(withoutNative(runs[1] ?? []), ["--self-check", "--self-check-deadline-ms=90000"]);
 		});
 
 		it("is refused when the entry says it observed a fault, even though it also ran long", async () => {
@@ -441,7 +484,36 @@ describe("runtime proof gate", { skip: process.platform !== "win32" ? "the runti
 	});
 });
 
-describe("runtime proof", { skip: built ? false : "the packaged broker tree is absent: run `node esbuild.mjs --pty` first" }, () => {
+describe("runtime proof", { skip: built ? false : "the packaged broker tree or native module is absent: run `node esbuild.mjs` first" }, () => {
+	it("is broken, for a full and for a pipe-only run, when the staged native module cannot load", async () => {
+		// The real broker entry, started with an addon that is not an image: it must refuse before it proves anything.
+		for (const pipeOnly of [false, true]) {
+			forgetProvedPtyRuntimes();
+			const root = await makeTempUnder(homedir(), ".omp-pty-fake-");
+			await mkdir(path.join(root, "out", "pty"), { recursive: true });
+			await mkdir(path.join(root, "out", "native"), { recursive: true });
+			await copyFile(path.join(EXTENSION_ROOT, "out", "pty", PTY_BROKER_ENTRY), path.join(root, "out", "pty", PTY_BROKER_ENTRY));
+			await writeFile(path.join(root, "out", "pty", PTY_OWNER_HELPER), "# owner watch", "utf8");
+			await writeFile(path.join(root, "out", "native", "koffi.node"), "not an image", "utf8");
+			const readiness = await ensurePtyRuntime({ storageDir: await makeTempUnder(homedir(), ".omp-pty-storage-"), extensionRoot: root, pipeOnly });
+			assert.equal(readiness.ready, false, `a runtime that cannot load the addon must not be admitted (pipeOnly ${pipeOnly})`);
+			assert.equal(readiness.proven, false);
+			assert.match(readiness.reason ?? "", /not a .* image/);
+		}
+	});
+
+	it("proves the Chat-only form with the real addon, which the entry loads and reads one creation time through", async () => {
+		forgetProvedPtyRuntimes();
+		const readiness = await ensurePtyRuntime({
+			storageDir: await makeTempUnder(homedir(), ".omp-pty-storage-"),
+			extensionRoot: EXTENSION_ROOT,
+			pipeOnly: true,
+		});
+		assert.equal(readiness.ready, true, readiness.reason ?? "not ready");
+		assert.equal(readiness.proven, true);
+		assert.equal(readiness.runtime?.selfCheck?.pipeOnly, true);
+	});
+
 	it("proves the packaged tree by running a child through its own PTY backend", async () => {
 		// The real access convention runs here, and the shared temporary directory fails
 		// its ancestor rule by measurement (another account may write it), so a test that
@@ -457,7 +529,9 @@ describe("runtime proof", { skip: built ? false : "the packaged broker tree is a
 		assert.ok(runtime);
 		assert.match(runtime.tree.digest, /^[a-f0-9]{64}$/);
 		assert.equal(runtime.tree.files.some(file => file.relativePath === PTY_BROKER_ENTRY), true);
-		assert.equal(runtime.tree.files.some(file => file.relativePath === PTY_PROBE_HELPER), true);
+		assert.equal(runtime.tree.files.some(file => file.relativePath === PTY_NATIVE_ADDON), true);
+		assert.equal(runtime.native.path.endsWith(PTY_NATIVE_ADDON.replace("/", path.sep)), true);
+		assert.equal(runtime.native.sha256, createHash("sha256").update(await readFile(path.join(EXTENSION_ROOT, "out", "native", "koffi.node"))).digest("hex"), "the broker is handed the packaged addon's own digest");
 		assert.equal(runtime.tree.files.some(file => file.relativePath === PTY_OWNER_HELPER), true);
 		assert.equal(runtime.ownerHelper.path.endsWith(PTY_OWNER_HELPER), true);
 		assert.match(runtime.ownerHelper.sha256, /^[a-f0-9]{64}$/);
@@ -515,7 +589,7 @@ describe("pipe-only runtime proof (ADR-0074)", { skip: process.platform !== "win
 
 	it("keeps a full proof and a pipe-only proof of the same tree and executable apart, in process and on disk", async () => {
 		forgetProvedPtyRuntimes();
-		const root = await packagedTree({ [PTY_BROKER_ENTRY]: "// entry", [PTY_PROBE_HELPER]: "# probe", [PTY_OWNER_HELPER]: "# owner" });
+		const root = await packagedTree({ [PTY_BROKER_ENTRY]: "// entry", [PTY_OWNER_HELPER]: "# owner" });
 		const storageDir = await makeTemp("omp-pty-pipe-only-storage-");
 		const seen: (boolean | undefined)[] = [];
 		const run = (pipeOnly: boolean | undefined) => ensurePtyRuntime({
@@ -558,7 +632,7 @@ describe("pipe-only runtime proof (ADR-0074)", { skip: process.platform !== "win
 		/** A run of `ensurePtyRuntime` whose self-check is a counted seam, on an executable that is any small file. */
 		async function counted() {
 			forgetProvedPtyRuntimes();
-			const root = await packagedTree({ [PTY_BROKER_ENTRY]: "// entry", [PTY_PROBE_HELPER]: "# probe", [PTY_OWNER_HELPER]: "# owner" });
+			const root = await packagedTree({ [PTY_BROKER_ENTRY]: "// entry", [PTY_OWNER_HELPER]: "# owner" });
 			const storageDir = await makeTemp("omp-pty-stamp-storage-");
 			const executable = path.join(await makeTemp("omp-pty-stamp-exe-"), "bun.exe");
 			await copyFile(fileURLToPath(import.meta.url), executable);
@@ -651,7 +725,7 @@ describe("pipe-only runtime proof (ADR-0074)", { skip: process.platform !== "win
 
 		it("asks for `--self-check --pipe-only` and reads the pipe-only answer", async () => {
 			const { readiness, runs } = await readinessFor(pipeOnlyReport, true);
-			assert.deepEqual(runs, [{ execArgv: [], args: ["--self-check", "--pipe-only"] }]);
+			assert.deepEqual(runs.map(run => ({ ...run, args: withoutNative(run.args) })), [{ execArgv: [], args: ["--self-check", "--pipe-only"] }]);
 			assert.equal(readiness.ready, true, readiness.reason ?? "not ready");
 			assert.equal(readiness.proven, true);
 			const answer = readiness.runtime?.selfCheck;
@@ -671,7 +745,7 @@ describe("pipe-only runtime proof (ADR-0074)", { skip: process.platform !== "win
 		it("puts the runtime's own arguments before the entry", async () => {
 			const { readiness, runs } = await readinessFor(pipeOnlyReport, true, ["--no-warnings"]);
 			assert.equal(readiness.ready, true, readiness.reason ?? "not ready");
-			assert.deepEqual(runs, [{ execArgv: ["--no-warnings"], args: ["--self-check", "--pipe-only"] }]);
+			assert.deepEqual(runs.map(run => ({ ...run, args: withoutNative(run.args) })), [{ execArgv: ["--no-warnings"], args: ["--self-check", "--pipe-only"] }]);
 		});
 
 		it("refuses an answer that does not say it is the pipe-only one", async () => {
@@ -692,7 +766,7 @@ describe("pipe-only runtime proof (ADR-0074)", { skip: process.platform !== "win
 
 		it("does not ask a full check for `--pipe-only`", async () => {
 			const { runs } = await readinessFor({ ...pipeOnlyReport, childOutput: true, childPid: 4242, pipeOnly: undefined }, false);
-			assert.deepEqual(runs, [{ execArgv: [], args: ["--self-check"] }]);
+			assert.deepEqual(runs.map(run => ({ ...run, args: withoutNative(run.args) })), [{ execArgv: [], args: ["--self-check"] }]);
 		});
 	});
 
@@ -756,7 +830,7 @@ const SPAWN_TEST_ANSWER: PtySelfCheckAnswer = {
 describe("spawning a broker on an executable that is not there", { skip: process.platform !== "win32" ? "the runtime proof is Windows-only" : false }, () => {
 	it("raises no uncaught exception, reports no pid, and leaves the caller an exit code to read", { timeout: 30_000 }, async () => {
 		forgetProvedPtyRuntimes();
-		const root = await packagedTree({ [PTY_BROKER_ENTRY]: "// entry", [PTY_PROBE_HELPER]: "# probe", [PTY_OWNER_HELPER]: "# owner" });
+		const root = await packagedTree({ [PTY_BROKER_ENTRY]: "// entry", [PTY_OWNER_HELPER]: "# owner" });
 		const storageDir = await makeTemp("omp-pty-missing-exe-");
 		const readiness = await ensurePtyRuntime({
 			storageDir,

@@ -25,6 +25,9 @@
  * reported a nonzero code.
  */
 
+import { silentLogger } from "../shared/logger.ts";
+import { startWin32Native } from "../host/win32-native.ts";
+
 /** Namespace of both markers, so one observed here is ours and not a child's own text. */
 export const SELF_CHECK_MARKER = "omp-pty-check";
 
@@ -87,6 +90,36 @@ export function selfCheckDeadlineFromArgs(args: readonly string[]): number {
 		);
 	}
 	return value;
+}
+
+/** Command-line flags carrying the staged native module a run loads (ADR-0076). */
+export const SELF_CHECK_NATIVE_FLAG = "--native";
+export const SELF_CHECK_NATIVE_DIGEST_FLAG = "--native-sha256";
+
+/**
+ * The native module this run was given, loaded the way a broker loads it, and one creation
+ * time read through it (this process's own, which must be `found`). A runtime that cannot
+ * load the addon, or whose addon cannot answer, must not be proven: every identity reading
+ * and every stop's absence evidence of a broker started in it would be `unknown`. Throws a
+ * refusal naming the cause; the module's own one-line failure log is the cause when it has one.
+ */
+export async function proveNativeCreationTime(args: readonly string[]): Promise<void> {
+	const value = (flag: string): string | undefined => {
+		const index = args.indexOf(flag);
+		return index < 0 ? undefined : args[index + 1];
+	};
+	const path = value(SELF_CHECK_NATIVE_FLAG);
+	const sha256 = value(SELF_CHECK_NATIVE_DIGEST_FLAG);
+	if (path === undefined || sha256 === undefined) {
+		throw new Error(`${SELF_CHECK_NATIVE_FLAG} and ${SELF_CHECK_NATIVE_DIGEST_FLAG} are required: the runtime cannot be proven without its native module`);
+	}
+	const causes: string[] = [];
+	const native = await startWin32Native(async () => ({ path, sha256 }), { ...silentLogger, warn: message => causes.push(message) });
+	if (native === null) throw new Error(causes[0] ?? "the native module is unavailable");
+	const reading = native.processCreation(process.pid);
+	if (reading.kind !== "found") {
+		throw new Error(`the native module could not read this process's creation time (${reading.kind === "unknown" ? reading.detail : "gone"})`);
+	}
 }
 
 /**

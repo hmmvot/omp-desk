@@ -7,15 +7,14 @@
 
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
-import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
 import { setTimeout as delay } from "node:timers/promises";
 import { after, before, describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
 import type { LogLevel } from "../shared/logger.ts";
 import type { BrokerProcessRow } from "./broker-processes.ts";
 import { isPtyProcessAlive, queryPtyProcessIdentity, waitForPtyProcessGone } from "./pty-identity.ts";
-import type { PtyIdentityReading, PtyProbeHelper } from "./pty-identity.ts";
+import type { PtyIdentityReading } from "./pty-identity.ts";
+import { loadWin32Native, setWin32NativeForTest } from "./win32-native.ts";
+import { installedAddonAsset } from "./win32-test-support.ts";
 import {
 	killProcessTree,
 	killSelection,
@@ -352,12 +351,10 @@ describe("the Kill command", () => {
 });
 
 const windowsOnly = { skip: process.platform !== "win32" ? "tree kill is implemented for Windows only" : false };
-const HELPER = fileURLToPath(new URL("./pty-process-probe.ps1", import.meta.url));
 const spawned: ChildProcess[] = [];
-let helper: PtyProbeHelper;
 
 before(async () => {
-	helper = { path: HELPER, sha256: createHash("sha256").update(await readFile(HELPER)).digest("hex") };
+	if (process.platform === "win32") setWin32NativeForTest(await loadWin32Native(await installedAddonAsset()));
 });
 
 after(() => {
@@ -390,15 +387,15 @@ describe("a real tree kill", windowsOnly, () => {
 		isAlive: isPtyProcessAlive,
 		// Integration against real processes: the pause is the platform's own wait for a terminated process to disappear.
 		pause: ms => delay(ms),
-		readIdentity: pid => queryPtyProcessIdentity(helper, pid),
+		readIdentity: queryPtyProcessIdentity,
 		killTree: pid => runTaskkillTree(pid),
-		waitGone: (pid, creationTime, timeoutMs) => waitForPtyProcessGone(helper, pid, creationTime, timeoutMs),
+		waitGone: waitForPtyProcessGone,
 	};
 
 	it("ends the process and the process it started, and the root is proven gone by its creation time", async () => {
 		const { parent, grandchildPid } = await treeWithGrandchild();
 		const parentPid = parent.pid as number;
-		const identity = await queryPtyProcessIdentity(helper, parentPid);
+		const identity = await queryPtyProcessIdentity(parentPid);
 		assert.equal(identity.kind, "found");
 		const creationTime = identity.kind === "found" ? identity.creationTime : "";
 		assert.equal(isPtyProcessAlive(grandchildPid), true);

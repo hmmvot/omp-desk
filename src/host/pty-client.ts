@@ -61,13 +61,7 @@ import {
 	type PtyStatusPayload,
 } from "./pty-protocol.ts";
 import { BrokerHandle, type BrokerHandleEvent, type SnapshotCollector } from "./broker-handle.ts";
-import {
-	PtyIdentityReadings,
-	isPtyProcessAlive,
-	queryPtyProcessIdentity,
-	type PtyIdentityReading,
-	type PtyProbeHelper,
-} from "./pty-identity.ts";
+import { isPtyProcessAlive, queryPtyProcessIdentity, type PtyIdentityReading } from "./pty-identity.ts";
 import { connectPtyBroker, type PtyClientSideConnection } from "./pty-ipc.ts";
 import {
 	acquirePtySlotLock,
@@ -82,10 +76,8 @@ import {
 } from "./pty-registry.ts";
 import {
 	discardReusedPtyProof,
-	ensurePtyProbeHelper,
 	ensurePtyRuntime,
 	ptyPackagedTreeDigest,
-	type PtyProbeReadiness,
 	spawnPtyBroker,
 	verifyPtyRuntime,
 	type PtyRuntime,
@@ -201,8 +193,8 @@ export interface PtyBrokerClientOptions {
 	readonly chatBrokerRuntime?: ChatBrokerRuntimePolicy;
 	/** Test seam: the access probe for the state directory and the staged trees; defaults to this machine's own. */
 	readonly access?: PrivateStorageProbe;
-	/** Test seam: the kernel creation-time reading; defaults to the staged probe helper. */
-	readonly queryIdentity?: (helper: PtyProbeHelper, pid: number) => Promise<PtyIdentityReading>;
+	/** Test seam: the kernel creation-time reading; defaults to the process's native module. */
+	readonly queryIdentity?: (pid: number) => Promise<PtyIdentityReading>;
 	/** Test seam; defaults to `Date.now`. */
 	readonly now?: () => number;
 }
@@ -239,7 +231,7 @@ export interface BrokerAttachOutcome<Handle> {
  * How an attach established that the process behind a record is the broker the record describes.
  * `trusted`: the broker's own token-authenticated statement of its pid and kernel creation time,
  * which a broker of this generation attests, with no kernel reading of this window's own.
- * `probe`: this window read the pid's creation time through the staged helper (a broker that
+ * `probe`: this window read the pid's creation time through its native module (a broker that
  * attests nothing, such as one started by an older build).
  */
 export interface BrokerIdentityProof {
@@ -399,14 +391,11 @@ export class PtyBrokerClient {
 	private readonly proof: PtyRuntimeProof;
 	/** Executable files kept off the Bun path, by exact file identity ({@link BunBrokerPlan.key}). */
 	private readonly bunHeld = new Map<string, { readonly until: number | null; readonly fallback: ChatBrokerFallback }>();
-	private probePromise: Promise<PtyProbeReadiness> | null = null;
 	private identityPromise: Promise<PtyAttachIdentity> | null = null;
 	private accessPromise: Promise<{ readonly ok: boolean; readonly reason: string | null }> | null = null;
-	private readonly readings: PtyIdentityReadings;
 
 	constructor(options: PtyBrokerClientOptions) {
 		this.options = options;
-		this.readings = new PtyIdentityReadings({ query: options.queryIdentity ?? queryPtyProcessIdentity });
 		this.proof = new PtyRuntimeProof({
 			probe: deadlineMs =>
 				ensurePtyRuntime({
@@ -436,49 +425,10 @@ export class PtyBrokerClient {
 	}
 
 	/**
-	 * What re-adopting an already-running broker needs: the verified identity probe.
-	 *
-	 * An attach reads a durable record, takes the recorded pid's kernel creation time
-	 * through the probe, and authenticates with the record's token; it never executes the
-	 * staged broker tree, so it does not wait for the tree's staging or self-check
-	 * ({@link ready}, required before anything is *started*). A runtime already proven by
-	 * {@link ready} answers from that proof. Only success is cached.
-	 */
-	async attachReady(): Promise<PtyProbeReadiness> {
-		const proven = this.proof.provenAnswer();
-		if (proven !== null && proven.runtime !== null) {
-			return {
-				ready: true,
-				reason: null,
-				runtimeVersion: proven.runtimeVersion,
-				treeDigest: proven.treeDigest,
-				helper: proven.runtime.helper,
-			};
-		}
-		const cached = this.probePromise;
-		if (cached !== null) {
-			const readiness = await cached;
-			if (readiness.ready) return readiness;
-			this.probePromise = null;
-		}
-		const attempt = ensurePtyProbeHelper({
-			storageDir: this.options.storageDir,
-			extensionRoot: this.options.extensionRoot,
-			...(this.options.access === undefined ? {} : { access: this.options.access }),
-		});
-		this.probePromise = attempt.catch(error => {
-			this.probePromise = null;
-			throw error;
-		});
-		return await this.probePromise;
-	}
-
-	/**
 	 * What an attach needs from this build's runtime when the broker can vouch for itself: the
-	 * runtime version and the digest of the packaged tree, hashed in place. Nothing is staged
-	 * and no PowerShell runs, so a restore's first attach does not wait on the probe helper's
-	 * staging and access verification; {@link attachReady} stages the helper only when a
-	 * kernel reading is actually needed ({@link identityReading}). Only success is cached.
+	 * runtime version and the digest of the packaged tree, hashed in place. Nothing is staged,
+	 * so a restore's first attach does not wait on the runtime's staging and access verification;
+	 * a kernel reading ({@link identityReading}) needs only the process's native module. Only success is cached.
 	 */
 	async attachIdentity(): Promise<PtyAttachIdentity> {
 		const proven = this.proof.provenAnswer();
@@ -513,16 +463,11 @@ export class PtyBrokerClient {
 
 	/**
 	 * This window's own kernel creation-time reading of one pid, for proving an attachment, an
-	 * ownership verdict or a stop's pin: it stages the probe helper on first use and shares one
-	 * probe among concurrent proofs of the same pid ({@link PtyIdentityReadings}); nothing is kept
-	 * once a probe has answered. Absence and kill decisions take their own readings instead.
+	 * ownership verdict or a stop's pin. Every reading asks the kernel again, so the evidence is
+	 * never older than the proof that uses it; absence and kill decisions take their own readings.
 	 */
 	async identityReading(pid: number): Promise<PtyIdentityReading> {
-		const ready = await this.attachReady();
-		if (!ready.ready || ready.helper === null) {
-			return { kind: "unknown", detail: ready.reason ?? "the broker identity probe is not ready" };
-		}
-		return await this.readings.read(ready.helper, pid);
+		return await (this.options.queryIdentity ?? queryPtyProcessIdentity)(pid);
 	}
 
 	/** Every record this window can read, plus the ones it cannot. */
@@ -947,7 +892,7 @@ export class PtyBrokerClient {
 				if (!ready.ready || ready.runtime === null) {
 					return { state: "not-started", reason: ready.reason ?? "the broker runtime is not ready", handle: null, adopted: false, brokerPid: null };
 				}
-				const identity = await queryPtyProcessIdentity(ready.runtime.helper, lookup.record.brokerPid);
+				const identity = await queryPtyProcessIdentity(lookup.record.brokerPid);
 				// A gone broker does NOT mean its child's process tree is gone: an escaped
 				// descendant may still be running, so retiring this record would drop the
 				// only recovery metadata for the slot and let a second writer start in it.
@@ -1259,10 +1204,10 @@ export function buildBrokerArguments(
 		String(spec.cols ?? 80),
 		"--rows",
 		String(spec.rows ?? 24),
-		"--helper",
-		runtime.helper.path,
-		"--helper-sha256",
-		runtime.helper.sha256,
+		"--native",
+		runtime.native.path,
+		"--native-sha256",
+		runtime.native.sha256,
 		"--owner-helper",
 		runtime.ownerHelper.path,
 		"--owner-helper-sha256",

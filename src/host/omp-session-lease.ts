@@ -156,7 +156,7 @@ export type LeaseState = "held" | "absent";
 export type LeaseProbe = (mutexNames: readonly string[]) => Promise<ReadonlyMap<string, LeaseState> | null>;
 
 /** The native module, once its load has settled; `null` when it is unavailable ({@link win32Native}). */
-export type NativeSource = () => Promise<Win32Native | null>;
+export type NativeSource = () => Promise<Pick<Win32Native, "mutexState"> | null>;
 
 /**
  * The production probe: each name is opened with `SYNCHRONIZE` only, in process (ADR-0076).

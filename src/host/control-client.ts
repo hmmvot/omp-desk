@@ -43,6 +43,7 @@ import { createHash, createPublicKey, generateKeyPair } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { StringDecoder } from "node:string_decoder";
 import { clearTimeout as clearNodeTimeout, setTimeout as setNodeTimeout } from "node:timers";
+import { win32Native } from "./win32-native.ts";
 import {
 	CONTROL_MAX_FRAME_BYTES,
 	CONTROL_PROTOCOL_VERSION,
@@ -101,7 +102,6 @@ export type {
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
-const PROCESS_PROBE_TIMEOUT_MS = 5_000;
 const MAX_MESSAGE_LENGTH = 512;
 const MAX_SEEN_SERVER_NONCES = 256;
 /** One bridged line carries at most this much base64; frames stay far below it. */
@@ -401,7 +401,7 @@ async function spawnControlHelper(args: readonly string[], label: string): Promi
 	};
 }
 
-/** `!GENERATION <filetime>` / `!ERROR <code>` from a generation probe. */
+/** `!<KIND> fields` control lines of the bridge helper. */
 const HELPER_FIELD_SEPARATOR = /\s+/;
 
 function parseHelperControlLine(line: string): { kind: string; fields: string[] } | null {
@@ -412,10 +412,12 @@ function parseHelperControlLine(line: string): { kind: string; fields: string[] 
 }
 
 /**
- * Kernel creation time of `pid`, as the FILETIME decimal string both the probe
- * and the bridge report. Call it promptly after the terminal's process id
- * resolves and record the result with the host ownership: it is the generation
- * the verified connection must still match later.
+ * Kernel creation time of `pid`, as the FILETIME decimal string the bridge also reports. Call it
+ * promptly after the terminal's process id resolves and record the result with the host
+ * ownership: it is the generation the verified connection must still match later.
+ *
+ * One in-process `OpenProcess` + `GetProcessTimes` (ADR-0076); an unavailable native module, a
+ * process that is gone and any other failure refuse visibly.
  */
 export async function queryControlProcessGeneration(pid: number): Promise<string> {
 	if (process.platform !== "win32") {
@@ -427,40 +429,19 @@ export async function queryControlProcessGeneration(pid: number): Promise<string
 	if (!Number.isSafeInteger(pid) || pid <= 0) {
 		throw new HostControlPeerError("helper-failed", "process id to probe is invalid");
 	}
-	const helper = await spawnControlHelper(
-		["-Mode", "generation", "-TargetPid", String(pid)],
-		"process generation probe",
-	);
-	const answered = Promise.withResolvers<string>();
-	helper.onLine(line => {
-		const control = parseHelperControlLine(line);
-		if (!control) return;
-		if (control.kind === "GENERATION" && control.fields[0] !== undefined) {
-			answered.resolve(control.fields[0]);
-			return;
-		}
-		if (control.kind === "ERROR") {
-			answered.reject(
-				new HostControlPeerError("helper-failed", `generation probe failed: ${control.fields[0] ?? "unknown"}`),
-			);
-		}
-	});
-	void helper.exited.then(reason => {
-		if (reason !== null) {
-			answered.reject(new HostControlPeerError(helper.failure() ?? "helper-failed", reason));
-		}
-	});
-	const timer = setNodeTimeout(() => {
-		answered.reject(new HostControlPeerError("timeout", "generation probe did not answer in time"));
-		helper.close();
-	}, PROCESS_PROBE_TIMEOUT_MS);
-	timer.unref();
-	try {
-		return await answered.promise;
-	} finally {
-		clearNodeTimeout(timer);
-		helper.close();
+	const native = await win32Native();
+	if (native === null) {
+		throw new HostControlPeerError(
+			"helper-unavailable",
+			"the native module is unavailable, so the process generation of the pipe server cannot be proven",
+		);
 	}
+	const reading = native.processCreation(pid);
+	if (reading.kind === "found") return reading.filetime;
+	throw new HostControlPeerError(
+		"helper-failed",
+		reading.kind === "gone" ? "generation probe failed: PROCESS_QUERY_FAILED" : `generation probe failed: ${reading.detail}`,
+	);
 }
 
 /**

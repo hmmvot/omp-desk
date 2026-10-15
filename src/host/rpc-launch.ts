@@ -336,7 +336,7 @@ export async function attachRpcHost(input: {
 	readonly cwd: string;
 	readonly sessionFile: string | null;
 	readonly client: PtyBrokerClient;
-	/** Test seam: the kernel reader; defaults to the client's, which stages the probe helper only when a reading is needed. */
+	/** Test seam: the kernel reader; defaults to the client's own readings. */
 	readonly readNativeGeneration?: NativeGenerationReader;
 }): Promise<RpcAttachOutcome> {
 	const proof = concurrentPinProof({

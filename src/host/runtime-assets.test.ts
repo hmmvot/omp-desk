@@ -19,7 +19,7 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { after, describe, it } from "node:test";
+import { after, before, describe, it } from "node:test";
 import {
 	RUNTIME_ASSET_DIRECTORY,
 	stageRuntimeAssets,
@@ -27,6 +27,8 @@ import {
 	verifyStagedRuntimeAsset,
 } from "./runtime-assets.ts";
 import { readStorageSecurity, type PrivateStorageCommandResult, type PrivateStorageProbe } from "./private-storage.ts";
+import { loadWin32Native, setWin32NativeForTest } from "./win32-native.ts";
+import { installedAddonAsset } from "./win32-test-support.ts";
 import { TEST_CURRENT_SID, fixtureAcl, fixturePrincipal } from "./private-storage-test-support.ts";
 
 /** The account a simulated Windows probe runs as. */
@@ -155,7 +157,12 @@ async function restrictWithRealTool(directory: string): Promise<void> {
 	]);
 }
 
+before(async () => {
+	if (process.platform === "win32") setWin32NativeForTest(await loadWin32Native(await installedAddonAsset()));
+});
+
 after(async () => {
+	setWin32NativeForTest(undefined);
 	await Promise.all(roots.map(root => rm(root, { recursive: true, force: true }).catch(() => {})));
 });
 

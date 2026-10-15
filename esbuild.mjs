@@ -9,7 +9,7 @@
 //   src/broker/pty-broker.ts -> out/pty/pty-broker.js  (extension-owned PTY broker, detached Node process)
 //
 // The broker is not just a bundle: `out/pty/` is a *tree* — the entry, the
-// PowerShell identity probe, and the `node-pty` package with its prebuilt native
+// owner-watch helper, and the `node-pty` package with its prebuilt native
 // addon, `conpty.dll` and `OpenConsole.exe`. `src/host/pty-runtime.ts` stages that
 // whole tree into content-addressed global storage (ADR-0012) and proves it with
 // `pty-broker.js --self-check` before any session runs from it.
@@ -177,6 +177,20 @@ const targets = [
       external: ["node-pty"],
     },
   },
+  {
+    // The one-shot child that stages the native module and verifies the tree it lands in
+    // (`node out/native-stage.js <packaged koffi.node> <storage directory>`, ADR-0076). It runs under the
+    // extension host's own executable as Node, from the install folder, and lives for about a second.
+    name: "native-stage",
+    options: {
+      entryPoints: ["src/runtime/native-stage.ts"],
+      outfile: "out/native-stage.js",
+      bundle: true,
+      platform: "node",
+      format: "cjs",
+      target: "node20",
+    },
+  },
 ];
 
 const shared = {
@@ -272,8 +286,9 @@ function ptyPrebuildDirectories() {
 /**
  * Assemble the broker runtime tree under `out/pty/`.
  *
- * Three things move here. The two checked-in helpers — the identity probe and the
- * owner watcher — are copied next to the broker entry, and `node-pty` is copied as a
+ * Three things move here. The checked-in owner watcher is copied next to the broker entry
+ * (the identity readings are in-process calls through `out/native/koffi.node`, which the staged
+ * tree also carries, ADR-0076), and `node-pty` is copied as a
  * *package* (`package.json`, `lib/**`, and the prebuilt native directory for this
  * platform) under `node_modules/`, which is where the staged bundle resolves it from.
  * The native directory matters most: `conpty.node` loads `conpty/conpty.dll`, which
@@ -285,7 +300,7 @@ function ptyPrebuildDirectories() {
  * and would silently change what the broker runs from it.
  */
 async function copyPtyRuntime() {
-  const helpers = ["pty-process-probe.ps1", "pty-owner-watch.ps1"];
+  const helpers = ["pty-owner-watch.ps1"];
   const sources = helpers.map(name => ({ name, path: path.join("src", "host", name) }));
   const destination = path.join("out", "pty");
   const packageRoot = path.join("node_modules", "node-pty");
@@ -296,8 +311,8 @@ async function copyPtyRuntime() {
       await fs.access(source.path);
       present.push(source);
     } catch {
-      // Nothing to assemble until both helpers exist; the runtime reports the tree as
-      // incomplete rather than starting a broker that cannot prove identity or owners.
+      // Nothing to assemble until the helper exists; the runtime reports the tree as
+      // incomplete rather than starting a broker that cannot watch its owners.
     }
   }
   if (present.length !== sources.length) return;
@@ -352,7 +367,8 @@ async function main() {
   if (watch) {
     const contexts = await Promise.all(selected.map(({ options }) => esbuild.context({ ...shared, ...options })));
     await Promise.all(contexts.map(context => context.watch()));
-    if (!ptyOnly) { await copyControlHelper(); await copyNativeAddon(); await copyCodicons(); }
+    if (!ptyOnly) { await copyControlHelper(); await copyCodicons(); }
+    await copyNativeAddon();
     await copyPtyRuntime();
     console.log(`watching ${selected.length} build targets`);
     return;
@@ -362,7 +378,8 @@ async function main() {
     if (result.metafile) assertBundleBoundary(name, Object.keys(result.metafile.inputs));
     console.log(`built ${name} -> ${options.outfile}`);
   }
-  if (!ptyOnly) { await copyControlHelper(); await copyNativeAddon(); await copyCodicons(); }
+  if (!ptyOnly) { await copyControlHelper(); await copyCodicons(); }
+  await copyNativeAddon();
   await copyPtyRuntime();
 }
 

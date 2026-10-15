@@ -31,7 +31,7 @@ function fixture() {
 	const parsed = parsePtyBrokerArgs([
 		"--slot", "shell:reply-order", "--kind", "folder-shell",
 		"--storage-dir", process.cwd(), "--file", process.execPath, "--cwd", process.cwd(),
-		"--tree-digest", "a".repeat(64), "--no-helper",
+		"--tree-digest", "a".repeat(64), "--native", "koffi.node", "--native-sha256", "b".repeat(64),
 	]);
 	if (typeof parsed === "string") throw new Error(parsed);
 	const options = parsed;

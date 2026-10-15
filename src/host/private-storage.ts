@@ -24,7 +24,7 @@ import * as fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { windowsPowerShellEnvironment, windowsPowerShellExecutable } from "./windows-powershell.ts";
+import { win32Native } from "./win32-native.ts";
 import { startToolSpawnTrace, type ToolSpawn, type ToolSpawnOutcome } from "./tool-spawn-trace.ts";
 
 /** One bounded security-tool result; injected so tests never depend on machine ACLs. */
@@ -67,29 +67,24 @@ export interface PrivateStorageLayout {
 	readonly probeDirectory: string;
 	/** Fixed text the probe writes and reads back. */
 	readonly probeText: string;
-	/**
-	 * Fixed, code-chosen name of this store for the spawn trace (`broker state`, `runtime tree`);
-	 * never a path or anything an outside source chose. Absent reads as `private-storage`.
-	 */
-	readonly label?: string;
 }
 
 export interface PrivateStorageProbe {
 	readonly platform?: NodeJS.Platform;
 	/** SID of the account allowed alongside the trusted system principals. */
 	readonly currentSid?: string;
-	/** Reads SID-based access entries as JSON; defaults to the module-free .NET reader. */
+	/** Reads SID-based access entries as JSON; defaults to the native security read. */
 	readonly readAcl?: (directory: string) => Promise<PrivateStorageCommandResult>;
 	/** Applies extra `icacls` arguments to a directory; defaults to running `icacls`. */
 	readonly applyIcacls?: (directory: string, args: readonly string[]) => Promise<PrivateStorageCommandResult>;
 	/** Reads owners as SIDs, with their resolved names for diagnostics when available. */
 	readonly readOwners?: (paths: readonly string[]) => Promise<PrivateStorageCommandResult>;
 	/**
-	 * Replaces the one process that reads the account SID, every access list and every owner
-	 * together; defaults to {@link readStorageSecurity}. It serves the reads the probe does not
+	 * Replaces the native read of the account SID, every access list and every owner;
+	 * defaults to {@link readStorageSecurity}. It serves the reads the probe does not
 	 * name itself.
 	 */
-	readonly readSecurity?: (paths: readonly string[], label: string | undefined) => Promise<PrivateStorageSecurityRead>;
+	readonly readSecurity?: (paths: readonly string[]) => Promise<PrivateStorageSecurityRead>;
 	/**
 	 * Reads the mode `ls -ld` prints for one path, on POSIX; the mode carries the
 	 * marker for an extended access control list. Defaults to `/bin/ls -ld`.
@@ -149,7 +144,6 @@ export function isInsideRoot(root: string, directory: string): boolean {
 }
 
 const MAX_ICACLS_BYTES = 64 * 1024;
-const MAX_OWNER_BYTES = 64 * 1024;
 const MAX_LISTING_BYTES = 256 * 1024;
 const ICACLS_TIMEOUT_MS = 10_000;
 const OWNER_TIMEOUT_MS = 20_000;
@@ -229,139 +223,69 @@ function systemTool(name: string): string {
 	return path.join(root, "System32", name);
 }
 
-/** Explicit UTF-8 also preserves non-ASCII paths and optional diagnostic account names. */
-const WINDOWS_SECURITY_SCRIPT = [
-	"$ErrorActionPreference = 'Stop'",
-	"[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)",
-	"$names = @{}",
-	"function Principal($sid) {",
-	"  $key = $sid.Value",
-	"  if ($names.ContainsKey($key)) { return $names[$key] }",
-	"  $name = $null",
-	"  try { $name = $sid.Translate([System.Security.Principal.NTAccount]).Value } catch {}",
-	"  $text = if ($null -eq $name) { $key } else { $key + ' (' + $name + ')' }",
-	"  $names[$key] = $text",
-	"  return $text",
-	"}",
-	"function Security($item) {",
-	"  if ([System.IO.Directory]::Exists($item)) { return [System.IO.Directory]::GetAccessControl($item) }",
-	"  return [System.IO.File]::GetAccessControl($item)",
-	"}",
-].join("\n");
-
 /**
  * What one batched security read reported for one path: its access entries (the JSON
  * protocol {@link parseWindowsAcl} reads) and its owner, each failing on its own.
  */
 export interface PrivateStorageSecurityReport {
 	readonly acl: PrivateStorageCommandResult;
-	/** The owner as `SID (name)` or a bare SID; `null` when it could not be read. */
+	/** The owner as a SID; `null` when it could not be read. */
 	readonly owner: string | null;
 }
 
-/** The result of one process that read the account SID and every requested path's access and owner. */
+/** The result of one batched read of the account SID and every requested path's access and owner. */
 export interface PrivateStorageSecurityRead {
-	/** The current token's SID; `null` when the process failed or printed something that is not one. */
+	/** The current token's SID; `null` when the read failed or answered something that is not one. */
 	readonly sid: string | null;
-	/** Why the whole process failed (it did not start, exited non-zero, timed out, flooded); `null` otherwise. */
+	/** Why the whole read failed (the native module is unavailable, it missed its deadline, it threw); `null` otherwise. */
 	readonly failure: string | null;
-	/** One report per requested path, keyed by its lower-case spelling; empty when the output could not be trusted. */
+	/** One report per requested path, keyed by its lower-case spelling. */
 	readonly reports: ReadonlyMap<string, PrivateStorageSecurityReport>;
 }
 
 /**
- * What one batched read's output says, judged as a whole: a failed process leaves every read
- * unverified, and so do a document that is not the expected shape and a path reported twice.
- * Each read inside a good document still fails on its own: a path whose rules cannot be read has
- * `acl.ok === false`, one whose owner cannot be read has `owner === null`, and the SID is `null`
- * when it is not a SID.
+ * The account SID and, for every requested path, its access entries and owner, read natively
+ * (`GetNamedSecurityInfoW`; ADR-0076). One batch runs under one 20 s deadline. The module being
+ * unavailable, a missed deadline and an error all leave every path unreadable, which refuses.
+ * Principals are bare SIDs; {@link namedPrincipal} adds a name to the ones a refusal quotes.
  */
-export function parseStorageSecurity(
-	result: PrivateStorageCommandResult,
-	paths: readonly string[],
-): PrivateStorageSecurityRead {
-	if (!result.ok) {
-		const detail = result.detail ?? "the security reader failed";
+export async function readStorageSecurity(paths: readonly string[]): Promise<PrivateStorageSecurityRead> {
+	const native = await win32Native();
+	if (native === null) {
+		const detail = "the native module is unavailable";
 		return {
 			sid: null,
 			failure: detail,
 			reports: new Map(paths.map(target => [target.toLowerCase(), { acl: { ok: false, stdout: "", detail }, owner: null }])),
 		};
 	}
-	const malformed: PrivateStorageSecurityRead = { sid: null, failure: null, reports: new Map() };
-	try {
-		const parsed: unknown = JSON.parse(result.stdout);
-		if (typeof parsed !== "object" || parsed === null) return malformed;
-		const { sid, reports: listed } = parsed as { sid?: unknown; reports?: unknown };
-		if (!Array.isArray(listed)) return malformed;
-		const reports = new Map<string, PrivateStorageSecurityReport>();
-		for (const report of listed) {
-			if (typeof report?.path !== "string" || !paths.includes(report.path)) continue;
-			const key = report.path.toLowerCase();
-			if (reports.has(key)) return malformed;
-			reports.set(key, {
-				acl: {
-					ok: report.entries !== null,
-					stdout: JSON.stringify(report.entries) ?? "",
-					detail: report.entries === null ? "the SID-based security API failed" : null,
-				},
-				owner: typeof report.owner === "string" && report.owner.length > 0 ? report.owner : null,
-			});
-		}
-		return { sid: typeof sid === "string" && isSid(sid) ? sid : null, failure: null, reports };
-	} catch {
-		return malformed;
+	const read = await native.readSecurity(paths, OWNER_TIMEOUT_MS);
+	const reports = new Map<string, PrivateStorageSecurityReport>();
+	for (const [key, report] of read.reports) {
+		reports.set(key, {
+			acl: {
+				ok: report.entries !== null,
+				stdout: JSON.stringify(report.entries) ?? "",
+				detail: report.entries === null ? "the SID-based security API failed" : null,
+			},
+			owner: report.owner,
+		});
 	}
+	return { sid: read.sid !== null && isSid(read.sid) ? read.sid : null, failure: read.failure, reports };
 }
 
 /**
- * One PowerShell process reads the current account SID and, for every requested path,
- * its access rules and its owner (ADR-0054, amended 2026-10-13). The 20 s bound and the
- * 64 KiB output cap cover the whole process; {@link parseStorageSecurity} judges its output.
+ * A principal for a refusal message: `SID (DOMAIN\name)` when the account resolves, the bare SID
+ * otherwise. Names are diagnostic only (no verdict reads them), so they are looked up for the
+ * principals a refusal quotes and never on the admission path.
  */
-export async function readStorageSecurity(
-	paths: readonly string[],
-	label = "private-storage",
-): Promise<PrivateStorageSecurityRead> {
-	const result = await runCommandDefault({
-		tool: "powershell",
-		purpose: `${label} security read (${paths.length} ${paths.length === 1 ? "path" : "paths"})`,
-		command: windowsPowerShellExecutable(),
-		args: [
-			"-NoProfile",
-			"-NonInteractive",
-			"-Command",
-			`${WINDOWS_SECURITY_SCRIPT}\n${SECURITY_READ_SCRIPT}`,
-		],
-		timeoutMs: OWNER_TIMEOUT_MS,
-		maxBytes: MAX_OWNER_BYTES,
-		env: windowsPowerShellEnvironment({ OMP_PRIVATE_STORAGE_PATHS: JSON.stringify(paths) }),
-	});
-	return parseStorageSecurity(result, paths);
+export async function namedPrincipal(principal: string): Promise<string> {
+	const sid = principalSid(principal);
+	if (sid === null || sid !== principal) return principal;
+	const names = await (await win32Native())?.lookupAccountNames([sid], OWNER_TIMEOUT_MS);
+	const name = names?.get(sid);
+	return name === undefined ? principal : `${sid} (${name})`;
 }
-
-/** The reader body: SID, then per path a security descriptor read once and mined for rules and owner. */
-const SECURITY_READ_SCRIPT = [
-	"$paths = $env:OMP_PRIVATE_STORAGE_PATHS | ConvertFrom-Json",
-	"$sid = $null",
-	"try { $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value } catch {}",
-	"$reports = @(foreach ($item in $paths) {",
-	"  $entries = $null",
-	"  $owner = $null",
-	"  $security = $null",
-	"  try { $security = Security $item } catch {}",
-	"  if ($null -ne $security) {",
-	"    try {",
-	"      $entries = @($security.GetAccessRules($true, $true, [System.Security.Principal.SecurityIdentifier]) | ForEach-Object {",
-	"        @{ principal = (Principal $_.IdentityReference); permissions = [int64]$_.FileSystemRights; denied = ($_.AccessControlType -eq [System.Security.AccessControl.AccessControlType]::Deny) }",
-	"      })",
-	"    } catch {}",
-	"    try { $owner = Principal ($security.GetOwner([System.Security.Principal.SecurityIdentifier])) } catch {}",
-	"  }",
-	"  @{ path = $item; entries = $entries; owner = $owner }",
-	"})",
-	"ConvertTo-Json -Depth 6 -Compress -InputObject @{ sid = $sid; reports = $reports }",
-].join("\n");
 
 function applyIcaclsDefault(
 	directory: string,
@@ -750,7 +674,7 @@ async function verifyStorage(
 		// amended 2026-10-13). A probe replaces only the reads it names; with all three replaced no
 		// process runs.
 		const security = probe?.currentSid === undefined || probe.readAcl === undefined || probe.readOwners === undefined
-			? await (probe?.readSecurity ?? readStorageSecurity)(owned, layout.label)
+			? await (probe?.readSecurity ?? readStorageSecurity)(owned)
 			: null;
 		if (taken !== undefined) taken.security = security;
 		const identity = probe?.currentSid ?? security?.sid ?? null;
@@ -766,7 +690,7 @@ async function verifyStorage(
 			if (!acl.parsed) return refuse(`the store access listing of ${target} could not be read`);
 			for (const principal of acl.principals) {
 				if (!isPermittedAclPrincipal(principal, identity)) {
-					return refuse(`the store path ${target} is readable by ${principal}, beyond the same-user boundary`);
+					return refuse(`the store path ${target} is readable by ${await namedPrincipal(principal)}, beyond the same-user boundary`);
 				}
 				if (!permittedPrincipals.includes(principal)) permittedPrincipals.push(principal);
 			}
@@ -782,7 +706,7 @@ async function verifyStorage(
 				if (entry.denied || isPermittedAclPrincipal(entry.principal, identity)) continue;
 				if (!permissionsPermitReplacement(entry.permissions)) continue;
 				return refuse(
-					`the component ${target} on the path to the store lets ${entry.principal} replace or re-permission it (${entry.permissions})`,
+					`the component ${target} on the path to the store lets ${await namedPrincipal(entry.principal)} replace or re-permission it (${entry.permissions})`,
 				);
 			}
 		}
@@ -808,7 +732,7 @@ async function verifyStorage(
 			const owner = ownerByPath.get(target.toLowerCase());
 			if (owner === undefined) return refuse(`the owner of ${target} could not be read`);
 			if (!isPermittedAclPrincipal(owner, identity)) {
-				return refuse(`the store path ${target} is owned by ${owner}, beyond the same-user boundary`);
+				return refuse(`the store path ${target} is owned by ${await namedPrincipal(owner)}, beyond the same-user boundary`);
 			}
 		}
 		evidence.push("access is limited to the owner, SYSTEM and Administrators");
@@ -954,7 +878,7 @@ export async function restrictPrivateStorage(input: {
 	const directories = restrictedDirectories(layout);
 	// The refused pass read every directory it reached; one that stopped before reading leaves nothing to reuse.
 	const needsRead = input.probe?.currentSid === undefined || input.probe.readAcl === undefined;
-	const security = taken.security ?? (needsRead ? await (input.probe?.readSecurity ?? readStorageSecurity)(directories, layout.label) : null);
+	const security = taken.security ?? (needsRead ? await (input.probe?.readSecurity ?? readStorageSecurity)(directories) : null);
 	const account = input.probe?.currentSid ?? security?.sid ?? null;
 	if (account === null || !isSid(account)) {
 		return {
@@ -991,7 +915,7 @@ export async function restrictPrivateStorage(input: {
 		// Inheritable grants can change every remaining directory. Never rewrite
 		// one from stale pre-parent-rewrite evidence.
 		if (input.probe?.readAcl === undefined && index + 1 < directories.length) {
-			reports = (await (input.probe?.readSecurity ?? readStorageSecurity)(directories.slice(index + 1), layout.label)).reports;
+			reports = (await (input.probe?.readSecurity ?? readStorageSecurity)(directories.slice(index + 1))).reports;
 		}
 	}
 	// Nothing was rewritten by this call, so the refused pass's refusal stands and the same checks are not repeated.

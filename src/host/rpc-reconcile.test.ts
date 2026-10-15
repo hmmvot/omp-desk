@@ -1069,13 +1069,13 @@ describe("stop of a recorded broker-owned child", () => {
 			assert.equal(stops, 0, "nothing was handed to the broker");
 		});
 
-		it("does not need the probe helper, while an unattested child still refuses without one", async () => {
+		it("needs no kernel reading for an attested child, while an unattested child still refuses without one", async () => {
 			let helperAsks = 0;
 			const withoutHelper = (handle: unknown): Client =>
 				Object.assign(brokerClient({ handle }), {
 					identityReading: async () => {
 						helperAsks += 1;
-						return { kind: "unknown", detail: "the probe helper could not be staged" } as const;
+						return { kind: "unknown", detail: "the native module is not available" } as const;
 					},
 				}) as unknown as Client;
 			const noSeam = { readNativeGeneration: undefined } as unknown as Partial<Parameters<typeof reconcile.stopBrokerOwnedHost>[0]>;

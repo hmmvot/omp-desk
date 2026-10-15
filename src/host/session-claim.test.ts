@@ -16,7 +16,7 @@ import { existsSync, symlinkSync } from "node:fs";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
-import { after, describe, it } from "node:test";
+import { after, before, describe, it } from "node:test";
 import {
 	ClaimBusyError,
 	ClaimConflictError,
@@ -40,6 +40,8 @@ import {
 	type SessionClaim,
 } from "./session-claim.ts";
 import { shortDirectoryAlias } from "./short-name-test-support.ts";
+import { loadWin32Native, setWin32NativeForTest } from "./win32-native.ts";
+import { installedAddonAsset } from "./win32-test-support.ts";
 
 const tempRoots: string[] = [];
 
@@ -96,7 +98,13 @@ async function caughtError(promise: Promise<unknown>, expected: new (...args: ne
 	assert.fail(`expected ${expected.name}, but the call resolved`);
 }
 
+before(async () => {
+	// The start times these tests compare are read in process (ADR-0076).
+	if (process.platform === "win32") setWin32NativeForTest(await loadWin32Native(await installedAddonAsset()));
+});
+
 after(async () => {
+	setWin32NativeForTest(undefined);
 	await Promise.all(tempRoots.map(root => rm(root, { recursive: true, force: true })));
 });
 
@@ -542,26 +550,6 @@ describe("whether another window's holder looks alive, for display", () => {
 			assert.equal(await claimHolderMayBeAlive(claim), true);
 			assert.deepEqual(purposes(probes), ["display", "verdict", "verdict"]);
 		});
-	});
-
-	/** Count the event-loop turns that run while `pending` is unsettled: a synchronous reading leaves none. */
-	async function turnsWhile(pending: Promise<unknown>): Promise<number> {
-		let settled = false;
-		void pending.then(() => { settled = true; }, () => { settled = true; });
-		let turns = 0;
-		while (!settled) {
-			turns++;
-			await new Promise<void>(resolve => setImmediate(resolve));
-		}
-		return turns;
-	}
-
-	it("lets the event loop run while a launch verdict reads the holder's start time", async () => {
-		const storageDir = await makeStorageDir();
-		const claim = await foreignClaim(storageDir, await makeSessionFile(), await liveProcess());
-		const pending = claimHolderMayBeAlive(claim);
-		assert.ok(await turnsWhile(pending) > 20, "the reading is a child process awaited off the thread, not a synchronous spawn");
-		assert.equal(await pending, true);
 	});
 
 	it("reads this process's start time once, off the thread", async () => {

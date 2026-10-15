@@ -3,10 +3,10 @@
  *
  * A fake broker speaks the real authenticated protocol over loopback (`startPtyBrokerServer`),
  * the record is published the way a broker publishes it, and the kernel reader is a counting
- * stand-in for the PowerShell probe, so each test states how many readings an attach took:
+ * stand-in for the native module, so each test states how many readings an attach took:
  *
  * - a broker that attests its own identity (this build's brokers) is attached with no reading at
- *   all, and the probe helper is never staged;
+ *   all;
  * - a broker that attests nothing (an older build's) is read through the kernel, once for the
  *   broker and once for its child, and a reconcile followed by the attach reads the pair once;
  * - a dead, replaced or substituted child, and a broker that is not the one the record names, are
@@ -15,7 +15,7 @@
  * Runner: `node --test src/host/pty-attach-identity.test.ts`
  */
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -28,7 +28,7 @@ import { PTY_PROTOCOL_VERSION, PTY_RECORD_VERSION, PTY_RUNTIME_VERSION, PTY_SERV
 import type { PtyBrokerRecord, PtyIdentityAttestation, PtyKind, PtyStatusPayload } from "./pty-protocol.ts";
 import { startPtyBrokerServer, type PtyBrokerServer } from "./pty-ipc.ts";
 import { claimPtyRecord } from "./pty-registry.ts";
-import type { PtyIdentityReading, PtyProbeHelper } from "./pty-identity.ts";
+import type { PtyIdentityReading } from "./pty-identity.ts";
 import type { PtyBrokerClient as PtyBrokerClientType } from "./pty-client.ts";
 import type { attachNativeHost as attachNativeHostType } from "./native-session.ts";
 import type { attachRpcHost as attachRpcHostType } from "./rpc-launch.ts";
@@ -99,15 +99,15 @@ before(async () => {
 		],
 	});
 	modules = (await import(pathToFileURL(outfile).href)) as Modules;
-	// The packaged tree an attach hashes in place: three small files are enough to name a build.
+	// The packaged tree an attach hashes in place: a few small files are enough to name a build.
 	extensionRoot = path.join(temp, "extension");
 	for (const [name, text] of [
-		["pty-broker.js", "// entry"],
-		["pty-process-probe.ps1", "# probe"],
-		["pty-owner-watch.ps1", "# owner watch"],
+		["out/pty/pty-broker.js", "// entry"],
+		["out/pty/pty-owner-watch.ps1", "# owner watch"],
+		["out/native/koffi.node", "native"],
 	] as const) {
-		await mkdir(path.join(extensionRoot, "out", "pty"), { recursive: true });
-		await writeFile(path.join(extensionRoot, "out", "pty", name), text, "utf8");
+		await mkdir(path.dirname(path.join(extensionRoot, name)), { recursive: true });
+		await writeFile(path.join(extensionRoot, name), text, "utf8");
 	}
 	treeDigest = await modules.ptyPackagedTreeDigest(extensionRoot);
 });
@@ -252,7 +252,7 @@ async function fixture(options: {
 		storageDir: storage,
 		extensionRoot,
 		access: ownerOnlyProbe(),
-		queryIdentity: async (_helper: PtyProbeHelper, pid: number) => {
+		queryIdentity: async (pid: number) => {
 			readings.push(pid);
 			if (options.readBarrier === undefined || readings.length >= options.readBarrier) barrier.resolve();
 			await barrier.promise;
@@ -284,10 +284,6 @@ async function fixture(options: {
 const ATTESTS_PIPE_CHILD: PtyIdentityAttestation = { brokerSelfRead: true, childHandleLive: true };
 const ATTESTS_CONSOLE_CHILD: PtyIdentityAttestation = { brokerSelfRead: true, childHandleLive: false };
 
-async function exists(target: string): Promise<boolean> {
-	return await stat(target).then(() => true, () => false);
-}
-
 async function listenOnLoopback(server: net.Server): Promise<number> {
 	const listening = Promise.withResolvers<void>();
 	server.listen(0, "127.0.0.1", listening.resolve);
@@ -302,14 +298,13 @@ async function closeServer(server: net.Server): Promise<void> {
 }
 
 describe("re-adopting a broker that attests its own identity", { skip: WINDOWS_ONLY }, () => {
-	it("takes no kernel reading and never stages the probe helper", async () => {
+	it("takes no kernel reading", async () => {
 		const f = await fixture({ attestation: ATTESTS_PIPE_CHILD });
 		const outcome = await modules.attachRpcHost({ pin: f.pin(), cwd: temp, sessionFile: null, client: f.client });
 		assert.equal(outcome.state, "attached", outcome.reason);
 		assert.deepEqual(f.readings, [], "an attested attach spawns no identity probe");
 		assert.equal(outcome.timings?.brokerIdentity, "trusted");
 		assert.equal(outcome.timings?.childIdentity, "trusted");
-		assert.equal(await exists(path.join(f.storage, "runtime", "pty-probe")), false, "the helper is staged only when a reading is needed");
 		outcome.runtime?.handle.disconnect();
 	});
 
@@ -381,7 +376,7 @@ describe("re-adopting a broker that attests its own identity", { skip: WINDOWS_O
 			const outcome = await f.client.attachRpcRecord(staleRecord(f, closedPort), { adopted: true });
 			assert.equal(outcome.state, "unavailable");
 			assert.equal(outcome.handle, null);
-			assert.deepEqual(f.readings, [], "no PowerShell reading was needed to refuse it");
+			assert.deepEqual(f.readings, [], "no kernel reading was needed to refuse it");
 		});
 
 		it("is refused when another broker answers on the recorded port", async () => {

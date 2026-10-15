@@ -64,7 +64,6 @@ import {
 	type HostControlVerifiedConnection,
 	createControlRecipient,
 	queryControlProcessGeneration,
-	setControlHelperScript,
 } from "./control-client.ts";
 import {
 	type HostControlAdapter,
@@ -80,7 +79,8 @@ import {
 	readControlLaunchMetadata,
 	startHostControlServer,
 } from "../omp/host-control.ts";
-import { stageRuntimeAssets } from "./runtime-assets.ts";
+import { loadWin32Native, setWin32NativeForTest } from "./win32-native.ts";
+import { installedAddonAsset } from "./win32-test-support.ts";
 import { NativeActivityLedger } from "./native-activity.ts";
 
 const tempDirs: string[] = [];
@@ -94,18 +94,6 @@ async function makeTempDir(prefix: string): Promise<string> {
 	const dir = await mkdtemp(path.join(tmpdir(), prefix));
 	tempDirs.push(dir);
 	return dir;
-}
-
-/**
- * A storage directory the stager can verify: under the local application data,
- * whose ancestor chain is trusted on this machine, because the shared temporary
- * directory is deliberately refused by the access verification.
- */
-async function makeStagingDir(): Promise<string> {
-	const base = process.env.LOCALAPPDATA ?? tmpdir();
-	const root = await mkdtemp(path.join(base, "omp-control-helper-"));
-	tempDirs.push(root);
-	return path.join(root, "globalStorage");
 }
 
 async function pathExists(target: string): Promise<boolean> {
@@ -1181,44 +1169,28 @@ describe("host control channel", () => {
 	});
 
 	it("reports a stable kernel generation for a live process", { skip: process.platform !== "win32" }, async () => {
-		// The peer proof runs the staged helper copy; a real window is handed one at
-		// activation, and the digest is kept beside the path because the copy is re-read
-		// and re-hashed immediately before every spawn. This stages the packaged helper
-		// the same way the extension does and hands the probe the staged path, so the
-		// path under test is the one a window would really use.
-		const packaged = fileURLToPath(new URL("./verified-pipe.ps1", import.meta.url));
-		const [stagedHelper] = await stageRuntimeAssets({
-			storageDir: await makeStagingDir(),
-			sourcePaths: [packaged],
-		});
-		assert.ok(stagedHelper !== undefined);
-		const helperPath = stagedHelper.path;
-		const helperDigest = stagedHelper.sha256;
-		assert.notEqual(helperPath, packaged, "the probe runs a staged copy, not the packaged file");
-		setControlHelperScript(helperPath, helperDigest);
-		const first = await queryControlProcessGeneration(process.pid);
-		const second = await queryControlProcessGeneration(process.pid);
-		assert.match(first, /^\d{15,}$/, "the generation is a FILETIME decimal string");
-		assert.equal(second, first, "a live process keeps its creation time");
+		// The generation is one in-process call through the native module (ADR-0076), loaded here from the
+		// installed addon the same way a window loads its staged copy.
+		setWin32NativeForTest(await loadWin32Native(await installedAddonAsset()));
+		try {
+			const first = await queryControlProcessGeneration(process.pid);
+			const second = await queryControlProcessGeneration(process.pid);
+			assert.match(first, /^\d{15,}$/, "the generation is a FILETIME decimal string");
+			assert.equal(second, first, "a live process keeps its creation time");
 
-		const gone = await caught(queryControlProcessGeneration(4294967290));
-		assert.ok(gone instanceof HostControlPeerError, `unexpected error: ${gone.message}`);
+			const gone = await caught(queryControlProcessGeneration(4294967290));
+			assert.ok(gone instanceof HostControlPeerError, `unexpected error: ${gone.message}`);
+			assert.equal(gone.reason, "helper-failed");
+			assert.match(gone.message, /PROCESS_QUERY_FAILED/);
 
-		// With no staged copy configured there is no helper at all: the proof refuses
-		// rather than falling back to an unchecked socket.
-		setControlHelperScript("", "");
-		const unconfigured = await caught(queryControlProcessGeneration(process.pid));
-		assert.ok(unconfigured instanceof HostControlPeerError, `unexpected error: ${unconfigured.message}`);
-		assert.equal(unconfigured.reason, "helper-unavailable");
-
-		// A copy whose bytes are no longer the ones it was staged with is refused too,
-		// rather than executed under the digest it no longer has.
-		setControlHelperScript(helperPath, "0".repeat(64));
-		const substituted = await caught(queryControlProcessGeneration(process.pid));
-		assert.ok(substituted instanceof HostControlPeerError, `unexpected error: ${substituted.message}`);
-		assert.equal(substituted.reason, "helper-unavailable");
-		assert.match(substituted.message, /no longer holds the bytes/);
-		setControlHelperScript(helperPath, helperDigest);
+			// A native module that could not be loaded refuses rather than falling back to an unchecked socket.
+			setWin32NativeForTest(null);
+			const unavailable = await caught(queryControlProcessGeneration(process.pid));
+			assert.ok(unavailable instanceof HostControlPeerError, `unexpected error: ${unavailable.message}`);
+			assert.equal(unavailable.reason, "helper-unavailable");
+		} finally {
+			setWin32NativeForTest(undefined);
+		}
 	});
 });
 

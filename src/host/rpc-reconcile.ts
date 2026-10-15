@@ -18,7 +18,6 @@
  */
 import type { BrokerSlotProvenance } from "./broker-slots";
 import type { PtyShutdownResult } from "./broker-handle";
-import { isPtyProcessAlive, queryPtyProcessIdentity } from "./pty-identity";
 import type { PtyIdentityReading } from "./pty-identity";
 import type { PtyBrokerClient } from "./pty-client";
 import { attestationOf } from "./pty-protocol";
@@ -44,7 +43,7 @@ export type BrokerProbeResult =
 	| { readonly ok: true; readonly pin: BrokerPin }
 	| { readonly ok: false; readonly reason: string };
 
-/** Kernel creation-time reading of one process id; the helper owns the reading. */
+/** Kernel creation-time reading of one process id. */
 export type NativeGenerationReader = (pid: number) => Promise<PtyIdentityReading>;
 
 /**
@@ -328,26 +327,17 @@ export function concurrentPinProof(input: {
 }
 
 /**
- * The staged probe helper's kernel reading, or `null` when the runtime has none.
- *
- * The helper is the same one that proves the broker's own process id, so a broker whose
- * record could be attached at all has one; a runtime that cannot be verified answers
- * `null` rather than reading a process id without a creation time.
+ * The kernel reader of the root-absence checks: the process's native module through
+ * {@link PtyBrokerClient.identityReading}, which asks the kernel on every call. No runtime is staged
+ * or proved for it, and a module that is not loaded answers `unknown`, which proves nothing.
  */
-export async function brokerNativeGenerationReader(client: PtyBrokerClient): Promise<NativeGenerationReader | null> {
-	// Attach-only: a read needs just the identity probe, not the staged runtime's self-check.
-	const ready = await client.attachReady();
-	const helper = ready.ready ? ready.helper : null;
-	if (helper === null) return null;
-	return pid => queryPtyProcessIdentity(helper, pid);
+export async function brokerNativeGenerationReader(client: PtyBrokerClient): Promise<NativeGenerationReader> {
+	return lazyNativeGenerationReader(client);
 }
 
 /**
- * The kernel reader an attachment proof uses: the staged probe helper is staged on the first
- * *call*, not before it. A proof of a child its broker attests never calls it, so the first
- * attach of a window does not wait on the helper's staging and access verification. Readings
- * go through {@link PtyBrokerClient.identityReading}, which shares only probes that are in
- * flight: every proof that starts after an answer reads the kernel again.
+ * The kernel reader an attachment proof uses. A proof of a child its broker attests never calls it.
+ * Every reading asks the kernel again, so evidence is never older than the proof that uses it.
  */
 export function lazyNativeGenerationReader(client: PtyBrokerClient): NativeGenerationReader {
 	return async pid => {
@@ -361,13 +351,7 @@ export function lazyNativeGenerationReader(client: PtyBrokerClient): NativeGener
 
 /** The reading this window takes of a process when no broker can be asked. */
 export async function kernelProcessIdentity(client: PtyBrokerClient, pid: number): Promise<PtyIdentityReading> {
-	try {
-		const reader = await brokerNativeGenerationReader(client);
-		if (reader === null) return { kind: "unknown", detail: "the runtime has no process probe" };
-		return await reader(pid);
-	} catch (error) {
-		return { kind: "unknown", detail: messageOf(error) };
-	}
+	return await (await brokerNativeGenerationReader(client))(pid);
 }
 
 type LookedUp =
@@ -443,7 +427,7 @@ export async function probeRpcHost(input: {
 	readonly slot: string;
 	readonly expected: RecordedRpcIdentity;
 	readonly kind?: "managed-rpc" | "managed-omp";
-	/** Test seam: the kernel reader; defaults to the staged broker probe helper. */
+	/** Test seam: the kernel reader; defaults to the client's own readings. */
 	readonly readNativeGeneration?: NativeGenerationReader;
 }): Promise<RpcProbeResult> {
 	// Concurrent equivalent reads share one in-flight RPC proof so they cannot exhaust the
@@ -523,7 +507,7 @@ async function probeRpcHostOnce(input: Parameters<typeof probeRpcHost>[0]): Prom
 			}
 			return { kind: "child-exited", childPid: handle.nativePid, brokerGeneration: expected.brokerGeneration };
 		}
-		// The staged probe helper is only staged if a kernel reading is actually needed.
+		// A kernel reading is taken only if the proof needs one.
 		const settled = await (early.proof ?? prove(handle));
 		if ("threw" in settled) throw settled.threw;
 		const proved = settled.proved;
@@ -681,7 +665,7 @@ export async function stopBrokerOwnedHost(input: {
 	readonly recordedPid: number | null;
 	/** The rpc identity this row recorded, or `null` (legacy row, or an attempt that learned none). */
 	readonly expected?: RecordedRpcIdentity | null;
-	/** Test seam: the kernel reader; defaults to the staged broker probe helper. */
+	/** Test seam: the kernel reader; defaults to the client's own readings. */
 	readonly readNativeGeneration?: NativeGenerationReader;
 	readonly stopTimeoutMs?: number;
 }): Promise<StopBrokerOwnedResult> {
@@ -699,8 +683,8 @@ export async function stopBrokerOwnedHost(input: {
 	let dispatched = false;
 	try {
 		// Lazy, like every attach: an attested child is proved from the broker's own status and needs no
-		// helper, so the stop does not wait for one; a reading that is needed stages it then, and a runtime
-		// that cannot supply one refuses the stop before anything is dispatched.
+		// kernel reading, so the stop takes one only when it must; a reading that cannot be taken
+		// (the native module is not loaded) answers `unknown` and refuses the stop before anything is dispatched.
 		const reader: NativeGenerationReader = input.readNativeGeneration ?? lazyNativeGenerationReader(input.client);
 		const kind: PtyKind = handle.kind === "managed-omp" ? "managed-omp" : "managed-rpc";
 		const proved = await provedBrokerPin(handle, reader, kind);

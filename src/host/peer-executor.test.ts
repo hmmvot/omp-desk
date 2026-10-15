@@ -33,7 +33,6 @@ describe("identifying a window's executor", () => {
 
 	it("records nothing when the host cannot be identified: a process that was never identified can never be proven gone", async () => {
 		assert.equal(await identifyPeerExecutor(null, probe()), null, "the record names no host");
-		assert.equal(await identifyPeerExecutor(4242, null), null, "no probe helper");
 		assert.equal(await identifyPeerExecutor(4242, probe({ read: { kind: "gone" } })), null);
 		assert.equal(await identifyPeerExecutor(4242, probe({ read: { kind: "unknown", detail: "timed out" } })), null);
 		assert.equal(await identifyPeerExecutor(4242, probe({ read: new Error("helper crashed") })), null);
@@ -52,8 +51,8 @@ describe("proving a window's executor gone", () => {
 	});
 
 	it("never calls a window gone on anything but that proof", async () => {
-		const noProbe = await proveExecutorGone(peer, null);
-		assert.equal(noProbe.gone, false);
+		const unknown = await proveExecutorGone(peer, probe({ gone: { gone: false, detail: "the native module is not available, so the process cannot be read" } }));
+		assert.equal(unknown.gone, false);
 		const unidentified = probe({ gone: { gone: true, detail: "x" } });
 		assert.equal((await proveExecutorGone({ executor: null }, unidentified)).gone, false, "a host that was never identified");
 		assert.deepEqual(unidentified.waited, [], "and the kernel is not even asked");
