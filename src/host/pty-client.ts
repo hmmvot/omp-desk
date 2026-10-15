@@ -180,8 +180,8 @@ export interface PtyBrokerClientOptions {
 	readonly extensionRoot: string;
 	/**
 	 * Whether the digest the build recorded next to the tree may stand for this build's until the installed tree has been hashed
-	 * (ADR-0076, decision 14). Default true; the extension passes false outside a packaged install (a development host, a test
-	 * host), where `out/` is rebuilt in place and a record can outlive the bytes it described.
+	 * (ADR-0076, decision 14). Default false: only the extension, in a packaged install (`extensionMode` Production), passes true; a
+	 * development or test host rebuilds `out/` in place, where a record can outlive the bytes it described.
 	 */
 	readonly useBuildRecord?: boolean;
 	/** Node binary for the broker; defaults to the extension host's own executable. */
@@ -474,7 +474,7 @@ export class PtyBrokerClient {
 	 */
 	private async packagedIdentity(): Promise<PtyAttachIdentity> {
 		try {
-			const recorded = this.options.useBuildRecord === false ? null : await ptyRecordedTreeDigest(this.options.extensionRoot);
+			const recorded = this.options.useBuildRecord === true ? await ptyRecordedTreeDigest(this.options.extensionRoot) : null;
 			if (recorded !== null) {
 				this.identityFromRecord = true;
 				return { ready: true, reason: null, runtimeVersion: PTY_RUNTIME_VERSION, treeDigest: recorded };

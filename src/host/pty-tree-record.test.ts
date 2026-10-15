@@ -30,7 +30,7 @@ async function extension(record: string | null): Promise<{ readonly root: string
 }
 
 function clientOver(root: string, lines: LoggedLine[]): PtyBrokerClient {
-	return new PtyBrokerClient({ storageDir: path.join(root, "storage"), extensionRoot: root, log: recordingLogger(lines) });
+	return new PtyBrokerClient({ storageDir: path.join(root, "storage"), extensionRoot: root, log: recordingLogger(lines), useBuildRecord: true });
 }
 
 describe("the broker tree digest an attach compares", { skip: process.platform !== "win32" }, () => {
@@ -73,11 +73,13 @@ describe("the broker tree digest an attach compares", { skip: process.platform !
 		assert.equal(await client.verifyPackagedTree(), "not-recorded", "a corrected identity is not checked twice");
 	});
 
-	it("is not taken from a record outside a packaged install: the tree is hashed", async () => {
+	it("is not taken from a record unless the host says it is a packaged install: the tree is hashed", async () => {
 		const { root, hashed } = await extension(RECORDED);
-		const client = new PtyBrokerClient({ storageDir: path.join(root, "storage"), extensionRoot: root, useBuildRecord: false });
-		assert.equal((await client.attachIdentity()).treeDigest, hashed, "the record is not read");
-		assert.equal(await client.verifyPackagedTree(), "not-recorded");
+		for (const options of [{}, { useBuildRecord: false }]) {
+			const client = new PtyBrokerClient({ storageDir: path.join(root, "storage"), extensionRoot: root, ...options });
+			assert.equal((await client.attachIdentity()).treeDigest, hashed, "the record is not read");
+			assert.equal(await client.verifyPackagedTree(), "not-recorded");
+		}
 	});
 
 	it("stays unchecked, with a warning, when the installed tree cannot be hashed", async () => {
