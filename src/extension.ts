@@ -2698,9 +2698,11 @@ async function chooseFolder(
   if (candidates.length === 1) return candidates[0];
   const picked = await vscode.window.showQuickPick(
     candidates.map(folder => {
+      // Why the folder is listed: pinned, open in this window or another one, or only kept for a running session.
+      const where = folder.openHere ? "open in this window" : folder.openElsewhere ? "open in another window" : null;
       const source = folder.pinned
-        ? (folder.open ? "pinned, open" : "pinned")
-        : (folder.open ? "open in a window" : "kept because a session runs in it");
+        ? (where === null ? "pinned" : `pinned, ${where}`)
+        : (where ?? "kept because a session runs in it");
       return {
         label: folderHeadline(folder.path),
         description: displayFolderPath(folder.path),
