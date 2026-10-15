@@ -29,9 +29,15 @@ jobs:
         shell: bash
         # 499b84ac-1321-427f-aa17-267ca6975798 is the Azure DevOps resource in Microsoft Entra ID.
         # A service principal has no Azure DevOps profile, so its id comes from connectionData.
+        # The identity record carries ids and display names only, no credential.
         run: |
+          echo "connectionData (authenticated identity):"
           az rest --method get \
             --url "https://app.vssps.visualstudio.com/_apis/connectionData" \
             --resource 499b84ac-1321-427f-aa17-267ca6975798 \
-            --query "{id: authenticatedUser.id, name: authenticatedUser.providerDisplayName}" \
-            --output table
+            --query "authenticatedUser" --output json
+          echo "profiles/me (works only once the identity has an Azure DevOps profile):"
+          az rest --method get \
+            --url "https://app.vssps.visualstudio.com/_apis/profile/profiles/me?api-version=7.1" \
+            --resource 499b84ac-1321-427f-aa17-267ca6975798 \
+            --query "{id: id, displayName: displayName}" --output json || true
