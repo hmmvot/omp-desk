@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { blockContaining, draftPieces, findFencedBlocks, indentEdit, newlineEdit, outdentEdit, type FencedBlock, type TextEdit } from "./code-fence.ts";
+import { blockContaining, findFencedBlocks, indentEdit, newlineEdit, outdentEdit, type FencedBlock, type TextEdit } from "./code-fence.ts";
 
 interface Marked {
 	text: string;
@@ -174,29 +174,5 @@ describe("Shift+Tab inside a block", () => {
 	it("changes nothing without leading blanks, and never touches a fence line", () => {
 		assert.equal(run("```\nx|\n```", outdentEdit), null);
 		assert.equal(run("   ```|", outdentEdit), null);
-	});
-});
-
-describe("pieces for the highlight layer", () => {
-	const describePieces = (text: string): string[] => draftPieces(text, findFencedBlocks(text)).map(piece => `${piece.block ? "B" : "P"}:${text.slice(piece.start, piece.end)}`);
-
-	it("splits around each block and drops the line breaks that separate the pieces", () => {
-		assert.deepEqual(describePieces("a\n```\nb\n```\nc"), ["P:a", "B:```\nb\n```", "P:c"]);
-	});
-
-	it("keeps empty pieces, so an empty line next to a block keeps its row", () => {
-		assert.deepEqual(describePieces("\n```\nb\n```\n"), ["P:", "B:```\nb\n```", "P:"]);
-	});
-
-	it("has no leading piece for a block at the start and no trailing one for a block at the end", () => {
-		assert.deepEqual(describePieces("```\nb"), ["B:```\nb"]);
-	});
-
-	it("puts no piece between adjacent blocks: one newline separates two boxes", () => {
-		assert.deepEqual(describePieces("```\na\n```\n```\nb\n```"), ["B:```\na\n```", "B:```\nb\n```"]);
-	});
-
-	it("is one ordinary piece without blocks", () => {
-		assert.deepEqual(describePieces("abc"), ["P:abc"]);
 	});
 });

@@ -205,6 +205,15 @@ For each IME and place:
 
 A failure to report: a message sent early, a lost, doubled or reordered character, a caret jump, an unselectable or unclickable chip, a composition that cancels itself when the status line or the queue row changes, a candidate window far from the caret, or any difference from the baseline build.
 
+### Manual verification record
+
+| Item | Result |
+| --- | --- |
+| Owned-Chromium tests (`chat-ui.test.ts`, 185 tests: undo and redo by real keys, plain paste, copy and cut, drop at the pointer, every-offset caret round trip, ARIA attributes and the suggestion status, retained selection, `Input.imeSetComposition`, send-then-compose, deferral and a dialog replacing the field, freeze) | Pass |
+| Real-window scenario `37-chat-composer-surface.spec.ts` (`Ctrl+Z`, `Ctrl+Y`, `Ctrl+Shift+Z`, `Ctrl+X`, `Ctrl+C`, `Ctrl+V`, `fill`, caret kept after Tab, Shift+Tab, a click away and `Ctrl+Shift+L`) and `05`, `35`, `36` | Pass, without the retained-selection hardening of `focus` that was tried and dropped: re-entering the field by Shift+Tab and by the host's focus command keeps the caret, so the hardening has no reproducing case |
+| Smoke screenshots in the hidden test window (prose proportional, block monospace on a band) | Taken, see the release notes of the slice |
+| Real Windows IMEs (Japanese, Chinese, Korean), screen readers, voice typing, the touch keyboard | **Not run.** The maintainer's run of the list above, baseline build first, is a release condition |
+
 ## Related Decisions
 
 [ADR-0077](../decisions/0077-edit-the-chat-draft-in-a-contenteditable-surface-rendered-from-the-markdown-string.md); [ADR-0050](../decisions/0050-retain-uncertain-input-and-confirm-exact-file-restart.md) (the capture freezes every content change, kept by `freeze()`).

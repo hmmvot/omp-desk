@@ -5,6 +5,7 @@
  * `purpose=webviewView` in the outer iframe's URL.
  */
 import { chromium, expect, type Browser, type BrowserContext, type FrameLocator, type Locator, type Page } from "@playwright/test";
+import { COMPOSER_NAME, COMPOSER_ROLE } from "./composer-field.ts";
 import { startVsCode } from "./launcher.ts";
 import type { RunState } from "./state.ts";
 import { sleep } from "./time.ts";
@@ -117,6 +118,21 @@ export class Desk {
 		return page.frameLocator("iframe.webview.ready:visible:not([src*='purpose=webviewView'])").first().frameLocator("iframe#active-frame");
 	}
 
+	/** The Chat composer's field, found by role and its idle name: the one place the specs learn what kind of element it is. */
+	composer(chat: FrameLocator): Locator {
+		return chat.getByRole(COMPOSER_ROLE, { name: COMPOSER_NAME });
+	}
+
+	/** The Chat composer's field while a turn runs: it is then the steer box and its name changes, so only its role finds it. */
+	composerWhileBusy(chat: FrameLocator): Locator {
+		return chat.getByRole(COMPOSER_ROLE).first();
+	}
+
+	/** The plain draft string held by a composer field (from `composer`): the text of its lines, one `\n` between them (a chip holds its literal marker text). */
+	async readDraft(composer: Locator): Promise<string> {
+		return await composer.evaluate(element => Array.from(element.children, line => line.textContent ?? "").join("\n"));
+	}
+
 	/** A webview view of the OMP Desk side bar (Settings). */
 	sidebarWebview(page: Page): FrameLocator {
 		return page.frameLocator("iframe.webview.ready:visible[src*='purpose=webviewView']").first().frameLocator("iframe#active-frame");
@@ -141,7 +157,7 @@ export class Desk {
 		}, `a folder pick or a new Chat panel for ${folderName}`).toPass({ timeout, intervals: [200] });
 		if (await pick.isVisible()) await pick.click();
 		await expect.poll(async () => await panels.count(), { message: "the new Chat panel", timeout }).toBeGreaterThan(before);
-		const composer = this.chat(page).getByRole("combobox", { name: "Message OMP" });
+		const composer = this.composer(this.chat(page));
 		await expect(composer).toBeVisible({ timeout });
 		return this.chat(page);
 	}
@@ -188,7 +204,7 @@ export class Desk {
 
 	/** Types `text` into a Chat composer and presses Send. */
 	async send(chat: FrameLocator, text: string): Promise<void> {
-		await chat.getByRole("combobox", { name: "Message OMP" }).fill(text);
+		await this.composer(chat).fill(text);
 		await chat.getByRole("button", { name: "Send message" }).click();
 	}
 

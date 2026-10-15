@@ -65,11 +65,12 @@ class Cdp {
 // VS Code's webview is two frames deep: its host page, which the workbench embeds, holds the content frame the page runs in.
 const WORKBENCH = `<!doctype html><iframe id="webview" src="/host.html" style="width:600px;height:300px"></iframe>`;
 const HOST = `<!doctype html><iframe id="content" src="/child.html" style="width:500px;height:200px"></iframe>`;
-const CONTENT = `<!doctype html><textarea id="composer"></textarea><button id="other">Other</button><script src="/restorer.js"></script>`;
+// The stand-in carries the real composer's markup hooks, which `window.composer` (the test driver) finds the field by.
+const CONTENT = `<!doctype html><div class="omp-composer-row--input"><div id="composer" class="omp-composer-input" contenteditable="true" role="textbox"></div></div><button id="other">Other</button><script src="/restorer.js"></script>`;
 
 test("the composer keeps its focus when the host focuses the webview frame again", { skip: browserPath === undefined && "no Chromium is available" }, async () => {
 	const bundle = await build({
-		stdin: { contents: `import { restoreFocusTakenByHost } from "./src/webview/lib/frame-focus.ts"; window.install = () => restoreFocusTakenByHost(window);`, resolveDir: process.cwd(), loader: "ts" },
+		stdin: { contents: `import { restoreFocusTakenByHost } from "./src/webview/lib/frame-focus.ts"; import { installComposerDriver } from "./src/webview/test-support/composer-driver.ts"; installComposerDriver(window); window.install = () => restoreFocusTakenByHost(window);`, resolveDir: process.cwd(), loader: "ts" },
 		bundle: true, write: false, format: "iife", platform: "browser", target: "es2022",
 	});
 	const script = bundle.outputFiles[0]!.text;
@@ -105,12 +106,12 @@ test("the composer keeps its focus when the host focuses the webview frame again
 		await page.call("Emulation.setFocusEmulationEnabled", { enabled: true });
 		const hostFrame = "document.querySelector('#webview').contentDocument";
 		const frame = `${hostFrame}.querySelector('#content').contentDocument`;
-		const composerReady = `Boolean(document.querySelector('#webview')?.contentDocument?.querySelector('#content')?.contentDocument?.querySelector('#composer'))`;
+		const composerReady = `Boolean(document.querySelector('#webview')?.contentDocument?.querySelector('#content')?.contentDocument?.defaultView?.composer?.exists())`;
 		// The target is still navigating from about:blank at first, which destroys the context a call runs in.
 		for (let attempt = 0; attempt < 300 && !await page.evaluate<boolean>(composerReady).catch(() => false); attempt++) await delay(20);
 		// VS Code's own 50 ms wait between its two focus calls runs on the platform clock; the restorer's window is measured in it.
 		const sleep = (ms: number) => page!.evaluate(`new Promise(resolve => setTimeout(resolve, ${ms}))`);
-		const heldByComposer = () => page!.evaluate<boolean>(`${frame}.activeElement === ${frame}.querySelector('#composer') && ${frame}.hasFocus()`);
+		const heldByComposer = () => page!.evaluate<boolean>(`${frame}.defaultView.composer.focused() && ${frame}.hasFocus()`);
 		/** What VS Code does when its window gains focus: the workbench focuses the webview frame; its host page then focuses the content frame 50 ms later. */
 		const hostRefocus = async () => {
 			await page!.evaluate(`document.querySelector('#webview').contentWindow.focus()`);
@@ -118,7 +119,7 @@ test("the composer keeps its focus when the host focuses the webview frame again
 			await page!.evaluate(`${hostFrame}.querySelector('#content').contentWindow.focus()`);
 			await sleep(100);
 		};
-		const focusComposer = () => page!.evaluate(`${frame}.defaultView.focus(); ${frame}.querySelector('#composer').focus()`);
+		const focusComposer = () => page!.evaluate(`${frame}.defaultView.focus(); ${frame}.defaultView.composer.focus()`);
 
 		await focusComposer();
 		assert.equal(await heldByComposer(), true);
@@ -131,7 +132,7 @@ test("the composer keeps its focus when the host focuses the webview frame again
 		await hostRefocus();
 		assert.equal(await heldByComposer(), true, "the composer is focused again");
 		await page.call("Input.insertText", { text: " kept" });
-		assert.equal(await page.evaluate<string>(`${frame}.querySelector('#composer').value`), "draft kept", "typing after the refocus reaches the composer");
+		assert.equal(await page.evaluate<string>(`${frame}.defaultView.composer.value()`), "draft kept", "typing after the refocus reaches the composer");
 
 		await page.evaluate(`${frame}.querySelector('#other').focus()`);
 		await hostRefocus();

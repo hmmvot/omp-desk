@@ -21,7 +21,7 @@ All commands are in the Command Palette under **OMP Desk**. The ones with defaul
 | `Ctrl+Alt+Shift+R` | Redraw Terminal | Terminal editor |
 | `Alt+Shift+K` | Add Selection to Session (see [Send code to a session](send-code.md)) | Text editor with a selection |
 
-Inside the Chat page, `Enter` steers a running turn, `Alt+Enter` queues a follow-up, `Alt+↑` takes the newest queued message back into the draft and `Esc` `Esc` starts a Rewind; see [Chat](chat.md).
+Inside the Chat page, `Enter` steers a running turn, `Alt+Enter` queues a follow-up, `Alt+↑` takes the newest queued message back into the draft and `Esc` `Esc` starts a Rewind; see [Chat](chat.md). In the composer `Ctrl+Z` undoes and `Ctrl+Y` or `Ctrl+Shift+Z` redoes (the composer keeps its own undo stack, so VS Code's **Edit > Undo** menu item does nothing there).
 
 ## Keymap notes
 

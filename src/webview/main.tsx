@@ -22,7 +22,7 @@ import { installTypeToFocus } from "./lib/type-to-focus";
 
 function boot(): void {
 	// A composer that loses focus without the user moving it is reported to the OMP Desk output, with what the page saw.
-	installFocusTrace(window, element => element.classList.contains("omp-textarea"), detail => guestTransport.post({ type: "omp:focus-trace", detail }));
+	installFocusTrace(window, element => element.classList.contains("omp-composer-input"), detail => guestTransport.post({ type: "omp:focus-trace", detail }));
 	// VS Code focuses the webview again when its window gains focus, which empties the page's focus; put it back.
 	restoreFocusTakenByHost(window);
 	// Typing while the page has the keyboard focus but nothing editable does goes into the composer.

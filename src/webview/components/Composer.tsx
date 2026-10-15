@@ -39,12 +39,12 @@
  * Code blocks (docs/designs/2026-10-15-composer-code-blocks.md, {@link ../lib/code-fence}):
  * - inside a fenced block of the draft Enter is a newline, Tab and Shift+Tab indent and outdent like an
  *   editor, and Ctrl+Enter is the chord that sends; Shift+Tab with nothing to outdent leaves the box;
- * - no completion opens there, and while a block exists the textarea and its highlight layer
- *   ({@link ./DraftMirror}) use the editor font and the layer paints a band behind each block;
+ * - no completion opens there, and the editing surface ({@link ./DraftEditor}, {@link ../lib/draft-surface}) draws the
+ *   lines of a block in the editor font on a band while the prose around them keeps the UI font;
  * - the text that is sent is the draft as typed.
  */
 import type { ImageContent } from "@oh-my-pi/pi-wire";
-import type { ChangeEvent, ClipboardEvent, DragEvent, KeyboardEvent, ReactNode, RefObject } from "react";
+import type { ChangeEvent, ReactNode, RefObject } from "react";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { chatTurnInProgress } from "../../chat/model";
 import { nativeSettingsCommand } from "../../chat/settings-command";
@@ -63,11 +63,11 @@ import {
 	type PendingImage,
 } from "../lib/attachments";
 import { AskDialog, AskOptionRow } from "./AskDialog";
-import { DraftMirror } from "./DraftMirror";
+import { DraftEditor } from "./DraftEditor";
 import type { ChatUiRequest, ChatUiResponse } from "../../chat/model";
 import type { ChatClient, ChatSnapshot } from "../lib/chat-client";
-import { caretRowEdges } from "../lib/caret-row";
-import { blockContaining, draftPieces, findFencedBlocks, indentEdit, newlineEdit, outdentEdit, type FencedBlock, type TextEdit } from "../lib/code-fence";
+import { blockContaining, findFencedBlocks, indentEdit, newlineEdit, outdentEdit, type TextEdit } from "../lib/code-fence";
+import type { DraftSurface, HistoryMode } from "../lib/draft-surface";
 import { chatWritable } from "../lib/chat-client";
 import { startsSession } from "../lib/chat-operation";
 import { reportComposerPopupOpen } from "../lib/composer-overlay";
@@ -86,14 +86,10 @@ import { MAX_DROP_URIS, mentionQueryAt, spliceMention } from "../../protocol/mes
 import {
 	activeImages,
 	compactForSend,
-	deletionRange,
 	findImageReferences,
 	imageReferenceLabel,
 	pruneInactive,
 	referencedNumbers,
-	repairDamagedReferences,
-	snapSelection,
-	type ImageReferenceSpan,
 } from "../lib/image-references";
 import { useDismissibleLayer } from "../lib/dismissible-layer";
 import { ExtensionNoticeLine, ExtensionWidgets } from "./ExtensionSurfaces";
@@ -105,14 +101,14 @@ import { rewindBlockedReason } from "../../chat/rewind-mode";
 
 /** Textarea line height, kept in sync with `.omp-textarea`; vertical padding and border are read from the element. */
 const LINE_PX = 20;
-/** The prompt textarea never shows fewer lines than this, so a two-line placeholder or draft is fully visible. */
-const MIN_ROWS = 2;
 const MAX_ROWS = 8;
-/** The words under the textarea while the caret is in a fenced code block (docs/designs/2026-10-15-composer-code-blocks.md). */
+/** The words under the field while the caret is in a fenced code block (docs/designs/2026-10-15-composer-code-blocks.md). */
 const CODE_HINT = "Code block · Ctrl+Enter: send · Enter: new line · Tab: indent · Shift+Tab: outdent, or leave when there is nothing to outdent";
 
 /** Wait after the last keystroke before asking the extension host for paths. */
 const SUGGESTION_DEBOUNCE_MS = 150;
+/** Quiet time before the screen-reader status states how many suggestions the list holds, so typing does not announce each narrowing. */
+const SUGGESTION_ANNOUNCE_MS = 400;
 /** How long a dropped file waits for the host to read it before the composer says so. */
 const URI_REQUEST_TIMEOUT_MS = 20_000;
 
@@ -139,31 +135,14 @@ function autosize(element: HTMLTextAreaElement | null, minRows: number): void {
 /** An image of the current draft: the attachment plus its stable reference number. */
 type DraftImage = PendingImage & { number: number };
 
-/** Horizontal padding of `.omp-textarea`; the highlight layer mirrors it plus the scrollbar gutter. */
-const TEXTAREA_PADDING_X = 12;
-
 /**
- * Keeps the marker highlight layer aligned with the textarea: the same scroll offset, and the
- * same wrapping width when the textarea shows a scrollbar the layer does not have.
+ * Replaces `[from, to)` through the surface, so the draft's own Undo covers the change (and, because the draft's
+ * attachments follow its markers, covers them too). The field takes the focus first, as a click on Attach or a
+ * thumbnail's × always returned it to the draft.
  */
-function syncMirror(textarea: HTMLTextAreaElement | null, mirror: HTMLDivElement | null): void {
-	if (textarea === null || mirror === null) return;
-	mirror.style.paddingRight = `${TEXTAREA_PADDING_X + textarea.offsetWidth - textarea.clientWidth}px`;
-	const content = mirror.firstElementChild;
-	if (content instanceof HTMLElement) content.style.transform = `translateY(${-textarea.scrollTop}px)`;
-}
-
-/**
- * Replaces `[start, end)` through the editing command stack, so the browser's own Undo/Redo
- * covers the change (and, because the draft's attachments follow its markers, covers them too).
- * Falls back to a plain value write when the command is unavailable.
- */
-function replaceRange(textarea: HTMLTextAreaElement, start: number, end: number, replacement: string): void {
-	textarea.focus();
-	textarea.setSelectionRange(start, end);
-	if (replacement.length === 0 ? document.execCommand("delete") : document.execCommand("insertText", false, replacement)) return;
-	textarea.setRangeText(replacement, start, end, "end");
-	textarea.dispatchEvent(new Event("input", { bubbles: true }));
+function replaceInSurface(surface: DraftSurface, from: number, to: number, replacement: string): void {
+	surface.focus();
+	surface.replaceRange(from, to, replacement);
 }
 
 /**
@@ -172,9 +151,9 @@ function replaceRange(textarea: HTMLTextAreaElement, start: number, end: number,
  * covers most browsers; the tracked flag bridges WebKit, which fires the
  * confirming Enter keydown after `compositionend`.
  */
-function shouldSubmitOnEnter(event: KeyboardEvent<HTMLTextAreaElement>, composing: boolean): boolean {
+function shouldSubmitOnEnter(event: Pick<globalThis.KeyboardEvent, "key" | "shiftKey" | "isComposing">, composing: boolean): boolean {
 	if (event.key !== "Enter" || event.shiftKey) return false;
-	return !(event.nativeEvent.isComposing || composing);
+	return !(event.isComposing || composing);
 }
 
 /** Tracks IME composition in a ref the keydown handler reads synchronously. */
@@ -231,7 +210,7 @@ function AskEditor({ prefill, placeholder, disabled, onSubmit }: AskEditorProps)
 				value={draft}
 				onChange={event => setDraft(event.target.value)}
 				onKeyDown={event => {
-					if (shouldSubmitOnEnter(event, composingRef.current)) {
+					if (shouldSubmitOnEnter(event.nativeEvent, composingRef.current)) {
 						event.preventDefault();
 						onSubmit(draft);
 					}
@@ -363,9 +342,11 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	}, []);
 	/** Files still being read; a prompt must not overtake them. */
 	const [reading, setReading] = useState(0);
-	const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+	const surfaceRef = useRef<DraftSurface | null>(null);
+	const getField = useCallback((): HTMLElement | null => surfaceRef.current?.element ?? null, []);
 	const fileInputRef = useRef<HTMLInputElement | null>(null);
-	const { composingRef, onCompositionStart, onCompositionEnd } = useCompositionGuard();
+	/** The surface's composition window, read live: false while no field is mounted. */
+	const composingRef = useMemo(() => ({ get current(): boolean { return surfaceRef.current?.composing ?? false; } }), []);
 	/**
 	 * Synchronous draft mirror. State lands a render later, so submit, attach,
 	 * and remove touch these refs first: a repeat Enter/click in the same frame
@@ -380,7 +361,6 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	/** Marker insertions waiting for an IME composition to finish. */
 	const deferredRef = useRef<(() => void)[]>([]);
 	const wrapperRef = useRef<HTMLDivElement | null>(null);
-	const mirrorRef = useRef<HTMLDivElement | null>(null);
 	/**
 	 * In-flight reads, counted synchronously: `send` must not overtake a read
 	 * that has been started but not yet published, which is exactly what the
@@ -403,8 +383,6 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	const uriRequestSeqRef = useRef(0);
 	/** Caret offset mirror; {@link mentionQueryAt} needs it synchronously. */
 	const caretRef = useRef(0);
-	/** Caret to restore after an accepted suggestion swaps the draft text. */
-	const pendingCaretRef = useRef<number | null>(null);
 	/** The ↑/↓ prompt-history walk in progress, or `null`. */
 	const historyRef = useRef<HistoryCursor | null>(null);
 	/** Last completion request sent, or `null` once it is answered or invalidated. */
@@ -422,7 +400,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	// a stale button can never reach the host.
 	const canPrompt = chatWritable(snapshot);
 	// A session that is re-attached while the user types disables the field; it takes the focus back when it is writable again.
-	useHeldFocus(textareaRef, canPrompt, canPrompt ? "" : `phase=${snapshot.phase}${snapshot.readOnlyReason === null ? "" : " read-only"}`);
+	useHeldFocus(getField, canPrompt, canPrompt ? "" : `phase=${snapshot.phase}${snapshot.readOnlyReason === null ? "" : " read-only"}`);
 	const resumable = snapshot.phase === "view-only" || snapshot.phase === "stopped";
 	// The click is acknowledged in this page before the host answers (`ChatClient.getOperationState`): Resume says `Starting…` and Stop says `Stopping…`.
 	const { operation, notice: operationNotice } = useSyncExternalStore(client.subscribeOperations, client.getOperationState);
@@ -435,19 +413,21 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	// shows, while `send` enforces the synchronous ref.
 	/** Images whose marker is in the text — what the strip shows and a send carries. */
 	const attached = useMemo(() => activeImages(text, images), [text, images]);
-	const referenceSpans = useMemo(() => findImageReferences(text, number => images.some(image => image.number === number)), [text, images]);
 	/** Fenced code blocks of the draft, and the one the caret is in: its keys are an editor's, and no completion opens in it. */
 	const blocks = useMemo(() => findFencedBlocks(text), [text]);
 	const caretBlock = useMemo(() => blockContaining(blocks, caret), [blocks, caret]);
 	const codeHintId = useId();
-	/** A whole-line edit is intentional even where its diff spans an image marker the edit does not touch. */
-	const blockEditRef = useRef(false);
 	const canSubmit = canPrompt && !captureLocked && request === null && !sending && reading === 0 && (text.trim().length > 0 || attached.length > 0);
 
+	// A marker is a chip while its image is attached and plain text otherwise, so the surface draws again when the set of images changes.
 	useLayoutEffect(() => {
-		autosize(textareaRef.current, MIN_ROWS);
-		syncMirror(textareaRef.current, mirrorRef.current);
-	}, [text, request?.id, referenceSpans]);
+		surfaceRef.current?.refresh();
+	}, [images]);
+	const fieldMounted = !(request !== null && canPrompt);
+	// A field that mounts while a hand-off holds the draft (a dialog closing meanwhile) starts frozen.
+	useLayoutEffect(() => {
+		if (fieldMounted && captureRef.current !== null) surfaceRef.current?.freeze();
+	}, [fieldMounted]);
 
 	useEffect(() => {
 		mountedRef.current = true;
@@ -551,22 +531,30 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 		setDismissedCompletion(`${textRef.current}\0${caretRef.current}`);
 	}), []);
 
-	// After an accepted suggestion the draft is new text; put the caret after the
-	// inserted mention once React has committed it.
-	useLayoutEffect(() => {
-		const target = pendingCaretRef.current;
-		if (target === null) return;
-		pendingCaretRef.current = null;
-		const element = textareaRef.current;
-		if (element === null) return;
-		element.focus();
-		element.setSelectionRange(target, target);
-		caretRef.current = target;
-		setCaret(target);
-	}, [text]);
+	/**
+	 * Every write from outside the surface (docs/designs/2026-10-15-composer-contenteditable-surface.md, section 2): the refs
+	 * and the surface change now and the state follows with the next render. Each caller says what happens to the undo
+	 * stack: `"reset"` for a draft that starts over (send, Rewind, hand-off), `"record"` for one more step the user can
+	 * undo. A `caret` also takes the focus, as every placement did when the field was a textarea.
+	 */
+	const writeDraft = useCallback((value: string, options: { caret?: number; history: HistoryMode }): void => {
+		const changed = value !== textRef.current;
+		draftRevisionRef.current++;
+		textRef.current = value;
+		surfaceRef.current?.setText(value, options);
+		const at = options.caret ?? (changed ? value.length : undefined);
+		if (at !== undefined) {
+			caretRef.current = at;
+			setCaret(at);
+		}
+		if (options.caret !== undefined) surfaceRef.current?.focus();
+		setText(value);
+	}, []);
 
-	const syncCaret = useCallback((element: HTMLTextAreaElement): void => {
-		const position = element.selectionStart ?? element.value.length;
+	const syncCaret = useCallback((): void => {
+		const surface = surfaceRef.current;
+		if (surface === null) return;
+		const position = surface.selectionStart;
 		if (position === caretRef.current) return;
 		caretRef.current = position;
 		setCaret(position);
@@ -587,16 +575,13 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			const token = selected.kind === "file" ? mentionQueryAt(textRef.current, caretRef.current) : null;
 			if (slashToken === null && argumentToken === null && token === null) return;
 			const spliced = slashToken ? spliceSlash(textRef.current, slashToken.end, selected.name) : argumentToken ? spliceArgument(textRef.current, argumentToken.start, argumentToken.end, selected.name) : spliceMention(textRef.current, caretRef.current, token!.start, selected.name);
-			draftRevisionRef.current++;
-			textRef.current = spliced.text;
 			// The answer has been consumed; anything still in flight is stale.
 			pendingQueryRef.current = null;
 			requestSeqRef.current++;
-			pendingCaretRef.current = spliced.caret;
 			setSuggestions(NO_SUGGESTIONS);
-			setText(spliced.text);
+			writeDraft(spliced.text, { caret: spliced.caret, history: "record" });
 		},
-		[completionsEnabled, composingRef, snapshot.commands],
+		[completionsEnabled, composingRef, snapshot.commands, writeDraft],
 	);
 
 	const publishImages = useCallback((next: readonly DraftImage[]): void => {
@@ -612,41 +597,26 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	/**
 	 * Insert the markers for `added` at the caret (or over the selection), one space apart and
 	 * with a space on each side unless whitespace is already there, so typing can continue
-	 * straight after the last marker. Goes through the editing command stack, so Undo removes
-	 * the marker and its attachment together. An IME composition is never interrupted: the
-	 * insertion waits for it to end.
+	 * straight after the last marker. An undoable edit of the draft, so Undo removes the marker and,
+	 * with it, the attachment. An IME composition is never interrupted: the insertion waits for it to end.
 	 */
 	const insertReferences = useCallback((added: readonly DraftImage[]): void => {
 		const place = (): void => {
 			if (captureRef.current !== null) return;
-			const element = textareaRef.current;
+			const surface = surfaceRef.current;
 			const current = textRef.current;
-			const start = element?.selectionStart ?? current.length;
-			const end = element?.selectionEnd ?? current.length;
+			const start = surface?.selectionStart ?? current.length;
+			const end = surface?.selectionEnd ?? current.length;
 			const markers = added.map(image => imageReferenceLabel(image.number, image.width !== undefined && image.height !== undefined ? { width: image.width, height: image.height } : undefined));
 			const lead = start > 0 && !/\s/.test(current[start - 1]!) ? " " : "";
 			const trail = end < current.length && /\s/.test(current[end]!) ? "" : " ";
 			const inserted = `${lead}${markers.join(" ")}${trail}`;
-			if (element === null) {
-				draftRevisionRef.current++;
-				textRef.current = current + inserted;
-				setText(textRef.current);
-				return;
-			}
-			replaceRange(element, start, end, inserted);
+			if (surface === null) writeDraft(current + inserted, { history: "record" });
+			else replaceInSurface(surface, start, end, inserted);
 		};
 		if (composingRef.current) deferredRef.current.push(place);
 		else place();
-	}, [composingRef]);
-
-	const endComposition = useCallback((): void => {
-		onCompositionEnd();
-		// Queued after the guard's own reset, so the insertion sees a finished composition.
-		setTimeout(() => {
-			const waiting = deferredRef.current.splice(0);
-			for (const place of waiting) place();
-		}, 0);
-	}, [onCompositionEnd]);
+	}, [composingRef, writeDraft]);
 
 	/** Validate, read, and add `files`; `earlier` are refusals that came before them (the host's, for a drop). Every rejection is reported, never dropped. */
 	const addFiles = useCallback(
@@ -704,17 +674,21 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 		[canPrompt, insertReferences, publishImages],
 	);
 
-	/** The × on a thumbnail deletes that image's marker(s) from the text; the attachment follows its marker. */
+	/** The × on a thumbnail deletes that image's marker(s) from the text, as one undo step; the attachment follows its marker. */
 	const removeImage = useCallback(
 		(number: number): void => {
-			if (captureRef.current !== null) return;
-			const element = textareaRef.current;
-			if (element === null) return;
-			const spans = findImageReferences(textRef.current, isKnownNumber).filter(span => span.number === number);
-			for (const span of spans.reverse()) replaceRange(element, span.start, span.end, "");
-			setAttachError(null);
+			const remove = (): void => {
+				const surface = surfaceRef.current;
+				if (captureRef.current !== null || surface === null) return;
+				const spans = findImageReferences(textRef.current, isKnownNumber).filter(span => span.number === number);
+				surface.focus();
+				surface.removeRanges(spans.map(span => ({ from: span.start, to: span.end })));
+				setAttachError(null);
+			};
+			if (composingRef.current) deferredRef.current.push(remove);
+			else remove();
 		},
-		[isKnownNumber],
+		[composingRef, isKnownNumber],
 	);
 
 	const onFilesPicked = useCallback(
@@ -727,14 +701,13 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 		[addFiles],
 	);
 
-	const onPaste = useCallback(
-		(event: ClipboardEvent<HTMLTextAreaElement>): void => {
+	/** A paste of an image attaches it; the surface cancels the paste, so no unreadable data URL lands in the text. Any other paste is its plain text. */
+	const handlePaste = useCallback(
+		(event: ClipboardEvent): boolean => {
 			const files = imageFilesFrom(event.clipboardData);
-			if (files.length === 0) return;
-			// The marker carries the image; letting the paste through would also
-			// drop an unreadable data URL into the prompt text.
-			event.preventDefault();
+			if (files.length === 0) return false;
 			void addFiles(files);
+			return true;
 		},
 		[addFiles],
 	);
@@ -814,26 +787,27 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	}, [addFiles, canPrompt, requestUris]);
 
 	/**
-	 * Typing rewrites the draft; if an edit the `beforeinput` interception did not cover (a
-	 * word-wise delete, a drop) cut into a marker, the whole marker goes, never a fragment.
+	 * The user edited the draft, or a composition settled. The surface has applied the edit, put a marker the edit cut
+	 * into back whole, and kept the selection; the composer takes the new text.
 	 */
-	const onTextChange = useCallback((event: ChangeEvent<HTMLTextAreaElement>): void => {
-		const element = event.target;
-		if (captureRef.current !== null) { element.value = textRef.current; return; }
-		let value = element.value;
-		const before = textRef.current;
-		if (!(event.nativeEvent as InputEvent).isComposing && !blockEditRef.current) {
-			const repaired = repairDamagedReferences(before, value, findImageReferences(before, isKnownNumber));
-			if (repaired !== null) {
-				value = repaired.text;
-				pendingCaretRef.current = repaired.caret;
-			}
-		}
+	const onEdit = useCallback((value: string): void => {
 		draftRevisionRef.current++;
 		textRef.current = value;
-		if (pendingCaretRef.current === null) syncCaret(element);
+		syncCaret();
 		setText(value);
-	}, [isKnownNumber, syncCaret]);
+	}, [syncCaret]);
+
+	/** A composition is an edit: a send awaiting confirmation must not erase what is being composed. */
+	const onWindowOpen = useCallback((): void => {
+		draftRevisionRef.current++;
+	}, []);
+
+	/** The composition window closed: the draft is settled, so the work that waited for it runs. */
+	const onSettled = useCallback((): void => {
+		syncCaret();
+		surfaceRef.current?.refresh();
+		for (const place of deferredRef.current.splice(0)) place();
+	}, [syncCaret]);
 
 	const send = useCallback(
 		async (followUp: boolean): Promise<void> => {
@@ -850,9 +824,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			if (draft.length === 0 && attached.length === 0) return;
 			// Chat's own `/rewind` and `/branch` never reach OMP; both open the in-place Rewind.
 			if (onRewind !== undefined && attached.length === 0 && isRewindCommand(draft)) {
-				draftRevisionRef.current++;
-				textRef.current = "";
-				setText("");
+				writeDraft("", { history: "reset" });
 				setSendError(null);
 				onRewind();
 				return;
@@ -906,15 +878,13 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			if (!running && result.explained !== true && nativeSettingsCommand(draft) === null) setSubmitted(true);
 			// Admission may finish after typing, attaching, or restoring another draft. Never erase that work.
 			if (draftRevisionRef.current !== revision) return;
-			draftRevisionRef.current++;
 			historyRef.current = null;
-			textRef.current = "";
 			nextNumberRef.current = 1;
 			publishImages([]);
 			setAttachError(null);
-			setText("");
+			writeDraft("", { history: "reset" });
 		},
-		[canPrompt, client, onRewind, onSubmitted, publishImages, publishRecoverable, readCapture, request, snapshot.commands],
+		[canPrompt, client, onRewind, onSubmitted, publishImages, publishRecoverable, readCapture, request, snapshot.commands, writeDraft],
 	);
 
 	/** Why the Commands list cannot offer a command now; each row adds its own rule (`lib/command-list.ts`). */
@@ -937,7 +907,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 		if (plan.kind === "rewind") { onRewind?.(); return; }
 		if (plan.kind === "action") {
 			if (!guestTransport.post({ type: "omp:chat-command", command: plan.command })) setSendError("OMP Desk could not reach the editor host. Try the command again in a moment.");
-			textareaRef.current?.focus();
+			surfaceRef.current?.focus();
 			return;
 		}
 		if (captureRef.current !== null || !canPrompt || request !== null) return;
@@ -949,21 +919,18 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			setSuggestions(NO_SUGGESTIONS);
 			setDismissedCompletion(null);
 			if (spliced.text === textRef.current) {
-				const element = textareaRef.current;
-				element?.focus();
-				element?.setSelectionRange(spliced.caret, spliced.caret);
+				const surface = surfaceRef.current;
+				surface?.focus();
+				surface?.setSelectionRange(spliced.caret, spliced.caret);
 				caretRef.current = spliced.caret;
 				setCaret(spliced.caret);
 				return;
 			}
-			draftRevisionRef.current++;
-			textRef.current = spliced.text;
-			pendingCaretRef.current = spliced.caret;
-			setText(spliced.text);
+			writeDraft(spliced.text, { caret: spliced.caret, history: "record" });
 			return;
 		}
 		if (sendingRef.current) return;
-		textareaRef.current?.focus();
+		surfaceRef.current?.focus();
 		setSendError(null);
 		void (async () => {
 			onSubmitted?.();
@@ -973,7 +940,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			if (!result.ok) { setSendError(result.reason); return; }
 			if (!running && result.explained !== true && nativeSettingsCommand(plan.text) === null) setSubmitted(true);
 		})();
-	}, [canPrompt, client, onRewind, onSubmitted, request]);
+	}, [canPrompt, client, onRewind, onSubmitted, request, writeDraft]);
 
 	// A complete capture stays immutable through the host's confirmation and replacement.
 	useEffect(() => provideDraftHandoff({
@@ -986,6 +953,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			const content: DraftCapture = { text: textRef.current, attachments: activeImages(textRef.current, imagesRef.current).length + lostAttachmentsRef.current, recoverable };
 			const { promise, resolve } = Promise.withResolvers<void>();
 			captureRef.current = { requestId, released: promise, release: resolve };
+			surfaceRef.current?.freeze();
 			client.setDraftHandoffLocked(true);
 			setCaptureLocked(true);
 			return content;
@@ -993,6 +961,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 		release(requestId) {
 			const held = captureRef.current;
 			if (held === null || held.requestId !== requestId) return;
+			surfaceRef.current?.thaw();
 			captureRef.current = null;
 			client.setDraftHandoffLocked(false);
 			if (mountedRef.current) setCaptureLocked(false);
@@ -1008,9 +977,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	// pending value is consumed so a later mount cannot replay it into a new draft.
 	useEffect(() => {
 		const apply = (restored: DraftCapture): void => {
-			draftRevisionRef.current++;
-			textRef.current = restored.text;
-			setText(restored.text);
+			writeDraft(restored.text, { caret: restored.text.length, history: "reset" });
 			lostAttachmentsRef.current = restored.attachments;
 			setLostAttachments(restored.attachments);
 			for (const span of findImageReferences(restored.text, () => true)) nextNumberRef.current = Math.max(nextNumberRef.current, span.number + 1);
@@ -1021,42 +988,38 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 				id: ++recoverySeqRef.current, text: entry.text, images: [], unconfirmed: entry.unconfirmed, lostAttachments: entry.attachments,
 				reason: entry.unconfirmed ? "OMP did not confirm this message before this editor was replaced. It may already have been accepted. Review the conversation before sending it again." : "This original message was not sent. Add it to the draft only when you want to send it.",
 			})));
-			textareaRef.current?.focus();
 		};
 		const pending = takeRestoredDraft();
 		if (pending !== null) apply(pending);
 		return subscribeRestoredDraft(apply);
-	}, [publishRecoverable]);
+	}, [publishRecoverable, writeDraft]);
 
 	// "OMP Desk: Add Selection/File to Session": the `@path` references the extension host composed in
-	// an editor are inserted at the caret (over a selection), through the editing command stack so
-	// Undo removes them, and at the end of the draft while no textarea is mounted. They are never
-	// submitted, and an IME composition is not interrupted. One that arrived before this composer
-	// mounted is delivered first (`lib/insert-text`).
+	// an editor are inserted at the caret (over a selection) as one undo step, and at the end of the
+	// draft while no field is mounted. They are never submitted, and an IME composition is not
+	// interrupted. One that arrived before this composer mounted is delivered first (`lib/insert-text`).
 	useEffect(() => subscribeInsertedText(reference => {
 		const place = (): void => {
 			if (captureRef.current !== null) { deferredRef.current.push(place); return; }
-			const element = textareaRef.current;
+			const surface = surfaceRef.current;
 			const current = textRef.current;
-			const start = element?.selectionStart ?? current.length;
-			const end = element?.selectionEnd ?? current.length;
+			const start = surface?.selectionStart ?? current.length;
+			const end = surface?.selectionEnd ?? current.length;
 			const inserted = spaceInsertion(current, start, end, reference);
-			if (element === null) {
-				draftRevisionRef.current++;
-				textRef.current = current + inserted;
-				setText(textRef.current);
+			if (surface === null) {
+				writeDraft(current + inserted, { history: "record" });
 				return;
 			}
-			replaceRange(element, start, end, inserted);
+			replaceInSurface(surface, start, end, inserted);
 			// A space already follows: the caret steps over it, so it never rests right after a bare `@path`.
 			if (followedByBlank(current, end)) {
 				const caret = start + inserted.length + 1;
-				element.setSelectionRange(caret, caret);
+				surface.setSelectionRange(caret, caret);
 			}
 		};
 		if (composingRef.current) deferredRef.current.push(place);
 		else place();
-	}), [composingRef]);
+	}), [composingRef, writeDraft]);
 
 	// `set_editor_text` from the session (an extension prefilling the prompt): the request
 	// replaces the draft, once per `seq`. The seq present at mount was already applied by an
@@ -1067,11 +1030,9 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 		if (editorText === null || editorText.seq === editorSeqRef.current) return;
 		if (captureRef.current !== null) return;
 		editorSeqRef.current = editorText.seq;
-		draftRevisionRef.current++;
-		textRef.current = editorText.text;
-		setText(editorText.text);
-		textareaRef.current?.focus();
-	}, [editorText, captureLocked]);
+		writeDraft(editorText.text, { history: "record" });
+		surfaceRef.current?.focus();
+	}, [editorText, captureLocked, writeDraft]);
 
 	// "Edit" / "Edit all" on queued messages (the queue row above the composer): what OMP handed back is
 	// appended to the draft after whatever is already typed, with its images re-attached under fresh
@@ -1085,16 +1046,13 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			imageSeqRef.current = merged.nextId - 1;
 			const present = referencedNumbers(merged.text, number => merged.images.some(image => image.number === number));
 			publishImages(pruneInactive(merged.images, number => present.has(number), new Set(merged.images.slice(held).map(image => image.number)), MAX_DRAFT_BYTES));
-			draftRevisionRef.current++;
-			textRef.current = merged.text;
-			pendingCaretRef.current = merged.text.length;
-			setText(merged.text);
+			writeDraft(merged.text, { caret: merged.text.length, history: "record" });
 			setAttachError(merged.imagesLost > 0 ? `${merged.imagesLost} image${merged.imagesLost === 1 ? "" : "s"} of the edited message could not be attached (unsupported format).` : null);
 		};
 		// Like inserted text: an IME composition in flight finishes first, so the restore never splits it.
 		if (composingRef.current) deferredRef.current.push(place);
 		else place();
-	}), [composingRef, publishImages]);
+	}), [composingRef, publishImages, writeDraft]);
 
 	// Rewind's edit and resubmit (ADR-0051): a rewound prompt replaces the draft, and a draft typed before it moves to
 	// a recovery card first, never overwritten. Undo takes the prompt back out while it is still unedited
@@ -1109,12 +1067,10 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			rewoundRef.current = null;
 			if (answer.kind === "undo") {
 				if (!unedited) return;
-				draftRevisionRef.current++;
-				textRef.current = "";
 				nextNumberRef.current = 1;
 				publishImages([]);
 				setAttachError(null);
-				setText("");
+				writeDraft("", { history: "reset" });
 				return;
 			}
 			const draft = answer.draft;
@@ -1129,22 +1085,18 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			imageSeqRef.current = merged.nextId - 1;
 			publishImages(pruneInactive(merged.images, () => true, new Set(merged.images.map(image => image.number)), MAX_DRAFT_BYTES));
 			historyRef.current = null;
-			draftRevisionRef.current++;
-			textRef.current = merged.text;
-			pendingCaretRef.current = merged.text.length;
-			setText(merged.text);
+			writeDraft(merged.text, { caret: merged.text.length, history: "reset" });
 			const lost = merged.imagesLost + draft.unavailableImages;
 			setAttachError(lost > 0 ? `${lost} image${lost === 1 ? "" : "s"} of the rewound message could not be restored.` : null);
 			setSendError(null);
 			rewoundRef.current = draftRevisionRef.current;
-			textareaRef.current?.focus();
 		};
 		if (composingRef.current) deferredRef.current.push(place);
 		else place();
-	}), [client, composingRef, publishImages, publishRecoverable]);
+	}), [client, composingRef, publishImages, publishRecoverable, writeDraft]);
 	const doubleEscapeRef = useRef(createDoubleEscape());
 	// `Esc` `Esc` with the focus on the page around the composer (the transcript, a tool row, a link, the body) opens Rewind
-	// under the same conditions. The composer's own textarea counts through `onPromptKeyDown`, any other editable field not
+	// under the same conditions. The composer's own field counts through `onPromptKeyDown`, any other editable field not
 	// at all; an Escape a popup, menu or dialog took was prevented in the capture phase and never reaches this listener.
 	useEffect(() => {
 		if (onRewind === undefined) return;
@@ -1205,7 +1157,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 				"stop-turn": stop,
 				"focus-composer": () => {
 					focusWhenPossible({
-						element: () => textareaRef.current,
+						element: () => surfaceRef.current,
 						active: () => document.activeElement,
 						idle: active => active === null || active === document.body,
 						schedule: (callback, delayMs) => { window.setTimeout(callback, delayMs); },
@@ -1239,70 +1191,14 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 		};
 	}, [suggestionsOpen]);
 
-	// Markers are atomic. The caret and selection edges never rest inside one, and a Backspace/Delete that
-	// touches one removes it whole through the editing command stack (so Undo restores it, and with it the
-	// attachment). Native listeners, because React's `onBeforeInput` does not carry deletion input types.
-	const textareaMounted = !(request !== null && canPrompt);
+	// A textbox cannot carry `aria-expanded`, so the open list is stated for screen readers by a polite status that says how many
+	// suggestions it holds, after a quiet moment so typing does not announce each narrowing.
+	const [suggestionStatus, setSuggestionStatus] = useState("");
 	useEffect(() => {
-		const element = textareaRef.current;
-		if (element === null) return;
-		const spans = (): ImageReferenceSpan[] => findImageReferences(element.value, isKnownNumber);
-		let dragging = false;
-		let last = { start: element.selectionStart, end: element.selectionEnd };
-		const snap = (pointer: boolean): void => {
-			if (dragging || composingRef.current) return;
-			const start = element.selectionStart;
-			const end = element.selectionEnd;
-			const forward = pointer || start !== end || start === last.start ? null : start > last.start;
-			const next = snapSelection(spans(), start, end, forward);
-			if (next.start !== start || next.end !== end) element.setSelectionRange(next.start, next.end, element.selectionDirection);
-			last = { start: next.start, end: next.end };
-		};
-		const onSelectionChange = (): void => {
-			if (document.activeElement === element) snap(false);
-		};
-		const onPointerDown = (): void => {
-			dragging = true;
-		};
-		const onPointerUp = (): void => {
-			if (!dragging) return;
-			dragging = false;
-			snap(true);
-		};
-		const onBeforeInput = (event: InputEvent): void => {
-			if (captureRef.current !== null) { event.preventDefault(); return; }
-			if (event.isComposing || !event.inputType.startsWith("delete")) return;
-			const direction = event.inputType.endsWith("Backward") ? "backward" : event.inputType.endsWith("Forward") ? "forward" : "range";
-			const range = deletionRange(spans(), element.selectionStart, element.selectionEnd, direction);
-			if (range === null) return;
-			event.preventDefault();
-			replaceRange(element, range.start, range.end, "");
-		};
-		element.addEventListener("selectionchange", onSelectionChange);
-		document.addEventListener("selectionchange", onSelectionChange);
-		element.addEventListener("pointerdown", onPointerDown);
-		document.addEventListener("pointerup", onPointerUp, true);
-		element.addEventListener("beforeinput", onBeforeInput);
-		return () => {
-			element.removeEventListener("selectionchange", onSelectionChange);
-			document.removeEventListener("selectionchange", onSelectionChange);
-			element.removeEventListener("pointerdown", onPointerDown);
-			document.removeEventListener("pointerup", onPointerUp, true);
-			element.removeEventListener("beforeinput", onBeforeInput);
-		};
-	}, [composingRef, isKnownNumber, textareaMounted]);
-
-	/** Applies a block edit through the editing command stack (one Undo step) and puts the selection where the edit says. */
-	const applyBlockEdit = useCallback((element: HTMLTextAreaElement, edit: TextEdit): void => {
-		blockEditRef.current = true;
-		try {
-			replaceRange(element, edit.from, edit.to, edit.insert);
-		} finally {
-			blockEditRef.current = false;
-		}
-		element.setSelectionRange(edit.selectionStart, edit.selectionEnd);
-		syncCaret(element);
-	}, [syncCaret]);
+		if (!suggestionsOpen) { setSuggestionStatus(""); return; }
+		const timer = setTimeout(() => setSuggestionStatus(visible.length > 0 ? `${visible.length} suggestion${visible.length === 1 ? "" : "s"}` : argumentHint), SUGGESTION_ANNOUNCE_MS);
+		return () => clearTimeout(timer);
+	}, [suggestionsOpen, visible.length, argumentHint]);
 
 	/**
 	 * Keys the open popup claims: arrows move the highlight, Enter/Tab accept
@@ -1317,33 +1213,41 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	 * outdent leaves the box backwards. Ctrl+Enter is not claimed there and sends by the rules below.
 	 */
 	const onPromptKeyDown = useCallback(
-		(event: KeyboardEvent<HTMLTextAreaElement>): void => {
-			const composing = event.nativeEvent.isComposing || composingRef.current;
+		(event: globalThis.KeyboardEvent): void => {
+			const surface = surfaceRef.current;
+			if (surface === null) return;
+			const composing = event.isComposing || composingRef.current;
+			const text = surface.text;
+			const start = surface.selectionStart;
+			const end = surface.selectionEnd;
+			/** A block edit is one undo step, with the selection where the edit says. */
+			const applyBlockEdit = (edit: TextEdit): void => {
+				surface.apply({ from: edit.from, to: edit.to, insert: edit.insert, selection: { anchor: edit.selectionStart, focus: edit.selectionEnd } }, "block");
+			};
 			// Inside a fenced code block Enter and Tab are an editor's (docs/designs/2026-10-15-composer-code-blocks.md); the chord that
 			// sends there is Ctrl+Enter, which falls through to the rules below. An IME composition and a held draft are left alone.
-			const element = event.currentTarget;
-			const block = composing || event.nativeEvent.keyCode === 229 || captureRef.current !== null
+			const block = composing || event.keyCode === 229 || captureRef.current !== null
 				? null
-				: blockContaining(findFencedBlocks(element.value), element.selectionStart, element.selectionEnd);
+				: blockContaining(findFencedBlocks(text), start, end);
 			if (block !== null) {
 				if (event.key === "Tab" && !event.ctrlKey && !event.altKey && !event.metaKey) {
-					const edit = event.shiftKey ? outdentEdit(element.value, block, element.selectionStart, element.selectionEnd) : indentEdit(element.value, block, element.selectionStart, element.selectionEnd);
+					const edit = event.shiftKey ? outdentEdit(text, block, start, end) : indentEdit(text, block, start, end);
 					// Shift+Tab with nothing left to outdent is the way out of the block, backwards, and is the only Tab that moves the focus.
 					if (edit === null && event.shiftKey) return;
 					event.preventDefault();
-					if (edit !== null) applyBlockEdit(element, edit);
+					if (edit !== null) applyBlockEdit(edit);
 					return;
 				}
 				if (event.key === "Enter" && !event.ctrlKey && !event.metaKey) {
 					event.preventDefault();
-					applyBlockEdit(element, newlineEdit(element.value, block, element.selectionStart, element.selectionEnd));
+					applyBlockEdit(newlineEdit(text, block, start, end));
 					return;
 				}
 			}
 			// `Esc` `Esc` in an empty composer while nothing runs opens Rewind, as in the TUI. While a turn runs, Escape
 			// belongs to Stop (`ompDesk.stopTurn`), and an open popup takes it first.
 			if (event.key === "Escape" && onRewind !== undefined && !composing && !suggestionsOpen) {
-				const idle = !client.getSnapshot().working && event.currentTarget.value.length === 0 && imagesRef.current.length === 0;
+				const idle = !client.getSnapshot().working && text.length === 0 && imagesRef.current.length === 0;
 				if (doubleEscapeRef.current.press(event.timeStamp, idle)) {
 					event.preventDefault();
 					onRewind();
@@ -1375,21 +1279,15 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 					if (event.key === "ArrowUp" && client.writable) { event.preventDefault(); void dequeueLast(); }
 					return;
 				}
-				const element = event.currentTarget;
-				const value = element.value;
-				const at = element.selectionStart;
 				// History takes the arrow only when the browser would have no row left to move the caret to: soft-wrapped rows count, not just newlines.
-				const edges = at === element.selectionEnd ? caretRowEdges(element, at) : null;
+				const edges = start === end ? surface.rowEdges(start) : null;
 				const edge = edges !== null && (event.key === "ArrowUp" ? edges.first : edges.last);
 				if (edge && imagesRef.current.length === 0) {
-					const step = historyStep(sessionPrompts(client.getSnapshot().entries), historyRef.current, event.key === "ArrowUp" ? "older" : "newer", value);
+					const step = historyStep(sessionPrompts(client.getSnapshot().entries), historyRef.current, event.key === "ArrowUp" ? "older" : "newer", text);
 					if (step !== null) {
 						event.preventDefault();
 						historyRef.current = step.cursor;
-						draftRevisionRef.current++;
-						textRef.current = step.text;
-						pendingCaretRef.current = step.text.length;
-						setText(step.text);
+						writeDraft(step.text, { caret: step.text.length, history: "record" });
 						return;
 					}
 				}
@@ -1399,7 +1297,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 				send(event.altKey);
 			}
 		},
-		[acceptSuggestion, activeIndex, applyBlockEdit, client, composingRef, dequeueLast, onRewind, send, suggestionsOpen, visible, selectSuggestion],
+		[acceptSuggestion, activeIndex, client, composingRef, dequeueLast, onRewind, send, suggestionsOpen, visible, selectSuggestion, writeDraft],
 	);
 
 	/** Answer the shown dialog; the client answers each dialog once and refuses a stale card. */
@@ -1578,7 +1476,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 							lostAttachmentsRef.current = entry.lostAttachments ?? 0;
 							setLostAttachments(lostAttachmentsRef.current);
 						}
-						textareaRef.current?.focus();
+						surfaceRef.current?.focus();
 					}}>Add to draft</button>
 					<button type="button" className="omp-btn" disabled={captureLocked} aria-label="Dismiss recoverable message" onClick={() => {
 						if (captureRef.current === null) publishRecoverable(recoverableRef.current.filter(item => item.id !== entry.id));
@@ -1624,32 +1522,18 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 				</div>
 			)}
 			<div className="omp-composer-row omp-composer-row--input">
-				<div className={blocks.length > 0 ? "omp-suggest-wrapper omp-suggest-wrapper--code" : "omp-suggest-wrapper"} ref={wrapperRef}>
-					{(referenceSpans.length > 0 || blocks.length > 0) && <DraftMirror text={text} spans={referenceSpans} blocks={blocks} mirrorRef={mirrorRef} />}
-					<textarea
-						ref={textareaRef}
-						className="omp-textarea"
-						value={text}
-						onChange={onTextChange}
-						onScroll={event => syncMirror(event.currentTarget, mirrorRef.current)}
-						onKeyDown={onPromptKeyDown}
-						onKeyUp={event => syncCaret(event.currentTarget)}
-						onClick={event => syncCaret(event.currentTarget)}
-						onSelect={event => syncCaret(event.currentTarget)}
-						onPaste={onPaste}
-						onCompositionStart={onCompositionStart}
-						onCompositionEnd={endComposition}
-						placeholder={placeholder}
-						rows={MIN_ROWS}
-						spellCheck={false}
-						readOnly={captureLocked}
-						disabled={!canPrompt}
-						role="combobox"
-						aria-autocomplete="list"
-						aria-expanded={suggestionsOpen}
-						aria-controls={suggestionsOpen ? suggestionListId : undefined}
-						aria-activedescendant={suggestionsOpen && activeIndex >= 0 ? `${suggestionListId}-${activeIndex}` : undefined}
-						aria-describedby={caretBlock !== null ? codeHintId : undefined}
+				<div className="omp-suggest-wrapper" ref={wrapperRef}>
+					<DraftEditor
+						surfaceRef={surfaceRef}
+						text={text}
+						config={{
+							editable: canPrompt,
+							placeholder,
+							describedBy: caretBlock !== null ? codeHintId : null,
+							controls: suggestionsOpen ? suggestionListId : null,
+							activeDescendant: suggestionsOpen && activeIndex >= 0 ? `${suggestionListId}-${activeIndex}` : null,
+						}}
+						options={{ isKnownImage: isKnownNumber, onEdit, onSelection: syncCaret, onKeyDown: onPromptKeyDown, onWindowOpen, onSettled, handlePaste, isAttachmentDrag: transfer => dragCarries(transfer) !== null }}
 					/>
 					{suggestionsOpen && (
 						<ul id={suggestionListId} role="listbox" aria-label={argument !== null ? "Command arguments" : slash !== null ? "Slash commands" : "Workspace files"} className="omp-suggest-list">
@@ -1662,7 +1546,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 									aria-selected={index === activeIndex}
 									className={`omp-suggest-option${index === activeIndex ? " omp-suggest-option--active" : ""}`}
 									onMouseEnter={() => selectSuggestion(index, true)}
-									// Accepting must not blur the textarea first: the click would
+									// Accepting must not blur the field first: the click would
 									// otherwise land after the caret and draft context were lost.
 									onMouseDown={event => event.preventDefault()}
 									onClick={() => acceptSuggestion(option)}
@@ -1675,6 +1559,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 							))}
 						</ul>
 					)}
+					<span className="omp-sr-only" role="status">{suggestionStatus}</span>
 				</div>
 			</div>
 			{blocks.length > 0 && (

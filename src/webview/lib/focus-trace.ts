@@ -137,7 +137,7 @@ export function installFocusTrace(win: Window & typeof globalThis, isComposer: (
 		// The window being deactivated keeps the page's active element, so the composer still holds its place.
 		if (doc.activeElement === target) return;
 		// A field that was disabled is reported by the observer below, which knows why.
-		if ((target as HTMLTextAreaElement).disabled) return;
+		if (target.getAttribute("aria-disabled") === "true") return;
 		held = false;
 		if (!trace.userRecently) trace.report(`composer lost focus to ${describeElement(event.relatedTarget)}`);
 	};
@@ -168,7 +168,7 @@ export function installFocusTrace(win: Window & typeof globalThis, isComposer: (
 	const observer = new win.MutationObserver(records => {
 		for (const record of records) {
 			if (record.type === "attributes" && record.target instanceof win.Element && isComposer(record.target)) {
-				const disabled = (record.target as HTMLTextAreaElement).disabled;
+				const disabled = record.target.getAttribute("aria-disabled") === "true";
 				trace.note(`${describeElement(record.target)} ${disabled ? "disabled" : "enabled"}`);
 				if (disabled && held && record.target === composer) {
 					held = false;
@@ -182,7 +182,7 @@ export function installFocusTrace(win: Window & typeof globalThis, isComposer: (
 			trace.report("composer removed while it held focus");
 		}
 	});
-	observer.observe(doc.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ["disabled"] });
+	observer.observe(doc.documentElement, { subtree: true, childList: true, attributes: true, attributeFilter: ["aria-disabled"] });
 
 	doc.addEventListener("focusin", onFocusIn, true);
 	doc.addEventListener("focusout", onFocusOut, true);

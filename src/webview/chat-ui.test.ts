@@ -120,8 +120,10 @@ import { attachInsertedText } from "./lib/insert-text";
 import { adoptNonceForCreatedStyles } from "./lib/nonce-styles";
 import { installFocusTrace } from "./lib/focus-trace";
 import { installTypeToFocus } from "./lib/type-to-focus";
-installFocusTrace(window, element => element.classList.contains("omp-textarea"), detail => guestTransport.post({ type: "omp:focus-trace", detail }));
+import { installComposerDriver } from "./test-support/composer-driver";
+installFocusTrace(window, element => element.classList.contains("omp-composer-input"), detail => guestTransport.post({ type: "omp:focus-trace", detail }));
 installTypeToFocus(window);
+installComposerDriver(window);
 attachSessionView(guestTransport);
 attachCodeTheme(guestTransport);
 attachInsertedText(guestTransport, () => sessionViewSnapshot().mode);
@@ -384,7 +386,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 
 		await t.test("turn progress starts on send, persists through asks, reduces motion and throttles announcements", async () => {
 			await reset("working-status-accessibility");
-			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.composer.focus()");
 			await ui.call("Input.insertText", { text: "Inspect the source" });
 			await ui.evaluate("document.querySelector('[aria-label=\"Send message\"]').click()");
 			await ui.wait("document.querySelector('.omp-turn-progress')");
@@ -406,10 +408,10 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate("window.ui.push({working:false,settled:true,uiRequests:[]})");
 			await ui.wait("!document.querySelector('.omp-turn-progress') && document.querySelector('.omp-working-status-text').textContent===''");
 			for (const text of ["/models", "/agents ignored"]) {
-				await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+				await ui.evaluate("window.composer.focus()");
 				await ui.call("Input.insertText", { text });
 				await ui.evaluate("document.querySelector('[aria-label=\"Send message\"]').click()");
-				await ui.wait("document.querySelector('.omp-composer textarea').value===''");
+				await ui.wait("window.composer.value()===''");
 				assert.equal(await ui.evaluate("document.querySelector('.omp-turn-progress')"), null, "native settings do not start a turn");
 			}
 		});
@@ -582,7 +584,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.wait("document.querySelector('.omp-history-pages').textContent.includes('100 new activities')");
 			assert.equal(await ui.evaluate("document.activeElement===window.pagedFocus && document.body.contains(window.pagedFocus)"), true);
 			assert.equal(await ui.evaluate("document.querySelector('.omp-transcript').textContent.includes('Paged reply 409')"), false);
-			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.composer.focus()");
 			await ui.wait("document.querySelector('.omp-transcript').textContent.includes('Paged reply 409')");
 			assert.ok(await ui.evaluate<number>("document.querySelectorAll('.omp-transcript-content > .omp-measured-rows > .omp-measured-row').length") <= 100);
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
@@ -899,7 +901,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.settleGeometry('[data-tool-call-id="detail-latest"] .omp-tool-body');
 			assert.equal(await ui.evaluate("document.querySelector('[data-tool-call-id=\"detail-latest\"] .omp-tool-body').textContent.includes('addedWhileFocused')"), false, "native held detail DOM stays stable while canonical content grows");
 			assert.equal(await ui.evaluate("document.querySelector('.omp-transcript').scrollTop"), heldTop);
-			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.composer.focus()");
 			await ui.wait("document.querySelector('[data-tool-call-id=\"detail-latest\"] .omp-tool-body').textContent.includes('addedWhileFocused')");
 			await ui.settleGeometry(".omp-transcript");
 			assert.ok(await ui.evaluate("(()=>{const root=document.querySelector('.omp-transcript');return root.scrollHeight-root.clientHeight-root.scrollTop<=2})()"), "release follows latest source in outer flow");
@@ -924,13 +926,13 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.wait("document.querySelector('[data-tool-call-id=\"write-live\"]')===null && document.querySelector('.omp-overview-head')?.textContent.includes('failed')");
 			await ui.evaluate("document.querySelector('.omp-overview-head').click()");
 			await ui.wait("document.querySelector('[data-tool-call-id=\"read-live\"]')!==null");
-			await ui.evaluate("document.querySelector('[data-tool-call-id=\"read-live\"] .omp-tool-head').click();document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("document.querySelector('[data-tool-call-id=\"read-live\"] .omp-tool-head').click();window.composer.focus()");
 			await ui.call("Input.insertText", { text: "Unsent draft survives" });
 			await ui.wait("document.querySelector('[data-tool-call-id=\"read-live\"] .omp-tool-body')?.textContent.includes('Canonical source output')");
 			// The density is a setting the host pushes; the page keeps the draft and the open call across the change.
 			await ui.evaluate("window.ui.density('detailed')");
 			await ui.wait("document.querySelector('.omp-tool-overview')===null");
-			assert.equal(await ui.evaluate("document.querySelector('.omp-composer textarea').value"), "Unsent draft survives");
+			assert.equal(await ui.evaluate("window.composer.value()"), "Unsent draft survives");
 			assert.match(await ui.evaluate<string>("document.querySelector('[data-tool-call-id=\"read-live\"] .omp-tool-body').textContent"), /Canonical source output/);
 			await ui.evaluate("window.ui.density('overview')");
 			await ui.wait("document.querySelector('.omp-overview-member')!==null");
@@ -947,7 +949,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			  row('density-result-2',{role:'toolResult',timestamp:2001,toolCallId:'density-read-2',toolName:'read',isError:false,content:[{type:'text',text:'Second selected source'}]})],working:false,settled:true});
 			})()`);
 			await ui.wait("document.querySelector('[data-tool-call-id=\"density-read\"] .omp-tool-head')");
-			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.composer.focus()");
 			await ui.call("Input.insertText", { text: "Density must retain this draft" });
 			await ui.evaluate("document.querySelector('[data-tool-call-id=\"density-read\"] .omp-tool-head').focus();window.ui.density('overview')");
 			await ui.wait("document.querySelector('.omp-tool-overview') && document.activeElement?.closest('[data-tool-call-id]')?.dataset.toolCallId==='density-read'");
@@ -967,10 +969,10 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.equal(await ui.evaluate("document.querySelector('.omp-overview-head').getAttribute('aria-expanded')"), "false");
 			await ui.evaluate("window.ui.density('detailed')");
 			await ui.wait("!document.querySelector('.omp-tool-overview') && document.getSelection().toString()===window.densitySelection && document.activeElement?.closest('[data-tool-call-id]')?.dataset.toolCallId==='density-read'");
-			assert.equal(await ui.evaluate("document.querySelector('.omp-composer textarea').value"), "Density must retain this draft");
-			await ui.evaluate("document.getSelection().removeAllRanges();document.activeElement.click();document.querySelector('.omp-composer textarea').focus();window.ui.density('overview')");
+			assert.equal(await ui.evaluate("window.composer.value()"), "Density must retain this draft");
+			await ui.evaluate("document.getSelection().removeAllRanges();document.activeElement.click();window.composer.focus();window.ui.density('overview')");
 			await ui.wait("document.querySelector('.omp-tool-overview') && !document.querySelector('[data-tool-call-id=\"density-read\"]')");
-			assert.equal(await ui.evaluate("document.activeElement===document.querySelector('.omp-composer textarea')"), true);
+			assert.equal(await ui.evaluate("window.composer.focused()"), true);
 		});
 
 		await t.test("a lone tool call is a plain row with no group summary, two calls form a group, and shrinking restores the plain row", async () => {
@@ -1175,12 +1177,12 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 
 		await t.test("slash alias acceptance inserts canonical skill text without sending; next Enter sends, Escape preserves draft", async () => {
 			await reset("paseo-slash");
-			await ui.evaluate("window.ui.push({commands:[{name:'skill:inspect',source:'skill',aliases:['review'],inputHint:'files',description:'Inspect source'},{name:'worktree',aliases:['sandbox']}]});document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.ui.push({commands:[{name:'skill:inspect',source:'skill',aliases:['review'],inputHint:'files',description:'Inspect source'},{name:'worktree',aliases:['sandbox']}]});window.composer.focus()");
 			await ui.call("Input.insertText", { text: "/rev" });
 			await ui.wait("document.querySelector('[aria-label=\"Slash commands\"]')?.textContent.includes('skill:inspect')");
 			await ui.call("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
 			await ui.call("Input.dispatchKeyEvent", { type: "keyUp", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
-			await ui.wait("document.querySelector('.omp-composer textarea').value==='/skill:inspect '");
+			await ui.wait("window.composer.value()==='/skill:inspect '");
 			assert.equal(await ui.evaluate("window.sent.filter(message=>message.type==='omp:chat-prompt').length"), 0);
 			await ui.call("Input.dispatchKeyEvent", { type: "keyDown", key: "Enter", code: "Enter", windowsVirtualKeyCode: 13 });
 			await ui.wait("window.sent.some(message=>message.type==='omp:chat-prompt' && message.text==='/skill:inspect')");
@@ -1188,12 +1190,12 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.wait("document.querySelector('[aria-label=\"Slash commands\"]')!==null");
 			await ui.call("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
 			await ui.wait("document.querySelector('[aria-label=\"Slash commands\"]')===null");
-			assert.equal(await ui.evaluate("document.querySelector('.omp-composer textarea').value"), "/skill");
+			assert.equal(await ui.evaluate("window.composer.value()"), "/skill");
 		});
 
 		await t.test("arrow keys keep the active suggestion visible in a scrolled list, wrapping both ways, while hovering never scrolls", async () => {
 			await reset("slash-scroll");
-			await ui.evaluate("window.ui.push({commands:Array.from({length:30},(_,i)=>({name:'cmd'+String(i).padStart(2,'0'),description:'Command '+i}))});document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.ui.push({commands:Array.from({length:30},(_,i)=>({name:'cmd'+String(i).padStart(2,'0'),description:'Command '+i}))});window.composer.focus()");
 			const key = async (key: string, code: number) => { await ui.call("Input.dispatchKeyEvent", {type:"keyDown",key,code:key,windowsVirtualKeyCode:code}); await ui.call("Input.dispatchKeyEvent", {type:"keyUp",key,code:key,windowsVirtualKeyCode:code}); };
 			await ui.call("Input.insertText", { text: "/cmd" });
 			await ui.wait("document.querySelectorAll('[aria-label=\"Slash commands\"] [role=\"option\"]').length===30");
@@ -1216,7 +1218,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 
 		await t.test("slash argument variants filter, navigate, insert by keyboard and click without sending, and dismiss safely", async () => {
 			await reset("slash-arguments");
-			await ui.evaluate("window.ui.push({commands:[{name:'shake',aliases:['trim'],inputHint:'[elide|images|thinking]',subcommands:[{name:'elide',description:'Hide old text (default)'},{name:'images',description:'Remove images',usage:'/shake images'},{name:'thinking',description:'Remove thinking'}]}]});document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.ui.push({commands:[{name:'shake',aliases:['trim'],inputHint:'[elide|images|thinking]',subcommands:[{name:'elide',description:'Hide old text (default)'},{name:'images',description:'Remove images',usage:'/shake images'},{name:'thinking',description:'Remove thinking'}]}]});window.composer.focus()");
 			const key = async (key: string, code = key, windowsVirtualKeyCode = 0) => { await ui.call("Input.dispatchKeyEvent", {type:"keyDown",key,code,windowsVirtualKeyCode}); await ui.call("Input.dispatchKeyEvent", {type:"keyUp",key,code,windowsVirtualKeyCode}); };
 			await ui.call("Input.insertText", {text:"/trim "});
 			await ui.wait("document.querySelector('[aria-label=\"Command arguments\"] [role=\"option\"]')");
@@ -1224,25 +1226,25 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.equal(await ui.evaluate("document.querySelectorAll('[aria-label=\"Command arguments\"] [aria-selected=\"true\"]').length"), 0, "empty optional argument has no forced selection");
 			assert.equal(await ui.evaluate("document.querySelector('[aria-label=\"Command arguments\"]').textContent.includes('optional') && document.querySelector('[aria-label=\"Command arguments\"]').textContent.includes('default')"), true);
 			await key("ArrowDown", "ArrowDown", 40); await key("ArrowDown", "ArrowDown", 40); await key("Enter", "Enter", 13);
-			await ui.wait("document.querySelector('.omp-composer textarea').value==='/trim images '");
+			await ui.wait("window.composer.value()==='/trim images '");
 			assert.equal(await ui.evaluate("window.sent.filter(message=>message.type==='omp:chat-prompt').length"), 0);
 			await key("Enter", "Enter", 13);
 			await ui.wait("window.sent.some(message=>message.type==='omp:chat-prompt' && message.text==='/trim images')");
 			await ui.call("Input.insertText", {text:"/shake thi"});
 			await ui.wait("document.querySelectorAll('[aria-label=\"Command arguments\"] [role=\"option\"]').length===1");
 			await key("Tab", "Tab", 9);
-			await ui.wait("document.querySelector('.omp-composer textarea').value==='/shake thinking '");
+			await ui.wait("window.composer.value()==='/shake thinking '");
 			await key("Enter", "Enter", 13);
 			await ui.call("Input.insertText", {text:"/shake "});
 			await ui.wait("document.querySelector('[aria-label=\"Command arguments\"]')");
 			await key("Escape", "Escape", 27);
 			await ui.wait("!document.querySelector('[aria-label=\"Command arguments\"]')");
-			assert.equal(await ui.evaluate("document.querySelector('.omp-composer textarea').value"), "/shake ");
+			assert.equal(await ui.evaluate("window.composer.value()"), "/shake ");
 			await key("Enter", "Enter", 13);
 			await ui.call("Input.insertText", {text:"/shake im"});
 			await ui.wait("document.querySelector('[aria-label=\"Command arguments\"] .omp-slash-hint')?.textContent==='/shake images'");
 			await ui.evaluate("document.querySelector('[aria-label=\"Command arguments\"] [role=\"option\"]').click()");
-			await ui.wait("document.querySelector('.omp-composer textarea').value==='/shake images '");
+			await ui.wait("window.composer.value()==='/shake images '");
 			assert.deepEqual(await ui.evaluate("window.sent.filter(message=>message.type==='omp:chat-prompt').map(message=>message.text)"), ["/trim images","/shake thinking","/shake"]);
 		});
 
@@ -1297,29 +1299,29 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await open();
 			await ui.evaluate("[...document.querySelectorAll('.omp-commands-option')].find(row=>row.textContent.startsWith('/settings')).click()");
 			await ui.wait("window.sent.some(message=>message.type==='omp:chat-prompt'&&message.text==='/settings')");
-			assert.equal(await ui.evaluate("document.querySelector('.omp-composer textarea').value"), "");
+			assert.equal(await ui.evaluate("window.composer.value()"), "");
 			// A command that takes arguments completes the draft: `/name ` with the caret after it, the rest of the draft kept.
-			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.composer.focus()");
 			await ui.call("Input.insertText", { text: "keep this text" });
 			await open();
 			await ui.evaluate("[...document.querySelectorAll('.omp-commands-option')].find(row=>row.textContent.startsWith('/skill:review')).click()");
-			await ui.wait("document.querySelector('.omp-composer textarea').value==='/skill:review keep this text'");
-			assert.deepEqual(await ui.evaluate("(()=>{const t=document.querySelector('.omp-composer textarea');return[document.activeElement===t,t.selectionStart,t.selectionEnd]})()"), [true, 14, 14]);
+			await ui.wait("window.composer.value()==='/skill:review keep this text'");
+			assert.deepEqual(await ui.evaluate("(()=>{const s=window.composer.selection();return[window.composer.focused(),s.start,s.end]})()"), [true, 14, 14]);
 			assert.deepEqual(await prompts(), ["/settings"], "an argument command is never sent by the pick");
 			// A command that takes none is sent as its own message; the draft stays exactly as it is.
 			await open();
 			await ui.evaluate("[...document.querySelectorAll('.omp-commands-option')].find(row=>row.textContent.startsWith('/usage')).click()");
 			await ui.wait("window.sent.some(message=>message.type==='omp:chat-prompt'&&message.text==='/usage')");
-			assert.equal(await ui.evaluate("document.querySelector('.omp-composer textarea').value"), "/skill:review keep this text");
+			assert.equal(await ui.evaluate("window.composer.value()"), "/skill:review keep this text");
 			// An empty draft takes the completion alone.
-			await ui.evaluate("(()=>{const t=document.querySelector('.omp-composer textarea');t.focus();t.select();document.execCommand('delete')})()");
-			await ui.wait("document.querySelector('.omp-composer textarea').value===''");
+			await ui.evaluate("window.composer.setText('')");
+			await ui.wait("window.composer.value()===''");
 			await open();
 			await ui.evaluate("[...document.querySelectorAll('.omp-commands-option')].find(row=>row.textContent.startsWith('/skill:review')).click()");
-			await ui.wait("document.querySelector('.omp-composer textarea').value==='/skill:review '");
-			assert.deepEqual(await ui.evaluate("(()=>{const t=document.querySelector('.omp-composer textarea');return[t.selectionStart,t.selectionEnd]})()"), [14, 14]);
+			await ui.wait("window.composer.value()==='/skill:review '");
+			assert.deepEqual(await ui.evaluate("(()=>{const s=window.composer.selection();return[s.start,s.end]})()"), [14, 14]);
 			// Keyboard: arrows move the highlight, Enter picks.
-			await ui.evaluate("(()=>{const t=document.querySelector('.omp-composer textarea');t.focus();t.select();document.execCommand('delete')})()");
+			await ui.evaluate("window.composer.setText('')");
 			await open();
 			assert.equal(await ui.evaluate("document.querySelector('.omp-commands-option--active').getAttribute('aria-selected')"), "true");
 			await key("ArrowUp", "ArrowUp", 38);
@@ -1348,7 +1350,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate("[...document.querySelectorAll('.omp-commands-option')].find(row=>row.textContent.startsWith('/settings')).click()");
 			await ui.wait("window.sent.some(message=>message.type==='omp:chat-steer'&&message.text==='/settings')");
 			await ui.evaluate("window.ui.push({working:false,phase:'stopped'})");
-			await ui.wait("document.querySelector('.omp-composer textarea').disabled");
+			await ui.wait("window.composer.disabled()");
 			await ui.evaluate("document.querySelector('.omp-composer-commands').click()");
 			await ui.wait("document.querySelector('.omp-commands-popup')");
 			assert.match((await state("/usage")).reason, /not running/);
@@ -1383,20 +1385,20 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 
 		await t.test("optional-empty and hint-only Enter send; required-empty stays open across Escape and every submit route", async () => {
 			await reset("slash-argument-enter");
-			await ui.evaluate("window.ui.push({commands:[{name:'shake',inputHint:'[variant]',subcommands:[{name:'elide'}]},{name:'focus',inputHint:'[focus instructions]'},{name:'join',inputHint:'<link>'},{name:'required',inputHint:'<action>',subcommands:[{name:'one'}]},{name:'raw',inputHint:'unrecognized hint syntax'}]});document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.ui.push({commands:[{name:'shake',inputHint:'[variant]',subcommands:[{name:'elide'}]},{name:'focus',inputHint:'[focus instructions]'},{name:'join',inputHint:'<link>'},{name:'required',inputHint:'<action>',subcommands:[{name:'one'}]},{name:'raw',inputHint:'unrecognized hint syntax'}]});window.composer.focus()");
 			const enter = () => ui.call("Input.dispatchKeyEvent", {type:"keyDown",key:"Enter",code:"Enter",windowsVirtualKeyCode:13});
 			for (const text of ["/shake ", "/focus ", "/raw "]) {
 				await ui.call("Input.insertText", {text});
 				await ui.wait("document.querySelector('[aria-label=\"Command arguments\"]')");
 				if (text !== "/shake ") assert.equal(await ui.evaluate("document.querySelectorAll('[aria-label=\"Command arguments\"] [role=\"option\"]').length"), 0);
 				await enter();
-				await ui.wait("document.querySelector('.omp-composer textarea').value===''");
+				await ui.wait("window.composer.value()===''");
 			}
 			assert.deepEqual(await ui.evaluate("window.sent.filter(message=>message.type==='omp:chat-prompt').map(message=>message.text)"), ["/shake","/focus","/raw"]);
 			await ui.call("Input.insertText", {text:"/join "});
 			await ui.wait("document.querySelector('[aria-label=\"Command arguments\"]')");
 			await enter();
-			assert.equal(await ui.evaluate("document.querySelector('.omp-composer textarea').value"), "/join ");
+			assert.equal(await ui.evaluate("window.composer.value()"), "/join ");
 			await ui.call("Input.dispatchKeyEvent", {type:"keyDown",key:"Escape",code:"Escape",windowsVirtualKeyCode:27});
 			await ui.wait("!document.querySelector('[aria-label=\"Command arguments\"]')");
 			await ui.evaluate("document.querySelector('button[aria-label=\"Send message\"]').click()");
@@ -1406,48 +1408,48 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.equal(await ui.evaluate("window.sent.filter(message=>message.type==='omp:chat-prompt').length"), 3, "host send action cannot bypass the required-empty guard");
 			await ui.call("Input.insertText", {text:"test-link"});
 			await enter();
-			await ui.wait("document.querySelector('.omp-composer textarea').value===''");
+			await ui.wait("window.composer.value()===''");
 			await ui.call("Input.insertText", {text:"/required "}); await enter();
-			assert.equal(await ui.evaluate("document.querySelector('.omp-composer textarea').value"), "/required ");
+			assert.equal(await ui.evaluate("window.composer.value()"), "/required ");
 			assert.equal(await ui.evaluate("document.querySelector('[aria-label=\"Command arguments\"]')!==null"), true);
 			await ui.call("Input.dispatchKeyEvent", {type:"keyDown",key:"ArrowDown",code:"ArrowDown",windowsVirtualKeyCode:40}); await enter();
-			await ui.wait("document.querySelector('.omp-composer textarea').value==='/required one '");
+			await ui.wait("window.composer.value()==='/required one '");
 			assert.equal(await ui.evaluate("window.sent.filter(message=>message.type==='omp:chat-prompt').length"), 4);
 		});
 
 		await t.test("IME owns argument arrows, Enter, Tab and clicks, including required-empty input", async () => {
 			await reset("slash-argument-ime");
-			await ui.evaluate("window.ui.push({commands:[{name:'required',inputHint:'<action>',subcommands:[{name:'one'},{name:'two'}]}]});document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.ui.push({commands:[{name:'required',inputHint:'<action>',subcommands:[{name:'one'},{name:'two'}]}]});window.composer.focus()");
 			await ui.call("Input.insertText", {text:"/required "});
 			await ui.wait("document.querySelector('[aria-label=\"Command arguments\"]')");
 			await ui.evaluate(`(()=>{
-			 const input=document.querySelector('.omp-composer textarea'); input.dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}));
+			 const input=window.composer.el(); input.dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}));
 			 for(const key of ['ArrowDown','Enter','Tab'])input.dispatchEvent(new KeyboardEvent('keydown',{key,code:key,isComposing:true,bubbles:true}));
 			 document.querySelector('[aria-label="Command arguments"] [role="option"]').click();
 			})()`);
-			assert.equal(await ui.evaluate("document.querySelector('.omp-composer textarea').value"), "/required ");
+			assert.equal(await ui.evaluate("window.composer.value()"), "/required ");
 			assert.equal(await ui.evaluate("window.sent.filter(message=>message.type==='omp:chat-prompt').length"), 0);
-			await ui.evaluate("document.querySelector('.omp-composer textarea').dispatchEvent(new CompositionEvent('compositionend',{bubbles:true}))");
+			await ui.evaluate("window.composer.el().dispatchEvent(new CompositionEvent('compositionend',{bubbles:true}))");
 			await ui.call("Input.dispatchKeyEvent", {type:"keyDown",key:"Tab",code:"Tab",windowsVirtualKeyCode:9});
-			await ui.wait("document.querySelector('.omp-composer textarea').value==='/required one '");
+			await ui.wait("window.composer.value()==='/required one '");
 		});
 
 		await t.test("an editor reference from the host lands at the caret with a space around it, keeps the rest of the draft, focuses the input and never submits", async () => {
 			await reset("editor-reference");
-			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.composer.focus()");
 			await ui.call("Input.insertText", { text: "fix  the bug" });
-			await ui.evaluate("document.querySelector('.omp-composer textarea').setSelectionRange(4,4);document.activeElement.blur()");
+			await ui.evaluate("window.composer.select(4,4);window.composer.blur()");
 			await ui.evaluate("window.ui.receive({type:'omp:insert-text',text:'@src/a.ts [lines 12-30]'})");
-			await ui.wait("document.querySelector('.omp-composer textarea').value==='fix @src/a.ts [lines 12-30] the bug'");
+			await ui.wait("window.composer.value()==='fix @src/a.ts [lines 12-30] the bug'");
 			assert.deepEqual(
-				await ui.evaluate("(()=>{const box=document.querySelector('.omp-composer textarea');return{focused:document.activeElement===box,caret:box.selectionStart===box.selectionEnd?box.selectionStart:-1}})()"),
+				await ui.evaluate("(()=>{const s=window.composer.selection();return{focused:window.composer.focused(),caret:s.start===s.end?s.start:-1}})()"),
 				{ focused: true, caret: "fix @src/a.ts [lines 12-30] ".length },
 				"the caret follows the inserted reference, past the space that already followed it",
 			);
 			// Pasted at the end of a draft that does not end in whitespace: one leading space, one trailing space.
-			await ui.evaluate("(()=>{const box=document.querySelector('.omp-composer textarea');box.setSelectionRange(box.value.length,box.value.length)})()");
+			await ui.evaluate("window.composer.select(window.composer.value().length)");
 			await ui.evaluate("window.ui.receive({type:'omp:insert-text',text:'@b.ts @c.ts'})");
-			await ui.wait("document.querySelector('.omp-composer textarea').value==='fix @src/a.ts [lines 12-30] the bug @b.ts @c.ts '");
+			await ui.wait("window.composer.value()==='fix @src/a.ts [lines 12-30] the bug @b.ts @c.ts '");
 			assert.equal(await ui.evaluate("window.sent.filter(message=>message.type==='omp:chat-prompt'||message.type==='omp:chat-steer'||message.type==='omp:chat-follow-up').length"), 0, "an insertion never submits");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
@@ -1460,7 +1462,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			 const colors={'editor-background':'#000000','foreground':'#ffffff','descriptionForeground':'#ffffff','editorSuggestWidget-background':'#000000','editorSuggestWidget-foreground':'#ffffff','editorSuggestWidget-selectedBackground':'#ffffff','editorSuggestWidget-selectedForeground':'#000000'};
 			 for(const [name,value] of Object.entries(colors))document.documentElement.style.setProperty('--vscode-'+name,value);
 			 window.ui.push({commands:[{name:'skill:inspect',source:'skill',description:'Inspect the selected source',inputHint:'files'}]});
-			 document.querySelector('.omp-composer textarea').focus();
+			 window.composer.focus();
 			})()`);
 			try {
 				await ui.call("Input.insertText", { text: "/skill:" });
@@ -1523,16 +1525,16 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 
 		await t.test("IME cannot accept slash completion or send, and a pushed catalogue removal withdraws the option without losing draft", async () => {
 			await reset("paseo-slash-ime");
-			await ui.evaluate("window.ui.push({commands:[{name:'skill:inspect',source:'skill',inputHint:'files'}]});document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.ui.push({commands:[{name:'skill:inspect',source:'skill',inputHint:'files'}]});window.composer.focus()");
 			await ui.call("Input.insertText", { text: "/skill:i" });
 			await ui.wait("document.querySelector('[aria-label=\"Slash commands\"]')");
-			await ui.evaluate(`const input=document.querySelector('.omp-composer textarea');input.dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}));
+			await ui.evaluate(`const input=window.composer.el();input.dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}));
 			 input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',code:'Enter',isComposing:true,bubbles:true}));input.dispatchEvent(new KeyboardEvent('keydown',{key:'Tab',code:'Tab',isComposing:true,bubbles:true}));`);
-			assert.equal(await ui.evaluate("document.querySelector('.omp-composer textarea').value"), "/skill:i");
+			assert.equal(await ui.evaluate("window.composer.value()"), "/skill:i");
 			assert.equal(await ui.evaluate("window.sent.filter(message=>message.type==='omp:chat-prompt').length"), 0);
-			await ui.evaluate("document.querySelector('.omp-composer textarea').dispatchEvent(new CompositionEvent('compositionend',{bubbles:true}));window.ui.push({commands:[]})");
+			await ui.evaluate("window.composer.el().dispatchEvent(new CompositionEvent('compositionend',{bubbles:true}));window.ui.push({commands:[]})");
 			await ui.wait("!document.querySelector('[aria-label=\"Slash commands\"]')");
-			assert.equal(await ui.evaluate("document.querySelector('.omp-composer textarea').value"), "/skill:i");
+			assert.equal(await ui.evaluate("window.composer.value()"), "/skill:i");
 		});
 
 		await t.test("narrow theme-sized viewports retain a docked ask without page overflow and keyboard disclosures expose real accessibility nodes", async () => {
@@ -2192,12 +2194,12 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.wait("document.querySelector('.omp-context-quota')?.textContent==='7d · 42% used · resets in 3d 5h'");
 			await ui.call("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
 			await ui.wait("!document.querySelector('.omp-context-popover')");
-			await ui.evaluate("document.querySelector('textarea').focus();window.fixtureClock.setNow(1800285240002);window.fixtureClock.fire(60000);document.querySelector('.omp-context-trigger').focus()");
+			await ui.evaluate("window.composer.focus();window.fixtureClock.setNow(1800285240002);window.fixtureClock.fire(60000);document.querySelector('.omp-context-trigger').focus()");
 			await ui.wait("document.querySelector('.omp-context-quota')?.textContent==='7d · 42% used · resets now / refreshing'");
 		});
 		await t.test("context hover and keyboard Escape preserve focus and never stop a working turn", async () => {
 			await reset("context-escape");
-			await ui.evaluate("window.ui.push({working:true});document.querySelector('textarea').focus()");
+			await ui.evaluate("window.ui.push({working:true});window.composer.focus()");
 			await ui.wait("document.querySelector('[aria-label=\"Stop the running turn\"]')");
 			const point = await ui.evaluate<{ x: number; y: number }>("(()=>{const rect=document.querySelector('.omp-context-trigger').getBoundingClientRect();return{x:rect.left+rect.width/2,y:rect.top+rect.height/2}})()");
 			await ui.call("Input.dispatchMouseEvent", { type: "mouseMoved", ...point });
@@ -2209,7 +2211,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.call("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
 			await ui.call("Input.dispatchKeyEvent", { type: "keyUp", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
 			await ui.wait("!document.querySelector('.omp-context-popover')");
-			assert.equal(await ui.evaluate("document.activeElement===document.querySelector('textarea')"), true);
+			assert.equal(await ui.evaluate("window.composer.focused()"), true);
 			await ui.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: 1, y: 1 });
 			await ui.evaluate("document.querySelector('.omp-context-trigger').focus()");
 			await ui.wait("document.querySelector('.omp-context-trigger').getAttribute('aria-expanded')==='true'");
@@ -2217,7 +2219,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.wait("!document.querySelector('.omp-context-popover')");
 			assert.equal(await ui.evaluate("document.activeElement===document.querySelector('.omp-context-trigger')"), true);
 			assert.equal(await ui.evaluate("window.sent.filter(message=>message.type==='omp:chat-abort').length"), 0);
-			await ui.evaluate("document.querySelector('textarea').focus()");
+			await ui.evaluate("window.composer.focus()");
 		});
 
 		await t.test("read-only and unavailable controls cannot mutate and explain why", async () => {
@@ -2264,14 +2266,14 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate("window.ui.receive({type:'omp:draft-restore',requestId:1889,text:'first\\nsecond\\nthird',attachments:0,recoverable:[]})");
 			await ui.evaluate("window.ui.receive({type:'omp:footer-metadata',provider:'one',branch:'layout-branch',windows:[],accounts:[],accountSelection:null})");
 			await ui.evaluate("window.ui.push({state:{...window.ui.current().state,model:{...window.ui.current().state.model,name:'A long model name that remains selectable'}}})");
-			await ui.wait("document.querySelector('textarea').getBoundingClientRect().height > 60");
+			await ui.wait("window.composer.el().getBoundingClientRect().height > 60");
 			for (const busy of [false, true]) {
 				await ui.evaluate(`window.ui.push({working:${busy},state:{...window.ui.current().state,queuedMessageCount:${busy ? 3 : 0}}})`);
 				for (const width of [1000, 760, 590, 460, 300, 240, 160]) {
 					await ui.call("Emulation.setDeviceMetricsOverride", { width, height: 900, deviceScaleFactor: 1, mobile: false });
 					await ui.settleGeometry(".omp-composer");
 					const layout = await ui.evaluate<{ overflow: boolean; contained: boolean; ordered: boolean; queued: boolean; spread: number; branch: boolean }>(`(() => {
-					 const card=document.querySelector('.omp-composer').getBoundingClientRect(),input=document.querySelector('textarea').getBoundingClientRect(),
+					 const card=document.querySelector('.omp-composer').getBoundingClientRect(),input=window.composer.el().getBoundingClientRect(),
 					  toolbar=document.querySelector('.omp-composer-toolbar'),bar=toolbar.getBoundingClientRect(),
 					  shown=node=>node!==null&&node.getBoundingClientRect().width>0,
 					  controls=[...toolbar.querySelectorAll('button,.omp-chip,.omp-composer-branch')].filter(node=>node.getBoundingClientRect().width>2).map(node=>node.getBoundingClientRect()),
@@ -2307,7 +2309,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 					assert.ok(popover.left >= 0 && popover.right <= width && !popover.overflow, `popover fits ${where}`);
 					await ui.call("Input.dispatchKeyEvent", { type: "keyDown", key: "Escape", code: "Escape", windowsVirtualKeyCode: 27 });
 					await ui.wait("!document.querySelector('.omp-context-popover')");
-					await ui.evaluate("document.querySelector('textarea').focus()");
+					await ui.evaluate("window.composer.focus()");
 				}
 			}
 			await ui.call("Emulation.clearDeviceMetricsOverride");
@@ -2316,25 +2318,25 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 		await t.test("composer text is inset inside a padded focus frame that autosizes and caps, in the prompt and the ask variant", async () => {
 			await reset("composer-padding");
 			await ui.call("Emulation.setFocusEmulationEnabled", { enabled: true });
-			await ui.evaluate("document.documentElement.style.setProperty('--vscode-focusBorder','#007fd4');document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("document.documentElement.style.setProperty('--vscode-focusBorder','#007fd4');window.composer.focus()");
 			await ui.call("Input.insertText", { text: "Padded text" });
-			await ui.wait("document.querySelector('.omp-composer textarea').value==='Padded text'");
+			await ui.wait("window.composer.value()==='Padded text'");
 			const frame = await ui.evaluate<{ pl: number; pr: number; pt: number; pb: number; outline: string; offset: number; height: number; left: number; top: number; toolbarGap: number }>(`(()=>{
-			 const ta=document.querySelector('.omp-composer textarea'),card=document.querySelector('.omp-composer').getBoundingClientRect(),box=ta.getBoundingClientRect(),s=getComputedStyle(ta),toolbar=document.querySelector('.omp-composer-toolbar').getBoundingClientRect();
+			 const ta=window.composer.el(),card=document.querySelector('.omp-composer').getBoundingClientRect(),box=ta.getBoundingClientRect(),s=getComputedStyle(ta),toolbar=document.querySelector('.omp-composer-toolbar').getBoundingClientRect();
 			 return {pl:parseFloat(s.paddingLeft),pr:parseFloat(s.paddingRight),pt:parseFloat(s.paddingTop),pb:parseFloat(s.paddingBottom),outline:s.outlineStyle+' '+s.outlineWidth,offset:parseFloat(s.outlineOffset),height:box.height,
 			  left:box.left-card.left,top:box.top-card.top,toolbarGap:toolbar.top-box.bottom};})()`);
 			assert.ok(frame.pl >= 10 && frame.pl <= 12 && frame.pr >= 10 && frame.pr <= 12, `horizontal padding ${frame.pl}/${frame.pr}`);
 			assert.ok(frame.pt >= 8 && frame.pt <= 10 && frame.pb >= 8 && frame.pb <= 10, `vertical padding ${frame.pt}/${frame.pb}`);
-			assert.equal(frame.outline.startsWith("none"), true, "the textarea draws no ring of its own");
-			assert.equal(await ui.evaluate("(()=>{const card=document.querySelector('.omp-composer');card.querySelector('textarea').focus();const probe=document.createElement('i');probe.style.color='var(--vscode-focusBorder, #007fd4)';document.body.append(probe);const same=getComputedStyle(card).borderTopColor===getComputedStyle(probe).color;probe.remove();return same})()"), true, "the focused card is the one ring");
+			assert.equal(frame.outline.startsWith("none"), true, "the field draws no ring of its own");
+			assert.equal(await ui.evaluate("(()=>{const card=document.querySelector('.omp-composer');window.composer.focus();const probe=document.createElement('i');probe.style.color='var(--vscode-focusBorder, #007fd4)';document.body.append(probe);const same=getComputedStyle(card).borderTopColor===getComputedStyle(probe).color;probe.remove();return same})()"), true, "the focused card is the one ring");
 			assert.ok(frame.left > 0 && frame.top > 0, "the frame sits inside the rounded card");
 			assert.equal(frame.height, 2 * 20 + frame.pt + frame.pb, "a short draft autosizes to the two-line minimum plus padding");
 			assert.ok(frame.toolbarGap >= 0, "the actions row stays below the input");
 			await ui.evaluate(`window.ui.receive({type:'omp:draft-restore',requestId:1958,text:${JSON.stringify(Array.from({ length: 14 }, (_, index) => `line ${index}`).join("\n"))},attachments:0,recoverable:[]})`);
-			await ui.wait("document.querySelector('.omp-composer textarea').getBoundingClientRect().height > 100");
-			const capped = await ui.evaluate<{ height: number; overflowY: string }>("(()=>{const ta=document.querySelector('.omp-composer textarea'),s=getComputedStyle(ta);return{height:ta.getBoundingClientRect().height,overflowY:s.overflowY}})()");
+			await ui.wait("window.composer.el().getBoundingClientRect().height > 100");
+			const capped = await ui.evaluate<{ height: number; overflowY: string }>("(()=>{const ta=window.composer.el(),s=getComputedStyle(ta);return{height:ta.getBoundingClientRect().height,overflowY:s.overflowY}})()");
 			assert.equal(capped.height, 8 * 20 + 20, "growth stops at eight lines plus padding");
-			assert.equal(capped.overflowY, "auto", "longer drafts scroll inside the textarea");
+			assert.equal(capped.overflowY, "auto", "longer drafts scroll inside the field");
 			await ui.evaluate("window.ui.push({uiRequests:[{id:'pad-ask',method:'input',title:'Name?',placeholder:'type here'}]})");
 			await ui.wait("document.querySelector('.omp-ask textarea')");
 			const ask = await ui.evaluate<{ pl: number; pt: number; height: number }>("(()=>{const ta=document.querySelector('.omp-ask textarea'),s=getComputedStyle(ta);return{pl:parseFloat(s.paddingLeft),pt:parseFloat(s.paddingTop),height:ta.getBoundingClientRect().height}})()");
@@ -2347,19 +2349,19 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await reset("stopped-placeholder");
 			await ui.call("Emulation.setDeviceMetricsOverride", { width: 420, height: 900, deviceScaleFactor: 1, mobile: false });
 			const host = "The session file exists and no live owner was proven. This session's launcher intent is stopped, so nothing was started or attached; choose Open to run it.";
-			const probe = "(()=>{const ta=document.querySelector('.omp-composer textarea'),s=getComputedStyle(ta);return{placeholder:ta.placeholder,height:ta.getBoundingClientRect().height,min:2*parseFloat(s.lineHeight)+parseFloat(s.paddingTop)+parseFloat(s.paddingBottom),toolbar:document.querySelector('.omp-composer-toolbar').getBoundingClientRect().height}})()";
+			const probe = "(()=>{const ta=window.composer.el(),s=getComputedStyle(ta);return{placeholder:window.composer.placeholder(),height:ta.getBoundingClientRect().height,min:2*parseFloat(s.lineHeight)+parseFloat(s.paddingTop)+parseFloat(s.paddingBottom),toolbar:document.querySelector('.omp-composer-toolbar').getBoundingClientRect().height}})()";
 			const idle = await ui.evaluate<{ height: number; min: number; toolbar: number }>(probe);
 			assert.equal(idle.height, idle.min, "an empty live composer is two lines tall");
 			for (const phase of ["stopped", "view-only"]) {
 				await ui.evaluate(`window.ui.push({phase:'${phase}',readOnlyReason:${JSON.stringify(host)}})`);
-				await ui.wait("document.querySelector('.omp-composer textarea').placeholder.startsWith('This session is not running')");
+				await ui.wait("window.composer.placeholder().startsWith('This session is not running')");
 				const shown = await ui.evaluate<{ placeholder: string; height: number; min: number; toolbar: number }>(probe);
 				assert.equal(shown.placeholder, "This session is not running. Resume it to send a message.", phase);
 				assert.equal(shown.height, shown.min, `${phase}: the composer keeps its two-line minimum`);
 				assert.equal(shown.toolbar, idle.toolbar, `${phase}: the toolbar row keeps its height`);
 			}
 			await ui.evaluate("window.ui.push({phase:'live',readOnlyReason:'Another editor controls this session'})");
-			await ui.wait("document.querySelector('.omp-composer textarea').placeholder==='Another editor controls this session'");
+			await ui.wait("window.composer.placeholder()==='Another editor controls this session'");
 			await ui.call("Emulation.clearDeviceMetricsOverride");
 		});
 
@@ -2371,7 +2373,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			const clicked = await ui.evaluate<{ text: string; disabled: boolean; spinner: boolean; busy: string | null; placeholder: string }>(`new Promise(resolve=>{
 			 [...document.querySelectorAll('.omp-composer button')].find(button=>button.textContent==='Resume').click();
 			 requestAnimationFrame(()=>{const button=[...document.querySelectorAll('.omp-composer button')].find(candidate=>candidate.textContent.includes('Starting'));
-			  resolve({text:button.textContent.trim(),disabled:button.disabled,spinner:button.querySelector('.codicon-loading')!==null,busy:button.getAttribute('aria-busy'),placeholder:document.querySelector('.omp-composer textarea').placeholder});});})`);
+			  resolve({text:button.textContent.trim(),disabled:button.disabled,spinner:button.querySelector('.codicon-loading')!==null,busy:button.getAttribute('aria-busy'),placeholder:window.composer.placeholder()});});})`);
 			assert.deepEqual(clicked, { text: "Starting…", disabled: true, spinner: true, busy: "true", placeholder: "Starting the session…" });
 			assert.equal(await ui.evaluate("document.querySelector('.omp-notice-description').textContent"), "Starting the session…", "the banner acknowledges too");
 			await ui.evaluate("document.querySelector('.omp-composer button[disabled]')?.click()");
@@ -2382,7 +2384,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.equal(await ui.evaluate("document.querySelector('.omp-notice').getAttribute('aria-busy')"), "true");
 			await ui.evaluate(`window.ui.receive({type:'omp:chat-operation',operation:null,ended:{kind:'resume',requestId:${JSON.stringify(requestId)},status:'refused'}})`);
 			await ui.wait("[...document.querySelectorAll('.omp-composer button')].some(button=>button.textContent==='Resume'&&!button.disabled)");
-			assert.equal(await ui.evaluate("document.querySelector('.omp-composer textarea').placeholder"), "This session is not running. Resume it to send a message.");
+			assert.equal(await ui.evaluate("window.composer.placeholder()"), "This session is not running. Resume it to send a message.");
 
 			await reset("pending-stop");
 			await ui.evaluate("window.ui.push({working:true})");
@@ -2964,9 +2966,9 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			 ];
 			 window.phase=step=>window.ui.push(phases[step%phases.length]);
 			 window.phase(2);
-			 const area=document.querySelector('.omp-composer textarea');area.focus();window.composerNode=area;
-			 window.sample=()=>{const a=document.querySelector('.omp-composer textarea'),r=a.getBoundingClientRect(),c=document.querySelector('.omp-composer').getBoundingClientRect(),t=document.querySelector('.omp-transcript');
-			  return {same:a===window.composerNode,top:r.top,height:r.height,composerTop:c.top,composerHeight:c.height,gap:t.scrollHeight-t.clientHeight-t.scrollTop,focused:document.activeElement===a,value:a.value,start:a.selectionStart,end:a.selectionEnd,overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth}};
+			 window.composer.focus();window.composerNode=window.composer.el();
+			 window.sample=()=>{const a=window.composer.el(),sel=window.composer.selection(),r=a.getBoundingClientRect(),c=document.querySelector('.omp-composer').getBoundingClientRect(),t=document.querySelector('.omp-transcript');
+			  return {same:a===window.composerNode,top:r.top,height:r.height,composerTop:c.top,composerHeight:c.height,gap:t.scrollHeight-t.clientHeight-t.scrollTop,focused:window.composer.focused(),value:window.composer.value(),start:sel.start,end:sel.end,overflow:document.documentElement.scrollWidth>document.documentElement.clientWidth}};
 			 window.frames2=()=>new Promise(resolve=>requestAnimationFrame(()=>requestAnimationFrame(resolve)));
 			})()`);
 			await ui.evaluate("window.frames2()");
@@ -2981,7 +2983,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			// The empty draft shows a placeholder that may wrap and so is not a baseline for the typed one.
 			const baseline = samples[0] as Record<string, number>;
 			const drift = (key: string): number => Math.max(...samples.map(sample => Math.abs(Number(sample[key]) - baseline[key]!)));
-			assert.ok(samples.every(sample => sample.same && sample.focused), "the textarea is never remounted or blurred");
+			assert.ok(samples.every(sample => sample.same && sample.focused), "the field is never remounted or blurred");
 			assert.ok(samples.every(sample => sample.value === sample.expected && sample.start === sample.end && sample.end === String(sample.value).length), "no character is dropped and the caret stays at the end");
 			assert.ok(drift("top") <= 1 && drift("composerTop") <= 1 && drift("composerHeight") <= 1 && drift("height") <= 1, JSON.stringify({ baseline, top: drift("top"), composerTop: drift("composerTop"), composerHeight: drift("composerHeight"), height: drift("height") }));
 			assert.ok(samples.every(sample => Number(sample.gap) <= 2), "the followed transcript stays at its tail");
@@ -3085,7 +3087,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 		});
 		await t.test("a remembered working state is not shown while the session is being re-attached, and the draft survives", async () => {
 			await reset("work-unknown");
-			await ui.evaluate("window.ui.push({working:true,settled:false});document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.ui.push({working:true,settled:false});window.composer.focus()");
 			await ui.call("Input.insertText", { text: "draft kept" });
 			// Busy is shown by the composer's own Stop and Steer, never by a separate chip in the state area.
 			await ui.wait("document.querySelector('[aria-label=\"Stop the running turn\"]') && document.querySelector('[aria-label=\"Steer the running turn\"]')");
@@ -3096,21 +3098,21 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			}
 			await ui.evaluate("window.ui.push({phase:'live'})");
 			await ui.wait("document.querySelector('[aria-label=\"Stop the running turn\"]')");
-			assert.equal(await ui.evaluate("document.querySelector('.omp-composer textarea').value"), "draft kept");
+			assert.equal(await ui.evaluate("window.composer.value()"), "draft kept");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
-			assert.equal(await ui.evaluate("document.activeElement===document.querySelector('.omp-composer textarea')"), true, "the composer takes back the focus its re-attach took by disabling it");
+			assert.equal(await ui.evaluate("window.composer.focused()"), true, "the composer takes back the focus its re-attach took by disabling it");
 		});
 		const focusTraces = (): Promise<string[]> => ui.evaluate("window.sent.filter(message=>message.type==='omp:focus-trace').map(message=>message.detail)");
 		await t.test("a composer disabled while the user types is focused again when it is writable, and the trace says why it lost focus", async () => {
 			await reset("held-focus");
-			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.composer.focus()");
 			await ui.call("Input.insertText", { text: "typing" });
 			await ui.evaluate("window.ui.push({phase:'resyncing'})");
-			await ui.wait("document.querySelector('.omp-composer textarea').disabled && document.activeElement===document.body");
+			await ui.wait("window.composer.disabled() && document.activeElement===document.body");
 			await ui.evaluate("window.ui.push({phase:'live'})");
-			await ui.wait("!document.querySelector('.omp-composer textarea').disabled && document.activeElement===document.querySelector('.omp-composer textarea')");
+			await ui.wait("!window.composer.disabled() && window.composer.focused()");
 			await ui.call("Input.insertText", { text: " on" });
-			assert.equal(await ui.evaluate("document.querySelector('.omp-composer textarea').value"), "typing on");
+			assert.equal(await ui.evaluate("window.composer.value()"), "typing on");
 			await ui.wait("window.sent.some(message=>message.type==='omp:focus-trace')");
 			const [line] = await focusTraces();
 			assert.match(line!, /^composer disabled while it held focus \| /);
@@ -3119,26 +3121,26 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 		});
 		await t.test("a composer the user left while it was disabled is not focused again", async () => {
 			await reset("held-focus-left");
-			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.composer.focus()");
 			await ui.evaluate("window.ui.push({phase:'attaching'})");
-			await ui.wait("document.querySelector('.omp-composer textarea').disabled");
+			await ui.wait("window.composer.disabled()");
 			await ui.evaluate("document.querySelector('.omp-transcript').dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}))");
 			await ui.evaluate("window.ui.push({phase:'live'})");
-			await ui.wait("!document.querySelector('.omp-composer textarea').disabled");
-			assert.equal(await ui.evaluate("document.activeElement===document.querySelector('.omp-composer textarea')"), false);
+			await ui.wait("!window.composer.disabled()");
+			assert.equal(await ui.evaluate("window.composer.focused()"), false);
 		});
 		await t.test("a composer blurred by script is reported with the caller, and one the user left is not", async () => {
 			await reset("focus-trace-blur");
-			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.composer.focus()");
 			await ui.evaluate("new Promise(resolve=>setTimeout(resolve,500))");
-			await ui.evaluate("document.querySelector('.omp-composer textarea').blur()");
+			await ui.evaluate("window.composer.blur()");
 			await ui.wait("window.sent.some(message=>message.type==='omp:focus-trace')");
 			const [line] = await focusTraces();
 			assert.match(line!, /^composer lost focus to none \| /);
-			assert.match(line!, /blur\(\) textarea\.omp-textarea by /);
+			assert.match(line!, /blur\(\) div\.omp-composer-input by /);
 			await ui.evaluate("new Promise(resolve=>setTimeout(resolve,1100))");
-			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
-			await ui.evaluate("document.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}));document.querySelector('.omp-composer textarea').blur()");
+			await ui.evaluate("window.composer.focus()");
+			await ui.evaluate("document.dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}));window.composer.blur()");
 			await ui.evaluate("new Promise(resolve=>setTimeout(resolve,100))");
 			assert.equal((await focusTraces()).length, 1, "a blur right after a pointer press is the user's");
 		});
@@ -3216,7 +3218,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.ok(await ui.evaluate("Boolean(document.querySelector('.omp-context-popover'))"), "a press inside the popover keeps it");
 			await ui.evaluate("document.querySelector('.omp-transcript').dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}))");
 			await ui.wait("!document.querySelector('.omp-context-popover')");
-			await ui.evaluate("window.ui.push({commands:[{name:'skill:inspect',source:'skill',description:'Inspect source'}]});document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.ui.push({commands:[{name:'skill:inspect',source:'skill',description:'Inspect source'}]});window.composer.focus()");
 			await ui.call("Input.insertText", { text: "/ins" });
 			await ui.wait("document.querySelector('[aria-label=\"Slash commands\"]')");
 			await ui.evaluate("document.querySelector('[aria-label=\"Slash commands\"]').dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}))");
@@ -3224,14 +3226,14 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.ok(await ui.evaluate("Boolean(document.querySelector('[aria-label=\"Slash commands\"]'))"), "a press inside the list keeps it");
 			await ui.evaluate("document.querySelector('.omp-transcript').dispatchEvent(new PointerEvent('pointerdown',{bubbles:true}))");
 			await ui.wait("!document.querySelector('[aria-label=\"Slash commands\"]')");
-			assert.equal(await ui.evaluate("document.querySelector('.omp-composer textarea').value"), "/ins", "dismissing keeps the draft");
+			assert.equal(await ui.evaluate("window.composer.value()"), "/ins", "dismissing keeps the draft");
 			// Context popover first, picker second: the picker is the newest layer and takes the first Escape.
 			await ui.call("Input.insertText", { text: "p" });
 			await ui.wait("document.querySelector('[aria-label=\"Slash commands\"]')");
 			await clickAt(await centerOf(".omp-context-trigger"));
 			await ui.wait("document.querySelector('.omp-context-popover')");
 			await ui.wait("window.sent.filter(message=>message.type==='omp:composer-popup').at(-1)?.open===true");
-			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.composer.focus()");
 			await ui.call("Input.insertText", { text: "e" });
 			await ui.wait("document.querySelector('[aria-label=\"Slash commands\"]')");
 			await press("Escape", "Escape", 27);
@@ -3279,23 +3281,23 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 		 window.pasteImage=async(width,height)=>{const blob=await window.makePng(width,height);
 		  const bytes=new Uint8Array(await blob.arrayBuffer());let binary='';for(const byte of bytes)binary+=String.fromCharCode(byte);window.pasted.push(btoa(binary));
 		  const data=new DataTransfer();data.items.add(new File([blob],'shot-'+width+'.png',{type:'image/png'}));
-		  const area=document.querySelector('.omp-composer textarea');area.focus();
-		  area.dispatchEvent(new ClipboardEvent('paste',{clipboardData:data,bubbles:true,cancelable:true}));};
+		  window.composer.focus();
+		  window.composer.el().dispatchEvent(new ClipboardEvent('paste',{clipboardData:data,bubbles:true,cancelable:true}));};
 		})()`);
-		const draftValue = (): Promise<string> => ui.evaluate("document.querySelector('.omp-composer textarea').value");
+		const draftValue = (): Promise<string> => ui.evaluate("window.composer.value()");
 		const strip = (): Promise<string[]> => ui.evaluate("[...document.querySelectorAll('.omp-attachment-number')].map(node=>node.textContent)");
 		const pasteImage = async (width: number, height: number, marker: string): Promise<void> => {
 			await ui.evaluate(`window.pasteImage(${width},${height})`);
-			await ui.wait(`document.querySelector('.omp-composer textarea').value.includes(${JSON.stringify(marker)})`);
+			await ui.wait(`window.composer.value().includes(${JSON.stringify(marker)})`);
 		};
-		const markers = (): Promise<{ start: number; end: number; number: number }[]> => ui.evaluate("(()=>{const value=document.querySelector('.omp-composer textarea').value;return[...value.matchAll(/\\[Image #(\\d+)[^\\]]*\\]/g)].map(match=>({start:match.index,end:match.index+match[0].length,number:Number(match[1])}))})()");
-		const setSelection = (start: number, end: number): Promise<unknown> => ui.evaluate(`(()=>{const area=document.querySelector('.omp-composer textarea');area.focus();area.setSelectionRange(${start},${end})})()`);
-		const selection = (): Promise<{ start: number; end: number }> => ui.evaluate("(()=>{const area=document.querySelector('.omp-composer textarea');return{start:area.selectionStart,end:area.selectionEnd}})()");
+		const markers = (): Promise<{ start: number; end: number; number: number }[]> => ui.evaluate("(()=>{const value=window.composer.value();return[...value.matchAll(/\\[Image #(\\d+)[^\\]]*\\]/g)].map(match=>({start:match.index,end:match.index+match[0].length,number:Number(match[1])}))})()");
+		const setSelection = (start: number, end: number): Promise<unknown> => ui.evaluate(`window.composer.select(${start},${end})`);
+		const selection = (): Promise<{ start: number; end: number }> => ui.evaluate("(()=>{const {start,end}=window.composer.selection();return{start,end}})()");
 		/** Polls a draft/selection condition (selection changes are not DOM mutations), reporting the draft when it never holds. */
 		const waitDraft = async (expression: string): Promise<void> => {
 			const held = await ui.evaluate<boolean>(`(async()=>{const deadline=performance.now()+15000;while(performance.now()<deadline){if(${expression})return true;await new Promise(resolve=>requestAnimationFrame(resolve));}return false})()`);
 			if (held) return;
-			const state = await ui.evaluate("(()=>{const a=document.querySelector('.omp-composer textarea');return{value:a.value,start:a.selectionStart,end:a.selectionEnd,focused:document.activeElement===a}})()");
+			const state = await ui.evaluate("(()=>{const s=window.composer.selection();return{value:window.composer.value(),start:s.start,end:s.end,focused:window.composer.focused()}})()");
 			assert.fail(`draft condition never held: ${expression}\n${JSON.stringify(state)}`);
 		};
 		const FIRST = "A [Image #1, 10x6] B [Image #2, 20x8] C [Image #3, 30x9] D";
@@ -3303,7 +3305,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 		const buildDraft = async (name: string): Promise<void> => {
 			await reset(name);
 			await installImages();
-			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.composer.focus()");
 			await ui.call("Input.insertText", { text: "A " });
 			await pasteImage(10, 6, "[Image #1, 10x6]");
 			await ui.call("Input.insertText", { text: "B " });
@@ -3311,10 +3313,10 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.call("Input.insertText", { text: "C " });
 			await pasteImage(30, 9, "[Image #3, 30x9]");
 			await ui.call("Input.insertText", { text: "D" });
-			await ui.wait(`document.querySelector('.omp-composer textarea').value===${JSON.stringify(FIRST)}`);
+			await ui.wait(`window.composer.value()===${JSON.stringify(FIRST)}`);
 		};
 
-		await t.test("pasted images become sequentially numbered `[Image #N, WxH]` markers at the caret, with matching labelled thumbnails and a painted chip", async () => {
+		await t.test("pasted images become sequentially numbered `[Image #N, WxH]` markers at the caret, with matching labelled thumbnails and an inline chip", async () => {
 			await buildDraft("image-refs-insert");
 			assert.equal(await draftValue(), FIRST);
 			assert.deepEqual(await strip(), ["#1", "#2", "#3"]);
@@ -3322,26 +3324,27 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			// Inserting in the middle of existing text goes at the caret, not at the end.
 			const [, second] = await markers();
 			await setSelection(second!.end + 1, second!.end + 1);
-			await ui.wait(`document.querySelector('.omp-composer textarea').selectionStart===${second!.end + 1}`);
+			await ui.wait(`window.composer.selection().start===${second!.end + 1}`);
 			await pasteImage(40, 11, "[Image #4, 40x11]");
 			assert.equal(await draftValue(), "A [Image #1, 10x6] B [Image #2, 20x8] [Image #4, 40x11] C [Image #3, 30x9] D");
 			assert.deepEqual(await strip(), ["#1", "#2", "#3", "#4"]);
-			// Every marker is painted as a chip exactly over its text.
-			const chips = await ui.evaluate<{ box: number[]; marks: { r: number[]; bg: string; text: string }[] }>(`(()=>{
-			 const area=document.querySelector('.omp-composer textarea');const box=area.getBoundingClientRect();
-			 return{box:[box.left,box.top,box.right,box.bottom],marks:[...document.querySelectorAll('.omp-image-ref-mark')].map(mark=>{const r=mark.getBoundingClientRect();return{r:[r.left,r.top,r.right,r.bottom],bg:getComputedStyle(mark).backgroundColor,text:mark.textContent}})};})()`);
+			// Every marker is an atomic inline chip that holds its own text, labelled like its thumbnail.
+			const chips = await ui.evaluate<{ box: number[]; marks: { r: number[]; bg: string; color: string; text: string; role: string | null; label: string | null; editable: string | null }[] }>(`(()=>{
+			 const box=window.composer.el().getBoundingClientRect();
+			 return{box:[box.left,box.top,box.right,box.bottom],marks:[...document.querySelectorAll('.omp-composer-input .omp-chip')].map(mark=>{const r=mark.getBoundingClientRect();const s=getComputedStyle(mark);return{r:[r.left,r.top,r.right,r.bottom],bg:s.backgroundColor,color:s.color,text:mark.textContent,role:mark.getAttribute('role'),label:mark.getAttribute('aria-label'),editable:mark.getAttribute('contenteditable')}})};})()`);
 			assert.equal(chips.marks.length, 4);
+			assert.deepEqual(chips.marks.map(mark => mark.label), ["Image #1", "Image #2", "Image #4", "Image #3"]);
 			for (const mark of chips.marks) {
 				const [left, top, right, bottom] = mark.r as [number, number, number, number];
 				assert.ok(right - left > 20 && left >= chips.box[0]! && right <= chips.box[2]! && top >= chips.box[1]! && bottom <= chips.box[3]! && mark.bg !== "rgba(0, 0, 0, 0)", JSON.stringify({ mark, box: chips.box }));
+				assert.ok(mark.color !== "rgba(0, 0, 0, 0)" && /^\[Image #\d+, \d+x\d+\]$/.test(mark.text) && mark.role === "img" && mark.editable === "false", JSON.stringify(mark));
 			}
-			assert.equal(await ui.evaluate("getComputedStyle(document.querySelector('.omp-image-ref-mark')).color"), "rgba(0, 0, 0, 0)", "the chip layer carries no second copy of the text");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
 		// Fenced code blocks in the draft (docs/designs/2026-10-15-composer-code-blocks.md).
-		const setDraft = (text: string): Promise<unknown> => ui.evaluate(`(()=>{const a=document.querySelector('.omp-composer textarea');a.focus();a.select();document.execCommand('insertText',false,${JSON.stringify(text)})})()`);
-		const areaState = (): Promise<{ value: string; start: number; end: number; focused: boolean }> => ui.evaluate("(()=>{const a=document.querySelector('.omp-composer textarea');return{value:a.value,start:a.selectionStart,end:a.selectionEnd,focused:document.activeElement===a}})()");
+		const setDraft = (text: string): Promise<unknown> => ui.evaluate(`window.composer.setText(${JSON.stringify(text)})`);
+		const areaState = (): Promise<{ value: string; start: number; end: number; focused: boolean }> => ui.evaluate("(()=>{const s=window.composer.selection();return{value:window.composer.value(),start:s.start,end:s.end,focused:window.composer.focused()}})()");
 		const undo = (): Promise<void> => press("z", "KeyZ", 90, { modifiers: 2, commands: ["undo"] });
 		const tab = (modifiers = 0): Promise<void> => press("Tab", "Tab", 9, modifiers ? { modifiers } : {});
 		const sendCount = (): Promise<number> => ui.evaluate("window.ui.sends().length");
@@ -3349,12 +3352,12 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 
 		await t.test("inside a fenced block Enter and Tab edit like an editor and send nothing; outside it Enter sends, and Ctrl+Enter sends from inside", async () => {
 			await reset("code-block-keys");
-			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.composer.focus()");
 			await ui.call("Input.insertText", { text: "Look at the loop" });
 			await press("Enter", "Enter", 13);
 			await ui.wait("window.ui.sends().length===1");
 			await ui.evaluate("window.ui.sendReply()");
-			await ui.wait("document.querySelector('.omp-composer textarea').value===''");
+			await ui.wait("window.composer.value()===''");
 			assert.equal(await codeHint(), null, "no hint outside a block");
 			await setDraft("Look:\n```ts");
 			await press("Enter", "Enter", 13);
@@ -3388,9 +3391,9 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await tab(8);
 			assert.deepEqual(await areaState(), { value: ORIGINAL, start: 4, end: 14, focused: true });
 			await undo();
-			await ui.wait(`document.querySelector('.omp-composer textarea').value===${JSON.stringify(indented)}`);
+			await ui.wait(`window.composer.value()===${JSON.stringify(indented)}`);
 			await undo();
-			await ui.wait(`document.querySelector('.omp-composer textarea').value===${JSON.stringify(ORIGINAL)}`);
+			await ui.wait(`window.composer.value()===${JSON.stringify(ORIGINAL)}`);
 			// Tab on a fence line changes nothing and does not leave.
 			await setSelection(2, 2);
 			await tab();
@@ -3399,15 +3402,15 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await setDraft("```\n  x\n```");
 			await setSelection(7, 7);
 			await press("Enter", "Enter", 13);
-			await ui.wait("document.querySelector('.omp-composer textarea').value==='```\\n  x\\n  \\n```'");
+			await ui.wait("window.composer.value()==='```\\n  x\\n  \\n```'");
 			await undo();
-			await ui.wait("document.querySelector('.omp-composer textarea').value==='```\\n  x\\n```'");
+			await ui.wait("window.composer.value()==='```\\n  x\\n```'");
 			// So is the supplied closing fence.
 			await setDraft("```ts");
 			await press("Enter", "Enter", 13);
-			await ui.wait("document.querySelector('.omp-composer textarea').value==='```ts\\n\\n```'");
+			await ui.wait("window.composer.value()==='```ts\\n\\n```'");
 			await undo();
-			await ui.wait("document.querySelector('.omp-composer textarea').value==='```ts'");
+			await ui.wait("window.composer.value()==='```ts'");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
@@ -3431,7 +3434,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await setDraft("```\nab\n```");
 			await setSelection(6, 6);
 			const prevented = await ui.evaluate<boolean[]>(`(()=>{
-			 const area=document.querySelector('.omp-composer textarea');const out=[];
+			 const area=window.composer.el();const out=[];
 			 const key=init=>{const event=new KeyboardEvent('keydown',{bubbles:true,cancelable:true,...init});area.dispatchEvent(event);out.push(event.defaultPrevented)};
 			 key({key:'Enter',isComposing:true});key({key:'Tab',keyCode:229});
 			 area.dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}));
@@ -3446,7 +3449,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 
 		await t.test("slash and @ completions do not open or search inside a block, and still do outside it", async () => {
 			await reset("code-block-completions");
-			await ui.evaluate("window.ui.push({commands:[{name:'shake',description:'Shake'}]});document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.ui.push({commands:[{name:'shake',description:'Shake'}]});window.composer.focus()");
 			const popup = (): Promise<boolean> => ui.evaluate("Boolean(document.querySelector('[aria-label=\"Slash commands\"],[aria-label=\"Workspace files\"]'))");
 			const lookups = (): Promise<number> => ui.evaluate("window.sent.filter(message=>message.type==='omp:complete-files').length");
 			const quiet = (): Promise<unknown> => ui.evaluate("new Promise(resolve=>setTimeout(resolve,500))");
@@ -3465,38 +3468,43 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
-		await t.test("the composer's font, band and chips follow the textarea's own rows at wrap boundaries and while scrolled", async () => {
+		await t.test("only the lines of a fenced block use the editor font on a band; clicks land where the caret belongs at wrap boundaries and while scrolled", async () => {
 			await reset("code-block-layout");
 			await installImages();
 			const prose = "Why does this long first line of prose wrap in the composer when it is wider than the box? ".repeat(2).trimEnd();
 			const code = "const wrapped = computeSomethingWithAVeryLongName(argumentNumberOne, argumentNumberTwo, argumentNumberThree);";
 			const draft = `${prose}\n\`\`\`ts\n${code}\n    short();\n\`\`\`\nafter text\nmore\nmore\nmore`;
-			assert.equal(await ui.evaluate("getComputedStyle(document.querySelector('.omp-composer textarea')).fontFamily.includes('Consolas')"), false, "proportional while the draft has no fence");
+			assert.equal(await ui.evaluate("getComputedStyle(window.composer.el()).fontFamily.includes('Consolas')"), false, "proportional while the draft has no fence");
 			await setDraft(draft);
-			await ui.wait("document.querySelector('.omp-mirror-block')");
-			const faces = await ui.evaluate<{ area: string; mirror: string; scrollbar: number }>(`(()=>{
-			 const area=document.querySelector('.omp-composer textarea');
-			 return{area:getComputedStyle(area).fontFamily,mirror:getComputedStyle(document.querySelector('.omp-textarea-mirror')).fontFamily,scrollbar:area.offsetWidth-area.clientWidth}})()`);
-			assert.ok(faces.area.includes("Consolas") && faces.mirror === faces.area, JSON.stringify(faces));
+			await ui.wait("document.querySelector('.omp-line--code')");
+			const faces = await ui.evaluate<{ prose: string; fence: string; code: string; after: string; band: string; proseBand: string; codeLines: number; scrollbar: number }>(`(()=>{
+			 const field=window.composer.el(),lines=[...field.children],style=line=>getComputedStyle(line);
+			 return{prose:style(lines[0]).fontFamily,fence:style(lines[1]).fontFamily,code:style(lines[2]).fontFamily,after:style(lines[5]).fontFamily,band:style(lines[2]).backgroundColor,proseBand:style(lines[0]).backgroundColor,codeLines:field.querySelectorAll('.omp-line--code').length,scrollbar:field.offsetWidth-field.clientWidth}})()`);
+			assert.ok(faces.fence.includes("Consolas") && faces.code === faces.fence, JSON.stringify(faces));
+			assert.ok(!faces.prose.includes("Consolas") && faces.after === faces.prose, `prose stays proportional: ${JSON.stringify(faces)}`);
+			assert.ok(faces.band !== "rgba(0, 0, 0, 0)" && faces.proseBand === "rgba(0, 0, 0, 0)", JSON.stringify(faces));
+			assert.equal(faces.codeLines, 4, "the fences and the two lines between them are the block");
 			assert.ok(faces.scrollbar > 0, "the draft is tall enough to scroll, so the wrapping width includes the scrollbar gutter");
 			// Where the browser itself puts the caret for a click: the band must cover exactly the block's rows.
 			const fenceLength = "```ts\n".length;
 			const block = { start: prose.length + 1, end: draft.indexOf("\nafter text") };
 			const rowOfWrap = await ui.evaluate<number>(`(()=>{
-			 const text=document.querySelector('.omp-mirror-block').firstChild;const range=document.createRange();
+			 const text=window.composer.el().children[2].firstChild;const range=document.createRange();
 			 const topOf=index=>{range.setStart(text,index);range.setEnd(text,index+1);return range.getBoundingClientRect().top};
-			 const first=topOf(${fenceLength});
-			 for(let i=${fenceLength + 1};i<${fenceLength + code.length};i++)if(topOf(i)>first+5)return i-${fenceLength};
+			 const first=topOf(0);
+			 for(let i=1;i<${code.length};i++)if(topOf(i)>first+5)return i;
 			 return -1;})()`);
 			assert.ok(rowOfWrap > 20, "the long code line wraps inside the band");
 			const probe = async (scrollTop: number): Promise<number> => {
-				await ui.evaluate(`(()=>{const a=document.querySelector('.omp-composer textarea');a.scrollTop=${scrollTop}})()`);
+				await ui.evaluate(`(()=>{window.composer.el().scrollTop=${scrollTop}})()`);
 				await settleFrames();
-				const geometry = await ui.evaluate<{ left: number; right: number; top: number; bottom: number; band: { top: number; bottom: number }; wrapY: number }>(`(()=>{
-				 const area=document.querySelector('.omp-composer textarea');const box=area.getBoundingClientRect();const band=document.querySelector('.omp-mirror-block').getBoundingClientRect();
-				 const text=document.querySelector('.omp-mirror-block').firstChild;const range=document.createRange();const at=${fenceLength + rowOfWrap};
+				const geometry = await ui.evaluate<{ left: number; right: number; top: number; bottom: number; band: { top: number; bottom: number; left: number; right: number }; wrapY: number }>(`(()=>{
+				 const field=window.composer.el(),box=field.getBoundingClientRect(),lines=[...field.children];
+				 const first=lines[1].getBoundingClientRect(),last=lines[4].getBoundingClientRect();
+				 const text=lines[2].firstChild;const range=document.createRange();const at=${rowOfWrap};
 				 range.setStart(text,at);range.setEnd(text,at+1);const wrap=range.getBoundingClientRect();
-				 return{left:box.left,right:box.right-(area.offsetWidth-area.clientWidth),top:box.top,bottom:box.bottom,band:{top:band.top,bottom:band.bottom},wrapY:wrap.top+wrap.height/2}})()`);
+				 return{left:box.left,right:box.right-(field.offsetWidth-field.clientWidth),top:box.top,bottom:box.bottom,band:{top:first.top,bottom:last.bottom,left:first.left,right:first.right},wrapY:wrap.top+wrap.height/2}})()`);
+				assert.ok(geometry.band.left <= geometry.left + 0.5 && geometry.band.right >= geometry.right - 0.5, `the band reaches the field's edges: ${JSON.stringify(geometry)}`);
 				const visible = (y: number): boolean => y > geometry.top + 4 && y < geometry.bottom - 4;
 				const targets: [string, number, number, number][] = [
 					["the last row above the band ends at the end of the prose", geometry.band.top - 10, geometry.right - 16, block.start - 1],
@@ -3513,7 +3521,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 					assert.equal(start, expected, `${what} (scrollTop ${scrollTop}) ${JSON.stringify({ x, y, geometry, rowOfWrap, fenceLength, block })}`);
 					// The hint follows the caret: shown with the caret in the block, gone with it outside.
 					await ui.wait(`(document.querySelector('.omp-composer-hint--code')?.textContent ?? '')!=='' === ${expected >= block.start && expected <= block.end}`);
-					assert.equal(await ui.evaluate("document.querySelector('.omp-composer textarea').getBoundingClientRect().top"), geometry.top, "the hint changing its words never moves the text");
+					assert.equal(await ui.evaluate("window.composer.el().getBoundingClientRect().top"), geometry.top, "the hint changing its words never moves the text");
 					checked++;
 				}
 				return checked;
@@ -3528,14 +3536,14 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await installImages();
 			await setDraft("```\n");
 			await pasteImage(10, 6, "[Image #1, 10x6]");
-			await ui.wait("document.querySelector('.omp-mirror-block .omp-image-ref-mark')");
-			const inside = await ui.evaluate<boolean>(`(()=>{const band=document.querySelector('.omp-mirror-block').getBoundingClientRect(),mark=document.querySelector('.omp-mirror-block .omp-image-ref-mark').getBoundingClientRect();
+			await ui.wait("document.querySelector('.omp-line--code .omp-chip')");
+			const inside = await ui.evaluate<boolean>(`(()=>{const chip=document.querySelector('.omp-line--code .omp-chip'),band=chip.closest('.omp-line--code').getBoundingClientRect(),mark=chip.getBoundingClientRect();
 			 return mark.left>=band.left&&mark.right<=band.right&&mark.top>=band.top-0.5&&mark.bottom<=band.bottom+0.5})()`);
 			assert.equal(inside, true, "the chip sits inside the band");
 			assert.deepEqual(await strip(), ["#1"]);
 			await setDraft("plain");
-			await ui.wait("!document.querySelector('.omp-mirror-block') && !document.querySelector('.omp-suggest-wrapper--code')");
-			assert.equal(await ui.evaluate("getComputedStyle(document.querySelector('.omp-composer textarea')).fontFamily.includes('Consolas')"), false);
+			await ui.wait("!document.querySelector('.omp-line--code')");
+			assert.equal(await ui.evaluate("getComputedStyle(window.composer.el()).fontFamily.includes('Consolas')"), false);
 			assert.equal(await codeHint(), null);
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
@@ -3558,14 +3566,15 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
-		await t.test("adjacent blocks and a block beside an empty line add no row to the layer", async () => {
+		await t.test("adjacent blocks and a block beside an empty line add no row: one line is one row and the bands touch", async () => {
 			await reset("code-block-rows");
-			const rows = (): Promise<{ area: number; layer: number }> => ui.evaluate("(()=>{const a=document.querySelector('.omp-composer textarea'),s=getComputedStyle(a);return{area:(a.scrollHeight-parseFloat(s.paddingTop)-parseFloat(s.paddingBottom))/20,layer:document.querySelector('.omp-textarea-mirror-text').getBoundingClientRect().height/20}})()");
+			const rows = (): Promise<{ lines: number; heights: number[]; gaps: number[] }> => ui.evaluate("(()=>{const lines=[...window.composer.el().children].map(line=>line.getBoundingClientRect());return{lines:lines.length,heights:lines.map(rect=>rect.height),gaps:lines.slice(1).map((rect,index)=>rect.top-lines[index].bottom)}})()");
 			for (const draft of ["```\na\n```\n```\nb\n```", "\n```\na\n```\n\n```ts\nb\n```\n", "text\n```\n```\n```\n```\ntail"]) {
 				await setDraft(draft);
-				await ui.wait("document.querySelector('.omp-mirror-block')");
-				const { area, layer } = await rows();
-				assert.equal(layer, area, `the layer has the textarea's ${area} rows for ${JSON.stringify(draft)}`);
+				await ui.wait("document.querySelector('.omp-line--code')");
+				const { lines, heights, gaps } = await rows();
+				assert.equal(lines, draft.split("\n").length, `a line element per line of ${JSON.stringify(draft)}`);
+				assert.ok(heights.every(height => height === 20) && gaps.every(gap => gap === 0), `each row is one 20px line and the bands touch: ${JSON.stringify({ heights, gaps })}`);
 			}
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
@@ -3574,27 +3583,27 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await buildDraft("image-refs-caret");
 			const [, second] = await markers();
 			await setSelection(second!.start + 4, second!.start + 4);
-			await ui.wait(`(()=>{const a=document.querySelector('.omp-composer textarea');return a.selectionStart===a.selectionEnd&&(a.selectionStart===${second!.start}||a.selectionStart===${second!.end})})()`);
+			await ui.wait(`(()=>{const a=window.composer.selection();return a.start===a.end&&(a.start===${second!.start}||a.start===${second!.end})})()`);
 			await setSelection(second!.end, second!.end);
-			await waitDraft(`document.querySelector('.omp-composer textarea').selectionStart===${second!.end}`);
+			await waitDraft(`window.composer.selection().start===${second!.end}`);
 			await press("ArrowLeft", "ArrowLeft", 37);
-			await waitDraft(`document.querySelector('.omp-composer textarea').selectionStart===${second!.start}`);
+			await waitDraft(`window.composer.selection().start===${second!.start}`);
 			assert.deepEqual(await selection(), { start: second!.start, end: second!.start }, "one ArrowLeft crosses the whole marker");
 			await press("ArrowRight", "ArrowRight", 39);
-			await waitDraft(`document.querySelector('.omp-composer textarea').selectionStart===${second!.end}`);
+			await waitDraft(`window.composer.selection().start===${second!.end}`);
 			assert.deepEqual(await selection(), { start: second!.end, end: second!.end }, "one ArrowRight crosses it back");
 			await press("ArrowLeft", "ArrowLeft", 37, { modifiers: 8 });
-			await waitDraft(`document.querySelector('.omp-composer textarea').selectionStart===${second!.start}`);
+			await waitDraft(`window.composer.selection().start===${second!.start}`);
 			assert.deepEqual(await selection(), { start: second!.start, end: second!.end }, "Shift+Arrow selects the marker whole");
-			// A selection that starts mid-marker grows to the marker's edges.
-			await setSelection(second!.start + 3, second!.end + 2);
-			await waitDraft(`document.querySelector('.omp-composer textarea').selectionStart===${second!.start}`);
+			// A selection that starts mid-marker (a drag from inside the chip's text) grows to the marker's edges.
+			await ui.evaluate(`(()=>{const chip=document.querySelector('.omp-chip[aria-label="Image #2"]');const next=chip.nextSibling;document.getSelection().setBaseAndExtent(chip.firstChild,3,next,2)})()`);
+			await waitDraft(`window.composer.selection().start===${second!.start}`);
 			assert.deepEqual(await selection(), { start: second!.start, end: second!.end + 2 });
 			// A real click inside a marker lands on its nearest edge.
-			const inside = await ui.evaluate<{ x: number; y: number }>("(()=>{const r=document.querySelector('.omp-image-ref-mark[data-image-number=\"3\"]').getBoundingClientRect();return{x:r.left+r.width*0.85,y:r.top+r.height/2}})()");
+			const inside = await ui.evaluate<{ x: number; y: number }>("(()=>{const r=document.querySelector('.omp-chip[aria-label=\"Image #3\"]').getBoundingClientRect();return{x:r.left+r.width*0.85,y:r.top+r.height/2}})()");
 			await clickAt(inside);
 			const third = (await markers())[2]!;
-			await waitDraft(`document.querySelector('.omp-composer textarea').selectionStart===${third.end}`);
+			await waitDraft(`window.composer.selection().start===${third.end}`);
 			assert.deepEqual(await selection(), { start: third.end, end: third.end });
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
@@ -3603,35 +3612,35 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await buildDraft("image-refs-delete");
 			const [first, second] = await markers();
 			await setSelection(second!.end, second!.end);
-			await ui.wait(`document.querySelector('.omp-composer textarea').selectionStart===${second!.end}`);
+			await ui.wait(`window.composer.selection().start===${second!.end}`);
 			await press("Backspace", "Backspace", 8, { commands: ["deleteBackward"] });
 			const withoutSecond = FIRST.replace("[Image #2, 20x8]", "");
-			await ui.wait(`document.querySelector('.omp-composer textarea').value===${JSON.stringify(withoutSecond)}`);
+			await ui.wait(`window.composer.value()===${JSON.stringify(withoutSecond)}`);
 			assert.deepEqual(await strip(), ["#1", "#3"], "#3 keeps its number");
 			assert.equal(await ui.evaluate("document.querySelector('.omp-attachment[data-image-number=\"2\"]')"), null);
 			// Undo brings the marker and the attachment back together; Redo removes both again.
 			await press("z", "KeyZ", 90, { modifiers: 2, commands: ["undo"] });
-			await ui.wait(`document.querySelector('.omp-composer textarea').value===${JSON.stringify(FIRST)}`);
+			await ui.wait(`window.composer.value()===${JSON.stringify(FIRST)}`);
 			await ui.wait("document.querySelectorAll('.omp-attachment-number').length===3");
 			assert.deepEqual(await strip(), ["#1", "#2", "#3"]);
 			await press("z", "KeyZ", 90, { modifiers: 10, commands: ["redo"] });
-			await ui.wait(`document.querySelector('.omp-composer textarea').value===${JSON.stringify(withoutSecond)}`);
+			await ui.wait(`window.composer.value()===${JSON.stringify(withoutSecond)}`);
 			assert.deepEqual(await strip(), ["#1", "#3"]);
 			// The next image continues after the highest number ever issued in this draft.
 			await pasteImage(50, 12, "[Image #4, 50x12]");
 			assert.deepEqual(await strip(), ["#1", "#3", "#4"]);
 			// Forward Delete in front of the first marker.
 			await setSelection(first!.start, first!.start);
-			await ui.wait(`document.querySelector('.omp-composer textarea').selectionStart===${first!.start}`);
+			await ui.wait(`window.composer.selection().start===${first!.start}`);
 			await press("Delete", "Delete", 46, { commands: ["deleteForward"] });
-			await ui.wait("!document.querySelector('.omp-composer textarea').value.includes('[Image #1')");
+			await ui.wait("!window.composer.value().includes('[Image #1')");
 			assert.deepEqual(await strip(), ["#3", "#4"]);
 			// A word-wise delete right after a marker takes the marker whole, never a fragment of it.
 			const fourth = (await markers()).find(marker => marker.number === 4)!;
 			await setSelection(fourth.end, fourth.end);
-			await waitDraft(`document.querySelector('.omp-composer textarea').selectionStart===${fourth.end}`);
+			await waitDraft(`window.composer.selection().start===${fourth.end}`);
 			await press("Backspace", "Backspace", 8, { modifiers: 2, commands: ["deleteWordBackward"] });
-			await waitDraft("!document.querySelector('.omp-composer textarea').value.includes('[Image #4')");
+			await waitDraft("!window.composer.value().includes('[Image #4')");
 			assert.deepEqual(await strip(), ["#3"]);
 			assert.doesNotMatch(await draftValue(), /Image #4|50x12/);
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
@@ -3641,18 +3650,18 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await buildDraft("image-refs-selection");
 			const [first, second] = await markers();
 			await setSelection(first!.end + 1, second!.start + 5);
-			await ui.wait(`document.querySelector('.omp-composer textarea').selectionEnd===${second!.end}`);
+			await ui.wait(`window.composer.selection().end===${second!.end}`);
 			await press("Backspace", "Backspace", 8, { commands: ["deleteBackward"] });
-			await ui.wait("!document.querySelector('.omp-composer textarea').value.includes('[Image #2')");
+			await ui.wait("!window.composer.value().includes('[Image #2')");
 			assert.equal(await draftValue(), "A [Image #1, 10x6] " + " C [Image #3, 30x9] D");
 			assert.deepEqual(await strip(), ["#1", "#3"]);
 			// The thumbnail's × removes its marker from the text.
 			await ui.evaluate("document.querySelector('.omp-attachment[data-image-number=\"1\"] .omp-attachment-remove').click()");
-			await ui.wait("!document.querySelector('.omp-composer textarea').value.includes('[Image #1')");
+			await ui.wait("!window.composer.value().includes('[Image #1')");
 			assert.deepEqual(await strip(), ["#3"]);
 			assert.equal(await draftValue(), "A   C [Image #3, 30x9] D");
 			await press("z", "KeyZ", 90, { modifiers: 2, commands: ["undo"] });
-			await ui.wait("document.querySelector('.omp-composer textarea').value.includes('[Image #1')");
+			await ui.wait("window.composer.value().includes('[Image #1')");
 			assert.deepEqual(await strip(), ["#1", "#3"], "Undo of the × restores marker and attachment together");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
@@ -3662,8 +3671,8 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate(`(()=>{
 			 window.pasteBytes=(size,name)=>{const bytes=new Uint8Array(size);bytes.set([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a]);
 			  const data=new DataTransfer();data.items.add(new File([bytes],name,{type:'image/png'}));
-			  const area=document.querySelector('.omp-composer textarea');area.focus();
-			  area.dispatchEvent(new ClipboardEvent('paste',{clipboardData:data,bubbles:true,cancelable:true}));};
+			  window.composer.focus();
+			  window.composer.el().dispatchEvent(new ClipboardEvent('paste',{clipboardData:data,bubbles:true,cancelable:true}));};
 			})()`);
 			const MiB = 1024 * 1024;
 			await ui.evaluate(`window.pasteBytes(${4 * MiB},'screenshot-4mb.png')`);
@@ -3679,7 +3688,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.wait("document.querySelector('.omp-attach-error')?.textContent.includes('third.png')");
 			assert.match(await ui.evaluate<string>("document.querySelector('.omp-attach-error').textContent"), /12\.0 MB of images; the limit is 10\.0 MB per prompt/);
 			assert.deepEqual(await strip(), ["#1", "#2"]);
-			await ui.evaluate("window.ui.admission(true);document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.ui.admission(true);window.composer.focus()");
 			await ui.call("Input.insertText", { text: "look" });
 			await ui.evaluate("document.querySelector('button[aria-keyshortcuts=\"Enter\"]').click()");
 			await ui.wait("window.ui.sends().length===1");
@@ -3688,30 +3697,30 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
-		const dropOn = (selector: string, type: string, items: string): Promise<{ prevented: boolean }> =>
+		const dropOn = (target: string, type: string, items: string): Promise<{ prevented: boolean }> =>
 			ui.evaluate(`(()=>{const data=new DataTransfer();${items};
 			 const event=new DragEvent(${JSON.stringify(type)},{dataTransfer:data,bubbles:true,cancelable:true});
-			 document.querySelector(${JSON.stringify(selector)}).dispatchEvent(event);return {prevented:event.defaultPrevented};})()`);
+			 ${target}.dispatchEvent(event);return {prevented:event.defaultPrevented};})()`);
 		const dropFile = "data.items.add(new File([new Uint8Array([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,1,2,3])],'dropped.png',{type:'image/png'}))";
 
 		await t.test("dropping image files on the composer attaches them, and the drop target shows while a droppable drag is over it", async () => {
 			await reset("drop-files");
 			// What the VS Code shell script does: it listens on the window and, told of a file drag, has the workbench block this page.
 			await ui.evaluate("window.shellSaw=[];for(const type of ['dragenter','dragover','drop'])window.addEventListener(type,event=>window.shellSaw.push(type))");
-			assert.equal((await dropOn(".omp-composer textarea", "dragover", dropFile)).prevented, true, "a file drag is accepted over the textarea");
+			assert.equal((await dropOn("window.composer.el()", "dragover", dropFile)).prevented, true, "a file drag is accepted over the field");
 			await ui.wait("document.querySelector('.omp-composer--dropping')");
 			await ui.evaluate("document.querySelector('.omp-composer').dispatchEvent(new DragEvent('dragleave',{bubbles:true,relatedTarget:null}))");
 			await ui.wait("!document.querySelector('.omp-composer--dropping')");
-			assert.equal((await dropOn(".omp-composer-toolbar", "drop", dropFile)).prevented, true, "a drop on the composer card is taken");
+			assert.equal((await dropOn("document.querySelector('.omp-composer-toolbar')", "drop", dropFile)).prevented, true, "a drop on the composer card is taken");
 			await ui.wait("document.querySelectorAll('.omp-attachment-number').length===1");
-			assert.equal((await dropOn(".omp-transcript", "drop", dropFile)).prevented, true, "a drop anywhere on the Chat page attaches to the composer");
+			assert.equal((await dropOn("document.querySelector('.omp-transcript')", "drop", dropFile)).prevented, true, "a drop anywhere on the Chat page attaches to the composer");
 			await ui.wait("document.querySelectorAll('.omp-attachment-number').length===2");
 			assert.equal(await ui.evaluate("document.querySelector('.omp-composer--dropping')"), null);
 			// Text and links stay with the browser.
 			assert.deepEqual(await ui.evaluate("window.shellSaw"), [], "the shell script is never told of a drag the composer takes");
-			assert.equal((await dropOn(".omp-composer textarea", "dragover", "data.setData('text/plain','just text')")).prevented, false);
+			assert.equal((await dropOn("window.composer.el()", "dragover", "data.setData('text/plain','just text')")).prevented, false);
 			assert.deepEqual(await ui.evaluate("window.shellSaw"), ["dragover"], "a drag the composer leaves alone still reaches it");
-			assert.equal((await dropOn(".omp-composer textarea", "drop", "data.setData('text/uri-list','https://example.com/a.png')")).prevented, false, "a web link is not a file");
+			assert.equal((await dropOn("window.composer.el()", "drop", "data.setData('text/uri-list','https://example.com/a.png')")).prevented, false, "a web link is not a file");
 			assert.equal(await ui.evaluate("window.sent.filter(message=>message.type==='omp:attach-uris').length"), 0);
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
@@ -3720,8 +3729,8 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await reset("drop-uris");
 			const tinyPng = "iVBORw0KGgoBAgM=";
 			const uris = "file:///c%3A/repo/shot.png\\r\\nfile:///c%3A/repo/notes.txt\\r\\nhttps://example.com/x.png";
-			assert.equal((await dropOn(".omp-composer textarea", "dragover", "data.setData('application/vnd.code.uri-list','file:///c%3A/repo/shot.png')")).prevented, true, "an Explorer drag is accepted by its type");
-			assert.equal((await dropOn(".omp-composer textarea", "drop", `data.setData('application/vnd.code.uri-list','${uris}')`)).prevented, true);
+			assert.equal((await dropOn("window.composer.el()", "dragover", "data.setData('application/vnd.code.uri-list','file:///c%3A/repo/shot.png')")).prevented, true, "an Explorer drag is accepted by its type");
+			assert.equal((await dropOn("window.composer.el()", "drop", `data.setData('application/vnd.code.uri-list','${uris}')`)).prevented, true);
 			await ui.wait("window.sent.some(message=>message.type==='omp:attach-uris')");
 			const request = await ui.evaluate<{ requestId: number; uris: string[] }>("window.sent.find(message=>message.type==='omp:attach-uris')");
 			assert.deepEqual(request.uris, ["file:///c%3A/repo/shot.png", "file:///c%3A/repo/notes.txt"], "only file: URIs are asked for");
@@ -3746,7 +3755,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.equal(await ui.evaluate("window.ui.sends().length"), 1, "neither duplicate actions nor unrelated receipts settle the send");
 			assert.equal(await draftValue(), FIRST);
 			await ui.evaluate("window.ui.sendReply()");
-			await ui.wait("document.querySelector('.omp-composer textarea').value==='' && !document.querySelector('.omp-composer-hint[role=\"status\"]')");
+			await ui.wait("window.composer.value()==='' && !document.querySelector('.omp-composer-hint[role=\"status\"]')");
 			assert.deepEqual(await strip(), []);
 			assert.equal(await ui.evaluate("window.ui.sends().length"), 1);
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
@@ -3754,12 +3763,12 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 
 		await t.test("late accepted steering retains newer edits and leaves Stop usable during admission", async () => {
 			await reset("steer-admission-edited");
-			await ui.evaluate("window.ui.admission(false);window.ui.push({working:true,settled:false,state:{...window.ui.current().state,isStreaming:true}});document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.ui.admission(false);window.ui.push({working:true,settled:false,state:{...window.ui.current().state,isStreaming:true}});window.composer.focus()");
 			await ui.call("Input.insertText", { text: "Original steering" });
 			await ui.evaluate("document.querySelector('button[aria-keyshortcuts=\"Enter\"]').click()");
 			await ui.wait("window.ui.sends().length===1 && document.querySelector('button[aria-keyshortcuts=\"Enter\"]').disabled");
 			assert.equal(await ui.evaluate("window.ui.sends()[0].type"), "omp:chat-steer");
-			await ui.evaluate("document.querySelector('[aria-label=\"Stop the running turn\"]').click();document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("document.querySelector('[aria-label=\"Stop the running turn\"]').click();window.composer.focus()");
 			await ui.call("Input.insertText", { text: " plus newer work" });
 			await ui.evaluate("window.ui.sendReply()");
 			await ui.wait("!document.querySelector('button[aria-keyshortcuts=\"Enter\"]').disabled");
@@ -3783,7 +3792,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.equal(await ui.evaluate("document.querySelectorAll('[aria-label=\"Dismiss recoverable message\"]').length"), 1, "the notice survives time and reconciliation");
 			assert.equal(await ui.evaluate("window.ui.sends().length"), 1, "uncertain delivery is never retried automatically");
 			await ui.evaluate("[...document.querySelectorAll('.omp-attach-error button')].find(button=>button.textContent==='Add to draft').click()");
-			await ui.wait("document.querySelector('.omp-composer textarea').value.includes('A [Image #4, 10x6]')");
+			await ui.wait("window.composer.value().includes('A [Image #4, 10x6]')");
 			assert.equal(await draftValue(), "New draft\n\nA [Image #4, 10x6] B [Image #5, 20x8] C [Image #6, 30x9] D");
 			assert.deepEqual(await strip(), ["#4", "#5", "#6"]);
 			await ui.evaluate("document.querySelector('[aria-label=\"Dismiss recoverable message\"]').click()");
@@ -3794,7 +3803,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 
 		await t.test("a refused edited send retains the original while an unchanged uncertain draft is not duplicated by recovery", async () => {
 			await reset("send-admission-refused");
-			await ui.evaluate("window.ui.admission(false);document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.ui.admission(false);window.composer.focus()");
 			await ui.call("Input.insertText", { text: "Refused original" });
 			await ui.evaluate("document.querySelector('button[aria-keyshortcuts=\"Enter\"]').click()");
 			await setSelection(0, "Refused original".length);
@@ -3804,13 +3813,13 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.equal(await draftValue(), "New work");
 			assert.equal(await ui.evaluate("document.querySelector('.omp-attach-error details pre').textContent"), "Refused original");
 			await reset("send-admission-held");
-			await ui.evaluate("window.ui.admission(false);document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.ui.admission(false);window.composer.focus()");
 			await ui.call("Input.insertText", { text: "Still held" });
 			await ui.evaluate("document.querySelector('button[aria-keyshortcuts=\"Enter\"]').click();window.ui.sendReply(undefined,'unconfirmed','Delivery unknown')");
 			await ui.wait("document.querySelector('[aria-label=\"Dismiss recoverable message\"]')");
 			await ui.evaluate("[...document.querySelectorAll('.omp-attach-error button')].find(button=>button.textContent==='Add to draft').click()");
 			assert.equal(await draftValue(), "Still held");
-			assert.equal(await ui.evaluate("document.activeElement===document.querySelector('.omp-composer textarea')"), true);
+			assert.equal(await ui.evaluate("window.composer.focused()"), true);
 			assert.equal(await ui.evaluate("window.ui.sends().length"), 1);
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
@@ -3827,7 +3836,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await setSelection(0, "Second input".length);
 			await ui.call("Input.insertText", { text: "Latest draft" });
 			await ui.evaluate("window.ui.receive({type:'omp:draft-request',requestId:700})");
-			await ui.wait("window.sent.some(message=>message.type==='omp:draft-reply'&&message.requestId===700)&&document.querySelector('.omp-composer textarea').readOnly");
+			await ui.wait("window.sent.some(message=>message.type==='omp:draft-reply'&&message.requestId===700)&&window.composer.readOnly()");
 			const captured = await ui.evaluate<{ captured: boolean; text: string; attachments: number; recoverable: { text: string; attachments: number; unconfirmed: boolean }[] }>("window.sent.find(message=>message.type==='omp:draft-reply'&&message.requestId===700)");
 			assert.equal(captured.captured, true);
 			assert.equal(captured.text, "Latest draft");
@@ -3836,9 +3845,9 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.call("Input.insertText", { text: "must not mutate" });
 			await ui.evaluate("window.ui.receive({type:'omp:insert-text',text:'@source.ts'});window.ui.sendReply();window.ui.receive({type:'omp:draft-release',requestId:701})");
 			assert.equal(await draftValue(), "Latest draft");
-			assert.equal(await ui.evaluate("document.querySelector('.omp-composer textarea').readOnly"), true);
+			assert.equal(await ui.evaluate("window.composer.readOnly()"), true);
 			await ui.evaluate("window.ui.receive({type:'omp:draft-release',requestId:700})");
-			await ui.wait("!document.querySelector('.omp-composer textarea').readOnly&&document.querySelector('.omp-composer textarea').value.includes('@source.ts')");
+			await ui.wait("!window.composer.readOnly()&&window.composer.value().includes('@source.ts')");
 			assert.ok((await draftValue()).includes("Latest draft"), "a late accepted admission cannot erase deferred new input");
 			assert.equal(await ui.evaluate("window.ui.sends().length"), 2);
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
@@ -3847,23 +3856,23 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 		await t.test("capture refuses incomplete IME and image reads and pauses native prefilling until release", async () => {
 			await reset("capture-incomplete");
 			await installImages();
-			await ui.evaluate("document.querySelector('.omp-composer textarea').dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}));window.ui.receive({type:'omp:draft-request',requestId:710})");
+			await ui.evaluate("window.composer.el().dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}));window.ui.receive({type:'omp:draft-request',requestId:710})");
 			assert.equal(await ui.evaluate("window.sent.find(message=>message.type==='omp:draft-reply'&&message.requestId===710).captured"), false);
-			await ui.evaluate("document.querySelector('.omp-composer textarea').dispatchEvent(new CompositionEvent('compositionend',{bubbles:true}))");
+			await ui.evaluate("window.composer.el().dispatchEvent(new CompositionEvent('compositionend',{bubbles:true}))");
 			await ui.evaluate(`(async()=>{
 			 const blob=await window.makePng(9,9),data=new DataTransfer();data.items.add(new File([blob],'capture.png',{type:'image/png'}));
-			 document.querySelector('.omp-composer textarea').dispatchEvent(new ClipboardEvent('paste',{clipboardData:data,bubbles:true,cancelable:true}));
+			 window.composer.el().dispatchEvent(new ClipboardEvent('paste',{clipboardData:data,bubbles:true,cancelable:true}));
 			 window.ui.receive({type:'omp:draft-request',requestId:711});
 			})()`);
 			assert.equal(await ui.evaluate("window.sent.find(message=>message.type==='omp:draft-reply'&&message.requestId===711).captured"), false);
 			await ui.wait("document.querySelector('.omp-attachment-number')");
 			await ui.evaluate("window.ui.receive({type:'omp:draft-request',requestId:712})");
-			await ui.wait("document.querySelector('.omp-composer textarea').readOnly");
+			await ui.wait("window.composer.readOnly()");
 			const original = await draftValue();
 			await ui.evaluate("window.ui.receive({type:'omp:chat-event',epoch:window.ui.current().epoch,frame:{type:'ui_editor_text',text:'Native prefill'}})");
 			assert.equal(await draftValue(), original);
 			await ui.evaluate("window.ui.receive({type:'omp:draft-release',requestId:712})");
-			await ui.wait("document.querySelector('.omp-composer textarea').value==='Native prefill'");
+			await ui.wait("window.composer.value()==='Native prefill'");
 			assert.equal(await ui.evaluate("window.ui.sends().length"), 0);
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
@@ -3879,7 +3888,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.equal(await draftValue(), restored.text);
 			assert.deepEqual(await ui.evaluate("[...document.querySelectorAll('.omp-attach-error details pre')].map(node=>node.textContent)"), restored.recoverable.map(record => record.text));
 			await installImages();
-			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.composer.focus()");
 			await pasteImage(9, 9, "[Image #10, 9x9]");
 			const edited = await draftValue();
 			await ui.evaluate(`window.ui.receive(${JSON.stringify(restored)})`);
@@ -3896,7 +3905,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.wait("window.ui.sends().length===1");
 			await ui.evaluate("document.querySelector('.omp-attachment[data-image-number=\"2\"] .omp-attachment-remove').click()");
 			await press("z", "KeyZ", 90, { modifiers: 2, commands: ["undo"] });
-			await ui.wait(`document.querySelector('.omp-composer textarea').value===${JSON.stringify(FIRST)}`);
+			await ui.wait(`window.composer.value()===${JSON.stringify(FIRST)}`);
 			await ui.evaluate("window.ui.sendReply()");
 			await ui.wait("!document.querySelector('button[aria-keyshortcuts=\"Enter\"]').disabled");
 			assert.equal(await draftValue(), FIRST);
@@ -3908,9 +3917,9 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await buildDraft("image-refs-send");
 			const [, second] = await markers();
 			await setSelection(second!.end, second!.end);
-			await ui.wait(`document.querySelector('.omp-composer textarea').selectionStart===${second!.end}`);
+			await ui.wait(`window.composer.selection().start===${second!.end}`);
 			await press("Backspace", "Backspace", 8, { commands: ["deleteBackward"] });
-			await ui.wait("!document.querySelector('.omp-composer textarea').value.includes('[Image #2')");
+			await ui.wait("!window.composer.value().includes('[Image #2')");
 			await ui.evaluate("document.querySelector('button[aria-keyshortcuts=\"Enter\"]').click()");
 			await ui.wait("window.sent.some(message=>message.type==='omp:chat-prompt')");
 			const sent = await ui.evaluate<{ text: string; images: { type: string; mimeType: string; data: string }[] }>("window.sent.find(message=>message.type==='omp:chat-prompt')");
@@ -3918,7 +3927,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			const pasted = await ui.evaluate<string[]>("window.pasted");
 			assert.deepEqual(sent.images.map(image => image.data), [pasted[0], pasted[2]], "image K is the image behind marker K");
 			assert.ok(sent.images.every(image => image.type === "image" && image.mimeType === "image/png"));
-			await ui.wait("document.querySelector('.omp-composer textarea').value===''");
+			await ui.wait("window.composer.value()===''");
 			assert.deepEqual(await strip(), []);
 			await installImages();
 			await pasteImage(7, 5, "[Image #1, 7x5]");
@@ -3929,18 +3938,291 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 		await t.test("an image arriving during an IME composition waits for it: the composition is never interrupted", async () => {
 			await reset("image-refs-ime");
 			await installImages();
-			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.composer.focus()");
 			await ui.call("Input.insertText", { text: "かな" });
-			await ui.evaluate("document.querySelector('.omp-composer textarea').dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}))");
+			await ui.evaluate("window.composer.el().dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}))");
 			await ui.evaluate("window.pasteImage(9,9)");
 			await ui.wait("window.pasted.length===1 && !document.querySelector('.omp-composer-attach .codicon-loading')");
 			await settleFrames();
 			assert.equal(await draftValue(), "かな", "nothing is inserted while composing");
-			await ui.evaluate("document.querySelector('.omp-composer textarea').dispatchEvent(new CompositionEvent('compositionend',{bubbles:true}))");
-			await ui.wait("document.querySelector('.omp-composer textarea').value.includes('[Image #1, 9x9]')");
+			await ui.evaluate("window.composer.el().dispatchEvent(new CompositionEvent('compositionend',{bubbles:true}))");
+			await ui.wait("window.composer.value().includes('[Image #1, 9x9]')");
 			assert.equal(await draftValue(), "かな [Image #1, 9x9] ");
 			assert.deepEqual(await strip(), ["#1"]);
 			assert.equal(await ui.evaluate("window.sent.filter(message=>message.type==='omp:chat-prompt').length"), 0);
+		});
+
+		// The editing surface (docs/designs/2026-10-15-composer-contenteditable-surface.md): the page's own undo stack, plain-text
+		// clipboard, caret mapping, retained selection, composition window and freeze.
+		const typeKey = (character: string): Promise<void> => press(character, `Key${character.toUpperCase()}`, character.toUpperCase().charCodeAt(0), { text: character });
+		const ctrlKey = (key: string, code: string, keyCode: number, modifiers = 2): Promise<void> => press(key, code, keyCode, { modifiers });
+		const ctrlZ = (): Promise<void> => ctrlKey("z", "KeyZ", 90);
+		const ctrlY = (): Promise<void> => ctrlKey("y", "KeyY", 89);
+		const ctrlShiftZ = (): Promise<void> => ctrlKey("z", "KeyZ", 90, 10);
+		const dispatchClipboard = (type: "paste" | "copy" | "cut", plain: string, html = ""): Promise<{ prevented: boolean; copied: string }> => ui.evaluate(`(()=>{
+		 const data=new DataTransfer();${type === "paste" ? `data.setData('text/plain',${JSON.stringify(plain)});${html === "" ? "" : `data.setData('text/html',${JSON.stringify(html)});`}` : ""}
+		 const event=new ClipboardEvent(${JSON.stringify(type)},{clipboardData:data,bubbles:true,cancelable:true});
+		 window.composer.el().dispatchEvent(event);return{prevented:event.defaultPrevented,copied:data.getData('text/plain')}})()`);
+
+		await t.test("Ctrl+Z, Ctrl+Y and Ctrl+Shift+Z drive the page's own undo stack: a typing run is one step, a newline and an insertion stand alone, and Edit > Undo is inert", async () => {
+			await reset("surface-undo");
+			await ui.evaluate("window.composer.focus()");
+			for (const character of "abc") await typeKey(character);
+			await ui.wait("window.composer.value()==='abc'");
+			await ui.call("Input.insertText", { text: "\n" });
+			await ui.call("Input.insertText", { text: "def" });
+			await ui.wait("window.composer.value()==='abc\\ndef'");
+			await ctrlZ();
+			await ui.wait("window.composer.value()==='abc\\n'");
+			await ctrlZ();
+			await ui.wait("window.composer.value()==='abc'");
+			await ctrlZ();
+			await ui.wait("window.composer.value()===''");
+			assert.deepEqual(await selection(), { start: 0, end: 0 }, "the caret is where it was before the step");
+			await ctrlZ();
+			assert.equal(await draftValue(), "", "nothing is left to undo");
+			await ctrlY();
+			await ui.wait("window.composer.value()==='abc'");
+			await ctrlShiftZ();
+			await ui.wait("window.composer.value()==='abc\\n'");
+			await ctrlY();
+			await ui.wait("window.composer.value()==='abc\\ndef'");
+			assert.deepEqual(await selection(), { start: 7, end: 7 });
+			// A new edit drops what could be redone.
+			await ctrlZ();
+			await ui.wait("window.composer.value()==='abc\\n'");
+			await ui.call("Input.insertText", { text: "xyz" });
+			await ctrlY();
+			assert.equal(await draftValue(), "abc\nxyz", "typing after an undo clears the redo stack");
+			// The workbench's Edit > Undo is a native command the page does not take part in.
+			assert.equal(await ui.evaluate("document.execCommand('undo')"), false);
+			await settleFrames();
+			assert.equal(await draftValue(), "abc\nxyz");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("a send starts a fresh undo stack, while history recall and an accepted completion are one undoable step", async () => {
+			await reset("surface-writes");
+			await ui.evaluate(`const row=(id,message)=>({type:'message',id,parentId:null,timestamp:'2026-10-01T00:00:00.000Z',message});
+			 window.ui.push({commands:[{name:'shake',description:'Shake'},{name:'shape',description:'Shape'}],entries:[row('u1',{role:'user',timestamp:1,content:'first prompt'}),row('a1',{role:'assistant',model:'m',timestamp:2,stopReason:'stop',content:[{type:'text',text:'ok'}]})],durableCount:2,working:false,settled:true});
+			 window.composer.focus()`);
+			await ui.wait("document.querySelector('.omp-transcript').textContent.includes('first prompt')");
+			await press("ArrowUp", "ArrowUp", 38);
+			await ui.wait("window.composer.value()==='first prompt'");
+			await ctrlZ();
+			await ui.wait("window.composer.value()===''");
+			await ctrlY();
+			await ui.wait("window.composer.value()==='first prompt'");
+			// An accepted completion is one step: undo puts the typed text back.
+			await setDraft("/sha");
+			await ui.wait("document.querySelector('[aria-label=\"Slash commands\"]')");
+			await press("Tab", "Tab", 9);
+			await ui.wait("window.composer.value()==='/shake '");
+			await ctrlZ();
+			await ui.wait("window.composer.value()==='/sha'");
+			// A send clears the draft for good: nothing of it can be brought back.
+			await setDraft("kept for the send");
+			await press("Enter", "Enter", 13);
+			await ui.wait("window.ui.sends().length===1");
+			await ui.evaluate("window.ui.sendReply()");
+			await ui.wait("window.composer.value()===''");
+			await ctrlZ();
+			await settleFrames();
+			assert.equal(await draftValue(), "", "the sent draft is not restorable");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("paste inserts only the plain text with normalised line endings, copy and cut write the draft's own text, and cut is one undo step", async () => {
+			await reset("surface-clipboard");
+			await installImages();
+			await ui.evaluate("window.composer.focus()");
+			const pasted = await dispatchClipboard("paste", "a\r\nb\rc", "<b>bold</b> <i>more</i>");
+			assert.equal(pasted.prevented, true);
+			await ui.wait("window.composer.value()==='a\\nb\\nc'");
+			assert.equal(await ui.evaluate("window.composer.el().querySelector('b,i,br:not(:only-child)')"), null, "no formatting and no stray node came from the HTML");
+			assert.equal(await ui.evaluate("window.composer.el().children.length"), 3);
+			await ctrlZ();
+			await ui.wait("window.composer.value()===''");
+			// A real paste (the workbench's Edit > Paste and Ctrl+V reach the page this way) takes the text too.
+			await ui.evaluate("(()=>{const source=document.createElement('textarea');source.value='from the clipboard';document.body.append(source);source.select();const copied=document.execCommand('copy');source.remove();window.composer.focus();return copied;})()");
+			await ui.call("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "v", code: "KeyV", windowsVirtualKeyCode: 86, modifiers: 2, commands: ["paste"] });
+			await ui.call("Input.dispatchKeyEvent", { type: "keyUp", key: "v", code: "KeyV", windowsVirtualKeyCode: 86, modifiers: 2 });
+			await ui.wait("window.composer.value()==='from the clipboard'");
+			await setDraft("one\ntwo");
+			await setSelection(1, 6);
+			await ui.wait("window.composer.selection().start===1 && window.composer.selection().end===6");
+			const copied = await dispatchClipboard("copy", "");
+			assert.deepEqual(copied, { prevented: true, copied: "ne\ntw" });
+			assert.equal(await draftValue(), "one\ntwo", "copy changes nothing");
+			const cut = await dispatchClipboard("cut", "");
+			assert.deepEqual(cut, { prevented: true, copied: "ne\ntw" });
+			await ui.wait("window.composer.value()==='oo'");
+			await ctrlZ();
+			await ui.wait("window.composer.value()==='one\\ntwo'");
+			assert.deepEqual(await selection(), { start: 1, end: 6 }, "undoing the cut selects what it removed");
+			// A selection across chips copies the markers as the literal text the model holds.
+			await buildDraft("surface-clipboard-chips");
+			await ui.evaluate("window.composer.selectAll()");
+			await ui.wait(`window.composer.selection().end===${FIRST.length}`);
+			assert.deepEqual(await dispatchClipboard("copy", ""), { prevented: true, copied: FIRST });
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("plain text dropped on the field lands at the pointer, and a single-line insertText or a multi-line one keeps one line element per line", async () => {
+			await reset("surface-drop");
+			await setDraft("hello world");
+			const point = await ui.evaluate<{ x: number; y: number }>("(()=>{const text=window.composer.el().children[0].firstChild;const range=document.createRange();range.setStart(text,5);range.setEnd(text,6);const box=range.getBoundingClientRect();return{x:box.left+1,y:box.top+box.height/2}})()");
+			const dropped = await ui.evaluate<boolean>(`(()=>{const data=new DataTransfer();data.setData('text/plain','XYZ');
+			 const event=new DragEvent('drop',{dataTransfer:data,clientX:${point.x},clientY:${point.y},bubbles:true,cancelable:true});window.composer.el().dispatchEvent(event);return event.defaultPrevented})()`);
+			assert.equal(dropped, true);
+			await ui.wait("window.composer.value()==='helloXYZ world'");
+			await ctrlZ();
+			await ui.wait("window.composer.value()==='hello world'");
+			await ui.evaluate("window.composer.select(11)");
+			await ui.call("Input.insertText", { text: "\nsecond\nthird" });
+			await ui.wait("window.composer.value()==='hello world\\nsecond\\nthird'");
+			assert.equal(await ui.evaluate("window.composer.el().children.length"), 3, "a line element per line");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("every offset of a draft with chips, blocks and empty lines maps to the DOM and back to itself", async () => {
+			await buildDraft("surface-round-trip");
+			await setDraft("A [Image #1, 10x6][Image #2, 20x8] B\n[Image #3, 30x9]\n\n```\ncode [Image #1, 10x6]\n\n```\n[Image #2, 20x8]\nlast ");
+			await ui.wait("document.querySelectorAll('.omp-composer-input .omp-chip').length===5");
+			assert.deepEqual(await ui.evaluate("window.composer.roundTrip()"), []);
+			assert.equal(await ui.evaluate("document.querySelectorAll('.omp-line--code .omp-chip').length"), 1, "the chip in the block's line");
+			// A selection from one line to another maps to a range that includes the line break between them.
+			await ui.evaluate("(()=>{const field=window.composer.el();document.getSelection().setBaseAndExtent(field.children[0].firstChild,2,field.children[1].lastChild,0)})()");
+			await waitDraft("window.composer.selection().end>window.composer.selection().start");
+			const across = await ui.evaluate<{ start: number; end: number }>("(()=>{const {start,end}=window.composer.selection();return{start,end}})()");
+			assert.equal(across.start, 2);
+			assert.ok(across.end > "A [Image #1, 10x6][Image #2, 20x8] B\n".length - 1);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("the field is a labelled multiline textbox whose open completion list is announced through aria-controls, aria-activedescendant and a status", async () => {
+			await reset("surface-aria");
+			await ui.evaluate("window.ui.push({commands:[{name:'shake',description:'Shake'},{name:'shape',description:'Shape'}]})");
+			const attributes = (): Promise<Record<string, string | null>> => ui.evaluate(`(()=>{const field=window.composer.el();const names=['role','aria-multiline','aria-label','aria-autocomplete','aria-haspopup','aria-controls','aria-activedescendant','aria-describedby','aria-disabled','aria-readonly','contenteditable','spellcheck','autocapitalize'];
+			 return Object.fromEntries(names.map(name=>[name,field.getAttribute(name)]))})()`);
+			assert.deepEqual(await attributes(), { role: "textbox", "aria-multiline": "true", "aria-label": "Message OMP", "aria-autocomplete": "list", "aria-haspopup": "listbox", "aria-controls": null, "aria-activedescendant": null, "aria-describedby": null, "aria-disabled": null, "aria-readonly": null, contenteditable: "true", spellcheck: "false", autocapitalize: "off" });
+			await ui.evaluate("window.composer.focus()");
+			await setDraft("/sha");
+			await ui.wait("document.querySelector('[aria-label=\"Slash commands\"]')");
+			const list = await ui.evaluate<string>("document.querySelector('[aria-label=\"Slash commands\"]').id");
+			const open = await attributes();
+			assert.equal(open["aria-controls"], list);
+			assert.equal(open["aria-activedescendant"], `${list}-0`);
+			await ui.wait("document.querySelector('.omp-suggest-wrapper [role=status]').textContent==='2 suggestions'");
+			await press("Escape", "Escape", 27);
+			await ui.wait("!document.querySelector('[aria-label=\"Slash commands\"]')");
+			assert.equal((await attributes())["aria-controls"], null, "no list, no aria-controls");
+			await ui.evaluate("window.ui.push({phase:'resyncing'})");
+			await ui.wait("window.composer.disabled()");
+			assert.equal((await attributes()).contenteditable, "false", "a field that cannot take a prompt is not editable");
+			await ui.evaluate("window.ui.push({phase:'live'})");
+			await ui.wait("!window.composer.disabled()");
+			assert.equal((await attributes()).contenteditable, "true");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("the selection is kept while the field has none, and focusing it puts it back instead of at the start", async () => {
+			await reset("surface-retained-selection");
+			// Earlier tests leave the page unfocused, where a focus() fires no focus event; a real window is focused.
+			await ui.call("Emulation.setFocusEmulationEnabled", { enabled: true });
+			try {
+				await setDraft("hello world");
+				await ui.evaluate("window.composer.select(2,5)");
+				await waitDraft("window.composer.selection().start===2 && window.composer.selection().end===5");
+				await ui.evaluate("(()=>{window.composer.blur();getSelection().removeAllRanges()})()");
+				await settleFrames();
+				await ui.evaluate("window.composer.focus()");
+				await waitDraft("window.composer.selection().start===2 && window.composer.selection().end===5");
+				assert.deepEqual(await selection(), { start: 2, end: 5 });
+			} finally {
+				await ui.call("Emulation.setFocusEmulationEnabled", { enabled: false });
+			}
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("a composition read back from the browser's own edits is one undo step, and nothing is lost to a send awaiting confirmation", async () => {
+			await reset("surface-ime-real");
+			await ui.evaluate("window.composer.focus()");
+			await ui.call("Input.insertText", { text: "ab" });
+			await ui.wait("window.composer.value()==='ab'");
+			await ui.call("Input.imeSetComposition", { text: "か", selectionStart: 1, selectionEnd: 1 });
+			await ui.wait("window.composer.value()==='abか'");
+			await ui.call("Input.insertText", { text: "か" });
+			await ui.wait("document.querySelector('button[aria-keyshortcuts=\"Enter\"]') && window.composer.value()==='abか'");
+			await settleFrames();
+			await ctrlZ();
+			await ui.wait("window.composer.value()==='ab'");
+			await ctrlZ();
+			await ui.wait("window.composer.value()===''");
+			// A send waiting for OMP's confirmation never erases what is composed meanwhile.
+			await reset("surface-send-then-compose");
+			await ui.evaluate("window.ui.admission(false);window.composer.focus()");
+			await ui.call("Input.insertText", { text: "hello" });
+			await press("Enter", "Enter", 13);
+			await ui.wait("window.ui.sends().length===1");
+			await ui.evaluate("(()=>{const field=window.composer.el();field.dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}));field.children[0].firstChild.data+='かな'})()");
+			await ui.evaluate("window.ui.sendReply()");
+			await ui.wait("!document.querySelector('button[aria-keyshortcuts=\"Enter\"]').disabled");
+			await ui.evaluate("window.composer.el().dispatchEvent(new CompositionEvent('compositionend',{bubbles:true,data:'かな'}))");
+			await ui.wait("window.composer.value()==='helloかな'");
+			await settleFrames();
+			assert.equal(await draftValue(), "helloかな", "the confirmed send did not erase the composed text");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("work that arrives during a composition waits for it, and a field replaced by a dialog settles the composition first", async () => {
+			await buildDraft("surface-ime-deferred");
+			await ui.evaluate("(()=>{const field=window.composer.el();field.dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}))})()");
+			await ui.evaluate("document.querySelector('.omp-attachment[data-image-number=\"2\"] .omp-attachment-remove').click()");
+			await settleFrames();
+			assert.equal(await draftValue(), FIRST, "the thumbnail's x waits for the composition");
+			// A hand-off cannot capture a draft that is being composed.
+			await ui.evaluate("window.ui.receive({type:'omp:draft-request',requestId:51})");
+			await ui.wait("window.sent.some(message=>message.type==='omp:draft-reply'&&message.requestId===51)");
+			assert.equal(await ui.evaluate("window.sent.find(message=>message.type==='omp:draft-reply'&&message.requestId===51).captured"), false);
+			await ui.evaluate("window.composer.el().dispatchEvent(new CompositionEvent('compositionend',{bubbles:true}))");
+			await ui.wait(`window.composer.value()===${JSON.stringify(FIRST.replace("[Image #2, 20x8]", ""))}`);
+			assert.deepEqual(await strip(), ["#1", "#3"]);
+			// A dialog takes the field away mid-composition: the composed text is read back before the field goes.
+			await ui.evaluate("window.composer.el().dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}))");
+			await ui.evaluate("(()=>{const text=window.composer.el().children[0].firstChild;text.data='かな '+text.data})()");
+			await ui.evaluate("window.ui.push({uiRequests:[{id:'compose-ask',method:'input',title:'Name?',placeholder:'type here'}]})");
+			await ui.wait("!window.composer.exists()");
+			await ui.evaluate("window.ui.push({uiRequests:[]})");
+			await ui.wait("window.composer.exists()");
+			assert.ok((await draftValue()).startsWith("かな A "), `the composed text survived the dialog: ${await draftValue()}`);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("a draft hand-off freezes the field against typing, paste and composition until it is released", async () => {
+			await reset("surface-freeze");
+			await ui.evaluate("window.composer.focus()");
+			await ui.call("Input.insertText", { text: "held draft" });
+			await ui.wait("window.composer.value()==='held draft'");
+			await ui.evaluate("window.ui.receive({type:'omp:draft-request',requestId:61})");
+			await ui.wait("window.sent.some(message=>message.type==='omp:draft-reply'&&message.requestId===61)");
+			const reply = await ui.evaluate<{ captured: boolean; text: string }>("window.sent.find(message=>message.type==='omp:draft-reply'&&message.requestId===61)");
+			assert.equal(reply.captured, true);
+			assert.equal(reply.text, "held draft");
+			assert.deepEqual(await ui.evaluate("(()=>{const field=window.composer.el();return[field.getAttribute('contenteditable'),field.getAttribute('aria-readonly'),window.composer.readOnly()]})()"), ["false", "true", true]);
+			await ui.call("Input.insertText", { text: " more" });
+			await dispatchClipboard("paste", "pasted");
+			await ui.evaluate("window.composer.el().dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}))");
+			await settleFrames();
+			await ctrlZ();
+			assert.equal(await draftValue(), "held draft", "nothing changes the held draft");
+			await ui.evaluate("window.ui.receive({type:'omp:draft-release',requestId:61})");
+			await ui.wait("!window.composer.readOnly()");
+			assert.equal(await ui.evaluate("window.composer.el().getAttribute('contenteditable')"), "true");
+			await ui.evaluate("window.composer.focus()");
+			await ui.call("Input.insertText", { text: "!" });
+			await ui.wait("window.composer.value()==='held draft!'");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
 		await t.test("a user message renders each `[Image #N, WxH]` marker as a reference to its Nth thumbnail, labelled #N; the same text elsewhere stays text", async () => {
@@ -4030,12 +4312,12 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			 const target=key?rows.find(row=>row.dataset.anchorKey===key):rows.filter(row=>row.getBoundingClientRect().top<rootBottom).at(-1);
 			 const rect=target.getBoundingClientRect();return{key:target.dataset.anchorKey,offset:rect.top-dock,rootBottom,dock,top:root.scrollTop,max:root.scrollHeight-root.clientHeight,btn:Boolean(document.querySelector('.omp-jump-latest'))}})()`;
 			const frame = "new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)))";
-			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.composer.focus()");
 			const typing = async (text: string) => { await ui.call("Input.insertText", { text }); await ui.evaluate(frame); };
 			const newline = async () => { await ui.call("Input.insertText", { text: "\n" }); await ui.evaluate(frame); };
 			for (const mode of ["following", "detached"]) {
 				if (mode === "detached") {
-					await ui.evaluate("document.querySelector('.omp-composer textarea').select();document.execCommand('delete')");
+					await ui.evaluate("window.composer.setText('')");
 					await ui.evaluate(frame);
 					const point = await ui.evaluate<{ x: number; y: number }>("(()=>{const rect=document.querySelector('.omp-transcript').getBoundingClientRect();return{x:rect.left+rect.width/2,y:rect.top+rect.height/2}})()");
 					await ui.call("Input.dispatchMouseEvent", { type: "mouseMoved", x: point.x, y: point.y });
@@ -4043,7 +4325,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 					await ui.wait("document.querySelector('.omp-jump-latest')");
 					await ui.evaluate("new Promise(r=>setTimeout(r,600))");
 					await ui.settleGeometry(".omp-transcript");
-					await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+					await ui.evaluate("window.composer.focus()");
 				}
 				const base = await ui.evaluate<{ key: string; offset: number; btn: boolean }>(probe(""));
 				assert.equal(base.btn, mode === "detached");
@@ -4061,7 +4343,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 				await ui.evaluate(frame);
 				await check("pasting three lines");
 				assert.ok(heights.at(-1)! > heights[0]! + 80, `the dock grew (${heights.join(",")})`);
-				await ui.evaluate("document.querySelector('.omp-composer textarea').select();document.execCommand('delete')");
+				await ui.evaluate("window.composer.setText('')");
 				await ui.evaluate(frame);
 				const shrunk = await ui.evaluate<{ offset: number }>(probe(base.key));
 				if (mode === "following") assert.ok(await ui.evaluate("(()=>{const r=document.querySelector('.omp-transcript');return Math.abs(r.scrollHeight-r.clientHeight-r.scrollTop)<=1})()"), "following stays at the tail after the dock shrinks");
@@ -4102,9 +4384,9 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 				assert.equal(await ui.evaluate("Boolean(document.querySelector('.omp-jump-latest'))"), true);
 				next += 2;
 				const sends = await ui.evaluate<number>("window.ui.sends().length");
-				await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+				await ui.evaluate("window.composer.focus()");
 				await ui.call("Input.insertText", { text: `Typed while scrolled up ${kind}` });
-				await ui.evaluate(`document.querySelector('[aria-label="${button}"]').click()`);
+				await ui.evaluate(`document.querySelector('button[aria-label="${button}"]').click()`);
 				await ui.wait(`window.ui.sends().length===${sends + 1}`);
 				await ui.wait("!document.querySelector('.omp-jump-latest')");
 				// The reply to it arrives after the send: the view follows it.
@@ -4304,9 +4586,8 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			const typeText = async (text: string): Promise<void> => {
 				for (const character of text) await key(character, `Key${character.toUpperCase()}`, character.toUpperCase().charCodeAt(0), { text: character });
 			};
-			const state = (): Promise<{ value: string; composerFocused: boolean }> => ui.evaluate(`(()=>{const field=document.querySelector('.omp-composer textarea');
-			 return{value:field.value,composerFocused:document.activeElement===field}})()`);
-			const clearComposer = (): Promise<void> => ui.evaluate("(()=>{const field=document.querySelector('.omp-composer textarea');field.focus();field.select();document.execCommand('delete');field.blur();})()");
+			const state = (): Promise<{ value: string; composerFocused: boolean }> => ui.evaluate("({value:window.composer.value(),composerFocused:window.composer.focused()})");
+			const clearComposer = (): Promise<void> => ui.evaluate("(()=>{window.composer.setText('');window.composer.blur();})()");
 			const focusOn = (selector: string): Promise<void> => ui.evaluate(selector === "body" ? "document.activeElement?.blur()" : `document.querySelector(${JSON.stringify(selector)}).focus()`);
 
 			for (const selector of ["body", "[data-tool-name=\"read\"] .omp-tool-head", ".omp-md .omp-file-link", ".omp-reply-copy"]) {
@@ -4314,15 +4595,15 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 				await focusOn(selector);
 				assert.equal((await state()).composerFocused, false, `${selector} holds the focus before typing`);
 				await typeText("abc");
-				await ui.wait("document.querySelector('.omp-composer textarea').value.length>=3");
+				await ui.wait("window.composer.value().length>=3");
 				assert.deepEqual(await state(), { value: "abc", composerFocused: true }, `abc typed over ${selector} lands once in the composer`);
 			}
 
 			// The caret goes to the end of what the draft already holds.
 			await clearComposer();
-			await ui.evaluate("(()=>{const field=document.querySelector('.omp-composer textarea');field.focus();document.execCommand('insertText',false,'xy');field.setSelectionRange(0,0);field.blur();})()");
+			await ui.evaluate("(()=>{window.composer.setText('xy');window.composer.select(0,0);window.composer.blur();})()");
 			await typeText("z");
-			await ui.wait("document.querySelector('.omp-composer textarea').value.length>=3");
+			await ui.wait("window.composer.value().length>=3");
 			assert.equal((await state()).value, "xyz");
 
 			// Space and Enter keep their native meaning on a focused button; they neither type nor send.
@@ -4362,34 +4643,34 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate("(()=>{const source=document.createElement('textarea');source.value='pasted text';document.body.append(source);source.select();const copied=document.execCommand('copy');source.remove();return copied;})()");
 			await ui.call("Input.dispatchKeyEvent", { type: "rawKeyDown", key: "v", code: "KeyV", windowsVirtualKeyCode: 86, modifiers: 2, commands: ["paste"] });
 			await ui.call("Input.dispatchKeyEvent", { type: "keyUp", key: "v", code: "KeyV", windowsVirtualKeyCode: 86, modifiers: 2 });
-			await ui.wait("document.querySelector('.omp-composer textarea').value==='pasted text'");
+			await ui.wait("window.composer.value()==='pasted text'");
 			assert.equal((await state()).composerFocused, true);
 
 			// A composer that cannot take text gets nothing, and the focus stays where it was.
 			await clearComposer();
 			await ui.evaluate("window.ui.push({phase:'resyncing'})");
-			await ui.wait("document.querySelector('.omp-composer textarea').disabled");
+			await ui.wait("window.composer.disabled()");
 			await focusOn(head);
 			await typeText("q");
 			assert.deepEqual(await state(), { value: "", composerFocused: false });
 			assert.equal(await ui.evaluate(`document.activeElement===document.querySelector(${JSON.stringify(head)})`), true);
 			await ui.evaluate("window.ui.push({phase:'live'})");
-			await ui.wait("!document.querySelector('.omp-composer textarea').disabled");
+			await ui.wait("!window.composer.disabled()");
 			await ui.evaluate("window.ui.receive({type:'omp:draft-request',requestId:900})");
-			await ui.wait("document.querySelector('.omp-composer textarea').readOnly");
+			await ui.wait("window.composer.readOnly()");
 			await focusOn(head);
 			await typeText("q");
 			assert.deepEqual(await state(), { value: "", composerFocused: false }, "a read-only composer is not a typing target");
 			await ui.evaluate("window.ui.receive({type:'omp:draft-release',requestId:900})");
-			await ui.wait("!document.querySelector('.omp-composer textarea').readOnly");
+			await ui.wait("!window.composer.readOnly()");
 
 			// While an ask replaces the composer there is nothing to type into; the ask keeps its focus.
 			await ui.evaluate("window.ui.push({uiRequests:[{id:'type-ask',method:'ask',title:'t',questions:[{id:'only',question:'Proceed?',multi:false,options:[{label:'Yes'},{label:'No'}]}]}],working:true,settled:false})");
-			await ui.wait("document.querySelectorAll('.omp-ask-option').length===3 && !document.querySelector('.omp-composer textarea')");
+			await ui.wait("document.querySelectorAll('.omp-ask-option').length===3 && !window.composer.exists()");
 			await ui.evaluate("document.querySelector('.omp-ask-option').focus()");
 			await typeText("x");
 			assert.equal(await ui.evaluate("document.activeElement===document.querySelector('.omp-ask-option')"), true);
-			assert.equal(await ui.evaluate("document.querySelector('.omp-composer textarea')"), null);
+			assert.equal(await ui.evaluate("window.composer.exists()"), false);
 			// Its own "Other" field is an editable target and keeps what is typed into it.
 			await ui.evaluate("document.querySelectorAll('.omp-ask-option')[2].click()");
 			await ui.wait("document.querySelector('.omp-ask-custom textarea')");
@@ -4506,18 +4787,18 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate(`const row=(id,message)=>({type:'message',id,parentId:null,timestamp:'2026-10-01T00:00:00.000Z',message});
 			 window.ui.push({entries:[row('u1',{role:'user',timestamp:1,content:'first prompt'}),row('a1',{role:'assistant',model:'m',timestamp:2,stopReason:'stop',content:[{type:'text',text:'ok'}]}),
 			  row('u2',{role:'user',timestamp:3,content:'second prompt'}),row('a2',{role:'assistant',model:'m',timestamp:4,stopReason:'stop',content:[{type:'text',text:'ok'}]})],durableCount:4,working:false,settled:true});
-			 document.querySelector('.omp-composer textarea').focus()`);
+			 window.composer.focus()`);
 			await ui.wait("document.querySelector('.omp-transcript').textContent.includes('second prompt')");
 			await press("ArrowUp", "ArrowUp", 38);
-			await ui.wait("document.querySelector('.omp-composer textarea').value==='second prompt'");
+			await ui.wait("window.composer.value()==='second prompt'");
 			await press("ArrowUp", "ArrowUp", 38);
-			await ui.wait("document.querySelector('.omp-composer textarea').value==='first prompt'");
+			await ui.wait("window.composer.value()==='first prompt'");
 			await press("ArrowUp", "ArrowUp", 38);
 			assert.equal(await draftValue(), "first prompt", "the oldest prompt is the end of the walk");
 			await press("ArrowDown", "ArrowDown", 40);
-			await ui.wait("document.querySelector('.omp-composer textarea').value==='second prompt'");
+			await ui.wait("window.composer.value()==='second prompt'");
 			await press("ArrowDown", "ArrowDown", 40);
-			await ui.wait("document.querySelector('.omp-composer textarea').value===''");
+			await ui.wait("window.composer.value()===''");
 			await ui.call("Input.insertText", { text: "typed draft" });
 			await press("ArrowUp", "ArrowUp", 38);
 			assert.equal(await draftValue(), "typed draft", "a typed draft is never replaced");
@@ -4531,12 +4812,12 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate(`const row=(id,message)=>({type:'message',id,parentId:null,timestamp:'2026-10-01T00:00:00.000Z',message});
 			 window.ui.push({entries:[row('u1',{role:'user',timestamp:1,content:'first prompt'}),row('a1',{role:'assistant',model:'m',timestamp:2,stopReason:'stop',content:[{type:'text',text:'ok'}]}),
 			  row('u2',{role:'user',timestamp:3,content:${JSON.stringify(long)}}),row('a2',{role:'assistant',model:'m',timestamp:4,stopReason:'stop',content:[{type:'text',text:'ok'}]})],durableCount:4,working:false,settled:true});
-			 window.composerBox=document.querySelector('.omp-composer textarea');window.composerBox.focus()`);
+			 window.composerBox=window.composer.el();window.composer.focus()`);
 			await ui.wait("document.querySelector('.omp-transcript').textContent.includes('word59')");
-			const caret = (): Promise<number> => ui.evaluate("window.composerBox.selectionStart");
-			const setCaret = (at: number): Promise<unknown> => ui.evaluate(`window.composerBox.setSelectionRange(${at},${at})`);
+			const caret = (): Promise<number> => ui.evaluate("window.composer.selection().start");
+			const setCaret = (at: number): Promise<unknown> => ui.evaluate(`window.composer.select(${at})`);
 			await press("ArrowUp", "ArrowUp", 38);
-			await ui.wait(`document.querySelector('.omp-composer textarea').value===${JSON.stringify(long)}`);
+			await ui.wait(`window.composer.value()===${JSON.stringify(long)}`);
 			assert.ok(await ui.evaluate<boolean>("window.composerBox.scrollHeight>=window.composerBox.clientHeight&&window.composerBox.scrollHeight>=60"), "the recalled prompt wraps over several rows");
 			assert.equal(await caret(), long.length, "the recalled prompt has the caret at its end");
 			const middle = Math.floor(long.length / 2);
@@ -4557,25 +4838,25 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.ok((await caret()) > 0, "down one row");
 			await setCaret(10);
 			await press("ArrowUp", "ArrowUp", 38);
-			await ui.wait("document.querySelector('.omp-composer textarea').value==='first prompt'");
+			await ui.wait("window.composer.value()==='first prompt'");
 			await press("ArrowDown", "ArrowDown", 40);
-			await ui.wait(`document.querySelector('.omp-composer textarea').value===${JSON.stringify(long)}`);
+			await ui.wait(`window.composer.value()===${JSON.stringify(long)}`);
 			await press("ArrowDown", "ArrowDown", 40);
-			await ui.wait("document.querySelector('.omp-composer textarea').value===''");
+			await ui.wait("window.composer.value()===''");
 			assert.equal(await ui.evaluate("window.ui.sends().length"), 0);
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
 		await t.test("Stop hands the still-queued messages back into the draft, after what is typed, and says when some could not come back", async () => {
 			await reset("quick-stop-restore");
-			await ui.evaluate("window.ui.push({working:true,settled:false,state:{...window.ui.current().state,isStreaming:true}});document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.ui.push({working:true,settled:false,state:{...window.ui.current().state,isStreaming:true}});window.composer.focus()");
 			await ui.wait("document.querySelector('[aria-label=\"Stop the running turn\"]')");
 			await ui.call("Input.insertText", { text: "typed" });
 			await ui.evaluate("document.querySelector('[aria-label=\"Stop the running turn\"]').click()");
 			await ui.wait("window.sent.some(message=>message.type==='omp:chat-abort')");
 			await ui.evaluate(`const abort=window.sent.find(message=>message.type==='omp:chat-abort');
 			 window.ui.receive({type:'omp:chat-abort-result',epoch:window.ui.current().epoch,requestId:abort.requestId,status:'accepted',entries:[{text:'queued steer'},{text:'queued follow-up'}],truncated:true})`);
-			await ui.wait("document.querySelector('.omp-composer textarea').value.includes('queued follow-up')");
+			await ui.wait("window.composer.value().includes('queued follow-up')");
 			const restored = await draftValue();
 			assert.ok(restored.startsWith("typed") && restored.indexOf("queued steer") < restored.indexOf("queued follow-up"), restored);
 			await ui.wait("document.querySelector('.omp-attach-error')?.textContent.includes('could not hand back every queued message')");
@@ -4590,7 +4871,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await frame({ type: "ui_widget", key: "hint", lines: ["below the editor"], placement: "belowEditor" });
 			await ui.wait("document.querySelectorAll('.omp-extension-widget').length===2");
 			const placed = await ui.evaluate<{ above: string[]; below: string[]; markup: number; aboveFirst: boolean }>(`(()=>{
-			 const above=document.querySelector('.omp-extension-widgets--aboveEditor'),below=document.querySelector('.omp-extension-widgets--belowEditor'),input=document.querySelector('.omp-composer textarea');
+			 const above=document.querySelector('.omp-extension-widgets--aboveEditor'),below=document.querySelector('.omp-extension-widgets--belowEditor'),input=window.composer.el();
 			 return {above:[...above.querySelectorAll('.omp-extension-widget-line')].map(node=>node.textContent),below:[...below.querySelectorAll('.omp-extension-widget-line')].map(node=>node.textContent),
 			  markup:above.querySelectorAll('b').length,aboveFirst:Boolean(above.compareDocumentPosition(input)&Node.DOCUMENT_POSITION_FOLLOWING)&&Boolean(input.compareDocumentPosition(below)&Node.DOCUMENT_POSITION_FOLLOWING)};
 			})()`);
@@ -4627,12 +4908,12 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate("document.querySelector('.omp-context-compact').click()");
 			assert.deepEqual(await commands(), ["cycle-model", "cycle-thinking", "compact"]);
 			await ui.wait("!document.querySelector('.omp-context-popover')");
-			await ui.evaluate("document.querySelector('.omp-composer textarea').focus();document.querySelector('.omp-context-trigger').focus()");
+			await ui.evaluate("window.composer.focus();document.querySelector('.omp-context-trigger').focus()");
 			await ui.wait("document.querySelector('.omp-context-shake')");
 			await ui.evaluate("document.querySelector('.omp-context-shake').click()");
 			assert.deepEqual(await commands(), ["cycle-model", "cycle-thinking", "compact", "shake"]);
 			await ui.wait("!document.querySelector('.omp-context-popover')");
-			await ui.evaluate("document.querySelector('.omp-composer textarea').focus();window.ui.push({working:true,settled:false})");
+			await ui.evaluate("window.composer.focus();window.ui.push({working:true,settled:false})");
 			await ui.wait("document.querySelector('[aria-label=\"Stop the running turn\"]')");
 			await ui.evaluate("document.querySelector('.omp-context-trigger').focus()");
 			await ui.wait("document.querySelector('.omp-context-compact')");
@@ -4972,12 +5253,11 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await reset("rewind-entry-points");
 			await pushRewind();
 			await ui.wait("document.querySelectorAll('[aria-label=\"Rewind to here\"]').length===2");
-			const composer = "document.querySelector('.omp-composer textarea')";
 			const closed = async (): Promise<void> => {
 				await settleFrames();
 				assert.equal(await ui.evaluate("document.querySelector('.omp-rewind-bar--picking')"), null);
 			};
-			await ui.evaluate(`${composer}.focus()`);
+			await ui.evaluate("window.composer.focus()");
 			await press("Escape", "Escape", 27);
 			await closed();
 			await ui.call("Input.insertText", { text: "x" });
@@ -4986,7 +5266,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await closed();
 			assert.equal(await draftValue(), "x", "a draft is never replaced by Rewind");
 			await press("Backspace", "Backspace", 8);
-			await ui.wait(`${composer}.value===''`);
+			await ui.wait("window.composer.value()===''");
 			await press("Escape", "Escape", 27);
 			await press("Escape", "Escape", 27);
 			await ui.wait(`document.querySelector('.omp-rewind-bar--picking') && ${barFocused}`);
@@ -4994,7 +5274,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await press("Escape", "Escape", 27);
 			await ui.wait("!document.querySelector('.omp-rewind-bar--picking')");
 			for (const command of ["/rewind", "/branch"]) {
-				await ui.evaluate(`${composer}.focus()`);
+				await ui.evaluate("window.composer.focus()");
 				await ui.call("Input.insertText", { text: command });
 				await ui.evaluate("document.querySelector('[aria-label=\"Send message\"]').click()");
 				await ui.wait(`document.querySelector('.omp-rewind-bar--picking') && ${barFocused}`);
@@ -5004,7 +5284,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 				await ui.wait("!document.querySelector('.omp-rewind-bar--picking')");
 			}
 			assert.equal(await ui.evaluate("window.ui.sends().length"), 0, "neither command reaches OMP");
-			await ui.evaluate(`${composer}.focus()`);
+			await ui.evaluate("window.composer.focus()");
 			await ui.call("Input.insertText", { text: "/branch foo" });
 			await ui.evaluate("document.querySelector('[aria-label=\"Send message\"]').click()");
 			await ui.wait(`document.querySelector('.omp-dock').innerText.includes(${JSON.stringify(REWIND_ARGUMENTS_SENTENCE)})`);
@@ -5019,7 +5299,6 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await reset("rewind-page-escape");
 			await pushRewind();
 			await ui.wait("document.querySelectorAll('[aria-label=\"Rewind to here\"]').length===2");
-			const composer = "document.querySelector('.omp-composer textarea')";
 			const onTranscript = async (): Promise<void> => {
 				await ui.evaluate("(()=>{const t=document.querySelector('.omp-transcript');t.setAttribute('tabindex','-1');t.focus()})()");
 				assert.equal(await ui.evaluate("document.activeElement===document.querySelector('.omp-transcript')"), true);
@@ -5048,16 +5327,16 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await press("Escape", "Escape", 27);
 			await ui.wait("!document.querySelector('.omp-rewind-bar--picking')");
 			// A draft is never replaced by Rewind.
-			await ui.evaluate(`${composer}.focus()`);
+			await ui.evaluate("window.composer.focus()");
 			await ui.call("Input.insertText", { text: "x" });
 			await onTranscript();
 			await press("Escape", "Escape", 27);
 			await press("Escape", "Escape", 27);
 			await closed();
 			assert.equal(await draftValue(), "x");
-			await ui.evaluate(`${composer}.focus()`);
+			await ui.evaluate("window.composer.focus()");
 			await press("Backspace", "Backspace", 8);
-			await ui.wait(`${composer}.value===''`);
+			await ui.wait("window.composer.value()===''");
 			// Another editable field keeps its own Escape and is not counted.
 			await ui.evaluate("(()=>{const i=document.createElement('input');i.id='probe-field';document.body.append(i);i.focus()})()");
 			await press("Escape", "Escape", 27);
@@ -5091,7 +5370,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await press("Enter", "Enter", 13);
 			await ui.wait("window.sent.some(message=>message.type==='omp:chat-navigate')");
 			await answerNavigation({ status: "done", kind: "rewind", summarized: false, draft: { text: "fix the parser", images: [], unavailableImages: 0 } });
-			await ui.wait("document.querySelector('.omp-composer textarea').value==='fix the parser' && !document.querySelector('.omp-rewind-bar')");
+			await ui.wait("window.composer.value()==='fix the parser' && !document.querySelector('.omp-rewind-bar')");
 			assert.equal(await ui.evaluate("document.querySelector('.omp-attach-error')"), null, "an empty composer has nothing to keep");
 			// OMP's rewound branch: the target's parent, then the marker, which is the leaf.
 			const marker = { type: "custom", id: "m1", parentId: "a1", timestamp: rewindAt(9), customType: "omp-desk/navigation",
@@ -5109,18 +5388,18 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual((await navigations())[1], { ...(await navigations())[1]!, kind: "undo", targetId: "a2", expectedLeafId: "m1", summarize: false });
 			await ui.wait("document.querySelector('.omp-rewind-bar[role=status]')?.textContent==='Undoing the rewind…'");
 			await answerNavigation({ status: "done", kind: "undo", summarized: false });
-			await ui.wait("document.querySelector('.omp-composer textarea').value===''");
+			await ui.wait("window.composer.value()===''");
 			// Back on the original branch, with a draft of the user's own.
 			await pushRewind();
 			await ui.wait("!document.querySelector('.omp-rewind-bar') && document.querySelectorAll('[aria-label=\"Rewind to here\"]').length===2");
-			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.composer.focus()");
 			await ui.call("Input.insertText", { text: "my own draft" });
 			await startFromRow(0);
 			await press("Enter", "Enter", 13);
 			await ui.wait("window.sent.filter(message=>message.type==='omp:chat-navigate').length===3");
 			assert.deepEqual((await navigations())[2], { ...(await navigations())[2]!, kind: "rewind", targetId: "u1", expectedLeafId: "a2", summarize: false });
 			await answerNavigation({ status: "done", kind: "rewind", summarized: false, draft: { text: "first prompt\nwith a second line", images: [], unavailableImages: 0 } });
-			await ui.wait("document.querySelector('.omp-composer textarea').value==='first prompt\\nwith a second line'");
+			await ui.wait("window.composer.value()==='first prompt\\nwith a second line'");
 			await ui.wait("document.querySelector('.omp-attach-error details pre')");
 			assert.deepEqual(await ui.evaluate("[...document.querySelectorAll('.omp-attach-error')].map(card=>({reason:card.firstElementChild.textContent,text:card.querySelector('details pre').textContent}))"),
 				[{ reason: "Your draft from before the rewind. Add it to the draft only when you want it back.", text: "my own draft" }], "the earlier draft is kept, not overwritten");
@@ -5150,7 +5429,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await answerNavigation({ status: "done", kind: "switch", summarized: false });
 			await ui.wait("!document.querySelector('.omp-rewind-bar')");
 			// A turn starts (here: from another window) while picking: the bar keeps the choice but says why it cannot act.
-			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.composer.focus()");
 			await press("Escape", "Escape", 27);
 			await press("Escape", "Escape", 27);
 			await ui.wait(`document.querySelector('.omp-rewind-bar--picking') && ${barFocused}`);
@@ -5169,7 +5448,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.equal((await navigations()).length, 1, "Enter does nothing while it is unavailable");
 			assert.equal(await ui.evaluate("document.querySelectorAll('[aria-label=\"Rewind to here\"]').length"), 0, "outside picking no prompt offers it while OMP works");
 			// Esc Esc does not open it while OMP works.
-			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.composer.focus()");
 			await press("Escape", "Escape", 27);
 			await press("Escape", "Escape", 27);
 			await settleFrames();
@@ -5177,7 +5456,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			// A chat process started without the navigate command: picking explains, nothing is offered.
 			await pushRewind({ branches, commands: [] });
 			await ui.wait("document.querySelectorAll('[aria-label=\"Rewind to here\"]').length===0 && !document.querySelector('[aria-label=\"Stop the running turn\"]')");
-			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.composer.focus()");
 			await press("Escape", "Escape", 27);
 			await press("Escape", "Escape", 27);
 			const unsupported = NAVIGATE_REFUSAL_SENTENCES["restart-needed"];

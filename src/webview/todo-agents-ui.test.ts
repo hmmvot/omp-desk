@@ -95,7 +95,9 @@ import { splitChatSnapshot } from "../protocol/chat-messages";
 import { injectGuestStyles } from "./styles";
 import { attachSessionView } from "./lib/session-view";
 import { adoptNonceForCreatedStyles } from "./lib/nonce-styles";
+import { installComposerDriver } from "./test-support/composer-driver";
 attachSessionView(guestTransport);
+installComposerDriver(window);
 const epoch = { nonce: "host-ui-test", counter: 1 };
 const client = new ChatClient(guestTransport); client.attach(guestTransport);
 let current = { ...snapshotOf(createChatModel(), epoch), phase: "live", state: {

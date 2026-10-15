@@ -28,9 +28,15 @@ Type a line of three backticks, with a language if you like (`` ```ts ``), and p
 - `Enter` is a new line that keeps the line's indentation and does not send.
 - `Tab` indents (four spaces; on several selected lines it indents them all) and does not move the focus. `Shift+Tab` outdents.
 - **`Ctrl+Enter` sends from inside a block** (a follow-up while a turn runs: `Ctrl+Alt+Enter`). `Enter` and `Tab` behave as before outside a block.
-- While the draft holds a block, the composer is set in your editor's font and a band marks the block's rows. The text is the same: plain Markdown, fences included, and nothing completes inside a block: no `/` commands, no `@` files.
+- Only the block is set in your editor's font, on a band that marks its rows; the prose around it keeps the proportional font. The text is the same: plain Markdown, fences included, and nothing completes inside a block: no `/` commands, no `@` files.
 - A line under the composer lists these keys while the caret is in a block.
 - **Keyboard way out:** `Shift+Tab` on a line with nothing left to outdent moves the focus to the previous control; `Ctrl+Shift+L` brings it back.
+
+### Editing the draft
+
+- `Ctrl+Z` undoes and `Ctrl+Y` or `Ctrl+Shift+Z` redoes, including a pasted image and its reference. VS Code's **Edit > Undo** menu item does not act on the composer: use the keys.
+- A paste inserts plain text only, whatever the page it came from. Text you drag onto the composer lands where you drop it.
+- A `[Image #N]` reference is one unit: the caret hops over it and one `Backspace` removes it with its image.
 
 ## Reading replies
 

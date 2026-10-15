@@ -93,7 +93,9 @@ import { splitChatSnapshot } from "../protocol/chat-messages";
 import { injectGuestStyles } from "./styles";
 import { attachSessionView } from "./lib/session-view";
 import { adoptNonceForCreatedStyles } from "./lib/nonce-styles";
+import { installComposerDriver } from "./test-support/composer-driver";
 attachSessionView(guestTransport);
+installComposerDriver(window);
 const epoch = { nonce: "host-ui-test", counter: 1 };
 const client = new ChatClient(guestTransport); client.attach(guestTransport);
 const liveState = { model: { provider: "one", id: "old", name: "Original", contextWindow: 1000000 }, thinkingLevel: "low", isStreaming: false, isCompacting: false, queuedMessageCount: 0,
@@ -202,10 +204,10 @@ test("queued messages row: list, cancel, edit, already-sent race and bottom anch
 		const rows = () => ui.evaluate<{ kind: string; text: string; title: string; height: number; truncated: boolean }[]>(`[...document.querySelectorAll('.omp-queue-rows > .omp-queue-item:not(.omp-queue-more)')].map(li=>{const text=li.querySelector('.omp-queue-text');return{kind:li.querySelector('.omp-queue-kind')?.textContent??'',text:text.textContent,title:text.title,height:li.getBoundingClientRect().height,truncated:text.scrollWidth>text.clientWidth}})`);
 		const LONG = "Please also double check that every one of the generated migration scripts is idempotent, because the last time we ran them twice the second run failed halfway through and left the schema in a state nobody could explain.";
 		const typeDraft = async (text: string) => {
-			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+			await ui.evaluate("window.composer.focus()");
 			await ui.call("Input.insertText", { text });
 		};
-		const draft = () => ui.evaluate<string>("document.querySelector('.omp-composer textarea').value");
+		const draft = () => ui.evaluate<string>("window.composer.value()");
 
 		await t.test("lists the host's queue — steering then follow-up, in order — one truncated line each with the full text in a tooltip, in the dock directly above the composer", async () => {
 			await load("queue-list");
@@ -304,9 +306,9 @@ test("queued messages row: list, cancel, edit, already-sent race and bottom anch
 			assert.equal(await draft(), "my half-typed idea", "nothing moves until OMP removed the message");
 			// The conversation's epoch moved while the command ran (any reconcile does that); the answer carries the request's own epoch and is still honoured.
 			await ui.evaluate("window.ui.answer(window.ui.removals()[0],[{status:'removed'}],{nonce:'other-epoch',counter:99});window.ui.queue([],['second one'])");
-			await ui.wait("document.querySelector('.omp-composer textarea').value.includes('rework the intro')");
+			await ui.wait("window.composer.value().includes('rework the intro')");
 			assert.equal(await draft(), "my half-typed idea\n\nrework the intro", "appended after the draft, not overwriting it");
-			assert.equal(await ui.evaluate("document.activeElement===document.querySelector('.omp-composer textarea')"), true, "focus moves to the composer");
+			assert.equal(await ui.evaluate("window.composer.focused()"), true, "focus moves to the composer");
 			assert.equal(await ui.evaluate("window.sent.filter(message=>/^omp:chat-(prompt|steer|follow-up)$/.test(message.type)).length"), 0, "editing sends nothing");
 			assert.deepEqual((await rows()).map(row => row.text), ["second one"]);
 		});
@@ -317,7 +319,7 @@ test("queued messages row: list, cancel, edit, already-sent race and bottom anch
 			await ui.wait("document.querySelector('.omp-queue-edit')");
 			await ui.evaluate("document.querySelector('.omp-queue-edit').click()");
 			await ui.evaluate(`window.ui.answer(window.ui.removals()[0],[{status:'removed',images:[{type:'image',mimeType:'image/png',data:'${PNG}'}]}]);window.ui.queue([],[])`);
-			await ui.wait("document.querySelector('.omp-composer textarea').value.includes('compare')");
+			await ui.wait("window.composer.value().includes('compare')");
 			assert.equal(await draft(), "compare [Image #1, 1x1] please");
 			assert.equal(await ui.evaluate("document.querySelectorAll('.omp-attachment').length"), 1, "the image is attached again");
 			await ui.evaluate("document.querySelector('button[aria-label=\"Send message\"]').click()");
@@ -462,7 +464,7 @@ test("queued messages row: list, cancel, edit, already-sent race and bottom anch
 			assert.equal(request!.purpose, "edit");
 			assert.deepEqual(request!.items, [{ queue: "followUp", text: "newest follow-up" }]);
 			await ui.evaluate("window.ui.answer(window.ui.removals()[0],[{status:'removed'}]);window.ui.queue(['steer first'],['older follow-up'])");
-			await ui.wait("document.querySelector('.omp-composer textarea').value.includes('newest follow-up')");
+			await ui.wait("window.composer.value().includes('newest follow-up')");
 			assert.equal(await draft(), "typed\n\nnewest follow-up");
 			await ui.call("Input.dispatchKeyEvent", { type: "keyDown", key: "ArrowUp", code: "ArrowUp", windowsVirtualKeyCode: 38, modifiers: 1 });
 			assert.deepEqual((await ui.evaluate<{ items: unknown }[]>("window.ui.removals()")).at(-1)!.items, [{ queue: "followUp", text: "older follow-up" }], "the next press takes the next newest");

@@ -554,7 +554,10 @@ ${ANSI_STYLES}
 .omp-suggest-wrapper { position: relative; flex: 1 1 auto; min-width: 0; }
 /* The input row reaches 6px past the card's content box so the focus ring wraps the padded textarea while the text itself stays inset. */
 .omp-composer-row--input { margin: -4px -6px 0; }
-.omp-composer-row .omp-textarea { display: block; border: 0; border-radius: var(--omp-radius-card); background: transparent; }
+/* The editing surface of the composer (docs/designs/2026-10-15-composer-contenteditable-surface.md): a contenteditable the page renders from the draft, one element per line. Height needs no measuring: two rows to eight, then it scrolls. */
+.omp-composer-input { position: relative; display: block; box-sizing: border-box; width: 100%; min-height: calc(2 * 20px + 20px); max-height: calc(8 * 20px + 20px); overflow-y: auto; padding: 10px 12px; border: 0; border-radius: var(--omp-radius-card); background: transparent; color: var(--vscode-input-foreground); font: inherit; line-height: 20px; white-space: pre-wrap; overflow-wrap: break-word; outline: none; cursor: text; }
+.omp-composer-input[aria-disabled="true"] { color: var(--vscode-disabledForeground, var(--omp-muted)); cursor: default; }
+.omp-composer-input[data-empty="true"]::before { content: attr(data-placeholder); position: absolute; left: 12px; right: 12px; top: 10px; color: var(--vscode-input-placeholderForeground, var(--omp-muted)); pointer-events: none; }
 .omp-suggest-list {
 	position: absolute;
 	bottom: 100%;
@@ -629,9 +632,9 @@ ${ANSI_STYLES}
 .vscode-light:not(.vscode-high-contrast-light) .omp-composer-toolbar-actions .omp-btn--primary:disabled { background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent); }
 /* One focus ring: the card, not the card and the textarea inside it. */
 .omp-composer:focus-within { border-color: var(--vscode-focusBorder); }
+.omp-composer .omp-textarea:focus { outline: none; }
 /* A drag the composer can attach is over it: the card takes the focus colour and a dashed outline, like an editor drop target. */
 .omp-composer--dropping { border-color: var(--vscode-focusBorder); outline: 1px dashed var(--vscode-focusBorder); outline-offset: 2px; }
-.omp-composer .omp-textarea:focus { outline: none; }
 /* Notices stacked above the input row keep the 6px gap of .omp-attach-error: the input row's -4px top margin would otherwise pull it over the hint's text. */
 .omp-composer > .omp-composer-hint { margin: 0 0 6px; line-height: 1.4; }
 
@@ -698,21 +701,19 @@ ${ANSI_STYLES}
 .omp-attachment-remove:disabled { opacity: 0.45; cursor: default; }
 .omp-attachment-remove:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
 
-/* Numbered image references: the textarea stays the editor; a click-through layer behind it paints each marker as a chip. */
-.omp-composer-row .omp-textarea { position: relative; }
-.omp-textarea-mirror { position: absolute; inset: 0; box-sizing: border-box; padding: 10px 12px; overflow: hidden; pointer-events: none; font: inherit; line-height: 20px; white-space: pre-wrap; overflow-wrap: break-word; color: transparent; border-radius: var(--omp-radius-card); }
-.omp-image-ref-mark { color: transparent; border-radius: var(--omp-radius); background: color-mix(in srgb, var(--vscode-textLink-foreground, var(--vscode-focusBorder, #3794ff)) 24%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--vscode-textLink-foreground, var(--vscode-focusBorder, #3794ff)) 55%, transparent); }
-/* A fenced code block in the draft: the textarea keeps painting the text, in the editor's font for the whole draft (one font means one layout for caret, selection and hit testing), and the layer behind it paints a band over exactly the block's rows. The band bleeds to the textarea's edges through margin and padding that cancel, so the text keeps the wrapping width of the textarea. */
-.omp-suggest-wrapper--code > .omp-textarea, .omp-suggest-wrapper--code > .omp-textarea-mirror { font-family: var(--omp-mono); font-size: min(var(--omp-mono-size), 15px); tab-size: 4; }
-.omp-mirror-block { margin: 0 -12px; padding: 0 12px; background: var(--vscode-textCodeBlock-background, color-mix(in srgb, var(--vscode-foreground) 8%, transparent)); }
+/* Prose lines keep the UI font; the lines of a fenced code block (fences included) take the editor's font on a band that bleeds to the surface's edges through margin and padding that cancel, so a wrapped code line breaks where the surface does. Numbered image references are atomic inline chips that hold the literal marker text. */
+.omp-line { min-height: 20px; }
+.omp-line--code { margin: 0 -12px; padding: 0 12px; background: var(--vscode-textCodeBlock-background, color-mix(in srgb, var(--vscode-foreground) 8%, transparent)); font-family: var(--omp-mono); font-size: min(var(--omp-mono-size), 15px); tab-size: 4; }
+.omp-line--fence { color: color-mix(in srgb, var(--vscode-input-foreground) 82%, transparent); }
+.omp-chip { display: inline; padding: 0 3px; margin: 0 1px; border-radius: var(--omp-radius); cursor: default; background: color-mix(in srgb, var(--vscode-textLink-foreground, var(--vscode-focusBorder, #3794ff)) 24%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--vscode-textLink-foreground, var(--vscode-focusBorder, #3794ff)) 55%, transparent); }
 .omp-composer > .omp-composer-hint--code { margin: 2px 0 6px; min-height: calc(11px * 1.4); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 @media (forced-colors: active) {
-	.omp-mirror-block { forced-color-adjust: none; background: Canvas; box-shadow: inset 0 0 0 1px CanvasText; }
+	.omp-line--code { forced-color-adjust: none; background: Canvas; color: CanvasText; box-shadow: inset 0 0 0 1px CanvasText; }
 }
 .omp-attachment-figure { position: relative; display: inline-flex; flex: 0 0 auto; }
 .omp-attachment-number { position: absolute; left: 1px; bottom: 1px; padding: 1px 3px; border-radius: var(--omp-radius); background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); font-size: 10px; line-height: 1; font-weight: 600; }
 @media (forced-colors: active) {
-	.omp-image-ref-mark { forced-color-adjust: none; background: Highlight; box-shadow: none; }
+	.omp-chip { forced-color-adjust: none; background: Highlight; color: HighlightText; box-shadow: none; }
 	.omp-attachment-number { border: 1px solid currentColor; }
 }
 

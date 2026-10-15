@@ -18,7 +18,7 @@ test("Ctrl+Alt+R opens the Resume picker and Ctrl+Alt+N starts a session, from a
 	const panels = page.locator("iframe.webview:not([src*='purpose=webviewView'])");
 	const picker = page.locator(".quick-input-widget");
 	const resumePicker = picker.getByText(/Resume an OMP session in alpha-desk/);
-	const composer = desk.chat(page).getByRole("combobox", { name: "Message OMP" });
+	const composer = desk.composer(desk.chat(page));
 
 	/** Ctrl+Alt+R: the folder's saved sessions, in the Resume picker (one folder is shown, so no folder question comes first). */
 	const resumeFrom = async (where: string): Promise<void> => {

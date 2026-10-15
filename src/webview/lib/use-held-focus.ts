@@ -14,7 +14,7 @@ import { useEffect, useLayoutEffect, useRef, type RefObject } from "react";
 import { describeElement, traceNote } from "./focus-trace.ts";
 
 /** `reason` says, for the focus trace, why `enabled` is false. */
-export function useHeldFocus(ref: RefObject<HTMLTextAreaElement | null>, enabled: boolean, reason: string): void {
+export function useHeldFocus(getField: () => HTMLElement | null, enabled: boolean, reason: string): void {
 	const held = useRef(false);
 	const enabledNow = useRef(enabled);
 	useLayoutEffect(() => {
@@ -23,11 +23,11 @@ export function useHeldFocus(ref: RefObject<HTMLTextAreaElement | null>, enabled
 
 	useEffect(() => {
 		const onFocusIn = (event: FocusEvent): void => {
-			held.current = event.target !== null && event.target === ref.current;
+			held.current = event.target !== null && event.target === getField();
 		};
 		const onFocusOut = (event: FocusEvent): void => {
-			const field = ref.current;
-			if (field === null || event.target !== field || field.disabled) return;
+			const field = getField();
+			if (field === null || event.target !== field || field.getAttribute("aria-disabled") === "true") return;
 			// The window being deactivated keeps the page's active element: the field still holds its place.
 			if (document.activeElement === field) return;
 			held.current = false;
@@ -37,7 +37,7 @@ export function useHeldFocus(ref: RefObject<HTMLTextAreaElement | null>, enabled
 			// (a suggestion list that refuses the focus) must not clear it. While it is disabled, a press on anything
 			// else is the user moving on.
 			if (enabledNow.current) return;
-			if (!(event.target instanceof Node) || ref.current?.contains(event.target) !== true) held.current = false;
+			if (!(event.target instanceof Node) || getField()?.contains(event.target) !== true) held.current = false;
 		};
 		document.addEventListener("focusin", onFocusIn, true);
 		document.addEventListener("focusout", onFocusOut, true);
@@ -47,18 +47,18 @@ export function useHeldFocus(ref: RefObject<HTMLTextAreaElement | null>, enabled
 			document.removeEventListener("focusout", onFocusOut, true);
 			document.removeEventListener("pointerdown", onPointerDown, true);
 		};
-	}, [ref]);
+	}, [getField]);
 
 	useLayoutEffect(() => {
-		const field = ref.current;
+		const field = getField();
 		if (!enabled) {
 			traceNote(`composer not writable: ${reason}`);
 			return;
 		}
-		if (field === null || !held.current || field.disabled) return;
+		if (field === null || !held.current || field.getAttribute("aria-disabled") === "true") return;
 		const active = document.activeElement;
 		if (active !== null && active !== document.body) return;
 		field.focus({ preventScroll: true });
 		traceNote(`composer focus restored to ${describeElement(field)}; it was disabled while it held focus`);
-	}, [ref, enabled, reason]);
+	}, [getField, enabled, reason]);
 }

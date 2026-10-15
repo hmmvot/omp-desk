@@ -49,17 +49,17 @@ export function typingIntent(event: TypingKey): "text" | "paste" | null {
 
 const EDITABLE = "input,textarea,select,[contenteditable]:not([contenteditable=false]),[role=textbox],[role=searchbox],[role=combobox],[role=menu],[role=listbox]";
 const KEEPS_FOCUS = ".omp-rewind-bar--picking";
-const COMPOSER = ".omp-composer-row--input textarea.omp-textarea";
+const COMPOSER = ".omp-composer-row--input .omp-composer-input";
 
 /** Whether `target` is, or sits inside, a field the user types into (or a menu or list that owns its keys). */
 export function isEditableTarget(target: Element): boolean {
 	return target.closest(EDITABLE) !== null;
 }
 
-/** The composer's textarea when it exists and can take text, else `null`. */
-export function writableComposer(doc: Document): HTMLTextAreaElement | null {
-	const field = doc.querySelector<HTMLTextAreaElement>(COMPOSER);
-	return field === null || field.disabled || field.readOnly ? null : field;
+/** The composer's field when it exists and can take text, else `null`. */
+export function writableComposer(doc: Document): HTMLElement | null {
+	const field = doc.querySelector<HTMLElement>(COMPOSER);
+	return field === null || !field.isContentEditable || field.getAttribute("aria-readonly") === "true" ? null : field;
 }
 
 /** Starts redirecting typing into the composer in `win`'s document; returns the function that stops it. */
@@ -84,7 +84,9 @@ export function installTypeToFocus(win: Window & typeof globalThis): () => void 
 		const composer = writableComposer(doc);
 		if (composer === null) return;
 		composer.focus({ preventScroll: true });
-		composer.setSelectionRange(composer.value.length, composer.value.length);
+		const selection = doc.getSelection();
+		selection?.selectAllChildren(composer);
+		selection?.collapseToEnd();
 	};
 	doc.addEventListener("keydown", onKeyDown);
 	return () => doc.removeEventListener("keydown", onKeyDown);

@@ -168,28 +168,3 @@ export function outdentEdit(text: string, block: FencedBlock, start: number, end
 	const moved = (position: number): number => position - removals.reduce((sum, removal) => sum + Math.min(Math.max(position - removal.at, 0), removal.length), 0);
 	return { from: range.from, to: range.to, insert: next.join("\n"), selectionStart: moved(start), selectionEnd: moved(end) };
 }
-
-/** A piece of the draft for the highlight layer: ordinary text or a fenced block, without the newline that separates it from the next piece. */
-export interface DraftPiece {
-	readonly block: boolean;
-	readonly start: number;
-	readonly end: number;
-}
-
-/**
- * Splits the draft at its fenced blocks. The newline before and after a block belongs to neither piece:
- * the layer renders each piece as a block-level box, and the box boundary is that line break, so exactly
- * one newline separates two boxes. A piece may be empty (an empty line next to a block); two adjacent
- * blocks have no piece between them.
- */
-export function draftPieces(text: string, blocks: readonly FencedBlock[]): DraftPiece[] {
-	const pieces: DraftPiece[] = [];
-	let cursor = 0;
-	for (const block of blocks) {
-		if (block.start > cursor) pieces.push({ block: false, start: cursor, end: block.start - 1 });
-		pieces.push({ block: true, start: block.start, end: block.end });
-		cursor = block.end + 1;
-	}
-	if (cursor <= text.length) pieces.push({ block: false, start: cursor, end: text.length });
-	return pieces;
-}

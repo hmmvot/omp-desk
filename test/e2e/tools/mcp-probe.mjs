@@ -12,6 +12,7 @@ import { spawn } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { COMPOSER_NAME, COMPOSER_ROLE } from "../support/composer-field.ts";
 
 const [kind, port, mockUrl] = process.argv.slice(2);
 if (!["playwright", "devtools"].includes(kind) || !port) {
@@ -81,9 +82,9 @@ try {
 		report.snapshotChars = snapshot.text.length;
 		report.snapshotHasSessionsTree = /Sessions/.test(snapshot.text);
 		report.snapshotHasIframe = /iframe/i.test(snapshot.text);
-		report.snapshotHasChatComposer = /Message OMP/.test(snapshot.text);
-		report.iframeExcerpt = snapshot.text.split("\n").filter(line => /iframe/i.test(line)).slice(0, 6).concat(snapshot.text.split("\n").filter(line => /Mock Model|Message OMP|Conversation transcript/.test(line)).slice(0, 4));
-		const composer = refOf(snapshot.text, 'combobox "Message OMP"');
+		report.snapshotHasChatComposer = snapshot.text.includes(COMPOSER_NAME);
+		report.iframeExcerpt = snapshot.text.split("\n").filter(line => /iframe/i.test(line)).slice(0, 6).concat(snapshot.text.split("\n").filter(line => /Mock Model|Conversation transcript/.test(line) || line.includes(COMPOSER_NAME)).slice(0, 4));
+		const composer = refOf(snapshot.text, `${COMPOSER_ROLE} "${COMPOSER_NAME}"`);
 		const send = refOf(snapshot.text, 'button "Send message"');
 		report.composerRef = composer ?? null;
 		if (composer && send) {
@@ -106,7 +107,7 @@ try {
 		const snapshot = await call("take_snapshot", { pageId: 1 });
 		report.snapshotChars = snapshot.text.length;
 		report.snapshotHasSessionsTree = /Sessions/.test(snapshot.text);
-		report.snapshotHasChatComposer = /Message OMP/.test(snapshot.text);
+		report.snapshotHasChatComposer = snapshot.text.includes(COMPOSER_NAME);
 		const start = await call("performance_start_trace", { pageId: 1, reload: false, autoStop: false });
 		report.traceStart = start.text.slice(0, 300);
 		await new Promise(resolve => setTimeout(resolve, 3000));

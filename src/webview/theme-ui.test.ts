@@ -75,7 +75,8 @@ import {splitChatSnapshot} from '../protocol/chat-messages';
 import {injectGuestStyles} from './styles';
 import {attachSessionView} from './lib/session-view';
 import {createTerminalRenderer} from './lib/terminal-renderer';
-attachSessionView(guestTransport);injectGuestStyles('theme-test');
+import {installComposerDriver} from './test-support/composer-driver';
+attachSessionView(guestTransport);injectGuestStyles('theme-test');installComposerDriver(window);
 const client=new ChatClient(guestTransport);client.attach(guestTransport);
 const snapshot={...snapshotOf(createChatModel(),{nonce:'theme-test',counter:1}),phase:'live',state:{model:{provider:'test',id:'model',name:'Model',contextWindow:100000},thinkingLevel:'low',isStreaming:true,isCompacting:false,queuedMessageCount:0,contextUsage:{tokens:4070,contextWindow:100000,percent:4.07}},todoSeed:[{name:'Theme checks',tasks:[{content:'Completed task',status:'completed'},{content:'Cancelled task',status:'abandoned'},{content:'Review controls',status:'in_progress'}]}],entries:[{type:'message',id:'answer',parentId:null,timestamp:'2026-10-08T00:00:00Z',message:{role:'assistant',model:'model',stopReason:'stop',timestamp:1,content:[{type:'text',text:${JSON.stringify("Inline `sample code` and fenced code:\n\n```ts\nconst visible = true;\n```")}}]}}]};
 snapshot.working=true;snapshot.settled=false;
@@ -147,7 +148,7 @@ test("theme-aware controls and live native/shell terminal palettes", { skip: bro
 		await loaded;
 		await page.evaluate("window.themeReady.promise");
 		await page.evaluate("window.themeFixture.controls()");
-		await page.evaluate("(()=>{document.querySelector('.omp-hud-toggle').click();document.querySelector('.omp-tool-head').click();const textarea=document.querySelector('textarea');Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(textarea,'A follow-up');textarea.dispatchEvent(new Event('input',{bubbles:true}));})()");
+		await page.evaluate("(()=>{document.querySelector('.omp-hud-toggle').click();document.querySelector('.omp-tool-head').click();window.composer.setText('A follow-up');})()");
 		const evidence: Record<string, unknown>[] = [];
 		const capture = async (name: string): Promise<void> => {
 			if (!process.env.OMP_THEME_SCREENSHOTS) return;
@@ -258,7 +259,7 @@ test("theme-aware controls and live native/shell terminal palettes", { skip: bro
 			for (const task of Object.values(closed)) assert.ok(contrast(task.color, task.background) >= 4.5, `${theme.name}: TODO detail contrast`);
 			await capture(`${name}-todo`);
 			evidence.push({ theme: theme.name, hover, warning, cancel, closed });
-			await page.evaluate("(()=>{window.themeFixture.push({phase:'live',uiRequests:[]});window.themeFixture.chat();document.querySelector('.omp-hud-toggle').click();document.querySelector('.omp-tool-head').click();const textarea=document.querySelector('textarea');Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(textarea,'A follow-up');textarea.dispatchEvent(new Event('input',{bubbles:true}));})()");
+			await page.evaluate("(()=>{window.themeFixture.push({phase:'live',uiRequests:[]});window.themeFixture.chat();document.querySelector('.omp-hud-toggle').click();document.querySelector('.omp-tool-head').click();window.composer.setText('A follow-up');})()");
 			await page.evaluate("window.themeFixture.controls()");
 			for (const width of [1000, 760, 590, 460, 300]) {
 				await page.call("Emulation.setDeviceMetricsOverride", { width, height: 740, deviceScaleFactor: 1, mobile: false });
@@ -266,11 +267,11 @@ test("theme-aware controls and live native/shell terminal palettes", { skip: bro
 				assert.equal(await page.evaluate("(()=>{const card=document.querySelector('.omp-composer').getBoundingClientRect();return[...document.querySelectorAll('.omp-composer-toolbar button')].filter(node=>node.getBoundingClientRect().width>0).every(node=>{const r=node.getBoundingClientRect();return r.left>=card.left&&r.right<=card.right})})()"), true, `${theme.name}: controls contained at ${width}px`);
 				await capture(`${name}-composer-${width}`);
 			}
-			await page.evaluate("(()=>{const textarea=document.querySelector('.omp-composer textarea');Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(textarea,'');textarea.dispatchEvent(new Event('input',{bubbles:true}));})()");
+			await page.evaluate("window.composer.setText('')");
 			await capture(`${name}-placeholder-300`);
 			await page.evaluate("window.themeFixture.push({working:false})");
 			await capture(`${name}-idle-placeholder-300`);
-			await page.evaluate("(()=>{window.themeFixture.push({working:true});const textarea=document.querySelector('.omp-composer textarea');Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(textarea,'A follow-up');textarea.dispatchEvent(new Event('input',{bubbles:true}));})()");
+			await page.evaluate("(()=>{window.themeFixture.push({working:true});window.composer.setText('A follow-up');})()");
 			await page.call("Emulation.setDeviceMetricsOverride", { width: 1050, height: 740, deviceScaleFactor: 1, mobile: false });
 		}
 		const remainder = await page.evaluate<string[]>("['native','shell'].map(id=>document.getElementById(id).style.backgroundColor)");

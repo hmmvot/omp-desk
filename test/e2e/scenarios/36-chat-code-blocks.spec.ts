@@ -23,7 +23,7 @@ test("a code block typed in the composer edits like an editor and sends with Ctr
 	const page = await desk.window("alpha-desk");
 	await desk.ready(page);
 	const chat = await desk.newChatSession(page, "alpha-desk");
-	const box = chat.getByRole("combobox", { name: "Message OMP" });
+	const box = desk.composer(chat);
 	const prose = "Why does touchedLines in src/webview/lib/code-fence.ts leave out the last line of a selection?";
 
 	await box.click();
@@ -31,7 +31,7 @@ test("a code block typed in the composer edits like an editor and sends with Ctr
 	await box.press("Shift+Enter");
 	await box.pressSequentially("```ts");
 	await box.press("Enter");
-	await expect(box, "Enter after the opening fence supplies the closing one").toHaveValue(`${prose}\n\`\`\`ts\n\n\`\`\``);
+	await expect.poll(() => desk.readDraft(box), "Enter after the opening fence supplies the closing one").toBe(`${prose}\n\`\`\`ts\n\n\`\`\``);
 	await expect(chat.getByRole("status").filter({ hasText: "Code block" }), "the keys are listed while the caret is in the block").toBeVisible();
 
 	await box.pressSequentially(CODE[0]!);
@@ -46,10 +46,11 @@ test("a code block typed in the composer edits like an editor and sends with Ctr
 	await box.press("Shift+Tab");
 	await box.pressSequentially("}");
 	const draft = `${prose}\n\`\`\`ts\n${CODE.join("\n")}\n\`\`\``;
-	await expect(box, "Enter kept the indentation, Tab indented, Shift+Tab outdented").toHaveValue(draft);
+	await expect.poll(() => desk.readDraft(box), "Enter kept the indentation, Tab indented, Shift+Tab outdented").toBe(draft);
 	await expect(box, "none of those keys moved the focus").toBeFocused();
-	await expect(chat.locator(".omp-mirror-block"), "the block has its band").toHaveCount(1);
-	expect(await box.evaluate(element => getComputedStyle(element).fontFamily), "the draft is set in the editor font while it holds a block").not.toBe(await chat.locator(".omp-footer-trigger").first().evaluate(element => getComputedStyle(element).fontFamily));
+	await expect(chat.locator(".omp-composer-input .omp-line--code"), "the block's lines (fences included) have the band").toHaveCount(CODE.length + 2);
+	const fonts = await box.evaluate(element => ({ prose: getComputedStyle(element.children[0]!).fontFamily, code: getComputedStyle(element.querySelector(".omp-line--code")!).fontFamily }));
+	expect(fonts.code, "only the block is set in the editor font; the prose keeps the UI font").not.toBe(fonts.prose);
 
 	const shots = process.env.E2E_SHOTS_DIR;
 	if (shots) {
@@ -60,7 +61,7 @@ test("a code block typed in the composer edits like an editor and sends with Ctr
 
 	await box.press("Control+Enter");
 	await expect(chat.getByText(/Mock reply to: Why does touchedLines/), "the draft was sent and the model answered").toBeVisible({ timeout: 120_000 });
-	await expect(box, "a sent draft is cleared").toHaveValue("");
+	await expect.poll(() => desk.readDraft(box), "a sent draft is cleared").toBe("");
 
 	// Outside a block Tab still leaves the composer; inside one, Shift+Tab with nothing to outdent is the way out.
 	await box.click();
@@ -70,10 +71,10 @@ test("a code block typed in the composer edits like an editor and sends with Ctr
 	await box.pressSequentially("```");
 	await box.press("Enter");
 	await box.press("Tab");
-	await expect(box).toHaveValue("```\n    \n```");
+	await expect.poll(() => desk.readDraft(box)).toBe("```\n    \n```");
 	await expect(box).toBeFocused();
 	await box.press("Shift+Tab");
-	await expect(box).toHaveValue("```\n\n```");
+	await expect.poll(() => desk.readDraft(box)).toBe("```\n\n```");
 	await box.press("Shift+Tab");
 	await expect(box, "nothing left to outdent: the focus moves on").not.toBeFocused();
 });

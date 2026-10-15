@@ -48,7 +48,7 @@ test("a 770 KB and a 4 MB screenshot attach, send, reach the model and render in
 	await expect(chat.locator(".omp-attach-error"), "no refusal text is shown").toHaveCount(0);
 
 	// Attaching put the images' markers into the draft, and only a marker in the text sends its image: type after them, never over them (`desk.send` fills the box).
-	const box = chat.getByRole("combobox", { name: "Message OMP" });
+	const box = desk.composer(chat);
 	await box.press("Control+End");
 	await box.pressSequentially("look at these");
 	await chat.getByRole("button", { name: "Send message" }).click();

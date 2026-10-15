@@ -4,7 +4,6 @@ import {
 	activeImages,
 	compactForSend,
 	deletionRange,
-	draftSegments,
 	findImageReferences,
 	imageReferenceLabel,
 	pruneInactive,
@@ -77,13 +76,4 @@ test("deleted images are released oldest first and only when the draft would exc
 	assert.equal(pruneInactive(images, number => active.has(number), new Set(), 200).length, 3);
 	assert.deepEqual(pruneInactive(images, number => active.has(number), new Set(), 100).map(item => item.number), [2, 3]);
 	assert.deepEqual(pruneInactive(images, number => active.has(number), new Set([2]), 100).map(item => item.number), [2, 3], "a protected image survives");
-});
-
-test("draft segments split exactly at the markers", () => {
-	const text = "a [Image #1] b";
-	assert.deepEqual(draftSegments(text, findImageReferences(text, all)), [
-		{ marker: false, text: "a " },
-		{ marker: true, text: "[Image #1]", number: 1 },
-		{ marker: false, text: " b" },
-	]);
 });

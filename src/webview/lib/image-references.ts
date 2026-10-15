@@ -191,19 +191,3 @@ export function pruneInactive<T extends NumberedImage>(images: readonly T[], isA
 	}
 	return images.filter(image => !dropped.has(image.number));
 }
-
-/** A piece of draft text for the highlight layer: plain text or a marker. */
-export type DraftSegment = { readonly marker: false; readonly text: string } | { readonly marker: true; readonly text: string; readonly number: number };
-
-/** Splits `text` at the markers of `spans` so the composer can paint them. */
-export function draftSegments(text: string, spans: readonly ImageReferenceSpan[]): DraftSegment[] {
-	const segments: DraftSegment[] = [];
-	let cursor = 0;
-	for (const span of spans) {
-		if (span.start > cursor) segments.push({ marker: false, text: text.slice(cursor, span.start) });
-		segments.push({ marker: true, text: text.slice(span.start, span.end), number: span.number });
-		cursor = span.end;
-	}
-	if (cursor < text.length) segments.push({ marker: false, text: text.slice(cursor) });
-	return segments;
-}
