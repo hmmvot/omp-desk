@@ -3908,9 +3908,12 @@ describe("same-editor Chat and native Terminal actions", () => {
 			harness.warning(() => { requested.resolve(); return answer.promise; });
 			const switching = harness.switchSessionMode(f.saved.context, f.index, f.state, "terminal");
 			await bounded(requested.promise);
+			const registry = (harness.window() as unknown as { pending: { get(key: string): { kind: string; step: string } | undefined } }).pending;
+			assert.deepEqual([registry.get(f.row.tabId)?.kind, registry.get(f.row.tabId)?.step], ["view-switch", "confirm"], "the editor says it is switching, waiting for the answer");
 			await bounded(f.index.lifecycle.run(f.row.tabId, async () => undefined));
 			assert.equal((await f.chat.sessionOf(f.row.tabId)!.prompt({ requestId: "during-dialog", text: "Do not send" })).status, "refused");
 			answer.resolve(undefined); await switching;
+			assert.equal(registry.get(f.row.tabId), undefined, "a declined switch leaves nothing pending");
 			assert.equal(harness.record(f.state).runtime, f.native);
 			assert.equal(f.state.mode, "chat");
 			assert.equal(harness.record(f.state).transitioning, false);

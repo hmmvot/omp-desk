@@ -3923,8 +3923,18 @@ function projectFence(index: SessionIndex, state: TabState): void {
   pushSessionView(index, state);
 }
 
-/** One editor, one held claim, positively non-overlapping exact root generations. */
+/**
+ * Change an editor's view (Chat or Terminal): the editor says so from the click, with the step. A stopped session's change ends in a launch
+ * (`openTab`), so it is a `resume` and joins the attempt its caller may already have begun; a live one is a `view-switch`.
+ */
 async function switchSessionMode(context: vscode.ExtensionContext, index: SessionIndex, state: TabState, mode: SessionViewMode, reload = false, keepLiveView = false): Promise<void> {
+  const tabId = state.tabId;
+  if (tabId === null || state.panel === null) return switchSessionModeNow(context, index, state, mode, reload, keepLiveView);
+  await pendingEntry(tabId, hostOf(state) === null ? "resume" : "view-switch", { origin: "composer", step: "checking" }, () => switchSessionModeNow(context, index, state, mode, reload, keepLiveView));
+}
+
+/** One editor, one held claim, positively non-overlapping exact root generations. */
+async function switchSessionModeNow(context: vscode.ExtensionContext, index: SessionIndex, state: TabState, mode: SessionViewMode, reload = false, keepLiveView = false): Promise<void> {
   const s = windowState();
   if (state.tabId === null || state.panel === null || fencedOf(state) || passiveReasonForSlot(state.slotId) !== null || s.openingTabs.has(state.tabId)) {
     showWarning("This editor cannot change views while the session is starting or stopping, or another editor controls it.");
@@ -4041,6 +4051,7 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
     let consent = false;
     if (!captured.settled || reload) {
       const label = reload ? "Reload" : `Switch to ${mode === "chat" ? "Chat" : "Terminal"}`;
+      s.pending.step(tabId, "confirm", "view-switch");
       consent = await vscode.window.showWarningMessage(
         reload ? "Reload this OMP process in the same view?" : `OMP is busy. Abort the current turn and switch to ${mode === "chat" ? "Chat" : "Terminal"}?`,
         { modal: true, detail: "The current process must stop before the new view opens. Queued or background work may delay shutdown, and an accepted shutdown cannot be cancelled. In-flight tool effects may not be fully saved." },
@@ -4050,6 +4061,8 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
     }
     carried = state.mode === "chat" ? await s.guestDispatcher.carryDraftFrom(state.panel) : null;
     if (carried !== null) s.draftRestores.set(state.slotId, carried);
+    s.pending.step(tabId, "working", "view-switch");
+    s.launchTimeline.begin(tabId, "view switch");
     const result = await s.sessionRuntime.replaceWriter({
       conversation: tabId, token: held, target, mode, binding: { slot: state.slotId, generation: binding.generation },
       stop: { kind: "graceful", consent, captured }, bounded: true,
@@ -4089,6 +4102,7 @@ async function switchSessionMode(context: vscode.ExtensionContext, index: Sessio
       s.guestDispatcher.releaseCarriedDraft(carried);
       if (s.draftRestores.get(state.slotId) === carried) s.draftRestores.delete(state.slotId);
     }
+    s.launchTimeline.abandon(tabId);
     if (s.pendingSessionViewChanges.get(state) === modeRequest) s.pendingSessionViewChanges.delete(state);
     if (token !== null) s.sessionRuntime.endTransition(token, "dispatched-stop");
     else pushSessionView(index, state);

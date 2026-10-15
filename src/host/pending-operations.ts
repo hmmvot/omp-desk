@@ -158,12 +158,14 @@ export class PendingOperations {
 	}
 
 	/**
-	 * Name the step of the displayed launch-family operation of `key`, or of its latest operation of `kind` when one is given; nothing
-	 * happens when there is none. For code that does not hold the handle.
+	 * Name the step of the displayed launch operation of `key` (the launch family, or a view switch, which relaunches), or of its latest
+	 * operation of `kind` when one is given; nothing happens when there is none. For code that does not hold the handle.
 	 */
 	step(key: string, step: PendingStep, kind?: PendingKind): void {
 		const live = this.#byKey.get(key);
-		const operation = kind === undefined ? live?.findLast(candidate => isLaunchFamily(candidate.kind)) : live?.findLast(candidate => candidate.kind === kind);
+		const operation = kind === undefined
+			? live?.findLast(candidate => isLaunchFamily(candidate.kind) || candidate.kind === "view-switch")
+			: live?.findLast(candidate => candidate.kind === kind);
 		if (operation === undefined || operation.step === step) return;
 		operation.step = step;
 		this.#emit({ key });
