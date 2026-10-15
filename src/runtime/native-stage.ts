@@ -13,9 +13,8 @@
  */
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { recordingLogger, type LoggedLine } from "../shared/logger.ts";
 import { stageRuntimeAssets } from "../host/runtime-assets.ts";
-import { startWin32Native } from "../host/win32-native.ts";
+import { startWin32Native, win32NativeFailure } from "../host/win32-native.ts";
 
 /** What the child reports on its one line of output. */
 export type NativeStageVerdict =
@@ -26,9 +25,8 @@ export type NativeStageVerdict =
 export async function stageNativeModule(packaged: string, storageDir: string): Promise<NativeStageVerdict> {
 	try {
 		const sha256 = createHash("sha256").update(await readFile(packaged)).digest("hex");
-		const lines: LoggedLine[] = [];
-		const native = await startWin32Native(async () => ({ path: packaged, sha256 }), recordingLogger(lines));
-		if (native === null) return { kind: "refused", reason: lines.at(-1)?.message ?? "the packaged native module did not load" };
+		const native = await startWin32Native(async () => ({ path: packaged, sha256 }));
+		if (native === null) return { kind: "refused", reason: win32NativeFailure() ?? "the packaged native module did not load" };
 		const [staged] = await stageRuntimeAssets({ storageDir, sourcePaths: [packaged] });
 		if (staged === undefined) return { kind: "refused", reason: "staging returned no copy" };
 		return { kind: "staged", path: staged.path, sha256: staged.sha256 };

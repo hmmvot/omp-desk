@@ -513,26 +513,37 @@ export async function loadWin32Native(asset: NativeModuleAsset, arch: string = p
 }
 
 let shared: Promise<Win32Native | null> | null = null;
+/** The message of the failure that made the load settle as unavailable; `null` while loading, after a load and when none was started. */
+let failure: string | null = null;
 
 /**
  * Start the one load of this process. Called first thing in activation, before any reader asks:
  * every reader awaits {@link win32Native}, and `null` is only ever the settled "unavailable".
+ * `source` throws, naming the cause, when it has no module to give: the message is kept for {@link win32NativeFailure}.
  */
 export function startWin32Native(source: () => Promise<NativeModuleAsset | null>, log: Logger = silentLogger): Promise<Win32Native | null> {
 	shared ??= (async () => {
+		failure = null;
 		try {
 			const asset = await source();
 			if (asset === null) {
-				log.warn("the native module is unavailable: it could not be staged; Windows checks read as unknown");
+				failure = "it could not be staged";
+				log.warn(`the native module is unavailable: ${failure}; Windows checks read as unknown`);
 				return null;
 			}
 			return await loadWin32Native(asset);
 		} catch (error) {
-			log.warn(`the native module is unavailable: ${error instanceof Error ? error.message : String(error)}; Windows checks read as unknown`);
+			failure = error instanceof Error ? error.message : String(error);
+			log.warn(`the native module is unavailable: ${failure}; Windows checks read as unknown`);
 			return null;
 		}
 	})();
 	return shared;
+}
+
+/** Why the process's load settled as unavailable, as the raw message of the last failure; `null` when it did not fail. */
+export function win32NativeFailure(): string | null {
+	return failure;
 }
 
 /** The process's native module once its load has settled; `null` when it could not load (or none was started). */
@@ -542,5 +553,6 @@ export function win32Native(): Promise<Win32Native | null> {
 
 /** Replace the process's native module. Tests only. */
 export function setWin32NativeForTest(native: Win32Native | null | undefined): void {
+	failure = null;
 	shared = native === undefined ? null : Promise.resolve(native);
 }

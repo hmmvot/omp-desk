@@ -65,13 +65,17 @@ describe("runtime staging", () => {
 		assert.equal(await staging.native(), null);
 		assert.equal(f.logs.length, 1);
 		assert.match(f.logs[0]?.message ?? "", /native module could not be staged: the staged tree is readable by another account/);
+		assert.equal(staging.nativeRefusal(), "the staged tree is readable by another account", "the raw verdict reason is kept for the classification");
 		assert.equal(f.logs[0]?.level, "warn");
 	});
 
 	it("reports a child that failed to run as no module", async () => {
 		const f = await deps({ stageNative: async () => { throw new Error("spawn failed"); } });
-		assert.equal(await createRuntimeStaging(f.deps).native(), null);
+		const staging = createRuntimeStaging(f.deps);
+		assert.equal(staging.nativeRefusal(), null, "nothing is refused before a staging was tried");
+		assert.equal(await staging.native(), null);
 		assert.match(f.logs[0]?.message ?? "", /native module could not be staged: spawn failed/);
+		assert.equal(staging.nativeRefusal(), "spawn failed", "the raw message of a child that failed to run");
 	});
 
 	it("hands out the staged copy while it holds its digest and asks the child again when it does not", async () => {
@@ -90,5 +94,6 @@ describe("runtime staging", () => {
 		await writeFile(copy, "tampered");
 		await staging.native();
 		assert.equal(runs, 2, "a copy that no longer holds its digest is staged again");
+		assert.equal(staging.nativeRefusal(), null, "a staged copy leaves no refusal");
 	});
 });

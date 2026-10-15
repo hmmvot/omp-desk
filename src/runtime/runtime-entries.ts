@@ -64,6 +64,8 @@ export interface RuntimeStaging {
 	 * readings it serves unknown and must never stop a host from launching.
 	 */
 	native(): Promise<StagedRuntimeAsset | null>;
+	/** Why the last {@link RuntimeStaging.native} call returned `null`, as the raw message; `null` after a staged copy. */
+	nativeRefusal(): string | null;
 }
 
 /** Do the copies still hold the bytes their digests name? */
@@ -77,6 +79,7 @@ async function stagedEntriesIntact(entries: StagedRuntimeEntries): Promise<boole
 export function createRuntimeStaging(deps: RuntimeStagingDeps): RuntimeStaging {
 	let stagedEntries: Promise<StagedRuntimeEntries> | null = null;
 	let stagedNative: Promise<StagedRuntimeAsset | null> | null = null;
+	let nativeRefusal: string | null = null;
 	return {
 		async entries() {
 			const cached = stagedEntries;
@@ -111,16 +114,22 @@ export function createRuntimeStaging(deps: RuntimeStagingDeps): RuntimeStaging {
 			}
 			stagedNative = deps.stageNative().then(
 				verdict => {
-					if (verdict.kind === "staged") return { path: verdict.path, sha256: verdict.sha256 };
+					if (verdict.kind === "staged") {
+						nativeRefusal = null;
+						return { path: verdict.path, sha256: verdict.sha256 };
+					}
+					nativeRefusal = verdict.reason;
 					deps.log.warn(`the native module could not be staged: ${verdict.reason}`);
 					return null;
 				},
 				(error: unknown) => {
-					deps.log.warn(`the native module could not be staged: ${error instanceof Error ? error.message : String(error)}`);
+					nativeRefusal = error instanceof Error ? error.message : String(error);
+					deps.log.warn(`the native module could not be staged: ${nativeRefusal}`);
 					return null;
 				},
 			);
 			return await stagedNative;
 		},
+		nativeRefusal: () => nativeRefusal,
 	};
 }

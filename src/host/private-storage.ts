@@ -24,7 +24,8 @@ import * as fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { win32Native } from "./win32-native.ts";
+import { win32Native, win32NativeFailure } from "./win32-native.ts";
+import { nativeUnavailableDetail } from "./native-module-failure.ts";
 import { startToolSpawnTrace, type ToolSpawn, type ToolSpawnOutcome } from "./tool-spawn-trace.ts";
 
 /** One bounded security-tool result; injected so tests never depend on machine ACLs. */
@@ -252,7 +253,7 @@ export interface PrivateStorageSecurityRead {
 export async function readStorageSecurity(paths: readonly string[]): Promise<PrivateStorageSecurityRead> {
 	const native = await win32Native();
 	if (native === null) {
-		const detail = "the native module is unavailable";
+		const detail = nativeUnavailableDetail(win32NativeFailure());
 		return {
 			sid: null,
 			failure: detail,

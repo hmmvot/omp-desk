@@ -114,7 +114,8 @@ import { holderSeemsAlive } from "./host/holder-liveness";
 import { claimFileNameFor, startClaimWatch } from "./host/claim-watch";
 import { WindowRegistry } from "./host/window-registry";
 import { ExternalLeaseObserver, nativeLeaseProbe, ompSessionOwnersDir } from "./host/omp-session-lease";
-import { startWin32Native, win32Native } from "./host/win32-native";
+import { startWin32Native, win32Native, win32NativeFailure } from "./host/win32-native";
+import { announceNativeFailure, nativeDiagnosticsFor, simulatedNativeFailure } from "./wiring/native-module-notice";
 import { canonicalFolderKey, folderHistoryDeletionSubject, inspectSessionFile, scanFolderHistory } from "./host/folder-history";
 import type { FolderHistoryCandidate, FolderHistoryIndexedEntry, FolderHistoryScan } from "./host/folder-history";
 import { findFileMentions } from "./host/file-mentions";
@@ -377,6 +378,8 @@ const HOST_CONTROL_MODULE = "out/omp-host-control.mjs";
 const NATIVE_ADDON = "out/native/koffi.node";
 /** Packaged one-shot child that stages that addon and verifies the tree it lands in (ADR-0076). */
 const NATIVE_STAGE_CHILD = "out/native-stage.js";
+/** The README section that explains a native module that cannot load and how an administrator allows it. */
+const NATIVE_TROUBLESHOOTING_URL = "https://github.com/hmmvot/omp-desk#the-native-module-is-blocked-or-missing";
 /**
  * The Bun helper that renames a *stopped* session's stored title through the
  * installed agent's own storage code. It is a plain packaged ESM file: it is not
@@ -1479,7 +1482,33 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // The native module (ADR-0076) answers every Windows question below in process. Its one load starts here, before the
   // first reader asks, and every reader awaits it: a reader that ran ahead of an unfinished load would file this window's
   // claims without a creation time for good.
-  if (process.platform === "win32") void startWin32Native(() => s.staging.native(), log);
+  if (process.platform === "win32") {
+    const nativeLoad = startWin32Native(async () => {
+      const simulated = simulatedNativeFailure(process.env.OMP_DESK_TEST_NATIVE_FAILURE);
+      if (simulated !== null) throw new Error(simulated);
+      const asset = await s.staging.native();
+      // The load records why it has nothing to load; staging's own words are the cause the notice classifies.
+      if (asset === null) throw new Error(s.staging.nativeRefusal() ?? "the native module could not be staged");
+      return asset;
+    }, log);
+    // Once per window: a load that settled as unavailable says so, with what to do (ADR-0076, decision 6).
+    void nativeLoad.then(() => announceNativeFailure({
+      failure: win32NativeFailure,
+      showError: (message, buttons) => vscode.window.showErrorMessage(`OMP Desk: ${message}`, ...buttons),
+      copy: text => vscode.env.clipboard.writeText(text),
+      openTroubleshooting: () => vscode.env.openExternal(vscode.Uri.parse(NATIVE_TROUBLESHOOTING_URL)),
+      reloadWindow: () => vscode.commands.executeCommand("workbench.action.reloadWindow"),
+      diagnostics: failure => nativeDiagnosticsFor({
+        failure,
+        shippedPath: context.asAbsolutePath(NATIVE_ADDON),
+        storageDir: context.globalStorageUri.fsPath,
+        vscodeVersion: vscode.version,
+        deskVersion: diagnosticsEnvironment(context).extensionVersion,
+        arch: process.arch,
+      }),
+      log,
+    }));
+  }
   // This host's start time is a PowerShell command, hundreds of milliseconds to seconds on a busy machine. It runs beside
   // the rest of the setup; only the claims the index writes wait for it (ADR-0035), so the Sessions view, the commands
   // and the editors appear without it. A synchronous read froze every extension in the host; an awaited one held them back.

@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { recordingLogger, type LoggedLine } from "../shared/logger.ts";
-import { loadWin32Native, peMachineOf, setWin32NativeForTest, startWin32Native, win32Native } from "./win32-native.ts";
+import { loadWin32Native, peMachineOf, setWin32NativeForTest, startWin32Native, win32Native, win32NativeFailure } from "./win32-native.ts";
 import { holdMutex, installedAddonAsset, releaseMutex } from "./win32-test-support.ts";
 
 describe("peMachineOf", () => {
@@ -275,6 +275,20 @@ describe("the process's native module", () => {
 		const missing = path.join(tmpdir(), `missing-${randomUUID()}.node`);
 		assert.equal(await startWin32Native(async () => ({ path: missing, sha256: "0".repeat(64) }), recordingLogger(logs)), null);
 		assert.match(logs[0]!.message, /native module is unavailable: .*cannot be read/);
+	});
+
+	it("records the raw failure for the notice, and none after a load that succeeded or before one started", { skip: process.platform !== "win32" }, async () => {
+		assert.equal(win32NativeFailure(), null);
+		const missing = path.join(tmpdir(), `missing-${randomUUID()}.node`);
+		await startWin32Native(async () => ({ path: missing, sha256: "0".repeat(64) }));
+		assert.match(win32NativeFailure() ?? "", /cannot be read/);
+		setWin32NativeForTest(undefined);
+		await startWin32Native(async () => { throw new Error("This program is blocked by group policy."); });
+		assert.equal(win32NativeFailure(), "This program is blocked by group policy.", "a source that throws names its own cause");
+		setWin32NativeForTest(undefined);
+		assert.equal(win32NativeFailure(), null);
+		await startWin32Native(async () => installedAddonAsset());
+		assert.equal(win32NativeFailure(), null);
 	});
 
 	it("loads the real staged copy once", { skip: process.platform !== "win32" }, async () => {
