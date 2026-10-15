@@ -106,6 +106,27 @@ export async function useSynchronousLocalFs(
 	return true;
 }
 
+/** The verdict of each directory {@link useSynchronousLocalFsFor} was asked about, by lower-cased resolved path. */
+const directoryVerdicts = new Map<string, Promise<boolean>>();
+
+/**
+ * {@link useSynchronousLocalFs} for one directory Desk does not own and cannot name at activation (the folder of a recorded OMP
+ * session file): asked at the first call that needs it, remembered per directory, so every later call on it (the next tab of the
+ * same project) is answered from the map. A directory with a `false` verdict stays on the asynchronous calls.
+ */
+export function useSynchronousLocalFsFor(
+	directory: string,
+	verdict: (targets: readonly string[]) => Promise<boolean>,
+): Promise<boolean> {
+	const key = keyOf(directory);
+	let known = directoryVerdicts.get(key);
+	if (known === undefined) {
+		known = useSynchronousLocalFs([directory], verdict).catch(() => false);
+		directoryVerdicts.set(key, known);
+	}
+	return known;
+}
+
 /** The file operations to use for `target`: synchronous below a verified root, asynchronous anywhere else. */
 export function localFs(target: string): LocalFs {
 	if (synchronousRoots.size === 0) return asynchronousFs;

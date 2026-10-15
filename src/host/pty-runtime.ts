@@ -38,7 +38,8 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { readFile, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
+import { localFs } from "./local-fs.ts";
 import { join } from "node:path";
 import process from "node:process";
 import type { PrivateStorageProbe } from "./private-storage.ts";
@@ -455,13 +456,19 @@ export const PTY_TREE_DIGEST_FILE = "out/pty-tree.json";
 /** The layout marker of a recorded digest, the one `hashRuntimeTree` puts in the digest itself. */
 const PTY_TREE_DIGEST_FORMAT = "omp-runtime-tree/v1";
 
+/** The file of {@link ptyRecordedTreeDigest}. */
+export function ptyRecordedTreeDigestFile(extensionRoot: string): string {
+	return join(extensionRoot, ...PTY_TREE_DIGEST_FILE.split("/"));
+}
+
 /**
  * The digest of the packaged tree as the build recorded it, or `null` when there is no usable record (a build from source or
  * a watch build, a record that is missing, unreadable or not a digest): the caller then hashes the tree. One small read.
  */
 export async function ptyRecordedTreeDigest(extensionRoot: string): Promise<string | null> {
 	try {
-		const parsed: unknown = JSON.parse(await readFile(join(extensionRoot, ...PTY_TREE_DIGEST_FILE.split("/")), "utf8"));
+		const file = ptyRecordedTreeDigestFile(extensionRoot);
+		const parsed: unknown = JSON.parse(await localFs(file).readFile(file, "utf8"));
 		if (typeof parsed !== "object" || parsed === null || !("format" in parsed) || !("digest" in parsed)) return null;
 		return parsed.format === PTY_TREE_DIGEST_FORMAT && isPtyDigest(parsed.digest) ? parsed.digest : null;
 	} catch {

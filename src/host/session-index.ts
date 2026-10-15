@@ -13,7 +13,8 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { stat } from "node:fs/promises";
+import { useSynchronousLocalFsFor, localFs } from "./local-fs.ts";
+import { synchronousLocalPaths } from "./private-storage.ts";
 import * as path from "node:path";
 import type { Logger } from "../shared/logger.ts";
 import { FILE_OPERATION_BACKOFF_MS, retryFileOperation } from "./atomic-file.ts";
@@ -3550,9 +3551,15 @@ function resolveWorkspaceDirectoryInput(value: string, caller: string): string {
 	return normalizeWorkspaceDirectory(value);
 }
 
+/**
+ * Whether `file` is a regular file. The folder of a recorded OMP session file is proved local like Desk's own storage (ADR-0076,
+ * decision 15), once per folder, and the `stat` is then one synchronous step: the restore asks once per tab before anything else,
+ * and an asynchronous `stat` came back after 0.6 s in every tab of a reload that kept the host's event loop busy.
+ */
 async function fileExists(file: string): Promise<boolean> {
 	try {
-		return (await stat(file)).isFile();
+		await useSynchronousLocalFsFor(path.dirname(file), synchronousLocalPaths);
+		return (await localFs(file).stat(file)).isFile();
 	} catch {
 		return false;
 	}

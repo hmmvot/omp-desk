@@ -34,6 +34,7 @@ import { link, lstat, mkdir, readdir, readFile, rm, unlink, writeFile } from "no
 import { createHash, randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { stageBeside } from "./atomic-file.ts";
+import { localFs } from "./local-fs.ts";
 import { restrictPrivateStorage, synchronousLocalPaths, type PrivateStorageProbe, type StoragePhaseSink } from "./private-storage.ts";
 import { PTY_RECORD_SUFFIX, isPtyCreationTime, parsePtyBrokerRecord, type PtyBrokerRecord } from "./pty-protocol.ts";
 import { isPtyProcessAlive } from "./pty-identity.ts";
@@ -191,12 +192,16 @@ export type PtyRecordLookup =
 	| { readonly kind: "ok"; readonly record: PtyBrokerRecord }
 	| { readonly kind: "invalid"; readonly detail: string };
 
-/** Read one slot's record. A malformed record is reported, never treated as absent. */
+/**
+ * Read one slot's record. A malformed record is reported, never treated as absent. On a verified local NTFS volume the read is
+ * one synchronous step (ADR-0076, decision 15): the restore reads one record per tab, and four asynchronous pool jobs, each
+ * finished by a turn of a busy event loop, took 2.2 s of a reload.
+ */
 export async function readPtyRecord(storageDir: string, slot: string): Promise<PtyRecordLookup> {
 	const path = ptyRecordPath(storageDir, slot);
 	let text: string;
 	try {
-		text = await readFile(path, "utf8");
+		text = await localFs(path).readFile(path, "utf8");
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") return { kind: "none" };
 		return { kind: "invalid", detail: `the broker record could not be read (${errorCode(error)})` };

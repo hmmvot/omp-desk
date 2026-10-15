@@ -244,6 +244,8 @@ import { EDITOR_GROUP_FOCUS_COMMANDS } from "./host/chat-layout";
 // The folder shell's terminal (ADR-0024): the extension-owned PTY broker is the writer, the
 // panel is only a frontend, and this module owns the glue between them.
 import { PtyBrokerClient } from "./host/pty-client";
+import { ptyStateDirectory } from "./host/pty-registry";
+import { ptyRecordedTreeDigestFile } from "./host/pty-runtime";
 import { createPtyReadinessGate } from "./host/pty-readiness";
 import type { PtyReadinessGate } from "./host/pty-readiness";
 import { createBrokerSlotStore, mergeBrokerSlotRecords, BROKER_SLOTS_KEY } from "./host/broker-slots";
@@ -1514,7 +1516,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // synchronous steps; the locks still wait on timers (ADR-0076, decision 12). Without the native module they stay asynchronous.
   const catalogReadStartedAt = performance.now();
   const synchronousFileCalls = useSynchronousLocalFs(
-    [claimsDirectory(context.globalStorageUri.fsPath), catalogPaths(context.globalStorageUri.fsPath).root],
+    [claimsDirectory(context.globalStorageUri.fsPath), catalogPaths(context.globalStorageUri.fsPath).root, ptyStateDirectory(context.globalStorageUri.fsPath)],
     targets => synchronousLocalPaths(targets),
   );
   let catalogReadMs = 0;
@@ -1589,10 +1591,15 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     () => undefined,
   );
   // The digest of the packaged broker tree is the other thing every re-adoption needs first. It only decides "same build" for a
-  // broker that attests its own identity (ADR-0024, ADR-0035). The build records it next to the tree, so this is one small read;
-  // the installed tree is hashed once, after the startup restore, to check that record (ADR-0076, decision 14), and a build with
-  // no record (from source, a watch build) hashes the tree here as before. A refusal is not cached and the first attach asks again.
-  void s.ptyClient.attachIdentity();
+  // broker that attests its own identity (ADR-0024, ADR-0035). The build records it next to the tree, so this is one small read,
+  // synchronous when the extension folder is proved local like the claims' (ADR-0076, decisions 14 and 15), which is why the read
+  // starts after that verdict; the installed tree is hashed once, after the startup restore, to check that record, and a build
+  // with no record (from source, a watch build) hashes the tree here as before. A refusal is not cached and the first attach asks again.
+  const ptyClientForIdentity = s.ptyClient;
+  const treeRecordFile = ptyRecordedTreeDigestFile(context.extensionUri.fsPath);
+  void useSynchronousLocalFs([path.dirname(treeRecordFile)], () => synchronousLocalPaths([treeRecordFile]))
+    .catch(() => false)
+    .then(() => ptyClientForIdentity.attachIdentity());
   const ptyClientForTreeCheck = s.ptyClient;
   void s.startupRestoreOver.promise.then(() => {
     const check = setTimeout(() => { void ptyClientForTreeCheck.verifyPackagedTree().catch(() => undefined); }, PACKAGED_TREE_CHECK_DELAY_MS);

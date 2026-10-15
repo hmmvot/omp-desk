@@ -23,7 +23,7 @@ describe("startup file-system turnaround probe", () => {
 		assert.equal(logged[0]!.level, "info");
 		assert.equal(
 			logged[0]!.message,
-			"window timing: startup file-system turnaround over 3 samples every 1 ms (asynchronous stat: median 7 ms, max 400 ms; synchronous stat: median 1 ms, max 1 ms)",
+			"window timing: startup file-system turnaround over 3 samples every 1 ms (asynchronous stat: median 7 ms, max 400 ms; synchronous stat: median 1 ms, max 1 ms); slowest asynchronous stats: 400 ms at +7 ms",
 		);
 	});
 

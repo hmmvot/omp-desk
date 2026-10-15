@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, it } from "node:test";
-import { localFs, markSynchronousLocalRoots, useSynchronousLocalFs } from "./local-fs.ts";
+import { localFs, markSynchronousLocalRoots, useSynchronousLocalFs, useSynchronousLocalFsFor } from "./local-fs.ts";
+import { ptyRecordPath, ptyStateDirectory, readPtyRecord } from "./pty-registry.ts";
+import { ptyRecordedTreeDigest, ptyRecordedTreeDigestFile } from "./pty-runtime.ts";
 import { catalogPaths, readCatalogDocument, transactCatalog } from "./profile-catalog.ts";
 import { acquireClaim, claimMutexPath, claimPathFor, createClaimHolder, createOwnerGeneration, readClaim } from "./session-claim.ts";
 
@@ -138,5 +140,49 @@ describe("synchronous local file calls", () => {
 		await handle.close();
 		await assert.rejects(io.open(target, "wx", 0o600), { code: "EEXIST" });
 		await io.rm(path.join(dir, "missing"), { force: true });
+	});
+
+	it("read a broker record and the build's tree digest without a turn of the loop, with the answers the asynchronous reads give", async () => {
+		const storage = await tempDir();
+		const extension = await tempDir();
+		const unbuilt = await tempDir();
+		await mkdir(ptyStateDirectory(storage), { recursive: true });
+		for (const root of [extension, unbuilt]) await mkdir(path.dirname(ptyRecordedTreeDigestFile(root)), { recursive: true });
+		await writeFile(ptyRecordPath(storage, "tab:bad"), "{ this is not json", "utf8");
+		await writeFile(ptyRecordedTreeDigestFile(extension), `${JSON.stringify({ format: "omp-runtime-tree/v1", digest: "ab".repeat(32), files: 3 })}\n`, "utf8");
+		const asynchronous = [await readPtyRecord(storage, "tab:bad"), await readPtyRecord(storage, "tab:none"), await ptyRecordedTreeDigest(extension), await ptyRecordedTreeDigest(unbuilt)];
+		assert.deepEqual(asynchronous.map(answer => (typeof answer === "object" && answer !== null ? answer.kind : answer)), ["invalid", "none", "ab".repeat(32), null]);
+
+		unmark.push(markSynchronousLocalRoots([ptyStateDirectory(storage), ...[extension, unbuilt].map(root => path.dirname(ptyRecordedTreeDigestFile(root)))]));
+		let synchronous: typeof asynchronous = [];
+		const turned = await loopTurnedDuring(async () => {
+			synchronous = [await readPtyRecord(storage, "tab:bad"), await readPtyRecord(storage, "tab:none"), await ptyRecordedTreeDigest(extension), await ptyRecordedTreeDigest(unbuilt)];
+		});
+		assert.equal(turned, false, "no read of the restore's record or of the tree digest waited for the loop");
+		assert.deepEqual(synchronous, asynchronous);
+	});
+
+	it("ask once per directory whether a file there may be reached synchronously, and keep the answer", async () => {
+		const yes = await tempDir();
+		const no = await tempDir();
+		await writeFile(path.join(yes, "a.jsonl"), "a", "utf8");
+		await writeFile(path.join(yes, "b.jsonl"), "b", "utf8");
+		await writeFile(path.join(no, "c.jsonl"), "c", "utf8");
+		const asked: string[] = [];
+		const verdict = async (targets: readonly string[]): Promise<boolean> => {
+			asked.push(...targets);
+			return targets[0] === yes;
+		};
+		const asynchronous = localFs(yes);
+		assert.equal(await useSynchronousLocalFsFor(yes, verdict), true);
+		unmark.push(markSynchronousLocalRoots([yes]));
+		assert.equal(await useSynchronousLocalFsFor(yes, verdict), true);
+		assert.equal(await useSynchronousLocalFsFor(no, verdict), false);
+		assert.equal(await useSynchronousLocalFsFor(no, verdict), false);
+		assert.deepEqual(asked, [yes, no], "each directory was judged once");
+		assert.notEqual(localFs(path.join(yes, "a.jsonl")), asynchronous);
+		assert.equal(localFs(path.join(no, "c.jsonl")), asynchronous, "a directory judged no keeps the asynchronous calls");
+		assert.equal(await useSynchronousLocalFsFor(yes, async () => { throw new Error("native module failed"); }), true, "the first answer stays");
+		assert.equal(await useSynchronousLocalFsFor(path.join(yes, "sub"), async () => { throw new Error("native module failed"); }), false, "a verdict that fails is no");
 	});
 });

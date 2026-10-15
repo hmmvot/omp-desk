@@ -34,14 +34,26 @@ function summary(values: readonly number[]): string {
 	return `median ${Math.round(sorted[Math.floor(sorted.length / 2)]!)} ms, max ${Math.round(sorted[sorted.length - 1]!)} ms`;
 }
 
+/** An asynchronous sample at least this slow is listed with its moment, so a queue can be matched with what the log says ran then. */
+const SLOW_SAMPLE_MS = 100;
+/** How many slow samples the line names. */
+const SLOWEST_LISTED = 3;
+
+/** The slowest samples, each with the offset from the probe's start at which it began; empty when none was slow. */
+function slowest(samples: readonly { readonly at: number; readonly took: number }[]): string {
+	const slow = samples.filter(sample => sample.took >= SLOW_SAMPLE_MS).sort((left, right) => right.took - left.took).slice(0, SLOWEST_LISTED);
+	return slow.length === 0 ? "" : `; slowest asynchronous stats: ${slow.map(sample => `${Math.round(sample.took)} ms at +${Math.round(sample.at)} ms`).join(", ")}`;
+}
+
 /** Sample the file system's turnaround and log one summary line when the last tick has run. Returns the function that stops it. */
 export function startFsTurnaroundProbe(options: FsTurnaroundOptions): () => void {
 	const total = options.samples ?? 40;
 	const intervalMs = options.intervalMs ?? 250;
 	const now = options.now ?? (() => performance.now());
+	const startedAt = now();
 	const statAsync = options.statAsync ?? ((target: string) => fs.promises.stat(target));
 	const statSync = options.statSync ?? ((target: string) => fs.statSync(target));
-	const asynchronous: number[] = [];
+	const asynchronous: { at: number; took: number }[] = [];
 	const synchronous: number[] = [];
 	let ticks = 0;
 	let settled = 0;
@@ -51,7 +63,7 @@ export function startFsTurnaroundProbe(options: FsTurnaroundOptions): () => void
 		if (stopped) return;
 		stopped = true;
 		options.log.info(
-			`window timing: startup file-system turnaround over ${ticks} samples every ${intervalMs} ms (asynchronous stat: ${summary(asynchronous)}; synchronous stat: ${summary(synchronous)})`,
+			`window timing: startup file-system turnaround over ${ticks} samples every ${intervalMs} ms (asynchronous stat: ${summary(asynchronous.map(sample => sample.took))}; synchronous stat: ${summary(synchronous)})${slowest(asynchronous)}`,
 		);
 	};
 	const timer = setInterval(() => {
@@ -70,7 +82,7 @@ export function startFsTurnaroundProbe(options: FsTurnaroundOptions): () => void
 			if (ticks >= total && settled >= ticks) report();
 		};
 		void Promise.resolve(statAsync(options.target)).then(
-			() => { asynchronous.push(now() - asyncBegin); finish(); },
+			() => { asynchronous.push({ at: asyncBegin - startedAt, took: now() - asyncBegin }); finish(); },
 			finish,
 		);
 		if (ticks >= total) clearInterval(timer);
