@@ -75,6 +75,14 @@ Every caller inherits this because there is one resolver: session launch (`launc
 
 **Review.** Independent architect review of this amendment: see *Amendment review (2026-10-12)* at the end of this record.
 
+## Amendment (2026-10-15): a bun shim's release is read from its package, not asked
+
+**Why.** After the 2026-10-12 amendment a busy machine no longer selects the wrong OMP, but it still pays for the question: the `--version` probe is a process start (Bun running OMP's entry), and at a reload with three windows on a saturated machine it ran past its 15 s limit and the slash-command registry went unread for that window ("`omp --version` of …\.bun\bin\omp.exe did not finish within 15 s"). For a bun shim the question has no new information: resolution has already followed the shim's metadata to Bun and to the entry script, checked that both are runnable files, and the package that holds the entry carries its release in its manifest.
+
+**Decision.** For a candidate resolved as a bun shim, `resolveOmpBinary` takes the release from the `version` field of the manifest of the OMP package that holds the entry (the nearest ancestor whose manifest names `@oh-my-pi/pi-coding-agent`, the same package `resolveOmpPackageRoot` already uses), normalised to major.minor.patch as `--version` output is, and starts no process. A manifest that cannot be read for a transient reason ends the resolution as transient, as every other inspection does; one that is missing, is not OMP's or gives no version leaves the candidate to the probe, unchanged. A standalone OMP program has no package to read and keeps the probe, with its definitive and transient outcomes exactly as above.
+
+**What it gives up, stated.** A bun shim whose entry script cannot run (it exits non-zero when asked for its version) used to be rejected at resolution and the search moved on; it is now selected, and the failure shows when a session starts, as for any later fault of that install. The release was never an admission rule (the first amendment's text and `verifyLaunchCandidate` say so): it is quoted in messages and checked against the package manifest by `resolveOmpPackageRoot`, which now agrees with it by construction. No decision of the inventory, the slash registry or the launch reads it.
+
 ## Related Documents
 
 - [ADR-0010: exact installed-release target](0010-use-verified-installed-omp-1830.md) — proposed, never adopted; replaced by this record.

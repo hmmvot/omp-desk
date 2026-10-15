@@ -21,6 +21,7 @@
  */
 
 import * as fs from "node:fs/promises";
+import * as fsSync from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
@@ -583,9 +584,61 @@ export function describeStorageError(error: unknown): string {
 	return error instanceof Error ? error.name : "unknown error";
 }
 
-async function ensureDirectories(layout: PrivateStorageLayout): Promise<void> {
+/** The file system calls of a verification, as asynchronous jobs or, for verified local NTFS paths, one synchronous step each. */
+interface StorageFs {
+	mkdir(directory: string): void | Promise<void>;
+	lstat(target: string): fsSync.Stats | null | Promise<fsSync.Stats | null>;
+	lstatBig(target: string): fsSync.BigIntStats | null | Promise<fsSync.BigIntStats | null>;
+	realpath(target: string): string | null | Promise<string | null>;
+}
+
+const asyncFs: StorageFs = {
+	mkdir: directory => fs.mkdir(directory, { recursive: true, mode: 0o700 }).then(() => undefined),
+	lstat: target => fs.lstat(target).catch(() => null),
+	lstatBig: target => fs.lstat(target, { bigint: true }).catch(() => null),
+	realpath: target => fs.realpath(target).catch(() => null),
+};
+
+const syncFs: StorageFs = {
+	mkdir: directory => { fsSync.mkdirSync(directory, { recursive: true, mode: 0o700 }); },
+	lstat: target => fsSync.lstatSync(target, { throwIfNoEntry: false }) ?? null,
+	lstatBig: target => fsSync.lstatSync(target, { bigint: true, throwIfNoEntry: false }) ?? null,
+	realpath: target => { try { return fsSync.realpathSync.native(target); } catch { return null; } },
+};
+
+async function ensureDirectories(layout: PrivateStorageLayout, io: StorageFs = asyncFs): Promise<void> {
 	for (const directory of layout.directories) {
-		await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+		await io.mkdir(directory);
+	}
+}
+
+/**
+ * Whether a verification of these paths may use synchronous file system calls (ADR-0076, decision 12): on Windows with the native
+ * module, when every path is on a local fixed NTFS volume and every ancestor of every path is an existing, plain directory,
+ * checked outermost first with `lstat` (which never follows the component it asks about). Each step then reaches only
+ * objects that are already known to be local, so no call can wait on a network or a domain controller; the first ancestor that is
+ * missing, a link, or not local ends the question, and the verification takes the asynchronous path, which reports the refusal.
+ * A path that does not exist yet is fine: its parents are what the calls reach.
+ */
+export async function synchronousLocalPaths(targets: readonly string[], platform: string = process.platform): Promise<boolean> {
+	if (platform !== "win32") return false;
+	const native = await win32Native();
+	if (native === null) return false;
+	try {
+		const known = new Set<string>();
+		for (const target of targets) {
+			if (!onLocalFixedNtfs(native, target)) return false;
+			for (const directory of [...ancestorComponents(target)].reverse()) {
+				const key = directory.toLowerCase();
+				if (known.has(key)) continue;
+				const stats = fsSync.lstatSync(directory, { throwIfNoEntry: false });
+				if (stats === undefined || stats.isSymbolicLink() || !stats.isDirectory()) return false;
+				known.add(key);
+			}
+		}
+		return true;
+	} catch {
+		return false;
 	}
 }
 
@@ -600,6 +653,35 @@ function restrictedDirectories(layout: PrivateStorageLayout): readonly string[] 
 }
 
 
+/** Create the probe file exclusively, write and flush the text, and read it back. */
+async function writeProbe(file: string, text: string): Promise<string> {
+	const handle = await fs.open(file, "wx", 0o600);
+	try {
+		await handle.writeFile(Buffer.from(text, "utf8"));
+		await handle.sync();
+	} finally {
+		await handle.close();
+	}
+	return (await fs.readFile(file)).toString("utf8");
+}
+
+/** {@link writeProbe} in one synchronous step. */
+function writeProbeSync(file: string, text: string): string {
+	const handle = fsSync.openSync(file, "wx", 0o600);
+	try {
+		fsSync.writeFileSync(handle, Buffer.from(text, "utf8"));
+		fsSync.fsyncSync(handle);
+	} finally {
+		fsSync.closeSync(handle);
+	}
+	return fsSync.readFileSync(file).toString("utf8");
+}
+
+/** Every path a verification of this layout names itself, besides the ancestors it derives. */
+function storagePaths(layout: PrivateStorageLayout): readonly string[] {
+	return [layout.root, ...layout.directories, ...layout.verifiedDirectories, layout.probeDirectory, ...(layout.verifiedFiles ?? [])];
+}
+
 /**
  * Why a path cannot be trusted as a plain object of the expected kind, or `null`
  * when it can.
@@ -612,17 +694,17 @@ function restrictedDirectories(layout: PrivateStorageLayout): readonly string[] 
  * temporary directory under `C:\Users\RUNNER~1`, say) is not a redirection, and
  * {@link spellsSameObject} proves that component by component.
  */
-async function unplainPath(target: string, kind: "directory" | "file", resolveLinks: boolean): Promise<string | null> {
-	const stats = await fs.lstat(target).catch(() => null);
+async function unplainPath(target: string, kind: "directory" | "file", resolveLinks: boolean, io: StorageFs = asyncFs): Promise<string | null> {
+	const stats = await io.lstat(target);
 	if (stats === null) return `the store ${kind} ${target} does not exist`;
 	if (stats.isSymbolicLink()) return `the store ${kind} ${target} is a link or reparse point`;
 	if (kind === "directory" ? !stats.isDirectory() : !stats.isFile()) {
 		return `the store ${kind} ${target} is not a plain ${kind}`;
 	}
 	if (!resolveLinks) return null;
-	const real = await fs.realpath(target).catch(() => null);
+	const real = await io.realpath(target);
 	if (real === null) return `the store ${kind} ${target} could not be resolved`;
-	if (!(await spellsSameObject(path.resolve(target), real))) {
+	if (!(await spellsSameObject(path.resolve(target), real, io))) {
 		return `the store ${kind} ${target} is reached through a link or reparse point`;
 	}
 	return null;
@@ -639,7 +721,7 @@ async function unplainPath(target: string, kind: "directory" | "file", resolveLi
  * second. Every earlier prefix was proven the same object, so an identically
  * spelled component names the same entry in the same directory.
  */
-async function spellsSameObject(spelled: string, real: string): Promise<boolean> {
+async function spellsSameObject(spelled: string, real: string, io: StorageFs = asyncFs): Promise<boolean> {
 	if (spelled.toLowerCase() === real.toLowerCase()) return true;
 	const spelledRoot = path.parse(spelled).root, realRoot = path.parse(real).root;
 	if (spelledRoot.toLowerCase() !== realRoot.toLowerCase()) return false;
@@ -651,10 +733,7 @@ async function spellsSameObject(spelled: string, real: string): Promise<boolean>
 		spelledPrefix = path.join(spelledPrefix, spelledParts[index]!);
 		realPrefix = path.join(realPrefix, realParts[index]!);
 		if (spelledParts[index]!.toLowerCase() === realParts[index]!.toLowerCase()) continue;
-		const [alias, resolved] = await Promise.all([
-			fs.lstat(spelledPrefix, { bigint: true }).catch(() => null),
-			fs.lstat(realPrefix, { bigint: true }).catch(() => null),
-		]);
+		const [alias, resolved] = await Promise.all([io.lstatBig(spelledPrefix), io.lstatBig(realPrefix)]);
 		if (alias === null || resolved === null || alias.isSymbolicLink()) return false;
 		if (alias.ino !== resolved.ino || alias.dev !== resolved.dev) return false;
 	}
@@ -701,6 +780,8 @@ async function verifyStorage(
 		readonly layout: PrivateStorageLayout;
 		readonly probe?: PrivateStorageProbe;
 		readonly phases?: StoragePhaseSink;
+		/** Decided by the caller that already asked {@link synchronousLocalPaths}; asked here when it did not. */
+		readonly synchronous?: boolean;
 	},
 	taken?: { security: PrivateStorageSecurityRead | null },
 ): Promise<PrivateStorageReadiness> {
@@ -728,12 +809,13 @@ async function verifyStorage(
 		layout.workspaceRoot === undefined ? "store is not bound to a workspace" : "store is outside the workspace",
 	);
 
+	const io = (input.synchronous ?? await synchronousLocalPaths(storagePaths(layout), platform)) ? syncFs : asyncFs;
 	try {
-		const existing = await fs.lstat(layout.root).catch(() => null);
+		const existing = await io.lstat(layout.root);
 		if (existing !== null && (existing.isSymbolicLink() || !existing.isDirectory())) {
 			return refuse(`the store root ${layout.root} is not a plain directory`);
 		}
-		await ensureDirectories(layout);
+		await ensureDirectories(layout, io);
 	} catch (error) {
 		return refuse(`the store could not be created (${describeStorageError(error)})`);
 	}
@@ -741,15 +823,15 @@ async function verifyStorage(
 
 	const carriers = ancestorComponents(layout.root);
 	for (const directory of [layout.root, ...layout.directories, ...layout.verifiedDirectories, ...carriers]) {
-		const problem = await unplainPath(directory, "directory", platform === "win32");
+		const problem = await unplainPath(directory, "directory", platform === "win32", io);
 		if (problem !== null) return refuse(problem);
 	}
 	const files: string[] = [];
 	for (const file of layout.verifiedFiles ?? []) {
 		// A file that is not there yet holds nothing to protect: whatever is written at
 		// that path later inherits the rules of the directory it lands in.
-		if ((await fs.lstat(file).catch(() => null)) === null) continue;
-		const problem = await unplainPath(file, "file", platform === "win32");
+		if ((await io.lstat(file)) === null) continue;
+		const problem = await unplainPath(file, "file", platform === "win32", io);
 		if (problem !== null) return refuse(problem);
 		files.push(file);
 	}
@@ -878,20 +960,14 @@ async function verifyStorage(
 	phase("judge");
 	const probeFile = path.join(layout.probeDirectory, `.probe-${randomUUID()}`);
 	try {
-		const handle = await fs.open(probeFile, "wx", 0o600);
-		try {
-			await handle.writeFile(Buffer.from(layout.probeText, "utf8"));
-			await handle.sync();
-		} finally {
-			await handle.close();
-		}
-		const written = await fs.readFile(probeFile);
-		if (written.toString("utf8") !== layout.probeText) return refuse("the store write probe did not read back");
+		const written = io === syncFs ? writeProbeSync(probeFile, layout.probeText) : await writeProbe(probeFile, layout.probeText);
+		if (written !== layout.probeText) return refuse("the store write probe did not read back");
 		evidence.push("the store accepted and returned a bounded write probe");
 	} catch (error) {
 		return refuse(`the store write probe failed (${describeStorageError(error)})`);
 	} finally {
-		await fs.rm(probeFile, { force: true }).catch(() => {});
+		if (io === syncFs) fsSync.rmSync(probeFile, { force: true });
+		else await fs.rm(probeFile, { force: true }).catch(() => {});
 	}
 	phase("probe");
 
@@ -962,13 +1038,14 @@ export async function restrictPrivateStorage(input: {
 			readiness,
 		};
 	}
+	const synchronous = await synchronousLocalPaths(storagePaths(layout), platform);
 	try {
-		await ensureDirectories(layout);
+		await ensureDirectories(layout, synchronous ? syncFs : asyncFs);
 	} catch (error) {
 		return { restricted: false, reason: `the store could not be created (${describeStorageError(error)})`, readiness: null };
 	}
 	const taken: { security: PrivateStorageSecurityRead | null } = { security: null };
-	const already = await verifyStorage({ layout, ...(input.probe ? { probe: input.probe } : {}), ...(input.phases ? { phases: input.phases } : {}) }, taken);
+	const already = await verifyStorage({ layout, synchronous, ...(input.probe ? { probe: input.probe } : {}), ...(input.phases ? { phases: input.phases } : {}) }, taken);
 	if (already.ready) return { restricted: true, reason: null, readiness: already };
 	const directories = restrictedDirectories(layout);
 	// The refused pass read every directory it reached; one that stopped before reading leaves nothing to reuse.

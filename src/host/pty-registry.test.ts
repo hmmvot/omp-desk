@@ -20,6 +20,8 @@ import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { after, describe, it } from "node:test";
 import type { PrivateStorageCommandResult, PrivateStorageProbe } from "./private-storage.ts";
+import { loadWin32Native, setWin32NativeForTest } from "./win32-native.ts";
+import { installedAddonAsset } from "./win32-test-support.ts";
 import { TEST_CURRENT_SID, fixtureAcl, fixturePrincipal } from "./private-storage-test-support.ts";
 import {
 	acquirePtySlotLock,
@@ -258,5 +260,26 @@ describe("broker records", () => {
 		assert.equal(access.ok, false);
 		assert.match(access.reason ?? "", /could not be read/);
 		assert.equal(reads, 1, "a refusal with nothing vanished is not retried");
+	});
+});
+
+describe("the record directory's verification on a verified local NTFS path", { skip: process.platform !== "win32" }, () => {
+	it("is made in one synchronous step once the directory is limited, and names its parts", async () => {
+		setWin32NativeForTest(await loadWin32Native(await installedAddonAsset()));
+		try {
+			// Under the profile, like the real storage: the temporary directory's own rules admit other accounts.
+			const storage = await mkdtemp(path.join(process.env.LOCALAPPDATA ?? tmpdir(), "omp-pty-sync-"));
+			roots.push(storage);
+			const first = await ensurePtyStateAccess(storage);
+			assert.equal(first.ok, true, first.reason ?? "");
+			await claimPtyRecord(storage, record("tab:1"));
+			const phases: string[] = [];
+			let turned = false;
+			setImmediate(() => { turned = true; });
+			const again = await ensurePtyStateAccess(storage, undefined, name => phases.push(name));
+			assert.equal(again.ok, true, again.reason ?? "");
+			assert.equal(turned, false, "no turn of the event loop: no thread-pool job, no waiting behind other extensions");
+			assert.deepEqual(phases, ["mkdir", "list", "directories", "plain", "security", "judge", "probe"]);
+		} finally { setWin32NativeForTest(undefined); }
 	});
 });

@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { after, before, it } from "node:test";
-import { isPermittedAclPrincipal, namedPrincipal, parseWindowsAcl, permissionsPermitReplacement, readStorageSecurity, readVerifiedStorageSecurity, restrictPrivateStorage, verifyPrivateStorage, type PrivateStorageLayout, type PrivateStorageProbe, type PrivateStorageSecurityReport } from "./private-storage.ts";
+import { synchronousLocalPaths, isPermittedAclPrincipal, namedPrincipal, parseWindowsAcl, permissionsPermitReplacement, readStorageSecurity, readVerifiedStorageSecurity, restrictPrivateStorage, verifyPrivateStorage, type PrivateStorageLayout, type PrivateStorageProbe, type PrivateStorageSecurityReport } from "./private-storage.ts";
 import { formatToolSpawn, reportToolSpawn, setToolSpawnObserver, type ToolSpawn } from "./tool-spawn-trace.ts";
 import { TEST_CURRENT_SID, fixtureAcl, fixturePrincipal } from "./private-storage-test-support.ts";
 import { loadWin32Native, setWin32NativeForTest, type Win32Native, type Win32SecurityRead } from "./win32-native.ts";
@@ -497,9 +497,37 @@ it("tells where a verification spent its time, part by part", { skip: process.pl
 			return { ok: true, stdout: "", detail: null };
 		} } });
 		const phases: [string, number][] = [];
+		let turned = false;
+		setImmediate(() => { turned = true; });
 		const ready = await verifyPrivateStorage({ layout, phases: (name, ms) => phases.push([name, ms]) });
 		assert.equal(ready.ready, true, ready.reason ?? "");
+		assert.equal(turned, false, "a limited store on a local NTFS volume is verified without one turn of the event loop");
 		assert.deepEqual(phases.map(([name]) => name), ["directories", "plain", "security", "judge", "probe"]);
 		assert.ok(phases.every(([, ms]) => ms >= 0));
+	} finally { await fs.rm(base, { recursive: true, force: true }); }
+});
+
+it("walks synchronously only where every path and every ancestor is a plain local directory", { skip: process.platform !== "win32" }, async () => {
+	const base = await fs.mkdtemp(path.join(process.env.LOCALAPPDATA ?? os.homedir(), "omp-sync-walk-"));
+	try {
+		const store = path.join(base, "store", "deeper");
+		assert.equal(await synchronousLocalPaths([store]), false, "an ancestor that does not exist is not a plain directory");
+		await fs.mkdir(path.join(base, "store"));
+		assert.equal(await synchronousLocalPaths([store]), true, "the path itself need not exist yet");
+		assert.equal(await synchronousLocalPaths([store], "linux"), false, "only Windows has the volume facts");
+		const target = path.join(base, "real");
+		await fs.mkdir(target);
+		const junction = path.join(base, "link");
+		await fs.symlink(target, junction, "junction");
+		assert.equal(await synchronousLocalPaths([path.join(junction, "x")]), false, "a junction on the way sends the verification to the asynchronous path, which refuses it");
+		const read: Win32SecurityRead = { sid: TEST_CURRENT_SID, failure: null, reports: new Map() };
+		setWin32NativeForTest({ ...fakeNative(read), volumeOf: () => ({ driveType: 4, fileSystem: "NTFS" }) });
+		try {
+			assert.equal(await synchronousLocalPaths([store]), false, "a network drive is not walked on this thread");
+		} finally { setWin32NativeForTest(realNative ?? undefined); }
+		setWin32NativeForTest({ ...fakeNative(read) });
+		try {
+			assert.equal(await synchronousLocalPaths([store]), false, "a module that cannot tell the volume is not trusted with it");
+		} finally { setWin32NativeForTest(realNative ?? undefined); }
 	} finally { await fs.rm(base, { recursive: true, force: true }); }
 });

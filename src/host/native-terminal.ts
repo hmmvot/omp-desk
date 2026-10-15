@@ -701,6 +701,14 @@ async function verifyLaunchCandidate(
   const { command, prefixArgs } = candidate.executable;
   let version: string | null = null;
   let transientCause: string | undefined;
+  if (candidate.launcher === "bun-shim") {
+    // A bun shim was resolved through to Bun and the entry script it runs, both already shown to be runnable files, and the package
+    // that holds the entry carries its release in its manifest: no process is started to ask (a start that a busy machine can delay
+    // past any limit). A manifest that does not give one falls back to asking.
+    const entry = prefixArgs.at(-1);
+    const release = entry === undefined ? null : await bunShimRelease(entry);
+    if (release !== null) return { command, prefixArgs, version: release, origin: candidate.origin, launcher: candidate.launcher };
+  }
   try {
     const result = await runOmpCli(candidate.executable, ["--version"], probeTimeoutMs);
     if (result.signal !== undefined) {
@@ -727,6 +735,14 @@ async function verifyLaunchCandidate(
     );
   }
   return { command, prefixArgs, version, origin: candidate.origin, launcher: candidate.launcher };
+}
+
+/** The release of the OMP package that holds `entry`, as `omp --version` prints it (major.minor.patch), or `null`. */
+async function bunShimRelease(entry: string): Promise<string | null> {
+  const dir = await packageDirectoryOf(entry);
+  if (dir === null) return null;
+  const manifest = await readPackageManifest(dir);
+  return manifest?.version === undefined ? null : parseVersion(manifest.version);
 }
 
 function describeRejections(rejections: readonly string[]): string {

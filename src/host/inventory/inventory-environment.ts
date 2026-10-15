@@ -3,8 +3,10 @@ import type { Logger } from "../../shared/logger.ts";
 
 /**
  * Where Bun and the selected OMP's package source are (ADR-0061). Finding them runs the same launcher
- * resolution a session start does, including an `omp --version` probe, which on a busy machine can take
- * tens of seconds. The answer is therefore resolved once, shared by concurrent reads and reused for a minute.
+ * resolution a session start does. For a bun shim that reads the release from the package manifest and starts no
+ * process (ADR-0011, 2026-10-15 amendment); a standalone OMP program still answers an `omp --version` probe,
+ * which on a busy machine can take tens of seconds. The answer is therefore resolved once, shared by concurrent
+ * reads and reused for a minute.
  *
  * A failed resolution is classified (ADR-0011, 2026-10-12 amendment). A *transient* one — the probe ran
  * past its limit, the process could not be created, it was killed — says nothing about the installed OMP,

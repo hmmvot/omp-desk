@@ -235,6 +235,39 @@ describe("OMP resolution when a candidate cannot answer", () => {
 		await assert.rejects(stat(lower), "the lower-priority install must not even be probed");
 	});
 
+	/** The package manifest of an install's own OMP package, beside its entry script. */
+	async function withManifest(install: { readonly entry: string }, manifest: Record<string, unknown>): Promise<void> {
+		await writeFile(path.join(path.dirname(install.entry), "package.json"), JSON.stringify(manifest));
+	}
+
+	it("reads a bun shim's release from its package and starts no process to ask, so a busy machine cannot time it out", async () => {
+		const marker = path.join(temp, `shim-probed-${installs}`);
+		const install = await fakeInstall(`require("node:fs").writeFileSync(${JSON.stringify(marker)}, "ran"); ${NEVER_ANSWERS}`);
+		await withManifest(install, { name: "@oh-my-pi/pi-coding-agent", version: "18.8.5" });
+
+		const binary = await onPath([install.bin], resolve);
+
+		assert.equal(binary.version, "18.8.5");
+		assert.equal(binary.launcher, "bun-shim");
+		assert.equal(binary.prefixArgs.at(-1), install.entry);
+		await assert.rejects(stat(marker), "the entry script was never run to ask for its version");
+	});
+
+	it("keeps asking a bun shim whose package gives no release, and takes the program's own answer for a standalone launcher", async () => {
+		const noRelease = await fakeInstall(prints("18.7.1"));
+		await withManifest(noRelease, { name: "@oh-my-pi/pi-coding-agent" });
+		assert.equal((await onPath([noRelease.bin], resolve)).version, "18.7.1");
+
+		const otherPackage = await fakeInstall(prints("18.6.0"));
+		await withManifest(otherPackage, { name: "some-other-package", version: "1.0.0" });
+		assert.equal((await onPath([otherPackage.bin], resolve)).version, "18.6.0", "a manifest that is not OMP's names nothing");
+
+		const slow = await fakeInstall(NEVER_ANSWERS);
+		await withManifest(slow, { name: "@oh-my-pi/pi-coding-agent" });
+		const error = await onPath([slow.bin], refused);
+		assert.equal(error.transientCause, "did not finish within 3 s", "the question, when it is still asked, keeps its transient timeout");
+	});
+
 	it("takes the first install that answers, and never looks at a later one for the answer", async () => {
 		const first = await fakeInstall(prints("18.8.5"));
 		const second = await fakeInstall(prints("18.0.4"));

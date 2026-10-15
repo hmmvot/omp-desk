@@ -29,11 +29,12 @@
  * connection the token authenticates, and never put in Webview state.
  */
 
+import { lstatSync, mkdirSync, readdirSync } from "node:fs";
 import { link, lstat, mkdir, readdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { createHash, randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { stageBeside } from "./atomic-file.ts";
-import { restrictPrivateStorage, type PrivateStorageProbe, type StoragePhaseSink } from "./private-storage.ts";
+import { restrictPrivateStorage, synchronousLocalPaths, type PrivateStorageProbe, type StoragePhaseSink } from "./private-storage.ts";
 import { PTY_RECORD_SUFFIX, isPtyCreationTime, parsePtyBrokerRecord, type PtyBrokerRecord } from "./pty-protocol.ts";
 import { isPtyProcessAlive } from "./pty-identity.ts";
 
@@ -270,7 +271,9 @@ export async function ensurePtyStateAccess(
 ): Promise<{ readonly ok: boolean; readonly reason: string | null }> {
 	const root = ptyStateDirectory(storageDir);
 	const began = performance.now();
-	await mkdir(root, { recursive: true, mode: 0o700 });
+	// On verified local NTFS paths (ADR-0076, decision 12) the whole check is made in one synchronous step.
+	if (access === undefined && await synchronousLocalPaths([root])) mkdirSync(root, { recursive: true, mode: 0o700 });
+	else await mkdir(root, { recursive: true, mode: 0o700 });
 	phases?.("mkdir", performance.now() - began);
 	return await verifyPtyStateAccess(storageDir, access, phases);
 }
@@ -290,7 +293,9 @@ export async function verifyPtyStateAccess(
 		const files: string[] = [];
 		const listed = performance.now();
 		try {
-			for (const name of await readdir(root)) {
+			// A root that is a link is not listed on this thread: the listing would follow it wherever it leads.
+			const local = access === undefined && await synchronousLocalPaths([root]) && !lstatSync(root).isSymbolicLink();
+			for (const name of local ? readdirSync(root) : await readdir(root)) {
 				if (name.endsWith(PTY_RECORD_SUFFIX) || name.endsWith(PTY_SLOT_LOCK_SUFFIX)) files.push(join(root, name));
 			}
 		} catch {
