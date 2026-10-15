@@ -9,7 +9,8 @@ import { startVsCode } from "./launcher.ts";
 import type { RunState } from "./state.ts";
 import { sleep } from "./time.ts";
 
-export const ACTIVITY_BAR_ENTRY = "[id='workbench.parts.activitybar'] .action-label[aria-label='OMP Desk']";
+/** The Activity Bar entry of OMP Desk: its own part on the side, or inside the side bar when the bar is at the top of it (`workbench.activityBar.location: top`). */
+export const ACTIVITY_BAR_ENTRY = ["activitybar", "sidebar"].map(part => `[id='workbench.parts.${part}'] .action-label[aria-label='OMP Desk']`).join(", ");
 
 export class Desk {
 	constructor(readonly browser: Browser, readonly state: RunState) {}
@@ -76,9 +77,21 @@ export class Desk {
 		return back;
 	}
 
-	/** Waits until the window has OMP Desk's Activity Bar entry, i.e. the extension's containers are contributed. */
+	/**
+	 * Waits until the window has OMP Desk's Activity Bar entry, i.e. the extension's containers are contributed, and puts the
+	 * window into the profile's layout (see layout.ts).
+	 */
 	async ready(page: Page): Promise<void> {
 		await page.locator(ACTIVITY_BAR_ENTRY).waitFor({ timeout: 120_000 });
+		if (this.state.layout === "user") await this.arrangeLayout(page);
+	}
+
+	/** The part of the user layout VS Code keeps per workspace: OMP Desk is the visible side bar and its Context view is expanded under Sessions. */
+	private async arrangeLayout(page: Page): Promise<void> {
+		const sidebar = await this.showSidebar(page);
+		const context = sidebar.getByRole("button", { name: /^Context/ });
+		if (await context.getAttribute("aria-expanded") !== "true") await context.click();
+		await expect(context).toHaveAttribute("aria-expanded", "true");
 	}
 
 	/** Reveals the OMP Desk side bar container (idempotent: clicks only when it is not already the visible one). */

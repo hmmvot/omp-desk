@@ -15,14 +15,17 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { startMockServer, type MockServer } from "./fixtures/mock-openai-server.ts";
+import * as readmeScene from "./readme/scene.ts";
 import { describeChanges, fingerprintUserState, startWatchdog, watchGuardedFiles, type Fingerprint, type Watchdog } from "./support/guard.ts";
 import { freePort, REPO_ROOT, startVsCode, stopVsCode, waitForCdp } from "./support/launcher.ts";
+import { layoutFromEnv, layoutSettings, seedGlobalState } from "./support/layout.ts";
 import { writeFixtureSkill, writeMockAgentConfig, writeProfileSettings } from "./support/omp-agent.ts";
 import { ENVIRONMENT_PREFIX, readCommandLines, selectStaleEnvironments } from "./support/stale-environments.ts";
 import { STATE_ENV, type RunState } from "./support/state.ts";
 import { resolveVsix } from "./support/vsix.ts";
 
-const RESULTS_DIR = join(REPO_ROOT, "out", "e2e-results");
+// `E2E_RESULTS_DIR` keeps one run's state, watchdog report and VSIX apart from another run in the same checkout.
+const RESULTS_DIR = process.env.E2E_RESULTS_DIR ?? join(REPO_ROOT, "out", "e2e-results");
 const KEPT_FILE = join(RESULTS_DIR, "kept-env.json");
 const NAME_PREFIX = ENVIRONMENT_PREFIX;
 
@@ -50,6 +53,16 @@ async function createFixtureFolders(base: string): Promise<{ folderA: string; fo
 	return { folderA, folderB };
 }
 
+/** The longest file of the PTY runtime that Desk stages under a profile (content-addressed folder of 64 hex digits). */
+const STAGED_RUNTIME_FILE = join("data", "User", "globalStorage", "hmmvot.omp-desk", "runtime", "pty-tree", "0".repeat(64), "node_modules", "node-pty", "prebuilds", "win32-x64", "conpty_console_list.node");
+const WINDOWS_PATH_LIMIT = 259;
+
+/** A root that makes that path longer than Windows allows ends in "Failed to load conpty.dll, error code 206" and no session ever starts. */
+function assertRootFitsPtyRuntime(base: string): void {
+	const length = join(base, STAGED_RUNTIME_FILE).length;
+	if (length > WINDOWS_PATH_LIMIT) throw new Error(`the test environment folder ${base} is ${length - STAGED_RUNTIME_FILE.length - 1} characters long: the PTY runtime would be staged at ${length} characters, over the ${WINDOWS_PATH_LIMIT} Windows allows. Use a shorter E2E_ROOT.`);
+}
+
 async function alive(port: number): Promise<boolean> {
 	try {
 		await waitForCdp(port, 3_000);
@@ -70,13 +83,14 @@ async function runAll(steps: ReadonlyArray<readonly [string, () => Promise<void>
 
 export default async function globalSetup(): Promise<() => Promise<void>> {
 	await mkdir(RESULTS_DIR, { recursive: true });
-	const root = join(process.env.LOCALAPPDATA ?? "", "omp-desk-test");
+	// `E2E_ROOT` gives a run a root of its own: the stale-environment sweep below deletes every `e2e-run-*` folder of its root, so runs that share one (two agents, two checkouts) end each other's windows.
+	const root = process.env.E2E_ROOT ?? join(process.env.LOCALAPPDATA ?? "", "omp-desk-test");
 	const keep = process.env.E2E_KEEP_ENV === "1";
 	const fingerprint: Fingerprint = await fingerprintUserState();
 	const fileWatch = await watchGuardedFiles();
 
 	let watchdog: Watchdog | undefined;
-	let mock: MockServer | undefined;
+	let mock: Pick<MockServer, "url" | "close"> | undefined;
 	let state: RunState | undefined;
 	let reused = false;
 
@@ -113,6 +127,7 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
 		watchdog = await startWatchdog("omp-desk-test", RESULTS_DIR);
 		await watchdog.ready();
 
+		const scene = process.env.E2E_SCENE === "readme" ? readmeScene : undefined;
 		const kept: RunState | undefined = existsSync(KEPT_FILE) ? JSON.parse(await readFile(KEPT_FILE, "utf8")) : undefined;
 		const keptAlive = kept !== undefined && await alive(kept.cdpPort);
 		if (keptAlive && keep && (process.env.E2E_VSIX !== undefined || process.env.E2E_REBUILD === "1")) {
@@ -123,19 +138,22 @@ export default async function globalSetup(): Promise<() => Promise<void>> {
 
 		if (reused && kept !== undefined) {
 			state = kept;
-			mock = await startMockServer(Number(new URL(kept.mockUrl).port));
+			mock = scene === undefined ? await startMockServer(Number(new URL(kept.mockUrl).port)) : await scene.startModelServer(kept.folderA, Number(new URL(kept.mockUrl).port));
 		} else {
 			await rm(KEPT_FILE, { force: true });
 			const vsix = await resolveVsix(RESULTS_DIR);
-			mock = await startMockServer();
 			const name = `${NAME_PREFIX}${Date.now().toString(36)}`;
 			const base = join(root, name);
-			const folders = await createFixtureFolders(base);
-			await writeMockAgentConfig(join(base, "agent"), mock.url);
+			assertRootFitsPtyRuntime(base);
+			const folders = scene === undefined ? await createFixtureFolders(base) : await scene.createFolders(base);
+			mock = scene === undefined ? await startMockServer() : await scene.startModelServer(folders.folderA);
+			await writeMockAgentConfig(join(base, "agent"), mock.url, scene?.AGENT_CONFIG);
 			await writeFixtureSkill(join(base, "agent"));
-			await writeProfileSettings(join(base, "data"));
+			const layout = layoutFromEnv();
+			await writeProfileSettings(join(base, "data"), layoutSettings(layout));
+			seedGlobalState(join(base, "data"), layout);
 			const cdpPort = await freePort();
-			state = { name, root, base, agentDir: join(base, "agent"), dataDir: join(base, "data"), cdpPort, mockUrl: mock.url, ...folders, vsix, resultsDir: RESULTS_DIR };
+			state = { name, root, base, agentDir: join(base, "agent"), dataDir: join(base, "data"), cdpPort, mockUrl: mock.url, ...folders, vsix, resultsDir: RESULTS_DIR, layout };
 			await startVsCode({ name, root, folder: folders.folderA, vsix, port: cdpPort });
 			await waitForCdp(cdpPort, 180_000);
 			if (keep) await writeFile(KEPT_FILE, JSON.stringify(state, null, 2));

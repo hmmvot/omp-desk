@@ -1,0 +1,16 @@
+{
+  "workbench.colorTheme": "Dark Modern",
+  "workbench.activityBar.location": "top",
+  "workbench.sideBar.location": "left",
+  "workbench.secondarySideBar.defaultVisibility": "hidden",
+  "window.titleBarStyle": "custom",
+  "window.commandCenter": true,
+  "window.menuBarVisibility": "compact",
+  "window.density.layout": "compact",
+  "workbench.statusBar.visible": true,
+  "workbench.editor.showTabs": "multiple",
+  "diffEditor.renderSideBySide": false,
+  "git.blame.editorDecoration.enabled": true,
+  "ompDesk.sessionsGrouping": "flat",
+  "ompDesk.toolCallDetail": "overview"
+}

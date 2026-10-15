@@ -11,27 +11,43 @@ import { join } from "node:path";
 import { SKILL_NAME } from "./fixtures-constants.ts";
 import { MOCK_MODEL_ID, MOCK_PROVIDER_ID } from "../fixtures/mock-openai-server.ts";
 
-export async function writeMockAgentConfig(agentDir: string, mockUrl: string): Promise<void> {
+export interface MockAgentOptions {
+	readonly providerId?: string;
+	readonly modelId?: string;
+	readonly modelName?: string;
+	readonly contextWindow?: number;
+	/** The model's `input:` list: `text`, default `text, image`, so a Chat attachment reaches the model (OMP drops an image for a text-only model). */
+	readonly inputKinds?: string;
+	/** Marks the model as a reasoning model, so the Chat offers thinking levels. */
+	readonly reasoning?: boolean;
+	/** Extra top-level lines of `config.yml` (OMP's global settings), for example `title:` blocks. */
+	readonly extraConfig?: readonly string[];
+}
+
+export async function writeMockAgentConfig(agentDir: string, mockUrl: string, options: MockAgentOptions = {}): Promise<void> {
+	const { providerId = MOCK_PROVIDER_ID, modelId = MOCK_MODEL_ID, modelName = "Mock Model", contextWindow = 64000, inputKinds = "text, image", reasoning = false, extraConfig = [] } = options;
 	await mkdir(agentDir, { recursive: true });
 	const models = [
 		"providers:",
-		`  ${MOCK_PROVIDER_ID}:`,
+		`  ${providerId}:`,
 		`    baseUrl: ${mockUrl}/v1`,
 		"    apiKey: mock-key-not-a-secret",
 		"    api: openai-completions",
 		"    models:",
-		`      - id: ${MOCK_MODEL_ID}`,
-		"        name: Mock Model",
-		"        contextWindow: 64000",
+		`      - id: ${modelId}`,
+		`        name: ${modelName}`,
+		`        contextWindow: ${contextWindow}`,
 		"        maxTokens: 4096",
 		"        supportsTools: true",
-		"        input: [text]",
+		...(reasoning ? ["        reasoning: true"] : []),
+		`        input: [${inputKinds}]`,
 		"        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }",
 		"",
 	].join("\n");
 	const config = [
 		"modelRoles:",
-		`  default: ${MOCK_PROVIDER_ID}/${MOCK_MODEL_ID}`,
+		`  default: ${providerId}/${modelId}`,
+		...extraConfig,
 		"",
 	].join("\n");
 	await writeFile(join(agentDir, "models.yml"), models, "utf8");
@@ -55,7 +71,7 @@ export async function writeFixtureSkill(agentDir: string): Promise<void> {
  * `window.dialogStyle: custom` renders modal confirmations (Kill, Delete...) as DOM instead of a native Win32 dialog
  * that CDP cannot see and that would block the window.
  */
-export async function writeProfileSettings(dataDir: string): Promise<void> {
+export async function writeProfileSettings(dataDir: string, layout: Record<string, unknown> = {}): Promise<void> {
 	const userDir = join(dataDir, "User");
 	await mkdir(userDir, { recursive: true });
 	const settings = {
@@ -68,6 +84,7 @@ export async function writeProfileSettings(dataDir: string): Promise<void> {
 		"telemetry.telemetryLevel": "off",
 		"extensions.autoUpdate": false,
 		"extensions.autoCheckUpdates": false,
+		...layout,
 	};
 	await writeFile(join(userDir, "settings.json"), JSON.stringify(settings, null, 2), "utf8");
 }

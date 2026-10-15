@@ -1612,6 +1612,7 @@
     "test": "node --test \"src/**/*.test.ts\" \"scripts/*.test.mjs\" \"test/e2e/support/*.test.ts\"",
     "test:e2e": "playwright test -c test/e2e/playwright.config.ts",
     "test:e2e:stop": "node test/e2e/stop-kept-env.mjs",
+    "readme:screenshots": "playwright test -c test/e2e/playwright.readme.config.ts",
     "vsix": "vsce package --no-dependencies --out out",
     "vsix:x64": "node scripts/package-vsix.mjs win32-x64",
     "vsix:arm64": "node scripts/package-vsix.mjs win32-arm64",

@@ -1,5 +1,6 @@
 /** What global setup publishes to the test workers (as the JSON file named by `OMP_E2E_STATE`). */
 import { readFileSync } from "node:fs";
+import type { LayoutName } from "./layout.ts";
 
 export interface RunState {
 	/** Launcher environment name; also the folder name under `root`. */
@@ -16,6 +17,8 @@ export interface RunState {
 	readonly vsix: string;
 	/** Directory for traces, screenshots and reports. */
 	readonly resultsDir: string;
+	/** The window layout the profile was prepared with (`E2E_LAYOUT`, see layout.ts). */
+	readonly layout: LayoutName;
 }
 
 export const STATE_ENV = "OMP_E2E_STATE";
