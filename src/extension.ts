@@ -1966,7 +1966,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     registerDeskCommand("ompDesk.copyTerminalScreen", copyActiveTerminalScreen),
     registerDeskCommand("ompDesk.redrawTerminal", redrawActiveTerminal),
     registerDeskCommand("ompDesk.moveFileToNewWindow", s.routing.moveFileToNewWindow),
-    registerDeskCommand("ompDesk.reloadAllWindows", () => s.routing.reloadAllWindows()),
+    registerDeskCommand("ompDesk.reloadAllWindows", () => pendingEntry("window", "reload-windows", { origin: "command", step: "working" }, () => s.routing.reloadAllWindows())),
     registerDeskCommand("ompDesk.fileLink.open", (argument: unknown) => openFileLinkFromMenu(argument, undefined)),
     registerDeskCommand("ompDesk.fileLink.reveal", (argument: unknown) => openFileLinkFromMenu(argument, "reveal")),
     registerDeskCommand("ompDesk.fileLink.revealInOs", (argument: unknown) => openFileLinkFromMenu(argument, "os")),
@@ -5583,7 +5583,7 @@ async function runChatAction(context: vscode.ExtensionContext, index: SessionInd
         filters: { HTML: ["html"] },
       });
       if (target === undefined || !current()) return;
-      const result = await conversations.exportHtml(tabId, incarnation, target.fsPath);
+      const result = await pendingEntry("window", "export", { origin: "command", step: "working" }, () => conversations.exportHtml(tabId, incarnation, target.fsPath));
       if (result.status === "stale") return;
       if (result.status !== "ok") {
         showError(result.status === "refused" ? `The conversation was not exported. ${chatRefusalText(result.reason)}` : "OMP did not report whether the export was written.");
