@@ -1,0 +1,37 @@
+name: Marketplace identity
+
+# One-time helper for setting up Marketplace publishing with Microsoft Entra ID
+# (docs/publishing.md). It signs in as the app registration trusted for the
+# `marketplace` environment and prints the Azure DevOps identity id that the
+# Marketplace publisher page needs when the app is added as a member. It reads
+# nothing secret and publishes nothing. Run it from Actions > Marketplace identity.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  identity:
+    runs-on: windows-latest
+    environment: marketplace
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: azure/login@v3
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          allow-no-subscriptions: true
+      - name: Print the identity id for the Marketplace publisher
+        shell: bash
+        # 499b84ac-1321-427f-aa17-267ca6975798 is the Azure DevOps resource in Microsoft Entra ID.
+        # A service principal has no Azure DevOps profile, so its id comes from connectionData.
+        run: |
+          az rest --method get \
+            --url "https://app.vssps.visualstudio.com/_apis/connectionData" \
+            --resource 499b84ac-1321-427f-aa17-267ca6975798 \
+            --query "{id: authenticatedUser.id, name: authenticatedUser.providerDisplayName}" \
+            --output table
