@@ -171,12 +171,12 @@ Interactions: `openingTabs` and the index's duplicate-restore guard stay the aut
 
 ### Slices
 
-1. **Slice 1, Resume and Open feel immediate:** vocabulary, registry, timeline observer, entry wrappers, tree display layer (text, icon, menus, fixed position, `setPending`, ticker, view progress), page store, `omp:chat-operation`, Composer and banner, status bar for command origin. Tests: registry, timeline mapping, tree, protocol, ChatClient, ChatRuntime, owned-Chromium composer harness, extension lifecycle.
-2. **Slice 2, New Session single flight and editor first:** the guard with reveal; the new order in `openSession`/`openTabOnce` with the Cancel rule; the ADR-0046 amendment becomes operative.
-3. **Slice 3, Delete, Forget, Kill, Close, Rename.**
-4. **Slice 4, Chat Stop, Export HTML, Reload All Windows.**
-5. **Slice 5, inventory toggles.**
-6. **Slice 6, view switch.**
+1. **Slice 1, Resume and Open feel immediate** (`efc7aac`): vocabulary, registry, timeline observer, entry wrappers (Open, Resume, Restart), tree display layer (text, icon, menus, fixed position, `setPending`, ticker, view progress), page store, `omp:chat-operation`, Composer and banner, status bar for command origin, and the Chat page's own **Stop** acknowledgement (page-local: the Stop button shows `Stopping…` in the frame of the click and returns with the next host state; it has no registry kind). Tests: registry, timeline mapping, tree, protocol, ChatClient, ChatRuntime, owned-Chromium composer harness, extension lifecycle.
+2. **Slice 2, New Session single flight and editor first** (`0f46c41`): the guard with reveal; the new order in `openSession`/`openTabOnce` with the Cancel rule; the ADR-0046 amendment becomes operative.
+3. **Slice 3, Delete, Forget, Kill, Close, Rename** (`38567f0`): the checks before a confirmation read `checking`, the confirmation `waiting for your answer`, the action `Deleting…`/`Killing…`/`Stopping…`; `PendingOperations.step` takes an optional kind for actions that are not launches.
+4. **Slice 4, view switch** (`a606796`): a Chat/Terminal switch (and a Reload) is a `view-switch` operation, or the `resume` it ends in for a stopped session, with `checking`, `waiting for your answer` and `working`; it begins a `view switch` timeline run like Restart.
+5. **Slice 5, Export HTML and Reload All Windows** (`1e16382`): command-origin operations under the key `window`, shown in the status bar after the grace; Export HTML shows from the end of its Save dialog.
+6. **Slice 6, inventory toggles** (`697fcf8`): `InventoryController.toggle` begins an `inventory-toggle` operation at the click; the row reads `Saving <name>…` and a second switch of it is dropped (and the row repainted as it is) until the write is done.
 
 Each slice commits on its own with its focused tests.
 
@@ -211,7 +211,7 @@ Each slice commits on its own with its focused tests.
 
 ## Rollout and Verification
 
-Implemented in the six slices above, one commit per slice on `main`, not pushed.
+Implemented in the six slices above, one commit per slice on `main`, not pushed (`efc7aac`, `0f46c41`, `38567f0`, `a606796`, `1e16382`, `697fcf8`). Cancel before the launch starts and the cross-window "Starting" display stay out of scope as decided.
 
 - Unit: the registry (join and upgrade, step, end, idempotence, 60 s mark, dispose), the lap-to-step table over every `LaunchLap`, `pendingText` (elapsed after 5 s, `confirm` shows no seconds, `still`, `Opening` becoming `Starting`), tree display layer (state and published status unchanged, menus hidden, fixed position, stop family only `Stopping` from `working`), the `omp:chat-operation` parser, `ChatClient` page-local lifecycle (ack, host contact, refusal, stall timeout, route change), `ChatRuntime` posting, re-posting to attached pages and the refusal `ended`.
 - Webview (owned Chromium harness, `chat-ui.test.ts` pattern): the Resume button is disabled with the spinner in the frame after the click with the host stubbed silent, the banner names the step, and the stall timeout returns the button.

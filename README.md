@@ -66,6 +66,7 @@ For how this works, see the [architecture](docs/architecture.md).
 - A session open in another window shows the same live status there, and clicking it takes you straight to that window with the session's tab selected, with no question first. If that window cannot be brought forward (for example it has an unsaved multi-root workspace), you are told why.
 - A session that a plain `omp` in a terminal is writing shows **Open in another OMP process**. OMP Desk asks before opening it too.
 - Row actions: **Open**, **Rename**, **Reload**, **Close**, **Forget** and **Delete**. A folder's **Resume Session** lists every saved session.
+- A click that takes time says so at once: the row you clicked reads **Opening…**, **Starting…**, **Closing…**, **Killing…**, **Deleting…**, **Forgetting…** or **Renaming…** with what it is doing (`checking for another OMP process`, `waiting for your answer`), the seconds once it passes five, and a progress bar runs across the view. The composer's **Resume** button shows the same in the Chat. A second click on a row that is already busy changes nothing, and **New Session** on a folder whose new session is still starting just shows that session.
 - **Open Terminal in Folder** starts a plain shell editor in that folder.
 - **Copy Diagnostics** in the context menu copies paths and process details for bug reports.
 
