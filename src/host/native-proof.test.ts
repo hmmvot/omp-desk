@@ -228,7 +228,7 @@ describe("a warm start", windowsOnly, () => {
 		assert.equal(warm.kind, "proven");
 		if (warm.kind !== "proven") return;
 		const native = (await loadWin32Native(await installedAddonAsset()));
-		assert.equal(await warm.verify(native), null);
+		assert.equal(warm.verify(native), null);
 		// A record written for another SID: the token that reads the chain is not the account that verified it.
 		const record = nativeProofPath(storageDir, sha256);
 		const parsed = JSON.parse(await readFile(record, "utf8")) as NativeProofRecord;
@@ -236,7 +236,7 @@ describe("a warm start", windowsOnly, () => {
 		const other = warmNativeAsset({ storageDir, packagedPath });
 		assert.equal(other.kind, "proven");
 		if (other.kind !== "proven") return;
-		assert.match(await other.verify(native) ?? "", /another account/);
+		assert.match(other.verify(native) ?? "", /another account/);
 	});
 
 	it("refuses a layout whose access an owner or access list change has loosened since the child verified it", async () => {
@@ -248,16 +248,16 @@ describe("a warm start", windowsOnly, () => {
 		// The same module, but the security read reports Everyone with write access on a directory above the store.
 		const loosened: Win32Native = {
 			...real,
-			readSecurity: async (paths, deadline) => {
-				const read = await real.readSecurity(paths, deadline);
+			readSecuritySync: paths => {
+				const read = real.readSecuritySync(paths);
 				const carrier = proofChain(stagedPath)[0]!.path.toLowerCase();
 				const report = read.reports.get(carrier);
 				const entries = [...(report?.entries ?? []), { principal: "S-1-1-0", permissions: 0x1f01ff, denied: false }];
 				return { ...read, reports: new Map([...read.reports, [carrier, { entries, owner: report?.owner ?? null }]]) };
 			},
 		};
-		assert.equal(await warm.verify(real), null, "the unmodified read is accepted");
-		assert.match(await warm.verify(loosened) ?? "", /on the path to the store lets .* replace or re-permission it/);
+		assert.equal(warm.verify(real), null, "the unmodified read is accepted");
+		assert.match(warm.verify(loosened) ?? "", /on the path to the store lets .* replace or re-permission it/);
 	});
 
 	it("records no proof for a volume that is not a local fixed NTFS volume, and none that spans two volumes", async () => {

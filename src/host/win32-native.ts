@@ -111,6 +111,13 @@ export interface Win32Native {
 	 */
 	readSecurity(paths: readonly string[], deadlineMs: number): Promise<Win32SecurityRead>;
 	/**
+	 * The same read on the calling thread, in one synchronous step: no lane, no thread-pool job, no turn of the event loop. Only
+	 * for paths on a local fixed NTFS volume (`volumeOf`), where the call cannot wait on a network or a domain controller; a path
+	 * that cannot be read still fails alone. On a host whose pool and loop other extensions keep busy, ten paths cost milliseconds
+	 * this way and seconds as sequential lane jobs.
+	 */
+	readSecuritySync(paths: readonly string[]): Win32SecurityRead;
+	/**
 	 * `DOMAIN\name` for each SID that resolves (`LookupAccountSidW`), in the same lane under the same deadline.
 	 * Names are diagnostic only: ask for the SIDs a refusal names, never on the admission path.
 	 */
@@ -393,7 +400,7 @@ function callAsync<T>(call: NativeCall, ...args: unknown[]): Promise<T> {
 /** Characters of one account name or domain a lookup may return; a longer name stays a bare SID. */
 const ACCOUNT_NAME_CHARS = 256;
 
-function bindSecurity(koffi: Koffi, lane: CallLane): Pick<Win32Native, "readSecurity" | "lookupAccountNames"> {
+function bindSecurity(koffi: Koffi, lane: CallLane): Pick<Win32Native, "readSecurity" | "readSecuritySync" | "lookupAccountNames"> {
 	const advapi32 = koffi.load("advapi32.dll");
 	const kernel32 = koffi.load("kernel32.dll");
 	const getNamedSecurityInfo = advapi32.func(
@@ -441,6 +448,20 @@ function bindSecurity(koffi: Koffi, lane: CallLane): Pick<Win32Native, "readSecu
 		const dacl = [null as unknown];
 		const descriptor = [null as unknown];
 		const status = await callAsync<number>(getNamedSecurityInfo, target, SE_FILE_OBJECT, OWNER_AND_DACL, owner, [null], dacl, [null], descriptor);
+		return decodeDescriptor(status, owner, dacl, descriptor);
+	}
+
+	/** {@link readPath} on the calling thread. */
+	function readPathSync(target: string): { entries: SecurityEntry[] | null; owner: string | null } {
+		const owner = [null as unknown];
+		const dacl = [null as unknown];
+		const descriptor = [null as unknown];
+		const status = getNamedSecurityInfo(target, SE_FILE_OBJECT, OWNER_AND_DACL, owner, [null], dacl, [null], descriptor) as number;
+		return decodeDescriptor(status, owner, dacl, descriptor);
+	}
+
+	/** What one `GetNamedSecurityInfoW` answered, decoded; the descriptor is freed. */
+	function decodeDescriptor(status: number, owner: unknown[], dacl: unknown[], descriptor: unknown[]): { entries: SecurityEntry[] | null; owner: string | null } {
 		if (status !== 0) return { entries: null, owner: null };
 		try {
 			let ownerSid: string | null = null;
@@ -463,6 +484,20 @@ function bindSecurity(koffi: Koffi, lane: CallLane): Pick<Win32Native, "readSecu
 	}
 
 	return {
+		readSecuritySync(paths) {
+			try {
+				const sid = tokenSid();
+				const reports = new Map<string, { entries: SecurityEntry[] | null; owner: string | null }>();
+				for (const target of paths) reports.set(target.toLowerCase(), readPathSync(target));
+				return { sid, failure: null, reports };
+			} catch (error) {
+				return {
+					sid: null,
+					failure: `the security read failed (${error instanceof Error ? error.message : String(error)})`,
+					reports: new Map(paths.map(target => [target.toLowerCase(), { entries: null, owner: null }])),
+				};
+			}
+		},
 		readSecurity(paths, deadlineMs) {
 			const failed = (failure: string): Win32SecurityRead => ({
 				sid: null,
@@ -633,11 +668,11 @@ export function win32NativeStartedWarm(): boolean {
 	return startedWarm;
 }
 
-/** A staged module a warm start names, and the check of its path chain that must pass before it is shared. */
+/** A staged module a warm start names, and the synchronous check of its path chain that must pass before it is shared. */
 export interface WarmStart {
 	readonly asset: NativeModuleAsset;
-	/** The refusal of the module's path chain, or `null`; runs after the module loaded, before it is shared. */
-	readonly verify?: (native: Win32Native) => Promise<string | null>;
+	/** The refusal of the module's path chain, or `null`; runs after the module loaded, before it is shared. A throw is a refusal. */
+	readonly verify?: (native: Win32Native) => string | null;
 }
 
 /**
@@ -646,8 +681,8 @@ export interface WarmStart {
  * `source` throws, naming the cause, when it has no module to give: the message is kept for {@link win32NativeFailure}.
  *
  * `warm`, when given, runs first and synchronously: a module it names that loads is loaded before this call returns, with no turn
- * of the event loop in between (ADR-0076 decision 11). It is shared once its `verify` (the owner and access list of the module's
- * path chain, read natively) has found nothing wrong; a refusal settles the load as unavailable with that cause, as a staging child's
+ * of the event loop in between (ADR-0076 decision 11). It is shared, in that same step, once its `verify` (the owner and access list
+ * of the module's path chain, read natively and synchronously) has found nothing wrong; a refusal settles the load as unavailable with that cause, as a staging child's
  * refusal does. A warm start that has nothing, or fails to load, falls through to `source`, which reports the cause.
  */
 export function startWin32Native(
@@ -669,16 +704,19 @@ export function startWin32Native(
 					log.warn(`the native module is unavailable: ${cause}; Windows checks read as unknown`);
 					return null;
 				};
-				const verifying = start.verify === undefined ? undefined : { verify: start.verify, wall: performance.now(), cpu: processCpuMs() };
-				shared = verifying === undefined
-					? Promise.resolve(native)
-					: verifying.verify(native).then(
-						problem => {
-							steps.push({ name: "verify", wallMs: performance.now() - verifying.wall, cpuMs: processCpuMs() - verifying.cpu });
-							return problem === null ? native : refuse(problem);
-						},
-						(error: unknown) => refuse(`the layout of the native module could not be verified (${error instanceof Error ? error.message : String(error)})`),
-					);
+				// Synchronous, like everything above it: the module is shared (or refused) before this call returns.
+				let problem: string | null = null;
+				if (start.verify !== undefined) {
+					const wall = performance.now();
+					const cpu = processCpuMs();
+					try {
+						problem = start.verify(native);
+					} catch (error) {
+						problem = `the layout of the native module could not be verified (${error instanceof Error ? error.message : String(error)})`;
+					}
+					steps.push({ name: "verify", wallMs: performance.now() - wall, cpuMs: processCpuMs() - cpu });
+				}
+				shared = Promise.resolve(problem === null ? native : refuse(problem));
 				return shared;
 			}
 		} catch (error) {

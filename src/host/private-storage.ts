@@ -24,7 +24,7 @@ import * as fs from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { win32Native, win32NativeFailure, type Win32Native } from "./win32-native.ts";
+import { win32Native, win32NativeFailure, type Win32Native, type Win32SecurityRead } from "./win32-native.ts";
 import { nativeUnavailableDetail } from "./native-module-failure.ts";
 import { startToolSpawnTrace, type ToolSpawn, type ToolSpawnOutcome } from "./tool-spawn-trace.ts";
 
@@ -234,6 +234,9 @@ export interface PrivateStorageSecurityReport {
 	readonly owner: string | null;
 }
 
+/** Receives how long each part of a storage verification took, in milliseconds: directories, plain, security, judge, probe. */
+export type StoragePhaseSink = (name: string, ms: number) => void;
+
 /** The result of one batched read of the account SID and every requested path's access and owner. */
 export interface PrivateStorageSecurityRead {
 	/** The current token's SID; `null` when the read failed or answered something that is not one. */
@@ -254,6 +257,37 @@ export async function readStorageSecurity(paths: readonly string[]): Promise<Pri
 	return readSecurityOn(await win32Native(), paths);
 }
 
+/**
+ * {@link readStorageSecurity} for paths a verification has just shown to be plain (no link or reparse point on the way): when every
+ * path is on a local fixed NTFS volume the read runs in one synchronous step, with no lane, no thread-pool job and no turn of the
+ * event loop (ADR-0076, decision 12); any other volume, and any other caller, keeps the lane and its deadline.
+ */
+export async function readVerifiedStorageSecurity(paths: readonly string[]): Promise<PrivateStorageSecurityRead> {
+	const native = await win32Native();
+	if (native !== null && paths.every(target => onLocalFixedNtfs(native, target))) return readSecuritySyncOn(native, paths);
+	return readSecurityOn(native, paths);
+}
+
+const localVolumes = new WeakMap<Win32Native, Map<string, boolean>>();
+
+/** Whether `target` is on a local fixed NTFS volume, by the volume of its root, remembered for the module's life. */
+export function onLocalFixedNtfs(native: Win32Native, target: string): boolean {
+	const root = path.parse(target).root.toLowerCase();
+	let known = localVolumes.get(native);
+	if (known === undefined) localVolumes.set(native, known = new Map());
+	let local = known.get(root);
+	if (local === undefined) {
+		const volume = root === "" ? { driveType: 0, fileSystem: null } : native.volumeOf(root);
+		known.set(root, local = volume.driveType === 3 && volume.fileSystem === "NTFS");
+	}
+	return local;
+}
+
+/** {@link readStorageSecurity} on a given module, synchronously; the caller has established that the paths are local. */
+export function readSecuritySyncOn(native: Win32Native, paths: readonly string[]): PrivateStorageSecurityRead {
+	return toStorageRead(native.readSecuritySync(paths));
+}
+
 /** {@link readStorageSecurity} on a given module: for the one caller that judges a module before it is shared. */
 export async function readSecurityOn(native: Win32Native | null, paths: readonly string[]): Promise<PrivateStorageSecurityRead> {
 	if (native === null) {
@@ -264,7 +298,10 @@ export async function readSecurityOn(native: Win32Native | null, paths: readonly
 			reports: new Map(paths.map(target => [target.toLowerCase(), { acl: { ok: false, stdout: "", detail }, owner: null }])),
 		};
 	}
-	const read = await native.readSecurity(paths, OWNER_TIMEOUT_MS);
+	return toStorageRead(await native.readSecurity(paths, OWNER_TIMEOUT_MS));
+}
+
+function toStorageRead(read: Win32SecurityRead): PrivateStorageSecurityRead {
 	const reports = new Map<string, PrivateStorageSecurityReport>();
 	for (const [key, report] of read.reports) {
 		reports.set(key, {
@@ -650,6 +687,7 @@ async function spellsSameObject(spelled: string, real: string): Promise<boolean>
 export function verifyPrivateStorage(input: {
 	readonly layout: PrivateStorageLayout;
 	readonly probe?: PrivateStorageProbe;
+	readonly phases?: StoragePhaseSink;
 }): Promise<PrivateStorageReadiness> {
 	return verifyStorage(input);
 }
@@ -662,12 +700,20 @@ async function verifyStorage(
 	input: {
 		readonly layout: PrivateStorageLayout;
 		readonly probe?: PrivateStorageProbe;
+		readonly phases?: StoragePhaseSink;
 	},
 	taken?: { security: PrivateStorageSecurityRead | null },
 ): Promise<PrivateStorageReadiness> {
 	const layout = input.layout;
 	const platform = input.probe?.platform ?? process.platform;
 	const evidence: string[] = [];
+	let phaseStart = performance.now();
+	/** Time the part that just ended for the caller's line; diagnostic only. */
+	const phase = (name: string): void => {
+		const now = performance.now();
+		input.phases?.(name, now - phaseStart);
+		phaseStart = now;
+	};
 	const refuse = (reason: string): PrivateStorageReadiness => ({
 		ready: false,
 		reason,
@@ -691,6 +737,7 @@ async function verifyStorage(
 	} catch (error) {
 		return refuse(`the store could not be created (${describeStorageError(error)})`);
 	}
+	phase("directories");
 
 	const carriers = ancestorComponents(layout.root);
 	for (const directory of [layout.root, ...layout.directories, ...layout.verifiedDirectories, ...carriers]) {
@@ -706,6 +753,7 @@ async function verifyStorage(
 		if (problem !== null) return refuse(problem);
 		files.push(file);
 	}
+	phase("plain");
 	evidence.push("the store and every path it is reached through is a plain, non-redirected path");
 
 	const permittedPrincipals: string[] = [];
@@ -717,9 +765,10 @@ async function verifyStorage(
 		// amended 2026-10-13). A probe replaces only the reads it names; with all three replaced no
 		// process runs.
 		const security = probe?.currentSid === undefined || probe.readAcl === undefined || probe.readOwners === undefined
-			? await (probe?.readSecurity ?? readStorageSecurity)(owned)
+			? await (probe?.readSecurity ?? readVerifiedStorageSecurity)(owned)
 			: null;
 		if (taken !== undefined) taken.security = security;
+		phase("security");
 		const identity = probe?.currentSid ?? security?.sid ?? null;
 		if (identity === null || !isSid(identity)) return refuse("the owning account SID could not be read");
 		const readAcl = probe?.readAcl ?? (async (target: string) =>
@@ -826,6 +875,7 @@ async function verifyStorage(
 		);
 	}
 
+	phase("judge");
 	const probeFile = path.join(layout.probeDirectory, `.probe-${randomUUID()}`);
 	try {
 		const handle = await fs.open(probeFile, "wx", 0o600);
@@ -843,6 +893,7 @@ async function verifyStorage(
 	} finally {
 		await fs.rm(probeFile, { force: true }).catch(() => {});
 	}
+	phase("probe");
 
 	return { ready: true, reason: null, evidence, permittedPrincipals };
 }
@@ -899,6 +950,7 @@ function ownerOnlyGrant(account: string): readonly string[] {
 export async function restrictPrivateStorage(input: {
 	readonly layout: PrivateStorageLayout;
 	readonly probe?: PrivateStorageProbe;
+	readonly phases?: StoragePhaseSink;
 }): Promise<PrivateStorageRestriction> {
 	const layout = input.layout;
 	const platform = input.probe?.platform ?? process.platform;
@@ -916,12 +968,12 @@ export async function restrictPrivateStorage(input: {
 		return { restricted: false, reason: `the store could not be created (${describeStorageError(error)})`, readiness: null };
 	}
 	const taken: { security: PrivateStorageSecurityRead | null } = { security: null };
-	const already = await verifyStorage({ layout, ...(input.probe ? { probe: input.probe } : {}) }, taken);
+	const already = await verifyStorage({ layout, ...(input.probe ? { probe: input.probe } : {}), ...(input.phases ? { phases: input.phases } : {}) }, taken);
 	if (already.ready) return { restricted: true, reason: null, readiness: already };
 	const directories = restrictedDirectories(layout);
 	// The refused pass read every directory it reached; one that stopped before reading leaves nothing to reuse.
 	const needsRead = input.probe?.currentSid === undefined || input.probe.readAcl === undefined;
-	const security = taken.security ?? (needsRead ? await (input.probe?.readSecurity ?? readStorageSecurity)(directories) : null);
+	const security = taken.security ?? (needsRead ? await (input.probe?.readSecurity ?? readVerifiedStorageSecurity)(directories) : null);
 	const account = input.probe?.currentSid ?? security?.sid ?? null;
 	if (account === null || !isSid(account)) {
 		return {
@@ -958,7 +1010,7 @@ export async function restrictPrivateStorage(input: {
 		// Inheritable grants can change every remaining directory. Never rewrite
 		// one from stale pre-parent-rewrite evidence.
 		if (input.probe?.readAcl === undefined && index + 1 < directories.length) {
-			reports = (await (input.probe?.readSecurity ?? readStorageSecurity)(directories.slice(index + 1))).reports;
+			reports = (await (input.probe?.readSecurity ?? readVerifiedStorageSecurity)(directories.slice(index + 1))).reports;
 		}
 	}
 	// Nothing was rewritten by this call, so the refused pass's refusal stands and the same checks are not repeated.

@@ -25,7 +25,7 @@ import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { RUNTIME_ASSET_DIRECTORY } from "./runtime-assets.ts";
-import { ancestorComponents, chainSecurityProblem, readSecurityOn, restrictPrivateStorage } from "./private-storage.ts";
+import { ancestorComponents, chainSecurityProblem, onLocalFixedNtfs, readSecurityOn, readSecuritySyncOn, restrictPrivateStorage } from "./private-storage.ts";
 import type { PrivateStorageProbe } from "./private-storage.ts";
 import type { Win32Native } from "./win32-native.ts";
 
@@ -89,10 +89,10 @@ export type WarmNativeResult =
 		readonly asset: WarmNativeAsset;
 		readonly ageMs: number;
 		/**
-		 * Read the owner and access list of every path of the chain natively and judge them by the verifier's rules, and require the
-		 * token's account to be the one that verified. Resolves with the refusal, or `null`.
+		 * Read the owner and access list of every path of the chain natively, in one synchronous step, and judge them by the verifier's
+		 * rules, and require the token's account to be the one that verified. Returns the refusal, or `null`.
 		 */
-		readonly verify: (native: Win32Native) => Promise<string | null>;
+		readonly verify: (native: Win32Native) => string | null;
 	}
 	| { readonly kind: "none"; readonly reason: string };
 
@@ -254,8 +254,11 @@ export function warmNativeAsset(input: { readonly storageDir: string; readonly p
 	const paths = chain.map(item => item.path);
 	const owned = chain.filter(item => item.owned).map(item => item.path);
 	const carriers = chain.filter(item => !item.owned).map(item => item.path);
-	const verify = async (native: Win32Native): Promise<string | null> => {
-		const read = await readSecurityOn(native, paths);
+	const verify = (native: Win32Native): string | null => {
+		// The record exists only for a local fixed NTFS volume; the stat identity above includes the volume serial. Asked again,
+		// because the synchronous read must never go to a network path.
+		if (!onLocalFixedNtfs(native, stagedPath)) return "the staged native module is no longer on a local fixed NTFS volume";
+		const read = readSecuritySyncOn(native, paths);
 		if (read.sid !== null && read.sid !== record.account.sid) return "the record was written by another account";
 		return chainSecurityProblem(read, { owned, carriers });
 	};

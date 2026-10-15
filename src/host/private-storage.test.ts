@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { after, before, it } from "node:test";
-import { isPermittedAclPrincipal, namedPrincipal, parseWindowsAcl, permissionsPermitReplacement, readStorageSecurity, restrictPrivateStorage, verifyPrivateStorage, type PrivateStorageLayout, type PrivateStorageProbe, type PrivateStorageSecurityReport } from "./private-storage.ts";
+import { isPermittedAclPrincipal, namedPrincipal, parseWindowsAcl, permissionsPermitReplacement, readStorageSecurity, readVerifiedStorageSecurity, restrictPrivateStorage, verifyPrivateStorage, type PrivateStorageLayout, type PrivateStorageProbe, type PrivateStorageSecurityReport } from "./private-storage.ts";
 import { formatToolSpawn, reportToolSpawn, setToolSpawnObserver, type ToolSpawn } from "./tool-spawn-trace.ts";
 import { TEST_CURRENT_SID, fixtureAcl, fixturePrincipal } from "./private-storage-test-support.ts";
 import { loadWin32Native, setWin32NativeForTest, type Win32Native, type Win32SecurityRead } from "./win32-native.ts";
@@ -196,6 +196,7 @@ function fakeNative(read: Win32SecurityRead, names: ReadonlyMap<string, string> 
 		processDescendants: unused,
 		openPipeClient: unused,
 		volumeOf: unused,
+		readSecuritySync: unused,
 		readSecurity: async (_paths, deadlineMs) => { deadlines.push(deadlineMs); return read; },
 		lookupAccountNames: async sids => new Map([...names].filter(([sid]) => sids.includes(sid))),
 	};
@@ -454,4 +455,51 @@ it("keeps a failing observer from changing what a spawn decides", () => {
 		assert.doesNotThrow(() => reportToolSpawn({ tool: "powershell", purpose: "x", pid: null, ms: 1, outcome: "ok" }));
 	} finally { setToolSpawnObserver(null); }
 	assert.equal(formatToolSpawn({ tool: "icacls", purpose: "p", pid: null, ms: 2, outcome: "timeout" }), "tool spawn: icacls p no pid 2 ms timeout");
+});
+
+it("reads in one synchronous step when every path is on a local fixed NTFS volume, and through the lane otherwise", async () => {
+	const read: Win32SecurityRead = { sid: TEST_CURRENT_SID, failure: null, reports: new Map() };
+	const calls = { sync: 0, lane: 0, volumes: [] as string[] };
+	const native: Win32Native = {
+		...fakeNative(read),
+		volumeOf: root => {
+			calls.volumes.push(root);
+			return root === "c:\\" ? { driveType: 3, fileSystem: "NTFS" } : root === "d:\\" ? { driveType: 4, fileSystem: "NTFS" } : { driveType: 3, fileSystem: "FAT32" };
+		},
+		readSecuritySync: () => { calls.sync++; return read; },
+		readSecurity: async () => { calls.lane++; return read; },
+	};
+	setWin32NativeForTest(native);
+	try {
+		await readVerifiedStorageSecurity(["C:\\a", "C:\\a\\b"]);
+		await readVerifiedStorageSecurity(["C:\\c"]);
+		assert.deepEqual([calls.sync, calls.lane], [2, 0]);
+		assert.deepEqual(calls.volumes, ["c:\\"], "the volume of a root is asked once");
+		await readVerifiedStorageSecurity(["C:\\a", "D:\\share\\x"]);
+		await readVerifiedStorageSecurity(["E:\\fat"]);
+		await readVerifiedStorageSecurity(["\\\\server\\share\\x"]);
+		assert.deepEqual([calls.sync, calls.lane], [2, 3], "a network drive, another file system and a UNC path keep the lane and its deadline");
+		// The ordinary reader never goes synchronous: it makes no promise about the paths it is handed.
+		await readStorageSecurity(["C:\\a"]);
+		assert.deepEqual([calls.sync, calls.lane], [2, 4]);
+	} finally { setWin32NativeForTest(realNative ?? undefined); }
+});
+
+it("tells where a verification spent its time, part by part", { skip: process.platform !== "win32" }, async () => {
+	const base = await fs.mkdtemp(path.join(process.env.LOCALAPPDATA ?? os.homedir(), "omp-phases-"));
+	const root = path.join(base, "store");
+	const layout: PrivateStorageLayout = { root, directories: [root], verifiedDirectories: [], probeDirectory: root, probeText: "phases" };
+	const system32 = path.join(process.env.SystemRoot ?? "C:\\Windows", "System32");
+	try {
+		const run = promisify(execFile);
+		await restrictPrivateStorage({ layout, probe: { applyIcacls: async (target, args) => {
+			await run(path.join(system32, "icacls.exe"), [target, ...args], { windowsHide: true });
+			return { ok: true, stdout: "", detail: null };
+		} } });
+		const phases: [string, number][] = [];
+		const ready = await verifyPrivateStorage({ layout, phases: (name, ms) => phases.push([name, ms]) });
+		assert.equal(ready.ready, true, ready.reason ?? "");
+		assert.deepEqual(phases.map(([name]) => name), ["directories", "plain", "security", "judge", "probe"]);
+		assert.ok(phases.every(([, ms]) => ms >= 0));
+	} finally { await fs.rm(base, { recursive: true, force: true }); }
 });

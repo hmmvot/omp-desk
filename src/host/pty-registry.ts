@@ -33,7 +33,7 @@ import { link, lstat, mkdir, readdir, readFile, rm, unlink, writeFile } from "no
 import { createHash, randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { stageBeside } from "./atomic-file.ts";
-import { restrictPrivateStorage, type PrivateStorageProbe } from "./private-storage.ts";
+import { restrictPrivateStorage, type PrivateStorageProbe, type StoragePhaseSink } from "./private-storage.ts";
 import { PTY_RECORD_SUFFIX, isPtyCreationTime, parsePtyBrokerRecord, type PtyBrokerRecord } from "./pty-protocol.ts";
 import { isPtyProcessAlive } from "./pty-identity.ts";
 
@@ -266,16 +266,20 @@ export async function listPtyRecords(storageDir: string): Promise<PtyRecordListi
 export async function ensurePtyStateAccess(
 	storageDir: string,
 	access?: PrivateStorageProbe,
+	phases?: StoragePhaseSink,
 ): Promise<{ readonly ok: boolean; readonly reason: string | null }> {
 	const root = ptyStateDirectory(storageDir);
+	const began = performance.now();
 	await mkdir(root, { recursive: true, mode: 0o700 });
-	return await verifyPtyStateAccess(storageDir, access);
+	phases?.("mkdir", performance.now() - began);
+	return await verifyPtyStateAccess(storageDir, access, phases);
 }
 
 /** The verification half, for a caller that has already created the directory. */
 export async function verifyPtyStateAccess(
 	storageDir: string,
 	access?: PrivateStorageProbe,
+	phases?: StoragePhaseSink,
 ): Promise<{ readonly ok: boolean; readonly reason: string | null }> {
 	const root = ptyStateDirectory(storageDir);
 	// A slot lock is transient: another launcher (a folder shell, a resume in another tab) removes it the moment its launch
@@ -284,6 +288,7 @@ export async function verifyPtyStateAccess(
 	// judged again, on a fresh listing, while a file it listed has vanished. A real refusal (nothing vanished) is never retried.
 	for (let attempt = 0; ; attempt++) {
 		const files: string[] = [];
+		const listed = performance.now();
 		try {
 			for (const name of await readdir(root)) {
 				if (name.endsWith(PTY_RECORD_SUFFIX) || name.endsWith(PTY_SLOT_LOCK_SUFFIX)) files.push(join(root, name));
@@ -291,6 +296,7 @@ export async function verifyPtyStateAccess(
 		} catch {
 			// A directory that is not there yet has nothing to verify beyond itself.
 		}
+		phases?.("list", performance.now() - listed);
 		const restriction = await restrictPrivateStorage({
 			layout: {
 				root,
@@ -301,6 +307,7 @@ export async function verifyPtyStateAccess(
 				probeText: PTY_STORAGE_PROBE_TEXT,
 			},
 			...(access === undefined ? {} : { probe: access }),
+			...(phases === undefined ? {} : { phases }),
 		});
 		if (restriction.restricted) return { ok: true, reason: null };
 		const vanished = await Promise.all(files.map(file => lstat(file).then(() => false, () => true)));

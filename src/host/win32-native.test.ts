@@ -341,23 +341,37 @@ describe("the process's native module", () => {
 		const asset = await installedAddonAsset();
 		const logs: LoggedLine[] = [];
 		let seen = 0;
-		const passed = await startWin32Native(async () => null, recordingLogger(logs), () => ({ asset, verify: async native => { seen++; assert.equal(native.processCreation(process.pid).kind, "found"); return null; } }));
+		const passed = await startWin32Native(async () => null, recordingLogger(logs), () => ({ asset, verify: native => { seen++; assert.equal(native.processCreation(process.pid).kind, "found"); return null; } }));
 		assert.notEqual(passed, null);
 		assert.equal(seen, 1);
 		assert.deepEqual(win32NativeLoadSteps().map(step => step.name), ["read", "hash", "dlopen", "bind", "verify"]);
 		assert.equal(win32NativeFailure(), null);
 
 		setWin32NativeForTest(undefined);
-		const refused = await startWin32Native(async () => asset, recordingLogger(logs), () => ({ asset, verify: async () => "the component C:\\x on the path to the store lets S-1-5-32-545 replace or re-permission it" }));
+		const refused = await startWin32Native(async () => asset, recordingLogger(logs), () => ({ asset, verify: () => "the component C:\\x on the path to the store lets S-1-5-32-545 replace or re-permission it" }));
 		assert.equal(refused, null, "the slow source is not tried: the module is loaded and its layout is wrong");
 		assert.equal(await win32Native(), null);
 		assert.match(win32NativeFailure() ?? "", /lets S-1-5-32-545 replace/);
 		assert.ok(logs.some(line => line.level === "warn" && /native module is unavailable: .*lets S-1-5-32-545/.test(line.message)));
 
 		setWin32NativeForTest(undefined);
-		const failed = await startWin32Native(async () => asset, silentLogger, () => ({ asset, verify: async () => { throw new Error("the lane died"); } }));
+		const failed = await startWin32Native(async () => asset, silentLogger, () => ({ asset, verify: () => { throw new Error("the lane died"); } }));
 		assert.equal(failed, null);
 		assert.match(win32NativeFailure() ?? "", /could not be verified \(the lane died\)/);
+	});
+
+	it("reads the owner and access list synchronously exactly as the lane does, and a path that cannot be read fails alone", { skip: process.platform !== "win32" }, async () => {
+		const native = await loadWin32Native(await installedAddonAsset());
+		const target = process.env.SystemRoot ?? "C:\\Windows";
+		const missing = path.join(target, `no-such-${randomUUID()}`);
+		const lane = await native.readSecurity([target, missing], 20_000);
+		const sync = native.readSecuritySync([target, missing]);
+		assert.equal(sync.failure, null);
+		assert.equal(sync.sid, lane.sid);
+		assert.ok(sync.sid !== null && /^S-1-5-21-/.test(sync.sid));
+		assert.deepEqual(sync.reports.get(target.toLowerCase()), lane.reports.get(target.toLowerCase()));
+		assert.ok((sync.reports.get(target.toLowerCase())?.entries?.length ?? 0) > 0);
+		assert.deepEqual(sync.reports.get(missing.toLowerCase()), { entries: null, owner: null });
 	});
 
 	it("tells a fixed NTFS volume from anything else", { skip: process.platform !== "win32" }, async () => {

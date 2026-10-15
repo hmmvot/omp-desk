@@ -1175,12 +1175,21 @@ export class PtyBrokerClient {
 	async stateAccess(): Promise<{ readonly ok: boolean; readonly reason: string | null }> {
 		const cached = this.accessPromise;
 		if (cached !== null) return await cached;
-		this.accessPromise = ensurePtyStateAccess(this.options.storageDir, this.options.access).catch(error => ({
+		this.accessPromise = ensurePtyStateAccess(this.options.storageDir, this.options.access, (name, ms) => {
+			this.#accessPhases.set(name, (this.#accessPhases.get(name) ?? 0) + ms);
+		}).catch(error => ({
 			ok: false,
 			reason: messageOf(error),
 		}));
 		return await this.accessPromise;
 	}
+
+	/** Where the state-directory verification spent its time, for the log line: `mkdir 3 · list 2 · plain 40 …`; diagnostic only. */
+	stateAccessPhases(): string {
+		return [...this.#accessPhases].map(([name, ms]) => `${name} ${Math.round(ms)}`).join(" · ");
+	}
+
+	readonly #accessPhases = new Map<string, number>();
 }
 
 /**

@@ -1563,7 +1563,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   });
   const stateAccessStartedAt = Date.now();
   void s.ptyClient.stateAccess().then(
-    access => windowTiming("broker state access", `${Date.now() - stateAccessStartedAt} ms ok=${access.ok}`),
+    access => windowTiming("broker state access", `${Date.now() - stateAccessStartedAt} ms ok=${access.ok} (${s.ptyClient?.stateAccessPhases() ?? ""})`, "info"),
     () => undefined,
   );
   // The digest of the packaged broker tree (about 30 ms for 3 MB) is the other thing every re-adoption needs first. It only
