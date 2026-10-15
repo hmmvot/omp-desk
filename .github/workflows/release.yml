@@ -1,7 +1,10 @@
 name: Release
 
-# Pushing a `v<version>` tag publishes a GitHub Release with both VSIX files. A manual
-# run must be started from that tag (Use workflow from: Tags), not from a branch.
+# Pushing a `v<version>` tag publishes a GitHub Release with both VSIX files. Push `main`
+# before the tag: the release does not run the tests itself, it waits for the CI workflow's
+# run on the tagged commit and fails unless that run's latest attempt concluded `success`.
+# After a red CI, re-run the failed jobs of that CI run, then re-run this workflow.
+# A manual run must be started from that tag (Use workflow from: Tags), not from a branch.
 #
 # Marketplace publishing is not automated yet. It will be added as a step running
 # `vsce publish --oidc` (trusted publishing, no stored secret) once vsce releases that
@@ -24,6 +27,7 @@ jobs:
     runs-on: windows-latest
     permissions:
       contents: write
+      actions: read
     steps:
       - name: Refuse a run that is not on a tag
         if: github.ref_type != 'tag'
@@ -39,10 +43,37 @@ jobs:
         # The notes stay outside the checkout: vsce would otherwise package them into the VSIX.
         run: node scripts/release-notes.mjs "${{ github.ref_name }}" "$env:RUNNER_TEMP/release-notes.md"
       - run: npm ci
-      - run: npm run typecheck
-      # The broker end-to-end tests run the bundled out/ tree; they register only after a build.
-      - run: npm run build
-      - run: npm test
+      - name: Wait for a green CI run on this commit
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+        run: |
+          # The CI run may not exist yet when the tag arrives together with `main`: no run yet is waiting, not failing.
+          deadline=$((SECONDS + 3600))
+          while :; do
+            row=$(gh api "repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&event=push&per_page=20" \
+              --jq '[.workflow_runs[]] | sort_by(.created_at) | last | if . == null then "" else "\(.status) \(.conclusion // "-") \(.html_url)" end') || row=""
+            read -r status conclusion url <<< "$row" || true
+            if [ -z "${status:-}" ]; then
+              echo "No CI run for $SHA yet."
+            elif [ "$status" = completed ]; then
+              if [ "$conclusion" = success ]; then
+                echo "CI is green for $SHA: $url"
+                break
+              fi
+              echo "::error::CI concluded '$conclusion' for $SHA ($url). Re-run the failed jobs of that CI run, then re-run this workflow."
+              exit 1
+            else
+              echo "CI is $status for $SHA: $url"
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "::error::No finished CI run for $SHA within an hour."
+              exit 1
+            fi
+            sleep 30
+          done
       - run: npm run vsix:all
       - name: Create the GitHub Release
         shell: bash
