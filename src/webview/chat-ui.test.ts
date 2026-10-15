@@ -3928,6 +3928,8 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(sent.images.map(image => image.data), [pasted[0], pasted[2]], "image K is the image behind marker K");
 			assert.ok(sent.images.every(image => image.type === "image" && image.mimeType === "image/png"));
 			await ui.wait("window.composer.value()===''");
+			// The strip is published as its own state (`publishImages`) beside the draft text: wait for it instead of reading it in the same turn as the field.
+			await ui.wait("document.querySelectorAll('.omp-attachment-number').length===0");
 			assert.deepEqual(await strip(), []);
 			await installImages();
 			await pasteImage(7, 5, "[Image #1, 7x5]");
