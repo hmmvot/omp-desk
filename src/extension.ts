@@ -11026,18 +11026,18 @@ async function confirmAndStopRuntime(
     }
     // A stop another window asked for is graceful only: it never opens a Force Stop or any other modal here.
     if (stopped.status === "unconfirmed" && preconfirmed?.gracefulOnly !== true) {
+      s.pending.step(tabId, "confirm", "close");
       const force = await vscode.window.showWarningMessage(
         `This session could not be confirmed stopped. ${stopped.detail}`,
         { modal: true, detail: "Force Stop may lose unsaved replies and work in progress. Commands started by OMP may continue running separately. Nothing is restarted automatically; check Sessions before resuming." },
         "Force Stop",
       );
-      s.pending.step(tabId, "confirm", "close");
+      if (force === "Force Stop") s.pending.step(tabId, "working", "close");
       if (force === "Force Stop") {
         stopped = await attempt("force");
         if (stopped.status === "refused" && stopped.code === "facts-changed") showWarning("The session target changed while Force Stop was pending; nothing was stopped.");
         if (stopped.status === "refused" && stopped.code === "not-idle") showWarning("The old session is no longer idle or its identity changed; nothing was stopped.");
       }
-      if (force === "Force Stop") s.pending.step(tabId, "working", "close");
     }
     if (stopped.status === "unconfirmed") showWarning(stopped.detail);
     return stopped.status === "stopped";
