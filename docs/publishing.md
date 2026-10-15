@@ -38,9 +38,24 @@ The Marketplace requires `name` and `displayName` to be unique across all extens
 3. **UX** ([UX Guidelines](https://code.visualstudio.com/api/ux-guidelines/overview)): commands carry the `OMP Desk` category, contributions sit in the right containers (Activity Bar view, editor title actions, Command Palette), and notifications and settings follow the platform conventions.
 4. **Version and changelog**: bump `version` ([SemVer](https://semver.org/spec/v2.0.0.html)), move the `Unreleased` entries of [CHANGELOG.md](../CHANGELOG.md) under the new version heading with its release date ([Keep a Changelog](https://keepachangelog.com/en/1.1.0/)), and update the comparison links at the bottom.
 5. **Third-party notices**: [THIRD_PARTY_NOTICES.txt](../THIRD_PARTY_NOTICES.txt) matches `package-lock.json` for every package bundled into or shipped next to the extension.
-6. **No private data**: no absolute local paths, user names, e-mail addresses, private workspace names, or references to files that are not tracked in Git (see [AGENTS.md](../AGENTS.md)).
+6. **No private data**: the [privacy gate](#privacy-gate) passes, and there are no absolute local paths, user names, e-mail addresses, private workspace names, or references to files that are not tracked in Git (see [AGENTS.md](../AGENTS.md)).
 7. **Repository health** ([community profile](https://docs.github.com/en/communities/setting-up-your-project-for-healthy-contributions/about-community-profiles-for-public-repositories)): `README.md`, `LICENSE`, `CONTRIBUTING.md`, `SECURITY.md`, issue forms under `.github/ISSUE_TEMPLATE/`, and a CI workflow are present. Enable [private vulnerability reporting](https://docs.github.com/en/code-security/how-tos/report-and-fix-vulnerabilities/configure-vulnerability-reporting/configure-for-a-repository) in the repository settings so the `SECURITY.md` link works. Optionally add a code of conduct.
 8. **Quality gates**: `npm run typecheck`, `npm test` and `npm run build` pass on a clean checkout (`npm ci`), and the CI workflow is green.
+
+## Privacy gate
+
+Before any `git push` and before any release, run `scripts/check-privacy.mjs`. It is a **mandatory, blocking** step: a hit stops the push or the release until it is fixed, and a changed history is not pushed until the gate passes over it.
+
+The gate looks for personal information: names of unrelated private projects, local paths and account names. The script contains no such names. It reads them from a denylist, a text file of case-insensitive regular expressions with one rule per line (blank lines and `#` comments are ignored). The maintainer keeps the denylist outside Git (default `.omp/workspace/privacy-denylist.txt`, or pass `--denylist <file>`); a missing, empty or invalid denylist is an error, never a pass.
+
+```powershell
+node scripts/check-privacy.mjs --tree HEAD                         # the tracked tree at a ref
+node scripts/check-privacy.mjs --range origin/main..HEAD           # every commit to be pushed: messages, changed paths, added lines
+node scripts/check-privacy.mjs --range all                         # the whole history, for a rewritten or newly published repository
+node scripts/check-privacy.mjs --vsix out/omp-desk-win32-x64-<version>.vsix --vsix out/omp-desk-win32-arm64-<version>.vsix
+```
+
+The checks combine freely; without any, `--tree HEAD` runs. For each hit the script prints `<where>:<line> rule <N>` (a path has no line), where `N` is the position of the rule in the denylist; it never prints the matched text. The exit code is 1 on any hit and 2 on a usage or denylist error. It also lists every image that a range adds or changes (and the images of a tree or a VSIX). A hit-free run is not enough for those: open each listed image, or have an agent look at it, because the script cannot read pixels. Rules for what belongs in the repository are in [AGENTS.md](../AGENTS.md).
 
 ## Versioning and release channels
 
@@ -58,6 +73,8 @@ npm run typecheck
 npm run build
 npm test
 npm run vsix:all
+node scripts/check-privacy.mjs --tree HEAD --range origin/main..HEAD
+node scripts/check-privacy.mjs --vsix out/omp-desk-win32-x64-<version>.vsix --vsix out/omp-desk-win32-arm64-<version>.vsix
 ```
 
 1. `npm run vsix:x64` and `npm run vsix:arm64` run `scripts/package-vsix.mjs`, which calls `vsce package --target <target> --no-dependencies` with `OMP_DESK_TARGET` set. `vscode:prepublish` runs `npm run build`, so the output always matches the sources; `esbuild.mjs` reads `OMP_DESK_TARGET` and copies only that target's `node-pty` prebuilds. `--no-dependencies` is correct because everything is bundled by esbuild and the `node-pty` package is copied into `out/pty/` by the build. Run `npm run build` again afterwards for an ordinary local build.

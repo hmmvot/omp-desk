@@ -31,8 +31,9 @@ npm ci
 | `npm run watch` | Rebuild on change |
 | `npm run vsix` | Package a VSIX for the current platform with `vsce` into `out/` |
 | `npm run vsix:x64`, `npm run vsix:arm64`, `npm run vsix:all` | Package per-architecture release VSIX files into `out/` (each contains only its own `node-pty` prebuilds); see [docs/publishing.md](docs/publishing.md) |
+| `node scripts/check-privacy.mjs` | The privacy gate: fails when personal information (names of unrelated private projects, local paths, account names) is in the tracked tree (`--tree <ref>`), in the commits about to be pushed (`--range <revs>`, messages, changed paths and added lines) or in a VSIX (`--vsix <file>`). It reads its rules from a local denylist kept outside Git (`--denylist <file>`) and prints `file:line rule N`, never the matched text |
 
-Before opening a pull request, run `npm run typecheck`, `npm test` and `npm run build`.
+Before opening a pull request, run `npm run typecheck`, `npm test` and `npm run build`. Before any `git push` or release, run the privacy gate over what is about to leave your machine; it is a blocking step ([docs/publishing.md](docs/publishing.md#privacy-gate)).
 
 ## Trying a change
 
