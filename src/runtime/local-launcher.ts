@@ -217,7 +217,7 @@ export class LocalLauncher implements OmpHostLauncher {
 	 * never replaced by another transport.
 	 */
 	async attach(request: OmpHostAttachRequest): Promise<OmpHostAttachResult> {
-		const { diagnostics, index, log } = this.#deps;
+		const { diagnostics, log } = this.#deps;
 		const attachedAt = Date.now();
 		diagnostics.beginSubject(request.tabId, {
 			label: this.#deps.diagnosticsLabel(request.cwd),
@@ -290,8 +290,7 @@ export class LocalLauncher implements OmpHostLauncher {
 		diagnostics.succeed(request.tabId, "broker-launch", { detail: `pid ${runtime.pid} · ${outcome.reason}` });
 		await this.startConversation(request.tabId, runtime, request.sessionFile, true);
 		lap("conversation");
-		await index.setRunIntent(request.tabId, "running", `attached ${outcome.reason}`);
-		lap("intent");
+		// The run intent is not recorded here: the index records it with the host it adopts, in the one write that follows this return.
 		log.info(`tab ${request.tabId}: attached — ${outcome.reason}`);
 		void this.#deps.control.reconnect(request.tabId, request.ownerGeneration, runtime);
 		return { state: "attached", host: hostHandle(runtime, request.sessionId), timings };
