@@ -702,6 +702,13 @@ ${ANSI_STYLES}
 .omp-composer-row .omp-textarea { position: relative; }
 .omp-textarea-mirror { position: absolute; inset: 0; box-sizing: border-box; padding: 10px 12px; overflow: hidden; pointer-events: none; font: inherit; line-height: 20px; white-space: pre-wrap; overflow-wrap: break-word; color: transparent; border-radius: var(--omp-radius-card); }
 .omp-image-ref-mark { color: transparent; border-radius: var(--omp-radius); background: color-mix(in srgb, var(--vscode-textLink-foreground, var(--vscode-focusBorder, #3794ff)) 24%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--vscode-textLink-foreground, var(--vscode-focusBorder, #3794ff)) 55%, transparent); }
+/* A fenced code block in the draft: the textarea keeps painting the text, in the editor's font for the whole draft (one font means one layout for caret, selection and hit testing), and the layer behind it paints a band over exactly the block's rows. The band bleeds to the textarea's edges through margin and padding that cancel, so the text keeps the wrapping width of the textarea. */
+.omp-suggest-wrapper--code > .omp-textarea, .omp-suggest-wrapper--code > .omp-textarea-mirror { font-family: var(--omp-mono); font-size: min(var(--omp-mono-size), 15px); tab-size: 4; }
+.omp-mirror-block { margin: 0 -12px; padding: 0 12px; background: var(--vscode-textCodeBlock-background, color-mix(in srgb, var(--vscode-foreground) 8%, transparent)); }
+.omp-composer > .omp-composer-hint--code { margin: 2px 0 6px; min-height: calc(11px * 1.4); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (forced-colors: active) {
+	.omp-mirror-block { forced-color-adjust: none; background: Canvas; box-shadow: inset 0 0 0 1px CanvasText; }
+}
 .omp-attachment-figure { position: relative; display: inline-flex; flex: 0 0 auto; }
 .omp-attachment-number { position: absolute; left: 1px; bottom: 1px; padding: 1px 3px; border-radius: var(--omp-radius); background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); font-size: 10px; line-height: 1; font-weight: 600; }
 @media (forced-colors: active) {

@@ -3339,6 +3339,237 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		// Fenced code blocks in the draft (docs/designs/2026-10-15-composer-code-blocks.md).
+		const setDraft = (text: string): Promise<unknown> => ui.evaluate(`(()=>{const a=document.querySelector('.omp-composer textarea');a.focus();a.select();document.execCommand('insertText',false,${JSON.stringify(text)})})()`);
+		const areaState = (): Promise<{ value: string; start: number; end: number; focused: boolean }> => ui.evaluate("(()=>{const a=document.querySelector('.omp-composer textarea');return{value:a.value,start:a.selectionStart,end:a.selectionEnd,focused:document.activeElement===a}})()");
+		const undo = (): Promise<void> => press("z", "KeyZ", 90, { modifiers: 2, commands: ["undo"] });
+		const tab = (modifiers = 0): Promise<void> => press("Tab", "Tab", 9, modifiers ? { modifiers } : {});
+		const sendCount = (): Promise<number> => ui.evaluate("window.ui.sends().length");
+		const codeHint = (): Promise<string | null> => ui.evaluate("document.querySelector('.omp-composer-hint--code')?.textContent ?? null");
+
+		await t.test("inside a fenced block Enter and Tab edit like an editor and send nothing; outside it Enter sends, and Ctrl+Enter sends from inside", async () => {
+			await reset("code-block-keys");
+			await ui.evaluate("document.querySelector('.omp-composer textarea').focus()");
+			await ui.call("Input.insertText", { text: "Look at the loop" });
+			await press("Enter", "Enter", 13);
+			await ui.wait("window.ui.sends().length===1");
+			await ui.evaluate("window.ui.sendReply()");
+			await ui.wait("document.querySelector('.omp-composer textarea').value===''");
+			assert.equal(await codeHint(), null, "no hint outside a block");
+			await setDraft("Look:\n```ts");
+			await press("Enter", "Enter", 13);
+			assert.deepEqual(await areaState(), { value: "Look:\n```ts\n\n```", start: 12, end: 12, focused: true }, "Enter after an opening fence supplies the closing one and rests between them");
+			assert.match((await codeHint())!, /Ctrl\+Enter: send.*Enter: new line.*Tab: indent.*Shift\+Tab: outdent/);
+			await ui.call("Input.insertText", { text: "if (x) {" });
+			await press("Enter", "Enter", 13);
+			await tab();
+			await ui.call("Input.insertText", { text: "y();" });
+			await press("Enter", "Enter", 13);
+			assert.equal((await areaState()).value, "Look:\n```ts\nif (x) {\n    y();\n    \n```", "Enter keeps the indentation of the line");
+			await tab(8);
+			await ui.call("Input.insertText", { text: "}" });
+			const typed = await areaState();
+			assert.deepEqual(typed, { value: "Look:\n```ts\nif (x) {\n    y();\n}\n```", start: 31, end: 31, focused: true }, "Shift+Tab outdents and the focus stayed in the composer");
+			assert.equal(await sendCount(), 1, "nothing was sent from inside the block");
+			await press("Enter", "Enter", 13, { modifiers: 2 });
+			await ui.wait("window.ui.sends().length===2");
+			assert.equal(await ui.evaluate("window.ui.sends()[1].text"), typed.value, "the sent text is the draft, fences included, unchanged");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("Tab and Shift+Tab work on a selection of lines, fence lines stay put, and every key is one native Undo step", async () => {
+			await reset("code-block-selection");
+			const ORIGINAL = "```\na\n    b\n\nc\n```";
+			await setDraft(ORIGINAL);
+			await setSelection(4, 14);
+			await tab();
+			const indented = "```\n    a\n        b\n\n    c\n```";
+			assert.deepEqual(await areaState(), { value: indented, start: 4, end: 26, focused: true });
+			await tab(8);
+			assert.deepEqual(await areaState(), { value: ORIGINAL, start: 4, end: 14, focused: true });
+			await undo();
+			await ui.wait(`document.querySelector('.omp-composer textarea').value===${JSON.stringify(indented)}`);
+			await undo();
+			await ui.wait(`document.querySelector('.omp-composer textarea').value===${JSON.stringify(ORIGINAL)}`);
+			// Tab on a fence line changes nothing and does not leave.
+			await setSelection(2, 2);
+			await tab();
+			assert.deepEqual(await areaState(), { value: ORIGINAL, start: 2, end: 2, focused: true });
+			// Enter inside the block is one undo step.
+			await setDraft("```\n  x\n```");
+			await setSelection(7, 7);
+			await press("Enter", "Enter", 13);
+			await ui.wait("document.querySelector('.omp-composer textarea').value==='```\\n  x\\n  \\n```'");
+			await undo();
+			await ui.wait("document.querySelector('.omp-composer textarea').value==='```\\n  x\\n```'");
+			// So is the supplied closing fence.
+			await setDraft("```ts");
+			await press("Enter", "Enter", 13);
+			await ui.wait("document.querySelector('.omp-composer textarea').value==='```ts\\n\\n```'");
+			await undo();
+			await ui.wait("document.querySelector('.omp-composer textarea').value==='```ts'");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("Shift+Enter and Alt+Enter inside a block are newlines, and a selection that straddles a fence keeps Enter sending", async () => {
+			await reset("code-block-modifiers");
+			await setDraft("a\n```\nb\n```");
+			await setSelection(7, 7);
+			await press("Enter", "Enter", 13, { modifiers: 8 });
+			assert.deepEqual(await areaState(), { value: "a\n```\nb\n\n```", start: 8, end: 8, focused: true });
+			await press("Enter", "Enter", 13, { modifiers: 1 });
+			assert.deepEqual(await areaState(), { value: "a\n```\nb\n\n\n```", start: 9, end: 9, focused: true });
+			assert.equal(await sendCount(), 0, "neither sends");
+			await setSelection(0, 8);
+			await press("Enter", "Enter", 13);
+			await ui.wait("window.ui.sends().length===1");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("an IME composition leaves Enter and Tab inside a block alone", async () => {
+			await reset("code-block-ime");
+			await setDraft("```\nab\n```");
+			await setSelection(6, 6);
+			const prevented = await ui.evaluate<boolean[]>(`(()=>{
+			 const area=document.querySelector('.omp-composer textarea');const out=[];
+			 const key=init=>{const event=new KeyboardEvent('keydown',{bubbles:true,cancelable:true,...init});area.dispatchEvent(event);out.push(event.defaultPrevented)};
+			 key({key:'Enter',isComposing:true});key({key:'Tab',keyCode:229});
+			 area.dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}));
+			 key({key:'Enter'});key({key:'Tab'});
+			 area.dispatchEvent(new CompositionEvent('compositionend',{bubbles:true,data:''}));
+			 return out;})()`);
+			assert.deepEqual(prevented, [false, false, false, false]);
+			assert.equal((await areaState()).value, "```\nab\n```");
+			assert.equal(await sendCount(), 0);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("slash and @ completions do not open or search inside a block, and still do outside it", async () => {
+			await reset("code-block-completions");
+			await ui.evaluate("window.ui.push({commands:[{name:'shake',description:'Shake'}]});document.querySelector('.omp-composer textarea').focus()");
+			const popup = (): Promise<boolean> => ui.evaluate("Boolean(document.querySelector('[aria-label=\"Slash commands\"],[aria-label=\"Workspace files\"]'))");
+			const lookups = (): Promise<number> => ui.evaluate("window.sent.filter(message=>message.type==='omp:complete-files').length");
+			const quiet = (): Promise<unknown> => ui.evaluate("new Promise(resolve=>setTimeout(resolve,500))");
+			await setDraft("/sh");
+			await ui.wait("document.querySelector('[aria-label=\"Slash commands\"]')");
+			await setDraft("```\n/sh");
+			await quiet();
+			assert.equal(await popup(), false, "a slash inside a block is code");
+			const before = await lookups();
+			await setDraft("```\n@sr");
+			await quiet();
+			assert.equal(await popup(), false);
+			assert.equal(await lookups(), before, "no file search runs inside a block");
+			await setDraft("```\n@sr\n```\n@sr");
+			await ui.wait(`window.sent.filter(message=>message.type==='omp:complete-files').length>${before}`);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("the composer's font, band and chips follow the textarea's own rows at wrap boundaries and while scrolled", async () => {
+			await reset("code-block-layout");
+			await installImages();
+			const prose = "Why does this long first line of prose wrap in the composer when it is wider than the box? ".repeat(2).trimEnd();
+			const code = "const wrapped = computeSomethingWithAVeryLongName(argumentNumberOne, argumentNumberTwo, argumentNumberThree);";
+			const draft = `${prose}\n\`\`\`ts\n${code}\n    short();\n\`\`\`\nafter text\nmore\nmore\nmore`;
+			assert.equal(await ui.evaluate("getComputedStyle(document.querySelector('.omp-composer textarea')).fontFamily.includes('Consolas')"), false, "proportional while the draft has no fence");
+			await setDraft(draft);
+			await ui.wait("document.querySelector('.omp-mirror-block')");
+			const faces = await ui.evaluate<{ area: string; mirror: string; scrollbar: number }>(`(()=>{
+			 const area=document.querySelector('.omp-composer textarea');
+			 return{area:getComputedStyle(area).fontFamily,mirror:getComputedStyle(document.querySelector('.omp-textarea-mirror')).fontFamily,scrollbar:area.offsetWidth-area.clientWidth}})()`);
+			assert.ok(faces.area.includes("Consolas") && faces.mirror === faces.area, JSON.stringify(faces));
+			assert.ok(faces.scrollbar > 0, "the draft is tall enough to scroll, so the wrapping width includes the scrollbar gutter");
+			// Where the browser itself puts the caret for a click: the band must cover exactly the block's rows.
+			const fenceLength = "```ts\n".length;
+			const block = { start: prose.length + 1, end: draft.indexOf("\nafter text") };
+			const rowOfWrap = await ui.evaluate<number>(`(()=>{
+			 const text=document.querySelector('.omp-mirror-block').firstChild;const range=document.createRange();
+			 const topOf=index=>{range.setStart(text,index);range.setEnd(text,index+1);return range.getBoundingClientRect().top};
+			 const first=topOf(${fenceLength});
+			 for(let i=${fenceLength + 1};i<${fenceLength + code.length};i++)if(topOf(i)>first+5)return i-${fenceLength};
+			 return -1;})()`);
+			assert.ok(rowOfWrap > 20, "the long code line wraps inside the band");
+			const probe = async (scrollTop: number): Promise<number> => {
+				await ui.evaluate(`(()=>{const a=document.querySelector('.omp-composer textarea');a.scrollTop=${scrollTop}})()`);
+				await settleFrames();
+				const geometry = await ui.evaluate<{ left: number; right: number; top: number; bottom: number; band: { top: number; bottom: number }; wrapY: number }>(`(()=>{
+				 const area=document.querySelector('.omp-composer textarea');const box=area.getBoundingClientRect();const band=document.querySelector('.omp-mirror-block').getBoundingClientRect();
+				 const text=document.querySelector('.omp-mirror-block').firstChild;const range=document.createRange();const at=${fenceLength + rowOfWrap};
+				 range.setStart(text,at);range.setEnd(text,at+1);const wrap=range.getBoundingClientRect();
+				 return{left:box.left,right:box.right-(area.offsetWidth-area.clientWidth),top:box.top,bottom:box.bottom,band:{top:band.top,bottom:band.bottom},wrapY:wrap.top+wrap.height/2}})()`);
+				const visible = (y: number): boolean => y > geometry.top + 4 && y < geometry.bottom - 4;
+				const targets: [string, number, number, number][] = [
+					["the last row above the band ends at the end of the prose", geometry.band.top - 10, geometry.right - 16, block.start - 1],
+					["the band's first row starts at the opening fence", geometry.band.top + 10, geometry.left + 13, block.start],
+					["the second row of the wrapped code line starts at the wrap point", geometry.wrapY, geometry.left + 13, block.start + fenceLength + rowOfWrap],
+					["the band's last row ends at the closing fence", geometry.band.bottom - 10, geometry.right - 16, block.end],
+					["the first row below the band starts the next line", geometry.band.bottom + 10, geometry.left + 13, block.end + 1],
+				];
+				let checked = 0;
+				for (const [what, y, x, expected] of targets) {
+					if (!visible(y)) continue;
+					await clickAt({ x, y });
+					const { start } = await areaState();
+					assert.equal(start, expected, `${what} (scrollTop ${scrollTop}) ${JSON.stringify({ x, y, geometry, rowOfWrap, fenceLength, block })}`);
+					// The hint follows the caret: shown with the caret in the block, gone with it outside.
+					await ui.wait(`(document.querySelector('.omp-composer-hint--code')?.textContent ?? '')!=='' === ${expected >= block.start && expected <= block.end}`);
+					assert.equal(await ui.evaluate("document.querySelector('.omp-composer textarea').getBoundingClientRect().top"), geometry.top, "the hint changing its words never moves the text");
+					checked++;
+				}
+				return checked;
+			};
+			assert.ok(await probe(0) >= 3, "rows checked at the top");
+			assert.ok(await probe(10_000) >= 2, "rows checked after scrolling to the bottom");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("an image marker typed into a block keeps its chip inside the band, and the draft is proportional again once the fence is gone", async () => {
+			await reset("code-block-chip");
+			await installImages();
+			await setDraft("```\n");
+			await pasteImage(10, 6, "[Image #1, 10x6]");
+			await ui.wait("document.querySelector('.omp-mirror-block .omp-image-ref-mark')");
+			const inside = await ui.evaluate<boolean>(`(()=>{const band=document.querySelector('.omp-mirror-block').getBoundingClientRect(),mark=document.querySelector('.omp-mirror-block .omp-image-ref-mark').getBoundingClientRect();
+			 return mark.left>=band.left&&mark.right<=band.right&&mark.top>=band.top-0.5&&mark.bottom<=band.bottom+0.5})()`);
+			assert.equal(inside, true, "the chip sits inside the band");
+			assert.deepEqual(await strip(), ["#1"]);
+			await setDraft("plain");
+			await ui.wait("!document.querySelector('.omp-mirror-block') && !document.querySelector('.omp-suggest-wrapper--code')");
+			assert.equal(await ui.evaluate("getComputedStyle(document.querySelector('.omp-composer textarea')).fontFamily.includes('Consolas')"), false);
+			assert.equal(await codeHint(), null);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("Shift+Tab on an unindented line is the keyboard's way out of a block, backwards; Escape alone changes nothing", async () => {
+			await reset("code-block-leave");
+			await setDraft("```\n  x");
+			await tab(8);
+			assert.deepEqual(await areaState(), { value: "```\nx", start: 5, end: 5, focused: true }, "the first Shift+Tab outdents");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-composer-hint--code').getAttribute('role')"), "status", "the hint is announced when it appears");
+			await tab(8);
+			const left = await areaState();
+			assert.equal(left.focused, false, "the next one has nothing to outdent and leaves the textarea");
+			assert.equal(left.value, "```\nx");
+			await setSelection(5, 5);
+			await press("Escape", "Escape", 27);
+			await tab();
+			assert.deepEqual(await areaState(), { value: "```\nx   ", start: 8, end: 8, focused: true }, "Escape arms nothing: Tab still indents");
+			assert.equal(await sendCount(), 0);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("adjacent blocks and a block beside an empty line add no row to the layer", async () => {
+			await reset("code-block-rows");
+			const rows = (): Promise<{ area: number; layer: number }> => ui.evaluate("(()=>{const a=document.querySelector('.omp-composer textarea'),s=getComputedStyle(a);return{area:(a.scrollHeight-parseFloat(s.paddingTop)-parseFloat(s.paddingBottom))/20,layer:document.querySelector('.omp-textarea-mirror-text').getBoundingClientRect().height/20}})()");
+			for (const draft of ["```\na\n```\n```\nb\n```", "\n```\na\n```\n\n```ts\nb\n```\n", "text\n```\n```\n```\n```\ntail"]) {
+				await setDraft(draft);
+				await ui.wait("document.querySelector('.omp-mirror-block')");
+				const { area, layer } = await rows();
+				assert.equal(layer, area, `the layer has the textarea's ${area} rows for ${JSON.stringify(draft)}`);
+			}
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("a marker is atomic for the caret and selection: it cannot be entered, and arrows hop over it", async () => {
 			await buildDraft("image-refs-caret");
 			const [, second] = await markers();

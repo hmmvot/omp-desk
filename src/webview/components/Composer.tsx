@@ -35,6 +35,13 @@
  *   it), the same two deliveries the native TUI offers;
  * - a refused send (session not live, a denied slash builtin) keeps the draft and
  *   says why.
+ *
+ * Code blocks (docs/designs/2026-10-15-composer-code-blocks.md, {@link ../lib/code-fence}):
+ * - inside a fenced block of the draft Enter is a newline, Tab and Shift+Tab indent and outdent like an
+ *   editor, and Ctrl+Enter is the chord that sends; Shift+Tab with nothing to outdent leaves the box;
+ * - no completion opens there, and while a block exists the textarea and its highlight layer
+ *   ({@link ./DraftMirror}) use the editor font and the layer paints a band behind each block;
+ * - the text that is sent is the draft as typed.
  */
 import type { ImageContent } from "@oh-my-pi/pi-wire";
 import type { ChangeEvent, ClipboardEvent, DragEvent, KeyboardEvent, ReactNode, RefObject } from "react";
@@ -56,9 +63,11 @@ import {
 	type PendingImage,
 } from "../lib/attachments";
 import { AskDialog, AskOptionRow } from "./AskDialog";
+import { DraftMirror } from "./DraftMirror";
 import type { ChatUiRequest, ChatUiResponse } from "../../chat/model";
 import type { ChatClient, ChatSnapshot } from "../lib/chat-client";
 import { caretRowEdges } from "../lib/caret-row";
+import { blockContaining, draftPieces, findFencedBlocks, indentEdit, newlineEdit, outdentEdit, type FencedBlock, type TextEdit } from "../lib/code-fence";
 import { chatWritable } from "../lib/chat-client";
 import { startsSession } from "../lib/chat-operation";
 import { reportComposerPopupOpen } from "../lib/composer-overlay";
@@ -78,7 +87,6 @@ import {
 	activeImages,
 	compactForSend,
 	deletionRange,
-	draftSegments,
 	findImageReferences,
 	imageReferenceLabel,
 	pruneInactive,
@@ -100,6 +108,8 @@ const LINE_PX = 20;
 /** The prompt textarea never shows fewer lines than this, so a two-line placeholder or draft is fully visible. */
 const MIN_ROWS = 2;
 const MAX_ROWS = 8;
+/** The words under the textarea while the caret is in a fenced code block (docs/designs/2026-10-15-composer-code-blocks.md). */
+const CODE_HINT = "Code block · Ctrl+Enter: send · Enter: new line · Tab: indent · Shift+Tab: outdent, or leave when there is nothing to outdent";
 
 /** Wait after the last keystroke before asking the extension host for paths. */
 const SUGGESTION_DEBOUNCE_MS = 150;
@@ -426,6 +436,12 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	/** Images whose marker is in the text — what the strip shows and a send carries. */
 	const attached = useMemo(() => activeImages(text, images), [text, images]);
 	const referenceSpans = useMemo(() => findImageReferences(text, number => images.some(image => image.number === number)), [text, images]);
+	/** Fenced code blocks of the draft, and the one the caret is in: its keys are an editor's, and no completion opens in it. */
+	const blocks = useMemo(() => findFencedBlocks(text), [text]);
+	const caretBlock = useMemo(() => blockContaining(blocks, caret), [blocks, caret]);
+	const codeHintId = useId();
+	/** A whole-line edit is intentional even where its diff spans an image marker the edit does not touch. */
+	const blockEditRef = useRef(false);
 	const canSubmit = canPrompt && !captureLocked && request === null && !sending && reading === 0 && (text.trim().length > 0 || attached.length > 0);
 
 	useLayoutEffect(() => {
@@ -446,9 +462,10 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	/**
 	 * `@` completion exists only where prompting does: a read-only or
 	 * disconnected panel asks nothing, and a pending host request owns the
-	 * composer outright, so no search runs beside it.
+	 * composer outright, so no search runs beside it. Inside a fenced code block
+	 * nothing completes: `/` and `@` there are code, and Enter and Tab are the editor's.
 	 */
-	const completionsEnabled = canPrompt && !captureLocked && request === null;
+	const completionsEnabled = canPrompt && !captureLocked && request === null && caretBlock === null;
 	const completionKey = `${text}\0${caret}`;
 	const slash = useMemo(() => completionsEnabled && dismissedCompletion !== completionKey ? slashQueryAt(text, caret) : null, [completionsEnabled, dismissedCompletion, completionKey, text, caret]);
 	const argument = useMemo(() => completionsEnabled && dismissedCompletion !== completionKey ? slashArgumentAt(snapshot.commands, text, caret) : null, [completionsEnabled, dismissedCompletion, completionKey, snapshot.commands, text, caret]);
@@ -805,7 +822,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 		if (captureRef.current !== null) { element.value = textRef.current; return; }
 		let value = element.value;
 		const before = textRef.current;
-		if (!(event.nativeEvent as InputEvent).isComposing) {
+		if (!(event.nativeEvent as InputEvent).isComposing && !blockEditRef.current) {
 			const repaired = repairDamagedReferences(before, value, findImageReferences(before, isKnownNumber));
 			if (repaired !== null) {
 				value = repaired.text;
@@ -1275,6 +1292,18 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 		};
 	}, [composingRef, isKnownNumber, textareaMounted]);
 
+	/** Applies a block edit through the editing command stack (one Undo step) and puts the selection where the edit says. */
+	const applyBlockEdit = useCallback((element: HTMLTextAreaElement, edit: TextEdit): void => {
+		blockEditRef.current = true;
+		try {
+			replaceRange(element, edit.from, edit.to, edit.insert);
+		} finally {
+			blockEditRef.current = false;
+		}
+		element.setSelectionRange(edit.selectionStart, edit.selectionEnd);
+		syncCaret(element);
+	}, [syncCaret]);
+
 	/**
 	 * Keys the open popup claims: arrows move the highlight, Enter/Tab accept
 	 * (Enter only without Shift), Escape closes. Everything else falls through to
@@ -1282,10 +1311,35 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	 * While an IME composition is active no key is claimed at
 	 * all — arrows and Enter belong to the candidate window, and consuming them
 	 * would break text entry for those users.
+	 *
+	 * Inside a fenced code block (`lib/code-fence`) the editor's keys come first: Enter is a newline that
+	 * keeps the line's indentation, Tab and Shift+Tab indent and outdent, and Shift+Tab with nothing to
+	 * outdent leaves the box backwards. Ctrl+Enter is not claimed there and sends by the rules below.
 	 */
 	const onPromptKeyDown = useCallback(
 		(event: KeyboardEvent<HTMLTextAreaElement>): void => {
 			const composing = event.nativeEvent.isComposing || composingRef.current;
+			// Inside a fenced code block Enter and Tab are an editor's (docs/designs/2026-10-15-composer-code-blocks.md); the chord that
+			// sends there is Ctrl+Enter, which falls through to the rules below. An IME composition and a held draft are left alone.
+			const element = event.currentTarget;
+			const block = composing || event.nativeEvent.keyCode === 229 || captureRef.current !== null
+				? null
+				: blockContaining(findFencedBlocks(element.value), element.selectionStart, element.selectionEnd);
+			if (block !== null) {
+				if (event.key === "Tab" && !event.ctrlKey && !event.altKey && !event.metaKey) {
+					const edit = event.shiftKey ? outdentEdit(element.value, block, element.selectionStart, element.selectionEnd) : indentEdit(element.value, block, element.selectionStart, element.selectionEnd);
+					// Shift+Tab with nothing left to outdent is the way out of the block, backwards, and is the only Tab that moves the focus.
+					if (edit === null && event.shiftKey) return;
+					event.preventDefault();
+					if (edit !== null) applyBlockEdit(element, edit);
+					return;
+				}
+				if (event.key === "Enter" && !event.ctrlKey && !event.metaKey) {
+					event.preventDefault();
+					applyBlockEdit(element, newlineEdit(element.value, block, element.selectionStart, element.selectionEnd));
+					return;
+				}
+			}
 			// `Esc` `Esc` in an empty composer while nothing runs opens Rewind, as in the TUI. While a turn runs, Escape
 			// belongs to Stop (`ompDesk.stopTurn`), and an open popup takes it first.
 			if (event.key === "Escape" && onRewind !== undefined && !composing && !suggestionsOpen) {
@@ -1296,7 +1350,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 					return;
 				}
 			}
-			if (suggestionsOpen && !composing) {
+			if (suggestionsOpen && !composing && block === null) {
 				if (visible.length > 0 && (event.key === "Home" || event.key === "End")) {
 					event.preventDefault(); event.stopPropagation();
 					selectSuggestion(event.key === "Home" ? 0 : visible.length - 1); return;
@@ -1345,7 +1399,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 				send(event.altKey);
 			}
 		},
-		[acceptSuggestion, activeIndex, client, composingRef, dequeueLast, onRewind, send, suggestionsOpen, visible, selectSuggestion],
+		[acceptSuggestion, activeIndex, applyBlockEdit, client, composingRef, dequeueLast, onRewind, send, suggestionsOpen, visible, selectSuggestion],
 	);
 
 	/** Answer the shown dialog; the client answers each dialog once and refuses a stale card. */
@@ -1570,17 +1624,8 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 				</div>
 			)}
 			<div className="omp-composer-row omp-composer-row--input">
-				<div className="omp-suggest-wrapper" ref={wrapperRef}>
-					{referenceSpans.length > 0 && (
-						<div className="omp-textarea-mirror" ref={mirrorRef} aria-hidden="true">
-							<div className="omp-textarea-mirror-text">
-								{draftSegments(text, referenceSpans).map((segment, index) => segment.marker
-									? <mark key={index} className="omp-image-ref-mark" data-image-number={segment.number}>{segment.text}</mark>
-									: segment.text)}
-								{"\u200b"}
-							</div>
-						</div>
-					)}
+				<div className={blocks.length > 0 ? "omp-suggest-wrapper omp-suggest-wrapper--code" : "omp-suggest-wrapper"} ref={wrapperRef}>
+					{(referenceSpans.length > 0 || blocks.length > 0) && <DraftMirror text={text} spans={referenceSpans} blocks={blocks} mirrorRef={mirrorRef} />}
 					<textarea
 						ref={textareaRef}
 						className="omp-textarea"
@@ -1604,6 +1649,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 						aria-expanded={suggestionsOpen}
 						aria-controls={suggestionsOpen ? suggestionListId : undefined}
 						aria-activedescendant={suggestionsOpen && activeIndex >= 0 ? `${suggestionListId}-${activeIndex}` : undefined}
+						aria-describedby={caretBlock !== null ? codeHintId : undefined}
 					/>
 					{suggestionsOpen && (
 						<ul id={suggestionListId} role="listbox" aria-label={argument !== null ? "Command arguments" : slash !== null ? "Slash commands" : "Workspace files"} className="omp-suggest-list">
@@ -1631,6 +1677,12 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 					)}
 				</div>
 			</div>
+			{blocks.length > 0 && (
+				// The row stays while the draft holds a block and only its words come and go with the caret, so a click into a block never moves the text under the pointer.
+				<div className="omp-composer-hint omp-composer-hint--code" id={codeHintId} role="status" title={caretBlock !== null ? CODE_HINT : undefined}>
+					{caretBlock !== null ? CODE_HINT : ""}
+				</div>
+			)}
 			<ExtensionWidgets snapshot={snapshot} placement="belowEditor" />
 			</>}
 			<ChatFooter client={client} snapshot={snapshot}
