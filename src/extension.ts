@@ -1484,7 +1484,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   // claims without a creation time for good.
   if (process.platform === "win32") {
     const nativeLoad = startWin32Native(async () => {
-      const simulated = simulatedNativeFailure(process.env.OMP_DESK_TEST_NATIVE_FAILURE);
+      const simulated = simulatedNativeFailure(process.env.OMPDESK_TEST_NATIVE_FAILURE);
       if (simulated !== null) throw new Error(simulated);
       const asset = await s.staging.native();
       // The load records why it has nothing to load; staging's own words are the cause the notice classifies.

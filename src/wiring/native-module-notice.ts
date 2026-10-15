@@ -90,9 +90,10 @@ export async function nativeDiagnosticsFor(input: {
 
 /**
  * Test-only: the loader's failure a run of the extension is told to simulate, so the message can be seen where the real cause
- * (an application-control policy) cannot be produced on a test machine. `OMP_DESK_TEST_NATIVE_FAILURE` names a Windows error
+ * (an application-control policy) cannot be produced on a test machine. `OMPDESK_TEST_NATIVE_FAILURE` names a Windows error
  * (`1260`, `577`, `225`), `timeout` or `other`; anything else (including unset) simulates nothing. The messages are the ones
- * Windows and Node give for these causes.
+ * Windows and Node give for these causes. The name has no `OMP_` prefix because `scripts/test-vscode.ps1` removes every
+ * `OMP_*` variable from the window it launches.
  */
 export function simulatedNativeFailure(value: string | undefined): string | null {
 	switch (value) {
