@@ -66,6 +66,7 @@ import type { LauncherFolder, LauncherFolders } from "../views/launcher-folders.
 import { folderHeadline, sessionItemState } from "../views/session-tree.ts";
 import type { SessionLauncherFacts, SessionTreeProvider } from "../views/session-tree.ts";
 import type { Logger } from "../shared/logger.ts";
+import type { PendingOrigin } from "../shared/pending-operation.ts";
 import type { SessionProcesses } from "./process-wiring.ts";
 
 /** How long an owner window waits to hold the focus before it tells a requester that it is not in front. */
@@ -149,7 +150,7 @@ export interface RoutingEditorPort {
 
 /** The ordinary launch and open paths a request another window sent is performed through. */
 export interface RoutingLaunchPort {
-	openSession(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, verb: "opened" | "resumed", noRouting: boolean, keepLiveView: boolean): Promise<boolean>;
+	openSession(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, verb: "opened" | "resumed", noRouting: boolean, keepLiveView: boolean, origin: PendingOrigin): Promise<boolean>;
 	openSessionInMode(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, mode: SessionViewMode, verb: "open" | "show", noRouting: boolean, revealIfLive: boolean): Promise<void>;
 	startNewSession(context: vscode.ExtensionContext, index: SessionIndex, folder: LauncherFolder): Promise<void>;
 	resumeFromFolderHistory(context: vscode.ExtensionContext, index: SessionIndex, folders: LauncherFolders, folder: LauncherFolder, keepLiveView: boolean): Promise<void>;
@@ -845,7 +846,7 @@ export function registerWindowRouting(deps: WindowRoutingDeps): WindowRouting {
 			// Chosen at the beginning, not before the waits: a session that is live here by then is revealed (the ordinary
 			// open does that), never switched to another view, and one that goes live while the open waits is still only revealed.
 			start = () => action.mode === null || deps.facts(action.tabId).running
-				? deps.openSession(context, index, action.tabId, action.verb, true, true)
+				? deps.openSession(context, index, action.tabId, action.verb, true, true, "row")
 				: deps.openSessionInMode(context, index, action.tabId, action.mode!, "open", true, true);
 		} else {
 			const folder = folders.get(action.folderId);

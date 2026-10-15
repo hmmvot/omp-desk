@@ -1490,7 +1490,7 @@
         },
         {
           "command": "ompDesk.killSession",
-          "when": "view == ompDesk.sessions && viewItem =~ /^ompSession\\.[^.]*\\.(running|working|background|question|unread|waiting|restoring|stopping|starting|checking|otherWindow)\\./",
+          "when": "view == ompDesk.sessions && viewItem =~ /^ompSession\\.[^.]*\\.(running|working|background|question|unread|waiting|restoring|stopping|starting|checking|otherWindow|pending-live)\\./",
           "group": "4_kill@1"
         },
         {

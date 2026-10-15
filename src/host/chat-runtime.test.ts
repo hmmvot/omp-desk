@@ -351,7 +351,7 @@ describe("a page asking to reconnect", () => {
 			assert.equal(await runtime.handleMessage(TAB, { ...request, epoch: { nonce: "old-native", counter: 1 } }, page), "refused");
 			const commands = channel.written.length;
 			assert.equal(await runtime.handleMessage(TAB, request, page), "accepted");
-			assert.deepEqual(events.filter(event => event.type === "restart-requested"), [{ type: "restart-requested", nativeNonce: session.epoch.nonce }]);
+			assert.deepEqual(events.filter(event => event.type === "restart-requested"), [{ type: "restart-requested", nativeNonce: session.epoch.nonce, requestId: "restart-1" }]);
 			assert.equal(channel.written.length, commands, "the lifecycle coordinator, not RPC, owns the recovery operation");
 		} finally { runtime.dispose(); }
 	});
@@ -373,7 +373,7 @@ describe("a page asking to reconnect", () => {
 			assert.equal(session.model.code, "identity-diverged");
 			assert.ok(logs.some(({ message }) => message.startsWith(`tab ${TAB}: identity check failed (identity-diverged): OMP reports file D:\\scratch\\other.jsonl`) && message.includes("expects file D:\\scratch\\bound.jsonl")), logs.map(({ message }) => message).join("\n"));
 			assert.equal(await runtime.handleMessage(TAB, request, page), "accepted");
-			assert.deepEqual(events.filter(event => event.type === "restart-requested"), [{ type: "restart-requested", nativeNonce: session.epoch.nonce }]);
+			assert.deepEqual(events.filter(event => event.type === "restart-requested"), [{ type: "restart-requested", nativeNonce: session.epoch.nonce, requestId: "restart-1" }]);
 		} finally { runtime.dispose(); }
 	});
 });

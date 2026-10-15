@@ -46,6 +46,7 @@ import { ChatSnapshotAssembler } from "../../protocol/chat-messages.ts";
 import type { ChatAbortResultMessage, ChatDisplayPreferences, ChatNavigateResultMessage, ChatQueuePurpose, ChatQueueResultEntry, ChatQueueResultItem, ChatQueuedRef } from "../../protocol/chat-messages.ts";
 import type { NavigationKind } from "../../chat/rewind.ts";
 import { parseSubagentPage, type SubagentTranscriptPage } from "../../chat/subagent-transcript.ts";
+import { ChatOperationStore, type ChatOperationState, type ChatOperationStoreOptions } from "./chat-operation.ts";
 
 /** What every surface renders from. */
 export type ChatSnapshot = ChatModel;
@@ -66,6 +67,8 @@ export interface ChatClientOptions {
 	now?: () => number;
 	/** Mutation id minter; injectable for tests. */
 	newRequestId?: () => string;
+	/** Clock, stall limit and timers of the page-local operation store; injectable for tests. */
+	operations?: ChatOperationStoreOptions;
 }
 
 /**
@@ -148,6 +151,7 @@ export class ChatClient {
 	readonly #aborts = new Map<string, (answer: ChatAbortAnswer) => void>();
 	readonly #navigations = new Map<string, { resolve(answer: ChatNavigateAnswer): void; timer: unknown }>();
 	readonly #navigationListeners = new Set<(answer: ChatNavigateAnswer) => void>();
+	readonly #operations: ChatOperationStore;
 	#model: ChatModel = createChatModel();
 	#displayPreferences: ChatDisplayPreferences = { toolCallDetail: "overview", accessibilitySupport: false };
 	#draftHandoffLocked = false;
@@ -160,10 +164,16 @@ export class ChatClient {
 		this.#transport = transport;
 		this.#now = options.now ?? Date.now;
 		this.#newRequestId = options.newRequestId ?? newChatRequestId;
+		this.#operations = new ChatOperationStore({ now: this.#now, ...options.operations });
 	}
 
 	getSnapshot = (): ChatSnapshot => this.#model;
 	getDisplayPreferences = (): ChatDisplayPreferences => this.#displayPreferences;
+	/** The action this page asked for that is still pending, and the sentence of one that stalled (see {@link ChatOperationStore}). */
+	getOperationState = (): ChatOperationState => this.#operations.getState();
+	subscribeOperations = (listener: () => void): (() => void) => this.#operations.subscribe(listener);
+	/** The host link was lost or the route changed: nothing the page awaited will be answered here. */
+	resetOperations(): void { this.#operations.reset(); }
 
 	subscribe = (listener: () => void): (() => void) => {
 		this.#listeners.add(listener);
@@ -185,6 +195,7 @@ export class ChatClient {
 	#commit(next: ChatModel): void {
 		if (next === this.#model) return;
 		this.#model = next;
+		this.#operations.model(next);
 		for (const listener of [...this.#listeners]) listener();
 	}
 
@@ -202,6 +213,7 @@ export class ChatClient {
 				return true;
 			}
 			case "omp:chat-abort-result": {
+				this.#operations.stopAnswered(message.requestId);
 				// Correlated by request id alone: OMP already withdrew these messages, whatever the epoch did since.
 				const answer = this.#aborts.get(message.requestId);
 				if (answer === undefined) return true;
@@ -252,6 +264,9 @@ export class ChatClient {
 				this.#finishChildRead(message.requestId, page ?? { status: "unavailable", reason: "read-failed" });
 				return true;
 			}
+			case "omp:chat-operation":
+				this.#operations.host(message);
+				return true;
 			case "omp:chat-state":
 				this.#commit(applyChatState(model, message));
 				return true;
@@ -371,12 +386,17 @@ export class ChatClient {
 		const refusal = this.#refusal();
 		if (refusal !== null) return { ok: false, reason: refusal };
 		const requestId = this.#newRequestId();
+		// A Stop already pending in this page is not sent again; it ends with its abort result, the turn ending, or the stall limit.
+		if (!this.#operations.begin("stop", requestId, this.#model.phase)) return { ok: true };
 		if (onAnswer !== undefined) {
 			this.#aborts.set(requestId, onAnswer);
 			if (this.#aborts.size > MAX_PENDING_ABORTS) this.#aborts.delete(this.#aborts.keys().next().value!);
 		}
 		const result = this.#send({ type: "omp:chat-abort", requestId });
-		if (!result.ok) this.#aborts.delete(requestId);
+		if (!result.ok) {
+			this.#aborts.delete(requestId);
+			this.#operations.abandon(requestId);
+		}
 		return result;
 	}
 
@@ -511,24 +531,43 @@ export class ChatClient {
 		pending.resolve({ ok: true, results });
 	}
 
-	/** The view-only tab's explicit Resume; the host runs the exact-file resume path. */
+	/**
+	 * The view-only tab's explicit Resume; the host runs the exact-file resume path. The click is acknowledged in this page at once
+	 * (see {@link getOperationState}); a second click while one is pending sends nothing. `false` when nothing was sent.
+	 */
 	resume(): boolean {
 		if (this.#draftHandoffLocked) return false;
 		if (this.#model.phase !== "view-only" && this.#model.phase !== "stopped") return false;
-		this.#transport.post({ type: "omp:chat-resume", requestId: this.#newRequestId() });
-		return true;
+		return this.#postOperation("resume", requestId => ({ type: "omp:chat-resume", requestId }));
 	}
 
 	/** The failed tab's explicit Reconnect; the host re-attaches the same session in place. `false` when nothing was sent. */
 	reconnect(): boolean {
 		if (this.#model.phase !== "failed") return false;
-		return this.#transport.post({ type: "omp:chat-reconnect", requestId: this.#newRequestId() }) !== false;
+		return this.#postOperation("reconnect", requestId => ({ type: "omp:chat-reconnect", requestId }));
 	}
 
 	/** The host checks the unanswered state or identity failure, ownership and exact saved identity before offering consent. */
 	restart(): boolean {
 		const epoch = this.#model.epoch;
 		if (this.#draftHandoffLocked || epoch === null) return false;
-		return this.#transport.post({ type: "omp:chat-restart", requestId: this.#newRequestId(), epoch }) !== false;
+		return this.#postOperation("restart", requestId => ({ type: "omp:chat-restart", requestId, epoch }));
+	}
+
+	/** Acknowledge the action in this page, then post it; a pending one of the same kind, or a message that went nowhere, leaves nothing pending. */
+	#postOperation(kind: "resume" | "reconnect" | "restart", message: (requestId: string) => GuestWebviewMessage): boolean {
+		const requestId = this.#newRequestId();
+		if (!this.#operations.begin(kind, requestId, this.#model.phase)) return false;
+		let posted: boolean | void;
+		try {
+			posted = this.#transport.post(message(requestId));
+		} catch {
+			posted = false;
+		}
+		if (posted === false) {
+			this.#operations.abandon(requestId);
+			return false;
+		}
+		return true;
 	}
 }

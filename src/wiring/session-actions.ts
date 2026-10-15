@@ -37,6 +37,7 @@ import { askWindowToStop } from "../host/window-requests.ts";
 import type { LauncherFolders } from "../views/launcher-folders.ts";
 import { ProcessTreeItem } from "../views/process-rows.ts";
 import { SessionClickRecognizer } from "../views/session-click.ts";
+import type { PendingOrigin } from "../shared/pending-operation.ts";
 import type { SessionsGrouping } from "../views/session-order.ts";
 import { SessionTreeItem, displaySessionTitle, sessionHeadline } from "../views/session-tree.ts";
 import type { LauncherTreeItem, SessionLauncherFacts, SessionTreeProvider } from "../views/session-tree.ts";
@@ -111,7 +112,7 @@ export interface SessionLauncherPort {
 
 /** The ordinary open paths and the argument readers of the commands. */
 export interface SessionOpenPort<Tab extends SessionTab> {
-	openSession(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown, verb: "opened" | "resumed"): Promise<boolean>;
+	openSession(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown, verb: "opened" | "resumed", noRouting?: boolean, keepLiveView?: boolean, origin?: PendingOrigin): Promise<boolean>;
 	/** Attach to a recorded detached shell and show it, or report that it is gone. */
 	attachFolderShell(context: vscode.ExtensionContext, index: SessionIndex, record: ShellSlotRecord): Promise<boolean>;
 	/** The tab a command was invoked on: a launcher row, or an explicit tab id. */
@@ -197,7 +198,7 @@ interface CapturedSessionStop {
 /** What the extension calls into the session actions. */
 export interface SessionActions {
 	/** Tree clicks keep history immediate; only a stopped same-row second click requests a launch. */
-	click(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown): Promise<void>;
+	click(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown, origin?: PendingOrigin): Promise<void>;
 	/** Click a process row: open what it stands for. */
 	openProcess(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown): Promise<void>;
 	/** `ompDesk.goToSession`: a searchable list of every session the Sessions view shows. */
@@ -240,7 +241,7 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 	const sessionClicks = new SessionClickRecognizer();
 
 	/** Tree clicks keep history immediate; only a stopped same-row second click requests a launch. */
-	async function clickSession(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown): Promise<void> {
+	async function clickSession(context: vscode.ExtensionContext, index: SessionIndex, argument: unknown, origin: PendingOrigin = "row"): Promise<void> {
 		if (!(argument instanceof SessionTreeItem)) return;
 		const tabId = argument.tabId;
 		const entry = index.get(tabId);
@@ -250,7 +251,7 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 		const stopped = argument.state === "stopped" && !deps.facts(tabId).running && entry.sessionFile !== null;
 		const action = sessionClicks.click(`${tabId}\0${entry.sessionFile ?? ""}`, stopped);
 		if (action === "launch") await deps.openingTab(tabId);
-		await deps.openSession(context, index, argument, action === "launch" ? "resumed" : "opened");
+		await deps.openSession(context, index, argument, action === "launch" ? "resumed" : "opened", false, false, origin);
 	}
 
 	/**
@@ -317,7 +318,7 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 		});
 		if (picked === undefined) return;
 		if (picked.row === undefined) await vscode.commands.executeCommand("ompDesk.newSession");
-		else await clickSession(context, index, picked.row);
+		else await clickSession(context, index, picked.row, "command");
 	}
 
 	/**

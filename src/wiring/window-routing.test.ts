@@ -838,9 +838,9 @@ describe("serving a launch another window asked for", () => {
 		await serve(w, request({ kind: "open-session", tabId: TAB, verb: "resumed", mode: "chat" }));
 		await nextTurn();
 		assert.deepEqual(w.opened, [
-			["open-session", TAB, "resumed", true, true],
+			["open-session", TAB, "resumed", true, true, "row"],
 			["open-session-in-mode", TAB, "chat", "open", true, true],
-			["open-session", TAB, "resumed", true, true],
+			["open-session", TAB, "resumed", true, true, "row"],
 		], "never routed again, and a session that is live here is only revealed");
 	});
 

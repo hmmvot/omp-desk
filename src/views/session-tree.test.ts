@@ -34,6 +34,7 @@ import type { LauncherFolder } from "./launcher-folders.ts";
 import type {
 	SessionActivityFacts,
 	SessionItemState,
+	RowPending,
 	SessionLauncherFacts,
 	SessionTreeItem,
 	SessionLauncherSource,
@@ -1725,6 +1726,109 @@ describe("launcher tree", () => {
 			assert.ok(changed.includes(item));
 			terminals.setProcesses(snapshot());
 			assert.deepEqual(await terminals.getChildren(), []);
+		});
+	});
+});
+
+describe("a row whose action is being processed", () => {
+	const FILE = path.join(os.tmpdir(), "omp-launcher-tree", "pending.jsonl");
+	const stopped = entry({ tabId: "tab:p", cwd: ALPHA, kind: "session", sessionFile: FILE, availability: "saved", runIntent: "stopped" });
+	const live = entry({ tabId: "tab:p", cwd: ALPHA, kind: "session", sessionFile: FILE, availability: "live", runIntent: "running" });
+	const present = (state: SessionItemState, entryOf: SessionIndexEntry, facts: SessionLauncherFacts, pending: RowPending | null, now = 20_000): SessionRow =>
+		new sessionTree.SessionTreeItem(entryOf, state, { header: null, conversation: null, facts, active: false, now, pending });
+	const operation = (kind: RowPending["kind"], step: RowPending["step"], startedAt = 20_000): RowPending =>
+		({ key: "tab:p", kind, step, startedAt, still: false });
+
+	it("says what it is doing, spins, and keeps its real state", () => {
+		const facts: SessionLauncherFacts = { ...NO_FACTS, ownershipChecked: true };
+		const state = sessionTree.sessionItemState(stopped, facts);
+		assert.equal(state, "stopped");
+		const row = present(state, stopped, facts, operation("resume", "ownership"));
+		assert.equal(row.description, "Starting · checking for another OMP process");
+		assert.equal(iconId(row), "sync~spin");
+		assert.equal(row.state, "stopped", "the state the click recognizer and the published status read is the real one");
+		assert.match(tooltipText(row), /Starting · checking for another OMP process$/);
+		const later = present(state, stopped, facts, operation("resume", "spawn", 12_000));
+		assert.equal(later.description, "Starting · starting OMP · 8 s", "seconds appear after 5 s");
+		assert.equal(present(state, stopped, facts, null).description, "Stopped");
+	});
+
+	it("offers no row action but Kill, and Kill only where the real state offers it", () => {
+		const facts: SessionLauncherFacts = { ...NO_FACTS, ownershipChecked: true };
+		const idle = present("stopped", stopped, facts, operation("open", "ownership"));
+		assert.match(idle.contextValue ?? "", /^ompSession\.held\.pending\.live-only\.file-kept\./);
+		assert.deepEqual(contributedCommands(idle.contextValue ?? "").filter(command => command !== "ompDesk.copyRowDiagnostics"), [],
+			"nothing to open, rename, forget, delete or kill on a stopped row that is being opened");
+		const running: SessionLauncherFacts = { ...NO_FACTS, open: true, running: true, viewMode: "chat" };
+		const acted = present("running", live, running, operation("rename", "checking"));
+		assert.match(acted.contextValue ?? "", /^ompSession\.held\.pending-live\.live-only\.file-kept\./);
+		assert.deepEqual(contributedCommands(acted.contextValue ?? "").filter(command => command !== "ompDesk.copyRowDiagnostics"), ["ompDesk.killSession"],
+			"a live row being renamed or closed keeps Kill and loses Rename, Close, Delete, Reload and Show");
+		const starting = present("starting", stopped, NO_FACTS, operation("resume", "spawn"));
+		assert.match(starting.contextValue ?? "", /^ompSession\.[^.]*\.starting\./, "a row that already is starting keeps its state's menu");
+	});
+
+	it("reads Stopping for a Close only once it is stopping, never while it checks or asks", () => {
+		const running: SessionLauncherFacts = { ...NO_FACTS, open: true, running: true, viewMode: "chat" };
+		assert.equal(present("running", live, running, operation("close", "checking")).description, "Closing · checking");
+		assert.equal(present("running", live, running, operation("close", "confirm", 1_000)).description, "Closing · waiting for your answer");
+		assert.equal(present("running", live, running, operation("close", "working")).description, "Stopping · working");
+	});
+
+	describe("in the tree", () => {
+		const entries = [
+			entry({ tabId: "tab:a", cwd: ALPHA, kind: "session", sessionFile: FILE, availability: "saved", runIntent: "stopped", ordinal: 1 }),
+			entry({ tabId: "tab:b", cwd: ALPHA, kind: "session", sessionFile: FILE, availability: "saved", runIntent: "stopped", ordinal: 2 }),
+		];
+		async function build(running: Set<string>) {
+			const provider = providerFor({
+				folders: () => [folder("folder:alpha", ALPHA)],
+				entries: () => entries,
+				activeTabId: () => null,
+				facts: tabId => ({ ...NO_FACTS, open: running.has(tabId), running: running.has(tabId) }),
+			}, { now: () => 20_000 });
+			const roots = await rootsOf(provider);
+			await waitForRows(provider, () => roots.every(root => root.rows.every(row => row.state !== "checking")));
+			return provider;
+		}
+
+		it("repaints only the row it is about, and ends the words when the operation ends", async () => {
+			const provider = await build(new Set());
+			const [folderRow] = await rootsOf(provider);
+			const rows = await rowsOf(provider, folderRow!);
+			const [a, b] = [rows.find(row => row.tabId === "tab:a")!, rows.find(row => row.tabId === "tab:b")!];
+			const changed: unknown[] = [];
+			provider.onDidChangeTreeData(element => changed.push(element));
+			provider.setPending([{ key: "tab:a", kind: "resume", step: "ownership", startedAt: 20_000, still: false }]);
+			assert.equal(a.description, "Starting · checking for another OMP process");
+			assert.doesNotMatch(String(b.description), /Starting/);
+			assert.ok(changed.includes(a));
+			assert.ok(!changed.includes(b), "a row with no operation is not repainted");
+			provider.setPending([]);
+			assert.equal(a.description, "Stopped");
+		});
+
+		it("keeps a row in the group it was in when its operation began, even when its state changes under it", async () => {
+			const running = new Set<string>();
+			const provider = await build(running);
+			const [folderRow] = await rootsOf(provider);
+			assert.deepEqual((await rowsOf(provider, folderRow!)).map(row => row.tabId), ["tab:a", "tab:b"]);
+			provider.setPending([{ key: "tab:b", kind: "resume", step: "prepare", startedAt: 20_000, still: false }]);
+			running.add("tab:b");
+			provider.refresh();
+			assert.deepEqual((await rowsOf(provider, (await rootsOf(provider))[0]!)).map(row => row.tabId), ["tab:a", "tab:b"],
+				"b became running but does not jump above a while its operation pends");
+			provider.setPending([]);
+			assert.deepEqual((await rowsOf(provider, (await rootsOf(provider))[0]!)).map(row => row.tabId), ["tab:b", "tab:a"], "it moves once, when the operation ends");
+		});
+
+		it("shows a folder's own operation (a New Session being reserved) on the folder row", async () => {
+			const provider = await build(new Set());
+			const [folderRow] = await rootsOf(provider);
+			provider.setPending([{ key: "folder:folder:alpha", kind: "new-session", step: "reserving", startedAt: 20_000, still: false }]);
+			assert.equal(folderRow!.description, "Starting · reserving the session");
+			provider.setPending([]);
+			assert.notEqual(folderRow!.description, "Starting · reserving the session");
 		});
 	});
 });

@@ -497,3 +497,74 @@ describe("chat quick actions", () => {
 		assert.deepEqual(client.getDisplayPreferences(), { toolCallDetail: "overview", accessibilitySupport: false, thinkingExpanded: true, toolsMode: "groups" });
 	});
 });
+
+describe("an action the page asked for is acknowledged in the page", () => {
+	const ASK = "1".padStart(32, "0");
+
+	it("makes Resume pending in the click, posts it once, and lets the host's step replace the acknowledgement", () => {
+		const { client, sent } = inPhase("view-only");
+		assert.equal(client.getOperationState().operation, null);
+		assert.equal(client.resume(), true);
+		assert.deepEqual(client.getOperationState().operation, { kind: "resume", step: null, elapsedMs: 0, still: false, requestId: ASK });
+		assert.equal(client.resume(), false, "a second click while pending sends nothing");
+		assert.equal(sent.filter(message => message.type === "omp:chat-resume").length, 1);
+		client.handle({ type: "omp:chat-operation", operation: { kind: "resume", step: "ownership", elapsedMs: 800, requestId: ASK, still: false } });
+		assert.equal(client.getOperationState().operation?.step, "ownership");
+		client.handle({ type: "omp:chat-operation", operation: null, ended: { kind: "resume", requestId: ASK, status: "refused" } });
+		assert.equal(client.getOperationState().operation, null);
+		assert.equal(client.resume(), true, "after a refusal the button works again");
+	});
+
+	it("survives the epoch swap a resume causes and ends when the conversation goes live", () => {
+		const { client } = inPhase("view-only");
+		client.resume();
+		client.handle(snapshotMessage({ phase: "view-only", readOnlyReason: "not running" }, OTHER_EPOCH));
+		assert.equal(client.getOperationState().operation?.kind, "resume", "a new epoch's snapshot does not erase the acknowledgement");
+		client.handle(snapshotMessage({ phase: "live" }, OTHER_EPOCH));
+		assert.equal(client.getOperationState().operation, null);
+	});
+
+	it("leaves nothing pending when the message went nowhere, and tells subscribers about every change", () => {
+		const { client, setReachable } = inPhase("view-only");
+		let notified = 0;
+		client.subscribeOperations(() => { notified += 1; });
+		setReachable(false);
+		assert.equal(client.resume(), false);
+		assert.equal(client.getOperationState().operation, null);
+		setReachable(true);
+		const before = notified;
+		client.resume();
+		assert.ok(notified > before);
+		client.resetOperations();
+		assert.equal(client.getOperationState().operation, null);
+	});
+
+	it("keeps Restart and Reconnect pending until the host takes over", () => {
+		const restart = inPhase("failed", { code: "state-failed" });
+		restart.client.restart();
+		assert.equal(restart.client.getOperationState().operation?.kind, "restart");
+		restart.client.handle(snapshotMessage({ phase: "attaching", readOnlyReason: "not running" }));
+		assert.equal(restart.client.getOperationState().operation, null);
+
+		const reconnect = inPhase("failed", { code: "state-failed" });
+		reconnect.client.reconnect();
+		assert.equal(reconnect.client.getOperationState().operation?.kind, "reconnect");
+		assert.equal(reconnect.client.reconnect(), false);
+	});
+
+	it("shows Stop as pending until its abort result, sends it once, and refuses a Stop that cannot be sent", () => {
+		const { client, sent, setReachable } = live({ working: true });
+		let answered = 0;
+		assert.deepEqual(client.sendAbort(() => { answered += 1; }), { ok: true });
+		assert.equal(client.getOperationState().operation?.kind, "stop");
+		assert.deepEqual(client.sendAbort(), { ok: true });
+		assert.equal(sent.filter(message => message.type === "omp:chat-abort").length, 1, "a repeat is not sent");
+		client.handle({ type: "omp:chat-abort-result", epoch: EPOCH, requestId: ASK, status: "accepted", entries: [] });
+		assert.equal(answered, 1);
+		assert.equal(client.getOperationState().operation, null);
+
+		setReachable(false);
+		assert.equal(client.sendAbort().ok, false);
+		assert.equal(client.getOperationState().operation, null, "a Stop that went nowhere is not pending");
+	});
+});

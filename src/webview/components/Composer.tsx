@@ -38,7 +38,7 @@
  */
 import type { ImageContent } from "@oh-my-pi/pi-wire";
 import type { ChangeEvent, ClipboardEvent, DragEvent, KeyboardEvent, ReactNode, RefObject } from "react";
-import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { chatTurnInProgress } from "../../chat/model";
 import { nativeSettingsCommand } from "../../chat/settings-command";
 import { guestTransport } from "../bridge";
@@ -57,6 +57,7 @@ import type { ChatUiRequest, ChatUiResponse } from "../../chat/model";
 import type { ChatClient, ChatSnapshot } from "../lib/chat-client";
 import { caretRowEdges } from "../lib/caret-row";
 import { chatWritable } from "../lib/chat-client";
+import { startsSession } from "../lib/chat-operation";
 import { reportComposerPopupOpen } from "../lib/composer-overlay";
 import { useHeldFocus } from "../lib/use-held-focus";
 import { providePanelActions } from "../lib/panel-actions";
@@ -403,6 +404,10 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	// A session that is re-attached while the user types disables the field; it takes the focus back when it is writable again.
 	useHeldFocus(textareaRef, canPrompt, canPrompt ? "" : `phase=${snapshot.phase}${snapshot.readOnlyReason === null ? "" : " read-only"}`);
 	const resumable = snapshot.phase === "view-only" || snapshot.phase === "stopped";
+	// The click is acknowledged in this page before the host answers (`ChatClient.getOperationState`): Resume says `Starting…` and Stop says `Stopping…`.
+	const { operation, notice: operationNotice } = useSyncExternalStore(client.subscribeOperations, client.getOperationState);
+	const starting = startsSession(operation);
+	const stopping = operation?.kind === "stop";
 	const busy = snapshot.working;
 	const request = snapshot.uiRequest;
 	useEffect(() => { setSubmitted(false); }, [snapshot.working, snapshot.phase, snapshot.commandFeedback, snapshot.lastPromptResult, progressAvailable]);
@@ -1289,9 +1294,9 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 						<DialogBody request={request} onRespond={respond} />
 					</fieldset>
 				</div>
-				{sendError !== null && (
+				{(sendError ?? operationNotice) !== null && (
 					<div className="omp-attach-error" role="alert">
-						{sendError}
+						{sendError ?? operationNotice}
 					</div>
 				)}
 				<div className="omp-composer-row">
@@ -1307,8 +1312,8 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 							Cancel
 						</button>
 						{busy && (
-							<button type="button" className="omp-btn omp-btn--stop" onClick={stop}>
-								<span aria-hidden="true" className="codicon codicon-debug-stop omp-btn-icon" /> Stop
+							<button type="button" className="omp-btn omp-btn--stop" disabled={stopping} onClick={stop}>
+								<span aria-hidden="true" className={`codicon codicon-${stopping ? "loading codicon-modifier-spin" : "debug-stop"} omp-btn-icon`} /> {stopping ? "Stopping…" : "Stop"}
 							</button>
 						)}
 					</div>
@@ -1317,7 +1322,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 		) : null;
 
 	const placeholder = resumable
-		? "This session is not running. Resume it to send a message."
+		? (starting ? "Starting the session…" : "This session is not running. Resume it to send a message.")
 		: !canPrompt
 		? (snapshot.readOnlyReason ?? "waiting for the session…")
 		: busy
@@ -1351,19 +1356,22 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 		<>
 			{attachmentAction}
 			{busy && canPrompt && (
-				<button type="button" className="omp-btn omp-btn--stop omp-btn--icon-mid" aria-label="Stop the running turn" title="Stop the running turn" onClick={stop}>
-					<span aria-hidden="true" className="codicon codicon-debug-stop omp-btn-icon" />
-					<span className="omp-btn-label">Stop</span>
+				<button type="button" className="omp-btn omp-btn--stop omp-btn--icon-mid" aria-label={stopping ? "Stopping the turn" : "Stop the running turn"} title={stopping ? "Stopping the turn…" : "Stop the running turn"} disabled={stopping} onClick={stop}>
+					<span aria-hidden="true" className={`codicon codicon-${stopping ? "loading codicon-modifier-spin" : "debug-stop"} omp-btn-icon`} />
+					<span className="omp-btn-label">{stopping ? "Stopping…" : "Stop"}</span>
 				</button>
 			)}
 			{resumable && (
 				<button
 					type="button"
 					className="omp-btn omp-btn--primary"
-					title="Start the session again from its saved file"
+					title={starting ? "Starting the session…" : "Start the session again from its saved file"}
+					disabled={starting}
+					aria-busy={starting}
 					onClick={() => client.resume()}
 				>
-					Resume
+					{starting && <span aria-hidden="true" className="codicon codicon-loading codicon-modifier-spin omp-btn-icon" />}
+					{starting ? " Starting…" : "Resume"}
 				</button>
 			)}
 			{busy && (
@@ -1446,9 +1454,9 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 					}}>Dismiss</button>
 				</div>
 			))}
-			{sendError !== null && (
+			{(sendError ?? operationNotice) !== null && (
 				<div className="omp-attach-error" role="alert">
-					{sendError}
+					{sendError ?? operationNotice}
 				</div>
 			)}
 			{attached.length > 0 && (

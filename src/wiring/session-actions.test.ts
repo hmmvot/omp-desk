@@ -354,7 +354,7 @@ describe("clicking a session row", () => {
 		} finally {
 			t.mock.timers.reset();
 		}
-		assert.deepEqual(w.opened.map(call => call.slice(1)), [["opened"], ["resumed"]]);
+		assert.deepEqual(w.opened.map(call => call.slice(1)), [["opened", false, false, "row"], ["resumed", false, false, "row"]]);
 		assert.deepEqual(w.tabsAsked, [TAB], "only the launching click waits for the open of the row");
 		assert.deepEqual(settled, ["opening settled"]);
 	});

@@ -102,6 +102,11 @@ import { claimHolderMayBeAlive, setProcessProbeObserver } from "./host/session-c
 import { formatToolSpawn, setToolSpawnObserver } from "./host/tool-spawn-trace";
 import { type Logger, prefixedLogger } from "./shared/logger";
 import { LaunchTimeline, type LaunchKind } from "./host/launch-timeline";
+import { PendingOperations, type PendingHandle } from "./host/pending-operations";
+import { PendingDisplay } from "./host/pending-display";
+import { observeLaunchSteps } from "./host/pending-steps";
+import type { PendingEnd, PendingKind, PendingOrigin, PendingStep } from "./shared/pending-operation";
+import { pendingDisplayShell } from "./wiring/pending-shell";
 import { PersistFailureReporter } from "./host/persist-report";
 import { holderSeemsAlive } from "./host/holder-liveness";
 import { claimFileNameFor, startClaimWatch } from "./host/claim-watch";
@@ -837,6 +842,13 @@ interface WindowState {
   readonly diagnostics: DiagnosticsRecorder;
   /** Where a new session's launch spends its time: begun by New Session, reported by the launcher and the host-control step. */
   readonly launchTimeline: LaunchTimeline;
+  /**
+   * The actions the user asked for that are still being processed in this window: display only (`docs/designs/2026-10-15-immediate-click-feedback.md`).
+   * The Sessions rows, the Sessions view's progress bar, the status bar and every Chat page of the tab read it; nothing decides from it.
+   */
+  readonly pending: PendingOperations;
+  /** Carries `pending` to the Sessions tree, the view's progress bar and the status bar; disposed with the window. */
+  readonly pendingDisplay: PendingDisplay;
   /** What a failed save of the session index tells the user: contention is only logged, a fault is shown once per cause. */
   readonly persistFailures: PersistFailureReporter;
   /**
@@ -1081,7 +1093,7 @@ function guestDispatcherDeps(): GuestDispatcherDeps<TabState> {
       itemFor: async tabId => windowState().launcherProvider?.itemFor(tabId),
       click: async (index, item) => {
         const context = windowState().context;
-        if (context !== undefined) await windowState().sessionActions.click(context, index, item);
+        if (context !== undefined) await windowState().sessionActions.click(context, index, item, "command");
       },
       info: showInfo,
     }),
@@ -1188,6 +1200,9 @@ function bridgeHostDeps(): BridgeHostDeps<TabState> {
 
 /** The initial state of one window: every collection empty, every handle not yet created. */
 function createWindowState(context: vscode.ExtensionContext): WindowState {
+  const pending = new PendingOperations({ log: line => log.debug(line) });
+  const launchTimeline = new LaunchTimeline();
+  launchTimeline.observe(observeLaunchSteps(pending));
   return {
     // Session index and claims
     reconciler: undefined as never, // assigned by `activate` before anything reads it
@@ -1281,7 +1296,9 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     context,
     output: undefined,
     diagnostics: new DiagnosticsRecorder(),
-    launchTimeline: new LaunchTimeline(),
+    launchTimeline,
+    pending,
+    pendingDisplay: new PendingDisplay(pending, pendingDisplayShell({ provider: () => windowState().launcherProvider, sessionsViewId: SESSIONS_VIEW_ID })),
     persistFailures: new PersistFailureReporter({ warn: message => log.warn(message) }, message => showWarning(message)),
     startupRestore: null,
     startupRestorePending: true,
@@ -1688,6 +1705,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const chat = new ChatRuntime({
     hostNonce: createToken(),
     hostTools: agentDebugger,
+    pending: s.pending,
     log,
     onEvent: (tabId, event) => handleChatEvent(context, index, tabId, event),
     readDisplayPreferences: readChatDisplayPreferences,
@@ -1848,6 +1866,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     { dispose: claimWatch },
     { dispose: () => s.windowRegistry?.dispose() },
     { dispose: () => s.routing.dispose() },
+    { dispose: () => { s.pendingDisplay.dispose(); s.pending.dispose(); } },
     // The window's own folders are shown in Sessions: a change of the open folders or of the
     // setting that hides them rebuilds the list. Resolved paths are remembered per path, so an
     // open-folder change forgets them; the only disk reads are the identity of each path and
@@ -1961,7 +1980,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     registerDeskCommand("ompDesk.resumeWorkspaceFolder", (argument: unknown) =>
       resumeWorkspaceFolder(context, index, argument),
     ),
-    registerDeskCommand("ompDesk.openSession", (argument: unknown) => openSession(context, index, argument, "resumed")),
+    registerDeskCommand("ompDesk.openSession", (argument: unknown) => openSession(context, index, argument, "resumed", false, false, argument instanceof SessionTreeItem ? "row" : "command")),
     registerDeskCommand("ompDesk.clickSession", (argument: unknown) => s.sessionActions.click(context, index, argument)),
     registerDeskCommand("ompDesk.openProcess", (argument: unknown) => s.sessionActions.openProcess(context, index, argument)),
     registerDeskCommand("ompDesk.goToSession", () => s.sessionActions.goTo(context, index)),
@@ -2260,8 +2279,9 @@ async function openSession(
   noRouting = false,
   /** Reveal a writer that is live when the open resolves instead of changing its view (a launch another window asked for, ADR-0057). */
   keepLiveView = false,
+  /** Who the user clicked: a row of the Sessions view shows its own state; a command (palette, Go to Session, keybinding) has no surface of its own. */
+  origin: PendingOrigin = "command",
 ): Promise<boolean> {
-  const s = windowState();
   const commandAt = Date.now();
   const tabId =
     tabIdArgument(argument) ??
@@ -2272,6 +2292,23 @@ async function openSession(
     refreshLauncher();
     return false;
   }
+  // The action is accepted from here: the row, the Chat page of the tab and (for a command) the status bar say so until it ends.
+  return pendingEntry(tabId, verb === "resumed" ? "resume" : "open", { origin, step: "routing" }, handle =>
+    openIndexedSession(context, index, tabId, verb, noRouting, keepLiveView, commandAt, handle));
+}
+
+/** The rest of {@link openSession} for a row the window indexes. `handle` is the pending operation the caller began for it. */
+async function openIndexedSession(
+  context: vscode.ExtensionContext,
+  index: SessionIndex,
+  tabId: string,
+  verb: "opened" | "resumed",
+  noRouting: boolean,
+  keepLiveView: boolean,
+  commandAt: number,
+  handle: PendingHandle,
+): Promise<boolean> {
+  const s = windowState();
   // A session another window holds switches to that window at once, with no confirmation:
   // nothing is launched from here. The claim is read afresh on every open of a row this window
   // does not run, not taken from the row's cached state, so a click while the row is still
@@ -2283,11 +2320,12 @@ async function openSession(
     windowTiming("requester: open of a row this window does not run", `${tabId.slice(0, 12)} held elsewhere=${held}, claim read ${Date.now() - openedAt} ms`);
     if (held) {
       await s.routing.switchToWindow(index, tabId);
+      handle.end("handed-off");
       return false;
     }
     if (s.launcherProvider?.displayedState(tabId) === "otherWindow") s.launcherProvider.refreshOwnership(new Set([tabId]));
     // A session of a folder that only another window has open is opened there (ADR-0057).
-    if (!noRouting && await s.routing.routeOpen(index, tabId, verb, null)) return false;
+    if (!noRouting && await s.routing.routeOpen(index, tabId, verb, null)) { handle.end("handed-off"); return false; }
   }
   // A row that shows a plain omp process outside this extension as the writer neither launches
   // nor opens history on a bare click: it asks first (ADR-0046), after a fresh probe, because the
@@ -2295,9 +2333,11 @@ async function openSession(
   // launch, so it resumes; OMP then saves to a sibling file instead of mixing writes.
   let externalConfirmed = false;
   if (s.launcherProvider?.displayedState(tabId) === "externalOmp") {
+    handle.step("ownership");
     const fresh = await launcherOwnershipFacts(index, tabId, { fresh: true });
     if (fresh.externalOmp === true) {
-      if (!(await confirmOpenAnyway())) return false;
+      handle.step("confirm");
+      if (!(await confirmOpenAnyway())) { handle.end("cancelled"); return false; }
       externalConfirmed = true;
     } else {
       s.launcherProvider.refreshOwnership(new Set([tabId]));
@@ -2933,7 +2973,7 @@ async function openFolderHistoryCandidate(
     return;
   }
   log.info(`tab ${entry.tabId}: resumed folder session ${candidate.file} (${candidate.source}) from ${folder.path}`);
-  await timedLaunch(entry.tabId, "resume", commandAt, () => openTab(context, index, entry.tabId, "resumed", "explicit", undefined, false, keepLiveView));
+  await pendingEntry(entry.tabId, "resume", { origin: "command" }, () => timedLaunch(entry.tabId, "resume", commandAt, () => openTab(context, index, entry.tabId, "resumed", "explicit", undefined, false, keepLiveView)));
 }
 
 /**
@@ -3068,6 +3108,28 @@ async function timedLaunch<T>(tabId: string, kind: LaunchKind, commandAt: number
 }
 
 /**
+ * Run the entry of an action the user asked for as a pending operation (display only, `src/host/pending-operations.ts`): it begins
+ * at once, once the target is known and before the first await, and ends when `run` settles. `run` may end it earlier with its
+ * own status (a hand-over, a refusal, a cancel); `end` is idempotent, so the first status wins.
+ */
+async function pendingEntry<T>(
+  key: string,
+  kind: PendingKind,
+  options: { readonly origin?: PendingOrigin; readonly requestId?: string | null; readonly step?: PendingStep },
+  run: (handle: PendingHandle) => Promise<T>,
+): Promise<T> {
+  const handle = windowState().pending.begin(key, kind, options);
+  try {
+    const result = await run(handle);
+    handle.end("running");
+    return result;
+  } catch (error) {
+    handle.end("failed");
+    throw error;
+  }
+}
+
+/**
  * Open or focus one indexed tab.
  *
  * An editor that is already showing a running host is revealed and nothing else
@@ -3099,6 +3161,7 @@ async function openTab(
   // Explicit mode actions use switchSessionMode; ordinary Open never changes a live editor.
   // The folder list may still be receiving the predecessor build's folders, so every
   // explicit open waits for that one pass to settle before it resolves anything.
+  windowState().pending.step(tabId, "waiting");
   await ensureCatalogReady();
   // A chat whose process ended shows the ended state before its exit cleanup is finished, and offers Resume at once. A click
   // in that gap would find the dead runtime still in place, take the session for one already running here and start nothing,
@@ -3186,6 +3249,7 @@ async function openTabOnce(
   // index afterwards, exactly as for any other open.
   const startup = s.startupRestore;
   if (startup !== null && startup.cohort.has(tabId)) {
+    s.pending.step(tabId, "waiting");
     await startup.settled;
     // The pass is this row's one authoritative native attempt. When it connected
     // a host — and this tab's editor was restored meanwhile, which is the ordinary
@@ -3204,9 +3268,11 @@ async function openTabOnce(
   let stoppedForOpen = false;
   const recorded = index.get(tabId);
   if (intent === "explicit" && hostOf(stateOf(tabId)) == null && recorded?.host != null && !isManagedHost(recorded.host) && (verb === "resumed" || verb === "opened")) {
+    s.pending.step(tabId, "ownership");
     const pid = await s.sessionRuntime.verifiedWriterPid(tabId);
     if (pid !== null) {
       const label = "Stop and Open";
+      s.pending.step(tabId, "confirm");
       const choice = await vscode.window.showWarningMessage(
         "Stop the running session and open it here?",
         { modal: true, detail: "Unsaved replies and work in progress may be lost." },
@@ -3221,7 +3287,9 @@ async function openTabOnce(
   // run intent is not stopped), and OMP then saves to a sibling file (ADR-0046). A stopped row's
   // plain Open and history views start no writer here, so they never ask.
   if (intent === "explicit" && (verb === "resumed" || recorded?.runIntent !== "stopped") && !externalConfirmed && hostOf(stateOf(tabId)) == null) {
+    s.pending.step(tabId, "ownership");
     const fresh = await launcherOwnershipFacts(index, tabId, { fresh: true });
+    if (fresh.externalOmp === true) s.pending.step(tabId, "confirm");
     if (fresh.externalOmp === true && !(await confirmOpenAnyway())) {
       s.launcherProvider?.refreshOwnership(new Set([tabId]));
       return;
@@ -3281,6 +3349,7 @@ async function openTabOnce(
       });
   }
   let outcome: RestoreOutcome;
+  s.pending.step(tabId, "admission");
   try {
     // Restoring the editor or opening stopped history never lifts its stopped intent.
     // Only Resume (or explicitly starting a draft with no history) may do that.
@@ -3990,7 +4059,7 @@ function viewSwitchRefusal(code: ReplaceRefusal, detail: string | undefined): st
 }
 
 /** Explicit owned-Chat recovery from an unanswered state request or a process that no longer serves this conversation; never asks that native dispatcher to settle. */
-async function restartChat(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, nativeNonce: string): Promise<void> {
+async function restartChat(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, nativeNonce: string, requestId: string): Promise<void> {
   const s = windowState();
   const state = stateOf(tabId);
   const runtime = hostOf(state);
@@ -4010,6 +4079,7 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
     refuse("Restart requires this controlling Chat editor, an OMP process that does not answer or no longer serves this conversation, and its exact saved conversation. Nothing was stopped.");
     return;
   }
+  const pendingRestart = s.pending.begin(tabId, "restart", { origin: "composer", requestId, step: "checking" });
   const file = row.sessionFile;
   const sessionId = row.host?.sessionId ?? row.sessionId;
   const durableSessionId = row.sessionId;
@@ -4068,12 +4138,15 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
     const imageWarning = attachments === 0 ? "" : ` ${attachments} attachment reference${attachments === 1 ? "" : "s"} cannot be transferred; reattach the images to the preserved text after Restart.`;
     const unanswered = conversations.liveOf(tabId)?.nativeStateUnanswered === true;
     const identityWarning = unanswered ? "" : " It is the exact process recorded for this conversation, but it now reports another conversation or identity; stopping it also ends whatever it is running now.";
+    s.pending.step(tabId, "confirm");
     const consent = await vscode.window.showWarningMessage(
       unanswered ? "Stop this unresponsive OMP process and restart its saved conversation?" : "Stop the OMP process that no longer serves this conversation and restart its saved conversation?",
       { modal: true, detail: "Unconfirmed input may already have been admitted; it will be preserved, not resent. Unsaved replies and in-flight tool effects may be lost. Commands or tools started by OMP may continue running separately and still modify files. The exact old process must be confirmed stopped before the same saved conversation is reopened." + identityWarning + imageWarning },
       "Restart",
     );
     if (consent !== "Restart") return;
+    s.pending.step(tabId, "working");
+    s.launchTimeline.begin(tabId, "restart");
     const result = await s.sessionRuntime.replaceWriter({
       conversation: tabId, token: held, target, mode: "chat",
       binding: { slot: state.slotId, generation: binding.generation }, stop: { kind: "force", file, durableSessionId },
@@ -4113,6 +4186,8 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
     }
     if (s.pendingSessionViewChanges.get(state) === modeRequest) s.pendingSessionViewChanges.delete(state);
     s.sessionRuntime.endTransition(held, "dispatched-stop");
+    s.launchTimeline.abandon(tabId);
+    pendingRestart.end(replacement !== null ? "running" : "failed");
     refreshGuestContext();
     refreshLauncher();
   }
@@ -6214,10 +6289,10 @@ function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, 
       void confirmOpenUrl(event);
       return;
     case "resume-requested":
-      void resumeFromChat(context, index, tabId);
+      void resumeFromChat(context, index, tabId, event.requestId);
       return;
     case "restart-requested":
-      void restartChat(context, index, tabId, event.nativeNonce);
+      void restartChat(context, index, tabId, event.nativeNonce, event.requestId);
       return;
     case "turn-ended":
       if (s.sessionModelRefreshOwed.has(tabId)) void refreshSessionModels(index, tabId);
@@ -6243,29 +6318,33 @@ function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, 
  * becomes writable. Anything else is told to the page in its footer, with the reason the
  * admission gave, so the button is never answered with silence.
  */
-async function resumeFromChat(context: vscode.ExtensionContext, index: SessionIndex, tabId: string): Promise<void> {
+async function resumeFromChat(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, requestId: string): Promise<void> {
   const s = windowState();
   const commandAt = Date.now();
   const before = s.outcomes.get(tabId);
-  try {
-    await timedLaunch(tabId, "resume", commandAt, () => openTab(context, index, tabId, "resumed"));
-  } catch (error) {
-    log.error(`tab ${tabId}: Resume from Chat failed: ${messageOf(error)}`);
-    const reason = `The session could not be resumed: ${messageOf(error)}`;
+  await pendingEntry(tabId, "resume", { origin: "composer", requestId }, async handle => {
+    try {
+      await timedLaunch(tabId, "resume", commandAt, () => openTab(context, index, tabId, "resumed"));
+    } catch (error) {
+      handle.end("failed");
+      log.error(`tab ${tabId}: Resume from Chat failed: ${messageOf(error)}`);
+      const reason = `The session could not be resumed: ${messageOf(error)}`;
+      if (!s.sessionRuntime.conversations.notify(tabId, reason) && !s.sessionRuntime.conversations.has(tabId)) s.guestDispatcher.presentUnavailable(index, tabId, reason);
+      return;
+    }
+    const phase = s.sessionRuntime.conversations.stateOf(tabId)?.phase ?? null;
+    if (phase === "live" || phase === "starting" || phase === "attaching" || phase === "resyncing") return;
+    handle.end("failed");
+    const outcome = s.outcomes.get(tabId);
+    log.warn(`tab ${tabId}: Resume from Chat did not start the session (${outcome?.status ?? "no outcome"})`);
+    // A refused, failed or conflicting admission already put its reason on the page (banner and, for a
+    // conflict, an error): `handleRestoreOutcome` presents every outcome that is not a running host.
+    if (outcome !== undefined && outcome !== before && outcome.status !== "restored" && outcome.status !== "attached") return;
+    // The admission was never reached (the editor or row changed, or this window still holds a process it could not
+    // prove gone): say so in the footer, or on the page itself when no conversation is shown.
+    const reason = (recordOf(stateOf(tabId))?.controlFailure ?? null) ?? "The session could not be resumed. The OMP Desk output channel has details.";
     if (!s.sessionRuntime.conversations.notify(tabId, reason) && !s.sessionRuntime.conversations.has(tabId)) s.guestDispatcher.presentUnavailable(index, tabId, reason);
-    return;
-  }
-  const phase = s.sessionRuntime.conversations.stateOf(tabId)?.phase ?? null;
-  if (phase === "live" || phase === "starting" || phase === "attaching" || phase === "resyncing") return;
-  const outcome = s.outcomes.get(tabId);
-  log.warn(`tab ${tabId}: Resume from Chat did not start the session (${outcome?.status ?? "no outcome"})`);
-  // A refused, failed or conflicting admission already put its reason on the page (banner and, for a
-  // conflict, an error): `handleRestoreOutcome` presents every outcome that is not a running host.
-  if (outcome !== undefined && outcome !== before && outcome.status !== "restored" && outcome.status !== "attached") return;
-  // The admission was never reached (the editor or row changed, or this window still holds a process it could not
-  // prove gone): say so in the footer, or on the page itself when no conversation is shown.
-  const reason = (recordOf(stateOf(tabId))?.controlFailure ?? null) ?? "The session could not be resumed. The OMP Desk output channel has details.";
-  if (!s.sessionRuntime.conversations.notify(tabId, reason) && !s.sessionRuntime.conversations.has(tabId)) s.guestDispatcher.presentUnavailable(index, tabId, reason);
+  });
 }
 
 /**

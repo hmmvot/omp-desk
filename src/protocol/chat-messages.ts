@@ -24,6 +24,7 @@
  * | `omp:chat-subagent-chunk` | one chunk of a subagent transcript the page asked for |
  * | `omp:chat-display-preferences` | tool-call detail and accessibility settings |
  * | `omp:chat-code-theme` | the token rules of the colour themes that may be active (the page picks by its theme id), for fenced code; none means plain code |
+ * | `omp:chat-operation` | the action the user asked for on this tab that is still being processed (kind, step id, elapsed time, request id), or none, with the end of the last one; epoch-free presentation only |
  * | `omp:chat-queue-result` | the outcome of a queue removal or promotion the page requested |
  * | `omp:chat-send-result` | correlated text admission, refusal, uncertain delivery, or a terminal-UI command the host answered itself; not a turn result |
  * | `omp:chat-abort-result` | what a Stop the page requested withdrew from OMP's queues, for its composer |
@@ -70,6 +71,7 @@ import type {
 	ChatUiResponse,
 } from "../chat/model.ts";
 import { isRecord } from "../shared/guards.ts";
+import { isPendingEnd, isPendingKind, isPendingStep, type PendingEnd, type PendingKind, type PendingStep } from "../shared/pending-operation.ts";
 import { parseCodeThemes, type CodeTheme } from "../chat/code-theme.ts";
 
 // Bounds
@@ -297,9 +299,24 @@ export interface ChatNavigateResultMessage {
 	draft?: { text: string; images: ChatImageWire[]; unavailableImages: number };
 }
 
+/**
+ * The action the user asked for on this tab (Resume, Open, Restart …) that is still being processed, or none.
+ *
+ * Presentation only and not epoch-bound: it describes the tab, not a conversation incarnation, and is re-posted to a page that
+ * attaches. The page maps the closed `kind`/`step` ids to words itself (ADR-0017: no free text crosses here). `elapsedMs` is the
+ * time since the host began it; the page adds its own clock delta. `ended` carries how the last operation ended, so a page that
+ * began it can stop waiting.
+ */
+export interface ChatOperationMessage {
+	type: "omp:chat-operation";
+	operation: { kind: PendingKind; step: PendingStep; elapsedMs: number; requestId: string | null; still: boolean } | null;
+	ended?: { kind: PendingKind; requestId: string | null; status: PendingEnd };
+}
+
 export type ChatHostMessage =
 	| ChatDisplayPreferencesMessage
 	| ChatCodeThemeMessage
+	| ChatOperationMessage
 	| ChatStateMessage
 	| ChatSnapshotMessage
 	| ChatSnapshotChunkMessage
@@ -1038,6 +1055,20 @@ export function parseChatHostMessage(value: unknown): ChatHostMessage | null {
 				message.draft = { text: draft.text, images: images.images ?? [], unavailableImages: draft.unavailableImages + (images.imagesDropped ? 1 : 0) };
 			}
 			return message;
+		}
+		case "omp:chat-operation": {
+			let ended: ChatOperationMessage["ended"];
+			if (value.ended !== undefined) {
+				const raw = value.ended;
+				if (!isRecord(raw) || !isPendingKind(raw.kind) || !isPendingEnd(raw.status) || !(raw.requestId === null || isChatRequestId(raw.requestId))) return null;
+				ended = { kind: raw.kind, requestId: raw.requestId, status: raw.status };
+			}
+			if (value.operation === null) return ended === undefined ? { type: value.type, operation: null } : { type: value.type, operation: null, ended };
+			const operation = value.operation;
+			if (!isRecord(operation) || !isPendingKind(operation.kind) || !isPendingStep(operation.step) || !isFiniteNumber(operation.elapsedMs) || operation.elapsedMs < 0 ||
+				!(operation.requestId === null || isChatRequestId(operation.requestId)) || typeof operation.still !== "boolean") return null;
+			const shown = { kind: operation.kind, step: operation.step, elapsedMs: operation.elapsedMs, requestId: operation.requestId, still: operation.still };
+			return ended === undefined ? { type: value.type, operation: shown } : { type: value.type, operation: shown, ended };
 		}
 		case "omp:chat-code-theme": {
 			const themes = parseCodeThemes(value.themes);

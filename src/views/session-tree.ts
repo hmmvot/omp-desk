@@ -67,6 +67,7 @@ import type { FlatOrderFacts, SessionsGrouping } from "./session-order";
 import type { BrokerProcessRow, BrokerProcessSnapshot } from "../host/broker-processes";
 import { ProcessTreeItem, TerminalsGroupTreeItem } from "./process-rows";
 import { listedProcessRows, processFolder, processOpenTarget, processUptime, processesBySession, sessionProcessMark } from "./session-processes";
+import { pendingText, type PendingKind, type PendingStep } from "../shared/pending-operation.ts";
 
 /**
  * Agent activity of an attached live session, as its guest reports it.
@@ -499,7 +500,7 @@ function repositoryRootNote(folder: LauncherFolder): string | null {
 	return `Sessions run at the repository root ${displayFolderPath(folder.path)}, not in the opened ${folder.openedPaths.map(opened => `"${displayFolderPath(opened)}"`).join(", ")}.`;
 }
 
-function folderTooltip(folder: LauncherFolder, latest: string | null, hasRecoverableShell: boolean, now: number): string {
+function folderTooltip(folder: LauncherFolder, latest: string | null, hasRecoverableShell: boolean, now: number, pending: string | null = null): string {
 	const where = folder.openHere && folder.openElsewhere ? "Open in this and another window"
 		: folder.openHere ? "Open in this window" : folder.openElsewhere ? "Open in another window" : null;
 	const rootNote = repositoryRootNote(folder);
@@ -510,8 +511,27 @@ function folderTooltip(folder: LauncherFolder, latest: string | null, hasRecover
 		...(rootNote === null ? [] : [rootNote]),
 	];
 	if (hasRecoverableShell) lines.push("Reconnect Terminal to reopen its terminal.");
+	if (pending !== null) lines.push(pending);
 	return lines.join("\n");
 }
+
+/**
+ * One pending operation of a row (the tab id) or of a folder (`folder:<id>`), as the registry holds it
+ * (`src/host/pending-operations.ts`). Presentation only: the row's state, published status and facts never read it.
+ */
+export interface RowPending {
+	readonly key: string;
+	readonly kind: PendingKind;
+	readonly step: PendingStep;
+	readonly startedAt: number;
+	/** Past the registry's 60 s mark: the words say "still …". */
+	readonly still: boolean;
+}
+
+/** The row states whose menu offers Kill; a row that is being acted on keeps Kill through `pending-live` and loses every other row action. */
+const KILL_OFFERED: Partial<Record<SessionItemState, true>> = {
+	running: true, working: true, background: true, question: true, unread: true, waiting: true, restoring: true, checking: true, otherWindow: true,
+};
 
 /** Everything one conversation row is painted from, besides its index entry and state. */
 interface SessionRowPresentation {
@@ -530,6 +550,8 @@ interface SessionRowPresentation {
 	peer?: PeerRow | null;
 	/** The tooltip sentence that marks the row's background process (`src/views/session-processes.ts`), or `null`. */
 	processMark?: string | null;
+	/** The action being processed on this row, or `null` (see {@link RowPending}). */
+	pending?: RowPending | null;
 }
 
 /** What the registry knows about the window that holds a row this window does not run. */
@@ -625,11 +647,17 @@ export class SessionTreeItem extends vscode.TreeItem {
 		// contract, and the tooltip names the window.
 		const shown = shownSessionState(state, row.peer ?? null, this.unread);
 		const status = STATE_LABEL[shown];
-		this.description = this.unread && shown !== "unread" ? `Unread · ${status}` : status;
-		this.tooltip = sessionTooltip(entry, shown, row.header, row.conversation, row.now, this.unread, hold(state, row), row.processMark ?? null, row.rootNote ?? null);
+		const pending = row.pending ?? null;
+		const pendingWords = pending === null ? null : pendingText(pending.kind, pending.step, Math.max(0, row.now - pending.startedAt), pending.still);
+		this.description = pendingWords ?? (this.unread && shown !== "unread" ? `Unread · ${status}` : status);
+		this.tooltip = sessionTooltip(entry, shown, row.header, row.conversation, row.now, this.unread, hold(state, row), row.processMark ?? null, row.rootNote ?? null) +
+			(pendingWords === null ? "" : `\n${pendingWords}`);
 		this.#diagnosticFacts = row.facts;
 		this.#diagnosticActive = row.active;
-		this.iconPath = STATE_ICON[shown];
+		this.iconPath = pendingWords === null ? STATE_ICON[shown] : STATE_ICON.starting;
+		// A row being acted on offers no row action but Kill (where its state offers it): `pending-live` and `pending` match no other
+		// menu condition. `state` itself, and so the published status and the click recognizer, stay the real ones.
+		const acted = pendingWords !== null && state !== "starting" && state !== "stopping";
 		// The menu conditions in package.json match on these segments, so the order is
 		// part of the contract:
 		// `ompSession.forgettable|held.<state>.<resumable|live-only>.<deletable|file-kept>.<materialized|fileless>.view-<chat|terminal|none>`.
@@ -638,15 +666,15 @@ export class SessionTreeItem extends vscode.TreeItem {
 		// `view-*` is the view an open editor shows now, so a live row offers only the other one.
 		this.contextValue = [
 			"ompSession",
-			this.forgettable ? "forgettable" : "held",
-			state,
-			this.resumable ? "resumable" : "live-only",
-			this.deletable ? "deletable" : "file-kept",
+			this.forgettable && !acted ? "forgettable" : "held",
+			acted ? (KILL_OFFERED[state] === true ? "pending-live" : "pending") : state,
+			this.resumable && !acted ? "resumable" : "live-only",
+			this.deletable && !acted ? "deletable" : "file-kept",
 			entry.sessionFile === null ? "fileless" : "materialized",
 			`view-${row.facts.open && row.facts.viewMode != null ? row.facts.viewMode : "none"}`,
 		].join(".");
 		if (state === "otherWindow" && row.facts.switchableWindow === true) this.contextValue += ".window-switchable";
-		const accessibilityLabel = `${row.folderLabel == null ? "" : `${row.folderLabel}, `}${headline}, ${STATE_LABEL[shown]}${this.unread && shown !== "unread" ? ", unread" : ""}${row.processMark == null ? "" : `, ${row.processMark.replace(/^Process: /, "process ")}`}${row.active ? ", selected session" : ""}`;
+		const accessibilityLabel = `${row.folderLabel == null ? "" : `${row.folderLabel}, `}${headline}, ${pendingWords ?? STATE_LABEL[shown]}${this.unread && shown !== "unread" ? ", unread" : ""}${row.processMark == null ? "" : `, ${row.processMark.replace(/^Process: /, "process ")}`}${row.active ? ", selected session" : ""}`;
 		this.accessibilityInformation = { label: accessibilityLabel };
 		this.resourceUri = vscode.Uri.from({ scheme: SESSION_DECORATION_SCHEME, path: `/${entry.tabId}` });
 	}
@@ -680,15 +708,15 @@ export class WorkspaceFolderTreeItem extends vscode.TreeItem {
 	 */
 	hasRecoverableShell!: boolean;
 
-	constructor(folder: LauncherFolder, rows: readonly SessionTreeItem[], hasRecoverableShell = false, now = Date.now()) {
+	constructor(folder: LauncherFolder, rows: readonly SessionTreeItem[], hasRecoverableShell = false, now = Date.now(), pending: string | null = null) {
 		super("", vscode.TreeItemCollapsibleState.None);
 		this.folderId = folder.id;
 		this.id = folder.id;
-		this.update(folder, rows, hasRecoverableShell, now);
+		this.update(folder, rows, hasRecoverableShell, now, pending);
 	}
 
 	/** The folder's "Last activity" is the latest of its rows' conversations. */
-	update(folder: LauncherFolder, rows: readonly SessionTreeItem[], hasRecoverableShell: boolean, now: number): void {
+	update(folder: LauncherFolder, rows: readonly SessionTreeItem[], hasRecoverableShell: boolean, now: number, pending: string | null = null): void {
 		this.label = folderHeadline(folder.path);
 		this.collapsibleState = folder.collapsed
 			? vscode.TreeItemCollapsibleState.Collapsed
@@ -697,8 +725,8 @@ export class WorkspaceFolderTreeItem extends vscode.TreeItem {
 		this.rows = rows;
 		this.hasRecoverableShell = hasRecoverableShell;
 		this.iconPath = new vscode.ThemeIcon(folder.pinned ? "pinned" : "folder", new vscode.ThemeColor("descriptionForeground"));
-		this.description = folderPathDescription(displayFolderPath(folder.path));
-		this.tooltip = folderTooltip(folder, latestConversationAt(rows.map(row => row.conversation?.lastAt ?? null)), hasRecoverableShell, now);
+		this.description = pending ?? folderPathDescription(displayFolderPath(folder.path));
+		this.tooltip = folderTooltip(folder, latestConversationAt(rows.map(row => row.conversation?.lastAt ?? null)), hasRecoverableShell, now, pending);
 		// The menu contract, exactly as the folder menus expect it:
 		// `ompWorkspaceFolder.[shells.]<collapsed|expanded>.<pinned|unpinned>`. A folder with a
 		// recoverable detached shell carries the `shells` segment so the Reconnect Terminal
@@ -835,6 +863,10 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 	#flatSignature = "";
 	/** The last process snapshot's rows (`setProcesses`); `null` until a read finished. */
 	#processes: readonly BrokerProcessRow[] | null = null;
+	/** The operations being processed (`setPending`), by tab id or `folder:<id>`. */
+	#pending: ReadonlyMap<string, RowPending> = new Map();
+	/** A row being acted on stays in the group it was in when the action began, so it never slides from under the pointer. */
+	readonly #heldGroup = new Map<string, boolean>();
 	/** The process rows the current layout serves, with the group that holds them in the flat and folders layouts. */
 	#processItems: ProcessTreeItem[] = [];
 	#group: TerminalsGroupTreeItem | null = null;
@@ -886,6 +918,22 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 		if (this.#disposed) return;
 		this.#processes = snapshot === null ? null : snapshot.rows;
 		this.#project();
+	}
+
+	/**
+	 * The operations the user asked for that are still being processed (`src/host/pending-operations.ts`). Only the rows whose words
+	 * changed are repainted; the rows' states, facts and published statuses are not read from it.
+	 */
+	setPending(operations: readonly RowPending[]): void {
+		if (this.#disposed) return;
+		this.#pending = new Map(operations.map(operation => [operation.key, operation] as const));
+		this.#project();
+	}
+
+	/** The words of the operation of `key` (a tab id or `folder:<id>`), or `null` when it has none. */
+	#pendingWords(key: string, now: number): string | null {
+		const operation = this.#pending.get(key);
+		return operation === undefined ? null : pendingText(operation.kind, operation.step, Math.max(0, now - operation.startedAt), operation.still);
 	}
 
 	/** Whether the current layout puts session rows on screen: `terminals` serves processes only. */
@@ -1076,6 +1124,7 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 		const inputs = folders.map(folder => ({
 			folder,
 			hasRecoverableShell: this.#source.hasRecoverableShell?.(folder) === true,
+			pending: this.#pendingWords(`folder:${folder.id}`, now),
 			rows: entries.filter(entry => folderOwnsCwd(folder, folders, entry.cwd)).map(entry => {
 				const identity = this.#identity(entry);
 				let observation = this.#observations.get(entry.tabId);
@@ -1123,20 +1172,26 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 				// A row another window runs shows its age from what its owner published for this run
 				// (nothing published means no activity, not this window's own reading), so every window agrees.
 				if (peer?.status != null) conversation = { lastAt: peer.lastActivityAt };
+				const pending = this.#pending.get(entry.tabId) ?? null;
+				// The group is read once, when the action begins; the row moves when the action ends, as any state change moves it.
+				let stoppedGroup = state === "stopped" || state === "draft";
+				if (pending === null) this.#heldGroup.delete(entry.tabId);
+				else if (this.#heldGroup.has(entry.tabId)) stoppedGroup = this.#heldGroup.get(entry.tabId) === true;
+				else this.#heldGroup.set(entry.tabId, stoppedGroup);
 				return { entry, header: entry.sessionFile === null ? null : header?.value?.header ?? null,
-					conversation, facts, state, active: entry.tabId === activeTabId, peer,
+					conversation, facts, state, active: entry.tabId === activeTabId, peer, pending,
 					folderLabel: grouping === "flat" ? folderLabels.get(folder.id) ?? null : null,
 					// The folder row says it under the folder tree; the flat list has none, so each row does.
 					rootNote: grouping === "flat" ? repositoryRootNote(folder) : null,
 					unread: isUnread(entry) && state !== "externalOmp",
 					processMark: sessionProcessMark(state, facts.running || facts.ownedWriterPid != null, processBySession.get(entry.tabId) ?? null),
-					order: { tabId: entry.tabId, stopped: state === "stopped" || state === "draft", folder: "", ordinal: entry.ordinal,
+					order: { tabId: entry.tabId, stopped: stoppedGroup, folder: "", ordinal: entry.ordinal,
 						title: sessionHeadline(entry, entry.sessionFile === null ? null : header?.value?.header ?? null) } };
 			}).sort((left, right) => compareFlatRows(left.order, right.order)),
 		})).map(input => ({
 			...input,
 			tooltip: folderTooltip(input.folder, latestConversationAt(input.rows.map(row => row.conversation?.lastAt ?? null)),
-				input.hasRecoverableShell, now),
+				input.hasRecoverableShell, now, input.pending),
 		}));
 		// One row per session of every shown folder, in the flat order: the flat list's rows, and the
 		// session picker's in either grouping.
@@ -1200,14 +1255,15 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 		const byTabId = new Map<string, SessionTreeItem>();
 		const rowChanges: SessionTreeItem[] = [];
 		const newItems = inputs.map(input => {
-			const rows = input.rows.map(({ entry, header, conversation, facts, state, active, folderLabel, rootNote, unread, peer, processMark }) => {
+			const rows = input.rows.map(({ entry, header, conversation, facts, state, active, folderLabel, rootNote, unread, peer, processMark, pending }) => {
 				// The relative age is part of the key, so a refresh repaints a stale "x minutes ago".
 				const age = conversation?.lastAt == null ? null : relativeAge(conversation.lastAt, now);
-				const key = JSON.stringify([entry, header, conversation, age, facts, active, folderLabel, rootNote, unread, peer, processMark]);
+				const pendingWords = pending === null ? null : pendingText(pending.kind, pending.step, Math.max(0, now - pending.startedAt), pending.still);
+				const key = JSON.stringify([entry, header, conversation, age, facts, active, folderLabel, rootNote, unread, peer, processMark, pendingWords]);
 				let row = previousRows.get(entry.tabId);
-				if (row === undefined) row = new SessionTreeItem(entry, state, { header, conversation, facts, active, now, folderLabel, rootNote, unread, peer, processMark });
+				if (row === undefined) row = new SessionTreeItem(entry, state, { header, conversation, facts, active, now, folderLabel, rootNote, unread, peer, processMark, pending });
 				else if (this.#presentation.get(entry.tabId) !== key) {
-					row.update(entry, state, { header, conversation, facts, active, now, folderLabel, rootNote, unread, peer, processMark });
+					row.update(entry, state, { header, conversation, facts, active, now, folderLabel, rootNote, unread, peer, processMark, pending });
 					rowChanges.push(row);
 				}
 				this.#presentation.set(entry.tabId, key);
@@ -1215,8 +1271,8 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 				return row;
 			});
 			let item = this.#items.find(previous => previous.folderId === input.folder.id);
-			if (item === undefined) item = new WorkspaceFolderTreeItem(input.folder, rows, input.hasRecoverableShell, now);
-			else item.update(input.folder, rows, input.hasRecoverableShell, now);
+			if (item === undefined) item = new WorkspaceFolderTreeItem(input.folder, rows, input.hasRecoverableShell, now, input.pending);
+			else item.update(input.folder, rows, input.hasRecoverableShell, now, input.pending);
 			return item;
 		});
 		this.#items = newItems;
@@ -1269,6 +1325,7 @@ export class SessionTreeProvider implements vscode.TreeDataProvider<LauncherTree
 			this.#headers.delete(tabId);
 			this.#conversations.delete(tabId);
 			this.#presentation.delete(tabId);
+			this.#heldGroup.delete(tabId);
 		}
 		const initialized = this.#initialized;
 		this.#initialized = true;

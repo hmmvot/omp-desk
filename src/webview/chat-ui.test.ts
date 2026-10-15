@@ -2363,6 +2363,40 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.call("Emulation.clearDeviceMetricsOverride");
 		});
 
+		await t.test("Resume and Stop acknowledge the click in the same frame with the host silent, name the host's step in the banner, and give the button back when the host ends it", async () => {
+			await reset("pending-resume");
+			await ui.evaluate("window.ui.push({phase:'view-only',readOnlyReason:'stopped'})");
+			await ui.wait("[...document.querySelectorAll('.omp-composer button')].some(button=>button.textContent==='Resume')");
+			// One synchronous script: the click, then the very next frame's reading, before any host message could arrive.
+			const clicked = await ui.evaluate<{ text: string; disabled: boolean; spinner: boolean; busy: string | null; placeholder: string }>(`new Promise(resolve=>{
+			 [...document.querySelectorAll('.omp-composer button')].find(button=>button.textContent==='Resume').click();
+			 requestAnimationFrame(()=>{const button=[...document.querySelectorAll('.omp-composer button')].find(candidate=>candidate.textContent.includes('Starting'));
+			  resolve({text:button.textContent.trim(),disabled:button.disabled,spinner:button.querySelector('.codicon-loading')!==null,busy:button.getAttribute('aria-busy'),placeholder:document.querySelector('.omp-composer textarea').placeholder});});})`);
+			assert.deepEqual(clicked, { text: "Starting…", disabled: true, spinner: true, busy: "true", placeholder: "Starting the session…" });
+			assert.equal(await ui.evaluate("document.querySelector('.omp-notice-description').textContent"), "Starting the session…", "the banner acknowledges too");
+			await ui.evaluate("document.querySelector('.omp-composer button[disabled]')?.click()");
+			assert.equal(await ui.evaluate("window.sent.filter(message=>message.type==='omp:chat-resume').length"), 1, "a second click sends nothing");
+			const requestId = await ui.evaluate<string>("window.sent.find(message=>message.type==='omp:chat-resume').requestId");
+			await ui.evaluate(`window.ui.receive({type:'omp:chat-operation',operation:{kind:'resume',step:'ownership',elapsedMs:7400,requestId:${JSON.stringify(requestId)},still:false}})`);
+			await ui.wait("document.querySelector('.omp-notice-description')?.textContent==='Starting the session · checking for another OMP process · 7 s'");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-notice').getAttribute('aria-busy')"), "true");
+			await ui.evaluate(`window.ui.receive({type:'omp:chat-operation',operation:null,ended:{kind:'resume',requestId:${JSON.stringify(requestId)},status:'refused'}})`);
+			await ui.wait("[...document.querySelectorAll('.omp-composer button')].some(button=>button.textContent==='Resume'&&!button.disabled)");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-composer textarea').placeholder"), "This session is not running. Resume it to send a message.");
+
+			await reset("pending-stop");
+			await ui.evaluate("window.ui.push({working:true})");
+			await ui.wait("document.querySelector('[aria-label=\"Stop the running turn\"]')");
+			const stopped = await ui.evaluate<{ label: string; disabled: boolean; spinner: boolean }>(`new Promise(resolve=>{
+			 document.querySelector('[aria-label="Stop the running turn"]').click();
+			 requestAnimationFrame(()=>{const button=document.querySelector('[aria-label="Stopping the turn"]');resolve({label:button.textContent.trim(),disabled:button.disabled,spinner:button.querySelector('.codicon-loading')!==null});});})`);
+			assert.deepEqual(stopped, { label: "Stopping…", disabled: true, spinner: true });
+			await ui.evaluate("window.ui.push({working:false})");
+			await ui.wait("!document.querySelector('[aria-label=\"Stopping the turn\"]')");
+			assert.equal(await ui.evaluate("window.sent.filter(message=>message.type==='omp:chat-abort').length"), 1);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("an autonomous exit shows plain-text stderr and a stopped-session provider login action", async () => {
 			await reset("child-exit-reason");
 			await ui.evaluate(`window.ui.push({phase:'stopped',code:'child-exited',readOnlyReason:'stopped',exitReason:{exitCode:1,stderr:'No default model selected. Use /login.\\n<script>not markup</script>'}})`);

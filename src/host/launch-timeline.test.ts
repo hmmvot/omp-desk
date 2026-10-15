@@ -25,9 +25,9 @@ describe("launch timeline", () => {
 		t.advance(200);
 		t.instance.add("tab:a", "runtime proof", 150);
 		t.advance(10);
-		t.instance.lap("tab:a", "rest");
+		t.instance.lap("tab:a", "stage");
 		t.advance(5);
-		assert.deepEqual(t.instance.summary("tab:a"), { kind: "new session", totalMs: 245, phases: "panel 30 · runtime proof 150 · rest 10" });
+		assert.deepEqual(t.instance.summary("tab:a"), { kind: "new session", totalMs: 245, phases: "panel 30 · runtime proof 150 · stage 10" });
 	});
 
 	it("ends the run at finish with its kind and the time since the command", () => {
@@ -71,5 +71,21 @@ describe("launch timeline", () => {
 		t.instance.abandon("tab:b");
 		assert.equal(t.instance.has("tab:b"), true, "the launcher owns a run it took");
 		assert.equal(t.instance.reached("tab:none"), null);
+	});
+
+	it("tells its observer of each lap and added phase of a tab that has a run, and of nothing else", () => {
+		const t = timeline();
+		const told: string[] = [];
+		t.instance.observe({ onLap: (tabId, lap) => told.push(`${tabId} lap ${lap}`), onAdd: tabId => told.push(`${tabId} add`) });
+		t.instance.lap("tab:a", "panel");
+		t.instance.add("tab:a", "spawn", 1);
+		assert.deepEqual(told, [], "no run: no lap and no observation");
+		t.instance.begin("tab:a", "view switch");
+		t.instance.lap("tab:a", "admission");
+		t.instance.add("tab:a", "spawn", 1);
+		assert.deepEqual(told, ["tab:a lap admission", "tab:a add"]);
+		t.instance.observe(null);
+		t.instance.lap("tab:a", "stage");
+		assert.equal(told.length, 2);
 	});
 });

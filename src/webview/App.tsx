@@ -34,6 +34,7 @@ import { REWIND_IDLE, conversationMovedPastLeaf, reduceRewind, rewindBlockedReas
 import { parseDraftHandoffContent } from "../protocol/messages";
 import type { ChatClient } from "./lib/chat-client";
 import { chatBanner } from "./lib/chat-banner";
+import { operationBannerText } from "./lib/chat-operation";
 import { captureDraft, offerRestoredDraft, releaseDraftCapture } from "./lib/draft-handoff";
 import { requestPanelAction } from "./lib/panel-actions";
 import { selectedText } from "../shared/selection-query";
@@ -164,9 +165,16 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 	}, [snapshot.header?.title, snapshot.state?.sessionName]);
 
 	const banner = chatBanner(snapshot);
+	// An action the user asked for is named where the conversation's own state is: the page's acknowledgement first, then the host's step.
+	const operations = useSyncExternalStore(client.subscribeOperations, client.getOperationState);
+	const pendingText = operations.operation === null ? null : operationBannerText(operations.operation);
+	const pending = pendingText !== null && snapshot.phase !== "live" ? pendingText : null;
 	// A severed host link is shown as a lost connection, never as silence; the draft lives in the composer and is kept.
 	const hostLost = useSyncExternalStore(guestTransport.onRouteChange, guestTransport.hostConnectionLost);
 	const hostRecoveryFailed = useSyncExternalStore(guestTransport.onRouteChange, guestTransport.hostRecoveryFailed);
+	// What was awaited will not be answered on another route or over a lost link: nothing stays pending behind the lost-connection notice.
+	useEffect(() => { if (hostLost) client.resetOperations(); }, [hostLost, client]);
+	useEffect(() => client.resetOperations(), [route, client]);
 	// While the link is down or the session is being (re)attached, a remembered `working` is not an observation: show none.
 	const workUnknown = hostLost || snapshot.phase === "attaching" || snapshot.phase === "resyncing" || snapshot.phase === "failed";
 	const shown = workUnknown && snapshot.working ? { ...snapshot, working: false } : snapshot;
@@ -219,16 +227,18 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 		? { level: "warn", icon: "debug-disconnect", text: hostRecoveryFailed
 			? "The extension connection repeatedly failed. Run Developer: Reload Window. If it still fails, copy your draft before closing and reopening this tab. OMP has not been stopped."
 			: "Lost connection to the extension host — reconnecting. Your draft is kept." }
-		: unansweredRestart
-			? { level: "warn", icon: "debug-disconnect", text: "OMP has not answered a state request. Reconnect keeps the same process; Restart can stop it and reopen the saved conversation. Unconfirmed input is kept and never resent automatically." }
-			: banner;
+		: pending !== null
+			? { level: "info", icon: "loading codicon-modifier-spin", text: pending }
+			: unansweredRestart
+				? { level: "warn", icon: "debug-disconnect", text: "OMP has not answered a state request. Reconnect keeps the same process; Restart can stop it and reopen the saved conversation. Unconfirmed input is kept and never resent automatically." }
+				: banner;
 	const banners = notice === null ? null : (
 		<div className="omp-notices">
-			<div className={`omp-notice omp-notice--${notice.level === "warn" ? "warning" : notice.level}`} role="status">
+			<div className={`omp-notice omp-notice--${notice.level === "warn" ? "warning" : notice.level}`} role="status" {...(pending !== null ? { "aria-busy": true } : {})}>
 				<span className={`codicon codicon-${notice.icon}`} aria-hidden="true" />
 				<span className={`omp-notice-description${snapshot.exitReason === undefined ? "" : " omp-notice-exit"}`}>{notice.text}</span>
-				{!hostLost && (banner?.action === "reconnect" || unansweredRestart) && <button type="button" className="omp-btn" disabled={snapshot.phase !== "failed"} onClick={() => client.reconnect()}>Reconnect</button>}
-				{!hostLost && snapshot.epoch !== null && (unansweredRestart || banner?.action === "restart") && <button type="button" className="omp-btn" onClick={() => client.restart()}>Restart</button>}
+				{!hostLost && pending === null && (banner?.action === "reconnect" || unansweredRestart) && <button type="button" className="omp-btn" disabled={snapshot.phase !== "failed"} onClick={() => client.reconnect()}>Reconnect</button>}
+				{!hostLost && pending === null && snapshot.epoch !== null && (unansweredRestart || banner?.action === "restart") && <button type="button" className="omp-btn" onClick={() => client.restart()}>Restart</button>}
 				{!hostLost && banner?.action === "provider-login" && <button type="button" className="omp-btn" onClick={() => guestTransport.post({ type: "omp:chat-command", command: "provider-login" })}>Log In to Provider</button>}
 			</div>
 		</div>

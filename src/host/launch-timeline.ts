@@ -12,12 +12,38 @@
  * launcher (the session is already running, the admission refused it, another window runs it) drops its run with
  * {@link LaunchTimeline.abandon}, so a later launch of the tab is not reported as that command's.
  *
- * Only a launch that began a run is reported, so the startup restore and a mode switch add no line. Diagnostic only:
- * nothing here decides anything. Nothing here imports `vscode`.
+ * Only a launch that began a run is reported, so the startup restore adds no line (a Restart after a failed Chat and a Chat/Terminal
+ * view switch begin runs too, so their launch phases are timed, and shown as steps by the pending-operation display through
+ * {@link LaunchTimeline.observe}). Diagnostic and presentation only: nothing here decides anything. Nothing here imports `vscode`.
  */
 
 /** What the user asked for; the word the timing lines carry. */
-export type LaunchKind = "new session" | "resume" | "open";
+export type LaunchKind = "new session" | "resume" | "open" | "restart" | "view switch";
+
+/**
+ * The laps a launch records, one per phase boundary it measures. A closed union: the pending-operation display derives its
+ * step from these names (`src/host/pending-steps.ts`), so a rename is a compile error there, not a silent wrong step.
+ */
+export type LaunchLap =
+	| "draft"
+	| "wait"
+	| "ownership"
+	| "panel"
+	| "admission"
+	| "stage"
+	| "host control keys"
+	| "runtime proof"
+	| "editor document"
+	| "broker slot"
+	| "conversation"
+	| "run intent";
+
+/** Told of each lap and of each timed phase the launcher adds, for a tab that has a run. Presentation only. */
+export interface LaunchTimelineObserver {
+	onLap(tabId: string, lap: LaunchLap): void;
+	/** A phase the caller timed itself was added (the broker launch's own timings, reported after it returns). */
+	onAdd(tabId: string): void;
+}
 
 interface Run {
 	readonly kind: LaunchKind;
@@ -47,8 +73,15 @@ export class LaunchTimeline {
 	readonly #now: () => number;
 	readonly #runs = new Map<string, Run>();
 
+	#observer: LaunchTimelineObserver | null = null;
+
 	constructor(now: () => number = Date.now) {
 		this.#now = now;
+	}
+
+	/** The one observer of this timeline's laps (the pending-operation display); `null` removes it. */
+	observe(observer: LaunchTimelineObserver | null): void {
+		this.#observer = observer;
 	}
 
 	/**
@@ -79,12 +112,13 @@ export class LaunchTimeline {
 	}
 
 	/** Record `phase` as the time since the previous lap (or the command). No run: nothing happens. */
-	lap(tabId: string, phase: string): void {
+	lap(tabId: string, phase: LaunchLap): void {
 		const run = this.#runs.get(tabId);
 		if (run === undefined) return;
 		const at = this.#now();
 		run.phases.push([phase, Math.max(0, at - run.lastMark)]);
 		run.lastMark = at;
+		this.#observer?.onLap(tabId, phase);
 	}
 
 	/** Record a phase the caller timed itself; the lap pointer moves to now, so a following {@link lap} excludes it. */
@@ -93,6 +127,7 @@ export class LaunchTimeline {
 		if (run === undefined) return;
 		run.phases.push([phase, Math.max(0, Math.round(ms))]);
 		run.lastMark = this.#now();
+		this.#observer?.onAdd(tabId);
 	}
 
 	/** The run so far, without ending it; `null` when the tab has none. */

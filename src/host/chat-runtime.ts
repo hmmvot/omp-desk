@@ -33,7 +33,9 @@ import type {
 import { prefixedLogger, type Logger } from "../shared/logger.ts";
 import { chatTurnInProgress, createChatModel, sameEpoch, setChatPhase, snapshotOf } from "../chat/model.ts";
 import { MAX_CHAT_TEXT_LENGTH, splitChatSnapshot } from "../protocol/chat-messages.ts";
-import type { ChatHostMessage, ChatWebviewMessage, ChatSubagentRequestMessage, ChatDisplayPreferences, ChatQueueRemoveMessage, ChatQueueResultEntry, ChatAbortResultMessage, ChatNavigateResultMessage } from "../protocol/chat-messages.ts";
+import type { ChatHostMessage, ChatWebviewMessage, ChatSubagentRequestMessage, ChatDisplayPreferences, ChatQueueRemoveMessage, ChatQueueResultEntry, ChatAbortResultMessage, ChatNavigateResultMessage, ChatOperationMessage } from "../protocol/chat-messages.ts";
+import type { PendingOperation, PendingOperations, PendingChange } from "./pending-operations.ts";
+import type { PendingKind } from "../shared/pending-operation.ts";
 import { SUBAGENT_CHUNK_CHARS, type SubagentTranscriptPage } from "../chat/subagent-transcript.ts";
 import type { HistoryReader } from "./rpc/history-reader.ts";
 import { SLASH_DENIED_SENTENCE, classifySlashInput } from "../protocol/rpc.ts";
@@ -109,8 +111,8 @@ export type ChatRuntimeEvent =
 	/** `open_url`: the extension shows an extension-owned confirm naming the URL. */
 	| { readonly type: "open-url"; readonly url: string; readonly launchUrl?: string; readonly instructions?: string }
 	/** The page asked to resume a view-only conversation. */
-	| { readonly type: "resume-requested" }
-	| { readonly type: "restart-requested"; readonly nativeNonce: string }
+	| { readonly type: "resume-requested"; readonly requestId: string }
+	| { readonly type: "restart-requested"; readonly nativeNonce: string; readonly requestId: string }
 	| { readonly type: "turn-ended" }
 	/** The live command catalogue changed, independently of token/model updates. */
 	| { readonly type: "catalogue" }
@@ -148,6 +150,11 @@ export interface ChatRuntimeOptions {
 	readonly openSettings?: (kind: NativeSettingsTarget, tabId: string) => Promise<void>;
 	/** The installed OMP's builtin slash registry, or `null` while it is unknown (nothing is refused as TUI-only then). */
 	readonly slashRegistry?: () => readonly BuiltinSlashEntry[] | null;
+	/**
+	 * The pending-operation registry of the window. When given, the tab's operation (Resume, Open, Restart, a view switch, Close) is
+	 * posted to every page of the tab as `omp:chat-operation` (and re-posted when a page attaches): presentation only.
+	 */
+	readonly pending?: PendingOperations;
 	/** Runs the Desk equivalent of a terminal-UI slash command. */
 	readonly runDeskAction?: (action: DeskSlashAction, tabId: string) => Promise<void>;
 	/** Desk's host tools for every live session (ADR-0055); absent: sessions register none. */
@@ -171,6 +178,9 @@ export const CHAT_UNCONFIRMED_SENTENCE =
 	"The message may not have been delivered; check the transcript before sending it again.";
 export const CHAT_CHOICE_FAILED_SENTENCE = "Your model or thinking change could not be applied, so the message was not sent. Check the footer, then send it again.";
 export const CHAT_PROMPT_LOST_SENTENCE = "The last message was not delivered — send it again manually.";
+
+/** The pending-operation kinds a Chat page shows in its own banner: the launch family, the view switch and Close. The rest belong to rows and the status bar. */
+const PAGE_KINDS: Partial<Record<PendingKind, true>> = { open: true, resume: true, "new-session": true, restart: true, "view-switch": true, close: true };
 
 interface Conversation {
 	readonly tabId: string;
@@ -197,8 +207,11 @@ export class ChatRuntime {
 	#generation = 0;
 	readonly #settingsRequests = new Map<string, Promise<ChatCommandOutcome>>();
 
+	readonly #unlistenPending: (() => void) | null;
+
 	constructor(options: ChatRuntimeOptions) {
 		this.#options = options;
+		this.#unlistenPending = options.pending?.onDidChange(change => this.#onPendingChange(change)) ?? null;
 	}
 
 	/** Whether a conversation of any kind exists for the tab. */
@@ -362,6 +375,7 @@ export class ChatRuntime {
 	}
 
 	dispose(): void {
+		this.#unlistenPending?.();
 		for (const tabId of [...this.#conversations.keys()]) this.#drop(tabId);
 		this.#pages.clear();
 	}
@@ -400,6 +414,7 @@ export class ChatRuntime {
 		const page = this.#pages.get(tabId)?.get(pageId);
 		if (page === undefined) return;
 		this.#postCodeThemes(page);
+		this.#postOperation(tabId, page);
 		const conversation = this.#conversations.get(tabId);
 		if (conversation === undefined) return;
 		const state = this.stateOf(tabId);
@@ -426,6 +441,39 @@ export class ChatRuntime {
 		page.post({ type: "omp:chat-code-theme", themes: [...(this.#options.readCodeThemes?.() ?? [])] });
 	}
 
+	/** The latest operation of the tab that a Chat page shows (see {@link PAGE_KINDS}), or `undefined`. */
+	#pageOperation(tabId: string): PendingOperation | undefined {
+		return this.#options.pending?.get(tabId, kind => PAGE_KINDS[kind] === true);
+	}
+
+	/** The tab's page-visible operation (or none) as the message; `ended` says how the last one ended. */
+	#operationMessage(tabId: string, ended?: ChatOperationMessage["ended"]): ChatOperationMessage {
+		const operation = this.#pageOperation(tabId);
+		const shown = operation === undefined ? null
+			: { kind: operation.kind, step: operation.step, elapsedMs: this.#options.pending?.elapsedMs(operation) ?? 0, requestId: operation.requestId, still: operation.still };
+		return ended === undefined ? { type: "omp:chat-operation", operation: shown } : { type: "omp:chat-operation", operation: shown, ended };
+	}
+
+	#postOperation(tabId: string, page: ChatPage): void {
+		if (this.#pageOperation(tabId) === undefined) return;
+		page.post(this.#operationMessage(tabId));
+	}
+
+	#onPendingChange(change: PendingChange): void {
+		const pages = this.#pages.get(change.key);
+		if (pages === undefined) return;
+		const ended = change.ended !== undefined && PAGE_KINDS[change.ended.kind] === true ? change.ended : undefined;
+		// An operation no page shows changes nothing a page shows: a rename must not blank the page's pending Resume.
+		if (ended === undefined && this.#pageOperation(change.key) === undefined) return;
+		const message = this.#operationMessage(change.key, ended);
+		for (const page of [...pages.values()]) page.post(message);
+	}
+
+	/** A request the host refused on the spot (never started): the page that asked learns it ended, so it does not wait for an answer it already got. */
+	#postRefused(tabId: string, origin: ChatPage | null, kind: PendingKind, requestId: string): void {
+		origin?.post(this.#operationMessage(tabId, { kind, requestId, status: "refused" }));
+	}
+
 	/** The candidate colour themes changed: every attached page of every tab gets them (not epoch-bound). */
 	refreshCodeThemes(): void {
 		for (const pages of this.#pages.values()) for (const page of pages.values()) this.#postCodeThemes(page);
@@ -446,7 +494,7 @@ export class ChatRuntime {
 			// A stopped session whose conversation was released still shows its Resume button; the
 			// request is the extension's to admit (claim checks, one writer), and it reports the outcome.
 			if (message.type === "omp:chat-resume") {
-				this.#options.onEvent(tabId, { type: "resume-requested" });
+				this.#options.onEvent(tabId, { type: "resume-requested", requestId: message.requestId });
 				return "accepted";
 			}
 			return "ignored";
@@ -485,9 +533,10 @@ export class ChatRuntime {
 				this.#tell(conversation, origin, phase === "live" || phase === "starting" || phase === "attaching" || phase === "resyncing"
 					? CHAT_ALREADY_RUNNING_SENTENCE
 					: this.stateOf(tabId)?.readOnlyReason ?? CHAT_NOT_LIVE_SENTENCE);
+				this.#postRefused(tabId, origin, "resume", message.requestId);
 				return "refused";
 			}
-			this.#options.onEvent(tabId, { type: "resume-requested" });
+			this.#options.onEvent(tabId, { type: "resume-requested", requestId: message.requestId });
 			return "accepted";
 		}
 		if (message.type === "omp:chat-load-older") {
@@ -502,9 +551,10 @@ export class ChatRuntime {
 		if (message.type === "omp:chat-restart") {
 			if (session === null || !session.restartOffered || session.epoch.nonce !== message.epoch.nonce) {
 				this.#tell(conversation, origin, "Restart is offered only while this session's current OMP process does not answer or no longer serves this conversation.");
+				this.#postRefused(tabId, origin, "restart", message.requestId);
 				return "refused";
 			}
-			this.#options.onEvent(tabId, { type: "restart-requested", nativeNonce: message.epoch.nonce });
+			this.#options.onEvent(tabId, { type: "restart-requested", nativeNonce: message.epoch.nonce, requestId: message.requestId });
 			return "accepted";
 		}
 		if (session === null) {

@@ -84,6 +84,26 @@ describe("parseChatHostMessage", () => {
 		assert.deepEqual(parseChatHostMessage({ ...state, extra: 1 }), state);
 	});
 
+	it("carries the pending operation of a tab as closed ids and numbers, and refuses anything else", () => {
+		const running = { type: "omp:chat-operation", operation: { kind: "resume", step: "ownership", elapsedMs: 1200, requestId: REQUEST_ID, still: false } };
+		assert.deepEqual(parseChatHostMessage({ ...running, extra: 1 }), running);
+		assert.deepEqual(parseChatHostMessage({ type: "omp:chat-operation", operation: null }), { type: "omp:chat-operation", operation: null });
+		const ended = { type: "omp:chat-operation", operation: null, ended: { kind: "resume", requestId: null, status: "refused" } };
+		assert.deepEqual(parseChatHostMessage(ended), ended);
+		for (const patch of [
+			{ operation: { ...running.operation, kind: "reboot" } },
+			{ operation: { ...running.operation, step: "somewhere" } },
+			{ operation: { ...running.operation, elapsedMs: -1 } },
+			{ operation: { ...running.operation, elapsedMs: Number.NaN } },
+			{ operation: { ...running.operation, requestId: "not a request id with spaces" } },
+			{ operation: { ...running.operation, still: "no" } },
+			{ operation: undefined },
+			{ ended: { kind: "resume", requestId: null, status: "exploded" } },
+		]) {
+			assert.equal(parseChatHostMessage({ ...running, ...patch }), null, JSON.stringify(patch));
+		}
+	});
+
 	it("refuses a phase or epoch the page does not know instead of guessing", () => {
 		assert.equal(parseChatHostMessage({ ...state, phase: "running" }), null);
 		assert.equal(parseChatHostMessage({ ...state, epoch: { nonce: "", counter: 1 } }), null);
