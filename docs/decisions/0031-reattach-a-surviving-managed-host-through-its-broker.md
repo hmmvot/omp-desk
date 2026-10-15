@@ -93,6 +93,7 @@ authorizes it, and an uncertain earlier stop stays visibly held.
   recorded slot per pass.
 - Compatibility: no durable schema change, no persisted secret, no change to claim or absence
   evidence, and unchanged behavior for a host that still has its legacy terminal.
+- Amendment (2026-10-15): the recorded OMP session id is a fence only when it exists. The id is recorded when the Chat's first `get_state` answers, which a reload right after New Session can precede; a live host whose pin (broker, generation, child pid and creation time) matches and whose id was never recorded is attached without an expected id, and the session learns the id from the process (a row with a file is checked against that file by the session itself). A host id that differs from a recorded one is still a refused switch, and a refusal tells the user to Stop or Kill the process. See [ADR-0021](0021-reattach-a-verified-live-draft-on-activation.md).
 
 ## Related Documents
 

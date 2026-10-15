@@ -3701,6 +3701,7 @@ function identityWindow(index: SessionIndex): IdentityWindow {
       void s.bridgeHost.commitDocument(tabId);
       s.bridgeHost.refreshReadiness(tabId);
     },
+    conflict(_tabId, detail) { showError(detail); },
     refresh: () => refreshLauncher(),
   };
 }

@@ -30,6 +30,8 @@ interface PendingIdentity {
 export interface IdentityWindow {
 	/** The conversation was bound to its file: refresh its tab appearance and commit the document the file now allows. */
 	bound(conversation: string): void;
+	/** The tab's process serves a conversation another one owns: show it, with the reason and the way out. */
+	conflict(conversation: string, detail: string): void;
 	/** The catalogue of sessions changed. */
 	refresh(): void;
 }
@@ -85,6 +87,10 @@ export class LocalIdentity {
 				(pending.sessionFile === sessionFile || controlPathEquals(pending.sessionFile, sessionFile))) return;
 			clearTimeout(pending?.timer ?? undefined);
 			const promotion = await index.promoteDraft(tabId, sessionFile, lease);
+			if (promotion.status === "claim-conflict") {
+				this.#refuseBinding(tabId, sessionFile, promotion.detail);
+				return;
+			}
 			if (promotion.status === "promoted") {
 				this.#pending.delete(tabId);
 				log.info(`tab ${tabId}: bound to the session file ${sessionFile}`);
@@ -139,6 +145,10 @@ export class LocalIdentity {
 			.run(tabId, async lease => {
 				if (this.#deps.records.get(tabId)?.runtime !== pending.runtime || this.#pending.get(tabId) !== pending) return;
 				const promotion = await index.promoteDraft(tabId, pending.sessionFile, lease);
+				if (promotion.status === "claim-conflict") {
+					this.#refuseBinding(tabId, pending.sessionFile, promotion.detail);
+					return;
+				}
 				if (promotion.status !== "promoted") {
 					if (promotion.detail !== pending.lastFailureDetail) {
 						pending.lastFailureDetail = promotion.detail;
@@ -153,5 +163,19 @@ export class LocalIdentity {
 				window.refresh();
 			})
 			.catch(error => log.warn(`tab ${tabId}: binding the session file failed: ${messageOf(error)}`));
+	}
+
+	/**
+	 * The session file this tab's process serves belongs to a conversation that is already open elsewhere (a re-adopted draft
+	 * whose process turns out to serve another session). Retrying cannot change that, so the chain ends and the tab says so
+	 * with a way out, instead of staying attached with no file.
+	 */
+	#refuseBinding(tabId: string, sessionFile: string, detail: string): void {
+		const { window, log } = this.#deps;
+		const pending = this.#pending.get(tabId);
+		clearTimeout(pending?.timer ?? undefined);
+		this.#pending.delete(tabId);
+		log.error(`tab ${tabId}: its OMP process serves ${sessionFile}, which another conversation owns: ${detail}`);
+		window.conflict(tabId, `${detail} This tab's OMP process serves that conversation, so it was not bound; use Stop or Kill on it in Sessions.`);
 	}
 }
