@@ -2440,6 +2440,70 @@ describe("verified-owned-writer policy fixtures", () => {
     } finally { provider.dispose(); setLauncherTree(undefined, undefined); harness.window().externalLeases = null; f.runtime.dispose(); }
   });
 
+  /** The window's pending-operation registry, which the harness's window type does not list. */
+  const pendingOf = (): { begin(key: string, kind: string): { end(status: string): void }; get(key: string): { step: string } | undefined } =>
+    (harness.window() as unknown as { pending: ReturnType<typeof pendingOf> }).pending;
+
+  /** Stand-in editor panels: record when the editor is opened and give the tab a panel whose closing is counted. */
+  function recordingPanels(events: string[]) {
+    const w = harness.window(), previous = w.editorPanels;
+    const closed = { count: 0 };
+    // Earlier cases leave a runtime record under this tab id; a panel makes the tab visible to it, so start from none.
+    (harness.record(harness.state(TAB)) as unknown as { runtime: unknown }).runtime = null;
+    w.editorPanels = { ...previous, openPanel: () => {
+      events.push("panel");
+      (harness.state(TAB) as { panel: unknown }).panel = { viewColumn: 1, title: "", webview: { postMessage: async () => true }, reveal() {}, dispose() { closed.count++; (harness.state(TAB) as { panel: unknown }).panel = null; } };
+    } };
+    return { closed, restore: () => { (harness.state(TAB) as { panel: unknown }).panel = null; w.editorPanels = previous; } };
+  }
+
+  it("opens the editor before the ownership probe: the user is looking at the session while the checks run, and the launch still waits for the verdict", async () => {
+    const f = await legacyFixture("editor-first", false, true);
+    const events: string[] = [];
+    const verdict = Promise.withResolvers<boolean | null>();
+    harness.window().externalLeases = { holds: async () => { events.push("probe"); return verdict.promise; } };
+    const panels = recordingPanels(events);
+    const operation = pendingOf().begin(TAB, "resume");
+    try {
+      const opening = harness.openTab(storage().context, f.index, TAB, "resumed");
+      for (let wait = 0; wait < 500 && !events.includes("probe"); wait++) await new Promise<void>(resolve => setTimeout(resolve, 10));
+      assert.deepEqual(events, ["panel", "probe"], "the editor exists before the probe is asked");
+      assert.deepEqual(f.operations, [], "nothing is launched while the verdict is open");
+      assert.equal(pendingOf().get(TAB)?.step, "ownership", "the row says what it is waiting for");
+      verdict.resolve(false);
+      await opening;
+      assert.deepEqual(f.operations, ["launch rpc"], "ADR-0046: a verdict that says no one else writes lets the launch go on");
+    } finally { operation.end("running"); panels.restore(); harness.window().externalLeases = null; f.runtime.dispose(); await f.index.closeSession(TAB, { confirmedStopped: true }); }
+  });
+
+  it("Cancel of Open Anyway keeps the editor of a stopped row (read-only history) and closes the editor an attempt created for a row that is not stopped; neither starts anything", async () => {
+    const stopped = await legacyFixture("cancel-stopped", false, true);
+    harness.window().externalLeases = leaseObserver({ held: true, fresh: 0 });
+    harness.warning(async () => undefined);
+    const events: string[] = [];
+    let panels = recordingPanels(events);
+    try {
+      await harness.openTab(storage().context, stopped.index, TAB, "resumed");
+      assert.deepEqual(events, ["panel"]);
+      assert.equal(panels.closed.count, 0, "a stopped row keeps its editor: the startup restore never starts a stopped row");
+      assert.deepEqual(stopped.operations, []);
+    } finally { panels.restore(); stopped.runtime.dispose(); await stopped.index.closeSession(TAB, { confirmedStopped: true }); }
+
+    const running = await legacyFixture("cancel-running", false, true);
+    harness.warning(async () => undefined);
+    harness.window().externalLeases = leaseObserver({ held: true, fresh: 0 });
+    events.length = 0;
+    panels = recordingPanels(events);
+    try {
+      await running.index.setRunIntent(TAB, "running");
+      await harness.openTab(storage().context, running.index, TAB, "opened");
+      assert.deepEqual(events, ["panel"]);
+      assert.equal(panels.closed.count, 1, "the editor this attempt created is closed again, so a reload cannot relaunch the row from it");
+      assert.deepEqual(running.operations, []);
+      assert.equal((harness.state(TAB) as unknown as { editorOfAttempt: boolean }).editorOfAttempt, false, "the marker ends with the attempt");
+    } finally { panels.restore(); harness.window().externalLeases = null; running.runtime.dispose(); await running.index.closeSession(TAB, { confirmedStopped: true }); }
+  });
+
   it("Open of a verified legacy writer after restart confirms its stop before launching on the same file", async () => {
     const f = await legacyFixture("live-open-after-restart", true, true);
     try {
@@ -4085,6 +4149,47 @@ describe("same-editor Chat and native Terminal actions", () => {
 				assert.equal(harness.state(draft.tabId).mode, "terminal");
 				assert.equal(f.index.get(draft.tabId)?.runIntent, "stopped");
 			} finally { restorePanels(); }
+		} finally { f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true }); }
+	});
+
+	it("a repeated New Session for a folder whose first one is still starting reserves no second draft, reveals the one that is starting, and the folder is free again afterwards", async () => {
+		const f = await fixture();
+		try {
+			harness.folders([{ id: "folder-flight", path: f.directory, collapsed: false, pinned: true, open: false, openHere: false, openElsewhere: false }]);
+			const requests: unknown[] = [];
+			const release = Promise.withResolvers<void>();
+			harness.policy(f.saved.context, {
+				readProcessIdentity: async () => ({ kind: "gone" }), isProcessAlive: () => false,
+				probeRpc: async () => ({ kind: "unreachable", reason: "gone" }), brokerProvenance: () => ({ kind: "none" }),
+			}, { launch: async (request: unknown) => {
+				requests.push(request);
+				await release.promise;
+				return { state: "not-started", reason: "fixture prevents native spawn" };
+			}, attach: async () => ({ state: "unavailable", reason: "not needed" }) }, {});
+			const restorePanels = harness.editorLifecycle();
+			const pending = (harness.window() as unknown as { pending: { get(key: string): { kind: string } | undefined } }).pending;
+			try {
+				const first = harness.newSession(f.saved.context, f.index, undefined);
+				for (let wait = 0; wait < 500 && requests.length === 0; wait++) await new Promise<void>(resolve => setTimeout(resolve, 10));
+				assert.equal(requests.length, 1, "the first launch is in flight");
+				const drafts = f.index.list().filter(entry => entry.tabId !== f.row.tabId);
+				assert.equal(drafts.length, 1);
+				assert.equal(pending.get(drafts[0]!.tabId)?.kind, "new-session", "the new row shows it is being started");
+				const panel = harness.state(drafts[0]!.tabId).panel as { reveal: (...args: unknown[]) => void } | null;
+				assert.notEqual(panel, null, "the editor of the starting session is open");
+				let revealed = 0;
+				panel!.reveal = () => { revealed++; };
+				await harness.newSession(f.saved.context, f.index, undefined);
+				assert.equal(f.index.list().filter(entry => entry.tabId !== f.row.tabId).length, 1, "no second draft was reserved");
+				assert.equal(requests.length, 1, "no second launch was started");
+				assert.equal(revealed, 1, "the session that is starting is brought forward");
+				release.resolve();
+				await first;
+				assert.equal(pending.get(drafts[0]!.tabId), undefined, "the pending state ends with the launch");
+				const second = harness.newSession(f.saved.context, f.index, undefined);
+				await second;
+				assert.equal(f.index.list().filter(entry => entry.tabId !== f.row.tabId).length, 2, "the folder is free again once the first has finished");
+			} finally { release.resolve(); restorePanels(); }
 		} finally { f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true }); }
 	});
 

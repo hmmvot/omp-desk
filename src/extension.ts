@@ -494,6 +494,13 @@ interface TabState {
    */
   lastOpenRequest: number;
   lastEditorClose: number;
+  /**
+   * This tab's editor was created by the open attempt now in flight (not already open when it began): a Cancel of that attempt's
+   * external-writer question closes it again unless the row's run intent is `stopped` (ADR-0046, editor first). Cleared when the attempt ends.
+   */
+  editorOfAttempt: boolean;
+  /** The last open attempt of this tab ended at a Cancel of its external-writer question (so `openSession` reports it as not opened). */
+  openDeclined: boolean;
   /** Frontend for a folder shell or the managed native session. */
   pipeline: TerminalPipeline | null;
   /** The folder-shell slot this editor carries, when this tab *is* a folder shell. */
@@ -933,6 +940,11 @@ interface WindowState {
   turnNotifier: { readonly index: SessionIndex; readonly notifier: TurnNotifier } | undefined;
   /** Conversations whose Chat /new or /delete replacement is running; a second request is refused. */
   readonly replacingConversations: Set<string>;
+  /**
+   * Folders whose New Session started in this window and has not finished: the session being started (`null` until its draft exists).
+   * A repeated New Session for the folder is ignored and reveals that session. A guard, not a display: it is not part of `pending`.
+   */
+  readonly newSessionsInFlight: Map<string, string | null>;
   /** The last connection-relevant phase logged per tab, so a restoration is reported against the failure it ends. */
   readonly loggedChatPhases: Map<string, ChatPhase>;
   /**
@@ -1320,6 +1332,7 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     editorRecency: new EditorRecency(),
     turnNotifier: undefined,
     replacingConversations: new Set<string>(),
+    newSessionsInFlight: new Map<string, string | null>(),
     loggedChatPhases: new Map<string, ChatPhase>(),
     subagentWork: new Map<string, boolean>(),
     subagentWatches: new Map<string, ReturnType<typeof setInterval>>(),
@@ -2156,13 +2169,43 @@ async function newSession(
     refreshLauncher();
     return;
   }
-  // A folder that only another window has open is started there (ADR-0057).
-  if (await s.routing.routeLaunch(index, current, { kind: "new-session", folderId: current.id })) return;
-  await startNewSession(context, index, current);
+  // A second New Session for a folder whose first one is still starting is ignored; it brings forward the session that is starting,
+  // so the click is answered and no second draft is reserved. The entry is taken before the launch can be routed or awaited, so a
+  // double click cannot start two.
+  const inFlight = s.newSessionsInFlight;
+  if (inFlight.has(current.id)) {
+    const starting = inFlight.get(current.id) ?? null;
+    const panel = starting === null ? null : stateOf(starting)?.panel ?? null;
+    if (starting !== null && panel !== null) await revealExistingTab(index, starting, panel);
+    return;
+  }
+  inFlight.set(current.id, null);
+  const origin: PendingOrigin = argument instanceof WorkspaceFolderTreeItem ? "row" : "command";
+  const reserving = s.pending.begin(`folder:${current.id}`, "new-session", { origin, step: "reserving" });
+  try {
+    // A folder that only another window has open is started there (ADR-0057).
+    if (await s.routing.routeLaunch(index, current, { kind: "new-session", folderId: current.id })) {
+      reserving.end("handed-off");
+      return;
+    }
+    await startNewSession(context, index, current, origin, tabId => {
+      inFlight.set(current.id, tabId);
+      reserving.end("running");
+    });
+  } finally {
+    reserving.end("failed");
+    inFlight.delete(current.id);
+  }
 }
 
-/** Reserve a draft in the folder and open its editor: the launch itself, in this window. */
-async function startNewSession(context: vscode.ExtensionContext, index: SessionIndex, current: LauncherFolder): Promise<void> {
+/** Reserve a draft in the folder and open its editor: the launch itself, in this window. `onDraft` is told the draft's tab once it exists. */
+async function startNewSession(
+  context: vscode.ExtensionContext,
+  index: SessionIndex,
+  current: LauncherFolder,
+  origin: PendingOrigin = "row",
+  onDraft?: (tabId: string) => void,
+): Promise<void> {
   let entry: SessionIndexEntry;
   try {
     const commandAt = Date.now();
@@ -2173,12 +2216,20 @@ async function startNewSession(context: vscode.ExtensionContext, index: SessionI
     showError(`A new OMP session could not be reserved: ${messageOf(error)}`);
     return;
   }
-  refreshLauncher();
-  // The editor comes first: a host that is slow to start, or fails, never delays the
-  // chat surface the user just asked for. Until the conversation attaches the page shows
-  // its phase, and the draft row and its claim are exactly what they would have been
-  // otherwise.
-  await openTab(context, index, entry.tabId, "started");
+  // From here the new row carries the pending state; the folder's own "reserving" entry is over.
+  const starting = windowState().pending.begin(entry.tabId, "new-session", { origin, step: "waiting" });
+  onDraft?.(entry.tabId);
+  try {
+    refreshLauncher();
+    // The editor comes first: a host that is slow to start, or fails, never delays the
+    // chat surface the user just asked for. Until the conversation attaches the page shows
+    // its phase, and the draft row and its claim are exactly what they would have been
+    // otherwise.
+    await openTab(context, index, entry.tabId, "started");
+    starting.end("running");
+  } finally {
+    starting.end("failed");
+  }
 }
 
 /** Slash commands are local to the editor that received them, even for an unpinned folder. */
@@ -2327,22 +2378,11 @@ async function openIndexedSession(
     // A session of a folder that only another window has open is opened there (ADR-0057).
     if (!noRouting && await s.routing.routeOpen(index, tabId, verb, null)) { handle.end("handed-off"); return false; }
   }
-  // A row that shows a plain omp process outside this extension as the writer neither launches
-  // nor opens history on a bare click: it asks first (ADR-0046), after a fresh probe, because the
-  // terminal may have exited since the row was last checked. "Open Anyway" is the user's explicit
-  // launch, so it resumes; OMP then saves to a sibling file instead of mixing writes.
-  let externalConfirmed = false;
-  if (s.launcherProvider?.displayedState(tabId) === "externalOmp") {
-    handle.step("ownership");
-    const fresh = await launcherOwnershipFacts(index, tabId, { fresh: true });
-    if (fresh.externalOmp === true) {
-      handle.step("confirm");
-      if (!(await confirmOpenAnyway())) { handle.end("cancelled"); return false; }
-      externalConfirmed = true;
-    } else {
-      s.launcherProvider.refreshOwnership(new Set([tabId]));
-    }
-  }
+  // A row that shows a plain omp process outside this extension as the writer neither launches nor opens history on a
+  // bare click: it asks first (ADR-0046), after a fresh probe, because the terminal may have exited since the row was last
+  // checked. The question is asked by `openTabOnce`, with the editor already open (the ADR-0046 amendment); this only says
+  // that the click was on such a row.
+  const externalRowClicked = s.launcherProvider?.displayedState(tabId) === "externalOmp";
   // An explicit open is a request to recheck this session now: a background readiness
   // backoff (a startup pass over many rows) must never answer it.
   s.ptyGate?.invalidate();
@@ -2364,7 +2404,9 @@ async function openIndexedSession(
     await revealExistingTab(index, tabId, panel);
     return true;
   }
-  await timedLaunch(tabId, "open", commandAt, () => openTab(context, index, tabId, externalConfirmed ? "resumed" : verb, "explicit", undefined, externalConfirmed, keepLiveView));
+  tabState(tabId).openDeclined = false;
+  await timedLaunch(tabId, "open", commandAt, () => openTab(context, index, tabId, verb, "explicit", undefined, false, keepLiveView, externalRowClicked));
+  if (tabState(tabId).openDeclined) { handle.end("cancelled"); return false; }
   return true;
 }
 
@@ -3154,6 +3196,7 @@ async function openTab(
   requestedMode?: SessionViewMode,
   externalConfirmed = false,
   keepLiveView = false,
+  externalRowClicked = false,
 ): Promise<void> {
   const s = windowState();
   // The user's own Open supersedes a request's deferral of this tab's restore.
@@ -3195,6 +3238,7 @@ async function openTab(
     // still perform exactly one restore, and a subsequent close cancels focus.
     const row = index.get(tabId);
     if (row !== null && (stateOf(tabId)?.panel ?? null) === null) {
+      tabState(tabId).editorOfAttempt = true;
       windowState().editorPanels.openPanel(context, index, tabId);
       refreshLauncher();
     }
@@ -3217,12 +3261,13 @@ async function openTab(
     if (!keepLiveView && mode !== undefined && mode !== state.mode) await switchSessionMode(context, index, state, mode);
     return;
   }
-  const attempt = openTabOnce(context, index, tabId, verb, openIntent, mode, externalConfirmed);
+  const attempt = openTabOnce(context, index, tabId, verb, openIntent, mode, externalConfirmed, externalRowClicked);
   s.openingTabs.set(tabId, attempt);
   try {
     await attempt;
   } finally {
     if (s.openingTabs.get(tabId) === attempt) s.openingTabs.delete(tabId);
+    tabState(tabId).editorOfAttempt = false;
   }
   const published = stateOf(tabId);
   if (published !== undefined) {
@@ -3240,6 +3285,8 @@ async function openTabOnce(
   intent: "explicit" | "restored" = "explicit",
   requestedMode?: SessionViewMode,
   externalConfirmed = false,
+  /** The click was on a row displayed as held by a plain omp process outside this extension: it asks (ADR-0046) even for a stopped row's history view. */
+  externalRowClicked = false,
 ): Promise<void> {
   const s = windowState();
   // Wait for the activation pass before touching this tab: it may be restoring
@@ -3265,42 +3312,14 @@ async function openTabOnce(
       return;
     }
   }
-  let stoppedForOpen = false;
   const recorded = index.get(tabId);
-  if (intent === "explicit" && hostOf(stateOf(tabId)) == null && recorded?.host != null && !isManagedHost(recorded.host) && (verb === "resumed" || verb === "opened")) {
-    s.pending.step(tabId, "ownership");
-    const pid = await s.sessionRuntime.verifiedWriterPid(tabId);
-    if (pid !== null) {
-      const label = "Stop and Open";
-      s.pending.step(tabId, "confirm");
-      const choice = await vscode.window.showWarningMessage(
-        "Stop the running session and open it here?",
-        { modal: true, detail: "Unsaved replies and work in progress may be lost." },
-        label,
-      );
-      if (choice !== label || !(await s.sessionActions.stopVerifiedOwnedWriter(context, index, tabId, pid))) return;
-      stoppedForOpen = verb === "opened";
-    }
-  }
-  // A plain omp outside this extension that writes this session is not replaced or joined silently:
-  // an explicit attempt that can launch a writer asks first (a Resume, or an Open of a row whose
-  // run intent is not stopped), and OMP then saves to a sibling file (ADR-0046). A stopped row's
-  // plain Open and history views start no writer here, so they never ask.
-  if (intent === "explicit" && (verb === "resumed" || recorded?.runIntent !== "stopped") && !externalConfirmed && hostOf(stateOf(tabId)) == null) {
-    s.pending.step(tabId, "ownership");
-    const fresh = await launcherOwnershipFacts(index, tabId, { fresh: true });
-    if (fresh.externalOmp === true) s.pending.step(tabId, "confirm");
-    if (fresh.externalOmp === true && !(await confirmOpenAnyway())) {
-      s.launcherProvider?.refreshOwnership(new Set([tabId]));
-      return;
-    }
-  }
-  const row = index.get(tabId);
+  const row = recorded;
   if (row === null) {
     showError("This session is no longer in Sessions. Refresh and try again.");
     return;
   }
   const opening = tabState(tabId);
+  opening.openDeclined = false;
   const opened = hostOf(opening);
   if (opened !== null) opening.mode = opened.kind;
   else if (requestedMode !== undefined) opening.mode = requestedMode;
@@ -3316,9 +3335,11 @@ async function openTabOnce(
   if (tabState(tabId).lastOpenRequest <= tabState(tabId).lastEditorClose) {
     log.debug(`tab ${tabId}: its editor was closed while this open was waiting; no editor is opened for it`);
   } else {
-    // The editor is created (or revealed) before anything native happens: it is where the
-    // user sees whatever comes next, and a launch that is slow or cannot start must not
-    // delay the chat surface or hide the reason it is unavailable.
+    // The editor is created (or revealed) before anything native or any question: it is where the user sees
+    // whatever comes next (the saved history, the step in progress, a question about another process), and a
+    // launch that is slow or cannot start must not delay the chat surface or hide the reason it is unavailable.
+    // This is the ADR-0046 amendment: the editor no longer waits for the ownership checks.
+    if (opening.panel === null) opening.editorOfAttempt = true;
     windowState().editorPanels.openPanel(context, index, tabId);
     windowState().launchTimeline.lap(tabId, "panel");
     refreshLauncher();
@@ -3327,10 +3348,6 @@ async function openTabOnce(
   if (openedState !== undefined && hostOf(openedState) != null) {
     await electLocalController(index, tabId);
     pushSessionView(index, openedState);
-    return;
-  }
-  if (index.get(tabId) === null) {
-    showError("This session is no longer in Sessions. Refresh and try again.");
     return;
   }
   // History is painted from the session file on disk while the process starts: the page
@@ -3347,6 +3364,52 @@ async function openTabOnce(
         // The live conversation may already have replaced this placeholder.
         if (s.sessionRuntime.conversations.kindOf(tabId) === "view-only") attachChatRoutes(tabId, true);
       });
+  }
+  /** A Cancel starts nothing and writes nothing. The editor this attempt created is closed again unless the row is stopped (its startup restore never starts a stopped row). */
+  const declined = (): void => {
+    opening.openDeclined = true;
+    if (opening.editorOfAttempt && index.get(tabId)?.runIntent !== "stopped") opening.panel?.dispose();
+  };
+  let stoppedForOpen = false;
+  if (intent === "explicit" && hostOf(stateOf(tabId)) == null && recorded?.host != null && !isManagedHost(recorded.host) && (verb === "resumed" || verb === "opened")) {
+    s.pending.step(tabId, "ownership");
+    const pid = await s.sessionRuntime.verifiedWriterPid(tabId);
+    if (pid !== null) {
+      const label = "Stop and Open";
+      s.pending.step(tabId, "confirm");
+      const choice = await vscode.window.showWarningMessage(
+        "Stop the running session and open it here?",
+        { modal: true, detail: "Unsaved replies and work in progress may be lost." },
+        label,
+      );
+      if (choice !== label || !(await s.sessionActions.stopVerifiedOwnedWriter(context, index, tabId, pid))) { declined(); return; }
+      stoppedForOpen = verb === "opened";
+    }
+  }
+  // A plain omp outside this extension that writes this session is not replaced or joined silently:
+  // an explicit attempt that can launch a writer asks first (a Resume, or an Open of a row whose
+  // run intent is not stopped), and OMP then saves to a sibling file (ADR-0046). A click on a row that
+  // shows such a process asks even for a stopped row's history view. Any other stopped row's plain Open and
+  // history views start no writer here, so they never ask.
+  if (intent === "explicit" && (externalRowClicked || verb === "resumed" || recorded?.runIntent !== "stopped") && !externalConfirmed && hostOf(stateOf(tabId)) == null) {
+    s.pending.step(tabId, "ownership");
+    const fresh = await launcherOwnershipFacts(index, tabId, { fresh: true });
+    if (fresh.externalOmp === true) {
+      s.pending.step(tabId, "confirm");
+      if (!(await confirmOpenAnyway())) {
+        s.launcherProvider?.refreshOwnership(new Set([tabId]));
+        declined();
+        return;
+      }
+      // Open Anyway is the user's explicit launch, so it resumes (OMP then saves to a sibling file instead of mixing writes).
+      if (externalRowClicked) verb = "resumed";
+    } else if (externalRowClicked) {
+      s.launcherProvider?.refreshOwnership(new Set([tabId]));
+    }
+  }
+  if (index.get(tabId) === null) {
+    showError("This session is no longer in Sessions. Refresh and try again.");
+    return;
   }
   let outcome: RestoreOutcome;
   s.pending.step(tabId, "admission");
@@ -7387,6 +7450,8 @@ function newTabState(slotId: string): TabState {
     origin: null,
     lastOpenRequest: -1,
     lastEditorClose: -1,
+    editorOfAttempt: false,
+    openDeclined: false,
     pipeline: null,
     shellSlot: null,
     ownerStopWatch: null,
