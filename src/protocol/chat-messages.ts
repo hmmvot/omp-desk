@@ -71,6 +71,7 @@ import type {
 	ChatUiResponse,
 } from "../chat/model.ts";
 import { isRecord } from "../shared/guards.ts";
+import { isCanonicalBase64Text } from "../shared/bytes-base64.ts";
 import { isPendingEnd, isPendingKind, isPendingStep, type PendingEnd, type PendingKind, type PendingStep } from "../shared/pending-operation.ts";
 import { parseCodeThemes, type CodeTheme } from "../chat/code-theme.ts";
 
@@ -82,10 +83,22 @@ export const MAX_CHAT_TEXT_LENGTH = 200_000;
 export const MAX_RESTORED_MESSAGES = 64;
 /** Images one prompt may carry. */
 export const MAX_CHAT_IMAGES = 8;
-/** Base64 characters of one image (512 KiB raw). */
-export const MAX_CHAT_IMAGE_BASE64_CHARS = Math.ceil((512 * 1024) / 3) * 4;
-/** Base64 characters of all of one prompt's images (576 KiB raw). */
-export const MAX_CHAT_IMAGES_BASE64_CHARS = Math.ceil((576 * 1024) / 3) * 4;
+/**
+ * Raw bytes of one image, as the composer reads the file. Source of truth for the composer's own refusal
+ * (`webview/lib/attachments.ts`) and for the base64 bound below.
+ */
+export const MAX_CHAT_IMAGE_BYTES = 5 * 1024 * 1024;
+/**
+ * Raw bytes of all of one prompt's images. The tightest transport bound behind it is the broker's stdin line
+ * (`PTY_RPC_MAX_WRITE_BYTES`, 16 MiB): 10 MiB of images is 13.3 MiB of base64, which leaves room for the longest
+ * text (`MAX_CHAT_TEXT_LENGTH`, 1.2 MB when every character is escaped as `\uXXXX`) and the command's own fields;
+ * `chat-messages.test.ts` proves that sum.
+ */
+export const MAX_CHAT_IMAGES_BYTES = 10 * 1024 * 1024;
+/** Base64 characters of one image. */
+export const MAX_CHAT_IMAGE_BASE64_CHARS = Math.ceil(MAX_CHAT_IMAGE_BYTES / 3) * 4;
+/** Base64 characters of all of one prompt's images. */
+export const MAX_CHAT_IMAGES_BASE64_CHARS = Math.ceil(MAX_CHAT_IMAGES_BYTES / 3) * 4;
 /** Rows one chunk, `omp:chat-entries` or `omp:chat-older` message may carry. */
 export const MAX_CHAT_ROWS_PER_MESSAGE = 5_000;
 /** Chunks one snapshot may announce. */
@@ -115,8 +128,12 @@ export function isChatRequestId(value: unknown): value is string {
 	return typeof value === "string" && REQUEST_ID.test(value);
 }
 
-const BASE64 = /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/;
 const IMAGE_MIME: Record<string, true> = { "image/png": true, "image/jpeg": true, "image/gif": true, "image/webp": true };
+
+/** True for a MIME type of an image OMP accepts as prompt input. */
+export function isChatImageMimeType(value: string): boolean {
+	return IMAGE_MIME[value] === true;
+}
 
 // Message shapes
 
@@ -1188,7 +1205,7 @@ function parseImages(value: unknown): ChatImageWire[] | undefined | null {
 		const data = candidate.data;
 		if (typeof data !== "string" || data.length === 0 || data.length > MAX_CHAT_IMAGE_BASE64_CHARS) return null;
 		total += data.length;
-		if (total > MAX_CHAT_IMAGES_BASE64_CHARS || !BASE64.test(data)) return null;
+		if (total > MAX_CHAT_IMAGES_BASE64_CHARS || !isCanonicalBase64Text(data)) return null;
 		images.push({ type: "image", mimeType: candidate.mimeType, data });
 	}
 	return images;

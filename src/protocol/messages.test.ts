@@ -19,6 +19,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
 	FILE_COMPLETION_LIMIT,
+	MAX_DROP_URIS,
+	MAX_DROP_URI_LENGTH,
 	MAX_DRAFT_TEXT_LENGTH,
 	MAX_CONTROL_TEXT_LENGTH,
 	MAX_FILE_PATH_LENGTH,
@@ -173,6 +175,43 @@ describe("mentionQueryAt", () => {
 		assert.equal(mentionQueryAt(overlong, overlong.length), null);
 		assert.equal(mentionQueryAt(`@${"a".repeat(MAX_FILE_QUERY_LENGTH)}`, MAX_FILE_QUERY_LENGTH + 1)?.query.length, MAX_FILE_QUERY_LENGTH);
 		assert.equal(mentionQueryAt("@a\u0007b", 4), null);
+	});
+});
+
+describe("a drop from VS Code's Explorer: omp:attach-uris and omp:attached-files", () => {
+	const uri = "file:///c%3A/repo/shot.png";
+	const file = { name: "shot.png", mimeType: "image/png", data: "iVBORw0KGgo=" };
+
+	it("accepts a bounded list of text URIs and nothing looser", () => {
+		assert.deepEqual(parseGuestWebviewMessage({ type: "omp:attach-uris", requestId: 4, uris: [uri], extra: 1 }), { type: "omp:attach-uris", requestId: 4, uris: [uri] });
+		const refused = [
+			{ requestId: -1, uris: [uri] },
+			{ requestId: 1, uris: [] },
+			{ requestId: 1, uris: "file:///a.png" },
+			{ requestId: 1, uris: [7] },
+			{ requestId: 1, uris: [""] },
+			{ requestId: 1, uris: ["file:///a\nb"] },
+			{ requestId: 1, uris: [`file:///${"a".repeat(MAX_DROP_URI_LENGTH)}`] },
+			{ requestId: 1, uris: Array.from({ length: MAX_DROP_URIS + 1 }, () => uri) },
+		];
+		for (const message of refused) assert.equal(parseGuestWebviewMessage({ type: "omp:attach-uris", ...message }), null, JSON.stringify(message).slice(0, 80));
+	});
+
+	it("accepts the host's answer only as supported images of canonical base64 within the prompt's limits", () => {
+		const answer = { type: "omp:attached-files", requestId: 4, files: [file], refusals: ["notes.txt: not a PNG, JPEG, GIF, or WebP image."] };
+		assert.deepEqual(parseGuestHostMessage(answer), answer);
+		const refused = [
+			{ ...answer, files: [{ ...file, mimeType: "image/svg+xml" }] },
+			{ ...answer, files: [{ ...file, data: "not base64!" }] },
+			{ ...answer, files: [{ ...file, data: "" }] },
+			{ ...answer, files: [{ ...file, name: "" }] },
+			{ ...answer, files: [{ ...file, name: "a\nb" }] },
+			{ ...answer, files: Array.from({ length: 9 }, () => file) },
+			{ ...answer, refusals: [""] },
+			{ ...answer, refusals: ["a\nb"] },
+			{ ...answer, requestId: "4" },
+		];
+		for (const message of refused) assert.equal(parseGuestHostMessage(message), null, JSON.stringify(message).slice(0, 80));
 	});
 });
 

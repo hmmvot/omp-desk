@@ -25,6 +25,7 @@ import {
 	BRIDGE_DIRECTION_CLIENT_TO_SERVER,
 	BRIDGE_DIRECTION_SERVER_TO_CLIENT,
 	BRIDGE_HEARTBEAT_MS,
+	BRIDGE_MAX_PLAINTEXT_BYTES,
 	BRIDGE_PATH,
 	BridgeProtocolError,
 	BridgeSequence,
@@ -183,14 +184,32 @@ export class BridgeClient {
 	}
 
 	/**
+	 * True when `payload` seals into one request frame. A page does not fragment a request
+	 * (only the host does, for its pushes), so a request above the sealed-plaintext ceiling
+	 * can never reach the host: sealing it would throw and drop the connection.
+	 */
+	canCarry(operation: string, payload: unknown): boolean {
+		try {
+			const json = JSON.stringify(payload);
+			if (typeof json !== "string" || json.length > BRIDGE_MAX_PLAINTEXT_BYTES) return false;
+			// Fixed-width stand-ins for the ids a real request carries: the frame's own overhead is exact.
+			return requestFrame(this.#hostGeneration, this.#documentId(), "0".repeat(32), "0".repeat(32), "9".repeat(16), operation, payload).length <= BRIDGE_MAX_PLAINTEXT_BYTES;
+		} catch {
+			return false;
+		}
+	}
+
+	/**
 	 * Send one request over the bridge.
 	 *
 	 * Returns `false` when this connection cannot carry it — the caller keeps the
 	 * outcome explicitly unknown rather than pretending the request was sent, and
 	 * never queues a mutation for a later connection: an uncertain native mutation
-	 * is not resent.
+	 * is not resent. A request {@link canCarry} refuses is not sent either, and does not
+	 * cost the connection.
 	 */
 	request(request: BridgeClientRequest): boolean {
+		if (!this.canCarry(request.operation, request.payload)) return false;
 		return this.#sendSealed(() =>
 			requestFrame(this.#hostGeneration, this.#documentId(), request.routeGeneration, request.requestId, request.actionSeq, request.operation, request.payload),
 		);

@@ -7,7 +7,7 @@
  *   - `[tool:<path>]` anywhere in it: the first completion calls OMP's `read` tool on `<path>`; once a tool result is in
  *     the conversation the model answers with `Tool result received.`
  *   - `[slow]` : the text is streamed in small chunks with a delay, so a turn stays running for a while
- *   - anything else: `Mock reply to: <text>`.
+ *   - anything else: `Mock reply to: <text>`, followed by ` [image bytes: <n>,…]` when the last user message carries images.
  *
  * `GET /__requests` returns the recorded request summaries as JSON; `DELETE /__requests` clears them.
  */
@@ -24,6 +24,7 @@ export interface RecordedRequest {
 	readonly lastUserText: string;
 	readonly messageCount: number;
 	readonly hasToolResult: boolean;
+	readonly imageBytes: readonly number[];
 	readonly reply: string;
 }
 
@@ -54,6 +55,20 @@ function textOf(content: unknown): string {
 			? content.map((part: unknown) => (typeof part === "object" && part !== null && "text" in part ? String(part.text) : "")).join("")
 			: "";
 	return raw.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "").trim();
+}
+
+/** Decoded byte sizes of the `data:` images in one message's content parts (what the model would be shown). */
+function imageSizesOf(content: unknown): number[] {
+	if (!Array.isArray(content)) return [];
+	const sizes: number[] = [];
+	for (const part of content) {
+		if (typeof part !== "object" || part === null || !("image_url" in part)) continue;
+		const image = part.image_url;
+		const url = typeof image === "object" && image !== null && "url" in image ? String(image.url) : "";
+		const comma = url.indexOf(",");
+		if (url.startsWith("data:image/") && comma > 0) sizes.push(Buffer.from(url.slice(comma + 1), "base64").length);
+	}
+	return sizes;
 }
 
 async function readBody(request: IncomingMessage): Promise<string> {
@@ -89,8 +104,10 @@ async function respond(request: IncomingMessage, response: ServerResponse, reque
 
 	// A turn that already carries a tool result is the follow-up completion; the user's marker is still in its history.
 	const callTool = toolMatch !== null && last?.role === "user" && toolNames.includes("read");
-	const reply = callTool ? "" : hasToolResult && toolMatch !== null ? "Tool result received." : `Mock reply to: ${userText.replace(/\s+/g, " ").trim().slice(0, 200)}`;
-	requests.push({ model, stream: body.stream === true, toolNames, lastRole: last?.role ?? "", lastUserText: userText.slice(0, 200), messageCount: messages.length, hasToolResult, reply: callTool ? `<tool call read ${toolMatch![1]}>` : reply });
+	const images = imageSizesOf(lastUser?.content);
+	const imageNote = images.length === 0 ? "" : ` [image bytes: ${images.join(",")}]`;
+	const reply = callTool ? "" : hasToolResult && toolMatch !== null ? "Tool result received." : `Mock reply to: ${userText.replace(/\s+/g, " ").trim().slice(0, 200)}${imageNote}`;
+	requests.push({ model, stream: body.stream === true, toolNames, lastRole: last?.role ?? "", lastUserText: userText.slice(0, 200), messageCount: messages.length, hasToolResult, imageBytes: images, reply: callTool ? `<tool call read ${toolMatch![1]}>` : reply });
 
 	const id = `chatcmpl-mock-${requests.length}`;
 	const usage = { prompt_tokens: 120 + messages.length * 10, completion_tokens: 12, total_tokens: 132 + messages.length * 10 };

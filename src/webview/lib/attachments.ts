@@ -17,16 +17,23 @@
  *   `@oh-my-pi/pi-utils` (PNG, JPEG, GIF, WebP) — the same set the native TUI
  *   accepts for image input;
  * - the byte budget is the chat message grammar's own image budget
- *   (`MAX_CHAT_IMAGE_BASE64_CHARS` and `MAX_CHAT_IMAGES_BASE64_CHARS` in
- *   `../chat-messages.ts`), so an oversized attachment is refused at selection
- *   time instead of being refused after the user pressed Send.
- *   {@link MAX_DRAFT_BYTES} raw bytes encode to ≈768 KiB of base64.
+ *   (`MAX_CHAT_IMAGE_BYTES` and `MAX_CHAT_IMAGES_BYTES` in
+ *   `../../protocol/chat-messages.ts`, the one place the numbers live), so an
+ *   oversized attachment is refused at selection time instead of being refused
+ *   after the user pressed Send. The grammar's own budget sits under the broker's
+ *   16 MiB stdin line, the tightest bound a prompt crosses on the panel route.
+ *   OMP normalizes an attached image (at most 1568 px a side, about 500 KB)
+ *   before it reaches the model and the session file, so the original is never
+ *   stored and the panel does not downscale.
  *
  * Previews are `data:` URLs built from the very string that gets sent, because
  * the panel CSP allows `img-src <cspSource> data:` and nothing else — an object
  * URL would not render. Image bytes therefore live only in the values returned
  * here, which the composer drops on send, removal, and unmount.
  */
+
+import { sniffImageMimeType } from "../../shared/image-sniff.ts";
+import { MAX_CHAT_IMAGES_BYTES, MAX_CHAT_IMAGE_BYTES } from "../../protocol/chat-messages.ts";
 
 /** Formats the host accepts for image input (pi-utils `SUPPORTED_IMAGE_MIME_TYPES`). */
 export const SUPPORTED_IMAGE_MIME_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
@@ -37,10 +44,10 @@ export type SupportedImageMimeType = (typeof SUPPORTED_IMAGE_MIME_TYPES)[number]
 export const IMAGE_ACCEPT_ATTRIBUTE = SUPPORTED_IMAGE_MIME_TYPES.join(",");
 
 /** Raw bytes allowed for one selected image. */
-export const MAX_ATTACHMENT_BYTES = 512 * 1024;
+export const MAX_ATTACHMENT_BYTES = MAX_CHAT_IMAGE_BYTES;
 
-/** Raw bytes allowed across one prompt's images (≈768 KiB as base64). */
-export const MAX_DRAFT_BYTES = 576 * 1024;
+/** Raw bytes allowed across one prompt's images. */
+export const MAX_DRAFT_BYTES = MAX_CHAT_IMAGES_BYTES;
 
 /** Human-readable format list used in failure messages. */
 const FORMAT_LABELS = "PNG, JPEG, GIF, or WebP";
@@ -132,7 +139,7 @@ async function decodedSize(bytes: Uint8Array, mimeType: string): Promise<{ width
 }
 
 /**
- * Standard base64 of `bytes`, chunked: a single spread of a 512 KiB file into
+ * Standard base64 of `bytes`, chunked: a single spread of a multi-megabyte file into
  * `String.fromCharCode` would exceed the argument limit.
  */
 function toBase64(bytes: Uint8Array): string {
@@ -141,54 +148,6 @@ function toBase64(bytes: Uint8Array): string {
 		binary += String.fromCharCode(...bytes.subarray(offset, offset + BASE64_CHUNK_BYTES));
 	}
 	return btoa(binary);
-}
-
-/** Full PNG signature: 89 50 4E 47 0D 0A 1A 0A. */
-const PNG_SIGNATURE = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a];
-
-/** JPEG start of image plus the first marker prefix. */
-const JPEG_SIGNATURE = [0xff, 0xd8, 0xff];
-
-/** RIFF container magic and the WebP form type that must follow its size field. */
-const RIFF_SIGNATURE = [..."RIFF"].map(character => character.charCodeAt(0));
-const WEBP_FORM_TYPE = [..."WEBP"].map(character => character.charCodeAt(0));
-
-/**
- * MIME type of `bytes` from its file signature, or `null` when it is not one of
- * the formats the host advertises.
- *
- * A signature is a structural check, not a decode: a truncated or corrupt file
- * whose header is intact still passes here and is left to the provider boundary
- * (and the model) to reject. What this does catch is a file that is not that
- * format at all — which matters because the host forwards `mimeType` straight
- * to the model provider, and a mislabeled payload is a provider error rather
- * than a visible failure. The declared `File.type` is a hint from an OS
- * extension mapping (empty for some clipboard and renamed files); the bytes
- * decide.
- */
-function sniffImageMimeType(bytes: Uint8Array): SupportedImageMimeType | null {
-	if (signatureAt(bytes, 0, PNG_SIGNATURE)) return "image/png";
-	if (signatureAt(bytes, 0, JPEG_SIGNATURE)) return "image/jpeg";
-	// GIF87a / GIF89a: the 6-byte version-stamped header.
-	const gifHeader = ascii(bytes, 0, 6);
-	if (gifHeader === "GIF87a" || gifHeader === "GIF89a") return "image/gif";
-	if (signatureAt(bytes, 0, RIFF_SIGNATURE) && signatureAt(bytes, 8, WEBP_FORM_TYPE)) return "image/webp";
-	return null;
-}
-
-/** True when `signature` sits at `offset` in `bytes`. */
-function signatureAt(bytes: Uint8Array, offset: number, signature: readonly number[]): boolean {
-	if (bytes.length < offset + signature.length) return false;
-	for (let index = 0; index < signature.length; index++) {
-		if (bytes[offset + index] !== signature[index]) return false;
-	}
-	return true;
-}
-
-function ascii(bytes: Uint8Array, offset: number, length: number): string {
-	let text = "";
-	for (let index = offset; index < offset + length; index++) text += String.fromCharCode(bytes[index] ?? 0);
-	return text;
 }
 
 /** Failure text for a file whose bytes are not a supported image. */
@@ -220,4 +179,39 @@ export function imageFilesFrom(data: DataTransfer | null): File[] {
 		if (file !== null) files.push(file);
 	}
 	return files;
+}
+
+/** Drag type VS Code's Explorer and editor tabs write: every dragged item as a `file:` URI line. */
+const CODE_URI_LIST = "application/vnd.code.uri-list";
+
+/**
+ * What a drag carries that the composer can attach: `files` (an OS drag: the page reads the bytes), `uris` (a drag from
+ * VS Code's Explorer or an editor tab: only addresses, the host reads them), or `null` (text, a link: left to the browser).
+ * Only the type names are readable while a drag is over the page, never its data.
+ */
+export function dragCarries(data: DataTransfer): "files" | "uris" | null {
+	if (Array.from(data.items).some(item => item.kind === "file")) return "files";
+	const types = Array.from(data.types);
+	return types.includes(CODE_URI_LIST) || types.includes("ResourceURLs") ? "uris" : null;
+}
+
+/** The `file:` URIs a drop names, in drag order, at most `limit`; other schemes and comments are not attachments. */
+export function droppedFileUris(data: DataTransfer | null, limit: number): string[] {
+	if (data === null) return [];
+	const raw = data.getData(CODE_URI_LIST) || data.getData("text/uri-list");
+	const uris: string[] = [];
+	for (const line of raw.split(/\r?\n/)) {
+		const uri = line.trim();
+		if (/^file:/i.test(uri)) uris.push(uri);
+		if (uris.length === limit) break;
+	}
+	return uris;
+}
+
+/** An image the host read for a drop, as a `File` the ordinary attach path takes. */
+export function fileFromAttached(attached: { readonly name: string; readonly mimeType: string; readonly data: string }): File {
+	const binary = atob(attached.data);
+	const bytes = new Uint8Array(binary.length);
+	for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+	return new File([bytes as BlobPart], attached.name, { type: attached.mimeType });
 }

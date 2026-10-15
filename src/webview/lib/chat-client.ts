@@ -55,6 +55,8 @@ export type ChatSnapshot = ChatModel;
 export interface ChatTransport {
 	/** `false` when the message provably went nowhere; anything else means it was handed to a route. */
 	post(message: GuestWebviewMessage): boolean | void;
+	/** `false` when the current route cannot carry `message` whole (a transport with one route omits this). */
+	carries?(message: GuestWebviewMessage): boolean;
 }
 
 /** A source of validated host messages (`guestTransport` in the page). */
@@ -94,6 +96,9 @@ const MAX_ANSWERED = 256;
 const REFUSAL_NOT_LIVE = "the session is not running, so it cannot take a message";
 const REFUSAL_UNREACHABLE =
 	"this editor cannot reach its session host right now, so the message was not sent; wait for the connection to return and send it again";
+/** The fallback route carries one sealed frame per request; a prompt with large images does not fit it. */
+const REFUSAL_ROUTE_TOO_SMALL =
+	"this editor is on the fallback connection to its session host (after a host restart), which cannot carry a message this large; reload the window to attach images of this size";
 
 const REFUSAL_NOT_ACCEPTED = "OMP did not accept this message. Your draft was kept.";
 const REFUSAL_UNCONFIRMED = "OMP has not confirmed this message. Your draft was kept; sending it again could deliver it twice.";
@@ -335,11 +340,13 @@ export class ChatClient {
 		const wire = images === undefined || images.length === 0 ? undefined : images.map(image => ({ type: "image" as const, mimeType: image.mimeType, data: image.data }));
 		const requestId = this.#newRequestId();
 		const base = { type, requestId, text };
+		const message = wire === undefined ? base : { ...base, images: wire };
+		if (wire !== undefined && this.#transport.carries?.(message) === false) return Promise.resolve({ ok: false, reason: REFUSAL_ROUTE_TOO_SMALL });
 		const { promise, resolve } = Promise.withResolvers<ChatSendResult>();
 		const timer = setTimeout(() => this.#finishTextSend(requestId, "unconfirmed"), SEND_RESULT_TIMEOUT_MS);
 		this.#textSends.set(requestId, { resolve, timer });
 		try {
-			if (this.#transport.post(wire === undefined ? base : { ...base, images: wire }) === false) {
+			if (this.#transport.post(message) === false) {
 				clearTimeout(timer);
 				this.#textSends.delete(requestId);
 				resolve({ ok: false, reason: REFUSAL_UNREACHABLE });

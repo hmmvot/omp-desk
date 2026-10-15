@@ -3426,6 +3426,84 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		await t.test("a 4 MB image attaches and sends whole; an image over 5 MiB and a prompt over 10 MiB are refused by size, naming the limit", async () => {
+			await reset("image-limits");
+			await ui.evaluate(`(()=>{
+			 window.pasteBytes=(size,name)=>{const bytes=new Uint8Array(size);bytes.set([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a]);
+			  const data=new DataTransfer();data.items.add(new File([bytes],name,{type:'image/png'}));
+			  const area=document.querySelector('.omp-composer textarea');area.focus();
+			  area.dispatchEvent(new ClipboardEvent('paste',{clipboardData:data,bubbles:true,cancelable:true}));};
+			})()`);
+			const MiB = 1024 * 1024;
+			await ui.evaluate(`window.pasteBytes(${4 * MiB},'screenshot-4mb.png')`);
+			await ui.wait("document.querySelectorAll('.omp-attachment-number').length===1");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-attach-error')"), null, "a 4 MB screenshot is not refused");
+			await ui.evaluate(`window.pasteBytes(${5 * MiB + 1},'huge.png')`);
+			await ui.wait("document.querySelector('.omp-attach-error')");
+			assert.match(await ui.evaluate<string>("document.querySelector('.omp-attach-error').textContent"), /huge\.png: 5\.0 MB exceeds the 5\.0 MB limit per image/);
+			assert.deepEqual(await strip(), ["#1"]);
+			await ui.evaluate(`window.pasteBytes(${4 * MiB},'second.png')`);
+			await ui.wait("document.querySelectorAll('.omp-attachment-number').length===2");
+			await ui.evaluate(`window.pasteBytes(${4 * MiB},'third.png')`);
+			await ui.wait("document.querySelector('.omp-attach-error')?.textContent.includes('third.png')");
+			assert.match(await ui.evaluate<string>("document.querySelector('.omp-attach-error').textContent"), /12\.0 MB of images; the limit is 10\.0 MB per prompt/);
+			assert.deepEqual(await strip(), ["#1", "#2"]);
+			await ui.evaluate("window.ui.admission(true);document.querySelector('.omp-composer textarea').focus()");
+			await ui.call("Input.insertText", { text: "look" });
+			await ui.evaluate("document.querySelector('button[aria-keyshortcuts=\"Enter\"]').click()");
+			await ui.wait("window.ui.sends().length===1");
+			const sent = await ui.evaluate<{ images: { data: string }[] }>("window.ui.sends()[0]");
+			assert.deepEqual(sent.images.map(image => image.data.length), [Math.ceil((4 * MiB) / 3) * 4, Math.ceil((4 * MiB) / 3) * 4], "both images travel whole");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		const dropOn = (selector: string, type: string, items: string): Promise<{ prevented: boolean }> =>
+			ui.evaluate(`(()=>{const data=new DataTransfer();${items};
+			 const event=new DragEvent(${JSON.stringify(type)},{dataTransfer:data,bubbles:true,cancelable:true});
+			 document.querySelector(${JSON.stringify(selector)}).dispatchEvent(event);return {prevented:event.defaultPrevented};})()`);
+		const dropFile = "data.items.add(new File([new Uint8Array([0x89,0x50,0x4e,0x47,0x0d,0x0a,0x1a,0x0a,1,2,3])],'dropped.png',{type:'image/png'}))";
+
+		await t.test("dropping image files on the composer attaches them, and the drop target shows while a droppable drag is over it", async () => {
+			await reset("drop-files");
+			// What the VS Code shell script does: it listens on the window and, told of a file drag, has the workbench block this page.
+			await ui.evaluate("window.shellSaw=[];for(const type of ['dragenter','dragover','drop'])window.addEventListener(type,event=>window.shellSaw.push(type))");
+			assert.equal((await dropOn(".omp-composer textarea", "dragover", dropFile)).prevented, true, "a file drag is accepted over the textarea");
+			await ui.wait("document.querySelector('.omp-composer--dropping')");
+			await ui.evaluate("document.querySelector('.omp-composer').dispatchEvent(new DragEvent('dragleave',{bubbles:true,relatedTarget:null}))");
+			await ui.wait("!document.querySelector('.omp-composer--dropping')");
+			assert.equal((await dropOn(".omp-composer-toolbar", "drop", dropFile)).prevented, true, "a drop on the composer card is taken");
+			await ui.wait("document.querySelectorAll('.omp-attachment-number').length===1");
+			assert.equal((await dropOn(".omp-transcript", "drop", dropFile)).prevented, true, "a drop anywhere on the Chat page attaches to the composer");
+			await ui.wait("document.querySelectorAll('.omp-attachment-number').length===2");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-composer--dropping')"), null);
+			// Text and links stay with the browser.
+			assert.deepEqual(await ui.evaluate("window.shellSaw"), [], "the shell script is never told of a drag the composer takes");
+			assert.equal((await dropOn(".omp-composer textarea", "dragover", "data.setData('text/plain','just text')")).prevented, false);
+			assert.deepEqual(await ui.evaluate("window.shellSaw"), ["dragover"], "a drag the composer leaves alone still reaches it");
+			assert.equal((await dropOn(".omp-composer textarea", "drop", "data.setData('text/uri-list','https://example.com/a.png')")).prevented, false, "a web link is not a file");
+			assert.equal(await ui.evaluate("window.sent.filter(message=>message.type==='omp:attach-uris').length"), 0);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("dropping from VS Code's Explorer asks the host to read the file URIs, attaches what it returns and reports what it refused", async () => {
+			await reset("drop-uris");
+			const tinyPng = "iVBORw0KGgoBAgM=";
+			const uris = "file:///c%3A/repo/shot.png\\r\\nfile:///c%3A/repo/notes.txt\\r\\nhttps://example.com/x.png";
+			assert.equal((await dropOn(".omp-composer textarea", "dragover", "data.setData('application/vnd.code.uri-list','file:///c%3A/repo/shot.png')")).prevented, true, "an Explorer drag is accepted by its type");
+			assert.equal((await dropOn(".omp-composer textarea", "drop", `data.setData('application/vnd.code.uri-list','${uris}')`)).prevented, true);
+			await ui.wait("window.sent.some(message=>message.type==='omp:attach-uris')");
+			const request = await ui.evaluate<{ requestId: number; uris: string[] }>("window.sent.find(message=>message.type==='omp:attach-uris')");
+			assert.deepEqual(request.uris, ["file:///c%3A/repo/shot.png", "file:///c%3A/repo/notes.txt"], "only file: URIs are asked for");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-composer-attach').disabled"), true, "the composer shows it is reading");
+			await ui.evaluate(`window.ui.receive({type:'omp:attached-files',requestId:${request.requestId + 1},files:[{name:'stale.png',mimeType:'image/png',data:${JSON.stringify(tinyPng)}}],refusals:[]})`);
+			assert.equal(await ui.evaluate("document.querySelectorAll('.omp-attachment-number').length"), 0, "an answer to another request is ignored");
+			await ui.evaluate(`window.ui.receive({type:'omp:attached-files',requestId:${request.requestId},files:[{name:'shot.png',mimeType:'image/png',data:${JSON.stringify(tinyPng)}}],refusals:['notes.txt: not a PNG, JPEG, GIF, or WebP image.']})`);
+			await ui.wait("document.querySelectorAll('.omp-attachment-number').length===1");
+			assert.match(await ui.evaluate<string>("document.querySelector('.omp-attach-error').textContent"), /notes\.txt: not a PNG, JPEG, GIF, or WebP image\./);
+			assert.equal(await ui.evaluate("document.querySelector('.omp-composer-attach').disabled"), false, "reading is over");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("pending admission keeps text and images, blocks duplicate send routes, and clears only after the matching receipt", async () => {
 			await buildDraft("send-admission-pending");
 			await ui.evaluate("window.ui.admission(false);document.querySelector('button[aria-keyshortcuts=\"Enter\"]').click()");
@@ -4888,7 +4966,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			const start = await ui.evaluate<{ head: string; keys: string[]; recents: number }>("({head:document.querySelector('.omp-empty-head').textContent,keys:[...document.querySelectorAll('.omp-empty-key kbd')].map(node=>node.textContent),recents:document.querySelectorAll('.omp-empty-recent button').length})");
 			assert.match(start.head, /alpha-desk/);
 			assert.match(start.head, /Original · low/);
-			assert.deepEqual(start.keys, ["/", "@", "Alt+Enter", "Esc Esc"]);
+			assert.deepEqual(start.keys, ["/", "@", "Shift+drag", "Alt+Enter", "Esc Esc"]);
 			assert.equal(start.recents, 0, "hints alone until the host answers");
 			// Answers the latest request in one step, so a timer cannot slip a newer request between reading its id and replying.
 			const answer = (items: string, offset = 0) => ui.evaluate<number>(`(()=>{const request=window.sent.filter(message=>message.type==='omp:recent-sessions-request').at(-1);window.ui.receive({type:'omp:recent-sessions',requestId:request.requestId+${offset},items:${items}});return request.requestId})()`);
@@ -4936,7 +5014,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			];
 			window.ui.push({header:{id:'hidden-h',cwd:'D:/work/alpha-desk/',timestamp:'${stamp}'},entries:window.setupEntries,durableCount:5,working:false,settled:true})`);
 			await ui.wait("document.querySelector('.omp-empty-state')");
-			assert.deepEqual(await ui.evaluate("[...document.querySelectorAll('.omp-empty-key kbd')].map(node=>node.textContent)"), ["/", "@", "Alt+Enter", "Esc Esc"]);
+			assert.deepEqual(await ui.evaluate("[...document.querySelectorAll('.omp-empty-key kbd')].map(node=>node.textContent)"), ["/", "@", "Shift+drag", "Alt+Enter", "Esc Esc"]);
 			assert.match(await ui.evaluate<string>("document.querySelector('.omp-empty-head').textContent"), /alpha-desk/);
 			await ui.evaluate(`window.ui.push({entries:[...window.setupEntries,{type:'message',id:'u1',parentId:'xd0',timestamp:'${stamp}',message:{role:'user',timestamp:1,content:'First prompt'}}],durableCount:6})`);
 			await ui.wait("!document.querySelector('.omp-empty-state') && document.querySelector('.omp-transcript')?.textContent.includes('First prompt')");

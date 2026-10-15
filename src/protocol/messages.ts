@@ -33,7 +33,8 @@
 // extensionless specifiers (the Webview bundle itself does not care).
 import type { ControlModelRef } from "./control.ts";
 import { isRecord } from "../shared/guards.ts";
-import { MAX_CHAT_TEXT_LENGTH, parseChatEpoch, parseChatHostMessage, parseChatWebviewMessage } from "./chat-messages.ts";
+import { isCanonicalBase64Text } from "../shared/bytes-base64.ts";
+import { MAX_CHAT_IMAGES, MAX_CHAT_IMAGE_BASE64_CHARS, MAX_CHAT_IMAGES_BASE64_CHARS, MAX_CHAT_TEXT_LENGTH, isChatImageMimeType, parseChatEpoch, parseChatHostMessage, parseChatWebviewMessage } from "./chat-messages.ts";
 import type { ChatHostMessage, ChatWebviewMessage } from "./chat-messages.ts";
 import type { ChatEpoch } from "../chat/model.ts";
 import { isPanelTabId } from "../shared/panel-identity.ts";
@@ -245,6 +246,43 @@ export interface GuestFileCompletionsMessage {
 	requestId: number;
 	/** Workspace-relative (preferred) or absolute paths, already ranked and bounded. */
 	paths: string[];
+}
+
+/** Image files one drop may name, and the files one answer may carry: one prompt's image count. */
+export const MAX_DROP_URIS = MAX_CHAT_IMAGES;
+/** Longest `file:` URI a drop may name. */
+export const MAX_DROP_URI_LENGTH = 2048;
+/** Longest file name an answer may carry. */
+export const MAX_ATTACHED_NAME_LENGTH = 255;
+/** Longest refusal sentence an answer may carry. */
+export const MAX_ATTACHED_REFUSAL_LENGTH = 400;
+
+/**
+ * A drag from VS Code's own Explorer or an editor tab carries URIs, not files; the page cannot read them, so it asks the
+ * host. The URIs are untrusted text: the host reads only a local file that is a supported image within the prompt's
+ * limits and refuses everything else in a sentence.
+ */
+export interface GuestAttachUrisRequestMessage {
+	type: "omp:attach-uris";
+	/** Monotonic per panel; an answer with any other id is stale. */
+	requestId: number;
+	uris: string[];
+}
+
+/** One image the host read for a drop: what the page turns back into a `File`. */
+export interface GuestAttachedFile {
+	name: string;
+	mimeType: string;
+	/** Standard base64 of the file's bytes. */
+	data: string;
+}
+
+/** Answer to {@link GuestAttachUrisRequestMessage}: the images read and one sentence per URI that was refused. */
+export interface GuestAttachedFilesMessage {
+	type: "omp:attached-files";
+	requestId: number;
+	files: GuestAttachedFile[];
+	refusals: string[];
 }
 
 /** One recent session of the empty state: what a row shows, nothing that could name it. */
@@ -754,6 +792,7 @@ export type GuestHostMessage =
 	| GuestBridgeBindMessage
 	| GuestControlInvalidateMessage
 	| GuestFileCompletionsMessage
+	| GuestAttachedFilesMessage
 	| GuestRecentSessionsMessage
 	| GuestControlStateMessage
 	| GuestPanelActionMessage
@@ -988,6 +1027,7 @@ export type GuestWebviewMessage =
 	| GuestRouteAckMessage
 	| GuestBridgeAckMessage
 	| GuestFileCompletionRequestMessage
+	| GuestAttachUrisRequestMessage
 	| GuestRecentSessionsRequestMessage
 	| GuestOpenRecentMessage
 	| GuestControlRequestMessage
@@ -1198,6 +1238,26 @@ export function parseGuestHostMessage(value: unknown): GuestHostMessage | null {
 		// even if a future host forgets its own limit.
 		return { type: "omp:file-completions", requestId: value.requestId, paths: paths.slice(0, FILE_COMPLETION_LIMIT) };
 	}
+	if (value.type === "omp:attached-files") {
+		if (!isRequestId(value.requestId) || !Array.isArray(value.files) || value.files.length > MAX_CHAT_IMAGES || !Array.isArray(value.refusals) || value.refusals.length > MAX_DROP_URIS) return null;
+		const files: GuestAttachedFile[] = [];
+		let total = 0;
+		for (const candidate of value.files) {
+			if (!isRecord(candidate) || typeof candidate.name !== "string" || candidate.name.length === 0 || candidate.name.length > MAX_ATTACHED_NAME_LENGTH || !isSafeBoundaryText(candidate.name)) return null;
+			const { mimeType, data } = candidate;
+			if (typeof mimeType !== "string" || !isChatImageMimeType(mimeType)) return null;
+			if (typeof data !== "string" || data.length > MAX_CHAT_IMAGE_BASE64_CHARS) return null;
+			total += data.length;
+			if (total > MAX_CHAT_IMAGES_BASE64_CHARS || !isCanonicalBase64Text(data)) return null;
+			files.push({ name: candidate.name, mimeType, data });
+		}
+		const refusals: string[] = [];
+		for (const candidate of value.refusals) {
+			if (typeof candidate !== "string" || candidate.length === 0 || candidate.length > MAX_ATTACHED_REFUSAL_LENGTH || !isSafeBoundaryText(candidate)) return null;
+			refusals.push(candidate);
+		}
+		return { type: "omp:attached-files", requestId: value.requestId, files, refusals };
+	}
 	if (value.type === "omp:recent-sessions") {
 		if (!isRequestId(value.requestId) || !Array.isArray(value.items)) return null;
 		const items: GuestRecentSession[] = [];
@@ -1352,6 +1412,15 @@ export function parseGuestWebviewMessage(value: unknown): GuestWebviewMessage | 
 			const { hostGeneration, documentId, bindingHash } = value;
 			if (!isBridgeToken(hostGeneration) || !isBridgeToken(documentId) || !isBridgeHash(bindingHash)) return null;
 			return { type: "omp:bridge-ack", hostGeneration, documentId, bindingHash };
+		}
+		case "omp:attach-uris": {
+			if (!isRequestId(value.requestId) || !Array.isArray(value.uris) || value.uris.length === 0 || value.uris.length > MAX_DROP_URIS) return null;
+			const uris: string[] = [];
+			for (const candidate of value.uris) {
+				if (typeof candidate !== "string" || candidate.length === 0 || candidate.length > MAX_DROP_URI_LENGTH || !isSafeBoundaryText(candidate)) return null;
+				uris.push(candidate);
+			}
+			return { type: "omp:attach-uris", requestId: value.requestId, uris };
 		}
 		case "omp:complete-files": {
 			if (!isRequestId(value.requestId) || typeof value.query !== "string") return null;

@@ -12,6 +12,7 @@
  */
 
 import * as vscode from "vscode";
+import { readDroppedImages } from "../host/dropped-images.ts";
 import { TAB_INPUT_VIEW_TYPE_PREFIX } from "../host/bridge-identity.ts";
 import type { ChatCommandOutcome, ChatPage } from "../host/chat-runtime.ts";
 import type { ConversationPort } from "../runtime/session-runtime.ts";
@@ -35,6 +36,7 @@ import type {
 	GuestDraftReplyMessage,
 	GuestDraftRequestMessage,
 	GuestDraftRestoreMessage,
+	GuestAttachedFilesMessage,
 	GuestFileCompletionsMessage,
 	GuestHostMessage,
 	GuestOpenArtifactMessage,
@@ -599,6 +601,15 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 					requestId: parsed.requestId,
 					paths,
 				};
+				void panel.webview.postMessage(reply);
+				return;
+			}
+			case "omp:attach-uris": {
+				// The page's own panel only: a request is answered to the panel that asked, and never after it was replaced.
+				if (deps.tab(tabId)?.panel !== panel) return;
+				const read = await readDroppedImages(parsed.uris);
+				if (deps.tab(tabId)?.panel !== panel) return;
+				const reply: GuestAttachedFilesMessage = { type: "omp:attached-files", requestId: parsed.requestId, files: read.files, refusals: read.refusals };
 				void panel.webview.postMessage(reply);
 				return;
 			}

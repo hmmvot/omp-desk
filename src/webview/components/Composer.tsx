@@ -45,6 +45,9 @@ import { guestTransport } from "../bridge";
 import {
 	IMAGE_ACCEPT_ATTRIBUTE,
 	MAX_DRAFT_BYTES,
+	dragCarries,
+	droppedFileUris,
+	fileFromAttached,
 	formatBytes,
 	imageFilesFrom,
 	rawTotal,
@@ -70,7 +73,7 @@ import { followedByBlank, spaceInsertion, subscribeInsertedText } from "../lib/i
 import { mergeRestoredQueued, offerQueuedForEditing, subscribeQueuedForEditing } from "../lib/queue-restore";
 import { queueNotice, queueRows, restoredEntries } from "../lib/queue-view";
 import { historyStep, sessionPrompts, type HistoryCursor } from "../../chat/prompt-history";
-import { mentionQueryAt, spliceMention } from "../../protocol/messages";
+import { MAX_DROP_URIS, mentionQueryAt, spliceMention } from "../../protocol/messages";
 import {
 	activeImages,
 	compactForSend,
@@ -100,6 +103,8 @@ const MAX_ROWS = 8;
 
 /** Wait after the last keystroke before asking the extension host for paths. */
 const SUGGESTION_DEBOUNCE_MS = 150;
+/** How long a dropped file waits for the host to read it before the composer says so. */
+const URI_REQUEST_TIMEOUT_MS = 20_000;
 
 /** Stable empty list, so "no suggestions" does not re-render every consumer. */
 const NO_SUGGESTIONS: readonly string[] = [];
@@ -325,6 +330,8 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	/** Every image attached to this draft, including ones whose marker was deleted and could still come back through Undo. */
 	const [images, setImages] = useState<readonly DraftImage[]>([]);
 	const [attachError, setAttachError] = useState<string | null>(null);
+	/** A drag the composer can attach is over it. */
+	const [dropActive, setDropActive] = useState(false);
 	/** Why the last send or answer was refused; cleared by the next accepted one. */
 	const [sendError, setSendError] = useState<string | null>(null);
 	const [submitted, setSubmitted] = useState(false);
@@ -381,6 +388,9 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	 */
 	const reservedRef = useRef(0);
 	const mountedRef = useRef(true);
+	/** The one drop whose files the host is reading, and the timer that gives up on it. */
+	const pendingUrisRef = useRef<{ readonly requestId: number; readonly timer: number } | null>(null);
+	const uriRequestSeqRef = useRef(0);
 	/** Caret offset mirror; {@link mentionQueryAt} needs it synchronously. */
 	const caretRef = useRef(0);
 	/** Caret to restore after an accepted suggestion swaps the draft text. */
@@ -426,6 +436,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	useEffect(() => {
 		mountedRef.current = true;
 		return () => {
+			clearTimeout(pendingUrisRef.current?.timer);
 			// Draft base64 and previews live only in this component's state and
 			// refs; dropping them with the component is what releases them.
 			mountedRef.current = false;
@@ -620,14 +631,14 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 		}, 0);
 	}, [onCompositionEnd]);
 
-	/** Validate, read, and add `files`. Every rejection is reported, never dropped. */
+	/** Validate, read, and add `files`; `earlier` are refusals that came before them (the host's, for a drop). Every rejection is reported, never dropped. */
 	const addFiles = useCallback(
-		async (files: readonly File[]): Promise<void> => {
-			if (captureRef.current !== null || !canPrompt || files.length === 0) return;
+		async (files: readonly File[], earlier: readonly string[] = []): Promise<void> => {
+			if (captureRef.current !== null || !canPrompt || (files.length === 0 && earlier.length === 0)) return;
 			readingRef.current += files.length;
 			setReading(readingRef.current);
 			const accepted: PendingImage[] = [];
-			const rejected: string[] = [];
+			const rejected: string[] = [...earlier];
 			// This call's share of `reservedRef`, so the release in `finally` stays
 			// balanced even if a read throws instead of reporting failure. A leaked
 			// reservation would shrink the draft budget with nothing to show for it.
@@ -711,19 +722,79 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 		[addFiles],
 	);
 
-	const onDragOver = useCallback((event: DragEvent<HTMLTextAreaElement>): void => {
-		if (canPrompt && Array.from(event.dataTransfer.items).some(item => item.kind === "file")) event.preventDefault();
-	}, [canPrompt]);
+	/** Settle the one drop that is waiting for the host to read its files: its share of `reading` is released here and nowhere else. */
+	const finishUriRequest = useCallback((): void => {
+		const waiting = pendingUrisRef.current;
+		if (waiting === null) return;
+		pendingUrisRef.current = null;
+		clearTimeout(waiting.timer);
+		readingRef.current = Math.max(0, readingRef.current - 1);
+		if (mountedRef.current) setReading(readingRef.current);
+	}, []);
 
-	const onDrop = useCallback(
-		(event: DragEvent<HTMLTextAreaElement>): void => {
-			const files = imageFilesFrom(event.dataTransfer);
-			if (files.length === 0) return;
+	/** Ask the host to read the files a drag from VS Code's Explorer or an editor tab named; its answer attaches them. */
+	const requestUris = useCallback((uris: readonly string[]): void => {
+		finishUriRequest();
+		const requestId = ++uriRequestSeqRef.current;
+		readingRef.current += 1;
+		setReading(readingRef.current);
+		const timer = window.setTimeout(() => {
+			if (pendingUrisRef.current?.requestId !== requestId) return;
+			finishUriRequest();
+			setAttachError("The extension host did not answer, so nothing was attached from VS Code. Try again.");
+		}, URI_REQUEST_TIMEOUT_MS);
+		pendingUrisRef.current = { requestId, timer };
+		if (guestTransport.post({ type: "omp:attach-uris", requestId, uris: [...uris] }) === false) {
+			finishUriRequest();
+			setAttachError("Dropping a file from VS Code needs this editor's own connection to the extension host; paste the image or use the attach button.");
+		}
+	}, [finishUriRequest]);
+
+	/**
+	 * Drags are taken at the document, not on the composer card: a drop anywhere on the Chat page attaches, and a drag that
+	 * enters over the transcript is not lost on its way to the card. An accepted drag is also hidden from the VS Code shell
+	 * script, which listens on the window and, told of a file drag, has the workbench block this page's pointer events so
+	 * its own drop overlay takes the drop and opens the image in an editor tab. That works only for a drag that first
+	 * enters over this page; one that enters over another part of the window (the usual case) is blocked before the page
+	 * sees it, and holding Shift is what lets it through.
+	 */
+	useEffect(() => {
+		const accepts = (event: globalThis.DragEvent): boolean =>
+			event.dataTransfer !== null && canPrompt && captureRef.current === null && dragCarries(event.dataTransfer) !== null;
+		const over = (event: globalThis.DragEvent): void => {
+			if (!accepts(event) || event.dataTransfer === null) return;
 			event.preventDefault();
-			void addFiles(files);
-		},
-		[addFiles],
-	);
+			event.stopPropagation();
+			event.dataTransfer.dropEffect = "copy";
+			setDropActive(true);
+		};
+		const leave = (event: globalThis.DragEvent): void => {
+			// A leave into another element of the page is not a leave; one to nothing is the drag going away.
+			if (!(event.relatedTarget instanceof Node)) setDropActive(false);
+		};
+		const drop = (event: globalThis.DragEvent): void => {
+			setDropActive(false);
+			if (!accepts(event) || event.dataTransfer === null) return;
+			const files = imageFilesFrom(event.dataTransfer);
+			const uris = files.length > 0 ? [] : droppedFileUris(event.dataTransfer, MAX_DROP_URIS);
+			if (files.length === 0 && uris.length === 0) return;
+			event.preventDefault();
+			event.stopPropagation();
+			if (files.length > 0) void addFiles(files);
+			else requestUris(uris);
+		};
+		document.addEventListener("dragenter", over);
+		document.addEventListener("dragover", over);
+		document.addEventListener("dragleave", leave);
+		document.addEventListener("drop", drop);
+		return () => {
+			document.removeEventListener("dragenter", over);
+			document.removeEventListener("dragover", over);
+			document.removeEventListener("dragleave", leave);
+			document.removeEventListener("drop", drop);
+			setDropActive(false);
+		};
+	}, [addFiles, canPrompt, requestUris]);
 
 	/**
 	 * Typing rewrites the draft; if an edit the `beforeinput` interception did not cover (a
@@ -1131,7 +1202,13 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	// A prompt picked in the host's history search (`Ctrl+R`) joins the draft like an edited queued message.
 	useEffect(() => guestTransport.subscribe(message => {
 		if (message.type === "omp:recall-prompt") offerQueuedForEditing([{ text: message.text, images: [] }]);
-	}), []);
+		if (message.type === "omp:attached-files") {
+			const waiting = pendingUrisRef.current;
+			if (waiting === null || waiting.requestId !== message.requestId) return;
+			finishUriRequest();
+			void addFiles(message.files.map(fileFromAttached), message.refusals);
+		}
+	}), [addFiles, finishUriRequest]);
 
 	// The extension host needs one more fact about Escape: whether this popup is
 	// open. It is reported on every change and cleared when the composer unmounts,
@@ -1336,7 +1413,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 				className="omp-btn omp-composer-attach"
 				disabled={!canPrompt || captureLocked || reading > 0}
 				aria-label={reading > 0 ? "Reading attached images" : "Attach images"}
-				title={reading > 0 ? "Reading attached images…" : "Attach images (PNG, JPEG, GIF, WebP)"}
+				title={reading > 0 ? "Reading attached images…" : "Attach images (PNG, JPEG, GIF, WebP). You can also paste one, or hold Shift while dragging one here."}
 				onClick={() => fileInputRef.current?.click()}
 			>
 				<span aria-hidden="true" className={`codicon codicon-${reading > 0 ? "loading" : "attach"}`} />
@@ -1404,7 +1481,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	);
 
 	return (
-		<div className="omp-composer">
+		<div className={dropActive ? "omp-composer omp-composer--dropping" : "omp-composer"}>
 			{progressAvailable && (submitted || chatTurnInProgress(snapshot)) && <div className="omp-turn-progress" aria-hidden="true" />}
 			{captureLocked && <div className="omp-composer-hint" role="status">Your input is held unchanged while this editor is being replaced.</div>}
 			{lostAttachments > 0 && <div className="omp-attach-error" role="alert">
@@ -1510,8 +1587,6 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 						value={text}
 						onChange={onTextChange}
 						onScroll={event => syncMirror(event.currentTarget, mirrorRef.current)}
-						onDragOver={onDragOver}
-						onDrop={onDrop}
 						onKeyDown={onPromptKeyDown}
 						onKeyUp={event => syncCaret(event.currentTarget)}
 						onClick={event => syncCaret(event.currentTarget)}

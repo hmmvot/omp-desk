@@ -38,6 +38,25 @@ export function decodeBase64(text: string): Uint8Array | null {
 }
 
 /**
+ * True when `text` is non-empty, canonical standard base64: groups of four, `=` padding only at the end.
+ *
+ * A linear scan, not a regular expression: the group-repetition expression that expresses this overflows V8's
+ * regexp stack on a multi-megabyte string (an image), where this has no depth.
+ */
+export function isCanonicalBase64Text(text: string): boolean {
+	const length = text.length;
+	if (length === 0 || length % 4 !== 0) return false;
+	let end = length;
+	if (text.charCodeAt(end - 1) === 0x3d) end -= text.charCodeAt(end - 2) === 0x3d ? 2 : 1;
+	for (let index = 0; index < end; index++) {
+		const code = text.charCodeAt(index);
+		const alphabet = (code >= 0x41 && code <= 0x5a) || (code >= 0x61 && code <= 0x7a) || (code >= 0x30 && code <= 0x39) || code === 0x2b || code === 0x2f;
+		if (!alphabet) return false;
+	}
+	return true;
+}
+
+/**
  * `text` as UTF-8 base64 chunks of at most `maxBytes` decoded bytes each.
  *
  * Chunks are cut on byte boundaries, not character boundaries, so one character can

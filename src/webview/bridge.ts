@@ -424,6 +424,17 @@ function post(message: GuestWebviewMessage): boolean {
 	return true;
 }
 
+/**
+ * False when the acknowledged route cannot carry `message` whole. A bridge request is one sealed
+ * frame (the page never fragments), so a prompt with large images fits the panel route and not this one.
+ */
+function carries(message: GuestWebviewMessage): boolean {
+	const route = state.route;
+	if (route?.kind !== "bridge" || state.bridge === null) return true;
+	const operation = bridgeOperation(message);
+	return operation === null || state.bridge.canCarry(operation, message);
+}
+
 export const guestTransport = {
 	/** False when this document was not loaded by the VS Code webview host. */
 	hosted: state.api !== null,
@@ -467,6 +478,7 @@ export const guestTransport = {
 		};
 	},
 	post,
+	carries,
 	/** The document's own strictly increasing sequence for irreversible changes. */
 	nextActionSeq,
 	/**

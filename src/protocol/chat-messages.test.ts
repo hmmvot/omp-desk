@@ -19,6 +19,9 @@ import {
 	ChatSnapshotAssembler,
 	MAX_CHAT_IMAGES,
 	MAX_CHAT_IMAGE_BASE64_CHARS,
+	MAX_CHAT_IMAGES_BASE64_CHARS,
+	MAX_CHAT_IMAGE_BYTES,
+	MAX_CHAT_IMAGES_BYTES,
 	MAX_CHAT_TEXT_LENGTH,
 	isChatRequestId,
 	parseChatEventFrame,
@@ -27,6 +30,7 @@ import {
 	parseChatWebviewMessage,
 	splitChatSnapshot,
 } from "./chat-messages.ts";
+import { PTY_RPC_MAX_WRITE_BYTES } from "../host/pty-protocol.ts";
 
 const EPOCH = { nonce: "host-a", counter: 1 };
 const REQUEST_ID = "0123456789abcdef0123456789abcdef";
@@ -238,6 +242,37 @@ describe("parseChatWebviewMessage", () => {
 		for (const images of refused) {
 			assert.equal(parseChatWebviewMessage({ type: "omp:chat-prompt", requestId: REQUEST_ID, text: "x", images }), null);
 		}
+	});
+
+	it("carries a 5 MiB image and a 10 MiB prompt, refuses one byte over either, and the longest such command fits the broker's stdin line", () => {
+		const image = (bytes: number) => ({ type: "image", mimeType: "image/png", data: Buffer.alloc(bytes, 7).toString("base64") });
+		const prompt = (images: unknown[]) => parseChatWebviewMessage({ type: "omp:chat-prompt", requestId: REQUEST_ID, text: "x", images });
+		const one = image(MAX_CHAT_IMAGE_BYTES);
+		assert.deepEqual(prompt([one]), { type: "omp:chat-prompt", requestId: REQUEST_ID, text: "x", images: [one] }, "a 5 MiB image is accepted whole (the base64 check has no recursion depth)");
+		assert.equal(prompt([image(MAX_CHAT_IMAGE_BYTES + 3)]), null, "one base64 group over its bound");
+		const half = image(MAX_CHAT_IMAGES_BYTES / 2);
+		assert.notEqual(prompt([half, half]), null, "two 5 MiB images are exactly the prompt budget");
+		assert.equal(prompt([half, half, image(3)]), null, "one base64 group over the prompt budget");
+		assert.equal(prompt([one, one, one]), null, "three 5 MiB images are over the prompt budget though each is within its own");
+		// The command OMP receives for the largest admissible prompt: the longest text with every character escaped to six bytes,
+		// the most images, and the base64 of the whole budget.
+		const perImage = Math.floor(MAX_CHAT_IMAGES_BASE64_CHARS / MAX_CHAT_IMAGES / 4) * 4;
+		const line = JSON.stringify({
+			id: `vsc:${"f".repeat(32)}`,
+			type: "prompt",
+			message: "\u0001".repeat(MAX_CHAT_TEXT_LENGTH),
+			images: Array.from({ length: MAX_CHAT_IMAGES }, () => ({ type: "image", data: "A".repeat(perImage), mimeType: "image/webp" })),
+			streamingBehavior: "followUp",
+		});
+		assert.ok(Buffer.byteLength(line) < PTY_RPC_MAX_WRITE_BYTES, `${Buffer.byteLength(line)} bytes against ${PTY_RPC_MAX_WRITE_BYTES}`);
+		assert.ok(PTY_RPC_MAX_WRITE_BYTES - Buffer.byteLength(line) > 512 * 1024, "with room to spare for the fields this test does not model");
+	});
+
+	it("accepts exactly canonical base64 and refuses the rest, without a recursion limit", () => {
+		const accepted = ["AAAA", "AAA=", "AA==", "iVBORw0KGgo=", "a+/9"];
+		const refused = ["", "AAA", "AAAAA", "AA=A", "A===", "=AAA", "AA=\n", "AA A", "AAA*", "AAAA=", "AAAA\u00e9"];
+		for (const data of accepted) assert.notEqual(parseChatWebviewMessage({ type: "omp:chat-prompt", requestId: REQUEST_ID, text: "x", images: [{ type: "image", mimeType: "image/png", data }] }), null, data);
+		for (const data of refused) assert.equal(parseChatWebviewMessage({ type: "omp:chat-prompt", requestId: REQUEST_ID, text: "x", images: [{ type: "image", mimeType: "image/png", data }] }), null, JSON.stringify(data));
 	});
 
 	it("accepts exactly one answer per dialog response", () => {

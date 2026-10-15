@@ -629,6 +629,8 @@ ${ANSI_STYLES}
 .vscode-light:not(.vscode-high-contrast-light) .omp-composer-toolbar-actions .omp-btn--primary:disabled { background: color-mix(in srgb, var(--vscode-foreground) 8%, transparent); }
 /* One focus ring: the card, not the card and the textarea inside it. */
 .omp-composer:focus-within { border-color: var(--vscode-focusBorder); }
+/* A drag the composer can attach is over it: the card takes the focus colour and a dashed outline, like an editor drop target. */
+.omp-composer--dropping { border-color: var(--vscode-focusBorder); outline: 1px dashed var(--vscode-focusBorder); outline-offset: 2px; }
 .omp-composer .omp-textarea:focus { outline: none; }
 /* Notices stacked above the input row keep the 6px gap of .omp-attach-error: the input row's -4px top margin would otherwise pull it over the hint's text. */
 .omp-composer > .omp-composer-hint { margin: 0 0 6px; line-height: 1.4; }

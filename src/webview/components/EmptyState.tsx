@@ -6,6 +6,7 @@ import { useRecentSessions } from "../lib/recent-sessions";
 const HINTS: readonly { keys: string; text: string }[] = [
 	{ keys: "/", text: "commands and skills" },
 	{ keys: "@", text: "attach a file" },
+	{ keys: "Shift+drag", text: "an image onto the chat to attach it (or paste it)" },
 	{ keys: "Alt+Enter", text: "queue a follow-up while the agent works" },
 	{ keys: "Esc Esc", text: "rewind to an earlier prompt" },
 ];

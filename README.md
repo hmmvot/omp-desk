@@ -72,7 +72,7 @@ For how this works, see the [architecture](docs/architecture.md).
 
 ### Chat
 
-- Streaming replies, saved history, image attachments and `@file` mentions.
+- Streaming replies, saved history, image attachments (attach, paste, or hold Shift and drag an image in; up to 5 MiB each and 10 MiB per message) and `@file` mentions.
 - While a turn runs, `Enter` steers it and `Alt+Enter` queues a follow-up. Queued messages can be edited, removed or sent now as steering. `Alt+↑` takes the newest one back into the draft.
 - **Stop** (or `Esc`) puts messages that were still queued back into the draft instead of running them.
 - `↑`/`↓` in an empty composer walk through your earlier prompts. `Ctrl+R` searches past prompts of every conversation.

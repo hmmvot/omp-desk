@@ -11,6 +11,10 @@
  */
 import assert from "node:assert/strict";
 import module from "node:module";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { afterEach, beforeEach, describe, it, mock } from "node:test";
 
 import type { ChatPage } from "../host/chat-runtime.ts";
@@ -423,6 +427,33 @@ describe("file completions", () => {
 		tabs.set(SLOT, tabRecord(SLOT, gone.panel, { hosted: { cwd: "/runtime" } }));
 		await replaced.dispatcher.handleMessage(index, SLOT, gone.panel, { type: "omp:complete-files", requestId: 3, query: "x" });
 		assert.deepEqual(gone.posted, []);
+	});
+});
+
+describe("omp:attach-uris", () => {
+	it("answers the asking page with the images it read and a sentence for what it refused, and never a replaced page", async () => {
+		const folder = await mkdtemp(join(tmpdir(), "omp-desk-attach-"));
+		try {
+			const image = join(folder, "shot.png");
+			await writeFile(image, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2]));
+			const w = world();
+			const live = w.editor();
+			await w.dispatcher.handleMessage(index, SLOT, live.panel, { type: "omp:attach-uris", requestId: 5, uris: [pathToFileURL(image).href, "https://example.com/a.png"] });
+			assert.deepEqual(live.posted, [{
+				type: "omp:attached-files",
+				requestId: 5,
+				files: [{ name: "shot.png", mimeType: "image/png", data: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2]).toString("base64") }],
+				refusals: ["Dropped item: only files on this computer can be attached by dropping."],
+			}]);
+			const tabs = new Map<string, FakeTab>();
+			const gone = fakePanel();
+			tabs.set(SLOT, tabRecord(SLOT, fakePanel().panel));
+			const replaced = world({ tabs: () => tabs });
+			await replaced.dispatcher.handleMessage(index, SLOT, gone.panel, { type: "omp:attach-uris", requestId: 6, uris: [pathToFileURL(image).href] });
+			assert.deepEqual(gone.posted, [], "a panel that is no longer the tab's own gets no answer");
+		} finally {
+			await rm(folder, { recursive: true, force: true });
+		}
 	});
 });
 
