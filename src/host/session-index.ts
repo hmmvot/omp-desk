@@ -73,7 +73,13 @@ import type { TabLifecycleLease } from "./tab-lifecycle.ts";
 import { compareReplyMarkers, laterReplyMarker } from "./session-unread.ts";
 import { mergeKeyedArray, sameRecord } from "./catalog-merge.ts";
 import type { RecordConflictDraft } from "./catalog-merge.ts";
+import { isCatalogBusy } from "./profile-catalog.ts";
 import type { CatalogRecordChange } from "./profile-catalog.ts";
+import { PersistRetry } from "./persist-retry.ts";
+import type { PersistRetryOptions } from "./persist-retry.ts";
+
+/** Contention for the catalog lock this long is not another window's write: a lock nobody releases. */
+export const PERSIST_BUSY_ESCALATE_MS = 120_000;
 
 /**
  * Memento key holding the shared index record.
@@ -500,6 +506,10 @@ export interface SessionIndexOptions {
 	readonly now?: () => Date;
 	/** Technical failure details for the extension's Output channel, separate from user-facing status. */
 	readonly log?: Logger;
+	/** Retry timing of a save that lost the catalog lock; tests shorten it. */
+	readonly persistRetry?: PersistRetryOptions;
+	/** Called once when contention for the catalog lock has lasted {@link PERSIST_BUSY_ESCALATE_MS}: that is a fault to show, not a wait. */
+	readonly onPersistStuck?: (message: string) => void;
 }
 
 export interface TrackSessionInput {
@@ -665,8 +675,13 @@ export class SessionIndex {
 	 * window's rows is chained here too, so it never interleaves with a mutation.
 	 */
 	#persistChain: Promise<void> = Promise.resolve();
-	#persistRetries = 0;
-	#persistRetryTimer: NodeJS.Timeout | null = null;
+	/** Whether the last failed shared write only lost the catalog lock to another window. */
+	#persistBusy = false;
+	/** When the current run of contention began; `null` while writes land. */
+	#persistBusySince: number | null = null;
+	#persistStuckReported = false;
+	readonly #persistRetry: PersistRetry;
+	readonly #onPersistStuck: ((message: string) => void) | undefined;
 
 	constructor(options: SessionIndexOptions) {
 		if (typeof options.claimStorageDir !== "string" || options.claimStorageDir.trim().length === 0) {
@@ -677,6 +692,8 @@ export class SessionIndex {
 		this.#claimStorageDir = path.resolve(options.claimStorageDir);
 		this.#now = options.now ?? (() => new Date());
 		this.#log = options.log;
+		this.#onPersistStuck = options.onPersistStuck;
+		this.#persistRetry = new PersistRetry(() => this.#persistNow(), options.persistRetry);
 		this.#claimHolder = options.claimHolder ?? createClaimHolder();
 		this.#claimHolderReady = options.claimHolderCreationTime === undefined
 			? Promise.resolve(this.#claimHolder)
@@ -714,6 +731,11 @@ export class SessionIndex {
 
 	get persistError(): string | null {
 		return this.#persistError;
+	}
+
+	/** Whether {@link persistError} is only contention for the profile catalog, which this index saves again by itself. */
+	get persistBusy(): boolean {
+		return this.#persistBusy;
 	}
 
 	/**
@@ -2700,9 +2722,11 @@ export class SessionIndex {
 		if (binding === undefined) throw new SessionIndexError("invalid-input", "The editor has no durable binding.");
 		this.#bindings.set(slotId, { ...binding, mode });
 		const failure = await this.#persistNow();
-		if (failure !== null) {
+		// Contention for the catalog is not a refusal: the mode stays, the whole index is saved again by itself, and the
+		// only cost of a window closing before that is a view the next open takes from the default.
+		if (failure !== null && !this.#persistBusy) {
 			this.#bindings.set(slotId, binding);
-			throw new SessionIndexError("invalid-input", "The editor mode could not be recorded durably.");
+			throw new SessionIndexError("invalid-input", `The editor mode could not be recorded durably: ${failure}`);
 		}
 	}
 
@@ -3175,7 +3199,10 @@ export class SessionIndex {
 				// The conditional write landed: only now does this window's own state follow it, inside the same serialized turn.
 				if (expectHost !== undefined) expectHost.publish();
 				this.#persistError = null;
-				this.#persistRetries = 0;
+				this.#persistBusy = false;
+				this.#persistBusySince = null;
+				this.#persistStuckReported = false;
+				this.#persistRetry.reset();
 				this.#sharedBase = snapshot;
 			} catch (error) {
 				if (hostChanged) {
@@ -3196,8 +3223,15 @@ export class SessionIndex {
 				}
 				failure = `The session index could not be persisted: ${describeError(error)}`;
 				this.#persistError = failure;
+				this.#persistBusy = isCatalogBusy(error);
+				if (this.#persistBusy) {
+					this.#log?.warn(`${failure} (contention between windows; saved again automatically)`);
+					this.#escalateLongBusy();
+				} else {
+					this.#persistBusySince = null;
+				}
 				// Identity and companion transactions are not retried as ordinary snapshots.
-				if (companion === undefined && identity === undefined) this.#retryPersistLater();
+				if (companion === undefined && identity === undefined) this.#retryPersistLater(this.#persistBusy);
 				return;
 			}
 			try {
@@ -3213,19 +3247,23 @@ export class SessionIndex {
 
 	/**
 	 * After a failed shared write, save the current state again a little later: the snapshot is the whole in-memory index,
-	 * so a change a blocked rename (another process holding the catalog open) refused is not lost, and no further user
-	 * action is needed. Bounded: three tries, two, four and eight seconds after the failures; the timer never keeps the
-	 * process alive.
+	 * so a change a blocked rename (another process holding the catalog open) or another window's lock refused is not lost,
+	 * and no further user action is needed. Contention for the catalog lock is retried without end, one second after the
+	 * first failure and doubling up to 30 s; any other failure is retried three times. A write that lands, from this retry or
+	 * from any later save, ends it (`#persistNow` resets it). The timer never keeps the process alive.
 	 */
-	#retryPersistLater(): void {
-		if (this.#persistRetryTimer !== null || this.#persistRetries >= 3) return;
-		const delayMs = 2000 * 2 ** this.#persistRetries;
-		this.#persistRetries++;
-		this.#persistRetryTimer = setTimeout(() => {
-			this.#persistRetryTimer = null;
-			void this.#persistNow();
-		}, delayMs);
-		this.#persistRetryTimer.unref();
+	#retryPersistLater(busy: boolean): void {
+		this.#persistRetry.schedule(busy ? Number.POSITIVE_INFINITY : 3);
+	}
+
+	/** Contention that lasts is no longer expected: it becomes a fault, reported once through `onPersistStuck`. */
+	#escalateLongBusy(): void {
+		const now = this.#now().getTime();
+		this.#persistBusySince ??= now;
+		if (this.#persistStuckReported || now - this.#persistBusySince < PERSIST_BUSY_ESCALATE_MS) return;
+		this.#persistStuckReported = true;
+		const minutes = Math.floor((now - this.#persistBusySince) / 60_000);
+		this.#onPersistStuck?.(`The OMP session index has not been saved for ${minutes} minutes: the profile catalog stays locked by another window. Close the other VS Code windows, or reload this one.`);
 	}
 }
 

@@ -23,10 +23,12 @@ import { recordingLogger, type LoggedLine } from "../shared/logger.ts";
 import { claimPathFor, createOwnerGeneration, acquireClaim, createClaimHolder, readClaim } from "./session-claim.ts";
 import type { ClaimHolder } from "./session-claim.ts";
 import {
+	PERSIST_BUSY_ESCALATE_MS,
 	SESSION_INDEX_STORAGE_KEY,
 	SessionIndex,
 	SessionIndexError,
 } from "./session-index.ts";
+import { CatalogError } from "./profile-catalog.ts";
 import { isAbsoluteWorkspaceDirectory, normalizeWorkspaceDirectory } from "./session-files.ts";
 import { isRpcHost, resolveSessionOrigin } from "./session-model.ts";
 import {
@@ -3783,5 +3785,98 @@ describe("reply identities across windows", () => {
 		} finally {
 			await owner.closeSession(entry.tabId, { confirmedStopped: true });
 		}
+	});
+});
+
+/** A memento whose writes can be refused with any error, the way the catalog refuses one that lost the lock. */
+class RefusingStore extends TestStore {
+	failure: Error | null = null;
+
+	override async update(key: string, value: unknown): Promise<void> {
+		if (this.failure !== null) throw this.failure;
+		await super.update(key, value);
+	}
+}
+
+type PersistedBindings = { bindings: { slotId: string; mode: string }[] };
+
+/** Waits, in real time, for the index's own retry timer (a few milliseconds here) to run: that timer is what these tests exercise, so fake time would test nothing. */
+async function until(predicate: () => boolean, what: string): Promise<void> {
+	for (let waited = 0; waited < 2000; waited += 5) {
+		if (predicate()) return;
+		await new Promise<void>(resolve => setTimeout(resolve, 5));
+	}
+	assert.fail(`timed out waiting for ${what}`);
+}
+
+describe("a save that loses the catalog lock to another window", () => {
+	const busy = () => new CatalogError("busy", "Another VS Code window is writing the OMP Desk profile catalog, so this change was not saved yet.");
+
+	async function boundSlot(store: RefusingStore, options: { now?: () => Date; onPersistStuck?: (message: string) => void } = {}) {
+		const { claimDir, cwd } = await tempWorkspace();
+		const lines: LoggedLine[] = [];
+		const index = new SessionIndex({
+			store, claimStorageDir: claimDir, log: recordingLogger(lines), persistRetry: { firstMs: 2, maxMs: 8 }, ...options,
+		});
+		const entry = await index.createDraft({ cwd });
+		await index.bindEditorSlot("slot:x", entry.tabId, "passive");
+		return { index, lines, entry };
+	}
+
+	it("is not a refusal: the editor mode stays, a warning names the cause, and the index saves itself once the lock frees", async () => {
+		const store = new RefusingStore();
+		const { index, lines } = await boundSlot(store);
+		store.failure = busy();
+		await index.setEditorMode("slot:x", "terminal");
+		assert.equal(index.slotBinding("slot:x")?.mode, "terminal", "the change is kept, not rolled back");
+		assert.equal(index.persistBusy, true);
+		assert.match(index.persistError ?? "", /profile catalog/);
+		assert.ok(lines.some(line => line.level === "warn" && /profile catalog.*saved again automatically/.test(line.message)), "the cause is logged at warn");
+
+		store.failure = null;
+		await until(() => index.persistError === null, "the background retry to persist");
+		assert.equal(index.persistBusy, false);
+		const written = store.value as PersistedBindings; // the stand-in memento holds exactly what the index wrote
+		assert.equal(written.bindings.find(binding => binding.slotId === "slot:x")?.mode, "terminal", "the retry saved the mode with no further action");
+	});
+
+	it("keeps trying for as long as the lock is held, and stops when a later write lands", async () => {
+		const store = new RefusingStore();
+		const { index, lines } = await boundSlot(store);
+		store.failure = busy();
+		await index.setEditorMode("slot:x", "terminal");
+		await until(() => lines.filter(line => line.level === "warn").length >= 5, "five failed tries, well past the old limit of three");
+		store.failure = null;
+		await index.setEditorMode("slot:x", "chat");
+		assert.equal(index.persistError, null);
+		const tries = lines.length;
+		await new Promise<void>(resolve => setTimeout(resolve, 40));
+		assert.equal(lines.length, tries, "the landed write cancelled the pending retry");
+	});
+
+	it("still refuses an editor mode a fault kept from being recorded, and says why", async () => {
+		const store = new RefusingStore();
+		const { index } = await boundSlot(store);
+		store.failure = new Error("the disk is full");
+		await assert.rejects(() => index.setEditorMode("slot:x", "terminal"), /could not be recorded durably.*the disk is full/);
+		assert.equal(index.slotBinding("slot:x")?.mode, "chat", "a fault rolls the change back");
+		assert.equal(index.persistBusy, false);
+	});
+
+	it("becomes a reported fault only when the lock stays held for minutes, once", async () => {
+		const store = new RefusingStore();
+		let clock = Date.parse("2026-10-15T09:00:00Z");
+		const stuck: string[] = [];
+		const { index } = await boundSlot(store, { now: () => new Date(clock), onPersistStuck: message => stuck.push(message) });
+		store.failure = busy();
+		await index.setEditorMode("slot:x", "terminal");
+		assert.deepEqual(stuck, [], "contention is expected for a while");
+		clock += PERSIST_BUSY_ESCALATE_MS + 1_000;
+		await until(() => stuck.length === 1, "the escalation");
+		await new Promise<void>(resolve => setTimeout(resolve, 40));
+		assert.equal(stuck.length, 1);
+		assert.match(stuck[0]!, /has not been saved for 2 minutes/);
+		store.failure = null;
+		await until(() => index.persistError === null, "the retry to persist");
 	});
 });

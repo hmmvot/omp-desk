@@ -84,7 +84,7 @@ export type UnpinFolderResult =
 /** The part of the pinned registry this module drives. */
 export type PinnedFolders = Pick<
 	WorkspaceFolderRegistry,
-	"list" | "add" | "remove" | "setCollapsed" | "reload" | "loadError" | "persistError"
+	"list" | "add" | "remove" | "setCollapsed" | "reload" | "loadError" | "persistError" | "persistBusy"
 >;
 
 export interface LauncherFoldersOptions {
@@ -279,6 +279,11 @@ export class LauncherFolders {
 	/** Set when the last attempt to save a pin, an unpin or a collapsed state failed. */
 	get persistError(): string | null {
 		return this.#pinned.persistError ?? this.#localPersistError;
+	}
+
+	/** Whether {@link persistError} is only contention for the profile catalog, which the pinned list saves again by itself. */
+	get persistBusy(): boolean {
+		return this.#pinned.persistError !== null && this.#pinned.persistBusy;
 	}
 
 	/** Adopt the pinned list another window committed; whether this window's list changed. */

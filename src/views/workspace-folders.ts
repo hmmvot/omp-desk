@@ -34,6 +34,9 @@ import { createHash } from "node:crypto";
 import { isAbsoluteWorkspaceDirectory, normalizeSessionIdentityKey, normalizeWorkspaceDirectory } from "../host/session-files.ts";
 import { mergeKeyedArray } from "../host/catalog-merge.ts";
 import type { RecordConflictDraft } from "../host/catalog-merge.ts";
+import { isCatalogBusy } from "../host/profile-catalog.ts";
+import { PersistRetry } from "../host/persist-retry.ts";
+import type { PersistRetryOptions } from "../host/persist-retry.ts";
 
 /** Catalog record key holding the profile-wide folder list. */
 export const WORKSPACE_FOLDERS_STORAGE_KEY = "omp.workspaceFolders.v1";
@@ -245,6 +248,8 @@ export class WorkspaceFolderRegistry {
 	#folders: WorkspaceFolder[];
 	#loadError: string | null = null;
 	#persistError: string | null = null;
+	#persistBusy = false;
+	readonly #persistRetry: PersistRetry;
 	#persistChain: Promise<void> = Promise.resolve();
 	/**
 	 * The list this window's folder state was derived from, named as the merge base so a
@@ -252,9 +257,10 @@ export class WorkspaceFolderRegistry {
 	 */
 	#loadedBase: unknown = undefined;
 
-	constructor(options: { readonly store: WorkspaceFolderStore; readonly inspector: FolderPathInspector }) {
+	constructor(options: { readonly store: WorkspaceFolderStore; readonly inspector: FolderPathInspector; readonly persistRetry?: PersistRetryOptions }) {
 		this.#store = options.store;
 		this.#inspector = options.inspector;
+		this.#persistRetry = new PersistRetry(() => this.#persist(), options.persistRetry);
 		this.#folders = this.#load();
 	}
 
@@ -276,6 +282,11 @@ export class WorkspaceFolderRegistry {
 	/** Set when the last attempt to persist the list failed. */
 	get persistError(): string | null {
 		return this.#persistError;
+	}
+
+	/** Whether {@link persistError} is only contention for the profile catalog, which this registry saves again by itself. */
+	get persistBusy(): boolean {
+		return this.#persistBusy;
 	}
 
 	/** The folder a session's working directory belongs to, if one is registered. */
@@ -448,8 +459,13 @@ export class WorkspaceFolderRegistry {
 				await Promise.resolve(this.#store.update(WORKSPACE_FOLDERS_STORAGE_KEY, snapshot, this.#loadedBase));
 				this.#loadedBase = snapshot;
 				this.#persistError = null;
+				this.#persistBusy = false;
+				this.#persistRetry.reset();
 			} catch (error) {
 				this.#persistError = `The OMP Desk folder list could not be saved: ${describeError(error)}`;
+				this.#persistBusy = isCatalogBusy(error);
+				// The list is the whole in-memory state, so saving it again later loses nothing and needs no user action.
+				if (this.#persistBusy) this.#persistRetry.schedule();
 			}
 		});
 		await this.#persistChain;

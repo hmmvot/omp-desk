@@ -915,6 +915,18 @@ describe("refreshing the launcher", () => {
 		w.actions.reportFolderSaveFailure({ persistError: "The folder list could not be saved." } as never);
 		assert.deepEqual(w.warnings, ["The folder list could not be saved."]);
 	});
+
+	it("only logs a folder-list save that lost the catalog lock to another window, and shows another failure once", async () => {
+		const w = await world();
+		const contended = { persistError: "The OMP Desk folder list could not be saved: Another VS Code window is writing the OMP Desk profile catalog, so this change was not saved yet.", persistBusy: true } as never;
+		w.actions.reportFolderSaveFailure(contended);
+		assert.deepEqual(w.warnings, [], "contention between windows is not a notification");
+		assert.ok(w.lines.some(line => line.level === "warn" && line.message.includes("Another VS Code window")), "its cause is logged");
+		const fault = { persistError: "The OMP Desk folder list could not be saved: disk is full", persistBusy: false } as never;
+		w.actions.reportFolderSaveFailure(fault);
+		w.actions.reportFolderSaveFailure(fault);
+		assert.deepEqual(w.warnings, ["The OMP Desk folder list could not be saved: disk is full"], "once per cause");
+	});
 });
 
 describe("the processes of the Sessions view", () => {

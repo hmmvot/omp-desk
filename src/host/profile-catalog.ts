@@ -203,6 +203,14 @@ export class CatalogError extends Error {
   }
 }
 
+/**
+ * Whether a failure is only contention: another window held the catalog lock for the whole wait. Nothing is wrong with
+ * the catalog and nothing was lost, so the write is simply tried again later; every other failure is a fault.
+ */
+export function isCatalogBusy(error: unknown): boolean {
+  return error instanceof CatalogError && error.reason === "busy";
+}
+
 /** The empty document a fresh install starts from (never written until a change). */
 export function emptyCatalogDocument(): CatalogDocument {
   return { version: CATALOG_VERSION, revision: 0, records: {}, imports: [], conflicts: [] };
@@ -473,7 +481,7 @@ async function acquireLock(lockPath: string, options: AcquireLockOptions): Promi
     if (options.now() >= deadline) {
       throw new CatalogError(
         "busy",
-        "Another VS Code window is writing the OMP Desk profile catalog, so this change was not saved. It will be retried by the next action.",
+        "Another VS Code window is writing the OMP Desk profile catalog, so this change was not saved yet.",
       );
     }
     await delay(15 + Math.floor(Math.random() * 25));

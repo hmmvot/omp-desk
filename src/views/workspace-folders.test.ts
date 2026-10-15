@@ -24,6 +24,8 @@ import {
 } from "./workspace-folders.ts";
 import type { FolderPathInspector, FolderPathVerdict, WorkspaceFolderStore } from "./workspace-folders.ts";
 import { normalizeSessionIdentityKey, normalizeWorkspaceDirectory } from "../host/session-files.ts";
+import { CatalogError } from "../host/profile-catalog.ts";
+import type { PersistRetryOptions } from "../host/persist-retry.ts";
 
 /** A memento stub: one in-memory value per key, with a switch to make writes fail. */
 function memoryStore(): WorkspaceFolderStore & { readonly raw: () => unknown; failWrites: boolean } {
@@ -73,13 +75,14 @@ describe("workspace folder registry", () => {
 		await fs.promises.rm(temp, { recursive: true, force: true });
 	});
 
-	function registry(store: WorkspaceFolderStore, calls?: string[]): WorkspaceFolderRegistry {
+	function registry(store: WorkspaceFolderStore, calls?: string[], persistRetry?: PersistRetryOptions): WorkspaceFolderRegistry {
 		// The real inspector answers from VS Code's own file system, which accepts
 		// any spelling of a real directory; the stub accepts the same aliases by
 		// comparing filesystem identities the way the registry itself does.
 		const known = new Set([normalizeSessionIdentityKey(first), normalizeSessionIdentityKey(second)]);
 		return new WorkspaceFolderRegistry({
 			store,
+			...(persistRetry === undefined ? {} : { persistRetry }),
 			inspector: stubInspector(raw => {
 				try {
 					if (known.has(normalizeSessionIdentityKey(raw))) return { ok: true, path: raw };
@@ -287,6 +290,42 @@ describe("workspace folder registry", () => {
 		assert.equal(await folders.setCollapsed(added.ok ? added.folder.id : "", true), true);
 		assert.equal(folders.persistError, null);
 		assert.equal(registry(store).list().length, 1);
+	});
+
+	it("saves the list again by itself when another window held the catalog lock, and does not call that a failure to show", async () => {
+		const inner = memoryStore();
+		let contended = true;
+		const store: WorkspaceFolderStore = {
+			get: key => inner.get(key),
+			update: (key, next) => {
+				if (contended) throw new CatalogError("busy", "Another VS Code window is writing the OMP Desk profile catalog, so this change was not saved yet.");
+				return inner.update(key, next);
+			},
+		};
+		const folders = registry(store, undefined, { firstMs: 2, maxMs: 4 });
+		const added = await folders.add(first);
+		assert.equal(added.ok, true);
+		assert.equal(folders.persistBusy, true, "the failure is contention, so nothing is shown for it");
+		assert.match(folders.persistError ?? "", /could not be saved/);
+		assert.equal(inner.raw(), undefined, "nothing landed yet");
+
+		contended = false;
+		// Real time on purpose: the registry's own retry timer is what is under test, and it is a few milliseconds here.
+		for (let waited = 0; waited < 2000 && folders.persistError !== null; waited += 5) await new Promise<void>(resolve => setTimeout(resolve, 5));
+		assert.equal(folders.persistError, null);
+		assert.equal(folders.persistBusy, false);
+		assert.equal(registry(inner).list().length, 1, "the retry saved the folder with no further action");
+	});
+
+	it("does not call a fault contention, and does not retry it", async () => {
+		const store = memoryStore();
+		const folders = registry(store, undefined, { firstMs: 2, maxMs: 4 });
+		store.failWrites = true;
+		await folders.add(first);
+		assert.equal(folders.persistBusy, false);
+		store.failWrites = false;
+		await new Promise<void>(resolve => setTimeout(resolve, 30)); // real time: waiting for a retry that must not come
+		assert.match(folders.persistError ?? "", /disk is full/);
 	});
 
 	it("registers a verified native conversation's own folder, deduplicated by alias", async () => {

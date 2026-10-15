@@ -30,6 +30,7 @@ import { isManagedHost } from "../host/session-model.ts";
 import type { SessionIndexEntry } from "../host/session-model.ts";
 import type { ShellExitWatchStop } from "../host/shell-exit.ts";
 import type { Logger } from "../shared/logger.ts";
+import { PersistFailureReporter } from "../host/persist-report.ts";
 import type { ShellSlotRecord, ShellSlotStore } from "../host/shell-slots.ts";
 import type { WindowRegistry } from "../host/window-registry.ts";
 import { askWindowToStop } from "../host/window-requests.ts";
@@ -884,8 +885,9 @@ export function registerSessionActions<Tab extends SessionTab>(deps: SessionActi
 	 * launcher usable; what the user must be able to see is that the change will not
 	 * survive this window.
 	 */
+	const folderSaveFailures = new PersistFailureReporter(deps.log, deps.warn);
 	function reportFolderSaveFailure(folders: LauncherFolders): void {
-		if (folders.persistError !== null) deps.warn(folders.persistError);
+		folderSaveFailures.report(folders);
 	}
 	return {
 		click: clickSession,

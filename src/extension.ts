@@ -102,6 +102,7 @@ import { claimHolderMayBeAlive, setProcessProbeObserver } from "./host/session-c
 import { formatToolSpawn, setToolSpawnObserver } from "./host/tool-spawn-trace";
 import { type Logger, prefixedLogger } from "./shared/logger";
 import { LaunchTimeline, type LaunchKind } from "./host/launch-timeline";
+import { PersistFailureReporter } from "./host/persist-report";
 import { holderSeemsAlive } from "./host/holder-liveness";
 import { claimFileNameFor, startClaimWatch } from "./host/claim-watch";
 import { WindowRegistry } from "./host/window-registry";
@@ -836,6 +837,8 @@ interface WindowState {
   readonly diagnostics: DiagnosticsRecorder;
   /** Where a new session's launch spends its time: begun by New Session, reported by the launcher and the host-control step. */
   readonly launchTimeline: LaunchTimeline;
+  /** What a failed save of the session index tells the user: contention is only logged, a fault is shown once per cause. */
+  readonly persistFailures: PersistFailureReporter;
   /**
    * The activation restore pass, while it is still running.
    *
@@ -1279,6 +1282,7 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     output: undefined,
     diagnostics: new DiagnosticsRecorder(),
     launchTimeline: new LaunchTimeline(),
+    persistFailures: new PersistFailureReporter({ warn: message => log.warn(message) }, message => showWarning(message)),
     startupRestore: null,
     startupRestorePending: true,
     startupRestoreOver: Promise.withResolvers<void>(),
@@ -1500,6 +1504,8 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     claimHolder,
     claimHolderCreationTime,
     log,
+    // Contention between windows is saved again by the index itself; only a lock that never frees is shown.
+    onPersistStuck: message => windowState().persistFailures.report({ persistError: message }),
   });
   // Protocol activation only reveals an existing handle; it never acquires or starts work.
   context.subscriptions.push(vscode.window.registerUriHandler({
@@ -4510,9 +4516,7 @@ async function restoreTabs(
   for (const failure of report.failures) {
     log.error(`restore failure (${failure.kind}) on tab ${failure.tabId}: ${failure.detail}`);
   }
-  if (report.persistError !== null) {
-    showWarning(`The OMP session index could not be saved: ${report.persistError}`);
-  }
+  windowState().persistFailures.report({ persistError: report.persistError, persistBusy: index.persistBusy }, "The OMP session index could not be saved: ");
 }
 
 async function handleRestoreOutcome(
