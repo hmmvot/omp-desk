@@ -3583,6 +3583,116 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		await t.test("a quote line is a band with a bar and muted proportional text, a nested fence is monospace inside it, a > line in a block stays code, and typing > rebuilds only that line", async () => {
+			await reset("quote-band");
+			const draft = "intro\n> quoted line\n> ```ts\n> const x = 1;\n> ```\n> > nested\n\nafter\n```\n> not a quote\n```";
+			await setDraft(draft);
+			await ui.wait("document.querySelector('.omp-line--quote')");
+			const facts = await ui.evaluate<{ classes: string[]; prose: string; quote: string; nested: string; bar: string; tint: string; plainTint: string; nestedTint: string; heights: number[]; gaps: number[] }>(`(()=>{
+			 const lines=[...window.composer.el().children],style=line=>getComputedStyle(line),rects=lines.map(line=>line.getBoundingClientRect());
+			 return{classes:lines.map(line=>line.className.replace('omp-line','').trim()),prose:style(lines[0]).fontFamily,quote:style(lines[1]).fontFamily,nested:style(lines[3]).fontFamily,bar:style(lines[1]).borderLeftWidth,
+			  tint:style(lines[1]).backgroundColor,plainTint:style(lines[0]).backgroundColor,nestedTint:style(lines[3]).backgroundColor,heights:rects.map(rect=>rect.height),gaps:rects.slice(1).map((rect,index)=>rect.top-rects[index].bottom)}})()`);
+			assert.deepEqual(facts.classes, ["", "omp-line--quote", "omp-line--quote omp-line--quote-code", "omp-line--quote omp-line--quote-code", "omp-line--quote omp-line--quote-code", "omp-line--quote", "", "", "omp-line--code omp-line--fence", "omp-line--code", "omp-line--code omp-line--fence"]);
+			assert.ok(!facts.prose.includes("Consolas") && facts.quote === facts.prose, `quote text stays proportional: ${JSON.stringify(facts)}`);
+			assert.ok(facts.nested.includes("Consolas"), `a fence nested in a quote is monospace: ${JSON.stringify(facts)}`);
+			assert.equal(facts.bar, "3px");
+			assert.ok(facts.tint !== "rgba(0, 0, 0, 0)" && facts.plainTint === "rgba(0, 0, 0, 0)" && facts.nestedTint === facts.tint, `one band, with no second one for the nested fence: ${JSON.stringify(facts)}`);
+			assert.ok(facts.heights.every(height => height === 20) && facts.gaps.every(gap => gap === 0), `each row is one 20px line: ${JSON.stringify(facts)}`);
+			assert.deepEqual(await ui.evaluate("window.composer.roundTrip()"), [], "every model offset round-trips through the DOM with quote lines in the draft");
+			// Typing > at the start of a line makes that line a quote and nothing else is rebuilt; removing it rebuilds that line again.
+			await ui.evaluate("[...window.composer.el().children].forEach((line,index)=>{line.__keep=index})");
+			const afterAt = draft.indexOf("\nafter") + 1;
+			await ui.evaluate("window.composer.focus()");
+			await setSelection(afterAt, afterAt);
+			await ui.call("Input.insertText", { text: ">" });
+			await waitDraft(`window.composer.value()===${JSON.stringify(`${draft.slice(0, afterAt)}>${draft.slice(afterAt)}`)}`);
+			assert.deepEqual(await ui.evaluate("[...window.composer.el().children].map(line=>line.__keep===undefined?'new':line.__keep)"), [0, 1, 2, 3, 4, 5, 6, "new", 8, 9, 10]);
+			assert.equal(await ui.evaluate("window.composer.el().children[7].className"), "omp-line omp-line--quote");
+			await press("Backspace", "Backspace", 8);
+			await waitDraft(`window.composer.value()===${JSON.stringify(draft)}`);
+			assert.deepEqual(await ui.evaluate("[...window.composer.el().children].map(line=>line.__keep===undefined?'new':line.__keep)"), [0, 1, 2, 3, 4, 5, 6, "new", 8, 9, 10]);
+			assert.equal(await ui.evaluate("window.composer.el().children[7].className"), "omp-line");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("the quote band follows the theme: a solid band with the text colour's bar in forced colours, the theme's contrast border in High Contrast", async () => {
+			await reset("quote-band-themes");
+			await setDraft("> quoted");
+			await ui.wait("document.querySelector('.omp-line--quote')");
+			const read = (): Promise<{ bar: string; text: string; background: string }> => ui.evaluate("(()=>{const style=getComputedStyle(document.querySelector('.omp-line--quote'));return{bar:style.borderLeftColor,text:style.color,background:style.backgroundColor}})()");
+			await ui.evaluate("document.body.classList.add('vscode-high-contrast');document.documentElement.style.setProperty('--vscode-contrastBorder','#ff0000')");
+			assert.equal((await read()).bar, "rgb(255, 0, 0)", "High Contrast uses the theme's own border");
+			await ui.evaluate("document.body.classList.remove('vscode-high-contrast');document.documentElement.style.removeProperty('--vscode-contrastBorder')");
+			await ui.call("Emulation.setEmulatedMedia", { features: [{ name: "forced-colors", value: "active" }] });
+			try {
+				const forced = await read();
+				assert.equal(forced.bar, forced.text, "the bar is drawn in the system text colour");
+				assert.match(forced.background, /^rgb\(/, "an opaque system background, not the tint");
+			} finally {
+				await ui.call("Emulation.setEmulatedMedia", { features: [{ name: "forced-colors", value: "none" }] });
+			}
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("Shift+Enter continues a quote, Backspace at its prefix removes a level, Delete joins the next quote line, Enter sends from a quote line, and no completion opens in one", async () => {
+			await reset("quote-keys");
+			await ui.evaluate("window.ui.push({commands:[{name:'shake',description:'Shake'}]});window.composer.focus()");
+			const shiftEnter = (): Promise<void> => press("Enter", "Enter", 13, { modifiers: 8 });
+			await setDraft("> ab");
+			await setSelection(3, 3);
+			await shiftEnter();
+			assert.deepEqual(await areaState(), { value: "> a\n> b", start: 6, end: 6, focused: true }, "the line break carries the prefix");
+			await undo();
+			await waitDraft("window.composer.value()==='> ab'");
+			assert.equal((await areaState()).value, "> ab", "one Ctrl+Z takes the whole continuation back");
+			await setDraft("> a\n> ");
+			await setSelection(6, 6);
+			await shiftEnter();
+			assert.deepEqual(await areaState(), { value: "> a\n\n", start: 5, end: 5, focused: true }, "Shift+Enter on an empty quote line leaves the quote");
+			await setDraft("> > x");
+			await setSelection(4, 4);
+			await press("Backspace", "Backspace", 8);
+			assert.deepEqual(await areaState(), { value: "> x", start: 2, end: 2, focused: true }, "one level at a time");
+			await press("Backspace", "Backspace", 8);
+			assert.deepEqual(await areaState(), { value: "x", start: 0, end: 0, focused: true }, "the last level takes the whole prefix");
+			await setDraft("> a\n> b");
+			await setSelection(3, 3);
+			await press("Delete", "Delete", 46);
+			assert.deepEqual(await areaState(), { value: "> ab", start: 3, end: 3, focused: true }, "the next line's prefix goes with the line break");
+			// Enter sends from inside a quote line, as on every prose line.
+			await setDraft("> q");
+			await setSelection(3, 3);
+			assert.match((await codeHint())!, /Shift\+Enter continues the quote.*Backspace.*Enter sends/, "the hint names the quote keys while the caret is in a quote line");
+			await press("Enter", "Enter", 13);
+			await ui.wait("window.ui.sends().length===1");
+			assert.equal(await ui.evaluate("window.ui.sends()[0].text"), "> q");
+			await ui.evaluate("window.ui.sendReply()");
+			await ui.wait("window.composer.value()===''");
+			// The hint row stays while the draft holds a quote, empty with the caret elsewhere; the field names it as its description only inside a quote.
+			await setDraft("> q\nplain");
+			await setSelection(9, 9);
+			assert.equal(await codeHint(), "");
+			assert.equal(await ui.evaluate("window.composer.el().getAttribute('aria-describedby')"), null);
+			await setSelection(2, 2);
+			await ui.wait("(document.querySelector('.omp-composer-hint--code')?.textContent??'')!==''");
+			assert.equal(await ui.evaluate("window.composer.el().getAttribute('aria-describedby')===document.querySelector('.omp-composer-hint--code').id"), true);
+			// No completion popup or file search opens in a quote line, and both still open outside it.
+			const popup = (): Promise<boolean> => ui.evaluate("Boolean(document.querySelector('[aria-label=\"Slash commands\"],[aria-label=\"Workspace files\"]'))");
+			const lookups = (): Promise<number> => ui.evaluate("window.sent.filter(message=>message.type==='omp:complete-files').length");
+			const quiet = (): Promise<unknown> => ui.evaluate("new Promise(resolve=>setTimeout(resolve,500))");
+			await setDraft("> /sh");
+			await quiet();
+			assert.equal(await popup(), false, "a slash in a quote is the agent's text");
+			const before = await lookups();
+			await setDraft("> @sr");
+			await quiet();
+			assert.equal(await popup(), false);
+			assert.equal(await lookups(), before, "no file search runs in a quote line");
+			await setDraft("> q\n@sr");
+			await ui.wait(`window.sent.filter(message=>message.type==='omp:complete-files').length>${before}`);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("a marker is atomic for the caret and selection: it cannot be entered, and arrows hop over it", async () => {
 			await buildDraft("image-refs-caret");
 			const [, second] = await markers();

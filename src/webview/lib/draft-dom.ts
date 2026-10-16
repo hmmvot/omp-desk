@@ -9,10 +9,13 @@
  */
 import type { FencedBlock } from "./code-fence.ts";
 import type { ImageReferenceSpan } from "./image-references.ts";
+import type { QuoteLineFlags } from "./quote-lines.ts";
 
 export const LINE_CLASS = "omp-line";
 export const CODE_LINE_CLASS = "omp-line--code";
 export const FENCE_LINE_CLASS = "omp-line--fence";
+export const QUOTE_LINE_CLASS = "omp-line--quote";
+export const QUOTE_CODE_LINE_CLASS = "omp-line--quote-code";
 export const CHIP_CLASS = "omp-chip";
 
 /** A marker inside one line, with line-relative offsets. */
@@ -29,11 +32,15 @@ export interface LineSpec {
 	readonly code: boolean;
 	/** The line is the opening or the closing fence. */
 	readonly fence: boolean;
+	/** The line is a quote line (it starts with `>`, outside every fenced block). */
+	readonly quote: boolean;
+	/** The line is inside a fenced block nested in a quote: the code font, no band of its own. */
+	readonly quoteCode: boolean;
 	readonly chips: readonly ChipSpec[];
 }
 
-/** Splits `text` into the lines the surface renders, with their block status and the markers each holds. */
-export function lineSpecs(text: string, blocks: readonly FencedBlock[], spans: readonly ImageReferenceSpan[]): LineSpec[] {
+/** Splits `text` into the lines the surface renders, with their block and quote status and the markers each holds; `quotes` has one entry per line. */
+export function lineSpecs(text: string, blocks: readonly FencedBlock[], spans: readonly ImageReferenceSpan[], quotes: readonly QuoteLineFlags[]): LineSpec[] {
 	const specs: LineSpec[] = [];
 	let lineStart = 0;
 	let block = 0;
@@ -50,14 +57,15 @@ export function lineSpecs(text: string, blocks: readonly FencedBlock[], spans: r
 			const marker = spans[index]!;
 			chips.push({ start: marker.start - lineStart, end: marker.end - lineStart, number: marker.number });
 		}
-		specs.push({ text: text.slice(lineStart, lineEnd), code, fence: code && (lineStart === current!.start || lineStart === current!.closeStart), chips });
+		const flags = quotes[specs.length];
+		specs.push({ text: text.slice(lineStart, lineEnd), code, fence: code && (lineStart === current!.start || lineStart === current!.closeStart), quote: flags?.quote === true, quoteCode: flags?.code === true, chips });
 		if (newline < 0) return specs;
 		lineStart = newline + 1;
 	}
 }
 
 function lineKey(spec: LineSpec): string {
-	return `${spec.code ? 1 : 0}${spec.fence ? 1 : 0}|${spec.chips.map(chip => `${chip.start}-${chip.end}-${chip.number}`).join(",")}|${spec.text}`;
+	return `${spec.code ? 1 : 0}${spec.fence ? 1 : 0}${spec.quote ? 1 : 0}${spec.quoteCode ? 1 : 0}|${spec.chips.map(chip => `${chip.start}-${chip.end}-${chip.number}`).join(",")}|${spec.text}`;
 }
 
 /** Whether `node` is an image chip. */
@@ -73,7 +81,7 @@ function endsInChip(spec: LineSpec): boolean {
 /** Builds the element of one line. */
 export function buildLine(doc: Document, spec: LineSpec): HTMLElement {
 	const line = doc.createElement("div");
-	line.className = `${LINE_CLASS}${spec.code ? ` ${CODE_LINE_CLASS}` : ""}${spec.fence ? ` ${FENCE_LINE_CLASS}` : ""}`;
+	line.className = `${LINE_CLASS}${spec.code ? ` ${CODE_LINE_CLASS}` : ""}${spec.fence ? ` ${FENCE_LINE_CLASS}` : ""}${spec.quote ? ` ${QUOTE_LINE_CLASS}` : ""}${spec.quoteCode ? ` ${QUOTE_CODE_LINE_CLASS}` : ""}`;
 	let at = 0;
 	for (const chip of spec.chips) {
 		if (chip.start > at) line.append(doc.createTextNode(spec.text.slice(at, chip.start)));
@@ -354,7 +362,7 @@ export class LineRenderer {
 			const before = this.#specs[prefix];
 			const after = specs[prefix]!;
 			const inPlace = oldEnd - prefix === 1 && newEnd - prefix === 1 && before !== undefined && !replace.has(prefix)
-				&& before.chips.length === 0 && after.chips.length === 0 && before.code === after.code && before.fence === after.fence;
+				&& before.chips.length === 0 && after.chips.length === 0 && before.code === after.code && before.fence === after.fence && before.quote === after.quote && before.quoteCode === after.quoteCode;
 			if (inPlace) {
 				const line = root.children[prefix]!;
 				const first = line.firstChild;

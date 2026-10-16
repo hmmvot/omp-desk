@@ -708,10 +708,15 @@ ${ANSI_STYLES}
 .omp-line { min-height: 20px; }
 .omp-line--code { margin: 0 -12px; padding: 0 12px; background: var(--vscode-textCodeBlock-background, color-mix(in srgb, var(--vscode-foreground) 8%, transparent)); font-family: var(--omp-mono); font-size: min(var(--omp-mono-size), 15px); tab-size: 4; }
 .omp-line--fence { color: color-mix(in srgb, var(--vscode-input-foreground) 82%, transparent); }
+/* A quote line shows as a band the way a code line does: the transcript blockquote's bar and muted text, a faint tint over the surface width, and an inline-start gutter (reserved for the Remove quote button, adds no text so no model offset changes). The "> " stays ordinary visible text. A fenced block inside a quote takes the code font without a band of its own. */
+.omp-line--quote { --omp-quote-gutter: 24px; margin: 0 -12px; padding: 0 12px 0 calc(9px + var(--omp-quote-gutter)); border-left: 3px solid color-mix(in srgb, var(--vscode-foreground) 28%, transparent); background: color-mix(in srgb, var(--vscode-foreground) 5%, transparent); color: var(--omp-muted); }
+.omp-line--quote-code { font-family: var(--omp-mono); font-size: min(var(--omp-mono-size), 15px); tab-size: 4; }
+.vscode-high-contrast .omp-line--quote, .vscode-high-contrast-light .omp-line--quote { border-left-color: var(--vscode-contrastBorder); }
 .omp-chip { display: inline; padding: 0 3px; margin: 0 1px; border-radius: var(--omp-radius); cursor: default; background: color-mix(in srgb, var(--vscode-textLink-foreground, var(--vscode-focusBorder, #3794ff)) 24%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--vscode-textLink-foreground, var(--vscode-focusBorder, #3794ff)) 55%, transparent); }
 .omp-composer > .omp-composer-hint--code { margin: 2px 0 6px; min-height: calc(11px * 1.4); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 @media (forced-colors: active) {
 	.omp-line--code { forced-color-adjust: none; background: Canvas; color: CanvasText; box-shadow: inset 0 0 0 1px CanvasText; }
+	.omp-line--quote { forced-color-adjust: none; background: Canvas; color: CanvasText; border-left-color: CanvasText; }
 }
 .omp-attachment-figure { position: relative; display: inline-flex; flex: 0 0 auto; }
 .omp-attachment-number { position: absolute; left: 1px; bottom: 1px; padding: 1px 3px; border-radius: var(--omp-radius); background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); font-size: 10px; line-height: 1; font-weight: 600; }

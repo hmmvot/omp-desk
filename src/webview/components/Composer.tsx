@@ -67,6 +67,8 @@ import { DraftEditor } from "./DraftEditor";
 import type { ChatUiRequest, ChatUiResponse } from "../../chat/model";
 import type { ChatClient, ChatSnapshot } from "../lib/chat-client";
 import { blockContaining, findFencedBlocks, indentEdit, newlineEdit, outdentEdit, type TextEdit } from "../lib/code-fence";
+import { findQuoteRuns, isQuoteLineAt } from "../lib/quote-lines";
+import { quoteKeyEdit } from "../lib/quote-edits";
 import type { DraftSurface, HistoryMode } from "../lib/draft-surface";
 import { chatWritable } from "../lib/chat-client";
 import { startsSession } from "../lib/chat-operation";
@@ -104,6 +106,8 @@ const LINE_PX = 20;
 const MAX_ROWS = 8;
 /** The words under the field while the caret is in a fenced code block (docs/designs/2026-10-15-composer-code-blocks.md). */
 const CODE_HINT = "Code block · Ctrl+Enter: send · Enter: new line · Tab: indent · Shift+Tab: outdent, or leave when there is nothing to outdent";
+/** The words under the field while the caret is in a quote line (docs/designs/2026-10-15-quote-chat-selection.md). */
+const QUOTE_HINT = "Quote · Shift+Enter continues the quote · Backspace at its start removes the quote mark · Enter sends";
 
 /** Wait after the last keystroke before asking the extension host for paths. */
 const SUGGESTION_DEBOUNCE_MS = 150;
@@ -416,6 +420,9 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	/** Fenced code blocks of the draft, and the one the caret is in: its keys are an editor's, and no completion opens in it. */
 	const blocks = useMemo(() => findFencedBlocks(text), [text]);
 	const caretBlock = useMemo(() => blockContaining(blocks, caret), [blocks, caret]);
+	/** Quote lines of the draft (bands outside the fenced blocks); a quote line holds text the agent wrote, so no completion opens in it. */
+	const quoteLayout = useMemo(() => findQuoteRuns(text, blocks), [text, blocks]);
+	const caretInQuote = isQuoteLineAt(quoteLayout, text, caret);
 	const codeHintId = useId();
 	const canSubmit = canPrompt && !captureLocked && request === null && !sending && reading === 0 && (text.trim().length > 0 || attached.length > 0);
 
@@ -445,7 +452,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	 * composer outright, so no search runs beside it. Inside a fenced code block
 	 * nothing completes: `/` and `@` there are code, and Enter and Tab are the editor's.
 	 */
-	const completionsEnabled = canPrompt && !captureLocked && request === null && caretBlock === null;
+	const completionsEnabled = canPrompt && !captureLocked && request === null && caretBlock === null && !caretInQuote;
 	const completionKey = `${text}\0${caret}`;
 	const slash = useMemo(() => completionsEnabled && dismissedCompletion !== completionKey ? slashQueryAt(text, caret) : null, [completionsEnabled, dismissedCompletion, completionKey, text, caret]);
 	const argument = useMemo(() => completionsEnabled && dismissedCompletion !== completionKey ? slashArgumentAt(snapshot.commands, text, caret) : null, [completionsEnabled, dismissedCompletion, completionKey, snapshot.commands, text, caret]);
@@ -1244,6 +1251,16 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 					return;
 				}
 			}
+			// A quote line keeps its prefix whole: Shift+Enter continues the quote, Backspace and Delete take the prefix with them. Enter still sends (a quote is prose).
+			if (block === null && !composing && event.keyCode !== 229 && captureRef.current === null) {
+				const blocksNow = findFencedBlocks(text);
+				const quoteEdit = quoteKeyEdit(text, findQuoteRuns(text, blocksNow), event, start, end);
+				if (quoteEdit !== null) {
+					event.preventDefault();
+					applyBlockEdit(quoteEdit);
+					return;
+				}
+			}
 			// `Esc` `Esc` in an empty composer while nothing runs opens Rewind, as in the TUI. While a turn runs, Escape
 			// belongs to Stop (`ompDesk.stopTurn`), and an open popup takes it first.
 			if (event.key === "Escape" && onRewind !== undefined && !composing && !suggestionsOpen) {
@@ -1529,7 +1546,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 						config={{
 							editable: canPrompt,
 							placeholder,
-							describedBy: caretBlock !== null ? codeHintId : null,
+							describedBy: caretBlock !== null || caretInQuote ? codeHintId : null,
 							controls: suggestionsOpen ? suggestionListId : null,
 							activeDescendant: suggestionsOpen && activeIndex >= 0 ? `${suggestionListId}-${activeIndex}` : null,
 						}}
@@ -1562,10 +1579,10 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 					<span className="omp-sr-only" role="status">{suggestionStatus}</span>
 				</div>
 			</div>
-			{blocks.length > 0 && (
-				// The row stays while the draft holds a block and only its words come and go with the caret, so a click into a block never moves the text under the pointer.
-				<div className="omp-composer-hint omp-composer-hint--code" id={codeHintId} role="status" title={caretBlock !== null ? CODE_HINT : undefined}>
-					{caretBlock !== null ? CODE_HINT : ""}
+			{(blocks.length > 0 || quoteLayout.runs.length > 0) && (
+				// The row stays while the draft holds a block or a quote and only its words come and go with the caret, so a click into one never moves the text under the pointer.
+				<div className="omp-composer-hint omp-composer-hint--code" id={codeHintId} role="status" title={caretBlock !== null ? CODE_HINT : caretInQuote ? QUOTE_HINT : undefined}>
+					{caretBlock !== null ? CODE_HINT : caretInQuote ? QUOTE_HINT : ""}
 				</div>
 			)}
 			<ExtensionWidgets snapshot={snapshot} placement="belowEditor" />

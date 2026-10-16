@@ -29,6 +29,18 @@ export interface FencedBlock {
 const OPENING = /^ {0,3}(`{3,})[^`]*$/;
 const CLOSING = /^ {0,3}(`{3,})[ \t]*$/;
 
+/** The length of the backtick run when `line` opens a fenced block (a quote line's content uses the same grammar), otherwise `null`. */
+export function fenceOpening(line: string): number | null {
+	const match = OPENING.exec(line);
+	return match === null ? null : match[1]!.length;
+}
+
+/** Whether `line` closes a block opened with `openLength` backticks. */
+export function fenceCloses(line: string, openLength: number): boolean {
+	const match = CLOSING.exec(line);
+	return match !== null && match[1]!.length >= openLength;
+}
+
 /** Every fenced block of `text`, in order. */
 export function findFencedBlocks(text: string): FencedBlock[] {
 	const blocks: FencedBlock[] = [];

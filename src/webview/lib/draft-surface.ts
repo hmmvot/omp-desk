@@ -28,6 +28,7 @@ import {
 import { DraftHistory, type DraftSnapshot, type EditKind } from "./draft-history.ts";
 import { deletionTarget, normalizeLineEndings, type DeleteKind } from "./draft-text.ts";
 import { deletionRange, findImageReferences, repairDamagedReferences, snapSelection } from "./image-references.ts";
+import { findQuoteRuns } from "./quote-lines.ts";
 
 /** How a write from outside the surface treats the undo stack: one more step, or a fresh start. */
 export type HistoryMode = "record" | "reset";
@@ -278,7 +279,7 @@ export class DraftSurface {
 
 	#render(replace: ReadonlySet<number> | true = new Set()): void {
 		const blocks = findFencedBlocks(this.#text);
-		this.#renderer.render(lineSpecs(this.#text, blocks, this.#markers()), replace);
+		this.#renderer.render(lineSpecs(this.#text, blocks, this.#markers(), findQuoteRuns(this.#text, blocks).lines), replace);
 		if (!this.#window.open) this.element.setAttribute("data-empty", String(this.#text === ""));
 	}
 
