@@ -3790,6 +3790,78 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			}
 		});
 
+		await t.test("every way a quote goes is one Ctrl+Z from coming back, whether the removal was a click or a key on the Remove quote button, a deleted selection or Backspace taking prefix levels, and the focus is in the field afterwards", async () => {
+			await reset("quote-undo");
+			await ui.call("Emulation.setFocusEmulationEnabled", { enabled: true });
+			try {
+				const draft = "intro\n\n> first quote\n> second line\nmy comment\n\n> other quote\n";
+				const removed = "intro\n\nmy comment\n\n> other quote\n";
+				const quoteStart = "intro\n\n".length;
+				/** Ctrl+Z as the keyboard sends it: only the keydown the field's handler reads, no editing command to fall back on. */
+				const ctrlZ = (): Promise<void> => press("z", "KeyZ", 90, { modifiers: 2 });
+				const expectRestored = async (what: string, expected: string): Promise<void> => {
+					await ctrlZ();
+					await waitDraft(`window.composer.value()===${JSON.stringify(expected)}`);
+					assert.equal((await areaState()).focused, true, `${what}: the field has the focus after Ctrl+Z`);
+				};
+				const expectRemoved = async (what: string, caret: number): Promise<void> => {
+					await waitDraft(`window.composer.value()===${JSON.stringify(removed)}`);
+					assert.deepEqual(await areaState(), { value: removed, start: caret, end: caret, focused: true }, `${what}: the caret is where the quote was and the field has the focus`);
+				};
+				const prepare = async (): Promise<void> => {
+					await setDraft(draft);
+					await ui.wait("document.querySelectorAll('.omp-quote-remove').length===2");
+				};
+				// The mouse with the focus elsewhere (a press on the button keeps the focus where it is, and that was not the field).
+				await prepare();
+				await ui.evaluate("window.composer.el().blur()");
+				assert.equal((await areaState()).focused, false);
+				await clickAt(await centerOf(".omp-quote-remove"));
+				await expectRemoved("click with the field unfocused", quoteStart);
+				await expectRestored("click with the field unfocused", draft);
+				// The mouse with the field focused.
+				await prepare();
+				await ui.evaluate("window.composer.focus()");
+				await setSelection(2, 4);
+				await clickAt(await centerOf(".omp-quote-remove"));
+				await expectRemoved("click with the field focused", quoteStart);
+				await expectRestored("click with the field focused", draft);
+				// The keyboard: Tab from the field, then Enter or Space on the button; the button is gone after the removal, so the focus must not be lost with it.
+				for (const [name, key, code, keyCode, text] of [["Enter", "Enter", "Enter", 13, "\r"], ["Space", " ", "Space", 32, " "]] as const) {
+					await prepare();
+					await ui.evaluate("window.composer.focus()");
+					await setSelection(0, 0);
+					await press("Tab", "Tab", 9);
+					assert.equal(await ui.evaluate("document.activeElement?.getAttribute('aria-label')"), "Remove quote: «first quote»");
+					await press(key, code, keyCode, { text });
+					await expectRemoved(`${name} on the button`, quoteStart);
+					await expectRestored(`${name} on the button`, draft);
+				}
+				// A selection over the quote lines, deleted by Backspace and by Delete.
+				for (const key of ["Backspace", "Delete"]) {
+					await prepare();
+					await ui.evaluate("window.composer.focus()");
+					await setSelection(quoteStart, quoteStart + "> first quote\n> second line".length);
+					await press(key, key, key === "Backspace" ? 8 : 46);
+					await waitDraft(`window.composer.value()===${JSON.stringify("intro\n\n\nmy comment\n\n> other quote\n")}`);
+					await expectRestored(`${key} on the selected quote`, draft);
+				}
+				// Backspace taking the prefix level by level: each level is a step of its own.
+				await setDraft("> > x");
+				await ui.evaluate("window.composer.focus()");
+				await setSelection(4, 4);
+				await press("Backspace", "Backspace", 8);
+				await waitDraft("window.composer.value()==='> x'");
+				await press("Backspace", "Backspace", 8);
+				await waitDraft("window.composer.value()==='x'");
+				await expectRestored("second level", "> x");
+				await expectRestored("first level", "> > x");
+				assert.deepEqual(await ui.evaluate("window.errors"), []);
+			} finally {
+				await ui.call("Emulation.setFocusEmulationEnabled", { enabled: false });
+			}
+		});
+
 		await t.test("the Remove quote buttons follow an edit, a scroll and a resize, are absent for a run scrolled out of view, wait out an IME composition and are disabled while the draft is held", async () => {
 			await reset("quote-remove-layout");
 			await ui.call("Emulation.setFocusEmulationEnabled", { enabled: true });

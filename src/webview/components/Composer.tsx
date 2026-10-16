@@ -1201,6 +1201,9 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			if (run === undefined) return;
 			const range = removalRange(current, run);
 			surface.apply({ from: range.from, to: range.to, insert: "", selection: { anchor: range.from, focus: range.from } }, "replace");
+			// The button that was pressed is gone (and a press on it never moved the focus into the field), so without this the
+			// focus would sit on the page body and Ctrl+Z would reach nobody: the field takes the focus, the caret where the quote was.
+			surface.focus();
 		};
 		if (composingRef.current) deferredRef.current.push(remove);
 		else remove();
