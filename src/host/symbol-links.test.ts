@@ -184,7 +184,7 @@ test("only a file inside the session folder or an open workspace folder that con
 	assert.equal(isInside("D:\\Work\\omp-vscode", "E:\\Work\\omp-vscode\\a.ts"), false, "another drive");
 	assert.equal(isInside("D:\\Work\\omp-vscode", ""), false, "a non-file location has no path");
 	assert.equal(isInside("", "D:\\x"), false);
-	assert.deepEqual(symbolRoots("D:\\Work\\omp-vscode", ["D:\\Work\\omp-vscode", "D:\\Work", "D:\\Work\\omp-vscode\\Sub", "D:\\Other"]), ["D:\\Work\\omp-vscode", "D:\\Work"], "the cwd and a workspace folder that contains it");
+	assert.deepEqual(symbolRoots("D:\\Work\\omp-vscode", ["D:\\Work\\omp-vscode", "D:\\Work", "D:\\Work\\omp-vscode\\Sub", "D:\\Other", "d:\\work\\OMP-VSCODE\\", "D:\\Work\\omp-vscode-other"]), ["D:\\Work\\omp-vscode", "D:\\Work", "D:\\Work\\omp-vscode\\Sub"], "the cwd, a workspace folder that contains it and one inside it (searched with its own excludes); not the cwd again, a sibling or an unrelated folder");
 	assert.deepEqual(symbolRoots("", ["D:\\Work"]), []);
 });
 

@@ -4,6 +4,7 @@ import { parseBareFileName } from "../shared/code-symbols.ts";
 import type { BareFileName } from "../shared/code-symbols.ts";
 import { FileNameLinkResolver, MAX_FILE_NAME_RESULTS, distinctRoots, excludeGlob, fileChoiceLabel, fileNameGlob, fileNameOutcome, fileNameTarget, workspaceFileNameSource } from "./file-name-links.ts";
 import type { FileNameResolverOptions, FileNameSource, FindFilesApi } from "./file-name-links.ts";
+import { symbolRoots } from "./symbol-links.ts";
 
 const CWD = "D:\\Work\\omp-vscode";
 const scope = { cwd: CWD, roots: [CWD] };
@@ -301,6 +302,33 @@ test("a file of a project opened next to the repository root that hides it is fo
 	};
 	const files = new FileNameLinkResolver(workspaceFileNameSource(api), { isFile: async () => false });
 	assert.deepEqual(await files.resolve(file("session-index.ts"), { cwd: repo, roots: [project, repo] }), { status: "found", target: "omp-vscode/src/session-index.ts" });
+});
+
+test("the roots of a session started at the repository root include the project folder inside it that the root's files.exclude hides", async () => {
+	// What the window hands over: the session's cwd and every open workspace folder. Roots come from `symbolRoots`, the same call the host makes for a request.
+	const repo = "D:\\Work\\repo";
+	const project = `${repo}\\omp-vscode`;
+	const loader = `${project}\\src\\session-index.ts`;
+	const searched: string[] = [];
+	class Pattern { base: string; pattern: string; constructor(base: string, pattern: string) { this.base = base; this.pattern = pattern; } }
+	class Folder { path: string; constructor(path: string) { this.path = path; } }
+	const api: FindFilesApi = {
+		workspace: {
+			async findFiles(include, exclude) {
+				if (!(include instanceof Pattern)) throw new Error("a relative pattern is expected");
+				searched.push(include.base);
+				return include.base === repo && exclude === "omp-vscode" ? [] : [{ scheme: "file", fsPath: loader }];
+			},
+			getConfiguration: (section, scope) => ({ get: <T>(key: string) => (section === "files" && key === "exclude" && scope instanceof Folder && scope.path === repo ? { "omp-vscode": true } : undefined) as T | undefined }),
+		},
+		RelativePattern: Pattern,
+		CancellationTokenSource: class { token = {}; cancel() {} dispose() {} },
+		Uri: { file: (path: string) => new Folder(path) },
+	};
+	const files = new FileNameLinkResolver(workspaceFileNameSource(api), { isFile: async () => false });
+	const roots = symbolRoots(repo, [project, repo, "E:\\Other"]);
+	assert.deepEqual(await files.resolve(file("session-index.ts:143"), { cwd: repo, roots }), { status: "found", target: "omp-vscode/src/session-index.ts:143" });
+	assert.deepEqual(searched.sort(), [project, repo].sort(), "the project folder is searched with its own excludes next to the root");
 });
 
 test("the search glob is the exact name at any depth, each letter in both cases, with no glob character of its own", () => {

@@ -253,12 +253,15 @@ export function matchSymbol(symbol: CodeSymbol, entries: readonly SymbolEntry[],
 }
 
 /**
- * The folders a symbol's file may be in: the session's working directory, and any open workspace folder that
- * contains it (a session started in a subfolder still links to the rest of its project). No library or metadata location.
+ * The folders a symbol's or file's path may be in: the session's working directory, every open workspace folder that
+ * contains it (a session started in a subfolder still links to the rest of its project) and every open workspace
+ * folder inside it. An inner folder adds no path to the scope, but it is searched with its own `files.exclude` and
+ * `search.exclude`: the session folder's may hide it (a repository root that hides its Unity project, opened as a second
+ * workspace folder). No library or metadata location; unrelated folders and the cwd itself (any spelling) are left out.
  */
 export function symbolRoots(cwd: string, workspaceFolders: readonly string[]): string[] {
 	if (cwd === "") return [];
-	return [cwd, ...workspaceFolders.filter(folder => !isInside(cwd, folder) && isInside(folder, cwd))];
+	return [cwd, ...workspaceFolders.filter(folder => !(isInside(cwd, folder) && isInside(folder, cwd)) && (isInside(folder, cwd) || isInside(cwd, folder)))];
 }
 
 /** The link target of `entry` in the grammar the page's open request takes: relative to `cwd` inside it, absolute elsewhere, with line and column when the provider gave a position. */
