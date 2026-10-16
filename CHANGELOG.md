@@ -7,19 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-10-16
+
 ### Changed
 
-- **OMP Settings: checked against OMP 18.11.1, and a setting the installed OMP no longer has is never shown.** The editor lists only the settings of the OMP it reads (so **Codex Code Mode**, which OMP 18.11.1 dropped, is gone from the Providers tab). A value your config file still holds for such a setting is ignored and stays in the file.
+- **OMP Settings: checked against OMP 18.11.1, and a setting the installed OMP does not have is never shown.** The editor lists only the settings of the OMP it reads, so **Codex Code Mode**, which OMP 18.11.1 dropped, is gone from the Providers tab. A value your config file still holds for such a setting is ignored and stays in the file.
+- **The getting-started guide lists every way to install OMP** and says what OMP Desk does for each.
 
 ### Fixed
 
-- **`/agents`, `/model` and `/settings` in a Chat, and the Models, Agents and OMP Settings editors, work with OMP installed through npm, and say why when they cannot.** Three causes, found by laying out each install form:
-  - **npm global install** (`npm install -g @oh-my-pi/pi-coding-agent`): Desk refused npm's `omp.cmd` as a script launcher, so no session started. It now resolves it, as it does Bun's own launcher, to Bun running the package's entry, without a shell. The editors' workers also looked for OMP's own dependency packages beside OMP's package, where Bun puts them; npm puts them inside it, so the editors failed with only "OMP could not complete this settings operation". They now find them where the package manager put them.
-  - **OMP's standalone program** (winget, the `omp.sh` binary install, mise) carries its code inside the executable and has no source for the editors to read; nothing else on the machine is borrowed for it. The refusal used to say "Bun and the importable sources" together and Chat showed only "Could not open native OMP settings." Now the editor does not open an empty panel; Chat, or an error from the palette command, says that the program has no source on disk, names it and its release, and points to `/agents`, `/model` or `/settings` in the session's Terminal view. A missing Bun is reported separately.
-- **pnpm, Yarn, Volta and mise installs of OMP start a session, and the editors work for all but the compiled program.** Each was installed privately and its files read before the fix:
-  - **pnpm** (`pnpm add -g`), **Yarn 1** (`yarn global add`) and **Volta** (`volta install`) put an `omp.cmd` on PATH that Desk refused as a script launcher, so no session started. Desk now resolves each to Bun running the package's entry, as for npm, without a shell and without starting Volta or Node. pnpm links the package into its `.pnpm` store with the dependencies beside the real folder, so the editors' workers would not find them (shown on a fixture laid out like pnpm's); they now also look beside the link's real path.
-  - **mise** (`mise use -g github:can1357/oh-my-pi`): PATH reaches mise's `shims\omp.exe`, a launcher that starts `mise`, which starts OMP, and Desk refused it as a package-manager shim. When exactly one release is installed Desk now starts that release's own `omp.exe` (OMP's compiled program, so the editors say they have no source to read, as for winget); with several it lists them and asks for `ompDesk.executablePath`, and with none it says how to install one.
-  - `install.ps1 -Source -Ref <tag>` is not a Desk problem: with Bun 1.3.14, 1.4.0 and 1.4.3 its `bun install -g` of the clone stops on `catalog:` dependencies and installs nothing. The getting-started guide now lists every install method with what Desk does for it.
+- **OMP installed through npm, pnpm, Yarn 1, Volta or mise now works.**
+  - **npm** (`npm install -g @oh-my-pi/pi-coding-agent`), **pnpm** (`pnpm add -g`), **Yarn 1** (`yarn global add`) and **Volta** (`volta install`) put an `omp.cmd` on `PATH` that OMP Desk refused, so no session started. Desk now runs the package through Bun directly, without a shell and without starting npm, pnpm, Volta or Node.
+  - **mise** puts a launcher in `shims\omp.exe` that starts `mise`, which starts OMP, and Desk refused it. When exactly one OMP release is installed in mise, Desk now starts that release's own `omp.exe`. With several, it lists them and asks you to set `ompDesk.executablePath`; with none, it says how to install one.
+- **The Models, Agents and OMP Settings editors work with those installs.** They looked for OMP's own packages only where Bun puts them, so with npm they failed with the bare message "OMP could not complete this settings operation". They now also look inside OMP's package (npm) and beside the real folder of a linked package (pnpm).
+- **OMP's standalone program (winget, the `omp.sh` binary install, a single mise release) gets a clear message instead of an empty panel.** That program carries its code inside the executable, so the editors have no source to read. The editor no longer opens empty. In Chat, and for an error from the Command Palette, Desk says that the program has no source on disk, names it and its release, and points to `/agents`, `/model` or `/settings` in the session's Terminal view. A missing Bun is reported separately.
+- **A source install through `install.ps1 -Source -Ref <tag>` can fail with Bun 1.3.14, 1.4.0 and 1.4.3**, which stop on `catalog:` dependencies and install nothing. This is not an OMP Desk problem; the guide now says so.
 
 ## [0.4.5] - 2026-10-16
 
@@ -371,7 +373,8 @@ First public preview of OMP Desk: a Windows-only VS Code extension that runs you
 - OMP is not bundled. The extension launches the `omp` found on `PATH` and never installs, downloads or updates it.
 - OMP Desk is an unofficial, independent integration, not an official OMP distribution.
 
-[Unreleased]: https://github.com/hmmvot/omp-desk/compare/v0.4.5...HEAD
+[Unreleased]: https://github.com/hmmvot/omp-desk/compare/v0.4.6...HEAD
+[0.4.6]: https://github.com/hmmvot/omp-desk/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/hmmvot/omp-desk/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/hmmvot/omp-desk/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/hmmvot/omp-desk/compare/v0.4.2...v0.4.3
