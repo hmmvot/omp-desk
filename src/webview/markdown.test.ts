@@ -399,3 +399,38 @@ test("the parse terminates for every short string over the 17 symbols that open 
 	const lines = ["1234567890. x", "- x", "-\u00a0x", "> x", "```", "# h", "| a |", "|---|", "1. x", "   ", "x"];
 	for (const first of lines) for (const second of lines) check(`${first}\n${second}`);
 });
+
+/** The code blocks of a rendering as language and source; the source is unescaped. */
+const codeBlocks = (html: string): { language: string; source: string }[] =>
+	[...html.matchAll(/<code data-language="([^"]*)">([\s\S]*?)<\/code>/g)].map(match => ({ language: match[1] as string, source: unescapeHtml(match[2] as string) }));
+
+test("a fence is closed only by a run at least as long as its opening run, as in the composer", () => {
+	// A four-backtick fence shows a three-backtick fence and a bare three-backtick line as its content.
+	const html = render("````md\n```ts\nconst x = 1;\n```\n```\nafter\n````\ntail");
+	assert.deepEqual(codeBlocks(html), [{ language: "md", source: "```ts\nconst x = 1;\n```\n```\nafter" }]);
+	assert.ok(html.endsWith("<p>tail</p></div>"), "the text after the closing run is a paragraph");
+	// A closing run longer than the opening one closes it.
+	assert.deepEqual(codeBlocks(render("```\na\n`````\nb")), [{ language: "", source: "a" }]);
+	assert.match(render("```\na\n`````\nb"), /<p>b<\/p><\/div>$/);
+	// A shorter run does not close it, and an unclosed fence runs to the end.
+	assert.deepEqual(codeBlocks(render("````\na\n```\nb")), [{ language: "", source: "a\n```\nb" }]);
+	// Three-backtick fences are unchanged.
+	assert.deepEqual(codeBlocks(render("```ts\nx\n```")), [{ language: "ts", source: "x" }]);
+	assert.deepEqual(codeBlocks(render("  ```ts\n  x\n  ```")), [{ language: "ts", source: "  x" }]);
+});
+
+test("an info string with spaces opens a fence with its first token as the language; backticks in the info string do not open one", () => {
+	assert.deepEqual(codeBlocks(render("```ts title=x\nconst a = 1;\n```")), [{ language: "ts", source: "const a = 1;" }]);
+	assert.deepEqual(codeBlocks(render("```  \na\n```")), [{ language: "", source: "a" }]);
+	assert.deepEqual(codeBlocks(render("```ts```")), [], "a line of inline code is not a fence");
+});
+
+test("an unclosed four-backtick fence streamed prefix by prefix renders as a fresh parse and never ends early on a three-backtick line", () => {
+	const source = "intro\n\n````md\n```ts\nx\n```\nmore\n````\n\ntail";
+	const lengths = Array.from({ length: source.length }, (_, index) => index + 1);
+	for (const [index, step] of renderStreamed(source, lengths).entries()) {
+		assert.equal(step.html, render(source.slice(0, lengths[index])), `prefix of ${lengths[index]} characters`);
+	}
+	const unclosed = render(source.slice(0, source.indexOf("\nmore") + 5));
+	assert.deepEqual(codeBlocks(unclosed), [{ language: "md", source: "```ts\nx\n```\nmore" }]);
+});

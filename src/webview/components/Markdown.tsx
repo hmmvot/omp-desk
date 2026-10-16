@@ -34,7 +34,17 @@ const INLINE_TOKEN =
 	/(`[^`\n]+`)|(\*\*[^*\n]+\*\*)|(__[^_\n]+__)|(\*[^*\n]+\*)|(_[^_\n]+_)|(~~[^~\n]+~~)|(\[[^\]\n]*\]\((?:[^()\s]|\([^()\s]*\))+\))|(\[Image #[1-9]\d*(?:,[^\]\n]*)?\])|(<https?:\/\/[^\s<>]+>)|((?<![A-Za-z\d+.-])[Hh][Tt][Tt][Pp][Ss]?:\/\/[^\s<>"`]+)/g;
 
 const HEADING = /^(#{1,6})\s+(.*)$/;
-const FENCE = /^\s*```(\S*)\s*$/;
+/** An opening fence: a run of three or more backticks and an info string without backticks (the composer's rule, `code-fence.ts`); the language is the first token of the info string. Leading whitespace of any width is tolerated: list item bodies keep their extra columns. */
+const FENCE = /^\s*(`{3,})([^`]*)$/;
+/** A closing fence: a run of backticks at least as long as the opening one (checked by the caller), nothing else. */
+const FENCE_CLOSE = /^\s*(`{3,})\s*$/;
+
+/** Whether `line` closes a fence opened with `openLength` backticks: a closing run is at least as long. */
+function closesFence(line: string, openLength: number): boolean {
+	const close = FENCE_CLOSE.exec(line);
+	return close !== null && (close[1] as string).length >= openLength;
+}
+
 /** A list item line: indent, marker, spacing after the marker, content. */
 const LIST_ITEM = /^([ \t]*)([-*+]|\d{1,9}[.)])([ \t]+)(.*)$/;
 const RULE = /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/;
@@ -359,10 +369,11 @@ function parseBlockRange(lines: readonly string[], from: number, firstKey: numbe
 
 		const fence = FENCE.exec(line);
 		if (fence !== null) {
-			const language = fence[1] ?? "";
+			const fenceLength = (fence[1] as string).length;
+			const language = (fence[2] as string).trim().split(/\s+/)[0] ?? "";
 			const body: string[] = [];
 			index++;
-			while (index < lines.length && !/^\s*```\s*$/.test(lines[index] as string)) {
+			while (index < lines.length && !closesFence(lines[index] as string, fenceLength)) {
 				body.push(lines[index] as string);
 				index++;
 			}
