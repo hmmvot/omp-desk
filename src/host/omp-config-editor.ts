@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { stageRuntimeAssets, verifyStagedRuntimeAsset } from "./runtime-assets";
 import type { StagedRuntimeAsset } from "./runtime-assets";
 import { resolveBunRuntime, resolveOmpBinary, resolveOmpPackageRoot } from "./native-terminal";
+import { checkSettingsRuntime } from "./settings-runtime";
 import type { OmpCommand } from "./native-terminal";
 import { runSettingsWorker } from "./omp-settings-worker";
 import { createSettingsHtml } from "./guest-webview";
@@ -49,7 +50,13 @@ export class OmpConfigEditors implements vscode.Disposable {
   readonly #disposables: vscode.Disposable[] = [];
   constructor(readonly context: vscode.ExtensionContext, readonly host: OmpConfigEditorHost) {
     this.#disposables.push(
-      vscode.commands.registerCommand("ompDesk.openOmpSettings", async () => this.open({ folder: await host.defaultFolder(), profile: host.defaultProfile() })),
+      vscode.commands.registerCommand("ompDesk.openOmpSettings", async () => {
+        try { await this.open({ folder: await host.defaultFolder(), profile: host.defaultProfile() }); }
+        catch (error) {
+          if (!(error instanceof SettingsRefusal)) throw error;
+          void vscode.window.showErrorMessage(error.message);
+        }
+      }),
       vscode.window.registerWebviewPanelSerializer(VIEW_TYPE, {
         deserializeWebviewPanel: async (panel, raw: unknown) => {
           const stored = record(raw) && typeof raw.key === "string" ? this.#stored().find(item => item.key === raw.key) : undefined;
@@ -64,6 +71,8 @@ export class OmpConfigEditors implements vscode.Disposable {
     const key = editorKey(binding);
     const existing = this.#editors.get(key);
     if (existing) { existing.panel.reveal(vscode.ViewColumn.Active); existing.controller.init(); return; }
+    // A new editor opens only on an OMP it can read. Otherwise the reason is the answer, not an empty panel that fails on its first read.
+    await this.#environment(binding);
     await this.#remember(key, binding);
     const panel = vscode.window.createWebviewPanel(VIEW_TYPE, "OMP Settings", vscode.ViewColumn.Active, {
       enableScripts: true, retainContextWhenHidden: true,
@@ -112,14 +121,20 @@ export class OmpConfigEditors implements vscode.Disposable {
   }
   /** The global scope runs OMP from a drive root: no project config there, and no user-profile ancestors are walked. */
   #cwd(binding: OmpConfigBinding): string { return binding.folder ?? path.parse(this.context.globalStorageUri.fsPath).root; }
+  /** Bun and the selected OMP's package source, or a refusal that says which of them is missing and why. */
+  async #environment(binding: OmpConfigBinding): Promise<{ bun: string; root: string }> {
+    const executable = binding.executable ?? await resolveOmpBinary();
+    const [bun, root] = await Promise.all([resolveBunRuntime(), resolveOmpPackageRoot(executable)]);
+    const found = checkSettingsRuntime({ surface: "The OMP Settings editor", instead: "Run /settings in this session's Terminal view instead.", executable, bun, root });
+    if (!found.ok) throw new SettingsRefusal(found.message);
+    return { bun: found.bun, root: found.root.root };
+  }
   async #runtime(editor: Editor): Promise<NonNullable<Editor["runtime"]>> {
     if (editor.runtime) return editor.runtime;
-    const executable = editor.binding.executable ?? await resolveOmpBinary();
-    const [bun, root] = await Promise.all([resolveBunRuntime(), resolveOmpPackageRoot(executable)]);
-    if (!bun || !root) throw new SettingsRefusal("The settings editor requires Bun and the selected OMP installation's importable sources. Compiled-only OMP installations are not supported; use OMP's /settings in a terminal.");
+    const { bun, root } = await this.#environment(editor.binding);
     const [asset] = await stageRuntimeAssets({ storageDir: this.context.globalStorageUri.fsPath, sourcePaths: [vscode.Uri.joinPath(this.context.extensionUri, "out", "config-settings-worker.mjs").fsPath] });
     if (!asset) throw new SettingsRefusal("The settings worker is missing from this extension build.");
-    const runtime = { bun, packageRoot: root.root, asset };
+    const runtime = { bun, packageRoot: root, asset };
     editor.runtime = runtime;
     return runtime;
   }

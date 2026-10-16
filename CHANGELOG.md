@@ -11,6 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **OMP Settings: checked against OMP 18.11.1, and a setting the installed OMP no longer has is never shown.** The editor lists only the settings of the OMP it reads (so **Codex Code Mode**, which OMP 18.11.1 dropped, is gone from the Providers tab). A value your config file still holds for such a setting is ignored and stays in the file.
 
+### Fixed
+
+- **`/agents`, `/model` and `/settings` in a Chat, and the Models, Agents and OMP Settings editors, work with OMP installed through npm, and say why when they cannot.** Three causes, found by laying out each install form:
+  - **npm global install** (`npm install -g @oh-my-pi/pi-coding-agent`): Desk refused npm's `omp.cmd` as a script launcher, so no session started. It now resolves it, as it does Bun's own launcher, to Bun running the package's entry, without a shell. The editors' workers also looked for OMP's own dependency packages beside OMP's package, where Bun puts them; npm puts them inside it, so the editors failed with only "OMP could not complete this settings operation". They now find them where the package manager put them.
+  - **OMP's standalone program** (winget, the `omp.sh` binary install, mise) carries its code inside the executable and has no source for the editors to read; nothing else on the machine is borrowed for it. The refusal used to say "Bun and the importable sources" together and Chat showed only "Could not open native OMP settings." Now the editor does not open an empty panel; Chat, or an error from the palette command, says that the program has no source on disk, names it and its release, and points to `/agents`, `/model` or `/settings` in the session's Terminal view. A missing Bun is reported separately.
+
 ## [0.4.5] - 2026-10-16
 
 ### Added

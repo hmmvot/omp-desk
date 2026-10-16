@@ -44,6 +44,7 @@ import type { RpcChannel } from "../protocol/rpc.ts";
 import { RpcSession, readViewOnlySnapshot } from "./rpc/session.ts";
 import type { ClearOutcome, NavigateOutcome, NavigateRequest, RestoredQueue, RpcRecoveryReason, RpcSessionOptions, RpcSessionOutput, SendOutcome } from "./rpc/session.ts";
 import type { HostToolProvider } from "./tools/host-tool.ts";
+import { SettingsRefusal } from "./omp-settings-core.ts";
 import { nativeSettingsCommand, type NativeSettingsTarget } from "../chat/settings-command.ts";
 import { CLEAR_DEFERRED_SENTENCES, CLEAR_DONE_SENTENCE, CLEAR_REFUSAL_SENTENCES } from "../chat/clear.ts";
 import { DESK_COMMAND_ARGUMENTS_SENTENCE, DESK_COMMAND_UNAVAILABLE_SENTENCE, NEW_BUSY_SENTENCE, deskSessionCommand, type DeskSessionCommand } from "../chat/desk-commands.ts";
@@ -513,7 +514,7 @@ export class ChatRuntime {
 				const operation = (async (): Promise<ChatCommandOutcome> => {
 					if (!this.#options.openSettings) { this.#tell(conversation, origin, "Native OMP settings are unavailable in this host."); return "refused"; }
 					try { await this.#options.openSettings(kind, tabId); return "accepted"; }
-					catch { this.#tell(conversation, origin, "Could not open native OMP settings."); return "refused"; }
+					catch (error) { this.#tell(conversation, origin, error instanceof SettingsRefusal ? error.message : "Could not open native OMP settings."); return "refused"; }
 				})();
 				this.#settingsRequests.set(key, operation);
 				if (this.#settingsRequests.size > 128) this.#settingsRequests.delete(this.#settingsRequests.keys().next().value!);
@@ -985,8 +986,8 @@ export class ChatRuntime {
 				return "explained";
 			}
 			try { await run(guidance.action, conversation.tabId); }
-			catch {
-				this.#tell(conversation, origin, `/${guidance.command} was not sent, and its Desk equivalent could not be opened.`);
+			catch (error) {
+				this.#tell(conversation, origin, error instanceof SettingsRefusal ? error.message : `/${guidance.command} was not sent, and its Desk equivalent could not be opened.`);
 				return "explained";
 			}
 			this.#tell(conversation, origin, guidance.line);

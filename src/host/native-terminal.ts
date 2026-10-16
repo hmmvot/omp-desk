@@ -390,6 +390,9 @@ async function pathTarget(file: string, origin: string): Promise<LaunchTarget> {
     };
   }
   if (identity === "bun-shim") return { kind: "bun-shim", key: file, shim: file };
+  // npm's launcher for a package whose script says `#!/usr/bin/env bun` starts Bun on the entry through a shell. Resolved through to
+  // that entry it is the same launch a bun shim stands for: Bun's own CLI running OMP's entry, with no shell and no process layer.
+  if (path.extname(file).toLowerCase() === ".cmd" && (await npmShimEntry(file)) !== null) return { kind: "bun-shim", key: file, shim: file };
   if (isShimLocation(file)) {
     return { kind: "unusable", key: file, reason: `${file} is a package-manager shim, which never runs as a single process` };
   }
@@ -588,15 +591,20 @@ const OMP_PACKAGE_NAME = "@oh-my-pi/pi-coding-agent";
  */
 async function bunShimCandidate(shim: string): Promise<OmpLaunchCandidate | string> {
   const binDirectory = path.dirname(shim);
-  const bunRoot = path.resolve(binDirectory, "..");
+  const npm = path.extname(shim).toLowerCase() === ".cmd";
+  const kind = npm ? "npm shim" : "bun shim";
   const bun = await bunRuntime(binDirectory);
-  if (bun === null) return `${shim} is a bun shim, but no bun runtime was found beside it in ${binDirectory}`;
+  if (bun === null) return `${shim} is ${npm ? "an npm" : "a bun"} shim, but no bun runtime was found beside it in ${binDirectory}${npm ? " or on PATH" : ""}`;
 
-  const entry = await bunShimEntry(shim, bunRoot);
-  if (entry === null) return `${shim} is a bun shim, but its target entry could not be resolved from ${bunRoot}`;
+  const entry = npm ? await npmShimEntry(shim) : await bunShimEntry(shim, path.resolve(binDirectory, ".."));
+  if (entry === null) {
+    return npm
+      ? `${shim} is an npm shim, but it does not start Bun on an entry of OMP's package`
+      : `${shim} is a bun shim, but its target entry could not be resolved from ${path.resolve(binDirectory, "..")}`;
+  }
   return {
     executable: { command: bun, prefixArgs: [entry] },
-    origin: `the bun shim ${shim}, resolved to ${entry}`,
+    origin: `the ${kind} ${shim}, resolved to ${entry}`,
     label: shim,
     launcher: "bun-shim",
   };
@@ -651,6 +659,42 @@ async function bunShimEntry(shim: string, bunRoot: string): Promise<string | nul
   }
   const packageDirectory = path.join(bunRoot, "install", "global", "node_modules", OMP_PACKAGE_NAME);
   return await packageBinEntry(packageDirectory);
+}
+
+/** npm's launcher text for a script that runs under Bun: which program it starts, and the entry it names relative to its own folder. */
+const NPM_SHIM_RUNS_BUN = /SET\s+"_prog=(?:%dp0%\\)?bun(?:\.exe)?"/i;
+const NPM_SHIM_ENTRY = /"%_prog%"\s+"%dp0%\\([^"\r\n]+)"/i;
+/** An npm launcher is a few hundred bytes; a `.cmd` file far larger than this is not one. */
+const NPM_SHIM_SCAN_BYTES = 16 * 1024;
+
+/**
+ * The entry script of OMP's package that an npm `.cmd` launcher starts under Bun, or null when the file is not such a launcher.
+ *
+ * `npm install -g` writes `omp.cmd` beside the global `node_modules`: it runs `bun.exe` from its own folder, else `bun` from PATH,
+ * on `%dp0%\node_modules\@oh-my-pi\pi-coding-agent\dist\cli.js` (the package's `bin`, whose first line asks for Bun). Nothing is
+ * guessed: the launcher must say it runs Bun, the entry it names must be a runnable file, and the nearest package manifest above it
+ * must be OMP's. A launcher for Node, or for any other package, is not OMP and stays refused.
+ */
+async function npmShimEntry(shim: string): Promise<string | null> {
+  let text: string;
+  try {
+    const handle = await fs.open(shim, "r");
+    try {
+      const buffer = Buffer.allocUnsafe(NPM_SHIM_SCAN_BYTES);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+      text = buffer.subarray(0, bytesRead).toString("utf8");
+    } finally {
+      await handle.close();
+    }
+  } catch (error) {
+    rethrowIfTransientInspection(shim, error);
+    return null;
+  }
+  const entry = NPM_SHIM_ENTRY.exec(text);
+  if (entry === null || !NPM_SHIM_RUNS_BUN.test(text)) return null;
+  const script = path.resolve(path.dirname(shim), entry[1]);
+  if (!(await isRunnableFile(script)) || (await packageDirectoryOf(script)) === null) return null;
+  return script;
 }
 
 /** The declared `omp` entry of an installed package, or null. */

@@ -23,6 +23,7 @@ import type { ChatHostMessage, ChatSnapshotChunkMessage, ChatSnapshotMessage } f
 import { ChatClient } from "../webview/lib/chat-client.ts";
 import { CHAT_ALREADY_RUNNING_SENTENCE, CHAT_NOT_LIVE_SENTENCE, ChatRuntime } from "./chat-runtime.ts";
 import type { ChatPage, ChatRuntimeEvent, ChatRuntimeOptions } from "./chat-runtime.ts";
+import { SettingsRefusal } from "./omp-settings-core.ts";
 import { settingsSessionApply } from "./omp-settings-apply.ts";
 import { FakeRpcChannel } from "./rpc/fake-channel.ts";
 import type { FakeChildModel } from "./rpc/fake-channel.ts";
@@ -680,6 +681,17 @@ describe("native Models and Agents settings", () => {
 		const { runtime, channel } = await liveRig({}, { openSettings: async () => { throw new Error("unavailable"); } });
 		assert.equal(await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "settings-failure", text: "/agents" }, new RecordingPage("failure")), "refused");
 		assert.equal(channel.commandsOfType("prompt").length, 0);
+	});
+	it("tells the page the opener's own reason, such as an OMP with no source on disk, and the generic sentence for any other failure", async () => {
+		const reason = "The Agents editor reads the installed OMP's TypeScript source, and the OMP this window runs is OMP's standalone program. Run /agents in this session's Terminal view instead.";
+		for (const [thrown, told] of [[new SettingsRefusal(reason), reason], [new Error("EACCES: C:\\secret"), "Could not open native OMP settings."]] as const) {
+			const { runtime, channel } = await liveRig({}, { openSettings: async () => { throw thrown; } });
+			const page = new RecordingPage("reason");
+			runtime.attachPage(TAB, page);
+			assert.equal(await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "settings-reason", text: "/agents" }, page), "refused");
+			assert.deepEqual(page.notices(), [told]);
+			assert.equal(channel.commandsOfType("prompt").length, 0);
+		}
 	});
 	it("applies only to the bound live idle session and confirms actual model/thinking by get_state", async () => {
 		const { runtime, channel } = await liveRig();

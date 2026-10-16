@@ -201,6 +201,11 @@ test("an OMP whose schema modules are missing is refused whatever its version, w
     const fake = path.join(r.root, "fake", "pi-coding-agent");
     await fs.mkdir(fake, { recursive: true });
     await fs.writeFile(path.join(fake, "package.json"), JSON.stringify({ version: "19.0.0" }));
+    await refused(call(r, { action: "read" }, { packageRoot: fake }), /has no @oh-my-pi\/pi-utils beside or inside it/);
+    for (const dependency of ["pi-utils", "pi-tui"]) {
+      await fs.mkdir(path.join(fake, "node_modules", "@oh-my-pi", dependency), { recursive: true });
+      await fs.writeFile(path.join(fake, "node_modules", "@oh-my-pi", dependency, "package.json"), JSON.stringify({ name: `@oh-my-pi/${dependency}`, version: "19.0.0" }));
+    }
     await refused(call(r, { action: "read" }, { packageRoot: fake }), /shape this version of OMP Desk does not recognise/);
     await fs.writeFile(path.join(fake, "package.json"), "{");
     await refused(call(r, { action: "read" }, { packageRoot: fake }), /shape this version of OMP Desk does not recognise/);

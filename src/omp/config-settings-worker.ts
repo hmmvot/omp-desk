@@ -6,6 +6,7 @@ import { ancestorMessage, assertSchemaShape, baselineProjection, optionNumber, p
 import { ancestorContextDir } from "./config-ancestor.ts";
 import type { NativeLayers, NativeSetting, NativeTabs } from "./config-schema.ts";
 import { SettingsRefusal, valueAt } from "../host/omp-settings-core.ts";
+import { ompDependencyRoot } from "../shared/omp-package-layout.ts";
 import { isRecord as record } from "../shared/guards.ts";
 import { parseNumericInput } from "../protocol/omp-config-model.ts";
 import type { ConfigChange, ConfigEntry, ConfigFileBaseline, ConfigLayer, ConfigReceipt } from "../protocol/omp-config-model.ts";
@@ -51,14 +52,14 @@ async function ompVersion(packageRoot: string): Promise<string> {
 }
 
 async function natives(packageRoot: string): Promise<Natives> {
-  const parent = path.dirname(packageRoot);
+  const dependency = (name: string): string => ompDependencyRoot(packageRoot, name, message => new SettingsRefusal(message));
   const [dirs, all, registry, settings, discovery, tabs] = await Promise.all([
-    load(path.join(parent, "pi-utils"), "src/dirs.ts", ["setProfile", "getAgentDir", "getProjectAgentDir"]),
+    load(dependency("pi-utils"), "src/dirs.ts", ["setProfile", "getAgentDir", "getProjectAgentDir"]),
     load(packageRoot, "src/config/all-settings.ts", ["orderedSettings"]),
     load(packageRoot, "src/config/registry.ts", ["lookup"]),
     load(packageRoot, "src/config/settings.ts", ["Settings"]),
     load(packageRoot, "src/discovery/index.ts", ["initializeWithSettings", "loadCapability"]),
-    load(path.join(parent, "pi-tui"), "src/overlays/settings-defs.ts", ["SETTING_TABS", "TAB_GROUPS", "getSettingsForTab"]),
+    load(dependency("pi-tui"), "src/overlays/settings-defs.ts", ["SETTING_TABS", "TAB_GROUPS", "getSettingsForTab"]),
   ]);
   return { dirs, all, registry, settings, discovery, tabs } as unknown as Natives;
 }
@@ -155,7 +156,7 @@ async function write(
     }
   };
   const file = layer === "project" ? where.projectFile! : where.globalFile;
-  const utilsRoot = path.join(path.dirname(request.packageRoot), "pi-utils");
+  const utilsRoot = ompDependencyRoot(request.packageRoot, "pi-utils", message => new SettingsRefusal(message));
   const changed = await writeConfig(
     { baseline: request.baseline, edits: planned.map(item => item.edit), scope: layer, pruneEmpty: true }, file, utilsRoot, validate,
     async () => (await where.loadSettings()).getGlobalSettings(), allowed,

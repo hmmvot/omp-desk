@@ -6,6 +6,7 @@ import { isDeepStrictEqual } from "node:util";
 import { globalConfigFile, readConfig, stageFile, writeConfig } from "./config-transaction.ts";
 import type { FileBaseline } from "./config-transaction.ts";
 import { displaySettings, editorSettings, parseAgentSpec, valueAt, withRollbackJournalHeader, EDITOR_SETTING_PATHS, SettingsRefusal } from "../host/omp-settings-core.ts";
+import { ompDependencyRoot } from "../shared/omp-package-layout";
 import { isRecord as record } from "../shared/guards";
 import type { AgentSpec, ConfigEdit, ConfigRecord, SettingsScope } from "../protocol/settings-model.ts";
 import { YAML } from "bun";
@@ -55,9 +56,10 @@ async function sourceImport<Name extends keyof NativeModules>(root: string, file
 
 async function main(request: WorkerRequest): Promise<unknown> {
   if (!path.isAbsolute(request.packageRoot) || !path.isAbsolute(request.cwd)) throw new SettingsRefusal("The settings context is unavailable.");
-  const utilsRoot = path.join(path.dirname(request.packageRoot), "pi-utils");
-  const aiRoot = path.join(path.dirname(request.packageRoot), "pi-ai");
-  const catalogRoot = path.join(path.dirname(request.packageRoot), "pi-catalog");
+  const dependency = (name: string): string => ompDependencyRoot(request.packageRoot, name, message => new SettingsRefusal(message));
+  const utilsRoot = dependency("pi-utils");
+  const aiRoot = dependency("pi-ai");
+  const catalogRoot = dependency("pi-catalog");
   const dirs = await sourceImport(utilsRoot, "dirs.ts");
   dirs.setProfile(request.profile);
   const agentDir = dirs.getAgentDir();

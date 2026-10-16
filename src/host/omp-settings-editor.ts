@@ -6,6 +6,7 @@ import { stageRuntimeAssets, verifyStagedRuntimeAsset } from "./runtime-assets";
 import type { StagedRuntimeAsset } from "./runtime-assets";
 import { openProviderLoginTerminal } from "./omp-vscode";
 import { resolveBunRuntime, resolveOmpBinary, resolveOmpPackageRoot } from "./native-terminal";
+import { checkSettingsRuntime } from "./settings-runtime";
 import type { OmpCommand } from "./native-terminal";
 import { runSettingsWorker } from "./omp-settings-worker";
 import { createSettingsHtml } from "./guest-webview";
@@ -69,8 +70,8 @@ export class SettingsEditors implements vscode.Disposable {
   readonly #disposables: vscode.Disposable[] = [];
   constructor(readonly context: vscode.ExtensionContext, readonly host: SettingsEditorHost) {
     this.#disposables.push(
-      vscode.commands.registerCommand("ompDesk.openModels", () => this.open("models", { folder: null, profile: host.defaultProfile() })),
-      vscode.commands.registerCommand("ompDesk.openAgents", () => this.open("agents", { folder: null, profile: host.defaultProfile() })),
+      vscode.commands.registerCommand("ompDesk.openModels", () => this.#openFromCommand("models")),
+      vscode.commands.registerCommand("ompDesk.openAgents", () => this.#openFromCommand("agents")),
       vscode.window.registerWebviewPanelSerializer(VIEW_TYPE, {
         deserializeWebviewPanel: async (panel, raw: unknown) => {
           const stored = record(raw) && typeof raw.key === "string" ? this.#stored().find(item => item.key === raw.key) : undefined;
@@ -79,6 +80,14 @@ export class SettingsEditors implements vscode.Disposable {
         },
       }),
     );
+  }
+  /** A palette command has no Chat to tell: a refusal to open (no Bun, no source) is shown as the error it is, with its reason. */
+  async #openFromCommand(kind: SettingsKind): Promise<void> {
+    try { await this.open(kind, { folder: null, profile: this.host.defaultProfile() }); }
+    catch (error) {
+      if (!(error instanceof SettingsRefusal)) throw error;
+      void vscode.window.showErrorMessage(error.message);
+    }
   }
   async open(kind: SettingsKind, requested: SettingsEditorContext): Promise<void> {
     const binding: SettingsEditorContext = requested.folder === null ? requested : { ...requested, folder: await onDiskFolder(requested.folder) };
@@ -90,6 +99,8 @@ export class SettingsEditors implements vscode.Disposable {
       existing.panel.reveal(vscode.ViewColumn.Active);
       return;
     }
+    // A new editor opens only on an OMP it can read. Otherwise the reason is the answer, not an empty panel that fails on its first read.
+    await this.#environment(kind, binding);
     await this.#remember(key, kind, binding);
     const panel = vscode.window.createWebviewPanel(VIEW_TYPE, kind === "models" ? "OMP Models" : "OMP Agents", vscode.ViewColumn.Active, {
       enableScripts: true, retainContextWhenHidden: true,
@@ -181,17 +192,27 @@ export class SettingsEditors implements vscode.Disposable {
     if (raw === "project" && editor.binding.folder === null) throw new SettingsRefusal("Choose a project folder in the scope control first. Nothing was changed.");
     return raw;
   }
+  /** Bun and the selected OMP's package source, or a refusal that says which of them is missing and why. */
+  async #environment(kind: SettingsKind, binding: SettingsEditorContext): Promise<{ bun: string; root: string; executable: OmpCommand }> {
+    const executable = binding.executable ?? await resolveOmpBinary();
+    const [bun, root] = await Promise.all([resolveBunRuntime(), resolveOmpPackageRoot(executable)]);
+    const found = checkSettingsRuntime({
+      surface: kind === "agents" ? "The Agents editor" : "The Models editor",
+      instead: kind === "agents" ? "Run /agents in this session's Terminal view instead." : "Run /model in this session's Terminal view instead.",
+      executable, bun, root,
+    });
+    if (!found.ok) throw new SettingsRefusal(found.message);
+    return { bun: found.bun, root: found.root.root, executable };
+  }
   async #runtime(editor: Editor): Promise<NonNullable<Editor["runtime"]>> {
     if (editor.runtime) return editor.runtime;
-    const executable = editor.binding.executable ?? await resolveOmpBinary();
-    const [bun, root] = await Promise.all([resolveBunRuntime(), resolveOmpPackageRoot(executable)]);
-    if (!bun || !root) throw new SettingsRefusal("These editors require Bun and the selected OMP installation's importable sources. Compiled-only OMP installations are not supported.");
+    const { bun, root, executable } = await this.#environment(editor.kind, editor.binding);
     const assets = await stageRuntimeAssets({ storageDir: this.context.globalStorageUri.fsPath, sourcePaths: [vscode.Uri.joinPath(this.context.extensionUri, "out", "settings-worker.mjs").fsPath] });
     const asset = assets[0];
     if (!asset) throw new SettingsRefusal("The native settings worker is missing from this extension build.");
     // The verified runtime directory is private; temporary catalogue copies inherit its restrictions.
     const cacheDirectory = await fs.mkdtemp(path.join(path.dirname(asset.path), "settings-editor-"));
-    const runtime = { bun, packageRoot: root.root, asset, cacheDirectory, executable };
+    const runtime = { bun, packageRoot: root, asset, cacheDirectory, executable };
     editor.runtime = runtime;
     if (editor.disposed) { await this.#cleanup(editor); throw new SettingsRefusal("The settings editor was closed."); }
     return runtime;

@@ -5,6 +5,7 @@ import { claudeRegistryBindsFolder } from "./inventory-guards.ts";
 import { SettingsRefusal, valueAt } from "../host/omp-settings-core.ts";
 import { PROTECTED_EXTENSION_NAMES, REASONS_PER_VIEW } from "../host/inventory/inventory-model.ts";
 import { isRecord as record } from "../shared/guards";
+import { ompDependencyRoot } from "../shared/omp-package-layout";
 import { BUILTIN_SWITCHES, SHARED_SWITCH_NOTES } from "./inventory-switches.ts";
 import { excusedEntryWarnings, foldMcpServer } from "./inventory-mcp.ts";
 import type { McpEntry } from "./inventory-mcp.ts";
@@ -66,10 +67,10 @@ async function load(root: string, file: string, names: readonly string[]): Promi
   return loaded;
 }
 async function natives(packageRoot: string): Promise<Natives> {
-  const scope = path.dirname(packageRoot);
+  const dependency = (name: string): string => ompDependencyRoot(packageRoot, name, message => new SettingsRefusal(message));
   const [claudePaths, dirs, settings, discovery, extSettings, state, skills, loader, helpers, tools, registry, plugins, pluginLoader, writer, bridge, transport, mcp] = await Promise.all([
     load(packageRoot, "config/claude-paths.ts", ["resolveClaudePaths"]),
-    load(path.join(scope, "pi-utils"), "dirs.ts", ["setProfile", "getAgentDir", "getMCPConfigPath"]),
+    load(dependency("pi-utils"), "dirs.ts", ["setProfile", "getAgentDir", "getMCPConfigPath"]),
     load(packageRoot, "config/settings.ts", ["Settings"]),
     load(packageRoot, "discovery/index.ts", ["initializeWithSettings", "loadCapability"]),
     load(packageRoot, "extensibility/settings.ts", ["cfgDisabledExtensions", "cfgExtensions", "cfgSkills"]),
@@ -83,7 +84,7 @@ async function natives(packageRoot: string): Promise<Natives> {
     load(packageRoot, "extensibility/plugins/loader.ts", ["getEnabledPlugins"]),
     load(packageRoot, "mcp/config-writer.ts", ["setServerDisabled", "setServerForceEnabled", "readDisabledServers", "readEnabledServers"]),
     load(packageRoot, "mcp/tool-bridge.ts", ["createMCPToolName"]),
-    load(path.join(scope, "pi-tui"), "overlays/extensions/mcp-runtime.ts", ["inferMcpTransport"]),
+    load(dependency("pi-tui"), "overlays/extensions/mcp-runtime.ts", ["inferMcpTransport"]),
     load(packageRoot, "capability/mcp.ts", ["isSameMCPConnection"]),
   ]);
   return { claudePaths, dirs, settings, discovery, extSettings, state, skills, loader, helpers, tools, registry, plugins, pluginLoader, writer, bridge, transport, mcp } as unknown as Natives;
@@ -345,7 +346,7 @@ async function toggle(request: WorkerRequest, n: Natives): Promise<{ changed: bo
   const view: Readonly<Record<string, ViewKind>> = { skill: "skills", "custom-tool": "tools", "builtin-tool": "tools", mcp: "mcp", "extension-module": "extensions", plugin: "extensions" };
   const failure = snapshot.incompleteReasons.find(entry => entry.view === (row === undefined ? undefined : view[row.kind]));
   if (row !== undefined && snapshot.incomplete.includes(view[row.kind]!)) throw new SettingsRefusal(`OMP reported a failure loading some sources of this kind${failure === undefined ? "" : ` (${failure.reason})`}. Refresh before switching anything.`);
-  const utilsRoot = path.join(path.dirname(request.packageRoot), "pi-utils");
+  const utilsRoot = ompDependencyRoot(request.packageRoot, "pi-utils", message => new SettingsRefusal(message));
   const agentDir = n.dirs.getAgentDir();
   const globalFile = await globalConfigFile(agentDir);
   const reload = async (): Promise<ConfigRecord> => (await n.settings.Settings.loadReadOnly({ cwd: request.cwd, agentDir })).getGlobalSettings();

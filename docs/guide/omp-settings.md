@@ -11,6 +11,7 @@ OMP Desk gives OMP's own configuration a VS Code interface. Models, Agents and O
 - Select one to see how it was decided, who depends on it and, for an agent, what resetting its override would change.
 - A provider that needs login has a **Sign in** button.
 - Agent overrides can be saved to the project config as well as the global one.
+- Like OMP Settings, they need Bun and the installed OMP's source files. With OMP's standalone program there are none to read: the editor does not open, the Chat or the notification says why, and `/agents` or `/model` in the session's Terminal view is the way to do the same.
 
 ## OMP Settings
 
@@ -22,7 +23,7 @@ OMP Desk gives OMP's own configuration a VS Code interface. Models, Agents and O
 - Only settings the installed OMP has are listed. A setting a newer OMP dropped is not shown, even if your config file still holds a value for it; that value is ignored and left in the file.
 - Each change is written to the **global** or the **project** (`.omp/config.yml`) layer, with the layer each value comes from, an environment override named when one applies, and **Reset** to remove a layer's value.
 - Credentials are never shown (set them with `omp config set` in a terminal); lists and mappings open their YAML at the key.
-- It needs Bun and the installed OMP's source files; an OMP whose settings schema it does not recognise is refused without changing anything.
+- It needs Bun and the installed OMP's source files, which a Bun or npm global install has and OMP's standalone program (winget, the `omp.sh` binary install, mise) does not; for that program it says so and points to `/settings` in the session's Terminal view. An OMP whose settings schema it does not recognise is refused without changing anything.
 - Project settings are saved at the root of the version-control checkout your folder lies in ([`ompDesk.runSessionsAtRepositoryRoot`](settings.md)).
 
 OMP's models, tools, skills and MCP servers live in OMP's files; the Models and Agents editors and the views below cover them.

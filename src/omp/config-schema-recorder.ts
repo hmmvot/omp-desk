@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
+import { ompDependencyRoot } from "../shared/omp-package-layout.ts";
 import { nativeEntries } from "./config-schema.ts";
 import type { NativeDef, NativeSetting, NativeTabs } from "./config-schema.ts";
 
@@ -14,10 +15,10 @@ import type { NativeDef, NativeSetting, NativeTabs } from "./config-schema.ts";
  */
 const packageRoot = process.argv[2];
 if (!packageRoot) throw new Error("Usage: bun config-schema-recorder.ts <pi-coding-agent root>");
-const parent = path.dirname(packageRoot);
+const tuiRoot = ompDependencyRoot(packageRoot, "pi-tui");
 const load = async (root: string, relative: string): Promise<Record<string, unknown>> => await import(pathToFileURL(path.join(root, relative)).href) as Record<string, unknown>;
 const all = await load(packageRoot, "src/config/all-settings.ts") as unknown as { orderedSettings(): readonly NativeSetting[] };
-const tabs = await load(path.join(parent, "pi-tui"), "src/overlays/settings-defs.ts") as unknown as NativeTabs;
+const tabs = await load(tuiRoot, "src/overlays/settings-defs.ts") as unknown as NativeTabs;
 const version = (JSON.parse(await readFile(path.join(packageRoot, "package.json"), "utf8")) as { version: string }).version;
 const settings = all.orderedSettings();
 const entries = nativeEntries(settings, tabs.SETTING_TABS);

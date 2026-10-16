@@ -543,3 +543,103 @@ describe("package source of the selected OMP", () => {
 		assert.equal((await native.resolveOmpPackageRoot(launch(own.entry, null)))?.root, own.root, "no reported release, nothing to compare");
 	});
 });
+
+/**
+ * `npm install -g @oh-my-pi/pi-coding-agent` lays the package out under the npm prefix and writes `omp.cmd` beside the
+ * global `node_modules` (the file text below is what npm 11 wrote for OMP 18.11.1; the entry's `#!/usr/bin/env bun` line
+ * makes it start `bun`). The package's own dependencies are nested inside it, not beside it as Bun's global install has them.
+ */
+describe("an npm global install of OMP", { skip: process.platform !== "win32" && "npm's .cmd launcher is a Windows file" }, () => {
+	const NPM_CMD = [
+		"@ECHO off", "GOTO start", ":find_dp0", "SET dp0=%~dp0", "EXIT /b", ":start", "SETLOCAL", "CALL :find_dp0", "",
+		'IF EXIST "%dp0%\\bun.exe" (', '  SET "_prog=%dp0%\\bun.exe"', ") ELSE (", '  SET "_prog=bun"', "  SET PATHEXT=%PATHEXT:;.JS;=;%", ")", "",
+		'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\node_modules\\@oh-my-pi\\pi-coding-agent\\dist\\cli.js" %*', "",
+	].join("\r\n");
+	let installs = 0;
+	let tools: string;
+
+	before(async () => {
+		tools = path.join(temp, "npm-tools");
+		await mkdir(tools, { recursive: true });
+		await copyFile(process.execPath, path.join(tools, "bun.exe"));
+	});
+
+	/** An npm prefix: `omp.cmd`, `omp`, and the package with the manifest, entry, storage module and nested dependencies. */
+	async function npmPrefix(options: { readonly cmd?: string; readonly name?: string; readonly version?: string } = {}): Promise<{ readonly prefix: string; readonly root: string; readonly entry: string }> {
+		const prefix = path.join(temp, `npm-${installs++}`);
+		const root = path.join(prefix, "node_modules", "@oh-my-pi", "pi-coding-agent");
+		await mkdir(path.join(root, "dist"), { recursive: true });
+		await mkdir(path.join(root, "src", "session"), { recursive: true });
+		await writeFile(path.join(root, "package.json"), JSON.stringify({ name: options.name ?? "@oh-my-pi/pi-coding-agent", version: options.version ?? "18.11.1" }));
+		await writeFile(path.join(root, "src", "session", "session-storage.ts"), "export {};");
+		const entry = path.join(root, "dist", "cli.js");
+		await writeFile(entry, "#!/usr/bin/env bun\nconsole.log('omp/18.11.1');\n");
+		await writeFile(path.join(prefix, "omp.cmd"), options.cmd ?? NPM_CMD);
+		await writeFile(path.join(prefix, "omp"), "#!/bin/sh\nexec bun \"$basedir/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js\" \"$@\"\n");
+		return { prefix, root, entry };
+	}
+
+	async function withPath<T>(dirs: readonly string[], action: () => Promise<T>): Promise<T> {
+		const saved = { PATH: process.env.PATH, LOCALAPPDATA: process.env.LOCALAPPDATA };
+		process.env.PATH = dirs.join(path.delimiter);
+		process.env.LOCALAPPDATA = path.join(temp, "no-local-app-data");
+		try {
+			return await action();
+		} finally {
+			for (const [name, value] of Object.entries(saved)) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+		}
+	}
+
+	it("resolves omp.cmd to Bun running the package's entry, as Bun's own CLI, with the release from the manifest", async () => {
+		const install = await npmPrefix();
+
+		const resolved = await withPath([install.prefix, tools], () => native.resolveOmpBinary());
+
+		assert.equal(resolved.command, path.join(tools, "bun.exe"), "bun.exe from PATH, as the launcher itself picks it when none sits beside it");
+		assert.deepEqual(resolved.prefixArgs, [install.entry]);
+		assert.equal(resolved.launcher, "bun-shim", "no shell and no process layer: the launch is Bun running the entry");
+		assert.equal(resolved.version, "18.11.1");
+		assert.match(resolved.origin, /the npm shim .*omp\.cmd, resolved to /);
+	});
+
+	it("prefers the bun.exe the launcher finds beside itself", async () => {
+		const install = await npmPrefix();
+		await copyFile(process.execPath, path.join(install.prefix, "bun.exe"));
+
+		const resolved = await withPath([install.prefix, tools], () => native.resolveOmpBinary());
+
+		assert.equal(resolved.command, path.join(install.prefix, "bun.exe"));
+	});
+
+	it("finds the package source of that launch, which is the package inside the npm prefix", async () => {
+		const install = await npmPrefix();
+
+		const resolved = await withPath([install.prefix, tools], () => native.resolveOmpBinary());
+		const found = await native.resolveOmpPackageRoot(resolved);
+
+		assert.equal(found?.root, install.root);
+		assert.equal(found?.version, "18.11.1");
+	});
+
+	it("still refuses a .cmd that is not OMP's launcher, with the reason, and never starts it", async () => {
+		const node = await npmPrefix({ cmd: NPM_CMD.replace(/_prog=(%dp0%\\)?bun(\.exe)?/g, "_prog=$1node$2") });
+		const other = await npmPrefix({ name: "some-other-package" });
+
+		for (const install of [node, other]) {
+			await withPath([install.prefix, tools], async () => {
+				await assert.rejects(native.resolveOmpBinary(), /omp\.cmd is a script launcher|omp\.cmd is a package-manager shim/);
+			});
+		}
+	});
+
+	it("says so when Bun is nowhere to be found, instead of starting the launcher's shell", async () => {
+		const install = await npmPrefix();
+
+		await withPath([install.prefix], async () => {
+			await assert.rejects(native.resolveOmpBinary(), /omp\.cmd is an npm shim, but no bun runtime was found beside it in .* or on PATH/);
+		});
+	});
+});
