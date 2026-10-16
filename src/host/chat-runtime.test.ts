@@ -24,6 +24,7 @@ import { ChatClient } from "../webview/lib/chat-client.ts";
 import { CHAT_ALREADY_RUNNING_SENTENCE, CHAT_NOT_LIVE_SENTENCE, ChatRuntime } from "./chat-runtime.ts";
 import type { ChatPage, ChatRuntimeEvent, ChatRuntimeOptions } from "./chat-runtime.ts";
 import { SettingsRefusal } from "./omp-settings-core.ts";
+import { OmpUnavailableError } from "../shared/omp-unavailable.ts";
 import { settingsSessionApply } from "./omp-settings-apply.ts";
 import { FakeRpcChannel } from "./rpc/fake-channel.ts";
 import type { FakeChildModel } from "./rpc/fake-channel.ts";
@@ -684,7 +685,8 @@ describe("native Models and Agents settings", () => {
 	});
 	it("tells the page the opener's own reason, such as an OMP with no source on disk, and the generic sentence for any other failure", async () => {
 		const reason = "The Agents editor reads the installed OMP's TypeScript source, and the OMP this window runs is OMP's standalone program. Run /agents in this session's Terminal view instead.";
-		for (const [thrown, told] of [[new SettingsRefusal(reason), reason], [new Error("EACCES: C:\\secret"), "Could not open native OMP settings."]] as const) {
+		const unusable = "The OMP named by the ompDesk.executablePath setting (C:\\nowhere\\omp.exe) cannot be used. Desk does not search PATH while that setting is set; correct the path, or clear the setting to use the OMP on PATH.";
+		for (const [thrown, told] of [[new SettingsRefusal(reason), reason], [new OmpUnavailableError(unusable), unusable], [new Error("EACCES: C:\\secret"), "Could not open native OMP settings."]] as const) {
 			const { runtime, channel } = await liveRig({}, { openSettings: async () => { throw thrown; } });
 			const page = new RecordingPage("reason");
 			runtime.attachPage(TAB, page);

@@ -11,6 +11,7 @@ import type { OmpCommand } from "./native-terminal";
 import { runSettingsWorker } from "./omp-settings-worker";
 import { createSettingsHtml } from "./guest-webview";
 import { parseAgentSpec, SettingsRefusal, valueAt } from "./omp-settings-core";
+import { OmpUnavailableError } from "../shared/omp-unavailable";
 import { isRecord as record } from "../shared/guards";
 import type { AgentSpec, ConfigEdit, ConfigRecord, SettingsScope, SettingsSnapshot } from "../protocol/settings-model";
 import type { SettingsKind } from "../chat/settings-command";
@@ -194,7 +195,8 @@ export class SettingsEditors implements vscode.Disposable {
   }
   /** Bun and the selected OMP's package source, or a refusal that says which of them is missing and why. */
   async #environment(kind: SettingsKind, binding: SettingsEditorContext): Promise<{ bun: string; root: string; executable: OmpCommand }> {
-    const executable = binding.executable ?? await resolveOmpBinary();
+    // A configured path that cannot be used is a reason to tell, like a missing Bun, not an error to throw out of a command.
+    const executable = binding.executable ?? await resolveOmpBinary().catch((error: unknown) => { throw error instanceof OmpUnavailableError ? new SettingsRefusal(error.message) : error; });
     const [bun, root] = await Promise.all([resolveBunRuntime(), resolveOmpPackageRoot(executable)]);
     const found = checkSettingsRuntime({
       surface: kind === "agents" ? "The Agents editor" : "The Models editor",

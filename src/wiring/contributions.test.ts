@@ -588,6 +588,16 @@ describe("the palette", () => {
 		assert.deepEqual(failures, [], "a command the palette offers threw when run with no argument");
 	});
 
+	it("tells why an editor does not open when the configured OMP cannot be used, and does not reject", async () => {
+		for (const id of ["ompDesk.openOmpSettings", "ompDesk.openModels", "ompDesk.openAgents"]) {
+			const before = recording.prompts.length;
+			await recording.commands.get(id)?.();
+			const shown = recording.prompts.slice(before).filter(prompt => prompt.kind === "showErrorMessage").map(prompt => String(prompt.args[0]));
+			assert.equal(shown.length, 1, `${id} shows one error`);
+			assert.match(shown[0]!, /The OMP named by the ompDesk\.executablePath setting \(.*no-such-omp\.exe\) cannot be used/, `${id} says why`);
+		}
+	});
+
 	it("only executes commands that exist when a visible command runs another", async () => {
 		const { executed } = await runPalette();
 				const viewFocus = new Set([...viewIds].map(id => `${id}.focus`));

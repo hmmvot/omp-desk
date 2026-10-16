@@ -13,6 +13,7 @@ import { chooseSetting } from "./settings-pickers";
 import { onDiskFolder, scopePickerFolders } from "./folder-display.ts";
 import { normalizeWorkspaceDirectory } from "./session-files.ts";
 import { SettingsRefusal } from "./omp-settings-core";
+import { OmpUnavailableError } from "../shared/omp-unavailable";
 import { isRecord as record } from "../shared/guards";
 import type { ConfigMessage } from "../protocol/omp-config-model";
 import type { ConfigRecord } from "../protocol/settings-model";
@@ -123,7 +124,8 @@ export class OmpConfigEditors implements vscode.Disposable {
   #cwd(binding: OmpConfigBinding): string { return binding.folder ?? path.parse(this.context.globalStorageUri.fsPath).root; }
   /** Bun and the selected OMP's package source, or a refusal that says which of them is missing and why. */
   async #environment(binding: OmpConfigBinding): Promise<{ bun: string; root: string }> {
-    const executable = binding.executable ?? await resolveOmpBinary();
+    // A configured path that cannot be used is a reason to tell, like a missing Bun, not an error to throw out of a command.
+    const executable = binding.executable ?? await resolveOmpBinary().catch((error: unknown) => { throw error instanceof OmpUnavailableError ? new SettingsRefusal(error.message) : error; });
     const [bun, root] = await Promise.all([resolveBunRuntime(), resolveOmpPackageRoot(executable)]);
     const found = checkSettingsRuntime({ surface: "The OMP Settings editor", instead: "Run /settings in this session's Terminal view instead.", executable, bun, root });
     if (!found.ok) throw new SettingsRefusal(found.message);
