@@ -63,7 +63,7 @@ function coveredText(range: Range, host: Element): { from: number; to: number; t
 
 /** A leaf the page has no record of: its shown text is all there is, so it degrades to that text. */
 function unknownLeaf(id: number): Leaf {
-	return { id, kind: "text", lines: [], first: Number.NEGATIVE_INFINITY, last: Number.NEGATIVE_INFINITY };
+	return { id, kind: "text", lines: [], first: Number.NEGATIVE_INFINITY, last: Number.NEGATIVE_INFINITY, emphasis: true };
 }
 
 function picksOf(range: Range, root: Element, leaves: readonly Leaf[]): LeafPick[] {

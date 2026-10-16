@@ -5,7 +5,9 @@
  * `dangerouslySetInnerHTML` path, so raw HTML in model output is displayed as
  * text and can never become markup. Supported syntax is the subset the chat
  * transcript needs — fenced code, headings, lists, blockquotes, horizontal
- * rules, pipe tables, plus inline code/bold/italic/strikethrough/links. Web links
+ * rules, pipe tables, plus inline code/bold/italic/strikethrough/links. Text the user typed is parsed with `emphasis` off: `**x**`, `__x__`,
+ * `*x*`, `_x_` and `~~x~~` stay literal characters there (`obj._m() … obj._n()`, `1*234*343` must not turn italic), while code spans and fences,
+ * quotes, lists, tables, headings, links and `[Image #N]` references keep working. Web links
  * (`[label](https://…)`, `<https://…>` and bare URLs in prose) accept only
  * `http:`/`https:`; any other destination keeps its label as text. A fenced `mermaid`
  * block is {@link MermaidBlock}: the diagram once the block is closed and drawn, the code before.
@@ -15,7 +17,7 @@
  */
 import type { ReactNode } from "react";
 import { Fragment, memo, useLayoutEffect, useMemo, useRef } from "react";
-import { INLINE_TOKEN, MAX_EMPHASIS_DEPTH } from "../lib/markdown-inline.ts";
+import { INLINE_TOKEN, MAX_EMPHASIS_DEPTH, USER_INLINE_TOKEN } from "../lib/markdown-inline.ts";
 import { LeafCollector, registerMarkdown, unregisterMarkdown, type Leaf, type LeafLine, type LeafTable, type LineOrigin } from "../lib/markdown-leaves.ts";
 import { detectChatFileLinks, fileTargetOfHref, isFileLinkCandidate } from "../lib/chat-file-links";
 import { detectWebLinks } from "../lib/chat-web-links";
@@ -47,9 +49,9 @@ const QUOTE = /^\s*>\s?(.*)$/;
 /** How many blockquotes may nest; a `>` inside the deepest one is literal text. */
 const MAX_QUOTE_DEPTH = 8;
 
-/** Where a block is parsed: inside a quote (a `mermaid` fence is then plain code, not a drawn diagram), how many quotes deep, and the collector of the leaf records when the message is quotable. */
-interface BlockContext { readonly quoted: boolean; readonly depth: number; readonly leaves: LeafCollector | null }
-const TOP_LEVEL: BlockContext = { quoted: false, depth: 0, leaves: null };
+/** Where a block is parsed: inside a quote (a `mermaid` fence is then plain code, not a drawn diagram), how many quotes deep, whether inline emphasis is parsed (not in text the user typed), and the collector of the leaf records when the message is quotable. */
+interface BlockContext { readonly quoted: boolean; readonly depth: number; readonly emphasis: boolean; readonly leaves: LeafCollector | null }
+const TOP_LEVEL: BlockContext = { quoted: false, depth: 0, emphasis: true, leaves: null };
 
 /** Where line `index` of a nested parse came from; `null` origins are the source's own lines. */
 function originAt(origins: readonly LineOrigin[] | null, index: number): LineOrigin {
@@ -118,15 +120,17 @@ function linkLabel(label: string, key: string): ReactNode {
 
 /** The content of an emphasis token: links, code spans and file paths like top-level text, nesting bounded. */
 function emphasized(inner: string, key: string, depth: number): ReactNode {
-	return depth < MAX_EMPHASIS_DEPTH ? <Fragment key={key}>{renderInline(inner, key, depth + 1)}</Fragment> : plain(inner, key);
+	return depth < MAX_EMPHASIS_DEPTH ? <Fragment key={key}>{renderInline(inner, key, true, depth + 1)}</Fragment> : plain(inner, key);
 }
 
-function renderInline(text: string, keyPrefix: string, depth = 0): ReactNode[] {
+/** One line of inline Markdown. `emphasis` false is text the user typed: `*`, `_` and `~~` are never markup there (links, code spans and `[Image #N]` still are). */
+function renderInline(text: string, keyPrefix: string, emphasis = true, depth = 0): ReactNode[] {
 	const nodes: ReactNode[] = [];
 	let cursor = 0;
 	let tokenIndex = 0;
-	INLINE_TOKEN.lastIndex = 0;
-	let match = INLINE_TOKEN.exec(text);
+	const grammar = emphasis ? INLINE_TOKEN : USER_INLINE_TOKEN;
+	grammar.lastIndex = 0;
+	let match = grammar.exec(text);
 	while (match !== null) {
 		if (match.index > cursor) nodes.push(plain(text.slice(cursor, match.index), `${keyPrefix}-p${tokenIndex}`));
 		const token = match[0];
@@ -162,19 +166,19 @@ function renderInline(text: string, keyPrefix: string, depth = 0): ReactNode[] {
 			nodes.push(<em key={key}>{emphasized(token.slice(1, -1), `${key}f`, depth)}</em>);
 		}
 		// A nested call moved the shared regex; continue right after this token.
-		INLINE_TOKEN.lastIndex = cursor;
-		match = INLINE_TOKEN.exec(text);
+		grammar.lastIndex = cursor;
+		match = grammar.exec(text);
 	}
 	if (cursor < text.length) nodes.push(plain(text.slice(cursor), `${keyPrefix}-p${tokenIndex}`));
 	return nodes;
 }
 
 /** Render soft-wrapped lines as inline content separated by `<br/>` (markdown `breaks` mode). */
-function renderLines(lines: readonly string[], keyPrefix: string): ReactNode[] {
+function renderLines(lines: readonly string[], keyPrefix: string, emphasis: boolean): ReactNode[] {
 	const nodes: ReactNode[] = [];
 	lines.forEach((line, lineIndex) => {
 		if (lineIndex > 0) nodes.push(<br key={`${keyPrefix}-br${lineIndex}`} />);
-		nodes.push(...renderInline(line, `${keyPrefix}-l${lineIndex}`));
+		nodes.push(...renderInline(line, `${keyPrefix}-l${lineIndex}`, emphasis));
 	});
 	return nodes;
 }
@@ -328,6 +332,8 @@ export interface MarkdownParse {
 	readonly blocks: readonly ReactNode[];
 	readonly starts: readonly number[];
 	readonly quotable: boolean;
+	/** Whether inline emphasis was parsed; `false` for text the user typed. A parse is reused only by one of the same mode. */
+	readonly emphasis: boolean;
 	readonly leaves: readonly Leaf[];
 	readonly leafStarts: readonly number[];
 }
@@ -339,9 +345,9 @@ export interface MarkdownParse {
  * the next block), so every block that ends before the previous text's last line — the one
  * line an append can change — is kept as the same element, and only the tail is parsed again.
  */
-export function parseMarkdown(text: string, previous: MarkdownParse | null, quotable = false): MarkdownParse {
+export function parseMarkdown(text: string, previous: MarkdownParse | null, quotable = false, emphasis = true): MarkdownParse {
 	const lines = text.split(/\r?\n/);
-	if (previous !== null && previous.quotable === quotable && previous.starts.length >= 2 && text.length > previous.text.length && text.startsWith(previous.text)) {
+	if (previous !== null && previous.quotable === quotable && previous.emphasis === emphasis && previous.starts.length >= 2 && text.length > previous.text.length && text.startsWith(previous.text)) {
 		const modified = previous.lineCount - 1;
 		const last = previous.starts.length - 1;
 		// A block that starts on the modified line may now be joined by the block before it
@@ -350,22 +356,23 @@ export function parseMarkdown(text: string, previous: MarkdownParse | null, quot
 		const from = (previous.starts[last] as number) < modified ? last : last - 1;
 		if (from >= 1) {
 			const kept = previous.leafStarts[from] as number;
-			const collector = quotable ? new LeafCollector(kept) : null;
-			const tail = parseBlockRange(lines, null, previous.starts[from] as number, from, false, "b", { ...TOP_LEVEL, leaves: collector });
+			const collector = quotable ? new LeafCollector(kept, emphasis) : null;
+			const tail = parseBlockRange(lines, null, previous.starts[from] as number, from, false, "b", { ...TOP_LEVEL, emphasis, leaves: collector });
 			return {
 				text,
 				lineCount: lines.length,
 				blocks: [...previous.blocks.slice(0, from), ...tail.blocks],
 				starts: [...previous.starts.slice(0, from), ...tail.starts],
 				quotable,
+				emphasis,
 				leaves: collector === null ? [] : [...previous.leaves.slice(0, kept), ...collector.leaves],
 				leafStarts: [...previous.leafStarts.slice(0, from), ...tail.leafStarts],
 			};
 		}
 	}
-	const collector = quotable ? new LeafCollector(0) : null;
-	const parsed = parseBlockRange(lines, null, 0, 0, false, "b", { ...TOP_LEVEL, leaves: collector });
-	return { text, lineCount: lines.length, blocks: parsed.blocks, starts: parsed.starts, quotable, leaves: collector === null ? [] : collector.leaves, leafStarts: parsed.leafStarts };
+	const collector = quotable ? new LeafCollector(0, emphasis) : null;
+	const parsed = parseBlockRange(lines, null, 0, 0, false, "b", { ...TOP_LEVEL, emphasis, leaves: collector });
+	return { text, lineCount: lines.length, blocks: parsed.blocks, starts: parsed.starts, quotable, emphasis, leaves: collector === null ? [] : collector.leaves, leafStarts: parsed.leafStarts };
 }
 
 /** The leaf's line `index` of `lines`: its origin, with the text the leaf draws from it and the characters of it the parse dropped. */
@@ -400,8 +407,8 @@ function parseBlockRange(lines: readonly string[], origins: readonly LineOrigin[
 			last: originAt(origins, firstLine + paragraphLines.length - 1).line,
 		});
 		return tight
-			? <span key={paragraphKey} data-md-leaf={leaf}>{renderLines(paragraphLines, paragraphKey)}</span>
-			: <p key={paragraphKey} data-md-leaf={leaf}>{renderLines(paragraphLines, paragraphKey)}</p>;
+			? <span key={paragraphKey} data-md-leaf={leaf}>{renderLines(paragraphLines, paragraphKey, context.emphasis)}</span>
+			: <p key={paragraphKey} data-md-leaf={leaf}>{renderLines(paragraphLines, paragraphKey, context.emphasis)}</p>;
 	};
 
 	while (index < lines.length) {
@@ -467,7 +474,7 @@ function parseBlockRange(lines: readonly string[], origins: readonly LineOrigin[
 			const level = Math.min(6, (heading[1] as string).length);
 			const Tag = `h${level}` as "h1" | "h2" | "h3" | "h4" | "h5" | "h6";
 			const leaf = collector?.add({ kind: "text", lines: [leafLine(origins, lines, index, heading[2] as string)], first: originAt(origins, index).line, last: originAt(origins, index).line });
-			blocks.push(<Tag key={`b${key++}`} data-md-leaf={leaf}>{renderInline(heading[2] as string, `h${key}`)}</Tag>);
+			blocks.push(<Tag key={`b${key++}`} data-md-leaf={leaf}>{renderInline(heading[2] as string, `h${key}`, context.emphasis)}</Tag>);
 			index++;
 			continue;
 		}
@@ -526,7 +533,7 @@ function parseBlockRange(lines: readonly string[], origins: readonly LineOrigin[
 						<thead>
 							<tr data-md-leaf={headerLeaf}>
 								{header.map((cell, cellIndex) => (
-									<th key={`th${cellIndex}`}>{renderInline(cell, `th${cellIndex}`)}</th>
+									<th key={`th${cellIndex}`}>{renderInline(cell, `th${cellIndex}`, context.emphasis)}</th>
 								))}
 							</tr>
 						</thead>
@@ -534,7 +541,7 @@ function parseBlockRange(lines: readonly string[], origins: readonly LineOrigin[
 							{rows.map((row, rowIndex) => (
 								<tr key={`tr${rowIndex}`} data-md-leaf={rowLeaves[rowIndex]}>
 									{header.map((_, cellIndex) => (
-										<td key={`td${cellIndex}`}>{renderInline(row[cellIndex] ?? "", `td${rowIndex}-${cellIndex}`)}</td>
+										<td key={`td${cellIndex}`}>{renderInline(row[cellIndex] ?? "", `td${rowIndex}-${cellIndex}`, context.emphasis)}</td>
 									))}
 								</tr>
 							))}
@@ -570,10 +577,10 @@ function parseBlockRange(lines: readonly string[], origins: readonly LineOrigin[
 	return { blocks, starts, leafStarts };
 }
 
-export const Markdown = memo(function Markdown({ text, quotable = false }: { text: string; quotable?: boolean }): ReactNode {
+export const Markdown = memo(function Markdown({ text, quotable = false, emphasis = true }: { text: string; quotable?: boolean; emphasis?: boolean }): ReactNode {
 	// The previous parse feeds the next one: while a reply streams, only the tail is parsed again.
 	const previous = useRef<MarkdownParse | null>(null);
-	const parsed = useMemo(() => parseMarkdown(text, previous.current, quotable), [text, quotable]);
+	const parsed = useMemo(() => parseMarkdown(text, previous.current, quotable, emphasis), [text, quotable, emphasis]);
 	previous.current = parsed;
 	const root = useRef<HTMLDivElement>(null);
 	// A quotable message hands the page the parse that produced its DOM, once the DOM is committed.

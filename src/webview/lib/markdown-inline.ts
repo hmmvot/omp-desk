@@ -7,12 +7,21 @@
  */
 import { webLinkUrl } from "../../shared/terminal-links.ts";
 
+const CODE = "(`[^`\\n]+`)";
+const EMPHASIS = "(\\*\\*[^*\\n]+\\*\\*)|(__[^_\\n]+__)|(\\*[^*\\n]+\\*)|(_[^_\\n]+_)|(~~[^~\\n]+~~)";
+const LINKS = "(\\[[^\\]\\n]*\\]\\((?:[^()\\s]|\\([^()\\s]*\\))+\\))|(\\[Image #[1-9]\\d*(?:,[^\\]\\n]*)?\\])|(<https?:\\/\\/[^\\s<>]+>)|((?<![A-Za-z\\d+.-])[Hh][Tt][Tt][Pp][Ss]?:\\/\\/[^\\s<>\"`]+)";
+
 /**
  * Inline token grammar; code wins over emphasis, bold over italic, matching markdown. A bare URL
  * is one token so the `_`/`*` inside it never start emphasis; `<https://…>` is an autolink.
  */
-export const INLINE_TOKEN =
-	/(`[^`\n]+`)|(\*\*[^*\n]+\*\*)|(__[^_\n]+__)|(\*[^*\n]+\*)|(_[^_\n]+_)|(~~[^~\n]+~~)|(\[[^\]\n]*\]\((?:[^()\s]|\([^()\s]*\))+\))|(\[Image #[1-9]\d*(?:,[^\]\n]*)?\])|(<https?:\/\/[^\s<>]+>)|((?<![A-Za-z\d+.-])[Hh][Tt][Tt][Pp][Ss]?:\/\/[^\s<>"`]+)/g;
+export const INLINE_TOKEN = new RegExp(`${CODE}|${EMPHASIS}|${LINKS}`, "g");
+
+/**
+ * The grammar of text the user typed: the same tokens without `**x**`, `__x__`, `*x*`, `_x_` and `~~x~~`, so the characters
+ * of `obj._method() … obj._other()` or `1*234*343` stay as written and nothing is styled.
+ */
+export const USER_INLINE_TOKEN = new RegExp(`${CODE}|${LINKS}`, "g");
 
 /** How many emphasis levels deep inline content is still parsed for links and code spans (bold inside italic inside strike). */
 export const MAX_EMPHASIS_DEPTH = 2;
@@ -25,9 +34,9 @@ export interface InlinePiece {
 	readonly visible: string;
 }
 
-/** The shown text of a token's inner content: parsed again until the depth bound, plain after it. */
+/** The shown text of a token's inner content: parsed again until the depth bound, plain after it (only where emphasis exists). */
 function emphasizedVisible(inner: string, depth: number): string {
-	return depth < MAX_EMPHASIS_DEPTH ? inlinePieces(inner, depth + 1).map(piece => piece.visible).join("") : inner;
+	return depth < MAX_EMPHASIS_DEPTH ? inlinePieces(inner, true, depth + 1).map(piece => piece.visible).join("") : inner;
 }
 
 /** The text the renderer shows for `token` (the one place that knows each token kind's markup, beside `renderInline`). */
@@ -41,10 +50,13 @@ function tokenVisible(token: string, depth: number): string {
 	return emphasizedVisible(token.slice(1, -1), depth);
 }
 
-/** The pieces of one line of inline Markdown, in order, covering the line; the plain pieces between tokens are text as it stands. */
-export function inlinePieces(text: string, depth = 0): InlinePiece[] {
+/**
+ * The pieces of one line of inline Markdown, in order, covering the line; the plain pieces between tokens are text as it stands.
+ * `emphasis` is false for text the user typed ({@link USER_INLINE_TOKEN}): it must match how the renderer parsed the line.
+ */
+export function inlinePieces(text: string, emphasis = true, depth = 0): InlinePiece[] {
 	const pieces: InlinePiece[] = [];
-	const grammar = new RegExp(INLINE_TOKEN.source, "g");
+	const grammar = new RegExp((emphasis ? INLINE_TOKEN : USER_INLINE_TOKEN).source, "g");
 	let cursor = 0;
 	for (let match = grammar.exec(text); match !== null; match = grammar.exec(text)) {
 		if (match.index > cursor) pieces.push({ start: cursor, end: match.index, token: false, visible: text.slice(cursor, match.index) });

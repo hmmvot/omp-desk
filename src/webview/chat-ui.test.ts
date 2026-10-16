@@ -4037,14 +4037,14 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 		await t.test("a selection across a user message, a tool row and a reply quotes the two messages and nothing of the tool; chrome, whitespace, a collapsed range and the composer are not quotable", async () => {
 			await reset("quote-capture-rows");
 			await showMessages([
-				{ role: "user", timestamp: 1, content: "Please check **this** file" },
+				{ role: "user", timestamp: 1, content: "Please check `this` file" },
 				assistantMessage([{ type: "toolCall", id: "r1", name: "read", arguments: { path: "src/a.ts" } }], { stopReason: "toolUse" }),
 				{ role: "toolResult", timestamp: 3, toolCallId: "r1", toolName: "read", isError: false, content: [{ type: "text", text: "RESULT_TEXT_MARK" }], details: {} },
 				assistantMessage([{ type: "text", text: "Done: `ok` now" }]),
 			]);
 			await ui.wait("document.querySelector('[data-tool-name=\"read\"]') && document.querySelectorAll('.omp-md').length>=2");
 			const joined = await quoteBetween("this", "ok");
-			assert.deepEqual(joined, { kind: "quote", source: "**this** file\n\nDone: `ok`", plain: false });
+			assert.deepEqual(joined, { kind: "quote", source: "`this` file\n\nDone: `ok`", plain: false });
 			// Only chrome: the tool's head.
 			const chrome = await ui.evaluate<Captured>(`(()=>{const head=document.querySelector('[data-tool-name="read"] .omp-tool-head');const range=document.createRange();range.selectNodeContents(head);const selection=getSelection();selection.removeAllRanges();selection.addRange(range);return window.captureQuote()})()`);
 			assert.equal(chrome.kind, "none");
@@ -4066,12 +4066,35 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		await t.test("a sent user message shows `_`, `*` and `~` as typed and quotes them exactly, while the same text in a reply is styled; code, quotes and links of the message still render", async () => {
+			await reset("quote-user-literal");
+			const typed = "obj._method() ..... obj._otherMethod() and 1*234*343 and **b** ~~s~~ with `code` and [docs](https://example.com/d)";
+			await showMessages([
+				{ role: "user", timestamp: 1, content: `> quoted _x_\n\n${typed}` },
+				assistantMessage([{ type: "text", text: typed }]),
+			]);
+			await ui.wait("document.querySelectorAll('.omp-md').length>=2");
+			const shape = await ui.evaluate<{ text: string; styled: number; code: number; quotes: number; replyStyled: number }>(`(()=>{
+			 const [user,reply]=document.querySelectorAll('.omp-md');
+			 return {text:user.textContent,styled:user.querySelectorAll('em,strong,s,del,i,b').length,code:user.querySelectorAll('code').length,quotes:user.querySelectorAll('blockquote').length,replyStyled:reply.querySelectorAll('em,strong,s').length}})()`);
+			assert.equal(shape.text, "quoted _x_obj._method() ..... obj._otherMethod() and 1*234*343 and **b** ~~s~~ with code and docs", "every typed character is shown; only the code span and the link drop their markup");
+			assert.equal(shape.styled, 0, "nothing of a user message is emphasised, struck through or bold");
+			assert.equal(shape.code, 1, "a code span is still code");
+			assert.equal(shape.quotes, 1, "a quote is still a quote");
+			assert.ok(shape.replyStyled > 0, "the same text in a reply is styled");
+			assert.equal(await quotedMarkdown("obj", "~~s~~"), "obj._method() ..... obj._otherMethod() and 1*234*343 and **b** ~~s~~", "a user message quotes as typed");
+			assert.equal(await quotedMarkdown("234", "343"), "234*343");
+			assert.equal(await quotedMarkdown("_method", "_other"), "_method() ..... obj._other");
+			assert.equal(await quotedMarkdown("quoted", "_x_"), "> quoted _x_");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("the host's quote-selection action (Alt+Q, the context menu item) quotes the selection through the composer, or says why there is nothing to quote; no Quote button is drawn", async () => {
 			await reset("quote-triggers");
 			await ui.call("Emulation.setFocusEmulationEnabled", { enabled: true });
 			try {
 				await showMessages([
-					{ role: "user", timestamp: 1, content: "Ask about **this** thing" },
+					{ role: "user", timestamp: 1, content: "Ask about `this` thing" },
 					assistantMessage([{ type: "text", text: "Reply with `code` inside" }]),
 				]);
 				await ui.wait("document.querySelectorAll('.omp-md').length>=2 && document.querySelector('.omp-reply-footer')");
@@ -4080,8 +4103,8 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 				await settleFrames();
 				assert.equal(await ui.evaluate("document.querySelectorAll('.omp-quote-selection,[aria-label^=\"Quote message\"],[aria-label^=\"Quote reply\"]').length"), 0);
 				await ui.evaluate("window.ui.receive({type:'omp:webview-action',action:'quote-selection'})");
-				await waitDraft("window.composer.value()==='> **this** thing\\n'");
-				assert.deepEqual(await areaState(), { value: "> **this** thing\n", start: 17, end: 17, focused: true }, "the caret is on the line under the quote, in the field");
+				await waitDraft("window.composer.value()==='> `this` thing\\n'");
+				assert.deepEqual(await areaState(), { value: "> `this` thing\n", start: 15, end: 15, focused: true }, "the caret is on the line under the quote, in the field");
 				await undo();
 				await waitDraft("window.composer.value()===''");
 				// A second selection after a comment lands after a blank line; the chrome of a row is not quotable.

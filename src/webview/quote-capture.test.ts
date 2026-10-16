@@ -9,13 +9,13 @@ import { build } from "esbuild";
  * stands in for the page, so a selection is given as the text it starts at and the text it ends at (the end is searched after the
  * start). The real DOM is checked in `chat-ui.test.ts`.
  */
-type Capture = (source: string, start: string, end: string) => { markdown: string; plain: boolean };
+type Capture = (source: string, start: string, end: string, emphasis?: boolean) => { markdown: string; plain: boolean };
 let capture: Capture;
-let leavesOf: (source: string) => { id: number; kind: string; first: number; last: number; language?: string; closed?: boolean; open?: { text: string }; lines: { line: number; start: number; quote: number; text: string }[] }[];
+let leavesOf: (source: string, emphasis?: boolean) => { id: number; kind: string; emphasis: boolean; first: number; last: number; language?: string; closed?: boolean; open?: { text: string }; lines: { line: number; start: number; quote: number; text: string }[] }[];
 /** Every text leaf selected whole while the DOM disagrees with the record (one more character than the record shows). */
 let captureDisagreeing: (source: string) => { markdown: string; plain: boolean };
 /** Every `[from, to)` with `from > 0` of every text leaf of `source`, alone: how many degraded, and the ranges whose slice did not show the text it covers, as `[markdown, covered]`. */
-let sliceFailures: (source: string) => { checked: number; degraded: number; failures: string[][] };
+let sliceFailures: (source: string, emphasis?: boolean) => { checked: number; degraded: number; failures: string[][] };
 /** Streams `text` in the given prefix lengths and returns the leaves of each step. */
 let leavesStreamed: (text: string, lengths: readonly number[]) => { id: number }[][];
 
@@ -24,14 +24,14 @@ before(async () => {
 		import { parseMarkdown } from "./components/Markdown";
 		import { quoteSurface } from "./lib/quote-capture";
 		import { inlinePieces } from "./lib/markdown-inline";
-		const shown = leaf => leaf.kind === "text" ? leaf.lines.map(line => inlinePieces(line.text).map(piece => piece.visible).join("")).join("") : leaf.kind === "code" ? leaf.lines.map(line => line.text).join("\\n") : leaf.lines[0].text;
-		const model = source => {
-			const parsed = parseMarkdown(source, null, true);
+		const shown = leaf => leaf.kind === "text" ? leaf.lines.map(line => inlinePieces(line.text, leaf.emphasis).map(piece => piece.visible).join("")).join("") : leaf.kind === "code" ? leaf.lines.map(line => line.text).join("\\n") : leaf.lines[0].text;
+		const model = (source, emphasis = true) => {
+			const parsed = parseMarkdown(source, null, true, emphasis);
 			let at = 0;
 			return parsed.leaves.map(leaf => { const text = shown(leaf); const entry = { leaf, text, start: at }; at += text.length + 1; return entry; });
 		};
-		export const capture = (source, start, end) => {
-			const entries = model(source);
+		export const capture = (source, start, end, emphasis = true) => {
+			const entries = model(source, emphasis);
 			const document = entries.map(entry => entry.text).join("\\n");
 			const from = document.indexOf(start);
 			if (from < 0) throw new Error("start not found: " + start);
@@ -47,20 +47,20 @@ before(async () => {
 			}
 			return quoteSurface(source.split(/\\r?\\n/), picks);
 		};
-		export const leavesOf = source => parseMarkdown(source, null, true).leaves;
+		export const leavesOf = (source, emphasis = true) => parseMarkdown(source, null, true, emphasis).leaves;
 		export const captureDisagreeing = source => quoteSurface(source.split(/\\r?\\n/), model(source).filter(entry => entry.leaf.kind === "text").map(entry => ({ leaf: entry.leaf, text: entry.text + "!", from: 0, to: entry.text.length + 1 })));
-		export const sliceFailures = source => {
+		export const sliceFailures = (source, emphasis = true) => {
 			let checked = 0;
 			let degraded = 0;
 			const failures = [];
 			const lines = source.split(/\\r?\\n/);
 			const bare = text => text.replace(/^(?:> ?)+/, "");
-			for (const { leaf, text } of model(source)) {
+			for (const { leaf, text } of model(source, emphasis)) {
 				if (leaf.kind !== "text") continue;
 				for (let from = 1; from < text.length; from++) for (let to = from + 1; to <= text.length; to++) {
 					checked++;
 					const result = quoteSurface(lines, [{ leaf, text, from, to }]);
-					const back = result.markdown.split("\\n").map(bare).map(line => result.plain ? line : inlinePieces(line).map(piece => piece.visible).join("")).join("");
+					const back = result.markdown.split("\\n").map(bare).map(line => result.plain ? line : inlinePieces(line, emphasis).map(piece => piece.visible).join("")).join("");
 					if (result.plain) degraded++;
 					if (back !== text.slice(from, to)) failures.push([result.markdown, text.slice(from, to)]);
 				}
@@ -217,5 +217,47 @@ describe("every range of a leaf", () => {
 		const result = sliceFailures("see https://example.com/x_y_z now");
 		assert.deepEqual(result.failures, []);
 		assert.ok(result.degraded > 0);
+	});
+});
+
+describe("text the user typed (no emphasis)", () => {
+	const user = (source: string, start: string, end: string): string => capture(source, start, end, false).markdown;
+
+	it("records the mode on every leaf, so capture reads the line the way the renderer drew it", () => {
+		assert.equal(leavesOf("a _b_ c\n\n> q *x*", false).every(leaf => !leaf.emphasis), true);
+		assert.equal(leavesOf("a _b_ c").every(leaf => leaf.emphasis), true);
+	});
+
+	it("quotes a selection of `_` and `*` text exactly as typed, whole and cut", () => {
+		const source = "call obj._method() ..... obj._otherMethod() then 1*234*343 and **b** ~~s~~ done";
+		assert.deepEqual(capture(source, "call", "done", false), { markdown: source, plain: false });
+		assert.equal(user(source, "_method", "_other"), "_method() ..... obj._other");
+		assert.equal(user(source, "234", "343"), "234*343");
+		assert.equal(user(source, "1*", "343"), "1*234*343");
+		assert.equal(user(source, "**b**", "~~s~~"), "**b** ~~s~~");
+		assert.equal(user(source, "b**", "~~s"), "b** ~~s");
+	});
+
+	it("is not what the same text quotes as in a styled message", () => {
+		assert.equal(md("1*234*343", "1234", "343"), "1*234*343");
+		assert.equal(md("a *b* c", "b", " c"), "*b* c", "a styled token the selection covers whole is source");
+		assert.equal(md("a *b* c", "b", "c"), "*b* c");
+		assert.equal(user("a *b* c", "b", " c"), "b* c", "a user message's `*` is a character of the shown text");
+	});
+
+	it("still carries code spans and links as source when the selection covers them whole", () => {
+		assert.equal(user("run `npm test` and [a link](https://example.com/x) now", "npm", " now"), "`npm test` and [a link](https://example.com/x) now");
+		assert.equal(user("run `npm test` now", "test", " now"), "test now");
+		assert.equal(user("> quoted _x_ here\n> more", "quoted", "more"), "> quoted _x_ here\n> more");
+	});
+
+	it("shows the text it covers for every range, without degrading", () => {
+		const sources = ["obj._method() ..... obj._otherMethod()", "1*234*343 and **b** ~~s~~", "> quoted _x_ and `code`\n> second *line*", "- item *one*\n- item _two_ [l](https://example.com)"];
+		for (const source of sources) {
+			const result = sliceFailures(source, false);
+			assert.ok(result.checked > 10, source);
+			assert.deepEqual(result.failures, [], source);
+			assert.equal(result.degraded, 0, source);
+		}
 	});
 });

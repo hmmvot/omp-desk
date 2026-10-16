@@ -3,10 +3,10 @@ import { flushSync } from "react-dom";
 import { TextReveal, nextTextRevealFrame } from "../lib/text-reveal.ts";
 import { Markdown } from "./Markdown.tsx";
 
-export interface PacedMarkdownProps { text: string; streaming: boolean; bypass?: boolean; quotable?: boolean }
+export interface PacedMarkdownProps { text: string; streaming: boolean; bypass?: boolean; quotable?: boolean; emphasis?: boolean }
 
 /** Reveals a live message's appended text gradually. The canonical text is never altered; pacing is skipped for reduced motion, a hidden document or an active selection. */
-export function PacedMarkdown({ text, streaming, bypass = false, quotable = false }: PacedMarkdownProps) {
+export function PacedMarkdown({ text, streaming, bypass = false, quotable = false, emphasis = true }: PacedMarkdownProps) {
 	const reveal = useRef<TextReveal | null>(null);
 	if (reveal.current === null) reveal.current = new TextReveal(text);
 	const [visible, setVisible] = useState(text);
@@ -60,5 +60,5 @@ export function PacedMarkdown({ text, streaming, bypass = false, quotable = fals
 		// Flush before the browser begins a native selection, then leave the selected DOM
 		// untouched until `selectionchange` releases it.
 		if (!selected.current && reveal.current!.flush()) flushSync(() => setVisible(reveal.current!.visible));
-	}}><Markdown text={visible} quotable={quotable} /></div>;
+	}}><Markdown text={visible} quotable={quotable} emphasis={emphasis} /></div>;
 }

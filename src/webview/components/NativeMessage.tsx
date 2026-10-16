@@ -139,11 +139,11 @@ function CustomMessageView({ message, irc }: { message: CustomMessage; irc?: Irc
 			</section>;
 		}
 		case "collab-prompt":
-			return <section className="omp-native-message omp-user omp-native-collab"><header><strong>«{stringField(details, "from")?.trim() || "guest"}»</strong></header><MessageContentView content={message.content} /></section>;
+			return <section className="omp-native-message omp-user omp-native-collab"><header><strong>«{stringField(details, "from")?.trim() || "guest"}»</strong></header><MessageContentView content={message.content} emphasis={false} /></section>;
 		case "skill-prompt": {
 			const invocation = userSkill(message);
 			if (invocation) return <section className="omp-native-message omp-native-skill omp-user">
-				<header><span className="codicon codicon-book" aria-hidden="true" /><Markdown text={invocation.prompt} />{invocation.reconstructed && <span className="omp-native-badge">reconstructed</span>}</header>
+				<header><span className="codicon codicon-book" aria-hidden="true" /><Markdown text={invocation.prompt} emphasis={false} />{invocation.reconstructed && <span className="omp-native-badge">reconstructed</span>}</header>
 				<NativeDisclosure title="Expanded skill"><MessageContentView content={message.content} /></NativeDisclosure>
 			</section>;
 			const name = stringField(details, "name");
@@ -264,7 +264,7 @@ function MessageView({ message, superseded, irc }: { message: ChatMessage; super
 		case "developer": return null;
 		case "user":
 			return <section className="omp-native-message omp-user">
-				{message.synthetic ? <NativeDisclosure title="Agent-attributed input"><MessageContentView content={message.content} references quotable /></NativeDisclosure> : <MessageContentView content={message.content} references quotable />}
+				{message.synthetic ? <NativeDisclosure title="Agent-attributed input"><MessageContentView content={message.content} references quotable /></NativeDisclosure> : <MessageContentView content={message.content} references quotable emphasis={false} />}
 			</section>;
 		case "custom": case "hookMessage": return <CustomMessageView message={message} irc={irc} />;
 		case "bashExecution": case "pythonExecution": return <ExecutionView message={message} />;

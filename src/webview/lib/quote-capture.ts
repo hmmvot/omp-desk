@@ -35,9 +35,9 @@ function quotePrefix(levels: number): string {
 	return "> ".repeat(levels);
 }
 
-/** The text of `source` as the renderer shows it, for checking a slice. */
-function shownText(source: string): string {
-	return inlinePieces(source).map(piece => piece.visible).join("");
+/** The text of `source` as the renderer shows it (with or without emphasis), for checking a slice. */
+function shownText(source: string, emphasis: boolean): string {
+	return inlinePieces(source, emphasis).map(piece => piece.visible).join("");
 }
 
 interface Mapped {
@@ -94,7 +94,7 @@ function plainPiece(leaf: Leaf, text: string): Piece | null {
 
 function textPiece(source: readonly string[], pick: LeafPick): Piece | null {
 	const { leaf } = pick;
-	const parsed = leaf.lines.map(line => ({ line, pieces: inlinePieces(line.text) }));
+	const parsed = leaf.lines.map(line => ({ line, pieces: inlinePieces(line.text, leaf.emphasis) }));
 	const shown = parsed.map(entry => entry.pieces.map(piece => piece.visible).join(""));
 	if (shown.join("") !== pick.text || !leaf.lines.every(line => lineHolds(source, line))) return plainPiece(leaf, pick.text.slice(pick.from, pick.to));
 	const verbatim = pick.from === 0;
@@ -113,7 +113,7 @@ function textPiece(source: readonly string[], pick: LeafPick): Piece | null {
 		const prefix = verbatim ? (source[entry.line.line] as string).slice(0, entry.line.start) : quotePrefix(entry.line.quote);
 		if (lines.length === 0) { firstQuote = entry.line.quote; first = entry.line.line; }
 		last = entry.line.line;
-		if (shownText(mapped.source) !== mapped.shown) throw new MismatchError();
+		if (shownText(mapped.source, leaf.emphasis) !== mapped.shown) throw new MismatchError();
 		lines.push(`${prefix}${mapped.source}`);
 	});
 	return lines.length === 0 ? null : { lines, first, last, firstQuote, lastQuote: leaf.lines[leaf.lines.length - 1]?.quote ?? firstQuote, plain: false };

@@ -45,15 +45,19 @@ export interface Leaf {
 	/** `row`: the table the row belongs to, and whether this row is its header. */
 	readonly table?: LeafTable;
 	readonly header?: boolean;
+	/** Whether the leaf's inline text was parsed with emphasis (`false` for text the user typed): the shown text of a line is `inlinePieces(text, emphasis)`. */
+	readonly emphasis: boolean;
 }
 
 /** Numbers the leaves of one parse from `base` on, so reused blocks keep their numbers while a streaming tail is parsed again. */
 export class LeafCollector {
 	readonly leaves: Leaf[] = [];
 	readonly base: number;
+	readonly emphasis: boolean;
 
-	constructor(base: number) {
+	constructor(base: number, emphasis: boolean) {
 		this.base = base;
+		this.emphasis = emphasis;
 	}
 
 	/** The number the next leaf gets. */
@@ -61,9 +65,9 @@ export class LeafCollector {
 		return this.base + this.leaves.length;
 	}
 
-	add(leaf: Omit<Leaf, "id">): number {
+	add(leaf: Omit<Leaf, "id" | "emphasis">): number {
 		const id = this.count;
-		this.leaves.push({ ...leaf, id });
+		this.leaves.push({ ...leaf, id, emphasis: this.emphasis });
 		return id;
 	}
 

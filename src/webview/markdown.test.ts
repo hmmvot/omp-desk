@@ -16,6 +16,10 @@ type RenderStreamed = (text: string, lengths: readonly number[]) => { html: stri
 let renderStreamed: RenderStreamed;
 /** Renders as it is, line-break points included. */
 let renderBreaks: (text: string) => string;
+/** Renders text the user typed (`emphasis: false`). */
+let renderUser: (text: string) => string;
+/** Parses `first` with emphasis, then `text` (which only appends to it) as user text from that parse: the html of the second parse, and whether any block of the first was reused. */
+let parseAcrossModes: (first: string, text: string) => { html: string; reused: boolean };
 /** The number of top-level blocks of a fresh parse. */
 let blockCount: (text: string) => number;
 before(async () => {
@@ -33,6 +37,12 @@ before(async () => {
 		const characters = html => html.replaceAll("<wbr/>", "");
 		export const renderBreaks = text => renderToStaticMarkup(createElement(Markdown, { text }));
 		export const render = text => characters(renderBreaks(text));
+		export const renderUser = text => characters(renderToStaticMarkup(createElement(Markdown, { text, emphasis: false })));
+		export const parseAcrossModes = (first, text) => {
+			const before = parseMarkdown(first, null);
+			const after = parseMarkdown(text, before, false, false);
+			return { html: characters(renderToStaticMarkup(createElement("div", { className: "omp-md" }, after.blocks))), reused: after.blocks.some(block => before.blocks.includes(block)) };
+		};
 		export const renderLinked = async (text, existing) => {
 			const listeners = new Set();
 			const transport = { post(message) { if (message.type === "omp:terminal-link-validate") queueMicrotask(() => { for (const listener of listeners) listener({ type: "omp:terminal-link-validation", requestId: message.requestId, valid: existing.includes(message.target) }); }); return true; }, subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); } };
@@ -84,10 +94,12 @@ before(async () => {
 		};
 	`, loader: "tsx", resolveDir: join(process.cwd(), "src/webview") }, bundle: true, write: false,
 		format: "cjs", platform: "node", packages: "external", jsx: "automatic", define: { "process.env.NODE_ENV": '"production"' } });
-	const module = { exports: {} as { render: typeof render; renderBreaks: typeof renderBreaks; renderLinked: Provide; renderSymbols: RenderSymbols; renderStreamed: RenderStreamed; blockCount: (text: string) => number } };
+	const module = { exports: {} as { render: typeof render; renderBreaks: typeof renderBreaks; renderUser: typeof renderUser; parseAcrossModes: typeof parseAcrossModes; renderLinked: Provide; renderSymbols: RenderSymbols; renderStreamed: RenderStreamed; blockCount: (text: string) => number } };
 	new Function("require", "module", "exports", bundled.outputFiles[0]!.text)(createRequire(import.meta.url), module, module.exports);
 	render = module.exports.render;
 	renderBreaks = module.exports.renderBreaks;
+	renderUser = module.exports.renderUser;
+	parseAcrossModes = module.exports.parseAcrossModes;
 	renderLinked = module.exports.renderLinked;
 	renderSymbols = module.exports.renderSymbols;
 	renderStreamed = module.exports.renderStreamed;
@@ -483,4 +495,35 @@ test("a quote with a fence streamed prefix by prefix renders as a fresh parse, a
 	}
 	assert.equal(blockCount(source), 4);
 	assert.equal(blockCount("> a\n> ```\n> b\n> - c"), 1);
+});
+
+test("text the user typed keeps `_`, `*` and `~` as typed: no emphasis, strong or strikethrough, with the same text in a reply still styled", () => {
+	const typed = "obj._method() ..... obj._otherMethod() and 1*234*343 and **b** __u__ *i* _j_ ~~s~~";
+	const html = renderUser(typed);
+	assert.equal(html, `<div class="omp-md"><p>${typed}</p></div>`);
+	assert.doesNotMatch(html, /<(?:em|strong|s)>/);
+	assert.match(render(typed), /<em>method\(\) \.\.\.\.\. obj\.<\/em>/, "the same text in a reply is styled");
+	assert.match(render("1*234*343"), /<em>234<\/em>/);
+	assert.match(render("**b** ~~s~~"), /<strong>b<\/strong> <s>s<\/s>/);
+	assert.equal(renderUser("1*234*343"), '<div class="omp-md"><p>1*234*343</p></div>');
+	assert.equal(renderUser("**b** ~~s~~"), '<div class="omp-md"><p>**b** ~~s~~</p></div>');
+});
+
+test("text the user typed still renders code spans, fences, quotes, links, lists, headings, tables and image references", () => {
+	assert.equal(renderUser("run `a_b*c` and **x**"), '<div class="omp-md"><p>run <code>a_b*c</code> and **x**</p></div>');
+	assert.deepEqual(codeBlocks(renderUser("```ts\nconst a = b*c*d; // _x_\n```")), [{ language: "ts", source: "const a = b*c*d; // _x_" }]);
+	assert.match(renderUser("> quoted _x_ and `a_b`\n> more *y*"), /^<div class="omp-md"><blockquote><p>quoted _x_ and <code>a_b<\/code><br\/>more \*y\*<\/p><\/blockquote><\/div>$/);
+	assert.equal(renderUser("see [the *guide*](https://example.com/g)"), render("see [the *guide*](https://example.com/g)"), "a link label is never styled, in either mode");
+	assert.equal(renderUser("<https://example.com/p> https://example.com/a_b_c"), render("<https://example.com/p> https://example.com/a_b_c"), "autolinks and bare URLs are the same in both modes");
+	assert.equal(renderUser("- a *b*\n- c _d_"), '<div class="omp-md"><ul><li><span>a *b*</span></li><li><span>c _d_</span></li></ul></div>');
+	assert.equal(renderUser("# a_b_ *c*"), '<div class="omp-md"><h1>a_b_ *c*</h1></div>');
+	assert.equal(renderUser("***"), '<div class="omp-md"><hr/></div>');
+	assert.match(renderUser("a | b\n- | -\n*1* | _2_"), /<thead><tr><th>a<\/th><th>b<\/th><\/tr><\/thead><tbody><tr><td>\*1\*<\/td><td>_2_<\/td><\/tr><\/tbody>/);
+	assert.match(renderUser("[Image #1] and *x*"), /\[Image #1\] and \*x\*/);
+});
+
+test("a parse of one emphasis mode is never reused by a parse of the other", () => {
+	const result = parseAcrossModes("a *b*\n\nsecond\n\nthird", "a *b*\n\nsecond\n\nthird more");
+	assert.equal(result.reused, false);
+	assert.equal(result.html, '<div class="omp-md"><p>a *b*</p><p>second</p><p>third more</p></div>');
 });

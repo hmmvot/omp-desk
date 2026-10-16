@@ -17,6 +17,8 @@ export interface MessageContentViewProps {
 	references?: boolean;
 	/** The message is something the reader may quote into the draft: its Markdown keeps the records capture needs. */
 	quotable?: boolean;
+	/** `false` for text the user typed: `*`, `_` and `~~` stay literal characters instead of styling the text. */
+	emphasis?: boolean;
 }
 export interface AssistantContentViewProps { content: readonly ChatContent[]; streaming?: boolean; bypassPacing?: boolean }
 export interface NativeDisclosureProps { title: ReactNode; children: ReactNode; className?: string; initiallyOpen?: boolean; forceOpen?: { open: boolean; generation: number }; expanded?: boolean; onExpandedChange?: (expanded: boolean) => void }
@@ -49,12 +51,12 @@ function ThinkingDisclosure({ children }: { children: ReactNode }) {
 }
 
 
-function ContentBlock({ block, pace = false, streaming = false, bypassPacing = false, quotable = false, imageNumber, imageAnchor }: { block: ChatContent; pace?: boolean; streaming?: boolean; bypassPacing?: boolean; quotable?: boolean; imageNumber?: number; imageAnchor?: string }) {
+function ContentBlock({ block, pace = false, streaming = false, bypassPacing = false, quotable = false, emphasis = true, imageNumber, imageAnchor }: { block: ChatContent; pace?: boolean; streaming?: boolean; bypassPacing?: boolean; quotable?: boolean; emphasis?: boolean; imageNumber?: number; imageAnchor?: string }) {
 	switch (block.type) {
 		case "text":
-			return pace ? <PacedMarkdown text={block.text} streaming={streaming} bypass={bypassPacing} quotable={quotable} /> : <Markdown text={block.text} quotable={quotable} />;
+			return pace ? <PacedMarkdown text={block.text} streaming={streaming} bypass={bypassPacing} quotable={quotable} emphasis={emphasis} /> : <Markdown text={block.text} quotable={quotable} emphasis={emphasis} />;
 		case "thinking":
-			return block.thinking.trim().length === 0 ? null : <ThinkingDisclosure>{pace ? <PacedMarkdown text={block.thinking} streaming={streaming} bypass={bypassPacing} quotable={quotable} /> : <Markdown text={block.thinking} quotable={quotable} />}</ThinkingDisclosure>;
+			return block.thinking.trim().length === 0 ? null : <ThinkingDisclosure>{pace ? <PacedMarkdown text={block.thinking} streaming={streaming} bypass={bypassPacing} quotable={quotable} emphasis={emphasis} /> : <Markdown text={block.thinking} quotable={quotable} emphasis={emphasis} />}</ThinkingDisclosure>;
 		case "redactedThinking": return null;
 		case "image":
 			return <figure className="omp-native-image" id={imageAnchor} tabIndex={imageAnchor === undefined ? undefined : -1} data-image-number={imageNumber}>
@@ -68,13 +70,13 @@ function ContentBlock({ block, pace = false, streaming = false, bypassPacing = f
 	}
 }
 
-export function MessageContentView({ content, pace, streaming, bypassPacing, references = false, quotable = false }: MessageContentViewProps) {
+export function MessageContentView({ content, pace, streaming, bypassPacing, references = false, quotable = false, emphasis = true }: MessageContentViewProps) {
 	const base = useId();
-	if (typeof content === "string") return <Markdown text={content} quotable={quotable} />;
+	if (typeof content === "string") return <Markdown text={content} quotable={quotable} emphasis={emphasis} />;
 	let imageCount = 0;
 	const blocks = content.map((block, index) => {
 		const imageNumber = references && block.type === "image" ? ++imageCount : undefined;
-		return <ContentBlock key={`${block.type}:${index}`} block={block} pace={pace} streaming={streaming} bypassPacing={bypassPacing} quotable={quotable} imageNumber={imageNumber} imageAnchor={imageNumber === undefined ? undefined : `${base}-image-${imageNumber}`} />;
+		return <ContentBlock key={`${block.type}:${index}`} block={block} pace={pace} streaming={streaming} bypassPacing={bypassPacing} quotable={quotable} emphasis={emphasis} imageNumber={imageNumber} imageAnchor={imageNumber === undefined ? undefined : `${base}-image-${imageNumber}`} />;
 	});
 	const body = <div className="omp-native-content">{blocks}</div>;
 	return references ? <UserImageReferencesContext.Provider value={{ count: imageCount, anchor: number => `${base}-image-${number}` }}>{body}</UserImageReferencesContext.Provider> : body;
