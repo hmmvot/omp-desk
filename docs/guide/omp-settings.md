@@ -19,6 +19,7 @@ OMP Desk gives OMP's own configuration a VS Code interface. Models, Agents and O
 ![The OMP Settings editor](../../media/readme/omp-settings.png)
 
 - OMP's own tabs, groups, labels and controls, search with filters (`@modified`, `@env`, `@warning`), and a **Global / Project / Effective** switch.
+- Only settings the installed OMP has are listed. A setting a newer OMP dropped is not shown, even if your config file still holds a value for it; that value is ignored and left in the file.
 - Each change is written to the **global** or the **project** (`.omp/config.yml`) layer, with the layer each value comes from, an environment override named when one applies, and **Reset** to remove a layer's value.
 - Credentials are never shown (set them with `omp config set` in a terminal); lists and mappings open their YAML at the key.
 - It needs Bun and the installed OMP's source files; an OMP whose settings schema it does not recognise is refused without changing anything.

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **OMP Settings: checked against OMP 18.11.1, and a setting the installed OMP no longer has is never shown.** The editor lists only the settings of the OMP it reads (so **Codex Code Mode**, which OMP 18.11.1 dropped, is gone from the Providers tab). A value your config file still holds for such a setting is ignored and stays in the file.
+
 ## [0.4.5] - 2026-10-16
 
 ### Added

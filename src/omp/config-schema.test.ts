@@ -180,6 +180,18 @@ test("baselines hold only registered, non-credential values", () => {
   assert.deepEqual(baselineProjection(input.layers.getGlobalSettings(), input.settings), { tui: { vimMode: true }, lsp: { formatOnWrite: true } });
 });
 
+test("a setting the installed OMP no longer has is not shown, whatever the user's files still hold for it", () => {
+  const stale = { providers: { "openai-codex": { codeMode: "on", codeModeDirectTools: ["read"] } } };
+  assert.ok(!recording.settings.some(setting => setting.id.startsWith("providers.openai-codex.codeMode")), "the recorded OMP (18.11.1) dropped these settings");
+  const clean = projectSnapshot(fakeSchema(recording));
+  const snapshot = projectSnapshot(fakeSchema(recording, { global: stale, project: stale, otherProject: stale, lowerProject: stale }));
+  assert.deepEqual(snapshot.entries.map(item => item.id), clean.entries.map(item => item.id), "no entry appears for a key only the files hold");
+  assert.ok(!JSON.stringify(snapshot).includes("codeMode"), "nothing of the stale key or its value reaches the snapshot");
+  assert.deepEqual(snapshot.notices, [], "the page does not warn about it either");
+  const input = fakeSchema(recording, { global: stale });
+  assert.deepEqual(baselineProjection(input.layers.getGlobalSettings(), input.settings), {}, "a write's baseline does not carry it");
+});
+
 test("an unrecognised shape fails closed: no version number gates the editor, the shape checks do", () => {
   assert.equal(projectSnapshot(fakeSchema(recording)).omp.verified, true);
   assert.equal(projectSnapshot({ ...fakeSchema(recording), version: "19.2.0" }).omp.verified, false, "another release is read, and shown as not verified");
