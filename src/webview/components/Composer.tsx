@@ -1650,7 +1650,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 				className="omp-btn omp-composer-attach"
 				disabled={!canPrompt || captureLocked || reading > 0 || routeKind === "bridge"}
 				aria-label={reading > 0 ? "Reading attached files" : "Attach files"}
-				title={reading > 0 ? "Reading attached files…" : routeKind === "bridge" ? NEEDS_HOST : "Attach a file or an image. You can also paste an image or a file, drag one here with Shift, or drag a file from VS Code's Explorer."}
+				title={reading > 0 ? "Reading attached files…" : routeKind === "bridge" ? NEEDS_HOST : "Attach a file or an image. You can also paste one, or hold Shift and drag it onto the chat (from the file manager or VS Code's Explorer): without Shift VS Code may open the file instead."}
 				onClick={requestPick}
 			>
 				<span aria-hidden="true" className={`codicon codicon-${reading > 0 ? "loading" : "attach"}`} />

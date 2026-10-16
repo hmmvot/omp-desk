@@ -4580,6 +4580,31 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		await t.test("a 2.6 MB text file dropped from the operating system is refused cleanly and leaves nothing behind: the next small file is accepted by dragenter, dragover and drop, and becomes a chip", async () => {
+			await reset("drop-huge-then-small");
+			await ui.evaluate(`window.hugeLog=()=>{const line='[0000000] Unity PlayMode line '+'x'.repeat(440)+'\\r\\n';return line.repeat(Math.ceil(2649137/line.length)).slice(0,2649137)};`);
+			const huge = "data.items.add(new File([window.hugeLog()],'Unity_PlayMode.log',{type:''}))";
+			const small = "data.items.add(new File(['a small file\\r\\n'.repeat(150)],'notes.txt',{type:'text/plain'}))";
+			const attachState = (): Promise<{ label: string | null; disabled: boolean; dropping: boolean; error: string }> => ui.evaluate(`(()=>{const button=document.querySelector('.omp-composer-attach');return{label:button.getAttribute('aria-label'),disabled:button.disabled,dropping:document.querySelector('.omp-composer--dropping')!==null,error:document.querySelector('.omp-attach-error')?.textContent??''}})()`);
+			for (const round of [1, 2]) {
+				assert.equal((await dropOn("window.composer.el()", "dragenter", huge)).prevented, true, `round ${round}: a file drag is accepted on entering`);
+				assert.equal((await dropOn("window.composer.el()", "dragover", huge)).prevented, true);
+				assert.equal((await dropOn("window.composer.el()", "drop", huge)).prevented, true, `round ${round}: the drop is taken, so VS Code never opens the file`);
+				await ui.wait("document.querySelector('.omp-attach-error')?.textContent.includes('Unity_PlayMode.log is 2.5 MB')");
+				const refused = await attachState();
+				assert.deepEqual([refused.label, refused.disabled, refused.dropping], ["Attach files", false, false], `round ${round}: reading is over, the button is usable, the drop target is gone`);
+			}
+			assert.equal(await ui.evaluate("document.querySelectorAll('.omp-attachment').length"), 0, "a refused file attaches nothing");
+			assert.equal((await dropOn("window.composer.el()", "dragenter", small)).prevented, true, "after the refusal a file drag is still accepted on entering");
+			assert.equal((await dropOn("window.composer.el()", "dragover", small)).prevented, true, "and over the field");
+			await ui.wait("document.querySelector('.omp-composer--dropping')");
+			assert.equal((await dropOn("window.composer.el()", "drop", small)).prevented, true, "and its drop is taken");
+			await ui.wait("document.querySelector('.omp-attachment[data-file-number=\"1\"]')");
+			assert.match(await draftValue(), /\[File #1: notes\.txt\]/);
+			assert.deepEqual(await ui.evaluate("window.sent.filter(message=>message.type==='omp:attach-uris').length"), 0, "an operating system drop reads in the page and asks the host for nothing");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("pending admission keeps text and images, blocks duplicate send routes, and clears only after the matching receipt", async () => {
 			await buildDraft("send-admission-pending");
 			await ui.evaluate("window.ui.admission(false);document.querySelector('button[aria-keyshortcuts=\"Enter\"]').click()");
