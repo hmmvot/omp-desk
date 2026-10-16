@@ -234,6 +234,32 @@ describe("a route that is read-only (a non-controlling editor of the conversatio
 	});
 });
 
+describe("a prompt OMP runs as a command of its own", () => {
+	it("is handled, not accepted, when OMP acknowledges it with agentInvoked false (`/rename` in a fresh session sends no prompt_result and starts no turn)", async () => {
+		const { runtime, channel } = await liveRig();
+		const page = new RecordingPage("editor");
+		runtime.attachPage(TAB, page);
+		channel.handlers.set("prompt", () => ({ data: { agentInvoked: false } }));
+		assert.equal(await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "rename-1", text: "/rename" }, page), "handled");
+		channel.handlers.set("prompt", () => ({ data: { agentInvoked: true } }));
+		assert.equal(await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "turn-1", text: "hello" }, page), "accepted", "a turn is accepted as before");
+		channel.handlers.set("prompt", () => ({}));
+		assert.equal(await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId: "turn-2", text: "hello again" }, page), "accepted", "an acknowledgement that says nothing is a turn too");
+	});
+});
+
+describe("the name OMP gives the session", () => {
+	it("is told to the extension on every session_info_update, with the session it names", async () => {
+		const { channel, events } = await liveRig();
+		channel.emit({ type: "session_info_update", title: "Fix the build", sessionId: channel.child.sessionId });
+		await tick();
+		assert.deepEqual(events.filter(event => event.type === "title"), [{ type: "title", sessionId: channel.child.sessionId, title: "Fix the build" }]);
+		channel.emit({ type: "session_info_update" });
+		await tick();
+		assert.equal(events.filter(event => event.type === "title").length, 1, "an update without a title says nothing");
+	});
+});
+
 describe("a page command while the conversation is not live", () => {
 	async function prompt(runtime: ChatRuntime, page: RecordingPage, requestId = "req-1") {
 		return await runtime.handleMessage(TAB, { type: "omp:chat-prompt", requestId, text: "hello" }, page);

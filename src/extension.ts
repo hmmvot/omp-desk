@@ -176,6 +176,7 @@ import type { ContextSession, ContextTarget } from "./host/context/context-contr
 import { owningWindowUri, registerWindowRouting } from "./wiring/window-routing";
 import type { WindowRouting, WindowRoutingDeps } from "./wiring/window-routing";
 import { registerSessionActions } from "./wiring/session-actions";
+import { adoptSessionTitle } from "./wiring/session-title";
 import type { SessionActions, SessionActionsDeps } from "./wiring/session-actions";
 import { CHAT_COMMAND_TYPES, registerGuestDispatcher } from "./wiring/guest-dispatcher";
 import type { CarriedDraft, GuestDispatcher, GuestDispatcherDeps } from "./wiring/guest-dispatcher";
@@ -6446,6 +6447,11 @@ async function confirmOpenUrl(event: { url: string; launchUrl?: string; instruct
   await vscode.env.openExternal(vscode.Uri.parse(event.launchUrl ?? event.url));
 }
 
+/** What taking a session's name into its row and editors needs: the index, the launcher repaint and the tab appearance. */
+function sessionTitleDeps(context: vscode.ExtensionContext, index: SessionIndex): Parameters<typeof adoptSessionTitle>[0] {
+  return { index, refreshLauncher: () => refreshLauncher(), applyAppearance: tabId => applyChatTabAppearance(context, index, tabId), log };
+}
+
 /**
  * One conversation event from the chat runtime, routed to the extension's own concerns:
  * activity and diagnostics for a model change, the redraw and readiness for a phase, the
@@ -6473,19 +6479,15 @@ function handleChatEvent(context: vscode.ExtensionContext, index: SessionIndex, 
         s.diagnostics.succeed(tabId, "first-paint", { detail: "the first authoritative snapshot of the conversation" });
       }
       return;
+    case "title":
+      void adoptSessionTitle(sessionTitleDeps(context, index), tabId, event.sessionId, event.title);
+      return;
     case "state": {
       const phase = event.payload.phase;
       logChatConnectionPhase(tabId, phase, event.payload.code, event.payload.exitReason);
       if (phase !== "live") cancelControlPicker(tabId);
       if (phase === "live") {
-        const entry = index.get(tabId);
-        const name = event.payload.title?.trim();
-        if (entry !== null && name && event.payload.sessionId === (entry.host?.sessionId ?? entry.sessionId) && entry.title !== name) {
-          void index.recordConversationState(tabId, { title: name }).then(() => {
-            refreshLauncher();
-            return applyChatTabAppearance(context, index, tabId);
-          }).catch(error => log.warn(`Session title could not be refreshed: ${messageOf(error)}`));
-        }
+        void adoptSessionTitle(sessionTitleDeps(context, index), tabId, event.payload.sessionId, event.payload.title ?? "");
         if (!diagnosticsStageMeasured(tabId, "chat-live")) {
           s.diagnostics.succeed(tabId, "chat-live", { detail: "the conversation reached its live phase" });
         }

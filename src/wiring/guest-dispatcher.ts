@@ -380,6 +380,10 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 			});
 	}
 
+	/**
+	 * A prompt OMP ran as a command of its own (`handled`) is reported as `explained`: the page starts no turn
+	 * state for it, because no turn follows and OMP sends no result for it.
+	 */
 	function replyChatSendResult(tabId: string, message: ChatWebviewMessage, page: ChatPage, outcome: ChatCommandOutcome): void {
 		if (message.type !== "omp:chat-prompt" && message.type !== "omp:chat-steer" && message.type !== "omp:chat-follow-up") return;
 		const epoch = deps.conversations().stateOf(tabId)?.epoch;
@@ -388,7 +392,7 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 			type: "omp:chat-send-result",
 			epoch,
 			requestId: message.requestId,
-			status: outcome === "accepted" ? "accepted" : outcome === "explained" ? "explained" : outcome === "unconfirmed" ? "unconfirmed" : "refused",
+			status: outcome === "accepted" ? "accepted" : outcome === "explained" || outcome === "handled" ? "explained" : outcome === "unconfirmed" ? "unconfirmed" : "refused",
 		});
 	}
 
@@ -408,12 +412,13 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 			outcome = "unconfirmed";
 		}
 		replyChatSendResult(tabId, message, page, outcome);
-		if (outcome === "accepted" && (message.type === "omp:chat-prompt" || message.type === "omp:chat-steer" || message.type === "omp:chat-follow-up")) {
+		const delivered = outcome === "accepted" || outcome === "handled";
+		if (delivered && (message.type === "omp:chat-prompt" || message.type === "omp:chat-steer" || message.type === "omp:chat-follow-up")) {
 			deps.rememberPrompt(message.text);
 		}
 		if (outcome !== "accepted" || message.type === "omp:chat-abort") {
 			const line = `tab ${tabId}: ${message.type} ${message.requestId.slice(0, 8)} was ${outcome}`;
-			if (outcome === "accepted") deps.log.info(line);
+			if (delivered) deps.log.info(line);
 			else deps.log.warn(line);
 		}
 		return outcome;

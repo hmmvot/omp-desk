@@ -836,6 +836,15 @@ describe("running a chat command", () => {
 		assert.deepEqual(w.lines[0], { level: "warn", message: `tab ${TAB}: omp:chat-prompt ${REQUEST.slice(0, 8)} was explained` });
 	});
 
+	it("tells the page a command OMP ran itself was explained, so no turn state starts, and still remembers its text", async () => {
+		const w = world();
+		w.state.outcome = "handled";
+		assert.equal(await w.dispatcher.runChatCommand(TAB, prompt, page as never), "handled");
+		assert.deepEqual(page.posted, [{ type: "omp:chat-send-result", epoch: w.state.epoch, requestId: REQUEST, status: "explained" }]);
+		assert.deepEqual(w.remembered, ["hello"]);
+		assert.deepEqual(w.lines, [{ level: "info", message: `tab ${TAB}: omp:chat-prompt ${REQUEST.slice(0, 8)} was handled` }]);
+	});
+
 	it("reports a send whose channel failed as unconfirmed, but lets another command's failure through", async () => {
 		const w = world();
 		w.state.handleMessageThrows = true;

@@ -106,6 +106,8 @@ export type ChatRuntimeEvent =
 	| { readonly type: "activity"; readonly activity: ConversationActivity; readonly baseline: boolean }
 	/** The phase, code, identity or bounded autonomous child-exit diagnostic changed. */
 	| { readonly type: "state"; readonly payload: ChatStatePayload }
+	/** OMP announced the session's name (`session_info_update`: `/rename`, or Desk's own rename); the extension records it for the row and the editor title. */
+	| { readonly type: "title"; readonly sessionId: string | null; readonly title: string }
 	/** The identity the process serves: learned for a new session, verified for a resumed one. */
 	| { readonly type: "identity"; readonly sessionFile: string; readonly sessionId: string; readonly previousSessionId?: string }
 	/** `open_url`: the extension shows an extension-owned confirm naming the URL. */
@@ -165,9 +167,11 @@ export interface ChatRuntimeOptions {
 
 /**
  * The outcome of one page command, for a route that answers its own request ledger. `explained` is a refusal
- * the asking route was already told about in one line, so it shows no second, generic refusal.
+ * the asking route was already told about in one line, so it shows no second, generic refusal. `handled` is a
+ * prompt OMP ran as a command of its own (`/rename`, `/memory`, a builtin: its acknowledgement says
+ * `agentInvoked: false`): it was accepted and no turn follows, so the page starts no turn state for it.
  */
-export type ChatCommandOutcome = "accepted" | "refused" | "explained" | "unconfirmed" | "ignored";
+export type ChatCommandOutcome = "accepted" | "handled" | "refused" | "explained" | "unconfirmed" | "ignored";
 
 /** Bounded sentences the page is told when the host refuses or cannot confirm a command. */
 export const CHAT_NOT_LIVE_SENTENCE = "This conversation is not accepting input right now.";
@@ -675,6 +679,9 @@ export class ChatRuntime {
 			case "event":
 				this.#broadcastEvent(conversation, { type: "omp:chat-event", epoch: output.epoch, frame: output.frame });
 				if (output.frame.type === "agent_end") this.#options.onEvent(tabId, { type: "turn-ended" });
+				if (output.frame.type === "session_info_update" && typeof output.frame.title === "string") {
+					this.#options.onEvent(tabId, { type: "title", sessionId: conversation.session?.sessionId ?? null, title: output.frame.title });
+				}
 				if (output.frame.type === "available_commands_update") this.#options.onEvent(tabId, { type: "catalogue" });
 				return;
 			case "entries":
@@ -990,7 +997,7 @@ export class ChatRuntime {
 	}
 
 	#settle(conversation: Conversation, origin: ChatPage | null, outcome: SendOutcome): ChatCommandOutcome {
-		if (outcome.status === "accepted") return "accepted";
+		if (outcome.status === "accepted") return outcome.agentInvoked === false ? "handled" : "accepted";
 		if (outcome.status === "unconfirmed") {
 			this.#tell(conversation, origin, CHAT_UNCONFIRMED_SENTENCE);
 			return "unconfirmed";
