@@ -3628,13 +3628,14 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate("document.body.classList.add('vscode-high-contrast');document.documentElement.style.setProperty('--vscode-contrastBorder','#ff0000')");
 			assert.equal((await read()).bar, "rgb(255, 0, 0)", "High Contrast uses the theme's own border");
 			await ui.evaluate("document.body.classList.remove('vscode-high-contrast');document.documentElement.style.removeProperty('--vscode-contrastBorder')");
-			await ui.call("Emulation.setEmulatedMedia", { features: [{ name: "forced-colors", value: "active" }] });
+			// setEmulatedMedia replaces every feature: keep the file's motion pin, or a CI image's OS setting leaks into the tests after this one.
+			await ui.call("Emulation.setEmulatedMedia", { features: [...MOTION_ALLOWED, { name: "forced-colors", value: "active" }] });
 			try {
 				const forced = await read();
 				assert.equal(forced.bar, forced.text, "the bar is drawn in the system text colour");
 				assert.match(forced.background, /^rgb\(/, "an opaque system background, not the tint");
 			} finally {
-				await ui.call("Emulation.setEmulatedMedia", { features: [{ name: "forced-colors", value: "none" }] });
+				await ui.call("Emulation.setEmulatedMedia", { features: [...MOTION_ALLOWED, { name: "forced-colors", value: "none" }] });
 			}
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
