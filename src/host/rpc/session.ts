@@ -449,6 +449,8 @@ export type MaintenanceRequest =
 
 /** A manual compaction can run a model summary: its report is awaited far longer than an ordinary command. */
 const MAINTENANCE_REPORT_TIMEOUT_MS = 15 * 60_000;
+/** What a manual pass's wait resolves with when OMP answered a Stop that closed it: that pass prints no report. */
+const PASS_STOPPED: unique symbol = Symbol("pass-stopped");
 /** HTML export renders the whole session. */
 const EXPORT_TIMEOUT_MS = 2 * 60_000;
 /** `/context` is a builtin that answers before anything else runs. */
@@ -659,7 +661,13 @@ export class RpcSession {
 	#slashArmed = false;
 	#internalSeq = 0;
 	/** Takes the next `command_output` line while a manual maintenance pass waits for its report. */
-	#maintenanceReport: ((text: string | null) => void) | null = null;
+	#maintenanceReport: ((outcome: string | null | typeof PASS_STOPPED) => void) | null = null;
+	/**
+	 * A manual `/compact` that OMP acknowledged is waiting for its report: a Stop OMP answers ends it, because
+	 * `AgentSession.abort` awaits the pass's cleanup (`isCompacting` released) before the answer and a pass
+	 * interrupted by the user prints nothing. `/shake` is not stoppable: it has no pass to wait for.
+	 */
+	#maintenanceStoppable = false;
 	/**
 	 * The explicit `/context` request in flight, from admission until its result is returned (ADR-0063). It fences every
 	 * mutation like a navigation does (`#controlRefusal`), is bound to the native identity it started under, and
@@ -911,6 +919,7 @@ export class RpcSession {
 		this.#failAllCommands("closed");
 		this.#maintenanceReport?.(null);
 		this.#maintenanceReport = null;
+		this.#maintenanceStoppable = false;
 		this.#contextRequest?.capture(null);
 		this.#contextRequest = null;
 		for (const waiter of this.#readyWaiters.splice(0)) waiter(false);
@@ -1034,9 +1043,10 @@ export class RpcSession {
 			this.#applyLocal({ type: "abort_requested" });
 			try {
 				const response = await this.#send(`${VSC_ID_PREFIX}${requestId}`, { type: "abort_and_restore_queue" }, ABORT_RESTORE_TIMEOUT_MS);
-				if (response.success) return { status: "accepted", restored: parseRestoredQueue(response.data) };
+				if (response.success) { this.#endStoppedPass(); return { status: "accepted", restored: parseRestoredQueue(response.data) }; }
 				if (response.error !== "Unknown command: abort_and_restore_queue") return { status: "refused", reason: "rejected" };
 				const fallback = await this.#sendInternal({ type: "abort" });
+				if (fallback.status === "accepted") this.#endStoppedPass();
 				return fallback.status === "accepted" ? { status: "accepted", restored: { entries: [], imagesDropped: false, truncated: false } } : fallback;
 			} catch (error) {
 				return this.#failureOutcome(error, requestId);
@@ -1501,30 +1511,43 @@ export class RpcSession {
 		if (refusal !== null) return { status: "refused", reason: refusal };
 		const action = request.kind === "shake" ? "shake" : request.mode === "soft" ? "compact" : request.mode;
 		const focus = request.kind === "compact" && request.instructions !== undefined && request.instructions.trim() !== "" ? ` ${request.instructions.trim()}` : "";
-		const report = Promise.withResolvers<string | null>();
+		const report = Promise.withResolvers<string | null | typeof PASS_STOPPED>();
 		this.#maintenanceReport = report.resolve;
 		this.#applyLocal({ type: "auto_compaction_start", action, reason: "manual" });
 		let result: CommandResult<string>;
+		let stopped = false;
 		// `/shake` answers only after it rewrote the branch, so its acknowledgement gets the report's patience too.
 		const ack = await this.#sendInternal({ type: "prompt", message: `/${request.kind} ${request.mode}${focus}` }, MAINTENANCE_REPORT_TIMEOUT_MS);
 		if (ack.status !== "accepted") result = ack;
 		// The text became a turn instead of a command: an input hook rewrote it, or this OMP does not have the builtin.
 		else if (!isRecord(ack.response.data) || ack.response.data.agentInvoked !== false) result = { status: "refused", reason: "rejected" };
 		else {
+			this.#maintenanceStoppable = request.kind === "compact";
 			const timer = this.#timers.setTimeout(() => report.resolve(null), MAINTENANCE_REPORT_TIMEOUT_MS);
 			const text = await report.promise;
 			this.#timers.clearTimeout(timer);
-			result = text === null ? { status: "unconfirmed" } : { status: "ok", value: text };
+			stopped = text === PASS_STOPPED;
+			result = text === PASS_STOPPED ? { status: "ok", value: "The compaction was stopped." } : text === null ? { status: "unconfirmed" } : { status: "ok", value: text };
 		}
+		this.#maintenanceStoppable = false;
 		if (this.#maintenanceReport === report.resolve) this.#maintenanceReport = null;
 		// OMP's own failure report is already in the transcript as command output; the pass ends as skipped so the
 		// progress line does not repeat it. Only a missing report or command leaves a failure line of its own.
-		const reportedFailure = result.status === "ok" && /^\w+ failed\b/i.test(result.value);
+		const reportedFailure = !stopped && result.status === "ok" && /^\w+ failed\b/i.test(result.value);
 		const errorMessage = result.status === "ok" ? undefined
 			: result.status === "unconfirmed" ? "OMP did not report the outcome." : "OMP did not run the command.";
-		if (this.#live) this.#applyLocal({ type: "auto_compaction_end", action, aborted: false, willRetry: false, ...(reportedFailure ? { skipped: true } : {}), ...(errorMessage === undefined ? {} : { errorMessage }) });
+		if (this.#live) this.#applyLocal({ type: "auto_compaction_end", action, aborted: stopped, willRetry: false, ...(reportedFailure ? { skipped: true } : {}), ...(errorMessage === undefined ? {} : { errorMessage }) });
 		this.#requestReconcile();
 		return result;
+	}
+
+	/** OMP answered a Stop: a manual `/compact` it was running is closed (see {@link RpcSession.#maintenanceStoppable}). */
+	#endStoppedPass(): void {
+		if (!this.#maintenanceStoppable) return;
+		this.#maintenanceStoppable = false;
+		const report = this.#maintenanceReport;
+		this.#maintenanceReport = null;
+		report?.(PASS_STOPPED);
 	}
 
 	/**

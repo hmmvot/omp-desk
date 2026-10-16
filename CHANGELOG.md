@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - **Chat: the working animation no longer stays on after a context compaction has ended.** OMP announces the end of an automatic compaction (`auto_compaction_end`) before it releases its own "compacting" flag, and Desk read that flag once, at the announcement, and then never again: when the read still said "compacting", nothing was left running but the composer kept the animation (and Rewind, Clear and the model choices kept answering that a compaction was running) until the next turn. Desk now keeps asking OMP once a second for as long as OMP reports a compaction that no Desk-started pass accounts for, so the state follows OMP's own and ends as soon as OMP does. The same readback ends the state after a stopped `/compact` typed in the composer, when a read had seen it running.
+- **Chat: stopping a compaction you started from the compact button ends it at once.** Stop used to cancel the compaction in OMP, but Desk kept waiting for OMP's report, which a stopped compaction never prints, so the composer kept the working animation for up to 15 minutes. OMP answers a Stop only after the compaction was cancelled and released, so Desk now ends the pass as cancelled on that answer.
 
 ## [0.4.4] - 2026-10-15
 

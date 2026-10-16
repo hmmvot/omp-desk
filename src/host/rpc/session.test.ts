@@ -1639,6 +1639,40 @@ describe("chat quick actions", () => {
 		session.dispose();
 	});
 
+	it("ends a manual compaction OMP closed on a Stop, which prints no report, as cancelled and not after the report's 15 minutes", async () => {
+		const { session, channel, timers } = await boot({ child });
+		// OMP acknowledges `/compact` and reports from the background; an interrupted pass reports nothing.
+		channel.handlers.set("prompt", () => ({ data: { agentInvoked: false } }));
+		channel.handlers.set("abort_and_restore_queue", () => ({ data: { steering: [], followUp: [] } }));
+		const pass = session.maintain({ kind: "compact", mode: "soft" });
+		await tick();
+		assert.equal(session.model.maintenance?.status, "working");
+		assert.equal(chatTurnInProgress(session.model), true);
+		assert.equal((await session.abortAndRestore("stop-compact")).status, "accepted");
+		await tick();
+		assert.equal(session.model.maintenance?.status, "cancelled", "OMP answered the Stop after it released the pass");
+		assert.equal(chatTurnInProgress(session.model), false);
+		assert.equal((await pass).status, "ok");
+		timers.advance(15 * 60_000);
+		await tick();
+		assert.equal(session.model.maintenance?.status, "cancelled", "the report's wait is over for good");
+		session.dispose();
+	});
+
+	it("keeps a /shake pass working through a Stop: it has no pass of its own to close", async () => {
+		const { session, channel } = await boot({ child });
+		channel.handlers.set("prompt", () => ({ data: { agentInvoked: false } }));
+		channel.handlers.set("abort_and_restore_queue", () => ({ data: { steering: [], followUp: [] } }));
+		const pass = session.maintain({ kind: "shake", mode: "elide" });
+		await tick();
+		await session.abortAndRestore("stop-shake");
+		await tick();
+		assert.equal(session.model.maintenance?.status, "working");
+		channel.emit({ type: "command_output", text: "Shook 3 tool results." });
+		assert.deepEqual(await pass, { status: "ok", value: "Shook 3 tool results." });
+		session.dispose();
+	});
+
 	it("re-reads the session file when a typed /compact reports completion, so its divider does not wait for the next turn, and not for other output", async () => {
 		const { session, channel } = await boot({ child });
 		channel.handlers.set("prompt", () => ({ data: { agentInvoked: false } }));
