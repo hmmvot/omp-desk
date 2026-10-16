@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import * as path from "node:path";
 
 /**
@@ -18,17 +18,32 @@ import * as path from "node:path";
  */
 const SCOPE = "@oh-my-pi";
 
-/** The directories that could hold `@oh-my-pi/<name>` for a package at `packageRoot`, nearest first. */
+/**
+ * The directories that could hold `@oh-my-pi/<name>` for a package at `packageRoot`, nearest first. A package that is a link into a
+ * store (pnpm: `<global>/node_modules/@oh-my-pi/pi-coding-agent` is a link to `.pnpm/<id>/node_modules/@oh-my-pi/pi-coding-agent`,
+ * and its dependencies are links beside the real folder, not beside the link) is searched where it really is after where it is named.
+ */
 export function ompDependencyCandidates(packageRoot: string, name: string): string[] {
-	const root = path.resolve(packageRoot);
-	const found = [path.join(root, "node_modules", SCOPE, name)];
-	for (let directory = path.dirname(root); ; directory = path.dirname(directory)) {
-		if (path.basename(directory) === "node_modules") {
-			found.push(path.join(directory, SCOPE, name));
-			return found;
-		}
-		if (path.dirname(directory) === directory) return found;
+	const named = path.resolve(packageRoot);
+	const roots = [named];
+	try {
+		const real = realpathSync(named);
+		if (real !== named) roots.push(real);
+	} catch {
+		// A root that cannot be resolved is searched as named; the manifest read then says it is not there.
 	}
+	const found: string[] = [];
+	for (const root of roots) {
+		found.push(path.join(root, "node_modules", SCOPE, name));
+		for (let directory = path.dirname(root); ; directory = path.dirname(directory)) {
+			if (path.basename(directory) === "node_modules") {
+				found.push(path.join(directory, SCOPE, name));
+				break;
+			}
+			if (path.dirname(directory) === directory) break;
+		}
+	}
+	return [...new Set(found)];
 }
 
 function namesPackage(directory: string, expected: string): boolean {

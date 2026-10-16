@@ -390,9 +390,11 @@ async function pathTarget(file: string, origin: string): Promise<LaunchTarget> {
     };
   }
   if (identity === "bun-shim") return { kind: "bun-shim", key: file, shim: file };
-  // npm's launcher for a package whose script says `#!/usr/bin/env bun` starts Bun on the entry through a shell. Resolved through to
-  // that entry it is the same launch a bun shim stands for: Bun's own CLI running OMP's entry, with no shell and no process layer.
-  if (path.extname(file).toLowerCase() === ".cmd" && (await npmShimEntry(file)) !== null) return { kind: "bun-shim", key: file, shim: file };
+  const mise = await miseShimTarget(file);
+  if (mise !== null) return mise;
+  // The `.cmd` launcher that npm, pnpm or Yarn writes for a package whose script says `#!/usr/bin/env bun` starts Bun on the entry through
+  // a shell. Resolved through to that entry it is the same launch a bun shim stands for: Bun's own CLI running OMP's entry, with no shell.
+  if (path.extname(file).toLowerCase() === ".cmd" && (await cmdShimEntry(file)) !== null) return { kind: "bun-shim", key: file, shim: file };
   if (isShimLocation(file)) {
     return { kind: "unusable", key: file, reason: `${file} is a package-manager shim, which never runs as a single process` };
   }
@@ -404,6 +406,85 @@ async function pathTarget(file: string, origin: string): Promise<LaunchTarget> {
     };
   }
   return { kind: "unusable", key: file, reason: `${file} ${FOREIGN_LAUNCHER_REASON}` };
+}
+
+/**
+ * The folder mise keeps the releases of OMP's documented install (`mise use -g github:can1357/oh-my-pi`) in, under its data directory:
+ * `<data>/installs/github-can1357-oh-my-pi/<release>/omp.exe` is OMP's own compiled program. The `<data>/shims/omp.exe` that PATH
+ * names is not: it is mise's launcher, a copy of its `mise-shim.exe`, which starts `mise x -- omp`, which starts the program.
+ */
+const MISE_INSTALL_DIRECTORY = "github-can1357-oh-my-pi";
+/** A text mise-shim.exe carries and OMP's program and every other launcher does not. */
+const MISE_SHIM_MARKER = "mise-shim:";
+const MISE_SHIM_SCAN_BYTES = 2 * 1024 * 1024;
+
+/**
+ * A mise shim for `omp`, resolved to the one release of OMP that is installed beside it, or refused with the reason; `null` when the
+ * file is not a mise shim. Nothing is started: the shim would be two processes ahead of OMP, so the process Desk launches would not
+ * be the one OMP registers. The files mise itself keeps are read instead (the shim directory and its sibling `installs`), and the
+ * program found there is held to the same identity rule as any direct program: its own content must say it is OMP's.
+ *
+ * With one release installed the shim can run only that one, so Desk starts it directly. With several, which one the shim runs
+ * depends on mise's configuration for the folder it is started in, which Desk does not evaluate: it refuses and names them, and
+ * the user picks with `ompDesk.executablePath` or by putting that release's folder on PATH.
+ */
+async function miseShimTarget(file: string): Promise<LaunchTarget | null> {
+  if (path.extname(file).toLowerCase() !== ".exe" || path.basename(path.dirname(file)).toLowerCase() !== "shims") return null;
+  let head: string;
+  try {
+    const handle = await fs.open(file, "r");
+    try {
+      const buffer = Buffer.allocUnsafe(MISE_SHIM_SCAN_BYTES);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+      head = buffer.subarray(0, bytesRead).toString("latin1");
+    } finally {
+      await handle.close();
+    }
+  } catch (error) {
+    rethrowIfTransientInspection(file, error);
+    return null;
+  }
+  if (!head.includes(MISE_SHIM_MARKER)) return null;
+
+  const installs = path.join(path.dirname(path.dirname(file)), "installs", MISE_INSTALL_DIRECTORY);
+  const program = process.platform === "win32" ? "omp.exe" : "omp";
+  const found: string[] = [];
+  try {
+    // A release is a real directory; the `latest`, `18` and `global` entries mise adds are links to one.
+    for (const entry of await fs.readdir(installs, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue;
+      const candidate = path.join(installs, entry.name, program);
+      if (await isRunnableFile(candidate)) found.push(candidate);
+    }
+  } catch (error) {
+    rethrowIfTransientInspection(installs, error);
+  }
+  const shim = `${file} is mise's shim, which starts mise and mise then starts OMP (two processes ahead of it), so it is not started`;
+  if (found.length === 0) {
+    return { kind: "unusable", key: file, reason: `${shim}, and no release of OMP is installed in ${installs}; install one with \`mise use -g github:can1357/oh-my-pi\`` };
+  }
+  if (found.length > 1) {
+    return {
+      kind: "unusable",
+      key: file,
+      reason: `${shim}. ${found.length} releases are installed (${found.join(", ")}) and the one the shim runs depends on mise's configuration for the folder, ` +
+        `which Desk does not evaluate: set ${OMP_PATH_SETTING} to the one to use, or put its folder on PATH before the shims`,
+    };
+  }
+  const installed = found[0];
+  if ((await classifyCandidate(installed)) !== "omp-program") {
+    return { kind: "unusable", key: file, reason: `${shim}, and ${installed}, the only release installed beside it, ${FOREIGN_LAUNCHER_REASON}` };
+  }
+  return {
+    kind: "direct",
+    key: file,
+    candidate: {
+      executable: { command: installed, prefixArgs: [] },
+      origin: `the mise install behind the shim ${file}`,
+      label: installed,
+      launcher: "program",
+    },
+  };
 }
 
 /** The directory OMP's own updater installs the release binary into. */
@@ -591,15 +672,15 @@ const OMP_PACKAGE_NAME = "@oh-my-pi/pi-coding-agent";
  */
 async function bunShimCandidate(shim: string): Promise<OmpLaunchCandidate | string> {
   const binDirectory = path.dirname(shim);
-  const npm = path.extname(shim).toLowerCase() === ".cmd";
-  const kind = npm ? "npm shim" : "bun shim";
+  const cmd = path.extname(shim).toLowerCase() === ".cmd";
+  const kind = cmd ? "package-manager shim" : "bun shim";
   const bun = await bunRuntime(binDirectory);
-  if (bun === null) return `${shim} is ${npm ? "an npm" : "a bun"} shim, but no bun runtime was found beside it in ${binDirectory}${npm ? " or on PATH" : ""}`;
+  if (bun === null) return `${shim} is a ${kind}, but no bun runtime was found beside it in ${binDirectory}${cmd ? " or on PATH" : ""}`;
 
-  const entry = npm ? await npmShimEntry(shim) : await bunShimEntry(shim, path.resolve(binDirectory, ".."));
+  const entry = cmd ? await cmdShimEntry(shim) : await bunShimEntry(shim, path.resolve(binDirectory, ".."));
   if (entry === null) {
-    return npm
-      ? `${shim} is an npm shim, but it does not start Bun on an entry of OMP's package`
+    return cmd
+      ? `${shim} is a package-manager shim, but it does not start Bun on an entry of OMP's package`
       : `${shim} is a bun shim, but its target entry could not be resolved from ${path.resolve(binDirectory, "..")}`;
   }
   return {
@@ -661,26 +742,62 @@ async function bunShimEntry(shim: string, bunRoot: string): Promise<string | nul
   return await packageBinEntry(packageDirectory);
 }
 
-/** npm's launcher text for a script that runs under Bun: which program it starts, and the entry it names relative to its own folder. */
+/**
+ * The `.cmd` launchers JavaScript package managers write for a package whose bin script starts with `#!/usr/bin/env bun`, as each wrote
+ * them for OMP 18.11.1 (observed): which program the launcher starts, and the entry it names relative to its own folder.
+ *
+ * - npm: `SET "_prog=%dp0%\bun.exe"` / `SET "_prog=bun"`, then `"%_prog%"  "%dp0%\node_modules\@oh-my-pi\pi-coding-agent\dist\cli.js" %*`.
+ * - pnpm and Yarn's own `.bin` launcher: `"%~dp0\bun.exe"  "%~dp0\<entry>" %*`, else `bun  "%~dp0\<entry>" %*`.
+ * - Yarn's launcher in the global prefix folder only forwards to that `.bin` launcher: `@"%~dp0\..\..\global\node_modules\.bin\omp.cmd" %*`.
+ */
 const NPM_SHIM_RUNS_BUN = /SET\s+"_prog=(?:%dp0%\\)?bun(?:\.exe)?"/i;
 const NPM_SHIM_ENTRY = /"%_prog%"\s+"%dp0%\\([^"\r\n]+)"/i;
-/** An npm launcher is a few hundred bytes; a `.cmd` file far larger than this is not one. */
-const NPM_SHIM_SCAN_BYTES = 16 * 1024;
+const BIN_SHIM_ENTRIES = [/"%~dp0\\bun\.exe"\s+"%~dp0\\([^"\r\n]+)"/i, /^\s*(?:@\s*)?bun\s+"%~dp0\\([^"\r\n]+)"/im];
+const SHIM_FORWARD = /^\s*@?\s*"%~dp0\\([^"\r\n]+\.cmd)"\s+%\*/im;
+/** A package manager's launcher is a few hundred bytes; a `.cmd` file far larger than this is not one. */
+const CMD_SHIM_SCAN_BYTES = 16 * 1024;
+/** Launchers that only forward to another launcher (Yarn's prefix folder): how many are followed. */
+const CMD_SHIM_MAX_FORWARDS = 2;
 
 /**
- * The entry script of OMP's package that an npm `.cmd` launcher starts under Bun, or null when the file is not such a launcher.
- *
- * `npm install -g` writes `omp.cmd` beside the global `node_modules`: it runs `bun.exe` from its own folder, else `bun` from PATH,
- * on `%dp0%\node_modules\@oh-my-pi\pi-coding-agent\dist\cli.js` (the package's `bin`, whose first line asks for Bun). Nothing is
- * guessed: the launcher must say it runs Bun, the entry it names must be a runnable file, and the nearest package manifest above it
- * must be OMP's. A launcher for Node, or for any other package, is not OMP and stays refused.
+ * Volta's launcher for a global package binary (Volta 2.0.2, observed): `<VOLTA_HOME>\bin\omp.cmd` is `@echo off` and `volta run %~n0 %*`,
+ * which starts Volta, which starts the package's own launcher in its image. Volta says which package a binary belongs to in
+ * `<VOLTA_HOME>\tools\user\bins\<name>.json`, and keeps the image of the one installed release in
+ * `<VOLTA_HOME>\tools\image\packages\<package>\<name>.cmd`.
  */
-async function npmShimEntry(shim: string): Promise<string | null> {
+const VOLTA_LAUNCHER = /^\s*@echo off\s+volta run %~n0 %\*\s*$/i;
+
+/** The package launcher inside Volta's image that `<VOLTA_HOME>\bin\<name>.cmd` runs for OMP, or null when it is not OMP's. */
+async function voltaPackageLauncher(shim: string): Promise<string | null> {
+  const bin = path.dirname(shim);
+  if (path.basename(bin).toLowerCase() !== "bin") return null;
+  const home = path.dirname(bin);
+  const name = path.basename(shim, path.extname(shim));
+  let manifest: unknown;
+  try {
+    manifest = JSON.parse(await fs.readFile(path.join(home, "tools", "user", "bins", `${name}.json`), "utf8"));
+  } catch (error) {
+    rethrowIfTransientInspection(shim, error);
+    return null;
+  }
+  if (typeof manifest !== "object" || manifest === null || !("package" in manifest) || manifest.package !== OMP_PACKAGE_NAME) return null;
+  return path.join(home, "tools", "image", "packages", ...OMP_PACKAGE_NAME.split("/"), `${name}.cmd`);
+}
+
+/**
+ * The entry script of OMP's package that a package manager's `.cmd` launcher starts under Bun, or null when the file is not such a
+ * launcher.
+ *
+ * Nothing is guessed: the launcher must say it runs Bun, the entry it names must be a runnable file, and the nearest package
+ * manifest above that entry must be OMP's. A launcher for Node, or for any other package, is not OMP and stays refused. A launcher
+ * that only forwards is followed to the launcher it names, at most {@link CMD_SHIM_MAX_FORWARDS} times.
+ */
+async function cmdShimEntry(shim: string, forwards = 0): Promise<string | null> {
   let text: string;
   try {
     const handle = await fs.open(shim, "r");
     try {
-      const buffer = Buffer.allocUnsafe(NPM_SHIM_SCAN_BYTES);
+      const buffer = Buffer.allocUnsafe(CMD_SHIM_SCAN_BYTES);
       const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
       text = buffer.subarray(0, bytesRead).toString("utf8");
     } finally {
@@ -690,9 +807,15 @@ async function npmShimEntry(shim: string): Promise<string | null> {
     rethrowIfTransientInspection(shim, error);
     return null;
   }
-  const entry = NPM_SHIM_ENTRY.exec(text);
-  if (entry === null || !NPM_SHIM_RUNS_BUN.test(text)) return null;
-  const script = path.resolve(path.dirname(shim), entry[1]);
+  const named = NPM_SHIM_RUNS_BUN.test(text) ? NPM_SHIM_ENTRY.exec(text)?.[1] : BIN_SHIM_ENTRIES.map(pattern => pattern.exec(text)?.[1]).find(entry => entry !== undefined);
+  if (named === undefined) {
+    const forward = SHIM_FORWARD.exec(text)?.[1];
+    if (forward !== undefined) return forwards >= CMD_SHIM_MAX_FORWARDS ? null : await cmdShimEntry(path.resolve(path.dirname(shim), forward), forwards + 1);
+    if (!VOLTA_LAUNCHER.test(text) || forwards >= CMD_SHIM_MAX_FORWARDS) return null;
+    const launcher = await voltaPackageLauncher(shim);
+    return launcher === null ? null : await cmdShimEntry(launcher, forwards + 1);
+  }
+  const script = path.resolve(path.dirname(shim), named);
   if (!(await isRunnableFile(script)) || (await packageDirectoryOf(script)) === null) return null;
   return script;
 }

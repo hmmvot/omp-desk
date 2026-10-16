@@ -12,7 +12,7 @@
  * Runner: `node --test src/host/native-terminal.test.ts`.
  */
 import assert from "node:assert/strict";
-import { appendFile, chmod, copyFile, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { appendFile, chmod, copyFile, mkdir, mkdtemp, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -602,7 +602,7 @@ describe("an npm global install of OMP", { skip: process.platform !== "win32" &&
 		assert.deepEqual(resolved.prefixArgs, [install.entry]);
 		assert.equal(resolved.launcher, "bun-shim", "no shell and no process layer: the launch is Bun running the entry");
 		assert.equal(resolved.version, "18.11.1");
-		assert.match(resolved.origin, /the npm shim .*omp\.cmd, resolved to /);
+		assert.match(resolved.origin, /the package-manager shim .*omp\.cmd, resolved to /);
 	});
 
 	it("prefers the bun.exe the launcher finds beside itself", async () => {
@@ -639,7 +639,277 @@ describe("an npm global install of OMP", { skip: process.platform !== "win32" &&
 		const install = await npmPrefix();
 
 		await withPath([install.prefix], async () => {
-			await assert.rejects(native.resolveOmpBinary(), /omp\.cmd is an npm shim, but no bun runtime was found beside it in .* or on PATH/);
+			await assert.rejects(native.resolveOmpBinary(), /omp\.cmd is a package-manager shim, but no bun runtime was found beside it in .* or on PATH/);
+		});
+	});
+});
+
+/**
+ * `pnpm add -g` (pnpm 12.14), `yarn global add` (Yarn 1.22) and `volta install` (Volta 2.0.2) of OMP 18.11.1, laid out as they wrote it.
+ * Their `.cmd` launchers differ from npm's in text (they name the entry as `%~dp0\<entry>` and pick `bun.exe` beside them, else `bun`),
+ * and each has its own layout: pnpm names a link in its global folder that points into `.pnpm`; Yarn's launcher in the prefix folder
+ * only forwards to the one in `global\node_modules\.bin`; Volta's launcher in `bin` only runs `volta run`, and the package is in its image.
+ */
+describe("a pnpm, Yarn or Volta global install of OMP", { skip: process.platform !== "win32" && "the .cmd launchers are Windows files" }, () => {
+	const entryLine = (entry: string): string => [
+		'@IF EXIST "%~dp0\\bun.exe" (', `  "%~dp0\\bun.exe"  "%~dp0\\${entry}" %*`, ") ELSE (", "  @SET PATHEXT=%PATHEXT:;.JS;=;%", `  bun  "%~dp0\\${entry}" %*`, ")",
+	].join("\r\n");
+	let installs = 0;
+	let tools: string;
+
+	before(async () => {
+		tools = path.join(temp, "pm-tools");
+		await mkdir(tools, { recursive: true });
+		await copyFile(process.execPath, path.join(tools, "bun.exe"));
+	});
+
+	async function withPath<T>(dirs: readonly string[], action: () => Promise<T>): Promise<T> {
+		const saved = { PATH: process.env.PATH, LOCALAPPDATA: process.env.LOCALAPPDATA };
+		process.env.PATH = dirs.join(path.delimiter);
+		process.env.LOCALAPPDATA = path.join(temp, "no-local-app-data");
+		try {
+			return await action();
+		} finally {
+			for (const [name, value] of Object.entries(saved)) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+		}
+	}
+
+	async function ompPackage(root: string, name = "@oh-my-pi/pi-coding-agent"): Promise<string> {
+		await mkdir(path.join(root, "dist"), { recursive: true });
+		await mkdir(path.join(root, "src", "session"), { recursive: true });
+		await writeFile(path.join(root, "package.json"), JSON.stringify({ name, version: "18.11.1" }));
+		await writeFile(path.join(root, "src", "session", "session-storage.ts"), "export {};");
+		await writeFile(path.join(root, "dist", "cli.js"), "#!/usr/bin/env bun\nconsole.log('omp/18.11.1');\n");
+		return path.join(root, "dist", "cli.js");
+	}
+
+	/** pnpm: `<home>\bin\omp.cmd`, the link `<home>\global\v11\<hash>\node_modules\@oh-my-pi\pi-coding-agent` into the `.pnpm` store. */
+	async function pnpmInstall(): Promise<{ readonly bin: string; readonly linked: string }> {
+		const home = path.join(temp, `pnpm-${installs++}`);
+		const hash = "3e5fe99b04406cd92878c275b37358555616dbfcc1b71cc932943dd1e40da552";
+		const real = path.join(home, "global", "v11", "cec8-18df1fcd5ba644ac-0", "node_modules", ".pnpm", "@oh-my-pi+pi-coding-agent@18.11.1_@types+node@26.6.5", "node_modules", "@oh-my-pi", "pi-coding-agent");
+		await ompPackage(real);
+		const linked = path.join(home, "global", "v11", hash, "node_modules", "@oh-my-pi", "pi-coding-agent");
+		await mkdir(path.dirname(linked), { recursive: true });
+		await symlink(real, linked, "junction");
+		const bin = path.join(home, "bin");
+		await mkdir(bin, { recursive: true });
+		await writeFile(path.join(bin, "omp.cmd"), `@SETLOCAL\r\n${entryLine(`..\\global\\v11\\${hash}\\node_modules\\@oh-my-pi\\pi-coding-agent\\dist\\cli.js`)}\r\n`);
+		return { bin, linked };
+	}
+
+	/** Yarn: `<prefix>\bin\omp.cmd` forwards to `<global>\node_modules\.bin\omp.cmd`, which names the entry in the flat tree. */
+	async function yarnInstall(): Promise<{ readonly prefixBin: string; readonly dotBin: string; readonly root: string }> {
+		const home = path.join(temp, `yarn-${installs++}`);
+		const root = path.join(home, "global", "node_modules", "@oh-my-pi", "pi-coding-agent");
+		await ompPackage(root);
+		const dotBin = path.join(home, "global", "node_modules", ".bin");
+		await mkdir(dotBin, { recursive: true });
+		await writeFile(path.join(dotBin, "omp.cmd"), entryLine("..\\@oh-my-pi\\pi-coding-agent\\dist\\cli.js"));
+		const prefixBin = path.join(home, "prefix", "bin");
+		await mkdir(prefixBin, { recursive: true });
+		await writeFile(path.join(prefixBin, "omp.cmd"), '@"%~dp0\\..\\..\\global\\node_modules\\.bin\\omp.cmd"   %*\r\n');
+		return { prefixBin, dotBin, root };
+	}
+
+	it("resolves pnpm's omp.cmd to Bun running the entry through its link, with the release from the manifest", async () => {
+		const install = await pnpmInstall();
+
+		const resolved = await withPath([install.bin, tools], () => native.resolveOmpBinary());
+
+		assert.equal(resolved.launcher, "bun-shim");
+		assert.deepEqual(resolved.prefixArgs, [path.join(install.linked, "dist", "cli.js")]);
+		assert.equal(resolved.version, "18.11.1");
+		assert.equal((await native.resolveOmpPackageRoot(resolved))?.root, install.linked);
+	});
+
+	it("resolves Yarn's launcher in the prefix folder by following its forward, and its own .bin launcher directly", async () => {
+		const install = await yarnInstall();
+		const entry = path.join(install.root, "dist", "cli.js");
+
+		for (const dir of [install.prefixBin, install.dotBin]) {
+			const resolved = await withPath([dir, tools], () => native.resolveOmpBinary());
+			assert.deepEqual(resolved.prefixArgs, [entry], dir);
+			assert.equal(resolved.launcher, "bun-shim", dir);
+		}
+		assert.equal((await native.resolveOmpPackageRoot(await withPath([install.prefixBin, tools], () => native.resolveOmpBinary())))?.root, install.root);
+	});
+
+	/**
+	 * Volta 2.0.2: `<home>\bin\omp.cmd` is `volta run omp`; the package is in `<home>\tools\image\packages\@oh-my-pi\pi-coding-agent`
+	 * with an npm-style launcher beside a nested npm layout; `<home>\tools\user\bins\omp.json` names the package.
+	 */
+	async function voltaInstall(packageName = "@oh-my-pi/pi-coding-agent"): Promise<{ readonly bin: string; readonly entry: string }> {
+		const home = path.join(temp, `volta-${installs++}`);
+		const image = path.join(home, "tools", "image", "packages", "@oh-my-pi", "pi-coding-agent");
+		const entry = await ompPackage(path.join(image, "node_modules", "@oh-my-pi", "pi-coding-agent"));
+		await writeFile(path.join(image, "omp.cmd"), [
+			"@ECHO off", "GOTO start", ":find_dp0", "SET dp0=%~dp0", "EXIT /b", ":start", "SETLOCAL", "CALL :find_dp0", "",
+			'IF EXIST "%dp0%\\bun.exe" (', '  SET "_prog=%dp0%\\bun.exe"', ") ELSE (", '  SET "_prog=bun"', "  SET PATHEXT=%PATHEXT:;.JS;=;%", ")", "",
+			'endLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  "%dp0%\\node_modules\\@oh-my-pi\\pi-coding-agent\\dist\\cli.js" %*', "",
+		].join("\r\n"));
+		await mkdir(path.join(home, "tools", "user", "bins"), { recursive: true });
+		await writeFile(path.join(home, "tools", "user", "bins", "omp.json"), JSON.stringify({ name: "omp", package: packageName, version: "18.11.1", manager: "Npm" }));
+		const bin = path.join(home, "bin");
+		await mkdir(bin, { recursive: true });
+		await writeFile(path.join(bin, "omp.cmd"), "@echo off\r\nvolta run %~n0 %*\r\n");
+		return { bin, entry };
+	}
+
+	it("resolves Volta's omp.cmd, which only runs `volta run`, to Bun running the package in Volta's image", async () => {
+		const install = await voltaInstall();
+
+		const resolved = await withPath([install.bin, tools], () => native.resolveOmpBinary());
+
+		assert.equal(resolved.launcher, "bun-shim");
+		assert.deepEqual(resolved.prefixArgs, [install.entry]);
+		assert.equal(resolved.version, "18.11.1");
+		assert.equal((await native.resolveOmpPackageRoot(resolved))?.root, path.dirname(path.dirname(install.entry)));
+	});
+
+	it("refuses a Volta launcher whose binary belongs to some other package, and never starts `volta run`", async () => {
+		const install = await voltaInstall("some-other-package");
+
+		await withPath([install.bin, tools], async () => {
+			await assert.rejects(native.resolveOmpBinary(), /omp\.cmd is a script launcher|omp\.cmd is a package-manager shim/);
+		});
+	});
+
+	it("refuses a forward that names no launcher of OMP's, and does not follow forwards without end", async () => {
+		const home = path.join(temp, `yarn-${installs++}`);
+		const bin = path.join(home, "bin");
+		await mkdir(bin, { recursive: true });
+		await writeFile(path.join(bin, "omp.cmd"), '@"%~dp0\\omp.cmd" %*\r\n');
+		const other = await ompPackage(path.join(home, "other"), "some-other-package");
+		await writeFile(path.join(bin, "other.cmd"), entryLine(path.relative(bin, other)));
+		const forwarding = path.join(home, "bin2");
+		await mkdir(forwarding, { recursive: true });
+		await writeFile(path.join(forwarding, "omp.cmd"), '@"%~dp0\\..\\bin\\other.cmd" %*\r\n');
+
+		for (const dir of [bin, forwarding]) {
+			await withPath([dir, tools], async () => {
+				await assert.rejects(native.resolveOmpBinary(), /omp\.cmd is a script launcher|omp\.cmd is a package-manager shim/, dir);
+			});
+		}
+	});
+});
+
+/**
+ * `mise use -g github:can1357/oh-my-pi` (mise 2026.10.12 on Windows, observed): OMP's own compiled program is
+ * `<data>/installs/github-can1357-oh-my-pi/<release>/omp.exe`, with `latest`, `18`, `18.11` and `global` links beside the release;
+ * the `omp.exe` that PATH reaches through `<data>/shims` is mise's launcher, a copy of `mise-shim.exe` that starts `mise x -- omp`.
+ */
+describe("a mise install of OMP", { skip: process.platform !== "win32" && "mise's Windows layout" }, () => {
+	const SHIM_BYTES = "MZ\u0000\u0000mise-shim: recursive shim invocation detected for omp\u0000mise-shim: failed to execute mise: ";
+	let installs = 0;
+	let program: string;
+
+	before(async () => {
+		// What the file carries makes it OMP's program: OMP's identity plus an embedded JavaScript engine (as in the classification test above).
+		program = path.join(temp, "mise-program.exe");
+		await copyFile(process.execPath, program);
+		await appendFile(program, "\n@oh-my-pi/pi-coding-agent JavaScriptCore oven-sh/bun\n");
+	});
+
+	/** A mise data directory with the given releases installed (each a copy of `source`) and the shim directory mise writes. */
+	async function miseData(releases: readonly string[], source = program): Promise<{ readonly data: string; readonly shims: string; readonly installed: (release: string) => string }> {
+		const data = path.join(temp, `mise-${installs++}`);
+		const shims = path.join(data, "shims");
+		const tool = path.join(data, "installs", "github-can1357-oh-my-pi");
+		await mkdir(shims, { recursive: true });
+		await writeFile(path.join(shims, "omp.exe"), SHIM_BYTES);
+		await writeFile(path.join(shims, ".mode"), "exe");
+		for (const release of releases) {
+			await mkdir(path.join(tool, release), { recursive: true });
+			await copyFile(source, path.join(tool, release, "omp.exe"));
+		}
+		// The links mise adds beside a release: aliases, not releases.
+		if (releases.length > 0) {
+			for (const alias of ["latest", "global", "18", "18.11"]) await symlink(path.join(tool, releases[0]), path.join(tool, alias), "junction");
+		}
+		return { data, shims, installed: release => path.join(tool, release, "omp.exe") };
+	}
+
+	async function withPath<T>(dirs: readonly string[], action: () => Promise<T>): Promise<T> {
+		const saved = { PATH: process.env.PATH, LOCALAPPDATA: process.env.LOCALAPPDATA };
+		process.env.PATH = dirs.join(path.delimiter);
+		process.env.LOCALAPPDATA = path.join(temp, "no-local-app-data");
+		try {
+			return await action();
+		} finally {
+			for (const [name, value] of Object.entries(saved)) {
+				if (value === undefined) delete process.env[name];
+				else process.env[name] = value;
+			}
+		}
+	}
+
+	it("starts the installed program itself, not mise's shim, when the shim directory is what PATH offers and one release is installed", async () => {
+		const mise = await miseData(["18.11.1"]);
+
+		const resolved = await withPath([mise.shims], () => native.resolveOmpBinary());
+
+		assert.equal(resolved.command, mise.installed("18.11.1"));
+		assert.deepEqual(resolved.prefixArgs, []);
+		assert.equal(resolved.launcher, "program", "OMP's own program: no Bun flags on its command line, the BUN_OPTIONS probe decides");
+		assert.match(resolved.origin, /the mise install behind the shim .*shims.omp\.exe/);
+	});
+
+	it("takes the same program when it is the install folder that PATH offers (mise activate) or the explicit path", async () => {
+		const mise = await miseData(["18.11.1"]);
+		const installed = mise.installed("18.11.1");
+
+		assert.equal((await withPath([path.dirname(installed)], () => native.resolveOmpBinary())).command, installed);
+		assert.equal((await withPath([], () => native.resolveOmpBinary({ explicitPath: installed }))).command, installed);
+		assert.equal((await withPath([], () => native.resolveOmpBinary({ explicitPath: path.join(mise.shims, "omp.exe") }))).command, installed, "the shim named by the setting is resolved the same way");
+	});
+
+	it("refuses a shim whose folder holds several releases, naming each and the way out, and starts nothing", async () => {
+		const mise = await miseData(["18.10.3", "18.11.1"]);
+
+		const error = await withPath([mise.shims], async () => {
+			try {
+				await native.resolveOmpBinary();
+			} catch (caught) {
+				return caught as Error;
+			}
+			return assert.fail("an ambiguous mise shim must be refused");
+		});
+
+		assert.match(error.message, /is mise's shim, which starts mise and mise then starts OMP/);
+		assert.ok(error.message.includes(mise.installed("18.10.3")) && error.message.includes(mise.installed("18.11.1")), error.message);
+		assert.match(error.message, /2 releases are installed/);
+		assert.match(error.message, /set ompDesk\.executablePath to the one to use/);
+	});
+
+	it("refuses a shim with no release installed beside it, and says how to install one", async () => {
+		const mise = await miseData([]);
+
+		await withPath([mise.shims], async () => {
+			await assert.rejects(native.resolveOmpBinary(), /is mise's shim.*no release of OMP is installed in .*github-can1357-oh-my-pi; install one with `mise use -g github:can1357\/oh-my-pi`/);
+		});
+	});
+
+	it("refuses a release that is not OMP's program, by its content", async () => {
+		const impostor = path.join(temp, "mise-impostor.exe");
+		await writeFile(impostor, "an unrelated launcher");
+		const mise = await miseData(["18.11.1"], impostor);
+
+		await withPath([mise.shims], async () => {
+			await assert.rejects(native.resolveOmpBinary(), /the only release installed beside it, is neither OMP's own program nor a recognised bun shim/);
+		});
+	});
+
+	it("still refuses an omp.exe in some other folder named shims that is not mise's", async () => {
+		const other = path.join(temp, `not-mise-${installs++}`, "shims");
+		await mkdir(other, { recursive: true });
+		await writeFile(path.join(other, "omp.exe"), "a launcher of another package manager");
+
+		await withPath([other], async () => {
+			await assert.rejects(native.resolveOmpBinary(), /is a package-manager shim, which never runs as a single process/);
 		});
 	});
 });

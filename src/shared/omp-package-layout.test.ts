@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -80,6 +80,21 @@ describe("where an OMP package's own dependencies are", () => {
 		class Refusal extends Error {}
 		assert.throws(() => ompDependencyRoot(root, "pi-tui", message => new Refusal(message)), (error: unknown) =>
 			error instanceof Refusal && error.message.includes("@oh-my-pi/pi-tui") && error.message.includes(path.join(root, "node_modules", "@oh-my-pi", "pi-tui")));
+	});
+
+	it("are beside the real folder, not the link, under a pnpm global install (the package is a link into the .pnpm store)", async () => {
+		const base = path.join(temp, `layout-${layouts++}`);
+		const store = path.join(base, "node_modules", ".pnpm", "@oh-my-pi+pi-coding-agent@18.11.1", "node_modules", "@oh-my-pi");
+		const real = await pkg(path.join(store, "pi-coding-agent"), "@oh-my-pi/pi-coding-agent");
+		const utils = await pkg(path.join(base, "node_modules", ".pnpm", "@oh-my-pi+pi-utils@18.11.1", "node_modules", "@oh-my-pi", "pi-utils"), "@oh-my-pi/pi-utils");
+		await symlink(utils, path.join(store, "pi-utils"), "junction");
+		// What the package manager's launcher names: the link in the global node_modules, which has only the direct dependency.
+		const named = path.join(base, "global", "node_modules", "@oh-my-pi", "pi-coding-agent");
+		await mkdir(path.dirname(named), { recursive: true });
+		await symlink(real, named, "junction");
+
+		assert.equal(findOmpDependencyRoot(named, "pi-utils"), path.join(store, "pi-utils"));
+		assert.equal(findOmpDependencyRoot(real, "pi-utils"), path.join(store, "pi-utils"));
 	});
 
 	it("lists the package's own node_modules, then the one it is installed into, and goes no further up", () => {
