@@ -3697,7 +3697,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
-		const quoteIn = (source: string): Promise<unknown> => ui.evaluate(`window.requestQuote({kind:'message',source:${JSON.stringify(source)}})`);
+		const quoteIn = (source: string): Promise<unknown> => ui.evaluate(`window.requestQuote({kind:'selection',plain:false,source:${JSON.stringify(source)}})`);
 		const hintText = (): Promise<string | null> => codeHint();
 
 		await t.test("a quote lands at the end of the draft after a blank line, the caret on the line under it with the focus in the field, and one Ctrl+Z takes it back", async () => {
@@ -3934,7 +3934,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
-		await t.test("the floating Quote button follows a quotable selection without taking it or the focus, quotes on release, hides on collapse and over chrome; Alt+Q's host action and the message buttons quote through the same path", async () => {
+		await t.test("the host's quote-selection action (Alt+Q, the context menu item) quotes the selection through the composer, or says why there is nothing to quote; no Quote button is drawn", async () => {
 			await reset("quote-triggers");
 			await ui.call("Emulation.setFocusEmulationEnabled", { enabled: true });
 			try {
@@ -3943,47 +3943,48 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 					assistantMessage([{ type: "text", text: "Reply with `code` inside" }]),
 				]);
 				await ui.wait("document.querySelectorAll('.omp-md').length>=2 && document.querySelector('.omp-reply-footer')");
-				const button = (): Promise<{ left: number; top: number; width: number; height: number; label: string | null; keys: string | null; tab: number } | null> => ui.evaluate(`(()=>{const b=document.querySelector('.omp-quote-selection');if(!b)return null;const r=b.getBoundingClientRect();return{left:r.left,top:r.top,width:r.width,height:r.height,label:b.getAttribute('aria-label'),keys:b.getAttribute('aria-keyshortcuts'),tab:b.tabIndex}})()`);
-				assert.equal(await button(), null, "no button without a selection");
+				// A selection raises no button of its own, and no message row or footer carries a Quote button.
 				await quoteBetween("this", "thing");
-				await ui.wait("document.querySelector('.omp-quote-selection')");
-				const shown = (await button())!;
-				assert.deepEqual([shown.label, shown.keys, shown.tab], ["Quote selection in draft", "Alt+Q", -1]);
-				assert.ok(shown.left >= 0 && shown.top >= 0 && shown.left + shown.width <= 1200 + 1, `inside the viewport: ${JSON.stringify(shown)}`);
-				const point = { x: shown.left + shown.width / 2, y: shown.top + shown.height / 2 };
-				await ui.call("Input.dispatchMouseEvent", { type: "mousePressed", x: point.x, y: point.y, button: "left", clickCount: 1 });
-				assert.deepEqual(await ui.evaluate("({collapsed:getSelection().isCollapsed,active:document.activeElement===document.body||document.activeElement===null||document.activeElement.tagName!=='BUTTON'})"), { collapsed: false, active: true }, "the press leaves the selection and the focus alone");
-				await ui.call("Input.dispatchMouseEvent", { type: "mouseReleased", x: point.x, y: point.y, button: "left", clickCount: 1 });
+				await settleFrames();
+				assert.equal(await ui.evaluate("document.querySelectorAll('.omp-quote-selection,[aria-label^=\"Quote message\"],[aria-label^=\"Quote reply\"]').length"), 0);
+				await ui.evaluate("window.ui.receive({type:'omp:webview-action',action:'quote-selection'})");
 				await waitDraft("window.composer.value()==='> **this** thing\\n'");
-				assert.equal(await ui.evaluate("document.querySelector('.omp-quote-selection')"), null, "the button goes with the selection");
+				assert.deepEqual(await areaState(), { value: "> **this** thing\n", start: 17, end: 17, focused: true }, "the caret is on the line under the quote, in the field");
 				await undo();
 				await waitDraft("window.composer.value()===''");
-				// Over chrome only, and after a collapse, there is no button.
-				await ui.evaluate("(()=>{const range=document.createRange();range.selectNodeContents(document.querySelector('.omp-reply-footer'));const selection=getSelection();selection.removeAllRanges();selection.addRange(range)})()");
-				await settleFrames();
-				assert.equal(await button(), null, "the footer is chrome");
-				await quoteBetween("code", "inside");
-				await ui.wait("document.querySelector('.omp-quote-selection')");
-				await ui.evaluate("getSelection().removeAllRanges()");
-				await ui.wait("!document.querySelector('.omp-quote-selection')");
-				// The host's action (Alt+Q, the context menu) quotes the selection, or says there is none.
+				// A second selection after a comment lands after a blank line; the chrome of a row is not quotable.
 				await quoteBetween("Reply", "inside");
 				await ui.evaluate("window.ui.receive({type:'omp:webview-action',action:'quote-selection'})");
 				await waitDraft("window.composer.value()==='> Reply with `code` inside\\n'");
 				await setDraft("");
+				await ui.evaluate("(()=>{const range=document.createRange();range.selectNodeContents(document.querySelector('.omp-reply-footer'));const selection=getSelection();selection.removeAllRanges();selection.addRange(range);window.ui.receive({type:'omp:webview-action',action:'quote-selection'})})()");
+				await ui.wait("document.querySelector('.omp-composer-hint--code')?.textContent==='Select text in the conversation first'||document.querySelector('.omp-composer-hint--code')?.textContent==='That selection has no message text to quote'");
 				await ui.evaluate("getSelection().removeAllRanges();window.ui.receive({type:'omp:webview-action',action:'quote-selection'})");
 				await ui.wait("document.querySelector('.omp-composer-hint--code')?.textContent==='Select text in the conversation first'");
 				assert.equal((await areaState()).value, "", "nothing was inserted");
-				// The whole-message buttons quote the message's source, as Copy takes it.
-				await ui.evaluate("document.querySelector('[aria-label=\"Quote message\"]').click()");
-				await waitDraft("window.composer.value()==='> Ask about **this** thing\\n'");
-				await ui.evaluate("document.querySelector('[aria-label=\"Quote reply\"]').click()");
-				await waitDraft("window.composer.value()==='> Ask about **this** thing\\n\\n> Reply with `code` inside\\n'");
 				assert.equal(await sendCount(), 0, "quoting never sends");
 				assert.deepEqual(await ui.evaluate("window.errors"), []);
 			} finally {
 				await ui.call("Emulation.setFocusEmulationEnabled", { enabled: false });
 			}
+		});
+
+		await t.test("Shift+Arrow extends a selection that exists in the transcript and the action quotes it, but a collapsed caret there cannot be extended: a selection cannot be started from the keyboard alone (measured, an accessibility gap)", async () => {
+			await reset("quote-keyboard");
+			await showMessages([assistantMessage([{ type: "text", text: "Keyboard **quoted words** here" }])]);
+			await ui.wait("document.querySelector('.omp-md p')");
+			// A collapsed caret in transcript text is not extended by Shift+Arrow (the transcript is not editable and caret browsing is off).
+			await ui.evaluate("(()=>{const text=document.querySelector('.omp-md p').firstChild;getSelection().setBaseAndExtent(text,0,text,0)})()");
+			for (let step = 0; step < 3; step++) await press("ArrowRight", "ArrowRight", 39, { modifiers: 8 });
+			assert.equal(await ui.evaluate("getSelection().toString()"), "", "nothing is selected by keys alone");
+			// A selection that exists (a drag, a double click) is extended by Shift+Arrow.
+			await ui.evaluate("(()=>{const text=document.querySelector('.omp-md p').firstChild;getSelection().setBaseAndExtent(text,0,text,1)})()");
+			for (let step = 0; step < 8; step++) await press("ArrowRight", "ArrowRight", 39, { modifiers: 8 });
+			const selected = await ui.evaluate<string>("getSelection().toString()");
+			await ui.evaluate("window.ui.receive({type:'omp:webview-action',action:'quote-selection'})");
+			await waitDraft("window.composer.value().startsWith('> ')");
+			assert.equal((await areaState()).value, `> ${selected}\n`, `Shift+Arrow selected ${JSON.stringify(selected)} and the action quoted exactly it`);
+			assert.ok(selected.length >= 4, "the keys moved the selection");
 		});
 
 		await t.test("a marker is atomic for the caret and selection: it cannot be entered, and arrows hop over it", async () => {

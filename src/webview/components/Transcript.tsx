@@ -46,7 +46,6 @@ import { AssistantContentView, NativeDisclosure } from "./MessageContent";
 import { ToolCard, type ToolCardProps } from "./ToolCard";
 import { WorkingStatus } from "./WorkingStatus";
 import { CopyButton } from "./CopyButton";
-import { QuoteMessageButton } from "./QuoteMessageButton";
 import { CHAT_TEXT_MENU_CONTEXT } from "../../shared/quote-menu";
 import { messageText } from "../../shared/format";
 import { requestPanelAction } from "../lib/panel-actions";
@@ -208,7 +207,6 @@ export function TranscriptCardView({ card, props, autoExpanded, clearedHistory }
 	const actions = copy !== null || rewindId !== null ? (
 		<div className="omp-row-actions">
 			{copy}
-			{copy !== null && <QuoteMessageButton className="omp-copy-button" source={copyText} label="Quote message" />}
 			{rewindId !== null && <button type="button" className="omp-copy-button" aria-label="Rewind to here" title="Rewind to here: edit this message and send it again" onClick={event => { event.stopPropagation(); rewind!.onPick(rewindId); }}>
 				<span className="codicon codicon-discard" aria-hidden="true" />
 			</button>}

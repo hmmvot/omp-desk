@@ -25,7 +25,7 @@ export interface QuoteHost {
 
 const HELD = "Your draft is being moved to a new editor; quote again in a moment";
 
-export function useQuoteDraft(host: QuoteHost): { notice: string | null; quote: (request: QuoteRequest) => void; ready: () => boolean } {
+export function useQuoteDraft(host: QuoteHost): { notice: string | null; quote: (request: QuoteRequest) => void } {
 	const hostRef = useRef(host);
 	hostRef.current = host;
 	const [notice, setNotice] = useState<string | null>(null);
@@ -56,14 +56,11 @@ export function useQuoteDraft(host: QuoteHost): { notice: string | null; quote: 
 			if (!surface.apply({ from: placed.from, to: placed.to, insert: placed.insert, selection: { anchor: placed.caret, focus: placed.caret } }, "replace")) { say(HELD); return; }
 			surface.focus();
 			const lines = quoteLineCount(block);
-			say(request.kind === "selection" && request.plain ? `Quoted ${lines} line${lines === 1 ? "" : "s"} as plain text` : `Quoted ${lines} line${lines === 1 ? "" : "s"} into the draft`);
+			say(request.plain ? `Quoted ${lines} line${lines === 1 ? "" : "s"} as plain text` : `Quoted ${lines} line${lines === 1 ? "" : "s"} into the draft`);
 		};
 		if (current.composing()) current.defer(place);
 		else place();
 	}, [say]);
 
-	/** The field takes a quote now (the floating button's condition): mounted and writable. */
-	const ready = useCallback((): boolean => hostRef.current.surface() !== null && hostRef.current.writable(), []);
-
-	return { notice, quote, ready };
+	return { notice, quote };
 }

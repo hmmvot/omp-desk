@@ -31,7 +31,7 @@ Today there is no way to do that with one gesture. The only paths are copy and p
 
 Answers to the seven open questions of the first draft, and the choice made after the review. They are inputs, not proposals; sections below say how each is realised.
 
-1. **Trigger.** A floating Quote button, a contributed command with the key **`Alt+Q`**, a context-menu item, and per-message Quote buttons. (Section 1 records how `Alt+Q` was checked.)
+1. **Trigger.** A contributed command with the key **`Alt+Q`** and a context-menu item. *Changed 2026-10-16 by the maintainer:* the floating Quote button and the per-message Quote buttons that the first answer asked for are not built; the key and the menu item are the only triggers. (Section 1 records how `Alt+Q` was checked.)
 2. **Capture.** The source Markdown of exactly the selection, with the plain-text fallback and a notice.
 3. **Composer.** An **editable band with a visible `> ` prefix**, following the fenced-band precedent, **plus a ✕ that removes the whole quote as one undo step**. (The first answer was a non-editable atomic block; after the independent review the maintainer chose the band. No ADR-0077 amendment.)
 4. **Scope.** Assistant replies, user messages and thinking only. Tool output is not quotable.
@@ -106,7 +106,7 @@ Windowing does not prevent a selection from spanning rows: while a selection is 
 
 ````
 select text in an assistant reply, a user message or thinking
-   └─ trigger: floating button / Alt+Q command / context-menu item / per-message button
+   └─ trigger: Alt+Q command / context-menu item
         └─ page: Range → Markdown source of exactly the selection (or a rendered-text fallback + notice)
              └─ composer: append the quote at the END of the draft (separator rule, Section 2); focus the composer
                   └─ the draft shows a quote band (editable `> ` lines) with a ✕; the caret is on the new line after it
@@ -117,12 +117,10 @@ Everything is page-local (webview layer). The host's only part is the keybinding
 
 ### 1. Trigger
 
-All four triggers call one page function (`quoteIntoDraft`), so no trigger can do what another cannot.
+Both triggers call one page function (`quoteSelectionIntoDraft`), so neither can do what the other cannot. The maintainer decided on 2026-10-16 against a floating button and per-message buttons (decision 1), so there are two triggers; the text below that described them is gone.
 
-1. **A floating Quote button** next to the end of a non-collapsed selection inside the transcript region. A small component in `App.tsx`, positioned `fixed` from the last client rect of the Range (flipped below when there is no room above, clamped to the viewport), repositioned on scroll and resize in `requestAnimationFrame`, hidden when the selection collapses, leaves the transcript, lies in an editable field, is whitespace-only, contains nothing quotable (decision 4), or the composer cannot take text. The click must not collapse the selection, so the button calls `preventDefault()` in `onMouseDown`, the repository's pattern for a control that must not take focus (`Composer.tsx:1551`); the owned-Chromium test measures that the selection survives the click. One `selectionchange` listener that returns at once when the selection is collapsed (five of this kind exist, `MeasuredRows.tsx:49`, `ToolCard.tsx:89`, `Transcript.tsx:456`, `PacedMarkdown.tsx:49`, `use-windowed-rows.ts:73`).
-2. **A contributed command and keybinding** `ompDesk.quoteChatSelection`: title "Quote Chat Selection in Draft", category "OMP Desk", `enablement: ompDesk.sessionMode == chat` (the pattern of `package.json:703-716`), palette-visible, key **`Alt+Q`** with the chat-only `when` (`activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat`). The host handler is `postChatPanelAction("quote-selection")` (`extension.ts:5599`); the new `"quote-selection"` member of `GuestPanelAction` (`messages.ts:344`, parse table `:1137-1142`) is run by the composer's `providePanelActions` map (`panel-actions.ts:23-60`, `Composer.tsx:1153-1169`), which the compiler forces to be complete. With no quotable selection the page says so in the status line (Section 7).
-3. **A context-menu item** "Quote Selection" in `webview/context`. The transcript root carries `data-vscode-context='{"ompChatText":true}'` and the item's `when` is `webviewId =~ /^omp[.]session/ && ompChatText`; the item is always offered on the transcript and answers "Select text in the conversation first" when nothing is selected, because the context object is read when the menu opens. A link span keeps its own `webviewSection`; that VS Code merges the keys with the nearest element winning is `[INFERENCE from the VS Code webview guide]`, so the end-to-end check measures it (Rollout) and the item is the first thing dropped if it does not hold.
-4. **Per-message Quote buttons**: in `.omp-row-actions` of a user row next to Copy (`Transcript.tsx:206-213`) and in the reply footer next to Copy (`ReplyFooter.tsx:15-16`). They quote the *whole* message from the source the Copy button already holds (`messageText`, `reply.text`), with no DOM mapping, and are the Tab-reachable path (Section 7). A message over the limit is refused with its size (decision 7).
+1. **A contributed command and keybinding** `ompDesk.quoteChatSelection`: title "Quote Selection", category "OMP Desk", `enablement: ompDesk.sessionMode == chat`, palette-visible, key **`Alt+Q`** with the chat-only `when` (`activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat`). The host handler is `postChatPanelAction("quote-selection")`; the new `"quote-selection"` member of `GuestPanelAction` is run by the composer's `providePanelActions` map, which the compiler forces to be complete. With no quotable selection the page says so in the status line (Section 7).
+2. **A context-menu item** "Quote Selection" in `webview/context`. The transcript root carries `data-vscode-context='{"ompChatText":true}'` and the item's `when` is `webviewId =~ /^omp[.]session/ && ompChatText`; the item is always offered on the transcript and answers "Select text in the conversation first" when nothing is selected, because the context object is read when the menu opens. A link span keeps its own `webviewSection`. *Measured in a real window:* VS Code merges the keys, and the item appears on text, on a paragraph and on the transcript background (e2e scenario 38).
 
 **How `Alt+Q` was checked** (decision 1). Reading and searching only; no window was started, and the review confirmed the bundle search independently:
 
@@ -173,7 +171,7 @@ Decision 2: source Markdown, mapped from the DOM, never `innerText`. The page ke
   5. Joins the slices of distinct surfaces with an empty line, then prefixes: `> ` before each non-empty line, a bare `>` for an empty one (no trailing space). Source that already contains `>` lines becomes `> > …`.
   6. **Neutralises image markers:** `[Image #N…]` is rewritten `[image #N…]`. The marker grammar and the transcript's `INLINE_TOKEN` are case-sensitive (`image-references.ts:23`, `Markdown.tsx:34`), so a quoted marker neither pairs with an image attached to the new draft (the Nth marker is the Nth image on the wire) nor renders in the sent message as a button that points at the wrong image.
 - **Degradation, never failure.** If a surface is not registered, a leaf has no record, or the offset map disagrees with the DOM text of its leaf (the visible text of the mapped slice, rendered through the same tokenizer, is compared with the Range's own text; a wrong column therefore falls back instead of producing a wrong quote), that surface falls back to its *rendered* text from the Range, wrapped as plain quote lines. The user still gets a quote and the status line says "Quoted as plain text", so the loss is not silent.
-- **Limit (decision 7).** The captured Markdown, before prefixing, is refused over 20 000 characters (the bound that decides which prompts the history keeps, `extension.ts:5787`), with the size in the message: "That selection is 31 482 characters; Quote takes at most 20 000." The same limit applies to the per-message buttons. Truncating would put an invented ellipsis into the model's context. The limit is one named constant.
+- **Limit (decision 7).** The captured Markdown, before prefixing, is refused over 20 000 characters (the bound that decides which prompts the history keeps, `extension.ts:5787`), with the size in the message: "That selection is 31 482 characters; Quote takes at most 20 000." Truncating would put an invented ellipsis into the model's context. The limit is one named constant.
 
 ### 4. The composer: an editable quote band
 
@@ -274,18 +272,16 @@ Two OMP behaviours on a quote's content are inherited, not introduced, and docum
 
 ### 7. Accessibility and the keyboard path
 
-- **Selecting without a mouse** needs caret browsing or a screen reader's own selection `[INFERENCE: Chromium behaviour, not measured in the webview]`; once a selection exists, `Shift+Arrow` extends it. The keyboard path is two-part: the contributed command and key (`Alt+Q`, rebindable in the Keyboard Shortcuts editor, also from the palette) for a selection that exists, and the per-message Quote buttons, which sit in the Tab order of their row (`.omp-row-actions` is shown on row hover or `focus-within`, `styles.ts:277-278`) and quote a whole message without any selection.
-- **The floating button** is a real `button` named "Quote selection in draft" with `aria-keyshortcuts="Alt+Q"` (as the send button has `aria-keyshortcuts="Enter"`, `Composer.tsx:1426`) and `tabindex="-1"`: it exists only while a selection exists, so it is a pointer affordance and the key, the palette and the row buttons are its equivalents.
+- **Selecting without a mouse.** The per-message Quote buttons were the Tab-reachable path; with them gone (decision 1, 2026-10-16) the keyboard path is to select text and press `Alt+Q` (rebindable in the Keyboard Shortcuts editor, also from the palette). *Measured in the owned Chromium (`chat-ui.test.ts`):* `Shift+Arrow` extends a selection that already exists in the transcript, but a collapsed caret placed in transcript text is **not** extended by `Shift+Arrow`, because the transcript is not editable and caret browsing is off, so a selection cannot be started from the keyboard alone. **This is an accessibility gap**: a keyboard-only user cannot quote, and nothing is added back to close it (maintainer decision). A screen reader's own selection commands, and `F7` caret browsing, are not measured here `[INFERENCE]`.
 - **Feedback** is one visually hidden `role="status"` line (the pattern of the composer's suggestion count, composer design section 7) plus one visible line in the composer's hint row for a few seconds: "Quoted N lines into the draft", "Quoted as plain text", "Select text in the conversation first", "This session cannot take a message", "Your draft is being moved to a new editor; quote again in a moment", "That selection is N characters; Quote takes at most 20 000". Focus moves to the composer with the caret on the line after the quote, so a screen reader announces the field.
 - **The band is text.** A screen reader reads every quote line as it will be sent, `>` included; there is nothing hidden or atomic to explore. The band is visible in High Contrast and forced colours (`styles.ts:430,711` precedents). The hint names the quote keys while the caret is in a quote line.
 - **Removing a quote by keyboard:** Tab to the "Remove quote: …" button after the field and press `Enter` or `Space`, or select the lines and delete them; `Ctrl+Z` restores it. The ✕ is also a pointer affordance.
-- **Motion.** The floating button appears without animation.
 
 ### 8. Edge cases
 
 | Case | Behaviour |
 | --- | --- |
-| Empty or whitespace-only selection | No floating button; the command says "Select text in the conversation first"; nothing is inserted. |
+| Empty or whitespace-only selection | The command says "Select text in the conversation first"; nothing is inserted. |
 | Selection inside the composer (the surface or any `[contenteditable]`, `input`, `textarea`, the AskEditor textarea) | Never quotable: no button, the command refuses with the same message. A range with an endpoint in the composer or the dock is refused too (both endpoints must lie in the transcript region). |
 | Selection that touches only tool output, tool heads, notices or other chrome | Nothing quotable: no button; the command says so. |
 | Selection spanning several messages | Supported. All touched rows are mounted and held by the selection (`MeasuredRows.tsx:39-51`); each quotable `div.omp-md` the range crosses contributes a slice, everything else contributes nothing, slices are joined by an empty quote line. A Range cannot cover a row that was never mounted. |
@@ -294,7 +290,6 @@ Two OMP behaviours on a quote's content are inherited, not introduced, and docum
 | Partial code block | The selected lines, re-fenced with the language and a safe fence length; synthetic closing fence. |
 | Selection includes links | Source `[label](url)` when the whole label is covered; the selected label text alone when it is cut. Bare URLs and file paths are plain text either way. |
 | Table | Header, separator and the touched rows, so the quote is a valid table. |
-| Whole-message quote | The message's source (`messageText`, `reply.text`); an image-only reply has nothing to quote and its button is disabled like Copy (`ReplyFooter.tsx:15`). |
 | Streaming message under the selection | The map is built from the parse that produced the DOM; the pacer stops painting while the selection touches its slot (`PacedMarkdown.tsx:39-47`), so the quote is exactly what the user saw selected, even if the canonical reply has grown. When the reply is saved and its row id changes (Current State 2) the row may remount and the selection collapse `[INFERENCE]`: the button disappears with the selection, and a command that arrives after it finds no selection and says so; nothing wrong is inserted. Both behaviours get a test. |
 | Very long selection | Over 20 000 characters of captured Markdown: refused with the size. A draft that would pass `MAX_CHAT_TEXT_LENGTH`: refused. `Ctrl+A` in the transcript never silently fills the draft. |
 | Draft ends inside an unclosed fence | The closing fence is supplied first (Section 2); the quote is never inside code. |
@@ -318,7 +313,7 @@ Two OMP behaviours on a quote's content are inherited, not introduced, and docum
 6. **Send-time normalisation** (insert the blank line CommonMark needs after a quote, trim trailing `>`). Rejected: ADR-0077 makes the sent string the stored string, byte for byte; the insertion decides the shape instead.
 7. **Host-side capture** (a menu command receives the selection from the page over `omp:selection-request`). Rejected: that reply keeps one line of at most 200 characters (`selection-query.ts:9-47`), and a page-local action avoids a new reply message.
 8. **A prompt-level attachment** (the quote as a structured context field). Rejected: OMP's `prompt` takes a string (`session.ts:939-944`) and the maintainer wants the quote visible in the draft.
-9. **No floating button, command and menu only.** Smaller, but the maintainer's words are "press Quote" (decision 1).
+9. **No floating button, command and menu only.** Chosen by the maintainer on 2026-10-16 (decision 1 changed); the first draft's "press Quote" and the per-message buttons are dropped.
 10. **Deferring a quote behind a held capture** (the Add Selection to Session pattern). Rejected: it runs only in the same editor, so a quote would vanish when the capture ends in a replacement (Section 2, rule 3).
 
 ## Risks and Open Questions
@@ -331,7 +326,7 @@ Two OMP behaviours on a quote's content are inherited, not introduced, and docum
 - **Context-menu merging.** The behaviour of `data-vscode-context` keys on nested elements and of a right-click on a selection in the webview is read second-hand from the VS Code documentation, not measured; the end-to-end check proves it in a real window, and the menu item is the first thing dropped if it does not hold.
 - **Selection survival across the streaming-to-saved row change** (`live:` ids, Current State 2) is inferred, not measured; the worst case is a vanished button.
 - **`@` mentions in quoted text** are expanded by OMP on an idle send and cost an extra file read (inherited, documented, not mitigated).
-- **Assistive technology** behaviour for the floating button, the ✕ buttons and the status line is unverified and goes on the same manual list as the composer's.
+- **Assistive technology** behaviour for the ✕ buttons and the status line is unverified and goes on the same manual list as the composer's. A selection cannot be started from the keyboard alone (Section 7).
 - No question is open: the maintainer decided the one that remained (decision 8).
 
 ## Rollout and Verification
@@ -344,7 +339,7 @@ Slices, in implementation order; each is independently reviewable, and slices 0 
 3. **The composer band**: `findQuoteRuns`, `lineSpecs`/`buildLine`/`lineKey`/`LineRenderer`, CSS, `quote-edits.ts` keys, the completion gate, the hint, and their tests.
 4. **Inserting and removing**: `placeQuote` (separator table, unclosed fence, limit), the held-capture refusal and the composition deferral, `surface.lineRect`, the ✕ overlay and its removal edit.
 5. **Capture**: the `quotable` prop, the leaf records with line ranges and prefix lengths, the registry, `quote-capture.ts`, the fallback and the limit.
-6. **Triggers**: the `quote-selection` panel action (protocol type, parser table, registry map, host command, keybinding, `webview/context` item, `data-vscode-context` attribute), the floating button, the per-message buttons, the status line.
+6. **Triggers**: the `quote-selection` panel action (protocol type, parser table, registry map, host command, keybinding, `webview/context` item, `data-vscode-context` attribute), the status line (no floating button, no per-message buttons: decision 1, 2026-10-16).
 7. **End-to-end and documents**: `38-chat-quote-selection.spec.ts`; `docs/guide/chat.md` (a "Quoting Chat text" subsection next to "Code blocks in the draft", lines 24-33), `docs/guide/keyboard-shortcuts.md` (the Chat table: `Alt+Q`), `docs/architecture.md` (the composer surface paragraph near line 222, the page-action and file-link paragraphs near 48 and 84-98), the CHANGELOG `[Unreleased]`, and the map entry in `docs/README.md`.
 
 **Unit checks (`node --test`, no browser):**
@@ -365,12 +360,11 @@ Slices, in implementation order; each is independently reviewable, and slices 0 
 - Held capture: the Quote action while the hand-off holds the draft is refused with the notice and nothing is queued; after `release` nothing is inserted.
 - Capture in the page: a paragraph with emphasis, a link, a code span and a list selected partly and fully; a partial code block re-fenced, including one whose content holds a three-backtick line; a table; a selection across two messages and across a tool row between them (the row contributes nothing); thinking; a child transcript row; a selection with only tool output or chrome (nothing quotable); a whitespace selection; a selection inside the composer or the ask textarea; a collapsed selection; a quote inside an assistant reply sliced from its original lines.
 - Streaming: a selected paced reply that keeps growing quotes what is painted; the reply being saved under a live selection (the `live:` remount) leaves the page consistent.
-- Button: appears on a selection, a click does not collapse it (`document.activeElement` and the selection are measured after the click), hides on collapse, in the composer and over non-quotable text, flips and clamps at the viewport edge, absent while the composer is disabled or a dialog is up.
-- Whole-message buttons: the quote of a user message and of a reply equals `messageText`/`reply.text` with the prefixes; keyboard reachable by Tab; refused over the limit with the size.
+- No Quote button is drawn for a selection or on a message row; the host's `quote-selection` action quotes the selection, and says why when there is none; `Shift+Arrow` extends an existing selection and a collapsed caret is not extended.
 
 **End-to-end in a real window (`test/e2e/scenarios/38-chat-quote-selection.spec.ts`, using `desk.send`, `composer`, `readDraft`, `clickMenuItem`; the mock server replies `Mock reply to: …` and truncates the recorded `lastUserText` to 200 characters, so test messages are short, and user messages are the Markdown source because they render through the same component):**
 
-- Send a short Markdown user message, select text inside its row, click the floating button: the draft is the quote plus its line break, the caret is on the line after, the focus is in the composer.
+- Send a short Markdown user message, select text inside its row and press `Alt+Q`: the draft is the quote plus its line break, the caret is on the line after, the focus is in the composer.
 - With a second selection press `Alt+Q`: a second quote lands at the end, after a typed comment and a blank line; `Ctrl+Z` removes only the second quote; the first quote's ✕ removes it and keeps the comment under it.
 - Right-click on the selection: the "Quote Selection" item is in the workbench menu (a webview menu is rendered by the workbench `[INFERENCE]`, which this check proves or refutes) and inserts the same text.
 - Send the draft: the mock server's recorded text contains the `> ` lines, and the transcript shows a `blockquote` followed by the comment paragraph.

@@ -1,7 +1,7 @@
 /**
  * Scenario: quoting Chat text into the draft in a real VS Code window (docs/designs/2026-10-15-quote-chat-selection.md). The
  * workbench sees every key and owns the webview context menu, so this is the check that Alt+Q reaches the page's quote path, that the
- * "Quote Selection" item is offered in a menu the workbench renders, that the floating button inserts the same text, and that a
+ * "Quote Selection" item is offered in a menu the workbench renders, that it inserts the same text, and that a
  * sent draft carries the `>` lines to the model and shows as a quote followed by the comment.
  *
  * User messages render through the same Markdown component as replies, so the test messages are short Markdown the mock server
@@ -22,7 +22,7 @@ async function select(chat: FrameLocator, selector: string): Promise<void> {
 	});
 }
 
-test("selected Chat text is quoted into the draft by the floating button, Alt+Q and the context menu, and a sent quote reaches the model and renders as a quote", async ({ desk, state }) => {
+test("selected Chat text is quoted into the draft by Alt+Q and the context menu, and a sent quote reaches the model and renders as a quote", async ({ desk, state }) => {
 	const page = await desk.window("alpha-desk");
 	await desk.ready(page);
 	const chat = await desk.newChatSession(page, "alpha-desk");
@@ -33,11 +33,12 @@ test("selected Chat text is quoted into the draft by the floating button, Alt+Q 
 	await expect(chat.getByText(/Mock reply to: Check/), "the model answered").toBeVisible({ timeout: 120_000 });
 	await expect.poll(draft).toBe("");
 
-	// The floating button: a selection shows it, a click quotes the source of exactly the selection and puts the caret under it.
+	// No Quote button is drawn: the key and the menu are the only triggers.
 	await select(chat, ".omp-user .omp-md strong");
-	const floating = chat.getByRole("button", { name: "Quote selection in draft" });
-	await expect(floating).toBeVisible();
-	await floating.click();
+	await expect(chat.getByRole("button", { name: /^Quote/ })).toHaveCount(0);
+
+	// Alt+Q quotes the source of exactly the selection and puts the caret under it, with the focus in the composer.
+	await page.keyboard.press("Alt+q");
 	await expect.poll(draft, "the quote and its line break").toBe("> **bold**\n");
 	await expect(box, "the focus is in the composer").toBeFocused();
 

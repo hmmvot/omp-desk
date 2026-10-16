@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import type { ReplyFooter as ReplyFooterData } from "../../chat/reply-turns.ts";
 import { fmtDuration } from "../../shared/format";
-import { QuoteMessageButton } from "./QuoteMessageButton";
 
 export function ReplyFooter({ reply }: { reply: ReplyFooterData }) {
 	const [copyStatus, setCopyStatus] = useState<string | null>(null);
@@ -17,7 +16,6 @@ export function ReplyFooter({ reply }: { reply: ReplyFooterData }) {
 			try { await navigator.clipboard.writeText(reply.text); setCopyStatus("Copied"); }
 			catch { setCopyStatus("Copy failed. Select the reply text to copy it manually."); }
 		}}><i className="codicon codicon-copy" aria-hidden="true" /></button>
-		<QuoteMessageButton className="omp-reply-copy" source={reply.text} label="Quote reply" disabled={reply.imageOnly} title={reply.imageOnly ? "Image-only reply: no text to quote" : "Quote reply in the draft"} />
 		{reply.imageOnly && <span>No text to copy</span>}
 		{copyStatus !== null && <span role="status">{copyStatus}</span>}
 	</footer>;

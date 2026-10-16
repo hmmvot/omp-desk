@@ -718,9 +718,6 @@ ${ANSI_STYLES}
 .omp-quote-remove:hover { background: var(--vscode-toolbar-hoverBackground, color-mix(in srgb, var(--vscode-foreground) 12%, transparent)); color: var(--vscode-foreground); }
 .omp-quote-remove:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
 .omp-quote-remove:disabled { opacity: 0.4; cursor: default; }
-.omp-quote-selection { position: fixed; z-index: 20; display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border: 1px solid var(--vscode-button-border, transparent); border-radius: var(--omp-radius); background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); font: inherit; cursor: pointer; user-select: none; }
-.omp-quote-selection:hover { background: var(--vscode-button-secondaryHoverBackground); }
-.vscode-high-contrast .omp-quote-selection, .vscode-high-contrast-light .omp-quote-selection { border-color: var(--vscode-contrastBorder); }
 .omp-chip { display: inline; padding: 0 3px; margin: 0 1px; border-radius: var(--omp-radius); cursor: default; background: color-mix(in srgb, var(--vscode-textLink-foreground, var(--vscode-focusBorder, #3794ff)) 24%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--vscode-textLink-foreground, var(--vscode-focusBorder, #3794ff)) 55%, transparent); }
 .omp-composer > .omp-composer-hint--code { margin: 2px 0 6px; min-height: calc(11px * 1.4); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 @media (forced-colors: active) {

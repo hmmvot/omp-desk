@@ -100,17 +100,9 @@ export function captureSelection(selection: Selection | null, region: Element): 
 	return joined.markdown.trim().length === 0 ? { kind: "none", message: NOTHING_QUOTABLE } : { kind: "quote", source: joined.markdown, plain: joined.plain };
 }
 
-/** Whether the selection holds quotable message text (a light check for the floating button). */
-export function hasQuotableText(selection: Selection | null, region: Element): boolean {
-	const range = quotableRange(selection, region);
-	if (range === null || range.toString().trim().length === 0) return false;
-	for (const root of region.querySelectorAll(".omp-md")) if (registeredMarkdown(root) !== undefined && crosses(range, root)) return true;
-	return false;
-}
-
 /**
- * The one page function every trigger of "quote the selection" calls (the floating button, the host's `quote-selection` action from
- * `Alt+Q` or the context menu): reads the selection of the transcript region and hands the composer a quote, or the words that say why
+ * The one page function every trigger of "quote the selection" calls (the host's `quote-selection` action, which `Alt+Q`
+ * and the context menu item both post): reads the selection of the transcript region and hands the composer a quote, or the words that say why
  * there is none. `false` when no composer is mounted.
  */
 export function quoteSelectionIntoDraft(): boolean {
