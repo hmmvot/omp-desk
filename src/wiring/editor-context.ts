@@ -229,6 +229,8 @@ export interface SendCandidate {
 	readonly mode: "chat" | "terminal";
 	readonly stateLabel: string;
 	readonly availability: InsertAvailability;
+	/** The session's editor is shown on screen now (its panel reports `visible`); a tab hidden behind another tab of its group is not. */
+	readonly visible: boolean;
 }
 
 /** The last path segment of a folder, for either separator. */
@@ -258,6 +260,18 @@ export function orderCandidates(candidates: readonly SendCandidate[], recency: r
 		rank(a) - rank(b)
 		|| (a.availability === b.availability ? 0 : a.availability === "live" ? -1 : 1)
 		|| a.title.localeCompare(b.title));
+}
+
+/**
+ * Where "Quote Selection to Session" goes without asking: the Chat session the user can see. A candidate counts when its editor is
+ * visible, it is a Chat (a terminal has no composer) and it is `live` (its input is free: a session still starting or stopped is not
+ * a composer to land in yet, and the picker, which also leaves it out or starts it, keeps deciding for those). Several visible Chats:
+ * the one focused last, by the same recency the picker orders by; one no recency knows ranks after the ones it knows. `null` when no
+ * Chat is visible, and the picker then asks.
+ */
+export function visibleQuoteTarget(candidates: readonly SendCandidate[], recency: readonly string[]): SendCandidate | null {
+	const shown = candidates.filter(candidate => candidate.visible && candidate.slotId !== null && candidate.mode === "chat" && candidate.availability === "live");
+	return orderCandidates(shown, recency)[0] ?? null;
 }
 
 /** The editors of this window in the order the user last focused them (newest first). */

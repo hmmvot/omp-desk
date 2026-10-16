@@ -20,6 +20,7 @@ import {
 	orderCandidates,
 	pickerEntries,
 	selectionLines,
+	visibleQuoteTarget,
 } from "./editor-context.ts";
 import type { EditorQuoteSource, SendCandidate } from "./editor-context.ts";
 import { bracketedPaste } from "../host/bracketed-paste.ts";
@@ -175,9 +176,45 @@ function candidate(tabId: string, overrides: Partial<SendCandidate> = {}): SendC
 		mode: "chat",
 		stateLabel: "Running",
 		availability: "live",
+		visible: false,
 		...overrides,
 	};
 }
+
+describe("the visible target of a quote", () => {
+	const shown = (tabId: string, overrides: Partial<SendCandidate> = {}): SendCandidate => candidate(tabId, { visible: true, ...overrides });
+
+	it("is none when no Chat is visible, so the picker asks", () => {
+		assert.equal(visibleQuoteTarget([candidate("a"), candidate("b")], ["slot-a"]), null);
+		assert.equal(visibleQuoteTarget([], []), null);
+	});
+
+	it("is the one visible Chat, whatever hidden sessions were focused more recently", () => {
+		assert.equal(visibleQuoteTarget([candidate("a"), shown("b"), candidate("c")], ["slot-a", "slot-c", "slot-b"])?.tabId, "b");
+	});
+
+	it("takes the most recently focused of several visible Chats", () => {
+		const recency = new EditorRecency();
+		recency.touch("slot-a");
+		recency.touch("slot-b");
+		recency.touch("slot-c");
+		recency.touch("slot-a");
+		assert.equal(visibleQuoteTarget([shown("a"), shown("b"), shown("c", { visible: false })], recency.order())?.tabId, "a");
+		assert.equal(visibleQuoteTarget([shown("b"), shown("c")], recency.order())?.tabId, "c");
+	});
+
+	it("ranks a visible Chat no recency knows after the ones it knows", () => {
+		assert.equal(visibleQuoteTarget([shown("a", { title: "Aardvark" }), shown("b")], ["slot-b"])?.tabId, "b");
+		assert.equal(visibleQuoteTarget([shown("z", { title: "Zed" }), shown("a", { title: "Alpha" })], [])?.tabId, "a");
+	});
+
+	it("does not count a visible Terminal view, a stopped Chat that would first be started, or a session with no editor", () => {
+		assert.equal(visibleQuoteTarget([shown("t", { mode: "terminal" })], ["slot-t"]), null);
+		assert.equal(visibleQuoteTarget([shown("s", { availability: "resume", stateLabel: "Stopped" })], ["slot-s"]), null);
+		assert.equal(visibleQuoteTarget([shown("n", { slotId: null })], []), null);
+		assert.equal(visibleQuoteTarget([shown("t", { mode: "terminal" }), shown("c")], ["slot-t", "slot-c"])?.tabId, "c", "a visible Terminal does not hide the Chat beside it");
+	});
+});
 
 describe("the target picker", () => {
 	it("puts the most recently focused session first, so it is the preselected row", () => {

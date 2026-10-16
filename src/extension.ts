@@ -135,6 +135,7 @@ import {
   newSessionFolder,
   pickerEntries,
   selectionLines,
+  visibleQuoteTarget,
 } from "./wiring/editor-context";
 import type { EditorQuoteSource, ReferenceSource, SendCandidate } from "./wiring/editor-context";
 import { TurnNotifier, desktopNotificationSuppression, reportsTrailingQuestion } from "./host/notifications";
@@ -5933,8 +5934,8 @@ async function loadSlashRegistry(context: vscode.ExtensionContext): Promise<void
 // "OMP Desk: Add Selection to Session", "OMP Desk: Add File to Session" and "OMP Desk: Quote Selection to Session"
 // What is added is a reference (`@src/a.ts [lines 12-30]`), composed by `wiring/editor-context` for the
 // chosen session's cwd, or (Quote Selection to Session) the selected text with its location as a quote the
-// page places like a Chat quote. The target is always the user's choice from a picker, most recently focused
-// editor first; nothing is ever submitted, and the destination is revealed and focused.
+// page places like a Chat quote. The target of Add to Session is always the user's choice from a picker, most recently focused
+// editor first; a quote skips the picker when a Chat of this window is visible and goes into that composer. Nothing is ever submitted, and the destination is revealed and focused.
 
 /** How long a session being opened may take to be able to receive the text. */
 const INSERT_TARGET_TIMEOUT_MS = 30_000;
@@ -5996,6 +5997,7 @@ function sendCandidates(context: vscode.ExtensionContext, index: SessionIndex): 
       mode: hostOf(tab)?.kind ?? tab?.mode ?? defaultSessionMode(context),
       stateLabel: sessionStateLabel(state),
       availability,
+      visible: editorOpen && tab?.panel?.visible === true,
     });
   }
   return found;
@@ -6114,7 +6116,9 @@ async function quoteEditorSelectionToSession(context: vscode.ExtensionContext, i
 async function sendToSession(context: vscode.ExtensionContext, index: SessionIndex, request: InsertionRequest, firstFsPath: string | null, unsaved: boolean): Promise<void> {
   const s = windowState();
   const quoting = request.kind === "quote";
-  const target = await pickSendTarget(context, index, firstFsPath, unsaved, quoting);
+  // A quote goes straight into the Chat the user can see in this window; the picker only asks when none is shown.
+  const visibleChat = quoting ? visibleQuoteTarget(sendCandidates(context, index), s.editorRecency.order()) : null;
+  const target = visibleChat !== null ? { kind: "session" as const, candidate: visibleChat } : await pickSendTarget(context, index, firstFsPath, unsaved, quoting);
   if (target === null) return;
   let tabId: string;
   let cwd: string;
