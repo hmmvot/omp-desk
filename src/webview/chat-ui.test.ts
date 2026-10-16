@@ -121,9 +121,11 @@ import { adoptNonceForCreatedStyles } from "./lib/nonce-styles";
 import { installFocusTrace } from "./lib/focus-trace";
 import { installTypeToFocus } from "./lib/type-to-focus";
 import { installComposerDriver } from "./test-support/composer-driver";
+import { requestQuote } from "./lib/quote-sink";
 installFocusTrace(window, element => element.classList.contains("omp-composer-input"), detail => guestTransport.post({ type: "omp:focus-trace", detail }));
 installTypeToFocus(window);
 installComposerDriver(window);
+window.requestQuote = requestQuote;
 attachSessionView(guestTransport);
 attachCodeTheme(guestTransport);
 attachInsertedText(guestTransport, () => sessionViewSnapshot().mode);
@@ -3691,6 +3693,157 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await setDraft("> q\n@sr");
 			await ui.wait(`window.sent.filter(message=>message.type==='omp:complete-files').length>${before}`);
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		const quoteIn = (source: string): Promise<unknown> => ui.evaluate(`window.requestQuote({kind:'message',source:${JSON.stringify(source)}})`);
+		const hintText = (): Promise<string | null> => codeHint();
+
+		await t.test("a quote lands at the end of the draft after a blank line, the caret on the line under it with the focus in the field, and one Ctrl+Z takes it back", async () => {
+			await reset("quote-insert");
+			await ui.call("Emulation.setFocusEmulationEnabled", { enabled: true });
+			try {
+				await setDraft("hello");
+				await ui.evaluate("window.composer.el().blur()");
+				await quoteIn("a\n\n```ts\nx\n```");
+				const expected = "hello\n\n> a\n>\n> ```ts\n> x\n> ```\n";
+				await waitDraft(`window.composer.value()===${JSON.stringify(expected)}`);
+				assert.deepEqual(await areaState(), { value: expected, start: expected.length, end: expected.length, focused: true }, "the caret is on the empty line under the quote and the field has the focus");
+				assert.equal(await hintText(), "Quoted 5 lines into the draft");
+				assert.equal(await ui.evaluate("window.composer.el().children.length"), 8, "the quote's five lines, the blank line, hello and the line under the quote");
+				await undo();
+				await waitDraft("window.composer.value()==='hello'");
+				// An empty draft, a draft with a comment and a second quote.
+				await setDraft("");
+				await quoteIn("first");
+				await waitDraft("window.composer.value()==='> first\\n'");
+				await ui.call("Input.insertText", { text: "my comment" });
+				await quoteIn("second");
+				await waitDraft(`window.composer.value()===${JSON.stringify("> first\nmy comment\n\n> second\n")}`);
+				assert.equal(await sendCount(), 0, "quoting never sends");
+				assert.deepEqual(await ui.evaluate("window.errors"), []);
+			} finally {
+				await ui.call("Emulation.setFocusEmulationEnabled", { enabled: false });
+			}
+		});
+
+		await t.test("a quote is refused while the hand-off holds the draft and nothing is inserted later; over the limit and empty it says why", async () => {
+			await reset("quote-refusals");
+			await setDraft("kept");
+			await ui.evaluate("window.ui.receive({type:'omp:draft-request',requestId:900})");
+			await ui.wait("window.sent.some(message=>message.type==='omp:draft-reply'&&message.requestId===900)&&window.composer.readOnly()");
+			await quoteIn("must not land");
+			await ui.wait("(document.querySelector('.omp-composer-hint--code')?.textContent??'').startsWith('Your draft is being moved to a new editor')");
+			await ui.evaluate("window.ui.receive({type:'omp:draft-release',requestId:900})");
+			await ui.wait("!window.composer.readOnly()");
+			await settleFrames();
+			assert.equal((await areaState()).value, "kept", "released, still nothing inserted");
+			await quoteIn("x".repeat(31_482));
+			await ui.wait("document.querySelector('.omp-composer-hint--code')?.textContent==='That selection is 31 482 characters; Quote takes at most 20 000.'");
+			await quoteIn("  \n ");
+			await ui.wait("document.querySelector('.omp-composer-hint--code')?.textContent==='Select text in the conversation first'");
+			await quoteIn("x".repeat(20_000));
+			await ui.wait("window.composer.value().length>20000");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("each quote run has a Remove quote button in its gutter: named, a Tab stop, beside the first visible line, never over text; a click removes the run and its line break as one undo step and keeps focus", async () => {
+			await reset("quote-remove");
+			await ui.call("Emulation.setFocusEmulationEnabled", { enabled: true });
+			try {
+				await setDraft("intro\n\n> first quote\n> second line\nmy comment\n\n> other quote\n");
+				await ui.wait("document.querySelectorAll('.omp-quote-remove').length===2");
+				const buttons = (): Promise<{ label: string; disabled: boolean; top: number; right: number; lineTop: number; textLeft: number }[]> => ui.evaluate(`(()=>{
+				 const field=window.composer.el(),lines=[...field.children];
+				 return[...document.querySelectorAll('.omp-quote-remove')].map(button=>{
+				  const rect=button.getBoundingClientRect(),line=lines.find(candidate=>candidate.classList.contains('omp-line--quote')&&Math.abs(candidate.getBoundingClientRect().top-rect.top)<4);
+				  const range=document.createRange();range.setStart(line.firstChild,0);range.setEnd(line.firstChild,1);
+				  return{label:button.getAttribute('aria-label'),disabled:button.disabled,top:rect.top,right:rect.right,lineTop:line.getBoundingClientRect().top,textLeft:range.getBoundingClientRect().left}})})()`);
+				const found = await buttons();
+				assert.deepEqual(found.map(button => button.label), ["Remove quote: «first quote»", "Remove quote: «other quote»"]);
+				assert.ok(found.every(button => Math.abs(button.top - button.lineTop) < 2 && button.right <= button.textLeft), `each is beside its run's first line and left of the text: ${JSON.stringify(found)}`);
+				// A Tab stop after the field.
+				await ui.evaluate("window.composer.focus()");
+				await press("Tab", "Tab", 9);
+				assert.equal(await ui.evaluate("document.activeElement?.getAttribute('aria-label')"), "Remove quote: «first quote»");
+				// A click keeps the field's focus and selection, removes the run and its line break, and leaves the comment.
+				await ui.evaluate("window.composer.focus()");
+				await setSelection(2, 4);
+				await clickAt(await centerOf(".omp-quote-remove"));
+				await waitDraft(`window.composer.value()===${JSON.stringify("intro\n\nmy comment\n\n> other quote\n")}`);
+				const after = await areaState();
+				assert.equal(after.focused, true, "the field kept the focus through the click");
+				assert.equal(await ui.evaluate("document.querySelectorAll('.omp-quote-remove').length"), 1);
+				await undo();
+				await waitDraft(`window.composer.value()===${JSON.stringify("intro\n\n> first quote\n> second line\nmy comment\n\n> other quote\n")}`);
+				// A click on the last character of a full-width quote line places the caret there and removes nothing.
+				const lastChar = await ui.evaluate<{ x: number; y: number }>(`(()=>{const line=window.composer.el().children[2],text=line.firstChild,range=document.createRange();range.setStart(text,text.length-1);range.setEnd(text,text.length);const box=range.getBoundingClientRect();return{x:box.right-1,y:box.top+box.height/2}})()`);
+				await clickAt(lastChar);
+				await settleFrames();
+				const placed = await areaState();
+				assert.equal(placed.value.includes("first quote"), true, "no quote was removed");
+				assert.equal(placed.start, "intro\n\n> first quote".length);
+				assert.deepEqual(await ui.evaluate("window.errors"), []);
+			} finally {
+				await ui.call("Emulation.setFocusEmulationEnabled", { enabled: false });
+			}
+		});
+
+		await t.test("the Remove quote buttons follow an edit, a scroll and a resize, are absent for a run scrolled out of view, wait out an IME composition and are disabled while the draft is held", async () => {
+			await reset("quote-remove-layout");
+			await ui.call("Emulation.setFocusEmulationEnabled", { enabled: true });
+			try {
+				const filler = Array.from({ length: 14 }, (_, index) => `filler line ${index}`).join("\n");
+				await setDraft(`${filler}\n\n> a quote that is long enough to wrap when the panel is made narrow, so that its first line stays where it is\n`);
+				await ui.wait("document.querySelectorAll('.omp-quote-remove').length===1");
+				const follow = (): Promise<{ matches: boolean; present: number }> => ui.evaluate(`(()=>{const button=document.querySelector('.omp-quote-remove');if(!button)return{matches:false,present:0};
+				 const line=[...window.composer.el().children].find(candidate=>candidate.classList.contains('omp-line--quote'));return{matches:Math.abs(button.getBoundingClientRect().top-line.getBoundingClientRect().top)<2,present:1}})()`);
+				const scroll = async (top: number): Promise<void> => { await ui.evaluate(`window.composer.el().scrollTop=${top}`); await settleFrames(); await settleFrames(); };
+				await scroll(1_000_000);
+				assert.deepEqual(await follow(), { matches: true, present: 1 }, "at the bottom, beside the quote");
+				await scroll(0);
+				assert.equal((await follow()).present, 0, "a run scrolled out of the field has no button");
+				await scroll(1_000_000);
+				assert.deepEqual(await follow(), { matches: true, present: 1 });
+				// An edit above the quote moves it; the button moves with it.
+				await ui.evaluate("window.composer.focus()");
+				await setSelection(0, 0);
+				await ui.call("Input.insertText", { text: "one\ntwo\nthree\n" });
+				await settleFrames();
+				await scroll(1_000_000);
+				assert.deepEqual(await follow(), { matches: true, present: 1 }, "after an edit");
+				// A resize wraps the quote and the field's height changes; the button stays at its first line.
+				await ui.call("Emulation.setDeviceMetricsOverride", { width: 240, height: 900, deviceScaleFactor: 1, mobile: false });
+				await ui.settleGeometry(".omp-composer");
+				await scroll(1_000_000);
+				assert.deepEqual(await follow(), { matches: true, present: 1 }, "after a resize");
+				await ui.call("Emulation.clearDeviceMetricsOverride");
+				await ui.settleGeometry(".omp-composer");
+				// A composition in progress: the click waits for its settle, in the same editor.
+				await setDraft("note\n\n> held quote\n");
+				await ui.wait("document.querySelectorAll('.omp-quote-remove').length===1");
+				await ui.evaluate("window.composer.focus()");
+				await setSelection("note\n\n> held quote\n".length, "note\n\n> held quote\n".length);
+				await ui.call("Input.imeSetComposition", { text: "か", selectionStart: 1, selectionEnd: 1 });
+				await ui.wait("window.composer.value().endsWith('か')");
+				await ui.evaluate("document.querySelector('.omp-quote-remove').click()");
+				await settleFrames();
+				assert.equal((await areaState()).value.includes("held quote"), true, "nothing changes while the composition is open");
+				await ui.call("Input.insertText", { text: "か" });
+				await ui.wait("!window.composer.value().includes('held quote')");
+				assert.ok((await areaState()).value.startsWith("note"), "the quote went and the rest stayed");
+				// While the hand-off holds the draft the button is disabled.
+				await setDraft("> held\n");
+				await ui.wait("document.querySelectorAll('.omp-quote-remove').length===1");
+				await ui.evaluate("window.ui.receive({type:'omp:draft-request',requestId:901})");
+				await ui.wait("window.composer.readOnly()");
+				assert.equal(await ui.evaluate("document.querySelector('.omp-quote-remove').disabled"), true);
+				await ui.evaluate("window.ui.receive({type:'omp:draft-release',requestId:901})");
+				await ui.wait("!window.composer.readOnly() && !document.querySelector('.omp-quote-remove').disabled");
+				assert.deepEqual(await ui.evaluate("window.errors"), []);
+			} finally {
+				await ui.call("Emulation.clearDeviceMetricsOverride");
+				await ui.call("Emulation.setFocusEmulationEnabled", { enabled: false });
+			}
 		});
 
 		await t.test("a marker is atomic for the caret and selection: it cannot be entered, and arrows hop over it", async () => {

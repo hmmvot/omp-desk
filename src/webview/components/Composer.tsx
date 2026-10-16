@@ -69,6 +69,10 @@ import type { ChatClient, ChatSnapshot } from "../lib/chat-client";
 import { blockContaining, findFencedBlocks, indentEdit, newlineEdit, outdentEdit, type TextEdit } from "../lib/code-fence";
 import { findQuoteRuns, isQuoteLineAt } from "../lib/quote-lines";
 import { quoteKeyEdit } from "../lib/quote-edits";
+import { removalRange } from "../lib/quote-draft";
+import { provideQuoteSink } from "../lib/quote-sink";
+import { useQuoteDraft } from "../lib/use-quote-draft";
+import { QuoteRemoveButtons } from "./QuoteRemoveButtons";
 import type { DraftSurface, HistoryMode } from "../lib/draft-surface";
 import { chatWritable } from "../lib/chat-client";
 import { startsSession } from "../lib/chat-operation";
@@ -1175,6 +1179,31 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 		[retry, send, stop],
 	);
 
+	// Quoting (docs/designs/2026-10-15-quote-chat-selection.md): every trigger asks this composer through the sink, so the refusals, the edit and the notice are the same whoever asked.
+	const { notice: quoteNotice, quote } = useQuoteDraft({
+		surface: () => surfaceRef.current,
+		captured: () => captureRef.current !== null,
+		composing: () => composingRef.current,
+		defer: work => { deferredRef.current.push(work); },
+		writable: () => canPrompt,
+	});
+	useEffect(() => provideQuoteSink(quote), [quote]);
+
+	/** Remove quote: the run that starts at `start` and its line break, one undo step; an open composition finishes first. */
+	const removeQuote = useCallback((start: number): void => {
+		const remove = (): void => {
+			const surface = surfaceRef.current;
+			if (surface === null || captureRef.current !== null) return;
+			const current = surface.text;
+			const run = findQuoteRuns(current, findFencedBlocks(current)).runs.find(candidate => candidate.start === start);
+			if (run === undefined) return;
+			const range = removalRange(current, run);
+			surface.apply({ from: range.from, to: range.to, insert: "", selection: { anchor: range.from, focus: range.from } }, "replace");
+		};
+		if (composingRef.current) deferredRef.current.push(remove);
+		else remove();
+	}, [composingRef]);
+
 	// A prompt picked in the host's history search (`Ctrl+R`) joins the draft like an edited queued message.
 	useEffect(() => guestTransport.subscribe(message => {
 		if (message.type === "omp:recall-prompt") offerQueuedForEditing([{ text: message.text, images: [] }]);
@@ -1552,6 +1581,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 						}}
 						options={{ isKnownImage: isKnownNumber, onEdit, onSelection: syncCaret, onKeyDown: onPromptKeyDown, onWindowOpen, onSettled, handlePaste, isAttachmentDrag: transfer => dragCarries(transfer) !== null }}
 					/>
+					{quoteLayout.runs.length > 0 && <QuoteRemoveButtons surfaceRef={surfaceRef} text={text} runs={quoteLayout.runs} disabled={captureLocked} onRemove={removeQuote} />}
 					{suggestionsOpen && (
 						<ul id={suggestionListId} role="listbox" aria-label={argument !== null ? "Command arguments" : slash !== null ? "Slash commands" : "Workspace files"} className="omp-suggest-list">
 							{argumentHint && <li role="presentation" className="omp-suggest-option omp-native-muted omp-slash-hint">{argumentHint}{argument?.hint.requirement === "optional" ? " · optional" : argument?.hint.requirement === "required" ? " · required" : ""}</li>}
@@ -1579,10 +1609,10 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 					<span className="omp-sr-only" role="status">{suggestionStatus}</span>
 				</div>
 			</div>
-			{(blocks.length > 0 || quoteLayout.runs.length > 0) && (
-				// The row stays while the draft holds a block or a quote and only its words come and go with the caret, so a click into one never moves the text under the pointer.
-				<div className="omp-composer-hint omp-composer-hint--code" id={codeHintId} role="status" title={caretBlock !== null ? CODE_HINT : caretInQuote ? QUOTE_HINT : undefined}>
-					{caretBlock !== null ? CODE_HINT : caretInQuote ? QUOTE_HINT : ""}
+			{(blocks.length > 0 || quoteLayout.runs.length > 0 || quoteNotice !== null) && (
+				// The row stays while the draft holds a block or a quote and only its words come and go with the caret, so a click into one never moves the text under the pointer. A quote's notice takes the row for a few seconds.
+				<div className="omp-composer-hint omp-composer-hint--code" id={codeHintId} role="status" title={quoteNotice ?? (caretBlock !== null ? CODE_HINT : caretInQuote ? QUOTE_HINT : undefined)}>
+					{quoteNotice ?? (caretBlock !== null ? CODE_HINT : caretInQuote ? QUOTE_HINT : "")}
 				</div>
 			)}
 			<ExtensionWidgets snapshot={snapshot} placement="belowEditor" />

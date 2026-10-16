@@ -712,6 +712,12 @@ ${ANSI_STYLES}
 .omp-line--quote { --omp-quote-gutter: 24px; margin: 0 -12px; padding: 0 12px 0 calc(9px + var(--omp-quote-gutter)); border-left: 3px solid color-mix(in srgb, var(--vscode-foreground) 28%, transparent); background: color-mix(in srgb, var(--vscode-foreground) 5%, transparent); color: var(--omp-muted); }
 .omp-line--quote-code { font-family: var(--omp-mono); font-size: min(var(--omp-mono-size), 15px); tab-size: 4; }
 .vscode-high-contrast .omp-line--quote, .vscode-high-contrast-light .omp-line--quote { border-left-color: var(--vscode-contrastBorder); }
+/* The Remove quote buttons sit in an overlay beside the field and never over its text: each is in its band's gutter, at the first visible line of its quote. */
+.omp-quote-overlay { position: absolute; inset: 0; overflow: hidden; pointer-events: none; }
+.omp-quote-remove { position: absolute; left: 10px; display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; border: 0; border-radius: var(--omp-radius); background: transparent; color: var(--omp-muted); cursor: pointer; pointer-events: auto; }
+.omp-quote-remove:hover { background: var(--vscode-toolbar-hoverBackground, color-mix(in srgb, var(--vscode-foreground) 12%, transparent)); color: var(--vscode-foreground); }
+.omp-quote-remove:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
+.omp-quote-remove:disabled { opacity: 0.4; cursor: default; }
 .omp-chip { display: inline; padding: 0 3px; margin: 0 1px; border-radius: var(--omp-radius); cursor: default; background: color-mix(in srgb, var(--vscode-textLink-foreground, var(--vscode-focusBorder, #3794ff)) 24%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--vscode-textLink-foreground, var(--vscode-focusBorder, #3794ff)) 55%, transparent); }
 .omp-composer > .omp-composer-hint--code { margin: 2px 0 6px; min-height: calc(11px * 1.4); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 @media (forced-colors: active) {

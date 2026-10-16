@@ -290,6 +290,11 @@ export class DraftSurface {
 		this.#retained = this.#clamp(this.#retained);
 	}
 
+	/** The rectangle of line `index`, `null` past the last line. Read-only: an overlay beside the field places itself by it and never writes into the field. */
+	lineRect(index: number): DOMRect | null {
+		return this.element.children[index]?.getBoundingClientRect() ?? null;
+	}
+
 	#applyConfig(config: SurfaceConfig): void {
 		this.#config = config;
 		const element = this.element;
