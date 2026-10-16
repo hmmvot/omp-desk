@@ -49,6 +49,22 @@ test("selected Chat text is quoted into the draft by Alt+Q and the context menu,
 	await expect.poll(draft).toBe("> **bold**\nmy comment\n\n> `code`\n");
 	await expect(box).toBeFocused();
 
+	// Enter in a quote is a line break that carries the prefix, Enter on its empty line lets go of the quote, Shift+Tab leaves at once, and none of them sends.
+	await box.press("ArrowUp");
+	await box.press("End");
+	await box.press("Enter");
+	await expect.poll(draft, "Enter continues the quote").toBe("> **bold**\nmy comment\n\n> `code`\n> \n");
+	await box.press("Enter");
+	await expect.poll(draft, "Enter on the empty quote line leaves it").toBe("> **bold**\nmy comment\n\n> `code`\n\n");
+	await box.press("Control+z");
+	await box.press("Control+z");
+	await expect.poll(draft).toBe("> **bold**\nmy comment\n\n> `code`\n");
+	await box.press("Shift+Tab");
+	await expect.poll(draft, "Shift+Tab adds a plain line after the quote line").toBe("> **bold**\nmy comment\n\n> `code`\n\n");
+	await expect(box, "the focus stayed in the composer").toBeFocused();
+	await box.press("Control+z");
+	await expect.poll(draft).toBe("> **bold**\nmy comment\n\n> `code`\n");
+
 	// One Ctrl+Z takes back only the second quote; the first quote's remove button keeps the comment under it.
 	await box.press("Control+z");
 	await expect.poll(draft).toBe("> **bold**\nmy comment");

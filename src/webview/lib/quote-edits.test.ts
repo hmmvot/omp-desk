@@ -18,49 +18,104 @@ function run(source: string, key: QuoteKey): string | null {
 	return `${result.slice(0, edit.selectionStart)}|${result.slice(edit.selectionStart)}`.replace(/\|(?=.*\|)/s, "");
 }
 
+const enter = plain("Enter");
 const shiftEnter = plain("Enter", { shiftKey: true });
+const altEnter = plain("Enter", { altKey: true });
+const shiftTab = plain("Tab", { shiftKey: true });
 
-describe("Shift+Enter on a quote line", () => {
-	it("continues the quote with the whole prefix of the line, at any depth and indentation", () => {
-		assert.equal(run("> a|b", shiftEnter), "> a\n> |b");
-		assert.equal(run("> ab|", shiftEnter), "> ab\n> |");
-		assert.equal(run("> > a|b", shiftEnter), "> > a\n> > |b");
-		assert.equal(run("  > a|b", shiftEnter), "  > a\n  > |b");
-		assert.equal(run(">a|b", shiftEnter), ">a\n>|b");
-		assert.equal(run("x\n> a|b\ny", shiftEnter), "x\n> a\n> |b\ny");
+describe("Enter on a quote line", () => {
+	it("is a new line that carries the line's whole prefix, at any depth and indentation", () => {
+		assert.equal(run("> a|b", enter), "> a\n> |b");
+		assert.equal(run("> ab|", enter), "> ab\n> |");
+		assert.equal(run("> > a|b", enter), "> > a\n> > |b");
+		assert.equal(run("  > a|b", enter), "  > a\n  > |b");
+		assert.equal(run(">a|b", enter), ">a\n>|b");
+		assert.equal(run("x\n> a|b\ny", enter), "x\n> a\n> |b\ny");
+	});
+
+	it("is the same with Shift and with Alt, as in a code block", () => {
+		for (const key of [shiftEnter, altEnter, plain("Enter", { shiftKey: true, altKey: true })]) {
+			assert.equal(run("> > a|b", key), "> > a\n> > |b");
+			assert.equal(run("> a\n> |", key), "> a\n|");
+		}
 	});
 
 	it("replaces a selection by the line break and the prefix", () => {
-		assert.equal(run("> a[bc]d", shiftEnter), "> a\n> |d");
+		assert.equal(run("> a[bc]d", enter), "> a\n> |d");
 	});
 
-	it("does nothing special with the selection start inside the prefix", () => {
-		assert.equal(run("|> a", shiftEnter), null);
-		assert.equal(run(">| a", shiftEnter), null);
-		assert.equal(run("> > |a", shiftEnter), "> > \n> > |a", "right after the prefix it still continues");
-		assert.equal(run("> >| a", shiftEnter), null);
+	it("is a plain line break, never a send, with the selection start inside the prefix", () => {
+		assert.equal(run("|> a", enter), "\n|> a");
+		assert.equal(run(">| a", enter), ">\n| a");
+		assert.equal(run("> >| a", enter), "> >\n| a");
+		assert.equal(run("> > |a", enter), "> > \n> > |a", "right after the prefix it continues");
 	});
 
-	it("leaves the quote on a line that holds only its prefix, with the caret at its end", () => {
-		assert.equal(run("> a\n> |", shiftEnter), "> a\n\n|");
-		assert.equal(run("> a\n> > |", shiftEnter), "> a\n\n|");
-		assert.equal(run("> a\n>  |", shiftEnter), "> a\n\n|", "blanks after the prefix are part of the empty line");
-		assert.equal(run(">|", shiftEnter), "\n|");
-		assert.equal(run("> | ", shiftEnter), "> \n> | ", "the caret not at the line's end continues instead");
+	it("on a line that holds only its prefix lets go of one level and keeps the caret on the line", () => {
+		assert.equal(run("> a\n> |", enter), "> a\n|", "a plain empty line");
+		assert.equal(run(">|", enter), "|");
+		assert.equal(run("  > |", enter), "|", "the indentation goes with the prefix");
+		assert.equal(run("> a\n> > |", enter), "> a\n> |", "one level at a time");
+		assert.equal(run("> > > |", enter), "> > |");
+		assert.equal(run("> >|", enter), "> |", "a prefix without a blank");
+		assert.equal(run("> a\n>  |", enter), "> a\n|", "blanks after the prefix are part of the empty line");
+		assert.equal(run("> | ", enter), "|", "the caret may sit among the blanks");
+		assert.equal(run("> a\n> |\n> b", enter), "> a\n|\n> b", "the lines around keep their prefix");
 	});
 
-	it("is not ours on a line that is not a quote, in a fenced block, with another modifier or with Enter alone", () => {
-		assert.equal(run("a|b", shiftEnter), null);
-		assert.equal(run("```\n> a|b\n```", shiftEnter), null);
-		assert.equal(run("> a|b", plain("Enter")), null);
+	it("does not leave the quote from an empty line in a fenced block nested in it: a blank line there is code", () => {
+		assert.equal(run("> ```ts\n> |\n> ```", enter), "> ```ts\n> \n> |\n> ```");
+		assert.equal(run("> ```ts\n> a\n> ```\n> |", enter), "> ```ts\n> a\n> ```\n|", "after the closing fence it is a quote line again");
+	});
+
+	it("is not ours on a line that is not a quote, in a top-level fenced block, with Ctrl or Meta (they send) or in four blanks of indentation", () => {
+		assert.equal(run("a|b", enter), null);
+		assert.equal(run("```\n> a|b\n```", enter), null);
+		assert.equal(run("> a|b", plain("Enter", { ctrlKey: true })), null);
+		assert.equal(run("> a|b", plain("Enter", { metaKey: true })), null);
 		assert.equal(run("> a|b", plain("Enter", { shiftKey: true, ctrlKey: true })), null);
-		assert.equal(run("> a|b", plain("Enter", { shiftKey: true, altKey: true })), null);
-		assert.equal(run("> a|b", plain("Enter", { shiftKey: true, metaKey: true })), null);
-		assert.equal(run("    > a|b", shiftEnter), null, "four blanks of indentation is not a quote line");
+		assert.equal(run("> |", plain("Enter", { ctrlKey: true })), null, "Ctrl+Enter sends from an empty quote line too");
+		assert.equal(run("    > a|b", enter), null);
+	});
+});
+
+describe("Shift+Tab on a quote line", () => {
+	it("adds a plain line after the line and puts the caret on it, leaving the text and the lines below as they are", () => {
+		assert.equal(run("> a|b", shiftTab), "> ab\n|");
+		assert.equal(run("> ab|", shiftTab), "> ab\n|");
+		assert.equal(run("x\n> a|b\n> c", shiftTab), "x\n> ab\n|\n> c");
+		assert.equal(run(">|a", shiftTab), ">a\n|");
+		assert.equal(run("> [ab]c", shiftTab), "> abc\n|", "with a selection, the line it starts on");
 	});
 
-	it("continues inside a fenced block nested in the quote without code keys", () => {
-		assert.equal(run("> ```ts\n> a|b\n> ```", shiftEnter), "> ```ts\n> a\n> |b\n> ```");
+	it("leaves one level at a time on a nested line: the new line has the outer prefix", () => {
+		assert.equal(run("> > a|", shiftTab), "> > a\n> |");
+		assert.equal(run("> > > a|", shiftTab), "> > > a\n> > |");
+		assert.equal(run("  > > a|", shiftTab), "  > > a\n  > |");
+		assert.equal(run(">> a|", shiftTab), ">> a\n> |");
+	});
+
+	it("on a line that holds only its prefix removes one level of it", () => {
+		assert.equal(run("> a\n> |", shiftTab), "> a\n|");
+		assert.equal(run("> > |", shiftTab), "> |");
+		assert.equal(run("  > |", shiftTab), "|");
+		assert.equal(run("> | ", shiftTab), "|");
+	});
+
+	it("works on a line of a fenced block nested in the quote", () => {
+		assert.equal(run("> ```ts\n> a|\n> ```", shiftTab), "> ```ts\n> a\n|\n> ```");
+		assert.equal(run("> ```ts\n> |\n> ```", shiftTab), "> ```ts\n|\n> ```");
+	});
+
+	it("is the browser's with the selection start inside the prefix, for Tab alone, with another modifier, off a quote and in a top-level block", () => {
+		assert.equal(run("|> a", shiftTab), null);
+		assert.equal(run(">| a", shiftTab), null);
+		assert.equal(run("> a|", plain("Tab")), null);
+		assert.equal(run("> a|", plain("Tab", { shiftKey: true, ctrlKey: true })), null);
+		assert.equal(run("> a|", plain("Tab", { shiftKey: true, altKey: true })), null);
+		assert.equal(run("> a|", plain("Tab", { shiftKey: true, metaKey: true })), null);
+		assert.equal(run("a|", shiftTab), null);
+		assert.equal(run("```\n> a|\n```", shiftTab), null);
 	});
 });
 

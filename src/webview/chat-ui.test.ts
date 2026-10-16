@@ -3638,21 +3638,66 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
-		await t.test("Shift+Enter continues a quote, Backspace at its prefix removes a level, Delete joins the next quote line, Enter sends from a quote line, and no completion opens in one", async () => {
+		await t.test("Enter, Shift+Enter and Alt+Enter continue a quote and an empty quote line lets go of it, Shift+Tab leaves it, Ctrl+Enter sends, Backspace at its prefix removes a level, Delete joins the next quote line, and no completion opens in one", async () => {
 			await reset("quote-keys");
 			await ui.evaluate("window.ui.push({commands:[{name:'shake',description:'Shake'}]});window.composer.focus()");
 			const shiftEnter = (): Promise<void> => press("Enter", "Enter", 13, { modifiers: 8 });
+			const altEnter = (): Promise<void> => press("Enter", "Enter", 13, { modifiers: 1 });
+			const shiftTab = (): Promise<void> => press("Tab", "Tab", 9, { modifiers: 8 });
 			await setDraft("> ab");
 			await setSelection(3, 3);
-			await shiftEnter();
-			assert.deepEqual(await areaState(), { value: "> a\n> b", start: 6, end: 6, focused: true }, "the line break carries the prefix");
+			await press("Enter", "Enter", 13);
+			assert.deepEqual(await areaState(), { value: "> a\n> b", start: 6, end: 6, focused: true }, "Enter is a line break that carries the prefix");
+			assert.equal(await sendCount(), 0, "Enter in a quote sends nothing");
 			await undo();
 			await waitDraft("window.composer.value()==='> ab'");
 			assert.equal((await areaState()).value, "> ab", "one Ctrl+Z takes the whole continuation back");
+			for (const key of [shiftEnter, altEnter]) {
+				await setDraft("> > ab");
+				await setSelection(5, 5);
+				await key();
+				assert.deepEqual(await areaState(), { value: "> > a\n> > b", start: 10, end: 10, focused: true });
+			}
+			assert.equal(await sendCount(), 0);
+			// An empty quote line lets go of one level, the caret staying on the line.
 			await setDraft("> a\n> ");
 			await setSelection(6, 6);
-			await shiftEnter();
-			assert.deepEqual(await areaState(), { value: "> a\n\n", start: 5, end: 5, focused: true }, "Shift+Enter on an empty quote line leaves the quote");
+			await press("Enter", "Enter", 13);
+			assert.deepEqual(await areaState(), { value: "> a\n", start: 4, end: 4, focused: true }, "Enter on an empty quote line leaves the quote");
+			await undo();
+			await waitDraft("window.composer.value()==='> a\\n> '");
+			await setDraft("> a\n> > ");
+			await setSelection(8, 8);
+			await press("Enter", "Enter", 13);
+			assert.deepEqual(await areaState(), { value: "> a\n> ", start: 6, end: 6, focused: true }, "a nested line drops one level");
+			assert.equal(await sendCount(), 0);
+			// Shift+Tab leaves the quote: a plain line after the current one, one level out for a nested line, and the focus stays in the field.
+			await setDraft("> a");
+			await setSelection(3, 3);
+			await shiftTab();
+			assert.deepEqual(await areaState(), { value: "> a\n", start: 4, end: 4, focused: true }, "a new plain line, the caret on it, the focus kept");
+			await undo();
+			await waitDraft("window.composer.value()==='> a'");
+			await setDraft("> > ab");
+			await setSelection(4, 4);
+			await shiftTab();
+			assert.deepEqual(await areaState(), { value: "> > ab\n> ", start: 9, end: 9, focused: true }, "one level out for a nested line, the text after the caret stays where it was");
+			await setDraft("> a\n> ");
+			await setSelection(6, 6);
+			await shiftTab();
+			assert.deepEqual(await areaState(), { value: "> a\n", start: 4, end: 4, focused: true }, "on an empty quote line it removes the prefix");
+			assert.equal(await sendCount(), 0);
+			// With the caret inside the prefix Shift+Tab is the browser's: the text is untouched.
+			await setDraft("> a");
+			await setSelection(1, 1);
+			await shiftTab();
+			assert.equal((await areaState()).value, "> a");
+			await ui.evaluate("window.composer.focus()");
+			// A fenced block nested in the quote: a blank line there stays in the quote.
+			await setDraft("> ```ts\n> \n> ```");
+			await setSelection(10, 10);
+			await press("Enter", "Enter", 13);
+			assert.deepEqual(await areaState(), { value: "> ```ts\n> \n> \n> ```", start: 13, end: 13, focused: true }, "Enter inside a nested fence keeps the prefix, even on an empty line");
 			await setDraft("> > x");
 			await setSelection(4, 4);
 			await press("Backspace", "Backspace", 8);
@@ -3663,11 +3708,11 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await setSelection(3, 3);
 			await press("Delete", "Delete", 46);
 			assert.deepEqual(await areaState(), { value: "> ab", start: 3, end: 3, focused: true }, "the next line's prefix goes with the line break");
-			// Enter sends from inside a quote line, as on every prose line.
+			// Ctrl+Enter sends from inside a quote line, and the hint says so.
 			await setDraft("> q");
 			await setSelection(3, 3);
-			assert.match((await codeHint())!, /Shift\+Enter continues the quote.*Backspace.*Enter sends/, "the hint names the quote keys while the caret is in a quote line");
-			await press("Enter", "Enter", 13);
+			assert.match((await codeHint())!, /^Quote · Ctrl\+Enter: send · Enter: new line · Shift\+Tab: leave the quote$/, "the hint names the quote keys while the caret is in a quote line");
+			await press("Enter", "Enter", 13, { modifiers: 2 });
 			await ui.wait("window.ui.sends().length===1");
 			assert.equal(await ui.evaluate("window.ui.sends()[0].text"), "> q");
 			await ui.evaluate("window.ui.sendReply()");
@@ -3694,6 +3739,21 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.equal(await lookups(), before, "no file search runs in a quote line");
 			await setDraft("> q\n@sr");
 			await ui.wait(`window.sent.filter(message=>message.type==='omp:complete-files').length>${before}`);
+			// An IME composition leaves Enter and Shift+Tab alone.
+			const sentBefore = await sendCount();
+			await setDraft("> a");
+			await setSelection(3, 3);
+			const prevented = await ui.evaluate<boolean[]>(`(()=>{
+			 const area=window.composer.el();const out=[];
+			 const key=init=>{const event=new KeyboardEvent('keydown',{bubbles:true,cancelable:true,...init});area.dispatchEvent(event);out.push(event.defaultPrevented)};
+			 key({key:'Enter',isComposing:true});key({key:'Tab',shiftKey:true,keyCode:229});
+			 area.dispatchEvent(new CompositionEvent('compositionstart',{bubbles:true}));
+			 key({key:'Enter'});key({key:'Tab',shiftKey:true});
+			 area.dispatchEvent(new CompositionEvent('compositionend',{bubbles:true,data:''}));
+			 return out;})()`);
+			assert.deepEqual(prevented, [false, false, false, false]);
+			assert.equal((await areaState()).value, "> a");
+			assert.equal(await sendCount(), sentBefore, "nothing was sent");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 

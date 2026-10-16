@@ -1,10 +1,10 @@
 /**
  * Keys on a quote line of the composer draft (docs/designs/2026-10-15-quote-chat-selection.md, Section 4, Keys).
  *
- * A quote is prose with a visible `> ` prefix, so `Enter` sends as on every prose line; these rules only keep the
- * prefix whole while the user edits: `Shift+Enter` continues the quote, and `Backspace` and `Delete` take the prefix
- * with them. Every rule reads the line itself (nothing is stored), reads plain keys only, and returns `null` when the
- * browser's own behaviour is the right one. Pure text arithmetic: the composer applies an {@link TextEdit} as one undo step.
+ * A quote has no way out of its band but its own keys, so they follow the fenced code block's: `Enter` is a new line that
+ * carries the line's prefix, an empty quote line lets go of it, `Ctrl+Enter` sends, and `Shift+Tab` leaves the quote.
+ * `Backspace` and `Delete` take the prefix with them. Every rule reads the line itself (nothing is stored) and returns
+ * `null` when the browser's own behaviour is the right one. Pure text arithmetic: the composer applies an {@link TextEdit} as one undo step.
  */
 import type { TextEdit } from "./code-fence.ts";
 import { normalizeLineEndings } from "./draft-text.ts";
@@ -24,8 +24,9 @@ function lineBounds(text: string, offset: number): { start: number; end: number 
 	return { start: offset === 0 ? 0 : text.lastIndexOf("\n", offset - 1) + 1, end: newline < 0 ? text.length : newline };
 }
 
-/** The prefix with its last nesting level taken off: `> > ` keeps `> `; `>> ` keeps `> `. */
+/** The prefix with its last nesting level taken off: `> > ` keeps `> `, `>> ` keeps `> `, and `> ` keeps nothing (the line leaves the quote). */
 function outerPrefix(prefix: string): string {
+	if (prefix.indexOf(">") === prefix.lastIndexOf(">")) return "";
 	const kept = prefix.slice(0, prefix.lastIndexOf(">"));
 	return kept.length > 0 && !/[ \t]$/.test(kept) ? `${kept} ` : kept;
 }
@@ -33,27 +34,46 @@ function outerPrefix(prefix: string): string {
 /**
  * The edit a key makes on a quote line, or `null` when the key is not ours or the browser's behaviour is right.
  * `layout` is the quote layout of `text`; a line in a top-level fenced block is never a quote line, so the code keys keep it.
+ *
+ * The keys follow the code block's (docs/designs/2026-10-15-quote-chat-selection.md, Section 4, Keys): `Enter` (and
+ * `Shift+Enter`, `Alt+Enter`) is a new line, `Ctrl+Enter` and `Meta+Enter` are not ours and send, `Shift+Tab` leaves the quote.
  */
 export function quoteKeyEdit(text: string, layout: QuoteLayout, key: QuoteKey, start: number, end: number): TextEdit | null {
-	if (key.ctrlKey || key.altKey || key.metaKey) return null;
+	if (key.ctrlKey || key.metaKey) return null;
 	const line = lineBounds(text, start);
-	if (layout.lines[lineIndexAt(text, start)]?.quote !== true) return null;
+	const flags = layout.lines[lineIndexAt(text, start)];
+	if (flags?.quote !== true) return null;
 	const prefixLength = quotePrefixLength(text.slice(line.start, line.end));
 	if (prefixLength === null) return null;
 	const prefixEnd = line.start + prefixLength;
+	const prefix = text.slice(line.start, prefixEnd);
+	const emptyLine = text.slice(prefixEnd, line.end).trim() === "";
+	/** The line is the one thing the key rewrites: it keeps `outer` and loses what was after it; the caret goes to its end. */
+	const rewriteLine = (outer: string): TextEdit => {
+		const caret = line.start + outer.length;
+		return { from: line.start, to: line.end, insert: outer, selectionStart: caret, selectionEnd: caret };
+	};
 	if (key.key === "Enter") {
-		if (!key.shiftKey || start < prefixEnd) return null;
-		// An empty quote line with the caret at its end leaves the quote: the line becomes an empty line, the caret the next one.
-		if (start === end && start === line.end && text.slice(prefixEnd, line.end).trim() === "") {
-			return { from: line.start, to: start, insert: "\n", selectionStart: line.start + 1, selectionEnd: line.start + 1 };
-		}
-		const insert = `\n${text.slice(line.start, prefixEnd)}`;
+		// A line break with the caret inside the prefix would leave a line that is no longer in the quote; it is still a line break, never a send.
+		if (start < prefixEnd) return { from: start, to: end, insert: "\n", selectionStart: start + 1, selectionEnd: start + 1 };
+		// An empty quote line leaves the quote one level at a time: `> ` becomes an empty line, `> > ` becomes `> `, the caret stays on the line.
+		// Not inside a fenced block nested in the quote: a blank line there is code, and Shift+Tab is the way out.
+		if (start === end && emptyLine && !flags.code) return rewriteLine(outerPrefix(prefix));
+		const insert = `\n${prefix}`;
 		return { from: start, to: end, insert, selectionStart: start + insert.length, selectionEnd: start + insert.length };
 	}
-	if (key.shiftKey || start !== end) return null;
+	if (key.key === "Tab") {
+		// Plain Tab keeps moving the focus, and so does Shift+Tab with the selection start inside the prefix.
+		if (!key.shiftKey || key.altKey || start < prefixEnd) return null;
+		// Leave one level: an empty quote line drops one level of its own prefix, any other line gets a new line after it one level out
+		// (a plain one from `> `), the caret on it, and its text and the lines under it stay where they are.
+		if (emptyLine) return rewriteLine(outerPrefix(prefix));
+		const insert = `\n${outerPrefix(prefix)}`;
+		return { from: line.end, to: line.end, insert, selectionStart: line.end + insert.length, selectionEnd: line.end + insert.length };
+	}
+	if (key.altKey || key.shiftKey || start !== end) return null;
 	if (key.key === "Backspace" && start === prefixEnd) {
-		const prefix = text.slice(line.start, prefixEnd);
-		const outer = prefix.indexOf(">") === prefix.lastIndexOf(">") ? "" : outerPrefix(prefix);
+		const outer = outerPrefix(prefix);
 		return { from: line.start, to: prefixEnd, insert: outer, selectionStart: line.start + outer.length, selectionEnd: line.start + outer.length };
 	}
 	if (key.key === "Delete" && start === line.end && line.end < text.length) {

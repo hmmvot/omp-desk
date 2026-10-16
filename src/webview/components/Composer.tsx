@@ -112,7 +112,7 @@ const MAX_ROWS = 8;
 /** The words under the field while the caret is in a fenced code block (docs/designs/2026-10-15-composer-code-blocks.md). */
 const CODE_HINT = "Code block · Ctrl+Enter: send · Enter: new line · Tab: indent · Shift+Tab: outdent, or leave when there is nothing to outdent";
 /** The words under the field while the caret is in a quote line (docs/designs/2026-10-15-quote-chat-selection.md). */
-const QUOTE_HINT = "Quote · Shift+Enter continues the quote · Backspace at its start removes the quote mark · Enter sends";
+const QUOTE_HINT = "Quote · Ctrl+Enter: send · Enter: new line · Shift+Tab: leave the quote";
 
 /** Wait after the last keystroke before asking the extension host for paths. */
 const SUGGESTION_DEBOUNCE_MS = 150;
@@ -1285,7 +1285,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 					return;
 				}
 			}
-			// A quote line keeps its prefix whole: Shift+Enter continues the quote, Backspace and Delete take the prefix with them. Enter still sends (a quote is prose).
+			// A quote line follows the code block's keys (docs/designs/2026-10-15-quote-chat-selection.md, Section 4): Enter is a new line that carries the prefix (an empty quote line lets go of it), Shift+Tab leaves the quote, Backspace and Delete take the prefix with them. Ctrl+Enter sends from here through the rules below.
 			if (block === null && !composing && event.keyCode !== 229 && captureRef.current === null) {
 				const blocksNow = findFencedBlocks(text);
 				const quoteEdit = quoteKeyEdit(text, findQuoteRuns(text, blocksNow), event, start, end);

@@ -11,6 +11,7 @@ All commands are in the Command Palette under **OMP Desk**. The ones with defaul
 | `Ctrl+Shift+M` | Toggle the file window: the first press moves all files of the group next to the chat into one window that stays on top (files from Chat links open there too); the next press brings them back next to the chat and closes it | Anywhere, including the integrated terminal (replaces VS Code's Problems key; a keymap extension that binds it in text editors wins there unless you add a user keybinding) |
 | `Ctrl+Enter` | Send composer prompt (`Enter` in the composer also sends) | Chat editor focused |
 | `Ctrl+Enter`, in a fenced code block of the draft | Send, where `Enter` is a new line (see [code blocks in the draft](chat.md#code-blocks-in-the-draft)) | Chat editor focused, caret inside a block |
+| `Ctrl+Enter`, on a quote line of the draft | Send, where `Enter` is a new line that carries the `> ` prefix; `Shift+Tab` leaves the quote (see [quoting Chat text](chat.md#quoting-chat-text)) | Chat editor focused, caret after the `>` of a quote line |
 | `Esc` | Stop current turn | Chat editor, turn running |
 | `F5`, `Alt+R` | Retry the failed or aborted reply | Chat editor, no turn running |
 | `Alt+Q` | Quote the selected Chat text into the draft (see [quoting Chat text](chat.md#quoting-chat-text)) | Chat editor |
