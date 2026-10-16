@@ -32,6 +32,7 @@
 // through `src/protocol/messages.test.ts`, and Node's ESM loader does not resolve
 // extensionless specifiers (the Webview bundle itself does not care).
 import type { ControlModelRef } from "./control.ts";
+import { DRAFT_CONTROL_CHARACTER } from "../shared/text-file.ts";
 import { isRecord } from "../shared/guards.ts";
 import { isCanonicalBase64Text } from "../shared/bytes-base64.ts";
 import { MAX_QUOTE_CHARACTERS } from "../shared/quote-limit.ts";
@@ -416,15 +417,6 @@ export interface GuestRecallPromptMessage {
  * the whole draft. It is a bound on memory, never a limit the user is told about before it is reached.
  */
 export const MAX_DRAFT_HANDOFF_CHARS = 2_000_000;
-
-/**
- * Control characters a draft may not carry.
- *
- * Newlines and tabs are part of prose and are kept; everything else — including a
- * bare carriage return — would corrupt the message or, once restored, the prompt
- * line, so a draft containing one is refused as a whole rather than repaired.
- */
-const DRAFT_CONTROL_CHARACTER = /[\u0000-\u0008\u000b-\u001f\u007f]/;
 
 /** True for text this boundary relays as a composer draft. */
 export function isDraftText(value: unknown): value is string {

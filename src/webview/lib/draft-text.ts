@@ -2,7 +2,7 @@
  * Text arithmetic for the composer's editing surface (docs/designs/2026-10-15-composer-contenteditable-surface.md).
  *
  * The surface normally deletes the range the browser itself computed (`beforeinput`'s `getTargetRanges()`); these
- * functions compute the same range from the model when the event offers none, and normalise pasted text.
+ * functions compute the same range from the model when the event offers none.
  * Everything here is pure over a `\n`-separated string.
  */
 
@@ -11,11 +11,6 @@ export type DeleteKind = "char-back" | "char-fwd" | "word-back" | "word-fwd" | "
 
 const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 const WORDS = new Intl.Segmenter(undefined, { granularity: "word" });
-
-/** Line endings of pasted or dropped text, as the draft keeps them. */
-export function normalizeLineEndings(text: string): string {
-	return text.replace(/\r\n?/g, "\n");
-}
 
 export function lineStartOf(text: string, offset: number): number {
 	return text.lastIndexOf("\n", offset - 1) + 1;

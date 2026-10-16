@@ -26,7 +26,8 @@ import {
 	type CaretRowEdges,
 } from "./draft-dom.ts";
 import { DraftHistory, type DraftSnapshot, type EditKind } from "./draft-history.ts";
-import { deletionTarget, normalizeLineEndings, type DeleteKind } from "./draft-text.ts";
+import { deletionTarget, type DeleteKind } from "./draft-text.ts";
+import { normalizeLineEndings } from "../../shared/text-file.ts";
 import { deletionRange, findImageReferences, repairDamagedReferences, snapSelection } from "./image-references.ts";
 import { findQuoteRuns } from "./quote-lines.ts";
 import { quotePasteEdit } from "./quote-edits.ts";

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { deletionTarget, normalizeLineEndings } from "./draft-text.ts";
+import { deletionTarget } from "./draft-text.ts";
 
 const caret = (text: string, at: number, kind: Parameters<typeof deletionTarget>[3]) => deletionTarget(text, at, at, kind);
 
@@ -36,11 +36,5 @@ describe("deletionTarget", () => {
 		assert.deepEqual(caret("ab\ncdef", 3, "line-back"), { from: 2, to: 3 });
 		assert.deepEqual(caret("abcd\nef", 1, "line-fwd"), { from: 1, to: 4 });
 		assert.deepEqual(caret("abcd\nef", 4, "line-fwd"), { from: 4, to: 5 });
-	});
-});
-
-describe("normalizeLineEndings", () => {
-	it("turns CRLF and lone CR into LF", () => {
-		assert.equal(normalizeLineEndings("a\r\nb\rc\nd"), "a\nb\nc\nd");
 	});
 });

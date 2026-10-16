@@ -70,6 +70,7 @@ import type {
 	ChatUiRequest,
 	ChatUiResponse,
 } from "../chat/model.ts";
+import { MAX_MESSAGE_CHARS } from "../shared/attach-limits.ts";
 import { isRecord } from "../shared/guards.ts";
 import { isCanonicalBase64Text } from "../shared/bytes-base64.ts";
 import { isPendingEnd, isPendingKind, isPendingStep, type PendingEnd, type PendingKind, type PendingStep } from "../shared/pending-operation.ts";
@@ -78,7 +79,7 @@ import { parseCodeThemes, type CodeTheme } from "../chat/code-theme.ts";
 // Bounds
 
 /** Longest prompt/steer/follow-up text one message carries. */
-export const MAX_CHAT_TEXT_LENGTH = 200_000;
+export const MAX_CHAT_TEXT_LENGTH = MAX_MESSAGE_CHARS;
 /** Messages one Stop hands back to the composer (the host's own bound on `abort_and_restore_queue`). */
 export const MAX_RESTORED_MESSAGES = 64;
 /** Images one prompt may carry. */
