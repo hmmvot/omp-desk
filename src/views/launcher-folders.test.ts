@@ -103,6 +103,49 @@ describe("launcher folders", () => {
 		assert.deepEqual(w.folders.list().map(folder => [folder.pinned, folder.open]), [[false, true], [true, true], [true, false]]);
 	});
 
+	describe("listForPicker", () => {
+		const window = (here: boolean, windowPaths: string[]): OpenFolderWindow => ({ holderId: here ? "window-here" : "window-other", startedAt: "2026-01-01T00:00:00.000Z", focusedAt: null, here, paths: windowPaths });
+
+		it("is the plain list when no folder is open here, so the pinned order is kept", async () => {
+			const w = windowOver();
+			await w.registry.add(gamma);
+			await w.registry.add(alpha);
+			w.state.others = [[beta]];
+			assert.deepEqual(paths(w.folders.listForPicker()), paths(w.folders.list()));
+			assert.deepEqual(paths(w.folders.listForPicker()), [beta, gamma, alpha]);
+		});
+
+		it("puts the one folder open here first, ahead of another window's folder and the pinned ones, so Enter picks it", async () => {
+			const w = windowOver();
+			await w.registry.add(gamma);
+			w.state.windows = [window(false, [beta]), window(true, [alpha])];
+			assert.deepEqual(paths(w.folders.list()), [beta, alpha, gamma], "the list itself lists the other window first");
+			assert.deepEqual(paths(w.folders.listForPicker()), [alpha, beta, gamma]);
+			assert.equal(w.folders.listForPicker()[0]!.openHere, true);
+		});
+
+		it("leads with several folders open here in workspace order, even when another window opened one of them earlier", async () => {
+			const w = windowOver();
+			await w.registry.add(gamma);
+			w.state.windows = [window(false, [beta, alpha]), window(true, [alpha, beta])];
+			assert.deepEqual(paths(w.folders.list()), [beta, alpha, gamma]);
+			assert.deepEqual(paths(w.folders.listForPicker()), [alpha, beta, gamma], "this window's workspace order, not the list order");
+			assert.deepEqual(w.folders.listForPicker().map(folder => folder.openHere), [true, true, false]);
+		});
+
+		it("treats a pinned folder open here as open here, and keeps the other folders' relative order", async () => {
+			const w = windowOver();
+			await w.registry.add(gamma);
+			await w.registry.add(beta);
+			await w.registry.add(alpha);
+			w.state.windowPaths = [beta];
+			assert.deepEqual(paths(w.folders.list()), [beta, gamma, alpha]);
+			w.state.show = false;
+			assert.deepEqual(paths(w.folders.list()), [gamma, beta, alpha], "with open folders hidden the pinned order stands");
+			assert.deepEqual(paths(w.folders.listForPicker()), [beta, gamma, alpha], "yet the pinned folder open here leads");
+		});
+	});
+
 	it("shows a folder that is both open and pinned once, as pinned, under its pinned id and collapsed state", async () => {
 		const w = windowOver();
 		const pinned = await w.registry.add(beta);

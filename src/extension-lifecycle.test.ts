@@ -179,7 +179,7 @@ export const harness = {
   record: recordFor,
   handleRestoreOutcome, renameSession, reloadSession, handleGuestControlRequest, panelResponder,
   switchSessionMode, restartChat, openSessionInMode, defaultSessionMode, chooseDefaultSessionView, newSession, startNewSession,
-  newSessionInPlace, deleteSessionInPlace,
+  resumeWorkspaceFolder, newSessionInPlace, deleteSessionInPlace,
   panelFactory(handler) {
     const w = fixtureWindow(), previous = w.editorPanels;
     w.editorPanels = registerEditorPanels({ ...editorPanelsDeps(), createWebviewPanel: handler });
@@ -265,9 +265,9 @@ export const harness = {
   warning(handler) { fixtureVscode.window.showWarningMessage = handler; },
   information(handler) { fixtureVscode.window.showInformationMessage = handler; },
   picker(mode) { fixtureVscode.window.showQuickPick = async rows => rows.find(row => row.mode === mode); },
-  folders(folders, openingWindows = []) {
+  folders(folders, openingWindows = [], pickerOrder = folders) {
     fixtureWindow().launcherFolders = {
-      list: () => folders, get: id => folders.find(folder => folder.id === id) ?? null, folderForCwd: cwd => folders.find(folder => folder.path === cwd) ?? null,
+      list: () => folders, listForPicker: () => pickerOrder, get: id => folders.find(folder => folder.id === id) ?? null, folderForCwd: cwd => folders.find(folder => folder.path === cwd) ?? null,
       windowsWithFolder: (folderPath, options) => typeof openingWindows === 'function' ? openingWindows(folderPath, options) : openingWindows,
       identityKeyOf: value => value,
     };
@@ -498,6 +498,7 @@ interface Harness {
   defaultSessionMode(context: unknown): "chat" | "terminal";
   chooseDefaultSessionView(context: unknown): Promise<void>;
   newSession(...args: unknown[]): Promise<void>;
+  resumeWorkspaceFolder(...args: unknown[]): Promise<void>;
   warning(handler: (...args: unknown[]) => unknown): void;
   information(handler: (...args: unknown[]) => unknown): void;
   openSession(context: unknown, index: SessionIndex, argument: unknown, verb: "opened" | "resumed"): Promise<void>;
@@ -505,6 +506,7 @@ interface Harness {
   folders(
     folders: readonly { id: string; path: string; collapsed: boolean; pinned: boolean; open: boolean; openHere: boolean; openElsewhere: boolean }[],
     openingWindows?: readonly FixtureOpeningWindow[] | ((folderPath: string, options?: { exact?: boolean }) => readonly FixtureOpeningWindow[]),
+    pickerOrder?: readonly { id: string; path: string; collapsed: boolean; pinned: boolean; open: boolean; openHere: boolean; openElsewhere: boolean }[],
   ): void;
   startNewSession(context: unknown, index: unknown, folder: unknown): Promise<void>;
   newSessionInPlace(context: unknown, index: SessionIndex, tabId: string): Promise<void>;
@@ -4168,6 +4170,27 @@ describe("same-editor Chat and native Terminal actions", () => {
 				assert.equal(f.index.get(draft.tabId)?.runIntent, "stopped");
 			} finally { restorePanels(); }
 		} finally { f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true }); }
+	});
+
+	it("New Session and Resume Session ask for the folder from LauncherFolders.listForPicker, so the folder open in this window is the first, pre-selected row", async () => {
+		const f = await fixture();
+		const folderRow = (id: string, folderPath: string, openHere: boolean) => ({ id, path: folderPath, collapsed: false, pinned: true, open: openHere, openHere, openElsewhere: false });
+		const stored = folderRow("folder-stored", path.join(f.directory, "stored"), false);
+		const current = folderRow("folder-current", path.join(f.directory, "current"), true);
+		harness.folders([stored, current], [], [current, stored]);
+		const asked: { title: string; ids: string[] }[] = [];
+		const restorePicker = harness.profilePicker(async (rows: { folder: { id: string } }[], options?: { title: string }) => {
+			asked.push({ title: options?.title ?? "", ids: rows.map(row => row.folder.id) });
+			return undefined;
+		});
+		try {
+			await harness.newSession(f.saved.context, f.index, undefined);
+			await harness.resumeWorkspaceFolder(f.saved.context, f.index, undefined);
+			assert.deepEqual(asked, [
+				{ title: "Choose the folder for a new session", ids: ["folder-current", "folder-stored"] },
+				{ title: "Choose the folder to resume a session from", ids: ["folder-current", "folder-stored"] },
+			], "the picker lists the current window's folder first; VS Code highlights the first row, so Enter picks it");
+		} finally { restorePicker(); harness.folders([]); f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true }); }
 	});
 
 	it("a repeated New Session for a folder whose first one is still starting reserves no second draft, reveals the one that is starting, and the folder is free again afterwards", async () => {

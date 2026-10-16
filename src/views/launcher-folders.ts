@@ -244,6 +244,29 @@ export class LauncherFolders {
 	}
 
 	/**
+	 * The folders a folder picker offers: `list()`, with the folders open in this window first, in the
+	 * order VS Code lists this window's workspace folders, then every other folder in `list()` order.
+	 * With one folder open here, it is the first row, so Enter picks it.
+	 */
+	listForPicker(): readonly LauncherFolder[] {
+		const shown = this.list();
+		const here = this.#windows().find(window => window.here);
+		if (here === undefined) return shown;
+		// Each opened path stands for the folder it is shown as and, when that differs, for the folder itself.
+		const heres = here.paths.map(windowPath => [this.#identityOf(windowPath).key, this.#identityOf(this.#shownPath(here, windowPath)).key]);
+		const rankOf = (folder: LauncherFolder): number => {
+			if (!folder.openHere) return -1;
+			const key = this.#identityOf(folder.path).key;
+			return heres.findIndex(keys => keys.includes(key));
+		};
+		const ranked = shown.map(folder => ({ folder, rank: rankOf(folder) }));
+		return [
+			...ranked.filter(entry => entry.rank >= 0).sort((a, b) => a.rank - b.rank),
+			...ranked.filter(entry => entry.rank < 0),
+		].map(entry => entry.folder);
+	}
+
+	/**
 	 * The live windows (this one included) that have this folder open, by the same identity the
 	 * list uses: a window counts when one of its opened folders is shown as this folder (its
 	 * session folder) or is this folder itself. `folderPath` is a shown folder's path. With

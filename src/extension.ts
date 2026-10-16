@@ -2280,6 +2280,7 @@ async function newSession(
   const folder = await chooseFolder(index, folders, argument, {
     title: "Choose the folder for a new session",
     addWhenEmpty: true,
+    openHereFirst: true,
   });
   if (folder === null) return;
   // The folder is resolved again after the dialog: a folder that left the launcher while the
@@ -2716,7 +2717,8 @@ async function unpinWorkspaceFolder(index: SessionIndex, argument: unknown): Pro
  * the launcher shows now: an id that went stale — the folder was unpinned and closed, or
  * the row belongs to another window — reports and stops instead of falling back to a
  * different folder. An absent argument asks the user (among the pinned or unpinned folders
- * when `only` says so); with no folder shown at all there is nothing to choose from, so a
+ * when `only` says so; this window's folders first, in workspace order, when `openHereFirst` says so,
+ * so that Enter picks the current project); with no folder shown at all there is nothing to choose from, so a
  * command that can create its subject (New Session, Resume) offers the Add flow and one
  * that cannot says so.
  */
@@ -2728,6 +2730,8 @@ async function chooseFolder(
     readonly title: string;
     readonly addWhenEmpty: boolean;
     readonly only?: "pinned" | "unpinned";
+    /** List the folders open in this window first, in workspace order, so the first (pre-selected) row is the current project. */
+    readonly openHereFirst?: boolean;
     /** What to say when `only` leaves nothing to choose from. */
     readonly nothing?: string;
   },
@@ -2739,7 +2743,7 @@ async function chooseFolder(
     return null;
   }
   if (supplied.kind === "folder") return supplied.folder;
-  const candidates = options.only === undefined ? shown : shown.filter(folder => folder.pinned === (options.only === "pinned"));
+  const candidates = (options.openHereFirst === true ? folders.listForPicker() : shown).filter(folder => options.only === undefined || folder.pinned === (options.only === "pinned"));
   if (candidates.length === 0) {
     if (options.only !== undefined) {
       showInfo(options.nothing ?? "No folder matches.");
@@ -2950,6 +2954,7 @@ async function resumeWorkspaceFolder(
   const folder = await chooseFolder(index, folders, argument, {
     title: "Choose the folder to resume a session from",
     addWhenEmpty: true,
+    openHereFirst: true,
   });
   if (folder === null) return;
   if (await s.routing.routeLaunch(index, folder, { kind: "resume-folder", folderId: folder.id })) return;

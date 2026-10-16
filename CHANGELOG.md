@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **New Session and Resume Session ask for the folder with this window's folders first.** In the folder question of **New Session…**, **Resume Session…** and their keys (`Ctrl+Alt+N`, `Ctrl+Alt+R`), the folders open in the current VS Code window now lead, in the order of the workspace, followed by the other folders in the order Sessions lists them. The first row is highlighted: with one folder open in the window (and other folders shown, so there is a question at all), `Ctrl+Alt+N` then `Enter` starts a session there, and `Ctrl+Alt+R` then `Enter` lists its saved sessions, newest first and highlighted, where `Enter` resumes the newest one. With several folders open here, the first of them is highlighted. The order is the same from the Sessions rows, the Command Palette and the keys. When only one folder is shown there is still no question, and when none is shown you are still offered to add one.
+
 ### Fixed
 
 - **Chat: the working animation no longer stays on after a context compaction has ended.** OMP announces the end of an automatic compaction (`auto_compaction_end`) before it releases its own "compacting" flag, and Desk read that flag once, at the announcement, and then never again: when the read still said "compacting", nothing was left running but the composer kept the animation (and Rewind, Clear and the model choices kept answering that a compaction was running) until the next turn. Desk now keeps asking OMP once a second for as long as OMP reports a compaction that no Desk-started pass accounts for, so the state follows OMP's own and ends as soon as OMP does. The same readback ends the state after a stopped `/compact` typed in the composer, when a read had seen it running.
