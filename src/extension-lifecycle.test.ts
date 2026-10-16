@@ -1035,6 +1035,7 @@ describe("footer host readback", () => {
       await harness.refreshSessionModels(index, TAB);
       assert.equal(harness.sessionModelAvailability(TAB), true);
       const request = { type: "omp:control-request", scope: "11111111-2222-4333-8444-555555555555", requestId: 1, action: "snapshot", picker: "model" };
+      const sentBefore = messages.length;
       const pending = harness.handleGuestControlRequest(index, TAB, request, harness.panelResponder(TAB, panel));
       await nextTurn();
       const picker = harness.quickPicks().at(-1)!;
@@ -1045,10 +1046,10 @@ describe("footer host readback", () => {
       assert.equal(fixture.logins.length, 2);
       assert.equal(auth.starts.length, 2);
       assert.equal(channel.commandsOfType("set_model").length, 0);
-      const reply = messages.at(-1);
-      assert.ok(reply && typeof reply === "object" && "type" in reply);
-      assert.equal(reply.type, "omp:control-state");
-      assert.equal("selectedModel" in reply, false);
+      // The login's model refresh may post footer metadata after the reply, so the reply is found by type.
+      const replies = messages.slice(sentBefore).filter(message => message && typeof message === "object" && "type" in message && message.type === "omp:control-state");
+      assert.equal(replies.length, 1);
+      assert.equal("selectedModel" in (replies[0] as object), false);
     } finally {
       harness.closeLoginTerminal("omp login"); host.dispose(); await harness.providerModelsIdle();
       for (const subscription of subscriptions) subscription.dispose();
