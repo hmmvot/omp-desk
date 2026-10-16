@@ -1,11 +1,14 @@
 import type { ReactNode } from "react";
-import { useEffect, useId, useRef, useState, useSyncExternalStore } from "react";
+import { useId, useSyncExternalStore } from "react";
 import type { ChatContent, MessageContent } from "../../chat/messages.ts";
+import { FileBlockRows } from "./FileBlockRow.tsx";
 import { Markdown } from "./Markdown.tsx";
 import { AssistantReplyContext } from "./FileLinks.tsx";
 import { UserImageReferencesContext } from "./ImageReference.tsx";
+import { NativeDisclosure } from "./NativeDisclosure.tsx";
 import { PacedMarkdown } from "./PacedMarkdown.tsx";
 import { SavedImage } from "./SavedImage.tsx";
+import { splitUserText } from "../lib/file-block-rows.ts";
 import { getTranscriptToggles, subscribeTranscriptToggles } from "../lib/transcript-toggles.ts";
 
 export interface MessageContentViewProps {
@@ -21,27 +24,12 @@ export interface MessageContentViewProps {
 	emphasis?: boolean;
 }
 export interface AssistantContentViewProps { content: readonly ChatContent[]; streaming?: boolean; bypassPacing?: boolean }
-export interface NativeDisclosureProps { title: ReactNode; children: ReactNode; className?: string; initiallyOpen?: boolean; forceOpen?: { open: boolean; generation: number }; expanded?: boolean; onExpandedChange?: (expanded: boolean) => void }
 
-/** Materialize large Markdown and archive bodies only on disclosure. */
-export function NativeDisclosure({ title, children, className = "", initiallyOpen = false, forceOpen, expanded, onExpandedChange }: NativeDisclosureProps) {
-	const [open, setOpen] = useState(initiallyOpen);
-	const ref = useRef<HTMLDetailsElement | null>(null);
-	const applied = useRef(forceOpen?.generation);
-	// A global press (the thinking toggle) opens or closes this block once; the user's own clicks win afterwards.
-	useEffect(() => {
-		if (forceOpen === undefined || applied.current === forceOpen.generation) return;
-		applied.current = forceOpen.generation;
-		if (ref.current !== null) ref.current.open = forceOpen.open;
-		setOpen(forceOpen.open);
-	}, [forceOpen?.generation, forceOpen?.open]);
-	return <details ref={ref} open={(expanded ?? initiallyOpen) || undefined} className={`omp-native-disclosure ${className}`} onToggle={event => { setOpen(event.currentTarget.open); if (expanded !== event.currentTarget.open) onExpandedChange?.(event.currentTarget.open); }} onKeyDown={event => {
-		if (event.key !== "Escape" || !event.currentTarget.open || !event.currentTarget.contains(document.activeElement)) return;
-		event.preventDefault(); event.stopPropagation(); event.currentTarget.querySelector<HTMLElement>(":scope > summary")?.focus(); event.currentTarget.open = false;
-	}}>
-		<summary>{title}</summary>
-		{(expanded ?? open) ? children : null}
-	</details>;
+/** A user's text: its prose as Markdown, as ever, and under it one closed row per attached file. A text that does not parse is the Markdown it always was. */
+function UserText({ text, quotable, emphasis }: { text: string; quotable: boolean; emphasis: boolean }) {
+	const { prose, blocks } = splitUserText(text);
+	if (blocks.length === 0) return <Markdown text={text} quotable={quotable} emphasis={emphasis} />;
+	return <><Markdown text={prose} quotable={quotable} emphasis={emphasis} /><FileBlockRows blocks={blocks} /></>;
 }
 
 /** A thinking block: closed unless the transcript's thinking toggle (`Ctrl+T`) shows thinking. */
@@ -51,9 +39,10 @@ function ThinkingDisclosure({ children }: { children: ReactNode }) {
 }
 
 
-function ContentBlock({ block, pace = false, streaming = false, bypassPacing = false, quotable = false, emphasis = true, imageNumber, imageAnchor }: { block: ChatContent; pace?: boolean; streaming?: boolean; bypassPacing?: boolean; quotable?: boolean; emphasis?: boolean; imageNumber?: number; imageAnchor?: string }) {
+function ContentBlock({ block, pace = false, streaming = false, bypassPacing = false, quotable = false, emphasis = true, references = false, imageNumber, imageAnchor }: { block: ChatContent; pace?: boolean; streaming?: boolean; bypassPacing?: boolean; quotable?: boolean; emphasis?: boolean; references?: boolean; imageNumber?: number; imageAnchor?: string }) {
 	switch (block.type) {
 		case "text":
+			if (references) return <UserText text={block.text} quotable={quotable} emphasis={emphasis} />;
 			return pace ? <PacedMarkdown text={block.text} streaming={streaming} bypass={bypassPacing} quotable={quotable} emphasis={emphasis} /> : <Markdown text={block.text} quotable={quotable} emphasis={emphasis} />;
 		case "thinking":
 			return block.thinking.trim().length === 0 ? null : <ThinkingDisclosure>{pace ? <PacedMarkdown text={block.thinking} streaming={streaming} bypass={bypassPacing} quotable={quotable} emphasis={emphasis} /> : <Markdown text={block.thinking} quotable={quotable} emphasis={emphasis} />}</ThinkingDisclosure>;
@@ -72,11 +61,11 @@ function ContentBlock({ block, pace = false, streaming = false, bypassPacing = f
 
 export function MessageContentView({ content, pace, streaming, bypassPacing, references = false, quotable = false, emphasis = true }: MessageContentViewProps) {
 	const base = useId();
-	if (typeof content === "string") return <Markdown text={content} quotable={quotable} emphasis={emphasis} />;
+	if (typeof content === "string") return references ? <UserText text={content} quotable={quotable} emphasis={emphasis} /> : <Markdown text={content} quotable={quotable} emphasis={emphasis} />;
 	let imageCount = 0;
 	const blocks = content.map((block, index) => {
 		const imageNumber = references && block.type === "image" ? ++imageCount : undefined;
-		return <ContentBlock key={`${block.type}:${index}`} block={block} pace={pace} streaming={streaming} bypassPacing={bypassPacing} quotable={quotable} emphasis={emphasis} imageNumber={imageNumber} imageAnchor={imageNumber === undefined ? undefined : `${base}-image-${imageNumber}`} />;
+		return <ContentBlock key={`${block.type}:${index}`} block={block} pace={pace} streaming={streaming} bypassPacing={bypassPacing} quotable={quotable} emphasis={emphasis} references={references} imageNumber={imageNumber} imageAnchor={imageNumber === undefined ? undefined : `${base}-image-${imageNumber}`} />;
 	});
 	const body = <div className="omp-native-content">{blocks}</div>;
 	return references ? <UserImageReferencesContext.Provider value={{ count: imageCount, anchor: number => `${base}-image-${number}` }}>{body}</UserImageReferencesContext.Provider> : body;

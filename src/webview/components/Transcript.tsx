@@ -42,12 +42,13 @@ import { focusAfter } from "../lib/focus-after";
 import { isHeadNavigation, nextHead } from "../lib/tool-navigation";
 import { NativeMessage } from "./NativeMessage";
 import { EmptyState } from "./EmptyState";
-import { AssistantContentView, NativeDisclosure } from "./MessageContent";
+import { AssistantContentView } from "./MessageContent";
+import { NativeDisclosure } from "./NativeDisclosure";
 import { ToolCard, type ToolCardProps } from "./ToolCard";
 import { WorkingStatus } from "./WorkingStatus";
 import { CopyButton } from "./CopyButton";
 import { CHAT_TEXT_MENU_CONTEXT } from "../../shared/quote-menu";
-import { messageText } from "../../shared/format";
+import { sentTextOf } from "../lib/file-block-rows";
 import { requestPanelAction } from "../lib/panel-actions";
 import { clearToolDisclosures, getTranscriptToggles, subscribeTranscriptToggles, withToolDefault } from "../lib/transcript-toggles";
 import { peekToolView, recordObservedToolMs, resetAllToolViews, useToolViewVersion } from "../lib/tool-view-state";
@@ -200,7 +201,8 @@ export function TranscriptCardView({ card, props, autoExpanded, clearedHistory }
 	}
 	const message = card.kind === "entry" ? entryMessage(card.entry) : null;
 	const user = message?.role === "user" && !message.synthetic;
-	const copyText = user ? messageText(message.content) : "";
+	// A message that carries files copies its text as sent, markers included and blocks left out; each row copies its own file.
+	const copyText = user ? sentTextOf(message.content) : "";
 	const rewind = props.rewind;
 	const rewindId = rewind !== undefined && card.kind === "entry" && user && rewind.targets.has(card.entry.id) ? card.entry.id : null;
 	const copy = copyText.trim().length > 0 ? <CopyButton text={copyText} label="Copy message" /> : null;

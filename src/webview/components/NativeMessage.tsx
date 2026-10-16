@@ -4,8 +4,11 @@ import { advisorNotes, entryMessage, userSkill, type AdvisorNote } from "../../c
 import { isRecord } from "../../shared/guards.ts";
 import { TODO_STATUS_WORD } from "../../chat/hud-summary.ts";
 import { fmtDuration, fmtTokens } from "../../shared/format.ts";
+import { splitUserText } from "../lib/file-block-rows.ts";
 import { Markdown } from "./Markdown.tsx";
-import { AssistantContentView, MessageContentView, NativeDisclosure } from "./MessageContent.tsx";
+import { FileBlockRows } from "./FileBlockRow.tsx";
+import { AssistantContentView, MessageContentView } from "./MessageContent.tsx";
+import { NativeDisclosure } from "./NativeDisclosure.tsx";
 import { lateDiagnosticsFiles, nativeText, numberField, recordRows, stringField } from "./native-message-helpers.ts";
 import { parseAnsi } from "../../chat/ansi.ts";
 import { AnsiLines, AnsiText } from "./AnsiText.tsx";
@@ -142,10 +145,14 @@ function CustomMessageView({ message, irc }: { message: CustomMessage; irc?: Irc
 			return <section className="omp-native-message omp-user omp-native-collab"><header><strong>«{stringField(details, "from")?.trim() || "guest"}»</strong></header><MessageContentView content={message.content} emphasis={false} /></section>;
 		case "skill-prompt": {
 			const invocation = userSkill(message);
-			if (invocation) return <section className="omp-native-message omp-native-skill omp-user">
-				<header><span className="codicon codicon-book" aria-hidden="true" /><Markdown text={invocation.prompt} emphasis={false} />{invocation.reconstructed && <span className="omp-native-badge">reconstructed</span>}</header>
-				<NativeDisclosure title="Expanded skill"><MessageContentView content={message.content} /></NativeDisclosure>
-			</section>;
+			if (invocation) {
+				const { prose, blocks } = splitUserText(invocation.prompt);
+				return <section className="omp-native-message omp-native-skill omp-user">
+					<header><span className="codicon codicon-book" aria-hidden="true" /><Markdown text={prose} emphasis={false} />{invocation.reconstructed && <span className="omp-native-badge">reconstructed</span>}</header>
+					{blocks.length > 0 && <FileBlockRows blocks={blocks} />}
+					<NativeDisclosure title="Expanded skill"><MessageContentView content={message.content} /></NativeDisclosure>
+				</section>;
+			}
 			const name = stringField(details, "name");
 			return <section className="omp-native-message omp-native-skill"><header><span className="codicon codicon-book" aria-hidden="true" /> <strong>Skill · {name ?? "Unknown skill"}</strong></header>
 				{stringField(details, "path") ? <p><code>{stringField(details, "path")}</code></p> : null}
