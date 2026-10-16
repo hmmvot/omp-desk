@@ -49,6 +49,17 @@ function closesFence(line: string, openLength: number): boolean {
 const LIST_ITEM = /^([ \t]*)([-*+]|\d{1,9}[.)])([ \t]+)(.*)$/;
 const RULE = /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/;
 const QUOTE = /^\s*>\s?(.*)$/;
+/** How many blockquotes may nest; a `>` inside the deepest one is literal text. */
+const MAX_QUOTE_DEPTH = 8;
+
+/** Where a block is parsed: inside a quote (a `mermaid` fence is then plain code, not a drawn diagram) and how many quotes deep. */
+interface BlockContext { readonly quoted: boolean; readonly depth: number }
+const TOP_LEVEL: BlockContext = { quoted: false, depth: 0 };
+
+/** Whether `line` opens or continues a quote at this depth. */
+function quoteLine(line: string, context: BlockContext): boolean {
+	return context.depth < MAX_QUOTE_DEPTH && QUOTE.test(line);
+}
 const TABLE_SEPARATOR = /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/;
 
 /** Text whose file references the host has proven can become links; text without a candidate stays a bare string. `breaks` offers line-break points after path separators (inline code only). */
@@ -237,7 +248,7 @@ function listItem(line: string): ListItemMatch | null {
  * blank lines between them; the owned text is rendered as nested blocks, so
  * nested lists, code fences and paragraphs inside items keep their structure.
  */
-function parseList(lines: readonly string[], start: number, listKey: string): { node: ReactNode; next: number } {
+function parseList(lines: readonly string[], start: number, listKey: string, context: BlockContext): { node: ReactNode; next: number } {
 	const first = listItem(lines[start] as string) as ListItemMatch;
 	const items: string[][] = [];
 	let loose = false;
@@ -271,7 +282,7 @@ function parseList(lines: readonly string[], start: number, listKey: string): { 
 			const indent = indentWidth(line);
 			if (indent >= head.contentOffset || (nested !== null && nested.indent > first.indent)) {
 				body.push(dedent(line, Math.min(indent, head.contentOffset)));
-			} else if (nested === null && !previousBlank && !FENCE.test(line) && !HEADING.test(line) && !RULE.test(line) && !QUOTE.test(line)) {
+			} else if (nested === null && !previousBlank && !FENCE.test(line) && !HEADING.test(line) && !RULE.test(line) && !quoteLine(line, context)) {
 				body.push(line.trim());
 			} else {
 				break;
@@ -285,7 +296,7 @@ function parseList(lines: readonly string[], start: number, listKey: string): { 
 		if (sibling === null || sibling.indent < first.indent || sibling.ordered !== first.ordered) break;
 	}
 	const rendered = items.map((body, itemIndex) => (
-		<li key={`li${itemIndex}`}>{parseBlocks(body.join("\n"), !loose, `${listKey}-${itemIndex}`)}</li>
+		<li key={`li${itemIndex}`}>{parseBlocks(body.join("\n"), !loose, `${listKey}-${itemIndex}`, context)}</li>
 	));
 	return {
 		node: first.ordered
@@ -296,8 +307,8 @@ function parseList(lines: readonly string[], start: number, listKey: string): { 
 }
 
 /** Parse block structure; `tight` renders paragraphs inline, as in a tight list item. */
-function parseBlocks(text: string, tight = false, keyPrefix = "b"): ReactNode[] {
-	return parseBlockRange(text.split(/\r?\n/), 0, 0, tight, keyPrefix).blocks;
+function parseBlocks(text: string, tight = false, keyPrefix = "b", context: BlockContext = TOP_LEVEL): ReactNode[] {
+	return parseBlockRange(text.split(/\r?\n/), 0, 0, tight, keyPrefix, context).blocks;
 }
 
 /**
@@ -328,16 +339,16 @@ export function parseMarkdown(text: string, previous: MarkdownParse | null): Mar
 		// parsed again too.
 		const from = (previous.starts[last] as number) < modified ? last : last - 1;
 		if (from >= 1) {
-			const tail = parseBlockRange(lines, previous.starts[from] as number, from, false, "b");
+			const tail = parseBlockRange(lines, previous.starts[from] as number, from, false, "b", TOP_LEVEL);
 			return { text, lineCount: lines.length, blocks: [...previous.blocks.slice(0, from), ...tail.blocks], starts: [...previous.starts.slice(0, from), ...tail.starts] };
 		}
 	}
-	const parsed = parseBlockRange(lines, 0, 0, false, "b");
+	const parsed = parseBlockRange(lines, 0, 0, false, "b", TOP_LEVEL);
 	return { text, lineCount: lines.length, blocks: parsed.blocks, starts: parsed.starts };
 }
 
 /** Parse the blocks from line `from` on; `firstKey` numbers the first of them. Every block takes exactly one key. */
-function parseBlockRange(lines: readonly string[], from: number, firstKey: number, tight: boolean, keyPrefix: string): { blocks: ReactNode[]; starts: number[] } {
+function parseBlockRange(lines: readonly string[], from: number, firstKey: number, tight: boolean, keyPrefix: string, context: BlockContext): { blocks: ReactNode[]; starts: number[] } {
 	const blocks: ReactNode[] = [];
 	const starts: number[] = [];
 	let index = from;
@@ -381,7 +392,7 @@ function parseBlockRange(lines: readonly string[], from: number, firstKey: numbe
 			index++; // closing fence (or EOF)
 			const text = body.join("\n");
 			blocks.push(
-				language.toLowerCase() === "mermaid" ? (
+				language.toLowerCase() === "mermaid" && !context.quoted ? (
 					<MermaidBlock key={`b${key++}`} source={text} closed={closed} />
 				) : (
 					<CodeBlock key={`b${key++}`} language={language} source={text} closed={closed} />
@@ -405,22 +416,22 @@ function parseBlockRange(lines: readonly string[], from: number, firstKey: numbe
 			continue;
 		}
 
-		if (QUOTE.test(line)) {
+		if (quoteLine(line, context)) {
+			// A quote ends at the first line without `>`: a comment written right under it is its own paragraph (no lazy continuation).
 			const quoted: string[] = [];
-			while (index < lines.length) {
-				const quotedLine = QUOTE.exec(lines[index] as string);
-				if (quotedLine === null) break;
-				quoted.push(quotedLine[1] as string);
+			while (index < lines.length && quoteLine(lines[index] as string, context)) {
+				quoted.push((QUOTE.exec(lines[index] as string) as RegExpExecArray)[1] as string);
 				index++;
 			}
+			const quoteKey = key++;
 			blocks.push(
-				<blockquote key={`b${key++}`}>{renderLines(quoted, `q${key}`)}</blockquote>,
+				<blockquote key={`b${quoteKey}`}>{parseBlocks(quoted.join("\n"), false, `q${quoteKey}-`, { quoted: true, depth: context.depth + 1 })}</blockquote>,
 			);
 			continue;
 		}
 
 		if (listItem(line) !== null) {
-			const list = parseList(lines, index, `${keyPrefix}${key++}`);
+			const list = parseList(lines, index, `${keyPrefix}${key++}`, context);
 			blocks.push(list.node);
 			index = list.next;
 			continue;
@@ -473,7 +484,7 @@ function parseBlockRange(lines: readonly string[], from: number, firstKey: numbe
 					FENCE.test(paragraphLine) ||
 					HEADING.test(paragraphLine) ||
 					RULE.test(paragraphLine) ||
-					QUOTE.test(paragraphLine) ||
+					quoteLine(paragraphLine, context) ||
 					listItem(paragraphLine) !== null)
 			) {
 				break;

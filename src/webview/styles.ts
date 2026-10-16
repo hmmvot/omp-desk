@@ -427,6 +427,9 @@ ${ANSI_STYLES}
 	border-left: 3px solid color-mix(in srgb, var(--vscode-foreground) 28%, transparent);
 	color: var(--omp-muted);
 }
+/* A quote's content is blocks: the first and last child give up their margin so a one-paragraph quote is as tall as an inline quote was. */
+.omp-md blockquote > :first-child { margin-top: 0; }
+.omp-md blockquote > :last-child { margin-bottom: 0; }
 .vscode-high-contrast .omp-md blockquote, .vscode-high-contrast-light .omp-md blockquote { border-left-color: var(--vscode-contrastBorder); }
 /* Tables are ruled by their rows, not boxed in a grid. One cannot wrap below its longest words: a wide one scrolls inside its own block, and its cells break only at spaces. */
 .omp-table-scroll { max-width: 100%; margin: 8px 0; overflow-x: auto; }

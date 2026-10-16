@@ -323,6 +323,10 @@ const STREAMED = [
 	"a | 1",
 	"",
 	"> quoted",
+	"> ```ts",
+	"> const y = 2;",
+	"> ```",
+	"> - in a list",
 	"",
 	"```ts",
 	"const x = 1;",
@@ -433,4 +437,50 @@ test("an unclosed four-backtick fence streamed prefix by prefix renders as a fre
 	}
 	const unclosed = render(source.slice(0, source.indexOf("\nmore") + 5));
 	assert.deepEqual(codeBlocks(unclosed), [{ language: "md", source: "```ts\nx\n```\nmore" }]);
+});
+
+test("a quote's content is nested blocks: paragraphs, with the same inline content as before", () => {
+	assert.equal(render("> text"), '<div class="omp-md"><blockquote><p>text</p></blockquote></div>');
+	assert.equal(render("> a\n> b"), '<div class="omp-md"><blockquote><p>a<br/>b</p></blockquote></div>');
+	assert.equal(render("> **a** and `b`"), '<div class="omp-md"><blockquote><p><strong>a</strong> and <code>b</code></p></blockquote></div>');
+	assert.equal(render(">no space"), '<div class="omp-md"><blockquote><p>no space</p></blockquote></div>');
+	assert.equal(render("> a\n>\n> b"), '<div class="omp-md"><blockquote><p>a</p><p>b</p></blockquote></div>', "a bare > is a paragraph break");
+	assert.equal(render("> a\n> \n> b"), render("> a\n>\n> b"));
+});
+
+test("a fence, a list, a heading, a rule and a table inside a quote are blocks", () => {
+	assert.deepEqual(codeBlocks(render("> ```ts\n> const x = 1;\n>     indented\n> ```")), [{ language: "ts", source: "const x = 1;\n    indented" }]);
+	assert.equal(render("> - a\n> - b"), '<div class="omp-md"><blockquote><ul><li><span>a</span></li><li><span>b</span></li></ul></blockquote></div>');
+	assert.equal(render("> 1. a\n> 2. b"), '<div class="omp-md"><blockquote><ol><li><span>a</span></li><li><span>b</span></li></ol></blockquote></div>');
+	assert.equal(render("> # h\n> ---\n> after"), '<div class="omp-md"><blockquote><h1>h</h1><hr/><p>after</p></blockquote></div>');
+	assert.match(render("> a | b\n> - | -\n> 1 | 2"), /<blockquote><div class="omp-table-scroll"><table><thead><tr><th>a<\/th><th>b<\/th><\/tr><\/thead><tbody><tr><td>1<\/td><td>2<\/td><\/tr><\/tbody><\/table><\/div><\/blockquote>/);
+	assert.equal(render("> a\n> > b\n> > c\n> d"), '<div class="omp-md"><blockquote><p>a</p><blockquote><p>b<br/>c</p></blockquote><p>d</p></blockquote></div>');
+	assert.equal(render("> > text"), '<div class="omp-md"><blockquote><blockquote><p>text</p></blockquote></blockquote></div>');
+	assert.deepEqual(codeBlocks(render("> ```\n> > b\n> ```")), [{ language: "", source: "> b" }], "a > line inside a quoted fence is code");
+});
+
+test("a quote ends at the first line without > : a comment right under it is its own paragraph, also after a fence or a list", () => {
+	assert.equal(render("> q\ncomment"), '<div class="omp-md"><blockquote><p>q</p></blockquote><p>comment</p></div>');
+	assert.match(render("> ```ts\n> x\n> ```\ncomment"), /<\/pre>.*<\/blockquote><p>comment<\/p><\/div>$/);
+	assert.equal(render("> - a\ncomment"), '<div class="omp-md"><blockquote><ul><li><span>a</span></li></ul></blockquote><p>comment</p></div>');
+	assert.equal(render("> q\ncomment\n\n> second\nmore"), '<div class="omp-md"><blockquote><p>q</p></blockquote><p>comment</p><blockquote><p>second</p></blockquote><p>more</p></div>');
+	assert.equal(render("> q\n\ncomment"), '<div class="omp-md"><blockquote><p>q</p></blockquote><p>comment</p></div>');
+});
+
+test("quotes nest at most eight deep and a mermaid fence in a quote is plain code", () => {
+	const deep = render(`${"> ".repeat(9)}x`);
+	assert.equal(deep.split("<blockquote>").length - 1, 8);
+	assert.match(deep, /<p>&gt; x<\/p>/, "the ninth > stays literal text");
+	assert.equal(render(`${">".repeat(8)} x\n${">".repeat(9)} y`).split("<blockquote>").length - 1, 8);
+	assert.deepEqual(codeBlocks(render("> ```mermaid\n> graph TD\n> ```")), [{ language: "mermaid", source: "graph TD" }]);
+});
+
+test("a quote with a fence streamed prefix by prefix renders as a fresh parse, and it stays one top-level block", () => {
+	const source = "intro\n\n> note\n> ```ts\n> const a = 1;\n> - not a list in code\n> ```\n> - item\n> > deeper\ncomment under it\n\ntail";
+	const lengths = Array.from({ length: source.length }, (_, index) => index + 1);
+	for (const [index, step] of renderStreamed(source, lengths).entries()) {
+		assert.equal(step.html, render(source.slice(0, lengths[index])), `prefix of ${lengths[index]} characters`);
+	}
+	assert.equal(blockCount(source), 4);
+	assert.equal(blockCount("> a\n> ```\n> b\n> - c"), 1);
 });
