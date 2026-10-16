@@ -1,0 +1,397 @@
+---
+status: accepted
+date: 2026-10-15
+---
+
+# Quote selected Chat text into the draft
+
+Revised 2026-10-16: the maintainer's answers to the first draft's open questions are in *Decisions*; an independent review of the atomic-block variant of decision 3 led the maintainer to choose an editable band instead (*Architecture Review*). The one remaining open question (the line after a quote) was answered the same day, option B, and is decision 8.
+
+## Problem
+
+The maintainer's use case: "I read the agent's reply in the Chat, select some text, press Quote, and it lands in the draft, visibly as a quote. I write my comment under it. I repeat this several times and then send one message."
+
+Today there is no way to do that with one gesture. The only paths are copy and paste (the transcript has no `copy` handler of its own, so the clipboard gets the *rendered* text: no code fences, no links, no list markers), or "Add Selection to Session", which inserts one `@path [lines a-b]` line from an *editor* selection and refuses newlines and anything over 900 characters (`src/protocol/messages.ts:354`, `src/webview/lib/insert-text.ts:36-41`). The composer is a `contenteditable` surface rendered from a Markdown string with a band for fenced code ([composer surface design](2026-10-15-composer-contenteditable-surface.md), ADR-0077), which makes a visible quote band natural. The transcript's Markdown renderer, however, renders a quote as inline text only, so a quoted code block would show up broken in the user's own sent message (Current State 2). Two existing transcript defects sit on the path of this feature and are fixed with it: a parser hang on some list-like lines and a fence grammar that disagrees with the composer's (Section 5).
+
+## Goals and Non-goals
+
+- Goals:
+  - One gesture quotes the selected text of an assistant reply, a user message or thinking into the draft of the Chat the selection is in, as Markdown blockquote lines (`> `), faithful to the source Markdown of exactly the selection (code fences, links, lists, emphasis), and never silently lossy.
+  - The draft shows the quote as a band, the way a fenced block shows as a band: the `> ` prefix stays visible, the text stays editable, and the string stays the single source of truth (ADR-0077). A ✕ removes a whole quote as one undo step.
+  - Several quotes interleaved with comments in one draft, in reading order: every quote lands at the end of the draft and the caret is left on a new line after it.
+  - A keyboard path and a screen-reader-usable path; one new host protocol member (a panel action).
+  - The sent message renders back in the transcript as a quote, including a quoted code block, list or nested quote.
+- Non-goals:
+  - Quoting from the editor, the Terminal pane, the Sessions views, tool output, tool rows, the dock (queued messages, TODO and Agents rows, the ask dialog) or the TODO/Agents detail tabs.
+  - Rich-text paste, attribution lines ("Assistant said:"), a quote that links back to its message, or a structured attachment: OMP receives one string.
+  - Changing how OMP reads `@` mentions or slash commands.
+  - Any change to ADR-0077: a quote is a per-line property of the rendering, exactly like the code band.
+
+## Decisions (maintainer, 2026-10-16)
+
+Answers to the seven open questions of the first draft, and the choice made after the review. They are inputs, not proposals; sections below say how each is realised.
+
+1. **Trigger.** A floating Quote button, a contributed command with the key **`Alt+Q`**, a context-menu item, and per-message Quote buttons. (Section 1 records how `Alt+Q` was checked.)
+2. **Capture.** The source Markdown of exactly the selection, with the plain-text fallback and a notice.
+3. **Composer.** An **editable band with a visible `> ` prefix**, following the fenced-band precedent, **plus a ✕ that removes the whole quote as one undo step**. (The first answer was a non-editable atomic block; after the independent review the maintainer chose the band. No ADR-0077 amendment.)
+4. **Scope.** Assistant replies, user messages and thinking only. Tool output is not quotable.
+5. **Transcript.** Parse the content of a quote as nested blocks for **all** messages (Section 5 lists the rendering this changes and the tests that pin it).
+6. **Insertion.** **Always at the end of the draft**, after a line break, with focus moved to the composer and the caret on the new line after the quote. No caret snapping and no retained-caret logic (Section 2 gives the exact separators).
+7. **Limit.** Refuse a selection over 20 000 characters, with its size in the message.
+8. **The line after a quote (option B).** After an inserted quote comes **one line break only**, and the caret sits on the very next line, so the user writes the comment straight under the quote. The reasons: the transcript renderer ends a quote at the first line without `>` (there is no lazy continuation, `Markdown.tsx` quote branch), so the user's own sent message shows the quote and then the comment as separate blocks; and the raw text the model reads marks every quoted line with `>`. Slice 2 (nested quote blocks) keeps this property: a following non-`>` line still ends the quote in the transcript, and a test pins it. To a CommonMark parser the comment under the quote is a lazy continuation of the quote's last paragraph; this was weighed and accepted (Risks).
+
+## Current State
+
+All references are to this repository at the time of writing; claims not read in code are marked `[INFERENCE]`.
+
+### 1. What the Chat renders, and what can hold a selection worth quoting
+
+Every transcript row is wrapped in `div.omp-measured-row[data-window-row]` (`src/webview/components/MeasuredRows.tsx:98`), inside `Row` (`Transcript.tsx:129-160`). There is no message-id attribute on user or assistant rows (the row id is `card.id`: the entry id, `entryId:content:N`, or `live:<streamId>` while streaming, `src/chat/transcript.ts:108,129,185,193,195`).
+
+| Surface | Rendering | Quotable (decision 4) | Notes |
+| --- | --- | --- | --- |
+| Assistant text | `MessageContentView pace` → `PacedMarkdown` → `div.omp-md` per text block (`MessageContent.tsx:53,81-83`, `PacedMarkdown.tsx:59-63`, `Markdown.tsx:466-472`) | **Yes** | One reply is several cards; tool calls split it (`transcript.ts:106-131`) |
+| User message | same `Markdown`, unpaced (`MessageContent.tsx:71`) | **Yes** | `[Image #N]` renders as `button.omp-image-ref` (`ImageReference.tsx`, `Markdown.tsx:34`) |
+| Thinking | `NativeDisclosure` → `Markdown` (`MessageContent.tsx:44-47,55`); the body exists only while open (`MessageContent.tsx:39`) | **Yes** | Symbol links are off there (`MessageContent.tsx:46`) |
+| Tool output, tool heads, run overviews | `pre.omp-pre` rows, buttons, `.omp-sr-only` text (`tool-renderer-primitives.tsx:59-69`, `ToolCard.tsx:271,290,311`, `styles.ts:508`) | **No** | A selection that spans a tool row contributes nothing from it |
+| Notices, errors, summaries, custom and advisor messages | `Markdown` or plain nodes (`NativeMessage.tsx:61-259`) | **No** | They share `div.omp-md` but are not message content of the three kinds |
+| Mermaid | drawn: `<img>` with no text and no source; Source view and the unrendered fallback: a `CodeBlock` (`MermaidBlock.tsx:55-68,98-120`) | The Source view only (it is a code block inside the reply) | Toolbar buttons are real text nodes (`mermaid-styles.ts:14-15`) |
+| Code block | `div.omp-code-block > pre > code[data-language]` plus a hover Copy button that stays in selection ranges (`CodeBlock.tsx:12-28`, `styles.ts:422-423`); highlighted runs spell exactly the source (`CodeBlock.tsx:17-23`) | Yes, inside the three kinds | The text of `code` *is* the source |
+| Tables, lists | `div.omp-table-scroll > table`; `ol`/`ul > li`, tight items render paragraphs as `<span>` (`Markdown.tsx:279-286,416-437`) | Yes | Markers and pipes are not text nodes |
+| File, web and symbol links | `span.omp-file-link[role=link]`, `span.omp-web-link`, `span.omp-symbol-search`, decorating text that is never altered (`FileLinks.tsx:90-103`, `WebLinks.tsx:40-49`) | Part of the surrounding text | They re-parent text nodes after the fact `[INFERENCE]`, so a Range endpoint can move |
+| Dock and composer | `.omp-dock`, the contenteditable surface (`App.tsx:308-318`) | **Never** | |
+
+Windowing does not prevent a selection from spanning rows: while a selection is not collapsed, every mounted row it touches is *held* mounted (`MeasuredRows.tsx:39-51`). A Range cannot cover rows that were never mounted, but a drag that scrolls mounts them as it goes.
+
+### 2. The Markdown pipeline and whether source is available per block
+
+- The renderer is project-owned and renders straight to React nodes; there is no AST and no node carries `position` or `data-*` source information (`Markdown.tsx:313-464`, DOM output at `:466-472`).
+- The only offsets are `MarkdownParse.starts`, the first line of each *top-level* block (`Markdown.tsx:299-304`, pushed at `:344`). They live in a `useMemo`/`useRef` inside the component and are not reachable from the DOM. Every top-level block pushes exactly one start and one root element, so the Nth child of `div.omp-md` is block N. List items re-parse their dedented bodies through `parseBlocks`, which discards `starts` (`Markdown.tsx:280,291-293`); table rows and quote lines have no offsets.
+- The source string of a message lives only in the `text` prop of `Markdown`, in the `source` prop of `CodeBlock`/`MermaidBlock` (also the Copy button's closure, `CodeBlock.tsx:25`) and in the card closure. `Transcript.tsx:202-205` already reads the source of a *user* message (`messageText(message.content)`) for the hover Copy button, and `ReplyFooter.tsx:15-16` has the whole reply text (`reply.text`, built in `src/chat/reply-turns.ts:62-73`).
+- Rendered text is not source text: `**x**`, `_x_`, `~~x~~` markers, code-span backticks, heading `#`, link syntax (collapsed to the label), table pipes and the separator row, and list markers are all dropped (`Markdown.tsx:115-142,368-375,405-437,279-286`); a soft newline inside a paragraph becomes `<br>` (`Markdown.tsx:152-159`). So `Selection.toString()` cannot be turned back into Markdown without the source.
+- `PacedMarkdown` hands `Markdown` the *revealed* prefix, not the canonical text, and stops painting while the selection touches its slot (`PacedMarkdown.tsx:39-47,63`): while a reply streams and is selected, the DOM lags the canonical text. A source map must therefore come from the parse that produced the DOM, never from the model.
+- A reply's row id and element can change while its text stays the same: the streaming card is `live:<streamId>` (`src/chat/transcript.ts:195`), and a message that ended live before its entry is durable is held as a pending row `live:<messageId>` and reconciled to the durable entry by role and timestamp (`src/chat/model.ts:10-13`). That a selection survives such a remount is `[INFERENCE]` and is to be measured.
+- **Quotes in the transcript today.** `QUOTE = /^\s*>\s?(.*)$/` (`Markdown.tsx:43`); consecutive matching lines become one `<blockquote>` whose content is `renderLines(quoted)`, inline tokens separated by `<br>` (`Markdown.tsx:383-395`, `:152-159`); the quote ends at the first line that does not match (no lazy continuation). **Fences, lists, headings and nested `>` inside a quote are not parsed as blocks**: `> ```ts` renders as literal backticks and the code lines as plain wrapped text without monospace or indentation. The blockquote style is `styles.ts:424-430` (3 px bar, muted text, High Contrast border). `markdown.test.ts` has no test that renders a quote's shape.
+- **A parser hang** (found by the review, which bundled and ran the current `Markdown.tsx`; the cause is read here in code). The paragraph interrupts on `UNORDERED_ITEM = /^\s*[-*+]\s+/` and `ORDERED_ITEM = /^\s*\d+[.)]\s+/` (`Markdown.tsx:38-39,451-452`), but the list branch is entered only when `listItem` accepts the line, and `LIST_ITEM` is stricter: `[ \t]+` after the marker and `\d{1,9}` (`Markdown.tsx:41,212-214,397`). A line both regexes match and `listItem` rejects (`1234567890. x`, a no-break space or an ideographic space after the marker, `-\u00a0x`, `*\u3000x`) skips the list branch, then the paragraph loop breaks on its first line without consuming it (`Markdown.tsx:443-458`), so the outer loop pushes an empty `<p>` forever. The review reproduced out-of-memory on `"1234567890. x"`, `"\u00a0- x"`, `"-\u00a0x"` and `"*\u3000x"`; `"> 1234567890. x"` returns today because quote content is not block-parsed, and would hang after the nested-quote change of Section 5.
+- **Two fence grammars.** The composer follows CommonMark: an opening run of three or more backticks, an info string without backticks, and a closing line of *at least as many* backticks (`code-fence.ts:29-30,46`). The transcript opens on `^\s*```(\S*)\s*$` and closes on exactly three backticks (`Markdown.tsx:37,351`): a four-backtick fence opens with the info string `` ` `` and ends at the first three-backtick line or at the end of the message, and an info string with a space (`` ```ts title=x ``) is not a fence at all.
+
+### 3. How the composer stores and renders its draft
+
+- The model is one Markdown string; the field is a `div[contenteditable]` with one `div.omp-line` per line, and the DOM text of a line *is* the model text, image chips included (`src/webview/lib/draft-dom.ts:26-57,74-109`; ADR-0077 and the design above, sections 1 and 6).
+- Band lines come from `findFencedBlocks` (`src/webview/lib/code-fence.ts:29-56`: an unclosed block runs to the end) through `lineSpecs`, which sets `code` and `fence` on each line (`draft-dom.ts:36-57`); `buildLine` turns that into `omp-line--code`/`omp-line--fence` (`draft-dom.ts:74-92`). The band is CSS on each line (`src/webview/styles.ts:704-712`, forced colours at `:711`). `LineRenderer` re-renders incrementally by line signature and updates a line in place only when `code` and `fence` are unchanged (`draft-dom.ts:59-61,316-373`).
+- Keys: `Composer.onPromptKeyDown` handles `Enter`/`Tab`/`Shift+Tab` inside a fenced block (`Composer.tsx:1229-1245`, edits from `code-fence.ts:89-170`), completions are off in a block (`Composer.tsx:416-418,448`), **`Enter` and `Alt+Enter` send everywhere else, including on any prose line** (`Composer.tsx:154-157,1295-1298`); `Shift+Enter` is the native line break, turned into a model `\n` by `beforeinput` (`draft-surface.ts:473-497`). History recall on the arrow keys needs an empty or recalled draft (`src/chat/prompt-history.ts:40-43`).
+- Undo is the page-owned stack of `{text, anchor, focus}` snapshots (`draft-history.ts:8-14`); `surface.apply({from, to, insert, selection}, kind)` and `replaceRange` are one undoable step each (`draft-surface.ts:361-381`).
+- The draft hand-off captures the draft with `read`, which freezes the surface and sets `captureRef`, and `release` thaws it and **runs the work deferred meanwhile in the same editor** (`Composer.tsx:948-975`); when the host replaces the editor the replacement page receives only text (`DraftHandoffContent`: `text`, an attachment count and recoverable records, `src/protocol/messages.ts:408-412`). Work deferred behind a capture that ends in a replacement therefore never runs. `freeze()` refuses every mutation until `thaw()` (`draft-surface.ts:326-337`).
+- Inserting text from outside the field has two precedents. Add Selection to Session splices at the caret with `spaceInsertion` through `replaceInSurface`, deferred while a capture is held or an IME composition is open (`Composer.tsx:143-146,1001-1022`, `insert-text.ts:36-41`). A recalled or restored queued message is **appended after a blank line** (`src/webview/lib/queue-restore.ts:133-134`: `${draft.text}\n\n${queued}`). The thumbnail ✕ removes an image's markers as one undo step, deferred during a composition (`Composer.tsx:677`).
+- Send: `compactForSend`, then `.trim()` of the text (`Composer.tsx:816-817`), then `client.sendPrompt(draft, images)` (`Composer.tsx:857-861`). A draft of only a quote is sendable (`canSubmit` needs non-blank text, `Composer.tsx:420`).
+
+### 4. What OMP receives and how the transcript shows it
+
+- `omp:chat-prompt` carries the string, parsed as text of at most `MAX_CHAT_TEXT_LENGTH = 200_000` and kept verbatim (`src/protocol/chat-messages.ts:81,1258-1268`); `RpcSession.prompt` sends `{type: "prompt", message: request.text, …}` after `classifySlashInput` (`src/host/rpc/session.ts:924-945`). No Markdown processing happens anywhere on the way; a blockquote reaches the model as the literal `> …` lines. Only two things change the text: the trim, and the renumbering of `[Image #N]` markers that belong to attached images (`src/webview/lib/image-references.ts:164-172`, marker grammar `:22-56`). A draft starting with `/` is a slash command (`session.ts:926,937`).
+- OMP expands `@path` mentions inside `AgentSession.prompt` for a prompt sent while the session is idle; a mention counts after whitespace or an opening bracket/quote, and a token that names no existing file is prose ([add-editor-context design](2026-10-07-add-editor-context-to-session.md), lines 30-32 and 79).
+- After the send the user message is stored as is (`src/chat/messages.ts:166-174`) and rendered by the `Markdown` component above: a `> ` quote shows as a blockquote, inline content only. "Copy message" copies the source (`Transcript.tsx:202-205`).
+
+### 5. Existing affordances
+
+- **Context menu.** The Chat page has no menu of its own. `data-vscode-context` is set on link spans only (`FileLinks.tsx:96`, `WebLinks.tsx:45`, `src/shared/terminal-links.ts:27-47`), and `package.json:1082-1108` contributes `webview/context` items for `webviewSection == ompFileLink|ompWebLink` under `webviewId =~ /^omp[.]session/`. VS Code makes each key of the object a context key for the menu's `when` and passes the object plus `webview` (the view type) to the command (`src/shared/terminal-links.ts:27-31`, `src/host/terminal-links.ts:26-40`). Every Chat editor has its own dynamic view type (`src/host/bridge-identity.ts:27-28,84-87`), which is why the clauses are regexes. A menu command therefore receives **no selected text**.
+- **Selection toolbar:** none. No code reads `getSelection()` to show UI; the selection readers are the page-side `omp:selection-request` answer, which keeps only the first non-empty line up to 200 characters (`src/shared/selection-query.ts:9-47`, `App.tsx:91-92`, `src/protocol/messages.ts:1523-1525`), and holders that keep rows/paced text stable (`MeasuredRows.tsx:41-50`, `PacedMarkdown.tsx:39-63`, `ToolCard.tsx:80-93`).
+- **Copy actions** all write *source*: user message (`Transcript.tsx:205`), code block, mermaid source, reply (`ReplyFooter.tsx:15-16`), tool output. Row hover actions live in `.omp-row-actions` (Copy, Rewind; `Transcript.tsx:206-213`).
+- **Keybindings** in the Chat (`package.json:1528-1563`): `Ctrl+Enter`, `Esc` (while streaming), `Ctrl+Shift+L`, `Ctrl+N`, `Ctrl+Shift+N`, `F5`, `Alt+R`, `Ctrl+R`, `Ctrl+T`, `Ctrl+O`, `Ctrl+Shift+O`, `Ctrl+Shift+U`; global `Ctrl+Alt+Q/N/R`, `Ctrl+Shift+M`; and `Alt+Shift+K` = Add Selection to Session, only under `editorTextFocus && editorHasSelection` (`package.json:1600-1604`). The chat-only `when` string is pinned by `src/wiring/contributions.test.ts:433-455`. No context key says whether a selection or the composer has focus. A plain letter would collide with type-to-focus, which moves a printable key into the composer and collapses the selection; Ctrl/Alt chords are left alone (`src/webview/lib/type-to-focus.ts:37-48`).
+- **Page actions.** A keybinding reaches the host, which posts `omp:webview-action` to the active Chat, and the page's registry runs the same function a button calls (`src/protocol/messages.ts:344,1137-1142`, `src/webview/lib/panel-actions.ts:23-60`, handlers at `Composer.tsx:1153-1169`; host `src/extension.ts:2143-2144,5598-5601`).
+- **Naming.** The repository's commands are `Add Selection to Session`, `Search Symbol from Chat Selection`, `Go to File from Chat Selection` (`package.json:703-716`), all category "OMP Desk"; the Chat ones have `enablement: ompDesk.sessionMode == chat`. Nothing in the repository mentions "Quote" or VS Code's chat "add selection" commands, so no external convention is claimed here.
+
+## Proposed Design
+
+### 0. Shape
+
+````
+select text in an assistant reply, a user message or thinking
+   └─ trigger: floating button / Alt+Q command / context-menu item / per-message button
+        └─ page: Range → Markdown source of exactly the selection (or a rendered-text fallback + notice)
+             └─ composer: append the quote at the END of the draft (separator rule, Section 2); focus the composer
+                  └─ the draft shows a quote band (editable `> ` lines) with a ✕; the caret is on the new line after it
+                       └─ the user writes the comment; repeat; send: the trimmed draft string → OMP; the transcript renders it as a quote
+````
+
+Everything is page-local (webview layer). The host's only part is the keybinding/menu command, which posts one new panel action. No new reply message and no selection text cross the bridge.
+
+### 1. Trigger
+
+All four triggers call one page function (`quoteIntoDraft`), so no trigger can do what another cannot.
+
+1. **A floating Quote button** next to the end of a non-collapsed selection inside the transcript region. A small component in `App.tsx`, positioned `fixed` from the last client rect of the Range (flipped below when there is no room above, clamped to the viewport), repositioned on scroll and resize in `requestAnimationFrame`, hidden when the selection collapses, leaves the transcript, lies in an editable field, is whitespace-only, contains nothing quotable (decision 4), or the composer cannot take text. The click must not collapse the selection, so the button calls `preventDefault()` in `onMouseDown`, the repository's pattern for a control that must not take focus (`Composer.tsx:1551`); the owned-Chromium test measures that the selection survives the click. One `selectionchange` listener that returns at once when the selection is collapsed (five of this kind exist, `MeasuredRows.tsx:49`, `ToolCard.tsx:89`, `Transcript.tsx:456`, `PacedMarkdown.tsx:49`, `use-windowed-rows.ts:73`).
+2. **A contributed command and keybinding** `ompDesk.quoteChatSelection`: title "Quote Chat Selection in Draft", category "OMP Desk", `enablement: ompDesk.sessionMode == chat` (the pattern of `package.json:703-716`), palette-visible, key **`Alt+Q`** with the chat-only `when` (`activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat`). The host handler is `postChatPanelAction("quote-selection")` (`extension.ts:5599`); the new `"quote-selection"` member of `GuestPanelAction` (`messages.ts:344`, parse table `:1137-1142`) is run by the composer's `providePanelActions` map (`panel-actions.ts:23-60`, `Composer.tsx:1153-1169`), which the compiler forces to be complete. With no quotable selection the page says so in the status line (Section 7).
+3. **A context-menu item** "Quote Selection" in `webview/context`. The transcript root carries `data-vscode-context='{"ompChatText":true}'` and the item's `when` is `webviewId =~ /^omp[.]session/ && ompChatText`; the item is always offered on the transcript and answers "Select text in the conversation first" when nothing is selected, because the context object is read when the menu opens. A link span keeps its own `webviewSection`; that VS Code merges the keys with the nearest element winning is `[INFERENCE from the VS Code webview guide]`, so the end-to-end check measures it (Rollout) and the item is the first thing dropped if it does not hold.
+4. **Per-message Quote buttons**: in `.omp-row-actions` of a user row next to Copy (`Transcript.tsx:206-213`) and in the reply footer next to Copy (`ReplyFooter.tsx:15-16`). They quote the *whole* message from the source the Copy button already holds (`messageText`, `reply.text`), with no DOM mapping, and are the Tab-reachable path (Section 7). A message over the limit is refused with its size (decision 7).
+
+**How `Alt+Q` was checked** (decision 1). Reading and searching only; no window was started, and the review confirmed the bundle search independently:
+
+- *This extension.* `package.json` contributes no `alt+q`: the keys with Alt are `ctrl+alt+q` (Go to Session, `:1515`), `ctrl+alt+n`, `ctrl+alt+r`, `alt+r` (`:1561`) and `alt+shift+k` (`:1602`). Nothing in `src/webview` handles an `Alt`+letter chord: every `altKey` use is `Alt+Enter`, `Alt+ArrowUp/Down`, `Alt+click` or a modifier guard (`Composer.tsx:1233,1278,1297`, `AskDialog.tsx:239`, `ChatFooter.tsx:149,154`, `Rewind.tsx:45`, `settings/common.tsx:134`), type-to-focus ignores Alt chords (`type-to-focus.ts:43`), and the composer's undo handler requires Ctrl or Meta (`draft-surface.ts:525`). In Terminal mode the page forwards only `Ctrl|Meta`+`Alt` chords to the workbench (`terminal-keys.ts:66-69`), so `Alt+Q` reaches the PTY there, and the command's `when` is Chat-only anyway.
+- *VS Code's defaults, installed 1.142.* The workbench registers default keybindings as numbers (`KeyMod.Alt` 512 plus `KeyCode.KeyQ` 47 = **559**). Searching `workbench.desktop.main.js` for `primary|win|mac|linux|secondary` followed by `559` finds nothing. The same search finds `primary:568` twice (512 + `KeyZ` 56, Alt+Z, Toggle Word Wrap), which shows the method sees such registrations. A search for the string `alt+q`, in every built-in extension's `package.json` and in all files under `out/`, finds nothing. Webview focus adds no keys: the webview forwards unhandled keydowns to the workbench keybinding service (`did-keydown` in `out/vs/workbench/contrib/webview/browser/pre/index.html`, Platform facts of the [composer design](2026-10-15-composer-contenteditable-surface.md)).
+- *Menu mnemonics.* Alt+letter also opens menu-bar mnemonics on Windows; the English labels use F, E, S, V, G, R, T, H, not Q. Localised builds may differ `[INFERENCE: not checked]`.
+- *Typing.* Alt+Q inserts no character on common Windows layouts; AltGr is reported as Ctrl+Alt, so a layout that produces a character with AltGr+Q does not match `alt+q` `[INFERENCE: VS Code's own AltGr handling, not measured]`.
+- *Not checkable here.* The maintainer's own `keybindings.json` and other extensions' contributions. The Keyboard Shortcuts editor reports a conflict when a key is assigned.
+
+### 2. Insertion: always at the end of the draft
+
+No caret snapping and no retained-caret logic (decision 6). `placeQuote(text, quoteMarkdown)` (pure, `src/webview/lib/quote-draft.ts`) returns the one edit `{from: text.length, to: text.length, insert}` and the selection `{anchor: end, focus: end}` where `end` is the new length.
+
+A quote is the string `Q + "\n"`, where `Q` is the quote's lines each prefixed `> ` (a bare `>` for an empty line): the quote lines and **one line break** (decision 8). After a quote the caret is on the new line that follows, so the comment is written directly under the quote. `insert = prefix + Q + "\n"`, with `prefix` decided by the end of the draft:
+
+| The draft | `prefix` | Result (`·` marks the caret) |
+| --- | --- | --- |
+| empty (`""`) | `""` | `> q\n·` |
+| ends with text, no line break (`foo`, also `foo  `) | `"\n\n"` | `foo\n\n> q\n·` |
+| ends with a whitespace-only last line (`foo\n  `) | `"\n\n"` | `foo\n  \n\n> q\n·`: the spaces are kept, so one more blank line appears |
+| ends with one line break (`foo\n`) | `"\n"` | `foo\n\n> q\n·` |
+| ends with two or more line breaks (`foo\n\n`, also a draft that is only `\n\n`) | `""` | `foo\n\n> q\n·`: the quote starts on the empty last line |
+| ends with a quote and its line break (`> a\n`, the caret on the empty line under it): two quotes in a row | `"\n"` | `> a\n\n> q\n·`: **a blank line separates the two quotes**, so they stay two runs with two ✕ buttons (one line break only would join them into one run); the blank line is the empty line the caret was on plus the one the prefix adds |
+| ends with a quote, no line break (`> a`) | `"\n\n"` | `> a\n\n> q\n·` |
+| ends inside an unclosed fenced block (`` ```ts\nfoo `` or `` ```ts\nfoo\n ``) | `"\n"` (only when the draft does not end with `\n`) + the closing fence of the block's own length + `"\n\n"` | `` ```ts\nfoo\n```\n\n> q\n· `` in both cases: a quote never lands inside code |
+
+The separator between two quotes follows from the one rule below (the number of line breaks at the end of the draft); a comment written between two quotes (`> a\ncomment\n`) is separated from the next quote by the same blank line (`> a\ncomment\n\n> q\n·`).
+
+Rules:
+
+1. `prefix` depends only on the number `n` of `\n` at the very end of the draft: `""` for an empty draft, otherwise `"\n".repeat(max(0, 2 - n))`; the unclosed-fence row is the only other case, and it reuses the closing-fence supply of `newlineEdit` (`code-fence.ts:89-103`). Existing blank lines are never removed. The closing fence is as long as the opening one, which both grammars close (Section 5 aligns the transcript to the composer's length rule). The blank line before a quote is what splits two quote runs and sets the quote off from the text above it; the line after it is only the one line break.
+2. The edit is applied with `surface.apply(edit, "replace")`: one undo step, caret at the end (`draft-surface.ts:361-376`), the surface scrolls the caret into view. Then `surface.focus()`; its retained selection is the end, so nothing guesses a caret.
+3. **A held draft capture refuses the quote; it is never deferred.** While the hand-off holds the draft (`captureRef` set, `captureLocked`, `Composer.tsx:948-975`) the quote is refused with a visible notice ("Your draft is being moved to a new editor; quote again in a moment"). A deferral, as Add Selection to Session uses, runs only in the same editor on `release`; when the capture ends in a replacement the waiting work never runs and the quote would be lost silently. An open IME composition does defer: `deferredRef` is flushed at the settle in the same editor (`Composer.tsx:1020`), and a capture cannot start inside a composition (`read` refuses first).
+4. When the field is not mounted (the ask dialog replaces it, `Composer.tsx:1447`) or the session cannot take a prompt, the quote is refused with a notice, not held: the user is looking at the transcript and would be surprised by text arriving later.
+5. A draft whose length plus the insertion would exceed `MAX_CHAT_TEXT_LENGTH` (`chat-messages.ts:81`) refuses the quote with a notice (the page does not enforce that bound on send today; the host parser rejects the message, `chat-messages.ts:1261`).
+
+### 3. Captured format: the source Markdown of exactly the selection
+
+Decision 2: source Markdown, mapped from the DOM, never `innerText`. The page keeps the *parse that produced the DOM*:
+
+- `Markdown` takes a `quotable` prop, set only by the three kinds of decision 4 (assistant text and thinking blocks in `ContentBlock`, the user case in `NativeMessage`; child transcripts inside agent rows render the same views and are quotable, tool output and notices are not). A quotable instance registers, after commit (a layout effect), its parse in a page-local `WeakMap<HTMLElement, RegisteredMarkdown>` keyed by its `div.omp-md` root: the exact `text` it rendered (the revealed prefix for a paced reply, so the map is consistent with the DOM by construction) and per-leaf records. No source text is written into the DOM.
+- The renderer stamps every **leaf block element** it already creates (`p` or the tight-list `span`, headings, list items, table rows, the quote's block children, the code block's wrapper, the `hr`) with `data-md-leaf="n"`, and the registry holds, for leaf *n*, its **source line range and, for each of its source lines, the number of leading characters the parse stripped before the leaf's own text** (the `\s*>\s?` of a quote, which varies per line, the list marker and dedent of an item, `Markdown.tsx:43,196-208,262-267`). Lines alone are not enough for an exact slice inside a quoted or listed line, since the column where the text starts differs per line. Top-level blocks have `MarkdownParse.starts` (`Markdown.tsx:299-304`) plus the next start; list items, table rows and quote children need the line index and prefix lengths that `parseList`, the table branch and the quote branch already know (`Markdown.tsx:232-293,383-395,405-437`) threaded in as a base offset next to `keyPrefix`, instead of discarded when the dedented body is re-parsed (`Markdown.tsx:280,291-293`). Inside a quote, nested line *j* is source line `quoteStart + j` (each quoted line strips only its own prefix), so the line base is trivial there. Streaming reuse of earlier blocks is unaffected: a reused block's records do not change when the text only appends (`Markdown.tsx:313-329`).
+- `quote-capture.ts` (new; its pure parts testable without a DOM) takes a `Range` and:
+  1. Refuses a collapsed or whitespace-only range, a range with an endpoint outside the transcript region, a range touching an editable field, and a range that touches no registered `div.omp-md`.
+  2. Walks the registered `div.omp-md` the range crosses in document order. Everything else the range crosses (tool rows, `pre` output, notices, buttons, `.omp-sr-only` text) contributes nothing.
+  3. For a `div.omp-md`, clips the range to each leaf block and slices the **source lines** of the leaf, taking the first and last leaf by text offset and the leaves between them whole, using the recorded prefix lengths to turn a text offset into a column of the source line. Within a leaf the rendered-to-source offset map comes from the same inline tokenizer the renderer uses (`INLINE_TOKEN`, `Markdown.tsx:33-34`): **a token (emphasis, code span, link, autolink) is carried as source only when the selection covers its whole visible text; a token the selection cuts contributes its selected visible text unchanged**. A list item or heading keeps its marker only when the selection starts at the item's visible start; a table keeps its header and separator rows and the rows touched; a `<br>` is a newline. A leaf inside a quote is sliced from the original source lines, `>` prefixes included, so it re-enters the draft as a nested quote.
+  4. A code block is sliced by the text of its `code` element, which equals the source exactly (`CodeBlock.tsx:17-23`): the selected lines, re-fenced with the original info string (`code[data-language]`) and a fence of `max(3, L + 1)` backticks, where `L` is the longest backtick run at the start of any line of the slice **counted after that line's leading whitespace** (both grammars accept a fence line with leading blanks, `code-fence.ts:29-30`, `Markdown.tsx:351`, so an indented run of backticks closes a fence and has to be counted). Once Section 5.2 aligns the length rule, a fence of `L + 1` is closed by its own synthetic closing line and by nothing inside the slice. The closing fence is synthetic when the block is only partly selected. A drawn mermaid diagram contributes nothing; its Source view is a code block.
+  5. Joins the slices of distinct surfaces with an empty line, then prefixes: `> ` before each non-empty line, a bare `>` for an empty one (no trailing space). Source that already contains `>` lines becomes `> > …`.
+  6. **Neutralises image markers:** `[Image #N…]` is rewritten `[image #N…]`. The marker grammar and the transcript's `INLINE_TOKEN` are case-sensitive (`image-references.ts:23`, `Markdown.tsx:34`), so a quoted marker neither pairs with an image attached to the new draft (the Nth marker is the Nth image on the wire) nor renders in the sent message as a button that points at the wrong image.
+- **Degradation, never failure.** If a surface is not registered, a leaf has no record, or the offset map disagrees with the DOM text of its leaf (the visible text of the mapped slice, rendered through the same tokenizer, is compared with the Range's own text; a wrong column therefore falls back instead of producing a wrong quote), that surface falls back to its *rendered* text from the Range, wrapped as plain quote lines. The user still gets a quote and the status line says "Quoted as plain text", so the loss is not silent.
+- **Limit (decision 7).** The captured Markdown, before prefixing, is refused over 20 000 characters (the bound that decides which prompts the history keeps, `extension.ts:5787`), with the size in the message: "That selection is 31 482 characters; Quote takes at most 20 000." The same limit applies to the per-message buttons. Truncating would put an invented ellipsis into the model's context. The limit is one named constant.
+
+### 4. The composer: an editable quote band
+
+A quote is plain text in the draft, shown as a band on its lines, exactly as a fenced block is. No change to ADR-0077: the band is a property of each line (surface design, section 1), and the model, the offsets, the IME window, the undo stack, the freeze, the hand-off, copy and paste are untouched.
+
+**What is a quote line.** A line outside every top-level fenced block that matches `^ {0,3}>` (CommonMark's indentation, as `code-fence.ts:4-7` says of fences; the transcript's own `QUOTE` is looser, `^\s*>`, so a line indented four or more spaces and starting with `>` shows no band but still renders as a quote after the send: harmless and noted). A **quote run** is consecutive quote lines; a blank line ends it, which is where both the transcript renderer and CommonMark end a quote. A top-level fence takes precedence, and a quote line can never open one (`OPENING` demands the fence at the line start, `code-fence.ts:29`), so `findFencedBlocks`, `blockContaining` and every fence key rule are unchanged. A line the user types as `> hello` is a quote line too, and gets the band: the band shows how the line will read in the transcript and to the model.
+
+**Nested fences.** Inside a run, the content after each line's prefix is scanned with the same `OPENING`/`CLOSING` grammar; those lines also get the code treatment (`omp-line--code` font, no separate band), so a quoted code block is monospace inside the quote band. A nested fence is not an editing zone: no code keys inside it, and `Shift+Enter` just continues the prefix.
+
+**Rendering.** A pure `findQuoteRuns(text, fenced)` (new `src/webview/lib/quote-lines.ts`) yields the runs and the per-line flags. `lineSpecs` (`draft-dom.ts:36-57`) gains `quote` (and `quoteCode`, the nested fence lines); `buildLine` adds `omp-line--quote` (`draft-dom.ts:74-92`); `lineKey` includes both (`draft-dom.ts:59-61`) and `LineRenderer`'s in-place text update requires them unchanged, as it does for `code` and `fence` (`draft-dom.ts:356-357`), so typing `>` at a line start rebuilds just that line and nothing else. CSS next to `styles.ts:704-712`: the left bar and muted colour of the transcript blockquote (`styles.ts:424-430`: 3 px bar from the foreground at 28 %, `--omp-muted` text, `--vscode-contrastBorder` in High Contrast), a faint tint over the surface width by the negative-margin trick of the code band, and a `forced-colors` rule like `styles.ts:711`. The `> ` stays **visible as ordinary text** in the muted colour, as the fence lines stay visible in the code band (`styles.ts:707`). Meaning is not colour alone: the `>` characters are there.
+
+**Keys.** Pure `quote-edits.ts` returns `TextEdit`s that the composer applies through `applyBlockEdit`, like `code-fence.ts`. They run in `onPromptKeyDown` only when no composition is active and no capture is held, before the send rule:
+
+- **The prefix of a quote line** is its leading run `^ {0,3}>(?:[ \t]?>)*[ \t]?`: up to three blanks, one `>` per nesting level, each optionally followed by one blank, so `> a` has the prefix `> `, `  > a` has `  > `, `> > a` has `> > `, `>a` has `>`. The prefix is read from the line itself (nothing is stored), and the rules below read **plain keys only**: no Ctrl, Alt or Meta, and no Shift except for `Shift+Enter`, so `Ctrl+Backspace`, `Ctrl+Delete` and `Shift+Delete` (cut) keep their native meaning.
+- **`Enter` sends, as on every prose line** (`Composer.tsx:154-157,1295-1298`): a quote is prose, not an editor. The line break is `Shift+Enter`.
+- **`Shift+Enter` on a quote line** with the selection start at or after the end of the prefix replaces the selection by `\n` plus that line's whole prefix, so a nested line `> > a|b` becomes `> > a` and `> > b` and the next line stays at the same depth. With the selection start strictly inside the prefix the key does nothing special (the native line break): splitting a prefix would leave a line that is no longer in the quote. On a line that holds only its prefix (and blanks), with the caret at its end, it exits: the line from its start to the caret is replaced by `\n`, so `> a` followed by an empty `> ` line becomes `> a`, an empty line and the caret on the next line.
+- **`Backspace`** with a collapsed caret directly after the prefix removes **one nesting level** in one step: `> > |` becomes `> |`, and `> |` becomes `|` (the prefix and its indentation go), instead of leaving a lone `>` that is still a quote line. **`Delete`** with a collapsed caret at the end of a quote line whose next line is a quote line removes the line break **and the next line's whole prefix**, so the two lines join as text.
+- **Completions** are off while the caret is in a quote line, like in a block: `completionsEnabled` also requires no quote line at the caret (`Composer.tsx:416-418,448`), so no `/` or `@` popup opens over text the agent wrote. `Tab` outside a fenced block still moves the focus.
+- **Hint.** The hint row under the composer that shows the code keys while the caret is in a block (`Composer.tsx:1531-1532,1567`) shows the quote keys while the caret is in a quote line ("Shift+Enter continues the quote; Backspace at its start removes the quote mark; Enter sends") and stays the field's `aria-describedby`.
+
+**The ✕.** Each quote run has a **Remove quote** button that removes the whole quote as one undo step.
+
+- It is a real `button` outside the field, in a sibling overlay container of the composer's input row (`position: absolute; inset: 0; pointer-events: none; overflow: hidden`), the button itself `pointer-events: auto`. **It never covers text or the scrollbar:** the band's CSS gives each quote line an inline-start gutter of the button's width (`padding-inline-start` on the line, which changes no model offset because it adds no text), the bar is at the gutter's left edge, and the button sits in the gutter beside the run's first visible line, so a click aimed at the text cannot hit it and wrapping inside a quote line shrinks by the gutter only. The field's markup is unchanged and nothing is written into it: the overlay only *reads* line rectangles through a small `surface.lineRect(index)` (the surface owns the line elements), so an IME composition is never disturbed. The overlay is recomputed from the draft text (`findQuoteRuns`, memoised like `blocks`, `Composer.tsx:417`) and rectangles are re-read after each edit, on the field's `scroll`, and on a `ResizeObserver` of the field. A run scrolled out of the field's visible area has no button.
+- Its name is "Remove quote: «first words of the quote»", so several quotes are told apart. It is a **Tab stop** after the field, so a keyboard user reaches it without selecting text. A click must keep the field's focus and selection: the button calls `preventDefault()` in `onMouseDown`, as the suggestion list does (`Composer.tsx:1551`); `pointerdown` is not used because that the focus change can be stopped there was not verified. The owned-Chromium test measures `document.activeElement` and the selection after a click.
+- A click removes the run `[start, end)` plus the one line break right after it (the break the Quote action added; none when the run ends the draft), as one `surface.apply({from: start, to: end + k, insert: ""}, "replace")` with `k` of 0 or 1, and puts the caret at `start`; one `Ctrl+Z` brings it back. The blank line the Quote action put *before* the quote is not removed: it is the user's own paragraph break as much as the quote's. While an IME composition is open the click is deferred (`deferredRef`), like the thumbnail ✕ (`Composer.tsx:677`); while a capture is held the button is disabled, like every other mutation.
+- Text that the user edited into the quote since it was inserted is part of the run and goes with it; a comment typed directly under the quote is **not** part of the run (it does not start with `>`); a quote the user has split by a blank line is two runs with two ✕ buttons.
+
+### 5. The transcript
+
+#### 5.1 Slice 0: fix the list-like-line parser hang (before or with everything else)
+
+The cause is the mismatch of Current State 2. The fix has two parts, both in `parseBlockRange` (`Markdown.tsx:332-464`):
+
+1. **The paragraph loop consumes its first line unconditionally.** It breaks only when `paragraph.length > 0` and the line opens another block, and it interrupts on `listItem(paragraphLine) !== null` (the one definition of a list item, `Markdown.tsx:212-223`) instead of `UNORDERED_ITEM` and `ORDERED_ITEM`; the two looser regexes (`Markdown.tsx:38-39`, used only at `:451-452`) are deleted. A line that is list-like but not a list item (`1234567890. x`, a no-break or ideographic space after the marker) is then paragraph text, which is what CommonMark does with more than nine digits and what no renderer should hang on.
+2. **A progress invariant.** Every iteration of the outer loop consumes at least one line; an iteration that did not advance `index` consumes one line as paragraph text. It makes the parser total even for a rule that is wrong in some other way.
+
+Regression tests (`src/webview/markdown.test.ts`, no browser): `parseMarkdown` of `"1234567890. x"`, `"\u00a0- x"`, `"-\u00a0x"`, `"*\u3000x"`, `"> 1234567890. x"` and `"- \u00a0x"` each returns promptly with exactly one block holding the original text; a bounded property over the 17 symbols `- * + > # | \` 1 0 . ) space tab NBSP U+3000 x`: every string of length up to four (about 88 000 small parses) plus a seeded sample of 2 000 strings of length up to twelve (a fixed seed in the test) and a short list of two-line combinations, asserting that the parse terminates with at most as many blocks as lines. Longer exhaustive lengths are deliberately not used: length six alone is 24 million parses. This slice has no dependency on the feature and can ship alone.
+
+#### 5.2 Slice 1: the same fence length and info rules in the composer and the transcript
+
+The composer follows CommonMark: open on a run of three or more backticks with an info string without backticks, close on a line of at least as many (`code-fence.ts:29-30,46`). The transcript opens on three backticks followed by one token and closes on exactly three (`Markdown.tsx:37,351`), so a reply that wraps a fence in a four-backtick fence (a common way to show a fence) renders broken today, and a quote or a draft that does the same renders broken after the send.
+
+**Decision: align the transcript to the composer's length rule**, and keep the capture rule of Section 3 (`max(3, L + 1)` backticks). Why not only change the capture to write three backticks unless the content has a bare fence line: that would leave every four-backtick fence in assistant replies wrong, which is the same defect, and a quote's fences would depend on the renderer's quirk. The change, for **all messages** (`FENCE` at `Markdown.tsx:37`, its uses at `:266,:346,:447`, the closing test at `:351`):
+
+- Open on `^\s*(`{3,})([^`]*)$`, the language being the first token of the info string; keep the transcript's leading-whitespace tolerance.
+- Close on `^\s*(`{3,})\s*$` with a run **at least as long as the opening run**. An unclosed fence still runs to the end.
+
+**Indentation stays different, on purpose.** The composer accepts at most three blanks before a fence (`code-fence.ts:29-30`), the transcript any amount of whitespace, because list-item bodies are re-parsed after a dedent that keeps the extra columns (`Markdown.tsx:197-208,265`); capping the transcript would break fences nested in lists. So the two grammars agree on run length and info string, not on indentation: a draft line of four or more blanks followed by backticks is prose in the composer (no band, and `placeQuote` does not see an unclosed block) and a fence in the transcript after the send. The capture never writes such a line (its fences start at the line start after `> `); a user can type one, and then the missing band already shows that the composer reads it as text. This is documented, not worked around.
+
+What changes for existing text: a four-or-more-backtick fence now opens with its real info string and closes on its own length (a three-backtick line inside it is content); an info string with spaces (`` ```ts title=x ``) now opens a fence (language `ts`) instead of being a paragraph, as in the composer. Three-backtick fences are unchanged. Tests: `markdown.test.ts` (`code fences inside items survive` at `:125` and the `STREAMED` corpus at `:313-339` stay green; new cases: a four-backtick fence holding a three-backtick fence and a bare three-backtick line, an info string with a space, a closing run longer than the opening, an unclosed four-backtick fence streamed prefix by prefix).
+
+#### 5.3 Slice 2: a quote's content is nested blocks (decision 5)
+
+The quote branch of `parseBlockRange` (`Markdown.tsx:383-395`) collects the quoted lines as today (stopping at the first line that is not a quote line, so a comment directly below a quote is a separate paragraph) and, instead of `renderLines(quoted)`, renders `parseBlocks(quoted.join("\n"))`, the way list items re-parse their dedented bodies (`Markdown.tsx:280,291-293`). It applies to **every** message that goes through `Markdown`, including assistant replies, thinking, user messages, summaries and tool prose. `parseBlockRange` gains parameters for what the quote needs (today it has `tight` and `keyPrefix`): a `quoted` flag that makes a `mermaid` fence a plain `CodeBlock` (the fence branch builds a `MermaidBlock` unconditionally today, `Markdown.tsx:357-361`) and a `depth` that caps nesting; margin resets are CSS.
+
+**This stop is a requirement, not a detail (decision 8).** The Quote action leaves the comment on the line directly under the quote, so the quote branch must keep ending at the first line that has no `>`: no lazy continuation is added, and a test pins that `> q\ncomment` renders a `<blockquote>` followed by a separate `<p>`, with and without a nested fence or list in the quote.
+
+**Rendering that changes** (today → after):
+
+| Quoted source | Today | After |
+| --- | --- | --- |
+| `> text` (one or several lines) | `<blockquote>` with inline content and `<br>` | `<blockquote><p>…</p></blockquote>`: the same inline content inside a paragraph |
+| `>` or an empty quoted line between lines | an extra `<br>` | a paragraph break: two paragraphs |
+| `> ```ts … > ``` ` | literal backticks and unformatted lines | a `CodeBlock` with highlighting and its Copy button |
+| `> - a` / `> 1. a` | literal `- a` text | a list (`ul`/`ol`) |
+| `> # h`, `> ---`, a table | literal | a heading, a rule, a table |
+| `> > text` | literal `> text` inside the quote | a nested `<blockquote>` |
+| `> ```mermaid` in an assistant reply | literal | a plain `CodeBlock`, not a drawn diagram |
+| `> 1234567890. x` and other list-like lines | inline text | a paragraph (after Section 5.1; it would hang without it) |
+
+Guards: nesting depth is capped at eight (deeper `>` stays literal text); a quote's blocks are parsed from its own lines only, so the streaming reuse of finished blocks (`Markdown.tsx:313-329`) is unchanged (the quote is still one top-level block with one `starts` entry); CSS resets the first and last child margin inside `.omp-md blockquote` so a one-paragraph quote keeps today's height (`.omp-md p` has `margin: 8px 0`, `styles.ts:348`); the High Contrast bar is unchanged (`styles.ts:430`).
+
+**Tests that pin the existing behaviour and what each needs:**
+
+- `src/webview/markdown.test.ts`: the `STREAMED` corpus includes `> quoted` (`:321`), and `a streamed reply parsed prefix by prefix renders exactly as a fresh parse at every length, keeping the finished blocks` asserts equality with a fresh parse at every length and `kept === 6` (`:331-339`); both hold because a quote is still one block, and the corpus gains nested content (a quote with a fence and a list) so the test keeps proving it. No test renders a quote's DOM shape today; the table above becomes new tests (a quote with a fence, a list, a heading, a nested `>`, a bare `>`, a quote directly followed by a paragraph, depth cap, mermaid in a quote, a streamed prefix of a quote with a fence).
+- `src/webview/chat-ui.test.ts`: the streaming-follow test builds a streamed document that contains `> quote that wraps around the panel width easily and keeps going` (`:4266`) and asserts the transcript stays pinned to the bottom at every committed frame (`:4283`); the long-lines test (`:5806`) has `> quote ${word}` in its reply (`:5820`) and asserts that nothing sticks out of the transcript at 360, 480 and 900 px (`:5860-5862`). They pin layout, not DOM shape, so they should pass, and they now also cover a nested paragraph in a quote.
+- `NativeMessage.tsx:162` uses `<blockquote>` for advisor notes **outside** `.omp-md`; the `.omp-md blockquote` rules do not apply to it and it is unchanged.
+
+### 6. Sent format
+
+The draft string, trimmed, byte for byte as ADR-0077 states (`Composer.tsx:816-817`, `session.ts:939-944`). The comment follows its quote on the next line and a blank line precedes each quote after the first; a draft with two quotes and two comments is:
+
+````
+> The migration runs inside the lock and releases it on error.
+>
+> ```ts
+> await withLock(path, () => migrate(db));
+> ```
+Why not release it after the commit? The retry path needs the lock.
+
+> A second passage from a later reply.
+That also needs a test.
+````
+
+Confirmed by reading, not by running: the quote reaches OMP as `message` unchanged (Current State 4), and the transcript shows the user's message through the same `Markdown` component, so after Section 5 it renders as a quote with a nested code block. `[INFERENCE]` what the model makes of a quote versus plain text is not something this design can verify.
+
+Two OMP behaviours on a quote's content are inherited, not introduced, and documented rather than worked around: an `@token` in a quoted reply that names an existing file is expanded as a mention when the prompt is sent while idle (`2026-10-07-add-editor-context-to-session.md:30-32,79`); the TUI-only emoticon expansion is not reached by Chat. A draft that is only a quote is sendable (it is non-blank).
+
+### 7. Accessibility and the keyboard path
+
+- **Selecting without a mouse** needs caret browsing or a screen reader's own selection `[INFERENCE: Chromium behaviour, not measured in the webview]`; once a selection exists, `Shift+Arrow` extends it. The keyboard path is two-part: the contributed command and key (`Alt+Q`, rebindable in the Keyboard Shortcuts editor, also from the palette) for a selection that exists, and the per-message Quote buttons, which sit in the Tab order of their row (`.omp-row-actions` is shown on row hover or `focus-within`, `styles.ts:277-278`) and quote a whole message without any selection.
+- **The floating button** is a real `button` named "Quote selection in draft" with `aria-keyshortcuts="Alt+Q"` (as the send button has `aria-keyshortcuts="Enter"`, `Composer.tsx:1426`) and `tabindex="-1"`: it exists only while a selection exists, so it is a pointer affordance and the key, the palette and the row buttons are its equivalents.
+- **Feedback** is one visually hidden `role="status"` line (the pattern of the composer's suggestion count, composer design section 7) plus one visible line in the composer's hint row for a few seconds: "Quoted N lines into the draft", "Quoted as plain text", "Select text in the conversation first", "This session cannot take a message", "Your draft is being moved to a new editor; quote again in a moment", "That selection is N characters; Quote takes at most 20 000". Focus moves to the composer with the caret on the line after the quote, so a screen reader announces the field.
+- **The band is text.** A screen reader reads every quote line as it will be sent, `>` included; there is nothing hidden or atomic to explore. The band is visible in High Contrast and forced colours (`styles.ts:430,711` precedents). The hint names the quote keys while the caret is in a quote line.
+- **Removing a quote by keyboard:** Tab to the "Remove quote: …" button after the field and press `Enter` or `Space`, or select the lines and delete them; `Ctrl+Z` restores it. The ✕ is also a pointer affordance.
+- **Motion.** The floating button appears without animation.
+
+### 8. Edge cases
+
+| Case | Behaviour |
+| --- | --- |
+| Empty or whitespace-only selection | No floating button; the command says "Select text in the conversation first"; nothing is inserted. |
+| Selection inside the composer (the surface or any `[contenteditable]`, `input`, `textarea`, the AskEditor textarea) | Never quotable: no button, the command refuses with the same message. A range with an endpoint in the composer or the dock is refused too (both endpoints must lie in the transcript region). |
+| Selection that touches only tool output, tool heads, notices or other chrome | Nothing quotable: no button; the command says so. |
+| Selection spanning several messages | Supported. All touched rows are mounted and held by the selection (`MeasuredRows.tsx:39-51`); each quotable `div.omp-md` the range crosses contributes a slice, everything else contributes nothing, slices are joined by an empty quote line. A Range cannot cover a row that was never mounted. |
+| Selection spanning a tool row between two messages | The messages' slices are quoted; the tool row's text is not. |
+| Selection in a collapsed thinking body | There is nothing in the DOM to select (`MessageContent.tsx:39`). |
+| Partial code block | The selected lines, re-fenced with the language and a safe fence length; synthetic closing fence. |
+| Selection includes links | Source `[label](url)` when the whole label is covered; the selected label text alone when it is cut. Bare URLs and file paths are plain text either way. |
+| Table | Header, separator and the touched rows, so the quote is a valid table. |
+| Whole-message quote | The message's source (`messageText`, `reply.text`); an image-only reply has nothing to quote and its button is disabled like Copy (`ReplyFooter.tsx:15`). |
+| Streaming message under the selection | The map is built from the parse that produced the DOM; the pacer stops painting while the selection touches its slot (`PacedMarkdown.tsx:39-47`), so the quote is exactly what the user saw selected, even if the canonical reply has grown. When the reply is saved and its row id changes (Current State 2) the row may remount and the selection collapse `[INFERENCE]`: the button disappears with the selection, and a command that arrives after it finds no selection and says so; nothing wrong is inserted. Both behaviours get a test. |
+| Very long selection | Over 20 000 characters of captured Markdown: refused with the size. A draft that would pass `MAX_CHAT_TEXT_LENGTH`: refused. `Ctrl+A` in the transcript never silently fills the draft. |
+| Draft ends inside an unclosed fence | The closing fence is supplied first (Section 2); the quote is never inside code. |
+| Draft starts with `/` and holds only a quote | The text is `> …`, so it is not a slash command; the band makes that visible. |
+| Session cannot take a prompt, ask dialog open | No field or not writable: refused with a notice (button hidden when the composer is disabled). |
+| Held draft capture (hand-off freeze) | Refused with a visible notice, never deferred, so the quote cannot be lost in an editor replacement (Section 2, rule 3). |
+| IME composition in progress | Deferred to the settle in the same editor (`deferredRef`). |
+| Quoted `[Image #N]` | Rewritten to `[image #N]` (Section 3). |
+| The same text quoted twice | Allowed; two quotes. |
+| The user edits inside a quote, or inserts a blank line under it | Allowed: the band is text. A comment directly under a quote (the shape the Quote action leaves, decision 8) is, to a CommonMark parser, a lazy continuation of the quote's last paragraph; the transcript renderer ends the quote at the first line without `>`, and a blank line under the quote is harmless. |
+| Another editor of the same session | One composer owns the draft (`providePanelActions` newest first, `panel-actions.ts:37-60`); a passive editor has no composer and refuses (`extension.ts:5598-5601`). |
+| TODO, Agents detail tabs | Separate webviews with no composer and no quotable surface. |
+
+## Alternatives
+
+1. **Rendered plain text (`Selection.toString()`) prefixed with `> `.** Smallest change, no renderer work. Rejected as the default: it drops code fences, link URLs, emphasis and list markers (Current State 2), so quoting a code snippet from a reply, the commonest case, produces text the model reads as prose. Kept as the per-surface fallback.
+2. **Whole-block snapping** (quote every top-level source block the selection touches). Exact Markdown with no inline mapping. Rejected by the maintainer (decision 2): the selection is quoted exactly. It remains the floor if the inline mapping proves too fragile in a slice.
+3. **A non-editable atomic quote block** (the maintainer's first answer to decision 3). Designed in the first revision of this document as a row element covering several lines, with a known-quote set, select-then-delete and an ADR-0077 amendment. The independent review rejected that shape (caret before a block sits on the root, which the surface forbids and which is unmeasured; about fifteen offset and render functions change and missing one corrupts the model on read-back; its rules hold only for cancelable input; the known-quote set is page state lost on hand-off and triggered by typed text; a screen reader cannot read inside it) and the maintainer chose the band. A per-line atom variant (each quote line an editable line holding one non-editable span, as chips) would keep one element per line and shrink the amendment, but it shares the page state, the edit-rule and screen-reader costs and was not prototyped.
+4. **A hidden `> ` prefix on editable lines.** The prefix would be an atomic non-text element on each line; more edge cases than the visible prefix and a worse screen-reader story, for no gain.
+5. **Recognising a quote band by anything but its text** (a registry of inserted quotes). Rejected: the band is a function of the string alone, so the hand-off, history recall, Rewind and Undo need no new state.
+6. **Send-time normalisation** (insert the blank line CommonMark needs after a quote, trim trailing `>`). Rejected: ADR-0077 makes the sent string the stored string, byte for byte; the insertion decides the shape instead.
+7. **Host-side capture** (a menu command receives the selection from the page over `omp:selection-request`). Rejected: that reply keeps one line of at most 200 characters (`selection-query.ts:9-47`), and a page-local action avoids a new reply message.
+8. **A prompt-level attachment** (the quote as a structured context field). Rejected: OMP's `prompt` takes a string (`session.ts:939-944`) and the maintainer wants the quote visible in the draft.
+9. **No floating button, command and menu only.** Smaller, but the maintainer's words are "press Quote" (decision 1).
+10. **Deferring a quote behind a held capture** (the Add Selection to Session pattern). Rejected: it runs only in the same editor, so a quote would vanish when the capture ends in a replacement (Section 2, rule 3).
+
+## Risks and Open Questions
+
+- **Inline offset mapping is the highest-risk piece of capture.** The tokenizer and the renderer must not drift; the leaf-level consistency check with the plain-text fallback bounds the damage (a visible "Quoted as plain text", never a wrong quote), and a property test guards it, including partial selections inside a quoted list item.
+- **Nested quote blocks change every message with `>` lines** (assistant replies too): paragraph margins, list rendering and code blocks inside quotes; the table in Section 5.3 lists them, and a look at real replies belongs in the smoke. The fence-grammar alignment (5.2) changes four-backtick fences and info strings with spaces in every message.
+- **A quote is editable text.** Editing can trim it, split it or glue a comment to it; the visible `>` prefix, the key rules and the ✕ make the intended shape the easy one, nothing enforces it.
+- **The comment is a lazy continuation for a CommonMark parser.** The Quote action leaves no blank line between the quote and the comment (decision 8): in CommonMark `> q\ncomment` is one quoted paragraph. The transcript renderer here ends the quote at the first non-`>` line, so the user sees what they meant; the model reads raw text in which every quoted line has `>` and the comment has none. Accepted by the maintainer; the cost is that a Markdown preview of the sent text elsewhere would show the comment inside the quote.
+- **The ✕ overlay reads rectangles of a field it does not own.** It never writes into the field, but its positions go stale between an edit and the next measurement; it is recomputed after each edit, scroll and resize, and the owned-Chromium test drives all three.
+- **Context-menu merging.** The behaviour of `data-vscode-context` keys on nested elements and of a right-click on a selection in the webview is read second-hand from the VS Code documentation, not measured; the end-to-end check proves it in a real window, and the menu item is the first thing dropped if it does not hold.
+- **Selection survival across the streaming-to-saved row change** (`live:` ids, Current State 2) is inferred, not measured; the worst case is a vanished button.
+- **`@` mentions in quoted text** are expanded by OMP on an idle send and cost an extra file read (inherited, documented, not mitigated).
+- **Assistive technology** behaviour for the floating button, the ✕ buttons and the status line is unverified and goes on the same manual list as the composer's.
+- No question is open: the maintainer decided the one that remained (decision 8).
+
+## Rollout and Verification
+
+Slices, in implementation order; each is independently reviewable, and slices 0 and 1 are fixes to existing behaviour that do not depend on the feature:
+
+0. **The list-like-line parser hang** (Section 5.1): the paragraph loop and the progress invariant, with the regression and property tests. Ships alone.
+1. **Same fence length and info rules** (Section 5.2): the transcript's open and close rules, with their tests.
+2. **Nested quote rendering** (Section 5.3): the quote branch, the `quoted` and `depth` parameters, CSS, and the tests that pin the old behaviour.
+3. **The composer band**: `findQuoteRuns`, `lineSpecs`/`buildLine`/`lineKey`/`LineRenderer`, CSS, `quote-edits.ts` keys, the completion gate, the hint, and their tests.
+4. **Inserting and removing**: `placeQuote` (separator table, unclosed fence, limit), the held-capture refusal and the composition deferral, `surface.lineRect`, the ✕ overlay and its removal edit.
+5. **Capture**: the `quotable` prop, the leaf records with line ranges and prefix lengths, the registry, `quote-capture.ts`, the fallback and the limit.
+6. **Triggers**: the `quote-selection` panel action (protocol type, parser table, registry map, host command, keybinding, `webview/context` item, `data-vscode-context` attribute), the floating button, the per-message buttons, the status line.
+7. **End-to-end and documents**: `38-chat-quote-selection.spec.ts`; `docs/guide/chat.md` (a "Quoting Chat text" subsection next to "Code blocks in the draft", lines 24-33), `docs/guide/keyboard-shortcuts.md` (the Chat table: `Alt+Q`), `docs/architecture.md` (the composer surface paragraph near line 222, the page-action and file-link paragraphs near 48 and 84-98), the CHANGELOG `[Unreleased]`, and the map entry in `docs/README.md`.
+
+**Unit checks (`node --test`, no browser):**
+
+- Slice 0 and 1 tests as in Sections 5.1 and 5.2.
+- `quote-lines.test.ts`: quote lines and runs (a blank line ends a run; indentation `^ {0,3}`; a `>` line inside a top-level fence is code; a quote line never opens a block; nested fence lines inside a run get the code flag; an unclosed nested fence runs to the end of the run).
+- `quote-edits.test.ts`: `Shift+Enter` continues at the caret (also on `> > ` and an indented `  > ` line, and with a selection) and exits on an empty prefix line, does nothing special with the caret inside the prefix; `Backspace` right after the prefix removes one level (`> > ` to `> `, `> ` to nothing); `Delete` joining two quote lines removes the next prefix; `Ctrl+Backspace`, `Ctrl+Delete` and `Shift+Delete` are not handled; none of them touching a fenced block, a line that is not a quote, or a composition.
+- `quote-draft.test.ts`: every row of the separator table (empty; `foo`; `foo  `; `foo\n  `; `foo\n`; `foo\n\n`; `\n\n`; ends with a quote with and without its line break; a quote, a comment and a second quote; unclosed fence with and without a final `\n`; a four-backtick unclosed fence); the resulting caret is the new length; the second quote is a second run (`findQuoteRuns`); refusal over the draft bound; capture prefixing of empty lines and nested quotes; fence length `max(3, L + 1)`; `[Image #1, 8x8]` rewritten; the ✕'s removal range for a run followed by a line break and by the end of the draft, and that a comment directly under the quote stays.
+- `markdown.test.ts`: Section 5.3's table, the depth cap, mermaid in a quote, the `STREAMED` corpus with nested quote content, the leaf records (line ranges and prefix lengths) of top-level blocks, list items, table rows and quoted blocks, and the stability of a reused block's records while text appends.
+- Inline slice property test over the `markdown.test.ts` corpus: for each leaf and each range inside it, rendering the slice yields text that contains the range's own text; tokens covered whole are carried as source, tokens cut are not; a partial selection inside a quoted list item.
+- `messages.test.ts` (`quote-selection` parses; an unknown action does not), `panel-actions.test.ts` (the handler map is complete), `wiring/contributions.test.ts` (the command is declared with a title and registered, the keybinding is `alt+q` with the pinned chat-only `when` and no other binding uses the key, the `webview/context` entry is reachable, a palette run with no argument does not throw).
+
+**Owned-Chromium checks (`chat-ui.test.ts`; selections made with `Range` and `setBaseAndExtent`, as at `chat-ui.test.ts:598,859-866`):**
+
+- Band: a quote line is proportional with the bar and tint, a nested fence is monospace inside it, a fence line inside a top-level block stays a code line, typing `>` at a line start and removing it rebuilds only that line; every model offset round-trips through the DOM with quote lines in the draft (extending the existing exhaustive check); forced-colours and High Contrast emulation.
+- Editing: `Shift+Enter` continuation and exit, `Backspace` at the prefix, `Enter` sends from inside a quote line, no completion popup in a quote line, the hint row, one `Ctrl+Z` removes an inserted quote with its line break, the sent `window.sent` message text is the exact string.
+- ✕: one per run, named with the quote's first words, a Tab stop after the field, absent for a run scrolled out of view, repositioned after an edit, a scroll and a resize, a click removes the run and its line break as one undo step, keeps a comment typed under it, and keeps the field's focus (`document.activeElement` and selection measured), deferred during an `Input.imeSetComposition` composition, disabled while a capture is held; **a click on the last character of a full-width quote line (and on the scrollbar strip) places the caret and does not remove the quote**, because the button lives in the gutter.
+- Held capture: the Quote action while the hand-off holds the draft is refused with the notice and nothing is queued; after `release` nothing is inserted.
+- Capture in the page: a paragraph with emphasis, a link, a code span and a list selected partly and fully; a partial code block re-fenced, including one whose content holds a three-backtick line; a table; a selection across two messages and across a tool row between them (the row contributes nothing); thinking; a child transcript row; a selection with only tool output or chrome (nothing quotable); a whitespace selection; a selection inside the composer or the ask textarea; a collapsed selection; a quote inside an assistant reply sliced from its original lines.
+- Streaming: a selected paced reply that keeps growing quotes what is painted; the reply being saved under a live selection (the `live:` remount) leaves the page consistent.
+- Button: appears on a selection, a click does not collapse it (`document.activeElement` and the selection are measured after the click), hides on collapse, in the composer and over non-quotable text, flips and clamps at the viewport edge, absent while the composer is disabled or a dialog is up.
+- Whole-message buttons: the quote of a user message and of a reply equals `messageText`/`reply.text` with the prefixes; keyboard reachable by Tab; refused over the limit with the size.
+
+**End-to-end in a real window (`test/e2e/scenarios/38-chat-quote-selection.spec.ts`, using `desk.send`, `composer`, `readDraft`, `clickMenuItem`; the mock server replies `Mock reply to: …` and truncates the recorded `lastUserText` to 200 characters, so test messages are short, and user messages are the Markdown source because they render through the same component):**
+
+- Send a short Markdown user message, select text inside its row, click the floating button: the draft is the quote plus its line break, the caret is on the line after, the focus is in the composer.
+- With a second selection press `Alt+Q`: a second quote lands at the end, after a typed comment and a blank line; `Ctrl+Z` removes only the second quote; the first quote's ✕ removes it and keeps the comment under it.
+- Right-click on the selection: the "Quote Selection" item is in the workbench menu (a webview menu is rendered by the workbench `[INFERENCE]`, which this check proves or refutes) and inserts the same text.
+- Send the draft: the mock server's recorded text contains the `> ` lines, and the transcript shows a `blockquote` followed by the comment paragraph.
+- No smoke screenshots or isolated upgrade are claimed by this design; a smoke in the hidden test window (a quote with a nested code block, the button, a draft with two quotes and comments) and a VSIX from a clean worktree follow as in earlier designs.
+
+Checks run only after the design is accepted; nothing here is implemented, and `docs/architecture.md` describes none of it until it is.
+
+## Related Decisions
+
+- [ADR-0077: Edit the Chat draft in a contenteditable surface rendered from the Markdown string](../decisions/0077-edit-the-chat-draft-in-a-contenteditable-surface-rendered-from-the-markdown-string.md) and the [composer surface design](2026-10-15-composer-contenteditable-surface.md): **not amended**: a quote is a per-line property of the rendering like the code band, and the string stays the single source of truth.
+- [Code blocks in the Chat composer](2026-10-15-composer-code-blocks.md): the fence grammar the capture, the unclosed-fence rule and the transcript alignment reuse; its key rules are unchanged.
+- [Add editor selection or files to a session](2026-10-07-add-editor-context-to-session.md): the precedent for inserting into the draft without sending, and OMP's `@` mention rules.
+- [ADR-0065](../decisions/0065-enforce-one-import-direction-between-source-layers.md): the new modules live in `src/webview/lib` and import `protocol` only for the action type and the length bound.
+- [ADR-0050](../decisions/0050-retain-uncertain-input-and-confirm-exact-file-restart.md): the draft capture freezes every content change; a quote is refused while it holds the draft.
+
+No new ADR is proposed: the choices are local to the Chat page and reversible.
+
+## Architecture Review
+
+- Reviewer: independent architect (`Adr76Review`, a persistent agent that had not written the document).
+- First pass (of the revision with the atomic block and an ADR-0077 amendment draft): **accept with changes** for triggers, insertion, capture, transcript change and `Alt+Q`; **the atomic row block and the amendment were not accepted** (four material findings: the caret before a block sits on the root, which the surface forbids; the amendment omitted what changes; the transcript parser can loop forever, extended by the nested-quote change; the composer and the transcript use different fence grammars) plus nine should-fix items. The reviewer recommended the editable band; the maintainer chose it (2026-10-16). Findings resolved in this text: the parser hang (Section 5.1, slice 0), the fence grammar (5.2, slice 1), Enter sending inside a band (Section 4 keys), mermaid, margin and depth parameters (5.3), per-line prefix lengths for exact slices inside quotes (Section 3), the held-capture refusal instead of a deferral that a replacement loses (Section 2 rule 3), the whitespace-only last-line row (Section 2); the atom-specific findings fall away with the atomic block. `Alt+Q` was confirmed independently in the 1.142 bundle.
+- Confirmation pass (of the editable-band revision): **accept with changes, no material findings, six should-fix items**, all resolved in this text: the ✕ no longer sits over text or the scrollbar but in a gutter of the band (Section 4, The ✕); focus is kept with `onMouseDown` as the repository does, not `pointerdown` (Section 1 and 4); Section 5.2 now claims only what it does, equal run length and info string, and states the indentation difference (the composer allows three blanks, the transcript any) and its consequence; the prefix of a nested `> > ` line and the plain-key rule for `Shift+Enter`, `Backspace` and `Delete` are defined (Section 4, Keys); the Section 5.1 property test is bounded to length four plus a seeded sample (about 88 000 parses instead of 24 million); the capture's fence length counts a backtick run after leading whitespace (Section 3).
+- Outcome: **accepted** (2026-10-16) on the reviewer's accept-with-changes verdict with the six items resolved as listed; the document records no open material finding. The one question that remained (the line after a quote) was answered by the maintainer the same day, option B (decision 8), which changes the separator table, the ✕ range and the tests; that change is the maintainer's decision, not a new design choice for review.
+- Notes: nothing here is implemented; implementation follows the slices of *Rollout and Verification*, slice 0 first.
