@@ -32,6 +32,16 @@ Type a line of three backticks, with a language if you like (`` ```ts ``), and p
 - A line under the composer lists these keys while the caret is in a block.
 - **Keyboard way out:** `Shift+Tab` on a line with nothing left to outdent moves the focus to the previous control; `Ctrl+Shift+L` brings it back.
 
+### Quoting Chat text
+
+Select text in an assistant reply, one of your own messages or an open thinking block and quote it into the draft; write your comment right under it and send one message with several quotes.
+
+- **How:** press **Quote** (it floats at the end of the selection), press `Alt+Q`, or right-click the selection and choose **Quote Selection**. Each reply, and each of your messages, also has a **Quote** button next to Copy that quotes the whole message without a selection.
+- **What lands in the draft:** the Markdown source of exactly what you selected, as `> ` lines at the end of the draft, after a blank line. A link, a code span, emphasis, a list marker or a code fence comes along when the selection covers it; a partly selected code block is wrapped in a fence again, with its language. A table keeps its header and separator row. Tool output and notices are never quoted. The caret is on the line directly under the quote.
+- **Edit a quote like any text:** a quote is plain `> ` lines shown on a band with a bar. `Shift+Enter` continues it, `Backspace` at the start of a line removes one level, and the **✕** beside it removes the whole quote in one undo step and keeps the comment under it.
+- **Limits:** a quote takes at most 20 000 characters of Markdown, and the draft at most what OMP Desk can send; the line under the composer says why a quote was refused. If part of a selection cannot be mapped back to its source, that part is quoted as the text you saw and the line says "as plain text".
+- **What the model sees:** the `> ` lines and your comment, as typed. Your sent message shows the quote and the comment under it.
+
 ### Editing the draft
 
 - `Ctrl+Z` undoes and `Ctrl+Y` or `Ctrl+Shift+Z` redoes, including a pasted image and its reference. VS Code's **Edit > Undo** menu item does not act on the composer: use the keys.

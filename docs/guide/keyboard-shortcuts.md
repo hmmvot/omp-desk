@@ -13,6 +13,7 @@ All commands are in the Command Palette under **OMP Desk**. The ones with defaul
 | `Ctrl+Enter`, in a fenced code block of the draft | Send, where `Enter` is a new line (see [code blocks in the draft](chat.md#code-blocks-in-the-draft)) | Chat editor focused, caret inside a block |
 | `Esc` | Stop current turn | Chat editor, turn running |
 | `F5`, `Alt+R` | Retry the failed or aborted reply | Chat editor, no turn running |
+| `Alt+Q` | Quote the selected Chat text into the draft (see [quoting Chat text](chat.md#quoting-chat-text)) | Chat editor |
 | `Ctrl+R` | Search prompt history | Chat editor |
 | `Ctrl+N` | Symbol search (`#`) prefilled with the Chat selection | Chat editor |
 | `Ctrl+Shift+N` | Go to File prefilled with the Chat selection | Chat editor |
