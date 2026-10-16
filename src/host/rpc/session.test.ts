@@ -11,7 +11,7 @@
  */
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
-import type { ChatModel, ChatSnapshotPayload } from "../../chat/model.ts";
+import { chatTurnInProgress, type ChatModel, type ChatSnapshotPayload } from "../../chat/model.ts";
 import { FakeRpcChannel, responseLine, type FakeChildModel } from "./fake-channel.ts";
 import { MESSAGE_UPDATE_PACE_MS, RpcSession, parseRestoredQueue, type RpcSessionOptions, type RpcSessionOutput } from "./session.ts";
 import { turnActivity } from "../../protocol/activity.ts";
@@ -1609,6 +1609,33 @@ describe("chat quick actions", () => {
 		channel.emit({ type: "auto_compaction_end", action: "context-full", result: undefined, aborted: false, willRetry: false });
 		await tick();
 		assert.deepEqual(session.model.state?.contextUsage, auto, "after an automatic compaction");
+		session.dispose();
+	});
+
+	it("stops showing a compaction once OMP releases it, although the read that followed its end frame still said it ran", async () => {
+		let compacting = true;
+		const { session, channel, timers } = await boot({ child, setup: setup => setup.handlers.set("get_state", () => ({ data: {
+			sessionId: setup.child.sessionId, sessionFile: setup.child.sessionFile ?? undefined, isStreaming: false, isCompacting: compacting, isSettled: true, queuedMessageCount: 0,
+		} })) });
+		// OMP sends `auto_compaction_end` to the client before its extensions handled it, and only then lets `isCompacting` go.
+		channel.emit({ type: "agent_start" });
+		channel.emit({ type: "agent_end", isTerminal: true, outcome: "stop" });
+		channel.emit({ type: "auto_compaction_start", action: "context-full", reason: "threshold" });
+		channel.emit({ type: "auto_compaction_end", action: "context-full", result: undefined, aborted: false, willRetry: false });
+		await tick();
+		assert.equal(session.model.maintenance?.status, "complete");
+		assert.equal(session.model.state?.isCompacting, true, "the read after the end frame still reports the pass");
+		assert.equal(chatTurnInProgress(session.model), true, "while OMP says so, the page shows it");
+		compacting = false;
+		timers.advance(1000);
+		await tick();
+		assert.equal(session.model.state?.isCompacting, false);
+		assert.equal(chatTurnInProgress(session.model), false, "no frame follows the release: the host asks again until OMP says the pass is over");
+		assert.equal(session.model.settled, true);
+		const reads = channel.commandsOfType("get_state").length;
+		timers.advance(5000);
+		await tick();
+		assert.equal(channel.commandsOfType("get_state").length, reads, "it stops asking once OMP reports no compaction");
 		session.dispose();
 	});
 

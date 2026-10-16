@@ -684,9 +684,10 @@ export class RpcSession {
 	/** A full read checking pending rows against the file's other branches is in flight. */
 	#offPathCheck = false;
 	#reconcileTimer: unknown = null;
-	#pausedStateTimer: unknown = null;
-	#pausedStatePending = false;
-	#pausedStateAgain = false;
+	/** The timer, in-flight read and queued re-read of the `get_state` readback that ends a state OMP cannot announce (async work, a compaction). */
+	#stateReadbackTimer: unknown = null;
+	#stateReadbackPending = false;
+	#stateReadbackAgain = false;
 	#needFull = false;
 	#resyncScheduled = false;
 	#reattaching = false;
@@ -903,7 +904,7 @@ export class RpcSession {
 		this.#unsubscribe = null;
 		this.#dropUpdates();
 		this.#clearReconcileTimer();
-		this.#clearPausedStateTimer();
+		this.#clearStateReadbackTimer();
 		this.#disarmWatchdog();
 		this.#clearAutoRecovery();
 		this.#endDeferredClear({ status: "refused", reason: "not-live" });
@@ -2007,7 +2008,7 @@ export class RpcSession {
 		this.#hostCalls?.open();
 		this.#afterHostToolsLive();
 		this.#afterReconcile();
-		this.#syncPausedStateReadback();
+		this.#syncStateReadback();
 		this.#lastActivityAt = this.#timers.now();
 		this.#armWatchdog();
 	}
@@ -2479,7 +2480,7 @@ export class RpcSession {
 			this.#emit({ type: "event", epoch: this.epoch, frame });
 			this.#emitModel();
 		}
-		this.#syncPausedStateReadback();
+		this.#syncStateReadback();
 		this.#syncHeld();
 		if (this.#live && this.#model.asyncPaused) {
 			let terminalChild = false;
@@ -2490,7 +2491,7 @@ export class RpcSession {
 				const after = this.#model.agents.get(frame.payload.progress.id)?.status;
 				terminalChild = (before === "pending" || before === "running") && (after === "completed" || after === "failed" || after === "aborted");
 			}
-			if (terminalChild) void this.#readPausedState();
+			if (terminalChild) void this.#readState();
 		}
 		switch (frame.type) {
 			case "message_end":
@@ -2790,43 +2791,54 @@ export class RpcSession {
 		return { ...rest, queuedMessageCount: current.queuedMessageCount, ...(current.queuedMessages === undefined ? {} : { queuedMessages: current.queuedMessages }) };
 	}
 
-	/** Public idle covers background jobs/delivery that never emit another main-agent end. */
-	async #readPausedState(): Promise<void> {
-		if (!this.#live || !this.#model.asyncPaused) return;
-		if (this.#pausedStatePending) { this.#pausedStateAgain = true; return; }
-		this.#pausedStatePending = true;
-		this.#clearPausedStateTimer();
+	/**
+	 * `get_state` reports a compaction that no pass of this session accounts for: its `auto_compaction_end` was
+	 * already read (OMP sends it before the pass releases `isCompacting`, so the read that follows it can still say
+	 * "compacting"), or the pass is a manual `/compact` typed in the composer, which has no start or end frame and
+	 * ends silently when aborted. Nothing else announces the moment OMP closes it.
+	 */
+	#compactionOpen(): boolean {
+		return this.#model.state?.isCompacting === true && this.#model.maintenance?.status !== "working";
+	}
+
+	/** Public idle covers background jobs/delivery that never emit another main-agent end, and a compaction that closes without a frame. */
+	async #readState(): Promise<void> {
+		if (!this.#live || !(this.#model.asyncPaused || this.#compactionOpen())) return;
+		if (this.#stateReadbackPending) { this.#stateReadbackAgain = true; return; }
+		this.#stateReadbackPending = true;
+		this.#clearStateReadbackTimer();
 		try {
 			await this.#refreshState();
 		} finally {
-			this.#pausedStatePending = false;
-			const again = this.#pausedStateAgain;
-			this.#pausedStateAgain = false;
-			if (again && this.#live && this.#model.asyncPaused) void this.#readPausedState();
-			else this.#syncPausedStateReadback();
+			this.#stateReadbackPending = false;
+			const again = this.#stateReadbackAgain;
+			this.#stateReadbackAgain = false;
+			if (again && this.#live && (this.#model.asyncPaused || this.#compactionOpen())) void this.#readState();
+			else this.#syncStateReadback();
 		}
 	}
 
-	#syncPausedStateReadback(): void {
+	#syncStateReadback(): void {
 		let activeChild = false;
 		for (const agent of this.#model.agents.values()) {
 			if (agent.status === "pending" || agent.status === "running") { activeChild = true; break; }
 		}
-		if (!this.#live || this.#disposed || this.#ended || !this.#model.asyncPaused || activeChild) {
-			this.#clearPausedStateTimer();
+		const wanted = this.#model.asyncPaused && !activeChild || this.#compactionOpen();
+		if (!this.#live || this.#disposed || this.#ended || !wanted) {
+			this.#clearStateReadbackTimer();
 			return;
 		}
-		if (this.#pausedStatePending || this.#pausedStateTimer !== null) return;
-		this.#pausedStateTimer = this.#timers.setTimeout(() => {
-			this.#pausedStateTimer = null;
-			void this.#readPausedState();
+		if (this.#stateReadbackPending || this.#stateReadbackTimer !== null) return;
+		this.#stateReadbackTimer = this.#timers.setTimeout(() => {
+			this.#stateReadbackTimer = null;
+			void this.#readState();
 		}, 1000);
 	}
 
-	#clearPausedStateTimer(): void {
-		if (this.#pausedStateTimer === null) return;
-		this.#timers.clearTimeout(this.#pausedStateTimer);
-		this.#pausedStateTimer = null;
+	#clearStateReadbackTimer(): void {
+		if (this.#stateReadbackTimer === null) return;
+		this.#timers.clearTimeout(this.#stateReadbackTimer);
+		this.#stateReadbackTimer = null;
 	}
 
 	/** The identity backstop: a `/` prompt may have moved or replaced the session inside the process. */
@@ -3129,7 +3141,7 @@ export class RpcSession {
 		if (next === this.#model) return;
 		this.#model = next;
 		this.#emitState();
-		this.#syncPausedStateReadback();
+		this.#syncStateReadback();
 		this.#syncHeld();
 	}
 
@@ -3147,7 +3159,7 @@ export class RpcSession {
 			asyncPaused: false,
 			activeTools: new Map(),
 		};
-		this.#clearPausedStateTimer();
+		this.#clearStateReadbackTimer();
 		this.#disarmWatchdog();
 		this.#publish();
 		this.#scheduleAutoRecovery(code);
@@ -3169,7 +3181,7 @@ export class RpcSession {
 		this.#ended = true;
 		this.#hostCalls?.childExited();
 		this.#clearReconcileTimer();
-		this.#clearPausedStateTimer();
+		this.#clearStateReadbackTimer();
 		this.#disarmWatchdog();
 		this.#clearAutoRecovery();
 		this.#failAllCommands("closed");
