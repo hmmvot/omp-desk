@@ -6102,6 +6102,12 @@ async function quoteEditorSelectionToSession(context: vscode.ExtensionContext, i
     languageId: document.languageId,
     selections: selections.map(selection => ({ start: selection.start, end: selection.end, text: document.getText(selection) })),
   };
+  // What cannot be quoted at all (too long, a control character, too many selections) is refused before a session is chosen or started.
+  const early = composeEditorQuotes(source, "");
+  if (!early.ok) {
+    showWarning(`${early.reason} Nothing was quoted.`);
+    return;
+  }
   await sendToSession(context, index, { kind: "quote", source }, fsPath, document.isDirty);
 }
 
