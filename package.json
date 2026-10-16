@@ -694,6 +694,13 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "ompDesk.quoteChatSelection",
+        "enablement": "ompDesk.sessionMode == chat",
+        "title": "Quote Selection",
+        "category": "OMP Desk",
+        "icon": "$(quote)"
+      },
+      {
         "command": "ompDesk.searchPromptHistory",
         "enablement": "ompDesk.sessionMode == chat",
         "title": "Search Prompt History…",
@@ -1080,6 +1087,11 @@
         }
       ],
       "webview/context": [
+        {
+          "command": "ompDesk.quoteChatSelection",
+          "when": "webviewId =~ /^omp[.]session/ && ompChatText",
+          "group": "1_quote@1"
+        },
         {
           "command": "ompDesk.fileLink.open",
           "when": "webviewId =~ /^omp[.]session/ && webviewSection == ompFileLink",
@@ -1560,6 +1572,11 @@
         "command": "ompDesk.retryTurn",
         "key": "alt+r",
         "when": "activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat && !ompDesk.streaming"
+      },
+      {
+        "command": "ompDesk.quoteChatSelection",
+        "key": "alt+q",
+        "when": "activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat"
       },
       {
         "command": "ompDesk.searchPromptHistory",

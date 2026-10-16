@@ -46,6 +46,8 @@ import { AssistantContentView, NativeDisclosure } from "./MessageContent";
 import { ToolCard, type ToolCardProps } from "./ToolCard";
 import { WorkingStatus } from "./WorkingStatus";
 import { CopyButton } from "./CopyButton";
+import { QuoteMessageButton } from "./QuoteMessageButton";
+import { CHAT_TEXT_MENU_CONTEXT } from "../../shared/quote-menu";
 import { messageText } from "../../shared/format";
 import { requestPanelAction } from "../lib/panel-actions";
 import { clearToolDisclosures, getTranscriptToggles, subscribeTranscriptToggles, withToolDefault } from "../lib/transcript-toggles";
@@ -206,6 +208,7 @@ export function TranscriptCardView({ card, props, autoExpanded, clearedHistory }
 	const actions = copy !== null || rewindId !== null ? (
 		<div className="omp-row-actions">
 			{copy}
+			{copy !== null && <QuoteMessageButton className="omp-copy-button" source={copyText} label="Quote message" />}
 			{rewindId !== null && <button type="button" className="omp-copy-button" aria-label="Rewind to here" title="Rewind to here: edit this message and send it again" onClick={event => { event.stopPropagation(); rewind!.onPick(rewindId); }}>
 				<span className="codicon codicon-discard" aria-hidden="true" />
 			</button>}
@@ -535,7 +538,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 
 	return (
 		<div className="omp-transcript-frame">
-		<div ref={rootRef} className="omp-transcript" role="region" aria-label="Conversation transcript" onKeyDown={event => {
+		<div ref={rootRef} className="omp-transcript" role="region" aria-label="Conversation transcript" data-vscode-context={CHAT_TEXT_MENU_CONTEXT} onKeyDown={event => {
 			if (event.defaultPrevented) return;
 			// Arrows, Home and End on a head move to the previous, next, first or last head that is mounted; inside a body, a filter or a menu they are not ours.
 			if (rootRef.current !== null && event.target instanceof Element && isHeadNavigation(event.key, event.target)) {

@@ -70,7 +70,8 @@ import { blockContaining, findFencedBlocks, indentEdit, newlineEdit, outdentEdit
 import { findQuoteRuns, isQuoteLineAt } from "../lib/quote-lines";
 import { quoteKeyEdit } from "../lib/quote-edits";
 import { removalRange } from "../lib/quote-draft";
-import { provideQuoteSink } from "../lib/quote-sink";
+import { announceQuoteReady, provideQuoteSink } from "../lib/quote-sink";
+import { quoteSelectionIntoDraft } from "../lib/quote-selection";
 import { useQuoteDraft } from "../lib/use-quote-draft";
 import { QuoteRemoveButtons } from "./QuoteRemoveButtons";
 import type { DraftSurface, HistoryMode } from "../lib/draft-surface";
@@ -1175,19 +1176,22 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 					});
 				},
 				"retry-turn": () => void retry(),
+				"quote-selection": () => { quoteSelectionIntoDraft(); },
 			}),
 		[retry, send, stop],
 	);
 
 	// Quoting (docs/designs/2026-10-15-quote-chat-selection.md): every trigger asks this composer through the sink, so the refusals, the edit and the notice are the same whoever asked.
-	const { notice: quoteNotice, quote } = useQuoteDraft({
+	const { notice: quoteNotice, quote, ready: quoteReady } = useQuoteDraft({
 		surface: () => surfaceRef.current,
 		captured: () => captureRef.current !== null,
 		composing: () => composingRef.current,
 		defer: work => { deferredRef.current.push(work); },
 		writable: () => canPrompt,
 	});
-	useEffect(() => provideQuoteSink(quote), [quote]);
+	useEffect(() => provideQuoteSink(quote, quoteReady), [quote, quoteReady]);
+	// Whether the field takes a quote changes with the session's phase and with a dialog taking the field's place; the floating button follows.
+	useEffect(() => { announceQuoteReady(); });
 
 	/** Remove quote: the run that starts at `start` and its line break, one undo step; an open composition finishes first. */
 	const removeQuote = useCallback((start: number): void => {

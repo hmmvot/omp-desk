@@ -341,7 +341,7 @@ export interface GuestPanelActionMessage {
 	action: GuestPanelAction;
 }
 
-export type GuestPanelAction = "send-prompt" | "stop-turn" | "focus-composer" | "retry-turn";
+export type GuestPanelAction = "send-prompt" | "stop-turn" | "focus-composer" | "retry-turn" | "quote-selection";
 
 /**
  * Longest reference text one editor-context insertion may carry.
@@ -1139,6 +1139,7 @@ const PANEL_ACTION: Record<string, GuestPanelAction> = {
 	"stop-turn": "stop-turn",
 	"focus-composer": "focus-composer",
 	"retry-turn": "retry-turn",
+	"quote-selection": "quote-selection",
 };
 
 

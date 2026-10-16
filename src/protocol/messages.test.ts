@@ -836,7 +836,7 @@ describe("draft messages", () => {
 
 describe("composer command boundary", () => {
 	it("relays only actions the composer can execute", () => {
-		for (const action of ["send-prompt", "stop-turn", "focus-composer", "retry-turn"]) {
+		for (const action of ["send-prompt", "stop-turn", "focus-composer", "retry-turn", "quote-selection"]) {
 			assert.deepEqual(parseGuestHostMessage({ type: "omp:webview-action", action }), { type: "omp:webview-action", action });
 		}
 		assert.equal(parseGuestHostMessage({ type: "omp:webview-action", action: "approve" }), null);

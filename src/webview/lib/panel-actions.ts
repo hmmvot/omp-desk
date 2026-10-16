@@ -29,6 +29,8 @@ export interface PanelActionHandlers extends Record<GuestPanelAction, () => void
 	"focus-composer"(): void;
 	/** Re-run a failed or aborted last turn (`/retry`), like the TUI's F5; a no-op while a turn runs. */
 	"retry-turn"(): void;
+	/** Quote the Chat's text selection into the draft (`Alt+Q`, the context menu item); the composer says why when there is nothing to quote. */
+	"quote-selection"(): void;
 }
 
 const providers: PanelActionHandlers[] = [];

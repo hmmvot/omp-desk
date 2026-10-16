@@ -20,6 +20,7 @@ import type { GuestRouteKind } from "./bridge";
 import { backgroundWaitOf } from "../chat/background-wait";
 import { chatTurnInProgress } from "../chat/model";
 import { Composer } from "./components/Composer";
+import { QuoteSelectionButton } from "./components/QuoteSelectionButton";
 import { FileLinksProvider } from "./components/FileLinks";
 import { WebLinksProvider } from "./components/WebLinks";
 import { DetailView } from "./components/DetailView";
@@ -316,6 +317,7 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 					onDismissNotice={() => setRewindNotice(null)} />
 				<Composer client={client} snapshot={shown} progressAvailable={!workUnknown} onRewind={startRewind} onSubmitted={followOwnSubmit} />
 			</div>
+			<QuoteSelectionButton />
 			</FileLinksProvider>
 			</ArtifactEpochContext.Provider>
 		</div>

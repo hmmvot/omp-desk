@@ -20,6 +20,7 @@ function recorder(name: string, calls: string[]) {
 		"stop-turn": () => calls.push(`${name}:stop`),
 		"focus-composer": () => calls.push(`${name}:focus`),
 		"retry-turn": () => calls.push(`${name}:retry`),
+		"quote-selection": () => calls.push(`${name}:quote`),
 	};
 }
 

@@ -6,6 +6,7 @@
  */
 import { joinSurfaces, quoteSurface, type LeafPick, type QuotedMarkdown } from "./quote-capture.ts";
 import { registeredMarkdown } from "./markdown-leaves.ts";
+import { requestQuote } from "./quote-sink.ts";
 import type { Leaf } from "./markdown-leaves.ts";
 
 export const NOTHING_SELECTED = "Select text in the conversation first";
@@ -105,4 +106,15 @@ export function hasQuotableText(selection: Selection | null, region: Element): b
 	if (range === null || range.toString().trim().length === 0) return false;
 	for (const root of region.querySelectorAll(".omp-md")) if (registeredMarkdown(root) !== undefined && crosses(range, root)) return true;
 	return false;
+}
+
+/**
+ * The one page function every trigger of "quote the selection" calls (the floating button, the host's `quote-selection` action from
+ * `Alt+Q` or the context menu): reads the selection of the transcript region and hands the composer a quote, or the words that say why
+ * there is none. `false` when no composer is mounted.
+ */
+export function quoteSelectionIntoDraft(): boolean {
+	const region = document.querySelector(".omp-transcript");
+	const captured: SelectionQuote = region === null ? { kind: "none", message: NOTHING_SELECTED } : captureSelection(window.getSelection(), region);
+	return requestQuote(captured.kind === "quote" ? { kind: "selection", source: captured.source, plain: captured.plain } : { kind: "nothing", message: captured.message });
 }

@@ -25,7 +25,7 @@ export interface QuoteHost {
 
 const HELD = "Your draft is being moved to a new editor; quote again in a moment";
 
-export function useQuoteDraft(host: QuoteHost): { notice: string | null; quote: (request: QuoteRequest) => void } {
+export function useQuoteDraft(host: QuoteHost): { notice: string | null; quote: (request: QuoteRequest) => void; ready: () => boolean } {
 	const hostRef = useRef(host);
 	hostRef.current = host;
 	const [notice, setNotice] = useState<string | null>(null);
@@ -39,6 +39,7 @@ export function useQuoteDraft(host: QuoteHost): { notice: string | null; quote: 
 
 	const quote = useCallback((request: QuoteRequest): void => {
 		const current = hostRef.current;
+		if (request.kind === "nothing") { say(request.message); return; }
 		if (request.source.trim().length === 0) { say("Select text in the conversation first"); return; }
 		if (current.surface() === null || !current.writable()) { say("This session cannot take a message"); return; }
 		if (current.captured()) { say(HELD); return; }
@@ -61,5 +62,8 @@ export function useQuoteDraft(host: QuoteHost): { notice: string | null; quote: 
 		else place();
 	}, [say]);
 
-	return { notice, quote };
+	/** The field takes a quote now (the floating button's condition): mounted and writable. */
+	const ready = useCallback((): boolean => hostRef.current.surface() !== null && hostRef.current.writable(), []);
+
+	return { notice, quote, ready };
 }

@@ -3934,6 +3934,58 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		await t.test("the floating Quote button follows a quotable selection without taking it or the focus, quotes on release, hides on collapse and over chrome; Alt+Q's host action and the message buttons quote through the same path", async () => {
+			await reset("quote-triggers");
+			await ui.call("Emulation.setFocusEmulationEnabled", { enabled: true });
+			try {
+				await showMessages([
+					{ role: "user", timestamp: 1, content: "Ask about **this** thing" },
+					assistantMessage([{ type: "text", text: "Reply with `code` inside" }]),
+				]);
+				await ui.wait("document.querySelectorAll('.omp-md').length>=2 && document.querySelector('.omp-reply-footer')");
+				const button = (): Promise<{ left: number; top: number; width: number; height: number; label: string | null; keys: string | null; tab: number } | null> => ui.evaluate(`(()=>{const b=document.querySelector('.omp-quote-selection');if(!b)return null;const r=b.getBoundingClientRect();return{left:r.left,top:r.top,width:r.width,height:r.height,label:b.getAttribute('aria-label'),keys:b.getAttribute('aria-keyshortcuts'),tab:b.tabIndex}})()`);
+				assert.equal(await button(), null, "no button without a selection");
+				await quoteBetween("this", "thing");
+				await ui.wait("document.querySelector('.omp-quote-selection')");
+				const shown = (await button())!;
+				assert.deepEqual([shown.label, shown.keys, shown.tab], ["Quote selection in draft", "Alt+Q", -1]);
+				assert.ok(shown.left >= 0 && shown.top >= 0 && shown.left + shown.width <= 1200 + 1, `inside the viewport: ${JSON.stringify(shown)}`);
+				const point = { x: shown.left + shown.width / 2, y: shown.top + shown.height / 2 };
+				await ui.call("Input.dispatchMouseEvent", { type: "mousePressed", x: point.x, y: point.y, button: "left", clickCount: 1 });
+				assert.deepEqual(await ui.evaluate("({collapsed:getSelection().isCollapsed,active:document.activeElement===document.body||document.activeElement===null||document.activeElement.tagName!=='BUTTON'})"), { collapsed: false, active: true }, "the press leaves the selection and the focus alone");
+				await ui.call("Input.dispatchMouseEvent", { type: "mouseReleased", x: point.x, y: point.y, button: "left", clickCount: 1 });
+				await waitDraft("window.composer.value()==='> **this** thing\\n'");
+				assert.equal(await ui.evaluate("document.querySelector('.omp-quote-selection')"), null, "the button goes with the selection");
+				await undo();
+				await waitDraft("window.composer.value()===''");
+				// Over chrome only, and after a collapse, there is no button.
+				await ui.evaluate("(()=>{const range=document.createRange();range.selectNodeContents(document.querySelector('.omp-reply-footer'));const selection=getSelection();selection.removeAllRanges();selection.addRange(range)})()");
+				await settleFrames();
+				assert.equal(await button(), null, "the footer is chrome");
+				await quoteBetween("code", "inside");
+				await ui.wait("document.querySelector('.omp-quote-selection')");
+				await ui.evaluate("getSelection().removeAllRanges()");
+				await ui.wait("!document.querySelector('.omp-quote-selection')");
+				// The host's action (Alt+Q, the context menu) quotes the selection, or says there is none.
+				await quoteBetween("Reply", "inside");
+				await ui.evaluate("window.ui.receive({type:'omp:webview-action',action:'quote-selection'})");
+				await waitDraft("window.composer.value()==='> Reply with `code` inside\\n'");
+				await setDraft("");
+				await ui.evaluate("getSelection().removeAllRanges();window.ui.receive({type:'omp:webview-action',action:'quote-selection'})");
+				await ui.wait("document.querySelector('.omp-composer-hint--code')?.textContent==='Select text in the conversation first'");
+				assert.equal((await areaState()).value, "", "nothing was inserted");
+				// The whole-message buttons quote the message's source, as Copy takes it.
+				await ui.evaluate("document.querySelector('[aria-label=\"Quote message\"]').click()");
+				await waitDraft("window.composer.value()==='> Ask about **this** thing\\n'");
+				await ui.evaluate("document.querySelector('[aria-label=\"Quote reply\"]').click()");
+				await waitDraft("window.composer.value()==='> Ask about **this** thing\\n\\n> Reply with `code` inside\\n'");
+				assert.equal(await sendCount(), 0, "quoting never sends");
+				assert.deepEqual(await ui.evaluate("window.errors"), []);
+			} finally {
+				await ui.call("Emulation.setFocusEmulationEnabled", { enabled: false });
+			}
+		});
+
 		await t.test("a marker is atomic for the caret and selection: it cannot be entered, and arrows hop over it", async () => {
 			await buildDraft("image-refs-caret");
 			const [, second] = await markers();

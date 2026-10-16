@@ -2143,6 +2143,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     registerDeskCommand("ompDesk.stopTurn", () => postPanelAction("stop-turn")),
     registerDeskCommand("ompDesk.focusComposer", () => windowState().editorPanels.focusChatComposer(index)),
     registerDeskCommand("ompDesk.retryTurn", () => postChatPanelAction("retry-turn")),
+    registerDeskCommand("ompDesk.quoteChatSelection", () => postChatPanelAction("quote-selection")),
     registerDeskCommand("ompDesk.toggleThinking", () => toggleThinkingDefault()),
     registerDeskCommand("ompDesk.toggleToolOutput", () => toggleToolsMode("output")),
     registerDeskCommand("ompDesk.toggleToolGroups", () => toggleToolsMode("groups")),

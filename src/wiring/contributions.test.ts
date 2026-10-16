@@ -28,6 +28,7 @@ import module from "node:module";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
+import { CHAT_TEXT_MENU_CONTEXT, CHAT_TEXT_MENU_KEY } from "../shared/quote-menu.ts";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { after, before, describe, it } from "node:test";
 
@@ -440,6 +441,19 @@ describe("commands", () => {
 		assert.equal(declared.get("ompDesk.searchFileFromChat")?.title, "Go to File from Chat Selection");
 	});
 
+	it("declare Quote Selection with Alt+Q inside a Chat only, no other binding on the key, and a transcript context menu item gated by the key the page sets", () => {
+		const chatOnly = "activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat";
+		const bound = contributes.keybindings.filter(binding => binding.key === "alt+q");
+		assert.deepEqual(bound.map(binding => [binding.command, binding.when]), [["ompDesk.quoteChatSelection", chatOnly]]);
+		assert.equal(declared.get("ompDesk.quoteChatSelection")?.title, "Quote Selection");
+		const entries = menus.filter(({ menu, entry }) => menu === "webview/context" && entry.command === "ompDesk.quoteChatSelection");
+		assert.equal(entries.length, 1);
+		assert.match(entries[0]?.entry.when ?? "", new RegExp(`webviewId =~ /\\^omp\\[\\.\\]session/ && ${CHAT_TEXT_MENU_KEY}$`));
+		assert.equal(JSON.parse(CHAT_TEXT_MENU_CONTEXT)[CHAT_TEXT_MENU_KEY], true);
+		const source = readFileSync(new URL("../extension.ts", import.meta.url), "utf8");
+		assert.match(source, /registerDeskCommand\("ompDesk\.quoteChatSelection", \(\) => postChatPanelAction\("quote-selection"\)\)/, "a palette run with no argument posts the action and reads nothing");
+	});
+
 	it("bind Ctrl+O to expand/collapse all tool calls and Ctrl+Shift+O to the tool groups inside a Chat only, with a title and a Chat-only menu entry each", () => {
 		const chatOnly = "activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat";
 		const bound = (key: string) => contributes.keybindings.filter(binding => binding.key === key);
@@ -634,7 +648,7 @@ describe("the namespace (ADR-0068)", () => {
 		assert.deepEqual(LEGACY_COMMAND_IDS.filter(id => declared.has(id)), [], "an alias that is also a contributed command");
 		assert.deepEqual(LEGACY_COMMAND_IDS.map(legacyCommandTarget).filter(id => !declared.has(id)), [], "an alias whose target is not contributed");
 		const addedAfterRename = contributes.commands.map(command => command.command).filter(id => !LEGACY_COMMAND_IDS.includes("omp." + id.slice("ompDesk.".length)));
-		assert.deepEqual(addedAfterRename.sort(), ["ompDesk.logoutProvider", "ompDesk.openOmpSettings", "ompDesk.refreshUsageStatus", "ompDesk.reloadAllWindows", "ompDesk.searchFileFromChat", "ompDesk.toggleToolGroups"], "the commands added after the rename have no alias; a new command needs none");
+		assert.deepEqual(addedAfterRename.sort(), ["ompDesk.logoutProvider", "ompDesk.openOmpSettings", "ompDesk.quoteChatSelection", "ompDesk.refreshUsageStatus", "ompDesk.reloadAllWindows", "ompDesk.searchFileFromChat", "ompDesk.toggleToolGroups"], "the commands added after the rename have no alias; a new command needs none");
 		assert.deepEqual(LEGACY_ALIASES.map(([oldId]) => oldId).filter(id => !recording.commands.has(id)), [], "an old id with no alias at runtime");
 		const generated = LEGACY_ALIASES.filter(([, target]) => !declared.has(target)).map(([oldId, target]) => `${oldId} -> ${target}`);
 		assert.deepEqual(generated, [
