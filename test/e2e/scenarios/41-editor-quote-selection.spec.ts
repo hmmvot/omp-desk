@@ -19,7 +19,10 @@ async function openFile(page: Page, fileName: string): Promise<void> {
 	await expect(page.locator(".quick-input-widget .monaco-list-row").first()).toContainText(fileName);
 	await page.keyboard.press("Enter");
 	await expect(page.locator(`.tab[aria-label^="${fileName}"]`).first()).toBeVisible();
-	await expect(page.locator(".monaco-editor.focused").first()).toBeVisible();
+	// The window is not the operating system's foreground window, so Monaco never shows its focused class; a click puts the caret, and with it editorTextFocus, in the editor.
+	const editor = page.locator(".editor-instance .monaco-editor:visible").first();
+	await expect(editor).toBeVisible();
+	await editor.locator(".view-lines").click();
 }
 
 /** Answers the session picker with its preselected row, the most recently focused Chat. */
@@ -62,4 +65,14 @@ test("Alt+Q in a text editor quotes its selection into the Chat draft: a code fi
 	// One Ctrl+Z takes back only the second quote.
 	await box.press("Control+z");
 	await expect.poll(draft).toBe("> `quote-sample.ts:2-3`\n> ```ts\n> export function f(x: number) {\n>   return x + a;\n> ```\n");
+
+	// Send the first quote with a comment: the transcript shows the location as a file link (a code span that is one path, with a line range).
+	await box.pressSequentially("why?");
+	await box.press("Enter");
+	const sent = chat.locator(".omp-user").last();
+	await expect(sent.locator("blockquote")).toHaveCount(1, { timeout: 60_000 });
+	const link = sent.locator("blockquote .omp-file-link");
+	await expect(link, "the location is drawn as a file link").toHaveCount(1, { timeout: 30_000 });
+	await expect(link).toHaveText("quote-sample.ts:2-3");
+	await expect(link).toHaveAttribute("data-file-target", "quote-sample.ts:2-3");
 });
