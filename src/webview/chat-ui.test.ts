@@ -4324,9 +4324,9 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			const request = await ui.evaluate<{ requestId: number; uris: string[] }>("window.sent.find(message=>message.type==='omp:attach-uris')");
 			assert.deepEqual(request.uris, ["file:///c%3A/repo/shot.png", "file:///c%3A/repo/notes.txt"], "only file: URIs are asked for");
 			assert.equal(await ui.evaluate("document.querySelector('.omp-composer-attach').disabled"), true, "the composer shows it is reading");
-			await ui.evaluate(`window.ui.receive({type:'omp:attached-files',requestId:${request.requestId + 1},files:[{name:'stale.png',mimeType:'image/png',data:${JSON.stringify(tinyPng)}}],refusals:[]})`);
+			await ui.evaluate(`window.ui.receive({type:'omp:attached-files',requestId:${request.requestId + 1},items:[{kind:'image',name:'stale.png',mimeType:'image/png',data:${JSON.stringify(tinyPng)}}],refusals:[]})`);
 			assert.equal(await ui.evaluate("document.querySelectorAll('.omp-attachment-number').length"), 0, "an answer to another request is ignored");
-			await ui.evaluate(`window.ui.receive({type:'omp:attached-files',requestId:${request.requestId},files:[{name:'shot.png',mimeType:'image/png',data:${JSON.stringify(tinyPng)}}],refusals:['notes.txt: not a PNG, JPEG, GIF, or WebP image.']})`);
+			await ui.evaluate(`window.ui.receive({type:'omp:attached-files',requestId:${request.requestId},items:[{kind:'image',name:'shot.png',mimeType:'image/png',data:${JSON.stringify(tinyPng)}}],refusals:['notes.txt: not a PNG, JPEG, GIF, or WebP image.']})`);
 			await ui.wait("document.querySelectorAll('.omp-attachment-number').length===1");
 			assert.match(await ui.evaluate<string>("document.querySelector('.omp-attach-error').textContent"), /notes\.txt: not a PNG, JPEG, GIF, or WebP image\./);
 			assert.equal(await ui.evaluate("document.querySelector('.omp-composer-attach').disabled"), false, "reading is over");

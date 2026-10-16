@@ -12,7 +12,7 @@
  */
 
 import * as vscode from "vscode";
-import { readDroppedImages } from "../host/dropped-images.ts";
+import { AttachedFileRegistry, readAttachedFiles, readAttachedForSend } from "../host/attached-files.ts";
 import { TAB_INPUT_VIEW_TYPE_PREFIX } from "../host/bridge-identity.ts";
 import type { ChatCommandOutcome, ChatPage } from "../host/chat-runtime.ts";
 import type { ConversationPort } from "../runtime/session-runtime.ts";
@@ -38,6 +38,7 @@ import type {
 	GuestDraftRestoreMessage,
 	GuestAttachedFilesMessage,
 	GuestFileCompletionsMessage,
+	GuestFilesReadMessage,
 	GuestHostMessage,
 	GuestOpenArtifactMessage,
 	GuestOpenDetailMessage,
@@ -47,6 +48,7 @@ import type {
 	GuestTerminalCopyReplyMessage,
 	SessionViewMode,
 } from "../protocol/messages.ts";
+import { MAX_ATTACH_ITEMS } from "../shared/attach-limits.ts";
 import type { Logger } from "../shared/logger.ts";
 import { fileSearchValue, symbolSearchValue } from "../shared/selection-query.ts";
 import type { RecentSessions } from "./recent-sessions.ts";
@@ -151,6 +153,10 @@ export interface GuestChatPort<Tab extends GuestTab> {
 	hostedCwd(tabId: string): string | null;
 	/** The workspace paths a composer's `@`-mention query matches below a folder. */
 	completeFiles(cwd: string, query: string): Promise<GuestFileCompletionsMessage["paths"]>;
+	/** The host's own file dialog for the attach button: the paths the user chose, none on cancel. Never rejects a cancel; a failure rejects. */
+	pickFiles(defaultFolder: string | null): Promise<readonly string[]>;
+	/** True when an open editor holds unsaved changes to this file. */
+	hasUnsavedChanges(fsPath: string): boolean;
 	/** The recent sessions of the page's own folder an empty chat lists, and the open of one of them. */
 	recents: RecentSessions;
 }
@@ -256,6 +262,19 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 	let selectionRequestSeq = 0;
 	/** A reply must belong to the exact source editor and document, not just its id. */
 	const draftCaptures = new Map<number, { source: Tab; panel: vscode.WebviewPanel; document: Tab["document"]; settle(reply: GuestDraftReplyMessage | null): void }>();
+	/** The files each conversation attached, by the reference the page holds: the host's side of an attachment, dropped with its conversation's last editor. */
+	const attachedFiles = new Map<string, AttachedFileRegistry>();
+	const attachedFilesOf = (tabId: string): AttachedFileRegistry => {
+		let registry = attachedFiles.get(tabId);
+		if (registry === undefined) {
+			const open = new Set<string>();
+			for (const state of deps.tabs().values()) if (state.tabId !== null) open.add(state.tabId);
+			for (const known of attachedFiles.keys()) if (!open.has(known)) attachedFiles.delete(known);
+			registry = new AttachedFileRegistry();
+			attachedFiles.set(tabId, registry);
+		}
+		return registry;
+	};
 	/** Source of the next draft-capture request id. */
 	let draftCaptureSeq = 0;
 
@@ -612,9 +631,38 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 			case "omp:attach-uris": {
 				// The page's own panel only: a request is answered to the panel that asked, and never after it was replaced.
 				if (deps.tab(tabId)?.panel !== panel) return;
-				const read = await readDroppedImages(parsed.uris);
+				const read = await readAttachedFiles(parsed.uris.map(uri => ({ uri })), attachedFilesOf(tabId));
 				if (deps.tab(tabId)?.panel !== panel) return;
-				const reply: GuestAttachedFilesMessage = { type: "omp:attached-files", requestId: parsed.requestId, files: read.files, refusals: read.refusals };
+				const reply: GuestAttachedFilesMessage = { type: "omp:attached-files", requestId: parsed.requestId, items: read.items, refusals: read.refusals };
+				void panel.webview.postMessage(reply);
+				return;
+			}
+			case "omp:pick-files": {
+				// The dialog is not shown to a replaced panel, and every request that was shown one is answered, an empty answer when the dialog
+				// was cancelled or failed, so the page's request always settles.
+				if (deps.tab(tabId)?.panel !== panel) return;
+				let reply: GuestAttachedFilesMessage = { type: "omp:attached-files", requestId: parsed.requestId, items: [], refusals: [] };
+				try {
+					const picked = await deps.pickFiles(deps.hostedCwd(tabId) ?? index.get(tabId)?.cwd ?? null);
+					if (picked.length > MAX_ATTACH_ITEMS) {
+						reply = { ...reply, refusals: [`At most ${MAX_ATTACH_ITEMS} files can be attached at once.`] };
+					} else if (picked.length > 0) {
+						const read = await readAttachedFiles(picked.map(file => ({ path: file })), attachedFilesOf(tabId));
+						reply = { ...reply, items: read.items, refusals: read.refusals };
+					}
+				} catch (error) {
+					deps.log.warn(`tab ${tabId}: the file dialog failed: ${error instanceof Error ? error.message : String(error)}`);
+				} finally {
+					if (deps.tab(tabId)?.panel === panel) void panel.webview.postMessage(reply);
+				}
+				return;
+			}
+			case "omp:read-files": {
+				if (deps.tab(tabId)?.panel !== panel) return;
+				const cwd = deps.hostedCwd(tabId) ?? index.get(tabId)?.cwd ?? null;
+				const read = await readAttachedForSend(parsed.files, parsed.budget, attachedFilesOf(tabId), { cwd, isDirty: deps.hasUnsavedChanges });
+				if (deps.tab(tabId)?.panel !== panel) return;
+				const reply: GuestFilesReadMessage = { type: "omp:files-read", requestId: parsed.requestId, files: read.files, failures: read.failures };
 				void panel.webview.postMessage(reply);
 				return;
 			}

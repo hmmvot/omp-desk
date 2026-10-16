@@ -39,6 +39,26 @@ export function sniffImageMimeType(bytes: Uint8Array): SniffedImageMimeType | nu
 	return null;
 }
 
+/** Image formats OMP does not take but whose signature is unmistakable, so a refusal can name them instead of calling the file text. */
+export type UnsupportedImageMimeType = "image/bmp" | "image/tiff" | "image/heic" | "image/avif";
+
+const HEIC_BRANDS = new Set(["heic", "heix", "hevc", "hevx", "heim", "heis", "mif1", "msf1"]);
+
+/**
+ * The image format `bytes` is, when it is a known one that is not in {@link SniffedImageMimeType}: BMP (with its zeroed
+ * reserved field, which a text file starting with "BM" does not have), TIFF, HEIC and AVIF.
+ */
+export function sniffUnsupportedImageMimeType(bytes: Uint8Array): UnsupportedImageMimeType | null {
+	if (signatureAt(bytes, 0, [0x42, 0x4d]) && bytes.length >= 14 && bytes[6] === 0 && bytes[7] === 0 && bytes[8] === 0 && bytes[9] === 0) return "image/bmp";
+	if (signatureAt(bytes, 0, [0x49, 0x49, 0x2a, 0x00]) || signatureAt(bytes, 0, [0x4d, 0x4d, 0x00, 0x2a])) return "image/tiff";
+	if (ascii(bytes, 4, 4) === "ftyp") {
+		const brand = ascii(bytes, 8, 4);
+		if (brand === "avif" || brand === "avis") return "image/avif";
+		if (HEIC_BRANDS.has(brand)) return "image/heic";
+	}
+	return null;
+}
+
 /** True when `signature` sits at `offset` in `bytes`. */
 function signatureAt(bytes: Uint8Array, offset: number, signature: readonly number[]): boolean {
 	if (bytes.length < offset + signature.length) return false;

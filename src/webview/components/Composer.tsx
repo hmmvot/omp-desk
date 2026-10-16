@@ -49,13 +49,13 @@ import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useSta
 import { chatTurnInProgress } from "../../chat/model";
 import { nativeSettingsCommand } from "../../chat/settings-command";
 import { guestTransport } from "../bridge";
+import { formatBytes } from "../../shared/file-size";
 import {
 	IMAGE_ACCEPT_ATTRIBUTE,
 	MAX_DRAFT_BYTES,
 	dragCarries,
 	droppedFileUris,
 	fileFromAttached,
-	formatBytes,
 	imageFilesFrom,
 	rawTotal,
 	readImageAttachment,
@@ -1216,7 +1216,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			const waiting = pendingUrisRef.current;
 			if (waiting === null || waiting.requestId !== message.requestId) return;
 			finishUriRequest();
-			void addFiles(message.files.map(fileFromAttached), message.refusals);
+			void addFiles(message.items.filter(item => item.kind === "image").map(fileFromAttached), message.refusals);
 		}
 	}), [addFiles, finishUriRequest]);
 

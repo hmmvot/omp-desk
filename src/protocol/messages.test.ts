@@ -17,6 +17,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { MAX_ATTACH_ITEMS } from "../shared/attach-limits.ts";
 import {
 	FILE_COMPLETION_LIMIT,
 	MAX_DROP_URIS,
@@ -178,9 +179,10 @@ describe("mentionQueryAt", () => {
 	});
 });
 
-describe("a drop from VS Code's Explorer: omp:attach-uris and omp:attached-files", () => {
+describe("an attach: omp:attach-uris, omp:pick-files and omp:attached-files", () => {
 	const uri = "file:///c%3A/repo/shot.png";
-	const file = { name: "shot.png", mimeType: "image/png", data: "iVBORw0KGgo=" };
+	const image = { kind: "image", name: "shot.png", mimeType: "image/png", data: "iVBORw0KGgo=" };
+	const document = { kind: "document", name: "notes.md", ref: "AbCdEf012345", bytes: 120, chars: 118 };
 
 	it("accepts a bounded list of text URIs and nothing looser", () => {
 		assert.deepEqual(parseGuestWebviewMessage({ type: "omp:attach-uris", requestId: 4, uris: [uri], extra: 1 }), { type: "omp:attach-uris", requestId: 4, uris: [uri] });
@@ -197,21 +199,84 @@ describe("a drop from VS Code's Explorer: omp:attach-uris and omp:attached-files
 		for (const message of refused) assert.equal(parseGuestWebviewMessage({ type: "omp:attach-uris", ...message }), null, JSON.stringify(message).slice(0, 80));
 	});
 
-	it("accepts the host's answer only as supported images of canonical base64 within the prompt's limits", () => {
-		const answer = { type: "omp:attached-files", requestId: 4, files: [file], refusals: ["notes.txt: not a PNG, JPEG, GIF, or WebP image."] };
+	it("accepts a pick request with an id and nothing else", () => {
+		assert.deepEqual(parseGuestWebviewMessage({ type: "omp:pick-files", requestId: 0, extra: 1 }), { type: "omp:pick-files", requestId: 0 });
+		assert.equal(parseGuestWebviewMessage({ type: "omp:pick-files", requestId: -1 }), null);
+		assert.equal(parseGuestWebviewMessage({ type: "omp:pick-files" }), null);
+	});
+
+	it("accepts the host's answer as images of canonical base64 and documents that carry a size and a reference, and no text", () => {
+		const answer = { type: "omp:attached-files", requestId: 4, items: [image, document], refusals: ["plan.pdf is not a text file (its bytes are not UTF-8)."] };
 		assert.deepEqual(parseGuestHostMessage(answer), answer);
+		assert.deepEqual(parseGuestHostMessage({ ...answer, items: [{ ...document, content: "secret", path: "C:/x" }] }), { ...answer, items: [document] }, "undeclared fields are dropped");
 		const refused = [
-			{ ...answer, files: [{ ...file, mimeType: "image/svg+xml" }] },
-			{ ...answer, files: [{ ...file, data: "not base64!" }] },
-			{ ...answer, files: [{ ...file, data: "" }] },
-			{ ...answer, files: [{ ...file, name: "" }] },
-			{ ...answer, files: [{ ...file, name: "a\nb" }] },
-			{ ...answer, files: Array.from({ length: 9 }, () => file) },
+			{ ...answer, items: [{ ...image, mimeType: "image/svg+xml" }] },
+			{ ...answer, items: [{ ...image, data: "not base64!" }] },
+			{ ...answer, items: [{ ...image, data: "" }] },
+			{ ...answer, items: [{ ...image, name: "" }] },
+			{ ...answer, items: [{ ...image, name: "a\nb" }] },
+			{ ...answer, items: [{ ...document, kind: "folder" }] },
+			{ ...answer, items: [{ ...document, ref: "short" }] },
+			{ ...answer, items: [{ ...document, ref: "has space in it!" }] },
+			{ ...answer, items: [{ ...document, bytes: -1 }] },
+			{ ...answer, items: [{ ...document, bytes: 600_004 }] },
+			{ ...answer, items: [{ ...document, chars: 200_001 }] },
+			{ ...answer, items: [{ ...document, chars: 1.5 }] },
+			{ ...answer, files: [image], items: undefined },
 			{ ...answer, refusals: [""] },
 			{ ...answer, refusals: ["a\nb"] },
 			{ ...answer, requestId: "4" },
 		];
 		for (const message of refused) assert.equal(parseGuestHostMessage(message), null, JSON.stringify(message).slice(0, 80));
+	});
+
+	it("bounds the items and the refusals by the guard of 1000, not by a user-facing number", () => {
+		const answer = { type: "omp:attached-files", requestId: 4, items: Array.from({ length: MAX_ATTACH_ITEMS }, () => document), refusals: Array.from({ length: MAX_ATTACH_ITEMS }, () => "x") };
+		assert.equal(parseGuestHostMessage(answer)?.type, "omp:attached-files");
+		assert.equal(parseGuestHostMessage({ ...answer, items: [...answer.items, document] }), null);
+		assert.equal(parseGuestHostMessage({ ...answer, refusals: [...answer.refusals, "x"] }), null);
+	});
+});
+
+describe("reading the files of a message at send: omp:read-files and omp:files-read", () => {
+	const request = { type: "omp:read-files", requestId: 7, files: [{ number: 1, ref: "AbCdEf012345" }, { number: 3, ref: "ZyXwVu987654" }], budget: 150_000 };
+	const text = { number: 1, label: "docs/plan.md", content: "# Plan\n\tbody\n", dirty: false };
+
+	it("accepts a read request for numbered references within the message's budget and nothing looser", () => {
+		assert.deepEqual(parseGuestWebviewMessage({ ...request, extra: 1 }), request);
+		const refused = [
+			{ ...request, files: [] },
+			{ ...request, files: Array.from({ length: MAX_ATTACH_ITEMS + 1 }, () => request.files[0]) },
+			{ ...request, files: [{ number: 0, ref: "AbCdEf012345" }] },
+			{ ...request, files: [{ number: 1, ref: "C:/secret/path.txt" }] },
+			{ ...request, files: [{ number: 1 }] },
+			{ ...request, budget: -1 },
+			{ ...request, budget: 200_001 },
+			{ ...request, budget: 1.5 },
+			{ ...request, requestId: -1 },
+		];
+		for (const message of refused) assert.equal(parseGuestWebviewMessage(message), null, JSON.stringify(message).slice(0, 90));
+		assert.equal(parseGuestWebviewMessage({ ...request, files: Array.from({ length: MAX_ATTACH_ITEMS }, () => request.files[0]) })?.type, "omp:read-files");
+	});
+
+	it("accepts the answer as texts with a label and failures with a sentence, and refuses a text over the message or with a control character", () => {
+		const answer = { type: "omp:files-read", requestId: 7, files: [text], failures: [{ number: 3, name: "gone.md", reason: "gone.md no longer exists." }] };
+		assert.deepEqual(parseGuestHostMessage(answer), answer);
+		const refused = [
+			{ ...answer, files: [{ ...text, content: "a\u0000b" }] },
+			{ ...answer, files: [{ ...text, content: "x".repeat(200_001) }] },
+			{ ...answer, files: [{ ...text, content: "x".repeat(150_000) }, { ...text, number: 2, content: "y".repeat(50_001) }] },
+			{ ...answer, files: [{ ...text, label: "" }] },
+			{ ...answer, files: [{ ...text, label: "a\nb" }] },
+			{ ...answer, files: [{ ...text, dirty: "no" }] },
+			{ ...answer, files: [{ ...text, number: 0 }] },
+			{ ...answer, failures: [{ number: 3, name: "x", reason: "" }] },
+			{ ...answer, failures: [{ number: 3, name: "x\ny", reason: "r" }] },
+			{ ...answer, requestId: "7" },
+		];
+		for (const message of refused) assert.equal(parseGuestHostMessage(message), null, JSON.stringify(message).slice(0, 90));
+		assert.deepEqual(parseGuestHostMessage({ ...answer, failures: [{ number: 3, name: "", reason: "An attached file is no longer known; attach it again." }] })?.type, "omp:files-read");
+		assert.equal(parseGuestHostMessage({ ...answer, files: [{ ...text, content: "x".repeat(200_000) }] })?.type, "omp:files-read", "exactly the message limit passes");
 	});
 });
 

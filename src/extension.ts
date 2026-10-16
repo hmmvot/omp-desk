@@ -124,7 +124,7 @@ import { warmNativeAsset } from "./host/native-proof";
 import { announceNativeFailure, nativeDiagnosticsFor, simulatedNativeDelayMs, simulatedNativeFailure } from "./wiring/native-module-notice";
 import { canonicalFolderKey, folderHistoryDeletionSubject, inspectSessionFile, scanFolderHistory } from "./host/folder-history";
 import type { FolderHistoryCandidate, FolderHistoryIndexedEntry, FolderHistoryScan } from "./host/folder-history";
-import { findFileMentions } from "./host/file-mentions";
+import { comparablePosix, findFileMentions } from "./host/file-mentions";
 import {
   EditorRecency,
   candidateDescription as sendCandidateDescription,
@@ -1120,6 +1120,21 @@ function guestDispatcherDeps(): GuestDispatcherDeps<TabState> {
       cwd,
       findFiles: (include, exclude, maxResults) => vscode.workspace.findFiles(include, exclude, maxResults),
     }),
+    pickFiles: async defaultFolder => {
+      const picked = await vscode.window.showOpenDialog({
+        canSelectMany: true,
+        canSelectFiles: true,
+        canSelectFolders: false,
+        openLabel: "Attach",
+        title: "Attach files",
+        ...(defaultFolder === null ? {} : { defaultUri: vscode.Uri.file(defaultFolder) }),
+      });
+      return (picked ?? []).filter(uri => uri.scheme === "file").map(uri => uri.fsPath);
+    },
+    hasUnsavedChanges: fsPath => {
+      const wanted = comparablePosix(fsPath);
+      return vscode.workspace.textDocuments.some(document => document.isDirty && document.uri.scheme === "file" && comparablePosix(document.uri.fsPath) === wanted);
+    },
     recents: registerRecentSessions({
       listed: () => windowState().launcherProvider?.listedSessions().map(({ item }) => item) ?? [],
       itemFor: async tabId => windowState().launcherProvider?.itemFor(tabId),

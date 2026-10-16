@@ -32,6 +32,7 @@
  * here, which the composer drops on send, removal, and unmount.
  */
 
+import { formatBytes } from "../../shared/file-size.ts";
 import { sniffImageMimeType } from "../../shared/image-sniff.ts";
 import { MAX_CHAT_IMAGES_BYTES, MAX_CHAT_IMAGE_BYTES } from "../../protocol/chat-messages.ts";
 
@@ -74,13 +75,6 @@ export interface PendingImage {
 
 /** Outcome of reading one selected file: the image, or the reason it cannot be attached. */
 export type AttachmentRead = { ok: true; image: PendingImage } | { ok: false; reason: string };
-
-/** "912 B", "512 KB", "1.4 MB". */
-export function formatBytes(bytes: number): string {
-	if (bytes < 1024) return `${bytes} B`;
-	if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-	return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
 
 /** Raw bytes the draft already holds. */
 export function rawTotal(images: readonly PendingImage[]): number {

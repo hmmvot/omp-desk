@@ -32,6 +32,7 @@
 // through `src/protocol/messages.test.ts`, and Node's ESM loader does not resolve
 // extensionless specifiers (the Webview bundle itself does not care).
 import type { ControlModelRef } from "./control.ts";
+import { MAX_ATTACH_ITEMS, MAX_DOCUMENT_BYTES, MAX_MESSAGE_CHARS } from "../shared/attach-limits.ts";
 import { DRAFT_CONTROL_CHARACTER } from "../shared/text-file.ts";
 import { isRecord } from "../shared/guards.ts";
 import { isCanonicalBase64Text } from "../shared/bytes-base64.ts";
@@ -258,11 +259,28 @@ export const MAX_DROP_URI_LENGTH = 2048;
 export const MAX_ATTACHED_NAME_LENGTH = 255;
 /** Longest refusal sentence an answer may carry. */
 export const MAX_ATTACHED_REFUSAL_LENGTH = 400;
+/** Longest path text a file block's header carries. */
+export const MAX_FILE_LABEL_LENGTH = 4096;
+
+/** An opaque reference the host minted for an attached file: short, URL-safe, nothing a path could hide in. */
+function isAttachRef(value: unknown): value is string {
+	return typeof value === "string" && /^[A-Za-z0-9_-]{8,64}$/.test(value);
+}
+
+/** A non-negative integer no larger than `max`. */
+function isCount(value: unknown, max: number): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 && value <= max;
+}
+
+/** The number of a document in a draft: a positive integer. */
+function isDocumentNumber(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
+}
 
 /**
  * A drag from VS Code's own Explorer or an editor tab carries URIs, not files; the page cannot read them, so it asks the
- * host. The URIs are untrusted text: the host reads only a local file that is a supported image within the prompt's
- * limits and refuses everything else in a sentence.
+ * host. The URIs are untrusted text: the host reads only a local file and answers with what it is (an image, whose bytes
+ * come back, or a text document, which does not) or a sentence for why it is neither.
  */
 export interface GuestAttachUrisRequestMessage {
 	type: "omp:attach-uris";
@@ -271,20 +289,81 @@ export interface GuestAttachUrisRequestMessage {
 	uris: string[];
 }
 
-/** One image the host read for a drop: what the page turns back into a `File`. */
-export interface GuestAttachedFile {
+/** The attach button: the host opens its own file dialog and answers with {@link GuestAttachedFilesMessage}, empty on cancel. */
+export interface GuestPickFilesRequestMessage {
+	type: "omp:pick-files";
+	requestId: number;
+}
+
+/** One image the host read: what the page turns back into a `File`. */
+export interface GuestAttachedImage {
+	kind: "image";
 	name: string;
 	mimeType: string;
 	/** Standard base64 of the file's bytes. */
 	data: string;
 }
 
-/** Answer to {@link GuestAttachUrisRequestMessage}: the images read and one sentence per URI that was refused. */
+/** One text file the host validated: its text stays on disk and is read again at send; the page keeps only this reference. */
+export interface GuestAttachedDocument {
+	kind: "document";
+	name: string;
+	/** Opaque, per tab: what the page hands back to have the file read at send. */
+	ref: string;
+	bytes: number;
+	chars: number;
+}
+
+export type GuestAttachedItem = GuestAttachedImage | GuestAttachedDocument;
+
+/** Answer to a pick or a drop: the items in the order asked and one sentence per file that was refused. */
 export interface GuestAttachedFilesMessage {
 	type: "omp:attached-files";
 	requestId: number;
-	files: GuestAttachedFile[];
+	items: GuestAttachedItem[];
 	refusals: string[];
+}
+
+/** One attached file the send needs the text of. */
+export interface GuestReadFileRef {
+	/** The document's number in the draft, echoed in the answer. */
+	number: number;
+	ref: string;
+}
+
+/** Send time: read these files now. `budget` is the room the message has left, in characters; the host stops when the text would pass it. */
+export interface GuestReadFilesRequestMessage {
+	type: "omp:read-files";
+	requestId: number;
+	files: GuestReadFileRef[];
+	budget: number;
+}
+
+/** The text of one file at send time. */
+export interface GuestFileText {
+	number: number;
+	/** The path text for the block header: relative to the session's folder inside it, absolute outside it. */
+	label: string;
+	content: string;
+	/** An open editor holds unsaved changes to this file; the saved text is what was read. */
+	dirty: boolean;
+}
+
+/** A file that could not be read at send time; any failure refuses the send. */
+export interface GuestFileReadFailure {
+	number: number;
+	/** The file's name when the host knows it, else empty. */
+	name: string;
+	/** One sentence naming the file. */
+	reason: string;
+}
+
+/** Answer to {@link GuestReadFilesRequestMessage}. */
+export interface GuestFilesReadMessage {
+	type: "omp:files-read";
+	requestId: number;
+	files: GuestFileText[];
+	failures: GuestFileReadFailure[];
 }
 
 /** One recent session of the empty state: what a row shows, nothing that could name it. */
@@ -818,6 +897,7 @@ export type GuestHostMessage =
 	| GuestControlInvalidateMessage
 	| GuestFileCompletionsMessage
 	| GuestAttachedFilesMessage
+	| GuestFilesReadMessage
 	| GuestRecentSessionsMessage
 	| GuestControlStateMessage
 	| GuestPanelActionMessage
@@ -1054,6 +1134,8 @@ export type GuestWebviewMessage =
 	| GuestBridgeAckMessage
 	| GuestFileCompletionRequestMessage
 	| GuestAttachUrisRequestMessage
+	| GuestPickFilesRequestMessage
+	| GuestReadFilesRequestMessage
 	| GuestRecentSessionsRequestMessage
 	| GuestOpenRecentMessage
 	| GuestControlRequestMessage
@@ -1266,24 +1348,55 @@ export function parseGuestHostMessage(value: unknown): GuestHostMessage | null {
 		return { type: "omp:file-completions", requestId: value.requestId, paths: paths.slice(0, FILE_COMPLETION_LIMIT) };
 	}
 	if (value.type === "omp:attached-files") {
-		if (!isRequestId(value.requestId) || !Array.isArray(value.files) || value.files.length > MAX_CHAT_IMAGES || !Array.isArray(value.refusals) || value.refusals.length > MAX_DROP_URIS) return null;
-		const files: GuestAttachedFile[] = [];
+		if (!isRequestId(value.requestId) || !Array.isArray(value.items) || value.items.length > MAX_ATTACH_ITEMS || !Array.isArray(value.refusals) || value.refusals.length > MAX_ATTACH_ITEMS) return null;
+		const items: GuestAttachedItem[] = [];
 		let total = 0;
-		for (const candidate of value.files) {
+		for (const candidate of value.items) {
 			if (!isRecord(candidate) || typeof candidate.name !== "string" || candidate.name.length === 0 || candidate.name.length > MAX_ATTACHED_NAME_LENGTH || !isSafeBoundaryText(candidate.name)) return null;
-			const { mimeType, data } = candidate;
-			if (typeof mimeType !== "string" || !isChatImageMimeType(mimeType)) return null;
-			if (typeof data !== "string" || data.length > MAX_CHAT_IMAGE_BASE64_CHARS) return null;
-			total += data.length;
-			if (total > MAX_CHAT_IMAGES_BASE64_CHARS || !isCanonicalBase64Text(data)) return null;
-			files.push({ name: candidate.name, mimeType, data });
+			if (candidate.kind === "image") {
+				const { mimeType, data } = candidate;
+				if (typeof mimeType !== "string" || !isChatImageMimeType(mimeType)) return null;
+				if (typeof data !== "string" || data.length > MAX_CHAT_IMAGE_BASE64_CHARS) return null;
+				total += data.length;
+				if (total > MAX_CHAT_IMAGES_BASE64_CHARS || !isCanonicalBase64Text(data)) return null;
+				items.push({ kind: "image", name: candidate.name, mimeType, data });
+			} else if (candidate.kind === "document") {
+				const { ref, bytes, chars } = candidate;
+				if (!isAttachRef(ref) || !isCount(bytes, MAX_DOCUMENT_BYTES) || !isCount(chars, MAX_MESSAGE_CHARS)) return null;
+				items.push({ kind: "document", name: candidate.name, ref, bytes, chars });
+			} else {
+				return null;
+			}
 		}
 		const refusals: string[] = [];
 		for (const candidate of value.refusals) {
 			if (typeof candidate !== "string" || candidate.length === 0 || candidate.length > MAX_ATTACHED_REFUSAL_LENGTH || !isSafeBoundaryText(candidate)) return null;
 			refusals.push(candidate);
 		}
-		return { type: "omp:attached-files", requestId: value.requestId, files, refusals };
+		return { type: "omp:attached-files", requestId: value.requestId, items, refusals };
+	}
+	if (value.type === "omp:files-read") {
+		if (!isRequestId(value.requestId) || !Array.isArray(value.files) || value.files.length > MAX_ATTACH_ITEMS || !Array.isArray(value.failures) || value.failures.length > MAX_ATTACH_ITEMS) return null;
+		const files: GuestFileText[] = [];
+		let total = 0;
+		for (const candidate of value.files) {
+			if (!isRecord(candidate) || !isDocumentNumber(candidate.number) || typeof candidate.dirty !== "boolean") return null;
+			const { label, content } = candidate;
+			if (typeof label !== "string" || label.length === 0 || label.length > MAX_FILE_LABEL_LENGTH || !isSafeBoundaryText(label)) return null;
+			if (typeof content !== "string" || DRAFT_CONTROL_CHARACTER.test(content)) return null;
+			total += content.length;
+			if (total > MAX_MESSAGE_CHARS) return null;
+			files.push({ number: candidate.number, label, content, dirty: candidate.dirty });
+		}
+		const failures: GuestFileReadFailure[] = [];
+		for (const candidate of value.failures) {
+			if (!isRecord(candidate) || !isDocumentNumber(candidate.number)) return null;
+			const { name, reason } = candidate;
+			if (typeof name !== "string" || name.length > MAX_ATTACHED_NAME_LENGTH || !isSafeBoundaryText(name)) return null;
+			if (typeof reason !== "string" || reason.length === 0 || reason.length > MAX_ATTACHED_REFUSAL_LENGTH || !isSafeBoundaryText(reason)) return null;
+			failures.push({ number: candidate.number, name, reason });
+		}
+		return { type: "omp:files-read", requestId: value.requestId, files, failures };
 	}
 	if (value.type === "omp:recent-sessions") {
 		if (!isRequestId(value.requestId) || !Array.isArray(value.items)) return null;
@@ -1466,6 +1579,20 @@ export function parseGuestWebviewMessage(value: unknown): GuestWebviewMessage | 
 				uris.push(candidate);
 			}
 			return { type: "omp:attach-uris", requestId: value.requestId, uris };
+		}
+		case "omp:pick-files": {
+			if (!isRequestId(value.requestId)) return null;
+			return { type: "omp:pick-files", requestId: value.requestId };
+		}
+		case "omp:read-files": {
+			if (!isRequestId(value.requestId) || !Array.isArray(value.files) || value.files.length === 0 || value.files.length > MAX_ATTACH_ITEMS) return null;
+			if (!isCount(value.budget, MAX_MESSAGE_CHARS)) return null;
+			const files: GuestReadFileRef[] = [];
+			for (const candidate of value.files) {
+				if (!isRecord(candidate) || !isDocumentNumber(candidate.number) || !isAttachRef(candidate.ref)) return null;
+				files.push({ number: candidate.number, ref: candidate.ref });
+			}
+			return { type: "omp:read-files", requestId: value.requestId, files, budget: value.budget };
 		}
 		case "omp:complete-files": {
 			if (!isRequestId(value.requestId) || typeof value.query !== "string") return null;

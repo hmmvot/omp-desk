@@ -134,7 +134,7 @@ function toPosix(value: string): string {
 }
 
 /** Comparison form: Windows paths and drive letters arrive with inconsistent casing. */
-function comparablePosix(value: string): string {
+export function comparablePosix(value: string): string {
 	const posix = toPosix(value);
 	return process.platform === "win32" ? posix.toLowerCase() : posix;
 }

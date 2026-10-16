@@ -11,7 +11,7 @@
  */
 import assert from "node:assert/strict";
 import module from "node:module";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -23,6 +23,29 @@ import type { LoggedLine } from "../shared/logger.ts";
 import { recordingLogger } from "../shared/logger.ts";
 import type { CarriedDraft, GuestDispatcher, GuestDispatcherDeps, GuestTab } from "./guest-dispatcher.ts";
 import { registerRecentSessions } from "./recent-sessions.ts";
+import { parseGuestHostMessage } from "../protocol/messages.ts";
+import type { GuestAttachedFilesMessage, GuestFilesReadMessage } from "../protocol/messages.ts";
+
+/** What the page was sent as an answer to an attach: parsed by the real boundary parser, so a malformed answer fails here too. */
+function attachedAnswer(message: unknown): GuestAttachedFilesMessage {
+	const parsed = parseGuestHostMessage(message);
+	assert.ok(parsed?.type === "omp:attached-files", `not an attach answer: ${JSON.stringify(message)}`);
+	return parsed;
+}
+
+/** The same for the answer to a read at send. */
+function readAnswer(message: unknown): GuestFilesReadMessage {
+	const parsed = parseGuestHostMessage(message);
+	assert.ok(parsed?.type === "omp:files-read", `not a read answer: ${JSON.stringify(message)}`);
+	return parsed;
+}
+
+/** The reference of the first document an answer carries. */
+function firstRef(answer: GuestAttachedFilesMessage): string {
+	const item = answer.items.find(candidate => candidate.kind === "document");
+	assert.ok(item?.kind === "document");
+	return item.ref;
+}
 
 // The module and the host modules it imports load the `vscode` specifier; map it before the first import.
 if (typeof module.registerHooks === "function") {
@@ -119,6 +142,10 @@ function world(overrides: Partial<GuestDispatcherDeps<FakeTab>> = {}) {
 		artifactOutcome: { opened: true } as { opened: true } | { opened: false; reason: string },
 		route: null as { routeGeneration: string | null } | null,
 		recentRows: [] as { tabId: string; headline: string; entry: { kind: string; cwd: string }; conversation: { lastAt: string | null } | null }[],
+		picked: [] as string[],
+		pickFails: false,
+		pickCalls: [] as (string | null)[],
+		dirty: new Set<string>(),
 	};
 	const calls: string[] = [];
 	const lines: LoggedLine[] = [];
@@ -179,6 +206,12 @@ function world(overrides: Partial<GuestDispatcherDeps<FakeTab>> = {}) {
 		runChatAction: async (...args) => { chatActions.push(args); },
 		hostedCwd: tabId => [...state.tabs.values()].find(candidate => candidate.tabId === tabId)?.hosted?.cwd ?? null,
 		completeFiles: async (cwd, query) => { calls.push(`completeFiles:${cwd}:${String(query)}`); return state.files; },
+		pickFiles: async defaultFolder => {
+			state.pickCalls.push(defaultFolder);
+			if (state.pickFails) throw new Error("dialog failed");
+			return state.picked;
+		},
+		hasUnsavedChanges: fsPath => state.dirty.has(fsPath),
 		pushSessionView: (_index, _tab, force) => { calls.push(`pushSessionView:${force}`); },
 		noteReadyDocument: (_tab, documentId) => { calls.push(`noteReadyDocument:${documentId}`); },
 		activateNativeEditor: () => { calls.push("activateNativeEditor"); },
@@ -431,26 +464,127 @@ describe("file completions", () => {
 });
 
 describe("omp:attach-uris", () => {
-	it("answers the asking page with the images it read and a sentence for what it refused, and never a replaced page", async () => {
+	it("answers the asking page with the images it read, a document without its text and a sentence for what it refused, and never a replaced page", async () => {
 		const folder = await mkdtemp(join(tmpdir(), "omp-desk-attach-"));
 		try {
 			const image = join(folder, "shot.png");
+			const notes = join(folder, "notes.md");
 			await writeFile(image, Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2]));
+			await writeFile(notes, "# Notes\n");
 			const w = world();
 			const live = w.editor();
-			await w.dispatcher.handleMessage(index, SLOT, live.panel, { type: "omp:attach-uris", requestId: 5, uris: [pathToFileURL(image).href, "https://example.com/a.png"] });
-			assert.deepEqual(live.posted, [{
-				type: "omp:attached-files",
-				requestId: 5,
-				files: [{ name: "shot.png", mimeType: "image/png", data: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2]).toString("base64") }],
-				refusals: ["Dropped item: only files on this computer can be attached by dropping."],
-			}]);
+			await w.dispatcher.handleMessage(index, SLOT, live.panel, { type: "omp:attach-uris", requestId: 5, uris: [pathToFileURL(image).href, pathToFileURL(notes).href, "https://example.com/a.png"] });
+			assert.equal(live.posted.length, 1);
+			const answer = attachedAnswer(live.posted[0]);
+			assert.equal(answer.requestId, 5);
+			assert.deepEqual(answer.items[0], { kind: "image", name: "shot.png", mimeType: "image/png", data: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2]).toString("base64") });
+			assert.deepEqual({ ...answer.items[1], ref: "x" }, { kind: "document", name: "notes.md", ref: "x", bytes: 8, chars: 8 });
+			assert.deepEqual(answer.refusals, ["Dropped item: only files on this computer can be attached by dropping."]);
 			const tabs = new Map<string, FakeTab>();
 			const gone = fakePanel();
 			tabs.set(SLOT, tabRecord(SLOT, fakePanel().panel));
 			const replaced = world({ tabs: () => tabs });
 			await replaced.dispatcher.handleMessage(index, SLOT, gone.panel, { type: "omp:attach-uris", requestId: 6, uris: [pathToFileURL(image).href] });
 			assert.deepEqual(gone.posted, [], "a panel that is no longer the tab's own gets no answer");
+		} finally {
+			await rm(folder, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("omp:pick-files", () => {
+	it("opens the dialog in the session's folder, answers what was chosen like a drop, and always answers an empty reply for a cancelled or failed dialog", async () => {
+		const folder = await mkdtemp(join(tmpdir(), "omp-desk-pick-"));
+		try {
+			const notes = join(folder, "notes.md");
+			await writeFile(notes, "hello");
+			const w = world();
+			const live = w.editor(SLOT, { hosted: { cwd: folder } });
+			w.state.picked = [notes, join(folder, "missing.md")];
+			await w.dispatcher.handleMessage(index, SLOT, live.panel, { type: "omp:pick-files", requestId: 8 });
+			assert.deepEqual(w.state.pickCalls, [folder]);
+			const answer = attachedAnswer(live.posted[0]);
+			assert.deepEqual(answer.items.map(item => [item.kind, item.name, item.kind === "document" ? item.chars : -1]), [["document", "notes.md", 5]]);
+			assert.deepEqual(answer.refusals, ["missing.md: could not be read."]);
+
+			w.state.picked = [];
+			await w.dispatcher.handleMessage(index, SLOT, live.panel, { type: "omp:pick-files", requestId: 9 });
+			assert.deepEqual(live.posted[1], { type: "omp:attached-files", requestId: 9, items: [], refusals: [] }, "a cancelled dialog settles the request");
+
+			w.state.pickFails = true;
+			await w.dispatcher.handleMessage(index, SLOT, live.panel, { type: "omp:pick-files", requestId: 10 });
+			assert.deepEqual(live.posted[2], { type: "omp:attached-files", requestId: 10, items: [], refusals: [] }, "a failed dialog settles the request");
+			assert.equal(w.warnings.length, 0);
+		} finally {
+			await rm(folder, { recursive: true, force: true });
+		}
+	});
+
+	it("refuses a result over the guard of 1000 before reading anything, and shows no dialog to a replaced page", async () => {
+		const w = world();
+		const live = w.editor();
+		w.state.picked = Array.from({ length: 1001 }, (_, index) => `C:\\x\\f${index}.md`);
+		await w.dispatcher.handleMessage(index, SLOT, live.panel, { type: "omp:pick-files", requestId: 3 });
+		assert.deepEqual(live.posted, [{ type: "omp:attached-files", requestId: 3, items: [], refusals: ["At most 1000 files can be attached at once."] }]);
+
+		const tabs = new Map<string, FakeTab>();
+		const gone = fakePanel();
+		tabs.set(SLOT, tabRecord(SLOT, fakePanel().panel));
+		const replaced = world({ tabs: () => tabs });
+		replaced.state.picked = ["C:\\x\\a.md"];
+		await replaced.dispatcher.handleMessage(index, SLOT, gone.panel, { type: "omp:pick-files", requestId: 4 });
+		assert.deepEqual(gone.posted, []);
+		assert.deepEqual(replaced.state.pickCalls, [], "the dialog was not shown");
+	});
+});
+
+describe("omp:read-files", () => {
+	it("reads the files a pick attached, by reference, with the label against the session's folder and the unsaved-changes fact, only for the asking page", async () => {
+		const folder = await mkdtemp(join(tmpdir(), "omp-desk-read-"));
+		try {
+			await mkdir(join(folder, "docs"));
+			const plan = join(folder, "docs", "plan.md");
+			await writeFile(plan, "# Plan\r\n");
+			const w = world();
+			const live = w.editor(SLOT, { hosted: { cwd: folder } });
+			w.state.picked = [plan];
+			await w.dispatcher.handleMessage(index, SLOT, live.panel, { type: "omp:pick-files", requestId: 1 });
+			const ref = firstRef(attachedAnswer(live.posted[0]));
+			w.state.dirty.add(plan);
+			await w.dispatcher.handleMessage(index, SLOT, live.panel, { type: "omp:read-files", requestId: 2, files: [{ number: 4, ref }, { number: 5, ref: "AAAAAAAAAAAA" }], budget: 1000 });
+			assert.deepEqual(live.posted[1], {
+				type: "omp:files-read",
+				requestId: 2,
+				files: [{ number: 4, label: "docs/plan.md", content: "# Plan\n", dirty: true }],
+				failures: [{ number: 5, name: "", reason: "An attached file is no longer known; attach it again." }],
+			});
+
+			const tabs = new Map<string, FakeTab>();
+			const gone = fakePanel();
+			tabs.set(SLOT, tabRecord(SLOT, fakePanel().panel));
+			const replaced = world({ tabs: () => tabs });
+			await replaced.dispatcher.handleMessage(index, SLOT, gone.panel, { type: "omp:read-files", requestId: 3, files: [{ number: 1, ref }], budget: 10 });
+			assert.deepEqual(gone.posted, []);
+		} finally {
+			await rm(folder, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps one registry per conversation: a reference minted for one tab does not read for another", async () => {
+		const folder = await mkdtemp(join(tmpdir(), "omp-desk-read2-"));
+		try {
+			const notes = join(folder, "n.md");
+			await writeFile(notes, "x");
+			const w = world();
+			const first = w.editor(SLOT, { hosted: { cwd: folder } });
+			w.state.picked = [notes];
+			await w.dispatcher.handleMessage(index, SLOT, first.panel, { type: "omp:pick-files", requestId: 1 });
+			const ref = firstRef(attachedAnswer(first.posted[0]));
+			const second = w.editor(OTHER_SLOT, { tabId: "other-tab", hosted: { cwd: folder } });
+			await w.dispatcher.handleMessage(index, OTHER_SLOT, second.panel, { type: "omp:read-files", requestId: 2, files: [{ number: 1, ref }], budget: 10 });
+			const answer = readAnswer(second.posted[0]);
+			assert.equal(answer.failures.length, 1);
+			assert.deepEqual(answer.files, []);
 		} finally {
 			await rm(folder, { recursive: true, force: true });
 		}
