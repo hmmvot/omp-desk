@@ -15,6 +15,7 @@ All commands are in the Command Palette under **OMP Desk**. The ones with defaul
 | `Esc` | Stop current turn | Chat editor, turn running |
 | `F5`, `Alt+R` | Retry the failed or aborted reply | Chat editor, no turn running |
 | `Alt+Q` | Quote the selected Chat text into the draft (see [quoting Chat text](chat.md#quoting-chat-text)) | Chat editor |
+| `Alt+Q` | Quote Selection to Session: the selected editor text goes into a Chat session's draft as a quote with its file and lines (see [quoting Chat text](chat.md#quoting-chat-text)) | Text editor with a selection |
 | `Ctrl+R` | Search prompt history | Chat editor |
 | `Ctrl+N` | Symbol search (`#`) prefilled with the Chat selection | Chat editor |
 | `Ctrl+Shift+N` | Go to File prefilled with the Chat selection | Chat editor |

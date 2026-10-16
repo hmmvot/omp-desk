@@ -4101,6 +4101,32 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			}
 		});
 
+		await t.test("the host's omp:insert-quote puts every editor selection into the draft as its own quote in one undo step, drops an over-long one and never sends", async () => {
+			await reset("quote-editor");
+			await ui.call("Emulation.setFocusEmulationEnabled", { enabled: true });
+			try {
+				await ui.evaluate("window.ui.receive({type:'omp:insert-quote',quotes:[{location:'src/app.ts:42-43',fileName:'app.ts',languageId:'typescript',text:'const x = 1;\\nconst y = 2;'}]})");
+				await waitDraft("window.composer.value()==='> `src/app.ts:42-43`\\n> ```ts\\n> const x = 1;\\n> const y = 2;\\n> ```\\n'");
+				const state = await areaState();
+				assert.equal(state.start, state.value.length, "the caret is on the line under the quote");
+				assert.equal(state.focused, true, "the focus is in the composer");
+				// A prose document and a document with no path: two quotes of one insertion, a blank line between them, one undo step.
+				await ui.evaluate("window.ui.receive({type:'omp:insert-quote',quotes:[{location:'docs/a.md:3',fileName:'a.md',languageId:'markdown',text:'# Title\\n\\nbody'},{location:null,fileName:'',languageId:'plaintext',text:'loose'}]})");
+				const both = "> `src/app.ts:42-43`\n> ```ts\n> const x = 1;\n> const y = 2;\n> ```\n\n> `docs/a.md:3`\n>\n> # Title\n>\n> body\n\n> loose\n";
+				await waitDraft(`window.composer.value()===${JSON.stringify(both)}`);
+				await undo();
+				await waitDraft("window.composer.value()==='> `src/app.ts:42-43`\\n> ```ts\\n> const x = 1;\\n> const y = 2;\\n> ```\\n'");
+				// Over the limit: the page's parser drops the message (the host refuses such a selection before it posts anything), so nothing is inserted.
+				await ui.evaluate("window.ui.receive({type:'omp:insert-quote',quotes:[{location:'big.ts:1',fileName:'big.ts',languageId:'typescript',text:'x'.repeat(20001)}]})");
+				await settleFrames();
+				assert.equal((await areaState()).value, "> `src/app.ts:42-43`\n> ```ts\n> const x = 1;\n> const y = 2;\n> ```\n", "nothing was inserted");
+				assert.equal(await sendCount(), 0, "quoting never sends");
+				assert.deepEqual(await ui.evaluate("window.errors"), []);
+			} finally {
+				await ui.call("Emulation.setFocusEmulationEnabled", { enabled: false });
+			}
+		});
+
 		await t.test("Shift+Arrow extends a selection that exists in the transcript and the action quotes it, but a collapsed caret there cannot be extended: a selection cannot be started from the keyboard alone (measured, an accessibility gap)", async () => {
 			await reset("quote-keyboard");
 			await showMessages([assistantMessage([{ type: "text", text: "Keyboard **quoted words** here" }])]);

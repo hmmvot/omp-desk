@@ -5,7 +5,7 @@ date: 2026-10-15
 
 # Quote selected Chat text into the draft
 
-Revised 2026-10-16: the maintainer's answers to the first draft's open questions are in *Decisions*; an independent review of the atomic-block variant of decision 3 led the maintainer to choose an editable band instead (*Architecture Review*). The one remaining open question (the line after a quote) was answered the same day, option B, and is decision 8.
+Revised 2026-10-16: the maintainer's answers to the first draft's open questions are in *Decisions*; an independent review of the atomic-block variant of decision 3 led the maintainer to choose an editable band instead (*Architecture Review*). The one remaining open question (the line after a quote) was answered the same day, option B, and is decision 8. The same day the maintainer asked for the quote key to work in a text editor too; that is decision 9 and the *Addendum* at the end of *Proposed Design*.
 
 ## Problem
 
@@ -39,6 +39,7 @@ Answers to the seven open questions of the first draft, and the choice made afte
 6. **Insertion.** **Always at the end of the draft**, after a line break, with focus moved to the composer and the caret on the new line after the quote. No caret snapping and no retained-caret logic (Section 2 gives the exact separators).
 7. **Limit.** Refuse a selection over 20 000 characters, with its size in the message.
 8. **The line after a quote (option B).** After an inserted quote comes **one line break only**, and the caret sits on the very next line, so the user writes the comment straight under the quote. The reasons: the transcript renderer ends a quote at the first line without `>` (there is no lazy continuation, `Markdown.tsx` quote branch), so the user's own sent message shows the quote and then the comment as separate blocks; and the raw text the model reads marks every quoted line with `>`. Slice 2 (nested quote blocks) keeps this property: a following non-`>` line still ends the quote in the transcript, and a test pins it. To a CommonMark parser the comment under the quote is a lazy continuation of the quote's last paragraph; this was weighed and accepted (Risks).
+9. **The quote key works in a text editor (maintainer, 2026-10-16).** `Alt+Q` with a selection in a text editor quotes it into a Chat session's draft: "the quote then holds a link to the file and the start of the quote, plus the selected text". A separate command **Quote Selection to Session**; the target rule of Add Selection to Session; a first line with the location as inline code (never an `@` mention), then the text as a fenced block for code and as plain quote lines for Markdown and plain text; each multi-cursor selection its own quote. The *Addendum* gives the details and the tests.
 
 ## Current State
 
@@ -352,6 +353,7 @@ Slices, in implementation order; each is independently reviewable, and slices 0 
 5. **Capture**: the `quotable` prop, the leaf records with line ranges and prefix lengths, the registry, `quote-capture.ts`, the fallback and the limit.
 6. **Triggers**: the `quote-selection` panel action (protocol type, parser table, registry map, host command, keybinding, `webview/context` item, `data-vscode-context` attribute), the status line (no floating button, no per-message buttons: decision 1, 2026-10-16).
 7. **End-to-end and documents**: `38-chat-quote-selection.spec.ts`; `docs/guide/chat.md` (a "Quoting Chat text" subsection next to "Code blocks in the draft", lines 24-33), `docs/guide/keyboard-shortcuts.md` (the Chat table: `Alt+Q`), `docs/architecture.md` (the composer surface paragraph near line 222, the page-action and file-link paragraphs near 48 and 84-98), the CHANGELOG `[Unreleased]`, and the map entry in `docs/README.md`.
+8. **Editor selections** (decision 9): `quote-limit.ts`, `GuestInsertQuoteMessage`, `composeEditorQuotes`, the command, key and menu entry, the target picker for Chat only, `editor-quote.ts`, the multi-source request of the quote sink, and `41-editor-quote-selection.spec.ts`; the guide, the shortcuts page and the CHANGELOG.
 
 **Unit checks (`node --test`, no browser):**
 
@@ -381,7 +383,32 @@ Slices, in implementation order; each is independently reviewable, and slices 0 
 - Send the draft: the mock server's recorded text contains the `> ` lines, and the transcript shows a `blockquote` followed by the comment paragraph.
 - No smoke screenshots or isolated upgrade are claimed by this design; a smoke in the hidden test window (a quote with a nested code block, the button, a draft with two quotes and comments) and a VSIX from a clean worktree follow as in earlier designs.
 
-Implemented in slices 0-7 as above; `docs/architecture.md` describes the result (Quoting Chat text).
+Implemented in slices 0-8 as above; `docs/architecture.md` describes the result (Quoting Chat text).
+
+## Addendum (2026-10-16): quoting an editor selection (decision 9)
+
+The maintainer asked: "the quote hotkey should work for files, not only the Chat; the quote then holds a link to the file and the start of the quote, plus the selected text." Main decided the shape the same day; the choices below are the implementer's within it. It changes none of decisions 1 to 8 for a Chat quote.
+
+- **Command and key.** A second command, `ompDesk.quoteEditorSelection`, titled **Quote Selection to Session** (palette category "OMP Desk"), bound to `Alt+Q` when `editorTextFocus && editorHasSelection`, and a context-menu item in `editor/context` under the same `when`, group `9_omp@3`. It is a separate command rather than a second `when` of `ompDesk.quoteChatSelection` because the two do different things (the Chat command reads the page's own selection through `providePanelActions`; this one reads the active editor and asks which session) and a palette title "Quote Selection" would otherwise mean two things. The two keybindings cannot both match: a Chat webview is never `editorTextFocus`.
+- **Target.** The target rule of **Add Selection to Session** (`pickSendTarget`): a QuickPick of the sessions of this window, most recently focused first and preselected, then a new session next to the file. Two differences, both because the payload is Markdown for the Chat composer: **terminal sessions are not offered**, and a new session is started as a Chat (`openTab` with a requested mode). With no Chat session and no folder the warning says so and nothing is started. The page receives `omp:insert-quote` and places the quote exactly as a Chat quote is placed (Section 2): at the end of the draft, one line break after it, the caret on the next line, the focus in the composer, one undo step, refused while the draft is held for a hand-off. A page that has not announced itself yet holds the quote until its composer mounts (`offerQuote`, as `omp:insert-text` is held).
+- **Format.** The first line of a quote is the location as **inline code**: `path:line` for one line, `path:start-end` for a range. The path is written as the mention helpers write it (`mentionPath`: relative to the session's cwd when inside it, else absolute with forward slashes). It is **not** an `@` mention: an idle OMP expands a mention into the whole file, which would defeat a quote of three lines. The transcript draws a code span that is one path as a file link, so the sent message links to the file `[INFERENCE: from the code-span rule in Markdown.tsx, not exercised with a range suffix in a real window]`. The lines of the range are the lines the text is on: a selection that ends at column 0 of a line does not count that line, and the line break it leaves is dropped.
+  - A **code file** puts the text in a fenced block: the info string is `languageForPath(fileName)`, else the editor's own language id when it is a language the composer knows, else none; the fence is `max(3, L + 1)` backticks (`fenceFor`, shared with the capture). Every line, fences included, is prefixed `> `.
+  - A **Markdown or plain-text document** (the editor's language id `markdown` or `plaintext`, or a `.md` name) is quoted as plain quote lines with no fence, after an empty `>` line under the location so the location is not glued to the first paragraph.
+  - A document with **no file path** (untitled, another scheme) is quoted without a location line.
+  - Example, lines 42 to 50 of `src/app.ts`:
+
+    ```
+    > `src/app.ts:42-50`
+    > ```ts
+    > const x = 1;
+    > ```
+    ```
+- **Several selections (multi-cursor).** Every non-empty selection is its own quote, in document order, without repeats, separated by a blank line so each keeps its own ✕; all are placed as one insertion, one undo step. At most 64 selections.
+- **Limits and refusals.** The same 20 000 characters as a Chat quote, counted over the selected text of every selection (the constant and the sentence moved to `src/shared/quote-limit.ts` so the host and the page share them). The host refuses an over-long selection, a control character other than tab and line feed, a path a message cannot carry and too many selections **before** the session picker; the page checks the limit again. An empty selection answers "Select some text first."
+- **Unsaved text.** The quote holds the text as it is in the editor now; the location is the saved file's. The status bar and the picker say so for a dirty document.
+- **Protocol.** `omp:insert-quote { quotes: { location: string | null, fileName, languageId, text }[] }` (host to page), parsed with the bounds the host composes within (`MAX_EDITOR_QUOTES`, `MAX_QUOTE_LOCATION_LENGTH`, a total over 20 000 characters refused). The page, not the host, writes the Markdown (`editor-quote.ts`), because the quote band, the fence rules and the `> ` prefix are page code.
+- **Tests.** `editor-context.test.ts` (ranges, relative versus absolute path, CRLF, the column-0 end, order and repeats, no-path document, size, control character, too many selections), `editor-quote.test.ts` (info string, fence length, Markdown without a fence, a backtick in the path), `messages.test.ts` (the boundary), `insert-text.test.ts` (held until a composer mounts, chat pages only), `quote-draft.test.ts` (several quotes in one placement), the Chromium test of `omp:insert-quote` in `chat-ui.test.ts`, `contributions.test.ts` (the key, its `when`, the menu entry) and the end-to-end scenario `41-editor-quote-selection.spec.ts`.
+- **Known limit.** A 20 000-character quote is above the draft hand-off cap of 8192 characters today, so a view switch with such a draft loses it; [ADR-0050](../decisions/0050-retain-uncertain-input-and-confirm-exact-file-restart.md) is amended to raise the cap to the composer's send limit (attachments design, *Rollout* 8), which also removes this limit for Chat quotes.
 
 ## Related Decisions
 
