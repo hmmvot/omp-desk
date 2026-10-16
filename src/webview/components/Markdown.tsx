@@ -35,8 +35,6 @@ const INLINE_TOKEN =
 
 const HEADING = /^(#{1,6})\s+(.*)$/;
 const FENCE = /^\s*```(\S*)\s*$/;
-const UNORDERED_ITEM = /^\s*[-*+]\s+(.*)$/;
-const ORDERED_ITEM = /^\s*\d+[.)]\s+(.*)$/;
 /** A list item line: indent, marker, spacing after the marker, content. */
 const LIST_ITEM = /^([ \t]*)([-*+]|\d{1,9}[.)])([ \t]+)(.*)$/;
 const RULE = /^\s*(?:-{3,}|\*{3,}|_{3,})\s*$/;
@@ -334,8 +332,24 @@ function parseBlockRange(lines: readonly string[], from: number, firstKey: numbe
 	const starts: number[] = [];
 	let index = from;
 	let key = firstKey;
+	// Progress invariant: every iteration consumes at least one line. An iteration that did not is undone and its line becomes paragraph text, so the parse is total even if a rule is wrong in some way not yet found.
+	let stalled = -1;
 
 	while (index < lines.length) {
+		if (index === stalled) {
+			const keep = starts.indexOf(index);
+			if (keep >= 0) {
+				blocks.length = keep;
+				starts.length = keep;
+				key = firstKey + keep;
+			}
+			const paragraphKey = `${keyPrefix}${key++}`;
+			starts.push(index);
+			blocks.push(tight ? <span key={paragraphKey}>{renderLines([lines[index] as string], paragraphKey)}</span> : <p key={paragraphKey}>{renderLines([lines[index] as string], paragraphKey)}</p>);
+			index++;
+			continue;
+		}
+		stalled = index;
 		const line = lines[index] as string;
 		if (line.trim() === "") {
 			index++;
@@ -438,18 +452,18 @@ function parseBlockRange(lines: readonly string[], from: number, firstKey: numbe
 			continue;
 		}
 
-		// Paragraph: consecutive lines that do not open another block, joined by a soft break.
+		// Paragraph: consecutive lines that do not open another block, joined by a soft break. The first line is always taken (the branches above did not take it); a list-like line that `listItem` rejects (`1234567890. x`, a no-break space after the marker) is paragraph text, not a block opener.
 		const paragraph: string[] = [];
 		while (index < lines.length) {
 			const paragraphLine = lines[index] as string;
 			if (
-				paragraphLine.trim() === "" ||
-				FENCE.test(paragraphLine) ||
-				HEADING.test(paragraphLine) ||
-				RULE.test(paragraphLine) ||
-				QUOTE.test(paragraphLine) ||
-				UNORDERED_ITEM.test(paragraphLine) ||
-				ORDERED_ITEM.test(paragraphLine)
+				paragraph.length > 0 &&
+				(paragraphLine.trim() === "" ||
+					FENCE.test(paragraphLine) ||
+					HEADING.test(paragraphLine) ||
+					RULE.test(paragraphLine) ||
+					QUOTE.test(paragraphLine) ||
+					listItem(paragraphLine) !== null)
 			) {
 				break;
 			}

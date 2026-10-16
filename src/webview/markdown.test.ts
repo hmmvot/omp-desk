@@ -16,6 +16,8 @@ type RenderStreamed = (text: string, lengths: readonly number[]) => { html: stri
 let renderStreamed: RenderStreamed;
 /** Renders as it is, line-break points included. */
 let renderBreaks: (text: string) => string;
+/** The number of top-level blocks of a fresh parse. */
+let blockCount: (text: string) => number;
 before(async () => {
 	const bundled = await build({ stdin: { contents: `
 		import { createElement } from "react";
@@ -67,6 +69,7 @@ before(async () => {
 			symbolLinks.dispose();
 			return { html, asked };
 		};
+		export const blockCount = text => parseMarkdown(text, null).blocks.length;
 		export const renderStreamed = (text, lengths) => {
 			const steps = [];
 			let previous = null;
@@ -81,13 +84,14 @@ before(async () => {
 		};
 	`, loader: "tsx", resolveDir: join(process.cwd(), "src/webview") }, bundle: true, write: false,
 		format: "cjs", platform: "node", packages: "external", jsx: "automatic", define: { "process.env.NODE_ENV": '"production"' } });
-	const module = { exports: {} as { render: typeof render; renderBreaks: typeof renderBreaks; renderLinked: Provide; renderSymbols: RenderSymbols; renderStreamed: RenderStreamed } };
+	const module = { exports: {} as { render: typeof render; renderBreaks: typeof renderBreaks; renderLinked: Provide; renderSymbols: RenderSymbols; renderStreamed: RenderStreamed; blockCount: (text: string) => number } };
 	new Function("require", "module", "exports", bundled.outputFiles[0]!.text)(createRequire(import.meta.url), module, module.exports);
 	render = module.exports.render;
 	renderBreaks = module.exports.renderBreaks;
 	renderLinked = module.exports.renderLinked;
 	renderSymbols = module.exports.renderSymbols;
 	renderStreamed = module.exports.renderStreamed;
+	blockCount = module.exports.blockCount;
 });
 
 test("inline code and link text break after path separators with a wbr that adds no character; prose and fenced code get none", () => {
@@ -346,4 +350,52 @@ test("a block that may still be joined by what follows is parsed again, and a te
 	const replaced = renderStreamed("a\n\nb\n\nc", [9, 1]);
 	assert.equal(replaced[1]?.kept, 0);
 	assert.equal(replaced[1]?.html, render("a"));
+});
+
+const unescapeHtml = (html: string): string => html.replaceAll("&gt;", ">").replaceAll("&lt;", "<").replaceAll("&quot;", '"').replaceAll("&#x27;", "'").replaceAll("&amp;", "&");
+
+test("a list-like line that is not a list item is one paragraph and the parse ends (it used to loop forever on a line the paragraph rule and the list rule read differently)", () => {
+	for (const line of ["1234567890. x", "\u00a0- x", "-\u00a0x", "*\u3000x", "- \u00a0x\u00a0"]) {
+		assert.equal(blockCount(line), 1, JSON.stringify(line));
+	}
+	for (const line of ["1234567890. x", "\u00a0- x", "-\u00a0x", "*\u3000x"]) {
+		assert.equal(unescapeHtml(text(render(line))), line, `the text of ${JSON.stringify(line)} is shown as written`);
+		assert.match(render(line), /^<div class="omp-md"><p>/, "a paragraph, not a list");
+	}
+	assert.equal(blockCount("> 1234567890. x"), 1);
+	assert.match(render("> 1234567890. x"), /<blockquote>.*1234567890\. x/);
+	// After a paragraph line the same lines are text of that paragraph; a real item still interrupts it.
+	assert.equal(render("a\n1234567890. x"), '<div class="omp-md"><p>a<br/>1234567890. x</p></div>');
+	assert.equal(render("a\n- b"), '<div class="omp-md"><p>a</p><ul><li><span>b</span></li></ul></div>');
+});
+
+test("the parse terminates for every short string over the 17 symbols that open blocks or break lines, with at most one block per line", () => {
+	const symbols = ["-", "*", "+", ">", "#", "|", "`", "1", "0", ".", ")", " ", "\t", "\u00a0", "\u3000", "x", "\n"];
+	const check = (value: string): void => {
+		const lines = value.split(/\r?\n/).length;
+		assert.ok(blockCount(value) <= lines, `${JSON.stringify(value)} has more blocks than lines`);
+	};
+	let count = 0;
+	const walk = (prefix: string, left: number): void => {
+		check(prefix);
+		count++;
+		if (left === 0) return;
+		for (const symbol of symbols) walk(prefix + symbol, left - 1);
+	};
+	walk("", 4);
+	assert.ok(count > 70_000);
+	// A seeded sample of longer strings, with line breaks among the symbols.
+	let state = 0x2545f491;
+	const next = (): number => {
+		state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+		return state;
+	};
+	for (let sample = 0; sample < 2000; sample++) {
+		const length = 5 + (next() % 8);
+		let value = "";
+		for (let at = 0; at < length; at++) value += symbols[next() % symbols.length];
+		check(value);
+	}
+	const lines = ["1234567890. x", "- x", "-\u00a0x", "> x", "```", "# h", "| a |", "|---|", "1. x", "   ", "x"];
+	for (const first of lines) for (const second of lines) check(`${first}\n${second}`);
 });
