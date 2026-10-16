@@ -26,13 +26,14 @@ const NOTE_CHARS = 160;
 
 type Diagram = Extract<MermaidOutcome, { kind: "diagram" }>;
 
-export function MermaidBlock({ source, closed }: { source: string; closed: boolean }) {
+/** `leaf` is the quote record number of the block (`data-md-leaf`); a drawn diagram carries none and contributes nothing to a quote. */
+export function MermaidBlock({ source, closed, leaf }: { source: string; closed: boolean; leaf?: number }) {
 	// Only the assistant's own reply text is drawn; the same fence in a user message, a tool result or thinking is the code it was written as.
 	const eligible = useContext(AssistantReplyContext);
-	return eligible ? <DiagramBlock source={source} closed={closed} /> : <CodeBlock language="mermaid" source={source} closed={closed} />;
+	return eligible ? <DiagramBlock source={source} closed={closed} leaf={leaf} /> : <CodeBlock language="mermaid" source={source} closed={closed} leaf={leaf} />;
 }
 
-function DiagramBlock({ source, closed }: { source: string; closed: boolean }) {
+function DiagramBlock({ source, closed, leaf }: { source: string; closed: boolean; leaf?: number }) {
 	// The tab is opened through the panel; a bridged editor (after an extension-host restart) cannot ask, and says so.
 	const [notOpened, setNotOpened] = useState(false);
 	const version = useSyncExternalStore(subscribeMermaid, mermaidVersion, mermaidVersion);
@@ -53,7 +54,7 @@ function DiagramBlock({ source, closed }: { source: string; closed: boolean }) {
 	const tabHelps = (refusal !== null || (outcome?.kind === "failed" && outcome.tab)) && isOpenableMermaidSource(source);
 	return (
 		<div className="omp-mermaid">
-			<CodeBlock language="mermaid" source={source} closed={closed} />
+			<CodeBlock language="mermaid" source={source} closed={closed} leaf={leaf} />
 			{reason !== null && (
 				<div className="omp-mermaid-note">
 					<span>Diagram not rendered: {reason.length > NOTE_CHARS ? `${reason.slice(0, NOTE_CHARS - 1)}…` : reason}</span>

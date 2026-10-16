@@ -6,11 +6,10 @@
  * notice, the same edit, whoever asked. Like {@link providePanelActions}, the newest provider answers.
  */
 
-/** What to quote: the Markdown source of a whole message. */
-export interface QuoteRequest {
-	readonly kind: "message";
-	readonly source: string;
-}
+/** What to quote: the Markdown source of a whole message, or of a selection (`plain`: some part of it could only be quoted as the text it shows). */
+export type QuoteRequest =
+	| { readonly kind: "message"; readonly source: string }
+	| { readonly kind: "selection"; readonly source: string; readonly plain: boolean };
 
 type QuoteSink = (request: QuoteRequest) => void;
 

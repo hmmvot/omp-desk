@@ -122,10 +122,12 @@ import { installFocusTrace } from "./lib/focus-trace";
 import { installTypeToFocus } from "./lib/type-to-focus";
 import { installComposerDriver } from "./test-support/composer-driver";
 import { requestQuote } from "./lib/quote-sink";
+import { captureSelection } from "./lib/quote-selection";
 installFocusTrace(window, element => element.classList.contains("omp-composer-input"), detail => guestTransport.post({ type: "omp:focus-trace", detail }));
 installTypeToFocus(window);
 installComposerDriver(window);
 window.requestQuote = requestQuote;
+window.captureQuote = () => captureSelection(window.getSelection(), document.querySelector(".omp-transcript"));
 attachSessionView(guestTransport);
 attachCodeTheme(guestTransport);
 attachInsertedText(guestTransport, () => sessionViewSnapshot().mode);
@@ -3844,6 +3846,92 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 				await ui.call("Emulation.clearDeviceMetricsOverride");
 				await ui.call("Emulation.setFocusEmulationEnabled", { enabled: false });
 			}
+		});
+
+		type Captured = { kind: "quote"; source: string; plain: boolean } | { kind: "none"; message: string };
+		/** The transcript holds exactly these messages (every one a root). */
+		const showMessages = (messages: unknown[]): Promise<unknown> => ui.evaluate(`(()=>{
+		 const entries=${JSON.stringify(messages)}.map((message,index)=>({type:'message',id:'q-'+index,parentId:null,timestamp:'2026-10-01T00:00:00.000Z',message}));
+		 window.ui.push({entries,durableCount:entries.length,working:false,settled:true})})()`);
+		const assistantMessage = (content: unknown[], extra: Record<string, unknown> = {}) => ({ role: "assistant", model: "m", timestamp: 2, stopReason: "stop", content, ...extra });
+		/** Selects from the first `start` in the transcript's text to the first `end` after it, and captures it as the page does. */
+		const quoteBetween = (start: string, end: string): Promise<Captured> => ui.evaluate(`(()=>{
+		 const S=${JSON.stringify(start)},E=${JSON.stringify(end)};
+		 const walker=document.createTreeWalker(document.querySelector('.omp-transcript'),NodeFilter.SHOW_TEXT);
+		 let from=null,to=null,node;
+		 while((node=walker.nextNode())){
+		  if(from===null){const i=node.data.indexOf(S);if(i>=0)from=[node,i]}
+		  if(from!==null){const j=node.data.indexOf(E,node===from[0]?from[1]+S.length:0);if(j>=0){to=[node,j+E.length];break}}
+		 }
+		 if(from===null||to===null)return{kind:'none',message:'needle not found: '+S+' / '+E};
+		 const range=document.createRange();range.setStart(from[0],from[1]);range.setEnd(to[0],to[1]);
+		 const selection=getSelection();selection.removeAllRanges();selection.addRange(range);
+		 return window.captureQuote()})()`);
+		const quotedMarkdown = async (start: string, end: string): Promise<string> => {
+			const result = await quoteBetween(start, end);
+			assert.equal(result.kind, "quote", result.kind === "none" ? result.message : undefined);
+			return result.kind === "quote" ? result.source : "";
+		};
+
+		const REPLY = [
+			"Intro with **bold** and `code` and [the docs](https://example.com/docs).",
+			"- first item\n- second item with *emphasis*",
+			"> quoted line\n> second quoted",
+			"```ts\nconst a = 1;\nconst b = 2;\n```",
+			"| name | value |\n| --- | --- |\n| alpha | 1 |\n| beta | 2 |",
+			"````md\n```\ninner\n```\n````",
+		].join("\n\n");
+
+		await t.test("a selection in a reply is captured as the source Markdown of exactly what is selected: tokens whole or as shown text, list markers, quote lines, code re-fenced, a table with its header", async () => {
+			await reset("quote-capture");
+			await showMessages([assistantMessage([{ type: "text", text: REPLY }])]);
+			await ui.wait("document.querySelector('.omp-md table') && document.querySelectorAll('.omp-md [data-md-leaf]').length===9");
+			assert.equal(await quotedMarkdown("bold", "docs"), "**bold** and `code` and [the docs](https://example.com/docs)", "a token the selection covers whole is source");
+			assert.equal(await quotedMarkdown("ld", "and"), "ld and", "a token the selection cuts is its shown text");
+			assert.equal(await quotedMarkdown("first", "emphasis"), "- first item\n- second item with *emphasis*", "markers stay when the selection starts at the item");
+			assert.equal(await quotedMarkdown("rst", "second"), "rst item\n- second", "and go when it starts inside");
+			assert.equal(await quotedMarkdown("quoted line", "second quoted"), "> quoted line\n> second quoted", "a quote inside the reply is sliced from its own lines");
+			assert.equal(await quotedMarkdown("ted line", "second"), "> ted line\n> second");
+			assert.equal(await quotedMarkdown("const a", "= 2;"), "```ts\nconst a = 1;\nconst b = 2;\n```");
+			assert.equal(await quotedMarkdown("a = 1;", "const b"), "```ts\na = 1;\nconst b\n```", "a partial block is re-fenced with its language");
+			assert.equal(await quotedMarkdown("beta", "2"), "| name | value |\n| --- | --- |\n| beta | 2 |", "a table keeps its header and separator");
+			assert.equal(await quotedMarkdown("```", "```"), "````md\n```\ninner\n```\n````", "a fence inside a longer fence stays inside a longer one");
+			assert.equal(await quotedMarkdown("Intro", "docs"), "Intro with **bold** and `code` and [the docs](https://example.com/docs)");
+			const everything = await quoteBetween("Intro", "inner");
+			assert.equal(everything.kind === "quote" && everything.plain, false, "nothing degraded");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("a selection across a user message, a tool row and a reply quotes the two messages and nothing of the tool; chrome, whitespace, a collapsed range and the composer are not quotable", async () => {
+			await reset("quote-capture-rows");
+			await showMessages([
+				{ role: "user", timestamp: 1, content: "Please check **this** file" },
+				assistantMessage([{ type: "toolCall", id: "r1", name: "read", arguments: { path: "src/a.ts" } }], { stopReason: "toolUse" }),
+				{ role: "toolResult", timestamp: 3, toolCallId: "r1", toolName: "read", isError: false, content: [{ type: "text", text: "RESULT_TEXT_MARK" }], details: {} },
+				assistantMessage([{ type: "text", text: "Done: `ok` now" }]),
+			]);
+			await ui.wait("document.querySelector('[data-tool-name=\"read\"]') && document.querySelectorAll('.omp-md').length>=2");
+			const joined = await quoteBetween("this", "ok");
+			assert.deepEqual(joined, { kind: "quote", source: "**this** file\n\nDone: `ok`", plain: false });
+			// Only chrome: the tool's head.
+			const chrome = await ui.evaluate<Captured>(`(()=>{const head=document.querySelector('[data-tool-name="read"] .omp-tool-head');const range=document.createRange();range.selectNodeContents(head);const selection=getSelection();selection.removeAllRanges();selection.addRange(range);return window.captureQuote()})()`);
+			assert.equal(chrome.kind, "none");
+			// A collapsed range, a whitespace-only range and a selection in the composer.
+			assert.deepEqual(await ui.evaluate("(()=>{getSelection().removeAllRanges();return window.captureQuote()})()"), { kind: "none", message: "Select text in the conversation first" });
+			await setDraft("typed words");
+			assert.deepEqual(await ui.evaluate("(()=>{const field=window.composer.el();const range=document.createRange();range.selectNodeContents(field);const selection=getSelection();selection.removeAllRanges();selection.addRange(range);return window.captureQuote()})()"), { kind: "none", message: "Select text in the conversation first" });
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("thinking is quotable once it is open; the reply's unrelated blocks contribute nothing", async () => {
+			await reset("quote-capture-thinking");
+			await showMessages([assistantMessage([{ type: "thinking", thinking: "Plan: **step** one" }, { type: "text", text: "Answer text" }])]);
+			await ui.wait("document.querySelector('.omp-thinking summary')");
+			await ui.evaluate("document.querySelector('.omp-thinking summary').click()");
+			await ui.wait("document.querySelector('.omp-thinking .omp-md')");
+			assert.equal(await quotedMarkdown("step", "one"), "**step** one");
+			assert.equal(await quotedMarkdown("Plan", "Answer"), "Plan: **step** one\n\nAnswer");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
 		await t.test("a marker is atomic for the caret and selection: it cannot be entered, and arrows hop over it", async () => {

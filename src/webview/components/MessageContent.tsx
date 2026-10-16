@@ -15,6 +15,8 @@ export interface MessageContentViewProps {
 	bypassPacing?: boolean;
 	/** A user message: its `[Image #N]` markers refer to its Nth image, and every image is labelled `#N`. */
 	references?: boolean;
+	/** The message is something the reader may quote into the draft: its Markdown keeps the records capture needs. */
+	quotable?: boolean;
 }
 export interface AssistantContentViewProps { content: readonly ChatContent[]; streaming?: boolean; bypassPacing?: boolean }
 export interface NativeDisclosureProps { title: ReactNode; children: ReactNode; className?: string; initiallyOpen?: boolean; forceOpen?: { open: boolean; generation: number }; expanded?: boolean; onExpandedChange?: (expanded: boolean) => void }
@@ -47,12 +49,12 @@ function ThinkingDisclosure({ children }: { children: ReactNode }) {
 }
 
 
-function ContentBlock({ block, pace = false, streaming = false, bypassPacing = false, imageNumber, imageAnchor }: { block: ChatContent; pace?: boolean; streaming?: boolean; bypassPacing?: boolean; imageNumber?: number; imageAnchor?: string }) {
+function ContentBlock({ block, pace = false, streaming = false, bypassPacing = false, quotable = false, imageNumber, imageAnchor }: { block: ChatContent; pace?: boolean; streaming?: boolean; bypassPacing?: boolean; quotable?: boolean; imageNumber?: number; imageAnchor?: string }) {
 	switch (block.type) {
 		case "text":
-			return pace ? <PacedMarkdown text={block.text} streaming={streaming} bypass={bypassPacing} /> : <Markdown text={block.text} />;
+			return pace ? <PacedMarkdown text={block.text} streaming={streaming} bypass={bypassPacing} quotable={quotable} /> : <Markdown text={block.text} quotable={quotable} />;
 		case "thinking":
-			return block.thinking.trim().length === 0 ? null : <ThinkingDisclosure>{pace ? <PacedMarkdown text={block.thinking} streaming={streaming} bypass={bypassPacing} /> : <Markdown text={block.thinking} />}</ThinkingDisclosure>;
+			return block.thinking.trim().length === 0 ? null : <ThinkingDisclosure>{pace ? <PacedMarkdown text={block.thinking} streaming={streaming} bypass={bypassPacing} quotable={quotable} /> : <Markdown text={block.thinking} quotable={quotable} />}</ThinkingDisclosure>;
 		case "redactedThinking": return null;
 		case "image":
 			return <figure className="omp-native-image" id={imageAnchor} tabIndex={imageAnchor === undefined ? undefined : -1} data-image-number={imageNumber}>
@@ -66,18 +68,18 @@ function ContentBlock({ block, pace = false, streaming = false, bypassPacing = f
 	}
 }
 
-export function MessageContentView({ content, pace, streaming, bypassPacing, references = false }: MessageContentViewProps) {
+export function MessageContentView({ content, pace, streaming, bypassPacing, references = false, quotable = false }: MessageContentViewProps) {
 	const base = useId();
-	if (typeof content === "string") return <Markdown text={content} />;
+	if (typeof content === "string") return <Markdown text={content} quotable={quotable} />;
 	let imageCount = 0;
 	const blocks = content.map((block, index) => {
 		const imageNumber = references && block.type === "image" ? ++imageCount : undefined;
-		return <ContentBlock key={`${block.type}:${index}`} block={block} pace={pace} streaming={streaming} bypassPacing={bypassPacing} imageNumber={imageNumber} imageAnchor={imageNumber === undefined ? undefined : `${base}-image-${imageNumber}`} />;
+		return <ContentBlock key={`${block.type}:${index}`} block={block} pace={pace} streaming={streaming} bypassPacing={bypassPacing} quotable={quotable} imageNumber={imageNumber} imageAnchor={imageNumber === undefined ? undefined : `${base}-image-${imageNumber}`} />;
 	});
 	const body = <div className="omp-native-content">{blocks}</div>;
 	return references ? <UserImageReferencesContext.Provider value={{ count: imageCount, anchor: number => `${base}-image-${number}` }}>{body}</UserImageReferencesContext.Provider> : body;
 }
 
 export function AssistantContentView({ content, streaming, bypassPacing }: AssistantContentViewProps) {
-	return <AssistantReplyContext.Provider value><MessageContentView content={content} pace streaming={streaming} bypassPacing={bypassPacing} /></AssistantReplyContext.Provider>;
+	return <AssistantReplyContext.Provider value><MessageContentView content={content} pace streaming={streaming} bypassPacing={bypassPacing} quotable /></AssistantReplyContext.Provider>;
 }

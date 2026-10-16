@@ -55,7 +55,7 @@ export function useQuoteDraft(host: QuoteHost): { notice: string | null; quote: 
 			if (!surface.apply({ from: placed.from, to: placed.to, insert: placed.insert, selection: { anchor: placed.caret, focus: placed.caret } }, "replace")) { say(HELD); return; }
 			surface.focus();
 			const lines = quoteLineCount(block);
-			say(`Quoted ${lines} line${lines === 1 ? "" : "s"} into the draft`);
+			say(request.kind === "selection" && request.plain ? `Quoted ${lines} line${lines === 1 ? "" : "s"} as plain text` : `Quoted ${lines} line${lines === 1 ? "" : "s"} into the draft`);
 		};
 		if (current.composing()) current.defer(place);
 		else place();

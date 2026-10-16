@@ -14,7 +14,9 @@
  * add a package to the bundle for behavior this panel does not need.
  */
 import type { ReactNode } from "react";
-import { Fragment, memo, useMemo, useRef } from "react";
+import { Fragment, memo, useLayoutEffect, useMemo, useRef } from "react";
+import { INLINE_TOKEN, MAX_EMPHASIS_DEPTH } from "../lib/markdown-inline.ts";
+import { LeafCollector, registerMarkdown, unregisterMarkdown, type Leaf, type LeafLine, type LeafTable, type LineOrigin } from "../lib/markdown-leaves.ts";
 import { detectChatFileLinks, fileTargetOfHref, isFileLinkCandidate } from "../lib/chat-file-links";
 import { detectWebLinks } from "../lib/chat-web-links";
 import { parseBareFileName, parseCodeSymbol } from "../../shared/code-symbols";
@@ -25,13 +27,6 @@ import { ImageReferenceToken } from "./ImageReference.tsx";
 import { WebLink } from "./WebLinks.tsx";
 import { CodeBlock } from "./CodeBlock.tsx";
 import { MermaidBlock } from "./MermaidBlock.tsx";
-
-/**
- * Inline token grammar; code wins over emphasis, bold over italic, matching markdown. A bare URL
- * is one token so the `_`/`*` inside it never start emphasis; `<https://…>` is an autolink.
- */
-const INLINE_TOKEN =
-	/(`[^`\n]+`)|(\*\*[^*\n]+\*\*)|(__[^_\n]+__)|(\*[^*\n]+\*)|(_[^_\n]+_)|(~~[^~\n]+~~)|(\[[^\]\n]*\]\((?:[^()\s]|\([^()\s]*\))+\))|(\[Image #[1-9]\d*(?:,[^\]\n]*)?\])|(<https?:\/\/[^\s<>]+>)|((?<![A-Za-z\d+.-])[Hh][Tt][Tt][Pp][Ss]?:\/\/[^\s<>"`]+)/g;
 
 const HEADING = /^(#{1,6})\s+(.*)$/;
 /** An opening fence: a run of three or more backticks and an info string without backticks (the composer's rule, `code-fence.ts`); the language is the first token of the info string. Leading whitespace of any width is tolerated: list item bodies keep their extra columns. */
@@ -52,9 +47,19 @@ const QUOTE = /^\s*>\s?(.*)$/;
 /** How many blockquotes may nest; a `>` inside the deepest one is literal text. */
 const MAX_QUOTE_DEPTH = 8;
 
-/** Where a block is parsed: inside a quote (a `mermaid` fence is then plain code, not a drawn diagram) and how many quotes deep. */
-interface BlockContext { readonly quoted: boolean; readonly depth: number }
-const TOP_LEVEL: BlockContext = { quoted: false, depth: 0 };
+/** Where a block is parsed: inside a quote (a `mermaid` fence is then plain code, not a drawn diagram), how many quotes deep, and the collector of the leaf records when the message is quotable. */
+interface BlockContext { readonly quoted: boolean; readonly depth: number; readonly leaves: LeafCollector | null }
+const TOP_LEVEL: BlockContext = { quoted: false, depth: 0, leaves: null };
+
+/** Where line `index` of a nested parse came from; `null` origins are the source's own lines. */
+function originAt(origins: readonly LineOrigin[] | null, index: number): LineOrigin {
+	return origins === null ? { line: index, start: 0, quote: 0 } : (origins[index] as LineOrigin);
+}
+
+/** The origin of `content`, what is left of `line` once the parse took its prefix (and `quotes` levels of quote) off. */
+function stripped(origin: LineOrigin, line: string, content: string, quotes = 0): LineOrigin {
+	return { line: origin.line, start: origin.start + Math.max(0, line.length - content.length), quote: origin.quote + quotes };
+}
 
 /** Whether `line` opens or continues a quote at this depth. */
 function quoteLine(line: string, context: BlockContext): boolean {
@@ -110,9 +115,6 @@ function linkLabel(label: string, key: string): ReactNode {
 	if (cursor < label.length) nodes.push(<Fragment key={`${key}t${cursor}`}>{breakable(label.slice(cursor))}</Fragment>);
 	return <Fragment key={key}>{nodes}</Fragment>;
 }
-
-/** How many emphasis levels deep inline content is still parsed for links and code spans (bold inside italic inside strike). */
-const MAX_EMPHASIS_DEPTH = 2;
 
 /** The content of an emphasis token: links, code spans and file paths like top-level text, nesting bounded. */
 function emphasized(inner: string, key: string, depth: number): ReactNode {
@@ -248,15 +250,16 @@ function listItem(line: string): ListItemMatch | null {
  * blank lines between them; the owned text is rendered as nested blocks, so
  * nested lists, code fences and paragraphs inside items keep their structure.
  */
-function parseList(lines: readonly string[], start: number, listKey: string, context: BlockContext): { node: ReactNode; next: number } {
+function parseList(lines: readonly string[], origins: readonly LineOrigin[] | null, start: number, listKey: string, context: BlockContext): { node: ReactNode; next: number } {
 	const first = listItem(lines[start] as string) as ListItemMatch;
-	const items: string[][] = [];
+	const tracking = context.leaves !== null;
+	const items: { lines: string[]; origins: LineOrigin[] }[] = [];
 	let loose = false;
 	let index = start;
 	while (index < lines.length) {
 		const head = listItem(lines[index] as string);
 		if (head === null || head.indent < first.indent || head.ordered !== first.ordered) break;
-		const body = [head.content];
+		const body = { lines: [head.content], origins: tracking ? [stripped(originAt(origins, index), lines[index] as string, head.content)] : [] };
 		index++;
 		let previousBlank = false;
 		while (index < lines.length) {
@@ -268,7 +271,10 @@ function parseList(lines: readonly string[], start: number, listKey: string, con
 				const following = lines[ahead] as string;
 				const nested = listItem(following);
 				if (indentWidth(following) >= head.contentOffset || (nested !== null && nested.indent > first.indent)) {
-					for (let blank = index; blank < ahead; blank++) body.push("");
+					for (let blank = index; blank < ahead; blank++) {
+						body.lines.push("");
+						if (tracking) body.origins.push(stripped(originAt(origins, blank), lines[blank] as string, ""));
+					}
 					loose = true;
 					previousBlank = true;
 					index = ahead;
@@ -281,9 +287,13 @@ function parseList(lines: readonly string[], start: number, listKey: string, con
 			const nested = listItem(line);
 			const indent = indentWidth(line);
 			if (indent >= head.contentOffset || (nested !== null && nested.indent > first.indent)) {
-				body.push(dedent(line, Math.min(indent, head.contentOffset)));
+				const content = dedent(line, Math.min(indent, head.contentOffset));
+				body.lines.push(content);
+				if (tracking) body.origins.push(stripped(originAt(origins, index), line, content));
 			} else if (nested === null && !previousBlank && !FENCE.test(line) && !HEADING.test(line) && !RULE.test(line) && !quoteLine(line, context)) {
-				body.push(line.trim());
+				const content = line.trim();
+				body.lines.push(content);
+				if (tracking) body.origins.push(stripped(originAt(origins, index), line, line.trimStart()));
 			} else {
 				break;
 			}
@@ -296,7 +306,7 @@ function parseList(lines: readonly string[], start: number, listKey: string, con
 		if (sibling === null || sibling.indent < first.indent || sibling.ordered !== first.ordered) break;
 	}
 	const rendered = items.map((body, itemIndex) => (
-		<li key={`li${itemIndex}`}>{parseBlocks(body.join("\n"), !loose, `${listKey}-${itemIndex}`, context)}</li>
+		<li key={`li${itemIndex}`}>{parseBlockRange(body.lines, tracking ? body.origins : null, 0, 0, !loose, `${listKey}-${itemIndex}`, context).blocks}</li>
 	));
 	return {
 		node: first.ordered
@@ -306,20 +316,20 @@ function parseList(lines: readonly string[], start: number, listKey: string, con
 	};
 }
 
-/** Parse block structure; `tight` renders paragraphs inline, as in a tight list item. */
-function parseBlocks(text: string, tight = false, keyPrefix = "b", context: BlockContext = TOP_LEVEL): ReactNode[] {
-	return parseBlockRange(text.split(/\r?\n/), 0, 0, tight, keyPrefix, context).blocks;
-}
-
 /**
  * One parse of a whole text, with what a later parse of a longer text can reuse: the
  * number of lines, and the line each block started on. The block keys are the block's index.
+ * A quotable parse also holds its leaf records (`leaves`, numbered from 0) and the number of leaves before each block
+ * (`leafStarts`), so a reused block keeps its leaf numbers.
  */
 export interface MarkdownParse {
 	readonly text: string;
 	readonly lineCount: number;
 	readonly blocks: readonly ReactNode[];
 	readonly starts: readonly number[];
+	readonly quotable: boolean;
+	readonly leaves: readonly Leaf[];
+	readonly leafStarts: readonly number[];
 }
 
 /**
@@ -329,9 +339,9 @@ export interface MarkdownParse {
  * the next block), so every block that ends before the previous text's last line — the one
  * line an append can change — is kept as the same element, and only the tail is parsed again.
  */
-export function parseMarkdown(text: string, previous: MarkdownParse | null): MarkdownParse {
+export function parseMarkdown(text: string, previous: MarkdownParse | null, quotable = false): MarkdownParse {
 	const lines = text.split(/\r?\n/);
-	if (previous !== null && previous.starts.length >= 2 && text.length > previous.text.length && text.startsWith(previous.text)) {
+	if (previous !== null && previous.quotable === quotable && previous.starts.length >= 2 && text.length > previous.text.length && text.startsWith(previous.text)) {
 		const modified = previous.lineCount - 1;
 		const last = previous.starts.length - 1;
 		// A block that starts on the modified line may now be joined by the block before it
@@ -339,34 +349,74 @@ export function parseMarkdown(text: string, previous: MarkdownParse | null): Mar
 		// parsed again too.
 		const from = (previous.starts[last] as number) < modified ? last : last - 1;
 		if (from >= 1) {
-			const tail = parseBlockRange(lines, previous.starts[from] as number, from, false, "b", TOP_LEVEL);
-			return { text, lineCount: lines.length, blocks: [...previous.blocks.slice(0, from), ...tail.blocks], starts: [...previous.starts.slice(0, from), ...tail.starts] };
+			const kept = previous.leafStarts[from] as number;
+			const collector = quotable ? new LeafCollector(kept) : null;
+			const tail = parseBlockRange(lines, null, previous.starts[from] as number, from, false, "b", { ...TOP_LEVEL, leaves: collector });
+			return {
+				text,
+				lineCount: lines.length,
+				blocks: [...previous.blocks.slice(0, from), ...tail.blocks],
+				starts: [...previous.starts.slice(0, from), ...tail.starts],
+				quotable,
+				leaves: collector === null ? [] : [...previous.leaves.slice(0, kept), ...collector.leaves],
+				leafStarts: [...previous.leafStarts.slice(0, from), ...tail.leafStarts],
+			};
 		}
 	}
-	const parsed = parseBlockRange(lines, 0, 0, false, "b", TOP_LEVEL);
-	return { text, lineCount: lines.length, blocks: parsed.blocks, starts: parsed.starts };
+	const collector = quotable ? new LeafCollector(0) : null;
+	const parsed = parseBlockRange(lines, null, 0, 0, false, "b", { ...TOP_LEVEL, leaves: collector });
+	return { text, lineCount: lines.length, blocks: parsed.blocks, starts: parsed.starts, quotable, leaves: collector === null ? [] : collector.leaves, leafStarts: parsed.leafStarts };
 }
 
-/** Parse the blocks from line `from` on; `firstKey` numbers the first of them. Every block takes exactly one key. */
-function parseBlockRange(lines: readonly string[], from: number, firstKey: number, tight: boolean, keyPrefix: string, context: BlockContext): { blocks: ReactNode[]; starts: number[] } {
+/** The leaf's line `index` of `lines`: its origin, with the text the leaf draws from it and the characters of it the parse dropped. */
+function leafLine(origins: readonly LineOrigin[] | null, lines: readonly string[], index: number, text = lines[index] as string): LeafLine {
+	const origin = stripped(originAt(origins, index), lines[index] as string, text);
+	return { ...origin, text };
+}
+
+/**
+ * Parse the blocks from line `from` on; `firstKey` numbers the first of them. Every block takes exactly one key.
+ * `origins` says where each line came from when it is not a line of the text itself (`null`: the lines are the source's own); the
+ * leaf collector of `context`, when there is one, records every leaf block and its element carries the leaf's number.
+ */
+function parseBlockRange(lines: readonly string[], origins: readonly LineOrigin[] | null, from: number, firstKey: number, tight: boolean, keyPrefix: string, context: BlockContext): { blocks: ReactNode[]; starts: number[]; leafStarts: number[] } {
 	const blocks: ReactNode[] = [];
 	const starts: number[] = [];
+	const leafStarts: number[] = [];
+	const collector = context.leaves;
 	let index = from;
 	let key = firstKey;
 	// Progress invariant: every iteration consumes at least one line. An iteration that did not is undone and its line becomes paragraph text, so the parse is total even if a rule is wrong in some way not yet found.
 	let stalled = -1;
+	const begin = (at: number): void => {
+		starts.push(at);
+		leafStarts.push(collector === null ? 0 : collector.count);
+	};
+	const paragraphOf = (paragraphLines: readonly string[], firstLine: number, paragraphKey: string): ReactNode => {
+		const leaf = collector?.add({
+			kind: "text",
+			lines: paragraphLines.map((_, offset) => leafLine(origins, lines, firstLine + offset)),
+			first: originAt(origins, firstLine).line,
+			last: originAt(origins, firstLine + paragraphLines.length - 1).line,
+		});
+		return tight
+			? <span key={paragraphKey} data-md-leaf={leaf}>{renderLines(paragraphLines, paragraphKey)}</span>
+			: <p key={paragraphKey} data-md-leaf={leaf}>{renderLines(paragraphLines, paragraphKey)}</p>;
+	};
 
 	while (index < lines.length) {
 		if (index === stalled) {
 			const keep = starts.indexOf(index);
 			if (keep >= 0) {
 				blocks.length = keep;
+				collector?.truncate(leafStarts[keep] as number);
 				starts.length = keep;
+				leafStarts.length = keep;
 				key = firstKey + keep;
 			}
 			const paragraphKey = `${keyPrefix}${key++}`;
-			starts.push(index);
-			blocks.push(tight ? <span key={paragraphKey}>{renderLines([lines[index] as string], paragraphKey)}</span> : <p key={paragraphKey}>{renderLines([lines[index] as string], paragraphKey)}</p>);
+			begin(index);
+			blocks.push(paragraphOf([lines[index] as string], index, paragraphKey));
 			index++;
 			continue;
 		}
@@ -376,12 +426,13 @@ function parseBlockRange(lines: readonly string[], from: number, firstKey: numbe
 			index++;
 			continue;
 		}
-		starts.push(index);
+		begin(index);
 
 		const fence = FENCE.exec(line);
 		if (fence !== null) {
 			const fenceLength = (fence[1] as string).length;
 			const language = (fence[2] as string).trim().split(/\s+/)[0] ?? "";
+			const open = index;
 			const body: string[] = [];
 			index++;
 			while (index < lines.length && !closesFence(lines[index] as string, fenceLength)) {
@@ -389,13 +440,23 @@ function parseBlockRange(lines: readonly string[], from: number, firstKey: numbe
 				index++;
 			}
 			const closed = index < lines.length;
+			const closing = index;
 			index++; // closing fence (or EOF)
 			const text = body.join("\n");
+			const leaf = collector?.add({
+				kind: "code",
+				lines: body.map((_, offset) => leafLine(origins, lines, open + 1 + offset)),
+				first: originAt(origins, open).line,
+				last: originAt(origins, closed ? closing : Math.max(open, closing - 1)).line,
+				open: leafLine(origins, lines, open),
+				language,
+				closed,
+			});
 			blocks.push(
 				language.toLowerCase() === "mermaid" && !context.quoted ? (
-					<MermaidBlock key={`b${key++}`} source={text} closed={closed} />
+					<MermaidBlock key={`b${key++}`} source={text} closed={closed} leaf={leaf} />
 				) : (
-					<CodeBlock key={`b${key++}`} language={language} source={text} closed={closed} />
+					<CodeBlock key={`b${key++}`} language={language} source={text} closed={closed} leaf={leaf} />
 				),
 			);
 			continue;
@@ -405,13 +466,15 @@ function parseBlockRange(lines: readonly string[], from: number, firstKey: numbe
 		if (heading !== null) {
 			const level = Math.min(6, (heading[1] as string).length);
 			const Tag = `h${level}` as "h1" | "h2" | "h3" | "h4" | "h5" | "h6";
-			blocks.push(<Tag key={`b${key++}`}>{renderInline(heading[2] as string, `h${key}`)}</Tag>);
+			const leaf = collector?.add({ kind: "text", lines: [leafLine(origins, lines, index, heading[2] as string)], first: originAt(origins, index).line, last: originAt(origins, index).line });
+			blocks.push(<Tag key={`b${key++}`} data-md-leaf={leaf}>{renderInline(heading[2] as string, `h${key}`)}</Tag>);
 			index++;
 			continue;
 		}
 
 		if (RULE.test(line)) {
-			blocks.push(<hr key={`b${key++}`} />);
+			const leaf = collector?.add({ kind: "rule", lines: [leafLine(origins, lines, index)], first: originAt(origins, index).line, last: originAt(origins, index).line });
+			blocks.push(<hr key={`b${key++}`} data-md-leaf={leaf} />);
 			index++;
 			continue;
 		}
@@ -419,19 +482,22 @@ function parseBlockRange(lines: readonly string[], from: number, firstKey: numbe
 		if (quoteLine(line, context)) {
 			// A quote ends at the first line without `>`: a comment written right under it is its own paragraph (no lazy continuation).
 			const quoted: string[] = [];
+			const quotedOrigins: LineOrigin[] = [];
 			while (index < lines.length && quoteLine(lines[index] as string, context)) {
-				quoted.push((QUOTE.exec(lines[index] as string) as RegExpExecArray)[1] as string);
+				const content = (QUOTE.exec(lines[index] as string) as RegExpExecArray)[1] as string;
+				quoted.push(content);
+				if (collector !== null) quotedOrigins.push(stripped(originAt(origins, index), lines[index] as string, content, 1));
 				index++;
 			}
 			const quoteKey = key++;
 			blocks.push(
-				<blockquote key={`b${quoteKey}`}>{parseBlocks(quoted.join("\n"), false, `q${quoteKey}-`, { quoted: true, depth: context.depth + 1 })}</blockquote>,
+				<blockquote key={`b${quoteKey}`}>{parseBlockRange(quoted, collector === null ? null : quotedOrigins, 0, 0, false, `q${quoteKey}-`, { ...context, quoted: true, depth: context.depth + 1 }).blocks}</blockquote>,
 			);
 			continue;
 		}
 
 		if (listItem(line) !== null) {
-			const list = parseList(lines, index, `${keyPrefix}${key++}`, context);
+			const list = parseList(lines, origins, index, `${keyPrefix}${key++}`, context);
 			blocks.push(list.node);
 			index = list.next;
 			continue;
@@ -440,12 +506,17 @@ function parseBlockRange(lines: readonly string[], from: number, firstKey: numbe
 		const nextLine = lines[index + 1];
 		if (line.includes("|") && nextLine !== undefined && TABLE_SEPARATOR.test(nextLine)) {
 			const header = splitTableRow(line);
+			const table: LeafTable | undefined = collector === null ? undefined : { header: leafLine(origins, lines, index), separator: leafLine(origins, lines, index + 1) };
+			const headerLeaf = collector?.add({ kind: "row", lines: [table!.header], first: table!.header.line, last: table!.header.line, table, header: true });
 			index += 2;
 			const rows: string[][] = [];
+			const rowLeaves: (number | undefined)[] = [];
 			while (index < lines.length) {
 				const row = lines[index] as string;
 				if (row.trim() === "" || !row.includes("|")) break;
 				rows.push(splitTableRow(row));
+				const rowLine = collector === null ? undefined : leafLine(origins, lines, index);
+				rowLeaves.push(collector?.add({ kind: "row", lines: [rowLine!], first: rowLine!.line, last: rowLine!.line, table, header: false }));
 				index++;
 			}
 			// A table cannot wrap below its longest words: a wide one scrolls inside its own block, never the transcript.
@@ -453,7 +524,7 @@ function parseBlockRange(lines: readonly string[], from: number, firstKey: numbe
 				<div className="omp-table-scroll" key={`b${key++}`}>
 					<table>
 						<thead>
-							<tr>
+							<tr data-md-leaf={headerLeaf}>
 								{header.map((cell, cellIndex) => (
 									<th key={`th${cellIndex}`}>{renderInline(cell, `th${cellIndex}`)}</th>
 								))}
@@ -461,7 +532,7 @@ function parseBlockRange(lines: readonly string[], from: number, firstKey: numbe
 						</thead>
 						<tbody>
 							{rows.map((row, rowIndex) => (
-								<tr key={`tr${rowIndex}`}>
+								<tr key={`tr${rowIndex}`} data-md-leaf={rowLeaves[rowIndex]}>
 									{header.map((_, cellIndex) => (
 										<td key={`td${cellIndex}`}>{renderInline(row[cellIndex] ?? "", `td${rowIndex}-${cellIndex}`)}</td>
 									))}
@@ -475,6 +546,7 @@ function parseBlockRange(lines: readonly string[], from: number, firstKey: numbe
 		}
 
 		// Paragraph: consecutive lines that do not open another block, joined by a soft break. The first line is always taken (the branches above did not take it); a list-like line that `listItem` rejects (`1234567890. x`, a no-break space after the marker) is paragraph text, not a block opener.
+		const paragraphStart = index;
 		const paragraph: string[] = [];
 		while (index < lines.length) {
 			const paragraphLine = lines[index] as string;
@@ -492,17 +564,24 @@ function parseBlockRange(lines: readonly string[], from: number, firstKey: numbe
 			paragraph.push(paragraphLine);
 			index++;
 		}
-		const paragraphKey = `${keyPrefix}${key++}`;
-		blocks.push(tight ? <span key={paragraphKey}>{renderLines(paragraph, paragraphKey)}</span> : <p key={paragraphKey}>{renderLines(paragraph, paragraphKey)}</p>);
+		blocks.push(paragraphOf(paragraph, paragraphStart, `${keyPrefix}${key++}`));
 	}
 
-	return { blocks, starts };
+	return { blocks, starts, leafStarts };
 }
 
-export const Markdown = memo(function Markdown({ text }: { text: string }): ReactNode {
+export const Markdown = memo(function Markdown({ text, quotable = false }: { text: string; quotable?: boolean }): ReactNode {
 	// The previous parse feeds the next one: while a reply streams, only the tail is parsed again.
 	const previous = useRef<MarkdownParse | null>(null);
-	const parsed = useMemo(() => parseMarkdown(text, previous.current), [text]);
+	const parsed = useMemo(() => parseMarkdown(text, previous.current, quotable), [text, quotable]);
 	previous.current = parsed;
-	return <div className="omp-md">{parsed.blocks}</div>;
+	const root = useRef<HTMLDivElement>(null);
+	// A quotable message hands the page the parse that produced its DOM, once the DOM is committed.
+	useLayoutEffect(() => {
+		const element = root.current;
+		if (!quotable || element === null) return undefined;
+		registerMarkdown(element, { text: parsed.text, leaves: parsed.leaves });
+		return () => unregisterMarkdown(element);
+	}, [parsed, quotable]);
+	return <div ref={root} className="omp-md">{parsed.blocks}</div>;
 });

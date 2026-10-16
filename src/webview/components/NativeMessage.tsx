@@ -264,7 +264,7 @@ function MessageView({ message, superseded, irc }: { message: ChatMessage; super
 		case "developer": return null;
 		case "user":
 			return <section className="omp-native-message omp-user">
-				{message.synthetic ? <NativeDisclosure title="Agent-attributed input"><MessageContentView content={message.content} references /></NativeDisclosure> : <MessageContentView content={message.content} references />}
+				{message.synthetic ? <NativeDisclosure title="Agent-attributed input"><MessageContentView content={message.content} references quotable /></NativeDisclosure> : <MessageContentView content={message.content} references quotable />}
 			</section>;
 		case "custom": case "hookMessage": return <CustomMessageView message={message} irc={irc} />;
 		case "bashExecution": case "pythonExecution": return <ExecutionView message={message} />;

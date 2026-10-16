@@ -9,10 +9,11 @@ import { useHighlightedRuns } from "../lib/use-highlighted-runs.ts";
 import { CodeRuns } from "./CodeRuns.tsx";
 import { CopyButton } from "./CopyButton.tsx";
 
-export function CodeBlock({ language, source, closed, copy = true }: { language: string; source: string; closed: boolean; copy?: boolean }) {
+/** `leaf` is the quote record number of a block in a quotable message (`data-md-leaf`). */
+export function CodeBlock({ language, source, closed, copy = true, leaf }: { language: string; source: string; closed: boolean; copy?: boolean; leaf?: number }) {
 	const runs = useHighlightedRuns(language, source, closed);
 	return (
-		<div className="omp-code-block">
+		<div className="omp-code-block" data-md-leaf={leaf}>
 			<pre>
 				{runs === null ? (
 					<code data-language={language}>{source}</code>
