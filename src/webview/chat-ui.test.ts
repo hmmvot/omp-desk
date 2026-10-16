@@ -4567,6 +4567,52 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		await t.test("pasting or dropping several lines on a quote line keeps every line in the quote as one undo step; at column 0, outside a quote and in a top-level block it is the plain paste", async () => {
+			await reset("quote-paste");
+			await ui.evaluate("window.composer.focus()");
+			const pasteAt = async (draft: string, start: number, end: number, plain: string, expected: string, what: string): Promise<void> => {
+				await setDraft(draft);
+				await ui.evaluate("window.composer.focus()");
+				await setSelection(start, end);
+				assert.equal((await dispatchClipboard("paste", plain)).prevented, true);
+				await waitDraft(`window.composer.value()===${JSON.stringify(expected)}`);
+				await ctrlZ();
+				await waitDraft(`window.composer.value()===${JSON.stringify(draft)}`);
+				assert.deepEqual(await ui.evaluate("window.errors"), [], what);
+			};
+			// The maintainer's case: the caret after `> `, several lines, CRLF and a lone CR, an empty line.
+			await pasteAt("> ", 2, 2, "one\r\ntwo\rthree\r\n\r\nfour", "> one\n> two\n> three\n>\n> four", "plain lines after `> `");
+			await pasteAt("> > a\n\nz", 5, 5, "x\ny", "> > ax\n> > y\n\nz", "a nested prefix is repeated whole");
+			await pasteAt("  > a", 5, 5, "x\ny", "  > ax\n  > y", "an indented prefix is repeated whole");
+			await pasteAt("> a\n\nz", 3, 3, "> x\n> y", "> a> x\n> y\n\nz", "a quote line pasted after text is text there");
+			await pasteAt("> ", 2, 2, "> x\n> y", "> x\n> y", "an already quoted block is not nested again");
+			await pasteAt("> ```ts\n> a\n> ```", 11, 11, "x\ny", "> ```ts\n> ax\n> y\n> ```", "inside a fenced block nested in the quote");
+			await pasteAt("> a\nb", 3, 5, "x\ny", "> ax\n> y", "a selection from the quote into a plain line takes the prefix of the line it starts on");
+			// The plain paste: column 0 before the `>`, inside the prefix, a line that is not a quote, a top-level block.
+			await pasteAt("> a", 0, 0, "x\ny", "x\ny> a", "column 0");
+			await pasteAt("> > a", 3, 3, "x\ny", "> >x\ny a", "inside the prefix");
+			await pasteAt("a", 1, 1, "x\ny", "ax\ny", "outside a quote");
+			await pasteAt("```\n> a\n```", 7, 7, "x\ny", "```\n> ax\ny\n```", "a `>` line in a top-level block is code");
+			// The caret lands after the pasted text, in the field.
+			await setDraft("> ");
+			await ui.evaluate("window.composer.focus()");
+			await setSelection(2, 2);
+			await dispatchClipboard("paste", "x\ny\n");
+			await waitDraft(`window.composer.value()===${JSON.stringify("> x\n> y\n> ")}`);
+			assert.deepEqual(await areaState(), { value: "> x\n> y\n> ", start: 10, end: 10, focused: true });
+			// A drop of plain text goes through the same insertion.
+			await setDraft("> hello");
+			await ui.evaluate("window.composer.focus()");
+			const point = await ui.evaluate<{ x: number; y: number }>("(()=>{const text=window.composer.el().children[0].firstChild;const range=document.createRange();range.setStart(text,3);range.setEnd(text,4);const box=range.getBoundingClientRect();return{x:box.left+1,y:box.top+box.height/2}})()");
+			const dropped = await ui.evaluate<boolean>(`(()=>{const data=new DataTransfer();data.setData('text/plain','X\\r\\nY');
+			 const event=new DragEvent('drop',{dataTransfer:data,clientX:${point.x},clientY:${point.y},bubbles:true,cancelable:true});window.composer.el().dispatchEvent(event);return event.defaultPrevented})()`);
+			assert.equal(dropped, true);
+			await waitDraft(`window.composer.value()===${JSON.stringify("> hX\n> Yello")}`);
+			await ctrlZ();
+			await waitDraft("window.composer.value()==='> hello'");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("every offset of a draft with chips, blocks and empty lines maps to the DOM and back to itself", async () => {
 			await buildDraft("surface-round-trip");
 			await setDraft("A [Image #1, 10x6][Image #2, 20x8] B\n[Image #3, 30x9]\n\n```\ncode [Image #1, 10x6]\n\n```\n[Image #2, 20x8]\nlast ");

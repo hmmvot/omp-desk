@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { findFencedBlocks, type TextEdit } from "./code-fence.ts";
-import { quoteKeyEdit, type QuoteKey } from "./quote-edits.ts";
+import { quoteKeyEdit, quotePasteEdit, type QuoteKey } from "./quote-edits.ts";
 import { findQuoteRuns } from "./quote-lines.ts";
 
 const plain = (key: string, modifiers: Partial<QuoteKey> = {}): QuoteKey => ({ key, shiftKey: false, ctrlKey: false, altKey: false, metaKey: false, ...modifiers });
@@ -109,5 +109,83 @@ describe("other keys", () => {
 	it("are not handled", () => {
 		assert.equal(run("> a|b", plain("a")), null);
 		assert.equal(run("> a|b", plain("Tab")), null);
+	});
+});
+
+/** The draft after pasting `pasted` at `|` (or over `[` `]`), with the caret shown as `|`; `null` when the paste is the plain one. */
+function paste(source: string, pasted: string): string | null {
+	const caret = source.indexOf("|");
+	const text = caret >= 0 ? source.replace("|", "") : source.replace("[", "").replace("]", "");
+	const start = caret >= 0 ? caret : source.indexOf("[");
+	const end = caret >= 0 ? caret : source.indexOf("]") - 1;
+	const edit = quotePasteEdit(text, findQuoteRuns(text, findFencedBlocks(text)), pasted, start, end);
+	if (edit === null) return null;
+	const result = text.slice(0, edit.from) + edit.insert + text.slice(edit.to);
+	return `${result.slice(0, edit.selectionStart)}|${result.slice(edit.selectionStart)}`;
+}
+
+describe("pasting several lines into a quote line", () => {
+	it("keeps every pasted line in the quote, the first at the caret and each later one under the line's prefix", () => {
+		assert.equal(paste("> |", "one\ntwo\nthree"), "> one\n> two\n> three|");
+		assert.equal(paste("> a|b", "x\ny"), "> ax\n> y|b");
+	});
+
+	it("repeats the whole prefix: nested levels, indentation and a prefix without a blank", () => {
+		assert.equal(paste("> > |", "one\ntwo"), "> > one\n> > two|");
+		assert.equal(paste("  > |", "one\ntwo"), "  > one\n  > two|");
+		assert.equal(paste(">|a", "x\ny"), ">x\n>y|a");
+	});
+
+	it("makes an empty pasted line a bare prefix without its trailing blank, as the capture does", () => {
+		assert.equal(paste("> > |", "one\n\ntwo"), "> > one\n> >\n> > two|");
+		assert.equal(paste("  > |", "one\n\ntwo"), "  > one\n  >\n  > two|");
+	});
+
+	it("gives the line the caret ends on the full prefix when the paste ends with a line break", () => {
+		assert.equal(paste("> |", "one\n"), "> one\n> |");
+		assert.equal(paste("> a|b", "x\n"), "> ax\n> |b");
+		assert.equal(paste("> |", "\n\n"), "> \n>\n> |");
+	});
+
+	it("does not nest again a pasted line that already is a quote line", () => {
+		assert.equal(paste("> |", "> one\n> two"), "> one\n> two|", "a quoted block replaces the line's own prefix");
+		assert.equal(paste("> |", "> one\n> > two"), "> one\n> > two|", "its own depth is kept");
+		assert.equal(paste("> > |", "> one\n> two"), "> one\n> two|");
+		assert.equal(paste("> |", "one\n> two\nthree"), "> one\n> two\n> three|", "a mixed block: quote lines stay, the others join the quote");
+		assert.equal(paste("> a|", "b\n> c"), "> ab\n> c|", "the first line joins the text before the caret");
+	});
+
+	it("keeps a quote line pasted first after text in a line as text, with the prefix on the next lines", () => {
+		assert.equal(paste("> a|", "> b\nc"), "> a> b\n> c|");
+	});
+
+	it("handles CRLF and a lone CR as line breaks", () => {
+		assert.equal(paste("> |", "one\r\ntwo\r\n\r\nthree"), "> one\n> two\n>\n> three|");
+		assert.equal(paste("> |", "one\rtwo"), "> one\n> two|");
+		assert.equal(paste("> |", "one\r\n> two"), "> one\n> two|");
+	});
+
+	it("keeps the prefix inside a fenced block nested in the quote", () => {
+		assert.equal(paste("> ```ts\n> a|\n> ```", "x\n\ny"), "> ```ts\n> ax\n>\n> y|\n> ```");
+	});
+
+	it("is the plain paste with the caret at column 0, inside the prefix, or before the text that follows it", () => {
+		assert.equal(paste("|> a", "x\ny"), null);
+		assert.equal(paste("> >| a", "x\ny"), null);
+		assert.equal(paste(" |> a", "x\ny"), null);
+	});
+
+	it("is the plain paste for a single line, on a line that is not a quote and in a top-level fenced block", () => {
+		assert.equal(paste("> a|", "x"), null);
+		assert.equal(paste("a|", "x\ny"), null);
+		assert.equal(paste("```\n> a|\n```", "x\ny"), null);
+		assert.equal(paste("> a\n\n|", "x\ny"), null);
+	});
+
+	it("uses the prefix of the line where a selection starts, whatever lines the selection spans", () => {
+		assert.equal(paste("> a[b\n> c]d", "x\ny"), "> ax\n> y|d");
+		assert.equal(paste("> a[b\nplain]d", "x\ny"), "> ax\n> y|d", "the plain tail joins the last pasted line, as typing over the selection would join it");
+		assert.equal(paste("plain[ a\n> b]c", "x\ny"), null, "a selection that starts outside a quote is the plain paste");
+		assert.equal(paste("> [a]b", "x\ny"), "> x\n> y|b");
 	});
 });

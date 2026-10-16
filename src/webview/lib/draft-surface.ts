@@ -29,6 +29,7 @@ import { DraftHistory, type DraftSnapshot, type EditKind } from "./draft-history
 import { deletionTarget, normalizeLineEndings, type DeleteKind } from "./draft-text.ts";
 import { deletionRange, findImageReferences, repairDamagedReferences, snapSelection } from "./image-references.ts";
 import { findQuoteRuns } from "./quote-lines.ts";
+import { quotePasteEdit } from "./quote-edits.ts";
 
 /** How a write from outside the surface treats the undo stack: one more step, or a fresh start. */
 export type HistoryMode = "record" | "reset";
@@ -460,7 +461,9 @@ export class DraftSurface {
 
 	#insert(text: string, kind: EditKind, at?: number): void {
 		const { start, end } = at === undefined ? { start: this.selectionStart, end: this.selectionEnd } : { start: at, end: at };
-		this.apply({ from: start, to: end, insert: text }, kind);
+		// Pasted, dropped and multi-character text that holds a line break stays in the quote it lands in (quote-edits.ts, quotePasteEdit).
+		const quoted = kind === "paste" && text.includes("\n") ? quotePasteEdit(this.#text, findQuoteRuns(this.#text, findFencedBlocks(this.#text)), text, start, end) : null;
+		this.apply(quoted === null ? { from: start, to: end, insert: text } : { from: quoted.from, to: quoted.to, insert: quoted.insert }, kind);
 	}
 
 	#onBeforeInput(event: InputEvent): void {
