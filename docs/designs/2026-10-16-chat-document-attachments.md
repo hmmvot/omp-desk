@@ -1,5 +1,5 @@
 ---
-status: accepted
+status: implemented
 date: 2026-10-16
 ---
 
@@ -398,3 +398,14 @@ Acceptance: a `.md` dragged from VS Code's Explorer and the same file pasted sho
 - Decisions for Main: **H** (decision 10) `MAX_DRAFT_TEXT_LENGTH` becomes `MAX_CHAT_TEXT_LENGTH`; ADR-0050 carries the amendment and the Restart refusal wording is corrected by *Rollout* 8. **F** (decision 11) above.
 - Answers to the questions put to the review: the host is the only path **authority** (the page relays drop URIs it read from the drag, which the host treats as untrusted); one reply, kept ordered, is right and a second message is rejected; ADR-0077 is safe if the five invariants hold and its tests stay unchanged; the guard is complete with the four added sites; the no-path text rule is sound with the amendments; the send-time check is a best-effort check with the stated race and the corrected placement.
 - Rejected alternatives: a separate reply message for documents; a page-side timeout for the picker; counting the check in `reading`.
+
+## Implementation (2026-10-16)
+
+Implemented in the planned order (slice 8, then 1 to 7, then 9) on `main`, unreleased. What differs from the text above:
+
+- **Decision 25** was added by the maintainer after acceptance (design commit `414e936`). Slice 0 measured it against installed OMP 18.11.1 through the real RPC: U+200B stored verbatim, reached the model unchanged, and none of `@`, `^model`, `+N`, `/skill:` acted after it, on an idle `prompt` and on a `steer`. `C` in a block counts the escaped text; `unescapeFileText` is decided from the stored text alone (an existing U+200B in front of a sigil is escaped too, so the inverse is unambiguous). The `/skill:` refusal of decision 22 is gone; a draft whose own text starts with `/` keeps the slash-command rule.
+- **The Attach button has no `<input type="file">`.** It posts `omp:pick-files` and the host opens the dialog. The end-to-end specs therefore drive the same attach path through a synthetic paste of `File` objects and a drop carrying `application/vnd.code.uri-list` (`Desk.pasteFiles`, `Desk.dropUris`); the dialog itself is not driven by any test.
+- `imageFilesFrom` became `filesFrom` (it returns every file of a paste or drop; the page classifies by first bytes afterwards).
+- The mock model server records `fullUserText` (at most 400 000 characters) per request for the end-to-end spec.
+
+**Evidence.** Unit and Chromium suites for every changed layer pass (`chat-ui.test.ts` 208 of 208 in an owned headless Chromium; the wide non-Chromium run of `src/host`, `src/protocol`, `src/wiring`, `src/shared`, `src/chat`, `src/webview/lib` and the extension-lifecycle test had one failure, `pty-client-bun.test.ts` "passes a bun-shim launch's Bun flags…", which starts a real Bun broker and finds no file written by its child, unrelated to attachments), `npm run typecheck` is green, and `test/e2e/scenarios/39-chat-document-attachments.spec.ts` and `35-chat-images.spec.ts` pass in a hidden window: a 100 000-character Markdown dragged in by `vnd.code.uri-list` reaches the model whole with every sigil escaped, a pasted no-path file steers a running turn, the rows are closed, open to the original text, survive Reload Window, and a rewind brings the chip back. `readme-screenshots.spec.ts` was edited (the removed `<input>` replaced by `Desk.pasteFiles`) and typechecked but not run, because running it overwrites the committed images under `media/readme`.
