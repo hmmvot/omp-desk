@@ -9,6 +9,8 @@ import { describe, it } from "node:test";
 
 import type { GuestHostMessage } from "../../protocol/messages.ts";
 import { attachInsertedText, followedByBlank, offerInsertedText, spaceInsertion, subscribeInsertedText } from "./insert-text.ts";
+import { provideQuoteSink } from "./quote-sink.ts";
+import type { QuoteRequest } from "./quote-sink.ts";
 
 describe("spaceInsertion", () => {
 	it("adds no space at the start of an empty draft, but one after it so typing can continue", () => {
@@ -114,6 +116,32 @@ describe("attachInsertedText", () => {
 		transport.post({ type: "omp:insert-text", text: "@chat.ts" });
 		assert.deepEqual(received, ["@chat.ts"]);
 		release();
+		detach();
+	});
+});
+
+describe("attachInsertedText with editor quotes", () => {
+	it("hands an omp:insert-quote to the quote sink, held until a composer provides one, and only on a chat page", () => {
+		const listeners = new Set<(message: GuestHostMessage) => void>();
+		const transport = { subscribe(listener: (message: GuestHostMessage) => void) { listeners.add(listener); return () => listeners.delete(listener); } };
+		const post = (message: GuestHostMessage): void => { for (const listener of listeners) listener(message); };
+		let mode: "chat" | "terminal" = "terminal";
+		const detach = attachInsertedText(transport, () => mode);
+		const message: GuestHostMessage = { type: "omp:insert-quote", quotes: [{ location: "src/a.ts:3", fileName: "a.ts", languageId: "typescript", text: "x" }] };
+		post(message);
+		const received: QuoteRequest[] = [];
+		const release = provideQuoteSink(request => received.push(request));
+		assert.deepEqual(received, [], "a terminal page does not take it");
+		mode = "chat";
+		post(message);
+		assert.equal(received.length, 1);
+		assert.deepEqual(received[0], { kind: "editor", sources: ["`src/a.ts:3`\n```ts\nx\n```"], size: 1 });
+		release();
+		// Held while no composer is mounted, then delivered to the first one.
+		post(message);
+		const later: QuoteRequest[] = [];
+		provideQuoteSink(request => later.push(request))();
+		assert.equal(later.length, 1);
 		detach();
 	});
 });

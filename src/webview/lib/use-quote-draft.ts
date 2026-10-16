@@ -5,7 +5,8 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { DraftSurface } from "./draft-surface.ts";
-import { placeQuote, quoteBlock, quoteLineCount, quoteSizeRefusal } from "./quote-draft.ts";
+import { quoteSizeRefusal } from "../../shared/quote-limit.ts";
+import { placeQuote, quoteBlock, quoteLineCount } from "./quote-draft.ts";
 import type { QuoteRequest } from "./quote-sink.ts";
 
 /** How long the notice stays under the field. */
@@ -40,23 +41,27 @@ export function useQuoteDraft(host: QuoteHost): { notice: string | null; quote: 
 	const quote = useCallback((request: QuoteRequest): void => {
 		const current = hostRef.current;
 		if (request.kind === "nothing") { say(request.message); return; }
-		if (request.source.trim().length === 0) { say("Select text in the conversation first"); return; }
+		// What each quote is made of: a Chat selection is one quote, an editor's selections are one quote each.
+		const sources = request.kind === "selection" ? [request.source] : request.sources;
+		if (sources.every(source => source.trim().length === 0)) { say(request.kind === "selection" ? "Select text in the conversation first" : "Select some text first"); return; }
 		if (current.surface() === null || !current.writable()) { say("This session cannot take a message"); return; }
 		if (current.captured()) { say(HELD); return; }
-		const tooLong = quoteSizeRefusal(request.source);
+		const tooLong = quoteSizeRefusal(request.kind === "selection" ? request.source.length : request.size);
 		if (tooLong !== null) { say(tooLong); return; }
 		const place = (): void => {
 			const now = hostRef.current;
 			const surface = now.surface();
 			if (surface === null) return;
 			if (now.captured()) { say(HELD); return; }
-			const block = quoteBlock(request.source);
+			// A blank line between two quote blocks is what keeps them two quotes.
+			const block = sources.map(quoteBlock).join("\n\n");
 			const placed = placeQuote(surface.text, block);
 			if (placed === null) { say("That would make the draft longer than OMP Desk can send"); return; }
 			if (!surface.apply({ from: placed.from, to: placed.to, insert: placed.insert, selection: { anchor: placed.caret, focus: placed.caret } }, "replace")) { say(HELD); return; }
 			surface.focus();
 			const lines = quoteLineCount(block);
-			say(request.plain ? `Quoted ${lines} line${lines === 1 ? "" : "s"} as plain text` : `Quoted ${lines} line${lines === 1 ? "" : "s"} into the draft`);
+			const plain = request.kind === "selection" && request.plain;
+			say(plain ? `Quoted ${lines} line${lines === 1 ? "" : "s"} as plain text` : `Quoted ${lines} line${lines === 1 ? "" : "s"} into the draft`);
 		};
 		if (current.composing()) current.defer(place);
 		else place();

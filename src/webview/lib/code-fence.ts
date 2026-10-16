@@ -67,6 +67,18 @@ export function findFencedBlocks(text: string): FencedBlock[] {
 	return blocks;
 }
 
+/** The longest run of backticks at the start of any line of `lines`, after its leading whitespace: a closing fence for either grammar. */
+export function longestFenceRun(lines: readonly string[]): number {
+	let longest = 0;
+	for (const line of lines) longest = Math.max(longest, /^\s*(`*)/.exec(line)?.[1]?.length ?? 0);
+	return longest;
+}
+
+/** The fence that holds `lines` (a quote of code): three backticks, or one more than the longest backtick run that could close it early. */
+export function fenceFor(lines: readonly string[]): string {
+	return "`".repeat(Math.max(3, longestFenceRun(lines) + 1));
+}
+
 /** The block that holds the whole selection `[start, end]` (fence lines included), or `null`. */
 export function blockContaining(blocks: readonly FencedBlock[], start: number, end = start): FencedBlock | null {
 	for (const block of blocks) {

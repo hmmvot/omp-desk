@@ -128,6 +128,7 @@ import { findFileMentions } from "./host/file-mentions";
 import {
   EditorRecency,
   candidateDescription as sendCandidateDescription,
+  composeEditorQuotes,
   composeInsertion,
   folderName as sessionFolderName,
   insertAvailability,
@@ -135,7 +136,7 @@ import {
   pickerEntries,
   selectionLines,
 } from "./wiring/editor-context";
-import type { ReferenceSource, SendCandidate } from "./wiring/editor-context";
+import type { EditorQuoteSource, ReferenceSource, SendCandidate } from "./wiring/editor-context";
 import { TurnNotifier, desktopNotificationSuppression, reportsTrailingQuestion } from "./host/notifications";
 import type { TurnActivity, TurnNotice, NotificationSuppression } from "./host/notifications";
 import { isLookedAt, markersAfterEvent, markersAfterViewing } from "./host/session-unread";
@@ -308,6 +309,7 @@ import type {
   GuestControlStateMessage,
   GuestPanelAction,
   GuestPanelActionMessage,
+  GuestInsertQuoteMessage,
   GuestInsertTextMessage,
   GuestHostMessage,
   GuestSessionViewMessage,
@@ -2158,6 +2160,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     registerDeskCommand("ompDesk.showChatKeyboardShortcuts", () => showChatKeyboardShortcuts()),
     registerDeskCommand("ompDesk.rewindConversation", () => rewindConversation()),
     registerDeskCommand("ompDesk.sendSelection", () => addSelectionToSession(context, index)),
+    registerDeskCommand("ompDesk.quoteEditorSelection", () => quoteEditorSelectionToSession(context, index)),
     registerDeskCommand("ompDesk.searchFileFromChat", () => s.guestDispatcher.searchFileFromChat()),
     registerDeskCommand("ompDesk.sendFile", (clicked: unknown, selected: unknown) => addFilesToSession(context, index, clicked, selected)),
     registerDeskCommand("ompDesk.showDiagnostics", () => showDiagnostics(context, index)),
@@ -5927,9 +5930,10 @@ async function loadSlashRegistry(context: vscode.ExtensionContext): Promise<void
   }
 }
 
-// "OMP Desk: Add Selection to Session" and "OMP Desk: Add File to Session"
+// "OMP Desk: Add Selection to Session", "OMP Desk: Add File to Session" and "OMP Desk: Quote Selection to Session"
 // What is added is a reference (`@src/a.ts [lines 12-30]`), composed by `wiring/editor-context` for the
-// chosen session's cwd. The target is always the user's choice from a picker, most recently focused
+// chosen session's cwd, or (Quote Selection to Session) the selected text with its location as a quote the
+// page places like a Chat quote. The target is always the user's choice from a picker, most recently focused
 // editor first; nothing is ever submitted, and the destination is revealed and focused.
 
 /** How long a session being opened may take to be able to receive the text. */
@@ -5998,15 +6002,22 @@ function sendCandidates(context: vscode.ExtensionContext, index: SessionIndex): 
 }
 
 /** The QuickPick: eligible sessions, most recently focused first and preselected, then a new session next to the file. */
-async function pickSendTarget(context: vscode.ExtensionContext, index: SessionIndex, firstFsPath: string, unsaved: boolean): Promise<SendTarget | null> {
+async function pickSendTarget(context: vscode.ExtensionContext, index: SessionIndex, firstFsPath: string | null, unsaved: boolean, chatOnly: boolean): Promise<SendTarget | null> {
   const s = windowState();
-  const workspace = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(firstFsPath));
-  const requestedFolder = newSessionFolder(firstFsPath, workspace?.uri.fsPath ?? null);
+  // A document with no path (untitled, or another scheme) starts a new session in the first workspace folder, if there is one.
+  const workspace = firstFsPath === null ? vscode.workspace.workspaceFolders?.[0] : vscode.workspace.getWorkspaceFolder(vscode.Uri.file(firstFsPath));
+  const requestedFolder = firstFsPath === null ? workspace?.uri.fsPath ?? null : newSessionFolder(firstFsPath, workspace?.uri.fsPath ?? null);
   // A workspace folder shown as the checkout root its sessions run at starts the session there.
-  const listed = s.launcherFolders?.folderForCwd(requestedFolder) ?? null;
+  const listed = requestedFolder === null ? null : s.launcherFolders?.folderForCwd(requestedFolder) ?? null;
   const folder = listed?.path ?? requestedFolder;
   const folderListed = listed !== null;
-  const entries = pickerEntries(sendCandidates(context, index), s.editorRecency.order(), folder, defaultSessionMode(context), folderListed);
+  // A quote is Markdown for the Chat composer: a terminal session is not offered, and a new session is started as a Chat.
+  const candidates = chatOnly ? sendCandidates(context, index).filter(candidate => candidate.mode === "chat") : sendCandidates(context, index);
+  const entries = pickerEntries(candidates, s.editorRecency.order(), folder ?? "", chatOnly ? "chat" : defaultSessionMode(context), folderListed).filter(entry => folder !== null || entry.kind !== "new");
+  if (entries.length === 0) {
+    showWarning(chatOnly ? "No Chat session is open in this window, and there is no folder to start one in. Open a Chat session first." : "No OMP session is open in this window, and there is no folder to start one in. Open a session first.");
+    return null;
+  }
   const items: (vscode.QuickPickItem & { target?: SendTarget })[] = [];
   for (const entry of entries) {
     if (entry.kind === "new") {
@@ -6023,8 +6034,9 @@ async function pickSendTarget(context: vscode.ExtensionContext, index: SessionIn
     });
   }
   const picker = vscode.window.createQuickPick<(typeof items)[number]>();
-  picker.title = "Add to OMP session";
-  picker.placeholder = unsaved ? "Choose the session to add it to — unsaved changes are not included" : "Choose the session to add it to";
+  picker.title = chatOnly ? "Quote into OMP session" : "Add to OMP session";
+  const verb = chatOnly ? "quote it into" : "add it to";
+  picker.placeholder = unsaved ? `Choose the session to ${verb} — ${chatOnly ? "the quote holds the unsaved text, the location is the saved file's" : "unsaved changes are not included"}` : `Choose the session to ${verb}`;
   picker.matchOnDescription = true;
   picker.matchOnDetail = true;
   picker.items = items;
@@ -6043,11 +6055,60 @@ async function pickSendTarget(context: vscode.ExtensionContext, index: SessionIn
   return await promise;
 }
 
+/** What goes to the chosen session: `@path` references (Add to Session) or a quote of editor text (Quote Selection to Session). */
+type InsertionRequest =
+  | { readonly kind: "references"; readonly sources: readonly ReferenceSource[] }
+  | { readonly kind: "quote"; readonly source: EditorQuoteSource };
+
+/** The request written for one session's working directory: the page message, and the text a terminal would be pasted (`null`: it takes none). */
+function composeRequest(request: InsertionRequest, cwd: string):
+  | { readonly ok: true; readonly summary: string; readonly chat: GuestInsertTextMessage | GuestInsertQuoteMessage; readonly pasteText: string | null }
+  | { readonly ok: false; readonly reason: string } {
+  if (request.kind === "references") {
+    const composed = composeInsertion(request.sources, cwd);
+    return composed.ok ? { ok: true, summary: composed.summary, chat: { type: "omp:insert-text", text: composed.text }, pasteText: composed.text } : composed;
+  }
+  const composed = composeEditorQuotes(request.source, cwd);
+  return composed.ok ? { ok: true, summary: composed.summary, chat: { type: "omp:insert-quote", quotes: composed.quotes }, pasteText: null } : composed;
+}
+
 async function addToSession(context: vscode.ExtensionContext, index: SessionIndex, sources: readonly ReferenceSource[], unsaved: boolean): Promise<void> {
-  const s = windowState();
   const first = sources[0];
   if (first === undefined) return;
-  const target = await pickSendTarget(context, index, first.fsPath, unsaved);
+  await sendToSession(context, index, { kind: "references", sources }, first.fsPath, unsaved);
+}
+
+/**
+ * "OMP Desk: Quote Selection to Session" (`Alt+Q` in a text editor): every non-empty selection of the active editor becomes a quote
+ * in the chosen Chat session's draft. The target rule is Add Selection to Session's; the page places the quote the way it places a
+ * Chat quote (docs/designs/2026-10-15-quote-chat-selection.md, decision 9).
+ */
+async function quoteEditorSelectionToSession(context: vscode.ExtensionContext, index: SessionIndex): Promise<void> {
+  const editor = vscode.window.activeTextEditor;
+  if (editor === undefined) {
+    showWarning("Open a text editor and select the text to quote.");
+    return;
+  }
+  const { document } = editor;
+  const selections = editor.selections.filter(selection => !selection.isEmpty);
+  if (selections.length === 0) {
+    showWarning("Select some text first.");
+    return;
+  }
+  const fsPath = document.uri.scheme === "file" ? document.uri.fsPath : null;
+  const source: EditorQuoteSource = {
+    fsPath,
+    fileName: fsPath === null ? "" : path.basename(fsPath),
+    languageId: document.languageId,
+    selections: selections.map(selection => ({ start: selection.start, end: selection.end, text: document.getText(selection) })),
+  };
+  await sendToSession(context, index, { kind: "quote", source }, fsPath, document.isDirty);
+}
+
+async function sendToSession(context: vscode.ExtensionContext, index: SessionIndex, request: InsertionRequest, firstFsPath: string | null, unsaved: boolean): Promise<void> {
+  const s = windowState();
+  const quoting = request.kind === "quote";
+  const target = await pickSendTarget(context, index, firstFsPath, unsaved, quoting);
   if (target === null) return;
   let tabId: string;
   let cwd: string;
@@ -6056,8 +6117,8 @@ async function addToSession(context: vscode.ExtensionContext, index: SessionInde
     const folders = s.launcherFolders;
     if (folders === undefined) return;
     // Refuse what cannot be written before anything is added or started.
-    const probe = composeInsertion(sources, target.folder);
-    if (!probe.ok) { showWarning(`${probe.reason} Nothing was added.`); return; }
+    const probe = composeRequest(request, target.folder);
+    if (!probe.ok) { showWarning(`${probe.reason} Nothing was ${quoting ? "quoted" : "added"}.`); return; }
     // Choosing "New session in <folder>" for a folder the launcher already shows (open in this
     // window or pinned) just starts there; for any other folder it is the explicit act of pinning
     // it (a session is never started in a folder the launcher does not show); the picker row says so.
@@ -6079,36 +6140,36 @@ async function addToSession(context: vscode.ExtensionContext, index: SessionInde
     }
     tabId = entry.tabId;
     refreshLauncher();
-    await openTab(context, index, tabId, "started");
+    await openTab(context, index, tabId, "started", "explicit", quoting ? "chat" : undefined);
   } else {
     tabId = target.candidate.tabId;
     cwd = target.candidate.cwd;
-    const probe = composeInsertion(sources, cwd);
-    if (!probe.ok) { showWarning(`${probe.reason} Nothing was added.`); return; }
+    const probe = composeRequest(request, cwd);
+    if (!probe.ok) { showWarning(`${probe.reason} Nothing was ${quoting ? "quoted" : "added"}.`); return; }
     // Reveals a running session's editor, reopens a closed one and starts a stopped one, all through the
     // path the Sessions view's Open uses (ownership is rechecked there).
     // The references are inserted into an editor of this window, so a stopped session is launched here, not in
     // the window its folder is open in (ADR-0057 leaves this one entry point local).
     if (!(await openSession(context, index, tabId, "resumed", true))) return;
   }
-  const delivered = await deliverInsertion(tabId, sources, cwd);
+  const delivered = await deliverInsertion(tabId, request, cwd);
   if (!delivered.ok) {
-    log.warn(`tab ${tabId}: editor references were not added (${delivered.reason})`);
-    void vscode.window.showWarningMessage(`OMP Desk: ${delivered.reason} Nothing was added.`, "Copy reference").then(choice => {
-      if (choice === "Copy reference") {
-        const composed = composeInsertion(sources, cwd);
+    log.warn(`tab ${tabId}: editor ${quoting ? "quote" : "references"} was not ${quoting ? "quoted" : "added"} (${delivered.reason})`);
+    void vscode.window.showWarningMessage(`OMP Desk: ${delivered.reason} Nothing was ${quoting ? "quoted" : "added"}.`, ...(request.kind === "references" ? ["Copy reference"] : [])).then(choice => {
+      if (choice === "Copy reference" && request.kind === "references") {
+        const composed = composeInsertion(request.sources, cwd);
         if (composed.ok) void vscode.env.clipboard.writeText(composed.text);
       }
     });
     return;
   }
-  log.debug(`tab ${tabId}: ${stateOf(tabId)?.mode ?? "chat"} received ${sources.length} editor reference(s)`);
+  log.debug(`tab ${tabId}: ${stateOf(tabId)?.mode ?? "chat"} received ${request.kind === "references" ? `${request.sources.length} editor reference(s)` : `${request.source.selections.length} editor quote(s)`}`);
   const notes: string[] = [];
-  if (unsaved) notes.push("unsaved changes are not included");
+  if (unsaved) notes.push(quoting ? "the file has unsaved changes: the location is the saved file's" : "unsaved changes are not included");
   if (folderAdded) notes.push(`${sessionFolderName(cwd)} was pinned to the Sessions view`);
-  // OMP expands @mentions only in a prompt sent while it is idle, not in a steering or queued follow-up message.
-  if (s.turnActivities.get(tabId)?.streaming === true) notes.push("the session is busy: send it once the turn ends so the files are read");
-  vscode.window.setStatusBarMessage(`Added ${delivered.summary} to «${delivered.title}»${notes.length > 0 ? ` — ${notes.join("; ")}` : ""}`, notes.length > 0 ? 10_000 : 6_000);
+  // OMP expands @mentions only in a prompt sent while it is idle, not in a steering or queued follow-up message. A quote holds no mention.
+  if (!quoting && s.turnActivities.get(tabId)?.streaming === true) notes.push("the session is busy: send it once the turn ends so the files are read");
+  vscode.window.setStatusBarMessage(`${quoting ? "Quoted" : "Added"} ${delivered.summary} ${quoting ? "into" : "to"} «${delivered.title}»${notes.length > 0 ? ` — ${notes.join("; ")}` : ""}`, notes.length > 0 ? 10_000 : 6_000);
 }
 
 /**
@@ -6119,7 +6180,7 @@ async function addToSession(context: vscode.ExtensionContext, index: SessionInde
  */
 async function deliverInsertion(
   tabId: string,
-  sources: readonly ReferenceSource[],
+  request: InsertionRequest,
   entryCwd: string,
 ): Promise<{ readonly ok: true; readonly title: string; readonly summary: string } | { readonly ok: false; readonly reason: string }> {
   const s = windowState();
@@ -6136,17 +6197,19 @@ async function deliverInsertion(
         revealed = true;
         if (!panel.active) panel.reveal(undefined, false);
       }
-      const composed = composeInsertion(sources, hostOf(state)?.cwd ?? entryCwd);
+      const composed = composeRequest(request, hostOf(state)?.cwd ?? entryCwd);
       if (!composed.ok) return { ok: false, reason: composed.reason };
-      const { text, summary } = composed;
+      const { summary } = composed;
       if (state.mode === "chat") {
         if (s.readyDocuments.get(state) === state.document) {
-          const posted = await panel.webview.postMessage({ type: "omp:insert-text", text } satisfies GuestInsertTextMessage);
+          const posted = await panel.webview.postMessage(composed.chat);
           return posted ? { ok: true, title: panel.title, summary } : { ok: false, reason: "The chat page did not accept the text." };
         }
         waiting = "the chat page did not become ready";
+      } else if (composed.pasteText === null) {
+        return { ok: false, reason: "A quote goes into a Chat session; this one shows its terminal." };
       } else if (state.pipeline !== null && state.shellSlot === null) {
-        const outcome = await state.pipeline.pasteText(text);
+        const outcome = await state.pipeline.pasteText(composed.pasteText);
         if (outcome === "pasted") {
           const settleBy = Date.now() + 2_000;
           while (state.panel?.active !== true && Date.now() < settleBy) await delay(50);

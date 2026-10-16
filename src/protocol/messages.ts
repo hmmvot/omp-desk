@@ -34,6 +34,7 @@
 import type { ControlModelRef } from "./control.ts";
 import { isRecord } from "../shared/guards.ts";
 import { isCanonicalBase64Text } from "../shared/bytes-base64.ts";
+import { MAX_QUOTE_CHARACTERS } from "../shared/quote-limit.ts";
 import { MAX_CHAT_IMAGES, MAX_CHAT_IMAGE_BASE64_CHARS, MAX_CHAT_IMAGES_BASE64_CHARS, MAX_CHAT_TEXT_LENGTH, isChatImageMimeType, parseChatEpoch, parseChatHostMessage, parseChatWebviewMessage } from "./chat-messages.ts";
 import type { ChatHostMessage, ChatWebviewMessage } from "./chat-messages.ts";
 import type { ChatEpoch } from "../chat/model.ts";
@@ -363,6 +364,36 @@ export const MAX_INSERT_TEXT_LENGTH = 900;
 export interface GuestInsertTextMessage {
 	type: "omp:insert-text";
 	text: string;
+}
+
+/** Selections one `omp:insert-quote` may carry. */
+export const MAX_EDITOR_QUOTES = 64;
+/** Longest `path:start-end` location an editor quote may carry. */
+export const MAX_QUOTE_LOCATION_LENGTH = MAX_FILE_PATH_LENGTH + 24;
+
+/**
+ * One selection of a text editor that the user quoted (`ompDesk.quoteEditorSelection`, `Alt+Q` in an editor).
+ *
+ * `location` is `path:42` or `path:42-50` written for the target session's working directory (relative inside it, absolute
+ * outside), `null` for a document with no path OMP can open (untitled, or a scheme other than `file`). `fileName` and
+ * `languageId` are the page's two hints for the fence's language and for whether the text is prose. `text` is the selected
+ * text with `\n` line ends; the host has already held it to the quote size limit.
+ */
+export interface GuestEditorQuote {
+	location: string | null;
+	fileName: string;
+	languageId: string;
+	text: string;
+}
+
+/**
+ * Editor selections to quote into the composer draft. The composer places them through the same path as a Chat quote (the end
+ * of the draft, one undo step, the caret under the quote), each selection its own quote, and never submits. A page whose
+ * composer is not mounted yet holds the message until one is.
+ */
+export interface GuestInsertQuoteMessage {
+	type: "omp:insert-quote";
+	quotes: GuestEditorQuote[];
 }
 
 /**
@@ -797,6 +828,7 @@ export type GuestHostMessage =
 	| GuestControlStateMessage
 	| GuestPanelActionMessage
 	| GuestInsertTextMessage
+	| GuestInsertQuoteMessage
 	| GuestRecallPromptMessage
 	| GuestDraftRequestMessage
 	| GuestSelectionRequestMessage
@@ -1279,6 +1311,24 @@ export function parseGuestHostMessage(value: unknown): GuestHostMessage | null {
 		return typeof text === "string" && text.trim().length > 0 && text.length <= MAX_INSERT_TEXT_LENGTH && isSafeBoundaryText(text)
 			? { type: "omp:insert-text", text }
 			: null;
+	}
+	if (value.type === "omp:insert-quote") {
+		if (!Array.isArray(value.quotes) || value.quotes.length === 0 || value.quotes.length > MAX_EDITOR_QUOTES) return null;
+		const quotes: GuestEditorQuote[] = [];
+		let total = 0;
+		for (const candidate of value.quotes) {
+			if (!isRecord(candidate)) return null;
+			const { location, fileName, languageId, text } = candidate;
+			if (location !== null && (typeof location !== "string" || location.length === 0 || location.length > MAX_QUOTE_LOCATION_LENGTH || !isSafeBoundaryText(location))) return null;
+			if (typeof fileName !== "string" || fileName.length > MAX_ATTACHED_NAME_LENGTH || !isSafeBoundaryText(fileName)) return null;
+			if (typeof languageId !== "string" || !/^[A-Za-z0-9._+-]{0,64}$/.test(languageId)) return null;
+			// Newlines and tabs are the text's own; every other control character would corrupt a draft that is handed off.
+			if (typeof text !== "string" || text.trim().length === 0 || DRAFT_CONTROL_CHARACTER.test(text)) return null;
+			total += text.length;
+			if (total > MAX_QUOTE_CHARACTERS) return null;
+			quotes.push({ location, fileName, languageId, text });
+		}
+		return { type: "omp:insert-quote", quotes };
 	}
 	if (value.type === "omp:recall-prompt") {
 		const { text } = value;

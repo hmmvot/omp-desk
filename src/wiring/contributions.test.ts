@@ -441,16 +441,23 @@ describe("commands", () => {
 		assert.equal(declared.get("ompDesk.searchFileFromChat")?.title, "Go to File from Chat Selection");
 	});
 
-	it("declare Quote Selection with Alt+Q inside a Chat only, no other binding on the key, and a transcript context menu item gated by the key the page sets", () => {
+	it("declare Quote Selection with Alt+Q inside a Chat, and Quote Selection to Session with Alt+Q in a text editor with a selection, no third binding on the key, and a transcript context menu item gated by the key the page sets", () => {
 		const chatOnly = "activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat";
 		const bound = contributes.keybindings.filter(binding => binding.key === "alt+q");
-		assert.deepEqual(bound.map(binding => [binding.command, binding.when]), [["ompDesk.quoteChatSelection", chatOnly]]);
+		assert.deepEqual(bound.map(binding => [binding.command, binding.when]), [
+			["ompDesk.quoteChatSelection", chatOnly],
+			["ompDesk.quoteEditorSelection", "editorTextFocus && editorHasSelection"],
+		]);
+		assert.equal(declared.get("ompDesk.quoteEditorSelection")?.title, "Quote Selection to Session");
+		const editorEntries = menus.filter(({ menu, entry }) => menu === "editor/context" && entry.command === "ompDesk.quoteEditorSelection");
+		assert.deepEqual(editorEntries.map(({ entry }) => entry.when), ["editorHasSelection"]);
 		assert.equal(declared.get("ompDesk.quoteChatSelection")?.title, "Quote Selection");
 		const entries = menus.filter(({ menu, entry }) => menu === "webview/context" && entry.command === "ompDesk.quoteChatSelection");
 		assert.equal(entries.length, 1);
 		assert.match(entries[0]?.entry.when ?? "", new RegExp(`webviewId =~ /\\^omp\\[\\.\\]session/ && ${CHAT_TEXT_MENU_KEY}$`));
 		assert.equal(JSON.parse(CHAT_TEXT_MENU_CONTEXT)[CHAT_TEXT_MENU_KEY], true);
 		const source = readFileSync(new URL("../extension.ts", import.meta.url), "utf8");
+		assert.match(source, /registerDeskCommand\("ompDesk\.quoteEditorSelection", \(\) => quoteEditorSelectionToSession\(context, index\)\)/);
 		assert.match(source, /registerDeskCommand\("ompDesk\.quoteChatSelection", \(\) => postChatPanelAction\("quote-selection"\)\)/, "a palette run with no argument posts the action and reads nothing");
 	});
 
@@ -648,7 +655,7 @@ describe("the namespace (ADR-0068)", () => {
 		assert.deepEqual(LEGACY_COMMAND_IDS.filter(id => declared.has(id)), [], "an alias that is also a contributed command");
 		assert.deepEqual(LEGACY_COMMAND_IDS.map(legacyCommandTarget).filter(id => !declared.has(id)), [], "an alias whose target is not contributed");
 		const addedAfterRename = contributes.commands.map(command => command.command).filter(id => !LEGACY_COMMAND_IDS.includes("omp." + id.slice("ompDesk.".length)));
-		assert.deepEqual(addedAfterRename.sort(), ["ompDesk.logoutProvider", "ompDesk.openOmpSettings", "ompDesk.quoteChatSelection", "ompDesk.refreshUsageStatus", "ompDesk.reloadAllWindows", "ompDesk.searchFileFromChat", "ompDesk.toggleToolGroups"], "the commands added after the rename have no alias; a new command needs none");
+		assert.deepEqual(addedAfterRename.sort(), ["ompDesk.logoutProvider", "ompDesk.openOmpSettings", "ompDesk.quoteChatSelection", "ompDesk.quoteEditorSelection", "ompDesk.refreshUsageStatus", "ompDesk.reloadAllWindows", "ompDesk.searchFileFromChat", "ompDesk.toggleToolGroups"], "the commands added after the rename have no alias; a new command needs none");
 		assert.deepEqual(LEGACY_ALIASES.map(([oldId]) => oldId).filter(id => !recording.commands.has(id)), [], "an old id with no alias at runtime");
 		const generated = LEGACY_ALIASES.filter(([, target]) => !declared.has(target)).map(([oldId, target]) => `${oldId} -> ${target}`);
 		assert.deepEqual(generated, [

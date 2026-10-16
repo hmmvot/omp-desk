@@ -10,21 +10,6 @@ import { MAX_CHAT_TEXT_LENGTH } from "../../protocol/chat-messages.ts";
 import { findFencedBlocks } from "./code-fence.ts";
 import type { QuoteRun } from "./quote-lines.ts";
 
-/** The most characters of Markdown one quote takes, before the `> ` prefixes. */
-export const MAX_QUOTE_CHARACTERS = 20_000;
-
-/** `31482` as `31 482`. */
-function grouped(count: number): string {
-	return String(count).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
-}
-
-/** The notice for a quote over the limit, naming its size; `null` when it fits. */
-export function quoteSizeRefusal(markdown: string): string | null {
-	return markdown.length > MAX_QUOTE_CHARACTERS
-		? `That selection is ${grouped(markdown.length)} characters; Quote takes at most ${grouped(MAX_QUOTE_CHARACTERS)}.`
-		: null;
-}
-
 /**
  * `[Image #N…]` becomes `[image #N…]`. The marker grammar and the transcript's inline grammar are case sensitive, so a quoted
  * marker neither pairs with an image attached to the new draft nor renders in the sent message as a button for the wrong image.

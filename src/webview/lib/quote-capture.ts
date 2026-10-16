@@ -10,6 +10,7 @@
  * re-fenced with a fence longer than any backtick run in it; a table keeps its header and separator. A leaf whose records
  * disagree with what is drawn is not guessed at: it degrades to the text the selection shows, and the caller says so.
  */
+import { fenceFor } from "./code-fence.ts";
 import { inlinePieces, type InlinePiece } from "./markdown-inline.ts";
 import type { Leaf, LeafLine, LeafTable } from "./markdown-leaves.ts";
 
@@ -121,13 +122,6 @@ function textPiece(source: readonly string[], pick: LeafPick): Piece | null {
 /** A slice whose tokens do not render back to the text the selection covers: the leaf degrades. */
 class MismatchError extends Error {}
 
-/** The longest run of backticks at the start of any line of `lines`, after its leading whitespace: a closing fence for either grammar. */
-function longestFenceRun(lines: readonly string[]): number {
-	let longest = 0;
-	for (const line of lines) longest = Math.max(longest, /^\s*(`*)/.exec(line)?.[1]?.length ?? 0);
-	return longest;
-}
-
 function codePiece(source: readonly string[], pick: LeafPick): Piece | null {
 	const { leaf } = pick;
 	const open = leaf.open;
@@ -138,7 +132,7 @@ function codePiece(source: readonly string[], pick: LeafPick): Piece | null {
 	const rows = selected.split("\n");
 	const prefix = quotePrefix(open.quote);
 	const bar = prefix.trimEnd();
-	const fence = "`".repeat(Math.max(3, longestFenceRun(rows) + 1));
+	const fence = fenceFor(rows);
 	const lines = [`${prefix}${fence}${leaf.language ?? ""}`, ...rows.map(row => (row.length === 0 ? bar : `${prefix}${row}`)), `${prefix}${fence}`];
 	return { lines, first: leaf.first, last: leaf.last, firstQuote: open.quote, lastQuote: open.quote, plain: false };
 }

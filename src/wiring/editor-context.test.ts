@@ -11,6 +11,7 @@ import { describe, it } from "node:test";
 import {
 	EditorRecency,
 	candidateDescription,
+	composeEditorQuotes,
 	composeInsertion,
 	formatReference,
 	insertAvailability,
@@ -20,7 +21,7 @@ import {
 	pickerEntries,
 	selectionLines,
 } from "./editor-context.ts";
-import type { SendCandidate } from "./editor-context.ts";
+import type { EditorQuoteSource, SendCandidate } from "./editor-context.ts";
 import { bracketedPaste } from "../host/bracketed-paste.ts";
 import { MAX_INSERT_TEXT_LENGTH } from "../protocol/messages.ts";
 
@@ -244,5 +245,65 @@ describe("editor recency", () => {
 		assert.deepEqual(recency.order(), ["b", "d", "c"]);
 		recency.forget("d");
 		assert.deepEqual(recency.order(), ["b", "c"]);
+	});
+});
+
+describe("quoting editor selections", () => {
+	const pos = (line: number, character: number) => ({ line, character });
+	const source = (selections: { start: ReturnType<typeof pos>; end: ReturnType<typeof pos>; text: string }[], over: Partial<EditorQuoteSource> = {}): EditorQuoteSource => ({
+		fsPath: "D:\\Work\\Repo\\src\\app.ts", fileName: "app.ts", languageId: "typescript", selections, ...over,
+	});
+
+	it("writes the location as path:line for one line and path:start-end for a range, relative inside the session's directory", () => {
+		const one = composeEditorQuotes(source([{ start: pos(41, 0), end: pos(41, 11), text: "const x = 1" }]), CWD);
+		assert.deepEqual(one, { ok: true, quotes: [{ location: "src/app.ts:42", fileName: "app.ts", languageId: "typescript", text: "const x = 1" }], summary: "src/app.ts:42" });
+		const range = composeEditorQuotes(source([{ start: pos(41, 2), end: pos(49, 3), text: "a\nb" }]), CWD);
+		assert.ok(range.ok && range.quotes[0]?.location === "src/app.ts:42-50");
+	});
+
+	it("keeps a file outside the session's directory absolute with forward slashes", () => {
+		const outside = composeEditorQuotes(source([{ start: pos(0, 0), end: pos(0, 3), text: "abc" }], { fsPath: "D:\\Other\\b.ts", fileName: "b.ts" }), CWD);
+		assert.ok(outside.ok && outside.quotes[0]?.location === "D:/Other/b.ts:1");
+	});
+
+	it("does not count the line a selection only touches at column 0, and drops the line break that leaves behind", () => {
+		const whole = composeEditorQuotes(source([{ start: pos(9, 0), end: pos(12, 0), text: "a\nb\nc\n" }]), CWD);
+		assert.ok(whole.ok && whole.quotes[0]?.location === "src/app.ts:10-12" && whole.quotes[0]?.text === "a\nb\nc");
+	});
+
+	it("normalises CRLF to LF", () => {
+		const crlf = composeEditorQuotes(source([{ start: pos(0, 0), end: pos(1, 1), text: "a\r\nb" }]), CWD);
+		assert.ok(crlf.ok && crlf.quotes[0]?.text === "a\nb");
+	});
+
+	it("makes each non-empty selection its own quote in document order, without a repeated one and without a blank one", () => {
+		const result = composeEditorQuotes(source([
+			{ start: pos(20, 0), end: pos(20, 1), text: "z" },
+			{ start: pos(2, 0), end: pos(2, 1), text: "a" },
+			{ start: pos(2, 0), end: pos(2, 1), text: "a" },
+			{ start: pos(5, 0), end: pos(5, 2), text: "  " },
+		]), CWD);
+		assert.ok(result.ok);
+		assert.deepEqual(result.quotes.map(quote => [quote.location, quote.text]), [["src/app.ts:3", "a"], ["src/app.ts:21", "z"]]);
+		assert.equal(result.summary, "2 selections");
+	});
+
+	it("gives a document with no path no location, and a selection of only blanks nothing to quote", () => {
+		const untitled = composeEditorQuotes(source([{ start: pos(0, 0), end: pos(0, 2), text: "hi" }], { fsPath: null, fileName: "", languageId: "plaintext" }), CWD);
+		assert.ok(untitled.ok && untitled.quotes[0]?.location === null && untitled.summary === "the selection");
+		assert.deepEqual(composeEditorQuotes(source([{ start: pos(0, 0), end: pos(0, 2), text: " \n " }]), CWD), { ok: false, reason: "Select some text first." });
+	});
+
+	it("refuses over 20 000 characters with the size, counted over every selection of the gesture", () => {
+		const big = composeEditorQuotes(source([{ start: pos(0, 0), end: pos(1, 0), text: "x".repeat(12_000) }, { start: pos(5, 0), end: pos(6, 0), text: "y".repeat(19_482 - 12_000 + 1_000) }]), CWD);
+		assert.deepEqual(big, { ok: false, reason: "That selection is 20 482 characters; Quote takes at most 20 000." });
+		assert.equal(composeEditorQuotes(source([{ start: pos(0, 0), end: pos(1, 0), text: "x".repeat(20_000) }]), CWD).ok, true);
+	});
+
+	it("refuses a control character a draft cannot hand over, a path a message cannot carry and too many selections", () => {
+		assert.equal(composeEditorQuotes(source([{ start: pos(0, 0), end: pos(0, 3), text: "a\u000cb" }]), CWD).ok, false);
+		assert.equal(composeEditorQuotes(source([{ start: pos(0, 0), end: pos(0, 3), text: "abc" }], { fsPath: "/r/a\u001bb.ts" }), "/r").ok, false);
+		const many = Array.from({ length: 65 }, (_, line) => ({ start: pos(line, 0), end: pos(line, 1), text: "x" }));
+		assert.deepEqual(composeEditorQuotes(source(many), CWD), { ok: false, reason: "Quote takes at most 64 selections at once." });
 	});
 });

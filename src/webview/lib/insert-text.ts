@@ -1,6 +1,6 @@
 /**
- * Text the extension host adds to the composer draft (`omp:insert-text`): the `@path`
- * references of "OMP Desk: Add Selection/File to Session".
+ * Text the extension host adds to the composer draft: `omp:insert-text` (the `@path` references of "OMP Desk: Add Selection/File
+ * to Session") and `omp:insert-quote` (the quotes of "OMP Desk: Quote Selection to Session", handed to the quote sink).
  *
  * Two small pieces live here so they can be tested without a DOM:
  *
@@ -14,6 +14,8 @@
  * Nothing here submits, and the text never reaches Webview state or a log.
  */
 import type { GuestHostMessage } from "../../protocol/messages";
+import { editorQuoteRequest } from "./editor-quote.ts";
+import { offerQuote } from "./quote-sink.ts";
 
 /** How many insertions may wait for a composer; older ones are dropped first. */
 const MAX_PENDING = 8;
@@ -56,6 +58,7 @@ interface InsertTransport {
 export function attachInsertedText(transport: InsertTransport, mode: () => "chat" | "terminal"): () => void {
 	return transport.subscribe(message => {
 		if (message.type === "omp:insert-text" && mode() === "chat") offerInsertedText(message.text);
+		if (message.type === "omp:insert-quote" && mode() === "chat") offerQuote(editorQuoteRequest(message.quotes));
 	});
 }
 

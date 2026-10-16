@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { MAX_CHAT_TEXT_LENGTH } from "../../protocol/chat-messages.ts";
 import { findFencedBlocks } from "./code-fence.ts";
-import { MAX_QUOTE_CHARACTERS, neutraliseImageMarkers, placeQuote, quoteBlock, quoteLineCount, quoteSizeRefusal, quoteTitle, removalRange } from "./quote-draft.ts";
+import { neutraliseImageMarkers, placeQuote, quoteBlock, quoteLineCount, quoteTitle, removalRange } from "./quote-draft.ts";
 import { findQuoteRuns } from "./quote-lines.ts";
 
 /** The draft after a quote of `markdown` was appended, with the caret shown as `·`; `null` when it was refused. */
@@ -29,12 +29,6 @@ describe("the quote block", () => {
 	it("rewrites an image marker so it neither pairs with an attached image nor renders as one", () => {
 		assert.equal(neutraliseImageMarkers("see [Image #1, 8x8] and [Image #12] but not [Image #0] or [image #3] or Image #4"), "see [image #1, 8x8] and [image #12] but not [Image #0] or [image #3] or Image #4");
 		assert.equal(quoteBlock("[Image #1, 8x8]"), "> [image #1, 8x8]");
-	});
-
-	it("refuses a selection over the limit with its size, grouped by thousands", () => {
-		assert.equal(quoteSizeRefusal("x".repeat(MAX_QUOTE_CHARACTERS)), null);
-		assert.equal(quoteSizeRefusal("x".repeat(31_482)), "That selection is 31 482 characters; Quote takes at most 20 000.");
-		assert.equal(quoteSizeRefusal("x".repeat(20_001)), "That selection is 20 001 characters; Quote takes at most 20 000.");
 	});
 });
 
@@ -104,5 +98,16 @@ describe("removing a quote", () => {
 		const empty = ">\n> text";
 		assert.equal(quoteTitle(empty, run(empty)), "text", "an empty first line is skipped");
 		assert.equal(quoteTitle(">", run(">")), "empty quote");
+	});
+});
+
+describe("several quotes in one placement (an editor's selections)", () => {
+	it("joins the blocks with a blank line so they are separate quotes, placed as one edit with the caret under the last", () => {
+		const block = ["a", "b\n\nc"].map(quoteBlock).join("\n\n");
+		const placed = placeQuote("note", block)!;
+		const next = "note" + placed.insert;
+		assert.equal(next, "note\n\n> a\n\n> b\n>\n> c\n");
+		assert.equal(placed.caret, next.length);
+		assert.equal(findQuoteRuns(next, findFencedBlocks(next)).runs.length, 2, "two quotes, each with its own Remove button");
 	});
 });

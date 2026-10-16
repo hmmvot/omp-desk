@@ -701,6 +701,13 @@
         "icon": "$(quote)"
       },
       {
+        "command": "ompDesk.quoteEditorSelection",
+        "enablement": "editorHasSelection",
+        "title": "Quote Selection to Session",
+        "category": "OMP Desk",
+        "icon": "$(quote)"
+      },
+      {
         "command": "ompDesk.searchPromptHistory",
         "enablement": "ompDesk.sessionMode == chat",
         "title": "Search Prompt History…",
@@ -1123,6 +1130,11 @@
           "command": "ompDesk.sendSelection",
           "when": "editorHasSelection && resourceScheme == file",
           "group": "9_omp@1"
+        },
+        {
+          "command": "ompDesk.quoteEditorSelection",
+          "when": "editorHasSelection",
+          "group": "9_omp@3"
         },
         {
           "command": "ompDesk.sendFile",
@@ -1577,6 +1589,11 @@
         "command": "ompDesk.quoteChatSelection",
         "key": "alt+q",
         "when": "activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat"
+      },
+      {
+        "command": "ompDesk.quoteEditorSelection",
+        "key": "alt+q",
+        "when": "editorTextFocus && editorHasSelection"
       },
       {
         "command": "ompDesk.searchPromptHistory",

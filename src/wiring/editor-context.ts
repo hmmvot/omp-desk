@@ -25,7 +25,9 @@
  * Runner: `node --test src/wiring/editor-context.test.ts`
  */
 import type { SessionItemState } from "../views/session-tree.ts";
-import { MAX_INSERT_TEXT_LENGTH, mentionTokenForPath } from "../protocol/messages.ts";
+import { MAX_EDITOR_QUOTES, MAX_INSERT_TEXT_LENGTH, MAX_QUOTE_LOCATION_LENGTH, mentionTokenForPath } from "../protocol/messages.ts";
+import type { GuestEditorQuote } from "../protocol/messages.ts";
+import { quoteSizeRefusal } from "../shared/quote-limit.ts";
 import { mentionPath } from "../host/file-mentions.ts";
 import { UNSAFE_PATH } from "../host/bracketed-paste.ts";
 
@@ -124,6 +126,75 @@ export function composeInsertion(sources: readonly ReferenceSource[], cwd: strin
 		return { ok: false, reason: `${references.length} references are too long to add at once (the limit is about ${MAX_INSERT_TEXT_LENGTH} characters). Add fewer files.` };
 	}
 	return { ok: true, text, summary: references.length === 1 ? (references[0] as string) : `${references.length} file references`, count: references.length };
+}
+
+/** One selection of a text editor, as the host reads it: its two positions and the exact text between them. */
+export interface EditorSelection {
+	readonly start: PositionLike;
+	readonly end: PositionLike;
+	readonly text: string;
+}
+
+/** The document a quote is taken from. `fsPath` is `null` when it has no path OMP can open (untitled, or a scheme other than `file`). */
+export interface EditorQuoteSource {
+	readonly fsPath: string | null;
+	readonly fileName: string;
+	readonly languageId: string;
+	readonly selections: readonly EditorSelection[];
+}
+
+/** `src/app.ts:42` for one line, `src/app.ts:42-50` for several: the path of {@link formatReference}'s rule (relative inside `cwd`, else absolute). */
+export function quoteLocation(fsPath: string, cwd: string, lines: LineRange): { readonly ok: true; readonly location: string } | Refusal {
+	const path = mentionPath(fsPath, cwd);
+	if (path.length === 0 || UNSAFE_PATH.test(path)) return { ok: false, reason: `“${fsPath}” has a character a message cannot carry.` };
+	const location = `${path}:${lines.start === lines.end ? lines.start : `${lines.start}-${lines.end}`}`;
+	if (location.length > MAX_QUOTE_LOCATION_LENGTH) return { ok: false, reason: `The path of “${fsPath}” is too long to quote.` };
+	return { ok: true, location };
+}
+
+export interface EditorQuotes {
+	readonly ok: true;
+	readonly quotes: GuestEditorQuote[];
+	/** What the status bar names: the one location, or a count. */
+	readonly summary: string;
+}
+
+/**
+ * Every non-empty selection of one editor as its own quote, in document order, for the target session's `cwd`.
+ *
+ * A selection ending at column 0 of a later line does not include that line (as for {@link selectionLines}); its text loses the
+ * line break that column 0 leaves behind. Line ends are `\n`. A whitespace-only selection is no selection. The size limit is the
+ * Chat quote's (`MAX_QUOTE_CHARACTERS`, counted over all the selections of one gesture) and is refused with the size; a control
+ * character other than a tab or a line end is refused, because a draft carrying one cannot be handed to a replacement editor.
+ * Nothing is dropped silently: either every selection is quoted or the whole gesture is refused with the reason.
+ */
+export function composeEditorQuotes(source: EditorQuoteSource, cwd: string): EditorQuotes | Refusal {
+	const ordered = [...source.selections].sort((a, b) => a.start.line - b.start.line || a.start.character - b.start.character);
+	const quotes: GuestEditorQuote[] = [];
+	const locations: string[] = [];
+	let total = 0;
+	let last: EditorSelection | undefined;
+	for (const selection of ordered) {
+		if (last !== undefined && last.start.line === selection.start.line && last.start.character === selection.start.character && last.end.line === selection.end.line && last.end.character === selection.end.character) continue;
+		last = selection;
+		const text = selection.text.replace(/\r\n?/g, "\n").replace(/\n+$/, "");
+		if (text.trim().length === 0) continue;
+		if (/[\u0000-\u0008\u000b-\u001f\u007f]/.test(text)) return { ok: false, reason: "The selection holds a control character that a message cannot carry." };
+		total += text.length;
+		let location: string | null = null;
+		if (source.fsPath !== null) {
+			const located = quoteLocation(source.fsPath, cwd, selectionLines(selection.start, selection.end));
+			if (!located.ok) return located;
+			location = located.location;
+			locations.push(location);
+		}
+		quotes.push({ location, fileName: source.fileName, languageId: source.languageId, text });
+	}
+	if (quotes.length === 0) return { ok: false, reason: "Select some text first." };
+	if (quotes.length > MAX_EDITOR_QUOTES) return { ok: false, reason: `Quote takes at most ${MAX_EDITOR_QUOTES} selections at once.` };
+	const tooLong = quoteSizeRefusal(total);
+	if (tooLong !== null) return { ok: false, reason: tooLong };
+	return { ok: true, quotes, summary: quotes.length === 1 ? (locations[0] ?? `${source.fileName || "the selection"}`) : `${quotes.length} selections` };
 }
 
 export type InsertAvailability = "live" | "resume";

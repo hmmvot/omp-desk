@@ -920,3 +920,20 @@ describe("detail tab request boundary", () => {
 		]) assert.equal(parseGuestWebviewMessage(message), null, JSON.stringify(message));
 	});
 });
+
+describe("editor quote insertion boundary", () => {
+	const quote = { location: "src/a.ts:3", fileName: "a.ts", languageId: "typescript", text: "const x = 1;\n\tx++;" };
+
+	it("relays bounded quotes of text and nothing that could corrupt a handed-over draft", () => {
+		assert.deepEqual(parseGuestHostMessage({ type: "omp:insert-quote", quotes: [quote] }), { type: "omp:insert-quote", quotes: [quote] });
+		assert.equal(parseGuestHostMessage({ type: "omp:insert-quote", quotes: [{ ...quote, location: null }] })?.type, "omp:insert-quote", "a document with no path has no location");
+		for (const bad of [
+			[], [{ ...quote, text: "   " }], [{ ...quote, text: "a\u001bb" }], [{ ...quote, text: "a\u000cb" }], [{ ...quote, location: "" }], [{ ...quote, location: "a\nb" }],
+			[{ ...quote, languageId: "type script" }], [{ ...quote, fileName: 5 }], [{ ...quote, text: "x".repeat(20_001) }], [quote, { ...quote, text: "y".repeat(19_995) }],
+			Array.from({ length: 65 }, () => quote), "x", null, [null],
+		]) {
+			assert.equal(parseGuestHostMessage({ type: "omp:insert-quote", quotes: bad }), null, JSON.stringify(bad)?.slice(0, 80));
+		}
+		assert.equal(parseGuestHostMessage({ type: "omp:insert-quote" }), null);
+	});
+});
