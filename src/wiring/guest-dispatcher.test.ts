@@ -648,7 +648,7 @@ describe("the draft handoff", () => {
 		const silent = lost.editor();
 		silent.state.accept = false;
 		assert.equal(await lost.dispatcher.carryDraftFrom(silent.panel), null);
-		assert.deepEqual(lost.warnings, ["This editor's complete unsent input could not be captured before the editor was replaced, so it was not preserved."]);
+		assert.deepEqual(lost.warnings, ["This editor's complete unsent input could not be captured before the editor was replaced (a read or an edit was still pending, or the input is longer than 2 000 000 characters), so it was not preserved."]);
 
 		const terminal = world();
 		const shell = terminal.editor(SLOT, { mode: "terminal" });

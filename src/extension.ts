@@ -4351,7 +4351,7 @@ async function restartChat(context: vscode.ExtensionContext, index: SessionIndex
     if (!eligible) { refuse("The saved conversation or controlling writer changed. Nothing was stopped."); return; }
     carried = await s.guestDispatcher.captureDraft(state);
     if (carried === null || !sameTarget(true)) {
-      refuse("Restart could not capture this editor's complete input. Wait for pending image reads or edits to finish and try again; nothing was stopped.");
+      refuse("Restart could not capture this editor's complete input: an image read or an edit is still pending, or the input is longer than 2 000 000 characters. Wait for a pending read or edit to finish and try again; nothing was stopped.");
       return;
     }
     const attachments = carried.reply.attachments + carried.reply.recoverable.reduce((count, original) => count + original.attachments, 0);

@@ -21,7 +21,7 @@ import {
 	FILE_COMPLETION_LIMIT,
 	MAX_DROP_URIS,
 	MAX_DROP_URI_LENGTH,
-	MAX_DRAFT_TEXT_LENGTH,
+	MAX_DRAFT_HANDOFF_CHARS,
 	MAX_CONTROL_TEXT_LENGTH,
 	MAX_FILE_PATH_LENGTH,
 	MAX_FILE_QUERY_LENGTH,
@@ -812,12 +812,12 @@ describe("draft messages", () => {
 		for (const refused of [
 			{ type: "omp:draft-restore", text: "a\rb" },
 			{ type: "omp:draft-restore", text: `a\u0000b` },
-			{ type: "omp:draft-restore", text: "x".repeat(MAX_DRAFT_TEXT_LENGTH + 1) },
+			{ type: "omp:draft-restore", text: "x".repeat(MAX_DRAFT_HANDOFF_CHARS + 1) },
 			{ type: "omp:draft-restore" },
 			{ ...plain, text: "a\rb" },
 			{ ...plain, attachments: -1 },
 			{ ...plain, captured: "true" },
-			{ ...plain, recoverable: [{ text: "x".repeat(MAX_DRAFT_TEXT_LENGTH), attachments: 0, unconfirmed: true }] },
+			{ ...plain, recoverable: [{ text: "x".repeat(MAX_DRAFT_HANDOFF_CHARS), attachments: 0, unconfirmed: true }] },
 			{ ...plain, recoverable: [{ text: "original", attachments: -1, unconfirmed: true }] },
 			{ ...plain, recoverable: [{ text: "original", attachments: 0, unconfirmed: "yes" }] },
 			{ ...plain, recoverable: undefined },
@@ -831,6 +831,19 @@ describe("draft messages", () => {
 		assert.deepEqual(parseGuestHostMessage({ type: "omp:draft-release", requestId: 2 }), { type: "omp:draft-release", requestId: 2 });
 		assert.deepEqual(parseGuestWebviewMessage({ type: "omp:draft-restored", requestId: 2 }), { type: "omp:draft-restored", requestId: 2 });
 		assert.equal(parseGuestWebviewMessage({ type: "omp:draft-restored", requestId: -1 }), null);
+	});
+
+	it("carries a long draft whole: the bound is on the sum of the text and the recoverable originals, not on 8 192 or 200 000 characters", () => {
+		for (const length of [20_000, 300_000, MAX_DRAFT_HANDOFF_CHARS]) {
+			const reply = { type: "omp:draft-reply", requestId: 1, captured: true, text: "y".repeat(length), attachments: 0, recoverable: [] };
+			assert.deepEqual(parseGuestWebviewMessage(reply), reply, `refused a draft of ${length} characters`);
+		}
+		const original = { text: "z".repeat(150_000), attachments: 0, unconfirmed: true };
+		const two = { type: "omp:draft-reply", requestId: 2, captured: true, text: "draft", attachments: 0, recoverable: [original, { ...original, unconfirmed: false }] };
+		assert.deepEqual(parseGuestWebviewMessage(two), two, "two 150 000-character originals refused a capture");
+		// The sum, not each part, is bounded: a text and an original that together pass it are refused whole.
+		const over = { type: "omp:draft-reply", requestId: 3, captured: true, text: "a".repeat(MAX_DRAFT_HANDOFF_CHARS - 10), attachments: 0, recoverable: [{ text: "b".repeat(11), attachments: 0, unconfirmed: true }] };
+		assert.equal(parseGuestWebviewMessage(over), null);
 	});
 });
 

@@ -354,7 +354,7 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 		if (owner === undefined || owner.mode !== "chat" || owner.document?.kind !== "guest") return null;
 		const carried = await captureDraft(owner);
 		if (carried === null) {
-			deps.warn("This editor's complete unsent input could not be captured before the editor was replaced, so it was not preserved.");
+			deps.warn("This editor's complete unsent input could not be captured before the editor was replaced (a read or an edit was still pending, or the input is longer than 2 000 000 characters), so it was not preserved.");
 			return null;
 		}
 		const attachments = carried.reply.attachments + carried.reply.recoverable.reduce((sum, entry) => sum + entry.attachments, 0);

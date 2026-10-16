@@ -406,14 +406,16 @@ export interface GuestRecallPromptMessage {
 }
 
 /**
- * Longest composer draft this boundary carries in one handoff.
+ * Largest composer capture this boundary carries in one handoff, as the sum of the draft's text and the text of every
+ * recoverable original (and, later, of every held file text).
  *
- * A draft is the user's own unsent text, so it is carried verbatim — but not without
- * bound: the handoff exists so a document that must be replaced does not lose what
- * the user typed, and a value larger than this is refused rather than truncated into
- * a half-draft.
+ * A draft is the user's own unsent text, so it is carried verbatim — but not without bound: the handoff exists so a
+ * document that must be replaced does not lose what the user typed, and a capture larger than this is refused rather
+ * than truncated into a half-draft. The bound is far above the 200 000-character send limit because a restored message
+ * (a queue edit, a rewind, a recall) can push a draft past it without the attach-time check, and a refused capture loses
+ * the whole draft. It is a bound on memory, never a limit the user is told about before it is reached.
  */
-export const MAX_DRAFT_TEXT_LENGTH = 8192;
+export const MAX_DRAFT_HANDOFF_CHARS = 2_000_000;
 
 /**
  * Control characters a draft may not carry.
@@ -426,7 +428,7 @@ const DRAFT_CONTROL_CHARACTER = /[\u0000-\u0008\u000b-\u001f\u007f]/;
 
 /** True for text this boundary relays as a composer draft. */
 export function isDraftText(value: unknown): value is string {
-	return typeof value === "string" && value.length <= MAX_DRAFT_TEXT_LENGTH && !DRAFT_CONTROL_CHARACTER.test(value);
+	return typeof value === "string" && value.length <= MAX_DRAFT_HANDOFF_CHARS && !DRAFT_CONTROL_CHARACTER.test(value);
 }
 
 /** Uncertain or refused original retained separately from the current draft. */
@@ -453,7 +455,7 @@ export function parseDraftHandoffContent(value: unknown): DraftHandoffContent | 
 	for (const entry of value.recoverable) {
 		if (!isRecord(entry) || !isDraftText(entry.text) || !isRequestId(entry.attachments) || typeof entry.unconfirmed !== "boolean") return null;
 		length += entry.text.length;
-		if (length > MAX_DRAFT_TEXT_LENGTH) return null;
+		if (length > MAX_DRAFT_HANDOFF_CHARS) return null;
 		recoverable.push({ text: entry.text, attachments: entry.attachments, unconfirmed: entry.unconfirmed });
 	}
 	return { text: value.text, attachments: value.attachments, recoverable };
