@@ -17,6 +17,7 @@ import { describe, it } from "node:test";
 import { createChatModel, setChatPhase, snapshotOf } from "../chat/model.ts";
 import { recordingLogger, type LoggedLine } from "../shared/logger.ts";
 import type { ChatEpoch } from "../chat/model.ts";
+import { MAX_ATTACH_ITEMS } from "../shared/attach-limits.ts";
 import { ChatSnapshotAssembler } from "../protocol/chat-messages.ts";
 import type { ChatHostMessage, ChatSnapshotChunkMessage, ChatSnapshotMessage } from "../protocol/chat-messages.ts";
 import { ChatClient } from "../webview/lib/chat-client.ts";
@@ -1186,7 +1187,23 @@ describe("navigating a conversation in place (omp:chat-navigate)", () => {
 
 		assert.equal((await runtime.navigate(TAB, request(), null)).status, "done");
 		assert.deepEqual(results(small).map(answer => answer.draft), [{ text: "look", images: [], unavailableImages: 9 }]);
-		assert.deepEqual(results(roomy).map(answer => [answer.draft?.images.length, answer.draft?.unavailableImages]), [[8, 1]], "at most eight images; the rest are counted");
+		assert.deepEqual(results(roomy).map(answer => [answer.draft?.images.length, answer.draft?.unavailableImages]), [[9, 0]], "nine images are carried whole: there is no count rule below the structural guard");
+		runtime.dispose();
+	});
+
+	it("carries every image of a rewound prompt up to the structural guard and counts the rest as unavailable", async () => {
+		const images = Array.from({ length: MAX_ATTACH_ITEMS + 1 }, () => ({ type: "image", data: PNG, mimeType: "image/png" }));
+		const entries = [
+			...rows(2),
+			messageEntry("r2", "r1", { role: "user", content: [{ type: "text", text: "look" }, ...images], timestamp: 1020 } as never),
+			messageEntry("r3", "r2", assistantMessage("seen", 1030)),
+		];
+		const { runtime } = await navigableRig(entries as never);
+		const roomy = new RecordingPage("editor");
+		runtime.attachPage(TAB, roomy);
+
+		assert.equal((await runtime.navigate(TAB, request(), null)).status, "done");
+		assert.deepEqual(results(roomy).map(answer => [answer.draft?.images.length, answer.draft?.unavailableImages]), [[MAX_ATTACH_ITEMS, 1]]);
 		runtime.dispose();
 	});
 });

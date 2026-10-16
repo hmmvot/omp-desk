@@ -15,6 +15,7 @@ import { desktopToastXml } from "../host/desktop-notifications.ts";
 import type { ChatEntry } from "../chat/messages.ts";
 import { CLEAR_MARKER_TYPE } from "../chat/clear.ts";
 import { NAVIGATE_REFUSAL_SENTENCES, rewindPreview } from "../chat/rewind.ts";
+import { composeFileBlocks, fileMarker, splitFileBlocks } from "../shared/file-blocks.ts";
 import { REWIND_ARGUMENTS_SENTENCE } from "../protocol/rpc.ts";
 
 const browserPath = [process.env.OMP_TEST_CHROMIUM,
@@ -2267,7 +2268,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 
 		await t.test("composer controls stay contained while branch and secondary controls give way before the model and thinking pickers", async () => {
 			await reset("layout");
-			await ui.evaluate("window.ui.receive({type:'omp:draft-restore',requestId:1889,text:'first\\nsecond\\nthird',attachments:0,recoverable:[]})");
+			await ui.evaluate("window.ui.receive({type:'omp:draft-restore',requestId:1889,text:'first\\nsecond\\nthird',attachments:0,recoverable:[],documents:[]})");
 			await ui.evaluate("window.ui.receive({type:'omp:footer-metadata',provider:'one',branch:'layout-branch',windows:[],accounts:[],accountSelection:null})");
 			await ui.evaluate("window.ui.push({state:{...window.ui.current().state,model:{...window.ui.current().state.model,name:'A long model name that remains selectable'}}})");
 			await ui.wait("window.composer.el().getBoundingClientRect().height > 60");
@@ -2336,7 +2337,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.ok(frame.left > 0 && frame.top > 0, "the frame sits inside the rounded card");
 			assert.equal(frame.height, 2 * 20 + frame.pt + frame.pb, "a short draft autosizes to the two-line minimum plus padding");
 			assert.ok(frame.toolbarGap >= 0, "the actions row stays below the input");
-			await ui.evaluate(`window.ui.receive({type:'omp:draft-restore',requestId:1958,text:${JSON.stringify(Array.from({ length: 14 }, (_, index) => `line ${index}`).join("\n"))},attachments:0,recoverable:[]})`);
+			await ui.evaluate(`window.ui.receive({type:'omp:draft-restore',requestId:1958,text:${JSON.stringify(Array.from({ length: 14 }, (_, index) => `line ${index}`).join("\n"))},attachments:0,recoverable:[],documents:[]})`);
 			await ui.wait("window.composer.el().getBoundingClientRect().height > 100");
 			const capped = await ui.evaluate<{ height: number; overflowY: string }>("(()=>{const ta=window.composer.el(),s=getComputedStyle(ta);return{height:ta.getBoundingClientRect().height,overflowY:s.overflowY}})()");
 			assert.equal(capped.height, 8 * 20 + 20, "growth stops at eight lines plus padding");
@@ -4089,6 +4090,129 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		const FILE_NOTES = "# Notes\nconst a = 1;\nask @src/a.ts now\n</file>\n";
+		const FILE_PLAN = "alpha\nbeta";
+		const FILE_PROSE = `Summarise ${fileMarker(1, "notes.md")} and ${fileMarker(2, "plan.txt")}`;
+		const FILE_MESSAGE = composeFileBlocks(FILE_PROSE, [
+			{ number: 1, name: "notes.md", label: "docs/notes.md", content: FILE_NOTES },
+			{ number: 2, name: "plan.txt", label: null, content: FILE_PLAN },
+		]);
+		/** The code lines of an opened row, as the file's own lines: the line number and its separator cut off each. */
+		const fileRowLines = (index: number): Promise<string[]> => ui.evaluate(`(()=>{
+		 const body=document.querySelectorAll('.omp-file-row')[${index}].querySelector('.omp-file-row-body');
+		 return [...body.querySelectorAll('.omp-native-code-line')].map(line=>line.textContent.slice(line.querySelector('.omp-native-line-number').textContent.length+1).replace(/\\n$/,''))})()`);
+
+		await t.test("a sent message with two files draws its prose and two closed rows that open to the original text, mount nothing while closed, and copy the prose, the file, and the whole text when it does not parse", async () => {
+			await reset("file-rows");
+			assert.ok(FILE_MESSAGE.includes("\u200b"), "the wire form of the sample escapes the sigils in the file");
+			await ui.evaluate("window.copied=[];Object.defineProperty(navigator,'clipboard',{configurable:true,value:{async writeText(text){window.copied.push(text)}}})");
+			await showMessages([{ role: "user", timestamp: 1, content: FILE_MESSAGE }]);
+			await ui.wait("document.querySelectorAll('.omp-file-row').length===2");
+			const shown = await ui.evaluate<{ prose: string; names: string[]; titles: string[]; meta: string[]; open: boolean[]; bodies: number; code: boolean; md: number }>(`(()=>({
+			 prose:document.querySelector('.omp-row--user .omp-md').textContent,
+			 names:[...document.querySelectorAll('.omp-file-row-name')].map(node=>node.textContent),
+			 titles:[...document.querySelectorAll('.omp-file-row-head')].map(node=>node.title),
+			 meta:[...document.querySelectorAll('.omp-file-row-meta')].map(node=>node.textContent),
+			 open:[...document.querySelectorAll('.omp-file-row details')].map(node=>node.open),
+			 bodies:document.querySelectorAll('.omp-file-row-body,.omp-file-row .omp-native-source').length,
+			 code:document.querySelector('.omp-transcript').textContent.includes('const a = 1'),
+			 md:document.querySelectorAll('.omp-file-row .omp-md').length}))()`);
+			assert.equal(shown.prose, FILE_PROSE, "the prose is drawn as before, markers included as plain text");
+			assert.deepEqual(shown.names, ["notes.md", "plan.txt"], "one row per block, in block order");
+			assert.deepEqual(shown.titles, ["docs/notes.md", "no path"], "a path block's title is its label, a name block's is `no path`");
+			assert.deepEqual(shown.meta, [`4 lines · ${new TextEncoder().encode(FILE_NOTES).length} B`, `2 lines · ${new TextEncoder().encode(FILE_PLAN).length} B`], "lines and the UTF-8 size of the original text");
+			assert.deepEqual(shown.open, [false, false], "rows are closed by default");
+			assert.equal(shown.bodies, 0, "a closed row mounts no content");
+			assert.equal(shown.code, false, "and none of the file's text is in the page");
+			assert.equal(shown.md, 0, "a row is not Markdown");
+
+			await ui.evaluate("document.querySelectorAll('.omp-file-row summary')[0].click()");
+			await ui.wait("document.querySelectorAll('.omp-file-row-body').length===1");
+			assert.deepEqual(await fileRowLines(0), ["# Notes", "const a = 1;", "ask @src/a.ts now", "</file>"], "an opened row shows the original text: no escape, the </file> inside it as written");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-transcript').textContent.includes('\\u200b')"), false, "no U+200B reaches the reader");
+			assert.equal(await ui.evaluate("document.querySelectorAll('.omp-file-row')[1].querySelector('.omp-file-row-body')"), null, "the other row stays closed");
+			await ui.evaluate("document.querySelectorAll('.omp-file-row summary')[1].click()");
+			await ui.wait("document.querySelectorAll('.omp-file-row-body').length===2");
+			assert.deepEqual(await fileRowLines(1), ["alpha", "beta"]);
+			await ui.evaluate("document.querySelectorAll('.omp-file-row summary')[0].click()");
+			await ui.wait("document.querySelectorAll('.omp-file-row-body').length===1");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-transcript').textContent.includes('const a = 1')"), false, "closing a row unmounts its content");
+
+			// The message's own Copy is the text as sent less the blocks; a row's Copy is its file, as written.
+			await ui.evaluate("document.querySelector('[aria-label=\"Copy message\"]').click()");
+			await ui.wait("window.copied.length===1");
+			await ui.evaluate("document.querySelector('[aria-label=\"Copy notes.md\"]').click()");
+			await ui.wait("window.copied.length===2");
+			assert.deepEqual(await ui.evaluate("window.copied"), [FILE_PROSE, FILE_NOTES]);
+
+			// The same rows after the history is replaced by a snapshot (the second row is still open, so close it first): closed again, and the same rows.
+			await ui.evaluate("document.querySelectorAll('.omp-file-row summary')[1].click()");
+			await ui.wait("document.querySelectorAll('.omp-file-row-body').length===0");
+			await showMessages([{ role: "user", timestamp: 1, content: [{ type: "text", text: FILE_MESSAGE }] }]);
+			await ui.wait("document.querySelectorAll('.omp-file-row').length===2");
+			assert.equal(await ui.evaluate("document.querySelectorAll('.omp-file-row-body').length"), 0);
+			assert.equal(await ui.evaluate("document.querySelector('.omp-row--user .omp-md').textContent"), FILE_PROSE, "an array of content blocks is split the same way");
+
+			// A text that does not end in a valid chain is drawn as it is today: Markdown, no rows, Copy copies it whole.
+			const forged = `${FILE_MESSAGE}\ntrailing words`;
+			await showMessages([{ role: "user", timestamp: 1, content: forged }]);
+			await ui.wait("document.querySelector('.omp-row--user .omp-md')?.textContent.includes('trailing words')");
+			assert.equal(await ui.evaluate("document.querySelectorAll('.omp-file-row').length"), 0);
+			assert.ok((await ui.evaluate<string>("document.querySelector('.omp-row--user .omp-md').textContent")).includes("const a = 1"), "the text is all there, as prose");
+			await ui.evaluate("window.copied=[];document.querySelector('[aria-label=\"Copy message\"]').click()");
+			await ui.wait("window.copied.length===1");
+			assert.deepEqual(await ui.evaluate("window.copied"), [forged]);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("the prompt of a skill card draws its file rows under its header and stays out of the Expanded skill disclosure", async () => {
+			await reset("file-rows-skill");
+			const prompt = composeFileBlocks(`/skill:inspect ${fileMarker(1, "notes.md")}`, [{ number: 1, name: "notes.md", label: "docs/notes.md", content: FILE_NOTES }]);
+			await showMessages([
+				{ role: "custom", customType: "skill-prompt", content: "Expanded skill body", details: { name: "inspect", args: "", prompt }, attribution: "user", display: true, timestamp: 1 },
+				{ role: "custom", customType: "skill-prompt", content: "Other body", details: { name: "inspect", args: "", prompt: `${prompt}\ntrailing` }, attribution: "user", display: true, timestamp: 2 },
+			]);
+			await ui.wait("document.querySelectorAll('.omp-native-skill').length===2");
+			const shape = await ui.evaluate<{ rows: number[]; underHeader: boolean; header: string; closed: boolean; body: boolean }>(`(()=>{
+			 const [parsed]=document.querySelectorAll('.omp-native-skill');
+			 const rows=[...document.querySelectorAll('.omp-native-skill')].map(skill=>skill.querySelectorAll('.omp-file-row').length);
+			 const row=parsed.querySelector('.omp-file-row');
+			 return {rows,underHeader:row.parentElement.parentElement===parsed&&row.parentElement.previousElementSibling===parsed.querySelector('header'),header:parsed.querySelector('header').textContent,closed:!row.querySelector('details').open,body:Boolean(row.querySelector('.omp-file-row-body'))}})()`);
+			assert.deepEqual(shape.rows, [1, 0], "the card that parses has a row; the one that does not has none");
+			assert.equal(shape.underHeader, true, "the rows follow the header");
+			assert.match(shape.header, /\/skill:inspect \[File #1: notes\.md\]/, "the header holds the prose only");
+			assert.equal(shape.closed && !shape.body, true, "closed, with no content mounted");
+			await ui.evaluate("document.querySelector('.omp-native-skill .omp-file-row summary').click()");
+			await ui.wait("document.querySelector('.omp-native-skill .omp-file-row-body')");
+			assert.deepEqual(await fileRowLines(0), ["# Notes", "const a = 1;", "ask @src/a.ts now", "</file>"]);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("quote capture never reads a file row: a selection from the prose through an opened row quotes the prose only, and one inside a row has nothing to quote", async () => {
+			await reset("file-rows-quote");
+			await showMessages([
+				{ role: "user", timestamp: 1, content: FILE_MESSAGE },
+				assistantMessage([{ type: "text", text: "Reply text" }]),
+			]);
+			await ui.wait("document.querySelectorAll('.omp-file-row').length===2");
+			await ui.evaluate("document.querySelectorAll('.omp-file-row summary')[0].click()");
+			await ui.wait("document.querySelector('.omp-file-row-body .omp-native-code-line')");
+			const select = (script: string): Promise<Captured> => ui.evaluate(`(()=>{
+			 const range=document.createRange();${script}
+			 const selection=getSelection();selection.removeAllRanges();selection.addRange(range);return window.captureQuote()})()`);
+			const across = await select("const prose=document.querySelector('.omp-row--user .omp-md');const body=document.querySelector('.omp-file-row-body');range.setStart(prose,0);range.setEnd(body,body.childNodes.length);");
+			assert.equal(across.kind, "quote", across.kind === "none" ? across.message : undefined);
+			if (across.kind === "quote") {
+				assert.match(across.source, /^Summarise /, "the prose is quoted");
+				assert.doesNotMatch(across.source, /const a|alpha|ask @|\u200b/, "none of the file's text is");
+			}
+			const through = await select("const body=document.querySelector('.omp-file-row-body');range.setStart(document.querySelector('.omp-file-row-name'),0);range.setEnd(body,body.childNodes.length);");
+			assert.deepEqual(through, { kind: "none", message: "That selection has no message text to quote" }, "a row's name, summary and content have nothing to quote");
+			const alone = await select("range.selectNodeContents(document.querySelector('.omp-file-row-body'));");
+			assert.deepEqual(alone, { kind: "none", message: "That selection has no message text to quote" });
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("the host's quote-selection action (Alt+Q, the context menu item) quotes the selection through the composer, or says why there is nothing to quote; no Quote button is drawn", async () => {
 			await reset("quote-triggers");
 			await ui.call("Emulation.setFocusEmulationEnabled", { enabled: true });
@@ -4333,6 +4457,129 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		const attachDocument = async (name: string, ref = "AbCdEf012345", bytes = 16, chars = 16): Promise<void> => {
+			const before = await ui.evaluate<number>("window.sent.filter(message=>message.type==='omp:attach-uris').length");
+			await dropOn("window.composer.el()", "drop", `data.setData('application/vnd.code.uri-list','file:///c%3A/repo/docs/${name}')`);
+			await ui.wait(`window.sent.filter(message=>message.type==='omp:attach-uris').length===${before + 1}`);
+			const request = await ui.evaluate<{ requestId: number }>("window.sent.filter(message=>message.type==='omp:attach-uris').at(-1)");
+			await ui.evaluate(`window.ui.receive({type:'omp:attached-files',requestId:${request.requestId},items:[{kind:'document',name:${JSON.stringify(name)},ref:${JSON.stringify(ref)},bytes:${bytes},chars:${chars}}],refusals:[]})`);
+		};
+		const pasteFile = (name: string, type: string, body: string): Promise<unknown> =>
+			ui.evaluate(`(()=>{const data=new DataTransfer();data.items.add(new File([${JSON.stringify(body)}],${JSON.stringify(name)},{type:${JSON.stringify(type)}}));
+			 window.composer.el().dispatchEvent(new ClipboardEvent('paste',{clipboardData:data,bubbles:true,cancelable:true}))})()`);
+
+		await t.test("a dropped Explorer .md attaches as a document: a marker and a tile with no file text, a stale reply is ignored, and × then Undo bring back both", async () => {
+			await reset("drop-document");
+			await dropOn("window.composer.el()", "drop", "data.setData('application/vnd.code.uri-list','file:///c%3A/repo/docs/notes.md')");
+			await ui.wait("window.sent.some(message=>message.type==='omp:attach-uris')");
+			const request = await ui.evaluate<{ requestId: number }>("window.sent.find(message=>message.type==='omp:attach-uris')");
+			await ui.evaluate(`window.ui.receive({type:'omp:attached-files',requestId:${request.requestId + 1},items:[{kind:'document',name:'stale.md',ref:'ZyXwVu987654',bytes:3,chars:3}],refusals:[]})`);
+			assert.equal(await ui.evaluate("document.querySelectorAll('.omp-attachment[data-file-number]').length"), 0, "an answer to another request is ignored");
+			await ui.evaluate(`window.ui.receive({type:'omp:attached-files',requestId:${request.requestId},items:[{kind:'document',name:'notes.md',ref:'AbCdEf012345',bytes:2048,chars:2000}],refusals:[]})`);
+			await ui.wait("document.querySelector('.omp-attachment[data-file-number=\"1\"]')");
+			assert.match(await draftValue(), /\[File #1: notes\.md\]/, "the marker is in the draft");
+			const tile = await ui.evaluate<{ ext: string; name: string; size: string; number: string; icon: string; text: string }>(`(()=>{const item=document.querySelector('.omp-attachment[data-file-number="1"]');
+			 return {ext:item.querySelector('.omp-attachment-ext').textContent,name:item.querySelector('.omp-attachment-name').textContent,size:item.querySelector('.omp-attachment-size').textContent,number:item.querySelector('.omp-attachment-number').textContent,icon:item.querySelector('.codicon').className,text:item.textContent};})()`);
+			assert.deepEqual([tile.ext, tile.number], ["MD", "#1"]);
+			assert.match(tile.name, /notes\.md/);
+			assert.match(tile.size, /2(\.0)? KB|2 KiB|2048/i, "the size is the file's");
+			assert.match(tile.icon, /markdown/, "Markdown has its own icon");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-attachment[data-file-number=\"1\"] .omp-attachment-figure').title"), "read from disk when sent");
+			assert.equal(await ui.evaluate("document.querySelectorAll('.omp-attachment-thumb').length"), 0, "no thumbnail, no file text");
+			// The × removes the marker with the tile; Undo brings both back.
+			await ui.evaluate("document.querySelector('.omp-attachment[data-file-number=\"1\"] .omp-attachment-remove').click()");
+			await ui.wait("!document.querySelector('.omp-attachment[data-file-number]')");
+			assert.doesNotMatch(await draftValue(), /\[File #1/);
+			await ui.evaluate("window.composer.focus()");
+			await press("z", "KeyZ", 90, { modifiers: 2, commands: ["undo"] });
+			await ui.wait("document.querySelector('.omp-attachment[data-file-number=\"1\"]')");
+			assert.match(await draftValue(), /\[File #1: notes\.md\]/, "Undo restored the marker");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("a send with a linked file reads it first, sends nothing until the host answers, carries its text in a block, and a missing file refuses the send and keeps the draft", async () => {
+			await reset("send-linked");
+			await attachDocument("notes.md");
+			await ui.wait("document.querySelector('.omp-attachment[data-file-number=\"1\"]')");
+			await ui.evaluate("window.ui.admission(true);window.composer.focus()");
+			await press("End", "End", 35, { modifiers: 2 });
+			await ui.call("Input.insertText", { text: " read it" });
+			await ui.evaluate("document.querySelector('button[aria-keyshortcuts=\"Enter\"]').click()");
+			await ui.wait("window.sent.some(message=>message.type==='omp:read-files')");
+			const read = await ui.evaluate<{ requestId: number; files: { number: number; ref: string }[]; budget: number }>("window.sent.find(message=>message.type==='omp:read-files')");
+			assert.deepEqual(read.files, [{ number: 1, ref: "AbCdEf012345" }]);
+			assert.ok(read.budget > 0 && read.budget <= 200_000, "the host is told how much text the draft can still take");
+			assert.equal(await sendCount(), 0, "nothing is sent while the host reads");
+			// A missing file refuses the send; the draft, marker and tile stay.
+			await ui.evaluate(`window.ui.receive({type:'omp:files-read',requestId:${read.requestId},files:[],failures:[{number:1,name:'notes.md',reason:'notes.md was deleted or moved, so nothing was sent.'}]})`);
+			await ui.wait("document.querySelector('.omp-attach-error')?.textContent.includes('notes.md was deleted')");
+			assert.equal(await sendCount(), 0);
+			assert.match(await draftValue(), /\[File #1: notes\.md\]/);
+			assert.equal(await ui.evaluate("document.querySelectorAll('.omp-attachment[data-file-number]').length"), 1);
+			// The same send again, now answered: one prompt, the prose then the block, no images.
+			await ui.evaluate("document.querySelector('button[aria-keyshortcuts=\"Enter\"]').click()");
+			await ui.wait("window.sent.filter(message=>message.type==='omp:read-files').length===2");
+			const again = await ui.evaluate<{ requestId: number }>("window.sent.filter(message=>message.type==='omp:read-files').at(-1)");
+			await ui.evaluate(`window.ui.receive({type:'omp:files-read',requestId:${again.requestId},files:[{number:1,label:'docs/notes.md',content:'see @src/a.ts\\n',dirty:false}],failures:[]})`);
+			await ui.wait("window.ui.sends().length===1");
+			const sent = await ui.evaluate<{ type: string; text: string; images?: unknown[] }>("window.ui.sends()[0]");
+			assert.equal(sent.type, "omp:chat-prompt");
+			assert.equal(sent.images, undefined, "a document is not an image");
+			const split = splitFileBlocks(sent.text);
+			assert.match(split.prose, /^\[File #1: notes\.md\]\s*read it$/);
+			assert.deepEqual(split.blocks.map(block => [block.number, block.name, block.label, block.content]), [[1, "notes.md", "docs/notes.md", "see @src/a.ts\n"]]);
+			assert.ok(sent.text.includes(`path="docs/notes.md" n="1" chars="${"\u200bsee @src/a.ts\n".length}"`), "the block counts the escaped text");
+			assert.ok(sent.text.includes("\u200b@src/a.ts"), "the file's @ mention is escaped on the wire");
+			await ui.evaluate("window.ui.sendReply()");
+			await ui.wait("window.composer.value()==='' && !document.querySelector('.omp-attachment[data-file-number]')");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("a pasted .md and a Shift-dropped one give the same marker and tile, a send needs no read and carries a named block, and a steer carries the same", async () => {
+			await reset("paste-document");
+			await pasteFile("notes.md", "text/markdown", "# Notes\n@src/a.ts\n");
+			await ui.wait("document.querySelector('.omp-attachment[data-file-number=\"1\"]')");
+			const pasted = await draftValue();
+			assert.match(pasted, /\[File #1: notes\.md\]/);
+			assert.equal(await ui.evaluate("document.querySelector('.omp-attachment[data-file-number=\"1\"] .omp-attachment-figure').title"), "no path: the text is held in the draft");
+			await ui.evaluate("window.ui.admission(true);window.composer.focus()");
+			await press("End", "End", 35, { modifiers: 2 });
+			await ui.call("Input.insertText", { text: " go" });
+			await ui.evaluate("document.querySelector('button[aria-keyshortcuts=\"Enter\"]').click()");
+			await ui.wait("window.ui.sends().length===1");
+			assert.equal(await ui.evaluate("window.sent.filter(message=>message.type==='omp:read-files').length"), 0, "a held file is not read again");
+			const sent = await ui.evaluate<{ type: string; text: string }>("window.ui.sends()[0]");
+			assert.deepEqual(splitFileBlocks(sent.text).blocks.map(block => [block.number, block.name, block.label, block.content]), [[1, "notes.md", null, "# Notes\n@src/a.ts\n"]]);
+			assert.match(sent.text, /<file name="notes\.md" n="1" chars="\d+">/);
+			await ui.evaluate("window.ui.sendReply()");
+			await ui.wait("window.composer.value()===''");
+			// Dropped with Shift, an OS file arrives as a File: the same marker and tile.
+			await dropOn("window.composer.el()", "drop", "data.items.add(new File(['# Notes\\n@src/a.ts\\n'],'notes.md',{type:'text/markdown'}))");
+			await ui.wait("document.querySelector('.omp-attachment[data-file-number]')");
+			assert.match(await draftValue(), /\[File #1: notes\.md\]/);
+			// A steer while a turn runs carries the same block.
+			await ui.evaluate("window.ui.push({working:true,settled:false,state:{...window.ui.current().state,isStreaming:true}});window.composer.focus()");
+			await press("End", "End", 35, { modifiers: 2 });
+			await ui.call("Input.insertText", { text: " steer" });
+			await ui.evaluate("document.querySelector('button[aria-keyshortcuts=\"Enter\"]').click()");
+			await ui.wait("window.ui.sends().length===2");
+			const steer = await ui.evaluate<{ type: string; text: string }>("window.ui.sends()[1]");
+			assert.equal(steer.type, "omp:chat-steer");
+			assert.deepEqual(splitFileBlocks(steer.text).blocks.map(block => block.content), ["# Notes\n@src/a.ts\n"]);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("a pasted file that is not text is refused by name and attaches nothing; an empty text file is a valid document", async () => {
+			await reset("paste-refused");
+			await pasteFile("report.pdf", "application/pdf", "%PDF-1.7\n\u0000\u0001binary");
+			await ui.wait("document.querySelector('.omp-attach-error')?.textContent.includes('report.pdf')");
+			assert.equal(await ui.evaluate("document.querySelectorAll('.omp-attachment[data-file-number]').length"), 0);
+			await pasteFile("empty.txt", "text/plain", "");
+			await ui.wait("document.querySelector('.omp-attachment[data-file-number]')");
+			assert.match(await draftValue(), /\[File #1: empty\.txt\]/);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("pending admission keeps text and images, blocks duplicate send routes, and clears only after the matching receipt", async () => {
 			await buildDraft("send-admission-pending");
 			await ui.evaluate("window.ui.admission(false);document.querySelector('button[aria-keyshortcuts=\"Enter\"]').click()");
@@ -4471,7 +4718,7 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			const restored = { type: "omp:draft-restore", requestId: 720, text: "Current [Image #5, 10x6]", attachments: 1, recoverable: [
 				{ text: "Original [Image #9, 9x9]", attachments: 2, unconfirmed: true },
 				{ text: "Refused text", attachments: 0, unconfirmed: false },
-			] };
+			], documents: [] };
 			await ui.evaluate(`window.ui.receive(${JSON.stringify(restored)})`);
 			await ui.wait("document.querySelectorAll('[aria-label=\"Dismiss recoverable message\"]').length===2&&document.querySelector('[aria-label=\"Dismiss attachment warning\"]')");
 			assert.equal(await draftValue(), restored.text);

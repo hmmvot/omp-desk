@@ -9,8 +9,6 @@
  */
 import { crc32, deflateSync } from "node:zlib";
 import { randomBytes } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
 import { expect, test } from "../support/fixtures.ts";
 
 /** A valid RGB PNG of incompressible pixels, `width` x `height` (about `3 * width * height` bytes). */
@@ -32,18 +30,15 @@ function noisePng(width: number, height: number): Buffer {
 	return Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), chunk("IHDR", header), chunk("IDAT", deflateSync(rows, { level: 0 })), chunk("IEND", Buffer.alloc(0))]);
 }
 
-test("a 770 KB and a 4 MB screenshot attach, send, reach the model and render in the transcript", async ({ desk }, testInfo) => {
-	const folder = testInfo.outputPath("images");
-	await mkdir(folder, { recursive: true });
-	const small = join(folder, "screenshot-770kb.png");
-	const large = join(folder, "screenshot-4mb.png");
-	await writeFile(small, noisePng(500, 513));
-	await writeFile(large, noisePng(1200, 1160));
+test("a 770 KB and a 4 MB screenshot attach, send, reach the model and render in the transcript", async ({ desk }) => {
+	const small = noisePng(500, 513);
+	const large = noisePng(1200, 1160);
 
 	const page = await desk.window("alpha-desk");
 	await desk.ready(page);
 	const chat = await desk.newChatSession(page, "alpha-desk");
-	await chat.locator("input.omp-file-input").setInputFiles([small, large]);
+	// The attach button opens a native dialog; a paste of the same files takes the same path in the page.
+	await desk.pasteFiles(desk.composer(chat), [{ name: "screenshot-770kb.png", type: "image/png", bytes: small }, { name: "screenshot-4mb.png", type: "image/png", bytes: large }]);
 	await expect(chat.locator(".omp-attachment-number"), "both files attach: neither is refused for its size").toHaveCount(2, { timeout: 60_000 });
 	await expect(chat.locator(".omp-attach-error"), "no refusal text is shown").toHaveCount(0);
 

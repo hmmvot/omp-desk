@@ -12,6 +12,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { ChatEpoch } from "../chat/model.ts";
+import { MAX_ATTACH_ITEMS } from "../shared/attach-limits.ts";
 import type { ChatHostMessage, ChatQueueRemoveMessage, ChatQueueResultMessage } from "../protocol/chat-messages.ts";
 import { ChatClient } from "../webview/lib/chat-client.ts";
 import type { GuestWebviewMessage } from "../protocol/messages.ts";
@@ -124,6 +125,19 @@ describe("cancelling and editing queued messages", () => {
 			{ status: "removed", images: [{ type: "image", mimeType: "image/png", data: PNG }] },
 			{ status: "removed" },
 		]);
+	});
+
+	it("an edit hands back every image of a queued message up to the structural guard, and flags the one past it", async () => {
+		const { runtime, channel, session } = await liveRig();
+		const page = new RecordingPage("editor");
+		runtime.attachPage(TAB, page);
+		const image = { type: "image", mimeType: "image/png", data: PNG };
+		scriptRemoval(channel, { nine: { removed: true, images: Array.from({ length: 9 }, () => image) }, over: { removed: true, images: Array.from({ length: MAX_ATTACH_ITEMS + 1 }, () => image) } });
+		const items = [{ queue: "followUp" as const, text: "nine" }, { queue: "followUp" as const, text: "over" }];
+		assert.equal(await runtime.handleMessage(TAB, remove(session.epoch, "edit", items), page), "accepted");
+		const [nine, over] = page.results()[0]?.results ?? [];
+		assert.deepEqual(nine, { status: "removed", images: Array.from({ length: 9 }, () => image) });
+		assert.deepEqual(over, { status: "removed", images: Array.from({ length: MAX_ATTACH_ITEMS }, () => image), imagesDropped: true });
 	});
 
 	it("a cancel never carries the removed message's images back", async () => {

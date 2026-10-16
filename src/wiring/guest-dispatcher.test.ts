@@ -20,6 +20,7 @@ import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import type { ChatPage } from "../host/chat-runtime.ts";
 import type { SessionIndex } from "../host/session-index.ts";
 import type { LoggedLine } from "../shared/logger.ts";
+import { composeFileBlocks, fileMarker, reduceFileBlocks } from "../shared/file-blocks.ts";
 import { recordingLogger } from "../shared/logger.ts";
 import type { CarriedDraft, GuestDispatcher, GuestDispatcherDeps, GuestTab } from "./guest-dispatcher.ts";
 import { registerRecentSessions } from "./recent-sessions.ts";
@@ -591,6 +592,40 @@ describe("omp:read-files", () => {
 	});
 });
 
+describe("recalledPrompt", () => {
+	it("hands a text with no reduced blocks over whole, and a reduced block with a path back as a file reference the page can read", async () => {
+		const w = world();
+		assert.deepEqual(await w.dispatcher.recalledPrompt(TAB, "plain words"), { type: "omp:recall-prompt", text: "plain words", documents: [], notes: [] });
+		const folder = await mkdtemp(join(tmpdir(), "omp-desk-recall-"));
+		try {
+			const plan = join(folder, "plan.md");
+			await writeFile(plan, "# Plan\n");
+			const prose = `see ${fileMarker(1, "plan.md")} and ${fileMarker(2, "loose.txt")} and ${fileMarker(3, "gone.md")}`;
+			const reduced = reduceFileBlocks(composeFileBlocks(prose, [
+				{ number: 1, name: "plan.md", label: "plan.md", content: "# Plan\n" },
+				{ number: 2, name: "loose.txt", label: null, content: "x" },
+				{ number: 3, name: "gone.md", label: "gone.md", content: "y" },
+			]), label => join(folder, label));
+			const recall = await w.dispatcher.recalledPrompt(TAB, reduced);
+			assert.equal(recall.text, prose);
+			assert.deepEqual(recall.documents.map(document => [document.number, document.name, document.bytes, document.chars]), [[1, "plan.md", 7, 7]]);
+			assert.match(recall.documents[0]!.ref, /^[A-Za-z0-9_-]{12,}$/);
+			assert.equal(recall.notes.length, 2);
+			assert.match(recall.notes[0]!, /^loose\.txt was not remembered/);
+			assert.match(recall.notes[1]!, /gone\.md/);
+			assert.notEqual(parseGuestHostMessage(recall), null, "the page's boundary parser accepts it");
+		} finally {
+			await rm(folder, { recursive: true, force: true });
+		}
+	});
+
+	it("restores a full text, a block that was not reduced, whole for the page to read itself", async () => {
+		const w = world();
+		const text = composeFileBlocks(`see ${fileMarker(1, "a.md")}`, [{ number: 1, name: "a.md", label: null, content: "body" }]);
+		assert.deepEqual(await w.dispatcher.recalledPrompt(TAB, text), { type: "omp:recall-prompt", text, documents: [], notes: [] });
+	});
+});
+
 describe("the empty chat's recent sessions", () => {
 	const row = (tabId: string, lastAt: string, cwd = "/runtime") => ({
 		tabId, headline: `Session ${tabId}`, entry: { kind: "session", cwd }, conversation: { lastAt },
@@ -681,7 +716,8 @@ describe("omp:ready", () => {
 });
 
 describe("the draft handoff", () => {
-	const content = { text: "edited draft", attachments: 1, recoverable: [{ text: "pending", attachments: 2, unconfirmed: true }] };
+	const held = { number: 1, name: "n.md", ref: null, label: "n.md", content: "text\n", bytes: 5, chars: 5 };
+	const content = { text: "edited draft [File #1: n.md]", attachments: 1, recoverable: [{ text: "pending", attachments: 2, unconfirmed: true }], documents: [held] };
 
 	it("captures the draft the page answers with and holds nothing back when it is complete", async () => {
 		const w = world();
@@ -692,7 +728,7 @@ describe("the draft handoff", () => {
 		});
 		const carried = await w.dispatcher.captureDraft(live.tab);
 		assert.ok(carried);
-		assert.deepEqual({ text: carried.reply.text, attachments: carried.reply.attachments, recoverable: carried.reply.recoverable }, content);
+		assert.deepEqual({ text: carried.reply.text, attachments: carried.reply.attachments, recoverable: carried.reply.recoverable, documents: carried.reply.documents }, content);
 		assert.equal(carried.source, live.tab);
 		assert.equal(carried.panel, live.panel);
 		assert.equal(carried.document, live.tab.document);
@@ -704,7 +740,7 @@ describe("the draft handoff", () => {
 		const w = world();
 		const live = w.editor(SLOT, {}, async message => {
 			if (message.type === "omp:draft-request") {
-				await w.dispatcher.handleMessage(index, SLOT, live.panel, { type: "omp:draft-reply", requestId: message.requestId, captured: false, text: "", attachments: 0, recoverable: [] });
+				await w.dispatcher.handleMessage(index, SLOT, live.panel, { type: "omp:draft-reply", requestId: message.requestId, captured: false, text: "", attachments: 0, recoverable: [], documents: [] });
 			}
 		});
 		assert.equal(await w.dispatcher.captureDraft(live.tab), null);
@@ -774,7 +810,7 @@ describe("the draft handoff", () => {
 		assert.equal(await w.dispatcher.carryDraftFrom(null), null);
 		assert.equal(await w.dispatcher.carryDraftFrom(fakePanel().panel), null);
 		const carried = await w.dispatcher.carryDraftFrom(live.panel);
-		assert.equal(carried?.reply.text, "edited draft");
+		assert.equal(carried?.reply.text, "edited draft [File #1: n.md]");
 		assert.deepEqual(w.infos, ["3 images could not be carried to the replacement document. Their text is preserved; reattach them before sending."]);
 		assert.deepEqual(w.warnings, []);
 
@@ -800,7 +836,7 @@ describe("the draft handoff", () => {
 		await w.dispatcher.handleMessage(index, SLOT, live.panel, { type: "omp:ready", protocolVersion: GUEST_PROTOCOL_VERSION });
 		const restores = live.posted.filter(message => message.type === "omp:draft-restore");
 		assert.equal(restores.length, 1);
-		assert.deepEqual({ requestId: restores[0]!.requestId, text: restores[0]!.text, attachments: restores[0]!.attachments }, { requestId: 5, text: "edited draft", attachments: 1 });
+		assert.deepEqual({ requestId: restores[0]!.requestId, text: restores[0]!.text, attachments: restores[0]!.attachments, documents: restores[0]!.documents }, { requestId: 5, text: "edited draft [File #1: n.md]", attachments: 1, documents: [held] });
 		await w.dispatcher.handleMessage(index, SLOT, live.panel, { type: "omp:draft-restored", requestId: 6 });
 		assert.ok(w.state.draftRestores.has(SLOT), "a foreign acknowledgement cannot consume input");
 		await w.dispatcher.handleMessage(index, SLOT, live.panel, { type: "omp:draft-restored", requestId: 5 });

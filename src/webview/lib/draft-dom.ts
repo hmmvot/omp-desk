@@ -8,7 +8,7 @@
  * trailing `<br>` so the caret has a position after it. That `<br>` is a rendering filler and never part of the model.
  */
 import type { FencedBlock } from "./code-fence.ts";
-import type { ImageReferenceSpan } from "./image-references.ts";
+import type { ReferenceKind, ReferenceSpan } from "./image-references.ts";
 import type { QuoteLineFlags } from "./quote-lines.ts";
 
 export const LINE_CLASS = "omp-line";
@@ -17,11 +17,14 @@ export const FENCE_LINE_CLASS = "omp-line--fence";
 export const QUOTE_LINE_CLASS = "omp-line--quote";
 export const QUOTE_CODE_LINE_CLASS = "omp-line--quote-code";
 export const CHIP_CLASS = "omp-chip";
+/** The modifier of a file's chip: the same atomic element with a file icon (`data-kind="file"`). */
+export const FILE_CHIP_CLASS = "omp-chip--file";
 
 /** A marker inside one line, with line-relative offsets. */
 export interface ChipSpec {
 	readonly start: number;
 	readonly end: number;
+	readonly kind: ReferenceKind;
 	readonly number: number;
 }
 
@@ -40,7 +43,7 @@ export interface LineSpec {
 }
 
 /** Splits `text` into the lines the surface renders, with their block and quote status and the markers each holds; `quotes` has one entry per line. */
-export function lineSpecs(text: string, blocks: readonly FencedBlock[], spans: readonly ImageReferenceSpan[], quotes: readonly QuoteLineFlags[]): LineSpec[] {
+export function lineSpecs(text: string, blocks: readonly FencedBlock[], spans: readonly ReferenceSpan[], quotes: readonly QuoteLineFlags[]): LineSpec[] {
 	const specs: LineSpec[] = [];
 	let lineStart = 0;
 	let block = 0;
@@ -55,7 +58,7 @@ export function lineSpecs(text: string, blocks: readonly FencedBlock[], spans: r
 		const chips: ChipSpec[] = [];
 		for (let index = span; index < spans.length && spans[index]!.start < lineEnd; index++) {
 			const marker = spans[index]!;
-			chips.push({ start: marker.start - lineStart, end: marker.end - lineStart, number: marker.number });
+			chips.push({ start: marker.start - lineStart, end: marker.end - lineStart, kind: marker.kind, number: marker.number });
 		}
 		const flags = quotes[specs.length];
 		specs.push({ text: text.slice(lineStart, lineEnd), code, fence: code && (lineStart === current!.start || lineStart === current!.closeStart), quote: flags?.quote === true, quoteCode: flags?.code === true, chips });
@@ -65,10 +68,10 @@ export function lineSpecs(text: string, blocks: readonly FencedBlock[], spans: r
 }
 
 function lineKey(spec: LineSpec): string {
-	return `${spec.code ? 1 : 0}${spec.fence ? 1 : 0}${spec.quote ? 1 : 0}${spec.quoteCode ? 1 : 0}|${spec.chips.map(chip => `${chip.start}-${chip.end}-${chip.number}`).join(",")}|${spec.text}`;
+	return `${spec.code ? 1 : 0}${spec.fence ? 1 : 0}${spec.quote ? 1 : 0}${spec.quoteCode ? 1 : 0}|${spec.chips.map(chip => `${chip.kind[0]}${chip.start}-${chip.end}-${chip.number}`).join(",")}|${spec.text}`;
 }
 
-/** Whether `node` is an image chip. */
+/** Whether `node` is a marker chip, of an image or of a file. */
 export function isChip(node: Node | null): node is HTMLElement {
 	return node !== null && node.nodeType === Node.ELEMENT_NODE && (node as HTMLElement).classList.contains(CHIP_CLASS);
 }
@@ -86,10 +89,18 @@ export function buildLine(doc: Document, spec: LineSpec): HTMLElement {
 	for (const chip of spec.chips) {
 		if (chip.start > at) line.append(doc.createTextNode(spec.text.slice(at, chip.start)));
 		const element = doc.createElement("span");
-		element.className = CHIP_CLASS;
+		if (chip.kind === "file") {
+			element.className = `${CHIP_CLASS} ${FILE_CHIP_CLASS}`;
+			element.dataset.kind = "file";
+			element.setAttribute("role", "group");
+			const label = spec.text.slice(chip.start, chip.end);
+			element.setAttribute("aria-label", `File #${chip.number}, ${label.slice(label.indexOf(": ") + 2, -1)}`);
+		} else {
+			element.className = CHIP_CLASS;
+			element.setAttribute("role", "img");
+			element.setAttribute("aria-label", `Image #${chip.number}`);
+		}
 		element.contentEditable = "false";
-		element.setAttribute("role", "img");
-		element.setAttribute("aria-label", `Image #${chip.number}`);
 		element.textContent = spec.text.slice(chip.start, chip.end);
 		line.append(element);
 		at = chip.end;

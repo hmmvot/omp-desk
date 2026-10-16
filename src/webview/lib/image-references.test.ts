@@ -4,12 +4,14 @@ import {
 	activeImages,
 	compactForSend,
 	deletionRange,
-	findImageReferences,
+	findReferences,
 	imageReferenceLabel,
 	pruneInactive,
+	referencedNumbers,
 	repairDamagedReferences,
 	snapSelection,
 } from "./image-references.ts";
+import { fileMarker } from "../../shared/file-blocks.ts";
 
 const all = (): boolean => true;
 const image = (number: number, bytes = 10): { number: number; bytes: number } => ({ number, bytes });
@@ -18,13 +20,13 @@ test("the marker is exactly the TUI's `[Image #N, WxH]`, bare when the size is u
 	assert.equal(imageReferenceLabel(1, { width: 589, height: 200 }), "[Image #1, 589x200]");
 	assert.equal(imageReferenceLabel(3), "[Image #3]");
 	const text = "a [Image #1, 589x200] b [Image #2] c [Image #0] d [Image #x]";
-	assert.deepEqual(findImageReferences(text, all).map(span => span.number), [1, 2]);
-	assert.deepEqual(findImageReferences(text, number => number === 2).map(span => text.slice(span.start, span.end)), ["[Image #2]"]);
+	assert.deepEqual(findReferences(text, all).map(span => span.number), [1, 2]);
+	assert.deepEqual(findReferences(text, (_kind, number) => number === 2).map(span => text.slice(span.start, span.end)), ["[Image #2]"]);
 });
 
 test("a caret hops out of a marker in its direction of travel; a range grows to cover the markers it touches", () => {
 	const text = "ab [Image #1] cd";
-	const [span] = findImageReferences(text, all);
+	const [span] = findReferences(text, all);
 	assert.ok(span);
 	assert.deepEqual(snapSelection([span], span.end - 2, span.end - 2, true), { start: span.end, end: span.end });
 	assert.deepEqual(snapSelection([span], span.end - 2, span.end - 2, false), { start: span.start, end: span.start });
@@ -35,7 +37,7 @@ test("a caret hops out of a marker in its direction of travel; a range grows to 
 
 test("Backspace after and Delete before a marker remove it whole; unrelated deletions stay the browser's", () => {
 	const text = "x [Image #1, 5x5] y";
-	const spans = findImageReferences(text, all);
+	const spans = findReferences(text, all);
 	const [span] = spans;
 	assert.ok(span);
 	assert.deepEqual(deletionRange(spans, span.end, span.end, "backward"), { start: span.start, end: span.end });
@@ -48,7 +50,7 @@ test("Backspace after and Delete before a marker remove it whole; unrelated dele
 
 test("a damaged marker is removed whole, an exact removal is left alone", () => {
 	const text = "x [Image #1, 5x5] y";
-	const spans = findImageReferences(text, all);
+	const spans = findReferences(text, all);
 	const [span] = spans;
 	assert.ok(span);
 	assert.equal(repairDamagedReferences(text, text.slice(0, span.start) + text.slice(span.end), spans), null);
@@ -76,4 +78,27 @@ test("deleted images are released oldest first and only when the draft would exc
 	assert.equal(pruneInactive(images, number => active.has(number), new Set(), 200).length, 3);
 	assert.deepEqual(pruneInactive(images, number => active.has(number), new Set(), 100).map(item => item.number), [2, 3]);
 	assert.deepEqual(pruneInactive(images, number => active.has(number), new Set([2]), 100).map(item => item.number), [2, 3], "a protected image survives");
+});
+
+test("a file marker is `[File #N: name]`, counts only with the document's own label, and keeps its own number space", () => {
+	const text = `a ${fileMarker(1, "plan.md")} b [File #1: other.md] c [Image #1] d [File #2: plan.md] e [File #0: x]`;
+	const known = (kind: string, number: number, name: string): boolean => (kind === "file" ? number === 1 && name === "plan.md" : number === 1);
+	assert.deepEqual(findReferences(text, known).map(span => [span.kind, span.number, text.slice(span.start, span.end)]), [
+		["file", 1, "[File #1: plan.md]"],
+		["image", 1, "[Image #1]"],
+	]);
+	assert.deepEqual([...referencedNumbers(text, "file", known)], [1]);
+	assert.deepEqual([...referencedNumbers(text, "image", known)], [1]);
+	assert.deepEqual(activeImages(text, [image(1), image(2)]).map(item => item.number), [1], "a file marker is never an image's");
+	assert.equal(compactForSend(`${fileMarker(2, "a.md")} [Image #3]`, [image(3)]).text, "[File #2: a.md] [Image #1]", "file markers are left as they are");
+});
+
+test("one start-sorted list without overlap: an image's free-form tail can swallow a file marker, an unknown one is stepped over", () => {
+	const text = "[Image #1, x [File #2: a.md]";
+	assert.deepEqual(findReferences(text, all).map(span => [span.kind, span.start, span.end]), [["image", 0, text.length]]);
+	assert.deepEqual(findReferences(text, (kind, number) => kind === "file" && number === 2).map(span => [span.kind, text.slice(span.start, span.end)]), [["file", "[File #2: a.md]"]]);
+	const mixed = `${fileMarker(1, "a.md")}[Image #2, 3x3]${fileMarker(3, "b.md")}`;
+	const spans = findReferences(mixed, all);
+	assert.deepEqual(spans.map(span => span.kind), ["file", "image", "file"]);
+	assert.ok(spans.every((span, index) => index === 0 || spans[index - 1]!.end <= span.start));
 });

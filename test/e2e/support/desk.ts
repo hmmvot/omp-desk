@@ -208,6 +208,34 @@ export class Desk {
 		await chat.getByRole("button", { name: "Send message" }).click();
 	}
 
+	/**
+	 * Pastes files into a Chat composer as the clipboard would: the page reads their bytes. The attach button opens a native
+	 * dialog, which a hidden-desktop run cannot drive, so a spec reaches the same attach path through a paste or a drop.
+	 */
+	async pasteFiles(box: Locator, files: readonly { name: string; type: string; bytes: Buffer }[]): Promise<void> {
+		const payload = files.map(file => ({ name: file.name, type: file.type, base64: file.bytes.toString("base64") }));
+		await box.evaluate((element, entries) => {
+			const data = new DataTransfer();
+			for (const entry of entries) {
+				const binary = atob(entry.base64);
+				const bytes = new Uint8Array(binary.length);
+				for (let index = 0; index < binary.length; index++) bytes[index] = binary.charCodeAt(index);
+				data.items.add(new File([bytes], entry.name, { type: entry.type }));
+			}
+			element.focus();
+			element.dispatchEvent(new ClipboardEvent("paste", { clipboardData: data, bubbles: true, cancelable: true }));
+		}, payload);
+	}
+
+	/** Drops files dragged from VS Code's Explorer onto a Chat composer: the page learns only their `file:` URIs and the host reads them. */
+	async dropUris(box: Locator, uris: readonly string[]): Promise<void> {
+		await box.evaluate((element, list) => {
+			const data = new DataTransfer();
+			data.setData("application/vnd.code.uri-list", list.join("\r\n"));
+			element.dispatchEvent(new DragEvent("drop", { dataTransfer: data, bubbles: true, cancelable: true }));
+		}, [...uris]);
+	}
+
 	async close(): Promise<void> {
 		await this.browser.close();
 	}

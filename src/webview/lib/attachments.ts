@@ -35,6 +35,7 @@
 import { formatBytes } from "../../shared/file-size.ts";
 import { sniffImageMimeType } from "../../shared/image-sniff.ts";
 import { MAX_CHAT_IMAGES_BYTES, MAX_CHAT_IMAGE_BYTES } from "../../protocol/chat-messages.ts";
+import { MAX_ATTACH_ITEMS } from "../../shared/attach-limits.ts";
 
 /** Formats the host accepts for image input (pi-utils `SUPPORTED_IMAGE_MIME_TYPES`). */
 export const SUPPORTED_IMAGE_MIME_TYPES = ["image/png", "image/jpeg", "image/gif", "image/webp"] as const;
@@ -162,8 +163,8 @@ function isSupportedImageMimeType(value: string): value is SupportedImageMimeTyp
 	return (SUPPORTED_IMAGE_MIME_TYPES as readonly string[]).includes(value);
 }
 
-/** Image files in a paste payload, in clipboard order. */
-export function imageFilesFrom(data: DataTransfer | null): File[] {
+/** Files in a paste or drop payload, in clipboard order: images and documents alike, told apart later by their first bytes. */
+export function filesFrom(data: DataTransfer | null): File[] {
 	if (data === null) return [];
 	const files: File[] = [];
 	for (let index = 0; index < data.items.length; index++) {
@@ -189,17 +190,35 @@ export function dragCarries(data: DataTransfer): "files" | "uris" | null {
 	return types.includes(CODE_URI_LIST) || types.includes("ResourceURLs") ? "uris" : null;
 }
 
-/** The `file:` URIs a drop names, in drag order, at most `limit`; other schemes and comments are not attachments. */
-export function droppedFileUris(data: DataTransfer | null, limit: number): string[] {
-	if (data === null) return [];
+/** What a drop named: its `file:` URIs, or the sentence that refuses the whole drop (then `uris` is empty). */
+export interface DroppedUris {
+	readonly uris: string[];
+	readonly refusal: string | null;
+}
+
+/**
+ * Why `adding` more attachments cannot join a draft that already holds `held`: the structural guard of the wire grammar
+ * (`MAX_ATTACH_ITEMS`, decision 9 of the attachments design), a bound on the parsers and the broker's line rather than a
+ * rule the user is told about before reaching it. `null` when they fit.
+ */
+export function attachGuardRefusal(held: number, adding: number, limit = MAX_ATTACH_ITEMS): string | null {
+	return held + adding > limit ? `At most ${limit} files can be attached at once.` : null;
+}
+
+/**
+ * The `file:` URIs a drop names, in drag order; other schemes and comments are not attachments. It reads one past `limit`
+ * so a drop over it is refused whole instead of silently losing everything after the `limit`th URI.
+ */
+export function droppedFileUris(data: DataTransfer | null, limit: number): DroppedUris {
+	if (data === null) return { uris: [], refusal: null };
 	const raw = data.getData(CODE_URI_LIST) || data.getData("text/uri-list");
 	const uris: string[] = [];
 	for (const line of raw.split(/\r?\n/)) {
 		const uri = line.trim();
 		if (/^file:/i.test(uri)) uris.push(uri);
-		if (uris.length === limit) break;
+		if (uris.length > limit) return { uris: [], refusal: attachGuardRefusal(uris.length, 0, limit) };
 	}
-	return uris;
+	return { uris, refusal: null };
 }
 
 /** An image the host read for a drop, as a `File` the ordinary attach path takes. */

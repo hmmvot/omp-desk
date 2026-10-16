@@ -86,7 +86,7 @@ function deliver(data: unknown): void {
 	for (const handler of messageHandlers) handler({ data });
 }
 
-const CONNECT = { type: "omp:draft-restore", requestId: 1, text: "restored draft", attachments: 0, recoverable: [] };
+const CONNECT = { type: "omp:draft-restore", requestId: 1, text: "restored draft", attachments: 0, recoverable: [], documents: [] };
 const COMPLETIONS = { type: "omp:file-completions", requestId: 1, paths: ["src/a.ts"] };
 
 describe("guestTransport", () => {

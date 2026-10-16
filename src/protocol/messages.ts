@@ -37,7 +37,7 @@ import { DRAFT_CONTROL_CHARACTER } from "../shared/text-file.ts";
 import { isRecord } from "../shared/guards.ts";
 import { isCanonicalBase64Text } from "../shared/bytes-base64.ts";
 import { MAX_QUOTE_CHARACTERS } from "../shared/quote-limit.ts";
-import { MAX_CHAT_IMAGES, MAX_CHAT_IMAGE_BASE64_CHARS, MAX_CHAT_IMAGES_BASE64_CHARS, MAX_CHAT_TEXT_LENGTH, isChatImageMimeType, parseChatEpoch, parseChatHostMessage, parseChatWebviewMessage } from "./chat-messages.ts";
+import { MAX_CHAT_IMAGE_BASE64_CHARS, MAX_CHAT_IMAGES_BASE64_CHARS, MAX_CHAT_TEXT_LENGTH, isChatImageMimeType, parseChatEpoch, parseChatHostMessage, parseChatWebviewMessage } from "./chat-messages.ts";
 import type { ChatHostMessage, ChatWebviewMessage } from "./chat-messages.ts";
 import type { ChatEpoch } from "../chat/model.ts";
 import { isPanelTabId } from "../shared/panel-identity.ts";
@@ -251,8 +251,8 @@ export interface GuestFileCompletionsMessage {
 	paths: string[];
 }
 
-/** Image files one drop may name, and the files one answer may carry: one prompt's image count. */
-export const MAX_DROP_URIS = MAX_CHAT_IMAGES;
+/** URIs one drop may name: the structural guard of every attachment array (decision 9), not a limit the user is told about. */
+export const MAX_DROP_URIS = MAX_ATTACH_ITEMS;
 /** Longest `file:` URI a drop may name. */
 export const MAX_DROP_URI_LENGTH = 2048;
 /** Longest file name an answer may carry. */
@@ -482,7 +482,21 @@ export interface GuestInsertQuoteMessage {
  */
 export interface GuestRecallPromptMessage {
 	type: "omp:recall-prompt";
+	/** The prompt's prose, with its `[File #N: name]` markers; the file blocks of a remembered message are reduced to `documents` and `notes`. */
 	text: string;
+	/** Files the host re-validated and minted references for, in the receiving tab's registry; their text is read again at send. */
+	documents: GuestRecallDocument[];
+	/** One sentence per file that could not come back (no path was remembered, or the path is gone). */
+	notes: string[];
+}
+
+/** A remembered file that the host found again: what a restored chip needs. */
+export interface GuestRecallDocument {
+	number: number;
+	name: string;
+	ref: string;
+	bytes: number;
+	chars: number;
 }
 
 /**
@@ -509,18 +523,35 @@ export interface DraftRecoveryRecord {
 	unconfirmed: boolean;
 }
 
-/** Complete text-only content of one document handoff; never trimmed or submitted. */
+/**
+ * A document of a draft in a hand-off (docs/designs/2026-10-16-chat-document-attachments.md, *Proposed Design* 7). A **linked**
+ * one is carried as its host reference (the host's registry is per tab, so the replacement editor of the same tab reads it at
+ * send); a **held** one is carried with its text and, for a restored message, its path text. Exactly one of `ref` and `content`.
+ */
+export interface DraftHandoffDocument {
+	number: number;
+	name: string;
+	ref: string | null;
+	label: string | null;
+	content: string | null;
+	bytes: number;
+	chars: number;
+}
+
+/** Complete content of one document handoff; never trimmed or submitted. Images are counted, never carried; documents are. */
 export interface DraftHandoffContent {
 	text: string;
 	attachments: number;
 	recoverable: readonly DraftRecoveryRecord[];
+	documents: readonly DraftHandoffDocument[];
 }
 
 const MAX_DRAFT_RECOVERY_RECORDS = 64;
 
-/** Validate and sanitize the entire bounded capture, including edited-away originals. */
+/** Validate and sanitize the entire bounded capture, including edited-away originals and the held text of documents. */
 export function parseDraftHandoffContent(value: unknown): DraftHandoffContent | null {
 	if (!isRecord(value) || !isDraftText(value.text) || !isRequestId(value.attachments) || !Array.isArray(value.recoverable) || value.recoverable.length > MAX_DRAFT_RECOVERY_RECORDS) return null;
+	if (!Array.isArray(value.documents) || value.documents.length > MAX_ATTACH_ITEMS) return null;
 	let length = value.text.length;
 	const recoverable: DraftRecoveryRecord[] = [];
 	for (const entry of value.recoverable) {
@@ -529,7 +560,25 @@ export function parseDraftHandoffContent(value: unknown): DraftHandoffContent | 
 		if (length > MAX_DRAFT_HANDOFF_CHARS) return null;
 		recoverable.push({ text: entry.text, attachments: entry.attachments, unconfirmed: entry.unconfirmed });
 	}
-	return { text: value.text, attachments: value.attachments, recoverable };
+	const documents: DraftHandoffDocument[] = [];
+	for (const entry of value.documents) {
+		if (!isRecord(entry) || !isDocumentNumber(entry.number) || typeof entry.name !== "string" || entry.name.length === 0 || entry.name.length > MAX_ATTACHED_NAME_LENGTH || !isSafeBoundaryText(entry.name)) return null;
+		if (!isCount(entry.bytes, MAX_DRAFT_HANDOFF_CHARS * 4) || !isCount(entry.chars, MAX_DRAFT_HANDOFF_CHARS)) return null;
+		const label = entry.label;
+		if (label !== null && (typeof label !== "string" || label.length === 0 || label.length > MAX_FILE_LABEL_LENGTH || !isSafeBoundaryText(label))) return null;
+		const { ref, content } = entry;
+		if (ref !== null && !isAttachRef(ref)) return null;
+		if (content !== null && !isDraftText(content)) return null;
+		// A linked document has a reference and no text; a held one has text and no reference.
+		if ((ref === null) === (content === null)) return null;
+		if (ref !== null && label !== null) return null;
+		if (content !== null) {
+			length += content.length;
+			if (length > MAX_DRAFT_HANDOFF_CHARS) return null;
+		}
+		documents.push({ number: entry.number, name: entry.name, ref, label, content, bytes: entry.bytes, chars: entry.chars });
+	}
+	return { text: value.text, attachments: value.attachments, recoverable, documents };
 }
 
 /**
@@ -1439,7 +1488,20 @@ export function parseGuestHostMessage(value: unknown): GuestHostMessage | null {
 	}
 	if (value.type === "omp:recall-prompt") {
 		const { text } = value;
-		return typeof text === "string" && text.trim().length > 0 && text.length <= MAX_CHAT_TEXT_LENGTH ? { type: "omp:recall-prompt", text } : null;
+		if (typeof text !== "string" || text.trim().length === 0 || text.length > MAX_CHAT_TEXT_LENGTH) return null;
+		if (!Array.isArray(value.documents) || value.documents.length > MAX_ATTACH_ITEMS || !Array.isArray(value.notes) || value.notes.length > MAX_ATTACH_ITEMS) return null;
+		const documents: GuestRecallDocument[] = [];
+		for (const candidate of value.documents) {
+			if (!isRecord(candidate) || !isDocumentNumber(candidate.number) || typeof candidate.name !== "string" || candidate.name.length === 0 || candidate.name.length > MAX_ATTACHED_NAME_LENGTH || !isSafeBoundaryText(candidate.name)) return null;
+			if (!isAttachRef(candidate.ref) || !isCount(candidate.bytes, MAX_DOCUMENT_BYTES) || !isCount(candidate.chars, MAX_MESSAGE_CHARS)) return null;
+			documents.push({ number: candidate.number, name: candidate.name, ref: candidate.ref, bytes: candidate.bytes, chars: candidate.chars });
+		}
+		const notes: string[] = [];
+		for (const note of value.notes) {
+			if (typeof note !== "string" || note.length === 0 || note.length > MAX_ATTACHED_REFUSAL_LENGTH || !isSafeBoundaryText(note)) return null;
+			notes.push(note);
+		}
+		return { type: "omp:recall-prompt", text, documents, notes };
 	}
 	if (value.type === "omp:webview-action") {
 		// Only the actions the composer itself offers: anything else is a

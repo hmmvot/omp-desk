@@ -13,11 +13,11 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { SessionEntry } from "@oh-my-pi/pi-wire";
+import { MAX_ATTACH_ITEMS } from "../shared/attach-limits.ts";
 import { createChatModel, reduceChatFrame, snapshotOf } from "../chat/model.ts";
 import type { ChatSnapshotPayload } from "../chat/model.ts";
 import {
 	ChatSnapshotAssembler,
-	MAX_CHAT_IMAGES,
 	MAX_CHAT_IMAGE_BASE64_CHARS,
 	MAX_CHAT_IMAGES_BASE64_CHARS,
 	MAX_CHAT_IMAGE_BYTES,
@@ -236,12 +236,50 @@ describe("parseChatWebviewMessage", () => {
 			[{ ...image, data: "not base64!" }],
 			[{ ...image, data: "" }],
 			[{ ...image, data: "A".repeat(MAX_CHAT_IMAGE_BASE64_CHARS + 4) }],
-			Array.from({ length: MAX_CHAT_IMAGES + 1 }, () => image),
+			Array.from({ length: MAX_ATTACH_ITEMS + 1 }, () => image),
 			"image",
 		];
 		for (const images of refused) {
 			assert.equal(parseChatWebviewMessage({ type: "omp:chat-prompt", requestId: REQUEST_ID, text: "x", images }), null);
 		}
+	});
+
+	it("accepts as many images as the structural guard allows, whatever their count, and refuses one more", () => {
+		const image = { type: "image", mimeType: "image/png", data: PNG };
+		const prompt = (count: number) => parseChatWebviewMessage({ type: "omp:chat-prompt", requestId: REQUEST_ID, text: "x", images: Array.from({ length: count }, () => image) });
+		const full = prompt(MAX_ATTACH_ITEMS);
+		assert.ok(full !== null && full.type === "omp:chat-prompt");
+		assert.equal(full.images?.length, MAX_ATTACH_ITEMS);
+		assert.notEqual(prompt(9), null, "nine images are no longer over a count rule");
+		assert.equal(prompt(MAX_ATTACH_ITEMS + 1), null);
+	});
+
+	it("accepts a full byte budget carried by the most images the guard allows, though each rounds up to a base64 group", () => {
+		// Two large images and the rest one byte each: every 1-byte image costs 4 characters for 1 byte, so the total passes
+		// the sum of the bytes' own base64 and only the rounding slack of the bound lets the prompt through.
+		const small = MAX_ATTACH_ITEMS - 2;
+		const large = Math.floor((MAX_CHAT_IMAGES_BYTES - small) / 2);
+		assert.ok(large <= MAX_CHAT_IMAGE_BYTES, "each large image is within its own budget");
+		const image = (bytes: number) => ({ type: "image", mimeType: "image/png", data: Buffer.alloc(bytes, 7).toString("base64") });
+		const images = [image(large), image(large), ...Array.from({ length: small }, () => image(1))];
+		const chars = images.reduce((sum, { data }) => sum + data.length, 0);
+		assert.ok(chars > Math.ceil(MAX_CHAT_IMAGES_BYTES / 3) * 4, "this set is over the unpadded base64 of the budget, the case the slack exists for");
+		assert.ok(chars <= MAX_CHAT_IMAGES_BASE64_CHARS);
+		const message = parseChatWebviewMessage({ type: "omp:chat-prompt", requestId: REQUEST_ID, text: "x", images });
+		assert.ok(message !== null && message.type === "omp:chat-prompt");
+		assert.equal(message.images?.length, MAX_ATTACH_ITEMS);
+	});
+
+	it("carries a rewound draft's images whole within the byte budget and counts every image of a set over it as lost", () => {
+		const draft = (images: unknown[]) => parseChatHostMessage({ type: "omp:chat-navigate-result", requestId: REQUEST_ID, status: "done", kind: "rewind", summarized: false, draft: { text: "look", images, unavailableImages: 1 } });
+		const small = { type: "image", mimeType: "image/png", data: PNG };
+		const nine = draft(Array.from({ length: 9 }, () => small));
+		assert.ok(nine !== null && nine.type === "omp:chat-navigate-result");
+		assert.deepEqual(nine.draft, { text: "look", images: Array.from({ length: 9 }, () => small), unavailableImages: 1 });
+		const big = { type: "image", mimeType: "image/png", data: Buffer.alloc(MAX_CHAT_IMAGE_BYTES, 7).toString("base64") };
+		const over = draft([big, big, big]);
+		assert.ok(over !== null && over.type === "omp:chat-navigate-result");
+		assert.deepEqual(over.draft, { text: "look", images: [], unavailableImages: 1 + 3 }, "three 5 MiB images are over the prompt budget: all three are lost, not one");
 	});
 
 	it("carries a 5 MiB image and a 10 MiB prompt, refuses one byte over either, and the longest such command fits the broker's stdin line", () => {
@@ -252,16 +290,19 @@ describe("parseChatWebviewMessage", () => {
 		assert.equal(prompt([image(MAX_CHAT_IMAGE_BYTES + 3)]), null, "one base64 group over its bound");
 		const half = image(MAX_CHAT_IMAGES_BYTES / 2);
 		assert.notEqual(prompt([half, half]), null, "two 5 MiB images are exactly the prompt budget");
-		assert.equal(prompt([half, half, image(3)]), null, "one base64 group over the prompt budget");
+		assert.notEqual(prompt([half, half, image(3)]), null, "a base64 group over the budget fits the rounding slack the guard of 1000 images can add up to");
+		assert.equal(prompt([half, half, image(3 * 1001)]), null, "more than that slack over the prompt budget is refused");
 		assert.equal(prompt([one, one, one]), null, "three 5 MiB images are over the prompt budget though each is within its own");
 		// The command OMP receives for the largest admissible prompt: the longest text with every character escaped to six bytes,
-		// the most images, and the base64 of the whole budget.
-		const perImage = Math.floor(MAX_CHAT_IMAGES_BASE64_CHARS / MAX_CHAT_IMAGES / 4) * 4;
+		// and the whole base64 bound carried by the most images the guard allows.
+		const groups = MAX_CHAT_IMAGES_BASE64_CHARS / 4;
+		const perImage = Math.floor(groups / MAX_ATTACH_ITEMS);
+		const extra = groups - perImage * MAX_ATTACH_ITEMS;
 		const line = JSON.stringify({
 			id: `vsc:${"f".repeat(32)}`,
 			type: "prompt",
 			message: "\u0001".repeat(MAX_CHAT_TEXT_LENGTH),
-			images: Array.from({ length: MAX_CHAT_IMAGES }, () => ({ type: "image", data: "A".repeat(perImage), mimeType: "image/webp" })),
+			images: Array.from({ length: MAX_ATTACH_ITEMS }, (_, index) => ({ type: "image", data: "A".repeat((perImage + (index < extra ? 1 : 0)) * 4), mimeType: "image/webp" })),
 			streamingBehavior: "followUp",
 		});
 		assert.ok(Buffer.byteLength(line) < PTY_RPC_MAX_WRITE_BYTES, `${Buffer.byteLength(line)} bytes against ${PTY_RPC_MAX_WRITE_BYTES}`);

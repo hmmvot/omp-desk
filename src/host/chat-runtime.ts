@@ -32,6 +32,7 @@ import type {
 } from "../chat/model.ts";
 import { prefixedLogger, type Logger } from "../shared/logger.ts";
 import { chatTurnInProgress, createChatModel, sameEpoch, setChatPhase, snapshotOf } from "../chat/model.ts";
+import { MAX_ATTACH_ITEMS } from "../shared/attach-limits.ts";
 import { MAX_CHAT_TEXT_LENGTH, splitChatSnapshot } from "../protocol/chat-messages.ts";
 import type { ChatHostMessage, ChatWebviewMessage, ChatSubagentRequestMessage, ChatDisplayPreferences, ChatQueueRemoveMessage, ChatQueueResultEntry, ChatAbortResultMessage, ChatNavigateResultMessage, ChatOperationMessage } from "../protocol/chat-messages.ts";
 import type { PendingOperation, PendingOperations, PendingChange } from "./pending-operations.ts";
@@ -893,7 +894,7 @@ export class ChatRuntime {
 		const draft = outcome.draft;
 		if (draft === null) { origin.post(base); return; }
 		const text = draft.text.slice(0, MAX_CHAT_TEXT_LENGTH);
-		const full: ChatNavigateResultMessage = { ...base, draft: { text, images: draft.images.slice(0, 8).map(image => ({ type: image.type, mimeType: image.mimeType, data: image.data })), unavailableImages: draft.unavailableImages + Math.max(0, draft.images.length - 8) } };
+		const full: ChatNavigateResultMessage = { ...base, draft: { text, images: draft.images.slice(0, MAX_ATTACH_ITEMS).map(image => ({ type: image.type, mimeType: image.mimeType, data: image.data })), unavailableImages: draft.unavailableImages + Math.max(0, draft.images.length - MAX_ATTACH_ITEMS) } };
 		if (origin.post(full) !== "too-large") return;
 		origin.post({ ...base, draft: { text, images: [], unavailableImages: draft.unavailableImages + draft.images.length } });
 	}

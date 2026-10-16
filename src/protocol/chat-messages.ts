@@ -70,7 +70,7 @@ import type {
 	ChatUiRequest,
 	ChatUiResponse,
 } from "../chat/model.ts";
-import { MAX_MESSAGE_CHARS } from "../shared/attach-limits.ts";
+import { MAX_ATTACH_ITEMS, MAX_MESSAGE_CHARS } from "../shared/attach-limits.ts";
 import { isRecord } from "../shared/guards.ts";
 import { isCanonicalBase64Text } from "../shared/bytes-base64.ts";
 import { isPendingEnd, isPendingKind, isPendingStep, type PendingEnd, type PendingKind, type PendingStep } from "../shared/pending-operation.ts";
@@ -82,8 +82,6 @@ import { parseCodeThemes, type CodeTheme } from "../chat/code-theme.ts";
 export const MAX_CHAT_TEXT_LENGTH = MAX_MESSAGE_CHARS;
 /** Messages one Stop hands back to the composer (the host's own bound on `abort_and_restore_queue`). */
 export const MAX_RESTORED_MESSAGES = 64;
-/** Images one prompt may carry. */
-export const MAX_CHAT_IMAGES = 8;
 /**
  * Raw bytes of one image, as the composer reads the file. Source of truth for the composer's own refusal
  * (`webview/lib/attachments.ts`) and for the base64 bound below.
@@ -98,8 +96,12 @@ export const MAX_CHAT_IMAGE_BYTES = 5 * 1024 * 1024;
 export const MAX_CHAT_IMAGES_BYTES = 10 * 1024 * 1024;
 /** Base64 characters of one image. */
 export const MAX_CHAT_IMAGE_BASE64_CHARS = Math.ceil(MAX_CHAT_IMAGE_BYTES / 3) * 4;
-/** Base64 characters of all of one prompt's images. */
-export const MAX_CHAT_IMAGES_BASE64_CHARS = Math.ceil(MAX_CHAT_IMAGES_BYTES / 3) * 4;
+/**
+ * Base64 characters of all of one prompt's images. The parser sums per-image lengths and each image rounds up to a
+ * multiple of 4 characters, so a full byte budget of many small images exceeds `ceil(BYTES / 3) * 4` by up to 4 characters
+ * an image; the slack is what the page may attach and this parser must still accept.
+ */
+export const MAX_CHAT_IMAGES_BASE64_CHARS = Math.ceil(MAX_CHAT_IMAGES_BYTES / 3) * 4 + 4 * MAX_ATTACH_ITEMS;
 /** Rows one chunk, `omp:chat-entries` or `omp:chat-older` message may carry. */
 export const MAX_CHAT_ROWS_PER_MESSAGE = 5_000;
 /** Chunks one snapshot may announce. */
@@ -1070,7 +1072,9 @@ export function parseChatHostMessage(value: unknown): ChatHostMessage | null {
 				const draft = value.draft;
 				if (!isRecord(draft) || typeof draft.text !== "string" || draft.text.length > MAX_CHAT_TEXT_LENGTH || !isCount(draft.unavailableImages)) return null;
 				const images = parseRestoredImages(draft.images, false);
-				message.draft = { text: draft.text, images: images.images ?? [], unavailableImages: draft.unavailableImages + (images.imagesDropped ? 1 : 0) };
+				// A set over the per-prompt budget is dropped as a whole: every image of it is one the user lost.
+				const lost = images.imagesDropped ? (Array.isArray(draft.images) ? Math.max(1, draft.images.length) : 1) : 0;
+				message.draft = { text: draft.text, images: images.images ?? [], unavailableImages: draft.unavailableImages + lost };
 			}
 			return message;
 		}
@@ -1192,12 +1196,13 @@ export function parseChatHostMessage(value: unknown): ChatHostMessage | null {
 // Page → host
 
 /**
- * Images of one prompt: a bounded count, a supported type, canonical base64 that fits the
- * per-image and per-prompt budgets. `undefined` means "none" and is valid; `null` means unusable.
+ * Images of one prompt: at most `MAX_ATTACH_ITEMS` (a bound on the parser and the broker's line, not a rule the user is
+ * told about), a supported type, canonical base64 that fits the per-image and per-prompt budgets. `undefined` means
+ * "none" and is valid; `null` means unusable.
  */
 function parseImages(value: unknown): ChatImageWire[] | undefined | null {
 	if (value === undefined) return undefined;
-	if (!Array.isArray(value) || value.length === 0 || value.length > MAX_CHAT_IMAGES) return null;
+	if (!Array.isArray(value) || value.length === 0 || value.length > MAX_ATTACH_ITEMS) return null;
 	const images: ChatImageWire[] = [];
 	let total = 0;
 	for (const candidate of value) {

@@ -210,7 +210,7 @@ async function editorShows(page: Page, text: RegExp): Promise<void> {
  * holds prose, an image chip with its thumbnail and a fenced code block. Taken last, in a narrower window (FEATURES_VIEWPORT), with every other
  * editor closed and the side bar hidden.
  */
-test("capture the Chat features image", async ({ desk, state }) => {
+test("capture the Chat features image", async ({ desk }) => {
 	const page = await desk.window(WORKSPACE_NAME);
 	await desk.ready(page);
 	await page.setViewportSize(VIEWPORT);
@@ -245,11 +245,9 @@ test("capture the Chat features image", async ({ desk, state }) => {
 	await box.fill(FEATURES_QUEUED);
 	await box.press("Alt+Enter");
 	await expect(chat.getByText("Queued")).toBeVisible();
-	const picture = join(state.base, "screenshot.png");
-	writeFileSync(picture, fixtureImagePng());
 	await box.click();
 	await box.pressSequentially(FEATURES_DRAFT_BEFORE_IMAGE);
-	await chat.locator("input.omp-file-input").setInputFiles(picture);
+	await desk.pasteFiles(box, [{ name: "screenshot.png", type: "image/png", bytes: fixtureImagePng() }]);
 	await expect(chat.locator(".omp-attachment-thumb")).toHaveCount(1, { timeout: 60_000 });
 	await box.press("Control+End");
 	await box.pressSequentially(FEATURES_DRAFT_AFTER_IMAGE);

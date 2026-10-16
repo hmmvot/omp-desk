@@ -28,7 +28,7 @@ export function DraftEditor({ surfaceRef, text, config, options }: {
 		const element = elementRef.current;
 		if (element === null) return;
 		const surface = new DraftSurface(element, {
-			isKnownImage: number => latest.current.options.isKnownImage(number),
+			isKnownReference: (kind, number, name) => latest.current.options.isKnownReference(kind, number, name),
 			onEdit: value => latest.current.options.onEdit(value),
 			onSelection: () => latest.current.options.onSelection(),
 			onKeyDown: event => latest.current.options.onKeyDown(event),

@@ -38,6 +38,7 @@ import { observeSessionBranch } from "./host/session-branch";
 import type { GitApi, BranchObservation } from "./host/session-branch";
 import type { FooterMetadataMessage } from "./shared/footer-metadata";
 import { relativeAge } from "./shared/relative-age";
+import { reduceFileBlocks, splitFileBlocks } from "./shared/file-blocks";
 import { normalizeSessionsGrouping, planNotificationReveal, sessionsLayoutPickItems } from "./views/session-order";
 import type { SessionsGrouping } from "./views/session-order";
 import { pinnedSessionTabId, selectionLeaveOtherWindow, selectionRestore } from "./views/session-selection";
@@ -5818,11 +5819,25 @@ function rememberedPrompts(): string[] {
   return Array.isArray(stored) ? stored.filter((item): item is string => typeof item === "string") : [];
 }
 
-function rememberPrompt(text: string): void {
+/** A file block's path text made absolute against the sending tab's folder (forward slashes, as the labels are), or left as it is. */
+function absoluteFileLabel(label: string, cwd: string | null): string {
+  if (/^(?:[A-Za-z]:[\\/]|[\\/])/.test(label) || cwd === null) return label;
+  return `${cwd.replaceAll("\\", "/").replace(/\/+$/, "")}/${label}`;
+}
+
+/**
+ * Remembers an accepted prompt of `tabId` for the history search. A message that carried files is stored with each file block
+ * reduced to its reference (the absolute path, or the bare name for a file that had none) and no text, so a message with large
+ * files is still remembered within the bound.
+ */
+function rememberPrompt(text: string, tabId: string): void {
   const s = windowState();
   const context = s.context;
-  if (context === undefined || text.trim().length === 0 || text.length > MAX_REMEMBERED_PROMPT || text.trimStart().startsWith("/")) return;
-  const next = [text, ...rememberedPrompts().filter(item => item !== text)].slice(0, MAX_PROMPT_HISTORY);
+  if (context === undefined || text.trim().length === 0 || text.trimStart().startsWith("/")) return;
+  const cwd = s.sessionRuntime.records.get(tabId)?.runtime?.cwd ?? null;
+  const stored = reduceFileBlocks(text, label => absoluteFileLabel(label, cwd));
+  if (stored.length > MAX_REMEMBERED_PROMPT) return;
+  const next = [stored, ...rememberedPrompts().filter(item => item !== stored)].slice(0, MAX_PROMPT_HISTORY);
   void context.globalState.update(PROMPT_HISTORY_KEY, next);
 }
 
@@ -5834,12 +5849,15 @@ async function searchPromptHistory(): Promise<void> {
   const s = windowState();
   const tabId = activeChatTab();
   if (tabId === null) return;
+  const proseOf = (text: string): string => splitFileBlocks(text).prose;
   const own = s.sessionRuntime.conversations.promptsOf(tabId).reverse();
-  const seen = new Set(own);
-  const others = rememberedPrompts().filter(text => !seen.has(text));
+  const seen = new Set(own.map(proseOf));
+  const others = rememberedPrompts().filter(text => !seen.has(proseOf(text)));
+  // A row shows the prose: a file's text is not what one searches for, and its lines are not the prompt's.
   const item = (text: string): vscode.QuickPickItem & { text: string } => {
-    const line = text.split(/\r?\n/).find(part => part.trim().length > 0)?.trim() ?? text.trim();
-    const lines = text.split(/\r?\n/).length;
+    const prose = proseOf(text);
+    const line = prose.split(/\r?\n/).find(part => part.trim().length > 0)?.trim() ?? prose.trim();
+    const lines = prose.split(/\r?\n/).length;
     return { label: line.length > 120 ? `${line.slice(0, 119)}…` : line, ...(lines > 1 ? { description: `${lines} lines` } : {}), text };
   };
   const items: (vscode.QuickPickItem & { text?: string })[] = [
@@ -5852,9 +5870,10 @@ async function searchPromptHistory(): Promise<void> {
   }
   const picked = await vscode.window.showQuickPick(items, { title: "Search Prompt History", placeHolder: "Type to filter; Enter adds the prompt to the draft without sending it", matchOnDescription: true });
   if (picked?.text === undefined) return;
+  const recall = await s.guestDispatcher.recalledPrompt(tabId, picked.text);
   const panel = stateOf(tabId)?.panel;
   if (panel === undefined || panel === null) return;
-  void panel.webview.postMessage({ type: "omp:recall-prompt", text: picked.text } satisfies GuestRecallPromptMessage);
+  void panel.webview.postMessage(recall satisfies GuestRecallPromptMessage);
 }
 
 /**

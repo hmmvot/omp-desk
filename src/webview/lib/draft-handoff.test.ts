@@ -3,8 +3,8 @@ import { describe, it } from "node:test";
 import { captureDraft, offerRestoredDraft, provideDraftHandoff, releaseDraftCapture, subscribeRestoredDraft, takeRestoredDraft } from "./draft-handoff.ts";
 import type { DraftCapture } from "./draft-handoff.ts";
 
-const first: DraftCapture = { text: "first draft", attachments: 0, recoverable: [] };
-const second: DraftCapture = { text: "edited draft", attachments: 2, recoverable: [{ text: "original message", attachments: 1, unconfirmed: true }] };
+const first: DraftCapture = { text: "first draft", attachments: 0, recoverable: [], documents: [] };
+const second: DraftCapture = { text: "edited draft", attachments: 2, recoverable: [{ text: "original message", attachments: 1, unconfirmed: true }], documents: [] };
 
 describe("draft handoff", () => {
 	it("does not invent a capture without a mounted composer", () => {

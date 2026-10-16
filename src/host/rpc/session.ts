@@ -89,6 +89,7 @@ import { transcriptWindow } from "../../chat/transcript-window.ts";
 import { blobsDirectoryFor, resolveBlobImages } from "./history-blobs.ts";
 import { parseAgentRoster } from "../../chat/agents.ts";
 import { childPageFromNative, type SubagentTranscriptPage } from "../../chat/subagent-transcript.ts";
+import { MAX_ATTACH_ITEMS } from "../../shared/attach-limits.ts";
 import { isRecord } from "../../shared/guards.ts";
 import { silentLogger, type Logger } from "../../shared/logger.ts";
 import { readJournalCost, readJournalFacts, type JournalFacts } from "../session-cost.ts";
@@ -328,15 +329,17 @@ export type QueueRemoval = QueuedRef &
 
 export type RemoveQueuedOutcome = { status: "done"; removals: readonly QueueRemoval[] } | { status: "refused"; reason: SendRefusal };
 
-const MAX_RESTORED_IMAGES = 8;
-
+/**
+ * The removal answer, validated. Images are bounded only by the structural guard of the wire grammar: the per-prompt
+ * byte budget is judged where the set reaches the page (`parseRestoredImages`), which reports an over-budget set as dropped.
+ */
 function parseRemoval(item: QueuedRef, data: unknown): QueueRemoval {
 	if (!isRecord(data) || typeof data.removed !== "boolean") return { queue: item.queue, text: item.text, status: "unknown" };
 	if (!data.removed) return { queue: item.queue, text: item.text, status: "gone" };
 	const images: RpcImage[] = [];
 	let imagesDropped = data.imagesDropped === true;
 	for (const image of Array.isArray(data.images) ? data.images : []) {
-		if (images.length < MAX_RESTORED_IMAGES && isRecord(image) && image.type === "image" && typeof image.data === "string" && typeof image.mimeType === "string") {
+		if (images.length < MAX_ATTACH_ITEMS && isRecord(image) && image.type === "image" && typeof image.data === "string" && typeof image.mimeType === "string") {
 			images.push({ type: "image", data: image.data, mimeType: image.mimeType });
 		} else {
 			imagesDropped = true;
@@ -481,7 +484,7 @@ export function parseRestoredQueue(data: unknown): RestoredQueue {
 				if (!isRecord(entry) || typeof entry.text !== "string") continue;
 				if (entries.length >= MAX_RESTORED_ENTRIES) { truncated = true; continue; }
 				const offered = Array.isArray(entry.images) ? entry.images : [];
-				const images = offered.slice(0, MAX_RESTORED_IMAGES).flatMap(image => isRecord(image) && image.type === "image" && typeof image.mimeType === "string" && typeof image.data === "string"
+				const images = offered.slice(0, MAX_ATTACH_ITEMS).flatMap(image => isRecord(image) && image.type === "image" && typeof image.mimeType === "string" && typeof image.data === "string"
 					? [{ type: "image" as const, mimeType: image.mimeType, data: image.data }] : []);
 				if (images.length < offered.length) imagesDropped = true;
 				entries.push({ text: entry.text, images });

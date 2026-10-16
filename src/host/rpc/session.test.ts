@@ -15,6 +15,7 @@ import { chatTurnInProgress, type ChatModel, type ChatSnapshotPayload } from "..
 import { FakeRpcChannel, responseLine, type FakeChildModel } from "./fake-channel.ts";
 import { MESSAGE_UPDATE_PACE_MS, RpcSession, parseRestoredQueue, type RpcSessionOptions, type RpcSessionOutput } from "./session.ts";
 import { turnActivity } from "../../protocol/activity.ts";
+import { MAX_ATTACH_ITEMS } from "../../shared/attach-limits.ts";
 import { TurnActivityLedger, type TurnNotice } from "../notifications.ts";
 import {
 	ManualTimers,
@@ -1487,6 +1488,17 @@ describe("chat quick actions", () => {
 		const small = parseRestoredQueue({ steering: [], followUp: [{ text: "x", images: [{ type: "image", mimeType: "image/png", data: "AA==" }, { type: "image" }] }] });
 		assert.deepEqual(small, { entries: [{ text: "x", images: [{ type: "image", mimeType: "image/png", data: "AA==" }] }], imagesDropped: true, truncated: false });
 		session.dispose();
+	});
+
+	it("hands back as many restored images as the structural guard allows and flags the rest", () => {
+		const image = { type: "image", mimeType: "image/png", data: "AA==" };
+		const offered = Array.from({ length: MAX_ATTACH_ITEMS + 1 }, () => image);
+		const kept = parseRestoredQueue({ steering: [{ text: "x", images: offered.slice(0, MAX_ATTACH_ITEMS) }], followUp: [] });
+		assert.equal(kept.entries[0]?.images.length, MAX_ATTACH_ITEMS);
+		assert.equal(kept.imagesDropped, false);
+		const over = parseRestoredQueue({ steering: [{ text: "x", images: offered }], followUp: [] });
+		assert.equal(over.entries[0]?.images.length, MAX_ATTACH_ITEMS);
+		assert.equal(over.imagesDropped, true, "the image past the guard is reported, not lost silently");
 	});
 
 	it("waits for a slow abort answer past the ordinary command timeout, because OMP has already withdrawn the queue", async () => {

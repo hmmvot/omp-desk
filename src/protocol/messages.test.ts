@@ -199,6 +199,13 @@ describe("an attach: omp:attach-uris, omp:pick-files and omp:attached-files", ()
 		for (const message of refused) assert.equal(parseGuestWebviewMessage({ type: "omp:attach-uris", ...message }), null, JSON.stringify(message).slice(0, 80));
 	});
 
+	it("accepts a drop of as many URIs as the structural guard allows, and its bound is the guard", () => {
+		assert.equal(MAX_DROP_URIS, MAX_ATTACH_ITEMS);
+		assert.equal(MAX_DROP_URIS, 1000);
+		const uris = Array.from({ length: MAX_DROP_URIS }, () => uri);
+		assert.deepEqual(parseGuestWebviewMessage({ type: "omp:attach-uris", requestId: 4, uris }), { type: "omp:attach-uris", requestId: 4, uris });
+	});
+
 	it("accepts a pick request with an id and nothing else", () => {
 		assert.deepEqual(parseGuestWebviewMessage({ type: "omp:pick-files", requestId: 0, extra: 1 }), { type: "omp:pick-files", requestId: 0 });
 		assert.equal(parseGuestWebviewMessage({ type: "omp:pick-files", requestId: -1 }), null);
@@ -365,7 +372,7 @@ describe("parseGuestHostMessage completion answers", () => {
 	});
 
 	it("still validates the pre-existing host messages", () => {
-		const restore = { type: "omp:draft-restore", requestId: 1, text: "hello", attachments: 0, recoverable: [] };
+		const restore = { type: "omp:draft-restore", requestId: 1, text: "hello", attachments: 0, recoverable: [], documents: [] };
 		assert.deepEqual(parseGuestHostMessage(restore), restore);
 		assert.equal(parseGuestHostMessage({ type: "omp:anything" }), null);
 	});
@@ -864,16 +871,16 @@ describe("parseGuestWebviewMessage terminal frames", () => {
 describe("draft messages", () => {
 	it("accepts a draft exactly as typed, newlines included, and refuses it whole when it is unusable", () => {
 		const draft = "first line\n\tindented second line";
-		const restore = { type: "omp:draft-restore", requestId: 3, text: draft, attachments: 2, recoverable: [{ text: "original draft", attachments: 1, unconfirmed: true }] };
+		const restore = { type: "omp:draft-restore", requestId: 3, text: draft, attachments: 2, recoverable: [{ text: "original draft", attachments: 1, unconfirmed: true }], documents: [] };
 		assert.deepEqual(parseGuestHostMessage(restore), restore);
 		const reply = { ...restore, type: "omp:draft-reply", captured: true };
 		assert.deepEqual(parseGuestWebviewMessage(reply), reply);
-		const empty = { type: "omp:draft-reply", requestId: 4, captured: false, text: "", attachments: 0, recoverable: [] };
+		const empty = { type: "omp:draft-reply", requestId: 4, captured: false, text: "", attachments: 0, recoverable: [], documents: [] };
 		assert.deepEqual(parseGuestWebviewMessage(empty), empty);
 
 		// A carriage return, a NUL, an over-long value or a negative attachment count is
 		// refused as a whole: half a draft is worse than none.
-		const plain = { type: "omp:draft-reply", requestId: 1, captured: true, text: "ok", attachments: 0, recoverable: [] };
+		const plain = { type: "omp:draft-reply", requestId: 1, captured: true, text: "ok", attachments: 0, recoverable: [], documents: [] };
 		for (const refused of [
 			{ type: "omp:draft-restore", text: "a\rb" },
 			{ type: "omp:draft-restore", text: `a\u0000b` },
@@ -900,15 +907,40 @@ describe("draft messages", () => {
 
 	it("carries a long draft whole: the bound is on the sum of the text and the recoverable originals, not on 8 192 or 200 000 characters", () => {
 		for (const length of [20_000, 300_000, MAX_DRAFT_HANDOFF_CHARS]) {
-			const reply = { type: "omp:draft-reply", requestId: 1, captured: true, text: "y".repeat(length), attachments: 0, recoverable: [] };
+			const reply = { type: "omp:draft-reply", requestId: 1, captured: true, text: "y".repeat(length), attachments: 0, recoverable: [], documents: [] };
 			assert.deepEqual(parseGuestWebviewMessage(reply), reply, `refused a draft of ${length} characters`);
 		}
 		const original = { text: "z".repeat(150_000), attachments: 0, unconfirmed: true };
-		const two = { type: "omp:draft-reply", requestId: 2, captured: true, text: "draft", attachments: 0, recoverable: [original, { ...original, unconfirmed: false }] };
+		const two = { type: "omp:draft-reply", requestId: 2, captured: true, text: "draft", attachments: 0, recoverable: [original, { ...original, unconfirmed: false }], documents: [] };
 		assert.deepEqual(parseGuestWebviewMessage(two), two, "two 150 000-character originals refused a capture");
 		// The sum, not each part, is bounded: a text and an original that together pass it are refused whole.
-		const over = { type: "omp:draft-reply", requestId: 3, captured: true, text: "a".repeat(MAX_DRAFT_HANDOFF_CHARS - 10), attachments: 0, recoverable: [{ text: "b".repeat(11), attachments: 0, unconfirmed: true }] };
+		const over = { type: "omp:draft-reply", requestId: 3, captured: true, text: "a".repeat(MAX_DRAFT_HANDOFF_CHARS - 10), attachments: 0, recoverable: [{ text: "b".repeat(11), attachments: 0, unconfirmed: true }], documents: [] };
 		assert.equal(parseGuestWebviewMessage(over), null);
+	});
+
+	it("carries the documents of a draft: a linked one by reference, a held one with its text, within the same bound", () => {
+		const linked = { number: 1, name: "plan.md", ref: "AbCdEf012345", label: null, content: null, bytes: 120, chars: 118 };
+		const held = { number: 2, name: "notes.md", ref: null, label: "docs/notes.md", content: "# Notes\n", bytes: 8, chars: 8 };
+		const reply = { type: "omp:draft-reply", requestId: 1, captured: true, text: "[File #1: plan.md] [File #2: notes.md]", attachments: 0, recoverable: [], documents: [linked, held] };
+		assert.deepEqual(parseGuestWebviewMessage(reply), reply);
+		const { captured: _captured, ...restore } = { ...reply, type: "omp:draft-restore" };
+		assert.deepEqual(parseGuestHostMessage(restore), restore);
+		const refused = [
+			{ ...reply, documents: undefined },
+			{ ...reply, documents: [{ ...linked, content: "both" }] },
+			{ ...reply, documents: [{ ...linked, ref: null }] },
+			{ ...reply, documents: [{ ...linked, ref: "short" }] },
+			{ ...reply, documents: [{ ...linked, label: "a/b.md" }] },
+			{ ...reply, documents: [{ ...held, content: "a\u0000b" }] },
+			{ ...reply, documents: [{ ...held, number: 0 }] },
+			{ ...reply, documents: [{ ...held, name: "" }] },
+			{ ...reply, documents: [{ ...held, chars: -1 }] },
+			{ ...reply, documents: Array.from({ length: MAX_ATTACH_ITEMS + 1 }, () => linked) },
+			{ ...reply, text: "a".repeat(MAX_DRAFT_HANDOFF_CHARS - 5), documents: [held] },
+		];
+		for (const message of refused) assert.equal(parseGuestWebviewMessage(message), null, JSON.stringify(message).slice(0, 100));
+		const bigHeld = { ...held, content: "h".repeat(MAX_DRAFT_HANDOFF_CHARS - 4), bytes: 4, chars: 4 };
+		assert.deepEqual(parseGuestWebviewMessage({ ...reply, text: "abcd", documents: [bigHeld] }), { ...reply, text: "abcd", documents: [bigHeld] }, "held text counts against the sum, and exactly the bound passes");
 	});
 });
 
@@ -923,8 +955,26 @@ describe("composer command boundary", () => {
 
 	it("relays a recalled prompt whole, newlines included, and nothing empty or oversized", () => {
 		const text = "first line\nsecond line";
-		assert.deepEqual(parseGuestHostMessage({ type: "omp:recall-prompt", text }), { type: "omp:recall-prompt", text });
-		for (const bad of ["", "  \n ", "x".repeat(200_001), 7, null]) assert.equal(parseGuestHostMessage({ type: "omp:recall-prompt", text: bad }), null);
+		const message = { type: "omp:recall-prompt", text, documents: [], notes: [] };
+		assert.deepEqual(parseGuestHostMessage(message), message);
+		for (const bad of ["", "  \n ", "x".repeat(200_001), 7, null]) assert.equal(parseGuestHostMessage({ ...message, text: bad }), null);
+	});
+
+	it("relays the files a recalled prompt names, by reference, and the sentences for those that did not come back", () => {
+		const document = { number: 1, name: "plan.md", ref: "AbCdEf012345", bytes: 120, chars: 118 };
+		const message = { type: "omp:recall-prompt", text: "see [File #1: plan.md]", documents: [document], notes: ["gone.md was not remembered; attach it again."] };
+		assert.deepEqual(parseGuestHostMessage({ ...message, extra: 1 }), message);
+		const refused = [
+			{ ...message, documents: undefined },
+			{ ...message, notes: undefined },
+			{ ...message, documents: [{ ...document, ref: "C:/secret/plan.md" }] },
+			{ ...message, documents: [{ ...document, number: 0 }] },
+			{ ...message, documents: [{ ...document, chars: 200_001 }] },
+			{ ...message, notes: [""] },
+			{ ...message, notes: ["a\nb"] },
+			{ ...message, documents: Array.from({ length: MAX_ATTACH_ITEMS + 1 }, () => document) },
+		];
+		for (const bad of refused) assert.equal(parseGuestHostMessage(bad), null, JSON.stringify(bad).slice(0, 90));
 	});
 
 	it("lets the page name only the fixed Chat actions the host asks consent for", () => {

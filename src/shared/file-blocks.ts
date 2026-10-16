@@ -277,3 +277,15 @@ export function splitFileBlocks(text: string): SplitMessage {
 	}
 	return none;
 }
+
+/**
+ * The form the host's cross-session prompt history stores (decision 21): every block reduced to its reference, with no
+ * text (`omitted="true"`, `chars="0"`). `absolutePath` makes a path label absolute against the sending tab's folder; a block
+ * with no path keeps its name. A text that does not parse is returned as it is.
+ */
+export function reduceFileBlocks(text: string, absolutePath: (label: string) => string): string {
+	const split = splitFileBlocks(text);
+	if (split.blocks.length === 0) return text;
+	const blocks = split.blocks.map(block => `<file ${block.label === null ? "name" : "path"}=${headerValue(block.label === null ? block.name : absolutePath(block.label))} n="${block.number}" chars="0" omitted="true">\n\n</file>`);
+	return `${split.prose}\n\n${blocks.join("\n\n")}`;
+}

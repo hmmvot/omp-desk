@@ -380,7 +380,7 @@ describe("writing needs a live, unlocked session", () => {
 		assert.deepEqual(withImages, [undefined, undefined, 1]);
 	});
 
-	it("refuses images a route cannot carry whole, with its own reason, and sends them when it can", async () => {
+	it("refuses a message a route cannot carry whole, with its own reason, text-only ones too, and sends it when it can", async () => {
 		const sent: GuestWebviewMessage[] = [];
 		let carries = false;
 		const client = new ChatClient(
@@ -393,10 +393,12 @@ describe("writing needs a live, unlocked session", () => {
 		assert.equal(refused.ok, false);
 		if (!refused.ok) assert.match(refused.reason, /fallback connection.*cannot carry a message this large/);
 		assert.equal(sent.length, 0, "nothing reached the route");
-		// Text alone is never asked: the route question is about the images.
-		void client.sendPrompt("plain");
-		assert.equal(sent.length, 1);
+		// The route is asked for every send: a text with files can be as large as one with images.
+		const text = await client.sendPrompt("plain");
+		assert.equal(text.ok, false);
+		assert.equal(sent.length, 0);
 		carries = true;
+		void client.sendPrompt("plain");
 		void client.sendPrompt("shot", image);
 		assert.equal(sent.length, 2);
 	});

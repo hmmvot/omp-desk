@@ -6,8 +6,8 @@ Chat is the rich editor view of a session. It opens in an editor tab, shows the 
 
 ## Writing and sending
 
-- Streaming replies, saved history, image attachments and `@file` mentions.
-- **Image attachments:** attach, paste, or hold Shift and drag an image in; up to 5 MiB each and 10 MiB per message.
+- Streaming replies, saved history, image and document attachments and `@file` mentions.
+- **Attachments:** the paperclip button opens a file dialog, and you can paste a file or hold Shift and drag one in, from the operating system or from VS Code's Explorer or an editor tab. An image (PNG, JPEG, GIF or WebP) is up to 5 MiB each and 10 MiB per message. Any other file that is text (UTF-8, no control characters, an empty file too) is a **document**: its whole text goes into your message. There is no limit on how many files you attach; one message carries at most 200 000 characters in all, and the composer says which file would take it over.
 - Your draft stays until OMP confirms it. Nothing is resent automatically.
 - `↑`/`↓` in an empty composer walk through your earlier prompts. `Ctrl+R` searches past prompts of every conversation.
 - Copy buttons on code blocks and on your own messages.
@@ -49,7 +49,16 @@ Select text in an assistant reply, one of your own messages or an open thinking 
 
 - `Ctrl+Z` undoes and `Ctrl+Y` or `Ctrl+Shift+Z` redoes, including a pasted image and its reference. VS Code's **Edit > Undo** menu item does not act on the composer: use the keys.
 - A paste inserts plain text only, whatever the page it came from. Text you drag onto the composer lands where you drop it.
-- A `[Image #N]` reference is one unit: the caret hops over it and one `Backspace` removes it with its image.
+- A `[Image #N]` or `[File #N: name]` reference is one unit: the caret hops over it and one `Backspace` removes it with its attachment.
+
+### Attaching documents
+
+- **Each file is a chip in the draft and a tile under it** (an icon chosen by the file's extension, `#N`, its name and size, a **✕**). The tile shows no file text. `Ctrl+Z` brings a removed file back. Attaching the same file twice gives two chips. A file that is not text (a PDF, a binary, an image format OMP cannot take) is refused by name and attaches nothing.
+- **What is sent.** Your text first, then each file's whole text in a block after it (`<file path="docs/notes.md" n="1" chars="…">`; a file with no path, pasted or restored, has a `name` instead). A file that came by path, from the dialog or a drag from VS Code, is read from disk when you press Send, so the model sees the file as it is then; if it was deleted, turned into a binary, or no longer fits the message, nothing is sent and your draft stays. If an open editor holds unsaved changes to it, a line tells you the saved text was sent. A pasted file is sent as it was when you pasted it. This works the same for a message, a steer and a queued follow-up.
+- **The model reads the text, not instructions in it.** OMP acts on `@path` mentions, `^model`, `+N` turn budgets and `/skill:name` tokens in a message. In an attached file's text, Desk puts an invisible zero-width space (U+200B) before each of them as it sends, so a file that happens to contain `@src/a.ts` or `/skill:x` is never read as an instruction; the model receives the file's own text. The text you type yourself is not changed, and the invisible characters are removed when Desk shows the file, copies it or puts it back in your draft. A file that already contains U+200B is restored exactly.
+- **In the conversation** each file is one closed row under your message (name, line count and size); open it to read the highlighted text, and **Copy** takes the file's own text. The rows are drawn again from the saved history after a reload.
+- **Getting them back.** Rewind, **Edit** on a queued message, `↑`/`↓` through earlier prompts and a draft carried to a replacement editor put the files back as chips with the text that was sent. `Ctrl+R` remembers a message with each file reduced to its path and no text, and a recalled message attaches those files again from disk; one with no path, or one that has since been deleted, is named in a line and has to be attached again.
+- **Fallback route.** When the page talks to the extension over the fallback connection (a rare, slow route), the file dialog and drops from VS Code are not offered, and a message too large for that connection is refused with a sentence instead of being sent.
 
 ## Reading replies
 

@@ -16,25 +16,50 @@
  * - on send the surviving markers are renumbered densely (1..K, in number order) because the
  *   wire mapping is positional.
  *
+ * A document attached to the draft (docs/designs/2026-10-16-chat-document-attachments.md) is marked the same way, `[File #N: name.md]`,
+ * with its own numbers: they are stable and never renumbered, because a file's marker is the reference of its `<file>` block in the
+ * message and not a position on the wire. A file marker counts only when its whole label is the document's own.
+ *
  * Everything here is pure; the composer owns the DOM, selection and focus.
  */
 
 /** The TUI's `VISION_MARKER_REGEX`, restricted to images. Group 1 is the number, group 2 the `, WxH` tail. */
 const IMAGE_REFERENCE_SOURCE = String.raw`\[Image #([1-9]\d*)((?:,[^\]\n]*)?)\]`;
 
+/** A file's marker, `[File #N: name.md]` (docs/designs/2026-10-16-chat-document-attachments.md, *Proposed Design* 3). Group 1 is the number, group 2 the label. */
+const FILE_REFERENCE_SOURCE = String.raw`\[File #([1-9]\d*): ([^\]\n]+)\]`;
+
+/** Both grammars as one alternation, so one scan sees every marker in text order and none overlaps another. */
+const REFERENCE_SOURCE = String.raw`\[(?:Image #([1-9]\d*)((?:,[^\]\n]*)?)|File #([1-9]\d*): ([^\]\n]+))\]`;
+
 /** A fresh global matcher; sharing one instance would share `lastIndex` between callers. */
 export function imageReferencePattern(): RegExp {
 	return new RegExp(IMAGE_REFERENCE_SOURCE, "g");
 }
 
-/** One image reference found in a draft. */
-export interface ImageReferenceSpan {
+/** A fresh global matcher for file markers, with the number in group 1 and the label in group 2. */
+export function fileReferencePattern(): RegExp {
+	return new RegExp(FILE_REFERENCE_SOURCE, "g");
+}
+
+/** What a marker refers to. The two kinds number independently: image `#1` and file `#1` are different attachments. */
+export type ReferenceKind = "image" | "file";
+
+/** One marker found in a draft. */
+export interface ReferenceSpan {
 	/** Offset of `[`. */
 	readonly start: number;
 	/** Offset just past `]`. */
 	readonly end: number;
+	readonly kind: ReferenceKind;
 	readonly number: number;
 }
+
+/**
+ * Whether a marker belongs to an attachment of this draft. `name` is the label after `File #N: ` for a file (a marker counts
+ * only when its whole label is the document's own, so a pasted `[File #1: other.md]` is prose) and empty for an image.
+ */
+export type IsKnownReference = (kind: ReferenceKind, number: number, name: string) => boolean;
 
 /** The marker text for image `number`, with its pixel size when it could be read. */
 export function imageReferenceLabel(number: number, size?: { width: number; height: number }): string {
@@ -42,22 +67,26 @@ export function imageReferenceLabel(number: number, size?: { width: number; heig
 }
 
 /**
- * Every marker in `text` whose number belongs to an image of this draft. A marker of an
- * unknown number is ordinary text: it is neither atomic nor highlighted nor sent as a reference.
+ * Every marker in `text` that belongs to an attachment of this draft, start-sorted and never overlapping. A marker of an
+ * unknown number (or, for a file, of another label) is ordinary text: it is neither atomic nor highlighted nor sent as a
+ * reference. The scan is leftmost-first, so an image marker's free-form tail can swallow a file marker that follows it
+ * inside the same brackets; an unknown marker is stepped over one character, so a known marker inside it is still found.
  */
-export function findImageReferences(text: string, isKnown: (number: number) => boolean): ImageReferenceSpan[] {
-	const spans: ImageReferenceSpan[] = [];
-	const pattern = imageReferencePattern();
+export function findReferences(text: string, isKnown: IsKnownReference): ReferenceSpan[] {
+	const spans: ReferenceSpan[] = [];
+	const pattern = new RegExp(REFERENCE_SOURCE, "g");
 	for (let match = pattern.exec(text); match !== null; match = pattern.exec(text)) {
-		const number = Number(match[1]);
-		if (isKnown(number)) spans.push({ start: match.index, end: match.index + match[0].length, number });
+		const kind: ReferenceKind = match[1] !== undefined ? "image" : "file";
+		const number = Number(kind === "image" ? match[1] : match[3]);
+		if (isKnown(kind, number, kind === "image" ? "" : match[4]!)) spans.push({ start: match.index, end: match.index + match[0].length, kind, number });
+		else pattern.lastIndex = match.index + 1;
 	}
 	return spans;
 }
 
-/** Numbers of the images whose marker is still present in `text`. */
-export function referencedNumbers(text: string, isKnown: (number: number) => boolean): Set<number> {
-	return new Set(findImageReferences(text, isKnown).map(span => span.number));
+/** Numbers of the attachments of `kind` whose marker is still present in `text`. */
+export function referencedNumbers(text: string, kind: ReferenceKind, isKnown: IsKnownReference): Set<number> {
+	return new Set(findReferences(text, isKnown).filter(span => span.kind === kind).map(span => span.number));
 }
 
 /**
@@ -67,7 +96,7 @@ export function referencedNumbers(text: string, isKnown: (number: number) => boo
  * nearest edge, as after a pointer click); a range grows to cover every marker it touches.
  */
 export function snapSelection(
-	spans: readonly ImageReferenceSpan[],
+	spans: readonly ReferenceSpan[],
 	start: number,
 	end: number,
 	forward: boolean | null,
@@ -93,7 +122,7 @@ export function snapSelection(
  * a marker swallows it. `null` leaves the deletion to the browser.
  */
 export function deletionRange(
-	spans: readonly ImageReferenceSpan[],
+	spans: readonly ReferenceSpan[],
 	start: number,
 	end: number,
 	direction: "backward" | "forward" | "range",
@@ -117,7 +146,7 @@ export function deletionRange(
 export function repairDamagedReferences(
 	previous: string,
 	next: string,
-	previousSpans: readonly ImageReferenceSpan[],
+	previousSpans: readonly ReferenceSpan[],
 ): { text: string; caret: number } | null {
 	if (previous === next || previousSpans.length === 0) return null;
 	const limit = Math.min(previous.length, next.length);
@@ -151,7 +180,7 @@ export interface NumberedImage {
 /** The images whose marker is present, in number order — the ones a send would carry. */
 export function activeImages<T extends NumberedImage>(text: string, images: readonly T[]): T[] {
 	const known = new Set(images.map(image => image.number));
-	const present = referencedNumbers(text, number => known.has(number));
+	const present = referencedNumbers(text, "image", (kind, number) => kind === "image" && known.has(number));
 	return images.filter(image => present.has(image.number)).sort((a, b) => a.number - b.number);
 }
 

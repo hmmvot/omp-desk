@@ -12,6 +12,7 @@
  */
 
 import * as vscode from "vscode";
+import { pathToFileURL } from "node:url";
 import { AttachedFileRegistry, readAttachedFiles, readAttachedForSend } from "../host/attached-files.ts";
 import { TAB_INPUT_VIEW_TYPE_PREFIX } from "../host/bridge-identity.ts";
 import type { ChatCommandOutcome, ChatPage } from "../host/chat-runtime.ts";
@@ -42,6 +43,8 @@ import type {
 	GuestHostMessage,
 	GuestOpenArtifactMessage,
 	GuestOpenDetailMessage,
+	GuestRecallDocument,
+	GuestRecallPromptMessage,
 	GuestRouteAckMessage,
 	GuestSelectionReplyMessage,
 	GuestSelectionRequestMessage,
@@ -49,6 +52,7 @@ import type {
 	SessionViewMode,
 } from "../protocol/messages.ts";
 import { MAX_ATTACH_ITEMS } from "../shared/attach-limits.ts";
+import { splitFileBlocks } from "../shared/file-blocks.ts";
 import type { Logger } from "../shared/logger.ts";
 import { fileSearchValue, symbolSearchValue } from "../shared/selection-query.ts";
 import type { RecentSessions } from "./recent-sessions.ts";
@@ -145,8 +149,8 @@ export interface GuestChatPort<Tab extends GuestTab> {
 	attachChatRoute(slot: string, force?: boolean): void;
 	/** Send the conversation to every page that shows it. */
 	attachChatRoutes(tabId: string, force?: boolean): void;
-	/** Remember an accepted prompt for the history search. */
-	rememberPrompt(text: string): void;
+	/** Remember an accepted prompt of one conversation for the history search; the sending tab's folder makes a file's path absolute. */
+	rememberPrompt(text: string, tabId: string): void;
 	/** A named chat action of the page: compact, shake, cycle model, export, share, provider login. */
 	runChatAction(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, command: GuestChatCommand): Promise<void>;
 	/** The folder of the process this window runs for a conversation, or `null` when it runs none. */
@@ -228,6 +232,12 @@ export interface GuestDispatcher<Tab extends GuestTab = GuestTab> {
 	replyChatSendResult(tabId: string, message: ChatWebviewMessage, page: ChatPage, outcome: ChatCommandOutcome): void;
 	/** The page's own answer to the selection request; a reply from another editor or panel is not the request's. */
 	acceptSelectionReply(slot: string, panel: vscode.WebviewPanel, reply: GuestSelectionReplyMessage): void;
+	/**
+	 * What the history search's pick means for the tab that receives it: the prompt's prose and, for each file the remembered
+	 * message carried by reference, a document the host re-validated (the drop rule and the text rule) and minted a reference for in
+	 * this tab's registry, or a sentence for why it could not come back.
+	 */
+	recalledPrompt(tabId: string, text: string): Promise<GuestRecallPromptMessage>;
 	/** `ompDesk.searchSymbolFromChat` (Ctrl+N over a Chat page). */
 	searchSymbolFromChat(): Promise<void>;
 	/** `ompDesk.searchFileFromChat` (Ctrl+Shift+N over a Chat page). */
@@ -275,6 +285,27 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 		}
 		return registry;
 	};
+
+	async function recalledPrompt(tabId: string, text: string): Promise<GuestRecallPromptMessage> {
+		const split = splitFileBlocks(text);
+		const omitted = split.blocks.filter(block => block.omitted);
+		// Only the reduced form the history stores is turned into references; a full text is restored whole by the page.
+		if (omitted.length === 0 || omitted.length !== split.blocks.length) return { type: "omp:recall-prompt", text, documents: [], notes: [] };
+		const documents: GuestRecallDocument[] = [];
+		const notes: string[] = [];
+		for (const block of omitted) {
+			if (block.label === null) {
+				notes.push(`${block.name} was not remembered (it had no path, so its text was not saved); attach it again.`);
+				continue;
+			}
+			// The remembered path is read like a dropped one: a network path is not opened by the host on its own account.
+			const read = await readAttachedFiles([{ uri: pathToFileURL(block.label).href }], attachedFilesOf(tabId));
+			const item = read.items.find(candidate => candidate.kind === "document");
+			if (item === undefined) notes.push(read.refusals[0] ?? `${block.name} could not be read.`);
+			else documents.push({ number: block.number, name: block.name, ref: item.ref, bytes: item.bytes, chars: item.chars });
+		}
+		return { type: "omp:recall-prompt", text: split.prose, documents, notes };
+	}
 	/** Source of the next draft-capture request id. */
 	let draftCaptureSeq = 0;
 
@@ -433,7 +464,7 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 		replyChatSendResult(tabId, message, page, outcome);
 		const delivered = outcome === "accepted" || outcome === "handled";
 		if (delivered && (message.type === "omp:chat-prompt" || message.type === "omp:chat-steer" || message.type === "omp:chat-follow-up")) {
-			deps.rememberPrompt(message.text);
+			deps.rememberPrompt(message.text, tabId);
 		}
 		if (outcome !== "accepted" || message.type === "omp:chat-abort") {
 			const line = `tab ${tabId}: ${message.type} ${message.requestId.slice(0, 8)} was ${outcome}`;
@@ -601,8 +632,8 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 				if (own.mode === "chat" && own.document?.kind === "guest" && carried !== undefined &&
 					(own.document !== carried.document || panel !== carried.panel)) {
 					carried.restoredDocument = own.document;
-					const { requestId, text, attachments, recoverable } = carried.reply;
-					void panel.webview.postMessage({ type: "omp:draft-restore", requestId, text, attachments, recoverable } satisfies GuestDraftRestoreMessage);
+					const { requestId, text, attachments, recoverable, documents } = carried.reply;
+					void panel.webview.postMessage({ type: "omp:draft-restore", requestId, text, attachments, recoverable, documents } satisfies GuestDraftRestoreMessage);
 				}
 				return;
 			}
@@ -734,6 +765,7 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 		replyChatSendResult,
 		acceptSelectionReply,
 		searchSymbolFromChat,
+		recalledPrompt,
 		searchFileFromChat,
 		captureDraft,
 		carryDraftFrom,

@@ -8,6 +8,7 @@ import {
 	fileMarker,
 	headerValue,
 	markerName,
+	reduceFileBlocks,
 	splitFileBlocks,
 	unescapeFileText,
 	type FileBlockSource,
@@ -246,5 +247,26 @@ describe("composeFileBlocks and splitFileBlocks", () => {
 		assert.ok(elapsed < 2_000, `took ${elapsed} ms`);
 		const unparsed = splitFileBlocks(noise.repeat(2));
 		assert.equal(unparsed.blocks.length, 0);
+	});
+});
+
+describe("reduceFileBlocks", () => {
+	it("keeps the prose and reduces each block to its reference, a path made absolute and a name kept", () => {
+		const documents = [document(1, "a.md", "text @x\n", "docs/a.md"), document(2, "b [1].txt", "body")];
+		const text = composeFileBlocks(proseFor(documents), documents);
+		const reduced = reduceFileBlocks(text, label => `D:/work/${label}`);
+		assert.ok(!reduced.includes("text"), "no file text is stored");
+		const back = splitFileBlocks(reduced);
+		assert.equal(back.prose, proseFor(documents));
+		assert.deepEqual(back.blocks.map(block => [block.number, block.name, block.label, block.content, block.omitted]), [
+			[1, "a.md", "D:/work/docs/a.md", "", true],
+			[2, "b [1].txt", null, "", true],
+		]);
+	});
+
+	it("returns a text that does not parse, and a prose with no document, as it is", () => {
+		assert.equal(reduceFileBlocks("just words", label => label), "just words");
+		const broken = composeFileBlocks(proseFor([document(1, "a", "x")]), [document(1, "a", "x")]).replace('chars="1"', 'chars="9"');
+		assert.equal(reduceFileBlocks(broken, label => label), broken);
 	});
 });

@@ -15,6 +15,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 
 export const MOCK_MODEL_ID = "mock-model";
 export const MOCK_PROVIDER_ID = "mock";
+/** The most characters of a user message a recorded request keeps whole. */
+export const FULL_USER_TEXT_LIMIT = 400_000;
 
 export interface RecordedRequest {
 	readonly model: string;
@@ -22,6 +24,8 @@ export interface RecordedRequest {
 	readonly toolNames: readonly string[];
 	readonly lastRole: string;
 	readonly lastUserText: string;
+	/** The whole user text (system reminders cut), bounded at {@link FULL_USER_TEXT_LIMIT} characters: what a file block's content is checked against. */
+	readonly fullUserText: string;
 	readonly messageCount: number;
 	readonly hasToolResult: boolean;
 	readonly imageBytes: readonly number[];
@@ -107,7 +111,7 @@ async function respond(request: IncomingMessage, response: ServerResponse, reque
 	const images = imageSizesOf(lastUser?.content);
 	const imageNote = images.length === 0 ? "" : ` [image bytes: ${images.join(",")}]`;
 	const reply = callTool ? "" : hasToolResult && toolMatch !== null ? "Tool result received." : `Mock reply to: ${userText.replace(/\s+/g, " ").trim().slice(0, 200)}${imageNote}`;
-	requests.push({ model, stream: body.stream === true, toolNames, lastRole: last?.role ?? "", lastUserText: userText.slice(0, 200), messageCount: messages.length, hasToolResult, imageBytes: images, reply: callTool ? `<tool call read ${toolMatch![1]}>` : reply });
+	requests.push({ model, stream: body.stream === true, toolNames, lastRole: last?.role ?? "", lastUserText: userText.slice(0, 200), fullUserText: userText.slice(0, FULL_USER_TEXT_LIMIT), messageCount: messages.length, hasToolResult, imageBytes: images, reply: callTool ? `<tool call read ${toolMatch![1]}>` : reply });
 
 	const id = `chatcmpl-mock-${requests.length}`;
 	const usage = { prompt_tokens: 120 + messages.length * 10, completion_tokens: 12, total_tokens: 132 + messages.length * 10 };

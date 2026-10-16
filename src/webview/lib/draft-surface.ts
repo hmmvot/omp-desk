@@ -28,7 +28,7 @@ import {
 import { DraftHistory, type DraftSnapshot, type EditKind } from "./draft-history.ts";
 import { deletionTarget, type DeleteKind } from "./draft-text.ts";
 import { normalizeLineEndings } from "../../shared/text-file.ts";
-import { deletionRange, findImageReferences, repairDamagedReferences, snapSelection } from "./image-references.ts";
+import { deletionRange, findReferences, repairDamagedReferences, snapSelection, type IsKnownReference } from "./image-references.ts";
 import { findQuoteRuns } from "./quote-lines.ts";
 import { quotePasteEdit } from "./quote-edits.ts";
 
@@ -50,8 +50,8 @@ export interface SurfaceEdit {
 }
 
 export interface SurfaceOptions {
-	/** Whether an image with this number is attached to the draft (a marker of an unknown number is ordinary text). */
-	isKnownImage(number: number): boolean;
+	/** Whether a marker belongs to an attachment of the draft, an image or a file (a marker that does not is ordinary text). */
+	isKnownReference: IsKnownReference;
 	/** The draft changed by the user (or a composition settled). Synchronous: the composer updates its own copy now. */
 	onEdit(text: string): void;
 	/** The caret or selection moved (never during a composition window). */
@@ -233,7 +233,7 @@ export class DraftSurface {
 	}
 
 	#markers() {
-		return findImageReferences(this.#text, number => this.#options.isKnownImage(number));
+		return findReferences(this.#text, (kind, number, name) => this.#options.isKnownReference(kind, number, name));
 	}
 
 	#writeDomSelection(selection: SurfaceSelection): void {
@@ -760,7 +760,7 @@ export class DraftSurface {
 			let selection: SurfaceSelection = live === null
 				? { anchor: Math.min(pre.focus + next.length - pre.text.length, next.length), focus: Math.min(pre.focus + next.length - pre.text.length, next.length) }
 				: live.selection;
-			const damaged = findImageReferences(pre.text, number => this.#options.isKnownImage(number));
+			const damaged = findReferences(pre.text, (kind, number, name) => this.#options.isKnownReference(kind, number, name));
 			const repaired = repairDamagedReferences(pre.text, next, damaged);
 			if (repaired !== null) {
 				next = repaired.text;

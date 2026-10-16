@@ -44,24 +44,29 @@
  * - the text that is sent is the draft as typed.
  */
 import type { ImageContent } from "@oh-my-pi/pi-wire";
-import type { ChangeEvent, ReactNode, RefObject } from "react";
+import type { ReactNode, RefObject } from "react";
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { chatTurnInProgress } from "../../chat/model";
 import { nativeSettingsCommand } from "../../chat/settings-command";
 import { guestTransport } from "../bridge";
-import { formatBytes } from "../../shared/file-size";
+import { formatBytes, groupedCount } from "../../shared/file-size";
+import { MAX_MESSAGE_CHARS } from "../../shared/attach-limits";
+import { composeFileBlocks, fileMarker } from "../../shared/file-blocks";
 import {
-	IMAGE_ACCEPT_ATTRIBUTE,
 	MAX_DRAFT_BYTES,
+	attachGuardRefusal,
 	dragCarries,
 	droppedFileUris,
 	fileFromAttached,
-	imageFilesFrom,
+	filesFrom,
 	rawTotal,
 	readImageAttachment,
 	sizeRejection,
 	type PendingImage,
 } from "../lib/attachments";
+import { classifyFile, draftRoomRefusal, readDocumentFile } from "../lib/attached-documents";
+import { activeDocuments, documentChars, documentExtension, documentIcon, documentTooltip, draftFromSentText, isKnownDocument, pruneInactiveDocuments, type DraftDocument } from "../lib/draft-documents";
+import { readLinkedFiles } from "../lib/read-linked";
 import { AskDialog, AskOptionRow } from "./AskDialog";
 import { DraftEditor } from "./DraftEditor";
 import type { ChatUiRequest, ChatUiResponse } from "../../chat/model";
@@ -89,14 +94,15 @@ import { followedByBlank, spaceInsertion, subscribeInsertedText } from "../lib/i
 import { mergeRestoredQueued, offerQueuedForEditing, subscribeQueuedForEditing } from "../lib/queue-restore";
 import { queueNotice, queueRows, restoredEntries } from "../lib/queue-view";
 import { historyStep, sessionPrompts, type HistoryCursor } from "../../chat/prompt-history";
-import { MAX_DROP_URIS, mentionQueryAt, spliceMention } from "../../protocol/messages";
+import { MAX_DROP_URIS, mentionQueryAt, spliceMention, type GuestAttachedDocument } from "../../protocol/messages";
 import {
 	activeImages,
 	compactForSend,
-	findImageReferences,
+	findReferences,
 	imageReferenceLabel,
 	pruneInactive,
 	referencedNumbers,
+	type ReferenceKind,
 } from "../lib/image-references";
 import { useDismissibleLayer } from "../lib/dismissible-layer";
 import { ExtensionNoticeLine, ExtensionWidgets } from "./ExtensionSurfaces";
@@ -143,6 +149,32 @@ function autosize(element: HTMLTextAreaElement | null, minRows: number): void {
 
 /** An image of the current draft: the attachment plus its stable reference number. */
 type DraftImage = PendingImage & { number: number };
+
+/** One thing to attach: a `File` the page was handed (its text is read here), or a document the host attached by path. */
+type AttachEntry =
+	| { readonly kind: "file"; readonly file: File }
+	| { readonly kind: "linked"; readonly item: GuestAttachedDocument };
+
+/** What one attach call accepted, in order, so the markers go into the draft in that order. */
+type Accepted =
+	| { readonly kind: "image"; readonly image: PendingImage }
+	| { readonly kind: "document"; readonly name: string; readonly source: DraftDocument["source"] };
+
+/** Why a file cannot be attached or read where the extension host's own connection is missing (the fallback route, decision 23). */
+const NEEDS_HOST = "Attaching files needs the editor's connection to the extension host; reload the window.";
+
+/** Whether `text` starts with the `/skill:<name>` of an installed skill: a skill invocation, which may carry files. */
+function startsInstalledSkill(commands: readonly { readonly name: string; readonly source?: string }[], text: string): boolean {
+	const token = /^\/(\S+)/.exec(text)?.[1];
+	return token !== undefined && commands.some(command => command.source === "skill" && command.name === token);
+}
+
+/** The refusal for a message over the limit, with its real figures and, when it carries files, the largest one. */
+function tooLongSentence(total: number, documents: readonly DraftDocument[]): string {
+	const largest = documents.reduce<DraftDocument | null>((best, document) => (best === null || documentChars(document) > documentChars(best) ? document : best), null);
+	const tail = largest === null ? "" : ` The largest file is ${largest.name} (${groupedCount(documentChars(largest))} characters).`;
+	return `The message would be ${groupedCount(total)} characters; one message carries ${groupedCount(MAX_MESSAGE_CHARS)}.${tail}`;
+}
 
 /**
  * Replaces `[from, to)` through the surface, so the draft's own Undo covers the change (and, because the draft's
@@ -313,6 +345,8 @@ interface RecoverableMessage {
 	reason: string;
 	unconfirmed: boolean;
 	lostAttachments?: number;
+	/** Linked files of a draft that moved here: their text is not on the page, so the file must be attached again. */
+	lostFiles?: number;
 }
 
 export function Composer({ client, snapshot, progressAvailable = true, onRewind, onSubmitted }: {
@@ -327,6 +361,12 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	const [text, setText] = useState("");
 	/** Every image attached to this draft, including ones whose marker was deleted and could still come back through Undo. */
 	const [images, setImages] = useState<readonly DraftImage[]>([]);
+	/** Every document attached to this draft, including ones whose marker was deleted and could still come back through Undo. */
+	const [documents, setDocuments] = useState<readonly DraftDocument[]>([]);
+	/** What the last send says besides its result (a file with unsaved changes in the editor); cleared by the next send. */
+	const [sendNotice, setSendNotice] = useState<string | null>(null);
+	/** The route the host selected: the fallback connection cannot attach files, only the extension host's own can. */
+	const [routeKind, setRouteKind] = useState(() => guestTransport.routeKind());
 	const [attachError, setAttachError] = useState<string | null>(null);
 	/** A drag the composer can attach is over it. */
 	const [dropActive, setDropActive] = useState(false);
@@ -353,7 +393,6 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	const [reading, setReading] = useState(0);
 	const surfaceRef = useRef<DraftSurface | null>(null);
 	const getField = useCallback((): HTMLElement | null => surfaceRef.current?.element ?? null, []);
-	const fileInputRef = useRef<HTMLInputElement | null>(null);
 	/** The surface's composition window, read live: false while no field is mounted. */
 	const composingRef = useMemo(() => ({ get current(): boolean { return surfaceRef.current?.composing ?? false; } }), []);
 	/**
@@ -367,6 +406,11 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	const imageSeqRef = useRef(0);
 	/** Next stable reference number; never reused within a draft, reset once a prompt is sent. */
 	const nextNumberRef = useRef(1);
+	const documentsRef = useRef<readonly DraftDocument[]>([]);
+	/** Next document number; its own counter, never reused within a draft, reset once a message is sent. */
+	const nextDocumentNumberRef = useRef(1);
+	/** Characters held by in-flight document reads, so overlapping attaches budget against one running total. */
+	const reservedCharsRef = useRef(0);
 	/** Marker insertions waiting for an IME composition to finish. */
 	const deferredRef = useRef<(() => void)[]>([]);
 	const wrapperRef = useRef<HTMLDivElement | null>(null);
@@ -388,7 +432,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	const reservedRef = useRef(0);
 	const mountedRef = useRef(true);
 	/** The one drop whose files the host is reading, and the timer that gives up on it. */
-	const pendingUrisRef = useRef<{ readonly requestId: number; readonly timer: number } | null>(null);
+	const pendingUrisRef = useRef<{ readonly requestId: number; readonly timer: number | null } | null>(null);
 	const uriRequestSeqRef = useRef(0);
 	/** Caret offset mirror; {@link mentionQueryAt} needs it synchronously. */
 	const caretRef = useRef(0);
@@ -422,6 +466,8 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	// shows, while `send` enforces the synchronous ref.
 	/** Images whose marker is in the text — what the strip shows and a send carries. */
 	const attached = useMemo(() => activeImages(text, images), [text, images]);
+	/** Documents whose marker is in the text, in number order: the ones a send would carry. */
+	const attachedDocuments = useMemo(() => activeDocuments(text, documents), [text, documents]);
 	/** Fenced code blocks of the draft, and the one the caret is in: its keys are an editor's, and no completion opens in it. */
 	const blocks = useMemo(() => findFencedBlocks(text), [text]);
 	const caretBlock = useMemo(() => blockContaining(blocks, caret), [blocks, caret]);
@@ -429,12 +475,12 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	const quoteLayout = useMemo(() => findQuoteRuns(text, blocks), [text, blocks]);
 	const caretInQuote = isQuoteLineAt(quoteLayout, text, caret);
 	const codeHintId = useId();
-	const canSubmit = canPrompt && !captureLocked && request === null && !sending && reading === 0 && (text.trim().length > 0 || attached.length > 0);
+	const canSubmit = canPrompt && !captureLocked && request === null && !sending && reading === 0 && (text.trim().length > 0 || attached.length > 0 || attachedDocuments.length > 0);
 
-	// A marker is a chip while its image is attached and plain text otherwise, so the surface draws again when the set of images changes.
+	// A marker is a chip while its attachment is attached and plain text otherwise, so the surface draws again when the set of attachments changes.
 	useLayoutEffect(() => {
 		surfaceRef.current?.refresh();
-	}, [images]);
+	}, [images, documents]);
 	const fieldMounted = !(request !== null && canPrompt);
 	// A field that mounts while a hand-off holds the draft (a dialog closing meanwhile) starts frozen.
 	useLayoutEffect(() => {
@@ -444,7 +490,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	useEffect(() => {
 		mountedRef.current = true;
 		return () => {
-			clearTimeout(pendingUrisRef.current?.timer);
+			clearTimeout(pendingUrisRef.current?.timer ?? undefined);
 			// Draft base64 and previews live only in this component's state and
 			// refs; dropping them with the component is what releases them.
 			mountedRef.current = false;
@@ -603,23 +649,30 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 		setImages(next);
 	}, []);
 
-	/** Whether `number` belongs to an image of this draft — read synchronously, so edits are judged against the draft as it is now. */
-	const isKnownNumber = useCallback((number: number): boolean => imagesRef.current.some(image => image.number === number), []);
+	const publishDocuments = useCallback((next: readonly DraftDocument[]): void => {
+		if (captureRef.current !== null) return;
+		draftRevisionRef.current++;
+		documentsRef.current = next;
+		setDocuments(next);
+	}, []);
+
+	/** Whether a marker belongs to an attachment of this draft — read synchronously, so edits are judged against the draft as it is now. */
+	const isKnownReference = useCallback((kind: ReferenceKind, number: number, name: string): boolean =>
+		kind === "image" ? imagesRef.current.some(image => image.number === number) : isKnownDocument(documentsRef.current, number, name), []);
 
 	/**
-	 * Insert the markers for `added` at the caret (or over the selection), one space apart and
+	 * Insert `markers` at the caret (or over the selection), one space apart and
 	 * with a space on each side unless whitespace is already there, so typing can continue
-	 * straight after the last marker. An undoable edit of the draft, so Undo removes the marker and,
-	 * with it, the attachment. An IME composition is never interrupted: the insertion waits for it to end.
+	 * straight after the last marker. An undoable edit of the draft, so Undo removes the markers and,
+	 * with them, the attachments. An IME composition is never interrupted: the insertion waits for it to end.
 	 */
-	const insertReferences = useCallback((added: readonly DraftImage[]): void => {
+	const insertMarkers = useCallback((markers: readonly string[]): void => {
 		const place = (): void => {
 			if (captureRef.current !== null) return;
 			const surface = surfaceRef.current;
 			const current = textRef.current;
 			const start = surface?.selectionStart ?? current.length;
 			const end = surface?.selectionEnd ?? current.length;
-			const markers = added.map(image => imageReferenceLabel(image.number, image.width !== undefined && image.height !== undefined ? { width: image.width, height: image.height } : undefined));
 			const lead = start > 0 && !/\s/.test(current[start - 1]!) ? " " : "";
 			const trail = end < current.length && /\s/.test(current[end]!) ? "" : " ";
 			const inserted = `${lead}${markers.join(" ")}${trail}`;
@@ -630,69 +683,134 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 		else place();
 	}, [composingRef, writeDraft]);
 
-	/** Validate, read, and add `files`; `earlier` are refusals that came before them (the host's, for a drop). Every rejection is reported, never dropped. */
-	const addFiles = useCallback(
-		async (files: readonly File[], earlier: readonly string[] = []): Promise<void> => {
-			if (captureRef.current !== null || !canPrompt || (files.length === 0 && earlier.length === 0)) return;
-			readingRef.current += files.length;
+	/**
+	 * Validate, read, and add `entries`; `earlier` are refusals that came before them (the host's, for a drop or a pick). Every
+	 * rejection is reported, never dropped. A `File` is classified by its first bytes before its size is judged; an image is
+	 * budgeted and read as an image, a text becomes a held document, and a document the host linked is added by reference.
+	 */
+	const attach = useCallback(
+		async (entries: readonly AttachEntry[], earlier: readonly string[] = []): Promise<void> => {
+			if (captureRef.current !== null || !canPrompt || (entries.length === 0 && earlier.length === 0)) return;
+			const overGuard = attachGuardRefusal(activeImages(textRef.current, imagesRef.current).length + activeDocuments(textRef.current, documentsRef.current).length, entries.length);
+			if (overGuard !== null) {
+				setAttachError(overGuard);
+				return;
+			}
+			readingRef.current += entries.length;
 			setReading(readingRef.current);
-			const accepted: PendingImage[] = [];
+			setSendNotice(null);
+			const accepted: Accepted[] = [];
 			const rejected: string[] = [...earlier];
-			// This call's share of `reservedRef`, so the release in `finally` stays
-			// balanced even if a read throws instead of reporting failure. A leaked
-			// reservation would shrink the draft budget with nothing to show for it.
-			let held = 0;
+			// This call's share of the reservations, so the release in `finally` stays balanced even if a read throws instead of
+			// reporting failure. A leaked reservation would shrink the draft budget with nothing to show for it.
+			let heldBytes = 0;
+			let heldChars = 0;
+			/** The characters the draft would hold: its text, every document of it and the reads still in flight. */
+			const knownChars = (): number => activeDocuments(textRef.current, documentsRef.current).reduce((sum, document) => sum + documentChars(document), textRef.current.length + reservedCharsRef.current);
+			const addDocument = (name: string, chars: number, source: DraftDocument["source"]): void => {
+				const room = draftRoomRefusal(name, chars, knownChars());
+				if (room !== null) {
+					rejected.push(room);
+					return;
+				}
+				reservedCharsRef.current += chars;
+				heldChars += chars;
+				accepted.push({ kind: "document", name, source });
+			};
 			try {
-				for (const file of files) {
-					// Reserve before reading: the check and the reservation happen in one
-					// synchronous step, so a concurrent selection sees these bytes. Only
-					// images still referenced by the text count: a removed one is released first.
-					const oversize = sizeRejection(file, rawTotal(activeImages(textRef.current, imagesRef.current)) + reservedRef.current);
-					if (oversize !== null) {
-						rejected.push(oversize);
+				for (const entry of entries) {
+					if (entry.kind === "linked") {
+						const { item } = entry;
+						const linkedTwice = (candidate: DraftDocument["source"]): boolean => candidate.kind === "linked" && candidate.ref === item.ref;
+						if (activeDocuments(textRef.current, documentsRef.current).some(document => linkedTwice(document.source)) || accepted.some(done => done.kind === "document" && linkedTwice(done.source))) {
+							rejected.push(`${item.name} is already attached.`);
+							continue;
+						}
+						addDocument(item.name, item.chars, { kind: "linked", ref: item.ref, bytes: item.bytes, chars: item.chars });
 						continue;
 					}
-					reservedRef.current += file.size;
-					held += file.size;
-					const read = await readImageAttachment(file, ++imageSeqRef.current).catch(() => null);
-					if (read !== null && read.ok) {
-						accepted.push(read.image);
-					} else {
-						// A failed read releases exactly what it reserved.
-						reservedRef.current -= file.size;
-						held -= file.size;
-						rejected.push(read === null ? `${file.name}: could not be read.` : read.reason);
+					const { file } = entry;
+					const sort = await classifyFile(file);
+					if (sort.kind === "refused") {
+						rejected.push(sort.reason);
+						continue;
 					}
+					if (sort.kind === "image") {
+						// Reserve before reading: the check and the reservation happen in one synchronous step, so a concurrent
+						// selection sees these bytes. Only images still referenced by the text count: a removed one is released first.
+						const oversize = sizeRejection(file, rawTotal(activeImages(textRef.current, imagesRef.current)) + reservedRef.current);
+						if (oversize !== null) {
+							rejected.push(oversize);
+							continue;
+						}
+						reservedRef.current += file.size;
+						heldBytes += file.size;
+						const read = await readImageAttachment(file, ++imageSeqRef.current).catch(() => null);
+						if (read !== null && read.ok) {
+							accepted.push({ kind: "image", image: read.image });
+						} else {
+							// A failed read releases exactly what it reserved.
+							reservedRef.current -= file.size;
+							heldBytes -= file.size;
+							rejected.push(read === null ? `${file.name}: could not be read.` : read.reason);
+						}
+						continue;
+					}
+					const text = await readDocumentFile(file).catch(() => null);
+					if (text === null || !text.ok) {
+						rejected.push(text === null ? `${file.name}: could not be read.` : text.reason);
+						continue;
+					}
+					addDocument(file.name, text.content.length, { kind: "held", content: text.content, label: null, bytes: text.bytes });
 				}
 			} finally {
-				// The bytes of `accepted` stop being reserved here and are published
-				// below with no await in between, so the invariant
-				// "published + reserved ≤ budget" never has a gap.
-				readingRef.current = Math.max(0, readingRef.current - files.length);
-				reservedRef.current = Math.max(0, reservedRef.current - held);
+				// What `accepted` reserved stops being reserved here and is published below with no await in between, so the
+				// invariant "published + reserved fits" never has a gap.
+				readingRef.current = Math.max(0, readingRef.current - entries.length);
+				reservedRef.current = Math.max(0, reservedRef.current - heldBytes);
+				reservedCharsRef.current = Math.max(0, reservedCharsRef.current - heldChars);
 			}
 			if (!mountedRef.current) return;
 			setReading(readingRef.current);
-			if (accepted.length > 0) {
-				const added: DraftImage[] = accepted.map(image => ({ ...image, number: nextNumberRef.current++ }));
-				const merged = [...imagesRef.current, ...added];
-				const present = referencedNumbers(textRef.current, number => merged.some(image => image.number === number));
-				// Deleted images stay only for Undo and never push the draft past the prompt budget.
-				publishImages(pruneInactive(merged, number => present.has(number), new Set(added.map(image => image.number)), MAX_DRAFT_BYTES));
-				insertReferences(added);
+			const addedImages: DraftImage[] = [];
+			const addedDocuments: DraftDocument[] = [];
+			const markers: string[] = [];
+			for (const done of accepted) {
+				if (done.kind === "image") {
+					const image: DraftImage = { ...done.image, number: nextNumberRef.current++ };
+					addedImages.push(image);
+					markers.push(imageReferenceLabel(image.number, image.width !== undefined && image.height !== undefined ? { width: image.width, height: image.height } : undefined));
+				} else {
+					const document: DraftDocument = { number: nextDocumentNumberRef.current++, name: done.name, source: done.source };
+					addedDocuments.push(document);
+					markers.push(fileMarker(document.number, document.name));
+				}
 			}
+			if (addedImages.length > 0) {
+				const merged = [...imagesRef.current, ...addedImages];
+				const present = referencedNumbers(textRef.current, "image", (kind, number) => kind === "image" && merged.some(image => image.number === number));
+				// Deleted images stay only for Undo and never push the draft past the prompt budget.
+				publishImages(pruneInactive(merged, number => present.has(number), new Set(addedImages.map(image => image.number)), MAX_DRAFT_BYTES));
+			}
+			if (addedDocuments.length > 0) {
+				const merged = [...documentsRef.current, ...addedDocuments];
+				const present = referencedNumbers(textRef.current, "file", (kind, number, name) => kind === "file" && isKnownDocument(merged, number, name));
+				// Deleted documents stay only for Undo, and what they hold is bounded like an image's bytes.
+				publishDocuments(pruneInactiveDocuments(merged, number => present.has(number), new Set(addedDocuments.map(document => document.number))));
+			}
+			if (markers.length > 0) insertMarkers(markers);
 			if (accepted.length > 0 || rejected.length > 0) setAttachError(rejectionSummary(rejected));
 		},
-		[canPrompt, insertReferences, publishImages],
+		[canPrompt, insertMarkers, publishDocuments, publishImages],
 	);
 
-	/** The × on a thumbnail deletes that image's marker(s) from the text, as one undo step; the attachment follows its marker. */
-	const removeImage = useCallback(
-		(number: number): void => {
+	/** The × on a thumbnail or a tile deletes that attachment's marker(s) from the text, as one undo step; the attachment follows its marker. */
+	const removeAttachment = useCallback(
+		(kind: ReferenceKind, number: number): void => {
 			const remove = (): void => {
 				const surface = surfaceRef.current;
 				if (captureRef.current !== null || surface === null) return;
-				const spans = findImageReferences(textRef.current, isKnownNumber).filter(span => span.number === number);
+				const spans = findReferences(textRef.current, isKnownReference).filter(span => span.kind === kind && span.number === number);
 				surface.focus();
 				surface.removeRanges(spans.map(span => ({ from: span.start, to: span.end })));
 				setAttachError(null);
@@ -700,36 +818,26 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			if (composingRef.current) deferredRef.current.push(remove);
 			else remove();
 		},
-		[composingRef, isKnownNumber],
+		[composingRef, isKnownReference],
 	);
 
-	const onFilesPicked = useCallback(
-		(event: ChangeEvent<HTMLInputElement>): void => {
-			const picked = event.target.files;
-			if (picked !== null && picked.length > 0) void addFiles(Array.from(picked));
-			// Reset so picking the same file again still fires `change`.
-			event.target.value = "";
-		},
-		[addFiles],
-	);
-
-	/** A paste of an image attaches it; the surface cancels the paste, so no unreadable data URL lands in the text. Any other paste is its plain text. */
+	/** A paste of files attaches them (an image as an image, a text as a document); the surface cancels the paste, so nothing unreadable lands in the text. Any other paste is its plain text. */
 	const handlePaste = useCallback(
 		(event: ClipboardEvent): boolean => {
-			const files = imageFilesFrom(event.clipboardData);
+			const files = filesFrom(event.clipboardData);
 			if (files.length === 0) return false;
-			void addFiles(files);
+			void attach(files.map(file => ({ kind: "file" as const, file })));
 			return true;
 		},
-		[addFiles],
+		[attach],
 	);
 
-	/** Settle the one drop that is waiting for the host to read its files: its share of `reading` is released here and nowhere else. */
+	/** Settle the one drop or pick that is waiting for the host: its share of `reading` is released here and nowhere else. */
 	const finishUriRequest = useCallback((): void => {
 		const waiting = pendingUrisRef.current;
 		if (waiting === null) return;
 		pendingUrisRef.current = null;
-		clearTimeout(waiting.timer);
+		clearTimeout(waiting.timer ?? undefined);
 		readingRef.current = Math.max(0, readingRef.current - 1);
 		if (mountedRef.current) setReading(readingRef.current);
 	}, []);
@@ -748,9 +856,29 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 		pendingUrisRef.current = { requestId, timer };
 		if (guestTransport.post({ type: "omp:attach-uris", requestId, uris: [...uris] }) === false) {
 			finishUriRequest();
-			setAttachError("Dropping a file from VS Code needs this editor's own connection to the extension host; paste the image or use the attach button.");
+			setAttachError(NEEDS_HOST);
 		}
 	}, [finishUriRequest]);
+
+	/** Open the host's file dialog; what it returns attaches like a drop. A native dialog may stay open as long as the user likes, so a pick has no timeout. */
+	const requestPick = useCallback((): void => {
+		if (captureRef.current !== null || !canPrompt) return;
+		finishUriRequest();
+		const requestId = ++uriRequestSeqRef.current;
+		readingRef.current += 1;
+		setReading(readingRef.current);
+		pendingUrisRef.current = { requestId, timer: null };
+		if (guestTransport.post({ type: "omp:pick-files", requestId }) === false) {
+			finishUriRequest();
+			setAttachError(NEEDS_HOST);
+		}
+	}, [canPrompt, finishUriRequest]);
+
+	// A route change settles a pending pick (its answer may have gone to the route that was left) and tells the button whether the host's connection is there.
+	useEffect(() => guestTransport.onRouteChange(kind => {
+		setRouteKind(kind);
+		finishUriRequest();
+	}), [finishUriRequest]);
 
 	/**
 	 * Drags are taken at the document, not on the composer card: a drop anywhere on the Chat page attaches, and a drag that
@@ -777,13 +905,14 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 		const drop = (event: globalThis.DragEvent): void => {
 			setDropActive(false);
 			if (!accepts(event) || event.dataTransfer === null) return;
-			const files = imageFilesFrom(event.dataTransfer);
-			const uris = files.length > 0 ? [] : droppedFileUris(event.dataTransfer, MAX_DROP_URIS);
-			if (files.length === 0 && uris.length === 0) return;
+			const files = filesFrom(event.dataTransfer);
+			const named = files.length > 0 ? { uris: [] as string[], refusal: null } : droppedFileUris(event.dataTransfer, MAX_DROP_URIS);
+			if (files.length === 0 && named.uris.length === 0 && named.refusal === null) return;
 			event.preventDefault();
 			event.stopPropagation();
-			if (files.length > 0) void addFiles(files);
-			else requestUris(uris);
+			if (named.refusal !== null) setAttachError(named.refusal);
+			else if (files.length > 0) void attach(files.map(file => ({ kind: "file" as const, file })));
+			else requestUris(named.uris);
 		};
 		document.addEventListener("dragenter", over);
 		document.addEventListener("dragover", over);
@@ -796,7 +925,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			document.removeEventListener("drop", drop);
 			setDropActive(false);
 		};
-	}, [addFiles, canPrompt, requestUris]);
+	}, [attach, canPrompt, requestUris]);
 
 	/**
 	 * The user edited the draft, or a composition settled. The surface has applied the edit, put a marker the edit cut
@@ -824,8 +953,10 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	const send = useCallback(
 		async (followUp: boolean): Promise<void> => {
 			// The wire pairs the Nth marker with the Nth image, so the draft's stable numbers are
-			// compacted to 1..K here and images whose marker was deleted are not sent.
+			// compacted to 1..K here and images whose marker was deleted are not sent. A document's marker is the
+			// reference of its block and is left as it is.
 			const compacted = compactForSend(textRef.current, imagesRef.current);
+			const files = activeDocuments(textRef.current, documentsRef.current);
 			const draft = compacted.text.trim();
 			const attached = compacted.images;
 			// A pending dialog, a locked or not-live panel, and a read that has started
@@ -833,9 +964,9 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			// `reading` state) is what makes this true inside the same frame that
 			// started the read.
 			if (captureRef.current !== null || !canPrompt || request !== null || readingRef.current > 0 || sendingRef.current) return;
-			if (draft.length === 0 && attached.length === 0) return;
+			if (draft.length === 0 && attached.length === 0 && files.length === 0) return;
 			// Chat's own `/rewind` and `/branch` never reach OMP; both open the in-place Rewind.
-			if (onRewind !== undefined && attached.length === 0 && isRewindCommand(draft)) {
+			if (onRewind !== undefined && attached.length === 0 && files.length === 0 && isRewindCommand(draft)) {
 				writeDraft("", { history: "reset" });
 				setSendError(null);
 				onRewind();
@@ -852,25 +983,88 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 				setSendError(`the attached images are ${formatBytes(rawTotal(attached))}, over the ${formatBytes(MAX_DRAFT_BYTES)} one message may carry; remove an image to send`);
 				return;
 			}
+			// A text that starts with `/` is a command to OMP, which does not take files; a skill invocation is the one that does.
+			if (files.length > 0 && draft.startsWith("/") && !startsInstalledSkill(snapshot.commands, draft)) {
+				setSendError("A message that starts with / is a command and cannot carry files.");
+				return;
+			}
+			const known = files.reduce((sum, file) => sum + documentChars(file), draft.length);
+			if (known > MAX_MESSAGE_CHARS) {
+				setSendError(tooLongSentence(known, files));
+				return;
+			}
 			const wire: ImageContent[] = attached.map(image => ({
 				type: "image",
 				mimeType: image.mimeType,
 				data: image.data,
 			}));
 			const payload = wire.length > 0 ? wire : undefined;
+			// The draft revision is the one at Enter: edits made while the files are read are kept by the guard below.
+			const revision = draftRevisionRef.current;
+			// Set before any await, so a second Enter and a command that sends are blocked while the files are read. The read is
+			// not counted in `reading`: a hand-off during it would be refused and a view switch would lose the draft.
+			sendingRef.current = true;
+			setSending(true);
+			setSendNotice(null);
+			const giveUp = (reason: string | null): void => {
+				sendingRef.current = false;
+				if (!mountedRef.current) return;
+				setSending(false);
+				if (reason !== null) setSendError(reason);
+			};
+			const linked = files.filter(file => file.source.kind === "linked");
+			const texts = new Map<number, { label: string; content: string; dirty: boolean }>();
+			if (linked.length > 0) {
+				const heldChars = files.reduce((sum, file) => sum + (file.source.kind === "held" ? file.source.content.length : 0), draft.length);
+				const read = await readLinkedFiles(
+					guestTransport,
+					++uriRequestSeqRef.current,
+					linked.flatMap(file => (file.source.kind === "linked" ? [{ number: file.number, ref: file.source.ref }] : [])),
+					Math.max(0, MAX_MESSAGE_CHARS - heldChars),
+					new Map(linked.map(file => [file.number, file.name])),
+				);
+				if (!read.ok) {
+					giveUp(read.reason);
+					return;
+				}
+				for (const [number, file] of read.files) texts.set(number, file);
+			}
+			// The values the send closed over are from before the read: judge the page as it is now. A hand-off that began during
+			// the read already carries the draft intact; otherwise the draft is untouched and Enter sends it again.
+			const current = client.getSnapshot();
+			if (captureRef.current !== null || !chatWritable(current) || current.uiRequest !== null || !mountedRef.current) {
+				giveUp(null);
+				return;
+			}
+			const blocks: { number: number; name: string; label: string | null; content: string }[] = [];
+			for (const file of files) {
+				if (file.source.kind === "held") {
+					blocks.push({ number: file.number, name: file.name, label: file.source.label, content: file.source.content });
+					continue;
+				}
+				const read = texts.get(file.number);
+				if (read === undefined) {
+					giveUp(`${file.name} could not be read.`);
+					return;
+				}
+				blocks.push({ number: file.number, name: file.name, label: read.label, content: read.content });
+			}
+			const text = composeFileBlocks(draft, blocks);
+			// Escaping the files' text can add characters, and a text-only message was never checked at all.
+			if (text.length > MAX_MESSAGE_CHARS) {
+				giveUp(tooLongSentence(text.length, files));
+				return;
+			}
 			// The model's own `working`, read now: the delivery follows the turn the
 			// session is in at this instant, not the one this render saw.
 			const running = client.getSnapshot().working;
-			const revision = draftRevisionRef.current;
-			pendingOriginalRef.current = { text: compacted.text, images: wire };
-			sendingRef.current = true;
+			pendingOriginalRef.current = { text, images: wire };
 			onSubmitted?.();
-			setSending(true);
 			const result = await (!running
-				? client.sendPrompt(draft, payload)
+				? client.sendPrompt(text, payload)
 				: followUp
-					? client.sendFollowUp(draft, payload)
-					: client.sendSteer(draft, payload));
+					? client.sendFollowUp(text, payload)
+					: client.sendSteer(text, payload));
 			for (let held = readCapture(); held !== null; held = readCapture()) await held.released;
 			pendingOriginalRef.current = null;
 			sendingRef.current = false;
@@ -878,7 +1072,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			setSending(false);
 			if (!result.ok) {
 				if (result.unconfirmed || draftRevisionRef.current !== revision) {
-					const entry: RecoverableMessage = { id: ++recoverySeqRef.current, text: compacted.text, images: wire, reason: result.reason, unconfirmed: result.unconfirmed === true };
+					const entry: RecoverableMessage = { id: ++recoverySeqRef.current, text, images: wire, reason: result.reason, unconfirmed: result.unconfirmed === true };
 					publishRecoverable([...recoverableRef.current, entry]);
 					setSendError(null);
 				} else {
@@ -887,16 +1081,20 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 				return;
 			}
 			setSendError(null);
+			const unsaved = linked.filter(file => texts.get(file.number)?.dirty === true).map(file => `${file.name} has unsaved changes in the editor; the saved version was sent.`);
+			setSendNotice(unsaved.length > 0 ? unsaved.join(" ") : null);
 			if (!running && result.explained !== true && nativeSettingsCommand(draft) === null) setSubmitted(true);
 			// Admission may finish after typing, attaching, or restoring another draft. Never erase that work.
 			if (draftRevisionRef.current !== revision) return;
 			historyRef.current = null;
 			nextNumberRef.current = 1;
+			nextDocumentNumberRef.current = 1;
 			publishImages([]);
+			publishDocuments([]);
 			setAttachError(null);
 			writeDraft("", { history: "reset" });
 		},
-		[canPrompt, client, onRewind, onSubmitted, publishImages, publishRecoverable, readCapture, request, snapshot.commands, writeDraft],
+		[canPrompt, client, onRewind, onSubmitted, publishDocuments, publishImages, publishRecoverable, readCapture, request, snapshot.commands, writeDraft],
 	);
 
 	/** Why the Commands list cannot offer a command now; each row adds its own rule (`lib/command-list.ts`). */
@@ -962,7 +1160,10 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			const recoverable = recoverableRef.current.map(entry => ({ text: entry.text, attachments: entry.images.length + (entry.lostAttachments ?? 0), unconfirmed: entry.unconfirmed }));
 			const pending = pendingOriginalRef.current;
 			if (pending !== null) recoverable.push({ text: pending.text, attachments: pending.images.length, unconfirmed: true });
-			const content: DraftCapture = { text: textRef.current, attachments: activeImages(textRef.current, imagesRef.current).length + lostAttachmentsRef.current, recoverable };
+			const documents = activeDocuments(textRef.current, documentsRef.current).map(document => document.source.kind === "held"
+				? { number: document.number, name: document.name, ref: null, label: document.source.label, content: document.source.content, bytes: document.source.bytes, chars: document.source.content.length }
+				: { number: document.number, name: document.name, ref: document.source.ref, label: null, content: null, bytes: document.source.bytes, chars: document.source.chars });
+			const content: DraftCapture = { text: textRef.current, attachments: activeImages(textRef.current, imagesRef.current).length + lostAttachmentsRef.current, recoverable, documents };
 			const { promise, resolve } = Promise.withResolvers<void>();
 			captureRef.current = { requestId, released: promise, release: resolve };
 			surfaceRef.current?.freeze();
@@ -992,10 +1193,21 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			writeDraft(restored.text, { caret: restored.text.length, history: "reset" });
 			lostAttachmentsRef.current = restored.attachments;
 			setLostAttachments(restored.attachments);
-			for (const span of findImageReferences(restored.text, () => true)) nextNumberRef.current = Math.max(nextNumberRef.current, span.number + 1);
-			for (const original of restored.recoverable) {
-				for (const span of findImageReferences(original.text, () => true)) nextNumberRef.current = Math.max(nextNumberRef.current, span.number + 1);
-			}
+			// Markers of the restored texts keep their numbers, so new attachments must not reuse one.
+			const bump = (text: string): void => {
+				for (const span of findReferences(text, () => true)) {
+					if (span.kind === "image") nextNumberRef.current = Math.max(nextNumberRef.current, span.number + 1);
+					else nextDocumentNumberRef.current = Math.max(nextDocumentNumberRef.current, span.number + 1);
+				}
+			};
+			bump(restored.text);
+			for (const original of restored.recoverable) bump(original.text);
+			for (const document of restored.documents) nextDocumentNumberRef.current = Math.max(nextDocumentNumberRef.current, document.number + 1);
+			publishDocuments(restored.documents.map((document): DraftDocument => ({
+				number: document.number,
+				name: document.name,
+				source: document.ref !== null ? { kind: "linked", ref: document.ref, bytes: document.bytes, chars: document.chars } : { kind: "held", content: document.content ?? "", label: document.label, bytes: document.bytes },
+			})));
 			publishRecoverable(restored.recoverable.map(entry => ({
 				id: ++recoverySeqRef.current, text: entry.text, images: [], unconfirmed: entry.unconfirmed, lostAttachments: entry.attachments,
 				reason: entry.unconfirmed ? "OMP did not confirm this message before this editor was replaced. It may already have been accepted. Review the conversation before sending it again." : "This original message was not sent. Add it to the draft only when you want to send it.",
@@ -1004,7 +1216,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 		const pending = takeRestoredDraft();
 		if (pending !== null) apply(pending);
 		return subscribeRestoredDraft(apply);
-	}, [publishRecoverable, writeDraft]);
+	}, [publishDocuments, publishRecoverable, writeDraft]);
 
 	// "OMP Desk: Add Selection/File to Session": the `@path` references the extension host composed in
 	// an editor are inserted at the caret (over a selection) as one undo step, and at the end of the
@@ -1053,18 +1265,23 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 		const place = (): void => {
 			if (captureRef.current !== null) { deferredRef.current.push(place); return; }
 			const held = imagesRef.current.length;
-			const merged = mergeRestoredQueued({ text: textRef.current, images: imagesRef.current, nextNumber: nextNumberRef.current, nextId: imageSeqRef.current + 1 }, entries);
+			const heldDocuments = documentsRef.current.length;
+			const merged = mergeRestoredQueued({ text: textRef.current, images: imagesRef.current, documents: documentsRef.current, nextNumber: nextNumberRef.current, nextDocumentNumber: nextDocumentNumberRef.current, nextId: imageSeqRef.current + 1 }, entries);
 			nextNumberRef.current = merged.nextNumber;
+			nextDocumentNumberRef.current = merged.nextDocumentNumber;
 			imageSeqRef.current = merged.nextId - 1;
-			const present = referencedNumbers(merged.text, number => merged.images.some(image => image.number === number));
+			const present = referencedNumbers(merged.text, "image", (kind, number) => kind === "image" && merged.images.some(image => image.number === number));
 			publishImages(pruneInactive(merged.images, number => present.has(number), new Set(merged.images.slice(held).map(image => image.number)), MAX_DRAFT_BYTES));
+			const presentFiles = referencedNumbers(merged.text, "file", (kind, number, name) => kind === "file" && isKnownDocument(merged.documents, number, name));
+			publishDocuments(pruneInactiveDocuments(merged.documents, number => presentFiles.has(number), new Set(merged.documents.slice(heldDocuments).map(document => document.number))));
 			writeDraft(merged.text, { caret: merged.text.length, history: "record" });
-			setAttachError(merged.imagesLost > 0 ? `${merged.imagesLost} image${merged.imagesLost === 1 ? "" : "s"} of the edited message could not be attached (unsupported format).` : null);
+			const sentences = [...(merged.imagesLost > 0 ? [`${merged.imagesLost} image${merged.imagesLost === 1 ? "" : "s"} of the edited message could not be attached (unsupported format).`] : []), ...merged.notes];
+			setAttachError(sentences.length > 0 ? sentences.join(" ") : null);
 		};
 		// Like inserted text: an IME composition in flight finishes first, so the restore never splits it.
 		if (composingRef.current) deferredRef.current.push(place);
 		else place();
-	}), [composingRef, publishImages, writeDraft]);
+	}), [composingRef, publishDocuments, publishImages, writeDraft]);
 
 	// Rewind's edit and resubmit (ADR-0051): a rewound prompt replaces the draft, and a draft typed before it moves to
 	// a recovery card first, never overwritten. Undo takes the prompt back out while it is still unedited
@@ -1080,7 +1297,9 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			if (answer.kind === "undo") {
 				if (!unedited) return;
 				nextNumberRef.current = 1;
+				nextDocumentNumberRef.current = 1;
 				publishImages([]);
+				publishDocuments([]);
 				setAttachError(null);
 				writeDraft("", { history: "reset" });
 				return;
@@ -1088,14 +1307,19 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			const draft = answer.draft;
 			if (answer.kind !== "rewind" || draft === undefined) return;
 			const held = compactForSend(textRef.current, imagesRef.current);
-			if (held.text.trim().length > 0 || held.images.length > 0) {
+			const heldFiles = activeDocuments(textRef.current, documentsRef.current);
+			const heldText = composeFileBlocks(held.text.trim(), heldFiles.flatMap(file => (file.source.kind === "held" ? [{ number: file.number, name: file.name, label: file.source.label, content: file.source.content }] : [])));
+			if (heldText.length > 0 || held.images.length > 0) {
 				const images: ImageContent[] = held.images.map(image => ({ type: "image", mimeType: image.mimeType, data: image.data }));
-				publishRecoverable([...recoverableRef.current, { id: ++recoverySeqRef.current, text: held.text, images, reason: "Your draft from before the rewind. Add it to the draft only when you want it back.", unconfirmed: false }]);
+				const linkedFiles = heldFiles.filter(file => file.source.kind === "linked").length;
+				publishRecoverable([...recoverableRef.current, { id: ++recoverySeqRef.current, text: heldText, images, reason: "Your draft from before the rewind. Add it to the draft only when you want it back.", unconfirmed: false, ...(linkedFiles > 0 ? { lostFiles: linkedFiles } : {}) }]);
 			}
-			const merged = mergeRestoredQueued({ text: "", images: [], nextNumber: 1, nextId: imageSeqRef.current + 1 }, [{ text: draft.text, images: draft.images }]);
+			const merged = mergeRestoredQueued({ text: "", images: [], documents: [], nextNumber: 1, nextDocumentNumber: 1, nextId: imageSeqRef.current + 1 }, [{ text: draft.text, images: draft.images }]);
 			nextNumberRef.current = merged.nextNumber;
+			nextDocumentNumberRef.current = merged.nextDocumentNumber;
 			imageSeqRef.current = merged.nextId - 1;
 			publishImages(pruneInactive(merged.images, () => true, new Set(merged.images.map(image => image.number)), MAX_DRAFT_BYTES));
+			publishDocuments(merged.documents);
 			historyRef.current = null;
 			writeDraft(merged.text, { caret: merged.text.length, history: "reset" });
 			const lost = merged.imagesLost + draft.unavailableImages;
@@ -1105,7 +1329,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 		};
 		if (composingRef.current) deferredRef.current.push(place);
 		else place();
-	}), [client, composingRef, publishImages, publishRecoverable, writeDraft]);
+	}), [client, composingRef, publishDocuments, publishImages, publishRecoverable, writeDraft]);
 	const doubleEscapeRef = useRef(createDoubleEscape());
 	// `Esc` `Esc` with the focus on the page around the composer (the transcript, a tool row, a link, the body) opens Rewind
 	// under the same conditions. The composer's own field counts through `onPromptKeyDown`, any other editable field not
@@ -1116,7 +1340,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			if (event.key !== "Escape" || event.defaultPrevented || event.isComposing || composingRef.current) return;
 			const target = event.target instanceof Element ? event.target : document.activeElement;
 			if (target !== null && isEditableTarget(target)) return;
-			const idle = !client.getSnapshot().working && textRef.current.length === 0 && imagesRef.current.length === 0;
+			const idle = !client.getSnapshot().working && textRef.current.length === 0 && imagesRef.current.length === 0 && documentsRef.current.length === 0;
 			if (!doubleEscapeRef.current.press(event.timeStamp, idle)) return;
 			event.preventDefault();
 			onRewind();
@@ -1211,14 +1435,15 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 
 	// A prompt picked in the host's history search (`Ctrl+R`) joins the draft like an edited queued message.
 	useEffect(() => guestTransport.subscribe(message => {
-		if (message.type === "omp:recall-prompt") offerQueuedForEditing([{ text: message.text, images: [] }]);
+		if (message.type === "omp:recall-prompt") offerQueuedForEditing([{ text: message.text, images: [], documents: message.documents, notes: message.notes }]);
 		if (message.type === "omp:attached-files") {
 			const waiting = pendingUrisRef.current;
 			if (waiting === null || waiting.requestId !== message.requestId) return;
 			finishUriRequest();
-			void addFiles(message.items.filter(item => item.kind === "image").map(fileFromAttached), message.refusals);
+			// The host's order is the drop's order, so image and file markers land in it.
+			void attach(message.items.map((item): AttachEntry => (item.kind === "image" ? { kind: "file", file: fileFromAttached(item) } : { kind: "linked", item })), message.refusals);
 		}
-	}), [addFiles, finishUriRequest]);
+	}), [attach, finishUriRequest]);
 
 	// The extension host needs one more fact about Escape: whether this popup is
 	// open. It is reported on every change and cleared when the composer unmounts,
@@ -1298,7 +1523,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			// `Esc` `Esc` in an empty composer while nothing runs opens Rewind, as in the TUI. While a turn runs, Escape
 			// belongs to Stop (`ompDesk.stopTurn`), and an open popup takes it first.
 			if (event.key === "Escape" && onRewind !== undefined && !composing && !suggestionsOpen) {
-				const idle = !client.getSnapshot().working && text.length === 0 && imagesRef.current.length === 0;
+				const idle = !client.getSnapshot().working && text.length === 0 && imagesRef.current.length === 0 && documentsRef.current.length === 0;
 				if (doubleEscapeRef.current.press(event.timeStamp, idle)) {
 					event.preventDefault();
 					onRewind();
@@ -1334,10 +1559,17 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 				const edges = start === end ? surface.rowEdges(start) : null;
 				const edge = edges !== null && (event.key === "ArrowUp" ? edges.first : edges.last);
 				if (edge && imagesRef.current.length === 0) {
-					const step = historyStep(sessionPrompts(client.getSnapshot().entries), historyRef.current, event.key === "ArrowUp" ? "older" : "newer", text);
+					// A prompt that carried files is walked by its prose; the history cursor owns the documents it placed and swaps them on
+					// each step, so ↑ then ↓ returns the draft.
+					const prompts = sessionPrompts(client.getSnapshot().entries);
+					const step = historyStep(prompts.map(prompt => draftFromSentText(prompt).text), historyRef.current, event.key === "ArrowUp" ? "older" : "newer", text);
 					if (step !== null) {
 						event.preventDefault();
 						historyRef.current = step.cursor;
+						const recalled = step.cursor === null ? null : draftFromSentText(prompts[prompts.length - step.cursor.index]!);
+						const placed = recalled?.documents ?? [];
+						nextDocumentNumberRef.current = placed.reduce((next, document) => Math.max(next, document.number + 1), 1);
+						publishDocuments(placed);
 						writeDraft(step.text, { caret: step.text.length, history: "record" });
 						return;
 					}
@@ -1348,7 +1580,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 				send(event.altKey);
 			}
 		},
-		[acceptSuggestion, activeIndex, client, composingRef, dequeueLast, onRewind, send, suggestionsOpen, visible, selectSuggestion, writeDraft],
+		[acceptSuggestion, activeIndex, client, composingRef, dequeueLast, onRewind, publishDocuments, send, suggestionsOpen, visible, selectSuggestion, writeDraft],
 	);
 
 	/** Answer the shown dialog; the client answers each dialog once and refuses a stale card. */
@@ -1382,9 +1614,11 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 				<div className="omp-composer-row">
 					<div className="omp-composer-hint" style={{ flex: "1 1 auto" }}>
 						{busy ? "The session is paused on this request." : "Answering resumes the session."}
-						{attached.length > 0 &&
+						{attached.length + attachedDocuments.length > 0 &&
 							` · ${
-								attached.length === 1 ? "1 attached image is" : `${attached.length} attached images are`
+								attachedDocuments.length > 0
+									? `${attached.length + attachedDocuments.length} attachments are`
+									: attached.length === 1 ? "1 attached image is" : `${attached.length} attached images are`
 							} held for your next prompt`}
 					</div>
 					<div className="omp-composer-actions omp-ask-actions">
@@ -1414,21 +1648,13 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 			<button
 				type="button"
 				className="omp-btn omp-composer-attach"
-				disabled={!canPrompt || captureLocked || reading > 0}
-				aria-label={reading > 0 ? "Reading attached images" : "Attach images"}
-				title={reading > 0 ? "Reading attached images…" : "Attach images (PNG, JPEG, GIF, WebP). You can also paste one, or hold Shift while dragging one here."}
-				onClick={() => fileInputRef.current?.click()}
+				disabled={!canPrompt || captureLocked || reading > 0 || routeKind === "bridge"}
+				aria-label={reading > 0 ? "Reading attached files" : "Attach files"}
+				title={reading > 0 ? "Reading attached files…" : routeKind === "bridge" ? NEEDS_HOST : "Attach a file or an image. You can also paste an image or a file, drag one here with Shift, or drag a file from VS Code's Explorer."}
+				onClick={requestPick}
 			>
 				<span aria-hidden="true" className={`codicon codicon-${reading > 0 ? "loading" : "attach"}`} />
 			</button>
-			<input
-				ref={fileInputRef}
-				className="omp-file-input"
-				type="file"
-				accept={IMAGE_ACCEPT_ATTRIBUTE}
-				multiple
-				onChange={onFilesPicked}
-			/>
 		</>
 	);
 	// Attach sits with the send actions. Narrow panels show Stop, Follow up and Send/Steer as icons (CSS hides `.omp-btn-label`), so the single toolbar row has the same height idle and busy.
@@ -1511,6 +1737,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 				<div key={entry.id} className="omp-attach-error" role="alert">
 					<div>{entry.reason}</div>
 					{(entry.lostAttachments ?? 0) > 0 && <div>{entry.lostAttachments} image{entry.lostAttachments === 1 ? "" : "s"} must be reattached before sending this original.</div>}
+					{(entry.lostFiles ?? 0) > 0 && <div>{entry.lostFiles} attached file{entry.lostFiles === 1 ? "" : "s"} must be attached again: the file's text is read from disk when sent and is not kept here.</div>}
 					<details>
 						<summary>{entry.unconfirmed ? "Unconfirmed message" : "Unsent message"}</summary>
 						<pre style={{ whiteSpace: "pre-wrap", maxHeight: 120, overflowY: "auto" }}>{entry.text}</pre>
@@ -1518,7 +1745,10 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 					<button type="button" className="omp-btn" disabled={captureLocked} onClick={() => {
 						if (captureRef.current !== null) return;
 						const held = compactForSend(textRef.current, imagesRef.current);
-						if (held.text !== entry.text || held.images.length !== entry.images.length || held.images.some((image, index) => image.mimeType !== entry.images[index]?.mimeType || image.data !== entry.images[index]?.data)) {
+						const files = activeDocuments(textRef.current, documentsRef.current);
+						// The draft already is this original when it composes to the same text. A linked file's text is not here to compare, so it never matches.
+						const sameText = files.every(file => file.source.kind === "held") && composeFileBlocks(held.text.trim(), files.flatMap(file => (file.source.kind === "held" ? [{ number: file.number, name: file.name, label: file.source.label, content: file.source.content }] : []))) === entry.text;
+						if (!sameText || held.images.length !== entry.images.length || held.images.some((image, index) => image.mimeType !== entry.images[index]?.mimeType || image.data !== entry.images[index]?.data)) {
 							offerQueuedForEditing([{ text: entry.text, images: entry.images }]);
 							lostAttachmentsRef.current += entry.lostAttachments ?? 0;
 							setLostAttachments(lostAttachmentsRef.current);
@@ -1539,8 +1769,9 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 					{sendError ?? operationNotice}
 				</div>
 			)}
-			{attached.length > 0 && (
-				<ul className="omp-attachments" aria-label="attached images">
+			{sendNotice !== null && <div className="omp-composer-hint" role="status">{sendNotice}</div>}
+			{(attached.length > 0 || attachedDocuments.length > 0) && (
+				<ul className="omp-attachments" aria-label="attachments">
 					{attached.map(image => (
 						<li key={image.id} className="omp-attachment" data-image-number={image.number}>
 							<span className="omp-attachment-figure">
@@ -1559,7 +1790,32 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 								disabled={!canPrompt || captureLocked}
 								aria-label={`Remove Image #${image.number} (${image.name})`}
 								title={`Remove ${image.name}`}
-								onClick={() => removeImage(image.number)}
+								onClick={() => removeAttachment("image", image.number)}
+							>
+								×
+							</button>
+						</li>
+					))}
+					{attachedDocuments.map(document => (
+						<li key={`file-${document.number}`} className="omp-attachment" data-file-number={document.number}>
+							<span className="omp-attachment-figure omp-attachment-tile" title={documentTooltip(document)}>
+								<span aria-hidden="true" className={`codicon codicon-${documentIcon(document.name)}`} />
+								<span className="omp-attachment-ext" aria-hidden="true">{documentExtension(document.name).slice(0, 4).toUpperCase()}</span>
+								<span className="omp-attachment-number" aria-hidden="true">#{document.number}</span>
+							</span>
+							<span className="omp-attachment-meta">
+								<span className="omp-attachment-name" title={document.name}>
+									{document.name}
+								</span>
+								<span className="omp-attachment-size">{formatBytes(document.source.bytes)}</span>
+							</span>
+							<button
+								type="button"
+								className="omp-attachment-remove"
+								disabled={!canPrompt || captureLocked}
+								aria-label={`Remove File #${document.number} (${document.name})`}
+								title={`Remove ${document.name}`}
+								onClick={() => removeAttachment("file", document.number)}
 							>
 								×
 							</button>
@@ -1584,7 +1840,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 							controls: suggestionsOpen ? suggestionListId : null,
 							activeDescendant: suggestionsOpen && activeIndex >= 0 ? `${suggestionListId}-${activeIndex}` : null,
 						}}
-						options={{ isKnownImage: isKnownNumber, onEdit, onSelection: syncCaret, onKeyDown: onPromptKeyDown, onWindowOpen, onSettled, handlePaste, isAttachmentDrag: transfer => dragCarries(transfer) !== null }}
+						options={{ isKnownReference, onEdit, onSelection: syncCaret, onKeyDown: onPromptKeyDown, onWindowOpen, onSettled, handlePaste, isAttachmentDrag: transfer => dragCarries(transfer) !== null }}
 					/>
 					{quoteLayout.runs.length > 0 && <QuoteRemoveButtons surfaceRef={surfaceRef} text={text} runs={quoteLayout.runs} disabled={captureLocked} onRemove={removeQuote} />}
 					{suggestionsOpen && (

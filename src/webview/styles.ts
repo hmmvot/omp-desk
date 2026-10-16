@@ -641,8 +641,7 @@ ${ANSI_STYLES}
 /* Notices stacked above the input row keep the 6px gap of .omp-attach-error: the input row's -4px top margin would otherwise pull it over the hint's text. */
 .omp-composer > .omp-composer-hint { margin: 0 0 6px; line-height: 1.4; }
 
-/* Attached images: chips above the row, wrapping on a narrow panel. */
-.omp-file-input { display: none; }
+/* Attached images and documents: chips above the row, wrapping on a narrow panel. */
 
 .omp-attachments {
 	list-style: none;
@@ -719,6 +718,8 @@ ${ANSI_STYLES}
 .omp-quote-remove:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
 .omp-quote-remove:disabled { opacity: 0.4; cursor: default; }
 .omp-chip { display: inline; padding: 0 3px; margin: 0 1px; border-radius: var(--omp-radius); cursor: default; background: color-mix(in srgb, var(--vscode-textLink-foreground, var(--vscode-focusBorder, #3794ff)) 24%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--vscode-textLink-foreground, var(--vscode-focusBorder, #3794ff)) 55%, transparent); }
+/* A document's marker is the same atomic chip with a file icon in front: a pseudo-element, so the chip's text stays the literal marker. */
+.omp-chip--file::before { content: "\\ea7b"; font-family: codicon; font-size: 12px; vertical-align: -1px; margin-right: 3px; }
 .omp-composer > .omp-composer-hint--code { margin: 2px 0 6px; min-height: calc(11px * 1.4); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 @media (forced-colors: active) {
 	.omp-line--code { forced-color-adjust: none; background: Canvas; color: CanvasText; box-shadow: inset 0 0 0 1px CanvasText; }
@@ -726,6 +727,10 @@ ${ANSI_STYLES}
 }
 .omp-attachment-figure { position: relative; display: inline-flex; flex: 0 0 auto; }
 .omp-attachment-number { position: absolute; left: 1px; bottom: 1px; padding: 1px 3px; border-radius: var(--omp-radius); background: var(--vscode-badge-background); color: var(--vscode-badge-foreground); font-size: 10px; line-height: 1; font-weight: 600; }
+/* A document's tile takes the place of an image's thumbnail: a file icon over the extension, the same size. */
+.omp-attachment-tile { flex-direction: column; align-items: center; justify-content: center; width: 36px; height: 36px; border: 1px solid var(--omp-border); border-radius: var(--omp-radius); background: var(--omp-surface); color: var(--omp-muted); }
+.omp-attachment-tile > .codicon { font-size: 16px; line-height: 1; }
+.omp-attachment-ext { font-size: 8px; line-height: 1; font-weight: 600; margin-top: 2px; }
 @media (forced-colors: active) {
 	.omp-chip { forced-color-adjust: none; background: Highlight; color: HighlightText; box-shadow: none; }
 	.omp-attachment-number { border: 1px solid currentColor; }
@@ -922,6 +927,17 @@ ${MERMAID_STYLES}
 .omp-image-ref:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
 .omp-image-ref .codicon { font-size: 0.95em; margin-right: 3px; vertical-align: -1px; }
 .omp-image-unavailable { display: inline-block; padding: 6px 10px; border: 1px dashed var(--omp-border); border-radius: var(--omp-radius); color: var(--omp-muted); font-size: 12px; }
+.omp-file-rows { margin: 6px 0 0; }
+.omp-file-row { position: relative; margin: 4px 0; border: 1px solid var(--omp-border); border-radius: var(--omp-radius); }
+.omp-file-row > .omp-file-row-disclosure { margin: 0; }
+.omp-file-row-disclosure > summary { padding: 3px 34px 3px 8px; }
+.omp-file-row-head { display: inline-flex; align-items: baseline; gap: 6px; min-width: 0; max-width: calc(100% - 20px); vertical-align: bottom; }
+.omp-file-row-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--vscode-foreground); }
+.omp-file-row-meta { flex: none; font-size: 11px; white-space: nowrap; color: var(--omp-muted); }
+.omp-file-row-copy { position: absolute; top: 3px; right: 4px; opacity: 0; }
+.omp-file-row:hover .omp-file-row-copy, .omp-file-row-copy:focus-visible, .omp-file-row-copy:has(.omp-copy-status) { opacity: 1; }
+/* Opened, a file is a block of bounded height that scrolls on its own; the windowed code rows inside it follow this scroller. */
+.omp-file-row-body { max-height: 24em; overflow-y: auto; border-top: 1px solid var(--omp-border); }
 .omp-error { color: var(--vscode-errorForeground); }
 .omp-success { color: var(--vscode-testing-iconPassed); }
 .omp-native-child-body { padding: 8px; border: 1px solid var(--omp-border); border-radius: var(--omp-radius); }

@@ -87,7 +87,7 @@ function SessionView({ client }: { client: ChatClient }): ReactNode {
 			const capture = view.mode === "chat" ? captureDraft(message.requestId) : null;
 			const content = parseDraftHandoffContent(capture);
 			if (content === null) releaseDraftCapture(message.requestId);
-			guestTransport.post({ type: "omp:draft-reply", requestId: message.requestId, captured: content !== null, ...(content ?? { text: "", attachments: 0, recoverable: [] }) });
+			guestTransport.post({ type: "omp:draft-reply", requestId: message.requestId, captured: content !== null, ...(content ?? { text: "", attachments: 0, recoverable: [], documents: [] }) });
 		} else if (message.type === "omp:selection-request") {
 			guestTransport.post({ type: "omp:selection-reply", requestId: message.requestId, text: view.mode === "chat" ? selectedText(document) : "" });
 		} else if (message.type === "omp:draft-release") {

@@ -437,7 +437,7 @@ interface Harness {
   localLauncher(context: unknown, index: unknown): { launch(request: unknown): Promise<{ state: string }> };
   presentRestoreOutcome(index: SessionIndex, tabId: string, outcome: unknown): void;
   openTab(...args: unknown[]): Promise<void>;
-  restoredDraft(slot: string): { requestId: number; text: string; attachments: number; recoverable: readonly { text: string; attachments: number; unconfirmed: boolean }[] } | null;
+  restoredDraft(slot: string): { requestId: number; text: string; attachments: number; recoverable: readonly { text: string; attachments: number; unconfirmed: boolean }[]; documents: readonly unknown[] } | null;
   switchSessionMode(...args: unknown[]): Promise<void>;
   restartChat(...args: unknown[]): Promise<void>;
   subscribeProviderLoginRefresh(context: { subscriptions: { dispose(): void }[] }, index: SessionIndex | ProviderModelIndexFixture): void;
@@ -2720,7 +2720,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 		const content = { text: "edited current draft", attachments: 1, recoverable: [
 			{ text: "pending original", attachments: 2, unconfirmed: true },
 			{ text: "refused original", attachments: 0, unconfirmed: false },
-		] };
+		], documents: [] };
 		const post = f.panels.webview.postMessage;
 		f.panels.webview.postMessage = async message => {
 			await post(message);
@@ -2728,7 +2728,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			if (request.type === "omp:draft-request" && typeof request.requestId === "number") {
 				await harness.window().guestDispatcher.handleMessage(f.index, f.state.slotId, f.panels, {
 					type: "omp:draft-reply", requestId: request.requestId, captured: captureComplete,
-					...(captureComplete ? content : { text: "", attachments: 0, recoverable: [] }),
+					...(captureComplete ? content : { text: "", attachments: 0, recoverable: [], documents: [] }),
 				});
 			}
 			return true;
@@ -2789,7 +2789,7 @@ describe("same-editor Chat and native Terminal actions", () => {
 			assert.equal(await readFile(f.file!, "utf8"), before);
 			assert.equal(f.channel.written.length, commands, "Restart cannot depend on another blocked get_state or abort");
 			const preserved = harness.restoredDraft(f.state.slotId)!;
-			assert.deepEqual({ text: preserved.text, attachments: preserved.attachments, recoverable: preserved.recoverable }, f.content);
+			assert.deepEqual({ text: preserved.text, attachments: preserved.attachments, recoverable: preserved.recoverable, documents: preserved.documents }, f.content);
 			await harness.window().guestDispatcher.handleMessage(f.index, f.state.slotId, f.panels, { type: "omp:ready", protocolVersion: GUEST_PROTOCOL_VERSION });
 			const restored = (f.panels.messages as { type: string; requestId?: number }[]).find(item => item.type === "omp:draft-restore");
 			assert.equal(restored?.requestId, preserved.requestId);
