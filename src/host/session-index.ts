@@ -828,6 +828,7 @@ export class SessionIndex {
 		const removed: string[] = [];
 		const kept: string[] = [];
 		let markersAhead = false;
+		let sweptBindings = false;
 		this.#persistChain = this.#persistChain.then(() => {
 			let raw: unknown;
 			try {
@@ -890,11 +891,13 @@ export class SessionIndex {
 			// order another window already used.
 			this.#nextOrdinal = Math.max(this.#nextOrdinal, raw.nextOrdinal);
 			this.#followCommitted(raw, followed, dropped);
+			// The bindings are mirrored whole above, orphans included; the sweep is a change of this window's, saved below.
+			sweptBindings = this.#dropOrphanBindings();
 		});
 		await this.#persistChain;
 		// A reply identity this window holds and the catalog lost (a stale copy of the row was written over it) is
 		// written back, so the other windows show what the user saw here.
-		if (markersAhead) await this.#persist();
+		if (markersAhead || sweptBindings) await this.#persist();
 		return { adopted, removed, kept };
 	}
 
@@ -2429,6 +2432,7 @@ export class SessionIndex {
 			}
 		}
 		this.#entries.delete(tabId);
+		this.#dropBindingsOf(tabId);
 		if (this.#activeTabId === tabId) this.#activeTabId = null;
 		await this.#persist();
 		return {
@@ -2525,6 +2529,7 @@ export class SessionIndex {
 			}
 		}
 		this.#entries.delete(tabId);
+		this.#dropBindingsOf(tabId);
 		if (this.#activeTabId === tabId) this.#activeTabId = null;
 		await this.#persist();
 		return {
@@ -2769,7 +2774,9 @@ export class SessionIndex {
 		const published: EditorSlotRole = refusal === null ? role : "passive";
 		const existing = this.#bindings.get(slotId);
 		const previous = new Map(this.#bindings);
-		const binding: EditorSlotBinding = {
+		// The same conversation, role and refusal again is no change: the generation and `committedAt` stay as committed.
+		const unchanged = existing !== undefined && existing.tabId === tabId && existing.role === published && existing.roleRefusal === refusal;
+		const binding: EditorSlotBinding = unchanged ? existing : {
 			slotId,
 			tabId,
 			generation: (existing?.generation ?? 0) + (existing?.tabId === tabId && existing.role === published ? 0 : 1),
@@ -2778,7 +2785,8 @@ export class SessionIndex {
 			roleRefusal: refusal,
 			mode: existing?.mode ?? "chat",
 		};
-		this.#demoteRivalControllers(binding);
+		const demoted = this.#demoteRivalControllers(binding);
+		if (unchanged && !demoted) return cloneBinding(binding);
 		this.#bindings.set(slotId, binding);
 		const failure = await this.#persistNow();
 		if (failure === null) return cloneBinding(binding);
@@ -2800,6 +2808,8 @@ export class SessionIndex {
 	async setEditorMode(slotId: string, mode: SessionViewMode): Promise<void> {
 		const binding = this.#bindings.get(slotId);
 		if (binding === undefined) throw new SessionIndexError("invalid-input", "The editor has no durable binding.");
+		// A mode the binding already records is not a change: no catalog commit for it.
+		if (binding.mode === mode) return;
 		this.#bindings.set(slotId, { ...binding, mode });
 		const failure = await this.#persistNow();
 		// Contention for the catalog is not a refusal: the mode stays, the whole index is saved again by itself, and the
@@ -2836,6 +2846,29 @@ export class SessionIndex {
 	}
 
 	/**
+	 * Drop every binding of a row that leaves the index, in the same save that drops the row.
+	 *
+	 * A binding names a row no window can show once the row is gone: the serializer already treats it as absent and a
+	 * restored editor falls back to its tab type's own conversation, so keeping it only grows the catalog.
+	 */
+	#dropBindingsOf(tabId: string): void {
+		for (const [slotId, binding] of this.#bindings) {
+			if (binding.tabId === tabId) this.#bindings.delete(slotId);
+		}
+	}
+
+	/** Drop the bindings whose row this window does not hold (an earlier build never dropped them); whether any went. */
+	#dropOrphanBindings(): boolean {
+		let dropped = false;
+		for (const [slotId, binding] of this.#bindings) {
+			if (this.#entries.has(binding.tabId)) continue;
+			this.#bindings.delete(slotId);
+			dropped = true;
+		}
+		return dropped;
+	}
+
+	/**
 	 * Make every *other* controlling binding of this conversation passive.
 	 *
 	 * A conversation has one controlling editor at a time: the one whose commands
@@ -2844,8 +2877,9 @@ export class SessionIndex {
 	 * able to copy (ADR-0025), and it must not be able to issue a second native
 	 * operation.
 	 */
-	#demoteRivalControllers(binding: EditorSlotBinding): void {
-		if (binding.role !== "controlling") return;
+	#demoteRivalControllers(binding: EditorSlotBinding): boolean {
+		if (binding.role !== "controlling") return false;
+		let demoted = false;
 		for (const [slotId, existing] of this.#bindings) {
 			if (slotId === binding.slotId || existing.tabId !== binding.tabId || existing.role !== "controlling") continue;
 			// The role change *is* a binding change, so the demoted binding advances
@@ -2858,7 +2892,9 @@ export class SessionIndex {
 				generation: existing.generation + 1,
 				committedAt: this.#timestamp(),
 			});
+			demoted = true;
 		}
+		return demoted;
 	}
 
 	// Internals
@@ -3123,6 +3159,9 @@ export class SessionIndex {
 				for (const binding of persistedBindings(raw.bindings)) {
 					this.#bindings.set(binding.slotId, binding);
 				}
+				// An earlier build never dropped a binding with its row. The sweep is in memory only: the next save
+				// carries the removal, so a window that never writes leaves the catalog as it found it.
+				this.#dropOrphanBindings();
 			}
 		}
 		this.#activeTabId = local.activeTabId ?? inlineActiveTabId;

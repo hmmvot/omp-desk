@@ -3250,6 +3250,99 @@ describe("editor slots", () => {
 		assert.equal(written.bindings.length, 2);
 		assert.equal(written.bindings.some(binding => "witness" in binding), false, "and so is a binding witness");
 	});
+
+	type Persisted = { bindings: { slotId: string; tabId: string; committedAt: string; generation: number }[] };
+
+	it("drops a removed row's bindings in the same save that drops the row", async () => {
+		const { claimDir, cwd } = await tempWorkspace();
+		const store = new TestStore();
+		const index = indexFor(store, claimDir);
+		const gone = await index.createDraft({ cwd });
+		const kept = await index.createDraft({ cwd });
+		await index.bindEditorSlot("slot:gone-1", gone.tabId, "controlling");
+		await index.bindEditorSlot("slot:gone-2", gone.tabId, "passive");
+		await index.bindEditorSlot("slot:kept", kept.tabId, "controlling");
+
+		assert.equal((await index.remove(gone.tabId)).removed, true);
+
+		assert.deepEqual((store.value as Persisted).bindings.map(binding => binding.slotId), ["slot:kept"]);
+		assert.deepEqual(index.slotBindings().map(binding => binding.slotId), ["slot:kept"]);
+		await index.remove(kept.tabId);
+		assert.deepEqual((store.value as Persisted).bindings, []);
+	});
+
+	it("drops the bindings of a row removed because its session file was deleted", async () => {
+		const { claimDir, sessionDir, cwd } = await tempWorkspace();
+		const store = new TestStore();
+		const index = indexFor(store, claimDir);
+		const file = await makeSessionFile(sessionDir, "S-BINDING-DELETED", cwd);
+		const entry = await managedSession(index, file, cwd);
+		await index.bindEditorSlot("slot:deleted", entry.tabId, "passive");
+		await rm(file);
+
+		assert.equal((await index.dropDeletedSession(entry.tabId, { sessionFile: file })).removed, true);
+
+		assert.deepEqual((store.value as Persisted).bindings, []);
+	});
+
+	it("sweeps the bindings of rows that are not there at load, and the next save carries the removal", async () => {
+		const { claimDir, cwd } = await tempWorkspace();
+		const store = new TestStore();
+		const first = indexFor(store, claimDir);
+		const row = await first.createDraft({ cwd });
+		await first.bindEditorSlot("slot:live", row.tabId, "passive");
+		const document = structuredClone(store.value) as Persisted;
+		document.bindings.push({ ...document.bindings[0]!, slotId: "slot:orphan", tabId: "tab:no-such-row" });
+		store.value = document;
+
+		const restarted = indexFor(store, claimDir);
+		assert.deepEqual(restarted.slotBindings().map(binding => binding.slotId), ["slot:live"], "the binding of a missing row is not held");
+		assert.equal((store.value as Persisted).bindings.length, 2, "reading changes nothing in the catalog");
+
+		await restarted.createDraft({ cwd });
+		assert.deepEqual((store.value as Persisted).bindings.map(binding => binding.slotId), ["slot:live"]);
+	});
+
+	it("sweeps the bindings of a missing row that another window committed, and saves the removal", async () => {
+		const { claimDir, cwd } = await tempWorkspace();
+		const store = new TestStore();
+		const index = indexFor(store, claimDir);
+		const row = await index.createDraft({ cwd });
+		await index.bindEditorSlot("slot:live", row.tabId, "passive");
+		const document = structuredClone(store.value) as Persisted;
+		document.bindings.push({ ...document.bindings[0]!, slotId: "slot:orphan", tabId: "tab:no-such-row" });
+		store.value = document;
+
+		await index.refreshFromStore();
+
+		assert.deepEqual(index.slotBindings().map(binding => binding.slotId), ["slot:live"]);
+		assert.deepEqual((store.value as Persisted).bindings.map(binding => binding.slotId), ["slot:live"]);
+	});
+
+	it("does not rewrite a binding, or commit, when a rebind or a mode change changes nothing", async () => {
+		const { claimDir, cwd } = await tempWorkspace();
+		const store = new CountingStore();
+		let clock = Date.parse("2026-10-17T10:00:00.000Z");
+		const index = new SessionIndex({ store, claimStorageDir: claimDir, now: () => new Date(clock) });
+		const row = await index.createDraft({ cwd });
+		const first = await index.bindEditorSlot("slot:a", row.tabId, "controlling");
+		await index.setEditorMode("slot:a", "terminal");
+		const writes = store.writes;
+		clock += 60_000;
+
+		const again = await index.bindEditorSlot("slot:a", row.tabId, "controlling");
+		await index.setEditorMode("slot:a", "terminal");
+
+		assert.equal(store.writes, writes, "nothing was committed");
+		assert.equal(again.committedAt, first.committedAt);
+		assert.equal(again.generation, first.generation);
+		assert.equal(index.slotBinding("slot:a")?.committedAt, first.committedAt);
+
+		const other = await index.bindEditorSlot("slot:b", row.tabId, "controlling");
+		assert.equal(other.role, "controlling");
+		assert.equal(index.slotBinding("slot:a")?.role, "passive", "a real change still elects, demotes and commits");
+		assert.ok(store.writes > writes);
+	});
 });
 
 describe("partial native deletion and recovery", () => {
