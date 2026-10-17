@@ -5487,6 +5487,64 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate("clearInterval(window.answerLinks)");
 		});
 
+		await t.test("a commit hash in an assistant reply, in code and in prose, is a link only once the host proves the commit; a click posts a plain open request, and a symbol lookup is made only for a span that is no commit", async () => {
+			await reset("chat-commit-links");
+			const prose = "Fixed in `c7398070` and a1b2c3d4e5 and `BadFace1`, not `FaceBead1`, `1234567` or deadbeef-rc.";
+			await ui.evaluate(`(()=>{
+			 const row=(id,message)=>({type:'message',id,parentId:null,timestamp:'2026-10-01T00:00:00.000Z',message});
+			 window.ui.push({entries:[
+			  row('user',{role:'user',timestamp:1,content:'Is c7398070 in the log?'}),
+			  row('assistant',{role:'assistant',model:'m',timestamp:2,stopReason:'stop',content:[{type:'text',text:${JSON.stringify(`${prose}\n\n\`\`\`\nc7398070 in a fence\n\`\`\``)}}]}),
+			 ],durableCount:2,working:false,settled:true});
+			 // The host's answers: these two commits exist in the session's repository and nothing else does; no symbol is known.
+			 const proven=['commit://c7398070','commit://a1b2c3d4e5','commit://badface1'];
+			 window.answered=new Set();
+			 window.symbolsAsked=[];
+			 window.answerLinks=setInterval(()=>{for(const message of window.sent){
+			  if(window.answered.has(message.requestId)&&message.type!=='omp:terminal-link-symbols')continue;
+			  if(message.type==='omp:terminal-link-validate'){
+			   window.answered.add(message.requestId);
+			   window.ui.receive({type:'omp:terminal-link-validation',requestId:message.requestId,valid:proven.includes(message.target)});
+			  }else if(message.type==='omp:terminal-link-symbols'&&!window.answered.has('s'+message.requestId)){
+			   window.answered.add('s'+message.requestId);
+			   window.symbolsAsked.push(...message.tokens);
+			   window.ui.receive({type:'omp:terminal-link-symbol-resolution',requestId:message.requestId,results:message.tokens.map(token=>({token,status:'none'}))});
+			   document.dispatchEvent(new Event('fixture-post'));
+			  }
+			 }},5);
+			})()`);
+			await ui.wait("document.querySelectorAll('.omp-commit-link').length>=3 && window.symbolsAsked.includes('FaceBead1')");
+			const facts = await ui.evaluate<{ targets: string[]; texts: string[]; inCode: number; reply: string; user: number; fenced: number; focusable: boolean; asked: string[]; symbols: string[]; menu: boolean }>(`(()=>{
+			 const links=[...document.querySelectorAll('.omp-commit-link')];
+			 const reply=[...document.querySelectorAll('.omp-md')].find(node=>node.textContent.startsWith('Fixed in'));
+			 const user=[...document.querySelectorAll('.omp-md')].find(node=>node.textContent.startsWith('Is c73'));
+			 return {targets:links.map(link=>link.dataset.commitTarget),texts:links.map(link=>link.textContent),inCode:reply.querySelectorAll('code .omp-commit-link').length,
+			  reply:reply.querySelector('p').textContent,user:user.querySelectorAll('.omp-commit-link').length,fenced:reply.querySelectorAll('pre .omp-commit-link').length,
+			  focusable:links.every(link=>link.tabIndex===0&&link.getAttribute('role')==='link'),
+			  asked:window.sent.filter(message=>message.type==='omp:terminal-link-validate'&&message.target.startsWith('commit://')).map(message=>message.target),
+			  symbols:window.symbolsAsked,menu:links.some(link=>link.hasAttribute('data-vscode-context'))};
+			})()`);
+			assert.deepEqual(facts.targets, ["commit://c7398070", "commit://a1b2c3d4e5", "commit://badface1"]);
+			assert.deepEqual(facts.texts, ["c7398070", "a1b2c3d4e5", "BadFace1"]);
+			assert.equal(facts.inCode, 2, "a code span is one link inside the code element");
+			assert.equal(facts.reply, prose.replaceAll("`", ""), "link detection never alters the rendered text");
+			assert.equal(facts.user, 0, "the user's own text is never linked");
+			assert.equal(facts.fenced, 0, "fenced code stays text");
+			assert.ok(facts.focusable, "links are keyboard reachable");
+			assert.ok(["commit://facebead1", "commit://1234567"].every(target => facts.asked.includes(target)), "an unknown candidate in code is asked about, and stays text");
+			assert.ok(!facts.asked.includes("commit://deadbeef") && !facts.asked.some(target => target.includes("rc")), "prose that is not a hash is never asked");
+			assert.ok(facts.symbols.includes("FaceBead1") && !facts.symbols.includes("c7398070") && !facts.symbols.includes("BadFace1"), "a span the host says is no commit is looked up as a symbol; a real commit is not, even when it reads as one");
+			assert.equal(facts.menu, false, "no file menu: there is no path");
+			const opens = () => ui.evaluate<Record<string, unknown>[]>("window.sent.filter(message=>message.type==='omp:terminal-link-open').map(({requestId,...rest})=>rest)");
+			assert.deepEqual(await opens(), [], "validation alone never opens anything");
+			await ui.evaluate("document.querySelector('[data-commit-target=\"commit://c7398070\"]').click()");
+			assert.deepEqual(await opens(), [{ type: "omp:terminal-link-open", target: "commit://c7398070" }], "a plain click posts the open request for the canonical target, naming no folder");
+			await ui.evaluate("document.querySelector('[data-commit-target=\"commit://a1b2c3d4e5\"]').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}))");
+			assert.deepEqual((await opens()).at(-1), { type: "omp:terminal-link-open", target: "commit://a1b2c3d4e5" }, "Enter activates a focused link");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+			await ui.evaluate("clearInterval(window.answerLinks)");
+		});
+
 		await t.test("a skill read is a Skill row with the book icon and the skill name, linked to the real SKILL.md once the result names it, and groups as Loaded N skill", async () => {
 			const skillFile = "C:\\Users\\me\\.omp\\skills\\omp-desk-release\\SKILL.md";
 			const subFile = "C:\\Users\\me\\.omp\\skills\\omp-desk-release\\scripts\\x.md";

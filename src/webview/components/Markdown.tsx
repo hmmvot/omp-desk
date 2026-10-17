@@ -24,9 +24,11 @@ import { detectChatFileLinks, fileTargetOfHref, isFileLinkCandidate } from "../l
 import { detectWebLinks } from "../lib/chat-web-links";
 import { parseBareFileName, parseCodeSymbol } from "../../shared/code-symbols";
 import { detectInternalLinks, internalTargetOf } from "../../shared/internal-links";
+import { commitTargetOfSpan, detectCommitHashes } from "../../shared/commit-links";
 import { webLinkUrl } from "../../shared/terminal-links";
 import type { TerminalTextLink } from "../../shared/terminal-links";
 import { CodeSymbolSpan, FileLink, FileLinkText, InternalLink } from "./FileLinks.tsx";
+import { CommitHashSpan, CommitLink } from "./CommitLinks.tsx";
 import { breakable } from "./BreakPoints.tsx";
 import { ImageReferenceToken } from "./ImageReference.tsx";
 import { WebLink } from "./WebLinks.tsx";
@@ -77,23 +79,30 @@ function files(text: string, key: string, breaks = false): ReactNode {
 	return detectChatFileLinks(text).length === 0 ? (breaks ? breakable(text) : text) : <FileLinkText key={key} text={text} breaks={breaks} />;
 }
 
-/** The bare web URLs and the internal OMP URLs (`agent://Name`) of `text`, in order and without overlap; a URL inside a web link is only that link. */
-function textLinks(text: string): { link: TerminalTextLink; internal: boolean }[] {
-	const web = detectWebLinks(text).map(link => ({ link, internal: false }));
-	const internal = detectInternalLinks(text).filter(link => !web.some(other => link.start < other.link.end && other.link.start < link.end)).map(link => ({ link, internal: true }));
-	return internal.length === 0 ? web : [...web, ...internal].sort((a, b) => a.link.start - b.link.start);
+/** The bare web URLs, the internal OMP URLs (`agent://Name`) and the commit hashes of `text`, in order and without overlap; a URL inside a web link is only that link. */
+function textLinks(text: string): { link: TerminalTextLink; kind: "web" | "internal" | "commit" }[] {
+	const links: { link: TerminalTextLink; kind: "web" | "internal" | "commit" }[] = detectWebLinks(text).map(link => ({ link, kind: "web" as const }));
+	const addApart = (found: readonly TerminalTextLink[], kind: "internal" | "commit"): void => {
+		const taken = links.slice();
+		for (const link of found) if (!taken.some(other => link.start < other.link.end && other.link.start < link.end)) links.push({ link, kind });
+	};
+	addApart(detectInternalLinks(text), "internal");
+	addApart(detectCommitHashes(text), "commit");
+	return links.sort((a, b) => a.link.start - b.link.start);
 }
 
-/** Plain text with its bare web URLs and internal OMP URLs linked and its file references offered to the host; the characters are never altered. */
+/** Plain text with its bare web URLs, internal OMP URLs and commit hashes linked and its file references offered to the host; the characters are never altered. */
 function plain(text: string, key: string): ReactNode {
 	const links = textLinks(text);
 	if (links.length === 0) return files(text, key);
 	const nodes: ReactNode[] = [];
 	let cursor = 0;
-	links.forEach(({ link, internal }, index) => {
+	links.forEach(({ link, kind }, index) => {
 		if (link.start > cursor) nodes.push(files(text.slice(cursor, link.start), `${key}-f${index}`));
 		const label = breakable(text.slice(link.start, link.end));
-		nodes.push(internal ? <InternalLink key={`${key}-i${index}`} target={link.target}>{label}</InternalLink> : <WebLink key={`${key}-w${index}`} url={link.target}>{label}</WebLink>);
+		nodes.push(kind === "internal" ? <InternalLink key={`${key}-i${index}`} target={link.target}>{label}</InternalLink>
+			: kind === "commit" ? <CommitLink key={`${key}-c${index}`} target={link.target}>{label}</CommitLink>
+			: <WebLink key={`${key}-w${index}`} url={link.target}>{label}</WebLink>);
 		cursor = link.end;
 	});
 	if (cursor < text.length) nodes.push(files(text.slice(cursor), `${key}-f${links.length}`));
@@ -104,6 +113,7 @@ function plain(text: string, key: string): ReactNode {
  * A whole code span that is one path (spaces allowed only after a drive, home or relative prefix) links as a unit; an `@` mention and any other span link the file references they hold. A URL in code stays code.
  * A span that names a code symbol (`Session`, `A.B`, `Run()`, `[Attr]`) or is a bare file name or the trailing part of a path (`session-index.ts:849`, `session-index.ts(849)`, `host/session-index.ts:579`) is one {@link CodeSymbolSpan}: its path proof first when it also looks like a path, then the host's workspace symbol and file lookup, in assistant text only.
  * A whole span that is one internal OMP URL of the session (`agent://Name`, `artifact://69`, `local://plan.md`) is one {@link InternalLink}: plain code until the host proves the session has what it names.
+ * A whole span that is one commit hash (7 to 40 hex digits) is one {@link CommitHashSpan}: a link to the commit once the host proves it exists, otherwise what it would be without this rule.
  */
 function codeSpan(content: string, key: string): ReactNode {
 	const internal = internalTargetOf(content);
@@ -113,8 +123,12 @@ function codeSpan(content: string, key: string): ReactNode {
 	const path = single && isFileLinkCandidate(whole) ? whole : null;
 	const symbol = parseCodeSymbol(content) !== null;
 	// A bare file name or path suffix (`session-index.ts:849`, `host/session-index.ts:579`) is looked up by the host in assistant text; where it links nothing the span renders as before.
-	if (symbol || parseBareFileName(content) !== null) return <CodeSymbolSpan key={key} content={content} path={path} plain={symbol || path !== null ? undefined : files(content, `${key}f`, true)} />;
-	return <code key={key}>{path !== null ? <FileLink target={path}>{breakable(content)}</FileLink> : files(content, `${key}f`, true)}</code>;
+	const node = symbol || parseBareFileName(content) !== null
+		? <CodeSymbolSpan key={key} content={content} path={path} plain={symbol || path !== null ? undefined : files(content, `${key}f`, true)} />
+		: <code key={key}>{path !== null ? <FileLink target={path}>{breakable(content)}</FileLink> : files(content, `${key}f`, true)}</code>;
+	// A span that is one commit hash is asked about as a commit first; `node` is what it is where the host knows no such commit.
+	const commit = commitTargetOfSpan(content);
+	return commit === null ? node : <CommitHashSpan key={key} target={commit} content={content} plain={node} />;
 }
 
 /** A link label keeps its inline code spans as code; nothing inside a label is linked again. */

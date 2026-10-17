@@ -2,6 +2,7 @@ import { detectTerminalFileLinks } from "../../shared/terminal-links.ts";
 import type { FileLinkAction, TerminalTextLink } from "../../shared/terminal-links.ts";
 import type { GuestHostMessage, GuestWebviewMessage } from "../../protocol/messages.ts";
 import { parseInternalLink } from "../../shared/internal-links.ts";
+import { parseCommitLinkTarget } from "../../shared/commit-links.ts";
 import { ValidationCache } from "./link-validation-cache.ts";
 import { TerminalLinkClient } from "./terminal-link-client.ts";
 
@@ -100,7 +101,8 @@ export class ChatFileLinks {
 	peek(target: string): boolean | undefined { return this.#cache.peek(target); }
 	resolve(target: string): Promise<boolean> { return this.#cache.resolve(target); }
 	open(target: string, action?: FileLinkAction): void {
-		if (parseInternalLink(target) !== null) this.#client.openInternal(target, action);
+		if (parseCommitLinkTarget(target) !== null) this.#client.openCommit(target);
+		else if (parseInternalLink(target) !== null) this.#client.openInternal(target, action);
 		else this.#client.openPath(target, action);
 	}
 	openSymbolSearch(symbol: string, files = false): void { this.#client.openSymbolSearch(symbol, files); }

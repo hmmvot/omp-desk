@@ -270,6 +270,10 @@ import { searchSymbol } from "./host/symbol-search";
 import { FileNameLinkResolver, fileChoiceLabel, workspaceFileNameSource } from "./host/file-name-links";
 import type { SymbolLinksRequest, SymbolLinksResolution, SymbolLinksRetry } from "./shared/code-symbols";
 import { handleInternalLink } from "./host/internal-links";
+import { handleCommitLink } from "./host/commit-links";
+import { createCommitLinks } from "./wiring/commit-links";
+import type { CommitLinks } from "./wiring/commit-links";
+import { parseCommitLinkTarget } from "./shared/commit-links";
 import { parseInternalLink } from "./shared/internal-links";
 import {
   createShellSlotId,
@@ -735,6 +739,8 @@ interface WindowState {
    * `file` locations count; a provider's library or metadata location has no path inside any session folder.
    */
   symbolLinks: SymbolLinkResolver | undefined;
+  /** The window's commit-hash links (docs/designs/2026-10-17-commit-hash-links.md): created by the first Chat request that names a hash. */
+  commitLinks: CommitLinks | undefined;
   /** Slots whose pages asked about symbols, told when parked tokens may be asked again. */
   readonly symbolAskers: Set<string>;
   /** The installed Nerd Font families, once read. */
@@ -1126,13 +1132,13 @@ function guestDispatcherDeps(): GuestDispatcherDeps<TabState> {
     rememberPrompt,
     runChatAction,
     hostedCwd: tabId => windowState().sessionRuntime.records.get(tabId)?.runtime?.cwd ?? null,
+    searchSymbol: searchSymbolFromSelection,
     completeFiles: (cwd, query) => findFileMentions(query, {
       cwd,
       findFiles: (include, exclude, maxResults) => vscode.workspace.findFiles(include, exclude, maxResults),
     }),
     pickFiles: async defaultFolder => {
       const picked = await vscode.window.showOpenDialog({
-    searchSymbol: searchSymbolFromSelection,
         canSelectMany: true,
         canSelectFiles: true,
         canSelectFolders: false,
@@ -1312,6 +1318,7 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     slashRegistryCheckedAt: 0,
     slashRegistryLoading: null,
     symbolLinks: undefined,
+    commitLinks: undefined,
     symbolAskers: new Set<string>(),
     installedTerminalFonts: [],
     installedTerminalFontsRead: null,
@@ -10102,13 +10109,6 @@ function symbolLinkResolver(): SymbolLinkResolver {
       }
       return Object.assign(candidates.map(symbolEntry), { total: found.length });
     },
-  }, {
-    log,
-    files: new FileNameLinkResolver(workspaceFileNameSource(vscode), { log }),
-    // Parked tokens (provider not ready, queue full) are asked again by every page that has asked.
-    onRetry: () => {
-      for (const slotId of [...s.symbolAskers]) {
-        if (stateOf(slotId) === undefined) s.symbolAskers.delete(slotId);
     // The type hierarchy of the same provider (the C# language server serves it): a member the qualifier's type inherits is declared in a base class.
     hierarchy: {
       async prepare(entry) {
@@ -10120,6 +10120,13 @@ function symbolLinkResolver(): SymbolLinkResolver {
         return Array.isArray(items) ? items.map(hierarchyNode) : [];
       },
     },
+  }, {
+    log,
+    files: new FileNameLinkResolver(workspaceFileNameSource(vscode), { log }),
+    // Parked tokens (provider not ready, queue full) are asked again by every page that has asked.
+    onRetry: () => {
+      for (const slotId of [...s.symbolAskers]) {
+        if (stateOf(slotId) === undefined) s.symbolAskers.delete(slotId);
         else pushTerminalTo(slotId, { type: "omp:terminal-link-symbols-retry" });
       }
     },
@@ -10141,13 +10148,6 @@ function symbolLinkResolver(): SymbolLinkResolver {
   return resolver;
 }
 
-/** The parsed inbound terminal messages a folder-shell panel may send. */
-const TERMINAL_PANEL_TYPES: Record<string, true> = {
-  "omp:terminal-attach": true,
-  "omp:terminal-probe": true,
-  "omp:terminal-input": true,
-  "omp:terminal-resize": true,
-  "omp:terminal-focus": true,
 /** `ompDesk.searchSymbolFromChat` for a non-empty selection: the link resolver's lookup in the folders of the conversation `tabId` shows (see {@link searchSymbol}). */
 async function searchSymbolFromSelection(query: string, tabId: string): Promise<void> {
   const s = windowState();
@@ -10164,6 +10164,13 @@ async function searchSymbolFromSelection(query: string, tabId: string): Promise<
   });
 }
 
+/** The parsed inbound terminal messages a folder-shell panel may send. */
+const TERMINAL_PANEL_TYPES: Record<string, true> = {
+  "omp:terminal-attach": true,
+  "omp:terminal-probe": true,
+  "omp:terminal-input": true,
+  "omp:terminal-resize": true,
+  "omp:terminal-focus": true,
   "omp:terminal-visibility": true,
   "omp:terminal-link-validate": true,
   "omp:terminal-link-symbols": true,
@@ -10241,6 +10248,17 @@ async function handleTerminalGuestMessage(
           isCurrent,
           reply: message => pushTerminalTo(state.slotId, message),
         }, symbolLinkResolver());
+        return;
+      }
+      // A commit hash (`commit://<hex>`) is proved and shown against the repositories of this session's folder, never as a file of the cwd.
+      if (typeof payload.target === "string" && parseCommitLinkTarget(payload.target) !== null) {
+        const links = s.commitLinks ??= createCommitLinks(s.context?.subscriptions ?? { push: () => 0 });
+        await handleCommitLink(payload as unknown as TerminalLinkRequest, links.resolver, links.env, {
+          cwd,
+          isCurrent,
+          reply: message => pushTerminalTo(state.slotId, message),
+          warn: message => { log.warn(`terminal link: ${message}`); showWarning(message); },
+        });
         return;
       }
       // An internal OMP URL (`agent://Name`) is proved and opened against the conversation's own session, never as a file of the cwd.
