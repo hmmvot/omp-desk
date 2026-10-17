@@ -588,6 +588,12 @@ export interface NativeStopVerdict {
 	readonly detail: string;
 	/** Low-level stop facts for Output only, never a notification. */
 	readonly diagnosticDetail?: string;
+	/**
+	 * How the root ended, as the broker's own status reported it: set only by a proof that read an
+	 * exited status (`waitForManagedRootExit`), absent for a proof made without the broker's answer
+	 * and for every stop verdict that is not an exit proof. A code of `null` is "no code reported".
+	 */
+	readonly exit?: { readonly code: number | null; readonly signal: number | null };
 }
 
 /** Facts one broker stop reported. */

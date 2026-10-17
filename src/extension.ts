@@ -3632,7 +3632,7 @@ function sessionRuntimeDeps(index: SessionIndex, chat: ChatRuntime, launchers?: 
   });
   const identity = new LocalIdentity({ index, records, window: identityWindow(index), log });
   const exit = new LocalExitOperations({
-    index, records, window: exitWindow(index), control, stop, attachBrokerClient, brokerSlots: () => windowState().brokerSlots, log,
+    index, records, window: exitWindow(index), control, stop, attachBrokerClient, proveExit: waitForManagedRootExit, brokerSlots: () => windowState().brokerSlots, log,
   });
   const nativeWatch = new LocalNativeWatch({
     index, records, window: nativeWatchWindow(index), control, exit, identity,

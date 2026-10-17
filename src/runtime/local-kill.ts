@@ -73,6 +73,11 @@ export class LocalKill {
 				});
 				window.launcherChanged();
 			},
+			recordStopIntent: async (tabId, captured) => {
+				const recorded = await index.recordKillIntent(tabId, captured);
+				if (recorded === null || recorded.previous === "stopped") return async () => undefined;
+				return async () => { await index.setRunIntent(tabId, recorded.previous); };
+			},
 			reconcileSession: (tabId, captured) => this.#reconcileKilled(tabId, captured),
 			refresh: () => window.refresh(),
 			info: message => window.notice("info", message),

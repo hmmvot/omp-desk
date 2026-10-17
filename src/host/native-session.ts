@@ -141,7 +141,11 @@ export async function waitForManagedRootExit(runtime: SessionHostRuntime, client
 			if (status.state === "exited" && status.nativePid === runtime.pid && status.nativeCreationTime === runtime.identity.childCreationTime) {
 				const reading = await reader(runtime.pid);
 				if (reading.kind === "gone" || (reading.kind === "found" && reading.creationTime !== runtime.identity.childCreationTime)) {
-					return { writerGone: true, treeEmpty: false, detail: "The session is stopped. Commands it started may continue running separately.", diagnosticDetail: `The exact OMP root pid ${runtime.pid} exited. Its uncontained process tree remains unknown.` };
+					return {
+						writerGone: true, treeEmpty: false, detail: "The session is stopped. Commands it started may continue running separately.",
+						diagnosticDetail: `The exact OMP root pid ${runtime.pid} exited. Its uncontained process tree remains unknown.`,
+						exit: { code: status.exitCode, signal: status.signal },
+					};
 				}
 			}
 		} catch (error) {

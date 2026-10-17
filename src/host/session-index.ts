@@ -544,6 +544,14 @@ export interface CloseSessionOptions {
 	/** `true` only when the caller has proved the native host stopped. */
 	readonly confirmedStopped: boolean;
 	readonly detail?: string;
+	/**
+	 * What the close does to the row's durable run intent. `"stopped"` (the default) is the user's stop:
+	 * the row stays stopped until an explicit Resume. `"unchanged"` ends the runtime and releases the claim
+	 * and host exactly the same way but leaves the intent as it was recorded, for a process that ended
+	 * without the user asking (a crash, the operating system ending the session): the next startup
+	 * relaunches such a row. Either way the intent, the cleared host and the release are one persist.
+	 */
+	readonly runIntent?: "stopped" | "unchanged";
 }
 
 export interface CloseSessionResult {
@@ -553,6 +561,15 @@ export interface CloseSessionResult {
 
 /** Sentinel the conditional shared write returns when the committed row no longer records the expected process. */
 const HOST_CHANGED = "The row's recorded process changed before this record was accepted.";
+
+/** The part of a recorded host a Kill's capture names. */
+type CapturedHostRecord = { readonly startedAt: string; readonly pid: number | null; readonly rpc?: RecordedRpcIdentity | null };
+
+/** Whether a row's host record is exactly the incarnation a Kill captured. */
+function recordsCapturedHost(host: CapturedHostRecord | null, captured: KilledHostCapture): boolean {
+	return host !== null && host.startedAt === captured.attemptStartedAt && host.pid === captured.hostPid &&
+		host.rpc?.slot === captured.slot && host.rpc?.brokerId === captured.brokerId && host.rpc?.brokerGeneration === captured.brokerGeneration;
+}
 
 export interface RemoveResult {
 	readonly removed: boolean;
@@ -2101,7 +2118,7 @@ export class SessionIndex {
 			const live = this.#live.get(tabId);
 			if (live !== undefined) await this.#releaseQuietly(live.claim);
 			this.#live.delete(tabId);
-			entry.runIntent = "stopped";
+			if (options.runIntent !== "unchanged") entry.runIntent = "stopped";
 			await this.#touch(entry, entry.sessionFile === null ? "draft" : "saved", detail);
 			await this.#persist();
 			return { released: live !== undefined, detail };
@@ -2112,7 +2129,7 @@ export class SessionIndex {
 		if (target === null) {
 			this.#live.delete(tabId);
 			entry.host = null;
-			entry.runIntent = "stopped";
+			if (options.runIntent !== "unchanged") entry.runIntent = "stopped";
 			await this.#touch(entry, entry.sessionFile === null ? "draft" : "saved", options.detail);
 			await this.#persist();
 			return { released: false, detail: "This session could not finish closing. Refresh Sessions and try again." };
@@ -2133,8 +2150,10 @@ export class SessionIndex {
 		entry.host = null;
 		// The explicit close is the durable run intent: a restarted extension host,
 		// a reloaded window and a full VS Code restart must all keep seeing this row
-		// as stopped until the user resumes it.
-		entry.runIntent = "stopped";
+		// as stopped until the user resumes it. A close that is not the user's stop
+		// (`runIntent: "unchanged"`) leaves the recorded intent, and the clearing of
+		// the host below is in the same persist as that decision.
+		if (options.runIntent !== "unchanged") entry.runIntent = "stopped";
 		if (entry.ownership !== null) {
 			entry.ownership = {
 				ownerGeneration: entry.ownership.ownerGeneration,
@@ -2270,6 +2289,29 @@ export class SessionIndex {
 	}
 
 	/**
+	 * Record the stopped intent of exactly the incarnation a Kill is about to end, before it is ended.
+	 *
+	 * The window that drives the session reads the end of its process as a crash and leaves a crash's run
+	 * intent as recorded (the next startup relaunches it), so the user's decision to kill must already be on
+	 * record when the process dies. `null` when the row records another process than the captured one (a newer
+	 * launch is not what is being killed); otherwise the intent the row had, for {@link SessionIndex.setRunIntent}
+	 * to put back if the kill then fails. Nothing else of the row changes: the host, the claim and the release
+	 * are recorded by whoever proves the process gone.
+	 */
+	async recordKillIntent(tabId: string, captured: KilledHostCapture): Promise<{ readonly previous: RunIntent } | null> {
+		return await this.withinTabLifecycle(tabId, undefined, async () => {
+			const entry = this.#entries.get(tabId);
+			if (entry === undefined || !recordsCapturedHost(entry.host, captured)) return null;
+			const previous = entry.runIntent;
+			if (previous !== "stopped") {
+				entry.runIntent = "stopped";
+				await this.#persist();
+			}
+			return { previous };
+		});
+	}
+
+	/**
 	 * Record a row stopped after its exact recorded process was proven gone *by someone else* (Kill).
 	 *
 	 * Unlike {@link SessionIndex.stopRecordedHost} this takes no rival-Stop exception and asks no broker: it
@@ -2285,9 +2327,7 @@ export class SessionIndex {
 			const entry = this.#entries.get(tabId);
 			if (entry === undefined || entry.host === null) return skipped("changed", "The row records no process any more.");
 			if (this.#drivesHost(tabId)) return skipped("driven", "This window drives the session; its own broker watch ends it.");
-			const matches = (host: { readonly startedAt: string; readonly pid: number | null; readonly rpc?: RecordedRpcIdentity | null } | null): boolean =>
-				host !== null && host.startedAt === captured.attemptStartedAt && host.pid === captured.hostPid &&
-				host.rpc?.slot === captured.slot && host.rpc?.brokerId === captured.brokerId && host.rpc?.brokerGeneration === captured.brokerGeneration;
+			const matches = (host: CapturedHostRecord | null): boolean => recordsCapturedHost(host, captured);
 			if (!matches(entry.host)) return skipped("changed", "The row records another process than the one that was killed.");
 			const identity = entry.sessionFile ?? entry.ownership?.draftIdentity ?? null;
 			if (identity === null) return { kind: "failed", detail: "The row recorded neither a session file nor a reserved identity, so its record cannot be held." };

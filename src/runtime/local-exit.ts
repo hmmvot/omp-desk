@@ -4,7 +4,9 @@
  * recording of an exit for a session whose recorded root is already gone (`endEnded`).
  *
  * One lifecycle operation each: clear the runtime, prove the exit through the broker, release
- * control material and the claim, record the stopped intent. A close, reload or relaunch that
+ * control material and the claim, and record the end. A normal exit (code 0, OMP's own `/exit`) records
+ * the stopped intent; any other end (a crash, a kill, the operating system ending the session) leaves
+ * the run intent as it was, so the next startup relaunches the session. A close, reload or relaunch that
  * reached the tab's gate first replaced or cleared the runtime, and the notification then
  * describes a process this window no longer drives, so it does nothing. The handlers take the
  * tab's gate themselves, so they are called outside it; what the window shows (notices, the
@@ -13,13 +15,13 @@
  */
 import { setTimeout as delay } from "node:timers/promises";
 import type { Logger } from "../shared/logger.ts";
-import { waitForManagedRootExit } from "../host/native-session.ts";
 import type { NativeHostRuntime, SessionHostRuntime } from "../host/native-session.ts";
 import type { PtyBrokerClient } from "../host/pty-client.ts";
 import { retireStoppedRpcBroker } from "../host/rpc-launch.ts";
 import type { RpcHostRuntime } from "../host/rpc-launch.ts";
 import type { BrokerSlotStore } from "../host/broker-slots.ts";
 import type { SessionIndex } from "../host/session-index.ts";
+import type { NativeStopVerdict } from "../host/rpc-reconcile.ts";
 import { controlOwnerFor } from "./local-control.ts";
 import type { LocalHostControl } from "./local-control.ts";
 import type { StopOperations } from "./local-stop.ts";
@@ -52,6 +54,8 @@ export interface LocalExitDeps {
 	readonly control: Pick<LocalHostControl, "release" | "dispose">;
 	readonly stop: Pick<StopOperations, "confirmEnded">;
 	readonly attachBrokerClient: () => Promise<PtyBrokerClient | null>;
+	/** Proves the exact OMP root gone through the broker and reports how it ended (`waitForManagedRootExit`). */
+	readonly proveExit: (runtime: SessionHostRuntime, client: PtyBrokerClient, timeoutMs: number) => Promise<NativeStopVerdict>;
 	/** The durable broker slot table, `undefined` before activation created it. */
 	readonly brokerSlots: () => BrokerSlotStore | undefined;
 	readonly log: Logger;
@@ -59,6 +63,44 @@ export interface LocalExitDeps {
 
 function messageOf(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+/** What the end of an OMP process means for its row: the durable run intent, and the sentences that say so. */
+export interface ExitOutcome {
+	/** `"stopped"` for the user's own exit, `"unchanged"` for anything else (`CloseSessionOptions.runIntent`). */
+	readonly intent: "stopped" | "unchanged";
+	/** The row's detail. */
+	readonly detail: string;
+	/** The Output line. */
+	readonly log: string;
+}
+
+/**
+ * Classify the end of a process OMP Desk did not ask to end.
+ *
+ * OMP's own ways out all leave through exit code 0: `/exit`, `/quit` and Ctrl+D in the terminal UI end
+ * `shutdown()` with `postmortem.quit(0)`, and a Chat (RPC) child leaves `disposeAndExit` with `process.exit(0)`
+ * once its stdin closes or an extension asks for shutdown. Everything else is not the user's decision to stop:
+ * a non-zero code (the broker logs show `4` when Windows ends the session, `-1` with signal 15 for a forced
+ * termination, `1` for a startup failure), a signal, no code, and no answer from the broker at all (it was killed
+ * with the process). Those leave the run intent as recorded, so the next startup relaunches the row.
+ * Desk's own Stop and Kill record the stopped intent before they end the process, so they never reach here as one of these.
+ */
+export function exitOutcome(stop: Pick<NativeStopVerdict, "exit" | "detail">): ExitOutcome {
+	const exit = stop.exit;
+	if (exit !== undefined && exit.code === 0 && (exit.signal ?? 0) === 0) {
+		return { intent: "stopped", detail: stop.detail, log: "OMP exited normally (exit code 0); the row is recorded stopped" };
+	}
+	const how = exit === undefined
+		? "the broker did not report how it ended"
+		: exit.code === null && (exit.signal ?? 0) === 0
+			? "it reported no exit code"
+			: `exit code ${exit.code ?? "none"}${(exit.signal ?? 0) === 0 ? "" : `, signal ${exit.signal}`}`;
+	return {
+		intent: "unchanged",
+		detail: `The OMP process ended unexpectedly (${how}). The session restarts the next time VS Code starts; Resume starts it now.`,
+		log: `OMP ended abnormally (${how}); the run intent stays as recorded, so the next startup relaunches the row`,
+	};
 }
 
 export class LocalExitOperations {
@@ -84,8 +126,9 @@ export class LocalExitOperations {
 	/**
 	 * The chat process of a tab ended without this window asking for it.
 	 *
-	 * One lifecycle operation: clearing the runtime, proving the exit through the broker,
-	 * releasing control material and the claim, and recording the stopped intent.
+	 * One lifecycle operation: clearing the runtime, proving the exit through the broker, retiring
+	 * the broker, recording the end in one write (the host cleared and the claim released, with the
+	 * run intent `exitOutcome` decides) and releasing control material.
 	 */
 	async rpcExited(tabId: string, runtime: RpcHostRuntime): Promise<void> {
 		const { index, window, control, log } = this.#deps;
@@ -103,7 +146,7 @@ export class LocalExitOperations {
 			log.info(`tab ${tabId}: the OMP process exited`);
 			const broker = await this.#deps.attachBrokerClient();
 			if (broker === null) { window.fence(current, true); return; }
-			const stop = await waitForManagedRootExit(runtime, broker, 1_000);
+			const stop = await this.#deps.proveExit(runtime, broker, 1_000);
 			log.info(`native exit ${runtime.pid}: ${stop.diagnosticDetail ?? stop.detail}`);
 			if (!stop.writerGone) {
 				current.controlFailure = stop.detail;
@@ -116,21 +159,19 @@ export class LocalExitOperations {
 			control.dispose(current);
 			try {
 				await this.retireBroker(tabId, runtime);
-				// A writer that exited is a stopped session: the durable intent is what keeps its
-				// row stopped across a reload instead of being re-launched.
-				await index.setRunIntent(tabId, "stopped", stop.detail);
-				// Control material is dropped only for a stop this window can prove.
-				if (stop.writerGone) await control.release(tabId, ownerGeneration);
-				else current.controlFailure = stop.detail;
 			} catch (error) {
 				log.error(`tab ${tabId}: the exit of the OMP process could not be recorded: ${messageOf(error)}`);
-				window.notice("error", `The OMP process exited, but its session could not be recorded as stopped: ${messageOf(error)}. Refresh Sessions before resuming it.`);
+				window.notice("error", `The OMP process exited, but its session could not be closed: ${messageOf(error)}. Refresh Sessions before resuming it.`);
 				window.view(current);
 				window.refresh();
 				return;
 			}
+			const outcome = exitOutcome(stop);
+			log.info(`tab ${tabId}: ${outcome.log}`);
 			try {
-				const result = await index.closeSession(tabId, { confirmedStopped: stop.writerGone, detail: stop.detail }, lease);
+				// The intent, the cleared host and the claim release are one record (`closeSession`): a window
+				// killed between two writes can never leave a stopped intent beside a retained host.
+				const result = await index.closeSession(tabId, { confirmedStopped: stop.writerGone, detail: outcome.detail, runIntent: outcome.intent }, lease);
 				log.info(`tab ${tabId}: closeSession released=${result.released} (${result.detail})`);
 				if (!result.released) {
 					window.notice(
@@ -141,6 +182,12 @@ export class LocalExitOperations {
 			} catch (error) {
 				log.error(`tab ${tabId}: closeSession failed: ${messageOf(error)}`);
 				window.notice("error", `Session ownership could not be reconciled after the OMP process exited: ${messageOf(error)}`);
+			}
+			try {
+				// Control material is dropped only for a stop this window can prove.
+				await control.release(tabId, ownerGeneration);
+			} catch (error) {
+				log.error(`tab ${tabId}: host control could not be released after the OMP process exited: ${messageOf(error)}`);
 			}
 			window.view(current);
 			window.refresh();
@@ -164,7 +211,7 @@ export class LocalExitOperations {
 			}
 			const client = await this.#deps.attachBrokerClient();
 			if (client === null) return;
-			const stop = await waitForManagedRootExit(runtime, client, 1_000);
+			const stop = await this.#deps.proveExit(runtime, client, 1_000);
 			log.info(`native exit ${runtime.pid}: ${stop.diagnosticDetail ?? stop.detail}`);
 			if (!stop.writerGone) { state.controlFailure = stop.detail; return; }
 			const owner = controlOwnerFor(runtime, index.get(tabId)?.ownership?.ownerGeneration ?? "");
@@ -174,15 +221,17 @@ export class LocalExitOperations {
 			state.nativeWatch = null;
 			state.transitioning = false;
 			await control.release(tabId, owner);
-			await index.setRunIntent(tabId, "stopped", stop.detail);
-			await index.closeSession(tabId, { confirmedStopped: true, detail: stop.detail }, lease);
+			const outcome = exitOutcome(stop);
+			log.info(`tab ${tabId}: ${outcome.log}`);
+			await index.closeSession(tabId, { confirmedStopped: true, detail: outcome.detail, runIntent: outcome.intent }, lease);
 			window.nativeEnded(tabId);
 		});
 	}
 
 	/**
 	 * End the runtime of a session whose recorded OMP root is already gone, the way its exit would have ended it
-	 * (`rpcExited`, `nativeExited`: runtime cleared, credentials and claim released, row recorded stopped),
+	 * (`rpcExited`, `nativeExited`: runtime cleared, credentials and claim released, row recorded stopped after a
+	 * clean exit and left running after an abnormal one),
 	 * so that a request made for a stopped session can follow. `false` when the root is not proven gone or the exit could
 	 * not be completed (surviving children, no proof through the broker): the caller then reports what it found.
 	 * Call it outside the tab's lifecycle gate, which both handlers take.

@@ -678,7 +678,11 @@ describe("killing a session or a process", () => {
 
 		async function killed(reconcile: (tabId: string, captured: unknown) => Promise<unknown>) {
 			const reconciled: unknown[][] = [];
-			const index = fakeIndex([recordedEntry()], { reconcileKilledHost: async (...args: unknown[]) => { reconciled.push(args.slice(0, 2)); return await reconcile(args[0] as string, args[1]); } });
+			const intents: unknown[][] = [];
+			const index = fakeIndex([recordedEntry()], {
+				recordKillIntent: async (...args: unknown[]) => { intents.push(args.slice(0, 2)); return { previous: "running" }; },
+				reconcileKilledHost: async (...args: unknown[]) => { reconciled.push(args.slice(0, 2)); return await reconcile(args[0] as string, args[1]); },
+			});
 			const w = await world(index);
 			const slotsForgotten: string[] = [];
 			w.state.brokerSlots = { forget: async (slot: string) => { slotsForgotten.push(slot); } } as never;
@@ -686,12 +690,13 @@ describe("killing a session or a process", () => {
 			w.state.processes = { refresh: async () => ({ rows: [] }), sync() {}, touch() {}, serveStopRequest: async () => [] };
 			w.state.provider = { headlineFor: () => "Fixture session" };
 			await w.actions.kill(w.state.context, index, sessionRow(TAB, "stopped"));
-			return { w, reconciled, slotsForgotten };
+			return { w, reconciled, intents, slotsForgotten };
 		}
 
 		it("takes the recorded process from the index's host record, then records the row stopped and forgets the slot, the outcome and the control material of that incarnation", async () => {
-			const { w, reconciled, slotsForgotten } = await killed(async () => ({ kind: "recorded", slot: SLOT }));
+			const { w, reconciled, intents, slotsForgotten } = await killed(async () => ({ kind: "recorded", slot: SLOT }));
 			assert.deepEqual(reconciled, [[TAB, { slot: SLOT, brokerId: "broker-1", brokerGeneration: "gen-1", attemptStartedAt: STAMP, hostPid: CHILD_PID }]]);
+			assert.deepEqual(intents, reconciled, "the stopped intent was recorded for exactly the incarnation that was then reconciled");
 			assert.deepEqual(slotsForgotten, [SLOT]);
 			assert.deepEqual([w.state.outcomes.size, w.released], [0, [[TAB, OWNER]]]);
 			assert.ok(w.logged.includes(`tab ${TAB}: after Kill: the row is recorded as stopped`));
@@ -700,7 +705,10 @@ describe("killing a session or a process", () => {
 
 		it("takes this window's own runtime identity over the index's record", async () => {
 			const reconciled: unknown[] = [];
-			const index = fakeIndex([{ ...recordedEntry(), host: { pid: CHILD_PID, startedAt: STAMP, transport: "rpc", rpc: null } as never }], { reconcileKilledHost: async (_tabId: string, captured: unknown) => { reconciled.push(captured); return { kind: "skipped", why: "driven", detail: "driven here" }; } });
+			const index = fakeIndex([{ ...recordedEntry(), host: { pid: CHILD_PID, startedAt: STAMP, transport: "rpc", rpc: null } as never }], {
+				recordKillIntent: async () => ({ previous: "running" }),
+				reconcileKilledHost: async (_tabId: string, captured: unknown) => { reconciled.push(captured); return { kind: "skipped", why: "driven", detail: "driven here" }; },
+			});
 			const w = await world(index);
 			w.state.tabs.set("slot-1", tabRecord("slot-1", TAB));
 			w.state.records.acquire(TAB, "slot-1").runtime = { identity: recordedIdentity, kind: "chat", pid: CHILD_PID } as unknown as SessionHostRuntime;

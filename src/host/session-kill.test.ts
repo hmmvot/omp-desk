@@ -242,6 +242,7 @@ function commandPorts(kernel: ReturnType<typeof fakeKernel>, overrides: Partial<
 		},
 		recordedProcess: () => recorded(),
 		forgetStoppedSlot: async slot => void events.push(`forget ${slot}`),
+		recordStopIntent: async tabId => { events.push(`intend ${tabId}`); return async () => void events.push(`withdraw ${tabId}`); },
 		reconcileSession: async tabId => void events.push(`reconcile ${tabId}`),
 		refresh: async () => void events.push("refresh"),
 		info: message => void events.push(`info ${message}`),
@@ -258,7 +259,7 @@ describe("the Kill command", () => {
 		const kernel = fakeKernel({ 4100: BROKER_CREATED, 4200: CHILD_CREATED }, { 4100: [4200] });
 		const { ports, events } = commandPorts(kernel);
 		await killSelection({ kind: "session", tabId: "tab-1", title: "Fix the build" }, ports);
-		assert.deepEqual(events.filter(event => !event.startsWith("log")), ["reconcile tab-1", "refresh"]);
+		assert.deepEqual(events.filter(event => !event.startsWith("log")), ["intend tab-1", "reconcile tab-1", "refresh"]);
 		const log = events.find(event => event.startsWith("log"));
 		assert.match(log ?? "", /^log info .*requested by the test/);
 		assert.match(log ?? "", /broker pid 4100: tree kill issued, root gone/);
@@ -323,6 +324,42 @@ describe("the Kill command", () => {
 		const { ports } = commandPorts(kernel, { reconcileSession: async (_tabId, captured) => void seen.push(captured) });
 		await killSelection({ kind: "session", tabId: "tab-1", title: "Fix the build" }, ports);
 		assert.deepEqual(seen, [{ slot: "tab:one", brokerId: "pty-one", brokerGeneration: "g1", attemptStartedAt: ATTEMPT, hostPid: 4100 }]);
+	});
+
+	it("records the stopped intent before it kills, so the driving window's exit handler cannot read a Kill as a crash", async () => {
+		const kernel = fakeKernel({ 4100: BROKER_CREATED, 4200: CHILD_CREATED }, { 4100: [4200] });
+		const events: string[] = [];
+		const { ports } = commandPorts(kernel, {
+			recordStopIntent: async tabId => { events.push(`intend ${tabId}`); return async () => void events.push("withdraw"); },
+			killTree: async pid => { events.push(`kill ${pid}`); return await kernel.ports.killTree(pid); },
+			reconcileSession: async tabId => void events.push(`reconcile ${tabId}`),
+		});
+		await killSelection({ kind: "session", tabId: "tab-1", title: "Fix the build" }, ports);
+		assert.equal(events[0], "intend tab-1", "the intent comes before the first kill");
+		assert.ok(events.includes("kill 4100"), "the broker tree was killed");
+		assert.equal(events.at(-1), "reconcile tab-1", "and the records follow the kill");
+		assert.ok(!events.includes("withdraw"), "a kill that worked keeps the intent");
+	});
+
+	it("puts the earlier intent back when the kill failed, and kills nothing when the intent could not be recorded", async () => {
+		const failing = fakeKernel({ 4100: BROKER_CREATED });
+		failing.ports.stillAlive = true;
+		failing.ports.run = { started: true, exitCode: 5, output: "Access is denied", timedOut: false };
+		const withdrawn: string[] = [];
+		const stuck = commandPorts(failing, { recordStopIntent: async () => async () => void withdrawn.push("back") });
+		await killSelection({ kind: "session", tabId: "tab-1", title: "Fix the build" }, stuck.ports);
+		assert.deepEqual(withdrawn, ["back"], "a process that is still running is not left recorded as stopped by a Kill");
+
+		const kernel = fakeKernel({ 4100: BROKER_CREATED, 4200: CHILD_CREATED }, { 4100: [4200] });
+		let killed = 0;
+		const refused = commandPorts(kernel, {
+			recordStopIntent: async () => { throw new Error("catalog locked"); },
+			killTree: async pid => { killed++; return await kernel.ports.killTree(pid); },
+		});
+		await killSelection({ kind: "session", tabId: "tab-1", title: "Fix the build" }, refused.ports);
+		assert.equal(killed, 0, "an intent that cannot be recorded stops the kill, as for Stop");
+		assert.ok(refused.events.some(event => event.startsWith("warn ") && /was not killed/.test(event)));
+		assert.ok(!refused.events.some(event => event.startsWith("reconcile")));
 	});
 
 	it("retires no session record on a broker's absence alone: a process row that cannot name the OMP child records nothing", async () => {

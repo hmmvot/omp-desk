@@ -1404,6 +1404,132 @@ describe("stopped intent is an admission rule", () => {
 });
 
 /**
+ * The operating system ending the user's session ends the OMP process before the window (Windows logoff:
+ * the broker logs show every child exiting with code 4). That is not the user's stop. The close that follows
+ * records the end without writing the stopped intent, and in one write, so that a window killed in the middle
+ * can leave neither a stopped row that still records a host nor a running row that a restart skips.
+ */
+describe("a close that is not the user's stop", () => {
+	interface Written { readonly tabId: string; readonly runIntent: string; readonly host: unknown }
+
+	/** A memento that keeps every write of the shared rows, in order. */
+	class WritesStore extends TestStore {
+		readonly writes: Written[][] = [];
+
+		override async update(key: string, value: unknown): Promise<void> {
+			if (key === SESSION_INDEX_STORAGE_KEY) {
+				// The index writes exactly its persisted snapshot under this key; the test reads only the fields it names.
+				const snapshot = value as { entries: Written[] };
+				this.writes.push(snapshot.entries.map(row => ({ tabId: row.tabId, runIntent: row.runIntent, host: row.host })));
+			}
+			await super.update(key, value);
+		}
+	}
+
+	/** A row this window runs: running intent, a recorded host, the claim held. */
+	async function runningRow<S extends TestStore>(store: S, sessionId: string): Promise<{ readonly claimDir: string; readonly file: string; readonly tabId: string; readonly index: SessionIndex }> {
+		const { claimDir, sessionDir, cwd } = await tempWorkspace();
+		const index = indexFor(store, claimDir);
+		const file = await makeSessionFile(sessionDir, sessionId, cwd);
+		const tab = await managedSession(index, file, cwd);
+		const started = recordingLauncher({ state: "running", host: runningHandle(sessionId) });
+		assert.equal((await index.restoreAll({ reconciler: noRecordedHost, launcher: started.launcher })).restored.length, 1);
+		assert.ok(await readClaim(claimDir, file), "the running row holds its claim");
+		return { claimDir, file, tabId: tab.tabId, index };
+	}
+
+	it("keeps the run intent, clears the host and releases the claim in one write", async () => {
+		const store = new WritesStore();
+		const { claimDir, file, tabId, index } = await runningRow(store, "S-LOGOFF");
+		store.writes.length = 0;
+
+		const closed = await index.closeSession(tabId, { confirmedStopped: true, runIntent: "unchanged", detail: "ended by the system" });
+
+		assert.equal(closed.released, true);
+		assert.equal(store.writes.length, 1, "the whole end is one catalog write");
+		const row = store.writes[0]?.find(written => written.tabId === tabId);
+		assert.equal(row?.runIntent, "running", "the system ending the process is not the user's stop");
+		assert.equal(row?.host, null);
+		assert.equal(await readClaim(claimDir, file), null);
+		assert.equal(index.get(tabId)?.availability, "saved", "the tab shows the process ended");
+		assert.equal(index.get(tabId)?.detail, "ended by the system");
+	});
+
+	it("records the user's stop in the same single write, never a stopped intent beside a retained host", async () => {
+		const store = new WritesStore();
+		const { tabId, index } = await runningRow(store, "S-USER-EXIT");
+		store.writes.length = 0;
+
+		await index.closeSession(tabId, { confirmedStopped: true, detail: "OMP exited normally" });
+
+		assert.equal(store.writes.length, 1);
+		for (const rows of store.writes) {
+			const row = rows.find(written => written.tabId === tabId);
+			assert.ok(!(row?.runIntent === "stopped" && row.host !== null), "no write may carry a stopped intent and a host");
+			assert.deepEqual([row?.runIntent, row?.host], ["stopped", null]);
+		}
+	});
+
+	it("is relaunched by the next startup, which a user's stop is not", async () => {
+		const store = new TestStore();
+		const { claimDir, file, tabId, index } = await runningRow(store, "S-RELAUNCH");
+		await index.closeSession(tabId, { confirmedStopped: true, runIntent: "unchanged" });
+
+		const nextStart = indexFor(store, claimDir);
+		const relaunch = recordingLauncher({ state: "running", host: runningHandle("S-RELAUNCH") });
+		const report = await nextStart.restoreAll({ reconciler: noRecordedHost, launcher: relaunch.launcher });
+
+		assert.deepEqual(report.restored.map(session => session.tabId), [tabId]);
+		assert.equal(relaunch.requests.length, 1);
+		assert.equal(relaunch.requests[0]?.sessionFile, file, "the exact session file is relaunched");
+		assert.equal(nextStart.get(tabId)?.runIntent, "running");
+
+		const stoppedStore = new TestStore();
+		const stopped = await runningRow(stoppedStore, "S-STOPPED-EXIT");
+		await stopped.index.closeSession(stopped.tabId, { confirmedStopped: true });
+		const skipped = recordingLauncher({ state: "running", host: runningHandle("S-STOPPED-EXIT") });
+		const skippedReport = await indexFor(stoppedStore, stopped.claimDir).restoreAll({ reconciler: noRecordedHost, launcher: skipped.launcher });
+		assert.equal(skipped.requests.length, 0, "a clean exit stays stopped");
+		assert.deepEqual(skippedReport.stopped.map(session => session.tabId), [stopped.tabId]);
+	});
+
+	it("is relaunched from a row that still records the host of a dead broker, with no claim left", async () => {
+		// A window killed after the claim was released and before the row was written: the claim is gone, the
+		// durable row still names the host, and (with the intent kept) that row is a running one.
+		const store = new FlakyStore();
+		const { claimDir, file, tabId, index } = await runningRow(store, "S-KILLED-MID-CLOSE");
+		store.failWrites = true;
+		await index.closeSession(tabId, { confirmedStopped: true, runIntent: "unchanged" });
+		assert.equal(await readClaim(claimDir, file), null, "the claim was released");
+		// The first window is gone; the next start reads what had reached the catalog and can write again.
+		store.failWrites = false;
+
+		const nextStart = indexFor(store, claimDir);
+		assert.equal(nextStart.get(tabId)?.runIntent, "running");
+		assert.notEqual(nextStart.get(tabId)?.host, null, "the durable row still records the dead broker's host");
+		const relaunch = recordingLauncher({ state: "running", host: runningHandle("S-KILLED-MID-CLOSE") });
+		const report = await nextStart.restoreAll({ reconciler: recordedHostGone, launcher: relaunch.launcher });
+
+		assert.deepEqual(report.restored.map(session => session.tabId), [tabId], JSON.stringify(report));
+		assert.equal(relaunch.requests.length, 1);
+	});
+
+	it("records a Kill's stopped intent for exactly the incarnation it captured", async () => {
+		const { tabId, index } = await runningRow(new TestStore(), "S-KILL");
+		const host = index.get(tabId)?.host;
+		assert.ok(host?.rpc, "the running row records its broker identity");
+		const captured = { slot: host.rpc.slot, brokerId: host.rpc.brokerId, brokerGeneration: host.rpc.brokerGeneration, attemptStartedAt: host.startedAt, hostPid: host.pid };
+
+		assert.equal(await index.recordKillIntent(tabId, { ...captured, attemptStartedAt: "2020-01-01T00:00:00.000Z" }), null, "a newer launch is not what is being killed");
+		assert.equal(index.get(tabId)?.runIntent, "running");
+
+		assert.deepEqual(await index.recordKillIntent(tabId, captured), { previous: "running" });
+		assert.equal(index.get(tabId)?.runIntent, "stopped");
+		assert.notEqual(index.get(tabId)?.host, null, "only the intent is recorded; whoever proves the process gone clears the host");
+	});
+});
+
+/**
  * Activation's attach-only draft restore.
  *
  * A reload leaves a draft's durable row, its reserved claim and its recorded

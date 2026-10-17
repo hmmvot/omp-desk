@@ -351,6 +351,14 @@ export interface KillCommandPorts extends TreeKillPorts {
 	/** Retire a shell recovery record and a broker slot mapping the killed process left. */
 	forgetStoppedSlot(slot: string): Promise<void>;
 	/**
+	 * Record the stopped intent of exactly the captured incarnation before it is ended: a Kill is the user's decision
+	 * to stop, and the window that drives the session cannot tell it from a crash (its exit handler leaves the run
+	 * intent of any abnormal end as recorded, so that the next startup relaunches it). Does nothing when the row
+	 * records another process than the captured one. Resolves to a function that puts the earlier intent back, for
+	 * a Kill that then failed to end the process. Throws when the intent could not be recorded; nothing is killed then.
+	 */
+	recordStopIntent(tabId: string, captured: CapturedHost): Promise<() => Promise<void>>;
+	/**
 	 * Let the session index record exactly the captured incarnation as stopped (stopped intent, claim, host
 	 * record). It leaves the row alone when the session started a new process meanwhile or a live window holds it:
 	 * that window's own broker watch finishes it. Throws when the records could not be updated.
@@ -394,12 +402,23 @@ export async function killSelection(selection: KillSelection, ports: KillCommand
 				ports.warn(`${target.label} recorded no process identity, so Kill cannot tell it from another process and killed nothing. Use Stop, or Task Manager.`);
 				continue;
 			}
+			let withdrawIntent: (() => Promise<void>) | null = null;
+			if (target.reconcile.kind === "session") {
+				try {
+					withdrawIntent = await ports.recordStopIntent(target.reconcile.tabId, target.reconcile.captured);
+				} catch (error) {
+					ports.log.error(`kill: requested by ${ports.requester}: ${target.label}: the stopped intent could not be recorded, so nothing was killed (${error instanceof Error ? error.message : String(error)})`);
+					ports.warn(`${target.label} was not killed: Desk could not record that you stopped it. Refresh Sessions and try again; see the OMP Desk output.`);
+					continue;
+				}
+			}
 			const outcome = await killProcessTree(target, ports);
 			const line = `kill: requested by ${ports.requester}: ${target.label}${target.slot === null ? "" : ` (slot ${target.slot})`}: ${outcome.kind}: ${outcome.detail}`;
 			if (outcome.kind === "failed") ports.log.error(line);
 			else if (outcome.incomplete) ports.log.warn(line);
 			else ports.log.info(line);
 			if (outcome.kind === "failed") {
+				await withdrawIntent?.().catch(() => undefined);
 				ports.warn(outcome.message);
 				continue;
 			}

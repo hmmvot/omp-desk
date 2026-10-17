@@ -2578,7 +2578,8 @@ describe("same-editor Chat and native Terminal actions", () => {
 				get state() { return native.handle.state; },
 				nativePid: pid, record: { brokerId: native.identity.brokerId, generation: native.identity.brokerGeneration },
 				async refreshStatus() {
-					return { ...await native.handle.refreshStatus(), exitCode: null, signal: null, cols, rows, alt: false,
+					// A fixture writer that exited did so normally (OMP's own `/exit`) unless the test says otherwise.
+					return { ...await native.handle.refreshStatus(), exitCode: native.handle.state === "exited" ? 0 : null, signal: null, cols, rows, alt: false,
 						title: "Native fixture", outputPosition: position, oldestPosition: 0, notices: [], inputOwner: owner };
 				},
 				async snapshot() { return { meta: { position, cols, rows, alt: false, truncated: false, cursorX: 0, cursorY: 0, cursorVisible: true }, data: screen }; },
@@ -3194,6 +3195,25 @@ describe("same-editor Chat and native Terminal actions", () => {
 			assert.equal(harness.record(f.state).runtime, null);
 			assert.equal(f.state.pipeline, null);
 			assert.equal(f.index.get(f.row.tabId)?.runIntent, "stopped");
+		} finally {
+			harness.record(f.state).nativeWatch?.(); f.state.pipeline?.dispose();
+			f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true });
+		}
+	});
+
+	it("keeps the run intent of a native writer that ended abnormally, as when the system ends the session, so the next start relaunches it", async () => {
+		const f = await fixture(false, "chat", true);
+		try {
+			await harness.switchSessionMode(f.saved.context, f.index, f.state, "terminal");
+			const native = f.successor()!;
+			const statusOf = native.handle.refreshStatus;
+			native.handle.refreshStatus = async () => ({ ...(await statusOf()), exitCode: 4 });
+			native.exit();
+			await harness.handleNativeHostExited(f.index, f.state, native);
+			assert.equal(harness.record(f.state).runtime, null, "the tab shows the process ended");
+			assert.equal(f.state.pipeline, null);
+			assert.equal(f.index.get(f.row.tabId)?.runIntent, "running", "exit code 4 is not the user's stop");
+			assert.equal(f.index.get(f.row.tabId)?.host, null, "the ended process is no longer recorded");
 		} finally {
 			harness.record(f.state).nativeWatch?.(); f.state.pipeline?.dispose();
 			f.chat.dispose(); await f.index.closeSession(f.row.tabId, { confirmedStopped: true });
