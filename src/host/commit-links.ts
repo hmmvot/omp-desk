@@ -2,12 +2,16 @@
  * Commit hashes of a Chat reply, proved and shown on the host (`docs/designs/2026-10-17-commit-hash-links.md`). The page names a
  * hash only (`commit://<hex>`, `shared/commit-links.ts`); the host parses it again, looks it up in the repositories that
  * VS Code's Git extension has open and that contain THIS session's folder (the deepest first), and only then answers that the hash is a link.
- * A click looks the hash up again and shows the commit in Source Control, through the first of these that this window has:
+ * A hash is a link only while it is the commit HEAD points at (read after the Git extension refreshed its state) and this VS Code
+ * has the Source Control Graph's commands: the built-in Graph can select no other commit, and a link that cannot show its
+ * commit in the Graph is not drawn. A click looks the hash up again, checks that it is still HEAD and shows it with VS Code's own
+ * Source Control, no extension involved:
  *
- * 1. a commit on the current branch: GitLens' `gitlens.revealCommitInView`, which selects it in the Commits view of Source Control;
- * 2. a commit elsewhere in the repository: GitLens' `gitlens.showCommitsInView`, which shows it in the Search & Compare view of Source Control
- *    (the Commits view lists the current branch only and reveals nothing for any other commit);
- * 3. without GitLens: the built-in `git.viewCommit`, the commit's changes in one editor, with the Source Control view opened first.
+ * 1. the Source Control Graph view is shown (`workbench.scm.history.focus`);
+ * 2. the Graph selects the commit (`workbench.scm.action.graph.revealCurrentHistoryItem`, which selects the current HEAD item).
+ *
+ * A click on a link whose commit has stopped being HEAD shows a notice, opens nothing and tells the page to ask again. When HEAD moves
+ * the wiring tells every page the same way (`CommitLinksChanged`).
  *
  * Nothing here takes a path or a repository from the page, runs a `git` process of its own or executes a command the page names.
  */
@@ -21,10 +25,8 @@ export interface CommitRepository {
 	readonly root: string;
 	/** `git show` of `ref`: rejects when `ref` names nothing, is ambiguous or is not a commit. */
 	getCommit(ref: string): Promise<{ readonly hash: string }>;
-	/** `git merge-base`; `undefined` when there is none. */
-	getMergeBase(ref1: string, ref2: string): Promise<string | undefined>;
-	/** The checked-out branch's name, or `undefined` when HEAD is detached (also at a tag). */
-	currentBranch(): string | undefined;
+	/** The commit HEAD points at (a detached HEAD included), read after the Git extension refreshed its state; `undefined` for a branch with no commit yet or a refresh that failed. */
+	headCommit(): Promise<string | undefined>;
 }
 
 /** A commit that exists: `hash` is its full lower-case hash. */
@@ -151,49 +153,54 @@ export class CommitLinkResolver {
 	}
 }
 
-/** What opening a commit uses of VS Code. */
+/** What showing a commit uses of VS Code. */
 export interface CommitOpenEnv {
-	/** Whether `command` is registered or contributed by an installed, enabled extension (a contributed command activates its extension on first use). */
-	commandAvailable(command: string): Promise<boolean>;
 	run(command: string, ...args: unknown[]): Promise<unknown>;
-	/** The URI `git.viewCommit` takes to find a repository: its root folder. */
-	repositoryUri(root: string): unknown;
+	/** Whether this VS Code has the Graph view's focus command and its reveal action (they exist in the workbench, not in an extension). */
+	graphAvailable(): Promise<boolean>;
+	/** One line per click: the steps and their outcome, so a click that did not show what the user expected is diagnosable. */
+	log(message: string): void;
 }
 
-export const GITLENS_REVEAL_COMMIT = "gitlens.revealCommitInView";
-export const GITLENS_SHOW_COMMITS = "gitlens.showCommitsInView";
-export const GIT_VIEW_COMMIT = "git.viewCommit";
-export const SCM_VIEW = "workbench.view.scm";
+export const GRAPH_FOCUS = "workbench.scm.history.focus";
+export const GRAPH_REVEAL_HEAD = "workbench.scm.action.graph.revealCurrentHistoryItem";
 
-export type CommitOpenRoute = "gitlens-commits-view" | "gitlens-search-view" | "git-view-commit";
+/** Why a commit is not shown: it is not what HEAD points at (`head` is what does), or this VS Code has no Graph to show it in. */
+export type CommitUnshowable = { readonly reason: "not-head"; readonly head: string | undefined } | { readonly reason: "no-graph" };
 
-/** GitLens keys its repositories by the folder with `/` separators, no trailing separator and, on Windows, a lower-case drive letter. */
-export function gitLensRepoPath(root: string): string {
-	return root.replace(/\\/g, "/").replace(/\/+$/, "").replace(/^[A-Z]:\//, drive => drive.toLowerCase());
+/** `null` when `hit` is the HEAD commit and the Graph is there: the one case in which it is a link. */
+export async function whyNotShowable(hit: CommitHit, env: CommitOpenEnv): Promise<CommitUnshowable | null> {
+	const head = (await hit.repo.headCommit().catch(() => undefined))?.toLowerCase();
+	if (head !== hit.hash) return { reason: "not-head", head };
+	return await env.graphAvailable().catch(() => false) ? null : { reason: "no-graph" };
 }
 
-/** Show the commit in Source Control by the first route this window has (see the module comment); rejects when every route failed. */
-export async function openCommit(hit: CommitHit, env: CommitOpenEnv): Promise<CommitOpenRoute> {
-	await env.run(SCM_VIEW).then(undefined, () => undefined);
-	if (await env.commandAvailable(GITLENS_REVEAL_COMMIT)) {
-		const repoPath = gitLensRepoPath(hit.repo.root);
-		// GitLens' Commits view lists the current BRANCH: with a detached HEAD (also at a tag) it finds no commit at all.
-		const onBranch = hit.repo.currentBranch() !== undefined && await hit.repo.getMergeBase(hit.hash, "HEAD").then(base => base?.trim().toLowerCase() === hit.hash, () => false);
-		try {
-			if (onBranch) {
-				await env.run(GITLENS_REVEAL_COMMIT, { repoPath, sha: hit.hash });
-				return "gitlens-commits-view";
-			}
-			if (await env.commandAvailable(GITLENS_SHOW_COMMITS)) {
-				await env.run(GITLENS_SHOW_COMMITS, { repoPath, refs: [hit.hash] });
-				return "gitlens-search-view";
-			}
-		} catch {
-			// GitLens refused: the built-in view still shows the commit.
-		}
+/**
+ * Select the commit in the Graph. `null` when it was shown, otherwise the reason it was not (and nothing was opened); rejects when the
+ * Graph refused the selection. Writes one log line.
+ */
+export async function openCommit(hit: CommitHit, env: CommitOpenEnv): Promise<CommitUnshowable | null> {
+	const short = hit.hash.slice(0, 12);
+	const refused = await whyNotShowable(hit, env);
+	if (refused !== null) {
+		env.log(`commit link ${short}: nothing shown, ${refused.reason === "no-graph" ? "this VS Code has no Source Control Graph" : `not HEAD (HEAD is ${refused.head?.slice(0, 12) ?? "none"})`}`);
+		return refused;
 	}
-	await env.run(GIT_VIEW_COMMIT, env.repositoryUri(hit.repo.root), hit.hash);
-	return "git-view-commit";
+	const steps = ["HEAD"];
+	try {
+		// A view that will not take the focus does not stop the selection: the action selects the item in the view wherever it is.
+		await env.run(GRAPH_FOCUS).then(() => steps.push("graph"), error => steps.push(`graph failed: ${error instanceof Error ? error.message : String(error)}`));
+		try {
+			await env.run(GRAPH_REVEAL_HEAD);
+			steps.push("select in graph");
+		} catch (error) {
+			steps.push(`select in graph failed: ${error instanceof Error ? error.message : String(error)}`);
+			throw error;
+		}
+		return null;
+	} finally {
+		env.log(`commit link ${short}: ${steps.join(", ")}`);
+	}
 }
 
 export interface CommitLinkHost {
@@ -202,26 +209,38 @@ export interface CommitLinkHost {
 	reply(message: TerminalLinkValidation): void;
 	/** Short user-visible notice, so an activation that cannot complete is never silent. */
 	warn(message: string): void;
+	/** Tell this page that every answer about a commit target is out of date (a click found a link stale). */
+	revalidate(): void;
 	/** The session's folder; never the page's word. */
 	readonly cwd: string;
 }
 
-/** Answer a validation or activation request whose target is `commit://<hex>` (`parseCommitLinkTarget` has already accepted `request.target`). */
+/**
+ * Answer a validation or activation request whose target is `commit://<hex>` (`parseCommitLinkTarget` has already accepted `request.target`).
+ * Valid means: the commit exists in the session's repository, it is the commit HEAD points at, and the Graph is there.
+ */
 export async function handleCommitLink(request: TerminalLinkRequest, resolver: CommitLinkResolver, env: CommitOpenEnv, host: CommitLinkHost): Promise<void> {
 	const hex = parseCommitLinkTarget(request.target);
 	if (hex === null) return;
 	const hit = await resolver.lookup(host.cwd, hex);
 	if (!host.isCurrent()) return;
 	if (request.type === "omp:terminal-link-validate") {
-		host.reply({ type: "omp:terminal-link-validation", requestId: request.requestId, valid: hit !== null });
+		const valid = hit !== null && await whyNotShowable(hit, env) === null;
+		if (host.isCurrent()) host.reply({ type: "omp:terminal-link-validation", requestId: request.requestId, valid });
 		return;
 	}
 	if (hit === null) {
 		host.warn(`cannot show commit ${hex}: this session's repository has no commit with that hash.`);
+		host.revalidate();
 		return;
 	}
 	try {
-		await openCommit(hit, env);
+		const refused = await openCommit(hit, env);
+		if (refused === null) return;
+		host.warn(refused.reason === "no-graph"
+			? `cannot show commit ${hex}: this VS Code has no Source Control Graph.`
+			: `commit ${hex} is no longer the current commit, so the Graph cannot select it.`);
+		host.revalidate();
 	} catch (error) {
 		host.warn(`cannot show commit ${hex}: ${error instanceof Error ? error.message : String(error)}.`);
 	}

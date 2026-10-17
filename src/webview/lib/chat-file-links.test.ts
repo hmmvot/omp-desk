@@ -47,13 +47,14 @@ test("a Markdown destination is a file reference only for a path or a file URL",
 
 function fixture(existing: readonly string[]) {
 	const sent: GuestWebviewMessage[] = [];
-	let deliver: (message: GuestHostMessage) => void = () => {};
-	const transport = { post(message: GuestWebviewMessage) { sent.push(message); return true; }, subscribe(listener: (message: GuestHostMessage) => void) { deliver = listener; return () => {}; } };
+	const listeners = new Set<(message: GuestHostMessage) => void>();
+	const deliver = (message: GuestHostMessage): void => { for (const listener of [...listeners]) listener(message); };
+	const transport = { post(message: GuestWebviewMessage) { sent.push(message); return true; }, subscribe(listener: (message: GuestHostMessage) => void) { listeners.add(listener); return () => { listeners.delete(listener); }; } };
 	const answer = (message: GuestWebviewMessage | undefined) => {
 		assert.ok(message !== undefined && message.type === "omp:terminal-link-validate");
 		deliver({ type: "omp:terminal-link-validation", requestId: message.requestId, valid: existing.includes(message.target) });
 	};
-	return { sent, transport, answer };
+	return { sent, transport, answer, deliver, listeners };
 }
 
 test("validation reuses the Terminal request pair, is answered once per target and a click posts the open request", async () => {
@@ -108,4 +109,41 @@ test("no more than eight validations wait on the host at once; the rest follow a
 	for (let index = 1; index < 12; index++) { answer(sent[index]); await all[index]; await tick(); }
 	assert.equal(sent.length, 12);
 	links.dispose();
+});
+
+test("the host's HEAD-moved signal forgets every commit answer and only those, tells the listeners, and ignores a late answer to the question it dropped", async () => {
+	const { sent, transport, answer, deliver, listeners } = fixture(["commit://c7398070", "src/a.ts:3"]);
+	const links = new ChatFileLinks(transport);
+	let told = 0;
+	links.onCommitsChanged(() => { told++; });
+	const known = links.resolve("commit://c7398070");
+	const file = links.resolve("src/a.ts:3");
+	answer(sent[0]);
+	answer(sent[1]);
+	assert.deepEqual([await known, await file], [true, true]);
+	assert.equal(links.peek("commit://c7398070"), true);
+
+	deliver({ type: "omp:terminal-link-commits-changed" });
+	assert.equal(told, 1);
+	assert.equal(links.peek("commit://c7398070"), undefined, "the commit answer is out of date");
+	assert.equal(links.peek("src/a.ts:3"), true, "a file answer is not: only commit spans are asked again");
+	const again = links.resolve("commit://c7398070");
+	assert.equal(sent.length, 3, "the commit is asked afresh");
+	const sameAgain = links.resolve("commit://c7398070");
+	assert.equal(sent.length, 3, "one question per target however many spans ask");
+
+	// HEAD moves while a question is under way: its answer belongs to the old HEAD and fills nothing.
+	deliver({ type: "omp:terminal-link-commits-changed" });
+	assert.equal(told, 2);
+	const asked = links.resolve("commit://c7398070");
+	assert.equal(sent.length, 4, "the dropped question is not shared with the new one");
+	answer(sent[3]);
+	assert.equal(await asked, true);
+	answer(sent[2]);
+	await Promise.all([again, sameAgain]);
+	assert.equal(links.peek("commit://c7398070"), true, "the late answer left the newer one in place");
+
+	links.dispose();
+	assert.equal(listeners.size, 0, "disposing unsubscribes");
+	assert.equal(told, 2);
 });

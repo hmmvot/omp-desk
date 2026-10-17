@@ -49,6 +49,8 @@ import type { TerminalLinkRequest, TerminalLinkValidation } from "../shared/term
 import { MAX_SYMBOL_QUERY_LENGTH, normalizeSymbolQuery } from "../shared/selection-query.ts";
 import { parseSymbolLinksRequest, parseSymbolLinksResolution, parseSymbolLinksRetry } from "../shared/code-symbols.ts";
 import type { SymbolLinksRequest, SymbolLinksResolution, SymbolLinksRetry } from "../shared/code-symbols.ts";
+import { parseCommitLinksChanged } from "../shared/commit-links.ts";
+import type { CommitLinksChanged } from "../shared/commit-links.ts";
 
 /** Provider-qualified model display shape shared with the host. */
 export type { ControlModelRef };
@@ -937,6 +939,7 @@ export type GuestHostMessage =
 	| TerminalLinkValidation
 	| SymbolLinksResolution
 	| SymbolLinksRetry
+	| CommitLinksChanged
 	| GuestSessionViewMessage
 	| GuestTerminalActivateMessage
 	| GuestTerminalCopyRequestMessage
@@ -1332,6 +1335,7 @@ export function parseGuestHostMessage(value: unknown): GuestHostMessage | null {
 	if (value.type === "omp:terminal-link-validation") return parseTerminalLinkValidation(value);
 	if (value.type === "omp:terminal-link-symbol-resolution") return parseSymbolLinksResolution(value);
 	if (value.type === "omp:terminal-link-symbols-retry") return parseSymbolLinksRetry(value);
+	if (value.type === "omp:terminal-link-commits-changed") return parseCommitLinksChanged(value);
 	if (value.type === "omp:session-view") {
 		if (Object.keys(value).some(key => !["type", "mode", "running", "starting", "stopping", "canSwitch", "title", "reason"].includes(key))) return null;
 		if (value.mode !== "chat" && value.mode !== "terminal") return null;

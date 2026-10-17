@@ -270,6 +270,7 @@ import { searchSymbol } from "./host/symbol-search";
 import { FileNameLinkResolver, excludePatterns, fileChoiceLabel, folderExcludeSettings, workspaceFileNameSource } from "./host/file-name-links";
 import { FileEventGate } from "./host/link-watch";
 import type { SymbolLinksRequest, SymbolLinksResolution, SymbolLinksRetry } from "./shared/code-symbols";
+import type { CommitLinksChanged } from "./shared/commit-links";
 import { handleInternalLink } from "./host/internal-links";
 import { handleCommitLink } from "./host/commit-links";
 import { createCommitLinks } from "./wiring/commit-links";
@@ -744,6 +745,8 @@ interface WindowState {
   commitLinks: CommitLinks | undefined;
   /** Slots whose pages asked about symbols, told when parked tokens may be asked again. */
   readonly symbolAskers: Set<string>;
+  /** Slots whose pages asked about commit hashes, told when HEAD moves (a commit link exists only for the HEAD commit). */
+  readonly commitAskers: Set<string>;
   /** The installed Nerd Font families, once read. */
   installedTerminalFonts: readonly string[];
   /** The one read of the installed terminal fonts, started by the first terminal pane that asks. */
@@ -1321,6 +1324,7 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     symbolLinks: undefined,
     commitLinks: undefined,
     symbolAskers: new Set<string>(),
+    commitAskers: new Set<string>(),
     installedTerminalFonts: [],
     installedTerminalFontsRead: null,
     // PTY and broker
@@ -9974,7 +9978,7 @@ function absentTerminalGeneration(tabId: string): string {
  * page's own channel and needs no route acknowledgement. A surviving page whose
  * panel this host does not have is reached over its authenticated bridge instead.
  */
-function pushTerminalTo(tabId: string, message: TerminalHostMessage | TerminalLinkValidation | SymbolLinksResolution | SymbolLinksRetry): void {
+function pushTerminalTo(tabId: string, message: TerminalHostMessage | TerminalLinkValidation | SymbolLinksResolution | SymbolLinksRetry | CommitLinksChanged): void {
   const state = stateOf(tabId);
   if (state === undefined) return;
   if (state.panel !== null) {
@@ -10285,11 +10289,18 @@ async function handleTerminalGuestMessage(
       }
       // A commit hash (`commit://<hex>`) is proved and shown against the repositories of this session's folder, never as a file of the cwd.
       if (typeof payload.target === "string" && parseCommitLinkTarget(payload.target) !== null) {
-        const links = s.commitLinks ??= createCommitLinks(s.context?.subscriptions ?? { push: () => 0 });
+        s.commitAskers.add(state.slotId);
+        const links = s.commitLinks ??= createCommitLinks(s.context?.subscriptions ?? { push: () => 0 }, line => log.info(line), () => {
+          for (const slotId of [...s.commitAskers]) {
+            if (stateOf(slotId) === undefined) s.commitAskers.delete(slotId);
+            else pushTerminalTo(slotId, { type: "omp:terminal-link-commits-changed" });
+          }
+        });
         await handleCommitLink(payload as unknown as TerminalLinkRequest, links.resolver, links.env, {
           cwd,
           isCurrent,
           reply: message => pushTerminalTo(state.slotId, message),
+          revalidate: () => pushTerminalTo(state.slotId, { type: "omp:terminal-link-commits-changed" }),
           warn: message => { log.warn(`terminal link: ${message}`); showWarning(message); },
         });
         return;

@@ -1,21 +1,26 @@
 /**
  * The window's commit-hash links (`host/commit-links.ts`): the repositories come from VS Code's built-in Git extension API, and
- * opening a commit runs commands of GitLens (when installed) or of the Git extension. Created once per extension host, which is per window.
+ * showing a commit runs commands of VS Code's Source Control Graph. A link exists only for the commit HEAD points at, so this
+ * module also watches each repository's HEAD and says when it moved. Created once per extension host, which is per window.
  */
 import * as vscode from "vscode";
-import { CommitLinkResolver } from "../host/commit-links.ts";
+import { CommitLinkResolver, GRAPH_FOCUS, GRAPH_REVEAL_HEAD } from "../host/commit-links.ts";
 import type { CommitOpenEnv, CommitRepository } from "../host/commit-links.ts";
 
+/** A burst of repository state changes (a commit touches the index, the branch and the HEAD one after another) is one report this long after its last HEAD change. */
+const HEAD_SETTLE_MS = 150;
+
 /** The part of the Git extension's API (version 1) these links use. */
+interface GitRepository {
+	readonly rootUri: vscode.Uri;
+	readonly state: { readonly HEAD?: { readonly commit?: string }; readonly onDidChange: vscode.Event<void> };
+	getCommit(ref: string): Promise<{ readonly hash: string }>;
+	status(): Promise<void>;
+}
 interface GitExtensionApi {
-	readonly repositories: readonly {
-		readonly rootUri: vscode.Uri;
-		readonly state: { readonly HEAD?: { readonly type?: number; readonly name?: string } };
-		getCommit(ref: string): Promise<{ readonly hash: string }>;
-		getMergeBase(ref1: string, ref2: string): Promise<string | undefined>;
-	}[];
-	onDidOpenRepository(listener: () => void): vscode.Disposable;
-	onDidCloseRepository(listener: () => void): vscode.Disposable;
+	readonly repositories: readonly GitRepository[];
+	onDidOpenRepository(listener: (repository: GitRepository) => void): vscode.Disposable;
+	onDidCloseRepository(listener: (repository: GitRepository) => void): vscode.Disposable;
 }
 
 export interface CommitLinks {
@@ -34,35 +39,72 @@ async function gitApi(): Promise<GitExtensionApi | undefined> {
 	}
 }
 
-export function createCommitLinks(subscriptions: { push(...items: vscode.Disposable[]): number }): CommitLinks {
+/**
+ * `onHeadChanged` runs once after the commit HEAD points at changed in some repository (a commit, a checkout, an amend, a reset), or a
+ * repository opened or closed, with a burst of such changes coalesced; the resolver's remembered answers are dropped first.
+ * Changes of the index or the working tree are not HEAD changes and report nothing.
+ */
+export function createCommitLinks(subscriptions: { push(...items: vscode.Disposable[]): number }, log: (message: string) => void, onHeadChanged: () => void): CommitLinks {
 	let watching = false;
+	const heads = new Map<GitRepository, { head: string | undefined; listener: vscode.Disposable }>();
+	/** One `git status` per repository however many links ask at once. */
+	const refreshing = new Map<GitRepository, Promise<string | undefined>>();
+	let timer: NodeJS.Timeout | undefined;
+	const settled = (): void => {
+		timer = undefined;
+		resolver.invalidate();
+		onHeadChanged();
+	};
+	const schedule = (): void => {
+		clearTimeout(timer);
+		timer = setTimeout(settled, HEAD_SETTLE_MS);
+	};
+	const track = (repository: GitRepository): void => {
+		if (heads.has(repository)) return;
+		const listener = repository.state.onDidChange(() => {
+			const entry = heads.get(repository);
+			const head = repository.state.HEAD?.commit;
+			if (entry === undefined || entry.head === head) return;
+			entry.head = head;
+			schedule();
+		});
+		heads.set(repository, { head: repository.state.HEAD?.commit, listener });
+	};
 	const resolver: CommitLinkResolver = new CommitLinkResolver({
 		async repositories(): Promise<readonly CommitRepository[]> {
 			const api = await gitApi();
 			if (api === undefined) return [];
 			if (!watching) {
 				watching = true;
-				subscriptions.push(api.onDidOpenRepository(() => resolver.invalidate()), api.onDidCloseRepository(() => resolver.invalidate()));
+				subscriptions.push(
+					api.onDidOpenRepository(repository => { track(repository); schedule(); }),
+					api.onDidCloseRepository(repository => { heads.get(repository)?.listener.dispose(); heads.delete(repository); schedule(); }),
+					{ dispose: () => { clearTimeout(timer); for (const { listener } of heads.values()) listener.dispose(); heads.clear(); } },
+				);
 			}
+			for (const repository of api.repositories) track(repository);
 			return api.repositories.map(repository => ({
 				root: repository.rootUri.fsPath,
 				getCommit: ref => repository.getCommit(ref),
-				getMergeBase: (ref1, ref2) => repository.getMergeBase(ref1, ref2),
-				// RefType.Head is 0; a detached HEAD at a tagged commit is reported as a tag (2) that carries the tag's name.
-				currentBranch: () => (repository.state.HEAD?.type === 0 ? repository.state.HEAD.name : undefined),
+				// The Git extension's state, and the Graph with it, lag a commit made a moment ago: refresh it before reading HEAD.
+				headCommit: () => {
+					let read = refreshing.get(repository);
+					if (read === undefined) {
+						read = repository.status().then(() => repository.state.HEAD?.commit).finally(() => refreshing.delete(repository));
+						refreshing.set(repository, read);
+					}
+					return read;
+				},
 			}));
 		},
 	});
 	const env: CommitOpenEnv = {
-		async commandAvailable(command) {
-			if ((await vscode.commands.getCommands(true)).includes(command)) return true;
-			return vscode.extensions.all.some(extension => {
-				const commands = (extension.packageJSON as { contributes?: { commands?: { command?: unknown }[] } } | undefined)?.contributes?.commands;
-				return Array.isArray(commands) && commands.some(entry => entry.command === command);
-			});
-		},
 		run: (command, ...args) => Promise.resolve(vscode.commands.executeCommand(command, ...args)),
-		repositoryUri: root => vscode.Uri.file(root),
+		async graphAvailable() {
+			const commands = await vscode.commands.getCommands(true);
+			return commands.includes(GRAPH_FOCUS) && commands.includes(GRAPH_REVEAL_HEAD);
+		},
+		log,
 	};
 	return { resolver, env };
 }

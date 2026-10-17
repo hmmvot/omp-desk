@@ -85,11 +85,24 @@ const MAX_IN_FLIGHT = 8;
 export class ChatFileLinks {
 	readonly #client: TerminalLinkClient;
 	readonly #cache: ValidationCache;
+	readonly #commitListeners = new Set<() => void>();
+	readonly #unsubscribe: () => void;
 	#active = 0;
 	readonly #waiting: (() => void)[] = [];
 	constructor(transport: { post(message: GuestWebviewMessage): boolean; subscribe(listener: (message: GuestHostMessage) => void): () => void }, now: () => number = Date.now) {
 		this.#client = new TerminalLinkClient(transport);
 		this.#cache = new ValidationCache(target => this.#validate(target), now);
+		// A commit link exists only for the commit HEAD points at: when it moves, every answer about a commit target is out of date.
+		this.#unsubscribe = transport.subscribe(message => {
+			if (message.type !== "omp:terminal-link-commits-changed") return;
+			this.#cache.forget(target => parseCommitLinkTarget(target) !== null);
+			for (const listener of [...this.#commitListeners]) listener();
+		});
+	}
+	/** `listener` runs after the host says the answers about commit targets are out of date (they are already forgotten). Returns the unsubscribe. */
+	onCommitsChanged(listener: () => void): () => void {
+		this.#commitListeners.add(listener);
+		return () => { this.#commitListeners.delete(listener); };
 	}
 	async #validate(target: string): Promise<boolean> {
 		while (this.#active >= MAX_IN_FLIGHT) await new Promise<void>(resolve => this.#waiting.push(resolve));
@@ -106,5 +119,5 @@ export class ChatFileLinks {
 		else this.#client.openPath(target, action);
 	}
 	openSymbolSearch(symbol: string, files = false): void { this.#client.openSymbolSearch(symbol, files); }
-	dispose(): void { this.#client.dispose(); }
+	dispose(): void { this.#unsubscribe(); this.#commitListeners.clear(); this.#client.dispose(); }
 }
