@@ -702,6 +702,13 @@
         "icon": "$(quote)"
       },
       {
+        "command": "ompDesk.findInChat",
+        "enablement": "ompDesk.sessionMode == chat",
+        "title": "Find in Chat",
+        "category": "OMP Desk",
+        "icon": "$(search)"
+      },
+      {
         "command": "ompDesk.quoteEditorSelection",
         "enablement": "editorHasSelection",
         "title": "Quote Selection to Session",
@@ -1202,6 +1209,11 @@
           "command": "ompDesk.toggleToolGroups",
           "when": "activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat",
           "group": "2_chat@5"
+        },
+        {
+          "command": "ompDesk.findInChat",
+          "when": "activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat",
+          "group": "2_chat@6"
         },
         {
           "command": "ompDesk.compactConversation",

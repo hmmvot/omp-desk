@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Chat: Ctrl+F finds text in the whole conversation.** It did nothing before (VS Code's own find is off for the Chat, and it could only see the rows the page keeps mounted anyway). `Ctrl+F` anywhere in the Chat, or **OMP Desk: Find in Chat** (Command Palette and the editor's `…` menu, no default key), opens a find bar that searches your messages, the replies and their thinking, and each tool call's name, target, intent and output text across every loaded row.
+  - It starts at the newest match; `Enter`/`F3` goes to the next and `Shift+Enter`/`Shift+F3` to the previous (both wrap), `Alt+C` toggles Match Case, and the bar shows `3 of 12`. Text selected in the Chat fills the field.
+  - A match is loaded into the transcript, scrolled to and highlighted, and what hides it (a tool group, the call's output, a thinking block) is opened. `Esc` closes the bar and returns the focus, and does not stop a running turn while the field has it.
+  - It does not search notices, summaries, attached files' text, history before a context reset or messages still on disk behind **load earlier messages**; the bar says how many earlier messages it did not search.
+
 - **Chat: OMP's internal addresses in a reply are links.** An `agent://<id>`, `history://<id>`, `artifact://<n>` or `local://<path>` written in a reply (in prose, in inline code such as `` `agent://DocsReview` ``, in bold, or as the destination of a Markdown link) becomes a link when this session has what it names, and stays plain text otherwise, so a link is never dead.
   - **`agent://<id>`** (a nested agent is `Parent.Child`; a `/path` after the id is ignored) opens the agent's read-only transcript tab, the same one the Agents row opens, while the live session knows the agent. When it does not (a stopped or resumed session), it opens the agent's published output, `<id>.md` in the session's folder, as a read-only document.
   - **`history://<id>`** opens the agent's transcript tab. **`artifact://<n>`** opens the full output of a truncated tool result, as the link in the tool row does. **`local://<path>`** opens a file of the session's scratch space as a read-only document.

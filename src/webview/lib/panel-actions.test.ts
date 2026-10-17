@@ -11,7 +11,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { providePanelActions, requestPanelAction } from "./panel-actions.ts";
+import { provideFindAction, providePanelActions, requestPanelAction } from "./panel-actions.ts";
 
 /** A handler set that records every call, so a dispatch can be attributed. */
 function recorder(name: string, calls: string[]) {
@@ -59,5 +59,21 @@ describe("dispatch", () => {
 		assert.equal(requestPanelAction("send-prompt"), true);
 		assert.deepEqual(calls, ["second:send"]);
 		releaseSecond();
+	});
+
+	it("sends Find to the transcript, not the composer: it works with no composer mounted and reports when no transcript is", () => {
+		const calls: string[] = [];
+		assert.equal(requestPanelAction("find-in-chat"), false);
+		const releaseFind = provideFindAction(() => calls.push("find"));
+		assert.equal(requestPanelAction("find-in-chat"), true);
+		const releaseComposer = providePanelActions(recorder("composer", calls));
+		assert.equal(requestPanelAction("find-in-chat"), true);
+		assert.deepEqual(calls, ["find", "find"], "the composer's handlers are not asked");
+		releaseComposer();
+		const stale = provideFindAction(() => calls.push("newer"));
+		releaseFind();
+		assert.equal(requestPanelAction("find-in-chat"), true, "a release of an older registration leaves the newer one");
+		stale();
+		assert.equal(requestPanelAction("find-in-chat"), false);
 	});
 });

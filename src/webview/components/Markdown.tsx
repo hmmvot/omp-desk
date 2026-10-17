@@ -17,7 +17,7 @@
  */
 import type { ReactNode } from "react";
 import { Fragment, memo, useLayoutEffect, useMemo, useRef } from "react";
-import { INLINE_TOKEN, MAX_EMPHASIS_DEPTH, USER_INLINE_TOKEN } from "../lib/markdown-inline.ts";
+import { INLINE_TOKEN, MAX_EMPHASIS_DEPTH, USER_INLINE_TOKEN, inlinePieces } from "../lib/markdown-inline.ts";
 import { LeafCollector, registerMarkdown, unregisterMarkdown, type Leaf, type LeafLine, type LeafTable, type LineOrigin } from "../lib/markdown-leaves.ts";
 import { splitTableCells } from "../lib/markdown-table.ts";
 import { detectChatFileLinks, fileTargetOfHref, isFileLinkCandidate } from "../lib/chat-file-links";
@@ -384,6 +384,22 @@ export function parseMarkdown(text: string, previous: MarkdownParse | null, quot
 	const collector = quotable ? new LeafCollector(0, emphasis) : null;
 	const parsed = parseBlockRange(lines, null, 0, 0, false, "b", { ...TOP_LEVEL, emphasis, leaves: collector });
 	return { text, lineCount: lines.length, blocks: parsed.blocks, starts: parsed.starts, quotable, emphasis, leaves: collector === null ? [] : collector.leaves, leafStarts: parsed.leafStarts };
+}
+
+/**
+ * The text `text` shows once rendered, leaf by leaf (a paragraph or item line per line, a code line as written, a table row cell by cell,
+ * no rule), joined by newlines: what Find in the transcript searches in place of the DOM it cannot see, so that a word written
+ * between `**` or inside a link is found as it reads and a fence or a `|` never is.
+ */
+export function markdownShownText(text: string, emphasis = true): string {
+	const shown: string[] = [];
+	for (const leaf of parseMarkdown(text, null, true, emphasis).leaves) {
+		if (leaf.kind === "rule") continue;
+		if (leaf.kind === "code") shown.push(...leaf.lines.map(line => line.text));
+		else if (leaf.kind === "row") for (const line of leaf.lines) shown.push(...splitTableCells(line.text).map(cell => inlinePieces(cell.text, leaf.emphasis).map(piece => piece.visible).join("")));
+		else for (const line of leaf.lines) shown.push(inlinePieces(line.text, leaf.emphasis).map(piece => piece.visible).join(""));
+	}
+	return shown.join("\n");
 }
 
 /** The leaf's line `index` of `lines`: its origin, with the text the leaf draws from it and the characters of it the parse dropped. */

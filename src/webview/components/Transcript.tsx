@@ -54,6 +54,8 @@ import { clearToolDisclosures, getTranscriptToggles, subscribeTranscriptToggles,
 import { peekToolView, recordObservedToolMs, resetAllToolViews, useToolViewVersion } from "../lib/tool-view-state";
 import type { BranchPoint } from "../../chat/rewind";
 import { BranchPointMarker } from "./Rewind";
+import { useTranscriptFind } from "./TranscriptFind";
+import { findIdOf } from "../lib/transcript-find";
 
 /** How long a requested older page may stay unanswered before the button offers to ask again. */
 const OLDER_REPLY_TIMEOUT_MS = 8_000;
@@ -113,6 +115,8 @@ export interface TranscriptProps {
 	branchesByCard?: ReadonlyMap<string, readonly BranchPoint[]>;
 	/** Counts the user's own submissions from the composer; each increase returns the view to the tail and follows it again, as Jump to latest does. */
 	followLatest?: number;
+	/** `false` for rows Find in the conversation does not search (the history shown under a context reset). */
+	findable?: boolean;
 }
 
 export interface TranscriptRewind {
@@ -134,6 +138,7 @@ function Row({
 	actions,
 	rewindState,
 	onPick,
+	findId,
 	children,
 }: {
 	kind: "user" | "assistant" | "custom" | "marker";
@@ -145,10 +150,12 @@ function Row({
 	rewindState?: "selected" | "dimmed";
 	/** While picking, a click on a rewindable prompt picks it. */
 	onPick?: () => void;
+	/** Find in the conversation searches this row under this id (`lib/transcript-find.ts`); absent for rows it does not search. */
+	findId?: string;
 	children: ReactNode;
 }): ReactNode {
 	return (
-		<div className={`omp-row omp-row--${kind}${rewindState === undefined ? "" : ` omp-row--rewind-${rewindState}`}`} aria-current={rewindState === "selected" ? "true" : undefined} onClick={onPick === undefined ? undefined : event => {
+		<div className={`omp-row omp-row--${kind}${rewindState === undefined ? "" : ` omp-row--rewind-${rewindState}`}`} data-find-id={findId} aria-current={rewindState === "selected" ? "true" : undefined} onClick={onPick === undefined ? undefined : event => {
 			if (event.target instanceof Element && event.target.closest("a,button")) return;
 			onPick();
 		}}>
@@ -219,6 +226,7 @@ export function TranscriptCardView({ card, props, autoExpanded, clearedHistory }
 	const points = props.branchesByCard?.get(card.id);
 	return (
 		<Row kind={user || message?.role === "custom" && userSkill(message) !== null ? "user" : "assistant"} flag={unsaved ? "not yet saved" : undefined} actions={actions}
+			findId={(props.depth ?? 0) === 0 && props.findable !== false && (user || card.kind === "assistant" || card.kind === "tool") ? findIdOf(card) : undefined}
 			rewindState={rewindState} onPick={picking && rewindId !== null ? () => rewind!.onPick(rewindId) : undefined}>
 			{body}
 			{props.footerByHost?.has(card.id) && <ReplyFooter reply={props.footerByHost.get(card.id)!} />}
@@ -232,7 +240,7 @@ function ClearedHistoryCards({ entries, props }: { entries: readonly ChatEntry[]
 	const cards = useMemo(() => projectTranscript(entries, { cwd: props.cwd }), [entries, props.cwd]);
 	const historyProps: TranscriptProps = {
 		entries, stream: null, activeTools: new Map(), working: false, phase: props.phase, olderCount: 0,
-		onLoadOlder: () => false, pending: new Map(), cards: [], pagedHistory: true,
+		onLoadOlder: () => false, pending: new Map(), cards: [], pagedHistory: true, findable: false,
 		model: props.model, cwd: props.cwd, renderChild: props.renderChild, depth: props.depth,
 		agents: props.agents, agentActivity: props.agentActivity, conversationKey: props.conversationKey,
 		disclosures: props.disclosures, onDisclosureChange: props.onDisclosureChange,
@@ -536,6 +544,20 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		}}>{awaitingOlder !== null ? "loading earlier messages…" : `load earlier messages (${olderCount} older)`}</button>
 	</div> : null;
 
+	// Find in the conversation (Ctrl+F): only the conversation's own transcript has it, not a child agent's inside a call.
+	const find = useTranscriptFind({
+		enabled: (props.depth ?? 0) === 0, canonical, rows, overview, grouped: props.toolCallDetail !== "detailed", shown, namespace, cwd: props.cwd,
+		paged: Boolean(props.pagedHistory), olderCount, beforeReset: cleared !== null, rootRef, controllerRef,
+		pinTop: setPinnedTopId,
+		showPage: cardId => {
+			const at = canonical.findIndex(card => card.id === cardId);
+			if (at < 0) return;
+			const end = canonical[Math.min(canonical.length - 1, at + TRANSCRIPT_WINDOW_ROWS - 1)]!;
+			setPageEndId(end.id === canonical.at(-1)?.id ? null : end.id);
+		},
+		disclose: (key, value) => presentationProps.onDisclosureChange?.(key, value),
+	});
+
 	return (
 		<div className="omp-transcript-frame">
 		<div ref={rootRef} className="omp-transcript" role="region" aria-label="Conversation transcript" data-vscode-context={CHAT_TEXT_MENU_CONTEXT} onKeyDown={event => {
@@ -606,6 +628,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 			setPinnedTopId(null); setPageEndId(null); controllerRef.current?.jump();
 		}}><i className="codicon codicon-arrow-down" aria-hidden="true" /></button>}
 		<span className="omp-sr-only" role="status">{anchorNotice}</span>
+		{find}
 		</div>
 	);
 }

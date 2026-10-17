@@ -79,6 +79,16 @@ Select text in an assistant reply, one of your own messages or an open thinking 
 
 ![A Chat with tool rows, TODO and Agents](../../media/readme/chat-agents.png)
 
+### Finding text in the conversation
+
+`Ctrl+F` anywhere in a Chat (the composer included, which has no find of its own) opens a find bar in the corner of the transcript. **OMP Desk: Find in Chat** (the Command Palette and the editor's `…` menu) opens the same bar, and you can give that command a key of your own.
+
+- **It searches the conversation, not just the rows in the page.** A long conversation keeps only the rows on screen in the page, which is all VS Code's own find could see, so the bar reads the loaded conversation itself: your messages, the replies and their thinking, and each tool call's name, target, intent and output text. It does not search notices and summaries, the text of attached files, the history before a context reset (`/clear`), or messages still on disk behind **load earlier messages**; the bar says how many of those there are.
+- **It starts at the newest match.** `Enter` or `F3` goes to the next match and `Shift+Enter` or `Shift+F3` to the previous one, both wrapping round; the bar shows `3 of 12` (or `No results`). `Alt+C` turns **Match Case** on and off. The query is literal text, not a pattern. Text you had selected in the Chat fills the field.
+- **The match is shown.** The row is loaded into the transcript if it was above the rows the Chat keeps, scrolled to (deep inside a long reply, to the line), and what hides it is opened: a tool group, the call's output or a thinking block. They stay open when you move on. Every match in the rows on screen is highlighted and the current one stands out. In a long tool output only the rows the card shows are highlighted (the match's row is outlined); use **Show all** and the output's own **Filter lines** to look further.
+- **`Esc` closes the bar** and puts the focus back where it was, the composer if that is gone. While the bar's field has the focus `Esc` does not stop a running turn.
+- With screen-reader paging on, the page that holds the match is shown. `Ctrl+F` is taken by the Chat page itself, so it also works in a view-only Chat and while the extension restarts; it is not in **Show Chat Keyboard Shortcuts**, because it is not a VS Code keybinding.
+
 ### Mermaid diagrams
 
 Fenced `mermaid` blocks are drawn as diagrams in your theme's colours once the block is complete (flowcharts, sequence, class, state, ER, gantt, pie and the other mermaid types); until then, and when a diagram has an error, you see the code.

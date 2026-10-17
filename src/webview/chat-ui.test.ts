@@ -6968,6 +6968,166 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		// Find in the conversation: the transcript is windowed, so Ctrl+F searches the model and brings the match's row into the page.
+		const CTRL = 2, ALT = 1, SHIFT = 8;
+		const findState = (): Promise<{ status: string; input: string; focused: boolean; note: string } | null> => ui.evaluate(`(()=>{const bar=document.querySelector('.omp-find');if(!bar)return null;
+		 return{status:bar.querySelector('.omp-find-status').textContent,input:bar.querySelector('.omp-find-input').value,focused:document.activeElement===bar.querySelector('.omp-find-input'),note:bar.querySelector('.omp-find-note')?.textContent??''}})()`);
+		/** The painted current match: its text, the row that holds it, whether it is inside the transcript's viewport, and how many matches are painted. */
+		const findCurrent = (): Promise<{ text: string; row: string | null; visible: boolean; painted: number } | null> => ui.evaluate(`(()=>{const h=CSS.highlights.get('omp-find-current'),r=h&&[...h][0];if(!r)return null;
+		 const box=r.getBoundingClientRect(),root=document.querySelector('.omp-transcript').getBoundingClientRect();
+		 return{text:r.toString(),row:r.startContainer.parentElement.closest('[data-find-id]')?.dataset.findId??null,visible:box.height>0&&box.top>=root.top-1&&box.bottom<=root.bottom+1,painted:CSS.highlights.get('omp-find')?.size??0}})()`);
+		/** Painting a highlight changes no DOM, so `ui.wait` (which re-checks on DOM changes) cannot see it: poll on frames. */
+		const waitCurrent = (row: string): Promise<unknown> => ui.evaluate(`(async()=>{const deadline=performance.now()+15000;
+		 while(performance.now()<deadline){const h=CSS.highlights.get('omp-find-current'),r=h&&[...h][0];
+		  if(r&&r.startContainer.parentElement.closest('[data-find-id]')?.dataset.findId===${JSON.stringify(row)})return true;
+		  await new Promise(resolve=>requestAnimationFrame(resolve))}
+		 throw new Error('the current match was not painted in row '+${JSON.stringify(row)})})()`);
+		const popupReports = (): Promise<boolean[]> => ui.evaluate("window.sent.filter(message=>message.type==='omp:composer-popup').map(message=>message.open)");
+
+		await t.test("Ctrl+F searches the whole loaded conversation, not the rows in the page: a match in an unmounted row is loaded, scrolled to and painted, Enter and Shift+Enter wrap, the count follows, Esc closes and returns the focus", async () => {
+			await reset("find-long");
+			await ui.evaluate(`(()=>{
+			 const row=(id,message)=>({type:'message',id,parentId:null,timestamp:new Date(1000).toISOString(),message});
+			 const entries=[];
+			 for(let index=0;index<600;index++){
+			  if(index%2===0)entries.push(row('u'+index,{role:'user',timestamp:1000+index,content:index===300?'Where does the zebrafish live?':'Prompt '+index}));
+			  else entries.push(row('a'+index,{role:'assistant',model:'m',timestamp:1000+index,stopReason:'stop',content:[{type:'text',text:'Reply '+index+(index===21?' with a **zebrafish** in bold':index===589?' with a late zebrafish':'')+'\\n\\n'+'Plain filler prose for the reply. '.repeat(6)}]}));
+			 }
+			 window.ui.push({entries,durableCount:entries.length,working:false,settled:true,olderCount:0});
+			})()`);
+			await ui.wait("document.querySelector('.omp-transcript').scrollHeight>5000 && document.querySelector('[data-find-id=\"a589\"]')");
+			await ui.settleGeometry(".omp-transcript");
+			assert.equal(await ui.evaluate("document.querySelector('[data-find-id=\"a21\"]')"), null, "the early reply is not in the page");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-find')"), null, "no find bar until it is asked for");
+			await ui.evaluate("window.composer.focus()");
+			await press("f", "KeyF", 70, { modifiers: CTRL });
+			await ui.wait("document.querySelector('.omp-find')");
+			assert.equal((await findState())?.focused, true, "the bar's field has the focus");
+			assert.equal(await popupReports().then(reports => reports.at(-1)), true, "while the field has the focus the host's stop-turn key is disarmed");
+			await ui.call("Input.insertText", { text: "zebrafish" });
+			await ui.wait("document.querySelector('.omp-find-status').textContent==='3 of 3'");
+			await waitCurrent("a589");
+			await ui.settleGeometry(".omp-transcript");
+			assert.deepEqual(await findCurrent().then(match => match === null ? null : { text: match.text, row: match.row, visible: match.visible }), { text: "zebrafish", row: "a589", visible: true }, "the search starts at the newest match, painted and on screen");
+			assert.ok((await findCurrent())!.painted >= 1);
+
+			// Next from the last wraps to the first: a reply 570 rows up, not mounted until now; its bold word is found as it reads.
+			await press("Enter", "Enter", 13);
+			await ui.wait("document.querySelector('.omp-find-status').textContent==='1 of 3'");
+			await waitCurrent("a21");
+			await ui.settleGeometry(".omp-transcript");
+			assert.deepEqual(await findCurrent().then(match => match === null ? null : { text: match.text, row: match.row, visible: match.visible }), { text: "zebrafish", row: "a21", visible: true }, "the unmounted row is loaded, scrolled to and its match painted");
+			assert.equal(await ui.evaluate("Boolean(document.querySelector('.omp-jump-latest'))"), true, "the reader is detached from the tail, as after any jump");
+
+			await press("Enter", "Enter", 13, { modifiers: SHIFT });
+			await ui.wait("document.querySelector('.omp-find-status').textContent==='3 of 3'");
+			await waitCurrent("a589");
+			await press("Enter", "Enter", 13, { modifiers: SHIFT });
+			await ui.wait("document.querySelector('.omp-find-status').textContent==='2 of 3'");
+			await waitCurrent("u300");
+			await press("F3", "F3", 114);
+			await ui.wait("document.querySelector('.omp-find-status').textContent==='3 of 3'");
+			await press("F3", "F3", 114, { modifiers: SHIFT });
+			await ui.wait("document.querySelector('.omp-find-status').textContent==='2 of 3'");
+
+			// A query is literal and case-insensitive until Match Case (Alt+C) is on.
+			await press("a", "KeyA", 65, { modifiers: CTRL });
+			await ui.call("Input.insertText", { text: "ZEBRA.ISH" });
+			await ui.wait("document.querySelector('.omp-find-status').textContent==='No results'");
+			await press("a", "KeyA", 65, { modifiers: CTRL });
+			await ui.call("Input.insertText", { text: "ZEBRAFISH" });
+			await ui.wait("document.querySelector('.omp-find-status').textContent==='3 of 3'");
+			await press("c", "KeyC", 67, { modifiers: ALT });
+			await ui.wait("document.querySelector('.omp-find-status').textContent==='No results' && document.querySelector('[aria-label=\"Match case\"]').getAttribute('aria-pressed')==='true'");
+			await press("c", "KeyC", 67, { modifiers: ALT });
+			await ui.wait("document.querySelector('.omp-find-status').textContent==='3 of 3'");
+
+			await press("Escape", "Escape", 27);
+			await ui.wait("!document.querySelector('.omp-find')");
+			assert.equal(await ui.evaluate("window.composer.focused()"), true, "Escape returns the focus to where it was");
+			assert.equal(await ui.evaluate("CSS.highlights.has('omp-find')||CSS.highlights.has('omp-find-current')"), false, "nothing stays painted");
+			assert.equal(await popupReports().then(reports => reports.at(-1)), false, "the stop-turn key is armed again");
+			await press("F3", "F3", 114);
+			await settleFrames();
+			assert.equal(await ui.evaluate("document.querySelector('.omp-find')"), null, "F3 does nothing while the bar is closed");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("Find opens what hides a match: a thinking block, a collapsed call's output and its group; it names the earlier messages it does not search, and a selection seeds the field", async () => {
+			await reset("find-hidden");
+			await ui.evaluate(`(()=>{
+			 const row=(id,message)=>({type:'message',id,parentId:null,timestamp:new Date(1000).toISOString(),message});
+			 const entries=[
+			  row('u1',{role:'user',timestamp:1,content:'Tell me about the quokka'}),
+			  row('a1',{role:'assistant',model:'m',timestamp:2,stopReason:'toolUse',content:[{type:'thinking',thinking:'Considering what a quokka is'},{type:'toolCall',id:'t1',name:'bash',arguments:{command:'echo hi'}}]}),
+			  row('r1',{role:'toolResult',toolCallId:'t1',toolName:'bash',timestamp:3,isError:false,content:[{type:'text',text:'the quokka output line\\nsecond line'}]}),
+			  row('a2',{role:'assistant',model:'m',timestamp:4,stopReason:'stop',content:[{type:'text',text:'Done.'}]}),
+			 ];
+			 window.ui.push({entries,durableCount:4,working:false,settled:true,olderCount:3});
+			})()`);
+			await ui.wait("document.querySelector('[data-find-id=\"a2\"]')");
+			assert.equal(await ui.evaluate("Boolean(document.querySelector('.omp-thinking .omp-md'))"), false, "the thinking block is closed");
+			assert.equal(await ui.evaluate("Boolean(document.querySelector('[data-tool-call-id=\"t1\"] .omp-tool-body'))"), false, "the call's output is closed");
+			await ui.evaluate("window.ui.receive({type:'omp:webview-action',action:'find-in-chat'})");
+			await ui.wait("document.querySelector('.omp-find')");
+			assert.equal((await findState())?.focused, true, "the host's Find in Chat command opens the same bar");
+			await ui.call("Input.insertText", { text: "quokka" });
+			await ui.wait("document.querySelector('.omp-find-status').textContent==='3 of 3'");
+			assert.equal((await findState())?.note, "3 earlier messages are not loaded.", "the bar says what it did not search");
+
+			// The newest match is in the output of a call that is closed (and may sit in a collapsed group): both open.
+			await ui.wait("document.querySelector('[data-tool-call-id=\"t1\"] .omp-tool-body')");
+			await waitCurrent("call:t1");
+			assert.equal((await findCurrent())?.text, "quokka");
+			assert.equal(await ui.evaluate("Boolean(document.querySelector('[data-tool-call-id=\"t1\"]')?.closest('[data-find-id]')?.querySelector('.omp-tool-body'))"), true);
+
+			// The one before it is thinking: the block opens to show it.
+			await press("Enter", "Enter", 13, { modifiers: SHIFT });
+			await ui.wait("document.querySelector('.omp-find-status').textContent==='2 of 3'");
+			await waitCurrent("a1");
+			assert.equal(await ui.evaluate("Boolean(document.querySelector('details.omp-thinking[open] .omp-md'))"), true, "the thinking block is open");
+			assert.equal((await findCurrent())?.text, "quokka");
+			await press("Escape", "Escape", 27);
+			await ui.wait("!document.querySelector('.omp-find')");
+
+			// A text selection in the transcript seeds the field.
+			await ui.evaluate("(()=>{const range=document.createRange();range.selectNodeContents(document.querySelector('[data-find-id=\"u1\"] .omp-md'));const selection=getSelection();selection.removeAllRanges();selection.addRange(range)})()");
+			await press("f", "KeyF", 70, { modifiers: CTRL });
+			await ui.wait("document.querySelector('.omp-find-input')?.value==='Tell me about the quokka'");
+			await ui.wait("document.querySelector('.omp-find-status').textContent==='1 of 1'");
+			await waitCurrent("u1");
+			// Close and reopen: a second Ctrl+F while open only selects the field.
+			await press("f", "KeyF", 70, { modifiers: CTRL });
+			assert.equal((await findState())?.input, "Tell me about the quokka");
+			await press("Escape", "Escape", 27);
+			await ui.wait("!document.querySelector('.omp-find')");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("in accessible paged history Find shows the page that holds the match", async () => {
+			await reset("find-paged", "overview", true);
+			await ui.evaluate(`(()=>{
+			 const row=(id,message)=>({type:'message',id,parentId:null,timestamp:new Date(1000).toISOString(),message});
+			 const entries=Array.from({length:250},(_,index)=>index%2===0
+			  ?row('u'+index,{role:'user',timestamp:1000+index,content:'Prompt '+index})
+			  :row('a'+index,{role:'assistant',model:'m',timestamp:1000+index,stopReason:'stop',content:[{type:'text',text:'Reply '+index+(index===11||index===249?' mentions the zebrafish':'')}]}));
+			 window.ui.push({entries,durableCount:250,working:false,settled:true,olderCount:0});
+			})()`);
+			await ui.wait("document.querySelector('[data-find-id=\"a249\"]')");
+			assert.equal(await ui.evaluate("document.querySelector('[data-find-id=\"a11\"]')"), null, "the early reply is on another page");
+			await ui.evaluate("window.composer.focus()");
+			await press("f", "KeyF", 70, { modifiers: CTRL });
+			await ui.wait("document.querySelector('.omp-find')");
+			await ui.call("Input.insertText", { text: "zebrafish" });
+			await ui.wait("document.querySelector('.omp-find-status').textContent==='2 of 2'");
+			await press("Enter", "Enter", 13);
+			await ui.wait("document.querySelector('.omp-find-status').textContent==='1 of 2'");
+			await waitCurrent("a11");
+			assert.equal((await findCurrent())?.text, "zebrafish");
+			await press("Escape", "Escape", 27);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 	} finally {
 		page?.socket.close();
 		if (browser) await browser.call("Browser.close").catch(() => {});

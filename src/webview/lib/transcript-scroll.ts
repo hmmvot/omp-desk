@@ -134,11 +134,14 @@ export class TranscriptScrollController {
 	retain(): void { this.#explicitFollowing = false; this.#capture(); }
 	jump(): void { this.#pageStart = false; this.#explicitFollowing = true; this.#intent = null; this.#anchor = null; this.#setMode("following"); this.layout(); }
 	pageStart(): void { this.#pageStart = true; this.#explicitFollowing = false; this.#intent = null; this.#anchor = null; this.#setMode("detached"); this.layout(); }
-	/** Detach and bring the row carrying one of `sources` into view, a third of the way down (Rewind's selected prompt). */
-	reveal(sources: readonly string[]): void {
+	/**
+	 * Detach and bring the row carrying one of `sources` into view, a third of the way down (Rewind's selected prompt, Find's match).
+	 * `offset` is where the row's top then is below the viewport top: Find passes a negative one to put a match deep inside a tall row on screen.
+	 */
+	reveal(sources: readonly string[], offset = Math.round(this.root.clientHeight / 3)): void {
 		this.#pageStart = false; this.#explicitFollowing = false; this.#intent = null;
 		const order = this.bindings.order();
-		this.#anchor = { sources, offset: Math.round(this.root.clientHeight / 3), height: this.root.clientHeight, order, index: order.findIndex(id => sources.includes(id)) };
+		this.#anchor = { sources, offset, height: this.root.clientHeight, order, index: order.findIndex(id => sources.includes(id)) };
 		this.#setMode("detached");
 		this.layout();
 	}

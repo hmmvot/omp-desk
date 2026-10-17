@@ -2183,6 +2183,7 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
     registerDeskCommand("ompDesk.focusComposer", () => windowState().editorPanels.focusChatComposer(index)),
     registerDeskCommand("ompDesk.retryTurn", () => postChatPanelAction("retry-turn")),
     registerDeskCommand("ompDesk.quoteChatSelection", () => postChatPanelAction("quote-selection")),
+    registerDeskCommand("ompDesk.findInChat", () => findInChat()),
     registerDeskCommand("ompDesk.toggleThinking", () => toggleThinkingDefault()),
     registerDeskCommand("ompDesk.toggleToolOutput", () => toggleToolsMode("output")),
     registerDeskCommand("ompDesk.toggleToolGroups", () => toggleToolsMode("groups")),
@@ -5680,6 +5681,21 @@ function activeChatTab(): string | null {
 /** Ask the active Chat editor's own composer to run one of its actions (retry, thinking or tools toggle). */
 function postChatPanelAction(action: GuestPanelAction): void {
   if (activeChatTab() !== null) postPanelAction(action);
+}
+
+/**
+ * Open the find bar of the active Chat editor's transcript. Searching writes nothing, so a view-only editor may do it too
+ * (the other panel actions refuse there); the key itself (`Ctrl+F`) is taken by the page and does not come through here.
+ */
+function findInChat(): void {
+  const target = activePanelTab();
+  if (target === null || target.mode !== "chat") {
+    showWarning("No Chat editor is active, so there is nothing to search.");
+    return;
+  }
+  const message: GuestPanelActionMessage = { type: "omp:webview-action", action: "find-in-chat" };
+  void target.panel.webview.postMessage(message);
+  log.debug(`tab ${target.tabId}: find-in-chat asked from a VS Code command`);
 }
 
 /** Run one {@link GuestChatCommand} for the active Chat editor, from the command palette or a keybinding. */

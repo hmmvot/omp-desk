@@ -16,11 +16,11 @@
 import type { GuestPanelAction } from "../../protocol/messages.ts";
 
 /**
- * The actions themselves are the message contract's ({@link GuestPanelAction});
- * extending the record with the named members below keeps the doc comments while
+ * The composer's actions are the message contract's ({@link GuestPanelAction}) but for Find, which belongs to the transcript and is
+ * provided by it ({@link provideFindAction}); extending the record with the named members below keeps the doc comments while
  * making the compiler refuse a handler map that misses one.
  */
-export interface PanelActionHandlers extends Record<GuestPanelAction, () => void> {
+export interface PanelActionHandlers extends Record<Exclude<GuestPanelAction, "find-in-chat">, () => void> {
 	/** Submit the current draft; a no-op when the composer cannot send it. */
 	"send-prompt"(): void;
 	/** Stop the running turn (the Stop button's own path). */
@@ -44,13 +44,25 @@ export function providePanelActions(handlers: PanelActionHandlers): () => void {
 	};
 }
 
+let findProvider: (() => void) | null = null;
+
+/** Register the transcript's Find (`ompDesk.findInChat`); the returned function releases it. */
+export function provideFindAction(open: () => void): () => void {
+	findProvider = open;
+	return () => { if (findProvider === open) findProvider = null; };
+}
+
 /**
- * Run `action` in the panel's composer.
+ * Run `action` in the panel's composer (Find: in its transcript).
  *
- * @returns `false` when no composer is mounted, so the caller can say so
+ * @returns `false` when nothing is mounted to run it, so the caller can say so
  *          instead of reporting a send or a stop that never happened.
  */
 export function requestPanelAction(action: GuestPanelAction): boolean {
+	if (action === "find-in-chat") {
+		findProvider?.();
+		return findProvider !== null;
+	}
 	for (let index = providers.length - 1; index >= 0; index--) {
 		const provider = providers[index];
 		if (provider !== undefined) {
