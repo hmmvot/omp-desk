@@ -440,7 +440,7 @@ describe("profile catalog", () => {
 function conflict(identity: string, n: number, extra: { reason?: string; key?: string; earlier?: number } = {}): CatalogConflictRecord {
 	return {
 		key: extra.key ?? "test.rows.v1", identity, source: null, at: `2026-10-12T00:00:${String(n).padStart(2, "0")}.000Z`,
-		reason: extra.reason ?? "both windows changed this row", retained: { n }, rejected: { n: -n },
+		reason: extra.reason ?? "both windows changed this row", retained: { n }, rejected: { n: -n - 1 },
 		...(extra.earlier === undefined ? {} : { earlier: extra.earlier }),
 	};
 }
@@ -472,6 +472,15 @@ describe("conflict ledger bound (ADR-0034)", () => {
 		assert.deepEqual(compacted.map(record => record.earlier), [11, undefined, undefined]);
 		const small = [conflict("a", 1), conflict("a", 2), conflict("b", 3)];
 		assert.equal(compactConflicts(small), small);
+	});
+
+	it("drops a record whose two sides are the same value, and keeps one that really disagrees", () => {
+		const same = { ...conflict("a", 1), retained: { n: 1 }, rejected: { n: 1 }, earlier: 30 };
+		const real = conflict("a", 2);
+		const removal: CatalogConflictRecord = { ...conflict("a", 3), reason: "removed while changed", rejected: null };
+		assert.deepEqual(compactConflicts([same, real, removal]), [real, removal]);
+		const unchanged = [real, removal];
+		assert.equal(compactConflicts(unchanged), unchanged);
 	});
 
 	it("shrinks an oversized ledger on the next ordinary commit, and a transaction that changes nothing leaves the file alone", async () => {

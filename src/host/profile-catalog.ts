@@ -81,6 +81,7 @@ import * as fs from "node:fs";
 import { localFs } from "./local-fs.ts";
 import * as os from "node:os";
 import * as path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { renameReplacing, stageBeside } from "./atomic-file.ts";
 import { trackOperation } from "./loop-lag.ts";
 
@@ -248,14 +249,22 @@ function readConflictRecord(value: unknown): CatalogConflictRecord | null {
   };
 }
 
+/** Whether a record's two sides are the same value: nothing was overwritten, so it is not a disagreement. */
+function sidesAgree(record: CatalogConflictRecord): boolean {
+  return record.rejected !== null && record.rejected !== undefined && isDeepStrictEqual(record.retained, record.rejected);
+}
+
 /**
- * Bound the conflict ledger per disagreement: records are grouped by `(key, identity, reason)` and a group keeps its
+ * Bound the conflict ledger. A record whose retained and rejected sides are the same value is dropped outright: an earlier
+ * build reported a row both windows had written alike, and that was never a disagreement (ADR-0034, 2026-10-17). The rest
+ * is bounded per disagreement: records are grouped by `(key, identity, reason)` and a group keeps its
  * newest {@link CATALOG_CONFLICT_GROUP_KEEP}. The records a group drops are counted into the `earlier` of the oldest record
  * it keeps, so the ledger still says how often the disagreement happened. A different row, reason, import source or lock
  * reclaim is another group and keeps its own records: nothing is forgotten as a kind of disagreement, only repeats of one.
  * Order is preserved (the ledger stays oldest first). Returns the same array when nothing is over the bound.
  */
-export function compactConflicts(conflicts: readonly CatalogConflictRecord[]): readonly CatalogConflictRecord[] {
+export function compactConflicts(all: readonly CatalogConflictRecord[]): readonly CatalogConflictRecord[] {
+  const conflicts = all.some(sidesAgree) ? all.filter(record => !sidesAgree(record)) : all;
   const groups = new Map<string, number[]>();
   conflicts.forEach((record, index) => {
     const group = JSON.stringify([record.key, record.identity, record.reason]);

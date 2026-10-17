@@ -4032,6 +4032,122 @@ describe("reply identities across windows", () => {
 	});
 });
 
+// A window's merge base is what it last saw of the shared record. A refresh that adopts another window's commit has to
+// move it, or the window's next write reads every row the other window changed as its own edit.
+
+describe("a window's merge base follows what it adopts", () => {
+	async function windowPair() {
+		const workspace = await tempWorkspace();
+		const open = async () => {
+			const store = await createCatalogStore({ paths: catalogPaths(workspace.cwd), mergers: {
+				[SESSION_INDEX_STORAGE_KEY]: mergeSessionIndexRecords, [BROKER_SLOTS_KEY]: mergeBrokerSlotRecords,
+			} });
+			const index = indexFor(store, workspace.claimDir);
+			return { store, index, adopt: async () => { await store.refresh(); await index.refreshFromStore(); } };
+		};
+		const a = await open();
+		const b = await open();
+		// Both windows hold a base, as any window that has loaded or written a record does.
+		await b.index.createDraft({ cwd: workspace.cwd });
+		await a.adopt();
+		return { workspace, a, b };
+	}
+
+	interface Row { readonly tabId: string; readonly title: string | null }
+	const committedRow = (store: { get<T>(key: string): T | undefined }, tabId: string): Row | undefined =>
+		store.get<{ entries: Row[] }>(SESSION_INDEX_STORAGE_KEY)?.entries.find(row => row.tabId === tabId);
+	const titleOf = (row: unknown): string | null | undefined => (row as Row | null | undefined)?.title;
+
+	it("does not report a row another window added as this window's own edit", async () => {
+		const { workspace, a, b } = await windowPair();
+		const row = await a.index.createDraft({ cwd: workspace.cwd });
+		await b.adopt();
+		assert.ok(b.index.get(row.tabId), "the second window adopted the row");
+
+		await b.index.createDraft({ cwd: workspace.cwd });
+		await b.store.refresh();
+
+		assert.deepEqual(b.store.conflicts(), [], "nothing was overwritten, so nothing is reported");
+		assert.ok(committedRow(b.store, row.tabId), "the adopted row is still committed");
+	});
+
+	it("does not report a row another window changed as this window's own edit", async () => {
+		const { workspace, a, b } = await windowPair();
+		const row = await a.index.createDraft({ cwd: workspace.cwd });
+		await b.adopt();
+		await a.index.recordConversationState(row.tabId, { title: "one" });
+		await b.adopt();
+
+		await b.index.createDraft({ cwd: workspace.cwd });
+		await b.store.refresh();
+
+		assert.deepEqual(b.store.conflicts(), []);
+		assert.equal(committedRow(b.store, row.tabId)?.title, "one");
+	});
+
+	it("keeps a change another window committed after this window's last adoption", async () => {
+		const { workspace, a, b } = await windowPair();
+		const row = await a.index.createDraft({ cwd: workspace.cwd });
+		await b.adopt();
+		await a.index.recordConversationState(row.tabId, { title: "one" });
+		await b.adopt();
+		await a.index.recordConversationState(row.tabId, { title: "two" }); // committed; the second window has not adopted it yet
+
+		await b.index.createDraft({ cwd: workspace.cwd }); // an unrelated write in the second window
+
+		await a.store.refresh();
+		assert.equal(committedRow(a.store, row.tabId)?.title, "two", "the newer title survives the unrelated write");
+		assert.deepEqual(a.store.conflicts(), []);
+	});
+
+	it("does not bring back a row another window removed", async () => {
+		const { workspace, a, b } = await windowPair();
+		const row = await a.index.createDraft({ cwd: workspace.cwd });
+		await b.adopt();
+		assert.equal((await a.index.remove(row.tabId)).removed, true);
+		await b.adopt();
+		assert.equal(b.index.get(row.tabId) ?? null, null, "the removal was adopted");
+
+		await b.index.createDraft({ cwd: workspace.cwd });
+		await b.store.refresh();
+
+		assert.equal(committedRow(b.store, row.tabId), undefined);
+		assert.deepEqual(b.store.conflicts(), []);
+	});
+
+	it("still reports two windows that really changed one row differently, and applies this window's facts", async () => {
+		const { workspace, a, b } = await windowPair();
+		const row = await a.index.createDraft({ cwd: workspace.cwd });
+		await b.adopt();
+		await a.index.recordConversationState(row.tabId, { title: "theirs" });
+		await b.index.recordConversationState(row.tabId, { title: "mine" }); // not adopted: both changed the row
+
+		await b.store.refresh();
+		assert.equal(committedRow(b.store, row.tabId)?.title, "mine");
+		const conflicts = b.store.conflicts().filter(record => record.identity === row.tabId);
+		assert.equal(conflicts.length, 1);
+		assert.equal(titleOf(conflicts[0]?.rejected), "theirs");
+		assert.equal(titleOf(conflicts[0]?.retained), "mine");
+	});
+
+	it("does not report a row both windows changed to the same value", () => {
+		const draft = (title: string | null, lastActiveAt: string) => ({
+			tabId: "tab:one", origin: "extension", sessionFile: null, sessionId: null, cwd: process.cwd(), scope: { profile: null, sessionDir: null },
+			sessionDir: null, ownership: { ownerGeneration: "g", draftIdentity: "d", releasedAt: null }, host: null,
+			createdAt: "2026-10-17T00:00:00.000Z", lastActiveAt, ordinal: 1, runIntent: "stopped", title,
+			lastCompletedReplyId: null, lastSeenReplyId: null,
+		});
+		const snapshot = (...entries: unknown[]) => ({ version: 1, nextOrdinal: 2, entries, bindings: [] });
+		const merged = mergeSessionIndexRecords({
+			base: snapshot(draft(null, "2026-10-17T00:00:01.000Z")),
+			desired: snapshot(draft("same", "2026-10-17T00:00:02.000Z")),
+			latest: snapshot(draft("same", "2026-10-17T00:00:02.000Z")),
+		});
+		assert.deepEqual(merged.conflicts, []);
+		assert.equal(titleOf((merged.value as { entries: unknown[] }).entries[0]), "same");
+	});
+});
+
 /** A memento whose writes can be refused with any error, the way the catalog refuses one that lost the lock. */
 class RefusingStore extends TestStore {
 	failure: Error | null = null;

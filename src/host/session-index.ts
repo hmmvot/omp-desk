@@ -695,7 +695,9 @@ export class SessionIndex {
 	 *
 	 * Every write names it as the merge base, so a record another window committed since is
 	 * not read as this window's own removal of it: this window's snapshot is simply older
-	 * than that record, and the merge keeps it.
+	 * than that record, and the merge keeps it. It stays the record of what this window *saw*:
+	 * a refresh moves it to the committed value of every row and binding it adopts, so a row
+	 * another window changed is never mistaken for this window's own edit by its next write.
 	 */
 	#sharedBase: unknown = undefined;
 	#loadError: string | null = null;
@@ -835,6 +837,9 @@ export class SessionIndex {
 			}
 			if (raw === undefined || raw === null || !isPersistedSnapshot(raw)) return;
 			const present = new Set<string>();
+			// The rows this refresh made equal to the committed record, and the ones it dropped with it: the merge base follows them.
+			const followed = new Map<string, SharedEntry>();
+			const dropped = new Set<string>();
 			for (const candidate of raw.entries) {
 				const shared = cloneSharedEntry(candidate);
 				present.add(shared.tabId);
@@ -842,6 +847,7 @@ export class SessionIndex {
 				if (existing === undefined) {
 					this.#entries.set(shared.tabId, composeEntry(shared, undefined));
 					adopted.push(shared.tabId);
+					followed.set(shared.tabId, candidate);
 					continue;
 				}
 				if (this.#lifecycle.busy(shared.tabId) || this.#live.has(shared.tabId)) {
@@ -861,6 +867,7 @@ export class SessionIndex {
 				composed.lastCompletedReplyId = laterReplyMarker(existing.lastCompletedReplyId, existing.lastCompletedReplyId, shared.lastCompletedReplyId) ?? null;
 				composed.lastSeenReplyId = laterReplyMarker(existing.lastSeenReplyId, existing.lastSeenReplyId, shared.lastSeenReplyId) ?? null;
 				this.#entries.set(shared.tabId, composed);
+				followed.set(shared.tabId, candidate);
 			}
 			for (const tabId of [...this.#entries.keys()]) {
 				if (present.has(tabId)) continue;
@@ -870,6 +877,7 @@ export class SessionIndex {
 				}
 				this.#entries.delete(tabId);
 				removed.push(tabId);
+				dropped.add(tabId);
 			}
 			const bindings = persistedBindings(raw.bindings);
 			const bound = new Set(bindings.map(binding => binding.slotId));
@@ -881,12 +889,28 @@ export class SessionIndex {
 			// Adopting a higher ordinal keeps a later row from this window out of an
 			// order another window already used.
 			this.#nextOrdinal = Math.max(this.#nextOrdinal, raw.nextOrdinal);
+			this.#followCommitted(raw, followed, dropped);
 		});
 		await this.#persistChain;
 		// A reply identity this window holds and the catalog lost (a stale copy of the row was written over it) is
 		// written back, so the other windows show what the user saw here.
 		if (markersAhead) await this.#persist();
 		return { adopted, removed, kept };
+	}
+
+	/**
+	 * Move the merge base to what a refresh just adopted.
+	 *
+	 * Rows the refresh made equal to the committed record take the committed value, rows it dropped leave the base, and
+	 * the bindings (which a refresh mirrors whole) are the committed ones. A row the refresh left alone (a live host or a
+	 * lifecycle operation in flight) keeps its old base entry, so its own change still reaches the merge and is reported.
+	 */
+	#followCommitted(raw: SharedSnapshot, followed: ReadonlyMap<string, SharedEntry>, dropped: ReadonlySet<string>): void {
+		const previous = isPersistedSnapshot(this.#sharedBase) ? this.#sharedBase : null;
+		const rows = new Map<string, SharedEntry>(previous?.entries.map(entry => [entry.tabId, entry]) ?? []);
+		for (const tabId of dropped) rows.delete(tabId);
+		for (const [tabId, row] of followed) rows.set(tabId, row);
+		this.#sharedBase = { version: INDEX_VERSION, nextOrdinal: raw.nextOrdinal, entries: [...rows.values()], bindings: raw.bindings } satisfies SharedSnapshot;
 	}
 
 	/** Set when the persisted snapshot could not be read back as index state. */
@@ -3827,7 +3851,8 @@ export function mergeSessionIndexRecords(input: {
 			continue;
 		}
 		const merged = theirs === null ? mine : withLaterReplyMarkers(mine, theirs, before);
-		if (mineIsLocalChange && theirs !== null && !sameRecord(before, theirs)) {
+		// Both windows wrote the same value: nothing was overwritten, so nothing is reported (as `mergeKeyedArray` does).
+		if (theirs !== null && !sameRecord(before, theirs) && !sameRecord(merged, theirs)) {
 			conflicts.push({
 				identity: mine.tabId,
 				reason: "another window changed this row while this window changed it too; this window's own facts were applied",
