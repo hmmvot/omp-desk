@@ -7,12 +7,18 @@
  * Rules: a token (emphasis, code span, link, autolink) is source only when the selection covers its whole shown text, and its
  * shown text alone when the selection cuts it; a list marker, a heading mark and the indentation come back only when the
  * selection starts at the leaf's shown start; quote prefixes always come back, so a quoted line is quoted again; a code block is
- * re-fenced with a fence longer than any backtick run in it; a table keeps its header and separator. A leaf whose records
- * disagree with what is drawn is not guessed at: it degrades to the text the selection shows, and the caller says so.
+ * re-fenced with a fence longer than any backtick run in it; a table is narrowed to what the selection touches (below). A leaf
+ * whose records disagree with what is drawn is not guessed at: it degrades to the text the selection shows, and the caller says so.
+ *
+ * Tables (design amendment 2026-10-17). A selection inside one cell quotes that cell's selected text alone, as a paragraph does. A
+ * selection across cells keeps a valid table: the header, the separator and the touched rows, cut to the columns between the
+ * start cell and the end cell, the two edge cells cut to the selected text. A selection that starts or ends outside the table
+ * (text before it, or after it) takes the touched rows whole, with every column: the part of it outside names no cell to cut at.
  */
 import { fenceFor } from "./code-fence.ts";
 import { inlinePieces, type InlinePiece } from "./markdown-inline.ts";
 import type { Leaf, LeafLine, LeafTable } from "./markdown-leaves.ts";
+import { escapeTableCell, splitTableCells, type TableCell } from "./markdown-table.ts";
 
 /** One leaf the selection touches, with the part of its shown text it covers. */
 export interface LeafPick {
@@ -20,6 +26,20 @@ export interface LeafPick {
 	/** The leaf's shown text: a text leaf's `textContent`, a code leaf's `code` text, empty for a rule or a row. */
 	readonly text: string;
 	/** The covered part of `text`: `[from, to)`. A rule or a row is taken whole. */
+	readonly from: number;
+	readonly to: number;
+	/** A row: the cells the selection has text in, left to right. A pick without it is taken whole. */
+	readonly cells?: readonly CellCover[];
+	/** A row: the selection starts or ends outside the table, so the rows are taken whole. A pick without it is taken whole. */
+	readonly whole?: boolean;
+}
+
+/** The text of one table cell a selection covers. */
+export interface CellCover {
+	/** The cell's column, counted from the left of the table. */
+	readonly column: number;
+	/** The cell's shown text and the covered part `[from, to)` of it. */
+	readonly text: string;
 	readonly from: number;
 	readonly to: number;
 }
@@ -159,6 +179,72 @@ function rowPiece(leaf: Leaf, emitted: Set<LeafTable>): Piece | null {
 	return lines.length === 0 ? null : { lines, first, last: leaf.header === true ? table.separator.line : leaf.last, firstQuote: table.header.quote, lastQuote: table.header.quote, plain: false };
 }
 
+/** The source of the covered part of one cell's text and the text it shows, or `null` when its tokens do not render back to what is covered. */
+function cutCell(cell: TableCell, cover: CellCover, emphasis: boolean): Mapped | null {
+	if (shownText(cell.text, emphasis) !== cover.text) return null;
+	const mapped = mapLine(cell.text, inlinePieces(cell.text, emphasis), cover.from, cover.to);
+	return shownText(mapped.source, emphasis) === mapped.shown ? mapped : null;
+}
+
+/**
+ * A table the selection has text in, cut to what it touches: the covered text of the one cell it lies in, or a table of the rows
+ * and columns between its start cell and its end cell. `undefined` when the rows are to be taken whole (the selection reaches
+ * outside the table, or the records disagree with what is drawn).
+ */
+function tableSlice(source: readonly string[], group: readonly LeafPick[]): Piece | null | undefined {
+	const table = group[0]?.leaf.table;
+	if (table === undefined || group.some(pick => pick.whole !== false || pick.cells === undefined)) return undefined;
+	const withText = group.filter(pick => (pick.cells as readonly CellCover[]).length > 0);
+	const firstPick = withText[0];
+	const lastPick = withText[withText.length - 1];
+	if (firstPick === undefined || lastPick === undefined) return undefined;
+	const rows = group.slice(group.indexOf(firstPick), group.indexOf(lastPick) + 1);
+	const lineOf = (pick: LeafPick): LeafLine | undefined => pick.leaf.lines[0];
+	if (!rows.every(pick => { const line = lineOf(pick); return line !== undefined && lineHolds(source, line); }) || !lineHolds(source, table.header) || !lineHolds(source, table.separator)) return undefined;
+	const touched = withText.flatMap(pick => (pick.cells as readonly CellCover[]).map(cover => ({ pick, cover })));
+	const start = touched[0];
+	const end = touched[touched.length - 1];
+	if (start === undefined || end === undefined) return undefined;
+	const emphasis = firstPick.leaf.emphasis;
+	const prefix = quotePrefix(table.header.quote);
+	const cellAt = (pick: LeafPick, column: number): TableCell | undefined => splitTableCells((lineOf(pick) as LeafLine).text)[column];
+
+	if (touched.length === 1) {
+		const cell = cellAt(start.pick, start.cover.column);
+		const covered = start.cover.text.slice(start.cover.from, start.cover.to);
+		const cut = cell === undefined ? null : cutCell(cell, start.cover, emphasis);
+		if (cut === null) return plainPiece(start.pick.leaf, covered);
+		return cut.source.trim().length === 0 ? null : { lines: [`${prefix}${cut.source}`], first: start.pick.leaf.first, last: start.pick.leaf.last, firstQuote: table.header.quote, lastQuote: table.header.quote, plain: false };
+	}
+
+	const low = Math.min(start.cover.column, end.cover.column);
+	const high = Math.max(start.cover.column, end.cover.column);
+	/** A row of the table cut to the columns `low..high`: whole cells as written, the two edge cells cut to the text covered. */
+	const rowText = (line: LeafLine): string | undefined => {
+		const cells = splitTableCells(line.text);
+		const out: string[] = [];
+		for (let column = low; column <= high; column++) {
+			const cell = cells[column];
+			const edge = [start, end].find(entry => lineOf(entry.pick) === line && entry.cover.column === column);
+			if (edge === undefined) {
+				out.push(cell?.source ?? "");
+				continue;
+			}
+			const cut = cell === undefined ? null : cutCell(cell, edge.cover, emphasis);
+			if (cut === null || cell === undefined) return undefined;
+			out.push(edge.cover.from === 0 && edge.cover.to === edge.cover.text.length ? cell.source : escapeTableCell(cut.source));
+		}
+		return `${prefix}| ${out.join(" | ")} |`;
+	};
+	const separatorCells = splitTableCells(table.separator.text);
+	const separator = `${prefix}| ${Array.from({ length: high - low + 1 }, (_, index) => separatorCells[low + index]?.source || "---").join(" | ")} |`;
+	const lines = [rowText(table.header), separator, ...rows.filter(pick => pick.leaf.header !== true).map(pick => rowText(lineOf(pick) as LeafLine))];
+	if (lines.some(line => line === undefined)) return undefined;
+	// A header the selection touches is the header leaf itself, whose line is `table.header`.
+	const lastRow = rows[rows.length - 1] as LeafPick;
+	return { lines: lines as string[], first: table.header.line, last: lastRow.leaf.header === true ? table.separator.line : lastRow.leaf.last, firstQuote: table.header.quote, lastQuote: table.header.quote, plain: false };
+}
+
 /** The blank line between two pieces of one surface that are not on neighbouring source lines: a bare line at the shallower quote depth. */
 function gapLine(depth: number): string {
 	return Array.from({ length: depth }, () => ">").join(" ");
@@ -173,7 +259,28 @@ export function quoteSurface(source: readonly string[], picks: readonly LeafPick
 	const emitted = new Set<LeafTable>();
 	let plain = false;
 	let previous: Piece | null = null;
-	for (const pick of picks) {
+	const add = (piece: Piece | null): void => {
+		if (piece === null) return;
+		if (piece.plain) plain = true;
+		if (previous !== null && piece.first - previous.last > 1) out.push(gapLine(Math.min(previous.lastQuote, piece.firstQuote)));
+		out.push(...piece.lines);
+		previous = piece;
+	};
+	for (let at = 0; at < picks.length; ) {
+		const pick = picks[at] as LeafPick;
+		const table = pick.leaf.kind === "row" ? pick.leaf.table : undefined;
+		if (table !== undefined) {
+			// The rows of one table are neighbours in the picks: they are cut together.
+			let upTo = at + 1;
+			while (upTo < picks.length && (picks[upTo] as LeafPick).leaf.table === table) upTo++;
+			const group = picks.slice(at, upTo);
+			at = upTo;
+			const slice = tableSlice(source, group);
+			if (slice !== undefined) add(slice);
+			else for (const row of group) add(rowPiece(row.leaf, emitted));
+			continue;
+		}
+		at++;
 		let piece: Piece | null;
 		try {
 			piece = pick.leaf.kind === "text" ? textPiece(source, pick) : pick.leaf.kind === "code" ? codePiece(source, pick) : pick.leaf.kind === "rule" ? rulePiece(pick.leaf) : rowPiece(pick.leaf, emitted);
@@ -181,11 +288,7 @@ export function quoteSurface(source: readonly string[], picks: readonly LeafPick
 			if (!(error instanceof MismatchError)) throw error;
 			piece = plainPiece(pick.leaf, pick.text.slice(pick.from, pick.to));
 		}
-		if (piece === null) continue;
-		if (piece.plain) plain = true;
-		if (previous !== null && piece.first - previous.last > 1) out.push(gapLine(Math.min(previous.lastQuote, piece.firstQuote)));
-		out.push(...piece.lines);
-		previous = piece;
+		add(piece);
 	}
 	return { markdown: out.join("\n"), plain };
 }

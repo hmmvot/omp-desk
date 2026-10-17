@@ -16,6 +16,8 @@ let leavesOf: (source: string, emphasis?: boolean) => { id: number; kind: string
 let captureDisagreeing: (source: string) => { markdown: string; plain: boolean };
 /** Every `[from, to)` with `from > 0` of every text leaf of `source`, alone: how many degraded, and the ranges whose slice did not show the text it covers, as `[markdown, covered]`. */
 let sliceFailures: (source: string, emphasis?: boolean) => { checked: number; degraded: number; failures: string[][] };
+/** Every `[from, to)` of every cell of every table of `source`, alone: as `sliceFailures` reports a text leaf. */
+let cellFailures: (source: string) => { checked: number; degraded: number; failures: string[][] };
 /** Streams `text` in the given prefix lengths and returns the leaves of each step. */
 let leavesStreamed: (text: string, lengths: readonly number[]) => { id: number }[][];
 
@@ -24,7 +26,9 @@ before(async () => {
 		import { parseMarkdown } from "./components/Markdown";
 		import { quoteSurface } from "./lib/quote-capture";
 		import { inlinePieces } from "./lib/markdown-inline";
-		const shown = leaf => leaf.kind === "text" ? leaf.lines.map(line => inlinePieces(line.text, leaf.emphasis).map(piece => piece.visible).join("")).join("") : leaf.kind === "code" ? leaf.lines.map(line => line.text).join("\\n") : leaf.lines[0].text;
+		import { splitTableCells } from "./lib/markdown-table";
+		const cellsOf = leaf => { const wanted = splitTableCells(leaf.table.header.text).length; const cells = splitTableCells(leaf.lines[0].text); return Array.from({ length: wanted }, (_, column) => cells[column] ? inlinePieces(cells[column].text, leaf.emphasis).map(piece => piece.visible).join("") : ""); };
+		const shown = leaf => leaf.kind === "text" ? leaf.lines.map(line => inlinePieces(line.text, leaf.emphasis).map(piece => piece.visible).join("")).join("") : leaf.kind === "code" ? leaf.lines.map(line => line.text).join("\\n") : leaf.kind === "row" ? cellsOf(leaf).join("\\t") : leaf.lines[0].text;
 		const model = (source, emphasis = true) => {
 			const parsed = parseMarkdown(source, null, true, emphasis);
 			let at = 0;
@@ -39,11 +43,25 @@ before(async () => {
 			if (upTo < 0) throw new Error("end not found: " + end);
 			const to = upTo + end.length;
 			const picks = [];
+			const tables = new Map();
+			for (const { leaf, text, start: at } of entries) if (leaf.kind === "row") { const span = tables.get(leaf.table) ?? [at, at]; span[1] = at + text.length; tables.set(leaf.table, span); }
 			for (const { leaf, text, start: at } of entries) {
 				const lo = Math.max(from, at) - at;
 				const hi = Math.min(to, at + text.length) - at;
 				if (hi <= lo) continue;
-				picks.push(leaf.kind === "text" || leaf.kind === "code" ? { leaf, text, from: lo, to: hi } : { leaf, text: "", from: 0, to: 0 });
+				if (leaf.kind === "row") {
+					const cells = [];
+					let cellStart = 0;
+					cellsOf(leaf).forEach((cell, column) => {
+						const a = Math.max(lo, cellStart);
+						const b = Math.min(hi, cellStart + cell.length);
+						if (b > a) cells.push({ column, text: cell, from: a - cellStart, to: b - cellStart });
+						cellStart += cell.length + 1;
+					});
+					const [tableStart, tableEnd] = tables.get(leaf.table);
+					const whole = (from < tableStart && document.slice(from, tableStart).trim() !== "") || (to > tableEnd && document.slice(tableEnd, to).trim() !== "");
+					picks.push({ leaf, text: "", from: 0, to: 0, cells, whole });
+				} else picks.push(leaf.kind === "text" || leaf.kind === "code" ? { leaf, text, from: lo, to: hi } : { leaf, text: "", from: 0, to: 0 });
 			}
 			return quoteSurface(source.split(/\\r?\\n/), picks);
 		};
@@ -67,6 +85,27 @@ before(async () => {
 			}
 			return { checked, degraded, failures };
 		};
+		export const cellFailures = source => {
+			let checked = 0;
+			let degraded = 0;
+			const failures = [];
+			const lines = source.split(/\\r?\\n/);
+			const bare = text => text.replace(/^(?:> ?)+/, "");
+			for (const { leaf } of model(source)) {
+				if (leaf.kind !== "row") continue;
+				cellsOf(leaf).forEach((text, column) => {
+					for (let from = 0; from < text.length; from++) for (let to = from + 1; to <= text.length; to++) {
+						if (text.slice(from, to).trim().length === 0) continue;
+						checked++;
+						const result = quoteSurface(lines, [{ leaf, text: "", from: 0, to: 0, cells: [{ column, text, from, to }], whole: false }]);
+						const back = result.markdown.split("\\n").map(bare).map(line => result.plain ? line : inlinePieces(line, true).map(piece => piece.visible).join("")).join("");
+						if (result.plain) degraded++;
+						if (back !== text.slice(from, to)) failures.push([result.markdown, text.slice(from, to)]);
+					}
+				});
+			}
+			return { checked, degraded, failures };
+		};
 		export const leavesStreamed = (text, lengths) => {
 			let previous = null;
 			return lengths.map(length => {
@@ -77,9 +116,9 @@ before(async () => {
 		};
 	`, loader: "ts", resolveDir: join(process.cwd(), "src/webview") }, bundle: true, write: false,
 	format: "cjs", platform: "node", packages: "external", jsx: "automatic", define: { "process.env.NODE_ENV": '"production"' } });
-	const module = { exports: {} as { capture: Capture; leavesOf: typeof leavesOf; captureDisagreeing: typeof captureDisagreeing; sliceFailures: typeof sliceFailures; leavesStreamed: typeof leavesStreamed } };
+	const module = { exports: {} as { capture: Capture; leavesOf: typeof leavesOf; captureDisagreeing: typeof captureDisagreeing; sliceFailures: typeof sliceFailures; cellFailures: typeof sliceFailures; leavesStreamed: typeof leavesStreamed } };
 	new Function("require", "module", "exports", bundled.outputFiles[0]!.text)(createRequire(import.meta.url), module, module.exports);
-	({ capture, leavesOf, captureDisagreeing, sliceFailures, leavesStreamed } = module.exports);
+	({ capture, leavesOf, captureDisagreeing, sliceFailures, cellFailures, leavesStreamed } = module.exports);
 });
 
 const md = (source: string, start: string, end: string): string => capture(source, start, end).markdown;
@@ -178,11 +217,54 @@ describe("the Markdown of a selection", () => {
 		assert.equal(md("- item\n\n  ```py\n  x = 1\n  ```", "item", "x = 1"), "- item\n\n```py\nx = 1\n```");
 	});
 
-	it("keeps a table's header and separator with the rows touched, and a rule", () => {
+	it("keeps a rule, and a table whole when the selection starts or ends outside it", () => {
 		const table = "intro\n\n| a | b |\n| - | - |\n| 1 | 2 |\n| 3 | 4 |\n\nafter";
-		assert.equal(md(table, "3 |", "4 |"), "| a | b |\n| - | - |\n| 3 | 4 |");
-		assert.equal(md(table, "intro", "3 |"), "intro\n\n| a | b |\n| - | - |\n| 1 | 2 |\n| 3 | 4 |");
+		assert.equal(md(table, "intro", "3"), "intro\n\n| a | b |\n| - | - |\n| 1 | 2 |\n| 3 | 4 |", "a selection that starts before the table takes the rows it reaches whole");
+		assert.equal(md(table, "3", "after"), "| a | b |\n| - | - |\n| 3 | 4 |\n\nafter", "and so does one that ends after it");
 		assert.equal(md("above\n\n---\n\nbelow", "above", "below"), "above\n\n---\n\nbelow");
+	});
+
+	describe("a table", () => {
+		const table = "intro\n\n| alpha | beta | gamma |\n| :-- | :-: | --: |\n| 1 | **two** and x | 3 |\n| 4 | five | 6 \\| z |\n\nafter";
+
+		it("quotes the selected text of one cell and nothing of the table", () => {
+			assert.equal(md(table, "wo", "an"), "wo an", "a cut token is its shown text");
+			assert.equal(md(table, "two", " and"), "**two** and", "a token the selection covers whole is source");
+			assert.equal(md(table, "two", "x"), "**two** and x");
+			assert.equal(md(table, "bet", "a"), "beta", "a header cell is quoted the same way");
+			assert.equal(md(table, "6", "z"), "6 | z", "a pipe the cell escaped is a plain pipe once the cell stands alone");
+			assert.equal(md(table, "iv", "e"), "ive");
+			assert.equal(md("> | alpha | beta |\n> | - | - |\n> | one | two |", "lp", "ha"), "> lpha", "a table inside a quote keeps the quote");
+		});
+
+		it("keeps a table of the columns between the start cell and the end cell, the two edge cells cut to the selection", () => {
+			assert.equal(md(table, "wo", "3"), "| beta | gamma |\n| :-: | --: |\n| wo and x | 3 |");
+			assert.equal(md(table, "two", "3"), "| beta | gamma |\n| :-: | --: |\n| **two** and x | 3 |", "an edge cell the selection covers whole is source");
+			assert.equal(md(table, "1", "wo"), "| alpha | beta |\n| :-- | :-: |\n| 1 | **two** |", "the end cell is cut to the selected text, and a token it covers whole is source");
+			assert.equal(md(table, "1", "tw"), "| alpha | beta |\n| :-- | :-: |\n| 1 | tw |", "a token the end cell cuts is its shown text");
+			assert.equal(md(table, "five", "6 |"), "| beta | gamma |\n| :-: | --: |\n| five | 6 \\| |", "a pipe in a cut cell is escaped again");
+			assert.equal(md(table, "five", "z"), "| beta | gamma |\n| :-: | --: |\n| five | 6 \\| z |", "an uncut cell keeps its source, escapes included");
+		});
+
+		it("keeps the rectangle between the start cell and the end cell across rows", () => {
+			assert.equal(md(table, "two", "five"), "| beta |\n| :-: |\n| **two** and x |\n| five |", "one column, two rows: still a table");
+			assert.equal(md(table, "3", "4"), "| alpha | beta | gamma |\n| :-- | :-: | --: |\n| 1 | **two** and x | 3 |\n| 4 | five | 6 \\| z |", "the start cell is right of the end cell: the columns are the range between them");
+			assert.equal(md(table, "lph", "wo"), "| lpha | beta |\n| :-- | :-: |\n| 1 | **two** |", "the start cell is cut from the selection point to its end, in the header too");
+		});
+
+		it("takes the touched rows whole when the selection starts before the table or ends after it", () => {
+			assert.equal(md(table, "intro", "five"), "intro\n\n| alpha | beta | gamma |\n| :-- | :-: | --: |\n| 1 | **two** and x | 3 |\n| 4 | five | 6 \\| z |");
+			assert.equal(md(table, "five", "after"), "| alpha | beta | gamma |\n| :-- | :-: | --: |\n| 4 | five | 6 \\| z |\n\nafter");
+		});
+
+		it("shows the text of every cell range, whole and cut, without degrading", () => {
+			for (const source of [table, "| a **b** `c` | [l](https://example.com) _d_ |\n| - | - |\n| *e* f | g ~~h~~ |", "> | alpha | **beta** |\n> | - | - |\n> | one | two |"]) {
+				const result = cellFailures(source);
+				assert.ok(result.checked > 10, source);
+				assert.deepEqual(result.failures, [], source);
+				assert.equal(result.degraded, 0, source);
+			}
+		});
 	});
 
 	it("degrades a leaf whose record disagrees with what is drawn to its shown text, and says so", () => {

@@ -4036,6 +4036,35 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		await t.test("a selection inside one table cell quotes that cell's text alone; across cells it quotes a table narrowed to the touched columns; from outside the table it takes the rows whole", async () => {
+			await reset("quote-capture-table");
+			const table = ["Before.", "| name | kind | note |\n| :-- | :-: | --: |\n| **Всё — параметры** | text | a \\| b |\n| beta | code | `x` |", "After."].join("\n\n");
+			await showMessages([assistantMessage([{ type: "text", text: table }])]);
+			await ui.wait("document.querySelector('.omp-md table') && document.querySelectorAll('.omp-md tbody tr').length===2");
+			/** Selects the whole content of body cell (`row`, `column`); `overshoot` ends the range at the start of the next cell, as a triple click does. */
+			const quoteCell = (row: number, column: number, overshoot: boolean): Promise<Captured> => ui.evaluate(`(()=>{
+			 const cells=[...document.querySelectorAll('.omp-md tbody tr')[${row}].children];
+			 const range=document.createRange();range.selectNodeContents(cells[${column}]);
+			 if(${overshoot})range.setEnd(cells[${column + 1}],0);
+			 const selection=getSelection();selection.removeAllRanges();selection.addRange(range);
+			 return window.captureQuote()})()`);
+			const only = async (result: Promise<Captured>): Promise<string> => {
+				const quote = await result;
+				assert.equal(quote.kind, "quote", quote.kind === "none" ? quote.message : undefined);
+				assert.equal(quote.kind === "quote" && quote.plain, false, "nothing degraded");
+				return quote.kind === "quote" ? quote.source : "";
+			};
+			assert.equal(await only(quoteCell(0, 0, false)), "**Всё — параметры**", "a whole bold run stays bold source, with no header, separator or pipes");
+			assert.equal(await only(quoteCell(0, 0, true)), "**Всё — параметры**", "a range that ends at the start of the next cell (a triple click) still lies in one cell");
+			assert.equal(await only(quoteCell(0, 2, false)), "a | b", "an escaped pipe is a plain pipe once the cell stands alone");
+			assert.equal(await quotedMarkdown("— п", "ар"), "— пар", "a token the selection cuts is its shown text");
+			assert.equal(await quotedMarkdown("text", "a |"), "| kind | note |\n| :-: | --: |\n| text | a \\| |", "across two cells of a row: the two columns, the end cell cut");
+			assert.equal(await quotedMarkdown("text", "beta"), "| name | kind |\n| :-- | :-: |\n| **Всё — параметры** | text |\n| beta | code |", "across two rows: the rectangle between the two cells");
+			assert.equal(await quotedMarkdown("Before", "beta"), "Before.\n\n| name | kind | note |\n| :-- | :-: | --: |\n| **Всё — параметры** | text | a \\| b |\n| beta | code | `x` |", "from outside the table the rows are whole");
+			assert.equal(await quotedMarkdown("beta", "After."), "| name | kind | note |\n| :-- | :-: | --: |\n| beta | code | `x` |\n\nAfter.", "and so are the rows of a selection that ends after it");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("a selection across a user message, a tool row and a reply quotes the two messages and nothing of the tool; chrome, whitespace, a collapsed range and the composer are not quotable", async () => {
 			await reset("quote-capture-rows");
 			await showMessages([

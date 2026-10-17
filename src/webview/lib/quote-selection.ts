@@ -4,7 +4,7 @@
  * the leaves to `quote-capture.ts`. Everything the Range crosses that is not a quotable message (tool rows, output, notices,
  * buttons) contributes nothing, and the page never reads `innerText`.
  */
-import { joinSurfaces, quoteSurface, type LeafPick, type QuotedMarkdown } from "./quote-capture.ts";
+import { joinSurfaces, quoteSurface, type CellCover, type LeafPick, type QuotedMarkdown } from "./quote-capture.ts";
 import { registeredMarkdown } from "./markdown-leaves.ts";
 import { requestQuote } from "./quote-sink.ts";
 import type { Leaf } from "./markdown-leaves.ts";
@@ -66,13 +66,50 @@ function unknownLeaf(id: number): Leaf {
 	return { id, kind: "text", lines: [], first: Number.NEGATIVE_INFINITY, last: Number.NEGATIVE_INFINITY, emphasis: true };
 }
 
+/** The cells of the table row `row` that `range` has text in, with the part of each it covers. */
+function coveredCells(range: Range, row: Element): CellCover[] {
+	const cells: CellCover[] = [];
+	Array.from(row.children).forEach((cell, column) => {
+		if (!crosses(range, cell)) return;
+		const covered = coveredText(range, cell);
+		if (covered.to > covered.from) cells.push({ column, ...covered });
+	});
+	return cells;
+}
+
+/** Whether `range` starts before `table` with text in front of it, or ends after it with text behind it: a table the selection only enters or leaves is quoted by whole rows. */
+function reachesOutside(range: Range, table: Element): boolean {
+	const inner = document.createRange();
+	inner.selectNodeContents(table);
+	if (range.compareBoundaryPoints(Range.START_TO_START, inner) < 0) {
+		const before = document.createRange();
+		before.setStart(range.startContainer, range.startOffset);
+		before.setEnd(inner.startContainer, inner.startOffset);
+		if (before.toString().trim().length > 0) return true;
+	}
+	if (range.compareBoundaryPoints(Range.END_TO_END, inner) > 0) {
+		const after = document.createRange();
+		after.setStart(inner.endContainer, inner.endOffset);
+		after.setEnd(range.endContainer, range.endOffset);
+		if (after.toString().trim().length > 0) return true;
+	}
+	return false;
+}
+
 function picksOf(range: Range, root: Element, leaves: readonly Leaf[]): LeafPick[] {
 	const picks: LeafPick[] = [];
+	const outside = new Map<Element, boolean>();
 	for (const element of root.querySelectorAll("[data-md-leaf]")) {
 		if (!crosses(range, element)) continue;
 		const id = Number(element.getAttribute("data-md-leaf"));
 		const leaf = leaves[id] ?? unknownLeaf(id);
-		if (leaf.kind === "rule" || leaf.kind === "row") {
+		if (leaf.kind === "row") {
+			const table = element.closest("table");
+			if (table !== null && !outside.has(table)) outside.set(table, reachesOutside(range, table));
+			picks.push({ leaf, text: "", from: 0, to: 0, cells: coveredCells(range, element), whole: table === null || outside.get(table) === true });
+			continue;
+		}
+		if (leaf.kind === "rule") {
 			picks.push({ leaf, text: "", from: 0, to: 0 });
 			continue;
 		}

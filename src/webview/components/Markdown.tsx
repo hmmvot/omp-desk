@@ -19,6 +19,7 @@ import type { ReactNode } from "react";
 import { Fragment, memo, useLayoutEffect, useMemo, useRef } from "react";
 import { INLINE_TOKEN, MAX_EMPHASIS_DEPTH, USER_INLINE_TOKEN } from "../lib/markdown-inline.ts";
 import { LeafCollector, registerMarkdown, unregisterMarkdown, type Leaf, type LeafLine, type LeafTable, type LineOrigin } from "../lib/markdown-leaves.ts";
+import { splitTableCells } from "../lib/markdown-table.ts";
 import { detectChatFileLinks, fileTargetOfHref, isFileLinkCandidate } from "../lib/chat-file-links";
 import { detectWebLinks } from "../lib/chat-web-links";
 import { parseBareFileName, parseCodeSymbol } from "../../shared/code-symbols";
@@ -185,26 +186,7 @@ function renderLines(lines: readonly string[], keyPrefix: string, emphasis: bool
 
 /** Split a table row on unescaped pipes, dropping the optional edge pipes. */
 function splitTableRow(line: string): string[] {
-	const cells: string[] = [];
-	let current = "";
-	for (let i = 0; i < line.length; i++) {
-		const ch = line[i] as string;
-		if (ch === "\\" && i + 1 < line.length) {
-			current += line[i + 1] as string;
-			i++;
-			continue;
-		}
-		if (ch === "|") {
-			cells.push(current);
-			current = "";
-			continue;
-		}
-		current += ch;
-	}
-	cells.push(current);
-	if (cells.length > 1 && (cells[0] as string).trim() === "") cells.shift();
-	if (cells.length > 1 && (cells[cells.length - 1] as string).trim() === "") cells.pop();
-	return cells.map(cell => cell.trim());
+	return splitTableCells(line).map(cell => cell.text);
 }
 
 /** Column width of leading whitespace, with tabs as four columns. */
