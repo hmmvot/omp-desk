@@ -15,6 +15,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import * as fsSync from "node:fs";
+import * as fsp from "node:fs/promises";
 import { localFs } from "./local-fs.ts";
 import * as path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -913,6 +914,87 @@ export async function claimHolderMayBeAlive(observed: ObservedClaim): Promise<bo
 function generationMatches(observed: ObservedClaim, creationTime: string): boolean {
 	if (observed.processCreationTime != null) return creationTime === observed.processCreationTime;
 	return observed.createdAt !== null && Date.parse(creationTime) <= Date.parse(observed.createdAt);
+}
+
+/**
+ * `true` only when the extension host that filed this claim is *provably* gone.
+ *
+ * {@link claimHolderMayBeAlive} answers "may it be alive" and treats every missing reading as "no". That is the right
+ * default for refusing a rival, and the wrong one for deleting a claim: a start time that could not be read is not
+ * evidence of death. This verdict needs a positive fact: the holder's process does not exist (the system says no such
+ * process, not a refusal to be probed), the pid now belongs to a process that started after the claim was filed, or the
+ * claim names a holder this process never minted under its own pid. An unreadable record, a record with no holder lease,
+ * and a process whose start time could not be read are never gone.
+ */
+export async function claimHolderProvablyGone(observed: ObservedClaim): Promise<boolean> {
+	if (!observed.verifiable || observed.pid === null || observed.holderId === null) return false;
+	if (!Number.isInteger(observed.pid) || observed.pid <= 0) return false;
+	if (localClaims.has(observed.claimPath)) return false;
+	if (observed.pid === process.pid) return !liveHolderIds.has(observed.holderId);
+	try {
+		process.kill(observed.pid, 0);
+	} catch (error) {
+		return isErrorCode(error, "ESRCH");
+	}
+	const creationTime = await readProcessCreationTime(observed.pid);
+	return creationTime !== null && !generationMatches(observed, creationTime);
+}
+
+/**
+ * Every claim file under `storageDir` that holds a readable record filed under its own name.
+ *
+ * A file that is not a readable claim (a staging file, another build's record, a corrupt one) is left out: it is never
+ * evidence that anything is free, and nothing here touches it.
+ */
+export async function listClaims(storageDir: string): Promise<readonly ObservedClaim[]> {
+	const directory = claimsDirectory(storageDir);
+	let names: string[];
+	try {
+		names = await fsp.readdir(directory);
+	} catch (error) {
+		if (isErrorCode(error, "ENOENT")) return [];
+		throw error;
+	}
+	const claims: ObservedClaim[] = [];
+	for (const name of names) {
+		if (!name.endsWith(CLAIM_FILE_SUFFIX)) continue;
+		const claimPath = path.join(directory, name);
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(await localFs(claimPath).readFile(claimPath, "utf8"));
+		} catch {
+			continue;
+		}
+		if (!isClaimRecord(parsed) || claimFilePath(storageDir, parsed.normalizedIdentity) !== claimPath) continue;
+		claims.push(observedClaim(claimPath, parsed.normalizedIdentity, parsed));
+	}
+	return claims;
+}
+
+/**
+ * Delete the claim file `observed` was read from, only while it is still that very record and its holder is still
+ * provably gone, under the identity's mutation lock.
+ *
+ * A window that took the identity meanwhile (a launch, an attach, a restore) replaced the record under the same lock, so
+ * the re-read here sees a different holder and nothing is removed. A busy lock is not waited out forever: the claim stays
+ * and the caller may try again later. Returns whether the file was removed.
+ */
+export async function removeClaimOfGoneHolder(observed: ObservedClaim): Promise<boolean> {
+	if (!observed.verifiable || observed.identity === null) return false;
+	const location: ClaimLocation = { identity: observed.identity, normalizedIdentity: observed.normalizedIdentity, claimPath: observed.claimPath };
+	try {
+		return await withIdentityLock(location, async () => {
+			const current = await readClaimFile(observed.claimPath, observed.normalizedIdentity);
+			if (current === null || !current.verifiable) return false;
+			if (current.holderId !== observed.holderId || current.ownerGeneration !== observed.ownerGeneration || current.createdAt !== observed.createdAt) return false;
+			if (!await claimHolderProvablyGone(current)) return false;
+			await localFs(observed.claimPath).rm(observed.claimPath, { force: true });
+			return true;
+		});
+	} catch (error) {
+		if (error instanceof ClaimBusyError) return false;
+		throw error;
+	}
 }
 
 /**

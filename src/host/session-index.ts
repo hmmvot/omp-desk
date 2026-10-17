@@ -26,12 +26,16 @@ import {
 	ClaimOwnershipError,
 	acquireClaim,
 	claimHolderMayBeAlive,
+	claimHolderProvablyGone,
+	claimPathFor,
 	createClaimHolder,
 	createDraftIdentity,
 	createOwnerGeneration,
 	normalizeClaimIdentity,
 	promoteDraftClaim,
+	listClaims,
 	readClaim,
+	removeClaimOfGoneHolder,
 } from "./session-claim.ts";
 import type { ClaimHolder, ObservedClaim, SessionClaim } from "./session-claim.ts";
 import { acceptOwnerAbsenceEvidence, classifySessionAvailability } from "./session-availability.ts";
@@ -569,6 +573,28 @@ type CapturedHostRecord = { readonly startedAt: string; readonly pid: number | n
 function recordsCapturedHost(host: CapturedHostRecord | null, captured: KilledHostCapture): boolean {
 	return host !== null && host.startedAt === captured.attemptStartedAt && host.pid === captured.hostPid &&
 		host.rpc?.slot === captured.slot && host.rpc?.brokerId === captured.brokerId && host.rpc?.brokerGeneration === captured.brokerGeneration;
+}
+
+/** Whether two host records name the same incarnation of a recorded process. */
+function sameHostIncarnation(left: CapturedHostRecord | null, right: CapturedHostRecord | null): boolean {
+	if (left === null || right === null) return left === right;
+	return left.startedAt === right.startedAt && left.pid === right.pid &&
+		(left.rpc?.slot ?? null) === (right.rpc?.slot ?? null) && (left.rpc?.brokerId ?? null) === (right.rpc?.brokerId ?? null) &&
+		(left.rpc?.brokerGeneration ?? null) === (right.rpc?.brokerGeneration ?? null) && (left.rpc?.childPid ?? null) === (right.rpc?.childPid ?? null) &&
+		(left.rpc?.childCreationTime ?? null) === (right.rpc?.childCreationTime ?? null);
+}
+
+export interface GoneRecordSweepOptions {
+	readonly reconciler: OwnerReconciler;
+	/** Whether the row is this window's own responsibility right now (its activation cohort, a host or an editor it holds); such a row is never touched. */
+	readonly ownedHere: (tabId: string) => boolean;
+}
+
+export interface GoneRecordSweepReport {
+	/** Rows whose recorded process was proven gone and whose record of it was cleared. */
+	readonly cleared: readonly string[];
+	/** Claim files deleted because their holder is provably gone and no row names them. */
+	readonly orphanClaims: number;
 }
 
 export interface RemoveResult {
@@ -1542,6 +1568,111 @@ export class SessionIndex {
 		}
 		if (reconciled.length > 0) await this.#persist();
 		return { order, reconciled, running, persistError: this.#persistError };
+	}
+
+	/**
+	 * Settle the records a window that is gone left behind, for rows this window is not responsible for.
+	 *
+	 * A row whose process ended while no window watched it (the window was closed, or never recorded the exit) keeps its
+	 * recorded host and its claim, and no window's startup pass looks at it: startup restores only the rows a window holds
+	 * an editor or a host for. The row is not wrong, it reads "Stopped" and Resume works, but the record names a process
+	 * that no longer exists and a claim nobody can release. This pass, started once per activation and after the startup
+	 * restore, clears both. It starts nothing, stops nothing and never changes a run intent: a row that was running stays
+	 * `running`, so a window that later holds an editor for it relaunches it like any row whose process ended abnormally.
+	 *
+	 * A row is touched only when all of this holds, each fact read again under the row's lifecycle:
+	 * - it records a host, and this window does not own it (`ownedHere`) nor launch, restore or drive it;
+	 * - its claim is absent or its holder is *provably* gone ({@link claimHolderProvablyGone}), so a window that holds the
+	 *   row, launches it or attaches to it, whichever window it is, is left alone;
+	 * - the reconciler proves the exact recorded process gone (`recorded-broker-and-child-gone`, or the broker's own report
+	 *   that the child exited), validated against the row like a relaunch is;
+	 * - this window then takes the claim (a window that acquires it meanwhile makes this pass step back) and the host is
+	 *   cleared with a write that is refused when the committed row no longer records that same process, so a replacement
+	 *   another window published is never cleared.
+	 *
+	 * Afterwards every claim file whose holder is provably gone and which no row names is deleted.
+	 */
+	async sweepGoneRecords(options: GoneRecordSweepOptions): Promise<GoneRecordSweepReport> {
+		const cleared: string[] = [];
+		for (const tabId of this.list().map(entry => entry.tabId)) {
+			const row = this.#entries.get(tabId);
+			if (row === undefined || row.host === null || options.ownedHere(tabId) || this.#drivesRow(tabId)) continue;
+			const done = await this.withinTabLifecycle(tabId, undefined, async () => await this.#clearGoneHostHeld(tabId, options));
+			if (done) cleared.push(tabId);
+		}
+		return { cleared, orphanClaims: await this.#removeOrphanClaims() };
+	}
+
+	/** Whether this window runs, launches or restores the row: the states in which another operation owns its record. */
+	#drivesRow(tabId: string): boolean {
+		return this.#live.has(tabId) || this.#restoring.has(tabId) || this.#launching.has(tabId);
+	}
+
+	/** One row's cleared host; the caller holds the row's lifecycle. `false` when the row is not this pass's to settle. */
+	async #clearGoneHostHeld(tabId: string, options: GoneRecordSweepOptions): Promise<boolean> {
+		const entry = this.#entries.get(tabId);
+		if (entry === undefined || entry.host === null || options.ownedHere(tabId) || this.#drivesRow(tabId)) return false;
+		const recorded: CapturedHostRecord = { startedAt: entry.host.startedAt, pid: entry.host.pid, rpc: entry.host.rpc === undefined || entry.host.rpc === null ? null : { ...entry.host.rpc } };
+		const identity = entry.sessionFile ?? entry.ownership?.draftIdentity ?? null;
+		if (identity === null) return false;
+		const observed = await this.#readClaim(identity);
+		if (!observed.ok) return false;
+		if (observed.claim !== null && !(await claimHolderProvablyGone(observed.claim))) return false;
+		const verdict = await this.#reconcile(entry, observed.claim, options.reconciler);
+		if (verdict.kind !== "free" || !verdict.evidence.some(item =>
+			(item.kind === "recorded-broker-and-child-gone" || item.kind === "broker-child-exited") && acceptOwnerAbsenceEvidence(toEntry(entry), item))) return false;
+		// The proof took awaits: the row, and what this window does with it, are read again before anything is written.
+		const current = this.#entries.get(tabId);
+		if (current === undefined || !sameHostIncarnation(current.host, recorded) || options.ownedHere(tabId) || this.#drivesRow(tabId)) return false;
+		let claim: SessionClaim;
+		try {
+			claim = await acquireClaim(this.#claimStorageDir, identity, current.ownership?.ownerGeneration ?? createOwnerGeneration(), await this.#claimHolderReady);
+		} catch (error) {
+			if (!(error instanceof ClaimConflictError)) this.#log?.warn(`gone-record sweep: the claim of ${tabId} could not be taken: ${describeError(error)}`);
+			return false;
+		}
+		const failure = await this.#persistNow(undefined, undefined, {
+			tabId,
+			matches: host => sameHostIncarnation(host, recorded),
+			apply: row => { row.host = null; },
+			publish: () => {
+				const row = this.#entries.get(tabId);
+				if (row === undefined || !sameHostIncarnation(row.host, recorded)) return;
+				row.host = null;
+				row.availability = row.sessionFile === null ? "draft" : "saved";
+				row.detail = "The process this session recorded has ended. Resume to continue.";
+			},
+		});
+		await this.#releaseQuietly(claim);
+		if (failure === HOST_CHANGED) {
+			await this.refreshFromStore().catch(() => undefined);
+			return false;
+		}
+		return failure === null;
+	}
+
+	/** Delete every claim file whose holder is provably gone and which no row, here or in the committed record, names. */
+	async #removeOrphanClaims(): Promise<number> {
+		const named = new Set<string>();
+		const name = (identity: string | null | undefined): void => {
+			if (typeof identity !== "string" || identity.length === 0) return;
+			try {
+				named.add(claimPathFor(this.#claimStorageDir, identity));
+			} catch {
+				// An identity that cannot name a claim names none.
+			}
+		};
+		const committed = this.#store.get<unknown>(SESSION_INDEX_STORAGE_KEY);
+		for (const row of [...this.#entries.values(), ...(isPersistedSnapshot(committed) ? committed.entries : [])]) {
+			name(row.sessionFile);
+			name(row.ownership?.draftIdentity);
+		}
+		let removed = 0;
+		for (const claim of await listClaims(this.#claimStorageDir)) {
+			if (named.has(claim.claimPath) || !(await claimHolderProvablyGone(claim))) continue;
+			if (await removeClaimOfGoneHolder(claim)) removed++;
+		}
+		return removed;
 	}
 
 	/**

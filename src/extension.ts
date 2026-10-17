@@ -4535,6 +4535,20 @@ function startStartupRestore(context: vscode.ExtensionContext, index: SessionInd
     // Start the full runtime proof now that the attach work is done, so the first launch
     // finds it ready. It is a readiness check only: no broker, host or session starts.
     void s.ptyGate?.client();
+    // Records a window that is gone left behind for rows no window here holds are settled once, after the restore and
+    // off its critical path: it starts nothing and never changes a run intent (`SessionIndex.sweepGoneRecords`).
+    const sweep = setTimeout(() => {
+      void index.sweepGoneRecords({
+        reconciler: s.reconciler,
+        ownedHere: tabId => cohort.has(tabId) || inLocalRecoveryCohort(index, tabId),
+      }).then(report => {
+        if (report.cleared.length > 0 || report.orphanClaims > 0) {
+          log.info(`records of ended processes: cleared the recorded process of ${report.cleared.length} row(s), deleted ${report.orphanClaims} unclaimed claim file(s)`);
+          if (report.cleared.length > 0) refreshLauncher();
+        }
+      }).catch(error => log.warn(`records of ended processes: the pass failed: ${messageOf(error)}`));
+    }, GONE_RECORD_SWEEP_DELAY_MS);
+    sweep.unref();
   });
 }
 
@@ -4564,6 +4578,9 @@ const STARTUP_DEFER_CAP_MS = 120_000;
 
 /** How long after the startup restore the installed broker tree is hashed to check the build's record of its digest. */
 const PACKAGED_TREE_CHECK_DELAY_MS = 10_000;
+
+/** How long after the startup restore the records of ended processes no window holds are settled. */
+const GONE_RECORD_SWEEP_DELAY_MS = 20_000;
 
 /**
  * `null` when the window's startup restore is over; otherwise a promise that settles when it is. Reads that only paint the

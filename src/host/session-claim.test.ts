@@ -24,16 +24,19 @@ import {
 	ClaimOwnershipError,
 	acquireClaim,
 	claimHolderMayBeAlive,
+	claimHolderProvablyGone,
 	claimHolderSeemsAlive,
 	claimMutexPath,
 	claimPathFor,
 	createClaimHolder,
 	createDraftIdentity,
 	createOwnerGeneration,
+	listClaims,
 	normalizeClaimIdentity,
 	promoteDraftClaim,
 	readClaim,
 	readProcessCreationTime,
+	removeClaimOfGoneHolder,
 	setProcessProbeObserver,
 	type ClaimHolder,
 	type ProcessProbe,
@@ -572,5 +575,54 @@ describe("whether another window's holder looks alive, for display", () => {
 		assert.equal(observed?.processCreationTime, null);
 		assert.equal(await claimHolderMayBeAlive(observed!), true, "this process's own holder is live by registration");
 		await claim.release();
+	});
+});
+
+describe("claims whose holder is provably gone", () => {
+	it("calls a claim gone only on a positive fact: a missing process, never a live holder or a record that cannot be read", async () => {
+		const storageDir = await makeStorageDir();
+		const deadFile = await makeSessionFile();
+		const liveFile = await makeSessionFile();
+		await acquireClaim(storageDir, deadFile, createOwnerGeneration(), deadHostHolder());
+		const live = await acquireClaim(storageDir, liveFile, createOwnerGeneration(), holder());
+
+		assert.equal(await claimHolderProvablyGone((await readClaim(storageDir, deadFile))!), true);
+		assert.equal(await claimHolderProvablyGone((await readClaim(storageDir, liveFile))!), false);
+		const unreadable = { ...(await readClaim(storageDir, deadFile))!, verifiable: false as const, holderId: null };
+		assert.equal(await claimHolderProvablyGone(unreadable), false, "an unreadable record is never evidence");
+		await live.release();
+	});
+
+	it("lists readable claim files and leaves everything else out", async () => {
+		const storageDir = await makeStorageDir();
+		const first = await makeSessionFile();
+		const second = await makeSessionFile();
+		const claimed = await acquireClaim(storageDir, first, createOwnerGeneration(), holder());
+		await acquireClaim(storageDir, second, createOwnerGeneration(), deadHostHolder());
+		const corrupt = claimPathFor(storageDir, await makeSessionFile());
+		await writeFile(corrupt, "not a claim", "utf8");
+		await writeFile(path.join(path.dirname(corrupt), "stray.tmp"), "{}", "utf8");
+
+		const listed = await listClaims(storageDir);
+
+		assert.deepEqual(listed.map(claim => claim.normalizedIdentity).sort(), [normalizeClaimIdentity(first), normalizeClaimIdentity(second)].sort());
+		assert.deepEqual(await listClaims(path.join(storageDir, "nothing-here")), []);
+		await claimed.release();
+	});
+
+	it("deletes a gone holder's claim, but not one a live holder took over after it was read", async () => {
+		const storageDir = await makeStorageDir();
+		const file = await makeSessionFile();
+		await acquireClaim(storageDir, file, createOwnerGeneration(), deadHostHolder());
+		const observed = (await readClaim(storageDir, file))!;
+
+		const taken = await acquireClaim(storageDir, file, createOwnerGeneration(), holder());
+		assert.equal(await removeClaimOfGoneHolder(observed), false, "the record is now another holder's");
+		assert.notEqual(await readClaim(storageDir, file), null);
+		await taken.release();
+
+		await acquireClaim(storageDir, file, createOwnerGeneration(), deadHostHolder());
+		assert.equal(await removeClaimOfGoneHolder((await readClaim(storageDir, file))!), true);
+		assert.equal(await readClaim(storageDir, file), null);
 	});
 });

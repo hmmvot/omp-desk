@@ -268,24 +268,25 @@ function attachingLauncher(result: OmpHostAttachResult): RecordingLauncher {
  * file: an adopted session is never launched, so it has no recorded host and no
  * attach to test.
  */
-async function restartedWithRecordedHost(sessionId = "S-ATTACH"): Promise<{
+async function restartedWithRecordedHost(sessionId = "S-ATTACH", holder: ClaimHolder = DEAD_WINDOW): Promise<{
 	readonly claimDir: string;
 	readonly file: string;
 	readonly tabId: string;
 	readonly index: SessionIndex;
 	readonly handle: OmpHostHandle;
+	readonly store: TestStore;
 }> {
 	const { claimDir, sessionDir, cwd } = await tempWorkspace();
-	const store = new TestStore();
+	const store = new ConditionalStore();
 	const file = await makeSessionFile(sessionDir, sessionId, cwd);
 	const handle = runningHandle(sessionId);
-	const first = indexFor(store, claimDir, DEAD_WINDOW);
+	const first = indexFor(store, claimDir, holder);
 	const tab = await managedSession(first, file, cwd);
 	const started = recordingLauncher({ state: "running", host: handle });
 	const report = await first.restoreAll({ reconciler: noRecordedHost, launcher: started.launcher });
 	assert.equal(report.restored.length, 1);
 	assert.ok((await readClaim(claimDir, file)) !== null);
-	return { claimDir, file, tabId: tab.tabId, index: indexFor(store, claimDir), handle };
+	return { claimDir, file, tabId: tab.tabId, index: indexFor(store, claimDir), handle, store };
 }
 
 /** The broker transport a reconciler proves for an attachable verdict about `host`. */
@@ -4381,5 +4382,96 @@ describe("saves that queue behind each other", () => {
 		await until(() => index.persistError === null, "the background retry to persist");
 		const written = store.value as PersistedBindings;
 		assert.deepEqual(written.bindings.map(binding => binding.mode).sort(), ["terminal", "terminal"]);
+	});
+});
+
+// The records a window that is gone left behind, for rows no window here holds (`SessionIndex.sweepGoneRecords`).
+
+describe("records of ended processes that no window holds", () => {
+	const everyRowIsForeign = { ownedHere: () => false };
+
+	it("clears a recorded process proven gone and its dead claim, and keeps the run intent so a later editor relaunches it", async () => {
+		const f = await restartedWithRecordedHost("S-GHOST");
+		assert.equal(f.index.get(f.tabId)?.runIntent, "running");
+		assert.notEqual(f.index.get(f.tabId)?.host, null, "the row names the process the dead window launched");
+
+		const report = await f.index.sweepGoneRecords({ reconciler: recordedHostGone, ...everyRowIsForeign });
+
+		assert.deepEqual(report.cleared, [f.tabId]);
+		assert.equal(f.index.get(f.tabId)?.host, null);
+		assert.equal(f.index.get(f.tabId)?.runIntent, "running", "the run intent is not the sweep's to change");
+		assert.equal(await readClaim(f.claimDir, f.file), null, "the dead claim is deleted");
+		const committed = f.store.value as { entries: { tabId: string; host: unknown; runIntent: string }[] };
+		const row = committed.entries.find(entry => entry.tabId === f.tabId);
+		assert.equal(row?.host, null, "and the catalog says so");
+		assert.equal(row?.runIntent, "running");
+
+		const { launcher, requests } = recordingLauncher({ state: "running", host: runningHandle("S-GHOST") });
+		const restored = await f.index.restoreAll({ reconciler: noRecordedHost, launcher });
+		assert.equal(restored.restored.length, 1, "a window that gets an editor for the row relaunches it");
+		assert.equal(requests.length, 1);
+		await f.index.closeSession(f.tabId, { confirmedStopped: true });
+	});
+
+	it("leaves a row whose claim holder is alive, even when its recorded process looks gone", async () => {
+		const f = await restartedWithRecordedHost("S-LIVE-HOLDER", createClaimHolder());
+		const claimBefore = await readClaim(f.claimDir, f.file);
+
+		const report = await f.index.sweepGoneRecords({ reconciler: recordedHostGone, ...everyRowIsForeign });
+
+		assert.deepEqual(report.cleared, []);
+		assert.notEqual(f.index.get(f.tabId)?.host, null);
+		assert.deepEqual(await readClaim(f.claimDir, f.file), claimBefore, "the live holder's claim is untouched");
+	});
+
+	it("leaves a row this window owns, and a row the reconciler cannot prove gone", async () => {
+		const f = await restartedWithRecordedHost("S-NOT-PROVEN");
+		const claimBefore = await readClaim(f.claimDir, f.file);
+
+		assert.deepEqual((await f.index.sweepGoneRecords({ reconciler: recordedHostGone, ownedHere: tabId => tabId === f.tabId })).cleared, []);
+		for (const reconciler of [freeWithoutEvidence, liveHost, unreconcilable, attachableHost(f.handle), noRecordedHost]) {
+			assert.deepEqual((await f.index.sweepGoneRecords({ reconciler, ...everyRowIsForeign })).cleared, []);
+		}
+
+		assert.notEqual(f.index.get(f.tabId)?.host, null);
+		assert.deepEqual(await readClaim(f.claimDir, f.file), claimBefore);
+	});
+
+	it("steps back when another window takes the row's claim while the proof is read", async () => {
+		const f = await restartedWithRecordedHost("S-RACE");
+		const rival = createClaimHolder();
+		const racing: OwnerReconciler = {
+			async reconcile(request) {
+				// A window launching or attaching the row takes the dead claim over right after the proof was read.
+				await acquireClaim(f.claimDir, f.file, request.ownerGeneration, rival);
+				return await recordedHostGone.reconcile(request);
+			},
+		};
+
+		const report = await f.index.sweepGoneRecords({ reconciler: racing, ...everyRowIsForeign });
+
+		assert.deepEqual(report.cleared, []);
+		assert.notEqual(f.index.get(f.tabId)?.host, null, "the row still names its process");
+		assert.equal((await readClaim(f.claimDir, f.file))?.holderId, rival.id, "and the other window's claim is kept");
+	});
+
+	it("deletes a claim file whose holder is gone and that no row names, and keeps every other claim", async () => {
+		const { claimDir, sessionDir, cwd } = await tempWorkspace();
+		const index = indexFor(new TestStore(), claimDir);
+		const named = await managedSession(index, await makeSessionFile(sessionDir, "S-NAMED", cwd), cwd);
+		const namedFile = named.sessionFile!;
+		const orphanFile = path.join(sessionDir, "no-row-names-this.jsonl");
+		const liveOrphanFile = path.join(sessionDir, "live-holder-no-row.jsonl");
+		await acquireClaim(claimDir, namedFile, createOwnerGeneration(), DEAD_WINDOW);
+		await acquireClaim(claimDir, orphanFile, createOwnerGeneration(), DEAD_WINDOW);
+		const liveHolder = createClaimHolder();
+		await acquireClaim(claimDir, liveOrphanFile, createOwnerGeneration(), liveHolder);
+
+		const report = await index.sweepGoneRecords({ reconciler: recordedHostGone, ...everyRowIsForeign });
+
+		assert.equal(report.orphanClaims, 1);
+		assert.equal(await readClaim(claimDir, orphanFile), null, "the unnamed dead claim is gone");
+		assert.notEqual(await readClaim(claimDir, namedFile), null, "a claim a row names stays");
+		assert.equal((await readClaim(claimDir, liveOrphanFile))?.holderId, liveHolder.id, "a live holder's claim stays");
 	});
 });
