@@ -72,6 +72,8 @@ export class ChatSymbolLinks {
 	/** Tokens the host parked (not a verdict), with the time after which they may be asked again on their own. */
 	readonly #parked = new Map<string, number>();
 	readonly #listeners = new Set<() => void>();
+	/** Moves on with every retry signal of the host: a request sent before a signal that comes back `pending` was parked after the signal went out, so it is asked again instead of waiting for a signal that does not repeat. */
+	#signals = 0;
 	#disposed = false;
 
 	constructor(transport: { post(message: GuestWebviewMessage): boolean; subscribe(listener: (message: GuestHostMessage) => void): () => void }, options: ChatSymbolLinksOptions = {}) {
@@ -128,6 +130,7 @@ export class ChatSymbolLinks {
 
 	/** The host's answer for `token`; `answered` is false when it could not answer even after the one retry. */
 	async #ask(token: string, retriesLeft: number): Promise<{ link: SymbolLink | null; answered: boolean; parked?: true }> {
+		const signals = this.#signals;
 		const { promise, resolve } = Promise.withResolvers<{ status: SymbolLinkStatus; target?: string; definitions?: number; files?: true }>();
 		this.#queue.push({ token, settle: (status, target, definitions, files) => resolve({ status, ...(target === undefined ? {} : { target }), ...(definitions === undefined ? {} : { definitions }), ...(files === undefined ? {} : { files }) }) });
 		this.#scheduleFlush();
@@ -135,7 +138,11 @@ export class ChatSymbolLinks {
 		if (answer.status === "found" && answer.target !== undefined) return { link: { target: answer.target }, answered: true };
 		// Several definitions: the link is the token itself (the host re-parses it) and opens the symbol search, not a file.
 		if (answer.status === "ambiguous" && answer.definitions !== undefined) return { link: { target: token, definitions: answer.definitions, ...(answer.files === true ? { files: true as const } : {}) }, answered: true };
-		if (answer.status === "pending") return { link: null, answered: false, parked: true };
+		if (answer.status === "pending") {
+			// A pending answer uses none of the retries: the host asks again with its signal. A signal that went out while this request was in flight never saw the token parked.
+			if (this.#signals !== signals && !this.#disposed && !this.disabled) return this.#ask(token, retriesLeft);
+			return { link: null, answered: false, parked: true };
+		}
 		if (answer.status !== "unavailable") return { link: null, answered: true };
 		if (retriesLeft <= 0 || this.#disposed || this.disabled) return { link: null, answered: false };
 		const { promise: waited, resolve: done } = Promise.withResolvers<void>();
@@ -172,6 +179,7 @@ export class ChatSymbolLinks {
 	/** The host says parked tokens may be asked again: forget the parking and the cooldown of unanswered tokens, and let every mounted span ask. */
 	#retry(): void {
 		if (this.#disposed) return;
+		this.#signals++;
 		this.#parked.clear();
 		for (const [token, entry] of this.#entries) if (entry.unanswered === true) this.#entries.delete(token);
 		this.#notify();

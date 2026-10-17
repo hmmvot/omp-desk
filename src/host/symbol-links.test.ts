@@ -287,7 +287,7 @@ test("the cache is per session folder and per spelling that changes matching, an
 	assert.deepEqual(both, [{ status: "none" }, { status: "none" }]);
 });
 
-test("invalidation drops cached answers and fences lookups that were running: they return unavailable and cache nothing", async () => {
+test("invalidation drops cached answers and fences lookups that were running: they wait (pending) and cache nothing", async () => {
 	const release: (() => void)[] = [];
 	let version = 1;
 	const asked: string[] = [];
@@ -303,7 +303,7 @@ test("invalidation drops cached answers and fences lookups that were running: th
 	await tick();
 	assert.equal(asked.length, 2, "a new generation never joins the old lookup");
 	release[0]!(); release[1]!();
-	assert.deepEqual(await stale, { status: "unavailable" }, "the old answer is not delivered");
+	assert.deepEqual(await stale, { status: "pending" }, "the old answer is not delivered, and is no failure either");
 	assert.deepEqual(await fresh, { status: "found", target: "New.cs:3:5" });
 	await resolver.resolve(symbol("Session"), scope);
 	assert.equal(asked.length, 2, "the fresh answer was cached, the stale one did not replace it");
@@ -409,7 +409,7 @@ test("without a file search a bare file name is just a symbol candidate or nothi
 	const moved = host();
 	const second = new SymbolLinkResolver(provider({}).source, { files: new FileNameLinkResolver({ find: async () => { second.invalidate(); return { paths: [`${CWD}\\Old\\Loader.cs`], truncated: false }; } }, { isFile: async () => false }) });
 	await handleSymbolLinks({ type: "omp:terminal-link-symbols", requestId: 2, tokens: ["Loader.cs"] }, moved.host, second);
-	assert.deepEqual(moved.replies[0]!.results, [{ token: "Loader.cs", status: "unavailable" }], "files changed while the search ran: nothing stale is delivered");
+	assert.deepEqual(moved.replies[0]!.results, [{ token: "Loader.cs", status: "pending" }], "files changed while the search ran: nothing stale is delivered, and the token waits for the signal");
 });
 
 test("a path tail token (`host/session-index.ts:579`) is answered from the file lookup like a bare name, and several files are a choice", async () => {
@@ -442,7 +442,7 @@ test("a busy repository does not leave file names plain: a file lookup under way
 	await batch;
 	assert.deepEqual(replies[0]!.results, [
 		{ token: "Loader.cs:7", status: "found", target: "Assets/Loader.cs:7" },
-		{ token: "Session", status: "unavailable" },
+		{ token: "Session", status: "pending" },
 	]);
 	let searches = 0;
 	const cached = new SymbolLinkResolver(provider({}).source, { files: new FileNameLinkResolver({ find: async () => { searches++; return { paths: [`${CWD}\\Assets\\Loader.cs`], truncated: false }; } }, { isFile: async () => false }) });
@@ -472,7 +472,7 @@ test("a setting turned off, a folder set that changed, or a replaced document wh
 	let roots = [CWD];
 	const moved = host({ roots: () => roots });
 	await handleSymbolLinks(request, moved.host, new SymbolLinkResolver({ query: async () => { roots = []; return answers.Session; } }));
-	assert.deepEqual(moved.replies, [{ type: "omp:terminal-link-symbol-resolution", requestId: 2, results: [{ token: "Session", status: "unavailable" }] }]);
+	assert.deepEqual(moved.replies, [{ type: "omp:terminal-link-symbol-resolution", requestId: 2, results: [{ token: "Session", status: "pending" }] }]);
 
 	let current = true;
 	const replaced = host({ isCurrent: () => current });
@@ -519,7 +519,7 @@ test("a path component that merely starts with dots is inside the folder; a real
 	assert.equal(isInside("D:\\Work\\omp-vscode", "D:\\Work\\omp-vscode\\..\\a.ts"), false);
 });
 
-test("a lookup that waits for a slot is dropped by an invalidation instead of reaching the provider, and a batch drops answers a file change made stale", async () => {
+test("a lookup that waits for a slot is dropped by an invalidation instead of reaching the provider, and a batch holds back answers a file change made stale", async () => {
 	const asked: string[] = [];
 	const releases: (() => void)[] = [];
 	const source: SymbolSource = { query: text => { asked.push(text); return new Promise(resolve => { releases.push(() => resolve([entry(text, SymbolKind.Class, `${text}.cs`, 2)])); }); } };
@@ -529,7 +529,7 @@ test("a lookup that waits for a slot is dropped by an invalidation instead of re
 	await tick();
 	resolver.invalidate();
 	releases.splice(0).forEach(release => release());
-	assert.deepEqual(await Promise.all([running, waiting]), [{ status: "unavailable" }, { status: "unavailable" }]);
+	assert.deepEqual(await Promise.all([running, waiting]), [{ status: "pending" }, { status: "pending" }]);
 	assert.deepEqual(asked, ["Aaa"], "the waiting lookup never reached the provider");
 
 	const fast = entry("Session", SymbolKind.Class, "A.cs", 3);
@@ -541,7 +541,7 @@ test("a lookup that waits for a slot is dropped by an invalidation instead of re
 	batchResolver.invalidate();
 	slow?.();
 	await batch;
-	assert.deepEqual(replies[0]!.results, [{ token: "Session", status: "unavailable" }, { token: "Slowpoke", status: "unavailable" }]);
+	assert.deepEqual(replies[0]!.results, [{ token: "Session", status: "pending" }, { token: "Slowpoke", status: "pending" }]);
 });
 
 test("an entry too long to match makes the lookup uncertain: it can hide the only rival of a unique match", async () => {
@@ -783,7 +783,7 @@ test("the type hierarchy is walked a bounded depth and number of calls; a hierar
 	assert.deepEqual(await new SymbolLinkResolver({ ...inheritedProvider().source, hierarchy: broken.source }).resolve(symbol("Profile.ApplyFrom"), scope), { status: "unavailable" });
 });
 
-test("an invalidation while the hierarchy is asked makes the lookup unavailable and caches nothing", async () => {
+test("an invalidation while the hierarchy is asked leaves the lookup pending and caches nothing", async () => {
 	const release = Promise.withResolvers<HierarchyNode[]>();
 	const types: TypeHierarchySource = { prepare: async () => [nodeAt("Profile", "Catalog.cs", 10, 12)], supertypes: () => release.promise };
 	const resolver = new SymbolLinkResolver({ ...inheritedProvider().source, hierarchy: types });
@@ -792,7 +792,7 @@ test("an invalidation while the hierarchy is asked makes the lookup unavailable 
 	await tick();
 	resolver.invalidate();
 	release.resolve([baseNode]);
-	assert.deepEqual(await running, { status: "unavailable" });
+	assert.deepEqual(await running, { status: "pending" });
 	const again = hierarchy({ Profile: [nodeAt("Profile", "Catalog.cs", 10, 12)] }, { Profile: [baseNode] });
 	assert.deepEqual(await new SymbolLinkResolver({ ...inheritedProvider().source, hierarchy: again.source }).resolve(symbol("Profile.ApplyFrom"), scope), { status: "found", target: "Data.cs:5:5" });
 });
@@ -818,4 +818,49 @@ test("a qualified selection's every definition is returned for the symbol search
 	assert.deepEqual(await new SymbolLinkResolver(provider({}).source, { probeDelaysMs: [100000] }).find(symbol("SessionData.Load"), scope), { state: "pending" }, "a provider that has not answered yet");
 	assert.deepEqual(await new SymbolLinkResolver(provider({ Load: "throw" }).source).find(symbol("SessionData.Load"), scope), { state: "unavailable" });
 	assert.deepEqual(await new SymbolLinkResolver(twins.source).find(symbol("SessionData.Load"), { cwd: "", roots: [] }), { state: "none" });
+});
+
+const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms));
+
+test("lookups lost to a burst of file changes are signalled once after the burst settles; a change that loses nothing signals nothing", async () => {
+	const releases: (() => void)[] = [];
+	let retries = 0;
+	const source: SymbolSource = { query: () => new Promise(resolve => { releases.push(() => resolve(Object.assign([entry("Session", SymbolKind.Class, "A.cs", 3)], { total: 1 }))); }) };
+	const resolver = new SymbolLinkResolver(source, { settleMs: 40, minRetryMs: 10, onRetry: () => { retries++; } });
+	resolver.invalidate("created Library\\a");
+	await sleep(60);
+	assert.equal(retries, 0, "no lookup was under way: nothing was lost, nothing is signalled");
+	const first = resolver.resolve(symbol("Session"), scope);
+	const second = resolver.resolve(symbol("Other"), scope);
+	await tick();
+	resolver.invalidate("created Library\\b");
+	releases.splice(0).forEach(release => release());
+	assert.deepEqual(await Promise.all([first, second]), [{ status: "pending" }, { status: "pending" }], "dropped by the change: waiting, not failed");
+	for (let burst = 0; burst < 4; burst++) { await sleep(15); resolver.invalidateContent("saved a.cs"); }
+	assert.equal(retries, 0, "the burst has not settled: the signal waits");
+	await sleep(120);
+	assert.equal(retries, 1, "one signal for the whole burst and both lookups");
+	await sleep(120);
+	assert.equal(retries, 1, "and not again");
+});
+
+test("an invalidation that never stops delays the signal only up to its cap, and a lost lookup in a quiet workspace is asked about again promptly", async () => {
+	let retries = 0;
+	const resolver = new SymbolLinkResolver({ query: async () => { resolver.invalidate("changed"); return []; } }, { settleMs: 20, minRetryMs: 5, onRetry: () => { retries++; } });
+	await resolver.resolve(symbol("Session"), scope);
+	for (let turn = 0; turn < 14 && retries === 0; turn++) { await sleep(15); resolver.invalidate("changed again"); }
+	assert.equal(retries, 1, "ten settle windows after the first loss at the latest, however busy");
+});
+
+test("a provider that becomes ready tells the pages even when no lookup was parked as not ready; lookups lost to changes were pending", async () => {
+	let loaded = false;
+	let retries = 0;
+	const source: SymbolSource = { query: async () => { if (!loaded) { resolver.invalidate("changed"); return []; } return Object.assign([entry("Session", SymbolKind.Class, "A.cs", 3)], { total: 1 }); } };
+	const resolver = new SymbolLinkResolver(source, { settleMs: 1_000_000, onRetry: () => { retries++; } });
+	assert.deepEqual(await resolver.resolve(symbol("Session"), scope), { status: "pending" });
+	loaded = true;
+	assert.deepEqual(await resolver.resolve(symbol("Session"), scope), { status: "found", target: "A.cs:3:5" });
+	assert.equal(retries, 1, "the lost lookup left a page waiting; the provider answering is the signal it waits for");
+	assert.deepEqual(await resolver.resolve(symbol("Other"), scope), { status: "none" });
+	assert.equal(retries, 1);
 });

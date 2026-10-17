@@ -10153,8 +10153,8 @@ function symbolLinkResolver(): SymbolLinkResolver {
   // answer, a change or a save cannot, and a busy repository changes contents constantly. Events for files no lookup can
   // return (below `.git`, hidden by their folder's own excludes: a Unity project's `Temp/` and `Library/`) are dropped, and a
   // burst of the rest is one invalidation (docs/designs/2026-10-10-code-symbol-links.md, "Fencing").
-  const dropFiles = () => resolver.invalidate();
-  const dropContent = () => resolver.invalidateContent();
+  const dropFiles = (why: string) => resolver.invalidate(why);
+  const dropContent = (why: string) => resolver.invalidateContent(why);
   const gate = new FileEventGate({
     folders: () => (vscode.workspace.workspaceFolders ?? []).map(folder => folder.uri.fsPath),
     excludes: folder => excludePatterns(...folderExcludeSettings(vscode, folder)),
@@ -10166,10 +10166,10 @@ function symbolLinkResolver(): SymbolLinkResolver {
   s.context?.subscriptions.push(
     watcher,
     watcher.onDidCreate(uri => gate.event("created", uri.fsPath)), watcher.onDidChange(uri => gate.event("changed", uri.fsPath)), watcher.onDidDelete(uri => gate.event("deleted", uri.fsPath)),
-    vscode.workspace.onDidSaveTextDocument(dropContent),
+    vscode.workspace.onDidSaveTextDocument(document => dropContent(`saved ${document.uri.fsPath}`)),
     vscode.workspace.onDidRenameFiles(() => gate.renamed()),
     vscode.workspace.onDidChangeConfiguration(event => { if (event.affectsConfiguration("files.exclude") || event.affectsConfiguration("search.exclude")) gate.resetExcludes(); }),
-    vscode.workspace.onDidChangeWorkspaceFolders(() => { resolver.resetReadiness(); gate.resetExcludes(); dropFiles(); }),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => { resolver.resetReadiness(); gate.resetExcludes(); dropFiles("workspace folders changed"); }),
     { dispose: () => { gate.dispose(); if (s.symbolLinks === resolver) s.symbolLinks = undefined; } },
   );
   s.symbolLinks = resolver;
@@ -10269,12 +10269,17 @@ async function handleTerminalGuestMessage(
         (terminalCwd(state) ?? "") === cwd;
       if (parsed.type === "omp:terminal-link-symbols") {
         s.symbolAskers.add(state.slotId);
-        await handleSymbolLinks(payload as unknown as SymbolLinksRequest, {
+        const asked = payload as unknown as SymbolLinksRequest;
+        log.debug(`slot ${state.slotId}: link batch ${asked.requestId} asks ${asked.tokens.length} token(s)`);
+        await handleSymbolLinks(asked, {
           cwd,
           roots: () => symbolRoots(cwd, (vscode.workspace.workspaceFolders ?? []).map(folder => folder.uri.fsPath)),
           enabled: () => vscode.workspace.getConfiguration("ompDesk").get<boolean>("linkCodeSymbols", true),
           isCurrent,
-          reply: message => pushTerminalTo(state.slotId, message),
+          reply: message => {
+            log.debug(`slot ${state.slotId}: link batch ${message.requestId} answered ${message.results.map(result => result.status).join(",")}`);
+            pushTerminalTo(state.slotId, message);
+          },
         }, symbolLinkResolver());
         return;
       }

@@ -14,6 +14,7 @@ const infos = (lines: readonly LoggedLine[]) => lines.filter(line => line.level 
 
 test("verdicts become short reasons", () => {
 	assert.equal(giveUpReason("unavailable: invalidated"), "invalidated");
+	assert.equal(giveUpReason("parked (invalidated)"), "invalidated");
 	assert.equal(giveUpReason("unavailable: queue-full"), "queue full");
 	assert.equal(giveUpReason("parked (timeout)"), "timeout");
 	assert.equal(giveUpReason("parked (not ready)"), "provider not ready");
@@ -24,32 +25,45 @@ test("a name that gives up is reported once per window, with its reasons, at inf
 	const lines: LoggedLine[] = [];
 	let now = 0;
 	const reporter = new GiveUpReporter(recordingLogger(lines), () => now);
-	reporter.missed("code symbol", "Session.Copy", "invalidated");
+	reporter.missed("code symbol", "Session.Copy", "no-answer");
 	now += 5_000;
 	reporter.missed("code symbol", "Session.Copy", "timeout");
 	assert.deepEqual(infos(lines), [], `${GIVE_UP_ATTEMPTS - 1} misses are a retry, not a give-up`);
 	now += 20_000;
-	reporter.missed("code symbol", "Session.Copy", "invalidated");
+	reporter.missed("code symbol", "Session.Copy", "no-answer");
 	assert.equal(infos(lines).length, 1);
-	assert.match(infos(lines)[0]!, /code symbol "Session\.Copy" had no answer in 3 tries over 25 s \(invalidated x2, timeout x1\)/);
-	for (let index = 0; index < 10; index++) { now += 1_000; reporter.missed("code symbol", "Session.Copy", "invalidated"); }
+	assert.match(infos(lines)[0]!, /code symbol "Session\.Copy" had no answer in 3 tries over 25 s \(no-answer x2, timeout x1\)/);
+	for (let index = 0; index < 10; index++) { now += 1_000; reporter.missed("code symbol", "Session.Copy", "no-answer"); }
 	assert.equal(infos(lines).length, 1, "no second line inside the window");
 	reporter.missed("code symbol", "Other", "timeout");
 	reporter.missed("code symbol", "Other", "timeout");
 	reporter.missed("code symbol", "Other", "timeout");
 	assert.equal(infos(lines).length, 2, "another name is reported on its own");
 	now += GIVE_UP_WINDOW_MS;
-	for (let index = 0; index < 3; index++) reporter.missed("code symbol", "Session.Copy", "provider not ready");
+	for (let index = 0; index < 3; index++) reporter.missed("code symbol", "Session.Copy", "queue full");
 	assert.equal(infos(lines).length, 3, "the window passed: reported again");
-	assert.match(infos(lines)[2]!, /provider not ready x3/);
+	assert.match(infos(lines)[2]!, /queue full x3/);
+});
+
+test("a miss that only waits (provider not ready, files changing) is no try and never gives a name up", () => {
+	const lines: LoggedLine[] = [];
+	const reporter = new GiveUpReporter(recordingLogger(lines), () => 0);
+	for (const reason of ["provider not ready", "invalidated", "invalidated while the batch ran", "files changed while the batch ran", "workspace folders changed"]) {
+		for (let index = 0; index < 10; index++) reporter.missed("code symbol", "Session.Dispose", reason);
+	}
+	reporter.missed("code symbol", "Session.Dispose", "timeout");
+	reporter.missed("code symbol", "Session.Dispose", "timeout");
+	assert.deepEqual(infos(lines), [], "two real failures among any number of waits are still a retry");
+	reporter.missed("code symbol", "Session.Dispose", "timeout");
+	assert.match(infos(lines)[0]!, /Session\.Dispose" had no answer in 3 tries over 0 s \(timeout x3\)/);
 });
 
 test("an answer in between starts the count again", () => {
 	const lines: LoggedLine[] = [];
 	const reporter = new GiveUpReporter(recordingLogger(lines), () => 0);
 	for (let index = 0; index < 5; index++) {
-		reporter.missed("file name", "Session.cs", "invalidated");
-		reporter.missed("file name", "Session.cs", "invalidated");
+		reporter.missed("file name", "Session.cs", "timeout");
+		reporter.missed("file name", "Session.cs", "timeout");
 		reporter.answered("file name", "Session.cs");
 	}
 	assert.deepEqual(infos(lines), []);
@@ -68,22 +82,25 @@ test("a symbol the provider never answers is reported at info after its tries, a
 	assert.equal(infos(lines).length, 2, "and once more a window later");
 });
 
-test("a provider that is not ready and a lookup that timed out give a reason each", async () => {
+test("a provider that is not ready is not given up on, a lookup that timed out is", async () => {
 	const lines: LoggedLine[] = [];
 	const loading = new SymbolLinkResolver({ query: async () => [] }, { log: recordingLogger(lines), probeDelaysMs: [1_000_000] });
-	for (let index = 0; index < 3; index++) await loading.resolve(symbol("Session.Copy"), scope);
-	assert.match(infos(lines)[0]!, /provider not ready x3/);
+	for (let index = 0; index < 5; index++) await loading.resolve(symbol("Session.Copy"), scope);
+	assert.deepEqual(infos(lines), [], "a language server that is still loading is a wait");
+	assert.equal(lines.filter(line => line.level === "debug" && /parked \(not ready\)/.test(line.message)).length, 5, "each wait stays a debug line");
 	const slow: LoggedLine[] = [];
 	const hung = new SymbolLinkResolver({ query: () => Promise.withResolvers<null>().promise }, { log: recordingLogger(slow), queryTimeoutMs: 5 });
 	for (let index = 0; index < 3; index++) await hung.resolve(symbol("Hang.Forever"), scope);
 	assert.match(infos(slow)[0]!, /timeout x3/);
 });
 
-test("a lookup that files changing keeps discarding is reported as invalidated", async () => {
+test("lookups that file changes keep discarding wait for the settle signal and are never given up on", async () => {
 	const lines: LoggedLine[] = [];
-	const resolver = new SymbolLinkResolver({ query: async () => { resolver.invalidate(); return []; } }, { log: recordingLogger(lines) });
-	for (let index = 0; index < 3; index++) await resolver.resolve(symbol("Session.Copy"), scope);
-	assert.match(infos(lines)[0]!, /invalidated x3/);
+	const resolver = new SymbolLinkResolver({ query: async () => { resolver.invalidate("created Library\\x"); return []; } }, { log: recordingLogger(lines), settleMs: 100_000 });
+	for (let index = 0; index < 6; index++) assert.deepEqual(await resolver.resolve(symbol("Session.Copy"), scope), { status: "pending" });
+	assert.deepEqual(infos(lines).filter(line => line.includes("gave up")), []);
+	assert.match(infos(lines)[0]!, /1 lookup under way dropped \(created Library\\x\); asked again once the changes settle/);
+	assert.equal(infos(lines).length, 1, "the dropped lookups are one info line per ten seconds");
 });
 
 test("a file name whose search keeps failing is reported once", async () => {

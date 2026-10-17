@@ -364,10 +364,14 @@ export interface SymbolResolverOptions {
 	readonly maxCached?: number;
 	/** One compact line per finished lookup (the extension's output channel). */
 	readonly log?: Logger;
-	/** Called when parked tokens may be asked again: the provider became ready or its queue drained. */
+	/** Called when pages may ask their waiting tokens again: the provider became ready, its queue drained, or a burst of file changes that had dropped lookups settled. */
 	readonly onRetry?: () => void;
 	/** Delays of the not-ready canary probes (the last one repeats). */
 	readonly probeDelaysMs?: readonly number[];
+	/** How long after the last file change (or dropped lookup) the pages are told to ask again; a burst that never pauses is cut at ten times this. */
+	readonly settleMs?: number;
+	/** The least time between two retry signals; it doubles for every signal that lookups lost to file changes caused without any lookup answering in between, up to a minute. */
+	readonly minRetryMs?: number;
 	/** The bare-file-name side: looked up by {@link SymbolLinkResolver.resolveFileName} and dropped with every {@link SymbolLinkResolver.invalidate}. */
 	readonly files?: FileNameLinks;
 }
@@ -418,9 +422,15 @@ const pending: SymbolOutcome = { status: "pending" };
 /** Parked tokens (and canary names) the resolver remembers; the page keeps its own, smaller budget. */
 const MAX_PARKED_KEYS = 1024;
 const MAX_CANARIES = 8;
-/** How long a not-ready provider is probed, and the least time between two "queue drained" signals. */
+/** How long a not-ready provider is probed. */
 const PROBE_WINDOW_MS = 10 * 60_000;
-const MIN_QUEUE_RETRY_MS = 3000;
+const MIN_RETRY_MS = 3000;
+const CHANGE_SETTLE_MS = 1000;
+const MAX_RETRY_INTERVAL_MS = 60_000;
+/** The lookup was dropped because files changed under it: it waits, like a loading provider, and the retry signal asks it again once the changes settle. */
+const PARKED_INVALIDATED = "parked (invalidated)";
+/** At most one info line about dropped lookups per this long. */
+const DROPPED_INFO_MS = 10_000;
 
 /**
  * Resolves symbols against one {@link SymbolSource}. Answers are cached per window by (session folder, canonical
@@ -450,7 +460,7 @@ export class SymbolLinkResolver {
 	#batches = 0;
 	/** False until some provider query answered with a symbol. */
 	#ready = false;
-	#notReadySince = 0;
+	#notReadySince: number | undefined;
 	#parkedKeys = new Set<string>();
 	#canaries: string[] = [];
 	#probeTimer: NodeJS.Timeout | undefined;
@@ -458,7 +468,18 @@ export class SymbolLinkResolver {
 	#probeStartedAt = 0;
 	#queueRetryDue = false;
 	#queueRetryTimer: NodeJS.Timeout | undefined;
-	#lastQueueRetry = -MIN_QUEUE_RETRY_MS;
+	#lastRetry = Number.NEGATIVE_INFINITY;
+	/** A lookup ended `pending` since the last retry signal: some page holds a parked token that only a signal (or a minute) asks again. */
+	#pagesParked = false;
+	/** When the first lookup of the current burst was lost to a file change, while a signal for it is due. */
+	#lostSince: number | undefined;
+	#lostTimer: NodeJS.Timeout | undefined;
+	/** Consecutive signals caused by lookups lost to changes; any answered lookup or the provider becoming ready starts again. */
+	#changeRetries = 0;
+	#probeGaveUp = false;
+	#lastDroppedInfo = Number.NEGATIVE_INFINITY;
+	readonly #settleMs: number;
+	readonly #minRetryMs: number;
 
 	constructor(source: SymbolSource, options: SymbolResolverOptions = {}) {
 		this.#source = source;
@@ -473,6 +494,8 @@ export class SymbolLinkResolver {
 		this.#onRetry = options.onRetry;
 		this.#probeDelays = options.probeDelaysMs ?? [2000, 4000, 8000, 16_000, 30_000];
 		this.#files = options.files;
+		this.#settleMs = options.settleMs ?? CHANGE_SETTLE_MS;
+		this.#minRetryMs = options.minRetryMs ?? MIN_RETRY_MS;
 	}
 
 	/** A batch of the page's questions may start only while fewer than {@link MAX_ACTIVE_BATCHES} are working; pair with {@link leaveBatch}. */
@@ -490,9 +513,12 @@ export class SymbolLinkResolver {
 	/** Moves on only when the set of files may have changed (see {@link invalidate}); the file lookups' own fence. */
 	get fileGeneration(): number { return this.#files?.generation ?? 0; }
 
-	/** Forget every answer: a file appeared, vanished or moved, so any of them may be stale. */
-	invalidate(): void {
-		this.invalidateContent();
+	/**
+	 * Forget every answer: a file appeared, vanished or moved, so any of them may be stale. `source` says what happened, for the log. A lookup
+	 * under way is not answered: it ends `pending` and the pages are told to ask again once the changes settle.
+	 */
+	invalidate(source = "files changed"): void {
+		this.#forget(source);
 		this.#files?.invalidate();
 	}
 
@@ -501,15 +527,33 @@ export class SymbolLinkResolver {
 	 * changes which files exist, so the file-name answers and the file lookups under way stay valid. A busy repository changes
 	 * contents all the time (an agent writing files, a Unity editor importing); discarding file lookups for it left their spans plain.
 	 */
-	invalidateContent(): void {
+	invalidateContent(source = "contents changed"): void {
+		this.#forget(source);
+	}
+
+	#forget(source: string): void {
+		const underWay = this.#pending.size;
 		this.#generation++;
 		this.#cache.clear();
 		this.#pending.clear();
+		this.#log.debug(`code symbols: answers dropped (${source}), ${underWay} lookup${underWay === 1 ? "" : "s"} under way`);
+		if (underWay > 0 && this.#now() - this.#lastDroppedInfo >= DROPPED_INFO_MS) {
+			this.#lastDroppedInfo = this.#now();
+			this.#log.info(`code symbols: ${underWay} lookup${underWay === 1 ? "" : "s"} under way dropped (${source}); asked again once the changes settle`);
+		}
+		// A burst that goes on postpones the signal, up to its cap.
+		if (this.#lostSince !== undefined) this.#armLostTimer();
 	}
 
-	/** A batch left `token` unanswered for a reason only the batch knows (a refused batch, its deadline, a change while it ran); see {@link GiveUpReporter}. */
+	/** A batch left `token` unanswered for a reason only the batch knows (a refused batch, its deadline); see {@link GiveUpReporter}. */
 	batchMissed(token: string, reason: string): void {
 		this.#giveUps.missed("link", token, reason);
+	}
+
+	/** A batch had to leave `token` pending because files changed while it ran (`reason`): not a failure; the pages are told to ask again once the changes settle. */
+	batchLost(token: string, reason: string): void {
+		this.#giveUps.missed("link", token, reason);
+		this.#retryAfterChange();
 	}
 
 	/** A batch answered `token`. */
@@ -565,8 +609,16 @@ export class SymbolLinkResolver {
 		const inScope = (entries: readonly SymbolEntry[]) => entries.filter(entry => scope.roots.some(root => isInside(root, entry.path)));
 		const done = (outcome: SymbolOutcome, verdict: string, matching = 0, via = ""): SymbolOutcome => {
 			this.#log.debug(`code symbol ${JSON.stringify(symbol.name)}: ${stats.queries} quer${stats.queries === 1 ? "y" : "ies"}, ${stats.total} provider entries, ${inScope(stats.entries).length} in scope, ${matching} matching locations -> ${verdict}${via === "" ? "" : ` (${via})`} in ${this.#now() - startedAt} ms`);
-			if (outcome.status === "unavailable" || outcome.status === "pending") this.#giveUps.missed("code symbol", symbol.name, giveUpReason(verdict));
-			else this.#giveUps.answered("code symbol", symbol.name);
+			if (outcome.status === "pending") {
+				this.#pagesParked = true;
+				this.#giveUps.missed("code symbol", symbol.name, giveUpReason(verdict));
+				if (verdict === PARKED_INVALIDATED) this.#retryAfterChange();
+			} else if (outcome.status === "unavailable") {
+				this.#giveUps.missed("code symbol", symbol.name, giveUpReason(verdict));
+			} else {
+				this.#giveUps.answered("code symbol", symbol.name);
+				this.#changeRetries = 0;
+			}
 			return outcome;
 		};
 		const gathered = await this.#gather(symbol, scope, generation, startedAt, stats);
@@ -608,13 +660,14 @@ export class SymbolLinkResolver {
 		stats.queries++;
 		const answer = await this.#query(text, last, generation);
 		if ("failed" in answer) return { failed: this.#failure(answer.failed) };
-		if (generation !== this.#generation) return { failed: { outcome: unavailable, verdict: "unavailable: invalidated" } };
+		if (generation !== this.#generation) return { failed: this.#failure("invalidated") };
 		stats.total += answer.total;
 		return { answer };
 	}
 
 	/** The verdict for a provider call that did not answer. */
 	#failure(failed: "invalidated" | "queue-full" | "error" | "no-answer" | "timeout"): Failure {
+		if (failed === "invalidated") return { outcome: pending, verdict: PARKED_INVALIDATED };
 		const parked = failed === "queue-full" || failed === "timeout";
 		if (parked) this.#queueRetryDue = true;
 		return { outcome: parked ? pending : unavailable, verdict: parked ? `parked (${failed === "timeout" ? "timeout" : "queue"})` : `unavailable: ${failed}` };
@@ -733,16 +786,53 @@ export class SymbolLinkResolver {
 	/** The queue drained after it had refused or timed out some lookups: tell the pages, at most once every few seconds. */
 	#scheduleQueueRetry(): void {
 		if (this.#queueRetryTimer !== undefined) return;
-		const delay = Math.max(0, this.#lastQueueRetry + MIN_QUEUE_RETRY_MS - this.#now());
+		const delay = Math.max(0, this.#lastRetry + this.#minRetryMs - this.#now());
 		this.#queueRetryTimer = setTimeout(() => {
 			this.#queueRetryTimer = undefined;
 			if (!this.#queueRetryDue || this.#running > 0) return;
-			this.#queueRetryDue = false;
-			this.#lastQueueRetry = this.#now();
 			this.#log.debug("code symbols: provider queue drained, asking parked tokens again");
-			this.#onRetry?.();
+			this.#sendRetry();
 		}, delay);
 		this.#queueRetryTimer.unref?.();
+	}
+
+	/** Tell every page that its waiting tokens may be asked again; whatever was due is served by this one signal. */
+	#sendRetry(): void {
+		this.#pagesParked = false;
+		this.#queueRetryDue = false;
+		clearTimeout(this.#lostTimer);
+		this.#lostTimer = undefined;
+		this.#lostSince = undefined;
+		this.#lastRetry = this.#now();
+		this.#onRetry?.();
+	}
+
+	/**
+	 * A lookup ended `pending` because files changed under it: the pages are told to
+	 * ask again, once the changes have settled ({@link SymbolResolverOptions.settleMs} after the last one, at the latest ten times that
+	 * after the first lost lookup) and not sooner than the backoff after the last signal. A workspace that never stops changing is asked
+	 * again at most once a minute, not never and not in a loop.
+	 */
+	#retryAfterChange(): void {
+		this.#pagesParked = true;
+		this.#lostSince ??= this.#now();
+		this.#armLostTimer();
+	}
+
+	#armLostTimer(): void {
+		if (this.#lostSince === undefined) return;
+		clearTimeout(this.#lostTimer);
+		const now = this.#now();
+		const interval = Math.min(this.#minRetryMs * 2 ** this.#changeRetries, Math.max(this.#minRetryMs, MAX_RETRY_INTERVAL_MS));
+		const quiet = Math.min(now + this.#settleMs, this.#lostSince + this.#settleMs * 10);
+		const at = Math.max(quiet, this.#lastRetry + interval);
+		this.#lostTimer = setTimeout(() => {
+			this.#lostTimer = undefined;
+			this.#changeRetries++;
+			this.#log.debug("code symbols: lookups were lost to changes that have settled, asking the pages again");
+			this.#sendRetry();
+		}, Math.max(0, at - now));
+		this.#lostTimer.unref?.();
 	}
 
 	/** The provider has answered at least one query with a symbol: an empty answer now means the name is unknown, not that the server is loading. */
@@ -751,12 +841,16 @@ export class SymbolLinkResolver {
 		this.#ready = true;
 		clearTimeout(this.#probeTimer);
 		this.#probeTimer = undefined;
+		this.#probeGaveUp = false;
+		this.#changeRetries = 0;
 		const parked = this.#parkedKeys.size;
 		this.#parkedKeys.clear();
-		if (parked > 0) {
-			this.#log.debug(`code symbols: provider ready after ${Math.round((this.#now() - this.#notReadySince) / 1000)} s, re-running ${parked} parked`);
-			this.#onRetry?.();
+		if (this.#pagesParked || parked > 0) {
+			const waited = this.#notReadySince === undefined ? "" : ` after ${Math.round((this.#now() - this.#notReadySince) / 1000)} s`;
+			this.#log.info(`code symbols: provider ready${waited}, ${parked > 0 ? `re-running ${parked} parked` : "asking the pages that wait"}`);
+			this.#sendRetry();
 		}
+		this.#notReadySince = undefined;
 	}
 
 	/** Park a token the provider could not answer yet (its server is loading); a canary probe finds out when it is ready. */
@@ -772,7 +866,13 @@ export class SymbolLinkResolver {
 	/** One canary query after a growing delay (2 s, doubling to 30 s) for up to ten minutes; any symbol in the answer, exact or fuzzy, means the provider is ready. */
 	#scheduleProbe(): void {
 		if (this.#ready || this.#probeTimer !== undefined) return;
-		if (this.#now() - this.#probeStartedAt > PROBE_WINDOW_MS) return;
+		if (this.#now() - this.#probeStartedAt > PROBE_WINDOW_MS) {
+			if (!this.#probeGaveUp) {
+				this.#probeGaveUp = true;
+				this.#log.info(`code symbols: the workspace symbol provider has not answered in ${PROBE_WINDOW_MS / 60_000} minutes; symbol links stay plain until a lookup finds it ready`);
+			}
+			return;
+		}
 		const delay = this.#probeDelays[Math.min(this.#probeIndex, this.#probeDelays.length - 1)]!;
 		this.#probeTimer = setTimeout(() => { this.#probeTimer = undefined; void this.#probe(); }, delay);
 		this.#probeTimer.unref?.();
@@ -791,6 +891,8 @@ export class SymbolLinkResolver {
 	/** The workspace's folders changed: the language servers load again, so an empty answer is not a verdict until one answers. */
 	resetReadiness(): void {
 		this.#ready = false;
+		this.#notReadySince = undefined;
+		this.#probeGaveUp = false;
 		clearTimeout(this.#probeTimer);
 		this.#probeTimer = undefined;
 		this.#probeIndex = 0;
@@ -870,9 +972,9 @@ export async function handleSymbolLinks(request: SymbolLinksRequest, host: Symbo
 			const file = parseBareFileName(token);
 			let outcome: SymbolOutcome = file === null || host.cwd === "" ? none : await resolver.resolveFileName(file, scope);
 			// Files appeared or vanished since the batch began (the file lookup answered for an older state): no symbol lookup is started on top of it.
-			if (outcome.status === "none" && resolver.fileGeneration !== fileGeneration) {
-				outcome = { status: "unavailable" };
-				resolver.batchMissed(token, "files changed while the batch ran");
+			if ((outcome.status === "none" || outcome.status === "unavailable") && resolver.fileGeneration !== fileGeneration) {
+				outcome = { status: "pending" };
+				resolver.batchLost(token, "files changed while the batch ran");
 			} else if (outcome.status === "none") {
 				const symbol = parseCodeSymbol(token);
 				symbolBased[index] = symbol !== null;
@@ -890,14 +992,16 @@ export async function handleSymbolLinks(request: SymbolLinksRequest, host: Symbo
 		// when files changed has proven each file it reports to still exist, and a file's content does not change which files exist.
 		if (!host.enabled()) return reply(request.tokens.map(token => ({ token, status: "none" })), true);
 		if (host.roots().join("\n") !== roots.join("\n")) {
-			for (const token of request.tokens) resolver.batchMissed(token, "workspace folders changed");
-			return reply(request.tokens.map(token => ({ token, status: "unavailable" })));
+			for (const token of request.tokens) resolver.batchLost(token, "workspace folders changed");
+			return reply(request.tokens.map(token => ({ token, status: "pending" })));
 		}
 		const symbolsStale = resolver.generation !== generation;
-		const final = results.map((result, index): SymbolLinkResult => symbolsStale && symbolBased[index] ? { token: result.token, status: "unavailable" } : { ...result });
+		// A symbol answer buffered across a change is not delivered, and not failed either: it waits for the signal that follows the change.
+		const lost = (index: number) => symbolsStale && symbolBased[index] && settled[index] && results[index]!.status !== "pending";
+		const final = results.map((result, index): SymbolLinkResult => lost(index) ? { token: result.token, status: "pending" } : { ...result });
 		final.forEach((result, index) => {
-			if (result.status === "unavailable" && !settled[index]) resolver.batchMissed(result.token, "batch deadline");
-			else if (result.status === "unavailable" && symbolsStale && symbolBased[index]) resolver.batchMissed(result.token, "invalidated while the batch ran");
+			if (lost(index)) resolver.batchLost(result.token, "invalidated while the batch ran");
+			else if (result.status === "unavailable" && !settled[index]) resolver.batchMissed(result.token, "batch deadline");
 			else if (result.status !== "unavailable" && result.status !== "pending") resolver.batchAnswered(result.token);
 		});
 		reply(final);

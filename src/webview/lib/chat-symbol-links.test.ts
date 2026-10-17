@@ -388,3 +388,28 @@ test("an ambiguous answer between files keeps its marker, from the answer throug
 		links.dispose();
 	} finally { mock.timers.reset(); }
 });
+
+test("a pending answer to a request that was sent before the host's retry signal is asked again at once: the signal never saw the token parked", async () => {
+	mock.timers.enable({ apis: ["setTimeout"] });
+	try {
+		const { sent, transport, answer, deliver } = fixture();
+		const links = new ChatSymbolLinks(transport);
+		const asked = links.resolve("Session");
+		mock.timers.tick(40);
+		assert.equal(sent.length, 1);
+		deliver({ type: "omp:terminal-link-symbols-retry" });
+		answer(0, [{ token: "Session", status: "pending" }]);
+		await settle();
+		mock.timers.tick(40);
+		assert.equal(sent.length, 2, "asked again without waiting for another signal or a minute");
+		answer(1, [found("Session", "a.ts:1:1")]);
+		assert.deepEqual(await asked, { target: "a.ts:1:1" });
+		const parked = links.resolve("Other");
+		mock.timers.tick(40);
+		answer(2, [{ token: "Other", status: "pending" }]);
+		assert.equal(await parked, null);
+		mock.timers.tick(40);
+		assert.equal(sent.length, 3, "a pending answer with no signal in between still parks, and costs none of the retries");
+		links.dispose();
+	} finally { mock.timers.reset(); }
+});

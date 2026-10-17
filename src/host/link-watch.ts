@@ -53,10 +53,10 @@ export interface FileEventGateOptions {
 	readonly folders: () => readonly string[];
 	/** The patterns `folder`'s own `files.exclude` and `search.exclude` hide (the search's own source of them). */
 	readonly excludes: (folder: string) => readonly string[];
-	/** Some file appeared, vanished or moved: every answer is stale. */
-	readonly dropFiles: () => void;
+	/** Some file appeared, vanished or moved: every answer is stale. `why` names the burst (its event count and first file) for the log. */
+	readonly dropFiles: (why: string) => void;
 	/** Some file's contents changed: the symbol answers are stale. */
-	readonly dropContent: () => void;
+	readonly dropContent: (why: string) => void;
 	/** An event burst is reported this long after its last event. */
 	readonly delayMs?: number;
 	/** A burst that never pauses is reported at the latest this long after its first event. */
@@ -83,6 +83,8 @@ export class FileEventGate {
 	#burstStartedAt = 0;
 	#events = 0;
 	#ignored = 0;
+	/** The first reported event of the burst, for the log. */
+	#first = "";
 
 	constructor(options: FileEventGateOptions) {
 		this.#options = options;
@@ -93,6 +95,7 @@ export class FileEventGate {
 	/** A file was created, deleted or changed. Ignored when the answer of no lookup can depend on it. */
 	event(kind: FileEventKind, file: string): void {
 		if (this.#hidden(file)) { this.#ignored++; return; }
+		if (this.#events === 0) this.#first = `${kind} ${file}`;
 		this.#events++;
 		if (kind === "changed") this.#contentDirty = true; else this.#filesDirty = true;
 		this.#schedule();
@@ -100,6 +103,7 @@ export class FileEventGate {
 
 	/** Files were renamed by the user in VS Code; the paths are not looked at. */
 	renamed(): void {
+		if (this.#events === 0) this.#first = "renamed in VS Code";
 		this.#events++;
 		this.#filesDirty = true;
 		this.#schedule();
@@ -129,13 +133,15 @@ export class FileEventGate {
 		this.#timer = undefined;
 		const files = this.#filesDirty;
 		const content = this.#contentDirty;
-		this.#log.debug(`link lookups: ${files ? "files" : "contents"} changed (${this.#events} event${this.#events === 1 ? "" : "s"}, ${this.#ignored} ignored since the last report)`);
+		const why = `${files ? "files" : "contents"} changed: ${this.#events} event${this.#events === 1 ? "" : "s"}, first ${this.#first}, ${this.#ignored} ignored since the last report`;
+		this.#log.debug(`link lookups: ${why}`);
 		this.#filesDirty = false;
 		this.#contentDirty = false;
 		this.#events = 0;
 		this.#ignored = 0;
-		if (files) this.#options.dropFiles();
-		else if (content) this.#options.dropContent();
+		this.#first = "";
+		if (files) this.#options.dropFiles(why);
+		else if (content) this.#options.dropContent(why);
 	}
 
 	/** Whether no lookup can depend on `file`: it lies below `.git`, or every workspace folder holding it hides it. */
