@@ -148,6 +148,19 @@ describe("liveOf", () => {
 	});
 });
 
+describe("subagentKnownOf", () => {
+	it("asks the conversation's own live session and knows nothing without one", () => {
+		const { port, sessions } = fixture();
+		assert.equal(port.subagentKnownOf(TAB, "Worker"), null);
+		sessions.set(TAB, Object.assign(fakeSession("a"), { subagentKnown: (id: string) => id === "Worker" ? "roster" : id === "Nested" ? "reference" : null }));
+		sessions.set(OTHER, Object.assign(fakeSession("b"), { subagentKnown: () => null }));
+		assert.equal(port.subagentKnownOf(TAB, "Worker"), "roster");
+		assert.equal(port.subagentKnownOf(TAB, "Nested"), "reference");
+		assert.equal(port.subagentKnownOf(TAB, "Other"), null);
+		assert.equal(port.subagentKnownOf(OTHER, "Worker"), null, "another conversation's agents are not this one's");
+	});
+});
+
 type Operation = readonly [name: string, call: (port: ConversationPort, incarnation: number) => Promise<unknown>, method: string];
 
 const OPERATIONS: readonly Operation[] = [

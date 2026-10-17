@@ -23,8 +23,10 @@ import { splitTableCells } from "../lib/markdown-table.ts";
 import { detectChatFileLinks, fileTargetOfHref, isFileLinkCandidate } from "../lib/chat-file-links";
 import { detectWebLinks } from "../lib/chat-web-links";
 import { parseBareFileName, parseCodeSymbol } from "../../shared/code-symbols";
+import { detectInternalLinks, internalTargetOf } from "../../shared/internal-links";
 import { webLinkUrl } from "../../shared/terminal-links";
-import { CodeSymbolSpan, FileLink, FileLinkText } from "./FileLinks.tsx";
+import type { TerminalTextLink } from "../../shared/terminal-links";
+import { CodeSymbolSpan, FileLink, FileLinkText, InternalLink } from "./FileLinks.tsx";
 import { breakable } from "./BreakPoints.tsx";
 import { ImageReferenceToken } from "./ImageReference.tsx";
 import { WebLink } from "./WebLinks.tsx";
@@ -75,26 +77,37 @@ function files(text: string, key: string, breaks = false): ReactNode {
 	return detectChatFileLinks(text).length === 0 ? (breaks ? breakable(text) : text) : <FileLinkText key={key} text={text} breaks={breaks} />;
 }
 
-/** Plain text with its bare web URLs linked and its file references offered to the host; the characters are never altered. */
+/** The bare web URLs and the internal OMP URLs (`agent://Name`) of `text`, in order and without overlap; a URL inside a web link is only that link. */
+function textLinks(text: string): { link: TerminalTextLink; internal: boolean }[] {
+	const web = detectWebLinks(text).map(link => ({ link, internal: false }));
+	const internal = detectInternalLinks(text).filter(link => !web.some(other => link.start < other.link.end && other.link.start < link.end)).map(link => ({ link, internal: true }));
+	return internal.length === 0 ? web : [...web, ...internal].sort((a, b) => a.link.start - b.link.start);
+}
+
+/** Plain text with its bare web URLs and internal OMP URLs linked and its file references offered to the host; the characters are never altered. */
 function plain(text: string, key: string): ReactNode {
-	const web = detectWebLinks(text);
-	if (web.length === 0) return files(text, key);
+	const links = textLinks(text);
+	if (links.length === 0) return files(text, key);
 	const nodes: ReactNode[] = [];
 	let cursor = 0;
-	web.forEach((link, index) => {
+	links.forEach(({ link, internal }, index) => {
 		if (link.start > cursor) nodes.push(files(text.slice(cursor, link.start), `${key}-f${index}`));
-		nodes.push(<WebLink key={`${key}-w${index}`} url={link.target}>{breakable(text.slice(link.start, link.end))}</WebLink>);
+		const label = breakable(text.slice(link.start, link.end));
+		nodes.push(internal ? <InternalLink key={`${key}-i${index}`} target={link.target}>{label}</InternalLink> : <WebLink key={`${key}-w${index}`} url={link.target}>{label}</WebLink>);
 		cursor = link.end;
 	});
-	if (cursor < text.length) nodes.push(files(text.slice(cursor), `${key}-f${web.length}`));
+	if (cursor < text.length) nodes.push(files(text.slice(cursor), `${key}-f${links.length}`));
 	return <Fragment key={key}>{nodes}</Fragment>;
 }
 
 /**
  * A whole code span that is one path (spaces allowed only after a drive, home or relative prefix) links as a unit; an `@` mention and any other span link the file references they hold. A URL in code stays code.
  * A span that names a code symbol (`Session`, `A.B`, `Run()`, `[Attr]`) or is a bare file name or the trailing part of a path (`session-index.ts:849`, `session-index.ts(849)`, `host/session-index.ts:579`) is one {@link CodeSymbolSpan}: its path proof first when it also looks like a path, then the host's workspace symbol and file lookup, in assistant text only.
+ * A whole span that is one internal OMP URL of the session (`agent://Name`, `artifact://69`, `local://plan.md`) is one {@link InternalLink}: plain code until the host proves the session has what it names.
  */
 function codeSpan(content: string, key: string): ReactNode {
+	const internal = internalTargetOf(content);
+	if (internal !== null) return <code key={key}><InternalLink target={internal}>{breakable(content)}</InternalLink></code>;
 	const whole = content.trim();
 	const single = !whole.startsWith("@") && (!/\s/.test(whole) || /^(?:[a-z]:[\\/]|~[\\/]|\.{1,2}[\\/]|\/)/i.test(whole) && !/\s-/.test(whole));
 	const path = single && isFileLinkCandidate(whole) ? whole : null;
@@ -153,10 +166,12 @@ function renderInline(text: string, keyPrefix: string, emphasis = true, depth = 
 			// A path or `file:` URL is a file reference: a link only once the host proves the file exists, the bare label before.
 			const file = fileTargetOfHref(destination);
 			const url = file === null ? webLinkUrl(destination) : null;
+			// An internal OMP URL of the session (`[the review](agent://Name)`) is a link only once the host proves the session has what it names.
+			const internal = file === null && url === null ? internalTargetOf(destination) : null;
 			// A rejected scheme keeps its label but never its URL: the transcript
 			// must not carry a `javascript:`/`data:`/`command:` destination at all.
 			const text = linkLabel(label, `${key}l`);
-			nodes.push(file !== null ? <FileLink key={key} target={file}>{text}</FileLink> : url === null ? <Fragment key={key}>{text}</Fragment> : <WebLink key={key} url={url}>{text}</WebLink>);
+			nodes.push(file !== null ? <FileLink key={key} target={file}>{text}</FileLink> : internal !== null ? <InternalLink key={key} target={internal}>{text}</InternalLink> : url === null ? <Fragment key={key}>{text}</Fragment> : <WebLink key={key} url={url}>{text}</WebLink>);
 		} else if (token.startsWith("<")) {
 			const url = webLinkUrl(token.slice(1, -1));
 			nodes.push(url === null ? plain(token, key) : <WebLink key={key} url={url}>{breakable(token.slice(1, -1))}</WebLink>);

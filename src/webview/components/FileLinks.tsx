@@ -102,6 +102,32 @@ function Anchor({ links, target, children }: { links: ChatFileLinks; target: str
 	>{children}</span>;
 }
 
+/** The anchor of an internal OMP URL: the look of a link, no file menu (there is no path), and Ctrl+Shift+Click shows the file behind it in the system file manager where it has one. */
+function InternalAnchor({ links, target, children }: { links: ChatFileLinks; target: string; children: ReactNode }): ReactNode {
+	const action = (event: { ctrlKey: boolean; shiftKey: boolean }): FileLinkAction | undefined => event.ctrlKey && event.shiftKey ? "os" : undefined;
+	return <span
+		className="omp-file-link omp-internal-link"
+		role="link"
+		tabIndex={0}
+		data-internal-target={target}
+		title={`${target}\nOpen · Ctrl+Shift+Click to show the file in File Explorer`}
+		onMouseDown={event => { if (event.shiftKey) event.preventDefault(); }}
+		onClick={event => { if (claimLinkActivation(event)) links.open(target, action(event)); }}
+		onKeyDown={event => { if ((event.key === "Enter" || event.key === " ") && claimLinkActivation(event)) links.open(target, action(event)); }}
+	>{children}</span>;
+}
+
+/**
+ * `children` as the link to an internal OMP URL of this session (`agent://Name`, `artifact://69`, `local://plan.md`) once the host
+ * proves the session has what it names; plain `children` before, otherwise, and where the page has no link context (a detail tab).
+ * `target` is the canonical text of the URL (`internalLinkTarget`), the key the host's answer is cached under and what a click sends.
+ */
+export function InternalLink({ target, children }: { target: string; children: ReactNode }): ReactNode {
+	const links = useContext(FileLinksContext);
+	const proven = useProvenTargets(links, links === null ? [] : [target], undefined);
+	return links !== null && proven.has(target) ? <InternalAnchor links={links} target={target}>{children}</InternalAnchor> : <>{children}</>;
+}
+
 /**
  * A code symbol with several different definitions, or a bare file name that several files carry (`files`): the same
  * look as a link, dotted. A click (or Ctrl+Click, there is no single file to reveal) opens VS Code's workspace symbol search

@@ -527,3 +527,40 @@ test("a parse of one emphasis mode is never reused by a parse of the other", () 
 	assert.equal(result.reused, false);
 	assert.equal(result.html, '<div class="omp-md"><p>a *b*</p><p>second</p><p>third more</p></div>');
 });
+
+const INTERNAL_REPLY = [
+	"See agent://DocsReview, `agent://Parent.Child`, [the review](agent://Reviewer/reports/0), `artifact://69`, **local://notes/plan.md** and history://Worker.",
+	"Not agent://Nope, `agent://Nope`, skill://create-plan, `xagent://X`, https://x.test/agent://Reviewer or a fence:",
+	"",
+	"```",
+	"agent://DocsReview stays code",
+	"```",
+].join("\n");
+const INTERNAL_PROVEN = ["agent://DocsReview", "agent://Parent.Child", "agent://Reviewer", "artifact://69", "local://notes/plan.md", "history://Worker"];
+
+test("an internal OMP URL in prose, in a code span, in emphasis and as a Markdown link destination is a link only once the host proves it, and the characters never change", async () => {
+	const plain = render(INTERNAL_REPLY);
+	assert.doesNotMatch(plain, /omp-internal-link/, "no link context, no links");
+	const linked = await renderLinked(INTERNAL_REPLY, INTERNAL_PROVEN);
+	assert.equal(text(linked), text(plain), "linking never changes the characters on screen");
+	assert.deepEqual([...linked.matchAll(/data-internal-target="([^"]*)"/g)].map(match => match[1]), ["agent://DocsReview", "agent://Parent.Child", "agent://Reviewer", "artifact://69", "local://notes/plan.md", "history://Worker"]);
+	assert.match(linked, /<span class="omp-file-link omp-internal-link" role="link" tabindex="0" data-internal-target="agent:\/\/DocsReview"[^>]*>agent:\/\/DocsReview<\/span>/);
+	assert.match(linked, /<code><span class="omp-file-link omp-internal-link"[^>]*data-internal-target="agent:\/\/Parent\.Child"[^>]*>agent:\/\/Parent\.Child<\/span><\/code>/, "an inline code span is one link inside the code element");
+	assert.match(linked, /<span[^>]*data-internal-target="agent:\/\/Reviewer"[^>]*>the review<\/span>/, "a Markdown link to an agent keeps its label and drops the JSON path from the target");
+	assert.match(linked, /<strong><span[^>]*data-internal-target="local:\/\/notes\/plan\.md"[^>]*>local:\/\/notes\/plan\.md<\/span><\/strong>/);
+	assert.doesNotMatch(linked, /data-internal-target="agent:\/\/Nope"/, "an id the host did not prove stays text, in prose and in code");
+	assert.match(linked, /<code>agent:\/\/Nope<\/code>/);
+	assert.equal([...linked.matchAll(/data-internal-target="agent:\/\/Reviewer"/g)].length, 1, "an agent URL inside a web address is part of that address only");
+	assert.doesNotMatch(linked, /<pre><code[^>]*><span/, "fenced code stays text");
+	assert.doesNotMatch(linked, /data-file-target="agent:/, "an internal URL is never offered to the file proof");
+	assert.doesNotMatch(linked, /ompFileLinkTarget/, "no file menu: there is no path to copy or reveal");
+});
+
+test("an internal OMP URL is not turned into a file link by the path detector, and a rejected scheme never becomes a destination", async () => {
+	const { asked } = await renderSymbols("see agent://Late and `agent://Late` and [x](skill://create-plan)", { paths: ["agent://Late"] });
+	assert.deepEqual(asked, [], "nothing asks the symbol lookup about a URL");
+	const linked = await renderLinked("see agent://Late and [x](skill://create-plan) and [y](agent://a b)", ["agent://Late"]);
+	assert.doesNotMatch(linked, /data-file-target="agent:\/\/Late"/);
+	assert.match(linked, /data-internal-target="agent:\/\/Late"/);
+	assert.doesNotMatch(linked, /skill:\/\/|data-internal-target="agent:\/\/a b"/, "a rejected scheme keeps its label and never its URL");
+});

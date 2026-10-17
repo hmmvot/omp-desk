@@ -345,6 +345,8 @@ export interface ConversationPort {
 	promptsOf(conversation: string): string[];
 	/** The prompts Rewind can go back to, newest first, or the sentence that says why none can. */
 	rewindOf(conversation: string): RewindRead;
+	/** How the conversation's live Chat session knows a subagent: `roster` (its Agents roster holds it), `reference` (only a held task result names it) or `null` (neither, or no live session). */
+	subagentKnownOf(conversation: string, subagentId: string): "roster" | "reference" | null;
 	showViewOnly(conversation: string, request: ViewOnlyRequest): Promise<void>;
 	showLegacy(conversation: string, request: LegacyViewRequest): void;
 	/** Drop the conversation: its session stops reading and its connection closes; the process is untouched. Pages stay attached. */

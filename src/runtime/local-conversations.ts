@@ -75,6 +75,10 @@ export class LocalConversations implements ConversationPort {
 		return this.#chat.rewindOf(conversation);
 	}
 
+	subagentKnownOf(conversation: string, subagentId: string): "roster" | "reference" | null {
+		return this.#chat.sessionOf(conversation)?.subagentKnown(subagentId) ?? null;
+	}
+
 	showViewOnly(conversation: string, request: ViewOnlyRequest): Promise<void> {
 		return this.#chat.showViewOnly(conversation, request);
 	}

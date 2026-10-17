@@ -96,6 +96,7 @@ Fenced `mermaid` blocks are drawn as diagrams in your theme's colours once the b
 - Turn the symbol and bare-file-name links off with [`ompDesk.linkCodeSymbols`](settings.md); [`ompDesk.linkReminder`](settings.md) asks the model to write them as links itself.
 - `Ctrl+N` (symbol search) and `Ctrl+Shift+N` (Go to File) are prefilled with the Chat selection; see [Keyboard shortcuts](keyboard-shortcuts.md).
 - Web links in replies, tool output and the TODO and Agents tabs open in a VS Code editor tab on click or `Enter`, and in your browser on `Ctrl+Click` or `Ctrl+Enter`.
+- **OMP's internal addresses** in a reply are links when this session has what they name: `agent://<id>` (a nested agent is `Parent.Child`) opens the agent's read-only transcript tab while the live session knows it, and otherwise its published output `<id>.md` as a read-only document; `history://<id>` opens the transcript tab; `artifact://<n>` opens a tool result's full output; `local://<path>` opens a file of the session's scratch space. `Ctrl+Shift+Click` shows the file behind a link in File Explorer. An address this session does not have stays plain text. `skill://`, `memory://`, `rule://`, `omp://`, `pr://` and `issue://` are never links, because only OMP can resolve them.
 
 ## Rewind
 

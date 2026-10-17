@@ -78,6 +78,24 @@ test("validation reuses the Terminal request pair, is answered once per target a
 	links.dispose();
 });
 
+test("an internal OMP URL is validated by the same pair and a click posts a plain open request that names no folder, with the modifier action only when given", async () => {
+	const { sent, transport, answer } = fixture(["agent://Worker"]);
+	const links = new ChatFileLinks(transport);
+	const known = links.resolve("agent://Worker");
+	answer(sent[0]);
+	assert.equal(await known, true);
+	links.open("agent://Worker");
+	links.open("agent://Worker", "os");
+	links.open("src/a.ts:3");
+	const opens = sent.filter(message => message.type === "omp:terminal-link-open") as unknown as Record<string, unknown>[];
+	assert.deepEqual(opens.map(({ requestId: _id, ...rest }) => rest), [
+		{ type: "omp:terminal-link-open", target: "agent://Worker" },
+		{ type: "omp:terminal-link-open", target: "agent://Worker", action: "os" },
+		{ type: "omp:terminal-link-open", target: "src/a.ts:3", folders: true },
+	], "a file or folder reference keeps `folders`, an internal URL is not one");
+	links.dispose();
+});
+
 test("no more than eight validations wait on the host at once; the rest follow as answers arrive", async () => {
 	const { sent, transport, answer } = fixture([]);
 	const links = new ChatFileLinks(transport);

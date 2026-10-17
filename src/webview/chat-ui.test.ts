@@ -5439,6 +5439,54 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.evaluate("clearInterval(window.answerLinks)");
 		});
 
+		await t.test("an agent:// URL in a reply, in code and as a link destination is a link only once the host proves this session has the agent, and a click posts a plain open request", async () => {
+			await reset("chat-internal-links");
+			const prose = "The review is in agent://DocsReview and `agent://Parent.Child`, see [the report](agent://DocsReview/reports/0), not agent://Missing or `agent://Missing`.";
+			await ui.evaluate(`(()=>{
+			 const row=(id,message)=>({type:'message',id,parentId:null,timestamp:'2026-10-01T00:00:00.000Z',message});
+			 window.ui.push({entries:[
+			  row('assistant',{role:'assistant',model:'m',timestamp:2,stopReason:'stop',content:[{type:'text',text:${JSON.stringify(`${prose}\n\n\`\`\`\nagent://DocsReview in a fence\n\`\`\``)}}]}),
+			 ],durableCount:1,working:false,settled:true});
+			 // The host's answers: the session has these two agents and nothing else.
+			 const proven=['agent://DocsReview','agent://Parent.Child'];
+			 window.answered=new Set();
+			 window.answerLinks=setInterval(()=>{for(const message of window.sent){
+			  if(message.type!=='omp:terminal-link-validate'||window.answered.has(message.requestId))continue;
+			  window.answered.add(message.requestId);
+			  window.ui.receive({type:'omp:terminal-link-validation',requestId:message.requestId,valid:proven.includes(message.target)});
+			 }},5);
+			})()`);
+			await ui.wait("document.querySelectorAll('.omp-internal-link').length>=3");
+			const facts = await ui.evaluate<{ targets: string[]; texts: string[]; inCode: number; reply: string; fenced: number; focusable: boolean; missingAsked: boolean; missingLinked: boolean; fileAsked: boolean; menu: boolean }>(`(()=>{
+			 const links=[...document.querySelectorAll('.omp-internal-link')];
+			 const reply=document.querySelector('.omp-md');
+			 return {targets:links.map(link=>link.dataset.internalTarget),texts:links.map(link=>link.textContent),inCode:reply.querySelectorAll('code .omp-internal-link').length,
+			  reply:reply.querySelector('p').textContent,fenced:reply.querySelectorAll('pre .omp-internal-link').length,focusable:links.every(link=>link.tabIndex===0&&link.getAttribute('role')==='link'),
+			  missingAsked:window.sent.some(message=>message.type==='omp:terminal-link-validate'&&message.target==='agent://Missing'),
+			  missingLinked:links.some(link=>link.textContent.includes('Missing')),
+			  fileAsked:window.sent.some(message=>message.type==='omp:terminal-link-validate'&&message.target.startsWith('agent://')&&message.target!==message.target.trim()),
+			  menu:links.some(link=>link.hasAttribute('data-vscode-context'))};
+			})()`);
+			assert.deepEqual(facts.targets, ["agent://DocsReview", "agent://Parent.Child", "agent://DocsReview"], "the JSON path of a destination is not part of what opens");
+			assert.deepEqual(facts.texts, ["agent://DocsReview", "agent://Parent.Child", "the report"]);
+			assert.equal(facts.inCode, 1, "a code span is one link inside the code element");
+			assert.equal(facts.reply, prose.replace("[the report](agent://DocsReview/reports/0)", "the report").replaceAll("`", ""), "link detection never alters the rendered text");
+			assert.equal(facts.fenced, 0, "fenced code stays text");
+			assert.ok(facts.focusable, "links are keyboard reachable");
+			assert.ok(facts.missingAsked && !facts.missingLinked, "an agent the host does not know stays text, in prose and in code");
+			assert.equal(facts.menu, false, "no file menu: there is no path");
+			const opens = () => ui.evaluate<Record<string, unknown>[]>("window.sent.filter(message=>message.type==='omp:terminal-link-open').map(({requestId,...rest})=>rest)");
+			assert.deepEqual(await opens(), [], "validation alone never opens anything");
+			await ui.evaluate("document.querySelector('[data-internal-target=\"agent://Parent.Child\"]').click()");
+			assert.deepEqual(await opens(), [{ type: "omp:terminal-link-open", target: "agent://Parent.Child" }], "a plain click posts the open request for the canonical URL, naming no folder");
+			await ui.evaluate("document.querySelector('[data-internal-target=\"agent://DocsReview\"]').dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',bubbles:true,cancelable:true}))");
+			assert.deepEqual((await opens()).at(-1), { type: "omp:terminal-link-open", target: "agent://DocsReview" }, "Enter activates a focused link");
+			await ui.evaluate("document.querySelector('[data-internal-target=\"agent://Parent.Child\"]').dispatchEvent(new MouseEvent('click',{bubbles:true,cancelable:true,ctrlKey:true,shiftKey:true}))");
+			assert.deepEqual((await opens()).at(-1), { type: "omp:terminal-link-open", target: "agent://Parent.Child", action: "os" }, "Ctrl+Shift+Click asks to show the file behind the link");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+			await ui.evaluate("clearInterval(window.answerLinks)");
+		});
+
 		await t.test("a skill read is a Skill row with the book icon and the skill name, linked to the real SKILL.md once the result names it, and groups as Loaded N skill", async () => {
 			const skillFile = "C:\\Users\\me\\.omp\\skills\\omp-desk-release\\SKILL.md";
 			const subFile = "C:\\Users\\me\\.omp\\skills\\omp-desk-release\\scripts\\x.md";

@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Chat: OMP's internal addresses in a reply are links.** An `agent://<id>`, `history://<id>`, `artifact://<n>` or `local://<path>` written in a reply (in prose, in inline code such as `` `agent://DocsReview` ``, in bold, or as the destination of a Markdown link) becomes a link when this session has what it names, and stays plain text otherwise, so a link is never dead.
+  - **`agent://<id>`** (a nested agent is `Parent.Child`; a `/path` after the id is ignored) opens the agent's read-only transcript tab, the same one the Agents row opens, while the live session knows the agent. When it does not (a stopped or resumed session), it opens the agent's published output, `<id>.md` in the session's folder, as a read-only document.
+  - **`history://<id>`** opens the agent's transcript tab. **`artifact://<n>`** opens the full output of a truncated tool result, as the link in the tool row does. **`local://<path>`** opens a file of the session's scratch space as a read-only document.
+  - **Ctrl+Shift+Click** shows the file behind a link (an output, an artifact or a scratch file) in File Explorer. Only this session's own files are reachable: the page names the address, never a path, and the host resolves it against the session it serves.
+  - `skill://`, `memory://`, `rule://`, `omp://`, `pr://` and `issue://` stay text: OMP resolves them from its own loaded skills, memory, rules and remote services, which OMP Desk cannot ask.
+
 ### Fixed
 
 - **Chat: quoting text inside one table cell quotes that text, not the whole table row.** Selecting a cell's text in a reply and pressing `Alt+Q` put the table's header, its separator and the whole row with every cell into the draft. Now a selection inside one cell quotes only what you selected, as a paragraph does (a bold run you selected whole stays `**bold**`, a part of it is its plain text), with no header and no pipes. A selection across several cells or rows quotes a valid table cut to the columns between the first and the last cell you touched, with the cells at its two ends cut to your selection. A selection that starts before the table or ends after it still quotes the touched rows whole, with every column.

@@ -1120,6 +1120,22 @@ describe("native authority cuts and child reads", () => {
 		assert.equal(channel.commandsOfType("get_subagent_messages").at(-1)?.sessionFile, undefined, "page ids never become path selectors");
 		session.dispose();
 	});
+
+	it("tells a link whether the live session knows an id, as roster or as a held task result, without reading any transcript", async () => {
+		const taskRow = messageEntry("nested-task", null, toolResultMessage("task-call", 1, "task", { results: [{ id: "Parent.Child", sessionFile: "D:\\scratch\\nested.jsonl" }] }));
+		const { session, channel } = await boot({ setup: ch => ch.handlers.set("get_subagent_messages", () => ({ data: { sessionFile: "D:\\scratch\\child.jsonl", fromByte: 0, nextByte: 400, reset: false, entries: [taskRow], messages: [] } })) });
+		assert.equal(session.subagentKnown("Parent"), null);
+		assert.equal(session.subagentKnown("D:\\private\\secrets.jsonl"), null);
+		channel.emit({ type: "subagent_lifecycle", payload: { id: "Parent", index: 0, agent: "implementer", agentSource: "builtin", status: "started" } });
+		assert.equal(session.subagentKnown("Parent"), "roster");
+		assert.equal(session.subagentKnown("Parent.Child"), null, "a nested id is known only once a task result that names it was observed");
+		assert.equal((await session.subagentMessages("Parent", 0)).status, "available");
+		const reads = channel.commandsOfType("get_subagent_messages").length;
+		assert.equal(session.subagentKnown("Parent.Child"), "reference");
+		assert.equal(channel.commandsOfType("get_subagent_messages").length, reads, "asking reads nothing");
+		session.dispose();
+		assert.equal(session.subagentKnown("Parent"), null, "a session that is not live knows no child");
+	});
 });
 
 describe("mode-transition admission and settlement", () => {

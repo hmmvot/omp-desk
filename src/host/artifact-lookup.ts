@@ -66,9 +66,12 @@ export function parseArtifactUri(uri: { readonly scheme: string; readonly path: 
 	}
 }
 
-/** Find artifact `artifactId` of the session transcript `sessionFile`, or say why it cannot be opened. */
-export async function findArtifact(sessionFile: string, artifactId: string): Promise<ArtifactLookup> {
-	if (!ARTIFACT_ID.test(artifactId)) return refused("That is not an artifact id.");
+/**
+ * The artifacts directory of the session transcript `sessionFile`: its path without `.jsonl`, once the file is an
+ * absolute path of a real OMP transcript (a regular file with a session header). Everything a session owns beside its
+ * transcript (tool-output artifacts, subagent outputs, the `local://` scratch space) lives below it.
+ */
+export async function sessionArtifactsDirectory(sessionFile: string): Promise<{ readonly status: "found"; readonly directory: string } | { readonly status: "refused"; readonly reason: string }> {
 	const layout = path.isAbsolute(sessionFile) ? sessionFileLayout(sessionFile) : null;
 	if (layout === null || layout.artifactsDirectory === null) return refused("The session file is not an OMP session transcript.");
 	try {
@@ -76,7 +79,15 @@ export async function findArtifact(sessionFile: string, artifactId: string): Pro
 	} catch {
 		return refused("The session file is gone.");
 	}
-	const directory = layout.artifactsDirectory;
+	return { status: "found", directory: layout.artifactsDirectory };
+}
+
+/** Find artifact `artifactId` of the session transcript `sessionFile`, or say why it cannot be opened. */
+export async function findArtifact(sessionFile: string, artifactId: string): Promise<ArtifactLookup> {
+	if (!ARTIFACT_ID.test(artifactId)) return refused("That is not an artifact id.");
+	const session = await sessionArtifactsDirectory(sessionFile);
+	if (session.status === "refused") return session;
+	const directory = session.directory;
 	let names: string[];
 	try {
 		names = await readdir(directory);
@@ -98,24 +109,30 @@ export async function findArtifact(sessionFile: string, artifactId: string): Pro
 	}
 }
 
+/** The first {@link MAX_ARTIFACT_BYTES} of a file of `bytes` bytes, decoded as UTF-8 with replacement; `null` when it cannot be read. */
+export async function readBoundedText(file: string, bytes: number): Promise<string | null> {
+	try {
+		const handle = await open(file, "r");
+		try {
+			const buffer = Buffer.allocUnsafe(Math.min(bytes, MAX_ARTIFACT_BYTES));
+			const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+			return buffer.subarray(0, bytesRead).toString("utf8");
+		} finally {
+			await handle.close();
+		}
+	} catch {
+		return null;
+	}
+}
+
 /** The text of an artifact: at most {@link MAX_ARTIFACT_BYTES}, decoded as UTF-8 with replacement. */
 export async function readArtifact(sessionFile: string, artifactId: string): Promise<ArtifactRead> {
 	const found = await findArtifact(sessionFile, artifactId);
 	if (found.status === "refused") return found;
 	const { file, name, bytes } = found.artifact;
 	if (bytes > MAX_ARTIFACT_BYTES) return { status: "too-large", name, bytes };
-	try {
-		const handle = await open(file, "r");
-		try {
-			const buffer = Buffer.allocUnsafe(Math.min(bytes, MAX_ARTIFACT_BYTES));
-			const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
-			return { status: "text", name, text: buffer.subarray(0, bytesRead).toString("utf8") };
-		} finally {
-			await handle.close();
-		}
-	} catch {
-		return refused(`Artifact ${artifactId} cannot be read.`);
-	}
+	const text = await readBoundedText(file, bytes);
+	return text === null ? refused(`Artifact ${artifactId} cannot be read.`) : { status: "text", name, text };
 }
 
 /** What an artifact document shows when the file cannot be shown as text; never empty, so an open never looks like an empty file. */

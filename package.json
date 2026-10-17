@@ -58,6 +58,7 @@
   "activationEvents": [
     "onStartupFinished",
     "onFileSystem:omp-artifact",
+    "onFileSystem:omp-session-file",
     "onView:ompDesk.sessions",
     "onView:ompDesk.skills",
     "onView:ompDesk.tools",

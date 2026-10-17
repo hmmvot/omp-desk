@@ -1852,14 +1852,30 @@ export class RpcSession {
 		return { epoch: this.epoch, entries: older.entries, olderCount: older.olderCount };
 	}
 
-	/** Native lookup only: a page id must already exist in our roster, lifecycle history or held task results. */
-	async subagentMessages(subagentId: string, fromByte: number, beforeId?: string): Promise<SubagentTranscriptPage> {
-		if (!this.#live || this.#disposed || this.#ended) return { status: "unavailable", reason: "not-live" };
+	/**
+	 * How the live session knows `subagentId`: `roster` when its Agents roster holds it, `reference` when only a task result it
+	 * holds names it (nested agents and agents of a resumed history); `null` for any other id and for a session that is not live.
+	 * It answers the question the child read asks (`subagentMessages`), without reading a transcript.
+	 */
+	subagentKnown(subagentId: string): "roster" | "reference" | null {
+		if (!this.#live || this.#disposed || this.#ended) return null;
+		if (this.#model.agents.has(subagentId)) return "roster";
+		this.#rememberHeldTaskReferences();
+		return this.#subagentReferences.has(subagentId) ? "reference" : null;
+	}
+
+	#rememberHeldTaskReferences(): void {
 		for (const agent of this.#model.agents.values()) this.#rememberTaskReferences(agent.progress);
 		for (const tool of this.#model.activeTools.values()) if (tool.toolName === "task" && isRecord(tool.partialResult)) this.#rememberTaskReferences(tool.partialResult.details);
 		for (const entry of this.#model.entries) {
 			if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "task") this.#rememberTaskReferences(entry.message.details);
 		}
+	}
+
+	/** Native lookup only: a page id must already exist in our roster, lifecycle history or held task results. */
+	async subagentMessages(subagentId: string, fromByte: number, beforeId?: string): Promise<SubagentTranscriptPage> {
+		if (!this.#live || this.#disposed || this.#ended) return { status: "unavailable", reason: "not-live" };
+		this.#rememberHeldTaskReferences();
 		const known = this.#model.agents.has(subagentId) || this.#subagentReferences.has(subagentId);
 		if (!known) return { status: "unavailable", reason: "unknown" };
 		const outcome = await this.#sendInternal({ type: "get_subagent_messages", subagentId, fromByte: beforeId === undefined ? fromByte : 0 });

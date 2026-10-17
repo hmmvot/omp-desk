@@ -186,6 +186,8 @@ import type { CarriedDraft, GuestDispatcher, GuestDispatcherDeps } from "./wirin
 import { registerRecentSessions } from "./wiring/recent-sessions";
 import { registerArtifactDocuments } from "./wiring/artifact-documents";
 import type { ArtifactDocuments } from "./wiring/artifact-documents";
+import { registerSessionFileDocuments } from "./wiring/session-file-documents";
+import type { SessionFileDocuments } from "./wiring/session-file-documents";
 import { registerBridgeHost } from "./wiring/bridge-host";
 import type { BridgeHost, BridgeHostDeps } from "./wiring/bridge-host";
 import { EDITOR_TAB_ICON, UPDATED_ON_DISK_DETAIL, registerEditorPanels } from "./wiring/editor-panels";
@@ -266,6 +268,8 @@ import type { FileLinkAction, TerminalLinkRequest, TerminalLinkValidation, WebLi
 import { MAX_SYMBOL_ENTRIES, SymbolLinkResolver, handleSymbolLinks, isNameCandidate, symbolEntry, symbolRoots } from "./host/symbol-links";
 import { FileNameLinkResolver, fileChoiceLabel, workspaceFileNameSource } from "./host/file-name-links";
 import type { SymbolLinksRequest, SymbolLinksResolution, SymbolLinksRetry } from "./shared/code-symbols";
+import { handleInternalLink } from "./host/internal-links";
+import { parseInternalLink } from "./shared/internal-links";
 import {
   createShellSlotId,
   createShellSlotStore,
@@ -942,6 +946,8 @@ interface WindowState {
   mermaidPreviews: MermaidPreviews;
   /** The read-only `omp-artifact:` documents (tool output design, slice 5); registered at the start of `activate`. */
   artifactDocuments: ArtifactDocuments;
+  /** The read-only `omp-session-file:` documents (subagent outputs and `local://` files opened from a Chat link); registered at the start of `activate`. */
+  sessionFileDocuments: SessionFileDocuments;
   /**
    * Last host-observed turn activity per tab, projected from the conversation's own model.
    *
@@ -1366,6 +1372,7 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     detailTabs: undefined as never, // assigned by `activate` before anything reads it
     mermaidPreviews: undefined as never, // assigned by `activate` before anything reads it
     artifactDocuments: undefined as never, // assigned by `activate`, first thing
+    sessionFileDocuments: undefined as never, // assigned by `activate`, first thing
     turnActivities: new Map<string, TurnActivity>(),
     editorRecency: new EditorRecency(),
     turnNotifier: undefined,
@@ -1467,8 +1474,9 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
   const activation = new ActivationTimer();
   window = createWindowState(context);
   const s = windowState();
-  // The `omp-artifact:` scheme first, synchronously: an editor tab of it that Reload Window restores is served as soon as the window has the provider.
+  // The `omp-artifact:` and `omp-session-file:` schemes first, synchronously: an editor tab of either that Reload Window restores is served as soon as the window has the provider.
   s.artifactDocuments = registerArtifactDocuments(context.subscriptions);
+  s.sessionFileDocuments = registerSessionFileDocuments(context.subscriptions);
   s.output = vscode.window.createOutputChannel("OMP Desk", { log: true });
   setOmpResolutionLog(log);
   context.subscriptions.push({ dispose: () => setOmpResolutionLog(null) });
@@ -10204,6 +10212,24 @@ async function handleTerminalGuestMessage(
           isCurrent,
           reply: message => pushTerminalTo(state.slotId, message),
         }, symbolLinkResolver());
+        return;
+      }
+      // An internal OMP URL (`agent://Name`) is proved and opened against the conversation's own session, never as a file of the cwd.
+      const internal = typeof payload.target === "string" && conversation !== null ? parseInternalLink(payload.target) : null;
+      if (internal !== null && conversation !== null) {
+        const conversations = s.sessionRuntime.conversations;
+        await handleInternalLink(payload as unknown as TerminalLinkRequest, internal, {
+          isCurrent,
+          reply: message => pushTerminalTo(state.slotId, message),
+          sessionFile: () => conversations.liveOf(conversation)?.sessionFile ?? s.indexForBridge?.get(conversation)?.sessionFile ?? null,
+          tabs: state.mode !== "terminal" && conversations.kindOf(conversation) !== "legacy",
+          knownSubagent: id => conversations.subagentKnownOf(conversation, id),
+          openAgentTab: id => { log.debug(`tab ${conversation}: detail tab agent was ${s.detailTabs.open(conversation, { kind: "agent", agentId: id })}`); },
+          openSessionFile: (sessionFile, ref) => s.sessionFileDocuments.open(sessionFile, ref),
+          openArtifact: (sessionFile, artifactId) => s.artifactDocuments.open(sessionFile, artifactId),
+          revealInOs: file => revealPathInOs(file),
+          warn: message => { log.warn(`terminal link: ${message}`); showWarning(message); },
+        });
         return;
       }
       await handleTerminalLink(payload as unknown as TerminalLinkRequest, {

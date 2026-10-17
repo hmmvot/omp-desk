@@ -39,6 +39,10 @@ export class TerminalLinkClient {
 	openPath(target: string, action?: FileLinkAction): void {
 		this.#post({ type: "omp:terminal-link-open", requestId: nextTerminalLinkRequestId++, target, folders: true, ...(action === undefined ? {} : { action }) });
 	}
+	/** Open an internal OMP URL of this conversation's session (`agent://Name`); the host proves it again and opens an existing read-only view, or with `action: "os"` shows the file behind it. */
+	openInternal(target: string, action?: FileLinkAction): void {
+		this.#post({ type: "omp:terminal-link-open", requestId: nextTerminalLinkRequestId++, target, ...(action === undefined ? {} : { action }) });
+	}
 	/**
 	 * Ask the host to open VS Code's workspace symbol search prefilled with the name of `symbol`, a code symbol with several definitions;
 	 * with `files`, `symbol` is a bare file name span that several files carry and the host lets the user choose one.
