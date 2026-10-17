@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { ChatEntry } from "../../chat/messages.ts";
 import { projectTranscript } from "../../chat/transcript.ts";
-import { clearFindCache, findIdOf, findPattern, findUnitsOf, matchAt, positionOf, searchUnits, segmentOf } from "./transcript-find.ts";
+import { clearFindCache, findIdOf, findPattern, findUnitsOf, isLetterKey, matchAt, positionOf, searchUnits, segmentOf } from "./transcript-find.ts";
 
 const entry = (id: string, message: Record<string, unknown>): ChatEntry => ({ type: "message", id, parentId: null, timestamp: "2026-10-17T00:00:00Z", message: { timestamp: 1, ...message } } as ChatEntry);
 const user = (id: string, content: string, extra: Record<string, unknown> = {}) => entry(id, { role: "user", content, ...extra });
@@ -118,5 +118,17 @@ describe("counting matches", () => {
 		assert.equal(segmentOf(units[3]!, 1)?.part, "output");
 		assert.equal(segmentOf(units[3]!, 3), null);
 		assert.equal(all.total, 8);
+	});
+});
+
+describe("the letter of a shortcut chord", () => {
+	it("is read by its Latin character, and by the physical key when the layout types another script", () => {
+		assert.equal(isLetterKey({ key: "f", code: "KeyF" }, "f"), true);
+		assert.equal(isLetterKey({ key: "F", code: "KeyF" }, "f"), true, "Caps Lock or Shift reports the capital");
+		assert.equal(isLetterKey({ key: "а", code: "KeyF" }, "f"), true, "a Cyrillic layout: the physical F key types а");
+		assert.equal(isLetterKey({ key: "с", code: "KeyC" }, "c"), true);
+		assert.equal(isLetterKey({ key: "а", code: "KeyA" }, "f"), false, "another physical key on that layout");
+		assert.equal(isLetterKey({ key: "u", code: "KeyF" }, "f"), false, "a Latin layout that moved the letter (Dvorak): the character wins");
+		assert.equal(isLetterKey({ key: "F3", code: "F3" }, "f"), false);
 	});
 });

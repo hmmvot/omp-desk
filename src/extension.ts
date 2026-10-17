@@ -5685,7 +5685,8 @@ function postChatPanelAction(action: GuestPanelAction): void {
 
 /**
  * Open the find bar of the active Chat editor's transcript. Searching writes nothing, so a view-only editor may do it too
- * (the other panel actions refuse there); the key itself (`Ctrl+F`) is taken by the page and does not come through here.
+ * (the other panel actions refuse there). `Ctrl+F` reaches here through the contributed keybinding, and the page takes the same press itself
+ * too; the page ignores the second arrival when its field already has the focus.
  */
 function findInChat(): void {
   const target = activePanelTab();

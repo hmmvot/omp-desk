@@ -7096,9 +7096,23 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await ui.wait("document.querySelector('.omp-find-input')?.value==='Tell me about the quokka'");
 			await ui.wait("document.querySelector('.omp-find-status').textContent==='1 of 1'");
 			await waitCurrent("u1");
-			// Close and reopen: a second Ctrl+F while open only selects the field.
+			// A second Ctrl+F, and the host's keybinding that follows the same press, leave the focused field's text and caret alone.
+			await ui.evaluate("document.querySelector('.omp-find-input').setSelectionRange(4,4)");
 			await press("f", "KeyF", 70, { modifiers: CTRL });
-			assert.equal((await findState())?.input, "Tell me about the quokka");
+			await ui.evaluate("window.ui.receive({type:'omp:webview-action',action:'find-in-chat'})");
+			await settleFrames();
+			assert.deepEqual(await ui.evaluate("(()=>{const input=document.querySelector('.omp-find-input');return[input.value,input.selectionStart,input.selectionEnd,document.activeElement===input]})()"), ["Tell me about the quokka", 4, 4, true], "nothing reselected under the reader's caret");
+			// Alt+C on a Cyrillic layout is the same key: the character is "с", the physical key is C.
+			await press("с", "KeyC", 67, { modifiers: ALT });
+			await ui.wait("document.querySelector('[aria-label=\"Match case\"]').getAttribute('aria-pressed')==='true'");
+			await press("с", "KeyC", 67, { modifiers: ALT });
+			await ui.wait("document.querySelector('[aria-label=\"Match case\"]').getAttribute('aria-pressed')==='false'");
+			await press("Escape", "Escape", 27);
+			await ui.wait("!document.querySelector('.omp-find')");
+			// Ctrl+F on a Cyrillic layout: the key is "а", the physical key is F, and VS Code reads it as Ctrl+F.
+			await press("а", "KeyF", 70, { modifiers: CTRL });
+			await ui.wait("document.querySelector('.omp-find-input')");
+			assert.equal((await findState())?.focused, true, "the bar opens on a layout that types another script");
 			await press("Escape", "Escape", 27);
 			await ui.wait("!document.querySelector('.omp-find')");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);

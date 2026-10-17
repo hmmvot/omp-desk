@@ -153,6 +153,14 @@ export function findPattern(query: string, caseSensitive: boolean): RegExp | nul
 	return new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), caseSensitive ? "gu" : "giu");
 }
 
+/**
+ * Whether a key event is the letter `letter` of a shortcut chord on any keyboard layout. A Latin character is compared as it is (Dvorak's F is F);
+ * any other character (a Cyrillic layout reports "а" for the physical F key, which VS Code itself still reads as F) falls back to the physical key.
+ */
+export function isLetterKey(event: { readonly key: string; readonly code: string }, letter: string): boolean {
+	return /^[a-z]$/i.test(event.key) ? event.key.toLowerCase() === letter : event.code === `Key${letter.toUpperCase()}`;
+}
+
 function countIn(text: string, pattern: RegExp): number {
 	pattern.lastIndex = 0;
 	let count = 0;

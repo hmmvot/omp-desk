@@ -81,14 +81,14 @@ Select text in an assistant reply, one of your own messages or an open thinking 
 
 ### Finding text in the conversation
 
-`Ctrl+F` anywhere in a Chat (the composer included, which has no find of its own) opens a find bar in the corner of the transcript. **OMP Desk: Find in Chat** (the Command Palette and the editor's `…` menu) opens the same bar, and you can give that command a key of your own.
+`Ctrl+F` (`Cmd+F` on macOS) anywhere in a Chat (the composer included, which has no find of its own) opens a find bar in the corner of the transcript. **OMP Desk: Find in Chat** (the Command Palette and the editor's `…` menu) opens the same bar. The key works on any keyboard layout, is listed in **Show Chat Keyboard Shortcuts**, and can be rebound or removed in the Keyboard Shortcuts editor like any other.
 
 - **It searches the conversation, not just the rows in the page.** A long conversation keeps only the rows on screen in the page, which is all VS Code's own find could see, so the bar reads the loaded conversation itself: your messages, the replies and their thinking, and each tool call's name, target, intent and output text. It does not search notices and summaries, the text of attached files, the history before a context reset (`/clear`), or messages still on disk behind **load earlier messages**; the bar says how many of those there are.
 - **It starts at the newest match.** `Enter` or `F3` goes to the next match and `Shift+Enter` or `Shift+F3` to the previous one, both wrapping round; the bar shows `3 of 12` (or `No results`). `Alt+C` turns **Match Case** on and off. The query is literal text, not a pattern. Text you had selected in the Chat fills the field.
 - **The match is shown.** The row is loaded into the transcript if it was above the rows the Chat keeps, scrolled to (deep inside a long reply, to the line), and what hides it is opened: a tool group, the call's output or a thinking block. They stay open when you move on. Every match in the rows on screen is highlighted and the current one stands out. In a long tool output only the rows the card shows are highlighted (the match's row is outlined); use **Show all** and the output's own **Filter lines** to look further.
 - **It searches when you pause.** The search runs about a moment after you stop typing (`Enter` searches at once), so a long conversation does not slow each keystroke. The reply that is still being written is not searched until it is complete.
 - **`Esc` closes the bar** and puts the focus back where it was, the composer if that is gone. It works from the field and from every button of the bar, and `Esc` there never stops a running turn.
-- With screen-reader paging on, the page that holds the match is shown. `Ctrl+F` is taken by the Chat page itself, so it also works in a view-only Chat and while the extension restarts; it is not in **Show Chat Keyboard Shortcuts**, because it is not a VS Code keybinding.
+- With screen-reader paging on, the page that holds the match is shown. `Ctrl+F` is a VS Code keybinding for the Chat editor, and the page also takes it itself, so it works in a view-only Chat and while the extension restarts. Pressing it while the field has the focus changes nothing, so it never reselects what you are typing; from anywhere else it returns to the field and selects its text.
 
 ### Mermaid diagrams
 

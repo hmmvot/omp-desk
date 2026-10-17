@@ -441,6 +441,17 @@ describe("commands", () => {
 		assert.equal(declared.get("ompDesk.searchFileFromChat")?.title, "Go to File from Chat Selection");
 	});
 
+	it("bind Ctrl+F (Cmd+F on macOS) to Find in Chat inside a Chat only, under the one condition, with no other binding on the key, and register the command to post the action", () => {
+		const chatOnly = "activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat";
+		assert.deepEqual(contributes.keybindings.filter(binding => binding.key === "ctrl+f").map(binding => [binding.command, binding.when]), [["ompDesk.findInChat", chatOnly]],
+			"the key reaches the page through VS Code's own keybinding resolution, which reads the physical key on any keyboard layout");
+		assert.equal((contributes.keybindings.find(binding => binding.command === "ompDesk.findInChat") as { mac?: string } | undefined)?.mac, "cmd+f");
+		assert.equal(declared.get("ompDesk.findInChat")?.title, "Find in Chat");
+		assert.deepEqual(menus.filter(({ menu, entry }) => menu === "editor/title" && entry.command === "ompDesk.findInChat").map(({ entry }) => entry.when), [chatOnly]);
+		const source = readFileSync(new URL("../extension.ts", import.meta.url), "utf8");
+		assert.match(source, /registerDeskCommand\("ompDesk\.findInChat", \(\) => findInChat\(\)\)/);
+	});
+
 	it("declare Quote Selection with Alt+Q inside a Chat, and Quote Selection to Session with Alt+Q in a text editor with a selection, no third binding on the key, and a transcript context menu item gated by the key the page sets", () => {
 		const chatOnly = "activeWebviewPanelId =~ /^omp[.]session/ && ompDesk.sessionMode == chat";
 		const bound = contributes.keybindings.filter(binding => binding.key === "alt+q");

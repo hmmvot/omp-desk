@@ -14,7 +14,7 @@ import type { OverviewProjection } from "../../chat/tool-overview";
 import { canHighlight, paintFind, rangesIn, rowText } from "../lib/find-dom";
 import { reportComposerPopupOpen } from "../lib/composer-overlay";
 import { provideFindAction, requestPanelAction } from "../lib/panel-actions";
-import { clearFindCache, findIdOf, findPattern, findUnitsOf, matchAt, positionOf, searchUnits, segmentOf, type FindMatch, type FindSearch } from "../lib/transcript-find";
+import { clearFindCache, findIdOf, findPattern, findUnitsOf, isLetterKey, matchAt, positionOf, searchUnits, segmentOf, type FindMatch, type FindSearch } from "../lib/transcript-find";
 import type { TranscriptScrollController } from "../lib/transcript-scroll";
 import { markdownShownText } from "./Markdown";
 
@@ -188,7 +188,12 @@ export function useTranscriptFind(params: TranscriptFindParams): ReactNode {
 		goTo(matchAt(now, at < 0 ? (delta > 0 ? 0 : now.total - 1) : (at + delta + now.total) % now.total));
 	}, [goTo]);
 
+	/**
+	 * Both the page's own Ctrl+F and the host's keybinding (which VS Code forwards for the same press) end here, so a press that finds the field
+	 * already focused changes nothing: it must not reselect text the reader has begun to type.
+	 */
 	const openFind = useCallback((): void => {
+		if (state.current.open && inputRef.current !== null && document.activeElement === inputRef.current) return;
 		const view = latest.current;
 		const selection = window.getSelection();
 		const seed = selection !== null && !selection.isCollapsed && view.rootRef.current?.contains(selection.anchorNode) === true ? selection.toString() : "";
@@ -220,7 +225,7 @@ export function useTranscriptFind(params: TranscriptFindParams): ReactNode {
 		const release = provideFindAction(openFind);
 		const onKeyDown = (event: KeyboardEvent): void => {
 			if (event.isComposing || event.keyCode === 229) return;
-			if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === "f") { event.preventDefault(); openFind(); return; }
+			if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && isLetterKey(event, "f")) { event.preventDefault(); openFind(); return; }
 			if (event.key === "F3" && !event.ctrlKey && !event.altKey && !event.metaKey && state.current.open) { event.preventDefault(); step(event.shiftKey ? -1 : 1); }
 		};
 		document.addEventListener("keydown", onKeyDown, true);
@@ -300,7 +305,7 @@ export function useTranscriptFind(params: TranscriptFindParams): ReactNode {
 							// A key pressed before the query settled searches for what is in the field first.
 							if (query !== settled) setSettled(query); else step(event.shiftKey ? -1 : 1);
 						}
-						else if (event.altKey && !event.ctrlKey && !event.metaKey && event.key.toLowerCase() === "c") { event.preventDefault(); setCaseSensitive(value => !value); }
+						else if (event.altKey && !event.ctrlKey && !event.metaKey && isLetterKey(event.nativeEvent, "c")) { event.preventDefault(); setCaseSensitive(value => !value); }
 					}} />
 				<span className="omp-find-status" role="status" aria-live="polite">{statusText(settled, search, position)}</span>
 				<button type="button" className="omp-find-button" aria-label="Match case" aria-pressed={caseSensitive} aria-keyshortcuts="Alt+C" title="Match Case (Alt+C)" onClick={() => { setCaseSensitive(value => !value); inputRef.current?.focus(); }}><span className="codicon codicon-case-sensitive" aria-hidden="true" /></button>
