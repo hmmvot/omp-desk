@@ -49,6 +49,8 @@ export interface RpcAttachResult {
 	rpcProtocol: 1 | 2 | null;
 	/** The raw `ready` line, or `null` when the child has not produced it yet. */
 	ready: string | null;
+	/** The child offered protocol 2 and its answer to the broker's negotiation is outstanding (`rpcProtocol` is `null` meanwhile). */
+	negotiating: boolean;
 	child: RpcChildStatus;
 }
 
@@ -256,6 +258,7 @@ export type RpcErrorCode =
 	| "identity-mismatch"
 	| "identity-diverged"
 	| "ready-timeout"
+	| "negotiation-timeout"
 	| "state-failed"
 	| "history-unreadable"
 	| "child-exited"
@@ -270,6 +273,7 @@ export const RPC_ERROR_SENTENCES: Readonly<Record<RpcErrorCode, string>> = {
 	"identity-mismatch": "The running OMP process is not serving this session file.",
 	"identity-diverged": "The session identity changed inside the OMP process; this tab is now read-only.",
 	"ready-timeout": "OMP did not become ready.",
+	"negotiation-timeout": "OMP did not finish starting the chat protocol. Reconnect, or restart this session if it keeps failing.",
 	"state-failed": "Lost the connection to OMP: it did not answer a state request.",
 	"history-unreadable": "The session file could not be read.",
 	"child-exited": "The OMP process has exited.",
@@ -291,6 +295,7 @@ const RECOVERABLE_FAILURES: Readonly<Partial<Record<RpcErrorCode, true>>> = {
 	"attach-failed": true,
 	"state-failed": true,
 	"ready-timeout": true,
+	"negotiation-timeout": true,
 	"protocol-error": true,
 	"write-refused": true,
 };

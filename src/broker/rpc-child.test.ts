@@ -14,7 +14,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, afterEach, before, describe, it } from "node:test";
-import { RpcChildWriteError, startRpcChild, offersProtocol2, RPC_NEGOTIATE_ID, type RpcChild } from "./rpc-child.ts";
+import { RpcChildWriteError, startRpcChild, offersProtocol2, RPC_NEGOTIATE_ID, type RpcChild, type RpcChildOptions } from "./rpc-child.ts";
 import { peekRpcLine, RpcLineRing } from "./rpc-ring.ts";
 import { PTY_RPC_STDERR_TAIL_BYTES } from "../host/pty-protocol.ts";
 
@@ -24,7 +24,9 @@ import { PTY_RPC_STDERR_TAIL_BYTES } from "../host/pty-protocol.ts";
  * - `v1`: `ready` lists no protocol versions (an older OMP);
  * - `refuse`: offers 2 but answers the negotiation with a failure;
  * - `die`: exits before `ready`;
- * - `partial`: like `v2`, and ends stdout with a line that has no newline.
+ * - `partial`: like `v2`, and ends stdout with a line that has no newline;
+ * - `slow`: like `v2`, but the negotiation is answered only once the file named by argv[3] exists
+ *   (the test creates it), and a `loading` line is written meanwhile (a child busy loading its session).
  * Every other stdin line is echoed as `{"type":"echo",...}` with whether negotiation had
  * already been seen; `ask` makes it raise a dialog; `hostcall` / `hostcancel` raise a `host_tool_call` or cancel one;
  * closing stdin makes it say `bye` and exit.
@@ -50,8 +52,18 @@ process.stdin.on("data", chunk => {
 		pending = pending.slice(newline + 1);
 		const command = JSON.parse(line);
 		if (command.type === "negotiate_protocol") {
-			negotiated = mode !== "refuse";
-			process.stdout.write(JSON.stringify({ id: command.id, type: "response", command: "negotiate_protocol", success: negotiated }) + "\n");
+			const answer = () => {
+				negotiated = mode !== "refuse";
+				process.stdout.write(JSON.stringify({ id: command.id, type: "response", command: "negotiate_protocol", success: negotiated }) + "\n");
+			};
+			if (mode === "slow") {
+				out({ type: "loading" });
+				const poll = setInterval(() => {
+					if (!require("node:fs").existsSync(process.argv[3])) return;
+					clearInterval(poll);
+					answer();
+				}, 10);
+			} else answer();
 		} else if (command.type === "ask") {
 			out({ type: "extension_ui_request", id: command.dialogId, method: "select", title: "Approve?", options: ["Approve", "Deny"] });
 		} else if (command.type === "noise") {
@@ -101,35 +113,45 @@ interface Started {
 	readonly child: RpcChild;
 	readonly ring: RpcLineRing;
 	readonly ready: Promise<{ readonly line: string; readonly protocol: 1 | 2 }>;
+	/** Every `onReady` call, in order: a second one would be a second `rpc-ready` broadcast. */
+	readonly readies: Array<{ readonly line: string; readonly protocol: 1 | 2 }>;
 	readonly exit: Promise<{ readonly code: number; readonly signal: number }>;
 	readonly stderr: string[];
 	readonly logs: string[];
 }
 
-async function start(mode: string): Promise<Started> {
+async function start(mode: string, args: readonly string[] = [], options?: RpcChildOptions): Promise<Started> {
 	const ring = new RpcLineRing();
 	const ready = Promise.withResolvers<{ line: string; protocol: 1 | 2 }>();
+	const readies: Array<{ line: string; protocol: 1 | 2 }> = [];
 	const exit = Promise.withResolvers<{ code: number; signal: number }>();
 	const stderr: string[] = [];
 	const logs: string[] = [];
 	const env: Record<string, string> = {};
 	for (const [key, value] of Object.entries(process.env)) if (value !== undefined) env[key] = value;
 	const child = await startRpcChild(
-		{ file: process.execPath, args: [script, mode], cwd: scratch, env },
+		{ file: process.execPath, args: [script, mode, ...args], cwd: scratch, env },
 		{
 			onLine: notify,
-			onReady: (line, protocol) => ready.resolve({ line, protocol }),
+			onReady: (line, protocol) => {
+				readies.push({ line, protocol });
+				ready.resolve({ line, protocol });
+			},
 			onStderr: text => {
 				stderr.push(text);
 				notify();
 			},
 			onExit: info => exit.resolve(info),
-			log: line => logs.push(line),
+			log: line => {
+				logs.push(line);
+				notify();
+			},
 		},
 		ring,
+		options,
 	);
 	running.push(child);
-	return { child, ring, ready: ready.promise, exit: exit.promise, stderr, logs };
+	return { child, ring, ready: ready.promise, readies, exit: exit.promise, stderr, logs };
 }
 
 /** The retained lines, parsed. */
@@ -184,6 +206,49 @@ describe("negotiation", { timeout: 30_000 }, () => {
 		await send(child, { type: "plain" });
 		await waitFor(() => lines(ring).length === 1);
 		assert.equal(lines(ring)[0]?.negotiated, false);
+	});
+
+	it("does not latch protocol 1 on a child that offered 2 but answers the negotiation late, and delivers the late answer once", async () => {
+		const release = join(scratch, "release-late-answer");
+		const { child, ring, ready, readies, logs } = await start("slow", [release], { negotiateNoticeMs: 100 });
+		const held = send(child, { type: "client-line" });
+		let heldWritten = false;
+		void held.then(() => {
+			heldWritten = true;
+		});
+		// The broker's own wait is over (it says so); the child still has not answered.
+		await waitFor(() => logs.some(line => line.includes("negotiation")));
+		await waitFor(() => lines(ring).some(line => line.type === "loading"));
+		assert.equal(child.rpcProtocol, null, "a timeout does not decide the protocol");
+		assert.equal(child.negotiating, true);
+		assert.equal(readies.length, 0, "no rpc-ready is announced while the answer is outstanding");
+		assert.equal(heldWritten, false, "client writes stay held behind the unanswered negotiation");
+
+		await writeFile(release, "go");
+		const settled = await ready;
+		assert.equal(settled.protocol, 2, "the late answer decides: protocol 2");
+		assert.equal(child.rpcProtocol, 2);
+		assert.equal(child.negotiating, false);
+		await held;
+		await waitFor(() => lines(ring).some(line => line.type === "echo"));
+		assert.deepEqual(
+			lines(ring).map(line => line.type),
+			["loading", "echo"],
+			"the line written while waiting and the held client line are both kept; the answer itself is swallowed",
+		);
+		assert.equal(lines(ring).find(line => line.type === "echo")?.negotiated, true);
+		assert.equal(readies.length, 1, "exactly one rpc-ready");
+	});
+
+	it("never announces a protocol for a child that offered 2 and exited without answering", async () => {
+		const { child, readies, exit, logs } = await start("slow", [join(scratch, "never-created")], { negotiateNoticeMs: 50 });
+		await waitFor(() => logs.some(line => line.includes("negotiation")));
+		const held = send(child, { type: "x" });
+		child.kill();
+		await exit;
+		await assert.rejects(held, (error: unknown) => error instanceof RpcChildWriteError && error.code === "child-exited");
+		assert.equal(child.rpcProtocol, null);
+		assert.equal(readies.length, 0);
 	});
 
 	it("reads the offer from `supportedProtocolVersions` and nothing looser", () => {

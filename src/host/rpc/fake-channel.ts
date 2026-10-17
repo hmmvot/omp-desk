@@ -54,6 +54,8 @@ export class FakeRpcChannel implements RpcChannel {
 	readonly handlers = new Map<string, CommandHandler>();
 	ready: string | null = READY_LINE;
 	rpcProtocol: 1 | 2 | null = 2;
+	/** The broker has seen `ready` and awaits the child's answer to its protocol negotiation. */
+	negotiating = false;
 	childState: RpcChildStatus["state"] = "running";
 	childExitCode = 0;
 	childStderrTail: string | undefined;
@@ -139,6 +141,7 @@ export class FakeRpcChannel implements RpcChannel {
 			hostCallOverflow: this.hostCallOverflow,
 			rpcProtocol: this.rpcProtocol,
 			ready: this.ready,
+			negotiating: this.negotiating,
 			child: { state: this.childState, pid: 1234, exitCode: this.childState === "exited" ? this.childExitCode : null, ...(this.childStderrTail === undefined ? {} : { stderrTail: this.childStderrTail }) },
 		};
 		queueMicrotask(() => {

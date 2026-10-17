@@ -1043,6 +1043,11 @@ export type PtyEventFrame =
 			readonly rpcProtocol: 1 | 2 | null;
 			/** The child's `ready` line verbatim, or `null` before it was seen. */
 			readonly ready: string | null;
+			/**
+			 * `ready` was seen, the child offered protocol 2 and has not answered the negotiation yet, so `rpcProtocol`
+			 * and `ready` are still `null`. Absent on a broker from an earlier build, which parses as `false`.
+			 */
+			readonly negotiating: boolean;
 			readonly child: PtyStatusPayload;
 	  }
 	| {
@@ -1388,6 +1393,7 @@ function narrowPtyFrame(record: Record<string, unknown>, direction: PtyDirection
 						pinnedOverflow: record.pinnedOverflow,
 						hostToolRetention: record.hostToolRetention === true,
 						hostCallOverflow: record.hostCallOverflow === true,
+						negotiating: record.negotiating === true,
 						rpcProtocol: record.rpcProtocol as 1 | 2 | null,
 						ready: record.ready as string | null,
 						child: record.child,

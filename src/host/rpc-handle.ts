@@ -133,6 +133,7 @@ export class RpcHandle extends BrokerHandle<BrokerHandleEvent> implements RpcCha
 			hostCallOverflow: frame.hostCallOverflow,
 			rpcProtocol: frame.rpcProtocol,
 			ready: frame.ready,
+			negotiating: frame.negotiating,
 			child: childStatusOf(frame.child),
 		};
 	}

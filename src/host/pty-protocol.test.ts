@@ -655,6 +655,20 @@ describe("managed-rpc kind and frames", () => {
 		assert.equal(forged.t === "rpc-attached" && forged.hostToolRetention, false, "only a literal true is a capability");
 	});
 
+	it("reads whether the broker still awaits the child's negotiation answer, and treats a broker that does not say as not negotiating", () => {
+		const key = derivePtySessionKey(createPtyToken(), createPtyNonce(), createPtyNonce());
+		const sessionId = derivePtySessionId(key);
+		const v = PTY_PROTOCOL_VERSION;
+		const attached = { v, t: "rpc-attached", id: 1, fromSeq: 0, oldestSeq: 1, latestSeq: 2, truncated: false, pinnedOverflow: false, rpcProtocol: null, ready: null, child: statusFixture() };
+		const parse = (frame: object) => parsePtyFrame(key, sessionId, 1, encodePtyFrame(key, sessionId, 1, frame as never), "broker-to-client");
+		const current = parse({ ...attached, negotiating: true });
+		assert.equal(current.t === "rpc-attached" && current.negotiating, true);
+		const earlier = parse(attached);
+		assert.equal(earlier.t === "rpc-attached" && earlier.negotiating, false, "an earlier build's broker does not send the field");
+		const forged = parse({ ...attached, negotiating: "yes" });
+		assert.equal(forged.t === "rpc-attached" && forged.negotiating, false, "only a literal true counts");
+	});
+
 	it("refuses an rpc frame whose fragment position, encoding or ids are wrong", () => {
 		const key = derivePtySessionKey(createPtyToken(), createPtyNonce(), createPtyNonce());
 		const sessionId = derivePtySessionId(key);

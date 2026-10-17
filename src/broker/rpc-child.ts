@@ -14,8 +14,9 @@
  * - **negotiation.** The broker is the only party that sees `ready` for every attach
  *   generation, so it negotiates protocol 2 itself: it identifies `ready` as the first line
  *   whose `type` is `ready`, writes `negotiate_protocol` when `supportedProtocolVersions`
- *   lists 2, swallows that response, and records the result. It only ever writes whole
- *   lines to stdin, and holds every client write until its own negotiate line is out;
+ *   lists 2, swallows that response, and records the result. A slow answer is waited for (the
+ *   broker never falls back to protocol 1 on a timer); it only ever writes whole
+ *   lines to stdin, and holds every client write until the negotiation has settled;
  * - **stdin**: whole lines, serialized, with `extension_ui_response` recognized so the
  *   ring stops replaying an answered dialog;
  * - **stderr**: a bounded tail for diagnostics;
@@ -38,8 +39,13 @@ export const RPC_NEGOTIATE_ID = "broker:negotiate";
 
 const NEGOTIATE_LINE = `${JSON.stringify({ id: RPC_NEGOTIATE_ID, type: "negotiate_protocol", protocolVersion: 2 })}\n`;
 
-/** How long the broker waits for the negotiate response before it settles on protocol 1. */
-export const RPC_NEGOTIATE_TIMEOUT_MS = 10_000;
+/**
+ * How long the broker waits for the negotiate response before it logs that the child is slow.
+ * It never settles on protocol 1 for a child that offered protocol 2: a child busy loading a large
+ * session can answer a minute late, and a latched protocol 1 cannot be undone (Desk serves chat over
+ * protocol 2 only). The wait ends with the answer, a refusal, or the child's exit.
+ */
+export const RPC_NEGOTIATE_NOTICE_MS = 10_000;
 
 /** After the process exits, how long its stdout gets to deliver the last lines before the exit is final. */
 const EXIT_DRAIN_MS = 250;
@@ -76,8 +82,13 @@ export interface RpcChildHooks {
 	readonly log: (line: string) => void;
 }
 
+/** Timing the tests shorten; the broker passes none. */
+export interface RpcChildOptions {
+	readonly negotiateNoticeMs?: number;
+}
+
 /** Spawn one rpc-ui child; rejects when the process could not be started. */
-export async function startRpcChild(spec: RpcChildSpec, hooks: RpcChildHooks, ring: RpcLineRing): Promise<RpcChild> {
+export async function startRpcChild(spec: RpcChildSpec, hooks: RpcChildHooks, ring: RpcLineRing, options: RpcChildOptions = {}): Promise<RpcChild> {
 	const proc = spawn(spec.file, [...spec.args], {
 		cwd: spec.cwd,
 		env: { ...spec.env },
@@ -88,7 +99,7 @@ export async function startRpcChild(spec: RpcChildSpec, hooks: RpcChildHooks, ri
 	proc.once("spawn", () => started.resolve());
 	proc.once("error", error => started.reject(error));
 	await started.promise;
-	return new RpcChild(proc, hooks, ring);
+	return new RpcChild(proc, hooks, ring, options.negotiateNoticeMs ?? RPC_NEGOTIATE_NOTICE_MS);
 }
 
 export class RpcChild {
@@ -112,11 +123,13 @@ export class RpcChild {
 	private stdoutEnded = false;
 	private stderrEnded = false;
 	private exitInfo: { readonly code: number | null; readonly signal: NodeJS.Signals | null } | null = null;
+	private readonly negotiateNoticeMs: number;
 
-	constructor(proc: ChildProcess, hooks: RpcChildHooks, ring: RpcLineRing) {
+	constructor(proc: ChildProcess, hooks: RpcChildHooks, ring: RpcLineRing, negotiateNoticeMs: number = RPC_NEGOTIATE_NOTICE_MS) {
 		this.proc = proc;
 		this.hooks = hooks;
 		this.ring = ring;
+		this.negotiateNoticeMs = negotiateNoticeMs;
 		// A gate nobody awaits (the child died before `ready`) must not be an unhandled rejection.
 		this.gate.promise.catch(() => undefined);
 		proc.stdout?.setEncoding("utf8");
@@ -135,7 +148,9 @@ export class RpcChild {
 		proc.stdin?.on("error", () => undefined);
 		proc.once("exit", (code, signal) => {
 			this.exitInfo = { code, signal };
-			this.settleNegotiation(1);
+			// An unanswered negotiation stays unsettled: the child is gone, there is no protocol to announce.
+			clearTimeout(this.negotiateTimer ?? undefined);
+			this.negotiateTimer = null;
 			this.gate.reject(new RpcChildWriteError("child-exited", "the child exited before it was ready"));
 			// A grandchild that inherited stdout would keep the pipe open past the child's exit.
 			this.exitTimer = setTimeout(() => this.finish(), EXIT_DRAIN_MS);
@@ -155,6 +170,11 @@ export class RpcChild {
 	/** The protocol negotiated with the child; `null` until `ready` was seen and settled. */
 	get rpcProtocol(): 1 | 2 | null {
 		return this.protocol;
+	}
+
+	/** `ready` was seen, the child offered protocol 2, and its answer to the negotiation is still outstanding. */
+	get negotiating(): boolean {
+		return this.ready !== null && this.protocol === null && this.exitInfo === null;
 	}
 
 	get exited(): boolean {
@@ -183,7 +203,8 @@ export class RpcChild {
 	}
 
 	/**
-	 * Write one whole stdin line. Held until the broker's own negotiate line is out; lines
+	 * Write one whole stdin line. Held until the negotiation has settled (the answer, a refusal, or a
+	 * child that offered no protocol 2); lines
 	 * are written strictly one after another. Resolves once the pipe has accepted the bytes.
 	 */
 	async writeLine(bytes: Buffer): Promise<void> {
@@ -291,9 +312,9 @@ export class RpcChild {
 			return;
 		}
 		this.negotiateTimer = setTimeout(() => {
-			this.hooks.log("the child did not answer the protocol negotiation in time; staying on protocol 1");
-			this.settleNegotiation(1);
-		}, RPC_NEGOTIATE_TIMEOUT_MS);
+			this.negotiateTimer = null;
+			this.hooks.log("the child has not answered the protocol negotiation yet; still waiting for it (protocol 1 is not assumed)");
+		}, this.negotiateNoticeMs);
 		this.negotiateTimer.unref();
 		const stdin = this.proc.stdin;
 		if (stdin === null || stdin.destroyed) {

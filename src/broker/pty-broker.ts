@@ -1055,6 +1055,7 @@ export class PtyBroker {
 					hostCallOverflow: this.ring.hostCallOverflow,
 					rpcProtocol: rpc.rpcProtocol,
 					ready: rpc.rpcProtocol === null ? null : rpc.readyLine,
+					negotiating: rpc.negotiating,
 					child: this.status(),
 				});
 				const tail = rpc.stderrTail();

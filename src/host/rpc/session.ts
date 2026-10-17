@@ -1970,7 +1970,8 @@ export class RpcSession {
 			this.#setPhase("attaching", null);
 			const ok = await this.#awaitReady(this.#options.readyTimeoutMs ?? DEFAULT_READY_TIMEOUT_MS);
 			if (this.#disposed || this.#ended) return;
-			if (!ok) throw new SessionFailure("ready-timeout");
+			// A broker that holds `ready` but no answer to its protocol negotiation is not "not ready": the child is up and its chat protocol never came.
+			if (!ok) throw new SessionFailure(result.negotiating ? "negotiation-timeout" : "ready-timeout");
 		}
 		await this.#resync(kind === "start");
 	}

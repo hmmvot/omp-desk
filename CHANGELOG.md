@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A slow OMP start no longer leaves a Chat tab saying "This OMP process cannot serve chat control".** When OMP took more than 10 seconds to answer the broker's chat-protocol handshake (a large session loading while the machine was busy), the broker gave up on the chat protocol for good and the tab stayed failed until you killed the process. The broker now keeps waiting for the answer, and the tab goes live when it arrives. If OMP never answers, the tab fails with "OMP did not finish starting the chat protocol. Reconnect, or restart this session if it keeps failing." and offers **Reconnect**. The old sentence is now shown only for an OMP process that really lacks the chat protocol. A session already running under the previous build keeps its old behaviour until it is restarted.
+
 ## [0.4.6] - 2026-10-16
 
 ### Changed

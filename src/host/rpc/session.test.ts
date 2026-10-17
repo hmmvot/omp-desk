@@ -15,6 +15,7 @@ import { chatTurnInProgress, type ChatModel, type ChatSnapshotPayload } from "..
 import { FakeRpcChannel, responseLine, type FakeChildModel } from "./fake-channel.ts";
 import { MESSAGE_UPDATE_PACE_MS, RpcSession, parseRestoredQueue, type RpcSessionOptions, type RpcSessionOutput } from "./session.ts";
 import { turnActivity } from "../../protocol/activity.ts";
+import { isRecoverableRpcFailure, RPC_ERROR_SENTENCES } from "../../protocol/rpc.ts";
 import { MAX_ATTACH_ITEMS } from "../../shared/attach-limits.ts";
 import { TurnActivityLedger, type TurnNotice } from "../notifications.ts";
 import {
@@ -253,6 +254,43 @@ describe("resync sequence", () => {
 		await tick();
 		assert.equal(rig.session.phase, "failed");
 		assert.equal(rig.session.model.code, "ready-timeout");
+	});
+
+	it("waits for the chat protocol while the broker still awaits the child's negotiation answer, and fails as `negotiation-timeout`, not as a v1 process", async () => {
+		const rig = await boot({
+			noWait: true,
+			setup: ch => {
+				ch.ready = null;
+				ch.rpcProtocol = null;
+				ch.negotiating = true;
+			},
+		});
+		await tick();
+		assert.equal(rig.session.phase, "attaching", "no state-unavailable while the answer is outstanding");
+		rig.timers.advance(120_001);
+		await tick();
+		assert.equal(rig.session.phase, "failed");
+		assert.equal(rig.session.model.code, "negotiation-timeout");
+		assert.equal(isRecoverableRpcFailure("negotiation-timeout"), true);
+		assert.notEqual(RPC_ERROR_SENTENCES["negotiation-timeout"], RPC_ERROR_SENTENCES["state-unavailable"]);
+	});
+
+	it("goes live on the late `ready` of a negotiation that the broker was still waiting for", async () => {
+		const rig = await boot({
+			noWait: true,
+			setup: ch => {
+				ch.ready = null;
+				ch.rpcProtocol = null;
+				ch.negotiating = true;
+			},
+		});
+		await tick();
+		assert.equal(rig.session.phase, "attaching");
+		rig.channel.ready = JSON.stringify({ type: "ready", protocolVersion: 2, supportedProtocolVersions: [1, 2] });
+		rig.channel.negotiating = false;
+		rig.channel.emitLateReady(2);
+		await waitUntil(() => (rig.session.phase as string) === "live");
+		assert.equal(rig.session.phase as string, "live");
 	});
 
 	it("goes live when `ready` arrives after the attach answered, whatever the last folded line seq is", async () => {
