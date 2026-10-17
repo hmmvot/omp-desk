@@ -226,7 +226,7 @@ export function TranscriptCardView({ card, props, autoExpanded, clearedHistory }
 	const points = props.branchesByCard?.get(card.id);
 	return (
 		<Row kind={user || message?.role === "custom" && userSkill(message) !== null ? "user" : "assistant"} flag={unsaved ? "not yet saved" : undefined} actions={actions}
-			findId={(props.depth ?? 0) === 0 && props.findable !== false && (user || card.kind === "assistant" || card.kind === "tool") ? findIdOf(card) : undefined}
+			findId={(props.depth ?? 0) === 0 && props.findable !== false && (user || card.kind === "assistant" && !card.streaming || card.kind === "tool") ? findIdOf(card) : undefined}
 			rewindState={rewindState} onPick={picking && rewindId !== null ? () => rewind!.onPick(rewindId) : undefined}>
 			{body}
 			{props.footerByHost?.has(card.id) && <ReplyFooter reply={props.footerByHost.get(card.id)!} />}

@@ -8,13 +8,13 @@
  * to the previous, both wrapping; `Esc` closes it and returns the focus to where it was.
  */
 import type { ReactNode, RefObject } from "react";
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import type { TranscriptCard } from "../../chat/transcript";
 import type { OverviewProjection } from "../../chat/tool-overview";
 import { canHighlight, paintFind, rangesIn, rowText } from "../lib/find-dom";
 import { reportComposerPopupOpen } from "../lib/composer-overlay";
 import { provideFindAction, requestPanelAction } from "../lib/panel-actions";
-import { findIdOf, findPattern, findUnitsOf, matchAt, positionOf, searchUnits, segmentOf, type FindMatch, type FindSearch } from "../lib/transcript-find";
+import { clearFindCache, findIdOf, findPattern, findUnitsOf, matchAt, positionOf, searchUnits, segmentOf, type FindMatch, type FindSearch } from "../lib/transcript-find";
 import type { TranscriptScrollController } from "../lib/transcript-scroll";
 import { markdownShownText } from "./Markdown";
 
@@ -46,6 +46,9 @@ export interface TranscriptFindParams {
 /** Frames a reveal waits for the row, its opened parts and the match to be in the page; after `SETTLE_FRAMES` with the row mounted it settles for what is there. */
 const REVEAL_FRAMES = 40;
 const SETTLE_FRAMES = 12;
+/** How long typing must pause before the conversation is searched, and the least time between mutation-driven repaints. */
+const QUERY_DEBOUNCE_MS = 150;
+const PAINT_INTERVAL = 200;
 
 /** The row that draws unit `id`, if it is mounted. */
 function rowOf(root: Element | null, id: string): HTMLElement | null {
@@ -63,22 +66,26 @@ export function useTranscriptFind(params: TranscriptFindParams): ReactNode {
 	const { enabled } = params;
 	const [open, setOpen] = useState(false);
 	const [query, setQuery] = useState("");
+	/** The query the search runs for: the field's value once typing has paused. */
+	const [settled, setSettled] = useState("");
 	const [caseSensitive, setCaseSensitive] = useState(false);
 	const [current, setCurrent] = useState<FindMatch | null>(null);
 	const [focusRequest, setFocusRequest] = useState(0);
-	const [fieldFocused, setFieldFocused] = useState(false);
-	const deferredQuery = useDeferredValue(query);
+	const [barFocused, setBarFocused] = useState(false);
+	const barId = useId();
 	const inputRef = useRef<HTMLInputElement | null>(null);
 	const barRef = useRef<HTMLDivElement | null>(null);
 	const returnFocus = useRef<HTMLElement | null>(null);
 	const revealToken = useRef(0);
 	const patternKey = useRef("");
 	const painting = useRef<number | null>(null);
+	const paintTimer = useRef<number | undefined>(undefined);
+	const lastPaint = useRef(0);
 	const latest = useRef(params);
 	latest.current = params;
 
 	const units = useMemo(() => open && enabled ? findUnitsOf(params.canonical, params.cwd, markdownShownText) : [], [open, enabled, params.canonical, params.cwd]);
-	const pattern = useMemo(() => findPattern(deferredQuery, caseSensitive), [deferredQuery, caseSensitive]);
+	const pattern = useMemo(() => findPattern(settled, caseSensitive), [settled, caseSensitive]);
 	const search = useMemo(() => searchUnits(units, pattern), [units, pattern]);
 	const position = current === null ? -1 : positionOf(search, current);
 	const state = useRef({ search, current, open });
@@ -101,9 +108,13 @@ export function useTranscriptFind(params: TranscriptFindParams): ReactNode {
 		// A match whose text is not drawn (deep in a long output), or a page that cannot paint, still shows which row holds it.
 		if (currentRow !== null && (currentRange === null || !canHighlight())) currentRow.setAttribute("data-find-current", "");
 	}, []);
-	const schedulePaint = useCallback((): void => {
-		if (painting.current !== null) return;
-		painting.current = requestAnimationFrame(() => { painting.current = null; paint(); });
+	/** `throttled`: a mutation-driven repaint (streaming output) runs at most once per `PAINT_INTERVAL`; a change of query or match paints on the next frame. */
+	const schedulePaint = useCallback((throttled = false): void => {
+		if (painting.current !== null || paintTimer.current !== undefined) return;
+		const frame = (): void => { painting.current = requestAnimationFrame(() => { painting.current = null; lastPaint.current = performance.now(); paint(); }); };
+		const wait = throttled ? PAINT_INTERVAL - (performance.now() - lastPaint.current) : 0;
+		if (wait > 0) paintTimer.current = window.setTimeout(() => { paintTimer.current = undefined; frame(); }, wait);
+		else frame();
 	}, [paint]);
 
 	/** Bring the match into view: load its row, open what hides it, scroll to its line. */
@@ -136,7 +147,7 @@ export function useTranscriptFind(params: TranscriptFindParams): ReactNode {
 		const tick = (): void => {
 			if (revealToken.current !== token) return;
 			frames++;
-			if (frames > 1 && openHidden()) {
+			if (frames > 1 && frames < REVEAL_FRAMES && openHidden()) {
 				latest.current.controllerRef.current?.reveal(unit.sources);
 				requestAnimationFrame(tick);
 				return;
@@ -149,10 +160,11 @@ export function useTranscriptFind(params: TranscriptFindParams): ReactNode {
 				else {
 					const target = rangesIn(rowText(row), needle)[match.occurrence] ?? null;
 					if (target !== null || seen >= SETTLE_FRAMES) {
-						// The row's top went a third of the way down; a match deep inside a tall row goes there instead.
-						const root = latest.current.rootRef.current, controller = latest.current.controllerRef.current, anchor = row.closest<HTMLElement>("[data-anchor-key]");
+						// The row's top went a third of the way down; a match deep inside a tall row goes there instead, and never under the bar.
+						const root = latest.current.rootRef.current, controller = latest.current.controllerRef.current, anchor = row.closest<HTMLElement>("[data-anchor-key]"), bar = barRef.current;
 						if (target !== null && root !== null && controller !== null && anchor !== null) {
-							controller.reveal(unit.sources, Math.round(root.clientHeight / 3 - (target.getBoundingClientRect().top - anchor.getBoundingClientRect().top)));
+							const floor = bar === null ? 0 : bar.getBoundingClientRect().bottom - root.getBoundingClientRect().top + 12;
+							controller.reveal(unit.sources, Math.round(Math.max(root.clientHeight / 3, floor) - (target.getBoundingClientRect().top - anchor.getBoundingClientRect().top)));
 						}
 						schedulePaint();
 						return;
@@ -193,9 +205,10 @@ export function useTranscriptFind(params: TranscriptFindParams): ReactNode {
 	const close = useCallback((): void => {
 		revealToken.current++;
 		paintFind([], null);
+		clearFindCache();
 		setOpen(false);
 		setCurrent(null);
-		setFieldFocused(false);
+		setBarFocused(false);
 		const back = returnFocus.current;
 		returnFocus.current = null;
 		if (back?.isConnected === true) back.focus({ preventScroll: true });
@@ -220,11 +233,19 @@ export function useTranscriptFind(params: TranscriptFindParams): ReactNode {
 		inputRef.current?.select();
 	}, [open, focusRequest]);
 
-	// While the field has the focus Escape belongs to it: the host's stop-turn key stays disarmed for that press.
+	// While the bar has the focus (its field or one of its buttons) Escape belongs to it: the host's stop-turn key stays disarmed for that press.
 	useEffect(() => {
-		reportComposerPopupOpen("find", open && fieldFocused);
+		reportComposerPopupOpen("find", open && barFocused);
 		return () => reportComposerPopupOpen("find", false);
-	}, [open, fieldFocused]);
+	}, [open, barFocused]);
+
+	// The query is searched once typing pauses; the field keeps the raw value meanwhile, and an empty query clears at once.
+	useEffect(() => {
+		if (query === settled) return;
+		if (query === "") { setSettled(""); return; }
+		const timer = setTimeout(() => setSettled(query), QUERY_DEBOUNCE_MS);
+		return () => clearTimeout(timer);
+	}, [query, settled]);
 
 	// A new query starts at the newest match; the same query keeps its match while the conversation changes under it.
 	useEffect(() => {
@@ -241,14 +262,16 @@ export function useTranscriptFind(params: TranscriptFindParams): ReactNode {
 	useEffect(() => {
 		const root = params.rootRef.current;
 		if (!open || root === null) return;
-		const observer = new MutationObserver(schedulePaint);
+		const observer = new MutationObserver(() => schedulePaint(true));
 		observer.observe(root, { childList: true, characterData: true, subtree: true });
 		return () => observer.disconnect();
 	}, [open, params.rootRef, schedulePaint]);
 	useEffect(() => () => {
 		revealToken.current++;
 		if (painting.current !== null) cancelAnimationFrame(painting.current);
+		clearTimeout(paintTimer.current);
 		paintFind([], null);
+		clearFindCache();
 	}, []);
 
 	if (!open || !enabled) return null;
@@ -256,24 +279,36 @@ export function useTranscriptFind(params: TranscriptFindParams): ReactNode {
 		params.olderCount > 0 ? `${params.olderCount.toLocaleString("en-US")} earlier messages are not loaded` : "",
 		params.beforeReset ? "Messages before the context reset are not searched" : "",
 	].filter(note => note !== "");
+	const showNote = query.length > 0 && notes.length > 0;
+	const noteId = `${barId}-note`;
 	return (
-		<div ref={barRef} className="omp-find" role="search" aria-label="Find in conversation">
+		<div ref={barRef} className="omp-find" role="search" aria-label="Find in conversation" onFocus={() => setBarFocused(true)}
+			onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setBarFocused(false); }}
+			onKeyDown={event => {
+				// Escape closes the bar from the field and from every button in it; the stop-turn key stays disarmed for the press.
+				if (event.nativeEvent.isComposing || event.keyCode === 229) return;
+				if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(); }
+			}}>
 			<div className="omp-find-row">
-				<input ref={inputRef} className="omp-find-input" type="text" aria-label="Find in conversation" placeholder="Find" spellCheck={false} autoComplete="off" value={query}
-					onChange={event => setQuery(event.target.value)} onFocus={() => setFieldFocused(true)} onBlur={() => setFieldFocused(false)}
+				<input ref={inputRef} className="omp-find-input" type="text" aria-label="Find in conversation" aria-keyshortcuts="Enter F3 Shift+Enter Shift+F3 Alt+C Escape" aria-describedby={showNote ? noteId : undefined}
+					placeholder="Find" spellCheck={false} autoComplete="off" value={query}
+					onChange={event => setQuery(event.target.value)}
 					onKeyDown={event => {
 						if (event.nativeEvent.isComposing || event.keyCode === 229) return;
-						if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); close(); }
-						else if (event.key === "Enter") { event.preventDefault(); step(event.shiftKey ? -1 : 1); }
+						if (event.key === "Enter") {
+							event.preventDefault();
+							// A key pressed before the query settled searches for what is in the field first.
+							if (query !== settled) setSettled(query); else step(event.shiftKey ? -1 : 1);
+						}
 						else if (event.altKey && !event.ctrlKey && !event.metaKey && event.key.toLowerCase() === "c") { event.preventDefault(); setCaseSensitive(value => !value); }
 					}} />
-				<span className="omp-find-status" role="status" aria-live="polite">{statusText(query, search, position)}</span>
+				<span className="omp-find-status" role="status" aria-live="polite">{statusText(settled, search, position)}</span>
 				<button type="button" className="omp-find-button" aria-label="Match case" aria-pressed={caseSensitive} aria-keyshortcuts="Alt+C" title="Match Case (Alt+C)" onClick={() => { setCaseSensitive(value => !value); inputRef.current?.focus(); }}><span className="codicon codicon-case-sensitive" aria-hidden="true" /></button>
-				<button type="button" className="omp-find-button" aria-label="Previous match" aria-keyshortcuts="Shift+Enter Shift+F3" title="Previous Match (Shift+Enter)" disabled={search.total === 0} onClick={() => step(-1)}><span className="codicon codicon-arrow-up" aria-hidden="true" /></button>
-				<button type="button" className="omp-find-button" aria-label="Next match" aria-keyshortcuts="Enter F3" title="Next Match (Enter)" disabled={search.total === 0} onClick={() => step(1)}><span className="codicon codicon-arrow-down" aria-hidden="true" /></button>
+				<button type="button" className="omp-find-button" aria-label="Previous match" aria-keyshortcuts="Shift+Enter Shift+F3" title="Previous Match (Shift+Enter)" aria-disabled={search.total === 0} onClick={() => step(-1)}><span className="codicon codicon-arrow-up" aria-hidden="true" /></button>
+				<button type="button" className="omp-find-button" aria-label="Next match" aria-keyshortcuts="Enter F3" title="Next Match (Enter)" aria-disabled={search.total === 0} onClick={() => step(1)}><span className="codicon codicon-arrow-down" aria-hidden="true" /></button>
 				<button type="button" className="omp-find-button" aria-label="Close find" aria-keyshortcuts="Escape" title="Close (Escape)" onClick={close}><span className="codicon codicon-close" aria-hidden="true" /></button>
 			</div>
-			{query.length > 0 && notes.length > 0 && <div className="omp-find-note">{notes.join(". ")}.</div>}
+			{showNote && <div id={noteId} className="omp-find-note">{notes.join(". ")}.</div>}
 		</div>
 	);
 }

@@ -10,9 +10,9 @@ export const FIND_STYLES = `
 .omp-find-input:focus { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
 .omp-find-status { flex: none; min-width: 7ch; padding: 0 6px; color: var(--omp-muted); font-size: 0.92em; text-align: center; white-space: nowrap; }
 .omp-find-button { display: flex; flex: none; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; border: 1px solid transparent; border-radius: var(--omp-radius); background: none; color: inherit; cursor: pointer; }
-.omp-find-button:hover:not(:disabled) { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); }
+.omp-find-button:hover:not([aria-disabled="true"]) { background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); }
 .omp-find-button:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
-.omp-find-button:disabled { opacity: 0.4; cursor: default; }
+.omp-find-button[aria-disabled="true"] { opacity: 0.4; cursor: default; }
 .omp-find-button[aria-pressed="true"] { border-color: var(--vscode-inputOption-activeBorder, transparent); background: var(--vscode-inputOption-activeBackground); color: var(--vscode-inputOption-activeForeground, inherit); }
 .omp-find-note { padding: 3px 4px 1px; color: var(--omp-muted); font-size: 0.92em; }
 .vscode-high-contrast .omp-find, .vscode-high-contrast-light .omp-find { border-color: var(--vscode-contrastBorder, var(--omp-border)); }

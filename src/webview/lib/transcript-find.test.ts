@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { ChatEntry } from "../../chat/messages.ts";
 import { projectTranscript } from "../../chat/transcript.ts";
-import { findIdOf, findPattern, findUnitsOf, matchAt, positionOf, searchUnits, segmentOf } from "./transcript-find.ts";
+import { clearFindCache, findIdOf, findPattern, findUnitsOf, matchAt, positionOf, searchUnits, segmentOf } from "./transcript-find.ts";
 
 const entry = (id: string, message: Record<string, unknown>): ChatEntry => ({ type: "message", id, parentId: null, timestamp: "2026-10-17T00:00:00Z", message: { timestamp: 1, ...message } } as ChatEntry);
 const user = (id: string, content: string, extra: Record<string, unknown> = {}) => entry(id, { role: "user", content, ...extra });
@@ -40,6 +40,21 @@ describe("the units Find searches", () => {
 			reply("a1", [{ type: "thinking", thinking: "   " }]),
 		]);
 		assert.deepEqual(units.map(unit => unit.id), ["u1", "call:call-c1"], "the result is searched once, with its call");
+	});
+
+	it("do not read the reply being written, whatever its text, and read it once it is complete", () => {
+		const message = (text: string) => ({ role: "assistant", model: "m", timestamp: 2, stopReason: "stop", content: [{ type: "text", text }] }) as never;
+		const seen: string[] = [];
+		const spy = (text: string): string => { seen.push(text); return text; };
+		const history = [user("u1", "quokka"), reply("a1", [{ type: "text", text: "settled quokka" }])];
+		for (const text of ["quokka", "quokka and", "quokka and more quokka"]) {
+			const cards = projectTranscript(history, { stream: message(text), streamId: "live" });
+			assert.deepEqual(findUnitsOf(cards, undefined, spy).map(unit => unit.id), ["u1", "a1"], "the streaming card is not a unit");
+		}
+		assert.deepEqual(seen.filter(text => text.startsWith("quokka and")), [], "no prefix of the streaming reply was parsed or cached");
+		clearFindCache();
+		const done = findUnitsOf(projectTranscript([...history, reply("a2", [{ type: "text", text: "quokka and more quokka" }])]), undefined, spy);
+		assert.deepEqual(done.map(unit => unit.id), ["u1", "a1", "a2"]);
 	});
 
 	it("take a result whose call is older than the loaded history as a call of its own", () => {

@@ -7,7 +7,8 @@
  * opens what hides the text and paints the occurrences that are mounted (`find-dom.ts`).
  *
  * Searched: your messages, assistant replies with their thinking, and each tool call's head (title, target, intent) and output text.
- * Not searched: notices, summaries, attachments' file text, the history before a context reset and rows still on disk.
+ * Not searched: notices, summaries, attachments' file text, the history before a context reset, rows still on disk, and the reply
+ * still being written (it is read once it is complete, not again for every delta).
  */
 import { entryMessage, type ChatContent } from "../../chat/messages.ts";
 import { stripAnsi } from "../../chat/ansi.ts";
@@ -42,17 +43,31 @@ export interface FindUnit {
 /** Shows the text of Markdown as the renderer draws it (`markdownShownText`); injected so this module has no component imports. */
 export type ShownText = (text: string, emphasis: boolean) => string;
 
-const SHOWN_LIMIT = 4_000;
-/** The shown text of the newest sources, per emphasis mode (user text, then replies): bounded. */
-const shownCache = [new Map<string, string>(), new Map<string, string>()] as const;
+/** Characters (source plus shown text) the shown-text cache keeps, per emphasis mode: a few settled long replies, never the prefixes of one being written. */
+const SHOWN_CHARS = 2_000_000;
+/** The shown text of the newest sources, per emphasis mode (user text, then replies), and the characters each holds. */
+const shownCache: { map: Map<string, string>; chars: number }[] = [{ map: new Map(), chars: 0 }, { map: new Map(), chars: 0 }];
+
+/** Forget every cached shown text (the bar closed: nothing needs them until the next search). */
+export function clearFindCache(): void {
+	for (const cache of shownCache) { cache.map.clear(); cache.chars = 0; }
+}
 
 function shown(text: string, emphasis: boolean, markdown: ShownText): string {
 	const cache = shownCache[emphasis ? 1 : 0];
-	const known = cache.get(text);
+	const known = cache.map.get(text);
 	if (known !== undefined) return known;
 	const value = markdown(text, emphasis);
-	cache.set(text, value);
-	if (cache.size > SHOWN_LIMIT) cache.delete(cache.keys().next().value!);
+	const cost = text.length + value.length;
+	// A text bigger than the whole budget is not worth evicting everything for.
+	if (cost > SHOWN_CHARS / 4) return value;
+	cache.map.set(text, value);
+	cache.chars += cost;
+	for (const [key, held] of cache.map) {
+		if (cache.chars <= SHOWN_CHARS) break;
+		cache.map.delete(key);
+		cache.chars -= key.length + held.length;
+	}
 	return value;
 }
 
@@ -113,7 +128,8 @@ export function findUnitsOf(cards: readonly TranscriptCard[], cwd: string | unde
 				break;
 			}
 			case "assistant": {
-				const first = card.content[0];
+				// The reply being written changes with every delta; it is searched once it is complete rather than re-read per delta.
+				const first = card.streaming ? undefined : card.content[0];
 				if (first === undefined) break;
 				units.push(cached(first, [card.id, card.content.length, ...card.content], () => ({
 					id: card.id, cardId: card.id, sources: [card.id, ...card.sourceIds], segments: segmentsOf(card.content, markdown),

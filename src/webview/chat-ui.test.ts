@@ -7128,6 +7128,80 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		await t.test("during a streaming turn Escape on a bar button closes the bar and the stop-turn key stays disarmed; the reply being written is read once it is complete", async () => {
+			await reset("find-streaming");
+			await ui.evaluate(`(()=>{
+			 const row=(id,message)=>({type:'message',id,parentId:null,timestamp:new Date(1000).toISOString(),message});
+			 window.findLive=text=>({role:'assistant',model:'m',timestamp:3000,stopReason:'stop',content:[{type:'text',text}]});
+			 const entries=[row('u1',{role:'user',timestamp:1,content:'Tell me about the quokka'}),row('a1',{role:'assistant',model:'m',timestamp:2,stopReason:'stop',content:[{type:'text',text:'The quokka is a small wallaby.'}]})];
+			 window.findEntries=entries;
+			 window.ui.push({entries,durableCount:2,working:true,settled:false,stream:{messageId:'live-find',message:window.findLive('quokka being written')},streamPosition:{anchorId:null,seq:1}});
+			})()`);
+			await ui.wait("document.querySelector('[data-find-id=\"a1\"]')");
+			await ui.evaluate("window.composer.focus()");
+			await press("f", "KeyF", 70, { modifiers: CTRL });
+			await ui.wait("document.querySelector('.omp-find')");
+			await ui.call("Input.insertText", { text: "quokka" });
+			await ui.wait("document.querySelector('.omp-find-status').textContent==='2 of 2'");
+			// The reply being written is not read per delta: more matches in it change nothing until it is complete.
+			await ui.evaluate("window.ui.push({stream:{messageId:'live-find',message:window.findLive('quokka being written, quokka again, and a quokka more')}})");
+			await settleFrames();
+			assert.equal(await ui.evaluate("document.querySelector('.omp-find-status').textContent"), "2 of 2", "the streaming reply is not searched");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-find')!==null"), true);
+
+			// Focus on a button of the bar: Escape is still the bar's, never the turn's.
+			await ui.evaluate("document.querySelector('[aria-label=\"Next match\"]').focus()");
+			await settleFrames();
+			assert.equal(await ui.evaluate("document.activeElement.getAttribute('aria-label')"), "Next match");
+			assert.equal(await popupReports().then(reports => reports.at(-1)), true, "with a bar button focused the host's stop-turn key is still disarmed");
+			await press("Escape", "Escape", 27);
+			await ui.wait("!document.querySelector('.omp-find')");
+			assert.equal(await popupReports().then(reports => reports.at(-1)), false, "closed: the stop-turn key is armed again");
+			assert.equal(await ui.evaluate("window.sent.filter(message=>message.type==='omp:chat-abort').length"), 0, "the turn was not stopped");
+
+			// Once the reply is complete it is searched like any other.
+			await ui.evaluate(`window.ui.push({stream:null,working:false,settled:true,entries:[...window.findEntries,{type:'message',id:'a2',parentId:null,timestamp:new Date(3000).toISOString(),message:window.findLive('quokka being written, quokka again, and a quokka more')}],durableCount:3})`);
+			await ui.wait("document.querySelector('[data-find-id=\"a2\"]')");
+			await ui.evaluate("window.composer.focus()");
+			await press("f", "KeyF", 70, { modifiers: CTRL });
+			await ui.wait("document.querySelector('.omp-find-status').textContent==='5 of 5'");
+			await press("Escape", "Escape", 27);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("the query is searched once typing pauses: the field keeps what was typed, Enter searches at once, and the status follows the searched query", async () => {
+			await reset("find-debounce");
+			await ui.evaluate(`(()=>{
+			 const row=(id,message)=>({type:'message',id,parentId:null,timestamp:new Date(1000).toISOString(),message});
+			 window.ui.push({entries:[row('u1',{role:'user',timestamp:1,content:'A quokka and a numbat'}),row('a1',{role:'assistant',model:'m',timestamp:2,stopReason:'stop',content:[{type:'text',text:'Numbat facts. Numbat again.'}]})],durableCount:2,working:false,settled:true,olderCount:0});
+			})()`);
+			await ui.wait("document.querySelector('[data-find-id=\"a1\"]')");
+			await ui.evaluate("window.composer.focus()");
+			await press("f", "KeyF", 70, { modifiers: CTRL });
+			await ui.wait("document.querySelector('.omp-find-input')");
+			// Typed and read back within two frames, well inside the pause: the field has the text, nothing has been searched yet.
+			const early = await ui.evaluate<{ value: string; status: string }>(`(async()=>{
+			 const input=document.querySelector('.omp-find-input');
+			 Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'quokka');input.dispatchEvent(new Event('input',{bubbles:true}));
+			 for(let frame=0;frame<2;frame++)await new Promise(resolve=>requestAnimationFrame(resolve));
+			 return{value:input.value,status:document.querySelector('.omp-find-status').textContent}})()`);
+			assert.deepEqual(early, { value: "quokka", status: "" }, "no search per keystroke");
+			await ui.wait("document.querySelector('.omp-find-status').textContent==='1 of 1'");
+			// A new query whose Enter comes before the pause is searched by that Enter instead of stepping the old one.
+			const flushed = await ui.evaluate<string>(`(async()=>{
+			 const input=document.querySelector('.omp-find-input');
+			 Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(input,'numbat');input.dispatchEvent(new Event('input',{bubbles:true}));
+			 await new Promise(resolve=>requestAnimationFrame(resolve));
+			 input.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',keyCode:13,bubbles:true,cancelable:true}));
+			 for(let frame=0;frame<4;frame++)await new Promise(resolve=>requestAnimationFrame(resolve));
+			 return document.querySelector('.omp-find-status').textContent})()`);
+			assert.equal(flushed, "3 of 3", "Enter searches the field's text before the pause is over");
+			await ui.wait("document.querySelector('.omp-find-status').textContent==='3 of 3'");
+			assert.equal(await ui.evaluate("document.querySelector('.omp-find-input').value"), "numbat");
+			await press("Escape", "Escape", 27);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 	} finally {
 		page?.socket.close();
 		if (browser) await browser.call("Browser.close").catch(() => {});
