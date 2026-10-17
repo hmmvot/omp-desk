@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileReference } from "../shared/code-symbols.ts";
 import type { BareFileName } from "../shared/code-symbols.ts";
 import { silentLogger, type Logger } from "../shared/logger.ts";
+import { GiveUpReporter, giveUpReason } from "./link-give-up.ts";
 import { isInside } from "./link-scope.ts";
 import type { FileLookup, FileNameLinks, SymbolOutcome, SymbolScope } from "./link-scope.ts";
 
@@ -84,6 +85,7 @@ export class FileNameLinkResolver implements FileNameLinks {
 	readonly #maxCached: number;
 	readonly #isFile: (file: string) => Promise<boolean>;
 	readonly #log: Logger;
+	readonly #giveUps: GiveUpReporter;
 	readonly #cache = new Map<string, { lookup: FileLookup; expires: number }>();
 	readonly #pending = new Map<string, Promise<FileLookup>>();
 	readonly #waiting: { grant(): void; timer: NodeJS.Timeout }[] = [];
@@ -105,6 +107,7 @@ export class FileNameLinkResolver implements FileNameLinks {
 		this.#maxCached = options.maxCached ?? 512;
 		this.#isFile = options.isFile ?? statIsFile;
 		this.#log = options.log ?? silentLogger;
+		this.#giveUps = new GiveUpReporter(this.#log, this.#now);
 	}
 
 	/** Forget every answer: a file appeared, vanished or moved, so any of them may be stale. */
@@ -148,6 +151,8 @@ export class FileNameLinkResolver implements FileNameLinks {
 		const startedGeneration = this.#generation;
 		const done = (lookup: FileLookup, ttlMs: number, verdict: string, found = 0): { lookup: FileLookup; ttlMs: number } => {
 			this.#log.debug(`file name ${JSON.stringify(reference)}: ${found} in scope -> ${verdict} in ${this.#now() - startedAt} ms`);
+			if (lookup.state === "unavailable") this.#giveUps.missed("file name", reference, giveUpReason(verdict));
+			else this.#giveUps.answered("file name", reference);
 			return { lookup, ttlMs };
 		};
 		const failure = (failed: "invalidated" | "queue-full" | "error" | "timeout") => {
@@ -277,23 +282,31 @@ export function fileNameGlob(name: string): string {
 	return `**/${out}`;
 }
 
-/** The files the window hides from the Explorer and from search, as one glob: every `true` entry of `files.exclude` and `search.exclude`. `null` when neither hides anything. */
-export function excludeGlob(...settings: readonly unknown[]): string | null {
+/** The patterns the window hides from the Explorer and from search: every `true` entry of `files.exclude` and `search.exclude`, each once, at most 256. */
+export function excludePatterns(...settings: readonly unknown[]): string[] {
 	const patterns = new Set<string>();
 	for (const setting of settings) {
 		if (typeof setting !== "object" || setting === null) continue;
 		for (const [pattern, value] of Object.entries(setting)) if (value === true && pattern !== "" && !/[\u0000-\u001f]/.test(pattern)) patterns.add(pattern);
 	}
-	const all = [...patterns].slice(0, 256);
+	return [...patterns].slice(0, 256);
+}
+
+/** The files the window hides from the Explorer and from search, as one glob: every pattern of {@link excludePatterns}. `null` when neither setting hides anything. */
+export function excludeGlob(...settings: readonly unknown[]): string | null {
+	const all = excludePatterns(...settings);
 	return all.length === 0 ? null : all.length === 1 ? all[0]! : `{${all.join(",")}}`;
+}
+
+/** `folder`'s own `files.exclude` and `search.exclude` (what the file search honours for that folder), for {@link excludeGlob} and {@link excludePatterns}. */
+export function folderExcludeSettings(api: Pick<FindFilesApi, "workspace" | "Uri">, folder: string): [files: unknown, search: unknown] {
+	const scope = api.Uri.file(folder);
+	return [api.workspace.getConfiguration("files", scope).get("exclude"), api.workspace.getConfiguration("search", scope).get("exclude")];
 }
 
 /** The file search through `vscode.workspace.findFiles`: one search per folder, that folder's `files.exclude` and `search.exclude` honoured, a bounded result count, cancelled with the signal. */
 export function workspaceFileNameSource(api: FindFilesApi): FileNameSource {
-	const excludeOf = (folder: string): string | null => {
-		const scope = api.Uri.file(folder);
-		return excludeGlob(api.workspace.getConfiguration("files", scope).get("exclude"), api.workspace.getConfiguration("search", scope).get("exclude"));
-	};
+	const excludeOf = (folder: string): string | null => excludeGlob(...folderExcludeSettings(api, folder));
 	return {
 		async find(name, folders, signal) {
 			const source = new api.CancellationTokenSource();

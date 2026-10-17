@@ -2,6 +2,7 @@ import path from "node:path";
 import { isNamespaceSegment, parseBareFileName, parseCodeSymbol } from "../shared/code-symbols.ts";
 import type { BareFileName, CodeSymbol, SymbolLinkResult, SymbolLinksRequest, SymbolLinksResolution } from "../shared/code-symbols.ts";
 import { silentLogger, type Logger } from "../shared/logger.ts";
+import { GiveUpReporter, giveUpReason } from "./link-give-up.ts";
 import { isInside } from "./link-scope.ts";
 import type { FileLookup, FileNameLinks, SymbolOutcome, SymbolScope } from "./link-scope.ts";
 
@@ -438,6 +439,7 @@ export class SymbolLinkResolver {
 	readonly #maxCached: number;
 	readonly #log: Logger;
 	readonly #onRetry: (() => void) | undefined;
+	readonly #giveUps: GiveUpReporter;
 	readonly #files: FileNameLinks | undefined;
 	readonly #probeDelays: readonly number[];
 	readonly #cache = new Map<string, { outcome: SymbolOutcome; expires: number }>();
@@ -467,6 +469,7 @@ export class SymbolLinkResolver {
 		this.#noneTtlMs = options.noneTtlMs ?? 15_000;
 		this.#maxCached = options.maxCached ?? 1024;
 		this.#log = options.log ?? silentLogger;
+		this.#giveUps = new GiveUpReporter(this.#log, this.#now);
 		this.#onRetry = options.onRetry;
 		this.#probeDelays = options.probeDelaysMs ?? [2000, 4000, 8000, 16_000, 30_000];
 		this.#files = options.files;
@@ -502,6 +505,16 @@ export class SymbolLinkResolver {
 		this.#generation++;
 		this.#cache.clear();
 		this.#pending.clear();
+	}
+
+	/** A batch left `token` unanswered for a reason only the batch knows (a refused batch, its deadline, a change while it ran); see {@link GiveUpReporter}. */
+	batchMissed(token: string, reason: string): void {
+		this.#giveUps.missed("link", token, reason);
+	}
+
+	/** A batch answered `token`. */
+	batchAnswered(token: string): void {
+		this.#giveUps.answered("link", token);
 	}
 
 	/** The bare file name a span is: where the file search finds it (`none` when the host has no file search). Fenced by {@link fileGeneration}. */
@@ -552,6 +565,8 @@ export class SymbolLinkResolver {
 		const inScope = (entries: readonly SymbolEntry[]) => entries.filter(entry => scope.roots.some(root => isInside(root, entry.path)));
 		const done = (outcome: SymbolOutcome, verdict: string, matching = 0, via = ""): SymbolOutcome => {
 			this.#log.debug(`code symbol ${JSON.stringify(symbol.name)}: ${stats.queries} quer${stats.queries === 1 ? "y" : "ies"}, ${stats.total} provider entries, ${inScope(stats.entries).length} in scope, ${matching} matching locations -> ${verdict}${via === "" ? "" : ` (${via})`} in ${this.#now() - startedAt} ms`);
+			if (outcome.status === "unavailable" || outcome.status === "pending") this.#giveUps.missed("code symbol", symbol.name, giveUpReason(verdict));
+			else this.#giveUps.answered("code symbol", symbol.name);
 			return outcome;
 		};
 		const gathered = await this.#gather(symbol, scope, generation, startedAt, stats);
@@ -836,7 +851,10 @@ export async function handleSymbolLinks(request: SymbolLinksRequest, host: Symbo
 	};
 	if (!host.enabled()) return reply(request.tokens.map(token => ({ token, status: "none" })), true);
 	// Host-side admission: only so many batches work at once, however many requests the page (or a forged one) sends.
-	if (!resolver.enterBatch()) return reply(request.tokens.map(token => ({ token, status: "unavailable" })));
+	if (!resolver.enterBatch()) {
+		for (const token of request.tokens) resolver.batchMissed(token, "too many batches at once (capped)");
+		return reply(request.tokens.map(token => ({ token, status: "unavailable" })));
+	}
 	try {
 		const roots = host.roots();
 		const generation = resolver.generation;
@@ -844,19 +862,24 @@ export async function handleSymbolLinks(request: SymbolLinksRequest, host: Symbo
 		const results: SymbolLinkResult[] = request.tokens.map(token => ({ token, status: "unavailable" }));
 		// Whether a result needed a symbol lookup: only those depend on the contents of files, not just on which files exist.
 		const symbolBased = request.tokens.map(() => false);
+		// Whether a token's lookups finished: one that did not reached the batch deadline (a lookup that ended without an answer has reported why itself).
+		const settled = request.tokens.map(() => false);
 		const tasks = request.tokens.map(async (token, index) => {
 			const scope = { cwd: host.cwd, roots };
 			// A bare file name is looked up as a file first; a span that is also a symbol (`Twin.run`) is looked up as one only when no file has that name. A file lookup that could not answer stays unanswered.
 			const file = parseBareFileName(token);
 			let outcome: SymbolOutcome = file === null || host.cwd === "" ? none : await resolver.resolveFileName(file, scope);
 			// Files appeared or vanished since the batch began (the file lookup answered for an older state): no symbol lookup is started on top of it.
-			if (outcome.status === "none" && resolver.fileGeneration !== fileGeneration) outcome = { status: "unavailable" };
-			else if (outcome.status === "none") {
+			if (outcome.status === "none" && resolver.fileGeneration !== fileGeneration) {
+				outcome = { status: "unavailable" };
+				resolver.batchMissed(token, "files changed while the batch ran");
+			} else if (outcome.status === "none") {
 				const symbol = parseCodeSymbol(token);
 				symbolBased[index] = symbol !== null;
 				outcome = symbol === null || host.cwd === "" ? none : await resolver.resolve(symbol, scope);
 			}
 			results[index] = outcome.status === "found" ? { token, status: "found", target: outcome.target } : outcome.status === "ambiguous" ? { token, status: "ambiguous", definitions: outcome.definitions, ...(outcome.files === true ? { files: true as const } : {}) } : { token, status: outcome.status };
+			settled[index] = true;
 		});
 		let timer: NodeJS.Timeout | undefined;
 		const deadline = new Promise<void>(resolve => { timer = setTimeout(resolve, deadlineMs); });
@@ -866,9 +889,18 @@ export async function handleSymbolLinks(request: SymbolLinksRequest, host: Symbo
 		// since the batch began makes every symbol answer it buffered stale. A file answer is not: a file lookup that was running
 		// when files changed has proven each file it reports to still exist, and a file's content does not change which files exist.
 		if (!host.enabled()) return reply(request.tokens.map(token => ({ token, status: "none" })), true);
-		if (host.roots().join("\n") !== roots.join("\n")) return reply(request.tokens.map(token => ({ token, status: "unavailable" })));
+		if (host.roots().join("\n") !== roots.join("\n")) {
+			for (const token of request.tokens) resolver.batchMissed(token, "workspace folders changed");
+			return reply(request.tokens.map(token => ({ token, status: "unavailable" })));
+		}
 		const symbolsStale = resolver.generation !== generation;
-		reply(results.map((result, index) => symbolsStale && symbolBased[index] ? { token: result.token, status: "unavailable" } : { ...result }));
+		const final = results.map((result, index): SymbolLinkResult => symbolsStale && symbolBased[index] ? { token: result.token, status: "unavailable" } : { ...result });
+		final.forEach((result, index) => {
+			if (result.status === "unavailable" && !settled[index]) resolver.batchMissed(result.token, "batch deadline");
+			else if (result.status === "unavailable" && symbolsStale && symbolBased[index]) resolver.batchMissed(result.token, "invalidated while the batch ran");
+			else if (result.status !== "unavailable" && result.status !== "pending") resolver.batchAnswered(result.token);
+		});
+		reply(final);
 	} finally {
 		resolver.leaveBatch();
 	}

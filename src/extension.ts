@@ -267,7 +267,8 @@ import { fileLinkMenuTarget, handleTerminalLink, openTerminalFile, openWebLink, 
 import type { FileLinkAction, TerminalLinkRequest, TerminalLinkValidation, WebLinkMode } from "./shared/terminal-links";
 import { MAX_SYMBOL_ENTRIES, SymbolLinkResolver, handleSymbolLinks, hierarchyNode, isNameCandidate, symbolEntry, symbolRoots } from "./host/symbol-links";
 import { searchSymbol } from "./host/symbol-search";
-import { FileNameLinkResolver, fileChoiceLabel, workspaceFileNameSource } from "./host/file-name-links";
+import { FileNameLinkResolver, excludePatterns, fileChoiceLabel, folderExcludeSettings, workspaceFileNameSource } from "./host/file-name-links";
+import { FileEventGate } from "./host/link-watch";
 import type { SymbolLinksRequest, SymbolLinksResolution, SymbolLinksRetry } from "./shared/code-symbols";
 import { handleInternalLink } from "./host/internal-links";
 import { handleCommitLink } from "./host/commit-links";
@@ -10132,17 +10133,27 @@ function symbolLinkResolver(): SymbolLinkResolver {
     },
   });
   // Which files exist and what they contain are separate questions: a created, deleted or renamed file can change a file-name
-  // answer, a change or a save cannot, and a busy repository changes contents constantly.
+  // answer, a change or a save cannot, and a busy repository changes contents constantly. Events for files no lookup can
+  // return (below `.git`, hidden by their folder's own excludes: a Unity project's `Temp/` and `Library/`) are dropped, and a
+  // burst of the rest is one invalidation (docs/designs/2026-10-10-code-symbol-links.md, "Fencing").
   const dropFiles = () => resolver.invalidate();
   const dropContent = () => resolver.invalidateContent();
+  const gate = new FileEventGate({
+    folders: () => (vscode.workspace.workspaceFolders ?? []).map(folder => folder.uri.fsPath),
+    excludes: folder => excludePatterns(...folderExcludeSettings(vscode, folder)),
+    dropFiles,
+    dropContent,
+    log,
+  });
   const watcher = vscode.workspace.createFileSystemWatcher("**/*");
   s.context?.subscriptions.push(
     watcher,
-    watcher.onDidCreate(dropFiles), watcher.onDidChange(dropContent), watcher.onDidDelete(dropFiles),
+    watcher.onDidCreate(uri => gate.event("created", uri.fsPath)), watcher.onDidChange(uri => gate.event("changed", uri.fsPath)), watcher.onDidDelete(uri => gate.event("deleted", uri.fsPath)),
     vscode.workspace.onDidSaveTextDocument(dropContent),
-    vscode.workspace.onDidRenameFiles(dropFiles),
-    vscode.workspace.onDidChangeWorkspaceFolders(() => { resolver.resetReadiness(); dropFiles(); }),
-    { dispose: () => { if (s.symbolLinks === resolver) s.symbolLinks = undefined; } },
+    vscode.workspace.onDidRenameFiles(() => gate.renamed()),
+    vscode.workspace.onDidChangeConfiguration(event => { if (event.affectsConfiguration("files.exclude") || event.affectsConfiguration("search.exclude")) gate.resetExcludes(); }),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => { resolver.resetReadiness(); gate.resetExcludes(); dropFiles(); }),
+    { dispose: () => { gate.dispose(); if (s.symbolLinks === resolver) s.symbolLinks = undefined; } },
   );
   s.symbolLinks = resolver;
   return resolver;
