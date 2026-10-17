@@ -63,10 +63,21 @@ function withoutCall(text: string): string | null {
 	return null;
 }
 
+/** The most identifiers of a symbol written as it is in code (`A.B.Type.Member`); more only when every segment before the type and the member reads as a namespace. */
+const MAX_PLAIN_SEGMENTS = 4;
+const MAX_QUALIFIED_SEGMENTS = 8;
+
+/** Whether a qualifier segment reads as a namespace (`OmpDesk`, `Core`): it starts with an uppercase letter. A provider's container names the type, not the namespaces above it, so such leading segments may be dropped when matching. */
+export function isNamespaceSegment(segment: string): boolean {
+	return /^[A-Z]/.test(segment);
+}
+
 /**
  * The code symbol one inline code span names, or `null`. Generic argument lists, array and nullable suffixes, one
  * call argument list and a whole-span attribute wrapper (`[Tracked]`, `[Tracked(typeof(X))]`) are stripped;
- * what remains must be one to four identifiers joined by `.`. Spans with spaces, operators, literals or keywords,
+ * what remains must be one to four identifiers joined by `.` (up to eight when everything before the last two reads as a
+ * namespace: `OmpDesk.Core.Catalog.Scope.Set`).
+ * Spans with spaces, operators, literals or keywords,
  * a last name shorter than three characters and bare all-lowercase words (prose: `main`, `json`) are not symbols;
  * a bare lowercase word is one only when written as a call (`parse()`).
  */
@@ -84,7 +95,7 @@ export function parseCodeSymbol(content: string): CodeSymbol | null {
 	// A call may follow the generic list of a method: `Run<T>(x)` was stripped above; `Run(x)<T>` is not code.
 	if (!/^[A-Za-z_$][\w$.]*$/.test(text)) return null;
 	const segments = text.split(".");
-	if (segments.length > 4 || !segments.every(segment => IDENTIFIER.test(segment))) return null;
+	if (segments.length > MAX_PLAIN_SEGMENTS && (segments.length > MAX_QUALIFIED_SEGMENTS || !segments.slice(0, -2).every(isNamespaceSegment)) || !segments.every(segment => IDENTIFIER.test(segment))) return null;
 	const last = segments[segments.length - 1]!;
 	if (last.length < 3 || Object.hasOwn(RECEIVERS, segments[0]!)) return null;
 	if (segments.some(segment => Object.hasOwn(KEYWORDS, segment))) return null;

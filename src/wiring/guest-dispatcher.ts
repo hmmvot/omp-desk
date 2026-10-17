@@ -54,7 +54,7 @@ import type {
 import { MAX_ATTACH_ITEMS } from "../shared/attach-limits.ts";
 import { splitFileBlocks } from "../shared/file-blocks.ts";
 import type { Logger } from "../shared/logger.ts";
-import { fileSearchValue, symbolSearchValue } from "../shared/selection-query.ts";
+import { fileSearchValue, normalizeSymbolQuery } from "../shared/selection-query.ts";
 import type { RecentSessions } from "./recent-sessions.ts";
 
 /** The chat commands a page sends; each is deduplicated by its own request id in the conversation. */
@@ -155,6 +155,8 @@ export interface GuestChatPort<Tab extends GuestTab> {
 	runChatAction(context: vscode.ExtensionContext, index: SessionIndex, tabId: string, command: GuestChatCommand): Promise<void>;
 	/** The folder of the process this window runs for a conversation, or `null` when it runs none. */
 	hostedCwd(tabId: string): string | null;
+	/** The symbol search of a selection a Chat page has (see `searchSymbol`), in the folder of the conversation `tabId` shows. */
+	searchSymbol(query: string, tabId: string): Promise<void>;
 	/** The workspace paths a composer's `@`-mention query matches below a folder. */
 	completeFiles(cwd: string, query: string): Promise<GuestFileCompletionsMessage["paths"]>;
 	/** The host's own file dialog for the attach button: the paths the user chose, none on cancel. Never rejects a cancel; a failure rejects. */
@@ -338,12 +340,14 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 
 	/**
 	 * `ompDesk.searchSymbolFromChat` (Ctrl+N over a Chat page): VS Code's symbol search seeded with what the page has selected,
-	 * as it is seeded from an editor's selection; with nothing selected it opens empty.
+	 * as it is seeded from an editor's selection; with nothing selected it opens empty. A qualified name is looked up the way a
+	 * chat link is (the window's dependency), because VS Code's own search cannot take `Type.Member`.
 	 */
 	async function searchSymbolFromChat(): Promise<void> {
-		const value = symbolSearchValue(await frontChatSelection());
-		if (value === null) await vscode.commands.executeCommand("workbench.action.showAllSymbols");
-		else await vscode.commands.executeCommand("workbench.action.quickOpen", value);
+		const target = deps.activePanelTab();
+		const query = target !== null && target.mode === "chat" ? normalizeSymbolQuery(await askPageSelection(target.slotId, target.panel)) : "";
+		if (target === null || query === "") await vscode.commands.executeCommand("workbench.action.showAllSymbols");
+		else await deps.searchSymbol(query, target.tabId);
 	}
 
 	/**

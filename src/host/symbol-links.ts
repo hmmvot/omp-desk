@@ -1,5 +1,5 @@
 import path from "node:path";
-import { parseBareFileName, parseCodeSymbol } from "../shared/code-symbols.ts";
+import { isNamespaceSegment, parseBareFileName, parseCodeSymbol } from "../shared/code-symbols.ts";
 import type { BareFileName, CodeSymbol, SymbolLinkResult, SymbolLinksRequest, SymbolLinksResolution } from "../shared/code-symbols.ts";
 import { silentLogger, type Logger } from "../shared/logger.ts";
 import { isInside } from "./link-scope.ts";
@@ -29,10 +29,25 @@ export interface SymbolEntry {
 	readonly column: number;
 }
 
+/** One type of the provider's type hierarchy: what {@link HierarchyType} holds, and the provider's own handle for asking about its supertypes. */
+export interface HierarchyNode extends HierarchyType {
+	readonly token: unknown;
+}
+
+/** The provider's type hierarchy (`vscode.prepareTypeHierarchy` and `vscode.provideSupertypes`); `null` when a call threw or did not answer, an empty list when the provider has no hierarchy for the position. */
+export interface TypeHierarchySource {
+	/** The type declared at an entry's position. */
+	prepare(entry: SymbolEntry): Promise<readonly HierarchyNode[] | null>;
+	/** The direct supertypes (base class and interfaces) of a type. */
+	supertypes(node: HierarchyNode): Promise<readonly HierarchyNode[] | null>;
+}
+
 /** The provider side: `null` when it threw or did not answer in time. */
 export interface SymbolSource {
 	/** `text` is what the provider is asked; `last` is the symbol's own name, which an entry must carry. */
 	query(text: string, last: string): Promise<SymbolAnswer | null>;
+	/** Present when the provider can name a type's supertypes: a member the qualifier's type inherits is then found where its base declares it. */
+	readonly hierarchy?: TypeHierarchySource;
 }
 
 /** The part of `vscode.SymbolInformation` this module reads; a provider may leave the location's range out. */
@@ -66,6 +81,18 @@ export function symbolEntry(symbol: ProviderSymbol): SymbolEntry {
 		line: unresolved || !Number.isSafeInteger(range.start.line) ? 0 : range.start.line + 1,
 		column: unresolved || !Number.isSafeInteger(range.start.character) ? 0 : range.start.character + 1,
 	};
+}
+
+/** The part of `vscode.TypeHierarchyItem` this module reads. */
+export interface ProviderHierarchyItem {
+	readonly name: string;
+	readonly uri: { readonly scheme: string; readonly fsPath: string };
+	readonly range: { readonly start: { readonly line: number }; readonly end: { readonly line: number } };
+}
+
+/** A provider's hierarchy item as a node: only a `file` location has a path, and the item itself is the handle for asking about its supertypes. */
+export function hierarchyNode(item: ProviderHierarchyItem): HierarchyNode {
+	return { name: String(item.name), path: item.uri.scheme === "file" ? item.uri.fsPath : "", line: item.range.start.line + 1, endLine: item.range.end.line + 1, token: item };
 }
 const MAX_NAME_LENGTH = 256;
 const MAX_CONTAINER_LENGTH = 512;
@@ -208,24 +235,38 @@ function representative(parts: readonly SymbolEntry[]): SymbolEntry {
 }
 
 /**
- * The single definition of `symbol` among `entries`, which are already limited to the session's folders. The last
- * segment must equal the entry's name exactly (case-sensitive; an attribute also matches `NameAttribute` on a type);
- * a dotted name needs its preceding segments to end the entry's container. A bare capitalized name prefers
- * type-like entries and accepts members only when no type matches. Declarations that are one symbol (the partial
- * parts of a type, the overloads of a member in one container) are one definition, opened at the type's own file or
- * the first by path and line. Distinct symbols are ambiguous, unless exactly one of them lies inside `cwd`.
+ * The qualifiers a dotted name may stand for. A provider's container names the type (`in SessionData (…)`, `Catalog.Profile`),
+ * not the namespaces above it, so after the qualifier as written come the ones with leading namespace-like segments
+ * dropped (`OmpDesk.Core.Catalog.Profile.Load` then `Core.Catalog.Profile.Load`, `Catalog.Profile.Load`, `Profile.Load`),
+ * always keeping the segment that stands next to the member. A shortened qualifier applies only to a container shorter than the
+ * written one: a container that carries the namespaces too (`OmpDesk.Sessions.SessionData`) contradicts a wrong one.
  */
-export function matchSymbol(symbol: CodeSymbol, entries: readonly SymbolEntry[], cwd = ""): SymbolMatch {
+function qualifierVariants(wanted: readonly string[]): string[][] {
+	const variants = [[...wanted]];
+	for (let dropped = 1; dropped < wanted.length && isNamespaceSegment(wanted[dropped - 1]!); dropped++) variants.push(wanted.slice(dropped));
+	return variants;
+}
+
+/**
+ * The distinct declaration locations of `symbol` among `entries`, which are already limited to the session's folders. The last
+ * segment must equal the entry's name exactly (case-sensitive; an attribute also matches `NameAttribute` on a type);
+ * a dotted name needs its preceding segments to end the entry's container (the longest qualifier variant that any entry
+ * satisfies). A bare capitalized name prefers type-like entries and accepts members only when no type matches
+ * (`preferTypes: false` turns that off, for a member looked up on its own).
+ */
+export function candidateEntries(symbol: CodeSymbol, entries: readonly SymbolEntry[], preferTypes = true): SymbolEntry[] {
 	const names = symbol.attribute ? [symbol.last, `${symbol.last}Attribute`] : [symbol.last];
 	const wanted = symbol.segments.slice(0, -1);
-	let matches = entries.filter(entry => {
-		if (LINKABLE_KINDS[entry.kind] !== true || !names.includes(bareName(entry.name))) return false;
-		if (symbol.attribute && !(entry.kind in TYPE_KINDS)) return false;
-		if (wanted.length === 0) return true;
-		return containerInfo(entry.container).paths.some(container =>
-			container.length >= wanted.length && wanted.every((segment, index) => container[container.length - wanted.length + index] === segment));
-	});
-	if (wanted.length === 0 && /^[A-Z]/.test(symbol.last)) {
+	const named = entries.filter(entry => LINKABLE_KINDS[entry.kind] === true && names.includes(bareName(entry.name)) && !(symbol.attribute && !(entry.kind in TYPE_KINDS)));
+	let matches = named;
+	if (wanted.length > 0) {
+		for (const variant of qualifierVariants(wanted)) {
+			matches = named.filter(entry => containerInfo(entry.container).paths.some(container =>
+				container.length >= variant.length && (variant.length === wanted.length || container.length < wanted.length)
+				&& variant.every((segment, index) => container[container.length - variant.length + index] === segment)));
+			if (matches.length > 0) break;
+		}
+	} else if (preferTypes && /^[A-Z]/.test(symbol.last)) {
 		const types = matches.filter(entry => entry.kind in TYPE_KINDS);
 		if (types.length > 0) matches = types;
 	}
@@ -236,7 +277,15 @@ export function matchSymbol(symbol: CodeSymbol, entries: readonly SymbolEntry[],
 		const key = candidate.line > 0 ? `${candidate.path.toLowerCase()}\0${candidate.line}\0${candidate.column}` : `${candidate.path.toLowerCase()}\0unresolved\0${index}`;
 		if (!distinct.has(key)) distinct.set(key, candidate);
 	});
-	const locations = [...distinct.values()];
+	return [...distinct.values()];
+}
+
+/**
+ * The single definition among `locations` (see {@link candidateEntries}). Declarations that are one symbol (the partial
+ * parts of a type, the overloads of a member in one container) are one definition, opened at the type's own file or
+ * the first by path and line. Distinct symbols are ambiguous, unless exactly one of them lies inside `cwd`.
+ */
+export function decideMatch(locations: readonly SymbolEntry[], cwd = ""): SymbolMatch {
 	if (locations.length === 0) return { state: "none", locations: 0 };
 	if (locations.length === 1) return { state: "unique", entry: locations[0]!, locations: 1 };
 	const groups = new Map<string, SymbolEntry[]>();
@@ -250,6 +299,39 @@ export function matchSymbol(symbol: CodeSymbol, entries: readonly SymbolEntry[],
 	const local = cwd === "" ? [] : sameSymbols.filter(group => group.some(entry => isInside(cwd, entry.path)));
 	if (local.length === 1) return { state: "unique", entry: representative(local[0]!), locations: locations.length, via: "cwd" };
 	return { state: "ambiguous", locations: locations.length, symbols: sameSymbols.length };
+}
+
+/** The single definition of `symbol` among `entries`: {@link decideMatch} of its {@link candidateEntries}. */
+export function matchSymbol(symbol: CodeSymbol, entries: readonly SymbolEntry[], cwd = ""): SymbolMatch {
+	return decideMatch(candidateEntries(symbol, entries), cwd);
+}
+
+/** A type of a supertype chain as the provider's type hierarchy reports it; `line` and `endLine` are one-based, `path` is empty for a type that is not in a file (metadata, a library). */
+export interface HierarchyType {
+	readonly name: string;
+	readonly path: string;
+	readonly line: number;
+	readonly endLine: number;
+}
+
+/**
+ * The declarations of a member that the nearest supertype level declares. `members` are the entries named like the member
+ * (any container) and `levels` the supertype chain of the qualifier's type, nearest level first (direct supertypes, then theirs). A
+ * member belongs to a type when its container's innermost name is the type's own (generic arguments aside); when several
+ * entries carry that name, the ones inside the type's declaration range win (`Base<T>` against `Base`, the partial part
+ * the hierarchy points at). A member declared further up the chain is shadowed by one nearer: an override is found where it is
+ * written. A type outside the files has nothing to compare and is skipped.
+ */
+export function inheritedLocations(members: readonly SymbolEntry[], levels: readonly (readonly HierarchyType[])[]): SymbolEntry[] {
+	for (const level of levels) {
+		const types = level.filter(type => type.path !== "");
+		const holds = (entry: SymbolEntry, type: HierarchyType) => containerInfo(entry.container).paths.some(container => container[container.length - 1] === bareName(type.name));
+		const named = members.filter(entry => types.some(type => holds(entry, type)));
+		if (named.length === 0) continue;
+		const inside = named.filter(entry => types.some(type => holds(entry, type) && entry.path.toLowerCase() === type.path.toLowerCase() && entry.line >= type.line && entry.line <= type.endLine));
+		return inside.length > 0 ? inside : named;
+	}
+	return [];
 }
 
 /**
@@ -294,6 +376,28 @@ export interface SymbolAnswer extends ReadonlyArray<SymbolEntry> { total?: numbe
 
 type QueryResult = { readonly entries: readonly SymbolEntry[]; readonly total: number } | { readonly failed: "invalidated" | "queue-full" | "error" | "no-answer" | "timeout" };
 
+/** Why a provider question gave no answer: the outcome the token gets and the line the log shows. */
+interface Failure {
+	readonly outcome: SymbolOutcome;
+	readonly verdict: string;
+}
+
+/** What the provider's questions of one lookup were and returned, for the log. */
+interface Gathering {
+	queries: number;
+	total: number;
+	entries: readonly SymbolEntry[];
+}
+
+type Gathered =
+	| { readonly failed: Failure }
+	| { readonly locations: readonly SymbolEntry[]; readonly match: SymbolMatch; readonly via: string; readonly truncated: boolean };
+
+/** The answer of {@link SymbolLinkResolver.find}: every matching definition of a qualified name, or why there is none (`pending`: the provider is not ready; `unavailable`: it failed or timed out). */
+export type SymbolFind =
+	| { readonly state: "matches"; readonly entries: readonly SymbolEntry[]; readonly via: string }
+	| { readonly state: "none" | "unavailable" | "pending" };
+
 /** Provider queries that may wait for a slot at once; beyond that a query is refused. A waiting query gives up after the query timeout. */
 const MAX_WAITING_QUERIES = 64;
 /** Entries of one provider answer that are looked at; an answer with more is a locally truncated list. */
@@ -302,6 +406,10 @@ export const MAX_SYMBOL_ENTRIES = 1000;
 const LOOKUP_BUDGET_MS = 15_000;
 /** Batches of page questions that may work at once, panel and bridge routes together. */
 const MAX_ACTIVE_BATCHES = 8;
+/** The supertype levels, provider hierarchy calls and search results one lookup takes at most; a hierarchy beyond that is not walked and the member stays unresolved. */
+const MAX_HIERARCHY_DEPTH = 8;
+const MAX_HIERARCHY_CALLS = 24;
+export const MAX_SEARCH_RESULTS = 100;
 
 const unavailable: SymbolOutcome = { status: "unavailable" };
 const none: SymbolOutcome = { status: "none" };
@@ -432,62 +540,158 @@ export class SymbolLinkResolver {
 	}
 
 	/**
-	 * One lookup: at most two provider queries. No query is dispatched and no answer is returned once
-	 * {@link invalidate} has moved the generation on, and the qualified second query is not started when the lookup
+	 * One lookup: at most two provider queries for the name, and for a member the qualifier's type does not declare itself
+	 * one more for the type plus a few type-hierarchy calls (see {@link #inherited}). No query is dispatched and no answer is
+	 * returned once {@link invalidate} has moved the generation on, and the later queries are not started when the lookup
 	 * has already used its budget. A provider answer longer than {@link MAX_SYMBOL_ENTRIES} is a locally truncated
 	 * list: it can still show an ambiguity, but a unique match in it is never trusted (`unavailable`).
 	 */
 	async #lookup(symbol: CodeSymbol, scope: SymbolScope, generation: number): Promise<SymbolOutcome> {
 		const startedAt = this.#now();
+		const stats: Gathering = { queries: 0, total: 0, entries: [] };
 		const inScope = (entries: readonly SymbolEntry[]) => entries.filter(entry => scope.roots.some(root => isInside(root, entry.path)));
-		let queries = 0;
-		let total = 0;
-		let entries: readonly SymbolEntry[] = [];
-		let locations = 0;
-		let via = "";
-		const done = (outcome: SymbolOutcome, verdict: string): SymbolOutcome => {
-			this.#log.debug(`code symbol ${JSON.stringify(symbol.name)}: ${queries} quer${queries === 1 ? "y" : "ies"}, ${total} provider entries, ${inScope(entries).length} in scope, ${locations} matching locations -> ${verdict}${via === "" ? "" : ` (${via})`} in ${this.#now() - startedAt} ms`);
+		const done = (outcome: SymbolOutcome, verdict: string, matching = 0, via = ""): SymbolOutcome => {
+			this.#log.debug(`code symbol ${JSON.stringify(symbol.name)}: ${stats.queries} quer${stats.queries === 1 ? "y" : "ies"}, ${stats.total} provider entries, ${inScope(stats.entries).length} in scope, ${matching} matching locations -> ${verdict}${via === "" ? "" : ` (${via})`} in ${this.#now() - startedAt} ms`);
 			return outcome;
 		};
-		const ask = async (text: string): Promise<{ answer: { readonly entries: readonly SymbolEntry[]; readonly total: number } } | { verdict: string; parked: boolean }> => {
-			queries++;
-			const answer = await this.#query(text, symbol.last, generation);
-			if ("failed" in answer) {
-				// A full line and a slow provider are not verdicts: the token waits for the queue to drain and is asked again.
-				const parked = answer.failed === "queue-full" || answer.failed === "timeout";
-				if (parked) this.#queueRetryDue = true;
-				return { verdict: parked ? `parked (${answer.failed === "timeout" ? "timeout" : "queue"})` : `unavailable: ${answer.failed}`, parked };
-			}
-			if (generation !== this.#generation) return { verdict: "unavailable: invalidated", parked: false };
-			total += answer.total;
-			return { answer };
-		};
-		const first = await ask(symbol.last);
-		if ("verdict" in first) return done(first.parked ? pending : unavailable, first.verdict);
+		const gathered = await this.#gather(symbol, scope, generation, startedAt, stats);
+		if ("failed" in gathered) return done(gathered.failed.outcome, gathered.failed.verdict);
+		const { match } = gathered;
+		if (!this.#ready && stats.total === 0) { this.#park(symbol, scope); return done(pending, "parked (not ready)", match.locations); }
+		if (stats.total === 0) return done(none, "none", match.locations);
+		// An entry whose name or container was too long to match could be a rival (or the match) that is not seen.
+		const unmatchable = inScope(stats.entries).some(candidate => candidate.kind === UNMATCHABLE_KIND);
+		if (match.state === "ambiguous") return done({ status: "ambiguous", definitions: match.symbols }, "ambiguous", match.locations, gathered.via);
+		if (unmatchable) return done(unavailable, "unavailable: unmatchable entry", match.locations);
+		if (match.state !== "unique") return done(none, "none", match.locations);
+		if (gathered.truncated) return done(unavailable, "unavailable: truncated", match.locations);
+		return done({ status: "found", target: symbolTarget(match.entry, scope.cwd) }, "found", match.locations, gathered.via === "" ? match.via ?? "" : gathered.via);
+	}
+
+	/**
+	 * Every definition of a qualified selection, for the symbol search (Ctrl+N): the same provider questions and the same matching as a
+	 * link, but all the matching locations are returned instead of one verdict, and nothing is cached. `none`, `unavailable` and `pending`
+	 * leave the caller to fall back to the provider's own search.
+	 */
+	async find(symbol: CodeSymbol, scope: SymbolScope): Promise<SymbolFind> {
+		if (scope.roots.length === 0) return { state: "none" };
+		const generation = this.#generation;
+		const startedAt = this.#now();
+		const stats: Gathering = { queries: 0, total: 0, entries: [] };
+		const gathered = await this.#gather(symbol, scope, generation, startedAt, stats);
+		const state = "failed" in gathered ? "failed" : generation !== this.#generation ? "invalidated" : stats.total === 0 ? "no entries" : `${gathered.locations.length} matching`;
+		this.#log.debug(`code symbol search ${JSON.stringify(symbol.name)}: ${stats.queries} quer${stats.queries === 1 ? "y" : "ies"}, ${stats.total} provider entries -> ${"failed" in gathered ? gathered.failed.verdict : state} in ${this.#now() - startedAt} ms`);
+		if ("failed" in gathered) return { state: gathered.failed.outcome.status === "pending" ? "pending" : "unavailable" };
+		if (generation !== this.#generation) return { state: "unavailable" };
+		if (stats.total === 0) return { state: this.#ready ? "none" : "pending" };
+		if (gathered.locations.length === 0) return { state: "none" };
+		return { state: "matches", entries: [...gathered.locations].sort(byPosition).slice(0, MAX_SEARCH_RESULTS), via: gathered.via };
+	}
+
+	/** One provider question for `text`; the answer, or why there is none (a full line and a slow provider are not verdicts: the token waits for the queue to drain and is asked again). */
+	async #ask(text: string, last: string, generation: number, stats: Gathering): Promise<{ readonly answer: { readonly entries: readonly SymbolEntry[]; readonly total: number } } | { readonly failed: Failure }> {
+		stats.queries++;
+		const answer = await this.#query(text, last, generation);
+		if ("failed" in answer) return { failed: this.#failure(answer.failed) };
+		if (generation !== this.#generation) return { failed: { outcome: unavailable, verdict: "unavailable: invalidated" } };
+		stats.total += answer.total;
+		return { answer };
+	}
+
+	/** The verdict for a provider call that did not answer. */
+	#failure(failed: "invalidated" | "queue-full" | "error" | "no-answer" | "timeout"): Failure {
+		const parked = failed === "queue-full" || failed === "timeout";
+		if (parked) this.#queueRetryDue = true;
+		return { outcome: parked ? pending : unavailable, verdict: parked ? `parked (${failed === "timeout" ? "timeout" : "queue"})` : `unavailable: ${failed}` };
+	}
+
+	/** The provider's questions of one lookup and what they say (see {@link #lookup}). */
+	async #gather(symbol: CodeSymbol, scope: SymbolScope, generation: number, startedAt: number, stats: Gathering): Promise<Gathered> {
+		const inScope = (entries: readonly SymbolEntry[]) => entries.filter(entry => scope.roots.some(root => isInside(root, entry.path)));
+		const first = await this.#ask(symbol.last, symbol.last, generation, stats);
+		if ("failed" in first) return first;
 		if (first.answer.total > 0) this.#markReady();
-		entries = first.answer.entries.slice(0, MAX_SYMBOL_ENTRIES);
+		stats.entries = first.answer.entries.slice(0, MAX_SYMBOL_ENTRIES);
 		let truncated = first.answer.entries.length > MAX_SYMBOL_ENTRIES;
-		let match = matchSymbol(symbol, inScope(entries), scope.cwd);
+		let locations = candidateEntries(symbol, inScope(stats.entries));
+		let match = decideMatch(locations, scope.cwd);
 		// A provider may understand a qualified query that the bare name's ranked list does not reach.
 		if (match.state === "none" && symbol.segments.length > 1) {
-			if (this.#now() - startedAt >= LOOKUP_BUDGET_MS) return done(unavailable, "unavailable: lookup budget");
-			const second = await ask(symbol.name);
-			if ("verdict" in second) return done(second.parked ? pending : unavailable, second.verdict);
-			entries = [...entries, ...second.answer.entries.slice(0, MAX_SYMBOL_ENTRIES)];
+			if (this.#now() - startedAt >= LOOKUP_BUDGET_MS) return { failed: { outcome: unavailable, verdict: "unavailable: lookup budget" } };
+			const second = await this.#ask(symbol.name, symbol.last, generation, stats);
+			if ("failed" in second) return second;
+			stats.entries = [...stats.entries, ...second.answer.entries.slice(0, MAX_SYMBOL_ENTRIES)];
 			truncated ||= second.answer.entries.length > MAX_SYMBOL_ENTRIES;
-			match = matchSymbol(symbol, inScope(entries), scope.cwd);
+			locations = candidateEntries(symbol, inScope(stats.entries));
+			match = decideMatch(locations, scope.cwd);
 		}
-		locations = match.locations;
-		if (!this.#ready && total === 0) { this.#park(symbol, scope); return done(pending, "parked (not ready)"); }
-		if (total === 0) return done(none, "none");
-		// An entry whose name or container was too long to match could be a rival (or the match) that is not seen.
-		const unmatchable = inScope(entries).some(candidate => candidate.kind === UNMATCHABLE_KIND);
-		if (match.state === "ambiguous") return done({ status: "ambiguous", definitions: match.symbols }, "ambiguous");
-		if (unmatchable) return done(unavailable, "unavailable: unmatchable entry");
-		if (match.state !== "unique") return done(none, "none");
-		if (truncated) return done(unavailable, "unavailable: truncated");
-		via = match.via ?? "";
-		return done({ status: "found", target: symbolTarget(match.entry, scope.cwd) }, "found");
+		let via = "";
+		// The member may be inherited: the provider names its base class as the container.
+		if (match.state === "none" && symbol.segments.length > 1 && stats.total > 0 && this.#source.hierarchy !== undefined) {
+			const inherited = await this.#inherited(symbol, scope, inScope(stats.entries), generation, startedAt, stats);
+			if ("failed" in inherited) return inherited;
+			if (inherited.locations.length > 0) {
+				locations = [...inherited.locations];
+				match = decideMatch(locations, scope.cwd);
+				via = "inherited";
+			}
+		}
+		return { locations, match, via, truncated };
+	}
+
+	/**
+	 * A member the qualifier's type does not declare itself: the type is looked up (a type-like entry, unique inside the scope),
+	 * its supertypes are asked of the provider's type hierarchy level by level, and the nearest level that declares the member
+	 * decides ({@link inheritedLocations}). A type that is not unique, has no position or no hierarchy gives nothing: there is no
+	 * name-only guess. Bounded in depth ({@link MAX_HIERARCHY_DEPTH}), in provider calls ({@link MAX_HIERARCHY_CALLS}) and by
+	 * the lookup budget; every call has the slots and timeouts of a symbol query.
+	 */
+	async #inherited(symbol: CodeSymbol, scope: SymbolScope, members: readonly SymbolEntry[], generation: number, startedAt: number, stats: Gathering): Promise<{ readonly locations: readonly SymbolEntry[] } | { readonly failed: Failure }> {
+		const hierarchy = this.#source.hierarchy;
+		if (hierarchy === undefined) return { locations: [] };
+		const budget = (): { readonly failed: Failure } | null => this.#now() - startedAt >= LOOKUP_BUDGET_MS ? { failed: { outcome: unavailable, verdict: "unavailable: lookup budget" } } : null;
+		const over = budget();
+		if (over !== null) return over;
+		const segments = symbol.segments.slice(0, -1);
+		const typeSymbol: CodeSymbol = { segments, name: segments.join("."), last: segments[segments.length - 1]!, attribute: false, call: false };
+		const typed = await this.#ask(typeSymbol.last, typeSymbol.last, generation, stats);
+		if ("failed" in typed) return typed;
+		const types = typed.answer.entries.slice(0, MAX_SYMBOL_ENTRIES).filter(entry => entry.kind in TYPE_KINDS && entry.kind !== SymbolKind.Enum && scope.roots.some(root => isInside(root, entry.path)));
+		const origin = decideMatch(candidateEntries(typeSymbol, types), scope.cwd);
+		if (origin.state !== "unique" || origin.entry.line === 0) return { locations: [] };
+		const levels: HierarchyNode[][] = [];
+		const seen = new Set<string>();
+		const mark = (node: HierarchyNode): boolean => {
+			const key = `${node.path.toLowerCase()}\0${node.line}\0${node.name}`;
+			if (seen.has(key)) return false;
+			seen.add(key);
+			return true;
+		};
+		const asked = async <T>(work: () => Promise<T | null>): Promise<{ readonly value: T } | { readonly failed: Failure }> => {
+			stats.queries++;
+			const result = await this.#bounded(generation, work);
+			return "failed" in result ? { failed: this.#failure(result.failed) } : result;
+		};
+		const prepared = await asked(() => hierarchy.prepare(origin.entry));
+		if ("failed" in prepared) return prepared;
+		let frontier = prepared.value.slice(0, 1);
+		for (const node of frontier) mark(node);
+		let calls = 0;
+		while (frontier.length > 0 && levels.length < MAX_HIERARCHY_DEPTH) {
+			const next: HierarchyNode[] = [];
+			for (const node of frontier) {
+				const out = calls >= MAX_HIERARCHY_CALLS ? { failed: { outcome: unavailable, verdict: "unavailable: hierarchy too large" } } : budget();
+				if (out !== null) return out;
+				calls++;
+				const supertypes = await asked(() => hierarchy.supertypes(node));
+				if ("failed" in supertypes) return supertypes;
+				for (const item of supertypes.value) if (mark(item)) next.push(item);
+			}
+			if (next.length > 0) levels.push(next);
+			frontier = next;
+		}
+		const named = candidateEntries({ segments: [symbol.last], name: symbol.last, last: symbol.last, attribute: false, call: false }, members, false);
+		return { locations: inheritedLocations(named, levels) };
 	}
 
 	/** A provider-call slot: at once when one is free, else after a place in a finite line; `false` when the line is full or the wait outlasts the query timeout. */
@@ -579,22 +783,29 @@ export class SymbolLinkResolver {
 		this.#parkedKeys.clear();
 	}
 
-	/**
-	 * One provider query. A slot is held until the provider's own call settles, not until the timeout: a hung
-	 * provider keeps its slot instead of letting invocations pile up. Waiting for a slot has the same logical
-	 * deadline as a query and a finite line, so no request state outlives a hung provider, and a query whose
-	 * generation was invalidated while it waited is dropped instead of dispatched.
-	 */
+	/** One provider query (see {@link #bounded}). */
 	async #query(text: string, last: string, generation: number): Promise<QueryResult> {
+		const result = await this.#bounded(generation, () => this.#source.query(text, last));
+		if ("failed" in result) return result;
+		return { entries: result.value.slice(0, MAX_SYMBOL_ENTRIES + 1), total: result.value.total ?? result.value.length };
+	}
+
+	/**
+	 * One provider call, a symbol query or a type-hierarchy question. A slot is held until the provider's own call settles, not until the
+	 * timeout: a hung provider keeps its slot instead of letting invocations pile up. Waiting for a slot has the same logical
+	 * deadline as a query and a finite line, so no request state outlives a hung provider, and a call whose
+	 * generation was invalidated while it waited is dropped instead of dispatched. `null` from the provider is no answer.
+	 */
+	async #bounded<T>(generation: number, work: () => Promise<T | null>): Promise<{ readonly value: T } | { readonly failed: "invalidated" | "queue-full" | "error" | "no-answer" | "timeout" }> {
 		if (generation !== this.#generation) return { failed: "invalidated" };
 		if (!await this.#acquire()) return { failed: "queue-full" };
 		if (generation !== this.#generation) { this.#release(); return { failed: "invalidated" }; }
-		const settled: Promise<QueryResult> = Promise.resolve()
-			.then(() => this.#source.query(text, last))
-			.then((answer): QueryResult => answer === null ? { failed: "no-answer" } : { entries: answer.slice(0, MAX_SYMBOL_ENTRIES + 1), total: (answer as SymbolAnswer).total ?? answer.length }, (): QueryResult => ({ failed: "error" }))
+		const settled = Promise.resolve()
+			.then(work)
+			.then((value): { readonly value: T } | { readonly failed: "no-answer" } => value === null ? { failed: "no-answer" } : { value }, (): { readonly failed: "error" } => ({ failed: "error" }))
 			.finally(() => this.#release());
 		let timer: NodeJS.Timeout | undefined;
-		const timeout = new Promise<QueryResult>(resolve => { timer = setTimeout(() => resolve({ failed: "timeout" }), this.#queryTimeoutMs); });
+		const timeout = new Promise<{ readonly failed: "timeout" }>(resolve => { timer = setTimeout(() => resolve({ failed: "timeout" }), this.#queryTimeoutMs); });
 		try { return await Promise.race([settled, timeout]); }
 		finally { clearTimeout(timer); }
 	}

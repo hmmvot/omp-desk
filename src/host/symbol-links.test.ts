@@ -3,10 +3,10 @@ import { test } from "node:test";
 import { parseCodeSymbol } from "../shared/code-symbols.ts";
 import type { SymbolLinksResolution } from "../shared/code-symbols.ts";
 import { recordingLogger, type LoggedLine } from "../shared/logger.ts";
-import { SymbolKind, SymbolLinkResolver, handleSymbolLinks, isNameCandidate, matchSymbol, symbolEntry, symbolRoots, symbolTarget } from "./symbol-links.ts";
+import { SymbolKind, SymbolLinkResolver, handleSymbolLinks, hierarchyNode, inheritedLocations, isNameCandidate, matchSymbol, symbolEntry, symbolRoots, symbolTarget } from "./symbol-links.ts";
 import { isInside } from "./link-scope.ts";
 import { FileNameLinkResolver } from "./file-name-links.ts";
-import type { SymbolEntry, SymbolSource } from "./symbol-links.ts";
+import type { HierarchyNode, HierarchyType, SymbolEntry, SymbolSource, TypeHierarchySource } from "./symbol-links.ts";
 
 const CWD = "D:\\Work\\omp-vscode";
 const entry = (name: string, kind: number, file: string, line = 10, container = "", column = 5): SymbolEntry =>
@@ -663,4 +663,159 @@ test("an ambiguous symbol is answered with its number of different definitions, 
 	const { host: h, replies } = host();
 	await handleSymbolLinks({ type: "omp:terminal-link-symbols", requestId: 3, tokens: ["Store"] }, h, resolver);
 	assert.deepEqual(replies[0]!.results, [{ token: "Store", status: "ambiguous", definitions: 3 }]);
+});
+
+test("namespaces written before a type are dropped for a container that names only the type, never for one that carries its own namespaces, and a lower-case segment is no namespace", () => {
+	assert.equal(unique("OmpDesk.Core.SessionIndex.Load", [roslyn("Load", SymbolKind.Method, "SessionIndex.cs", 20, IN("SessionIndex"))]), "SessionIndex.cs:20");
+	assert.equal(unique("OmpDesk.Core.Catalog.Profile.Load", [roslyn("Load", SymbolKind.Method, "Catalog.cs", 4, IN("Catalog.Profile"))]), "Catalog.cs:4", "a nested type's container is `Outer.Inner`");
+	assert.equal(unique("OmpDesk.Core.SessionIndex.Load", [entry("Load", SymbolKind.Method, "M.cs", 20, "Other.Sessions.SessionIndex")]), "none", "a provider that names namespaces contradicts a wrong one");
+	assert.equal(unique("Other.SessionData.Load", [entry("Load", SymbolKind.Method, "M.cs", 20, "OmpDesk.Sessions.SessionData")]), "none");
+	assert.equal(unique("core.SessionIndex.Load", [roslyn("Load", SymbolKind.Method, "SessionIndex.cs", 20, IN("SessionIndex"))]), "none", "a lower-case segment is not dropped");
+	assert.equal(unique("SessionIndex.Load", [roslyn("Load", SymbolKind.Method, "SessionIndex.cs", 20, IN("SessionIndex"))]), "SessionIndex.cs:20", "the segment beside the member is always kept");
+});
+
+const at = (file: string) => `${CWD}\\${file}`;
+const typeAt = (name: string, file: string, line: number, endLine: number): HierarchyType => ({ name, path: at(file), line, endLine });
+
+test("an inherited member is the one the nearest supertype level declares, found by the container's own name and narrowed by the type's range", () => {
+	const base = typeAt("RecordBase<string, Profile>", "Data.cs", 3, 8);
+	const declared = roslyn("ApplyFrom(TValue)", SymbolKind.Method, "Data.cs", 5, IN("RecordBase<TValue, TSelf>"));
+	const named = (...entries: SymbolEntry[]) => inheritedLocations(entries, [[typeAt("Mid", "Mid.cs", 2, 9)], [base]]).map(found => `${found.path.slice(CWD.length + 1)}:${found.line}`);
+	assert.deepEqual(named(declared), ["Data.cs:5"], "two levels up");
+	assert.deepEqual(named(declared, roslyn("ApplyFrom", SymbolKind.Method, "Mid.cs", 7, IN("Mid"))), ["Mid.cs:7"], "an override nearer the type shadows the base's declaration");
+	assert.deepEqual(named(roslyn("ApplyFrom", SymbolKind.Method, "Other.cs", 5, IN("Unrelated"))), [], "a member of a type outside the chain is not inherited");
+	assert.deepEqual(named(roslyn("ApplyFrom", SymbolKind.Method, "Data.cs", 6, IN("Inner")), declared), ["Data.cs:5"], "a nested type inside the base's range is not the base");
+	const twins = [roslyn("Reset", SymbolKind.Method, "Data.cs", 6, IN("RecordBase<TValue, TSelf>")), roslyn("Reset", SymbolKind.Method, "Elsewhere.cs", 6, IN("RecordBase<TValue>"))];
+	assert.deepEqual(inheritedLocations(twins, [[base]]).map(found => found.path.slice(CWD.length + 1)), ["Data.cs"], "of two types with the one name the one the hierarchy points at");
+	assert.deepEqual(inheritedLocations(twins.slice(1), [[base]]).map(found => found.path.slice(CWD.length + 1)), ["Elsewhere.cs"], "a partial part in another file is still the type, by name");
+	assert.deepEqual(inheritedLocations([declared], [[{ name: "RecordBase", path: "", line: 1, endLine: 9 }]]), [], "a type outside the files has nothing to compare");
+});
+
+/** A type hierarchy answering from tables of type name to supertypes, recording the calls it got. */
+function hierarchy(prepared: Record<string, HierarchyNode[]>, supertypes: Record<string, HierarchyNode[] | "throw" | "hang">) {
+	const calls: string[] = [];
+	const source: TypeHierarchySource = {
+		prepare(from) {
+			calls.push(`prepare ${from.name}`);
+			return Promise.resolve(prepared[from.name] ?? []);
+		},
+		supertypes(of) {
+			calls.push(`supertypes ${of.name}`);
+			const answer = supertypes[of.name] ?? [];
+			if (answer === "throw") return Promise.reject(new Error("hierarchy failed"));
+			if (answer === "hang") return new Promise(() => {});
+			return Promise.resolve(answer);
+		},
+	};
+	return { source, calls };
+}
+const nodeAt = (name: string, file: string, line: number, endLine: number): HierarchyNode => ({ ...typeAt(name, file, line, endLine), token: name });
+
+/** The shape of a real capture of the C# language server on a three-type project: the member's container is the base class, the derived type is nested in `Catalog`. */
+const baseType = roslyn("RecordBase<TValue, TSelf>", SymbolKind.Class, "Data.cs", 3, TOP);
+const setMember = roslyn("ApplyFrom(TValue)", SymbolKind.Method, "Data.cs", 5, IN("RecordBase<TValue, TSelf>"));
+const overrideType = roslyn("Profile", SymbolKind.Class, "Catalog.cs", 10, IN("Catalog"));
+const baseNode = nodeAt("RecordBase<string, Profile>", "Data.cs", 3, 8);
+const inheritedProvider = (extra: Record<string, SymbolEntry[]> = {}) => provider({ ApplyFrom: [setMember, roslyn("ApplyFrom(int)", SymbolKind.Method, "Other.cs", 2, IN("Unrelated"))], Profile: [overrideType], ...extra });
+
+test("a member the qualifier's type inherits is found where its base class declares it, through the provider's type hierarchy", async () => {
+	const answers = inheritedProvider();
+	const types = hierarchy({ Profile: [nodeAt("Profile", "Catalog.cs", 10, 12)] }, { Profile: [baseNode] });
+	const resolver = new SymbolLinkResolver({ ...answers.source, hierarchy: types.source });
+	assert.deepEqual(await resolver.resolve(symbol("Profile.ApplyFrom"), scope), { status: "found", target: "Data.cs:5:5" });
+	assert.deepEqual(answers.asked, ["ApplyFrom", "Profile.ApplyFrom", "Profile"], "the name, the qualified name, then the qualifier's type");
+	assert.deepEqual(types.calls, ["prepare Profile", "supertypes Profile", "supertypes RecordBase<string, Profile>"]);
+	await resolver.resolve(symbol("Profile.ApplyFrom"), scope);
+	assert.equal(answers.asked.length, 3, "a found answer is cached like any other");
+	assert.deepEqual(await new SymbolLinkResolver({ ...answers.source, hierarchy: types.source }).resolve(symbol("OmpDesk.Core.Catalog.Profile.ApplyFrom"), scope), { status: "found", target: "Data.cs:5:5" }, "namespaces and the outer type before the nested one");
+});
+
+test("without a type hierarchy, or when the type is not exactly one in the folders or the hierarchy says nothing, an inherited member stays unresolved: no name-only guess", async () => {
+	const bare = inheritedProvider();
+	assert.deepEqual(await new SymbolLinkResolver(bare.source).resolve(symbol("Profile.ApplyFrom"), scope), { status: "none" });
+	assert.deepEqual(bare.asked, ["ApplyFrom", "Profile.ApplyFrom"], "no hierarchy, no third question");
+	const silent = hierarchy({}, {});
+	assert.deepEqual(await new SymbolLinkResolver({ ...inheritedProvider().source, hierarchy: silent.source }).resolve(symbol("Profile.ApplyFrom"), scope), { status: "none" }, "the provider has no hierarchy for the position");
+	const twice = hierarchy({ Profile: [nodeAt("Profile", "Catalog.cs", 10, 12)] }, { Profile: [baseNode] });
+	const twins = inheritedProvider({ Profile: [overrideType, roslyn("Profile", SymbolKind.Class, "Other.cs", 4, IN("Elsewhere"))] });
+	assert.deepEqual(await new SymbolLinkResolver({ ...twins.source, hierarchy: twice.source }).resolve(symbol("Profile.ApplyFrom"), scope), { status: "none" }, "two types of that name: which one is meant is unknown");
+	assert.deepEqual(twice.calls, []);
+	const unplaced = inheritedProvider({ Profile: [{ ...overrideType, line: 0, column: 0 }] });
+	assert.deepEqual(await new SymbolLinkResolver({ ...unplaced.source, hierarchy: twice.source }).resolve(symbol("Profile.ApplyFrom"), scope), { status: "none" }, "a type without a position cannot be asked");
+	const outside = inheritedProvider({ Profile: [{ ...overrideType, path: "D:\\Other\\Catalog.cs" }] });
+	assert.deepEqual(await new SymbolLinkResolver({ ...outside.source, hierarchy: twice.source }).resolve(symbol("Profile.ApplyFrom"), scope), { status: "none" }, "a type outside the session's folders");
+	assert.deepEqual(await new SymbolLinkResolver({ ...inheritedProvider({ Profile: [{ ...overrideType, kind: SymbolKind.Enum }] }).source, hierarchy: twice.source }).resolve(symbol("Profile.ApplyFrom"), scope), { status: "none" }, "an enum has no base to inherit from");
+});
+
+test("an override nearer the type wins, two declarations at one level are ambiguous, and a direct member never needs the hierarchy", async () => {
+	const mid = nodeAt("Mid", "Mid.cs", 2, 9);
+	const middle = roslyn("ApplyFrom", SymbolKind.Method, "Mid.cs", 7, IN("Mid"));
+	const types = hierarchy({ Profile: [nodeAt("Profile", "Catalog.cs", 10, 12)] }, { Profile: [mid], Mid: [baseNode] });
+	assert.deepEqual(await new SymbolLinkResolver({ ...inheritedProvider({ ApplyFrom: [setMember, middle] }).source, hierarchy: types.source }).resolve(symbol("Profile.ApplyFrom"), scope), { status: "found", target: "Mid.cs:7:5" });
+	const twoBases = hierarchy({ Profile: [nodeAt("Profile", "Catalog.cs", 10, 12)] }, { Profile: [nodeAt("IFirst", "First.cs", 1, 5), nodeAt("ISecond", "Second.cs", 1, 5)] });
+	const declared = (type: string, file: string) => roslyn("ApplyFrom", SymbolKind.Method, file, 3, IN(type));
+	assert.deepEqual(await new SymbolLinkResolver({ ...inheritedProvider({ ApplyFrom: [declared("IFirst", "First.cs"), declared("ISecond", "Second.cs")] }).source, hierarchy: twoBases.source }).resolve(symbol("Profile.ApplyFrom"), scope), { status: "ambiguous", definitions: 2 });
+	const direct = hierarchy({}, {});
+	const own = inheritedProvider({ ApplyFrom: [roslyn("ApplyFrom", SymbolKind.Method, "Catalog.cs", 11, IN("Profile"))] });
+	assert.deepEqual(await new SymbolLinkResolver({ ...own.source, hierarchy: direct.source }).resolve(symbol("Profile.ApplyFrom"), scope), { status: "found", target: "Catalog.cs:11:5" });
+	assert.deepEqual(direct.calls, [], "the container matched: nothing else was asked");
+	assert.deepEqual(own.asked, ["ApplyFrom"]);
+});
+
+test("the type hierarchy is walked a bounded depth and number of calls; a hierarchy that is too large or fails is not a verdict, and nothing is cached", async () => {
+	const tower: Record<string, HierarchyNode[]> = {};
+	for (let level = 0; level < 20; level++) tower[level === 0 ? "Profile" : `Level${level}`] = [nodeAt(`Level${level + 1}`, `L${level + 1}.cs`, 1, 5)];
+	const deep = hierarchy({ Profile: [nodeAt("Profile", "Catalog.cs", 10, 12)] }, tower);
+	assert.deepEqual(await new SymbolLinkResolver({ ...inheritedProvider().source, hierarchy: deep.source }).resolve(symbol("Profile.ApplyFrom"), scope), { status: "none" });
+	assert.equal(deep.calls.length, 9, "one prepare and eight levels");
+	const wide: Record<string, HierarchyNode[]> = { Profile: [0, 1, 2].map(index => nodeAt(`Fan${index}`, `F${index}.cs`, 1, 5)) };
+	for (let index = 0; index < 3; index++) wide[`Fan${index}`] = [0, 1, 2].map(child => nodeAt(`Fan${index}${child}`, `G${index}${child}.cs`, 1, 5));
+	for (let index = 0; index < 3; index++) for (let child = 0; child < 3; child++) wide[`Fan${index}${child}`] = [0, 1, 2].map(leaf => nodeAt(`Fan${index}${child}${leaf}`, `H${index}${child}${leaf}.cs`, 1, 5));
+	const broad = hierarchy({ Profile: [nodeAt("Profile", "Catalog.cs", 10, 12)] }, { ...wide, ...Object.fromEntries(Object.values(wide).flat().map(node => [node.name, [0, 1, 2].map(next => nodeAt(`${node.name}${next}`, `${node.name}${next}.cs`, 1, 5))])) });
+	assert.deepEqual(await new SymbolLinkResolver({ ...inheritedProvider().source, hierarchy: broad.source }).resolve(symbol("Profile.ApplyFrom"), scope), { status: "unavailable" });
+	assert.ok(broad.calls.length <= 25, `at most 24 supertype calls and the prepare: ${broad.calls.length}`);
+	const hung = hierarchy({ Profile: [nodeAt("Profile", "Catalog.cs", 10, 12)] }, { Profile: "hang" });
+	const slow = new SymbolLinkResolver({ ...inheritedProvider().source, hierarchy: hung.source }, { queryTimeoutMs: 10 });
+	assert.deepEqual(await slow.resolve(symbol("Profile.ApplyFrom"), scope), { status: "pending" }, "a hierarchy that does not answer in time parks the token like a slow provider");
+	assert.deepEqual(await slow.resolve(symbol("Profile.ApplyFrom"), scope), { status: "pending" });
+	assert.equal(hung.calls.filter(call => call === "prepare Profile").length, 2, "nothing cached: the second question asked again");
+	const broken = hierarchy({ Profile: [nodeAt("Profile", "Catalog.cs", 10, 12)] }, { Profile: "throw" });
+	assert.deepEqual(await new SymbolLinkResolver({ ...inheritedProvider().source, hierarchy: broken.source }).resolve(symbol("Profile.ApplyFrom"), scope), { status: "unavailable" });
+});
+
+test("an invalidation while the hierarchy is asked makes the lookup unavailable and caches nothing", async () => {
+	const release = Promise.withResolvers<HierarchyNode[]>();
+	const types: TypeHierarchySource = { prepare: async () => [nodeAt("Profile", "Catalog.cs", 10, 12)], supertypes: () => release.promise };
+	const resolver = new SymbolLinkResolver({ ...inheritedProvider().source, hierarchy: types });
+	const running = resolver.resolve(symbol("Profile.ApplyFrom"), scope);
+	await tick();
+	await tick();
+	resolver.invalidate();
+	release.resolve([baseNode]);
+	assert.deepEqual(await running, { status: "unavailable" });
+	const again = hierarchy({ Profile: [nodeAt("Profile", "Catalog.cs", 10, 12)] }, { Profile: [baseNode] });
+	assert.deepEqual(await new SymbolLinkResolver({ ...inheritedProvider().source, hierarchy: again.source }).resolve(symbol("Profile.ApplyFrom"), scope), { status: "found", target: "Data.cs:5:5" });
+});
+
+test("a provider's hierarchy item becomes a node: only a file location has a path, and lines are one-based", () => {
+	const item = { name: "RecordBase<string, Profile>", uri: { scheme: "file", fsPath: at("Data.cs") }, range: { start: { line: 2 }, end: { line: 5 } } };
+	assert.deepEqual(hierarchyNode(item), { name: item.name, path: at("Data.cs"), line: 3, endLine: 6, token: item });
+	assert.equal(hierarchyNode({ ...item, uri: { scheme: "roslyn-metadata", fsPath: "x" } }).path, "");
+});
+
+test("a qualified selection's every definition is returned for the symbol search, inherited ones included, without a cache; failures leave the fallback to the caller", async () => {
+	const twins = provider({ Load: [entry("Load", SymbolKind.Method, "B.cs", 20, "SessionData"), entry("Load", SymbolKind.Method, "A.cs", 4, "Other.SessionData"), entry("Load", SymbolKind.Method, "C.cs", 9, "Unrelated")] });
+	const resolver = new SymbolLinkResolver(twins.source);
+	const direct = await resolver.find(symbol("SessionData.Load"), scope);
+	assert.equal(direct.state, "matches");
+	assert.deepEqual(direct.state === "matches" ? direct.entries.map(found => found.path.slice(CWD.length + 1)) : [], ["A.cs", "B.cs"], "both classes of that name, by position");
+	await resolver.find(symbol("SessionData.Load"), scope);
+	assert.equal(twins.asked.length, 2, "nothing is cached");
+	const types = hierarchy({ Profile: [nodeAt("Profile", "Catalog.cs", 10, 12)] }, { Profile: [baseNode] });
+	const inherited = await new SymbolLinkResolver({ ...inheritedProvider().source, hierarchy: types.source }).find(symbol("Profile.ApplyFrom"), scope);
+	assert.deepEqual(inherited.state === "matches" ? [inherited.via, inherited.entries.map(found => found.line)] : inherited, ["inherited", [5]]);
+	assert.deepEqual(await new SymbolLinkResolver(provider({ Load: [entry("Load", SymbolKind.Method, "C.cs", 9, "Unrelated")] }).source).find(symbol("SessionData.Load"), scope), { state: "none" });
+	assert.deepEqual(await new SymbolLinkResolver(provider({}).source, { probeDelaysMs: [100000] }).find(symbol("SessionData.Load"), scope), { state: "pending" }, "a provider that has not answered yet");
+	assert.deepEqual(await new SymbolLinkResolver(provider({ Load: "throw" }).source).find(symbol("SessionData.Load"), scope), { state: "unavailable" });
+	assert.deepEqual(await new SymbolLinkResolver(twins.source).find(symbol("SessionData.Load"), { cwd: "", roots: [] }), { state: "none" });
 });

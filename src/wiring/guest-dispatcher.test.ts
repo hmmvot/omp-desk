@@ -206,6 +206,7 @@ function world(overrides: Partial<GuestDispatcherDeps<FakeTab>> = {}) {
 		rememberPrompt: text => { remembered.push(text); },
 		runChatAction: async (...args) => { chatActions.push(args); },
 		hostedCwd: tabId => [...state.tabs.values()].find(candidate => candidate.tabId === tabId)?.hosted?.cwd ?? null,
+		searchSymbol: async (query, tabId) => { calls.push(`searchSymbol:${tabId}:${query}`); },
 		completeFiles: async (cwd, query) => { calls.push(`completeFiles:${cwd}:${String(query)}`); return state.files; },
 		pickFiles: async defaultFolder => {
 			state.pickCalls.push(defaultFolder);
@@ -870,12 +871,13 @@ const activate = (state: { active: (FakeTab & { tabId: string; panel: never }) |
 };
 
 describe("the symbol search from a chat page", () => {
-	it("seeds the quick open with what the page selected", async () => {
+	it("hands what the page selected to the window's symbol search", async () => {
 		const w = world();
 		const live = w.editor(SLOT, {}, selectionAnswering(w.dispatcher, "  Foo  ", () => ({ slot: SLOT, panel: w.state.tabs.get(SLOT)!.panel as never })));
 		activate(w.state, live);
 		await w.dispatcher.searchSymbolFromChat();
-		assert.deepEqual(stub.commands.calls, [["workbench.action.quickOpen", "#Foo"]]);
+		assert.deepEqual(w.calls, [`searchSymbol:${TAB}:Foo`], "the window looks the name up (a qualified one through the chat links' resolver); the tab names the folder");
+		assert.deepEqual(stub.commands.calls, []);
 	});
 
 	it("opens the symbol search empty when the selection is empty, unanswered or answered by another editor", async () => {

@@ -17,7 +17,7 @@ All commands are in the Command Palette under **OMP Desk**. The ones with defaul
 | `Alt+Q` | Quote the selected Chat text into the draft (see [quoting Chat text](chat.md#quoting-chat-text)) | Chat editor |
 | `Alt+Q` | Quote Selection to Session: the selected editor text goes into a Chat draft as a quote with its file and lines, straight into the Chat that is visible in this window (the one focused last if several), else into the Chat you pick from a list (see [quoting Chat text](chat.md#quoting-chat-text)) | Text editor with a selection |
 | `Ctrl+R` | Search prompt history | Chat editor |
-| `Ctrl+N` | Symbol search (`#`) prefilled with the Chat selection | Chat editor |
+| `Ctrl+N` | Symbol search (`#`) prefilled with the Chat selection; a qualified name (`Type.Member`) opens its definition, or lists them to choose from | Chat editor |
 | `Ctrl+Shift+N` | Go to File prefilled with the Chat selection | Chat editor |
 | `Ctrl+T` / `Ctrl+O` / `Ctrl+Shift+O` | Show/hide all thinking / expand/collapse all tool calls / open or close the tool groups with every call collapsed | Chat editor |
 | `Ctrl+Shift+U` | Cycle thinking level (**Cycle Model** has no default key) | Chat editor |

@@ -265,7 +265,8 @@ import { TerminalPipeline } from "./host/terminal-pipeline";
 import type { TerminalHostMessage } from "./host/terminal-pipeline";
 import { fileLinkMenuTarget, handleTerminalLink, openTerminalFile, openWebLink, revealPathInExplorer, revealPathInOs, webLinkMenuUrl } from "./host/terminal-links";
 import type { FileLinkAction, TerminalLinkRequest, TerminalLinkValidation, WebLinkMode } from "./shared/terminal-links";
-import { MAX_SYMBOL_ENTRIES, SymbolLinkResolver, handleSymbolLinks, isNameCandidate, symbolEntry, symbolRoots } from "./host/symbol-links";
+import { MAX_SYMBOL_ENTRIES, SymbolLinkResolver, handleSymbolLinks, hierarchyNode, isNameCandidate, symbolEntry, symbolRoots } from "./host/symbol-links";
+import { searchSymbol } from "./host/symbol-search";
 import { FileNameLinkResolver, fileChoiceLabel, workspaceFileNameSource } from "./host/file-name-links";
 import type { SymbolLinksRequest, SymbolLinksResolution, SymbolLinksRetry } from "./shared/code-symbols";
 import { handleInternalLink } from "./host/internal-links";
@@ -1131,6 +1132,7 @@ function guestDispatcherDeps(): GuestDispatcherDeps<TabState> {
     }),
     pickFiles: async defaultFolder => {
       const picked = await vscode.window.showOpenDialog({
+    searchSymbol: searchSymbolFromSelection,
         canSelectMany: true,
         canSelectFiles: true,
         canSelectFolders: false,
@@ -10107,6 +10109,17 @@ function symbolLinkResolver(): SymbolLinkResolver {
     onRetry: () => {
       for (const slotId of [...s.symbolAskers]) {
         if (stateOf(slotId) === undefined) s.symbolAskers.delete(slotId);
+    // The type hierarchy of the same provider (the C# language server serves it): a member the qualifier's type inherits is declared in a base class.
+    hierarchy: {
+      async prepare(entry) {
+        const items = await vscode.commands.executeCommand<vscode.TypeHierarchyItem[] | undefined>("vscode.prepareTypeHierarchy", vscode.Uri.file(entry.path), new vscode.Position(entry.line - 1, Math.max(entry.column, 1) - 1));
+        return Array.isArray(items) ? items.map(hierarchyNode) : [];
+      },
+      async supertypes(node) {
+        const items = await vscode.commands.executeCommand<vscode.TypeHierarchyItem[] | undefined>("vscode.provideSupertypes", node.token);
+        return Array.isArray(items) ? items.map(hierarchyNode) : [];
+      },
+    },
         else pushTerminalTo(slotId, { type: "omp:terminal-link-symbols-retry" });
       }
     },
@@ -10135,6 +10148,22 @@ const TERMINAL_PANEL_TYPES: Record<string, true> = {
   "omp:terminal-input": true,
   "omp:terminal-resize": true,
   "omp:terminal-focus": true,
+/** `ompDesk.searchSymbolFromChat` for a non-empty selection: the link resolver's lookup in the folders of the conversation `tabId` shows (see {@link searchSymbol}). */
+async function searchSymbolFromSelection(query: string, tabId: string): Promise<void> {
+  const s = windowState();
+  const cwd = s.sessionRuntime.records.get(tabId)?.runtime?.cwd ?? s.indexForBridge?.get(tabId)?.cwd ?? "";
+  const resolver = symbolLinkResolver();
+  await searchSymbol(query, { cwd, roots: symbolRoots(cwd, (vscode.workspace.workspaceFolders ?? []).map(folder => folder.uri.fsPath)) }, {
+    find: (symbol, scope) => resolver.find(symbol, scope),
+    open: location => openTerminalFile(vscode, location, s.routing.fileWindowColumn()),
+    pick: async choices => {
+      const picked = await vscode.window.showQuickPick(choices.map(choice => ({ label: choice.label, description: choice.description, detail: choice.detail, entry: choice.entry })), { placeHolder: "Choose a definition", matchOnDescription: true, matchOnDetail: true });
+      return picked?.entry;
+    },
+    quickOpen: async value => { await vscode.commands.executeCommand("workbench.action.quickOpen", value); },
+  });
+}
+
   "omp:terminal-visibility": true,
   "omp:terminal-link-validate": true,
   "omp:terminal-link-symbols": true,

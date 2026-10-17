@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { parseGuestWebviewMessage } from "../protocol/messages.ts";
-import { MAX_SYMBOL_QUERY_LENGTH, fileSearchValue, normalizeSymbolQuery, selectedText, symbolSearchValue } from "./selection-query.ts";
+import { MAX_SYMBOL_QUERY_LENGTH, fileSearchValue, normalizeSymbolQuery, selectedText } from "./selection-query.ts";
 
 test("a selection is trimmed to its first non-empty line", () => {
 	assert.equal(normalizeSymbolQuery("  SessionData.Load  "), "SessionData.Load");
@@ -13,15 +13,6 @@ test("a long selection is cut to the cap and an overlong single line never grows
 	const cut = normalizeSymbolQuery("x".repeat(500));
 	assert.equal(cut.length, MAX_SYMBOL_QUERY_LENGTH);
 	assert.equal(normalizeSymbolQuery(`${"x".repeat(MAX_SYMBOL_QUERY_LENGTH - 1)} tail`).length, MAX_SYMBOL_QUERY_LENGTH - 1);
-});
-
-test("the quick open argument is '#' plus the selection; an empty selection means the plain symbol search", () => {
-	assert.equal(symbolSearchValue("Session"), "#Session");
-	assert.equal(symbolSearchValue("  Load()\nmore"), "#Load()");
-	assert.equal(symbolSearchValue(""), null);
-	assert.equal(symbolSearchValue("   \n  "), null);
-	assert.equal(symbolSearchValue(null), null);
-	assert.equal(symbolSearchValue(undefined), null);
 });
 
 test("the Go to File argument is the selection itself; an empty selection means the plain Go to File", () => {

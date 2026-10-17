@@ -2,7 +2,8 @@
  * The text a Chat page offers VS Code's symbol search (Ctrl+N) and Go to File (Ctrl+Shift+N), and how the host turns it into a query.
  *
  * VS Code seeds those pickers from the editor selection, but a webview's selection is invisible to it, so the page
- * reports its own selection to the host and the host opens `workbench.action.quickOpen` with the text (after `#` for symbols).
+ * reports its own selection to the host. Go to File opens `workbench.action.quickOpen` with the text; the symbol search
+ * looks a qualified name up itself (see `host/symbol-search.ts`).
  */
 
 /** Longest query offered; a longer selection is cut, never refused. */
@@ -15,12 +16,6 @@ export function normalizeSymbolQuery(raw: string): string {
 		if (text.length > 0) return text.length > MAX_SYMBOL_QUERY_LENGTH ? text.slice(0, MAX_SYMBOL_QUERY_LENGTH).trimEnd() : text;
 	}
 	return "";
-}
-
-/** The `workbench.action.quickOpen` argument for a selection (`#Name`), or `null` to open the empty symbol search. */
-export function symbolSearchValue(selection: string | null | undefined): string | null {
-	const query = normalizeSymbolQuery(selection ?? "");
-	return query.length === 0 ? null : `#${query}`;
 }
 
 /** The `workbench.action.quickOpen` argument for a selection (the text itself, as Go to File takes it), or `null` to open the empty Go to File. */

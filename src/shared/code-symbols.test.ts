@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fileReference, parseBareFileName, parseCodeSymbol, parseSymbolLinksRequest, parseSymbolLinksResolution, parseSymbolLinksRetry } from "./code-symbols.ts";
+import { fileReference, isNamespaceSegment, parseBareFileName, parseCodeSymbol, parseSymbolLinksRequest, parseSymbolLinksResolution, parseSymbolLinksRetry } from "./code-symbols.ts";
 
 const shape = (content: string) => {
 	const symbol = parseCodeSymbol(content);
@@ -47,10 +47,21 @@ test("spans with spaces, operators, literals, keywords, short names, paths and u
 		"123", "1.5", "0xFF", "\"Foo\"", "'Foo'", "Foo\"", "src/Foo.ts", "..\\Foo", "C:\\Foo", "http://x.test", "Foo/Bar",
 		"null", "true", "undefined", "class", "this", "this.Foo", "base.Run()", "string", "void", "Foo.class", "int.Parse",
 		"Foo<", "Foo<T", "Foo>", "Foo<a+b>", "Foo(", "Foo)", "Foo(x", "(Foo)", "[Foo", "Foo]", "[]", "[Foo]]", "Foo<T>>",
-		"Ünïcode", "Foo.Ünï", "A.B.C.D.E.Fff", "Foo..Bar", ".Foo", "Foo.", "Foo`bar", "Foo\nBar", "Foo\u0000",
+		"Ünïcode", "Foo.Ünï", "A.B.C.D.E.F.G.H.Fff", "Foo..Bar", ".Foo", "Foo.", "Foo`bar", "Foo\nBar", "Foo\u0000",
+		"cfg.server.http.port.value", "OmpDesk.core.Catalog.Scope.Set", "OmpDesk.Core.bus.Scope.Set",
 		"x".repeat(121),
 	];
 	for (const content of refused) assert.equal(parseCodeSymbol(content), null, JSON.stringify(content));
+});
+
+test("a name qualified by namespaces is a symbol up to eight segments when everything before the type and the member reads as a namespace", () => {
+	assert.deepEqual(shape("OmpDesk.Core.Catalog.Scope.Set"), { name: "OmpDesk.Core.Catalog.Scope.Set", last: "Set", attribute: false, call: false });
+	assert.deepEqual(shape("OmpDesk.Core.Catalog.Scope.Set()"), { name: "OmpDesk.Core.Catalog.Scope.Set", last: "Set", attribute: false, call: true });
+	assert.ok(parseCodeSymbol("A.B.C.D.E.F.Type.Member"), "eight segments");
+	assert.equal(parseCodeSymbol("A.B.C.D.E.F.G.Type.Member"), null, "nine segments");
+	assert.equal(parseCodeSymbol("cfg.server.http.port.value"), null, "a lowercase member chain is not a namespace");
+	assert.equal(isNamespaceSegment("OmpDesk"), true);
+	assert.equal(isNamespaceSegment("core"), false);
 });
 
 test("keywords are case-sensitive: a type named like a keyword in another case is still a symbol", () => {
