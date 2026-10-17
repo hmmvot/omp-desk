@@ -551,6 +551,38 @@ describe("syncEditors", () => {
 		assert.ok(w.state.live.has(EDITOR), "it is still observed");
 	});
 
+	it("reserves each restored editor for the conversation its committed binding names, not the one its viewType names", async () => {
+		// EDITOR was first opened for TAB and later switched to OTHER_TAB; OTHER_EDITOR was opened
+		// for TAB and still serves it. Both view types name TAB, so reserving by the viewType makes
+		// the second one lose its own conversation.
+		const w = world();
+		w.state.rows.set(TAB, { tabId: TAB });
+		w.state.rows.set(OTHER_TAB, { tabId: OTHER_TAB });
+		const committed: Record<string, string> = { [EDITOR]: OTHER_TAB, [OTHER_EDITOR]: TAB };
+		const index = {
+			get: (tabId: string) => w.state.rows.get(tabId) ?? null,
+			slotBinding: (slot: string) => (slot in committed ? { tabId: committed[slot], role: "controlling" } : null),
+		} as unknown as SessionIndex;
+		membership([TAB, EDITOR], [TAB, OTHER_EDITOR]);
+		await w.host.syncEditors(context0(), index);
+		assert.equal(w.state.editors.winner(OTHER_TAB)?.editorId, EDITOR, "the switched editor holds the conversation it serves now");
+		assert.equal(w.state.editors.winner(TAB)?.editorId, OTHER_EDITOR, "the editor of the original conversation is not shut out by it");
+		assert.equal(w.host.editorConversation(index, { tabId: TAB, editorId: EDITOR }), OTHER_TAB);
+	});
+
+	it("falls back to the viewType's tab for an editor with no binding row, or whose bound row is gone", () => {
+		const w = world();
+		w.state.rows.set(TAB, { tabId: TAB });
+		const index = {
+			get: (tabId: string) => w.state.rows.get(tabId) ?? null,
+			slotBinding: (slot: string) => (slot === OTHER_EDITOR ? { tabId: OTHER_TAB, role: "controlling" } : null),
+		} as unknown as SessionIndex;
+		assert.equal(w.host.editorConversation(index, { tabId: TAB, editorId: EDITOR }), TAB, "no binding row");
+		assert.equal(w.host.editorConversation(index, { tabId: TAB, editorId: OTHER_EDITOR }), TAB, "the bound row is not in the index");
+		w.state.editors.reserve({ tabId: OTHER_TAB, editorId: EDITOR, provenance: "saved", sequence: 1 });
+		assert.equal(w.host.editorConversation(index, { tabId: TAB, editorId: EDITOR }), OTHER_TAB, "a reservation outranks both");
+	});
+
 	it("skips an editor whose row the index no longer has", async () => {
 		const w = world();
 		membership([TAB, EDITOR]);

@@ -108,7 +108,7 @@ export class CancellationTokenSource {
 export const ViewColumn = { Active: -1 };
 export const TreeItemCollapsibleState = { None: 0, Collapsed: 1, Expanded: 2 };
 export const Uri = { from: URI.from, parse: URI.parse, file: fsPath => ({ fsPath, toString: () => fsPath }), joinPath: (root, ...parts) => Uri.file([root.fsPath, ...parts].join('/')) };
-export const window = { state: { focused: true }, errors: [], tabGroups: { all: [], activeTabGroup: { activeTab: null, viewColumn: 1 } },
+export const window = { state: { focused: true }, errors: [], tabGroups: { all: [], activeTabGroup: { activeTab: null, viewColumn: 1 }, changes: new EventEmitter(), onDidChangeTabs(listener) { return this.changes.event(listener); }, onDidChangeTabGroups(listener) { return this.changes.event(listener); } },
   openedDocuments: [],
   closedTerminals: new EventEmitter(),
   onDidCloseTerminal(listener) { return window.closedTerminals.event(listener); },
@@ -311,6 +311,7 @@ export const harness = {
     return groups;
   },
   commandHandler(handler) { fixtureVscode.commands.calls.length = 0; fixtureVscode.commands.handler = handler; return fixtureVscode.commands.calls; },
+  tabsChanged() { fixtureVscode.window.tabGroups.changes.fire(); },
   bindRevived(slot, panel) { const w = fixtureWindow(); w.tabs.get(slot).panel = panel; for (const resolve of w.panelBindWaiters.get(slot) ?? []) resolve(); },
   markPageRunning(slot) { fixtureWindow().bridgeLiveEditors.add(slot); },
   controlClient: HostControlClient,
@@ -526,6 +527,7 @@ interface Harness {
   viewTypeOf(tabId: string, editorId: string): string;
   tabStrip(columns: readonly (readonly string[])[], activeColumn?: number): { viewColumn: number; tabs: { isActive: boolean; group: unknown }[] }[];
   commandHandler(handler: ((command: string, ...args: unknown[]) => void) | null): unknown[][];
+  tabsChanged(): void;
   bindRevived(slot: string, panel: unknown): void;
   markPageRunning(slot: string): void;
   attachChatRoute(slot: string): void;
@@ -5116,6 +5118,32 @@ describe("editors VS Code restored but has not shown yet", () => {
     assert.deepEqual(calls, [["workbench.action.focusSecondEditorGroup"], ["workbench.action.openEditorAtIndex", 1]]);
     assert.equal(shown.selected, true);
     assert.equal(shown.panel, panel, "the panel the serializer was handed is the one returned");
+    harness.commandHandler(null);
+    harness.tabStrip([]);
+  });
+
+  it("waits for the tab VS Code activates after openEditorAtIndex has already resolved, and does not report it as unreachable", async () => {
+    const slot = "9".repeat(32);
+    const TAB_B = tabFor(6);
+    const index = indexFixture(runtime(906));
+    harness.reset(index, null);
+    harness.editor(index, {}, null, slot, TAB_B);
+    index.slotBinding().tabId = TAB_B;
+    const groups = harness.tabStrip([[harness.viewTypeOf(TAB_B, slot)]], 0);
+    const panel = revived();
+    // VS Code's handler does not await the open: the command resolves, the tab becomes active a moment later.
+    const calls = harness.commandHandler((command, argument) => {
+      if (command !== "workbench.action.openEditorAtIndex") return;
+      void nextTurn().then(() => {
+        groups[0]!.tabs[argument as number]!.isActive = true;
+        harness.tabsChanged();
+        harness.bindRevived(slot, panel);
+      });
+    });
+    const shown = await harness.reviveEditorPanel(index, TAB_B);
+    assert.deepEqual(calls, [["workbench.action.openEditorAtIndex", 0]], "the command is not repeated while the open is in flight");
+    assert.equal(shown.selected, true);
+    assert.equal(shown.panel, panel);
     harness.commandHandler(null);
     harness.tabStrip([]);
   });

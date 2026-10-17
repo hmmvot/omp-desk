@@ -153,6 +153,8 @@ export interface BridgeHost<Tab extends BridgeTab = BridgeTab> {
 	readonly hostGeneration: Uint8Array;
 	/** The editors this window's actual VS Code membership contains, from the tab inputs' view types. */
 	editorMembership(): { readonly tabId: string; readonly editorId: string }[];
+	/** The conversation one VS Code editor serves now: its reservation, else its committed slot binding, else its viewType's tab. */
+	editorConversation(index: Pick<SessionIndex, "get" | "slotBinding">, entry: { readonly tabId: string; readonly editorId: string }): string;
 	/** The endpoint of one editor, or `null` when this window does not serve it. */
 	endpointOf(editorId: string): BridgeEditorEndpoint | null;
 	/** Whether one document of one editor may still act, re-derived from live window state. */
@@ -426,6 +428,22 @@ export function registerBridgeHost<Tab extends BridgeTab>(deps: BridgeHostDeps<T
 	}
 
 	/**
+	 * The conversation one VS Code editor serves now: its reservation; else the conversation
+	 * its committed slot binding names; else the tab its viewType names. The binding rule is
+	 * the serializer's (`editor-panels.ts`), so the activation pass and a revival reserve an
+	 * editor for one and the same conversation.
+	 */
+	function editorConversation(
+		index: Pick<SessionIndex, "get" | "slotBinding">,
+		entry: { readonly tabId: string; readonly editorId: string },
+	): string {
+		const reserved = deps.editors().tabOfEditor(entry.editorId);
+		if (reserved !== null) return reserved;
+		const committed = index.slotBinding(entry.editorId);
+		return committed === null || index.get(committed.tabId) === null ? entry.tabId : committed.tabId;
+	}
+
+	/**
 	 * Reconcile this window's editors with VS Code's own membership.
 	 *
 	 * Called at activation — before any asynchronous native work — and again whenever the
@@ -458,15 +476,17 @@ export function registerBridgeHost<Tab extends BridgeTab>(deps: BridgeHostDeps<T
 			// The viewType names the editor's *original* (T, E) namespace, which never
 			// changes. Which conversation the editor serves now is the editor
 			// coordinator's reservation for it: after a settled switch that is the new conversation, and
-			// the original T no longer selects anything.
-			const served = deps.editors().tabOfEditor(entry.editorId);
+			// the original T no longer selects anything. An editor that holds no reservation
+			// yet (the activation pass) is reserved for the conversation its committed slot
+			// binding names, exactly as the serializer reserves it; the viewType's tab is
+			// only the answer for an editor with no binding row.
 			// Only the elected editor may own this conversation's endpoint; a duplicate
 			// actual Webview input is still observed, but never gets a native route or secret.
-			if (served === null) {
-				const elected = deps.reserveSlot(index, entry.tabId, entry.editorId, "saved");
+			if (deps.editors().tabOfEditor(entry.editorId) === null) {
+				const elected = deps.reserveSlot(index, editorConversation(index, entry), entry.editorId, "saved");
 				if (elected.outcome === "lost") continue;
 			}
-			const conversation = deps.editors().tabOfEditor(entry.editorId) ?? entry.tabId;
+			const conversation = editorConversation(index, entry);
 			if (index.get(conversation) === null) continue;
 			const state = deps.tabs().get(entry.editorId);
 			if (state !== undefined && state.bridge?.editorId === entry.editorId && state.bridge.documentId !== null) continue;
@@ -849,6 +869,7 @@ export function registerBridgeHost<Tab extends BridgeTab>(deps: BridgeHostDeps<T
 	return {
 		hostGeneration,
 		editorMembership,
+		editorConversation,
 		endpointOf: bridgeEndpointOf,
 		documentEligible: bridgeDocumentEligible,
 		registerSerializer: registerBridgeSerializer,

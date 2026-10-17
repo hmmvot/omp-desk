@@ -250,7 +250,9 @@ export function registerEditorPanels<Tab extends EditorPanelsTab>(deps: EditorPa
 			// reservation exists to prevent.
 			if (deps.editorTabOf(reservation.reservation.editorId) !== null) {
 				void deps.reviveEditorPanel(index, tabId).then(({ selected }) => {
-					if (!selected) deps.warn("That OMP session is open in a tab VS Code could not bring to the front. Select its tab in the editor.");
+					if (selected) return;
+					deps.log.info(`tab ${tabId}: its restored editor ${reservation.reservation.editorId.slice(0, 8)} could not be brought to the front; the user was told to select its tab`);
+					deps.warn("That OMP session is open in a tab VS Code could not bring to the front. Select its tab in the editor.");
 				});
 				return;
 			}
@@ -374,7 +376,10 @@ export function registerEditorPanels<Tab extends EditorPanelsTab>(deps: EditorPa
 			const groups = vscode.window.tabGroups;
 			const column = chatGroupColumn(groups.all, groups.activeTabGroup.viewColumn, isSessionTabInput);
 			const input = groups.all.find(group => group.viewColumn === column)?.activeTab?.input;
-			tabId = (input instanceof vscode.TabInputWebview ? tabInputIdentity(input.viewType)?.tabId : null) ?? index.activeTabId;
+			// The viewType's tab is the editor's original namespace; the conversation it serves
+			// now is its reservation, else its committed binding.
+			const identity = input instanceof vscode.TabInputWebview ? tabInputIdentity(input.viewType) : null;
+			tabId = (identity === null ? null : deps.editors().tabOfEditor(identity.editorIdHex) ?? index.slotBinding(identity.editorIdHex)?.tabId ?? identity.tabId) ?? index.activeTabId;
 		}
 		// A tab VS Code restored but never showed has no panel yet; selecting it makes VS Code hand one over.
 		const panel = tabId === null ? null : (await deps.reviveEditorPanel(index, tabId)).panel;

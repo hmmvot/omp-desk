@@ -245,6 +245,8 @@ import { isSafeBoundaryText, parseGuestWebviewMessage, type GuestChatCommand, ty
 import { DETAIL_VIEW_TYPE, DetailTabs } from "./host/detail-tabs";
 import { MERMAID_PREVIEW_VIEW_TYPE, MermaidPreviews } from "./host/mermaid-previews";
 import { EDITOR_GROUP_FOCUS_COMMANDS } from "./host/chat-layout";
+import { selectEditorTab as selectEditorTabThrough } from "./host/editor-tab-selection";
+import type { TabSelectionApi } from "./host/editor-tab-selection";
 // The folder shell's terminal (ADR-0024): the extension-owned PTY broker is the writer, the
 // panel is only a frontend, and this module owns the glue between them.
 import { PtyBrokerClient } from "./host/pty-client";
@@ -3197,23 +3199,34 @@ function editorTabOf(slot: string): vscode.Tab | null {
   return null;
 }
 
+/** What {@link selectEditorTab} reads from VS Code and where it reports a refusal. */
+const tabSelectionApi: TabSelectionApi = {
+  tabOf: editorTabOf,
+  activeColumn: () => vscode.window.tabGroups.activeTabGroup.viewColumn,
+  executeCommand: (command, ...args) => vscode.commands.executeCommand(command, ...args),
+  nextTabChange: ms =>
+    new Promise<void>(resolve => {
+      const listeners: vscode.Disposable[] = [];
+      const done = (): void => {
+        clearTimeout(timer);
+        for (const listener of listeners) listener.dispose();
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
+      listeners.push(vscode.window.tabGroups.onDidChangeTabs(done), vscode.window.tabGroups.onDidChangeTabGroups(done));
+    }),
+  now: () => Date.now(),
+  info: message => log.info(message),
+};
+
 /**
  * Make VS Code show this slot's tab. `WebviewPanel.reveal` needs the panel handle this window
- * may not have yet, so the tab itself is selected through its group and position.
+ * may not have yet, so the tab itself is selected through its group and position; `openEditorAtIndex`
+ * does not wait for the open, so the answer is VS Code's own report that the tab became active
+ * (`src/host/editor-tab-selection.ts`).
  */
-async function selectEditorTab(slot: string): Promise<boolean> {
-  const tab = editorTabOf(slot);
-  if (tab === null) return false;
-  const column = tab.group.viewColumn;
-  if (!(tab.isActive && column === vscode.window.tabGroups.activeTabGroup.viewColumn)) {
-    if (column !== vscode.window.tabGroups.activeTabGroup.viewColumn) {
-      const focusGroup = EDITOR_GROUP_FOCUS_COMMANDS[column - 1];
-      if (focusGroup === undefined) return false;
-      await vscode.commands.executeCommand(focusGroup);
-    }
-    await vscode.commands.executeCommand("workbench.action.openEditorAtIndex", tab.group.tabs.indexOf(tab));
-  }
-  return editorTabOf(slot)?.isActive === true;
+function selectEditorTab(slot: string): Promise<boolean> {
+  return selectEditorTabThrough(tabSelectionApi, slot, EDITOR_GROUP_FOCUS_COMMANDS);
 }
 
 /**
@@ -3235,7 +3248,10 @@ async function reviveEditorPanel(
 ): Promise<{ readonly selected: boolean; readonly panel: vscode.WebviewPanel | null }> {
   const s = windowState();
   const state = stateOf(tabId);
-  if (state === undefined) return { selected: false, panel: null };
+  if (state === undefined) {
+    log.info(`tab ${tabId}: no editor was selected, this window holds no record for it`);
+    return { selected: false, panel: null };
+  }
   if (state.panel !== null) return { selected: true, panel: state.panel };
   const slot = state.slotId;
   const pageIsRunning = s.bridgeLiveEditors.has(slot) && state.bridge?.documentId != null;
@@ -3247,7 +3263,8 @@ async function reviveEditorPanel(
     timer = setTimeout(resolve, EDITOR_REVIVE_TIMEOUT_MS);
   });
   try {
-    if (!(await selectEditorTab(slot))) return { selected: false, panel: null };
+    // A panel this window was handed while the tab was being selected proves the tab was shown, whatever its tab reported.
+    if (!(await selectEditorTab(slot)) && (s.tabs.get(slot)?.panel ?? null) === null) return { selected: false, panel: null };
     if (!pageIsRunning) await bound;
   } finally {
     clearTimeout(timer);
@@ -4579,7 +4596,10 @@ function hasLocalEditorFor(tabId: string): boolean {
   ) {
     return true;
   }
-  return windowState().bridgeHost.editorMembership().some(entry => (s.bridgeEditors.tabOfEditor(entry.editorId) ?? entry.tabId) === tabId);
+  const index = s.indexForBridge;
+  return s.bridgeHost
+    .editorMembership()
+    .some(entry => (index === null ? s.bridgeEditors.tabOfEditor(entry.editorId) ?? entry.tabId : s.bridgeHost.editorConversation(index, entry)) === tabId);
 }
 
 // The profile catalog

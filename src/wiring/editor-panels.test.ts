@@ -871,4 +871,21 @@ describe("focusChatComposer", () => {
 		assert.equal(revived, TAB);
 		assert.deepEqual(panel.posted, [{ type: "omp:webview-action", action: "focus-composer" }]);
 	});
+
+	it("revives the conversation the chat group's active editor serves now, not the tab its view type names", async () => {
+		const index = indexFixture();
+		const SERVED = TAB.replace("1111", "3333");
+		index.bindings.set(EDITOR, { tabId: SERVED, role: "controlling" });
+		const chat = { viewColumn: 1, tabs: [] as never[], activeTab: undefined as unknown };
+		chat.activeTab = { label: "chat", input: new stub.TabInputWebview(bridgeViewType(TAB, EDITOR)), group: chat };
+		chat.tabs.push(chat.activeTab as never);
+		stub.window.tabGroups.all = [chat] as never;
+		stub.window.tabGroups.activeTabGroup = chat as never;
+		let revived: string | null = null;
+		const revivingWorld = world({
+			reviveEditorPanel: async (_index, tabId) => { revived = tabId; return { selected: true, panel: null }; },
+		});
+		await revivingWorld.panels.focusChatComposer(index);
+		assert.equal(revived, SERVED);
+	});
 });
