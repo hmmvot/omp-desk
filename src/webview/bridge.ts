@@ -245,6 +245,8 @@ function bridgeOperation(message: GuestWebviewMessage): string | null {
 			return "chat-restart";
 		case "omp:chat-queue-remove":
 			return "chat-queue-remove";
+		case "omp:chat-btw-request":
+			return "chat-btw-request";
 		case "omp:terminal-attach":
 			return "terminal-attach";
 		case "omp:terminal-probe":

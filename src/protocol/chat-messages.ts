@@ -30,9 +30,10 @@
  * | `omp:chat-send-result` | correlated text admission, refusal, uncertain delivery, or a terminal-UI command the host answered itself; not a turn result |
  * | `omp:chat-abort-result` | what a Stop the page requested withdrew from OMP's queues, for its composer |
  * | `omp:chat-navigate-result` | the outcome of an in-place Rewind/Undo/branch switch, and a rewound prompt for the composer |
+ * | `omp:chat-btw`, `omp:chat-btw-delta`, `omp:chat-btw-result` | `/btw` side questions: records, streamed text and the answer to a panel request (`btw-messages.ts`); never part of the transcript |
  *
  * Page → host: `omp:chat-prompt`, `-steer`, `-follow-up`, `-abort`, `-ui-response`,
- * `-load-older`, `-resume`, `-reconnect`, `-restart`, `-subagent-read`, `-queue-remove`, `-navigate`.
+ * `-load-older`, `-resume`, `-reconnect`, `-restart`, `-subagent-read`, `-queue-remove`, `-navigate`, `-btw-request`.
  * Every mutation carries a page-minted `requestId`, which the host uses as the
  * exactly-once key (the rpc command id is `vsc:<requestId>`).
  */
@@ -77,6 +78,7 @@ import { isCanonicalBase64Text } from "../shared/bytes-base64.ts";
 import { isPendingEnd, isPendingKind, isPendingStep, type PendingEnd, type PendingKind, type PendingStep } from "../shared/pending-operation.ts";
 import { parseCodeThemes, type CodeTheme } from "../chat/code-theme.ts";
 import { isEmptyStateKeyCommand, MAX_KEY_CONFLICTS, MAX_KEY_HINTS, MAX_KEY_LENGTH, MAX_KEY_SOURCE_LENGTH, type ChatKeyConflict, type ChatKeyHint } from "../shared/key-hints.ts";
+import { parseBtwHostMessage, parseBtwRequest, type ChatBtwHostMessage, type ChatBtwRequestMessage } from "./btw-messages.ts";
 
 // Bounds
 
@@ -362,6 +364,7 @@ export type ChatHostMessage =
 	| ChatSendResultMessage
 	| ChatAbortResultMessage
 	| ChatNavigateResultMessage
+	| ChatBtwHostMessage
 	| ChatUiCancelMessage;
 
 /** One image of a prompt, as OMP's `prompt`/`steer`/`follow_up` accept it. */
@@ -457,7 +460,8 @@ export type ChatWebviewMessage =
 	| ChatReconnectMessage
 	| ChatRestartMessage
 	| ChatNavigateMessage
-	| ChatQueueRemoveMessage;
+	| ChatQueueRemoveMessage
+	| ChatBtwRequestMessage;
 
 // Small guards
 
@@ -1223,6 +1227,12 @@ export function parseChatHostMessage(value: unknown): ChatHostMessage | null {
 			if (epoch === null || !isName(value.targetId, MAX_ID_LENGTH)) return null;
 			return { type: "omp:chat-ui-cancel", epoch, targetId: value.targetId };
 		}
+		case "omp:chat-btw":
+		case "omp:chat-btw-delta":
+		case "omp:chat-btw-result": {
+			const epoch = parseChatEpoch(value.epoch);
+			return epoch === null ? null : parseBtwHostMessage(value, epoch);
+		}
 		default:
 			return null;
 	}
@@ -1359,6 +1369,10 @@ export function parseChatWebviewMessage(value: unknown): ChatWebviewMessage | nu
 			if (epoch === null || !isQueuePurpose(value.purpose)) return null;
 			const items = parseQueuedRefs(value.items);
 			return items === null ? null : { type: "omp:chat-queue-remove", requestId, epoch, purpose: value.purpose, items };
+		}
+		case "omp:chat-btw-request": {
+			const epoch = parseChatEpoch(value.epoch);
+			return epoch === null ? null : parseBtwRequest(value, requestId, epoch);
 		}
 		default:
 			return null;

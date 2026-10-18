@@ -113,6 +113,8 @@ test("availability: a GUI command follows its own requirements, an OMP command i
 	assert.match(commandAvailability(rowOf("clear"), running)!, /abort it before resetting/);
 	assert.match(commandAvailability(rowOf("fresh"), running)!, /\/fresh/);
 	assert.match(commandAvailability(rowOf("fork"), running)!, /before forking/);
+	assert.equal(commandAvailability(rowOf("btw"), running), null, "a side question is meant to be asked while a turn runs");
+	assert.deepEqual(pickPlan(rowOf("btw")), { kind: "insert", name: "btw" }, "picking /btw puts it in the draft for the question to be typed; a bare /btw opens the history");
 	assert.equal(commandAvailability(rowOf("compact"), running), null, "compact interrupts a running turn");
 	assert.equal(commandAvailability(rowOf("compact"), { ...OPEN, maintenanceRunning: true }), "Context maintenance is already running.");
 	assert.equal(commandAvailability(rowOf("export"), stopped), "This session is not running.");

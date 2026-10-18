@@ -89,6 +89,7 @@ import {
 import { rendersTranscriptEntry } from "../../chat/transcript.ts";
 import { transcriptWindow } from "../../chat/transcript-window.ts";
 import { blobsDirectoryFor, resolveBlobImages } from "./history-blobs.ts";
+import { BtwChannel, type BtwChannelDeps, type BtwOutput, type BtwReply } from "./btw.ts";
 import { parseAgentRoster } from "../../chat/agents.ts";
 import { childPageFromNative, type SubagentTranscriptPage } from "../../chat/subagent-transcript.ts";
 import { MAX_ATTACH_ITEMS } from "../../shared/attach-limits.ts";
@@ -221,7 +222,9 @@ export type RpcSessionOutput =
 	/** The session healed itself (or was asked to): a bounded reason for the diagnostics log, never child text. */
 	| { type: "recovery"; reason: RpcRecoveryReason }
 	/** An OMP extension's error `notify`; the host shows it as an error message rather than in the transcript. */
-	| { type: "extension-error"; message: string };
+	| { type: "extension-error"; message: string }
+	/** A side-question change (`/btw`): records or streamed text, for every page of the conversation. */
+	| { type: "btw"; epoch: ChatEpoch; output: BtwOutput };
 
 export type RpcRecoveryReason = "probe-timeout" | "stale-working" | "frame-failure" | "manual-reconnect" | "auto-retry";
 
@@ -636,6 +639,7 @@ export class RpcSession {
 	readonly #options: RpcSessionOptions;
 	readonly #listeners = new Set<(output: RpcSessionOutput) => void>();
 	readonly #frames = new RpcFrameReader();
+	readonly #btw: BtwChannel;
 	readonly #pendingCommands = new Map<string, PendingCommand>();
 	readonly #subagentReferences = new Set<string>();
 	/** Session-bound, sequence-checked acceptance of the Desk liveness signal (ADR-0053). */
@@ -772,6 +776,10 @@ export class RpcSession {
 		this.#boundFile = options.sessionFile;
 		this.#fileMaterialized = options.sessionFile !== null;
 		this.#model = { ...createChatModel(), epoch: { nonce: options.hostNonce, counter: 0 } };
+		this.#btw = new BtwChannel({
+			send: command => this.#sendBtw(command),
+			emit: output => { if (this.#live) this.#emit({ type: "btw", epoch: this.epoch, output }); },
+		});
 		const provider = options.hostTools;
 		if (provider === undefined) {
 			this.#hostCalls = null;
@@ -817,6 +825,11 @@ export class RpcSession {
 
 	get epoch(): ChatEpoch {
 		return { nonce: this.#options.hostNonce, counter: this.#epochCounter };
+	}
+
+	/** The side questions of this session (`/btw`), outside the conversation model. */
+	get btw(): BtwChannel {
+		return this.#btw;
 	}
 
 	/** The exact file the process serves: the binding, or the path learned for a new conversation. */
@@ -2100,6 +2113,9 @@ export class RpcSession {
 		this.#syncStateReadback();
 		this.#lastActivityAt = this.#timers.now();
 		this.#armWatchdog();
+		// The first baseline reads OMP's side-question history once (the session is new after an extension-host restart, OMP's history is not);
+		// a later resync reads it again only to repair a question that was answering. A failure leaves the channel unread.
+		if (!this.#btw.loaded || this.#btw.running) void this.#btw.history();
 	}
 
 	#identityMismatch(state: ParsedState, bind: boolean): RpcErrorCode | null {
@@ -2318,6 +2334,8 @@ export class RpcSession {
 	}
 
 	#onFrame(frame: Record<string, unknown>): void {
+		// `/btw` frames are a side channel: never a transcript row, a turn or a queue entry.
+		if (this.#btw.onFrame(frame)) return;
 		const phase = this.#resetPhase;
 		if (phase !== null) {
 			if (frame.type === "prompt_result" && frame.id === phase.id) {
@@ -3168,6 +3186,18 @@ export class RpcSession {
 			return { status: "refused", reason: "rejected", ...(typeof response.code === "string" ? { code: response.code } : {}) };
 		} catch (error) {
 			return this.#failureOutcome(error, null);
+		}
+	}
+
+	/** One `/btw` command for the side-question channel: the response itself (its error wording picks the refusal), or why there is none. */
+	async #sendBtw(command: Parameters<BtwChannelDeps["send"]>[0]): Promise<BtwReply> {
+		try {
+			const response = await this.#send(`${INTERNAL_ID_PREFIX}${++this.#internalSeq}`, command);
+			return { status: "response", success: response.success, ...(response.data === undefined ? {} : { data: response.data }), ...(response.error === undefined ? {} : { error: response.error }) };
+		} catch (error) {
+			if (!(error instanceof CommandFailure)) return { status: "failed" };
+			if (error.reason === "unconfirmed" || error.reason === "timeout") return { status: "unconfirmed" };
+			return error.reason === "closed" || error.writeCode === "input-not-owner" ? { status: "not-live" } : { status: "failed" };
 		}
 	}
 

@@ -35,6 +35,7 @@ import { chatTurnInProgress, createChatModel, sameEpoch, setChatPhase, snapshotO
 import { MAX_ATTACH_ITEMS } from "../shared/attach-limits.ts";
 import { MAX_CHAT_TEXT_LENGTH, splitChatSnapshot } from "../protocol/chat-messages.ts";
 import type { ChatHostMessage, ChatWebviewMessage, ChatSubagentRequestMessage, ChatDisplayPreferences, ChatQueueRemoveMessage, ChatQueueResultEntry, ChatAbortResultMessage, ChatNavigateResultMessage, ChatOperationMessage } from "../protocol/chat-messages.ts";
+import type { ChatBtwHostMessage, ChatBtwMessage, ChatBtwRequestMessage } from "../protocol/btw-messages.ts";
 import type { PendingOperation, PendingOperations, PendingChange } from "./pending-operations.ts";
 import type { PendingKind } from "../shared/pending-operation.ts";
 import { SUBAGENT_CHUNK_CHARS, type SubagentTranscriptPage } from "../chat/subagent-transcript.ts";
@@ -51,6 +52,7 @@ import { CLEAR_DEFERRED_SENTENCES, CLEAR_DONE_SENTENCE, CLEAR_REFUSAL_SENTENCES,
 import { FORK_ARGUMENTS_SENTENCE, FORK_FAILED_SENTENCE, FORK_REFUSAL_SENTENCES, type ForkSource } from "../chat/fork.ts";
 import { awaitForkDisk } from "./fork-source.ts";
 import { DESK_COMMAND_ARGUMENTS_SENTENCE, DESK_COMMAND_UNAVAILABLE_SENTENCE, NEW_BUSY_SENTENCE, deskSessionCommand, type DeskSessionCommand } from "../chat/desk-commands.ts";
+import { BTW_REFUSALS, MAX_BTW_QUESTION_CHARS, btwCommand, type BtwRefusal } from "../chat/btw.ts";
 import { tuiCommandGuidance, tuiOnlyCommand, type BuiltinSlashEntry, type DeskSlashAction } from "./slash-registry.ts";
 import { turnActivity } from "../protocol/activity.ts";
 import type { TurnActivityReport } from "../protocol/activity.ts";
@@ -520,6 +522,7 @@ export class ChatRuntime {
 				this.#options.onEvent(tabId, { type: "resume-requested", requestId: message.requestId });
 				return "accepted";
 			}
+			if (message.type === "omp:chat-btw-request") this.#answerBtw(origin, message, { status: "refused", reason: "not-live" });
 			return "ignored";
 		}
 		if (message.type === "omp:chat-prompt" || message.type === "omp:chat-steer" || message.type === "omp:chat-follow-up") {
@@ -546,6 +549,7 @@ export class ChatRuntime {
 		const readOnly = origin?.readOnlyReason?.() ?? null;
 		if (readOnly !== null && message.type !== "omp:chat-load-older" && message.type !== "omp:chat-subagent-read" && !resuming) {
 			if (message.type === "omp:chat-queue-remove") this.#failQueueRemove(message, origin);
+			if (message.type === "omp:chat-btw-request") this.#answerBtw(origin, message, { status: "refused", reason: "not-live" });
 			if (message.type === "omp:chat-navigate") this.#answerNavigate(origin, message.requestId, { status: "refused", reason: "not-live" });
 			this.#tell(conversation, origin, readOnly);
 			return "refused";
@@ -582,11 +586,14 @@ export class ChatRuntime {
 		}
 		if (session === null) {
 			if (message.type === "omp:chat-queue-remove") this.#failQueueRemove(message, origin);
+			if (message.type === "omp:chat-btw-request") this.#answerBtw(origin, message, { status: "refused", reason: "not-live" });
 			if (message.type === "omp:chat-navigate") this.#answerNavigate(origin, message.requestId, { status: "refused", reason: "not-live" });
 			this.#tell(conversation, origin, CHAT_NOT_LIVE_SENTENCE);
 			return "refused";
 		}
 		if (message.type === "omp:chat-prompt" || message.type === "omp:chat-steer" || message.type === "omp:chat-follow-up") {
+			const btw = btwCommand(message.text);
+			if (btw !== null) return this.#serveBtwCommand(conversation, session, origin, `${tabId}:${message.requestId}`, btw.question, message.images !== undefined && message.images.length > 0);
 			const desk = deskSessionCommand(message.text);
 			if (desk !== null) return this.#serveDeskCommand(conversation, session, origin, `${tabId}:${message.requestId}`, desk);
 			// An identity-changing builtin keeps its own refusal (the session's); every other TUI-only builtin is answered here.
@@ -609,6 +616,8 @@ export class ChatRuntime {
 			}
 			case "omp:chat-queue-remove":
 				return await this.#serveQueueRemove(conversation, session, message, origin);
+			case "omp:chat-btw-request":
+				return await this.#serveBtwRequest(session, message, origin, `${tabId}:${message.requestId}`);
 			case "omp:chat-ui-response":
 				return (await session.respondUi(message.response)) ? "accepted" : "refused";
 			case "omp:chat-reconnect":
@@ -706,6 +715,15 @@ export class ChatRuntime {
 			case "entries":
 				this.#broadcast(conversation, { type: "omp:chat-entries", ...output.payload });
 				return;
+			case "btw": {
+				const { output: item } = output;
+				// Posted directly, never through `#deliver`: a too-large answer there is another snapshot, which carries the same records.
+				const message: ChatBtwHostMessage = item.kind === "records"
+					? { type: "omp:chat-btw", epoch: output.epoch, records: [...item.records], replace: item.replace, ...(item.omitted > 0 ? { omitted: item.omitted } : {}), ...(item.show === undefined ? {} : { show: item.show }) }
+					: { type: "omp:chat-btw-delta", epoch: output.epoch, recordId: item.recordId, at: item.at, delta: item.delta };
+				for (const page of this.#pageList(tabId)) page.post(message);
+				return;
+			}
 			case "ui-request":
 				this.#broadcast(conversation, { type: "omp:chat-ui-request", epoch: output.epoch, request: output.request });
 				return;
@@ -772,12 +790,17 @@ export class ChatRuntime {
 			page.maxChunkBytes === undefined
 				? splitChatSnapshot(payload, snapshotId)
 				: splitChatSnapshot(payload, snapshotId, page.maxChunkBytes);
+		// The side-question history follows every snapshot (a snapshot resets the page's store), after the messages the page needs first.
+		// It is part of this delivery, not a separate post, so a bridge that streams the snapshot keeps its order; it never re-enters
+		// `#deliver`, whose too-large answer is another snapshot.
+		const btw = this.#btwReplace(conversation, payload.epoch);
 		if (page.postSnapshot !== undefined) {
 			const preferences = this.#displayPreferences();
 			page.postSnapshot((function* () {
 				yield split.snapshot;
 				yield* split.chunks;
 				yield { type: "omp:chat-display-preferences", epoch: payload.epoch, ...preferences };
+				if (btw !== null) yield btw;
 			})());
 			return;
 		}
@@ -786,7 +809,7 @@ export class ChatRuntime {
 			if (page.post(chunk) !== "sent") return;
 		}
 		page.post({ type: "omp:chat-display-preferences", epoch: payload.epoch, ...this.#displayPreferences() });
-		void conversation;
+		if (btw !== null) page.post(btw);
 	}
 
 	async #serveLoadOlder(conversation: Conversation, beforeId: string, origin: ChatPage | null): Promise<void> {
@@ -870,6 +893,75 @@ export class ChatRuntime {
 	/** Every item of a removal that never reached OMP: still queued, said so to the page that asked. */
 	#failQueueRemove(message: ChatQueueRemoveMessage, origin: ChatPage | null): void {
 		this.#answerQueueRemove(message, origin, message.items.map((): ChatQueueResultEntry => ({ status: "failed" })));
+	}
+
+	/** The answer to one panel request of `/btw`, to the page that asked, by request id: a gate that refused it never leaves the panel waiting. */
+	#answerBtw(origin: ChatPage | null, request: ChatBtwRequestMessage, result: { status: "accepted" } | { status: "refused"; reason: BtwRefusal }): void {
+		origin?.post({ type: "omp:chat-btw-result", epoch: request.epoch, requestId: request.requestId, ...result });
+	}
+
+	/** The side-question history as one `replace` message for a page that got a snapshot, or `null` before OMP's history was read (§6 of the design). */
+	#btwReplace(conversation: Conversation, epoch: ChatEpoch): ChatBtwMessage | null {
+		const btw = conversation.session?.btw;
+		if (btw === undefined || !btw.loaded) return null;
+		const { records, omitted } = btw.snapshot();
+		return { type: "omp:chat-btw", epoch, records: [...records], replace: true, ...(omitted > 0 ? { omitted } : {}) };
+	}
+
+	/**
+	 * A `/btw` typed in the composer (the text path of `prompt`, `steer` and `follow_up`): never sent to OMP as a prompt. A question is asked as a
+	 * side question and answered `explained` (the panel shows the answer); without one the history opens. A refusal keeps the draft.
+	 */
+	#serveBtwCommand(conversation: Conversation, session: RpcSession, origin: ChatPage | null, key: string, question: string, hasImages: boolean): Promise<ChatCommandOutcome> {
+		const previous = this.#settingsRequests.get(key);
+		if (previous) return previous;
+		const operation = (async (): Promise<ChatCommandOutcome> => {
+			if (question.length === 0) {
+				const loaded = await session.btw.history(true);
+				if (loaded.status === "refused") {
+					this.#tell(conversation, origin, BTW_REFUSALS[loaded.reason]);
+					return "refused";
+				}
+				return "explained";
+			}
+			const early: BtwRefusal | null = hasImages ? "images" : question.length > MAX_BTW_QUESTION_CHARS ? "too-long" : null;
+			const asked = early === null ? await session.btw.ask(question) : { status: "refused" as const, reason: early };
+			if (asked.status === "refused") {
+				this.#tell(conversation, origin, BTW_REFUSALS[asked.reason]);
+				return "refused";
+			}
+			return "explained";
+		})();
+		this.#settingsRequests.set(key, operation);
+		if (this.#settingsRequests.size > 128) this.#settingsRequests.delete(this.#settingsRequests.keys().next().value!);
+		return operation;
+	}
+
+	/** A panel request: ask (a follow-up when it names a topic), cancel, or read the history. Answered once per request id, whatever happens. */
+	#serveBtwRequest(session: RpcSession, request: ChatBtwRequestMessage, origin: ChatPage | null, key: string): Promise<ChatCommandOutcome> {
+		const previous = this.#settingsRequests.get(key);
+		if (previous) return previous;
+		const operation = (async (): Promise<ChatCommandOutcome> => {
+			if (!sameEpoch(session.epoch, request.epoch)) {
+				this.#answerBtw(origin, request, { status: "refused", reason: "not-live" });
+				return "ignored";
+			}
+			if (request.op === "cancel") {
+				await session.btw.cancel(request.recordId);
+				this.#answerBtw(origin, request, { status: "accepted" });
+				return "accepted";
+			}
+			const result = request.op === "ask" ? await session.btw.ask(request.question ?? "", request.recordId) : await session.btw.history();
+			if (result.status === "refused") {
+				this.#answerBtw(origin, request, { status: "refused", reason: result.reason });
+				return "refused";
+			}
+			this.#answerBtw(origin, request, { status: "accepted" });
+			return "accepted";
+		})();
+		this.#settingsRequests.set(key, operation);
+		if (this.#settingsRequests.size > 128) this.#settingsRequests.delete(this.#settingsRequests.keys().next().value!);
+		return operation;
 	}
 
 	#answerQueueRemove(message: ChatQueueRemoveMessage, origin: ChatPage | null, results: ChatQueueResultEntry[]): boolean {

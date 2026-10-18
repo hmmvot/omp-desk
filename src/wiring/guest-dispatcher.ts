@@ -70,6 +70,7 @@ export const CHAT_COMMAND_TYPES: ReadonlySet<string> = new Set([
 	"omp:chat-reconnect",
 	"omp:chat-restart",
 	"omp:chat-queue-remove",
+	"omp:chat-btw-request",
 	"omp:chat-subagent-read",
 	"omp:chat-navigate",
 ]);

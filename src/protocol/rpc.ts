@@ -147,6 +147,10 @@ export type RpcCommand =
 	| { type: "abort" }
 	/** Withdraw the user's queued messages, then abort; the child answers `{steering, followUp, imagesDropped?, truncated?}`. */
 	| { type: "abort_and_restore_queue" }
+	/** A side question (`/btw`): answered by `btw_record` and `btw_delta` frames outside the conversation; `recordId` continues a topic. */
+	| { type: "btw"; question: string; recordId?: string }
+	| { type: "btw_cancel"; recordId?: string }
+	| { type: "get_btw_history" }
 	/** Next role/scoped model; the child answers `null` when there is nothing to cycle to. */
 	| { type: "cycle_model" }
 	/** Next thinking selector of the live model; `null` when the model has none. */

@@ -186,6 +186,19 @@ These work in Chat.
 - `/fork` takes no arguments here: `pane`, `window` and `tab` are the terminal UI's placements, and typing one shows a one-line reason. **Fork Session** in the session's context menu, in the Chat tab's `…` menu and in the Command Palette does the same.
 - A stopped session cannot be forked (Resume it first), and a session shown in Terminal is forked from the Terminal with OMP's own `/fork`.
 
+### `/btw`
+
+`/btw <question>` asks a **side question** about the conversation without touching it, as OMP's terminal UI does. The question and its answer never become part of the session: they are not rows of the transcript, are not in the session file and do not count toward the context or the cost line. The answer streams as Markdown into a panel directly above the message box.
+
+- **It works while a response is running**, and does not wait for it or stop it. The side answer can see what the assistant has said so far in the running turn. Stop does not cancel a side question and a side question does not block the response.
+- **One at a time.** A second `/btw` while one is answering says so and keeps your text in the message box.
+- **Cancel** with the stop button in the panel, or `Esc` while the focus is inside the panel (`Esc` there never also stops the response; `Esc` in the message box still does). `Esc` in the panel closes it when nothing is running. **Copy** takes the last non-blank answer, **Close** hides the panel.
+- **Follow up** in the row under a finished answer: `Enter` continues the same side conversation, `Shift+Enter` adds a line.
+- **`/btw` with no text** opens the list of the session's side questions, newest first, with their state and when they were asked; pick one to read it. The list is OMP's own (the same one the terminal UI shows), so it survives closing the page, a second editor on the same session and a restart of the extension host. A question that was still answering when its process ended reads as *Interrupted*.
+- **Only text.** A `/btw` with an image attached is refused with a sentence and keeps the draft. A refusal (a question already answering, no active model, history that cannot be saved, an OMP without this feature) says why under the message box and keeps what you typed.
+- Rewind, `/new` and Resume end a running side question, as in OMP; `/fork` opens a copy and leaves this session's side question running.
+- Not here: the terminal UI's *branch* key, which turns a side answer into a branch of the session; use `/fork` or Rewind instead.
+
 ### Branch and Clear from the Sessions view
 
 A running session's context menu in Sessions also has **Branch…** and **Clear Context…**, and the Chat tab's `…` menu has **Clear Context…**:

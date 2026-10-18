@@ -16,6 +16,7 @@ import { ANSI_STYLES } from "./ansi-styles.ts";
 import { TERMINAL_STYLES } from "./lib/terminal-styles.ts";
 import { HUD_STYLES } from "./hud-styles.ts";
 import { QUEUE_STYLES } from "./queue-styles.ts";
+import { BTW_STYLES } from "./btw-styles.ts";
 import { MERMAID_STYLES } from "./mermaid-styles.ts";
 import { FIND_STYLES } from "./find-styles.ts";
 
@@ -908,6 +909,7 @@ ${ANSI_STYLES}
 /* ── native transcript and the bottom-block HUD rows ───────────────────── */
 ${HUD_STYLES}
 ${QUEUE_STYLES}
+${BTW_STYLES}
 ${MERMAID_STYLES}
 ${FIND_STYLES}
 .omp-native-child button:focus-visible { outline: 1px solid var(--vscode-focusBorder); }

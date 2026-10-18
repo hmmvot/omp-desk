@@ -26,6 +26,7 @@ import { DetailView } from "./components/DetailView";
 import { ChildTranscript } from "./components/ChildTranscript";
 import { HudDock } from "./components/HudDock";
 import { QueuedMessages } from "./components/QueuedMessages";
+import { BtwPanel } from "./components/BtwPanel";
 import { DETAIL_META, parseDetailMeta } from "../protocol/detail-target";
 import { Transcript, type TranscriptRewind } from "./components/Transcript";
 import { RewindBar } from "./components/Rewind";
@@ -308,6 +309,7 @@ function ChatView({ client }: { client: ChatClient }): ReactNode {
 			<div className="omp-dock">
 				<HudDock model={snapshot} />
 				<QueuedMessages client={client} model={snapshot} />
+				<BtwPanel btw={client.btw} model={snapshot} />
 				<RewindBar mode={rewind} targets={targets} entries={durable} cwd={snapshot.header?.cwd} blocked={rewindBlocked} undo={undo} notice={rewindNotice} barRef={rewindBarRef}
 					onMove={to => dispatchRewind({ type: "move", targets, to })}
 					onSubmit={summarize => { if (rewind.kind === "picking") void navigate("rewind", rewind.targetId, rewind.leafId, summarize); }}

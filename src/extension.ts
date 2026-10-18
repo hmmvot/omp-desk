@@ -5557,6 +5557,7 @@ const BRIDGE_OPERATIONS: Record<string, true> = {
   "chat-reconnect": true,
   "chat-restart": true,
   "chat-queue-remove": true,
+  "chat-btw-request": true,
   "chat-subagent-read": true,
   "terminal-attach": true,
   "terminal-probe": true,
@@ -5582,6 +5583,7 @@ const BRIDGE_CHAT_OPERATION_TYPE: Record<string, string> = {
   "chat-reconnect": "omp:chat-reconnect",
   "chat-restart": "omp:chat-restart",
   "chat-queue-remove": "omp:chat-queue-remove",
+  "chat-btw-request": "omp:chat-btw-request",
 };
 
 /**
@@ -8041,6 +8043,7 @@ const ELECTION_GATED_TYPES: Readonly<Record<string, true>> = {
   "omp:chat-reconnect": true,
   "omp:chat-restart": true,
   "omp:chat-queue-remove": true,
+  "omp:chat-btw-request": true,
   "omp:chat-command": true,
 };
 

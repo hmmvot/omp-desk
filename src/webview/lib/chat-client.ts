@@ -47,6 +47,7 @@ import type { ChatAbortResultMessage, ChatDisplayPreferences, ChatNavigateResult
 import type { NavigationKind } from "../../chat/rewind.ts";
 import { parseSubagentPage, type SubagentTranscriptPage } from "../../chat/subagent-transcript.ts";
 import { ChatOperationStore, type ChatOperationState, type ChatOperationStoreOptions } from "./chat-operation.ts";
+import { BtwClient } from "./btw-client.ts";
 
 /** What every surface renders from. */
 export type ChatSnapshot = ChatModel;
@@ -125,6 +126,8 @@ export type ChatQueueRemoveResult = { ok: true; results: readonly ChatQueueResul
 const QUEUE_REMOVAL_TIMEOUT_MS = 90_000;
 const REFUSAL_UNREACHABLE_QUEUE =
 	"this editor cannot reach its session host right now, so the queued messages were not changed; wait for the connection to return and try again";
+/** A side-question request that went nowhere: the panel keeps what it showed. */
+const REFUSAL_UNREACHABLE_BTW = "This editor cannot reach its session host right now, so the side question was not sent. Wait for the connection to return and try again.";
 
 interface PendingSubagentRead {
 	epoch: ChatEpoch;
@@ -157,6 +160,8 @@ export class ChatClient {
 	readonly #navigations = new Map<string, { resolve(answer: ChatNavigateAnswer): void; timer: unknown }>();
 	readonly #navigationListeners = new Set<(answer: ChatNavigateAnswer) => void>();
 	readonly #operations: ChatOperationStore;
+	/** The side-question store (`/btw`): outside the chat model, so a side answer is never a row of the transcript. */
+	readonly btw: BtwClient;
 	#model: ChatModel = createChatModel();
 	#displayPreferences: ChatDisplayPreferences = { toolCallDetail: "overview", accessibilitySupport: false };
 	#draftHandoffLocked = false;
@@ -170,6 +175,13 @@ export class ChatClient {
 		this.#now = options.now ?? Date.now;
 		this.#newRequestId = options.newRequestId ?? newChatRequestId;
 		this.#operations = new ChatOperationStore({ now: this.#now, ...options.operations });
+		this.btw = new BtwClient({
+			post: message => this.#transport.post(message),
+			epoch: () => this.#model.epoch,
+			writable: () => chatWritable(this.#model),
+			newRequestId: this.#newRequestId,
+			unreachable: REFUSAL_UNREACHABLE_BTW,
+		});
 	}
 
 	getSnapshot = (): ChatSnapshot => this.#model;
@@ -306,6 +318,11 @@ export class ChatClient {
 			case "omp:chat-ui-cancel":
 				if (sameEpoch(model.epoch, message.epoch)) this.#commit(applyChatUiCancel(model, message.targetId));
 				return true;
+			case "omp:chat-btw":
+			case "omp:chat-btw-delta":
+			case "omp:chat-btw-result":
+				this.btw.handle(message);
+				return true;
 			default:
 				return false;
 		}
@@ -313,6 +330,8 @@ export class ChatClient {
 
 	/** The reset: a new generation forgets which dialogs this page answered. */
 	#adopt(payload: ChatSnapshotPayload): void {
+		// A side question belongs to one conversation (the epoch nonce); a snapshot of the same one keeps the store, and the `replace` the host sends right after it corrects it.
+		if (this.#model.epoch?.nonce !== payload.epoch.nonce) this.btw.reset();
 		for (const [requestId, pending] of this.#childReads) if (!sameEpoch(pending.epoch, payload.epoch)) this.#finishChildRead(requestId, { status: "unavailable", reason: "changed" });
 		// A pending queue removal is not settled here: the host answers it by request id whatever the epoch did meanwhile.
 		this.#answered.clear();
