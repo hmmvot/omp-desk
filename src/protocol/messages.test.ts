@@ -48,6 +48,7 @@ import {
 	MAX_TERMINAL_INPUT_BYTES,
 } from "./messages.ts";
 import { decodeBase64, encodeUtf8Chunks } from "../shared/bytes-base64.ts";
+import { SERVED_MODEL_PAIR_LIMIT, SERVED_MODEL_TEXT_LIMIT } from "./messages.ts";
 
 const FILE_MENTION_REGEX = /@(?:"([^"]+)"|'([^']+)'|([^\s@]+))/g;
 const LEADING_PUNCTUATION_REGEX = /^[`"'([{<]+/;
@@ -1077,5 +1078,51 @@ describe("editor quote insertion boundary", () => {
 			assert.equal(parseGuestHostMessage({ type: "omp:insert-quote", quotes: bad }), null, JSON.stringify(bad)?.slice(0, 80));
 		}
 		assert.equal(parseGuestHostMessage({ type: "omp:insert-quote" }), null);
+	});
+});
+
+describe("served-model boundary", () => {
+	const pair = { provider: "anthropic", requested: "claude-haiku-4-5", served: "claude-haiku-4-5-20251001" };
+
+	it("accepts one to eight well-formed pairs and drops undeclared fields", () => {
+		assert.deepEqual(parseGuestWebviewMessage({ type: "omp:served-models-request", requestId: 3, pairs: [{ ...pair, extra: 1 }], tabId: "tab:x" }), {
+			type: "omp:served-models-request",
+			requestId: 3,
+			pairs: [pair],
+		});
+		const eight = Array.from({ length: SERVED_MODEL_PAIR_LIMIT }, () => pair);
+		const parsedEight = parseGuestWebviewMessage({ type: "omp:served-models-request", requestId: 0, pairs: eight });
+		assert.ok(parsedEight?.type === "omp:served-models-request");
+		assert.equal(parsedEight.pairs.length, SERVED_MODEL_PAIR_LIMIT);
+		const longest = "m".repeat(SERVED_MODEL_TEXT_LIMIT);
+		assert.notEqual(parseGuestWebviewMessage({ type: "omp:served-models-request", requestId: 0, pairs: [{ provider: longest, requested: longest, served: longest }] }), null);
+	});
+
+	it("refuses the whole request when the id, the count or any pair is malformed", () => {
+		const send = (value: object) => parseGuestWebviewMessage({ type: "omp:served-models-request", requestId: 1, pairs: [pair], ...value });
+		for (const requestId of [undefined, null, -1, 1.5, Number.NaN, "3", {}]) assert.equal(send({ requestId }), null, String(requestId));
+		for (const pairs of [undefined, null, "x", {}, [], Array.from({ length: SERVED_MODEL_PAIR_LIMIT + 1 }, () => pair)]) assert.equal(send({ pairs }), null, JSON.stringify(pairs)?.slice(0, 40));
+		const tooLong = "m".repeat(SERVED_MODEL_TEXT_LIMIT + 1);
+		for (const field of ["provider", "requested", "served"]) {
+			for (const bad of [undefined, null, 7, "", tooLong, "a\u0000b"]) {
+				assert.equal(send({ pairs: [pair, { ...pair, [field]: bad }] }), null, `${field}: ${String(bad).slice(0, 12)}`);
+			}
+			const { [field as keyof typeof pair]: _omitted, ...missing } = pair;
+			assert.equal(send({ pairs: [missing] }), null, `${field} missing`);
+		}
+		for (const entry of [null, "x", 7, []]) assert.equal(send({ pairs: [entry] }), null, JSON.stringify(entry));
+	});
+
+	it("parses a verdict answer of the three literals only", () => {
+		assert.deepEqual(parseGuestHostMessage({ type: "omp:served-models", requestId: 2, verdicts: ["same", "mismatch", "unknown"], extra: 1 }), {
+			type: "omp:served-models",
+			requestId: 2,
+			verdicts: ["same", "mismatch", "unknown"],
+		});
+		const base = { type: "omp:served-models", requestId: 2, verdicts: ["same"] };
+		for (const requestId of [undefined, -1, 1.5, "2"]) assert.equal(parseGuestHostMessage({ ...base, requestId }), null, String(requestId));
+		for (const verdicts of [undefined, "same", [], ["Same"], ["same", 1], [null], Array.from({ length: SERVED_MODEL_PAIR_LIMIT + 1 }, () => "same")]) {
+			assert.equal(parseGuestHostMessage({ ...base, verdicts }), null, JSON.stringify(verdicts));
+		}
 	});
 });

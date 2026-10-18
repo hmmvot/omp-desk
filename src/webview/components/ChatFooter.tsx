@@ -10,6 +10,7 @@ import { CLEAR_DEFERRED_SENTENCES } from "../../chat/clear";
 import { ContextUsageIndicator } from "./ContextUsageIndicator";
 import { HostSignalChips } from "./HostSignalChips";
 import { quotaUsedPercent } from "../../shared/context-indicator";
+import { provideModelPicker } from "../lib/model-picker";
 
 const CONTROL_WAIT_TIMEOUT_MS = 35_000;
 const FEEDBACK_MS = 6_000;
@@ -127,6 +128,9 @@ export function ChatFooter({ client, snapshot, commandsAction, trailingActions }
 		view.state === null ? "Waiting for the host's controls." : !view.state.available ? view.state.reason ?? "Host controls are unavailable." :
 		view.state.mutationMode === "unavailable" ? "The host cannot apply changes." :
 		view.awaiting !== null ? "Waiting for the host's request outcome." : null;
+	// The provider-error row's Switch model opens the same picker as a click on the model trigger.
+	const openModelPicker = needsProviderLogin || blocked === null ? () => (needsProviderLogin ? guestTransport.post({ type: "omp:chat-command", command: "provider-login" }) : send({ action: "snapshot", picker: "model" })) : null;
+	useEffect(() => provideModelPicker(openModelPicker), [send, needsProviderLogin, blocked === null]);
 	const usage = snapshot.state?.contextUsage;
 	const contextWindow = usage?.contextWindow ?? model?.contextWindow ?? null;
 	const { windows, quotaTooltip } = useMemo(() => {

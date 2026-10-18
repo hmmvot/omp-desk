@@ -304,14 +304,20 @@ ${ANSI_STYLES}
 .omp-row { position: relative; }
 .omp-row-actions { position: absolute; top: 2px; right: 4px; display: flex; gap: 4px; opacity: 0; }
 .omp-row:hover > .omp-row-actions, .omp-row-actions:focus-within, .omp-row-actions:has(.omp-copy-status) { opacity: 1; }
-.omp-retry-turn { display: inline-flex; align-items: center; gap: 4px; margin-top: 6px; padding: 2px 8px; border: 1px solid var(--vscode-button-border, transparent); border-radius: var(--omp-radius); background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); font: inherit; cursor: pointer; }
-.omp-retry-turn:hover { background: var(--vscode-button-secondaryHoverBackground); }
-.omp-retry-turn:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
+.omp-retry-turn, .omp-error-action { display: inline-flex; align-items: center; gap: 4px; margin-top: 6px; padding: 2px 8px; border: 1px solid var(--vscode-button-border, transparent); border-radius: var(--omp-radius); background: var(--vscode-button-secondaryBackground); color: var(--vscode-button-secondaryForeground, var(--vscode-foreground)); font: inherit; cursor: pointer; }
+.omp-retry-turn:hover, .omp-error-action:hover { background: var(--vscode-button-secondaryHoverBackground); }
+.omp-retry-turn:focus-visible, .omp-error-action:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: 1px; }
 /* Turn notices: an aborted reply is one muted line, a provider error one line in the error colour that wraps only when the panel is narrow. */
 .omp-turn-aborted { display: flex; align-items: center; gap: 6px; padding: 2px 0; color: var(--omp-muted); font-size: 12px; }
 .omp-turn-error { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; color: var(--vscode-errorForeground); }
 .omp-turn-error > strong { font-weight: 600; }
 .omp-turn-error > span { min-width: 0; overflow-wrap: anywhere; }
+.omp-turn-error-status { padding: 0 6px; border: 1px solid currentColor; border-radius: var(--omp-radius); font-size: 11px; line-height: 16px; font-variant-numeric: tabular-nums; }
+.omp-turn-error--clamped > .omp-turn-error-body { flex: 1 1 100%; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden; }
+.omp-turn-error-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 6px; }
+.omp-turn-error-actions > button { margin-top: 0; }
+.omp-turn-error-actions > button:disabled { opacity: 0.5; cursor: default; }
+.omp-turn-error-copied { color: var(--omp-muted); font-size: 11px; }
 /* OMP extension setWidget blocks and notify notices, above or below the prompt. */
 .omp-extension-widgets { display: flex; flex-direction: column; gap: 4px; margin: 0 0 6px; }
 .omp-extension-widgets--belowEditor { margin: 6px 0 0; }
@@ -540,7 +546,8 @@ ${ANSI_STYLES}
 .omp-slash-description { display: block; font-family: var(--vscode-font-family); color: var(--omp-muted); font-size: 11px; white-space: normal; }
 .omp-tool-head:focus-visible, .omp-tool-body:focus-visible, .omp-overview-head:focus-visible { outline: 1px solid var(--vscode-focusBorder); outline-offset: -1px; }
 .omp-reply-footer { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 4px; color: var(--omp-muted); font-size: 11px; }
-.omp-reply-footer > span:nth-of-type(2)::before { content: "\\00b7"; margin-right: 6px; }
+.omp-reply-footer > .omp-reply-usage::before, .omp-reply-footer > .omp-reply-time::before { content: "\\00b7"; margin-right: 6px; }
+.omp-served-model { display: flex; flex: 1 1 100%; align-items: center; gap: 4px; min-width: 0; overflow-wrap: anywhere; color: var(--vscode-editorWarning-foreground); }
 .omp-reply-copy { display: inline-flex; align-items: center; border: 0; border-radius: var(--omp-radius); padding: 2px 4px; background: transparent; color: inherit; font: inherit; cursor: pointer; }
 .omp-reply-copy .codicon { font-size: 14px; }
 .omp-reply-copy:hover:not(:disabled) { color: var(--vscode-foreground); background: var(--vscode-toolbar-hoverBackground, var(--vscode-list-hoverBackground)); }

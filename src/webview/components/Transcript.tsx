@@ -16,7 +16,7 @@
  * bound's cards, since a result has no row of its own to be shown on.
  */
 import type { BackgroundWait } from "../../chat/background-wait";
-import { assistantPersistenceKey, entryMessage, userSkill, type AssistantMessage, type ChatEntry } from "../../chat/messages";
+import { assistantPersistenceKey, entryMessage, userSkill, type AssistantMessage, type ChatContent, type ChatEntry } from "../../chat/messages";
 import type { ReactNode } from "react";
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { ChatPhase, DisplayTurn } from "../../chat/model";
@@ -30,7 +30,7 @@ import { projectTranscript, type ProjectedTool, type TranscriptCard } from "../.
 import { splitClearedHistory, type ClearedHistorySplit } from "../../chat/cleared-history";
 import { CLEAR_REFUSAL_SENTENCES } from "../../chat/clear";
 import { isOverviewMessage, overviewMemberId, projectToolOverview, type DensityCard, type OverviewProjection } from "../../chat/tool-overview";
-import { replyFooters, type ReplyFooter as ReplyFooterData } from "../../chat/reply-turns";
+import { replyFooters, turnMeta, type ReplyFooter as ReplyFooterData } from "../../chat/reply-turns";
 import { ReplyFooter } from "./ReplyFooter";
 import { ToolOverview } from "./ToolOverview";
 import { TRANSCRIPT_WINDOW_ROWS, pageTranscriptCards, windowTranscriptCards } from "../../chat/transcript-window";
@@ -56,6 +56,11 @@ import type { BranchPoint } from "../../chat/rewind";
 import { BranchPointMarker } from "./Rewind";
 import { useTranscriptFind } from "./TranscriptFind";
 import { findIdOf } from "../lib/transcript-find";
+import { ProviderErrorFrame } from "./ProviderError";
+import { thinkingKey } from "../../chat/thinking-clock";
+import { announcedMismatches, type ServedModelMismatch } from "../../chat/served-model";
+import { observeThinking, type ThinkingClockRef } from "../lib/thinking-clock-store";
+import { useServedVerdicts } from "../lib/served-models";
 
 /** How long a requested older page may stay unanswered before the button offers to ask again. */
 const OLDER_REPLY_TIMEOUT_MS = 8_000;
@@ -106,6 +111,8 @@ export interface TranscriptProps {
 	asyncPaused?: boolean;
 	pagedHistory?: boolean;
 	footerByHost?: ReadonlyMap<string, ReplyFooterData>;
+	/** The served-model substitutions to announce, by the entry of the request they were found on (`chat/served-model.ts`). */
+	servedByEntry?: ReadonlyMap<string, ServedModelMismatch>;
 	/** The failed or aborted last reply that offers Retry, or `null`. */
 	retryTailId?: string | null;
 	/** Rewind (ADR-0051): the hover action, the picked prompt and the branch markers. Absent in child transcripts. */
@@ -195,11 +202,19 @@ export function TranscriptCardView({ card, props, autoExpanded, clearedHistory }
 			const failed = !card.streaming && card.content.length === 0 && (card.message.stopReason === "error" || card.message.stopReason === "aborted");
 			const retry = card.id === props.retryTailId && <button type="button" className="omp-retry-turn" title="Retry: run the failed or aborted turn again (F5)" onClick={() => requestPanelAction("retry-turn")}><span className="codicon codicon-refresh" aria-hidden="true" />Retry</button>;
 			const failure = card.message.errorMessage;
-			// One line each: an aborted reply is a muted note with the reply's own message, a provider error says what it is and why inline.
-			const notice = !failed ? null : card.message.stopReason === "error"
-				? <div className="omp-error omp-turn-error" role="status"><strong>Provider error</strong>{failure && <span>{failure}</span>}</div>
+			const providerError = failed && card.message.stopReason === "error";
+			const errorKey = `error:${props.conversationKey ?? "chat"}:${card.id}`;
+			// An aborted reply is one muted line with the reply's own message; a provider error is a frame with its status, its message, Copy error, Switch model and Retry.
+			const notice = !failed ? null : providerError
+				? <ProviderErrorFrame message={card.message} retry={retry} expanded={props.disclosures?.get(errorKey) ?? false} onExpandedChange={value => props.onDisclosureChange?.(errorKey, value)} />
 				: <div className="omp-turn-aborted" role="status"><span className="codicon codicon-circle-slash" aria-hidden="true" /><span>{failure || "Aborted"}</span></div>;
-			body = <><AssistantContentView content={card.content} streaming={card.streaming && !props.waitingForAnswer} bypassPacing={props.pagedHistory} />{notice}{retry}</>;
+			// A thinking block is timed by the page that watched it stream; the clock is keyed by its request and position, so it survives the message becoming a saved entry.
+			const scope = props.conversationKey ?? "chat";
+			const thinkingClock = (block: ChatContent): ThinkingClockRef | undefined => {
+				const index = card.message.content.indexOf(block);
+				return index < 0 ? undefined : { key: thinkingKey(scope, card.message, index), live: card.streaming && index === card.message.content.length - 1 };
+			};
+			body = <><AssistantContentView content={card.content} streaming={card.streaming && !props.waitingForAnswer} bypassPacing={props.pagedHistory} thinkingClock={thinkingClock} />{notice}{providerError ? null : retry}</>;
 			break;
 		}
 		case "recovery": body = <div className="omp-native-recovery"><strong>Recovered provider error</strong>{card.message.retryRecovery?.note && <p>{card.message.retryRecovery.note}</p>}</div>; break;
@@ -229,7 +244,7 @@ export function TranscriptCardView({ card, props, autoExpanded, clearedHistory }
 			findId={(props.depth ?? 0) === 0 && props.findable !== false && (user || card.kind === "assistant" && !card.streaming || card.kind === "tool") ? findIdOf(card) : undefined}
 			rewindState={rewindState} onPick={picking && rewindId !== null ? () => rewind!.onPick(rewindId) : undefined}>
 			{body}
-			{props.footerByHost?.has(card.id) && <ReplyFooter reply={props.footerByHost.get(card.id)!} />}
+			{props.footerByHost?.has(card.id) && <ReplyFooter reply={props.footerByHost.get(card.id)!} served={props.footerByHost.get(card.id)!.entryIds.flatMap(id => props.servedByEntry?.get(id) ?? [])} />}
 			{points?.map(point => <BranchPointMarker key={point.entryId ?? "root"} point={point} onSwitch={rewind?.onSwitch} />)}
 		</Row>
 	);
@@ -282,7 +297,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 	const controllerRef = useRef<TranscriptScrollController | null>(null);
 	const previousPaged = useRef(Boolean(props.pagedHistory));
 	const activatingPaged = Boolean(props.pagedHistory) && !previousPaged.current;
-	const { rows, topId, olderRows, earlierTopId, canonical, page, cleared } = useMemo(() => {
+	const { rows, topId, olderRows, earlierTopId, canonical, page, cleared, projected } = useMemo(() => {
 		const live = stream && props.streamId && props.streamPosition ? { message: stream, messageId: props.streamId, position: props.streamPosition } : null;
 		const positioned = positionTranscript(entries, props.durableCount ?? entries.length - pending.size, pending, cards, live, props.durablePositions);
 		const cleared = splitClearedHistory(positioned, olderCount);
@@ -298,15 +313,28 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		}
 		const page = pageTranscriptCards(canonical, TRANSCRIPT_WINDOW_ROWS, end);
 		const window = props.pagedHistory ? page : windowTranscriptCards(canonical, TRANSCRIPT_WINDOW_ROWS, pinnedTopId ?? (previousPaged.current ? page.topId : null));
-		return { ...window, canonical, page, cleared };
+		return { ...window, canonical, page, cleared, projected: cleared?.after ?? positioned };
 	}, [entries, pending, cards, pinnedTopId, activeTools, working, stream, olderCount, props.durableCount, props.streamId, props.streamPosition, props.retrySuppressedIds, props.sealedSeq, props.cwd, props.durablePositions, props.pagedHistory, pageEndId, heldPageEndId, activatingPaged]);
 
 	const overviewRef = useRef<OverviewProjection | undefined>(undefined);
 	const namespace = props.conversationKey ?? "chat";
+	// The page times thinking by watching the stream; a block's seconds are not on the wire (`chat/thinking-clock.ts`). A look that comes
+	// together with new entries is a fresh snapshot of the session (a stream's own updates leave the entries alone), so it did not watch the stream begin.
+	const lookedAtEntries = useRef<readonly ChatEntry[] | null>(null);
+	useEffect(() => {
+		const attached = lookedAtEntries.current !== entries;
+		lookedAtEntries.current = entries;
+		observeThinking(namespace, stream, attached);
+	}, [namespace, stream, entries]);
 	const overview = useMemo(() => projectToolOverview(rows, namespace, overviewRef.current, props.cwd), [rows, namespace, props.cwd]);
 	overviewRef.current = overview;
-	const footerByHost = useMemo(() => replyFooters(rows, { displayTurns: props.displayTurns, working, settled: props.settled ?? true, asyncPaused: props.asyncPaused ?? false, phase }),
-		[rows, props.displayTurns, working, props.settled, props.asyncPaused, phase]);
+	// Turn totals and served-model candidates come from every request of the loaded transcript, not only the rows in the window.
+	const { byEntry: metaByEntry, served: servedCandidates } = useMemo(() => turnMeta(projected, props.displayTurns), [projected, props.displayTurns]);
+	const servedPairs = useMemo(() => servedCandidates.map(candidate => candidate.pair), [servedCandidates]);
+	const { verdictOf, revision: verdictRevision } = useServedVerdicts(servedPairs);
+	const servedByEntry = useMemo(() => announcedMismatches(servedCandidates, verdictOf), [servedCandidates, verdictRevision]);
+	const footerByHost = useMemo(() => replyFooters(rows, { displayTurns: props.displayTurns, working, settled: props.settled ?? true, asyncPaused: props.asyncPaused ?? false, phase, meta: metaByEntry }),
+		[rows, props.displayTurns, working, props.settled, props.asyncPaused, phase, metaByEntry]);
 	const disclosures = useRef(new Map<string, boolean>());
 	const [disclosureRevision, redrawDisclosures] = useState(0);
 	for (const [old, current] of overview.redirects) {
@@ -360,7 +388,7 @@ export function Transcript(props: TranscriptProps): ReactNode {
 		}
 		return byCard;
 	}, [canonical, entries, branchPoints, olderCount, cleared]);
-	const presentationProps: TranscriptProps = { ...props, footerByHost, retryTailId, rewindDimmed, branchesByCard, disclosures: shown, onDisclosureChange: (key, value) => { controllerRef.current?.retain(); disclosures.current.set(key, value); redrawDisclosures(version => version + 1); } };
+	const presentationProps: TranscriptProps = { ...props, footerByHost, servedByEntry, retryTailId, rewindDimmed, branchesByCard, disclosures: shown, onDisclosureChange: (key, value) => { controllerRef.current?.retain(); disclosures.current.set(key, value); redrawDisclosures(version => version + 1); } };
 
 	const rootRef = useRef<HTMLDivElement | null>(null);
 	const contentRef = useRef<HTMLDivElement | null>(null);

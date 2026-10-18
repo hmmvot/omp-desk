@@ -230,6 +230,7 @@ function world(overrides: Partial<GuestDispatcherDeps<FakeTab>> = {}) {
 		recents,
 		controlRequest: async (...args) => { controlRequests.push(args); },
 		openKeyConflict: async command => { calls.push(`openKeyConflict:${command}`); },
+		servedModels: async asked => asked.map(() => "unknown"),
 		log: recordingLogger(lines),
 		info: message => { infos.push(message); },
 		warn: message => { warnings.push(message); },
@@ -1127,6 +1128,47 @@ describe("the detail tabs of a previous host lifetime", () => {
 		} finally {
 			stub.window.tabGroups.close = close;
 			stub.window.tabGroups.all = all;
+		}
+	});
+});
+
+describe("omp:served-models-request", () => {
+	const pairs = [
+		{ provider: "anthropic", requested: "claude-haiku-4-5", served: "claude-haiku-4-5-20251001" },
+		{ provider: "anthropic", requested: "claude-opus-5", served: "claude-haiku-4-5" },
+	];
+	const ask = (requestId = 6) => ({ type: "omp:served-models-request" as const, requestId, pairs });
+
+	it("answers the panel that serves the slot with the window's verdicts, in the pairs' order, and nobody else", async () => {
+		const asked: unknown[] = [];
+		const w = world({ servedModels: async asking => { asked.push(asking); return ["same", "mismatch"]; } });
+		const live = w.editor();
+		await w.dispatcher.handleMessage(index, SLOT, live.panel, ask());
+		assert.deepEqual(asked, [pairs]);
+		assert.deepEqual(live.posted.map(message => parseGuestHostMessage(message)), [{ type: "omp:served-models", requestId: 6, verdicts: ["same", "mismatch"] }]);
+		const stale = fakePanel();
+		await w.dispatcher.handleMessage(index, SLOT, stale.panel, ask(7));
+		assert.deepEqual([stale.posted, live.posted.length, asked.length], [[], 1, 1], "a panel that no longer serves the slot reads nothing and hears nothing");
+	});
+
+	it("does not answer a panel that stopped serving the slot while the verdicts were read", async () => {
+		let release: () => void = () => undefined;
+		const gate = new Promise<void>(resolve => { release = resolve; });
+		const w = world({ servedModels: async () => { await gate; return ["same", "same"]; } });
+		const first = w.editor();
+		const pending = w.dispatcher.handleMessage(index, SLOT, first.panel, ask());
+		const second = w.editor();
+		release();
+		await pending;
+		assert.deepEqual([first.posted, second.posted], [[], []]);
+	});
+
+	it("answers every pair unknown when the window's check throws or answers a different count", async () => {
+		for (const servedModels of [async () => { throw new Error("helper failed"); }, async () => ["mismatch"] as const, async () => [] as const]) {
+			const w = world({ servedModels: servedModels as never });
+			const live = w.editor();
+			await w.dispatcher.handleMessage(index, SLOT, live.panel, ask(9));
+			assert.deepEqual(live.posted.map(message => parseGuestHostMessage(message)), [{ type: "omp:served-models", requestId: 9, verdicts: ["unknown", "unknown"] }]);
 		}
 	});
 });

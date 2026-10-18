@@ -224,6 +224,8 @@ import {
 import type { NativeStopVerdict } from "./host/rpc-reconcile";
 import type { ChoiceOutcome, CommandResult, CompactMode, SendRefusal, ShakeMode } from "./host/rpc/session";
 import { readSlashRegistry, type BuiltinSlashEntry, type DeskSlashAction, type SlashRegistry } from "./host/slash-registry";
+import { readServedModels, ServedModelMemo } from "./host/served-model";
+import type { ServedModelPair, ServedModelVerdict } from "./chat/served-model";
 import { NAVIGATE_REFUSAL_SENTENCES } from "./chat/rewind";
 import { nextToolsMode, toolsModeFromStored, toolsModeToStored, type ToolsModeKey } from "./chat/tools-mode";
 import type { ChatLiteState, ChatPhase } from "./chat/model";
@@ -424,6 +426,8 @@ const RENAME_HELPER_SCRIPT = "media/rename-session.mjs";
 const RUNTIME_PROBE_MODULE = "media/runtime-probe.mjs";
 /** Packaged Bun helper that lists the installed OMP's builtin slash commands (`host/slash-registry.ts`). */
 const SLASH_REGISTRY_HELPER = "media/slash-registry.mjs";
+/** Packaged Bun helper that decides whether a reply's served model differs from the requested one (`host/served-model.ts`). */
+const SERVED_MODEL_HELPER = "media/served-model.mjs";
 /** Chat publishes promptly; native startup can wait on a heavy workspace. */
 const CONTROL_RENDEZVOUS_TIMEOUT_MS = 15_000;
 const NATIVE_CONTROL_RENDEZVOUS_TIMEOUT_MS = 60_000;
@@ -744,6 +748,8 @@ interface WindowState {
   slashRegistryCheckedAt: number;
   /** The slash registry read in flight, if any. */
   slashRegistryLoading: Promise<void> | null;
+  /** The served-model verdicts read from the installed OMP, per install: a page asks only about replies that name another served id. */
+  servedModels: ServedModelMemo;
   /**
    * The window's code-symbol resolver (docs/designs/2026-10-10-code-symbol-links.md): created by the first Chat
    * request, asking VS Code's workspace symbol providers, and dropped whenever files or folders change. Only
@@ -1183,6 +1189,7 @@ function guestDispatcherDeps(): GuestDispatcherDeps<TabState> {
       const query = windowState().keyHints?.queryOf(command) ?? null;
       if (query !== null) await vscode.commands.executeCommand("workbench.action.openGlobalKeybindings", query);
     },
+    servedModels: pairs => servedModelVerdicts(pairs),
     pushSessionView,
     noteReadyDocument,
     activateNativeEditor,
@@ -1340,6 +1347,7 @@ function createWindowState(context: vscode.ExtensionContext): WindowState {
     slashRegistryFailedKey: null,
     slashRegistryCheckedAt: 0,
     slashRegistryLoading: null,
+    servedModels: new ServedModelMemo(),
     symbolLinks: undefined,
     commitLinks: undefined,
     symbolAskers: new Set<string>(),
@@ -6199,6 +6207,34 @@ async function loadSlashRegistry(context: vscode.ExtensionContext): Promise<void
     log.debug(`read ${commands.length} builtin slash commands from ${key}`);
   } catch (error) {
     log.warn(`the slash-command registry could not be read: ${messageOf(error)}`);
+  }
+}
+
+/**
+ * Whether the provider served another model than requested, for each pair, by the installed OMP's own classifier
+ * (`media/served-model.mjs`). Nothing is read until a page asks; a failed read answers "unknown" and is read again next
+ * time, while a successful one is remembered for the install (`host/served-model.ts`).
+ */
+async function servedModelVerdicts(pairs: readonly ServedModelPair[]): Promise<ServedModelVerdict[]> {
+  const s = windowState();
+  const unknown = (): ServedModelVerdict[] => pairs.map(() => "unknown");
+  const { context } = s;
+  if (context === undefined) return unknown();
+  try {
+    const bun = await resolveBunRuntime();
+    const pkg = bun === null ? null : await resolveOmpPackageRoot(await resolveOmpBinary());
+    if (bun === null || pkg === null) return unknown();
+    const key = `${pkg.root}@${pkg.version ?? "unknown"}`;
+    return await s.servedModels.resolve(key, pairs, async missing => {
+      const [helper] = await stageRuntimeAssets({ storageDir: context.globalStorageUri.fsPath, sourcePaths: [context.asAbsolutePath(SERVED_MODEL_HELPER)] });
+      if (helper === undefined) return null;
+      const verdicts = await readServedModels({ bunPath: bun, helperPath: helper.path, packageRoot: pkg.root, cwd: path.dirname(helper.path), pairs: missing });
+      if (verdicts === null) log.warn(`the served-model verdicts of ${key} could not be read`);
+      return verdicts;
+    });
+  } catch (error) {
+    log.warn(`the served-model verdicts could not be read: ${messageOf(error)}`);
+    return unknown();
   }
 }
 

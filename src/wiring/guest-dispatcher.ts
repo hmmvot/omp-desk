@@ -48,9 +48,11 @@ import type {
 	GuestRouteAckMessage,
 	GuestSelectionReplyMessage,
 	GuestSelectionRequestMessage,
+	GuestServedModelsMessage,
 	GuestTerminalCopyReplyMessage,
 	SessionViewMode,
 } from "../protocol/messages.ts";
+import type { ServedModelPair, ServedModelVerdict } from "../chat/served-model.ts";
 import { MAX_ATTACH_ITEMS } from "../shared/attach-limits.ts";
 import { splitFileBlocks } from "../shared/file-blocks.ts";
 import type { EmptyStateKeyCommand } from "../shared/key-hints.ts";
@@ -169,6 +171,8 @@ export interface GuestChatPort<Tab extends GuestTab> {
 	recents: RecentSessions;
 	/** Open Keyboard Shortcuts filtered to the current key of one empty-state command; does nothing for a command with no key or none known yet. */
 	openKeyConflict(command: EmptyStateKeyCommand): Promise<void>;
+	/** Whether each reply's provider served another model than requested, by the installed OMP's classifier; one verdict per pair, in order. */
+	servedModels(pairs: ServedModelPair[]): Promise<ServedModelVerdict[]>;
 }
 
 /** The editor's document and session view: what a page's announcement and a mode request drive. */
@@ -721,6 +725,22 @@ export function registerGuestDispatcher<Tab extends GuestTab>(deps: GuestDispatc
 			case "omp:open-key-conflict": {
 				if (deps.tab(tabId)?.panel !== panel) return;
 				await deps.openKeyConflict(parsed.command);
+				return;
+			}
+			case "omp:served-models-request": {
+				if (deps.tab(tabId)?.panel !== panel) return;
+				const unknown = (): ServedModelVerdict[] => parsed.pairs.map(() => "unknown");
+				let verdicts: ServedModelVerdict[];
+				try {
+					const answered = await deps.servedModels(parsed.pairs);
+					verdicts = answered.length === parsed.pairs.length ? answered : unknown();
+				} catch (error) {
+					deps.log.warn(`tab ${tabId}: the served-model check failed: ${error instanceof Error ? error.message : String(error)}`);
+					verdicts = unknown();
+				}
+				if (deps.tab(tabId)?.panel !== panel) return;
+				const reply: GuestServedModelsMessage = { type: "omp:served-models", requestId: parsed.requestId, verdicts };
+				void panel.webview.postMessage(reply);
 				return;
 			}
 			case "omp:control-request":

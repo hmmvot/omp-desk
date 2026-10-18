@@ -885,10 +885,10 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await reset("thinking");
 			await ui.evaluate(`window.ui.thinking([{type:'thinking',thinking:''},{type:'thinking',thinking:'  \\n\\t  '},{type:'text',text:'Answer'}])`);
 			await ui.wait("document.querySelector('.omp-transcript')?.textContent.includes('Answer')");
-			assert.equal(await ui.evaluate("Array.from(document.querySelectorAll('.omp-native-disclosure summary')).filter(node => node.textContent?.startsWith('Thinking')).length"), 0);
+			assert.equal(await ui.evaluate("Array.from(document.querySelectorAll('.omp-native-disclosure summary')).filter(node => node.textContent?.startsWith('Thought')).length"), 0);
 			await ui.evaluate(`window.ui.thinking([{type:'thinking',thinking:'Reasoned conclusion',signature:'INTERNAL_THINKING_SIGNATURE'},{type:'redactedThinking',data:'INTERNAL_REDACTED_PAYLOAD'},{type:'text',text:'Answer'}])`);
-			await ui.wait("Array.from(document.querySelectorAll('.omp-native-disclosure summary')).filter(node => node.textContent?.startsWith('Thinking')).length === 1");
-			await ui.evaluate("Array.from(document.querySelectorAll('.omp-native-disclosure')).filter(node => node.querySelector(':scope > summary')?.textContent?.startsWith('Thinking')).forEach(node => node.open = true)");
+			await ui.wait("Array.from(document.querySelectorAll('.omp-native-disclosure summary')).filter(node => node.textContent === 'Thought').length === 1");
+			await ui.evaluate("Array.from(document.querySelectorAll('.omp-native-disclosure')).filter(node => node.querySelector(':scope > summary')?.textContent?.startsWith('Thought')).forEach(node => node.open = true)");
 			await ui.wait("document.querySelector('.omp-transcript')?.textContent.includes('Reasoned conclusion')");
 			assert.equal(await ui.evaluate("document.querySelector('.omp-transcript').textContent.includes('INTERNAL_')"), false);
 		});

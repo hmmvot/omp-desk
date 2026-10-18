@@ -42,6 +42,7 @@ import { isEmptyStateKeyCommand, type EmptyStateKeyCommand } from "../shared/key
 import { MAX_CHAT_IMAGE_BASE64_CHARS, MAX_CHAT_IMAGES_BASE64_CHARS, MAX_CHAT_TEXT_LENGTH, isChatImageMimeType, parseChatEpoch, parseChatHostMessage, parseChatWebviewMessage } from "./chat-messages.ts";
 import type { ChatHostMessage, ChatWebviewMessage } from "./chat-messages.ts";
 import type { ChatEpoch } from "../chat/model.ts";
+import type { ServedModelPair, ServedModelVerdict } from "../chat/served-model.ts";
 import { isPanelTabId } from "../shared/panel-identity.ts";
 import { isOpenableMermaidSource } from "./mermaid-preview.ts";
 import { parseFooterMetadata } from "../shared/footer-metadata.ts";
@@ -955,6 +956,7 @@ export type GuestHostMessage =
 	| GuestFileCompletionsMessage
 	| GuestAttachedFilesMessage
 	| GuestFilesReadMessage
+	| GuestServedModelsMessage
 	| GuestRecentSessionsMessage
 	| GuestControlStateMessage
 	| GuestPanelActionMessage
@@ -1036,6 +1038,31 @@ export interface GuestRecentSessionsRequestMessage {
 	type: "omp:recent-sessions-request";
 	/** Monotonic per panel; an answer for any other id is stale. */
 	requestId: number;
+}
+
+/** Most (provider, requested, served) triples one served-model request or answer carries. */
+export const SERVED_MODEL_PAIR_LIMIT = 8;
+/** Longest provider, requested or served id of a {@link ServedModelPair}. */
+export const SERVED_MODEL_TEXT_LIMIT = 256;
+
+/**
+ * Ask the extension host whether the provider served a different model than requested, decided by the
+ * installed OMP's own model classifier (the terminal UI's served-model marker). The page names only ids.
+ */
+export interface GuestServedModelsRequestMessage {
+	type: "omp:served-models-request";
+	/** Monotonic per panel; an answer for any other id is stale. */
+	requestId: number;
+	/** 1 to {@link SERVED_MODEL_PAIR_LIMIT} triples. */
+	pairs: ServedModelPair[];
+}
+
+/** Answer to {@link GuestServedModelsRequestMessage}: one verdict per requested pair, in the same order. */
+export interface GuestServedModelsMessage {
+	type: "omp:served-models";
+	/** Echoes the request this answers. */
+	requestId: number;
+	verdicts: ServedModelVerdict[];
 }
 
 /**
@@ -1203,6 +1230,7 @@ export type GuestWebviewMessage =
 	| GuestAttachUrisRequestMessage
 	| GuestPickFilesRequestMessage
 	| GuestReadFilesRequestMessage
+	| GuestServedModelsRequestMessage
 	| GuestRecentSessionsRequestMessage
 	| GuestOpenRecentMessage
 	| GuestControlRequestMessage
@@ -1481,6 +1509,15 @@ export function parseGuestHostMessage(value: unknown): GuestHostMessage | null {
 		// Truncated, not rejected, like the completions: the empty state stays bounded.
 		return { type: "omp:recent-sessions", requestId: value.requestId, items: items.slice(0, RECENT_SESSIONS_LIMIT) };
 	}
+	if (value.type === "omp:served-models") {
+		if (!isRequestId(value.requestId) || !Array.isArray(value.verdicts) || value.verdicts.length === 0 || value.verdicts.length > SERVED_MODEL_PAIR_LIMIT) return null;
+		const verdicts: ServedModelVerdict[] = [];
+		for (const candidate of value.verdicts) {
+			if (candidate !== "mismatch" && candidate !== "same" && candidate !== "unknown") return null;
+			verdicts.push(candidate);
+		}
+		return { type: "omp:served-models", requestId: value.requestId, verdicts };
+	}
 	if (value.type === "omp:control-state") return parseControlState(value);
 	if (value.type === "omp:insert-text") {
 		// One line only: a control character would corrupt the message and, once inserted, the
@@ -1686,6 +1723,17 @@ export function parseGuestWebviewMessage(value: unknown): GuestWebviewMessage | 
 		case "omp:recent-sessions-request": {
 			if (!isRequestId(value.requestId)) return null;
 			return { type: "omp:recent-sessions-request", requestId: value.requestId };
+		}
+		case "omp:served-models-request": {
+			if (!isRequestId(value.requestId) || !Array.isArray(value.pairs) || value.pairs.length === 0 || value.pairs.length > SERVED_MODEL_PAIR_LIMIT) return null;
+			const pairs: ServedModelPair[] = [];
+			for (const candidate of value.pairs) {
+				if (!isRecord(candidate)) return null;
+				const { provider, requested, served } = candidate;
+				if (!isNamedBoundaryText(provider, SERVED_MODEL_TEXT_LIMIT) || !isNamedBoundaryText(requested, SERVED_MODEL_TEXT_LIMIT) || !isNamedBoundaryText(served, SERVED_MODEL_TEXT_LIMIT)) return null;
+				pairs.push({ provider, requested, served });
+			}
+			return { type: "omp:served-models-request", requestId: value.requestId, pairs };
 		}
 		case "omp:open-recent": {
 			if (!isRequestId(value.requestId) || !isRequestId(value.index) || value.index >= RECENT_SESSIONS_LIMIT) return null;
