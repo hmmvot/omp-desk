@@ -27,7 +27,7 @@ function hintsOf(user: UserBinding[] = [], foreign: ForeignBinding[] = []): Map<
 	return new Map(computeKeyHints({ defaults: DEFAULTS, user, foreign }).map(({ hint }) => [hint.command, hint]));
 }
 const user = (entry: Partial<UserBinding> & { command: string }): UserBinding => ({ key: undefined, when: undefined, removal: false, ...entry });
-const foreign = (entry: Partial<ForeignBinding> & { key: string; command: string }): ForeignBinding => ({ by: "IntelliJ IDEA Keymap", when: undefined, removal: false, ...entry });
+const foreign = (entry: Partial<ForeignBinding> & { command: string }): ForeignBinding => ({ by: "IntelliJ IDEA Keymap", key: undefined, when: undefined, removal: false, ...entry });
 
 describe("normalizeKey and displayKey", () => {
 	it("gives two spellings of one key one form", () => {
@@ -213,6 +213,12 @@ describe("removals and the user's own entries, as VS Code resolves them", () => 
 		assert.equal(hintsOf([], [keymap({ command: THINKING, key: "alt+t", removal: true })]).get(THINKING)?.key, null, "the keymap removed our key");
 		const hints = hintsOf([], [foreign({ command: "git.sync", key: "alt+t" }), keymap({ command: "git.sync", key: "alt+t", removal: true })]);
 		assert.deepEqual(hints.get(THINKING)?.conflicts, [], "the removed binding takes nothing");
+	});
+
+	it("applies another extension's removal that names no key", () => {
+		assert.equal(hintsOf([], [foreign({ by: "Keymap", command: THINKING, removal: true })]).get(THINKING)?.key, null);
+		const parsed = foreignBindingsOf([{ id: "vendor.keymap", packageJSON: { contributes: { keybindings: [{ command: "-ompDesk.toggleThinking" }, { command: "x.noKey" }] } } }], "me.omp-desk");
+		assert.deepEqual(parsed, [{ by: "vendor.keymap", command: "ompDesk.toggleThinking", key: undefined, when: undefined, removal: true }]);
 	});
 
 	it("never removes a positive entry of the user's own file, and shows the last of the user's entries that can hold in the Chat", () => {

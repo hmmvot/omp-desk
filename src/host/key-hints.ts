@@ -36,7 +36,7 @@ export interface UserBinding {
 export interface ForeignBinding {
 	readonly by: string;
 	readonly command: string;
-	/** `undefined` only for a removal with no key (a manifest entry always has one: this is for the shape's sake). */
+	/** `undefined` only for a removal that names no key (VS Code then removes the command's bindings of every key). */
 	readonly key: string | undefined;
 	readonly when: string | undefined;
 	/** A `-command` entry: it takes the matching defaults away instead of binding anything. */
@@ -306,23 +306,27 @@ function textOf(value: unknown): string | undefined {
 }
 
 /** The keybindings an extension manifest contributes, `win` before `key`, as `{ command, key, when }`. An array, or the one object VS Code also accepts. */
-function manifestBindings(packageJSON: unknown): { command: string; key: string; when: string | undefined }[] {
+function manifestBindings(packageJSON: unknown): { command: string; key: string | undefined; when: string | undefined }[] {
 	const contributes = isRecord(packageJSON) ? packageJSON.contributes : undefined;
 	const raw = isRecord(contributes) ? contributes.keybindings : undefined;
 	const entries = Array.isArray(raw) ? raw.slice(0, MAX_ENTRIES) : isRecord(raw) ? [raw] : [];
-	const found: { command: string; key: string; when: string | undefined }[] = [];
+	const found: { command: string; key: string | undefined; when: string | undefined }[] = [];
 	for (const entry of entries) {
 		if (!isRecord(entry)) continue;
 		const command = textOf(entry.command);
 		const key = textOf(entry.win) ?? textOf(entry.key);
-		if (command !== undefined && key !== undefined) found.push({ command, key, when: textOf(entry.when) });
+		if (command !== undefined && (key !== undefined || command.startsWith("-"))) found.push({ command, key, when: textOf(entry.when) });
 	}
 	return found;
 }
 
 /** This extension's own bindings of `commands`, from its manifest. */
 export function defaultBindingsOf(packageJSON: unknown, commands: readonly string[]): DefaultBinding[] {
-	return manifestBindings(packageJSON).filter(binding => commands.includes(binding.command));
+	const found: DefaultBinding[] = [];
+	for (const binding of manifestBindings(packageJSON)) {
+		if (binding.key !== undefined && commands.includes(binding.command)) found.push({ command: binding.command, key: binding.key, when: binding.when });
+	}
+	return found;
 }
 
 /** What the installed extensions contribute that is not this extension's own: bindings and removals (`-command`). */
