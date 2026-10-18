@@ -5459,13 +5459,20 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
-		await t.test("while a turn runs only Desk's own commands are chips, because OMP does not scan a steered or queued message for commands and skills", async () => {
+		await t.test("while a turn runs a skill is still a chip, because the host sends it as a prompt OMP expands; other commands are chips only where Chat answers them itself", async () => {
 			await chipSetup("chips-working");
 			await setDraft("/skill:review x");
 			await waitChips(1);
 			await ui.evaluate("window.ui.push({working:true})");
-			await waitChips(0);
+			await settleFrames();
+			assert.equal((await commandChips())[0]!.label, "Skill review", "a skill invocation reaches OMP as a prompt whatever the turn is doing");
 			assert.equal(await draftValue(), "/skill:review x", "the draft is the same text");
+			await setDraft("please run /skill:review on it");
+			await waitDraft("window.composer.value()==='please run /skill:review on it'");
+			await waitChips(1);
+			await setDraft("/compact x");
+			await waitDraft("window.composer.value()==='/compact x'");
+			await waitChips(0);
 			await setDraft("/clear x");
 			await waitChips(1);
 			assert.equal((await commandChips())[0]!.label, "Command clear", "Chat answers its own commands whatever the turn is doing");
@@ -5473,10 +5480,11 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			await waitDraft("window.composer.value()==='/CLEAR x'");
 			await waitChips(1);
 			await setDraft("/skill:review x");
-			await waitDraft("window.composer.value()==='/skill:review x'");
-			await ui.evaluate("window.ui.push({working:false})");
 			await waitChips(1);
-			assert.equal((await commandChips())[0]!.label, "Skill review", "the turn ended: the next message is a prompt again");
+			await ui.evaluate("window.ui.push({working:false})");
+			await setDraft("/compact x");
+			await waitChips(1);
+			assert.equal((await commandChips())[0]!.label, "Command compact", "the turn ended: the next message is a prompt again");
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 

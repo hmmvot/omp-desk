@@ -14,11 +14,14 @@
  *   `<namespace>/<name>`) is a skill invocation as well, the first such token only, unless the draft starts with another
  *   slash command or with a local-execution sigil (`!`, `$ `, `$$ `);
  * - the skill must be one the session lists; an unknown name is ordinary text;
- * - all of it is the `prompt` command: while a turn runs the composer sends `steer` or `follow_up`, which OMP does not scan, so
- *   only Desk's own commands (answered by the host on every send path) stay chips then.
+ * - the skill rule itself is shared with the host (`chat/skill-invocation.ts`), which delivers a message that invokes a skill
+ *   while a turn runs as a `prompt` with `streamingBehavior` (the one path on which OMP expands it); every other message sent
+ *   during a turn is a `steer` or `follow_up`, which OMP does not scan, so then only skills and Desk's own commands (answered by
+ *   the host on every send path) stay chips.
  * A chip is drawn for the token OMP would act on, and only once the name is complete: whitespace must follow it.
  */
 import type { ChatSlashCommand } from "../../chat/model.ts";
+import { SKILL_PREFIX, SKILL_TOKEN, startsWithLocalExecution } from "../../chat/skill-invocation.ts";
 import { findReferences, type IsKnownReference, type ReferenceSpan } from "./image-references.ts";
 import { slashCatalogue } from "./slash-completion.ts";
 
@@ -45,16 +48,17 @@ const DESK_SOURCE = "OMP Desk";
 /**
  * The resolver of one catalogue: Desk's own commands and what the session advertises (denied identity-changing builtins are not in it,
  * so they stay plain text and are refused at send as before). Names and aliases match exactly, case included, as OMP's own lookup does,
- * except Desk's own commands, which Chat's interceptors match in any case. While `working` the composer sends `steer` or `follow_up`,
- * which OMP does not scan for commands and skills, so only Desk's own commands are known then.
+ * except Desk's own commands, which Chat's interceptors match in any case. While `working` a message is steered or queued, which OMP
+ * does not scan for commands, so only Desk's own commands and the skills are known then: the host sends a skill invocation as a
+ * `prompt` with `streamingBehavior`, the one path OMP expands it on.
  */
 export function commandResolver(commands: readonly ChatSlashCommand[], working: boolean = false): ResolveCommand {
 	const kinds = new Map<string, CommandKind>();
 	const own = new Map<string, CommandKind>();
 	for (const command of slashCatalogue(commands)) {
 		const desk = command.source === DESK_SOURCE;
-		if (working && !desk) continue;
 		const kind: CommandKind = command.source === "skill" ? "skill" : "command";
+		if (working && !desk && kind !== "skill") continue;
 		for (const name of [command.name, ...(command.aliases ?? [])]) {
 			if (!kinds.has(name)) kinds.set(name, kind);
 			if (desk) own.set(name.toLowerCase(), kind);
@@ -63,18 +67,7 @@ export function commandResolver(commands: readonly ChatSlashCommand[], working: 
 	return name => kinds.get(name) ?? own.get(name.toLowerCase()) ?? null;
 }
 
-const SKILL_PREFIX = "/skill:";
-/** OMP's `SKILL_TOKEN_RE` without the global flag: group 1 is the delimiter before the token, group 2 the name. */
-const SKILL_TOKEN = /(^|\s)\/skill:([^\s/]+(?:\/[^\s/]+)?)(?=\s|$)/;
 const WHITESPACE = /\s/;
-
-/** Whether the left-trimmed draft begins with a TUI local-execution sigil, whose body OMP takes verbatim (so no skill token in it is an invocation). */
-function startsWithLocalExecution(trimmed: string): boolean {
-	if (trimmed.startsWith("!")) return true;
-	if (trimmed.charCodeAt(0) !== 36 /* $ */ || trimmed.charCodeAt(1) === 123 /* { */) return false;
-	const next = trimmed.charCodeAt(trimmed.charCodeAt(1) === 36 ? 2 : 1);
-	return Number.isNaN(next) || next === 32 || next === 9 || next === 10 || next === 13;
-}
 
 function tokenEnd(text: string, from: number): number {
 	let end = from;

@@ -68,6 +68,7 @@ import {
 	type ClearRefusal,
 } from "../../chat/clear.ts";
 import type { ForkSource } from "../../chat/fork.ts";
+import { invokesListedSkill } from "../../chat/skill-invocation.ts";
 import {
 	NAVIGATE_COMMAND,
 	NAVIGATE_ERROR_PATH,
@@ -949,22 +950,33 @@ export class RpcSession {
 			}
 			const refusal = this.#controlRefusal() ?? await this.#applyHeldBeforeSend() ?? this.#controlRefusal();
 			if (refusal !== null) return { status: "refused", reason: refusal };
-			this.cancelDeferredClear();
-			this.#slashArmed = request.text.trimStart().startsWith("/");
-			this.#remember({ requestId: request.requestId, text: request.text, sentAt: this.#timers.now(), unconfirmed: false });
-			return this.#sendUser(request.requestId, {
-				type: "prompt",
-				message: request.text,
-				...(request.images !== undefined && request.images.length > 0 ? { images: request.images } : {}),
-				streamingBehavior: request.streamingBehavior ?? "steer",
-			});
+			return this.#sendPrompt(request, request.streamingBehavior ?? "steer");
 		});
 	}
 
+	/** The `prompt` command itself: accounted like any prompt (ledger entry until its `prompt_result`, slash identity re-check). */
+	#sendPrompt(request: PromptRequest, streamingBehavior: "steer" | "followUp"): Promise<SendOutcome> {
+		this.cancelDeferredClear();
+		this.#slashArmed = request.text.trimStart().startsWith("/");
+		this.#remember({ requestId: request.requestId, text: request.text, sentAt: this.#timers.now(), unconfirmed: false });
+		return this.#sendUser(request.requestId, {
+			type: "prompt",
+			message: request.text,
+			...(request.images !== undefined && request.images.length > 0 ? { images: request.images } : {}),
+			streamingBehavior,
+		});
+	}
+
+	/**
+	 * OMP's `steer` and `follow_up` queue the text as it is, and only `prompt` expands a `/skill:<name>` invocation
+	 * (`dispatchRpcSkillPrompt`, which queues the expanded skill under the same `streamingBehavior`): a skill the session
+	 * lists therefore goes as a `prompt` whichever queue the user chose, and everything else keeps its own command.
+	 */
 	steer(request: MessageRequest): Promise<SendOutcome> {
 		return this.#once(request.requestId, async () => {
 			const refusal = this.#controlRefusal() ?? await this.#applyHeldBeforeSend() ?? this.#controlRefusal();
 			if (refusal !== null) return { status: "refused", reason: refusal };
+			if (invokesListedSkill(request.text, this.#model.commands)) return this.#sendPrompt(request, "steer");
 			this.cancelDeferredClear();
 			return this.#sendUser(request.requestId, {
 				type: "steer",
@@ -978,6 +990,7 @@ export class RpcSession {
 		return this.#once(request.requestId, async () => {
 			const refusal = this.#controlRefusal() ?? await this.#applyHeldBeforeSend() ?? this.#controlRefusal();
 			if (refusal !== null) return { status: "refused", reason: refusal };
+			if (invokesListedSkill(request.text, this.#model.commands)) return this.#sendPrompt(request, "followUp");
 			this.cancelDeferredClear();
 			return this.#sendUser(request.requestId, {
 				type: "follow_up",

@@ -72,3 +72,34 @@ test("a skill and a command typed or picked in a real Chat are chips, and Backsp
 		await box.screenshot({ path: join(shots, "chat-command-chip-skill.png") });
 	}
 });
+
+/** The model-visible user text of every request the mock has seen. */
+async function modelPrompts(mockUrl: string): Promise<string[]> {
+	const requests: { fullUserText: string }[] = await (await fetch(`${mockUrl}/__requests`)).json();
+	return requests.map(request => request.fullUserText);
+}
+
+test("a skill sent while a turn runs is expanded by OMP, steered or queued as a follow-up, and is drawn as a chip meanwhile", async ({ desk, state }) => {
+	test.setTimeout(300_000);
+	const page = await desk.window("alpha-desk");
+	await desk.ready(page);
+	const chat = await desk.newChatSession(page, "alpha-desk");
+	const stop = chat.getByRole("button", { name: "Stop the running turn" });
+	for (const [how, send] of [["steer", "Enter"], ["follow-up", "Alt+Enter"]] as const) {
+		const marker = `${how}-${Date.now().toString(36)}`;
+		await desk.send(chat, `[slow] ${marker} ${"streaming ".repeat(40)}`);
+		await expect(stop, "a turn is running").toBeVisible({ timeout: 60_000 });
+		const busy = desk.composerWhileBusy(chat);
+		await busy.click();
+		await busy.pressSequentially(`/skill:${SKILL_NAME} ${marker}`);
+		await expect(chips(chat), "the skill is a chip during the turn").toHaveCount(1, { timeout: 30_000 });
+		await expect(chips(chat).first()).toHaveAttribute("data-kind", "skill");
+		await busy.press(send);
+		// The model receives the skill's body, not the literal token.
+		await expect.poll(async () => (await modelPrompts(state.mockUrl)).some(text => text.includes("Nothing to do.") && text.includes(marker)), { timeout: 150_000, message: `the ${how}'s skill was expanded` }).toBe(true);
+		await expect(chat.locator(".omp-native-skill").filter({ hasText: marker }), "the transcript shows a skill row").toHaveCount(1, { timeout: 60_000 });
+		const literal = (await modelPrompts(state.mockUrl)).filter(text => text.trimStart().startsWith(`/skill:${SKILL_NAME} ${marker}`));
+		expect(literal, "no request carries the literal token as its message").toEqual([]);
+		await expect(stop, "the turns end").toHaveCount(0, { timeout: 150_000 });
+	}
+});
