@@ -3,9 +3,11 @@
  * showing a commit runs commands of VS Code's Source Control Graph. A link exists only for the commit HEAD points at, so this
  * module also watches each repository's HEAD and says when it moved. Created once per extension host, which is per window.
  */
+import * as path from "node:path";
 import * as vscode from "vscode";
 import { CommitLinkResolver, GRAPH_FOCUS, GRAPH_REVEAL_HEAD } from "../host/commit-links.ts";
 import type { CommitOpenEnv, CommitRepository } from "../host/commit-links.ts";
+import { graphRefId, readGraphFilter } from "../host/graph-filter.ts";
 import { gitApi } from "./git-api.ts";
 import type { GitRepository } from "./git-api.ts";
 
@@ -22,7 +24,9 @@ export interface CommitLinks {
  * repository opened or closed, with a burst of such changes coalesced; the resolver's remembered answers are dropped first.
  * Changes of the index or the working tree are not HEAD changes and report nothing.
  */
-export function createCommitLinks(subscriptions: { push(...items: vscode.Disposable[]): number }, log: (message: string) => void, onHeadChanged: () => void): CommitLinks {
+export function createCommitLinks(subscriptions: { push(...items: vscode.Disposable[]): number }, extensionStorage: vscode.Uri | undefined, log: (message: string) => void, onHeadChanged: () => void): CommitLinks {
+	// This extension's workspace storage folder is a child of the folder VS Code keeps the workspace's own storage (`state.vscdb`) in.
+	const workspaceStorage = extensionStorage === undefined ? undefined : path.dirname(extensionStorage.fsPath);
 	let watching = false;
 	const heads = new Map<GitRepository, { head: string | undefined; listener: vscode.Disposable }>();
 	/** One `git status` per repository however many links ask at once. */
@@ -73,6 +77,8 @@ export function createCommitLinks(subscriptions: { push(...items: vscode.Disposa
 					}
 					return read;
 				},
+				headRef: () => graphRefId(repository.state.HEAD),
+				graphFilter: () => readGraphFilter(workspaceStorage, repository.rootUri.toString()),
 			}));
 		},
 	});

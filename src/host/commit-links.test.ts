@@ -6,6 +6,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { GRAPH_FOCUS, GRAPH_REVEAL_HEAD, CommitLinkResolver, handleCommitLink, openCommit, repositoriesContaining, whyNotShowable } from "./commit-links.ts";
 import type { CommitHit, CommitLinkHost, CommitOpenEnv, CommitRepository } from "./commit-links.ts";
+import type { GraphFilter } from "./graph-filter.ts";
 import type { TerminalLinkRequest, TerminalLinkValidation } from "../shared/terminal-links.ts";
 
 const FULL = "c7398070aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -15,11 +16,15 @@ interface FakeRepo extends CommitRepository {
 	readonly calls: string[];
 	/** The commit HEAD points at. */
 	head: string | undefined;
+	/** The Graph's id for the checked-out reference. */
+	ref: string | undefined;
+	/** What the Graph's filter is set to. */
+	filter: GraphFilter;
 }
 
 /** A repository that answers nothing. */
 function inert(root: string): CommitRepository {
-	return { root, getCommit: async () => { throw new Error("unused"); }, headCommit: async () => undefined };
+	return { root, getCommit: async () => { throw new Error("unused"); }, headCommit: async () => undefined, headRef: () => undefined, graphFilter: () => ({ kind: "unlimited" }) };
 }
 
 /** A repository whose commits are `commits` (full hashes): a hex resolves when exactly one starts with it; `refs` are branch names that resolve to a commit whatever they look like. */
@@ -28,6 +33,8 @@ function repo(root: string, commits: readonly string[], refs: Record<string, str
 		root,
 		calls: [],
 		head: undefined,
+		ref: "refs/heads/main",
+		filter: { kind: "unlimited" },
 		async getCommit(ref) {
 			state.calls.push(ref);
 			if (refs[ref] !== undefined) return { hash: refs[ref]! };
@@ -36,6 +43,8 @@ function repo(root: string, commits: readonly string[], refs: Record<string, str
 			return { hash: matches[0]!.toUpperCase() };
 		},
 		headCommit: async () => state.head,
+		headRef: () => state.ref,
+		graphFilter: () => state.filter,
 	};
 	return state;
 }
@@ -115,6 +124,8 @@ test("at most two lookups run at once, and a lookup that does not settle in time
 			return { hash: ref.padEnd(40, "0") };
 		},
 		headCommit: async () => undefined,
+		headRef: () => undefined,
+		graphFilter: () => ({ kind: "unlimited" }),
 	};
 	const resolver = resolverOf([slow]);
 	const all = ["1234567", "2345678", "3456789", "4567890"].map(hex => resolver.lookup("C:\\work", hex));
@@ -191,7 +202,7 @@ test("a click on the HEAD commit shows the Graph and selects it there, and opens
 	const commands = registry();
 	assert.equal(await openCommit(hitOf(project), commands.env), null);
 	assert.deepEqual(commands.ran, [{ command: GRAPH_FOCUS, args: [] }, { command: GRAPH_REVEAL_HEAD, args: [] }], "no editor, no diff, no command of an extension");
-	assert.deepEqual(commands.logged, [`commit link ${SHORT}: HEAD, graph, select in graph`], "one line per click names the steps");
+	assert.deepEqual(commands.logged, [`commit link ${SHORT}: HEAD, graph, graph filter unlimited, select in graph`], "one line per click names the steps");
 });
 
 test("a click on a commit that is no longer HEAD, or where there is no Graph, runs nothing and says why", async () => {
@@ -216,11 +227,66 @@ test("a view that will not take the focus does not stop the selection; a selecti
 	noFocus.failing.add(GRAPH_FOCUS);
 	assert.equal(await openCommit(hitOf(project), noFocus.env), null);
 	assert.deepEqual(noFocus.ran.map(run => run.command), [GRAPH_FOCUS, GRAPH_REVEAL_HEAD]);
-	assert.match(noFocus.logged[0] ?? "", /HEAD, graph failed: .*, select in graph$/);
+	assert.match(noFocus.logged[0] ?? "", /HEAD, graph failed: .*, graph filter unlimited, select in graph$/);
 	const noSelect = registry();
 	noSelect.failing.add(GRAPH_REVEAL_HEAD);
 	await assert.rejects(openCommit(hitOf(project), noSelect.env), /revealCurrentHistoryItem failed/);
-	assert.match(noSelect.logged[0] ?? "", /HEAD, graph, select in graph failed: .*revealCurrentHistoryItem failed$/, "a refused click is logged too");
+	assert.match(noSelect.logged[0] ?? "", /HEAD, graph, graph filter unlimited, select in graph failed: .*revealCurrentHistoryItem failed$/, "a refused click is logged too");
+});
+
+test("a click while the Graph's filter hides the current branch shows the Graph, selects nothing and logs the filter; every other filter selects", async () => {
+	const project = repo("C:\\work\\project", [FULL]);
+	project.head = FULL;
+	project.filter = { kind: "refs", refs: ["refs/heads/other"] };
+	const hidden = registry();
+	assert.deepEqual(await openCommit(hitOf(project), hidden.env), { reason: "filtered", ref: "refs/heads/main" });
+	assert.deepEqual(hidden.ran.map(run => run.command), [GRAPH_FOCUS], "the Graph comes into view, with its filter button; the selection action, which would do nothing, is not run");
+	assert.deepEqual(hidden.logged, [`commit link ${SHORT}: HEAD, graph, graph filter hides refs/heads/main (filter: refs/heads/other)`]);
+
+	project.filter = { kind: "refs", refs: [] };
+	const empty = registry();
+	assert.deepEqual(await openCommit(hitOf(project), empty.env), { reason: "filtered", ref: "refs/heads/main" }, "a filter of no reference hides it too");
+	assert.match(empty.logged[0] ?? "", /\(filter: no reference\)$/);
+
+	project.ref = FULL;
+	project.filter = { kind: "refs", refs: ["refs/heads/main"] };
+	assert.deepEqual(await openCommit(hitOf(project), registry().env), { reason: "filtered", ref: FULL }, "a detached HEAD is a commit the filter does not list");
+
+	project.ref = "refs/heads/main";
+	for (const [filter, logged] of [
+		[{ kind: "refs", refs: ["refs/heads/other", "refs/heads/main"] }, "graph filter includes HEAD"],
+		[{ kind: "unlimited" }, "graph filter unlimited"],
+		[{ kind: "unreadable", why: "database is locked" }, "graph filter unreadable: database is locked"],
+	] as const) {
+		project.filter = filter;
+		const shown = registry();
+		assert.equal(await openCommit(hitOf(project), shown.env), null, logged);
+		assert.deepEqual(shown.ran.map(run => run.command), [GRAPH_FOCUS, GRAPH_REVEAL_HEAD]);
+		assert.deepEqual(shown.logged, [`commit link ${SHORT}: HEAD, graph, ${logged}, select in graph`]);
+	}
+
+	project.ref = undefined;
+	project.filter = { kind: "refs", refs: ["refs/heads/other"] };
+	assert.equal(await openCommit(hitOf(project), registry().env), null, "a HEAD with no reference is not hidden by any filter");
+});
+
+test("a click the Graph's filter hides warns how to fix it, keeps the link and does not ask the page to re-validate", async () => {
+	const project = repo("C:\\work\\project", [FULL]);
+	project.head = FULL;
+	project.filter = { kind: "refs", refs: ["refs/heads/other"] };
+	const resolver = resolverOf([project]);
+	const talk = exchange();
+	const commands = registry();
+	await handleCommitLink(request("omp:terminal-link-open", "commit://c7398070"), resolver, commands.env, talk.host);
+	assert.deepEqual(talk.warnings, [`commit c7398070 is not selected: the Source Control Graph's filter hides the current branch (main). In the Graph, choose "Auto" or include main in its filter.`]);
+	assert.deepEqual([talk.revalidations, talk.replies], [0, []], "the commit is still HEAD: the link stays");
+	project.ref = FULL;
+	await handleCommitLink(request("omp:terminal-link-open", "commit://c7398070"), resolver, registry().env, talk.host);
+	assert.match(talk.warnings[1] ?? "", /hides the current commit \(c7398070aaaa\)\. In the Graph, choose "Auto" or include it in its filter\.$/);
+	talk.warnings.length = 0;
+	project.ref = "refs/tags/v1";
+	await handleCommitLink(request("omp:terminal-link-open", "commit://c7398070"), resolver, registry().env, talk.host);
+	assert.match(talk.warnings[0] ?? "", /hides the current tag \(v1\)\. In the Graph, choose "Auto" or include v1 in its filter\.$/);
 });
 
 test("the wait for a free slot counts toward a lookup's time, and a lookup that timed out while it waited starts no git process", async () => {

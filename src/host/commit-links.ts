@@ -10,11 +10,15 @@
  * 1. the Source Control Graph view is shown (`workbench.scm.history.focus`);
  * 2. the Graph selects the commit (`workbench.scm.action.graph.revealCurrentHistoryItem`, which selects the current HEAD item).
  *
+ * That action does nothing, silently, while the Graph's reference filter hides the current branch, so the click reads the filter
+ * first (`graph-filter.ts`) and, when it hides the checked-out reference, shows a notice that says how to put it back instead.
  * A click on a link whose commit has stopped being HEAD shows a notice, opens nothing and tells the page to ask again. When HEAD moves
  * the wiring tells every page the same way (`CommitLinksChanged`).
  *
  * Nothing here takes a path or a repository from the page, runs a `git` process of its own or executes a command the page names.
  */
+import { describeGraphRef } from "./graph-filter.ts";
+import type { GraphFilter } from "./graph-filter.ts";
 import { isInside } from "./link-scope.ts";
 import { MAX_COMMIT_HASH_LENGTH, parseCommitLinkTarget } from "../shared/commit-links.ts";
 import type { TerminalLinkRequest, TerminalLinkValidation } from "../shared/terminal-links.ts";
@@ -27,6 +31,10 @@ export interface CommitRepository {
 	getCommit(ref: string): Promise<{ readonly hash: string }>;
 	/** The commit HEAD points at (a detached HEAD included), read after the Git extension refreshed its state; `undefined` for a branch with no commit yet or a refresh that failed. */
 	headCommit(): Promise<string | undefined>;
+	/** The id the Graph gives the checked-out reference (`refs/heads/main`; the commit when HEAD is detached); `undefined` when there is none. */
+	headRef(): string | undefined;
+	/** What the Graph's reference filter is set to for this repository now. */
+	graphFilter(): GraphFilter;
 }
 
 /** A commit that exists: `hash` is its full lower-case hash. */
@@ -168,6 +176,12 @@ export const GRAPH_REVEAL_HEAD = "workbench.scm.action.graph.revealCurrentHistor
 /** Why a commit is not shown: it is not what HEAD points at (`head` is what does), or this VS Code has no Graph to show it in. */
 export type CommitUnshowable = { readonly reason: "not-head"; readonly head: string | undefined } | { readonly reason: "no-graph" };
 
+/** A click found that the Graph's filter hides the checked-out reference `ref` (a Graph reference id such as `refs/heads/main`): its selection action would do nothing. */
+export interface CommitFiltered {
+	readonly reason: "filtered";
+	readonly ref: string;
+}
+
 /** `null` when `hit` is the HEAD commit and the Graph is there: the one case in which it is a link. */
 export async function whyNotShowable(hit: CommitHit, env: CommitOpenEnv): Promise<CommitUnshowable | null> {
 	const head = (await hit.repo.headCommit().catch(() => undefined))?.toLowerCase();
@@ -179,7 +193,7 @@ export async function whyNotShowable(hit: CommitHit, env: CommitOpenEnv): Promis
  * Select the commit in the Graph. `null` when it was shown, otherwise the reason it was not (and nothing was opened); rejects when the
  * Graph refused the selection. Writes one log line.
  */
-export async function openCommit(hit: CommitHit, env: CommitOpenEnv): Promise<CommitUnshowable | null> {
+export async function openCommit(hit: CommitHit, env: CommitOpenEnv): Promise<CommitUnshowable | CommitFiltered | null> {
 	const short = hit.hash.slice(0, 12);
 	const refused = await whyNotShowable(hit, env);
 	if (refused !== null) {
@@ -190,6 +204,14 @@ export async function openCommit(hit: CommitHit, env: CommitOpenEnv): Promise<Co
 	try {
 		// A view that will not take the focus does not stop the selection: the action selects the item in the view wherever it is.
 		await env.run(GRAPH_FOCUS).then(() => steps.push("graph"), error => steps.push(`graph failed: ${error instanceof Error ? error.message : String(error)}`));
+		// The action selects nothing, and says nothing, while the Graph's filter hides the current branch: look at the filter first, so the click can say so.
+		const filter = hit.repo.graphFilter();
+		const ref = hit.repo.headRef();
+		if (filter.kind === "refs" && ref !== undefined && !filter.refs.includes(ref)) {
+			steps.push(`graph filter hides ${ref} (filter: ${filter.refs.join(", ") || "no reference"})`);
+			return { reason: "filtered", ref };
+		}
+		steps.push(filter.kind === "unreadable" ? `graph filter unreadable: ${filter.why}` : `graph filter ${filter.kind === "refs" ? "includes HEAD" : "unlimited"}`);
 		try {
 			await env.run(GRAPH_REVEAL_HEAD);
 			steps.push("select in graph");
@@ -237,6 +259,11 @@ export async function handleCommitLink(request: TerminalLinkRequest, resolver: C
 	try {
 		const refused = await openCommit(hit, env);
 		if (refused === null) return;
+		if (refused.reason === "filtered") {
+			const { noun, name } = describeGraphRef(refused.ref);
+			host.warn(`commit ${hex} is not selected: the Source Control Graph's filter hides the current ${noun} (${name}). In the Graph, choose "Auto" or include ${noun === "commit" ? "it" : name} in its filter.`);
+			return;
+		}
 		host.warn(refused.reason === "no-graph"
 			? `cannot show commit ${hex}: this VS Code has no Source Control Graph.`
 			: `commit ${hex} is no longer the current commit, so the Graph cannot select it.`);

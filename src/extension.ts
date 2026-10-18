@@ -10424,7 +10424,7 @@ async function handleTerminalGuestMessage(
       // A commit hash (`commit://<hex>`) is proved and shown against the repositories of this session's folder, never as a file of the cwd.
       if (typeof payload.target === "string" && parseCommitLinkTarget(payload.target) !== null) {
         s.commitAskers.add(state.slotId);
-        const links = s.commitLinks ??= createCommitLinks(s.context?.subscriptions ?? { push: () => 0 }, line => log.info(line), () => {
+        const links = s.commitLinks ??= createCommitLinks(s.context?.subscriptions ?? { push: () => 0 }, s.context?.storageUri, line => log.info(line), () => {
           for (const slotId of [...s.commitAskers]) {
             if (stateOf(slotId) === undefined) s.commitAskers.delete(slotId);
             else pushTerminalTo(slotId, { type: "omp:terminal-link-commits-changed" });
