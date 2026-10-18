@@ -12,6 +12,12 @@ import type { ExplicitFileLink } from "./FileLinks";
 import { fmtDuration, fmtTokens } from "../../shared/format";
 import { useLiveDurations } from "../lib/live-clock";
 import { CodePreview, Diagnostics, DiffPreview, groupedFiles, JsonOutput, LimitedList, Link, MatchOutput, OutputText, record, records, scalar, Section, string, strings, TextPreview, ToolImage } from "./tool-renderer-primitives";
+import { isAutoresearchTool } from "../../chat/autoresearch";
+import { isMcpToolName } from "../../chat/mcp-tool";
+import { yieldItems, yieldLabels } from "../../chat/yield-submission";
+import { autoresearchToolRenderers } from "./autoresearch-tool-renderers";
+import { mcpTool } from "./mcp-tool-renderer";
+import { yieldTool } from "./yield-tool-renderer";
 import { AgentProgressView } from "./AgentProgress";
 import { DEBUG_TOOL_ICONS, debugToolRenderers } from "./debug-tool-renderers";
 import type { ToolRenderContext, ToolSemanticView } from "./tool-render-types";
@@ -416,15 +422,14 @@ function finding(value: unknown): Finding | null {
 }
 function TaskReview({ row }: { row: Record<string, unknown> }): ReactNode {
 	const extracted = record(row.extractedToolData);
-	const rawYields = extracted.yield;
-	const yields = records(Array.isArray(rawYields) ? rawYields : isRecord(rawYields) ? [rawYields] : []);
+	const yields = yieldItems(extracted.yield);
 	// Native reviewer yields append array sections and replace scalar sections; a terminal payload wins.
 	let data = record(record(row.structuredOutput).data);
 	const sections: Record<string, unknown> = {};
 	let terminal: Record<string, unknown> | undefined;
 	for (const item of yields) {
 		if (item.status === "aborted") continue;
-		const names = strings(item.type);
+		const names = yieldLabels(item.type);
 		if (names.length === 0 || names.includes("result")) { if (isRecord(item.data)) terminal = item.data; continue; }
 		for (const name of names) {
 			const value = names.length > 1 ? record(item.data)[name] : item.data;
@@ -558,10 +563,10 @@ function write(c: ToolRenderContext): ToolSemanticView {
 	if (route.kind === "config") return config(c, true);
 	if (route.kind === "help") return { title: route.name, family: "xd-help", target: "Help", body: <TextPreview text={c.text} expanded={c.expanded} lines={8} /> };
 	if (route.kind === "device") {
-		const renderer = Object.hasOwn(nativeToolRenderers, route.name) ? nativeToolRenderers[route.name] : undefined;
+		const renderer = rendererFor(route.name);
 		// Device writes are resolved once; never recursively route or execute callbacks.
 		const inner = { ...c, name: route.name, args: presentArgs(route.args), details: route.details };
-		if (renderer && route.name !== "write") return { ...renderer(inner), icon: TOOL_ICONS[route.name] ?? "tools" };
+		if (renderer && route.name !== "write") { const view = renderer(inner); return { ...view, icon: view.icon ?? TOOL_ICONS[route.name] ?? "tools" }; }
 		return { ...unknown(inner), icon: "tools" };
 	}
 	const content = typeof c.args.content === "string" ? c.args.content : scalar(c.args.content);
@@ -583,17 +588,32 @@ export const TOOL_ICONS: Readonly<Record<string, string>> = {
 	resolve: "check", reject: "circle-slash", retain: "bookmark", recall: "history", reflect: "lightbulb",
 	task: "organization", think: "lightbulb", todo: "checklist", web_search: "globe",
 	vibe_spawn: "run", vibe_send: "send", vibe_wait: "watch", vibe_kill: "debug-stop", vibe_list: "list-tree", write: "edit",
+	yield: "pass", init_experiment: "beaker", log_experiment: "beaker", run_experiment: "beaker", update_notes: "notebook",
 	...DEBUG_TOOL_ICONS,
 };
 export const nativeToolRenderers: Record<string, ToolRenderer> = {
 	ask, ast_grep: astGrep, ast_edit: astEdit, bash, debug, edit, apply_patch: edit, eval: evaluate,
 	find, github, glob, grep, lsp, wait, read, resolve: resolution, reject: resolution,
-	retain, recall, reflect, task, think, todo, goal, web_search: webSearch,
+	retain, recall, reflect, task, think, todo, goal, web_search: webSearch, yield: yieldTool,
 	vibe_spawn: vibe, vibe_send: vibe, vibe_wait: vibe, vibe_kill: vibe, vibe_list: vibe, write,
+	...autoresearchToolRenderers,
 	...debugToolRenderers,
 };
+/** The renderer of a tool: a native one by its name, the MCP renderer for any minted MCP name; `undefined` for a tool OMP Desk has no renderer for. */
+function rendererFor(name: string): ToolRenderer | undefined {
+	if (Object.hasOwn(nativeToolRenderers, name)) return nativeToolRenderers[name];
+	return isMcpToolName(name) ? mcpTool : undefined;
+}
+/**
+ * Tools whose one-line face (title, target, the facts of the outcome) is the renderer's: an MCP call's `server/tool` and arguments summary, a
+ * yield's section, an experiment's disposition. The card builds their view while closed, as it does for Wait and Debug.
+ */
+export type RendererFace = "yield" | "autoresearch" | "mcp";
+export function rendererFace(name: string): RendererFace | undefined {
+	return name === "yield" ? "yield" : isAutoresearchTool(name) ? "autoresearch" : isMcpToolName(name) ? "mcp" : undefined;
+}
 export function describeTool(context: ToolRenderContext): ToolSemanticView {
-	const renderer = Object.hasOwn(nativeToolRenderers, context.name) ? nativeToolRenderers[context.name]! : unknown;
+	const renderer = rendererFor(context.name) ?? unknown;
 	const args = presentArgs(context.args);
 	const view = renderer(args === context.args ? context : { ...context, args });
 	return { ...view, icon: view.icon ?? (Object.hasOwn(TOOL_ICONS, context.name) ? TOOL_ICONS[context.name] : "tools") };

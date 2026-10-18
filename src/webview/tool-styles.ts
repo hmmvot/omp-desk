@@ -153,4 +153,9 @@ export const TOOL_STYLES = `
 .omp-window .omp-row { height: var(--omp-row-h); }
 .omp-fold-all { display: inline-flex; }
 @media (max-width: 460px) { .omp-fold-all { display: none; } }
+/* A tool's own error or note in full (a rejected yield names every offending field), and a label/value grid (an experiment's metric against its baseline). */
+.omp-tool-wrap { white-space: pre-wrap; overflow-wrap: anywhere; }
+.omp-tool-kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 4px 0; }
+.omp-tool-kv > dt { color: var(--omp-muted); }
+.omp-tool-kv > dd { margin: 0; font-variant-numeric: tabular-nums; }
 `;

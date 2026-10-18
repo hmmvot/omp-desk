@@ -10,7 +10,7 @@ import { ToolTargetText } from "./FileLinks";
 import { MessageContentView } from "./MessageContent";
 import { lateDiagnosticsFiles, recordRows, stringField } from "./native-message-helpers";
 import { Diagnostics, displayText, JsonOutput, OUTPUT_SCOPE, record, scalar, Section, TextPreview } from "./tool-renderer-primitives";
-import { describeTool, hasNoDetails, hasWaitRows, TOOL_ICONS } from "./tool-renderers";
+import { describeTool, hasNoDetails, hasWaitRows, rendererFace, TOOL_ICONS } from "./tool-renderers";
 import type { ToolSemanticView } from "./tool-render-types";
 import { formatGistDuration, toolGist, type GistPart } from "../../chat/tool-gist";
 import { stripSkillHeader } from "../../chat/skill-read";
@@ -133,9 +133,10 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 	// Wait owns its clock; Ask names the user wait even while its details are closed.
 	const waitFace = name === "wait";
 	const pendingAsk = metadata.route.name === "ask" && result === undefined && (state === "running" || state === "queued");
-	// The host-run debug tools carry their one-line face (outcome, clock) in their renderer, so it is built while collapsed too.
+	// The host-run debug tools carry their one-line face (outcome, clock) in their renderer, so it is built while collapsed too; so do yield, MCP and autoresearch calls.
 	const debugFace = Object.hasOwn(DEBUG_TOOL_TITLES, name);
-	const view = showBody || waitFace || debugFace || metadata.route.name === "ask" ? frozen && retainedView.current ? retainedView.current : describeTool({
+	const rendererKind = rendererFace(metadata.route.name);
+	const view = showBody || waitFace || debugFace || rendererKind !== undefined || metadata.route.name === "ask" ? frozen && retainedView.current ? retainedView.current : describeTool({
 		name, args: record(args), details, stream, text, expanded: full, partial,
 		hasResult: metadata.route.name === "ask" ? result !== undefined : source !== undefined, isError: state === "error",
 		callId: props.callId, agents: props.agents, agentActivity: props.agentActivity, renderChild: props.renderChild, cwd: props.cwd,
@@ -146,8 +147,8 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 	const errorText = failed ? scalar(details.error) : "";
 	const route = metadata.route;
 	const exit = route.name === "bash" ? exitCodeOf(route.details, split.notices) : undefined;
-	// The Wait, Debug and Ask faces say their facts in the head even while closed; every other card says them in its output bar.
-	const metaInHead = waitFace || debugFace || route.name === "ask";
+	// The Wait, Debug, Ask and renderer faces say their facts in the head even while closed; every other card says them in its output bar.
+	const metaInHead = waitFace || debugFace || rendererKind !== undefined || route.name === "ask";
 	const chips = metaInHead ? [] : view?.meta ?? [];
 	// A format detected in the output (once it settled): its badge, the Formatted | Text switch and the fold buttons live in the bar.
 	const structuredText = view?.output?.structured;
@@ -253,7 +254,7 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 	const aux = intent?.replace(/\s+/g, " ").trim() || undefined;
 	// The head says what a result says at a glance; the digest of agents and the wait face say it themselves.
 	const elapsed = live && props.startedAt !== undefined ? Math.max(0, Date.now() - props.startedAt) : undefined;
-	const gist: readonly GistPart[] = compactTarget !== null || waitFace || pendingAsk || state === "skipped" || state === "queued" ? []
+	const gist: readonly GistPart[] = compactTarget !== null || waitFace || pendingAsk || state === "skipped" || state === "queued" || rendererKind === "yield" || rendererKind === "autoresearch" ? []
 		: live ? elapsed !== undefined && elapsed >= 1000 ? [{ text: formatGistDuration(elapsed), tone: "plain" }] : []
 		: result === undefined ? []
 		: toolGist({ name: route.name, args: route.args, details: route.details, body: metadata.skill !== null ? stripSkillHeader(text) : text, notices: split.notices, failed, settled: true, startedAt: props.startedAt, endedAt: props.endedAt, observedMs });
@@ -308,7 +309,7 @@ export const ToolCard = memo(function ToolCard(props: ToolCardProps): ReactNode 
 			<span className={`codicon codicon-${showBody ? "chevron-down" : "chevron-right"}`} aria-hidden="true" />
 			{face}
 		</button>
-		{showBody && <div id={bodyId} className="omp-tool-body" role="region" aria-label={`${metadata.title} details`} tabIndex={0}>{body}</div>}
+		{showBody && <div id={bodyId} className="omp-tool-body" role="region" aria-label={`${view?.title ?? metadata.title} details`} tabIndex={0}>{body}</div>}
 	</div>;
 });
 
