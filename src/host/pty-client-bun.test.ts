@@ -299,6 +299,12 @@ describe("a Chat broker on the session's Bun", { skip: SKIP }, () => {
 			const spec = (slot: string): PtyLaunchSpec => ({ ...specFor(slot), file: REAL.executable, args: [...flags, entry, "--mode", "rpc-ui"] });
 			const handle = runningHandle(await launch(window, { command: REAL.executable, launcher: "bun-shim" }, nextSlot(), spec));
 			assert.deepEqual(recordedRuntime(handle), { engine: "bun", version: REAL.version }, "the broker is on Bun");
+			// A real Bun child writes the marker on its own clock after the broker reports "running"; no fake clock can drive another process, so poll for the file (bounded).
+			for (let waited = 0; !existsSync(marker) && waited < 15_000; waited += 50) {
+				const { promise, resolve } = Promise.withResolvers<void>();
+				setTimeout(resolve, 50);
+				await promise;
+			}
 			const saw = JSON.parse(readFileSync(marker, "utf8")) as { define: string; preloaded: boolean; bunOptions: string | null; argv: string[] };
 			assert.equal(saw.define, "public-recipient", "--define reached the entry");
 			assert.equal(saw.preloaded, true, "--preload ran before the entry");
