@@ -37,6 +37,7 @@ import { DRAFT_CONTROL_CHARACTER } from "../shared/text-file.ts";
 import { isRecord } from "../shared/guards.ts";
 import { isCanonicalBase64Text } from "../shared/bytes-base64.ts";
 import { MAX_QUOTE_CHARACTERS } from "../shared/quote-limit.ts";
+import { MAX_QUOTE_VERSION_LENGTH, QUOTE_VERSION_SEPARATOR } from "../shared/quote-location.ts";
 import { MAX_CHAT_IMAGE_BASE64_CHARS, MAX_CHAT_IMAGES_BASE64_CHARS, MAX_CHAT_TEXT_LENGTH, isChatImageMimeType, parseChatEpoch, parseChatHostMessage, parseChatWebviewMessage } from "./chat-messages.ts";
 import type { ChatHostMessage, ChatWebviewMessage } from "./chat-messages.ts";
 import type { ChatEpoch } from "../chat/model.ts";
@@ -450,14 +451,15 @@ export interface GuestInsertTextMessage {
 
 /** Selections one `omp:insert-quote` may carry. */
 export const MAX_EDITOR_QUOTES = 64;
-/** Longest `path:start-end` location an editor quote may carry. */
-export const MAX_QUOTE_LOCATION_LENGTH = MAX_FILE_PATH_LENGTH + 24;
+/** Longest location an editor quote may carry: `path:start-end`, plus ` @ ` and the version of a Git revision (`src/shared/quote-location.ts`). */
+export const MAX_QUOTE_LOCATION_LENGTH = MAX_FILE_PATH_LENGTH + 24 + QUOTE_VERSION_SEPARATOR.length + MAX_QUOTE_VERSION_LENGTH;
 
 /**
  * One selection of a text editor that the user quoted (`ompDesk.quoteEditorSelection`, `Alt+Q` in an editor).
  *
  * `location` is `path:42` or `path:42-50` written for the target session's working directory (relative inside it, absolute
- * outside), `null` for a document with no path OMP can open (untitled, or a scheme other than `file`). `fileName` and
+ * outside), followed by ` @ <version>` when the selection is in a Git revision and not the file on disk (`path:42-50 @ HEAD (3f2a9c1)`),
+ * `null` for a document with no path OMP can open (untitled, or a scheme other than `file` and `git`). `fileName` and
  * `languageId` are the page's two hints for the fence's language and for whether the text is prose. `text` is the selected
  * text with `\n` line ends; the host has already held it to the quote size limit.
  */

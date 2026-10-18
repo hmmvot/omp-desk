@@ -25,6 +25,7 @@ import {
 	MAX_DRAFT_HANDOFF_CHARS,
 	MAX_CONTROL_TEXT_LENGTH,
 	MAX_FILE_PATH_LENGTH,
+	MAX_QUOTE_LOCATION_LENGTH,
 	MAX_FILE_QUERY_LENGTH,
 	MAX_RECENT_TITLE_LENGTH,
 	RECENT_SESSIONS_LIMIT,
@@ -1055,6 +1056,9 @@ describe("editor quote insertion boundary", () => {
 	it("relays bounded quotes of text and nothing that could corrupt a handed-over draft", () => {
 		assert.deepEqual(parseGuestHostMessage({ type: "omp:insert-quote", quotes: [quote] }), { type: "omp:insert-quote", quotes: [quote] });
 		assert.equal(parseGuestHostMessage({ type: "omp:insert-quote", quotes: [{ ...quote, location: null }] })?.type, "omp:insert-quote", "a document with no path has no location");
+		const revision = { ...quote, location: "src/app.ts:42-50 @ HEAD (3f2a9c1)" };
+		assert.deepEqual(parseGuestHostMessage({ type: "omp:insert-quote", quotes: [revision] }), { type: "omp:insert-quote", quotes: [revision] }, "the location of a Git revision carries its version");
+		assert.equal(parseGuestHostMessage({ type: "omp:insert-quote", quotes: [{ ...quote, location: `${"a".repeat(MAX_QUOTE_LOCATION_LENGTH)}x` }] }), null, "the bound includes the version");
 		for (const bad of [
 			[], [{ ...quote, text: "   " }], [{ ...quote, text: "a\u001bb" }], [{ ...quote, text: "a\u000cb" }], [{ ...quote, location: "" }], [{ ...quote, location: "a\nb" }],
 			[{ ...quote, languageId: "type script" }], [{ ...quote, fileName: 5 }], [{ ...quote, text: "x".repeat(20_001) }], [quote, { ...quote, text: "y".repeat(19_995) }],

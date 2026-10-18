@@ -3,8 +3,10 @@
  * docs/designs/2026-10-15-quote-chat-selection.md, decision 9). The host sends the selected text and the location it wrote for
  * the target session; the page writes the quote the way it writes any quote, so one composer path places them all.
  *
- * - The first line is the location as inline code (`src/app.ts:42-50`), never an `@` mention: OMP expands a mention of an idle
- *   prompt into the whole file. A document with no path has no location line.
+ * - The first line is the location as inline code (`src/app.ts:42-50`, or `src/app.ts:3-4 @ HEAD (3f2a9c1)` for a Git version),
+ *   never an `@` mention: OMP expands a mention of an idle prompt into the whole file. It is not one because it does not start
+ *   with `@` and the one `@` in it has a space on both sides (`quote-location.ts` writes only that form). A document with no
+ *   path has no location line.
  * - A Markdown or plain-text document is quoted as its own lines. A code file is a fenced block whose info string is the file's
  *   language and whose fence is longer than any backtick run that could close it early.
  */

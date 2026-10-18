@@ -24,6 +24,7 @@ import { detectChatFileLinks, fileTargetOfHref, isFileLinkCandidate } from "../l
 import { detectWebLinks } from "../lib/chat-web-links";
 import { parseBareFileName, parseCodeSymbol } from "../../shared/code-symbols";
 import { detectInternalLinks, internalTargetOf } from "../../shared/internal-links";
+import { isRevisionLocation } from "../../shared/quote-location";
 import { commitTargetOfSpan, detectCommitHashes } from "../../shared/commit-links";
 import { webLinkUrl } from "../../shared/terminal-links";
 import type { TerminalTextLink } from "../../shared/terminal-links";
@@ -114,8 +115,10 @@ function plain(text: string, key: string): ReactNode {
  * A span that names a code symbol (`Session`, `A.B`, `Run()`, `[Attr]`) or is a bare file name or the trailing part of a path (`session-index.ts:849`, `session-index.ts(849)`, `host/session-index.ts:579`) is one {@link CodeSymbolSpan}: its path proof first when it also looks like a path, then the host's workspace symbol and file lookup, in assistant text only.
  * A whole span that is one internal OMP URL of the session (`agent://Name`, `artifact://69`, `local://plan.md`) is one {@link InternalLink}: plain code until the host proves the session has what it names.
  * A whole span that is one commit hash (7 to 40 hex digits) is one {@link CommitHashSpan}: a link to the commit once the host proves it exists, otherwise what it would be without this rule.
+ * A whole span that is the location of a Git revision (`src/app.ts:42-50 @ HEAD (3f2a9c1)`, from an editor quote of a diff) is plain code: its path and lines are those of that version, so a link to the file on disk would open other lines.
  */
 function codeSpan(content: string, key: string): ReactNode {
+	if (isRevisionLocation(content)) return <code key={key}>{breakable(content)}</code>;
 	const internal = internalTargetOf(content);
 	if (internal !== null) return <code key={key}><InternalLink target={internal}>{breakable(content)}</InternalLink></code>;
 	const whole = content.trim();

@@ -6,37 +6,15 @@
 import * as vscode from "vscode";
 import { CommitLinkResolver, GRAPH_FOCUS, GRAPH_REVEAL_HEAD } from "../host/commit-links.ts";
 import type { CommitOpenEnv, CommitRepository } from "../host/commit-links.ts";
+import { gitApi } from "./git-api.ts";
+import type { GitRepository } from "./git-api.ts";
 
 /** A burst of repository state changes (a commit touches the index, the branch and the HEAD one after another) is one report this long after its last HEAD change. */
 const HEAD_SETTLE_MS = 150;
 
-/** The part of the Git extension's API (version 1) these links use. */
-interface GitRepository {
-	readonly rootUri: vscode.Uri;
-	readonly state: { readonly HEAD?: { readonly commit?: string }; readonly onDidChange: vscode.Event<void> };
-	getCommit(ref: string): Promise<{ readonly hash: string }>;
-	status(): Promise<void>;
-}
-interface GitExtensionApi {
-	readonly repositories: readonly GitRepository[];
-	onDidOpenRepository(listener: (repository: GitRepository) => void): vscode.Disposable;
-	onDidCloseRepository(listener: (repository: GitRepository) => void): vscode.Disposable;
-}
-
 export interface CommitLinks {
 	readonly resolver: CommitLinkResolver;
 	readonly env: CommitOpenEnv;
-}
-
-/** The Git extension's API, activating the extension if needed; `undefined` when it is missing or disabled. */
-async function gitApi(): Promise<GitExtensionApi | undefined> {
-	const extension = vscode.extensions.getExtension<{ getAPI(version: 1): GitExtensionApi }>("vscode.git");
-	if (extension === undefined) return undefined;
-	try {
-		return (extension.isActive ? extension.exports : await extension.activate()).getAPI(1);
-	} catch {
-		return undefined;
-	}
 }
 
 /**

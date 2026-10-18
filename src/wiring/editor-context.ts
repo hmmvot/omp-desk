@@ -28,6 +28,7 @@ import type { SessionItemState } from "../views/session-tree.ts";
 import { MAX_EDITOR_QUOTES, MAX_INSERT_TEXT_LENGTH, MAX_QUOTE_LOCATION_LENGTH, mentionTokenForPath } from "../protocol/messages.ts";
 import type { GuestEditorQuote } from "../protocol/messages.ts";
 import { quoteSizeRefusal } from "../shared/quote-limit.ts";
+import { quoteLocationText } from "../shared/quote-location.ts";
 import { mentionPath } from "../host/file-mentions.ts";
 import { UNSAFE_PATH } from "../host/bracketed-paste.ts";
 
@@ -135,19 +136,24 @@ export interface EditorSelection {
 	readonly text: string;
 }
 
-/** The document a quote is taken from. `fsPath` is `null` when it has no path OMP can open (untitled, or a scheme other than `file`). */
+/**
+ * The document a quote is taken from. `fsPath` is `null` when it has no path OMP can open (untitled, or a scheme other than `file`
+ * and the `git` documents of a diff). `version` is `null` for the file on disk and the words naming the version otherwise (a side of
+ * a diff that is a Git revision: `index`, `HEAD (3f2a9c1)`; see `quote-revision.ts`); the lines of a quote are lines of that version.
+ */
 export interface EditorQuoteSource {
 	readonly fsPath: string | null;
+	readonly version: string | null;
 	readonly fileName: string;
 	readonly languageId: string;
 	readonly selections: readonly EditorSelection[];
 }
 
-/** `src/app.ts:42` for one line, `src/app.ts:42-50` for several: the path of {@link formatReference}'s rule (relative inside `cwd`, else absolute). */
-export function quoteLocation(fsPath: string, cwd: string, lines: LineRange): { readonly ok: true; readonly location: string } | Refusal {
+/** `src/app.ts:42` for one line, `src/app.ts:42-50` for several, `src/app.ts:42-50 @ HEAD (3f2a9c1)` for a Git revision: the path of {@link formatReference}'s rule (relative inside `cwd`, else absolute). */
+export function quoteLocation(fsPath: string, cwd: string, lines: LineRange, version: string | null = null): { readonly ok: true; readonly location: string } | Refusal {
 	const path = mentionPath(fsPath, cwd);
 	if (path.length === 0 || UNSAFE_PATH.test(path)) return { ok: false, reason: `“${fsPath}” has a character a message cannot carry.` };
-	const location = `${path}:${lines.start === lines.end ? lines.start : `${lines.start}-${lines.end}`}`;
+	const location = quoteLocationText(path, lines.start, lines.end, version);
 	if (location.length > MAX_QUOTE_LOCATION_LENGTH) return { ok: false, reason: `The path of “${fsPath}” is too long to quote.` };
 	return { ok: true, location };
 }
@@ -183,7 +189,7 @@ export function composeEditorQuotes(source: EditorQuoteSource, cwd: string): Edi
 		total += text.length;
 		let location: string | null = null;
 		if (source.fsPath !== null) {
-			const located = quoteLocation(source.fsPath, cwd, selectionLines(selection.start, selection.end));
+			const located = quoteLocation(source.fsPath, cwd, selectionLines(selection.start, selection.end), source.version);
 			if (!located.ok) return located;
 			location = located.location;
 			locations.push(location);

@@ -24,7 +24,8 @@ import {
 } from "./editor-context.ts";
 import type { EditorQuoteSource, SendCandidate } from "./editor-context.ts";
 import { bracketedPaste } from "../host/bracketed-paste.ts";
-import { MAX_INSERT_TEXT_LENGTH } from "../protocol/messages.ts";
+import { MAX_FILE_PATH_LENGTH, MAX_INSERT_TEXT_LENGTH, MAX_QUOTE_LOCATION_LENGTH } from "../protocol/messages.ts";
+import { MAX_QUOTE_VERSION_LENGTH } from "../shared/quote-location.ts";
 
 const CWD = "D:\\Work\\Repo";
 
@@ -288,7 +289,7 @@ describe("editor recency", () => {
 describe("quoting editor selections", () => {
 	const pos = (line: number, character: number) => ({ line, character });
 	const source = (selections: { start: ReturnType<typeof pos>; end: ReturnType<typeof pos>; text: string }[], over: Partial<EditorQuoteSource> = {}): EditorQuoteSource => ({
-		fsPath: "D:\\Work\\Repo\\src\\app.ts", fileName: "app.ts", languageId: "typescript", selections, ...over,
+		fsPath: "D:\\Work\\Repo\\src\\app.ts", version: null, fileName: "app.ts", languageId: "typescript", selections, ...over,
 	});
 
 	it("writes the location as path:line for one line and path:start-end for a range, relative inside the session's directory", () => {
@@ -296,6 +297,30 @@ describe("quoting editor selections", () => {
 		assert.deepEqual(one, { ok: true, quotes: [{ location: "src/app.ts:42", fileName: "app.ts", languageId: "typescript", text: "const x = 1" }], summary: "src/app.ts:42" });
 		const range = composeEditorQuotes(source([{ start: pos(41, 2), end: pos(49, 3), text: "a\nb" }]), CWD);
 		assert.ok(range.ok && range.quotes[0]?.location === "src/app.ts:42-50");
+	});
+
+	it("says which version a side of a diff is: path:lines @ version, the lines being that version's", () => {
+		const head = composeEditorQuotes(source([{ start: pos(2, 0), end: pos(4, 1), text: "a\nb\nc" }], { version: "HEAD (3f2a9c1)" }), CWD);
+		assert.deepEqual(head, { ok: true, quotes: [{ location: "src/app.ts:3-5 @ HEAD (3f2a9c1)", fileName: "app.ts", languageId: "typescript", text: "a\nb\nc" }], summary: "src/app.ts:3-5 @ HEAD (3f2a9c1)" });
+		const index = composeEditorQuotes(source([{ start: pos(41, 0), end: pos(41, 4), text: "abcd" }], { version: "index" }), CWD);
+		assert.ok(index.ok && index.quotes[0]?.location === "src/app.ts:42 @ index");
+		const commit = composeEditorQuotes(source([{ start: pos(0, 0), end: pos(0, 3), text: "abc" }], { fsPath: "D:\\Other\\b.ts", fileName: "b.ts", version: "3f2a9c1" }), CWD);
+		assert.ok(commit.ok && commit.quotes[0]?.location === "D:/Other/b.ts:1 @ 3f2a9c1", "outside the session's directory the path is absolute, the version stays");
+	});
+
+	it("gives every selection of a revision the version, and the file on disk none", () => {
+		const both = composeEditorQuotes(source([{ start: pos(0, 0), end: pos(0, 1), text: "a" }, { start: pos(9, 0), end: pos(9, 1), text: "b" }], { version: "index" }), CWD);
+		assert.ok(both.ok);
+		assert.deepEqual(both.quotes.map(quote => quote.location), ["src/app.ts:1 @ index", "src/app.ts:10 @ index"]);
+		const disk = composeEditorQuotes(source([{ start: pos(0, 0), end: pos(0, 1), text: "a" }]), CWD);
+		assert.ok(disk.ok && disk.quotes[0]?.location === "src/app.ts:1");
+	});
+
+	it("refuses a location that is too long with its version, and the longest one still passes the page's bound", () => {
+		const long = composeEditorQuotes(source([{ start: pos(0, 0), end: pos(0, 1), text: "a" }], { fsPath: `/r/${"d/".repeat(400)}a.ts`, version: "HEAD (3f2a9c1)" }), "/r");
+		assert.equal(long.ok, false);
+		const longest = composeEditorQuotes(source([{ start: pos(0, 0), end: pos(0, 1), text: "a" }], { fsPath: `/r/${"d".repeat(MAX_FILE_PATH_LENGTH - 20)}.ts`, version: "x".repeat(MAX_QUOTE_VERSION_LENGTH) }), "/r");
+		assert.ok(longest.ok && (longest.quotes[0]?.location?.length ?? Infinity) <= MAX_QUOTE_LOCATION_LENGTH);
 	});
 
 	it("keeps a file outside the session's directory absolute with forward slashes", () => {

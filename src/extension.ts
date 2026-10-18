@@ -139,6 +139,7 @@ import {
   visibleQuoteTarget,
 } from "./wiring/editor-context";
 import type { EditorQuoteSource, ReferenceSource, SendCandidate } from "./wiring/editor-context";
+import { quoteSourceOf } from "./wiring/quote-source";
 import { TurnNotifier, desktopNotificationSuppression, reportsTrailingQuestion } from "./host/notifications";
 import type { TurnActivity, TurnNotice, NotificationSuppression } from "./host/notifications";
 import { isLookedAt, markersAfterEvent, markersAfterViewing } from "./host/session-unread";
@@ -6193,7 +6194,8 @@ async function addToSession(context: vscode.ExtensionContext, index: SessionInde
 /**
  * "OMP Desk: Quote Selection to Session" (`Alt+Q` in a text editor): every non-empty selection of the active editor becomes a quote
  * in the chosen Chat session's draft. The target rule is Add Selection to Session's; the page places the quote the way it places a
- * Chat quote (docs/designs/2026-10-15-quote-chat-selection.md, decision 9).
+ * Chat quote (docs/designs/2026-10-15-quote-chat-selection.md, decision 9). The active editor of a diff is the side that has the
+ * focus; a side that is a Git revision quotes with the version it is (decision 10, `src/wiring/quote-source.ts`).
  */
 async function quoteEditorSelectionToSession(context: vscode.ExtensionContext, index: SessionIndex): Promise<void> {
   const editor = vscode.window.activeTextEditor;
@@ -6207,20 +6209,15 @@ async function quoteEditorSelectionToSession(context: vscode.ExtensionContext, i
     showWarning("Select some text first.");
     return;
   }
-  const fsPath = document.uri.scheme === "file" ? document.uri.fsPath : null;
-  const source: EditorQuoteSource = {
-    fsPath,
-    fileName: fsPath === null ? "" : path.basename(fsPath),
-    languageId: document.languageId,
-    selections: selections.map(selection => ({ start: selection.start, end: selection.end, text: document.getText(selection) })),
-  };
+  const source = await quoteSourceOf(document, selections);
+  log.debug(`quote source: ${document.uri.scheme} document, ${source.fsPath === null ? "no path" : source.version === null ? "file on disk" : `version ${source.version}`}, ${selections.length} selection(s)`);
   // What cannot be quoted at all (too long, a control character, too many selections) is refused before a session is chosen or started.
   const early = composeEditorQuotes(source, "");
   if (!early.ok) {
     showWarning(`${early.reason} Nothing was quoted.`);
     return;
   }
-  await sendToSession(context, index, { kind: "quote", source }, fsPath, document.isDirty);
+  await sendToSession(context, index, { kind: "quote", source }, source.fsPath, document.isDirty);
 }
 
 async function sendToSession(context: vscode.ExtensionContext, index: SessionIndex, request: InsertionRequest, firstFsPath: string | null, unsaved: boolean): Promise<void> {
