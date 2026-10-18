@@ -45,6 +45,12 @@ export function fileReferencePattern(): RegExp {
 /** What a marker refers to. The two kinds number independently: image `#1` and file `#1` are different attachments. */
 export type ReferenceKind = "image" | "file";
 
+/** A stretch of the draft that is drawn and edited as one atomic chip: an attachment's marker or a command's token. */
+export interface SpanRange {
+	readonly start: number;
+	readonly end: number;
+}
+
 /** One marker found in a draft. */
 export interface ReferenceSpan {
 	/** Offset of `[`. */
@@ -96,7 +102,7 @@ export function referencedNumbers(text: string, kind: ReferenceKind, isKnown: Is
  * nearest edge, as after a pointer click); a range grows to cover every marker it touches.
  */
 export function snapSelection(
-	spans: readonly ReferenceSpan[],
+	spans: readonly SpanRange[],
 	start: number,
 	end: number,
 	forward: boolean | null,
@@ -122,7 +128,7 @@ export function snapSelection(
  * a marker swallows it. `null` leaves the deletion to the browser.
  */
 export function deletionRange(
-	spans: readonly ReferenceSpan[],
+	spans: readonly SpanRange[],
 	start: number,
 	end: number,
 	direction: "backward" | "forward" | "range",
@@ -146,7 +152,7 @@ export function deletionRange(
 export function repairDamagedReferences(
 	previous: string,
 	next: string,
-	previousSpans: readonly ReferenceSpan[],
+	previousSpans: readonly SpanRange[],
 ): { text: string; caret: number } | null {
 	if (previous === next || previousSpans.length === 0) return null;
 	const limit = Math.min(previous.length, next.length);

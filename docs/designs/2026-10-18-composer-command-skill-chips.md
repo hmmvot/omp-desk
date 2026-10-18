@@ -1,0 +1,72 @@
+---
+status: accepted
+date: 2026-10-18
+---
+
+# Commands and skills as atomic chips in the Chat composer
+
+The maintainer's request (2026-10-18): "commands and skills in the composer drawn not as plain text but as a block that one Backspace deletes."
+
+Extends, and changes nothing else in, [A contenteditable editing surface for the Chat composer](2026-10-15-composer-contenteditable-surface.md) ([ADR-0077](../decisions/0077-edit-the-chat-draft-in-a-contenteditable-surface-rendered-from-the-markdown-string.md)): its atomic image and file chips (section 1, `contenteditable="false"` inline spans over the literal marker text, found by a pure scan of the draft) gain a third and fourth kind. Nothing is added to the model and nothing is sent differently.
+
+## Problem
+
+`/compact`, `/skill:review` and the other commands are plain text in the draft. The text is editable inside the name, nothing says whether OMP will act on it, and it is deleted a character at a time. An image or a file attached to the draft is already one block (a chip that one Backspace removes, that the caret cannot enter and the arrow keys skip); the maintainer wants the command and the skill to be the same kind of block.
+
+## What OMP acts on (checked in the installed OMP 18.11.1, not assumed)
+
+The sources are `pi-tui/src/prompt/skill-tokens.ts`, `coding-agent/src/extensibility/skills.ts` (`parseSkillInvocation`) and `modes/rpc/rpc-mode.ts` (`resolveRpcSkillInvocation`, the `prompt` command's skill branch; the `steer` and `follow_up` branches above it):
+
+- A draft that starts with `/` names a command by its first token; the rest is that command's arguments. The skill form is `/skill:<name>`. The send trims the draft first (`Composer.tsx`, `compacted.text.trim()`), so leading blanks do not matter.
+- **A `/skill:<name>` token anywhere in the draft is a skill invocation too** (`fix the bug /skill:foo focus on auth`): a token delimited by whitespace or an edge, a bare name or `<namespace>/<name>` (one slash), the **first such token only**, with the surrounding prose passed as the skill's arguments. It does not apply when the draft starts with another slash command or a local-execution sigil (`!`, `$ `, `$$ `; `${` is not one). OMP's pattern also accepts a token at the very end of the draft (`(?=\s|$)`).
+- The invocation needs the skill in the session's list (`session.skills`, and the `enableSkillCommands` setting); an unknown name is a plain prompt. Names and aliases match exactly, case included.
+- **All of this is the rpc `prompt` command.** While a turn runs the composer sends `steer` or `follow_up` (`Composer.tsx` `send`), and OMP's dispatcher handles those before the prompt branch: `session.steer` and `session.followUp` do not scan for commands or skills, so a `/compact` or a `/skill:review` sent then is literal text for the model.
+- Desk's own commands (`DESK_COMMANDS` in `slash-completion.ts`) are answered by Chat before anything reaches OMP, on the prompt, steer and follow-up paths alike (`chat-runtime.ts`, `deskSessionCommand`, `nativeSettingsCommand`, `isRewindCommand`), and their interceptors match in any case.
+- Desk's own file-block escaping (`escapeFileText`) already neutralises `/skill:` tokens inside attached files because of the mid-text rule.
+
+**Decisions.** OMP does accept skills mid-text, so **a skill is a chip where OMP would invoke it** (the first valid token, the same gates), and any other command is a chip only as the leading token, because only the leading token is a command. A chip is a statement that the text will be acted on, so it is drawn only for a send that is a `prompt`: **while a turn runs, only Desk's own commands are chips.** A token that OMP would not act on is not a chip.
+
+## Behaviour
+
+- **Known.** A token is a command or a skill when it is in the live catalogue (`snapshot.commands` plus Desk's own commands, through `slashCatalogue`, so a denied identity-changing builtin and an unknown `/foo` stay plain text). A skill is a catalogue entry with `source: "skill"`; everything else is a command. A path such as `/usr/bin/x` is a token that names nothing. Not in the catalogue, so not a chip: the terminal-only commands Chat answers with guidance (`/git`, `/hotkeys`, `/skills`, …, `tuiOnlyCommand` in the host) and `/name:argument` forms, which OMP splits at the colon (`/compact:hard`); both stay plain text.
+- **When the chip appears (the rule).** A name is a chip once it is complete **and whitespace already follows it in the draft**: a space, a tab or a line break. That is the same moment whether the name was picked from the suggestion list (the splice writes `/name `), typed in full and followed by a space, followed by Shift+Enter, pasted, recalled from the history, restored after a reload or brought back by undo, because the rule reads the text and the catalogue and nothing else. A name at the very end of the draft is still being typed (`/model` is a prefix of `/models`, `/skill:review` of `/skill:review-code`), so it stays text until something follows it, although OMP would accept it at the end; a bare recalled `/compact` is therefore text, and `/compact now` is a chip. Plain Enter sends, so it never "follows" a name inside the draft. A token inside an attachment's marker label (`[File #1: … /skill:x …]`) is not a chip: the marker keeps its text.
+- **What the chip covers.** The token and, when the character after it is a single space, that space: the chip ends where the arguments begin. This is what makes one Backspace from the natural caret position (after `/name `) remove the block instead of its space. A line break is never part of a chip.
+- **Look.** The same chip as an attachment's (the theme's link colour at 24 % with a 1 px ring, the forced-colours fallback), with the field's text colour and an icon in front: a terminal prompt for a command, a book for a skill (the book is the Skills inventory's icon). `role="group"`, `aria-label` `Command compact` or `Skill review`, `data-kind`. The chip text stays the literal token, so copy, the hand-off and the send are unchanged.
+- **Atomic.** The caret cannot land inside; arrow keys skip over it; a pointer click inside lands on its nearest edge; Backspace right after it and Delete right before it remove it whole, any deletion that touches its space takes it whole, a selection that cuts into it takes it whole, and the edit is one undo step. All of that is the existing marker machinery (`snapSelection`, `deletionRange`, the edit widening of `apply`, `repairDamagedReferences` for an IME or native edit), fed one more kind of span.
+- **When a chip goes back to text.** A chip cannot be edited from inside, so the rule stops holding only when something changes around it: a character typed before the `/` or after the name of a chip that a line break ends (`/compact` then `x` is `/compactx`), the catalogue dropping the name, or the turn starting. The text is the same string in every case.
+- **Catalogue and turn changes.** When the catalogue or the working state changes, the surface re-renders (`refresh()`) and writes the selection back, snapped off any chip that now covers it, so a caret never jumps because the field was redrawn.
+
+## Technique
+
+One pure scan, no state, no second convention:
+
+- `command-chips.ts`: `commandResolver(commands, working)` (name or alias to `"command" | "skill" | null`, from `slashCatalogue`; Desk's own commands also match in any case, and only they are known while `working`), `findCommandChips(text, resolve)` (at most one span, with OMP's gates; the leading token is read after the blanks the send trims) and `findChips(text, isKnown, resolve)`, which merges the attachment markers of `findReferences` with the command span in text order.
+- `ReferenceSpan`'s helpers take a plain `{start, end}` range now (`SpanRange`), so `snapSelection`, `deletionRange` and `repairDamagedReferences` serve both. `ChipSpec.kind` grows to `command | skill`; `lineSpecs` and `buildLine` draw them; the line key already includes the chip kind and the text, so a chip appearing or disappearing replaces its line and nothing else.
+- `DraftSurface` takes a `resolveCommand` option beside `isKnownReference` and uses `findChips` in `#markers()` (render, selection snapping, deletion widening, IME repair). `Composer` supplies it from `snapshot.commands` and the turn's `working` flag through a ref and calls `surface.refresh()` when either changes, as it already does when the set of attachments changes: a draft restored before the session lists its commands gets its chips when the list arrives.
+- Completion is untouched. `slashQueryAt` and `slashArgumentAt` already ignore a caret that is not inside the first token or the first argument, and a caret cannot be inside a chip, so no popup opens on one; backspacing into a plain-text name opens it as before.
+
+## Alternatives
+
+1. **Chip only at the moment a suggestion is picked.** Rejected: the chip would not survive undo, history recall, a reload or a paste, and the draft would need a second, non-textual state.
+2. **Chip as soon as the name matches, with no delimiter.** Rejected: `/model` would chip while the user is typing `/models`, and `/skill:review` while typing `/skill:review-code`; the chip is atomic, so the user would have to delete it to continue.
+3. **Chip every `/word` mid-text, or only leading tokens.** Rejected: OMP runs only the leading command and the first valid skill token; a chip on anything else would claim an invocation that does not happen, and none on a mid-text skill would hide one that does.
+4. **The space is not part of the chip.** Rejected: after picking a suggestion the caret sits after the space, so the first Backspace would delete a space and, by the rule, silently turn the chip back into text instead of removing the block.
+5. **The same chips while a turn runs.** Rejected: OMP does not scan a steered or queued message, so the chip would claim an invocation that does not happen. The cost is that a draft's chips disappear when a turn starts and return when it ends, which is exactly when what the send does changes.
+6. **A separate command-chip DOM layer or a second editor mode.** Rejected: the surface's chips already are this mechanism.
+
+## Risks and open questions
+
+- **OMP's rule can change.** The gates are mirrored from 18.11.1 and recorded in the module's header. A change shows as a chip that disagrees with what OMP does; the catalogue (not the rule) already decides what is known, and the worst case is a missing or an extra chip, never a different message.
+- **A skill chip inside a fenced block or a quote line** is drawn because OMP would invoke it there too; the draft shows what the agent will receive.
+- **Missing chips by choice:** a name at the very end of the draft, a token inside an attachment marker's label, the `/name:argument` forms and the terminal-only commands Chat answers itself.
+- **Case.** Names match exactly, as OMP's lookup does; Desk's own commands match in any case, as Chat's interceptors do.
+- **Real IME and assistive technology** have not been exercised; the chip adds no composition path (an IME edit that cuts a chip is repaired by the existing code).
+
+## Verification
+
+Pure units in `command-chips.test.ts` (the rule, OMP's gates, the trimmed left edge, the working turn, Desk's case rule, overlap with markers, atomic selection and deletion); owned-Chromium tests in `chat-ui.test.ts` for the chip on a picked suggestion, on a typed name plus space and on a line break, as plain text for unknown names, paths, a still-typed name and a denied command; mid-text skills and their gates; Backspace, Delete, word-wise delete, arrows, Shift+Arrow, a pointer click, a selection cutting into the chip, typing over it, and undo of each; undo, redo, paste, history recall (Up and the history search), a restored draft and a catalogue arriving late or changing with the caret kept; the working turn; a quote beside a chip, an IME composition at the line end and straight after the chip, and the text sent unchanged; screenshots in the light and the dark theme.
+
+## Architecture Review
+
+- Reviewer: independent `reviewer` agent (`ChipsDesignReview`), one pass over this document and the working-tree implementation, checked against the installed OMP 18.11.1 sources.
+- Outcome: accepted after the material finding was resolved. **Material:** a chip claimed an invocation while a turn runs, where the composer sends `steer`/`follow_up`, which OMP does not scan; resolved by the working-turn rule above (only Desk's own commands are chips then). **Should-fix:** the leading command was read from the untrimmed draft although the send trims it (now read after the left blanks); `refresh()` did not restore the selection after a catalogue change (it now does, snapped off a chip). **Nits applied to the text:** Desk's own commands match in any case; the colon form and the terminal-only commands are named as plain text; "a chip goes back to text" and the end-of-draft qualification are stated exactly.

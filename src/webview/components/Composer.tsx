@@ -104,6 +104,7 @@ import {
 	referencedNumbers,
 	type ReferenceKind,
 } from "../lib/image-references";
+import { commandResolver } from "../lib/command-chips";
 import { useDismissibleLayer } from "../lib/dismissible-layer";
 import { ExtensionNoticeLine, ExtensionWidgets } from "./ExtensionSurfaces";
 import { argumentSuggestions, isRewindCommand, missingRequiredArgument, slashArgumentAt, slashQueryAt, slashSuggestions, spliceArgument, spliceSlash } from "../lib/slash-completion";
@@ -477,10 +478,16 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 	const codeHintId = useId();
 	const canSubmit = canPrompt && !captureLocked && request === null && !sending && reading === 0 && (text.trim().length > 0 || attached.length > 0 || attachedDocuments.length > 0);
 
-	// A marker is a chip while its attachment is attached and plain text otherwise, so the surface draws again when the set of attachments changes.
+	// A command or a skill is a chip while the session's catalogue lists it and the next send would reach OMP as a `prompt` (while a
+	// turn runs the composer steers or follows up, which OMP does not scan), so those two are what the surface draws from besides the attachments.
+	const resolver = useMemo(() => commandResolver(snapshot.commands, busy), [snapshot.commands, busy]);
+	const resolverRef = useRef(resolver);
+	const resolveCommand = useCallback((name: string) => resolverRef.current(name), []);
+	// A marker is a chip while its attachment is attached and plain text otherwise, so the surface draws again when the set of attachments or the catalogue changes.
 	useLayoutEffect(() => {
+		resolverRef.current = resolver;
 		surfaceRef.current?.refresh();
-	}, [images, documents]);
+	}, [images, documents, resolver]);
 	const fieldMounted = !(request !== null && canPrompt);
 	// A field that mounts while a hand-off holds the draft (a dialog closing meanwhile) starts frozen.
 	useLayoutEffect(() => {
@@ -1841,7 +1848,7 @@ export function Composer({ client, snapshot, progressAvailable = true, onRewind,
 							controls: suggestionsOpen ? suggestionListId : null,
 							activeDescendant: suggestionsOpen && activeIndex >= 0 ? `${suggestionListId}-${activeIndex}` : null,
 						}}
-						options={{ isKnownReference, onEdit, onSelection: syncCaret, onKeyDown: onPromptKeyDown, onWindowOpen, onSettled, handlePaste, isAttachmentDrag: transfer => dragCarries(transfer) !== null }}
+						options={{ isKnownReference, resolveCommand, onEdit, onSelection: syncCaret, onKeyDown: onPromptKeyDown, onWindowOpen, onSettled, handlePaste, isAttachmentDrag: transfer => dragCarries(transfer) !== null }}
 					/>
 					{quoteLayout.runs.length > 0 && <QuoteRemoveButtons surfaceRef={surfaceRef} text={text} runs={quoteLayout.runs} disabled={captureLocked} onRemove={removeQuote} />}
 					{suggestionsOpen && (

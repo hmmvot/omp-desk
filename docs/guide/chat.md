@@ -52,6 +52,7 @@ Select text in an assistant reply, one of your own messages or an open thinking 
 - `Ctrl+Z` undoes and `Ctrl+Y` or `Ctrl+Shift+Z` redoes, including a pasted image and its reference. VS Code's **Edit > Undo** menu item does not act on the composer: use the keys.
 - A paste inserts plain text only, whatever the page it came from. Text you drag onto the composer lands where you drop it.
 - A `[Image #N]` or `[File #N: name]` reference is one unit: the caret hops over it and one `Backspace` removes it with its attachment.
+- A command or a skill that the draft names (`/compact `, `/skill:review `) is the same kind of unit; see [Commands and skills are blocks](#commands-and-skills-are-blocks).
 
 ### Attaching documents
 
@@ -125,6 +126,15 @@ Fenced `mermaid` blocks are drawn as diagrams in your theme's colours once the b
 - Terminal-only slash commands such as `/hotkeys` are never sent to the model. Chat opens the VS Code equivalent or says where the command works.
 - Slash commands suggest their arguments.
 - `/models`, `/agents` and `/settings` open OMP's own editors; see [OMP settings, models and agents](omp-settings.md).
+
+### Commands and skills are blocks
+
+A command or a skill that the draft names is drawn as one block, like an attached image or file: a terminal-prompt icon for a command and a book for a skill, in the same tinted chip. The text is still `/name args`; the block is only how it is drawn, and what is sent does not change.
+
+- **When it appears.** When the name is complete and a space or a line break follows it: after you pick a suggestion, or after you type `/compact` and a space (a name at the very end of the draft is still being typed, so `/model` does not become a block while you are typing `/models`). It also appears when the draft comes from the history (`↑`, `Ctrl+R`), a restore after a reload, Undo or a paste.
+- **What is a block.** A command of the session (the Commands list shows them) or a skill, at the start of the draft. A `/skill:name` anywhere in the draft is one too, because OMP runs it from the middle of a message; only the first such token counts, and not in a message that starts with another command, `!` or `$ `. An unknown `/foo`, a path such as `/usr/bin/x`, a name in the wrong case and a command Chat refuses stay plain text.
+- **Delete it in one key.** `Backspace` right after the block, `Delete` right before it, `Ctrl+Backspace`, or a selection that touches it removes the whole block (with the one space after it) as one undo step. The caret cannot go inside it and `←`/`→` hop over it.
+- **While a turn runs** a message you send is steered or queued, and OMP does not run commands or skills from such a message, so only Chat's own commands (`/rewind`, `/clear`, `/new`, `/delete`, `/fork`, …) stay blocks then; the others are plain text until the turn ends.
 
 ### The Commands list
 

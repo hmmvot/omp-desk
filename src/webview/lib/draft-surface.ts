@@ -12,6 +12,7 @@
  * The surface owns every attribute of the element that changes while the user types; React renders the element with a
  * class only and never touches its children or attributes.
  */
+import { findChips, type ChipSpan, type ResolveCommand } from "./command-chips.ts";
 import { findFencedBlocks } from "./code-fence.ts";
 import {
 	LineRenderer,
@@ -28,7 +29,7 @@ import {
 import { DraftHistory, type DraftSnapshot, type EditKind } from "./draft-history.ts";
 import { deletionTarget, type DeleteKind } from "./draft-text.ts";
 import { normalizeLineEndings } from "../../shared/text-file.ts";
-import { deletionRange, findReferences, repairDamagedReferences, snapSelection, type IsKnownReference } from "./image-references.ts";
+import { deletionRange, repairDamagedReferences, snapSelection, type IsKnownReference } from "./image-references.ts";
 import { findQuoteRuns } from "./quote-lines.ts";
 import { quotePasteEdit } from "./quote-edits.ts";
 
@@ -52,6 +53,8 @@ export interface SurfaceEdit {
 export interface SurfaceOptions {
 	/** Whether a marker belongs to an attachment of the draft, an image or a file (a marker that does not is ordinary text). */
 	isKnownReference: IsKnownReference;
+	/** Whether a token (the draft's first, without its `/`) names a command or a skill of the session; a token that does not is ordinary text. */
+	resolveCommand: ResolveCommand;
 	/** The draft changed by the user (or a composition settled). Synchronous: the composer updates its own copy now. */
 	onEdit(text: string): void;
 	/** The caret or selection moved (never during a composition window). */
@@ -232,8 +235,9 @@ export class DraftSurface {
 		return { anchor: Math.min(Math.max(0, selection.anchor), length), focus: Math.min(Math.max(0, selection.focus), length) };
 	}
 
-	#markers() {
-		return findReferences(this.#text, (kind, number, name) => this.#options.isKnownReference(kind, number, name));
+	/** Every chip of `text` (the draft by default): attachment markers and the command or skill the draft names. */
+	#markers(text: string = this.#text): ChipSpan[] {
+		return findChips(text, (kind, number, name) => this.#options.isKnownReference(kind, number, name), name => this.#options.resolveCommand(name));
 	}
 
 	#writeDomSelection(selection: SurfaceSelection): void {
@@ -285,11 +289,18 @@ export class DraftSurface {
 		if (!this.#window.open) this.element.setAttribute("data-empty", String(this.#text === ""));
 	}
 
-	/** Re-renders after the set of attached images changed (a marker may have become text, or text a marker). */
+	/**
+	 * Re-renders after the chips of the draft may have changed (an attachment was attached or released, the catalogue of commands
+	 * changed: a marker may have become text, or text a chip). The selection is read before the lines are replaced and written
+	 * back after, snapped off any chip that now covers it, so a caret never jumps because the field was redrawn under it.
+	 */
 	refresh(): void {
 		if (this.#window.open || this.#disposed) return;
+		const before = this.#selection();
 		this.#render();
-		this.#retained = this.#clamp(this.#retained);
+		const snapped = snapSelection(this.#markers(), Math.min(before.anchor, before.focus), Math.max(before.anchor, before.focus), null);
+		this.#retained = this.#clamp(before.focus < before.anchor ? { anchor: snapped.end, focus: snapped.start } : { anchor: snapped.start, focus: snapped.end });
+		this.#writeDomSelection(this.#retained);
 	}
 
 	/** The rectangle of line `index`, `null` past the last line. Read-only: an overlay beside the field places itself by it and never writes into the field. */
@@ -760,7 +771,7 @@ export class DraftSurface {
 			let selection: SurfaceSelection = live === null
 				? { anchor: Math.min(pre.focus + next.length - pre.text.length, next.length), focus: Math.min(pre.focus + next.length - pre.text.length, next.length) }
 				: live.selection;
-			const damaged = findReferences(pre.text, (kind, number, name) => this.#options.isKnownReference(kind, number, name));
+			const damaged = this.#markers(pre.text);
 			const repaired = repairDamagedReferences(pre.text, next, damaged);
 			if (repaired !== null) {
 				next = repaired.text;

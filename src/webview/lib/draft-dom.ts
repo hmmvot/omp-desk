@@ -3,12 +3,12 @@
  * sections 1 and 6): how a draft string is rendered as one element per line, and how model offsets and DOM points
  * map to each other. Every function takes the root element, so the surface and the tests share one mapping.
  *
- * A rendered line is `div.omp-line` holding text nodes and image chips (`span.omp-chip`, a non-editable inline
- * element whose text is the literal marker). An empty line is a lone `<br>`; a line that ends in a chip carries a
- * trailing `<br>` so the caret has a position after it. That `<br>` is a rendering filler and never part of the model.
+ * A rendered line is `div.omp-line` holding text nodes and chips (`span.omp-chip`, a non-editable inline element whose text is
+ * the literal marker or token: an image or a file marker, a leading command or a skill). An empty line is a lone `<br>`; a line
+ * that ends in a chip carries a trailing `<br>` so the caret has a position after it. That `<br>` is a rendering filler and never part of the model.
  */
+import type { ChipSpan } from "./command-chips.ts";
 import type { FencedBlock } from "./code-fence.ts";
-import type { ReferenceKind, ReferenceSpan } from "./image-references.ts";
 import type { QuoteLineFlags } from "./quote-lines.ts";
 
 export const LINE_CLASS = "omp-line";
@@ -19,12 +19,16 @@ export const QUOTE_CODE_LINE_CLASS = "omp-line--quote-code";
 export const CHIP_CLASS = "omp-chip";
 /** The modifier of a file's chip: the same atomic element with a file icon (`data-kind="file"`). */
 export const FILE_CHIP_CLASS = "omp-chip--file";
+/** The modifiers of a command's and a skill's chip (`data-kind="command"|"skill"`): the same atomic element, an icon in front. */
+export const COMMAND_CHIP_CLASS = "omp-chip--command";
+export const SKILL_CHIP_CLASS = "omp-chip--skill";
 
 /** A marker inside one line, with line-relative offsets. */
 export interface ChipSpec {
 	readonly start: number;
 	readonly end: number;
-	readonly kind: ReferenceKind;
+	readonly kind: ChipSpan["kind"];
+	/** The attachment's number; 0 for a command or a skill. */
 	readonly number: number;
 }
 
@@ -43,7 +47,7 @@ export interface LineSpec {
 }
 
 /** Splits `text` into the lines the surface renders, with their block and quote status and the markers each holds; `quotes` has one entry per line. */
-export function lineSpecs(text: string, blocks: readonly FencedBlock[], spans: readonly ReferenceSpan[], quotes: readonly QuoteLineFlags[]): LineSpec[] {
+export function lineSpecs(text: string, blocks: readonly FencedBlock[], spans: readonly ChipSpan[], quotes: readonly QuoteLineFlags[]): LineSpec[] {
 	const specs: LineSpec[] = [];
 	let lineStart = 0;
 	let block = 0;
@@ -89,7 +93,16 @@ export function buildLine(doc: Document, spec: LineSpec): HTMLElement {
 	for (const chip of spec.chips) {
 		if (chip.start > at) line.append(doc.createTextNode(spec.text.slice(at, chip.start)));
 		const element = doc.createElement("span");
-		if (chip.kind === "file") {
+		if (chip.kind === "command" || chip.kind === "skill") {
+			const token = spec.text.slice(chip.start, chip.end);
+			const name = token.trimEnd().slice(1);
+			element.className = `${CHIP_CLASS} ${chip.kind === "skill" ? SKILL_CHIP_CLASS : COMMAND_CHIP_CLASS}`;
+			element.dataset.kind = chip.kind;
+			// The token may carry the one space that follows it: the chip then ends where the arguments begin.
+			if (token.endsWith(" ")) element.dataset.spaced = "true";
+			element.setAttribute("role", "group");
+			element.setAttribute("aria-label", chip.kind === "skill" ? `Skill ${name.replace(/^skill:/, "")}` : `Command ${name}`);
+		} else if (chip.kind === "file") {
 			element.className = `${CHIP_CLASS} ${FILE_CHIP_CLASS}`;
 			element.dataset.kind = "file";
 			element.setAttribute("role", "group");

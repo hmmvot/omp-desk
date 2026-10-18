@@ -5164,6 +5164,311 @@ test("compact chat's rendered behavioral boundaries", { skip: browserPath === un
 			assert.deepEqual(await ui.evaluate("window.errors"), []);
 		});
 
+		// Commands and skills as atomic chips (docs/designs/2026-10-18-composer-command-skill-chips.md).
+		const CHIP_COMMANDS = "[{name:'compact',description:'Compact the context'},{name:'status'},{name:'worktree',source:'builtin'},{name:'skill:review',source:'skill',description:'Review code',inputHint:'files'},{name:'skill:other',source:'skill'}]";
+		interface CommandChip { kind: string | undefined; text: string; label: string | null; role: string | null; editable: string | null; spaced: string | undefined; background: string; icon: number }
+		const commandChips = (): Promise<CommandChip[]> => ui.evaluate(`[...document.querySelectorAll('.omp-composer-input .omp-chip[data-kind="command"],.omp-composer-input .omp-chip[data-kind="skill"]')].map(chip=>({kind:chip.dataset.kind,text:chip.textContent,label:chip.getAttribute('aria-label'),role:chip.getAttribute('role'),editable:chip.getAttribute('contenteditable'),spaced:chip.dataset.spaced,background:getComputedStyle(chip).backgroundColor,icon:getComputedStyle(chip,'::before').content.codePointAt(1)}))`);
+		const chipSetup = async (name: string): Promise<void> => {
+			await reset(name);
+			await ui.evaluate(`window.ui.push({commands:${CHIP_COMMANDS}});window.composer.focus()`);
+		};
+		const waitChips = (count: number): Promise<void> => ui.wait(`document.querySelectorAll('.omp-composer-input .omp-chip[data-kind="command"],.omp-composer-input .omp-chip[data-kind="skill"]').length===${count}`);
+
+		await t.test("a command or a skill picked from the list is one chip, the same style with a terminal prompt or a book, holding the literal token and its space, and the text sent is unchanged", async () => {
+			await chipSetup("chips-pick");
+			await ui.call("Input.insertText", { text: "/skill:rev" });
+			await ui.wait("document.querySelector('[aria-label=\"Slash commands\"]')");
+			assert.deepEqual(await commandChips(), [], "a name still being typed is text");
+			await press("Tab", "Tab", 9);
+			await waitDraft("window.composer.value()==='/skill:review '");
+			await waitChips(1);
+			const [skill] = await commandChips();
+			assert.deepEqual({ ...skill!, background: "" }, { kind: "skill", text: "/skill:review ", label: "Skill review", role: "group", editable: "false", spaced: "true", background: "", icon: 0xeaa4 });
+			assert.notEqual(skill!.background, "rgba(0, 0, 0, 0)", "the chip is drawn on a tinted background");
+			assert.deepEqual(await selection(), { start: 14, end: 14 }, "the caret rests after the chip");
+			assert.equal(await ui.evaluate("document.querySelector('[aria-label=\"Slash commands\"]')"), null, "no popup opens on a chip");
+			assert.deepEqual(await ui.evaluate("window.composer.roundTrip()"), []);
+			await ui.call("Input.insertText", { text: "src/a.ts" });
+			await waitDraft("window.composer.value()==='/skill:review src/a.ts'");
+			await press("Enter", "Enter", 13);
+			await ui.wait("window.ui.sends().length===1");
+			assert.equal(await ui.evaluate("window.ui.sends()[0].text"), "/skill:review src/a.ts", "the text sent is the draft, token and arguments, unchanged");
+			await ui.evaluate("window.ui.sendReply()");
+			await waitDraft("window.composer.value()===''");
+			await waitChips(0);
+			await ui.call("Input.insertText", { text: "/comp" });
+			await ui.wait("document.querySelector('[aria-label=\"Slash commands\"]')");
+			await press("Tab", "Tab", 9);
+			await waitDraft("window.composer.value()==='/compact '");
+			await waitChips(1);
+			const [command] = await commandChips();
+			assert.deepEqual({ ...command!, background: "" }, { kind: "command", text: "/compact ", label: "Command compact", role: "group", editable: "false", spaced: "true", background: "", icon: 0xea85 });
+			assert.equal(command!.background, skill!.background, "one chip style for both; the icon and the label tell them apart");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("a typed name becomes a chip once whitespace follows it, a line break counts, and a name still being typed, an unknown command, a path and a denied command stay plain text", async () => {
+			await chipSetup("chips-typed");
+			await ui.call("Input.insertText", { text: "/compact" });
+			await waitDraft("window.composer.value()==='/compact'");
+			await settleFrames();
+			assert.deepEqual(await commandChips(), [], "a complete name at the end of the draft is still being typed");
+			await ui.call("Input.insertText", { text: " " });
+			await waitChips(1);
+			assert.equal((await commandChips())[0]!.text, "/compact ");
+			await setDraft("/compact");
+			await waitDraft("window.composer.value()==='/compact'");
+			await press("Enter", "Enter", 13, { modifiers: 8, commands: ["insertLineBreak"] });
+			await waitDraft("window.composer.value()==='/compact\\n'");
+			await waitChips(1);
+			assert.deepEqual([(await commandChips())[0]!.text, (await commandChips())[0]!.spaced], ["/compact", undefined], "a line break follows the chip and is not part of it");
+			assert.deepEqual(await ui.evaluate("window.composer.roundTrip()"), []);
+			for (const text of ["/foo bar", "/usr/bin x", "/comp now", "/Compact now", "x /compact now", "/compact/x now", "/worktree now"]) {
+				await setDraft(text);
+				await waitDraft(`window.composer.value()===${JSON.stringify(text)}`);
+				await settleFrames();
+				assert.deepEqual(await commandChips(), [], `${JSON.stringify(text)} is text`);
+			}
+			// The send trims the left edge, so a draft that starts with a blank still runs the command and shows the chip.
+			await setDraft(" /compact now");
+			await waitDraft("window.composer.value()===' /compact now'");
+			await waitChips(1);
+			assert.equal((await commandChips())[0]!.text, "/compact ");
+			assert.deepEqual(await ui.evaluate("window.composer.roundTrip()"), []);
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("a skill is a chip mid-text exactly where OMP invokes it: the first valid token, not after another command or a shell sigil, not an unknown skill", async () => {
+			await chipSetup("chips-mid-text");
+			await setDraft("please /skill:review the file");
+			await waitChips(1);
+			assert.deepEqual([(await commandChips())[0]!.label, await ui.evaluate("document.querySelector('.omp-chip[data-kind=\"skill\"]').previousSibling.data")], ["Skill review", "please "]);
+			assert.deepEqual(await ui.evaluate("window.composer.roundTrip()"), []);
+			await setDraft("a /skill:other b /skill:review c");
+			await waitDraft("window.composer.value()==='a /skill:other b /skill:review c'");
+			await waitChips(1);
+			assert.equal((await commandChips())[0]!.label, "Skill other", "only the first token is invoked");
+			for (const text of ["a /skill:nope b /skill:review c", "/compact do /skill:review x", "!ls /skill:review x", "a /skill:review", "a/skill:review b"]) {
+				await setDraft(text);
+				await waitDraft(`window.composer.value()===${JSON.stringify(text)}`);
+				await settleFrames();
+				assert.deepEqual((await commandChips()).filter(chip => chip.kind === "skill"), [], `${JSON.stringify(text)}: OMP does not invoke a skill here`);
+			}
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("the caret cannot enter a command chip and the arrows skip it, one Backspace right after it or Delete right before it removes it whole, and each is one undo step", async () => {
+			await chipSetup("chips-keys");
+			await setDraft("/compact now");
+			await waitChips(1);
+			const back = (): Promise<void> => press("Backspace", "Backspace", 8, { commands: ["deleteBackward"] });
+			await setSelection(9, 9);
+			await waitDraft("window.composer.selection().start===9");
+			await back();
+			await waitDraft("window.composer.value()==='now'");
+			await waitChips(0);
+			await ctrlZ();
+			await waitDraft("window.composer.value()==='/compact now'");
+			await waitChips(1);
+			assert.deepEqual(await selection(), { start: 9, end: 9 }, "undo puts the caret where Backspace found it");
+			await setSelection(0, 0);
+			await waitDraft("window.composer.selection().start===0");
+			await press("Delete", "Delete", 46, { commands: ["deleteForward"] });
+			await waitDraft("window.composer.value()==='now'");
+			await ctrlZ();
+			await waitDraft("window.composer.value()==='/compact now'");
+			// The word-wise delete takes the chip whole too.
+			await setSelection(9, 9);
+			await waitDraft("window.composer.selection().start===9");
+			await press("Backspace", "Backspace", 8, { modifiers: 2, commands: ["deleteWordBackward"] });
+			await waitDraft("window.composer.value()==='now'");
+			await ctrlZ();
+			await waitDraft("window.composer.value()==='/compact now'");
+			// One arrow crosses the whole chip, in both directions; Shift+Arrow selects it whole.
+			await setSelection(0, 0);
+			await waitDraft("window.composer.selection().start===0");
+			await press("ArrowRight", "ArrowRight", 39);
+			await waitDraft("window.composer.selection().start===9");
+			assert.deepEqual(await selection(), { start: 9, end: 9 });
+			await press("ArrowLeft", "ArrowLeft", 37);
+			await waitDraft("window.composer.selection().start===0");
+			await press("ArrowRight", "ArrowRight", 39, { modifiers: 8 });
+			await waitDraft("window.composer.selection().end===9");
+			assert.deepEqual(await selection(), { start: 0, end: 9 });
+			// A point inside the chip's text snaps to an edge; a selection that cuts into it takes it whole.
+			await ui.evaluate("(()=>{const chip=document.querySelector('.omp-chip[data-kind=\"command\"]');document.getSelection().setBaseAndExtent(chip.firstChild,3,chip.firstChild,3)})()");
+			await waitDraft("(()=>{const a=window.composer.selection();return a.start===a.end&&(a.start===0||a.start===9)})()");
+			await ui.evaluate("(()=>{const chip=document.querySelector('.omp-chip[data-kind=\"command\"]');document.getSelection().setBaseAndExtent(chip.firstChild,3,chip.nextSibling,2)})()");
+			await waitDraft("window.composer.selection().end===11&&window.composer.selection().start===0");
+			await back();
+			await waitDraft("window.composer.value()==='w'");
+			await ctrlZ();
+			await waitDraft("window.composer.value()==='/compact now'");
+			// Typing over a selection that holds the chip replaces it whole.
+			await setSelection(0, 11);
+			await waitDraft("window.composer.selection().end===11");
+			await ui.call("Input.insertText", { text: "x" });
+			await waitDraft("window.composer.value()==='xw'");
+			await ctrlZ();
+			await waitDraft("window.composer.value()==='/compact now'");
+			// A real click inside the chip lands on its nearest edge.
+			const spot = (fraction: number): Promise<{ x: number; y: number }> => ui.evaluate(`(()=>{const r=document.querySelector('.omp-chip[data-kind="command"]').getBoundingClientRect();return{x:r.left+r.width*${fraction},y:r.top+r.height/2}})()`);
+			await setSelection(12, 12);
+			await waitDraft("window.composer.selection().start===12");
+			await clickAt(await spot(0.85));
+			await waitDraft("window.composer.selection().start===9");
+			await clickAt(await spot(0.1));
+			await waitDraft("window.composer.selection().start===0");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("undo, paste, history recall, a prompt picked in the history search and a restored draft all show the chip, because the chip is a rule over the text and the catalogue", async () => {
+			await chipSetup("chips-sources");
+			await ui.evaluate(`const row=(id,message)=>({type:'message',id,parentId:null,timestamp:'2026-10-01T00:00:00.000Z',message});
+			 window.ui.push({entries:[row('u1',{role:'user',timestamp:1,content:'/skill:review src/a.ts'}),row('a1',{role:'assistant',model:'m',timestamp:2,stopReason:'stop',content:[{type:'text',text:'ok'}]})],durableCount:2,working:false,settled:true});
+			 window.composer.focus()`);
+			await ui.wait("document.querySelector('.omp-transcript').textContent.includes('src/a.ts')");
+			await press("ArrowUp", "ArrowUp", 38);
+			await waitDraft("window.composer.value()==='/skill:review src/a.ts'");
+			await waitChips(1);
+			await ctrlZ();
+			await waitDraft("window.composer.value()===''");
+			await waitChips(0);
+			await ctrlY();
+			await waitDraft("window.composer.value()==='/skill:review src/a.ts'");
+			await waitChips(1);
+			await ctrlZ();
+			await waitDraft("window.composer.value()===''");
+			// Paste.
+			assert.equal((await dispatchClipboard("paste", "/compact now")).prevented, true);
+			await waitDraft("window.composer.value()==='/compact now'");
+			await waitChips(1);
+			await ctrlZ();
+			await waitDraft("window.composer.value()===''");
+			await waitChips(0);
+			// The history search (Ctrl+R) hands the picked prompt to the page.
+			await ui.evaluate("window.ui.receive({type:'omp:recall-prompt',text:'/skill:other b.ts',documents:[],notes:[]})");
+			await waitDraft("window.composer.value()==='/skill:other b.ts'");
+			await waitChips(1);
+			assert.equal((await commandChips())[0]!.label, "Skill other");
+			// A draft restored after a reload, and a catalogue that arrives after the draft or changes under it.
+			await reset("chips-restore");
+			await ui.evaluate(`window.ui.receive({type:'omp:draft-restore',requestId:730,text:'/compact x',attachments:0,recoverable:[],documents:[]})`);
+			await waitDraft("window.composer.value()==='/compact x'");
+			await settleFrames();
+			assert.deepEqual(await commandChips(), [], "the session has not listed its commands yet");
+			await ui.evaluate("window.composer.select(10)");
+			await waitDraft("window.composer.selection().start===10");
+			await ui.evaluate(`window.ui.push({commands:${CHIP_COMMANDS}})`);
+			await waitChips(1);
+			assert.deepEqual(await selection(), { start: 10, end: 10 }, "the caret stays where it was when the chip is drawn around it");
+			await ui.evaluate("window.ui.push({commands:[]})");
+			await waitChips(0);
+			await ui.evaluate("window.composer.select(4)");
+			await waitDraft("window.composer.selection().start===4");
+			await ui.evaluate(`window.ui.push({commands:${CHIP_COMMANDS}})`);
+			await waitChips(1);
+			await waitDraft("(()=>{const a=window.composer.selection();return a.start===a.end&&(a.start===0||a.start===9)})()");
+			await ui.evaluate("window.ui.push({commands:[{name:'status'}]})");
+			await waitChips(0);
+			assert.equal(await draftValue(), "/compact x", "a command that leaves the catalogue is text again and the draft is untouched");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("while a turn runs only Desk's own commands are chips, because OMP does not scan a steered or queued message for commands and skills", async () => {
+			await chipSetup("chips-working");
+			await setDraft("/skill:review x");
+			await waitChips(1);
+			await ui.evaluate("window.ui.push({working:true})");
+			await waitChips(0);
+			assert.equal(await draftValue(), "/skill:review x", "the draft is the same text");
+			await setDraft("/clear x");
+			await waitChips(1);
+			assert.equal((await commandChips())[0]!.label, "Command clear", "Chat answers its own commands whatever the turn is doing");
+			await setDraft("/CLEAR x");
+			await waitDraft("window.composer.value()==='/CLEAR x'");
+			await waitChips(1);
+			await setDraft("/skill:review x");
+			await waitDraft("window.composer.value()==='/skill:review x'");
+			await ui.evaluate("window.ui.push({working:false})");
+			await waitChips(1);
+			assert.equal((await commandChips())[0]!.label, "Skill review", "the turn ended: the next message is a prompt again");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
+		await t.test("a quote beside a chip, an IME composition next to it and a send leave the chip and the text intact", async () => {
+			await chipSetup("chips-neighbours");
+			await ui.call("Emulation.setFocusEmulationEnabled", { enabled: true });
+			try {
+				await setDraft("/skill:review x");
+				await waitChips(1);
+				await ui.evaluate("window.ui.receive({type:'omp:insert-quote',quotes:[{location:'src/app.ts:1',fileName:'app.ts',languageId:'typescript',text:'const x = 1;'}]})");
+				await waitDraft("window.composer.value().startsWith('/skill:review x')&&window.composer.value().includes('> `src/app.ts:1`')");
+				await ui.wait("document.querySelector('.omp-line--quote')");
+				await waitChips(1);
+				assert.deepEqual(await ui.evaluate("window.composer.roundTrip()"), []);
+				await ctrlZ();
+				await waitDraft("window.composer.value()==='/skill:review x'");
+				await waitChips(1);
+				// A composition at the end of the line and one straight after the chip.
+				await setSelection(15, 15);
+				await waitDraft("window.composer.selection().start===15");
+				await ui.call("Input.imeSetComposition", { text: "か", selectionStart: 1, selectionEnd: 1 });
+				await waitDraft("window.composer.value()==='/skill:review xか'");
+				await ui.call("Input.insertText", { text: "か" });
+				await settleFrames();
+				await waitChips(1);
+				assert.equal(await draftValue(), "/skill:review xか");
+				await ctrlZ();
+				await waitDraft("window.composer.value()==='/skill:review x'");
+				await setSelection(14, 14);
+				await waitDraft("window.composer.selection().start===14");
+				await ui.call("Input.imeSetComposition", { text: "か", selectionStart: 1, selectionEnd: 1 });
+				await waitDraft("window.composer.value()==='/skill:review かx'");
+				await ui.call("Input.insertText", { text: "か" });
+				await settleFrames();
+				await waitChips(1);
+				assert.equal(await draftValue(), "/skill:review かx");
+				assert.deepEqual([(await commandChips())[0]!.text, await ui.evaluate("window.composer.roundTrip()")], ["/skill:review ", []]);
+				assert.equal(await sendCount(), 0);
+				assert.deepEqual(await ui.evaluate("window.errors"), []);
+			} finally {
+				await ui.call("Emulation.setFocusEmulationEnabled", { enabled: false });
+			}
+		});
+
+		await t.test("the chip follows the theme in both colour schemes", async () => {
+			const schemes = {
+				dark: { "editor-background": "#1f1f1f", "editor-foreground": "#cccccc", foreground: "#cccccc", "editorWidget-background": "#202020", "panel-border": "#2b2b2b", "widget-border": "#313131", "input-background": "#313131", "input-foreground": "#cccccc", "button-background": "#0078d4", descriptionForeground: "#9d9d9d", "textLink-foreground": "#4daafc", "font-family": "'Segoe UI', sans-serif" },
+				light: { "editor-background": "#ffffff", "editor-foreground": "#3b3b3b", foreground: "#3b3b3b", "editorWidget-background": "#f8f8f8", "panel-border": "#e5e5e5", "widget-border": "#c8c8c8", "input-background": "#ffffff", "input-foreground": "#3b3b3b", "button-background": "#005fb8", descriptionForeground: "#616161", "textLink-foreground": "#005fb8", "font-family": "'Segoe UI', sans-serif" },
+			} as const;
+			const backgrounds: string[] = [];
+			for (const [scheme, variables] of Object.entries(schemes)) {
+				await chipSetup(`chips-theme-${scheme}`);
+				await ui.evaluate(`document.body.className='vscode-${scheme}';document.body.setAttribute('data-vscode-theme-id','${scheme}');${Object.entries(variables).map(([name, value]) => `document.documentElement.style.setProperty('--vscode-${name}',${JSON.stringify(value)})`).join(";")}`);
+				await ui.call("Emulation.setDeviceMetricsOverride", { width: 720, height: 560, deviceScaleFactor: 2, mobile: false });
+				for (const [name, draft, kind] of [["skill", "/skill:review src/webview/components/Composer.tsx", "skill"], ["command", "/compact keep the open files", "command"], ["mid-text-skill", "please check the diff with /skill:review before I commit", "skill"]] as const) {
+					await setDraft(draft);
+					await waitChips(1);
+					await ui.evaluate("document.querySelector('.omp-chip[data-kind]')?.getBoundingClientRect()");
+					await settleFrames();
+					const [chip] = await commandChips();
+					assert.equal(chip!.kind, kind);
+					assert.notEqual(chip!.background, "rgba(0, 0, 0, 0)", `${scheme} ${name}: the chip has a background of its own`);
+					if (name === "skill") backgrounds.push(chip!.background);
+					if (process.env.OMP_UI_SCREENSHOT_DIR) {
+						const box = await ui.evaluate<{ x: number; y: number; width: number; height: number }>("(()=>{const r=document.querySelector('.omp-composer').getBoundingClientRect();return{x:Math.max(0,r.left-8),y:Math.max(0,r.top-8),width:r.width+16,height:r.height+16}})()");
+						const image = await ui.call("Page.captureScreenshot", { format: "png", clip: { ...box, scale: 1 } });
+						await mkdir(process.env.OMP_UI_SCREENSHOT_DIR, { recursive: true });
+						await writeFile(join(process.env.OMP_UI_SCREENSHOT_DIR, `composer-chip-${name}-${scheme}.png`), Buffer.from(String(image.data), "base64"));
+					}
+				}
+				await ui.call("Emulation.clearDeviceMetricsOverride");
+			}
+			assert.notEqual(backgrounds[0], backgrounds[1], "the tint is the theme's link colour, so it differs between the schemes");
+			assert.deepEqual(await ui.evaluate("window.errors"), []);
+		});
+
 		await t.test("a user message renders each `[Image #N, WxH]` marker as a reference to its Nth thumbnail, labelled #N; the same text elsewhere stays text", async () => {
 			await reset("image-refs-transcript");
 			await installImages();

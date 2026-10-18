@@ -721,6 +721,12 @@ ${ANSI_STYLES}
 .omp-chip { display: inline; padding: 0 3px; margin: 0 1px; border-radius: var(--omp-radius); cursor: default; background: color-mix(in srgb, var(--vscode-textLink-foreground, var(--vscode-focusBorder, #3794ff)) 24%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--vscode-textLink-foreground, var(--vscode-focusBorder, #3794ff)) 55%, transparent); }
 /* A document's marker is the same atomic chip with a file icon in front: a pseudo-element, so the chip's text stays the literal marker. */
 .omp-chip--file::before { content: "\\ea7b"; font-family: codicon; font-size: 12px; vertical-align: -1px; margin-right: 3px; }
+/* A command's and a skill's token is the same chip with a terminal prompt or a book in front. The one space after a name is inside the chip, so it stands in for the right padding. */
+.omp-chip--command, .omp-chip--skill { color: inherit; }
+.omp-chip--command::before, .omp-chip--skill::before { font-family: codicon; font-size: 12px; vertical-align: -1px; margin-right: 3px; }
+.omp-chip--command::before { content: "\\ea85"; }
+.omp-chip--skill::before { content: "\\eaa4"; }
+.omp-chip[data-spaced="true"] { padding-right: 0; margin-right: 2px; }
 .omp-composer > .omp-composer-hint--code { margin: 2px 0 6px; min-height: calc(11px * 1.4); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 @media (forced-colors: active) {
 	.omp-line--code { forced-color-adjust: none; background: Canvas; color: CanvasText; box-shadow: inset 0 0 0 1px CanvasText; }

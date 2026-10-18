@@ -9,7 +9,7 @@
  * the draft and the selection are read back from its DOM through the same pure functions the surface uses, and edits go
  * through the platform's own editing commands, so the page sees user edits.
  */
-import { locate, offsetOf, readText } from "../lib/draft-dom";
+import { isChip, locate, offsetOf, readText } from "../lib/draft-dom";
 
 const FIELD = ".omp-composer-row--input .omp-composer-input";
 
@@ -90,23 +90,30 @@ export const composerDriver = {
 	placeholder(): string {
 		return required().getAttribute("data-placeholder") ?? "";
 	},
-	/** Replaces the whole draft through the platform's own editing command, so the page sees a user edit. */
+	/**
+	 * Replaces the whole draft through the platform's own editing commands, so the page sees user edits. A selection that holds a
+	 * chip is deleted first: the platform's one-command replacement of a range with a non-editable element in it sends the page a
+	 * delete the page applies, and then stops before the insertion.
+	 */
 	setText(text: string): void {
 		const element = required();
 		element.focus();
 		writeSelection(element, 0, readText(element).length);
-		if (text.length === 0) document.execCommand("delete");
-		else document.execCommand("insertText", false, text);
+		if (text.length === 0 || element.querySelector(".omp-chip") !== null) document.execCommand("delete");
+		if (text.length > 0) document.execCommand("insertText", false, text);
 	},
 	/**
-	 * Every model offset of the draft that is not inside an image marker, mapped to a DOM point and back. The offsets that
-	 * come back different are returned: an empty list is the identity the design requires of the caret mapping.
+	 * Every model offset of the draft that is not inside a chip (an image or file marker, a command or a skill), mapped to a DOM
+	 * point and back. The offsets that come back different are returned: an empty list is the identity the design requires of the caret mapping.
 	 */
 	roundTrip(): { offset: number; back: number }[] {
 		const element = required();
 		const text = readText(element);
 		const inside = new Set<number>();
-		for (const marker of text.matchAll(/\[Image #\d+[^\]\n]*\]/g)) for (let at = marker.index + 1; at < marker.index + marker[0].length; at++) inside.add(at);
+		for (const chip of Array.from(element.querySelectorAll("*")).filter(isChip)) {
+			const start = offsetOf(element, chip, 0);
+			for (let at = start + 1; at < start + (chip.textContent?.length ?? 0); at++) inside.add(at);
+		}
 		const failures: { offset: number; back: number }[] = [];
 		for (let offset = 0; offset <= text.length; offset++) {
 			if (inside.has(offset)) continue;
